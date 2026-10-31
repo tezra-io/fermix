@@ -44,7 +44,9 @@ defmodule FermixCore.ComputerUse.BackgroundGateTest do
     # `hello` (M86 F1), and a reading without the actions would pass every
     # assertion below without the flag doing anything.
     start_supervised!({HelperActions, read_at_boot?: false})
-    :ok = HelperActions.record(Protocol.actions())
+
+    :ok =
+      HelperActions.record(%{actions: Protocol.actions(), input_methods: ~w(foreground_hid ax)})
   end
 
   defp put_background(background?) do

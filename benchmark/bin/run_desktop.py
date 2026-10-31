@@ -155,9 +155,12 @@ def score_attempt(ctx: Context, base: dict, rendered: corpus.RenderedTask,
     expected = rendered.task.expect_refusal
     seen = expected is not None and any(cu_trace.carries_code(row, expected) for row in rows
                                         if cu_trace.is_computer_use(row))
+    route = rendered.task.sanity_route
+    taken = route is not None and any(cu_trace.took_route(row, route) for row in rows)
     return {**base, "status": "scored", "turn": session,
-            "success": oracle.passed(results) and (expected is None or seen),
-            "expected_refusal_seen": seen, "route": route_of(rows),
+            "success": (oracle.passed(results) and (expected is None or seen)
+                        and (route is None or taken)),
+            "expected_refusal_seen": seen, "sanity_route_seen": taken, "route": route_of(rows),
             "elapsed_ms": result.elapsed_ms,
             "events": len(events), "state_settled": settled,
             "clauses": [{"clause": r.clause.describe(), "passed": r.passed, "detail": r.detail}
@@ -495,19 +498,25 @@ def git_rev() -> str:
 # --- dry run -------------------------------------------------------------------------
 
 def dry_run(loaded: corpus.Corpus, names: list[str], tasks: list[corpus.Task], args) -> int:
+    # A task marked for one platform is planned on that platform's fixtures alone.
     rendered = {name: {r.task.id: r for r in corpus.render_all(_only(loaded, tasks), [name])}
                 for name in names}
     print(f"desktop corpus {loaded.suite}: {len(tasks)} task(s), risk {loaded.risk} — "
           f"{os.path.relpath(loaded.path, SKILL_DIR)}")
-    print(f"plan: --repeat {args.repeat} → {len(tasks) * args.repeat} turn(s) per fixture; "
+    turns = ", ".join(f"{len(rendered[n]) * args.repeat} turn(s) on {n}" for n in names)
+    print(f"plan: --repeat {args.repeat} → {turns}; "
           f"fixtures {', '.join(f'{n} ({loaded.fixtures[n].platform})' for n in names)}")
     for task in tasks:
         refusal = f" · expect refusal {task.expect_refusal}" if task.expect_refusal else ""
-        print(f"\n  {task.id} [{task.verb}] risk={task.risk}{refusal}")
+        sanity = f" · sanity route {task.sanity_route}" if task.sanity_route else ""
+        print(f"\n  {task.id} [{task.verb}] risk={task.risk}{refusal}{sanity}")
+        planned = [rendered[name][task.id] for name in names if task.id in rendered[name]]
         for name in names:
-            print(f"    {name}: {rendered[name][task.id].query}")
-        clauses = rendered[names[0]][task.id].clauses
-        print("      oracle: " + "; ".join(clause.describe() for clause in clauses))
+            plan = rendered[name].get(task.id)
+            print(f"    {name}: {plan.query}" if plan else
+                  f"    {name}: not planned (the task is for {', '.join(task.platforms)})")
+        if planned:
+            print("      oracle: " + "; ".join(c.describe() for c in planned[0].clauses))
     print("\npreconditions for a live run on this host (" + host_platform() + "):")
     for name in names:
         print(f"  {name}: {_launch_note(loaded.fixtures[name], args)}")

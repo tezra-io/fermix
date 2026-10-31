@@ -5,6 +5,7 @@ defmodule FermixCore.Tools.ToolHelpTest do
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry
   alias FermixCore.Tools.ContentSearch
+  alias FermixCore.Tools.React
   alias FermixCore.Tools.ToolHelp
 
   @context %{agent_name: "test_agent", conversation_key: :test}
@@ -65,6 +66,50 @@ defmodule FermixCore.Tools.ToolHelpTest do
 
     assert result.output =~ "Described for test_agent."
     refute result.output =~ "Registered at boot."
+  end
+
+  # A built-in's parameters, examples and failure modes are read from its module
+  # when the docs are rendered, not from the copy mirrored at boot (M86 P2):
+  # computer use builds them from what its helper offers, known only later.
+  test "a built-in is documented from its module as it answers now" do
+    name = :"tool_help_current_#{System.unique_integer([:positive])}"
+    start_supervised!({Registry, name: name})
+
+    stale =
+      ContentSearch
+      |> Builtin.from_tool_module()
+      |> Map.put(:parameters, %{"type" => "object", "properties" => %{"stale_arg" => %{}}})
+      |> Map.update!(:metadata, &Map.merge(&1, %{examples: [], failure_modes: []}))
+
+    :ok = Registry.register(name, stale)
+
+    assert {:ok, result} =
+             ToolHelp.execute(
+               %{"name" => "content_search"},
+               Map.put(@context, :capability_registry, name)
+             )
+
+    assert result.output =~ "`pattern`"
+    refute result.output =~ "stale_arg"
+    refute result.output =~ "## Examples\n- none"
+  end
+
+  # The docs describe the tool, not one turn's view of it: a built-in with a
+  # per-turn schema is documented by its static one, exactly as before.
+  test "a built-in with a per-turn schema is documented by its static one" do
+    name = :"tool_help_static_#{System.unique_integer([:positive])}"
+    start_supervised!({Registry, name: name})
+    :ok = Registry.register(name, Builtin.from_tool_module(React))
+
+    context =
+      @context
+      |> Map.put(:capability_registry, name)
+      |> Map.put(:reaction_spec, %{emoji_set: ["👍"]})
+
+    assert {:ok, result} = ToolHelp.execute(%{"name" => "react"}, context)
+
+    assert result.output =~ "A single emoji to react with, chosen to fit the message."
+    refute result.output =~ "Pick the one that best fits the message."
   end
 
   test "returns a clear error for an unknown capability" do

@@ -10,6 +10,7 @@ defmodule FermixCore.Prompt.RuntimeSections do
   alias FermixCore.Capabilities.Deferral
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.ComputerUse.Config, as: ComputerUseConfig
+  alias FermixCore.ComputerUse.HelperActions
   alias FermixCore.Harness.Config, as: HarnessConfig
   alias FermixCore.HostFacts
   alias FermixCore.OpenLoops.Config, as: OpenLoopsConfig
@@ -123,9 +124,8 @@ defmodule FermixCore.Prompt.RuntimeSections do
     ## Runtime Contract
     #{deferred_tools_contract()}- Prefer direct Fermix built-ins over shell, curl, grep, computer-use, or external automation when a built-in owns the verb — but `computer_use` is the ONLY tool that acts on the user's OWN live screen; use it when the task is about a page/app/session they already have open (`browser`/`shell` run in their own context and won't touch their screen).
     - Even on the user's own screen, an intent the OS can NAME is a script, not a pixel hunt: launch apps from `shell` (`open -a` on macOS), drive app menus/settings/Finder through the OS scripting surface where it names the object (AppleScript via `osascript` on macOS), and spend `computer_use` clicks only on state that exists solely as pixels.
-    - When you do spend pixels: coordinates are pixels in the image you name. Every `computer_use` reply that hands back coordinates carries an `observation_id`, and every click, move, drag, scroll and inspect must carry the id of the image its x,y were read in — read and aim in the same image, and never re-send coordinates from an image that has been refused as unknown, expired or stale.
-    - Better still, don't aim at all — NAME the control. `computer_use`'s `elements` lists each control with a reference and says what that control itself supports: one that lists `press` is pressed by name (`press` with its `element_ref` and that listing's `observation_id`), which moves no pointer and cannot miss, and a `settable` field is filled with `set_value` instead of clicking it and typing. Spend pixels on what the accessibility tree does not expose.
-    - Every mutating `computer_use` action comes back with its own check: the view it acted in, captured once that view stopped changing, or — for a `press` or `set_value` — the control read again. A check that says nothing visible changed is a fact about the view, not a miss, and never a reason to send the same action again; when a run of actions leaves the view unchanged, take a fresh full `screenshot`, take `elements` and act on a control by name, or tell the user what is not working.
+    #{computer_use_controls_rule()}- When you do spend pixels: coordinates are pixels in the image you name. Every `computer_use` reply that hands back coordinates carries an `observation_id`, and every click, move, drag and scroll must carry the id of the image its x,y were read in — read and aim in the same image, and never re-send coordinates from an image that has been refused as unknown, expired or stale.
+    - Every mutating `computer_use` action comes back with its own check: the view it acted in, captured once that view stopped changing, or — for a verb on a control — the control read again. A check that says nothing visible changed is a fact about the view, not a miss, and never a reason to send the same action again; when a run of actions leaves the view unchanged, take a fresh full `screenshot` or tell the user what is not working.
     #{background_computer_use_rule()}- Web routing — pick ONE and commit; switch only on a new reason, never rotate through tools for the same goal:
       - If a connected plugin owns the surface (e.g. `github_*` for GitHub, `notion_*` for Notion, `obsidian_*` for the vault, `x_*` for X/Twitter, the Google tools for mail/calendar/drive) use its tools — they hit the real API directly; do NOT open the browser or `web_search` for what they cover. What no listed tool does, or what the service rejects for a reason a retry or a reconnect won't change, is a new reason to switch to `browser` (say why); a hold or refusal from Fermix or the user never is. Any such plugin is listed under Plugins below.
       - `web_search` for a fact with no known URL — anything current, changing, or possibly moved since training (prices, rates, versions, who holds a role, schedules, hours, addresses, news) as well as plain lookups; a confident memory of a mutable fact is still a reason to search.
@@ -239,6 +239,34 @@ defmodule FermixCore.Prompt.RuntimeSections do
     else
       ""
     end
+  end
+
+  # M86 P2: controls before pixels, rendered only where the installed helper lists
+  # controls at all (`HelperActions`, the same reading the tool's schema is built
+  # from) — a helper without `elements` would be steered toward verbs it does not
+  # have. A function of that reading alone, so it changes only when it does.
+  defp computer_use_controls_rule do
+    offered = HelperActions.offered()
+
+    if "elements" in offered do
+      "- Where the screen exposes controls, don't aim at all — work by control: " <>
+        "`computer_use`'s `elements` lists each one with a reference and the verbs it takes; " <>
+        "send one of those verbs with its `element_ref` and that listing's `observation_id`, " <>
+        "which moves no pointer and cannot miss. List an app plainly the first time (no " <>
+        "`scope` or `query`): only that wakes an app that builds its controls late. Spend " <>
+        "pixels on canvases, games, remote desktops and anything `elements` does not list." <>
+        wait_rule(offered) <> "\n"
+    else
+      ""
+    end
+  end
+
+  defp wait_rule(offered) do
+    if "wait_for" in offered,
+      do:
+        " To wait, name the condition (`until` on the action, or `wait_for`) instead of " <>
+          "polling with screenshots.",
+      else: ""
   end
 
   # M42 slice 5 §1: rendered only where the operator switched the experimental

@@ -22,6 +22,7 @@ defmodule FermixCore.Tools.ComputerUse do
   alias FermixCore.Capabilities.Builtin.Tool
   alias FermixCore.ComputerUse.Background
   alias FermixCore.ComputerUse.Config
+  alias FermixCore.ComputerUse.Controls
   alias FermixCore.ComputerUse.HelperActions
   alias FermixCore.ComputerUse.Session
   alias FermixCore.ComputerUse.SessionManager
@@ -33,6 +34,10 @@ defmodule FermixCore.Tools.ComputerUse do
   # reveals, so a guard can use it and there is no second copy to drift.
   @background_codes Background.codes()
   @scroll_directions ~w(up down left right)
+
+  # The verbs a control lists (M86 P2), `type` aside: it is a verb only when it
+  # names a control.
+  @verbs Controls.verbs() -- ["type"]
 
   @impl true
   def name, do: "computer_use"
@@ -56,11 +61,38 @@ defmodule FermixCore.Tools.ComputerUse do
 
   defp description(offered) do
     screen_description() <>
+      controls_first_description(offered) <>
       aiming_description(offered) <>
       zoom_description() <>
       check_description(offered) <>
       background_description(offered) <>
       controls_description(offered)
+  end
+
+  # Work by control where the screen exposes controls, and by pixels where it does
+  # not (M86 P2). Only where the helper lists controls at all: on a pixel
+  # helper this paragraph would teach verbs it does not have.
+  defp controls_first_description(offered) do
+    naming(
+      offered,
+      ["elements"],
+      "CONTROLS FIRST. Where the screen exposes controls, work by control, not by pixels: " <>
+        "`elements` lists them one per line — reference, role, label, state and the verbs " <>
+        "each takes (after a plain first listing, narrow a dense window with `scope`, a " <>
+        "`query`, or `skeleton` then `root`). Send a verb its line lists (" <>
+        verb_names(offered) <>
+        ") with that control's `element_ref` and the " <>
+        "list's `observation_id`: no pointer, no aim, no miss, and the reply reads the " <>
+        "control back instead of a picture. Pixels are for canvases, games, remote desktops " <>
+        "and anything `elements` does not list. "
+    ) <>
+      naming(
+        offered,
+        ["wait_for"],
+        "To wait, name what you are waiting for: `until` on an action waits for its effect " <>
+          "in the same call, and `wait_for` waits without acting; both end the moment it " <>
+          "holds, so never poll with screenshots. "
+      )
   end
 
   # Whose screen this is, and what to reach for before pixels.
@@ -98,9 +130,7 @@ defmodule FermixCore.Tools.ComputerUse do
       "only for about half a minute; if an id is refused as unknown, expired or stale, take " <>
       "a fresh `screenshot` and read the coordinates again in IT, never re-send the old ones. " <>
       "Prefer exact targets where a surface exposes them (`browser` element " <>
-      "actions, numbered `marks`" <>
-      naming(offered, ["elements"], ", `elements` click points") <>
-      "). Take a `screenshot` with " <>
+      "actions, numbered `marks`). Take a `screenshot` with " <>
       "`\"marks\": true` and act with `mark: <id>` plus that image's `observation_id` — the " <>
       "exact point is resolved for you, " <>
       "which beats any pixel estimate. " <>
@@ -140,8 +170,8 @@ defmodule FermixCore.Tools.ComputerUse do
       "it. " <>
       naming(
         offered,
-        ["press", "set_value"],
-        "A `press` or `set_value` returns the CONTROL instead, read again after the action: " <>
+        ["elements"],
+        "A verb on a control returns the CONTROL instead, read again after the action: " <>
           "that is its state, never a picture and never proof the action had its effect. "
       ) <>
       "A check shows what the screen looks like now, not whether your input arrived, so " <>
@@ -153,7 +183,7 @@ defmodule FermixCore.Tools.ComputerUse do
       "— element click, keyboard, the browser's own click — not aim. "
   end
 
-  # The read-only controls, the wait, and the access mode.
+  # The read-only look at one point, the screen wait, and the access mode.
   defp controls_description(offered) do
     naming(
       offered,
@@ -162,14 +192,6 @@ defmodule FermixCore.Tools.ComputerUse do
         "you can confirm you're about to click the right control (e.g., a button labeled " <>
         "\"Delete\") before a consequential action. "
     ) <>
-      naming(
-        offered,
-        ["elements"],
-        "`elements` (read-only) lists the UI controls — each with a reference, whether it is " <>
-          "enabled, what it supports and a click point — so you target by control instead of " <>
-          "guessing pixels" <>
-          naming(offered, ["press"], ", and press the ones that can be pressed") <> "; "
-      ) <>
       "`wait_for_change` blocks until the screen updates (e.g. a page finishes loading) instead " <>
       "of repeated screenshots. Honor " <>
       "the configured access mode: standard confirms before anything " <>
@@ -238,20 +260,23 @@ defmodule FermixCore.Tools.ComputerUse do
   # this, so the words never teach a binding the enum cannot carry.
   defp bound?(offered), do: "select_target" in actions(offered)
 
-  # The schema for the helper's latest reading (`HelperActions`). Read at the
-  # call, so the static copy registered at boot and the per-turn refresh are the
-  # same function of the same fact.
+  # The schema for the helper's latest reading (`HelperActions`): what it offers
+  # and how it sends input, read in one call so both halves are one helper's
+  # answer. Read at the call, so the static copy registered at boot and the
+  # per-turn refresh are the same function of the same facts.
   @impl true
-  def parameters, do: schema(HelperActions.offered())
+  def parameters, do: schema(HelperActions.reading())
 
-  defp schema(offered) do
+  defp schema(%{actions: offered, input_methods: input_methods}) do
     %{
       "type" => "object",
       "required" => ["action"],
       "additionalProperties" => false,
       "properties" =>
         background_properties(offered)
-        |> Map.merge(control_properties(offered))
+        |> Map.merge(control_properties(offered, input_methods))
+        |> Map.merge(listing_properties(offered))
+        |> Map.merge(until_property(offered))
         |> Map.merge(%{
           "action" => %{
             "type" => "string",
@@ -295,7 +320,13 @@ defmodule FermixCore.Tools.ComputerUse do
           "amount" => %{"type" => "integer", "description" => "Scroll amount (positive)"},
           "text" => %{
             "type" => "string",
-            "description" => "Text to type or paste (for action=type/paste)"
+            "description" =>
+              "Text to type or paste (for action=type/paste)" <>
+                typing_into(
+                  offered,
+                  input_methods,
+                  "; `type` with an `element_ref` puts it into that control, no keyboard"
+                )
           },
           "chord" => %{
             "type" => "string",
@@ -363,14 +394,16 @@ defmodule FermixCore.Tools.ComputerUse do
   end
 
   # The fields that exist only for the accessibility actions (M86 F1): the
-  # reference an `elements` listing mints, and the text `set_value` sets. Offered
-  # with the action they belong to, so a helper without it is not handed the
-  # field either.
-  defp control_properties(offered) do
-    Map.merge(element_ref_property(offered), value_property(offered))
+  # reference an `elements` listing mints, the text `set_value` sets, and the
+  # state `toggle` ends in. Offered with the action they belong to, so a helper
+  # without it is not handed the field either.
+  defp control_properties(offered, input_methods) do
+    element_ref_property(offered, input_methods)
+    |> Map.merge(value_property(offered))
+    |> Map.merge(on_property(offered))
   end
 
-  defp element_ref_property(offered) do
+  defp element_ref_property(offered, input_methods) do
     if "elements" in offered do
       %{
         "element_ref" => %{
@@ -379,10 +412,128 @@ defmodule FermixCore.Tools.ComputerUse do
             "A control, by the reference an `elements` listing (or a mark) gave it — `e1`, " <>
               "`e2`, … A reference belongs to the listing that minted it, so send it with " <>
               "that reply's `observation_id`. " <>
-              naming(offered, ["press", "set_value"], "REQUIRED by `press`/`set_value`; a", "A") <>
-              " click, right-click, double-click, move or scroll may take it INSTEAD of x,y and " <>
-              "the control's bounds are re-read at that moment, so a control that has shifted " <>
-              "is still hit. Never send both a reference and coordinates on one action"
+              required_by(offered) <>
+              typing_into(
+                offered,
+                input_methods,
+                "`type` takes it to type into that control; "
+              ) <>
+              "a click, right-click, double-click, move or scroll may take it INSTEAD of x,y " <>
+              "where the control's line gives a point, and its bounds are re-read at that " <>
+              "moment. Never send both a reference and coordinates on one action"
+        }
+      }
+    else
+      %{}
+    end
+  end
+
+  # `type` with an `element_ref` types into that control only where the helper
+  # sends input through accessibility (`input_methods` holds "ax", PROTOCOL.md
+  # §1); elsewhere `type` types at the focus, and the words say nothing more.
+  defp typing_into(offered, input_methods, text) do
+    if "elements" in offered and "ax" in input_methods, do: text, else: ""
+  end
+
+  # The verbs on a control this reading offers, named where the reference is
+  # required, so the sentence never names one the enum lacks.
+  defp required_by(offered) do
+    case Enum.filter(@verbs, &(&1 in offered)) do
+      [] -> ""
+      verbs -> "REQUIRED by " <> Enum.map_join(verbs, ", ", &"`#{&1}`") <> "; "
+    end
+  end
+
+  defp on_property(offered) do
+    if "toggle" in offered do
+      %{
+        "on" => %{
+          "type" => "boolean",
+          "description" =>
+            "For action=toggle: the state the control should END in — true for on, false " <>
+              "for off. Nothing is sent when it already reads so"
+        }
+      }
+    else
+      %{}
+    end
+  end
+
+  # What `elements` reads beyond the whole window (M86 P2, PROTOCOL.md §2.1):
+  # where to start, what to find, how deep to go, and which container to open.
+  # Offered with `elements`, whose arguments they are.
+  defp listing_properties(offered) do
+    if "elements" in offered do
+      %{
+        "scope" => %{
+          "type" => "string",
+          "enum" => Protocol.scopes(),
+          "description" =>
+            "On `elements`" <>
+              naming(offered, ["wait_for"], " (and inside `until`)") <>
+              ": where to read — window (" <>
+              scope_window(offered) <>
+              "), app, focused, menu (open menus), dialog (open dialogs and alerts)"
+        },
+        "query" => %{
+          "type" => "object",
+          "properties" => %{"role" => %{"type" => "string"}, "name" => %{"type" => "string"}},
+          "description" =>
+            "On `elements`: list only the controls that match — `role` as a listing names it " <>
+              "(button, textfield, checkbox, …) and/or `name`, text in its label, any case"
+        },
+        "skeleton" => %{
+          "type" => "boolean",
+          "description" =>
+            "On `elements`: true reads three levels deep; a line with `+N inside` is a " <>
+              "container to open with `root`"
+        },
+        "root" => %{
+          "type" => "string",
+          "description" =>
+            "On `elements`: a reference from a listing — list only what is inside that " <>
+              "control, with that listing's `observation_id`; references outside it stay valid"
+        }
+      }
+    else
+      %{}
+    end
+  end
+
+  # The window `scope` reads: the bound one only where a window can be bound.
+  defp scope_window(offered) do
+    if bound?(offered), do: "the bound or front window", else: "the front window"
+  end
+
+  # A condition on the accessibility tree (M86 P2, PROTOCOL.md §5.1): what
+  # `wait_for` waits for, and what an action that sends input waits for after it,
+  # in the same call.
+  defp until_property(offered) do
+    if "wait_for" in offered do
+      %{
+        "until" => %{
+          "type" => "object",
+          "required" => ["kind"],
+          "properties" => %{
+            "kind" => %{
+              "type" => "string",
+              "enum" => ~w(appears disappears enabled value window_title menu_open menu_closed
+                           text)
+            },
+            "role" => %{"type" => "string"},
+            "name" => %{"type" => "string"},
+            "element_ref" => %{"type" => "string"},
+            "value" => %{"type" => "string"},
+            "contains" => %{"type" => "string"},
+            "scope" => %{"type" => "string", "enum" => Protocol.scopes()},
+            "timeout_ms" => %{"type" => "integer"}
+          },
+          "description" =>
+            "A condition on the controls. On `wait_for` it is what to wait for; on an action " <>
+              "that sends input it waits for that action's effect in the same call. kind: " <>
+              "appears / disappears (role and/or name, or disappears by element_ref), enabled " <>
+              "(element_ref), value (element_ref + value), window_title / text (contains), " <>
+              "menu_open / menu_closed. Optional scope, and timeout_ms 1–25000 (default 5000)"
         }
       }
     else
@@ -418,12 +569,12 @@ defmodule FermixCore.Tools.ComputerUse do
   # model without a cached prompt section that would freeze on config change.
   @spec dynamic_parameters(map()) :: map()
   def dynamic_parameters(_context) do
-    offered = HelperActions.offered()
+    reading = HelperActions.reading()
 
     put_in(
-      schema(offered),
+      schema(reading),
       ["properties", "action", "description"],
-      action_description(Config.current().access, offered)
+      action_description(Config.current().access, reading.actions)
     )
   end
 
@@ -448,32 +599,40 @@ defmodule FermixCore.Tools.ComputerUse do
       naming(
         offered,
         ["elements"],
-        "elements (best-effort accessibility click points — prefer usable points over " <>
-          "guessing pixels, but an empty result does not block pixel targeting of visible " <>
-          "content), "
+        "elements (the controls, one line each with a reference and the verbs it takes; an " <>
+          "empty result does not block pixel targeting of visible content), "
       ) <>
       "windows (list the open windows, each with a ready-made `region` — use it to " <>
       "crop to the app you are working in instead of squinting at a downscaled " <>
       "whole screen), " <>
       "wait_for_change (block until the screen changes, then return the new frame), " <>
+      naming(offered, ["wait_for"], "wait_for (block until an `until` condition holds), ") <>
       "mouse_move, wait. Mutating: left_click, right_click, double_click, " <>
       "left_click_drag, scroll, type, paste (clipboard — prefer for long text), key" <>
-      naming(offered, ["press"], ", press") <>
-      naming(offered, ["set_value"], ", set_value") <>
+      offered_verbs(offered) <>
       ". " <>
       background_actions_description(offered) <>
       naming(
         offered,
-        ["elements", "press", "set_value"],
-        "PREFER A NAMED CONTROL: `elements` says, per control, whether it " <>
-          "can be pressed and whether its value can be set, and a control that lists `press` " <>
-          "is pressed by name with `press` + its `element_ref` — that moves no pointer, takes " <>
-          "no aim and cannot miss. `set_value` fills a field the same way where `elements` " <>
-          "says it is settable; `type` and `paste` remain for a field that is not, and for " <>
-          "text that must go through real keystrokes. A control that lists neither is " <>
-          "clicked — by `element_ref` (its bounds are re-read as it is clicked) or by point. " <>
-          "Nothing is switched for you: a refused `press` is a refusal, never a quiet click."
+        ["elements"],
+        "PREFER A NAMED CONTROL: a verb its `elements` line lists, sent with its " <>
+          "`element_ref`, cannot miss. `type` and `paste` remain for text that must go " <>
+          "through real keystrokes; click (by `element_ref` or point) only a control that " <>
+          "lists no verb you need. A refused verb is a refusal, never a quiet click."
       )
+  end
+
+  # The verbs on a control this reading offers, named for the description.
+  defp verb_names(offered) do
+    @verbs |> Enum.filter(&(&1 in offered)) |> Enum.map_join(", ", &"`#{&1}`")
+  end
+
+  # The verbs on a control this reading offers, in the order a listing names them.
+  defp offered_verbs(offered) do
+    case Enum.filter(@verbs, &(&1 in offered)) do
+      [] -> ""
+      verbs -> ", " <> Enum.join(verbs, ", ") <> " (verbs on a control)"
+    end
   end
 
   defp background_actions_description(offered) do
@@ -504,8 +663,22 @@ defmodule FermixCore.Tools.ComputerUse do
       " external messages, or destructive system changes. A higher bar than standard, not zero."
   end
 
+  # Read from the helper's latest reading like the schema, so an example never
+  # shows an action the enum lacks (M86 P2). The copy registered at boot is the
+  # pixel one; `tool_help` reads this again when it renders.
   @impl true
   def examples do
+    offered = HelperActions.offered()
+    Enum.filter(all_examples(), &example_offered?(&1.args, offered))
+  end
+
+  # An `until` rides only where `wait_for` is offered, whatever action carries it.
+  defp example_offered?(%{"until" => _until} = args, offered),
+    do: args["action"] in offered and "wait_for" in offered
+
+  defp example_offered?(args, offered), do: args["action"] in offered
+
+  defp all_examples do
     [
       %{
         args: %{"action" => "screenshot"},
@@ -520,12 +693,12 @@ defmodule FermixCore.Tools.ComputerUse do
         note: "check what UI element is under a point before clicking it"
       },
       %{
-        args: %{"action" => "elements"},
-        note: "list the controls, each with a reference, what it supports, and a click point"
+        args: %{"action" => "elements", "query" => %{"role" => "button", "name" => "save"}},
+        note: "find a control: each line has its reference and the verbs it takes"
       },
       %{
         args: %{"action" => "press", "observation_id" => "7c1e-13", "element_ref" => "e4"},
-        note: "press a control that listed `press` — no pointer, no aim, no miss"
+        note: "press a control whose line lists `press` — no pointer, no aim, no miss"
       },
       %{
         args: %{
@@ -534,14 +707,45 @@ defmodule FermixCore.Tools.ComputerUse do
           "element_ref" => "e7",
           "value" => "chess.com"
         },
-        note: "fill a field that listed `settable`, instead of clicking it and typing"
+        note: "fill a field whose line lists `set_value`, instead of clicking it and typing"
+      },
+      %{
+        args: %{
+          "action" => "toggle",
+          "observation_id" => "7c1e-13",
+          "element_ref" => "e3",
+          "on" => true
+        },
+        note: "make sure a checkbox ends ticked; nothing is sent if it already is"
+      },
+      %{
+        args: %{
+          "action" => "key",
+          "chord" => "cmd+s",
+          "until" => %{"kind" => "appears", "role" => "dialog"}
+        },
+        note: "act and wait for its effect in one call"
       },
       %{args: %{"action" => "type", "text" => "hello"}, note: "type into the focused field"}
     ]
   end
 
+  # Like the examples, read from the helper's latest reading: a failure mode for
+  # an action the schema does not carry is a capability advertised through the
+  # back door (M86 P2).
   @impl true
   def failure_modes do
+    offered = HelperActions.offered()
+
+    common_failure_modes(offered) ++
+      naming_list(offered, "elements", control_failure_modes()) ++
+      naming_list(offered, "wait_for", wait_failure_modes()) ++
+      background_failure_modes(offered)
+  end
+
+  defp naming_list(offered, action, modes), do: if(action in offered, do: modes, else: [])
+
+  defp common_failure_modes(offered) do
     [
       %{
         tag: "invalid action",
@@ -573,7 +777,7 @@ defmodule FermixCore.Tools.ComputerUse do
         tag: "input_busy",
         description:
           "another conversation is driving the cursor and keyboard; nothing was sent. " <>
-            "Read-only actions still work — wait rather than re-sending"
+            "Looking still works — wait rather than re-sending"
       },
       %{
         tag: "busy",
@@ -597,8 +801,8 @@ defmodule FermixCore.Tools.ComputerUse do
       %{
         tag: "observation_required",
         description:
-          "a click/move/drag/scroll/inspect that named no observation_id; nothing was " <>
-            "sent. Take a screenshot and send the action with the id it names"
+          "an action aimed at a point or a control that named no observation_id; nothing " <>
+            "was sent. Take a fresh look and send the action with the id it names"
       },
       %{
         tag: "unknown/expired/stale observation",
@@ -620,16 +824,45 @@ defmodule FermixCore.Tools.ComputerUse do
             "captured, so nothing was sent; an operator fault, not a retryable one"
       },
       %{
+        tag: "text_outside_layout",
+        description: "the keyboard layout cannot type that text; nothing was sent — use paste"
+      },
+      # A mark and coordinates on one action are refused by any helper that mints
+      # marks; a reference joins them only where controls are listed.
+      %{
         tag: "addressing_conflict",
         description:
-          "the action named its target twice — an element_ref together with " <>
-            "coordinates or a mark; nothing was sent. Send one or the other"
+          "the action named its target twice — " <>
+            naming(
+              offered,
+              ["elements"],
+              "an element_ref together with coordinates or a mark",
+              "a mark together with coordinates"
+            ) <> "; nothing was sent. Send one or the other"
       },
+      %{
+        tag: "consent_refused / consent_timeout",
+        description:
+          "the desktop's own prompt to allow screen capture or control was declined or not " <>
+            "answered; nothing was sent. Ask the user, never work around it"
+      }
+    ]
+  end
+
+  # The controls a listing names, and every way a verb on one is refused.
+  defp control_failure_modes do
+    [
       %{
         tag: "stale_element",
         description:
-          "the control the element_ref names is gone with the listing that minted " <>
-            "it; nothing was sent. Take `elements` again and use the new reference"
+          "the control the element_ref names is gone or was rebuilt; nothing was sent. Take " <>
+            "`elements` again and use the new reference"
+      },
+      %{
+        tag: "ambiguous_element / identity_unknown",
+        description:
+          "the control the element_ref names now matches several, or cannot be read " <>
+            "reliably; nothing was sent. Take `elements` again and use the new reference"
       },
       %{
         tag: "element_disabled",
@@ -640,8 +873,26 @@ defmodule FermixCore.Tools.ComputerUse do
       %{
         tag: "ax_action_unsupported",
         description:
-          "the control does not offer that accessibility action; nothing was sent " <>
-            "and nothing was switched to a click for you — choose the mechanism yourself"
+          "the control has no route for that verb; nothing was sent and nothing was " <>
+            "switched to a click for you — choose the mechanism yourself"
+      },
+      %{
+        tag: "state_unreadable",
+        description:
+          "a verb that reads the control's state first could not read it, so it could not " <>
+            "tell whether to act; nothing was sent"
+      },
+      %{
+        tag: "focus_refused",
+        description:
+          "focus on a control in a window that is not the active one; focus never brings a " <>
+            "window forward, so nothing was sent"
+      },
+      %{
+        tag: "scope_not_found / toolkit_accessibility_off",
+        description:
+          "nothing to read: the scope has no root right now (no focused window, no menu or " <>
+            "dialog open), or the application's toolkit is not publishing its controls"
       },
       %{
         tag: "ax_timed_out / ax_action_failed",
@@ -657,13 +908,30 @@ defmodule FermixCore.Tools.ComputerUse do
           "set_value was given a non-string value; nothing was sent and nothing was " <>
             "converted — send the characters you want in the field, in quotes"
       }
-    ] ++ background_failure_modes()
+    ]
+  end
+
+  defp wait_failure_modes do
+    [
+      %{
+        tag: "check_unsupported / invalid_argument",
+        description:
+          "an `until` on an action that sends no input, or a condition, scope or argument " <>
+            "the helper refuses; nothing was sent — fix it, or use wait_for to wait alone"
+      },
+      %{
+        tag: "until not met",
+        description:
+          "the condition did not hold in time — an answer, not a failure; the action (if " <>
+            "any) was still sent, so look before repeating it"
+      }
+    ]
   end
 
   # Listed only where the surface is offered: a failure mode for an action the
   # schema does not carry is a capability advertised through the back door.
-  defp background_failure_modes do
-    if Config.background?() do
+  defp background_failure_modes(offered) do
+    if bound?(offered) do
       [
         %{
           tag: "target_required",
@@ -682,6 +950,12 @@ defmodule FermixCore.Tools.ComputerUse do
           description:
             "something covers the bound window at that point, so a click would land on " <>
               "it; nothing was sent and nothing was raised. Press the control by name instead"
+        },
+        %{
+          tag: "target_binding_unavailable",
+          description:
+            "the helper cannot prove the window is the one it claims to be, or this desktop " <>
+              "allows no binding; nothing was bound. Work on the whole screen instead"
         },
         %{
           tag: "ax_binding_unavailable",
@@ -732,13 +1006,31 @@ defmodule FermixCore.Tools.ComputerUse do
     # happened and where. Both are an enum and an opaque id — nothing from the
     # screen ever enters always-on metadata.
     ToolTelemetry.exec("computer_use", context, success, duration,
-      metadata: Map.put(telemetry, :action, Map.get(params, "action")),
+      metadata:
+        telemetry
+        |> Map.put(:action, Map.get(params, "action"))
+        |> put_verb(params, HelperActions.reading().input_methods),
       input: params,
       result: result
     )
 
     result
   end
+
+  # The verb an action sent to a control by name (M86 P2): `press`, `toggle`, …,
+  # and `type` only when it named a control on a helper that types by
+  # accessibility; elsewhere it typed at the focus. A word from the closed verb
+  # list, read off the request on every row — refused ones included — and never
+  # the value, the text, or the control's label.
+  defp put_verb(metadata, %{"action" => "type"} = params, input_methods) do
+    named? = Map.has_key?(params, "element_ref") or Map.has_key?(params, "mark")
+    if named? and "ax" in input_methods, do: Map.put(metadata, :cu_verb, "type"), else: metadata
+  end
+
+  defp put_verb(metadata, %{"action" => action}, _input_methods) when action in @verbs,
+    do: Map.put(metadata, :cu_verb, action)
+
+  defp put_verb(metadata, _params, _input_methods), do: metadata
 
   # Resolve the per-conversation session lazily: a caller may pre-place
   # `:computer_use_session` on the context (tests, a future eager path), otherwise
@@ -845,9 +1137,17 @@ defmodule FermixCore.Tools.ComputerUse do
         perform(session, request)
 
       {:error, reason} ->
-        {{:ok, Tool.error(refusal_message(reason))}, refusal_telemetry(reason)}
+        {{:ok, Tool.error(gate_message(reason, HelperActions.offered()))},
+         refusal_telemetry(reason)}
     end
   end
+
+  # A refusal from this side's own gate. Naming a target twice is answered in the
+  # words of the ways this helper's reading offers to name one.
+  defp gate_message(:addressing_conflict, offered),
+    do: code_message("addressing_conflict", offered)
+
+  defp gate_message(reason, _offered), do: refusal_message(reason)
 
   defp refusal_telemetry(reason) do
     reason
@@ -888,9 +1188,8 @@ defmodule FermixCore.Tools.ComputerUse do
   # a refusal — so the next move is to wait or to ask, never to re-send.
   defp refusal_message({:refused, :input_busy}) do
     "another conversation is driving this machine's cursor and keyboard right now, so this " <>
-      "action was not sent. Read-only actions (screenshot, elements, inspect) still work. " <>
-      "Wait for that work to finish, or tell the user you need the machine, before sending " <>
-      "this again."
+      "action was not sent. Looking still works: a `screenshot` sends no input. Wait for that " <>
+      "work to finish, or tell the user you need the machine, before sending this again."
   end
 
   # WHICH conversation holds the cursor could not be established. A different fact
@@ -899,8 +1198,8 @@ defmodule FermixCore.Tools.ComputerUse do
   defp refusal_message({:refused, :input_unavailable}) do
     "this action was not sent: which conversation holds this machine's cursor and keyboard " <>
       "could not be established, and driving it without knowing risks two agents fighting " <>
-      "for one pointer. Read-only actions (screenshot, elements, inspect) still work. Tell " <>
-      "the user computer use needs a restart rather than retrying this."
+      "for one pointer. Looking still works: a `screenshot` sends no input. Tell the user " <>
+      "computer use needs a restart rather than retrying this."
   end
 
   # Stop; do NOT retry (a retry loop would burn iterations against a hold the
@@ -916,18 +1215,10 @@ defmodule FermixCore.Tools.ComputerUse do
   # click on the wrong thing, the one outcome a GUI driver must never produce.
   defp refusal_message(:observation_required) do
     "this action was not sent: it names no `observation_id`, so there is no reply its target " <>
-      "belongs to — a coordinate and an `element_ref` alike mean something only in the image " <>
-      "or listing they were read from. Take a `screenshot` (or `elements`, or `windows`), " <>
-      "then send this action again with the `observation_id` that reply names and the target " <>
-      "you read in it."
-  end
-
-  # Two answers to "where" on one request. Guessing which the model meant is a
-  # click on the wrong thing, so it is refused here, before anything is dispatched.
-  defp refusal_message(:addressing_conflict) do
-    "this action was not sent: it names its target twice — an `element_ref` together with " <>
-      "coordinates or a `mark`. Send ONE: the reference, to act on that control wherever it " <>
-      "now is, or the point, to act at those pixels of the image you named."
+      "belongs to — a target means something only in the image or listing it was read from. " <>
+      "Take a fresh look (a `screenshot`, or the listing the target came from), then send " <>
+      "this action again with the `observation_id` that reply names and the target you read " <>
+      "in it."
   end
 
   # The schema says `value` is a string; a model that sends a number gets a
@@ -1059,12 +1350,18 @@ defmodule FermixCore.Tools.ComputerUse do
   defp format_points([{fx, fy}, {tx, ty}]), do: "(#{fx},#{fy})→(#{tx},#{ty})"
 
   defp perform(session, request) do
-    case Session.execute(session, request) do
+    perform_result(Session.execute(session, request), request, HelperActions.offered())
+  end
+
+  # `offered` is the helper's latest reading: the refusals whose next step is an
+  # argument or an action name only what it offers.
+  defp perform_result(execution, request, offered) do
+    case execution do
       {:ok, %{image: nil} = result} ->
-        {{:ok, Tool.success(action_summary(result))}, action_telemetry(result)}
+        {{:ok, Tool.success(action_summary(result, offered))}, action_telemetry(result)}
 
       {:ok, %{image: image} = result} ->
-        {{:ok, Tool.success_with_images(action_summary(result), [image])},
+        {{:ok, Tool.success_with_images(action_summary(result, offered), [image])},
          action_telemetry(result)}
 
       {:error, :user_active} ->
@@ -1079,7 +1376,7 @@ defmodule FermixCore.Tools.ComputerUse do
           |> geometry_refusal(failure.code)
           |> put_receipt_facts(failure)
 
-        {{:ok, Tool.error(failure_message(failure))}, telemetry}
+        {{:ok, Tool.error(failure_message(failure, offered))}, telemetry}
 
       # A `/pause` cast can land between classify and execute, so the SAME refusal
       # can arrive here. It gets the same sentence and the same courtesy dimension
@@ -1104,7 +1401,8 @@ defmodule FermixCore.Tools.ComputerUse do
   # own words for what is in front, which is the one fact that decides whether the
   # model aims elsewhere or asks the person to move something.
   @detailed_codes ~w(point_outside_observation capture_geometry_mismatch
-                     ax_timed_out ax_action_failed target_obstructed)
+                     ax_timed_out ax_action_failed target_obstructed scope_not_found
+                     toolkit_accessibility_off invalid_argument)
 
   # A check the helper refused after the input had already gone out is a SUCCESS
   # here — the action happened — so the code it refused with would otherwise reach
@@ -1112,14 +1410,14 @@ defmodule FermixCore.Tools.ComputerUse do
   # is an operator fault whose own sentence says "do not retry, tell the user", and
   # the generic unverified lead ends in "take a fresh `screenshot`" — the exact
   # retry that code forbids. One authority per code, so the sentence comes from the
-  # same `action_error_message/1` a refusal would have used, with the helper's
-  # numbers after it exactly as `failure_message/1` places them.
-  defp action_summary(%{summary: summary, check_code: code} = result)
+  # same `code_message/2` a refusal would have used, with the helper's numbers
+  # after it exactly as `failure_message/2` places them.
+  defp action_summary(%{summary: summary, check_code: code} = result, offered)
        when code in @detailed_codes do
-    summary <> " " <> action_error_message(code) <> check_detail(result)
+    summary <> " " <> code_message(code, offered) <> check_detail(result)
   end
 
-  defp action_summary(%{summary: summary}), do: summary
+  defp action_summary(%{summary: summary}, _offered), do: summary
 
   defp check_detail(%{check_detail: detail}) when is_binary(detail), do: " (#{detail})"
   defp check_detail(_result), do: ""
@@ -1145,7 +1443,10 @@ defmodule FermixCore.Tools.ComputerUse do
   # pointed at (a window or the desktop) and how it reached the screen (through
   # accessibility inside a bound window, or in front of the person). Two more
   # closed words — never the window's title and never the application's name,
-  # which are content and belong to the model's side of the wire.
+  # which are content and belong to the model's side of the wire. Protocol 12
+  # adds three counts and a word (M86 P2): how many dialogs or menus an action
+  # left open, why a walk stopped short, and what it cost in accessibility
+  # messages — never what any of them said.
   @receipt_facts [
     :input_method,
     :effect,
@@ -1156,7 +1457,10 @@ defmodule FermixCore.Tools.ComputerUse do
     :cu_capture_ms,
     :cu_encode_ms,
     :target_kind,
-    :cu_mode
+    :cu_mode,
+    :cu_surfaces_count,
+    :cu_truncated,
+    :cu_ax_messages
   ]
 
   defp put_receipt_facts(telemetry, source) do
@@ -1251,7 +1555,8 @@ defmodule FermixCore.Tools.ComputerUse do
   # an honest, general diagnosis (no app-specific examples — the model decides what
   # to do with the fact). Every other reason surfaces verbatim so a real backend
   # error is never masked (Rule #7).
-  defp action_error_message("no_active_display") do
+  defp action_error_message(code)
+       when code in ["no_active_display", "display_asleep", "display_disconnected"] do
     "no capturable display — the screen is locked, the display is asleep, or this " <>
       "process has no active GUI session. Computer use cannot see or control the " <>
       "desktop until there is an unlocked, awake display; retrying will not help " <>
@@ -1335,6 +1640,18 @@ defmodule FermixCore.Tools.ComputerUse do
       "conversation. Take a `screenshot` to see the current screen, then send the action again."
   end
 
+  # The helper does not have this action. The schema offers only what the helper
+  # listed (M86 F1), so this is a helper replaced under a running daemon.
+  defp action_error_message("unknown_action"), do: unavailable_action_message()
+
+  # The operating system's capture wedged inside the helper, which restarts
+  # itself after this reply.
+  defp action_error_message("capture_stalled") do
+    "nothing was captured: the screen capture stalled inside the computer-use helper, which " <>
+      "restarts itself after this. Take a `screenshot` again; if it keeps happening, tell the " <>
+      "user."
+  end
+
   # The image the action named is not one the helper can still map a point through:
   # it has been replaced, it timed out, or the display's geometry moved under it.
   # One sentence for all three, because the recovery is one move and the difference
@@ -1404,23 +1721,97 @@ defmodule FermixCore.Tools.ComputerUse do
   # What to do instead is the model's call: the helper never switches mechanism on
   # its own, because a click is a different act with different consequences.
   defp action_error_message("ax_action_unsupported") do
-    "this action was not sent: that control cannot be operated by name — its own list of " <>
-      "accessibility actions does not include the one you asked for. Reach it another way if " <>
-      "you still want to: click it by `element_ref`, or by its point from `elements` or a " <>
-      "marked `screenshot`. Nothing was switched for you."
+    "this action was not sent: that control has no route for this verb — the verbs it takes " <>
+      "are the ones its `elements` line lists. Reach it another way if you still want to: " <>
+      "another verb it lists, or a click by its `element_ref` where its line gives a point. " <>
+      "Nothing was switched for you."
   end
 
   # The same fact as Fermix's own conflict refusal, from the other side of the
   # wire, so it reads the same whichever half the request met first.
-  defp action_error_message("addressing_conflict"), do: refusal_message(:addressing_conflict)
 
   # The helper wants a control and got none. Fermix never sends this shape (the
   # library refuses it first), so it means the two halves disagree about what the
   # action takes.
   defp action_error_message("element_required") do
-    "this action was not sent: it names no control. `press` and `set_value` act on the " <>
-      "`element_ref` of a control an `elements` listing named — take `elements`, then send " <>
-      "the reference of the control you want with that reply's `observation_id`."
+    "this action was not sent: it names no control. A verb on a control acts on the " <>
+      "`element_ref` an `elements` listing gave it — take `elements`, then send the reference " <>
+      "of the control you want with that reply's `observation_id`."
+  end
+
+  # The helper said so where this side did not: the action named no image. The
+  # same fact, so the same sentence.
+  defp action_error_message("observation_required"), do: refusal_message(:observation_required)
+
+  # A verb that reads the control's state first could not read it, so it could
+  # not tell whether the control already holds what was asked — and it sent
+  # nothing rather than guess (M86 P2). Nothing is switched for the model either.
+  defp action_error_message("state_unreadable") do
+    "this action was not sent: the control's current state could not be read, so whether " <>
+      "it already holds what you asked could not be decided and nothing was sent rather than " <>
+      "guessed. Take `elements` again to see it; if the state still reads nothing, choose " <>
+      "another way yourself — another verb it lists, or a click by its `element_ref` — and " <>
+      "look at the result."
+  end
+
+  # `focus` never brings a window forward: a window the person is not in is
+  # theirs to switch to, not this action's.
+  defp action_error_message("focus_refused") do
+    "this action was not sent: that control is in a window that is not the active one, and " <>
+      "`focus` never brings a window forward. Work in the window that is in front, or ask the " <>
+      "user to switch to that one first."
+  end
+
+  # The scope the listing or the condition asked for has no root right now. The
+  # helper's detail says which, so it rides after the sentence.
+  defp action_error_message("scope_not_found") do
+    "this action was not sent: that scope has nothing in it right now — no focused window, " <>
+      "nothing focused, or no menu or dialog open, as the detail below says. Use another " <>
+      "`scope`, or take a `screenshot` to see what is there."
+  end
+
+  # A build with no accessibility API (the Linux helper before it has a reader)
+  # was asked about controls. Pixels are the honest alternative, and the only one.
+  defp action_error_message("accessibility_unavailable") do
+    "this action was not sent: the computer-use helper on this machine cannot read or act on " <>
+      "controls at all. Work by pixels: take a `screenshot` and act in the image it names."
+  end
+
+  # Re-validation found several controls where the reference named one, or could
+  # not read the candidate reliably enough to know it is the same control. Acting
+  # on either would be a guess, so the next move is a fresh listing.
+  defp action_error_message(code) when code in ["ambiguous_element", "identity_unknown"] do
+    "this action was not sent: the control its `element_ref` names could not be told apart " <>
+      "from others, or could not be read reliably enough to be sure it is still the same one. " <>
+      "Take `elements` again and use the reference from THAT reply; do not re-send this one."
+  end
+
+  # The application's toolkit publishes no tree until a switch is set (Qt,
+  # Chromium). The helper's detail names the switch, which is the user's to set.
+  defp action_error_message("toolkit_accessibility_off") do
+    "this action was not sent: this application is not publishing its controls, because its " <>
+      "toolkit keeps them off until a switch is set — the detail below names it. Work by pixels " <>
+      "here (take a `screenshot`), and tell the user the switch if they want controls to work " <>
+      "in it."
+  end
+
+  # The active keyboard layout cannot produce some character of the text. The
+  # clipboard can, and `paste` is offered wherever `type` is.
+  defp action_error_message("text_outside_layout") do
+    "this action was not sent: the keyboard layout in use cannot type some of that text. " <>
+      "Send it with `paste` instead."
+  end
+
+  # The person declined the desktop's own consent prompt for screen capture or
+  # remote control. Theirs to decide; never worked around.
+  defp action_error_message("consent_refused") do
+    "this action was not sent: the person declined the desktop's request to let computer use " <>
+      "see or control the screen. Do not retry. Ask them whether they want to allow it."
+  end
+
+  defp action_error_message("consent_timeout") do
+    "this action was not sent: the desktop's request for permission to see or control the " <>
+      "screen was not answered in time. Ask the user to watch for that prompt, then try again."
   end
 
   # The bound-window family, routed through the flag: with it off nothing can
@@ -1434,9 +1825,11 @@ defmodule FermixCore.Tools.ComputerUse do
       else: "action failed: #{code}"
   end
 
-  # The build and the installed helper disagree about what a request may contain.
-  # No retry can fix that, and it is an operator fact, not a model one.
-  defp action_error_message("unknown_field") do
+  # The build and the installed helper disagree about what a request may contain,
+  # or how one is framed. No retry can fix that, and it is an operator fact, not a
+  # model one.
+  defp action_error_message(code)
+       when code in ["unknown_field", "malformed_frame", "untagged_frame", "unknown_frame_type"] do
     "this action was not sent: the computer-use helper does not understand part of the " <>
       "request this build sends, which means the helper and Fermix are different versions. " <>
       "Do not retry. Tell the user the computer-use helper needs reinstalling to match."
@@ -1575,6 +1968,15 @@ defmodule FermixCore.Tools.ComputerUse do
       "afterwards."
   end
 
+  # Linux: the helper cannot prove the window is the frame it claims to be, or
+  # the desktop allows no binding at all (Wayland). Binding the wrong window is
+  # the failure this refuses, so the whole screen is the honest alternative.
+  defp background_code_message("target_binding_unavailable") do
+    "this action was not sent: this window cannot be bound here — the helper cannot prove it " <>
+      "is the window it claims to be, or this desktop allows no binding at all. Work on the " <>
+      ~s(whole screen instead: `select_target` with `"window_id": "desktop"`.)
+  end
+
   defp background_code_message("capture_budget_exceeded") do
     "this action was not sent: the window you bound is too large to hold pictures of within " <>
       "the memory this helper allows itself, so nothing was captured. Retrying will not help. " <>
@@ -1588,18 +1990,77 @@ defmodule FermixCore.Tools.ComputerUse do
   # reaches the model on a code whose sentence asked for it, and on a code with no
   # sentence of its own, where the alternative is a bare token the operator cannot
   # act on.
-  defp failure_message(%{code: code, detail: detail} = failure) do
-    message = named_failure_message(failure)
+  defp failure_message(%{code: code, detail: detail} = failure, offered) do
+    message = named_failure_message(failure, offered)
 
     if is_binary(detail) and (code in @detailed_codes or message =~ "action failed:"),
       do: message <> " (#{detail})",
       else: message
   end
 
-  defp named_failure_message(%{code: code, dispatch: dispatch}) when code in @ax_failures,
-    do: ax_dispatch_message(ax_cause(code, dispatch), dispatch)
+  defp named_failure_message(%{code: code, dispatch: dispatch}, _offered)
+       when code in @ax_failures,
+       do: ax_dispatch_message(ax_cause(code, dispatch), dispatch)
 
-  defp named_failure_message(%{code: code}), do: action_error_message(code)
+  defp named_failure_message(%{code: code}, offered), do: code_message(code, offered)
+
+  # The refusals whose next step is an argument, an action or a way of naming a
+  # target: their sentence names only what this helper's reading offers. Every
+  # other code has one sentence whatever the reading.
+  defp code_message("check_unsupported", offered), do: check_unsupported_message(offered)
+  defp code_message("invalid_argument", offered), do: invalid_argument_message(offered)
+  defp code_message("addressing_conflict", offered), do: addressing_conflict_message(offered)
+  defp code_message(code, _offered), do: action_error_message(code)
+
+  # Two answers to "where" on one request. Guessing which the model meant is a
+  # click on the wrong thing, so it is refused, before anything is dispatched.
+  # References exist only where the helper lists controls; a mark and a point
+  # clash on any helper that badges marks.
+  defp addressing_conflict_message(offered) do
+    if "elements" in offered do
+      "this action was not sent: it names its target twice — an `element_ref` together with " <>
+        "coordinates or a `mark`. Send ONE: the reference, to act on that control wherever it " <>
+        "now is, or the point, to act at those pixels of the image you named."
+    else
+      "this action was not sent: it names its target twice — a `mark` together with " <>
+        "coordinates. Send ONE: the mark, to act at the point it badged, or the point, to " <>
+        "act at those pixels of the image you named."
+    end
+  end
+
+  # A check the helper cannot take on this action. Fermix decides the check by
+  # rule, so the reachable case is a condition (`until`) on an action that sends
+  # nothing, or one the helper could not read. Where `wait_for` is offered,
+  # waiting alone is the way; elsewhere no argument of the model's caused it.
+  defp check_unsupported_message(offered) do
+    if "wait_for" in offered do
+      "this action was not sent: its check could not be taken — a condition (`until`) can " <>
+        "only follow an action that sends input, and it has to be one of the kinds the " <>
+        "schema lists. To wait without acting, use `wait_for`."
+    else
+      "this action was not sent: its check could not be taken, and sending it again will " <>
+        "not change that. Take a `screenshot` to see where things stand, and tell the user " <>
+        "if it happens again."
+    end
+  end
+
+  # A wrong value the helper named. Its detail says which, and that is the fix; the
+  # examples are arguments this reading offers.
+  defp invalid_argument_message(offered) do
+    examples =
+      naming_list(offered, "elements", ["an unknown `scope`", "an empty `query`"]) ++
+        ["a combination that cannot go together"] ++
+        naming_list(offered, "wait_for", ["a bad `until`"]) ++
+        naming_list(offered, "toggle", ["a `toggle` without a true or false `on`"]) ++
+        ["a `type` without `text`"]
+
+    "this action was not sent: one of its arguments has a value the helper refuses, as the " <>
+      "detail below says — " <> or_list(examples) <> ". Fix that argument and send it again."
+  end
+
+  defp or_list([only]), do: only
+  defp or_list([first, second]), do: first <> " or " <> second
+  defp or_list(items), do: Enum.join(Enum.drop(items, -1), ", ") <> ", or " <> List.last(items)
 
   # The two accessibility failures, whose sentence follows the RECEIPT and not the
   # code: the same failure name covers a message the platform refused before it

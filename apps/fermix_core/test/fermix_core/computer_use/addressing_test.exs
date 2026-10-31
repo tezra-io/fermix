@@ -475,8 +475,7 @@ defmodule FermixCore.ComputerUse.AddressingTest do
 
       assert result.summary =~
                "Image #{@crop}, 1200x760 (display 0). Coordinates are pixels in this exact " <>
-                 "image: pass observation_id \"#{@crop}\" with any click, move, drag, scroll " <>
-                 "or inspect."
+                 "image: pass observation_id \"#{@crop}\" with any click, move, drag or scroll."
     end
 
     # The helper's screenshot reply carries no `display` key, so the number has to
@@ -492,16 +491,14 @@ defmodule FermixCore.ComputerUse.AddressingTest do
     end
 
     test "an elements listing names the image its points were read in" do
-      session = start_session(elements: [%{"role" => "AXButton", "x" => 180, "y" => 150}])
+      session = start_session(elements: [%{"role" => "button", "x" => 180, "y" => 150}])
 
       {:ok, result} = run(session, %{"action" => "elements", "region" => @region})
 
-      assert result.summary =~
-               "List obs-elements. The coordinates below are pixels in the image this list " <>
-                 "was read from: pass observation_id \"obs-elements\" with any click, move, " <>
-                 "drag, scroll or inspect."
-
-      assert result.summary =~ "AXButton"
+      assert result.summary =~ "List obs-elements: 1 control(s)"
+      assert result.summary =~ ~s(observation_id "obs-elements": no pointer, no aim)
+      assert result.summary =~ "at its point in this list's pixels"
+      assert result.summary =~ "button at (180,150)"
     end
 
     test "a windows listing does the same, and its regions are copied verbatim" do

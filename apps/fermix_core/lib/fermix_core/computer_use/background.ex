@@ -60,7 +60,7 @@ defmodule FermixCore.ComputerUse.Background do
   # surface leaking out the back.
   @codes ~w(target_unavailable target_minimized target_obstructed ax_binding_unavailable
             control_surface_unavailable capture_unavailable capture_budget_exceeded
-            screen_recording_not_granted)
+            screen_recording_not_granted target_binding_unavailable)
 
   @doc "The helper codes whose sentences belong to this surface."
   @spec codes() :: [String.t()]

@@ -12,7 +12,10 @@ defmodule FermixCore.ComputerUse.ElementActionsTest do
 
   use ExUnit.Case, async: false
 
+  alias Compux.Protocol
+  alias FermixCore.ComputerUse.Background
   alias FermixCore.ComputerUse.Config
+  alias FermixCore.ComputerUse.HelperActions
   alias FermixCore.ComputerUse.Session
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Tools.ComputerUse
@@ -33,7 +36,10 @@ defmodule FermixCore.ComputerUse.ElementActionsTest do
          test_pid: Keyword.fetch!(opts, :test_pid),
          receipt: Keyword.get(opts, :receipt),
          elements: Keyword.get(opts, :elements, []),
-         marks: Keyword.get(opts, :marks)
+         marks: Keyword.get(opts, :marks),
+         extra: Keyword.get(opts, :extra, %{}),
+         actions: Keyword.get(opts, :actions, Protocol.actions()),
+         input_methods: Keyword.get(opts, :input_methods, ~w(foreground_hid ax))
        }}
     end
 
@@ -48,9 +54,20 @@ defmodule FermixCore.ComputerUse.ElementActionsTest do
 
     defp response(_state, %{"action" => "idle_ms"}), do: %{"ok" => true, "idle_ms" => 10_000}
 
+    # The handshake of the macOS helper unless a case names another one.
+    defp response(state, %{"action" => "hello"}) do
+      %{
+        "ok" => true,
+        "protocol_version" => Protocol.protocol_version(),
+        "actions" => state.actions,
+        "capabilities" => %{"input_methods" => state.input_methods}
+      }
+    end
+
     defp response(state, %{"action" => "elements"} = request) do
       %{"ok" => true, "elements" => state.elements}
       |> ComputerUseObservations.stamp(request)
+      |> Map.merge(state.extra)
     end
 
     defp response(state, request) do
@@ -64,6 +81,7 @@ defmodule FermixCore.ComputerUse.ElementActionsTest do
       |> put_marks(state, request)
       |> ComputerUseObservations.stamp(request)
       |> put_receipt(state, request)
+      |> Map.merge(state.extra)
     end
 
     defp put_marks(response, %{marks: marks}, %{"marks" => true}) when is_list(marks),
@@ -160,8 +178,24 @@ defmodule FermixCore.ComputerUse.ElementActionsTest do
 
   defp run(session, config, params), do: ComputerUse.execute(params, context(session, config))
 
+  # The reading the tool's words and its row follow (`HelperActions`).
+  defp read_helper(actions, input_methods) do
+    start_supervised!({HelperActions, read_at_boot?: false})
+    :ok = HelperActions.record(%{actions: actions, input_methods: input_methods})
+  end
+
   defp press(ref \\ "e1"),
     do: %{"action" => "press", "observation_id" => @obs, "element_ref" => ref}
+
+  defp ax_receipt(effect, extra) do
+    :sent
+    |> ComputerUseReceipts.receipt(
+      effect: effect,
+      input_method: "ax",
+      check: %{"kind" => "semantic"}
+    )
+    |> Map.merge(extra)
+  end
 
   describe "outcomes from the receipt" do
     # A successful AX return says the call was made, not that the control acted,
@@ -386,9 +420,29 @@ defmodule FermixCore.ComputerUse.ElementActionsTest do
     for {code, anchor} <- [
           {"stale_element", "Take `elements` again and use the reference from THAT reply"},
           {"element_disabled", "Work out what enables it"},
-          {"ax_action_unsupported", "click it by `element_ref`, or by its point"},
+          {"ax_action_unsupported", "another verb it lists, or a click by its `element_ref`"},
           {"addressing_conflict", "it names its target twice"},
-          {"element_required", "it names no control"}
+          {"element_required", "it names no control"},
+          {"observation_required", "it names no `observation_id`"},
+          {"state_unreadable", "nothing was sent rather than guessed"},
+          {"focus_refused", "`focus` never brings a window forward"},
+          {"scope_not_found", "that scope has nothing in it right now"},
+          {"accessibility_unavailable", "Work by pixels"},
+          {"ambiguous_element", "could not be told apart"},
+          {"identity_unknown", "reliably enough to be sure"},
+          {"toolkit_accessibility_off", "is not publishing its controls"},
+          {"check_unsupported", "its check could not be taken"},
+          {"invalid_argument", "Fix that argument and send it again"},
+          {"text_outside_layout", "Send it with `paste` instead"},
+          {"consent_refused", "Ask them whether they want to allow it"},
+          {"consent_timeout", "watch for that prompt"},
+          {"unknown_action", "does not offer"},
+          {"malformed_frame", "different versions"},
+          {"untagged_frame", "different versions"},
+          {"unknown_frame_type", "different versions"},
+          {"display_asleep", "no capturable display"},
+          {"display_disconnected", "no capturable display"},
+          {"capture_stalled", "restarts itself after this"}
         ] do
       test "the helper's #{code} names the next move", %{config: config} do
         session =
@@ -409,6 +463,84 @@ defmodule FermixCore.ComputerUse.ElementActionsTest do
         assert result.error =~ unquote(anchor)
         refute result.error =~ "action failed:", "a named refusal never renders as a raw term"
       end
+    end
+
+    # Every code protocol 12 answers reaches the model as a sentence of its own,
+    # never as the raw code (M86 P2), so a code the library adds fails here until
+    # it has one. Left out on purpose: the bound-window family speaks only with its
+    # flag on (`Background`, tested there), and `request_too_large` is never
+    # correlated to a request, so no action reply carries it.
+    test "every refusal the protocol names renders as a sentence", %{config: config} do
+      for code <- Protocol.refusals() -- ["request_too_large" | Background.codes()] do
+        session =
+          start_supervised!(
+            {Session,
+             [
+               config: config,
+               driver: {RefusingDriver, [code: code]},
+               origin: :interactive,
+               session_id: "cua_every_#{code}"
+             ]},
+            id: {:every_refusal, code}
+          )
+
+        assert {:ok, result} = run(session, config, press())
+        assert result.success == false, code
+        refute result.error =~ "action failed:", "#{code} renders as a raw term"
+        :ok = stop_supervised!({:every_refusal, code})
+      end
+    end
+
+    # The argument and check refusals name an argument only where the reading
+    # offers the action it belongs to.
+    test "the argument and check refusals name only what the reading offers", %{config: config} do
+      pixel =
+        for code <- ~w(invalid_argument check_unsupported), into: %{} do
+          session =
+            start_supervised!(
+              {Session,
+               [
+                 config: config,
+                 driver: {RefusingDriver, [code: code]},
+                 origin: :interactive,
+                 session_id: "cua_reading_#{code}"
+               ]},
+              id: {:reading_refusal, code}
+            )
+
+          {:ok, result} = run(session, config, press())
+          :ok = stop_supervised!({:reading_refusal, code})
+          {code, result.error}
+        end
+
+      assert pixel["check_unsupported"] =~ "its check could not be taken"
+      assert pixel["invalid_argument"] =~ "Fix that argument and send it again"
+
+      # Two examples are joined by "or" alone.
+      assert pixel["invalid_argument"] =~
+               "a combination that cannot go together or a `type` without `text`."
+
+      for {code, error} <- pixel, word <- ~w(`scope` `query` `until` `on` `wait_for`) do
+        refute error =~ word, "#{code} names #{word} to a pixel helper"
+      end
+
+      read_helper(Protocol.actions(), ~w(foreground_hid ax))
+
+      session =
+        start_supervised!(
+          {Session,
+           [
+             config: config,
+             driver: {RefusingDriver, [code: "invalid_argument"]},
+             origin: :interactive,
+             session_id: "cua_reading_full"
+           ]},
+          id: :reading_full
+        )
+
+      {:ok, result} = run(session, config, press())
+
+      for word <- ~w(`scope` `query` `until` `on`), do: assert(result.error =~ word)
     end
 
     test "a disabled control is never told to try again", %{config: config} do
@@ -449,6 +581,49 @@ defmodule FermixCore.ComputerUse.ElementActionsTest do
       assert_receive {:tool_exec, %{outcome: :refused, geometry_refusal: "addressing_conflict"}}
     end
 
+    # References exist only where the helper lists controls, so only there does
+    # the sentence name one, whichever side refused: this side's gate or the
+    # helper's own code. A mark and a point clash on any helper that badges marks.
+    test "naming a target twice names a reference only where controls are listed", %{
+      config: config
+    } do
+      twice = %{
+        "action" => "left_click",
+        "observation_id" => @obs,
+        "mark" => 3,
+        "x" => 1,
+        "y" => 2
+      }
+
+      pixel_gate = start_session(config, [])
+      assert {:ok, gate} = run(pixel_gate, config, twice)
+      refute_received {:driver_execute, %{"action" => "left_click"}}
+
+      pixel_helper =
+        start_supervised!(
+          {Session,
+           [
+             config: config,
+             driver: {RefusingDriver, [code: "addressing_conflict"]},
+             origin: :interactive,
+             session_id: "cua_twice_helper"
+           ]},
+          id: :twice_helper
+        )
+
+      assert {:ok, helper} = run(pixel_helper, config, press())
+
+      for error <- [gate.error, helper.error] do
+        assert error =~ "it names its target twice — a `mark` together with coordinates"
+        refute error =~ "element_ref"
+      end
+
+      read_helper(Protocol.actions(), ~w(foreground_hid ax))
+      controls = start_session(config, [])
+      assert {:ok, result} = run(controls, config, twice)
+      assert result.error =~ "an `element_ref` together with coordinates or a `mark`"
+    end
+
     test "a reference with no image named is refused for want of the image", %{config: config} do
       session = start_session(config, [])
 
@@ -456,8 +631,253 @@ defmodule FermixCore.ComputerUse.ElementActionsTest do
                run(session, config, %{"action" => "press", "element_ref" => "e1"})
 
       assert result.error =~ "it names no `observation_id`"
-      assert result.error =~ "an `element_ref` alike"
+      assert result.error =~ "the listing the target came from"
       refute_received {:driver_execute, %{"action" => "press"}}
+    end
+  end
+
+  # Protocol 12 (M86 P2): what a receipt adds once the helper reads states and
+  # looks for what an action left open. Built by hand from the contract's own
+  # examples (compux `PROTOCOL.md` §3–§5).
+  describe "protocol 12 receipts" do
+    test "the dialogs and menus an action left open are named, and counted on the row", %{
+      config: config
+    } do
+      receipt =
+        ax_receipt("not_observed", %{
+          "surfaces" => [
+            %{"kind" => "dialog", "native_kind" => "AXSheet", "label" => "Clear all items?"}
+          ]
+        })
+
+      session = start_session(config, receipt: receipt)
+
+      assert {:ok, result} = run(session, config, press())
+
+      assert result.output =~ ~s(Open after this action: dialog "Clear all items?".)
+      assert result.output =~ ~s(`scope` "dialog")
+      assert_receive {:tool_exec, %{cu_surfaces_count: 1, cu_verb: "press"} = metadata}
+      refute inspect(metadata) =~ "Clear all items", "a surface's name is content"
+    end
+
+    test "nothing open is counted as zero and says nothing", %{config: config} do
+      session = start_session(config, receipt: ax_receipt("not_observed", %{"surfaces" => []}))
+
+      assert {:ok, result} = run(session, config, press())
+
+      refute result.output =~ "Open after this action"
+      assert_receive {:tool_exec, %{cu_surfaces_count: 0}}
+    end
+
+    test "a receipt that did not look carries no count", %{config: config} do
+      session = start_session(config, receipt: ax_receipt("not_observed", %{}))
+
+      assert {:ok, _result} = run(session, config, press())
+
+      assert_receive {:tool_exec, metadata}
+      refute Map.has_key?(metadata, :cu_surfaces_count), "absent is not looked, never zero"
+    end
+
+    test "the control read back carries its normalised role and states", %{config: config} do
+      session =
+        start_session(config,
+          receipt: ax_receipt("changed", %{}),
+          extra: %{
+            "element_after" => %{
+              "present" => true,
+              "role" => "checkbox",
+              "native_role" => "AXCheckBox",
+              "label" => "Bold",
+              "enabled" => true,
+              "checked" => true
+            }
+          }
+        )
+
+      assert {:ok, result} = run(session, config, press())
+
+      assert result.output =~ ~s(The control now reads: checkbox "Bold", enabled, on.)
+
+      assert_receive {:tool_exec,
+                      %{outcome: :performed, effect: :changed, check_kind: "semantic"}}
+    end
+
+    test "a condition the action waited on says what it found", %{config: config} do
+      receipt =
+        ComputerUseReceipts.receipt(:sent,
+          effect: "not_observed",
+          input_method: "ax",
+          check: %{"kind" => "semantic", "until" => "not_met", "looks" => 51, "waited_ms" => 5004}
+        )
+
+      session = start_session(config, receipt: receipt)
+
+      assert {:ok, result} = run(session, config, press())
+
+      assert result.output =~ "What you waited for did not hold within its timeout"
+      assert result.output =~ "do not repeat it for that"
+    end
+
+    # A secure field's value is never read back (PROTOCOL.md §4.7). A reply that
+    # carries one anyway must not reach the model, the row or anything else.
+    test "typing into a secure field never repeats a value, even one the reply carried", %{
+      config: config
+    } do
+      secret = "correct horse battery"
+
+      session =
+        start_session(config,
+          receipt: ax_receipt("not_observed", %{}),
+          extra: %{
+            "value" => secret,
+            "element_after" => %{
+              "present" => true,
+              "role" => "textfield",
+              "label" => "Password",
+              "secure" => true,
+              "enabled" => true
+            }
+          }
+        )
+
+      assert {:ok, result} =
+               run(session, config, %{
+                 "action" => "type",
+                 "observation_id" => @obs,
+                 "element_ref" => "e3",
+                 "text" => secret
+               })
+
+      assert result.output =~ "The field is secure; its value is not read back."
+      refute inspect(result) =~ secret
+    end
+
+    # Typing into a control rides the contract's own signal, the helper's
+    # `input_methods` (PROTOCOL.md §1), not whether it lists controls.
+    test "typing into a control is a verb on it only where the helper types by accessibility",
+         %{config: config} do
+      read_helper(Protocol.actions(), ~w(foreground_hid))
+      keyboard = start_session(config, input_methods: ~w(foreground_hid))
+      type = %{"action" => "type", "observation_id" => @obs, "element_ref" => "e2", "text" => "x"}
+
+      assert {:ok, _result} = run(keyboard, config, type)
+      assert_receive {:driver_execute, %{"action" => "type"} = sent}
+      refute sent["check"] == "semantic"
+      assert_receive {:tool_exec, plain}
+      refute Map.has_key?(plain, :cu_verb)
+
+      :ok =
+        HelperActions.record(%{actions: Protocol.actions(), input_methods: ~w(foreground_hid ax)})
+
+      accessibility = start_session(config, [])
+
+      assert {:ok, _result} = run(accessibility, config, type)
+      assert_receive {:driver_execute, %{"action" => "type", "check" => "semantic"}}
+      assert_receive {:tool_exec, %{cu_verb: "type"}}
+    end
+
+    # The way to read a field back names `inspect` only where this helper has it.
+    test "a set_value that did not read back names `inspect` only where the helper has it", %{
+      config: config
+    } do
+      set = %{
+        "action" => "set_value",
+        "observation_id" => @obs,
+        "element_ref" => "e2",
+        "value" => "a"
+      }
+
+      receipt = ax_receipt("not_observed", %{})
+
+      without =
+        start_session(config, receipt: receipt, actions: Protocol.actions() -- ["inspect"])
+
+      assert {:ok, result} = run(without, config, set)
+      assert result.output =~ "reading the field back did not return it"
+      refute result.output =~ "inspect"
+
+      with_inspect = start_session(config, receipt: receipt)
+      assert {:ok, result} = run(with_inspect, config, set)
+      assert result.output =~ "`inspect` the control"
+    end
+
+    test "a walk's cut and its message count reach the row", %{config: config} do
+      session =
+        start_session(config,
+          elements: [%{"element_ref" => "e1", "role" => "button", "label" => "Save"}],
+          extra: %{"truncated" => "nodes", "ax_messages" => 412}
+        )
+
+      assert {:ok, %{success: true}} = run(session, config, %{"action" => "elements"})
+      assert_receive {:tool_exec, %{cu_truncated: "nodes", cu_ax_messages: 412}}
+    end
+
+    test "a pointer action names no verb on its row", %{config: config} do
+      session = start_session(config, [])
+
+      assert {:ok, %{success: true}} =
+               run(session, config, %{
+                 "action" => "left_click",
+                 "observation_id" => @obs,
+                 "x" => 1,
+                 "y" => 2
+               })
+
+      assert_receive {:tool_exec, metadata}
+      refute Map.has_key?(metadata, :cu_verb)
+    end
+
+    test "typing at the focus names no verb; typing into a control does", %{config: config} do
+      read_helper(Protocol.actions(), ~w(foreground_hid ax))
+      session = start_session(config, [])
+
+      assert {:ok, _result} = run(session, config, %{"action" => "type", "text" => "hi"})
+      assert_receive {:tool_exec, plain}
+      refute Map.has_key?(plain, :cu_verb)
+
+      assert {:ok, _result} =
+               run(session, config, %{"action" => "type", "element_ref" => "e2", "text" => "hi"})
+
+      assert_receive {:tool_exec, %{cu_verb: "type"} = named}
+      refute named |> Map.drop([:input]) |> inspect() =~ ~s("hi"), "the text is content"
+    end
+  end
+
+  # Every verb on a control, and `type` into one, names the listing its reference
+  # came from — refused HERE, before any driver call, like `press` (M86 P2).
+  describe "a verb on a control names its listing" do
+    for action <- ~w(focus select toggle expand collapse scroll_to) do
+      test "#{action} without an observation_id is refused before the driver", %{config: config} do
+        session = start_session(config, [])
+
+        assert {:ok, result} =
+                 run(session, config, %{"action" => unquote(action), "element_ref" => "e1"})
+
+        assert result.success == false
+        assert result.error =~ "it names no `observation_id`"
+        refute_received {:driver_execute, %{"action" => unquote(action)}}
+        assert_receive {:tool_exec, %{geometry_refusal: "observation_required"}}
+      end
+    end
+
+    test "type into a control needs its listing; type at the focus needs none", %{config: config} do
+      session = start_session(config, [])
+
+      assert {:ok, refused} =
+               run(session, config, %{"action" => "type", "element_ref" => "e2", "text" => "x"})
+
+      assert refused.error =~ "it names no `observation_id`"
+
+      assert {:ok, %{success: true}} = run(session, config, %{"action" => "type", "text" => "x"})
+    end
+
+    test "a drill into a control needs the listing that named it", %{config: config} do
+      session = start_session(config, [])
+
+      assert {:ok, result} = run(session, config, %{"action" => "elements", "root" => "e12"})
+
+      assert result.error =~ "it names no `observation_id`"
+      refute_received {:driver_execute, %{"action" => "elements"}}
     end
   end
 

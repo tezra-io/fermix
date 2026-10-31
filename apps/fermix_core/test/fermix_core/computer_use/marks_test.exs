@@ -327,7 +327,7 @@ defmodule FermixCore.ComputerUse.MarksTest do
       {:ok, :auto, request} = Session.classify(session, %{"action" => "elements"})
       {:ok, result} = Session.execute(session, request)
 
-      assert result.summary =~ "no accessibility-backed click targets"
+      assert result.summary =~ "No accessibility-backed controls"
       assert result.summary =~ "AX: AXManualAccessibility activated"
     end
   end

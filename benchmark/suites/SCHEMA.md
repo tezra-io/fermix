@@ -981,7 +981,7 @@ name `{fixture_dir}` and `{fixture_app}` and must pass `{state_file}`; `env` is
 extra environment for that fixture's process only, as quoted strings.
 
 A task is `id`, `verb`, `query`, `oracle`, and optionally `expect_refusal: <code>`,
-`timeout_ms` and `risk`. `expect_refusal` names the helper's typed code for the
+`timeout_ms`, `risk`, `platforms` and `sanity_route`. `expect_refusal` names the helper's typed code for the
 refusal that is the task's right outcome (`element_disabled` for a disabled
 control). The task passes only when its clauses pass AND a failed computer-use row
 in the turn carries THAT code; a paused, busy or user-active refusal does not
@@ -993,9 +993,19 @@ engine's own clause for the code. Any other value fails at load and in
 `--dry-run`. Every attempt, this one included, also needs at least one
 computer-use call in its turn, or it is invalid rather than scored. The verbs
 are `press`, `set_value`, `type`, `select`, `toggle`, `expand`, `collapse`,
-`scroll_to`, `focus`, `dialog`, `menu`, `ambiguity`, `refusal`, `secure` (each
-needs at least one task) and `form`. A query may name `{toolkit}` and `{window}`,
-the labels the fixture shows.
+`scroll_to`, `focus`, `wait_for`, `dialog`, `menu`, `ambiguity`, `refusal`,
+`secure` (each needs at least one task) and `form`. A query may name `{toolkit}`
+and `{window}`, the labels the fixture shows. `platforms: [linux]` (or
+`[macos]`) marks a task only that platform's fixtures can produce; it is planned
+and rendered on those fixtures alone, and a missing key means every platform.
+`sanity_route: <route>` labels a sanity case (AGENTS.md: route assertions only
+for safety and in labelled sanity cases): a task whose fixture state any route
+would produce passes only when a computer-use row in the turn also took that
+route, `wait_for` (the action, or an `until` among an action's arguments) or
+`type_by_reference` (`type` with an `element_ref`, or with a `mark`, which the
+session sends as the badged control's `element_ref`), as
+`desktoplib/cu_trace.py` `took_route` reads it. Only a row that went through
+counts: a refused one took no route, whatever its arguments.
 
 ### The state file
 

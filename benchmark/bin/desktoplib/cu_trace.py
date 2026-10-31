@@ -104,7 +104,25 @@ FAILURE_ANCHORS = (
 # sentence in `output`, so the sentence is how a row carries the code.
 TYPED_CODE_ANCHORS = {
     "element_disabled": "that control is DISABLED right now",
+    # Protocol 12 (M86 P2): the control refusals macOS answers ...
+    "stale_element": "its `element_ref` names is no longer one",
+    "ax_action_unsupported": "that control has no route for this verb",
+    "state_unreadable": "the control's current state could not be read",
+    "focus_refused": "`focus` never brings a window forward",
+    "scope_not_found": "that scope has nothing in it right now",
+    # ... and the ones only the Linux helper answers at first.
+    "accessibility_unavailable": "cannot read or act on controls at all",
+    "toolkit_accessibility_off": "this application is not publishing its controls",
+    "text_outside_layout": "the keyboard layout in use cannot type some of that text",
+    "consent_refused": "the person declined the desktop's request",
+    "consent_timeout": "request for permission to see or control the screen was not answered",
 }
+# The routes a labelled sanity case may require (`sanity_route` in the desktop
+# corpus; AGENTS.md allows a route assertion only for safety and in labelled
+# sanity cases). A computer-use row takes one whatever its outcome: `wait_for` by
+# the action itself or by an `until` among any action's arguments,
+# `type_by_reference` by `type` with an `element_ref`.
+ROUTES = ("wait_for", "type_by_reference")
 # `computer_use/session.ex` `delivery_suffix/1`: the helper's own word that the
 # cursor did not end where the action aimed.
 AIM_NOT_CONFIRMED = "Aim NOT confirmed at ("
@@ -240,6 +258,34 @@ def select_turn(rows: list[dict], start: float, end: float) -> tuple[str, list[d
 
 def is_computer_use(row: dict) -> bool:
     return row.get("type") == "tool_exec" and row.get("tool") == "computer_use"
+
+
+def took_route(row: dict, route: str) -> bool:
+    """True for a computer-use row that went through and took `route` (one of ROUTES).
+
+    A refused row took no route: the model then reached the task some other way.
+    `type_by_reference` is `type` with an `element_ref` or with a `mark`, which the
+    session sends as the badged control's `element_ref` (`observations.ex`
+    `@element_actions`; a mark with no reference is refused, so never sent).
+    """
+    if route not in ROUTES:
+        raise ValueError(f"{route!r} is not a route a sanity case can require "
+                         f"({', '.join(ROUTES)})")
+    if not is_computer_use(row) or not row.get("success"):
+        return False
+    if route == "wait_for" and row.get("action") == "wait_for":
+        return True
+    if not row.get("input"):
+        return False
+    try:
+        args = parse_elixir_input(row["input"])
+    except TraceError:
+        # An input that would not decode shows no route, so the sanity case fails
+        # rather than passing on a guess.
+        return False
+    if route == "wait_for":
+        return "until" in args
+    return row.get("action") == "type" and ("element_ref" in args or "mark" in args)
 
 
 def classify_failure(row: dict) -> str:

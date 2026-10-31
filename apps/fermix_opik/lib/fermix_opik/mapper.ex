@@ -247,6 +247,15 @@ defmodule FermixOpik.Mapper do
             # application name, which are content and stay off the row.
             :target_kind,
             :cu_mode,
+            # Protocol 12 (M86 P2): the verb an action sent to a control by name,
+            # how many dialogs or menus it left open, why an `elements` walk
+            # stopped short, and what the walk cost in accessibility messages.
+            # A word from the closed verb list, a closed reason and two counts —
+            # never a label, a value or a surface's name.
+            :cu_verb,
+            :cu_surfaces_count,
+            :cu_truncated,
+            :cu_ax_messages,
             # A voice call's task function (M70 §09): one span per call the
             # model made, refused and cancelled ones included, so the terminal
             # word and the Fermix-minted task id are what tell them apart. A

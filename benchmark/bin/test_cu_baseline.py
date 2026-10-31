@@ -240,6 +240,39 @@ def test_each_expectable_code_is_the_sentence_its_own_clause_renders():
         assert anchor in clause.group(1), f"{code}: {anchor!r} is not its sentence"
 
 
+# The protocol-12 refusals a desktop task may expect (M86 P2): the control
+# refusals macOS answers, and the ones only the Linux helper answers at first.
+PROTOCOL_12_EXPECTABLE = {"stale_element", "ax_action_unsupported", "state_unreadable",
+                          "focus_refused", "scope_not_found", "accessibility_unavailable",
+                          "toolkit_accessibility_off", "text_outside_layout", "consent_refused",
+                          "consent_timeout"}
+
+
+def test_the_protocol_12_refusals_can_be_expected():
+    missing = PROTOCOL_12_EXPECTABLE - set(cu_trace.TYPED_CODE_ANCHORS)
+    assert not missing, f"no anchor for {sorted(missing)}"
+
+
+def _sentence(text: str, code: str) -> str:
+    """The sentence `action_error_message("<code>")` renders: its string literals,
+    joined as the `<>` joins them."""
+    clause = re.search(r'defp action_error_message\("' + re.escape(code)
+                       + r'"\) do\n(.*?)\n  end', text, re.DOTALL)
+    assert clause, f"the engine no longer renders a sentence for {code}"
+    return "".join(re.findall(r'"((?:[^"\\]|\\.)*)"', clause.group(1)))
+
+
+# Two anchors that both match one sentence would let a task pass on the wrong
+# refusal, so each sentence carries its own code and no other.
+def test_each_expectable_sentence_carries_its_own_code_alone():
+    text = _engine_text()
+    for code in cu_trace.TYPED_CODE_ANCHORS:
+        row = cu_row(BASE_MS, "focus", success=False, output=_sentence(text, code))
+        carried = {other for other in cu_trace.TYPED_CODE_ANCHORS
+                   if cu_trace.carries_code(row, other)}
+        assert carried == {code}, f"{code}'s sentence carries {sorted(carried)}"
+
+
 DISABLED = ("this action was not sent: that control is DISABLED right now, so it would do "
             "nothing however it were reached")
 

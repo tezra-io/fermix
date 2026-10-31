@@ -44,6 +44,10 @@ defmodule FermixCore.ComputerUse.HelperActionsTest do
 
   @accessibility ~w(elements inspect press set_value)
 
+  # What a helper's `hello` says, as the holder records it.
+  defp reading(actions, input_methods \\ []),
+    do: %{actions: actions, input_methods: input_methods}
+
   setup do
     %{tasks: start_supervised!(Task.Supervisor)}
   end
@@ -69,8 +73,10 @@ defmodule FermixCore.ComputerUse.HelperActionsTest do
     assert_receive {:DOWN, ^ref, :process, ^task, _reason}
   end
 
-  defp helper_reading(actions),
-    do: {:ok, Capabilities.from_identity(%{"actions" => actions, "capabilities" => %{}})}
+  defp helper_reading(actions) do
+    identity = %{"actions" => actions, "capabilities" => %{"input_methods" => ~w(foreground_hid)}}
+    {:ok, Capabilities.from_identity(identity)}
+  end
 
   describe "before any helper has answered" do
     test "only the pixel actions are offered" do
@@ -86,8 +92,14 @@ defmodule FermixCore.ComputerUse.HelperActionsTest do
       end
     end
 
+    test "no input method is known, so nothing is typed by reference" do
+      start_holder([])
+      assert HelperActions.reading() == reading(@pixel)
+    end
+
     test "a holder that is not running answers the pixel set" do
       assert HelperActions.offered(:no_helper_actions_here) == @pixel
+      assert HelperActions.reading(:no_helper_actions_here) == reading(@pixel)
     end
   end
 
@@ -95,7 +107,7 @@ defmodule FermixCore.ComputerUse.HelperActionsTest do
     test "a hello without the accessibility actions offers none of them" do
       holder = start_holder([])
 
-      assert :ok = HelperActions.record(@pixel, holder)
+      assert :ok = HelperActions.record(reading(@pixel), holder)
 
       offered = HelperActions.offered(holder)
       assert offered == @pixel
@@ -108,15 +120,26 @@ defmodule FermixCore.ComputerUse.HelperActionsTest do
     test "a hello with them keeps them" do
       holder = start_holder([])
 
-      assert :ok = HelperActions.record(Protocol.actions(), holder)
+      assert :ok = HelperActions.record(reading(Protocol.actions()), holder)
 
       assert HelperActions.offered(holder) == Protocol.actions()
+    end
+
+    # One call answers the whole reading, so a schema built from it is built from
+    # one helper's answer even when another lands meanwhile.
+    test "the whole reading is one answer" do
+      holder = start_holder([])
+
+      :ok = HelperActions.record(reading(Protocol.actions(), ~w(foreground_hid ax)), holder)
+
+      assert HelperActions.reading(holder) ==
+               reading(Protocol.actions(), ~w(foreground_hid ax))
     end
 
     test "an action the library does not encode is never offered, and the library's order holds" do
       holder = start_holder([])
 
-      assert :ok = HelperActions.record(~w(left_click teleport screenshot), holder)
+      assert :ok = HelperActions.record(reading(~w(left_click teleport screenshot)), holder)
 
       assert HelperActions.offered(holder) == ~w(screenshot left_click)
 
@@ -127,8 +150,8 @@ defmodule FermixCore.ComputerUse.HelperActionsTest do
     test "a later reading replaces an earlier one" do
       holder = start_holder([])
 
-      :ok = HelperActions.record(Protocol.actions(), holder)
-      :ok = HelperActions.record(@pixel, holder)
+      :ok = HelperActions.record(reading(Protocol.actions()), holder)
+      :ok = HelperActions.record(reading(@pixel), holder)
 
       assert HelperActions.offered(holder) == @pixel
     end
@@ -137,12 +160,12 @@ defmodule FermixCore.ComputerUse.HelperActionsTest do
     # learnt from it, so it is treated as a reading that failed.
     test "a reading that offers nothing this build encodes leaves the offer as it was" do
       holder = start_holder([])
-      :ok = HelperActions.record(@pixel, holder)
+      :ok = HelperActions.record(reading(@pixel), holder)
 
       log =
         capture_log(fn ->
-          assert :ok = HelperActions.record([], holder)
-          assert :ok = HelperActions.record(~w(teleport), holder)
+          assert :ok = HelperActions.record(reading([]), holder)
+          assert :ok = HelperActions.record(reading(~w(teleport)), holder)
         end)
 
       assert HelperActions.offered(holder) == @pixel
@@ -150,7 +173,7 @@ defmodule FermixCore.ComputerUse.HelperActionsTest do
     end
 
     test "recording into a holder that is not running is a no-op" do
-      assert :ok = HelperActions.record(@pixel, :no_helper_actions_here)
+      assert :ok = HelperActions.record(reading(@pixel), :no_helper_actions_here)
     end
   end
 
@@ -167,11 +190,11 @@ defmodule FermixCore.ComputerUse.HelperActionsTest do
     )
   end
 
-  defp hello(actions) do
+  defp hello(actions, input_methods \\ []) do
     %{
       "protocol_version" => Protocol.protocol_version(),
       "actions" => actions,
-      "capabilities" => %{}
+      "capabilities" => %{"input_methods" => input_methods}
     }
   end
 
@@ -195,9 +218,21 @@ defmodule FermixCore.ComputerUse.HelperActionsTest do
       assert HelperActions.offered() == Protocol.actions()
     end
 
+    # Typing into a control by reference rides the contract's own signal, the
+    # helper's `input_methods` (PROTOCOL.md §1), not whether it lists controls.
+    test "records how this helper sends input beside what it offers" do
+      start_holder([])
+
+      start_session(hello(Protocol.actions(), ~w(foreground_hid ax)))
+      assert HelperActions.reading() == reading(Protocol.actions(), ~w(foreground_hid ax))
+
+      start_session(hello(Protocol.actions(), ~w(foreground_hid)))
+      assert HelperActions.reading() == reading(Protocol.actions(), ~w(foreground_hid))
+    end
+
     test "a helper that does not answer `hello` leaves the reading as it was" do
       holder = start_holder([])
-      :ok = HelperActions.record(@pixel ++ ~w(elements), holder)
+      :ok = HelperActions.record(reading(@pixel ++ ~w(elements)), holder)
 
       capture_log(fn -> start_session(nil) end)
 
@@ -216,7 +251,8 @@ defmodule FermixCore.ComputerUse.HelperActionsTest do
 
       await_boot_read()
 
-      assert HelperActions.offered(holder) == ~w(screenshot left_click elements)
+      assert HelperActions.reading(holder) ==
+               reading(~w(screenshot left_click elements), ~w(foreground_hid))
     end
 
     test "does not hold up boot: the holder answers while the helper has not", %{tasks: tasks} do
@@ -309,7 +345,7 @@ defmodule FermixCore.ComputerUse.HelperActionsTest do
         )
 
       assert_receive {:boot_read, task}
-      :ok = HelperActions.record(@pixel, holder)
+      :ok = HelperActions.record(reading(@pixel), holder)
 
       send(task, :answer)
       ref = Process.monitor(task)
@@ -340,7 +376,7 @@ defmodule FermixCore.ComputerUse.HelperActionsTest do
         )
 
       assert_receive {:boot_read, task}
-      capture_log(fn -> :ok = HelperActions.record([], holder) end)
+      capture_log(fn -> :ok = HelperActions.record(reading([]), holder) end)
 
       send(task, :answer)
       ref = Process.monitor(task)

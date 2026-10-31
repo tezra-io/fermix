@@ -2,7 +2,7 @@
 # Test-only fake compux sidecar for the fermix PortDriver adapter. Autoflush so a
 # one-line reply reaches the Port immediately.
 #
-# It speaks protocol 11 framing: every inbound line is a tagged `request` or
+# It speaks protocol 12 framing: every inbound line is a tagged `request` or
 # `control` frame carrying a `request_id`, and every reply echoes that id inside a
 # tagged `response` or `control_ack`. A reply that hands back coordinates mints an
 # `observation_id`; a pointer action that names none, or names one this fake has
@@ -25,6 +25,12 @@
 # one of those paths unproven. `idle_ms` answers `front_is_target` beside its
 # reading, which is what tells the person working in THIS window from the person
 # working elsewhere.
+#
+# Protocol 12 (M86 P2) names controls the same way on every platform: a
+# normalised `role` beside the platform's `native_role`, the `verbs` each control
+# has a route for (replacing `actions` and `settable`), `secure` on a field whose
+# value is never read, and the verbs on a reference (`focus`, `select`, `toggle`,
+# `expand`, `collapse`, `scroll_to`) addressed exactly as `press` is.
 #
 # Protocol 10 replaced `screenshot_after` with `check`, and a mutating success
 # answers exactly what its request asked for: `image` returns the view the action
@@ -80,7 +86,7 @@ use strict;
 use warnings;
 $| = 1;
 
-my $proto        = $ENV{FAKE_PROTO} // 11;
+my $proto        = $ENV{FAKE_PROTO} // 12;
 my $BOOT         = $ENV{FAKE_SIDECAR_GENERATION} // 'boot-fake';
 my $CONTROL_MODE = $ENV{FAKE_CONTROL_MODE} // 'ack';
 my $OBS_ERROR    = $ENV{FAKE_OBSERVATION_ERROR};
@@ -110,11 +116,11 @@ my $OBS_SEQ = 0;
 # so each needs an `observation_id` and refuses a `region`.
 my %ADDRESSED = map { $_ => 1 } qw(
     left_click right_click double_click mouse_move left_click_drag scroll inspect
-    press set_value
+    press set_value focus select toggle expand collapse scroll_to
 );
 
 # Mirrors the helper's element set: addressed by a control, never by a point.
-my %ELEMENT_ONLY = map { $_ => 1 } qw(press set_value);
+my %ELEMENT_ONLY = map { $_ => 1 } qw(press set_value focus select toggle expand collapse scroll_to);
 
 # The references this fake has minted, and what each control answers to. `e1`
 # presses, `e2` is a settable field, `e3` is the secure field whose read-back is
@@ -139,7 +145,7 @@ my $deferred;
 # model actions: only a mutating action carries a receipt.
 my %READ_ONLY = map { $_ => 1 } qw(
     screenshot mouse_move wait inspect wait_for_change elements windows
-    select_target release_target
+    select_target release_target wait_for
     hello probe idle_ms wait_for_idle hang defer no_receipt
 );
 
@@ -149,6 +155,7 @@ my %READ_ONLY = map { $_ => 1 } qw(
 my %TARGETABLE = map { $_ => 1 } qw(
     screenshot elements inspect left_click right_click double_click mouse_move
     left_click_drag scroll type key paste press set_value
+    focus select toggle expand collapse scroll_to wait_for
 );
 
 sub envelope {
@@ -295,22 +302,22 @@ sub element_after {
 # and one that offers no accessibility action at all.
 sub elements_body {
     return qq("elements":[)
-        . qq({"element_ref":"e1","role":"AXButton","label":"Save",)
-        . qq("enabled":true,"actions":["press"],"settable":false,)
+        . qq({"element_ref":"e1","role":"button","native_role":"AXButton","label":"Save",)
+        . qq("enabled":true,"verbs":["press","focus"],)
         . qq("bounds":{"x":10,"y":20,"w":60,"h":24},"path":["Document","Toolbar"],)
         . qq("x":40,"y":32},)
-        . qq({"element_ref":"e2","role":"AXTextField","label":"Search","value":"chess",)
-        . qq("enabled":true,"actions":[],"settable":true,)
+        . qq({"element_ref":"e2","role":"textfield","native_role":"AXTextField",)
+        . qq("label":"Search","value":"chess","enabled":true,"verbs":["set_value","type"],)
         . qq("bounds":{"x":10,"y":60,"w":200,"h":24},"path":["Toolbar"],"x":110,"y":72},)
-        . qq({"element_ref":"e3","role":"AXSecureTextField","label":"Password",)
-        . qq("enabled":true,"actions":[],"settable":true,)
+        . qq({"element_ref":"e3","role":"textfield","native_role":"AXSecureTextField",)
+        . qq("label":"Password","secure":true,"enabled":true,"verbs":["set_value"],)
         # A secure field's contents are never read, so it carries no `value` at all.
         . qq("bounds":{"x":10,"y":90,"w":200,"h":24},"path":["Toolbar"],"x":110,"y":102},)
-        . qq({"element_ref":"e4","role":"AXButton","label":"Delete",)
-        . qq("enabled":false,"actions":["press"],"settable":false,)
+        . qq({"element_ref":"e4","role":"button","native_role":"AXButton","label":"Delete",)
+        . qq("enabled":false,"verbs":["press"],)
         . qq("bounds":{"x":10,"y":120,"w":60,"h":24},"path":["Document"],"x":40,"y":132},)
-        . qq({"element_ref":"e5","role":"AXImage","label":"Board",)
-        . qq("enabled":true,"actions":[],"settable":false,)
+        . qq({"element_ref":"e5","role":"image","native_role":"AXImage","label":"Board",)
+        . qq("enabled":true,"verbs":[],)
         . qq("bounds":{"x":10,"y":150,"w":60,"h":24},"path":["Document"],"x":40,"y":162})
         . qq(],"truncated":"nodes");
 }
@@ -377,7 +384,7 @@ sub request {
     # side come to depend on fields the helper never sends.
     if ($action eq 'press') {
         print qq({"type":"response",) . envelope($id)
-            . qq(,"ok":true,) . element_after('AXButton', 'Save', 'true', undef) . qq(,)
+            . qq(,"ok":true,) . element_after('button', 'Save', 'true', undef) . qq(,)
             . ax_receipt('not_observed') . qq(}\n);
         return;
     }
@@ -392,8 +399,8 @@ sub request {
         # A secure control's value is never read back, so its `element_after`
         # carries none either — the same withholding, on both halves of the frame.
         my $after = $secure
-            ? element_after('AXTextField', 'Password', 'true', undef)
-            : element_after('AXTextField', 'Search', 'true', $value);
+            ? element_after('textfield', 'Password', 'true', undef)
+            : element_after('textfield', 'Search', 'true', $value);
         print qq({"type":"response",) . envelope($id)
             . qq(,"ok":true,"verified":$verified,$read_back$after,)
             . ax_receipt($effect) . qq(}\n);

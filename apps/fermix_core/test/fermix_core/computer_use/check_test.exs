@@ -14,6 +14,7 @@ defmodule FermixCore.ComputerUse.CheckTest do
   use ExUnit.Case, async: false
 
   alias FermixCore.ComputerUse.Config
+  alias FermixCore.ComputerUse.HelperActions
   alias FermixCore.ComputerUse.Session
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Timeouts
@@ -48,7 +49,8 @@ defmodule FermixCore.ComputerUse.CheckTest do
          timings: Keyword.get(opts, :timings, :default),
          element_after: Keyword.get(opts, :element_after),
          refusal: Keyword.get(opts, :refusal),
-         detail: Keyword.get(opts, :detail, "the helper refused it")
+         detail: Keyword.get(opts, :detail, "the helper refused it"),
+         actions: Keyword.get(opts, :actions, Compux.Protocol.actions())
        }}
     end
 
@@ -60,6 +62,10 @@ defmodule FermixCore.ComputerUse.CheckTest do
 
     @impl true
     def stop(_state), do: :ok
+
+    # A real helper's handshake lists what it offers (M86 F1).
+    defp respond(state, %{"action" => "hello"}),
+      do: {:ok, %{"actions" => state.actions, "capabilities" => %{}}}
 
     defp respond(_state, %{"action" => "idle_ms"}),
       do: {:ok, %{"ok" => true, "idle_ms" => 10_000}}
@@ -453,10 +459,11 @@ defmodule FermixCore.ComputerUse.CheckTest do
           check: %{"kind" => "semantic"},
           element_after: %{
             "present" => true,
-            "role" => "AXCheckBox",
+            "role" => "checkbox",
+            "native_role" => "AXCheckBox",
             "label" => "Remember me",
             "enabled" => true,
-            "value" => "1"
+            "checked" => true
           }
         )
 
@@ -464,7 +471,7 @@ defmodule FermixCore.ComputerUse.CheckTest do
       result = press(session)
 
       assert result.summary =~
-               ~s(The control now reads: AXCheckBox "Remember me", enabled, value "1".)
+               ~s(The control now reads: checkbox "Remember me", enabled, on.)
 
       refute result.summary =~ "\n", "the control's state is one line"
     end
@@ -650,6 +657,21 @@ defmodule FermixCore.ComputerUse.CheckTest do
       assert third.outcome == :performed
       # The look that opened the view plus three clicks: nothing was held back.
       assert Session.action_count(session) == 4
+    end
+
+    # Acting by name is a way out only where the helper lists controls (M86 P2): a
+    # Linux helper has no `elements`, so the sentence never sends the model there.
+    test "a helper that lists no controls is not sent to them" do
+      session = start_session(check: @no_change, actions: HelperActions.pixel())
+      in_the_crop(session)
+
+      click(session)
+      click(session, in: @check)
+      third = click(session, in: @check)
+
+      assert third.summary =~ "3 actions in a row have left this view unchanged"
+      assert third.summary =~ "tell the user"
+      refute third.summary =~ "elements"
     end
 
     test "a view that changed clears the count" do

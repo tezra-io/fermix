@@ -1443,17 +1443,21 @@ defaulted whenever its fact was not established.
 |---|---|---|---|
 | `action` | the model's action name | every call | which verb was asked for |
 | `cu_session` | `cua_…` string | the session was registry-registered | which session drove it |
-| `outcome` | `refused \| performed \| performed_unverified \| unknown \| read` | every call | what happened to the INPUT |
+| `outcome` | `refused \| performed \| performed_unverified \| unknown \| read \| already` | every call | what happened to the INPUT; `already` is a verb on a control that sent nothing because the control already held the asked state (M86 P2) |
 | `courtesy` | `off \| na \| unavailable \| proceeded \| deferred \| yielded \| paused` | every call | what the coexistence arbiter did about a person at the machine: nothing to do, not applicable, no idle signal, went ahead, waited for them, stepped aside, or the seat was already handed back |
 | `observation_age_ms` | non-negative integer | the action named an image | how stale that image was when it was sent |
 | `geometry_refusal` | `observation_required \| addressing_conflict \| unknown_observation \| expired_observation \| stale_observation \| point_outside_observation \| capture_geometry_mismatch` | an addressing or geometry gate refused | which one, countable without parsing a sentence |
 | `input_method` | `ax \| foreground_hid` | the helper reported a receipt | by which mechanism the input went out |
-| `effect` | `verified \| not_observed \| unknown` | the helper observed the result | what it observed, never inferred |
+| `effect` | `verified \| changed \| not_observed \| unknown` | the helper observed the result | what it observed, never inferred; `changed` is a protocol-12 verb's read-back showing what was asked |
 | `check_kind` | `image \| semantic \| none` | the action came back with a check | which evidence it carried |
 | `check_changed` | boolean | an image check could compare two hashes | whether that view differs from the one acted on |
 | `cu_input_ms` / `cu_settle_ms` / `cu_capture_ms` / `cu_encode_ms` | non-negative integers, dropped above the outer call deadline | the helper timed that phase | what each phase of the action cost |
 | `target_kind` | `window \| desktop` | a target is bound, which needs `[fermix_core.computer_use] background` on; absent on every row otherwise | what the action was pointed at |
 | `cu_mode` | `background \| foreground` | the action produced a result rather than a refusal; reads `foreground` until a window is bound, so `background` is the value that needs the flag | how the input reached the screen: inside a bound window through accessibility, or in front of the person |
+| `cu_verb` | `press \| set_value \| focus \| select \| toggle \| expand \| collapse \| scroll_to \| type` | the call named a verb on a control (`type` only with an `element_ref` or a mark, on a helper whose `input_methods` include `ax`), refused ones included | which semantic verb was sent (M86 P2) |
+| `cu_surfaces_count` | non-negative integer | the helper looked for open surfaces after input it dispatched | how many dialogs, alerts, menus and popups the action left open; never their names |
+| `cu_truncated` | `nodes \| depth \| time` | an `elements` or `wait_for` listing stopped before the tree did | why the walk was cut short |
+| `cu_ax_messages` | non-negative integer | the helper counted the walk's accessibility messages | what the walk cost |
 
 `control_origin` is the one addition to the **lifecycle** rows: on
 `session_pause` and `session_resume` it is `:command` when a chat `/pause` or

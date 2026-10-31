@@ -52,6 +52,15 @@ defmodule FermixCore.ComputerUse.ActionGatesTest do
     "key" => :mutating,
     "press" => :mutating,
     "set_value" => :mutating,
+    # M86 P2: the verbs on a control reach the screen as `press` does, by name.
+    # `wait_for` waits on the tree and sends nothing.
+    "focus" => :mutating,
+    "select" => :mutating,
+    "toggle" => :mutating,
+    "expand" => :mutating,
+    "collapse" => :mutating,
+    "scroll_to" => :mutating,
+    "wait_for" => :read_only,
     # M42 slice 5: binding a window and giving it back change what the helper is
     # POINTED at. Nothing is dispatched, no pointer moves and no key goes down,
     # so they are read-only in every sense the gates below key on — including the
@@ -83,7 +92,13 @@ defmodule FermixCore.ComputerUse.ActionGatesTest do
     "paste" => %{"text" => "hello"},
     "key" => %{"chord" => "cmd+s"},
     "press" => %{"observation_id" => @obs, "element_ref" => "e1"},
-    "set_value" => %{"observation_id" => @obs, "element_ref" => "e1", "value" => "hello"}
+    "set_value" => %{"observation_id" => @obs, "element_ref" => "e1", "value" => "hello"},
+    "focus" => %{"observation_id" => @obs, "element_ref" => "e1"},
+    "select" => %{"observation_id" => @obs, "element_ref" => "e1"},
+    "toggle" => %{"observation_id" => @obs, "element_ref" => "e1", "on" => true},
+    "expand" => %{"observation_id" => @obs, "element_ref" => "e1"},
+    "collapse" => %{"observation_id" => @obs, "element_ref" => "e1"},
+    "scroll_to" => %{"observation_id" => @obs, "element_ref" => "e1"}
   }
 
   # A driver that answers every action, so the gates under test are the only thing
