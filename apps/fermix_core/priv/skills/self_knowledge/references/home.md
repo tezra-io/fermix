@@ -276,8 +276,9 @@ it, never a second writer.
 - **The readiness report.** Before the move, `home.move.readiness
   {candidate_id}` (the apps' review step) answers each fact as `ok`, `warn` or
   `block`: the secrets this computer keeps in its keychain, which move with
-  the home (one the keychain will not give blocks, named by its id, never its
-  value); the server's Fermix (an older one blocks); free disk here (the
+  the home (one the keychain will not give blocks, named as its settings row
+  labels it, "your Anthropic key", one no row shows counted, never by its id
+  or its value); the server's Fermix (an older one blocks); free disk here (the
   capture needs about twice the home; short of it blocks, with the numbers);
   a home over one S3 upload (5 GiB) when the server keeps snapshots in S3
   (warns: it would never back up there); on a server of another system, the

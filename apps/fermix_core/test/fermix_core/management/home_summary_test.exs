@@ -597,6 +597,8 @@ defmodule FermixCore.Management.HomeSummaryTest do
       end
 
       assert Copy.internal_words("Shown with key id 0011.") == ["key id"]
+      # An S3 credential's name, as AWS and the snapshot settings call it.
+      assert Copy.internal_words("Set your Access key ID in Recovery snapshots.") == []
       assert Copy.internal_words("Fermix runs on your server.") == []
     end
   end

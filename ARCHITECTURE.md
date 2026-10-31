@@ -501,10 +501,12 @@ in `mobile/candidates.json` (`Home.Candidates`, at most four, 24 hours);
 `Management.HomeMove` answers `home.enroll.open`, `home.candidates.list`,
 `home.move.readiness`, `home.move.start` and the `enrollment`, `candidates`
 and `move` places of `home.status`. `Home.MoveReadiness` is the report the
-owner reviews (keychain secrets, engine versions, free disk, the S3 upload
+owner reviews (keychain secrets, a secret it cannot read named as its
+settings row labels it, `Management.Settings.secret_names/1`, the one reading
+of those labels, never by its id; engine versions, free disk, the S3 upload
 bound, the plugins the catalog has no build of for the server, what stops:
 those of iMessage, voice calls and meetings the home has turned on
-(`MoveReadiness.stays_here/2`, which the summary's `off` line reads too),
+(`MoveReadiness.stays_here/3`, which the summary's `off` line reads too),
 WhatsApp, and Slack without Socket Mode;
 coding agents asking for approval again, read from `config.toml`; the
 cutover gap) and

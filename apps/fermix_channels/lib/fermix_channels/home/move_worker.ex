@@ -95,6 +95,7 @@ defmodule FermixChannels.Home.MoveWorker do
   alias FermixCore.Home.Snapshot
   alias FermixCore.Home.Snapshot.Run
   alias FermixCore.Management.Lifecycle
+  alias FermixCore.Management.Settings
   alias FermixCore.Setup.ConfigStore
 
   @chunk_bytes 60 * 1_024
@@ -335,16 +336,25 @@ defmodule FermixChannels.Home.MoveWorker do
       {:ok, MoveSecrets.extra_files(values)}
     else
       {:error, {:unreadable, ids}} ->
+        Logger.warning("home move: the keychain gave nothing for #{Enum.join(ids, ", ")}")
+        secrets = MoveSecrets.described(ids, Settings.secret_names())
+        them = if match?([_one], ids), do: "it", else: "them"
+
         {:error,
          {:secrets,
-          "The keychain did not give Fermix #{Enum.join(ids, ", ")}, so nothing moved: " <>
-            "unlock it, or set them again or clear them in settings, then start the move again."}}
+          "The keychain did not give Fermix #{secrets}, so nothing moved: unlock it, or set " <>
+            "#{them} again or clear #{them} in settings, then start the move again."}}
 
       {:error, {:unknown, keys}} ->
+        Logger.warning("home move: no setting names the keychain items #{inspect(keys)}")
+
+        {setting, them} =
+          if match?([_one], keys), do: {"setting", "it"}, else: {"settings", "them"}
+
         {:error,
          {:secrets,
-          "Fermix cannot tell which keychain item #{Enum.join(keys, ", ")} names, so " <>
-            "nothing moved: set it again in settings, then start the move again."}}
+          "Fermix cannot tell which #{setting} #{MoveSecrets.unknown_items(keys)} to, so " <>
+            "nothing moved: set #{them} again in settings, then start the move again."}}
     end
   end
 

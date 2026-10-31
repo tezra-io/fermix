@@ -289,7 +289,11 @@ defmodule FermixChannels.Home.MoveTest do
     run_worker(source, ctx.candidate, connect: fn _route -> flunk("dialed") end)
 
     assert {:ok, %{"phase" => "undoing", "sentence" => sentence}} = Move.read_phase(source)
-    assert sentence =~ "anthropic_api_key"
+
+    assert sentence ==
+             "The keychain did not give Fermix your Anthropic key, so nothing moved: unlock " <>
+               "it, or set it again or clear it in settings, then start the move again."
+
     {:ok, %{"move_id" => move_id}} = Move.read_phase(source)
     refute File.exists?(Move.snapshot_path(source, move_id))
     assert {:ok, %{role: :primary}} = Role.configured(source)

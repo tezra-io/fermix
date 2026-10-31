@@ -93,6 +93,29 @@ defmodule FermixCore.Management.Settings do
   end
 
   @doc """
+  What an owner reads each secret as outside its row, by the id `secret.set`
+  takes: the label its row shows, with the section's title after it when the
+  label does not name it ("Anthropic key", "Bot token in Telegram"). The first
+  section that shows a secret names it; a secret no section shows has no name
+  here. `opts` as `get/2`'s.
+  """
+  @spec secret_names(keyword()) :: %{String.t() => String.t()}
+  def secret_names(opts \\ []) when is_list(opts) do
+    snapshot = snapshot(opts)
+
+    for %{id: id, title: title} <- sections(opts),
+        row <- family_rows(family(id, opts), id, snapshot, opts),
+        row["kind"] == "secret",
+        reduce: %{} do
+      names -> Map.put_new(names, row["key"], secret_name(row["label"], title))
+    end
+  end
+
+  defp secret_name(label, title) do
+    if String.contains?(label, title), do: label, else: "#{label} in #{title}"
+  end
+
+  @doc """
   Applies changed keys to one section.
 
   Every value is checked against the row it names before anything is written, so

@@ -78,14 +78,14 @@ defmodule FermixCore.Management.HomeMoveReviewTest do
        ctx do
     forget_secret(ctx)
     assert {:error, :unavailable, %{"sentence" => sentence}} = start(ctx, ctx.seams)
-    assert sentence =~ "The keychain did not give Fermix anthropic_api_key"
+    assert sentence =~ "The keychain did not give Fermix your Anthropic key"
 
     restore_secret(ctx)
     assert {:ok, %{"ready" => true}} = review(ctx, ctx.seams)
     forget_secret(ctx)
     later = Keyword.put(ctx.seams, :now, DateTime.add(@now, 16 * 60, :second))
     assert {:error, :unavailable, %{"sentence" => sentence}} = start(ctx, later)
-    assert sentence =~ "anthropic_api_key"
+    assert sentence =~ "your Anthropic key"
 
     restore_secret(ctx)
     {:ok, other} = Candidates.add(ctx.home, %{candidate_attrs() | name: "south-box"}, @now)
@@ -95,7 +95,7 @@ defmodule FermixCore.Management.HomeMoveReviewTest do
 
     forget_secret(ctx)
     assert {:error, :unavailable, %{"sentence" => sentence}} = start(ctx, ctx.seams)
-    assert sentence =~ "anthropic_api_key"
+    assert sentence =~ "your Anthropic key"
 
     refute_received :restarted
     refute Move.pending?(ctx.home)

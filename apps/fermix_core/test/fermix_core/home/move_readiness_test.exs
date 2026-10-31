@@ -188,7 +188,10 @@ defmodule FermixCore.Home.MoveReadinessTest do
              {"disk", disk}
            ] = blocks
 
-    assert secrets =~ "anthropic_api_key"
+    assert secrets ==
+             "The keychain did not give Fermix your Anthropic key: unlock it, or set it " <>
+               "again or clear it in settings, then check again."
+
     assert version =~ "north-box runs an older Fermix"
     assert disk =~ "make room first"
   end
@@ -233,6 +236,39 @@ defmodule FermixCore.Home.MoveReadinessTest do
              "ready" => false,
              "items" => [%{"id" => "disk", "status" => "block", "sentence" => "No room."}]
            }
+  end
+
+  # A secret no settings row shows is counted, never named by its id, and a
+  # keychain item of no setting Fermix knows is said without its key.
+  test "a secret with no settings label is counted, and an unknown item is not named", ctx do
+    File.write!(Path.join(ctx.home, "config.toml"), """
+    [fermix_core]
+    profile = "#{ctx.profile}"
+
+    [fermix_core.providers.anthropic]
+    api_key = "@keyring"
+
+    [fermix_core.providers.openai]
+    api_key = "@keyring"
+    """)
+
+    unlabelled = Keyword.put(opts(ctx), :secret_names, %{"anthropic_api_key" => "Anthropic key"})
+    %{items: items} = MoveReadiness.report(ctx.home, ctx.candidate, unlabelled)
+
+    assert item_in(items, "keychain_secrets").sentence ==
+             "The keychain did not give Fermix your Anthropic key and 1 other secret: unlock " <>
+               "it, or set them again or clear them in settings, then check again."
+
+    File.write!(Path.join(ctx.home, "config.toml"), """
+    [invented.section]
+    token = "@keyring"
+    """)
+
+    %{items: items} = MoveReadiness.report(ctx.home, ctx.candidate, opts(ctx))
+
+    assert item_in(items, "keychain_secrets").sentence ==
+             "Fermix cannot tell which setting a keychain item belongs to: set it again in " <>
+               "settings, then check again."
   end
 
   defp opts(ctx),

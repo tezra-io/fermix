@@ -9,7 +9,9 @@ defmodule FermixCore.Home.MoveReadiness do
     * `keychain_secrets`: the secrets this computer keeps in its keychain
       move with the home, into the server's secret files
       (`FermixCore.Home.MoveSecrets`); one Fermix cannot read, or a
-      reference it cannot name, blocks, named by its id, never its value.
+      reference it cannot name, blocks, named as its settings row labels it
+      (`Management.Settings.secret_names/1`, `:secret_names` in a test), one
+      no row shows counted, and never by its id (logged) or its value.
       Checking reads each value, which opens the keychain (and can raise its
       prompt), and the sentence says so; a start soon after a ready review
       takes the review rather than reading again (`Move.review/3`), so a move
@@ -57,6 +59,7 @@ defmodule FermixCore.Home.MoveReadiness do
   alias FermixCore.Home.Snapshot.S3
   alias FermixCore.Home.UnreadableFiles
   alias FermixCore.Management.Copy
+  alias FermixCore.Management.Settings
   alias FermixCore.Plugins.Dist.Index
 
   require Logger
@@ -170,24 +173,32 @@ defmodule FermixCore.Home.MoveReadiness do
       item("keychain_secrets", :ok, carried_sentence(length(values)))
     else
       {:error, {:unreadable, ids}} ->
+        Logger.warning("move readiness: the keychain gave nothing for #{Enum.join(ids, ", ")}")
+        names = Keyword.get_lazy(opts, :secret_names, &Settings.secret_names/0)
+
         item(
           "keychain_secrets",
           :block,
-          "The keychain did not give Fermix #{Enum.join(ids, ", ")}: unlock it, or set " <>
-            "#{them(ids)} again or clear #{them(ids)} in settings, then check again."
+          "The keychain did not give Fermix #{MoveSecrets.described(ids, names)}: unlock it, " <>
+            "or set #{them(ids)} again or clear #{them(ids)} in settings, then check again."
         )
 
       {:error, {:unknown, keys}} ->
+        Logger.warning("move readiness: no setting names the keychain items #{inspect(keys)}")
+
         item(
           "keychain_secrets",
           :block,
-          "Fermix cannot tell which keychain item #{Enum.join(keys, ", ")} names: set " <>
-            "#{them(keys)} again in settings, then check again."
+          "Fermix cannot tell which #{setting(keys)} #{MoveSecrets.unknown_items(keys)} to: " <>
+            "set #{them(keys)} again in settings, then check again."
         )
     end
   end
 
   defp keychain({:error, sentence}, _opts), do: item("keychain_secrets", :block, sentence)
+
+  defp setting([_one]), do: "setting"
+  defp setting(_many), do: "settings"
 
   defp carried_sentence(0), do: "No secret is kept in this computer's keychain."
 

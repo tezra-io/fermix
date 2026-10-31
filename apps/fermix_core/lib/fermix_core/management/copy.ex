@@ -47,6 +47,7 @@ defmodule FermixCore.Management.Copy do
   """
 
   alias FermixCore.Providers.Descriptor
+  alias FermixCore.Setup.SecretPaths
 
   @type kind :: :prose | :name
   @type violation :: {atom(), String.t()}
@@ -54,12 +55,14 @@ defmodule FermixCore.Management.Copy do
   @em_dashes ["—", "–"]
   @backticked ~r/`[^`]*`/
   @backtick_or_span ~r/`[^`]*`|`/
+  @cue_secret_id ~r/\bcue_source:[A-Za-z0-9_-]+:[a-z_]+/
   @mix_task ~r/\bmix\s+[a-z][a-z0-9_]*\.[a-z]/
   @version ~r/\bv?\d+\.\d+(?:\.\d+)?\b/
   @wire_token ~r/\b(?:[a-z][a-z0-9]*(?:_[a-z0-9]+)+|[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)\b/
   @capitalised ~r/\b[A-Z][a-z]+\b/
-  # The engine's own words for the move, which no summary word may carry.
-  @internal_words ~r/\b(?:epochs?|primar(?:y|ies)|candidates?|relays?|rails?|phases?|ledgers?|key ids?)\b/i
+  # The engine's own words for the move, which no summary word may carry. A
+  # key id is the recovery key's; an S3 "access key ID" is AWS's name.
+  @internal_words ~r/\b(?:epochs?|primar(?:y|ies)|candidates?|relays?|rails?|phases?|ledgers?|(?<!access )key ids?)\b/i
   @cities %{"fsn1" => "Falkenstein", "nbg1" => "Nuremberg", "hel1" => "Helsinki"}
   # What runs only on the computer a move leaves, in the order it is named.
   @stays_here [imessage: "iMessage", voice: "voice calls", meetings: "meetings"]
@@ -239,15 +242,31 @@ defmodule FermixCore.Management.Copy do
 
   @doc """
   What keeps `text` from being a summary word beside `violations/3`: each
-  internal word (`internal_words/1`) and each backticked span or stray
-  backtick. A summary sentence is plain words an owner reads, so it carries no
-  literal to type and no code, which `violations/3` lets stand in backticks.
+  internal word (`internal_words/1`), each backticked span or stray backtick,
+  and each secret's id (the one `secret.set` takes: `anthropic_api_key`,
+  `cue_source:<ref>:<field>`). A summary sentence is plain words an owner
+  reads, so it carries no literal to type and no code, which `violations/3`
+  lets stand in backticks, and names a secret by what the settings call it
+  (`Management.Settings.secret_names/1`), which `violations/3` lets a call
+  site declare as data.
   """
   @spec summary_violations(String.t()) :: [violation()]
   def summary_violations(text) when is_binary(text) do
     Enum.map(internal_words(text), &{:internal_word, &1}) ++
-      (@backtick_or_span |> Regex.scan(text) |> Enum.map(&{:backtick, hd(&1)}))
+      (@backtick_or_span |> Regex.scan(text) |> Enum.map(&{:backtick, hd(&1)})) ++
+      secret_ids(text)
   end
+
+  defp secret_ids(text) do
+    registry =
+      for %{key: key} <- SecretPaths.all(), id = Atom.to_string(key), word?(text, id), do: id
+
+    cues = @cue_secret_id |> Regex.scan(text) |> Enum.map(&hd/1)
+
+    Enum.map(registry ++ cues, &{:secret_id, &1})
+  end
+
+  defp word?(text, word), do: Regex.match?(~r/\b#{Regex.escape(word)}\b/, text)
 
   @doc "Every key `summary_sentence/2` takes, so the copy gate walks them all."
   @spec summary_keys() :: [atom()]

@@ -1780,6 +1780,27 @@ defmodule FermixCore.Management.SettingsTest do
   # fingerprint the login keyring stays locked, and before this section the file
   # store could be chosen only from a terminal, so a key saved from the app met
   # an unlock prompt for a password its owner did not know.
+  # What an owner reads a secret as, outside its row (the move's review and
+  # the Always On summary): the label its row shows, with the section's title
+  # where the label alone does not say which.
+  describe "the names of secrets" do
+    test "each is its row's label, with its section's title when the label does not name it" do
+      names = Settings.secret_names()
+
+      assert names["anthropic_api_key"] == "Anthropic key"
+      assert names["telegram_bot_token"] == "Bot token in Telegram"
+      assert names["snapshot_s3_secret_access_key"] == "Secret access key in Recovery snapshots"
+
+      # The first section that shows a secret names it.
+      assert names["openai_api_key"] == "OpenAI key"
+
+      for {id, name} <- names do
+        assert Copy.violations(name, :name) == [], "#{id}: #{name}"
+        assert Copy.summary_violations(name) == [], "#{id}: #{name}"
+      end
+    end
+  end
+
   describe "the secrets section" do
     # The suite's compiled telegram token is plaintext, and every save secures a
     # plaintext value into the store in force, the switching save included. The

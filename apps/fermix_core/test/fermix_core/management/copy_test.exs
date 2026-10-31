@@ -702,7 +702,7 @@ defmodule FermixCore.Management.CopyTest do
         # The summary shows a block as its sentence and each warning in
         # Details, so each item is a summary word too.
         for item <- report.items do
-          assert_clean(item.sentence, :prose, ["anthropic_api_key", "invented-notes"], item.id)
+          assert_clean(item.sentence, :prose, ["invented-notes"], item.id)
           assert Copy.summary_violations(item.sentence) == [], "#{item.id}: #{item.sentence}"
           refute_command(item.sentence, item.id)
         end
@@ -874,6 +874,19 @@ defmodule FermixCore.Management.CopyTest do
              ]
 
       assert Copy.summary_violations("Fermix runs on your server.") == []
+    end
+
+    # A secret is named by what the settings call it, never by the id
+    # `secret.set` takes, which `violations/3` lets a call site declare.
+    test "the summary's own rule catches a secret's id" do
+      assert Copy.summary_violations("The keychain did not give Fermix anthropic_api_key.") ==
+               [{:secret_id, "anthropic_api_key"}]
+
+      assert Copy.summary_violations("Set cue_source:invented-feed:key again.") ==
+               [{:secret_id, "cue_source:invented-feed:key"}]
+
+      assert Copy.summary_violations("The keychain did not give Fermix your Anthropic key.") ==
+               []
     end
 
     # The summary prints a create's or a replace's failure as the provisioner

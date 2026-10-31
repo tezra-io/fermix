@@ -14,7 +14,8 @@ defmodule FermixCore.Home.MoveSecrets do
   the candidate's one-time recipient, and are never written to the source's
   disk, a log, a status file or the phase file. A reference whose value
   cannot be read stops the move before anything is captured, and the move's
-  readiness report names it (never its value) as a block.
+  readiness report names it as a block, as its settings row labels it
+  (`described/2`), never by its id or its value.
 
   **On the candidate.** The restored home holds them in its file store, and
   each `@keyring` reference whose file arrived becomes `@file`
@@ -96,6 +97,38 @@ defmodule FermixCore.Home.MoveSecrets do
       _some -> {:error, {:unreadable, Enum.map(unreadable, fn {ref, _error} -> ref.id end)}}
     end
   end
+
+  @doc """
+  The secrets `ids` are, as an owner reads them: each by what the settings
+  call it (`names`, `Management.Settings.secret_names/1`), "your Anthropic
+  key", then the ones no setting shows, counted ("1 other secret"), never by
+  their ids.
+  """
+  @spec described([String.t(), ...], %{String.t() => String.t()}) :: String.t()
+  def described([_ | _] = ids, names) when is_map(names) do
+    {named, unnamed} = Enum.split_with(ids, &Map.has_key?(names, &1))
+    words = Enum.map(named, &"your #{Map.fetch!(names, &1)}") ++ counted(named, length(unnamed))
+
+    case words do
+      [one] -> one
+      _many -> Enum.join(Enum.drop(words, -1), ", ") <> " and " <> List.last(words)
+    end
+  end
+
+  defp counted(_named, 0), do: []
+  defp counted([], 1), do: ["1 secret"]
+  defp counted([], count), do: ["#{count} secrets"]
+  defp counted(_named, 1), do: ["1 other secret"]
+  defp counted(_named, count), do: ["#{count} other secrets"]
+
+  @doc """
+  The keychain items no setting Fermix knows names (`references/1`'s
+  `{:unknown, keys}`), as an owner reads them: "a keychain item belongs",
+  "2 keychain items belong", never by their keys.
+  """
+  @spec unknown_items([String.t(), ...]) :: String.t()
+  def unknown_items([_one]), do: "a keychain item belongs"
+  def unknown_items([_ | _] = keys), do: "#{length(keys)} keychain items belong"
 
   @doc "The values as files of the file secret store, for `Snapshot.write/4`'s `:extra_files`."
   @spec extra_files([{ref(), String.t()}]) :: [{String.t(), binary()}]
