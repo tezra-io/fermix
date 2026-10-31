@@ -161,7 +161,7 @@
 (* reapReturn is where the Scheduler goes once its reaping is done: "arm"  *)
 (* after init, "scan" in the 60 s tick, "idle" after a DOWN.               *)
 (***************************************************************************)
-\* SOURCE: apps/fermix_core/lib/fermix_core/jobs/scheduler.ex @ 57f42f75c993
+\* SOURCE: apps/fermix_core/lib/fermix_core/jobs/scheduler.ex @ 20d10b3192c1
 \* SOURCE: apps/fermix_core/lib/fermix_core/jobs/runner.ex @ d209d9e47e8e
 \* SOURCE: apps/fermix_core/lib/fermix_core/jobs/runner_supervisor.ex @ 6a21dfe6cfad
 \* SOURCE: apps/fermix_core/lib/fermix_core/jobs/delivery.ex @ 4eb42c517b57
