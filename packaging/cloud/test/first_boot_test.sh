@@ -6,9 +6,10 @@
 # first boot, an Ubuntu host with swap of its own, the nightly update's cases,
 # and the distribution's Chromium installed for real and started headless as
 # the engine account.
-# Needs shellcheck, Docker, the debian:trixie-slim image, and network inside
-# the containers (apt-get installs nftables and shellcheck, and Chromium in
-# its scenario).
+# Needs shellcheck, Docker on Linux 6.2 or later with Landlock enabled (the
+# chromium scenario asks the kernel for its Landlock ABI for real), the
+# debian:trixie-slim image, and network inside the containers (apt-get
+# installs nftables and shellcheck, and Chromium in its scenario).
 # Not wired into CI; run it by hand:
 #
 #   sh packaging/cloud/test/first_boot_test.sh

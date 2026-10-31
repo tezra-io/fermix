@@ -3,11 +3,13 @@
 # first_boot_test.sh, with packaging/cloud mounted read-only at /cloud, the
 # package's systemd units at /linux-systemd, /run on a tmpfs and NET_ADMIN, so
 # nft loads the real ruleset. useradd, runuser, nft and apt-config are real;
-# systemctl, loginctl, curl, apt-get, dpkg-query, swapon, fallocate, mkswap and
-# fermix are the stand-ins in stubs/ (in the chromium scenario apt-get and
-# dpkg-query are the real ones). One scenario per container:
+# systemctl, loginctl, curl, apt-get, dpkg-query, perl, swapon, fallocate,
+# mkswap and fermix are the stand-ins in stubs/ (in the chromium scenario
+# apt-get, dpkg-query and perl are the real ones, so first boot asks the
+# kernel Docker runs on for its Landlock ABI). One scenario per container:
 #
-#   existing-host  refusals, then the code typed at a terminal, the wait for
+#   existing-host  refusals (a kernel below Landlock ABI 3 among them), then
+#                  the code typed at a terminal, the wait for
 #                  the primary, then a re-run; then the code in the
 #                  environment with a bucket
 #   restore        --restore: no code, no enrollment, the steps printed, a
@@ -17,7 +19,9 @@
 #   ubuntu         no Chromium package, and the sentence that says to install
 #                  one; swap of its own, which it keeps
 #   updates        the nightly update: no new release, a new one, a failed
-#                  installer, a reboot asked for, a failed restart, no home
+#                  installer, a reboot asked for, a move under way (received,
+#                  then sent) and the next night's restart, a failed restart,
+#                  no home
 #   chromium       the distribution's Chromium installed for real and started
 #                  headless as the engine account, the way the engine's
 #                  launcher starts it, its own sandbox on
@@ -88,7 +92,7 @@ setup_tools() {
   apt-get -qq -y install --no-install-recommends nftables shellcheck >/dev/null 2>&1
   install_stubs
   install -m 0755 /cloud/test/stubs/apt-get /usr/local/sbin/apt-get
-  install -m 0755 /cloud/test/stubs/dpkg-query /usr/local/bin/dpkg-query
+  for stub in dpkg-query perl; do install -m 0755 "/cloud/test/stubs/$stub" "/usr/local/bin/$stub"; done
 }
 
 # Runs first-boot.sh with no terminal; $OUT gets stdout and stderr, $STATUS
@@ -137,10 +141,26 @@ stopped_with() {
   fi
 }
 
+# Runs first boot on a host whose /etc/os-release names ID $1, VERSION_ID $2
+# and PRETTY_NAME $3, putting the container's own back after.
+as_release() {
+  sh -c "cp /etc/os-release /tmp/os-release && printf 'ID=$1\nVERSION_ID=\"$2\"\nPRETTY_NAME=\"$3\"\n' >/etc/os-release && { FERMIX_ENROLL_CODE='$CODE' sh $FIRST_BOOT; status=\$?; cp /tmp/os-release /etc/os-release; exit \$status; }"
+}
+
 check_refusals() {
-  refuses "a host that is not Debian 12, Debian 13 or Ubuntu 24.04" \
-    "This host runs Invented Linux 7. Fermix Always On supports Debian 12, Debian 13 and Ubuntu 24.04." \
-    sh -c "cp /etc/os-release /tmp/os-release && printf 'ID=invented\nVERSION_ID=\"7\"\nPRETTY_NAME=\"Invented Linux 7\"\n' >/etc/os-release && { FERMIX_ENROLL_CODE='$CODE' sh $FIRST_BOOT; status=\$?; cp /tmp/os-release /etc/os-release; exit \$status; }"
+  refuses "a host that is not Debian 13 or Ubuntu 24.04" \
+    "This host runs Invented Linux 7. Fermix Always On supports Debian 13 and Ubuntu 24.04." \
+    as_release invented 7 "Invented Linux 7"
+  refuses "a Debian 12 host, whose kernel has no Landlock ABI 3" \
+    "This host runs Debian GNU/Linux 12 (bookworm). Fermix Always On supports Debian 13 and Ubuntu 24.04." \
+    as_release debian 12 "Debian GNU/Linux 12 (bookworm)"
+  for abi in 2 0; do
+    printf '%s\n' "$abi" >"$FIXTURES/landlock-abi"
+    refuses "a kernel that gives Landlock ABI $abi, before anything is installed" \
+      "This host's kernel gives Landlock ABI $abi (0 is none) and Fermix's sandbox needs ABI 3, so Fermix would run no command here: Fermix Always On needs Linux 6.2 or later with Landlock enabled, as Debian 13 and Ubuntu 24.04 have by default." \
+      env FERMIX_ENROLL_CODE="$CODE" sh "$FIRST_BOOT"
+  done
+  rm -f "$FIXTURES/landlock-abi"
   printf '#!/bin/sh\necho riscv64\n' >/usr/local/bin/uname
   chmod 0755 /usr/local/bin/uname
   refuses "an architecture other than arm64 and x86_64" \
@@ -554,22 +574,27 @@ night_calls() {
 }
 
 # The nightly update, run by hand as fermix-update.service runs it, one night
-# per case, on a host first boot enrolled. Releases are invented versions.
+# per case, on a host first boot enrolled. Releases are invented versions; the
+# stand-in fermix runs the release its last start installed.
 updates() {
   run_first_boot env FERMIX_ENROLL_CODE="$CODE" sh "$FIRST_BOOT"
   check "[ $STATUS -eq 0 ]" "a host enrolls (exit $STATUS)"
   [ "$STATUS" -eq 0 ] || sed 's/^/    /' "$OUT"
   check_updates
   update=/usr/local/sbin/fermix-update
+  status='fermix service status --json [as fermix]'
+  home='fermix home status --json [as fermix]'
+  restart='fermix restart [as fermix]'
 
   run_apart "$update"
-  check "[ $STATUS -eq 0 ] && night_calls" "a night with no new release runs the installer and nothing else"
-  check "contains $OUT '==> Fermix 1.2.3 is the newest release, so the engine keeps running'" "and says so"
+  check "[ $STATUS -eq 0 ] && night_calls '$status'" \
+    "a night with no new release runs the installer, asks whether a restart is due, and does nothing else"
+  check "contains $OUT '==> No restart is due and no update asks for a reboot'" "and says so"
 
   printf '1.2.4\n' >"$FIXTURES/release"
   run_apart "$update"
-  check "[ $STATUS -eq 0 ] && night_calls 'fermix restart [as fermix]'" \
-    "a new release restarts the engine as its own account"
+  check "[ $STATUS -eq 0 ] && night_calls '$status' '$home' '$restart'" \
+    "a new release, with no move under way, restarts the engine as its own account"
   check "contains $OUT '==> Fermix went from 1.2.3 to 1.2.4'" "and names both versions"
   for name in HOME XDG_RUNTIME_DIR FERMIX_HOME; do
     check "grep -qx $name $LOG/env-restart" "fermix restart has $name"
@@ -585,22 +610,45 @@ updates() {
 
   rm -f "$FIXTURES/installer-fails"
   run_apart "$update"
-  check "[ $STATUS -eq 0 ] && night_calls 'fermix restart [as fermix]' 'systemctl reboot'" \
+  check "[ $STATUS -eq 0 ] && night_calls '$status' '$home' '$restart' 'systemctl reboot'" \
     "the next night updates, restarts the engine, then reboots as asked"
 
   printf '1.2.6\n' >"$FIXTURES/release"
+  printf 'receiving|Receiving the home from Invented Mac.\n' >"$FIXTURES/phases"
+  run_apart "$update"
+  check "[ $STATUS -eq 0 ] && night_calls '$status' '$home'" \
+    "while this candidate receives a move, a new release restarts nothing and reboots nothing"
+  check "contains $OUT '==> A move is under way on this server (receiving), so the restart and the reboot wait for the next night'" \
+    "and says so in one line"
+
+  rm -f "$FIXTURES/phases"
+  run_apart "$update"
+  check "[ $STATUS -eq 0 ] && night_calls '$status' '$home' '$restart' 'systemctl reboot'" \
+    "the next night, the move done and no newer release, the engine restarts on 1.2.6 and the server reboots"
+  check "contains $OUT '==> Fermix 1.2.6 is the newest release'" "with nothing new to install"
+
+  printf '1.2.7\n' >"$FIXTURES/release"
+  printf 'streaming|Moving to the invented server.\n' >"$FIXTURES/phases"
+  run_apart "$update"
+  check "[ $STATUS -eq 0 ] && night_calls '$status' '$home'" \
+    "while this server sends its home in a move, nothing restarts either"
+  check "contains $OUT '==> A move is under way on this server (streaming), so the restart and the reboot wait for the next night'" \
+    "and says so in one line"
+
+  rm -f "$FIXTURES/phases"
   : >"$FIXTURES/restart-fails"
   run_apart "$update"
   ended_with "Fermix is updated, but fermix restart stopped; its message above says why." \
     "a restart that fails ends the night with its sentence"
-  check "night_calls 'fermix restart [as fermix]'" "and does not reboot"
+  check "night_calls '$status' '$home' '$restart'" "and does not reboot"
 
   rm -f "$FIXTURES/restart-fails" /run/reboot-required
   rm -rf /home/fermix/.fermix
-  printf '1.2.7\n' >"$FIXTURES/release"
+  printf '1.2.8\n' >"$FIXTURES/release"
   run_apart "$update"
-  check "[ $STATUS -eq 0 ] && night_calls" "a server with no home yet (a restore host) updates and restarts nothing"
-  check "contains $OUT '==> Fermix has no home here yet, so no engine runs to restart'" "and says so"
+  check "[ $STATUS -eq 0 ] && night_calls '$status'" \
+    "a server with no home yet (a restore host) updates and starts no engine"
+  check "contains $OUT '==> No restart is due and no update asks for a reboot'" "and says so"
   check "[ -z \"\$(find /run -maxdepth 1 -name 'fermix-update.*')\" ]" "no night leaves a work directory behind"
 }
 

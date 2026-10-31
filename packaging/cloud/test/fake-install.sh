@@ -15,6 +15,8 @@ release=1.2.3
 if [ -f /etc/fermix-test/release ]; then release=$(cat /etc/fermix-test/release); fi
 install -m 0755 /cloud/test/stubs/fermix /usr/bin/fermix
 install -D -m 0644 /linux-systemd/fermix.service /usr/lib/systemd/user/fermix.service
-install -d /var/lib/fermix-test
+# Shared with the stand-in fermix, which runs as the engine account.
+install -d -m 1777 /var/lib/fermix-test
 printf '%s\n' "$release" >/var/lib/fermix-test/installed-version
+chmod 0644 /var/lib/fermix-test/installed-version
 echo "==> (test) installed the stand-in fermix"

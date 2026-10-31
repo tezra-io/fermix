@@ -125,10 +125,14 @@ it, never a second writer.
 
 - Always On puts the primary on a Linux server the owner controls, so Fermix
   keeps working with the Mac closed. The server enrolls with an enrollment
-  code the primary opens (one use, 30 minutes), on an existing Debian 12,
-  Debian 13 or Ubuntu 24.04 host (arm64 or x86_64):
+  code the primary opens (one use, 30 minutes), on an existing Debian 13 or
+  Ubuntu 24.04 host (arm64 or x86_64):
   `curl -fsSL https://fermix.ai/always-on | sudo sh`, which asks for the code
-  without echoing it. After `sh -s --`:
+  without echoing it. The host's kernel must give Landlock ABI 3 (Linux 6.2
+  or later with Landlock enabled, as both have by default), or every command
+  Fermix runs there would be refused: the first boot checks it before it
+  installs anything and names what is missing. Debian 12 (Linux 6.1) is
+  refused. After `sh -s --`:
   `--snapshot-bucket NAME --snapshot-region REGION`, `--restore`.
 - The first boot, as root: writes the code to `/run/fermix/enroll.code`
   (memory only, the engine account's), blocks the instance metadata service
@@ -150,8 +154,12 @@ it, never a second writer.
   `/etc/apt/apt.conf.d/21fermix-always-on`). Fermix: the package comes from
   release files, not an apt source, so `fermix-update.timer` (root) runs
   `/usr/local/sbin/fermix-update` every night at 04:00 UTC: the installer
-  again, `fermix restart` as `fermix` only when the installed version changed,
-  then a reboot when `/run/reboot-required` exists. A night that fails stops
+  again, `fermix restart` as `fermix` when `fermix service status` says the
+  running engine is behind the installed one (so a restart a night skipped is
+  done the next night), then a reboot when `/run/reboot-required` exists.
+  Neither happens while a move is under way on the server, sending its home
+  or receiving one; the night says so and the next night does both. A night
+  that fails stops
   before the restart and the reboot, leaves the running engine as it was and
   says why in `journalctl -u fermix-update`; the next night tries again. So a
   server's engine can be up to a day behind the Mac's.

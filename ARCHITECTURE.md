@@ -996,7 +996,10 @@ compiled-in build identity, never from runtime detection.
 owner's primary (M75 step 6). It runs once as root, from cloud-init user data
 (the code in `FERMIX_ENROLL_CODE`) or as
 `curl -fsSL https://fermix.ai/always-on | sudo sh` (the code read from the
-terminal without echo), and in order: writes the enrollment code to
+terminal without echo). It refuses, before it installs anything, any host but
+Debian 13 or Ubuntu 24.04 and any kernel below Landlock ABI 3 (asked through
+`perl`'s `syscall`), where the engine would refuse every command; then in
+order: writes the enrollment code to
 `/run/fermix/enroll.code` (tmpfs, 0600); installs an nftables table that drops
 every packet to the metadata addresses (`169.254.169.254`,
 `100.100.100.200`, `fd00:ec2::254`, `fd20:ce::254`) from every uid but 0,
@@ -1009,8 +1012,10 @@ host with no swap a 2 GB `/swapfile`; installs the Linux package through
 `https://fermix.ai/install --no-setup`; turns on Debian's daily
 unattended-upgrades and installs `fermix-update.timer`, a root timer that at
 04:00 UTC runs the installer again, `fermix restart` as the engine account
-when the package's version changed, and `systemctl reboot` when
-`/run/reboot-required` exists, stopping before both when a step fails; creates
+when `fermix service status` says the running engine is behind the installed
+one, and `systemctl reboot` when `/run/reboot-required` exists, neither while
+`fermix home status` shows a move under way, stopping before both when a step
+fails; creates
 the engine account `fermix` (home `/home/fermix`, no login, lingering); runs
 `fermix home enroll` and `fermix service install` as `fermix`; installs the
 distribution's Chromium on Debian (Ubuntu's is a snap: it says to install a

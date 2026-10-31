@@ -134,8 +134,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the newest one. The setup page's Always On tab says where Fermix runs, and
   `fermix home` does all of this at a terminal, with `export`, `import` and
   `mark-moved` for moving a home by hand.
-- **A server gets ready for Always On from one command.** On a Debian 12,
-  Debian 13 or Ubuntu 24.04 server (arm64 or x86_64),
+- **A server gets ready for Always On from one command.** On a Debian 13 or
+  Ubuntu 24.04 server (arm64 or x86_64) running Linux 6.2 or later with
+  Landlock enabled, as both do by default,
   `curl -fsSL https://fermix.ai/always-on | sudo sh` asks for the enrollment
   code without showing it, or cloud-init user data passes it in
   `FERMIX_ENROLL_CODE`. It blocks the cloud's instance metadata addresses
@@ -147,8 +148,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   server. The server then keeps itself up to date: Debian's security updates
   install every day, and every night at 04:00 UTC Fermix's installer runs
   again, restarts Fermix only when there is a new release, and reboots when an
-  update asks for it; a night that fails leaves Fermix running and says why in
-  the journal. `--snapshot-bucket` and `--snapshot-region` name where the
+  update asks for it, waiting a night while a move is under way; a night that
+  fails leaves Fermix running and says why in the journal. A server whose
+  kernel cannot sandbox commands is refused before anything is installed. `--snapshot-bucket` and `--snapshot-region` name where the
   server will keep its snapshots, and `--restore` prepares a server to restore
   your home from a snapshot instead.
 

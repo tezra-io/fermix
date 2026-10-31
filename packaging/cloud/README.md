@@ -3,7 +3,9 @@
 A server that becomes the owner's Fermix primary (M75 step 6, D21). One
 script, two modes:
 
-- **Any Debian 12, Debian 13 or Ubuntu 24.04 host** (arm64, x86_64):
+- **Any Debian 13 or Ubuntu 24.04 host** (arm64, x86_64) whose kernel gives
+  Landlock ABI 3 or later (Linux 6.2 or later with Landlock enabled, as both
+  have by default; Debian 12's 6.1 gives ABI 2, so Debian 12 is refused):
   `curl -fsSL https://fermix.ai/always-on | sudo sh`, which serves
   `first-boot.sh` byte for byte and asks for the code without echo. Cloud-init
   user data can run it with the code in `FERMIX_ENROLL_CODE` instead.
@@ -19,7 +21,18 @@ script, two modes:
 
 ## What the first boot does
 
-In this order, failing with one sentence and a non-zero exit at any step:
+First it checks the host and refuses, before it installs or writes anything,
+an account other than root, a release other than Debian 13 or Ubuntu 24.04,
+an architecture other than arm64 or x86_64, a `/run` that is not a tmpfs, and
+a kernel below Landlock ABI 3: Fermix's Linux sandbox holds commands only
+from ABI 3, and below it the engine installs and runs but refuses every
+command. The ABI is the kernel's own answer to `landlock_create_ruleset`'s
+version query (syscall 444 on both architectures), asked through `perl`
+(`perl-base` is essential on Debian and Ubuntu); a kernel built without
+Landlock, or booted without it in its `lsm=` list, answers none.
+
+Then, in this order, failing with one sentence and a non-zero exit at any
+step:
 
 1. Enroll mode only: writes the code to `/run/fermix/enroll.code` (tmpfs; the
    directory 0700 and the file 0600, root's until the engine account exists,
@@ -67,10 +80,17 @@ In this order, failing with one sentence and a non-zero exit at any step:
    UTC`, `Persistent=true`) runs `fermix-update.service`, a oneshot bounded
    by `TimeoutStartSec=30min` that runs `/usr/local/sbin/fermix-update`: the
    installer again (`--no-setup`, with its sha256 check and the cosign
-   signature check through the package's own cosign), then `fermix restart`
-   as `fermix` only when `dpkg-query` shows a new version (and only once a
-   home exists), then `systemctl reboot` when `/run/reboot-required` exists
-   (unattended-upgrades' kernel hook writes it). A night that fails stops
+   signature check through the package's own cosign); then `fermix restart`
+   as `fermix` when `fermix service status --json` says `pending_restart`
+   (the running engine is older than the installed one, so a restart a night
+   skipped or failed is still due the next night, and an engine that is not
+   running, such as a restore host's before its import, is not started); then
+   `systemctl reboot` when `/run/reboot-required` exists (unattended-upgrades'
+   kernel hook writes it). Neither happens while a move is under way, read
+   from `fermix home status --json` (`move.phase` `requested` to `undoing`
+   on a server sending its home, `receiving`, `staged` or `activating` on a
+   candidate): the night says so in one line and the next night does both.
+   A night that fails stops
    before the restart and the reboot, leaves the running engine as it was,
    says why on stderr (the journal: `journalctl -u fermix-update`) and exits
    non-zero; the next night tries again. First boot writes the script again
@@ -137,14 +157,19 @@ scenario). `useradd`, `runuser`, `nft` and `apt-config` run for real
 (`--cap-add NET_ADMIN`, `/run` on a tmpfs); `systemctl` (which runs a unit's
 `ExecStart` for `start` and `restart`), `loginctl`, `curl` (the fake
 installer, which records the release it installed), `apt-get`, `dpkg-query`,
-`swapon`, `fallocate`, `mkswap` and `fermix` are the stand-ins in
-`test/stubs/`. The scenarios: an existing host typing the code at a terminal,
-then enrolling again with the code in the environment and a bucket; a
-restore host and its printed steps; the failures that stop the first boot,
+`perl` (the Landlock ABI from a fixture), `swapon`, `fallocate`, `mkswap` and
+`fermix` (which runs the release its last start installed) are the
+stand-ins in `test/stubs/`. The chromium scenario keeps the real `perl`, so it
+asks the kernel Docker runs on for its Landlock ABI and needs Linux 6.2 or
+later with Landlock enabled. The scenarios: an existing host typing the code at a terminal,
+then enrolling again with the code in the environment and a bucket, after
+the refusals (a Debian 12 host, a kernel with Landlock ABI 2 or none among
+them); a restore host and its printed steps; the failures that stop the first boot,
 each by its exit status and its one sentence on stderr; an Ubuntu host with
 swap of its own; the nightly update, one night per case (no new release, a
-new one, a failed installer while a reboot is asked for, the reboot, a
-failed restart, no home yet); and the distribution's Chromium installed with
+new one, a failed installer while a reboot is asked for, the reboot, a move
+under way as the candidate receiving it and as the server sending it, the
+next night's restart and reboot, a failed restart, no home yet); and the distribution's Chromium installed with
 the real `apt-get` and started headless as `fermix` through the engine's
 `oom_score_adj` shell, with its own sandbox (that container runs without
 Docker's seccomp profile, which refuses the user namespaces a server's kernel

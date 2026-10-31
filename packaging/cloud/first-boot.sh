@@ -2,8 +2,8 @@
 # Fermix Always On: first boot of a server that becomes the owner's primary.
 #
 # Runs once as root. Cloud-init user data runs it with the enrollment code in
-# FERMIX_ENROLL_CODE; on an existing Debian or Ubuntu host it asks for the code
-# on the terminal, without echo:
+# FERMIX_ENROLL_CODE; on an existing Debian 13 or Ubuntu 24.04 host it asks for
+# the code on the terminal, without echo:
 #
 #   curl -fsSL https://fermix.ai/always-on | sudo sh
 #
@@ -49,6 +49,9 @@ SWAP_SIZE=2G
 # installer, by a root timer every night at 04:00 UTC.
 UPGRADES_CONF=/etc/apt/apt.conf.d/21fermix-always-on
 UPDATE_SCRIPT=/usr/local/sbin/fermix-update
+# Fermix's Linux sandbox holds commands only from Landlock ABI 3 (Linux 6.2);
+# on a kernel below it the engine installs and runs but refuses every command.
+LANDLOCK_ABI_MIN=3
 
 CODE=""
 RESTORE=0
@@ -112,13 +115,22 @@ os_field() {
   sed -n "s/^$1=//p" /etc/os-release | head -n 1 | sed "s/^[\"']//; s/[\"']\$//"
 }
 
+# The Landlock ABI this kernel gives, 0 for none: landlock_create_ruleset
+# (syscall 444 on x86_64 and arm64 alike) asked for its version, through the
+# perl every Debian and Ubuntu host has (perl-base is essential). The call
+# fails, read as none, on a kernel built without Landlock or booted without it
+# in its lsm= list.
+landlock_abi() {
+  perl -e 'my $abi = syscall(444, 0, 0, 1); printf("%d\n", $abi < 0 ? 0 : $abi)'
+}
+
 check_host() {
   [ "$(id -u)" -eq 0 ] || fail "Run this as root: curl -fsSL https://fermix.ai/always-on | sudo sh"
   [ -r /etc/os-release ] ||
-    fail "This host has no /etc/os-release. Fermix Always On supports Debian 12, Debian 13 and Ubuntu 24.04."
+    fail "This host has no /etc/os-release. Fermix Always On supports Debian 13 and Ubuntu 24.04."
   case "$(os_field ID) $(os_field VERSION_ID)" in
-    "debian 12" | "debian 13" | "ubuntu 24.04") ;;
-    *) fail "This host runs $(os_field PRETTY_NAME). Fermix Always On supports Debian 12, Debian 13 and Ubuntu 24.04." ;;
+    "debian 13" | "ubuntu 24.04") ;;
+    *) fail "This host runs $(os_field PRETTY_NAME). Fermix Always On supports Debian 13 and Ubuntu 24.04." ;;
   esac
   case "$(uname -m)" in
     aarch64 | x86_64) ;;
@@ -126,6 +138,10 @@ check_host() {
   esac
   [ "$(stat -f -c %T /run)" = tmpfs ] ||
     fail "/run is not a tmpfs, so the enrollment code would be written to disk."
+  abi=$(landlock_abi) || fail "perl could not ask this host's kernel for its Landlock ABI."
+  matches "$abi" '^[0-9]+$' || fail "perl answered this host's Landlock ABI with something other than a number."
+  [ "$abi" -ge "$LANDLOCK_ABI_MIN" ] ||
+    fail "This host's kernel gives Landlock ABI $abi (0 is none) and Fermix's sandbox needs ABI $LANDLOCK_ABI_MIN, so Fermix would run no command here: Fermix Always On needs Linux 6.2 or later with Landlock enabled, as Debian 13 and Ubuntu 24.04 have by default."
 }
 
 check_code() {
@@ -328,6 +344,7 @@ EOF
     cat <<'FERMIX_UPDATE'
 REBOOT_FLAG=/run/reboot-required
 WORK=""
+PHASE=""
 
 # One sentence and a non-zero exit, before anything restarts or reboots.
 fail() {
@@ -359,20 +376,71 @@ update_fermix() {
     fail "The Fermix installer stopped, so the engine keeps running; its message above says why."
 }
 
-# The engine account's own `fermix restart`, the restart an owner runs after an
-# update: it restarts the service and waits for the new engine to answer.
-restart_engine() {
-  if [ ! -e "$FERMIX_HOME_DIR" ]; then
-    say "Fermix has no home here yet, so no engine runs to restart"
-    return 0
-  fi
-  say "Restarting the engine"
+# A fermix verb as the engine account, with the clean environment first boot
+# gives it.
+as_engine() {
   uid=$(id -u "$ENGINE_USER")
   runuser -u "$ENGINE_USER" -- env -i HOME="$ACCOUNT_HOME" USER="$ENGINE_USER" \
     LOGNAME="$ENGINE_USER" SHELL=/usr/sbin/nologin PATH=/usr/bin:/bin LANG=C.UTF-8 \
     XDG_RUNTIME_DIR="/run/user/$uid" FERMIX_HOME="$FERMIX_HOME_DIR" \
-    "$FERMIX_BIN" restart </dev/null ||
+    "$FERMIX_BIN" "$@" </dev/null
+}
+
+# Whether the running engine is older than the installed one: the `alignment`
+# `fermix service status --json` publishes, `pending_restart` exactly then. It
+# compares what runs with what is installed, so a restart a night skipped or
+# failed is still due the next night, and an engine that is not running (a
+# restore host before its import) is not started.
+restart_due() {
+  as_engine service status --json >"$WORK/service-status.json" ||
+    fail "fermix service status stopped, so whether the engine runs the installed release is unknown and it keeps running; its message above says why."
+  [ "$(tr -d '\n' <"$WORK/service-status.json" |
+    sed -n 's/.*"alignment": *"\([a-z_]*\)".*/\1/p')" = pending_restart ]
+}
+
+# Whether a move is under way here, read from `fermix home status --json` (with
+# Fermix running or not): this server sending its home (requested to undoing)
+# or, as a candidate, receiving one (receiving, staged, activating). A restart
+# or a reboot then would cut the move short. Sets PHASE.
+move_under_way() {
+  [ -e "$FERMIX_HOME_DIR" ] || return 1
+  as_engine home status --json >"$WORK/home-status.json" ||
+    fail "fermix home status stopped, so whether a move is under way is unknown and nothing restarts; its message above says why."
+  PHASE=$(tr -d '\n' <"$WORK/home-status.json" | sed -n 's/.*"move": *{\([^}]*\)}.*/\1/p' |
+    sed -n 's/.*"phase": *"\([a-z_]*\)".*/\1/p')
+  case "$PHASE" in
+    requested | streaming | committing | committed | aborting | undoing) return 0 ;;
+    receiving | staged | activating) return 0 ;;
+  esac
+  return 1
+}
+
+# The engine account's own `fermix restart`, the restart an owner runs after an
+# update: it restarts the service and waits for the new engine to answer.
+restart_engine() {
+  say "Restarting the engine, which runs an older release than the one installed"
+  as_engine restart ||
     fail "Fermix is updated, but fermix restart stopped; its message above says why."
+}
+
+# After the update: the restart when the engine is behind, the reboot when an
+# update asks for one, neither while a move is under way.
+restart_and_reboot() {
+  restart=0
+  if restart_due; then restart=1; fi
+  if [ "$restart" -eq 0 ] && [ ! -e "$REBOOT_FLAG" ]; then
+    say "No restart is due and no update asks for a reboot"
+    return 0
+  fi
+  if move_under_way; then
+    say "A move is under way on this server ($PHASE), so the restart and the reboot wait for the next night"
+    return 0
+  fi
+  if [ "$restart" -eq 1 ]; then restart_engine; fi
+  if [ -e "$REBOOT_FLAG" ]; then
+    say "An installed update asks for a reboot ($REBOOT_FLAG), so this server reboots now"
+    systemctl reboot || fail "systemctl reboot was refused; the next night tries again."
+  fi
 }
 
 main() {
@@ -397,15 +465,11 @@ main() {
   update_fermix
   after=$(installed_version) || exit 1
   if [ "$after" = "$before" ]; then
-    say "Fermix $after is the newest release, so the engine keeps running"
+    say "Fermix $after is the newest release"
   else
     say "Fermix went from $before to $after"
-    restart_engine
   fi
-  if [ -e "$REBOOT_FLAG" ]; then
-    say "An installed update asks for a reboot ($REBOOT_FLAG), so this server reboots now"
-    systemctl reboot || fail "systemctl reboot was refused; the next night tries again."
-  fi
+  restart_and_reboot
 }
 
 main "$@"
@@ -418,9 +482,10 @@ FERMIX_UPDATE
 # provider's image lacks it, and its two daily switches set in a file of
 # Fermix's. Fermix's own: the package comes from the release files, not an apt
 # source, so unattended-upgrades never sees it; a root timer runs the
-# installer every night at 04:00 UTC, restarts the engine when its version
-# changed and reboots when an update asks for it. A run that fails stops
-# before both, says why in the journal, and the next night tries again.
+# installer every night at 04:00 UTC, restarts the engine when it runs an
+# older release than the one installed and reboots when an update asks for
+# it, neither while a move is under way. A run that fails stops before both,
+# says why in the journal, and the next night tries again.
 schedule_updates() {
   say "Turning on updates: Debian's security updates every day, Fermix every night at 04:00 UTC"
   apt_install unattended-upgrades
@@ -437,7 +502,7 @@ EOF
   write_update_script
   write_file "$UNIT_DIR/fermix-update.service" 0644 <<EOF
 [Unit]
-Description=Fermix: update Fermix through its installer, restart it when its version changed, reboot when an update asks
+Description=Fermix: update Fermix through its installer, restart it when it is behind, reboot when an update asks
 Wants=network-online.target
 After=network-online.target
 

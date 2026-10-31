@@ -5,11 +5,16 @@
 # and writes a candidate home the way the real verb does. `home status --json`
 # answers the candidate's phases from /etc/fermix-test/phases, one line per
 # call ("phase|sentence"), the last repeated (enrolled without the file).
-# `restart` fails, as a new engine that does not answer does, while
-# /etc/fermix-test/restart-fails exists.
+# The release the service runs is kept in $state/running-version: `service
+# install` and `restart` start the installed one (the fake installer records
+# it in $state/installed-version), and `service status --json` answers
+# `aligned`, `pending_restart` when they differ, or `not_running` while the
+# home is missing. `restart` fails, as a new engine that does not answer does,
+# while /etc/fermix-test/restart-fails exists.
 set -eu
 log=/var/log/fermix-test
 fixtures=/etc/fermix-test
+state=/var/lib/fermix-test
 printf 'fermix %s [as %s]\n' "$*" "$(id -un)" >>"$log/calls.log"
 verb="$1${2+ $2}"
 env | cut -d= -f1 | sort >"$log/env-$(printf '%s' "$verb" | tr ' ' -)"
@@ -22,12 +27,23 @@ case "$verb" in
     ;;
   "service install")
     printf '%s\n' "$XDG_RUNTIME_DIR" >"$log/service-runtime-dir"
+    cp "$state/installed-version" "$state/running-version"
+    ;;
+  "service status")
+    alignment=not_running
+    if [ -e "$FERMIX_HOME" ] && [ -f "$state/running-version" ]; then
+      alignment=aligned
+      cmp -s "$state/installed-version" "$state/running-version" || alignment=pending_restart
+    fi
+    printf '{\n  "ok": true,\n  "result": {\n    "active": true,\n    "alignment": "%s"\n  },\n  "schema_version": 1\n}\n' \
+      "$alignment"
     ;;
   restart)
     if [ -f "$fixtures/restart-fails" ]; then
       echo "fermix restart: (test) the new engine did not answer" >&2
       exit 1
     fi
+    cp "$state/installed-version" "$state/running-version"
     ;;
   "home status")
     calls=$(grep -c 'fermix home status' "$log/calls.log")
