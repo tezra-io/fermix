@@ -193,6 +193,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tries again. The same one sentence follows the replace: creating and
   setting up the new server (Cancel), ready for the move (Move now), moving,
   removing the old server, and what went wrong with its one action.
+  Hetzner is the first cloud provider Fermix creates a server with: the
+  apps draw the token and choose screens from the providers Fermix lists,
+  each with its own How to get one and console, so a provider added to
+  Fermix appears there without an app update, and every sentence about the
+  server names its provider.
   The server's hosting provider can technically read its disk, so Fermix
   keeps less there: the prompts, replies, tool input and output and shell
   commands in its traces are kept about a day (through the previous UTC

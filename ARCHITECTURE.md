@@ -543,20 +543,43 @@ which build a host installs, shared by the installer and the readiness.
 (`MoveSecrets.missing/1`). The channels half
 (`FermixChannels.Home`) is described under `fermix_channels`.
 
-`Home.Provision` is the behaviour of a host Fermix creates the Always On
-server on (M75 lean v1 §4.3), and `Provision.Hetzner` the one host: Req over
-the Hetzner Cloud API through `Net.HttpClient`. The project token and the
-ledger of what was created live in one file, `device/provision/hetzner.json`
-(`Provision.Ledger`, `0600`, device-local, never `config.toml` or the
-keyring, so a move never carries it), written before each call that creates
-or deletes and updated after it. Every write is `Ledger.update/3`, which holds
-the file's lock across its read, change, write and rename (never across a
-call to Hetzner); `Provision.Ledger.Lock`, one supervised owner in the
+`Home.Provision` is the contract every cloud provider Fermix creates the
+Always On server on implements (M75 lean v1 §4.3), and the place a new
+provider plugs in: a module of its `@callback`s (`id/0`, `display/0` with
+the name, token label, How to get one steps, console URL, docs anchor,
+locations and the proper nouns its words use, `type_name/1`,
+`check_token/2`, `reaches/3`, `options/2`, `create/3`, `power/3`,
+`reconcile/2`, `delete/2`, `delete_replaced/2`) listed in
+`Provision.Registry`, a compile-time list. `Provision.Hetzner` is the one
+provider today: Req over the Hetzner Cloud API through `Net.HttpClient`,
+and everything of Hetzner's (endpoints, label rules, price parsing, error
+codes, locations and cities, the image, the 32 KiB user data limit, the
+root-password drop) lives there only. A provider answers its own refusals
+as one of the contract's closed shared kinds (`:unauthorized`,
+`:read_only_token`, `:account_limit`, `{:unavailable, capacity}` with the
+next location in stock, `{:rate_limited, _}`, `{:unreachable, _}`,
+`:other_project`, or `{:other, sentence}`, the provider's own plain
+message), and `Provision.error_sentence/2` words every reason in the
+provider's display data, so the shared code (`Provision`, the ledger, the
+job, `HomeSummary`, `Copy`, `Management.Provision`, the router) names no
+provider, which `provider_contract_test.exs` holds by scanning every lib
+file and by running the shared code on an invented second provider.
+`Provision.current/2` is the one resolver of which provider Always On
+speaks of: the one whose ledger holds what Fermix created (or cannot be
+read), else the one whose token was given last, else the first the registry
+offers. A provider's token and the ledger of what was created on it live in
+its own file, `device/provision/<id>.json` (`Provision.Ledger`, `0600`,
+device-local, never `config.toml` or the keyring, so a move never carries
+it), which is how the ledger records which provider each resource belongs
+to, written before each call that creates or deletes and updated after it.
+Every write is `Ledger.update/3`, which holds the file's lock across its
+read, change, write and rename (never across a call to the provider); `Provision.Ledger.Lock`, one supervised owner in the
 primary's and a desktop's tree, serves writers in the order they asked, each
 the moment the one before is done or exits, with no retry or backoff, and
 refuses only a writer whose turn has not come in 30 s. `Provision.FirstBoot` embeds `packaging/cloud/first-boot.sh`
 at compile time and wraps it, gzip and base64 with its SHA-256, as the
-server's cloud-init user data, the enrollment code in `FERMIX_ENROLL_CODE`.
+server's cloud-init user data, the enrollment code in `FERMIX_ENROLL_CODE`,
+refused past the limit its provider passes in.
 A create checks the type against the live stock, makes the firewall (the
 first write, where a read-only token fails before anything costs money),
 opens a provisioned enrollment window (24 hours; `home.enroll.open` is
@@ -566,10 +589,14 @@ ledger's ref, and polls each action with a bound; a create whose answer was
 lost is found again by its labels in `reconcile/2`, which also marks a
 resource deleted outside Fermix gone. `Management.Provision` answers
 `home.provision.*` (device-class in `Placement`: the computer that created
-the server manages it and never forwards the request); connect, create,
-power and delete are owner decisions in the daemon, a new token replaces
-the kept one only when it reaches the ledger's server or firewall (one read
-by id, the same project), and create, power and delete run as one
+the server manages it and never forwards the request):
+`home.provision.providers` answers each provider's display data, so the apps
+draw the token and choose screens from it; connect, options and create name
+the provider; power, resources and delete act on `Provision.current/2`'s;
+connect, create, power and delete are owner decisions in the daemon, a new
+token replaces the kept one only when it reaches the ledger's server or
+firewall (one read by id, the same account), a create is refused while any
+provider holds a server, and create, power and delete run as one
 `home_provision` management job at a time; delete refuses while a move to the server runs
 and once this engine is its linked desktop (or the home carries the moved
 marker). `Ledger.state/3` is the one reading of the provisioner for `home.status`'s
@@ -583,14 +610,30 @@ every role's tree: once when it stops being readable and once, with the
 failed reads counted, when it reads again; a verb with no engine tree passes
 no memory and logs its one read.
 
+A provider served by an external plugin is not built. It would be one more
+module of the contract in the engine, listed in the registry, that forwards
+each callback to the plugin; what the engine keeps for every provider stays
+in the engine: the token's custody (read from the provider's ledger and
+passed with each call, never stored by the plugin or seen by a command, as
+`device/` is denied to the sandbox), the owner's decisions over connect,
+create, power and delete (the daemon), the enrollment code's window, the
+display data the apps draw (answered from the plugin's manifest, held to the
+copy rules), and the ledger. Since `create/3`, `reconcile/2` and the deletes
+write the ledger themselves today, their write-ahead steps would first move
+out of the provider module into a shared driver, so the plugin answers
+single steps (create the firewall, create the server, read one resource,
+delete one, power one) with the shared error kinds, and no plugin ever
+writes a ledger.
+
 `Management.HomeSummary` is that summary (M75 lean v1 §7): `gather/5` reads
-the ledger, the last kept review (`Move.last_review/1`) and a desktop's stored
+the provider in use and its ledger, the last kept review (`Move.last_review/1`) and a desktop's stored
 copies beside the record `Management.Home.status/1` already holds (the role,
 the move's phase, the candidates, the rail's window and link, the snapshots,
 the primary's disk, `Home.Disk.usage/2`, and a linked desktop's composed
 `primary_home`, or `Placement.primary_part/2`'s `too_old` when the server
 refused this engine's protocol), and the pure `summary/1` answers `{state,
-sentence, action, detail}` in `Management.Copy`'s words, which `CopyTest`
+sentence, action, detail}` in `Management.Copy`'s words and the provider's
+display data, which `CopyTest`
 holds to the copy rules and to `Copy.summary_violations/1` (no internal word,
 no backticked code), as it does every sentence the summary prints as it is
 from elsewhere: it sweeps the provisioner's refusals, the ledger's, the
@@ -648,8 +691,8 @@ attempt), so a late offer never un-stages a home its source retired for. The
 move's ending (`done`, `aborted`) is written only by the engine that came
 back after the restart. A move's keychain values exist only in memory and
 inside the stream encrypted to the candidate's one-time key. The
-provisioner's token never leaves the computer that pasted it, and Hetzner's
-root password for a created server is read for nothing. A replace deletes the
+provisioner's tokens never leave the computer that pasted them, and a
+provider's root password for a created server (Hetzner's) is read for nothing. A replace deletes the
 old server only once a primary of a higher epoch answered this desktop, never
 the server that holds the home.
 
