@@ -34,7 +34,8 @@ defmodule FermixCore.Trace.Retention do
   `<type>.bodies.jsonl` beside its records (M75 L20). `prune_bodies/3`,
   which `Trace` runs before `prune/3`, removes those files from every day
   more than #{@body_max_age_days} day before today, so a server keeps bodies
-  through yesterday and the records #{@max_age_days} days. Elsewhere no day
+  about a day (through the previous UTC day) and the records #{@max_age_days}
+  days. Elsewhere no day
   holds one, and the pass removes nothing. It keeps to the same days of
   traces and to #{@max_removals} days a pass, leaves a day past the age bound
   to `prune/3`, and refuses by name a file it cannot remove.

@@ -1451,7 +1451,8 @@ its own precondition.
 `task_summary`, `query`, `content`, `context`, and the shell tool's
 always-on `command`). An Always On server's disk is
 one its hosting provider can read, so there `Trace` writes those fields to the
-day's `<type>.bodies.jsonl`, kept one day, and the rest of the row to
+day's `<type>.bodies.jsonl`, kept about a day (through the previous UTC day),
+and the rest of the row to
 `<type>.jsonl`, kept 14 (M75 L20). A body under any other name stays with its
 row for 14 days on the server: add the name to `body_keys/0` (and the
 `observability` self-knowledge reference) rather than inventing one.

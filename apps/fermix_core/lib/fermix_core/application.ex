@@ -667,8 +667,9 @@ defmodule FermixCore.Application do
 
   # Trace's retention passes (M75 L14) stay dark under `mix test`, as the
   # snapshot scheduler's timers do; tests start their own Trace with a clock.
-  # On an Always On server a trace keeps the bodies of its records one day
-  # (M75 L20), decided once from what this boot recorded.
+  # On an Always On server a trace keeps the bodies of its records about a day
+  # (through the previous UTC day; M75 L20), decided once from what this boot
+  # recorded.
   defp trace_opts do
     [
       base_dir: trace_dir(),

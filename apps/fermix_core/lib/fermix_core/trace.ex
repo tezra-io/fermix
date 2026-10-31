@@ -12,7 +12,8 @@ defmodule FermixCore.Trace do
   `body_keys/0`: a prompt, a reply, a tool's input or output, a delegated
   task's words) is written twice: without its bodies to `<type>.jsonl`, and
   whole to `<type>.bodies.jsonl`, which `Trace.Retention.prune_bodies/3`
-  keeps one day while the records keep the store's bounds. Each line is
+  keeps about a day (through the previous UTC day) while the records keep the
+  store's bounds. Each line is
   written, and counted when dropped, on its own. Everywhere else a record is
   written whole to `<type>.jsonl`.
 
@@ -86,7 +87,7 @@ defmodule FermixCore.Trace do
 
   @doc """
   The fields of a record that are its bodies, which an Always On server writes
-  to `<type>.bodies.jsonl` and keeps one day.
+  to `<type>.bodies.jsonl` and keeps about a day (through the previous UTC day).
   """
   @spec body_keys() :: [String.t()]
   def body_keys, do: @body_keys

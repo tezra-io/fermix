@@ -2,7 +2,8 @@ defmodule FermixCore.Home.AlwaysOn do
   @moduledoc """
   Whether this engine is an Always On server (M75 L20), where Fermix keeps
   less on a disk its hosting provider can technically read: a trace keeps the
-  bodies of its records one day there (`FermixCore.Trace`).
+  bodies of its records about a day (through the previous UTC day) there
+  (`FermixCore.Trace`).
 
   A server is the primary of a home that came to its host by a move or a
   restore, run by the Linux package on a machine with no Fermix app. Each fact

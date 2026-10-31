@@ -153,7 +153,8 @@ reduce blast radius. They are not a claim to withstand a hostile local account.
 Also out of scope: the hosting provider of an Always On server, which can
 technically read the server's disk. Fermix adds no disk encryption there, since
 a server that restarts on its own would keep the key on the same disk; it keeps
-less there instead (the bodies in its traces one day) and encrypts what leaves
+less there instead (the bodies in its traces about a day, through the previous
+UTC day) and encrypts what leaves
 it: snapshots to the recovery key, whose private half the server never holds,
 and every link to the phones and the desktop.
 

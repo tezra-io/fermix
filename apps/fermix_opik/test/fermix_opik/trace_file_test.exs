@@ -237,7 +237,7 @@ defmodule FermixOpik.TraceFileTest do
   end
 
   # An Always On server writes a record with bodies twice (M75 L20): without
-  # them to `<type>.jsonl` and whole to `<type>.bodies.jsonl`, kept one day.
+  # them to `<type>.jsonl` and whole to `<type>.bodies.jsonl`, kept about a day.
   # A replay of its traces reads each record once, from its own file.
   @tag :tmp_dir
   test "read_events replays a server's day once, without its bodies file", %{tmp_dir: dir} do

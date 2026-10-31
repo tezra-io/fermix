@@ -664,22 +664,23 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     end
   end
 
-  # M75 L20: an Always On server keeps the bodies of its traces one day, and the
-  # owner is told plainly what lives on the server, for how long, and that its
-  # hosting provider can read the disk. The body fields come from
-  # `Trace.body_keys/0`, so a body added there and not named here fails. Each
-  # string is a file, a field, a bound or a boundary word, not a phrasing.
+  # M75 L20: an Always On server keeps the bodies of its traces about a day,
+  # said in one wording (`window/0`) wherever the docs give it, and the owner is
+  # told plainly what lives on the server, for how long, and that its hosting
+  # provider can read the disk. The body fields come from `Trace.body_keys/0`,
+  # so a body added there and not named here fails. Each string is a file, a
+  # field, a bound or a boundary word, not a phrasing.
   test "documents what an Always On server keeps, for how long, and who can read it" do
     body = File.read!(self_knowledge_path())
     observability = "observability" |> reference_path() |> File.read!() |> squash()
     home = "home" |> reference_path() |> File.read!() |> squash()
 
-    assert body =~ "on an Always On server the prompts, replies and tool bodies one day"
+    assert body =~ "on an Always On server the prompts, replies and tool bodies #{window()}"
 
     fields = Enum.map(Trace.body_keys(), &"`#{&1}`")
 
     for required <-
-          ["`<type>.bodies.jsonl`", "before yesterday", "14 days", "no Fermix app"] ++
+          ["`<type>.bodies.jsonl`", window(), "14 days", "no Fermix app"] ++
             fields do
       assert observability =~ required, "observability reference does not mention #{required}"
     end
@@ -689,7 +690,7 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
           "`memory.db`",
           "the secret files",
           "browser profile",
-          "kept one day on a server",
+          "kept #{window()} on a server",
           "14 days and at most 1 GiB",
           "no disk encryption",
           "can technically read the server's disk",
@@ -703,6 +704,8 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
   end
 
   defp squash(text), do: String.replace(text, ~r/\s+/, " ")
+
+  defp window, do: "about a day (through the previous UTC day)"
 
   # Every build has cues, off until the owner turns them on, so the owner must
   # be told the switch and sent to the surfaces that really configure it:

@@ -606,8 +606,8 @@ running the Linux package with no Fermix app, decided at boot) `Trace` starts
 with `separate_bodies: true` and writes a record that carries a body
 (`Trace.body_keys/0`) twice: without its bodies to `<type>.jsonl` and whole to
 `<type>.bodies.jsonl`. Each pass first removes the bodies files of every day
-before yesterday (`Retention.prune_bodies/3`), so a server keeps bodies one day
-and the records 14. Readers of trace rows (`Setup.ProviderHealth`, the Doctor's
+before yesterday (`Retention.prune_bodies/3`), so a server keeps bodies about a
+day (through the previous UTC day) and the records 14. Readers of trace rows (`Setup.ProviderHealth`, the Doctor's
 sandbox check, `FermixOpik.TraceFile`) read `<type>.jsonl` and need no body.
 
 Architecture Invariant: trace writes are best-effort. `Trace` is an early child of

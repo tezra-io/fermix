@@ -385,17 +385,17 @@ it, never a second writer.
   the settings, the token file and the secret files, the phone identity,
   skills, journals, workspace and installed plugins. Beside it are the
   server's own browser profile, with the sessions of the sites signed in to
-  there, the logs (10 MB, five files) and the traces: the prompts, replies
-  and tool input and output in them are kept one day on a server, the rest of
-  each record (when, which model, tokens, errors, ids) 14 days and at most
-  1 GiB. Fermix adds no disk encryption on the server: one that restarts on
-  its own would need the key on the same disk, so it would protect little.
-  The hosting provider can technically read the server's disk, so turn on
-  two-factor sign-in for the hosting account and keep a project for Fermix
-  alone. What leaves the server is encrypted end to end: snapshots to the
-  recovery key, of which the server keeps only the half that writes them, so
-  neither it nor the provider can open one, and every link to the phones and
-  the desktop.
+  there, the logs (10 MB, five files) and the traces: the prompts, replies,
+  tool input and output and shell commands in them are kept about a day
+  (through the previous UTC day) on a server, the rest of each record (when,
+  which model, tokens, errors, ids) 14 days and at most 1 GiB. Fermix adds no
+  disk encryption on the server: one that restarts on its own would need the
+  key on the same disk, so it would protect little. The hosting provider can
+  technically read the server's disk, so turn on two-factor sign-in for the
+  hosting account and keep a project for Fermix alone. What leaves the server
+  is encrypted end to end: snapshots to the recovery key, of which the server
+  keeps only the half that writes them, so neither it nor the provider can
+  open one, and every link to the phones and the desktop.
 - After a move, or a restore, `home.status`'s `secrets_missing` on the
   primary names each secret reference that did not resolve on that host (by
   the id `fermix setup` and the app take), and the settings rows show those
