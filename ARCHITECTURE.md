@@ -997,9 +997,10 @@ owner's primary (M75 step 6). It runs once as root, from cloud-init user data
 (the code in `FERMIX_ENROLL_CODE`) or as
 `curl -fsSL https://fermix.ai/always-on | sudo sh` (the code read from the
 terminal without echo). It refuses, before it installs anything, any host but
-Debian 13 or Ubuntu 24.04 and any kernel below Landlock ABI 3 (asked through
-`perl`'s `syscall`), where the engine would refuse every command; then in
-order: writes the enrollment code to
+Debian 12, Debian 13 or Ubuntu 24.04 and, deciding, any kernel below Landlock
+ABI 3 (asked through `perl`'s `syscall`; a stock Debian 12 is one), where the
+engine would refuse every command; then in order: writes the enrollment code
+to
 `/run/fermix/enroll.code` (tmpfs, 0600); installs an nftables table that drops
 every packet to the metadata addresses (`169.254.169.254`,
 `100.100.100.200`, `fd00:ec2::254`, `fd20:ce::254`) from every uid but 0,
@@ -1013,9 +1014,11 @@ host with no swap a 2 GB `/swapfile`; installs the Linux package through
 unattended-upgrades and installs `fermix-update.timer`, a root timer that at
 04:00 UTC runs the installer again, `fermix restart` as the engine account
 when `fermix service status` says the running engine is behind the installed
-one, and `systemctl reboot` when `/run/reboot-required` exists, neither while
-`fermix home status` shows a move under way, stopping before both when a step
-fails; creates
+one (not while `fermix home status` shows a pending move phase, nor when
+either read fails), and `systemctl reboot` when `/run/reboot-required`
+exists, which a move may defer at most two nights in a row (a root-owned
+count under `/var/lib/fermix-update`), stopping before both when the
+installer fails; creates
 the engine account `fermix` (home `/home/fermix`, no login, lingering); runs
 `fermix home enroll` and `fermix service install` as `fermix`; installs the
 distribution's Chromium on Debian (Ubuntu's is a snap: it says to install a
@@ -1032,7 +1035,8 @@ with the real apt and Chromium.
 Architecture Invariant: no engine process reaches the instance metadata
 service. The enrollment code reaches the engine only as a file, never in an
 argument, an environment the engine inherits, or the console output. A failed
-nightly update leaves the running engine as it was.
+nightly update leaves the running engine as it was, and nothing the engine
+account answers holds a security reboot off for more than two nights.
 
 ### `apps/fermix_channels`
 

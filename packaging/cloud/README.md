@@ -3,9 +3,11 @@
 A server that becomes the owner's Fermix primary (M75 step 6, D21). One
 script, two modes:
 
-- **Any Debian 13 or Ubuntu 24.04 host** (arm64, x86_64) whose kernel gives
-  Landlock ABI 3 or later (Linux 6.2 or later with Landlock enabled, as both
-  have by default; Debian 12's 6.1 gives ABI 2, so Debian 12 is refused):
+- **Any Debian 12, Debian 13 or Ubuntu 24.04 host** (arm64, x86_64) whose
+  kernel gives Landlock ABI 3 or later: Linux 6.2 or later with Landlock
+  enabled, as Debian 13 and Ubuntu 24.04 have by default. Debian 12's own 6.1
+  gives ABI 2, so a stock Debian 12 is refused, and one on a 6.2 or later
+  kernel is not:
   `curl -fsSL https://fermix.ai/always-on | sudo sh`, which serves
   `first-boot.sh` byte for byte and asks for the code without echo. Cloud-init
   user data can run it with the code in `FERMIX_ENROLL_CODE` instead.
@@ -22,9 +24,10 @@ script, two modes:
 ## What the first boot does
 
 First it checks the host and refuses, before it installs or writes anything,
-an account other than root, a release other than Debian 13 or Ubuntu 24.04,
-an architecture other than arm64 or x86_64, a `/run` that is not a tmpfs, and
-a kernel below Landlock ABI 3: Fermix's Linux sandbox holds commands only
+an account other than root, a release other than Debian 12, Debian 13 or
+Ubuntu 24.04, an architecture other than arm64 or x86_64, a `/run` that is
+not a tmpfs, and a kernel below Landlock ABI 3 (the check that decides, not
+the release): Fermix's Linux sandbox holds commands only
 from ABI 3, and below it the engine installs and runs but refuses every
 command. The ABI is the kernel's own answer to `landlock_create_ruleset`'s
 version query (syscall 444 on both architectures), asked through `perl`
@@ -86,15 +89,25 @@ step:
    skipped or failed is still due the next night, and an engine that is not
    running, such as a restore host's before its import, is not started); then
    `systemctl reboot` when `/run/reboot-required` exists (unattended-upgrades'
-   kernel hook writes it). Neither happens while a move is under way, read
-   from `fermix home status --json` (`move.phase` `requested` to `undoing`
-   on a server sending its home, `receiving`, `staged` or `activating` on a
-   candidate): the night says so in one line and the next night does both.
-   A night that fails stops
-   before the restart and the reboot, leaves the running engine as it was,
-   says why on stderr (the journal: `journalctl -u fermix-update`) and exits
-   non-zero; the next night tries again. First boot writes the script again
-   whenever it runs.
+   kernel hook writes it). A move under way is read from `fermix home status
+   --json`, in the phases the move code treats as pending: `requested`,
+   `streaming`, `committing` or `aborting` on a server sending its home
+   (`FermixCore.Home.Move`'s pending list), `enrolling`, `receiving`,
+   `staged` or `activating` on a candidate; ended phases (`committed`,
+   `undoing`, `done`, `aborted`, `enrolled`, `expired`, `failed`) defer
+   nothing. Only the restart rests on the engine account's answers: a move
+   under way skips it, and so does a `service status` or `home status` that
+   fails, in one journal line. The reboot is root's: a move defers it at most
+   two nights in a row, counted in `/var/lib/fermix-update/reboot-deferrals`
+   (root's, 0600, in a 0700 directory; cleared by a reboot and by a night
+   without a move; a count that is not a number reads as the limit), and the
+   third night reboots all the same and says so; a failed read of the engine
+   counts as no move. Each night says what it did in one line per step. A
+   failed installer stops the night before the restart and the reboot and
+   leaves the running engine as it was; any failure says why on stderr (the
+   journal: `journalctl -u fermix-update`) and the night exits non-zero; the
+   next night tries again. First boot writes the script again whenever it
+   runs.
 6. Creates the account `fermix` (home `/home/fermix`, `/usr/sbin/nologin`, no
    password), lingering, with `/run/fermix` recreated for it at every boot
    (tmpfiles.d) and a `user@<uid>.service` drop-in whose `ExecStartPre` refuses
@@ -158,18 +171,21 @@ scenario). `useradd`, `runuser`, `nft` and `apt-config` run for real
 `ExecStart` for `start` and `restart`), `loginctl`, `curl` (the fake
 installer, which records the release it installed), `apt-get`, `dpkg-query`,
 `perl` (the Landlock ABI from a fixture), `swapon`, `fallocate`, `mkswap` and
-`fermix` (which runs the release its last start installed) are the
-stand-ins in `test/stubs/`. The chromium scenario keeps the real `perl`, so it
-asks the kernel Docker runs on for its Landlock ABI and needs Linux 6.2 or
-later with Landlock enabled. The scenarios: an existing host typing the code at a terminal,
-then enrolling again with the code in the environment and a bucket, after
-the refusals (a Debian 12 host, a kernel with Landlock ABI 2 or none among
-them); a restore host and its printed steps; the failures that stop the first boot,
-each by its exit status and its one sentence on stderr; an Ubuntu host with
-swap of its own; the nightly update, one night per case (no new release, a
-new one, a failed installer while a reboot is asked for, the reboot, a move
-under way as the candidate receiving it and as the server sending it, the
-next night's restart and reboot, a failed restart, no home yet); and the distribution's Chromium installed with
+`fermix` (which runs the release its last start installed, and whose status
+reads can fail) are the stand-ins in `test/stubs/`. The chromium scenario
+keeps the real `perl`, so it asks the kernel Docker runs on for its Landlock
+ABI and needs Linux 6.2 or later with Landlock enabled. The scenarios: an
+existing host typing the code at a terminal, then enrolling again with the
+code in the environment and a bucket, after the refusals (a stock Debian 12
+host and kernels with Landlock ABI 2 or none, by the ABI sentence, among
+them); a restore host and its printed steps; the failures that stop the
+first boot, each by its exit status and its one sentence on stderr; an
+Ubuntu host with swap of its own; the nightly update, one night per case (no
+new release, a new one, a failed installer while a reboot is asked for, the
+reboot, a failed `service status` and a failed `home status` (no restart, the
+reboot all the same), three nights under a move (the reboot waits two, then
+goes), a move in an ended phase, a failed restart (the reboot all the same),
+no home yet); and the distribution's Chromium installed with
 the real `apt-get` and started headless as `fermix` through the engine's
 `oom_score_adj` shell, with its own sandbox (that container runs without
 Docker's seccomp profile, which refuses the user namespaces a server's kernel

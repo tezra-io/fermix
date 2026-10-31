@@ -125,14 +125,15 @@ it, never a second writer.
 
 - Always On puts the primary on a Linux server the owner controls, so Fermix
   keeps working with the Mac closed. The server enrolls with an enrollment
-  code the primary opens (one use, 30 minutes), on an existing Debian 13 or
-  Ubuntu 24.04 host (arm64 or x86_64):
-  `curl -fsSL https://fermix.ai/always-on | sudo sh`, which asks for the code
-  without echoing it. The host's kernel must give Landlock ABI 3 (Linux 6.2
-  or later with Landlock enabled, as both have by default), or every command
-  Fermix runs there would be refused: the first boot checks it before it
-  installs anything and names what is missing. Debian 12 (Linux 6.1) is
-  refused. After `sh -s --`:
+  code the primary opens (one use, 30 minutes), on an existing Debian 12,
+  Debian 13 or Ubuntu 24.04 host (arm64 or x86_64) whose kernel gives
+  Landlock ABI 3: `curl -fsSL https://fermix.ai/always-on | sudo sh`, which
+  asks for the code without echoing it. ABI 3 means Linux 6.2 or later with
+  Landlock enabled, as Debian 13 and Ubuntu 24.04 have by default; Debian
+  12's own 6.1 does not, so a stock Debian 12 is refused (one on a 6.2 or
+  later kernel is not). Below it every command Fermix runs would be refused,
+  so the first boot checks the kernel before it installs anything and names
+  what is missing. After `sh -s --`:
   `--snapshot-bucket NAME --snapshot-region REGION`, `--restore`.
 - The first boot, as root: writes the code to `/run/fermix/enroll.code`
   (memory only, the engine account's), blocks the instance metadata service
@@ -146,8 +147,9 @@ it, never a second writer.
   lingering), runs `fermix home enroll` and `fermix service install` as
   `fermix`, installs Chromium on Debian for browser tasks, and waits up to 5
   minutes for the primary to accept the server. The engine starts in the
-  candidate role, enrolls with the primary and waits for the move. Running it again is safe: a host whose home exists is not enrolled
-  again. It never prints the code; cloud-init's console log shows each step.
+  candidate role, enrolls with the primary and waits for the move. Running
+  it again is safe: a host whose home exists is not enrolled again. It never
+  prints the code; cloud-init's console log shows each step.
 - **Updates on the server.** Nobody logs in to it, so it updates itself.
   Debian's security updates: `unattended-upgrades` every day (the first boot
   installs it where the image lacks it and sets its two daily switches in
@@ -157,12 +159,13 @@ it, never a second writer.
   again, `fermix restart` as `fermix` when `fermix service status` says the
   running engine is behind the installed one (so a restart a night skipped is
   done the next night), then a reboot when `/run/reboot-required` exists.
-  Neither happens while a move is under way on the server, sending its home
-  or receiving one; the night says so and the next night does both. A night
-  that fails stops
-  before the restart and the reboot, leaves the running engine as it was and
-  says why in `journalctl -u fermix-update`; the next night tries again. So a
-  server's engine can be up to a day behind the Mac's.
+  While a move is under way on the server (sending its home, or as a
+  candidate enrolling or receiving one) the restart waits, and so it does
+  when the engine's status cannot be read; the reboot waits at most two
+  nights in a row for a move and then happens all the same. Each night says
+  what it did in `journalctl -u fermix-update`; a failed installer stops the
+  night and leaves the running engine as it was; the next night tries again.
+  So a server's engine can be a day or more behind the Mac's.
 - **Memory.** Out of memory the kernel stops one process. The swap file makes
   that rarer, and on Linux the engine starts Chrome, and so every Chrome
   process, with `oom_score_adj` 1000, so the kernel stops Chrome before the

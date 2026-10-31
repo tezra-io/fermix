@@ -114,7 +114,7 @@ scenarios:
           1. Says the server updates Fermix by itself every night at 04:00 UTC
              (4 a.m. UTC) by running Fermix's installer again.
           2. Says Fermix restarts only when a newer release was installed, so
-             the server can run a release up to a day behind the Mac.
+             the server can run a release a day or more behind the Mac.
           3. Does not tell the owner to log in and run `apt upgrade` or
              `fermix upgrade` on the server as the way to keep it current.
       - id: security_patches_and_reboots_on_the_server

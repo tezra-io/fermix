@@ -10,7 +10,8 @@
 # it in $state/installed-version), and `service status --json` answers
 # `aligned`, `pending_restart` when they differ, or `not_running` while the
 # home is missing. `restart` fails, as a new engine that does not answer does,
-# while /etc/fermix-test/restart-fails exists.
+# while /etc/fermix-test/restart-fails exists, and `service status` and `home
+# status` fail while service-status-fails and home-status-fails do.
 set -eu
 log=/var/log/fermix-test
 fixtures=/etc/fermix-test
@@ -30,6 +31,10 @@ case "$verb" in
     cp "$state/installed-version" "$state/running-version"
     ;;
   "service status")
+    if [ -f "$fixtures/service-status-fails" ]; then
+      echo "fermix service status: (test) the user manager did not answer" >&2
+      exit 1
+    fi
     alignment=not_running
     if [ -e "$FERMIX_HOME" ] && [ -f "$state/running-version" ]; then
       alignment=aligned
@@ -46,6 +51,10 @@ case "$verb" in
     cp "$state/installed-version" "$state/running-version"
     ;;
   "home status")
+    if [ -f "$fixtures/home-status-fails" ]; then
+      echo "fermix home status: (test) the home could not be read" >&2
+      exit 1
+    fi
     calls=$(grep -c 'fermix home status' "$log/calls.log")
     line="enrolled|Enrolled with Invented Mac; waiting for its move."
     if [ -f "$fixtures/phases" ]; then line=$(sed -n "${calls}p" "$fixtures/phases"); fi

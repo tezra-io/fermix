@@ -2,8 +2,9 @@
 # Fermix Always On: first boot of a server that becomes the owner's primary.
 #
 # Runs once as root. Cloud-init user data runs it with the enrollment code in
-# FERMIX_ENROLL_CODE; on an existing Debian 13 or Ubuntu 24.04 host it asks for
-# the code on the terminal, without echo:
+# FERMIX_ENROLL_CODE; on an existing Debian 12, Debian 13 or Ubuntu 24.04 host
+# whose kernel gives Landlock ABI 3 it asks for the code on the terminal,
+# without echo:
 #
 #   curl -fsSL https://fermix.ai/always-on | sudo sh
 #
@@ -51,6 +52,8 @@ UPGRADES_CONF=/etc/apt/apt.conf.d/21fermix-always-on
 UPDATE_SCRIPT=/usr/local/sbin/fermix-update
 # Fermix's Linux sandbox holds commands only from Landlock ABI 3 (Linux 6.2);
 # on a kernel below it the engine installs and runs but refuses every command.
+# This, not the release, decides: Debian 12's own 6.1 gives ABI 2, and a
+# Debian 12 host on a 6.2 or later kernel qualifies.
 LANDLOCK_ABI_MIN=3
 
 CODE=""
@@ -127,10 +130,10 @@ landlock_abi() {
 check_host() {
   [ "$(id -u)" -eq 0 ] || fail "Run this as root: curl -fsSL https://fermix.ai/always-on | sudo sh"
   [ -r /etc/os-release ] ||
-    fail "This host has no /etc/os-release. Fermix Always On supports Debian 13 and Ubuntu 24.04."
+    fail "This host has no /etc/os-release. Fermix Always On supports Debian 12, Debian 13 and Ubuntu 24.04."
   case "$(os_field ID) $(os_field VERSION_ID)" in
-    "debian 13" | "ubuntu 24.04") ;;
-    *) fail "This host runs $(os_field PRETTY_NAME). Fermix Always On supports Debian 13 and Ubuntu 24.04." ;;
+    "debian 12" | "debian 13" | "ubuntu 24.04") ;;
+    *) fail "This host runs $(os_field PRETTY_NAME). Fermix Always On supports Debian 12, Debian 13 and Ubuntu 24.04." ;;
   esac
   case "$(uname -m)" in
     aarch64 | x86_64) ;;
@@ -343,10 +346,17 @@ INSTALL_URL=$INSTALL_URL
 EOF
     cat <<'FERMIX_UPDATE'
 REBOOT_FLAG=/run/reboot-required
+# Whether a move is under way is the engine account's answer, so it may hold a
+# root reboot off only this many nights in a row, counted in root's own file.
+DEFERRALS_FILE=/var/lib/fermix-update/reboot-deferrals
+DEFERRALS_MAX=2
 WORK=""
 PHASE=""
+# Set when the engine's answer or its restart failed: the night still decides
+# the reboot, then ends non-zero.
+ENGINE_FAILED=0
 
-# One sentence and a non-zero exit, before anything restarts or reboots.
+# One sentence and a non-zero exit, ending the night there.
 fail() {
   printf 'fermix update: %s\n' "$1" >&2
   exit 1
@@ -386,31 +396,44 @@ as_engine() {
     "$FERMIX_BIN" "$@" </dev/null
 }
 
+# A line on stderr for a failure the night carries on past.
+warn() {
+  printf 'fermix update: %s\n' "$1" >&2
+}
+
 # Whether the running engine is older than the installed one: the `alignment`
 # `fermix service status --json` publishes, `pending_restart` exactly then. It
 # compares what runs with what is installed, so a restart a night skipped or
 # failed is still due the next night, and an engine that is not running (a
 # restore host before its import) is not started.
 restart_due() {
-  as_engine service status --json >"$WORK/service-status.json" ||
-    fail "fermix service status stopped, so whether the engine runs the installed release is unknown and it keeps running; its message above says why."
+  if ! as_engine service status --json >"$WORK/service-status.json"; then
+    warn "fermix service status stopped, so the engine is not restarted tonight; its message above says why."
+    ENGINE_FAILED=1
+    return 1
+  fi
   [ "$(tr -d '\n' <"$WORK/service-status.json" |
     sed -n 's/.*"alignment": *"\([a-z_]*\)".*/\1/p')" = pending_restart ]
 }
 
-# Whether a move is under way here, read from `fermix home status --json` (with
-# Fermix running or not): this server sending its home (requested to undoing)
-# or, as a candidate, receiving one (receiving, staged, activating). A restart
-# or a reboot then would cut the move short. Sets PHASE.
+# Whether a move is under way here, from `fermix home status --json` (with
+# Fermix running or not), in a phase the move code treats as pending: this
+# server sending its home (Home.Move's pending phases), or a candidate
+# enrolling or receiving one. Ended phases (committed, undoing, done, aborted,
+# enrolled, expired, failed) are not. Sets PHASE. An answer that cannot be
+# read counts as no move, and the engine is not restarted tonight.
 move_under_way() {
   [ -e "$FERMIX_HOME_DIR" ] || return 1
-  as_engine home status --json >"$WORK/home-status.json" ||
-    fail "fermix home status stopped, so whether a move is under way is unknown and nothing restarts; its message above says why."
+  if ! as_engine home status --json >"$WORK/home-status.json"; then
+    warn "fermix home status stopped, so the engine is not restarted tonight and the reboot is decided as if no move were under way; its message above says why."
+    ENGINE_FAILED=1
+    return 1
+  fi
   PHASE=$(tr -d '\n' <"$WORK/home-status.json" | sed -n 's/.*"move": *{\([^}]*\)}.*/\1/p' |
     sed -n 's/.*"phase": *"\([a-z_]*\)".*/\1/p')
   case "$PHASE" in
-    requested | streaming | committing | committed | aborting | undoing) return 0 ;;
-    receiving | staged | activating) return 0 ;;
+    requested | streaming | committing | aborting) return 0 ;;
+    enrolling | receiving | staged | activating) return 0 ;;
   esac
   return 1
 }
@@ -419,27 +442,78 @@ move_under_way() {
 # update: it restarts the service and waits for the new engine to answer.
 restart_engine() {
   say "Restarting the engine, which runs an older release than the one installed"
-  as_engine restart ||
-    fail "Fermix is updated, but fermix restart stopped; its message above says why."
+  if ! as_engine restart; then
+    warn "Fermix is updated, but fermix restart stopped; its message above says why."
+    ENGINE_FAILED=1
+  fi
+}
+
+# The restart, unless the engine's answers failed or a move is under way ($1).
+restart_step() {
+  [ "$ENGINE_FAILED" -eq 0 ] || return 0
+  if [ "$1" -eq 1 ]; then
+    say "A move is under way on this server ($PHASE), so the engine restarts on a night without one"
+    return 0
+  fi
+  restart_engine
+}
+
+# Consecutive nights a move has held a reboot off. A count the file does not
+# hold as a number reads as the limit, so the reboot waits no longer.
+deferrals() {
+  if [ ! -e "$DEFERRALS_FILE" ]; then
+    echo 0
+    return 0
+  fi
+  count=$(cat "$DEFERRALS_FILE") || count=""
+  case "$count" in
+    '' | *[!0-9]*) echo "$DEFERRALS_MAX" ;;
+    *) echo "$count" ;;
+  esac
+}
+
+record_deferral() {
+  install -d -m 0700 "$(dirname "$DEFERRALS_FILE")"
+  printf '%s\n' "$1" >"$DEFERRALS_FILE.incoming"
+  mv -f "$DEFERRALS_FILE.incoming" "$DEFERRALS_FILE"
+}
+
+# The reboot an update asks for, unless a move is under way ($1) and has held
+# it off fewer than DEFERRALS_MAX nights in a row.
+reboot_step() {
+  sentence="An installed update asks for a reboot ($REBOOT_FLAG), so this server reboots now"
+  if [ "$1" -eq 1 ]; then
+    count=$(deferrals)
+    if [ "$count" -lt "$DEFERRALS_MAX" ]; then
+      record_deferral $((count + 1))
+      say "A move is under way on this server ($PHASE), so the reboot an update asks for waits: night $((count + 1)) of at most $DEFERRALS_MAX"
+      return 0
+    fi
+    sentence="A move has held the reboot an update asks for off $DEFERRALS_MAX nights in a row, so this server reboots now all the same"
+  fi
+  rm -f "$DEFERRALS_FILE"
+  say "$sentence"
+  systemctl reboot || fail "systemctl reboot was refused; the next night tries again."
 }
 
 # After the update: the restart when the engine is behind, the reboot when an
-# update asks for one, neither while a move is under way.
+# update asks for one. Only the restart rests on the engine's answers; a move
+# defers the reboot a bounded number of nights.
 restart_and_reboot() {
   restart=0
   if restart_due; then restart=1; fi
   if [ "$restart" -eq 0 ] && [ ! -e "$REBOOT_FLAG" ]; then
-    say "No restart is due and no update asks for a reboot"
+    [ "$ENGINE_FAILED" -eq 1 ] || say "No restart is due and no update asks for a reboot"
+    rm -f "$DEFERRALS_FILE"
     return 0
   fi
-  if move_under_way; then
-    say "A move is under way on this server ($PHASE), so the restart and the reboot wait for the next night"
-    return 0
-  fi
-  if [ "$restart" -eq 1 ]; then restart_engine; fi
+  moving=0
+  if move_under_way; then moving=1; fi
+  if [ "$restart" -eq 1 ]; then restart_step "$moving"; fi
   if [ -e "$REBOOT_FLAG" ]; then
-    say "An installed update asks for a reboot ($REBOOT_FLAG), so this server reboots now"
-    systemctl reboot || fail "systemctl reboot was refused; the next night tries again."
+    reboot_step "$moving"
+  else
+    rm -f "$DEFERRALS_FILE"
   fi
 }
 
@@ -470,6 +544,7 @@ main() {
     say "Fermix went from $before to $after"
   fi
   restart_and_reboot
+  [ "$ENGINE_FAILED" -eq 0 ] || exit 1
 }
 
 main "$@"
@@ -483,9 +558,11 @@ FERMIX_UPDATE
 # Fermix's. Fermix's own: the package comes from the release files, not an apt
 # source, so unattended-upgrades never sees it; a root timer runs the
 # installer every night at 04:00 UTC, restarts the engine when it runs an
-# older release than the one installed and reboots when an update asks for
-# it, neither while a move is under way. A run that fails stops before both,
-# says why in the journal, and the next night tries again.
+# older release than the one installed (not while a move is under way, nor
+# when the engine's answers fail) and reboots when an update asks for it (a
+# move may hold that off two nights in a row, no more). A failed installer
+# stops the night before both; every failure says why in the journal, and
+# the next night tries again.
 schedule_updates() {
   say "Turning on updates: Debian's security updates every day, Fermix every night at 04:00 UTC"
   apt_install unattended-upgrades

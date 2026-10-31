@@ -19,9 +19,9 @@
 #   ubuntu         no Chromium package, and the sentence that says to install
 #                  one; swap of its own, which it keeps
 #   updates        the nightly update: no new release, a new one, a failed
-#                  installer, a reboot asked for, a move under way (received,
-#                  then sent) and the next night's restart, a failed restart,
-#                  no home
+#                  installer, a reboot asked for, a failed status read, three
+#                  nights under a move, an ended move, a failed restart, no
+#                  home
 #   chromium       the distribution's Chromium installed for real and started
 #                  headless as the engine account, the way the engine's
 #                  launcher starts it, its own sandbox on
@@ -148,11 +148,12 @@ as_release() {
 }
 
 check_refusals() {
-  refuses "a host that is not Debian 13 or Ubuntu 24.04" \
-    "This host runs Invented Linux 7. Fermix Always On supports Debian 13 and Ubuntu 24.04." \
+  refuses "a host that is not Debian 12, Debian 13 or Ubuntu 24.04" \
+    "This host runs Invented Linux 7. Fermix Always On supports Debian 12, Debian 13 and Ubuntu 24.04." \
     as_release invented 7 "Invented Linux 7"
-  refuses "a Debian 12 host, whose kernel has no Landlock ABI 3" \
-    "This host runs Debian GNU/Linux 12 (bookworm). Fermix Always On supports Debian 13 and Ubuntu 24.04." \
+  printf '2\n' >"$FIXTURES/landlock-abi"
+  refuses "a Debian 12 host on its own 6.1 kernel, by its Landlock ABI" \
+    "This host's kernel gives Landlock ABI 2 (0 is none) and Fermix's sandbox needs ABI 3, so Fermix would run no command here: Fermix Always On needs Linux 6.2 or later with Landlock enabled, as Debian 13 and Ubuntu 24.04 have by default." \
     as_release debian 12 "Debian GNU/Linux 12 (bookworm)"
   for abi in 2 0; do
     printf '%s\n' "$abi" >"$FIXTURES/landlock-abi"
@@ -573,6 +574,17 @@ night_calls() {
   cmp -s "$LOG/calls.log" /tmp/calls.expected
 }
 
+# The reboot deferral count, root's own: "N MODE OWNER", or "none".
+deferral_count() {
+  file=/var/lib/fermix-update/reboot-deferrals
+  if [ -f "$file" ]; then printf '%s %s\n' "$(cat "$file")" "$(mode_owner "$file")"; else echo none; fi
+}
+
+# A night the stand-in systemctl "rebooted": the real reboot empties /run.
+rebooted() {
+  rm -f /run/reboot-required
+}
+
 # The nightly update, run by hand as fermix-update.service runs it, one night
 # per case, on a host first boot enrolled. Releases are invented versions; the
 # stand-in fermix runs the release its last start installed.
@@ -585,6 +597,7 @@ updates() {
   status='fermix service status --json [as fermix]'
   home='fermix home status --json [as fermix]'
   restart='fermix restart [as fermix]'
+  reboot='systemctl reboot'
 
   run_apart "$update"
   check "[ $STATUS -eq 0 ] && night_calls '$status'" \
@@ -610,45 +623,86 @@ updates() {
 
   rm -f "$FIXTURES/installer-fails"
   run_apart "$update"
-  check "[ $STATUS -eq 0 ] && night_calls '$status' '$home' '$restart' 'systemctl reboot'" \
+  check "[ $STATUS -eq 0 ] && night_calls '$status' '$home' '$restart' '$reboot'" \
     "the next night updates, restarts the engine, then reboots as asked"
+  rebooted
 
   printf '1.2.6\n' >"$FIXTURES/release"
-  printf 'receiving|Receiving the home from Invented Mac.\n' >"$FIXTURES/phases"
+  : >"$FIXTURES/service-status-fails"
+  : >/run/reboot-required
   run_apart "$update"
-  check "[ $STATUS -eq 0 ] && night_calls '$status' '$home'" \
-    "while this candidate receives a move, a new release restarts nothing and reboots nothing"
-  check "contains $OUT '==> A move is under way on this server (receiving), so the restart and the reboot wait for the next night'" \
-    "and says so in one line"
+  ended_with "fermix service status stopped, so the engine is not restarted tonight; its message above says why." \
+    "when fermix service status fails, the night says so in one line and ends non-zero"
+  check "night_calls '$status' '$home' '$reboot'" "and skips the restart but still reboots"
+  rm -f "$FIXTURES/service-status-fails"
+  rebooted
 
-  rm -f "$FIXTURES/phases"
+  : >"$FIXTURES/home-status-fails"
+  : >/run/reboot-required
   run_apart "$update"
-  check "[ $STATUS -eq 0 ] && night_calls '$status' '$home' '$restart' 'systemctl reboot'" \
-    "the next night, the move done and no newer release, the engine restarts on 1.2.6 and the server reboots"
-  check "contains $OUT '==> Fermix 1.2.6 is the newest release'" "with nothing new to install"
+  ended_with "fermix home status stopped, so the engine is not restarted tonight and the reboot is decided as if no move were under way; its message above says why." \
+    "when fermix home status fails, the night says so in one line and ends non-zero"
+  check "night_calls '$status' '$home' '$reboot'" "and skips the restart but reboots as if no move were under way"
+  rm -f "$FIXTURES/home-status-fails"
+  rebooted
 
   printf '1.2.7\n' >"$FIXTURES/release"
+  printf 'receiving|Receiving the home from Invented Mac.\n' >"$FIXTURES/phases"
+  : >/run/reboot-required
+  run_apart "$update"
+  check "[ $STATUS -eq 0 ] && night_calls '$status' '$home'" \
+    "the first night this candidate receives a move, nothing restarts or reboots"
+  check "contains $OUT '==> A move is under way on this server (receiving), so the engine restarts on a night without one'" \
+    "and the restart says why in one line"
+  check "contains $OUT '==> A move is under way on this server (receiving), so the reboot an update asks for waits: night 1 of at most 2'" \
+    "and the reboot says how many nights it has waited"
+  check "[ \"\$(deferral_count)\" = '1 600 root:root' ] && [ \"\$(mode_owner /var/lib/fermix-update)\" = '700 root:root' ]" \
+    "the deferral is counted in a file root alone can read"
+
   printf 'streaming|Moving to the invented server.\n' >"$FIXTURES/phases"
   run_apart "$update"
   check "[ $STATUS -eq 0 ] && night_calls '$status' '$home'" \
-    "while this server sends its home in a move, nothing restarts either"
-  check "contains $OUT '==> A move is under way on this server (streaming), so the restart and the reboot wait for the next night'" \
-    "and says so in one line"
+    "the second night, this server sending its home, nothing restarts or reboots"
+  check "contains $OUT '==> A move is under way on this server (streaming), so the reboot an update asks for waits: night 2 of at most 2'" \
+    "and the reboot waits its second and last night"
+  check "[ \"\$(deferral_count)\" = '2 600 root:root' ]" "the count reads 2"
 
+  run_apart "$update"
+  check "[ $STATUS -eq 0 ] && night_calls '$status' '$home' '$reboot'" \
+    "the third night under a move, the server reboots all the same and the engine still waits"
+  check "contains $OUT '==> A move has held the reboot an update asks for off 2 nights in a row, so this server reboots now all the same'" \
+    "and says so in one line"
+  check "[ \"\$(deferral_count)\" = none ]" "the reboot clears the count"
+  rebooted
+
+  printf 'committed|Moved to the invented server.\n' >"$FIXTURES/phases"
+  printf '1\n' >/var/lib/fermix-update/reboot-deferrals
+  : >/run/reboot-required
+  run_apart "$update"
+  check "[ $STATUS -eq 0 ] && night_calls '$status' '$home' '$restart' '$reboot'" \
+    "a move in an ended phase (committed) defers nothing: the engine restarts and the server reboots"
+  check "[ \"\$(deferral_count)\" = none ]" "and the count is cleared"
   rm -f "$FIXTURES/phases"
+  rebooted
+
+  printf '1.2.8\n' >"$FIXTURES/release"
   : >"$FIXTURES/restart-fails"
+  : >/run/reboot-required
   run_apart "$update"
   ended_with "Fermix is updated, but fermix restart stopped; its message above says why." \
-    "a restart that fails ends the night with its sentence"
-  check "night_calls '$status' '$home' '$restart'" "and does not reboot"
+    "a restart that fails says so in one line and ends the night non-zero"
+  check "night_calls '$status' '$home' '$restart' '$reboot'" "and the server still reboots"
+  rm -f "$FIXTURES/restart-fails"
+  rebooted
 
-  rm -f "$FIXTURES/restart-fails" /run/reboot-required
   rm -rf /home/fermix/.fermix
-  printf '1.2.8\n' >"$FIXTURES/release"
+  printf '1.2.9\n' >"$FIXTURES/release"
+  printf '1\n' >/var/lib/fermix-update/reboot-deferrals
   run_apart "$update"
   check "[ $STATUS -eq 0 ] && night_calls '$status'" \
     "a server with no home yet (a restore host) updates and starts no engine"
   check "contains $OUT '==> No restart is due and no update asks for a reboot'" "and says so"
+  check "[ \"\$(deferral_count)\" = none ]" "a night with no move clears the count"
   check "[ -z \"\$(find /run -maxdepth 1 -name 'fermix-update.*')\" ]" "no night leaves a work directory behind"
 }
 
