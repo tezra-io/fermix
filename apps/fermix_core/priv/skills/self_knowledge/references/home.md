@@ -412,7 +412,11 @@ it, never a second writer.
   server enrolls with it, and the move starts on the old server with
   `keep_as_desktop` false (`home.move.start`; true unless said), so the old
   server keeps no desktop key, row or link and serves nothing once the move
-  commits.
+  commits. On a server primary with no desktop to start it from, the same
+  move is `fermix home move --to ID --retire` at the server's own terminal.
+  Moving Fermix back to a desktop is not part of this release: to
+  bring it back to a computer, restore the newest snapshot into a fresh home
+  there.
 - **Replacing a server Fermix created on Hetzner** (Always On's details,
   Replace the server, on the computer the home left, which keeps the token
   and the record of what Fermix created): pick the size and location, and
@@ -432,11 +436,7 @@ it, never a second writer.
   its code on the old one and leaves the home where it was; a move the old
   server undid leaves the new one waiting for its move again. Replace is
   refused while the new server stands, while the move to it runs and while the
-  old one is not deleted yet, each in one sentence. On a server primary with no desktop to start it from, the same
-  move is `fermix home move --to ID --retire` at the server's own terminal.
-  Moving Fermix back to a desktop is not part of this release: to
-  bring it back to a computer, restore the newest snapshot into a fresh home
-  there.
+  old one is not deleted yet, each in one sentence.
 
 ## Snapshots and the recovery passphrase
 
