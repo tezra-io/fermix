@@ -699,8 +699,11 @@ defmodule FermixCore.Management.CopyTest do
             home_bytes: bytes
           )
 
+        # The summary shows a block as its sentence and each warning in
+        # Details, so each item is a summary word too.
         for item <- report.items do
           assert_clean(item.sentence, :prose, ["anthropic_api_key", "invented-notes"], item.id)
+          assert Copy.summary_violations(item.sentence) == [], "#{item.id}: #{item.sentence}"
           refute_command(item.sentence, item.id)
         end
       end
@@ -932,6 +935,33 @@ defmodule FermixCore.Management.CopyTest do
   # The older copy the apps and the setup page show (readiness actions and
   # every settings row) is held to the same rule: what to do in the app, or
   # on the server, never a `fermix` command.
+  # The summary prints sentences written outside `Copy` as they are: a
+  # create's failure (`Home.Provision`, kept in the ledger), which keeps a
+  # refused code as its own (`{:code_unavailable, _}`: the enrollment
+  # window's and the rail's, `Home.Link`, in the channels app), the ledger's
+  # unreadable file and the readiness items. They are swept from source with
+  # every template rendered, so a fixed word of the engine's own, a code, or
+  # a term an interpolation inlines fails here rather than in an owner's pane.
+  describe "the sentences the summary takes from elsewhere" do
+    test "every one is plain words, with no internal word, code or term" do
+      offenders =
+        for {file, sentence} <- summary_sources(),
+            (found = Copy.summary_violations(sentence) ++ internal_terms(sentence)) != [],
+            do: {Path.basename(file), sentence, found}
+
+      assert offenders == []
+    end
+
+    test "the sweep reads every producer" do
+      files = summary_sources() |> Enum.map(&Path.basename(elem(&1, 0))) |> Enum.uniq()
+
+      assert Enum.sort(files) ==
+               ~w(enrollment.ex ledger.ex link.ex move_readiness.ex provision.ex)
+
+      assert Enum.count(summary_sources()) > 60
+    end
+  end
+
   describe "the readiness and settings copy an app pane shows" do
     test "names no fermix command" do
       readiness =
@@ -1564,6 +1594,7 @@ defmodule FermixCore.Management.CopyTest do
   end
 
   @lib Path.expand("../../../lib/fermix_core", __DIR__)
+  @channels_lib Path.expand("../../../../fermix_channels/lib/fermix_channels", __DIR__)
 
   defp published_sentences, do: source_sentences() ++ source_templates()
 
@@ -1584,13 +1615,35 @@ defmodule FermixCore.Management.CopyTest do
 
   defp source_sentences, do: collect(&literal/1)
 
+  defp summary_sources do
+    files =
+      Enum.map(
+        ["home/provision.ex", "home/provision/ledger.ex", "home/move_readiness.ex"],
+        &Path.join(@lib, &1)
+      ) ++ Enum.map(["home/enrollment.ex", "home/link.ex"], &Path.join(@channels_lib, &1))
+
+    collect(files, &literal/1) ++ collect(files, &template/1) ++ collect(files, &joined/1)
+  end
+
+  # A sentence written over several lines is `<>`-joined fragments, none of
+  # them a sentence alone: rendered whole, so the sweep reads what is shown.
+  defp joined({:<>, _meta, [left, right]}), do: keep(fragment(left) <> fragment(right))
+  defp joined(_node), do: :skip
+
+  defp fragment({:<>, _meta, [left, right]}), do: fragment(left) <> fragment(right)
+  defp fragment({:<<>>, _meta, parts}), do: Enum.map_join(parts, &part/1)
+  defp fragment(text) when is_binary(text), do: text
+  defp fragment(_other), do: @placeholder
+
   # The same sweep, reading the sentences that are assembled rather than
   # written: every interpolation is rendered, so a template that inlines a
   # reason is judged on the text a client would actually be shown.
   defp source_templates, do: collect(&template/1)
 
-  defp collect(render) do
-    Enum.flat_map(source_files(), fn file ->
+  defp collect(render), do: collect(source_files(), render)
+
+  defp collect(files, render) do
+    Enum.flat_map(files, fn file ->
       {:ok, ast} = Code.string_to_quoted(File.read!(file))
       {_ast, found} = Macro.prewalk(ast, [], &collect_sentence(&1, &2, render))
 

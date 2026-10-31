@@ -399,8 +399,11 @@ defmodule FermixChannels.Home.Enrollment do
       %{state: :helper_missing} ->
         {:error, "This build has no remote-reach helper, so a server cannot enroll with it."}
 
+      # The rail's own words (its relays, versions, keys) go to the log and
+      # Doctor; an owner reads this refusal, in Always On too.
       %{state: :failed} = status ->
-        {:error, "Remote reach failed: #{Map.get(status, :failure, "unknown")}."}
+        Logger.warning("enrollment: no code: remote reach failed: #{status[:failure]}")
+        {:error, "Remote reach failed, so Fermix opened no code; Doctor says why."}
     end
   end
 
@@ -431,8 +434,12 @@ defmodule FermixChannels.Home.Enrollment do
 
   defp host_name do
     case :inet.gethostname() do
-      {:ok, name} -> {:ok, String.slice(to_string(name), 0, 64)}
-      {:error, reason} -> {:error, "This host has no name to give (#{inspect(reason)})."}
+      {:ok, name} ->
+        {:ok, String.slice(to_string(name), 0, 64)}
+
+      {:error, reason} ->
+        Logger.error("enrollment: this host's name could not be read: #{inspect(reason)}")
+        {:error, "Fermix could not read this computer's name, so it opened no code."}
     end
   end
 

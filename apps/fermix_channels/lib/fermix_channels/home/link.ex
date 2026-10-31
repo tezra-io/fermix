@@ -43,12 +43,13 @@ defmodule FermixChannels.Home.Link do
   end
 
   # The window runs on the primary alone (`FermixChannels.Home.Enrollment`);
-  # any other role answers by name.
+  # with no window running here, none opens, said in words an owner reads
+  # (a create keeps it as its failure, which Always On shows).
   @impl true
   def open_enrollment(kind) when kind in [:manual, :provisioned] do
     if Process.whereis(Enrollment),
       do: Enrollment.open(Enrollment, kind),
-      else: {:error, {:unavailable, "Only the primary opens an enrollment code."}}
+      else: {:error, {:unavailable, "Fermix cannot open a code here right now."}}
   end
 
   # No window runs outside the primary, so there is none to close.

@@ -12,6 +12,7 @@ defmodule FermixChannels.Home.EnrollmentTest do
   alias FermixCore.Home.Candidates
   alias FermixCore.Home.DeviceLocal
   alias FermixCore.Home.EnrollmentCode
+  alias FermixCore.Management.Copy
 
   setup do
     primary = HomeMove.primary!()
@@ -188,6 +189,23 @@ defmodule FermixChannels.Home.EnrollmentTest do
              Enrollment.open(enrollment)
 
     assert Enrollment.status(enrollment) == nil
+  end
+
+  # The refusal is a sentence an owner reads, in Always On too (a create
+  # keeps it as its failure), so the rail's own failure words, with its
+  # relays, versions and keys, stay in the log and Doctor.
+  test "a failed rail opens no code, in plain words that carry none of its own" do
+    failure = "the helper runs iroh 1.3.0, the relays run 1.2.0"
+    rail = start_supervised!({HomeMove.RailStatus, %{state: :failed, failure: failure}})
+    suffix = System.unique_integer([:positive])
+
+    enrollment =
+      start_supervised!({Enrollment, name: :"enrollment_failed_#{suffix}", helper: rail})
+
+    assert {:error, {:unavailable, sentence}} = Enrollment.open(enrollment)
+    refute sentence =~ failure
+    assert Copy.violations(sentence, :prose) == []
+    assert Copy.summary_violations(sentence) == []
   end
 
   defp open_enrollment(primary, code, home \\ nil) do
