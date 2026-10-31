@@ -10,10 +10,10 @@ defmodule FermixCore.Home.Archive.RestoredConfig do
       (M75 §13);
     * a home in keyring mode (no `[fermix_core] secret_store`, or
       `"keyring"`, read by `SecretWriter.parse_store/1`) restored on a host
-      that is not macOS and whose keyring cannot be used
-      (`SecretWriter.usable?/1` on its probe, the question setup's headless
-      file-store default asks) gets `secret_store = "file"`. On macOS the
-      keyring is kept;
+      that is not macOS and whose keyring cannot be used (`keyring_usable?`,
+      true only when the keyring answered `available`: a probe that timed
+      out or could not tell keeps nothing in a keyring the new host may not
+      read) gets `secret_store = "file"`. On macOS the keyring is kept;
     * `[fermix_channels.imessage] enabled = true` restored on a host that is
       not macOS becomes `false`: iMessage needs that Mac's Messages database
       and helper, and a settings file that asks for it refuses to load on

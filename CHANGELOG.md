@@ -137,7 +137,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   any install is; one it could not install says so in Plugins, with Install….
   Once a recovery passphrase is set, a primary keeps encrypted snapshots of
   itself in an S3 bucket, every six hours by default, and after a move on your
-  desktop too, and a lost server is restored from the newest one. The app,
+  desktop too, and a lost server is restored from the newest one. A move or
+  restore onto a Linux server keeps your secrets in its keyring only when the
+  keyring answers, and otherwise in Fermix's own secret files. The app,
   the setup page's Always On tab and `fermix home status` all lead with the
   same one sentence for where Always On stands and, when something is wrong,
   the one action that fixes it: a server turned off in Hetzner (Turn it on),

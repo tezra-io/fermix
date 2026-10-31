@@ -49,7 +49,8 @@ defmodule FermixCore.Home.Archive do
 
   **What does not travel as consent or history.** A restore withdraws
   coding-harness consent, moves a keyring-mode home to the file store on a host
-  without a usable keyring (`FermixCore.Home.Archive.RestoredConfig`), deletes
+  whose keyring did not answer `available` (`FermixCore.Home.Archive.RestoredConfig`;
+  a probe that timed out counts as not answering, logged once), deletes
   screen history from the restored database
   (`FermixCore.Home.Archive.ScreenHistory`), and names the installed plugins
   built for another OS or architecture (the manifest's `host`). Sandbox grants
@@ -692,10 +693,28 @@ defmodule FermixCore.Home.Archive do
     end
   end
 
+  # Only a keyring that answered keeps keyring mode: on a server with no
+  # session bus, a probe that timed out (`unknown`) would otherwise move in a
+  # home whose secrets the new primary cannot read.
   defp keyring_usable?(opts) do
     probe_opts = [store: :keyring] ++ Keyword.take(opts, [:probe_timeout_ms])
-    SecretWriter.usable?(SecretWriter.probe(probe_opts))
+
+    case SecretWriter.probe(probe_opts) do
+      %{state: :available} ->
+        true
+
+      verdict ->
+        Logger.warning(
+          "restore: the keyring answered #{verdict.state} (#{verdict_words(verdict)}), so " <>
+            "this home keeps its secrets in files"
+        )
+
+        false
+    end
   end
+
+  defp verdict_words(%{evidence: evidence}) when is_binary(evidence), do: evidence
+  defp verdict_words(%{sentence: sentence}), do: sentence
 
   # A plugin installed on another OS or architecture carries a build for that
   # one; the restore names them and installs nothing.

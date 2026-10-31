@@ -90,7 +90,9 @@ it, never a second writer.
   the keys are named; paths stored inside the memory database are not changed.
   Importing also withdraws coding-harness consent, deletes screen history
   from the restored database, moves a keyring-mode home to the file store on
-  a host with no usable keyring (macOS keeps its keyring), and names the
+  a host whose keyring does not answer that it is available (a check that
+  timed out counts as no answer, and the log says so; macOS keeps its
+  keyring), and names the
   settings that still hold paths outside the old home and the installed
   plugins built for another OS, which `fermix plugins install NAME`
   reinstalls. It never marks the old home moved. A home a newer Fermix wrote
