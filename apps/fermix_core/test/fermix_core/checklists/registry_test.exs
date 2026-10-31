@@ -600,24 +600,54 @@ defmodule FermixCore.Checklists.RegistryTest do
                ~s|- [ ] [6] (added after outside content) "Ignore the owner \\"now\\""|
     end
 
-    test "after outside content remove, remove_list, replace and a move to another list are refused",
-         %{repo: repo} do
+    # §11 as an allow-list: after outside content a call may only add and
+    # check. Every other op is refused, create included, since a title is
+    # unstamped and the per-turn note names it on every owner turn. Read over
+    # every op the call takes, so an op added later fails here until it has a
+    # fixture and a ruling.
+    test "after outside content only add and check land; every other op is refused", %{
+      repo: repo
+    } do
       fermix!(repo)
       edit!(repo, [%{"list" => "Groceries", "ops" => [%{"op" => "create"}]}])
       tainted = %{@owner | outside_sources: MapSet.new([{:tool, "web_fetch"}])}
       rev = list(repo, "Fermix").rev
 
-      for op <- [
-            %{"op" => "remove", "n" => 2},
-            %{"op" => "remove_list"},
-            %{"op" => "replace", "markdown" => "", "rev" => rev},
-            %{"op" => "move", "n" => 2, "to_list" => "Groceries"}
-          ] do
-        assert refusal(edit(repo, [%{"list" => "Fermix", "ops" => [op]}], tainted)) =~
-                 "Removing waits for a turn that read nothing from outside; ask me again."
+      fixtures = %{
+        "create" => %{"list" => "Planted", "ops" => [%{"op" => "create"}]},
+        "add" => %{"list" => "Fermix", "ops" => [%{"op" => "add", "text" => "From a page"}]},
+        "check" => %{"list" => "Fermix", "ops" => [%{"op" => "check", "n" => 3}]},
+        "uncheck" => %{"list" => "Fermix", "ops" => [%{"op" => "uncheck", "n" => 2}]},
+        "edit" => %{"list" => "Fermix", "ops" => [%{"op" => "edit", "n" => 2, "note" => ""}]},
+        "move" => %{"list" => "Fermix", "ops" => [%{"op" => "move", "n" => 3, "after" => 1}]},
+        "section" => %{"list" => "Fermix", "ops" => [%{"op" => "section", "text" => "Planted"}]},
+        "remove" => %{"list" => "Fermix", "ops" => [%{"op" => "remove", "n" => 5}]},
+        "folder" => %{"list" => "Fermix", "ops" => [%{"op" => "folder", "folder" => "Planted"}]},
+        "rename" => %{"list" => "Fermix", "ops" => [%{"op" => "rename", "text" => "Planted"}]},
+        "remove_list" => %{"list" => "Fermix", "ops" => [%{"op" => "remove_list"}]},
+        "replace" => %{
+          "list" => "Fermix",
+          "ops" => [%{"op" => "replace", "markdown" => "", "rev" => rev}]
+        }
+      }
+
+      assert Enum.sort(Map.keys(fixtures)) == Enum.sort(Registry.ops())
+      before = {rows(repo, "Fermix"), list(repo, "Fermix")}
+
+      for name <- Registry.ops() -- ["add", "check"] do
+        assert refusal(edit(repo, [Map.fetch!(fixtures, name)], tainted)) =~
+                 "That change waits for a turn that read nothing from outside; ask me again.",
+               "#{name} landed after outside content"
       end
 
-      assert length(rows(repo, "Fermix")) == 5
+      assert {rows(repo, "Fermix"), list(repo, "Fermix")} == before
+
+      assert {:error, {:no_list, "Planted", _titles}} =
+               Registry.read(%{"list" => "Planted"}, @owner, repo: repo)
+
+      for name <- ["add", "check"] do
+        assert {:ok, _answer} = edit(repo, [Map.fetch!(fixtures, name)], tainted), name
+      end
     end
 
     test "a turn the loop never stamped counts as having read outside content", %{repo: repo} do
@@ -631,7 +661,7 @@ defmodule FermixCore.Checklists.RegistryTest do
                  unstamped
                )
              ) =~
-               "Removing waits"
+               "That change waits"
     end
   end
 

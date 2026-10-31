@@ -15,9 +15,12 @@ defmodule FermixCore.Checklists.Ops do
   Rows keep their order by `position`, integers with gaps of 1,024; a row put
   between two neighbours takes the midpoint, and when no gap is left the
   whole list is numbered again. A row's `n` comes from its list's `next_n`,
-  which only goes up, so a number is never reused within a list. A row whose
-  words a call writes after outside content is stamped, and the stamp is never
-  cleared (§11).
+  which only goes up, so a number is never reused within a list.
+
+  After outside content a call may only add and check (§11, `@outside_ops`):
+  every other op, `create` included, is refused, since a list's title is
+  unstamped and the per-turn note names it on every owner turn. A row it adds
+  is stamped, and the stamp is never cleared.
 
   Refusals are `{:error, {:op_failed, change, op, list, reason}}`, the change
   and the op counted from 1, which `Checklists.Registry.describe_error/1`
@@ -28,6 +31,9 @@ defmodule FermixCore.Checklists.Ops do
 
   @gap 1_024
   @max_lists 50
+  # The only ops a call that read outside content may run (§11): an allow-list,
+  # so an op added later is refused there until it is ruled on.
+  @outside_ops [:add, :check]
   @max_rows 500
   @id_alphabet ~c"0123456789abcdefghjkmnpqrstvwxyz"
   @list_id ~r/\Ack_[0-9a-z]{10}\z/
@@ -172,7 +178,8 @@ defmodule FermixCore.Checklists.Ops do
 
   # The list a change edits: one its first op creates, or an existing live one.
   defp change_list(state, %{list: title, ops: [%{op: :create} = create | rest]}, edit) do
-    with {:ok, id, state} <- create(state, title, create, edit),
+    with :ok <- outside_allows(edit, create),
+         {:ok, id, state} <- create(state, title, create, edit),
          do: {:ok, {id, rest, 2}, touch(state, id)}
   end
 
@@ -231,11 +238,12 @@ defmodule FermixCore.Checklists.Ops do
   defp folder_words(nil), do: ""
   defp folder_words(folder), do: " in " <> Render.quoted(folder)
 
-  # Nothing reaches a list a call removed; a list's own ops come first, then
-  # its rows'.
+  # Nothing reaches a list a call removed, and after outside content nothing
+  # but an add or a check; a list's own ops come first, then its rows'.
   defp op(state, id, op, edit) do
     cond do
       op.op == :create -> {:error, :create_not_first}
+      outside_allows(edit, op) != :ok -> {:error, :outside_content}
       list(state, id).removed_at -> {:error, :list_removed}
       op.op in [:folder, :rename, :remove_list] -> list_op(state, id, op, edit)
       true -> row_op(state, id, op, edit)
@@ -261,11 +269,8 @@ defmodule FermixCore.Checklists.Ops do
     end
   end
 
-  defp list_op(state, id, %{op: :remove_list}, edit) do
-    with :ok <- inside(edit) do
-      {:ok, state |> update_list(id, removed_at: edit.now) |> event(id, "removed the list")}
-    end
-  end
+  defp list_op(state, id, %{op: :remove_list}, edit),
+    do: {:ok, state |> update_list(id, removed_at: edit.now) |> event(id, "removed the list")}
 
   defp in_folder(nil), do: " in no folder"
   defp in_folder(folder), do: " in " <> Render.quoted(folder)
@@ -317,7 +322,7 @@ defmodule FermixCore.Checklists.Ops do
     with {:ok, index, row} <- find(rows(state, id), n),
          :ok <- editable(row, op),
          :ok <- section_name_free(rows(state, id), row, op.text) do
-      reworded = row |> reword(op) |> stamp(edit) |> dirty(edit.now)
+      reworded = row |> reword(op) |> dirty(edit.now)
 
       state
       |> replace_row(id, index, reworded)
@@ -331,9 +336,7 @@ defmodule FermixCore.Checklists.Ops do
   defp row_op(state, id, %{op: :move, to_list: nil} = op, edit),
     do: move_within(state, id, op, edit)
 
-  defp row_op(state, id, %{op: :move} = op, edit) do
-    with :ok <- inside(edit), do: move_across(state, id, op, edit)
-  end
+  defp row_op(state, id, %{op: :move} = op, edit), do: move_across(state, id, op, edit)
 
   defp row_op(state, id, %{op: :section, text: text} = op, edit) do
     rows = rows(state, id)
@@ -353,8 +356,7 @@ defmodule FermixCore.Checklists.Ops do
   defp row_op(state, id, %{op: :remove, n: n}, edit) do
     rows = rows(state, id)
 
-    with :ok <- inside(edit),
-         {:ok, index, row} <- find(rows, n),
+    with {:ok, index, row} <- find(rows, n),
          :ok <- empty_section(rows, index, row) do
       removed = %{row | updated_at: edit.now} |> Map.put(:removed_at, edit.now)
 
@@ -370,8 +372,7 @@ defmodule FermixCore.Checklists.Ops do
   defp row_op(state, id, %{op: :replace} = op, edit) do
     list = list(state, id)
 
-    with :ok <- inside(edit),
-         :ok <- current(list, op.rev),
+    with :ok <- current(list, op.rev),
          {:ok, plan} <- replacement(rows(state, id), op.rows) do
       replaced(state, id, plan, edit)
     end
@@ -435,10 +436,6 @@ defmodule FermixCore.Checklists.Ops do
 
   defp reword(row, %{text: text, note: :keep}), do: %{row | text: text || row.text}
   defp reword(row, %{text: text, note: note}), do: %{row | text: text || row.text, note: note}
-
-  # A row whose words a call writes after outside content keeps the stamp.
-  defp stamp(row, %{outside?: true}), do: %{row | stamped: true}
-  defp stamp(row, _edit), do: row
 
   defp move_within(state, id, %{n: n} = op, edit) do
     with {:ok, index, row} <- item(rows(state, id), n),
@@ -592,7 +589,7 @@ defmodule FermixCore.Checklists.Ops do
     fields = %{text: line.text, note: line.note}
 
     {row, state} =
-      new_row(state, id, line.kind, fields, %{edit | outside?: edit.outside? or line.stamped})
+      new_row(state, id, line.kind, fields, %{edit | outside?: line.stamped})
 
     {%{row | done: line.done, done_at: if(line.done, do: edit.now)}, state, :added}
   end
@@ -720,8 +717,10 @@ defmodule FermixCore.Checklists.Ops do
       else: {:error, {:list_full, list(state, id).title}}
   end
 
-  defp inside(%{outside?: true}), do: {:error, :outside_content}
-  defp inside(_edit), do: :ok
+  defp outside_allows(%{outside?: true}, %{op: op}) when op not in @outside_ops,
+    do: {:error, :outside_content}
+
+  defp outside_allows(_edit, _op), do: :ok
 
   defp live(state),
     do: state.lists |> Map.values() |> Enum.filter(&is_nil(&1.removed_at)) |> sorted()

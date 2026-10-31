@@ -6,8 +6,8 @@ defmodule FermixCore.Tools.ChecklistEdit do
   The answer is one line per list of what changed and its new counts, never
   the whole list.
 
-  After outside content an add or a check still lands, its row stamped, and a
-  removal, a replace or a move to another list is refused (`Checklists.Ops`).
+  After outside content an add or a check still lands, its row stamped, and
+  every other op, a create included, is refused (`Checklists.Ops`).
   A stamped row's words come back framed in the answer, which brings the turn
   an outside source, as a read does.
 
@@ -27,8 +27,6 @@ defmodule FermixCore.Tools.ChecklistEdit do
   alias FermixCore.ReplyBlocks
   alias FermixCore.Telemetry
   alias FermixCore.Tools.Telemetry, as: ToolTelemetry
-
-  @ops ~w(create add check uncheck edit move section remove folder rename remove_list replace)
 
   @impl true
   @spec name() :: String.t()
@@ -72,7 +70,7 @@ defmodule FermixCore.Tools.ChecklistEdit do
       properties: %{
         op: %{
           type: "string",
-          enum: @ops,
+          enum: Registry.ops(),
           description:
             "create (first op; folder?) makes the list. add (text, note?, section? or after?). " <>
               "check, uncheck, remove (n). edit (n, text?, note?; \"\" clears). move (n, " <>
@@ -120,7 +118,7 @@ defmodule FermixCore.Tools.ChecklistEdit do
       %{tag: "stale", description: "a replace's rev is behind the list's"},
       %{
         tag: "outside_content",
-        description: "a removal, replace or move to another list after outside content"
+        description: "an op other than add or check after outside content"
       },
       %{tag: "list_full", description: "the list holds 500 rows"},
       %{tag: "too_many_lists", description: "the owner keeps 50 lists"},

@@ -19,9 +19,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and voice calls, never in a group or for a guest, and a scheduled job only
   when it was set up there with the list tools allowed. After a request reads
   a page or other outside content, Fermix still adds and ticks, marked as
-  such, but removes nothing until you ask again. Memory's review leaves list
-  items to the list. No app draws a list yet: ask to see one and it comes as a
-  short checklist.
+  such, but changes nothing else until you ask again. Memory's review leaves
+  list items to the list. No app draws a list yet: ask to see one and it comes
+  as a short checklist.
 
 - **A watcher can set off a follow-up: your own job, run whenever it passes
   an item.** Ask in chat ("watch x-feed, and whenever a post says the limits

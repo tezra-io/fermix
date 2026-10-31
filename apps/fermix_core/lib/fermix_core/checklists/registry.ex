@@ -15,9 +15,9 @@ defmodule FermixCore.Checklists.Registry do
     * **one transaction** — the call goes to the Repo whole, where
       `Checklists.Ops` applies it to the rows it loaded and every list it
       changed moves its `rev` once, or nothing changes;
-    * **provenance** — a call on a turn that had read outside content stamps
-      the rows whose words it writes, and its removals, replaces and moves to
-      another list are refused (`Checklists.Ops`);
+    * **provenance** — a call on a turn that had read outside content may
+      only add and check, the rows it adds stamped, and every other op is
+      refused (`Checklists.Ops`);
     * **the answers** — a read rendered as markdown (`Checklists.Render`), an
       edit's one line per list, and one sentence for every refusal
       (`describe_error/1`).
@@ -51,6 +51,10 @@ defmodule FermixCore.Checklists.Registry do
   @type touch :: %{list_id: String.t(), title: String.t(), rows: [String.t()]}
 
   @type answer :: %{text: String.t(), touched: [touch()]}
+
+  @doc "Every op a `checklist_edit` call takes, by name."
+  @spec ops() :: [String.t()]
+  def ops, do: @ops
 
   @doc "The most lists one `checklist_edit` call changes."
   @spec max_changes() :: pos_integer()
