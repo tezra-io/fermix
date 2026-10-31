@@ -98,7 +98,21 @@ second block type in `PROTOCOL.md`, `checklists`: the lists a turn's list tools
 read or changed, by id, which `Turns` takes with the place records in the same
 call, and which rides the same row, `text_done` and history message. No client
 rule reads it, and every row, seq, ending and settlement is as before, so
-nothing the spec models changed.
+nothing the spec models changed. The re-read after M85 §07 found the owner's
+lists on companion protocol 6: `checklists_pull`, `checklist_pull` and
+`checklist_edit` are served in the Connection's own step against the lists'
+tables, an edit answered `accepted` (or `request_failed`) by its own
+`client_msg_id`, deduplicated in the lists' own table and never in the
+request store; `checklists` and `checklist` reach only the owner's version 6
+connections that pulled the index or hold the list, written from two new
+`handle_info` clauses, `{:checklists_changed, _}`, which only marks what is
+pending and arms the window's timer, and `:checklists_flush`, which writes
+them whole and, on a failed write, ends the connection as a drop does; and
+`message` stamps a turn with whether its connection draws lists, which the
+turn's prompt reads. None of them has a seq, request or turn, none moves a
+cursor or the outbox, and every row, seq, ending and settlement is as
+before, so nothing the spec models changed; the header names them among
+what it leaves out.
 
 **The Queue is one abstract process.** The runner takes one `.tla` per spec,
 and `turn_queue` proves the Queue's rules against `queue.ex`, so this spec takes
