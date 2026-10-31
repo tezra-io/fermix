@@ -675,6 +675,187 @@ defmodule FermixCore.Management.HomeSummaryTest do
     end
   end
 
+  # -- watching for a change ----------------------------------------------------
+
+  # What `Home.StatusWatch` reads (companion protocol 6): the key a change is
+  # told by, whether Always On is off, and when the summary next changes by
+  # time alone.
+  describe "watching for a change" do
+    @hour 60 * @minute
+    @day 24 * @hour
+
+    test "the key does not move with the clock between deadlines" do
+      for {name, facts, _state, _sentence, _action} <- cases() do
+        %{key: key, next_change_ms: next} = HomeSummary.watch(facts)
+        shift = min((next || 6 * @hour) - 1_000, 6 * @hour)
+
+        if shift > 0 do
+          assert HomeSummary.watch(later(facts, shift)).key == key,
+                 "#{name}: the key moved #{shift} ms later"
+        end
+      end
+    end
+
+    test "each deadline is when the summary changes, and not a second before" do
+      for {name, facts, wait, state, kind} <- deadline_cases() do
+        assert HomeSummary.watch(facts).next_change_ms == wait, name
+
+        before = HomeSummary.summary(later(facts, wait - 1_000))
+        refute {before["state"], before["detail"]["kind"]} == {state, kind}, name
+
+        at = HomeSummary.summary(later(facts, wait))
+        assert {at["state"], at["detail"]["kind"]} == {state, kind}, "#{name}: #{inspect(at)}"
+      end
+    end
+
+    test "off watches nothing: no deadline, and the key says off" do
+      for facts <- [facts([]), facts(stays_here: [:imessage]), facts(host_os: :linux)] do
+        assert %{off: true, next_change_ms: nil} = HomeSummary.watch(facts)
+      end
+
+      refute HomeSummary.watch(ready_facts([])).off
+      refute HomeSummary.watch(desktop([])).off
+    end
+
+    test "the key moves with the state, the action, the problem kind and a step's sentence" do
+      keys =
+        for facts <- [
+              facts([]),
+              facts(stays_here: [:imessage]),
+              facts(provision: ledger(:creating)),
+              facts(provision: created_ledger(), link: link(enrollment: provisioned(:open))),
+              facts(provision: created_ledger(), link: link(enrollment: provisioned(:used))),
+              facts(provision: ledger(:failed, failure: failure("unavailable", "nbg1"))),
+              facts(provision: ledger(:failed, failure: failure("unavailable"))),
+              ready_facts([]),
+              device(move: move("streaming")),
+              device(move: move("committing")),
+              desktop([]),
+              desktop(primary_home: server_home(disk: 0.9))
+            ],
+            do: HomeSummary.watch(facts).key
+
+      assert length(Enum.uniq(keys)) == length(keys)
+    end
+
+    test "on and problem keys leave out the sentence, whose figures move with the clock" do
+      an_hour_ago = server_home(backups: [{"desktop", ~U[2031-05-04 11:00:00Z]}])
+
+      assert HomeSummary.summary(desktop(primary_home: an_hour_ago))["sentence"] ==
+               "Fermix runs on your server. Last backup 1 hour ago."
+
+      assert HomeSummary.watch(desktop([])).key ==
+               HomeSummary.watch(desktop(primary_home: an_hour_ago)).key
+
+      assert HomeSummary.watch(desktop(primary_home: server_home(disk: 0.9))).key ==
+               HomeSummary.watch(desktop(primary_home: server_home(disk: 0.96))).key
+    end
+
+    # A desktop draws its own summary from what its server's `home.status`
+    # holds, so the server's key moves with that too.
+    test "a server's key moves with the backups, the code and the servers its desktops draw" do
+      base = HomeSummary.watch(server([])).key
+
+      assert HomeSummary.watch(
+               server(snapshots: snapshots([{"desktop", ~U[2031-05-04 11:30:00Z]}]))
+             ).key != base
+
+      assert HomeSummary.watch(server(link: server_link(enrollment: provisioned(:open)))).key !=
+               base
+
+      assert HomeSummary.watch(server(candidates: [candidate()])).key != base
+
+      # The awake count of an open code is no change.
+      assert HomeSummary.watch(
+               server(link: server_link(enrollment: provisioned(:open, nil, 2 * @minute)))
+             ).key ==
+               HomeSummary.watch(server(link: server_link(enrollment: provisioned(:open)))).key
+    end
+
+    test "the computer that sets Always On up does not watch its own backups" do
+      assert HomeSummary.watch(facts(snapshots: snapshots([{"s3", ~U[2031-05-01 10:00:00Z]}]))) ==
+               HomeSummary.watch(facts([]))
+    end
+  end
+
+  # {name, facts, ms until the change, the state and problem kind it changes to}
+  defp deadline_cases do
+    created = created_ledger()
+
+    [
+      {"a created server, its code open a minute awake",
+       facts(provision: created, link: link(enrollment: provisioned(:open))), 29 * @minute,
+       "problem", "not_set_up"},
+      {"a server held until its day is out", ready_facts([]), 23 * @hour, "problem",
+       "waited_too_long"},
+      {"a server silent for five minutes",
+       desktop(link_primary: primary(:unreachable, 5 * @minute)), 5 * @minute, "problem",
+       "cannot_reach"},
+      {"a backup two hours old", desktop([]), 3 * @day - 2 * @hour + 1_000, "problem",
+       "backup_old"},
+      {"no backup since a move a day ago",
+       desktop(primary_home: server_home(backups: []), moved: moved(~U[2031-05-03 12:00:00Z])),
+       2 * @day + 1_000, "problem", "backup_old"},
+      {"the server's backup two hours old", server([]), 3 * @day - 2 * @hour + 1_000, "problem",
+       "backup_old"},
+      {"a replace's new server, made twenty minutes ago",
+       desktop(
+         provision: replacing(:waiting, server: new_server(created_at: ~U[2031-05-04 11:40:00Z])),
+         primary_home: server_home(enrollment: new_window("open"))
+       ), 10 * @minute, "problem", "not_set_up"},
+      {"a replace's new server held until its day is out", replace_ready([]),
+       23 * @hour + 40 * @minute, "problem", "waited_too_long"}
+    ]
+  end
+
+  # The same facts `ms` later: the clock, the awake counts of a code and of a
+  # link that is down, and the servers held only while they have not expired
+  # (`Home.Candidates` drops one at its expiry).
+  defp later(facts, ms) do
+    now = DateTime.add(facts.now, ms, :millisecond)
+    link = facts.link
+
+    link = %{
+      link
+      | enrollment: advance(link.enrollment, :awake_ms, ms),
+        primary: advance(link.primary, :down_ms, ms)
+    }
+
+    %{
+      facts
+      | now: now,
+        link: link,
+        candidates: live(facts.candidates, now),
+        primary_home: live_home(facts.primary_home, now)
+    }
+  end
+
+  defp advance(nil, _key, _ms), do: nil
+
+  defp advance(map, key, ms) do
+    case Map.get(map, key) do
+      count when is_integer(count) -> Map.put(map, key, count + ms)
+      _none -> map
+    end
+  end
+
+  defp live(candidates, now) do
+    Enum.filter(candidates, fn %{"expires_at" => at} ->
+      {:ok, at, 0} = DateTime.from_iso8601(at)
+      DateTime.compare(at, now) == :gt
+    end)
+  end
+
+  defp live_home(nil, _now), do: nil
+
+  defp live_home(home, now),
+    do: Map.update(home, "candidates", [], &live(&1, now))
+
+  defp server_link(overrides) do
+    desktop_row = %{device_id: "6d2b3c1e", name: "Studio Mac", connected: true}
+    link([desktops: [desktop_row]] ++ overrides)
+  end
+
   # -- facts --------------------------------------------------------------------
 
   defp facts(overrides) do

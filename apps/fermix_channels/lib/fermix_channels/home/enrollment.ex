@@ -56,12 +56,18 @@ defmodule FermixChannels.Home.Enrollment do
   30 minutes of it a server that did not finish setting up (M75 lean v1 §7),
   and a sleeping computer is never the server's fault.
 
+  Every change it keeps (a window opened, used, given its candidate or
+  withdrawn) and its expiry tell the Always On watch
+  (`FermixCore.Home.StatusWatch`, `:enrollment`): the summary an app draws
+  reads the window (companion protocol 6).
+
   Primary only: `FermixCore.Home.Role` leaves it out of a device and a
   candidate. Test seams: `:home`, `:helper`, `:device_store`, `:clock` (a
   0-arity `DateTime`), `:monotonic` (a 0-arity count of milliseconds),
   `:schedule` (a 2-arity `Process.send_after/3` stand-in for the expiry),
   `:host_name`, `:identity` (a 1-arity loader answering the gateway's public
-  key for a home).
+  key for a home), `:status_changed` (a 0-arity call in place of telling the
+  Always On watch).
   """
 
   use GenServer
@@ -74,6 +80,7 @@ defmodule FermixChannels.Home.Enrollment do
   alias FermixChannels.Mobile.Iroh.Relays
   alias FermixCore.Home.Candidates
   alias FermixCore.Home.EnrollmentCode
+  alias FermixCore.Home.StatusWatch
   alias FermixCore.Setup.ConfigStore
 
   # How long a window of each kind stays open, in seconds (L15).
@@ -181,6 +188,8 @@ defmodule FermixChannels.Home.Enrollment do
       schedule: Keyword.get(opts, :schedule, &Process.send_after(self(), &1, &2)),
       host_name: Keyword.get(opts, :host_name, &host_name/0),
       identity: Keyword.get(opts, :identity, &gateway_public_key/1),
+      status_changed:
+        Keyword.get(opts, :status_changed, fn -> StatusWatch.changed(:enrollment) end),
       window: load(home),
       held_since_ms: monotonic.()
     }
@@ -264,8 +273,11 @@ defmodule FermixChannels.Home.Enrollment do
   end
 
   @impl true
-  def handle_info({:expire, expires_at}, %{window: %{expires_at: expires_at}} = state),
-    do: {:noreply, expire_or_arm(state)}
+  def handle_info({:expire, expires_at}, %{window: %{expires_at: expires_at}} = state) do
+    state = expire_or_arm(state)
+    :ok = state.status_changed.()
+    {:noreply, state}
+  end
 
   # A timer of a window another replaced.
   def handle_info({:expire, _expires_at}, state), do: {:noreply, state}
@@ -490,6 +502,7 @@ defmodule FermixChannels.Home.Enrollment do
   defp keep(state, window, reply) do
     case write(state.home, window, state.clock.()) do
       :ok ->
+        :ok = state.status_changed.()
         {:reply, reply, %{state | window: window}}
 
       {:error, reason} ->

@@ -16,7 +16,7 @@ defmodule FermixCore.Companion.ProtocolTest do
              ~w(server_hello accepted turn_started text_delta tool_event reasoning text_done
                 turn_error turn_done row row_updated approval approval_resolved read_state
                 history_page search_results media_path media_missing proposal proposal_resolved
-                error)
+                home_status_changed error)
   end
 
   # M56 §6: a turn that ends with no reply needs a frame an older client would
@@ -31,7 +31,8 @@ defmodule FermixCore.Companion.ProtocolTest do
       "media_missing" => 3,
       "proposal" => 4,
       "proposal_resolved" => 4,
-      "reasoning" => 6
+      "reasoning" => 6,
+      "home_status_changed" => 6
     }
 
     for type <- Protocol.server_events() do
@@ -53,6 +54,18 @@ defmodule FermixCore.Companion.ProtocolTest do
     refute "media_fetch" in Protocol.shared_client_events()
     refute "proposal_answer" in Protocol.shared_client_events()
     assert_raise ArgumentError, fn -> Protocol.client_event_version("ping") end
+  end
+
+  # Version 6: Always On's state changed, and the client reads `home.status`
+  # over management for what it is now, so the notice carries nothing.
+  test "home_status_changed carries nothing, and refuses any field" do
+    assert {:ok, line} = Protocol.encode_server_event("home_status_changed", %{})
+    assert Jason.decode!(line) == %{"type" => "home_status_changed"}
+
+    assert {:error, {:invalid_field, "state"}} =
+             Protocol.encode_server_event("home_status_changed", %{"state" => "on"})
+
+    refute "home_status_changed" in Protocol.shared_server_events()
   end
 
   test "turn_done names the turn it ends and nothing else" do

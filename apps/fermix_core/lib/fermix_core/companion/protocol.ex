@@ -75,8 +75,13 @@ defmodule FermixCore.Companion.Protocol do
   6 connection only; a `tool_event` that starts a tool carries `activity`, the
   engine's sentence for the step (`FermixCore.Capabilities.Activity`, at most
   `max_activity_bytes/0`), additive, so on every version. `activity` is this
-  wire's alone: the phone's `tool_event` does not carry it. The window is now
-  {5, 6}.
+  wire's alone: the phone's `tool_event` does not carry it. Version 6 also
+  lets the apps stop polling Always On (M75 lean v1 §7): `home_status_changed`
+  carries nothing and says that `home.status`'s summary changed, so the client
+  reads it again over management, the one source of its words
+  (`FermixCore.Home.StatusWatch` decides when). It is sent once after
+  `server_hello` unless Always On is off, and at every change after, and
+  reaches a version 6 connection only. The window is now {5, 6}.
 
   Both hellos carry the primary epoch (M75 D14), additive and optional on
   every version: `server_hello.primary_epoch` is the home's, absent only from a
@@ -141,7 +146,7 @@ defmodule FermixCore.Companion.Protocol do
   @server_events ~w(
     server_hello accepted turn_started text_delta tool_event reasoning text_done turn_error
     turn_done row row_updated approval approval_resolved read_state history_page search_results
-    media_path media_missing proposal proposal_resolved error
+    media_path media_missing proposal proposal_resolved home_status_changed error
   )
 
   # The events a version after 1 brought; every other one is version 1.
@@ -153,7 +158,8 @@ defmodule FermixCore.Companion.Protocol do
     "media_missing" => 3,
     "proposal" => 4,
     "proposal_resolved" => 4,
-    "reasoning" => 6
+    "reasoning" => 6,
+    "home_status_changed" => 6
   }
 
   # The events only the owner's connection is sent or may send (version 4).
@@ -216,6 +222,7 @@ defmodule FermixCore.Companion.Protocol do
     "media_missing" => ~w(ref),
     "proposal" => ~w(profile_id proposal),
     "proposal_resolved" => ~w(profile_id proposal_id state sentence),
+    "home_status_changed" => [],
     "error" => ~w(reason)
   }
 
@@ -700,6 +707,14 @@ defmodule FermixCore.Companion.Protocol do
          :ok <- enum(payload, "state", @proposal_end_states),
          :ok <- optional_enum(payload, "result_status", @proposal_result_statuses) do
       optional_bounded(payload, "result_text", @max_proposal_result_chars)
+    end
+  end
+
+  # A notice with no content: the client reads `home.status` for what changed.
+  defp validate_server("home_status_changed", payload) do
+    case Map.keys(payload) do
+      [] -> :ok
+      [field | _more] -> {:error, {:invalid_field, field}}
     end
   end
 

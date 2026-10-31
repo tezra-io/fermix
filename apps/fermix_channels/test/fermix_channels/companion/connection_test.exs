@@ -14,6 +14,7 @@ defmodule FermixChannels.Companion.ConnectionTest do
   alias FermixChannels.Mobile.RequestCoordinator
   alias FermixCore.Agents.TurnRunner
   alias FermixCore.Companion.Timeline
+  alias FermixCore.Home.StatusWatch
   alias FermixCore.Memory.Repo
   alias FermixTestSupport.ParentProcess
 
@@ -284,6 +285,59 @@ defmodule FermixChannels.Companion.ConnectionTest do
     for client <- [new, old] do
       assert %{"type" => "tool_event", "activity" => "Searching the web"} = recv(client)
       assert %{"type" => "text_done", "turn_id" => "turn-next"} = recv(client)
+    end
+  end
+
+  # Companion protocol 6 (M75 lean v1 §7): the app reads `home.status` when
+  # Always On changed, never on a timer. A version 6 connection is told once
+  # after its hello unless Always On is off, and again at every change; a
+  # version 5 connection is never told.
+  describe "Always On (version 6)" do
+    test "a version 6 client is told after its hello and at a change; 5 never", ctx do
+      {watch, read} = start_watch!(%{key: :ready, off: false, next_change_ms: nil})
+      restart_endpoint(ctx, status_watch: watch)
+
+      old = hello(ctx.socket_path, 5)
+      six = hello(ctx.socket_path, 6)
+      settle_watch(watch)
+
+      assert recv(six) == %{"type" => "home_status_changed"}
+      assert_nothing_before_read_state([old, six])
+
+      Agent.update(read, &%{&1 | key: :moving})
+      :ok = StatusWatch.changed(watch, :move)
+      settle_watch(watch)
+
+      assert recv(six) == %{"type" => "home_status_changed"}
+      assert_nothing_before_read_state([old, six])
+    end
+
+    test "a version 6 client is told nothing at its hello while Always On is off", ctx do
+      {watch, read} = start_watch!(%{key: :off, off: true, next_change_ms: nil})
+      restart_endpoint(ctx, status_watch: watch)
+
+      six = hello(ctx.socket_path, 6)
+      settle_watch(watch)
+      assert_nothing_before_read_state([six])
+
+      # Setting it up is a change, told as any other.
+      Agent.update(read, &%{&1 | key: :choose, off: false})
+      :ok = StatusWatch.changed(watch, :ledger)
+      settle_watch(watch)
+      assert recv(six) == %{"type" => "home_status_changed"}
+    end
+
+    test "an unchanged read tells nobody", ctx do
+      {watch, _read} = start_watch!(%{key: :on, off: false, next_change_ms: nil})
+      restart_endpoint(ctx, status_watch: watch)
+
+      six = hello(ctx.socket_path, 6)
+      settle_watch(watch)
+      assert recv(six) == %{"type" => "home_status_changed"}
+
+      :ok = StatusWatch.changed(watch, :snapshots)
+      settle_watch(watch)
+      assert_nothing_before_read_state([six])
     end
   end
 
@@ -1464,6 +1518,41 @@ defmodule FermixChannels.Companion.ConnectionTest do
   end
 
   # The endpoint again, with `connection_opts` added to the ones setup gave it.
+  # The Always On watch (`Home.StatusWatch`) with a read of the test's: an
+  # Agent the test changes, and no timer of its own.
+  defp start_watch!(read_value) do
+    {:ok, read} = Agent.start_link(fn -> read_value end)
+
+    watch =
+      start_supervised!(
+        {StatusWatch,
+         name: nil,
+         read: fn -> Agent.get(read, & &1) end,
+         timer: fn _message, _delay -> make_ref() end,
+         cancel_timer: fn _ref -> false end,
+         clock_monitor: false},
+        id: {:status_watch, System.unique_integer([:positive])}
+      )
+
+    {watch, read}
+  end
+
+  # The watch handled every message sent before, and the read a change asks
+  # for, which it sends itself behind them.
+  defp settle_watch(watch) do
+    _state = :sys.get_state(watch)
+    _state = :sys.get_state(watch)
+  end
+
+  # Each client's next line is the answer to its read_state: nothing came
+  # before it.
+  defp assert_nothing_before_read_state(clients) do
+    for client <- clients do
+      send_line(client, %{"type" => "read_state", "profile_id" => "main", "read_up_to_seq" => 0})
+      assert %{"type" => "read_state"} = recv(client)
+    end
+  end
+
   defp restart_endpoint(ctx, connection_opts) do
     stop_supervised!(Endpoint)
 

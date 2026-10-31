@@ -111,6 +111,23 @@ defmodule FermixCore.Management.Home do
   @doc "`home.status`: the whole picture of this home."
   @spec status(keyword()) :: {:ok, map()}
   def status(opts \\ []) when is_list(opts) do
+    {facts, gathered} = gather(opts)
+    {:ok, picture(Map.put(facts, :summary, HomeSummary.summary(gathered)))}
+  end
+
+  @doc """
+  The facts `home.status`'s summary is worked out from
+  (`HomeSummary.gather/5`), gathered with `opts` exactly as `status/1`
+  gathers them: what `FermixCore.Home.StatusWatch` reads (companion protocol
+  6), so the summary it watches is the one the apps then read.
+  """
+  @spec summary_facts(keyword()) :: HomeSummary.facts()
+  def summary_facts(opts \\ []) when is_list(opts) do
+    {_facts, gathered} = gather(opts)
+    gathered
+  end
+
+  defp gather(opts) do
     home = home(opts)
     role = role(opts)
     link = Keyword.get(opts, :link_status, fn -> Link.impl().status() end).()
@@ -137,7 +154,7 @@ defmodule FermixCore.Management.Home do
     gathered =
       HomeSummary.gather(home, role, link, Map.put(facts, :primary_too_old, too_old?), opts)
 
-    {:ok, picture(Map.put(facts, :summary, HomeSummary.summary(gathered)))}
+    {facts, gathered}
   end
 
   # How full a primary's disk is; a desktop reads its server's in

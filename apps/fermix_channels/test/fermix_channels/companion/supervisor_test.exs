@@ -52,7 +52,9 @@ defmodule FermixChannels.Companion.SupervisorTest do
 
   # The media grants start before the connections, so a restart of theirs,
   # which forgets every hold, takes the connections that held them down too.
-  test "a serving boot binds companion.sock owner-only, after its coordinator and media grants" do
+  # So does the Always On watch (companion protocol 6): a restart forgets who
+  # it tells, and the connections it takes down subscribe again.
+  test "a serving boot binds companion.sock owner-only, after its coordinator, media grants and Always On watch" do
     unique = System.unique_integer([:positive])
     socket_path = Path.join(System.tmp_dir!(), "fermix-companion-sup-#{unique}.sock")
     db_path = Path.join(System.tmp_dir!(), "fermix-companion-sup-#{unique}.db")
@@ -85,7 +87,12 @@ defmodule FermixChannels.Companion.SupervisorTest do
          connection_supervisor: :"companion_sup_connections_#{unique}",
          socket_path: socket_path,
          store_opts: [repo: repo],
-         media_grants_opts: [name: :"companion_sup_media_#{unique}", root: media_root]}
+         media_grants_opts: [name: :"companion_sup_media_#{unique}", root: media_root],
+         status_watch_opts: [
+           name: :"companion_sup_watch_#{unique}",
+           read: fn -> %{key: :off, off: true, next_change_ms: nil} end,
+           clock_monitor: false
+         ]}
       )
 
     ids = supervisor |> Supervisor.which_children() |> Enum.map(&elem(&1, 0)) |> Enum.reverse()
@@ -96,10 +103,14 @@ defmodule FermixChannels.Companion.SupervisorTest do
              :"companion_sup_approvals_#{unique}",
              :"companion_sup_coordinator_#{unique}",
              :"companion_sup_media_#{unique}",
+             :"companion_sup_watch_#{unique}",
              :"companion_sup_connections_#{unique}",
              Endpoint
            ]
 
+    assert is_pid(Process.whereis(:"companion_sup_watch_#{unique}"))
+    {:ok, connection_opts} = Endpoint.connection_opts()
+    assert connection_opts[:status_watch] == :"companion_sup_watch_#{unique}"
     assert is_pid(Process.whereis(:"companion_sup_media_#{unique}"))
     assert File.dir?(media_root)
     assert Bitwise.band(File.stat!(socket_path).mode, 0o777) == 0o600

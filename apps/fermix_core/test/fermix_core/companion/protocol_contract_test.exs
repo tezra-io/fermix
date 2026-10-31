@@ -182,6 +182,33 @@ defmodule FermixCore.Companion.ProtocolContractTest do
     assert protocol =~ "Every version 5 event, field and rule holds unchanged on version 6."
   end
 
+  # Version 6 (M75 lean v1 §7) also says Always On's state changed. The notice
+  # carries nothing, since the client reads `home.status` for what it is now,
+  # and it is the same version 6, in the same window: no client below 6 is
+  # ever sent it.
+  test "home_status_changed is version 6's too and carries nothing", %{
+    schema: schema,
+    protocol: protocol
+  } do
+    assert Protocol.protocol_version() == 6
+    assert Protocol.supported_version_range() == {5, 6}
+    assert Protocol.server_event_version("home_status_changed") == 6
+
+    definition = schema["$defs"]["home_status_changed"]
+    assert definition["x-since-version"] == 6
+    assert definition["required"] == ["type"]
+    assert Map.keys(definition["properties"]) == ["type"]
+
+    goldens =
+      @server_fixtures |> jsonl() |> Enum.filter(&(&1["type"] == "home_status_changed"))
+
+    assert goldens == [%{"type" => "home_status_changed"}]
+
+    assert protocol =~ "### Version 6: what a turn is doing, and Always On without polling"
+    assert protocol =~ "Version 6 also lets an app stop asking for Always On's state on a timer."
+    assert protocol =~ "## When Always On changes"
+  end
+
   # The schema names every field of the card the engine builds, and bounds the
   # outside text as the codec does; the golden cards are the engine's shape.
   test "the proposal card's schema is the card Cues.ProposalView builds", %{schema: schema} do

@@ -20,6 +20,7 @@ defmodule FermixCore.Setup.ConfigStore do
   alias FermixCore.Home.Archive.ConfigText
   alias FermixCore.Home.Role
   alias FermixCore.Home.Snapshot.Config, as: SnapshotConfig
+  alias FermixCore.Home.StatusWatch
   alias FermixCore.IMessage
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Net.Egress
@@ -305,8 +306,10 @@ defmodule FermixCore.Setup.ConfigStore do
          {:ok, persisted} <- persisted_snapshot(snapshot, opts),
          :ok <- File.mkdir_p(fermix_home()),
          :ok <- ensure_workspace(),
-         :ok <- File.write(path(), dump_snapshot(Map.put(persisted, :mcp, mcp))) do
-      RestartState.record_persisted_baseline()
+         :ok <- File.write(path(), dump_snapshot(Map.put(persisted, :mcp, mcp))),
+         :ok <- RestartState.record_persisted_baseline() do
+      # The Always On summary's `off` line names what this home turns on.
+      StatusWatch.changed(:config)
     end
   end
 

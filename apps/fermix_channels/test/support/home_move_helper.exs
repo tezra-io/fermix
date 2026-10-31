@@ -62,7 +62,8 @@ defmodule FermixChannels.Test.HomeMove do
   @doc """
   A primary's home at `:epoch` (4), its gateway identity and iroh key, a
   config naming a path inside it, its device store, its enrollment window
-  (its timers through `:schedule` when given) and its bridge. Answers the
+  (its timers through `:schedule`, and what it tells the Always On watch
+  through `:status_changed`, when given) and its bridge. Answers the
   facts a test needs.
   """
   def primary!(opts \\ []) do
@@ -101,7 +102,7 @@ defmodule FermixChannels.Test.HomeMove do
          device_store: store,
          clock: fn -> Agent.get(clock, & &1) end,
          host_name: fn -> {:ok, "studio-mac"} end
-       ] ++ Keyword.take(opts, [:schedule, :monotonic])},
+       ] ++ Keyword.take(opts, [:schedule, :monotonic, :status_changed])},
       id: {:enrollment, suffix}
     )
 

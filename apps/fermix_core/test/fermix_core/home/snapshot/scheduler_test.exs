@@ -107,6 +107,32 @@ defmodule FermixCore.Home.Snapshot.SchedulerTest do
     assert hidden(home) == []
   end
 
+  # Companion protocol 6: a finished run moves the newest backup the Always On
+  # summary reads, so it tells the watch, once the status file holds it.
+  test "a finished run tells the Always On watch, after the status holds it",
+       %{home: home} = context do
+    test = self()
+
+    scheduler =
+      start!(context,
+        status_changed: fn ->
+          send(test, {:status_changed, Status.read(home)})
+          :ok
+        end
+      )
+
+    assert_receive {:planned, {:tick, token}, _delay}
+    _info = Scheduler.info(scheduler)
+    refute_received {:status_changed, _status}
+
+    advance(context, 300)
+    send(scheduler, {:tick, token})
+
+    assert_receive {:status_changed, {:ok, status}}, @wait
+    assert %{last_verified: %{epoch: 2}} = status.targets["fake"]
+    refute_received {:status_changed, _again}
+  end
+
   test "a failure is recorded with its sentence and retried at the next interval",
        %{config: config, pair: pair, home: home} = context do
     Agent.update(config, fn _ -> configured(pair, "refuse") end)

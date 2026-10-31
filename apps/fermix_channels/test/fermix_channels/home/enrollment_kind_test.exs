@@ -28,6 +28,40 @@ defmodule FermixChannels.Home.EnrollmentKindTest do
     %{primary: primary}
   end
 
+  # Companion protocol 6 (M75 lean v1 §7): the window feeds the Always On
+  # summary, so every change of it tells the watch, which reads it again.
+  test "opening, withdrawing and the expiry of a window each tell the Always On watch" do
+    test = self()
+
+    primary =
+      HomeMove.primary!(
+        schedule: fn message, delay ->
+          send(test, {:scheduled, message, delay})
+          make_ref()
+        end,
+        status_changed: fn ->
+          send(test, :status_changed)
+          :ok
+        end
+      )
+
+    {:ok, _code} = Enrollment.open(primary.enrollment, :provisioned)
+    assert_received :status_changed
+
+    :ok = Enrollment.withdraw(primary.enrollment)
+    assert_received :status_changed
+
+    {:ok, %{expires_at: at}} = Enrollment.open(primary.enrollment)
+    assert_received :status_changed
+    assert_receive {:scheduled, {:expire, ^at} = expiry, @half_hour_ms}, 10_000
+
+    HomeMove.advance!(primary, 1_800)
+    send(GenServer.whereis(primary.enrollment), expiry)
+    assert %{state: :expired} = Enrollment.status(primary.enrollment)
+    assert_received :status_changed
+    refute_received :status_changed
+  end
+
   test "a window opened for a created server lives 24 hours, a copied code 30 minutes", ctx do
     {:ok, %{code: code, expires_at: at}} = Enrollment.open(ctx.primary.enrollment, :provisioned)
     assert_receive {:scheduled, {:expire, ^at}, @day_ms}, 10_000

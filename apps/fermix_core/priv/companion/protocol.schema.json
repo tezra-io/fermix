@@ -97,6 +97,7 @@
             "media_missing",
             "proposal",
             "proposal_resolved",
+            "home_status_changed",
             "error"
           ]
         }
@@ -187,6 +188,13 @@
             "properties": { "type": { "const": "proposal_resolved" } }
           },
           "then": { "$ref": "#/$defs/proposal_resolved" }
+        },
+        {
+          "if": {
+            "required": ["type"],
+            "properties": { "type": { "const": "home_status_changed" } }
+          },
+          "then": { "$ref": "#/$defs/home_status_changed" }
         },
         {
           "if": { "required": ["type"], "properties": { "type": { "const": "error" } } },
@@ -587,6 +595,15 @@
         "result_status": { "enum": ["ok", "error", "unknown"] },
         "sentence": { "type": "string", "minLength": 1 },
         "result_text": { "type": "string", "maxLength": 2000 }
+      }
+    },
+    "home_status_changed": {
+      "type": "object",
+      "description": "Version 6. Always On's summary (management home.status.summary) changed: its state, its action, its problem kind, or the sentence of a step. Carries no content: the client reads home.status over management for what it is now. Sent once after server_hello unless Always On is off, then at each change, only to a connection on version 6. After a move, the desktop's engine sends it for its own home.status, never the server's (PROTOCOL.md, When Always On changes).",
+      "x-since-version": 6,
+      "required": ["type"],
+      "properties": {
+        "type": { "const": "home_status_changed" }
       }
     },
     "error": {

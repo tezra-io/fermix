@@ -44,6 +44,7 @@
 {"type":"proposal_resolved","profile_id":"main","proposal_id":"cpr_0e1d2c3b4a5f6e7d8c9b0a1f","state":"refused","sentence":"Not run: the validator refused it.","result_text":"Only issues in the ops repository."}
 {"type":"proposal_resolved","profile_id":"main","proposal_id":"cpr_7b6a5f4e3d2c1b0a9f8e7d6c","state":"expired","sentence":"That proposal expired; nothing ran."}
 {"type":"proposal_resolved","profile_id":"main","proposal_id":"cft_5d2e8a1c9b4f7e3a6c0d1b2e","state":"confirmed","sentence":"Confirmed; the follow-up is starting."}
+{"type":"home_status_changed"}
 {"type":"error","reason":"handshake_required"}
 {"type":"error","reason":"unsupported_protocol_version","direction":"client_too_new","client_version":7,"min_version":5,"max_version":6}
 {"type":"error","reason":"stale_primary","message":"This engine is at epoch 2; you have seen epoch 3: the primary moved, reconnect to the current one"}
