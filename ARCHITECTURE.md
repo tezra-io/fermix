@@ -689,7 +689,9 @@ behind them). One timer, replaced at each read, at least a second and at most
 a week, waits for the next clock change; a time-offset monitor reads again
 after a wake from sleep, since the monotonic timers stop while the computer
 sleeps. While off nothing is armed and only `:ledger`, `:move` and
-`:enrollment` are read. It never calls Hetzner.
+`:enrollment` are read. It never calls a cloud provider; every ledger
+write (`Provision.Ledger.update/3`, the shared driver's and the management
+family's) tells it `:ledger`.
 
 Replace the server (`home.provision.create {replace: true}`) runs on the
 linked desktop whose ledger holds the server the home lives on. The job sets

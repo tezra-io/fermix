@@ -667,14 +667,14 @@ it, never a second writer.
   without polling: it reads the summary
   again only when something it rests on happens (the move's phase, the
   enrollment code opened, used, withdrawn or expiring, a server enrolling,
-  the Hetzner file written, the link to the server up or down, a backup run
+  the provider's file written, the link to the server up or down, a backup run
   finishing) and at the next time it changes by the clock
   alone (30 minutes awake for a created server to check in, 10 minutes awake
   of silence, a waiting server's 24 hours, a backup's 3 days), on one timer,
   armed again at each read and after a wake from sleep, and only while an app
   is connected. While Always On is off nothing is armed, and only a token, a
-  code or a move is read. It never asks Hetzner on its own:
-  Hetzner is read when the pane asks (`home.provision.resources`) or a job
+  code or a move is read. It never asks the cloud provider on its own: the
+  provider is read when the pane asks (`home.provision.resources`) or a job
   runs. After a move the desktop's Fermix tells its app about its own
   summary, reading the server's part again when the server says its own
   moved; while the server is unreachable the chat connection is refused, and
