@@ -5,9 +5,12 @@ defmodule FermixCore.Memory.Repo do
 
   use GenServer
 
+  require Logger
+
   alias Exqlite.Sqlite3
   alias FermixCore.Agents.IterationLimits
   alias FermixCore.Memory.Config
+  alias FermixCore.Memory.Repo.ChecklistsSql
   alias FermixCore.Memory.Repo.ComputerHistorySql
   alias FermixCore.Memory.Repo.CuesDeliveriesSql
   alias FermixCore.Memory.Repo.CuesFilterSql
@@ -82,6 +85,7 @@ defmodule FermixCore.Memory.Repo do
   @channel_event_ids_migration_version 53
   @watcher_follow_up_migration_version 54
   @cue_delivery_window_index_migration_version 55
+  @checklists_migration_version 56
   @sqlite_open_intent :readwritecreate
 
   # The cue SQL modules (M60), one per lane, all served by `cues_call/3`.
@@ -3736,6 +3740,15 @@ defmodule FermixCore.Memory.Repo do
       do: call({:cues, module, request}, opts)
 
   @doc """
+  Serves one request about the owner's lists (M85) with
+  `Memory.Repo.ChecklistsSql`, a `handle(conn, request)` with one head per
+  request tuple. Only `FermixCore.Checklists.Registry` calls it.
+  """
+  @spec checklists_call(tuple(), keyword()) :: term()
+  def checklists_call(request, opts \\ []) when is_tuple(request) and is_list(opts),
+    do: call({:checklists, request}, opts)
+
+  @doc """
   The base schema as SQL, for a test that seeds a store an older release wrote.
 
   Every statement is `IF NOT EXISTS`, so a fixture can lay the base tables down
@@ -4954,6 +4967,10 @@ defmodule FermixCore.Memory.Repo do
     {:reply, with_connection(state, &module.handle(&1, request)), state}
   end
 
+  def handle_call({:checklists, request}, _from, state) do
+    {:reply, with_connection(state, &ChecklistsSql.handle(&1, request)), state}
+  end
+
   # Every request is served in order by this one process, so a call waits
   # behind every request ahead of it. A timed-out call exits its caller unless
   # the caller passed `on_timeout: :error` (`periodic_opts/2`). The request
@@ -4989,6 +5006,7 @@ defmodule FermixCore.Memory.Repo do
          {:ok, conn} <- Sqlite3.open(database_path, sqlite_open_opts(@sqlite_open_intent)),
          :ok <- configure_connection(conn),
          :ok <- run_migrations(conn) do
+      :ok = sweep_removed_checklists(conn)
       {:ok, conn}
     end
   end
@@ -5071,8 +5089,40 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_mobile_uncertain_request_migration(conn, versions),
          :ok <- apply_channel_event_ids_migration(conn, versions),
          :ok <- apply_watcher_follow_up_migration(conn, versions),
-         :ok <- apply_cue_delivery_window_index_migration(conn, versions) do
+         :ok <- apply_cue_delivery_window_index_migration(conn, versions),
+         :ok <- apply_checklists_migration(conn, versions) do
       :ok
+    end
+  end
+
+  # The owner's lists (M85 §06), their two tables and version in one
+  # transaction. Nothing is rewritten: a store from before has no lists.
+  defp apply_checklists_migration(conn, versions) do
+    if Enum.member?(versions, @checklists_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{ChecklistsSql.schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@checklists_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  # The one sweep the owner's lists have (M85 §06): lists removed more than 30
+  # days ago go when the store opens, never on a timer. A sweep that fails is
+  # logged and the store opens: what it would have deleted waits for the next.
+  defp sweep_removed_checklists(conn) do
+    case ChecklistsSql.handle(conn, {:purge_removed_lists, DateTime.utc_now()}) do
+      {:ok, _deleted} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error("memory: removed lists could not be swept: #{inspect(reason)}")
     end
   end
 
