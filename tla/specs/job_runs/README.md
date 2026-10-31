@@ -29,7 +29,7 @@ what is left out and every step folded into another.
   what the platform took survive. This also covers a crash of any core child
   started before the `RunnerSupervisor` (`CommandHostSupervisor` through
   `MainAgent`, `Memory.Repo`, `Trace` and `Finch` among them,
-  `application.ex:258-332`) or of the `RunnerSupervisor` itself, since
+  `application.ex:259-338`) or of the `RunnerSupervisor` itself, since
   `:rest_for_one` restarts every job process in each case (`:180`). A
   runner's send helper and its AgentLoop are linked to it, so none outlives
   the restart; `LoopDiesWithRunner` off lets the loop outlive it (JOB-8).
@@ -37,7 +37,7 @@ what is left out and every step folded into another.
   of any callback, including its own init. A Repo timeout no longer kills it
   (`SchedulerTimeouts`); another cause still does, such as `:rest_for_one`
   restarting it when `MeetingsSupervisor`, started between the
-  `RunnerSupervisor` and the Scheduler, dies (`application.ex:333-340`).
+  `RunnerSupervisor` and the Scheduler, dies (`application.ex:339-346`).
   Runners keep running. When it dies waiting on the reaper's write, that write
   may still land (see late writes).
 - `SchedulerTimeouts`: how many of the Scheduler's Repo calls may time out.
@@ -1000,7 +1000,7 @@ shortest and can change between runs.
   write or Scheduler call (`job_registry_support.ex:36-41`): a request the owner
   never made. That check's job-row read feeds no modelled column. The store
   of parked confirmations (`Capabilities.AccessGate.Pending`,
-  `application.ex:326`) and the holder of a conversation's place records
+  `application.ex:332`) and the holder of a conversation's place records
   (`ReplyBlocks`, `:329`, which no job process reads) are two more core
   children started before the `RunnerSupervisor`, so a crash of either is the
   daemon crash above.
