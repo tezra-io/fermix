@@ -293,7 +293,7 @@ defmodule FermixCore.Management.HomeTest do
            "new server's code from the old one",
          %{home: home} do
       :ok = DesktopLink.write(home, desktop_link())
-      new_server = %{server() | name: "fermix-general-5d2e", id: 61_900_117}
+      new_server = %{server() | name: "fermix-general-5d2e", id: "61900117"}
 
       {:ok, _ledger} =
         Ledger.update(home, "hetzner", fn ledger ->
@@ -544,7 +544,7 @@ defmodule FermixCore.Management.HomeTest do
   defp server do
     %{
       name: "fermix-general-a3f9",
-      id: 61_839_204,
+      id: "61839204",
       status: :created,
       type: "cpx22",
       location: "fsn1",

@@ -40,50 +40,58 @@ defmodule FermixCore.Home.Provision.LedgerTest do
     assert File.ls!(Path.dirname(Ledger.path(home, "nimbus"))) == ["nimbus.json"]
   end
 
-  # A resource's id is its provider's own, opaque to Fermix: a string. A file
-  # written before ids were strings holds Hetzner's numbers; each reads as
-  # its string, and is written as one from then on.
-  test "an id is an opaque string, and a number the file holds reads as its string",
-       %{home: home} do
+  # A resource's id is its provider's own, opaque to Fermix: a string, and
+  # only a string. An id of any other shape, a number included, makes the
+  # file malformed, refused like any other with its sentence.
+  test "an id is an opaque string, and any other id is a malformed ledger", %{home: home} do
     file = Ledger.path(home, "nimbus")
     File.mkdir_p!(Path.dirname(file))
 
-    File.write!(
-      file,
-      Jason.encode!(%{
-        "v" => 1,
-        "token" => @token,
-        "ref" => "a3f9",
-        "server" => %{
-          "name" => "fermix-general-a3f9",
-          "id" => 61_839_204,
-          "status" => "created",
-          "type" => "cpx22",
-          "location" => "fsn1"
-        },
-        "firewall" => %{"name" => "fermix-general-a3f9", "id" => "fw-7", "status" => "created"},
-        "primary_ips" => [%{"id" => 91, "type" => "ipv4", "ip" => "203.0.113.7"}]
-      })
-    )
-
-    assert {:ok, ledger} = Ledger.read(home, "nimbus")
-    assert %{server: %{id: "61839204"}, firewall: %{id: "fw-7"}} = ledger
-    assert [%{id: "91"}] = ledger.primary_ips
-
-    {:ok, _ledger} = Ledger.update(home, "nimbus", &{:ok, &1})
-    assert %{"server" => %{"id" => "61839204"}} = file |> File.read!() |> Jason.decode!()
-
-    for bad <- [0, -3, "", 1.5, %{}] do
+    write = fn server_id, firewall_id, ip_id ->
       File.write!(
         file,
         Jason.encode!(%{
           "v" => 1,
-          "firewall" => %{"name" => "f", "id" => bad, "status" => "created"},
-          "primary_ips" => []
+          "token" => @token,
+          "ref" => "a3f9",
+          "server" => %{
+            "name" => "fermix-general-a3f9",
+            "id" => server_id,
+            "status" => "created",
+            "type" => "cpx22",
+            "location" => "fsn1"
+          },
+          "firewall" => %{
+            "name" => "fermix-general-a3f9",
+            "id" => firewall_id,
+            "status" => "created"
+          },
+          "primary_ips" => [%{"id" => ip_id, "type" => "ipv4", "ip" => "203.0.113.7"}]
         })
       )
+    end
 
-      assert {:error, {:invalid_ledger, _path}} = Ledger.read(home, "nimbus"), inspect(bad)
+    write.("61839204", "fw-7", "91")
+    assert {:ok, ledger} = Ledger.read(home, "nimbus")
+    assert %{server: %{id: "61839204"}, firewall: %{id: "fw-7"}} = ledger
+    assert [%{id: "91"}] = ledger.primary_ips
+
+    for {server_id, firewall_id, ip_id} <- [
+          {61_839_204, "fw-7", "91"},
+          {"61839204", 1203, "91"},
+          {"61839204", "fw-7", 91},
+          {"61839204", "", "91"},
+          {"61839204", "fw-7", 1.5},
+          {%{}, "fw-7", "91"}
+        ] do
+      write.(server_id, firewall_id, ip_id)
+      where = inspect({server_id, firewall_id, ip_id})
+
+      assert {:error, {:invalid_ledger, _path}} = Ledger.read(home, "nimbus"), where
+
+      assert %{state: :unreadable, sentence: "Fermix could not read its Nimbus file" <> _} =
+               Ledger.state(home, FakeCloudProvider, unreadable_files: nil),
+             where
     end
   end
 

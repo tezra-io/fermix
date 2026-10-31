@@ -203,7 +203,7 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
       replace: nil,
       server: %{
         name: @server_name,
-        id: 61_839_204,
+        id: "61839204",
         status: :created,
         type: "cpx22",
         location: "fsn1",
