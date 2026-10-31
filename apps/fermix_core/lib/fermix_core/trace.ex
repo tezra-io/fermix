@@ -4,7 +4,17 @@ defmodule FermixCore.Trace do
   per UTC day.
 
   Each trace type gets its own file: `llm_call.jsonl`, `tool_exec.jsonl`, etc.
-  File handles are cached per {date, type} and cleaned up on date rollover.
+  File handles are cached per {date, file} and cleaned up on date rollover.
+
+  **Bodies on an Always On server** (M75 L20). With `separate_bodies: true`,
+  which `FermixCore.Application` sets on an Always On server
+  (`FermixCore.Home.AlwaysOn`), a record that carries a body (a field named in
+  `body_keys/0`: a prompt, a reply, a tool's input or output, a delegated
+  task's words) is written twice: without its bodies to `<type>.jsonl`, and
+  whole to `<type>.bodies.jsonl`, which `Trace.Retention.prune_bodies/3`
+  keeps one day while the records keep the store's bounds. Each line is
+  written, and counted when dropped, on its own. Everywhere else a record is
+  written whole to `<type>.jsonl`.
 
   **A trace never stops the engine** (M75 L14). Trace is an early child of
   core's `:rest_for_one` supervisor: a crash here restarts every child after
@@ -20,7 +30,8 @@ defmodule FermixCore.Trace do
   **Retention.** A pass of `FermixCore.Trace.Retention` (which states the
   bounds: days of age and total size, oldest days first) runs when Trace
   starts and every hour, after the files of earlier days are closed, so the
-  days it removes free their space. `timer_enabled: false` (a test tree) runs
+  days it removes free their space; the bodies files due go first, so the size
+  bound counts what is left. `timer_enabled: false` (a test tree) runs
   none and plans none; a `:retention` message runs one. The clock (`:today`)
   and the opening of a day's file (`:open`) are injected for tests.
   """
@@ -33,6 +44,16 @@ defmodule FermixCore.Trace do
 
   @valid_types [:llm_call, :tool_exec, :agent_event, :channel_msg, :error, :sandbox_event]
   @retention_every_ms 3_600_000
+
+  # The fields content capture attaches that are a body (docs/TELEMETRY_CONTRACT.md,
+  # "Content"): a call's or a run's `input` and `output` (prompts, replies,
+  # transcripts, tool arguments and results, a coding run's prompt and output),
+  # a delegated task's or skill's `task_summary`, a tool search's `query`, a
+  # reminder's or a cue's `content` and a timed-out call's `context`. What the
+  # gate attaches beside them (a meeting's link and title, an attachment's file
+  # name, the names of the tools a reply called) describes the record and stays
+  # with it.
+  @body_keys ~w(input output task_summary query content context)
 
   # The exception classes `Jason.encode!/1` raises on un-encodable input: bad
   # UTF-8 (EncodeError) and a value with no `Jason.Encoder` — a PID/ref/fun or a
@@ -48,7 +69,9 @@ defmodule FermixCore.Trace do
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
-    {init_opts, opts} = Keyword.split(opts, [:base_dir, :today, :open, :timer_enabled])
+    {init_opts, opts} =
+      Keyword.split(opts, [:base_dir, :today, :open, :timer_enabled, :separate_bodies])
+
     {name, server_opts} = Keyword.pop(opts, :name, __MODULE__)
     GenServer.start_link(__MODULE__, init_opts, [name: name] ++ server_opts)
   end
@@ -60,6 +83,13 @@ defmodule FermixCore.Trace do
     GenServer.cast(server, {:record, type, to_string(agent), data})
   end
 
+  @doc """
+  The fields of a record that are its bodies, which an Always On server writes
+  to `<type>.bodies.jsonl` and keeps one day.
+  """
+  @spec body_keys() :: [String.t()]
+  def body_keys, do: @body_keys
+
   # --- Server Callbacks ---
 
   @impl true
@@ -69,6 +99,7 @@ defmodule FermixCore.Trace do
       today: Keyword.get(opts, :today, &Date.utc_today/0),
       open: Keyword.get(opts, :open, &open_append/1),
       timer_enabled: Keyword.get(opts, :timer_enabled, true),
+      separate_bodies: separate_bodies!(Keyword.get(opts, :separate_bodies, false)),
       handles: %{},
       failing: nil
     }
@@ -94,12 +125,8 @@ defmodule FermixCore.Trace do
 
   @impl true
   def handle_cast({:record, type, agent, data}, state) do
-    entry = build_entry(type, agent, data)
-
-    case ensure_handle(state, type) do
-      {:ok, key, state} -> {:noreply, write_entry(state, key, entry)}
-      {:error, path, reason, state} -> {:noreply, failed(state, "open #{path}", reason)}
-    end
+    lines = type |> build_entry(agent, data) |> lines(type, state.separate_bodies)
+    {:noreply, Enum.reduce(lines, state, &write_record/2)}
   end
 
   @impl true
@@ -109,6 +136,32 @@ defmodule FermixCore.Trace do
   end
 
   # --- Private ---
+
+  defp separate_bodies!(value) when is_boolean(value), do: value
+
+  defp separate_bodies!(other),
+    do: raise(ArgumentError, "Trace :separate_bodies must be a boolean, got: #{inspect(other)}")
+
+  # Which file each line of a record goes to: the record's own, and on an
+  # Always On server, for a record that carries a body, the record without its
+  # bodies there and the whole record in the bodies file.
+  defp lines(entry, type, false), do: [{type, entry}]
+
+  defp lines(entry, type, true) do
+    record = Map.drop(entry, @body_keys)
+
+    case map_size(record) == map_size(entry) do
+      true -> [{type, entry}]
+      false -> [{type, record}, {{type, :bodies}, entry}]
+    end
+  end
+
+  defp write_record({file, entry}, state) do
+    case ensure_handle(state, file) do
+      {:ok, key, state} -> write_entry(state, key, entry)
+      {:error, path, reason, state} -> failed(state, "open #{path}", reason)
+    end
+  end
 
   defp build_entry(type, agent, data) do
     normalized = Map.new(data, fn {k, v} -> {to_string(k), v} end)
@@ -127,13 +180,13 @@ defmodule FermixCore.Trace do
   # Invalid UTF-8 in a captured value (e.g. a non-UTF-8 byte in tool output) is
   # the common cause, so scrub binary leaves and retry once before giving up;
   # anything still unencodable is logged and dropped, not raised.
-  defp write_entry(state, {_date, type} = key, entry) do
+  defp write_entry(state, {_date, file} = key, entry) do
     case encode_line(entry) do
       {:ok, line} ->
         write_line(state, key, line)
 
       {:error, reason} ->
-        Logger.warning("Trace dropped #{type} entry: #{reason}")
+        Logger.warning("Trace dropped #{file_name(file)} entry: #{reason}")
         state
     end
   end
@@ -201,9 +254,9 @@ defmodule FermixCore.Trace do
   defp scrub(%{} = value), do: Map.new(value, fn {k, v} -> {scrub(k), scrub(v)} end)
   defp scrub(value), do: value
 
-  defp ensure_handle(state, type) do
+  defp ensure_handle(state, file) do
     today = state.today.()
-    key = {today, type}
+    key = {today, file}
 
     case Map.has_key?(state.handles, key) do
       true ->
@@ -232,8 +285,11 @@ defmodule FermixCore.Trace do
   # refusal instead of raising it.
   defp open_append(path), do: File.open(path, [:append, :binary])
 
-  defp trace_path(base_dir, {date, type}),
-    do: Path.join([base_dir, Date.to_iso8601(date), "#{type}.jsonl"])
+  defp trace_path(base_dir, {date, file}),
+    do: Path.join([base_dir, Date.to_iso8601(date), "#{file_name(file)}.jsonl"])
+
+  defp file_name({type, :bodies}), do: "#{type}.bodies"
+  defp file_name(type) when is_atom(type), do: Atom.to_string(type)
 
   defp close_stale_handles(state, today) do
     {stale, current} =
@@ -268,6 +324,10 @@ defmodule FermixCore.Trace do
     state = close_stale_handles(state, today)
 
     state.base_dir
+    |> Retention.prune_bodies(today)
+    |> log_bodies_retention(state.base_dir)
+
+    state.base_dir
     |> Retention.prune(today)
     |> log_retention(state.base_dir)
 
@@ -283,10 +343,27 @@ defmodule FermixCore.Trace do
 
   defp log_retention(%{removed: removed, refused: refused}, base_dir) do
     log_removed(removed, base_dir)
+    log_refused(refused)
+  end
 
+  defp log_bodies_retention(%{removed: removed, refused: refused}, base_dir) do
+    log_bodies_removed(removed, base_dir)
+    log_refused(refused)
+  end
+
+  defp log_refused(refused) do
     Enum.each(refused, fn {path, reason} ->
       Logger.error("Trace retention left #{path} in place: #{describe(reason)}")
     end)
+  end
+
+  defp log_bodies_removed([], _base_dir), do: :ok
+
+  defp log_bodies_removed(removed, base_dir) do
+    Logger.info(
+      "Trace retention removed the bodies of #{length(removed)} day(s) from #{base_dir}, " <>
+        "#{List.first(removed)} to #{List.last(removed)}"
+    )
   end
 
   defp log_removed([], _base_dir), do: :ok

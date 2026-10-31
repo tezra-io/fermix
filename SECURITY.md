@@ -150,6 +150,13 @@ This is a boundary, not an excuse for sloppiness: `auth.json` is `0600`,
 from `argv`, and temp files are created exclusively with private modes. Those
 reduce blast radius. They are not a claim to withstand a hostile local account.
 
+Also out of scope: the hosting provider of an Always On server, which can
+technically read the server's disk. Fermix adds no disk encryption there, since
+a server that restarts on its own would keep the key on the same disk; it keeps
+less there instead (the bodies in its traces one day) and encrypts what leaves
+it: snapshots to the recovery key, whose private half the server never holds,
+and every link to the phones and the desktop.
+
 Also out of scope: the operator's own model provider (reached over TLS with the
 operator's own key), and GitHub itself for release distribution — the upgrade
 path pins the release origin and verifies a keyless cosign signature, which

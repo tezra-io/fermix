@@ -15,6 +15,7 @@ defmodule FermixCore.Trace.RetentionTest do
 
   @today ~D[2026-10-30]
   @limits %{max_age_days: 14, max_bytes: 1_073_741_824, max_removals: 32}
+  @bodies_limits Map.put(@limits, :body_max_age_days, 1)
 
   setup do
     base = SafeRm.make_tmp_dir!("trace-retention")
@@ -28,6 +29,18 @@ defmodule FermixCore.Trace.RetentionTest do
     File.write!(Path.join(dir, "llm_call.jsonl"), :binary.copy("x", bytes))
     dir
   end
+
+  # What an Always On server writes (M75 L20): each day's records, and the
+  # bodies of those that carry one in `<type>.bodies.jsonl` beside them.
+  defp server_day!(base, date) do
+    dir = day!(base, date)
+    File.write!(Path.join(dir, "agent_event.jsonl"), ~s({"event":"turn_complete"}\n))
+    File.write!(Path.join(dir, "llm_call.bodies.jsonl"), ~s({"output":"Three days."}\n))
+    File.write!(Path.join(dir, "agent_event.bodies.jsonl"), ~s({"input":"Plan it"}\n))
+    dir
+  end
+
+  defp names(dir), do: dir |> File.ls!() |> Enum.sort()
 
   defp days(base) do
     base
@@ -196,6 +209,95 @@ defmodule FermixCore.Trace.RetentionTest do
              %{removed: [~D[2026-09-01]], refused: [{unsizable, :eacces}]}
 
     assert days(base) == ["2026-10-28", "2026-10-29", "2026-10-30"]
+  end
+
+  describe "the bodies bound" do
+    test "removes the bodies files of each day before yesterday and keeps every record",
+         %{base: base} do
+      old = server_day!(base, ~D[2026-10-20])
+      two_ago = server_day!(base, ~D[2026-10-28])
+      yesterday = server_day!(base, ~D[2026-10-29])
+      today = server_day!(base, @today)
+
+      assert Retention.prune_bodies(base, @today, @bodies_limits) ==
+               %{removed: [~D[2026-10-20], ~D[2026-10-28]], refused: []}
+
+      for dir <- [old, two_ago], do: assert(names(dir) == ["agent_event.jsonl", "llm_call.jsonl"])
+
+      for dir <- [yesterday, today] do
+        assert names(dir) == [
+                 "agent_event.bodies.jsonl",
+                 "agent_event.jsonl",
+                 "llm_call.bodies.jsonl",
+                 "llm_call.jsonl"
+               ]
+      end
+    end
+
+    test "a day with no bodies, as everywhere but a server, is left whole", %{base: base} do
+      dir = day!(base, ~D[2026-10-20])
+      File.write!(Path.join(dir, "agent_event.jsonl"), ~s({"input":"Plan it"}\n))
+
+      assert Retention.prune_bodies(base, @today, @bodies_limits) == %{removed: [], refused: []}
+      assert names(dir) == ["agent_event.jsonl", "llm_call.jsonl"]
+    end
+
+    test "a day past the age bound is left to the age bound", %{base: base} do
+      expired = server_day!(base, ~D[2026-09-01])
+
+      assert Retention.prune_bodies(base, @today, @bodies_limits) == %{removed: [], refused: []}
+      assert "llm_call.bodies.jsonl" in names(expired)
+    end
+
+    test "a pass removes the bodies of at most its bound of days, oldest first", %{base: base} do
+      for date <- Date.range(~D[2026-10-20], ~D[2026-10-23]), do: server_day!(base, date)
+      limits = %{@bodies_limits | max_removals: 3}
+
+      assert %{removed: [~D[2026-10-20], ~D[2026-10-21], ~D[2026-10-22]]} =
+               Retention.prune_bodies(base, @today, limits)
+
+      assert %{removed: [~D[2026-10-23]]} = Retention.prune_bodies(base, @today, limits)
+    end
+
+    test "never touches a dated folder that is not a day of traces", %{base: base} do
+      photos = server_day!(base, ~D[2026-10-20])
+      File.write!(Path.join(photos, "beach.jpg"), "not a trace")
+      before = names(photos)
+
+      assert Retention.prune_bodies(base, @today, @bodies_limits) == %{removed: [], refused: []}
+      assert names(photos) == before
+    end
+
+    test "a bodies file it cannot remove is refused, and the pass goes on", %{base: base} do
+      stuck = server_day!(base, ~D[2026-10-20])
+      server_day!(base, ~D[2026-10-21])
+      File.chmod!(stuck, 0o500)
+      on_exit(fn -> File.chmod!(stuck, 0o700) end)
+
+      assert %{removed: [~D[2026-10-21]], refused: [{path, :eacces}, {path2, :eacces}]} =
+               Retention.prune_bodies(base, @today, @bodies_limits)
+
+      assert Enum.sort([path, path2]) == [
+               Path.join(stuck, "agent_event.bodies.jsonl"),
+               Path.join(stuck, "llm_call.bodies.jsonl")
+             ]
+    end
+
+    test "a day it cannot list is named once, by the pass over the days", %{base: base} do
+      server_day!(base, ~D[2026-10-20])
+      unreadable = server_day!(base, ~D[2026-10-21])
+      File.chmod!(unreadable, 0o000)
+      on_exit(fn -> File.chmod!(unreadable, 0o700) end)
+
+      assert Retention.prune_bodies(base, @today, @bodies_limits) ==
+               %{removed: [~D[2026-10-20]], refused: []}
+
+      assert %{refused: [{^unreadable, :eacces}]} = Retention.prune(base, @today, @limits)
+    end
+
+    test "the bodies bound is one day" do
+      assert Retention.limits().body_max_age_days == 1
+    end
   end
 
   describe "from the Trace process" do

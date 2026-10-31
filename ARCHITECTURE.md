@@ -600,7 +600,15 @@ starts and every hour, after closing the files of earlier days, it removes whole
 day folders older than 14 days, then the oldest until the rest fit in 1 GiB, at
 most 32 a pass, never today's or a later day's, and nothing but a folder named as
 a date that holds only `.jsonl` files (and hidden ones).
-The bounds are constants, not settings.
+The bounds are constants, not settings. On an Always On server (M75 L20;
+`Home.AlwaysOn`: the primary of a home that moved or was restored onto a host
+running the Linux package with no Fermix app, decided at boot) `Trace` starts
+with `separate_bodies: true` and writes a record that carries a body
+(`Trace.body_keys/0`) twice: without its bodies to `<type>.jsonl` and whole to
+`<type>.bodies.jsonl`. Each pass first removes the bodies files of every day
+before yesterday (`Retention.prune_bodies/3`), so a server keeps bodies one day
+and the records 14. Readers of trace rows (`Setup.ProviderHealth`, the Doctor's
+sandbox check, `FermixOpik.TraceFile`) read `<type>.jsonl` and need no body.
 
 Architecture Invariant: trace writes are best-effort. `Trace` is an early child of
 core's `:rest_for_one` supervisor, so it never raises on its I/O: an entry it

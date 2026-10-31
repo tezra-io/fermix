@@ -5,6 +5,7 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
   alias FermixCore.Delivery.OwnerInbox
   alias FermixCore.NativeHost.Server, as: NativeHostServer
   alias FermixCore.Temporal.Registry, as: TemporalRegistry
+  alias FermixCore.Trace
 
   test "bundled self-knowledge skill loads as a core skill with no tools" do
     local =
@@ -662,6 +663,46 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
       assert reference =~ required, "browser reference does not mention #{required}"
     end
   end
+
+  # M75 L20: an Always On server keeps the bodies of its traces one day, and the
+  # owner is told plainly what lives on the server, for how long, and that its
+  # hosting provider can read the disk. The body fields come from
+  # `Trace.body_keys/0`, so a body added there and not named here fails. Each
+  # string is a file, a field, a bound or a boundary word, not a phrasing.
+  test "documents what an Always On server keeps, for how long, and who can read it" do
+    body = File.read!(self_knowledge_path())
+    observability = "observability" |> reference_path() |> File.read!() |> squash()
+    home = "home" |> reference_path() |> File.read!() |> squash()
+
+    assert body =~ "on an Always On server the prompts, replies and tool bodies one day"
+
+    fields = Enum.map(Trace.body_keys(), &"`#{&1}`")
+
+    for required <-
+          ["`<type>.bodies.jsonl`", "before yesterday", "14 days", "no Fermix app"] ++
+            fields do
+      assert observability =~ required, "observability reference does not mention #{required}"
+    end
+
+    for required <- [
+          "What lives on the server, and for how long",
+          "`memory.db`",
+          "the secret files",
+          "browser profile",
+          "kept one day on a server",
+          "14 days and at most 1 GiB",
+          "no disk encryption",
+          "can technically read the server's disk",
+          "two-factor sign-in",
+          "snapshots to the recovery key"
+        ] do
+      assert home =~ required, "home reference does not mention #{required}"
+    end
+
+    refute home =~ "the owner encrypts the disk"
+  end
+
+  defp squash(text), do: String.replace(text, ~r/\s+/, " ")
 
   # Every build has cues, off until the owner turns them on, so the owner must
   # be told the switch and sent to the surfaces that really configure it:

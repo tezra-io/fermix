@@ -29,6 +29,7 @@ defmodule FermixCore.Application do
   alias FermixCore.Cues
   alias FermixCore.Cues.Supervisor, as: CuesSupervisor
   alias FermixCore.Harness.Supervisor, as: HarnessSupervisor
+  alias FermixCore.Home.AlwaysOn
   alias FermixCore.Home.Candidate
   alias FermixCore.Home.Epoch
   alias FermixCore.Home.Move
@@ -666,7 +667,21 @@ defmodule FermixCore.Application do
 
   # Trace's retention passes (M75 L14) stay dark under `mix test`, as the
   # snapshot scheduler's timers do; tests start their own Trace with a clock.
-  defp trace_opts, do: [base_dir: trace_dir(), timer_enabled: @compiled_env != :test]
+  # On an Always On server a trace keeps the bodies of its records one day
+  # (M75 L20), decided once from what this boot recorded.
+  defp trace_opts do
+    [
+      base_dir: trace_dir(),
+      timer_enabled: @compiled_env != :test,
+      separate_bodies: always_on_server?()
+    ]
+  end
+
+  defp always_on_server? do
+    ConfigStore.fermix_home()
+    |> AlwaysOn.facts(Role.recorded(), HostFacts.current())
+    |> AlwaysOn.server?()
+  end
 
   defp jobs_scheduler_opts do
     Application.get_env(:fermix_core, :jobs, [])

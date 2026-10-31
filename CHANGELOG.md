@@ -157,6 +157,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   moved to. While a created server waits for its code or its move, a new
   enrollment code is not opened, and while it stands a token from another
   Hetzner project does not replace the one that reaches it.
+  The server's hosting provider can technically read its disk, so Fermix
+  keeps less there: the prompts, replies and tool input and output in its
+  traces are kept one day, and the rest of each trace 14 days; snapshots and
+  every link stay encrypted end to end.
 - **A server gets ready for Always On from one command.** On a Debian 12,
   Debian 13 or Ubuntu 24.04 server (arm64 or x86_64) running Linux 6.2 or
   later with Landlock enabled (Debian 13 and Ubuntu 24.04 do by default),

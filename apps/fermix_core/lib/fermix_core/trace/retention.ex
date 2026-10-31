@@ -1,7 +1,9 @@
 defmodule FermixCore.Trace.Retention do
   @max_age_days 14
+  @body_max_age_days 1
   @max_bytes 1_073_741_824
   @max_removals 32
+  @bodies_suffix ".bodies.jsonl"
 
   @moduledoc """
   Keeps the trace store bounded on every machine (M75 L14): traces hold full
@@ -26,19 +28,38 @@ defmodule FermixCore.Trace.Retention do
   the report's `refused` with the reason; while a day cannot be sized, the
   pass removes nothing for size. `Trace` runs a pass
   at its start and every hour, after closing the files of earlier days.
+
+  **Bodies.** On an Always On server `Trace` writes the bodies of a record
+  (a prompt, a reply, a tool's input or output) to the day's
+  `<type>.bodies.jsonl` beside its records (M75 L20). `prune_bodies/3`,
+  which `Trace` runs before `prune/3`, removes those files from every day
+  more than #{@body_max_age_days} day before today, so a server keeps bodies
+  through yesterday and the records #{@max_age_days} days. Elsewhere no day
+  holds one, and the pass removes nothing. It keeps to the same days of
+  traces and to #{@max_removals} days a pass, leaves a day past the age bound
+  to `prune/3`, and refuses by name a file it cannot remove.
   """
 
   @type limits :: %{
           max_age_days: non_neg_integer(),
+          body_max_age_days: non_neg_integer(),
           max_bytes: non_neg_integer(),
           max_removals: pos_integer()
         }
   @type report :: %{removed: [Date.t()], refused: [{Path.t(), term()}]}
 
-  @doc "The bounds a pass keeps: days of age, total bytes, and days removed in one pass."
+  @doc """
+  The bounds a pass keeps: days of age, days of age for bodies, total bytes,
+  and days removed in one pass.
+  """
   @spec limits() :: limits()
   def limits,
-    do: %{max_age_days: @max_age_days, max_bytes: @max_bytes, max_removals: @max_removals}
+    do: %{
+      max_age_days: @max_age_days,
+      body_max_age_days: @body_max_age_days,
+      max_bytes: @max_bytes,
+      max_removals: @max_removals
+    }
 
   @doc """
   One pass over `trace_dir` for the UTC date `today`: removes what the bounds
@@ -56,6 +77,62 @@ defmodule FermixCore.Trace.Retention do
 
       {:error, path, reason} ->
         %{removed: [], refused: [{path, reason}]}
+    end
+  end
+
+  @doc """
+  One bodies pass over `trace_dir` for the UTC date `today`: removes the
+  `<type>.bodies.jsonl` files of each day more than `body_max_age_days`
+  before it and within `max_age_days`, oldest first, and reports the days
+  whose bodies it removed and each file it could not remove. A directory or
+  a day it cannot list is left to `prune/3`, which runs in the same pass and
+  names it, so a failure is reported once.
+  """
+  @spec prune_bodies(Path.t(), Date.t(), limits()) :: report()
+  def prune_bodies(trace_dir, %Date{} = today, limits \\ limits())
+      when is_binary(trace_dir) and is_map(limits) do
+    case days(Path.expand(trace_dir)) do
+      {:ok, days, _unlisted_named_by_prune} ->
+        days
+        |> Enum.filter(&bodies_due?(&1, today, limits))
+        |> Enum.take(limits.max_removals)
+        |> Enum.reduce(%{removed: [], refused: []}, &remove_bodies/2)
+        |> then(&%{removed: Enum.reverse(&1.removed), refused: Enum.reverse(&1.refused)})
+
+      {:error, _path, _reason_named_by_prune} ->
+        %{removed: [], refused: []}
+    end
+  end
+
+  defp bodies_due?(%{date: date, names: names}, today, limits) do
+    age = Date.diff(today, date)
+
+    age > limits.body_max_age_days and age <= limits.max_age_days and
+      Enum.any?(names, &bodies_file?/1)
+  end
+
+  defp bodies_file?(name), do: String.ends_with?(name, @bodies_suffix)
+
+  # The day counts as removed once each of its bodies files is gone; a file
+  # gone since the listing is the outcome the removal was after.
+  defp remove_bodies(%{date: date, path: path, names: names}, report) do
+    refused =
+      names
+      |> Enum.filter(&bodies_file?/1)
+      |> Enum.map(&Path.join(path, &1))
+      |> Enum.flat_map(&remove_file/1)
+
+    case refused do
+      [] -> %{report | removed: [date | report.removed]}
+      _some -> %{report | refused: Enum.reverse(refused) ++ report.refused}
+    end
+  end
+
+  defp remove_file(file) do
+    case File.rm(file) do
+      :ok -> []
+      {:error, :enoent} -> []
+      {:error, reason} -> [{file, reason}]
     end
   end
 
@@ -93,7 +170,7 @@ defmodule FermixCore.Trace.Retention do
     with {:ok, %File.Stat{type: :directory}} <- File.lstat(path),
          {:ok, names} <- File.ls(path) do
       case Enum.all?(names, &(String.ends_with?(&1, ".jsonl") or String.starts_with?(&1, "."))) do
-        true -> [%{date: date, path: path}]
+        true -> [%{date: date, path: path, names: Enum.sort(names)}]
         false -> []
       end
     else

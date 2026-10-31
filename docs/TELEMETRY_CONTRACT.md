@@ -1441,10 +1441,19 @@ console/JS-exception buffer to its error details.
 `FERMIX_TRACE_CONTENT=0`. Bodies never leave the machine: the JSONL lives under
 a `0700` `FERMIX_HOME` and the Opik instance is local, so the privacy argument
 for a lean default does not apply, and a trace missing the request and the
-response cannot answer the questions traces exist for. The cost is disk —
-`FermixCore.Trace` has no retention, and a busy day's `tool_exec.jsonl` runs to
-tens of MB with content on. The test env pins it off (`config/test.exs`) so
-every content assertion in the suite establishes its own precondition.
+response cannot answer the questions traces exist for. The cost is disk — a
+busy day's `tool_exec.jsonl` runs to tens of MB with content on, and
+`FermixCore.Trace.Retention` keeps 14 days and at most 1 GiB. The test env pins
+it off (`config/test.exs`) so every content assertion in the suite establishes
+its own precondition.
+
+**Name a body one of `FermixCore.Trace.body_keys/0`** (`input`, `output`,
+`task_summary`, `query`, `content`, `context`). An Always On server's disk is
+one its hosting provider can read, so there `Trace` writes those fields to the
+day's `<type>.bodies.jsonl`, kept one day, and the rest of the row to
+`<type>.jsonl`, kept 14 (M75 L20). A body under any other name stays with its
+row for 14 days on the server: add the name to `body_keys/0` (and the
+`observability` self-knowledge reference) rather than inventing one.
 
 A field carrying user content obeys this switch even when it is not shaped by
 `preview/1` — `agent_task_start` / `skill_invoke` `task_summary` is the one that
