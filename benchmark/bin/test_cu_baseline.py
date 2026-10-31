@@ -244,8 +244,8 @@ def test_each_expectable_code_is_the_sentence_its_own_clause_renders():
 # refusals macOS answers, and the ones only the Linux helper answers at first.
 PROTOCOL_12_EXPECTABLE = {"stale_element", "ax_action_unsupported", "state_unreadable",
                           "focus_refused", "scope_not_found", "accessibility_unavailable",
-                          "toolkit_accessibility_off", "text_outside_layout", "consent_refused",
-                          "consent_timeout"}
+                          "pixels_unavailable", "toolkit_accessibility_off", "text_outside_layout",
+                          "consent_refused", "consent_timeout"}
 
 
 def test_the_protocol_12_refusals_can_be_expected():

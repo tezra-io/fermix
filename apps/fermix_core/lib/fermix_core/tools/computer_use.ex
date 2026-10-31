@@ -1777,6 +1777,16 @@ defmodule FermixCore.Tools.ComputerUse do
       "controls at all. Work by pixels: take a `screenshot` and act in the image it names."
   end
 
+  # The mirror image: a Linux helper that found its display through the user's
+  # session can reach the controls on it but not capture or drive its pixels, so a
+  # screenshot, a click by point, typing at the focus and an image check are all
+  # refused. Controls are the honest alternative, and the only one.
+  defp action_error_message("pixels_unavailable") do
+    "this action was not sent: the computer-use helper on this machine cannot see or drive " <>
+      "the screen by pixels right now, only act on its controls. Work by control: list them " <>
+      "with `elements` and act with a verb on a reference it gives."
+  end
+
   # Re-validation found several controls where the reference named one, or could
   # not read the candidate reliably enough to know it is the same control. Acting
   # on either would be a guess, so the next move is a fresh listing.

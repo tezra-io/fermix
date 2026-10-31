@@ -112,6 +112,7 @@ TYPED_CODE_ANCHORS = {
     "scope_not_found": "that scope has nothing in it right now",
     # ... and the ones only the Linux helper answers at first.
     "accessibility_unavailable": "cannot read or act on controls at all",
+    "pixels_unavailable": "only act on its controls",
     "toolkit_accessibility_off": "this application is not publishing its controls",
     "text_outside_layout": "the keyboard layout in use cannot type some of that text",
     "consent_refused": "the person declined the desktop's request",

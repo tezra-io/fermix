@@ -428,6 +428,7 @@ defmodule FermixCore.ComputerUse.ElementActionsTest do
           {"focus_refused", "`focus` never brings a window forward"},
           {"scope_not_found", "that scope has nothing in it right now"},
           {"accessibility_unavailable", "Work by pixels"},
+          {"pixels_unavailable", "Work by control"},
           {"ambiguous_element", "could not be told apart"},
           {"identity_unknown", "reliably enough to be sure"},
           {"toolkit_accessibility_off", "is not publishing its controls"},
