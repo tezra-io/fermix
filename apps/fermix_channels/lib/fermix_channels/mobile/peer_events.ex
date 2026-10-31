@@ -69,15 +69,6 @@ defmodule FermixChannels.Mobile.PeerEvents do
          {"candidate",
           {:object,
            [{"node_id", :node_id}, {"relays", {:list, @relay, 1, 8}}, {"recipient", :x25519}]}},
-         {"instance",
-          {:optional,
-           {:object,
-            [
-              {"provider", :name},
-              {"instance_id", :name},
-              {"region", :name},
-              {"account_id", {:optional, :name}}
-            ]}}},
          {"snapshots", {:optional, {:object, [{"s3_bucket", :name}, {"s3_region", :name}]}}}
        ], :none},
     "move_offer" =>

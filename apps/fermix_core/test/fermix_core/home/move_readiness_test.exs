@@ -122,7 +122,6 @@ defmodule FermixCore.Home.MoveReadinessTest do
       relays: [%{"url" => "https://eu1.relay.invalid/", "quic_port" => 7842}],
       noise_pk: :binary.copy(<<1>>, 32),
       recipient: :binary.copy(<<2>>, 32),
-      instance: nil,
       snapshots: nil
     }
   end

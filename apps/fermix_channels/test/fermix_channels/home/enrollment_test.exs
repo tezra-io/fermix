@@ -40,9 +40,11 @@ defmodule FermixChannels.Home.EnrollmentTest do
   end
 
   test "a candidate with the code enrolls once; the window is burned", ctx do
-    home = HomeMove.candidate_home!(ctx.code, instance: instance())
+    home = HomeMove.candidate_home!(ctx.code)
     {:ok, rail} = open_enrollment(ctx.primary, ctx.code, home)
-    :ok = Rail.send_event(rail, "enroll_request", request(home))
+    # What a host says of its instance is no field of the request: an older
+    # host's is neither checked nor kept.
+    :ok = Rail.send_event(rail, "enroll_request", Map.put(request(home), "instance", instance()))
 
     assert_receive {:rail, ^rail, {:event, %{"t" => "enroll_accepted"} = accepted, _bytes}},
                    10_000
@@ -57,7 +59,7 @@ defmodule FermixChannels.Home.EnrollmentTest do
     assert record.name == "north-box"
     assert record.noise_pk == noise.public
     assert record.recipient == pair.public_key
-    assert record.instance == instance()
+    refute Map.has_key?(record, :instance)
     assert Bitwise.band(File.stat!(Candidates.path(ctx.primary.root)).mode, 0o777) == 0o600
 
     assert %{state: :used} = Enrollment.status(ctx.primary.enrollment)
@@ -213,7 +215,6 @@ defmodule FermixChannels.Home.EnrollmentTest do
 
   defp request(home) do
     {:ok, pair} = Candidate.recipient_pair(home)
-    {:ok, instance} = Candidate.instance(home)
     iroh = File.read!(Candidate.path(home, "mobile/iroh_key"))
     {public, _secret} = :crypto.generate_key(:eddsa, :ed25519, iroh)
 
@@ -230,9 +231,6 @@ defmodule FermixChannels.Home.EnrollmentTest do
         "recipient" => Base.encode64(pair.public_key)
       }
     }
-    |> then(fn request ->
-      if instance == %{}, do: request, else: Map.put(request, "instance", instance)
-    end)
   end
 
   defp code_facts(primary) do
@@ -265,7 +263,6 @@ defmodule FermixChannels.Home.EnrollmentTest do
       relays: [%{"url" => "https://eu1.relay.invalid/", "quic_port" => 7842}],
       noise_pk: :binary.copy(<<1>>, 32),
       recipient: :binary.copy(<<2>>, 32),
-      instance: nil,
       snapshots: nil
     }
   end

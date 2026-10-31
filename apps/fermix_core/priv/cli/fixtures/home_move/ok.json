@@ -6,11 +6,6 @@
       "candidate_id": "cand-5e2a9c1f7b3d4086",
       "enrolled_at": "2026-10-27T09:12:00Z",
       "expires_at": "2026-10-28T09:12:00Z",
-      "instance": {
-        "instance_id": "61839204",
-        "provider": "hetzner",
-        "region": "fsn1"
-      },
       "name": "north-box",
       "node_id": "bb716f238ec342e512e3400c6f8363f0fc3fd3ba2b6b749dd6130b81d7cb5827",
       "os": "linux",

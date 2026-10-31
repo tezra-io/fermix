@@ -203,7 +203,6 @@ defmodule FermixChannels.Test.HomeMove do
     {:ok, _code} =
       Candidate.enroll(home, code,
         destination: Keyword.get(opts, :destination),
-        instance: Keyword.get(opts, :instance),
         now: @now
       )
 

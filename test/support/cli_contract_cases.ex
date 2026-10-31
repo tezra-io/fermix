@@ -232,8 +232,8 @@ defmodule FermixTestSupport.CliContractCases do
     })
   end
 
-  # The facts a candidate's view publishes, with the instance and the bucket
-  # the host reported, so the goldens draw both.
+  # The facts a candidate's view publishes, with the bucket the host
+  # reported, so the goldens draw it.
   defp candidate do
     %{
       candidate_id: "cand-5e2a9c1f7b3d4086",
@@ -242,7 +242,6 @@ defmodule FermixTestSupport.CliContractCases do
       arch: "aarch64",
       version: "1.2.3",
       node_id: "bb716f238ec342e512e3400c6f8363f0fc3fd3ba2b6b749dd6130b81d7cb5827",
-      instance: %{"provider" => "hetzner", "instance_id" => "61839204", "region" => "fsn1"},
       snapshots: %{"s3_bucket" => "invented-fermix-snapshots", "s3_region" => "eu-central-1"},
       enrolled_at: ~U[2026-10-27 09:12:00Z],
       expires_at: ~U[2026-10-28 09:12:00Z]

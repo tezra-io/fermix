@@ -25,7 +25,7 @@ defmodule FermixCore.Home.CandidatesTest do
     view = Candidates.view(record)
     refute Map.has_key?(view, "noise_pk")
     refute Map.has_key?(view, "recipient")
-    assert view["instance"]["instance_id"] == "61839311"
+    refute Map.has_key?(view, "instance")
   end
 
   test "holds at most four, each for 24 hours", %{home: home} do
@@ -56,11 +56,6 @@ defmodule FermixCore.Home.CandidatesTest do
       relays: [%{"url" => "https://eu1.relay.invalid/", "quic_port" => 7842}],
       noise_pk: :binary.copy(<<1>>, 32),
       recipient: :binary.copy(<<2>>, 32),
-      instance: %{
-        "provider" => "hetzner",
-        "instance_id" => "61839311",
-        "region" => "fsn1"
-      },
       snapshots: nil
     }
   end

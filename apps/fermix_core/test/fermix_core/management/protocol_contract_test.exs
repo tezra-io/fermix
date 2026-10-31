@@ -1446,7 +1446,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
   end
 
   # A candidate as the primary holds it after enrollment: invented facts, and
-  # the instance and bucket a host reports, so the goldens draw both.
+  # the bucket a host reports, so the goldens draw it.
   defp contract_candidate do
     %{
       name: "north-box",
@@ -1457,7 +1457,6 @@ defmodule FermixCore.Management.ProtocolContractTest do
       relays: [%{"url" => "https://eu1.relay.invalid/", "quic_port" => 7842}],
       noise_pk: :binary.copy(<<1>>, 32),
       recipient: :binary.copy(<<2>>, 32),
-      instance: %{"provider" => "hetzner", "instance_id" => "61839204", "region" => "fsn1"},
       snapshots: %{"s3_bucket" => "invented-fermix-snapshots", "s3_region" => "eu-central-1"}
     }
   end

@@ -255,7 +255,7 @@ defmodule FermixCore.Sandbox.OsSandboxTest do
         assert {:ok, entries} = OsSandbox.unreadable(config(ctx, mode))
         assert {resolved(Path.join(ctx.fermix_home, "secrets")), :tree} in entries
         # M75: the phone gateway's identity bundle, a desktop's key and
-        # receipts, and an Always-On host's enrollment and instance files.
+        # receipts, and an Always-On host's enrollment code.
         assert {resolved(Path.join(ctx.fermix_home, "mobile")), :tree} in entries
         assert {resolved(Path.join(ctx.fermix_home, "device")), :tree} in entries
         assert {resolved("/run/fermix"), :tree} in entries

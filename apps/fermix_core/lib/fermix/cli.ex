@@ -160,7 +160,7 @@ defmodule Fermix.CLI do
       fermix home snapshots status|run [--json]    Show the snapshots, or take one now
       fermix home snapshots passphrase --passphrase-file PATH [--json]  Set the recovery passphrase
       fermix home enroll-code [--json]             Open a one-time code a new server enrolls with
-      fermix home enroll --code-file PATH [--snapshot-bucket B --snapshot-region R] [--instance-file PATH]  Make this fresh home a candidate primary
+      fermix home enroll --code-file PATH [--snapshot-bucket B --snapshot-region R]  Make this fresh home a candidate primary
       fermix home candidates [--json]              List the enrolled candidate primaries
       fermix home move --to ID [--recovery-passphrase-file PATH] [--retire] [--json]  Move this home to a candidate
       fermix logs   [-f] [-n LINES]                Show daemon log file

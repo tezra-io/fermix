@@ -203,11 +203,11 @@ it, never a second writer.
   anywhere on and ready: otherwise it is refused by name ("Remote reach is
   off…", or "…starting; open the code again in a few seconds").
 - **The candidate.** `fermix home enroll --code-file PATH
-  [--snapshot-bucket B --snapshot-region R] [--instance-file PATH]` (what the
-  server's first boot runs) makes a fresh home a candidate primary: it writes
+  [--snapshot-bucket B --snapshot-region R]` (what the server's first boot
+  runs) makes a fresh home a candidate primary: it writes
   `<home>/candidate/` (the code, the snapshot bucket and region the new
-  primary will write to, what the host says of itself, its own iroh key, its
-  Noise key and a one-time snapshot recipient, all 0600) and
+  primary will write to, its own iroh key, its Noise key and a one-time
+  snapshot recipient, all 0600) and
   `[fermix_core.engine] role = "candidate"`, and removes the code file. It
   refuses a home that ran as a primary, carries a moved marker, is a
   candidate already, or holds anything a fresh install does not write, and a
@@ -224,8 +224,7 @@ it, never a second writer.
   (one that enrolled and waits for its move is not).
 - **Reviewing it.** `fermix home candidates` (or `home.candidates.list`)
   lists the candidates the primary holds (at most four, each for 24 hours):
-  id, name, system, version, and the instance facts the server reported
-  about itself, which nobody verified.
+  id, name, system, version, and the snapshot bucket it was told.
 - **The readiness report.** Before the move, `home.move.readiness
   {candidate_id}` (the apps' review step) answers each fact as `ok`, `warn` or
   `block`: the secrets this computer keeps in its keychain, which move with
@@ -506,7 +505,7 @@ it, never a second writer.
 | Where snapshots are kept (bucket, region, the S3-compatible address, how often) and the two access keys | Recovery: the `snapshots` section; the keys as hidden fields, never shown again | `fermix settings set snapshots …`, `fermix settings secret set snapshot_s3_access_key_id` |
 | Take a snapshot now | **Back up now**, offered once snapshots have somewhere to go | `fermix home snapshots run` |
 | An enrollment code | **Get a code** (**Get a new code** while one is open, which stops the open one working), shown once with **Copy** and when it expires, beside the command for a server you have, and what to know before moving (the disk it needs, that this computer serves nothing meanwhile, the cutover gap, where the server keeps secrets, no way back) | `fermix home enroll-code` |
-| The servers waiting for the move, with the instance facts they reported (unverified) | Servers waiting for the move | `fermix home candidates` |
+| The servers waiting for the move | Servers waiting for the move | `fermix home candidates` |
 | Review the move (`home.move.readiness`): each item ready, a note or a block | **Review the move** on a server waiting; a block is shown as one | `fermix home move` says each block |
 | Start the move | the app's pane | `fermix home move --to ID [--retire]` |
 | Where the move stands (its phase and sentence) | The move | `fermix home status` |

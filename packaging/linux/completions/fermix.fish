@@ -61,7 +61,6 @@ complete -c fermix -n "__fish_seen_subcommand_from home" -l mark-moved -d "Mark 
 complete -c fermix -n "__fish_seen_subcommand_from home; and __fish_seen_subcommand_from enroll" -l code-file -r -d "Read the enrollment code from this file"
 complete -c fermix -n "__fish_seen_subcommand_from home; and __fish_seen_subcommand_from enroll" -l snapshot-bucket -r -d "The bucket this server keeps its snapshots in"
 complete -c fermix -n "__fish_seen_subcommand_from home; and __fish_seen_subcommand_from enroll" -l snapshot-region -r -d "The region of that bucket"
-complete -c fermix -n "__fish_seen_subcommand_from home; and __fish_seen_subcommand_from enroll" -l instance-file -r -d "Read what this server reports about itself from a provisioner's file"
 complete -c fermix -n "__fish_seen_subcommand_from home; and __fish_seen_subcommand_from move" -l recovery-passphrase-file -r -d "Read the recovery passphrase from this file"
 complete -c fermix -n "__fish_seen_subcommand_from home; and __fish_seen_subcommand_from move" -l retire -d "Keep no desktop here: a server being replaced"
 complete -c fermix -n "__fish_seen_subcommand_from browser" -a "bridge install uninstall status" -d "Browser bridge subcommand"

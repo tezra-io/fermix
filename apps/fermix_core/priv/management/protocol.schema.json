@@ -5872,8 +5872,8 @@
     },
     "homeCandidate": {
       "type": "object",
-      "description": "A candidate primary the primary holds, for 24 hours after it enrolled, never its keys. instance is what the host reported about itself, which nobody verified, and snapshots the bucket it was told to keep snapshots in; either is null when the host gave none.",
-      "required": ["candidate_id", "name", "os", "arch", "version", "node_id", "instance", "snapshots", "enrolled_at", "expires_at"],
+      "description": "A candidate primary the primary holds, for 24 hours after it enrolled, never its keys. snapshots is the bucket it was told to keep snapshots in, null when the host gave none.",
+      "required": ["candidate_id", "name", "os", "arch", "version", "node_id", "snapshots", "enrolled_at", "expires_at"],
       "additionalProperties": false,
       "properties": {
         "candidate_id": { "type": "string", "pattern": "^cand-[0-9a-f]{16}$" },
@@ -5882,21 +5882,6 @@
         "arch": { "type": "string" },
         "version": { "type": "string" },
         "node_id": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-        "instance": {
-          "oneOf": [
-            {
-              "type": "object",
-              "required": ["provider", "instance_id", "region"],
-              "properties": {
-                "provider": { "type": "string" },
-                "instance_id": { "type": "string" },
-                "region": { "type": "string" },
-                "account_id": { "type": "string" }
-              }
-            },
-            { "type": "null" }
-          ]
-        },
         "snapshots": {
           "oneOf": [
             {

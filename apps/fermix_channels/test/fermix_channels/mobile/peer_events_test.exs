@@ -114,21 +114,10 @@ defmodule FermixChannels.Mobile.PeerEventsTest do
                  update_in(request["candidate"], &Map.delete(&1, "recipient"))
                )
 
-      instance = %{"provider" => "hetzner", "instance_id" => "61839204", "region" => "fsn1"}
-
-      assert {:ok, _event} = decode("enroll_request", Map.put(request, "instance", instance))
-
+      # What a host says of its instance is no field of the request, so it
+      # is not checked.
       assert {:ok, _event} =
-               decode(
-                 "enroll_request",
-                 Map.put(request, "instance", Map.put(instance, "account_id", "invented-7"))
-               )
-
-      assert {:error, {:invalid_field, "instance.account_id"}} =
-               decode(
-                 "enroll_request",
-                 Map.put(request, "instance", Map.put(instance, "account_id", ""))
-               )
+               decode("enroll_request", Map.put(request, "instance", %{"region" => ""}))
 
       assert {:error, {:missing_field, "host.arch"}} =
                decode(
@@ -138,12 +127,6 @@ defmodule FermixChannels.Mobile.PeerEventsTest do
 
       assert {:error, {:invalid_field, "candidate.relays"}} =
                decode("enroll_request", put_in(request, ["candidate", "relays"], []))
-
-      assert {:error, {:invalid_field, "instance.region"}} =
-               decode(
-                 "enroll_request",
-                 Map.put(request, "instance", %{instance | "region" => ""})
-               )
     end
 
     test "a move offer, its chunks, and the candidate's one-time recipient" do

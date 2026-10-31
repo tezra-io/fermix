@@ -8,8 +8,6 @@ defmodule FermixCore.Home.Candidate do
     * `code`: the enrollment code, until the enrollment is accepted;
     * `destination.json`: the snapshot bucket and region the new primary
       writes to (`{}` when none was named);
-    * `instance.json`: what the host says of itself (`{}` when nothing was
-      given), sent unverified (B6);
     * `noise_key`: the candidate's X25519 Noise static key (32 raw bytes), its
       key in the enrollment handshake and the move's responder key;
     * `recipient_key`: the one-time snapshot recipient (`Snapshot.Recipient`)
@@ -53,8 +51,6 @@ defmodule FermixCore.Home.Candidate do
   @file_mode 0o600
   @phases ~w(enrolling enrolled receiving staged activating expired failed)
   @config_text ~s([fermix_core.engine]\nrole = "candidate"\n)
-  @instance_fields ~w(provider instance_id region)
-  @optional_instance_fields ~w(account_id)
 
   @type phase :: String.t()
   @type state :: %{required(String.t()) => term()}
@@ -86,8 +82,7 @@ defmodule FermixCore.Home.Candidate do
 
   @doc """
   Makes `home` a candidate from `code_text` (see the moduledoc). `opts`:
-  `:destination` (`%{"s3_bucket" => b, "s3_region" => r}` or nil),
-  `:instance` (the instance facts or nil), `:now` (a `DateTime`),
+  `:destination` (`%{"s3_bucket" => b, "s3_region" => r}` or nil), `:now` (a `DateTime`),
   `:consume` (a 0-arity function run last, such as removing the code file
   the code came from; its `{:error, reason}` undoes the enrollment too), and
   `:hello` (`DaemonProbe.stopped/2`'s seam).
@@ -100,18 +95,17 @@ defmodule FermixCore.Home.Candidate do
     with {:ok, code} <- EnrollmentCode.decode(code_text),
          :ok <- not_expired(code, now),
          {:ok, destination} <- given_destination(Keyword.get(opts, :destination)),
-         {:ok, instance} <- given_instance(Keyword.get(opts, :instance)),
          {:ok, found} <- fresh(home, Keyword.take(opts, [:hello])) do
       consume = Keyword.get(opts, :consume, fn -> :ok end)
-      enroll_into(found, home, {code, code_text}, destination, instance, now, consume)
+      enroll_into(found, home, {code, code_text}, destination, now, consume)
     end
   end
 
-  defp enroll_into(:replace, home, code, destination, instance, now, consume),
-    do: replace_all(home, code, destination, instance, now, consume)
+  defp enroll_into(:replace, home, code, destination, now, consume),
+    do: replace_all(home, code, destination, now, consume)
 
-  defp enroll_into(created_home?, home, code, destination, instance, now, consume) do
-    write_all(home, code, destination, instance, now, consume)
+  defp enroll_into(created_home?, home, code, destination, now, consume) do
+    write_all(home, code, destination, now, consume)
     |> undo_on_error(home, created_home?)
   end
 
@@ -187,10 +181,6 @@ defmodule FermixCore.Home.Candidate do
   @spec destination(Path.t()) :: {:ok, map()} | {:error, term()}
   def destination(home) when is_binary(home), do: read_json(path(home, "destination.json"))
 
-  @doc "The instance facts (`instance.json`): `%{}` or what the host said of itself."
-  @spec instance(Path.t()) :: {:ok, map()} | {:error, term()}
-  def instance(home) when is_binary(home), do: read_json(path(home, "instance.json"))
-
   @doc "See `FermixCore.Home.Candidate.Activation.finish_activation/1`."
   @spec finish_activation(Path.t()) :: :ok | {:error, term()}
   def finish_activation(home), do: Activation.finish_activation(home)
@@ -232,7 +222,6 @@ defmodule FermixCore.Home.Candidate do
         "starts from an empty home."
 
   def error_sentence({:invalid_destination, sentence}), do: sentence
-  def error_sentence({:invalid_instance, sentence}), do: sentence
   def error_sentence({:invalid_state, file}), do: "#{file} is not a candidate state Fermix wrote."
   def error_sentence({:invalid_key, file}), do: "#{file} is not a key Fermix wrote."
 
@@ -265,21 +254,6 @@ defmodule FermixCore.Home.Candidate do
       else:
         {:error,
          {:invalid_destination, "The snapshot bucket and region are text of 1 to 128 bytes."}}
-  end
-
-  defp given_instance(nil), do: {:ok, %{}}
-
-  defp given_instance(%{} = facts) do
-    optional = Map.take(facts, @optional_instance_fields)
-
-    if Enum.all?(@instance_fields, &EnrollmentCode.printable?(Map.get(facts, &1))) and
-         Enum.all?(Map.values(optional), &EnrollmentCode.printable?/1),
-       do: {:ok, Map.merge(Map.take(facts, @instance_fields), optional)},
-       else:
-         {:error,
-          {:invalid_instance,
-           "The instance file must hold provider, instance_id and region, and may hold " <>
-             "account_id, each text of 1 to 128 bytes."}}
   end
 
   # A fresh install writes nothing a move would carry: every top-level entry
@@ -327,12 +301,12 @@ defmodule FermixCore.Home.Candidate do
   # Everything goes into a private sibling directory first and is renamed into
   # place whole, then the settings file is created; a failure removes what was
   # written (`undo_on_error/3`).
-  defp write_all(home, {code, code_text}, destination, instance, now, consume) do
+  defp write_all(home, {code, code_text}, destination, now, consume) do
     building = Path.join(home, ".candidate-#{Base.encode16(:crypto.strong_rand_bytes(4))}")
 
     with :ok <- make_dir(home),
          :ok <- make_dir(building),
-         :ok <- write_files(building, code, code_text, destination, instance, now),
+         :ok <- write_files(building, code, code_text, destination, now),
          :ok <- rename(building, dir(home)),
          :ok <- create_config(home),
          :ok <- consume.() do
@@ -344,13 +318,13 @@ defmodule FermixCore.Home.Candidate do
 
   # The new candidate is built beside the old, then swapped in; the old one is
   # put back if the swap or the last step fails, and removed once it held.
-  defp replace_all(home, {code, code_text}, destination, instance, now, consume) do
+  defp replace_all(home, {code, code_text}, destination, now, consume) do
     suffix = Base.encode16(:crypto.strong_rand_bytes(4))
     building = Path.join(home, ".candidate-#{suffix}")
     aside = Path.join(home, ".candidate-replaced-#{suffix}")
 
     with :ok <- make_dir(building),
-         :ok <- write_files(building, code, code_text, destination, instance, now),
+         :ok <- write_files(building, code, code_text, destination, now),
          :ok <- rename(dir(home), aside),
          :ok <- swap_in(building, home, aside),
          :ok <- consumed(consume.(), home, aside) do
@@ -387,7 +361,7 @@ defmodule FermixCore.Home.Candidate do
     end
   end
 
-  defp write_files(building, code, code_text, destination, instance, now) do
+  defp write_files(building, code, code_text, destination, now) do
     {_public, noise_private} = :crypto.generate_key(:ecdh, :x25519)
     recipient = Recipient.generate()
 
@@ -404,7 +378,6 @@ defmodule FermixCore.Home.Candidate do
 
     with :ok <- write_private(Path.join(building, "code"), String.trim(code_text)),
          :ok <- write_private(Path.join(building, "destination.json"), Jason.encode!(destination)),
-         :ok <- write_private(Path.join(building, "instance.json"), Jason.encode!(instance)),
          :ok <- write_private(Path.join(building, "noise_key"), noise_private),
          :ok <-
            write_private(

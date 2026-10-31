@@ -8,9 +8,9 @@ defmodule FermixChannels.Home.Candidate do
   **Enrollment.** In phase `enrolling` it dials the primary the code names
   (`Mobile.Rail`, `:ikpsk2_enroll`: its Noise key, the code's gateway key and
   secret) and sends `enroll_request` with its host, its own iroh route, the
-  one-time snapshot recipient, and the instance and destination facts it was
-  given. On `enroll_accepted` it removes the code and waits for the move, up
-  to 24 hours (`enrolled`); after that it stops waiting (`expired`). A
+  one-time snapshot recipient, and the destination facts it was given. On
+  `enroll_accepted` it removes the code and waits for the move, up to 24
+  hours (`enrolled`); after that it stops waiting (`expired`). A
   refusal (`enrollment_expired`, `used`, `limit`) ends it (`failed`), logged
   by its code; an unreachable primary is tried again, 1 s doubling to 60 s,
   until the code expires. Every ending removes the code: a burnt or expired
@@ -248,7 +248,6 @@ defmodule FermixChannels.Home.Candidate do
     with {:ok, code} <- Files.read_code(state.home),
          {:ok, noise} <- Files.noise_keypair(state.home),
          {:ok, pair} <- Files.recipient_pair(state.home),
-         {:ok, instance} <- Files.instance(state.home),
          {:ok, destination} <- Files.destination(state.home),
          {:ok, iroh} <- File.read(Path.join([Files.dir(state.home), "mobile", "iroh_key"])) do
       {:ok,
@@ -258,7 +257,7 @@ defmodule FermixChannels.Home.Candidate do
          rail_opts:
            [static_keypair: noise, remote_static: code.gateway_pk, psk: code.secret] ++
              helper_opts(state),
-         request: enroll_request(state.host, iroh, pair, instance, destination)
+         request: enroll_request(state.host, iroh, pair, destination)
        }}
     end
   end
@@ -266,7 +265,7 @@ defmodule FermixChannels.Home.Candidate do
   defp helper_opts(%{rail_opts: []} = state), do: [helper: state.helper]
   defp helper_opts(state), do: state.rail_opts
 
-  defp enroll_request(host, iroh_secret, pair, instance, destination) do
+  defp enroll_request(host, iroh_secret, pair, destination) do
     {iroh_public, _secret} = :crypto.generate_key(:eddsa, :ed25519, iroh_secret)
 
     %{
@@ -277,7 +276,6 @@ defmodule FermixChannels.Home.Candidate do
         "recipient" => Base.encode64(pair.public_key)
       }
     }
-    |> put_unless_empty("instance", instance)
     |> put_unless_empty("snapshots", destination)
   end
 

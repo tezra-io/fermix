@@ -17,11 +17,6 @@ defmodule FermixCore.Home.CandidateTest do
     name: "orchard-mini",
     expires_at: ~U[2031-05-04 10:10:00Z]
   }
-  @instance %{
-    "provider" => "hetzner",
-    "instance_id" => "61839204",
-    "region" => "fsn1"
-  }
 
   setup do
     tmp = SafeRm.make_tmp_dir!("candidate")
@@ -37,7 +32,6 @@ defmodule FermixCore.Home.CandidateTest do
       assert {:ok, %{name: "orchard-mini"}} =
                Candidate.enroll(ctx.home, ctx.code <> "\n",
                  destination: destination,
-                 instance: @instance,
                  now: @now
                )
 
@@ -48,14 +42,15 @@ defmodule FermixCore.Home.CandidateTest do
       assert mode(Path.join(Candidate.dir(ctx.home), "mobile")) == 0o700
 
       for file <-
-            ~w(code destination.json instance.json noise_key recipient_key state.json) ++
+            ~w(code destination.json noise_key recipient_key state.json) ++
               ["mobile/iroh_key"] do
         assert mode(Candidate.path(ctx.home, file)) == 0o600, file
       end
 
       assert File.read!(Candidate.path(ctx.home, "code")) == ctx.code
       assert {:ok, ^destination} = Candidate.destination(ctx.home)
-      assert {:ok, @instance} = Candidate.instance(ctx.home)
+      # Nothing in v1 reports what a host says of itself, so none is kept.
+      refute File.exists?(Candidate.path(ctx.home, "instance.json"))
       assert byte_size(File.read!(Candidate.path(ctx.home, "mobile/iroh_key"))) == 32
       assert {:ok, %{private: <<_::256>>, public: <<_::256>>}} = Candidate.noise_keypair(ctx.home)
 
@@ -142,28 +137,9 @@ defmodule FermixCore.Home.CandidateTest do
       assert Enum.sort(File.ls!(ctx.home)) == ["candidate", "config.toml"]
     end
 
-    test "keeps an account id when the host gives one", ctx do
-      instance = Map.put(@instance, "account_id", "invented-project-7")
-
-      assert {:ok, _code} = Candidate.enroll(ctx.home, ctx.code, instance: instance, now: @now)
-      assert {:ok, ^instance} = Candidate.instance(ctx.home)
-    end
-
-    test "refuses a code that ran out, or facts that are not text", ctx do
+    test "refuses a code that ran out, or one Fermix did not open", ctx do
       assert {:error, {:code_expired, ~U[2031-05-04 10:10:00Z]}} =
                Candidate.enroll(ctx.home, ctx.code, now: ~U[2031-05-04 10:10:00Z])
-
-      assert {:error, {:invalid_instance, _sentence}} =
-               Candidate.enroll(ctx.home, ctx.code,
-                 instance: Map.delete(@instance, "region"),
-                 now: @now
-               )
-
-      assert {:error, {:invalid_instance, _sentence}} =
-               Candidate.enroll(ctx.home, ctx.code,
-                 instance: Map.put(@instance, "account_id", ""),
-                 now: @now
-               )
 
       assert {:error, {:invalid_code, "prefix"}} =
                Candidate.enroll(ctx.home, "fxpair1.abc", now: @now)

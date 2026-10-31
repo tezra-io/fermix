@@ -5,7 +5,6 @@ defmodule Fermix.CLI.HomeMoveCommand do
 
       fermix home enroll-code [--json]
       fermix home enroll --code-file PATH [--snapshot-bucket B --snapshot-region R]
-                         [--instance-file PATH]
       fermix home candidates [--json]
       fermix home move --to ID [--recovery-passphrase-file PATH] [--retire] [--json]
 
@@ -14,10 +13,7 @@ defmodule Fermix.CLI.HomeMoveCommand do
     It needs the running engine (`engine_stopped` otherwise).
   - `enroll`, on the new host, makes a fresh home a candidate
     (`FermixCore.Home.Candidate.enroll/3`) with no engine running: it reads
-    the code from the file (trimmed), the instance facts from
-    `--instance-file` (`{provider, instance_id, region}` and an optional
-    `account_id`, shown unverified; a provisioner writes that file, and the
-    first boot passes none), writes `candidate/` and the candidate
+    the code from the file (trimmed), writes `candidate/` and the candidate
     role, and removes the code file. A failure leaves the home as it found
     it, and the code file too. Human output only.
   - `candidates` lists the candidates the primary holds: from the engine
@@ -51,8 +47,7 @@ defmodule Fermix.CLI.HomeMoveCommand do
   @enroll_switches [
     code_file: :string,
     snapshot_bucket: :string,
-    snapshot_region: :string,
-    instance_file: :string
+    snapshot_region: :string
   ]
   @move_switches [
     to: :string,
@@ -68,7 +63,7 @@ defmodule Fermix.CLI.HomeMoveCommand do
   @usage """
   Usage:
     fermix home enroll-code [--json]
-    fermix home enroll --code-file PATH [--snapshot-bucket B --snapshot-region R] [--instance-file PATH]
+    fermix home enroll --code-file PATH [--snapshot-bucket B --snapshot-region R]
     fermix home candidates [--json]
     fermix home move --to ID [--recovery-passphrase-file PATH] [--retire] [--json]
   """
@@ -120,13 +115,11 @@ defmodule Fermix.CLI.HomeMoveCommand do
   defp enroll_with(opts, deps) do
     with {:ok, code_file} <- required(opts, :code_file),
          {:ok, destination} <- destination(opts),
-         {:ok, code_text} <- read_small(Path.expand(code_file)),
-         {:ok, instance} <- instance(opts) do
+         {:ok, code_text} <- read_small(Path.expand(code_file)) do
       code_file = Path.expand(code_file)
 
       enroll_opts = [
         destination: destination,
-        instance: instance,
         now: now(deps),
         consume: fn -> remove_code_file(code_file) end
       ]
@@ -182,22 +175,6 @@ defmodule Fermix.CLI.HomeMoveCommand do
 
       _half ->
         :usage
-    end
-  end
-
-  defp instance(opts) do
-    case Keyword.fetch(opts, :instance_file) do
-      {:ok, path} -> read_instance(Path.expand(path))
-      :error -> {:ok, nil}
-    end
-  end
-
-  defp read_instance(path) do
-    with {:ok, text} <- read_small(path) do
-      case Jason.decode(text) do
-        {:ok, %{} = facts} -> {:ok, facts}
-        _other -> {:error, "The instance file #{path} is not a JSON object."}
-      end
     end
   end
 
@@ -258,17 +235,8 @@ defmodule Fermix.CLI.HomeMoveCommand do
     [
       "#{candidate["candidate_id"]}  #{candidate["name"]}  #{candidate["os"]}/#{candidate["arch"]}" <>
         "  enrolled #{candidate["enrolled_at"]}, held until #{candidate["expires_at"]}"
-    ] ++ instance_line(candidate["instance"])
+    ]
   end
-
-  defp instance_line(%{"provider" => provider, "instance_id" => id} = facts) do
-    ["  #{provider} instance #{id} in #{facts["region"]}#{account(facts)} (unverified)"]
-  end
-
-  defp instance_line(_none), do: []
-
-  defp account(%{"account_id" => account}), do: ", account #{account}"
-  defp account(_facts), do: ""
 
   # -- move -------------------------------------------------------------------
 

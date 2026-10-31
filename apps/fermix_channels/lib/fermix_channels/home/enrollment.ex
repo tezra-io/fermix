@@ -467,7 +467,6 @@ defmodule FermixChannels.Home.Enrollment do
       relays: candidate["relays"],
       noise_pk: noise_pk,
       recipient: Base.decode64!(candidate["recipient"]),
-      instance: request["instance"],
       snapshots: request["snapshots"]
     }
   end

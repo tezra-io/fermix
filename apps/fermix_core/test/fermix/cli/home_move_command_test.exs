@@ -16,11 +16,6 @@ defmodule Fermix.CLI.HomeMoveCommandTest do
 
   @now ~U[2031-05-04 10:00:00Z]
   @passphrase "invented-lantern-orchard"
-  @instance %{
-    "provider" => "hetzner",
-    "instance_id" => "61839204",
-    "region" => "fsn1"
-  }
 
   setup do
     tmp = SafeRm.make_tmp_dir!("home_move_command")
@@ -40,16 +35,8 @@ defmodule Fermix.CLI.HomeMoveCommandTest do
     code_file = Path.join(tmp, "enroll.code")
     # The first-boot script writes it with printf '%s\n'.
     File.write!(code_file, code <> "\n")
-    instance_file = Path.join(tmp, "instance.json")
-    File.write!(instance_file, Jason.encode!(@instance))
 
-    %{
-      tmp: tmp,
-      home: Path.join(tmp, "home"),
-      code: code,
-      code_file: code_file,
-      instance_file: instance_file
-    }
+    %{tmp: tmp, home: Path.join(tmp, "home"), code: code, code_file: code_file}
   end
 
   describe "enroll" do
@@ -61,9 +48,7 @@ defmodule Fermix.CLI.HomeMoveCommandTest do
         "--snapshot-bucket",
         "invented-bucket-91",
         "--snapshot-region",
-        "eu-north-1",
-        "--instance-file",
-        ctx.instance_file
+        "eu-north-1"
       ]
 
       {status, out, err} = run(argv, home: ctx.home, now: fn -> @now end)
@@ -73,7 +58,7 @@ defmodule Fermix.CLI.HomeMoveCommandTest do
       refute out =~ ctx.code
       refute File.exists?(ctx.code_file)
       assert File.read!(Candidate.path(ctx.home, "code")) == ctx.code
-      assert {:ok, @instance} = Candidate.instance(ctx.home)
+      refute File.exists?(Candidate.path(ctx.home, "instance.json"))
 
       assert {:ok, %{"s3_bucket" => "invented-bucket-91", "s3_region" => "eu-north-1"}} =
                Candidate.destination(ctx.home)
@@ -122,6 +107,21 @@ defmodule Fermix.CLI.HomeMoveCommandTest do
 
       assert {2, _out, _err} = run(["enroll"], home: ctx.home)
     end
+
+    # Nothing in v1 writes what a host says of itself, so the option is gone.
+    test "an instance file is a usage error, and the code file stays", ctx do
+      instance_file = Path.join(ctx.tmp, "instance.json")
+      File.write!(instance_file, ~s({"provider": "hetzner"}))
+
+      assert {2, _out, _err} =
+               run(["enroll", "--code-file", ctx.code_file, "--instance-file", instance_file],
+                 home: ctx.home,
+                 now: fn -> @now end
+               )
+
+      assert File.exists?(ctx.code_file)
+      refute File.exists?(ctx.home)
+    end
   end
 
   describe "enroll-code" do
@@ -162,9 +162,7 @@ defmodule Fermix.CLI.HomeMoveCommandTest do
 
       {0, out, _err} = run(["candidates"], home: ctx.home, client: stopped, now: fn -> @now end)
       assert out =~ record.candidate_id
-
-      assert out =~ "hetzner instance 61839204 in fsn1 (unverified)"
-      refute out =~ ~r/compare/i
+      refute out =~ ~r/instance|unverified|compare/i
 
       empty = fn "home.candidates.list", %{}, _opts -> {:ok, %{"candidates" => []}} end
       {0, out, _err} = run(["candidates"], home: ctx.home, client: empty)
@@ -406,7 +404,6 @@ defmodule Fermix.CLI.HomeMoveCommandTest do
       relays: [%{"url" => "https://eu1.relay.invalid/", "quic_port" => 7842}],
       noise_pk: :binary.copy(<<1>>, 32),
       recipient: :binary.copy(<<2>>, 32),
-      instance: @instance,
       snapshots: nil
     }
   end

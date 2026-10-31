@@ -10,7 +10,6 @@ defmodule Fermix.CLI.HomeCommand do
       fermix home snapshots passphrase --passphrase-file PATH [--json]
       fermix home enroll-code [--json]
       fermix home enroll --code-file PATH [--snapshot-bucket B --snapshot-region R]
-                         [--instance-file PATH]
       fermix home candidates [--json]
       fermix home move --to ID [--recovery-passphrase-file PATH] [--retire] [--json]
 
@@ -546,7 +545,7 @@ defmodule Fermix.CLI.HomeCommand do
       fermix home snapshots status|run [--json]
       fermix home snapshots passphrase --passphrase-file PATH [--json]
       fermix home enroll-code [--json]
-      fermix home enroll --code-file PATH [--snapshot-bucket B --snapshot-region R] [--instance-file PATH]
+      fermix home enroll --code-file PATH [--snapshot-bucket B --snapshot-region R]
       fermix home candidates [--json]
       fermix home move --to ID [--recovery-passphrase-file PATH] [--retire] [--json]
     """)

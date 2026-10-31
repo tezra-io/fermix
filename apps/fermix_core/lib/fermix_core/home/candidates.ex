@@ -8,8 +8,8 @@ defmodule FermixCore.Home.Candidates do
   needs to reach it and what the owner reviews before moving: the host it
   describes, its iroh endpoint and relays, its Noise static key (the
   enrollment handshake's initiator key, the move's responder key), the
-  one-time snapshot recipient it gave, and the instance facts it reported
-  about itself, which nobody verified (B6). At most #{4} are held, each for
+  one-time snapshot recipient it gave, and the snapshot bucket it was told
+  to keep snapshots in. At most #{4} are held, each for
   24 hours after it enrolled; an expired one is dropped at the next read or
   write.
 
@@ -35,7 +35,6 @@ defmodule FermixCore.Home.Candidates do
           relays: [map(), ...],
           noise_pk: <<_::256>>,
           recipient: <<_::256>>,
-          instance: map() | nil,
           snapshots: map() | nil,
           enrolled_at: DateTime.t(),
           expires_at: DateTime.t()
@@ -111,7 +110,6 @@ defmodule FermixCore.Home.Candidates do
       "arch" => record.arch,
       "version" => record.version,
       "node_id" => record.node_id,
-      "instance" => record.instance,
       "snapshots" => record.snapshots,
       "enrolled_at" => DateTime.to_iso8601(record.enrolled_at),
       "expires_at" => DateTime.to_iso8601(record.expires_at)
@@ -150,7 +148,6 @@ defmodule FermixCore.Home.Candidates do
          relays: relays,
          noise_pk: noise_pk,
          recipient: recipient,
-         instance: map["instance"],
          snapshots: map["snapshots"],
          enrolled_at: enrolled_at,
          expires_at: expires_at
