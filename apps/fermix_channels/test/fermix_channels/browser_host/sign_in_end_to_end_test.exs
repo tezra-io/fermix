@@ -243,6 +243,50 @@ defmodule FermixChannels.BrowserHost.SignInEndToEndTest do
     assert reply =~ @late_confirm
   end
 
+  # `submit: true` sends the login form in the same call once the login is
+  # typed: the fill is not looked at, the submit is, and the model reads the
+  # submit's look with the sign-in's receipt beside it.
+  test "a sign-in that submits types the login, then submits the form and looks once", ctx do
+    connection = attach_app(ctx)
+    :ok = register(ctx, connection)
+    submitting = Map.put(@sign_in, "submit", true)
+    turn = start_turn(ctx, session(), [[open()], [{"browser", submitting}]])
+
+    assert_receive {:prompt, {:approval_prompt, _prompt, token}}
+    assert request_types(connection) == ["tab.open", "page.login_for"]
+    assert :ok = chat("/confirm #{token}")
+    assert_receive {:chat_reply, "Approved."}
+
+    assert {{:ok, %{response: "Done."}}, results} = Task.await(turn)
+
+    assert [
+             {"tab.open", open},
+             {"page.login_for", _lookup},
+             {"page.sign_in", typed},
+             {"page.act", submitted}
+           ] = FakeBrowserHostConnection.requests(connection)
+
+    assert typed["observe"] == false
+    refute Map.has_key?(typed, "snapshot")
+
+    assert submitted == %{
+             "tab_id" => "t1",
+             "kind" => "submit",
+             "ref" => 12,
+             "observe" => true,
+             "snapshot" => open["snapshot"]
+           }
+
+    result = results |> Enum.at(1) |> Map.fetch!(:output) |> tool_json()
+    assert result["action"] == "submit"
+    assert result["page"] == "changed"
+    assert result["url"] == "https://example.com/home"
+    assert result["snapshot"] =~ ~s([link] "Your account")
+    assert result["fill"]["filled"] == ["username", "password"]
+    assert result["fill"]["site"] == "example.com"
+    assert result["fill"]["username"] == @username
+  end
+
   test "a username alone is typed with no question to the owner", ctx do
     connection = attach_app(ctx)
     :ok = register(ctx, connection)
@@ -410,7 +454,32 @@ defmodule FermixChannels.BrowserHost.SignInEndToEndTest do
            "filled" => filled,
            "page" => login_page()
          }}
-      end
+      end,
+      "page.act" =>
+        {:ok, %{"url" => "https://example.com/home", "title" => "Home", "page" => home_page()}}
+    }
+  end
+
+  # The page a submitted login lands on.
+  defp home_page do
+    %{
+      "url" => "https://example.com/home",
+      "title" => "Home",
+      "ready_state" => "complete",
+      "nodes" => [
+        %{
+          "nodeId" => "1",
+          "role" => %{"value" => "RootWebArea"},
+          "name" => %{"value" => "Home"},
+          "childIds" => ["2"]
+        },
+        %{
+          "nodeId" => "2",
+          "backendDOMNodeId" => 21,
+          "role" => %{"value" => "link"},
+          "name" => %{"value" => "Your account"}
+        }
+      ]
     }
   end
 
@@ -450,6 +519,12 @@ defmodule FermixChannels.BrowserHost.SignInEndToEndTest do
 
   defp request_types(connection),
     do: connection |> FakeBrowserHostConnection.requests() |> Enum.map(&elem(&1, 0))
+
+  # A browser result reaches the model wrapped as untrusted data; its JSON is
+  # the one line of the wrapper that is an object.
+  defp tool_json(output) do
+    output |> String.split("\n") |> Enum.find(&String.starts_with?(&1, "{")) |> Jason.decode!()
+  end
 
   defp drain(acc \\ []) do
     receive do

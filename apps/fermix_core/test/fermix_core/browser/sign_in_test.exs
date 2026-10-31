@@ -11,6 +11,7 @@ defmodule FermixCore.Browser.SignInTest do
   alias FermixCore.Browser.Error
   alias FermixCore.Browser.HostAvailability
   alias FermixCore.Browser.ProfileServer
+  alias FermixCore.Browser.Scope
   alias FermixCore.Browser.SignIn
   alias FermixCore.Capabilities.AccessGate
   alias FermixCore.Capabilities.AccessGate.Pending
@@ -237,6 +238,58 @@ defmodule FermixCore.Browser.SignInTest do
                "username_ref" => 11,
                "observe" => true
              }
+    end
+
+    # A submit the facade sends next in the same call is the look the model
+    # reads; a look at the filled form before it would cost the app a settle
+    # and replace the refs the submit is sent with. So the app is asked not to
+    # look, on a tab that was looked at, and the receipt carries no `page`.
+    test "a sign-in a submit follows asks the app not to look at the page", ctx do
+      {pid, connection} = pane(ctx)
+      {:ok, opened} = open_login(pid)
+
+      args = %{"site" => "example.com", "username_ref" => "textbox_1", "target" => opened}
+
+      assert {:ok, result} = SignIn.run(args, chat(ctx), :fermix_app, route(pid), false)
+
+      assert result["filled"] == ["username"]
+      refute Map.has_key?(result, "page")
+
+      assert [{"tab.open", _open}, {"page.login_for", _lookup}, {"page.sign_in", typed}] =
+               FakeBrowserHostConnection.requests(connection)
+
+      assert typed == %{
+               "tab_id" => "t1",
+               "site" => "example.com",
+               "login_site" => "example.com",
+               "username_ref" => 11,
+               "observe" => false
+             }
+    end
+
+    # `submit: true` sends the form only after a fill that succeeded, so a
+    # sign-in the owner refuses, or never answers, types nothing and submits
+    # nothing. Through the facade, which composes the submit.
+    test "a sign-in with submit that the owner denies submits nothing", ctx do
+      {turn, connection} = submitting_sign_in(ctx)
+
+      assert_receive {:asked, _waiter, id}
+      assert {:ok, :in_call} = AccessGate.deny(id, ctx.pending)
+
+      assert {{:error, %Error{code: "sign_in_denied"}}, :fermix_app} = Task.await(turn)
+      assert request_types(connection) == ["tab.open", "page.login_for"]
+    end
+
+    # The window's end is the waiter's own timer message, delivered by hand.
+    @tag :capture_log
+    test "a sign-in with submit that the owner never answers submits nothing", ctx do
+      {turn, connection} = submitting_sign_in(ctx)
+
+      assert_receive {:asked, waiter, id}
+      send(waiter, {:access_timeout, id})
+
+      assert {{:error, %Error{code: "sign_in_unanswered"}}, :fermix_app} = Task.await(turn)
+      assert request_types(connection) == ["tab.open", "page.login_for"]
     end
 
     test "a page with no saved login is answered with where to add one, and nobody is asked",
@@ -476,6 +529,28 @@ defmodule FermixCore.Browser.SignInTest do
 
   defp route(pid), do: &ProfileServer.request(pid, &1)
 
+  # A `browser` call that signs in and submits, made through the facade on a
+  # pane registered for a conversation of its own, in the turn's own process.
+  defp submitting_sign_in(ctx) do
+    context = %{
+      chat(ctx)
+      | conversation_key: {"telegram", "sign-in-#{System.unique_integer([:positive])}", :root}
+    }
+
+    {pid, connection} = pane(ctx, routed_for: context)
+    {:ok, opened} = open_login(pid)
+
+    args =
+      Map.merge(sign_in_args(), %{
+        "action" => "act",
+        "kind" => "sign_in",
+        "target" => opened,
+        "submit" => true
+      })
+
+    {Task.async(fn -> Browser.execute(args, context) end), connection}
+  end
+
   defp request_types(connection),
     do: connection |> FakeBrowserHostConnection.requests() |> Enum.map(&elem(&1, 0))
 
@@ -506,18 +581,27 @@ defmodule FermixCore.Browser.SignInTest do
 
     {:ok, config} = Config.current(%{})
 
-    pid =
-      start_supervised!(
-        {ProfileServer,
-         owner_key: "owner-sign-in-#{System.unique_integer([:positive])}",
-         profile_name: "fermix",
-         profile: @pane,
-         config: config,
-         host_availability: host},
-        id: make_ref()
-      )
+    server =
+      [
+        owner_key: "owner-sign-in-#{System.unique_integer([:positive])}",
+        profile_name: "fermix",
+        profile: @pane,
+        config: config,
+        host_availability: host
+      ] ++ routed(Keyword.get(opts, :routed_for))
 
+    pid = start_supervised!({ProfileServer, server}, id: make_ref())
     {pid, connection}
+  end
+
+  # Registered under a conversation's pane key, as `ProfileManager` would have
+  # started it, so `Browser.execute/2` routes that conversation's calls to it.
+  defp routed(nil), do: []
+
+  defp routed(context) do
+    {:ok, owner} = Scope.owner_key(context)
+    pane = Scope.pane_key(owner, context.conversation_key)
+    [registry: FermixCore.Browser.Registry, key: {pane, "fermix"}]
   end
 
   defp app_answers(opts) do

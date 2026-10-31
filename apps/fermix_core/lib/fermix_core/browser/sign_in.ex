@@ -86,22 +86,25 @@ defmodule FermixCore.Browser.SignIn do
   @doc """
   Run a validated `sign_in` call on the turn's profile, whose routed `mode`
   decides whether it can sign in at all. `route` sends one request to that
-  profile.
+  profile. `observe?` false asks the profile not to look at the page after the
+  fill, for a sign-in a submit follows in the same call (`Browser`): the
+  submit's look is the one the model reads.
   """
-  @spec run(map(), map(), atom(), route()) :: {:ok, map()} | {:error, Error.t()}
-  def run(args, context, mode, route)
-      when is_map(args) and is_map(context) and is_atom(mode) and is_function(route, 1) do
+  @spec run(map(), map(), atom(), route(), boolean()) :: {:ok, map()} | {:error, Error.t()}
+  def run(args, context, mode, route, observe? \\ true)
+      when is_map(args) and is_map(context) and is_atom(mode) and is_function(route, 1) and
+             is_boolean(observe?) do
     if Capabilities.allows?(mode, :sign_in),
-      do: run_signed(args, context, route),
+      do: run_signed(args, context, route, observe?),
       else: Capabilities.refuse(mode, :sign_in)
   end
 
-  defp run_signed(args, context, route) do
+  defp run_signed(args, context, route, observe?) do
     {:ok, site} = site(args["site"])
 
     with {:ok, login} <- route.(login_request(args, site, context)),
          :ok <- approved(args, site, login, context),
-         {:ok, receipt} <- route.(sign_in_request(args, site, login, context)) do
+         {:ok, receipt} <- route.(sign_in_request(args, site, login, context, observe?)) do
       {:ok, Map.merge(receipt, %{"site" => site, "username" => login["username"]})}
     end
   end
@@ -118,7 +121,7 @@ defmodule FermixCore.Browser.SignIn do
 
   # On the tab `login_for` was answered on, whichever tab is active by then,
   # and never re-sent after a dead server (`Browser.mutating?/2`).
-  defp sign_in_request(args, site, login, context) do
+  defp sign_in_request(args, site, login, context, observe?) do
     %{
       action: "sign_in",
       args:
@@ -127,7 +130,8 @@ defmodule FermixCore.Browser.SignIn do
         |> Map.merge(%{
           "target" => login["target"],
           "site" => site,
-          "login_site" => login["login_site"]
+          "login_site" => login["login_site"],
+          "observe" => observe?
         }),
       context: context,
       mutating: Browser.mutating?("act", args)
