@@ -512,8 +512,9 @@ computer is awake, a link down 10 minutes while it is awake, a waiting
 server's 24 hours, a backup's 3 days), on one timer, armed again at each
 read; and only while a version 6 connection is attached. While Always On is
 `off` it arms nothing and reads only on what could end `off` (a token, a
-code, a move). It never calls the cloud provider: Hetzner
-is read when the app asks (`home.provision.resources`) or a job runs.
+code, a move). It never calls the cloud provider: the
+provider is read when the app asks (`home.provision.resources`) or a job
+runs.
 
 A notice sent while the app was disconnected is lost, so an app that
 connects reads nothing on its own: the notice after `server_hello` is its
