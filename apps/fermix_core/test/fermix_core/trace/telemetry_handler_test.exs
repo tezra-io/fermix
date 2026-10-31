@@ -12,10 +12,14 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
   alias FermixCore.Trace
   alias FermixCore.Trace.TelemetryHandler
 
+  # The day Trace files under, handed in so a run across UTC midnight writes
+  # and reads the same folder.
+  @today ~D[2026-10-30]
+
   setup do
     tmp_dir = Path.join(System.tmp_dir!(), "fermix_tel_#{System.unique_integer([:positive])}")
     name = :"tel_trace_#{System.unique_integer([:positive])}"
-    start_supervised!({Trace, base_dir: tmp_dir, name: name})
+    start_supervised!({Trace, base_dir: tmp_dir, name: name, today: fn -> @today end})
 
     prefix = "test-#{System.unique_integer([:positive])}"
     TelemetryHandler.attach(trace_server: name, handler_prefix: prefix)
@@ -43,7 +47,7 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
   defp sync(server), do: :sys.get_state(server)
 
   defp read_entries(base_dir, type) do
-    Path.join([base_dir, Date.utc_today() |> Date.to_iso8601(), "#{type}.jsonl"])
+    Path.join([base_dir, Date.to_iso8601(@today), "#{type}.jsonl"])
     |> File.read!()
     |> String.split("\n", trim: true)
     |> Enum.map(&Jason.decode!/1)
@@ -90,7 +94,7 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
 
     sync(server)
 
-    llm_call_path = Path.join([dir, Date.utc_today() |> Date.to_iso8601(), "llm_call.jsonl"])
+    llm_call_path = Path.join([dir, Date.to_iso8601(@today), "llm_call.jsonl"])
     refute File.exists?(llm_call_path)
 
     tool = find_entry!(read_entries(dir, :tool_exec), &(&1["tool"] == "shell"))
@@ -457,7 +461,7 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
     refute Map.has_key?(quiet, "name")
     assert named["name"] == "chart.png"
 
-    refute File.read!(Path.join([dir, Date.to_iso8601(Date.utc_today()), "agent_event.jsonl"])) =~
+    refute File.read!(Path.join([dir, Date.to_iso8601(@today), "agent_event.jsonl"])) =~
              "PNG-BYTES"
   end
 
@@ -501,7 +505,7 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
     assert failed["sound"] == "failed"
     assert failed["sound_detail"] == ":not_configured"
 
-    refute File.read!(Path.join([dir, Date.to_iso8601(Date.utc_today()), "agent_event.jsonl"])) =~
+    refute File.read!(Path.join([dir, Date.to_iso8601(@today), "agent_event.jsonl"])) =~
              "SECRET-WORDS"
   end
 
@@ -731,7 +735,7 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
       assert entry["session_id"] == session
     end
 
-    refute File.read!(Path.join([dir, Date.to_iso8601(Date.utc_today()), "agent_event.jsonl"])) =~
+    refute File.read!(Path.join([dir, Date.to_iso8601(@today), "agent_event.jsonl"])) =~
              "Dr Vance"
   end
 
