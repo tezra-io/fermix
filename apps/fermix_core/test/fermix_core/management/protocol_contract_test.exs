@@ -43,6 +43,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
   alias FermixCore.Management.McpServers.PastedValues
   alias FermixCore.Management.McpServers.Row, as: McpRow
   alias FermixCore.Management.Plugins.Row, as: PluginRow
+  alias FermixCore.Management.Placement
   alias FermixCore.Management.Protocol
   alias FermixCore.Management.Router
   alias FermixCore.Management.Settings
@@ -1248,6 +1249,29 @@ defmodule FermixCore.Management.ProtocolContractTest do
       assert doc =~ "`#{bound}`", "PROTOCOL.md does not document bound #{bound}"
       assert doc =~ Integer.to_string(value), "PROTOCOL.md does not publish #{bound}'s value"
     end
+  end
+
+  # A client looks a method up in the catalog, so every method's row is there,
+  # once; the forward deadlines under "After a move" list only deadlines.
+  test "PROTOCOL.md lists every method once in its catalog, and only deadlines as deadlines" do
+    doc = File.read!(@protocol_doc)
+    [_before, catalog] = String.split(doc, "\n## Method catalog\n", parts: 2)
+    [catalog | _rest] = String.split(catalog, "\n## ", parts: 2)
+
+    rows = Regex.scan(~r/^\| `([a-z_.]+)` \|/m, catalog, capture: :all_but_first)
+    listed = List.flatten(rows)
+
+    for method <- Protocol.methods() do
+      assert Enum.count(listed, &(&1 == method)) == 1,
+             "the method catalog does not list #{method} exactly once"
+    end
+
+    [_before, after_move] = String.split(doc, "- **Forward deadlines.**", parts: 2)
+    [deadlines | _rest] = String.split(after_move, "\n- **", parts: 2)
+    deadline_rows = Regex.scan(~r/^\s*\| `([a-z_.]+)` \|/m, deadlines, capture: :all_but_first)
+
+    assert Enum.sort(List.flatten(deadline_rows)) ==
+             Enum.sort(Map.keys(Placement.long_forward_deadlines()))
   end
 
   # Every seam here injects a *source*, never a result: the projection,
