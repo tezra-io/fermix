@@ -292,8 +292,11 @@ loop compresses older results into digests and retries the provider call. Each
 reduction applied emits `[:fermix, :agent_loop, :context_compaction]`
 (measurements `%{count: 1, results, bytes_before, bytes_after}`; metadata
 `session_id`, optional `parent_session`, `agent`, `iteration`, `level`,
-`trigger` in `:budget | :recovery`). Each recovery round after a provider
-refused a request as too large emits `[:fermix, :agent_loop, :context_recovery]`
+`trigger` in `:budget | :recovery | :superseded_look`). `:superseded_look` is
+the batch that swaps the page text of browser results a later look at the same
+page superseded for a one-line marker: it calls no model, and fires once those
+looks reach 32,000 bytes, whatever the window. Each recovery round after a
+provider refused a request as too large emits `[:fermix, :agent_loop, :context_recovery]`
 (measurements `%{count: 1}`; metadata `session_id`, optional `parent_session`,
 `agent`, `iteration`, `round` 1..3, `outcome` in `:recovered | :refused_again |
 :nothing_left | :digest_failed`). Both are point events. `FermixOpik` renders

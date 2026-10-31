@@ -495,6 +495,61 @@ defmodule FermixCore.Tools.Browser do
   def progress_by_result?(%{"action" => "webmcp", "op" => "call"}), do: true
   def progress_by_result?(arguments) when is_map(arguments), do: false
 
+  @doc """
+  The page a result looks at, for the agent loop's rule that only the newest
+  look at a page stays in the run's history: `{target, address}` for a result
+  carrying the page's text (`snapshot`, as a `snapshot`, an observed `open` or
+  `navigate`, and an act whose look found the page `changed` return it), where
+  the address is its `url` without the fragment. `nil` for any other result,
+  and for text that is not a JSON object with a `target`, a `url` and the
+  page's text. Discovered via `function_exported?`, with `superseded_look/1`.
+  """
+  @spec page_look(String.t()) :: {String.t(), String.t()} | nil
+  def page_look(result) when is_binary(result) do
+    case decoded_look(result) do
+      {:ok, _look, page} -> page
+      :none -> nil
+    end
+  end
+
+  @doc """
+  `result`, a look `page_look/1` names, with its page text replaced by one line
+  saying which page it was, that a later look at the same page replaced it and
+  that a `snapshot` reads it again. Every other field is kept. Raises on a
+  result that is not a look.
+  """
+  @spec superseded_look(String.t()) :: String.t()
+  def superseded_look(result) when is_binary(result) do
+    case decoded_look(result) do
+      {:ok, look, {target, address}} ->
+        Jason.encode!(%{look | "snapshot" => superseded_marker(target, address)})
+
+      :none ->
+        raise ArgumentError, "superseded_look/1 takes a look page_look/1 names"
+    end
+  end
+
+  defp decoded_look(result) do
+    case Jason.decode(result) do
+      {:ok, %{"target" => target, "url" => url, "snapshot" => text} = look}
+      when is_binary(target) and is_binary(url) and is_binary(text) ->
+        {:ok, look, {target, page_address(url)}}
+
+      {:ok, _not_a_look} ->
+        :none
+
+      {:error, %Jason.DecodeError{}} ->
+        :none
+    end
+  end
+
+  defp page_address(url), do: url |> String.split("#", parts: 2) |> hd()
+
+  defp superseded_marker(target, address) do
+    "[page text left out: a later look at the same page replaced it (#{address}, tab " <>
+      "#{target}); a `snapshot` reads the page again]"
+  end
+
   @impl true
   @spec execute(map(), Tool.context()) :: {:ok, Tool.tool_result()}
   def execute(args, context) when is_map(args) and is_map(context) do
