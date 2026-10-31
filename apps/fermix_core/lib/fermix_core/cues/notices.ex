@@ -197,7 +197,8 @@ defmodule FermixCore.Cues.Notices do
     opts = repo_opts ++ [repo: Keyword.get(repo_opts, :server, Repo), now: now]
     bound = min(limit, @gap_notices_per_sweep)
 
-    case call({:due_gap_notices, now, bound}, opts) do
+    # A read the next pass makes again, so one the Repo reaches late is skipped.
+    case call({:due_gap_notices, now, bound}, [skip_when_late: true] ++ opts) do
       {:ok, gaps} ->
         Enum.each(gaps, &gap_notice(&1, opts))
         {:ok, length(gaps)}
@@ -212,7 +213,9 @@ defmodule FermixCore.Cues.Notices do
   defp gap_notice(gap, opts) do
     stamp = CuesSql.stamp(now(opts))
 
-    case call({:claim_gap_notice, gap.gap_id, now(opts)}, opts) do
+    # A claim the next pass makes again: one the Repo reaches after this call
+    # gave up is skipped, so no notice is claimed that nobody sends.
+    case call({:claim_gap_notice, gap.gap_id, now(opts)}, [skip_when_late: true] ++ opts) do
       {:ok, :claimed} ->
         gap.notice_job_id
         |> send_to_task(gap_text(gap), opts)
@@ -400,7 +403,8 @@ defmodule FermixCore.Cues.Notices do
 
   defp call(request, opts) do
     repo_opts =
-      [server: Keyword.get(opts, :repo, Repo)] ++ Keyword.take(opts, [:timeout, :on_timeout])
+      [server: Keyword.get(opts, :repo, Repo)] ++
+        Keyword.take(opts, [:timeout, :on_timeout, :skip_when_late])
 
     Repo.cues_call(CuesWatchersSql, request, repo_opts)
   end

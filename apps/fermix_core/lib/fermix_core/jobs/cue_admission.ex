@@ -164,7 +164,11 @@ defmodule FermixCore.Jobs.CueAdmission do
     offer = Keyword.fetch!(opts, :offer)
     true = is_function(offer, 1)
 
-    case Repo.cues_call(CuesFollowUpSql, {:claim_offers, now, @offers_per_pass}, repo_opts) do
+    # A claim the next pass makes again: one the Repo reaches after this call
+    # gave up is skipped, so no card is stamped offered that nobody sends.
+    claim_opts = Keyword.put(repo_opts, :skip_when_late, true)
+
+    case Repo.cues_call(CuesFollowUpSql, {:claim_offers, now, @offers_per_pass}, claim_opts) do
       {:ok, triggers} ->
         Enum.each(triggers, offer)
 
@@ -255,9 +259,11 @@ defmodule FermixCore.Jobs.CueAdmission do
   end
 
   defp claim_trigger(trigger, now, run_attrs_fun, opts) do
-    repo_opts = Keyword.fetch!(opts, :repo_opts)
+    # A claim a later pass makes again: one the Repo reaches after this call
+    # gave up is skipped, so no run is claimed that no runner starts.
+    claim_opts = opts |> Keyword.fetch!(:repo_opts) |> Keyword.put(:skip_when_late, true)
 
-    case Repo.claim_follow_up_run(trigger.id, run_attrs_fun.(trigger.job_id), now, repo_opts) do
+    case Repo.claim_follow_up_run(trigger.id, run_attrs_fun.(trigger.job_id), now, claim_opts) do
       {:ok, {:started, claim}} ->
         FollowUps.emit_started(claim.trigger, claim.run)
         [claim]
@@ -287,8 +293,12 @@ defmodule FermixCore.Jobs.CueAdmission do
   defp cap_notice(%{watcher_id: watcher_id, daily_cap: cap, waiting: waiting}, cue_notice),
     do: cue_notice.(watcher_id, :cap_reached, %{cap: cap, waiting: waiting})
 
+  # A claim a later pass makes again: one the Repo reaches after this call
+  # gave up is skipped, so no run is claimed that no runner starts.
   defp claim_candidate(%{job_id: job_id}, now, run_attrs_fun, repo_opts) do
-    case Repo.claim_cue_run(job_id, run_attrs_fun.(job_id), now, repo_opts) do
+    claim_opts = Keyword.put(repo_opts, :skip_when_late, true)
+
+    case Repo.claim_cue_run(job_id, run_attrs_fun.(job_id), now, claim_opts) do
       {:ok, claim} ->
         emit_claimed(claim, now)
         [claim]

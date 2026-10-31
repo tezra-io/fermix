@@ -549,8 +549,12 @@ defmodule FermixCore.Cues.Proposals do
   @spec expire(keyword(), DateTime.t(), pos_integer()) ::
           {:ok, non_neg_integer()} | {:error, term()}
   def expire(repo_opts, %DateTime{} = now, limit) when is_list(repo_opts) do
+    # A claim the next pass makes again: one the Repo reaches after this call
+    # gave up is skipped, so no expiry lands that nobody announces.
+    claim_opts = Keyword.put(repo_opts, :skip_when_late, true)
+
     with {:ok, expired} <-
-           Repo.cues_call(CuesMandateSql, {:expire_proposals, now, limit}, repo_opts) do
+           Repo.cues_call(CuesMandateSql, {:expire_proposals, now, limit}, claim_opts) do
       Enum.each(expired, &expired(&1, repo_opts))
       {:ok, length(expired)}
     end
@@ -578,7 +582,11 @@ defmodule FermixCore.Cues.Proposals do
     cutoff = DateTime.add(now, -@unknown_after_s, :second)
     request = {:claim_unknown_outcomes, now, cutoff, @unknown_reports_per_sweep}
 
-    with {:ok, claimed} <- Repo.cues_call(CuesMandateSql, request, repo_opts) do
+    # A claim the next pass makes again: one the Repo reaches after this call
+    # gave up is skipped, so no outcome is claimed that nobody reports.
+    claim_opts = Keyword.put(repo_opts, :skip_when_late, true)
+
+    with {:ok, claimed} <- Repo.cues_call(CuesMandateSql, request, claim_opts) do
       Enum.each(claimed, &report_one(&1, now, repo_opts, send_opts))
       {:ok, length(claimed)}
     end

@@ -205,7 +205,7 @@ defmodule FermixCore.Cues.Sweeper do
           {:ok, non_neg_integer()} | {:error, term()}
   def expire_lifetime(repo_opts, now, limit) do
     with {:ok, %{count: count, expired: expired, gaps: gaps}} <-
-           Repo.cues_call(CuesSql, {:expire_lifetime, now, limit}, repo_opts) do
+           Repo.cues_call(CuesSql, {:expire_lifetime, now, limit}, skip_when_late(repo_opts)) do
       Enum.each(expired, &emit_expired/1)
       Enum.each(gaps, &emit_gap/1)
       {:ok, count}
@@ -268,8 +268,12 @@ defmodule FermixCore.Cues.Sweeper do
   def prune_counts(repo_opts, now, limit), do: sql_step(:prune_counts, repo_opts, now, limit)
 
   defp sql_step(name, repo_opts, now, limit) do
-    Repo.cues_call(CuesSql, {name, now, limit}, repo_opts)
+    Repo.cues_call(CuesSql, {name, now, limit}, skip_when_late(repo_opts))
   end
+
+  # Retention work the next pass does again, so a step the Repo reaches after
+  # its caller gave up is skipped (`Repo.periodic_opts/2`).
+  defp skip_when_late(repo_opts), do: Keyword.put(repo_opts, :skip_when_late, true)
 
   defp emit_expired(expired) do
     Telemetry.lifecycle(:expired, %{}, %{

@@ -247,8 +247,12 @@ defmodule FermixCore.Cues.FollowUpApprovals do
           {:ok, non_neg_integer()} | {:error, term()}
   def expire(repo_opts, %DateTime{} = now, limit)
       when is_list(repo_opts) and is_integer(limit) and limit > 0 do
+    # A claim the next pass makes again: one the Repo reaches after this call
+    # gave up is skipped, so no prompt expires that nobody announces.
+    claim_opts = Keyword.put(repo_opts, :skip_when_late, true)
+
     with {:ok, expired} <-
-           Repo.cues_call(CuesFollowUpApprovalsSql, {:expire_approvals, now, limit}, repo_opts) do
+           Repo.cues_call(CuesFollowUpApprovalsSql, {:expire_approvals, now, limit}, claim_opts) do
       Enum.each(expired, &ended(&1, repo_opts))
       {:ok, length(expired)}
     end

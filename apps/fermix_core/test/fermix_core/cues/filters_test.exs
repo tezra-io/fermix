@@ -83,6 +83,9 @@ defmodule FermixCore.Cues.FiltersTest do
     def init(config), do: {:ok, config}
 
     @impl true
+    def handle_call({:with_deadline, _deadline, request}, from, state),
+      do: handle_call(request, from, state)
+
     def handle_call({:cues, CuesFilterSql, {:claim, _now, _free, _busy}} = request, _from, state)
         when state.late > 0 do
       {:ok, %{claims: _committed}} = GenServer.call(state.forward_to, request)
