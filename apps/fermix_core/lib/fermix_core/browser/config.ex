@@ -94,8 +94,9 @@ defmodule FermixCore.Browser.Config do
 
   ## Act bounds
 
-  `act_limits/0`, not struct fields either: the post-action settle budget and
-  the `fill_form` field count are tuning, not posture.
+  `act_limits/0`, not struct fields either: the post-action settle budget, how
+  long a page must hold still to be read, and the `fill_form` field count are
+  tuning, not posture.
 
   ## Address-check bounds
 
@@ -272,7 +273,8 @@ defmodule FermixCore.Browser.Config do
   # Bounds on the `act` action itself. Constants rather than struct fields, for
   # the same reason as `@webmcp_limits`: neither is a posture an operator would
   # want to take — `[fermix_core.browser]` accepts neither.
-  # `settle_budget_ms` is the cost of looking at the page after an action, and
+  # `settle_budget_ms` is the cost of looking at the page after an action (and
+  # of a `snapshot` that finds a load in flight), and
   # the poll runs inside the profile's `handle_call`, so it is deliberately
   # short: a page holding a JS dialog answers nothing at all, and this is what
   # bounds that wait. It bounds the WORK, not the wall clock — a command waits
@@ -284,11 +286,16 @@ defmodule FermixCore.Browser.Config do
   # is still well under the model turn it
   # replaces, and the same `handle_call` already blocks up to
   # `navigation_timeout_ms` inside `Page.navigate` and `wait_max_ms` inside `act
-  # wait`, so it is not a new class of stall. `form_fields` is how many fields
+  # wait`, so it is not a new class of stall. `rest_ms` is how long the page
+  # must read the same (its address, title, element count and text length)
+  # inside either budget before it is looked at, so a page a click's request
+  # is still re-rendering is not read mid-render; at the budget it is read as
+  # it stands. `form_fields` is how many fields
   # one `fill_form` may carry, and `ref_chars` bounds a ref quoted back at the
   # model in a refusal.
   @act_limits %{
     settle_budget_ms: 1_500,
+    rest_ms: 150,
     navigation_budget_ms: 4_000,
     form_fields: 12,
     ref_chars: 128
@@ -334,12 +341,14 @@ defmodule FermixCore.Browser.Config do
   def webmcp_limits, do: @webmcp_limits
 
   @doc """
-  Bounds on `act`: the budget for observing the page after an action, the longer
-  one for observing it after a navigation, the number of fields one `fill_form`
-  may carry, and how much of a ref a refusal quotes back.
+  Bounds on `act`: the budget for observing the page after an action, how long
+  the page must hold still within it, the longer budget for observing it after a
+  navigation, the number of fields one `fill_form` may carry, and how much of a
+  ref a refusal quotes back.
   """
   @spec act_limits() :: %{
           settle_budget_ms: pos_integer(),
+          rest_ms: pos_integer(),
           navigation_budget_ms: pos_integer(),
           form_fields: pos_integer(),
           ref_chars: pos_integer()

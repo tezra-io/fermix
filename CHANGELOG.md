@@ -223,6 +223,14 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   process it starts now begin with the kernel's highest score, so the kernel
   stops one of them instead and Fermix keeps running; a browser task that
   finds Chrome gone starts it again.
+- **The browser reads a page once it has stopped changing.** After a click,
+  a submit or an Enter, and after opening a page, Chrome's page is now read
+  once it has held still for a moment (the same address, title, number of
+  elements and amount of text), not as soon as its address stops moving, so
+  results still filling in after a click are no longer read half-built and
+  need no second look. A snapshot taken while a page is still loading now
+  waits for it, up to a second and a half, then reads what is there and says
+  whether it had finished loading.
 
 ### Removed
 
