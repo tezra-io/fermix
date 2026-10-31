@@ -89,7 +89,8 @@ defmodule FermixCore.Trace.BodiesTest do
         task_summary: "Compare two flats in Porto",
         query: "flats near the river",
         content: "Call the landlord at noon",
-        context: "%{job: :rent_check}"
+        context: "%{job: :rent_check}",
+        command: "grep -c rent ledger-okafor.csv"
       }
 
       Trace.record(:tool_exec, "main", Map.merge(%{tool: "shell", success: true}, bodies),

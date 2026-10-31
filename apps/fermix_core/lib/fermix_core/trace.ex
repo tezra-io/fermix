@@ -49,11 +49,12 @@ defmodule FermixCore.Trace do
   # "Content"): a call's or a run's `input` and `output` (prompts, replies,
   # transcripts, tool arguments and results, a coding run's prompt and output),
   # a delegated task's or skill's `task_summary`, a tool search's `query`, a
-  # reminder's or a cue's `content` and a timed-out call's `context`. What the
-  # gate attaches beside them (a meeting's link and title, an attachment's file
-  # name, the names of the tools a reply called) describes the record and stays
-  # with it.
-  @body_keys ~w(input output task_summary query content context)
+  # reminder's or a cue's `content`, a timed-out call's `context`, and the
+  # command line the shell tool records on every call, capture or not
+  # (`command`, a `tool_exec` field only). What the gate attaches beside them (a
+  # meeting's link and title, an attachment's file name, the names of the tools
+  # a reply called) describes the record and stays with it.
+  @body_keys ~w(input output task_summary query content context command)
 
   # The exception classes `Jason.encode!/1` raises on un-encodable input: bad
   # UTF-8 (EncodeError) and a value with no `Jason.Encoder` — a PID/ref/fun or a
