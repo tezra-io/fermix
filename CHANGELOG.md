@@ -327,6 +327,22 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A busy computer no longer quietly costs you a watcher's notices.** When
+  the computer was so busy that Fermix's memory database fell behind, every
+  request waiting on it gave up after a few seconds, yet each one still ran
+  when its turn came: the backlog only grew, and work could be picked up
+  after the part of Fermix that asked for it had moved on, so a follow-up card
+  was never sent, a proposal expired without a word to you, or a reminder sat
+  claimed with nothing sending it. Fermix now drops such a request instead of
+  running it late when it only picks up new work (a due reminder or scheduled
+  run, a card to offer, an expiry to announce) or does upkeep the next round
+  repeats, so the database catches up as soon as the load eases and that work
+  is picked up again on the next round. A record of something that already
+  happened, such as a reminder sent or a run finished, is still saved however
+  late, as before. The cue cleanup that runs every minute also stops at its
+  first request that times out instead of queueing one for each of its steps.
+  A request already running when its asker gives up still finishes, so a
+  missed notice can still happen, but only in that brief window.
 - **A long task on Claude no longer stops after Fermix shortens its
   context.** Claude Opus 5.5, Sonnet 5.5, Haiku 5.5 and Fable 5.1 tie their
   reasoning to the exact conversation that produced it, and Anthropic enforces

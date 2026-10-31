@@ -400,6 +400,22 @@ defmodule FermixCore.Cues.SweeperTest do
       assert log =~ "notice was not sent: :repo_timeout"
     end
 
+    # An overloaded Repo costs a pass the one call that timed out, not one per
+    # step, and the next pass starts again at the first step.
+    test "a step that ends in a Repo timeout ends the pass", ctx do
+      stalled = start_supervised!({FermixTestSupport.StalledRepo, notify: self()})
+      server = start_sweeper(ctx, repo: stalled, repo_timeout_ms: 50)
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        for _pass <- 1..2 do
+          assert Sweeper.sweep(server, @t0) == {:ok, %{expire_lifetime: {:error, :repo_timeout}}}
+          _ = :sys.get_state(stalled, @wait_ms)
+          assert_received {:stalled, :expire_lifetime}
+          refute_received {:stalled, _name}
+        end
+      end)
+    end
+
     test "runs every step in chunks when driven by hand", ctx do
       insert_watcher(ctx.conn, %{filter: "llm", sources: [ctx.ref], listen_for: @words})
       :ok = accept(ctx, Enum.map(1..5, &"e#{&1}"), @t0)
