@@ -30,7 +30,9 @@ defmodule FermixChannels.Desktop.Relay do
   (`FermixCore.Management.Provision.primary_reached/2`, in a task of its own,
   so the session never waits on it): one above the epoch the old server of a
   replace held is how this desktop sees the move to the new server done, and
-  the old server is deleted then (M75 lean v1 §4.3).
+  the old server is deleted then (M75 lean v1 §4.3). The provisioner then
+  names the new server (`rename/2`), which this desktop reaches at the same
+  node id: the link file keeps the name and every sentence says it.
 
   Every ending it did not ask for is retried after 1 s, doubling to 60 s, and
   the backoff starts over once a session is up. While the session is down,
@@ -259,6 +261,16 @@ defmodule FermixChannels.Desktop.Relay do
   end
 
   @doc """
+  Names the primary `name` from now on (the new server of a replace, once
+  the move to it is done): kept in `desktop.json` and said in every sentence.
+  A name that cannot be kept is logged and answered, and the name held stays;
+  `{:error, :no_link}` while the relay holds no link.
+  """
+  @spec rename(GenServer.server(), String.t()) :: :ok | {:error, term()}
+  def rename(server \\ __MODULE__, name) when is_binary(name),
+    do: GenServer.call(server, {:rename, name}, @status_wait_ms)
+
+  @doc """
   Opens a companion channel for the calling `Desktop.Tunnel`: the channel's
   number and the relay's process (to monitor), or why not: `{:revoked,
   sentence}` once the primary no longer knows this computer, which no retry
@@ -410,6 +422,7 @@ defmodule FermixChannels.Desktop.Relay do
   def handle_call({:forward, request, deadline_ms}, from, state),
     do: forward_call(request, deadline_ms, from, state)
 
+  def handle_call({:rename, name}, _from, state), do: renamed(name, state)
   def handle_call(:open_channel, {tunnel, _tag}, state), do: open(tunnel, state)
   def handle_call({:fetch_media, ref}, {tunnel, _tag}, state), do: fetch(ref, tunnel, state)
 
@@ -642,6 +655,25 @@ defmodule FermixChannels.Desktop.Relay do
       :ok
     end
   end
+
+  defp renamed(_name, %{link: nil} = state), do: {:reply, {:error, :no_link}, state}
+
+  defp renamed(name, %{link: link} = state) do
+    case DesktopLink.record_name(state.root, link, name) do
+      {:ok, link} ->
+        {:reply, :ok, named(%{state | link: link})}
+
+      {:error, reason} = error ->
+        Logger.error("desktop relay: the server's new name was not kept: #{inspect(reason)}")
+        {:reply, error, state}
+    end
+  end
+
+  # A session that is up says the name it now goes by.
+  defp named(%{phase: :connected, link: link} = state),
+    do: %{state | sentence: "Fermix is connected to the server #{link.primary.name}."}
+
+  defp named(state), do: state
 
   # The primary names its blob bound; this desktop takes no more than its own
   # ceiling, whatever that says.

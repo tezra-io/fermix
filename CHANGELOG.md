@@ -170,7 +170,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   lives on that server, Replace the server (in Always On's details on the
   computer it left) creates a new one, named apart from the old, with a
   24-hour code the old server gives it; you review and start the same move
-  to it, and once the move is done Fermix deletes the old server by itself.
+  to it, and once the move is done your computer names the new server and
+  Fermix deletes the old one by itself.
   If that delete fails, the old server stays listed with why, and Delete
   tries again. The same one sentence follows the replace: creating and
   setting up the new server (Cancel), ready for the move (Move now), moving,

@@ -47,8 +47,9 @@ defmodule FermixCore.Management.Provision do
   move to the new server (`move_forwarded/3`, beside the forwarded
   `home.move.start`), and the desktop relay reports every primary epoch it
   reaches (`primary_reached/2`). Once that is above the epoch the old server
-  held, the move to the new one is done and the old server is deleted, once,
-  as a job of the same kind (`Provision.delete_replaced/2`); a failed delete
+  held, the move to the new one is done: this desktop's link names the new
+  server from then on (`Home.Link`'s `rename_primary/1`), and the old server
+  is deleted, once, as a job of the same kind (`Provision.delete_replaced/2`); a failed delete
   stays in the ledger with its sentence, and `home.provision.delete` tries it
   again. The old server answering again at its own epoch after the move
   started means it undid the move: the replace waits for its move again.
@@ -70,7 +71,8 @@ defmodule FermixCore.Management.Provision do
   Test seams in `opts`: `:home`, `:engine_role`, `:profile`, `:host` (the
   host module), `:host_opts` (the host's own seams), `:jobs`, `:open_code`
   and `:withdraw_code` (in place of the rail's provisioned window), and
-  `:primary_forward`, the daemon's way to the server on a linked desktop.
+  `:primary_forward`, the daemon's way to the server on a linked desktop, and
+  `:rename_primary` (in place of the rail's, given the new server's name).
   """
 
   alias FermixCore.Home.DesktopLink
@@ -598,9 +600,30 @@ defmodule FermixCore.Management.Provision do
 
   defp run_clean_up(epoch, report, opts) do
     case Ledger.update(home(opts), host(opts).host(), &Ledger.moved(&1, epoch, now(opts))) do
-      {:ok, _ledger} -> run_delete(:replaced, report, opts)
-      {:error, :not_moved} -> {:ok, %{"deleted" => false}}
-      {:error, reason} -> job_failure({:ledger, reason}, opts)
+      {:ok, ledger} ->
+        :ok = rename_primary(ledger, opts)
+        run_delete(:replaced, report, opts)
+
+      {:error, :not_moved} ->
+        {:ok, %{"deleted" => false}}
+
+      {:error, reason} ->
+        job_failure({:ledger, reason}, opts)
+    end
+  end
+
+  # The home lives on the new server now, reached at the same node id: the
+  # desktop's link names it, so no sentence names the old one. A name the
+  # link could not keep costs the words only, and is logged.
+  defp rename_primary(%{server: %{name: name}}, opts) do
+    rename = Keyword.get(opts, :rename_primary, fn name -> Link.impl().rename_primary(name) end)
+
+    case rename.(name) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error("provision: the link could not name your new server: #{inspect(reason)}")
     end
   end
 

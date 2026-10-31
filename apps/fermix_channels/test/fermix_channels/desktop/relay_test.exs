@@ -91,6 +91,28 @@ defmodule FermixChannels.Desktop.RelayTest do
     assert_receive {:primary_reached, 6}, 10_000
   end
 
+  # M75 lean v1 §4.3: once a replace's move is done the home lives on the new
+  # server, reached at the same node id, and the provisioner names it here.
+  test "the server's new name after a replace is kept and said from then on" do
+    primary = DesktopRail.primary!(epoch: 6)
+    root = DesktopRail.desktop_home!(primary, epoch: 5)
+    relay = DesktopRail.start_relay!(root, primary)
+    DesktopRail.await_connected(relay)
+
+    assert :ok = Relay.rename(relay, "fermix-general-5d2e")
+    assert {:ok, %{primary: %{name: "fermix-general-5d2e"}, epoch: 6}} = DesktopLink.read(root)
+
+    assert %{name: "fermix-general-5d2e", sentence: sentence} = Relay.status(relay)
+    assert sentence == "Fermix is connected to the server fermix-general-5d2e."
+
+    :ok = drop_sessions(primary)
+    assert_receive {:scheduled, {:relay_timer, :reconnect, _token}, 1_000}, 10_000
+
+    assert {:error, {:unreachable, unreachable}} = Relay.open_channel(relay)
+    assert unreachable =~ "The server fermix-general-5d2e is unreachable."
+    refute unreachable =~ "fermix-vm"
+  end
+
   # A hello_ack that names no epoch never reaches the relay: the rail's codec
   # refuses it (the primary's own codec will not even send one), and the
   # relay names that refusal a stale primary too.

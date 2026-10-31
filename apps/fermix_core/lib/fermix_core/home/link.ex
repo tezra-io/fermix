@@ -2,8 +2,9 @@ defmodule FermixCore.Home.Link do
   @moduledoc """
   The rail-side half of the home (M75), as `fermix_core` sees it: forwarding a
   Fermix-wide management call from a desktop's device-role engine to its
-  primary, the rail's facts for `home.status`, and opening an enrollment window
-  on a primary.
+  primary, the rail's facts for `home.status`, opening an enrollment window
+  on a primary, and naming a desktop's primary anew after a replace of the
+  server.
 
   `fermix_core` must never compile-depend on `fermix_channels`, so the
   implementation is injected **by module** through
@@ -76,6 +77,14 @@ defmodule FermixCore.Home.Link do
   role, is left as it is.
   """
   @callback withdraw_enrollment() :: :ok | {:error, {:unavailable, String.t()}}
+
+  @doc """
+  Device role: the server this desktop reaches is known by `name` from now on
+  (the new server of a replace, once the move to it is done; it is reached at
+  the same node id). The desktop link keeps it and every sentence names it.
+  `{:error, reason}` when no link runs or the name could not be kept.
+  """
+  @callback rename_primary(String.t()) :: :ok | {:error, term()}
 
   @doc "The configured implementation; raises when none is configured."
   @spec impl() :: module()

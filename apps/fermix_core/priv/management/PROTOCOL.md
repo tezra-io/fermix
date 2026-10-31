@@ -1411,7 +1411,9 @@ Notes that the shapes alone do not carry:
   the candidate that code enrolled (`enrollment.candidate_id` in the server's
   `home.status`, which `primary_home` carries), and once the desktop reaches
   its server one primary epoch above the one the old server held, the old
-  server is deleted, once, as a `home_provision` job. Moving Fermix back to a
+  server is deleted, once, as a `home_provision` job. From then on the
+  desktop names the new server: `home.status`'s `primary.name` and every
+  sentence of the link (`primary_unreachable` included) say it. Moving Fermix back to a
   desktop is not part of this release: to bring it back to a computer, restore
   the newest snapshot into a fresh home there.
 - **Enrollment and the move are the primary's** (M75). `home.enroll.open`

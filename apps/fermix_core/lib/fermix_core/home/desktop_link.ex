@@ -8,7 +8,8 @@ defmodule FermixCore.Home.DesktopLink do
   The move worker writes both on the source of a move (`write/2`,
   `write_key/2`); the desktop relay (`FermixChannels.Desktop.Relay`) reads
   them and raises what the file remembers as it learns more
-  (`record_epoch/2`, `record_route/3`). One engine boot decides whether the
+  (`record_epoch/2`, `record_route/3`, and `record_name/3` once a replace of
+  the server moved the home to a new one). One engine boot decides whether the
   home is linked (`linked?/2`): the device role with `desktop.json` present.
 
   ## `device/desktop.json`
@@ -31,7 +32,8 @@ defmodule FermixCore.Home.DesktopLink do
 
   - `device_id` is the desktop's row in the primary's `devices.toml` (a UUID).
   - `primary.name` is the name a person knows the primary by, at most 128
-    bytes of printable text. `gateway_pk` is the primary's X25519 gateway key
+    bytes of printable text: the server the move went to, and after a replace
+    of it the new one. `gateway_pk` is the primary's X25519 gateway key
     (the Noise responder's static key) and `node_id` its iroh endpoint id; both
     are the source's own, because the identity bundle moves with the home.
     `relays` (1 to 8) and `relays_rev` are the route the primary last gave,
@@ -146,6 +148,19 @@ defmodule FermixCore.Home.DesktopLink do
     if relays == primary.relays and rev == primary.relays_rev,
       do: {:ok, link},
       else: rewrite(home, %{link | primary: %{primary | relays: relays, relays_rev: rev}})
+  end
+
+  @doc """
+  Keeps `name` as the primary's (the new server of a replace, reached at the
+  same node id once the move to it is done); the name held changes nothing.
+  A name the file cannot hold is refused by name and nothing is written.
+  """
+  @spec record_name(Path.t(), t(), String.t()) :: {:ok, t()} | {:error, error()}
+  def record_name(home, %{primary: primary} = link, name)
+      when is_binary(home) and is_binary(name) do
+    if name == primary.name,
+      do: {:ok, link},
+      else: rewrite(home, %{link | primary: %{primary | name: name}})
   end
 
   defp rewrite(home, link) do

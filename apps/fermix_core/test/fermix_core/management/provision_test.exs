@@ -59,6 +59,10 @@ defmodule FermixCore.Management.ProvisionTest do
       withdraw_code: fn ->
         send(test, :code_withdrawn)
         :ok
+      end,
+      rename_primary: fn name ->
+        send(test, {:renamed, name})
+        :ok
       end
     ]
 
@@ -610,6 +614,11 @@ defmodule FermixCore.Management.ProvisionTest do
       assert {:deleting, job} = Provision.primary_reached(6, ctx.seams)
       assert %{"status" => "completed", "kind" => "home_provision"} = finished(job, ctx)
 
+      # The desktop's link names the server the home moved to from now on.
+      new_name = ledger.server.name
+      assert_received {:renamed, ^new_name}
+      refute new_name == ctx.old.name
+
       assert Map.keys(HetznerStub.world(ctx.stub).servers) == [ledger.server.id]
 
       assert %{state: :created, replace: %{state: :done, current: :new, old: nil}} =
@@ -633,6 +642,8 @@ defmodule FermixCore.Management.ProvisionTest do
       {:deleting, job} = Provision.primary_reached(6, ctx.seams)
       assert %{"status" => "failed", "failure" => %{"sentence" => sentence}} = finished(job, ctx)
       assert sentence =~ "Fermix could not delete your old server: Hetzner refused the request"
+      # The move is done all the same: the link names the new server.
+      assert_received {:renamed, _new_name}
 
       assert %{replace: %{state: :failed, current: :new, failure: %{sentence: ^sentence}}} =
                Ledger.state(ctx.home)

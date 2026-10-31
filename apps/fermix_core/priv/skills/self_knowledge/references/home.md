@@ -419,8 +419,9 @@ it, never a second writer.
   enrolled, the owner reviews and starts the same move to it, with the
   recovery passphrase; the old server serves nothing while the move runs.
   When this computer next reaches its server and finds it one epoch above
-  the old one, the move is done, and Fermix deletes the old server by itself,
-  once (its addresses unless they went with it, then its firewall). If that
+  the old one, the move is done: this computer names the new server from
+  then on, and Fermix deletes the old server by itself, once (its addresses
+  unless they went with it, then its firewall). If that
   delete fails, the old server stays listed, with why, and Delete tries it
   again; the new one, which now holds the home, is never deleted from here.
   Before the move, Cancel or Start again deletes only the new server, closes

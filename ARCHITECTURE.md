@@ -602,8 +602,11 @@ move is the existing one, forwarded; beside the forward of `home.move.start`
 the daemon records that the move started (`Provision.move_forwarded/3`),
 because the old server serves nothing while it runs. The desktop relay
 reports every primary epoch a session reaches (`Provision.primary_reached/2`,
-in a task): one above the old server's is the move to the new one done, and
-the old server is deleted, once, as a `home_provision` job
+in a task): one above the old server's is the move to the new one done, the
+desktop's link names the new server from then on (`Home.Link`'s
+`rename_primary/1`, the relay writing it with `DesktopLink.record_name/3`, so
+the relay stays the one writer of `desktop.json`), and the old server is
+deleted, once, as a `home_provision` job
 (`Provision.delete_replaced/2`, the same order as any delete, refused unless
 the move is done); a failed delete stays in the ledger with its sentence for
 `home.provision.delete` to try again, and the old server answering at its own

@@ -81,6 +81,23 @@ defmodule FermixCore.Home.DesktopLinkTest do
     assert {:ok, ^routed} = DesktopLink.record_route(home, routed, {relays, "fedcba9876543210"})
   end
 
+  # A replace of the server moves the home to a new server, reached at the
+  # same node id: from then on the link names the new one.
+  test "the server's name is kept when it changes, and a name it cannot be is refused",
+       %{home: home} do
+    assert :ok = DesktopLink.write(home, @link)
+
+    assert {:ok, renamed} = DesktopLink.record_name(home, @link, "fermix-general-5d2e")
+    assert renamed.primary.name == "fermix-general-5d2e"
+    assert {:ok, ^renamed} = DesktopLink.read(home)
+    assert {:ok, ^renamed} = DesktopLink.record_name(home, renamed, "fermix-general-5d2e")
+
+    assert {:error, {:invalid_link, _path, :name}} =
+             DesktopLink.record_name(home, renamed, "two\nlines")
+
+    assert {:ok, ^renamed} = DesktopLink.read(home)
+  end
+
   test "the key is read only at 0600, and a looser mode is refused by name", %{home: home} do
     {public, private} = :crypto.generate_key(:ecdh, :x25519)
     assert :ok = DesktopLink.write_key(home, private)
