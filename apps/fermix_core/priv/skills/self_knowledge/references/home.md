@@ -163,8 +163,10 @@ it, never a second writer.
   candidate enrolling or receiving one) the restart waits, and so it does
   when the engine's status cannot be read; the reboot waits at most two
   nights in a row for a move and then happens all the same. Each night says
-  what it did in `journalctl -u fermix-update`; a failed installer stops the
-  night and leaves the running engine as it was; the next night tries again.
+  what it did in `journalctl -u fermix-update`; an installer that ran and
+  failed stops the night and leaves the running engine as it was, while one
+  that could not be downloaded changed nothing, so the restart and the reboot
+  are still decided; the next night tries again.
   So a server's engine can be a day or more behind the Mac's.
 - **Memory.** Out of memory the kernel stops one process. The swap file makes
   that rarer, and on Linux the engine starts Chrome, and so every Chrome

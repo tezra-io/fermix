@@ -102,11 +102,15 @@ step:
    (root's, 0600, in a 0700 directory; cleared by a reboot and by a night
    without a move; a count that is not a number reads as the limit), and the
    third night reboots all the same and says so; a failed read of the engine
-   counts as no move. Each night says what it did in one line per step. A
-   failed installer stops the night before the restart and the reboot and
-   leaves the running engine as it was; any failure says why on stderr (the
-   journal: `journalctl -u fermix-update`) and the night exits non-zero; the
-   next night tries again. First boot writes the script again whenever it
+   counts as no move. Each night says what it did in one line per step. An
+   installer that cannot be downloaded from `fermix.ai` never ran, so
+   nothing changed and the restart and the reboot are still decided; one
+   that ran and failed stops the night before both and leaves the running
+   engine as it was, since its exit status (1 for a refusal before the
+   package manager runs and for a failure after it) cannot say whether the
+   package was touched. Any failure says why on stderr (the journal:
+   `journalctl -u fermix-update`) and the night exits non-zero; the next
+   night tries again. First boot writes the script again whenever it
    runs.
 6. Creates the account `fermix` (home `/home/fermix`, `/usr/sbin/nologin`, no
    password), lingering, with `/run/fermix` recreated for it at every boot
@@ -182,7 +186,8 @@ them); a restore host and its printed steps; the failures that stop the
 first boot, each by its exit status and its one sentence on stderr; an
 Ubuntu host with swap of its own; the nightly update, one night per case (no
 new release, a new one, a failed installer while a reboot is asked for, the
-reboot, a failed `service status` and a failed `home status` (no restart, the
+reboot, an installer that cannot be downloaded (the reboot all the same), a
+failed `service status` and a failed `home status` (no restart, the
 reboot all the same), three nights under a move (the reboot waits two, then
 goes), a move in an ended phase, a failed restart (the reboot all the same),
 no home yet); and the distribution's Chromium installed with

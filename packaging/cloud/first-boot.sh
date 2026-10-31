@@ -355,6 +355,10 @@ PHASE=""
 # Set when the engine's answer or its restart failed: the night still decides
 # the reboot, then ends non-zero.
 ENGINE_FAILED=0
+# Set when the installer itself could not be downloaded: it never ran, so
+# nothing on disk changed and the night goes on to the restart and the
+# reboot, then ends non-zero.
+INSTALLER_UNREACHABLE=0
 
 # One sentence and a non-zero exit, ending the night there.
 fail() {
@@ -376,12 +380,23 @@ installed_version() {
     fail "dpkg lists no fermix package on this server, so there is nothing to update."
 }
 
-# The installer every host uses, with its sha256 and cosign checks: it installs
-# the newest release's package, or nothing when that one is installed. The
-# package restarts nothing, so the running engine is untouched until the restart.
+# The installer every host uses, downloaded afresh. A failed download changed
+# nothing, so the night carries on without an update.
+fetch_installer() {
+  if ! curl -fsSL --proto '=https' "$INSTALL_URL" -o "$WORK/install.sh"; then
+    warn "Could not download the Fermix installer from $INSTALL_URL, so Fermix is not updated tonight; nothing was installed, so the restart and the reboot are still decided."
+    INSTALLER_UNREACHABLE=1
+    return 1
+  fi
+}
+
+# The installer, with its sha256 and cosign checks: it installs the newest
+# release's package, or nothing when that one is installed. The package
+# restarts nothing, so the running engine is untouched until the restart. Its
+# exit status does not say whether it failed before or after the package
+# manager ran, so any failure stops the night before the restart and the
+# reboot.
 update_fermix() {
-  curl -fsSL --proto '=https' "$INSTALL_URL" -o "$WORK/install.sh" ||
-    fail "Could not download the Fermix installer from $INSTALL_URL, so Fermix was not updated and the engine keeps running."
   sh "$WORK/install.sh" --no-setup </dev/null ||
     fail "The Fermix installer stopped, so the engine keeps running; its message above says why."
 }
@@ -517,6 +532,15 @@ restart_and_reboot() {
   fi
 }
 
+report_versions() {
+  after=$(installed_version) || exit 1
+  if [ "$after" = "$1" ]; then
+    say "Fermix $after is the newest release"
+  else
+    say "Fermix went from $1 to $after"
+  fi
+}
+
 main() {
   umask 077
   PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -536,15 +560,12 @@ main() {
 
   before=$(installed_version) || exit 1
   say "Updating Fermix $before through $INSTALL_URL"
-  update_fermix
-  after=$(installed_version) || exit 1
-  if [ "$after" = "$before" ]; then
-    say "Fermix $after is the newest release"
-  else
-    say "Fermix went from $before to $after"
+  if fetch_installer; then
+    update_fermix
+    report_versions "$before"
   fi
   restart_and_reboot
-  [ "$ENGINE_FAILED" -eq 0 ] || exit 1
+  [ "$ENGINE_FAILED" -eq 0 ] && [ "$INSTALLER_UNREACHABLE" -eq 0 ] || exit 1
 }
 
 main "$@"
@@ -560,9 +581,10 @@ FERMIX_UPDATE
 # installer every night at 04:00 UTC, restarts the engine when it runs an
 # older release than the one installed (not while a move is under way, nor
 # when the engine's answers fail) and reboots when an update asks for it (a
-# move may hold that off two nights in a row, no more). A failed installer
-# stops the night before both; every failure says why in the journal, and
-# the next night tries again.
+# move may hold that off two nights in a row, no more). An installer that
+# ran and failed stops the night before both; one that could not be
+# downloaded changed nothing, so both are still decided. Every failure says
+# why in the journal, and the next night tries again.
 schedule_updates() {
   say "Turning on updates: Debian's security updates every day, Fermix every night at 04:00 UTC"
   apt_install unattended-upgrades

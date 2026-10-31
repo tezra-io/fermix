@@ -19,9 +19,9 @@
 #   ubuntu         no Chromium package, and the sentence that says to install
 #                  one; swap of its own, which it keeps
 #   updates        the nightly update: no new release, a new one, a failed
-#                  installer, a reboot asked for, a failed status read, three
-#                  nights under a move, an ended move, a failed restart, no
-#                  home
+#                  installer, a reboot asked for, an installer that cannot be
+#                  downloaded, a failed status read, three nights under a
+#                  move, an ended move, a failed restart, no home
 #   chromium       the distribution's Chromium installed for real and started
 #                  headless as the engine account, the way the engine's
 #                  launcher starts it, its own sandbox on
@@ -625,6 +625,17 @@ updates() {
   run_apart "$update"
   check "[ $STATUS -eq 0 ] && night_calls '$status' '$home' '$restart' '$reboot'" \
     "the next night updates, restarts the engine, then reboots as asked"
+  rebooted
+
+  : >"$FIXTURES/install-unreachable"
+  : >/run/reboot-required
+  run_apart "$update"
+  ended_with "Could not download the Fermix installer from https://fermix.ai/install, so Fermix is not updated tonight; nothing was installed, so the restart and the reboot are still decided." \
+    "an installer that cannot be downloaded says so in one line and ends the night non-zero"
+  printf 'curl GET https://fermix.ai/install\n%s\n%s\n%s\n' "$status" "$home" "$reboot" >/tmp/calls.expected
+  check "cmp -s $LOG/calls.log /tmp/calls.expected" \
+    "and, nothing installed, the server still reboots as asked"
+  rm -f "$FIXTURES/install-unreachable"
   rebooted
 
   printf '1.2.6\n' >"$FIXTURES/release"

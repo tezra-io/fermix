@@ -1018,7 +1018,8 @@ one (not while `fermix home status` shows a pending move phase, nor when
 either read fails), and `systemctl reboot` when `/run/reboot-required`
 exists, which a move may defer at most two nights in a row (a root-owned
 count under `/var/lib/fermix-update`), stopping before both when the
-installer fails; creates
+installer ran and failed (one that could not be downloaded changed nothing,
+so both are still decided); creates
 the engine account `fermix` (home `/home/fermix`, no login, lingering); runs
 `fermix home enroll` and `fermix service install` as `fermix`; installs the
 distribution's Chromium on Debian (Ubuntu's is a snap: it says to install a

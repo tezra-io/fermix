@@ -1,7 +1,8 @@
 #!/bin/sh
 # Test stand-in for curl. https://fermix.ai/install answers the fake
-# installer; any other address is refused, as one that does not resolve is.
-# Logs every call as a GET of its URL.
+# installer, unless /etc/fermix-test/install-unreachable exists; any other
+# address is refused, as one that does not resolve is. Logs every call as a
+# GET of its URL.
 set -eu
 log=/var/log/fermix-test
 url="" out=""
@@ -17,6 +18,7 @@ while [ $# -gt 0 ]; do
 done
 printf 'curl GET %s\n' "$url" >>"$log/calls.log"
 
+[ ! -f /etc/fermix-test/install-unreachable ] || exit 6
 case "$url" in
   https://fermix.ai/install) body=/cloud/test/fake-install.sh ;;
   *) exit 6 ;;
