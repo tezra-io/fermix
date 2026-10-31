@@ -522,7 +522,10 @@ version 6 connection:
   change of note, and `off`. `detail` alone never counts: an app reads it
   when the owner opens Details. On the server, which its desktops' summaries
   read in their `primary_home`, a change of its newest backup, of its
-  enrollment code or of the servers it holds counts as well.
+  enrollment code or of the servers it holds counts as well. On a desktop and
+  on the server, the newest backup the summary counts from turning 7 days old
+  counts once, though its words do not change there: it is when the app
+  raises its notification that the last backup is a week old.
 - **never while Always On stays `off`**: an app forgets Always On while it is
   off. A settings write that changes what the `off` sentence names (iMessage,
   voice calls, meetings) is not told; the app reads that line when the owner
@@ -536,8 +539,8 @@ On provisioner's file being written, the link to the server going up or
 down, a backup run finishing) and at the next time the
 summary changes by the clock alone (a code open 30 minutes while the
 computer is awake, a link down 10 minutes while it is awake, a waiting
-server's 24 hours, a backup's 3 days), on one timer, armed again at each
-read; and only while a version 6 connection is attached. While Always On is
+server's 24 hours, a backup's 3 days and its 7), on one timer, armed again
+at each read; and only while a version 6 connection is attached. While Always On is
 `off` it arms nothing and reads only on what could end `off` (a token, a
 code, a move). It never calls the cloud provider: the
 provider is read when the app asks (`home.provision.resources`) or a job

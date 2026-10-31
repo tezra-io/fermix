@@ -776,6 +776,34 @@ defmodule FermixCore.Management.HomeSummaryTest do
                HomeSummary.watch(server(link: server_link(enrollment: provisioned(:open)))).key
     end
 
+    # The apps raise their notification once the newest backup is a week old
+    # (M75 lean v1 §7), a mark the summary's words do not show: it is a
+    # deadline, and the key moves once as it passes, then holds.
+    test "a backup's week is a deadline, and the key moves once as it passes" do
+      four_days_ago = ~U[2031-04-30 12:00:00Z]
+
+      for {name, facts} <- [
+            {"a desktop whose server's backup is four days old",
+             desktop(primary_home: server_home(backups: [{"desktop", four_days_ago}]))},
+            {"a desktop with no backup since a move four days ago",
+             desktop(primary_home: server_home(backups: []), moved: moved(four_days_ago))},
+            {"a server whose backup is four days old",
+             server(snapshots: snapshots([{"desktop", four_days_ago}]))}
+          ] do
+        %{key: key, next_change_ms: wait} = HomeSummary.watch(facts)
+        assert HomeSummary.summary(facts)["detail"]["kind"] == "backup_old", name
+        assert wait == 3 * @day, name
+
+        assert HomeSummary.watch(later(facts, wait - 1_000)).key == key, name
+
+        week = HomeSummary.watch(later(facts, wait))
+        refute week.key == key, "#{name}: the week passed untold"
+        assert week.next_change_ms == nil, name
+        assert HomeSummary.summary(later(facts, wait))["detail"]["kind"] == "backup_old", name
+        assert HomeSummary.watch(later(facts, wait + 2 * @day)).key == week.key, name
+      end
+    end
+
     test "the computer that sets Always On up does not watch its own backups" do
       assert HomeSummary.watch(facts(snapshots: snapshots([{"s3", ~U[2031-05-01 10:00:00Z]}]))) ==
                HomeSummary.watch(facts([]))

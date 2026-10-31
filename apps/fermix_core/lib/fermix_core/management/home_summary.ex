@@ -89,6 +89,8 @@ defmodule FermixCore.Management.HomeSummary do
   @setup_ms 30 * 60_000
   @backup_old_s 3 * 86_400
   @day_s 86_400
+  # The apps raise their notification once the newest backup is this old.
+  @backup_week_s 7 * @day_s
   # The states whose sentence `watch/1`'s key leaves out: on `on` and
   # `problem` it carries a figure that moves with the clock (a backup's age, a
   # count of days, how full a disk is), and their state, action and kind say
@@ -149,21 +151,24 @@ defmodule FermixCore.Management.HomeSummary do
       it ends (an `off` summary has one key). On a server with desktops it also
       holds what their own summaries read from its `home.status`: its newest
       backup, its enrollment code (kind, state, who used it) and the servers
-      it holds. `detail` alone is no change.
+      it holds. On a desktop and on a server with desktops it holds whether
+      the newest backup the summary counts from is 7 days old, the mark the
+      apps raise their notification at, which the summary's words do not
+      show. `detail` alone is no change.
     * `off`: whether the summary is `off`.
     * `next_change_ms`: the milliseconds until the summary next changes by
       the clock alone (a created server's code open 30 minutes awake, a link
-      down 10 minutes awake, a held server's 24 hours, a backup's 3 days), or
-      nil when nothing does; always nil while off. A deadline may change
-      nothing when it comes (another rule decided first): the watch then reads
-      a same key and tells nobody.
+      down 10 minutes awake, a held server's 24 hours, a backup's 3 days and
+      its 7), or nil when nothing does; always nil while off. A deadline may
+      change nothing when it comes (another rule decided first): the watch
+      then reads a same key and tells nobody.
   """
   @spec watch(facts()) :: %{key: term(), off: boolean(), next_change_ms: pos_integer() | nil}
   def watch(facts) when is_map(facts) do
     summary = summary(facts)
     off = summary["state"] == "off"
     next = if off, do: nil, else: next_change(facts)
-    %{key: {key(summary), drawn(facts)}, off: off, next_change_ms: next}
+    %{key: {key(summary), drawn(facts), backup_week?(facts)}, off: off, next_change_ms: next}
   end
 
   @doc """
@@ -820,6 +825,25 @@ defmodule FermixCore.Management.HomeSummary do
 
   defp drawn(_facts), do: nil
 
+  # Whether the newest backup this place's summary counts from is a week old.
+  defp backup_week?(facts) do
+    case backup_since(facts) do
+      %DateTime{} = at -> DateTime.diff(facts.now, at, :second) >= @backup_week_s
+      nil -> false
+    end
+  end
+
+  # When the backup this place's summary counts from was taken: on a desktop
+  # its server's newest, else the move where none finished since; on a server
+  # with desktops its own newest.
+  defp backup_since(%{role: :device, primary_home: %{"snapshots" => snapshots}} = facts),
+    do: newest_backup(snapshots) || get_in(facts, [:moved, :moved_at])
+
+  defp backup_since(%{role: :primary, link: %{desktops: [_ | _]}} = facts),
+    do: newest_backup(facts.snapshots)
+
+  defp backup_since(_facts), do: nil
+
   # The soonest time rule of this place's summary that has not come yet.
   defp next_change(facts) do
     facts
@@ -830,11 +854,16 @@ defmodule FermixCore.Management.HomeSummary do
 
   defp deadlines(%{role: :candidate}), do: []
 
-  defp deadlines(%{role: :device} = facts),
-    do: [link_deadline(facts), desktop_backup_deadline(facts) | replace_deadlines(facts)]
+  defp deadlines(%{role: :device} = facts) do
+    since = backup_since(facts)
+    [link_deadline(facts), backup_deadline(since, facts), week_deadline(since, facts)] ++
+      replace_deadlines(facts)
+  end
 
-  defp deadlines(%{role: :primary, link: %{desktops: [_ | _]}} = facts),
-    do: [backup_deadline(newest_backup(facts.snapshots), facts)]
+  defp deadlines(%{role: :primary, link: %{desktops: [_ | _]}} = facts) do
+    since = backup_since(facts)
+    [backup_deadline(since, facts), week_deadline(since, facts)]
+  end
 
   defp deadlines(%{role: :primary} = facts),
     do: [window_deadline(window(facts)) | expiries(facts.candidates, facts)]
@@ -856,20 +885,17 @@ defmodule FermixCore.Management.HomeSummary do
 
   defp link_deadline(_facts), do: nil
 
-  defp desktop_backup_deadline(%{primary_home: %{"snapshots" => snapshots}} = facts) do
-    case newest_backup(snapshots) do
-      nil -> backup_deadline(get_in(facts, [:moved, :moved_at]), facts)
-      at -> backup_deadline(at, facts)
-    end
-  end
-
-  defp desktop_backup_deadline(_facts), do: nil
-
   # A backup is old once it is more than three days old, in whole seconds.
   defp backup_deadline(%DateTime{} = at, facts),
     do: ms_until(DateTime.add(at, @backup_old_s + 1, :second), facts)
 
   defp backup_deadline(nil, _facts), do: nil
+
+  # A backup is a week old once seven days have passed (`backup_week?/1`).
+  defp week_deadline(%DateTime{} = at, facts),
+    do: ms_until(DateTime.add(at, @backup_week_s, :second), facts)
+
+  defp week_deadline(nil, _facts), do: nil
 
   # During a replace: the new server's 30 minutes from its creation while its
   # code is open on the old server, and the day each server the old one holds

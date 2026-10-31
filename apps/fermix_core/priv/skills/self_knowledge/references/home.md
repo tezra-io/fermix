@@ -661,7 +661,8 @@ it, never a second writer.
   connects unless Always On is off, and at each change of the state, the
   action, the problem kind, or a step's sentence (a backup's age or a disk's
   percentage moving is no change; the app reads them again when the pane
-  opens). Nothing is told while Always On stays off, not even a settings
+  opens), and once when the last backup turns a week old, for the app's
+  notification. Nothing is told while Always On stays off, not even a settings
   change to what the off line names: the app forgets Always On while it is
   off and reads that line when the pane opens. Fermix works the change out
   without polling: it reads the summary
@@ -670,8 +671,8 @@ it, never a second writer.
   the provider's file written, the link to the server up or down, a backup run
   finishing) and at the next time it changes by the clock
   alone (30 minutes awake for a created server to check in, 10 minutes awake
-  of silence, a waiting server's 24 hours, a backup's 3 days), on one timer,
-  armed again at each read and after a wake from sleep, and only while an app
+  of silence, a waiting server's 24 hours, a backup's 3 days and its 7), on
+  one timer, armed again at each read and after a wake from sleep, and only while an app
   is connected. While Always On is off nothing is armed, and only a token, a
   code or a move is read. It never asks the cloud provider on its own: the
   provider is read when the pane asks (`home.provision.resources`) or a job

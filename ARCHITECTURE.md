@@ -674,8 +674,10 @@ forgets its subscribers takes them down too), keeps the last
 (state, action, problem kind, and the sentence except on `on` and `problem`,
 whose figures move with the clock, and on `off`, which an app forgets until it
 ends, so a settings write tells nothing; on a server with desktops also its newest
-backup, its window and its candidates, which their summaries read), whether it
-is `off`, and the milliseconds to its next change by the clock alone. A
+backup, its window and its candidates, which their summaries read; on a desktop
+and a server with desktops whether the newest backup is 7 days old, when the
+apps notify), whether it is `off`, and the milliseconds to its next change by
+the clock alone. A
 version 6 `Companion.Connection` subscribes before its `server_hello` and
 writes `home_status_changed` when told: once after the hello unless off, then
 at each change of key. It reads only while subscribed, on `changed/2` from the
