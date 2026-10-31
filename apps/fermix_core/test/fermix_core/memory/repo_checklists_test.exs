@@ -95,7 +95,7 @@ defmodule FermixCore.Memory.RepoChecklistsTest do
       :ok =
         Sqlite3.execute(
           conn,
-          "DELETE FROM schema_migrations WHERE version IN (#{@version}, #{@edits_version})"
+          "DELETE FROM schema_migrations WHERE version >= #{@version}"
         )
 
       :ok =
@@ -150,7 +150,7 @@ defmodule FermixCore.Memory.RepoChecklistsTest do
       :ok = Sqlite3.execute(conn, "DROP TABLE checklist_edits")
 
       :ok =
-        Sqlite3.execute(conn, "DELETE FROM schema_migrations WHERE version = #{@edits_version}")
+        Sqlite3.execute(conn, "DELETE FROM schema_migrations WHERE version >= #{@edits_version}")
 
       assert [[56]] = query!(conn, "SELECT MAX(version) FROM schema_migrations")
     end)
