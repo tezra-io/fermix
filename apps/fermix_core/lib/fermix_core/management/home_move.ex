@@ -5,11 +5,13 @@ defmodule FermixCore.Management.HomeMove do
   `home.move.start`, and the `enrollment`, `candidates` and `move` places of
   `home.status`.
 
-  - `home.enroll.open` (primary only) opens the one enrollment window, thirty
-    minutes, replacing an open one, through the rail
-    (`FermixCore.Home.Link.impl().open_enrollment/0`), and answers the code
-    and when it expires. The code is answered once and never logged or kept
-    in a status.
+  - `home.enroll.open` (primary only) opens the one enrollment window, a
+    manual one of thirty minutes, replacing an open one, through the rail
+    (`FermixCore.Home.Link.impl().open_enrollment/1`), and answers the code
+    and when it expires; while a server Fermix created waits on its own
+    24-hour window (M75 lean v1 L15), it is refused with the rail's
+    sentence. The code is answered once and never logged or kept in a
+    status.
   - `home.candidates.list` answers the candidates the primary holds
     (`FermixCore.Home.Candidates`), never their keys.
   - `home.move.readiness {candidate_id}` (primary only) answers what the owner
@@ -83,7 +85,7 @@ defmodule FermixCore.Management.HomeMove do
   @doc "`home.enroll.open`."
   @spec enroll_open(keyword()) :: {:ok, map()} | {:error, term()}
   def enroll_open(opts \\ []) when is_list(opts) do
-    open = Keyword.get(opts, :open_enrollment, fn -> Link.impl().open_enrollment() end)
+    open = Keyword.get(opts, :open_enrollment, fn -> Link.impl().open_enrollment(:manual) end)
 
     with :ok <- primary(role(opts)) do
       case open.() do

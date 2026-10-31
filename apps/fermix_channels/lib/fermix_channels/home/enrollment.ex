@@ -4,16 +4,25 @@ defmodule FermixChannels.Home.Enrollment do
   primary is admitted, and the one writer of `<home>/mobile/candidates.json`
   (`FermixCore.Home.Candidates`).
 
-  `open/1` (`home.enroll.open`, through `FermixChannels.Home.Link`) opens one
-  window of thirty minutes, replacing an open one, and answers its code
-  (`FermixCore.Home.EnrollmentCode`): a fresh 32-byte secret, this primary's
-  gateway key, its iroh endpoint id, the relays its endpoint listens on (the
-  ones every paired device acknowledged), the host's name and the expiry.
-  Thirty minutes covers a cloud server's creation and first boot. The code is
-  answered once and never logged; the window (its secret, expiry, and who
-  used it) is kept in `<home>/mobile/enrollment.json` (`0600`, device-local),
-  so an engine restart between opening a code and the server's check-in loses
-  nothing.
+  `open/2` (through `FermixChannels.Home.Link`) opens one window, replacing
+  an open one, and answers its code (`FermixCore.Home.EnrollmentCode`): a
+  fresh 32-byte secret, this primary's gateway key, its iroh endpoint id, the
+  relays its endpoint listens on (the ones every paired device acknowledged),
+  the host's name and the expiry. A window has a kind (M75 lean v1 L15):
+  `:manual`, the code a person copies onto a server of their own
+  (`home.enroll.open`), lives thirty minutes; `:provisioned`, the code Fermix
+  puts inside a server it creates (`FermixCore.Home.Provision`), lives 24
+  hours, so a slow install or a sleeping computer does not fail it. Only one
+  window is open at a time, so a manual one is refused, in one sentence,
+  while a provisioned window is open and unexpired: a new code would strand
+  the server that waits for its own. `withdraw/1` closes an open provisioned
+  window (its server was never created, or is deleted) and nothing else. The
+  code is answered once and never logged; the window (its kind, secret,
+  expiry, and who used it) is kept in `<home>/mobile/enrollment.json`
+  (`0600`, device-local), so an engine restart between opening a code and the
+  server's check-in loses nothing. The window records which candidate used
+  it, which is how a created server is known when it enrolls: the code is
+  single use.
 
   A stream with the enrollment prelude (`FXM1 0x03`) reaches the window
   through `FermixChannels.Home.EnrollmentResponder` while a window is held
@@ -55,29 +64,50 @@ defmodule FermixChannels.Home.Enrollment do
   alias FermixCore.Home.EnrollmentCode
   alias FermixCore.Setup.ConfigStore
 
-  @window_s 1_800
+  # How long a window of each kind stays open, in seconds (L15).
+  @window_s %{manual: 1_800, provisioned: 86_400}
+  @kinds Map.keys(@window_s)
   @file_name "enrollment.json"
   @file_mode 0o600
+  @server_waits_sentence "Your new server is still setting up with a code of its own, so " <>
+                           "Fermix opens no other code until that server connects or is deleted."
 
-  @type window_view :: %{state: :open | :used | :expired, expires_at: DateTime.t()}
+  @type kind :: :manual | :provisioned
+  @type window_view :: %{
+          state: :open | :used | :expired,
+          expires_at: DateTime.t(),
+          kind: kind(),
+          candidate_id: String.t() | nil
+        }
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) when is_list(opts),
     do: GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
 
-  @doc "How long a window stays open, in seconds."
-  @spec window_s() :: pos_integer()
-  def window_s, do: @window_s
+  @doc "How long a window of `kind` stays open, in seconds."
+  @spec window_s(kind()) :: pos_integer()
+  def window_s(kind) when kind in @kinds, do: Map.fetch!(@window_s, kind)
 
   @doc """
-  Opens a window, replacing any, and answers its code and expiry; or
-  `{:error, {:unavailable, sentence}}` when this primary cannot be reached
-  over the rail.
+  Opens a window of `kind`, replacing any, and answers its code and expiry;
+  or `{:error, {:unavailable, sentence}}` when this primary cannot be reached
+  over the rail, or when a manual one is asked for while a provisioned window
+  is open.
   """
-  @spec open(GenServer.server()) ::
+  @spec open(GenServer.server(), kind()) ::
           {:ok, %{code: String.t(), expires_at: DateTime.t()}}
           | {:error, {:unavailable, String.t()}}
-  def open(server \\ __MODULE__), do: GenServer.call(server, :open, 15_000)
+  def open(server \\ __MODULE__, kind \\ :manual) when kind in @kinds,
+    do: GenServer.call(server, {:open, kind}, 15_000)
+
+  @doc """
+  Closes the window when it is a provisioned one still open: its expiry
+  becomes now and its secret leaves the disk. Any other window, or none, is
+  left as it is. Answers `:ok`, or `{:error, {:unavailable, sentence}}` when
+  the closed window could not be kept.
+  """
+  @spec withdraw(GenServer.server()) :: :ok | {:error, {:unavailable, String.t()}}
+  def withdraw(server \\ __MODULE__), do: GenServer.call(server, :withdraw)
 
   @doc "Whether a window is held (open, used or expired); false when no window process runs."
   @spec window?(GenServer.server()) :: boolean()
@@ -93,7 +123,7 @@ defmodule FermixChannels.Home.Enrollment do
 
   @doc """
   Burns the window once a session proved its secret with the Noise key
-  `remote`: `:ok` the first time within its thirty minutes, and again for the
+  `remote`: `:ok` the first time while it is open, and again for the
   candidate that used it (`remote` the same); `{:error, :used}` or
   `{:error, :expired}` otherwise.
   """
@@ -141,11 +171,19 @@ defmodule FermixChannels.Home.Enrollment do
   end
 
   @impl true
-  def handle_call(:open, _from, state) do
-    case code_facts(state) do
-      {:ok, facts} -> open_window(facts, state)
+  def handle_call({:open, kind}, _from, state) do
+    with :ok <- room_for(kind, state),
+         {:ok, facts} <- code_facts(state) do
+      open_window(kind, facts, state)
+    else
       {:error, sentence} -> {:reply, {:error, {:unavailable, sentence}}, state}
     end
+  end
+
+  def handle_call(:withdraw, _from, state) do
+    if provisioned_open?(state),
+      do: withdraw_window(state),
+      else: {:reply, :ok, state}
   end
 
   def handle_call(:window?, _from, state), do: {:reply, state.window != nil, state}
@@ -196,10 +234,16 @@ defmodule FermixChannels.Home.Enrollment do
 
   def handle_call(:status, _from, %{window: nil} = state), do: {:reply, nil, state}
 
-  def handle_call(:status, _from, %{window: window} = state),
-    do:
-      {:reply, %{state: window_state(window, state.clock.()), expires_at: window.expires_at},
-       state}
+  def handle_call(:status, _from, %{window: window} = state) do
+    view = %{
+      state: window_state(window, state.clock.()),
+      expires_at: window.expires_at,
+      kind: window.kind,
+      candidate_id: window.candidate_id
+    }
+
+    {:reply, view, state}
+  end
 
   @impl true
   def handle_info({:expire, expires_at}, %{window: %{expires_at: expires_at}} = state),
@@ -210,14 +254,28 @@ defmodule FermixChannels.Home.Enrollment do
 
   # -- opening ----------------------------------------------------------------
 
-  defp open_window(facts, state) do
+  # A manual code waits while a created server's window is open (L15); a
+  # provisioned window replaces any.
+  defp room_for(:manual, state) do
+    if provisioned_open?(state), do: {:error, @server_waits_sentence}, else: :ok
+  end
+
+  defp room_for(:provisioned, _state), do: :ok
+
+  defp provisioned_open?(%{window: %{kind: :provisioned} = window} = state),
+    do: window_state(window, state.clock.()) == :open
+
+  defp provisioned_open?(_state), do: false
+
+  defp open_window(kind, facts, state) do
     now = state.clock.()
-    expires_at = now |> DateTime.add(@window_s, :second) |> DateTime.truncate(:second)
+    expires_at = now |> DateTime.add(window_s(kind), :second) |> DateTime.truncate(:second)
     secret = :crypto.strong_rand_bytes(32)
 
     case EnrollmentCode.encode(Map.merge(facts, %{secret: secret, expires_at: expires_at})) do
       {:ok, code} ->
         window = %{
+          kind: kind,
           secret: secret,
           expires_at: expires_at,
           used?: false,
@@ -226,13 +284,27 @@ defmodule FermixChannels.Home.Enrollment do
           candidate_id: nil
         }
 
-        Logger.info("enrollment: a window is open until #{DateTime.to_iso8601(expires_at)}")
+        Logger.info(
+          "enrollment: a #{kind} window is open until #{DateTime.to_iso8601(expires_at)}"
+        )
+
         arm(state, window, now)
         keep(state, window, {:ok, %{code: code, expires_at: expires_at}})
 
       {:error, reason} ->
         Logger.error("enrollment: no code could be made: #{inspect(reason)}")
         {:reply, {:error, {:unavailable, "Fermix could not make an enrollment code."}}, state}
+    end
+  end
+
+  # The window ends now; the next write takes its secret off the disk.
+  defp withdraw_window(state) do
+    now = DateTime.truncate(state.clock.(), :second)
+    Logger.info("enrollment: the provisioned window was withdrawn")
+
+    case keep(state, %{state.window | expires_at: now}, :ok) do
+      {:reply, :ok, kept} -> {:reply, :ok, %{kept | window: %{kept.window | secret: nil}}}
+      refused -> refused
     end
   end
 
@@ -370,6 +442,7 @@ defmodule FermixChannels.Home.Enrollment do
     json =
       Jason.encode!(%{
         "v" => 1,
+        "kind" => Atom.to_string(window.kind),
         "secret" => kept_secret(window, now),
         "expires_at" => DateTime.to_iso8601(window.expires_at),
         "used" => window.used?,
@@ -417,13 +490,17 @@ defmodule FermixChannels.Home.Enrollment do
     end
   end
 
-  defp decode(%{"v" => 1, "secret" => secret, "expires_at" => at, "used" => used?} = map)
-       when is_boolean(used?) do
+  defp decode(
+         %{"v" => 1, "kind" => kind, "secret" => secret, "expires_at" => at, "used" => used?} =
+           map
+       )
+       when kind in ["manual", "provisioned"] and is_boolean(used?) do
     with {:ok, secret} <- optional_key(secret),
          {:ok, expires_at, 0} <- DateTime.from_iso8601(at),
          {:ok, used_by} <- optional_key(map["used_by"]) do
       {:ok,
        %{
+         kind: String.to_existing_atom(kind),
          secret: secret,
          expires_at: expires_at,
          used?: used?,

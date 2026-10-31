@@ -6,8 +6,9 @@ defmodule FermixChannels.Home.Link do
   Each callback is owned by the part of the rail that knows its answer:
   `forward/1` and `status/0`'s `primary` by the desktop relay (device role),
   `status/0`'s `desktops` by the primary's desktop peers
-  (`FermixChannels.Desktop.Peer`), and `open_enrollment/0` with `status/0`'s
-  `enrollment` by the enrollment window.
+  (`FermixChannels.Desktop.Peer`), and `open_enrollment/1`,
+  `withdraw_enrollment/0` and `status/0`'s `enrollment` by the enrollment
+  window.
 
   The desktop relay (`FermixChannels.Desktop.Relay`) runs only in a device
   role whose home holds its desktop link, which is also the only engine whose
@@ -37,10 +38,16 @@ defmodule FermixChannels.Home.Link do
   # The window runs on the primary alone (`FermixChannels.Home.Enrollment`);
   # any other role answers by name.
   @impl true
-  def open_enrollment do
+  def open_enrollment(kind) when kind in [:manual, :provisioned] do
     if Process.whereis(Enrollment),
-      do: Enrollment.open(),
+      do: Enrollment.open(Enrollment, kind),
       else: {:error, {:unavailable, "Only the primary opens an enrollment code."}}
+  end
+
+  # No window runs outside the primary, so there is none to close.
+  @impl true
+  def withdraw_enrollment do
+    if Process.whereis(Enrollment), do: Enrollment.withdraw(), else: :ok
   end
 
   # Every desktop row the primary holds, with whether its session is up now.

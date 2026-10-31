@@ -20,13 +20,22 @@ defmodule FermixCore.Home.Link do
   What the rail knows for `home.status`. `primary` is the device role's link to
   its primary (`nil` on any other role, or a device role with no desktop link).
   `desktops` are the primary's desktop peers. `enrollment` is the primary's
-  enrollment window, `state` `:open`, `:used` or `:expired` and when it
-  expires, `nil` when none was opened since the engine started.
+  enrollment window: `state` `:open`, `:used` or `:expired`, when it expires,
+  its `kind` (`:manual`, the code a person copies, or `:provisioned`, the code
+  inside a server Fermix created) and the `candidate_id` that enrolled
+  through it (nil until one did); `nil` when no window is kept.
   """
   @type status :: %{
           primary: map() | nil,
           desktops: [map()],
-          enrollment: %{state: :open | :used | :expired, expires_at: DateTime.t()} | nil
+          enrollment:
+            %{
+              state: :open | :used | :expired,
+              expires_at: DateTime.t(),
+              kind: :manual | :provisioned,
+              candidate_id: String.t() | nil
+            }
+            | nil
         }
 
   @doc """
@@ -43,13 +52,23 @@ defmodule FermixCore.Home.Link do
   @callback status() :: status()
 
   @doc """
-  Primary role: opens the enrollment window (spec §7.1) and answers the code and
-  when it expires. One window at a time; opening another replaces it. A
+  Primary role: opens the enrollment window (spec §7.1) of `kind` and answers
+  the code and when it expires: `:manual` (`home.enroll.open`, thirty
+  minutes) or `:provisioned` (the code inside a server Fermix creates, 24
+  hours, M75 lean v1 L15). One window at a time; opening another replaces it,
+  except that a manual one is refused while a provisioned one is open. A
   refusal carries the sentence a person is shown.
   """
-  @callback open_enrollment() ::
+  @callback open_enrollment(:manual | :provisioned) ::
               {:ok, %{code: String.t(), expires_at: DateTime.t()}}
               | {:error, {:unavailable, String.t()}}
+
+  @doc """
+  Closes the primary's provisioned window while it is open (the server it
+  was opened for was never created, or is being deleted); any other window,
+  or none, and any other role, is left as it is.
+  """
+  @callback withdraw_enrollment() :: :ok | {:error, {:unavailable, String.t()}}
 
   @doc "The configured implementation; raises when none is configured."
   @spec impl() :: module()
