@@ -24,6 +24,9 @@ defmodule FermixCore.Companion.ProtocolContractTest do
   # The fields the phone's wire requires of a shared event beyond this wire's.
   # None since version 3, when this wire's `row` came to require `media_refs`.
   @phone_only_required %{}
+  # The optional fields a shared event carries on this wire alone: what a
+  # tool's start is doing, in the engine's words (version 6).
+  @companion_only_fields %{"tool_event" => ["activity"]}
   # The events version 3 brought (M66): the media grant and the changed row.
   @version_3_client_events ~w(media_fetch media_release)
   @version_3_server_events ~w(row_updated media_path media_missing)
@@ -131,8 +134,6 @@ defmodule FermixCore.Companion.ProtocolContractTest do
     schema: schema,
     protocol: protocol
   } do
-    assert Protocol.protocol_version() == 5
-    assert Protocol.supported_version_range() == {4, 5}
     assert schema["$defs"]["followUpCard"]["x-since-version"] == 5
 
     assert schema["$defs"]["followUpCard"]["properties"] |> Map.keys() |> Enum.sort() ==
@@ -146,6 +147,39 @@ defmodule FermixCore.Companion.ProtocolContractTest do
     assert Enum.all?(mandates, &(Protocol.server_payload_version("proposal", &1) == 4))
     assert protocol =~ "### Version 5: a watcher's follow-ups on the owner's devices"
     assert protocol =~ "Every version 4 event, field and rule holds unchanged on version 5."
+  end
+
+  # Version 6 says what a turn is doing: the reasoning summary is a version 6
+  # event this wire alone carries, and a tool's start carries its step's words,
+  # additive, on every version, with goldens of both at the bounds the codec holds.
+  test "what a turn is doing is version 6's, with goldens of both", %{
+    schema: schema,
+    protocol: protocol
+  } do
+    assert Protocol.protocol_version() == 6
+    assert Protocol.supported_version_range() == {5, 6}
+
+    assert Protocol.server_event_version("reasoning") == 6
+    assert schema["$defs"]["reasoning"]["x-since-version"] == 6
+    refute "reasoning" in Protocol.shared_server_events()
+    assert Protocol.server_event_version("tool_event") == 1
+
+    text = schema["$defs"]["reasoning"]["properties"]["text"]
+    activity = schema["$defs"]["tool_event"]["properties"]["activity"]
+    assert text["x-max-bytes"] == Protocol.max_reasoning_bytes()
+    assert activity["x-max-bytes"] == Protocol.max_activity_bytes()
+
+    goldens = jsonl(@server_fixtures)
+    assert Enum.any?(goldens, &(&1["type"] == "reasoning"))
+
+    assert Enum.any?(
+             goldens,
+             &(&1["type"] == "tool_event" and &1["phase"] == "start" and
+                 is_binary(&1["activity"]))
+           )
+
+    assert protocol =~ "### Version 6: what a turn is doing"
+    assert protocol =~ "Every version 5 event, field and rule holds unchanged on version 6."
   end
 
   # The schema names every field of the card the engine builds, and bounds the
@@ -271,10 +305,17 @@ defmodule FermixCore.Companion.ProtocolContractTest do
     end
 
     for type <- Protocol.shared_server_events() do
-      companion = Map.delete(schema["$defs"][type]["properties"], "type")
+      companion =
+        Map.drop(schema["$defs"][type]["properties"], ["type" | companion_only(type)])
+
       phone = Map.take(mobile["$defs"][type]["properties"], Map.keys(companion))
 
       assert phone == companion, "#{type} bounds a shared field differently on the two wires"
+
+      for field <- companion_only(type) do
+        refute Map.has_key?(mobile["$defs"][type]["properties"], field),
+               "#{type}.#{field} is this wire's alone, yet the phone's wire publishes it"
+      end
     end
   end
 
@@ -701,6 +742,8 @@ defmodule FermixCore.Companion.ProtocolContractTest do
     [_before, approvals] = String.split(protocol, "## Approvals", parts: 2)
     assert approvals =~ "When `server_hello` arrives, a client drops every card it shows"
   end
+
+  defp companion_only(type), do: Map.get(@companion_only_fields, type, [])
 
   defp minimal_client_payloads do
     %{

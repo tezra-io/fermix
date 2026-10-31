@@ -1,10 +1,11 @@
-{"type":"server_hello","min_version":4,"max_version":5,"primary_epoch":2,"role":"primary"}
+{"type":"server_hello","min_version":5,"max_version":6,"primary_epoch":2,"role":"primary"}
 {"type":"accepted","client_msg_id":"mac-1","duplicate":false}
 {"type":"row","profile_id":"main","server_seq":12,"role":"user","text":"What is on my calendar today?","ts":"2026-09-25T09:00:00Z","client_msg_id":"mac-1","media_refs":[]}
 {"type":"accepted","client_msg_id":"mac-1","duplicate":true,"server_seq":13}
 {"type":"turn_started","profile_id":"main","turn_id":"turn-mac-1","in_reply_to":"mac-1"}
 {"type":"text_delta","turn_id":"turn-mac-1","text":"You have "}
-{"type":"tool_event","turn_id":"turn-mac-1","tool":"web_search","phase":"start"}
+{"type":"reasoning","turn_id":"turn-mac-1","text":"**Checking the calendar**\n\nThe owner wants today's schedule, so I'll look up today's events before answering."}
+{"type":"tool_event","turn_id":"turn-mac-1","tool":"web_search","phase":"start","activity":"Searching the web"}
 {"type":"tool_event","turn_id":"turn-mac-1","tool":"web_search","phase":"stop","detail":"%{status: :ok}"}
 {"type":"text_done","turn_id":"turn-mac-1","server_seq":13,"text":"You have one meeting, at 10."}
 {"type":"text_done","turn_id":"turn-mac-6","server_seq":24,"text":"Two quiet ones near you: [Example Coffee](https://example.coffee/) has long tables and no music, and [Quiet Grounds](https://provider.example/place/2) is the calmest before ten.","blocks":[{"type":"places","places":[{"name":"Example Coffee","canonical_url":"https://example.coffee/","source_url":"https://provider.example/place/1","location":{"latitude":40.7233,"longitude":-74.003},"address":"12 Example St, New York","rating":{"value":4.6,"best":5,"count":321},"price_range":"$$","categories":["coffee_shop"],"opening_hours":{"current_day":"Thursday 07:00-19:00"},"distance":{"value":0.4,"units":"km"}},{"name":"Quiet Grounds","source_url":"https://provider.example/place/2","location":{"latitude":40.7251,"longitude":-74.0012},"categories":["cafe"]}]}]}
@@ -44,7 +45,7 @@
 {"type":"proposal_resolved","profile_id":"main","proposal_id":"cpr_7b6a5f4e3d2c1b0a9f8e7d6c","state":"expired","sentence":"That proposal expired; nothing ran."}
 {"type":"proposal_resolved","profile_id":"main","proposal_id":"cft_5d2e8a1c9b4f7e3a6c0d1b2e","state":"confirmed","sentence":"Confirmed; the follow-up is starting."}
 {"type":"error","reason":"handshake_required"}
-{"type":"error","reason":"unsupported_protocol_version","direction":"client_too_new","client_version":6,"min_version":4,"max_version":5}
+{"type":"error","reason":"unsupported_protocol_version","direction":"client_too_new","client_version":7,"min_version":5,"max_version":6}
 {"type":"error","reason":"stale_primary","message":"This engine is at epoch 2; you have seen epoch 3: the primary moved, reconnect to the current one"}
 {"type":"error","reason":"client_message_conflict","client_msg_id":"mac-2"}
 {"type":"error","reason":"invalid_field","field":"limit"}

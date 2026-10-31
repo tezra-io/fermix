@@ -14,6 +14,7 @@ defmodule FermixChannels.Companion.Output do
   An absent optional field is an absent key, never an explicit null.
   """
 
+  alias FermixCore.Companion.Protocol
   alias FermixCore.Text
 
   @sandbox_ttl_s 60
@@ -97,6 +98,26 @@ defmodule FermixChannels.Companion.Output do
       "phase" => "stop",
       "detail" => event |> inspect() |> Text.truncate_utf8(@max_tool_detail_bytes)
     }
+
+  @doc """
+  A tool's start as the Mac's socket carries it (companion protocol 6): the
+  shared `tool_event` with `activity`, the engine's sentence for the step
+  (`FermixCore.Capabilities.Activity`), which the phone's wire does not carry.
+  """
+  @spec tool_start(String.t(), String.t(), String.t()) :: event()
+  def tool_start(turn_id, tool, activity) when is_binary(activity) and activity != "",
+    do: turn_id |> tool_event({:tool_start, tool}) |> Map.put("activity", activity)
+
+  @doc """
+  The model's summary of one step of a turn's reasoning (companion protocol
+  6), as the provider wrote it, trimmed and cut on a character to the wire's
+  bound. Live-only, like a delta: it is never stored.
+  """
+  @spec reasoning(String.t(), String.t()) :: event()
+  def reasoning(turn_id, summary) when is_binary(turn_id) and is_binary(summary) do
+    text = summary |> String.trim() |> Text.truncate_utf8(Protocol.max_reasoning_bytes())
+    %{"t" => "reasoning", "turn_id" => turn_id, "text" => text}
+  end
 
   @doc """
   A completed turn's ending, for the connections that streamed it: every

@@ -2,6 +2,7 @@ defmodule FermixChannels.Companion.OutputTest do
   use ExUnit.Case, async: true
 
   alias FermixChannels.Companion.Output
+  alias FermixCore.Companion.Protocol
 
   # An event header is capped, so the text a failure or a tool's result
   # becomes is cut to a bound, and never inside a code point.
@@ -21,6 +22,33 @@ defmodule FermixChannels.Companion.OutputTest do
 
     other = Output.tool_event("turn-1", {:tool_progress, String.duplicate("x", 5_000)})
     assert byte_size(other["detail"]) <= 512
+  end
+
+  # Companion protocol 6: a tool's start on the Mac's wire says what the step
+  # is; the phone's start, the shared event, does not.
+  test "a tool's start for the Mac carries its activity, the shared start none" do
+    assert Output.tool_start("turn-1", "web_search", "Searching the web") == %{
+             "t" => "tool_event",
+             "turn_id" => "turn-1",
+             "tool" => "web_search",
+             "phase" => "start",
+             "activity" => "Searching the web"
+           }
+
+    refute Map.has_key?(Output.tool_event("turn-1", {:tool_start, "web_search"}), "activity")
+    assert_raise FunctionClauseError, fn -> Output.tool_start("turn-1", "web_search", "") end
+  end
+
+  test "a reasoning summary is trimmed and bounded in bytes on a UTF-8 boundary" do
+    summary = "\n  **Weighing it**\n\n" <> String.duplicate("日本", 1_000)
+    event = Output.reasoning("turn-1", summary)
+
+    assert %{"t" => "reasoning", "turn_id" => "turn-1", "text" => text} = event
+    assert String.starts_with?(text, "**Weighing it**")
+    assert byte_size(text) <= Protocol.max_reasoning_bytes()
+    assert byte_size(text) > Protocol.max_reasoning_bytes() - 4
+    assert String.valid?(text)
+    assert :ok = Protocol.validate_server_payload("reasoning", Map.delete(event, "t"))
   end
 
   # One message for a failure reason on every error path, the Mac's and the

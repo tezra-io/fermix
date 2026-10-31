@@ -106,8 +106,8 @@ defmodule FermixChannels.Companion.ConnectionProposalsTest do
 
   test "a stored proposal reaches the owner's connection as its compact card, on either version",
        ctx do
-    owner = hello(ctx.socket_path, 5)
-    old = hello(ctx.socket_path, 4)
+    owner = hello(ctx.socket_path, 6)
+    old = hello(ctx.socket_path, 5)
     id = propose!(ctx)
 
     assert %{"type" => "proposal", "profile_id" => "main", "proposal" => card} = recv(owner)
@@ -139,20 +139,19 @@ defmodule FermixChannels.Companion.ConnectionProposalsTest do
     id = propose!(ctx)
     restart_repo!(ctx.fixture)
 
-    owner = hello(ctx.socket_path, 5)
+    owner = hello(ctx.socket_path, 6)
     assert %{"type" => "proposal", "proposal" => %{"proposal_id" => ^id}} = recv(owner)
 
-    old = hello(ctx.socket_path, 4)
+    old = hello(ctx.socket_path, 5)
     assert %{"type" => "proposal", "proposal" => %{"proposal_id" => ^id}} = recv(old)
   end
 
   # M60_WATCHER_CODING_RUNS.md §6.2: a follow-up's card names no mandate,
-  # tool or arguments, which a version 4 client requires, so only version 5
-  # reads it; its end reaches both, and the version 4 client has nothing to
-  # show for it.
-  test "a follow-up's card reaches the owner's version 5 connection only", ctx do
-    owner = hello(ctx.socket_path, 5)
-    old = hello(ctx.socket_path, 4)
+  # tool or arguments, which a version 4 client required, so it needs version
+  # 5; every version in the window reads it, and its end.
+  test "a follow-up's card reaches the owner's connections on either version", ctx do
+    owner = hello(ctx.socket_path, 6)
+    old = hello(ctx.socket_path, 5)
     registry = ctx.endpoint_opts[:connection_opts][:registry]
     card = ProposalView.follow_up_card(follow_up_card(), [])
 
@@ -164,7 +163,7 @@ defmodule FermixChannels.Companion.ConnectionProposalsTest do
     assert wire["follow_up"]["tools"] == ["shell"]
     refute Map.has_key?(wire, "mandate")
     refute Map.has_key?(wire["outside"], "args_text")
-    assert_quiet(old)
+    assert %{"type" => "proposal", "proposal" => ^wire} = recv(old)
 
     resolved = %{
       proposal_id: "cft_1",
@@ -186,7 +185,7 @@ defmodule FermixChannels.Companion.ConnectionProposalsTest do
     id = propose!(ctx)
     restart_endpoint(ctx, daemon_os_pid: ParentProcess.os_pid())
 
-    agent = hello(ctx.socket_path, 4)
+    agent = hello(ctx.socket_path, 5)
     send_line(agent, answer("agent-1", id, "confirm"))
 
     assert recv(agent) == %{
@@ -208,7 +207,7 @@ defmodule FermixChannels.Companion.ConnectionProposalsTest do
     role = %{role: :device, primary: "vm.example.test"}
     restart_endpoint(ctx, request_opts: [engine_role: role])
 
-    owner = hello(ctx.socket_path, 4)
+    owner = hello(ctx.socket_path, 5)
     send_line(owner, answer("mac-device-1", id, "confirm"))
 
     assert next_after_cards(owner, 3) == %{
@@ -228,7 +227,7 @@ defmodule FermixChannels.Companion.ConnectionProposalsTest do
        ctx do
     id = propose!(ctx)
     token = token!()
-    owner = hello(ctx.socket_path, 4)
+    owner = hello(ctx.socket_path, 5)
     assert %{"type" => "proposal"} = recv(owner)
 
     send_line(owner, answer("mac-1", id, "confirm"))
@@ -277,8 +276,8 @@ defmodule FermixChannels.Companion.ConnectionProposalsTest do
 
   test "a denial runs nothing, and every owner connection hears it", ctx do
     id = propose!(ctx)
-    owner = hello(ctx.socket_path, 4)
-    watcher = hello(ctx.socket_path, 4)
+    owner = hello(ctx.socket_path, 5)
+    watcher = hello(ctx.socket_path, 5)
     assert %{"type" => "proposal"} = recv(owner)
     assert %{"type" => "proposal"} = recv(watcher)
 
@@ -301,7 +300,7 @@ defmodule FermixChannels.Companion.ConnectionProposalsTest do
 
   test "an answer after the chat's confirm runs nothing; the chat's confirm is heard here", ctx do
     id = propose!(ctx)
-    owner = hello(ctx.socket_path, 4)
+    owner = hello(ctx.socket_path, 5)
     assert %{"type" => "proposal"} = recv(owner)
 
     assert {:ok, _reply} =
@@ -331,7 +330,7 @@ defmodule FermixChannels.Companion.ConnectionProposalsTest do
 
     restart_endpoint(ctx, proposal_opts: later)
 
-    owner = hello(ctx.socket_path, 4)
+    owner = hello(ctx.socket_path, 5)
     send_line(owner, answer("mac-5", id, "confirm"))
 
     assert recv(owner) == %{
@@ -400,15 +399,6 @@ defmodule FermixChannels.Companion.ConnectionProposalsTest do
     ctx.endpoint_opts
     |> Keyword.update!(:connection_opts, &Keyword.merge(&1, connection_opts))
     |> then(&start_supervised!({Endpoint, &1}))
-  end
-
-  # Nothing was written before the answer to a request sent now: a proposal
-  # sent to this connection would have arrived ahead of it. The probe is one
-  # the connection refuses without touching any store.
-  defp assert_quiet(client) do
-    ref = String.duplicate("a", 64)
-    send_line(client, %{"type" => "media_fetch", "profile_id" => "elsewhere", "ref" => ref})
-    assert recv(client) == %{"type" => "error", "reason" => "unsupported_profile"}
   end
 
   defp follow_up_card do

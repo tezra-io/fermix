@@ -192,27 +192,26 @@ defmodule FermixChannels.Companion.ConnectionTest do
     assert closed?(early)
 
     client = connect(path)
-    send_line(client, %{"type" => "client_hello", "protocol_version" => 5})
+    send_line(client, %{"type" => "client_hello", "protocol_version" => 6})
 
     assert recv(client) == %{
              "type" => "server_hello",
-             "min_version" => 4,
-             "max_version" => 5,
+             "min_version" => 5,
+             "max_version" => 6,
              "primary_epoch" => 2,
              "role" => "primary"
            }
 
-    send_line(client, %{"type" => "client_hello", "protocol_version" => 5})
+    send_line(client, %{"type" => "client_hello", "protocol_version" => 6})
     assert %{"type" => "error", "reason" => "unexpected_client_hello"} = recv(client)
     assert closed?(client)
   end
 
-  # M60_WATCHER_CODING_RUNS.md §6.2: version 5 adds a follow-up's card, and
-  # version 4 is still served. Each connection is known by the version its
-  # hello declared.
-  test "a version 4 and a version 5 client are both served, each known by its version", ctx do
-    old = hello(ctx.socket_path, 4)
-    new = hello(ctx.socket_path, 5)
+  # Version 6 adds what a turn is doing, and version 5 is still served. Each
+  # connection is known by the version its hello declared.
+  test "a version 5 and a version 6 client are both served, each known by its version", ctx do
+    old = hello(ctx.socket_path, 5)
+    new = hello(ctx.socket_path, 6)
 
     versions =
       ctx.registry
@@ -220,7 +219,7 @@ defmodule FermixChannels.Companion.ConnectionTest do
       |> Enum.map(fn {_connection, version} -> version end)
       |> Enum.sort()
 
-    assert versions == [4, 5]
+    assert versions == [5, 6]
 
     for client <- [old, new] do
       send_line(client, %{"type" => "read_state", "profile_id" => "main", "read_up_to_seq" => 0})
@@ -228,13 +227,14 @@ defmodule FermixChannels.Companion.ConnectionTest do
     end
   end
 
-  # Every client now reads `row_updated` (version 3) and a proposal's end
-  # (version 4); a follow-up's card is version 5's, so a version 4 client
-  # never sees one.
-  test "row_updated and a proposal's end reach both; a follow-up's card the version 5 client only",
+  # Every client now reads `row_updated` (version 3), a proposal's end
+  # (version 4) and a follow-up's card (version 5); a step's reasoning is
+  # version 6's, so a version 5 client never sees one, while a tool's start
+  # and the words it carries reach both.
+  test "a follow-up's card and a tool's start reach both; a step's reasoning the version 6 client only",
        ctx do
-    old = hello(ctx.socket_path, 4)
-    new = hello(ctx.socket_path, 5)
+    old = hello(ctx.socket_path, 5)
+    new = hello(ctx.socket_path, 6)
 
     :ok = Companion.broadcast("main", Output.turn_done("turn-quiet"), ctx.registry)
     :ok = Companion.broadcast("main", Output.row_updated("main", 21), ctx.registry)
@@ -249,6 +249,10 @@ defmodule FermixChannels.Companion.ConnectionTest do
 
     :ok = Companion.broadcast("main", resolved, ctx.registry)
     :ok = Companion.broadcast("main", follow_up_card(), ctx.registry)
+    :ok = Companion.broadcast("main", Output.reasoning("turn-next", "**Reading**"), ctx.registry)
+
+    start = Output.tool_start("turn-next", "web_search", "Searching the web")
+    :ok = Companion.broadcast("main", start, ctx.registry)
 
     done = %{"t" => "text_done", "turn_id" => "turn-next", "server_seq" => 3, "text" => "Hi"}
     :ok = Companion.broadcast("main", done, ctx.registry)
@@ -267,22 +271,33 @@ defmodule FermixChannels.Companion.ConnectionTest do
       assert %{"type" => "proposal_resolved", "proposal_id" => "cpr_1"} = recv(client)
     end
 
-    assert %{"type" => "proposal", "proposal" => %{"proposal_id" => "cft_1"}} = recv(new)
-    assert %{"type" => "text_done", "turn_id" => "turn-next"} = recv(new)
-    assert %{"type" => "text_done", "turn_id" => "turn-next"} = recv(old)
+    for client <- [new, old] do
+      assert %{"type" => "proposal", "proposal" => %{"proposal_id" => "cft_1"}} = recv(client)
+    end
+
+    assert recv(new) == %{
+             "type" => "reasoning",
+             "turn_id" => "turn-next",
+             "text" => "**Reading**"
+           }
+
+    for client <- [new, old] do
+      assert %{"type" => "tool_event", "activity" => "Searching the web"} = recv(client)
+      assert %{"type" => "text_done", "turn_id" => "turn-next"} = recv(client)
+    end
   end
 
-  test "a version 3 client is refused as too old", %{socket_path: path} do
+  test "a version 4 client is refused as too old", %{socket_path: path} do
     client = connect(path)
-    send_line(client, %{"type" => "client_hello", "protocol_version" => 3})
+    send_line(client, %{"type" => "client_hello", "protocol_version" => 4})
 
     assert recv(client) == %{
              "type" => "error",
              "reason" => "unsupported_protocol_version",
              "direction" => "client_too_old",
-             "client_version" => 3,
-             "min_version" => 4,
-             "max_version" => 5
+             "client_version" => 4,
+             "min_version" => 5,
+             "max_version" => 6
            }
 
     assert closed?(client)
@@ -310,7 +325,7 @@ defmodule FermixChannels.Companion.ConnectionTest do
     restart_endpoint(ctx, approvals: approvals)
 
     client = connect(ctx.socket_path)
-    send_line(client, %{"type" => "client_hello", "protocol_version" => 4})
+    send_line(client, %{"type" => "client_hello", "protocol_version" => 5})
     assert %{"type" => "server_hello"} = recv(client)
 
     assert %{"type" => "approval", "approval_id" => id, "ttl_s" => ttl} = recv(client)
@@ -371,15 +386,15 @@ defmodule FermixChannels.Companion.ConnectionTest do
 
   test "a client outside the window learns which side must update", %{socket_path: path} do
     client = connect(path)
-    send_line(client, %{"type" => "client_hello", "protocol_version" => 6})
+    send_line(client, %{"type" => "client_hello", "protocol_version" => 7})
 
     assert recv(client) == %{
              "type" => "error",
              "reason" => "unsupported_protocol_version",
              "direction" => "client_too_new",
-             "client_version" => 6,
-             "min_version" => 4,
-             "max_version" => 5
+             "client_version" => 7,
+             "min_version" => 5,
+             "max_version" => 6
            }
 
     assert closed?(client)
@@ -729,7 +744,7 @@ defmodule FermixChannels.Companion.ConnectionTest do
   # error builder, as a failed worker is; at boot recovery nobody is waiting.
   test "a request's late failure is told in this socket's own error", ctx do
     client = hello(ctx.socket_path)
-    [{connection, 4}] = Registry.lookup(ctx.registry, "main")
+    [{connection, 5}] = Registry.lookup(ctx.registry, "main")
 
     assert :ok = Connection.transport(connection).report_failure.("mac-late", {:exit, :timeout})
 
@@ -746,7 +761,7 @@ defmodule FermixChannels.Companion.ConnectionTest do
   test "turn events reach the socket, and each stream snapshot is sent as its unsent suffix",
        ctx do
     client = hello(ctx.socket_path)
-    [{connection, 4}] = Registry.lookup(ctx.registry, "main")
+    [{connection, 5}] = Registry.lookup(ctx.registry, "main")
 
     send(connection, {:companion_stream, "turn-1", {:snapshot, "Hel"}})
     send(connection, {:companion_stream, "turn-1", {:snapshot, "Hello"}})
@@ -798,7 +813,7 @@ defmodule FermixChannels.Companion.ConnectionTest do
   # call; one not running under exactly those ids is refused with a sentence,
   # and the connection stays open.
   test "a cancel naming a task that is not running is refused and the connection kept", ctx do
-    client = hello(ctx.socket_path, 4)
+    client = hello(ctx.socket_path, 5)
 
     task_ref = %{
       "call_uuid" => "3f2b8c1e-5a4d-4e6f-9b8a-7c6d5e4f3a2b",
@@ -1160,7 +1175,7 @@ defmodule FermixChannels.Companion.ConnectionTest do
 
       assert_receive {:granted, media, holder}
       assert media == %{ref: @voice_ref, kind: "audio", mime: "audio/ogg", size_bytes: 48_213}
-      assert [{^holder, 4}] = Registry.lookup(ctx.registry, "main")
+      assert [{^holder, 5}] = Registry.lookup(ctx.registry, "main")
     end
 
     test "a ref no row names is missing, and nothing is granted for it", ctx do
@@ -1206,7 +1221,7 @@ defmodule FermixChannels.Companion.ConnectionTest do
 
     test "a release reaches the grants for this connection and is never answered", ctx do
       client = hello(ctx.socket_path)
-      [{connection, 4}] = Registry.lookup(ctx.registry, "main")
+      [{connection, 5}] = Registry.lookup(ctx.registry, "main")
 
       send_line(client, media_event("media_release", @voice_ref))
       assert_receive {:released, @voice_ref, ^connection}
@@ -1246,8 +1261,8 @@ defmodule FermixChannels.Companion.ConnectionTest do
   # announced, and a text that did change is announced to every connection
   # (each in the window reads version 3's `row_updated`).
   test "an enrichment announces row_updated only when it changed the row's text", ctx do
-    old = hello(ctx.socket_path, 4)
-    new = hello(ctx.socket_path, 5)
+    old = hello(ctx.socket_path, 5)
+    new = hello(ctx.socket_path, 6)
 
     send_line(new, message("mac-enrich", "pick up milk"))
     assert %{"type" => "accepted", "client_msg_id" => "mac-enrich"} = recv(new)
@@ -1288,12 +1303,12 @@ defmodule FermixChannels.Companion.ConnectionTest do
       for seen <- [nil, 1, 2] do
         client = connect(ctx.socket_path)
         epoch = if seen, do: %{"primary_epoch" => seen}, else: %{}
-        send_line(client, Map.merge(%{"type" => "client_hello", "protocol_version" => 4}, epoch))
+        send_line(client, Map.merge(%{"type" => "client_hello", "protocol_version" => 5}, epoch))
 
         assert recv(client) == %{
                  "type" => "server_hello",
-                 "min_version" => 4,
-                 "max_version" => 5,
+                 "min_version" => 5,
+                 "max_version" => 6,
                  "primary_epoch" => 2,
                  "role" => "primary"
                }
@@ -1306,7 +1321,7 @@ defmodule FermixChannels.Companion.ConnectionTest do
       restart_with_epoch(ctx, fn -> {:ok, 2} end, @primary_role)
       client = connect(ctx.socket_path)
 
-      send_line(client, %{"type" => "client_hello", "protocol_version" => 4, "primary_epoch" => 3})
+      send_line(client, %{"type" => "client_hello", "protocol_version" => 5, "primary_epoch" => 3})
 
       assert recv(client) == %{
                "type" => "error",
@@ -1328,12 +1343,12 @@ defmodule FermixChannels.Companion.ConnectionTest do
       for seen <- [3, 2, nil] do
         client = connect(ctx.socket_path)
         epoch = if seen, do: %{"primary_epoch" => seen}, else: %{}
-        send_line(client, Map.merge(%{"type" => "client_hello", "protocol_version" => 4}, epoch))
+        send_line(client, Map.merge(%{"type" => "client_hello", "protocol_version" => 5}, epoch))
 
         assert recv(client) == %{
                  "type" => "server_hello",
-                 "min_version" => 4,
-                 "max_version" => 5,
+                 "min_version" => 5,
+                 "max_version" => 6,
                  "primary_epoch" => 2,
                  "role" => "device"
                }
@@ -1346,12 +1361,12 @@ defmodule FermixChannels.Companion.ConnectionTest do
       restart_with_epoch(ctx, fn -> :absent end)
       client = connect(ctx.socket_path)
 
-      send_line(client, %{"type" => "client_hello", "protocol_version" => 4, "primary_epoch" => 3})
+      send_line(client, %{"type" => "client_hello", "protocol_version" => 5, "primary_epoch" => 3})
 
       assert recv(client) == %{
                "type" => "server_hello",
-               "min_version" => 4,
-               "max_version" => 5,
+               "min_version" => 5,
+               "max_version" => 6,
                "role" => "primary"
              }
     end
@@ -1360,7 +1375,7 @@ defmodule FermixChannels.Companion.ConnectionTest do
       unreadable = {:epoch, {:invalid_epoch, "/home/mobile/primary_epoch", ~s("x\n")}}
       restart_with_epoch(ctx, fn -> {:error, unreadable} end)
       client = connect(ctx.socket_path)
-      send_line(client, %{"type" => "client_hello", "protocol_version" => 4})
+      send_line(client, %{"type" => "client_hello", "protocol_version" => 5})
 
       assert %{"type" => "error", "reason" => "primary_epoch_unavailable", "message" => message} =
                recv(client)
@@ -1416,7 +1431,7 @@ defmodule FermixChannels.Companion.ConnectionTest do
     forward(test_pid)
   end
 
-  defp hello(path, version \\ 4) do
+  defp hello(path, version \\ 5) do
     client = connect(path)
     send_line(client, %{"type" => "client_hello", "protocol_version" => version})
     assert %{"type" => "server_hello"} = recv(client)

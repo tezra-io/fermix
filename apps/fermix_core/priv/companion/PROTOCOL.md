@@ -22,7 +22,9 @@ history message. This wire's `row` carries the message's `kind`, `metadata`,
 chunks inside its envelope, and this one grants a managed file on the same
 machine, so neither it nor its answers are shared. The proposal events
 (version 4, and the follow-up's card of version 5) are this wire's alone for
-now: the phone's wire carries them at its next version.
+now: the phone's wire carries them at its next version. So are what a turn is
+doing (version 6): `reasoning`, and the `activity` a `tool_event` that starts
+a tool carries here, which the phone's `tool_event` does not.
 
 ## Transport
 
@@ -63,9 +65,9 @@ previous one (or the same value while only one version exists).
 
 | Field | Value |
 |---|---|
-| `protocol_version` (companion declares) | `5` |
-| daemon `min_version` | `4` |
-| daemon `max_version` | `5` |
+| `protocol_version` (companion declares) | `6` |
+| daemon `min_version` | `5` |
+| daemon `max_version` | `6` |
 
 ### Version 2: a turn that ends with no reply
 
@@ -173,6 +175,37 @@ client ignores them.
 
 Every version 4 event, field and rule holds unchanged on version 5. Since
 version 5 the window is {4, 5}, so a version 3 client is refused with
+`error: unsupported_protocol_version` (`client_too_old`).
+
+### Version 6: what a turn is doing
+
+Version 6 says what a turn is doing while it runs, in words a person reads,
+never a tool's name, so a long turn shows its steps rather than only that it
+is thinking. It adds:
+
+- one server event: `reasoning { turn_id, text }`, the model's summary of one
+  step of its reasoning, sent as the step completes, as the provider wrote it
+  (markdown, often opening with a bold line that names the step), trimmed and
+  at most 4,096 bytes, cut on a character. A turn may send several, or none:
+  only a provider that writes a summary of its reasoning sends one (today, a
+  ChatGPT sign-in). It is live-only, like `text_delta`: it carries no seq, it
+  is never stored, and a client that joins mid-turn has not seen the earlier
+  ones. It names version 6 as its `x-since-version` and reaches version 6
+  connections only;
+- one field: `activity` on a `tool_event` whose `phase` is `start`, the
+  engine's sentence for the step (`Searching the web`, `Running a command`,
+  `Using Notion`): sentence case, no final period, at most 120 bytes, never
+  the tool's name. A built-in tool says its own; a tool a plugin brings says
+  `Using` and the plugin's name, and one from an MCP server the owner added
+  `Using` and the name the owner gave the server; anything else, a skill
+  among them, says `Working on it`. This daemon sends it on every start. It is
+  additive, so it is sent on every version and an older client ignores it.
+
+A client shows the latest of the two as the turn's current step, and keeps
+`tool` for its logs: the activity is the words, the tool is the id.
+
+Every version 5 event, field and rule holds unchanged on version 6. Since
+version 6 the window is {5, 6}, so a version 4 client is refused with
 `error: unsupported_protocol_version` (`client_too_old`).
 
 ## Handshake state machine
@@ -293,7 +326,8 @@ in a fixed order:
 | `accepted` | `client_msg_id`, `duplicate`; `server_seq?` | Durable receipt for a `msg` or `command`; clears the outbox item. `server_seq` is present only on a duplicate whose request already has a reply row: that reply's seq. A first `accepted` never carries it; the request's own row arrives as a `row`. |
 | `turn_started` | `profile_id`, `turn_id`, `in_reply_to` | A turn began answering `in_reply_to`. |
 | `text_delta` | `turn_id`, `text` | Text to append to the turn's draft, exactly as sent. |
-| `tool_event` | `turn_id`, `tool`, `phase`; `detail?` | `phase` is `start` or `stop`. `detail` is at most 512 bytes. |
+| `tool_event` | `turn_id`, `tool`, `phase`; `detail?`, `activity?` | `phase` is `start` or `stop`. `detail` is at most 512 bytes. `activity`, on a start, is the engine's sentence for the step, at most 120 bytes; see *Version 6*. |
+| `reasoning` | `turn_id`, `text` | Version 6. The model's summary of one step of its reasoning, at most 4,096 bytes. Live-only, no seq; see *Version 6*. Sent only to a connection on version 6. |
 | `text_done` | `turn_id`, `server_seq`, `text`; `blocks[]?` | A reply's canonical text at its timeline row, sent once the turn has completed; replaces the draft. A turn may send more than one. `blocks` are the row's, present only when it has one; see *Blocks under a reply*. |
 | `turn_error` | `turn_id`, `code`, `message` | The turn's terminal failure: `code` is `cancelled` after a `cancel`, `interrupted` when the daemon lost the turn, `uncertain_after_restart` when the request may have run before the daemon restarted (see *Delivery and the outbox*). `message` is at most 512 bytes. |
 | `turn_done` | `turn_id` | Version 2. The turn completed and wrote no reply: it ends the turn, and nothing of its draft is kept. Sent only to a connection on version 2; see *Version 2*. |
@@ -655,6 +689,12 @@ a new stretch and is appended after the previous one. A connection that joins
 mid-turn receives the text so far as its first `text_delta` for that turn,
 possibly without having seen `turn_started`. Deltas are live-only.
 
+Between them, a `tool_event` pair brackets each tool the turn runs, its start
+carrying the step's `activity`, and on version 6 a `reasoning` carries the
+model's summary of each step of its reasoning as it completes (see *Version
+6*). Both say what the turn is doing; neither is part of its reply, and
+neither is kept once the turn ends.
+
 A turn ends on the wire exactly once, and only from its outcome in the
 daemon's turn queue:
 
@@ -817,15 +857,16 @@ a `media_fetch`. A refused `proposal_answer` is a `request_failed` whose
 ## Chat sequence
 
 ```
-companion -> daemon:  client_hello { protocol_version: 5 }
-daemon -> companion:  server_hello { min_version: 4, max_version: 5 }
+companion -> daemon:  client_hello { protocol_version: 6 }
+daemon -> companion:  server_hello { min_version: 5, max_version: 6 }
 companion -> daemon:  history_pull { profile_id: "main", after_seq: 12, limit: 200 }
 daemon -> companion:  history_page { messages: [...], next_after_seq: 12, history_head_seq: 12 }
 companion -> daemon:  msg { client_msg_id: "mac-1", profile_id: "main", text, attach_ids: [] }
 daemon -> companion:  accepted { client_msg_id: "mac-1", duplicate: false }
 daemon -> companion:  row { server_seq: 13, role: "user", text, ts, media_refs: [], client_msg_id: "mac-1" }
 daemon -> companion:  turn_started { turn_id: "turn-mac-1", in_reply_to: "mac-1" }
-daemon -> companion:  tool_event { turn_id, tool, phase: "start" } / { phase: "stop" }
+daemon -> companion:  reasoning { turn_id, text: "**Checking today's calendar**\n\n…" }
+daemon -> companion:  tool_event { turn_id, tool, phase: "start", activity: "Checking your reminders and events" } / { phase: "stop" }
 daemon -> companion:  text_delta { turn_id, text } …
 daemon -> companion:  text_done { turn_id, server_seq: 14, text }
 companion -> daemon:  read_state { profile_id: "main", read_up_to_seq: 14 }

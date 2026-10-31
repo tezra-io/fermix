@@ -2,6 +2,7 @@ defmodule FermixCore.Plugins.CapabilityTest do
   use ExUnit.Case, async: false
 
   alias FermixCore.Auth.Store
+  alias FermixCore.Capabilities.Activity
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Plugins.Capabilities
 
@@ -74,6 +75,11 @@ defmodule FermixCore.Plugins.CapabilityTest do
     assert cap.metadata.plugin == "google_calendar"
     assert cap.metadata.auth_profile == "google_calendar:primary"
     assert cap.metadata.when_to_use == "Create a Google Calendar event."
+
+    # What the chat shows while the tool runs names the plugin as people know
+    # it, never the tool (companion protocol 6).
+    assert cap.metadata.plugin_display_name == "Google Calendar"
+    assert Activity.sentence(registry, "google_calendar_create_event") == "Using Google Calendar"
   end
 
   test "registers all ready-plugin tools regardless of granted scope", %{registry: registry} do

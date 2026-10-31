@@ -306,6 +306,25 @@ defmodule FermixChannels.Channels.CompanionTest do
     refute_receive {:companion_stream, _turn, {:snapshot, "thinking"}}
   end
 
+  # Companion protocol 6: a step's reasoning summary goes out as it completes,
+  # trimmed, never as part of the draft; a blank one says nothing.
+  test "a step's reasoning summary is announced as reasoning, never as the draft" do
+    stream = Companion.build_raw_stream_callback(request_message())
+
+    stream.({:reasoning_done, "  **Checking the calendar**\n\nLooking at today first.\n"})
+
+    assert_receive {:companion_event,
+                    %{
+                      "t" => "reasoning",
+                      "turn_id" => "turn-mac-1",
+                      "text" => "**Checking the calendar**\n\nLooking at today first."
+                    }}
+
+    stream.({:reasoning_done, "  \n"})
+    refute_receive {:companion_event, %{"t" => "reasoning"}}, 100
+    refute_received {:companion_stream, _turn, _update}
+  end
+
   # M56 §4.4: a reply that may still become the sentinel never reaches a
   # client as a draft, so a turn that ends silently shows nothing on its way.
   test "a snapshot that could still become [SILENT] is held back from the draft" do
@@ -658,7 +677,16 @@ defmodule FermixChannels.Channels.CompanionTest do
     assert :ok = activity.({:tool_start, "shell"})
 
     assert_receive {:companion_event,
-                    %{"t" => "tool_event", "tool" => "shell", "phase" => "start"}}
+                    %{
+                      "t" => "tool_event",
+                      "tool" => "shell",
+                      "phase" => "start",
+                      "activity" => "Running a command"
+                    }}
+
+    assert :ok = activity.({:tool_finish, "shell", %{status: :ok}})
+    assert_receive {:companion_event, %{"t" => "tool_event", "phase" => "stop"} = stop}
+    refute Map.has_key?(stop, "activity")
 
     assert :ok = Companion.send_approval(message, "Allow this? /confirm TOK", "TOK")
     assert_receive {:companion_event, %{"t" => "approval"} = approval}

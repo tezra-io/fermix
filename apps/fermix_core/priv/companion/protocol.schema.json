@@ -3,8 +3,8 @@
   "$id": "https://fermix.sh/companion/protocol.schema.json",
   "title": "Fermix companion chat socket protocol",
   "description": "Newline-delimited JSON wire contract between the Fermix daemon and a native companion's chat. Source of truth: FermixCore.Companion.Protocol. See PROTOCOL.md.",
-  "x-protocol-version": 5,
-  "x-supported-version-range": { "min": 4, "max": 5 },
+  "x-protocol-version": 6,
+  "x-supported-version-range": { "min": 5, "max": 6 },
   "x-max-line-bytes": 65536,
   "x-media-budget-bytes": 536870912,
   "x-media-release-grace-s": 60,
@@ -82,6 +82,7 @@
             "turn_started",
             "text_delta",
             "tool_event",
+            "reasoning",
             "text_done",
             "turn_error",
             "turn_done",
@@ -120,6 +121,10 @@
         {
           "if": { "required": ["type"], "properties": { "type": { "const": "tool_event" } } },
           "then": { "$ref": "#/$defs/tool_event" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "reasoning" } } },
+          "then": { "$ref": "#/$defs/reasoning" }
         },
         {
           "if": { "required": ["type"], "properties": { "type": { "const": "text_done" } } },
@@ -373,13 +378,26 @@
     },
     "tool_event": {
       "type": "object",
+      "description": "A tool's start or stop. tool is its id, for logs; activity, on a start, is the engine's sentence for the step, in a person's words and never the tool's name, which a client shows instead (PROTOCOL.md, Version 6). activity is this wire's alone.",
       "required": ["type", "turn_id", "tool", "phase"],
       "properties": {
         "type": { "const": "tool_event" },
         "turn_id": { "type": "string", "minLength": 1 },
         "tool": { "type": "string", "minLength": 1 },
         "phase": { "enum": ["start", "stop"] },
-        "detail": { "type": "string", "maxLength": 512, "x-max-bytes": 512 }
+        "detail": { "type": "string", "maxLength": 512, "x-max-bytes": 512 },
+        "activity": { "type": "string", "minLength": 1, "maxLength": 120, "x-max-bytes": 120 }
+      }
+    },
+    "reasoning": {
+      "type": "object",
+      "description": "Version 6. The model's summary of one step of its reasoning, as the provider wrote it (markdown, often opening with a bold line naming the step), trimmed and cut on a character. Live-only, like text_delta: no seq, never stored. Sent only to a connection on version 6.",
+      "x-since-version": 6,
+      "required": ["type", "turn_id", "text"],
+      "properties": {
+        "type": { "const": "reasoning" },
+        "turn_id": { "type": "string", "minLength": 1 },
+        "text": { "type": "string", "minLength": 1, "maxLength": 4096, "x-max-bytes": 4096 }
       }
     },
     "text_done": {

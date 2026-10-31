@@ -67,6 +67,16 @@ defmodule FermixCore.Companion.Protocol do
   and `outside.reason` (the filter's reason) for the compact card (§6.3),
   additive, so on every version. The window is now {4, 5}.
 
+  Version 6 says what a turn is doing while it runs, in words a person reads
+  rather than a tool's name: `reasoning` carries the model's summary of one
+  step of its reasoning, as the provider wrote it (at most
+  `max_reasoning_bytes/0`), live-only like `text_delta`, and reaches a version
+  6 connection only; a `tool_event` that starts a tool carries `activity`, the
+  engine's sentence for the step (`FermixCore.Capabilities.Activity`, at most
+  `max_activity_bytes/0`), additive, so on every version. `activity` is this
+  wire's alone: the phone's `tool_event` does not carry it. The window is now
+  {5, 6}.
+
   Both hellos carry the primary epoch (M75 D14), additive and optional on
   every version: `server_hello.primary_epoch` is the home's, absent only from a
   home that has never booted as the primary, and `client_hello.primary_epoch`
@@ -83,7 +93,7 @@ defmodule FermixCore.Companion.Protocol do
 
   # Bumped in lockstep with any wire-shape change. The supported range is an
   # N/N-1 window derived from this single constant.
-  @protocol_version 5
+  @protocol_version 6
   @min_supported_version max(1, @protocol_version - 1)
 
   # The inbound line cap, the same as the Realtime socket's.
@@ -118,15 +128,19 @@ defmodule FermixCore.Companion.Protocol do
   @follow_up_asks ~w(run automatic)
   @follow_up_strings ~w(name instructions reports_to)
   @follow_up_card_version 5
+  # What a turn is doing (version 6): a tool's step in the engine's words, and
+  # the model's summary of a step of its reasoning, each bounded in bytes.
+  @max_activity_bytes 120
+  @max_reasoning_bytes 4_096
 
   @client_events ~w(
     client_hello msg command cancel history_pull history_search read_state media_fetch
     media_release proposal_answer
   )
   @server_events ~w(
-    server_hello accepted turn_started text_delta tool_event text_done turn_error turn_done row
-    row_updated approval approval_resolved read_state history_page search_results media_path
-    media_missing proposal proposal_resolved error
+    server_hello accepted turn_started text_delta tool_event reasoning text_done turn_error
+    turn_done row row_updated approval approval_resolved read_state history_page search_results
+    media_path media_missing proposal proposal_resolved error
   )
 
   # The events a version after 1 brought; every other one is version 1.
@@ -137,7 +151,8 @@ defmodule FermixCore.Companion.Protocol do
     "media_path" => 3,
     "media_missing" => 3,
     "proposal" => 4,
-    "proposal_resolved" => 4
+    "proposal_resolved" => 4,
+    "reasoning" => 6
   }
 
   # The events only the owner's connection is sent or may send (version 4).
@@ -185,6 +200,7 @@ defmodule FermixCore.Companion.Protocol do
     "turn_started" => ~w(profile_id turn_id in_reply_to),
     "text_delta" => ~w(turn_id text),
     "tool_event" => ~w(turn_id tool phase),
+    "reasoning" => ~w(turn_id text),
     "text_done" => ~w(turn_id server_seq text),
     "turn_error" => ~w(turn_id code message),
     "turn_done" => ~w(turn_id),
@@ -268,6 +284,17 @@ defmodule FermixCore.Companion.Protocol do
   @doc "The longest `result_text` of a `proposal_resolved`, in characters."
   @spec max_proposal_result_chars() :: pos_integer()
   def max_proposal_result_chars, do: @max_proposal_result_chars
+
+  @doc """
+  The longest `activity` a `tool_event` carries, in bytes (version 6): the
+  engine's sentence for a tool's step.
+  """
+  @spec max_activity_bytes() :: pos_integer()
+  def max_activity_bytes, do: @max_activity_bytes
+
+  @doc "The longest `reasoning` text, in bytes (version 6)."
+  @spec max_reasoning_bytes() :: pos_integer()
+  def max_reasoning_bytes, do: @max_reasoning_bytes
 
   @doc "The client chat events whose payload the mobile wire shares verbatim."
   @spec shared_client_events() :: [String.t()]
@@ -572,8 +599,15 @@ defmodule FermixCore.Companion.Protocol do
   defp validate_server("tool_event", payload) do
     with :ok <- nonempty(payload, "turn_id"),
          :ok <- nonempty(payload, "tool"),
-         :ok <- enum(payload, "phase", ~w(start stop)) do
-      optional_binary(payload, "detail")
+         :ok <- enum(payload, "phase", ~w(start stop)),
+         :ok <- optional_binary(payload, "detail") do
+      optional_bytes(payload, "activity", @max_activity_bytes)
+    end
+  end
+
+  defp validate_server("reasoning", payload) do
+    with :ok <- nonempty(payload, "turn_id") do
+      bytes(payload, "text", @max_reasoning_bytes)
     end
   end
 
@@ -910,6 +944,21 @@ defmodule FermixCore.Companion.Protocol do
   defp optional_binary(payload, field) do
     value = Map.get(payload, field)
     if is_nil(value) or is_binary(value), do: :ok, else: {:error, {:invalid_field, field}}
+  end
+
+  # Nonempty UTF-8 text of at most `max_bytes` bytes.
+  defp bytes(payload, field, max_bytes) do
+    with :ok <- nonempty(payload, field) do
+      value = Map.fetch!(payload, field)
+
+      if String.valid?(value) and byte_size(value) <= max_bytes,
+        do: :ok,
+        else: {:error, {:invalid_field, field}}
+    end
+  end
+
+  defp optional_bytes(payload, field, max_bytes) do
+    if Map.has_key?(payload, field), do: bytes(payload, field, max_bytes), else: :ok
   end
 
   defp string_list(payload, field) do

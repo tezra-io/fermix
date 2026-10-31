@@ -209,6 +209,13 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   form leads to right away. Signing in still asks you first, exactly as
   before. If sending fails once the fields are filled, the agent is told they
   are filled, so it does not type them again.
+- **The Mac app's chat says what Fermix is doing while it works.** Each step
+  of a long answer comes with a short line in plain words, such as "Searching
+  the web", "Running a command" or "Using Notion", instead of the name of the
+  tool behind it, and when you sign in with ChatGPT the model's own summary of
+  each step of its thinking arrives as it finishes. The app shows them under
+  its thinking line once it reads them; nothing of either is kept after the
+  answer.
 
 ### Changed
 

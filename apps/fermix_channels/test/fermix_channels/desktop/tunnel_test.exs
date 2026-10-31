@@ -170,7 +170,7 @@ defmodule FermixChannels.Desktop.TunnelTest do
 
   test "history, an approval card and the hello's epoch are the primary's", ctx do
     client = connect(ctx.socket)
-    send_line(client, %{"type" => "client_hello", "protocol_version" => 4, "primary_epoch" => 2})
+    send_line(client, %{"type" => "client_hello", "protocol_version" => 5, "primary_epoch" => 2})
 
     assert %{"type" => "server_hello", "role" => "primary", "primary_epoch" => 3} = recv(client)
 
@@ -191,7 +191,7 @@ defmodule FermixChannels.Desktop.TunnelTest do
   test "a client that has seen a later primary is refused by the primary, through the tunnel",
        ctx do
     client = connect(ctx.socket)
-    send_line(client, %{"type" => "client_hello", "protocol_version" => 4, "primary_epoch" => 9})
+    send_line(client, %{"type" => "client_hello", "protocol_version" => 5, "primary_epoch" => 9})
     assert %{"type" => "error", "reason" => "stale_primary"} = recv(client)
     assert closed?(client)
   end
@@ -488,7 +488,7 @@ defmodule FermixChannels.Desktop.TunnelTest do
 
   defp hello(path) do
     client = connect(path)
-    send_line(client, %{"type" => "client_hello", "protocol_version" => 4})
+    send_line(client, %{"type" => "client_hello", "protocol_version" => 5})
     assert %{"type" => "server_hello", "role" => "primary"} = recv(client)
     client
   end

@@ -248,6 +248,7 @@ defmodule FermixCore.Plugins.Dist.McpSource do
       capability_metadata: %{
         plugin_owned?: true,
         plugin: plugin.name,
+        plugin_display_name: plugin.display_name,
         auth_profile: Config.auth_profile(plugin),
         category: :plugin
       }
@@ -366,6 +367,7 @@ defmodule FermixCore.Plugins.Dist.McpSource do
       capability_metadata: %{
         plugin_owned?: true,
         plugin: plugin.name,
+        plugin_display_name: plugin.display_name,
         category: :plugin
       }
     }

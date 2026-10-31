@@ -22,7 +22,10 @@ defmodule FermixChannels.Channels.Companion do
   verbatim. The loop's stream events are cumulative snapshots, so the callback
   relays each snapshot and every connection sends its own client the suffix it
   has not written yet; a client that connects mid-turn gets the text so far as
-  its first delta. `turn_started` goes out when the loop starts.
+  its first delta. `turn_started` goes out when the loop starts. The model's
+  summary of a step of its reasoning, where the provider writes one, goes out
+  as `reasoning` to the connections on version 6, and a tool's start carries
+  the engine's sentence for the step (`activity`).
 
   During a Live call in the chat a turn may end with no reply (M56 §4.4): a
   snapshot that could still become the sentinel is held back, so such a turn
@@ -52,6 +55,7 @@ defmodule FermixChannels.Channels.Companion do
   alias FermixChannels.Mobile.Supervisor, as: MobileSupervisor
   alias FermixChannels.Telemetry, as: ChannelTelemetry
   alias FermixCore.Agents.LiveCallTurn
+  alias FermixCore.Capabilities.Activity
   alias FermixCore.Companion.Protocol
   alias FermixCore.Companion.Timeline
   alias FermixCore.Reply
@@ -198,9 +202,20 @@ defmodule FermixChannels.Channels.Companion do
       :silent_reply ->
         Turns.silent(message)
 
-      _reasoning_or_other ->
+      {:reasoning_done, summary} when is_binary(summary) ->
+        reason(profile_id, turn_id, summary)
+
+      _reasoning_delta_or_other ->
         :ok
     end
+  end
+
+  # A step's reasoning summary reaches the connections on version 6 as it
+  # completes (`reasoning`); a blank one says nothing.
+  defp reason(profile_id, turn_id, summary) do
+    if String.trim(summary) == "",
+      do: :ok,
+      else: broadcast(profile_id, Output.reasoning(turn_id, summary))
   end
 
   @impl true
@@ -216,15 +231,25 @@ defmodule FermixChannels.Channels.Companion do
 
   # A provider call is not a tool: `tool_event` is a tool's lifecycle, named,
   # never the model call that picks it. The turn's thinking state already
-  # reaches the client through `turn_started` and the first `text_delta`.
+  # reaches the client through `turn_started` and the first `text_delta`. A
+  # tool's start says what the step is in a person's words (`activity`,
+  # `Capabilities.Activity`), which the client shows instead of the tool's name.
   @impl true
   def build_activity_callback(%Message{} = message) do
     turn_id = turn_id(message)
 
     fn
-      :provider_start -> :ok
-      :provider_response -> :ok
-      event -> broadcast(message.chat_id, Output.tool_event(turn_id, event))
+      :provider_start ->
+        :ok
+
+      :provider_response ->
+        :ok
+
+      {:tool_start, tool} ->
+        broadcast(message.chat_id, Output.tool_start(turn_id, tool, Activity.sentence(tool)))
+
+      event ->
+        broadcast(message.chat_id, Output.tool_event(turn_id, event))
     end
   end
 

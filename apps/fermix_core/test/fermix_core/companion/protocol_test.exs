@@ -4,8 +4,8 @@ defmodule FermixCore.Companion.ProtocolTest do
   alias FermixCore.Companion.Protocol
 
   test "publishes the version window, the line cap and the ordered catalogs" do
-    assert Protocol.protocol_version() == 5
-    assert Protocol.supported_version_range() == {4, 5}
+    assert Protocol.protocol_version() == 6
+    assert Protocol.supported_version_range() == {5, 6}
     assert Protocol.max_line_bytes() == 65_536
 
     assert Protocol.client_events() ==
@@ -13,14 +13,16 @@ defmodule FermixCore.Companion.ProtocolTest do
                 media_fetch media_release proposal_answer)
 
     assert Protocol.server_events() ==
-             ~w(server_hello accepted turn_started text_delta tool_event text_done turn_error
-                turn_done row row_updated approval approval_resolved read_state history_page
-                search_results media_path media_missing proposal proposal_resolved error)
+             ~w(server_hello accepted turn_started text_delta tool_event reasoning text_done
+                turn_error turn_done row row_updated approval approval_resolved read_state
+                history_page search_results media_path media_missing proposal proposal_resolved
+                error)
   end
 
   # M56 §6: a turn that ends with no reply needs a frame an older client would
   # not survive, so it goes only to a connection that declared version 2; the
-  # media grant and the changed row (M66) only to one that declared 3.
+  # media grant and the changed row (M66) only to one that declared 3; what a
+  # turn is reasoning only to one that declared 6.
   test "every server event names the version that brought it" do
     later = %{
       "turn_done" => 2,
@@ -28,7 +30,8 @@ defmodule FermixCore.Companion.ProtocolTest do
       "media_path" => 3,
       "media_missing" => 3,
       "proposal" => 4,
-      "proposal_resolved" => 4
+      "proposal_resolved" => 4,
+      "reasoning" => 6
     }
 
     for type <- Protocol.server_events() do
@@ -63,6 +66,51 @@ defmodule FermixCore.Companion.ProtocolTest do
              Protocol.encode_server_event("turn_done", %{"turn_id" => ""})
   end
 
+  # Version 6: a tool's start says what the step is, in at most 120 bytes of
+  # text, and a stop or a start from an older daemon says nothing.
+  test "a tool_event carries an optional activity of at most 120 bytes" do
+    start = %{"turn_id" => "t", "tool" => "web_search", "phase" => "start"}
+    words = String.duplicate("é", 60)
+
+    assert Protocol.max_activity_bytes() == 120
+    assert {:ok, _line} = Protocol.encode_server_event("tool_event", start)
+
+    assert {:ok, line} =
+             Protocol.encode_server_event("tool_event", Map.put(start, "activity", words))
+
+    assert %{"activity" => ^words} = Jason.decode!(line)
+
+    for bad <- ["", words <> "a", 1, <<0xFF>>] do
+      assert {:error, {:invalid_field, "activity"}} =
+               Protocol.encode_server_event("tool_event", Map.put(start, "activity", bad)),
+             inspect(bad)
+    end
+  end
+
+  # Version 6: a step's reasoning summary, nonempty text of at most 4,096 bytes.
+  test "reasoning names its turn and carries nonempty text of at most 4,096 bytes" do
+    text = String.duplicate("ab", 2_048)
+
+    assert Protocol.max_reasoning_bytes() == 4_096
+
+    assert {:ok, line} =
+             Protocol.encode_server_event("reasoning", %{"turn_id" => "t", "text" => text})
+
+    assert Jason.decode!(line) == %{"type" => "reasoning", "turn_id" => "t", "text" => text}
+
+    assert {:error, {:missing_field, "text"}} =
+             Protocol.encode_server_event("reasoning", %{"turn_id" => "t"})
+
+    assert {:error, {:missing_field, "turn_id"}} =
+             Protocol.encode_server_event("reasoning", %{"text" => "x"})
+
+    for bad <- ["", text <> "a", 1] do
+      assert {:error, {:invalid_field, "text"}} =
+               Protocol.encode_server_event("reasoning", %{"turn_id" => "t", "text" => bad}),
+             inspect(bad)
+    end
+  end
+
   test "the shared chat events are a subset of both catalogs" do
     assert Protocol.shared_client_events() -- Protocol.client_events() == []
     assert Protocol.shared_server_events() -- Protocol.server_events() == []
@@ -72,11 +120,11 @@ defmodule FermixCore.Companion.ProtocolTest do
     assert "row" in Protocol.shared_server_events()
   end
 
-  test "negotiates directionally, version 4 and version 5 both accepted, version 3 too old" do
-    assert :ok = Protocol.negotiate(4)
+  test "negotiates directionally, version 5 and version 6 both accepted, version 4 too old" do
     assert :ok = Protocol.negotiate(5)
-    assert {:error, :client_too_old} = Protocol.negotiate(3)
-    assert {:error, :client_too_new} = Protocol.negotiate(6)
+    assert :ok = Protocol.negotiate(6)
+    assert {:error, :client_too_old} = Protocol.negotiate(4)
+    assert {:error, :client_too_new} = Protocol.negotiate(7)
   end
 
   test "client_hello refuses a missing or malformed version with the Realtime reasons" do
@@ -105,7 +153,7 @@ defmodule FermixCore.Companion.ProtocolTest do
              inspect(bad)
     end
 
-    hello = %{"min_version" => 4, "max_version" => 5, "role" => "primary"}
+    hello = %{"min_version" => 5, "max_version" => 6, "role" => "primary"}
 
     assert {:ok, line} =
              Protocol.encode_server_event("server_hello", Map.put(hello, "primary_epoch", 2))
@@ -220,8 +268,8 @@ defmodule FermixCore.Companion.ProtocolTest do
   test "the encoder writes one newline-terminated object with its type" do
     assert {:ok, line} =
              Protocol.encode_server_event("server_hello", %{
-               min_version: 4,
-               max_version: 5,
+               min_version: 5,
+               max_version: 6,
                role: "primary"
              })
 
@@ -229,15 +277,15 @@ defmodule FermixCore.Companion.ProtocolTest do
 
     assert Jason.decode!(line) == %{
              "type" => "server_hello",
-             "min_version" => 4,
-             "max_version" => 5,
+             "min_version" => 5,
+             "max_version" => 6,
              "role" => "primary"
            }
 
     assert {:error, {:invalid_field, "version_range"}} =
              Protocol.encode_server_event("server_hello", %{
-               min_version: 3,
-               max_version: 5,
+               min_version: 4,
+               max_version: 6,
                role: "primary"
              })
   end
@@ -245,7 +293,7 @@ defmodule FermixCore.Companion.ProtocolTest do
   # M75: the engine names its role on every hello, so a desktop app never
   # compares a device-role engine's epoch against the primary's.
   test "server_hello names the engine's role, primary or device" do
-    hello = %{"min_version" => 4, "max_version" => 5}
+    hello = %{"min_version" => 5, "max_version" => 6}
 
     for role <- ~w(primary device) do
       assert {:ok, line} =
