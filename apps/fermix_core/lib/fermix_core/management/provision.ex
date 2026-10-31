@@ -92,17 +92,23 @@ defmodule FermixCore.Management.Provision do
   @doc "`home.provision.connect`."
   @spec connect(term(), keyword()) :: {:ok, map()} | {:error, term()}
   def connect(token, opts \\ []) when is_list(opts) do
-    with {:ok, token} <- token_param(token) do
-      case host(opts).check_token(token, host_opts(opts)) do
-        {:ok, %{other_servers: others?}} ->
-          with :ok <- same_project(token, opts), do: keep_token(token, others?, opts)
+    with {:ok, token} <- token_param(token),
+         {:ok, others?} <- accepted(token, opts),
+         :ok <- same_project(token, opts) do
+      keep_token(token, others?, opts)
+    end
+  end
 
-        {:error, :unauthorized} ->
-          {:error, {:invalid_params, "token", Provision.error_sentence(:token_invalid)}}
+  defp accepted(token, opts) do
+    case host(opts).check_token(token, host_opts(opts)) do
+      {:ok, %{other_servers: others?}} ->
+        {:ok, others?}
 
-        {:error, reason} ->
-          refused(reason, opts)
-      end
+      {:error, :unauthorized} ->
+        {:error, {:invalid_params, "token", Provision.error_sentence(:token_invalid)}}
+
+      {:error, reason} ->
+        refused(reason, opts)
     end
   end
 
