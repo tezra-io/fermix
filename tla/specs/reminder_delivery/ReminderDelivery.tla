@@ -40,7 +40,7 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/application.ex#start_supervision_tree,supervision_children,temporal_scheduler_opts @ d6f4fb21a73e
 \* SOURCE: apps/fermix_core/lib/fermix_core/temporal/registry.ex @ 26a90999cd1c
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/mobile.ex @ b39e088f2603
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/output.ex @ 9f2f4c84f999
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/output.ex @ 143a4859705c
 EXTENDS Naturals, FiniteSets
 
 CONSTANTS
