@@ -8,6 +8,21 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Lists: a list per project, a shopping list, anything to tick off, kept as
+  lists and never in memory.** Ask in your own chat ("start a list for the
+  garden in my Projects folder", "add lemons to groceries", "tick off the
+  keychain logins") and Fermix keeps each list as a record of its own, with
+  sections, notes on items, and 30 days to bring back anything removed. One
+  message can file items into several lists, and they land together or not
+  at all; an item that could belong to two lists is asked about, never
+  guessed. Fermix reads and changes your lists only in your own private chats
+  and voice calls, never in a group or for a guest, and a scheduled job only
+  when it was set up there with the list tools allowed. After a request reads
+  a page or other outside content, Fermix still adds and ticks, marked as
+  such, but removes nothing until you ask again. Memory's review leaves list
+  items to the list. No app draws a list yet: ask to see one and it comes as a
+  short checklist.
+
 - **A watcher can set off a follow-up: your own job, run whenever it passes
   an item.** Ask in chat ("watch x-feed, and whenever a post says the limits
   reset, launch Codex in ~/projects/app to review yesterday's commits") and
