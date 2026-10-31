@@ -55,7 +55,7 @@ defmodule FermixCore.Tools.BrowserPageLookTest do
   describe "page_look/1" do
     test "a snapshot, an observed open and a changed act each look at their tab and address" do
       assert Browser.page_look(encode(snapshot_result())) ==
-               {"T1", "https://example.com/flights?from=LIS"}
+               {"T1", "https://example.com/flights?from=LIS#results"}
 
       assert Browser.page_look(encode(pane_open_result())) == {"h3:7", "https://example.com/"}
 
@@ -63,10 +63,19 @@ defmodule FermixCore.Tools.BrowserPageLookTest do
                {"T1", "https://example.com/flights/42"}
     end
 
-    test "the fragment is not part of the address; the query is" do
+    # A hash-routed app puts each screen behind its own fragment: the inbox and
+    # a message read from it are different pages, so the whole address is the
+    # page, fragment and query both.
+    test "the whole address is the page, its fragment and its query included" do
       at = fn url -> encode(%{snapshot_result() | "url" => url}) end
 
-      assert Browser.page_look(at.("https://example.com/a#top")) ==
+      assert Browser.page_look(at.("https://mail.example.com/#inbox/m1")) ==
+               {"T1", "https://mail.example.com/#inbox/m1"}
+
+      refute Browser.page_look(at.("https://mail.example.com/#inbox/m1")) ==
+               Browser.page_look(at.("https://mail.example.com/#inbox"))
+
+      refute Browser.page_look(at.("https://example.com/a#top")) ==
                Browser.page_look(at.("https://example.com/a"))
 
       refute Browser.page_look(at.("https://example.com/a?page=2")) ==
@@ -118,7 +127,10 @@ defmodule FermixCore.Tools.BrowserPageLookTest do
   end
 
   describe "superseded_look/1" do
-    test "swaps the page text for one line naming the page and keeps every other field" do
+    # The marker says what happened and nothing more: a page whose content
+    # changed at the same address (a search's Next re-rendering in place) is
+    # not brought back by a `snapshot`, so it promises no way back of its own.
+    test "swaps the page text for one line saying what replaced it and keeps every other field" do
       result = changed_act_result()
       superseded = result |> encode() |> Browser.superseded_look() |> Jason.decode!()
 
@@ -127,19 +139,18 @@ defmodule FermixCore.Tools.BrowserPageLookTest do
       marker = superseded["snapshot"]
       refute marker =~ "Book this flight"
       refute marker =~ "\n"
-      assert marker =~ "https://example.com/flights/42"
-      assert marker =~ "T1"
-      assert marker =~ "a later look at the same page replaced it"
-      assert marker =~ "`snapshot`"
+      assert marker =~ "a later look at the same address in this tab replaced it"
+      refute marker =~ "snapshot"
+      refute marker =~ "again"
     end
 
-    test "names the page by its address, without the fragment" do
-      marker =
-        snapshot_result() |> encode() |> Browser.superseded_look() |> Jason.decode!()
+    test "the marker is the same for every look it replaces" do
+      marker = fn result ->
+        result |> encode() |> Browser.superseded_look() |> Jason.decode!() |> Map.get("snapshot")
+      end
 
-      assert marker["snapshot"] =~ "https://example.com/flights?from=LIS"
-      refute marker["snapshot"] =~ "#results"
-      assert marker["url"] == "https://example.com/flights?from=LIS#results"
+      assert marker.(snapshot_result()) == marker.(changed_act_result())
+      assert marker.(snapshot_result()) == marker.(pane_open_result())
     end
 
     test "the marked result is small however long the page text was" do

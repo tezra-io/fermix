@@ -3624,10 +3624,18 @@ defmodule FermixCore.AgentLoopTest do
     defp answered_outputs({_state, results, _opts}),
       do: Map.new(results, &{&1.call_id, &1.output})
 
+    # A replaced look: the loop's own line naming the call id and how to read
+    # the original back, then the tool's marked copy, framed as the original was.
     defp marked_look(text) do
-      assert {:ok, inner} = UntrustedContent.unframe("browser", text)
+      assert [note, framed] = String.split(text, "\n", parts: 2)
+      assert note =~ "page text left out of a "
+      assert {:ok, inner} = UntrustedContent.unframe("browser", framed)
       Jason.decode!(inner)
     end
+
+    defp marker_note(text), do: text |> String.split("\n", parts: 2) |> hd()
+
+    @replaced "a later look at the same address in this tab replaced it"
 
     test "nothing is replaced below the threshold; crossing it replaces every superseded look at once",
          %{registry: registry} do
@@ -3661,7 +3669,14 @@ defmodule FermixCore.AgentLoopTest do
         refute subs[call_id] =~ word
         look = marked_look(subs[call_id])
         assert %{"target" => "T1", "url" => @page_a, "title" => "Page"} = look
-        assert look["snapshot"] =~ "a later look at the same page replaced it"
+        assert look["snapshot"] =~ @replaced
+        refute look["snapshot"] =~ "snapshot"
+
+        # a run with no recall tool is told the text is gone, never pointed at it
+        note = marker_note(subs[call_id])
+        assert note =~ "(call_id #{call_id})"
+        assert note =~ "not retrievable on this run"
+        refute note =~ "tool_result_recall"
       end
 
       # the newest look is the step being answered, raw
@@ -3687,6 +3702,30 @@ defmodule FermixCore.AgentLoopTest do
       refute_received {:loop_event, [:fermix, :agent_loop, :context_compaction], _, _}
     end
 
+    test "a superseded look its marked copy would not shrink stays as it is",
+         %{registry: registry} do
+      register_caps(registry, [PageTool])
+
+      # c1 is a near-empty page, a shell still loading: its marked copy, the
+      # loop's line included, is longer than it is. c2 alone crosses the
+      # threshold once c3 supersedes it.
+      set_mock_responses([
+        browse([look_call("c1", look_result("T1", @page_a, "SHELL", 60))]),
+        browse([look_call("c2", look_result("T1", @page_a, "PAGE-TWO"))]),
+        browse([look_call("c3", look_result("T1", @page_a, "PAGE-THREE"))]),
+        turn("done")
+      ])
+
+      assert {:ok, %{response: "done"}} =
+               run_loop(
+                 capability_registry: registry,
+                 context_window: 1_000_000,
+                 trust: :operator
+               )
+
+      assert mock_continues() |> List.last() |> substituted_ids() == ["c2"]
+    end
+
     test "a look at another address or in another tab is never replaced", %{registry: registry} do
       register_caps(registry, [PageTool])
 
@@ -3696,8 +3735,8 @@ defmodule FermixCore.AgentLoopTest do
           look_call("c2", look_result("T1", "https://example.com/b", "PAGE-B")),
           look_call("c3", look_result("T2", @page_a, "PAGE-A-OTHER-TAB"))
         ]),
-        # the same address as c1: only the fragment differs
-        browse([look_call("c4", look_result("T1", @page_a <> "#reviews", "PAGE-A-AGAIN"))]),
+        # the same tab and the same address as c1
+        browse([look_call("c4", look_result("T1", @page_a, "PAGE-A-AGAIN"))]),
         # not c2's address: the query differs
         browse([look_call("c5", look_result("T1", "https://example.com/b?sort=1", "PAGE-B2"))]),
         turn("done")
@@ -3714,7 +3753,60 @@ defmodule FermixCore.AgentLoopTest do
       assert Enum.all?([c1, c2], &is_nil(substitutions_of(&1)))
       assert substituted_ids(c3) == ["c1"]
       assert substituted_ids(c4) == ["c1"]
-      assert marked_look(substitutions_of(c4)["c1"])["snapshot"] =~ @page_a
+      assert marked_look(substitutions_of(c4)["c1"])["url"] == @page_a
+    end
+
+    # Gmail's inbox and each message read from it share an address up to the
+    # fragment: they are different screens, so reading three messages replaces
+    # none of them, and only a second look at the same screen supersedes one.
+    test "the screens of a hash-routed app are different pages", %{registry: registry} do
+      register_caps(registry, [PageTool])
+      inbox = "https://mail.example.com/mail/u/0/#inbox"
+
+      set_mock_responses([
+        browse([look_call("c1", look_result("T1", inbox, "INBOX"))]),
+        browse([look_call("c2", look_result("T1", inbox <> "/m1", "MESSAGE-ONE"))]),
+        browse([look_call("c3", look_result("T1", inbox <> "/m2", "MESSAGE-TWO"))]),
+        browse([look_call("c4", look_result("T1", inbox <> "/m1", "MESSAGE-ONE-AGAIN"))]),
+        turn("done")
+      ])
+
+      assert {:ok, %{response: "done"}} =
+               run_loop(
+                 capability_registry: registry,
+                 context_window: 1_000_000,
+                 trust: :operator
+               )
+
+      [c1, c2, c3, c4] = mock_continues()
+      assert Enum.all?([c1, c2, c3], &is_nil(substitutions_of(&1)))
+      assert substituted_ids(c4) == ["c2"]
+    end
+
+    # The way back is the digest's: the call id and `tool_result_recall` on it,
+    # on a run that can call the recall tool.
+    test "a replaced look names its call id and how to read it back", %{registry: registry} do
+      register_caps(registry, [PageTool, FermixCore.Tools.ToolResultRecall])
+
+      set_mock_responses([
+        browse([look_call("c1", look_result("T1", @page_a, "PAGE-1"))]),
+        browse([look_call("c2", look_result("T1", @page_a, "PAGE-2"))]),
+        turn("done")
+      ])
+
+      assert {:ok, %{response: "done"}} =
+               run_loop(
+                 capability_registry: registry,
+                 context_window: 1_000_000,
+                 trust: :operator
+               )
+
+      %{"c1" => text} = substitutions_of(List.last(mock_continues()))
+      note = marker_note(text)
+      assert note =~ "(call_id c1)"
+      assert note =~ "use tool_result_recall on c1."
+      refute note =~ "not retrievable"
+      assert marked_look(text)["snapshot"] =~ @replaced
     end
 
     test "the step being answered is never touched, even where a later look in it supersedes one",
@@ -3746,6 +3838,10 @@ defmodule FermixCore.AgentLoopTest do
       assert answered_outputs(c2)["c2"] =~ "PAGE-2"
       assert answered_outputs(c2)["c3"] =~ "PAGE-3"
       assert substituted_ids(c3) == ["c1", "c2"]
+
+      # a replaced look is the same text on every replay, so the prompt cache
+      # breaks only where a replacement happened
+      assert substitutions_of(c3)["c1"] == substitutions_of(c2)["c1"]
     end
 
     test "results of another tool and browser results that are not looks are never replaced",
@@ -3906,7 +4002,8 @@ defmodule FermixCore.AgentLoopTest do
 
       assert first["tool_call_id"] == "c1"
       refute first["content"] =~ "PAGE-ONE"
-      assert marked_look(first["content"])["snapshot"] =~ "a later look at the same page"
+      assert marked_look(first["content"])["snapshot"] =~ @replaced
+      assert marker_note(first["content"]) =~ "(call_id c1)"
 
       assert second["tool_call_id"] == "c2"
       assert second["content"] =~ "PAGE-TWO"

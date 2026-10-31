@@ -310,7 +310,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   whether it had finished loading.
 - **Long browser tasks stay quick.** In a long browser task, the agent's later
   steps stop re-reading its older reads of a page it has since read again, so
-  each step is quicker and costs less.
+  each step is quicker and costs less. Each screen of a site that changes only
+  the part of its address after `#`, such as a mail inbox and each message
+  opened from it, counts as a page of its own, so reading several messages
+  keeps every one, and the agent can still look up an older read it set aside.
 
 ### Removed
 

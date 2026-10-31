@@ -1141,9 +1141,10 @@ defmodule FermixCore.AgentLoop do
   # deterministic, no model call. A result its tool names as a look at a page
   # (`{target, address}`) supersedes every earlier look at that page; once the
   # superseded looks still raw reach @superseded_look_bytes, each is replaced in
-  # the replayed history by the tool's own marked copy of it. The step being
-  # answered can supersede a look but is never replaced: adapters substitute
-  # only the history they replay. Returns the bytes the replacement saved.
+  # the replayed history by the tool's own marked copy of it, behind a line
+  # naming its call id (`superseded_text/3`). The step being answered can
+  # supersede a look but is never replaced: adapters substitute only the history
+  # they replay. Returns the bytes the replacement saved.
   defp replace_superseded_looks(tool_results, state) do
     state = %{state | looks: state.looks ++ Enum.flat_map(tool_results, &look(&1, state))}
     superseded = superseded_looks(state)
@@ -1163,13 +1164,24 @@ defmodule FermixCore.AgentLoop do
     with {:ok, module} <- look_module(entry.tool_name, state),
          {:ok, result} <- tool_text(entry),
          {_target, _address} = page <- module.page_look(result) do
-      marked = ToolResultStore.frame(entry, module.superseded_look(result))
+      marked = superseded_text(entry, module.superseded_look(result), state)
       [%{call_id: call_id, step: entry.step, page: page, bytes: entry.bytes, marked: marked}]
     else
       :no_hooks -> []
       :error -> []
       nil -> []
     end
+  end
+
+  # The way back is the digest's, in its words (`recall_advice/2`): the call id,
+  # and `tool_result_recall` on a run that can call it. The tool's marked copy
+  # says what replaced the page text and is framed as the original was; this
+  # line is the loop's own, outside the frame. Built when the look is recorded
+  # and stored as it is, so a replaced result reads the same on every replay.
+  defp superseded_text(entry, marked, state) do
+    "[page text left out of a #{entry.bytes}-byte result from #{entry.tool_name} (call_id " <>
+      "#{entry.call_id}), to keep the context small. Every other field was kept; " <>
+      recall_advice(entry, state) <> "]\n" <> ToolResultStore.frame(entry, marked)
   end
 
   defp look_module(tool_name, state) do
@@ -1190,15 +1202,17 @@ defmodule FermixCore.AgentLoop do
   defp tool_text(%{external?: false, output: output}), do: {:ok, output}
 
   # Every look a later look at the same page superseded that the replayed
-  # history still carries raw: older than the step being answered, and neither
-  # replaced nor digested yet. `looks` is in recording order, so the last look
-  # at a page is its newest.
+  # history still carries raw: older than the step being answered, neither
+  # replaced nor digested yet, and longer than its marked copy, so a near-empty
+  # page is never swapped for a longer note. `looks` is in recording order, so
+  # the last look at a page is its newest.
   defp superseded_looks(state) do
     newest = Map.new(state.looks, &{&1.page, &1.call_id})
 
     Enum.filter(state.looks, fn look ->
       newest[look.page] != look.call_id and look.step < state.iteration and
-        not Map.has_key?(state.substitutions, look.call_id)
+        not Map.has_key?(state.substitutions, look.call_id) and
+        byte_size(look.marked) < look.bytes
     end)
   end
 
