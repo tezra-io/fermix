@@ -657,10 +657,13 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
           "the approval names both",
           "never asks for the password in the chat",
           "`sign_in_store_unavailable`",
-          "Linux"
+          "Linux",
+          "`submit: true`"
         ] do
       assert reference =~ required, "browser reference does not mention #{required}"
     end
+
+    refute reference =~ "it does not submit the form"
   end
 
   # Every build has cues, off until the owner turns them on, so the owner must

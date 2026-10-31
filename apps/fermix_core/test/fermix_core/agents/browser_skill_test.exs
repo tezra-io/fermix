@@ -48,6 +48,14 @@ defmodule FermixCore.Agents.BrowserGuidanceSkillTest do
     assert definition.system_prompt =~ "Never ask the owner for a password"
     assert definition.system_prompt =~ "Settings > Browser > Website logins"
 
+    # A form and a sign-in submit in the same call, and a fill's receipt is
+    # its own check: nothing left says a fill never submits or must be verified.
+    assert definition.system_prompt =~ "`submit: true`"
+    assert definition.system_prompt =~ "receipt is its own check"
+    refute definition.system_prompt =~ "After anything else, verify"
+    refute definition.system_prompt =~ "fills and does not submit"
+    refute definition.system_prompt =~ "no click, no submit"
+
     for code <- ~w(sign_in_pane_only sign_in_no_login sign_in_denied sign_in_unanswered
                    sign_in_not_delivered sign_in_wrong_site secret_on_screen) do
       assert definition.system_prompt =~ "`#{code}`", "browser-guidance never names #{code}"

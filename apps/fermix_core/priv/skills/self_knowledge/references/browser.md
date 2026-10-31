@@ -152,7 +152,10 @@ to that site as that username, and waits up to a minute for **Approve** or
 `/confirm` while nothing else of the turn runs; `/deny`, no answer or a stopped
 turn types nothing. A call that fills only the username (a site that asks for
 it first) is not asked about. The result names the site, the username and the
-fields filled; it does not submit the form.
+fields filled. With `submit: true`, which `act` `kind: "fill_form"` takes too,
+Fermix then submits the form in the same call, so the result is the page the
+form led to, with the sign-in's receipt beside it as `fill`; the owner's
+approval is the same either way, and a sign-in that fails submits nothing.
 
 It works only in the Fermix app's own browser pane on a Mac with the app open,
 on an `https` page whose host is the saved site (a leading `www.` aside) or,
