@@ -343,6 +343,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   first request that times out instead of queueing one for each of its steps.
   A request already running when its asker gives up still finishes, so a
   missed notice can still happen, but only in that brief window.
+- **Fermix installed with Homebrew on a Mac runs with an app's priority.**
+  `fermix service install` wrote its launch agent as a Standard job, which
+  macOS still throttles, so a busy computer could slow every reply. It now
+  writes an Interactive one, as the Mac app's own agent does, and `fermix
+  setup` rewrites an agent installed before.
 - **A long task on Claude no longer stops after Fermix shortens its
   context.** Claude Opus 5.5, Sonnet 5.5, Haiku 5.5 and Fable 5.1 tie their
   reasoning to the exact conversation that produced it, and Anthropic enforces
