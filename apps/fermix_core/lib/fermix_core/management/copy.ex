@@ -65,7 +65,11 @@ defmodule FermixCore.Management.Copy do
                    candidate_receiving primary turned_off cannot_reach deleted not_set_up
                    server_not_set_up waited_too_long server_waited_too_long token_refused
                    update disk_full server_disk_full backup_old backup_none server_backup_old
-                   backup_push not_ready turned_off_cost server_costs billing data)a
+                   backup_push not_ready turned_off_cost server_costs billing data
+                   replace_creating replace_starting replace_installing replace_connecting
+                   replace_ready replace_moving replace_deleting replace_cancelling
+                   replace_turned_off replace_not_set_up replace_waited_too_long
+                   new_server_costs old_server_costs)a
   # A sentence starts at the beginning of the string and after a terminator or
   # a colon, which is how this copy introduces a command or a list.
   @sentence_break ~r/(?<=[.?:])\s+/
@@ -344,6 +348,31 @@ defmodule FermixCore.Management.Copy do
   def summary_sentence(:billing, _values),
     do: "Hetzner bills by the hour until the server is deleted."
 
+  def summary_sentence(:replace_creating, _values), do: "Creating your new server…"
+  def summary_sentence(:replace_starting, _values), do: "Starting your new server…"
+  def summary_sentence(:replace_installing, _values), do: "Installing Fermix on your new server…"
+  def summary_sentence(:replace_connecting, _values), do: "Connecting your new server…"
+  def summary_sentence(:replace_ready, _values), do: "Your new server is ready for the move."
+
+  def summary_sentence(:replace_moving, _values),
+    do: "Moving to your new server. Messages wait until it is done."
+
+  def summary_sentence(:replace_deleting, _values), do: "Removing your old server…"
+  def summary_sentence(:replace_cancelling, _values), do: "Deleting your new server…"
+  def summary_sentence(:replace_turned_off, _values), do: "Your new server is turned off."
+
+  def summary_sentence(:replace_not_set_up, _values),
+    do: "Your new server did not finish setting up."
+
+  def summary_sentence(:replace_waited_too_long, _values),
+    do: "Your new server waited too long and must be set up again."
+
+  def summary_sentence(:new_server_costs, _values),
+    do: "Your new server costs its monthly price until it is deleted."
+
+  def summary_sentence(:old_server_costs, _values),
+    do: "Your old server costs its monthly price until it is deleted."
+
   def summary_sentence(:data, %{provider: provider}),
     do:
       "Your conversations and memories, the secrets, the browser and traces live on your " <>
@@ -352,7 +381,8 @@ defmodule FermixCore.Management.Copy do
 
   @doc """
   The label of one summary action, by its id; `create_in` names the city of
-  `location` (`fsn1`, `nbg1` or `hel1`).
+  `location` (`fsn1`, `nbg1` or `hel1`), and `delete_server` the server a
+  replace deletes (`which`: `"new"` or `"old"`) when there are two.
   """
   @spec summary_label(atom(), map()) :: String.t()
   def summary_label(:set_up, _values), do: "Set up"
@@ -372,6 +402,10 @@ defmodule FermixCore.Management.Copy do
   def summary_label(:replace_server, _values), do: "Replace the server"
   def summary_label(:check_again, _values), do: "Check again"
   def summary_label(:own_server, _values), do: "Use my own Linux server"
+
+  def summary_label(:delete_server, %{which: which}) when which in ["new", "old"],
+    do: "Delete your #{which} server"
+
   def summary_label(:delete_server, _values), do: "Delete your server"
 
   @doc """

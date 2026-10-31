@@ -608,7 +608,13 @@ it, never a second writer.
   - on the computer the move leaves: moving ("Waiting for your server to
     confirm the move. Fermix keeps trying." once it waits on the server);
     "Fermix runs on your server. Last backup 2 hours ago." once linked; no
-    longer connected to it (**Learn more**);
+    longer connected to it (**Learn more**); while it replaces the server
+    Fermix created on Hetzner: creating, starting, installing Fermix on or
+    connecting the new server (**Cancel**), "Your new server is ready for the
+    move." (**Move now**), "Moving to your new server. Messages wait until it
+    is done.", removing the old server, and a problem of the new server in
+    its own words (**Start again**, or **Delete your old server** when
+    deleting the old one stopped after the move);
   - on the server: waiting for its move, then "Fermix runs here.";
   - a problem, in one sentence with the one action that fixes it: turned off
     (**Turn it on**), no answer for 10 minutes of this computer being awake

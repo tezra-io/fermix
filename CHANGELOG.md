@@ -172,7 +172,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   24-hour code the old server gives it; you review and start the same move
   to it, and once the move is done Fermix deletes the old server by itself.
   If that delete fails, the old server stays listed with why, and Delete
-  tries again.
+  tries again. The same one sentence follows the replace: creating and
+  setting up the new server (Cancel), ready for the move (Move now), moving,
+  removing the old server, and what went wrong with its one action.
   The server's hosting provider can technically read its disk, so Fermix
   keeps less there: the prompts, replies, tool input and output and shell
   commands in its traces are kept about a day (through the previous UTC

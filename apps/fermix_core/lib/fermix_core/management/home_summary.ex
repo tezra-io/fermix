@@ -34,6 +34,20 @@ defmodule FermixCore.Management.HomeSummary do
   answering after 10 minutes of no session, counted the same way (the link's
   `down_ms`). The last backup is old past 3 days.
 
+  On the computer the home left, a replace of the server Fermix created on
+  Hetzner (`Ledger.state/1`'s `replace`) leads while it runs: creating the
+  new server (`creating`, with Cancel), its code and its enrollment as the
+  old server's own `home.status` draws them (`primary_home`'s `enrollment`
+  and `candidates`: starting, installing, connecting, then `ready` with Move
+  now), the move to it (`moving`, before any silence of the old server, which
+  serves nothing while it runs), removing the old server, or deleting the new
+  one; a failure is a `problem` with its one action (`delete_failed` and
+  Delete when the old server could not be deleted). Until the move is done
+  the old server is the one the home lives on, and Hetzner's power actions,
+  which reach only the new one, are not offered for it. The new server's
+  code lives on the old server, which never sleeps, so its 30 minutes count
+  from its creation.
+
   `detail` holds what §7 lists and nothing else: on `off` the token step its
   Set up opens, on `connect` the "How to get one" steps, on `choose` how
   Hetzner bills, on `ready` the server's facts, the readiness warnings and
@@ -54,7 +68,7 @@ defmodule FermixCore.Management.HomeSummary do
   @states ~w(off connect choose creating ready moving on undone retired candidate primary problem)
   @problems ~w(turned_off cannot_reach deleted not_set_up waited_too_long no_capacity
                account_limit read_only_token token_refused create_failed update disk_full
-               backup_old not_ready unreadable)
+               backup_old not_ready unreadable delete_failed)
   @actions ~w(set_up create_server cancel move_now try_again learn_more turn_on restart_server
               start_again create_in open_hetzner paste_token update back_up_now replace_server
               check_again own_server delete_server)
@@ -177,6 +191,7 @@ defmodule FermixCore.Management.HomeSummary do
         "unavailable" -> {"no_capacity", :learn_more, []}
         "account_limit" -> {"account_limit", :open_hetzner, [:own_server]}
         "read_only_token" -> {"read_only_token", :paste_token, []}
+        "gone" -> {"deleted", :start_again, []}
         _other -> {"create_failed", :start_again, []}
       end
 
@@ -314,23 +329,31 @@ defmodule FermixCore.Management.HomeSummary do
   end
 
   # A problem before the move, while a server Fermix created still stands:
-  # Details says it costs money and offers to delete it.
-  defp before_move(view, %{provision: %{server: server}}) do
+  # Details says it costs money and offers to delete it (during a replace,
+  # the new one).
+  defp before_move(view, %{provision: %{server: server} = provision}) do
     if standing?(server) do
       detail = view["detail"]
+      {note, delete} = server_costs(provision)
 
       %{
         view
         | "detail" => %{
             detail
-            | "note" => detail["note"] || Copy.summary_sentence(:server_costs, %{}),
-              "alternatives" => detail["alternatives"] ++ [action(:delete_server)]
+            | "note" => detail["note"] || note,
+              "alternatives" => detail["alternatives"] ++ [delete]
           }
       }
     else
       view
     end
   end
+
+  defp server_costs(%{replace: %{}}),
+    do: {Copy.summary_sentence(:new_server_costs, %{}), action(:delete_server, %{which: "new"})}
+
+  defp server_costs(_provision),
+    do: {Copy.summary_sentence(:server_costs, %{}), action(:delete_server)}
 
   # -- the computer the move left ------------------------------------------------
 
@@ -350,7 +373,16 @@ defmodule FermixCore.Management.HomeSummary do
   defp retired(facts), do: view("retired", sentence(:retired, facts), action(:learn_more), %{})
 
   defp desktop(facts) do
-    checks = [&away/1, &too_old/1, &token_stopped/1, &server_disk/1, &desktop_backup/1]
+    checks = [
+      &replace_moving/1,
+      &away/1,
+      &too_old/1,
+      &token_stopped/1,
+      &server_disk/1,
+      &replacing/1,
+      &desktop_backup/1
+    ]
+
     Enum.find_value(checks, & &1.(facts)) || on(facts)
   end
 
@@ -358,34 +390,44 @@ defmodule FermixCore.Management.HomeSummary do
   # silence while this computer is awake.
   defp away(%{link: %{primary: %{status: status} = link}, provision: provision})
        when status in [:unreachable, :stale] do
-    server = provision.server
+    {server, powered?} = home_server(provision)
 
     cond do
       match?(%{status: :gone}, server) -> deleted(server, :learn_more)
-      match?(%{power: "off"}, server) -> turned_off(server)
-      (Map.get(link, :down_ms) || 0) >= @unreachable_ms -> cannot_reach(server)
+      match?(%{power: "off"}, server) -> turned_off(server, :turned_off, powered?)
+      (Map.get(link, :down_ms) || 0) >= @unreachable_ms -> cannot_reach(server, powered?)
       true -> nil
     end
   end
 
   defp away(_facts), do: nil
 
-  defp cannot_reach(%{status: :created} = server) do
-    problem("cannot_reach", Copy.summary_sentence(:cannot_reach, %{}), :restart_server, %{
+  defp cannot_reach(%{status: :created} = server, powered?) do
+    act = if powered?, do: :restart_server, else: :learn_more
+
+    problem("cannot_reach", Copy.summary_sentence(:cannot_reach, %{}), act, %{
       "seen_at" => iso(server.seen_at)
     })
   end
 
-  defp cannot_reach(_server),
+  defp cannot_reach(_server, _powered?),
     do: problem("cannot_reach", Copy.summary_sentence(:cannot_reach, %{}), :learn_more, %{})
+
+  # The server the home lives on, and whether Hetzner's power actions reach
+  # it: during a replace the old one until the move is done, which they do
+  # not (they act on the new server).
+  defp home_server(%{replace: %{current: :old, old: old}}), do: {old, false}
+  defp home_server(provision), do: {provision.server, true}
 
   defp too_old(%{primary_too_old: true} = facts),
     do: problem("update", sentence(:update, facts), :update, %{})
 
   defp too_old(_facts), do: nil
 
-  defp token_stopped(%{provision: %{token: :refused, server: server}} = facts) do
-    if standing?(server),
+  defp token_stopped(%{provision: %{token: :refused} = provision} = facts) do
+    {server, _powered?} = home_server(provision)
+
+    if standing?(server) or standing?(provision.server),
       do: problem("token_refused", sentence(:token_refused, facts), :paste_token, %{})
   end
 
@@ -454,6 +496,105 @@ defmodule FermixCore.Management.HomeSummary do
   defp provider(%{provision: %{server: %{}}}), do: "Hetzner"
   defp provider(_facts), do: "whoever hosts it"
 
+  # -- a replace of the server, on the computer the home left -------------------
+
+  # The old server serves nothing while the move runs, so its silence then is
+  # the move, not a problem.
+  defp replace_moving(%{provision: %{replace: %{state: :moving}}} = facts),
+    do: view("moving", sentence(:replace_moving, facts), nil, %{})
+
+  defp replace_moving(_facts), do: nil
+
+  defp replacing(%{provision: %{replace: %{state: state} = replace}} = facts),
+    do: replace_step(state, replace, facts)
+
+  defp replacing(_facts), do: nil
+
+  defp replace_step(:creating, _replace, facts), do: new_server_step(:replace_creating, facts)
+  defp replace_step(:waiting, _replace, facts), do: new_server(facts.provision.server, facts)
+
+  defp replace_step(:deleting, _replace, facts),
+    do: view("creating", sentence(:replace_deleting, facts), nil, %{})
+
+  defp replace_step(:cancelling, _replace, facts),
+    do: view("creating", sentence(:replace_cancelling, facts), nil, %{})
+
+  defp replace_step(:failed, %{current: :new, failure: failure}, _facts),
+    do: delete_failed(failure)
+
+  defp replace_step(:failed, %{failure: failure}, facts), do: failure_problem(failure, facts)
+  defp replace_step(state, _replace, _facts) when state in [:moving, :done], do: nil
+
+  # The new server, by where the old server's 24-hour code for it stands.
+  defp new_server(%{power: "off"} = server, facts),
+    do: server |> turned_off(:replace_turned_off, true) |> before_move(facts)
+
+  defp new_server(server, facts), do: new_server_window(new_window(facts), server, facts)
+
+  defp new_server_window(%{"state" => "open"}, server, facts) do
+    if older_than?(server.created_at, @setup_ms, facts),
+      do: new_server_problem("not_set_up", :replace_not_set_up, facts),
+      else: new_server_step(power_step(server), facts)
+  end
+
+  defp new_server_window(%{"state" => "used", "candidate_id" => nil}, _server, facts),
+    do: new_server_step(:replace_connecting, facts)
+
+  defp new_server_window(%{"state" => "used", "candidate_id" => id}, server, facts) do
+    case held_by_server(facts, id) do
+      nil ->
+        new_server_problem("waited_too_long", :replace_waited_too_long, facts)
+
+      candidate ->
+        view("ready", sentence(:replace_ready, facts), action(:move_now), %{
+          "server" => server_facts(candidate, server),
+          "readiness" => [],
+          "waits_until" => candidate["expires_at"]
+        })
+    end
+  end
+
+  defp new_server_window(%{"state" => "expired"}, _server, facts),
+    do: new_server_problem("not_set_up", :replace_not_set_up, facts)
+
+  # The old server's part is missing, or holds no such code: what Hetzner says.
+  defp new_server_window(nil, server, facts), do: new_server_step(power_step(server), facts)
+
+  defp power_step(%{power: "running"}), do: :replace_installing
+  defp power_step(_server), do: :replace_starting
+
+  defp new_server_step(key, facts),
+    do: view("creating", sentence(key, facts), action(:cancel), %{})
+
+  defp new_server_problem(kind, key, facts),
+    do: problem(kind, sentence(key, facts), :start_again, %{}) |> before_move(facts)
+
+  # Deleting the old server after the move stopped: it stays, and costs.
+  defp delete_failed(failure) do
+    problem("delete_failed", failure.sentence, action(:delete_server, %{which: "old"}), %{
+      "note" => Copy.summary_sentence(:old_server_costs, %{}),
+      "seen_at" => iso(failure.at)
+    })
+  end
+
+  # The old server's window for the new one, as its own `home.status` says.
+  defp new_window(facts) do
+    case get_in(facts, [:primary_home, "enrollment"]) do
+      %{"kind" => "provisioned"} = window -> window
+      _none -> nil
+    end
+  end
+
+  defp held_by_server(facts, id) do
+    candidates = get_in(facts, [:primary_home, "candidates"]) || []
+    Enum.find(candidates, &(&1["candidate_id"] == id))
+  end
+
+  defp older_than?(%DateTime{} = at, ms, facts),
+    do: DateTime.diff(facts.now, at, :millisecond) >= ms
+
+  defp older_than?(nil, _ms, _facts), do: false
+
   # -- the server ----------------------------------------------------------------
 
   defp server(facts) do
@@ -483,8 +624,11 @@ defmodule FermixCore.Management.HomeSummary do
 
   # -- problems shared by more than one place ------------------------------------
 
-  defp turned_off(server) do
-    problem("turned_off", Copy.summary_sentence(:turned_off, %{}), :turn_on, %{
+  # `powered?`: whether Turn it on reaches this server.
+  defp turned_off(server, key \\ :turned_off, powered? \\ true) do
+    act = if powered?, do: :turn_on, else: :learn_more
+
+    problem("turned_off", Copy.summary_sentence(key, %{}), act, %{
       "note" => Copy.summary_sentence(:turned_off_cost, %{}),
       "seen_at" => iso(server.seen_at)
     })

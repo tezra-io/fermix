@@ -261,6 +261,62 @@ defmodule FermixCore.Management.HomeTest do
       assert summary["action"]["id"] == "learn_more"
     end
 
+    test "a linked desktop replacing its server reads the replace from its ledger and the " <>
+           "new server's code from the old one",
+         %{home: home} do
+      :ok = DesktopLink.write(home, desktop_link())
+      new_server = %{server() | name: "fermix-general-5d2e", id: 61_900_117}
+
+      {:ok, _ledger} =
+        Ledger.update(home, "hetzner", fn ledger ->
+          {:ok, replacing} =
+            ledger
+            |> Ledger.connect("invented-token-0001", @at)
+            |> Ledger.put_server(server())
+            |> Ledger.begin_replace(5, @at)
+
+          {:ok, Ledger.put_server(replacing, new_server)}
+        end)
+
+      candidate = %{
+        "candidate_id" => "cand-9d41c7e2b05a3f68",
+        "name" => "fermix-general-5d2e",
+        "os" => "linux",
+        "arch" => "x86_64",
+        "version" => "9.9.9",
+        "enrolled_at" => "2031-05-04T10:05:00Z",
+        "expires_at" => "2031-05-05T10:05:00Z"
+      }
+
+      server_part = %{
+        "role" => "primary",
+        "version" => "9.9.9",
+        "disk" => %{"used" => 0.4, "nearly_full" => false},
+        "snapshots" => %{"targets" => []},
+        "enrollment" => %{
+          "state" => "used",
+          "expires_at" => "2031-05-05T10:00:00Z",
+          "kind" => "provisioned",
+          "candidate_id" => "cand-9d41c7e2b05a3f68"
+        },
+        "candidates" => [candidate]
+      }
+
+      forward = fn _request, _opts -> {:ok, server_part} end
+
+      assert {:ok, %{"summary" => summary}} =
+               route(
+                 "home.status",
+                 %{},
+                 opts(home, engine_role: @device, link_status: link(primary: primary(nil)))
+                 |> Keyword.put(:primary_forward, forward)
+               )
+
+      assert summary["sentence"] == "Your new server is ready for the move."
+      assert summary["action"]["id"] == "move_now"
+      assert summary["detail"]["server"]["name"] == "fermix-general-5d2e"
+    end
+
     test "a server this desktop is too old for asks to update it", %{home: home} do
       :ok = DesktopLink.write(home, desktop_link())
       too_old = fn _request, _opts -> {:error, :client_too_old, %{"minimum_version" => 3}} end

@@ -579,8 +579,13 @@ sentence, action, detail}` in `Management.Copy`'s words, which `CopyTest`
 holds to the copy rules and to `Copy.internal_words/1`. The two times it
 counts are awake time on the monotonic clock: how long the created server's
 window has been held (`Enrollment`'s `awake_ms`, 30 minutes) and how long the
-desktop relay has had no session (`Relay`'s `down_ms`, 10 minutes). The
-snapshot scheduler tells the paired phones, once per occurrence (the point
+desktop relay has had no session (`Relay`'s `down_ms`, 10 minutes). On a
+linked desktop a replace of the server (`Ledger.state/1`'s `replace`) leads
+while it runs, read with the old server's own window and candidates from
+`primary_home` (the new server's 30 minutes count from its creation, since
+its code lives on the old server, which never sleeps); until the move is
+done the old server is the one the home lives on, and the power actions,
+which reach the new one, are not offered for it. The snapshot scheduler tells the paired phones, once per occurrence (the point
 kept in `snapshots/status.json`'s `stale_notice`), when the newest verified
 snapshot passes 7 days, through the phones' own path: a message in the
 owner's phone chat (`ChannelSend` to `mobile`, its proactive key the point).

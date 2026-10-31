@@ -11,12 +11,13 @@ defmodule FermixCore.Management.HomeSummaryTest do
   @now ~U[2031-05-04 12:00:00Z]
   @minute 60_000
   @cand "cand-5e2a9c1f7b3d4086"
+  @new_cand "cand-9d41c7e2b05a3f68"
 
   # -- the table ----------------------------------------------------------------
 
   # {name, facts, state, sentence, action id or nil}
   defp cases do
-    setup_cases() ++ device_cases() ++ server_cases() ++ candidate_cases()
+    setup_cases() ++ device_cases() ++ replace_cases() ++ server_cases() ++ candidate_cases()
   end
 
   defp setup_cases do
@@ -181,6 +182,118 @@ defmodule FermixCore.Management.HomeSummaryTest do
        "problem",
        "No backup has finished since the move 4 days ago. It runs when this Mac is online.",
        "back_up_now"}
+    ]
+  end
+
+  # A replace of the server, on the computer the home left: the ledger's
+  # `replace` (`Ledger.state/1`), and the old server's own part for the new
+  # server's code and the candidate it enrolled as.
+  defp replace_cases do
+    [
+      {"a replace creating the new server",
+       desktop(provision: replacing(:creating, server: nil, ledger_state: :creating)), "creating",
+       "Creating your new server…", "cancel"},
+      {"a replace's new server still starting",
+       desktop(
+         provision: replacing(:waiting, server: new_server(power: "starting")),
+         primary_home: server_home(enrollment: new_window("open"))
+       ), "creating", "Starting your new server…", "cancel"},
+      {"a replace's new server installing Fermix",
+       desktop(
+         provision: replacing(:waiting),
+         primary_home: server_home(enrollment: new_window("open"))
+       ), "creating", "Installing Fermix on your new server…", "cancel"},
+      {"a replace's new server, the old one's part missing",
+       desktop(provision: replacing(:waiting), primary_home: nil), "creating",
+       "Installing Fermix on your new server…", "cancel"},
+      {"a replace's new server that just used its code",
+       desktop(
+         provision: replacing(:waiting),
+         primary_home: server_home(enrollment: new_window("used"))
+       ), "creating", "Connecting your new server…", "cancel"},
+      {"a replace's new server waiting for its move", replace_ready([]), "ready",
+       "Your new server is ready for the move.", "move_now"},
+      {"a replace's new server turned off",
+       desktop(
+         provision: replacing(:waiting, server: new_server(power: "off")),
+         primary_home: server_home(enrollment: new_window("open"))
+       ), "problem", "Your new server is turned off.", "turn_on"},
+      {"a replace's new server silent for thirty minutes",
+       desktop(
+         provision: replacing(:waiting, server: new_server(created_at: ~U[2031-05-04 11:29:00Z])),
+         primary_home: server_home(enrollment: new_window("open"))
+       ), "problem", "Your new server did not finish setting up.", "start_again"},
+      {"a replace's code expired unused",
+       desktop(
+         provision: replacing(:waiting),
+         primary_home: server_home(enrollment: new_window("expired"))
+       ), "problem", "Your new server did not finish setting up.", "start_again"},
+      {"a replace's new server that waited past its day",
+       desktop(
+         provision: replacing(:waiting),
+         primary_home: server_home(enrollment: new_window("used", @new_cand))
+       ), "problem", "Your new server waited too long and must be set up again.", "start_again"},
+      {"the move to the new server, the old one silent",
+       desktop(
+         link_primary: primary(:unreachable, 40 * @minute),
+         provision: replacing(:moving),
+         primary_home: nil
+       ), "moving", "Moving to your new server. Messages wait until it is done.", nil},
+      {"the old server being removed after the move", desktop(provision: replacing(:deleting)),
+       "creating", "Removing your old server…", nil},
+      {"the old server's delete stopped",
+       desktop(provision: replacing(:failed, current: :new, failure: old_server_failure())),
+       "problem",
+       "Fermix could not delete your old server: Hetzner had not finished deleting your " <>
+         "server after five minutes; Always On checks again when it opens.", "delete_server"},
+      {"the new server being deleted before the move",
+       desktop(provision: replacing(:cancelling, ledger_state: :deleting)), "creating",
+       "Deleting your new server…", nil},
+      {"the new server's create stopped",
+       desktop(
+         provision:
+           replacing(:failed,
+             server: nil,
+             ledger_state: :failed,
+             failure: failure("action_timeout")
+           )
+       ), "problem",
+       "Hetzner had not finished starting your server after five minutes; Always On checks " <>
+         "again when it opens.", "start_again"},
+      {"no capacity for the new server",
+       desktop(
+         provision:
+           replacing(:failed,
+             server: nil,
+             ledger_state: :failed,
+             failure: failure("unavailable", "nbg1")
+           )
+       ), "problem", "Falkenstein has no CPX22 right now.", "create_in"},
+      {"the new server deleted in Hetzner before the move",
+       desktop(
+         provision:
+           replacing(:failed,
+             server: new_server(status: :gone),
+             ledger_state: :gone,
+             failure: replacement_gone()
+           )
+       ), "problem", "Your new server was deleted in Hetzner, so replace the server again.",
+       "start_again"},
+      {"a replace that is done", desktop(provision: replacing(:done)), "on",
+       "Fermix runs on your server. Last backup 2 hours ago.", nil},
+      {"the old server silent for ten minutes during a replace",
+       desktop(
+         link_primary: primary(:unreachable, 10 * @minute),
+         provision: replacing(:waiting),
+         primary_home: nil
+       ), "problem", "Fermix cannot reach your server. Your messages wait until it is back.",
+       "learn_more"},
+      {"the old server turned off during a replace",
+       desktop(
+         link_primary: primary(:unreachable, @minute),
+         provision: replacing(:waiting, old: %{created_ledger().server | power: "off"}),
+         primary_home: nil
+       ), "problem", "Your server is turned off.", "learn_more"}
     ]
   end
 
@@ -392,8 +505,63 @@ defmodule FermixCore.Management.HomeSummaryTest do
       assert summary["detail"]["next_location"] == "nbg1"
     end
 
+    test "a replace's ready holds the new server's facts and until when it waits" do
+      %{"detail" => detail} = HomeSummary.summary(replace_ready([]))
+
+      assert detail == %{
+               "server" => %{
+                 "name" => "fermix-general-5d2e",
+                 "type" => "CPX32",
+                 "location" => "Helsinki",
+                 "ipv4" => "203.0.113.9",
+                 "system" => "linux x86_64",
+                 "version" => "0.9.0"
+               },
+               "readiness" => [],
+               "waits_until" => "2031-05-05T11:40:00Z"
+             }
+    end
+
+    test "a replace's problem before the move offers to delete the new server" do
+      summary =
+        HomeSummary.summary(
+          desktop(
+            provision: replacing(:waiting),
+            primary_home: server_home(enrollment: new_window("expired"))
+          )
+        )
+
+      assert summary["detail"]["note"] ==
+               "Your new server costs its monthly price until it is deleted."
+
+      assert summary["detail"]["alternatives"] == [
+               %{"id" => "delete_server", "label" => "Delete your new server"}
+             ]
+    end
+
+    test "an old server left after a replace says it costs money, and Delete tries again" do
+      summary =
+        HomeSummary.summary(
+          desktop(provision: replacing(:failed, current: :new, failure: old_server_failure()))
+        )
+
+      assert summary["action"] == %{"id" => "delete_server", "label" => "Delete your old server"}
+
+      assert summary["detail"] == %{
+               "kind" => "delete_failed",
+               "note" => "Your old server costs its monthly price until it is deleted.",
+               "seen_at" => "2031-05-04T11:00:00Z",
+               "alternatives" => []
+             }
+    end
+
     test "every state with nothing more to say holds an empty detail" do
-      for facts <- [device(move: move("streaming")), server([]), candidate_role("enrolled")] do
+      for facts <- [
+            device(move: move("streaming")),
+            server([]),
+            candidate_role("enrolled"),
+            desktop(provision: replacing(:moving))
+          ] do
         assert HomeSummary.summary(facts)["detail"] == %{}
       end
     end
@@ -546,6 +714,97 @@ defmodule FermixCore.Management.HomeSummaryTest do
     ledger(state, server: server)
   end
 
+  # A replace of the server as `Ledger.state/1` answers it: the ledger's own
+  # places hold the new server, `replace.old` the one the home lives on.
+  defp replacing(state, overrides \\ []) do
+    current = if state in [:deleting, :done], do: :new, else: :old
+    old = if state == :done, do: nil, else: created_ledger().server
+
+    %{
+      state: Keyword.get(overrides, :ledger_state, :created),
+      token: :accepted,
+      server: Keyword.get(overrides, :server, new_server()),
+      failure: nil,
+      sentence: nil,
+      replace: %{
+        state: state,
+        current: Keyword.get(overrides, :current, current),
+        old: Keyword.get(overrides, :old, old),
+        failure: Keyword.get(overrides, :failure)
+      }
+    }
+  end
+
+  defp new_server(overrides \\ []) do
+    Map.merge(
+      %{
+        created_ledger().server
+        | name: "fermix-general-5d2e",
+          id: 61_900_117,
+          type: "cpx32",
+          location: "hel1",
+          ipv4: "203.0.113.9",
+          created_at: ~U[2031-05-04 11:40:00Z]
+      },
+      Map.new(overrides)
+    )
+  end
+
+  # The new server waiting for its move: the old server's code used by the
+  # candidate it holds.
+  defp replace_ready(overrides) do
+    desktop(
+      [
+        provision: replacing(:waiting),
+        primary_home:
+          server_home(
+            enrollment: new_window("used", @new_cand),
+            candidates: [new_candidate()]
+          )
+      ] ++ overrides
+    )
+  end
+
+  # The old server's window for the new one, as its `home.status` draws it.
+  defp new_window(state, candidate_id \\ nil) do
+    %{
+      "state" => state,
+      "expires_at" => "2031-05-05T11:40:00Z",
+      "kind" => "provisioned",
+      "candidate_id" => candidate_id
+    }
+  end
+
+  defp new_candidate do
+    %{
+      candidate()
+      | "candidate_id" => @new_cand,
+        "name" => "fermix-general-5d2e",
+        "enrolled_at" => "2031-05-04T11:45:00Z",
+        "expires_at" => "2031-05-05T11:40:00Z"
+    }
+  end
+
+  defp old_server_failure do
+    %{
+      reason: "action_timeout",
+      sentence:
+        "Fermix could not delete your old server: Hetzner had not finished deleting your " <>
+          "server after five minutes; Always On checks again when it opens.",
+      next_location: nil,
+      at: ~U[2031-05-04 11:00:00Z]
+    }
+  end
+
+  defp replacement_gone do
+    %{
+      reason: "gone",
+      sentence: "Your new server was deleted in Hetzner, so replace the server again.",
+      next_location: nil,
+      at: ~U[2031-05-04 11:50:00Z]
+    }
+  end
+
   defp unreadable_ledger do
     %{
       state: :unreadable,
@@ -639,7 +898,9 @@ defmodule FermixCore.Management.HomeSummaryTest do
       "role" => "primary",
       "version" => "0.9.0",
       "snapshots" => snapshots(backups),
-      "disk" => %{"used" => used, "nearly_full" => used >= 0.85}
+      "disk" => %{"used" => used, "nearly_full" => used >= 0.85},
+      "enrollment" => Keyword.get(overrides, :enrollment),
+      "candidates" => Keyword.get(overrides, :candidates, [])
     }
   end
 

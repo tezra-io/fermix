@@ -241,9 +241,9 @@ it with their "update Fermix" screen, so they raise their own minimum for
 | `off` | the computer that sets Always On up | Nothing is set up. Its action, `set_up`, opens the token screen, whose words `detail.connect` holds (`{sentence, steps, alternatives}`); pressing it records nothing. |
 | `connect` | the same | A code for a server of the owner's own is open, or Hetzner refused the token before anything was created. `detail.steps` are the "How to get one" steps (two-factor sign-in first, a project for Fermix alone) and `detail.alternatives` the own-server link. No action: the token is checked when pasted. |
 | `choose` | the same | The token works. `detail.billing` says Hetzner bills by the hour until the server is deleted; the recommendation, the prices and the other offers are `home.provision.options`'s. |
-| `creating` | the same | Starting, installing Fermix on, connecting, or deleting the server, each in its own sentence. `cancel` while Fermix's own server sets up. |
-| `ready` | the same | The server is held and waits for Move now. `detail`: `server` (`{name, type, location, ipv4, system, version}`, Hetzner's facts null for a server of the owner's own), `readiness` (the last review's warnings and blocks, `home.move.readiness`'s items; empty when all is well or no review was made) and `waits_until`. |
-| `moving` | the computer the move leaves | The move runs; once that computer waits on the server's confirmation the sentence says Fermix keeps trying. |
+| `creating` | the same, and a linked desktop during a replace | Starting, installing Fermix on, connecting, or deleting the server, each in its own sentence. `cancel` while Fermix's own server sets up. During a replace of the server (`home.provision.resources`' `replace`): creating, starting, installing Fermix on or connecting the new server (`cancel`), as the old server's own code for it says (`primary_home`'s `enrollment` and `candidates`), removing the old server after the move, or deleting the new one before it (no action). |
+| `ready` | the same, and a linked desktop during a replace | The server is held and waits for Move now. `detail`: `server` (`{name, type, location, ipv4, system, version}`, Hetzner's facts null for a server of the owner's own), `readiness` (the last review's warnings and blocks, `home.move.readiness`'s items; empty when all is well or no review was made, and always during a replace, whose review is the old server's own) and `waits_until`. During a replace the new server is held by the old one, and Move now is the move to it from there (see `move_now`). |
+| `moving` | the computer the move leaves, and a linked desktop during a replace | The move runs; once that computer waits on the server's confirmation the sentence says Fermix keeps trying. During a replace, the move to the new server, which this desktop started: the old server serves nothing until it is done, so its silence then is no problem. |
 | `on` | a linked desktop | Fermix runs on the server. `detail`: `server` (`{name, location, version}`), `backups` (`{place, at}` for each place's newest verified backup), `copies_bytes` (the space this computer's copies take), `disk_used`, `data` (what lives on the server, and that its host can technically read its disk) and `actions` (`back_up_now`, `replace_server`). |
 | `undone` | the computer the move left | The move was undone and its server is still held (`try_again`), or the engine is restarting as it was (no action). |
 | `retired` | a computer the move left | It has no link to the server, or the server no longer knows it. |
@@ -263,7 +263,15 @@ awake), `waited_too_long` (enrolled, but waited past its 24 hours),
 engine is too old for), `disk_full` (85% or more), `backup_old` (the newest
 backup is over 3 days old, or none since a move that long ago), `not_ready`
 (the last review blocks the move: `check_again`, every item in
-`detail.readiness`) and `unreadable` (the provisioner's file).
+`detail.readiness`), `unreadable` (the provisioner's file) and
+`delete_failed` (after a replace's move, deleting the old server stopped:
+`delete_server` tries again, and `note` says it costs money until then).
+During a replace, a problem of the new server says so in its sentence
+(`turned_off`, `not_set_up`, `waited_too_long`, `deleted` when Hetzner no
+longer has it, and the create's own), and `alternatives` ends with
+`delete_server` for it while it stands; a problem of the old server, which
+holds the home until the move is done, offers `learn_more` where Hetzner's
+power actions would act on the new one (`turned_off`, `cannot_reach`).
 
 Actions (`action.id`, and in `detail`), and what a client does for each:
 
@@ -271,20 +279,20 @@ Actions (`action.id`, and in `detail`), and what a client does for each:
 |---|---|
 | `set_up` | opens the token screen |
 | `create_server` | reads `home.provision.options`, then `home.provision.create` |
-| `cancel` | `job.cancel` on the running `home_provision` job, then `home.provision.delete` |
-| `move_now` | `home.move.readiness`, then `home.move.start` (asking for the passphrase first when none is set) |
+| `cancel` | `job.cancel` on the running `home_provision` job, then `home.provision.delete` (during a replace, it deletes the new server) |
+| `move_now` | `home.move.readiness`, then `home.move.start` (asking for the passphrase first when none is set); during a replace, both for the candidate `primary_home.enrollment.candidate_id` names, and `home.move.start` with `keep_as_desktop: false` |
 | `try_again` | the same, for the server still held |
 | `check_again` | `home.move.readiness` |
 | `turn_on` | `home.provision.power` `{action: on}` |
 | `restart_server` | `home.provision.power` `{action: reset}` |
-| `start_again` | `home.provision.delete`, then `home.provision.create` with the same type and location |
-| `create_in` | `home.provision.create` in `detail.next_location` |
-| `delete_server` | `home.provision.delete` |
+| `start_again` | `home.provision.delete`, then `home.provision.create` with the same type and location (on a linked desktop, with `replace: true`) |
+| `create_in` | `home.provision.create` in `detail.next_location` (on a linked desktop, with `replace: true`) |
+| `delete_server` | `home.provision.delete` (its label names the new or the old server during a replace) |
 | `paste_token` | the token field, `home.provision.connect` |
 | `own_server` | `home.enroll.open`, and the command for the owner's own Linux server |
 | `open_hetzner` | opens Hetzner's console |
 | `back_up_now` | `home.snapshots.run` |
-| `replace_server` | listed in Details; its flow is not in this version |
+| `replace_server` | reads `home.provision.options`, then `home.provision.create` with `replace: true` |
 | `update` | the app's own update |
 | `learn_more` | opens the Always On docs page |
 
