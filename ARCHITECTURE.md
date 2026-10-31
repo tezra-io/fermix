@@ -547,8 +547,12 @@ the Hetzner Cloud API through `Net.HttpClient`. The project token and the
 ledger of what was created live in one file, `device/provision/hetzner.json`
 (`Provision.Ledger`, `0600`, device-local, never `config.toml` or the
 keyring, so a move never carries it), written before each call that creates
-or deletes and updated after it, under a per-file lock held only for the
-read and write. `Provision.FirstBoot` embeds `packaging/cloud/first-boot.sh`
+or deletes and updated after it. Every write is `Ledger.update/3`, which holds
+the file's lock across its read, change, write and rename (never across a
+call to Hetzner); `Provision.Ledger.Lock`, one supervised owner in the
+primary's and a desktop's tree, serves writers in the order they asked, each
+the moment the one before is done or exits, with no retry or backoff, and
+refuses only a writer whose turn has not come in 30 s. `Provision.FirstBoot` embeds `packaging/cloud/first-boot.sh`
 at compile time and wraps it, gzip and base64 with its SHA-256, as the
 server's cloud-init user data, the enrollment code in `FERMIX_ENROLL_CODE`.
 A create checks the type against the live stock, makes the firewall (the

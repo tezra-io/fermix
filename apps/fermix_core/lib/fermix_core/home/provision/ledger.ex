@@ -57,9 +57,11 @@ defmodule FermixCore.Home.Provision.Ledger do
     delete; a cancelled replace puts it back in place (`clear/1`).
 
   The ledger is written before each call that creates or deletes and updated
-  after it (`update/3`). Updates are serialised per file (a lock held only
-  while reading and writing it, never across a call to the host), so two
-  writers never lose each other's change.
+  after it (`update/3`). Updates are serialised per file: `Ledger.Lock`, the
+  one owner of the locks, holds a file's lock across the read, the change,
+  the write and the rename (never across a call to the host) and serves
+  writers in the order they asked, so two writers never lose each other's
+  change and none waits while the file is free.
 
   `state/1` is what `home.status`'s summary reads: one of `none`,
   `connected`, `creating`, `created` (the server exists and waits for its
@@ -96,15 +98,13 @@ defmodule FermixCore.Home.Provision.Ledger do
   """
 
   alias FermixCore.Home.Provision
+  alias FermixCore.Home.Provision.Ledger.Lock
 
   require Logger
 
   @version 1
   @dir_mode 0o700
   @file_mode 0o600
-  # The lock is held only while one small file is read and written, so a few
-  # tries are plenty; past them the update fails by name.
-  @lock_retries 20
   @statuses ~w(requested creating created deleting gone)a
   @status_words Map.new(@statuses, &{Atom.to_string(&1), &1})
   @unreadable_sentence "Fermix could not read its Hetzner file, so it shows nothing it " <>
@@ -211,22 +211,22 @@ defmodule FermixCore.Home.Provision.Ledger do
 
   @doc """
   Reads the ledger, hands it to `fun`, and writes what `fun` answers
-  (`{:ok, ledger}`), all under the file's lock; `{:error, _}` from `fun` is
-  answered as it is and writes nothing.
+  (`{:ok, ledger}`), all under the file's lock (`Ledger.Lock`, released on
+  every path); `{:error, _}` from `fun` is answered as it is and writes
+  nothing. `{:error, {:locked, file}}` when the lock did not come within its
+  bound.
   """
   @spec update(Path.t(), String.t(), (t() -> {:ok, t()} | {:error, term()})) ::
           {:ok, t()} | {:error, term()}
   def update(home, host, fun) when is_binary(home) and is_binary(host) and is_function(fun, 1) do
     file = path(home, host)
 
-    case :global.trans(
-           {{__MODULE__, file}, self()},
-           fn -> read_apply_write(home, host, fun) end,
-           [node()],
-           @lock_retries
-         ) do
-      :aborted -> {:error, {:locked, file}}
-      result -> result
+    with :ok <- Lock.acquire(file) do
+      try do
+        read_apply_write(home, host, fun)
+      after
+        :ok = Lock.release(file)
+      end
     end
   end
 

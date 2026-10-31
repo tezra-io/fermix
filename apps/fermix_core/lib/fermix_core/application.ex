@@ -263,6 +263,10 @@ defmodule FermixCore.Application do
         # add no restart intensity to the tree.
         CommandHostSupervisor,
         {Task.Supervisor, name: FermixCore.TaskSupervisor},
+        # The Always On provisioner's ledger locks, before anything that can
+        # write the ledger (a management call, a job, the desktop relay). It
+        # runs no writer's code, so nothing it serves can bring it down.
+        FermixCore.Home.Provision.Ledger.Lock,
         # The OAuth loopback listeners open now (M75 D17), before anything
         # that runs a sign-in: a desktop's sign-in is forwarded from it.
         FermixCore.Auth.LoopbackRegistry,
