@@ -12,17 +12,19 @@ defmodule FermixCore.Checklists.Parse do
   is dropped, and a row framed as written after outside content comes back
   with its words unquoted and `stamped: true`.
 
-  Anything else is refused with its line number, so a list is never read as
-  something it does not say: a line that is not a row, a note with no item
-  above it, a note under a section, a malformed frame, or a second list's
-  header.
+  A leading `[n]` of ASCII digits is always the row's handle, whatever space
+  follows it, since Render escapes words that begin with one. Anything else is
+  refused with its line number, so a list is never read as something it does
+  not say: a line that is not a row, a heading of any level but `## `, an
+  indented item or heading (a list does not nest), a note with no item above
+  it, a note under a section, a malformed frame, or a second list's header.
   """
 
   alias FermixCore.Checklists.Render
 
-  @item ~r/\A[-*] \[([ xX])\] ?(.*)\z/su
-  @section ~r/\A## ?(.*)\z/su
-  @handle ~r/\A\[(\d+)\](?: (.*))?\z/su
+  @item ~r/\A[-*] \[([ xX])\]\s*(.*)\z/su
+  @section ~r/\A## \s*(.*)\z/su
+  @handle ~r/\A\[([0-9]+)\]\s*(.*)\z/su
   @header ~r/\A(?:# )?List ".*\(ck_[0-9a-z]{10}\)/u
 
   @typedoc "One row as markdown carries it: `n` is nil on a line without a number."
@@ -36,7 +38,14 @@ defmodule FermixCore.Checklists.Parse do
         }
 
   @typedoc "Why a line was refused."
-  @type reason :: :not_a_row | :note_without_item | :note_on_section | :bad_frame | :second_list
+  @type reason ::
+          :not_a_row
+          | :heading_level
+          | :nested
+          | :note_without_item
+          | :note_on_section
+          | :bad_frame
+          | :second_list
 
   @doc "The rows `text` writes, in order, or the first line it cannot read."
   @spec rows(String.t()) :: {:ok, [row()]} | {:error, {:line, pos_integer(), reason()}}
@@ -48,7 +57,7 @@ defmodule FermixCore.Checklists.Parse do
     |> finish()
   end
 
-  defp finish({:ok, rows}), do: {:ok, rows |> Enum.reverse() |> Enum.map(&Map.delete(&1, :notes))}
+  defp finish({:ok, rows}), do: {:ok, Enum.reverse(rows)}
   defp finish({:error, _reason} = error), do: error
 
   defp read_line({line, number}, {:ok, rows}) do
@@ -60,8 +69,10 @@ defmodule FermixCore.Checklists.Parse do
 
   defp line("", rows), do: {:ok, rows}
 
-  defp line(<<first::utf8, _rest::binary>> = line, rows) when first in [?\s, ?\t],
-    do: note(String.trim(line), rows)
+  defp line(<<first::utf8, _rest::binary>> = line, rows) when first in [?\s, ?\t] do
+    content = String.trim(line)
+    if Render.row_like?(content), do: {:error, :nested}, else: note(content, rows)
+  end
 
   defp line(line, rows) do
     cond do
@@ -69,6 +80,7 @@ defmodule FermixCore.Checklists.Parse do
       Regex.match?(@header, line) -> header(rows)
       captures = Regex.run(@item, line) -> item(captures, rows)
       captures = Regex.run(@section, line) -> section(captures, rows)
+      String.starts_with?(line, "#") -> {:error, :heading_level}
       true -> {:error, :not_a_row}
     end
   end
@@ -95,7 +107,6 @@ defmodule FermixCore.Checklists.Parse do
 
   defp handle(rest) do
     case Regex.run(@handle, rest) do
-      [_rest, n] -> {:ok, String.to_integer(n), ""}
       [_rest, n, words] -> {:ok, String.to_integer(n), words}
       nil -> {:ok, nil, rest}
     end

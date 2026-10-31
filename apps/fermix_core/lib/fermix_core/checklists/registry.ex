@@ -697,6 +697,14 @@ defmodule FermixCore.Checklists.Registry do
       "as an indented line under its item."
   end
 
+  defp line_problem(:heading_level),
+    do: "is a heading of another level; a section is `## Name`, one level deep."
+
+  defp line_problem(:nested) do
+    "is an item or a heading indented under another row; a list does not nest, so write it " <>
+      "unindented, or as words in the note."
+  end
+
   defp line_problem(:note_without_item), do: "is a note with no item above it."
   defp line_problem(:note_on_section), do: "is a note under a section; only an item has one."
   defp line_problem(:bad_frame), do: "has a frame whose words are not one quoted string."

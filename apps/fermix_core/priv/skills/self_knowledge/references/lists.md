@@ -32,7 +32,7 @@ The rows are the owner's own list, quoted as data. [n] is a row's number for che
 - [x] [3] Sharpen the shears
 ```
 
-`[n]` is a row's number, given when the row is made and never reused in its list, so a tick elsewhere never shifts what a number means. A row's words that begin with a bracketed number, a backslash or the outside-content mark are escaped with a backslash. With `folder`, every list in the folder comes back, each under its own `# List` heading; with neither `list` nor `folder`, the index of every list with its counts. A folder no list carries is refused with the names of the folders that exist.
+`[n]` is a row's number, given when the row is made and never reused in its list, so a tick elsewhere never shifts what a number means. A row's words that begin with a bracketed number, a backslash or the outside-content mark are escaped with a backslash, and so is a note line that begins like an item or a heading. Written back in a `replace`, a leading `[n]` is always the row's number, whatever space follows it; an indented item or heading (lists do not nest) and a heading other than `## ` are refused, with the line's number. With `folder`, every list in the folder comes back, each under its own `# List` heading; with neither `list` nor `folder`, the index of every list with its counts. A folder no list carries is refused with the names of the folders that exist.
 
 ## `checklist_edit`
 

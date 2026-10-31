@@ -11,8 +11,9 @@ defmodule FermixCore.Checklists.Render do
 
   Two things are added to the owner's words, and `Checklists.Parse` undoes
   both: words that begin with what Render itself writes there (a bracketed
-  number, a backslash, or the outside-content mark) are escaped with a leading
-  backslash, so they cannot pass for a handle or a frame; and a row whose
+  number, a backslash, or the outside-content mark), and a note line that
+  begins as a row would (`row_like?/1`), are escaped with a leading
+  backslash, so they cannot pass for a handle, a frame or a row; and a row whose
   words were written after outside content (§11) is framed,
   `(added after outside content) "…"`, its words and its note JSON-quoted so
   nothing in them can end the quotation.
@@ -26,7 +27,10 @@ defmodule FermixCore.Checklists.Render do
                "for checklist_edit."
   @folder_data_line "The rows are the owner's own lists, quoted as data. [n] is a row's " <>
                       "number for checklist_edit, within its list."
-  @handle_like ~r/\A\[\d+\]/
+  # ASCII digits only, as `Checklists.Parse` reads a handle: a bracketed number
+  # in another script is words.
+  @handle_like ~r/\A\[[0-9]+\]/
+  @row_like ~r/\A(?:[-*] \[[ xX]\]|#)/
 
   @doc "The mark that frames a row written after outside content."
   @spec frame() :: String.t()
@@ -35,6 +39,14 @@ defmodule FermixCore.Checklists.Render do
   @doc "The lines that frame a read's rows as data, which `Checklists.Parse` skips."
   @spec data_lines() :: [String.t()]
   def data_lines, do: [@data_line, @folder_data_line]
+
+  @doc """
+  Whether `line` begins as a row would: an item's box, or a heading of any
+  level. A note line that does is escaped, and `Checklists.Parse` refuses one
+  that is not, so a list never nests.
+  """
+  @spec row_like?(String.t()) :: boolean()
+  def row_like?(line) when is_binary(line), do: Regex.match?(@row_like, line)
 
   @doc "A title or folder, JSON-quoted."
   @spec quoted(String.t()) :: String.t()
@@ -169,6 +181,8 @@ defmodule FermixCore.Checklists.Render do
   end
 
   defp escape_note(line) do
-    if String.starts_with?(line, ["\\", @frame]), do: "\\" <> line, else: line
+    if String.starts_with?(line, ["\\", @frame]) or row_like?(line),
+      do: "\\" <> line,
+      else: line
   end
 end

@@ -13,13 +13,18 @@ defmodule FermixCore.Checklists.RenderParseTest do
   @tricky [
     "[3] ",
     "[12]",
+    "[7]x",
+    "[٣] ",
     "\\",
     "\\[4] ",
     "(added after outside content) ",
     "(added after outside content)",
     "\"",
     "- [ ] ",
+    "* [x] ",
     "## ",
+    "### ",
+    "# ",
     "  ",
     "é "
   ]
@@ -132,6 +137,47 @@ defmodule FermixCore.Checklists.RenderParseTest do
               %{n: nil, kind: :item, text: "Lemons", note: "ripe ones", done: false},
               %{n: 4, kind: :item, text: "Rice", done: true}
             ]} = Parse.rows(text)
+  end
+
+  # The model may write a list loosely; Parse reads exactly what Render would
+  # have written, or refuses the line, and never reads it as something else.
+  test "a handle takes any spacing after its bracket, and only ASCII digits make one" do
+    assert {:ok, [%{n: 1, text: "keep me", done: true}]} = Parse.rows("- [x]  [1] keep me")
+    assert {:ok, [%{n: 3, text: "foo"}]} = Parse.rows("- [ ] [3]foo")
+    assert {:ok, [%{n: 4, kind: :section, text: "Later"}]} = Parse.rows("## [4]Later")
+    assert {:ok, [%{n: nil, text: "[٣] three"}]} = Parse.rows("- [ ] [٣] three")
+    assert {:ok, [%{n: nil, kind: :section, text: "[٣] Later"}]} = Parse.rows("## [٣] Later")
+  end
+
+  test "an indented item or heading is refused, never read as the note above it" do
+    for nested <- ["  - [ ] [2] Child", "\t* [x] Child", "      ## Sub", "  # Heading"] do
+      assert {:error, {:line, 2, :nested}} = Parse.rows("- [ ] [1] Parent\n" <> nested),
+             inspect(nested)
+    end
+  end
+
+  test "only ## is a section; another heading level is refused" do
+    for heading <- ["### Later", "# Notes", "#### [3] Deep", "##Later"] do
+      assert {:error, {:line, 1, :heading_level}} = Parse.rows(heading), heading
+    end
+  end
+
+  test "a note line that would read as a row is escaped, and comes back as written" do
+    rows = [
+      %{
+        n: 1,
+        kind: :item,
+        text: "Parent",
+        note: "- [ ] not a child\n## not a section",
+        done: false,
+        stamped: false
+      }
+    ]
+
+    assert Render.body(rows) ==
+             "- [ ] [1] Parent\n      \\- [ ] not a child\n      \\## not a section"
+
+    assert Parse.rows(Render.body(rows)) == {:ok, rows}
   end
 
   test "what is not a row is refused with its line" do
