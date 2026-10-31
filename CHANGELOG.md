@@ -123,22 +123,24 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   computer to a Linux server, so Fermix keeps working with your Mac closed.
   With Reach from anywhere on, Always On on your primary gives an enrollment
   code, good once for thirty minutes; a server enrolled with it waits for the
-  move, and you review the move (the secrets that travel, the server's
-  Fermix, free disk, the plugins with no build for the server, and what
-  stops: iMessage, voice calls and meetings, WhatsApp, and Slack unless it
-  uses Socket Mode; coding agents ask for your approval again on the server)
-  and start it from the app with a recovery passphrase. The computer the home
-  left stays a desktop of the server: the app's chat and Fermix-wide settings
-  go to the server through it, and paired phones see a reconnect. The server
-  will not remove that desktop from its devices, since this version cannot
-  link it again and it keeps copies of the server's backups. Right after
-  the move the server installs your plugins again for itself, checked as any
-  install is; one it could not install says so in Plugins, with Install…. Once a recovery passphrase is set, a primary keeps
-  encrypted snapshots of itself in an S3 bucket, every six hours by default,
-  and after a move on your desktop too, and a lost server is restored from
-  the newest one. The setup page's Always On tab says where Fermix runs, and
-  `fermix home` does all of this at a terminal, with `export`, `import` and
-  `mark-moved` for moving a home by hand.
+  move, and you review the move (the secrets that travel, the server's Fermix,
+  free disk, the plugins with no build for the server, and what stops:
+  iMessage, voice calls and meetings, WhatsApp, and Slack unless it uses
+  Socket Mode; coding agents ask for your approval again on the server) and
+  start it from the app with a recovery passphrase. Your Mac (or Linux
+  computer) stays awake while the move runs, and only then. The computer the
+  home left stays a desktop of the server: the app's chat and Fermix-wide
+  settings go to the server through it, and paired phones see a reconnect. The
+  server will not remove that desktop from its devices, since this version
+  cannot link it again and it keeps copies of the server's backups. Right
+  after the move the server installs your plugins again for itself, checked as
+  any install is; one it could not install says so in Plugins, with Install….
+  Once a recovery passphrase is set, a primary keeps encrypted snapshots of
+  itself in an S3 bucket, every six hours by default, and after a move on your
+  desktop too, and a lost server is restored from the newest one. The setup
+  page's Always On tab says where Fermix runs, and `fermix home` does all of
+  this at a terminal, with `export`, `import` and `mark-moved` for moving a
+  home by hand.
 - **A server gets ready for Always On from one command.** On a Debian 12,
   Debian 13 or Ubuntu 24.04 server (arm64 or x86_64) running Linux 6.2 or
   later with Landlock enabled (Debian 13 and Ubuntu 24.04 do by default),

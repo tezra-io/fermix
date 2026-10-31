@@ -1305,7 +1305,13 @@ Current channels:
   stage in a task; commit, an activation that fails part-way retried on a
   timer while a resume is refused; resume). On the source,
   `Home.MoveWorker` (a line of `Desktop.DeviceSupervisor`, started while
-  `Home.Move.pending?/1`) adds the desktop's key and row, captures once to
+  `Home.Move.pending?/1`) holds the computer awake for its whole run
+  (`FermixCore.Home.MoveAwake`: `caffeinate -i -w <BEAM pid>` through the
+  disclaim shim on macOS, `systemd-inhibit … tail --pid=<BEAM pid>` on
+  Linux, each ending with the engine; a holder under the core task
+  supervisor that monitors the worker ends the inhibitor's process group on
+  release, on the worker's death or after 26 hours), adds the desktop's key
+  and row, captures once to
   `.move/<id>.fxsnap` for the candidate's one-time recipient (every attempt
   sends that capture; a move session, `:ik_move`, has no lifetime), streams
   it, and commits only after `moved.json`; after the marker it only resumes:

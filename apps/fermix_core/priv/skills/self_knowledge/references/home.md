@@ -316,6 +316,14 @@ it, never a second writer.
   the server for the stream and the restored home: about twice the home on
   each, which the readiness report and the server check first. A move session
   has no time limit, so a large home on a slow link just takes longer.
+- While the move runs this computer is kept awake, and only then: from the
+  restart into the device role until the restart the move ends with
+  (caffeinate on a Mac, systemd-inhibit on Linux, each ending with Fermix).
+  A closed lid still sleeps a Mac; the move then retries or waits, as for a
+  network drop. Nothing keeps it awake while a server waits for the move: the
+  server keeps trying until its code expires. Without an inhibitor (a Linux
+  without systemd-inhibit) the move runs anyway and the log says the computer
+  may sleep.
 - While the move runs this computer serves nothing; a message typed in the
   app then is answered "Fermix is moving this home to <name>; your message is
   kept until it is done." and sent again once Fermix is back.

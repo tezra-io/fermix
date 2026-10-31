@@ -58,12 +58,20 @@ defmodule FermixChannels.Home.MoveWorker do
   (`Management.Lifecycle.restart_self/0`: the systemd start budget reset
   first, then the one stop path), which the service manager brings back.
 
+  **Kept awake** (L16). From its start until it ends, which is the restart
+  every move but an unconfirmed one ends with, the worker holds this computer
+  awake (`FermixCore.Home.MoveAwake`: caffeinate on a Mac, systemd-inhibit on
+  Linux, each ending with the engine). The hold is released however the worker
+  ends, and its holder lets go by itself if the worker dies. A computer
+  Fermix cannot keep awake still moves, and the log says why. A test VM holds
+  nothing unless a case injects `:awake`.
+
   A request file that cannot be read is recorded with its sentence, and the
   worker ends without changing anything else.
 
   Test seams: `:home`, `:helper`, `:connect` (route to a `Mobile.Rail`
   `:connect` function), `:clock`, `:sleep`, `:restart`, `:snapshot_opts`,
-  `:resume_for_ms`.
+  `:resume_for_ms`, `:awake` (0-arity, as `MoveAwake.hold/0`).
   """
 
   use Task, restart: :transient
@@ -80,6 +88,7 @@ defmodule FermixChannels.Home.MoveWorker do
   alias FermixCore.BuildInfo
   alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.Move
+  alias FermixCore.Home.MoveAwake
   alias FermixCore.Home.Moved
   alias FermixCore.Home.MoveSecrets
   alias FermixCore.Home.MoveTelemetry
@@ -96,6 +105,7 @@ defmodule FermixChannels.Home.MoveWorker do
   @first_resume_ms 1_000
   @max_resume_ms 60_000
   @resume_for_ms 24 * 3_600_000
+  @compiled_env Mix.env()
 
   @spec start_link(keyword()) :: {:ok, pid()}
   def start_link(opts) when is_list(opts), do: Task.start_link(__MODULE__, :run, [opts])
@@ -104,11 +114,32 @@ defmodule FermixChannels.Home.MoveWorker do
   @spec run(keyword()) :: :ok
   def run(opts) do
     ctx = context(opts)
+    awake = keep_awake(ctx)
 
-    case {Move.read_request(ctx.home), Move.read_phase(ctx.home)} do
-      {{:ok, request}, {:ok, phase}} -> carry_on(ctx, request, phase)
-      {{:error, reason}, _phase} -> unreadable(ctx, reason)
-      {_request, other} -> unreadable(ctx, other)
+    try do
+      case {Move.read_request(ctx.home), Move.read_phase(ctx.home)} do
+        {{:ok, request}, {:ok, phase}} -> carry_on(ctx, request, phase)
+        {{:error, reason}, _phase} -> unreadable(ctx, reason)
+        {_request, other} -> unreadable(ctx, other)
+      end
+    after
+      MoveAwake.release(awake)
+    end
+  end
+
+  # Before anything of the move is done, so the computer stays awake for all
+  # of it; a hold that cannot start leaves the move to run as it would.
+  defp keep_awake(ctx) do
+    case ctx.awake.() do
+      {:ok, holder} ->
+        holder
+
+      {:error, reason} ->
+        Logger.warning(
+          "move: this computer may sleep while the move runs: #{MoveAwake.describe(reason)}"
+        )
+
+        nil
     end
   end
 
@@ -134,8 +165,14 @@ defmodule FermixChannels.Home.MoveWorker do
       sleep: Keyword.get(opts, :sleep, &Process.sleep/1),
       restart: Keyword.get(opts, :restart, &Lifecycle.restart_self/0),
       snapshot_opts: Keyword.get(opts, :snapshot_opts, []),
-      resume_for_ms: Keyword.get(opts, :resume_for_ms, @resume_for_ms)
+      resume_for_ms: Keyword.get(opts, :resume_for_ms, @resume_for_ms),
+      awake: Keyword.get(opts, :awake, default_awake())
     }
+  end
+
+  # A test VM never holds its host awake; a case injects `:awake` to see it.
+  defp default_awake do
+    if @compiled_env == :test, do: fn -> {:ok, nil} end, else: &MoveAwake.hold/0
   end
 
   defp started(request, %{"phase" => "requested"}),

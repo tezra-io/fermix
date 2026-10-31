@@ -107,6 +107,46 @@ defmodule FermixChannels.Home.MoveTest do
                      %{phase: :finished, side: :candidate, result: :done, epoch: 5}}
   end
 
+  # L16: the computer the home leaves is kept awake while the move runs, from
+  # the worker's start until the restart it ends with, and only then.
+  test "this computer is kept awake from the worker's start to its restart", ctx do
+    run_worker(ctx.primary.root, ctx.candidate, awake: held_awake())
+
+    assert [:awake_held, :source_restart] = from_worker([:awake_held, :source_restart])
+    assert_received :awake_released
+  end
+
+  test "an undone move, or one whose files cannot be read, lets the computer sleep again",
+       ctx do
+    source = ctx.primary.root
+
+    :ok =
+      Move.put_phase(source, "streaming", %{"attempts" => Move.max_attempts()}, HomeMove.now())
+
+    run_worker(source, ctx.candidate, awake: held_awake())
+    assert_received :awake_held
+    assert_received :source_restart
+    assert_received :awake_released
+
+    File.write!(Path.join(Move.dir(source), "request.json"), "{")
+    run_worker(source, ctx.candidate, awake: held_awake())
+    assert_received :awake_held
+    assert_received :awake_released
+  end
+
+  test "a computer Fermix cannot keep awake still moves, and the log says why", ctx do
+    awake = fn -> {:error, {:not_found, "systemd-inhibit"}} end
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        run_worker(ctx.primary.root, ctx.candidate, awake: awake)
+      end)
+
+    assert log =~ "this computer may sleep while the move runs: systemd-inhibit is not installed"
+    assert_received :source_restart
+    assert {:ok, %{"phase" => "committed"}} = Move.read_phase(ctx.primary.root)
+  end
+
   test "a refusal before move_ready aborts: nothing was retired, the primary is back", ctx do
     source = ctx.primary.root
     request_file = Path.join(Move.dir(source), "request.json")
@@ -417,6 +457,31 @@ defmodule FermixChannels.Home.MoveTest do
 
   # The worker runs in a task of its own, as under its supervisor; its
   # restart still reaches the test (`HomeMove.worker_opts/3`).
+  # A hold that tells the test when it was taken and when it was let go, in the
+  # protocol `MoveAwake.release/1` speaks.
+  defp held_awake do
+    test = self()
+
+    fn ->
+      send(test, :awake_held)
+
+      holder =
+        spawn(fn ->
+          receive do
+            :release -> send(test, :awake_released)
+          end
+        end)
+
+      {:ok, holder}
+    end
+  end
+
+  # The named messages in this process's mailbox, in the order they came.
+  defp from_worker(names) do
+    {:messages, messages} = Process.info(self(), :messages)
+    Enum.filter(messages, &(&1 in names))
+  end
+
   defp run_worker(source, candidate, overrides \\ []) do
     opts = HomeMove.worker_opts(source, candidate, overrides)
     :ok = Task.await(Task.async(fn -> MoveWorker.run(opts) end), 60_000)
