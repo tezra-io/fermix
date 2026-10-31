@@ -76,9 +76,30 @@ defmodule FermixCore.Memory.Repo.ChecklistsSql do
     ON checklist_items(checklist_id, removed_at, position);
   """
 
+  # Migration 57 (M85 §07): each edit a device sent, by its `client_msg_id`,
+  # so one sent again (a reconnect, an outbox's replay) is answered as a
+  # duplicate and changes nothing. Kept 30 days, deleted with a later device
+  # edit, and naming the list it changed and the id an add or create made.
+  @edits_schema_sql """
+  CREATE TABLE IF NOT EXISTS checklist_edits (
+    owner_id TEXT NOT NULL,
+    agent_id TEXT NOT NULL,
+    client_msg_id TEXT NOT NULL CHECK (length(client_msg_id) BETWEEN 1 AND 128),
+    checklist_id TEXT NOT NULL,
+    made_id TEXT,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (owner_id, agent_id, client_msg_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_checklist_edits_created ON checklist_edits(created_at);
+  """
+
   @doc "The two tables and their indexes, as migration 56 creates them."
   @spec schema_sql() :: String.t()
   def schema_sql, do: @schema_sql
+
+  @doc "The device edits' table, as migration 57 creates it."
+  @spec edits_schema_sql() :: String.t()
+  def edits_schema_sql, do: @edits_schema_sql
 
   @doc "How long a removed row or list is kept before it is deleted, in seconds."
   @spec retention_seconds() :: pos_integer()
@@ -99,6 +120,15 @@ defmodule FermixCore.Memory.Repo.ChecklistsSql do
 
   def handle(conn, {:edit, owner_id, agent_id, changes, edit}),
     do: in_transaction(conn, fn -> edit(conn, owner_id, agent_id, changes, edit) end)
+
+  def handle(conn, {:list_by_id, owner_id, agent_id, list_id, removed?}),
+    do: list_by_id(conn, owner_id, agent_id, list_id, removed?)
+
+  def handle(conn, {:device_edit, owner_id, agent_id, client_msg_id, changes, edit}) do
+    in_transaction(conn, fn ->
+      device_edit(conn, {owner_id, agent_id, client_msg_id}, changes, edit)
+    end)
+  end
 
   def handle(conn, {:purge_removed_lists, %DateTime{} = now}),
     do: in_transaction(conn, fn -> purge_removed_lists(conn, now) end)
@@ -141,8 +171,53 @@ defmodule FermixCore.Memory.Repo.ChecklistsSql do
   defp read_folder(conn, owner_id, agent_id, folder) do
     with {:ok, lists} <- live_lists(conn, owner_id, agent_id),
          {:ok, members} <- Ops.folder_lists(lists, folder),
-         {:ok, rows} <- rows_of(conn, Enum.map(members, & &1.id)) do
+         {:ok, rows} <- rows_of(conn, Enum.map(members, & &1.id), &live_rows/2) do
       {:ok, Enum.map(members, &%{list: &1, rows: Map.fetch!(rows, &1.id)})}
+    end
+  end
+
+  # One list by id, live or removed and not yet swept, with its live rows and,
+  # when asked, the rows removed from it in the last 30 days, newest first.
+  defp list_by_id(conn, owner_id, agent_id, list_id, removed?) do
+    sql = """
+    SELECT #{@list_select} FROM checklists WHERE owner_id = ? AND agent_id = ? AND id = ?
+    """
+
+    with {:ok, [values]} <- query_all(conn, sql, [owner_id, agent_id, list_id]),
+         list = decode_list(values),
+         {:ok, rows} <- live_rows(conn, list.id),
+         {:ok, gone} <- if(removed?, do: removed_rows(conn, list.id), else: {:ok, []}) do
+      {:ok, %{list: list, rows: rows, removed_rows: gone}}
+    else
+      {:ok, []} -> {:error, {:no_such_list, list_id}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp removed_rows(conn, list_id) do
+    sql = """
+    SELECT #{@item_select} FROM checklist_items
+    WHERE checklist_id = ? AND removed_at IS NOT NULL
+    ORDER BY removed_at DESC, n
+    """
+
+    with {:ok, rows} <- query_all(conn, sql, [list_id]) do
+      {:ok, Enum.map(rows, &decode_item/1)}
+    end
+  end
+
+  defp removed_lists(_conn, _owner_id, _agent_id, []), do: {:ok, []}
+
+  defp removed_lists(conn, owner_id, agent_id, ids) do
+    marks = Enum.map_join(ids, ", ", fn _id -> "?" end)
+
+    sql = """
+    SELECT #{@list_select} FROM checklists
+    WHERE owner_id = ? AND agent_id = ? AND removed_at IS NOT NULL AND id IN (#{marks})
+    """
+
+    with {:ok, rows} <- query_all(conn, sql, [owner_id, agent_id | ids]) do
+      {:ok, Enum.map(rows, &decode_list/1)}
     end
   end
 
@@ -176,17 +251,81 @@ defmodule FermixCore.Memory.Repo.ChecklistsSql do
   # them to `Ops`, and writes what it changed. Inside `in_transaction/2`, so a
   # refusal of any op leaves every list as it was.
   defp edit(conn, owner_id, agent_id, changes, edit) do
-    with {:ok, lists} <- live_lists(conn, owner_id, agent_id),
-         {:ok, rows} <- rows_of(conn, Ops.referenced(lists, changes)),
-         {:ok, result} <- Ops.apply(%{lists: lists, rows: rows}, changes, edit),
+    with {:ok, live} <- live_lists(conn, owner_id, agent_id),
+         {:ok, gone} <- removed_lists(conn, owner_id, agent_id, Ops.restored_lists(changes)),
+         lists = live ++ gone,
+         ids = Ops.referenced(lists, changes),
+         {:ok, rows} <- rows_of(conn, ids, &live_rows/2),
+         {:ok, removed} <- removed_of(conn, ids, Ops.restores_rows?(changes)),
+         loaded = %{lists: lists, rows: rows, removed: removed},
+         {:ok, result} <- Ops.apply(loaded, changes, edit),
          :ok <- write(conn, {owner_id, agent_id, lists}, result, edit.now) do
       {:ok, result}
     end
   end
 
-  defp rows_of(conn, list_ids) do
+  defp removed_of(_conn, _ids, false), do: {:ok, %{}}
+  defp removed_of(conn, ids, true), do: rows_of(conn, ids, &removed_rows/2)
+
+  # A device's edit, once: an id already recorded is answered as the duplicate
+  # it is, and changes nothing; a new one is applied and recorded in the same
+  # transaction, and records older than the retention go with it.
+  defp device_edit(conn, key, changes, edit) do
+    case edit_record(conn, key) do
+      {:ok, nil} -> applied_device_edit(conn, key, changes, edit)
+      {:ok, record} -> {:ok, {:duplicate, record}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp applied_device_edit(conn, {owner_id, agent_id, client_msg_id}, changes, edit) do
+    with {:ok, result} <- edit(conn, owner_id, agent_id, changes, edit),
+         [%{list_id: list_id} | _rest] = result.summary,
+         record = %{list_id: list_id, made: result.made},
+         :ok <- insert_edit_record(conn, {owner_id, agent_id, client_msg_id}, record, edit.now),
+         :ok <- purge_edit_records(conn, edit.now) do
+      {:ok, {:applied, result}}
+    end
+  end
+
+  defp edit_record(conn, {owner_id, agent_id, client_msg_id}) do
+    sql = """
+    SELECT checklist_id, made_id FROM checklist_edits
+    WHERE owner_id = ? AND agent_id = ? AND client_msg_id = ?
+    """
+
+    case query_all(conn, sql, [owner_id, agent_id, client_msg_id]) do
+      {:ok, []} -> {:ok, nil}
+      {:ok, [[list_id, made]]} -> {:ok, %{list_id: list_id, made: made}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp insert_edit_record(conn, {owner_id, agent_id, client_msg_id}, record, now) do
+    sql = """
+    INSERT INTO checklist_edits (owner_id, agent_id, client_msg_id, checklist_id, made_id,
+      created_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+    """
+
+    execute(conn, sql, [
+      owner_id,
+      agent_id,
+      client_msg_id,
+      record.list_id,
+      record.made,
+      stamp(now)
+    ])
+  end
+
+  defp purge_edit_records(conn, now) do
+    cutoff = now |> DateTime.add(-@retention_seconds, :second) |> stamp()
+    execute(conn, "DELETE FROM checklist_edits WHERE created_at < ?", [cutoff])
+  end
+
+  defp rows_of(conn, list_ids, read) do
     Enum.reduce_while(list_ids, {:ok, %{}}, fn id, {:ok, acc} ->
-      case live_rows(conn, id) do
+      case read.(conn, id) do
         {:ok, rows} -> {:cont, {:ok, Map.put(acc, id, rows)}}
         {:error, reason} -> {:halt, {:error, reason}}
       end
@@ -203,7 +342,7 @@ defmodule FermixCore.Memory.Repo.ChecklistsSql do
     changed = Enum.map(result.changed, &Map.fetch!(result.lists, &1))
     {created, existing} = Enum.split_with(changed, & &1.created?)
     titles = Map.new(stored, &{&1.id, &1.title})
-    moving = Enum.filter(existing, &(&1.removed_at || &1.title != Map.fetch!(titles, &1.id)))
+    moving = Enum.filter(existing, &title_moves?(&1, titles))
 
     with :ok <- each(moving, &free_title(conn, &1)),
          :ok <- each(existing, &update_list(conn, &1)),
@@ -211,6 +350,12 @@ defmodule FermixCore.Memory.Repo.ChecklistsSql do
          :ok <- each(dirty_rows(result, changed), &write_row(conn, &1)) do
       each(changed, &purge_rows(conn, &1.id, now))
     end
+  end
+
+  # A removed list coming back holds no live title to give up.
+  defp title_moves?(list, titles) do
+    not Map.get(list, :restored?, false) and
+      (list.removed_at != nil or list.title != Map.fetch!(titles, list.id))
   end
 
   # The live rows an op changed, then the rows it removed, less any added and
@@ -232,11 +377,14 @@ defmodule FermixCore.Memory.Repo.ChecklistsSql do
     execute(conn, sql, values)
   end
 
+  # A list a call brings back is the one row this update finds removed.
   defp update_list(conn, list) do
+    live = if Map.get(list, :restored?, false), do: "IS NOT NULL", else: "IS NULL"
+
     sql = """
     UPDATE checklists SET title = ?, folder = ?, rev = ?, next_n = ?, updated_at = ?,
       removed_at = ?
-    WHERE id = ? AND removed_at IS NULL
+    WHERE id = ? AND removed_at #{live}
     """
 
     params = [
@@ -258,11 +406,13 @@ defmodule FermixCore.Memory.Repo.ChecklistsSql do
   end
 
   defp write_row(conn, row) do
+    live = if row.dirty == :restored, do: "IS NOT NULL", else: "IS NULL"
+
     sql = """
     UPDATE checklist_items SET checklist_id = ?, n = ?, text = ?, note = ?, done = ?,
       done_at = ?, position = ?, added_after_outside_content = ?, updated_at = ?,
       removed_at = ?
-    WHERE id = ? AND removed_at IS NULL
+    WHERE id = ? AND removed_at #{live}
     """
 
     params = [
@@ -365,7 +515,7 @@ defmodule FermixCore.Memory.Repo.ChecklistsSql do
     Map.merge(raw, %{
       created_at: parse_stamp(raw.created_at),
       updated_at: parse_stamp(raw.updated_at),
-      removed_at: nil,
+      removed_at: optional_parse(raw.removed_at),
       created?: false
     })
   end
@@ -387,6 +537,7 @@ defmodule FermixCore.Memory.Repo.ChecklistsSql do
       made_via: raw.made_via,
       created_at: parse_stamp(raw.created_at),
       updated_at: parse_stamp(raw.updated_at),
+      removed_at: optional_parse(raw.removed_at),
       dirty: nil
     }
   end

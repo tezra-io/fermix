@@ -10,19 +10,20 @@ defmodule FermixCore.Companion.ProtocolTest do
 
     assert Protocol.client_events() ==
              ~w(client_hello msg command cancel history_pull history_search read_state
-                media_fetch media_release proposal_answer)
+                media_fetch media_release proposal_answer checklists_pull checklist_pull
+                checklist_edit)
 
     assert Protocol.server_events() ==
              ~w(server_hello accepted turn_started text_delta tool_event reasoning text_done
                 turn_error turn_done row row_updated approval approval_resolved read_state
                 history_page search_results media_path media_missing proposal proposal_resolved
-                home_status_changed error)
+                home_status_changed checklists checklist error)
   end
 
   # M56 §6: a turn that ends with no reply needs a frame an older client would
   # not survive, so it goes only to a connection that declared version 2; the
   # media grant and the changed row (M66) only to one that declared 3; what a
-  # turn is reasoning only to one that declared 6.
+  # turn is reasoning and the owner's lists (M85) only to one that declared 6.
   test "every server event names the version that brought it" do
     later = %{
       "turn_done" => 2,
@@ -32,7 +33,9 @@ defmodule FermixCore.Companion.ProtocolTest do
       "proposal" => 4,
       "proposal_resolved" => 4,
       "reasoning" => 6,
-      "home_status_changed" => 6
+      "home_status_changed" => 6,
+      "checklists" => 6,
+      "checklist" => 6
     }
 
     for type <- Protocol.server_events() do
@@ -44,7 +47,14 @@ defmodule FermixCore.Companion.ProtocolTest do
   end
 
   test "every client event names the version that brought it: the media grant 3, the answer 4" do
-    later = %{"media_fetch" => 3, "media_release" => 3, "proposal_answer" => 4}
+    later = %{
+      "media_fetch" => 3,
+      "media_release" => 3,
+      "proposal_answer" => 4,
+      "checklists_pull" => 6,
+      "checklist_pull" => 6,
+      "checklist_edit" => 6
+    }
 
     for type <- Protocol.client_events() do
       assert Protocol.client_event_version(type) == Map.get(later, type, 1),
@@ -53,6 +63,7 @@ defmodule FermixCore.Companion.ProtocolTest do
 
     refute "media_fetch" in Protocol.shared_client_events()
     refute "proposal_answer" in Protocol.shared_client_events()
+    refute "checklist_edit" in Protocol.shared_client_events()
     assert_raise ArgumentError, fn -> Protocol.client_event_version("ping") end
   end
 
@@ -66,6 +77,112 @@ defmodule FermixCore.Companion.ProtocolTest do
              Protocol.encode_server_event("home_status_changed", %{"state" => "on"})
 
     refute "home_status_changed" in Protocol.shared_server_events()
+  end
+
+  # M85 §07: the wire holds what a list event is carried in, by the engine's
+  # ids; the op itself is the Registry's to judge, with its sentence.
+  describe "the owner's lists (version 6)" do
+    @list_id "ck_4q8m2x7v1d"
+    @row_id "ci_8f3k2m9q1x"
+
+    test "a pull names a list by its id, and removed is a boolean" do
+      pull = %{"profile_id" => "main", "list_id" => @list_id}
+
+      assert :ok = Protocol.validate_client_payload("checklist_pull", pull)
+
+      assert :ok =
+               Protocol.validate_client_payload("checklist_pull", Map.put(pull, "removed", true))
+
+      for bad <- [
+            %{pull | "list_id" => "Groceries"},
+            %{pull | "list_id" => @row_id},
+            Map.put(pull, "removed", "yes")
+          ] do
+        assert {:error, {:invalid_field, _field}} =
+                 Protocol.validate_client_payload("checklist_pull", bad)
+      end
+    end
+
+    test "an edit carries one op object, its id bounded as the store keeps it" do
+      edit = %{
+        "client_msg_id" => "mac-1",
+        "profile_id" => "main",
+        "list_id" => @list_id,
+        "op" => %{"op" => "check", "row_id" => @row_id}
+      }
+
+      assert :ok = Protocol.validate_client_payload("checklist_edit", edit)
+      assert :ok = Protocol.validate_client_payload("checklist_edit", Map.delete(edit, "list_id"))
+
+      long = String.duplicate("a", Protocol.max_checklist_msg_id() + 1)
+
+      for {field, bad} <- [
+            {"op", %{edit | "op" => "check"}},
+            {"op", %{edit | "op" => %{"row_id" => @row_id}}},
+            {"op", %{edit | "op" => %{"op" => ""}}},
+            {"list_id", %{edit | "list_id" => "Groceries"}},
+            {"client_msg_id", %{edit | "client_msg_id" => long}}
+          ] do
+        assert {:error, {:invalid_field, ^field}} =
+                 Protocol.validate_client_payload("checklist_edit", bad)
+      end
+    end
+
+    test "a pushed list is whole, without a null, and a removed row says when" do
+      item = %{"row_id" => @row_id, "kind" => "item", "text" => "Bread", "done" => false}
+      list = %{"list_id" => @list_id, "title" => "Groceries", "rev" => 3, "rows" => [item]}
+      event = %{"profile_id" => "main", "list" => list}
+
+      assert {:ok, _line} = Protocol.encode_server_event("checklist", event)
+
+      removed = Map.put(item, "removed_at", "2031-06-02T14:05:00.000000Z")
+
+      assert {:ok, _line} =
+               Protocol.encode_server_event(
+                 "checklist",
+                 put_in(event, ["list", "removed"], [removed])
+               )
+
+      for bad <- [
+            put_in(event, ["list", "removed"], [item]),
+            put_in(event, ["list", "rows"], [Map.put(item, "note", nil)]),
+            put_in(event, ["list", "rows"], [%{item | "kind" => "task"}]),
+            put_in(event, ["list", "list_id"], "Groceries")
+          ] do
+        assert {:error, {:invalid_field, "list"}} = Protocol.encode_server_event("checklist", bad)
+      end
+
+      assert {:error, {:invalid_field, "made"}} =
+               Protocol.encode_server_event("checklist", Map.put(event, "made", %{}))
+    end
+
+    test "the index lists each list by id with its counts" do
+      entry = %{
+        "list_id" => @list_id,
+        "title" => "Groceries",
+        "open" => 2,
+        "done" => 1,
+        "rev" => 7
+      }
+
+      assert {:ok, _line} =
+               Protocol.encode_server_event("checklists", %{
+                 "profile_id" => "main",
+                 "lists" => [entry]
+               })
+
+      for bad <- [
+            Map.delete(entry, "rev"),
+            %{entry | "open" => -1},
+            Map.put(entry, "folder", nil)
+          ] do
+        assert {:error, {:invalid_field, "lists"}} =
+                 Protocol.encode_server_event("checklists", %{
+                   "profile_id" => "main",
+                   "lists" => [bad]
+                 })
+      end
+    end
   end
 
   test "turn_done names the turn it ends and nothing else" do

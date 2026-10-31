@@ -100,7 +100,7 @@ defmodule FermixCore.Tools.ChecklistToolsTrustInvariantTest do
     end
 
     assert advertised(context) == []
-    assert Note.rules(context, "telegram") == nil
+    assert Note.rules(context, "telegram", false) == nil
     assert Note.index(context) == nil
   end
 
@@ -138,7 +138,7 @@ defmodule FermixCore.Tools.ChecklistToolsTrustInvariantTest do
 
       assert advertised(context) == ["checklist_edit", "checklist_read"]
 
-      assert Note.rules(context, Map.get(context, :channel)) =~
+      assert Note.rules(context, Map.get(context, :channel), false) =~
                "lives in a list and never in memory"
     end
   end
@@ -164,7 +164,7 @@ defmodule FermixCore.Tools.ChecklistToolsTrustInvariantTest do
     assert advertised(Map.put(job, :subagent_depth, 1)) == []
 
     # A job is told nothing per turn: its prompt is its own.
-    assert Note.rules(job, nil) == nil
+    assert Note.rules(job, nil, false) == nil
   end
 
   test "the capability catalog, cached per profile and shared by group chats, names none of them" do

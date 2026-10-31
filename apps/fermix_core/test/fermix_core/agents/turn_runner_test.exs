@@ -2377,6 +2377,33 @@ defmodule FermixCore.Agents.TurnRunnerTest do
                ~s(The owner's lists: in "Projects", "Fermix"; "Groceries".)
     end
 
+    # M85 §07: the card's line goes only to a turn the Mac's connection carried
+    # after it pulled the lists' index; the Mac's chat on a connection that did
+    # not, and every other channel, keep the line that says to write the list.
+    test "the card's line rides only a companion turn whose connection draws lists",
+         %{repo: repo} do
+      card = "A list you read or change is drawn under your reply, live"
+      written = "No list is drawn here"
+
+      drawn =
+        %{channel: "companion", chat_id: "main", metadata: %{draws_lists: true}}
+        |> capture_prompt(memory_repo: repo)
+        |> rules_line()
+
+      assert drawn =~ card
+      refute drawn =~ written
+
+      for msg <- [
+            %{channel: "companion", chat_id: "main"},
+            %{channel: "companion", chat_id: "main", metadata: %{draws_lists: false}},
+            put_in(private_chat("40041"), [:metadata, :draws_lists], true)
+          ] do
+        line = msg |> capture_prompt(memory_repo: repo) |> rules_line()
+        assert line =~ written, inspect(msg)
+        refute line =~ card, inspect(msg)
+      end
+    end
+
     test "a tick leaves every list line of the prompt byte-identical", %{repo: repo, owner: owner} do
       before = list_lines(capture_prompt(private_chat("40041"), memory_repo: repo))
 
@@ -2399,6 +2426,9 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       end
     end
   end
+
+  defp rules_line(messages),
+    do: Enum.find(messages, &(&1.content =~ "lives in a list and never in memory")).content
 
   defp list_lines(messages),
     do: Enum.filter(messages, &(&1.content =~ "checklist_" or &1.content =~ "The owner's lists:"))

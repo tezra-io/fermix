@@ -60,6 +60,15 @@ defmodule FermixCore.Checklists.Access do
   @spec read_outside?(map()) :: boolean()
   def read_outside?(context) when is_map(context), do: OpenLoopsAccess.read_outside?(context)
 
+  @doc """
+  Whether a device connection may read and change the lists (M85 §07, §11):
+  only one the daemon placed as the owner's (`:independent`), the rule the
+  Mac's proposals answer by; one the daemon started, a detached one or an
+  unplaced one may not.
+  """
+  @spec device_owner?(atom() | nil) :: boolean()
+  def device_owner?(caller), do: caller == :independent
+
   @doc "Where a change came from, as a row records it: a job's run, or the chat."
   @spec made_via(map()) :: String.t()
   def made_via(context) when is_map(context) do

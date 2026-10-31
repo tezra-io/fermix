@@ -86,6 +86,7 @@ defmodule FermixCore.Memory.Repo do
   @watcher_follow_up_migration_version 54
   @cue_delivery_window_index_migration_version 55
   @checklists_migration_version 56
+  @checklist_edits_migration_version 57
   @sqlite_open_intent :readwritecreate
 
   # The cue SQL modules (M60), one per lane, all served by `cues_call/3`.
@@ -5144,8 +5145,27 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_channel_event_ids_migration(conn, versions),
          :ok <- apply_watcher_follow_up_migration(conn, versions),
          :ok <- apply_cue_delivery_window_index_migration(conn, versions),
-         :ok <- apply_checklists_migration(conn, versions) do
+         :ok <- apply_checklists_migration(conn, versions),
+         :ok <- apply_checklist_edits_migration(conn, versions) do
       :ok
+    end
+  end
+
+  # The edits the owner's devices sent (M85 §07), kept by `client_msg_id` so
+  # one sent again changes nothing, with its version in one transaction.
+  defp apply_checklist_edits_migration(conn, versions) do
+    if Enum.member?(versions, @checklist_edits_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{ChecklistsSql.edits_schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@checklist_edits_migration_version});
+        COMMIT;
+        """
+      )
     end
   end
 

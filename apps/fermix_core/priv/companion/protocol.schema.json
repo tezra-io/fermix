@@ -24,7 +24,10 @@
             "read_state",
             "media_fetch",
             "media_release",
-            "proposal_answer"
+            "proposal_answer",
+            "checklists_pull",
+            "checklist_pull",
+            "checklist_edit"
           ]
         }
       },
@@ -68,6 +71,18 @@
         {
           "if": { "required": ["type"], "properties": { "type": { "const": "proposal_answer" } } },
           "then": { "$ref": "#/$defs/proposal_answer" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "checklists_pull" } } },
+          "then": { "$ref": "#/$defs/checklists_pull" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "checklist_pull" } } },
+          "then": { "$ref": "#/$defs/checklist_pull" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "checklist_edit" } } },
+          "then": { "$ref": "#/$defs/checklist_edit" }
         }
       ]
     },
@@ -98,6 +113,8 @@
             "proposal",
             "proposal_resolved",
             "home_status_changed",
+            "checklists",
+            "checklist",
             "error"
           ]
         }
@@ -195,6 +212,14 @@
             "properties": { "type": { "const": "home_status_changed" } }
           },
           "then": { "$ref": "#/$defs/home_status_changed" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "checklists" } } },
+          "then": { "$ref": "#/$defs/checklists" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "checklist" } } },
+          "then": { "$ref": "#/$defs/checklist" }
         },
         {
           "if": { "required": ["type"], "properties": { "type": { "const": "error" } } },
@@ -334,6 +359,41 @@
         "decision": { "enum": ["confirm", "deny"] }
       }
     },
+    "checklists_pull": {
+      "type": "object",
+      "description": "Version 6. Asks for the index of the owner's lists, answered checklists. From then on this connection is sent checklists again after every change to any list, and a turn it carries is told the app draws lists. Taken only from a connection the daemon placed as the owner's; any other is answered error request_failed with the engine's sentence.",
+      "x-since-version": 6,
+      "required": ["type", "profile_id"],
+      "properties": {
+        "type": { "const": "checklists_pull" },
+        "profile_id": { "type": "string", "minLength": 1 }
+      }
+    },
+    "checklist_pull": {
+      "type": "object",
+      "description": "Version 6. Asks for one whole list by its id, answered checklist. The connection then holds the list and is sent checklist after every committed change to it, whoever made it; it holds at most 16, and pulling another lets the one it pulled longest ago go. removed true adds the rows removed in the last 30 days, in that pull and in every push of the list after it. A removed list not yet swept still answers, with removed_at; a list that is gone is error request_failed. Taken only from a connection the daemon placed as the owner's.",
+      "x-since-version": 6,
+      "required": ["type", "profile_id", "list_id"],
+      "properties": {
+        "type": { "const": "checklist_pull" },
+        "profile_id": { "type": "string", "minLength": 1 },
+        "list_id": { "type": "string", "pattern": "^ck_[0-9a-z]{10}$" },
+        "removed": { "type": "boolean" }
+      }
+    },
+    "checklist_edit": {
+      "type": "object",
+      "description": "Version 6. One op on the owner's lists, by row id, through the same transaction as the model's edits; list_id names the list for every op but create. Answered accepted (duplicate false) once applied, then checklist to every connection holding the list; sent again with the same client_msg_id it is answered accepted with duplicate true and changes nothing. A refused op changes nothing and is answered error request_failed with the engine's sentence and client_msg_id. Taken only from a connection the daemon placed as the owner's.",
+      "x-since-version": 6,
+      "required": ["type", "client_msg_id", "profile_id", "op"],
+      "properties": {
+        "type": { "const": "checklist_edit" },
+        "client_msg_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "profile_id": { "type": "string", "minLength": 1 },
+        "list_id": { "type": "string", "pattern": "^ck_[0-9a-z]{10}$" },
+        "op": { "$ref": "#/$defs/checklistOp" }
+      }
+    },
     "server_hello": {
       "type": "object",
       "required": ["type", "min_version", "max_version"],
@@ -355,7 +415,7 @@
     },
     "accepted": {
       "type": "object",
-      "description": "Durable receipt for a msg or command; clears the outbox item. server_seq is present only on a duplicate whose request already has a reply row: that reply's seq.",
+      "description": "Durable receipt for a msg, a command or (version 6) a checklist_edit; clears the outbox item. server_seq is present only on a duplicate whose request already has a reply row: that reply's seq.",
       "required": ["type", "client_msg_id", "duplicate"],
       "properties": {
         "type": { "const": "accepted" },
@@ -606,9 +666,37 @@
         "type": { "const": "home_status_changed" }
       }
     },
+    "checklists": {
+      "type": "object",
+      "description": "Version 6. The index of the owner's lists, every live list in picker order: the answer to checklists_pull, and sent again, whole, to a connection that pulled it after any list changes, at most once per 100 ms. Sent only to a connection on version 6 that the daemon placed as the owner's and that pulled the index.",
+      "x-since-version": 6,
+      "required": ["type", "profile_id", "lists"],
+      "properties": {
+        "type": { "const": "checklists" },
+        "profile_id": { "type": "string", "minLength": 1 },
+        "lists": { "type": "array", "maxItems": 50, "items": { "$ref": "#/$defs/checklistEntry" } }
+      }
+    },
+    "checklist": {
+      "type": "object",
+      "description": "Version 6. One whole list: the answer to checklist_pull, and sent again, whole, to every connection holding it after each committed change to it, whoever made it, at most once per 100 ms per list and carrying the rev it ended on. A client drops one whose rev is below the one it shows. made maps the client_msg_id of each create or add a device sent since the list's last push to the id it made, a create's list_id or an add's row_id; a client matches the ids it sent and ignores the rest. Sent only to a connection on version 6 that the daemon placed as the owner's and that holds the list.",
+      "x-since-version": 6,
+      "required": ["type", "profile_id", "list"],
+      "properties": {
+        "type": { "const": "checklist" },
+        "profile_id": { "type": "string", "minLength": 1 },
+        "list": { "$ref": "#/$defs/checklistList" },
+        "made": {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 100,
+          "additionalProperties": { "type": "string", "pattern": "^c[ki]_[0-9a-z]{10}$" }
+        }
+      }
+    },
     "error": {
       "type": "object",
-      "description": "A refusal. reason is the code; the other fields are context. Protocol violations close the connection; request failures do not. ref is set only on the request_failed answering a media_fetch the daemon could not serve. A desktop whose home moved also sends primary_unreachable (its message names the primary; the app keeps its outbox), desktop_revoked (the primary no longer knows this computer, so nothing waiting can be sent) and unattended_client, each before it closes.",
+      "description": "A refusal. reason is the code; the other fields are context. Protocol violations close the connection; request failures do not. ref is set only on the request_failed answering a media_fetch the daemon could not serve. A request_failed answering a checklists_pull, checklist_pull or checklist_edit carries the engine's sentence in message, and client_msg_id when it answers an edit. A desktop whose home moved also sends primary_unreachable (its message names the primary; the app keeps its outbox), desktop_revoked (the primary no longer knows this computer, so nothing waiting can be sent) and unattended_client, each before it closes.",
       "required": ["type", "reason"],
       "properties": {
         "type": { "const": "error" },
@@ -807,6 +895,111 @@
         "title": { "type": "string", "minLength": 1, "maxLength": 80 },
         "rows": { "type": "array", "items": { "type": "string", "pattern": "^ci_[0-9a-z]{10}$" } }
       }
+    },
+    "checklistEntry": {
+      "type": "object",
+      "description": "One list in the index: its id, title, folder when it is in one, its open and done items, and its rev, which moves with every change to the list.",
+      "required": ["list_id", "title", "open", "done", "rev"],
+      "properties": {
+        "list_id": { "type": "string", "pattern": "^ck_[0-9a-z]{10}$" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "folder": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "open": { "type": "integer", "minimum": 0 },
+        "done": { "type": "integer", "minimum": 0 },
+        "rev": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "checklistList": {
+      "type": "object",
+      "description": "A whole list, its rows in order. removed holds the rows removed in the last 30 days, newest first, only when the pull asked for them; removed_at is set only on a list that was itself removed and is not yet swept. Times are RFC 3339 UTC with microseconds.",
+      "required": ["list_id", "title", "rev", "rows"],
+      "properties": {
+        "list_id": { "type": "string", "pattern": "^ck_[0-9a-z]{10}$" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "rev": { "type": "integer", "minimum": 0 },
+        "rows": { "type": "array", "maxItems": 500, "items": { "$ref": "#/$defs/checklistRow" } },
+        "removed": { "type": "array", "items": { "$ref": "#/$defs/checklistRemovedRow" } },
+        "removed_at": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}Z$" }
+      }
+    },
+    "checklistRow": {
+      "type": "object",
+      "description": "One row: an item, with done and its note and done_at when it has them, or a section heading, which has neither. row_id is stable for the row's life, across moves and edits.",
+      "required": ["row_id", "kind", "text"],
+      "properties": {
+        "row_id": { "type": "string", "pattern": "^ci_[0-9a-z]{10}$" },
+        "kind": { "enum": ["item", "section"] },
+        "text": { "type": "string", "minLength": 1, "maxLength": 280 },
+        "note": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "done": { "type": "boolean" },
+        "done_at": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}Z$" }
+      },
+      "allOf": [
+        {
+          "if": { "required": ["kind"], "properties": { "kind": { "const": "item" } } },
+          "then": { "required": ["done"] }
+        }
+      ]
+    },
+    "checklistRemovedRow": {
+      "type": "object",
+      "description": "A row removed in the last 30 days, with when; restore brings it back.",
+      "required": ["removed_at"],
+      "properties": { "removed_at": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}Z$" } },
+      "allOf": [{ "$ref": "#/$defs/checklistRow" }]
+    },
+    "checklistOp": {
+      "type": "object",
+      "description": "One op of checklist_edit, the model's ops by row id without replace, with clear_done and restore. create {title, folder?} makes a list; add {text, note?, section_id? or after_id?}; check, uncheck and remove {row_id}; edit {row_id, text?, note?}, one of them at least, note \"\" clearing it; move {row_id, section_id? or after_id?, to_list_id?}, one of the three at least; section {text, after_id?} adds a heading; folder {folder}, \"\" taking the list out of its folder; rename {text}; remove_list; clear_done removes every done item; restore {row_id?, title?} brings back a removed row of the list at its place, or with no row_id the removed list itself, under title when given, and is refused while a live list holds the title it would come back under. section_id puts a row at the end of that section and after_id right after that row, never both; an add with neither goes to the end of the list's first group, and a move to another list with neither to the end of that list's first group. Every text is one line, trimmed, its maximum counted in characters.",
+      "required": ["op"],
+      "properties": {
+        "op": {
+          "enum": [
+            "create",
+            "add",
+            "check",
+            "uncheck",
+            "edit",
+            "move",
+            "section",
+            "remove",
+            "folder",
+            "rename",
+            "remove_list",
+            "clear_done",
+            "restore"
+          ]
+        },
+        "title": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "folder": { "type": "string", "maxLength": 40 },
+        "text": { "type": "string", "minLength": 1, "maxLength": 280 },
+        "note": { "type": "string", "maxLength": 1000 },
+        "row_id": { "type": "string", "pattern": "^ci_[0-9a-z]{10}$" },
+        "section_id": { "type": "string", "pattern": "^ci_[0-9a-z]{10}$" },
+        "after_id": { "type": "string", "pattern": "^ci_[0-9a-z]{10}$" },
+        "to_list_id": { "type": "string", "pattern": "^ck_[0-9a-z]{10}$" }
+      },
+      "allOf": [
+        {
+          "if": { "required": ["op"], "properties": { "op": { "const": "create" } } },
+          "then": { "required": ["title"] }
+        },
+        {
+          "if": { "required": ["op"], "properties": { "op": { "enum": ["add", "section", "rename"] } } },
+          "then": { "required": ["text"] }
+        },
+        {
+          "if": {
+            "required": ["op"],
+            "properties": { "op": { "enum": ["check", "uncheck", "edit", "move", "remove"] } }
+          },
+          "then": { "required": ["row_id"] }
+        },
+        {
+          "if": { "required": ["op"], "properties": { "op": { "const": "folder" } } },
+          "then": { "required": ["folder"] }
+        }
+      ]
     },
     "place": {
       "type": "object",

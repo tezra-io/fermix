@@ -103,14 +103,23 @@ defmodule FermixCore.Prompt.ChannelPresentation do
   end
 
   @doc """
-  The line about the owner's lists for `channel` (MILESTONE_85 §05), which
-  `Checklists.Note.rules/2` carries on the owner's private turns only. No
-  surface draws a list yet, so every channel gets the one that says to write
-  it; the card's line comes with the wire that can draw it.
+  The line about the owner's lists (MILESTONE_85 §05), which
+  `Checklists.Note.rules/3` carries on the owner's private turns only. The
+  card's line goes to a turn on the Mac's chat whose connection draws lists
+  (`draws?`: it pulled their index), never to a version alone, since a Mac
+  app on the version may not draw them; every other turn is told to write the
+  list.
   """
-  @spec checklist_line(String.t() | nil) :: String.t()
-  def checklist_line(channel) when is_binary(channel) or is_nil(channel),
-    do: "No list is drawn here: when the owner asks to see a list, write it as a short checklist."
+  @spec checklist_line(String.t() | nil, boolean()) :: String.t()
+  def checklist_line("companion", true) do
+    "A list you read or change is drawn under your reply, live: say in a sentence what " <>
+      "changed and never repeat its items."
+  end
+
+  def checklist_line(channel, draws?)
+      when (is_binary(channel) or is_nil(channel)) and is_boolean(draws?),
+      do:
+        "No list is drawn here: when the owner asks to see a list, write it as a short checklist."
 
   defp group_line(chat_type) when chat_type in @group_chat_types do
     "- This is a shared chat: answer the person who asked, briefly addressing them, without lecturing the room."

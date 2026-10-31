@@ -8,6 +8,7 @@ defmodule FermixCore.Checklists.RegistryTest do
   alias FermixCore.Checklists.Ops
   alias FermixCore.Checklists.Registry
   alias FermixCore.Memory.Repo
+  alias FermixTestSupport.TelemetryCapture
 
   # Every item and title here is invented.
   @now ~U[2031-06-02 14:00:00Z]
@@ -755,6 +756,68 @@ defmodule FermixCore.Checklists.RegistryTest do
                )
              ) =~
                "That change waits"
+    end
+  end
+
+  # M85 §07: the Mac's edits, by row id, through the same transaction.
+  describe "the owner's devices" do
+    @client_goldens Application.app_dir(
+                      :fermix_core,
+                      "priv/companion/fixtures/client_events.jsonl"
+                    )
+
+    # Every golden edit the Mac vendors is an op the Registry takes: on a store
+    # holding none of the goldens' lists, a create makes its list and every
+    # other op gets as far as looking for its list.
+    test "every golden edit of the Mac's wire is an op the Registry takes", %{repo: repo} do
+      goldens =
+        @client_goldens
+        |> File.stream!()
+        |> Enum.map(&Jason.decode!/1)
+        |> Enum.filter(&(&1["type"] == "checklist_edit"))
+
+      assert length(goldens) >= length(Registry.device_ops())
+
+      for golden <- goldens do
+        case Registry.device_edit(golden, :independent, repo: repo, now: @now) do
+          {:ok, %{duplicate: false}} -> assert golden["op"]["op"] == "create"
+          other -> assert {:error, {:no_such_list, _id}} = other, inspect(golden)
+        end
+      end
+    end
+
+    test "a device's edit is made via the Mac and says so in its telemetry", %{repo: repo} do
+      TelemetryCapture.attach([[:fermix, :checklist, :edit]], :emitter)
+      fermix!(repo)
+      %{id: list_id} = list(repo, "Fermix")
+      [_active, row | _rest] = rows(repo, "Fermix")
+
+      params = %{
+        "client_msg_id" => "mac-1",
+        "list_id" => list_id,
+        "op" => %{"op" => "add", "text" => "Lists on the Mac", "after_id" => row.id}
+      }
+
+      assert {:ok, %{list_id: ^list_id, made: "ci_" <> _ = made, duplicate: false}} =
+               Registry.device_edit(params, :independent, repo: repo, now: @now)
+
+      assert %{made_via: "mac", text: "Lists on the Mac"} =
+               Enum.find(rows(repo, "Fermix"), &(&1.id == made))
+
+      assert_receive {:telemetry, [:fermix, :checklist, :edit], %{lists: 1, ops: 1},
+                      %{outcome: :ok, made_via: "mac", error_code: nil}}
+
+      move = %{
+        "client_msg_id" => "mac-2",
+        "list_id" => list_id,
+        "op" => %{"op" => "move", "row_id" => made}
+      }
+
+      assert {:error, {:device, :move_needs_place}} =
+               Registry.device_edit(move, :independent, repo: repo, now: @now)
+
+      assert_receive {:telemetry, [:fermix, :checklist, :edit], %{lists: 0, ops: 1},
+                      %{outcome: :refused, made_via: "mac", error_code: "move_needs_place"}}
     end
   end
 

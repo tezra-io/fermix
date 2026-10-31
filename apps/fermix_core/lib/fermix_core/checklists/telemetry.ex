@@ -8,7 +8,7 @@ defmodule FermixCore.Checklists.Telemetry do
   `[:fermix, :checklist, :edit]`: one event per `checklist_edit` call, the
   one transaction it is. Measurements: `duration_us`, `lists` (the lists the
   call touched) and `ops`. Metadata on both: `component: "checklists"`,
-  `made_via` (`chat | job`), `outcome` (`ok | refused | failed`), `error_code`
+  `made_via` (`chat | job | mac`, the last a device's edit over the Mac's wire), `outcome` (`ok | refused | failed`), `error_code`
   (the refusal's tag, `Checklists.Registry.error_tag/1`, else nil), `scope`
   on a read (`list | folder | index`), and the caller's `session_id` when it
   has one.
@@ -72,7 +72,7 @@ defmodule FermixCore.Checklists.Telemetry do
   end
 
   defp metadata(context, %{outcome: outcome, made_via: made_via} = fields)
-       when outcome in @outcomes and made_via in ["chat", "job"] do
+       when outcome in @outcomes and made_via in ["chat", "job", "mac"] do
     context
     |> Telemetry.correlation()
     |> Map.take([:session_id])
