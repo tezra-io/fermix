@@ -189,7 +189,7 @@ SweptTo ==
     ELSE "pending"
 
 \* The platform puts the reminder in front of the user. The companion timeline
-\* drops a second message with the same key (output.ex:258-260, which the
+\* drops a second message with the same key (output.ex:279-281, which the
 \* mobile and companion adapters write through -> mobile_sql.ex:507-517,
 \* unique index :52-54); no other platform reads the key.
 AlreadyShownUnderKey == PlatformDedupes /\ StableKey /\ seen > 0

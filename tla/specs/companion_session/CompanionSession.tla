@@ -62,16 +62,16 @@
 (* Each client's version is fixed here                                     *)
 (* (V1Clients); turn_done itself is read by no client rule, so it is not   *)
 (* put on the wire. Since companion protocol 4 a version 1 or 2 hello is   *)
-(* refused (the daemon's window is {4, 5} since protocol 5), so no version *)
+(* refused (the daemon's window is {5, 6} since protocol 6), so no version *)
 (* 1 client joins any more: the checks that name one (34, 35) prove the    *)
 (* gate the code still keeps (every_client_reads?), not a client the       *)
 (* daemon admits.                                                          *)
 (*                                                                         *)
 (* Not modelled:                                                           *)
-(* - text_delta, tool_event, turn_started, read_state: live-only, never in *)
-(* the timeline; no rule reads them (read_state is a frontier the daemon   *)
-(* caps at the newest row and announces to every watcher, the phones       *)
-(* included);                                                              *)
+(* - text_delta, tool_event, reasoning, turn_started, read_state:          *)
+(* live-only, never in the timeline; no rule reads them (read_state is a   *)
+(* frontier the daemon caps at the newest row and announces to every       *)
+(* watcher, the phones included);                                          *)
 (* - history_search and scroll-back (history_pull{before_seq}): reads      *)
 (* below the cursor that never move it;                                    *)
 (* - the phone: it shares this timeline, and its rows and read_state reach *)
@@ -158,7 +158,7 @@
 (* One step = one callback of one process, one Memory.Repo call, or one    *)
 (* thing a client or the environment does.                                 *)
 (***************************************************************************)
-\* SOURCE: apps/fermix_core/priv/companion/PROTOCOL.md @ 556be3d76fd2
+\* SOURCE: apps/fermix_core/priv/companion/PROTOCOL.md @ 3987fda8754a
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/requests.ex#request,cancel,claim_and_run,acquire_and_run,run_started,ingest_span,settle_after_ingest,settle_unless_handed_off,handoff_settlement,fail_attempt,report_failure,settle_failed,append_user,after_user_append,settle_inline,ingest_gateway,approval_resolution_fn,history,fit_page,cut_page,take_within,accepted_event,history_event,emit,best_effort_emit @ 97be58f8e741
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/turns.ex @ b14ce70b09b6
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/output.ex#text_done,turn_error,row,timeline_message,approval,approval_resolved,persist_text,persist_output,complete_request,fail_request @ ba55e94f8827
@@ -166,7 +166,7 @@
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/fanout.ex @ abddae4baafe
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/approvals.ex @ 59c135c36360
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/endpoint.ex#@max_clients,accept_connection,start_connection,hand_over @ c9885a5286f1
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/companion.ex#broadcast,dispatch,build_text_reply,build_turn_result,send_approval,send_message,write_call_row,announce_written,message,build_raw_stream_callback,every_client_reads? @ 6079ae4807e9
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/companion.ex#broadcast,dispatch,build_text_reply,build_turn_result,send_approval,send_message,write_call_row,announce_written,message,build_raw_stream_callback,every_client_reads? @ 66047cb5faaf
 \* SOURCE: apps/fermix_core/lib/fermix_core/companion/timeline.ex#append_client_message,append_proactive,history_page,claim_client_request,get_client_request,cancel_client_request,start_client_request,append_client_output,complete_client_request,fail_client_request @ bfe43cb17172
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/mobile_sql.ex#history,cancel_request,cancelled_request,append_in_tx,next_server_seq,increment_server_seq,claim_request_in_tx,classify_claim,complete_request,settle_request_in_tx,request_transition,append_client_output_in_tx,ensure_running_attempt @ 1ec47b7ff12f
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/request_coordinator.ex#handle_call @ 176aadf6651d
