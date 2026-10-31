@@ -277,6 +277,33 @@ defmodule FermixCore.Tools.BrowserTest do
     end
   end
 
+  # A form costs one model turn only if the model knows `submit: true` exists
+  # and that a fill's receipt needs no `get` or `wait` after it; a sentence left
+  # saying a fill never submits would teach the second turn back.
+  describe "the submit surface" do
+    test "both halves of the prompt teach submit and that a fill's receipt is its check" do
+      for surface <- [Browser.description(), Browser.when_to_use()] do
+        assert surface =~ "`submit: true`"
+        assert surface =~ "receipt is its own check"
+        # The pane's receipt carries no `value`, so a sentence sending the model
+        # to `get` a field without one would cost a turn per field there.
+        refute surface =~ "`get` that"
+      end
+
+      # In Chrome the receipt's `value` is what the field holds after typing.
+      assert Browser.when_to_use() =~ "holds after typing"
+    end
+
+    test "the schema carries submit, names the kinds that take it, and no kind says it cannot" do
+      params = Browser.parameters()
+
+      assert params.properties.submit.type == "boolean"
+      assert params.properties.submit.description =~ "`kind=fill_form`"
+      assert params.properties.submit.description =~ "`kind=sign_in`"
+      refute params.properties.kind.description =~ "does not submit"
+    end
+  end
+
   describe "progress_by_result?/1" do
     test "a call to a page's WebMCP tool counts progress by what it returns" do
       assert Browser.progress_by_result?(%{
