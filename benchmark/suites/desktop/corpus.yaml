@@ -1,0 +1,277 @@
+suite: desktop_corpus
+title: "Desktop corpus — native fixture applications, judged by what they recorded"
+risk: desktop_input
+description: >
+  The desktop half of the corpus M42 §14 asked for (M86 P0): real-user requests
+  against the compux fixture applications, each decided by what the APPLICATION
+  recorded about itself — never by a picture of the screen or by the reply's
+  wording. Every fixture writes a JSON state file of events (`seq`, `control`,
+  `action`, `value`, or `length` for a secure field), and every task here is a
+  list of clauses on those events.
+
+  One task list, four fixtures. The Linux fixtures (GTK3, GTK4, Qt) and the macOS
+  fixture (its AppKit half) carry the same control families under their own
+  prefix, so `{tk}` in a clause is that prefix and `{toolkit}` / `{window}` in a
+  query are the labels that fixture shows. The two Save buttons record as
+  `document.save` and `sidebar.save` on every fixture.
+
+  RISK: every task injects real input and captures the screen. The runner
+  (`bin/run_desktop.py`) refuses a live run unless told the desktop is disposable
+  (`--disposable-desktop`) — a container, a VM or a throwaway account, never a
+  session someone uses. `--dry-run` validates this file and plans, and spends,
+  launches and contacts nothing. The capability runner refuses `desktop_input`
+  outright and never loads this directory.
+
+  WHAT A TASK IS: an id, the verb it is there for (the plan's §6.3/§6.4 verbs plus
+  the cases fast operation needs: a dialog, a menu, two controls with one label, a
+  disabled control, a secure field), a query, and an oracle. A clause names a
+  control and optionally an action, a value or a length, and exactly one verdict:
+  `present` (at least one such event), `absent` (none), `count` (exactly N), or
+  `last` (the last event of that control and action matches). `expect_refusal`
+  names the helper's typed code for the refusal that is the right outcome: the
+  task passes only when its clauses pass and a failed computer-use row in the
+  turn carries THAT code (a paused, busy or user-active refusal does not). A turn
+  that made no computer-use call is invalid, never a pass. Contract:
+  `suites/SCHEMA.md`, "Desktop corpus".
+defaults:
+  # A desktop task is several look/act round trips through the computer-use tool.
+  timeout_ms: 600000
+
+fixtures:
+  gtk3:
+    platform: linux
+    prefix: gtk3
+    toolkit: GTK3
+    window: "Compux Fixture GTK3"
+    launch: [python3, "{fixture_dir}/linux/fixture_gtk3.py", --state-file, "{state_file}"]
+  gtk4:
+    platform: linux
+    prefix: gtk4
+    toolkit: GTK4
+    window: "Compux Fixture GTK4"
+    launch: [python3, "{fixture_dir}/linux/fixture_gtk4.py", --state-file, "{state_file}"]
+  qt:
+    platform: linux
+    prefix: qt
+    toolkit: Qt
+    window: "Compux Fixture Qt"
+    launch: [python3, "{fixture_dir}/linux/fixture_qt.py", --state-file, "{state_file}"]
+    # Qt 6.4 joins the accessibility bus only with an assistive technology running
+    # or this switch; QT_ACCESSIBILITY=1 alone does not (fixtures/linux/private-session.sh).
+    env: {QT_ACCESSIBILITY: "1", QT_LINUX_ACCESSIBILITY_ALWAYS_ON: "1"}
+  macos:
+    platform: macos
+    prefix: appkit
+    toolkit: AppKit
+    window: "Compux Fixture"
+    launch: ["{fixture_app}", --state-file, "{state_file}"]
+
+# What every fixture records: `<prefix>.<family>` for each family, plus the two
+# Save buttons, whose names carry no prefix.
+controls:
+  families: [button, checkbox, text_field, secure_field, disabled_button, popup, search,
+             list, outline, tabs, slider, far_list, dialog, menu]
+  shared: [document.save, sidebar.save]
+
+tasks:
+  - id: press_button
+    verb: press
+    query: "Press the {toolkit} button in the {window} window."
+    oracle:
+      - { control: "{tk}.button", action: press, count: 1 }
+
+  - id: tick_checkbox
+    verb: toggle
+    query: "Tick the {toolkit} checkbox in the {window} window."
+    oracle:
+      - { control: "{tk}.checkbox", action: toggle, value: "on", last: true }
+
+  - id: leave_checkbox_unticked
+    # It starts unticked: the right move is to read it and leave it alone.
+    verb: toggle
+    query: "In the {window} window, make sure the {toolkit} checkbox is unticked. Don't change anything else."
+    oracle:
+      - { control: "{tk}.checkbox", action: toggle, value: "on", absent: true }
+
+  - id: fill_text_field
+    verb: set_value
+    query: "Put 'Ada Lovelace' in the {toolkit} text field of the {window} window."
+    oracle:
+      - { control: "{tk}.text_field", action: set_value, value: "Ada Lovelace", last: true }
+
+  - id: rewrite_text_field
+    verb: set_value
+    query: "In the {window} window, type 'draft' into the {toolkit} text field, then change it to 'final'."
+    oracle:
+      - { control: "{tk}.text_field", action: set_value, value: "draft", present: true }
+      - { control: "{tk}.text_field", action: set_value, value: "final", last: true }
+
+  - id: search_for_report
+    verb: type
+    query: "In the {window} window, search for 'quarterly report'."
+    oracle:
+      - { control: "{tk}.search", action: set_value, value: "quarterly report", last: true }
+
+  - id: search_then_clear
+    verb: type
+    query: "Search for 'invoices' in the {window} window, then clear the search box again."
+    oracle:
+      - { control: "{tk}.search", action: set_value, value: "invoices", present: true }
+      - { control: "{tk}.search", action: set_value, value: "", last: true }
+
+  - id: enter_password
+    verb: secure
+    query: "Enter the password 'correct horse' in the {toolkit} secure field of the {window} window."
+    oracle:
+      - { control: "{tk}.secure_field", action: set_value, length: 13, last: true }
+
+  - id: sign_up_and_save
+    verb: form
+    query: >
+      In the {window} window, fill in the {toolkit} text field with 'Grace Hopper' and
+      the {toolkit} secure field with 'cobol1959', then press Save in the Document group.
+    oracle:
+      - { control: "{tk}.text_field", action: set_value, value: "Grace Hopper", last: true }
+      - { control: "{tk}.secure_field", action: set_value, length: 9, last: true }
+      - { control: document.save, action: press, count: 1 }
+      - { control: sidebar.save, absent: true }
+
+  - id: choose_popup_item
+    verb: select
+    query: "Set the {toolkit} pop-up button in the {window} window to Third."
+    oracle:
+      - { control: "{tk}.popup", action: select, value: Third, last: true }
+
+  - id: select_cherry
+    verb: select
+    query: "In the {window} window, select Cherry in the Fruit list."
+    oracle:
+      - { control: "{tk}.list", action: select, value: Cherry, last: true }
+
+  - id: select_elderberry
+    verb: select
+    query: "Pick Elderberry from the Fruit list in the {window} window."
+    oracle:
+      - { control: "{tk}.list", action: select, value: Elderberry, last: true }
+
+  - id: open_advanced_tab
+    verb: select
+    query: "Switch the {window} window to its Advanced tab."
+    oracle:
+      - { control: "{tk}.tabs", action: select, value: Advanced, last: true }
+
+  - id: open_about_tab
+    verb: select
+    query: "Show me the About tab in the {window} window."
+    oracle:
+      - { control: "{tk}.tabs", action: select, value: About, last: true }
+
+  - id: expand_pictures
+    verb: expand
+    query: "In the Folders outline of the {window} window, expand Pictures."
+    oracle:
+      - { control: "{tk}.outline", action: expand, value: Pictures, present: true }
+      - { control: "{tk}.outline", action: collapse, value: Pictures, absent: true }
+
+  - id: collapse_projects
+    # Projects starts expanded, so there is something to collapse.
+    verb: collapse
+    query: "Collapse the Projects folder in the {window} window's Folders outline."
+    oracle:
+      - { control: "{tk}.outline", action: collapse, value: Projects, present: true }
+      - { control: "{tk}.outline", action: expand, value: Projects, absent: true }
+
+  - id: select_nested_folder
+    verb: expand
+    query: "In the {window} window's Folders outline, open Documents and select Letters."
+    oracle:
+      - { control: "{tk}.outline", action: expand, value: Documents, present: true }
+      - { control: "{tk}.outline", action: select, value: Letters, last: true }
+
+  - id: set_volume
+    verb: set_value
+    query: "Set the Volume slider in the {window} window to 80."
+    oracle:
+      - { control: "{tk}.slider", action: set_value, value: "80", last: true }
+
+  - id: mute_volume
+    verb: set_value
+    query: "Turn the volume all the way down in the {window} window."
+    oracle:
+      - { control: "{tk}.slider", action: set_value, value: "0", last: true }
+
+  - id: scroll_history_to_end
+    verb: scroll_to
+    query: "Scroll the History list in the {window} window all the way to the bottom."
+    oracle:
+      - { control: "{tk}.far_list", action: scroll, value: bottom, present: true }
+
+  - id: select_oldest_entry
+    # Entry 200 starts far out of view.
+    verb: scroll_to
+    query: "In the {window} window's History list, select Entry 200."
+    oracle:
+      - { control: "{tk}.far_list", action: select, value: "Entry 200", last: true }
+
+  - id: focus_search
+    verb: focus
+    query: "Put the cursor in the search box of the {window} window, but don't type anything."
+    oracle:
+      - { control: "{tk}.search", action: focus, present: true }
+      - { control: "{tk}.search", action: set_value, absent: true }
+
+  - id: clear_all_confirmed
+    verb: dialog
+    query: "In the {window} window, use Clear All… and confirm it."
+    oracle:
+      - { control: "{tk}.dialog", action: open, present: true }
+      - { control: "{tk}.dialog", action: accept, present: true }
+      - { control: "{tk}.dialog", action: cancel, absent: true }
+
+  - id: clear_all_cancelled
+    verb: dialog
+    query: "Open Clear All… in the {window} window to see what it asks, then cancel it."
+    oracle:
+      - { control: "{tk}.dialog", action: open, present: true }
+      - { control: "{tk}.dialog", action: cancel, present: true }
+      - { control: "{tk}.dialog", action: accept, absent: true }
+
+  - id: export_report
+    verb: menu
+    query: "Export the report from the Actions menu of the {window} application."
+    oracle:
+      - { control: "{tk}.menu", action: activate, value: Export Report, count: 1 }
+      - { control: "{tk}.menu", action: activate, value: Print Preview, absent: true }
+
+  - id: print_preview
+    verb: menu
+    query: "Open Print Preview from the Actions menu of the {window} application."
+    oracle:
+      - { control: "{tk}.menu", action: activate, value: Print Preview, present: true }
+      - { control: "{tk}.menu", action: activate, value: Export Report, absent: true }
+
+  - id: save_document
+    # Two buttons say "Save"; only the group around each one tells them apart.
+    verb: ambiguity
+    query: "Save the document in the {window} window: the Save button in the Document group."
+    oracle:
+      - { control: document.save, action: press, count: 1 }
+      - { control: sidebar.save, absent: true }
+
+  - id: save_sidebar
+    verb: ambiguity
+    query: "In the {window} window, press the Save button that belongs to the Sidebar group."
+    oracle:
+      - { control: sidebar.save, action: press, count: 1 }
+      - { control: document.save, absent: true }
+
+  - id: press_disabled_button
+    # The button is disabled: compux refuses `element_disabled`, and a click at its
+    # pixels does nothing either. Success is the application recording no press AND
+    # a computer-use row refused with `element_disabled`, so a turn that never tried,
+    # or one refused for another reason, cannot pass.
+    verb: refusal
+    expect_refusal: element_disabled
+    query: "Press the {toolkit} disabled button in the {window} window."
+    oracle:
+      - { control: "{tk}.disabled_button", absent: true }
