@@ -46,10 +46,11 @@ attempt like every platform's, so nothing here models it separately.
   Repo call that times out no longer does: it returns an error (see
   `RepoCanFail`).
 - `DaemonCanCrash`: the whole daemon dies and boots again.
-- `RepoCanFail`: a scheduler Repo call returns an error. Either its transaction
-  rolled back (a recovery or the boot sweep: the row is unchanged), or it timed
-  out and its request still runs later (the claim, `ClaimTimesOut`; see "Repo
-  call timeouts" under Assumptions).
+- `RepoCanFail`: a scheduler Repo call returns an error. Either nothing was
+  written (its transaction rolled back, a recovery or the boot sweep, or the
+  Repo turned a late claim away unrun: the row is unchanged), or it timed out
+  and its request still runs later (the claim, `ClaimTimesOut`; see "Repo call
+  timeouts" under Assumptions).
 - `OwnerCanChange`: the owner edits or cancels the event.
 - `DownHandledBeforeRetryDue`: a timing fact, not a code mechanism. A worker
   that settles a retry exits at once, so its `:DOWN` reaches the scheduler long
@@ -67,7 +68,7 @@ least one check):
 - `ClaimRequiresPending`: the claim takes only pending rows. The load-bearing
   filter is the due scan's `status = 'pending'` (`temporal_sql.ex:1573`). The
   per-row re-read (`:1593`) and the UPDATE's `WHERE status = 'pending'`
-  (`:1033`) repeat it inside the same Repo callback (`repo.ex:3055-3058`), where
+  (`:1033`) repeat it inside the same Repo callback (`repo.ex:3061-3064`), where
   no other writer can interleave, so removing only them would change nothing.
 - `WorkersDieWithScheduler`: `DeliverySupervisor` starts after the scheduler
   under `:rest_for_one` (`application.ex:362-363`, `:182`).
@@ -77,7 +78,7 @@ least one check):
   REMIND-2 fix: the send is `spawn_monitor`ed, not linked, and outlives its
   worker.
 - `ResetSkipsMonitored`: the 60 s check leaves rows with a monitored worker
-  alone (`scheduler.ex:528-531`).
+  alone (`scheduler.ex:534-537`).
 - `RecoverSkipsSettled`: recovery leaves a row that is no longer `delivering`
   untouched (`temporal_sql.ex:1099-1102`).
 - `RefusesWhileDelivering`: edit and cancel refuse while a row is `delivering`
@@ -89,11 +90,11 @@ least one check):
 - `ClampsWatchdog`: `timeout_ms = min(60 s, valid_until - now)`
   (`delivery_worker.ex:102-110`).
 - `BoundaryExpires`: the 60 s page expires pending rows past `valid_until`
-  (`scheduler.ex:405-421` → `temporal_sql.ex:1203-1240`).
+  (`scheduler.ex:411-427` → `temporal_sql.ex:1203-1240`).
 
 **What holds:**
 - Check 01, with every fault on (no dedupe), 7,173 states:
-  - No sixth attempt (`scheduler.ex:326-329`). This rests on `AttemptCap`
+  - No sixth attempt (`scheduler.ex:332-335`). This rests on `AttemptCap`
     (check 02).
   - Never two workers for the row (`delivery_supervisor.ex:5-10`,
     `application.ex:355-363`). This rests on `ClaimRequiresPending` (check 03),
@@ -172,7 +173,7 @@ abandoned at the platform, is a proposed rule (REMIND-3).
   shortest path is a claim that times out but still lands (`ClaimTimesOut`,
   three states). A `:DOWN` recovery that rolls back reaches it too, as does a
   restart between the claim and the worker's start followed by a boot sweep
-  that rolls back (`scheduler.ex:217`).
+  that rolls back (`scheduler.ex:219`).
 - 19: a row claimed while valid reaches its worker after `valid_until` (claim,
   then the boundary passes, then `handle_continue`), a path
   `delivery_worker.ex:160-163` calls impossible (see the drift note).
@@ -458,13 +459,19 @@ push an id and expiry. No delivery path the spec models changed.
   business. With `PlatformCanBeSlow = FALSE` the platform always answers inside
   the watchdog, so the watchdog can only catch a send that never reached it.
 - **Repo call timeouts.** `Memory.Repo` serves every request in order, and a
-  call gives up after 5 s (`repo.ex:3960-3983`). Every call the scheduler
-  process makes passes `Repo.periodic_opts/2` (`scheduler.ex:175-183`), so a
+  call gives up after 5 s (`repo.ex` `call/2`). Every call the scheduler
+  process makes passes `Repo.periodic_opts/2` (`scheduler.ex:175-185`), so a
   timeout returns `{:error, :repo_timeout}`: the scheduler takes that site's
   error branch and keeps running, monitors intact. The request is not
   cancelled. It still runs, ahead of anything the scheduler sends next, so its
   write lands whole and no scheduler step can read the row in between. That
-  is unlike a Repo error, which rolls back (`RepoFails`).
+  is unlike a Repo error, which rolls back (`RepoFails`). The due claim is the
+  one exception: the scheduler marks it `skip_when_late` (`claim_due/3`), so
+  the Repo turns it away unrun once the scheduler's deadline has passed
+  (`handle_call/3`'s `{:with_deadline, ...}` clause). That writes nothing, the
+  `RepoFails` branch; a claim the Repo had started by then still lands
+  (`ClaimTimesOut`). Every other request, a delivery worker's settlement
+  included, still runs however late.
   - A timed-out claim lands as a `delivering` row with its attempt consumed,
     no worker and no monitor (`ClaimTimesOut`). Only the 60 s monitor check
     resets it, or a restart's boot sweep. Before the change the timeout crashed

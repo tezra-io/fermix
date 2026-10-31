@@ -39,7 +39,13 @@ One step is one GenServer callback, one `Memory.Repo` call (the single writer, s
 one call is atomic whatever SQL it runs) or one side effect. Calls from one
 process are served in the order sent, and a call whose caller timed out still
 runs, ahead of anything that caller sends next (`repo.ex` `call/2`,
-`call_or_timeout_error/3`). That ordering is why a filter task killed by a
+`call_or_timeout_error/3`), unless its caller marked it `skip_when_late`: the
+Repo turns such a request away unrun once the caller's deadline has passed
+(`handle_call/3`'s `{:with_deadline, ...}` clause). The filter dispatcher's
+claim and reclaim, the scheduler's cue claim and the sweeper's steps are
+marked, and one turned away writes nothing, a stutter; a call that "times out
+and still lands" below is one the Repo had started. No settle or reset is
+marked. That ordering is why a filter task killed by a
 dispatcher restart cannot write after the new dispatcher's boot reset: its settle,
 if it was sent, is already in the Repo's mailbox ahead of the reset.
 
@@ -93,8 +99,9 @@ if it was sent, is already in the Repo's mailbox ahead of the reset.
   whether: a younger orphan is reclaimed by a later sweep. A call the
   dispatcher still holds is never reclaimed, whatever its age, and that is
   modelled (`Orphan`). A reclaim that fails changes no row and is traced
-  (`sweep_error`, `filter_reclaim`) and tried by the next sweep; one that times
-  out still lands, as the step does.
+  (`sweep_error`, `filter_reclaim`) and tried by the next sweep, as is one the
+  Repo turns away unrun past its deadline; one that times out once started
+  still lands, as the step does.
 - **The first sweep's scheduler wake (R3).** The filtering group's first sweep
   wakes the scheduler once (`first_sweep/1`, `filters.ex:180-185`), because the
   scheduler's own admission request at init comes before the cue tree runs.
@@ -227,6 +234,19 @@ if it was sent, is already in the Repo's mailbox ahead of the reset.
   `screen_provider/0` unset), so which deliveries exist is unchanged. A
   decision model with none set up holds the watcher at its filter call, the
   provider-failure branch `TaskSettle` already takes. No step moved.
+- **Claims the Repo may skip; a sweep pass stops at a Repo timeout
+  (2026-10-31).** A caller marks a request `skip_when_late` when skipping it is
+  safe, and the Repo turns it away unrun once the caller's deadline has passed
+  (see the top of this file). Marked here: the filter claim (`FClaimTimesOut`)
+  and reclaim (`FReclaim`), the cue claim (`AdmitTimesOut`), the sweeper's
+  steps (`SweepExpire`, `PropSweep`) and the follow-up offer claim, which no
+  step models. A request turned away writes nothing, so it is a stutter, and
+  a claim that times out once started still lands as before. No settle, reset
+  or proposal decision is marked. A sweeper pass now also stops at the first
+  step that ends in a Repo timeout, as it stops at a spent budget, and the
+  next tick starts again at the first step; the sweeper's steps are modelled
+  one at a time with no pass, so an early stop changes when a later step
+  runs, not whether. No step moved.
 
 ## Switches
 

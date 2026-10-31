@@ -113,7 +113,9 @@ send (`manager.ex:1253-1259`).
     in time.
   - A timed-out mark (`:216-225`) is not a failed mark. The Repo serves
     requests one at a time in arrival order and still runs one whose caller
-    gave up (`repo.ex:3931-3935`), so the UPDATE lands exactly where it would
+    gave up (`repo.ex` `call/2`; the worker marks none of its requests
+    `skip_when_late`, the option that lets the Repo turn a late one away), so
+    the UPDATE lands exactly where it would
     have if the worker had waited, ahead of the worker's next request, its
     next tick's read included. The worker reads the answer only to log it,
     and nothing it does in between reaches the row except through the Repo,

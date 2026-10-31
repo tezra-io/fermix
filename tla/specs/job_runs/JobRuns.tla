@@ -79,12 +79,17 @@
 (* Late writes: the Repo serves one request at a time, and a call it does  *)
 (* not answer within 5 s (Timeouts.repo_call) is not cancelled: the        *)
 (* request lands later, still before any later request from the same       *)
-(* caller (repo.ex:4335-4348). A runner dies on that timeout, so a crash   *)
-(* at a runner's Repo write comes in two kinds: the write lands late, or   *)
-(* it never lands (a kill). The late kind is modelled where no later crash *)
-(* point stands for it: the runner's final write (RunnerCrashLate). The    *)
+(* caller (repo.ex call/2). The one exception is a claim its caller marks  *)
+(* skip_when_late (the Scheduler's claims: claim_due_job, claim_job_now,   *)
+(* claim_cue_run, claim_follow_up_run), which the Repo turns away unrun    *)
+(* once the caller's deadline has passed (handle_call/3, {:with_deadline,  *)
+(* ...}): it writes nothing. A write always lands late. A runner dies on   *)
+(* that timeout, so a crash at a runner's Repo write comes in two kinds:   *)
+(* the write lands late, or it never lands (a kill). The late kind is      *)
+(* modelled where no later crash point stands for it: the runner's final   *)
+(* write (RunnerCrashLate). The                                            *)
 (* Scheduler survives the timeout (Repo.periodic_opts, repo.ex:1224-1226,  *)
-(* :4350-4358): the call returns {:error, :repo_timeout}, and the          *)
+(* :4371-4379): the call returns {:error, :repo_timeout}, and the          *)
 (* Scheduler takes that call site's error branch and keeps its monitors    *)
 (* and timers (the timeout steps below). It can still die of another       *)
 (* cause while it waits on the reaper's write, which then lands            *)
@@ -162,10 +167,10 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/jobs/delivery.ex @ 4eb42c517b57
 \* SOURCE: apps/fermix_core/lib/fermix_core/jobs/registry.ex @ 09431e45a0f5
 \* SOURCE: apps/fermix_core/lib/fermix_core/delivery/channel_send.ex @ 9b06289e25ae
-\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo.ex#call,call_or_timeout_error,request_name,periodic_opts,claim_due_job,claim_job_now,claim_due_job_tx,claim_in_tx,claim_job_now_tx,transact_claim,fetch_claimable_due_job,finish_job_claim,rollback_job_claim,upsert_scheduled_job_row,upsert_job_run_row,ensure_no_active_job_run,fetch_claimable_job,settle_job_run,settle_job_run_tx,settle_job_run_in_tx,ensure_job_run_active,release_settled_job,finish_job_settle,rollback_job_settle,unsettled_job_runs,fetch_unsettled_job_runs,@unsettled_job_runs_sql,update_scheduled_job_fields,update_scheduled_job_fields_row,scheduled_job_field_assignments!,scheduled_job_field_assignment!,@owner_text_fields,due_scheduled_jobs,fetch_due_scheduled_jobs,next_scheduled_job,fetch_next_scheduled_job,upsert_job_run,upsert_scheduled_job,get_job_run,get_scheduled_job,upsert_memory @ 5020e2ba0160
+\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo.ex#call,request_message,deadline_after,deadline_passed?,call_or_timeout_error,request_name,periodic_opts,claim_due_job,claim_job_now,claim_due_job_tx,claim_in_tx,claim_job_now_tx,transact_claim,fetch_claimable_due_job,finish_job_claim,rollback_job_claim,upsert_scheduled_job_row,upsert_job_run_row,ensure_no_active_job_run,fetch_claimable_job,settle_job_run,settle_job_run_tx,settle_job_run_in_tx,ensure_job_run_active,release_settled_job,finish_job_settle,rollback_job_settle,unsettled_job_runs,fetch_unsettled_job_runs,@unsettled_job_runs_sql,update_scheduled_job_fields,update_scheduled_job_fields_row,scheduled_job_field_assignments!,scheduled_job_field_assignment!,@owner_text_fields,due_scheduled_jobs,fetch_due_scheduled_jobs,next_scheduled_job,fetch_next_scheduled_job,upsert_job_run,upsert_scheduled_job,get_job_run,get_scheduled_job,upsert_memory @ 1c54499d5b8d
 \* SOURCE: apps/fermix_core/lib/fermix_core/application.ex#start_supervision_tree,supervision_children,jobs_scheduler_opts @ 2668fea2b05c
 \* SOURCE: apps/fermix_core/lib/fermix_core/timeouts.ex#expired,repo_call,@repo_call_ms @ 05d3e6ea2142
-\* SOURCE: apps/fermix_core/lib/fermix_core/jobs/cue_admission.ex @ 3791eb7ad5b0
+\* SOURCE: apps/fermix_core/lib/fermix_core/jobs/cue_admission.ex @ b98563b66ad5
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo.ex#claim_cue_run,claim_cue_run_tx,claim_cue_run_in_tx,claim_delivery,settle_cue_run,settle_cue_run_tx,settle_cue_run_in_tx,ensure_not_cue_run,active_run_trigger,release_cue_job @ 895445d8ff8b
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_runs_sql.ex#@open_sql,@cap_room_sql,@eligible_sql,@candidates_sql,@eligible_delivery_sql,eligible_delivery,settle_delivery @ 80ae2421c1fd
 \* SOURCE: apps/fermix_core/lib/fermix_core/jobs/cue_run.ex#report_final_failure,record_delivery,write_delivery @ fb34531385a5
@@ -210,22 +215,22 @@ CONSTANTS
                         \* never with CueTask. Every check before 54 sets it FALSE
     \* Mechanism switches: what the code does about it. TRUE is the real code;
     \* each is switched off by the checks that show a property needs it.
-    AtomicRaceStop,           \* the claim refuses while a run is queued/running (repo.ex:6788, :6841-6859);
-                              \* the due, manual and follow-up claims alike (claim_in_tx, repo.ex:7580)
+    AtomicRaceStop,           \* the claim refuses while a run is queued/running (repo.ex:6842, :6895-6913);
+                              \* the due, manual and follow-up claims alike (claim_in_tx, repo.ex:7634)
     RetriesOnlyUnsent,        \* a send is retried only when it never reached the platform (channel_send.ex:140-143, :194-202);
                               \* the mechanism for platforms that do not dedupe on the run's proactive_key
     ReconcilesRuns,           \* init and every 60 s reap orphaned runs, adopt live runners (scheduler.ex:228, :263-533)
     CrashFailsPendingDelivery,\* a dead runner's pending delivery is marked failed, whatever the run's
-                              \* status (scheduler.ex:1043-1045, :1064-1077)
+                              \* status (scheduler.ex:1049-1051, :1070-1083)
     DeliveryWatchdog,         \* the runner stops waiting for a send after delivery_timeout_ms (channel_send.ex:219-241)
     AtomicSettle,             \* a run's final row and its job's release are one transaction, for the
-                              \* runner and the reaper alike (repo.ex:2483-2486, :6797-6813, :6873-6920)
+                              \* runner and the reaper alike (repo.ex:2489-2492, :6851-6867, :6927-6974)
     ReconcilesPending,        \* the reconcile pass also reads runs whose delivery is still pending
-                              \* (unsettled_job_runs, repo.ex:2522-2575, scheduler.ex:489)
+                              \* (unsettled_job_runs, repo.ex:2528-2581, scheduler.ex:489)
     RefusalBacksOff,          \* a due claim refused as :already_running is backpressure: the re-arm
-                              \* floors at the 5 s backoff (scheduler.ex:711-715, :1198-1204)
+                              \* floors at the 5 s backoff (scheduler.ex:714-718, :1204-1210)
     OwnerWritesColumns,       \* pause, resume and update_job write only the columns they own
-                              \* (registry.ex:238-261; repo.ex:2426-2429, :7068-7075, :8042-8080)
+                              \* (registry.ex:238-261; repo.ex:2432-2435, :7122-7129, :8096-8134)
     LoopDiesWithRunner,       \* a runner's AgentLoop is linked to it, so a restart that kills
                               \* the runner kills its loop too (runner.ex:1285-1289)
     TicksAdmit,               \* the due and reconcile ticks run cue admission after their due
@@ -246,7 +251,7 @@ VARIABLES
     nextRun,     \* scheduled_jobs.next_run_at, as a fire-time index
     runStatus,   \* runStatus[r]: job_runs.status ("absent" = no row for this id yet)
     delivery,    \* delivery[r]: job_runs.delivery_status; "unset" is the "none" the claim
-                 \* writes before a result exists (scheduler.ex:898), kept apart from the
+                 \* writes before a result exists (scheduler.ex:904), kept apart from the
                  \* final "none" of delivery_mode "none" (modelled as "skipped")
     waiting,     \* the task's passed deliveries a claim may take (cue_deliveries rows in
                  \* state passed, as a count; always 0 for a cron job)
@@ -368,18 +373,18 @@ Min(S) == CHOOSE x \in S : \A y \in S : x <= y
 
 \* The due scan and the due timer never see a job a watcher runs, a cue task
 \* or a follow-up: it has neither a next_run_at nor an expiry
-\* (fetch_due_scheduled_jobs, fetch_next_scheduled_job, repo.ex:6675-6731;
+\* (fetch_due_scheduled_jobs, fetch_next_scheduled_job, repo.ex:6729-6785;
 \* registry.ex:5-18).
 WatcherJob == CueTask \/ FollowUp
 Due == ~WatcherJob /\ nextRun <= now
 Alive(r) == pc[r] \notin {"off", "gone"}
 
 \* Rows that hold an active slot: what ensure_no_active_job_run counts
-\* (repo.ex:6762-6780) and the settle's guard accepts (repo.ex:6873-6880).
+\* (repo.ex:6816-6834) and the settle's guard accepts (repo.ex:6927-6934).
 Active == {r \in Runs : runStatus[r] \in {"queued", "running"}}
 
 \* What the reconcile scan reads: unsettled_job_runs, the active rows and then
-\* the rows whose delivery is still pending (repo.ex:2522-2575); without
+\* the rows whose delivery is still pending (repo.ex:2528-2581); without
 \* ReconcilesPending, the active rows alone.
 Scanned == IF ReconcilesPending
            THEN Active \cup {r \in Runs : delivery[r] = "pending"}
@@ -387,7 +392,7 @@ Scanned == IF ReconcilesPending
 
 JobRow == [en |-> jobEnabled, st |-> jobState, next |-> nextRun]
 
-\* The settle's job release (release_settled_job, repo.ex:6886-6911): one
+\* The settle's job release (release_settled_job, repo.ex:6940-6965): one
 \* column-targeted UPDATE that turns "running" back into "scheduled" and keeps
 \* any other state. It never writes next_run_at, and writes enabled only to
 \* disable a one-off its claim consumed (one-offs are not modelled).
@@ -412,7 +417,7 @@ Reusable(r) ==
        /\ r /= sRun
 FreeIds == {r \in Runs : Reusable(r)}
 
-\* The job_runs row the claim inserts (run_attrs, scheduler.ex:869-881),
+\* The job_runs row the claim inserts (run_attrs, scheduler.ex:875-887),
 \* and a clean slate for the per-run process and platform variables.
 NewRun(r) ==
     /\ runStatus' = [runStatus EXCEPT ![r] = "queued"]
@@ -478,7 +483,7 @@ OwnerQuiet == <<rowVars, runnerVars, helperVars, envVars, sPc, reapReturn, monit
 
 \* Registry.pause_job (registry.ex:124-126 -> update_job_fields :241-249):
 \* Repo.update_scheduled_job_fields writes enabled = false and state =
-\* "paused" in place (repo.ex:2426-2429, :7068-7075), then the :job_changed cast
+\* "paused" in place (repo.ex:2432-2435, :7122-7129), then the :job_changed cast
 \* (registry.ex:681-686). The owner is told "paused". Nothing is read first.
 Pause ==
     /\ OwnerWritesColumns
@@ -542,16 +547,16 @@ UpdateRead ==
 
 \* ... then apply_job_update (registry.ex:250-260). With OwnerWritesColumns,
 \* Repo.update_scheduled_job_fields writes only the edited columns, never
-\* state, enabled or last_* (repo.ex:7068-7075; the owner field list,
-\* :8042-8080): the modelled edit writes no modelled column. Without it, the
+\* state, enabled or last_* (repo.ex:7122-7129; the owner field list,
+\* :8096-8134): the modelled edit writes no modelled column. Without it, the
 \* code before the fix upserted the whole row it read, writing back the
 \* enabled, state and next_run_at it saw. Then the :job_changed cast.
 \* The write and the clearing of a follow-up's automatic approval the edit
 \* made stale run in one BEGIN IMMEDIATE (update_scheduled_job_fields_row,
-\* repo.ex:7944-7955; cue_watchers columns, not modelled), still one Repo
+\* repo.ex:7998-8009; cue_watchers columns, not modelled), still one Repo
 \* call. A follow-up's own edit (update_follow_up_job, registry.ex:165-174)
 \* takes the same path and may also write its tools and timeout
-\* (repo.ex:8944-8949), which no step here reads.
+\* (repo.ex:8998-9003), which no step here reads.
 UpdateWrite ==
     /\ oPc = "editing"
     /\ IF OwnerWritesColumns
@@ -618,7 +623,7 @@ CueAdmit ==
                    activeSnap, reapQ, sSnap, runsKnown, fQ, fClaimed>>
 
 \* handle_info({:DOWN, ...}) with an abnormal reason (scheduler.ex:284-296):
-\* forget the monitor, then mark_run_crashed -> mark_run_failed (:942-966), and
+\* forget the monitor, then mark_run_crashed -> mark_run_failed (:948-972), and
 \* with cues on request one admission pass (maybe_request_admission).
 HandleDown(r) ==
     /\ sPc = "idle"
@@ -631,13 +636,13 @@ HandleDown(r) ==
     /\ UNCHANGED <<Quiet, reapReturn, changed, dueTimer, refused, activeSnap, reapQ, sSnap,
                    admit, runsKnown, fQ, fClaimed>>
 
-\* handle_call({:run_now, ...}) -> manual_run (scheduler.ex:241-244, :730-763).
+\* handle_call({:run_now, ...}) -> manual_run (scheduler.ex:241-244, :733-769).
 \* Its Repo.get_scheduled_job lookup is folded into Repo.claim_job_now: the
 \* claim transaction re-checks enabled, "scheduled" and (the race-stop) no
-\* queued/running run (repo.ex:6662-6666, :6696-6714, :6741-6780), so the
+\* queued/running run (repo.ex:6716-6720, :6750-6768, :6795-6834), so the
 \* fold only drops harmless outcomes (an error reply either way). A manual
 \* claim leaves a recurring job's next_run_at alone (manual_claim_patch,
-\* scheduler.ex:754, :882-886). With every modelled run id in use, the
+\* scheduler.ex:757, :888-892). With every modelled run id in use, the
 \* request is out of the model's bounds and is refused. A Repo call that
 \* times out is ManualRunTimeout. A cue task never gets here: run_job_now
 \* refuses it before calling the Scheduler (Registry.check_run_now,
@@ -707,16 +712,16 @@ ReconcileLive ==
                    runsKnown, fQ, fClaimed>>
 
 \* The reaper's write for run r, as it lands (mark_run_error, scheduler.ex
-\* :996-1047). A queued/running run is settled "error": with AtomicSettle
+\* :1002-1053). A queued/running run is settled "error": with AtomicSettle
 \* through Repo.settle_job_run, which releases the job in the same write
-\* (:1025-1041); without, an upsert of the run row alone. A run whose delivery
-\* is still pending, whatever its status, gets delivery "failed" (:1043-1045,
-\* :1064-1077). Any other row is left alone.
+\* (:1031-1047); without, an upsert of the run row alone. A run whose delivery
+\* is still pending, whatever its status, gets delivery "failed" (:1049-1051,
+\* :1070-1083). Any other row is left alone.
 \* A cue task's queued/running run settles through CueAdmission.settle/3 ->
-\* Repo.settle_cue_run (mark_run_error's cue clause, scheduler.ex:1005-1023): the
+\* Repo.settle_cue_run (mark_run_error's cue clause, scheduler.ex:1011-1029): the
 \* same row and release in one transaction, plus its delivery, put back or
 \* ended (Retries). An exhausted one gets its final failure report from a task
-\* the reaper starts after the write (report_cue_failure, :972-992) when
+\* the reaper starts after the write (report_cue_failure, :978-998) when
 \* `reports`: not when the Scheduler died waiting on the write. The task
 \* first marks the delivery pending (ReportMark), or, without
 \* ReportMarksPending, sends at once. A follow-up's run (trigger "watcher")
@@ -745,11 +750,11 @@ SplitReapFollows(r) ==
     /\ \/ runStatus[r] \in {"queued", "running"}
        \/ CrashFailsPendingDelivery /\ delivery[r] = "pending"
 
-\* mark_run_failed -> mark_run_error (scheduler.ex:949-1047): Repo.get_job_run,
+\* mark_run_failed -> mark_run_error (scheduler.ex:955-1053): Repo.get_job_run,
 \* then the write above. The two calls are one step: once its runner is dead
 \* only the Scheduler writes this row, and a runner's timed-out write landed
 \* before the get, which was queued after it. For the same reason the
-\* settle's :run_not_active branch (:1035-1036) is unreachable here. One other
+\* settle's :run_not_active branch (:1041-1042) is unreachable here. One other
 \* writer remains: a cue run's report task, whose pending row a reconcile
 \* pass reaps like any orphan's (the task is no runner). Its result write
 \* can land between the get and the write, which then records "failed" over
@@ -757,7 +762,7 @@ SplitReapFollows(r) ==
 \* FailedMeansNotDelivered (JOB-6, checked with cues off) tells "failed" over
 \* a sent report from "sent". A write that times out is this step too: it
 \* lands late, before the Scheduler's next Repo call, and its error branch
-\* only logs and skips the memory-source mirror (:1038-1039, :1072-1075), which
+\* only logs and skips the memory-source mirror (:1044-1045, :1078-1081), which
 \* is not modelled. A get that times out is ReapLookupTimeout. Without
 \* AtomicSettle the code before the fix then wrote the job row (r_read).
 ReapRun ==
@@ -793,7 +798,7 @@ ReapWriteJob ==
                    runsKnown, fQ, fClaimed>>
 
 \* run_due_jobs: Repo.due_scheduled_jobs (scheduler.ex:569-578): enabled,
-\* state "scheduled", next_run_at <= now (repo.ex:6596-6623). A scan that
+\* state "scheduled", next_run_at <= now (repo.ex:6650-6677). A scan that
 \* times out is ScanTimeout.
 Scan ==
     /\ sPc = "scan"
@@ -801,8 +806,8 @@ Scan ==
     /\ UNCHANGED <<Quiet, reapReturn, monitors, downs, changed, dueTimer, refused, sRun,
                    activeSnap, reapQ, sSnap, cuePending, admit, runsKnown, fQ, fClaimed>>
 
-\* claim_patched_job -> Repo.claim_due_job (scheduler.ex:704-724): one
-\* BEGIN IMMEDIATE transaction (repo.ex:6654-6658, :6696-6739) that re-checks the job is
+\* claim_patched_job -> Repo.claim_due_job (scheduler.ex:704-727): one
+\* BEGIN IMMEDIATE transaction (repo.ex:6708-6712, :6750-6793) that re-checks the job is
 \* due, refuses while a run is queued/running (the race-stop), then sets
 \* state "running" with next_run_at advanced (claim_job_patch, scheduler.ex
 \* :875-879) and inserts the run "queued". :already_running returns
@@ -828,7 +833,7 @@ Claim ==
                    activeSnap, reapQ, sSnap, waiting, starting, cuePending, admit, runsKnown,
                    fQ, fClaimed>>
 
-\* start_or_mark_failed (scheduler.ex:853-863): RunnerSupervisor.start_run
+\* start_or_mark_failed (scheduler.ex:859-869): RunnerSupervisor.start_run
 \* runs Runner.init synchronously (runner_supervisor.ex:20-23), which
 \* publishes the run id (runner.ex:180); then Process.monitor. No Repo call.
 Start ==
@@ -851,8 +856,8 @@ Start ==
 AdmitFrom == IF FollowUp THEN "f_scan" ELSE "c_scan"
 
 \* schedule_due_timer -> next_due_timer: Repo.next_scheduled_job (scheduler.ex
-\* :1125-1153, repo.ex:6625-6652). A tick whose claim was refused re-arms no
-\* sooner than the 5 s backoff (outcome :busy, due_delay_ms, scheduler.ex:1198-1204) with
+\* :1131-1159, repo.ex:6679-6706). A tick whose claim was refused re-arms no
+\* sooner than the 5 s backoff (outcome :busy, due_delay_ms, scheduler.ex:1204-1210) with
 \* RefusalBacksOff; without it the refusal counted as a clean drain. After a
 \* clean tick an enabled "scheduled" job is armed at its next_run_at, which is
 \* 0 ms when it is already due; no such job arms nothing. A lookup that times
@@ -872,7 +877,7 @@ Arm ==
                    cuePending, admit, runsKnown, fQ, fClaimed>>
 
 \* admit_follow_up_runs: the free cue slots (free_cue_slots, :363-369), then
-\* CueAdmission.claim_follow_ups (cue_admission.ex:193-210): one Repo call
+\* CueAdmission.claim_follow_ups (cue_admission.ex:197-214): one Repo call
 \* for the oldest starting triggers, at most ten ({:starting_triggers, 10},
 \* cues_follow_up_sql.ex:211-213). While the last reconcile scan failed the
 \* slots are 0 and claim_follow_ups(0, ...) makes no call (:189-191).
@@ -890,13 +895,13 @@ FollowUpScan ==
                    activeSnap, reapQ, sSnap, cuePending, admit, runsKnown, fClaimed>>
 
 \* Whether the claim can take the follow-up's run: fetch_claimable_job (the
-\* job enabled and "scheduled", repo.ex:7614-7633) and claim_in_tx's
-\* ensure_no_active_job_run (:7580-7587, :7635), the race-stop every claim
+\* job enabled and "scheduled", repo.ex:7668-7687) and claim_in_tx's
+\* ensure_no_active_job_run (:7634-7641, :7689), the race-stop every claim
 \* shares.
 FollowUpClaimable == jobEnabled /\ jobState = "scheduled" /\ (Active = {} \/ ~AtomicRaceStop)
 
 \* The claim of one trigger, as it lands: Repo.claim_follow_up_run
-\* (repo.ex:2562-2565, :7521-7567), one BEGIN IMMEDIATE that reads the
+\* (repo.ex:2568-2571, :7575-7621), one BEGIN IMMEDIATE that reads the
 \* trigger while it is starting (CuesFollowUpSql.claimable,
 \* cues_follow_up_sql.ex:486-492), takes the job through the claim every run
 \* takes with state "running" alone (claim_follow_up_job: claim_in_tx over
@@ -926,13 +931,13 @@ FollowUpClaimRows(start) ==
 FollowUpNext ==
     sPc' = IF fQ > 1 THEN "f_claim" ELSE IF fClaimed' /= {} THEN "f_start" ELSE "c_scan"
 
-\* One trigger the scan read (admit_trigger, cue_admission.ex:222-241): its
+\* One trigger the scan read (admit_trigger, cue_admission.ex:226-245): its
 \* job read (JobsRegistry.get_job) and the hold check (held_check,
-\* :243-255) are folded in, since the claim re-reads the job in its own
+\* :247-259) are folded in, since the claim re-reads the job in its own
 \* transaction and the hold is not modelled (see the header), then the
-\* claim (claim_trigger, :257-276). A refused trigger spends no slot and
-\* goes to FollowUps.refused/3 in a task (refused, :279-282), which writes
-\* nothing modelled; the pass goes on (admit_until_full, :215-219). A claim
+\* claim (claim_trigger, :261-282). A refused trigger spends no slot and
+\* goes to FollowUps.refused/3 in a task (refused, :285-288), which writes
+\* nothing modelled; the pass goes on (admit_until_full, :219-223). A claim
 \* that times out, or a read before it, is FollowUpClaimTimeout.
 FollowUpClaim ==
     /\ sPc = "f_claim"
@@ -943,7 +948,7 @@ FollowUpClaim ==
                    refused, sRun, activeSnap, reapQ, sSnap, cuePending, admit, runsKnown>>
 
 \* start_follow_up_run -> start_or_mark_failed (scheduler.ex:412-413,
-\* :853-865), as Start, for each run the pass claimed, after every trigger
+\* :859-871), as Start, for each run the pass claimed, after every trigger
 \* the scan read. Then the cue runs' admission.
 FollowUpStart ==
     /\ sPc = "f_start"
@@ -974,12 +979,12 @@ CueCandidates ==
     /\ UNCHANGED <<Quiet, reapReturn, monitors, downs, changed, dueTimer, refused, sRun,
                    activeSnap, reapQ, sSnap, cuePending, runsKnown, fQ, fClaimed>>
 
-\* Repo.claim_cue_run (cue_admission.ex:290-307; repo.ex:2403-2406,
-\* :6673-6694): one BEGIN IMMEDIATE that re-reads the task's oldest eligible
+\* Repo.claim_cue_run (cue_admission.ex:298-317; repo.ex:2409-2412,
+\* :6727-6748): one BEGIN IMMEDIATE that re-reads the task's oldest eligible
 \* delivery (CuesRunsSql.eligible_delivery, the same rule), takes the job with
 \* state "running" alone, leaving next_run_at as it is (claim_in_tx, whose
 \* ensure_no_active_job_run repeats the rule's no-active-run part inside the
-\* same transaction, repo.ex:6707-6714), inserts the run with trigger "cue" and
+\* same transaction, repo.ex:6761-6768), inserts the run with trigger "cue" and
 \* moves the delivery passed -> claimed. A task no longer eligible is
 \* :nothing_due, skipped. With every modelled run id in use the claim is out of
 \* the model's bounds and behaves like :nothing_due. A claim that times out is
@@ -1000,7 +1005,7 @@ CueClaim ==
                    changed, dueTimer, refused, activeSnap, reapQ, sSnap, cuePending, admit,
                    runsKnown, fQ, fClaimed>>
 
-\* start_cue_run -> start_or_mark_failed (scheduler.ex:475, :853-863), as
+\* start_cue_run -> start_or_mark_failed (scheduler.ex:475, :859-869), as
 \* Start. The pass ends here: admission runs after the re-arm.
 CueStart ==
     /\ sPc = "c_start"
@@ -1022,7 +1027,7 @@ SchedStep ==
 
 \* Every Repo call the Scheduler's process makes passes Repo.periodic_opts
 \* (scheduler.ex:170-173; repo.ex:1224-1226): a call the Repo does not answer
-\* within 5 s returns {:error, :repo_timeout} (repo.ex:4350-4358) and the
+\* within 5 s returns {:error, :repo_timeout} (repo.ex:4371-4379) and the
 \* Scheduler takes that call site's error branch, its monitors and timers
 \* intact. The request is not cancelled: it lands later, before the
 \* Scheduler's next Repo call, so a write lands in the timeout step itself
@@ -1051,7 +1056,7 @@ ReconcileRowsTimeout ==
     /\ UNCHANGED <<TimeoutQuiet, monitors, downs, changed, dueTimer, refused, activeSnap,
                    sSnap, cuePending, admit, fQ, fClaimed>>
 
-\* mark_run_failed: Repo.get_job_run times out (scheduler.ex:959-962), so the
+\* mark_run_failed: Repo.get_job_run times out (scheduler.ex:965-968), so the
 \* run is not marked and its row keeps its status. After a DOWN the monitor
 \* is already gone: a queued/running row holds the job, with no runner and
 \* no monitor, until the next reconcile pass reaps it with the generic
@@ -1066,8 +1071,8 @@ ReapLookupTimeout ==
 
 \* run_due_jobs: Repo.due_scheduled_jobs times out (scheduler.ex:574-576).
 \* The tick's outcome is :error, so the re-arm floors at the 5 s backoff
-\* (:1125-1162, :1198-1204). That re-arm is folded in: whatever its own lookup
-\* returns, or if it times out too (:1149-1151), the model arms "backoff",
+\* (:1131-1168, :1204-1210). That re-arm is folded in: whatever its own lookup
+\* returns, or if it times out too (:1155-1157), the model arms "backoff",
 \* which fires whether or not the job is due. Nothing is written. A callback
 \* that admits still goes on to admission after any of the three timeouts.
 ScanTimeout ==
@@ -1078,9 +1083,11 @@ ScanTimeout ==
     /\ UNCHANGED <<TimeoutQuiet, reapReturn, monitors, downs, changed, refused, sRun,
                    activeSnap, reapQ, sSnap, cuePending, admit, runsKnown, fQ, fClaimed>>
 
-\* claim_patched_job: Repo.claim_due_job times out (scheduler.ex:720-722).
-\* The claim transaction still runs when the Repo reaches it, as Claim would
-\* run it, but the Scheduler starts no runner and monitors nothing: a claim
+\* claim_patched_job: Repo.claim_due_job times out (scheduler.ex:723-725).
+\* A claim the Repo had started still runs, as Claim would run it (one it
+\* reaches past the deadline is turned away unrun, skip_when_late, and
+\* writes nothing: what ScanTimeout leaves), but the Scheduler starts no
+\* runner and monitors nothing: a claim
 \* that lands leaves a queued run with no runner, which holds its job until
 \* the next reconcile pass reaps it ("... or a memory store that answered too
 \* late", scheduler.ex:68-72). The tick's outcome is :error: the re-arm is
@@ -1102,7 +1109,7 @@ ClaimTimeout ==
                    monitors, downs, changed, refused, sRun, activeSnap, reapQ, sSnap,
                    waiting, starting, cueSupply, cuePending, admit, runsKnown, fQ, fClaimed>>
 
-\* next_due_timer: Repo.next_scheduled_job times out (scheduler.ex:1147-1151):
+\* next_due_timer: Repo.next_scheduled_job times out (scheduler.ex:1153-1157):
 \* the timer is armed at the backoff whatever the row says.
 ArmTimeout ==
     /\ sPc = "arm"
@@ -1114,9 +1121,10 @@ ArmTimeout ==
     /\ UNCHANGED <<TimeoutQuiet, monitors, downs, changed, sRun, activeSnap, reapQ, sSnap,
                    cuePending, admit, runsKnown, fQ, fClaimed>>
 
-\* handle_call({:run_now, ...}) whose lookup (scheduler.ex:731-733) or
-\* Repo.claim_job_now (:756-761) times out. A claim that times out still
-\* lands when ManualRun's would, with no runner started. Either way the
+\* handle_call({:run_now, ...}) whose lookup (scheduler.ex:734-736) or
+\* Repo.claim_job_now (:762-767) times out. A claim the Repo had started
+\* still lands when ManualRun's would, with no runner started; one it turned
+\* away unrun past the deadline (skip_when_late) is the first branch. Either way the
 \* owner is told {:error, :repo_timeout} and the due timer is re-armed, as
 \* after any "run now" (:243).
 ManualRunTimeout ==
@@ -1150,8 +1158,10 @@ CueCandidatesTimeout ==
                    sRun, activeSnap, reapQ, sSnap, cuePending, runsKnown, fQ, fClaimed>>
 
 \* Repo.claim_cue_run times out (claim_candidate's error branch,
-\* cue_admission.ex:302-305): traced, logged and skipped, but the claim still lands
-\* when the Repo reaches it, as CueClaim would run it, with no runner started:
+\* cue_admission.ex:312-315): traced, logged and skipped, but a claim the Repo had
+\* started still lands, as CueClaim would run it (one turned away unrun past
+\* the deadline, skip_when_late, writes nothing and the delivery waits for a
+\* later pass), with no runner started:
 \* a queued cue run that holds its job until the next reconcile pass reaps it.
 CueClaimTimeout ==
     /\ sPc = "c_claim"
@@ -1169,7 +1179,7 @@ CueClaimTimeout ==
                    activeSnap, reapQ, sSnap, cuePending, admit, runsKnown, fQ, fClaimed>>
 
 \* CueAdmission.claim_follow_ups: the scan of starting triggers times out
-\* (cue_admission.ex:205-208): traced, logged, nothing admitted, and the
+\* (cue_admission.ex:209-212): traced, logged, nothing admitted, and the
 \* pass goes on to the cue runs. Only a pass with free slots makes the call.
 FollowUpScanTimeout ==
     /\ sPc = "f_scan" /\ runsKnown
@@ -1179,11 +1189,12 @@ FollowUpScanTimeout ==
                    sRun, activeSnap, reapQ, sSnap, cuePending, admit, runsKnown, fQ, fClaimed>>
 
 \* One trigger's Repo call times out. Its job read or a read of the hold check
-\* (admit_trigger's and held_check's error branches, cue_admission.ex:230,
-\* :236-239): traced, logged, and the trigger stays starting for a later
-\* pass. Or the claim itself (claim_trigger's error branch, :271-274): traced
-\* and logged, but it still lands when the Repo reaches it, as
-\* FollowUpClaim would run it, with no runner to start: a queued run that
+\* (admit_trigger's and held_check's error branches, cue_admission.ex:234,
+\* :240-243): traced, logged, and the trigger stays starting for a later
+\* pass. Or the claim itself (claim_trigger's error branch, :277-280): traced
+\* and logged, but one the Repo had started still lands, as FollowUpClaim
+\* would run it (one turned away unrun past the deadline, skip_when_late, is
+\* the first branch), with no runner to start: a queued run that
 \* holds its job until the next reconcile pass reaps it, or a refused
 \* trigger. Either way the pass goes on to the next trigger.
 FollowUpClaimTimeout ==
@@ -1241,21 +1252,21 @@ RunnerWrite(r) ==
     /\ IF AtomicSettle THEN Release ELSE UNCHANGED jobState
     /\ UNCHANGED <<jobEnabled, nextRun>>
 
-\* The settle's guard (ensure_job_run_active, repo.ex:6873-6880): only a
+\* The settle's guard (ensure_job_run_active, repo.ex:6927-6934): only a
 \* queued/running row may be settled. The split write has no guard.
 Settleable(r) == ~AtomicSettle \/ runStatus[r] \in {"queued", "running"}
 
 \* mark_completed (runner.ex:315-346) / mark_failed (:470-494) with
 \* AtomicSettle: write output.md or error.md (folded in), then
-\* Repo.settle_job_run (repo.ex:2483-2486, :6797-6813, :6873-6920): the run row and the job's
+\* Repo.settle_job_run (repo.ex:2489-2492, :6851-6867, :6927-6974): the run row and the job's
 \* release in one transaction. After a success the memory write comes next;
 \* after a loop error the memory-source update (runner.ex:492, folded in) and then the
 \* send, so that runner goes straight to its send. A settle the guard refuses
 \* fails the {:ok, _} match and kills the runner; that branch is unreachable,
 \* since the reaper only settles a run whose runner is dead.
 \* A cue run settles through CueAdmission.settle/3 -> Repo.settle_cue_run
-\* (runner.ex:352-375, :440-468; settle_job_run refuses it, repo.ex:6805-6813,
-\* :6841-6847): the same row and release, and its delivery in the same
+\* (runner.ex:352-375, :440-468; settle_job_run refuses it, repo.ex:6859-6867,
+\* :6895-6901): the same row and release, and its delivery in the same
 \* transaction. A completed one acks it and goes on as above, with no summary
 \* memory (complete_run, runner.ex:240-249). A failed one puts it back (Retries) and
 \* then only marks its delivery "skipped", sending none of its text and leaving
@@ -1412,7 +1423,7 @@ RunnerCrash(r) ==
                    cuePending, admit, runsKnown, fQ, fClaimed>>
 
 \* The runner's final write times out: GenServer.call exits the runner, which
-\* passes no on_timeout (repo.ex:4340-4348), but the request stays in the
+\* passes no on_timeout (repo.ex:4361-4369), but the request stays in the
 \* Repo's mailbox and lands.
 \* With AtomicSettle that is the whole settle, guard included; after a loop
 \* error it also stands for a crash at the memory-source calls between the
@@ -1485,7 +1496,7 @@ Watchdog(r) ==
 (* The final failure report of a cue run the Scheduler exhausted *)
 
 \* A task under the shared TaskSupervisor, started by the reaper and linked to
-\* no Scheduler (report_cue_failure, scheduler.ex:972-992), runs
+\* no Scheduler (report_cue_failure, scheduler.ex:978-998), runs
 \* CueRun.report_final_failure (cue_run.ex:372-384). The run was settled with
 \* the delivery_status its claim wrote ("unset" here). Its first write
 \* (mark_attempted, :386-391, after the context and call reads, which write
@@ -1574,7 +1585,7 @@ SchedulerCrash ==
                    daemonCrashed, schedTimeouts, cueSupply>>
 
 \* The Scheduler dies of such a cause while it waits on the reaper's write,
-\* and the write still lands (repo.ex:4335-4339). With AtomicSettle that is
+\* and the write still lands (repo.ex:4356-4360). With AtomicSettle that is
 \* the whole settle; without, the run row alone, and the job write never
 \* happens. A cue run's write lands whole, but no report task starts.
 SchedulerCrashLate ==
@@ -1716,7 +1727,7 @@ Spec == Init /\ [][Next]_vars /\ Fairness
 -----------------------------------------------------------------------------
 (* PROPERTIES *)
 
-\* scheduler.ex:737-741: "a job mid-run carries state 'running' (the claim
+\* scheduler.ex:740-744: "a job mid-run carries state 'running' (the claim
 \* sets it atomically) ... The in-transaction `ensure_no_active_job_run`
 \* guard (shared with the due path) remains the atomic race-stop
 \* underneath." Read as: at most one run of the job is active, counting a
@@ -1756,7 +1767,7 @@ ResumeNeverOverwritten == intent = "resumed" => jobEnabled
 \* scheduler.ex:47-52: a due tick that cannot drain its work, including "a
 \* due job whose previous run is still active", re-arms no sooner than the
 \* backoff, "so a persistently past-due-but-unclaimable job can never spin
-\* the scheduler at 0ms"; :1192-1196 says it again. Read as an action rule: the
+\* the scheduler at 0ms"; :1198-1202 says it again. Read as an action rule: the
 \* Arm step that ends a callback whose claim was refused as :already_running
 \* never arms the 0 ms timer. (Arm and ArmTimeout, which arms the backoff,
 \* are the only steps from "arm" to "idle", or to the candidate scan in a

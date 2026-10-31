@@ -48,8 +48,10 @@
 (*   log line: a stutter, and the fairness on WkrStep assumes a later      *)
 (*   tick's read is answered in time. A timed-out mark (:216-225) is not a *)
 (*   failed mark: the Repo serves requests in arrival order and still runs *)
-(*   one whose caller gave up (repo.ex:3931-3935), so the UPDATE lands     *)
-(*   where the wait would have put it, before the worker's next request.   *)
+(*   one whose caller gave up (repo.ex call/2; the worker marks none of    *)
+(*   its requests skip_when_late, which would let the Repo skip a late     *)
+(*   one), so the UPDATE lands where the wait would have put it, before    *)
+(*   the worker's next request.                                            *)
 (*   The worker reads the answer only to log it, so the mark is WkrResolve *)
 (*   or WkrDeadLetter, the worker's return to idle ordered after the write *)
 (* - the DeliveryWorker crashing on its own                                *)
@@ -70,7 +72,7 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/harness/supervisor.ex @ f4967c985e88
 \* SOURCE: apps/fermix_core/lib/fermix_core/harness/run_supervisor.ex @ 434b12f3182b
 \* SOURCE: apps/fermix_core/lib/fermix_core/harness/run.ex @ 788c70041804
-\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo.ex#call,periodic_opts,call_or_timeout_error,request_name,admit_harness_run,admit_harness_run_tx,admit_harness_run_in_tx,ensure_harness_capacity,insert_harness_run_row,terminalize_harness_run,terminalize_harness_run_row,update_harness_run,update_harness_run_row,pending_harness_deliveries,fetch_pending_harness_deliveries,active_harness_runs,fetch_active_harness_runs,normalize_harness_run_attrs,upsert_memory,@harness_runs_schema_sql,@harness_active_status_sql @ 2a54769ee37b
+\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo.ex#call,request_message,deadline_after,deadline_passed?,periodic_opts,call_or_timeout_error,request_name,admit_harness_run,admit_harness_run_tx,admit_harness_run_in_tx,ensure_harness_capacity,insert_harness_run_row,terminalize_harness_run,terminalize_harness_run_row,update_harness_run,update_harness_run_row,pending_harness_deliveries,fetch_pending_harness_deliveries,active_harness_runs,fetch_active_harness_runs,normalize_harness_run_attrs,upsert_memory,@harness_runs_schema_sql,@harness_active_status_sql @ c12b0f65b39e
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo.ex#interpret_harness_terminalize,harness_terminalize_rejection,harness_run_set_clause,harness_run_set_entry,@harness_run_timestamp_cols @ 58c7f52fc492
 \* SOURCE: apps/fermix_core/lib/fermix_core/delivery/channel_send.ex @ 9b06289e25ae
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/harness/continuation_dispatcher.ex @ 4a8408f063b0
