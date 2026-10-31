@@ -177,6 +177,39 @@ it, never a second writer.
   one installed by hand (Google Chrome's own package, for example), and until
   then browser tasks on it answer that no Chrome or Chromium is installed. A
   Debian server gets Chromium at its first boot.
+- **A server Fermix creates on Hetzner.** Instead of a host of their own,
+  the owner can let Fermix create the server in their Hetzner Cloud project,
+  from the Always On pane: paste a Read & Write API token of a project made
+  for Fermix (checked at once; it stays on this computer in
+  `device/provision/hetzner.json`, 0600, never in `config.toml` or the
+  keychain, so a move never carries it to the server, and the owner can
+  delete the file), pick the size and location (the cheapest x86 type with at
+  least 4 GB in stock, in Falkenstein, then Nuremberg, then Helsinki, with
+  the next size up as "more room"; prices read live from Hetzner, monthly
+  with VAT as the account is billed and the IPv4 address), and **Create
+  server**. Fermix creates a firewall with no inbound rule first (a token
+  that can only read is refused there, before anything costs money), then a
+  Debian 13 server named `fermix-<profile>-<4 hex>` and labelled
+  `fermix=always-on`, its IPv4 address kept and no SSH key, whose cloud-init
+  runs the same first boot with an enrollment code already inside. That code
+  lives 24 hours, so a slow install or a sleeping Mac does not fail it, and
+  while it waits **Get a code** is refused ("Your new server is still setting
+  up…"); the server that enrolls with it is the one Fermix created. Hetzner's
+  answers in one sentence each: no capacity in a location names the next one
+  in stock; "Hetzner limits new servers on this account" (a new account may
+  not order at all; the own-server path stays); a token Hetzner stopped
+  accepting asks for a new one. The pane lists what Fermix created and
+  Hetzner bills for until it is deleted (the server, its firewall, its
+  addresses), marks anything deleted in Hetzner's console as gone, turns the
+  server on or restarts it, and deletes everything it created (the server,
+  then its addresses, then the firewall). It never deletes the server the
+  home moved to: replace the server instead. There is no moving back to the
+  Mac in this version, and deleting that server in Hetzner's console does not
+  bring Fermix back to it: the home is restored from a snapshot onto a new
+  server. Hetzner's root password for the
+  server is never kept, and restoring a lost one starts from Hetzner's
+  root-password reset (below). Creating, restarting and deleting the server
+  are the owner's decisions, refused to a command Fermix runs.
 - **A restore host.** When the primary is gone, `--restore` on a host
   prepares the same server without enrolling it and prints the exact steps:
   copy the newest snapshot onto it (downloaded from the bucket by hand, when
@@ -192,13 +225,15 @@ it, never a second writer.
   a one-time secret, the primary's gateway key, its iroh endpoint id and
   relays, its name and when the window closes. The window lasts thirty
   minutes (time for a cloud server to boot), takes one server, and opening
-  another replaces it; the code is shown once and never logged, and the
+  another replaces it, except while the 24-hour window of a server Fermix
+  created on Hetzner waits for it, when a new code is refused; the code is
+  shown once and never logged, and the
   window is kept on this machine (`mobile/enrollment.json`, 0600, never in a
   snapshot) so an engine restart before the server checks in loses nothing.
   A server whose acceptance was lost on the way and that asks again with the
   same key hears it again, as the same candidate, while the window lasts. The
   file keeps the secret only while it can still admit a server: once one is
-  recorded, or the thirty minutes are over, the secret leaves it, and the
+  recorded, or the window is over, the secret leaves it, and the
   state and expiry stay for the status. It needs Reach from
   anywhere on and ready: otherwise it is refused by name ("Remote reach is
   off…", or "…starting; open the code again in a few seconds").
@@ -528,6 +563,12 @@ it, never a second writer.
 | Where snapshots are kept (bucket, region, the S3-compatible address, how often) and the two access keys | Recovery: the `snapshots` section; the keys as hidden fields, never shown again | `fermix settings set snapshots …`, `fermix settings secret set snapshot_s3_access_key_id` |
 | Take a snapshot now | **Back up now**, offered once snapshots have somewhere to go | `fermix home snapshots run` |
 | An enrollment code | **Get a code** (**Get a new code** while one is open, which stops the open one working), shown once with **Copy** and when it expires, beside the command for a server you have, and what to know before moving (the disk it needs, that this computer serves nothing meanwhile, the cutover gap, where the server keeps secrets, no way back) | `fermix home enroll-code` |
+| A Hetzner token: pasted once, checked at once, kept on this computer (`home.provision.connect`) | Paste a token, with How to get one | none |
+| The sizes and locations Hetzner has in stock, with the monthly price (`home.provision.options`) | The recommendation, and Change | none |
+| Create the server on Hetzner (`home.provision.create`, a job) | **Create server** | none |
+| What Fermix created on Hetzner and Hetzner bills for, each marked gone once deleted outside Fermix (`home.provision.resources`) | Details | none |
+| Turn the created server on, or restart it (`home.provision.power`) | **Turn it on**, **Restart server** | none |
+| Delete what Fermix created on Hetzner (`home.provision.delete`), never the server the home moved to | Cancel, Start again | none |
 | The servers waiting for the move | Servers waiting for the move | `fermix home candidates` |
 | Review the move (`home.move.readiness`): each item ready, a note or a block | **Review the move** on a server waiting; a block is shown as one | `fermix home move` says each block |
 | Start the move | the app's pane | `fermix home move --to ID [--retire]` |

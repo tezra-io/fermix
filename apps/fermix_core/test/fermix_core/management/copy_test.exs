@@ -25,6 +25,7 @@ defmodule FermixCore.Management.CopyTest do
   alias FermixCore.Home.Candidate, as: HomeCandidate
   alias FermixCore.Home.Move, as: HomeMove
   alias FermixCore.Home.MoveReadiness
+  alias FermixCore.Home.Provision
   alias FermixCore.Home.Snapshot.Recipient, as: SnapshotRecipient
   alias FermixCore.Home.Snapshot.Run, as: SnapshotRun
   alias FermixCore.Home.Snapshot.S3, as: SnapshotS3
@@ -764,6 +765,64 @@ defmodule FermixCore.Management.CopyTest do
     end
   end
 
+  # The provisioner's refusals are written in `Home.Provision`, outside the
+  # management tree the sweep below reads, so each reason it can answer is
+  # rendered here; the type and the city it names are Hetzner's words.
+  describe "the Always On provisioner copy" do
+    test "every refusal obeys the rules and names no fermix command" do
+      for {reason, sentence} <- provision_copy() do
+        # Hetzner's own message is its words, not the daemon's.
+        assert_clean(sentence, :prose, ["CPX22", "cpx12" | vendor_words(reason)], inspect(reason))
+        refute_command(sentence, inspect(reason))
+      end
+    end
+
+    test "the owner decision obeys the rules" do
+      assert_clean(FermixCore.Management.Provision.owner_only_sentence(), :prose, [], "owner")
+      refute_command(FermixCore.Management.Provision.owner_only_sentence(), "owner")
+    end
+  end
+
+  defp vendor_words({:refused, _status, _code, message}), do: [message]
+  defp vendor_words(_reason), do: []
+
+  defp provision_copy do
+    unavailable = %{city: "Falkenstein", description: "CPX22", next_city: "Nuremberg"}
+
+    reasons = [
+      :token_invalid,
+      :token_refused,
+      :unauthorized,
+      :forbidden,
+      :account_limit,
+      {:unavailable, unavailable},
+      {:unavailable, %{unavailable | next_city: nil}},
+      {:ineligible_type, "cpx12"},
+      {:rate_limited, 1_999_999_999},
+      {:unreachable, "timeout"},
+      {:refused, 422, "invalid_input", "invalid input in field 'server_type'"},
+      {:action_failed, "create_server", "server placement failed"},
+      {:action_timeout, "start_server"},
+      {:code_unavailable, "Remote reach is off."},
+      :user_data_too_large,
+      :no_image,
+      :too_many_types,
+      :invalid_code,
+      :interrupted,
+      :no_token,
+      :no_server,
+      :server_exists,
+      :nothing_to_delete,
+      :not_primary,
+      :live_home,
+      :move_under_way,
+      :not_found,
+      {:ledger, :eacces}
+    ]
+
+    for reason <- reasons, do: {reason, Provision.error_sentence(reason)}
+  end
+
   # The older copy the apps and the setup page show (readiness actions and
   # every settings row) is held to the same rule: what to do in the app, or
   # on the server, never a `fermix` command.
@@ -881,6 +940,7 @@ defmodule FermixCore.Management.CopyTest do
       PluginRow.verbs() ++
       Enum.map(PluginRow.statuses(), &PluginRow.check_sentence/1) ++
       plugin_copy() ++
+      Enum.map(provision_copy(), &elem(&1, 1)) ++
       Enum.map(source_sentences(), &elem(&1, 1))
   end
 

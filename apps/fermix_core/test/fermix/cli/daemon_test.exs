@@ -1178,6 +1178,62 @@ defmodule Fermix.CLI.DaemonTest do
     end
   end
 
+  # M75 lean v1 §4.3: creating, powering and deleting the Always On server
+  # spend the owner's money and can take Fermix's home away, so a command the
+  # agent ran is refused; the reads and the token are not decisions.
+  describe "owner decisions on the Always On server" do
+    @provision_decisions ~w(home.provision.create home.provision.power home.provision.delete)
+    @provision_open ~w(home.provision.connect home.provision.options home.provision.resources)
+
+    test "a process the daemon started is refused, and so is one it cannot place" do
+      golden = provision_owner_golden()
+
+      for peer <- [[daemon_os_pid: ParentProcess.os_pid()], [os: {:win32, :nt}]] do
+        socket_path = start_peer_daemon(peer)
+
+        log =
+          ExUnit.CaptureLog.capture_log(fn ->
+            for method <- @provision_decisions do
+              assert {:error, {:management_error, "unavailable", _message, ^golden}} =
+                       Client.request_v1(method, %{}, socket_path: socket_path, timeout: 5_000),
+                     method
+            end
+          end)
+
+        assert log =~ "only the owner may"
+      end
+    end
+
+    test "the token and the reads are not owner decisions" do
+      golden = provision_owner_golden()
+      socket_path = start_peer_daemon(daemon_os_pid: ParentProcess.os_pid())
+
+      for method <- @provision_open do
+        result = Client.request_v1(method, %{}, socket_path: socket_path, timeout: 5_000)
+        refute match?({:error, {:management_error, "unavailable", _message, ^golden}}, result)
+      end
+    end
+
+    defp provision_owner_golden do
+      golden =
+        :fermix_core
+        |> Application.app_dir("priv/management/fixtures/errors.jsonl")
+        |> File.stream!()
+        |> Enum.map(&Jason.decode!/1)
+        |> Enum.find(&(&1["name"] == "unavailable_provision_owner_decision"))
+        |> get_in(["response", "error", "details"])
+
+      assert golden == %{
+               "capability" => "home",
+               "sentence" =>
+                 "Only the owner can create, restart or delete Fermix's server: use the " <>
+                   "Fermix app."
+             }
+
+      golden
+    end
+  end
+
   # M75 §2: a candidate primary runs no agent, phone channel or plugins until
   # its move, so of the unversioned methods it answers `shutdown` alone and
   # refuses the rest with the router's own sentence.

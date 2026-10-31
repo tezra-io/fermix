@@ -30,6 +30,7 @@ defmodule FermixCore.Management.Router do
   alias FermixCore.Management.Plugins
   alias FermixCore.Management.Protocol
   alias FermixCore.Management.Providers
+  alias FermixCore.Management.Provision
   alias FermixCore.Management.Secrets
   alias FermixCore.Management.Settings
   alias FermixCore.Management.SetupState
@@ -45,7 +46,8 @@ defmodule FermixCore.Management.Router do
     mobile.devices.list browser.install.start imessage.permissions.get imessage.policy.confirm
     mcp.servers.list mcp.servers.import.scan cues.status cues.sources.list cues.watchers.list
     cues.mandates.list cues.mandates.choices home.status home.snapshots.status home.snapshots.run
-    home.enroll.open home.candidates.list
+    home.enroll.open home.candidates.list home.provision.options home.provision.resources
+    home.provision.delete
   )
   @lease_params ~w(lease_id)
   @doctor_session_params ~w(session_id)
@@ -80,6 +82,7 @@ defmodule FermixCore.Management.Router do
   @home_passphrase_params ~w(recovery_passphrase)
   @home_readiness_params ~w(candidate_id)
   @home_move_params ~w(candidate_id recovery_passphrase keep_as_desktop)
+  @provision_connect_params ~w(token)
   # A candidate (M75 §2) answers the protocol's hello and home.status, and
   # refuses every other method by name.
   @candidate_methods ~w(hello home.status)
@@ -322,6 +325,30 @@ defmodule FermixCore.Management.Router do
       )
     end
   end
+
+  # The Always On provisioner (M75 lean v1 §4.3): device-class, answered on
+  # the computer that created the server. `token` is the one parameter here
+  # that carries a secret: it is never logged, traced or answered.
+  defp route_home("home.provision.connect", params, opts) do
+    with :ok <- reject_unknown_params(params, @provision_connect_params) do
+      operation_result(Provision.connect(Map.get(params, "token"), provision_opts(opts)))
+    end
+  end
+
+  defp route_home("home.provision.options", %{}, opts),
+    do: operation_result(Provision.options(provision_opts(opts)))
+
+  defp route_home("home.provision.create", params, opts),
+    do: operation_result(Provision.create(params, provision_opts(opts)))
+
+  defp route_home("home.provision.power", params, opts),
+    do: operation_result(Provision.power(params, provision_opts(opts)))
+
+  defp route_home("home.provision.resources", %{}, opts),
+    do: operation_result(Provision.resources(provision_opts(opts)))
+
+  defp route_home("home.provision.delete", %{}, opts),
+    do: operation_result(Provision.delete(provision_opts(opts)))
 
   defp keep_as_desktop(params) do
     case Map.get(params, "keep_as_desktop", true) do
@@ -781,6 +808,16 @@ defmodule FermixCore.Management.Router do
   defp jobs_opts(opts), do: opts |> operation_opts() |> Keyword.get(:jobs, [])
   defp mobile_opts(opts), do: opts |> operation_opts() |> Keyword.get(:mobile, [])
   defp cues_opts(opts), do: opts |> operation_opts() |> Keyword.get(:cues, [])
+
+  # The router's own `:engine_role` (tests) reaches the provisioner as its seam.
+  defp provision_opts(opts) do
+    provision = opts |> operation_opts() |> Keyword.get(:provision, [])
+
+    case Keyword.fetch(opts, :engine_role) do
+      {:ok, role} -> Keyword.put_new(provision, :engine_role, role)
+      :error -> provision
+    end
+  end
 
   # The router's own `:engine_role` (tests) reaches the family as its seam, and
   # a linked device's way to its primary (`:primary_forward`, from the daemon)

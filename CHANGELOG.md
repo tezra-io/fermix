@@ -140,7 +140,22 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   desktop too, and a lost server is restored from the newest one. The setup
   page's Always On tab says where Fermix runs, and `fermix home` does all of
   this at a terminal, with `export`, `import` and `mark-moved` for moving a
-  home by hand.
+  home by hand. Fermix can also create the server
+  for you on Hetzner: paste a Read & Write API token from a Hetzner project
+  made for Fermix (checked at once and kept only on this computer, never in
+  your settings or keychain, so it never moves to the server), take the
+  recommended size and location (the cheapest x86 server with 4 GB in stock,
+  in Falkenstein, Nuremberg or Helsinki, with its monthly price, VAT and the
+  IPv4 address included, read live from Hetzner) or change them, and Fermix
+  creates a firewall with no inbound rule and a Debian 13 server with its
+  enrollment code inside, good for 24 hours so a slow install or a sleeping
+  Mac does not fail it. A token that can only read is refused before
+  anything costs money, a location with no capacity names the next one in
+  stock, and an account Hetzner limits is said in one sentence. The pane
+  lists what Fermix created until you delete it, turns the server on or
+  restarts it, and deletes what it created, but never the server your home
+  moved to. While a created server waits for its code, a new enrollment code
+  is not opened.
 - **A server gets ready for Always On from one command.** On a Debian 12,
   Debian 13 or Ubuntu 24.04 server (arm64 or x86_64) running Linux 6.2 or
   later with Landlock enabled (Debian 13 and Ubuntu 24.04 do by default),

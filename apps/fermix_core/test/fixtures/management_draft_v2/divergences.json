@@ -2693,6 +2693,162 @@
       "field": "error_codes:unconfirmed",
       "kind": "engine_only",
       "why": "M75: the error code a desktop answers for a forwarded move start whose answer was lost, so it is never reported as a failure. The draft predates the move."
+    },
+    {
+      "method": "(schema)",
+      "field": "job_kinds:home_provision",
+      "kind": "engine_only",
+      "why": "M75 lean v1: creating, powering and deleting the Always On server on Hetzner wait on Hetzner's actions, so each is a job of the kind home_provision, with the phases checking, firewall, server, starting, power and deleting. The draft predates it; a closed decoder that has never heard the kind refuses the job view rather than ignoring it, so the app adds it when it re-vendors."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:home.provision.connect",
+      "kind": "engine_only",
+      "why": "M75 lean v1 adds the Always On provisioner (Fermix creates the owner's server on Hetzner) after the draft was written, so the draft publishes no home.provision.* method. The six methods are minimum version 2 and additive: a client built against the draft never calls them, and the app re-vendors this export before it draws the Always On pane."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:home.provision.create",
+      "kind": "engine_only",
+      "why": "M75 lean v1 adds the Always On provisioner (Fermix creates the owner's server on Hetzner) after the draft was written, so the draft publishes no home.provision.* method. The six methods are minimum version 2 and additive: a client built against the draft never calls them, and the app re-vendors this export before it draws the Always On pane."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:home.provision.delete",
+      "kind": "engine_only",
+      "why": "M75 lean v1 adds the Always On provisioner (Fermix creates the owner's server on Hetzner) after the draft was written, so the draft publishes no home.provision.* method. The six methods are minimum version 2 and additive: a client built against the draft never calls them, and the app re-vendors this export before it draws the Always On pane."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:home.provision.options",
+      "kind": "engine_only",
+      "why": "M75 lean v1 adds the Always On provisioner (Fermix creates the owner's server on Hetzner) after the draft was written, so the draft publishes no home.provision.* method. The six methods are minimum version 2 and additive: a client built against the draft never calls them, and the app re-vendors this export before it draws the Always On pane."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:home.provision.power",
+      "kind": "engine_only",
+      "why": "M75 lean v1 adds the Always On provisioner (Fermix creates the owner's server on Hetzner) after the draft was written, so the draft publishes no home.provision.* method. The six methods are minimum version 2 and additive: a client built against the draft never calls them, and the app re-vendors this export before it draws the Always On pane."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:home.provision.resources",
+      "kind": "engine_only",
+      "why": "M75 lean v1 adds the Always On provisioner (Fermix creates the owner's server on Hetzner) after the draft was written, so the draft publishes no home.provision.* method. The six methods are minimum version 2 and additive: a client built against the draft never calls them, and the app re-vendors this export before it draws the Always On pane."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:home.provision.connect=2",
+      "kind": "engine_only",
+      "why": "M75 lean v1: every home.provision.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the provisioner, so its table has no entry for it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:home.provision.create=2",
+      "kind": "engine_only",
+      "why": "M75 lean v1: every home.provision.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the provisioner, so its table has no entry for it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:home.provision.delete=2",
+      "kind": "engine_only",
+      "why": "M75 lean v1: every home.provision.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the provisioner, so its table has no entry for it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:home.provision.options=2",
+      "kind": "engine_only",
+      "why": "M75 lean v1: every home.provision.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the provisioner, so its table has no entry for it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:home.provision.power=2",
+      "kind": "engine_only",
+      "why": "M75 lean v1: every home.provision.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the provisioner, so its table has no entry for it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:home.provision.resources=2",
+      "kind": "engine_only",
+      "why": "M75 lean v1: every home.provision.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the provisioner, so its table has no entry for it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.home.provision.connect",
+      "kind": "engine_only",
+      "why": "M75 lean v1: hello publishes every method this daemon serves with its minimum version, the provisioner included. The draft predates it; a client ignores a method it does not know."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.home.provision.create",
+      "kind": "engine_only",
+      "why": "M75 lean v1: hello publishes every method this daemon serves with its minimum version, the provisioner included. The draft predates it; a client ignores a method it does not know."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.home.provision.delete",
+      "kind": "engine_only",
+      "why": "M75 lean v1: hello publishes every method this daemon serves with its minimum version, the provisioner included. The draft predates it; a client ignores a method it does not know."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.home.provision.options",
+      "kind": "engine_only",
+      "why": "M75 lean v1: hello publishes every method this daemon serves with its minimum version, the provisioner included. The draft predates it; a client ignores a method it does not know."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.home.provision.power",
+      "kind": "engine_only",
+      "why": "M75 lean v1: hello publishes every method this daemon serves with its minimum version, the provisioner included. The draft predates it; a client ignores a method it does not know."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.home.provision.resources",
+      "kind": "engine_only",
+      "why": "M75 lean v1: hello publishes every method this daemon serves with its minimum version, the provisioner included. The draft predates it; a client ignores a method it does not know."
+    },
+    {
+      "method": "home.provision.connect",
+      "field": "params:token",
+      "kind": "engine_only",
+      "why": "M75 lean v1: home.provision.connect takes the Hetzner project API token the owner pastes, which the engine keeps only in this computer's device/provision/hetzner.json and never answers. The draft predates the provisioner."
+    },
+    {
+      "method": "home.provision.create",
+      "field": "params:location",
+      "kind": "engine_only",
+      "why": "M75 lean v1: home.provision.create takes the location to create the server in, one of fsn1, nbg1 and hel1 as home.provision.options names them. The draft predates the provisioner."
+    },
+    {
+      "method": "home.provision.create",
+      "field": "params:type",
+      "kind": "engine_only",
+      "why": "M75 lean v1: home.provision.create takes the Hetzner server type, as home.provision.options names it. The draft predates the provisioner."
+    },
+    {
+      "method": "home.provision.power",
+      "field": "params:action",
+      "kind": "engine_only",
+      "why": "M75 lean v1: home.provision.power takes on or reset. The draft predates the provisioner."
+    },
+    {
+      "method": "job.get",
+      "field": "result.location",
+      "kind": "engine_only",
+      "why": "M75 lean v1: the export illustrates a finished home_provision job, whose flat result names the server Fermix created, its type and its location. The draft illustrates no such job; the result stays the published flat object of public scalars."
+    },
+    {
+      "method": "job.get",
+      "field": "result.server",
+      "kind": "engine_only",
+      "why": "M75 lean v1: the export illustrates a finished home_provision job, whose flat result names the server Fermix created, its type and its location. The draft illustrates no such job; the result stays the published flat object of public scalars."
+    },
+    {
+      "method": "job.get",
+      "field": "result.type",
+      "kind": "engine_only",
+      "why": "M75 lean v1: the export illustrates a finished home_provision job, whose flat result names the server Fermix created, its type and its location. The draft illustrates no such job; the result stays the published flat object of public scalars."
     }
   ]
 }

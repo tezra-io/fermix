@@ -59,6 +59,14 @@ defmodule FermixCore.Management.Copy do
     "Fermix Computer Use",
     "Fermix Messages",
     "Always On",
+    # The Always On host, the permission its API token needs, as Hetzner names
+    # it, the three locations Fermix creates a server in, and its system.
+    "Read & Write",
+    "Hetzner",
+    "Debian",
+    "Falkenstein",
+    "Nuremberg",
+    "Helsinki",
     "Apple ID",
     "Apple",
     "Full Disk Access",

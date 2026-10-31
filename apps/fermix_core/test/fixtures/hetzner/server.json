@@ -1,0 +1,182 @@
+{
+  "id": 0,
+  "name": "",
+  "status": "initializing",
+  "created": "2031-05-04T10:00:00Z",
+  "public_net": {
+    "ipv4": {
+      "id": 0,
+      "ip": "",
+      "blocked": false,
+      "dns_ptr": ""
+    },
+    "ipv6": {
+      "id": 0,
+      "ip": "",
+      "blocked": false,
+      "dns_ptr": []
+    },
+    "floating_ips": [],
+    "firewalls": []
+  },
+  "private_net": [],
+  "server_type": {
+    "id": 104,
+    "name": "cpx22",
+    "description": "CPX22",
+    "cores": 2,
+    "memory": 4.0,
+    "disk": 80,
+    "deprecated": false,
+    "prices": [
+      {
+        "location": "fsn1",
+        "price_hourly": {
+          "net": "0.0224000000",
+          "gross": "0.0267000000"
+        },
+        "price_monthly": {
+          "net": "16.3782000000",
+          "gross": "19.4901000000"
+        },
+        "included_traffic": 21990232555520,
+        "price_per_tb_traffic": {
+          "net": "1.0000000000",
+          "gross": "1.1900000000"
+        }
+      },
+      {
+        "location": "nbg1",
+        "price_hourly": {
+          "net": "0.0224000000",
+          "gross": "0.0267000000"
+        },
+        "price_monthly": {
+          "net": "16.3782000000",
+          "gross": "19.4901000000"
+        },
+        "included_traffic": 21990232555520,
+        "price_per_tb_traffic": {
+          "net": "1.0000000000",
+          "gross": "1.1900000000"
+        }
+      },
+      {
+        "location": "hel1",
+        "price_hourly": {
+          "net": "0.0224000000",
+          "gross": "0.0267000000"
+        },
+        "price_monthly": {
+          "net": "16.3782000000",
+          "gross": "19.4901000000"
+        },
+        "included_traffic": 21990232555520,
+        "price_per_tb_traffic": {
+          "net": "1.0000000000",
+          "gross": "1.1900000000"
+        }
+      },
+      {
+        "location": "ash",
+        "price_hourly": {
+          "net": "0.0274000000",
+          "gross": "0.0326000000"
+        },
+        "price_monthly": {
+          "net": "19.9916000000",
+          "gross": "23.7900000000"
+        },
+        "included_traffic": 21990232555520,
+        "price_per_tb_traffic": {
+          "net": "1.0000000000",
+          "gross": "1.1900000000"
+        }
+      }
+    ],
+    "storage_type": "local",
+    "cpu_type": "shared",
+    "category": "Shared vCPU",
+    "architecture": "x86",
+    "deprecation": null,
+    "locations": [
+      {
+        "id": 1,
+        "name": "fsn1",
+        "deprecation": null,
+        "recommended": false,
+        "available": true
+      },
+      {
+        "id": 2,
+        "name": "nbg1",
+        "deprecation": null,
+        "recommended": false,
+        "available": true
+      },
+      {
+        "id": 3,
+        "name": "hel1",
+        "deprecation": null,
+        "recommended": false,
+        "available": true
+      },
+      {
+        "id": 4,
+        "name": "ash",
+        "deprecation": null,
+        "recommended": false,
+        "available": true
+      }
+    ]
+  },
+  "location": {
+    "id": 1,
+    "name": "fsn1",
+    "description": "Falkenstein DC Park 1",
+    "country": "DE",
+    "city": "Falkenstein",
+    "latitude": 50.47612,
+    "longitude": 12.370071,
+    "network_zone": "eu-central"
+  },
+  "image": {
+    "id": 161547269,
+    "type": "system",
+    "status": "available",
+    "name": "debian-13",
+    "description": "Debian 13",
+    "image_size": null,
+    "disk_size": 5,
+    "created": "2031-04-02T08:00:00Z",
+    "created_from": null,
+    "bound_to": null,
+    "os_flavor": "debian",
+    "os_version": "13",
+    "rapid_deploy": true,
+    "protection": {
+      "delete": false
+    },
+    "deprecated": null,
+    "deprecation": null,
+    "deleted": null,
+    "labels": {},
+    "architecture": "x86"
+  },
+  "iso": null,
+  "rescue_enabled": false,
+  "locked": false,
+  "backup_window": null,
+  "outgoing_traffic": null,
+  "ingoing_traffic": null,
+  "included_traffic": 21990232555520,
+  "protection": {
+    "delete": false,
+    "rebuild": false
+  },
+  "labels": {},
+  "volumes": [],
+  "load_balancers": [],
+  "primary_disk_size": 80,
+  "placement_group": null
+}

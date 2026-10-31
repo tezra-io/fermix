@@ -17,6 +17,8 @@ defmodule FermixCore.Management.ProtocolContractTest do
   alias FermixCore.Home.Candidates, as: HomeCandidates
   alias FermixCore.Home.Epoch
   alias FermixCore.Home.Move, as: HomeMove
+  alias FermixCore.Home.Provision.Hetzner, as: ProvisionHetzner
+  alias FermixCore.Home.Provision.Ledger, as: ProvisionLedger
   alias FermixCore.Home.Snapshot.Recipient, as: SnapshotRecipient
   alias FermixCore.Home.Snapshot.Scheduler, as: SnapshotScheduler
   alias FermixCore.Home.Snapshot.Status, as: SnapshotStatus
@@ -49,6 +51,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
   alias FermixCore.Readiness
   alias FermixCore.Setup.ConfigStore
   alias FermixTestSupport.CueFixtures
+  alias FermixTestSupport.HetznerStub
   alias FermixTestSupport.MandateFixtures
   alias FermixTestSupport.SafeRm
 
@@ -1249,7 +1252,8 @@ defmodule FermixCore.Management.ProtocolContractTest do
       mobile_cases() ++
       mcp_cases() ++
       cues_cases() ++
-      home_cases()
+      home_cases() ++
+      provision_cases()
   end
 
   # Stands in for `Cues.Proposals` with the record and the card in the shape
@@ -1385,6 +1389,75 @@ defmodule FermixCore.Management.ProtocolContractTest do
       move_start_case()
     ]
   end
+
+  # The Always On provisioner against the recorded Hetzner API: a project the
+  # token was just pasted for, the options it sells, and a home whose server
+  # was created, which the power action, the resources and the delete read.
+  # The job-backed methods answer their running job.
+  defp provision_cases do
+    stub = HetznerStub.start!()
+    connected = provision_home!(stub, false)
+    created = provision_home!(stub, true)
+
+    [
+      {"home.provision.connect", %{"token" => HetznerStub.token()},
+       provision_opts(provision_home!(stub, nil), stub)},
+      {"home.provision.options", %{}, provision_opts(connected, stub)},
+      {"home.provision.create", %{"type" => "cpx22", "location" => "fsn1"},
+       provision_opts(connected, stub)},
+      {"home.provision.power", %{"action" => "reset"}, provision_opts(created, stub)},
+      {"home.provision.resources", %{}, provision_opts(created, stub)},
+      {"home.provision.delete", %{}, provision_opts(provision_home!(stub, true), stub)}
+    ]
+  end
+
+  # A home with no token (`nil`), a connected one (`false`), or one whose
+  # server Fermix created (`true`).
+  defp provision_home!(stub, created?) do
+    home = SafeRm.make_tmp_dir!("contract_provision")
+    on_exit(fn -> SafeRm.rm_rf!(home) end)
+    :ok = Epoch.write(home, 4)
+
+    if created? != nil do
+      {:ok, _ledger} =
+        ProvisionLedger.update(
+          home,
+          "hetzner",
+          &{:ok, ProvisionLedger.connect(&1, HetznerStub.token(), ~U[2026-10-30 09:00:00Z])}
+        )
+    end
+
+    if created? do
+      request = %{type: "cpx22", location: "fsn1", profile: "general"}
+
+      {:ok, _server} =
+        ProvisionHetzner.create(home, request, provision_host_opts(stub) ++ code_seams())
+    end
+
+    home
+  end
+
+  defp provision_opts(home, stub) do
+    [
+      engine_role: %{role: :primary, primary: nil},
+      operation_opts: [
+        provision:
+          [home: home, profile: "general", jobs: jobs(), host_opts: provision_host_opts(stub)] ++
+            code_seams()
+      ]
+    ]
+  end
+
+  defp provision_host_opts(stub) do
+    [
+      req_options: HetznerStub.req_options(stub),
+      now: fn -> ~U[2026-10-30 09:00:00Z] end,
+      sleep: fn _ms -> :ok end
+    ]
+  end
+
+  defp code_seams,
+    do: [open_code: fn -> {:ok, "fxenroll1.aW52ZW50ZWQ"} end, withdraw_code: fn -> :ok end]
 
   # Enrollment and the move as the `home.status` golden shows them: the
   # candidate the used window enrolled, and a move to it undone before the

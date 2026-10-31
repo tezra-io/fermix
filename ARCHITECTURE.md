@@ -539,6 +539,32 @@ which build a host installs, shared by the installer and the readiness.
 (`MoveSecrets.missing/1`). The channels half
 (`FermixChannels.Home`) is described under `fermix_channels`.
 
+`Home.Provision` is the behaviour of a host Fermix creates the Always On
+server on (M75 lean v1 §4.3), and `Provision.Hetzner` the one host: Req over
+the Hetzner Cloud API through `Net.HttpClient`. The project token and the
+ledger of what was created live in one file, `device/provision/hetzner.json`
+(`Provision.Ledger`, `0600`, device-local, never `config.toml` or the
+keyring, so a move never carries it), written before each call that creates
+or deletes and updated after it, under a per-file lock held only for the
+read and write. `Provision.FirstBoot` embeds `packaging/cloud/first-boot.sh`
+at compile time and wraps it, gzip and base64 with its SHA-256, as the
+server's cloud-init user data, the enrollment code in `FERMIX_ENROLL_CODE`.
+A create checks the type against the live stock, makes the firewall (the
+first write, where a read-only token fails before anything costs money),
+opens a provisioned enrollment window (24 hours; `home.enroll.open` is
+refused while it is open), creates the server named and labelled by the
+ledger's ref, and polls each action with a bound; a create whose answer was
+lost is found again by its labels in `reconcile/2`, which also marks a
+resource deleted outside Fermix gone. `Management.Provision` answers
+`home.provision.*` (device-class in `Placement`: the computer that created
+the server manages it and never forwards the request); create, power and
+delete are owner decisions in the daemon and run as one `home_provision`
+management job at a time; delete refuses while a move to the server runs
+and once this engine is its linked desktop (or the home carries the moved
+marker). `Ledger.state/1` is the one reading of the provisioner for `home.status`'s
+summary: none, connected, creating, created, deleting, gone, failed (with the
+reason) or unreadable, beside whether the token is still accepted.
+
 Architecture Invariant: one role gate, one epoch writer, one marker, one
 device-local list, one placement table; a linked device's request takes one
 path, here or the primary, never both. A device-role engine makes no provider call and refreshes
@@ -552,7 +578,9 @@ offer later than the move it holds (move ids ordered by start, then the
 attempt), so a late offer never un-stages a home its source retired for. The
 move's ending (`done`, `aborted`) is written only by the engine that came
 back after the restart. A move's keychain values exist only in memory and
-inside the stream encrypted to the candidate's one-time key.
+inside the stream encrypted to the candidate's one-time key. The
+provisioner's token never leaves the computer that pasted it, and Hetzner's
+root password for a created server is read for nothing.
 
 ### `FermixCore.Trace` and Telemetry
 

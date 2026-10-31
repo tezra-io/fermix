@@ -63,7 +63,14 @@ defmodule FermixCore.Management.Jobs do
     # M74 §5: connecting a server the owner added, then one tool listing. A
     # first `npx -y` or `uvx` start downloads its package, and `MCP.Server`
     # gives that 60 s, so the connecting wait outlasts it.
-    mcp_check: %{budget_ms: 75_000, phases: ["connecting", "listing"]}
+    mcp_check: %{budget_ms: 75_000, phases: ["connecting", "listing"]},
+    # M75 lean v1 §4.3: creating, powering or deleting the Always On server on
+    # Hetzner. Each action is polled every 2 s at most 150 times, and a create
+    # waits on two (the create and the start), so 15 minutes holds the worst.
+    home_provision: %{
+      budget_ms: 900_000,
+      phases: ["checking", "firewall", "server", "starting", "power", "deleting"]
+    }
   ]
   @kind_names Keyword.keys(@kinds)
   # The closed failure vocabulary a run may answer with. `timed_out` and
@@ -100,6 +107,7 @@ defmodule FermixCore.Management.Jobs do
           | :imessage_grant
           | :imessage_policy_confirm
           | :mcp_check
+          | :home_provision
   @type view :: %{String.t() => term()}
   @type report :: ({:phase, String.t()} | {:progress, map()} | {:ready, map()} -> any())
   @type outcome :: {:ok, map()} | {:error, {:unavailable | :refused, String.t()}}

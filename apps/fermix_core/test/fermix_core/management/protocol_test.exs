@@ -156,7 +156,13 @@ defmodule FermixCore.Management.ProtocolTest do
              "home.enroll.open",
              "home.candidates.list",
              "home.move.readiness",
-             "home.move.start"
+             "home.move.start",
+             "home.provision.connect",
+             "home.provision.options",
+             "home.provision.create",
+             "home.provision.power",
+             "home.provision.resources",
+             "home.provision.delete"
            ]
 
     assert Protocol.error_codes() == [

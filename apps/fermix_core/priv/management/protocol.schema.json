@@ -234,7 +234,13 @@
     "home.enroll.open": 2,
     "home.candidates.list": 2,
     "home.move.readiness": 2,
-    "home.move.start": 2
+    "home.move.start": 2,
+    "home.provision.connect": 2,
+    "home.provision.options": 2,
+    "home.provision.create": 2,
+    "home.provision.power": 2,
+    "home.provision.resources": 2,
+    "home.provision.delete": 2
   },
   "$defs": {
     "request": {
@@ -342,7 +348,13 @@
             "home.enroll.open",
             "home.candidates.list",
             "home.move.readiness",
-            "home.move.start"
+            "home.move.start",
+            "home.provision.connect",
+            "home.provision.options",
+            "home.provision.create",
+            "home.provision.power",
+            "home.provision.resources",
+            "home.provision.delete"
           ]
         },
         "params": { "type": "object" }
@@ -999,6 +1011,48 @@
             "properties": { "method": { "const": "home.move.start" } }
           },
           "then": { "properties": { "params": { "$ref": "#/$defs/home_move_start_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "home.provision.connect" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/home_provision_connect_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "home.provision.options" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/home_provision_options_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "home.provision.create" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/home_provision_create_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "home.provision.power" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/home_provision_power_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "home.provision.resources" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/home_provision_resources_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "home.provision.delete" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/home_provision_delete_params" } } }
         }
       ]
     },
@@ -1160,7 +1214,13 @@
         { "$ref": "#/$defs/home_enroll_open_result" },
         { "$ref": "#/$defs/home_candidates_list_result" },
         { "$ref": "#/$defs/home_move_readiness_result" },
-        { "$ref": "#/$defs/home_move_start_result" }
+        { "$ref": "#/$defs/home_move_start_result" },
+        { "$ref": "#/$defs/home_provision_connect_result" },
+        { "$ref": "#/$defs/home_provision_options_result" },
+        { "$ref": "#/$defs/home_provision_create_result" },
+        { "$ref": "#/$defs/home_provision_power_result" },
+        { "$ref": "#/$defs/home_provision_resources_result" },
+        { "$ref": "#/$defs/home_provision_delete_result" }
       ]
     },
     "hello_params": { "type": "object", "maxProperties": 0, "additionalProperties": false },
@@ -2192,7 +2252,8 @@
         "browser_install",
         "imessage_grant",
         "imessage_policy_confirm",
-        "mcp_check"
+        "mcp_check",
+        "home_provision"
       ]
     },
     "jobStatus": {
@@ -5869,6 +5930,156 @@
         "key_id": { "type": "string", "pattern": "^[0-9a-f]{16}$" },
         "keep_as_desktop": { "type": "boolean" },
         "sentence": { "type": "string", "minLength": 1 }
+      }
+    },
+    "home_provision_connect_params": {
+      "type": "object",
+      "required": ["token"],
+      "additionalProperties": false,
+      "properties": {
+        "token": {
+          "description": "A Read & Write API token of the Hetzner project made for Fermix. Kept only in this computer's device/provision/hetzner.json, never logged, traced or answered.",
+          "type": "string",
+          "minLength": 16,
+          "maxLength": 512,
+          "pattern": "^[!-~]+$"
+        }
+      }
+    },
+    "home_provision_connect_result": { "$ref": "#/$defs/homeProvisionView" },
+    "home_provision_options_params": { "type": "object", "maxProperties": 0, "additionalProperties": false },
+    "home_provision_options_result": {
+      "description": "What Hetzner sells now, read live: every x86 type with at least 4 GB that is not deprecated, wherever it is in stock in Falkenstein, Nuremberg and Helsinki, cheapest first. recommended is the cheapest type in the first of the three where it is in stock, more_room the cheapest type with more memory; either is null when nothing fits. sentence says the recommendation, or that nothing is in stock.",
+      "type": "object",
+      "required": ["currency", "locations", "offers", "recommended", "more_room", "sentence"],
+      "additionalProperties": false,
+      "properties": {
+        "currency": { "type": "string" },
+        "locations": { "type": "array", "maxItems": 3, "items": { "$ref": "#/$defs/homeProvisionLocation" } },
+        "offers": { "type": "array", "maxItems": 150, "items": { "$ref": "#/$defs/homeProvisionOffer" } },
+        "recommended": { "oneOf": [{ "$ref": "#/$defs/homeProvisionPick" }, { "type": "null" }] },
+        "more_room": { "oneOf": [{ "$ref": "#/$defs/homeProvisionPick" }, { "type": "null" }] },
+        "sentence": { "type": "string", "minLength": 1 }
+      }
+    },
+    "homeProvisionLocation": {
+      "type": "object",
+      "required": ["id", "city", "country"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "enum": ["fsn1", "nbg1", "hel1"] },
+        "city": { "type": "string" },
+        "country": { "type": "string" }
+      }
+    },
+    "homeProvisionOffer": {
+      "type": "object",
+      "description": "One type in one location. The prices are monthly, gross, with VAT as the account is billed, as decimal strings in the account's currency; total_monthly adds the IPv4 address.",
+      "required": ["type", "description", "cores", "memory_gb", "disk_gb", "dedicated", "location", "monthly", "ipv4_monthly", "total_monthly"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "type": "string" },
+        "description": { "type": "string" },
+        "cores": { "type": "integer" },
+        "memory_gb": { "type": "number" },
+        "disk_gb": { "type": "integer" },
+        "dedicated": { "type": "boolean" },
+        "location": { "enum": ["fsn1", "nbg1", "hel1"] },
+        "monthly": { "type": "string", "pattern": "^[0-9]+\\.[0-9]{2}$" },
+        "ipv4_monthly": { "type": "string", "pattern": "^[0-9]+\\.[0-9]{2}$" },
+        "total_monthly": { "type": "string", "pattern": "^[0-9]+\\.[0-9]{2}$" }
+      }
+    },
+    "homeProvisionPick": {
+      "type": "object",
+      "required": ["type", "location"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "type": "string" },
+        "location": { "enum": ["fsn1", "nbg1", "hel1"] }
+      }
+    },
+    "home_provision_create_params": {
+      "type": "object",
+      "required": ["type", "location"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,31}$" },
+        "location": { "enum": ["fsn1", "nbg1", "hel1"] }
+      }
+    },
+    "home_provision_create_result": { "$ref": "#/$defs/jobView" },
+    "home_provision_power_params": {
+      "type": "object",
+      "required": ["action"],
+      "additionalProperties": false,
+      "properties": { "action": { "enum": ["on", "reset"] } }
+    },
+    "home_provision_power_result": { "$ref": "#/$defs/jobView" },
+    "home_provision_resources_params": { "type": "object", "maxProperties": 0, "additionalProperties": false },
+    "home_provision_resources_result": { "$ref": "#/$defs/homeProvisionView" },
+    "home_provision_delete_params": { "type": "object", "maxProperties": 0, "additionalProperties": false },
+    "home_provision_delete_result": { "$ref": "#/$defs/jobView" },
+    "homeProvisionView": {
+      "type": "object",
+      "description": "What Fermix created on Hetzner, from this computer's ledger. state is none (no token), connected, creating, created (the server exists and waits for its enrollment and move), deleting, gone (deleted outside Fermix), failed (the last create stopped; failure says why) or unreadable. other_servers is answered by home.provision.connect, checked and sentence by home.provision.resources: whether Hetzner was read just now, and why not. The token is never answered.",
+      "required": ["state", "token", "server", "failure", "resources", "sentence"],
+      "additionalProperties": false,
+      "properties": {
+        "state": { "enum": ["none", "connected", "creating", "created", "deleting", "gone", "failed", "unreadable"] },
+        "token": { "enum": ["none", "accepted", "refused"] },
+        "server": { "oneOf": [{ "$ref": "#/$defs/homeProvisionServer" }, { "type": "null" }] },
+        "failure": { "oneOf": [{ "$ref": "#/$defs/homeProvisionFailure" }, { "type": "null" }] },
+        "resources": { "type": "array", "maxItems": 8, "items": { "$ref": "#/$defs/homeProvisionResource" } },
+        "sentence": { "type": ["string", "null"] },
+        "other_servers": { "type": "boolean" },
+        "checked": { "type": "boolean" }
+      }
+    },
+    "homeProvisionServer": {
+      "type": "object",
+      "required": ["name", "type", "location", "status", "power", "ipv4", "created_at", "seen_at"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "pattern": "^fermix-[a-z0-9-]+-[0-9a-f]{4}$" },
+        "type": { "type": "string" },
+        "location": { "enum": ["fsn1", "nbg1", "hel1"] },
+        "status": { "$ref": "#/$defs/homeProvisionStatus" },
+        "power": {
+          "description": "The server's status as Hetzner last reported it (running, off, starting and the like), and when; null before it was read.",
+          "type": ["string", "null"]
+        },
+        "ipv4": { "type": ["string", "null"] },
+        "created_at": { "type": ["string", "null"] },
+        "seen_at": { "type": ["string", "null"] }
+      }
+    },
+    "homeProvisionStatus": {
+      "description": "requested (written before the call that creates it), creating, created, deleting or gone (deleted outside Fermix).",
+      "enum": ["requested", "creating", "created", "deleting", "gone"]
+    },
+    "homeProvisionFailure": {
+      "type": "object",
+      "description": "Why the last create stopped: reason is a word (unavailable, account_limit, read_only_token, token_refused and others), sentence the daemon's words, next_location the next location in stock when Hetzner had no capacity.",
+      "required": ["reason", "sentence", "next_location", "at"],
+      "additionalProperties": false,
+      "properties": {
+        "reason": { "type": "string" },
+        "sentence": { "type": "string", "minLength": 1 },
+        "next_location": { "oneOf": [{ "enum": ["fsn1", "nbg1", "hel1"] }, { "type": "null" }] },
+        "at": { "type": "string" }
+      }
+    },
+    "homeProvisionResource": {
+      "type": "object",
+      "description": "One thing Fermix created and Hetzner bills for until it is deleted: the server, its firewall or one of its primary addresses (named by the address).",
+      "required": ["kind", "name", "id", "status"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "enum": ["server", "firewall", "primary_ip"] },
+        "name": { "type": ["string", "null"] },
+        "id": { "type": ["integer", "null"] },
+        "status": { "$ref": "#/$defs/homeProvisionStatus" }
       }
     },
     "homeCandidate": {

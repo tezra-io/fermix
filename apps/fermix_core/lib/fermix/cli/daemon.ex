@@ -62,6 +62,7 @@ defmodule Fermix.CLI.Daemon do
   alias FermixCore.Management.Mobile, as: ManagementMobile
   alias FermixCore.Management.Placement
   alias FermixCore.Management.Protocol, as: ManagementProtocol
+  alias FermixCore.Management.Provision, as: ManagementProvision
   alias FermixCore.Management.Router, as: ManagementRouter
   alias FermixCore.Management.Secrets, as: ManagementSecrets
   alias FermixCore.Management.Settings.Cues, as: SettingsCues
@@ -102,6 +103,11 @@ defmodule Fermix.CLI.Daemon do
   # and replacing the recovery key (M75).
   @home_decisions_v1 ~w(home.enroll.open home.move.readiness home.move.start
                         home.snapshots.passphrase)
+  # Creating the Always On server, turning it on or resetting it, and deleting
+  # it: each spends the owner's money or can take the home away (M75 lean v1
+  # §4.3). The token and the reads stay open.
+  @provision_decisions_v1 ~w(home.provision.create home.provision.power
+                             home.provision.delete)
   @owner_decisions_v0 ~w(mobile_pair_begin mobile_pair_decide mobile_pair_cancel
                          mobile_device_revoke)
   # The cue writes that widen what reaches a task or what a task may do, the
@@ -428,6 +434,7 @@ defmodule Fermix.CLI.Daemon do
   # Every other secret and section stays open, as it was.
   defp owner_family(method, _params) when method in @mobile_decisions_v1, do: :mobile
   defp owner_family(method, _params) when method in @home_decisions_v1, do: :home
+  defp owner_family(method, _params) when method in @provision_decisions_v1, do: :provision
   defp owner_family(method, _params) when method in @cue_decisions_v1, do: :cues
 
   defp owner_family(method, %{"id" => @cue_secret_prefix <> _ref}) when method in @secret_writes,
@@ -456,13 +463,21 @@ defmodule Fermix.CLI.Daemon do
   # channel is fine and doctor says so, so "not running" would send the
   # operator after the wrong fault. The capability and the sentence are the
   # request's family's: the phone's own pair for its pairing methods, the
-  # cues' for theirs and for a cue write that rides a generic method, and for
-  # M75's the home move's.
+  # cues' for theirs and for a cue write that rides a generic method, for
+  # M75's the home move's, and the Always On server's own.
   defp owner_decision_refusal(:home) do
     {:error, :unavailable,
      %{
        "capability" => ManagementHomeMove.capability(),
        "sentence" => ManagementHomeMove.owner_only_sentence()
+     }}
+  end
+
+  defp owner_decision_refusal(:provision) do
+    {:error, :unavailable,
+     %{
+       "capability" => ManagementProvision.capability(),
+       "sentence" => ManagementProvision.owner_only_sentence()
      }}
   end
 

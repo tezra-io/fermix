@@ -35,7 +35,8 @@ Fermix runs as a local daemon that holds provider API keys and bot tokens,
 executes a workspace-rooted command/path sandbox, and bridges external chat
 channels. Areas of particular interest:
 
-- secret handling (config, env passthrough, `auth.json`),
+- secret handling (config, env passthrough, `auth.json`, the Always On
+  provisioner's Hetzner token),
 - the sandbox and its allow/deny policy,
 - inbound/outbound MCP and channel ingress authorization,
 - the signed `fermix upgrade` path.
@@ -66,6 +67,23 @@ the vendor CLI is handed; once confirmed, a coding run still meets its own
 authorization, consent and vendor-config checks.
 The same gate holds access-sensitive plugin commands (a car unlock) on every
 platform.
+
+The Hetzner API token the Always On provisioner uses can create, delete and
+read everything in its project, so it is kept apart from every other secret:
+only in `device/provision/hetzner.json` (`0600` in a `0700` folder, owner-only
+before the token is written into it, renamed into place), never in
+`config.toml`, the keychain or the file secret store, because a move carries
+those to the server, and `device/` is left out of every archive, snapshot and
+move and denied to sandboxed commands. It is never logged, traced or answered
+(`home.provision.*` answers only whether it is accepted). Creating, powering
+and deleting the server are owner decisions, refused to a command Fermix
+started, and Fermix touches only what it created (named and labelled by its
+own short id). The root password Hetzner answers for a server created with
+no SSH key is dropped where the answer arrives: it reaches no file, log,
+trace, status or crash report. The
+server's cloud-init user data carries a single-use enrollment code and stays
+readable through the metadata service, which the server's first boot blocks
+for every account but root.
 
 What this deliberately does not cover:
 

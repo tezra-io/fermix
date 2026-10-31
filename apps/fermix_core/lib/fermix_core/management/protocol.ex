@@ -133,7 +133,13 @@ defmodule FermixCore.Management.Protocol do
     {"home.enroll.open", 2},
     {"home.candidates.list", 2},
     {"home.move.readiness", 2},
-    {"home.move.start", 2}
+    {"home.move.start", 2},
+    {"home.provision.connect", 2},
+    {"home.provision.options", 2},
+    {"home.provision.create", 2},
+    {"home.provision.power", 2},
+    {"home.provision.resources", 2},
+    {"home.provision.delete", 2}
   ]
   @methods Enum.map(@method_minimums, fn {method, _minimum} -> method end)
   @method_minimum_versions Map.new(@method_minimums)

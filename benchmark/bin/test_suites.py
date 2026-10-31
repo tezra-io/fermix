@@ -562,6 +562,8 @@ def test_the_shipped_numbered_rubrics_parse():
                       "what_stops_after_an_always_on_move": 5,
                       "new_fermix_release_on_the_server": 3,
                       "security_patches_and_reboots_on_the_server": 3,
+                      "hetzner_server_from_a_token": 5,
+                      "deleting_the_server_the_home_moved_to": 3,
                       # open_loops.yaml
                       "grant_overhead": 3, "contractor_choice": 3,
                       "fence_paint_route_sanity": 3,

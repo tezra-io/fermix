@@ -15,7 +15,10 @@ defmodule FermixCore.Management.Placement do
   did. The home's recovery, enrollment and move are the primary's too
   (`home.snapshots.*`, `home.enroll.open`, `home.candidates.list`,
   `home.move.readiness`, `home.move.start`): after a move the server holds
-  them, and the desktop reaches them only through it.
+  them, and the desktop reaches them only through it. The Always On
+  provisioner (`home.provision.*`) is device-class: its token and the ledger
+  of what it created stay on the computer that created the server, which
+  manages that server itself and never sends the request to it.
 
   Two methods are **composed** (`composed?/1`): `home.status` and
   `settings.sections`. A linked device answers them itself and adds the
@@ -47,7 +50,7 @@ defmodule FermixCore.Management.Placement do
     browser.install.start capabilities.install.start
     home.status settings.sections
   )
-  @device_families ~w(lifecycle. doctor. computer_use. imessage.)
+  @device_families ~w(lifecycle. doctor. computer_use. imessage. home.provision.)
   # Answered on this machine with the primary's own answer added (M75: a
   # desktop draws its own facts beside the server's).
   @composed_methods ~w(home.status settings.sections)
