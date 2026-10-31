@@ -600,7 +600,8 @@ it, never a second writer.
   `summary`: one sentence and at most one action, worked out once by the
   engine, which the apps, the setup page and `fermix home status` (first,
   before the rest) all print as they are. Its words never name an epoch, the
-  primary, a candidate, the relay, the rail or a phase. Its states:
+  primary, a candidate, the relay, the rail, a phase or an error code (a
+  refusal of Hetzner's is said in its message alone). Its states:
   - before the move, on the computer that sets it up: nothing set up ("Keep
     Fermix running when this Mac sleeps. It moves to a server you own.", with
     a second line only when this home uses something that stops after the

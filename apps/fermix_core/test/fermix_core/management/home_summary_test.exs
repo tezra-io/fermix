@@ -358,15 +358,16 @@ defmodule FermixCore.Management.HomeSummaryTest do
     assert MapSet.equal?(actions, MapSet.new(HomeSummary.actions()))
   end
 
-  # Every word a surface prints: no dash, no command, and none of the engine's
-  # own words for the move.
+  # Every word a surface prints: no dash, no command, no backticked code, and
+  # none of the engine's own words for the move.
   test "every sentence, label and detail line obeys the copy rules and names nothing internal" do
     for {name, facts, _state, _sentence, _action} <- cases(),
         text <- printed(HomeSummary.summary(facts)) do
       assert Copy.violations(text, :prose, ["CPX22", "Read & Write"]) == [],
              "#{name}: #{inspect(text)} breaks #{inspect(Copy.violations(text, :prose))}"
 
-      assert Copy.internal_words(text) == [], "#{name}: #{inspect(text)} names an internal word"
+      assert Copy.summary_violations(text) == [],
+             "#{name}: #{inspect(text)} breaks #{inspect(Copy.summary_violations(text))}"
     end
   end
 

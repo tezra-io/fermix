@@ -54,7 +54,8 @@ defmodule FermixCore.Home.Provision.Hetzner do
   account's limit; `412 resource_unavailable` no capacity, with the next
   location in stock; `429` rate limited, with Hetzner's `RateLimit-Reset`
   (a poll waits 10 s and goes on, still counted against its bound); every
-  other refusal carries Hetzner's own code and message.
+  other refusal carries Hetzner's own code and message. The log names each
+  refusal's status and code; the sentence it becomes says only the message.
   """
 
   @behaviour FermixCore.Home.Provision
@@ -943,8 +944,11 @@ defmodule FermixCore.Home.Provision.Hetzner do
        when status in 200..299,
        do: {:ok, body}
 
+  # The status and Hetzner's code go to the log: the sentence a refusal
+  # becomes carries neither (`Provision.error_sentence/1`).
   defp answer({:ok, %Req.Response{status: status} = response}, method, path) do
-    Logger.warning("provision: Hetzner answered #{method} #{path} with #{status}")
+    code = vendor(response.body, "code") || "no code"
+    Logger.warning("provision: Hetzner answered #{method} #{path} with #{status} (#{code})")
     {:error, refusal(status, response)}
   end
 

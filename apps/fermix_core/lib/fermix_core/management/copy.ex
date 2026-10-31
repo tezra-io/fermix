@@ -41,9 +41,9 @@ defmodule FermixCore.Management.Copy do
   sentence and at most one action for where Always On stands, which the Mac
   app, the Linux app, the setup page and `fermix home status` print as they
   are (`FermixCore.Management.HomeSummary` picks them). They obey one rule
-  more, `internal_words/1`: none of the engine's own words for the move
+  more, `summary_violations/1`: none of the engine's own words for the move
   (epoch, primary, candidate, relay, rail, phase, ledger, key id) reaches an
-  owner.
+  owner (`internal_words/1`), and no backticked literal or code does either.
   """
 
   alias FermixCore.Providers.Descriptor
@@ -53,6 +53,7 @@ defmodule FermixCore.Management.Copy do
 
   @em_dashes ["—", "–"]
   @backticked ~r/`[^`]*`/
+  @backtick_or_span ~r/`[^`]*`|`/
   @mix_task ~r/\bmix\s+[a-z][a-z0-9_]*\.[a-z]/
   @version ~r/\bv?\d+\.\d+(?:\.\d+)?\b/
   @wire_token ~r/\b(?:[a-z][a-z0-9]*(?:_[a-z0-9]+)+|[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)\b/
@@ -235,6 +236,18 @@ defmodule FermixCore.Management.Copy do
   @spec internal_words(String.t()) :: [String.t()]
   def internal_words(text) when is_binary(text),
     do: @internal_words |> Regex.scan(text) |> Enum.map(&hd/1)
+
+  @doc """
+  What keeps `text` from being a summary word beside `violations/3`: each
+  internal word (`internal_words/1`) and each backticked span or stray
+  backtick. A summary sentence is plain words an owner reads, so it carries no
+  literal to type and no code, which `violations/3` lets stand in backticks.
+  """
+  @spec summary_violations(String.t()) :: [violation()]
+  def summary_violations(text) when is_binary(text) do
+    Enum.map(internal_words(text), &{:internal_word, &1}) ++
+      (@backtick_or_span |> Regex.scan(text) |> Enum.map(&{:backtick, hd(&1)}))
+  end
 
   @doc "Every key `summary_sentence/2` takes, so the copy gate walks them all."
   @spec summary_keys() :: [atom()]

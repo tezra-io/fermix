@@ -178,7 +178,11 @@ defmodule FermixCore.Home.Provision do
   def failure_word(:forbidden), do: "read_only_token"
   def failure_word(reason) when is_atom(reason), do: Atom.to_string(reason)
 
-  @doc "One sentence for `reason`, in the daemon's words (and the host's own where it has some)."
+  @doc """
+  One sentence for `reason`, in the daemon's words (and the host's own where
+  it has some): plain words, with no code or HTTP status, since the summary
+  prints a create's failure as it is.
+  """
   @spec error_sentence(reason()) :: String.t()
   def error_sentence(:token_invalid),
     do:
@@ -212,11 +216,11 @@ defmodule FermixCore.Home.Provision do
   def error_sentence({:unreachable, _reason}),
     do: "Fermix could not reach Hetzner, so check this computer's connection and try again."
 
-  def error_sentence({:refused, status, code, message}),
-    do: "Hetzner refused the request (#{status} `#{code}`): #{closed(message)}"
+  def error_sentence({:refused, _status, _code, message}),
+    do: "Hetzner refused the request: #{vendor(message)}"
 
   def error_sentence({:action_failed, command, message}),
-    do: "Hetzner could not finish #{doing(command)}: #{closed(message)}"
+    do: "Hetzner could not finish #{doing(command)}: #{vendor(message)}"
 
   def error_sentence({:action_timeout, command}),
     do:
@@ -301,11 +305,11 @@ defmodule FermixCore.Home.Provision do
       "Fermix cannot reach your server to close the code it gave the new one, so try again " <>
         "once your server is back."
 
-  def error_sentence({:code_refused, code}),
-    do: "Your server did not open a code for the new one (`#{code}`)."
+  def error_sentence({:code_refused, _code}),
+    do: "Your server did not open a code for the new one."
 
-  def error_sentence({:withdraw_refused, code}),
-    do: "Your server did not close the code it gave the new one (`#{code}`)."
+  def error_sentence({:withdraw_refused, _code}),
+    do: "Your server did not close the code it gave the new one."
 
   def error_sentence({:old_server, reason}),
     do: "Fermix could not delete your old server: #{error_sentence(reason)}"
@@ -323,7 +327,11 @@ defmodule FermixCore.Home.Provision do
   defp doing("reset_server"), do: "restarting your server"
   defp doing(_command), do: "what Fermix asked of it"
 
-  defp closed(message) do
-    if String.ends_with?(message, [".", "?", "!"]), do: message, else: message <> "."
+  # Hetzner's own message, as plain words the summary can print: a backtick
+  # in it reads as a quote. Its code and HTTP status are in the log
+  # (`Provision.Hetzner`), never in the sentence.
+  defp vendor(message) do
+    plain = String.replace(message, "`", "'")
+    if String.ends_with?(plain, [".", "?", "!"]), do: plain, else: plain <> "."
   end
 end

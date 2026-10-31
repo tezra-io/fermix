@@ -582,7 +582,9 @@ the primary's disk, `Home.Disk.usage/2`, and a linked desktop's composed
 `primary_home`, or `Placement.primary_part/2`'s `too_old` when the server
 refused this engine's protocol), and the pure `summary/1` answers `{state,
 sentence, action, detail}` in `Management.Copy`'s words, which `CopyTest`
-holds to the copy rules and to `Copy.internal_words/1`. The two times it
+holds to the copy rules and to `Copy.summary_violations/1` (no internal word,
+no backticked code), as it does every provisioner refusal a failure keeps in
+the ledger, which the summary prints as it is. The two times it
 counts are awake time on the monotonic clock: how long the created server's
 window has been held (`Enrollment`'s `awake_ms`, 30 minutes) and how long the
 desktop relay has had no session (`Relay`'s `down_ms`, 10 minutes). On a

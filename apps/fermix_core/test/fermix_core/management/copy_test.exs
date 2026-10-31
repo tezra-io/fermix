@@ -850,11 +850,42 @@ defmodule FermixCore.Management.CopyTest do
       for {where, text, kind} <- summary_copy() do
         assert_clean(text, kind, [], where)
 
-        assert Copy.internal_words(text) == [],
-               "#{where}: #{inspect(text)} names an internal word"
+        assert Copy.summary_violations(text) == [],
+               "#{where}: #{inspect(text)} breaks #{inspect(Copy.summary_violations(text))}"
 
         refute_command(text, where)
       end
+    end
+
+    # A summary word is plain words an owner reads: a backticked span is a
+    # literal to type or a code, which `violations/3` lets stand as one, and
+    # an internal word is the engine's own.
+    test "the summary's own rule catches a backticked code and an internal word" do
+      assert Copy.summary_violations("Hetzner refused the request (422 `invalid_input`).") ==
+               [{:backtick, "`invalid_input`"}]
+
+      assert Copy.summary_violations("A stray ` mark.") == [{:backtick, "`"}]
+
+      assert Copy.summary_violations("Only the primary opens a code.") == [
+               {:internal_word, "primary"}
+             ]
+
+      assert Copy.summary_violations("Fermix runs on your server.") == []
+    end
+
+    # The summary prints a create's or a replace's failure as the provisioner
+    # wrote it (`Provision.error_sentence/1`, kept in the ledger), so every
+    # refusal it can keep is held to the summary's rule too.
+    test "every failure sentence the summary prints is plain words" do
+      offenders =
+        for {reason, sentence} <- provision_copy(),
+            (found = Copy.summary_violations(sentence)) != [],
+            do: {reason, sentence, found}
+
+      assert offenders == []
+
+      quoted = Provision.error_sentence({:refused, 422, "invalid_input", "bad `name` field"})
+      assert Copy.summary_violations(quoted) == [], inspect(quoted)
     end
 
     test "every key and every action answers its words" do

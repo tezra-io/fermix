@@ -784,6 +784,7 @@ defmodule FermixCore.Management.Provision do
         {:error, sentence}
 
       {:error, code, _details} ->
+        Logger.warning("provision: your server refused home.enroll.open (#{code})")
         {:error, Provision.error_sentence({:code_refused, Atom.to_string(code)})}
     end
   end
@@ -800,6 +801,8 @@ defmodule FermixCore.Management.Provision do
         {:error, {:unavailable, sentence}}
 
       {:error, code, _details} ->
+        Logger.warning("provision: your server refused home.enroll.withdraw (#{code})")
+
         {:error,
          {:unavailable, Provision.error_sentence({:withdraw_refused, Atom.to_string(code)})}}
     end
