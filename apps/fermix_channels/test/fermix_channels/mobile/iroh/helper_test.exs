@@ -15,6 +15,10 @@ defmodule FermixChannels.Mobile.Iroh.HelperTest do
   @us1 %{url: "https://us1.relay.fermix.ai/", quic_port: 7842}
   @eu1 %{url: "https://eu1.relay.fermix.ai/", quic_port: 7842}
   @ap1 %{url: "https://ap1.relay.fermix.ai/", quic_port: 7842}
+  # What the fake says is a Perl process's work, which on a loaded runner takes
+  # longer than the suite's 2 s; the rail itself gives a helper 10 s to start.
+  @helper_ms 10_000
+  @poll_ms 20
 
   setup %{tmp_dir: root} do
     mobile = Path.join(root, "mobile")
@@ -99,13 +103,13 @@ defmodule FermixChannels.Mobile.Iroh.HelperTest do
 
   defp self_pid(opts), do: Keyword.get(opts, :test_pid, self())
 
-  defp await_state(pid, state, attempts \\ 100) do
+  defp await_state(pid, state, attempts \\ div(@helper_ms, @poll_ms)) do
     case Helper.status(pid) do
       %{state: ^state} = status ->
         status
 
       other when attempts > 0 ->
-        Process.sleep(20)
+        Process.sleep(@poll_ms)
 
         if attempts == 1,
           do: flunk("rail stayed #{inspect(other)}"),
