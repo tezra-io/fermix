@@ -66,7 +66,8 @@ defmodule FermixCore.Management.Home do
   `:disk_usage` (a 1-arity reader of a home's disk, `Home.Disk.usage/2`),
   `:version`, `:now` and `:host_os`. `:supervised` is the caller's world for
   the disk's `df` (false from a tree-less verb), and `:unreadable_files` the
-  memory that logs an unreadable file the summary reads once per stretch
+  memory that logs what this record reads (the disk, the ledger, the settings,
+  the last review, a desktop's copies) once per stretch it cannot be read
   (`Home.UnreadableFiles`, the default; nil from a tree-less verb).
   `:primary_forward` is the daemon's way to the primary, given only on a
   linked desktop.
@@ -83,6 +84,7 @@ defmodule FermixCore.Management.Home do
   alias FermixCore.Home.Snapshot.Scheduler
   alias FermixCore.Home.Snapshot.Settings, as: SnapshotSettings
   alias FermixCore.Home.Snapshot.Status
+  alias FermixCore.Home.UnreadableFiles
   alias FermixCore.Management.HomeMove
   alias FermixCore.Management.HomeSummary
   alias FermixCore.Management.Placement
@@ -139,17 +141,20 @@ defmodule FermixCore.Management.Home do
   end
 
   # How full a primary's disk is; a desktop reads its server's in
-  # `primary_home`, and a disk that cannot be read is said in the log.
+  # `primary_home`, and a disk that cannot be read is said in the log, once
+  # while it stays so (`Home.UnreadableFiles`).
   defp disk(home, %{role: :primary}, opts) do
     supervised = Keyword.get(opts, :supervised, true)
     usage = Keyword.get(opts, :disk_usage, &Disk.usage(&1, supervised: supervised))
+    read = usage.(home)
+    memory = Keyword.get(opts, :unreadable_files, UnreadableFiles)
+    :ok = UnreadableFiles.log_read("the disk of #{home}", "home status", read, memory)
 
-    case usage.(home) do
+    case read do
       {:ok, %{used: used, nearly_full: nearly_full}} ->
         %{"used" => Float.round(used * 1.0, 2), "nearly_full" => nearly_full}
 
-      {:error, reason} ->
-        Logger.warning("home status: the disk could not be read: #{inspect(reason)}")
+      {:error, _reason} ->
         nil
     end
   end

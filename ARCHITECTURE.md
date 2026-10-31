@@ -575,12 +575,13 @@ and once this engine is its linked desktop (or the home carries the moved
 marker). `Ledger.state/3` is the one reading of the provisioner for `home.status`'s
 summary: none, connected, creating, created, deleting, gone, failed (with the
 reason) or unreadable, beside whether the token is still accepted. The apps
-poll `home.status`, so the ledger and the settings its summary reads
-(`MoveReadiness.stays_here/3`) log an unreadable file through
-`Home.UnreadableFiles`, a supervised memory in every role's tree: once when
-the file stops being readable and once, with the failed reads counted, when
-it reads again; a verb with no engine tree passes no memory and logs its one
-read.
+poll `home.status`, so everything it reads on each poll (the ledger, the
+settings its summary reads, `MoveReadiness.stays_here/3`, the primary's
+disk, the last review of the move and each copy a desktop stores) logs a
+failure to read it through `Home.UnreadableFiles`, a supervised memory in
+every role's tree: once when it stops being readable and once, with the
+failed reads counted, when it reads again; a verb with no engine tree passes
+no memory and logs its one read.
 
 `Management.HomeSummary` is that summary (M75 lean v1 §7): `gather/5` reads
 the ledger, the last kept review (`Move.last_review/1`) and a desktop's stored

@@ -62,9 +62,8 @@ defmodule FermixCore.Management.HomeSummary do
   alias FermixCore.Home.MoveReadiness
   alias FermixCore.Home.Provision.Ledger
   alias FermixCore.Home.Snapshot.Capture
+  alias FermixCore.Home.UnreadableFiles
   alias FermixCore.Management.Copy
-
-  require Logger
 
   @states ~w(off connect choose creating ready moving on undone retired candidate primary problem)
   @problems ~w(turned_off cannot_reach deleted not_set_up waited_too_long no_capacity
@@ -146,12 +145,12 @@ defmodule FermixCore.Management.HomeSummary do
       link: link,
       candidates: status.candidates,
       provision: Ledger.state(home, "hetzner", reads),
-      review: review(home, role),
+      review: review(home, role, reads),
       snapshots: status.snapshots,
       disk: status.disk,
       primary_home: status.primary_home,
       primary_too_old: Map.get(status, :primary_too_old, false),
-      copies_bytes: copies_bytes(home, role),
+      copies_bytes: copies_bytes(home, role, reads),
       stays_here: stays_here(home, role, host_os, reads)
     }
   end
@@ -750,21 +749,24 @@ defmodule FermixCore.Management.HomeSummary do
   end
 
   # The last review of the move, whatever its age: on the computer that moves.
-  defp review(home, :primary) do
-    case Move.last_review(home) do
-      {:ok, review} ->
-        review
+  # One that cannot be read is logged once while it stays so.
+  defp review(home, :primary, reads) do
+    read = Move.last_review(home)
+    subject = "the last review of the move in #{Move.dir(home)}"
+    :ok = UnreadableFiles.log_read(subject, "home status", read_result(read), memory(reads))
 
-      :none ->
-        nil
-
-      {:error, reason} ->
-        Logger.error("home status: the move's review could not be read: #{inspect(reason)}")
-        nil
+    case read do
+      {:ok, review} -> review
+      _none_or_unreadable -> nil
     end
   end
 
-  defp review(_home, _role), do: nil
+  defp review(_home, _role, _reads), do: nil
+
+  defp read_result(:none), do: :ok
+  defp read_result(read), do: read
+
+  defp memory(reads), do: Keyword.get(reads, :unreadable_files, UnreadableFiles)
 
   # What stops after a move, which only the computer that sets it up says.
   defp stays_here(home, :primary, host_os, reads) do
@@ -777,29 +779,27 @@ defmodule FermixCore.Management.HomeSummary do
   defp stays_here(_home, _role, _host_os, _reads), do: []
 
   # The space the server's backups take on this desktop (`Desktop.SnapshotStore`).
-  defp copies_bytes(home, :device) do
+  defp copies_bytes(home, :device, reads) do
     home
     |> Capture.dir()
     |> Path.join("*.fxsnap")
     |> Path.wildcard()
-    |> Enum.reduce(0, &(&2 + copy_bytes(&1)))
+    |> Enum.reduce(0, &(&2 + copy_bytes(&1, reads)))
   end
 
-  defp copies_bytes(_home, _role), do: nil
+  defp copies_bytes(_home, _role, _reads), do: nil
 
   # A copy the store rotated out between the listing and the read takes no
-  # space; any other failure is logged and counted as none.
-  defp copy_bytes(file) do
-    case File.stat(file) do
-      {:ok, %File.Stat{size: size}} ->
-        size
+  # space; any other failure counts as none and is logged once while it
+  # stays so.
+  defp copy_bytes(file, reads) do
+    stat = File.stat(file)
+    read = if match?({:error, :enoent}, stat), do: :ok, else: stat
+    :ok = UnreadableFiles.log_read(file, "home status", read, memory(reads))
 
-      {:error, :enoent} ->
-        0
-
-      {:error, reason} ->
-        Logger.warning("home status: #{file} could not be read: #{inspect(reason)}")
-        0
+    case stat do
+      {:ok, %File.Stat{size: size}} -> size
+      {:error, _reason} -> 0
     end
   end
 end

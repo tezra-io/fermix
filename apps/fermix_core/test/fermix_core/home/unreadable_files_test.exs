@@ -9,9 +9,12 @@ defmodule FermixCore.Home.UnreadableFilesTest do
   import ExUnit.CaptureLog
 
   alias Fermix.CLI.HomeStatusCommand
+  alias FermixCore.Home.Move
   alias FermixCore.Home.MoveReadiness
   alias FermixCore.Home.Provision.Ledger
+  alias FermixCore.Home.Snapshot.Capture
   alias FermixCore.Home.UnreadableFiles
+  alias FermixCore.Management.Home
   alias FermixCore.Management.HomeSummary
   alias FermixTestSupport.SafeRm
 
@@ -144,6 +147,80 @@ defmodule FermixCore.Home.UnreadableFilesTest do
     assert [_line] = lines(log, settings)
   end
 
+  test "the primary's disk home.status reads is logged once while unreadable", ctx do
+    poll = fn usage ->
+      Home.status(
+        home: ctx.home,
+        engine_role: %{role: :primary, primary: nil},
+        config: [],
+        scheduler: nil,
+        profile: "general",
+        now: @now,
+        disk_usage: usage,
+        unreadable_files: ctx.server
+      )
+    end
+
+    log =
+      capture_log(fn ->
+        for _poll <- 1..3 do
+          assert {:ok, %{"disk" => nil}} = poll.(fn _home -> {:error, :df_unavailable} end)
+        end
+      end)
+
+    assert [line] = lines(log, "the disk of #{ctx.home}")
+    assert line =~ "df_unavailable"
+
+    log =
+      capture_log(fn ->
+        for _poll <- 1..2 do
+          assert {:ok, %{"disk" => %{"used" => 0.42}}} =
+                   poll.(fn _home -> {:ok, %{used: 0.42, nearly_full: false}} end)
+        end
+      end)
+
+    assert [line] = lines(log, "the disk of #{ctx.home}")
+    assert line =~ "reads again after 3 failed reads"
+  end
+
+  test "the last review of the move the summary reads is logged once while unreadable", ctx do
+    File.mkdir_p!(Move.dir(ctx.home))
+    review = Path.join(Move.dir(ctx.home), "readiness.json")
+    File.write!(review, "not json")
+
+    log =
+      capture_log(fn ->
+        for _poll <- 1..3,
+            do: assert(%{review: nil} = gather(ctx.home, unreadable_files: ctx.server))
+      end)
+
+    assert [_line] = lines(log, Move.dir(ctx.home))
+
+    :ok = SafeRm.rm!(review)
+
+    log = capture_log(fn -> gather(ctx.home, unreadable_files: ctx.server) end)
+    assert [line] = lines(log, Move.dir(ctx.home))
+    assert line =~ "reads again after 3 failed reads"
+  end
+
+  # A copy that loops back on itself can be listed and never measured.
+  test "a desktop's stored copy it cannot measure is logged once while it stays so", ctx do
+    copy = Path.join(Capture.dir(ctx.home), "invented.fxsnap")
+    File.mkdir_p!(Path.dirname(copy))
+    :ok = File.ln_s(copy, copy)
+
+    log =
+      capture_log(fn ->
+        for _poll <- 1..3 do
+          assert %{copies_bytes: 0} =
+                   gather(ctx.home, [unreadable_files: ctx.server], %{role: :device, primary: "x"})
+        end
+      end)
+
+    assert [line] = lines(log, copy)
+    assert line =~ "eloop"
+  end
+
   # A verb with no engine running reads once and exits: nothing is
   # remembered, so no process is asked, and each read is its first.
   test "a tree-less read remembers nothing", ctx do
@@ -177,7 +254,7 @@ defmodule FermixCore.Home.UnreadableFilesTest do
     file
   end
 
-  defp gather(home, opts) do
+  defp gather(home, opts, record \\ %{role: :primary, primary: nil}) do
     status = %{
       moved: nil,
       move: nil,
@@ -189,7 +266,7 @@ defmodule FermixCore.Home.UnreadableFilesTest do
 
     HomeSummary.gather(
       home,
-      %{role: :primary, primary: nil},
+      record,
       %{primary: nil, desktops: [], enrollment: nil},
       status,
       [now: @now, host_os: :macos] ++ opts
