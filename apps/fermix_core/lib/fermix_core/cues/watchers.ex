@@ -72,9 +72,9 @@ defmodule FermixCore.Cues.Watchers do
   @cap_reached "This watcher has 20 instructions; merge some first."
   @none_needs_cap "A watcher with no filter wakes its task for every cue; say how many runs a day " <>
                     "it may cause, or say none."
-  @none_takes_nothing "A watcher with no filter takes no purpose, instructions or words to " <>
-                        "listen for."
-  @needs_words "A watcher that filters needs words to listen for: list the names, products, " <>
+  @none_takes_nothing "A watcher with no filter takes no purpose, instructions or keywords " <>
+                        "to listen for."
+  @needs_words "A watcher that filters needs keywords to listen for: list the names, products, " <>
                  "abbreviations and phrases an item it should see would contain, as listen_for."
   @drop_gone "That drop is no longer kept: Fermix keeps a stream watcher's last 50 drops until " <>
                "it restarts."
@@ -377,8 +377,8 @@ defmodule FermixCore.Cues.Watchers do
 
   defp no_filter_on_stream(refs) do
     "A watcher with no filter cannot listen to a stream (#{Enum.join(refs, ", ")}), where it " <>
-      "would pass every item: give it a model filter and words to listen for, or pick sources " <>
-      "that are not streams."
+      "would pass every item: give it a model filter and keywords to listen for, or pick " <>
+      "sources that are not streams."
   end
 
   @doc """
@@ -1623,7 +1623,7 @@ defmodule FermixCore.Cues.Watchers do
 
   defp change_words({:filter, "none"}), do: "it passes every item without a filter"
   defp change_words({:filter, "llm"}), do: "it filters with a model"
-  defp change_words({:listen_for, _words}), do: "new words to listen for"
+  defp change_words({:listen_for, _words}), do: "new keywords to listen for"
   defp change_words({:purpose, nil}), do: "purpose cleared"
   defp change_words({:purpose, purpose}), do: "purpose #{purpose}"
   defp change_words({:daily_cap, 0}), do: "no daily cap"

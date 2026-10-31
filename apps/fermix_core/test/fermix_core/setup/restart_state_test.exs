@@ -328,14 +328,14 @@ defmodule FermixCore.Setup.RestartStateTest do
       Application.put_env(:fermix_core, :cues,
         enabled: true,
         mandates_enabled: false,
-        screen_provider: "openai",
+        screen: :decision_model,
         sources: %{"eng-blogs" => [preset: "rss", url: "https://example.org/feed"]},
         mandates: %{"release-issues" => [job: "job_1"]}
       )
 
       assert RestartState.restart(server: server) == %{required: false, reasons: []}
       refute RestartState.boot_bound?([:cues, :sources])
-      refute RestartState.boot_bound?([:cues, :screen_provider])
+      refute RestartState.boot_bound?([:cues, :screen])
     end
   end
 

@@ -21,11 +21,11 @@
 (*  - FermixCore.Browser.HostServer: the pane task, running inside its own *)
 (*    ProfileServer (one live task per profile, not one process for the    *)
 (*    whole daemon). It binds a host task to the connection it was decided *)
-(*    on (bind, host_server.ex:404-468) and to that connection alone       *)
-(*    (check_host, :472-485); it fails the task on that connection's :DOWN, *)
+(*    on (bind, host_server.ex:405-469) and to that connection alone       *)
+(*    (check_host, :473-486); it fails the task on that connection's :DOWN, *)
 (*    the app's host_stopping, or the person's own task.cancel for it      *)
-(*    (handle_message, :153-184; lose/lose_cancelled, :511-530) and names   *)
-(*    its tabs by the connection (public_id, :792);                        *)
+(*    (handle_message, :154-185; lose/lose_cancelled, :512-531) and names   *)
+(*    its tabs by the connection (public_id, :793);                        *)
 (*  - FermixCore.Browser.HostAvailability: the one process that holds the  *)
 (*    host's last report, with no probe, and which connection it is on;    *)
 (*  - FermixCore.Browser.HostLauncher: the pure decision table (step,      *)
@@ -95,7 +95,7 @@
 (*  - FermixCore.Browser.TurnMarker: a turn (the caller of a task, not the *)
 (*    task itself) that loses its pane marks every later browser call of   *)
 (*    THAT TURN with the same sentence (dispatch reads the mark before     *)
-(*    Routing ever runs, browser.ex:154-160), so a turn whose first task   *)
+(*    Routing ever runs, browser.ex:157-163), so a turn whose first task   *)
 (*    failed on the host never starts a second task Routing could send to  *)
 (*    Chrome. This spec's Tasks are already turn-sized: a Task is one      *)
 (*    script run to one Terminal state, and nothing here lets a second     *)
@@ -121,7 +121,7 @@
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/browser_host/connection.ex#attach,availability,host_stopping,task_request,bind_task,release_task,task_exited,write_request,cancel_task @ 03447d148ae1
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/browser_host/endpoint.ex @ 50e6a7f26529
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/browser_host/supervisor.ex @ a91e3fe95333
-\* SOURCE: apps/fermix_core/priv/browser_host/PROTOCOL.md @ 350c2848004e
+\* SOURCE: apps/fermix_core/priv/browser_host/PROTOCOL.md @ 8a311fa4e7cc
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 
 CONSTANTS
@@ -151,7 +151,7 @@ CONSTANTS
     DecideOnceAtStart,  \* the backend is decided once, when no profile is live for the
                         \* task (Routing.for_request, routing.ex:62-68), and a host task is
                         \* bound to the connection it was decided on and refused on any
-                        \* other (HostServer.check_host, host_server.ex:472-485); FALSE
+                        \* other (HostServer.check_host, host_server.ex:473-486); FALSE
                         \* re-decides before every step
     LastReportWins,     \* HostAvailability keeps the host's last report and hands it back
                         \* with no probe (report/3, current/1, host_availability.ex:102-105,
@@ -181,7 +181,7 @@ CONSTANTS
                         \* registry gives to a task (app-side, unpinned)
     TabCaps,            \* tab.open and a popup past TaskCap or GlobalCap are refused
                         \* (app-side, unpinned; the engine only carries the two numbers on
-                        \* tab.open, task_tab_cap and tab_cap, host_server.ex:201-203)
+                        \* tab.open, task_tab_cap and tab_cap, host_server.ex:202-204)
     StoppingHandshake,  \* on quit an attached host sends host_stopping and holds its
                         \* quit for the daemon's answer (app-side, unpinned); the engine's
                         \* half is answering host.stop_ack behind every release
@@ -190,7 +190,7 @@ CONSTANTS
     QuitBound,          \* the held quit ends when a bound elapses, answer or not
                         \* (app-side, unpinned)
     NoChromeRetry       \* a host task the host fails is failed with a sentence, never
-                        \* re-routed to Chrome (HostServer.lose, host_server.ex:489-493),
+                        \* re-routed to Chrome (HostServer.lose, host_server.ex:490-494),
                         \* and TurnMarker keeps the rest of its turn off Chrome too (not
                         \* modelled here, see the header); FALSE re-runs the task on
                         \* Chrome
@@ -457,7 +457,7 @@ Deadline ==
 \* route[t] never changes once set, because Routing.for_request only
 \* re-decides when no profile is live (routing.ex:64-67, :76-89) and a live host
 \* profile's task is refused on any other connection (check_host,
-\* host_server.ex:472-485). Without it the step re-decides from what
+\* host_server.ex:473-486). Without it the step re-decides from what
 \* HostServer knows now, and NoChromeRetry still refuses Chrome to a task
 \* once routed to the host.
 Resolve(t) ==
@@ -467,11 +467,11 @@ Resolve(t) ==
     ELSE "chrome"
 
 \* A running task takes its next step through the backend boundary
-\* (HostServer.operate/ensure_task, host_server.ex:393-402):
+\* (HostServer.operate/ensure_task, host_server.ex:394-403):
 \*  - on the host, its next request (tab.open, then page.act on its tab,
-\*    `request`, :504-517), and it waits for the answer; with the script
+\*    `request`, :505-518), and it waits for the answer; with the script
 \*    done it completes and HostServer releases it (`Link.release`,
-\*    `stop`, :124-146, BROWSER-1/2's `task.release`);
+\*    `stop`, :125-147, BROWSER-1/2's `task.release`);
 \*  - on Chrome, managed Chrome runs the rest of it and completes (not this
 \*    spec's, see the header).
 TaskStep(t) ==
@@ -512,27 +512,27 @@ TaskStep(t) ==
 \*    decide on it, and on unavailable every task bound to this host ends
 \*    (EndHostTasks) with task.release -- this folds into one step what the
 \*    real code discovers lazily, at each such task's own next check_host
-\*    (host_server.ex:472-485); both orders (one more host step slips through,
+\*    (host_server.ex:473-486); both orders (one more host step slips through,
 \*    or none does) are still explored, since TaskStep and DaemonRecv race
 \*    freely. After host_stopping the host is stopping for good and a report
 \*    changes nothing (BROWSER-5).
 \*  - ok: the task's step is done; a late answer for a task that ended is
-\*    dropped (`request`, host_server.ex:504-517). error: the task fails
-\*    with a sentence and its tabs are released (`host_error`, :521-530).
+\*    dropped (`request`, host_server.ex:505-518). error: the task fails
+\*    with a sentence and its tabs are released (`host_error`, :522-531).
 \*  - stopping: in one callback every task bound to this host ends and
 \*    task.release goes for it -- the app side of the handshake and its own
 \*    release loop are Connection.host_stopping (connection.ex:295-307,
 \*    BROWSER-1/7); HostServer's own end of each task is `lose`/`stop`
-\*    (host_server.ex:489-493,:124-146) on `{:browser_host_stopping, _}`
-\*    (:163-167) -- launching is no longer allowed (the person quit the app),
+\*    (host_server.ex:490-494,:125-147) on `{:browser_host_stopping, _}`
+\*    (:164-168) -- launching is no longer allowed (the person quit the app),
 \*    and the answer, host.stop_ack, is sent behind every release
 \*    (connection.ex:306, protocol.ex "host.stop_ack").
 \*  - cancel: the one task task_id names ends the way EndHostTasks ends a
 \*    host failure -- NoChromeRetry decides it the same way -- and its
 \*    task.release goes behind whatever it already had queued
 \*    (Connection.cancel_task, connection.ex; HostServer's end of it is
-\*    `lose_cancelled`/`stop`, host_server.ex:511-530,:124-146, on
-\*    `{:browser_host_cancelled, _, _}`, :181-184,:544,:1198-1199). A task_id
+\*    `lose_cancelled`/`stop`, host_server.ex:512-531,:125-147, on
+\*    `{:browser_host_cancelled, _, _}`, :182-185,:545,:1205-1206). A task_id
 \*    already ended by the time this is read (HostTasks(dgen) no longer names
 \*    it) is left alone, matching the connection's own idempotent lookup.
 DaemonRecv ==
@@ -601,7 +601,7 @@ DaemonRecv ==
 \* The connection's :DOWN, once everything the host wrote before it closed
 \* was read (Connection owns the socket, so its exit closes the fd on every
 \* path; HostServer watches it, `handle_message` on `{:DOWN, connection_ref,
-\* ...}`, host_server.ex:157-161, `lose`, :489-493). DecideOnceAtStart: every
+\* ...}`, host_server.ex:158-162, `lose`, :490-494). DecideOnceAtStart: every
 \* task bound to it fails (no release: there is no socket; the host released
 \* on losing the daemon, or died). Without it, only a task with a request out
 \* fails (its call returns an error); the rest re-decide at their next step.
@@ -621,7 +621,7 @@ DaemonDown ==
 \* waiting on a launch decision, or already routed to Chrome -- has no tab in
 \* the app to cancel from: the turn (its caller) ends there, the same :DOWN a
 \* crash would send (`handle_message` on `{:DOWN, caller_ref, ...}`,
-\* host_server.ex:154-155, `stop`, :124-146); a waiting task simply stops
+\* host_server.ex:155-156, `stop`, :125-147); a waiting task simply stops
 \* waiting. A task on the host has its own tab in the app's pane, with its
 \* own "Cancel task": the person's click is the app's task.cancel
 \* { task_id, reason } event over the wire (`Connection.cancel_task`;

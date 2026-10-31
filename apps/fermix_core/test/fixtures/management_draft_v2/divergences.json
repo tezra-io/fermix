@@ -2396,9 +2396,9 @@
     },
     {
       "method": "settings.get:cues",
-      "field": "rows:cues_screen_provider",
+      "field": "rows:cues_screen",
       "kind": "engine_only",
-      "why": "The screen postdates the draft, as the rest of the cues section does: one live choice in the ordinary row shape, read at every accept and filter call: the words to listen for, or the decision model of a provider that is set up, checking each item by meaning before the filter model reads it."
+      "why": "The screen postdates the draft, as the rest of the cues section does: one live choice in the ordinary row shape, read at every accept and filter call, with two options: keyword match on the watcher's keywords, or the decision model the daemon picks from the providers set up, checking each item by meaning before the filter model reads it."
     },
     {
       "method": "settings.get:cues",

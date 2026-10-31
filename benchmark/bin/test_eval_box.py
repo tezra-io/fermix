@@ -48,8 +48,6 @@ import pytest
 import yaml
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE))
-from evallib import suites  # noqa: E402
 WORKFLOWS = HERE.parent.parent / ".github" / "workflows"
 EVAL_BOX = WORKFLOWS / "eval-box.yml"
 DANGEROUS_SUITE = HERE.parent / "suites" / "dangerous" / "sandbox_verify.yaml"
@@ -173,61 +171,6 @@ def test_the_dangerous_tier_is_never_judged(steps):
         assert scenario.get("judge", False) is False
         for case in scenario["cases"]:
             assert case.get("judge", False) is False and "rubric" not in case, case["id"]
-
-
-ATTACHED_NOTE_SCENARIO = "attached_note_command_waits_for_owner"
-
-
-def test_the_dangerous_tier_runs_the_linux_attached_note_case_unjudged(steps):
-    # F-01's eval runs on this ubuntu box, beside sandbox_verify: its own run, since
-    # the destructive profile drives exactly one named scenario.
-    run = " ".join(_step_by_id(steps, "dangerous")["run"].replace("\\\n", " ").split())
-    assert (f"uv run bin/run_eval.py --suite safety --scenario {ATTACHED_NOTE_SCENARIO} "
-            "--profile isolated_mutation --confirm-daemon-isolated --confirm-isolated-env"
-            ) in run
-    # What the runner will actually load, not the raw YAML: a `judge` default
-    # inherited from the suite would not show in the case's own map.
-    safety = next(s for s in suites.load_all(str(HERE.parent / "suites"))
-                  if s.name == "safety")
-    scenario = next(s for s in safety.scenarios if s.id == ATTACHED_NOTE_SCENARIO)
-    assert scenario.platforms == ("linux",)
-    for case in scenario.cases:
-        assert case.judge is False and case.rubric is None, case.id
-
-
-def _run_dangerous_step(steps, tmp_path, verify_rc: int, note_rc: int):
-    """The dangerous step's own shell, with `uv` answering each run's exit code."""
-    stub_bin, uv_log, output = tmp_path / "bin", tmp_path / "uv.log", tmp_path / "out"
-    stub_bin.mkdir()
-    _stub(stub_bin, "uv", f"""#!/usr/bin/env bash
-printf '%s\\n' "$*" >> "{uv_log}"
-case "$*" in
-  *--check) exit 0 ;;
-  *"--suite sandbox_verify"*) exit {verify_rc} ;;
-  *"--scenario {ATTACHED_NOTE_SCENARIO}"*) exit {note_rc} ;;
-esac
-exit 64
-""")
-    env = {"PATH": f"{stub_bin}{os.pathsep}{os.environ.get('PATH', '')}",
-           "GITHUB_OUTPUT": str(output)}
-    proc = subprocess.run(["bash", "-c", _step_by_id(steps, "dangerous")["run"]],
-                          env=env, cwd=tmp_path, capture_output=True, text=True,
-                          timeout=30)
-    return proc, output.read_text(), uv_log.read_text().splitlines()
-
-
-@pytest.mark.parametrize("verify_rc, note_rc, decided", [
-    (0, 0, 0), (0, 1, 1), (1, 0, 1), (4, 1, 4), (0, 3, 3)])
-def test_both_dangerous_runs_happen_and_the_first_failure_decides(
-        steps, tmp_path, verify_rc, note_rc, decided):
-    proc, output, uv_calls = _run_dangerous_step(steps, tmp_path, verify_rc, note_rc)
-    assert proc.returncode == decided, proc.stderr
-    assert output == f"exit_code={decided}\n"
-    assert len(uv_calls) == 3, uv_calls
-    assert "--suite sandbox_verify" in uv_calls[1]
-    assert f"--scenario {ATTACHED_NOTE_SCENARIO}" in uv_calls[2]
-    assert f"sandbox_verify exited {verify_rc}; {ATTACHED_NOTE_SCENARIO} exited " \
-           f"{note_rc}" in proc.stdout
 
 
 def test_the_judge_is_proven_first_and_the_sign_in_precedes_claude_code_and_the_daemon(

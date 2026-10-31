@@ -148,7 +148,7 @@ defmodule FermixCore.Cues.NoticesTest do
       assert {:ok, 2} = Watchers.needs_update_notices(opts(ctx, 0) ++ cues)
 
       assert_receive {:sent, "chat-9",
-                      "Watcher market-news: it has no words to listen for, so no item reaches " <>
+                      "Watcher market-news: it has no keywords to listen for, so no item reaches " <>
                         "it. Ask Fermix in chat to give it some.", _opts}
 
       assert_receive {:sent, "chat-9",
@@ -170,7 +170,7 @@ defmodule FermixCore.Cues.NoticesTest do
 
       assert log =~ "notice was not sent"
       assert {:ok, 1} = Watchers.needs_update_notices(opts(ctx, 1))
-      assert_receive {:sent, "chat-9", "Watcher market-news: it has no words" <> _, _opts}
+      assert_receive {:sent, "chat-9", "Watcher market-news: it has no keywords" <> _, _opts}
     end
   end
 

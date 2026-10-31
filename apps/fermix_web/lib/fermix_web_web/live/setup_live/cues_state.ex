@@ -111,7 +111,7 @@ defmodule FermixWebWeb.SetupLive.CuesState do
       },
       door: Overview.door(Keyword.get(opts, :door, @door)),
       words: section_words(snapshot),
-      screen: screen_view(raw, snapshot),
+      screen: screen_view(cues, snapshot),
       filter: filter_view(Keyword.get(core, :routing, []), snapshot),
       sources: Enum.map(CuesConfig.sources(cues), &source_view(&1, rows, now)),
       sources_error: rows_error(rows),
@@ -274,14 +274,14 @@ defmodule FermixWebWeb.SetupLive.CuesState do
       enabled: checked?(params["enabled"]),
       mandates_enabled: checked?(params["mandates_enabled"]),
       door_port: integer_or_text(params["door_port"]),
-      screen_provider: text(params["screen_provider"])
+      screen: text(params["screen"])
     ]
 
     saved = [
       enabled: state.switches.enabled,
       mandates_enabled: state.switches.mandates_enabled,
       door_port: state.switches.door_port,
-      screen_provider: state.screen.provider
+      screen: state.screen.value
     ]
 
     pair = [
@@ -322,11 +322,17 @@ defmodule FermixWebWeb.SetupLive.CuesState do
 
   # --- the screen ----------------------------------------------------------------
 
-  # Words first, then the decision model of each provider that is set up.
-  defp screen_view(raw, snapshot) do
+  # Keyword match is the form's empty option, as it is saved as no key. The
+  # decision model is always offered, so a saved one stays the form's value;
+  # `Settings.save_screen/1` refuses it while none is set up, and its hint says
+  # which one Fermix uses or what to set up.
+  defp screen_view(cues, snapshot) do
+    [keyword, decision_model] = FilterChoices.screen_choices(snapshot)
+
     %{
-      provider: raw |> Keyword.get(:screen_provider) |> text(),
-      options: FilterChoices.screen_options(snapshot),
+      value: if(CuesConfig.screen(cues) == :keyword, do: "", else: "decision_model"),
+      keyword: keyword,
+      decision_model: decision_model,
       info: FilterChoices.screen_info()
     }
   end

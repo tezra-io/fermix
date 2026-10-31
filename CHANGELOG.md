@@ -19,9 +19,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and voice calls, never in a group or for a guest, and a scheduled job only
   when it was set up there with the list tools allowed. After a request reads
   a page or other outside content, Fermix still adds and ticks, marked as
-  such, but removes nothing until you ask again. Memory's review leaves list
-  items to the list. No app draws a list yet: ask to see one and it comes as a
-  short checklist.
+  such, but changes nothing else until you ask again. Memory's review leaves
+  list items to the list. No app draws a list yet: ask to see one and it comes
+  as a short checklist.
 
 - **A watcher can set off a follow-up: your own job, run whenever it passes
   an item.** Ask in chat ("watch x-feed, and whenever a post says the limits
@@ -75,19 +75,22 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a link that redirects still pairs with its preview. A message's previews
   are now sent one by one as each resolves, so a slow site no longer costs
   the message the previews that already finished.
-- **Watchers can screen items by meaning, not only by their words.** A new
+- **Watchers can check items by meaning, not only by their keywords.** A new
   **Screen** setting in Settings → Cues and the setup page's Cues tab picks
-  how items are checked before the filter model reads them: **Words**, as
-  before, or a decision model from a provider you already set up (OpenAI's
-  Decisions API with gpt-6-luna, or TypeSafe's Jev through OpenRouter or
-  Venice), with that provider's key and nothing new to enter. A decision model
-  checks each item against the watcher's purpose and instructions, with its
-  words as hints, so a post worded differently or in another language is no
-  longer missed, in about a third of a second per item, roughly ten times
-  faster than a chat model. The filter model still makes every pass. Fermix
-  writes a watcher's words the same way either way, and if the chosen
-  provider fails or is removed, the watcher waits and retries instead of
-  falling back to the words.
+  how items are checked before the filter model reads them: **Keyword
+  match**, as before, or **Decision model**. There is no provider to choose:
+  Fermix uses your main provider's decision model when it has one, otherwise
+  the first you set up of OpenAI (its Decisions API with gpt-6-luna),
+  OpenRouter and Venice (both TypeSafe's Jev), with that provider's key and
+  nothing new to enter, and the setting names the one it uses. A decision
+  model checks each item against the watcher's purpose and instructions, with
+  its keywords as hints, so a post worded differently or in another language
+  is no longer missed, in about a third of a second per item, roughly ten
+  times faster than a chat model. The filter model still makes every pass.
+  Fermix writes a watcher's keywords the same way either way, and if the
+  decision model's provider fails or none is set up any more, the watcher
+  waits and retries instead of falling back to keyword match. A watcher's
+  words to listen for are now called keywords everywhere Fermix names them.
 - **Watch X accounts with the X sign-in you already have.** A new X accounts
   preset for feed sources takes up to 20 handles, typed with or without `@`,
   and brings each new post from those accounts in as a cue, replies and
@@ -318,7 +321,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   whether it had finished loading.
 - **Long browser tasks stay quick.** In a long browser task, the agent's later
   steps stop re-reading its older reads of a page it has since read again, so
-  each step is quicker and costs less.
+  each step is quicker and costs less. Each screen of a site that changes only
+  the part of its address after `#`, such as a mail inbox and each message
+  opened from it, counts as a page of its own, so reading several messages
+  keeps every one, and the agent can still look up an older read it set aside.
 
 ### Removed
 
@@ -329,6 +335,27 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A busy computer no longer quietly costs you a watcher's notices.** When
+  the computer was so busy that Fermix's memory database fell behind, every
+  request waiting on it gave up after a few seconds, yet each one still ran
+  when its turn came: the backlog only grew, and work could be picked up
+  after the part of Fermix that asked for it had moved on, so a follow-up card
+  was never sent, a proposal expired without a word to you, or a reminder sat
+  claimed with nothing sending it. Fermix now drops such a request instead of
+  running it late when it only picks up new work (a due reminder or scheduled
+  run, a card to offer, an expiry to announce) or does upkeep the next round
+  repeats, so the database catches up as soon as the load eases and that work
+  is picked up again on the next round. A record of something that already
+  happened, such as a reminder sent or a run finished, is still saved however
+  late, as before. The cue cleanup that runs every minute also stops at its
+  first request that times out instead of queueing one for each of its steps.
+  A request already running when its asker gives up still finishes, so a
+  missed notice can still happen, but only in that brief window.
+- **Fermix installed with Homebrew on a Mac runs with an app's priority.**
+  `fermix service install` wrote its launch agent as a Standard job, which
+  macOS still throttles, so a busy computer could slow every reply. It now
+  writes an Interactive one, as the Mac app's own agent does, and `fermix
+  setup` rewrites an agent installed before.
 - **A long task on Claude no longer stops after Fermix shortens its
   context.** Claude Opus 5.5, Sonnet 5.5, Haiku 5.5 and Fable 5.1 tie their
   reasoning to the exact conversation that produced it, and Anthropic enforces
@@ -404,6 +431,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   dropped. Traces hold full request bodies and were never removed; Fermix now
   keeps 14 days of them and at most 1 GiB, removing the oldest days first
   when it starts and every hour.
+- **Submitting a form in Chrome sends that form.** When the field the agent
+  submitted from sat outside any form, as on many single-page sign-ins and
+  checkouts, Chrome sent the page's first form instead, often a search box or
+  a newsletter sign-up. Nothing is sent now, and the agent is told to click the
+  page's own submit button.
 
 ### Security
 

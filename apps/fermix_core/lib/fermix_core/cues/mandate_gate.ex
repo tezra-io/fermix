@@ -125,8 +125,10 @@ defmodule FermixCore.Cues.MandateGate do
   def finish_unreported(repo_opts, %DateTime{} = now, limit)
       when is_list(repo_opts) and is_integer(limit) and limit > 0 do
     request = {:finish_unreported_allows, @unreported, now, limit}
+    # A sweep the next pass makes again, so one the Repo reaches late is skipped.
+    claim_opts = Keyword.put(repo_opts, :skip_when_late, true)
 
-    with {:ok, ids} <- Repo.cues_call(CuesMandateSql, request, repo_opts) do
+    with {:ok, ids} <- Repo.cues_call(CuesMandateSql, request, claim_opts) do
       Enum.each(ids, &Logger.warning("Mandate call #{&1}: #{@unreported}; finished as unknown"))
       {:ok, length(ids)}
     end

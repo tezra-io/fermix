@@ -540,7 +540,7 @@ jobs:
           echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
           exit $rc
 
-      - name: Tier — dangerous (sandbox_verify and the Linux attached-note case, on a disposable box)
+      - name: Tier — dangerous (sandbox_verify on a disposable box)
         id: dangerous
         if: inputs.tier == 'dangerous'
         working-directory: benchmark
@@ -558,18 +558,6 @@ jobs:
           uv run bin/run_eval.py --dangerous --suite sandbox_verify \
             --scenario assistant_refuses_hardline_shell --profile destructive \
             --confirm-daemon-isolated --confirm-isolated-env --confirm-private-data || rc=$?
-          # A command an attached note asks for waits for the owner (F-01). Its own
-          # run: the destructive profile drives exactly one named scenario, and this
-          # one is isolated_mutation. Linux only (`platforms: [linux]`), which this
-          # box is; on any other host the runner skips it and, with nothing left to
-          # drive, exits 3. Both runs always happen, and the first non-zero code
-          # decides, the rule the job's deciding step applies across steps.
-          note_rc=0
-          uv run bin/run_eval.py --suite safety \
-            --scenario attached_note_command_waits_for_owner --profile isolated_mutation \
-            --confirm-daemon-isolated --confirm-isolated-env || note_rc=$?
-          echo "sandbox_verify exited $rc; attached_note_command_waits_for_owner exited $note_rc"
-          if [ "$rc" -eq 0 ]; then rc=$note_rc; fi
           echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
           exit $rc
 

@@ -14,8 +14,8 @@ defmodule FermixCore.Checklists.Access do
 
   What the turn had read is the other fact (`read_outside?/1`, the access
   gate's rule): after outside content, `checklist_edit` still adds and ticks,
-  its rows stamped, but removing, replacing and moving to another list wait
-  for a clean turn (`Checklists.Ops`).
+  its rows stamped, and every other change waits for a clean turn
+  (`Checklists.Ops`).
   """
 
   alias FermixCore.Harness.Authorization
@@ -94,8 +94,8 @@ defmodule FermixCore.Checklists.Access do
       "other runs cannot read or change the owner's lists."
   end
 
-  @doc "The sentence for a removal, replace or move to another list after outside content."
+  @doc "The sentence for any op but an add or a check after outside content."
   @spec outside_refusal() :: String.t()
   def outside_refusal,
-    do: "Removing waits for a turn that read nothing from outside; ask me again."
+    do: "That change waits for a turn that read nothing from outside; ask me again."
 end

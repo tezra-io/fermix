@@ -22,22 +22,50 @@ defmodule FermixCore.Providers.DecisionModelTest do
     :ok
   end
 
-  describe "route/1" do
-    test "builds the chosen provider's route, primary or not, on its own key" do
+  describe "pick/2" do
+    test "the primary first, when it serves a decision model and is set up" do
+      assert DecisionModel.pick({:ok, :venice}, fn _provider -> true end) == {:ok, :venice}
+    end
+
+    test "otherwise the first set up, in catalog order" do
+      set_up = &(&1 in [:venice, :openrouter])
+
+      assert DecisionModel.pick({:ok, :anthropic}, set_up) == {:ok, :openrouter}
+      assert DecisionModel.pick({:ok, :openai}, set_up) == {:ok, :openrouter}
+      assert DecisionModel.pick({:error, :multiple_primary}, set_up) == {:ok, :openrouter}
+      assert DecisionModel.pick({:ok, :anthropic}, &(&1 == :venice)) == {:ok, :venice}
+    end
+
+    test "none set up" do
+      assert DecisionModel.pick({:ok, :openai}, fn _provider -> false end) ==
+               {:error, :not_set_up}
+    end
+  end
+
+  describe "route/0" do
+    test "a primary that serves one leads, on its own key" do
+      Application.put_env(:fermix_core, :providers,
+        openai: [api_key: "sk-invented"],
+        venice: [api_key: "vn-invented", primary: true]
+      )
+
+      assert {:ok, venice} = DecisionModel.route()
+      assert venice.model == "jev-latest"
+      assert venice.url == "https://api.venice.ai/api/v1/decisions"
+      assert venice.api_key == "vn-invented"
+    end
+
+    test "under a primary that serves none, the first set up, primary or not" do
       Application.put_env(:fermix_core, :providers,
         anthropic: [api_key: "sk-ant-invented", primary: true],
         venice: [api_key: "vn-invented"],
         openrouter: [api_key: "sk-or-invented"]
       )
 
-      assert {:ok, venice} = DecisionModel.route(:venice)
-      assert venice.model == "jev-latest"
-      assert venice.url == "https://api.venice.ai/api/v1/decisions"
-      assert venice.api_key == "vn-invented"
-
-      assert {:ok, openrouter} = DecisionModel.route(:openrouter)
+      assert {:ok, openrouter} = DecisionModel.route()
       assert openrouter.model == "~typesafe/jev-latest"
       assert openrouter.url == "https://openrouter.ai/api/alpha/decisions"
+      assert openrouter.api_key == "sk-or-invented"
     end
 
     test "OpenAI asks its Decisions API under the provider's own base URL" do
@@ -45,19 +73,18 @@ defmodule FermixCore.Providers.DecisionModelTest do
         openai: [api_key: "sk-invented", base_url: "https://gw.example.net/v1/"]
       )
 
-      assert {:ok, route} = DecisionModel.route(:openai)
+      assert {:ok, route} = DecisionModel.route()
       assert {route.provider, route.model} == {:openai, "gpt-6-luna"}
       assert route.url == "https://gw.example.net/v1/decisions"
     end
 
-    test "says why there is no route: no credentials, or no decision model" do
+    test "no provider that serves one set up is no route" do
       Application.put_env(:fermix_core, :providers,
         anthropic: [api_key: "sk-ant-invented", primary: true],
         openrouter: [default_model: "openai/gpt-5.5"]
       )
 
-      assert DecisionModel.route(:openrouter) == {:error, :not_set_up}
-      assert DecisionModel.route(:anthropic) == {:error, :no_decision_model}
+      assert DecisionModel.route() == {:error, :not_set_up}
     end
   end
 

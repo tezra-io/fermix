@@ -510,7 +510,11 @@ defmodule FermixCore.Cues.FollowUps do
           {:ok, non_neg_integer()} | {:error, term()}
   def expire(repo_opts, %DateTime{} = now, limit)
       when is_list(repo_opts) and is_integer(limit) and limit > 0 do
-    with {:ok, expired} <- Repo.cues_call(CuesFollowUpSql, {:expire, now, limit}, repo_opts) do
+    # A claim the next pass makes again: one the Repo reaches after this call
+    # gave up is skipped, so no card expires that nobody announces.
+    claim_opts = Keyword.put(repo_opts, :skip_when_late, true)
+
+    with {:ok, expired} <- Repo.cues_call(CuesFollowUpSql, {:expire, now, limit}, claim_opts) do
       Enum.each(expired, fn trigger ->
         emit(:follow_up_expired, trigger, %{})
         announce_end(trigger, repo_opts)

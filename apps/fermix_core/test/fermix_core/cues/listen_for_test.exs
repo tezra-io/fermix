@@ -14,26 +14,26 @@ defmodule FermixCore.Cues.ListenForTest do
   describe "validate/1" do
     test "trims, keeps the first spelling of words that normalize alike, and counts 1 to 200" do
       assert ListenFor.validate([" TSMC ", "tsmc", "Café", "cafe"]) == {:ok, ["TSMC", "Café"]}
-      assert {:error, "A watcher listens for at least one word."} = ListenFor.validate([])
+      assert {:error, "A watcher listens for at least one keyword."} = ListenFor.validate([])
 
-      assert {:error, "A watcher listens for at most 200 words or short phrases."} =
+      assert {:error, "A watcher listens for at most 200 keywords or short phrases."} =
                ListenFor.validate(Enum.map(1..201, &"word#{&1}"))
     end
 
     test "refuses what cannot be a word" do
-      assert {:error, "A word to listen for cannot be empty."} = ListenFor.validate(["  "])
+      assert {:error, "A keyword to listen for cannot be empty."} = ListenFor.validate(["  "])
 
-      assert {:error, "Each word to listen for takes a single line."} =
+      assert {:error, "Each keyword to listen for takes a single line."} =
                ListenFor.validate(["a\nb"])
 
-      assert {:error, "A word to listen for needs a letter or a digit: --"} =
+      assert {:error, "A keyword to listen for needs a letter or a digit: --"} =
                ListenFor.validate(["--"])
 
-      assert {:error, "Each word to listen for is at most 64" <> _} =
+      assert {:error, "Each keyword to listen for is at most 64" <> _} =
                ListenFor.validate([String.duplicate("x", 65)])
 
-      assert {:error, "Give the words to listen for as a list."} = ListenFor.validate("chips")
-      assert {:error, "Each word to listen for is text."} = ListenFor.validate([42])
+      assert {:error, "Give the keywords to listen for as a list."} = ListenFor.validate("chips")
+      assert {:error, "Each keyword to listen for is text."} = ListenFor.validate([42])
     end
   end
 

@@ -32,7 +32,12 @@
 (* whatever SQL it runs), or one side effect. Repo calls from one process  *)
 (* are served in the order sent, and a call whose caller timed out still   *)
 (* runs, ahead of anything that caller sends next (repo.ex call/2,         *)
-(* call_or_timeout_error/3).                                               *)
+(* call_or_timeout_error/3), unless its caller marked it skip_when_late:   *)
+(* the Repo turns such a request away unrun once the caller's deadline has *)
+(* passed (handle_call/3, {:with_deadline, ...}). The filter claim and     *)
+(* reclaim, the cue claim and the sweeper's steps are marked; a request    *)
+(* turned away writes nothing, a stutter. "Times out and still lands"      *)
+(* below means one the Repo had started.                                   *)
 (*                                                                         *)
 (* The spec follows the code as committed in e0be70a6 (M60): the review-1  *)
 (* (R1) fixes, lane R3's fixes of CUE-1 (the sweep reclaims a filtering    *)
@@ -50,19 +55,19 @@
 (* proposal's (see the README). Line numbers of the code this changed are  *)
 (* those of 90a1f0f1.                                                      *)
 (***************************************************************************)
-\* SOURCE: apps/fermix_core/lib/fermix_core/cues/ingest.ex @ 3c7062290165
-\* SOURCE: apps/fermix_core/lib/fermix_core/cues/filters.ex @ 7ee5d5943d2e
+\* SOURCE: apps/fermix_core/lib/fermix_core/cues/ingest.ex @ 61d136110d03
+\* SOURCE: apps/fermix_core/lib/fermix_core/cues/filters.ex @ 110e5fad9800
 \* SOURCE: apps/fermix_core/lib/fermix_core/cues/supervisor.ex @ e1b36533a8b3
-\* SOURCE: apps/fermix_core/lib/fermix_core/cues/sweeper.ex @ cff6b376e8b6
-\* SOURCE: apps/fermix_core/lib/fermix_core/cues/proposals.ex @ ba6fa50833a0
+\* SOURCE: apps/fermix_core/lib/fermix_core/cues/sweeper.ex @ 9807ef13859e
+\* SOURCE: apps/fermix_core/lib/fermix_core/cues/proposals.ex @ 02fb8fec1eb8
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_sql.ex @ e09460089a9d
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_filter_sql.ex @ 319f777956cf
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_runs_sql.ex#@open_sql,@cap_room_sql,@eligible_sql,@candidates_sql,@eligible_delivery_sql,@settle_facts_sql,eligible_delivery,settle_delivery,settle_facts,settle_held,settle_move,unspent_retry,spent_retry,move_patch,untouched @ 03becc353f97
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_mandate_sql.ex#mark_tools_started,decide_propose,store_proposal,point_at_existing,decide_waiting,decided_or_why,decide_by_id,decided_by_id,end_denied,settle_proposal,expire_proposals @ 029c6975cee1
-\* SOURCE: apps/fermix_core/lib/fermix_core/jobs/cue_admission.ex @ 3791eb7ad5b0
+\* SOURCE: apps/fermix_core/lib/fermix_core/jobs/cue_admission.ex @ b98563b66ad5
 \* SOURCE: apps/fermix_core/lib/fermix_core/jobs/scheduler.ex#init,handle_info,handle_cast,maybe_request_admission,request_admission,admit_cue_runs,free_cue_slots,cue_run_attrs,start_cue_run,reconcile_active_runs,reconcile_active_run,adopt_live_run,monitored_run?,reap_orphaned_run,live_runner_pids,put_live_runner,active_run_count,start_or_mark_failed,monitor_entry,mark_run_crashed,mark_run_failed,mark_run_error,fail_delivery_after_settle @ a7d895b46845
 \* SOURCE: apps/fermix_core/lib/fermix_core/jobs/runner.ex#complete_run,mark_cue_completed,mark_failed @ 81415352eea2
-\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo.ex#call,call_or_timeout_error,periodic_opts,claim_cue_run,claim_cue_run_tx,claim_cue_run_in_tx,claim_delivery,claim_in_tx,fetch_claimable_job,ensure_no_active_job_run,settle_cue_run,settle_cue_run_tx,settle_cue_run_in_tx,active_run_trigger,release_cue_job,ensure_job_run_active,finish_job_settle,rollback_job_settle,upsert_job_run_row @ 87275850c2a1
+\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo.ex#call,request_message,deadline_after,deadline_passed?,call_or_timeout_error,periodic_opts,claim_cue_run,claim_cue_run_tx,claim_cue_run_in_tx,claim_delivery,claim_in_tx,fetch_claimable_job,ensure_no_active_job_run,settle_cue_run,settle_cue_run_tx,settle_cue_run_in_tx,active_run_trigger,release_cue_job,ensure_job_run_active,finish_job_settle,rollback_job_settle,upsert_job_run_row @ eada092e9175
 \* SOURCE: apps/fermix_core/lib/fermix_core/application.ex#start_supervision_tree,supervision_children,maybe_cues_supervisor @ 8fa454fabe81
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_follow_up_sql.ex#on_pass,trigger_pass,settle_taskless @ dccbfed103ed
 EXTENDS Naturals, Sequences, FiniteSets
@@ -347,8 +352,10 @@ FClaim(w) ==
                    disp, resetPending, schedVars, obs, faults>>
 
 \* The same claim call times out: claim/2 traces sweep_error (filter_claim) and
-\* starts nothing (filters.ex:244-246), but the request still runs and its
-\* write lands. No task holds the row and the dispatcher's in_flight does not
+\* starts nothing (filters.ex:244-246), but a request the Repo had started
+\* still runs and its write lands (one it reaches past the deadline is turned
+\* away unrun, skip_when_late: a stutter). No task holds the row and the
+\* dispatcher's in_flight does not
 \* know it: the sweep's reclaim (FReclaim) or a boot reset puts it back (CUE-1,
 \* fixed in R3; without ReclaimsOrphans only a boot reset does).
 FClaimTimesOut(w) ==
@@ -411,7 +418,9 @@ Orphan(d) == dstate[d] = "filtering" /\ fcall[d] \notin inflight
 \* (abort_orphan_calls/3, :711). The cutoff (a call started more than the 60 s
 \* deadline plus 30 s ago) changes when, not whether: a younger orphan is
 \* reclaimed by a later sweep. A reclaim that fails changes no row and is
-\* tried by the next sweep; one that times out still lands, as this step.
+\* tried by the next sweep, as is one turned away unrun past its deadline
+\* (skip_when_late); one that times out once started still lands, as this
+\* step.
 FReclaim ==
     /\ ReclaimsOrphans
     /\ disp = "up" /\ ~resetPending
@@ -664,8 +673,10 @@ Admit(w) ==
                    dispVars, sched, runsKnown, obs, faults>>
 
 \* The claim call times out (periodic opts): claim_candidate/4 logs it and
-\* starts nothing (claim_candidate/4, cue_admission.ex:290), but the write lands: a run with
-\* no runner, which reconciliation reaps.
+\* starts nothing (claim_candidate/4, cue_admission.ex:290), but a claim the Repo had
+\* started still lands: a run with no runner, which reconciliation reaps. One
+\* turned away unrun past the deadline (skip_when_late) writes nothing, a
+\* stutter.
 AdmitTimesOut(w) ==
     /\ SchedulerRepoCanFail /\ Fault
     /\ sched = "up"

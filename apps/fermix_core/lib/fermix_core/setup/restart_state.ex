@@ -93,7 +93,7 @@ defmodule FermixCore.Setup.RestartState do
     sandbox: [[:env]],
     channels: [[:mobile, :enabled], [:mobile, :iroh]],
     routing: [[:filter_provider], [:filter_model], [:filter_reasoning_effort]],
-    cues: [[:screen_provider], [:mandates_enabled], [:sources], [:mandates]]
+    cues: [[:screen], [:mandates_enabled], [:sources], [:mandates]]
   ]
   @wrong_shape_sentence "The settings file could not be read: a value in it is not the shape Fermix expects."
   @external_change_section "settings_file"

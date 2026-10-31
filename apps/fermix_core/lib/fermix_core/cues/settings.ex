@@ -48,7 +48,8 @@ defmodule FermixCore.Cues.Settings do
   # are made by Fermix (`new_token/1`, `Cues.Webhook.ensure_path_secret/2`).
   @typed_secret_fields [:key, :secret]
   @token_bytes 32
-  @screen_not_offered "Pick Words, or the decision model of a provider that is set up."
+  @no_decision_model "Set up OpenAI, OpenRouter or Venice first: a decision model runs on one " <>
+                       "of them."
 
   @type refusal :: {:invalid, String.t()}
   @type secret_failure :: {:secret_store_failed, String.t(), String.t()}
@@ -84,46 +85,50 @@ defmodule FermixCore.Cues.Settings do
   end
 
   @doc """
-  Saves how items are screened before the filter model reads them
-  (`[fermix_core.cues] screen_provider`): a provider whose decision model
-  screens in place of the words to listen for, or nil (or `""`) for the words.
-  Only a provider `FilterChoices.screen_options/1` offers is taken. Read at
-  every accept and filter call, so it applies at once.
+  Saves how items are checked before the filter model reads them
+  (`[fermix_core.cues] screen`): `"keyword"` (also nil or `""`) or
+  `"decision_model"`, refused while no provider that serves a decision model
+  is set up (`FilterChoices.decision_model/1`). Keyword match is the default,
+  so it is saved as no key. Read at every accept and filter call, so it
+  applies at once.
   """
-  @spec save_screen_provider(String.t() | nil) ::
-          {:ok, %{words?: boolean()}} | {:error, refusal() | term()}
-  def save_screen_provider(provider) when is_binary(provider) or is_nil(provider) do
-    provider = blank_to_nil(provider)
-
-    with {:ok, plan} <- screen_plan(provider),
+  @spec save_screen(String.t() | nil) ::
+          {:ok, %{screen: :keyword | :decision_model}} | {:error, refusal() | term()}
+  def save_screen(screen) when is_binary(screen) or is_nil(screen) do
+    with {:ok, plan} <- screen_plan(screen_value(screen)),
          {:ok, _report} <- commit(plan) do
-      {:ok, %{words?: is_nil(provider)}}
+      {:ok, %{screen: plan.new |> CuesConfig.normalize() |> CuesConfig.screen()}}
     end
   end
 
   @doc """
-  Checks a `save_screen_provider/1` value as that save does, and writes
-  nothing; that save stays the screen's one write.
+  Checks a `save_screen/1` value as that save does, and writes nothing; that
+  save stays the screen's one write.
   """
-  @spec check_screen_provider(String.t() | nil) :: :ok | {:error, refusal()}
-  def check_screen_provider(provider) when is_binary(provider) or is_nil(provider) do
-    with {:ok, _plan} <- screen_plan(blank_to_nil(provider)), do: :ok
+  @spec check_screen(String.t() | nil) :: :ok | {:error, refusal()}
+  def check_screen(screen) when is_binary(screen) or is_nil(screen) do
+    with {:ok, _plan} <- screen_plan(screen_value(screen)), do: :ok
   end
 
-  defp screen_plan(provider) do
-    with :ok <- screen_offered(provider),
-         do: plan(&{:ok, put_or_delete(&1, :screen_provider, provider), nil})
+  defp screen_plan(value) do
+    with :ok <- screen_ready(value),
+         do: plan(&{:ok, put_or_delete(&1, :screen, value), nil})
   end
 
-  defp screen_offered(nil), do: :ok
+  defp screen_value(screen) do
+    case blank_to_nil(screen) do
+      "keyword" -> nil
+      value -> value
+    end
+  end
 
-  defp screen_offered(provider) do
-    offered = FilterChoices.screen_options(ConfigStore.current_snapshot())
-
-    if Enum.any?(offered, &(&1.id == provider)),
+  defp screen_ready("decision_model") do
+    if FilterChoices.decision_model(ConfigStore.current_snapshot()),
       do: :ok,
-      else: {:error, {:invalid, @screen_not_offered}}
+      else: {:error, {:invalid, @no_decision_model}}
   end
+
+  defp screen_ready(_value), do: :ok
 
   @doc """
   Saves the default filter model (`[fermix_core.routing] filter_provider` and

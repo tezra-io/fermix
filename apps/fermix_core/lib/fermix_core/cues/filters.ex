@@ -204,7 +204,8 @@ defmodule FermixCore.Cues.Filters do
     held = state.in_flight |> Map.values() |> Enum.map(& &1.run.call_id)
     request = {:reclaim_orphans, held, cutoff, now}
 
-    case Repo.cues_call(CuesFilterSql, request, repo_opts(state)) do
+    # The next sweep reclaims again, so one the Repo reaches late is skipped.
+    case Repo.cues_call(CuesFilterSql, request, skip_when_late(repo_opts(state))) do
       {:ok, %{reclaimed: []}} ->
         state
 
@@ -241,7 +242,11 @@ defmodule FermixCore.Cues.Filters do
     now = state.clock.()
     busy = state.in_flight |> Map.values() |> Enum.map(& &1.run.watcher_id)
 
-    case Repo.cues_call(CuesFilterSql, {:claim, now, free, busy}, repo_opts(state)) do
+    # A claim the next dispatch makes again: one the Repo reaches after this
+    # call gave up is skipped, so no row is claimed that no task holds (CUE-1).
+    request = {:claim, now, free, busy}
+
+    case Repo.cues_call(CuesFilterSql, request, skip_when_late(repo_opts(state))) do
       {:ok, %{claims: claims, over_budget: over, next_at: next_at}} ->
         Enum.each(over, &notify(state, &1.watcher_id, :filter_budget_reached, budget_data(&1)))
         state = Enum.reduce(claims, state, &start_call/2)
@@ -497,6 +502,8 @@ defmodule FermixCore.Cues.Filters do
   end
 
   defp repo_opts(%{repo: repo}), do: Repo.periodic_opts(repo, Timeouts.repo_call())
+
+  defp skip_when_late(repo_opts), do: Keyword.put(repo_opts, :skip_when_late, true)
 
   defp monotonic_ms, do: System.monotonic_time(:millisecond)
 

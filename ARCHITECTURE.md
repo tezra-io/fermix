@@ -953,9 +953,9 @@ Architecture Invariant: the lists are the owner's. `Checklists.Access` admits
 only the owner's private turn or voice call, and a scheduled job whose allowed
 tools name the tool; the tools are left out of the cached capability catalog,
 which an owner's group chat shares, so a shared turn sees no list tool, line
-or name. After a turn read outside content, rows it writes are stamped and
-framed when read back, and its removals, replaces and moves to another list
-are refused.
+or name. After a turn read outside content it may only add and check, the
+rows it adds stamped and framed when read back; every other change, a new
+list included, is refused.
 
 ### Sandbox and Command Execution
 

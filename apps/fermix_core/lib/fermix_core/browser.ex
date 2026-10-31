@@ -225,15 +225,29 @@ defmodule FermixCore.Browser do
 
   # The fields hold what was typed, so the failure keeps the submit's own code
   # and recovery and says so, with the fill's receipt, rather than leaving the
-  # model to fill the form again blindly.
+  # model to fill the form again blindly. A field in no form sent nothing and
+  # left the page as the fill did, so its sentence is the whole way on: no
+  # snapshot first.
+  defp submitted({:error, %Error{code: "no_form"} = error}, receipt) do
+    filled_error(error, "The form was filled (`fill` below is the fill's receipt), but ", receipt)
+  end
+
   defp submitted({:error, %Error{} = error}, receipt) do
-    message =
+    lead =
       "The form was filled (`fill` below is the fill's receipt), and then submitting it failed. " <>
         "Take a snapshot to see the form as it stands before acting on it again. The " <>
-        "submit's error: " <> error.message
+        "submit's error: "
 
+    filled_error(error, lead, receipt)
+  end
+
+  defp filled_error(error, lead, receipt) do
     {:error,
-     %{error | message: message, details: Map.put(error.details, "fill", filled(receipt))}}
+     %{
+       error
+       | message: lead <> error.message,
+         details: Map.put(error.details, "fill", filled(receipt))
+     }}
   end
 
   defp filled(receipt), do: Map.delete(receipt, "tabs")

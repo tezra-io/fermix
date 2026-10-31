@@ -31,12 +31,11 @@ defmodule FermixCore.Cues.Source.Stream do
   `unmatched`; the rate buckets (`Cues.Buckets.admit/3`) and the daily budget
   apply to the matched ones; the rest go to `Cues.LiveFilters` with the
   watchers whose words matched, where each is judged and only a pass is
-  stored. While a decision model screens in place of the words
-  (`Cues.Config.screen_provider/0`, read for each frame), every item goes to
-  every `llm` watcher that has words, and its filter call screens it first
-  (`Cues.Filter`). A
-  stream routes nothing to a `none` watcher, and never goes through
-  `Cues.Ingest.accept/3`. Repeats are refused at a pass, by identity.
+  stored. While the screen is a decision model (`Cues.Config.screen/0`, read
+  for each frame), every item goes to every `llm` watcher that has words, and
+  its filter call screens it first (`Cues.Filter`). A stream routes nothing to
+  a `none` watcher, and never goes through `Cues.Ingest.accept/3`. Repeats are
+  refused at a pass, by identity.
 
   **Watchers.** At connect and on every flush of a live connection the worker
   reads its source's enabled watchers (`{:source_watchers, ref}`) and what a
@@ -130,8 +129,8 @@ defmodule FermixCore.Cues.Source.Stream do
   module's callbacks), `:transport_opts` (added to the transport's options),
   `:admit` (`(ref, n, now_ms) -> admitted`, default `Cues.Buckets.admit/3`),
   `:live` (the `Cues.LiveFilters` server, default its name), `:words?`
-  (zero-arity, whether items are routed by words; default: unless
-  `Cues.Config.screen_provider/0` names a provider), `:notify`
+  (zero-arity, whether items are routed by words; default: whether
+  `Cues.Config.screen/0` is `:keyword`), `:notify`
   (default `Cues.Notices.source/4`), `:manager` (a pid linked from `init`;
   `Cues.SourceManager` passes itself). A transport implements
   `Cues.Source.Stream.Transport`.
@@ -155,7 +154,7 @@ defmodule FermixCore.Cues.Source.Stream do
         transport: Keyword.get(opts, :transport, Socket),
         transport_opts: Keyword.get(opts, :transport_opts, []),
         live: Keyword.get(opts, :live, LiveFilters),
-        words?: Keyword.get(opts, :words?, fn -> is_nil(CuesConfig.screen_provider()) end),
+        words?: Keyword.get(opts, :words?, fn -> CuesConfig.screen() == :keyword end),
         socket: nil,
         socket_ref: nil,
         closing: nil,

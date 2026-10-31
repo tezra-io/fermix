@@ -755,7 +755,7 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
           "off by default",
           "Signal",
           "Cues pane",
-          "words to listen for"
+          "keywords to listen for"
         ] do
       assert paragraph =~ required, "the Cues paragraph does not mention #{required}"
     end
@@ -781,6 +781,9 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
           "list_cues",
           "cue_history",
           "filter_model",
+          "[fermix_core.cues] screen",
+          "Keyword match",
+          "Decision model",
           "listen_for",
           "needs_update",
           "drop_key",

@@ -32,7 +32,7 @@ The rows are the owner's own list, quoted as data. [n] is a row's number for che
 - [x] [3] Sharpen the shears
 ```
 
-`[n]` is a row's number, given when the row is made and never reused in its list, so a tick elsewhere never shifts what a number means. A row's words that begin with a bracketed number, a backslash or the outside-content mark are escaped with a backslash. With `folder`, every list in the folder comes back, each under its own `# List` heading; with neither `list` nor `folder`, the index of every list with its counts. A folder no list carries is refused with the names of the folders that exist.
+`[n]` is a row's number, given when the row is made and never reused in its list, so a tick elsewhere never shifts what a number means. A row's words that begin with a bracketed number, a backslash or the outside-content mark are escaped with a backslash, and so is a note line that begins like an item or a heading. Written back in a `replace`, a leading `[n]` is always the row's number, whatever space follows it; an indented item or heading (lists do not nest) and a heading other than `## ` are refused, with the line's number. With `folder`, every list in the folder comes back, each under its own `# List` heading; with neither `list` nor `folder`, the index of every list with its counts. A folder no list carries is refused with the names of the folders that exist.
 
 ## `checklist_edit`
 
@@ -43,16 +43,16 @@ One call is `{"changes": [{"list": <title or id>, "ops": [...]}]}`: at most 8 li
 - `check`, `uncheck` (`n`): done or not; twice changes nothing.
 - `edit` (`n`; `text`, `note`, an empty note clearing it): rewords an item or a section heading.
 - `move` (`n`; `section`, `after`, `to_list`): reorders an item, or moves it to another list, where it takes that list's next number.
-- `section` (`text`; `after`): a new heading, at the end without `after`.
+- `section` (`text`; `after`): a new heading right after a section's last row, or at the end without `after`; never inside a section, where it would take the items below it.
 - `remove` (`n`): an item, or a section with no items under it.
-- `folder` (`folder`, none taking the list out of its folder); `rename` (`text`); `remove_list`.
+- `folder` (`folder`, an explicit null or "" taking the list out of its folder; a call with no `folder` is refused); `rename` (`text`); `remove_list`.
 - `replace` (`markdown`, `rev`): the whole list as text. A line with `[n]` keeps that row, a line without one is new, a number left out is removed. Refused when the list moved past `rev`: "The list changed since you read it at rev 112; read it again." A list created in the same call needs no `rev`.
 
 ## Who can use them
 
 - Only the owner's attended, top-level turn in a private chat (a Telegram or Slack direct message, the Fermix Mac app, the paired phone) and the owner's own voice call. A guest, a group chat, a Slack channel mention, a shared Buzz session, a delegated worker and a coding continuation see no list tool, no list line and no list. The tools are never in the capability catalog; on the owner's turns a line names the lists by folder (names only, no counts).
 - A scheduled job reaches a list tool only when its allowed tools name it, at operator trust, and `schedule_job` gives a job one only from the owner's private turn. A job set up with no allowed tools does not get them. A change a job makes is recorded as made by a job.
-- **After outside content** (a fetched page, a cue, a plugin's or a worker's output): `add` and `check` still land, the rows marked and framed as `(added after outside content) "…"` whenever they are read back, which marks the reading request too; `remove`, `remove_list`, `replace` and a `move` to another list are refused: "Removing waits for a turn that read nothing from outside; ask me again."
+- **After outside content** (a fetched page, a cue, a plugin's or a worker's output): `add` and `check` still land, the rows marked and framed as `(added after outside content) "…"` whenever they are read back, which marks the reading request too; every other op, `create` included (a list's title is not marked, and the line naming the lists reaches every turn of the owner's), is refused: "That change waits for a turn that read nothing from outside; ask me again."
 - A list's rows are the owner's data, never instructions, wherever they are read.
 
 ## Bounds and removal

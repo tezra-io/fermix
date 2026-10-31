@@ -667,18 +667,42 @@ defmodule FermixCore.Tools.BrowserTest do
     # fill's receipt, rather than filling the form again blindly; the code is
     # the submit's own, so its recovery still applies.
     test "a submit that fails after the fill keeps its code and says the form was filled" do
-      missing = Error.new("no_submit_control", "No form or submit control found for ref")
-      context = recording_profile!(&answer(&1, {:ok, @filled}, {:error, missing}))
+      failed = Error.new("act_failed", "The submit control is disabled")
+      context = recording_profile!(&answer(&1, {:ok, @filled}, {:error, failed}))
 
       assert {:ok, %{success: false, error: error}} =
                Browser.execute(Map.put(@fill_form, "submit", true), context)
 
-      assert error =~ "(no_submit_control)"
-      assert error =~ "No form or submit control found for ref"
+      assert error =~ "(act_failed)"
+      assert error =~ "The submit control is disabled"
       assert error =~ "was filled"
       assert error =~ ~s("fill":)
       assert error =~ ~s("value":"Rome")
       assert [_fill, _submit] = requested()
+    end
+
+    # A first field in no form sends nothing and leaves the page as the fill
+    # left it, so the refs the model holds still name it: the way on is the
+    # page's own submit button, not a snapshot or a second fill.
+    test "a fill whose field is in no form says the form was filled and to click its button" do
+      no_form =
+        Error.new(
+          "no_form",
+          "`textbox_1` is in no form, so nothing was submitted: click the page's own submit " <>
+            "button."
+        )
+
+      context = recording_profile!(&answer(&1, {:ok, @filled}, {:error, no_form}))
+
+      assert {:ok, %{success: false, error: error}} =
+               Browser.execute(Map.put(@fill_form, "submit", true), context)
+
+      assert error =~ "(no_form)"
+      assert error =~ "The form was filled"
+      assert error =~ "`textbox_1` is in no form, so nothing was submitted"
+      assert error =~ "click the page's own submit button"
+      refute error =~ "snapshot"
+      assert error =~ ~s("value":"Rome")
     end
 
     test "submit false fills and submits nothing" do

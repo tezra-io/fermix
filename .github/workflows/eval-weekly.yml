@@ -1,9 +1,8 @@
 # Weekly eval (Milestone 22 T2a + T2b): full capability benchmark on a
 # disposable box, then the dangerous tier — sandbox_verify, the safety gate of
-# record for hardline-shaped shell requests, and the Linux attached-note case (a
-# command an attached note asks for waits for the owner). Any tier that fails
-# files (or updates) a GitHub issue via the shared `alert` job; the dangerous
-# tier is labelled critical.
+# record for hardline-shaped shell requests. Any tier that fails files (or
+# updates) a GitHub issue via the shared `alert` job; the dangerous tier is
+# labelled critical.
 #
 # Schedules execute the workflow file on the DEFAULT branch (main); dev is
 # checked out explicitly inside the box.
@@ -39,8 +38,7 @@ jobs:
   dangerous:
     # Runs even if the capability tier went red — the safety signal is
     # independent of capability drift. Only a cancelled run skips it. Never
-    # judged (sandbox_verify and the attached-note case set `judge: false`), so
-    # no id-token: write.
+    # judged (sandbox_verify sets `judge: false`), so no id-token: write.
     needs: capability
     if: ${{ !cancelled() }}
     uses: ./.github/workflows/eval-box.yml
@@ -139,7 +137,7 @@ jobs:
               const body = [
                 `The **${job}** tier in \`${process.env.WORKFLOW}\`: ${KINDS[kind].line(job)}`,
                 critical
-                  ? "\n**Critical** — the safety gates of record: `sandbox_verify` for hardline-shaped shell requests, and the Linux attached-note case for a command outside content asks for."
+                  ? "\n**Critical** — `sandbox_verify` is the safety gate of record for hardline-shaped shell requests."
                   : "",
                 `\nRun: ${runUrl}`,
                 "\nWhile this issue stays open, further occurrences add a comment instead of a new issue. Close it once the tier is green again.",

@@ -43,7 +43,8 @@ defmodule FermixCore.Cues.FilterTest do
     :ok
   end
 
-  test "with words as the screen, the filter model reads the item and no decision model is asked" do
+  test "with keyword match as the screen, the filter model reads the item and no decision " <>
+         "model is asked" do
     Application.put_env(:fermix_core, :cues, enabled: true)
     stub(fn _conn -> flunk("the decision model was asked") end)
 
@@ -52,7 +53,7 @@ defmodule FermixCore.Cues.FilterTest do
   end
 
   test "an item the decision model lets through goes on to the filter model" do
-    Application.put_env(:fermix_core, :cues, enabled: true, screen_provider: "openai")
+    Application.put_env(:fermix_core, :cues, enabled: true, screen: :decision_model)
     stub(&predicate(&1, 0.62))
 
     assert {:pass, "A release.", "New version."} = Filter.decide(claim(), opts())
@@ -61,12 +62,24 @@ defmodule FermixCore.Cues.FilterTest do
   end
 
   test "an item the decision model screens out never reaches the filter model" do
-    Application.put_env(:fermix_core, :cues, enabled: true, screen_provider: "openai")
+    Application.put_env(:fermix_core, :cues, enabled: true, screen: :decision_model)
     stub(&predicate(&1, 0.05))
 
     assert {:drop, reason} = Filter.decide(claim(), opts())
     assert reason =~ "judged it unlikely to matter (5%)"
     assert_received {:asked, "/v1/decisions"}
+    refute_received :chat_asked
+  end
+
+  test "with no decision model set up, the watcher is held and the filter model is not asked" do
+    Application.put_env(:fermix_core, :cues, enabled: true, screen: :decision_model)
+    Application.put_env(:fermix_core, :providers, anthropic: [api_key: "sk-ant-invented"])
+    stub(fn _conn -> flunk("the decision model was asked") end)
+
+    assert {:provider_failure, %{kind: :no_route, message: message}} =
+             Filter.decide(claim(), opts())
+
+    assert message =~ "No decision model is set up"
     refute_received :chat_asked
   end
 

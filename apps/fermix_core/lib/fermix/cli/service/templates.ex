@@ -50,7 +50,7 @@ defmodule Fermix.CLI.Service.Templates do
       <key>Label</key><string>#{label}</string>
       <key>RunAtLoad</key><true/>
       <key>KeepAlive</key><true/>
-      <key>ProcessType</key><string>Standard</string>
+      <key>ProcessType</key><string>Interactive</string>
       <key>ExitTimeOut</key><integer>30</integer>
       <key>EnvironmentVariables</key>
       <dict>

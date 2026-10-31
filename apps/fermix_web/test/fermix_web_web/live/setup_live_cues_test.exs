@@ -229,7 +229,7 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
       page = LazyHTML.from_fragment(html)
 
       assert settings_fields(html) ==
-               ~w(enabled mandates_enabled door_port screen_provider filter_provider)
+               ~w(enabled mandates_enabled door_port screen filter_provider)
 
       assert page |> LazyHTML.query("#cues-settings-form button") |> Enum.map(&button_type/1) ==
                ["submit"]
@@ -308,7 +308,7 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
             enabled: "true",
             mandates_enabled: "false",
             door_port: "4040",
-            screen_provider: "openai",
+            screen: "decision_model",
             filter_provider: "openai",
             filter_model: model
           }
@@ -322,24 +322,24 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
       assert Keyword.get(cues, :enabled) == true
       assert Keyword.get(cues, :mandates_enabled) == false
       assert Keyword.get(cues, :door_port) == 4040
-      assert Keyword.get(cues, :screen_provider) == "openai"
+      assert Keyword.get(cues, :screen) == :decision_model
       assert %{provider: :openai, model: ^model} = RoutingOverrides.filter()
       assert Keyword.get(persisted(:routing), :filter_model) == model
 
-      # Back to the words and the main model: live, no restart.
+      # Back to keyword match and the main model: live, no restart.
       view
       |> form("#cues-settings-form", cues_settings: %{filter_provider: ""})
       |> render_change()
 
       html =
         view
-        |> form("#cues-settings-form", cues_settings: %{screen_provider: "", filter_provider: ""})
+        |> form("#cues-settings-form", cues_settings: %{screen: "", filter_provider: ""})
         |> render_submit()
 
       # The door still says it waits for the restart the first Save asked for.
       assert html =~ "Cues saved."
       refute html =~ "Cues saved. Restart to apply."
-      refute Keyword.has_key?(persisted_cues(), :screen_provider)
+      refute Keyword.has_key?(persisted_cues(), :screen)
       assert %{provider: nil, model: nil} = RoutingOverrides.filter()
       refute Keyword.has_key?(persisted(:routing), :filter_provider)
     end
@@ -380,25 +380,13 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
       html =
         view
         |> form("#cues-settings-form",
-          cues_settings: %{enabled: "true", screen_provider: "openai", door_port: "80"}
+          cues_settings: %{enabled: "true", screen: "decision_model", door_port: "80"}
         )
         |> render_submit()
 
       assert alert_with(html, "Save failed:")
       assert settings_refusal(html, "cues_door_port") =~ "door_port"
-      assert settings_refusal(html, "cues_screen_provider") == nil
-      assert persisted_cues() == []
-
-      # A screen that is not set up, said under the Screen.
-      html =
-        view
-        |> element("#cues-settings-form")
-        |> render_submit(%{cues_settings: %{screen_provider: "venice"}})
-
-      assert settings_refusal(html, "cues_screen_provider") ==
-               "Pick Words, or the decision model of a provider that is set up."
-
-      assert settings_refusal(html, "cues_door_port") == nil
+      assert settings_refusal(html, "cues_screen") == nil
       assert persisted_cues() == []
 
       # A model with no provider, said under the filter model.
@@ -456,17 +444,61 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
       assert models != []
     end
 
-    test "the Screen offers the words, then only the decision models of providers that are set up",
+    test "the Screen offers keyword match and the decision model, and names the one Fermix uses",
          %{conn: conn} do
       Application.put_env(:fermix_core, :providers, openai: [api_key: "invented-key-2207"])
       {:ok, view, _html} = live(conn, "/setup")
       html = open_cues(view)
 
-      assert html =~ "How items are screened before the filter model reads them."
-      assert html =~ ~r/<option value="" selected[^>]*>\s*Words/
-      assert html =~ ~s(<option value="openai")
-      assert html =~ "OpenAI · gpt-6-luna"
-      refute html =~ ~s(<option value="openrouter")
+      assert html =~ "How items are checked before the filter model reads them."
+
+      assert screen_options(html) == [
+               {"", "Keyword match", true},
+               {"decision_model", "Decision model", false}
+             ]
+
+      refute html =~ "Uses OpenAI · gpt-6-luna"
+
+      html =
+        view
+        |> form("#cues-settings-form", cues_settings: %{screen: "decision_model"})
+        |> render_submit()
+
+      assert screen_options(html) == [
+               {"", "Keyword match", false},
+               {"decision_model", "Decision model", true}
+             ]
+
+      assert screen_hint(html) == "Uses OpenAI · gpt-6-luna"
+    end
+
+    test "the Screen is two options side by side, with no menu, and says why the decision model is not ready",
+         %{conn: conn} do
+      Application.put_env(:fermix_core, :providers, anthropic: [api_key: "invented-key-2207"])
+      {:ok, view, _html} = live(conn, "/setup")
+      html = open_cues(view)
+
+      page = LazyHTML.from_fragment(html)
+      assert page |> LazyHTML.query("#cues-screen select") |> Enum.count() == 0
+      assert page |> LazyHTML.query(~s(#cues-screen input[type="radio"])) |> Enum.count() == 2
+      assert screen_hint(html) == "Set up OpenAI, OpenRouter or Venice first."
+    end
+
+    test "the decision model is refused under the Screen while none is set up, and nothing is written",
+         %{conn: conn} do
+      Application.put_env(:fermix_core, :providers, anthropic: [api_key: "invented-key-2207"])
+      {:ok, view, _html} = live(conn, "/setup")
+      open_cues(view)
+
+      html =
+        view
+        |> form("#cues-settings-form", cues_settings: %{screen: "decision_model"})
+        |> render_submit()
+
+      assert settings_refusal(html, "cues_screen") ==
+               "Set up OpenAI, OpenRouter or Venice first: a decision model runs on one of them."
+
+      assert persisted_cues() == []
     end
 
     test "a running door shows where it listens", %{conn: conn} do
@@ -1695,7 +1727,7 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
       {:ok, _view, html} = live(conn, "/setup?tab=cues")
 
       assert html =~ "Needs update"
-      assert html =~ "Needs words to listen for: update it in chat."
+      assert html =~ "Needs keywords to listen for: update it in chat."
       assert html =~ ~s(data-watcher-offered="7")
     end
   end
@@ -1886,6 +1918,30 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
     persisted_cues() |> Keyword.fetch!(:mandates) |> Map.fetch!(name)
   end
 
+  # The Screen's options as `{value, label, checked?}`, in order.
+  defp screen_options(html) do
+    html
+    |> LazyHTML.from_fragment()
+    |> LazyHTML.query("#cues-screen label")
+    |> Enum.map(fn option ->
+      input = LazyHTML.query(option, ~s(input[type="radio"]))
+      [value] = LazyHTML.attribute(input, "value")
+      label = option |> LazyHTML.query(".cues-screen-label") |> LazyHTML.text() |> squish()
+      {value, label, LazyHTML.attribute(input, "checked") != []}
+    end)
+  end
+
+  # The one hint the Screen shows, or nil.
+  defp screen_hint(html) do
+    case html
+         |> LazyHTML.from_fragment()
+         |> LazyHTML.query("#cues-screen .cues-screen-hint")
+         |> Enum.to_list() do
+      [] -> nil
+      [hint] -> hint |> LazyHTML.text() |> squish()
+    end
+  end
+
   defp open_cues(view) do
     view |> element(~s(button[phx-value-tab="cues"])) |> render_click()
   end
@@ -1917,6 +1973,8 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
     |> Enum.reject(&(LazyHTML.attribute(&1, "type") == ["hidden"]))
     |> Enum.flat_map(&LazyHTML.attribute(&1, "name"))
     |> Enum.map(&String.replace(&1, ~r/\Acues_settings\[(.+)\]\z/, "\\1"))
+    # A radio group is one field, however many options it has.
+    |> Enum.uniq()
   end
 
   # The refusal said under the settings field a row key names, or nil.

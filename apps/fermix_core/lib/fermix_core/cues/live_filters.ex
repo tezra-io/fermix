@@ -835,8 +835,14 @@ defmodule FermixCore.Cues.LiveFilters do
 
   defp counts_after(state, _rows, {:error, _reason}), do: state.counts
 
+  # Each row is an hour's absolute totals, kept here until a flush writes them,
+  # so the next flush writes the same totals again: a write the Repo reaches
+  # after this flush gave up is skipped (`Counts`).
   defp write_counts(context, rows) do
-    case Repo.cues_call(CuesSql, {:counts_put, rows, context.clock.()}, repo_opts(context)) do
+    request = {:counts_put, rows, context.clock.()}
+    opts = Keyword.put(repo_opts(context), :skip_when_late, true)
+
+    case Repo.cues_call(CuesSql, request, opts) do
       {:ok, _written} = written ->
         written
 

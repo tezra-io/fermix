@@ -17,11 +17,13 @@ defmodule FermixCore.Providers.DecisionModel do
   | OpenRouter | `POST <base without /v1>/alpha/decisions` | `~typesafe/jev-latest` (TypeSafe's Jev) |
   | Venice | `POST <base>/decisions` | `jev-latest` (TypeSafe's Jev) |
 
-  The owner picks the provider (`[fermix_core.cues] screen_provider`), any of
-  the three that is set up, primary or not; `route/1` builds its route or says
-  why there is none. The Jev routes follow the vendor's newest Jev; the answer
-  names the model that answered, and the call's telemetry carries it, so an
-  upgrade stays visible.
+  Fermix picks the provider, never the owner (`route/0`): the primary provider
+  when it serves a decision model and is set up, otherwise the first of the
+  three that is set up, in the order above. `pick/2` is that rule alone, over
+  a primary and a set-up check the caller passes, so a settings surface answers
+  from its own snapshot. The Jev routes follow the vendor's newest Jev; the
+  answer names the model that answered, and the call's telemetry carries it,
+  so an upgrade stays visible.
 
   ## The call
 
@@ -66,25 +68,39 @@ defmodule FermixCore.Providers.DecisionModel do
           | {:refused, String.t()}
           | {:parser_changed, String.t()}
 
-  @doc "The providers that serve a decision model, in catalog order."
-  @spec providers() :: [provider()]
-  def providers, do: @providers
-
   @doc "How a surface names the decision model on `provider`."
   @spec label(provider()) :: String.t()
   def label(provider) when provider in @providers, do: Map.fetch!(@labels, provider)
 
   @doc """
-  The route of `provider`'s decision model, from application env: `:no_decision_model`
-  for a provider that serves none Fermix uses, `:not_set_up` for one with no
-  credentials.
+  The provider a decision model runs on: the primary (`primary`, shaped as
+  `Selection.primary_provider/0` answers) when it serves one and `configured?`
+  says it is set up, otherwise the first provider that serves one and is set
+  up, in catalog order; `:not_set_up` when none is.
   """
-  @spec route(atom()) :: {:ok, route()} | {:error, :no_decision_model | :not_set_up}
-  def route(provider) when is_atom(provider) do
-    cond do
-      provider not in @providers -> {:error, :no_decision_model}
-      not Selection.configured?(provider) -> {:error, :not_set_up}
-      true -> {:ok, build_route(provider)}
+  @spec pick({:ok, atom()} | {:error, term()}, (provider() -> boolean())) ::
+          {:ok, provider()} | {:error, :not_set_up}
+  def pick(primary, configured?) when is_function(configured?, 1) do
+    case Enum.find(lead(primary) ++ @providers, configured?) do
+      nil -> {:error, :not_set_up}
+      provider -> {:ok, provider}
+    end
+  end
+
+  # The primary leads only when it serves a decision model; an unreadable
+  # primary (two flagged) leaves the catalog order as it is.
+  defp lead({:ok, provider}) when provider in @providers, do: [provider]
+  defp lead({:ok, provider}) when is_atom(provider), do: []
+  defp lead({:error, _reason}), do: []
+
+  @doc """
+  The route of the decision model `pick/2` picks from application env, or
+  `:not_set_up` when no provider that serves one is set up.
+  """
+  @spec route() :: {:ok, route()} | {:error, :not_set_up}
+  def route do
+    with {:ok, provider} <- pick(Selection.primary_provider(), &Selection.configured?/1) do
+      {:ok, build_route(provider)}
     end
   end
 

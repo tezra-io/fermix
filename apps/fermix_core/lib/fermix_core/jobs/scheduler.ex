@@ -703,8 +703,11 @@ defmodule FermixCore.Jobs.Scheduler do
 
   defp claim_patched_job(job, job_patch, now, state) do
     run_attrs = run_attrs(job, now)
+    # A claim the next tick makes again: one the Repo reaches after this call
+    # gave up is skipped, so no run is claimed that no runner starts.
+    claim_opts = Keyword.put(state.repo_opts, :skip_when_late, true)
 
-    case Repo.claim_due_job(job.id, job_patch, run_attrs, now, state.repo_opts) do
+    case Repo.claim_due_job(job.id, job_patch, run_attrs, now, claim_opts) do
       {:ok, {claimed_job, run}} ->
         {:ok, start_or_mark_failed(claimed_job, run, state)}
 
@@ -752,8 +755,11 @@ defmodule FermixCore.Jobs.Scheduler do
   defp claim_manual_run(job, now, state) do
     run_attrs = job |> run_attrs(now) |> Map.put(:trigger, "manual")
     job_patch = manual_claim_patch(job, now)
+    # The owner is told the timeout and can ask again, so a claim the Repo
+    # reaches after this call gave up is skipped rather than left runnerless.
+    claim_opts = Keyword.put(state.repo_opts, :skip_when_late, true)
 
-    case Repo.claim_job_now(job.id, job_patch, run_attrs, state.repo_opts) do
+    case Repo.claim_job_now(job.id, job_patch, run_attrs, claim_opts) do
       {:ok, {claimed_job, run}} ->
         {{:ok, run}, start_or_mark_failed(claimed_job, run, state)}
 

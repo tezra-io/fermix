@@ -175,8 +175,10 @@ defmodule FermixCore.Temporal.Scheduler do
       # Every Repo call this scheduler makes, the worker-exit recoveries included:
       # a Repo that does not answer in time is an error each path logs and
       # retries, not an exit (`Repo.periodic_opts/2`). The request still runs,
-      # ahead of anything this scheduler sends next; a late claim is a
-      # `delivering` row with no worker, which the monitor-invariant scan resets.
+      # ahead of anything this scheduler sends next, except a due claim the Repo
+      # reaches after this scheduler gave up (`claim_due/3`); a late claim it had
+      # started is a `delivering` row with no worker, which the monitor-invariant
+      # scan resets.
       # The scheduler-before-delivery-supervisor order holds whether or not the
       # scheduler crashes, so exiting here would fence nothing, only restart.
       repo_opts:
@@ -252,8 +254,12 @@ defmodule FermixCore.Temporal.Scheduler do
     end
   end
 
+  # A claim the next tick makes again: one the Repo reaches after this call
+  # gave up is skipped, so no row is left delivering with no worker.
   defp claim_due(state, now, limit) do
-    case Repo.claim_due_reminders(now, limit, state.repo_opts) do
+    claim_opts = Keyword.put(state.repo_opts, :skip_when_late, true)
+
+    case Repo.claim_due_reminders(now, limit, claim_opts) do
       {:ok, rows} ->
         {:ok, Enum.reduce(rows, state, &start_delivery(&1, now, &2))}
 

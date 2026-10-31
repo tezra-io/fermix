@@ -4,9 +4,9 @@ defmodule FermixCore.Cues.Sweeper do
   in `Cues.Supervisor`, so a crash in sweep logic restarts nothing else.
 
   A pass runs the steps of `@steps` in order, each in chunks of 1,000 rows,
-  within a 250 ms budget: once the budget is spent the pass stops and the next
-  tick resumes from the first step. `filtering` and `claimed` deliveries are
-  never touched here.
+  within a 250 ms budget: once the budget is spent, or a step's Repo call times
+  out, the pass stops and the next tick resumes from the first step.
+  `filtering` and `claimed` deliveries are never touched here.
 
   The first sweep comes after a delay, never from `init`, and it alone also
   tells the owner about stored watchers that break a rule
@@ -85,12 +85,15 @@ defmodule FermixCore.Cues.Sweeper do
   @doc """
   Runs one pass at `now`. Returns rows touched per step that ran; a step that
   failed maps to `{:error, reason}` (logged and traced), and the steps after a
-  spent budget are absent.
+  spent budget or a Repo timeout are absent.
   """
   @spec sweep(GenServer.server(), DateTime.t()) :: {:ok, %{atom() => step_result()}}
   def sweep(server, %DateTime{} = now) do
-    # A pass stops at the first chunk that ends past its budget, and each Repo
-    # call is bounded by the repo budget, so one pass ends within about two.
+    # A pass stops at the first chunk that ends past its budget or in a Repo
+    # timeout, so it overruns its budget by one chunk, and a chunk of one Repo
+    # call is bounded by the Repo budget: a pass ends within about two. A chunk
+    # that also sends (gap notices, unknown outcomes) makes a few more calls per
+    # send, so a slow Repo can stretch it further.
     GenServer.call(server, {:sweep, now}, 2 * Timeouts.repo_call())
   end
 
@@ -164,12 +167,16 @@ defmodule FermixCore.Cues.Sweeper do
     Enum.reduce_while(@steps, %{}, fn {name, step}, results ->
       outcome = run_step(state, step, repo_opts, now, started)
       results = Map.put(results, name, step_total(name, outcome))
-
-      if elem(outcome, 0) == :budget_spent,
-        do: {:halt, results},
-        else: {:cont, results}
+      if ends_pass?(outcome), do: {:halt, results}, else: {:cont, results}
     end)
   end
+
+  # A Repo timeout ends the pass as a spent budget does: the Repo is behind,
+  # and every later step would wait the same bound on it. Any other step error
+  # stops only that step.
+  defp ends_pass?({:budget_spent, _total}), do: true
+  defp ends_pass?({:error, {_total, :repo_timeout}}), do: true
+  defp ends_pass?(_outcome), do: false
 
   defp run_step(state, step, repo_opts, now, started) do
     Enum.reduce_while(1..@max_chunks_per_step, {:done, 0}, fn _chunk, {_status, total} ->
@@ -205,7 +212,7 @@ defmodule FermixCore.Cues.Sweeper do
           {:ok, non_neg_integer()} | {:error, term()}
   def expire_lifetime(repo_opts, now, limit) do
     with {:ok, %{count: count, expired: expired, gaps: gaps}} <-
-           Repo.cues_call(CuesSql, {:expire_lifetime, now, limit}, repo_opts) do
+           Repo.cues_call(CuesSql, {:expire_lifetime, now, limit}, skip_when_late(repo_opts)) do
       Enum.each(expired, &emit_expired/1)
       Enum.each(gaps, &emit_gap/1)
       {:ok, count}
@@ -268,8 +275,12 @@ defmodule FermixCore.Cues.Sweeper do
   def prune_counts(repo_opts, now, limit), do: sql_step(:prune_counts, repo_opts, now, limit)
 
   defp sql_step(name, repo_opts, now, limit) do
-    Repo.cues_call(CuesSql, {name, now, limit}, repo_opts)
+    Repo.cues_call(CuesSql, {name, now, limit}, skip_when_late(repo_opts))
   end
+
+  # Retention work the next pass does again, so a step the Repo reaches after
+  # its caller gave up is skipped (`Repo.periodic_opts/2`).
+  defp skip_when_late(repo_opts), do: Keyword.put(repo_opts, :skip_when_late, true)
 
   defp emit_expired(expired) do
     Telemetry.lifecycle(:expired, %{}, %{

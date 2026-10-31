@@ -1326,6 +1326,12 @@ defmodule FermixCore.Memory.Repo do
   already logs an `{:error, reason}` and retries on its next tick; exiting
   instead restarted it and, for the jobs and reminder schedulers, every later
   child of the root supervisor, the daemon socket included.
+
+  A request that timed out still runs when the Repo reaches it, after the
+  worker has its error. A worker adds `skip_when_late: true` to a request that
+  is safe to skip, a claim of new work or a read its next tick redoes, and the
+  Repo then turns that one away unrun once `timeout_ms` has passed; one it
+  started before then still finishes, and can commit late.
   """
   @spec periodic_opts(GenServer.server(), pos_integer()) :: keyword()
   def periodic_opts(server, timeout_ms) when is_integer(timeout_ms) and timeout_ms > 0 do
@@ -3811,7 +3817,22 @@ defmodule FermixCore.Memory.Repo do
     end
   end
 
+  # A request `call/2` sends with `skip_when_late: true` carries its caller's
+  # deadline. One whose deadline has passed when the Repo reaches it is not
+  # run: its caller has stopped waiting and said skipping it is safe, so running
+  # it would only delay every request behind it and commit a claim nobody acts
+  # on. That caller's timeout is already traced (`Timeouts.expired/3`) or exits
+  # it, so this adds no trace of its own, which under load would only double
+  # each timeout's record.
   @impl true
+  def handle_call({:with_deadline, deadline, request}, from, state) do
+    if deadline_passed?(deadline) do
+      {:reply, {:error, :repo_timeout}, state}
+    else
+      handle_call(request, from, state)
+    end
+  end
+
   def handle_call(:enabled?, _from, state) do
     {:reply, state.enabled, state}
   end
@@ -4973,18 +4994,50 @@ defmodule FermixCore.Memory.Repo do
 
   # Every request is served in order by this one process, so a call waits
   # behind every request ahead of it. A timed-out call exits its caller unless
-  # the caller passed `on_timeout: :error` (`periodic_opts/2`). The request
-  # itself still runs when the Repo reaches it, and still before anything that
-  # caller sends afterwards.
+  # the caller passed `on_timeout: :error` (`periodic_opts/2`).
+  #
+  # A request still runs when the Repo reaches it, however late, and before
+  # anything its caller sends afterwards: most record something that already
+  # happened (a send, a settle, a decision), and skipping one would repeat that
+  # or lose it. A caller whose request is safe to skip, a claim of new work or
+  # a read a later tick redoes, passes `skip_when_late: true`. That request goes
+  # out as `{:with_deadline, deadline, request}`, the deadline being the
+  # monotonic millisecond at which the caller gives up (`:infinity` never
+  # passes), and the Repo turns it away unrun once that has passed
+  # (`handle_call/3`). So a Repo that falls behind sheds the claims its callers
+  # gave up on, instead of committing them after the caller moved on, which
+  # never acts on what it claimed. One the Repo started before its deadline
+  # still runs to the end and can commit late.
+  #
+  # A caller held up between taking its deadline and sending starts its own
+  # timer that much later, so it can still be waiting when its request is
+  # turned away; it then gets `{:error, :repo_timeout}` back, whichever
+  # `on_timeout` it chose.
   defp call(request, opts) do
     server = Keyword.get(opts, :server, __MODULE__)
     timeout = Keyword.get(opts, :timeout, Timeouts.repo_call())
+    message = request_message(request, timeout, Keyword.get(opts, :skip_when_late, false))
 
     case Keyword.get(opts, :on_timeout, :exit) do
-      :exit -> GenServer.call(server, request, timeout)
-      :error -> call_or_timeout_error(server, request, timeout)
+      :exit -> GenServer.call(server, message, timeout)
+      :error -> call_or_timeout_error(server, message, timeout)
     end
   end
+
+  defp request_message(request, _timeout, false), do: request
+
+  defp request_message(request, timeout, true),
+    do: {:with_deadline, deadline_after(timeout), request}
+
+  defp deadline_after(:infinity), do: :infinity
+
+  defp deadline_after(timeout) when is_integer(timeout) and timeout >= 0,
+    do: System.monotonic_time(:millisecond) + timeout
+
+  defp deadline_passed?(:infinity), do: false
+
+  defp deadline_passed?(deadline) when is_integer(deadline),
+    do: System.monotonic_time(:millisecond) > deadline
 
   defp call_or_timeout_error(server, request, timeout) do
     GenServer.call(server, request, timeout)
@@ -4996,6 +5049,7 @@ defmodule FermixCore.Memory.Repo do
       {:error, :repo_timeout}
   end
 
+  defp request_name({:with_deadline, _deadline, request}), do: request_name(request)
   defp request_name(request) when is_tuple(request), do: elem(request, 0)
   defp request_name(request) when is_atom(request), do: request
 

@@ -179,7 +179,7 @@ defmodule FermixCore.Memory.Repo.ChecklistsSql do
     with {:ok, lists} <- live_lists(conn, owner_id, agent_id),
          {:ok, rows} <- rows_of(conn, Ops.referenced(lists, changes)),
          {:ok, result} <- Ops.apply(%{lists: lists, rows: rows}, changes, edit),
-         :ok <- write(conn, owner_id, agent_id, result, edit.now) do
+         :ok <- write(conn, {owner_id, agent_id, lists}, result, edit.now) do
       {:ok, result}
     end
   end
@@ -193,14 +193,20 @@ defmodule FermixCore.Memory.Repo.ChecklistsSql do
     end)
   end
 
-  # Existing lists first, so a removed or renamed list frees its title before a
-  # list created in the same call takes it; then the new lists, which the rows
-  # moved or added into them reference; then the rows; then the purge.
-  defp write(conn, owner_id, agent_id, result, now) do
+  # The unique index on live titles must never see two lists hold one title
+  # mid-call, whatever order the call touched them in: every existing list
+  # whose title moves or which is removed first gives its title up for a
+  # placeholder no title can be (it starts with a control character), so the
+  # final writes land in any order. Then the new lists, which the rows moved or
+  # added into them reference; then the rows; then the purge.
+  defp write(conn, {owner_id, agent_id, stored}, result, now) do
     changed = Enum.map(result.changed, &Map.fetch!(result.lists, &1))
     {created, existing} = Enum.split_with(changed, & &1.created?)
+    titles = Map.new(stored, &{&1.id, &1.title})
+    moving = Enum.filter(existing, &(&1.removed_at || &1.title != Map.fetch!(titles, &1.id)))
 
-    with :ok <- each(existing, &update_list(conn, &1)),
+    with :ok <- each(moving, &free_title(conn, &1)),
+         :ok <- each(existing, &update_list(conn, &1)),
          :ok <- each(created, &insert_list(conn, owner_id, agent_id, &1)),
          :ok <- each(dirty_rows(result, changed), &write_row(conn, &1)) do
       each(changed, &purge_rows(conn, &1.id, now))
@@ -213,6 +219,11 @@ defmodule FermixCore.Memory.Repo.ChecklistsSql do
     live = Enum.flat_map(changed, &Map.get(result.rows, &1.id, []))
     removed = Enum.reject(result.removed_rows, &(&1.dirty == :new))
     Enum.filter(live, & &1.dirty) ++ Enum.map(removed, &Map.put(&1, :dirty, :removed))
+  end
+
+  defp free_title(conn, list) do
+    sql = "UPDATE checklists SET title = ? WHERE id = ? AND removed_at IS NULL"
+    expect_one(conn, sql, [<<1>> <> list.id, list.id], {:list_gone, list.id})
   end
 
   defp insert_list(conn, owner_id, agent_id, list) do

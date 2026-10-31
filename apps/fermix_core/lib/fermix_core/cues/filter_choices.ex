@@ -6,9 +6,9 @@ defmodule FermixCore.Cues.FilterChoices do
   up, with their catalog models as suggestions. A provider that is not set up
   is not offered: a filter on it would fail at its first call.
 
-  It also offers how items are screened before the filter model reads them
-  (`screen_options/1`): by the words to listen for, or by the decision model of
-  a provider that is set up, with the sentence both surfaces show beside it
+  It also offers how items are checked before the filter model reads them
+  (`screen_choices/1`): keyword match, or the decision model Fermix picks
+  (`decision_model/1`), with the sentence both surfaces show beside them
   (`screen_info/0`).
 
   The one reader behind the setup page's Cues tab and the management `cues`
@@ -24,12 +24,19 @@ defmodule FermixCore.Cues.FilterChoices do
   alias FermixCore.Providers.Selection
 
   @type choice :: %{id: String.t(), label: String.t()}
+  @type screen_choice :: %{
+          id: String.t(),
+          label: String.t(),
+          hint: String.t() | nil,
+          disabled?: boolean()
+        }
 
-  @screen_info "How items are screened before the filter model reads them. Words: only an " <>
-                 "item containing one of the watcher's words gets through. A decision model " <>
-                 "checks each item by its meaning instead, with the watcher's purpose, " <>
-                 "instructions and words as hints, in about a third of a second, roughly ten " <>
-                 "times faster than a chat model."
+  @screen_info "How items are checked before the filter model reads them. Keyword match: an " <>
+                 "item must contain one of the watcher's keywords. Decision model: each item " <>
+                 "is checked by its meaning, with the watcher's purpose, instructions and " <>
+                 "keywords as hints, in about a third of a second, roughly ten times faster " <>
+                 "than a chat model."
+  @no_decision_model "Set up OpenAI, OpenRouter or Venice first."
 
   @doc """
   The label of the empty choice, the main model, read from the owner's own
@@ -74,16 +81,44 @@ defmodule FermixCore.Cues.FilterChoices do
   def screen_info, do: @screen_info
 
   @doc """
-  The decision models a screen can use: one for each provider that serves one
-  (`Providers.DecisionModel.providers/0`) and is set up, primary or not, in
-  catalog order, labelled "OpenAI · gpt-6-luna". The words are the empty
-  choice, which a surface offers first.
+  The two screens, keyword match first. The decision model's hint names the
+  one Fermix would use ("Uses OpenAI · gpt-6-luna"); while none is set up it
+  is disabled, with the hint that says what to set up.
   """
-  @spec screen_options(Source.snapshot()) :: [choice()]
-  def screen_options(snapshot) when is_map(snapshot) do
-    DecisionModel.providers()
-    |> Enum.filter(&Selection.configured?(&1, Source.provider(snapshot, &1)))
-    |> Enum.map(&%{id: Atom.to_string(&1), label: DecisionModel.label(&1)})
+  @spec screen_choices(Source.snapshot()) :: [screen_choice()]
+  def screen_choices(snapshot) when is_map(snapshot) do
+    [
+      %{id: "keyword", label: "Keyword match", hint: nil, disabled?: false},
+      decision_model_choice(decision_model(snapshot))
+    ]
+  end
+
+  defp decision_model_choice(nil),
+    do: %{
+      id: "decision_model",
+      label: "Decision model",
+      hint: @no_decision_model,
+      disabled?: true
+    }
+
+  defp decision_model_choice(%{label: label}),
+    do: %{id: "decision_model", label: "Decision model", hint: "Uses #{label}", disabled?: false}
+
+  @doc """
+  The decision model a screen would run on, picked from the snapshot as
+  `Providers.DecisionModel.pick/2` picks it at the call, with its label
+  ("OpenAI · gpt-6-luna"), or nil while no provider that serves one is set up.
+  """
+  @spec decision_model(Source.snapshot()) ::
+          %{provider: DecisionModel.provider(), label: String.t()} | nil
+  def decision_model(snapshot) when is_map(snapshot) do
+    primary =
+      PrimaryConfig.primary_in(Source.core(snapshot, :providers), Source.core(snapshot, :agent))
+
+    case DecisionModel.pick(primary, &Selection.configured?(&1, Source.provider(snapshot, &1))) do
+      {:ok, provider} -> %{provider: provider, label: DecisionModel.label(provider)}
+      {:error, :not_set_up} -> nil
+    end
   end
 
   defp route_label(provider, block) do

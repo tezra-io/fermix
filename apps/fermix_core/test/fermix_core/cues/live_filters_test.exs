@@ -81,6 +81,9 @@ defmodule FermixCore.Cues.LiveFiltersTest do
     def init(config), do: {:ok, config}
 
     @impl true
+    def handle_call({:with_deadline, _deadline, request}, from, state),
+      do: handle_call(request, from, state)
+
     def handle_call({:cues, CuesSql, {:counts_put, rows, _now}}, from, %{hold: hold} = state)
         when hold > 0 do
       send(state.test, {:counts_put, rows, from})

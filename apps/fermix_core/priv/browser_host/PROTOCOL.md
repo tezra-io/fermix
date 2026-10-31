@@ -161,10 +161,15 @@ take `ref`; `fill` and `type` take `ref` and `text`; `fill_form` takes
 `wait_until` (`text`, `url`, `element`, `load`), `timeout_ms`, and the target
 the mode names (`text` for `text`/`url`, `ref` or `selector` for `element`).
 
-A navigation or an act's result carries `page: "changed"` with a fresh
-`snapshot` when the app judges the page restructured, `page: "unchanged"`
-when an identical look was taken and found no different text, or no `page`
-key when `observe` was `false`.
+An observed `tab.open`, `tab.navigate`, `page.act` or `page.sign_in` result
+carries `page`: the page its look ended on, in the shape `page.snapshot`
+answers with (`url`, `title`, `ready_state`, `nodes`), on every look the app
+took, whether or not the page changed. The app judges nothing: the daemon
+renders `page` and tells the model `changed`, with the fresh snapshot, or, for
+an act or a sign-in whose text is the same as the last look at that tab,
+`unchanged`. `page` is absent when `observe` was `false`, and when the app
+could not take the look, which the daemon reports to the model as
+`unobserved`.
 
 ## Signing in (protocol 2)
 

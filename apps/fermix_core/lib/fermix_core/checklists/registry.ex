@@ -15,9 +15,9 @@ defmodule FermixCore.Checklists.Registry do
     * **one transaction** — the call goes to the Repo whole, where
       `Checklists.Ops` applies it to the rows it loaded and every list it
       changed moves its `rev` once, or nothing changes;
-    * **provenance** — a call on a turn that had read outside content stamps
-      the rows whose words it writes, and its removals, replaces and moves to
-      another list are refused (`Checklists.Ops`);
+    * **provenance** — a call on a turn that had read outside content may
+      only add and check, the rows it adds stamped, and every other op is
+      refused (`Checklists.Ops`);
     * **the answers** — a read rendered as markdown (`Checklists.Render`), an
       edit's one line per list, and one sentence for every refusal
       (`describe_error/1`).
@@ -51,6 +51,10 @@ defmodule FermixCore.Checklists.Registry do
   @type touch :: %{list_id: String.t(), title: String.t(), rows: [String.t()]}
 
   @type answer :: %{text: String.t(), touched: [touch()]}
+
+  @doc "Every op a `checklist_edit` call takes, by name."
+  @spec ops() :: [String.t()]
+  def ops, do: @ops
 
   @doc "The most lists one `checklist_edit` call changes."
   @spec max_changes() :: pos_integer()
@@ -287,9 +291,12 @@ defmodule FermixCore.Checklists.Registry do
     end
   end
 
-  # The folder a list goes in, named as a create names it; none takes it out.
+  # The folder a list goes in, named as a create names it. Only an explicit
+  # null or "" takes it out: a call that names no folder is refused, never
+  # read as one.
   defp op_fields(:folder, op, _creates?) do
-    with {:ok, folder} <- optional_text(op, "folder", :folder, @folder_max),
+    with :ok <- present(op, "folder"),
+         {:ok, folder} <- optional_text(op, "folder", :folder, @folder_max),
          do: {:ok, %{op: :folder, text: folder}}
   end
 
@@ -306,6 +313,10 @@ defmodule FermixCore.Checklists.Registry do
          {:ok, rows} <- parsed(markdown) do
       {:ok, %{op: :replace, rev: rev, rows: rows}}
     end
+  end
+
+  defp present(op, key) do
+    if Map.has_key?(op, key), do: :ok, else: {:error, {:missing, String.to_existing_atom(key)}}
   end
 
   defp something_to_edit(nil, :keep), do: {:error, :nothing_to_edit}
@@ -613,6 +624,12 @@ defmodule FermixCore.Checklists.Registry do
   def describe_error({:kind_changed, n}),
     do: "[#{n}] cannot change between a section and an item; give the new one no number."
 
+  def describe_error({:section_inside, n}) do
+    "[#{n}] has items after it in its section, and a new section there would take the items " <>
+      "below it; put the section after that section's last row or at the end, then move the " <>
+      "items you want into it."
+  end
+
   def describe_error({:section_not_empty, n}),
     do: "Section [#{n}] still holds items; move or remove them first."
 
@@ -678,6 +695,14 @@ defmodule FermixCore.Checklists.Registry do
   defp line_problem(:not_a_row) do
     "is not a list row: write an item as `- [ ] words`, a section as `## Name`, and a note " <>
       "as an indented line under its item."
+  end
+
+  defp line_problem(:heading_level),
+    do: "is a heading of another level; a section is `## Name`, one level deep."
+
+  defp line_problem(:nested) do
+    "is an item or a heading indented under another row; a list does not nest, so write it " <>
+      "unindented, or as words in the note."
   end
 
   defp line_problem(:note_without_item), do: "is a note with no item above it."

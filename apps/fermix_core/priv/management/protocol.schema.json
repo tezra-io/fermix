@@ -4070,7 +4070,7 @@
             "offered": {
               "type": "integer",
               "minimum": 0,
-              "description": "Every item its words to listen for let through, kept or not; for a watcher with no filter, every item of its sources."
+              "description": "Every item its keywords to listen for let through, kept or not; for a watcher with no filter, every item of its sources."
             },
             "waiting": {
               "type": "integer",
@@ -4108,7 +4108,7 @@
       }
     },
     "cueWatcherDetail": {
-      "description": "A watcher row plus its purpose, its words to listen for, its instructions and how many examples are marked each way.",
+      "description": "A watcher row plus its purpose, its keywords to listen for, its instructions and how many examples are marked each way.",
       "type": "object",
       "required": [
         "id",

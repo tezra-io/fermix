@@ -16,10 +16,12 @@ defmodule Fermix.CLI.Service.TemplatesTest do
       assert plist =~ "<key>Label</key><string>io.tezra.fermix</string>"
       assert plist =~ "<key>RunAtLoad</key><true/>"
       assert plist =~ "<key>KeepAlive</key><true/>"
-      # Standard (not Background): Background puts the daemon in macOS's darwinbg
-      # QoS band — CPU/IO/timer throttled under load, which starved the
-      # user-facing HTTP daemon while the foreground dev process stayed fast.
-      assert plist =~ "<key>ProcessType</key><string>Standard</string>"
+      # Interactive: the daemon serves chat, voice and channel replies, so it
+      # runs with an app's priority (31). Standard is still throttled (20), and
+      # Background or an unboosted Adaptive job sits in the darwinbg band (4),
+      # where CPU load starved every Repo call while a terminal-started daemon
+      # at 31 had none.
+      assert plist =~ "<key>ProcessType</key><string>Interactive</string>"
 
       # ExitTimeOut > launchd's 20s default so a graceful shutdown (Phoenix
       # connection drain) on SIGTERM/bootout is not escalated to SIGKILL.
