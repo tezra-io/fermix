@@ -104,6 +104,10 @@ defmodule FermixWebWeb.SetupLive.PhonePairing do
   """
   @spec refusal_sentence(tuple()) :: String.t()
   def refusal_sentence({:invalid_params, _field, sentence}) when is_binary(sentence), do: sentence
+
+  def refusal_sentence({:unavailable, _capability, sentence}) when is_binary(sentence),
+    do: sentence
+
   def refusal_sentence({:config_unreadable, sentence}) when is_binary(sentence), do: sentence
 
   # The socket answers an unknown section as invalid parameters, so does this.
