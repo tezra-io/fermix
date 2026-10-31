@@ -378,15 +378,22 @@ defmodule FermixCore.Management.ProtocolContractTest do
   # green while the vendored macOS target validated against a shape the daemon
   # no longer produces. This drives the real router and compares key shapes.
   test "every golden success result carries the key shape the router returns", %{} do
-    for {method, params, opts} <- router_cases() do
-      {:ok, minimum} = Protocol.minimum_version(method)
-      request = %{request_id: "req-1", protocol_version: minimum, method: method, params: params}
+    for {method, params, opts} <- router_cases(), do: assert_router_shape(method, params, opts)
 
-      assert {:ok, result} = Router.route(request, opts), "router refused #{method}"
+    # Minted only now, each just before it is read: a job left running holds
+    # that state only for its kind's budget, and a loaded runner has taken
+    # longer than a probe's 15 s to get through the cases above.
+    for {method, params, opts} <- job_view_cases(), do: assert_router_shape(method, params, opts)
+  end
 
-      assert shape(result) == shape(fixture_result(method, params)),
-             "the golden #{method} fixture no longer matches the router's own result shape"
-    end
+  defp assert_router_shape(method, params, opts) do
+    {:ok, minimum} = Protocol.minimum_version(method)
+    request = %{request_id: "req-1", protocol_version: minimum, method: method, params: params}
+
+    assert {:ok, result} = Router.route(request, opts), "router refused #{method}"
+
+    assert shape(result) == shape(fixture_result(method, params)),
+           "the golden #{method} fixture no longer matches the router's own result shape"
   end
 
   # The one flow method whose golden result is a job in its TERMINAL state: the
@@ -1247,7 +1254,6 @@ defmodule FermixCore.Management.ProtocolContractTest do
       {"plugins.list", %{}, []}
     ] ++
       settings_cases() ++
-      job_view_cases() ++
       flow_cases() ++
       mobile_cases() ++
       mcp_cases() ++
@@ -1944,8 +1950,8 @@ defmodule FermixCore.Management.ProtocolContractTest do
     {:ok, _terminal} = eventually_terminal(finished, completed)
 
     # One job, still running, for each of the other two: both golden results are
-    # of a job that has not finished, and a probe that never answers is what
-    # holds that state without a clock.
+    # of a job that has not finished. A probe that never answers holds that
+    # state until the kind's budget runs out, so the caller reads these at once.
     listed = jobs()
     _running = probe_job(listed, blocking_probe())
 
