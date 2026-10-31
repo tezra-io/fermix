@@ -46,7 +46,7 @@ defmodule FermixCore.Management.Router do
     mobile.devices.list browser.install.start imessage.permissions.get imessage.policy.confirm
     mcp.servers.list mcp.servers.import.scan cues.status cues.sources.list cues.watchers.list
     cues.mandates.list cues.mandates.choices home.status home.snapshots.status home.snapshots.run
-    home.enroll.withdraw home.candidates.list home.provision.options home.provision.resources
+    home.enroll.withdraw home.candidates.list home.provision.providers home.provision.resources
     home.provision.delete
   )
   @lease_params ~w(lease_id)
@@ -83,7 +83,8 @@ defmodule FermixCore.Management.Router do
   @home_enroll_params ~w(kind)
   @home_readiness_params ~w(candidate_id)
   @home_move_params ~w(candidate_id recovery_passphrase keep_as_desktop)
-  @provision_connect_params ~w(token)
+  @provision_connect_params ~w(provider token)
+  @provision_options_params ~w(provider)
   # A candidate (M75 §2) answers the protocol's hello and home.status, and
   # refuses every other method by name.
   @candidate_methods ~w(hello home.status)
@@ -338,14 +339,20 @@ defmodule FermixCore.Management.Router do
   # The Always On provisioner (M75 lean v1 §4.3): device-class, answered on
   # the computer that created the server. `token` is the one parameter here
   # that carries a secret: it is never logged, traced or answered.
+  defp route_home("home.provision.providers", %{}, opts),
+    do: operation_result(Provision.providers(provision_opts(opts)))
+
   defp route_home("home.provision.connect", params, opts) do
     with :ok <- reject_unknown_params(params, @provision_connect_params) do
-      operation_result(Provision.connect(Map.get(params, "token"), provision_opts(opts)))
+      operation_result(Provision.connect(params, provision_opts(opts)))
     end
   end
 
-  defp route_home("home.provision.options", %{}, opts),
-    do: operation_result(Provision.options(provision_opts(opts)))
+  defp route_home("home.provision.options", params, opts) do
+    with :ok <- reject_unknown_params(params, @provision_options_params) do
+      operation_result(Provision.options(params, provision_opts(opts)))
+    end
+  end
 
   defp route_home("home.provision.create", params, opts),
     do: operation_result(Provision.create(params, provision_opts(opts)))

@@ -1,8 +1,11 @@
 defmodule FermixCore.Home.Provision.Ledger do
   @moduledoc """
-  The provisioner's one file for a host (M75 lean v1 §4.3):
-  `<home>/device/provision/<host>.json`, holding the host's API token and the
-  ledger of what Fermix created there.
+  The provisioner's one file for a provider (M75 lean v1 §4.3):
+  `<home>/device/provision/<id>.json`, holding the provider's API token and
+  the ledger of what Fermix created there. One file per provider is how the
+  ledger records which provider each resource belongs to: a provider's
+  resources and its token live in its own file, a token stays with its
+  provider, and no file is ever moved or rewritten for another.
 
   The token lives here and nowhere else: never a `config.toml` reference and
   never the keyring, because a move carries every keyring reference to the
@@ -30,14 +33,15 @@ defmodule FermixCore.Home.Provision.Ledger do
         "replace": null
       }
 
-  - `token_state` is `accepted` once the host accepted the token, `refused`
-    once a later call was refused for it (the token stopped working).
+  - `token_state` is `accepted` once the provider accepted the token,
+    `refused` once a later call was refused for it (the token stopped
+    working).
   - `ref` is the short id (four hex digits) a create mints and every resource
     it makes is named and labelled by, so a lost create is found again by its
     labels; null when nothing was created.
   - A resource's `status` is `requested` (written before the call that
-    creates it, with no id yet), `creating` (the host answered with an id and
-    its action runs), `created`, `deleting` (written before the call that
+    creates it, with no id yet), `creating` (the provider answered with an id
+    and its action runs), `created`, `deleting` (written before the call that
     deletes it) or `gone` (deleted outside Fermix). A resource Fermix deleted
     leaves the ledger.
   - `failure` is why the last create stopped, in the daemon's words; null
@@ -59,7 +63,7 @@ defmodule FermixCore.Home.Provision.Ledger do
   The ledger is written before each call that creates or deletes and updated
   after it (`update/3`). Updates are serialised per file: `Ledger.Lock`, the
   one owner of the locks, holds a file's lock across the read, the change,
-  the write and the rename (never across a call to the host) and serves
+  the write and the rename (never across a call to the provider) and serves
   writers in the order they asked, so two writers never lose each other's
   change and none waits while the file is free.
 
@@ -86,7 +90,7 @@ defmodule FermixCore.Home.Provision.Ledger do
       deleted, once.
     * `done`: the old server is deleted; the new one holds the home.
     * `failed`: with `failure`, why: the new server's create stopped, or the
-      new server was deleted in Hetzner (`reason` `gone`), and the old one
+      new server was deleted at the provider (`reason` `gone`), and the old one
       still holds the home (`current` `old`); or deleting the old server
       stopped (`current` `new`), which leaves it listed for the owner to
       delete.
@@ -106,8 +110,6 @@ defmodule FermixCore.Home.Provision.Ledger do
   @file_mode 0o600
   @statuses ~w(requested creating created deleting gone)a
   @status_words Map.new(@statuses, &{Atom.to_string(&1), &1})
-  @unreadable_sentence "Fermix could not read its Hetzner file, so it shows nothing it " <>
-                         "created there; Fermix's log says why."
 
   @type status :: :requested | :creating | :created | :deleting | :gone
   @type server :: %{
@@ -175,10 +177,10 @@ defmodule FermixCore.Home.Provision.Ledger do
           replace: replace_view() | nil
         }
 
-  @doc "Where the file for `host` lives under `home`."
+  @doc "Where the file of the provider `id` lives under `home`."
   @spec path(Path.t(), String.t()) :: Path.t()
-  def path(home, host) when is_binary(home) and home != "" and is_binary(host),
-    do: Path.join([home, "device", "provision", host <> ".json"])
+  def path(home, id) when is_binary(home) and home != "" and is_binary(id),
+    do: Path.join([home, "device", "provision", id <> ".json"])
 
   @doc "A ledger with nothing in it: no token, nothing created."
   @spec empty() :: t()
@@ -196,10 +198,10 @@ defmodule FermixCore.Home.Provision.Ledger do
     }
   end
 
-  @doc "The ledger for `host`: an empty one when the file is absent."
+  @doc "The ledger of the provider `id`: an empty one when the file is absent."
   @spec read(Path.t(), String.t()) :: {:ok, t()} | {:error, term()}
-  def read(home, host) when is_binary(home) and is_binary(host) do
-    file = path(home, host)
+  def read(home, id) when is_binary(home) and is_binary(id) do
+    file = path(home, id)
 
     case File.read(file) do
       {:ok, json} -> decode(json, file)
@@ -217,34 +219,43 @@ defmodule FermixCore.Home.Provision.Ledger do
   """
   @spec update(Path.t(), String.t(), (t() -> {:ok, t()} | {:error, term()})) ::
           {:ok, t()} | {:error, term()}
-  def update(home, host, fun) when is_binary(home) and is_binary(host) and is_function(fun, 1) do
-    file = path(home, host)
+  def update(home, id, fun) when is_binary(home) and is_binary(id) and is_function(fun, 1) do
+    file = path(home, id)
 
     with :ok <- Lock.acquire(file) do
       try do
-        read_apply_write(home, host, fun)
+        read_apply_write(home, id, fun)
       after
         :ok = Lock.release(file)
       end
     end
   end
 
-  defp read_apply_write(home, host, fun) do
-    with {:ok, ledger} <- read(home, host),
+  defp read_apply_write(home, id, fun) do
+    with {:ok, ledger} <- read(home, id),
          {:ok, changed} <- fun.(ledger),
-         :ok <- write(path(home, host), changed) do
+         :ok <- write(path(home, id), changed) do
       {:ok, changed}
     end
   end
 
+  @doc """
+  Whether the ledger holds anything Fermix created or was creating (a short
+  id, a server, a firewall, an address) or a replace: what makes its
+  provider the one Always On speaks of (`Provision.current/2`).
+  """
+  @spec holding?(t()) :: boolean()
+  def holding?(%{ref: nil, server: nil, firewall: nil, primary_ips: [], replace: nil}), do: false
+  def holding?(%{} = _ledger), do: true
+
   # -- the transforms the provisioner writes through `update/3` ---------------
 
-  @doc "The token the host just accepted, with when."
+  @doc "The token the provider just accepted, with when."
   @spec connect(t(), String.t(), DateTime.t()) :: t()
   def connect(ledger, token, %DateTime{} = now) when is_binary(token) and token != "",
     do: %{ledger | token: token, token_state: :accepted, connected_at: now}
 
-  @doc "The host refused a call for the token it accepted before."
+  @doc "The provider refused a call for the token it accepted before."
   @spec token_refused(t()) :: t()
   def token_refused(%{token: token} = ledger) when is_binary(token),
     do: %{ledger | token_state: :refused}
@@ -475,19 +486,20 @@ defmodule FermixCore.Home.Provision.Ledger do
   # -- the summary --------------------------------------------------------------
 
   @doc """
-  What the summary reads for `host` (`"hetzner"` unless named): the state,
-  whether the token is accepted, the server's facts and the last failure.
-  An unreadable file is answered `unreadable` with its sentence on every
-  read, and logged once when it stops being readable and once when it reads
-  again (`Home.UnreadableFiles`, `opts`' `:unreadable_files`: that memory,
-  or nil for none), since `home.status` is polled.
+  What the summary reads of `provider`'s ledger (a module of the
+  `Home.Provision` contract): the state, whether the token is accepted, the
+  server's facts and the last failure, in the provider's words. An
+  unreadable file is answered `unreadable` with its sentence on every read,
+  and logged once when it stops being readable and once when it reads again
+  (`Home.UnreadableFiles`, `opts`' `:unreadable_files`: that memory, or nil
+  for none), since `home.status` is polled.
   """
-  @spec state(Path.t(), String.t(), keyword()) :: state_view()
-  def state(home, host \\ "hetzner", opts \\ [])
-      when is_binary(home) and is_binary(host) and is_list(opts) do
-    read = read(home, host)
+  @spec state(Path.t(), module(), keyword()) :: state_view()
+  def state(home, provider, opts \\ [])
+      when is_binary(home) and is_atom(provider) and is_list(opts) do
+    read = read(home, provider.id())
     memory = Keyword.get(opts, :unreadable_files, UnreadableFiles)
-    :ok = UnreadableFiles.log_read(path(home, host), "provision", read, memory)
+    :ok = UnreadableFiles.log_read(path(home, provider.id()), "provision", read, memory)
 
     case read do
       {:ok, ledger} ->
@@ -497,7 +509,7 @@ defmodule FermixCore.Home.Provision.Ledger do
           server: ledger.server,
           failure: ledger.failure,
           sentence: nil,
-          replace: replace_view(ledger)
+          replace: replace_view(ledger, provider)
         }
 
       {:error, _reason} ->
@@ -506,16 +518,16 @@ defmodule FermixCore.Home.Provision.Ledger do
           token: :none,
           server: nil,
           failure: nil,
-          sentence: @unreadable_sentence,
+          sentence: Provision.error_sentence(:unreadable, provider),
           replace: nil
         }
     end
   end
 
-  defp replace_view(%{replace: nil}), do: nil
+  defp replace_view(%{replace: nil}, _provider), do: nil
 
-  defp replace_view(%{replace: replace} = ledger) do
-    {state, failure} = replace_state(ledger)
+  defp replace_view(%{replace: replace} = ledger, provider) do
+    {state, failure} = replace_state(ledger, provider)
 
     %{
       state: state,
@@ -525,33 +537,33 @@ defmodule FermixCore.Home.Provision.Ledger do
     }
   end
 
-  defp replace_state(%{replace: replace} = ledger) do
+  defp replace_state(%{replace: replace} = ledger, provider) do
     cond do
       replace.failure != nil -> {:failed, replace.failure}
       replace.deleted_at != nil -> {:done, nil}
       replace.moved_at != nil -> {:deleting, nil}
       replace.move_started_at != nil -> {:moving, nil}
-      true -> before_move(ledger)
+      true -> before_move(ledger, provider)
     end
   end
 
   # Before the move the new server's own places say where the replace is.
-  defp before_move(ledger) do
+  defp before_move(ledger, provider) do
     cond do
       deleting?(ledger) -> {:cancelling, nil}
       ledger.failure != nil -> {:failed, ledger.failure}
-      match?(%{status: :gone}, ledger.server) -> {:failed, gone(ledger.server)}
+      match?(%{status: :gone}, ledger.server) -> {:failed, gone(ledger.server, provider)}
       match?(%{status: :created}, ledger.server) -> {:waiting, nil}
       true -> {:creating, nil}
     end
   end
 
-  # The new server deleted in Hetzner before the move: the replace starts
-  # again.
-  defp gone(server) do
+  # The new server deleted at the provider before the move: the replace
+  # starts again.
+  defp gone(server, provider) do
     %{
       reason: "gone",
-      sentence: Provision.error_sentence(:replacement_gone),
+      sentence: Provision.error_sentence(:replacement_gone, provider),
       next_location: nil,
       at: server.seen_at || server.created_at
     }

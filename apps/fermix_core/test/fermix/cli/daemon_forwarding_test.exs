@@ -16,6 +16,7 @@ defmodule Fermix.CLI.DaemonForwardingTest do
 
   alias Fermix.CLI.Daemon
   alias Fermix.CLI.Daemon.Client
+  alias FermixCore.Home.Provision.Hetzner
   alias FermixCore.Home.Provision.Ledger
   alias FermixTestSupport.ParentProcess
   alias FermixTestSupport.SafeRm
@@ -283,7 +284,7 @@ defmodule Fermix.CLI.DaemonForwardingTest do
       assert {:ok, %{replace: %{candidate_id: "cand-new", move_started_at: %DateTime{}}}} =
                Ledger.read(root, "hetzner")
 
-      assert %{replace: %{state: :moving}} = Ledger.state(root)
+      assert %{replace: %{state: :moving}} = Ledger.state(root, Hetzner)
     end
   end
 

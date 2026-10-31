@@ -2830,13 +2830,13 @@
       "method": "home.provision.connect",
       "field": "params:token",
       "kind": "engine_only",
-      "why": "M75 lean v1: home.provision.connect takes the Hetzner project API token the owner pastes, which the engine keeps only in this computer's device/provision/hetzner.json and never answers. The draft predates the provisioner."
+      "why": "M75 lean v1: home.provision.connect takes the API token the owner pastes for a provider's account, which the engine keeps only in this computer's device/provision/<provider>.json and never answers. The draft predates the provisioner."
     },
     {
       "method": "home.provision.create",
       "field": "params:location",
       "kind": "engine_only",
-      "why": "M75 lean v1: home.provision.create takes the location to create the server in, one of fsn1, nbg1 and hel1 as home.provision.options names them. The draft predates the provisioner."
+      "why": "M75 lean v1: home.provision.create takes the location to create the server in, one of the provider's as home.provision.options names them. The draft predates the provisioner."
     },
     {
       "method": "home.provision.create",
@@ -2848,7 +2848,43 @@
       "method": "home.provision.create",
       "field": "params:type",
       "kind": "engine_only",
-      "why": "M75 lean v1: home.provision.create takes the Hetzner server type, as home.provision.options names it. The draft predates the provisioner."
+      "why": "M75 lean v1: home.provision.create takes the provider's server type, as home.provision.options names it. The draft predates the provisioner."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:home.provision.providers",
+      "kind": "engine_only",
+      "why": "M75 lean v1: every cloud provider the Always On server can be created on is a module behind one contract, and home.provision.providers answers each one's display data (id, name, token label, How to get one steps, console, docs section), so the apps draw the token and choose screens from it and need no change for a new provider. The draft predates the provisioner; a client built against it never calls the method."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:home.provision.providers=2",
+      "kind": "engine_only",
+      "why": "M75 lean v1: every home.provision.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the provisioner, so its table has no entry for it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.home.provision.providers",
+      "kind": "engine_only",
+      "why": "M75 lean v1: hello publishes every method this daemon serves with its minimum version, the provisioner included. The draft predates it; a client ignores a method it does not know."
+    },
+    {
+      "method": "home.provision.connect",
+      "field": "params:provider",
+      "kind": "engine_only",
+      "why": "M75 lean v1: home.provision.connect names the provider the token is for, one home.provision.providers lists, since each provider keeps its own token and ledger. The draft predates the provisioner."
+    },
+    {
+      "method": "home.provision.create",
+      "field": "params:provider",
+      "kind": "engine_only",
+      "why": "M75 lean v1: home.provision.create names the provider to create the server on, one home.provision.providers lists. The draft predates the provisioner."
+    },
+    {
+      "method": "home.provision.options",
+      "field": "params:provider",
+      "kind": "engine_only",
+      "why": "M75 lean v1: home.provision.options names the provider whose offers it reads live, one home.provision.providers lists. The draft predates the provisioner."
     },
     {
       "method": "home.provision.power",

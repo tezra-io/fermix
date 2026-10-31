@@ -1,10 +1,14 @@
 defmodule FermixCore.Home.Provision.Hetzner do
   @moduledoc """
-  The Hetzner Cloud host (M75 lean v1 §3, §4.3, L1, L2): Req over
+  The Hetzner Cloud provider (M75 lean v1 §3, §4.3, L1, L2), a module of the
+  `FermixCore.Home.Provision` contract: Req over
   `https://api.hetzner.cloud/v1` with the project token the owner pasted, kept
   in `Provision.Ledger`'s `device/provision/hetzner.json`. Every request goes
   through `Net.HttpClient` (the shared pool and the egress proxy), with no
-  automatic retry and no redirect.
+  automatic retry and no redirect. Everything of Hetzner's lives here: its
+  endpoints, its label rules, how it writes prices, its error codes, its
+  locations and their cities, its system image, its user data limit (32 KiB)
+  and the root password it answers a create with.
 
   **Options (L2).** `GET /server_types` (shape, per-location stock in
   `locations[].available`, and prices), `GET /pricing` (the currency and the
@@ -49,13 +53,24 @@ defmodule FermixCore.Home.Provision.Hetzner do
   the server's root password. The answer is read for its ids and dropped:
   nothing of it reaches the ledger, a log, a trace or a status.
 
-  **Errors.** `401` is `:unauthorized`; `403 forbidden` on a write a
-  read-only token (`:forbidden`); `403 resource_limit_exceeded` the
-  account's limit; `412 resource_unavailable` no capacity, with the next
-  location in stock; `429` rate limited, with Hetzner's `RateLimit-Reset`
-  (a poll waits 10 s and goes on, still counted against its bound); every
-  other refusal carries Hetzner's own code and message. The log names each
+  **Errors.** Inside, a refusal keeps Hetzner's status and code, which
+  decide whether a write is known to have failed. Every callback answers it
+  as one of the contract's shared kinds (`error/1`): `401` is
+  `:unauthorized`; `403 forbidden` on a write a read-only token
+  (`:read_only_token`); `403 resource_limit_exceeded` the account's limit;
+  `412 resource_unavailable` on a create no capacity, with the next location
+  in stock (`{:unavailable, _}`); `429` rate limited, with Hetzner's
+  `RateLimit-Reset` (a poll waits 10 s and goes on, still counted against its
+  bound); no answer `{:unreachable, _}`; a 404 on a token check of what the
+  ledger holds another project's token; and every other refusal Hetzner's
+  own message in a plain sentence (`{:other, sentence}`). The log names each
   refusal's status and code; the sentence it becomes says only the message.
+
+  **Labels.** Every resource carries `fermix=always-on`,
+  `fermix-profile=<profile>` and `fermix-ref=<ref>`, the profile as
+  `Provision.name_part/1` makes it (Hetzner takes at most 63 characters of
+  letters, digits, `-`, `_` and `.` in a label value), so a lost create is
+  found again by a label selector.
   """
 
   @behaviour FermixCore.Home.Provision
@@ -67,9 +82,12 @@ defmodule FermixCore.Home.Provision.Hetzner do
 
   require Logger
 
-  @host "hetzner"
+  @id "hetzner"
   @base_url "https://api.hetzner.cloud/v1"
   @locations ~w(fsn1 nbg1 hel1)
+  @cities %{"fsn1" => "Falkenstein", "nbg1" => "Nuremberg", "hel1" => "Helsinki"}
+  @image "debian-13"
+  @max_user_data 32_768
   @min_memory_gb 4
   @poll_ms 2_000
   @max_polls 150
@@ -80,16 +98,47 @@ defmodule FermixCore.Home.Provision.Hetzner do
   @max_vendor_bytes 300
 
   @impl true
-  def host, do: @host
+  def id, do: @id
 
-  @doc "The three locations Fermix offers, in the order it recommends them."
-  @spec locations() :: [String.t()]
-  def locations, do: @locations
+  @impl true
+  def display do
+    %{
+      name: "Hetzner",
+      token_label: "Hetzner API token",
+      write_token: "a Read & Write API token",
+      account: "project",
+      steps: [
+        "Sign in to Hetzner's console and turn on two-factor sign-in for your account.",
+        "Make a new project for Fermix alone, so the token reaches nothing else.",
+        "In that project, open Security, then API Tokens, and generate a token with Read & " <>
+          "Write permission.",
+        "Paste the token here: Fermix checks it at once."
+      ],
+      console_url: "https://console.hetzner.cloud/",
+      docs_anchor: "hetzner",
+      locations: Enum.map(@locations, &%{id: &1, city: Map.fetch!(@cities, &1)}),
+      # Its name, the permission and the two places in its console the steps
+      # name as it labels them, its cities, and the system its servers run.
+      proper_nouns:
+        ["Hetzner", "Read & Write", "API Tokens", "Security", "Debian"] ++ Map.values(@cities)
+    }
+  end
+
+  # Hetzner's console names a type in capitals ("CPX22").
+  @impl true
+  def type_name(type) when is_binary(type), do: String.upcase(type)
+
+  @doc "The most bytes of user data Hetzner takes."
+  @spec max_user_data() :: pos_integer()
+  def max_user_data, do: @max_user_data
 
   # -- the token ----------------------------------------------------------------
 
   @impl true
-  def check_token(token, opts) when is_binary(token) and is_list(opts) do
+  def check_token(token, opts) when is_binary(token) and is_list(opts),
+    do: token |> project(opts) |> shared()
+
+  defp project(token, opts) do
     with {:ok, %{"servers" => servers}} <-
            get(token, "/servers", opts, label_selector: "!fermix", per_page: 1),
          {:ok, _pricing} <- get(token, "/pricing", opts) do
@@ -103,7 +152,7 @@ defmodule FermixCore.Home.Provision.Hetzner do
   def reaches(token, ledger, opts) when is_binary(token) and is_map(ledger) do
     case standing(ledger) || standing(Ledger.replaced_set(ledger)) do
       nil -> :ok
-      path -> reached(get(token, path, opts))
+      path -> token |> get(path, opts) |> reached() |> shared()
     end
   end
 
@@ -122,7 +171,10 @@ defmodule FermixCore.Home.Provision.Hetzner do
   # -- options ------------------------------------------------------------------
 
   @impl true
-  def options(token, opts) when is_binary(token) and is_list(opts) do
+  def options(token, opts) when is_binary(token) and is_list(opts),
+    do: token |> offered(opts) |> shared()
+
+  defp offered(token, opts) do
     with {:ok, types} <- server_types(token, opts),
          {:ok, %{"pricing" => pricing}} <- get(token, "/pricing", opts),
          {:ok, %{"locations" => locations}} <- get(token, "/locations", opts) do
@@ -273,8 +325,11 @@ defmodule FermixCore.Home.Provision.Hetzner do
   # -- create -------------------------------------------------------------------
 
   @impl true
-  def create(home, %{type: type, location: location, profile: profile}, opts)
-      when is_binary(home) and is_binary(type) and location in @locations and is_binary(profile) do
+  def create(home, %{type: type, location: location, profile: profile} = request, opts)
+      when is_binary(home) and is_binary(type) and location in @locations and is_binary(profile),
+      do: home |> created_server(request, opts) |> shared()
+
+  defp created_server(home, %{type: type, location: location, profile: profile}, opts) do
     report(opts, "checking")
 
     with {:ok, ledger} <- read(home),
@@ -386,7 +441,7 @@ defmodule FermixCore.Home.Provision.Hetzner do
 
     body = %{
       name: plan.name,
-      labels: Provision.labels(plan.profile, plan.ref),
+      labels: labels(plan.profile, plan.ref),
       rules: [],
       apply_to: []
     }
@@ -403,7 +458,7 @@ defmodule FermixCore.Home.Provision.Hetzner do
   end
 
   defp image(token, opts) do
-    case get(token, "/images", opts, type: "system", name: "debian-13", architecture: "x86") do
+    case get(token, "/images", opts, type: "system", name: @image, architecture: "x86") do
       {:ok, %{"images" => [%{"id" => id} | _rest]}} -> {:ok, id}
       {:ok, _none} -> {:error, :no_image}
       {:error, _reason} = error -> error
@@ -412,7 +467,7 @@ defmodule FermixCore.Home.Provision.Hetzner do
 
   defp user_data(opts) do
     with {:ok, code} <- open_code(opts) do
-      case FirstBoot.user_data(code) do
+      case FirstBoot.user_data(code, @max_user_data) do
         {:ok, user_data} -> {:ok, user_data}
         {:error, :too_large} -> withdrawn(opts, :user_data_too_large)
         {:error, :invalid_code} -> withdrawn(opts, :invalid_code)
@@ -469,7 +524,7 @@ defmodule FermixCore.Home.Provision.Hetzner do
       start_after_create: true,
       firewalls: [%{firewall: parts.firewall}],
       public_net: %{enable_ipv4: true, enable_ipv6: true},
-      labels: Provision.labels(plan.profile, plan.ref),
+      labels: labels(plan.profile, plan.ref),
       user_data: parts.user_data
     }
   end
@@ -527,7 +582,10 @@ defmodule FermixCore.Home.Provision.Hetzner do
   # -- power ----------------------------------------------------------------------
 
   @impl true
-  def power(home, action, opts) when is_binary(home) and action in [:on, :reset] do
+  def power(home, action, opts) when is_binary(home) and action in [:on, :reset],
+    do: home |> powered(action, opts) |> shared()
+
+  defp powered(home, action, opts) do
     report(opts, "power")
 
     with {:ok, ledger} <- read(home),
@@ -555,7 +613,10 @@ defmodule FermixCore.Home.Provision.Hetzner do
   # -- reconcile ------------------------------------------------------------------
 
   @impl true
-  def reconcile(home, opts) when is_binary(home) and is_list(opts) do
+  def reconcile(home, opts) when is_binary(home) and is_list(opts),
+    do: home |> read_back(opts) |> shared()
+
+  defp read_back(home, opts) do
     with {:ok, ledger} <- read(home),
          {:ok, token} <- token(ledger) do
       if Keyword.get(opts, :running?, false),
@@ -684,7 +745,7 @@ defmodule FermixCore.Home.Provision.Hetzner do
       current.failure ||
         %{
           reason: "interrupted",
-          sentence: Provision.error_sentence(:interrupted),
+          sentence: Provision.error_sentence(:interrupted, __MODULE__),
           next_location: nil,
           at: now(opts)
         }
@@ -709,7 +770,10 @@ defmodule FermixCore.Home.Provision.Hetzner do
   # -- delete ---------------------------------------------------------------------
 
   @impl true
-  def delete(home, opts) when is_binary(home) and is_list(opts) do
+  def delete(home, opts) when is_binary(home) and is_list(opts),
+    do: home |> deleted(opts) |> shared()
+
+  defp deleted(home, opts) do
     with {:ok, ledger} <- read(home),
          {:ok, token} <- token(ledger),
          :ok <- something(ledger),
@@ -735,7 +799,10 @@ defmodule FermixCore.Home.Provision.Hetzner do
   defp not_moved_to(_ledger), do: :ok
 
   @impl true
-  def delete_replaced(home, opts) when is_binary(home) and is_list(opts) do
+  def delete_replaced(home, opts) when is_binary(home) and is_list(opts),
+    do: home |> replaced_deleted(opts) |> shared()
+
+  defp replaced_deleted(home, opts) do
     with {:ok, ledger} <- read(home),
          {:ok, token} <- token(ledger),
          {:ok, old} <- Ledger.retired(ledger) do
@@ -945,7 +1012,7 @@ defmodule FermixCore.Home.Provision.Hetzner do
        do: {:ok, body}
 
   # The status and Hetzner's code go to the log: the sentence a refusal
-  # becomes carries neither (`Provision.error_sentence/1`).
+  # becomes carries neither (`error/1`).
   defp answer({:ok, %Req.Response{status: status} = response}, method, path) do
     code = vendor(response.body, "code") || "no code"
     Logger.warning("provision: Hetzner answered #{method} #{path} with #{status} (#{code})")
@@ -1027,17 +1094,89 @@ defmodule FermixCore.Home.Provision.Hetzner do
     |> String.trim()
   end
 
+  # The labels every resource of `ref` carries.
+  defp labels(profile, ref),
+    do: %{
+      "fermix" => "always-on",
+      "fermix-profile" => Provision.name_part(profile),
+      "fermix-ref" => ref
+    }
+
+  # -- the shared kinds -----------------------------------------------------------
+
+  defp shared({:error, reason}), do: {:error, error(reason)}
+  defp shared(answer), do: answer
+
+  @doc """
+  One of Hetzner's own refusals as the contract's shared kind
+  (`Provision.provider_error/0`), which every callback answers: a read-only
+  token's `forbidden` is `:read_only_token`, and every refusal the contract
+  has no kind for is Hetzner's own message in a plain sentence
+  (`{:other, sentence}`). A shared kind, and a reason of the engine's own,
+  is answered as it is.
+  """
+  @spec error(term()) :: Provision.reason()
+  def error(:forbidden), do: :read_only_token
+
+  def error({:refused, _status, _code, message}),
+    do: {:other, "Hetzner refused the request: #{vendor(message)}"}
+
+  def error({:action_failed, command, message}),
+    do: {:other, "Hetzner could not finish #{doing(command)}: #{vendor(message)}"}
+
+  def error({:action_timeout, command}),
+    do:
+      {:other,
+       "Hetzner had not finished #{doing(command)} after five minutes; Always On checks " <>
+         "again when it opens."}
+
+  def error({:ineligible_type, type}),
+    do:
+      {:other,
+       "Fermix creates only a server type Hetzner still sells with at least 4 GB on x86, " <>
+         "and #{type} is not one."}
+
+  def error(:no_image),
+    do: {:other, "Hetzner offers no Debian 13 image right now, so Fermix created no server."}
+
+  def error(:too_many_types),
+    do:
+      {:other, "Hetzner listed more server types than Fermix reads, so it offers none right now."}
+
+  def error(:resource_unavailable),
+    do: {:other, "Hetzner has no room for that right now, so try again in a few minutes."}
+
+  def error(reason) when reason in [:not_found, :resource_in_use],
+    do: {:other, "Hetzner no longer has what Fermix created there, so open Always On again."}
+
+  def error(reason), do: reason
+
+  defp doing("create_server"), do: "creating your server"
+  defp doing("start_server"), do: "starting your server"
+  defp doing("delete_server"), do: "deleting your server"
+  defp doing("poweron_server"), do: "turning your server on"
+  defp doing("reset_server"), do: "restarting your server"
+  defp doing(_command), do: "what Fermix asked of it"
+
+  # Hetzner's own message, as plain words the summary can print: a backtick
+  # in it reads as a quote. Its code and HTTP status are in the log, never in
+  # the sentence.
+  defp vendor(message) do
+    plain = String.replace(message, "`", "'")
+    if String.ends_with?(plain, [".", "?", "!"]), do: plain, else: plain <> "."
+  end
+
   # -- the ledger -----------------------------------------------------------------
 
   defp read(home) do
-    case Ledger.read(home, @host) do
+    case Ledger.read(home, @id) do
       {:ok, ledger} -> {:ok, ledger}
       {:error, reason} -> {:error, {:ledger, reason}}
     end
   end
 
   defp update(home, fun) do
-    case Ledger.update(home, @host, fun) do
+    case Ledger.update(home, @id, fun) do
       {:ok, ledger} -> {:ok, ledger}
       {:error, reason} -> {:error, {:ledger, reason}}
     end

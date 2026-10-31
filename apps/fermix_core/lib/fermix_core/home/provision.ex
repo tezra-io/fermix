@@ -1,67 +1,121 @@
 defmodule FermixCore.Home.Provision do
   @moduledoc """
-  A host Fermix creates an Always On server on (M75 lean v1 §4.3, L1, L2):
-  one behaviour in the engine, so both apps and the CLI share one
-  implementation over management (`FermixCore.Management.Provision`,
-  `home.provision.*`). `Provision.Hetzner` is the one host in v1.
+  The contract every cloud provider Always On creates a server on implements
+  (M75 lean v1 §4.3, L1, L2): one behaviour in the engine, so both apps and
+  the CLI share one implementation over management
+  (`FermixCore.Management.Provision`, `home.provision.*`). This is where a new
+  provider plugs in: a module implementing the callbacks below, listed in
+  `Provision.Registry` (one provider today).
 
-  A host keeps its token and what it created in one ledger file
-  (`Provision.Ledger`, `device/provision/<host>.json`), written before each
-  call that creates or deletes and updated after it. A host's callbacks:
+  Everything provider-specific lives in the provider's module: its API, its
+  label and naming rules, how it reads prices, its error codes, its
+  locations, its system image and what it answers that must never be kept.
+  The shared code (this module's own functions, `Provision.Ledger`,
+  `Provision.FirstBoot`, the job, the summary, `Management.Copy` and the
+  management family) reaches a provider only through the callbacks and its
+  display data, and names none.
 
-    * `check_token/2`: reads the project, so a token the host refuses is
-      named at once; answers whether the project holds servers Fermix did not
-      create (Details says "Fermix only touches what it creates").
-    * `reaches/3`: whether a new token is of the project the ledger's server
-      (or firewall) is in, so a token for another project never replaces the
+  A provider keeps its token and what it created in one ledger file of its
+  own (`Provision.Ledger`, `device/provision/<id>.json`), written before each
+  call that creates or deletes and updated after it. The callbacks:
+
+    * `id/0`: the provider's id, its ledger's file name and what the wire
+      calls it (lower case, as `"examplecloud"`).
+    * `display/0`: what the apps draw and the shared sentences say of it
+      (`t:display/0`): its name, the token field's label, the "How to get
+      one" steps (two-factor sign-in first and an account for Fermix alone,
+      L20), its console and docs section, its locations and the proper nouns
+      its words use.
+    * `type_name/1`: a server type as its console names it.
+    * `check_token/2`: reads the account, so a token the provider refuses is
+      named at once; answers whether the account holds servers Fermix did
+      not create (Details says "Fermix only touches what it creates").
+    * `reaches/3`: whether a new token is of the account the ledger's server
+      (or firewall) is in, so a token for another account never replaces the
       one that reaches what Fermix created.
-    * `options/2`: the orderable types per location with their monthly prices
-      as the account is billed, and the L2 recommendation, read live.
-    * `create/3`: the firewall with no inbound rule first (a read-only token
-      fails there, before anything costs money), then the server with the
-      first boot (`Provision.FirstBoot`) and a fresh 24-hour enrollment code
-      inside, each write's action polled with a bound.
+    * `options/2`: the orderable types per location with their monthly
+      prices as the account is billed (VAT included), and the L2
+      recommendation, read live.
+    * `create/3`: what the server needs before it (a firewall with no inbound
+      rule first, where a read-only token fails before anything costs money),
+      then the server with the first boot (`Provision.FirstBoot`) and a fresh
+      24-hour enrollment code as its user data, each write's action polled
+      with a bound.
     * `power/3`: turns the server on, or restarts it.
-    * `reconcile/2`: reads what the ledger names from the host: a resource
-      deleted outside Fermix is marked gone, a server's power is recorded, and
+    * `reconcile/2`: reads what the ledger names from the provider: a
+      resource deleted outside Fermix is marked gone, a server's power is
+      recorded (`"running"`, `"off"`, or another word of the provider's), and
       a create whose answer was lost is found again by its labels.
-    * `delete/2`: the server, then its primary addresses unless they went with
-      it, then the firewall.
+    * `delete/2`: the server, then its addresses unless they went with it,
+      then the firewall.
     * `delete_replaced/2`: the same, in the same order, for the server a
       replace retired (`Ledger.retired/1`), never one that still holds the
       home; the ledger then keeps that the replace is done.
 
-  Every refusal is a reason `error_sentence/1` turns into one sentence in
-  the daemon's words, and `failure_word/1` into the word the ledger keeps.
+  A provider answers its own refusals as one of a small closed set of shared
+  kinds (`t:provider_error/0`), so the shared code words them alike for every
+  provider: the token refused (`:unauthorized`, which is "does not accept"
+  when pasted and "no longer accepts" after), a read-only token, the
+  account's limit, no capacity where asked (with the next location in
+  stock), the rate limit, no answer, another account's token, or any other
+  refusal as the provider's own plain sentence (`{:other, sentence}`). The
+  rest of `t:reason/0` is the engine's own. Every reason is one sentence
+  (`error_sentence/2`, in the provider's words where it names it) and one
+  word the ledger keeps (`failure_word/1`).
 
   Names and labels (`server_name/2`, `labels/2`): a server is named
   `fermix-<profile>-<ref>`, `ref` four hex digits from the ledger, so a new
   server never collides with one it replaces, and every resource carries
   `fermix=always-on`, `fermix-profile=<profile>` and `fermix-ref=<ref>`, the
-  profile sanitised to the host's label rules.
+  profile sanitised to label rules strict enough for every provider (lower
+  case, digits and hyphens).
+
+  A provider served by an external plugin (not built) would be a module of
+  this contract inside the engine that forwards each callback to the plugin.
+  The engine keeps what it keeps for every provider: the token's custody
+  (read from the ledger and passed with each call, never stored by the
+  plugin), the owner's decisions over connect, create, power and delete
+  (`Fermix.CLI.Daemon`), the enrollment code's window, and the ledger, whose
+  write-ahead steps would move out of the provider module into a shared
+  driver first, so that the plugin answers single steps (create the
+  firewall, create the server, read one resource, delete one) with the
+  shared error kinds.
   """
 
   alias FermixCore.Home.Provision.Ledger
 
-  @type reason ::
+  @typedoc """
+  A provider's own refusal, as the shared code words it: the closed set every
+  provider maps its errors to.
+  """
+  @type provider_error ::
           :unauthorized
-          | :token_invalid
-          | :token_refused
-          | :forbidden
+          | :read_only_token
           | :account_limit
-          | :not_found
-          | :resource_in_use
-          | {:unavailable, map()}
-          | {:ineligible_type, String.t()}
+          | {:unavailable, capacity()}
           | {:rate_limited, integer() | nil}
           | {:unreachable, String.t()}
-          | {:refused, pos_integer(), String.t(), String.t()}
-          | {:action_failed, String.t(), String.t()}
-          | {:action_timeout, String.t()}
+          | :other_project
+          | {:other, String.t()}
+
+  @typedoc """
+  No capacity where asked: the type (`description` as the provider names it)
+  and the location (`city`), and the next location in stock (`next`,
+  `next_city`), or nil.
+  """
+  @type capacity :: %{
+          required(:description) => String.t(),
+          required(:city) => String.t(),
+          required(:next_city) => String.t() | nil,
+          optional(atom()) => term()
+        }
+
+  @type reason ::
+          provider_error()
+          | :token_invalid
+          | :token_refused
           | {:code_unavailable, String.t()}
           | :user_data_too_large
-          | :no_image
-          | :too_many_types
           | :invalid_code
           | :interrupted
           | :no_token
@@ -69,7 +123,6 @@ defmodule FermixCore.Home.Provision do
           | :server_exists
           | :nothing_to_delete
           | :not_primary
-          | :other_project
           | :live_home
           | :move_under_way
           | :replace_only
@@ -81,10 +134,42 @@ defmodule FermixCore.Home.Provision do
           | :no_link
           | :code_unreachable
           | :withdraw_unreachable
+          | :unreadable
           | {:code_refused, String.t()}
           | {:withdraw_refused, String.t()}
           | {:old_server, reason()}
           | {:ledger, term()}
+
+  @typedoc """
+  A provider's display data:
+
+    * `name`: how every sentence names it ("ExampleCloud");
+    * `token_label`: the token field's label, read after "a" in a sentence
+      ("ExampleCloud API token");
+    * `write_token`: the token Fermix needs, with its article ("a token
+      that may create servers");
+    * `account`: what a token belongs to, as the provider calls it
+      ("project", "workspace");
+    * `steps`: "How to get one", two-factor sign-in first and an account for
+      Fermix alone (L20);
+    * `console_url`: the provider's console, which Open <name> opens;
+    * `docs_anchor`: its section of the Always On docs page;
+    * `locations`: where Fermix creates a server, `{id, city}`, in the order
+      it recommends them;
+    * `proper_nouns`: the names its words use, which the copy rules accept
+      (`Management.Copy`).
+  """
+  @type display :: %{
+          name: String.t(),
+          token_label: String.t(),
+          write_token: String.t(),
+          account: String.t(),
+          steps: [String.t(), ...],
+          console_url: String.t(),
+          docs_anchor: String.t(),
+          locations: [%{id: String.t(), city: String.t()}, ...],
+          proper_nouns: [String.t(), ...]
+        }
 
   @typedoc """
   What a create asks for: the type and location (`options/2` names them) and
@@ -101,12 +186,14 @@ defmodule FermixCore.Home.Provision do
   """
   @type opts :: keyword()
 
-  @callback host() :: String.t()
+  @callback id() :: String.t()
+  @callback display() :: display()
+  @callback type_name(String.t()) :: String.t()
   @doc """
   Whether `token` reaches what the ledger holds: one read, by id, of its
   server (or else its firewall) that is not gone; `{:error,
-  :other_project}` when the host says it has no such thing for this token.
-  Nothing standing is reached by any token.
+  :other_project}` when the provider says it has no such thing for this
+  token. Nothing standing is reached by any token.
   """
   @callback reaches(String.t(), Ledger.t(), opts()) :: :ok | {:error, reason()}
   @callback check_token(String.t(), opts()) ::
@@ -118,12 +205,77 @@ defmodule FermixCore.Home.Provision do
   @callback delete(Path.t(), opts()) :: :ok | {:error, reason()}
   @callback delete_replaced(Path.t(), opts()) :: :ok | {:error, reason()}
 
+  @doc "The provider of `providers` (the registry's list) whose id is `id`."
+  @spec provider([module(), ...], term()) :: {:ok, module()} | :error
+  def provider([_ | _] = providers, id) do
+    case Enum.find(providers, &(&1.id() == id)) do
+      nil -> :error
+      provider -> {:ok, provider}
+    end
+  end
+
+  @doc """
+  The provider Always On speaks of under `home`, of `providers` (the
+  registry's list, in the order it offers them): the one whose ledger holds
+  what Fermix created, or cannot be read (it may hold a server); else the one
+  whose token was given last; else the first offered. Fermix creates on one
+  provider at a time (`Management.Provision` refuses a create while another
+  holds a server), so at most one holds anything.
+  """
+  @spec current(Path.t(), [module(), ...]) :: module()
+  def current(home, [first | _] = providers) when is_binary(home) do
+    readings = Enum.map(providers, &{&1, Ledger.read(home, &1.id())})
+    holding(readings) || latest_token(readings) || first
+  end
+
+  defp holding(readings) do
+    Enum.find_value(readings, fn
+      {provider, {:error, _reason}} -> provider
+      {provider, {:ok, ledger}} -> if Ledger.holding?(ledger), do: provider
+    end)
+  end
+
+  defp latest_token(readings) do
+    connected =
+      for {provider, {:ok, %{token: token, connected_at: %DateTime{} = at}}} <- readings,
+          is_binary(token),
+          do: {provider, at}
+
+    case connected do
+      [] -> nil
+      _some -> connected |> Enum.max_by(&elem(&1, 1), DateTime) |> elem(0)
+    end
+  end
+
+  @doc "The city of `location`, one of the provider's own (`display/0`'s `locations`)."
+  @spec city(module(), String.t()) :: String.t()
+  def city(provider, location) when is_binary(location) do
+    %{city: city} = Enum.find(provider.display().locations, &(&1.id == location))
+    city
+  end
+
+  @doc "The ids of the locations the provider creates a server in, in its order."
+  @spec location_ids(module()) :: [String.t()]
+  def location_ids(provider), do: Enum.map(provider.display().locations, & &1.id)
+
+  @doc """
+  The provider's cities as a sentence lists them: "Oslo", "Oslo or Lisbon",
+  "Falkenstein, Nuremberg or Helsinki".
+  """
+  @spec cities(module()) :: String.t()
+  def cities(provider) do
+    case Enum.map(provider.display().locations, & &1.city) do
+      [city] -> city
+      cities -> Enum.join(Enum.drop(cities, -1), ", ") <> " or " <> List.last(cities)
+    end
+  end
+
   @max_profile_label 40
 
   @doc "The server's name for `profile` and the ledger's `ref`."
   @spec server_name(String.t(), String.t()) :: String.t()
   def server_name(profile, ref) when is_binary(profile) and is_binary(ref),
-    do: "fermix-#{label_value(profile)}-#{ref}"
+    do: "fermix-#{name_part(profile)}-#{ref}"
 
   @doc """
   A server's short id from two random bytes: four hex digits, never `avoid`
@@ -140,19 +292,15 @@ defmodule FermixCore.Home.Provision do
   defp hex4(value),
     do: value |> Integer.to_string(16) |> String.downcase() |> String.pad_leading(4, "0")
 
-  @doc "The labels every resource of `ref` carries."
-  @spec labels(String.t(), String.t()) :: %{String.t() => String.t()}
-  def labels(profile, ref) when is_binary(profile) and is_binary(ref),
-    do: %{"fermix" => "always-on", "fermix-profile" => label_value(profile), "fermix-ref" => ref}
-
   @doc """
-  `profile` as a label value and a host name part: lower-case letters and
-  digits, runs of anything else one hyphen, at most #{@max_profile_label}
-  characters, never starting or ending with a hyphen. A profile with nothing
-  left is named by its digest (`p` and eight hex digits).
+  `profile` as a part of a server's name: lower-case letters and digits,
+  runs of anything else one hyphen, at most #{@max_profile_label} characters,
+  never starting or ending with a hyphen, so it is also a label or tag value
+  every provider takes. A profile with nothing left is named by its digest
+  (`p` and eight hex digits).
   """
-  @spec label_value(String.t()) :: String.t()
-  def label_value(profile) when is_binary(profile) do
+  @spec name_part(String.t()) :: String.t()
+  def name_part(profile) when is_binary(profile) do
     profile
     |> String.downcase()
     |> String.replace(~r/[^a-z0-9]+/, "-")
@@ -173,165 +321,135 @@ defmodule FermixCore.Home.Provision do
   @spec failure_word(reason()) :: String.t()
   def failure_word({:old_server, reason}), do: failure_word(reason)
   def failure_word({kind, _detail}) when is_atom(kind), do: Atom.to_string(kind)
-  def failure_word({:refused, _status, _code, _message}), do: "refused"
-  def failure_word({:action_failed, _command, _message}), do: "action_failed"
-  def failure_word(:forbidden), do: "read_only_token"
   def failure_word(reason) when is_atom(reason), do: Atom.to_string(reason)
 
   @doc """
-  One sentence for `reason`, in the daemon's words (and the host's own where
-  it has some): plain words, with no code or HTTP status, since the summary
-  prints a create's failure as it is.
+  One sentence for `reason`, in the daemon's words and `provider`'s where it
+  names it (`display/0`), or the provider's own (`{:other, sentence}`):
+  plain words, with no code or HTTP status, since the summary prints a
+  create's failure as it is.
   """
-  @spec error_sentence(reason()) :: String.t()
-  def error_sentence(:token_invalid),
+  @spec error_sentence(reason(), module()) :: String.t()
+  def error_sentence(reason, provider) when is_atom(provider),
+    do: sentence(reason, provider.display())
+
+  defp sentence(:token_invalid, words),
     do:
-      "Hetzner does not accept this token, so paste a Read & Write API token from the " <>
-        "Hetzner project you made for Fermix."
+      "#{words.name} does not accept this token, so paste #{words.write_token} from the " <>
+        "#{words.name} #{words.account} you made for Fermix."
 
-  def error_sentence(reason) when reason in [:unauthorized, :token_refused],
-    do: "Hetzner no longer accepts Fermix's token."
+  defp sentence(reason, words) when reason in [:unauthorized, :token_refused],
+    do: "#{words.name} no longer accepts Fermix's token."
 
-  def error_sentence(:forbidden),
+  defp sentence(:read_only_token, words),
     do:
-      "This token can only read, so Fermix created nothing; paste a Read & Write API token " <>
-        "from your Hetzner project."
+      "This token can only read, so Fermix created nothing; paste #{words.write_token} " <>
+        "from your #{words.name} #{words.account}."
 
-  def error_sentence(:account_limit), do: "Hetzner limits new servers on this account."
+  defp sentence(:account_limit, words), do: "#{words.name} limits new servers on this account."
 
-  def error_sentence({:unavailable, %{city: city, description: type, next_city: nil}}),
+  defp sentence({:unavailable, %{city: city, description: type, next_city: nil}}, _words),
     do: "No location Fermix offers has a #{type} right now, #{city} included."
 
-  def error_sentence({:unavailable, %{city: city, description: type}}),
+  defp sentence({:unavailable, %{city: city, description: type}}, _words),
     do: "#{city} has no #{type} right now."
 
-  def error_sentence({:ineligible_type, type}),
+  defp sentence({:rate_limited, _reset}, words),
+    do: "#{words.name} is limiting how often Fermix may ask, so try again in a few minutes."
+
+  defp sentence({:unreachable, _reason}, words),
     do:
-      "Fermix creates only a server type Hetzner still sells with at least 4 GB on x86, " <>
-        "and #{type} is not one."
+      "Fermix could not reach #{words.name}, so check this computer's connection and try " <>
+        "again."
 
-  def error_sentence({:rate_limited, _reset}),
-    do: "Hetzner is limiting how often Fermix may ask, so try again in a few minutes."
-
-  def error_sentence({:unreachable, _reason}),
-    do: "Fermix could not reach Hetzner, so check this computer's connection and try again."
-
-  def error_sentence({:refused, _status, _code, message}),
-    do: "Hetzner refused the request: #{vendor(message)}"
-
-  def error_sentence({:action_failed, command, message}),
-    do: "Hetzner could not finish #{doing(command)}: #{vendor(message)}"
-
-  def error_sentence({:action_timeout, command}),
+  defp sentence(:other_project, words),
     do:
-      "Hetzner had not finished #{doing(command)} after five minutes; Always On checks " <>
-        "again when it opens."
+      "This token is for another #{words.name} #{words.account} than the server Fermix " <>
+        "created, so paste a token from that #{words.account}."
 
-  def error_sentence({:code_unavailable, sentence}), do: sentence
+  defp sentence({:other, sentence}, _words) when is_binary(sentence), do: sentence
+  defp sentence({:code_unavailable, sentence}, _words), do: sentence
 
-  def error_sentence(:no_image),
-    do: "Hetzner offers no Debian 13 image right now, so Fermix created no server."
+  defp sentence(:user_data_too_large, words),
+    do: "The setup Fermix puts on a new server is larger than #{words.name} takes."
 
-  def error_sentence(:too_many_types),
-    do: "Hetzner listed more server types than Fermix reads, so it offers none right now."
-
-  def error_sentence(:user_data_too_large),
-    do: "The setup Fermix puts on a new server is larger than Hetzner takes."
-
-  def error_sentence(:invalid_code),
+  defp sentence(:invalid_code, _words),
     do: "Fermix made an enrollment code it could not put on the server, so start again."
 
-  def error_sentence(:interrupted),
+  defp sentence(:interrupted, _words),
     do: "Fermix stopped before your server was created, so start again."
 
-  def error_sentence(:no_token), do: "Paste a Hetzner API token first."
+  defp sentence(:no_token, words), do: "Paste a #{words.token_label} first."
 
-  def error_sentence(:no_server),
-    do: "Fermix has no server on Hetzner to turn on or restart."
+  defp sentence(:no_server, words),
+    do: "Fermix has no server on #{words.name} to turn on or restart."
 
-  def error_sentence(:server_exists),
+  defp sentence(:server_exists, _words),
     do: "Your server already exists, so delete it before creating another."
 
-  def error_sentence(:nothing_to_delete), do: "Fermix created nothing on Hetzner to delete."
+  defp sentence(:nothing_to_delete, words),
+    do: "Fermix created nothing on #{words.name} to delete."
 
-  def error_sentence(:not_primary),
+  defp sentence(:not_primary, _words),
     do:
       "Fermix runs on your server now, so it creates no other one from here; to replace " <>
         "that server, get a code in Always On and use it on a Linux server of your own."
 
-  def error_sentence(:other_project),
-    do:
-      "This token is for another Hetzner project than the server Fermix created, so paste " <>
-        "a token from that project."
-
-  def error_sentence(:live_home),
+  defp sentence(:live_home, _words),
     do:
       "Your server runs Fermix now, so Fermix does not delete it; replace the server " <>
         "instead."
 
-  def error_sentence(:move_under_way),
+  defp sentence(:move_under_way, _words),
     do: "Fermix is moving to your server, so it is not deleted while the move runs."
 
-  def error_sentence(:replace_only),
+  defp sentence(:replace_only, _words),
     do: "Fermix runs on your server now, so a new server from here can only replace it."
 
-  def error_sentence(:nothing_to_replace),
+  defp sentence(:nothing_to_replace, _words),
     do: "Fermix runs on this computer, so there is no server to replace yet."
 
-  def error_sentence(:replacement_exists),
+  defp sentence(:replacement_exists, _words),
     do: "Your new server already exists, so delete it before creating another."
 
-  def error_sentence(:replace_moving),
+  defp sentence(:replace_moving, _words),
     do: "Fermix is moving to your new server, so it creates no other one until the move is done."
 
-  def error_sentence(:old_server_remains),
+  defp sentence(:old_server_remains, _words),
     do: "Your old server still exists, so delete it before replacing this one."
 
-  def error_sentence(:replacement_gone),
-    do: "Your new server was deleted in Hetzner, so replace the server again."
+  defp sentence(:replacement_gone, words),
+    do: "Your new server was deleted in #{words.name}, so replace the server again."
 
-  def error_sentence(:no_link),
+  defp sentence(:no_link, _words),
     do:
       "Fermix could not read how this computer reaches your server, so it created nothing; " <>
         "Fermix's log says why."
 
-  def error_sentence(:code_unreachable),
+  defp sentence(:code_unreachable, _words),
     do:
       "Fermix cannot reach your server to get a code for the new one, so try again once your " <>
         "server is back."
 
-  def error_sentence(:withdraw_unreachable),
+  defp sentence(:withdraw_unreachable, _words),
     do:
       "Fermix cannot reach your server to close the code it gave the new one, so try again " <>
         "once your server is back."
 
-  def error_sentence({:code_refused, _code}),
+  defp sentence({:code_refused, _code}, _words),
     do: "Your server did not open a code for the new one."
 
-  def error_sentence({:withdraw_refused, _code}),
+  defp sentence({:withdraw_refused, _code}, _words),
     do: "Your server did not close the code it gave the new one."
 
-  def error_sentence({:old_server, reason}),
-    do: "Fermix could not delete your old server: #{error_sentence(reason)}"
+  defp sentence({:old_server, reason}, words),
+    do: "Fermix could not delete your old server: #{sentence(reason, words)}"
 
-  def error_sentence(reason) when reason in [:not_found, :resource_in_use],
-    do: "Hetzner no longer has what Fermix created there, so open Always On again."
+  defp sentence({:ledger, _reason}, words),
+    do: "Fermix could not keep its #{words.name} file; Fermix's log says why."
 
-  def error_sentence({:ledger, _reason}),
-    do: "Fermix could not keep its Hetzner file; Fermix's log says why."
-
-  defp doing("create_server"), do: "creating your server"
-  defp doing("start_server"), do: "starting your server"
-  defp doing("delete_server"), do: "deleting your server"
-  defp doing("poweron_server"), do: "turning your server on"
-  defp doing("reset_server"), do: "restarting your server"
-  defp doing(_command), do: "what Fermix asked of it"
-
-  # Hetzner's own message, as plain words the summary can print: a backtick
-  # in it reads as a quote. Its code and HTTP status are in the log
-  # (`Provision.Hetzner`), never in the sentence.
-  defp vendor(message) do
-    plain = String.replace(message, "`", "'")
-    if String.ends_with?(plain, [".", "?", "!"]), do: plain, else: plain <> "."
-  end
+  defp sentence(:unreadable, words),
+    do:
+      "Fermix could not read its #{words.name} file, so it shows nothing it created there; " <>
+        "Fermix's log says why."
 end

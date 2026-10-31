@@ -241,7 +241,8 @@
     "home.provision.create": 2,
     "home.provision.power": 2,
     "home.provision.resources": 2,
-    "home.provision.delete": 2
+    "home.provision.delete": 2,
+    "home.provision.providers": 2
   },
   "$defs": {
     "request": {
@@ -356,7 +357,8 @@
             "home.provision.create",
             "home.provision.power",
             "home.provision.resources",
-            "home.provision.delete"
+            "home.provision.delete",
+            "home.provision.providers"
           ]
         },
         "params": { "type": "object" }
@@ -1062,6 +1064,13 @@
             "properties": { "method": { "const": "home.provision.delete" } }
           },
           "then": { "properties": { "params": { "$ref": "#/$defs/home_provision_delete_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "home.provision.providers" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/home_provision_providers_params" } } }
         }
       ]
     },
@@ -1230,7 +1239,8 @@
         { "$ref": "#/$defs/home_provision_create_result" },
         { "$ref": "#/$defs/home_provision_power_result" },
         { "$ref": "#/$defs/home_provision_resources_result" },
-        { "$ref": "#/$defs/home_provision_delete_result" }
+        { "$ref": "#/$defs/home_provision_delete_result" },
+        { "$ref": "#/$defs/home_provision_providers_result" }
       ]
     },
     "hello_params": { "type": "object", "maxProperties": 0, "additionalProperties": false },
@@ -5781,7 +5791,7 @@
       "required": ["id", "label"],
       "additionalProperties": false,
       "properties": {
-        "id": { "enum": ["set_up", "create_server", "cancel", "move_now", "try_again", "learn_more", "turn_on", "restart_server", "start_again", "create_in", "open_hetzner", "paste_token", "update", "back_up_now", "replace_server", "check_again", "own_server", "delete_server"] },
+        "id": { "enum": ["set_up", "create_server", "cancel", "move_now", "try_again", "learn_more", "turn_on", "restart_server", "start_again", "create_in", "open_console", "paste_token", "update", "back_up_now", "replace_server", "check_again", "own_server", "delete_server"] },
         "label": { "type": "string", "minLength": 1 }
       }
     },
@@ -5826,12 +5836,12 @@
         "kind": { "enum": ["turned_off", "cannot_reach", "deleted", "not_set_up", "waited_too_long", "no_capacity", "account_limit", "read_only_token", "token_refused", "create_failed", "update", "disk_full", "backup_old", "not_ready", "unreadable", "delete_failed"] },
         "note": { "type": ["string", "null"] },
         "seen_at": { "type": ["string", "null"] },
-        "next_location": { "enum": ["fsn1", "nbg1", "hel1"] }
+        "next_location": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,31}$" }
       }
     },
     "homeSummaryServer": {
       "type": "object",
-      "description": "The server a summary names: Hetzner's facts (type, location as a city, ipv4) are null for a server of the owner's own; on ready the system and version it enrolled with, on on the version it answers with.",
+      "description": "The server a summary names: its provider's facts (type, location as a city, ipv4) are null for a server of the owner's own; on ready the system and version it enrolled with, on on the version it answers with.",
       "required": ["name"],
       "additionalProperties": false,
       "properties": {
@@ -6058,13 +6068,43 @@
         "sentence": { "type": "string", "minLength": 1 }
       }
     },
-    "home_provision_connect_params": {
+    "home_provision_providers_params": { "type": "object", "maxProperties": 0, "additionalProperties": false },
+    "home_provision_providers_result": {
+      "description": "Every cloud provider Fermix creates a server on, in the order the apps offer them, with what the token and choose screens draw. A new provider is a new row: a client draws every row it is given.",
       "type": "object",
-      "required": ["token"],
+      "required": ["providers"],
       "additionalProperties": false,
       "properties": {
+        "providers": { "type": "array", "minItems": 1, "maxItems": 16, "items": { "$ref": "#/$defs/homeProvisionProvider" } }
+      }
+    },
+    "homeProvisionProvider": {
+      "type": "object",
+      "description": "One provider: id is what home.provision.connect, options and create take as provider; name how every sentence names it; token_label the token field's label; steps the How to get one steps, two-factor sign-in first and an account for Fermix alone; console_url the provider's console, which open_console opens; docs_anchor its section of the Always On docs page (#docs_anchor).",
+      "required": ["id", "name", "token_label", "steps", "console_url", "docs_anchor"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]{1,31}$" },
+        "name": { "type": "string", "minLength": 1 },
+        "token_label": { "type": "string", "minLength": 1 },
+        "steps": { "type": "array", "minItems": 1, "maxItems": 8, "items": { "type": "string", "minLength": 1 } },
+        "console_url": { "type": "string", "pattern": "^https://" },
+        "docs_anchor": { "type": "string", "pattern": "^[a-z0-9-]+$" }
+      }
+    },
+    "homeProvisionProviderId": {
+      "description": "A provider home.provision.providers lists.",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{1,31}$"
+    },
+    "home_provision_connect_params": {
+      "type": "object",
+      "required": ["provider", "token"],
+      "additionalProperties": false,
+      "properties": {
+        "provider": { "$ref": "#/$defs/homeProvisionProviderId" },
         "token": {
-          "description": "A Read & Write API token of the Hetzner project made for Fermix. Kept only in this computer's device/provision/hetzner.json, never logged, traced or answered.",
+          "description": "An API token of the provider's account made for Fermix, with the permission its steps name. Kept only in this computer's device/provision/<provider>.json, never logged, traced or answered.",
           "type": "string",
           "minLength": 16,
           "maxLength": 512,
@@ -6073,15 +6113,20 @@
       }
     },
     "home_provision_connect_result": { "$ref": "#/$defs/homeProvisionView" },
-    "home_provision_options_params": { "type": "object", "maxProperties": 0, "additionalProperties": false },
+    "home_provision_options_params": {
+      "type": "object",
+      "required": ["provider"],
+      "additionalProperties": false,
+      "properties": { "provider": { "$ref": "#/$defs/homeProvisionProviderId" } }
+    },
     "home_provision_options_result": {
-      "description": "What Hetzner sells now, read live: every x86 type with at least 4 GB that is not deprecated, wherever it is in stock in Falkenstein, Nuremberg and Helsinki, cheapest first. recommended is the cheapest type in the first of the three where it is in stock, more_room the cheapest type with more memory; either is null when nothing fits. sentence says the recommendation, or that nothing is in stock.",
+      "description": "What the provider sells now, read live: every type Fermix can use (x86, at least 4 GB, still sold), wherever it is in stock in the locations Fermix offers there, cheapest first. recommended is the cheapest type in the first location where it is in stock, more_room the cheapest type with more memory; either is null when nothing fits. sentence says the recommendation, or that nothing is in stock.",
       "type": "object",
       "required": ["currency", "locations", "offers", "recommended", "more_room", "sentence"],
       "additionalProperties": false,
       "properties": {
         "currency": { "type": "string" },
-        "locations": { "type": "array", "maxItems": 3, "items": { "$ref": "#/$defs/homeProvisionLocation" } },
+        "locations": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/homeProvisionLocation" } },
         "offers": { "type": "array", "maxItems": 150, "items": { "$ref": "#/$defs/homeProvisionOffer" } },
         "recommended": { "oneOf": [{ "$ref": "#/$defs/homeProvisionPick" }, { "type": "null" }] },
         "more_room": { "oneOf": [{ "$ref": "#/$defs/homeProvisionPick" }, { "type": "null" }] },
@@ -6093,7 +6138,7 @@
       "required": ["id", "city", "country"],
       "additionalProperties": false,
       "properties": {
-        "id": { "enum": ["fsn1", "nbg1", "hel1"] },
+        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,31}$" },
         "city": { "type": "string" },
         "country": { "type": "string" }
       }
@@ -6110,7 +6155,7 @@
         "memory_gb": { "type": "number" },
         "disk_gb": { "type": "integer" },
         "dedicated": { "type": "boolean" },
-        "location": { "enum": ["fsn1", "nbg1", "hel1"] },
+        "location": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,31}$" },
         "monthly": { "type": "string", "pattern": "^[0-9]+\\.[0-9]{2}$" },
         "ipv4_monthly": { "type": "string", "pattern": "^[0-9]+\\.[0-9]{2}$" },
         "total_monthly": { "type": "string", "pattern": "^[0-9]+\\.[0-9]{2}$" }
@@ -6122,17 +6167,18 @@
       "additionalProperties": false,
       "properties": {
         "type": { "type": "string" },
-        "location": { "enum": ["fsn1", "nbg1", "hel1"] }
+        "location": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,31}$" }
       }
     },
     "home_provision_create_params": {
       "type": "object",
-      "description": "replace (default false) is true only on the linked desktop whose ledger holds the server the home lives on: the new server is created with a 24-hour code the old server opens, and the old one is deleted once the move to the new one is done.",
-      "required": ["type", "location"],
+      "description": "provider is one home.provision.providers lists, and location one its options name. replace (default false) is true only on the linked desktop whose ledger of that provider holds the server the home lives on: the new server is created with a 24-hour code the old server opens, and the old one is deleted once the move to the new one is done.",
+      "required": ["provider", "type", "location"],
       "additionalProperties": false,
       "properties": {
+        "provider": { "$ref": "#/$defs/homeProvisionProviderId" },
         "type": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,31}$" },
-        "location": { "enum": ["fsn1", "nbg1", "hel1"] },
+        "location": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,31}$" },
         "replace": { "type": "boolean" }
       }
     },
@@ -6150,10 +6196,11 @@
     "home_provision_delete_result": { "$ref": "#/$defs/jobView" },
     "homeProvisionView": {
       "type": "object",
-      "description": "What Fermix created on Hetzner, from this computer's ledger. state is none (no token), connected, creating, created (the server exists and waits for its enrollment and move), deleting, gone (deleted outside Fermix), failed (the last create stopped; failure says why) or unreadable. replace, while one is recorded, says where a replace of the server stands, and state and server are then the new server's. other_servers is answered by home.provision.connect, checked and sentence by home.provision.resources: whether Hetzner was read just now, and why not. The token is never answered.",
-      "required": ["state", "token", "server", "failure", "replace", "resources", "sentence"],
+      "description": "What Fermix created on a provider, from this computer's ledger of it. provider is that provider's id: the one Fermix created something on, else the one whose token was given last, else the first home.provision.providers lists (for home.provision.connect, the one connected). state is none (no token), connected, creating, created (the server exists and waits for its enrollment and move), deleting, gone (deleted outside Fermix), failed (the last create stopped; failure says why) or unreadable. replace, while one is recorded, says where a replace of the server stands, and state and server are then the new server's. other_servers is answered by home.provision.connect, checked and sentence by home.provision.resources: whether the provider was read just now, and why not. The token is never answered.",
+      "required": ["provider", "state", "token", "server", "failure", "replace", "resources", "sentence"],
       "additionalProperties": false,
       "properties": {
+        "provider": { "$ref": "#/$defs/homeProvisionProviderId" },
         "state": { "enum": ["none", "connected", "creating", "created", "deleting", "gone", "failed", "unreadable"] },
         "token": { "enum": ["none", "accepted", "refused"] },
         "server": { "oneOf": [{ "$ref": "#/$defs/homeProvisionServer" }, { "type": "null" }] },
@@ -6167,7 +6214,7 @@
     },
     "homeProvisionReplace": {
       "type": "object",
-      "description": "A replace of the server from the linked desktop. state is creating (the new server), waiting (it exists and waits for its enrollment and move), moving (this desktop started the move to it; the old server serves nothing meanwhile), deleting (the move is done and the old server is being deleted, once), done, failed (failure says why: the new server's create stopped or it was deleted in Hetzner, reason gone, with current old; or deleting the old server stopped, with current new, and it stays listed for home.provision.delete) or cancelling (the new server is being deleted before the move). current is the server that holds the home: old until the move is done, then new. old is the old server's facts, null once it is deleted.",
+      "description": "A replace of the server from the linked desktop. state is creating (the new server), waiting (it exists and waits for its enrollment and move), moving (this desktop started the move to it; the old server serves nothing meanwhile), deleting (the move is done and the old server is being deleted, once), done, failed (failure says why: the new server's create stopped or it was deleted at its provider, reason gone, with current old; or deleting the old server stopped, with current new, and it stays listed for home.provision.delete) or cancelling (the new server is being deleted before the move). current is the server that holds the home: old until the move is done, then new. old is the old server's facts, null once it is deleted.",
       "required": ["state", "current", "old", "failure"],
       "additionalProperties": false,
       "properties": {
@@ -6184,10 +6231,10 @@
       "properties": {
         "name": { "type": "string", "pattern": "^fermix-[a-z0-9-]+-[0-9a-f]{4}$" },
         "type": { "type": "string" },
-        "location": { "enum": ["fsn1", "nbg1", "hel1"] },
+        "location": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,31}$" },
         "status": { "$ref": "#/$defs/homeProvisionStatus" },
         "power": {
-          "description": "The server's status as Hetzner last reported it (running, off, starting and the like), and when; null before it was read.",
+          "description": "The server's status as its provider last reported it: running, off, or another word of the provider's (starting and the like); null before it was read.",
           "type": ["string", "null"]
         },
         "ipv4": { "type": ["string", "null"] },
@@ -6201,19 +6248,19 @@
     },
     "homeProvisionFailure": {
       "type": "object",
-      "description": "Why the last create stopped, or why deleting a replaced server stopped: reason is a word (unavailable, account_limit, read_only_token, token_refused, gone and others), sentence the daemon's words, next_location the next location in stock when Hetzner had no capacity.",
+      "description": "Why the last create stopped, or why deleting a replaced server stopped: reason is a word (unavailable, account_limit, read_only_token, token_refused, rate_limited, unreachable, other (the provider's own refusal, in its words), gone and the engine's own), sentence the daemon's words, next_location the next location in stock when the provider had no capacity.",
       "required": ["reason", "sentence", "next_location", "at"],
       "additionalProperties": false,
       "properties": {
         "reason": { "type": "string" },
         "sentence": { "type": "string", "minLength": 1 },
-        "next_location": { "oneOf": [{ "enum": ["fsn1", "nbg1", "hel1"] }, { "type": "null" }] },
+        "next_location": { "oneOf": [{ "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,31}$" }, { "type": "null" }] },
         "at": { "type": "string" }
       }
     },
     "homeProvisionResource": {
       "type": "object",
-      "description": "One thing Fermix created and Hetzner bills for until it is deleted: the server, its firewall or one of its primary addresses (named by the address). replaced is true for the old server's, while a replace keeps it.",
+      "description": "One thing Fermix created and its provider bills for until it is deleted: the server, its firewall or one of its primary addresses (named by the address). replaced is true for the old server's, while a replace keeps it.",
       "required": ["kind", "name", "id", "status", "replaced"],
       "additionalProperties": false,
       "properties": {

@@ -11,6 +11,7 @@ defmodule FermixCore.Home.UnreadableFilesTest do
   alias Fermix.CLI.HomeStatusCommand
   alias FermixCore.Home.Move
   alias FermixCore.Home.MoveReadiness
+  alias FermixCore.Home.Provision.Hetzner
   alias FermixCore.Home.Provision.Ledger
   alias FermixCore.Home.Snapshot.Capture
   alias FermixCore.Home.UnreadableFiles
@@ -80,7 +81,7 @@ defmodule FermixCore.Home.UnreadableFilesTest do
       capture_log(fn ->
         for _poll <- 1..3 do
           assert %{state: :unreadable, sentence: sentence} =
-                   Ledger.state(ctx.home, "hetzner", unreadable_files: ctx.server)
+                   Ledger.state(ctx.home, Hetzner, unreadable_files: ctx.server)
 
           assert sentence =~ "could not read its Hetzner file"
         end
@@ -94,7 +95,7 @@ defmodule FermixCore.Home.UnreadableFilesTest do
     log =
       capture_log(fn ->
         for _poll <- 1..2 do
-          assert %{state: :none} = Ledger.state(ctx.home, "hetzner", unreadable_files: ctx.server)
+          assert %{state: :none} = Ledger.state(ctx.home, Hetzner, unreadable_files: ctx.server)
         end
       end)
 
@@ -229,7 +230,7 @@ defmodule FermixCore.Home.UnreadableFilesTest do
     log =
       capture_log(fn ->
         for _run <- 1..2 do
-          assert %{state: :unreadable} = Ledger.state(ctx.home, "hetzner", unreadable_files: nil)
+          assert %{state: :unreadable} = Ledger.state(ctx.home, Hetzner, unreadable_files: nil)
 
           assert {:ok, %{"summary" => %{"state" => "problem"}}} =
                    HomeStatusCommand.offline(ctx.home)

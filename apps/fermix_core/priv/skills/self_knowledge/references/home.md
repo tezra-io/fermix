@@ -180,9 +180,15 @@ it, never a second writer.
   then browser tasks on it answer that no Chrome or Chromium is installed. A
   Debian server gets Chromium at its first boot.
 - **A server Fermix creates on Hetzner.** Instead of a host of their own,
-  the owner can let Fermix create the server in their Hetzner Cloud project,
-  from the Always On pane: paste a Read & Write API token of a project made
-  for Fermix (checked at once; it stays on this computer in
+  the owner can let Fermix create the server with a cloud provider. Hetzner
+  is the one provider today: each provider is one module behind one contract
+  in the engine, and the apps draw its token and choose screens from what
+  the engine lists (`home.provision.providers`: its name, its token's label,
+  its How to get one steps, its console), so another provider needs no new
+  app; every sentence about the server names the provider in its own words,
+  and Fermix creates on one provider at a time. On Hetzner, from the Always
+  On pane: paste a Read & Write API token of a project made for Fermix
+  (checked at once; it stays on this computer in its provider's own file,
   `device/provision/hetzner.json`, 0600, never in `config.toml` or the
   keychain, so a move never carries it to the server, and the owner can
   delete the file), pick the size and location (the cheapest x86 type with at
@@ -665,6 +671,7 @@ it, never a second writer.
 | Where snapshots are kept (bucket, region, the S3-compatible address, how often) and the two access keys | Recovery: the `snapshots` section; the keys as hidden fields, never shown again | `fermix settings set snapshots …`, `fermix settings secret set snapshot_s3_access_key_id` |
 | Take a snapshot now | **Back up now**, offered once snapshots have somewhere to go | `fermix home snapshots run` |
 | An enrollment code | **Get a code** (**Get a new code** while one is open, which stops the open one working), shown once with **Copy** and when it expires, beside the command for a server you have, and what to know before moving (the disk it needs, that this computer serves nothing meanwhile, the cutover gap, where the server keeps secrets, no way back) | `fermix home enroll-code` |
+| The cloud providers Fermix creates the server on (Hetzner today), each with its name, token label, How to get one and console (`home.provision.providers`) | The token screen | none |
 | A Hetzner token: pasted once, checked at once, kept on this computer (`home.provision.connect`) | Paste a token, with How to get one | none |
 | The sizes and locations Hetzner has in stock, with the monthly price (`home.provision.options`) | The recommendation, and Change | none |
 | Create the server on Hetzner (`home.provision.create`, a job) | **Create server** | none |

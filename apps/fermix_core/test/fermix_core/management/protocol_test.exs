@@ -163,7 +163,8 @@ defmodule FermixCore.Management.ProtocolTest do
              "home.provision.create",
              "home.provision.power",
              "home.provision.resources",
-             "home.provision.delete"
+             "home.provision.delete",
+             "home.provision.providers"
            ]
 
     assert Protocol.error_codes() == [
