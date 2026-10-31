@@ -16,6 +16,9 @@ defmodule FermixChannels.Mobile.Iroh.HelperDialTest do
   @peer "2f1b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809"
   @relays [%{"url" => "https://relay.invalid/", "quic_port" => 7842}]
   @target %{node_id: @peer, relays: @relays}
+  # What the fake says is a Perl process's work, which on a loaded runner takes
+  # longer than the suite's 2 s; the rail itself gives a helper 10 s to start.
+  @helper_ms 10_000
 
   setup do
     # Short: a dial socket's path must fit a Unix socket address.
@@ -94,7 +97,9 @@ defmodule FermixChannels.Mobile.Iroh.HelperDialTest do
     1 = :erlang.trace(pid, true, [:receive])
 
     unless match?(%{state: :ready}, Helper.status(pid)) do
-      assert_receive {:trace, ^pid, :receive, {_port, {:data, {:eol, ~s({"event":"ready") <> _}}}}
+      assert_receive {:trace, ^pid, :receive,
+                      {_port, {:data, {:eol, ~s({"event":"ready") <> _}}}},
+                     @helper_ms
     end
 
     assert %{state: :ready} = Helper.status(pid)
@@ -144,7 +149,7 @@ defmodule FermixChannels.Mobile.Iroh.HelperDialTest do
     pid = ctx |> start(binary_path: fake(ctx, :connect)) |> ready(ctx)
 
     assert {:ok, socket, %{kind: :direct, relay: nil}} = Helper.dial(pid, @target)
-    assert {:ok, "from the peer"} = :gen_tcp.recv(socket, 13, 2_000)
+    assert {:ok, "from the peer"} = :gen_tcp.recv(socket, 13, @helper_ms)
 
     assert [_start, %{"op" => "dial", "dial_id" => dial_id, "socket" => path} = op] =
              ops(ctx)
@@ -156,8 +161,8 @@ defmodule FermixChannels.Mobile.Iroh.HelperDialTest do
     assert dial_sockets(ctx) == []
 
     # The helper's word that the stream ended reaches the dial's owner.
-    assert_receive {:iroh_dial, ^dial_id, :closed}
-    assert {:error, :closed} = :gen_tcp.recv(socket, 0, 2_000)
+    assert_receive {:iroh_dial, ^dial_id, :closed}, @helper_ms
+    assert {:error, :closed} = :gen_tcp.recv(socket, 0, @helper_ms)
     assert :sys.get_state(pid).dials == %{}
   end
 
