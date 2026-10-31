@@ -157,7 +157,7 @@
 (* after init, "scan" in the 60 s tick, "idle" after a DOWN.               *)
 (***************************************************************************)
 \* SOURCE: apps/fermix_core/lib/fermix_core/jobs/scheduler.ex @ 57f42f75c993
-\* SOURCE: apps/fermix_core/lib/fermix_core/jobs/runner.ex @ 89e6659831d6
+\* SOURCE: apps/fermix_core/lib/fermix_core/jobs/runner.ex @ d209d9e47e8e
 \* SOURCE: apps/fermix_core/lib/fermix_core/jobs/runner_supervisor.ex @ 6a21dfe6cfad
 \* SOURCE: apps/fermix_core/lib/fermix_core/jobs/delivery.ex @ 4eb42c517b57
 \* SOURCE: apps/fermix_core/lib/fermix_core/jobs/registry.ex @ 09431e45a0f5

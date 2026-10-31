@@ -600,6 +600,16 @@ the six commits on `dev` `c3442c3a` that build the feature (`a190c404` to
 - **Line numbers** were moved through the diff, so each moved reference
   points at the same line it did; the new comments cite `90a1f0f1`.
 
+## Re-read for the owner's lists (M85, 2026-10-31)
+
+The owner's lists (M85) staled `runner.ex` alone. `finalize_delivery` now asks
+`FermixCore.ReplyBlocks` for the lists the run's list tools read or changed
+(`reply_delivery_opts`, a call into the in-memory holder, no Repo call) before
+the send helper spawns, and passes them as the send's `blocks`, which a channel
+that draws none ignores. No modelled row, helper, delivery or report changes,
+and the new function sits below every line the spec cites, so nothing the spec
+models changed and no reference moved.
+
 ## Plan hypotheses
 
 The plan (`docs/design/TLA_PLUS_MODELS.md` §4.3) listed four expected

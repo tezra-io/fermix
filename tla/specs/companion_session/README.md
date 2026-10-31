@@ -93,7 +93,12 @@ additive and sent on every version. These are proposal events, with no seq,
 request or turn, written in the same steps as before, so `server_hello`, the
 approval cards behind it and every rule here are as before; the header names
 them among what it leaves out. The line references into `sandbox.ex`, which
-had drifted, now point at the pinned functions.
+had drifted, now point at the pinned functions. The re-read after M85 found a
+second block type in `PROTOCOL.md`, `checklists`: the lists a turn's list tools
+read or changed, by id, which `Turns` takes with the place records in the same
+call, and which rides the same row, `text_done` and history message. No client
+rule reads it, and every row, seq, ending and settlement is as before, so
+nothing the spec models changed.
 
 **The Queue is one abstract process.** The runner takes one `.tla` per spec,
 and `turn_queue` proves the Queue's rules against `queue.ex`, so this spec takes
