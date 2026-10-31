@@ -89,10 +89,12 @@ defmodule FermixCore.Management.HomeSummary do
   @setup_ms 30 * 60_000
   @backup_old_s 3 * 86_400
   @day_s 86_400
-  # The states whose sentence carries a figure that moves with the clock (a
-  # backup's age, a count of days, how full a disk is): `watch/1`'s key leaves
-  # it out, since their state, action and kind say every change of note.
-  @clock_sentences ~w(on problem)
+  # The states whose sentence `watch/1`'s key leaves out: on `on` and
+  # `problem` it carries a figure that moves with the clock (a backup's age, a
+  # count of days, how full a disk is), and their state, action and kind say
+  # every change of note; on `off` an app forgets Always On (the owner's rule),
+  # so the line naming what stops is read when its pane opens, never told.
+  @untold_sentences ~w(off on problem)
   @moving ~w(requested streaming committed)
   @undoing ~w(aborting undoing)
   @receiving ~w(receiving staged activating)
@@ -143,7 +145,8 @@ defmodule FermixCore.Management.HomeSummary do
     * `key` changes exactly when the summary changes the way a surface draws
       it: its state, its action (id and label), its problem kind, and its
       sentence on every state but `on` and `problem`, whose sentences carry a
-      figure that moves with the clock. On a server with desktops it also
+      figure that moves with the clock, and `off`, which an app forgets until
+      it ends (an `off` summary has one key). On a server with desktops it also
       holds what their own summaries read from its `home.status`: its newest
       backup, its enrollment code (kind, state, who used it) and the servers
       it holds. `detail` alone is no change.
@@ -804,7 +807,7 @@ defmodule FermixCore.Management.HomeSummary do
   # -- watching ------------------------------------------------------------------
 
   defp key(%{"state" => state, "action" => action, "detail" => detail} = summary) do
-    sentence = if state in @clock_sentences, do: nil, else: summary["sentence"]
+    sentence = if state in @untold_sentences, do: nil, else: summary["sentence"]
     {state, action, Map.get(detail, "kind"), sentence}
   end
 

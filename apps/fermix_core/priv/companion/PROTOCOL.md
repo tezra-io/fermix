@@ -325,7 +325,7 @@ in a fixed order:
 | `media_missing` | `ref` | Version 3. Nothing to grant for `ref`; see *Managed media files*. Sent only to a connection on version 3. |
 | `proposal` | `profile_id`, `proposal` (the card) | Version 4. A proposal waiting for the owner: sent when it is stored, and again after `server_hello` for each still waiting, oldest first. Sent only to a connection on version 4 placed as the owner's; see *Proposals*. |
 | `proposal_resolved` | `profile_id`, `proposal_id`, `state`, `sentence`; `result_status?`, `result_text?` | Version 4. A proposal left `waiting`: `denied`, `expired` or `refused`, or `confirmed` once its call has finished, whichever surface decided it. Sent only to a connection on version 4 placed as the owner's; see *Proposals*. |
-| `home_status_changed` | none | Version 6. Always On's summary changed: read `home.status` over management. Carries no content. Sent once after `server_hello` unless Always On is off, then at each change, only to a connection on version 6; see *When Always On changes*. |
+| `home_status_changed` | none | Version 6. Always On's summary changed: read `home.status` over management. Carries no content. Sent once after `server_hello` unless Always On is off, then at each change, never while it stays off, only to a connection on version 6; see *When Always On changes*. |
 | `error` | `reason`; `message?`, `field?`, `event?`, `client_msg_id?`, `ref?`, `direction?`, `client_version?`, `min_version?`, `max_version?` | A refusal; see *Errors*. |
 
 ### Timeline shapes
@@ -492,22 +492,27 @@ version 6 connection:
   `sentence` on any state but `on` and `problem`, where the sentence carries
   a figure that moves with the clock (the last backup's age, a count of days,
   how full the disk is) and the state, action and kind already say every
-  change of note. `detail` alone never counts: an app reads it when the owner
-  opens Details. On the server, which its desktops' summaries read in their
-  `primary_home`, a change of its newest backup, of its enrollment code or of
-  the servers it holds counts as well.
+  change of note, and `off`. `detail` alone never counts: an app reads it
+  when the owner opens Details. On the server, which its desktops' summaries
+  read in their `primary_home`, a change of its newest backup, of its
+  enrollment code or of the servers it holds counts as well.
+- **never while Always On stays `off`**: an app forgets Always On while it is
+  off. A settings write that changes what the `off` sentence names (iMessage,
+  voice calls, meetings) is not told; the app reads that line when the owner
+  opens the pane. Entering `off` from another state (a server deleted before
+  the move, a cancelled setup) is a change, told once.
 
 The daemon works this out without polling anything. It reads the summary
 again only when something it rests on happens (the move's phase, a server
 enrolling or its code being opened, used, withdrawn or expiring, the Always
 On provisioner's file being written, the link to the server going up or
-down, a backup run finishing, a settings write) and at the next time the
+down, a backup run finishing) and at the next time the
 summary changes by the clock alone (a code open 30 minutes while the
 computer is awake, a link down 10 minutes while it is awake, a waiting
 server's 24 hours, a backup's 3 days), on one timer, armed again at each
 read; and only while a version 6 connection is attached. While Always On is
 `off` it arms nothing and reads only on what could end `off` (a token, a
-code, a move, a settings write). It never calls the cloud provider: Hetzner
+code, a move). It never calls the cloud provider: Hetzner
 is read when the app asks (`home.provision.resources`) or a job runs.
 
 A notice sent while the app was disconnected is lost, so an app that

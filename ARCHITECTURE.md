@@ -672,7 +672,8 @@ forgets its subscribers takes them down too), keeps the last
 `HomeSummary.watch/1` read (`Management.Home.summary_facts/1`, gathered as
 `home.status` gathers them, through the server on a linked desktop): its key
 (state, action, problem kind, and the sentence except on `on` and `problem`,
-whose figures move with the clock; on a server with desktops also its newest
+whose figures move with the clock, and on `off`, which an app forgets until it
+ends, so a settings write tells nothing; on a server with desktops also its newest
 backup, its window and its candidates, which their summaries read), whether it
 is `off`, and the milliseconds to its next change by the clock alone. A
 version 6 `Companion.Connection` subscribes before its `server_hello` and
@@ -681,15 +682,14 @@ at each change of key. It reads only while subscribed, on `changed/2` from the
 writers the summary rests on, each a cast that is a no-op with no watch
 running: `Provision.Ledger.update/3` (`:ledger`), `Move.put_phase/4`
 (`:move`), the enrollment window's kept changes and expiry (`:enrollment`),
-`ConfigStore.save_snapshot/2` (`:config`, the `off` line), a finished
-`Snapshot.Scheduler` run (`:snapshots`), the desktop relay's session up or
+a finished `Snapshot.Scheduler` run (`:snapshots`), the desktop relay's session up or
 down (`:link`) and a tunnel that heard its server's own notice (`:server`);
 events that arrive together are one read (a message it sends itself, queued
 behind them). One timer, replaced at each read, at least a second and at most
 a week, waits for the next clock change; a time-offset monitor reads again
 after a wake from sleep, since the monotonic timers stop while the computer
-sleeps. While off nothing is armed and only `:ledger`, `:move`,
-`:enrollment` and `:config` are read. It never calls Hetzner.
+sleeps. While off nothing is armed and only `:ledger`, `:move` and
+`:enrollment` are read. It never calls Hetzner.
 
 Replace the server (`home.provision.create {replace: true}`) runs on the
 linked desktop whose ledger holds the server the home lives on. The job sets

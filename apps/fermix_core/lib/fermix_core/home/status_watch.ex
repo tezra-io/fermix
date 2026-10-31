@@ -15,8 +15,7 @@ defmodule FermixCore.Home.StatusWatch do
   `:ledger` (the provisioner's file, `Provision.Ledger.update/3`), `:move`
   (a move's phase, `Move.put_phase/4`), `:enrollment` (the enrollment window
   opened, used, enrolled, withdrawn or expired, `FermixChannels.Home.Enrollment`),
-  `:config` (a settings write, `ConfigStore.save_snapshot/2`, which can change
-  the `off` line), `:snapshots` (a backup run finished,
+  `:snapshots` (a backup run finished,
   `Snapshot.Scheduler`), `:link` (the desktop's session to its server up or
   down, `FermixChannels.Desktop.Relay`) and `:server` (a desktop's tunnel
   heard its server's own notice, so the server's part of `home.status` may
@@ -33,9 +32,14 @@ defmodule FermixCore.Home.StatusWatch do
   read. When the last subscriber goes, the timer is cancelled and the last
   read forgotten.
 
-  **Off is quiet.** While the summary is `off`, nothing is armed, and only an
-  event that could end `off` is read (`:ledger`, `:enrollment`, `:move`,
-  `:config`); a backup run, the link and the clock are not.
+  **Off is quiet.** An app forgets Always On while it is off (the owner's
+  rule): an `off` summary has one key (`HomeSummary.watch/1`), so nothing is
+  told while it stays off, a settings write that changes the line naming what
+  stops included (no write of settings tells this process at all; the app
+  reads that line when its pane opens). Nothing is armed, and only an event
+  that could end `off` is read (`:ledger`, `:enrollment`, `:move`); a backup
+  run, the link and the clock are not. Entering `off` from another state is a
+  change, told once.
 
   It never calls the cloud provider: the provider is read when the app asks
   (`home.provision.resources`) or a job runs, and every write of its ledger
@@ -68,15 +72,15 @@ defmodule FermixCore.Home.StatusWatch do
   alias FermixCore.Management.HomeSummary
   alias FermixCore.Setup.ConfigStore
 
-  @kinds [:ledger, :move, :enrollment, :config, :snapshots, :link, :server]
+  @kinds [:ledger, :move, :enrollment, :snapshots, :link, :server]
   # While Always On is off, only these can end it.
-  @off_wakes [:ledger, :move, :enrollment, :config]
+  @off_wakes [:ledger, :move, :enrollment]
   @min_delay_ms 1_000
   # Within the runtime's timer bound; a deadline further off is looked at
   # again then.
   @max_delay_ms 7 * 86_400_000
 
-  @type kind :: :ledger | :move | :enrollment | :config | :snapshots | :link | :server
+  @type kind :: :ledger | :move | :enrollment | :snapshots | :link | :server
   @type read :: %{key: term(), off: boolean(), next_change_ms: pos_integer() | nil}
 
   @spec start_link(keyword()) :: GenServer.on_start()

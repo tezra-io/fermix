@@ -713,6 +713,11 @@ defmodule FermixCore.Management.HomeSummaryTest do
         assert %{off: true, next_change_ms: nil} = HomeSummary.watch(facts)
       end
 
+      # The line naming what stops after the move is read when the pane
+      # opens, never told: an app forgets Always On while it is off.
+      assert HomeSummary.watch(facts(stays_here: [:imessage, :voice])).key ==
+               HomeSummary.watch(facts([])).key
+
       refute HomeSummary.watch(ready_facts([])).off
       refute HomeSummary.watch(desktop([])).off
     end
@@ -721,7 +726,6 @@ defmodule FermixCore.Management.HomeSummaryTest do
       keys =
         for facts <- [
               facts([]),
-              facts(stays_here: [:imessage]),
               facts(provision: ledger(:creating)),
               facts(provision: created_ledger(), link: link(enrollment: provisioned(:open))),
               facts(provision: created_ledger(), link: link(enrollment: provisioned(:used))),

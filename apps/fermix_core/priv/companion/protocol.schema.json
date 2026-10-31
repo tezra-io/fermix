@@ -581,7 +581,7 @@
     },
     "home_status_changed": {
       "type": "object",
-      "description": "Version 6. Always On's summary (management home.status.summary) changed: its state, its action, its problem kind, or the sentence of a step. Carries no content: the client reads home.status over management for what it is now. Sent once after server_hello unless Always On is off, then at each change, only to a connection on version 6. After a move, the desktop's engine sends it for its own home.status, never the server's (PROTOCOL.md, When Always On changes).",
+      "description": "Version 6. Always On's summary (management home.status.summary) changed: its state, its action, its problem kind, or the sentence of a step. Carries no content: the client reads home.status over management for what it is now. Sent once after server_hello unless Always On is off, then at each change, never while it stays off, only to a connection on version 6. After a move, the desktop's engine sends it for its own home.status, never the server's (PROTOCOL.md, When Always On changes).",
       "x-since-version": 6,
       "required": ["type"],
       "properties": {
