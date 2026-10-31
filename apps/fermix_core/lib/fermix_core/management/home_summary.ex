@@ -856,6 +856,7 @@ defmodule FermixCore.Management.HomeSummary do
 
   defp deadlines(%{role: :device} = facts) do
     since = backup_since(facts)
+
     [link_deadline(facts), backup_deadline(since, facts), week_deadline(since, facts)] ++
       replace_deadlines(facts)
   end
