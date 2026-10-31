@@ -26,7 +26,6 @@
     "apps/fermix_core/test/fermix_core/computer_use/check_test.exs" => 1,
     "apps/fermix_core/test/fermix_core/computer_use/operator_stop_test.exs" => 3,
     "apps/fermix_core/test/fermix_core/computer_use/session_manager_test.exs" => 1,
-    "apps/fermix_core/test/fermix_core/management/doctor_session_test.exs" => 2,
     "apps/fermix_core/test/fermix_core/realtime/live_session_server_test.exs" => 6,
     "apps/fermix_core/test/fermix_core/temporal/telemetry_test.exs" => 1
   },

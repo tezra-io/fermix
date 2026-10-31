@@ -320,15 +320,13 @@ defmodule FermixCore.Management.DoctorSessionTest do
       # deliver its bookends into this mailbox first. Pinning the session id
       # makes each assert_receive wait for *this* run's event.
       assert_receive {:telemetry, [:fermix, :doctor, :session_start], _meas,
-                      %{session_id: ^session_id} = start_meta},
-                     1_000
+                      %{session_id: ^session_id} = start_meta}
 
       assert start_meta.agent == "doctor"
       assert start_meta.scope == :local
 
       assert_receive {:telemetry, [:fermix, :doctor, :session_complete], meas,
-                      %{session_id: ^session_id} = complete_meta},
-                     1_000
+                      %{session_id: ^session_id} = complete_meta}
 
       assert complete_meta.status == "completed"
       assert is_integer(meas.duration_ms)
