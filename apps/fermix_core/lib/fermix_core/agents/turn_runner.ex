@@ -673,7 +673,10 @@ defmodule FermixCore.Agents.TurnRunner do
     # because it is byte-stable for the conversation's lifetime, which keeps the
     # date note's once-a-day churn the only churn in this prompt region.
     messages = inject_channel_presentation(messages, msg)
-    messages = append_system_note(messages, ChecklistNote.rules(context, msg.channel))
+
+    messages =
+      append_system_note(messages, ChecklistNote.rules(context, msg.channel, draws_lists?(msg)))
+
     messages = inject_current_date(messages)
     messages = append_system_note(messages, ChecklistNote.index(context))
     messages = inject_recent_calls(messages, state, source_trust, voice_call)
@@ -821,6 +824,12 @@ defmodule FermixCore.Agents.TurnRunner do
   end
 
   defp apply_run_profile(_normal, messages, context), do: {messages, context}
+
+  # The Mac's connection that carried the turn pulled the lists' index, so its
+  # app draws them (M85 §07): stamped by the companion channel under an atom
+  # key, never read from a payload.
+  defp draws_lists?(%{metadata: %{draws_lists: true}}), do: true
+  defp draws_lists?(_msg), do: false
 
   # Kept in the leading system run (the Anthropic adapter requires system
   # messages to lead) so the date sits with the rest of the system prompt.

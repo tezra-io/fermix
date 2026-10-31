@@ -67,4 +67,4 @@ A plugin named `checklist`, or starting with `checklist_`, is refused when it is
 
 ## Where a list shows
 
-No surface draws a list yet: when the owner asks to see one, the reply writes it as a short checklist. A reply that read or changed a list carries the list ids and the rows it touched as a `checklists` block, which an app that does not draw it skips.
+A Fermix Mac app that draws lists shows each list a reply read or changed under the reply, live: a change from anywhere (a turn, a job, the owner's own taps) shows as it lands, and the owner ticks, adds, edits, moves, clears done items and restores removed ones there, each change recorded as made in the Mac app. On such a turn the list line says the list is drawn under the reply: the reply says in a sentence what changed and never repeats the items. Everywhere else (another channel, the phone, a Mac app that does not draw lists) nothing draws a list: when the owner asks to see one, the reply writes it as a short checklist. A reply that read or changed a list carries the list ids and the rows it touched as a `checklists` block, which an app that does not draw it skips.

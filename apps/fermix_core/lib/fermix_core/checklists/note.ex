@@ -6,9 +6,10 @@ defmodule FermixCore.Checklists.Note do
   (`Checklists.Access.private_owner_turn?/1`), so a guest, a group chat or a
   shared session is told nothing of the lists.
 
-  `rules/1` is the routing line, the one that says a list never lives in
-  memory, and the channel line (`Prompt.ChannelPresentation.checklist_line/1`):
-  the same bytes for the life of a conversation. It rides the turn rather
+  `rules/3` is the routing line, the one that says a list never lives in
+  memory, and the channel line (`Prompt.ChannelPresentation.checklist_line/2`):
+  the card's line when the turn's connection draws lists, else the line that
+  says to write one. It rides the turn rather
   than the cached runtime contract because that contract is one per trust
   profile and an owner's group chat shares it, where no list line may appear
   (§11).
@@ -39,11 +40,15 @@ defmodule FermixCore.Checklists.Note do
            "and when one could belong to more than one, ask before adding it. Make a new list " <>
            "only when the owner names a new one, in the folder that holds lists like it."
 
-  @doc "The routing line and the channel line for `channel`, or nil on any other turn."
-  @spec rules(map(), String.t() | nil) :: String.t() | nil
-  def rules(context, channel) when is_map(context) do
+  @doc """
+  The routing line and the channel line for `channel`, the card's when the
+  connection that carried the turn draws lists (`draws?`), or nil on any turn
+  but the owner's private one.
+  """
+  @spec rules(map(), String.t() | nil, boolean()) :: String.t() | nil
+  def rules(context, channel, draws?) when is_map(context) and is_boolean(draws?) do
     if Access.private_owner_turn?(context),
-      do: @rules <> "\n" <> ChannelPresentation.checklist_line(channel)
+      do: @rules <> "\n" <> ChannelPresentation.checklist_line(channel, draws?)
   end
 
   @doc "The one line naming the owner's lists, or nil."
