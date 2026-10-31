@@ -904,6 +904,17 @@ defmodule FermixCore.Management.PluginsTest do
                "The download did not match the signature it was published with."
     end
 
+    # M85 §04: Fermix keeps the checklist name for its own list tools.
+    test "a plugin named for the list tools is refused in the registry's own sentence" do
+      install = fn _name, _opts -> {:error, {:reserved_name, "checklist_pro"}} end
+
+      assert {:ok, view} = Plugins.install_start("checklist_pro", jobs: jobs(), install: install)
+
+      assert await(view, jobs())["failure"]["sentence"] ==
+               "checklist is a name Fermix keeps for its own list tools. Rename the plugin to " <>
+                 "install it."
+    end
+
     test "a store lock held by another operation says so" do
       install = fn _name, _opts -> {:error, :lock_unavailable} end
 

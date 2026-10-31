@@ -1,0 +1,259 @@
+# Lists (MILESTONE_85) — the owner's lists through real turns: filing items for two
+# projects from one message, ticking one, seeing a list, asking when an item could
+# belong to two lists, and never keeping a list in memory.
+#
+# WHAT A TURN CAN DRIVE. `fermix ask` is the owner's private chat (the CLI marks
+# its turns `chat_type: private`), so checklist_read and checklist_edit are on the
+# surface and the per-turn line names the owner's lists. No channel draws a list
+# yet, so a reply that shows one writes it as a checklist.
+#
+# ROUTE ASSERTIONS. A change to a list is the outcome under test, so the turns that
+# change one assert `tools_any: [checklist_edit]`, and the per-project case asserts
+# what the call carried (`tool_inputs_match_all`), phrasing-independent. Reading is
+# not gated on the tool: the model may already hold a list from the turn that made
+# it, so the read cases gate on the items the reply must name. The suite bans
+# memory_store everywhere (a ban, so always sticky): a list never lives in memory (§03). One labelled
+# route-sanity case pins the boundary against the reminder and job rails.
+#
+# FLOORS. Each turn's floor is the item or list the reply must name, or the tool
+# span that is the outcome. No wording gate is sticky; the rubrics own the rest.
+#
+# CLEANUP. The eval home keeps its lists between runs and a title names one list,
+# so every case ends with a turn in which the owner removes the lists it made. A
+# case that fails before that turn leaves its lists behind; a later run's create is
+# then refused as a title in use, so reseed the home when a run reports
+# title_taken. Every name and item is invented.
+#
+# PRECONDITIONS. None: lists need no switch, only the memory store, which an eval
+# home has.
+suite: lists
+risk: isolated_mutation
+title: "Lists — items for several projects in one message, ticks, reads, and never memory"
+description: >
+  Exercises the MILESTONE_85 list rail through real turns: the owner names new lists
+  in a folder; one message files items into two projects, each in its own list, in
+  one checklist_edit; a tick lands on the item the owner named; asking to see a list
+  returns its items as a short checklist; an item that could belong to two lists is
+  asked about, not guessed; and a shopping item reaches the list, never memory, a
+  reminder or a job.
+defaults:
+  timeout_ms: 180000
+  judge: true
+  expect:
+    status: ok
+    no_tool_errors: true
+    tools_none: [memory_store]
+
+scenarios:
+  - id: file_across_projects
+    title: "One message files items for two projects, each in its own list"
+    severity: critical
+    tags: [lists, core]
+    cases:
+      - id: garden_and_kitchen
+        turns:
+          - query: >-
+              Start two lists in a Projects folder: Quillmere Garden and Brackenridge
+              Kitchen.
+            expect:
+              tools_any: [checklist_edit]
+          - query: >-
+              For the garden I need to buy cedar mulch, and in the kitchen the pantry
+              hinge needs fixing.
+            expect:
+              tools_any: [checklist_edit]
+              tool_inputs_match_all: ["(?i)mulch", "(?i)hinge", "(?i)Quillmere", "(?i)Brackenridge"]
+          - query: "Done with those for now, remove both lists."
+            expect:
+              tools_any: [checklist_edit]
+        expect:
+          max_cost_usd: 1.0
+        rubric: |
+          1. The first reply confirms both lists exist, in the Projects folder.
+          2. The second reply says in a sentence where each item went: the mulch to
+             Quillmere Garden and the hinge to Brackenridge Kitchen.
+          3. The third reply confirms both lists were removed.
+      - id: site_and_app
+        turns:
+          - query: >-
+              I want a list per project. Make Larkspur Site and Larkspur App, both in a
+              Projects folder.
+            expect:
+              tools_any: [checklist_edit]
+          - query: >-
+              Add a contact form to the site, and on the app the login screen needs a
+              dark mode.
+            expect:
+              tools_any: [checklist_edit]
+              tool_inputs_match_all: ["(?i)contact form", "(?i)dark mode"]
+          - query: "Remove the two Larkspur lists, I'm moving them elsewhere."
+            expect:
+              tools_any: [checklist_edit]
+        expect:
+          max_cost_usd: 1.0
+        rubric: |
+          1. The second reply says the contact form went to Larkspur Site and the dark
+             mode to Larkspur App.
+          2. No reply repeats a whole list item by item after a change.
+          3. The third reply confirms both lists were removed.
+
+  - id: tick_one
+    title: "A tick lands on the item the owner named"
+    severity: critical
+    tags: [lists, core]
+    cases:
+      - id: groceries
+        turns:
+          - query: "Start a shopping list called Harrowgate Groceries with eggs, oat milk and lemons."
+            expect:
+              tools_any: [checklist_edit]
+          - query: "Got the eggs, tick them off."
+            expect:
+              tools_any: [checklist_edit]
+              tool_inputs_match_all: ["\"check\""]
+          - query: "Shopping's done, remove the Harrowgate Groceries list."
+            expect:
+              tools_any: [checklist_edit]
+        expect:
+          max_cost_usd: 1.0
+        rubric: |
+          1. The second reply confirms the eggs are ticked and that oat milk and lemons
+             are still open, or says how many are left.
+          2. The third reply confirms the list was removed.
+      - id: reading
+        turns:
+          - query: "Make me a reading list called Fenwick Reading: Middlemarch, Bleak House, Persuasion."
+            expect:
+              tools_any: [checklist_edit]
+          - query: "Finished Middlemarch last night, check it off."
+            expect:
+              tools_any: [checklist_edit]
+              tool_inputs_match_all: ["\"check\""]
+          - query: "Remove the Fenwick Reading list please."
+            expect:
+              tools_any: [checklist_edit]
+        expect:
+          max_cost_usd: 1.0
+        rubric: |
+          1. The second reply confirms Middlemarch is checked off.
+          2. The third reply confirms the list was removed.
+
+  - id: see_a_list
+    title: "Asked to see a list, the reply writes it as a short checklist"
+    tags: [lists]
+    cases:
+      - id: hardware
+        turns:
+          - query: "Start a list called Tallow Hardware with wood glue, sandpaper and two hinges."
+            expect:
+              tools_any: [checklist_edit]
+          - query: "What's on my Tallow Hardware list?"
+            expect:
+              reply_matches: "(?i)glue"
+          - query: "Remove the Tallow Hardware list."
+            expect:
+              tools_any: [checklist_edit]
+        expect:
+          max_cost_usd: 1.0
+        rubric: |
+          1. The second reply lists wood glue, sandpaper and the hinges, as a short
+             checklist or list, and nothing that is not on it.
+          2. The third reply confirms the list was removed.
+      - id: packing
+        turns:
+          - query: "Make a Corvane Packing list: passport, charger, rain jacket."
+            expect:
+              tools_any: [checklist_edit]
+          - query: "Show me the packing list."
+            expect:
+              reply_matches: "(?i)passport"
+          - query: "Trip's off, remove the Corvane Packing list."
+            expect:
+              tools_any: [checklist_edit]
+        expect:
+          max_cost_usd: 1.0
+        rubric: |
+          1. The second reply shows the passport, the charger and the rain jacket, as a
+             short checklist or list.
+          2. The third reply confirms the list was removed.
+
+  - id: ask_when_it_could_be_either
+    title: "An item that could belong to two lists is asked about, never guessed"
+    tags: [lists, judgment]
+    cases:
+      - id: landing_page
+        turns:
+          - query: "Make two lists in a Projects folder: Orrin Studio and Orrin Shop."
+            expect:
+              tools_any: [checklist_edit]
+          - query: "Add fixing the landing page to my project list."
+            expect:
+              tools_none: [checklist_edit]
+          - query: "Never mind that one. Remove both Orrin lists."
+            expect:
+              tools_any: [checklist_edit]
+        expect:
+          max_cost_usd: 1.0
+        rubric: |
+          1. The second reply asks which list the landing page fix belongs to, naming
+             Orrin Studio and Orrin Shop, and adds it to neither.
+          2. The third reply confirms both lists were removed.
+      - id: newsletter
+        turns:
+          - query: "Set up two project lists in a Projects folder: Halvering Blog and Halvering Podcast."
+            expect:
+              tools_any: [checklist_edit]
+          - query: "Put writing the newsletter on my projects."
+            expect:
+              tools_none: [checklist_edit]
+          - query: "Forget it, remove the two Halvering lists."
+            expect:
+              tools_any: [checklist_edit]
+        expect:
+          max_cost_usd: 1.0
+        rubric: |
+          1. The second reply asks which of Halvering Blog and Halvering Podcast the
+             newsletter belongs to, and adds it to neither.
+          2. The third reply confirms both lists were removed.
+
+  - id: list_not_reminder
+    title: "A shopping item reaches the list, never a reminder or a job"
+    tags: [lists, routing]
+    cases:
+      # THE labelled route-sanity case: an item for a list reaches checklist_edit, and
+      # neither the reminder rail nor a scheduled job, nor memory (suite default).
+      - id: oat_milk_route_sanity
+        turns:
+          - query: "Start a list called Brightfield Shopping with bread."
+            expect:
+              tools_any: [checklist_edit]
+          - query: "Add oat milk to my Brightfield Shopping list."
+            expect:
+              tools_any: [checklist_edit]
+              tools_none: [event_store, schedule_job]
+          - query: "Remove the Brightfield Shopping list."
+            expect:
+              tools_any: [checklist_edit]
+        expect:
+          max_cost_usd: 1.0
+        rubric: |
+          1. The second reply confirms oat milk is on the list in a sentence, and
+             mentions no reminder.
+          2. The third reply confirms the list was removed.
+      - id: batteries
+        turns:
+          - query: "Make a list called Ellery Errands with returning the library books."
+            expect:
+              tools_any: [checklist_edit]
+          - query: "Oh and batteries, put those on Ellery Errands too."
+            expect:
+              tools_any: [checklist_edit]
+              tools_none: [event_store, schedule_job]
+          - query: "All done, remove the Ellery Errands list."
+            expect:
+              tools_any: [checklist_edit]
+        expect:
+          max_cost_usd: 1.0
+        rubric: |
+          1. The second reply confirms the batteries were added, in a sentence.
+          2. The third reply confirms the list was removed.

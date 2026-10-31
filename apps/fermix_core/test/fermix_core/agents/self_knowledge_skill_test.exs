@@ -2,7 +2,10 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
   use ExUnit.Case, async: true
 
   alias FermixCore.Agents.SkillRegistry
+  alias FermixCore.Checklists.Access, as: ChecklistAccess
+  alias FermixCore.Checklists.Registry, as: ChecklistRegistry
   alias FermixCore.Delivery.OwnerInbox
+  alias FermixCore.Plugins.Registry, as: PluginRegistry
   alias FermixCore.NativeHost.Server, as: NativeHostServer
   alias FermixCore.Temporal.Registry, as: TemporalRegistry
   alias FermixCore.Trace
@@ -314,6 +317,27 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
   # reminder platforms and a three-channel derived order while the registry
   # had six and `OwnerInbox` four. Both are read from the code here, so the
   # next platform fails this test until the reference names it.
+  # M85: the lists reference quotes the engine's own refusals, so a reworded
+  # sentence fails here until the reference follows.
+  test "documents the owner's lists, their tools and the sentences their refusals say" do
+    body = File.read!(self_knowledge_path())
+    reference = "lists" |> reference_path() |> File.read!() |> String.replace(~r/\s+/, " ")
+
+    for tool <- ["checklist_read", "checklist_edit"] do
+      assert body =~ "`#{tool}`"
+      assert reference =~ "`#{tool}`"
+    end
+
+    for sentence <- [
+          ChecklistAccess.outside_refusal(),
+          ChecklistRegistry.describe_error({:list_full, "Fermix"}),
+          ChecklistRegistry.describe_error({:stale, 112, 113}),
+          PluginRegistry.reserved_name_sentence()
+        ] do
+      assert reference =~ sentence
+    end
+  end
+
   test "the events_reminders reference names every reminder platform and the derived order" do
     reference =
       "events_reminders" |> reference_path() |> File.read!() |> String.replace(~r/\s+/, " ")
