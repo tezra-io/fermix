@@ -67,7 +67,7 @@ Models one move of M75 §7.2 (B5). Three parts take part:
   untouched (`fenced_offer/2`, `later?/2`, `candidate.ex:400-412`).
   `move_offer` carries the attempt (`stream/3`, `move_worker.ex:370`), which
   only grows across restarts. Move ids are ordered by when the move started
-  (`move_id/1`, `move.ex:506-515`); with one move id, the fence orders by
+  (`move_id/1`, `move.ex:505-514`); with one move id, the fence orders by
   attempt.
 - `ReadyAfterStaged`: `move_ready` goes out only after `staged` is written.
   `restored/2` records `staged`, then tells the responder
