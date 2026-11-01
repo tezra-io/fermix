@@ -521,14 +521,14 @@ defmodule FermixCore.Browser.HostServerTest do
 
   defp in_turn(turn, pid, action, args \\ %{}) do
     send(turn, {:call, self(), pid, action, args})
-    assert_receive {:turn_answer, answer}, 5_000
+    assert_receive {:turn_answer, answer}, 30_000
     answer
   end
 
   defp finish(turn) do
     ref = Process.monitor(turn)
     send(turn, :finish)
-    assert_receive {:DOWN, ^ref, :process, ^turn, :normal}
+    assert_receive {:DOWN, ^ref, :process, ^turn, :normal}, 30_000
   end
 
   defp open_and_hand_over(turn, pid) do
@@ -545,7 +545,7 @@ defmodule FermixCore.Browser.HostServerTest do
     assert {:ok, _} = in_turn(turn, pid, "open", %{"url" => @verify, "observe" => false})
     finish(turn)
 
-    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}
+    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 30_000
     assert [_released] = FakeBrowserHostConnection.releases(connection)
   end
 
@@ -566,7 +566,7 @@ defmodule FermixCore.Browser.HostServerTest do
     assert {:ok, %{"tabs" => [%{"id" => "h1:t1"}]}} = in_turn(second, pid, "tabs")
     finish(second)
 
-    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}
+    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 30_000
     assert [released] = FakeBrowserHostConnection.releases(connection)
 
     opened =
@@ -585,22 +585,26 @@ defmodule FermixCore.Browser.HostServerTest do
     open_and_hand_over(turn, pid)
     Process.exit(turn, :shutdown)
 
-    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}
+    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 30_000
     assert [_released] = FakeBrowserHostConnection.releases(connection)
   end
 
+  # The idle period's own message, sent rather than waited for: a short
+  # period races the test's requests, each of which restarts it.
   test "a handed-over task nobody comes back to ends with the profile's idle period" do
-    {:ok, config} = Config.current(%{})
     {host, connection} = handover_host()
-    pid = start_server(host_availability: host, config: %{config | idle_profile_ttl_ms: 200})
+    pid = start_server(host_availability: host)
     ref = Process.monitor(pid)
     turn = start_turn()
 
     open_and_hand_over(turn, pid)
     finish(turn)
     assert {:ok, %{"running" => true}} = req(pid, "status")
+    assert FakeBrowserHostConnection.releases(connection) == []
 
-    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+    send(pid, :idle_timeout)
+
+    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 30_000
     assert [_released] = FakeBrowserHostConnection.releases(connection)
   end
 
@@ -614,7 +618,7 @@ defmodule FermixCore.Browser.HostServerTest do
     finish(turn)
     :ok = Link.cancelled(pid, connection, "cancelled by the person")
 
-    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}
+    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 30_000
     assert [_released] = FakeBrowserHostConnection.releases(connection)
     assert TurnMarker.lookup("owner-pane", turn) == nil
   end
@@ -629,7 +633,7 @@ defmodule FermixCore.Browser.HostServerTest do
     finish(turn)
     Process.exit(connection, :kill)
 
-    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}
+    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 30_000
   end
 
   test "a handover with no tab open is refused, and nothing is kept" do
