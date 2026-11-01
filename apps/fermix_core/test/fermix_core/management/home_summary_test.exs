@@ -103,7 +103,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
        facts(provision: ledger(:failed, failure: failure("unavailable", "nbg1"))), "problem",
        "Falkenstein has no CPX22 right now.", "create_in"},
       {"no capacity anywhere", facts(provision: ledger(:failed, failure: failure("unavailable"))),
-       "problem", "Falkenstein has no CPX22 right now.", "learn_more"},
+       "problem", "Falkenstein has no CPX22 right now.", "start_again"},
       {"the account's limit",
        facts(provision: ledger(:failed, failure: failure("account_limit"))), "problem",
        "Hetzner limits new servers on this account.", "open_console"},
@@ -151,7 +151,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
       {"nothing in stock for the recommendation",
        facts(provision: ledger(:failed, failure: failure("nothing_in_stock"))), "problem",
        "Hetzner has no server type with 4 GB in stock in Falkenstein, Nuremberg or Helsinki " <>
-         "right now.", "learn_more"},
+         "right now.", "start_again"},
       {"a move undone, the server still held",
        ready_facts(move: move("aborted"), link: link(enrollment: provisioned(:used, @cand))),
        "undone", "The move was undone. Fermix still runs on this Mac.", "try_again"},
@@ -661,12 +661,61 @@ defmodule FermixCore.Management.HomeSummaryTest do
       assert ids(detail["alternatives"]) == ["own_server", "open_console", "delete_server"]
     end
 
-    test "the account's limit offers a server of the owner's own beside it" do
+    # Review R3: a refusal the owner or the provider can lift is offered again.
+    test "the account's limit offers to start again once lifted, and a server of the " <>
+           "owner's own" do
       %{"detail" => detail} =
         HomeSummary.summary(facts(provision: ledger(:failed, failure: failure("account_limit"))))
 
-      assert ids(detail["alternatives"]) == ["own_server"]
+      assert ids(detail["alternatives"]) == ["start_again", "own_server"]
       assert detail["seen_at"] == "2031-05-04T11:00:00Z"
+    end
+
+    test "no stock anywhere offers to start again, and Learn more beside it" do
+      for reason <- ["unavailable", "nothing_in_stock"] do
+        summary = HomeSummary.summary(facts(provision: ledger(:failed, failure: failure(reason))))
+
+        assert %{"id" => "start_again", "confirm" => confirm} = summary["action"]
+        assert confirm =~ "create your server again"
+        assert ids(summary["detail"]["alternatives"]) == ["learn_more"]
+      end
+    end
+
+    # Review R2: what Fermix created for a move that has not begun can be
+    # deleted from every screen it waits on, and nothing else can.
+    test "a server Fermix created, ready or blocked, offers to delete it" do
+      for facts <- [ready_facts([]), ready_facts(review: review([warn(), block()]))] do
+        summary = HomeSummary.summary(facts)
+
+        assert [%{"id" => "delete_server", "label" => "Delete your server"} = delete] =
+                 summary["detail"]["alternatives"]
+
+        assert delete["confirm"] == "Delete your server? Everything on it is deleted."
+
+        assert delete["key"] ==
+                 HomeSummary.action_key(
+                   "delete_server",
+                   "Delete your server",
+                   delete["confirm"],
+                   [],
+                   "61839204"
+                 )
+      end
+
+      blocked = HomeSummary.summary(ready_facts(review: review([block()])))
+
+      assert blocked["detail"]["note"] ==
+               "Your server costs its monthly price until it is deleted."
+    end
+
+    test "no delete is offered for a server of the owner's own, nor while a move runs" do
+      own = facts(candidates: [candidate()], link: link(enrollment: manual(:used, @cand)))
+      assert HomeSummary.summary(own)["detail"]["alternatives"] in [nil, []]
+
+      for phase <- ["requested", "streaming", "committing", "undoing"] do
+        summary = HomeSummary.summary(ready_facts(move: move(phase)))
+        refute "delete_server" in ids(summary["detail"]["alternatives"] || []), phase
+      end
     end
 
     test "Create in names the next location and carries its id" do
@@ -682,7 +731,24 @@ defmodule FermixCore.Management.HomeSummaryTest do
     test "a replace's ready holds the new server's facts and until when it waits" do
       %{"detail" => detail} = HomeSummary.summary(replace_ready([]))
 
-      assert Map.delete(detail, "lines") == %{
+      # Review R2: the new server, and only it, can be deleted before the move.
+      assert [%{"id" => "delete_server", "label" => "Delete your new server"} = delete] =
+               detail["alternatives"]
+
+      assert delete["confirm"] == "Delete your new server? Everything on it is deleted."
+      new_id = replace_ready([]).provision.server.id
+      assert delete["key"] =~ ~r/\A[A-Za-z0-9_-]+\z/
+
+      assert delete["key"] ==
+               HomeSummary.action_key(
+                 "delete_server",
+                 "Delete your new server",
+                 delete["confirm"],
+                 [],
+                 new_id
+               )
+
+      assert Map.drop(detail, ["lines", "alternatives"]) == %{
                "server" => %{
                  "name" => "fermix-general-5d2e",
                  "type" => "CPX32",
@@ -694,6 +760,24 @@ defmodule FermixCore.Management.HomeSummaryTest do
                "readiness" => [],
                "waits_until" => "2031-05-05T11:40:00Z"
              }
+    end
+
+    # Review R4: the replace stopped before anything was made for it, so the
+    # server the home lives on is untouched and only Replace is offered.
+    test "a replace that stopped before its new server is a problem, offering Replace alone" do
+      summary =
+        HomeSummary.summary(desktop(provision: failed(created_ledger(), step_failure("create"))))
+
+      assert %{"state" => "problem", "action" => %{"id" => "replace_server"} = replace} = summary
+      assert replace["needs"] == ["choice"]
+      assert summary["detail"]["kind"] == "create_failed"
+      assert summary["detail"]["alternatives"] == []
+
+      assert summary["detail"]["note"] ==
+               "Your server still runs Fermix, so replacing it can be tried again."
+
+      assert summary["sentence"] ==
+               "Fermix could not reach Hetzner, so check this computer's connection and try again."
     end
 
     test "a replace's problem before the move offers to delete the new server" do
@@ -802,7 +886,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
     end
 
     test "Learn more opens the docs at the provider's part, Open its console" do
-      %{"action" => learn} =
+      %{"detail" => %{"alternatives" => [learn]}} =
         HomeSummary.summary(facts(provision: ledger(:failed, failure: failure("unavailable"))))
 
       assert learn["url"] == "https://fermix.ai/docs/always-on/#hetzner"

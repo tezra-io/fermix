@@ -364,6 +364,81 @@ defmodule FermixCore.Home.Provision.LedgerTest do
   # M75 lean v1 §4.3, §7 `on` Details "Replace the server": a linked desktop
   # creates a new server for the home, the old one keeps the home until the
   # move to the new one is done, and only then is the old one deleted.
+  # Review R1, R5: the transforms a step's ending and a new token write.
+  describe "a token that replaces the one that stopped a create" do
+    test "ends its failure, and a create that made nothing leaves no short id behind" do
+      for reason <- ["read_only_token", "token_refused"] do
+        ledger = %{Ledger.empty() | ref: "a3f9", failure: token_failure(reason)}
+
+        replaced =
+          ledger |> Ledger.connect(@token, @now) |> Ledger.token_replaced(FakeCloudProvider)
+
+        assert %{failure: nil, ref: nil, token: @token, token_state: :accepted} = replaced
+      end
+    end
+
+    test "keeps a create that left something standing as one to try again" do
+      firewall = %{name: "fermix-general-a3f9", id: "nb-1", status: :created}
+
+      ledger = %{
+        Ledger.empty()
+        | ref: "a3f9",
+          firewall: firewall,
+          failure: token_failure("token_refused")
+      }
+
+      replaced = Ledger.token_replaced(ledger, FakeCloudProvider)
+      assert replaced.firewall == firewall
+      assert replaced.ref == "a3f9"
+
+      assert %{
+               reason: "token_replaced",
+               sentence: "The new token works, so try again.",
+               action: "create",
+               type: "small-4",
+               location: "osl1"
+             } = replaced.failure
+    end
+
+    test "leaves any other failure, and a delete's, as it is" do
+      for failure <- [
+            %{token_failure("unavailable") | sentence: "Oslo has no Small 4 right now."},
+            %{token_failure("read_only_token") | action: "delete"}
+          ] do
+        ledger = %{Ledger.empty() | ref: "a3f9", failure: failure}
+        assert Ledger.token_replaced(ledger, FakeCloudProvider) == ledger
+      end
+    end
+  end
+
+  describe "a step's end" do
+    test "keeps the failure its run said, with the server's size and place, and clears the step" do
+      server = %{name: "fermix-general-a3f9", id: "nb-2", status: :created, type: "large-8"}
+      server = Map.merge(server, %{location: "osl1"})
+      {:ok, ledger} = Ledger.put_action(%{Ledger.empty() | server: server}, "power_on", @now)
+      failure = %{reason: "unreachable", sentence: "Invented.", next_location: nil, at: @now}
+
+      ended = Ledger.end_step(ledger, Map.put(failure, :action, "power_on"))
+
+      assert ended.action == nil
+
+      assert ended.failure ==
+               Map.merge(failure, %{action: "power_on", type: "large-8", location: "osl1"})
+    end
+  end
+
+  defp token_failure(reason) do
+    %{
+      reason: reason,
+      sentence: "Invented refusal of the token.",
+      next_location: nil,
+      at: @now,
+      action: "create",
+      type: "small-4",
+      location: "osl1"
+    }
+  end
+
   describe "a replace" do
     setup %{home: home} do
       put!(home, &Ledger.connect(&1, @token, @now))

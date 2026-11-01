@@ -287,7 +287,9 @@ defmodule FermixCore.Management.Provision do
   end
 
   defp keep_token(provider, token, others?, opts) do
-    case Ledger.update(home(opts), provider.id(), &{:ok, Ledger.connect(&1, token, now(opts))}) do
+    change = &{:ok, &1 |> Ledger.connect(token, now(opts)) |> Ledger.token_replaced(provider)}
+
+    case Ledger.update(home(opts), provider.id(), change) do
       {:ok, _ledger} ->
         {:ok, Map.put(provider_ledger_view(home(opts), provider), "other_servers", others?)}
 
@@ -582,7 +584,7 @@ defmodule FermixCore.Management.Provision do
          :ok <- keep_choice(provider, priced, opts) do
       run_plan(provider, plan, priced, report, opts)
     else
-      {:error, reason} -> job_failure(remembered(reason, provider, request, opts), provider)
+      {:error, reason} -> create_failed(reason, provider, request, opts)
     end
   end
 
@@ -649,16 +651,18 @@ defmodule FermixCore.Management.Provision do
         {:ok, %{"server" => server.name, "type" => server.type, "location" => server.location}}
 
       {:error, reason} ->
-        job_failure(remembered(reason, provider, request, opts), provider)
+        create_failed(reason, provider, request, opts)
     end
   end
 
-  # A create's refusal stays in the ledger with the size and place it was
-  # for, for the summary; one for the token marks it refused.
-  defp remembered(reason, _provider, _request, _opts) when reason in [:server_exists, :no_token],
-    do: reason
+  # A create's refusal is the failure its ending keeps (`ended/3`), with the
+  # size and place it was for; one for the token marks it refused too. One
+  # that found a server, or no token, kept nothing to say.
+  defp create_failed(reason, provider, _request, _opts)
+       when reason in [:server_exists, :no_token],
+       do: job_failure(reason, provider)
 
-  defp remembered(reason, provider, request, opts) do
+  defp create_failed(reason, provider, request, opts) do
     reason = token_reason(reason, provider, opts)
 
     failure = %{
@@ -671,10 +675,7 @@ defmodule FermixCore.Management.Provision do
       location: request.location
     }
 
-    case Ledger.update(home(opts), provider.id(), &{:ok, Ledger.put_failure(&1, failure)}) do
-      {:ok, _ledger} -> reason
-      {:error, why} -> log_unkept(why, reason)
-    end
+    step_failure(reason, provider, failure)
   end
 
   defp next_location({:unavailable, %{next: next}}), do: next
@@ -721,7 +722,7 @@ defmodule FermixCore.Management.Provision do
         {:ok, %{"action" => Atom.to_string(action)}}
 
       {:error, reason} ->
-        job_failure(step_failed(reason, power_step(action), provider, opts), provider)
+        step_failed(reason, power_step(action), provider, opts)
     end
   end
 
@@ -780,7 +781,7 @@ defmodule FermixCore.Management.Provision do
   defp run_delete(provider, :current, report, opts) do
     case Driver.delete(provider, home(opts), run_opts(provider, report, opts)) do
       :ok -> {:ok, %{"deleted" => true}}
-      {:error, reason} -> job_failure(step_failed(reason, "delete", provider, opts), provider)
+      {:error, reason} -> step_failed(reason, "delete", provider, opts)
     end
   end
 
@@ -826,37 +827,25 @@ defmodule FermixCore.Management.Provision do
         &{:ok, Ledger.put_replace_failure(&1, failure)}
       )
 
-  # A power action or a delete that stopped stays in the ledger with the
-  # step and the server's size and place, unless the token's refusal, which
-  # marks the token, says it.
+  # A power action or a delete that stopped is the failure its ending keeps,
+  # with the step (and the server's size and place, `Ledger.end_step/2`),
+  # unless the token's refusal, which marks the token, says it.
   defp step_failed(reason, step, provider, opts) do
     case token_reason(reason, provider, opts) do
-      :token_refused -> :token_refused
-      reason -> keep_step_failure(reason, step, provider, opts)
-    end
-  end
+      :token_refused ->
+        job_failure(:token_refused, provider)
 
-  defp keep_step_failure(reason, step, provider, opts) do
-    change = fn ledger ->
-      {:ok, Ledger.put_failure(ledger, step_failure(reason, step, ledger.server, provider, opts))}
-    end
+      reason ->
+        failure = %{
+          reason: Provision.failure_word(reason),
+          sentence: Provision.error_sentence(reason, provider),
+          next_location: nil,
+          at: now(opts),
+          action: step
+        }
 
-    case Ledger.update(home(opts), provider.id(), change) do
-      {:ok, _ledger} -> reason
-      {:error, why} -> log_unkept(why, reason)
+        step_failure(reason, provider, failure)
     end
-  end
-
-  defp step_failure(reason, step, server, provider, opts) do
-    %{
-      reason: Provision.failure_word(reason),
-      sentence: Provision.error_sentence(reason, provider),
-      next_location: nil,
-      at: now(opts),
-      action: step,
-      type: server && server.type,
-      location: server && server.location
-    }
   end
 
   # -- after a replace's move ---------------------------------------------------
@@ -1102,39 +1091,35 @@ defmodule FermixCore.Management.Provision do
     end
   end
 
-  # A step's job (`:clears_action`) ends by clearing the step's action,
-  # whatever its run answered or raised; a reconcile and the clean-up after
-  # a replace's move name no step (`:keeps_action`).
+  # A step's job (`:clears_action`) is ended by its owner, the job family,
+  # however its run ended (`ended/3`); a reconcile and the clean-up after a
+  # replace's move name no step (`:keeps_action`).
   defp start(provider, opts, run, ending) when ending in [:clears_action, :keeps_action] do
-    started =
-      Jobs.start(
-        @kind,
-        Keyword.merge(Keyword.get(opts, :jobs, []),
-          name: provider.id(),
-          run: fn _job_id, report ->
-            step(provider, opts, ending, fn -> run.(&report.({:phase, &1})) end)
-          end
-        )
-      )
+    job = [
+      name: provider.id(),
+      run: fn _job_id, report -> run.(&report.({:phase, &1})) end
+    ]
 
-    case started do
+    job = if ending == :clears_action, do: job ++ [ending: &ended(provider, opts, &1)], else: job
+
+    case Jobs.start(@kind, Keyword.merge(Keyword.get(opts, :jobs, []), job)) do
       {:ok, view} -> {:ok, view}
       {:error, :busy} -> {:error, {:busy, Atom.to_string(@kind)}}
     end
   end
 
-  defp step(_provider, _opts, :keeps_action, run), do: run.()
+  # The one ending of a step (Always On setup §5): in one write, what its run
+  # left, then its action goes. A failure the run answered is kept as it
+  # said it; a run that answered nothing (it raised, exited, was killed or ran
+  # past its budget) is kept as interrupted, whose reason is in the job
+  # family's log; a cancelled one leaves nothing, since whoever cancelled it
+  # takes the next step.
+  defp ended(provider, opts, ended) do
+    change = &ending(&1, ended, provider, now(opts))
 
-  defp step(provider, opts, :clears_action, run) do
-    run.()
-  after
-    end_step(provider, opts)
-  end
-
-  defp end_step(provider, opts) do
-    case Ledger.update(home(opts), provider.id(), &Ledger.clear_action/1) do
-      {:ok, _ledger} ->
-        :ok
+    case Ledger.update(home(opts), provider.id(), change) do
+      {:ok, ledger} ->
+        log_ending(ended, ledger, provider)
 
       {:error, :no_action} ->
         :ok
@@ -1143,6 +1128,24 @@ defmodule FermixCore.Management.Provision do
         Logger.error("provision: the end of a step could not be kept: #{inspect(reason)}")
     end
   end
+
+  defp ending(ledger, {:answered, {:error, _refusal, %{} = failure}}, _provider, _at),
+    do: {:ok, Ledger.end_step(ledger, failure)}
+
+  defp ending(ledger, {:answered, _answer}, _provider, _at), do: Ledger.clear_action(ledger)
+  defp ending(ledger, :cancelled, _provider, _at), do: Ledger.clear_action(ledger)
+
+  defp ending(ledger, unanswered, provider, at) when unanswered in [:crashed, :timed_out],
+    do: Ledger.interrupt(ledger, provider, at)
+
+  defp log_ending(unanswered, ledger, provider) when unanswered in [:crashed, :timed_out] do
+    Logger.warning(
+      "provision: the #{ledger.failure.action} step on #{provider.id()} ended without an " <>
+        "answer (#{unanswered}); it is kept as interrupted"
+    )
+  end
+
+  defp log_ending(_ended, _ledger, _provider), do: :ok
 
   defp run_opts(provider, report, opts),
     do: provider_opts(opts) ++ [report: report] ++ code_opts(provider, opts)
@@ -1227,6 +1230,12 @@ defmodule FermixCore.Management.Provision do
   defp job_failure(reason, provider) do
     code = if unavailable_reason?(reason), do: :unavailable, else: :refused
     {:error, {code, Provision.error_sentence(reason, provider)}}
+  end
+
+  # A refusal whose failure the step's ending keeps (`ended/3`).
+  defp step_failure(reason, provider, failure) do
+    {:error, refusal} = job_failure(reason, provider)
+    {:error, refusal, failure}
   end
 
   defp unavailable_reason?({kind, _detail})

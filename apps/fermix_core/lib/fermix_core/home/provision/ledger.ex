@@ -139,6 +139,8 @@ defmodule FermixCore.Home.Provision.Ledger do
   @statuses ~w(requested creating created deleting gone)a
   @status_words Map.new(@statuses, &{Atom.to_string(&1), &1})
   @action_kinds ~w(create delete power_on power_reset)
+  # The failures a token's own refusal leaves.
+  @token_reasons ~w(read_only_token token_refused)
   # What a failure keeps beside its reason; null for one written before it.
   @failure_step %{action: nil, type: nil, location: nil}
 
@@ -317,6 +319,35 @@ defmodule FermixCore.Home.Provision.Ledger do
   def connect(ledger, token, %DateTime{} = now) when is_binary(token) and token != "",
     do: %{ledger | token: token, token_state: :accepted, connected_at: now}
 
+  @doc """
+  A token was accepted in place of one whose refusal stopped a create
+  (`read_only_token`, `token_refused`; review R1): that failure no longer
+  says what is wrong. A create that made nothing but its short id leaves
+  the ledger as it was before it, so the next screen offers the create; one
+  that left something standing (or stopped a replace) keeps its failure as
+  `token_replaced`, in `provider`'s words, so the next screen offers it
+  again. Any other failure, and everything Fermix created, stays.
+  """
+  @spec token_replaced(t(), module()) :: t()
+  def token_replaced(%{failure: %{reason: reason, action: action}} = ledger, provider)
+      when reason in @token_reasons and action in ["create", nil] and is_atom(provider) do
+    if made_nothing?(ledger),
+      do: %{ledger | failure: nil, ref: nil},
+      else: %{ledger | failure: replaced_failure(ledger.failure, provider)}
+  end
+
+  def token_replaced(ledger, provider) when is_atom(provider), do: ledger
+
+  defp made_nothing?(ledger),
+    do: match?(%{server: nil, firewall: nil, primary_ips: [], replace: nil}, ledger)
+
+  defp replaced_failure(failure, provider),
+    do: %{
+      failure
+      | reason: "token_replaced",
+        sentence: Provision.error_sentence(:token_replaced, provider)
+    }
+
   @doc "The provider refused a call for the token it accepted before."
   @spec token_refused(t()) :: t()
   def token_refused(%{token: token} = ledger) when is_binary(token),
@@ -397,6 +428,22 @@ defmodule FermixCore.Home.Provision.Ledger do
       do: %{ledger | action: %{action | type: type, location: location}}
 
   def choose(%{action: nil} = ledger, %{type: _type, location: _location}), do: ledger
+
+  @doc """
+  The step's job ended with `failure`, in its run's words: it is kept with
+  the step's server's size and place where it names none, and the action
+  goes, in one write (`Management.Provision`'s ending).
+  """
+  @spec end_step(t(), map()) :: t()
+  def end_step(ledger, %{reason: reason, sentence: sentence} = failure)
+      when is_binary(reason) and is_binary(sentence) do
+    server = %{
+      type: ledger.server && ledger.server.type,
+      location: ledger.server && ledger.server.location
+    }
+
+    %{ledger | action: nil, failure: with_step(Map.merge(server, failure))}
+  end
 
   @doc "The step's job ended: its action goes; `:no_action` when none stood."
   @spec clear_action(t()) :: {:ok, t()} | {:error, :no_action}

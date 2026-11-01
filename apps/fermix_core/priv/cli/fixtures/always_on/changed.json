@@ -14,6 +14,16 @@
         "url": null
       },
       "detail": {
+        "alternatives": [
+          {
+            "confirm": "Delete your server? Everything on it is deleted.",
+            "id": "delete_server",
+            "key": "c1yXdvadZiiMCMzJaPBJhg",
+            "label": "Delete your server",
+            "needs": [],
+            "url": null
+          }
+        ],
         "lines": [
           {
             "label": "Server",
@@ -69,7 +79,7 @@
         },
         "waits_until": "2031-05-05T11:00:00Z"
       },
-      "key": "Hpj619zuAVxgXXRVumw26w",
+      "key": "8nXB7YvhWSovYv-s9_sKvA",
       "notice": {
         "id": "ready:cand-5e2a9c1f7b3d4086",
         "sentence": "Your server is ready for the move."

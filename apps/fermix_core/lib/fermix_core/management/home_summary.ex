@@ -136,6 +136,9 @@ defmodule FermixCore.Management.HomeSummary do
   @untold_sentences ~w(off on problem)
   @moving ~w(requested streaming committed)
   @undoing ~w(aborting undoing)
+  # A move under way, from its request to its undoing: nothing it goes to is
+  # offered for deletion.
+  @in_flight @moving ++ ["committing" | @undoing]
   @receiving ~w(receiving staged activating)
   @power_steps ~w(power_on power_reset)
   # The states whose Details have lines.
@@ -375,7 +378,7 @@ defmodule FermixCore.Management.HomeSummary do
   # A step that stopped, by the step: a power action's and a delete's, then
   # a create's by its reason.
   defp failure_problem(%{action: action} = failure, facts) when action in @power_steps,
-    do: failure |> power_failed() |> before_move(facts)
+    do: failure |> power_failed() |> cleanup(facts)
 
   defp failure_problem(%{action: "delete"} = failure, facts) do
     {note, delete} = server_costs(facts.provision)
@@ -394,15 +397,18 @@ defmodule FermixCore.Management.HomeSummary do
       "next_location" => next,
       "seen_at" => iso(failure.at)
     })
-    |> before_move(facts)
+    |> cleanup(facts)
   end
 
+  # A refusal the provider may lift by itself (stock) or once the owner did
+  # (an account limit) is offered again, Start again with the size and place
+  # the failure kept.
   defp failure_problem(%{reason: reason} = failure, facts) do
     {kind, act, alternatives} =
       case reason do
-        "unavailable" -> {"no_capacity", :learn_more, []}
-        "nothing_in_stock" -> {"no_capacity", :learn_more, []}
-        "account_limit" -> {"account_limit", :open_console, [:own_server]}
+        "unavailable" -> {"no_capacity", :start_again, [:learn_more]}
+        "nothing_in_stock" -> {"no_capacity", :start_again, [:learn_more]}
+        "account_limit" -> {"account_limit", :open_console, [:start_again, :own_server]}
         "read_only_token" -> {"read_only_token", :paste_token, []}
         "gone" -> {"deleted", :start_again, []}
         _other -> {"create_failed", :start_again, []}
@@ -412,7 +418,7 @@ defmodule FermixCore.Management.HomeSummary do
       "seen_at" => iso(failure.at),
       "alternatives" => Enum.map(alternatives, &action(&1, words(facts)))
     })
-    |> before_move(facts)
+    |> cleanup(facts)
   end
 
   defp power_failed(%{action: action} = failure) do
@@ -426,7 +432,7 @@ defmodule FermixCore.Management.HomeSummary do
   defp provisioned(%{provision: %{state: :creating}}), do: creating(:starting)
 
   defp provisioned(%{provision: %{state: :gone, server: server}} = facts),
-    do: deleted(server, :start_again, facts) |> before_move(facts)
+    do: deleted(server, :start_again, facts) |> cleanup(facts)
 
   defp provisioned(%{provision: %{state: :created, server: server}} = facts),
     do: created(server, facts)
@@ -434,7 +440,7 @@ defmodule FermixCore.Management.HomeSummary do
   defp provisioned(_facts), do: nil
 
   defp created(%{power: "off"} = server, facts),
-    do: turned_off(server) |> before_move(facts)
+    do: turned_off(server) |> cleanup(facts)
 
   defp created(server, facts), do: waiting_server(window(facts), server, facts)
 
@@ -454,7 +460,7 @@ defmodule FermixCore.Management.HomeSummary do
     case held(facts, id) do
       nil ->
         problem("waited_too_long", sentence(:waited_too_long, facts), :start_again, %{})
-        |> before_move(facts)
+        |> cleanup(facts)
 
       candidate ->
         ready(candidate, server, facts)
@@ -467,7 +473,7 @@ defmodule FermixCore.Management.HomeSummary do
     problem("not_set_up", sentence(:not_set_up, facts), :start_again, %{
       "alternatives" => [action(:own_server), action(:open_console, words(facts))]
     })
-    |> before_move(facts)
+    |> cleanup(facts)
   end
 
   # A server of the owner's own (`home.enroll.open`), with none Fermix created.
@@ -520,8 +526,12 @@ defmodule FermixCore.Management.HomeSummary do
   defp creating(step),
     do: view("creating", Copy.summary_sentence(step, %{}), action(:cancel), %{})
 
-  # The server is held and waits for Move now, unless the last review blocks.
-  defp ready(candidate, server, facts) do
+  # The server is held and waits for Move now, unless the last review blocks;
+  # either way what Fermix created for it can be deleted.
+  defp ready(candidate, server, facts),
+    do: candidate |> ready_view(server, facts) |> cleanup(facts)
+
+  defp ready_view(candidate, server, facts) do
     items = review_items(facts.review, candidate["candidate_id"])
 
     case for(%{"status" => "block", "sentence" => block} <- items, do: block) do
@@ -557,26 +567,35 @@ defmodule FermixCore.Management.HomeSummary do
     }
   end
 
-  # A problem before the move, while a server Fermix created still stands:
-  # Details says it costs money and offers to delete it (during a replace,
-  # the new one).
-  defp before_move(view, %{provision: %{server: server} = provision}) do
-    if standing?(server) do
-      detail = view["detail"]
-      {note, delete} = server_costs(provision)
-
-      %{
-        view
-        | "detail" => %{
-            detail
-            | "note" => detail["note"] || note,
-              "alternatives" => detail["alternatives"] ++ [delete]
-          }
-      }
+  # Before a move, while a server Fermix created for it stands, the screen
+  # offers to delete it (during a replace, the new one) beside its own
+  # alternatives, and a problem's note says it costs money: built here
+  # once, for every screen a waiting server has (review R2). Never the
+  # server the home lives on, and never while a move runs.
+  defp cleanup(view, facts) do
+    if deletable?(facts) do
+      {note, delete} = server_costs(facts.provision)
+      detail = Map.update(view["detail"], "alternatives", [delete], &(&1 ++ [delete]))
+      %{view | "detail" => noted(detail, view["state"], note)}
     else
       view
     end
   end
+
+  defp noted(detail, "problem", note), do: Map.update!(detail, "note", &(&1 || note))
+  defp noted(detail, _state, _note), do: detail
+
+  defp deletable?(%{provision: provision} = facts),
+    do: standing?(provision.server) and not home_server?(facts) and not moving?(facts)
+
+  # The server the home lives on: a linked desktop's own, outside a replace
+  # or once the move to the new one is done.
+  defp home_server?(%{role: :device, provision: %{replace: %{current: :old}}}), do: false
+  defp home_server?(%{role: :device}), do: true
+  defp home_server?(_facts), do: false
+
+  defp moving?(%{move: %{"phase" => phase}}), do: phase in @in_flight
+  defp moving?(_facts), do: false
 
   defp server_costs(%{replace: %{}}),
     do: {Copy.summary_sentence(:new_server_costs, %{}), action(:delete_server, %{which: "new"})}
@@ -660,6 +679,7 @@ defmodule FermixCore.Management.HomeSummary do
       &away/1,
       &too_old/1,
       &token_stopped/1,
+      &replace_stopped/1,
       &server_disk/1,
       &replacing/1,
       &desktop_backup/1
@@ -722,6 +742,18 @@ defmodule FermixCore.Management.HomeSummary do
   end
 
   defp token_stopped(_facts), do: nil
+
+  # A replace that stopped before the provider made anything for it (review
+  # R4): the server the home lives on is as it was, so Replace is offered
+  # again, never a Start again, whose delete would reach that server.
+  defp replace_stopped(%{provision: %{replace: nil, failure: %{action: "create"} = failure}}) do
+    problem("create_failed", failure.sentence, :replace_server, %{
+      "note" => Copy.summary_sentence(:replace_stopped, %{}),
+      "seen_at" => iso(failure.at)
+    })
+  end
+
+  defp replace_stopped(_facts), do: nil
 
   defp server_disk(%{primary_home: %{"disk" => disk}}), do: disk_problem(disk, :disk_full)
   defp server_disk(_facts), do: nil
@@ -817,7 +849,7 @@ defmodule FermixCore.Management.HomeSummary do
 
   # The new server, by where the old server's 24-hour code for it stands.
   defp new_server(%{power: "off"} = server, facts),
-    do: server |> turned_off(:replace_turned_off, true) |> before_move(facts)
+    do: server |> turned_off(:replace_turned_off, true) |> cleanup(facts)
 
   defp new_server(server, facts), do: new_server_window(new_window(facts), server, facts)
 
@@ -841,6 +873,7 @@ defmodule FermixCore.Management.HomeSummary do
           "readiness" => [],
           "waits_until" => candidate["expires_at"]
         })
+        |> cleanup(facts)
     end
   end
 
@@ -858,7 +891,7 @@ defmodule FermixCore.Management.HomeSummary do
     do: view("creating", sentence(key, facts), action(:cancel), %{})
 
   defp new_server_problem(kind, key, facts),
-    do: problem(kind, sentence(key, facts), :start_again, %{}) |> before_move(facts)
+    do: problem(kind, sentence(key, facts), :start_again, %{}) |> cleanup(facts)
 
   # Deleting the old server after the move stopped: it stays, and costs.
   defp delete_failed(failure) do

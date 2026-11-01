@@ -209,6 +209,7 @@ defmodule FermixCore.Home.Provision do
           | {:action_timeout, step()}
           | :token_invalid
           | :token_refused
+          | :token_replaced
           | {:code_unavailable, String.t()}
           | :user_data_too_large
           | :invalid_code
@@ -463,6 +464,9 @@ defmodule FermixCore.Home.Provision do
 
   defp sentence(reason, words) when reason in [:unauthorized, :token_refused],
     do: "#{words.name} no longer accepts Fermix's token."
+
+  defp sentence(:token_replaced, _words),
+    do: "The new token works, so try again."
 
   defp sentence(:read_only_token, words),
     do:

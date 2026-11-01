@@ -655,35 +655,44 @@ it, never a second writer.
     creating, deleting, turning on or restarting the server, each with the
     step in hand, then starting, installing Fermix, connecting, with
     **Cancel** while it creates); ready (**Move now**, with the review's
-    warnings, and that there is no way back to this Mac in this version); the
-    move undone (**Try again**);
+    warnings, and that there is no way back to this Mac in this version,
+    and **Delete your server** beside it for the server Fermix created, never
+    for one of the owner's own); the move undone (**Try again**);
   - on the computer the move leaves: moving ("Waiting for your server to
     confirm the move. Fermix keeps trying." once it waits on the server);
     "Fermix runs on your server. Last backup 2 hours ago." once linked; no
     longer connected to it (**Learn more**); while it replaces the server
     Fermix created on Hetzner: creating, starting, installing Fermix on or
     connecting the new server (**Cancel**), "Your new server is ready for the
-    move." (**Move now**), "Moving to your new server. Messages wait until it
-    is done.", removing the old server, and a problem of the new server in
-    its own words (**Start again**, or **Delete your old server** when
-    deleting the old one stopped after the move);
+    move." (**Move now**, and **Delete your new server** beside it), "Moving
+    to your new server. Messages wait until it is done.", removing the old
+    server, a problem of the new server in its own words (**Start again**, or
+    **Delete your old server** when deleting the old one stopped after the
+    move), and a replace that stopped before Hetzner made anything for it,
+    the old server running Fermix as before (**Replace the server** again,
+    never Start again);
   - on the server: waiting for its move, then "Fermix runs here.";
   - a problem, in one sentence with the one action that fixes it: turned off
     (**Turn it on**), no answer for 10 minutes of this computer being awake
     while Hetzner says it runs (**Restart server**), deleted in Hetzner, never
     checked in within 30 minutes of being awake for it or waited past its 24
     hours (**Start again**), no capacity (**Create in** the next location in
-    stock), the account's limit (**Open Hetzner**, beside the own-server
-    path), a token that can only read or stopped working (**Paste a new
-    token**), this computer too old for its server (**Update**), the server's
+    stock, or **Start again** with the same size and place once it is back
+    in stock), the account's limit (**Open Hetzner**, then **Start again**
+    once the limit is lifted, beside the own-server path), a token that can
+    only read or stopped working (**Paste a new token**; once one that writes
+    is accepted, Create server is offered again, or Start again where the
+    refused create left something standing), this computer too old for its server (**Update**), the server's
     disk 85% full or more, the last backup over 3 days old (**Back up now**),
     a review that blocks the move (**Check again**), turning the server on or
     restarting it that stopped (**Turn it on**, **Restart server** again), a
-    delete that stopped (**Delete your server** again), and a step Fermix's
-    own restart cut short (**Start again**). Every step's ending is kept on
-    this computer, so the problem outlives the step. Before the move, while
-    the created server stands, Details also says it costs money and offers to
-    delete it.
+    delete that stopped (**Delete your server** again), and a step that ended
+    with no answer, cut short by Fermix's own restart or stopped inside
+    Fermix, whose reason is in the log (**Start again**). Every step's ending
+    is kept on this computer however the step ended, so the problem outlives
+    the step. Before the move, while the created server stands, Details also
+    says it costs money and offers to delete it, and while a move runs
+    nothing is offered for deletion.
 - Details holds the rest: every provider's token screen, how Hetzner bills,
   the server's facts and the review's items, Back up now and Replace the
   server, what lives on the server (conversations and memories, the secrets,

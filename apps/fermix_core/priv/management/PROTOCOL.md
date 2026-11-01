@@ -330,14 +330,14 @@ the summary.
 | `connect` | the same | A code for a server of the owner's own is open, or the provider refused the token before anything was created. The action is `paste_token` (`Set up`, or `Paste a new token` once a token was refused); `detail.providers` the token screens, `detail.alternatives` the own-server link and, while a code is open, `cancel` (`Cancel the code`). |
 | `choose` | the same | The token works. `detail.billing` says the provider bills by the hour until the server is deleted; the recommendation, the prices and the other offers are `home.provision.options`'s. |
 | `creating` | the same, and a linked desktop | A step's job runs, from before it wrote anything: creating (`cancel`), deleting, turning on or restarting the server, each in its own sentence, with `detail.progress`. Or the server starts, installs Fermix or connects, each in its own sentence, `cancel` while Fermix's own server sets up. During a replace of the server: creating, starting, installing Fermix on or connecting the new server (`cancel`), as the old server's own code for it says (`primary_home`'s `enrollment` and `candidates`), removing the old server after the move, or deleting the new one before it (no action). |
-| `ready` | the same, and a linked desktop during a replace | The server is held and waits for Move now. `detail`: `server` (`{name, type, location, ipv4, system, version}`, the provider's facts null for a server of the owner's own), `readiness` (the last review's warnings and blocks, `home.move.readiness`'s items; empty when all is well or no review was made, and always during a replace, whose review is the old server's own) and `waits_until`. During a replace the new server is held by the old one, and Move now is the move to it from there. |
+| `ready` | the same, and a linked desktop during a replace | The server is held and waits for Move now. `detail`: `server` (`{name, type, location, ipv4, system, version}`, the provider's facts null for a server of the owner's own), `readiness` (the last review's warnings and blocks, `home.move.readiness`'s items; empty when all is well or no review was made, and always during a replace, whose review is the old server's own) and `waits_until`. During a replace the new server is held by the old one, and Move now is the move to it from there. Until the move begins, `detail.alternatives` holds `delete_server` for a server Fermix created (during a replace, the new one), here and when its review blocks (`not_ready`); a server of the owner's own has none. |
 | `moving` | the computer the move leaves, and a linked desktop during a replace | The move runs; once that computer waits on the server's confirmation the sentence says Fermix keeps trying. During a replace, the move to the new server, which this desktop started: the old server serves nothing until it is done, so its silence then is no problem. |
 | `on` | a linked desktop | Fermix runs on the server. `detail`: `server` (`{name, location, version}`), `backups` (`{place, at}` for each place's newest verified backup), `copies_bytes` (the space this computer's copies take), `disk_used`, `data` (what lives on the server, and that its host can technically read its disk) and `actions` (`back_up_now`, `replace_server`). |
 | `undone` | the computer the move left | The move was undone and its server is still held (`try_again`), or the engine is restarting as it was (no action). |
 | `retired` | a computer the move left | It has no link to the server, or the server no longer knows it. |
 | `candidate` | the server, before its move | It waits for its move, or receives the home. |
 | `primary` | the server, after its move | Fermix runs there. |
-| `problem` | anywhere | `detail.kind` names it, `detail.note` adds one sentence where the design gives one, `detail.seen_at` is when Fermix last saw what it rests on, and `detail.alternatives` lists the other actions. Before the move, while a server Fermix created stands, `note` says it costs money and `alternatives` ends with `delete_server`. |
+| `problem` | anywhere | `detail.kind` names it, `detail.note` adds one sentence where the design gives one, `detail.seen_at` is when Fermix last saw what it rests on, and `detail.alternatives` lists the other actions. Before the move, while a server Fermix created stands, `note` says it costs money and `alternatives` ends with `delete_server`; never for the server the home lives on, and never while a move runs. |
 
 Problems (`detail.kind`): `turned_off` (the provider says the server is off),
 `cannot_reach` (no session with the server for 10 minutes while this
@@ -346,9 +346,18 @@ for a server of the owner's own), `deleted` (gone from its provider), `not_set_u
 (no check-in within 30 minutes of the code being open while this computer is
 awake), `waited_too_long` (enrolled, but waited past its 24 hours),
 `no_capacity` (`create_in`, its location in `detail.next_location`, or
-`learn_more` when nothing is in stock), `account_limit`, `read_only_token`,
-`token_refused`, `create_failed` (a create stopped, or a step the engine's
-restart cut short: `start_again`), `update` (the server speaks a protocol this
+`start_again` with the size and place the failure kept, and `learn_more`
+beside it, when nothing is in stock), `account_limit` (`open_console`, then
+`start_again` once the limit is lifted, and the own-server link),
+`read_only_token` and `token_refused` (`paste_token`: once a token that
+writes is accepted the refused create no longer stands in the way: `choose`
+when it made nothing, else `create_failed`, "The new token works, so try
+again."), `create_failed` (a create stopped, or a step whose job ended with
+no answer, the engine's restart or a run that raised, exited, was killed or
+ran past its budget: `start_again`; on a linked desktop, a replace that
+stopped before its new server was made: `replace_server` again, `note`
+saying the server still runs Fermix, never `start_again`, whose delete would
+reach that server), `update` (the server speaks a protocol this
 engine is too old for), `disk_full` (85% or more), `backup_old` (the newest
 backup is over 3 days old, or none since a move that long ago), `not_ready`
 (the last review blocks the move: `check_again`, every item in
@@ -357,7 +366,8 @@ backup is over 3 days old, or none since a move that long ago), `not_ready`
 costs money until then; after a replace's move, the old server) and
 `power_failed` (turning the server on or restarting it stopped: `turn_on` or
 `restart_server` tries again). Every step's ending is kept in the
-provisioner's ledger, so these outlive the job that met them.
+provisioner's ledger, written by the daemon once the step's run is over
+however it ended, so these outlive the job that met them.
 During a replace, a problem of the new server says so in its sentence
 (`turned_off`, `not_set_up`, `waited_too_long`, `deleted` when its provider no
 longer has it, and the create's own), and `alternatives` ends with
@@ -583,7 +593,11 @@ Notes that the shapes alone do not carry:
   answers `unknown_job`. A job that is stopped (cancelled, past its budget, or
   never minting the value its start waits for) stays `running` until its run
   has stopped, at most 5 s more, and holds its place against `busy` until then;
-  it then finishes `cancelled`, `timed_out` or `failed`.
+  it then finishes `cancelled`, `timed_out` or `failed`. An Always On step's
+  job (`home_provision`) is ended by the daemon itself once its run is over,
+  however it ended, before it finishes: what the run left is written to the
+  provisioner's ledger then (at most 35 s more), so a job read as finished
+  never left its step half-kept.
 - **`phase` is display copy, never a state.** It names the current step from a
   closed per-kind vocabulary — `provider_probe`: `calling`; `auth`: `binding`,
   `discovering`, `registering`, `awaiting_browser`, `verifying` (an MCP server's

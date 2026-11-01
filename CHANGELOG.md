@@ -336,6 +336,20 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the move to a new server once the server answered. The command for a
   server of your own now carries no code: the server asks for it without
   showing it, so it never lands in a shell history.
+- **Always On never leaves you without a next step, and a server waiting
+  for its move can always be deleted.** A server Fermix created that is
+  ready for the move, or whose review blocks it, offers Delete your server
+  beside Move now (during a replace, Delete your new server, never the one
+  your home lives on), so a move you no longer want stops costing money
+  from Always On itself; a server of your own is never offered for
+  deletion, and nothing is while a move runs. After a token that could only
+  read, the token that writes brings back Create server; after Hetzner's
+  account limit (once you lifted it) or no stock anywhere, Start again tries
+  once more with the size and place you chose. On a computer your home
+  left, a replace that stopped before Hetzner made anything shows as its own
+  problem, saying your server still runs Fermix, with Replace the server
+  again. A step that stopped inside Fermix, or was stopped, is kept on
+  screen however it ended, with Start again, and its reason in Fermix's log.
 - **A mandate's proposal is a short card too.** It names the tool and the
   watcher, quotes the item, says why it passed, and shows each argument on its
   own line, with every argument whole and the whole item behind Details, in
