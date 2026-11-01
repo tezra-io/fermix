@@ -302,8 +302,11 @@ it, never a second writer.
   recurring job more than an hour late is skipped); this computer
   serving nothing while the move runs; and Fermix run from a terminal
   (`fermix run`, warns: "Fermix runs from a terminal here, so it stops when
-  the move starts. Start it again to finish."; the Mac app's engine, a
-  systemd unit and a `fermix service` install start again by themselves). The
+  the move starts. Start it again to finish."; the Mac app's engine,
+  Fermix's own systemd unit (`fermix.service`, as the Linux package and
+  `fermix service install` run it) and a `fermix service` install start again
+  by themselves, while a shell inside any other unit, such as a terminal's,
+  does not). The
   move does not start while
   anything blocks, from the apps or
   from `fermix home move`, which says each block. Checking the keychain reads

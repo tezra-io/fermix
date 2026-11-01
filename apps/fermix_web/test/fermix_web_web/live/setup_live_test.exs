@@ -5900,9 +5900,9 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert html =~ "Nothing to restart from here"
     end
 
-    # Always On setup §9: the Mac app's engine (launchd), a systemd unit and a
-    # `fermix service` install each bring Fermix back, so the button restarts
-    # there, where it once said there was nothing to restart.
+    # Always On setup §9: the Mac app's engine (launchd), Fermix's own systemd
+    # unit and a `fermix service` install each bring Fermix back, so the button
+    # restarts there, where it once said there was nothing to restart.
     test "Apply & restart restarts an engine that starts again by itself", %{conn: conn} do
       test = self()
       restarts = Application.fetch_env(:fermix_web, :restarts_itself)

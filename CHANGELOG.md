@@ -356,8 +356,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Apply & restart on the setup page restarts Fermix under the Mac app.**
   The button used to say there was nothing to restart unless Fermix ran as a
   `fermix service` install. It now restarts whenever something brings Fermix
-  back: the Mac app, a systemd service, or `fermix service`. Under `fermix
-  run` in a terminal it still says it cannot.
+  back: the Mac app, Fermix's own systemd service, or `fermix service`. Under
+  `fermix run` in a terminal (any terminal, even one a desktop's own service
+  opened) it still says it cannot.
 - **A busy computer no longer quietly costs you a watcher's notices.** When
   the computer was so busy that Fermix's memory database fell behind, every
   request waiting on it gave up after a few seconds, yet each one still ran

@@ -942,7 +942,7 @@ defmodule FermixWebWeb.SetupLive do
   end
 
   # Only where something brings Fermix back once it stops: the Mac app's
-  # engine, a systemd unit, a `fermix service` install
+  # engine, Fermix's own systemd unit, a `fermix service` install
   # (`Lifecycle.restarts_itself?/0`, the one predicate a move's review reads).
   def handle_event("apply_restart", _params, socket) do
     if restarts_itself?() do

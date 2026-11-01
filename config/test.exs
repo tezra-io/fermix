@@ -145,9 +145,9 @@ config :fermix_web, :harness_detector, harness_absent_detector
 
 # Hermetic default: the setup page's Apply & restart asks whether something
 # brings Fermix back once it stops (`Lifecycle.restarts_itself?/0`), which reads
-# this process's environment (systemd's `INVOCATION_ID`); a runner started by
-# systemd would answer yes and the page would stop the suite's VM. The suite is
-# an engine run from a terminal; a case about the other answer says so itself.
+# this host (the build's identity, a Burrito launcher, this process's cgroup); a
+# runner whose answer was yes would have the page stop the suite's VM. The suite
+# is an engine run from a terminal; a case about the other answer says so itself.
 config :fermix_web, :restarts_itself, fn -> false end
 
 config :fermix_core, :prompt_bootstrap,
