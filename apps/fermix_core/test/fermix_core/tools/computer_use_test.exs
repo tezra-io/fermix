@@ -37,6 +37,21 @@ defmodule FermixCore.Tools.ComputerUseTest do
 
   @accessibility ~w(elements inspect press set_value)
 
+  # What a Linux helper whose pixel route was refused lists: every pixel verb,
+  # `inspect` and the binding left out.
+  @controls_only Protocol.actions() --
+                   ~w(screenshot left_click right_click double_click mouse_move left_click_drag
+                      scroll key wait_for_change paste windows inspect select_target release_target)
+
+  # The pixel verbs, and the words that describe working by them.
+  @pixel_words ~w(screenshot screenshots left_click right_click double_click mouse_move
+                  left_click_drag scroll key wait_for_change paste windows inspect click clicks
+                  clicked clicking drag mouse pixel pixels zoom aim coordinates)
+
+  # The fields that exist only for a pixel verb.
+  @pixel_fields ~w(x y modifiers from to direction amount chord timeout_ms poll_ms region
+                   confirm_grid marks mark)
+
   # Every place in the schema a model reads an action's name from.
   defp schemas do
     [
@@ -755,6 +770,90 @@ defmodule FermixCore.Tools.ComputerUseTest do
       for verb <- lacked(HelperActions.pixel()) do
         refute names?(pixel, verb), "the pixel docs name `#{verb}`"
       end
+    end
+
+    # GNOME Wayland's portal serves no `windows`, so nothing the model reads may
+    # send it there: the description says to read a window's bounds in a full
+    # screenshot instead. Helpers that list it read what they always did.
+    test "`windows` is named only where the helper lists it" do
+      wayland = Protocol.actions() -- ~w(inspect select_target release_target paste windows)
+      read_helper(wayland, ~w(foreground_hid ax))
+
+      for {where, text} <- texts() do
+        refute text =~ "`windows`", "#{where} names `windows`"
+        refute text =~ "windows (list", "#{where} offers `windows`"
+      end
+
+      description = ComputerUse.dynamic_description(%{})
+      assert description =~ "`screenshot` and `elements` each return an `observation_id`"
+      assert description =~ "Read the window's bounds in a full `screenshot`"
+
+      for actions <- [Protocol.actions(), Protocol.actions() -- ["inspect"]] do
+        record(actions, ~w(foreground_hid ax))
+        description = ComputerUse.dynamic_description(%{})
+
+        assert description =~ "`screenshot`, `elements` and `windows` each return"
+        assert description =~ "Call `windows` to get the exact bounds"
+        assert action_desc(ComputerUse.dynamic_parameters(%{})) =~ "windows (list the open"
+      end
+    end
+
+    # GNOME Wayland's portal has no clipboard to paste through, so its helper does
+    # not list `paste`, and nothing the model reads may offer it there. Helpers
+    # that list it read what they always did.
+    test "`paste` is named only where the helper lists it" do
+      wayland = Protocol.actions() -- ~w(inspect select_target release_target paste windows)
+      read_helper(wayland, ~w(foreground_hid ax))
+      modes = {"the failure modes", Jason.encode!(ComputerUse.failure_modes())}
+
+      for {where, text} <- [modes | texts()] do
+        refute names?(text, "paste"), "#{where} names `paste`"
+      end
+
+      params = ComputerUse.dynamic_parameters(%{})
+      assert action_desc(params) =~ "left_click_drag, scroll, type, key"
+      assert action_desc(params) =~ "`type` remains for text that must go through real keystrokes"
+      assert params["properties"]["text"]["description"] =~ "Text to type (for action=type)"
+
+      for actions <- [Protocol.actions(), HelperActions.pixel()] do
+        record(actions, ~w(foreground_hid ax))
+        params = ComputerUse.dynamic_parameters(%{})
+
+        assert action_desc(params) =~ "type, paste (clipboard — prefer for long text), key"
+        assert params["properties"]["text"]["description"] =~ "Text to type or paste"
+        assert ComputerUse.dynamic_description(%{}) =~ "keystroke or paste returns the VIEW"
+        assert Jason.encode!(ComputerUse.failure_modes()) =~ "nothing was sent — use paste"
+      end
+    end
+
+    # A Linux session whose pixel route was refused lists the controls and nothing
+    # else: no capture, no pointer, no keys, input by accessibility alone. Nothing
+    # the model reads may describe pixels to it, or a verb it cannot send.
+    test "a controls-only reading is never described with pixel verbs" do
+      read_helper(@controls_only, ["ax"])
+
+      docs = [
+        {"the failure modes", Jason.encode!(ComputerUse.failure_modes())},
+        {"the examples", Jason.encode!(ComputerUse.examples())} | texts()
+      ]
+
+      for {where, text} <- docs, word <- @pixel_words do
+        refute names?(text, word), "#{where} says #{word}"
+      end
+
+      # Only a Linux session reads this way, so the macOS hints go with the pixels.
+      for {where, text} <- docs, hint <- ["open -a", "osascript", "AppleScript"] do
+        refute text =~ hint, "#{where} says #{hint}"
+      end
+
+      for {_where, schema} <- schemas(), field <- @pixel_fields do
+        refute Map.has_key?(schema["properties"], field), "the schema offers `#{field}`"
+      end
+
+      refute Enum.any?(
+               ComputerUse.examples(),
+               &(&1.args == %{"action" => "type", "text" => "hello"})
+             )
     end
 
     test "the examples and failure modes name only what the reading offers" do

@@ -565,6 +565,20 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert detail =~ "answering, but no application is on it"
     end
 
+    # The bus said it answers; only the count is missing or none. Neither is an
+    # unknown bus.
+    test "the accessibility bus: answering with no application, or with a count not given" do
+      none = linux(accessibility_bus: bus(applications: 0))
+      assert %{status: :warn, detail: detail} = row(none, "accessibility bus")
+      assert detail =~ "answering, but no application is on it"
+
+      uncounted = linux(accessibility_bus: bus(applications: nil))
+      assert %{status: :ok, detail: detail} = row(uncounted, "accessibility bus")
+      assert detail =~ "answering"
+      assert detail =~ "did not say how many applications are on it"
+      refute detail =~ "unknown:"
+    end
+
     test "the accessibility bus: unavailable with the reason the probe gives" do
       down =
         linux(
@@ -656,6 +670,8 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       lost = row(linux(x11_pixels: nil), "x11 pixels")
       assert lost.status == :warn
       assert lost.detail =~ "no X endpoint answers"
+      refute lost.detail =~ "both"
+      assert lost.detail =~ "the X11 pixel route needs one"
     end
 
     test "the portal's version and whether the Registry is there" do
@@ -681,6 +697,28 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
 
       absent = row(linux(portal: nil), "desktop portal")
       assert absent.detail =~ "not read: no session bus answered"
+      assert absent.status == :ok
+    end
+
+    # On Wayland the portal is the pixel route, so any portal that cannot serve
+    # it refuses pixels there: none read, one not running or not saying whether
+    # it runs, and one without the Registry.
+    test "on Wayland a portal that cannot serve pixels warns, as on X11 it does not" do
+      for portal <- [
+            nil,
+            portal(running: false, registry: nil),
+            portal(running: nil, registry: nil),
+            portal(registry: false)
+          ] do
+        wayland = row(linux(display_server: "wayland", portal: portal), "desktop portal")
+        assert wayland.status == :warn, inspect(portal)
+
+        x11 = row(linux(portal: portal), "desktop portal")
+        assert x11.status == :ok, inspect(portal)
+      end
+
+      serving = linux(display_server: "wayland", portal: portal(registry: true))
+      assert row(serving, "desktop portal").status == :ok
     end
 
     # `running: false` is the bus saying nobody runs it; `nil` is an error that
@@ -696,8 +734,17 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     end
 
     test "a stored Screenshot no prints the reset exactly" do
-      refused = linux(portal: portal(screenshot_permission: "no"))
+      refused = linux(display_server: "wayland", portal: portal(screenshot_permission: "no"))
       assert %{status: :warn, detail: detail} = row(refused, "portal screenshot")
+      assert detail =~ "stored no"
+      assert String.ends_with?(detail, @reset)
+    end
+
+    # The X11 pixel route never asks the portal, so there the stored no refuses
+    # nothing yet: information, with the same reset.
+    test "a stored Screenshot no is information on X11" do
+      refused = linux(portal: portal(screenshot_permission: "no"))
+      assert %{status: :ok, detail: detail} = row(refused, "portal screenshot")
       assert detail =~ "stored no"
       assert String.ends_with?(detail, @reset)
     end
@@ -788,6 +835,92 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
 
       assert result.status == :fail
       assert result.detail =~ "could not read what the helper supports"
+    end
+
+    # A Linux helper binds a window under X11 with its badge beside it, and binds
+    # none on Wayland. The row has to be true there for every indicator it can
+    # report, and never send a Wayland user to update a helper that cannot help.
+    test "on Linux the row is true for an indicator present, missing or unknown" do
+      linux = [sidecar_target: {:ok, "linux-x86_64"}]
+
+      present =
+        Checks.computer_use_background(
+          read(%{
+            "targets" => true,
+            "indicator" => "present",
+            "capture_methods" => ["display", "window"],
+            "input_methods" => ["foreground_hid", "ax"]
+          }),
+          linux
+        )
+
+      assert present.status == :ok
+      assert present.detail =~ "can bind a window and its on-screen indicator is present"
+
+      missing =
+        Checks.computer_use_background(
+          read(%{"targets" => true, "indicator" => "missing"}),
+          linux
+        )
+
+      assert missing.status == :warn
+      assert missing.detail =~ "no on-screen indicator installed beside it"
+      refute missing.detail =~ "bundle"
+
+      unknown = Checks.computer_use_background(read(%{"targets" => true}), linux)
+      assert unknown.status == :warn
+      assert unknown.detail =~ "does not report an on-screen indicator"
+      refute unknown.detail =~ "bundle"
+    end
+
+    test "on Linux a helper that binds nothing names X11, not an update" do
+      result =
+        Checks.computer_use_background(
+          read(%{"indicator" => "present", "capture_methods" => ["display"]}),
+          sidecar_target: {:ok, "linux-x86_64"}
+        )
+
+      assert result.status == :warn
+      assert result.detail =~ "only under X11, never on Wayland"
+      assert result.detail =~ "display server"
+      refute result.detail =~ "publishes no target support"
+
+      mac =
+        Checks.computer_use_background(
+          read(%{"indicator" => "present"}),
+          sidecar_target: {:ok, "macos-aarch64"}
+        )
+
+      assert mac.detail =~ "Update the helper from setup"
+      refute mac.detail =~ "X11"
+    end
+
+    # The Linux words came with the X11 binding; a macOS helper still reads what it
+    # read before them, word for word.
+    test "on macOS a missing indicator or no binding reads as it always did" do
+      mac = [sidecar_target: {:ok, "macos-aarch64"}]
+
+      missing =
+        Checks.computer_use_background(
+          read(%{"targets" => true, "indicator" => "missing"}),
+          mac
+        )
+
+      assert String.starts_with?(
+               missing.detail,
+               "on, but this computer-use helper's bundle has no on-screen indicator, and " <>
+                 "Fermix will not work inside a window without one visible. Reinstall the " <>
+                 "helper from setup."
+             )
+
+      none = Checks.computer_use_background(read(%{"indicator" => "present"}), mac)
+
+      assert String.starts_with?(
+               none.detail,
+               "on, but this computer-use helper cannot bind a window — it publishes no " <>
+                 "target support, so every select_target is refused. Update the helper from " <>
+                 "setup."
+             )
     end
 
     defp read(capabilities) do

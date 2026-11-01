@@ -1887,7 +1887,7 @@ defmodule Fermix.CLI.Doctor.Checks do
       atk_bridge_row(probe.accessibility_packages)
     ] ++
       toolkit_rows(probe.toolkit_notes) ++
-      [x11_pixels_row(probe), desktop_portal_row(probe), portal_screenshot_row(probe.portal)]
+      [x11_pixels_row(probe), desktop_portal_row(probe), portal_screenshot_row(probe)]
   end
 
   defp linux_computer_use_rows(_result), do: []
@@ -1916,7 +1916,12 @@ defmodule Fermix.CLI.Doctor.Checks do
     ok("accessibility bus", "answering, with #{count} #{noun}")
   end
 
-  defp accessibility_bus_row(%{state: "empty"}) do
+  defp accessibility_bus_row(%{state: "answering", applications: nil}) do
+    ok("accessibility bus", "answering; the helper did not say how many applications are on it")
+  end
+
+  defp accessibility_bus_row(%{state: state, applications: count})
+       when state == "empty" or (state == "answering" and count == 0) do
     warn(
       "accessibility bus",
       "answering, but no application is on it, so there is no control to list yet"
@@ -1979,9 +1984,12 @@ defmodule Fermix.CLI.Doctor.Checks do
     detail = x11_pixels_text(pixels)
 
     if server == "x11" and pixels != %{xtest: true, keymap: true},
-      do: warn("x11 pixels", detail <> "; the X11 pixel route needs both"),
+      do: warn("x11 pixels", detail <> x11_pixels_need(pixels)),
       else: ok("x11 pixels", detail)
   end
+
+  defp x11_pixels_need(nil), do: "; the X11 pixel route needs one"
+  defp x11_pixels_need(_pixels), do: "; the X11 pixel route needs both"
 
   defp x11_pixels_text(nil), do: "no X endpoint answers"
 
@@ -1994,9 +2002,10 @@ defmodule Fermix.CLI.Doctor.Checks do
 
   # Without the host Registry (xdg-desktop-portal 1.18 and later) the helper would
   # share the empty app id with every host process, so it refuses pixels on
-  # Wayland. On X11 the pixel route never asks the portal.
-  defp desktop_portal_row(%{portal: nil}),
-    do: ok("desktop portal", "not read: no session bus answered")
+  # Wayland, as it does when no portal runs or none was read. On X11 the pixel
+  # route never asks the portal.
+  defp desktop_portal_row(%{portal: nil, display_server: server}),
+    do: portal_status(server, false).("desktop portal", "not read: no session bus answered")
 
   defp desktop_portal_row(%{portal: portal, display_server: server}) do
     detail =
@@ -2009,10 +2018,14 @@ defmodule Fermix.CLI.Doctor.Checks do
         "; "
       )
 
-    if server == "wayland" and portal.registry == false,
-      do: warn("desktop portal", detail),
-      else: ok("desktop portal", detail)
+    serves? = portal.running == true and portal.registry == true
+    portal_status(server, serves?).("desktop portal", detail)
   end
+
+  # The portal is the pixel route on Wayland alone: what keeps it from serving
+  # warns there, and is information on X11.
+  defp portal_status("wayland", false), do: &warn/2
+  defp portal_status(_server, _serves?), do: &ok/2
 
   defp portal_version(nil), do: "xdg-desktop-portal version unknown"
   defp portal_version(version), do: "xdg-desktop-portal #{version}"
@@ -2036,17 +2049,19 @@ defmodule Fermix.CLI.Doctor.Checks do
                       "org.freedesktop.impl.portal.PermissionStore.DeletePermission screenshot " <>
                       "screenshot io.tezra.fermix.ComputerUse"
 
-  defp portal_screenshot_row(nil),
+  defp portal_screenshot_row(%{portal: nil}),
     do: ok("portal screenshot", "not read: no session bus answered")
 
-  defp portal_screenshot_row(%{screenshot_permission: "no"}) do
-    warn(
+  # A stored no keeps the portal from serving any screenshot, which refuses pixels
+  # on Wayland and nothing yet on X11; the reset is there for either.
+  defp portal_screenshot_row(%{portal: %{screenshot_permission: "no"}, display_server: server}) do
+    portal_status(server, false).(
       "portal screenshot",
       "a stored no refuses every screenshot on Wayland until it is reset: " <> @screenshot_reset
     )
   end
 
-  defp portal_screenshot_row(%{screenshot_permission: answer}),
+  defp portal_screenshot_row(%{portal: %{screenshot_permission: answer}}),
     do: ok("portal screenshot", stored_answer(answer))
 
   defp stored_answer("yes"), do: "allowed, by an answer the desktop keeps"
@@ -2129,10 +2144,16 @@ defmodule Fermix.CLI.Doctor.Checks do
   tests inject every state. Read-only by construction: the deepest it goes is the
   `hello` the helper answers from its handshake identity, which captures nothing,
   clicks nothing and opens no consent dialog, and it only goes there when the flag
-  is on.
+  is on. `:sidecar_target` is the platform seam `computer_use_permissions/2` takes:
+  a Linux helper binds a window only under X11, so its reason for binding none is
+  not an old build alone.
   """
-  @spec computer_use_background({:ok, map()} | {:error, term()}) :: result()
-  def computer_use_background(result \\ ProviderProbe.computer_use_background()) do
+  @spec computer_use_background({:ok, map()} | {:error, term()}, keyword()) :: result()
+  def computer_use_background(
+        result \\ ProviderProbe.computer_use_background(),
+        opts \\ []
+      )
+      when is_list(opts) do
     case result do
       {:ok, %{state: :disabled}} ->
         ok("window binding", "computer use is off, so there is nothing to bind")
@@ -2144,7 +2165,7 @@ defmodule Fermix.CLI.Doctor.Checks do
         warn("window binding", "on, but the computer-use helper isn't installed")
 
       {:ok, %{state: :read, capabilities: capabilities}} ->
-        background_capability_result(capabilities)
+        background_capability_result(capabilities, sidecar_target(opts))
 
       {:error, reason} ->
         fail("window binding", "could not read what the helper supports: #{inspect(reason)}")
@@ -2154,7 +2175,7 @@ defmodule Fermix.CLI.Doctor.Checks do
   # The flag is on; whether the surface RUNS is the helper's answer. Both halves
   # are named, because "nothing happens" with one of them missing is exactly the
   # silence this row exists to break.
-  defp background_capability_result(capabilities) do
+  defp background_capability_result(capabilities, target) do
     case Background.unavailable_reason(capabilities) do
       nil ->
         ok(
@@ -2164,21 +2185,39 @@ defmodule Fermix.CLI.Doctor.Checks do
         )
 
       reason ->
-        warn("window binding", background_unavailable_hint(reason) <> sidecar_version_suffix())
+        warn(
+          "window binding",
+          background_unavailable_hint(reason, target) <> sidecar_version_suffix()
+        )
     end
   end
 
-  defp background_unavailable_hint(:no_targets) do
+  # A Linux helper binds a window under X11 alone, so on Wayland no update makes
+  # it bind one; the display server row says which session this is.
+  defp background_unavailable_hint(:no_targets, {:ok, "linux-" <> _arch}) do
+    "on, but this computer-use helper cannot bind a window in this session, so select_target " <>
+      "is not offered: on Linux a window binds only under X11, never on Wayland (the display " <>
+      "server row says which this is). Under X11, update the helper from setup."
+  end
+
+  defp background_unavailable_hint(:no_targets, _target) do
     "on, but this computer-use helper cannot bind a window — it publishes no target support, " <>
       "so every select_target is refused. Update the helper from setup."
   end
 
-  defp background_unavailable_hint(:indicator_missing) do
+  # A Linux helper's badge is a program installed beside it; a macOS helper's is
+  # part of its bundle.
+  defp background_unavailable_hint(:indicator_missing, {:ok, "linux-" <> _arch}) do
+    "on, but this computer-use helper has no on-screen indicator installed beside it, and " <>
+      "Fermix will not work inside a window without one visible. Reinstall the helper from setup."
+  end
+
+  defp background_unavailable_hint(:indicator_missing, _target) do
     "on, but this computer-use helper's bundle has no on-screen indicator, and Fermix will " <>
       "not work inside a window without one visible. Reinstall the helper from setup."
   end
 
-  defp background_unavailable_hint(:indicator_unknown) do
+  defp background_unavailable_hint(:indicator_unknown, _target) do
     "on, but this computer-use helper does not report an on-screen indicator, and Fermix will " <>
       "not work inside a window without one visible. Update the helper from setup."
   end

@@ -50,6 +50,7 @@ defmodule FermixCore.ComputerUse.Controls do
   }
 
   @untrusted_text_max 120
+  @helper_sentence_max 600
 
   @doc "The verbs a control may list, in the contract's order."
   @spec verbs() :: [String.t()]
@@ -240,15 +241,25 @@ defmodule FermixCore.ComputerUse.Controls do
   nothing.
   """
   @spec safe_text(term()) :: String.t()
-  def safe_text(text) when is_binary(text) do
+  def safe_text(text), do: neutralised(text, @untrusted_text_max)
+
+  @doc """
+  A sentence the helper wrote (a refusal's detail, a note on what it did), made
+  safe the same way: it can carry a window's title or an application's name
+  inside it, and it is longer than a label, so only its bound differs.
+  """
+  @spec safe_sentence(term()) :: String.t()
+  def safe_sentence(text), do: neutralised(text, @helper_sentence_max)
+
+  defp neutralised(text, max) when is_binary(text) do
     text
     |> String.replace(~r/[[:space:][:cntrl:]]+/u, " ")
     |> String.replace("\"", "'")
     |> String.trim()
-    |> bound_text()
+    |> bound_text(max)
   end
 
-  def safe_text(_not_a_string), do: ""
+  defp neutralised(_not_a_string, _max), do: ""
 
   @doc "A label in quotes, or nothing when there is none."
   @spec quoted(term()) :: String.t()
@@ -478,9 +489,9 @@ defmodule FermixCore.ComputerUse.Controls do
   defp matched(%{"elements" => [_ | _]} = reply), do: " Matched:\n" <> listing(reply, %{})
   defp matched(_reply), do: ""
 
-  defp bound_text(text) do
-    if String.length(text) > @untrusted_text_max,
-      do: String.slice(text, 0, @untrusted_text_max) <> "…",
+  defp bound_text(text, max) do
+    if String.length(text) > max,
+      do: String.slice(text, 0, max) <> "…",
       else: text
   end
 end

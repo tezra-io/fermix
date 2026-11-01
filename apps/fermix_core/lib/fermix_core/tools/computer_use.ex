@@ -63,10 +63,10 @@ defmodule FermixCore.Tools.ComputerUse do
   def dynamic_description(context) when is_map(context), do: description()
 
   defp description(offered) do
-    screen_description() <>
+    screen_description(offered) <>
       controls_first_description(offered) <>
       aiming_description(offered) <>
-      zoom_description() <>
+      zoom_description(offered) <>
       check_description(offered) <>
       background_description(offered) <>
       controls_description(offered)
@@ -75,57 +75,116 @@ defmodule FermixCore.Tools.ComputerUse do
   # Work by control where the screen exposes controls, and by pixels where it does
   # not (M86 P2). Only where the helper lists controls at all: on a pixel
   # helper this paragraph would teach verbs it does not have.
+  # A session whose pixel route was refused (Linux) lists the controls and nothing
+  # else, so there the paragraph says they are the only way in.
   defp controls_first_description(offered) do
     naming(
       offered,
       ["elements"],
-      "CONTROLS FIRST. Where the screen exposes controls, work by control, not by pixels: " <>
+      naming(
+        offered,
+        ["screenshot"],
+        "CONTROLS FIRST. Where the screen exposes controls, work by control, not by pixels: ",
+        "CONTROLS ONLY. This desktop is reached by its controls alone: "
+      ) <>
         "`elements` lists them one per line — reference, role, label, state and the verbs " <>
         "each takes (after a plain first listing, narrow a dense window with `scope`, a " <>
         "`query`, or `skeleton` then `root`). Send a verb its line lists (" <>
         verb_names(offered) <>
         ") with that control's `element_ref` and the " <>
-        "list's `observation_id`: no pointer, no aim, no miss, and the reply reads the " <>
-        "control back instead of a picture. Pixels are for canvases, games, remote desktops " <>
-        "and anything `elements` does not list. "
+        "list's `observation_id`" <>
+        naming(
+          offered,
+          ["screenshot"],
+          ": no pointer, no aim, no miss, and the reply reads the " <>
+            "control back instead of a picture. Pixels are for canvases, games, remote desktops " <>
+            "and anything `elements` does not list. ",
+          ", and the reply reads the control back; `type` with an `element_ref` puts text " <>
+            "into that control. What `elements` does not list cannot be reached here: tell " <>
+            "the user. "
+        )
     ) <>
       naming(
         offered,
         ["wait_for"],
         "To wait, name what you are waiting for: `until` on an action waits for its effect " <>
           "in the same call, and `wait_for` waits without acting; both end the moment it " <>
-          "holds, so never poll with screenshots. "
+          "holds, so never poll" <> naming(offered, ["screenshot"], " with screenshots") <> ". "
       )
   end
 
-  # Whose screen this is, and what to reach for before pixels.
-  defp screen_description do
+  # Whose screen this is, and what to reach for before pixels, or before acting at
+  # all where only the controls are served.
+  defp screen_description(offered) do
+    if "screenshot" in offered,
+      do: pixel_screen_description(),
+      else: controls_screen_description()
+  end
+
+  defp pixel_screen_description do
     "Drive the host desktop GUI by screenshot + mouse/keyboard, one action per call. " <>
-      "It is the ONLY tool that sees and acts on the user's OWN live screen — a page, app, or " <>
-      "session they already have open; a `browser`/`shell` action runs in its own context and " <>
-      "won't touch their screen. " <>
-      "Anything the human must SEE or act on themselves — a form they are filling, a document " <>
-      "you review together, a game you play together — has to be on THEIR screen: the `browser` " <>
-      "window (visible on a desktop " <>
-      "OS) or an app opened with `shell` `open -a`. Never leave a shared activity somewhere " <>
-      "only you can see. " <>
+      own_screen_description("`shell` `open -a`") <>
       "Even on their screen, never CLICK for an intent the OS can name: `shell` `open -a` " <>
       "launches apps, and AppleScript (`osascript`) drives named menus/settings/Finder " <>
-      "directly — spend pixels only on state that exists solely as pixels. A live page whose " <>
-      "state is SERVER-synced under the same account (a live game, a shared doc) can be driven " <>
-      "through the managed `browser`'s exact element rails while the human watches their own " <>
-      "window — prefer that over pixel-aiming at their screen. For precision clicks, bring the " <>
+      "directly — spend pixels only on state that exists solely as pixels. " <>
+      live_page_description("pixel-aiming at") <>
+      "For precision clicks, bring the " <>
       "target window to the FRONT and unobstructed; do not maximize it for aiming's sake — a " <>
       "window that fits the capture budget arrives at native detail, a maximized one gets " <>
       "downscaled. "
   end
 
-  # One rule for coordinates, and the exact targets that beat them.
+  # Only a Linux session is served by its controls alone, so nothing here names
+  # the macOS launcher or its scripting.
+  defp controls_screen_description do
+    "Drive the host desktop GUI by its controls, one action per call. " <>
+      own_screen_description("`shell`") <>
+      "Even on their screen, never act for an intent the OS can name: `shell` launches apps " <>
+      "and changes settings directly. " <>
+      live_page_description("acting on")
+  end
+
+  defp own_screen_description(launcher) do
+    "It is the ONLY tool that sees and acts on the user's OWN live screen — a page, app, or " <>
+      "session they already have open; a `browser`/`shell` action runs in its own context and " <>
+      "won't touch their screen. " <>
+      "Anything the human must SEE or act on themselves — a form they are filling, a document " <>
+      "you review together, a game you play together — has to be on THEIR screen: the `browser` " <>
+      "window (visible on a desktop OS) or an app opened with #{launcher}. Never leave a shared " <>
+      "activity somewhere only you can see. "
+  end
+
+  defp live_page_description(instead) do
+    "A live page whose state is SERVER-synced under the same account (a live game, a shared " <>
+      "doc) can be driven through the managed `browser`'s exact element rails while the human " <>
+      "watches their own window — prefer that over #{instead} their screen. "
+  end
+
+  # One rule for coordinates, and the exact targets that beat them. Where only the
+  # controls are served there are no coordinates, and the rule is the listing's.
   defp aiming_description(offered) do
+    if "screenshot" in offered,
+      do: coordinates_description(offered),
+      else: references_description()
+  end
+
+  defp references_description do
+    "A reference belongs to the listing that minted it: send it with that listing's " <>
+      "`observation_id`. Only the last few listings stay addressable and only for about half " <>
+      "a minute; if an id is refused as unknown, expired or stale, take `elements` again and " <>
+      "use the references in THAT reply, never re-send the old ones. `elements` is " <>
+      "best-effort accessibility metadata: an empty result means no controls were exposed " <>
+      "there. "
+  end
+
+  defp coordinates_description(offered) do
+    replies = image_replies(offered)
+
     "AIMING — ONE RULE: coordinates are pixels in the image you name. Every reply that " <>
-      "gives you coordinates names its image: `screenshot`" <>
-      naming(offered, ["elements"], ", `elements`") <>
-      " and `windows` each return an `observation_id`, and every click, move, drag" <>
+      "gives you coordinates names its image: " <>
+      spoken_list(replies, "and") <>
+      returns(replies) <>
+      " an `observation_id`, and every click, move, drag" <>
       naming(offered, ["inspect"], ", scroll and inspect", " and scroll") <>
       " must carry the id of the image its x,y were read in. There is no region to copy onto an " <>
       "action, and coordinates read in one image NEVER apply to another — read and aim in " <>
@@ -145,8 +204,31 @@ defmodule FermixCore.Tools.ComputerUse do
       "every other surface. "
   end
 
-  # Screen-share frames, zooming to the window, and Fermix's own companion.
-  defp zoom_description do
+  # The replies that name an image on this reading: `screenshot`, then `elements`
+  # and `windows` only where the helper lists them.
+  defp image_replies(offered),
+    do: Enum.map(["screenshot" | Enum.filter(~w(elements windows), &(&1 in offered))], &"`#{&1}`")
+
+  defp spoken_list([one], _conjunction), do: one
+
+  defp spoken_list([_ | _] = names, conjunction),
+    do: Enum.join(Enum.drop(names, -1), ", ") <> " #{conjunction} " <> List.last(names)
+
+  defp returns([_one]), do: " returns"
+  defp returns(_many), do: " each return"
+
+  # Screen-share frames, zooming to the window, and Fermix's own companion. Where
+  # the helper lists no `windows` (GNOME Wayland), the window's bounds are read in
+  # a full screenshot instead.
+  defp zoom_description(offered) do
+    if "screenshot" in offered,
+      do: window_zoom_description(offered),
+      else:
+        "Fermix's own floating voice companion may be on that screen — never act on its " <>
+          "controls: they end the call you are on. "
+  end
+
+  defp window_zoom_description(offered) do
     "A screen-share frame is a LOW-DETAIL awareness image with no observation_id, so it is " <>
       "never a source of click coordinates: take a fresh `screenshot` to aim. " <>
       "ZOOM TO THE WINDOW, not just to small controls. A full-screen capture is downscaled to " <>
@@ -154,8 +236,14 @@ defmodule FermixCore.Tools.ComputerUse do
       "desktop you do not care about and the app you DO care about arrives too small to aim " <>
       "in. A `region` crop is rescaled to that same budget on its own, so cropping to the " <>
       "window you are working in can multiply your effective resolution several times over. " <>
-      "Call `windows` to get the exact bounds — it returns a ready-made `region` per window, " <>
-      "so you never estimate them — then pass that region to `screenshot` and aim in the " <>
+      naming(
+        offered,
+        ["windows"],
+        "Call `windows` to get the exact bounds — it returns a ready-made `region` per " <>
+          "window, so you never estimate them — then pass that region",
+        "Read the window's bounds in a full `screenshot`, then pass them as a `region`"
+      ) <>
+      " to `screenshot` and aim in the " <>
       "magnified image it returns, naming that image's id on every action inside it; zoom " <>
       "further for a small control within it. " <>
       "Fermix's own floating voice companion may be visible on that screen — never click it; " <>
@@ -164,10 +252,22 @@ defmodule FermixCore.Tools.ComputerUse do
 
   # What every mutating action comes back with, and what it does and does not prove.
   defp check_description(offered) do
+    if "screenshot" in offered,
+      do: view_check_description(offered),
+      else:
+        "A verb on a control returns the CONTROL, read again after the action: that is its " <>
+          "state, never proof the action had its effect, so repeat a verb only when that " <>
+          "state shows the effect is missing. Verify the effect through the surface's own " <>
+          "structure where it has one (a `browser` snapshot or `get` for a page that browser " <>
+          "drives). "
+  end
+
+  defp view_check_description(offered) do
     "`screenshot` to see the screen, then act on it (click, type, key, scroll, drag) using " <>
       "pixel coordinates read in the image that screenshot names. Every " <>
       "mutating action comes back with its own check, and you never ask for one: a click, " <>
-      "drag, scroll, keystroke or paste returns the VIEW it acted in — the same crop when the " <>
+      naming(offered, ["paste"], "drag, scroll, keystroke or paste", "drag, scroll or keystroke") <>
+      " returns the VIEW it acted in — the same crop when the " <>
       "action was aimed in a zoomed image, the full screen otherwise — captured once that " <>
       "view stopped changing, and naming a NEW image: READ it, and aim your next action in " <>
       "it. " <>
@@ -195,8 +295,13 @@ defmodule FermixCore.Tools.ComputerUse do
         "you can confirm you're about to click the right control (e.g., a button labeled " <>
         "\"Delete\") before a consequential action. "
     ) <>
-      "`wait_for_change` blocks until the screen updates (e.g. a page finishes loading) instead " <>
-      "of repeated screenshots. Honor " <>
+      naming(
+        offered,
+        ["wait_for_change"],
+        "`wait_for_change` blocks until the screen updates (e.g. a page finishes loading) " <>
+          "instead of repeated screenshots. "
+      ) <>
+      "Honor " <>
       "the configured access mode: standard confirms before anything " <>
       "irreversible; open acts autonomously but still confirms a truly dangerous/catastrophic " <>
       "action; strict is look-only."
@@ -280,6 +385,7 @@ defmodule FermixCore.Tools.ComputerUse do
         |> Map.merge(control_properties(offered, input_methods))
         |> Map.merge(listing_properties(offered))
         |> Map.merge(until_property(offered))
+        |> Map.merge(pixel_properties(offered))
         |> Map.merge(%{
           "action" => %{
             "type" => "string",
@@ -288,116 +394,148 @@ defmodule FermixCore.Tools.ComputerUse do
           },
           "observation_id" => %{
             "type" => "string",
-            "description" =>
-              "The image these coordinates were read in — the id a `screenshot`" <>
-                naming(offered, ["elements"], ", `elements`") <>
-                " or `windows` reply named. REQUIRED on click/move/drag/scroll" <>
-                naming(offered, ["inspect"], "/inspect") <>
-                "; an id from one image never applies to another"
-          },
-          "x" => %{
-            "type" => "integer",
-            "description" => "X pixel in the image named by observation_id"
-          },
-          "y" => %{
-            "type" => "integer",
-            "description" => "Y pixel in the image named by observation_id"
+            "description" => observation_id_description(offered)
           },
           "display" => %{
             "type" => "integer",
             "description" => "Display index; defaults to the configured display"
           },
-          "modifiers" => %{
-            "type" => "array",
-            "items" => %{"type" => "string", "enum" => @modifiers},
-            "description" => "Held modifier keys for a click (e.g. [\"cmd\"])"
-          },
-          "from" =>
-            point_schema("Drag start point, in pixels of the image named by observation_id"),
-          "to" => point_schema("Drag end point, in pixels of the image named by observation_id"),
-          "direction" => %{
-            "type" => "string",
-            "enum" => @scroll_directions,
-            "description" => "Scroll direction"
-          },
-          "amount" => %{
-            "type" => "integer",
-            "minimum" => 1,
-            "maximum" => @max_scroll_notches,
-            "description" => "Notches to scroll, 1 to #{@max_scroll_notches}"
-          },
           "text" => %{
             "type" => "string",
             "description" =>
-              "Text to type or paste (for action=type/paste)" <>
+              naming(
+                offered,
+                ["paste"],
+                "Text to type or paste (for action=type/paste)",
+                "Text to type (for action=type)"
+              ) <>
                 typing_into(
                   offered,
                   input_methods,
                   "; `type` with an `element_ref` puts it into that control, no keyboard"
                 )
           },
-          "chord" => %{
-            "type" => "string",
-            "description" => "Key chord for action=key, e.g. \"ctrl+s\""
-          },
           "ms" => %{
             "type" => "integer",
             "description" => "Milliseconds to wait (for action=wait)"
-          },
-          "timeout_ms" => %{
-            "type" => "integer",
-            "description" =>
-              "Max ms to wait for a change (for action=wait_for_change; default 10000)"
-          },
-          "poll_ms" => %{
-            "type" => "integer",
-            "description" => "Check interval in ms (for action=wait_for_change; default 250)"
-          },
-          "region" => %{
-            "type" => "object",
-            "properties" => %{
-              "x" => %{"type" => "integer"},
-              "y" => %{"type" => "integer"},
-              "w" => %{"type" => "integer"},
-              "h" => %{"type" => "integer"}
-            },
-            "required" => ["x", "y", "w", "h"],
-            "description" =>
-              "Optional zoom rectangle {x,y,w,h}, for `screenshot`" <>
-                naming(offered, ["elements"], ", `elements`") <>
-                " and `wait_for_change` only. With `observation_id` it is in that image's " <>
-                "pixels; without one it is in a full-screen screenshot's pixels (the space " <>
-                "`windows` answers in). The reply names a NEW image — aim in that one. A " <>
-                "click, move, drag" <>
-                naming(offered, ["inspect"], ", scroll or inspect", " or scroll") <>
-                " never carries a region: it names its image with `observation_id` instead."
-          },
-          "confirm_grid" => %{
-            "type" => "boolean",
-            "description" =>
-              "Set true ONLY to re-send an action that was refused as ambiguous coordinates, " <>
-                "after re-reading the magnified image and confirming your x,y are pixels of THAT " <>
-                "image — not of the full screen"
-          },
-          "marks" => %{
-            "type" => "boolean",
-            "description" =>
-              "On `screenshot`: badge the accessibility click targets with numbered marks and " <>
-                "list them, so you can act by mark number instead of estimating pixels"
-          },
-          "mark" => %{
-            "type" => "integer",
-            "description" =>
-              "Act on a numbered mark instead of x/y — the exact click point is resolved for " <>
-                "you. A mark belongs to the image it was badged on, so send it with that " <>
-                "image's `observation_id`." <>
-                naming(
-                  offered,
-                  ["press", "set_value"],
-                  " On `press`/`set_value` it names the badged CONTROL"
-                )
           }
         })
+    }
+  end
+
+  # Where only the controls are served, an id names a listing and nothing else.
+  defp observation_id_description(offered) do
+    if "screenshot" in offered,
+      do:
+        "The image these coordinates were read in — the id a " <>
+          spoken_list(image_replies(offered), "or") <>
+          " reply named. REQUIRED on click/move/drag/scroll" <>
+          naming(offered, ["inspect"], "/inspect") <>
+          "; an id from one image never applies to another",
+      else:
+        "The listing these references belong to — the id an `elements` reply named. " <>
+          "REQUIRED with an `element_ref`; an id from one listing never applies to another"
+  end
+
+  # The fields only a pixel verb takes: a point, a drag, a scroll, a chord, a
+  # wait on the screen, a crop and the marks badged on a screenshot. A session
+  # whose pixel route was refused is offered none of them.
+  defp pixel_properties(offered) do
+    if "screenshot" in offered,
+      do: Map.merge(pointer_properties(), capture_properties(offered)),
+      else: %{}
+  end
+
+  defp pointer_properties do
+    %{
+      "x" => %{
+        "type" => "integer",
+        "description" => "X pixel in the image named by observation_id"
+      },
+      "y" => %{
+        "type" => "integer",
+        "description" => "Y pixel in the image named by observation_id"
+      },
+      "modifiers" => %{
+        "type" => "array",
+        "items" => %{"type" => "string", "enum" => @modifiers},
+        "description" => "Held modifier keys for a click (e.g. [\"cmd\"])"
+      },
+      "from" => point_schema("Drag start point, in pixels of the image named by observation_id"),
+      "to" => point_schema("Drag end point, in pixels of the image named by observation_id"),
+      "direction" => %{
+        "type" => "string",
+        "enum" => @scroll_directions,
+        "description" => "Scroll direction"
+      },
+      "amount" => %{
+        "type" => "integer",
+        "minimum" => 1,
+        "maximum" => @max_scroll_notches,
+        "description" => "Notches to scroll, 1 to #{@max_scroll_notches}"
+      },
+      "chord" => %{
+        "type" => "string",
+        "description" => "Key chord for action=key, e.g. \"ctrl+s\""
+      }
+    }
+  end
+
+  defp capture_properties(offered) do
+    %{
+      "timeout_ms" => %{
+        "type" => "integer",
+        "description" => "Max ms to wait for a change (for action=wait_for_change; default 10000)"
+      },
+      "poll_ms" => %{
+        "type" => "integer",
+        "description" => "Check interval in ms (for action=wait_for_change; default 250)"
+      },
+      "region" => %{
+        "type" => "object",
+        "properties" => %{
+          "x" => %{"type" => "integer"},
+          "y" => %{"type" => "integer"},
+          "w" => %{"type" => "integer"},
+          "h" => %{"type" => "integer"}
+        },
+        "required" => ["x", "y", "w", "h"],
+        "description" =>
+          "Optional zoom rectangle {x,y,w,h}, for `screenshot`" <>
+            naming(offered, ["elements"], ", `elements`") <>
+            " and `wait_for_change` only. With `observation_id` it is in that image's " <>
+            "pixels; without one it is in a full-screen screenshot's pixels" <>
+            naming(offered, ["windows"], " (the space `windows` answers in)") <>
+            ". The reply names a NEW image — aim in that one. A " <>
+            "click, move, drag" <>
+            naming(offered, ["inspect"], ", scroll or inspect", " or scroll") <>
+            " never carries a region: it names its image with `observation_id` instead."
+      },
+      "confirm_grid" => %{
+        "type" => "boolean",
+        "description" =>
+          "Set true ONLY to re-send an action that was refused as ambiguous coordinates, " <>
+            "after re-reading the magnified image and confirming your x,y are pixels of THAT " <>
+            "image — not of the full screen"
+      },
+      "marks" => %{
+        "type" => "boolean",
+        "description" =>
+          "On `screenshot`: badge the accessibility click targets with numbered marks and " <>
+            "list them, so you can act by mark number instead of estimating pixels"
+      },
+      "mark" => %{
+        "type" => "integer",
+        "description" =>
+          "Act on a numbered mark instead of x/y — the exact click point is resolved for " <>
+            "you. A mark belongs to the image it was badged on, so send it with that " <>
+            "image's `observation_id`." <>
+            naming(
+              offered,
+              ["press", "set_value"],
+              " On `press`/`set_value` it names the badged CONTROL"
+            )
+      }
     }
   end
 
@@ -417,7 +555,9 @@ defmodule FermixCore.Tools.ComputerUse do
         "element_ref" => %{
           "type" => "string",
           "description" =>
-            "A control, by the reference an `elements` listing (or a mark) gave it — `e1`, " <>
+            "A control, by the reference an `elements` listing" <>
+              naming(offered, ["screenshot"], " (or a mark)") <>
+              " gave it — `e1`, " <>
               "`e2`, … A reference belongs to the listing that minted it, so send it with " <>
               "that reply's `observation_id`. " <>
               required_by(offered) <>
@@ -426,9 +566,14 @@ defmodule FermixCore.Tools.ComputerUse do
                 input_methods,
                 "`type` takes it to type into that control; "
               ) <>
-              "a click, right-click, double-click, move or scroll may take it INSTEAD of x,y " <>
-              "where the control's line gives a point, and its bounds are re-read at that " <>
-              "moment. Never send both a reference and coordinates on one action"
+              naming(
+                offered,
+                ["screenshot"],
+                "a click, right-click, double-click, move or scroll may take it INSTEAD of x,y " <>
+                  "where the control's line gives a point, and its bounds are re-read at that " <>
+                  "moment. Never send both a reference and coordinates on one action",
+                "the control is found again when the action runs"
+              )
         }
       }
     else
@@ -602,32 +747,72 @@ defmodule FermixCore.Tools.ComputerUse do
   end
 
   defp base_action_description(offered) do
-    "The GUI action. Read-only: screenshot, " <>
+    "The GUI action. Read-only: " <>
+      naming(offered, ["screenshot"], "screenshot, ") <>
       naming(offered, ["inspect"], "inspect, ") <>
       naming(
         offered,
         ["elements"],
-        "elements (the controls, one line each with a reference and the verbs it takes; an " <>
-          "empty result does not block pixel targeting of visible content), "
+        "elements (the controls, one line each with a reference and the verbs it takes" <>
+          naming(
+            offered,
+            ["screenshot"],
+            "; an empty result does not block pixel targeting of visible content"
+          ) <> "), "
       ) <>
-      "windows (list the open windows, each with a ready-made `region` — use it to " <>
-      "crop to the app you are working in instead of squinting at a downscaled " <>
-      "whole screen), " <>
-      "wait_for_change (block until the screen changes, then return the new frame), " <>
+      naming(
+        offered,
+        ["windows"],
+        "windows (list the open windows, each with a ready-made `region` — use it to " <>
+          "crop to the app you are working in instead of squinting at a downscaled " <>
+          "whole screen), "
+      ) <>
+      naming(
+        offered,
+        ["wait_for_change"],
+        "wait_for_change (block until the screen changes, then return the new frame), "
+      ) <>
       naming(offered, ["wait_for"], "wait_for (block until an `until` condition holds), ") <>
-      "mouse_move, wait. Mutating: left_click, right_click, double_click, " <>
-      "left_click_drag, scroll, type, paste (clipboard — prefer for long text), key" <>
+      naming(offered, ["mouse_move"], "mouse_move, ") <>
+      "wait. Mutating: " <>
+      Enum.join(mutating_names(offered), ", ") <>
       offered_verbs(offered) <>
       ". " <>
       background_actions_description(offered) <>
-      naming(
-        offered,
-        ["elements"],
-        "PREFER A NAMED CONTROL: a verb its `elements` line lists, sent with its " <>
-          "`element_ref`, cannot miss. `type` and `paste` remain for text that must go " <>
-          "through real keystrokes; click (by `element_ref` or point) only a control that " <>
-          "lists no verb you need. A refused verb is a refusal, never a quiet click."
-      )
+      naming(offered, ["elements"], prefer_control_description(offered))
+  end
+
+  # The mutating actions that are not verbs on a control, as the description names
+  # them, in its order.
+  @mutating_names [
+    {"left_click", "left_click"},
+    {"right_click", "right_click"},
+    {"double_click", "double_click"},
+    {"left_click_drag", "left_click_drag"},
+    {"scroll", "scroll"},
+    {"type", "type"},
+    {"paste", "paste (clipboard — prefer for long text)"},
+    {"key", "key"}
+  ]
+
+  defp mutating_names(offered),
+    do: for({action, name} <- @mutating_names, action in offered, do: name)
+
+  # Where only the controls are served, every input names one: there are no
+  # keystrokes at the focus and no click to fall back to.
+  defp prefer_control_description(offered) do
+    if "screenshot" in offered do
+      "PREFER A NAMED CONTROL: a verb its `elements` line lists, sent with its " <>
+        "`element_ref`, cannot miss. " <>
+        naming(offered, ["paste"], "`type` and `paste` remain", "`type` remains") <>
+        " for text that must go " <>
+        "through real keystrokes; click (by `element_ref` or point) only a control that " <>
+        "lists no verb you need. A refused verb is a refusal, never a quiet click."
+    else
+      "EVERY INPUT NAMES A CONTROL: a verb its `elements` line lists, sent with its " <>
+        "`element_ref`, or `type` with an `element_ref` for text. A refused verb is a " <>
+        "refusal: nothing is done in its place."
+    end
   end
 
   # The verbs on a control this reading offers, named for the description.
@@ -653,7 +838,9 @@ defmodule FermixCore.Tools.ComputerUse do
 
   defp action_description(:strict, offered) do
     base_action_description(offered) <>
-      " ACCESS=strict (look only): screenshot/mouse_move/wait run; every mutating action is refused."
+      " ACCESS=strict (look only): " <>
+      naming(offered, ["screenshot"], "screenshot/mouse_move/wait", "elements/wait") <>
+      " run; every mutating action is refused."
   end
 
   defp action_description(:standard, offered) do
@@ -677,16 +864,21 @@ defmodule FermixCore.Tools.ComputerUse do
   @impl true
   def examples do
     offered = HelperActions.offered()
-    Enum.filter(all_examples(), &example_offered?(&1.args, offered))
+    Enum.filter(all_examples(offered), &example_offered?(&1.args, offered))
   end
 
   # An `until` rides only where `wait_for` is offered, whatever action carries it.
   defp example_offered?(%{"until" => _until} = args, offered),
     do: args["action"] in offered and "wait_for" in offered
 
+  # `type` with no control types at the focus, which takes the pixel route's keys.
+  defp example_offered?(%{"action" => "type"} = args, offered)
+       when not is_map_key(args, "element_ref"),
+       do: "type" in offered and "key" in offered
+
   defp example_offered?(args, offered), do: args["action"] in offered
 
-  defp all_examples do
+  defp all_examples(offered) do
     [
       %{
         args: %{"action" => "screenshot"},
@@ -706,7 +898,9 @@ defmodule FermixCore.Tools.ComputerUse do
       },
       %{
         args: %{"action" => "press", "observation_id" => "7c1e-13", "element_ref" => "e4"},
-        note: "press a control whose line lists `press` — no pointer, no aim, no miss"
+        note:
+          "press a control whose line lists `press`" <>
+            naming(offered, ["screenshot"], " — no pointer, no aim, no miss")
       },
       %{
         args: %{
@@ -715,7 +909,9 @@ defmodule FermixCore.Tools.ComputerUse do
           "element_ref" => "e7",
           "value" => "chess.com"
         },
-        note: "fill a field whose line lists `set_value`, instead of clicking it and typing"
+        note:
+          "fill a field whose line lists `set_value`" <>
+            naming(offered, ["screenshot"], ", instead of clicking it and typing")
       },
       %{
         args: %{
@@ -746,7 +942,9 @@ defmodule FermixCore.Tools.ComputerUse do
     offered = HelperActions.offered()
 
     common_failure_modes(offered) ++
-      naming_list(offered, "elements", control_failure_modes()) ++
+      naming_list(offered, "screenshot", pixel_failure_modes(offered)) ++
+      [consent_failure_mode()] ++
+      naming_list(offered, "elements", control_failure_modes(offered)) ++
       naming_list(offered, "wait_for", wait_failure_modes()) ++
       background_failure_modes(offered)
   end
@@ -797,28 +995,63 @@ defmodule FermixCore.Tools.ComputerUse do
         tag: "outcome unknown",
         description:
           "the helper stopped responding or exited during the action, so whether the input " <>
-            "reached the screen is not knowable; the session was reset — read a fresh " <>
-            "screenshot before repeating anything"
+            "reached the screen is not knowable; the session was reset — " <>
+            naming(offered, ["screenshot"], "read a fresh screenshot", "list the controls again") <>
+            " before repeating anything"
       },
       %{
         tag: "performed, not verified",
         description:
-          "the action was sent but its check could not be obtained; take a " <>
-            "screenshot to see the result instead of re-sending the action"
-      },
-      %{
-        tag: "observation_required",
-        description:
-          "an action aimed at a point or a control that named no observation_id; nothing " <>
-            "was sent. Take a fresh look and send the action with the id it names"
-      },
-      %{
-        tag: "unknown/expired/stale observation",
-        description:
-          "the image the action named is no longer addressable — replaced, aged out, or " <>
-            "its display changed; nothing was sent. Take a fresh screenshot and re-read " <>
-            "the coordinates in it"
-      },
+          "the action was sent but its check could not be obtained; take a" <>
+            naming(offered, ["screenshot"], " screenshot", "n `elements` listing") <>
+            " to see the result instead of re-sending the action"
+      }
+      | addressing_failure_modes(offered)
+    ]
+  end
+
+  # Where only the controls are served, an id names a listing and an action names
+  # a control.
+  defp addressing_failure_modes(offered) do
+    if "screenshot" in offered do
+      [
+        %{
+          tag: "observation_required",
+          description:
+            "an action aimed at a point or a control that named no observation_id; nothing " <>
+              "was sent. Take a fresh look and send the action with the id it names"
+        },
+        %{
+          tag: "unknown/expired/stale observation",
+          description:
+            "the image the action named is no longer addressable — replaced, aged out, or " <>
+              "its display changed; nothing was sent. Take a fresh screenshot and re-read " <>
+              "the coordinates in it"
+        }
+      ]
+    else
+      [
+        %{
+          tag: "observation_required",
+          description:
+            "an action on a control that named no observation_id; nothing was sent. List " <>
+              "the controls again and send the action with the id that listing names"
+        },
+        %{
+          tag: "unknown/expired/stale observation",
+          description:
+            "the listing the action named is no longer addressable — replaced, aged out, or " <>
+              "its display changed; nothing was sent. Take `elements` again and use the " <>
+              "references in it"
+        }
+      ]
+    end
+  end
+
+  # The refusals only a pixel verb meets: a point, a capture, keys at the focus,
+  # and a point named beside a reference or a mark.
+  defp pixel_failure_modes(offered) do
+    [
       %{
         tag: "point_outside_observation",
         description:
@@ -833,7 +1066,9 @@ defmodule FermixCore.Tools.ComputerUse do
       },
       %{
         tag: "text_outside_layout",
-        description: "the keyboard layout cannot type that text; nothing was sent — use paste"
+        description:
+          "the keyboard layout cannot type that text; nothing was sent" <>
+            naming(offered, ["paste"], " — use paste")
       },
       %{
         tag: "no_active_window / keyboard_not_neutral",
@@ -853,18 +1088,26 @@ defmodule FermixCore.Tools.ComputerUse do
               "an element_ref together with coordinates or a mark",
               "a mark together with coordinates"
             ) <> "; nothing was sent. Send one or the other"
-      },
-      %{
-        tag: "consent_refused / consent_timeout",
-        description:
-          "the desktop's own prompt to allow screen capture or control was declined or not " <>
-            "answered; nothing was sent. Ask the user, never work around it"
       }
     ]
   end
 
+  defp consent_failure_mode do
+    %{
+      tag: "consent_refused / consent_timeout",
+      description:
+        "the desktop's own prompt to allow screen capture or control was declined or not " <>
+          "answered; nothing was sent. Ask the user, never work around it"
+    }
+  end
+
   # The controls a listing names, and every way a verb on one is refused.
-  defp control_failure_modes do
+  defp control_failure_modes(offered) do
+    reference_failure_modes(offered) ++
+      linux_control_failure_modes(offered) ++ accessibility_call_failure_modes()
+  end
+
+  defp reference_failure_modes(offered) do
     [
       %{
         tag: "stale_element",
@@ -887,8 +1130,13 @@ defmodule FermixCore.Tools.ComputerUse do
       %{
         tag: "ax_action_unsupported",
         description:
-          "the control has no route for that verb; nothing was sent and nothing was " <>
-            "switched to a click for you — choose the mechanism yourself"
+          "the control has no route for that verb; nothing was sent and " <>
+            naming(
+              offered,
+              ["screenshot"],
+              "nothing was switched to a click for you — choose the mechanism yourself",
+              "nothing was done in its place — choose another verb its line lists"
+            )
       },
       %{
         tag: "state_unreadable",
@@ -901,19 +1149,12 @@ defmodule FermixCore.Tools.ComputerUse do
         description:
           "focus on a control in a window that is not the active one; focus never brings a " <>
             "window forward, so nothing was sent"
-      },
-      %{
-        tag: "pixels_unavailable",
-        description:
-          "this desktop cannot serve that action by pixels, as the detail says; nothing was " <>
-            "sent. Work by control: `elements`, then a verb on a reference"
-      },
-      %{
-        tag: "scope_not_found / toolkit_accessibility_off",
-        description:
-          "nothing to read: the scope has no root right now (no focused window, no menu or " <>
-            "dialog open), or the application's toolkit is not publishing its controls"
-      },
+      }
+    ]
+  end
+
+  defp accessibility_call_failure_modes do
+    [
       %{
         tag: "ax_timed_out / ax_action_failed",
         description:
@@ -927,6 +1168,27 @@ defmodule FermixCore.Tools.ComputerUse do
         description:
           "set_value was given a non-string value; nothing was sent and nothing was " <>
             "converted — send the characters you want in the field, in quotes"
+      }
+    ]
+  end
+
+  # The refusals of a verb on a control that the Linux build answers: a pixel route
+  # refused, and a toolkit that publishes no controls until a switch is set.
+  defp linux_control_failure_modes(offered) do
+    [
+      %{
+        tag: "pixels_unavailable",
+        description:
+          "this desktop cannot serve that action" <>
+            naming(offered, ["screenshot"], " by pixels", ": every input here names a control") <>
+            ", as the detail says; nothing was " <>
+            "sent. Work by control: `elements`, then a verb on a reference"
+      },
+      %{
+        tag: "scope_not_found / toolkit_accessibility_off",
+        description:
+          "nothing to read: the scope has no root right now (no focused window, no menu or " <>
+            "dialog open), or the application's toolkit is not publishing its controls"
       }
     ]
   end
@@ -962,20 +1224,23 @@ defmodule FermixCore.Tools.ComputerUse do
         %{
           tag: "target_unavailable / target_minimized",
           description:
-            "the bound window closed, its application quit, or it was minimized; " <>
-              "nothing was sent and nothing was un-minimized. Take windows and bind again"
+            "the bound window closed, its application quit, or it was minimized or is on " <>
+              "another desktop; nothing was sent and nothing was un-minimized. Take windows " <>
+              "and bind again"
         },
         %{
           tag: "target_obstructed",
           description:
-            "something covers the bound window at that point, so a click would land on " <>
-              "it; nothing was sent and nothing was raised. Press the control by name instead"
+            "something covers the bound window at that point (a window, a menu or a popup), " <>
+              "so a click would land on it; nothing was sent and nothing was raised. Press the " <>
+              "control by name instead"
         },
         %{
           tag: "target_binding_unavailable",
           description:
-            "the helper cannot prove the window is the one it claims to be, or this desktop " <>
-              "allows no binding; nothing was bound. Work on the whole screen instead"
+            "the helper cannot prove the window is the one it claims to be (it names no " <>
+              "process, or its id now names another window), or this desktop allows no " <>
+              "binding; nothing was bound. Take windows again, or work on the whole screen"
         },
         %{
           tag: "ax_binding_unavailable",
@@ -992,8 +1257,9 @@ defmodule FermixCore.Tools.ComputerUse do
         %{
           tag: "capture_unavailable / capture_budget_exceeded",
           description:
-            "the bound window's own picture stalled, or the window is too large to hold " <>
-              "pictures of within the helper's memory budget; nothing was sent"
+            "the bound window's own picture stalled or is not yet proven its own (one being " <>
+              "checked again after a change: look again in a moment), or the window is too " <>
+              "large to hold pictures of within the helper's memory budget; nothing was sent"
         },
         %{
           tag: "screen_recording_not_granted",
@@ -1258,10 +1524,10 @@ defmodule FermixCore.Tools.ComputerUse do
   # The operator DID switch it on and the installed helper cannot carry it. An
   # operator fact with an operator fix, so the sentence says who to tell rather
   # than what to try.
-  defp refusal_message({:background_unavailable, reason}) do
+  defp refusal_message({:background_unavailable, reason, target}) do
     "this action was not sent: the computer-use helper on this machine cannot work inside a " <>
-      "bound window — #{background_cause(reason)}. Do not retry. Tell the user `fermix doctor` " <>
-      "explains it, and work on the whole screen meanwhile."
+      "bound window — #{background_cause(reason, target)}. Do not retry. Tell the user " <>
+      "`fermix doctor` explains it, and work on the whole screen meanwhile."
   end
 
   # Nothing is bound, and something was about to act. Running it on the whole
@@ -1333,14 +1599,24 @@ defmodule FermixCore.Tools.ComputerUse do
       "retry it; use one of those instead."
   end
 
-  defp background_cause(:no_targets), do: "this build cannot bind a window at all"
+  # A Linux helper binds a window only under X11, and its badge is a program
+  # installed beside it; a macOS helper's badge is part of its bundle.
+  defp background_cause(:no_targets, {:ok, "linux-" <> _arch}),
+    do: "it cannot bind one in this desktop session"
 
-  defp background_cause(:indicator_missing),
+  defp background_cause(:no_targets, _target), do: "this build cannot bind a window at all"
+
+  defp background_cause(:indicator_missing, {:ok, "linux-" <> _arch}),
+    do:
+      "its on-screen indicator is not installed beside it, and work inside a window is " <>
+        "never done without one on screen"
+
+  defp background_cause(:indicator_missing, _target),
     do:
       "its on-screen indicator is not in the installed bundle, and work inside a window is " <>
         "never done without one on screen"
 
-  defp background_cause(_unknown),
+  defp background_cause(_unknown, _target),
     do:
       "it did not say whether it has the on-screen indicator, and work inside a window is " <>
         "never done without one on screen"
@@ -1419,15 +1695,23 @@ defmodule FermixCore.Tools.ComputerUse do
   # what a bug report needs — appended, never rendered AS the message.
   # `target_obstructed` is here too: its sentence ends by promising the helper's
   # own words for what is in front, which is the one fact that decides whether the
-  # model aims elsewhere or asks the person to move something.
-  # The Linux refusals are here too where the helper's detail is the cause: how
-  # many applications claim the active window, which key state is on, why this
-  # desktop's pixel route is refused. None of them arrives on a check, because
-  # each is refused before any input goes out.
-  @detailed_codes ~w(point_outside_observation capture_geometry_mismatch
-                     ax_timed_out ax_action_failed target_obstructed scope_not_found
-                     toolkit_accessibility_off invalid_argument no_active_window
-                     keyboard_not_neutral pixels_unavailable)
+  # model aims elsewhere or asks the person to move something. So are the refusals
+  # whose detail is the cause: how many applications claim the active window,
+  # which key state is on, why this desktop's pixel route is refused, and why a
+  # capture could not serve (a bound window not yet proven its own, the desktop's
+  # screen-sharing service).
+  @detailed_codes ~w(point_outside_observation capture_geometry_mismatch ax_timed_out
+                     ax_action_failed target_obstructed scope_not_found toolkit_accessibility_off
+                     invalid_argument no_active_window keyboard_not_neutral pixels_unavailable
+                     capture_unavailable)
+
+  # The codes the capture behind a check can answer once the input has gone out,
+  # each with a sentence true after it: the display's geometry, a capture that
+  # stalled, a display that went away. Every other code's sentence was written for
+  # a refusal before any input, and many open "this action was not sent", which
+  # after a click that landed would buy a second real one.
+  @check_codes ~w(capture_geometry_mismatch capture_stalled no_active_display display_asleep
+                  display_disconnected)
 
   # A check the helper refused after the input had already gone out is a SUCCESS
   # here — the action happened — so the code it refused with would otherwise reach
@@ -1436,16 +1720,20 @@ defmodule FermixCore.Tools.ComputerUse do
   # the generic unverified lead ends in "take a fresh `screenshot`" — the exact
   # retry that code forbids. One authority per code, so the sentence comes from the
   # same `code_message/2` a refusal would have used, with the helper's numbers
-  # after it exactly as `failure_message/2` places them.
+  # after it exactly as `failure_message/2` places them. Any other code adds
+  # nothing: the row carries it.
   defp action_summary(%{summary: summary, check_code: code} = result, offered)
-       when code in @detailed_codes do
-    summary <> " " <> code_message(code, offered) <> check_detail(result)
+       when code in @check_codes do
+    summary <> " " <> code_message(code, offered) <> check_detail(code, result)
   end
 
   defp action_summary(%{summary: summary}, _offered), do: summary
 
-  defp check_detail(%{check_detail: detail}) when is_binary(detail), do: " (#{detail})"
-  defp check_detail(_result), do: ""
+  defp check_detail(code, %{check_detail: detail})
+       when code in @detailed_codes and is_binary(detail),
+       do: " (#{Controls.safe_sentence(detail)})"
+
+  defp check_detail(_code, _result), do: ""
 
   # The session decided the outcome of a reply it produced (it knows whether the
   # check came back); the tool only classifies the error tuples. A check the helper
@@ -1963,39 +2251,49 @@ defmodule FermixCore.Tools.ComputerUse do
           "reset and the next action starts a fresh helper. Take a `screenshot` and read the " <>
           "current state before doing anything else; repeat this action only if the screen " <>
           "shows it did not take effect.",
-      else: "action failed: #{format_reason(reason)}"
+      else: "action failed: #{helper_reason(reason)}"
   end
 
-  # The window is gone: closed, or its application quit. A reused window number
-  # or a relaunched application never revives a binding, so there is nothing to
-  # re-point at — the window has to be found again from scratch.
+  # A string here is a code the helper sent that this build has no sentence for:
+  # the helper's text, so it reads the way its details do. Anything else is this
+  # side's own term.
+  defp helper_reason(reason) when is_binary(reason), do: Controls.safe_sentence(reason)
+  defp helper_reason(reason), do: format_reason(reason)
+
+  # The window is gone: closed, or its application quit, or the desktop would no
+  # longer list its windows. A reused window number or a relaunched application
+  # never revives a binding, so there is nothing to re-point at — the window has
+  # to be found again from scratch.
   defp background_code_message("target_unavailable") do
-    "this action was not sent: the window you bound is gone — it was closed, or its " <>
-      "application quit. Nothing was done to whatever is there now. Take `windows` to see " <>
-      "what is open and `select_target` the window you want; do not re-send this one against " <>
-      "the old binding."
+    "this action was not sent: the window you bound is gone — it was closed, its " <>
+      "application quit, or the desktop would not say which windows are open. Nothing was " <>
+      "done to whatever is there now. Take `windows` to see what is open and `select_target` " <>
+      "the window you want; do not re-send this one against the old binding."
   end
 
-  # Minimized is recoverable by the PERSON, not by the agent: nothing here
-  # un-minimizes a window, because that is a visible change to their desktop
-  # nobody asked for.
+  # Minimized, or on another desktop, is recoverable by the PERSON, not by the
+  # agent: nothing here un-minimizes a window or switches desktops, because that
+  # is a visible change to their desktop nobody asked for.
   defp background_code_message("target_minimized") do
-    "this action was not sent: the window you bound is minimized, so there is nothing of it " <>
-      "to see or act on. Nothing was un-minimized for you. Ask the user to bring it back, or " <>
-      "`select_target` a different window; `windows` shows what is open."
+    "this action was not sent: the window you bound is minimized or on another desktop, so " <>
+      "there is nothing of it to see or act on. Nothing was un-minimized or switched to for " <>
+      "you. Ask the user to bring it back, or `select_target` a different window; `windows` " <>
+      "shows what is open."
   end
 
-  # A pixel action needs the target to be the topmost window at that point.
-  # Deliberately does NOT offer to raise it: raising a window is exactly the
-  # visible interruption a bound window exists to avoid.
+  # A pixel action needs the target to be the topmost window at that point, and
+  # a menu or popup no window manager lists counts as in front too. Deliberately
+  # does NOT offer to raise it: raising a window is exactly the visible
+  # interruption a bound window exists to avoid.
   defp background_code_message("target_obstructed") do
-    "this action was not sent: something is in front of the window you bound at that point, " <>
-      "so a click there would land on whatever is covering it. Nothing was raised or brought " <>
-      "forward. The detail below names what is in front; if it is Fermix's own on-screen " <>
-      "indicator, that is the panel with pause and stop on it and clicking through it would " <>
-      "press one of those. Reach the control by name instead — take `elements` and `press` or " <>
-      "`set_value` it, which does not go through the pointer at all — or aim somewhere the " <>
-      "window is not covered, or ask the user to move what is on top."
+    "this action was not sent: something is in front of the window you bound at that point " <>
+      "— another window, or a menu or popup — so a click there would land on whatever is " <>
+      "covering it. Nothing was raised, closed or brought forward. The detail below names " <>
+      "what is in front; if it is Fermix's own on-screen indicator, that is the panel with " <>
+      "pause and stop on it and clicking through it would press one of those. Reach the " <>
+      "control by name instead — take `elements` and `press` or `set_value` it, which does " <>
+      "not go through the pointer at all — or aim somewhere the window is not covered, or ask " <>
+      "the user to move or close what is on top."
   end
 
   # The window was bound but its accessibility window was not, so there is no
@@ -2007,22 +2305,29 @@ defmodule FermixCore.Tools.ComputerUse do
       "and click in the image it names, knowing the pointer moves where the user can see it."
   end
 
-  # The on-screen indicator never started, or died. An operator fact: work inside
-  # a window is not done invisibly, so the answer is to tell the user, never to
-  # retry into the same wall.
+  # The on-screen indicator is not beside the helper, never started, or died. An
+  # operator fact: work inside a window is not done invisibly, so the answer is to
+  # tell the user, never to retry into the same wall.
   defp background_code_message("control_surface_unavailable") do
-    "this action was not sent: the computer-use helper could not put its on-screen indicator " <>
-      "up, and it will not work inside a window with nothing on screen to show the user that " <>
-      "it is doing so or to stop it. Do not retry. Tell the user the on-screen computer-use " <>
-      "indicator could not start; the whole screen still works as usual."
+    "this action was not sent: the computer-use helper's on-screen indicator is not up — it " <>
+      "is not installed beside the helper, or it could not start or stopped — and the helper " <>
+      "will not work inside a window with nothing on screen to show the user that it is " <>
+      "doing so or to stop it. Do not retry. Tell the user the on-screen computer-use " <>
+      "indicator is not running; the whole screen still works as usual."
   end
 
-  # The window's own capture stream is not delivering. Distinct from the display
-  # being asleep: the display may be perfectly awake.
+  # The window's own picture is not delivering, or is not yet proven to be the
+  # window's rather than what covered it: it did not repaint in time, or it is
+  # proved again after a resize or being shown again, which a moment settles.
+  # Distinct from the display being asleep: the display may be perfectly awake.
+  # The helper's detail says which, so it rides after the sentence.
   defp background_code_message("capture_unavailable") do
-    "this action was not sent: the picture of the window you bound could not be obtained — " <>
-      "its stream stalled, or the window stopped being drawable. Take `windows` to see whether " <>
-      "it is still open, and `select_target` it again to start a fresh picture of it."
+    "this action was not sent: the picture of the window you bound could not be obtained or " <>
+      "proven to be that window's own — it did not draw itself in time, it is being checked " <>
+      "again after it changed size or was shown again, or its stream stalled, as the detail " <>
+      "below says. If it is being checked again, wait a moment and look again; otherwise " <>
+      "take `windows` to see whether it is still open, and `select_target` it again to start " <>
+      "a fresh picture of it."
   end
 
   # A window whose frames do not fit the worker's memory budget. Not retryable as
@@ -2038,13 +2343,18 @@ defmodule FermixCore.Tools.ComputerUse do
       "afterwards."
   end
 
-  # Linux: the helper cannot prove the window is the frame it claims to be, or
-  # the desktop allows no binding at all (Wayland). Binding the wrong window is
-  # the failure this refuses, so the whole screen is the honest alternative.
+  # Linux: the helper cannot prove the window is the one it claims to be — it
+  # names no process, or its id now belongs to another process's window than
+  # `windows` listed — or the desktop allows no binding at all (Wayland). Binding
+  # the wrong window is the failure this refuses, so a fresh listing comes first
+  # and the whole screen is the honest alternative.
   defp background_code_message("target_binding_unavailable") do
-    "this action was not sent: this window cannot be bound here — the helper cannot prove it " <>
-      "is the window it claims to be, or this desktop allows no binding at all. Work on the " <>
-      ~s(whole screen instead: `select_target` with `"window_id": "desktop"`.)
+    "this action was not sent: this window cannot be bound — the helper cannot prove it is " <>
+      "the window it claims to be (it names no process, as some popups do, or the window " <>
+      "with that id is no longer the one `windows` listed), or this desktop allows no binding " <>
+      "at all. Take `windows` again and `select_target` the window by the id it lists now; if " <>
+      "it is refused again, work on the whole screen instead: " <>
+      ~s(`select_target` with `"window_id": "desktop"`.)
   end
 
   defp background_code_message("capture_budget_exceeded") do
@@ -2059,12 +2369,13 @@ defmodule FermixCore.Tools.ComputerUse do
   # A refusal the helper named. Its code selects the sentence above; a `detail`
   # reaches the model on a code whose sentence asked for it, and on a code with no
   # sentence of its own, where the alternative is a bare token the operator cannot
-  # act on.
+  # act on. A detail can name a window by the title its maker chose, so it reads
+  # the way a bound window's title does.
   defp failure_message(%{code: code, detail: detail} = failure, offered) do
     message = named_failure_message(failure, offered)
 
     if is_binary(detail) and (code in @detailed_codes or message =~ "action failed:"),
-      do: message <> " (#{detail})",
+      do: message <> " (#{Controls.safe_sentence(detail)})",
       else: message
   end
 
@@ -2090,7 +2401,27 @@ defmodule FermixCore.Tools.ComputerUse do
       else: action_error_message("capture_unavailable")
   end
 
+  # Only X11 answers these two, and it lists `paste`. A reading without it is never
+  # sent to the clipboard.
+  defp code_message(code, offered) when code in ["keyboard_not_neutral", "text_outside_layout"] do
+    if "paste" in offered,
+      do: action_error_message(code),
+      else: keys_without_paste_message(code)
+  end
+
   defp code_message(code, _offered), do: action_error_message(code)
+
+  defp keys_without_paste_message("keyboard_not_neutral") do
+    "this action was not sent: the keyboard is not in its plain state — Caps Lock is on, a " <>
+      "key is held, or another layout is selected, as the detail below says — so the text " <>
+      "would come out different. Send it into the control by reference (`type` or " <>
+      "`set_value` with its `element_ref`), or ask the user to clear it."
+  end
+
+  defp keys_without_paste_message("text_outside_layout") do
+    "this action was not sent: the keyboard layout in use cannot type some of that text. " <>
+      "Tell the user which characters it could not type."
+  end
 
   # Two answers to "where" on one request. Guessing which the model meant is a
   # click on the wrong thing, so it is refused, before anything is dispatched.

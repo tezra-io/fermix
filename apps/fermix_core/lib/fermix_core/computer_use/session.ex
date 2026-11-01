@@ -367,6 +367,9 @@ defmodule FermixCore.ComputerUse.Session do
         # identity. The doctor row reads the same facts through its own spawn; a
         # session reads them from the helper it is actually driving.
         capabilities: capabilities,
+        # The platform this helper was built for, which the words of a binding it
+        # cannot carry depend on; the caller's, or `Compux.Binary.target/0`.
+        sidecar_target: Keyword.get_lazy(opts, :sidecar_target, &Compux.Binary.target/0),
         # Whether the bound-window surface is live HERE (M42 slice 5 §1). Two
         # answers, both required: the operator turned the experiment on, and this
         # helper can carry a target with an indicator on screen. A helper that
@@ -802,11 +805,16 @@ defmodule FermixCore.ComputerUse.Session do
   defp check_background_surface(%{"action" => action}, %{background?: false} = state)
        when action in @background_actions do
     if Background.enabled?(state.config),
-      do: {:error, {:background_unavailable, Background.unavailable_reason(state.capabilities)}},
+      do: {:error, background_unavailable(state)},
       else: {:error, :background_disabled}
   end
 
   defp check_background_surface(_params, _state), do: :ok
+
+  defp background_unavailable(state) do
+    reason = Background.unavailable_reason(state.capabilities)
+    {:background_unavailable, reason, state.sidecar_target}
+  end
 
   # `select_target` naming the desktop is Fermix's own word, not the helper's:
   # there is no desktop target on the wire, there is the ABSENCE of one (M42
@@ -1145,7 +1153,8 @@ defmodule FermixCore.ComputerUse.Session do
   defp refusal_reply(request, payload, state, courtesy, %{dispatch: :sent} = receipt) do
     if request["check"] == "image" and not carried?(receipt, "image") do
       code = refused_check(payload)
-      result = unverified_result(code, courtesy, receipt, state, {code, payload["detail"]})
+      shown = Controls.safe_sentence(code)
+      result = unverified_result(shown, courtesy, receipt, state, {code, payload["detail"]})
       {:reply, {:ok, result}, count_action(state, request)}
     else
       {:reply, {:error, failure(payload, receipt)}, state}
@@ -2216,18 +2225,23 @@ defmodule FermixCore.ComputerUse.Session do
       "returns:\n" <> Enum.join(lines, "\n")
   end
 
+  # The application's name and the title are whatever that window's maker chose,
+  # so they read the way the select reply shows them.
   defp window_line(%{"region" => %{"x" => x, "y" => y, "w" => w, "h" => h}} = window) do
-    app = window["app"] || "window"
-    title = window["title"]
+    app = window_app(Controls.safe_text(window["app"]))
+    title = Controls.safe_text(window["title"])
     focus = if window["focused"], do: " [focused]", else: ""
     region = ~s(region {"x": #{x}, "y": #{y}, "w": #{w}, "h": #{h}})
 
-    if is_binary(title) and title != "",
+    if title != "",
       do: ~s(#{app}#{focus} — "#{title}" — #{region}),
       else: "#{app}#{focus} — #{region}"
   end
 
   defp window_line(_other), do: nil
+
+  defp window_app(""), do: "window"
+  defp window_app(app), do: app
 
   defp inspect_summary(%{"found" => false}), do: "no UI element at that point"
 
@@ -2244,7 +2258,10 @@ defmodule FermixCore.ComputerUse.Session do
   end
 
   defp inspect_field(_label, nil), do: nil
-  defp inspect_field(label, value) when is_binary(value), do: ~s(#{label}="#{value}")
+
+  defp inspect_field(label, value) when is_binary(value),
+    do: ~s(#{label}="#{Controls.safe_text(value)}")
+
   defp inspect_field(label, value), do: "#{label}=#{inspect(value)}"
 
   # The screenshot IMAGE is the attacker-controllable surface (on-screen text can carry
@@ -2348,7 +2365,9 @@ defmodule FermixCore.ComputerUse.Session do
 
   # B4: what accessibility activation did (or why it failed) — an empty element
   # list must never be silent about its cause again.
-  defp ax_suffix(%{"ax_activation" => note}) when is_binary(note), do: " AX: #{note}."
+  defp ax_suffix(%{"ax_activation" => note}) when is_binary(note),
+    do: " AX: #{Controls.safe_sentence(note)}."
+
   defp ax_suffix(_response), do: ""
 
   # Set only by `note_delivery/2`, when the action's own check found the pointer away
