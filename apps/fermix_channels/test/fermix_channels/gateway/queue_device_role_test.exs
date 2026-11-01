@@ -54,6 +54,39 @@ defmodule FermixChannels.Gateway.QueueDeviceRoleTest do
     %{queue: queue}
   end
 
+  # A slash command sent to a desktop (`fermix ask "/history status"`) would
+  # read the database the device does not open: it is refused like any message.
+  test "a slash command hears the device-role sentence, and no command runs", %{queue: queue} do
+    test_pid = self()
+
+    message =
+      struct!(FermixChannels.Gateway.Message,
+        id: "device-command-1",
+        content: "/history status",
+        sender: "cli",
+        channel: "cli",
+        chat_id: "cli",
+        reply_target: "cli",
+        metadata: %{source: :cli, user_id: "cli", chat_type: "private"}
+      )
+
+    capture_log(fn ->
+      assert :ok =
+               FermixChannels.Gateway.ingest([message],
+                 channel: FermixChannels.CLI,
+                 agent: Queue,
+                 agent_server: queue,
+                 engine_role: %{role: :device, primary: "aws i-0f3b1c"},
+                 reply_fn: fn
+                   {:text, text} -> send(test_pid, {:reply, text})
+                   _other -> :ok
+                 end
+               )
+
+      assert_receive {:reply, @sentence}, 10_000
+    end)
+  end
+
   test "the channel hears the device-role sentence and the turn fails by name", %{queue: queue} do
     test_pid = self()
 

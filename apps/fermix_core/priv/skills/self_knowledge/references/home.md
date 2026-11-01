@@ -33,11 +33,16 @@ it, never a second writer.
   is the one engine that writes long-term memory. `device` serves the desktop
   app on this machine: it starts no channel transport and none of the
   schedulers for jobs, reminders, open loops, cues, coding-run delivery, skill
-  curation or meetings, and refuses every turn with "This engine runs in the
-  device role; the primary is <where it went>." From the desktop app it also
-  refuses, with the same sentence, every write into the retired copy: a
-  cancel, a read receipt and an answer to a cue card; history and search still
-  answer.
+  curation or meetings, and refuses every turn, and every slash command
+  (`fermix ask "/history"` included), with "This engine runs in the device
+  role; the primary is <where it went>." From the desktop app it also refuses,
+  with the same sentence, everything that would read or write the retired
+  copy itself: a cancel, a read receipt, an answer to a cue card, a page of
+  history, a search and the lists (a linked desktop gets those from the
+  server). A desktop with no link to its server any more refuses every cue
+  method as "Fermix moved to your server, and this <Mac or computer> is no
+  longer connected to it.", the error a linked one gets while its server is
+  out of reach.
 - A device-role engine makes no provider call and refreshes no token: it
   starts no token manager and no realtime voice (the voice socket is absent,
   so the app sees no connection rather than a refusal), it opens no database

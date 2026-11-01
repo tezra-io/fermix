@@ -996,10 +996,11 @@ defmodule FermixChannels.Companion.ConnectionTest do
     assert {:ok, %{messages: []}} = Timeline.history_page("main", ctx.store_opts)
   end
 
-  # M75: a device-role engine runs a retired copy of a moved home. A read
-  # receipt or a cancel from the app would write that copy, so each is refused
-  # by name and nothing is written; reads are still served.
-  test "a device-role engine refuses read receipts and cancels by name, writing nothing", ctx do
+  # M75: a device-role engine runs a retired copy of a moved home, and opens no
+  # database. A read receipt or a cancel from the app would write that copy, and
+  # a page of history, a search or the lists would read it, so each is refused
+  # by name, and nothing is read or written.
+  test "a device-role engine refuses the store's reads and writes by name", ctx do
     store_opts = [transport: "companion"] ++ ctx.store_opts
     claim_held(store_opts, "mac-retired-1", "boot-earlier")
     assert {:ok, _row} = Timeline.append("main", %{role: "user", content: "kept"}, ctx.store_opts)
@@ -1022,7 +1023,24 @@ defmodule FermixChannels.Companion.ConnectionTest do
 
     pull = %{"type" => "history_pull", "profile_id" => "main", "after_seq" => 0, "limit" => 10}
     send_line(client, pull)
-    assert %{"type" => "history_page", "messages" => [%{"server_seq" => 1}]} = recv(client)
+    assert recv(client) == refusal
+
+    search = %{
+      "type" => "history_search",
+      "profile_id" => "main",
+      "query" => "kept",
+      "limit" => 5
+    }
+
+    send_line(client, search)
+    assert recv(client) == refusal
+
+    lists = hello(ctx.socket_path, 6)
+    send_line(lists, %{"type" => "checklists_pull", "profile_id" => "main"})
+    assert recv(lists) == refusal
+    list_id = "ck_0a1b2c3d4e"
+    send_line(lists, %{"type" => "checklist_pull", "profile_id" => "main", "list_id" => list_id})
+    assert recv(lists) == refusal
 
     refute_received {:turns_cancel, _profile, _id}
     assert {:ok, ^frontier} = Timeline.read_frontier("main", ctx.store_opts)

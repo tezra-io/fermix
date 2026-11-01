@@ -12,7 +12,12 @@ defmodule FermixCore.Management.Placement do
   the Fermix that lives on the primary, so a linked device
   (`FermixCore.Home.DesktopLink.linked?/2`) forwards it over the rail
   (`FermixCore.Home.Link`), and a device with no link refuses it as stage 1
-  did. The home's recovery, enrollment and move are the primary's too
+  did. A device opens no database (`FermixCore.Home.Role`), so with no link it
+  refuses every method of a family whose state is the primary's `memory.db`
+  (`database_family?/1`: the cues, their sources, watchers, mandates and
+  proposals) as retired (`retired/1`): `primary_unreachable`, as a linked
+  desktop's is while its server is out of reach, with the sentence that this
+  computer is no longer connected to its server. The home's recovery, enrollment and move are the primary's too
   (`home.snapshots.*`, `home.enroll.open`, `home.enroll.withdraw`,
   `home.candidates.list`, `home.move.readiness`, `home.move.start`): after a
   move the server holds them, and the desktop reaches them only through it.
@@ -53,6 +58,7 @@ defmodule FermixCore.Management.Placement do
   reads what happened from `home.status`.
   """
 
+  alias FermixCore.Management.Copy
   alias FermixCore.Management.Protocol
 
   @device_methods ~w(
@@ -61,6 +67,9 @@ defmodule FermixCore.Management.Placement do
     home.status settings.sections home.act
   )
   @device_families ~w(lifecycle. doctor. computer_use. imessage. home.provision.)
+  # The primary-class families whose state is the primary's memory.db, which
+  # a device never opens: one with no link refuses them as retired.
+  @database_families ~w(cues.)
   @rail_only_methods ~w(home.move.readiness home.move.start home.enroll.open home.enroll.withdraw
                         home.snapshots.run)
   @rail_only_sentence "Always On takes this step itself: send home.act with the action the " <>
@@ -256,6 +265,25 @@ defmodule FermixCore.Management.Placement do
     details = %{"sentence" => sentence}
     details = if name, do: Map.put(details, "primary", name), else: details
     {:error, :primary_unreachable, details}
+  end
+
+  @doc """
+  Whether `method` belongs to a primary-class family whose state is the
+  primary's `memory.db` (see the moduledoc).
+  """
+  @spec database_family?(String.t()) :: boolean()
+  def database_family?(method) when is_binary(method),
+    do: Enum.any?(@database_families, &String.starts_with?(method, &1))
+
+  @doc """
+  The refusal of a device with no link to its server (retired) for a method of
+  a `database_family?/1`: `primary_unreachable` with the summary's own retired
+  sentence for this computer, `os_type` as `:os.type/0` answers it.
+  """
+  @spec retired({atom(), atom()}) :: Protocol.route_result()
+  def retired({_family, name} = os_type) when is_tuple(os_type) and is_atom(name) do
+    machine = if os_type == {:unix, :darwin}, do: "Mac", else: "computer"
+    unreachable(nil, Copy.summary_sentence(:retired, %{machine: machine}))
   end
 
   @doc "The primary's refusal of a device-class request a desktop forwarded."

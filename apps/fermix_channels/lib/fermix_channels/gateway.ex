@@ -5,7 +5,8 @@ defmodule FermixChannels.Gateway do
 
   It normalizes each message, authorizes it (dropping denied senders before
   any attachment is fetched), runs the attachment pipeline (which transcribes
-  audio), dispatches slash commands, and otherwise
+  audio), dispatches slash commands (never on a device-role engine, whose turn
+  checkout refuses them as any message), and otherwise
   hands the turn to the queue via the agent delivery seam (building an outbound
   `reply_fn` so core replies without knowing the channel). Channel transports
   (pollers, webhooks, CLI) all route through here; `FermixChannels.Dispatcher`
@@ -27,6 +28,7 @@ defmodule FermixChannels.Gateway do
   alias FermixCore.Agents.ConversationKey
   alias FermixCore.Attachments.Manifest
   alias FermixCore.Capabilities.UntrustedContent
+  alias FermixCore.Home.Role
   alias FermixCore.Memory.Config
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Telemetry
@@ -68,7 +70,9 @@ defmodule FermixChannels.Gateway do
       ingress_context: Keyword.get(opts, :ingress_context),
       command_context_opts: command_context_opts(opts),
       ingest_enriched_fn: Keyword.get(opts, :ingest_enriched_fn),
-      keep_chain_metadata: Keyword.get(opts, :keep_chain_metadata, false)
+      keep_chain_metadata: Keyword.get(opts, :keep_chain_metadata, false),
+      # The role this boot recorded (`:engine_role` its stand-in in a test).
+      engine_role: Keyword.get_lazy(opts, :engine_role, &Role.recorded/0)
     }
   end
 
@@ -439,10 +443,14 @@ defmodule FermixChannels.Gateway do
   # Channels the registry marks `commands?: false` never see the slash-command
   # pipeline: no parse, no dispatch, content reaches the model as ordinary text
   # (M29 §4). Every other channel keeps today's exact path.
+  # A device-role engine runs a retired copy of a moved home and opens no
+  # database (`FermixCore.Home.Role`), so it runs no command either: a slash
+  # command reaches the turn checkout as any message does, which refuses it by
+  # name with the device role's sentence.
   defp run_commands_or_deliver(channel, reply_message, authorization, reply_fn, deps) do
     closures = build_closures(channel, reply_message, reply_fn, deps.ingress_context)
 
-    if ChannelRegistry.commands?(reply_message.channel) do
+    if ChannelRegistry.commands?(reply_message.channel) and Role.admit(deps.engine_role) == :ok do
       run_commands(reply_message, authorization, reply_fn, closures, deps)
     else
       deliver_to_agent(reply_message, authorization, deps.agent, deps.agent_server, closures)

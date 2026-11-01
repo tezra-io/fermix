@@ -359,14 +359,17 @@ defmodule FermixChannels.Companion.Connection do
       else: refuse({:unknown_event, type}, state)
   end
 
-  # The events that write the home's store, besides a `msg` or `command`, which
-  # `Requests.request/3` refuses itself before it claims anything.
-  @writing_events ~w(cancel read_state proposal_answer checklist_edit)
+  # The events that read or write the home's store, besides a `msg` or
+  # `command`, which `Requests.request/3` refuses itself before it claims
+  # anything.
+  @store_events ~w(cancel read_state proposal_answer checklist_edit history_pull history_search
+                   checklists_pull checklist_pull)
 
-  # A device-role engine runs a retired copy of a moved home (M75): every event
-  # that would write it is refused by name, before any write, with the
-  # sentence `Requests.request/3` gives a `msg`. Reads are served.
-  defp serve_admitted(%{type: type} = event, state) when type in @writing_events do
+  # A device-role engine runs a retired copy of a moved home (M75) and opens
+  # no database: every event that would read or write the store is refused by
+  # name, before anything is read, with the sentence `Requests.request/3`
+  # gives a `msg`.
+  defp serve_admitted(%{type: type} = event, state) when type in @store_events do
     role = Keyword.get_lazy(state.request_opts, :engine_role, &Role.recorded/0)
 
     case Role.admit(role) do

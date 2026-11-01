@@ -132,6 +132,46 @@ defmodule Fermix.CLI.DaemonForwardingTest do
     refute_received {:forwarded, _request, _opts}
   end
 
+  # A device with no link (the server revoked it, or a replace retired it)
+  # opens no database, and every cue method reads or writes the cue rows in
+  # memory.db: each is refused by name, as a linked desktop's is while its
+  # server is out of reach, before anything is read. Read from the protocol's
+  # own method list, so a cue method added later is refused too.
+  test "without a desktop link a device refuses every cue method as retired", ctx do
+    socket = start_daemon!(ctx, engine_role: @device, desktop_link?: false, os: {:unix, :darwin})
+    cue_methods = Enum.filter(FermixCore.Management.Protocol.methods(), &(&1 =~ ~r/^cues\./))
+
+    assert length(cue_methods) > 20
+
+    for method <- cue_methods do
+      assert {:error, {:management_error, "primary_unreachable", _message, details}} =
+               Client.request_v1(method, %{}, socket_path: socket, timeout: @reply_ms),
+             method
+
+      assert details["sentence"] ==
+               "Fermix moved to your server, and this Mac is no longer connected to it.",
+             method
+    end
+
+    assert {:ok, %{"engine" => "this machine"}} =
+             Client.request_v1("settings.get", %{"section" => "sandbox"},
+               socket_path: socket,
+               timeout: @reply_ms
+             )
+
+    refute_received {:forwarded, _request, _opts}
+  end
+
+  test "on a computer that is no Mac the retired sentence names the computer", ctx do
+    socket = start_daemon!(ctx, engine_role: @device, desktop_link?: false, os: {:unix, :linux})
+
+    assert {:error, {:management_error, "primary_unreachable", _message, details}} =
+             Client.request_v1("cues.status", %{}, socket_path: socket, timeout: @reply_ms)
+
+    assert details["sentence"] ==
+             "Fermix moved to your server, and this computer is no longer connected to it."
+  end
+
   test "the primary's refusal while unreachable reaches the app as it was said", ctx do
     unreachable =
       {:error, :primary_unreachable,

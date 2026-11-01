@@ -472,9 +472,10 @@ defmodule FermixChannels.Companion.ConnectionChecklistsTest do
              ChecklistRegistry.device_index(:independent, ctx.checklist_opts)
   end
 
-  # M75: a device-role engine runs a retired copy of a moved home, so an edit
-  # from it is refused by its id and changes nothing; the lists are still read.
-  test "a device-role engine refuses an edit by its id and still serves the pulls", ctx do
+  # M75: a device-role engine runs a retired copy of a moved home and opens no
+  # database, so an edit from it is refused by its id and changes nothing, and
+  # a pull is refused by name, reading nothing.
+  test "a device-role engine refuses an edit by its id, and the pulls by name", ctx do
     list_id = groceries!(ctx)
     request_opts = ctx.endpoint_opts[:connection_opts][:request_opts]
     role = %{role: :device, primary: "vm.example.test"}
@@ -490,8 +491,16 @@ defmodule FermixChannels.Companion.ConnectionChecklistsTest do
              "client_msg_id" => "device-1"
            }
 
-    assert [%{"list_id" => ^list_id}] = pull_index(mac)
-    assert %{"list_id" => ^list_id} = pull(mac, list_id)
+    refusal = %{
+      "type" => "error",
+      "reason" => "request_failed",
+      "message" => "This engine runs in the device role; the primary is vm.example.test."
+    }
+
+    send_line(mac, %{"type" => "checklists_pull", "profile_id" => "main"})
+    assert recv(mac) == refusal
+    send_line(mac, %{"type" => "checklist_pull", "profile_id" => "main", "list_id" => list_id})
+    assert recv(mac) == refusal
   end
 
   test "a version 5 connection hears no list event, cannot pull one, and its turns still work",

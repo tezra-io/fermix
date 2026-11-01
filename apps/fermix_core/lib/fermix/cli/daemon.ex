@@ -30,7 +30,9 @@ defmodule Fermix.CLI.Daemon do
   passed this socket's own owner placement is answered here when it is
   device-class (`FermixCore.Management.Placement`) and sent to the primary
   through `FermixCore.Home.Link` when it is primary-class; no request takes
-  both paths. The server's Always On steps (`Placement.rail_only?/1`) are
+  both paths. A device with no link refuses a method whose state is the
+  primary's database (`Placement.database_family?/1`) as retired. The server's
+  Always On steps (`Placement.rail_only?/1`) are
   refused here by name in every role: a linked desktop's own `home.act`
   sends them over the link, and keeps a replace's move in its ledger itself.
   A composed request (`home.status`, `settings.sections`) is
@@ -527,8 +529,13 @@ defmodule Fermix.CLI.Daemon do
     end
   end
 
-  defp dispatch_management_request(request, state),
-    do: route_management_request(request, management_opts(state))
+  # A device with no link opens no database: a method whose state is the
+  # primary's memory.db is refused as retired, before anything reads it.
+  defp dispatch_management_request(request, state) do
+    if device?(state) and Placement.database_family?(request.method),
+      do: Placement.retired(state.os),
+      else: route_management_request(request, management_opts(state))
+  end
 
   defp route_management_request(request, opts),
     do: guarded(request.method, fn -> ManagementRouter.route(request, opts) end)
@@ -603,6 +610,13 @@ defmodule Fermix.CLI.Daemon do
     if method != "shutdown" and candidate?(state),
       do: %{status: "error", reason: "candidate", error: ManagementRouter.candidate_sentence()},
       else: dispatch_served_request(request, conn, state)
+  end
+
+  defp device?(state) do
+    match?(
+      %{role: :device},
+      Keyword.get_lazy(state.management_opts, :engine_role, &Role.booted/0)
+    )
   end
 
   # `:engine_role` stands in for the role this boot recorded (tests), as the
