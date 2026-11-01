@@ -40,7 +40,15 @@ defmodule Fermix.CLI.AlwaysOnCommand do
   verb's own `hello`) it refuses `app_managed`, naming the app's Always On
   pane. With Fermix stopped it refuses `engine_stopped` and writes nothing.
 
-  Exit status: `0` done, `1` refused, `2` usage error.
+  **A step that waits reports how it ended**, from the screen's `outcome`,
+  the engine's word: `failed` (the step ended on a problem) is
+  `step_failed`, and a wait that ran out with Always On still at it is
+  `step_unfinished`, each exit 1 with the screen it stands at; a step that
+  does not wait answers that it was taken, and reading the screen alone
+  succeeds whatever it shows.
+
+  Exit status: `0` done, `1` refused or a waited step that did not get
+  there, `2` usage error.
 
   Dependencies: `:home`, `:client` (a 3-arity management call, as
   `Client.request_v1/3`), `:terminal` (the `SecretInput` terminal), `:stdin`,
@@ -257,7 +265,9 @@ defmodule Fermix.CLI.AlwaysOnCommand do
     unless ctx.flags.json, do: print(ctx.stdout, Render.result(answer["result"]))
 
     case follow(answer["summary"], record, ctx, ctx.flags.wait or ctx.interactive?) do
-      {:ok, summary} -> done(step_result(summary, answer["result"]), ctx)
+      {:taken, summary} -> done(step_result(summary, answer["result"]), ctx)
+      {:ok, summary} -> ended(step_result(summary, answer["result"]), ctx)
+      {:bounded, summary} -> unfinished(summary, ctx)
       {:refused, code, details} -> refuse(code, details, ctx)
     end
   end
@@ -309,10 +319,8 @@ defmodule Fermix.CLI.AlwaysOnCommand do
     status
   end
 
-  defp follow(summary, _record, _ctx, false), do: {:ok, summary}
-
-  defp follow(summary, record, ctx, true),
-    do: summary |> Wait.follow(pressed(record), ctx) |> settled(ctx)
+  defp follow(summary, _record, _ctx, false), do: {:taken, summary}
+  defp follow(summary, record, ctx, true), do: Wait.follow(summary, pressed(record), ctx)
 
   # An unconfirmed move answered no result of its own: its screen is read.
   defp unconfirmed_answer(status), do: %{"summary" => status["summary"], "result" => nil}
@@ -321,12 +329,9 @@ defmodule Fermix.CLI.AlwaysOnCommand do
   defp pressed(%{"id" => id}) when id in ~w(move_now try_again), do: :move
   defp pressed(_record), do: :step
 
+  # The guided loop offers the screen a wait that ran out stands at.
   defp settled({:bounded, summary}, ctx) do
-    IO.puts(
-      ctx.stderr,
-      "Always On is still at it after 45 minutes; fermix always-on shows where it stands."
-    )
-
+    IO.puts(ctx.stderr, "fermix always-on: " <> MachineOutput.sentence(:step_unfinished))
     {:ok, summary}
   end
 
@@ -338,6 +343,22 @@ defmodule Fermix.CLI.AlwaysOnCommand do
       else: print(ctx.stdout, Render.screen(answer["summary"]))
 
     0
+  end
+
+  # A waited step that ended on a problem did not get there: the screen, and
+  # exit 1.
+  defp ended(%{"summary" => %{"outcome" => "failed"} = summary}, ctx) do
+    status = refuse(:step_failed, [reason: summary["sentence"]], ctx, %{"summary" => summary})
+    unless ctx.flags.json, do: print(ctx.stdout, Render.screen(summary))
+    status
+  end
+
+  defp ended(answer, ctx), do: done(answer, ctx)
+
+  defp unfinished(summary, ctx) do
+    status = refuse(:step_unfinished, [], ctx, %{"summary" => summary})
+    unless ctx.flags.json, do: print(ctx.stdout, Render.screen(summary))
+    status
   end
 
   # ── the guided loop, on a terminal ─────────────────────────────────────

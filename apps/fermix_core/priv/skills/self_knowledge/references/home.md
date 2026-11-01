@@ -765,9 +765,12 @@ it, never a second writer.
   recommended one Fermix offers, sent as that size and place), `--yes` accepts the step's confirm, and `--wait` waits; a
   need no flag gives exits 2 naming the flag, and a confirm without `--yes`
   refuses `confirm_required`. A token or passphrase typed as an argument is
-  refused. The wait asks `home.status` with the screen's key and stops after
-  45 minutes with the screen as it stands; Ctrl-C stops it and the step goes
-  on. During Move now the engine restarts, so the wait reconnects for up to
+  refused. The wait asks `home.status` with the screen's key while the
+  screen's outcome says Always On is at it, and stops after 45 minutes; a
+  waited step that ends on a problem exits 1 (`step_failed`), and so does
+  one still at it when the wait runs out (`step_unfinished`), each with the
+  screen where it stands, while the screen read alone exits 0 whatever it
+  shows. Ctrl-C stops the wait and the step goes on. During Move now the engine restarts, so the wait reconnects for up to
   90 seconds and otherwise says "Start Fermix again to finish the move." If
   Always On changed since the screen was read (another window pressed first),
   it says so (`changed`) and shows the screen again; a Move now sent to the

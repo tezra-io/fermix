@@ -39,8 +39,9 @@
           }
         ]
       },
-      "key": "i98yhsFIKQNbWPd2GopNdA",
+      "key": "IurlVhODFUU1O0uKPI2ezA",
       "notice": null,
+      "outcome": "running",
       "sentence": "Installing Fermix on your server…",
       "state": "creating"
     }

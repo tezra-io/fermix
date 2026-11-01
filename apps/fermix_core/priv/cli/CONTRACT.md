@@ -331,11 +331,18 @@ the action's `needs` lists, from flags only: `--stdin` the token (with
 `action_refused` with that answer's sentence when it recommends none). A need no flag gives is a usage error, exit `2`, naming the
 flag. A step whose `confirm` is not null needs `--yes`; without it the verb
 refuses `confirm_required`. A token or passphrase typed as an argument is a
-usage error. `--wait` follows the step until nothing is moving (a step's job,
-the move, a code waiting for its server), for at most 45 minutes, and then
-answers the screen as it stands; a connection that closes during the wait is
-the move restarting Fermix, followed for up to 90 seconds before
-`engine_stopped`.
+usage error. `--wait` follows the step while the screen's `outcome`, the
+engine's own word, says Always On moves it on by itself (`running`: a step's
+job, the server setting up, the move; `waiting`: a code for a server of the
+owner's own, waiting for it), for at most 45 minutes; a connection that closes
+during the wait is the move restarting Fermix, followed for up to 90 seconds
+before `engine_stopped`. A waited step reports how it ended: a screen whose
+`outcome` is `failed` (the step ended on a problem) is `step_failed`, and a
+wait that ran out while Always On was still at it is `step_unfinished`; both
+exit `1`, their `error` object carrying `summary`, the screen where it
+stands. A step that does not wait succeeds once Fermix took it, and the
+screen read alone (`fermix always-on` with no step) succeeds whatever it
+shows, a problem included.
 
 A refusal prints its sentence on stderr as well as its envelope on stdout:
 `app_managed` on a home the Fermix app manages ("This Fermix home is managed
@@ -346,7 +353,10 @@ Fermix again to finish the move."; `confirm_required`; `changed`, whose `error`
 object also carries `summary`, the screen read again; `action_refused`, in the
 engine's words, or, for a step the screen does not offer, "Always On does not
 offer turn-on now. Run fermix always-on to see the steps it offers."; and
-`home_status_unavailable`. Golden: `always_on/changed.json`.
+`home_status_unavailable`; and, for a waited step, `step_failed` ("That step
+ended on a problem: <the screen's sentence> Run fermix always-on to fix it.")
+and `step_unfinished` ("Always On is still at it after 45 minutes; fermix
+always-on shows where it stands."). Golden: `always_on/changed.json`.
 
 `unconfirmed` (a linked desktop's Move now that the server had, whose answer
 was lost) is not a refusal: the move may have started. The verb prints the
@@ -388,6 +398,8 @@ sentence interpolates a fact, the example below is the golden's.
 - `action_refused` — Fermix did not take that step. It said: Hetzner does not accept this token, so paste a Read & Write API token from the Hetzner project you made for Fermix.
 - `confirm_required` — Create your server? Hetzner bills it by the hour until it is deleted. Pass --yes to accept it.
 - `changed` — Always On changed since this was shown, so look at it again.
+- `step_failed` — That step ended on a problem: Falkenstein has no CPX22 right now. Run fermix always-on to fix it.
+- `step_unfinished` — Always On is still at it after 45 minutes; fermix always-on shows where it stands.
 
 A sentence ending in `It said:` carries the words of whatever refused —
 the service manager, the login manager, the filesystem. A client shows them and

@@ -79,11 +79,12 @@
         },
         "waits_until": "2031-05-05T11:00:00Z"
       },
-      "key": "8nXB7YvhWSovYv-s9_sKvA",
+      "key": "fdp-Dj9Y6fX4jR6a8bmO2g",
       "notice": {
         "id": "ready:cand-5e2a9c1f7b3d4086",
         "sentence": "Your server is ready for the move."
       },
+      "outcome": "done",
       "sentence": "Your server is ready for the move. There is no way back to this Mac in this version.",
       "state": "ready"
     }

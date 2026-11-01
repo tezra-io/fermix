@@ -353,7 +353,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The size and place you were shown is the one Fermix creates: every create
   names it, the recommendation included, and Fermix never picks one again
   behind your back (`fermix always-on create-server` with no `--type` and
-  `--location` sends the recommended one it read).
+  `--location` sends the recommended one it read). A `fermix always-on`
+  step that waits now exits 1 when it ends on a problem (`step_failed`) or
+  is still running after 45 minutes (`step_unfinished`), each with the
+  screen where it stands, instead of reporting success; reading the screen
+  alone still succeeds whatever it shows. Every surface reads whether
+  Always On is still at it from the screen itself (its `outcome`).
 - **A mandate's proposal is a short card too.** It names the tool and the
   watcher, quotes the item, says why it passed, and shows each argument on its
   own line, with every argument whole and the whole item behind Details, in

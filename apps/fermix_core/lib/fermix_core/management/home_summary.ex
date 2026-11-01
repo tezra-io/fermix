@@ -4,7 +4,7 @@ defmodule FermixCore.Management.HomeSummary do
   On stands, worked out once here so the Mac app, the Linux app, the setup
   page and the CLI draw the same screen.
 
-      summary: {key, state, sentence, action, detail, notice}
+      summary: {key, state, sentence, action, detail, notice, outcome}
 
   `summary/1` is pure: it reads the facts `gather/5` collects (the role, the
   move's phase, the candidates held, the cloud provider Always On speaks of
@@ -96,6 +96,14 @@ defmodule FermixCore.Management.HomeSummary do
   (`not_set_up:<created_at>`) and the newest backup a week old
   (`backup_week:<at>`). An app posts when the id changes.
 
+  `outcome` is what a surface that follows a step reads (review R6), so none
+  keeps its own table of states: `running` while Always On is at something
+  that moves this screen on by itself (a step's job; the server starting,
+  installing and connecting; the move, from its request here until the
+  restart shows; a server receiving its home), `waiting` while it waits on a
+  server of the owner's own to use its code, `failed` on a problem, `done`
+  when the next step is the owner's.
+
   `key/1` is the one digest of the summary (`summary.key`, and what
   `FermixCore.Home.StatusWatch` tells by, `watch/1`): every change a surface
   draws moves it, and the clock alone (the last check, what was last seen,
@@ -114,6 +122,7 @@ defmodule FermixCore.Management.HomeSummary do
   alias FermixCore.Management.Copy
 
   @states ~w(off connect choose creating ready moving on undone retired candidate primary problem)
+  @outcomes ~w(running waiting done failed)
   @problems ~w(turned_off cannot_reach deleted not_set_up waited_too_long no_capacity
                account_limit read_only_token token_refused create_failed update disk_full
                backup_old not_ready unreadable delete_failed power_failed)
@@ -181,6 +190,10 @@ defmodule FermixCore.Management.HomeSummary do
   @doc "Every action id a summary offers, as its action or in `detail`."
   @spec actions() :: [String.t()]
   def actions, do: @actions
+
+  @doc "Every word `outcome` takes, in the protocol's order."
+  @spec outcomes() :: [String.t()]
+  def outcomes, do: @outcomes
 
   @doc "Every word an action's `needs` lists."
   @spec needs() :: [String.t()]
@@ -1059,13 +1072,15 @@ defmodule FermixCore.Management.HomeSummary do
 
   # -- finishing the screen ------------------------------------------------------
 
-  # Every action a record, then what Details draws, the notice and the key.
+  # Every action a record, then what Details draws, the notice, the outcome
+  # and the key.
   defp finish(view, facts) do
     summary =
       view
       |> Map.update!("action", &(&1 && record(&1, facts)))
       |> Map.update!("detail", &finish_detail(&1, view, facts))
       |> Map.put("notice", notice(view, facts))
+      |> Map.put("outcome", outcome(view, facts))
 
     Map.put(summary, "key", key(summary))
   end
@@ -1298,6 +1313,31 @@ defmodule FermixCore.Management.HomeSummary do
        do: [Copy.summary_line(key, {total, currency}, ctx)]
 
   defp cost_line(_key, _server, _ctx), do: []
+
+  # -- the outcome -----------------------------------------------------------------
+
+  # A move under way runs whatever the screen still shows (one asked for
+  # here reads `ready` until the restart); a code for a server of the owner's
+  # own waits for that server.
+  defp outcome(%{"state" => "problem"}, _facts), do: "failed"
+  defp outcome(%{"state" => state}, _facts) when state in ["creating", "moving"], do: "running"
+  defp outcome(%{"state" => "candidate"}, facts), do: receiving(facts)
+
+  defp outcome(view, facts) do
+    cond do
+      moving?(facts) ->
+        "running"
+
+      view["state"] == "connect" and match?(%{kind: :manual, state: :open}, window(facts)) ->
+        "waiting"
+
+      true ->
+        "done"
+    end
+  end
+
+  defp receiving(%{move: %{"phase" => phase}}) when phase in @receiving, do: "running"
+  defp receiving(_facts), do: "done"
 
   # -- the notice ------------------------------------------------------------------
 

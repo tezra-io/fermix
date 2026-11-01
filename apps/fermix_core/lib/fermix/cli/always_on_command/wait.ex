@@ -6,13 +6,11 @@ defmodule Fermix.CLI.AlwaysOnCommand.Wait do
   one line on stderr each time the sentence or the step in hand changes. No
   interval: the daemon answers when the screen moves.
 
-  **Moving** is what the screen says runs by itself: `creating` and
-  `moving`; right after a step, also a code for a server of the owner's own
-  still open (`connect` offering Cancel the code: the server it was opened
-  for is coming); and right after Move now, also the screen before the
-  engine's restart (`ready` or `undone` until the restart shows). A screen
-  read with no step taken (`:screen`) waits on neither, so the owner gets
-  Cancel the code there.
+  **Moving** is the engine's word, the summary's `outcome` (review R6):
+  `running` is followed always; `waiting` (a code for a server of the
+  owner's own, waiting for that server) only right after a step, so coming
+  back to an open code on a fresh screen (`:screen`) offers Cancel the code
+  rather than a wait. The CLI keeps no table of states.
 
   **Bounded.** The whole wait stops after 45 minutes (a step's job has 15,
   a code 30) or 2,000 reads, whichever comes first, answering the screen
@@ -34,7 +32,6 @@ defmodule Fermix.CLI.AlwaysOnCommand.Wait do
   @reconnect_every_ms 1_000
   @reconnect_call_ms 10_000
   @gone [:not_running, :closed, :timeout, :econnreset]
-  @moving ~w(creating moving)
 
   @type outcome :: {:ok, map()} | {:bounded, map()} | {:refused, atom(), keyword()}
 
@@ -93,15 +90,8 @@ defmodule Fermix.CLI.AlwaysOnCommand.Wait do
     end
   end
 
-  # The move's screen stands until the restart: once it shows, or the state
-  # leaves it, what remains to wait on is a step's.
-  defp moved_on({:read, summary}, state, ctx) do
-    since = if summary["state"] in ~w(ready undone), do: state.since, else: step(state.since)
-    loop(%{say(state, summary, ctx) | since: since, reads: state.reads + 1}, ctx)
-  end
-
-  defp moved_on({:restarted, summary}, state, ctx),
-    do: loop(%{say(state, summary, ctx) | since: step(state.since), reads: state.reads + 1}, ctx)
+  defp moved_on({kind, summary}, state, ctx) when kind in [:read, :restarted],
+    do: loop(%{say(state, summary, ctx) | reads: state.reads + 1}, ctx)
 
   defp moved_on({:refused, _code, _details} = refused, _state, _ctx), do: refused
 
@@ -138,18 +128,7 @@ defmodule Fermix.CLI.AlwaysOnCommand.Wait do
   defp reconnected({:ok, _no_summary}, _state, _ctx, _deadline),
     do: {:refused, :home_status_unavailable, output: "it answered no screen"}
 
-  defp step(:move), do: :step
-  defp step(since), do: since
-
-  defp moving?(%{summary: summary, since: since}) do
-    summary["state"] in @moving or (since != :screen and code_open?(summary)) or
-      (since == :move and summary["state"] in ~w(ready undone))
-  end
-
-  # `connect` offers Cancel the code while a code for a server of the
-  # owner's own is open: the server it is for has yet to come.
-  defp code_open?(%{"state" => "connect"} = summary),
-    do: Enum.any?(Render.records(summary), &(&1["id"] == "cancel"))
-
-  defp code_open?(_summary), do: false
+  defp moving?(%{summary: %{"outcome" => "running"}}), do: true
+  defp moving?(%{summary: %{"outcome" => "waiting"}, since: since}), do: since != :screen
+  defp moving?(_state), do: false
 end

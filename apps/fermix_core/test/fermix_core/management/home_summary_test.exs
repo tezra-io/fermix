@@ -397,6 +397,34 @@ defmodule FermixCore.Management.HomeSummaryTest do
     end
   end
 
+  # Review R6: the outcome a surface following a step reads is the engine's,
+  # so no surface keeps a table of states.
+  test "every row's outcome is the engine's word for whether it moves on by itself" do
+    for {name, facts, state, _sentence, _action} <- cases() do
+      outcome = HomeSummary.summary(facts)["outcome"]
+      assert outcome in HomeSummary.outcomes(), name
+
+      expected =
+        case state do
+          "problem" -> "failed"
+          state when state in ["creating", "moving"] -> "running"
+          _settled -> outcome
+        end
+
+      assert outcome == expected, "#{name}: #{outcome}"
+    end
+
+    outcome = &HomeSummary.summary(&1)["outcome"]
+    assert outcome.(ready_facts([])) == "done"
+    assert outcome.(ready_facts(move: move("requested"))) == "running"
+    assert outcome.(facts(link: link(enrollment: manual(:open)))) == "waiting"
+    assert outcome.(facts(provision: ledger(:connected))) == "done"
+    assert outcome.(candidate_role("receiving")) == "running"
+    assert outcome.(candidate_role("enrolled")) == "done"
+    assert outcome.(device(move: move("undoing"))) == "running"
+    assert outcome.(desktop([])) == "done"
+  end
+
   test "the table reaches every state, every problem and every action of the vocabulary" do
     summaries = Enum.map(cases(), fn {_name, facts, _s, _t, _a} -> HomeSummary.summary(facts) end)
 
