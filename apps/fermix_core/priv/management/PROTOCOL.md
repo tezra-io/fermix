@@ -1237,7 +1237,8 @@ Notes that the shapes alone do not carry:
 - **`cues` is the cue section**, under pane `cues`: `cues_enabled` (the cue tree
   starts at boot, so `restart` is true), `cues_mandates_enabled` ("Let watchers
   act", read at every mandate call and every follow-up trigger), `cues_screen` (how items are checked, read at every
-  accept and filter call), `filter_provider` and `filter_model` (the Cues
+  accept and filter call), `cues_decision_provider` (which decision model
+  that is, read at every filter call), `filter_provider` and `filter_model` (the Cues
   filter model, the one every watcher's filter uses, read at every filter call)
   and `cues_door_port` (`advanced`, 1024 to 65535, always on 127.0.0.1). The rows
   carry their explanations in `info` and no `footer`; the filter model's says
@@ -1254,13 +1255,27 @@ Notes that the shapes alone do not carry:
   the watcher's keywords to listen for, and `decision_model` ("Decision
   model"), which checks each item by meaning, with the watcher's purpose,
   instructions and keywords as hints, so only an item it lets through reaches
-  the filter model. There is no provider to pick: the daemon uses the primary
-  provider's decision model when it serves one and is set up, otherwise the
-  first set up of OpenAI, OpenRouter and Venice, and the option's `hint` names
-  it ("Uses OpenAI · gpt-6-luna"). While none is set up, `decision_model` is
+  the filter model. The option's `hint` names the decision model in use
+  ("Uses OpenAI · gpt-6-luna"). While none is set up, `decision_model` is
   disabled with the hint "Set up OpenAI, OpenRouter or Venice first.", which
   is also the refusal; a saved `decision_model` keeps its value, and its
   watchers are held until one is set up or `keyword` is picked.
+  `cues_decision_provider` ("Decision model") is which decision model the
+  screen uses, published whatever `cues_screen` is, so a client shows or
+  hides it as the screen's choice changes, with no read. Its first option is
+  `""`, Automatic: the daemon uses the primary provider's decision model when
+  it serves one and is set up, otherwise the first set up of OpenAI,
+  OpenRouter and Venice, and the label names it ("Automatic (Uses OpenAI ·
+  gpt-6-luna)"); while none is set up it is "Automatic", disabled with the
+  hint "Set up OpenAI, OpenRouter or Venice first.". Then always `openai`
+  ("OpenAI · gpt-6-luna"), `openrouter` ("OpenRouter · Jev") and `venice`
+  ("Venice · Jev"), each disabled with the hint "Set up this provider first."
+  while its provider is not set up with a key that loaded, a saved one
+  included, so the value is always an option. A chosen provider that is not
+  set up holds the watchers with a sentence naming it, and never falls back to
+  Automatic. `cues_screen` and `cues_decision_provider` may go in one
+  `settings.apply`: each is checked before either is written, and neither
+  check reads the other's saved value, so a refusal of one writes neither.
 - **Every cue write goes through the setup page's own path**, so the outside
   edit refusal (`external_change`), the baseline re-record, the secret
   take-back and the source workers' reconcile apply identically from either

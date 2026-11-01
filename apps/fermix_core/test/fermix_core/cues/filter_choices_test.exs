@@ -117,6 +117,85 @@ defmodule FermixCore.Cues.FilterChoicesTest do
 
       assert hint == "Set up OpenAI, OpenRouter or Venice first."
     end
+
+    test "a key that did not load is not set up" do
+      snapshot =
+        snapshot(
+          openrouter: [api_key: "@keyring", primary: true],
+          venice: [api_key: "@file"]
+        )
+
+      assert FilterChoices.decision_model(snapshot) == nil
+      assert %{disabled?: true} = List.last(FilterChoices.screen_choices(snapshot))
+    end
+
+    test "a chosen decision model is the one the screen names" do
+      snapshot =
+        Map.update!(
+          snapshot(openai: [api_key: "sk-invented"], venice: [api_key: "vn-invented"]),
+          :fermix_core,
+          &Keyword.put(&1, :cues, decision_provider: :venice)
+        )
+
+      assert %{hint: "Uses Venice · Jev", disabled?: false} =
+               List.last(FilterChoices.screen_choices(snapshot))
+    end
+  end
+
+  describe "the screen's decision model" do
+    test "Automatic names what it resolves to, then each provider, one not set up disabled" do
+      snapshot =
+        snapshot(
+          anthropic: [api_key: "sk-ant-invented", primary: true],
+          openai: [api_key: "sk-invented"],
+          openrouter: [api_key: "@keyring"]
+        )
+
+      assert FilterChoices.decision_provider_choices(snapshot) == [
+               %{
+                 id: "",
+                 label: "Automatic (Uses OpenAI · gpt-6-luna)",
+                 hint: nil,
+                 disabled?: false
+               },
+               %{id: "openai", label: "OpenAI · gpt-6-luna", hint: nil, disabled?: false},
+               %{
+                 id: "openrouter",
+                 label: "OpenRouter · Jev",
+                 hint: "Set up this provider first.",
+                 disabled?: true
+               },
+               %{
+                 id: "venice",
+                 label: "Venice · Jev",
+                 hint: "Set up this provider first.",
+                 disabled?: true
+               }
+             ]
+    end
+
+    test "with none set up, Automatic is disabled with what to set up" do
+      snapshot = snapshot(anthropic: [api_key: "sk-ant-invented", primary: true])
+
+      assert [automatic | providers] = FilterChoices.decision_provider_choices(snapshot)
+
+      assert automatic == %{
+               id: "",
+               label: "Automatic",
+               hint: "Set up OpenAI, OpenRouter or Venice first.",
+               disabled?: true
+             }
+
+      assert Enum.all?(providers, & &1.disabled?)
+    end
+
+    test "a provider is set up for it only with a key that loaded" do
+      snapshot = snapshot(openai: [api_key: "sk-invented"], venice: [api_key: "@file"])
+
+      assert FilterChoices.decision_model_set_up?(snapshot, :openai)
+      refute FilterChoices.decision_model_set_up?(snapshot, :venice)
+      refute FilterChoices.decision_model_set_up?(snapshot, :openrouter)
+    end
   end
 
   test "models are the catalog's suggestions, none for an unknown provider" do

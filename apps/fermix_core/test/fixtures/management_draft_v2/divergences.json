@@ -2420,6 +2420,12 @@
     },
     {
       "method": "settings.get:cues",
+      "field": "rows:cues_decision_provider",
+      "kind": "engine_only",
+      "why": "The screen's decision model postdates the draft, as the rest of the cues section does: one live choice in the ordinary row shape, published whatever the screen is and read at every filter call: Automatic, the decision model the daemon picks from the providers set up, or one provider that serves a decision model, a provider not set up disabled with its hint."
+    },
+    {
+      "method": "settings.get:cues",
       "field": "rows:cues_screen",
       "kind": "engine_only",
       "why": "The screen postdates the draft, as the rest of the cues section does: one live choice in the ordinary row shape, read at every accept and filter call, with two options: keyword match on the watcher's keywords, or the decision model the daemon picks from the providers set up, checking each item by meaning before the filter model reads it."

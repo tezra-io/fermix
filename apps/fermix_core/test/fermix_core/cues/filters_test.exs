@@ -373,8 +373,10 @@ defmodule FermixCore.Cues.FiltersTest do
                  rows(ctx.conn, "SELECT filter_failures FROM cue_watchers WHERE id = ?", [w])
       end
 
-      assert_receive {:notice, ^w, :filter_held, %{waiting: 1}}
+      assert_receive {:notice, ^w, :filter_held, %{waiting: 1} = held}
       refute_received {:notice, ^w, :filter_held, _data}
+      # A provider's own words may echo the item, so a notice never carries them.
+      refute Map.has_key?(held, :sentence)
 
       # C30: no call before filter_retry_at.
       advance(ctx, 599)
@@ -388,6 +390,24 @@ defmodule FermixCore.Cues.FiltersTest do
       assert_receive {:notice, ^w, :filter_recovered, _data}
       assert_receive :woke_scheduler
       assert_receive {:telemetry, @lifecycle, _m, %{phase: :filter_held}}
+    end
+
+    test "a hold for a missing route tells the owner Fermix's own sentence", ctx do
+      sentence =
+        "The screen's decision model is Venice's, which is not set up: set it up or pick " <>
+          "another in the Cues settings."
+
+      w = watcher(ctx)
+      push(ctx, ["a"])
+      filters = start_filters(ctx)
+
+      for wait <- [0, 30, 120] do
+        advance(ctx, wait)
+        Filters.wake(filters)
+        finish(filters, next_call(), {:error, {:no_route, sentence}})
+      end
+
+      assert_receive {:notice, ^w, :filter_held, %{waiting: 1, sentence: ^sentence}}
     end
 
     test "a cue the provider refuses is exhausted after its third refusal", ctx do

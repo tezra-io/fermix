@@ -1,10 +1,12 @@
 defmodule FermixCore.Cues.Filter.Decision do
   @moduledoc """
   The screen of a filter call while `[fermix_core.cues] screen` is
-  `decision_model`: the decision model Fermix picks (`Providers.DecisionModel.route/0`)
-  reads the item by its meaning, in place of matching the watcher's keywords
-  to listen for, and only an item it lets through reaches the filter model
-  (`Cues.Filter.Llm`), which still makes every pass.
+  `decision_model`: the decision model the owner chose
+  (`[fermix_core.cues] decision_provider`), or the one Fermix picks when none
+  is chosen (`Providers.DecisionModel.route/1`), reads the item by its
+  meaning, in place of matching the watcher's keywords to listen for, and only
+  an item it lets through reaches the filter model (`Cues.Filter.Llm`), which
+  still makes every pass.
 
   It asks one yes or no: could the item matter by the watcher's purpose and
   numbered instructions (`Filter.Prompt.criteria/1`), with the watcher's keywords
@@ -19,7 +21,8 @@ defmodule FermixCore.Cues.Filter.Decision do
   Failures follow the filter's taxonomy (`Cues.Filter.Llm`):
 
   - **provider failure**, the watcher's: no provider that serves a decision
-    model is set up (`no_route`), every transport failure, every HTTP failure
+    model is set up, or the chosen one is not (`no_route`, with Fermix's
+    sentence naming what to set up), every transport failure, every HTTP failure
     except the one below, and an answer of a shape Fermix does not read
     (`parser_changed`).
     Unlike a chat call's, a 400 or 422 counts here too: the model, the body's
@@ -29,13 +32,16 @@ defmodule FermixCore.Cues.Filter.Decision do
   - **content failure**, the cue's: an item too large for the provider
     (HTTP 413) and a refused question.
 
-  A failed check never falls back to the keywords or to the filter model alone.
+  A failed check never falls back to the keywords, to the filter model alone
+  or, from a chosen decision model, to another provider's.
   """
 
+  alias FermixCore.Cues.Config, as: CuesConfig
   alias FermixCore.Cues.Filter.Llm
   alias FermixCore.Cues.Filter.Prompt
   alias FermixCore.Cues.Filter.Telemetry, as: FilterTelemetry
   alias FermixCore.Providers.DecisionModel
+  alias FermixCore.Providers.Descriptor
 
   @through_at 0.3
   @max_message_chars 500
@@ -55,7 +61,7 @@ defmodule FermixCore.Cues.Filter.Decision do
   @type outcome :: :through | Llm.result()
 
   @doc """
-  Screens one claim on the decision model Fermix picks before the filter model
+  Screens one claim on the screen's decision model before the filter model
   reads it: `:through`, a drop with Fermix's reason, or a failure. Opts:
   `:session_id` (required, the call's own) and the seam `:req_options` (merged
   into the decision request).
@@ -70,7 +76,7 @@ defmodule FermixCore.Cues.Filter.Decision do
 
     item = Prompt.evidence(%{claim | examples: []})
 
-    with {:ok, route} <- route(),
+    with {:ok, route} <- route(CuesConfig.decision_provider()),
          {:ok, answer} <- DecisionModel.yes_no(route, item, question(claim), call_opts) do
       outcome(answer.probability)
     else
@@ -78,11 +84,17 @@ defmodule FermixCore.Cues.Filter.Decision do
     end
   end
 
-  defp route do
-    case DecisionModel.route() do
+  defp route(choice) do
+    case DecisionModel.route(choice) do
       {:ok, route} -> {:ok, route}
       {:error, :not_set_up} -> {:error, {:no_route, @no_route}}
+      {:error, {:not_set_up, provider}} -> {:error, {:no_route, chosen_not_set_up(provider)}}
     end
+  end
+
+  defp chosen_not_set_up(provider) do
+    "The screen's decision model is #{Descriptor.fetch!(provider).label}'s, which is not set " <>
+      "up: set it up or pick another in the Cues settings."
   end
 
   defp question(%{watcher: watcher} = claim) do

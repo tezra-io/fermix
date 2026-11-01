@@ -347,7 +347,7 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
       />
       <section id="cues-judging" class="space-y-2">
         <.section_head title="How watchers judge items" />
-        <.screen screen={@cues.screen} refusal={@cues.settings_refusal} />
+        <.screen screen={@cues.screen} words={@cues.words} refusal={@cues.settings_refusal} />
         <.filter_model filter={@cues.filter} words={@cues.words} refusal={@cues.settings_refusal} />
       </section>
       <div class="flex justify-end">
@@ -510,6 +510,7 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
   # --- screen ----------------------------------------------------------------
 
   attr :screen, :map, required: true
+  attr :words, :map, required: true
   attr :refusal, :map, default: nil
 
   defp screen(assigns) do
@@ -528,7 +529,52 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
           checked={@screen.value == "decision_model"}
         />
       </div>
-      <.settings_refusal refusal={@refusal} rows={["cues_screen"]} />
+      <.decision_provider
+        :if={@screen.selected == "decision_model"}
+        screen={@screen}
+        words={@words["cues_decision_provider"]}
+      />
+      <.settings_refusal refusal={@refusal} rows={["cues_screen", "cues_decision_provider"]} />
+    </div>
+    """
+  end
+
+  attr :screen, :map, required: true
+  attr :words, :map, required: true
+
+  # Which decision model the screen uses, under it while the decision model is
+  # picked. A provider that is not set up cannot be picked, but the saved one
+  # stays selectable, so the form keeps it as it is and its hint says why it
+  # does not run.
+  defp decision_provider(assigns) do
+    saved =
+      Enum.find(assigns.screen.decision_providers, &(&1.id == assigns.screen.decision_provider))
+
+    assigns = assign(assigns, hint: saved && saved.disabled? && saved.hint)
+
+    ~H"""
+    <div
+      id="cues-decision-provider"
+      class="flex flex-wrap items-center gap-x-3 gap-y-2 border-t border-base-300 pt-3"
+    >
+      <span class="flex items-center gap-1.5 text-sm font-medium">
+        {@words.label} <.info text={@words.info} />
+      </span>
+      <select
+        name="cues_settings[decision_provider]"
+        aria-label={@words.label}
+        class="select select-bordered select-sm w-full bg-base-100 sm:ml-auto sm:w-auto"
+      >
+        <option
+          :for={choice <- @screen.decision_providers}
+          value={choice.id}
+          selected={choice.id == @screen.decision_provider}
+          disabled={choice.disabled? and choice.id != @screen.decision_provider}
+        >
+          {choice.label}
+        </option>
+      </select>
+      <p :if={@hint} class="w-full text-sm text-warning">{@hint}</p>
     </div>
     """
   end

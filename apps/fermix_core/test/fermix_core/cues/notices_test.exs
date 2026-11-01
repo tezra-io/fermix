@@ -51,6 +51,26 @@ defmodule FermixCore.Cues.NoticesTest do
       refute_received {:sent, _destination, _text, _opts}
     end
 
+    test "a hold for a reason in Fermix's own words says it", ctx do
+      sentence =
+        "The screen's decision model is OpenRouter's, which is not set up: set it up or pick " <>
+          "another in the Cues settings."
+
+      assert :sent =
+               Notices.watcher(
+                 ctx.watcher.id,
+                 :filter_held,
+                 %{waiting: 2, sentence: sentence},
+                 opts(ctx, 0)
+               )
+
+      assert_receive {:sent, "chat-9", text, _send_opts}
+
+      assert text ==
+               "Watcher market-news: its filter is held, and 2 items are waiting. " <>
+                 sentence <> " Fermix tries again every 10 minutes."
+    end
+
     test "recovery is told once, and only after a hold was told", ctx do
       assert :already_sent = Notices.watcher(ctx.watcher.id, :filter_recovered, %{}, opts(ctx, 0))
 

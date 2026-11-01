@@ -34,6 +34,7 @@ defmodule FermixCore.Cues.ConfigTest do
       "enabled" => true,
       "mandates_enabled" => false,
       "screen" => "decision_model",
+      "decision_provider" => "openrouter",
       "door_port" => 4555,
       "sources" => %{
         "eng-blogs" => %{
@@ -102,6 +103,7 @@ defmodule FermixCore.Cues.ConfigTest do
       assert config[:enabled] == true
       assert config[:mandates_enabled] == false
       assert config[:screen] == :decision_model
+      assert config[:decision_provider] == :openrouter
       assert config[:door_port] == 4555
 
       assert config[:sources]["home-alerts"] ==
@@ -133,6 +135,7 @@ defmodule FermixCore.Cues.ConfigTest do
       assert persisted[:sources]["gh-hooks"][:verify] == "hmac"
       assert persisted[:mandates]["release-issues"][:mode] == "approve"
       assert persisted[:screen] == "decision_model"
+      assert persisted[:decision_provider] == "openrouter"
     end
 
     test "an unknown top-level key is refused by name" do
@@ -166,12 +169,26 @@ defmodule FermixCore.Cues.ConfigTest do
       assert Config.screen([]) == :keyword
     end
 
+    test "the screen's decision model is a provider that serves one, or Fermix's own pick with no key" do
+      for provider <- [:openai, :openrouter, :venice] do
+        config = Config.normalize(%{"decision_provider" => Atom.to_string(provider)})
+        assert config == [decision_provider: provider]
+        assert Config.decision_provider(config) == provider
+        assert Config.to_keyword(config) == [decision_provider: Atom.to_string(provider)]
+      end
+
+      assert Config.decision_provider([]) == nil
+    end
+
     test "value errors name the key" do
       cases = [
         {%{"enabled" => "yes"}, ~r/cues\.enabled/},
         {%{"mandates_enabled" => 1}, ~r/cues\.mandates_enabled/},
         {%{"screen" => "openai"}, ~r/cues\.screen "openai".*keyword, decision_model/},
         {%{"screen" => true}, ~r/cues\.screen/},
+        {%{"decision_provider" => "anthropic"},
+         ~r/cues\.decision_provider "anthropic".*openai, openrouter, venice/},
+        {%{"decision_provider" => ""}, ~r/cues\.decision_provider/},
         {%{"door_port" => 80}, ~r/cues\.door_port.*1024/},
         {%{"door_port" => 70_000}, ~r/cues\.door_port/},
         {source(%{"kind" => "carrier_pigeon"}), ~r/sources\.s1\.kind/},

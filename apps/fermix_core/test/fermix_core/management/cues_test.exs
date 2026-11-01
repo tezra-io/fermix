@@ -2014,6 +2014,7 @@ defmodule FermixCore.Management.CuesTest do
                {"cues_enabled", "toggle", true},
                {"cues_mandates_enabled", "toggle", false},
                {"cues_screen", "choice", false},
+               {"cues_decision_provider", "choice", false},
                {"filter_provider", "choice", false},
                {"filter_model", "choice", false},
                {"cues_door_port", "number", true}
@@ -2208,6 +2209,172 @@ defmodule FermixCore.Management.CuesTest do
 
       assert %{"disabled" => true, "hint" => "Set up OpenAI, OpenRouter or Venice first."} =
                Enum.find(screen["options"], &(&1["value"] == "decision_model"))
+    end
+
+    test "the screen's decision model is Automatic, named by what it resolves to, then each " <>
+           "provider, published whatever the screen is" do
+      Application.put_env(:fermix_core, :providers,
+        anthropic: [api_key: "sk-ant-invented", primary: true],
+        openai: [api_key: "sk-invented"],
+        venice: [api_key: "@keyring"]
+      )
+
+      assert {:ok, %{"rows" => rows}} = Settings.get("cues")
+      assert CuesConfig.screen() == :keyword
+      row = Enum.find(rows, &(&1["key"] == "cues_decision_provider"))
+
+      assert %{"label" => "Decision model", "kind" => "choice", "value" => ""} = row
+
+      assert row["info"] ==
+               "Which decision model checks items while the screen uses one, on that " <>
+                 "provider's own key. Automatic: your main provider's when it serves one, " <>
+                 "otherwise the first set up of OpenAI, OpenRouter and Venice."
+
+      assert Enum.map(row["options"], &Map.take(&1, ["value", "label", "hint", "disabled"])) == [
+               %{
+                 "value" => "",
+                 "label" => "Automatic (Uses OpenAI · gpt-6-luna)",
+                 "hint" => nil,
+                 "disabled" => false
+               },
+               %{
+                 "value" => "openai",
+                 "label" => "OpenAI · gpt-6-luna",
+                 "hint" => nil,
+                 "disabled" => false
+               },
+               %{
+                 "value" => "openrouter",
+                 "label" => "OpenRouter · Jev",
+                 "hint" => "Set up this provider first.",
+                 "disabled" => true
+               },
+               %{
+                 "value" => "venice",
+                 "label" => "Venice · Jev",
+                 "hint" => "Set up this provider first.",
+                 "disabled" => true
+               }
+             ]
+    end
+
+    test "with none set up, Automatic is disabled with what to set up" do
+      Application.put_env(:fermix_core, :providers,
+        anthropic: [api_key: "sk-ant-invented", primary: true]
+      )
+
+      assert {:ok, %{"rows" => rows}} = Settings.get("cues")
+      row = Enum.find(rows, &(&1["key"] == "cues_decision_provider"))
+
+      assert %{
+               "value" => "",
+               "label" => "Automatic",
+               "hint" => "Set up OpenAI, OpenRouter or Venice first.",
+               "disabled" => true
+             } = hd(row["options"])
+    end
+
+    test "a saved decision model that is no longer set up keeps its value, disabled with its hint" do
+      Application.put_env(:fermix_core, :providers,
+        anthropic: [api_key: "sk-ant-invented", primary: true],
+        openai: [api_key: "sk-invented"]
+      )
+
+      Application.put_env(:fermix_core, :cues,
+        screen: :decision_model,
+        decision_provider: :venice
+      )
+
+      assert {:ok, %{"rows" => rows}} = Settings.get("cues")
+      row = Enum.find(rows, &(&1["key"] == "cues_decision_provider"))
+
+      assert row["value"] == "venice"
+
+      assert %{"disabled" => true, "hint" => "Set up this provider first."} =
+               Enum.find(row["options"], &(&1["value"] == "venice"))
+
+      screen = Enum.find(rows, &(&1["key"] == "cues_screen"))
+
+      assert %{"hint" => "Uses Venice · Jev"} =
+               Enum.find(screen["options"], &(&1["value"] == "decision_model"))
+    end
+
+    test "the decision model and the screen are one write, applied live, and back to Automatic",
+         %{home: home} do
+      Application.put_env(:fermix_core, :providers,
+        anthropic: [api_key: "sk-ant-invented", primary: true],
+        openai: [api_key: "sk-invented"],
+        openrouter: [api_key: "sk-or-invented"]
+      )
+
+      assert {:ok, %{"applied" => applied}} =
+               Settings.apply("cues", %{
+                 "cues_screen" => "decision_model",
+                 "cues_decision_provider" => "openrouter"
+               })
+
+      assert Enum.sort(applied) == ["cues_decision_provider", "cues_screen"]
+      assert config_text(home) =~ ~s(screen = "decision_model")
+      assert config_text(home) =~ ~s(decision_provider = "openrouter")
+      assert CuesConfig.decision_provider() == :openrouter
+
+      # Automatic is saved as no key.
+      assert {:ok, _automatic} = Settings.apply("cues", %{"cues_decision_provider" => ""})
+      refute config_text(home) =~ "decision_provider"
+      assert CuesConfig.decision_provider() == nil
+
+      # Picked while the screen is keyword match, it is kept for later.
+      assert {:ok, _keyword} =
+               Settings.apply("cues", %{
+                 "cues_screen" => "keyword",
+                 "cues_decision_provider" => "openai"
+               })
+
+      assert CuesConfig.screen() == :keyword
+      assert CuesConfig.decision_provider() == :openai
+    end
+
+    test "a decision model that is not set up is refused under its row, and neither is written",
+         %{home: home} do
+      Application.put_env(:fermix_core, :providers,
+        anthropic: [api_key: "sk-ant-invented", primary: true],
+        openai: [api_key: "sk-invented"],
+        openrouter: [api_key: "@keyring"]
+      )
+
+      # The disabled option's hint is the socket's refusal.
+      assert Settings.apply("cues", %{
+               "cues_screen" => "decision_model",
+               "cues_decision_provider" => "openrouter"
+             }) ==
+               {:error,
+                {:invalid_params, "cues_decision_provider", "Set up this provider first."}}
+
+      refute File.exists?(Path.join(home, "config.toml"))
+
+      # The setup page's save checks both before writing either.
+      sentence = "Set up OpenRouter first: the screen's decision model runs on its key."
+
+      assert SettingsCues.save(screen: "decision_model", decision_provider: "openrouter") ==
+               {:error, {:invalid_value, "cues_decision_provider", sentence}}
+
+      refute File.exists?(Path.join(home, "config.toml"))
+
+      assert CueSettings.check_decision_provider("openrouter") == {:error, {:invalid, sentence}}
+      assert CueSettings.save_decision_provider("openrouter") == {:error, {:invalid, sentence}}
+
+      assert {:error, {:invalid, unknown}} = CueSettings.check_decision_provider("anthropic")
+      assert unknown =~ ~s(invalid cues.decision_provider "anthropic")
+
+      for automatic <- ["", nil],
+          do: assert(CueSettings.check_decision_provider(automatic) == :ok)
+
+      refute File.exists?(Path.join(home, "config.toml"))
+
+      assert CueSettings.save_decision_provider("openai") == {:ok, %{decision_provider: :openai}}
+      assert config_text(home) =~ ~s(decision_provider = "openai")
+      assert CueSettings.save_decision_provider(nil) == {:ok, %{decision_provider: nil}}
+      refute config_text(home) =~ "decision_provider"
     end
 
     test "the switches write through the setup page's own path", %{home: home} do

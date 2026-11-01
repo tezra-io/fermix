@@ -85,19 +85,23 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Watchers can check items by meaning, not only by their keywords.** A new
   **Screen** setting in Settings → Cues and the setup page's Cues tab picks
   how items are checked before the filter model reads them: **Keyword
-  match**, as before, or **Decision model**. There is no provider to choose:
-  Fermix uses your main provider's decision model when it has one, otherwise
-  the first you set up of OpenAI (its Decisions API with gpt-6-luna),
-  OpenRouter and Venice (both TypeSafe's Jev), with that provider's key and
-  nothing new to enter, and the setting names the one it uses. A decision
+  match**, as before, or **Decision model**. A **Decision model** setting
+  under it picks which one: **Automatic**, your main provider's decision
+  model when it has one, otherwise the first you set up of OpenAI (its
+  Decisions API with gpt-6-luna), OpenRouter and Venice (both TypeSafe's
+  Jev), named by the one it resolves to; or one of those three that you
+  choose. Each runs on that provider's key with nothing new to enter, and a
+  provider whose key did not load is never offered or called. A decision
   model checks each item against the watcher's purpose and instructions, with
   its keywords as hints, so a post worded differently or in another language
   is no longer missed, in about a third of a second per item, roughly ten
   times faster than a chat model. The filter model still makes every pass.
   Fermix writes a watcher's keywords the same way either way, and if the
-  decision model's provider fails or none is set up any more, the watcher
-  waits and retries instead of falling back to keyword match. A watcher's
-  words to listen for are now called keywords everywhere Fermix names them.
+  decision model's provider fails, none is set up any more, or the one you
+  chose is not set up, the watcher waits and retries instead of falling back
+  to keyword match or to another provider; when one is missing, its notice
+  says what to set up. A watcher's words to listen for are now called keywords
+  everywhere Fermix names them.
 - **Watch X accounts with the X sign-in you already have.** A new X accounts
   preset for feed sources takes up to 20 handles, typed with or without `@`,
   and brings each new post from those accounts in as a cue, replies and
