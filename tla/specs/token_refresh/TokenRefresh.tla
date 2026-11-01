@@ -95,7 +95,7 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/chatgpt/registration.ex#read,signed_out,@profile @ 8a05570f216c
 \* SOURCE: apps/fermix_core/lib/fermix/cli/plugins_command.ex @ be9afb0398a5
 \* SOURCE: apps/fermix_core/lib/fermix/cli/auth_command.ex @ 248ca48a51fc
-\* SOURCE: apps/fermix_core/lib/fermix/cli/daemon.ex @ 8c5d75a17520
+\* SOURCE: apps/fermix_core/lib/fermix/cli/daemon.ex @ d683704e089c
 \* SOURCE: apps/fermix_core/lib/fermix/cli/daemon/client.ex @ fd0cff9607dc
 EXTENDS Naturals, FiniteSets
 
