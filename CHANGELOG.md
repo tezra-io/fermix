@@ -466,8 +466,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   page session can make every decision the page offers, so asking Fermix for
   one is now the owner's decision, as pairing a phone or moving Fermix is: a
   command the agent ran is refused, with "Only the owner can open the setup
-  page: use the Fermix app, or run fermix setup in your own terminal." The
-  Mac app and `fermix setup` open it as before.
+  page: use the Fermix app or your own terminal." The Mac app and `fermix
+  setup` open it as before.
 - **Commands the agent runs can no longer read the Mac app's browser
   data.** The cookies, storage and caches of the browser in the Fermix app
   (under `~/Library/WebKit`, `HTTPStorages`, `Caches` and `Cookies` for the

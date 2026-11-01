@@ -249,7 +249,7 @@ defmodule FermixCore.Management.HomeMoveTest do
 
       assert Enum.map(items, & &1["id"]) ==
                ~w(keychain_secrets engine_version disk s3_size plugins stays_here whatsapp slack
-                  coding_agents cutover_gap serves_nothing)
+                  coding_agents cutover_gap serves_nothing service)
 
       assert Enum.all?(items, &(&1["status"] in ~w(ok warn block) and &1["sentence"] != ""))
       refute_received :restarted

@@ -116,8 +116,8 @@ defmodule Fermix.CLI.Daemon do
   # independent peer.
   @setup_decisions_v1 ~w(setup.session.create)
   @setup_capability "setup_session"
-  @setup_owner_sentence "Only the owner can open the setup page: use the Fermix app, or run " <>
-                          "fermix setup in your own terminal."
+  @setup_owner_sentence "Only the owner can open the setup page: use the Fermix app or your " <>
+                          "own terminal."
   @owner_decisions_v0 ~w(mobile_pair_begin mobile_pair_decide mobile_pair_cancel
                          mobile_device_revoke)
   # The cue writes that widen what reaches a task or what a task may do, the

@@ -271,7 +271,7 @@ defmodule FermixCore.Home.MoveReadinessTest do
   end
 
   test "the items that read the settings alone say an unreadable file", ctx do
-    File.rm!(Path.join(ctx.home, "config.toml"))
+    SafeRm.rm!(Path.join(ctx.home, "config.toml"))
     File.mkdir!(Path.join(ctx.home, "config.toml"))
     seams = opts(ctx) ++ [unreadable_files: nil]
 

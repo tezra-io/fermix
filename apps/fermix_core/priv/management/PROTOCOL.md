@@ -631,8 +631,7 @@ Notes that the shapes alone do not carry:
 - **Opening the setup page is the owner's decision too.** A setup page
   session drives every decision the page offers, so `setup.session.create`
   answers `unavailable` {`capability`: `setup_session`, `sentence`: "Only the
-  owner can open the setup page: use the Fermix app, or run fermix setup in
-  your own terminal."} to the same callers. The Mac app's agent is an
+  owner can open the setup page: use the Fermix app or your own terminal."} to the same callers. The Mac app's agent is an
   independent caller, and `fermix setup` mints the page's link in its own
   process without asking this socket.
 - **Cue writes, the two values handed out and a proposal's answer are the

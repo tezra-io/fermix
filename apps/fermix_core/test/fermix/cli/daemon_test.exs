@@ -1223,8 +1223,8 @@ defmodule Fermix.CLI.DaemonTest do
       assert golden == %{
                "capability" => "setup_session",
                "sentence" =>
-                 "Only the owner can open the setup page: use the Fermix app, or run " <>
-                   "fermix setup in your own terminal."
+                 "Only the owner can open the setup page: use the Fermix app or your own " <>
+                   "terminal."
              }
 
       golden

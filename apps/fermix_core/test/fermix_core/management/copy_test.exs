@@ -29,6 +29,7 @@ defmodule FermixCore.Management.CopyTest do
   alias FermixCore.Home.Provision.Hetzner
   alias FermixCore.Home.Provision.Registry, as: ProvisionRegistry
   alias FermixCore.Home.Snapshot.Recipient, as: SnapshotRecipient
+  alias FermixCore.Home.Snapshot.Recovery
   alias FermixCore.Home.Snapshot.Run, as: SnapshotRun
   alias FermixCore.Home.Snapshot.S3, as: SnapshotS3
   alias FermixCore.Home.Snapshot.Status, as: SnapshotStatus
@@ -70,6 +71,13 @@ defmodule FermixCore.Management.CopyTest do
   # A `fermix` verb, quoted or bare: what the CLI's user types, never what an
   # app or the setup page asks of its owner.
   @fermix_command ~r/\bfermix\s+[a-z]/
+  @recovery_refusals [
+    :passphrase_too_short,
+    :passphrase_not_text,
+    :wrong_passphrase,
+    :key_unreadable,
+    {:not_saved, :eacces}
+  ]
 
   describe "the rules themselves" do
     # A rule the module publishes and nothing here provokes is a rule nobody has
@@ -653,12 +661,14 @@ defmodule FermixCore.Management.CopyTest do
         {:move_pending, "streaming"},
         :epoch_absent,
         {:unknown_candidate, "cand-5e2a9c1f7b3d4086"},
-        :passphrase_too_short,
         {:not_ready, ["This home is about 4 GiB; the move needs about 9 GiB free."]}
       ]
 
       for reason <- refusals,
           do: assert_clean(HomeMove.error_sentence(reason), :prose, [], "move refusal")
+
+      for reason <- @recovery_refusals,
+          do: assert_clean(Recovery.error_sentence(reason), :prose, [], "recovery refusal")
     end
 
     # The readiness report's every item, in each status it can take: an
@@ -688,16 +698,17 @@ defmodule FermixCore.Management.CopyTest do
         snapshots: %{"s3_bucket" => "invented-bucket", "s3_region" => "eu-central-1"}
       }
 
-      for {free, version, bytes} <- [
-            {1_000, "0.16.0", 6_442_450_944},
-            {1_099_511_627_776, "0.9.0", 10}
+      for {free, version, bytes, restarts?} <- [
+            {1_000, "0.16.0", 6_442_450_944, false},
+            {1_099_511_627_776, "0.9.0", 10, true}
           ] do
         report =
           MoveReadiness.report(home, candidate,
             free_bytes: fn _dir -> {:ok, free} end,
             version: version,
             host: "macos-aarch64",
-            home_bytes: bytes
+            home_bytes: bytes,
+            restarts_itself: restarts?
           )
 
         # The summary shows a block as its sentence and each warning in
@@ -748,8 +759,22 @@ defmodule FermixCore.Management.CopyTest do
             do: {"candidate refusal", HomeCandidate.error_sentence(reason)}
 
       owner = [
-        {"home owner decision", ManagementHomeMove.owner_only_sentence()}
+        {"home owner decision", ManagementHomeMove.owner_only_sentence()},
+        {"setup owner decision", setup_owner_sentence()}
       ]
+
+      recovery =
+        for reason <- @recovery_refusals, do: {"recovery", Recovery.error_sentence(reason)}
+
+      service =
+        for restarts? <- [true, false],
+            item <-
+              MoveReadiness.config_items(unwritten_home(), "north-box",
+                restarts_itself: restarts?,
+                unreadable_files: nil
+              ),
+            item.id == "service",
+            do: {"service", item.sentence}
 
       # The answer to a move's start whose answer was lost.
       {:error, :unconfirmed, %{"sentence" => unconfirmed}} =
@@ -757,8 +782,24 @@ defmodule FermixCore.Management.CopyTest do
 
       device = [{"move unconfirmed", unconfirmed}]
 
-      for {where, text} <- section_rows ++ move ++ enrolling ++ owner ++ device,
+      for {where, text} <-
+            section_rows ++ move ++ enrolling ++ owner ++ device ++ recovery ++ service,
           do: refute_command(text, where)
+    end
+
+    # A home with no settings file, which turns nothing on; nothing is written.
+    defp unwritten_home,
+      do: Path.join(System.tmp_dir!(), "fermix-copy-#{System.unique_integer([:positive])}")
+
+    # The daemon's refusal of a setup session, as the golden its own test
+    # holds the daemon to.
+    defp setup_owner_sentence do
+      :fermix_core
+      |> Application.app_dir("priv/management/fixtures/errors.jsonl")
+      |> File.stream!()
+      |> Enum.map(&Jason.decode!/1)
+      |> Enum.find(&(&1["name"] == "unavailable_setup_owner_decision"))
+      |> get_in(["response", "error", "details", "sentence"])
     end
 
     # A gate nothing provokes is a gate nobody has seen fire.
