@@ -34,8 +34,9 @@ defmodule FermixCore.Home.Provision.Driver do
   (or removed when a delete was under way); absent with no id is removed,
   the create failed `interrupted` unless it recorded why, and its code
   withdrawn; found is recorded, and a lost create recovers its addresses.
-  Changes apply only where the ledger still names what was read, and
-  nothing is asked while a job runs (`:running?`). A reconcile that read the
+  Changes apply only where the ledger still names what was read; a
+  reconcile runs only as a job of the provisioner's family, so never beside
+  another step (`Management.Provision.start_reconcile/1`). A reconcile that read the
   provider writes when it did (`checked_at`); one that finds the server
   running ends a power action's failure, as a power action that succeeds
   does.
@@ -336,11 +337,8 @@ defmodule FermixCore.Home.Provision.Driver do
           {:ok, Ledger.t()} | {:error, Provision.reason()}
   def reconcile(provider, home, opts) when is_binary(home) and is_list(opts) do
     with {:ok, ledger} <- read(provider, home),
-         {:ok, token} <- token(ledger) do
-      if Keyword.get(opts, :running?, false),
-        do: {:ok, ledger},
-        else: reconciled(provider, home, token, ledger, opts)
-    end
+         {:ok, token} <- token(ledger),
+         do: reconciled(provider, home, token, ledger, opts)
   end
 
   defp reconciled(provider, home, token, ledger, opts) do

@@ -17,13 +17,12 @@ defmodule FermixCore.Management.ProtocolContractTest do
   alias FermixCore.Home.Candidates, as: HomeCandidates
   alias FermixCore.Home.Epoch
   alias FermixCore.Home.Move, as: HomeMove
-  alias FermixCore.Home.Provision.Driver, as: ProvisionDriver
-  alias FermixCore.Home.Provision.Hetzner, as: ProvisionHetzner
   alias FermixCore.Home.Provision.Ledger, as: ProvisionLedger
   alias FermixCore.Home.Snapshot.Recipient, as: SnapshotRecipient
   alias FermixCore.Home.Snapshot.Scheduler, as: SnapshotScheduler
   alias FermixCore.Home.Snapshot.Status, as: SnapshotStatus
   alias FermixCore.Jobs.Registry, as: JobsRegistry
+  alias FermixCore.Management.AlwaysOn
   alias FermixCore.Management.Cues.MandateRow, as: CueMandateRow
   alias FermixCore.Management.Cues.SourceRow, as: CueSourceRow
   alias FermixCore.Management.Cues.WatcherRow, as: CueWatcherRow
@@ -65,6 +64,8 @@ defmodule FermixCore.Management.ProtocolContractTest do
   @successes Application.app_dir(:fermix_core, "priv/management/fixtures/success.jsonl")
   @errors Application.app_dir(:fermix_core, "priv/management/fixtures/errors.jsonl")
   @compatibility Application.app_dir(:fermix_core, "priv/management/fixtures/compatibility.jsonl")
+  # The desktop whose forward the server's Always On steps answer.
+  @desktop_id "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e"
 
   @mcp_router_toml ~S"""
   [mcp.servers.filesystem]
@@ -654,6 +655,20 @@ defmodule FermixCore.Management.ProtocolContractTest do
 
     for {_name, %{"summary" => %{"detail" => detail}}} <- HomeSummaryGoldens.rows(),
         do: assert(Map.keys(detail) -- detail_keys == [])
+  end
+
+  # Always On setup §3.4: `home.act`'s golden is the router's own answer to
+  # its case, the token pasted on the first screen, and its `changed`
+  # refusal carries a summary the engine draws.
+  test "the golden home.act answer and its changed refusal are the engine's own" do
+    {"home.act", params, opts} = Enum.find(router_cases(), &(elem(&1, 0) == "home.act"))
+    request = %{request_id: "req-1", protocol_version: 2, method: "home.act", params: params}
+    {:ok, answer} = Router.route(request, opts)
+
+    assert named_fixture_result("home_act") == json(answer)
+
+    assert golden_error_details("changed")["summary"] ==
+             named_fixture_result("home_status")["summary"]
   end
 
   test "the schema's row vocabulary matches the settings module", %{schema: schema} do
@@ -1446,7 +1461,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
           open_enrollment: fn :manual ->
             {:ok, %{code: "fxenroll1.aW52ZW50ZWQ", expires_at: ~U[2026-10-27 09:40:00Z]}}
           end,
-          withdraw_enrollment: fn -> :ok end,
+          withdraw_enrollment: fn :provisioned -> :ok end,
           # A keychain reference this host could not resolve, as a home a
           # restore carried here without its values shows it.
           settings_snapshot: fn ->
@@ -1456,14 +1471,17 @@ defmodule FermixCore.Management.ProtocolContractTest do
       ]
     ]
 
+    # The server's Always On steps answer a desktop's forward alone.
+    rail = [actor: {:desktop, @desktop_id}] ++ opts
+
     [
       {"home.status", %{}, opts},
       {"home.snapshots.status", %{}, opts},
-      {"home.snapshots.run", %{}, opts},
+      {"home.snapshots.run", %{}, rail},
       {"home.snapshots.passphrase", %{"recovery_passphrase" => "invented-lighthouse-meridian"},
        opts},
-      {"home.enroll.open", %{}, opts},
-      {"home.enroll.withdraw", %{}, opts},
+      {"home.enroll.open", %{}, rail},
+      {"home.enroll.withdraw", %{}, rail},
       {"home.candidates.list", %{}, opts},
       move_readiness_case(),
       move_start_case()
@@ -1478,26 +1496,52 @@ defmodule FermixCore.Management.ProtocolContractTest do
   defp provision_cases do
     stub = HetznerStub.start!()
     connected = provision_home!(stub, false)
-    created = provision_home!(stub, true)
-    replacing = replacing_home!(provision_home!(stub, true), stub)
 
     [
-      {"home.provision.providers", %{}, provision_opts(provision_home!(stub, nil), stub)},
-      {"home.provision.connect", %{"provider" => "hetzner", "token" => HetznerStub.token()},
-       provision_opts(provision_home!(stub, nil), stub)},
       {"home.provision.options", %{"provider" => "hetzner"}, provision_opts(connected, stub)},
-      {"home.provision.create",
-       %{"provider" => "hetzner", "type" => "cpx22", "location" => "fsn1"},
-       provision_opts(connected, stub)},
-      {"home.provision.power", %{"action" => "reset"}, provision_opts(created, stub)},
-      {"home.provision.resources", %{}, provision_opts(replacing, stub)},
-      {"home.provision.delete", %{}, provision_opts(provision_home!(stub, true), stub)}
+      act_case(stub)
     ]
   end
 
-  # A home with no token (`nil`), a connected one (`false`), or one whose
-  # server Fermix created (`true`).
-  defp provision_home!(stub, created?) do
+  # Always On's one step method on a home with nothing set up: the token
+  # pasted on the first screen, against the recorded Hetzner API, under the
+  # key that screen gave it; the answer is the choice that follows.
+  defp act_case(stub) do
+    home = provision_home!(stub, nil)
+    serializer = :"contract_always_on_#{System.unique_integer([:positive])}"
+    start_supervised!({AlwaysOn, name: serializer}, id: serializer)
+
+    seams =
+      [
+        home: home,
+        engine_role: %{role: :primary, primary: nil},
+        profile: "general",
+        now: ~U[2026-10-30 09:00:00Z],
+        host_os: :macos,
+        config: [],
+        scheduler: nil,
+        disk_usage: fn _home -> {:ok, %{used: 0.42, nearly_full: false}} end,
+        link_status: fn -> %{primary: nil, desktops: [], enrollment: nil} end,
+        settings_snapshot: fn -> %{} end,
+        jobs: jobs(),
+        provider_opts: provision_host_opts(stub),
+        serializer: serializer
+      ] ++ code_seams()
+
+    %{"action" => %{"id" => "paste_token", "key" => key}} =
+      seams |> ManagementHome.summary_facts() |> HomeSummary.summary()
+
+    params = %{
+      "action" => "paste_token",
+      "key" => key,
+      "input" => %{"token" => HetznerStub.token()}
+    }
+
+    {"home.act", params, [operation_opts: [always_on: seams]]}
+  end
+
+  # A home with no token (`nil`), or a connected one (`false`).
+  defp provision_home!(_stub, created?) do
     home = SafeRm.make_tmp_dir!("contract_provision")
     on_exit(fn -> SafeRm.rm_rf!(home) end)
     :ok = Epoch.write(home, 4)
@@ -1510,40 +1554,6 @@ defmodule FermixCore.Management.ProtocolContractTest do
           &{:ok, ProvisionLedger.connect(&1, HetznerStub.token(), ~U[2026-10-30 09:00:00Z])}
         )
     end
-
-    if created? do
-      request = %{type: "cpx22", location: "fsn1", profile: "general"}
-
-      {:ok, _server} =
-        ProvisionDriver.create(
-          ProvisionHetzner,
-          home,
-          request,
-          provision_host_opts(stub) ++ code_seams()
-        )
-    end
-
-    home
-  end
-
-  # The server the home lives on set aside, and its replacement created.
-  defp replacing_home!(home, stub) do
-    {:ok, _ledger} =
-      ProvisionLedger.update(
-        home,
-        "hetzner",
-        &ProvisionLedger.begin_replace(&1, 4, ~U[2026-10-30 09:00:00Z])
-      )
-
-    request = %{type: "cpx32", location: "hel1", profile: "general"}
-
-    {:ok, _server} =
-      ProvisionDriver.create(
-        ProvisionHetzner,
-        home,
-        request,
-        provision_host_opts(stub) ++ code_seams()
-      )
 
     home
   end
@@ -1603,7 +1613,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
     ]
 
     {"home.move.readiness", %{"candidate_id" => held.candidate_id},
-     [operation_opts: [home: seams ++ readiness_seams()]]}
+     [actor: {:desktop, @desktop_id}, operation_opts: [home: seams ++ readiness_seams()]]}
   end
 
   defp readiness_seams,
@@ -1639,7 +1649,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
       "recovery_passphrase" => "invented-harbor-juniper-lantern"
     }
 
-    {"home.move.start", params, [operation_opts: [home: seams]]}
+    {"home.move.start", params, [actor: {:desktop, @desktop_id}, operation_opts: [home: seams]]}
   end
 
   # A candidate as the primary holds it after enrollment: invented facts, and

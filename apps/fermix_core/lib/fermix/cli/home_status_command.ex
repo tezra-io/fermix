@@ -1,11 +1,10 @@
 defmodule Fermix.CLI.HomeStatusCommand do
   @moduledoc """
   `fermix home status` and `fermix home snapshots` (M75 §14): the home's role,
-  epoch, moved marker and snapshots, and the two snapshot actions.
+  epoch, moved marker and snapshots, and the recovery passphrase.
 
       fermix home status [--json]
       fermix home snapshots status [--json]
-      fermix home snapshots run [--json]
       fermix home snapshots passphrase --passphrase-file PATH [--json]
 
   `status` asks the engine that owns the home (`home.status` over
@@ -14,10 +13,9 @@ defmodule Fermix.CLI.HomeStatusCommand do
   the marker, `[fermix_core.snapshots]` and `snapshots/status.json`, through
   the same projection the engine answers with (`Management.Home`). It prints
   the summary first (M75 lean v1 §7): its sentence, and its one action as the
-  Fermix app names it, since production is managed there. `run` and
-  `passphrase` need the engine: a snapshot is the scheduler's, and the
-  recovery key is saved through the running settings path. With the engine
-  stopped they refuse with `engine_stopped`.
+  Fermix app names it, since production is managed there. `passphrase` needs
+  the engine: the recovery key is saved through the running settings path.
+  With the engine stopped it refuses with `engine_stopped`.
 
   The passphrase never enters argv: `--passphrase-file` (one line, a trailing
   newline dropped) or, with a terminal and no file, asked twice without echo.
@@ -42,7 +40,6 @@ defmodule Fermix.CLI.HomeStatusCommand do
   Usage:
     fermix home status [--json]
     fermix home snapshots status [--json]
-    fermix home snapshots run [--json]
     fermix home snapshots passphrase --passphrase-file PATH [--json]
   """
 
@@ -63,9 +60,6 @@ defmodule Fermix.CLI.HomeStatusCommand do
         with_json(rest, fn json? ->
           read(json?, deps, "home.snapshots.status", &snapshot_lines/1)
         end)
-
-      ["run" | rest] ->
-        with_json(rest, fn json? -> act(json?, deps, "home.snapshots.run", %{}, &run_lines/1) end)
 
       ["passphrase" | rest] ->
         passphrase(rest, deps)
@@ -280,9 +274,6 @@ defmodule Fermix.CLI.HomeStatusCommand do
 
   defp next_line(nil), do: []
   defp next_line(at), do: ["  Next run: #{at}"]
-
-  defp run_lines(%{"snapshots" => snapshots}),
-    do: ["A snapshot is being written now." | Enum.drop(snapshot_lines(snapshots), 1)]
 
   defp passphrase_lines(
          %{"recipient" => recipient, "key_id" => key_id, "snapshots" => snapshots} = result

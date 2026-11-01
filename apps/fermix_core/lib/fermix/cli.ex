@@ -157,12 +157,10 @@ defmodule Fermix.CLI do
       fermix home import FILE --into ROOT [--passphrase-file PATH]  Restore an archive or a snapshot as the next primary
       fermix home mark-moved --to TEXT [--json]    Retire this home once its archive has left
       fermix home status [--json]                  Show the role, epoch and snapshots of this home
-      fermix home snapshots status|run [--json]    Show the snapshots, or take one now
+      fermix home snapshots status [--json]        Show the snapshots
       fermix home snapshots passphrase --passphrase-file PATH [--json]  Set the recovery passphrase
-      fermix home enroll-code [--json]             Open a one-time code a new server enrolls with
       fermix home enroll --code-file PATH [--snapshot-bucket B --snapshot-region R]  Make this fresh home a candidate primary
       fermix home candidates [--json]              List the enrolled candidate primaries
-      fermix home move --to ID [--recovery-passphrase-file PATH] [--retire] [--json]  Move this home to a candidate
       fermix logs   [-f] [-n LINES]                Show daemon log file
       fermix upgrade [--check]                     Self-update from signed releases
       fermix uninstall                             Remove a Fermix.app-managed installation

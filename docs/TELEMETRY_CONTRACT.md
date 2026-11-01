@@ -1351,6 +1351,15 @@ root span per settings read with nothing nested under it. If a new management
 method has to *wait* on a network, a download or a person, it is a job — start
 one and inherit the bookends rather than minting a sixth event.
 
+Always On's two methods are sessionless the same way. `home.status` (its
+held wait included) reads and answers; `home.act` (Always On setup §9) emits
+nothing of its own: a step that starts a job (a create, a power action, a
+delete, Start again) inherits that `home_provision` job's bookends, and the
+synchronous ones (a token check, a review, a code, a move's start) stay
+sessionless as their functions are. An act logs its action id and who asked,
+and its `input` (a token, a recovery passphrase) never enters any log line or
+any event's metadata.
+
 ## Computer-use sessions
 
 A computer-use session is a **run kind**: `ComputerUse.Session` mints

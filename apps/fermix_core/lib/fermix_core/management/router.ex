@@ -10,6 +10,7 @@ defmodule FermixCore.Management.Router do
   alias FermixCore.Health
   alias FermixCore.Home.Role
   alias FermixCore.Introspection.Overview
+  alias FermixCore.Management.AlwaysOn
   alias FermixCore.Management.Auth
   alias FermixCore.Management.Capabilities
   alias FermixCore.Management.ComputerUse
@@ -46,8 +47,7 @@ defmodule FermixCore.Management.Router do
     mobile.devices.list browser.install.start imessage.permissions.get imessage.policy.confirm
     mcp.servers.list mcp.servers.import.scan cues.status cues.sources.list cues.watchers.list
     cues.mandates.list cues.mandates.choices home.snapshots.status home.snapshots.run
-    home.enroll.withdraw home.candidates.list home.provision.providers home.provision.resources
-    home.provision.delete
+    home.enroll.withdraw home.candidates.list
   )
   @lease_params ~w(lease_id)
   @doctor_session_params ~w(session_id)
@@ -86,7 +86,7 @@ defmodule FermixCore.Management.Router do
   @home_enroll_params ~w(kind)
   @home_readiness_params ~w(candidate_id)
   @home_move_params ~w(candidate_id recovery_passphrase keep_as_desktop)
-  @provision_connect_params ~w(provider token)
+  @home_act_params ~w(action key input)
   @provision_options_params ~w(provider)
   # A candidate (M75 §2) answers the protocol's hello and home.status, and
   # refuses every other method by name.
@@ -285,7 +285,13 @@ defmodule FermixCore.Management.Router do
     do: mcp_by_name(&McpServers.check_start/2, params, opts)
 
   defp route_known("cues." <> _rest = method, params, opts), do: route_cues(method, params, opts)
-  defp route_known("home." <> _rest = method, params, opts), do: route_home(method, params, opts)
+  # The server's Always On steps answer only a desktop's forward (Always On
+  # setup §3.5); everything else of the family is routed as it comes.
+  defp route_known("home." <> _rest = method, params, opts) do
+    if Placement.rail_only?(method) and not match?({:desktop, _id}, Keyword.get(opts, :actor)),
+      do: Placement.rail_only_refusal(method),
+      else: route_home(method, params, opts)
+  end
 
   # Answered locally in every role (M75 §14): a device reads its own home.
   # With `after` and `wait_ms` it waits for the summary's key to move
@@ -349,35 +355,25 @@ defmodule FermixCore.Management.Router do
     end
   end
 
-  # The Always On provisioner (M75 lean v1 §4.3): device-class, answered on
-  # the computer that created the server. `token` is the one parameter here
-  # that carries a secret: it is never logged, traced or answered.
-  defp route_home("home.provision.providers", %{}, opts),
-    do: operation_result(Provision.providers(provision_opts(opts)))
-
-  defp route_home("home.provision.connect", params, opts) do
-    with :ok <- reject_unknown_params(params, @provision_connect_params) do
-      operation_result(Provision.connect(params, provision_opts(opts)))
-    end
-  end
-
+  # The Always On provisioner's offers (M75 lean v1 §4.3): device-class,
+  # answered on the computer that creates the server.
   defp route_home("home.provision.options", params, opts) do
     with :ok <- reject_unknown_params(params, @provision_options_params) do
       operation_result(Provision.options(params, provision_opts(opts)))
     end
   end
 
-  defp route_home("home.provision.create", params, opts),
-    do: operation_result(Provision.create(params, provision_opts(opts)))
-
-  defp route_home("home.provision.power", params, opts),
-    do: operation_result(Provision.power(params, provision_opts(opts)))
-
-  defp route_home("home.provision.resources", %{}, opts),
-    do: operation_result(Provision.resources(provision_opts(opts)))
-
-  defp route_home("home.provision.delete", %{}, opts),
-    do: operation_result(Provision.delete(provision_opts(opts)))
+  # Every Always On step (Always On setup §3.4): `input` is decoded here into
+  # `AlwaysOn.Input`, which withholds its token and recovery passphrase from
+  # any log, and the raw map goes no further.
+  defp route_home("home.act", params, opts) do
+    with :ok <- reject_unknown_params(params, @home_act_params) do
+      case AlwaysOn.decode(params) do
+        {:ok, request} -> AlwaysOn.act(request, always_on_opts(opts))
+        {:error, _invalid} = refused -> operation_result(refused)
+      end
+    end
+  end
 
   defp status_wait(params) when map_size(params) == 0, do: {:ok, :now}
 
@@ -862,20 +858,29 @@ defmodule FermixCore.Management.Router do
   defp cues_opts(opts), do: opts |> operation_opts() |> Keyword.get(:cues, [])
 
   # The router's own `:engine_role` (tests) reaches the provisioner as its
-  # seam, and a linked desktop's way to its server (`:primary_forward`, from
-  # the daemon) lets a replace ask that server for the new one's code.
+  # seam.
   defp provision_opts(opts) do
     provision = opts |> operation_opts() |> Keyword.get(:provision, [])
 
-    provision =
-      case Keyword.fetch(opts, :engine_role) do
-        {:ok, role} -> Keyword.put_new(provision, :engine_role, role)
-        :error -> provision
-      end
-
-    case Keyword.fetch(opts, :primary_forward) do
-      {:ok, forward} -> Keyword.put(provision, :primary_forward, forward)
+    case Keyword.fetch(opts, :engine_role) do
+      {:ok, role} -> Keyword.put_new(provision, :engine_role, role)
       :error -> provision
+    end
+  end
+
+  # An act reaches every family it steps through with one set of seams, the
+  # router's own `:engine_role` (tests), a linked desktop's way to its server
+  # (`:primary_forward`, from the daemon) and who asked (`:actor`).
+  defp always_on_opts(opts) do
+    always_on =
+      opts
+      |> operation_opts()
+      |> Keyword.get(:always_on, [])
+      |> Keyword.merge(Keyword.take(opts, [:actor, :primary_forward]))
+
+    case Keyword.fetch(opts, :engine_role) do
+      {:ok, role} -> Keyword.put_new(always_on, :engine_role, role)
+      :error -> always_on
     end
   end
 

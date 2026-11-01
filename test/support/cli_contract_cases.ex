@@ -21,7 +21,6 @@ defmodule FermixTestSupport.CliContractCases do
   alias FermixCore.Home.Snapshot.Status, as: SnapshotStatus
   alias FermixCore.Management.Diagnostics.Offline
   alias FermixCore.Management.Home
-  alias FermixCore.Management.HomeMove
   alias FermixCore.Management.HomeSummary
 
   @vendor_unit "/usr/lib/systemd/user/fermix.service"
@@ -209,29 +208,13 @@ defmodule FermixTestSupport.CliContractCases do
       {"home_mark_moved/ok.json", encoded(MachineOutput.ok(HomeMovedCommand.result(moved())))},
       {"home_status/primary.json", encoded(MachineOutput.ok(home_status()))},
       {"home_snapshots_status/ok.json", encoded(MachineOutput.ok(snapshots_view()))},
-      {"home_candidates/ok.json", encoded(MachineOutput.ok(candidates_view()))},
-      {"home_move/ok.json", encoded(MachineOutput.ok(move_view(true)))},
-      {"home_move/retired.json", encoded(MachineOutput.ok(move_view(false)))}
+      {"home_candidates/ok.json", encoded(MachineOutput.ok(candidates_view()))}
     ]
   end
 
   # `fermix home candidates`: the one candidate the primary holds, as the
   # engine answers it or, stopped, as the home's own file holds it.
   defp candidates_view, do: %{"candidates" => [Candidates.view(candidate())]}
-
-  # `fermix home move`: the move to that candidate as the running engine
-  # answers it, its recovery key the one the snapshot goldens show; with
-  # `--retire`, a server being replaced that keeps no desktop.
-  defp move_view(keep_as_desktop) do
-    HomeMove.started_view(%{
-      move_id: "mv-01a17cb1f5c04c1e9a7b",
-      candidate: candidate(),
-      recovery_recipient:
-        "fxsnap1.AAECAwQFBgcICQoLDA0ODw.B3l5ExMinEfPofapoLSG57ZGCBl_fiIqFbtB5nPDNqA",
-      key_id: "08c15ca36dd935c4",
-      keep_as_desktop: keep_as_desktop
-    })
-  end
 
   # The facts a candidate's view publishes, with the bucket the host
   # reported, so the goldens draw it.
@@ -427,16 +410,6 @@ defmodule FermixTestSupport.CliContractCases do
 
   def error_details(:home_status_unavailable),
     do: [output: "The requested management method is not available. (method_not_found)"]
-
-  def error_details(:enrollment_refused),
-    do: [output: "Only the primary enrolls candidates and starts a move."]
-
-  def error_details(:move_refused),
-    do: [
-      output:
-        "No server waiting for the move has the id cand-0f1e2d3c4b5a6978. A server waits 24 " <>
-          "hours after it enrolls; after that, get a new code and enroll it again."
-    ]
 
   def error_details(:mark_moved_failed),
     do: [output: "could not tell whether Fermix is running (timeout)"]

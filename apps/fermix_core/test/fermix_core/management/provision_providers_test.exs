@@ -1,19 +1,18 @@
 defmodule FermixCore.Management.ProvisionProvidersTest do
-  # M75 lean v1 §4.3: the `home.provision.*` family is the same for every
-  # provider in `Provision.Registry`. `home.provision.providers` answers each
-  # one's display data, so the apps draw the token and choose screens from
-  # it; connect, options and create name the provider; power, resources and
-  # delete act on the one Fermix created something on. Run here on an
-  # invented provider alone (`FermixTestSupport.FakeCloudProvider`), so the
-  # family is shown to need nothing of Hetzner's.
+  # M75 lean v1 §4.3: Always On's provisioner is the same for every provider
+  # in `Provision.Registry`. Connect and options name the provider; create,
+  # power, the read back and delete act on the one Always On speaks of
+  # (`Provision.current/2`). Run here on an invented provider alone
+  # (`FermixTestSupport.FakeCloudProvider`), so the provisioner is shown to
+  # need nothing of Hetzner's.
   use ExUnit.Case, async: true
 
   alias FermixCore.Home.Epoch
   alias FermixCore.Home.Provision.Hetzner
   alias FermixCore.Home.Provision.Ledger
   alias FermixCore.Management.Jobs
-  alias FermixCore.Management.Placement
   alias FermixCore.Management.Protocol
+  alias FermixCore.Management.Provision
   alias FermixCore.Management.Router
   alias FermixTestSupport.FakeCloudProvider
   alias FermixTestSupport.SafeRm
@@ -58,42 +57,6 @@ defmodule FermixCore.Management.ProvisionProvidersTest do
     %{home: home, seams: seams, jobs: [server: jobs], world: world}
   end
 
-  describe "home.provision.providers" do
-    test "is answered on this computer, open to every caller, minimum version 2" do
-      assert {:ok, 2} = Protocol.minimum_version("home.provision.providers")
-      assert Placement.place("home.provision.providers", %{}) == :device
-      assert "home.provision.providers" in Protocol.methods()
-    end
-
-    test "answers each provider's display data, the registry's by default", ctx do
-      assert {:ok, %{"providers" => [hetzner]}} =
-               route("home.provision.providers", %{}, %{ctx | seams: []})
-
-      assert hetzner["id"] == "hetzner"
-      assert hetzner["name"] == "Hetzner"
-      assert hetzner["token_label"] == Hetzner.display().token_label
-      assert hetzner["steps"] == Hetzner.display().steps
-      assert hetzner["console_url"] == "https://console.hetzner.cloud/"
-      assert hetzner["docs_anchor"] == "hetzner"
-
-      assert {:ok, %{"providers" => [nimbus]}} = route("home.provision.providers", %{}, ctx)
-
-      assert nimbus == %{
-               "id" => "nimbus",
-               "name" => "Nimbus",
-               "token_label" => "Nimbus access key",
-               "steps" => FakeCloudProvider.display().steps,
-               "console_url" => "https://console.nimbus.invalid/",
-               "docs_anchor" => "nimbus"
-             }
-    end
-
-    test "takes no parameters", ctx do
-      assert {:error, :invalid_params, _details} =
-               route("home.provision.providers", %{"provider" => "nimbus"}, ctx)
-    end
-  end
-
   describe "the family on a provider that is not Hetzner" do
     test "connects, offers, creates, powers, reads back and deletes", ctx do
       assert {:ok, view} = connect(ctx)
@@ -102,7 +65,7 @@ defmodule FermixCore.Management.ProvisionProvidersTest do
       assert token == FakeCloudProvider.token()
       refute File.exists?(Ledger.path(ctx.home, "hetzner"))
 
-      assert {:ok, options} = route("home.provision.options", %{"provider" => "nimbus"}, ctx)
+      assert {:ok, options} = options(ctx)
       assert options["sentence"] == "Recommended: Small 4 in Oslo, €12 a month."
 
       assert {:ok, job} = create(ctx)
@@ -116,7 +79,7 @@ defmodule FermixCore.Management.ProvisionProvidersTest do
 
       assert_received :code_opened
 
-      assert {:ok, view} = route("home.provision.resources", %{}, ctx)
+      view = resources(ctx)
       assert %{"provider" => "nimbus", "state" => "created", "checked" => true} = view
       assert %{"type" => "small-4", "location" => "osl1"} = view["server"]
 
@@ -124,27 +87,22 @@ defmodule FermixCore.Management.ProvisionProvidersTest do
       assert [_server, _firewall, _ip] = view["resources"]
       assert Enum.all?(view["resources"], &match?(%{"id" => "nb-" <> _}, &1))
 
-      assert {:ok, job} = route("home.provision.power", %{"action" => "on"}, ctx)
+      assert {:ok, job} = power(ctx, "on")
       assert %{"status" => "completed"} = finished(job, ctx)
 
-      assert {:ok, job} = route("home.provision.delete", %{}, ctx)
+      assert {:ok, job} = delete(ctx)
       assert %{"status" => "completed"} = finished(job, ctx)
       assert_received :code_withdrawn
 
-      assert {:ok, %{"state" => "connected", "resources" => []}} =
-               route("home.provision.resources", %{}, ctx)
+      assert %{"state" => "connected", "resources" => []} = resources(ctx)
     end
 
     test "every refusal names the provider in its own words", ctx do
       assert {:error, :unavailable, %{"sentence" => "Paste a Nimbus access key first."}} =
-               route("home.provision.options", %{"provider" => "nimbus"}, ctx)
+               options(ctx)
 
       assert {:error, :invalid_params, %{"field" => "token", "sentence" => sentence}} =
-               route(
-                 "home.provision.connect",
-                 %{"provider" => "nimbus", "token" => "invented-wrong-token-0000"},
-                 ctx
-               )
+               connect(ctx, %{"provider" => "nimbus", "token" => "invented-wrong-token-0000"})
 
       assert sentence ==
                "Nimbus does not accept this token, so paste a key that may create servers " <>
@@ -153,11 +111,7 @@ defmodule FermixCore.Management.ProvisionProvidersTest do
       {:ok, _view} = connect(ctx)
 
       assert {:error, :invalid_params, %{"field" => "location", "sentence" => sentence}} =
-               route(
-                 "home.provision.create",
-                 %{"provider" => "nimbus", "type" => "small-4", "location" => "fsn1"},
-                 ctx
-               )
+               create(ctx, location: "fsn1")
 
       assert sentence == "Fermix creates a server in Oslo or Lisbon."
     end
@@ -171,25 +125,23 @@ defmodule FermixCore.Management.ProvisionProvidersTest do
       assert %{"status" => "failed", "failure" => %{"sentence" => sentence}} = finished(job, ctx)
       assert sentence == "Nimbus limits new servers on this account."
 
-      assert {:ok, %{"state" => "failed", "failure" => failure}} =
-               route("home.provision.resources", %{}, ctx)
+      assert %{"state" => "failed", "failure" => failure} = resources(ctx)
 
       assert %{"reason" => "account_limit", "sentence" => ^sentence} = failure
     end
   end
 
   describe "the provider a call names" do
-    test "connect, options and create need one, and only one Fermix offers", ctx do
-      for {method, params} <- [
-            {"home.provision.connect", %{"token" => FakeCloudProvider.token()}},
-            {"home.provision.options", %{}},
-            {"home.provision.create", %{"type" => "small-4", "location" => "osl1"}}
+    test "connect and options need one, and only one Fermix offers", ctx do
+      for {step, params} <- [
+            {&connect/2, %{"token" => FakeCloudProvider.token()}},
+            {&options/2, %{}}
           ],
           provider <- [:absent, "hetzner", 7] do
         params = if provider == :absent, do: params, else: Map.put(params, "provider", provider)
 
-        assert {:error, :invalid_params, %{"field" => "provider"}} = route(method, params, ctx),
-               "#{method} #{inspect(provider)}"
+        assert {:error, :invalid_params, %{"field" => "provider"}} = step.(ctx, params),
+               "#{inspect(step)} #{inspect(provider)}"
       end
     end
 
@@ -213,27 +165,63 @@ defmodule FermixCore.Management.ProvisionProvidersTest do
 
       {:ok, _view} = connect(ctx)
 
-      assert {:error, :unavailable, %{"sentence" => sentence}} = create(ctx)
+      # Always On speaks of the provider that holds it (`Provision.current/2`),
+      # whose recommendation the create would make.
+      assert {:error, :unavailable, %{"sentence" => sentence}} =
+               create(ctx, type: nil, location: nil)
+
       assert sentence == "Your server already exists, so delete it before creating another."
       assert {:ok, %{server: nil, ref: nil}} = Ledger.read(ctx.home, "nimbus")
     end
   end
 
-  defp connect(ctx),
-    do:
-      route(
-        "home.provision.connect",
-        %{"provider" => "nimbus", "token" => FakeCloudProvider.token()},
-        ctx
-      )
+  # Paste a token: Nimbus's own unless `params` say otherwise.
+  defp connect(ctx, params \\ %{"provider" => "nimbus", "token" => FakeCloudProvider.token()}),
+    do: answered(Provision.connect(params, seams(ctx)))
 
-  defp create(ctx),
-    do:
-      route(
-        "home.provision.create",
-        %{"provider" => "nimbus", "type" => "small-4", "location" => "osl1"},
-        ctx
-      )
+  # A create: small-4 in Oslo unless `opts` says another type or location.
+  defp create(ctx, opts \\ []) do
+    choice = %{
+      type: Keyword.get(opts, :type, "small-4"),
+      location: Keyword.get(opts, :location, "osl1"),
+      replace: false
+    }
+
+    answered(Provision.start_create(choice, seams(ctx)))
+  end
+
+  defp power(ctx, action), do: answered(Provision.power(%{"action" => action}, seams(ctx)))
+  defp delete(ctx), do: answered(Provision.delete(seams(ctx)))
+
+  # The ledger read back from the provider: one reconcile, its end read from
+  # its completion event, then the view, with `checked` (the read completed)
+  # and `sentence` (why it did not, else the view's own).
+  defp resources(ctx) do
+    {:ok, job} = Provision.start_reconcile(seams(ctx))
+    done = finished(job, ctx)
+    view = Provision.view(ctx.home, seams(ctx))
+
+    Map.merge(view, %{
+      "checked" => done["status"] == "completed",
+      "sentence" => get_in(done, ["failure", "sentence"]) || view["sentence"]
+    })
+  end
+
+  # The one method of the provisioner still on the wire, through the router
+  # as a daemon answers it.
+  defp options(ctx, params \\ %{"provider" => "nimbus"}),
+    do: route("home.provision.options", params, ctx)
+
+  defp seams(ctx), do: Keyword.put(ctx.seams, :engine_role, @primary)
+
+  # A step's answer as the router puts it on the wire.
+  defp answered({:ok, view}), do: {:ok, view}
+
+  defp answered({:error, {:unavailable, capability, sentence}}),
+    do: {:error, :unavailable, %{"capability" => capability, "sentence" => sentence}}
+
+  defp answered({:error, {:invalid_params, field, sentence}}),
+    do: {:error, :invalid_params, %{"field" => field, "sentence" => sentence}}
 
   defp ref(ctx) do
     {:ok, %{ref: ref}} = Ledger.read(ctx.home, "nimbus")

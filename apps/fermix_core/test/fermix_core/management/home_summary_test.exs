@@ -783,7 +783,16 @@ defmodule FermixCore.Management.HomeSummaryTest do
 
       assert needs.(facts([])) == ["token"]
       assert needs.(facts(provision: ledger(:connected))) == ["choice"]
-      assert needs.(ready_facts([])) == ["recovery_passphrase"]
+
+      # The recovery passphrase is typed twice where none is set yet, and once,
+      # to be checked, where one is; a replace's move checks the server's own,
+      # which every move to it set.
+      assert needs.(ready_facts([])) == ["new_recovery_passphrase"]
+
+      assert needs.(ready_facts(snapshots: Map.put(snapshots([]), "recipient_set", true))) ==
+               ["recovery_passphrase"]
+
+      assert needs.(replace_ready([])) == ["recovery_passphrase"]
 
       assert needs.(facts(provision: ledger(:failed, failure: failure("unavailable", "nbg1")))) ==
                []

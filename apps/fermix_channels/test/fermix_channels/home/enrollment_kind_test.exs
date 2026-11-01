@@ -48,7 +48,7 @@ defmodule FermixChannels.Home.EnrollmentKindTest do
     {:ok, _code} = Enrollment.open(primary.enrollment, :provisioned)
     assert_received :status_changed
 
-    :ok = Enrollment.withdraw(primary.enrollment)
+    :ok = Enrollment.withdraw(primary.enrollment, :provisioned)
     assert_received :status_changed
 
     {:ok, %{expires_at: at}} = Enrollment.open(primary.enrollment)
@@ -182,7 +182,7 @@ defmodule FermixChannels.Home.EnrollmentKindTest do
     :ok = Enrollment.take(ctx.primary.enrollment, remote)
     {:ok, _enrolled} = Enrollment.enroll(ctx.primary.enrollment, request(), remote)
 
-    assert :ok = Enrollment.withdraw(ctx.primary.enrollment)
+    assert :ok = Enrollment.withdraw(ctx.primary.enrollment, :provisioned)
     assert kept(ctx.primary)["withdrawn"] == true
 
     restart!(ctx.primary.enrollment)
@@ -200,20 +200,39 @@ defmodule FermixChannels.Home.EnrollmentKindTest do
   end
 
   test "withdrawing closes a created server's open window and nothing else", ctx do
-    assert :ok = Enrollment.withdraw(ctx.primary.enrollment)
+    assert :ok = Enrollment.withdraw(ctx.primary.enrollment, :provisioned)
 
     {:ok, %{code: manual}} = Enrollment.open(ctx.primary.enrollment, :manual)
-    assert :ok = Enrollment.withdraw(ctx.primary.enrollment)
+    assert :ok = Enrollment.withdraw(ctx.primary.enrollment, :provisioned)
     assert secret(ctx.primary) == {:ok, decoded_secret(manual)}
 
     {:ok, _code} = Enrollment.open(ctx.primary.enrollment, :provisioned)
-    assert :ok = Enrollment.withdraw(ctx.primary.enrollment)
+    assert :ok = Enrollment.withdraw(ctx.primary.enrollment, :manual)
+    assert %{state: :open, kind: :provisioned} = Enrollment.status(ctx.primary.enrollment)
+
+    assert :ok = Enrollment.withdraw(ctx.primary.enrollment, :provisioned)
     assert %{state: :expired, kind: :provisioned} = Enrollment.status(ctx.primary.enrollment)
     assert secret(ctx.primary) == :none
     assert kept(ctx.primary)["secret"] == nil
 
     # A withdrawn window holds back no copied code.
     assert {:ok, _manual} = Enrollment.open(ctx.primary.enrollment, :manual)
+  end
+
+  # Always On setup §4: Cancel the code, on the token screen.
+  test "withdrawing a copied code's window ends it, so the code admits nobody", ctx do
+    {:ok, %{code: manual}} = Enrollment.open(ctx.primary.enrollment, :manual)
+    assert secret(ctx.primary) == {:ok, decoded_secret(manual)}
+
+    assert :ok = Enrollment.withdraw(ctx.primary.enrollment, :manual)
+
+    assert %{state: :expired, kind: :manual} = Enrollment.status(ctx.primary.enrollment)
+    assert secret(ctx.primary) == :none
+    assert kept(ctx.primary)["withdrawn"] == true
+    assert kept(ctx.primary)["secret"] == nil
+
+    assert Enrollment.take(ctx.primary.enrollment, :binary.copy(<<7>>, 32)) ==
+             {:error, :expired}
   end
 
   test "the window keeps its kind across an engine restart", ctx do

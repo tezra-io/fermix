@@ -1122,11 +1122,12 @@ defmodule Fermix.CLI.DaemonTest do
     end
   end
 
-  # M75: a code that lets a server take this home, the move itself and the
-  # recovery key are the owner's decisions; a command the agent ran is refused.
+  # M75, Always On setup §6: every Always On step (`home.act`: a token, a
+  # server Fermix creates, powers or deletes, a code that lets a server take
+  # this home, the move) and the recovery key are the owner's decisions; a
+  # command the agent ran is refused.
   describe "owner decisions on the home" do
-    @home_decisions ~w(home.enroll.open home.enroll.withdraw home.move.readiness
-                       home.move.start home.snapshots.passphrase)
+    @home_decisions ~w(home.act home.snapshots.passphrase)
 
     test "a process the daemon started is refused, and so is one it cannot place" do
       golden = home_owner_golden()
@@ -1170,8 +1171,8 @@ defmodule Fermix.CLI.DaemonTest do
       assert golden == %{
                "capability" => "home",
                "sentence" =>
-                 "Only the owner can move Fermix or set its recovery passphrase: use the " <>
-                   "Fermix app or your own terminal."
+                 "Only the owner can set up Always On, move Fermix or set its recovery " <>
+                   "passphrase: use the Fermix app, the setup page or your own terminal."
              }
 
       golden
@@ -1231,60 +1232,61 @@ defmodule Fermix.CLI.DaemonTest do
     end
   end
 
-  # M75 lean v1 §4.3: a provider's token decides which account Fermix acts in,
-  # and creating, powering and deleting the Always On server spend the owner's
-  # money and can take Fermix's home away, so a command the agent ran is
-  # refused each; the reads are not decisions.
-  describe "owner decisions on the Always On server" do
-    @provision_decisions ~w(home.provision.connect home.provision.create home.provision.power
-                            home.provision.delete)
-    @provision_open ~w(home.provision.options home.provision.resources)
+  # Always On setup §3.5: the server's steps a linked desktop's `home.act`
+  # sends over the link are served only to a desktop's forward, so this
+  # socket refuses each by name whoever asks, before any owner placement; the
+  # provisioner's writes left the wire, `home.act` runs them.
+  describe "the rail-only steps and the provisioner's writes" do
+    @rail_only ~w(home.move.readiness home.move.start home.enroll.open home.enroll.withdraw
+                  home.snapshots.run)
+    @gone ~w(home.provision.providers home.provision.connect home.provision.create
+             home.provision.power home.provision.resources home.provision.delete)
 
-    test "a process the daemon started is refused, and so is one it cannot place" do
-      golden = provision_owner_golden()
+    test "a rail-only step is refused on the socket by name, the owner's peer included", %{
+      socket_path: socket_path
+    } do
+      golden = rail_only_golden()
+      started_here = start_peer_daemon(daemon_os_pid: ParentProcess.os_pid())
 
-      for peer <- [[daemon_os_pid: ParentProcess.os_pid()], [os: {:win32, :nt}]] do
-        socket_path = start_peer_daemon(peer)
+      for socket <- [socket_path, started_here], method <- @rail_only do
+        assert {:error, {:management_error, "unavailable", _message, details}} =
+                 Client.request_v1(method, %{}, socket_path: socket, timeout: 5_000),
+               method
 
-        log =
-          ExUnit.CaptureLog.capture_log(fn ->
-            for method <- @provision_decisions do
-              assert {:error, {:management_error, "unavailable", _message, ^golden}} =
-                       Client.request_v1(method, %{}, socket_path: socket_path, timeout: 5_000),
-                     method
-            end
-          end)
-
-        assert log =~ "only the owner may"
+        assert details == %{golden | "method" => method}
       end
     end
 
-    test "the reads are not owner decisions" do
-      golden = provision_owner_golden()
+    test "the provisioner's writes are no method, and its choice of offers is no decision" do
       socket_path = start_peer_daemon(daemon_os_pid: ParentProcess.os_pid())
 
-      for method <- @provision_open do
-        result = Client.request_v1(method, %{}, socket_path: socket_path, timeout: 5_000)
-        refute match?({:error, {:management_error, "unavailable", _message, ^golden}}, result)
+      for method <- @gone do
+        assert {:error, {:management_error, "method_not_found", _message, %{"method" => ^method}}} =
+                 Client.request_v1(method, %{}, socket_path: socket_path, timeout: 5_000)
       end
+
+      result =
+        Client.request_v1("home.provision.options", %{}, socket_path: socket_path, timeout: 5_000)
+
+      refute match?(
+               {:error, {:management_error, "unavailable", _message, %{"capability" => "home"}}},
+               result
+             )
     end
 
-    defp provision_owner_golden do
+    defp rail_only_golden do
       golden =
         :fermix_core
         |> Application.app_dir("priv/management/fixtures/errors.jsonl")
         |> File.stream!()
         |> Enum.map(&Jason.decode!/1)
-        |> Enum.find(&(&1["name"] == "unavailable_provision_owner_decision"))
+        |> Enum.find(&(&1["name"] == "unavailable_rail_only"))
         |> get_in(["response", "error", "details"])
 
-      assert golden == %{
-               "capability" => "home",
-               "sentence" =>
-                 "Only the owner can give Fermix an API token or create, restart or delete " <>
-                   "its server: use the Fermix app."
-             }
+      assert %{"capability" => "home", "method" => "home.move.start", "sentence" => sentence} =
+               golden
 
+      assert sentence =~ "home.act"
       golden
     end
   end

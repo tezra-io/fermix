@@ -43,7 +43,7 @@ config :logger, :default_formatter,
 
 config :phoenix,
   filter_parameters:
-    ~w(password secret token t _csrf_token access_token refresh_token bot_token verify_token api_key mobile_push_key mobile_apns_key)
+    ~w(password passphrase secret token t _csrf_token access_token refresh_token bot_token verify_token api_key mobile_push_key mobile_apns_key)
 
 config :fermix_core,
   providers: [

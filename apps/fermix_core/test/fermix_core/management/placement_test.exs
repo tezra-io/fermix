@@ -11,7 +11,7 @@ defmodule FermixCore.Management.PlacementTest do
     doctor.start doctor.get doctor.cancel setup.session.create setup.detect
     computer_use.grant.start computer_use.permissions.get imessage.permissions.get
     imessage.grant.start imessage.policy.confirm browser.install.start
-    capabilities.install.start home.status settings.sections
+    capabilities.install.start home.status settings.sections home.act home.provision.options
   )
 
   test "the device-class methods are this machine's, whatever their parameters" do
@@ -38,6 +38,35 @@ defmodule FermixCore.Management.PlacementTest do
     end
 
     for method <- primary, do: assert(Placement.place(method, %{}) == :primary, method)
+  end
+
+  # Always On setup §3.5: the server's steps a linked desktop's `home.act`
+  # sends over the link, and the create job's request for the new server's
+  # code, are served only to a desktop's forward and refused on `daemon.sock`.
+  test "the server's Always On steps are the rail's alone, refused elsewhere by name" do
+    rail = ~w(home.move.readiness home.move.start home.enroll.open home.enroll.withdraw
+              home.snapshots.run)
+
+    assert Enum.sort(Placement.rail_only_methods()) == Enum.sort(rail)
+
+    for method <- rail do
+      assert Placement.rail_only?(method)
+      assert Placement.place(method, %{}) == :primary
+      assert Placement.served_forwarded?(method, %{})
+
+      assert {:error, :unavailable,
+              %{"capability" => "home", "method" => ^method, "sentence" => sentence}} =
+               Placement.rail_only_refusal(method)
+
+      assert sentence =~ "home.act"
+    end
+
+    for method <- ~w(home.act home.status home.snapshots.passphrase home.candidates.list),
+        do: refute(Placement.rail_only?(method), method)
+
+    # A linked desktop answers `home.act` itself, and the server refuses one
+    # forwarded to it.
+    refute Placement.served_forwarded?("home.act", %{})
   end
 
   test "settings are placed by section: this machine's own, else the primary's" do

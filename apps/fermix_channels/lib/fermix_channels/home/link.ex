@@ -8,7 +8,7 @@ defmodule FermixChannels.Home.Link do
   relay (device role),
   `status/0`'s `desktops` by the primary's desktop peers
   (`FermixChannels.Desktop.Peer`), and `open_enrollment/1`,
-  `withdraw_enrollment/0` and `status/0`'s `enrollment` by the enrollment
+  `withdraw_enrollment/1` and `status/0`'s `enrollment` by the enrollment
   window.
 
   The desktop relay (`FermixChannels.Desktop.Relay`) runs only in a device
@@ -54,8 +54,8 @@ defmodule FermixChannels.Home.Link do
 
   # No window runs outside the primary, so there is none to close.
   @impl true
-  def withdraw_enrollment do
-    if Process.whereis(Enrollment), do: Enrollment.withdraw(), else: :ok
+  def withdraw_enrollment(kind) when kind in [:manual, :provisioned] do
+    if Process.whereis(Enrollment), do: Enrollment.withdraw(Enrollment, kind), else: :ok
   end
 
   # Every desktop row the primary holds, with whether its session is up now.

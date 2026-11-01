@@ -466,15 +466,6 @@ defmodule FermixCore.Home.Provision.HetznerTest do
       assert {:ok, %{server: %{status: :created, power: "off", seen_at: @now}}} =
                Driver.reconcile(Hetzner, ctx.home, ctx.opts)
     end
-
-    test "nothing is asked of Hetzner while an operation runs", ctx do
-      before = length(HetznerStub.requests(ctx.stub))
-
-      assert {:ok, _ledger} =
-               Driver.reconcile(Hetzner, ctx.home, Keyword.put(ctx.opts, :running?, true))
-
-      assert length(HetznerStub.requests(ctx.stub)) == before
-    end
   end
 
   describe "a create whose answer was lost" do

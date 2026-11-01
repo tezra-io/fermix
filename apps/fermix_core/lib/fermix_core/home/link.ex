@@ -81,12 +81,15 @@ defmodule FermixCore.Home.Link do
               | {:error, {:unavailable, String.t()}}
 
   @doc """
-  Releases the primary's provisioned window (the server it was opened for
-  was never created, or is being deleted): an open one ends, a used one no
-  longer holds a manual code back. A manual window, or none, and any other
+  Primary role: releases the enrollment window when it is of `kind`: the
+  provisioned one when the server it was opened for was never created or is
+  being deleted (a used one then no longer holds a manual code back), the
+  manual one when the owner cancels its code (Always On's Cancel the code).
+  An open one ends now. A window of the other kind, or none, and any other
   role, is left as it is.
   """
-  @callback withdraw_enrollment() :: :ok | {:error, {:unavailable, String.t()}}
+  @callback withdraw_enrollment(:manual | :provisioned) ::
+              :ok | {:error, {:unavailable, String.t()}}
 
   @doc """
   Device role: the server this desktop reaches is known by `name` from now on

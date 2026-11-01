@@ -250,15 +250,10 @@ defmodule Fermix.CLI.DaemonForwardingTest do
       refute_received {:forwarded, _request, _opts}
     end
 
-    test "the home's recovery, enrollment and move are the primary's", ctx do
+    test "the home's recovery and the servers it holds are the primary's", ctx do
       socket = start_daemon!(ctx, engine_role: @device, desktop_link?: true)
 
-      for {method, params} <- [
-            {"home.snapshots.status", %{}},
-            {"home.candidates.list", %{}},
-            {"home.enroll.open", %{}},
-            {"home.enroll.withdraw", %{}}
-          ] do
+      for {method, params} <- [{"home.snapshots.status", %{}}, {"home.candidates.list", %{}}] do
         assert {:ok, %{"answered_by" => "primary"}} =
                  Client.request_v1(method, params, socket_path: socket, timeout: @reply_ms)
 
@@ -266,26 +261,31 @@ defmodule Fermix.CLI.DaemonForwardingTest do
       end
     end
 
-    # M75 lean v1 §4.3: the old server serves nothing while it moves the home
-    # to the server replacing it, so the desktop keeps that it started that
-    # move, beside the forward, for the summary to say "moving".
-    test "a move the primary started to a server replacing it is kept in the ledger", ctx do
+    # Always On setup §3.5, §7: the server's Always On steps reach it only from
+    # this desktop's own `home.act`, which records a replace's move itself, so
+    # one sent on this socket is refused here by name and never forwarded, and
+    # the ledger keeps nothing of it.
+    test "a server step sent on the socket is refused by name and never forwarded", ctx do
       {socket, root} = start_daemon!(ctx, [engine_role: @device, desktop_link?: true], :both)
       waiting_replace!(root)
       start = %{"candidate_id" => "cand-new", "recovery_passphrase" => "invented-lantern-orchard"}
 
-      assert {:ok, %{"answered_by" => "primary"}} =
-               Client.request_v1("home.move.start", start,
-                 socket_path: socket,
-                 timeout: @reply_ms
-               )
+      for {method, params} <- [
+            {"home.move.start", start},
+            {"home.move.readiness", %{"candidate_id" => "cand-new"}},
+            {"home.enroll.open", %{}},
+            {"home.enroll.withdraw", %{}},
+            {"home.snapshots.run", %{}}
+          ] do
+        assert {:error,
+                {:management_error, "unavailable", _message,
+                 %{"capability" => "home", "method" => ^method}}} =
+                 Client.request_v1(method, params, socket_path: socket, timeout: @reply_ms)
+      end
 
-      assert_receive {:forwarded, %{method: "home.move.start"}, []}
-
-      assert {:ok, %{replace: %{candidate_id: "cand-new", move_started_at: %DateTime{}}}} =
-               Ledger.read(root, "hetzner")
-
-      assert %{replace: %{state: :moving}} = Ledger.state(root, Hetzner)
+      refute_received {:forwarded, _request, _opts}
+      assert {:ok, %{replace: %{move_started_at: nil}}} = Ledger.read(root, "hetzner")
+      assert %{replace: %{state: :waiting}} = Ledger.state(root, Hetzner)
     end
   end
 
@@ -326,6 +326,32 @@ defmodule Fermix.CLI.DaemonForwardingTest do
                Daemon.serve_forwarded(decide, "desk-1", daemon)
 
       assert_receive {:pair_decided, "pair-9", false}
+    end
+
+    test "serves a server step a desktop's Always On sent, and refuses home.act itself", ctx do
+      daemon = start_daemon!(ctx, [engine_role: %{role: :primary, primary: nil}], :name)
+
+      assert %{
+               "request_id" => "call-7",
+               "error" => %{"code" => "unavailable", "details" => %{"capability" => "snapshots"}}
+             } =
+               Daemon.serve_forwarded(
+                 frame("call-7", "home.snapshots.run", %{}),
+                 "desk-1",
+                 daemon
+               )
+
+      assert %{
+               "error" => %{
+                 "code" => "device_class_method",
+                 "details" => %{"method" => "home.act"}
+               }
+             } =
+               Daemon.serve_forwarded(
+                 frame("call-8", "home.act", %{"action" => "cancel", "key" => "k"}),
+                 "desk-1",
+                 daemon
+               )
     end
 
     test "refuses a device-class request by name, and a frame that is no request", ctx do

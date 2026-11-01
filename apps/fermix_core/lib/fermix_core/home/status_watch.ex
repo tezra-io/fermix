@@ -41,8 +41,9 @@ defmodule FermixCore.Home.StatusWatch do
   run, the link and the clock are not. Entering `off` from another state is a
   change, told once.
 
-  It never calls the cloud provider: the provider is read when the app asks
-  (`home.provision.resources`) or a job runs, and every write of its ledger
+  It never calls the cloud provider: the provider is read by a job of its
+  family (a step, or the reconcile a stale `home.status` read starts), and
+  every write of its ledger
   (`Provision.Ledger.update/3`, through which `Provision.Driver` and the
   management family write) tells the watch `:ledger`. A read that fails is logged;
   the last read stands, with no deadline until the next read.
@@ -65,12 +66,9 @@ defmodule FermixCore.Home.StatusWatch do
 
   require Logger
 
-  alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.Link
-  alias FermixCore.Home.Role
   alias FermixCore.Management.Home
   alias FermixCore.Management.HomeSummary
-  alias FermixCore.Setup.ConfigStore
 
   @kinds [:ledger, :move, :enrollment, :snapshots, :link, :server]
   # While Always On is off, only these can end it.
@@ -252,11 +250,7 @@ defmodule FermixCore.Home.StatusWatch do
   # As the daemon decides its management forwarding: once, at start. A
   # linked desktop's summary composes its server's part, as `home.status`'s.
   defp default_read do
-    opts =
-      if DesktopLink.linked?(Role.recorded(), ConfigStore.fermix_home()),
-        do: [primary_forward: fn request, opts -> Link.impl().forward(request, opts) end],
-        else: []
-
+    opts = Link.forwarding()
     fn -> HomeSummary.watch(Home.summary_facts(opts)) end
   end
 end

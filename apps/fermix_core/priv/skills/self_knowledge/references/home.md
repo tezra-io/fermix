@@ -182,12 +182,14 @@ it, never a second writer.
 - **A server Fermix creates on Hetzner.** Instead of a host of their own,
   the owner can let Fermix create the server with a cloud provider. Hetzner
   is the one provider today: each provider is one module behind one contract
-  in the engine, and the apps draw its token and choose screens from what
-  the engine lists (`home.provision.providers`: its name, its token's label,
-  its How to get one steps, its console), so another provider needs no new
-  app; every sentence about the server names the provider in its own words,
-  and Fermix creates on one provider at a time. On Hetzner, from the Always
-  On pane: paste a Read & Write API token of a project made for Fermix
+  in the engine, and every surface draws its token and choose screens from
+  what the engine's summary lists (`detail.providers`: its name, its token's
+  label, its How to get one steps, its console), so another provider needs no
+  new app; every sentence about the server names the provider in its own
+  words, and Fermix creates on one provider at a time. The engine runs every
+  step itself: a surface sends the one step the owner pressed (`home.act`)
+  and draws the summary it answers. On Hetzner, from Always On: paste a Read
+  & Write API token of a project made for Fermix
   (checked at once; it stays on this computer in its provider's own file,
   `device/provision/hetzner.json`, 0600, never in `config.toml` or the
   keychain, so a move never carries it to the server, and the owner can
@@ -201,16 +203,19 @@ it, never a second writer.
   `fermix=always-on`, its IPv4 address kept and no SSH key, whose cloud-init
   runs the same first boot with an enrollment code already inside. That code
   lives 24 hours, so a slow install or a sleeping Mac does not fail it, and
-  while it waits **Get a code** is refused ("Your new server is still setting
+  while it waits **Use my own Linux server** is refused ("Your new server is still setting
   up…"); the server that enrolls with it is the one Fermix created. Hetzner's
   answers in one sentence each: no capacity in a location names the next one
   in stock; "Hetzner limits new servers on this account" (a new account may
   not order at all; the own-server path stays); a token Hetzner stopped
-  accepting asks for a new one. The pane lists what Fermix created and
-  Hetzner bills for until it is deleted (the server, its firewall, its
-  addresses), marks anything deleted in Hetzner's console as gone, turns the
-  server on or restarts it, and deletes everything it created (the server,
-  then its addresses, then the firewall). It never deletes the server the
+  accepting asks for a new one. Always On's Details list the server and what
+  it costs, a server deleted in Hetzner's console shows as gone (the engine
+  reads Hetzner back at most once a minute while a step or a problem rests on
+  it), **Turn it on** and **Restart server** power it, **Cancel** during a
+  create stops the create, waits for it to stop and then deletes what it
+  made, **Start again** deletes what stands and creates it again as one step,
+  and **Delete your server** deletes everything it created (the server, then
+  its addresses, then the firewall). It never deletes the server the
   home moved to: replace the server instead. There is no moving back to the
   Mac in this version, and deleting that server in Hetzner's console does not
   bring Fermix back to it: the home is restored from a snapshot onto a new
@@ -234,9 +239,13 @@ it, never a second writer.
 
 ## Enrollment, the candidate and the move
 
-- **The code.** On the primary, `fermix home enroll-code` (or the
-  `home.enroll.open` management method the apps call) opens an enrollment
-  window and shows its code once: `fxenroll1.` and a long string that carries
+- **The code.** On the primary, Always On's **Use my own Linux server**
+  (`home.act`'s `own_server`) opens an enrollment window and shows its code
+  once, with the command to run on the server, `curl -fsSL
+  https://fermix.ai/always-on | sudo sh`, which carries no code: the server's
+  first boot asks for it on the terminal without echo, so it never lands in a
+  shell history. **Cancel the code** on the token screen closes it. The code
+  is `fxenroll1.` and a long string that carries
   a one-time secret, the primary's gateway key, its iroh endpoint id and
   relays, its name and when the window closes. The window lasts thirty
   minutes (time for a cloud server to boot), takes one server, and opening
@@ -306,22 +315,28 @@ it, never a second writer.
   Fermix's own systemd unit (`fermix.service`, as the Linux package and
   `fermix service install` run it) and a `fermix service` install start again
   by themselves, while a shell inside any other unit, such as a terminal's,
-  does not). The
-  move does not start while
-  anything blocks, from the apps or
-  from `fermix home move`, which says each block. Checking the keychain reads
+  does not). **Move now** runs it at the press (a ready review under 15
+  minutes old is taken as it was shown), and **Check again** runs it again.
+  The move does not start while anything blocks, and Move now says each
+  block; a warning the screen did not name yet comes back as the screen with
+  that warning in Move now's confirm, so the owner accepts it first. Checking
+  the keychain reads
   each secret, which opens the keychain and can ask the owner to allow it; a
   start within 15 minutes of a ready review takes that review rather than
   reading it again, so a move opens the keychain in the review and once more
-  when its capture carries the values. Reviewing and starting a
-  move, like opening a code, are the owner's decisions: a process Fermix
-  started is refused on `daemon.sock`.
-- **Starting the move.** `fermix home move --to ID [--recovery-passphrase-file
-  PATH] [--retire]` (or `home.move.start {candidate_id, recovery_passphrase,
-  keep_as_desktop?}`), with Fermix running, first checks the recovery
-  passphrase: with one set, it must be that one ("That is not the recovery
-  passphrase you set." otherwise, and nothing moves); with none set, it sets
-  it, as setting the passphrase does. The move then carries the recovery key
+  when its capture carries the values. Every Always On step (a token, a
+  server created, powered or deleted, a code, a review, a move) is the
+  owner's decision: a process Fermix started is refused on `daemon.sock`
+  ("Only the owner can set up Always On, move Fermix or set its recovery
+  passphrase: use the Fermix app, the setup page or your own terminal."). The
+  server's own steps (opening a code, reviewing and starting a move, a backup
+  now) answer only a linked desktop's request over the link, which that
+  desktop's own Always On sends; on `daemon.sock` they are refused by name.
+- **Starting the move.** **Move now** (`home.act`'s `move_now`), with Fermix
+  running, asks for the recovery passphrase (twice, compared, where none is
+  set yet; once where one is) and checks it: with one set, it must be that
+  one ("That is not the recovery passphrase you set." otherwise, and nothing
+  moves); with none set, it sets it, as setting the passphrase does. The move then carries the recovery key
   this computer already keeps, never a second one, so the new primary's
   snapshots open with the passphrase the owner has. It writes
   `<home>/.move/request.json` (the move id, the candidate, and that recovery
@@ -331,10 +346,8 @@ it, never a second writer.
   the Linux service restarts always). Under a systemd user service a restart
   Fermix chooses resets the service's start budget first, so moves never use
   up the starts a crash loop is held to. An engine started by hand with `fermix
-  run` just stops; start it again (the review warns of it). With Fermix
-  stopped the command refuses (`engine_stopped`): there is no running engine
-  to check the passphrase against. Keep the recovery passphrase: the new
-  primary's snapshots open only with it.
+  run` just stops; start it again (the review warns of it). Keep the recovery
+  passphrase: the new primary's snapshots open only with it.
 - **What happens** (`home.status`'s `move`: phase, candidate, sentence; also
   `fermix home status`). On this computer: `requested`; `streaming`, the
   desktop's own key goes to `device/desktop_key` and its row into the device
@@ -428,13 +441,11 @@ it, never a second writer.
   the id `fermix setup` and the app take), and the settings rows show those
   secrets as not set rather than set: each needs entering again there.
 - **Replacing the server** runs through the same move, started from the
-  desktop's app: the desktop asks the server for an enrollment code, the new
-  server enrolls with it, and the move starts on the old server with
-  `keep_as_desktop` false (`home.move.start`; true unless said), so the old
-  server keeps no desktop key, row or link and serves nothing once the move
-  commits. On a server primary with no desktop to start it from, the same
-  move is `fermix home move --to ID --retire` at the server's own terminal.
-  Moving Fermix back to a desktop is not part of this release: to
+  desktop's Always On: the desktop asks the server for an enrollment code,
+  the new server enrolls with it, and Move now starts the move on the old
+  server with `keep_as_desktop` false, so the old server keeps no desktop
+  key, row or link and serves nothing once the move commits; the server
+  checks the passphrase against its own recovery key. Moving Fermix back to a desktop is not part of this release: to
   bring it back to a computer, restore the newest snapshot into a fresh home
   there.
 - **Replacing a server Fermix created on Hetzner** (Always On's details,
@@ -480,7 +491,8 @@ it, never a second writer.
 - Each snapshot is `<prefix>/<profile>/<UTC time>-e<epoch>.fxsnap` in the
   bucket. It counts as stored only when the bucket accepted its SHA-256
   checksum; a failure keeps the bucket's own words and is retried at the next
-  interval. `fermix home snapshots run` takes one now. A bucket named with
+  interval. **Back up now** in Always On takes one now (on a linked desktop
+  it asks the server). A bucket named with
   dots is addressed path-style, which S3's certificate covers. A capture
   needs about twice the home free on the disk and is refused with the
   numbers otherwise.
@@ -719,9 +731,9 @@ it, never a second writer.
   moved; while the server is unreachable the chat connection is refused, and
   the app reads the summary then. A server's disk filling is seen at the next
   thing that happens (on the server, every backup run).
-- The browser setup page's **Always On** tab sets nothing up and shows the
-  summary, read when the tab opens and on **Refresh**: its sentence, and its
-  action as the Fermix app's to take, or Learn more.
+- The browser setup page's **Always On** tab sets nothing up yet and shows
+  the summary, read when the tab opens and on **Refresh**: its sentence, and
+  its action as the Fermix app's to take, or Learn more.
 
 | Fact or action | App | CLI |
 |---|---|---|
@@ -733,22 +745,22 @@ it, never a second writer.
 | Set the recovery passphrase | Recovery: typed twice, never shown; a change says which snapshots open with which passphrase | `fermix home snapshots passphrase` |
 | On the primary: the secrets that did not resolve on this host (`secrets_missing`), by id | Secrets to enter again | `fermix home status` |
 | Where snapshots are kept (bucket, region, the S3-compatible address, how often) and the two access keys | Recovery: the `snapshots` section; the keys as hidden fields, never shown again | `fermix settings set snapshots …`, `fermix settings secret set snapshot_s3_access_key_id` |
-| Take a snapshot now | **Back up now**, offered once snapshots have somewhere to go | `fermix home snapshots run` |
-| An enrollment code | **Get a code** (**Get a new code** while one is open, which stops the open one working), shown once with **Copy** and when it expires, beside the command for a server you have, and what to know before moving (the disk it needs, that this computer serves nothing meanwhile, the cutover gap, where the server keeps secrets, no way back) | `fermix home enroll-code` |
-| The cloud providers Fermix creates the server on (Hetzner today), each with its name, token label, How to get one and console (`home.provision.providers`) | The token screen | none |
-| A Hetzner token: pasted once, checked at once, kept on this computer (`home.provision.connect`) | Paste a token, with How to get one | none |
+| Take a snapshot now (`home.act` `back_up_now`) | **Back up now**, offered once snapshots have somewhere to go | none |
+| An enrollment code for a server of your own (`home.act` `own_server`) | **Use my own Linux server**: the code shown once with **Copy** and when it expires, beside the command for the server, which carries no code; **Cancel the code** closes it | none |
+| The cloud providers Fermix creates the server on (Hetzner today), each with its name, token label, How to get one and console (the summary's `detail.providers`) | The token screen | `fermix home status --json` |
+| A Hetzner token: pasted once, checked at once, kept on this computer (`home.act` `paste_token`) | Paste a token, with How to get one | none |
 | The sizes and locations Hetzner has in stock, with the monthly price (`home.provision.options`) | The recommendation, and Change | none |
-| Create the server on Hetzner (`home.provision.create`, a job) | **Create server** | none |
-| What Fermix created on Hetzner and Hetzner bills for, each marked gone once deleted outside Fermix (`home.provision.resources`) | Details | none |
-| Turn the created server on, or restart it (`home.provision.power`) | **Turn it on**, **Restart server** | none |
-| Delete what Fermix created on Hetzner (`home.provision.delete`), never the server the home moved to | Cancel, Start again | none |
-| On a linked desktop: replace a server Fermix created on Hetzner (`home.provision.create` with `replace`; `home.provision.resources`' `replace` says where it stands), the move to it as below, then the old one deleted by itself | Replace the server, then the review and the move; the old server listed with Delete if its delete failed | none |
+| Create the server on Hetzner (`home.act` `create_server`, a job), in the next place when the first had none (`create_in`) | **Create server**, **Create in CITY** | none |
+| The server Fermix created, what it costs and when Hetzner was last read back (the summary's Details) | Details | `fermix home status` |
+| Turn the created server on, or restart it (`home.act` `turn_on`, `restart_server`) | **Turn it on**, **Restart server** | none |
+| Delete what Fermix created on Hetzner (`home.act` `delete_server`, `cancel`, `start_again`), never the server the home moved to | **Delete your server**, **Cancel**, **Start again** | none |
+| On a linked desktop: replace a server Fermix created on Hetzner (`home.act` `replace_server`), the move to it as below, then the old one deleted by itself | Replace the server, then Move now; the old server listed with Delete if its delete failed | none |
 | The servers waiting for the move | Servers waiting for the move | `fermix home candidates` |
-| Review the move (`home.move.readiness`): each item ready, a note or a block | **Review the move** on a server waiting; a block is shown as one | `fermix home move` says each block |
-| Start the move | the app's pane | `fermix home move --to ID [--retire]` |
+| Review the move: each item ready, a note or a block | Move now reviews at the press; **Check again** on a block | none |
+| Start the move (`home.act` `move_now`, `try_again`) | **Move now**, the recovery passphrase asked first | none |
 | Where the move stands (its phase and sentence) | The move | `fermix home status` |
 | On a linked desktop: the server's own recovery, its move, and the secrets it could not resolve (the composed `primary_home`, or why it is missing) | The server's recovery (**Back up now** asks the server), The server's move | `fermix home status --json` |
-| On a linked desktop: replace the server (a code from the server, the review on it, then the move with `keep_as_desktop` false) | Replace the server: **Get a code**, **Review the move**, the passphrase typed twice, **Move to NAME** (the server restarts, never this computer) | none |
+| On a linked desktop: replace the server (a code from the server, the review on it, then the move with `keep_as_desktop` false) | Replace the server, then **Move now** with the server's recovery passphrase (the server restarts, never this computer) | none |
 
 - In the device role the browser setup page opens on Always On and leads
   with a notice that Fermix-wide settings live on the server and are changed

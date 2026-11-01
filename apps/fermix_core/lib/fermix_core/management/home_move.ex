@@ -17,7 +17,7 @@ defmodule FermixCore.Management.HomeMove do
     creates. The code is answered once and never logged or kept in a status.
   - `home.enroll.withdraw` (primary only) releases the 24-hour window when
     the server it was opened for was never created or is being deleted
-    (`FermixCore.Home.Link.impl().withdraw_enrollment/0`), so a copied code
+    (`FermixCore.Home.Link.impl().withdraw_enrollment/1`), so a copied code
     can open again.
   - `home.candidates.list` answers the candidates the primary holds
     (`FermixCore.Home.Candidates`), never their keys.
@@ -49,7 +49,8 @@ defmodule FermixCore.Management.HomeMove do
   Test seams in `opts`: those of `Management.Home` (its `:config` and
   `:save_recipient` reach the passphrase check), plus `:now` (a
   `DateTime`), `:open_enrollment` (a 1-arity stand-in for the rail's, given
-  the kind), `:withdraw_enrollment` (in place of the rail's), `:actor`
+  the kind), `:withdraw_enrollment` (a 1-arity stand-in for the rail's, given
+  the kind), `:actor`
   (`{:desktop, device_id}` for a request a desktop forwarded), `:restart` (in
   place of the restart), `:boot_ending` (in place of `Move.boot_ending/0`),
   and the readiness report's `:free_bytes`, `:version`, `:host` and
@@ -75,13 +76,14 @@ defmodule FermixCore.Management.HomeMove do
                       "your computer."
   @kind_sentence "A code is `manual`, or `provisioned` for a server Fermix creates."
   @kinds %{"manual" => :manual, "provisioned" => :provisioned}
-  @owner_sentence "Only the owner can move Fermix or set its recovery passphrase: use the " <>
-                    "Fermix app or your own terminal."
+  @owner_sentence "Only the owner can set up Always On, move Fermix or set its recovery " <>
+                    "passphrase: use the Fermix app, the setup page or your own terminal."
 
   @doc """
   The sentence `daemon.sock` answers when a process Fermix started (or one it
-  cannot place) asks to open an enrollment code, start a move or set the
-  recovery passphrase: the owner's decisions (M75).
+  cannot place) asks for an Always On step (`home.act`) or to set the
+  recovery passphrase: the owner's decisions (M75, Always On setup §6). It
+  names every place the owner acts from.
   """
   @spec owner_only_sentence() :: String.t()
   def owner_only_sentence, do: @owner_sentence
@@ -141,10 +143,10 @@ defmodule FermixCore.Management.HomeMove do
   @spec enroll_withdraw(keyword()) :: {:ok, map()} | {:error, term()}
   def enroll_withdraw(opts \\ []) when is_list(opts) do
     withdraw =
-      Keyword.get(opts, :withdraw_enrollment, fn -> Link.impl().withdraw_enrollment() end)
+      Keyword.get(opts, :withdraw_enrollment, fn kind -> Link.impl().withdraw_enrollment(kind) end)
 
     with :ok <- primary(role(opts)) do
-      case withdraw.() do
+      case withdraw.(:provisioned) do
         :ok ->
           {:ok, %{"withdrawn" => true}}
 
@@ -223,9 +225,8 @@ defmodule FermixCore.Management.HomeMove do
     end
   end
 
-  @doc "The answer of a started move, as `home.move.start` and `fermix home move` give it."
-  @spec started_view(map()) :: map()
-  def started_view(%{candidate: candidate} = started) do
+  # The answer of a started move, as `home.move.start` gives it.
+  defp started_view(%{candidate: candidate} = started) do
     %{
       "move_id" => started.move_id,
       "candidate" => Candidates.view(candidate),

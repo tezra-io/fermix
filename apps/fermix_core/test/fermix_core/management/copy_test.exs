@@ -34,6 +34,8 @@ defmodule FermixCore.Management.CopyTest do
   alias FermixCore.Home.Snapshot.Run, as: SnapshotRun
   alias FermixCore.Home.Snapshot.S3, as: SnapshotS3
   alias FermixCore.Home.Snapshot.Status, as: SnapshotStatus
+  alias FermixCore.Management.AlwaysOn
+  alias FermixCore.Management.AlwaysOn.Input, as: AlwaysOnInput
   alias FermixCore.Management.Copy
   alias FermixCore.Management.Cues, as: ManagementCues
   alias FermixCore.Management.Cues.MandateRow, as: CueMandateRow
@@ -787,8 +789,32 @@ defmodule FermixCore.Management.CopyTest do
       device = [{"move unconfirmed", unconfirmed}]
 
       for {where, text} <-
-            section_rows ++ move ++ enrolling ++ owner ++ device ++ recovery ++ service,
+            section_rows ++
+              move ++ enrolling ++ owner ++ device ++ recovery ++ service ++ always_on_steps(),
           do: refute_command(text, where)
+    end
+
+    # Always On setup §3.4, §3.5: every sentence `home.act` refuses with of its
+    # own, its input's, and the refusal of a server step sent on the socket.
+    test "home.act's own refusals obey the rules" do
+      for {where, text} <- always_on_steps(),
+          do: assert_clean(text, :prose, ["Always On"], where)
+    end
+
+    defp always_on_steps do
+      {:error, :unavailable, %{"sentence" => rail_only}} =
+        Placement.rail_only_refusal("home.move.start")
+
+      inputs =
+        for field <- ["input" | AlwaysOnInput.fields()] do
+          {:error, {:invalid_params, _field, sentence}} =
+            AlwaysOnInput.decode(%{field => 1})
+
+          {"input #{field}", sentence}
+        end
+
+      Enum.map(AlwaysOn.sentences(), &{"home.act", &1}) ++
+        [{"rail-only step", rail_only} | inputs]
     end
 
     # A home with no settings file, which turns nothing on; nothing is written.
@@ -830,8 +856,8 @@ defmodule FermixCore.Management.CopyTest do
     end
 
     test "the owner decision obeys the rules" do
-      assert_clean(FermixCore.Management.Provision.owner_only_sentence(), :prose, [], "owner")
-      refute_command(FermixCore.Management.Provision.owner_only_sentence(), "owner")
+      assert_clean(ManagementHomeMove.owner_only_sentence(), :prose, ["Always On"], "owner")
+      refute_command(ManagementHomeMove.owner_only_sentence(), "owner")
     end
   end
 

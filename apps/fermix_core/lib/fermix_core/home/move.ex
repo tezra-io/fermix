@@ -2,7 +2,8 @@ defmodule FermixCore.Home.Move do
   @moduledoc """
   The source side of a move (M75 §7.2): `<home>/.move/`, device-local, `0700`.
 
-  `start/5` (`home.move.start`, `fermix home move`) writes the request and
+  `start/5` (`home.move.start`, reached through `home.act`'s Move now)
+  writes the request and
   hands the home to the device role:
 
     * `.move/request.json` (`0600`): the move id (ordered by when the move

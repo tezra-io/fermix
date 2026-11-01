@@ -11,7 +11,8 @@ defmodule FermixCore.Home.Provision do
   the labels, the polling and its bounds, a lost create found again by its
   labels, the reconcile, the delete order and its guard, the code window,
   and the L2 offer (`Provision.Offering`). Both apps and the CLI reach it
-  over management (`FermixCore.Management.Provision`, `home.provision.*`).
+  over management (`FermixCore.Management.Provision`, the steps `home.act`
+  runs).
 
   What stays in a provider's module is what only it knows: its API (its
   endpoints, how it encodes labels and finds by them, how it writes prices,

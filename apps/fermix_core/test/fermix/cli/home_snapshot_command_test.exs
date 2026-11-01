@@ -236,28 +236,59 @@ defmodule Fermix.CLI.HomeSnapshotCommandTest do
     end
   end
 
-  describe "home snapshots run and passphrase" do
-    test "need Fermix running", ctx do
-      for argv <- [
-            ["snapshots", "run", "--json"],
-            ["snapshots", "passphrase", "--passphrase-file", ctx.passphrase_file, "--json"]
-          ] do
-        {status, out, _err} = run(argv, home: ctx.home, client: stopped())
-        assert status == 1
-        assert out == MachineOutput.error(:engine_stopped) <> "\n"
+  # Always On setup §3.5, §8.2: `home.snapshots.run` is served only to a
+  # linked desktop's forward now, so the verb that called it over
+  # `daemon.sock` is gone, with nothing in its place.
+  describe "home snapshots run" do
+    test "is a usage error, reaches no engine and is not in the usage", ctx do
+      test = self()
+
+      client = fn method, _params, _opts ->
+        send(test, {:called, method})
+        {:error, :not_running}
       end
+
+      for argv <- [["snapshots", "run"], ["snapshots", "run", "--json"]] do
+        {status, out, err} = run(argv, home: ctx.home, client: client)
+        assert {status, out} == {2, ""}, inspect(argv)
+        assert err =~ "fermix home snapshots passphrase --passphrase-file PATH", inspect(argv)
+        refute err =~ ~r/snapshots (status\|)?run/, inspect(argv)
+      end
+
+      refute_received {:called, _method}
+    end
+
+    test "is not in fermix help" do
+      help = capture_io(fn -> assert Fermix.CLI.main(["help"]) == 0 end)
+
+      assert help =~ "fermix home snapshots status [--json]"
+      refute help =~ ~r/snapshots (status\|)?run/
+    end
+  end
+
+  describe "home snapshots passphrase" do
+    test "needs Fermix running", ctx do
+      argv = ["snapshots", "passphrase", "--passphrase-file", ctx.passphrase_file, "--json"]
+      {status, out, _err} = run(argv, home: ctx.home, client: stopped())
+      assert status == 1
+      assert out == MachineOutput.error(:engine_stopped) <> "\n"
     end
 
     test "a refusal carries the engine's own sentence", ctx do
-      sentence = "Snapshots are off: set a recovery passphrase to turn them on."
+      sentence = "The recovery passphrase must be at least 12 bytes long."
 
-      client = fn "home.snapshots.run", %{}, _opts ->
+      client = fn "home.snapshots.passphrase", %{}, _opts ->
         {:error,
-         {:management_error, "unavailable", "The requested management capability is unavailable.",
-          %{"capability" => "snapshots", "sentence" => sentence}}}
+         {:management_error, "invalid_params", "The request parameters are invalid.",
+          %{"field" => "recovery_passphrase", "sentence" => sentence}}}
       end
 
-      {1, "", err} = run(["snapshots", "run"], home: ctx.home, client: client)
+      {1, "", err} =
+        run(["snapshots", "passphrase", "--passphrase-file", ctx.passphrase_file],
+          home: ctx.home,
+          client: client
+        )
+
       assert err == "fermix home: Fermix did not do that. It said: #{sentence}\n"
     end
 

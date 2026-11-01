@@ -6,12 +6,10 @@ defmodule Fermix.CLI.HomeCommand do
       fermix home import FILE --into ROOT [--passphrase-file PATH]
       fermix home mark-moved --to TEXT [--json]
       fermix home status [--json]
-      fermix home snapshots status|run [--json]
+      fermix home snapshots status [--json]
       fermix home snapshots passphrase --passphrase-file PATH [--json]
-      fermix home enroll-code [--json]
       fermix home enroll --code-file PATH [--snapshot-bucket B --snapshot-region R]
       fermix home candidates [--json]
-      fermix home move --to ID [--recovery-passphrase-file PATH] [--retire] [--json]
 
   `export` archives the home this command runs against (`FERMIX_HOME`, default
   `~/.fermix`) into `FILE`, sealed under a passphrase (`FermixCore.Home.Archive`).
@@ -26,8 +24,8 @@ defmodule Fermix.CLI.HomeCommand do
   `import` also takes a snapshot (`FXSNAP1`, `FermixCore.Home.Snapshot`), told
   by its magic: the passphrase is then the recovery passphrase, and the key is
   derived from it and the salt the snapshot's header carries. `status` and
-  `snapshots` are `Fermix.CLI.HomeStatusCommand`; `enroll-code`, `enroll`,
-  `candidates` and `move` are `Fermix.CLI.HomeMoveCommand`.
+  `snapshots` are `Fermix.CLI.HomeStatusCommand`; `enroll` and `candidates`
+  are `Fermix.CLI.HomeMoveCommand`.
 
   The passphrase never enters argv. It is read from `--passphrase-file` (one
   line; a trailing newline is dropped) or asked for on the terminal without
@@ -53,7 +51,7 @@ defmodule Fermix.CLI.HomeCommand do
 
   @export_switches [passphrase_file: :string, mark_moved: :boolean, to: :string]
   @import_switches [into: :string, passphrase_file: :string]
-  @move_verbs ~w(enroll-code enroll candidates move)
+  @move_verbs ~w(enroll candidates)
   @max_passphrase_file_bytes 4_096
   @moved "Start the engine here; the old home must be marked moved before it runs again."
 
@@ -83,8 +81,7 @@ defmodule Fermix.CLI.HomeCommand do
 
   defp status_deps(deps), do: Keyword.take(deps, [:home, :client, :terminal])
 
-  defp move_deps(deps),
-    do: Keyword.take(deps, [:home, :client, :terminal, :now, :free_bytes, :version, :host])
+  defp move_deps(deps), do: Keyword.take(deps, [:home, :client, :now])
 
   defp export(argv, deps) do
     case OptionParser.parse(argv, strict: @export_switches) do
@@ -542,12 +539,10 @@ defmodule Fermix.CLI.HomeCommand do
       fermix home import FILE --into ROOT [--passphrase-file PATH]
       fermix home mark-moved --to TEXT [--json]
       fermix home status [--json]
-      fermix home snapshots status|run [--json]
+      fermix home snapshots status [--json]
       fermix home snapshots passphrase --passphrase-file PATH [--json]
-      fermix home enroll-code [--json]
       fermix home enroll --code-file PATH [--snapshot-bucket B --snapshot-region R]
       fermix home candidates [--json]
-      fermix home move --to ID [--recovery-passphrase-file PATH] [--retire] [--json]
     """)
 
     2

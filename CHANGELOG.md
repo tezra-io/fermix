@@ -163,7 +163,7 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   first move sets it if you have not, and every move after checks that it is
   the one you set ("That is not the recovery passphrase you set."), so a typo
   never becomes the key your server's snapshots are encrypted to, and a move
-  never makes a second key. `fermix home move` needs Fermix running. Your Mac (or Linux
+  never makes a second key. Your Mac (or Linux
   computer) stays awake while the move runs, and only then. The computer the
   home left stays a desktop of the server: the app's chat and Fermix-wide
   settings go to the server through it, and paired phones see a reconnect. The
@@ -189,9 +189,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   its newest backup is a week old. Fermix tells the app when that sentence
   changes and when the last backup turns a week old, so the app need not
   check Always On on a timer and says so on time, and while Always On is off
-  nothing runs for it. `fermix home` does all of
-  this at a terminal, with `export`, `import` and `mark-moved` for moving a
-  home by hand. Fermix can also create the server
+  nothing runs for it. `fermix home status` prints the same screen at a
+  terminal, and `export`, `import` and `mark-moved` move a home by hand.
+  Fermix can also create the server
   for you on Hetzner: paste a Read & Write API token from a Hetzner project
   made for Fermix (checked at once and kept only on this computer, never in
   your settings or keychain, so it never moves to the server), take the
@@ -202,10 +202,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   enrollment code inside, good for 24 hours so a slow install or a sleeping
   Mac does not fail it. A token that can only read is refused before
   anything costs money, a location with no capacity names the next one in
-  stock, and an account Hetzner limits is said in one sentence. The pane
-  lists what Fermix created until you delete it, turns the server on or
-  restarts it, and deletes what it created, but never the server your home
-  moved to. While a created server waits for its code or its move, a new
+  stock, and an account Hetzner limits is said in one sentence. Always On
+  turns the server on or restarts it, starts it again, and deletes what it
+  created, but never the server your home moved to. While a created server waits for its code or its move, a new
   enrollment code is not opened, and while it stands a token from another
   Hetzner project does not replace the one that reaches it. Once your home
   lives on that server, Replace the server (in Always On's details on the
@@ -217,11 +216,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tries again. The same one sentence follows the replace: creating and
   setting up the new server (Cancel), ready for the move (Move now), moving,
   removing the old server, and what went wrong with its one action.
-  Hetzner is the first cloud provider Fermix creates a server with: the
-  apps draw the token and choose screens from the providers Fermix lists,
-  each with its own How to get one and console, so a provider added to
-  Fermix appears there without an app update, and every sentence about the
-  server names its provider.
+  Hetzner is the first cloud provider Fermix creates a server with: every
+  surface draws the token and choose screens from the providers Fermix's
+  screen lists, each with its own How to get one and console, so a provider
+  added to Fermix appears there without an app update, and every sentence
+  about the server names its provider.
   The server's hosting provider can technically read its disk, so Fermix
   keeps less there: the prompts, replies, tool input and output and shell
   commands in its traces are kept about a day (through the previous UTC
@@ -283,6 +282,25 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Fermix checks with Hetzner at most once a minute while the screen shows a
   problem, a step or a ready server, never beside a step, and `home.status`
   can wait for the screen to change instead of being asked again and again.
+- **Fermix runs every Always On step itself, so each surface only draws the
+  screen and sends the button you pressed.** Setting up a token, creating,
+  turning on, restarting, starting again or deleting the server, a code for
+  a server of your own, a backup now, checking the move again and Move now
+  are each one request with the screen it was pressed on; if Always On
+  changed meanwhile (another window pressed first, the server moved on), Fermix
+  does nothing and answers with the screen as it is, so a confirm you
+  accepted on an older screen never runs. Cancel during a create stops the
+  create and waits until it has really stopped before deleting what it made;
+  Cancel the code closes a code for a server of your own; Start again deletes
+  what stands and creates the server again as one step, with its size and
+  place. Move now looks the move over again as you press it, refuses with
+  every reason it cannot start, and shows you any warning you have not seen
+  before going ahead; it asks for your recovery passphrase twice when none is
+  set yet and once when one is, and checks it. On a computer your home left,
+  its own Always On sends the server's steps over the link itself, and keeps
+  the move to a new server once the server answered. The command for a
+  server of your own now carries no code: the server asks for it without
+  showing it, so it never lands in a shell history.
 - **A mandate's proposal is a short card too.** It names the tool and the
   watcher, quotes the item, says why it passed, and shows each argument on its
   own line, with every argument whole and the whole item behind Details, in
@@ -365,6 +383,15 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   keeps every one, and the agent can still look up an older read it set aside.
 
 ### Removed
+
+- **`fermix home enroll-code`.** A code for a server you set up yourself now
+  comes from Always On's **Use my own Linux server**, the same step on every
+  surface.
+- **`fermix home move`, with `--retire`.** Always On's **Move now** starts the
+  move and asks for the recovery passphrase itself, and **Replace the server**
+  retires a server being replaced.
+- **`fermix home snapshots run`.** **Back up now** in Always On takes a
+  snapshot now.
 
 - **The check-in message after a reminder.** A reminder is now always just the
   reminder: fixed text, sent on time, with nothing model-written after it.
@@ -495,6 +522,16 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Security
 
+- **A command Fermix started can no longer take an Always On step, and no
+  local caller can take the server's own.** Every Always On step is the
+  owner's decision, refused to a command Fermix runs in words that name the
+  Fermix app, the setup page or your own terminal. The steps a server takes
+  for the computer its home left (opening a code, reviewing or starting a
+  move, a backup now) now answer only that computer's request over their
+  encrypted link, and are refused by name on the local socket. Your API token
+  and recovery passphrase never reach a log line, a crash report or a trace
+  on the way, and the setup page's request logs hide any field named for a
+  passphrase.
 - **A command Fermix started can no longer open the setup page.** A setup
   page session can make every decision the page offers, so asking Fermix for
   one is now the owner's decision, as pairing a phone or moving Fermix is: a

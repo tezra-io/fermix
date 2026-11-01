@@ -21,6 +21,26 @@ defmodule FermixWebWeb.ConfigTest do
     assert filtered["safe"] == "visible"
   end
 
+  # Always On setup §6: the recovery passphrase the page asks for at Move now,
+  # typed once or twice, never reaches a request or event log.
+  test "Phoenix filters the recovery passphrase, however the form names it" do
+    filtered =
+      Phoenix.Logger.filter_values(%{
+        "recovery_passphrase" => "invented-lighthouse-meridian",
+        "new_recovery_passphrase" => "invented-lighthouse-meridian",
+        "passphrase_again" => "invented-lighthouse-meridian",
+        "always_on" => %{"recovery_passphrase" => "invented-lighthouse-meridian"},
+        "id" => "move_now"
+      })
+
+    for key <- ~w(recovery_passphrase new_recovery_passphrase passphrase_again) do
+      assert filtered[key] == "[FILTERED]"
+    end
+
+    assert filtered["always_on"]["recovery_passphrase"] == "[FILTERED]"
+    assert filtered["id"] == "move_now"
+  end
+
   test "Phoenix filters API-key parameters for every provider and search backend" do
     # Setup-page secret fields are all `*_api_key`. The filter word `api_key` must
     # redact them regardless of which form (or none) wraps them, so adding a new

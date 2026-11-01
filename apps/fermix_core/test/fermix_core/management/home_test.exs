@@ -23,6 +23,7 @@ defmodule FermixCore.Management.HomeTest do
 
   @primary %{role: :primary, primary: nil}
   @device %{role: :device, primary: "invented host"}
+  @desktop {:desktop, "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e"}
   @passphrase "invented-lighthouse-meridian"
   @at ~U[2031-05-04 12:00:00Z]
 
@@ -399,7 +400,18 @@ defmodule FermixCore.Management.HomeTest do
       end
 
       scheduler = scheduler!(home, config, run: run)
-      opts = opts(home, config: config, scheduler: scheduler)
+
+      # On `daemon.sock` the run is refused by name and starts none, so the
+      # forward's run below is the first.
+      assert {:error, :unavailable,
+              %{
+                "capability" => "home",
+                "method" => "home.snapshots.run",
+                "sentence" => <<_, _::binary>>
+              }} =
+               route("home.snapshots.run", %{}, opts(home, config: config, scheduler: scheduler))
+
+      opts = forwarded(opts(home, config: config, scheduler: scheduler))
 
       assert {:ok, %{"started" => true, "snapshots" => snapshots}} =
                route("home.snapshots.run", %{}, opts)
@@ -417,7 +429,7 @@ defmodule FermixCore.Management.HomeTest do
     test "with nothing to write, says what is missing", %{home: home} do
       scheduler = scheduler!(home, [])
 
-      assert route("home.snapshots.run", %{}, opts(home, scheduler: scheduler)) ==
+      assert route("home.snapshots.run", %{}, forwarded(opts(home, scheduler: scheduler))) ==
                {:error, :unavailable,
                 %{
                   "capability" => "snapshots",
@@ -427,11 +439,11 @@ defmodule FermixCore.Management.HomeTest do
 
     test "a device, and an engine with no scheduler, refuse by name", %{home: home} do
       assert {:error, :unavailable, %{"sentence" => device}} =
-               route("home.snapshots.run", %{}, opts(home, engine_role: @device))
+               route("home.snapshots.run", %{}, forwarded(opts(home, engine_role: @device)))
 
       assert device =~ "device role"
 
-      assert route("home.snapshots.run", %{}, opts(home, scheduler: nil)) ==
+      assert route("home.snapshots.run", %{}, forwarded(opts(home, scheduler: nil))) ==
                {:error, :unavailable,
                 %{
                   "capability" => "snapshots",
@@ -815,6 +827,10 @@ defmodule FermixCore.Management.HomeTest do
 
     [operation_opts: [home: home_opts]]
   end
+
+  # The server answering a desktop's forward over the rail, the one caller
+  # `home.snapshots.run` is served to.
+  defp forwarded(opts), do: Keyword.put(opts, :actor, @desktop)
 
   defp scheduler!(home, config, extra \\ []) do
     name = :"snapshot_scheduler_#{System.unique_integer([:positive])}"

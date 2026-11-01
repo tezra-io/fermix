@@ -136,13 +136,8 @@ defmodule FermixCore.Management.Protocol do
     {"home.candidates.list", 2},
     {"home.move.readiness", 2},
     {"home.move.start", 2},
-    {"home.provision.connect", 2},
     {"home.provision.options", 2},
-    {"home.provision.create", 2},
-    {"home.provision.power", 2},
-    {"home.provision.resources", 2},
-    {"home.provision.delete", 2},
-    {"home.provision.providers", 2}
+    {"home.act", 2}
   ]
   @methods Enum.map(@method_minimums, fn {method, _minimum} -> method end)
   @method_minimum_versions Map.new(@method_minimums)
@@ -174,7 +169,8 @@ defmodule FermixCore.Management.Protocol do
     primary_unreachable: "The primary engine cannot be reached.",
     device_class_method: "This method belongs to the device that sent it.",
     unconfirmed:
-      "The request was sent, but its answer did not arrive, so its outcome is not known yet."
+      "The request was sent, but its answer did not arrive, so its outcome is not known yet.",
+    changed: "What the request was drawn from has changed, so nothing was done."
   ]
   @error_messages Map.new(@errors)
 

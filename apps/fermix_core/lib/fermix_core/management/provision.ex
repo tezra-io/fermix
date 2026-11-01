@@ -1,49 +1,45 @@
 defmodule FermixCore.Management.Provision do
   @moduledoc """
-  The `home.provision.*` family (M75 lean v1 §4.3): Fermix creates the
-  owner's Always On server on a cloud provider (`FermixCore.Home.Provision`,
-  the contract; `Provision.Registry`, the providers, one today) from an API
-  token pasted once. Nothing here names a provider: each one's words come
-  from its display data, and its refusals arrive as the contract's shared
-  kinds.
+  Fermix creates the owner's Always On server on a cloud provider (M75 lean
+  v1 §4.3; `FermixCore.Home.Provision`, the contract; `Provision.Registry`,
+  the providers, one today) from an API token pasted once. Nothing here names
+  a provider: each one's words come from its display data, and its refusals
+  arrive as the contract's shared kinds.
 
-  Every method is device-class (`Management.Placement`): a linked desktop
-  answers it itself and never sends it to the server, since the tokens and
-  the ledgers (`Home.Provision.Ledger`, `device/provision/<id>.json`, one per
-  provider) stay on the computer that created the server.
+  Everything here is answered on the computer that created the server
+  (`Management.Placement`: a linked desktop answers it itself and never
+  sends it to the server), since the tokens and the ledgers
+  (`Home.Provision.Ledger`, `device/provision/<id>.json`, one per provider)
+  stay there. One method is on the wire, `home.provision.options`; the rest
+  are Always On's steps, which `Management.AlwaysOn.act/2` (`home.act`)
+  runs:
 
-    * `home.provision.providers` answers each provider's display data, in
-      the order the apps offer them: `{id, name, token_label, steps,
-      console_url, docs_anchor}`, so the apps draw the token and choose
-      screens from it and need no change for a new provider.
-    * `home.provision.connect {provider, token}` (an owner decision) checks
-      the token with that provider and keeps it in that provider's ledger;
-      one the provider refuses is `invalid_params` on `token` with its
-      sentence. While that ledger holds a server or firewall that is not
-      gone, a new token replaces the old only when it reaches it
-      (`reaches/3`, the same account), so a token that stopped working is
-      replaced and one for another account is refused, also on `token`.
-      Answers that provider's view (below) and `other_servers` (the account
-      holds servers Fermix did not create).
-    * `home.provision.options {provider}` reads the orderable types per
-      location live, with their monthly prices as the account is billed, the
-      L2 recommendation, "more room", and the recommendation in one
-      `sentence`.
-    * `home.provision.create {provider, type, location, replace?}` (an owner
-      decision) starts a job, kind `home_provision`, that creates the
-      firewall and the server, the 24-hour enrollment code inside. Refused
-      while any provider holds a server Fermix created. On the primary only,
-      unless `replace` is true: then on the linked desktop whose ledger of
-      that provider holds the server the home lives on, which asks that
-      server over the link for the code (`home.enroll.open {kind:
-      provisioned}`, forwarded) and keeps both servers in the ledger
-      (`Ledger.begin_replace/3`), the old one holding the home until the move
-      to the new one is done.
-    * `home.provision.power {action}` (an owner decision), `on` or `reset`, a
-      job of the same kind.
-    * `home.provision.resources` reads the ledger back from the provider (a
-      resource deleted outside Fermix is marked gone) and answers the view.
-    * `home.provision.delete` (an owner decision) deletes the server, its
+    * `connect/2` (`paste_token`) checks the token with that provider and
+      keeps it in that provider's ledger; one the provider refuses is
+      `invalid_params` on `token` with its sentence. While that ledger holds
+      a server or firewall that is not gone, a new token replaces the old
+      only when it reaches it (`reaches/3`, the same account), so a token that
+      stopped working is replaced and one for another account is refused,
+      also on `token`. Answers that provider's view (below) and
+      `other_servers` (the account holds servers Fermix did not create).
+    * `options/2` (`home.provision.options {provider}`) reads the orderable
+      types per location live, with their monthly prices as the account is
+      billed, the L2 recommendation, "more room", and the recommendation in
+      one `sentence`.
+    * `start_create/2` (`create_server`, `create_in`, `replace_server`)
+      starts a job, kind `home_provision`, that creates the firewall and the
+      server, the 24-hour enrollment code inside. Refused while any provider
+      holds a server Fermix created. On the primary only, unless `replace`:
+      then on the linked desktop whose ledger of that provider holds the
+      server the home lives on, which asks that server over the link for the
+      code (`home.enroll.open {kind: provisioned}`, rail-only) and keeps both
+      servers in the ledger (`Ledger.begin_replace/3`), the old one holding
+      the home until the move to the new one is done.
+    * `start_again/2` (`start_again`): one job that deletes what stands and
+      creates the server again.
+    * `power/2` (`turn_on`, `restart_server`), `on` or `reset`, a job of the
+      same kind.
+    * `delete/1` (`delete_server`, `cancel`) deletes the server, its
       addresses unless they went with it, and the firewall, as a job; it is
       refused while a move to the server runs and once the home lives on it
       (this engine is a linked desktop, or its home carries the moved
@@ -51,27 +47,27 @@ defmodule FermixCore.Management.Provision do
       it deletes what does not hold the home: the new server before the move
       (Cancel, which closes its code on the old server and gives the ledger
       back the old one), or the old server after it (when deleting it
-      failed); while the move runs, nothing.
+      failed); while the move runs, nothing. `stop_step/1` cancels a step's
+      job first, answering once its run has stopped.
 
-  Power, resources, delete and what follows a replace's move act on the
-  provider Always On speaks of (`Provision.current/2`): the one Fermix
-  created something on, else the one whose token was given last, else the
-  first the registry offers.
+  These act on the provider Always On speaks of (`Provision.current/2`): the
+  one Fermix created something on, else the one whose token was given last,
+  else the first the registry offers.
 
-  After a replace's move: the daemon records that this desktop started the
-  move to the new server (`move_forwarded/3`, beside the forwarded
-  `home.move.start`), and the desktop relay reports every primary epoch it
+  After a replace's move: the desktop's `home.act` records that it started
+  the move to the new server (`move_forwarded/3`, once the server answered
+  its `home.move.start`), and the desktop relay reports every primary epoch it
   reaches (`primary_reached/2`). Once that is above the epoch the old server
   held, the move to the new one is done: this desktop's link names the new
   server from then on (`Home.Link`'s `rename_primary/1`), and the old server
   is deleted, once, as a job of the same kind (`Provision.Driver.delete_replaced/3`); a failed delete
-  stays in the ledger with its sentence, and `home.provision.delete` tries it
+  stays in the ledger with its sentence, and Delete your old server tries it
   again. The old server answering again at its own epoch after the move
   started means it undid the move: the replace waits for its move again.
 
   One job of the kind runs at a time (`busy` otherwise). A create's refusal
-  is kept in the ledger, so the summary and `home.provision.resources` say
-  it after the job is gone; a refusal for the token marks it refused.
+  is kept in the ledger, so the summary says it after the job is gone; a
+  refusal for the token marks it refused.
 
   **A step and its ending** (Always On setup §5). The step a job runs is
   named in the ledger before the job starts (`put_action/2`, which
@@ -96,9 +92,7 @@ defmodule FermixCore.Management.Provision do
   `replace` (null, or `{state, current, old, failure}` as `Ledger.state/3`'s),
   `resources` (every resource the ledger holds: `{kind, name, id, status,
   replaced}`, `id` the provider's own as a string, `replaced` true for the
-  old server's), and from
-  `home.provision.resources` `checked` (whether the provider was read just
-  now) and `sentence` (why not, or null). The token never leaves the ledger.
+  old server's) and `sentence`. The token never leaves the ledger.
 
   Test seams in `opts`: `:home`, `:engine_role`, `:profile`, `:providers` (in
   place of `Provision.Registry.all/0`), `:provider_opts` (the providers' own
@@ -127,45 +121,13 @@ defmodule FermixCore.Management.Provision do
   @kind :home_provision
   @token_pattern ~r/\A[!-~]{16,512}\z/
   @type_pattern ~r/\A[a-z0-9][a-z0-9-]{0,31}\z/
-  @owner_sentence "Only the owner can give Fermix an API token or create, restart or delete " <>
-                    "its server: use the Fermix app."
   @provider_sentence "Choose one of the providers Fermix creates a server on."
   # What `Ledger.begin_replace/3` refuses, each a reason with its sentence.
   @replace_refusals [:replacement_exists, :replace_moving, :old_server_remains, :not_primary]
 
-  @doc """
-  The sentence `daemon.sock` answers when a process Fermix started (or one it
-  cannot place) asks to give Fermix a token, or to create, power or delete
-  the server: the owner's decisions.
-  """
-  @spec owner_only_sentence() :: String.t()
-  def owner_only_sentence, do: @owner_sentence
-
-  @doc "The capability a refusal of this family names."
-  @spec capability() :: String.t()
-  def capability, do: @capability
-
   @doc "The job kind a create, a power action and a delete run as."
   @spec job_kind() :: atom()
   def job_kind, do: @kind
-
-  @doc "`home.provision.providers`: each provider's display data, in the order offered."
-  @spec providers(keyword()) :: {:ok, map()}
-  def providers(opts \\ []) when is_list(opts),
-    do: {:ok, %{"providers" => Enum.map(providers_of(opts), &provider_view/1)}}
-
-  defp provider_view(provider) do
-    display = provider.display()
-
-    %{
-      "id" => provider.id(),
-      "name" => display.name,
-      "token_label" => display.token_label,
-      "steps" => display.steps,
-      "console_url" => display.console_url,
-      "docs_anchor" => display.docs_anchor
-    }
-  end
 
   @doc """
   Writes, under the ledger's lock, that a step's job is about to start on
@@ -197,6 +159,39 @@ defmodule FermixCore.Management.Provision do
       {:error, :no_action} -> :ok
       {:error, reason} -> refused({:ledger, reason}, provider, opts)
     end
+  end
+
+  @doc """
+  Whether the ledger of the provider Always On speaks of holds anything
+  Fermix created or was creating, or a replace (`Ledger.holding?/1`): what a
+  cancelled create leaves for the delete.
+  """
+  @spec holding(keyword()) :: {:ok, boolean()} | {:error, term()}
+  def holding(opts \\ []) when is_list(opts) do
+    provider = current(opts)
+    with {:ok, ledger} <- ledger(provider, opts), do: {:ok, Ledger.holding?(ledger)}
+  end
+
+  @doc """
+  Cancels the family's running job (a step's, or a read of the provider) and
+  answers once its run has stopped (`Jobs.cancel/2`), so a step started
+  after it never runs beside it. One that ended between the listing and the
+  cancel has stopped already.
+  """
+  @spec stop_step(keyword()) :: :ok
+  def stop_step(opts \\ []) when is_list(opts) do
+    jobs = Keyword.get(opts, :jobs, [])
+    {:ok, views} = Jobs.list(jobs)
+    kind = Atom.to_string(@kind)
+
+    for %{"kind" => ^kind, "status" => "running", "job_id" => id} <- views do
+      case Jobs.cancel(id, jobs) do
+        {:ok, _view} -> :ok
+        {:error, :unknown_job} -> :ok
+      end
+    end
+
+    :ok
   end
 
   @doc """
@@ -240,7 +235,7 @@ defmodule FermixCore.Management.Provision do
     end
   end
 
-  @doc "`home.provision.connect`."
+  @doc "`paste_token`'s step: checks the token and keeps it (the moduledoc)."
   @spec connect(map(), keyword()) :: {:ok, map()} | {:error, term()}
   def connect(params, opts \\ []) when is_map(params) and is_list(opts) do
     with {:ok, provider} <- provider_param(params, opts),
@@ -359,21 +354,13 @@ defmodule FermixCore.Management.Provision do
   end
 
   @doc """
-  `home.provision.create`: starts the job that creates the server, or with
-  `replace` the one that replaces the server the home lives on.
-  """
-  @spec create(map(), keyword()) :: {:ok, map()} | {:error, term()}
-  def create(params, opts \\ []) when is_map(params) and is_list(opts) do
-    with {:ok, provider, choice, replace?} <- create_params(params, opts),
-         do: begin_create(provider, choice, replace?, opts)
-  end
-
-  @doc """
-  Starts the create job on the provider Always On speaks of, as
-  `home.provision.create` does: `type` and `location` both given, or both
-  nil for the recommendation the job reads from the live offer; `replace`
-  true to replace the server the home lives on. Refused by field when only
-  one is given, or either is not one Fermix offers.
+  Starts the create job on the provider Always On speaks of, which creates
+  the firewall and the server, the 24-hour enrollment code inside: `type`
+  and `location` both given, or both nil for the recommendation the job
+  reads from the live offer; `replace` true to replace the server the home
+  lives on. Refused by field when only one is given, or either is not one
+  Fermix offers; refused while any provider holds a server Fermix created,
+  and on a linked desktop unless `replace`.
   """
   @spec start_create(
           %{type: String.t() | nil, location: String.t() | nil, replace: boolean()},
@@ -385,6 +372,69 @@ defmodule FermixCore.Management.Provision do
 
     with {:ok, choice} <- choice(type, location, provider),
          do: begin_create(provider, choice, replace?, opts)
+  end
+
+  @doc """
+  Starts Start again's one job on the provider Always On speaks of: what the
+  ledger holds is deleted first (the step's action, `create`, stays named
+  while it runs, so the summary says the delete), then a server is created
+  with the size and place of the one that stood, else of the failure the
+  step answers, else the recommendation; with `replace`, on the linked
+  desktop whose ledger holds the server the home lives on. A delete that
+  stops ends the job with its failure kept, as a delete's is.
+  """
+  @spec start_again(%{replace: boolean()}, keyword()) :: {:ok, map()} | {:error, term()}
+  def start_again(%{replace: replace?}, opts \\ []) when is_boolean(replace?) and is_list(opts) do
+    provider = current(opts)
+
+    with {:ok, ledger} <- ledger(provider, opts),
+         {:ok, _token} <- stored_token(provider, opts) do
+      request = Map.put(again(ledger), :profile, profile(opts))
+
+      start(
+        provider,
+        opts,
+        fn report -> run_again(provider, replace?, request, report, opts) end,
+        :clears_action
+      )
+    end
+  end
+
+  # The server's size and place, else the failure's: both, or neither.
+  defp again(%{server: %{type: type, location: location}})
+       when is_binary(type) and is_binary(location),
+       do: %{type: type, location: location}
+
+  defp again(%{failure: %{type: type, location: location}})
+       when is_binary(type) and is_binary(location),
+       do: %{type: type, location: location}
+
+  defp again(_ledger), do: %{type: nil, location: nil}
+
+  defp run_again(provider, replace?, request, report, opts) do
+    with {:ok, _deleted} <- cleared(provider, report, opts),
+         {:ok, plan} <- again_plan(provider, replace?, opts),
+         do: run_create(provider, plan, request, report, opts)
+  end
+
+  defp cleared(provider, report, opts) do
+    case Ledger.read(home(opts), provider.id()) do
+      {:ok, ledger} ->
+        if Ledger.holding?(ledger),
+          do: run_delete(provider, :current, report, opts),
+          else: {:ok, %{"deleted" => false}}
+
+      {:error, reason} ->
+        job_failure({:ledger, reason}, provider)
+    end
+  end
+
+  # What the create checks before it starts, once what stood is gone.
+  defp again_plan(provider, replace?, opts) do
+    case create_plan(provider, replace?, opts) do
+      {:ok, plan} -> {:ok, plan}
+      {:error, {:unavailable, _capability, sentence}} -> {:error, {:refused, sentence}}
+    end
   end
 
   defp begin_create(provider, choice, replace?, opts) do
@@ -400,16 +450,6 @@ defmodule FermixCore.Management.Provision do
     end
   end
 
-  defp create_params(params, opts) do
-    with :ok <- known_params(params, ~w(provider type location replace)),
-         {:ok, provider} <- provider_param(params, opts),
-         {:ok, type} <- matching(params, "type", @type_pattern),
-         {:ok, location} <- location(params, provider),
-         {:ok, replace?} <- replace_param(params) do
-      {:ok, provider, %{type: type, location: location}, replace?}
-    end
-  end
-
   # Both given, or neither: the recommendation, which the job reads.
   defp choice(nil, nil, _provider), do: {:ok, %{type: nil, location: nil}}
 
@@ -417,13 +457,6 @@ defmodule FermixCore.Management.Provision do
     with {:ok, type} <- matching(%{"type" => type}, "type", @type_pattern),
          {:ok, location} <- location(%{"location" => location}, provider),
          do: {:ok, %{type: type, location: location}}
-  end
-
-  defp replace_param(params) do
-    case Map.get(params, "replace", false) do
-      replace? when is_boolean(replace?) -> {:ok, replace?}
-      _other -> invalid("replace", "Say true to replace the server the home lives on.")
-    end
   end
 
   # A server is created on the primary, and replaced from the linked desktop
@@ -568,8 +601,7 @@ defmodule FermixCore.Management.Provision do
     end
   end
 
-  # A create started with no step named (`home.provision.create`) keeps it
-  # nowhere.
+  # A create started with no step named keeps it nowhere.
   defp chosen(%{action: nil}, _request), do: {:error, :no_action}
   defp chosen(ledger, request), do: {:ok, Ledger.choose(ledger, request)}
 
@@ -629,7 +661,7 @@ defmodule FermixCore.Management.Provision do
     reason
   end
 
-  @doc "`home.provision.power`: starts the job that turns the server on or restarts it."
+  @doc "Starts the job that turns the server on or restarts it (`turn_on`, `restart_server`)."
   @spec power(map(), keyword()) :: {:ok, map()} | {:error, term()}
   def power(params, opts \\ []) when is_map(params) and is_list(opts) do
     provider = current(opts)
@@ -672,46 +704,9 @@ defmodule FermixCore.Management.Provision do
   defp power_step(:on), do: "power_on"
   defp power_step(:reset), do: "power_reset"
 
-  @doc "`home.provision.resources`: the ledger, read back from its provider."
-  @spec resources(keyword()) :: {:ok, map()}
-  def resources(opts \\ []) when is_list(opts) do
-    home = home(opts)
-    provider = current(opts)
-
-    case Ledger.read(home, provider.id()) do
-      {:ok, %{token: nil}} -> {:ok, checked(provider_ledger_view(home, provider), false, nil)}
-      {:ok, _ledger} -> {:ok, reconciled(home, provider, opts)}
-      {:error, _reason} -> {:ok, checked(provider_ledger_view(home, provider), false, nil)}
-    end
-  end
-
-  defp reconciled(home, provider, opts) do
-    case Driver.reconcile(
-           provider,
-           home,
-           Keyword.put(provider_opts(opts), :running?, running?(opts)) ++
-             code_opts(provider, opts)
-         ) do
-      {:ok, _ledger} ->
-        checked(provider_ledger_view(home, provider), true, nil)
-
-      {:error, reason} ->
-        reason = token_reason(reason, provider, opts)
-
-        checked(
-          provider_ledger_view(home, provider),
-          false,
-          Provision.error_sentence(reason, provider)
-        )
-    end
-  end
-
-  defp checked(view, checked?, sentence),
-    do: Map.merge(view, %{"checked" => checked?, "sentence" => sentence || view["sentence"]})
-
   @doc """
-  `home.provision.delete`: starts the job that deletes what Fermix created
-  and does not hold the home.
+  Starts the job that deletes what Fermix created and does not hold the home
+  (`delete_server`, `cancel`).
   """
   @spec delete(keyword()) :: {:ok, map()} | {:error, term()}
   def delete(opts \\ []) when is_list(opts) do
@@ -843,8 +838,9 @@ defmodule FermixCore.Management.Provision do
   # -- after a replace's move ---------------------------------------------------
 
   @doc """
-  Records, beside the daemon's forward of `home.move.start` with `params`,
-  that this desktop started the move to the new server of a replace, when
+  Records, after `home.act`'s Move now sent `home.move.start` with `params`
+  (`Management.AlwaysOn`), that this desktop started the move to the new
+  server of a replace, when
   the server answered `answer` with it started (or with it `unconfirmed`):
   `:recorded`, `:nothing` when no replace waits for its move or the move did
   not start, or why the ledger could not keep it (logged).
@@ -1124,12 +1120,6 @@ defmodule FermixCore.Management.Provision do
     end
   end
 
-  defp running?(opts) do
-    {:ok, views} = Jobs.list(Keyword.get(opts, :jobs, []))
-    kind = Atom.to_string(@kind)
-    Enum.any?(views, &(&1["kind"] == kind and &1["status"] == "running"))
-  end
-
   defp run_opts(provider, report, opts),
     do: provider_opts(opts) ++ [report: report] ++ code_opts(provider, opts)
 
@@ -1151,7 +1141,7 @@ defmodule FermixCore.Management.Provision do
          fn -> forwarded_withdraw(forward, provider) end}
 
       :error ->
-        {&open_code/0, fn -> Link.impl().withdraw_enrollment() end}
+        {&open_code/0, fn -> Link.impl().withdraw_enrollment(:provisioned) end}
     end
   end
 

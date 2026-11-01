@@ -15,10 +15,20 @@ defmodule FermixCore.Management.Placement do
   did. The home's recovery, enrollment and move are the primary's too
   (`home.snapshots.*`, `home.enroll.open`, `home.enroll.withdraw`,
   `home.candidates.list`, `home.move.readiness`, `home.move.start`): after a
-  move the server holds them, and the desktop reaches them only through it. The Always On
-  provisioner (`home.provision.*`) is device-class: its token and the ledger
-  of what it created stay on the computer that created the server, which
-  manages that server itself and never sends the request to it.
+  move the server holds them, and the desktop reaches them only through it.
+  Always On's steps (`home.act`) and its choice of offers
+  (`home.provision.options`) are device-class: the provisioner's token and
+  the ledger of what it created stay on the computer that created the
+  server, which manages that server itself, and a linked desktop's
+  `home.act` sends the server's own steps over the link.
+
+  **Rail-only** (`rail_only?/1`, Always On setup §3.5): the server's steps a
+  linked desktop's `home.act` sends (`home.move.readiness`,
+  `home.move.start`, `home.enroll.open`, `home.enroll.withdraw`,
+  `home.snapshots.run`) and the create job's request for the new server's
+  code are served only to a desktop's forward (actor `{:desktop, _}`) and
+  refused on `daemon.sock` by name (`rail_only_refusal/1`): there, `home.act`
+  takes the step.
 
   Two methods are **composed** (`composed?/1`): `home.status` and
   `settings.sections`. A linked device answers them itself and adds the
@@ -48,9 +58,13 @@ defmodule FermixCore.Management.Placement do
   @device_methods ~w(
     hello diagnostics.build logs.query setup.session.create setup.detect
     browser.install.start capabilities.install.start
-    home.status settings.sections
+    home.status settings.sections home.act
   )
   @device_families ~w(lifecycle. doctor. computer_use. imessage. home.provision.)
+  @rail_only_methods ~w(home.move.readiness home.move.start home.enroll.open home.enroll.withdraw
+                        home.snapshots.run)
+  @rail_only_sentence "Always On takes this step itself: send home.act with the action the " <>
+                        "summary offers."
   # Answered on this machine with the primary's own answer added (M75: a
   # desktop draws its own facts beside the server's).
   @composed_methods ~w(home.status settings.sections)
@@ -188,6 +202,28 @@ defmodule FermixCore.Management.Placement do
 
   defp server(name) when is_binary(name), do: "The server #{name}"
   defp server(nil), do: "The server"
+
+  @doc """
+  The methods served only to a desktop's forward over the rail, and refused
+  on `daemon.sock` by name (the moduledoc's *Rail-only*).
+  """
+  @spec rail_only_methods() :: [String.t()]
+  def rail_only_methods, do: @rail_only_methods
+
+  @doc "Whether `method` is served only to a desktop's forward."
+  @spec rail_only?(String.t()) :: boolean()
+  def rail_only?(method) when is_binary(method), do: method in @rail_only_methods
+
+  @doc """
+  The refusal of a rail-only `method` sent by anything but a desktop's
+  forward: `unavailable`, naming the method, with the sentence that says
+  `home.act` takes the step.
+  """
+  @spec rail_only_refusal(String.t()) :: Protocol.route_result()
+  def rail_only_refusal(method) when method in @rail_only_methods do
+    {:error, :unavailable,
+     %{"capability" => "home", "method" => method, "sentence" => @rail_only_sentence}}
+  end
 
   @doc "The methods answered on this machine whatever their parameters."
   @spec device_methods() :: [String.t()]

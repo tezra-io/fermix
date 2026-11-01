@@ -1,16 +1,11 @@
 defmodule Fermix.CLI.HomeMoveCommand do
   @moduledoc """
-  `fermix home enroll-code`, `enroll`, `candidates` and `move` (M75 §7, §14):
-  moving a home to a candidate primary.
+  `fermix home enroll` and `candidates` (M75 §7, §14): a fresh host enrolling
+  as a candidate primary, and the candidates the primary holds.
 
-      fermix home enroll-code [--json]
       fermix home enroll --code-file PATH [--snapshot-bucket B --snapshot-region R]
       fermix home candidates [--json]
-      fermix home move --to ID [--recovery-passphrase-file PATH] [--retire] [--json]
 
-  - `enroll-code`, on the primary, asks its engine for an enrollment code
-    (`home.enroll.open`): valid for thirty minutes, single use, shown once.
-    It needs the running engine (`engine_stopped` otherwise).
   - `enroll`, on the new host, makes a fresh home a candidate
     (`FermixCore.Home.Candidate.enroll/3`) with no engine running: it reads
     the code from the file (trimmed), writes `candidate/` and the candidate
@@ -18,26 +13,13 @@ defmodule Fermix.CLI.HomeMoveCommand do
     it, and the code file too. Human output only.
   - `candidates` lists the candidates the primary holds: from the engine
     (`home.candidates.list`), or from the home's file when it is stopped.
-  - `move` starts the move (`home.move.start`): the running engine checks
-    the recovery passphrase against the key it keeps (or keeps it when none
-    is set), writes the request and restarts in the device role. It needs the
-    running engine (`engine_stopped` otherwise), since a stopped one has no
-    key to check the passphrase against. The recovery passphrase never enters
-    argv: `--recovery-passphrase-file`
-    (one line, a trailing newline dropped) or, on a terminal, asked twice
-    without echo. This computer becomes a desktop of the new primary, unless
-    `--retire` says otherwise (`keep_as_desktop: false`): a server that is
-    itself the primary, being replaced by another and then destroyed, hands
-    the home over and then serves nothing.
 
   Exit status: `0` done, `1` refused (one sentence on stderr, or the `--json`
   envelope), `2` usage error.
   """
 
   alias Fermix.CLI.Daemon.Client
-  alias Fermix.CLI.HomeCommand
   alias Fermix.CLI.MachineOutput
-  alias Fermix.CLI.SecretInput
   alias FermixCore.Home.Candidate
   alias FermixCore.Home.Candidates
   alias FermixCore.Setup.ConfigStore
@@ -48,58 +30,24 @@ defmodule Fermix.CLI.HomeMoveCommand do
     snapshot_bucket: :string,
     snapshot_region: :string
   ]
-  @move_switches [
-    to: :string,
-    recovery_passphrase_file: :string,
-    retire: :boolean,
-    json: :boolean
-  ]
   @call_timeout_ms 30_000
-  # `home.move.start` walks the home for its readiness report before it
-  # answers; the management PROTOCOL.md asks a client to allow it 65 s.
-  @move_timeout_ms 65_000
   @max_file_bytes 4_096
   @usage """
   Usage:
-    fermix home enroll-code [--json]
     fermix home enroll --code-file PATH [--snapshot-bucket B --snapshot-region R]
     fermix home candidates [--json]
-    fermix home move --to ID [--recovery-passphrase-file PATH] [--retire] [--json]
   """
 
   @doc """
   Runs one verb. `deps`: `:home`, `:client` (a 3-arity management call, as
-  `Client.request_v1/3`), `:terminal`, `:now` (a 0-arity clock).
+  `Client.request_v1/3`), `:now` (a 0-arity clock).
   """
   @spec run(String.t(), [String.t()], keyword()) :: non_neg_integer()
   def run(verb, argv, deps \\ []) when is_binary(verb) and is_list(argv) and is_list(deps) do
     case verb do
-      "enroll-code" -> with_json(argv, &enroll_code(&1, deps))
       "enroll" -> enroll(argv, deps)
       "candidates" -> with_json(argv, &candidates(&1, deps))
-      "move" -> move(argv, deps)
     end
-  end
-
-  # -- enroll-code ------------------------------------------------------------
-
-  defp enroll_code(json?, deps) do
-    case client(deps).("home.enroll.open", %{}, call_opts(home(deps))) do
-      {:ok, result} -> report(json?, result, &code_lines/1)
-      {:error, :not_running} -> refuse(json?, :engine_stopped, [])
-      {:error, reason} -> refuse(json?, :enrollment_refused, output: said(reason))
-    end
-  end
-
-  defp code_lines(%{"code" => code, "expires_at" => at}) do
-    [
-      "Enrollment code, valid once until #{at}:",
-      "",
-      code,
-      "",
-      "Paste it where the new server asks for it. Fermix shows it only now; open another " <>
-        "with fermix home enroll-code if this one runs out."
-    ]
   end
 
   # -- enroll -----------------------------------------------------------------
@@ -223,8 +171,7 @@ defmodule Fermix.CLI.HomeMoveCommand do
     end
   end
 
-  defp candidate_lines(%{"candidates" => []}),
-    do: ["No candidate is enrolled. Open a code with fermix home enroll-code."]
+  defp candidate_lines(%{"candidates" => []}), do: ["No server is enrolled."]
 
   defp candidate_lines(%{"candidates" => candidates}) do
     Enum.flat_map(candidates, &candidate_line/1)
@@ -235,75 +182,6 @@ defmodule Fermix.CLI.HomeMoveCommand do
       "#{candidate["candidate_id"]}  #{candidate["name"]}  #{candidate["os"]}/#{candidate["arch"]}" <>
         "  enrolled #{candidate["enrolled_at"]}, held until #{candidate["expires_at"]}"
     ]
-  end
-
-  # -- move -------------------------------------------------------------------
-
-  defp move(argv, deps) do
-    case OptionParser.parse(argv, strict: @move_switches) do
-      {opts, [], []} -> move_with(opts, deps)
-      _invalid -> usage()
-    end
-  end
-
-  defp move_with(opts, deps) do
-    json? = Keyword.get(opts, :json, false)
-
-    with {:ok, to} <- required(opts, :to),
-         {:ok, passphrase} <- recovery_passphrase(opts, deps) do
-      start_move(json?, {to, Keyword.get(opts, :retire, false)}, passphrase, deps)
-    else
-      :usage ->
-        usage()
-
-      {:error, reason} ->
-        refuse(json?, :move_refused, output: HomeCommand.passphrase_sentence(reason))
-    end
-  end
-
-  # `retire?`: the move keeps no desktop here (`keep_as_desktop: false`); the
-  # parameter is sent only then, so the engine's default stays the one place
-  # that says what a plain move keeps.
-  defp start_move(json?, {to, retire?}, passphrase, deps) do
-    home = home(deps)
-    params = %{"candidate_id" => to, "recovery_passphrase" => passphrase}
-    params = if retire?, do: Map.put(params, "keep_as_desktop", false), else: params
-
-    case client(deps).("home.move.start", params, call_opts(home, @move_timeout_ms)) do
-      {:ok, result} -> report(json?, result, &move_lines/1)
-      {:error, :not_running} -> refuse(json?, :engine_stopped, [])
-      {:error, reason} -> refuse(json?, :move_refused, output: said(reason))
-    end
-  end
-
-  defp move_lines(result) do
-    [
-      result["sentence"],
-      "Move #{result["move_id"]} to #{result["candidate"]["name"]}.",
-      "Recovery key (key id #{result["key_id"]}): #{result["recovery_recipient"]}"
-    ]
-  end
-
-  defp recovery_passphrase(opts, deps) do
-    case Keyword.fetch(opts, :recovery_passphrase_file) do
-      {:ok, path} -> HomeCommand.read_passphrase_file(Path.expand(path))
-      :error -> ask_twice(deps)
-    end
-  end
-
-  defp ask_twice(deps) do
-    with {:ok, first} <- ask("Recovery passphrase", deps),
-         {:ok, second} <- ask("Repeat the passphrase", deps) do
-      if first == second, do: {:ok, first}, else: {:error, :passphrases_differ}
-    end
-  end
-
-  defp ask(label, deps) do
-    case SecretInput.read_masked(label, Keyword.take(deps, [:terminal])) do
-      {:ok, value} -> {:ok, value}
-      {:error, :not_a_terminal} -> {:error, :no_passphrase_source}
-      {:error, reason} -> {:error, {:passphrase_prompt, reason}}
-    end
   end
 
   # -- output -----------------------------------------------------------------
@@ -347,8 +225,8 @@ defmodule Fermix.CLI.HomeMoveCommand do
   defp client(deps), do: Keyword.get(deps, :client, &Client.request_v1/3)
   defp now(deps), do: Keyword.get(deps, :now, &DateTime.utc_now/0).()
 
-  defp call_opts(home, timeout_ms \\ @call_timeout_ms),
-    do: [socket_path: Path.join(home, "daemon.sock"), timeout: timeout_ms]
+  defp call_opts(home),
+    do: [socket_path: Path.join(home, "daemon.sock"), timeout: @call_timeout_ms]
 
   defp usage do
     IO.puts(:stderr, @usage)

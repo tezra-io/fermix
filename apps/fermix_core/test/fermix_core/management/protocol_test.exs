@@ -159,13 +159,8 @@ defmodule FermixCore.Management.ProtocolTest do
              "home.candidates.list",
              "home.move.readiness",
              "home.move.start",
-             "home.provision.connect",
              "home.provision.options",
-             "home.provision.create",
-             "home.provision.power",
-             "home.provision.resources",
-             "home.provision.delete",
-             "home.provision.providers"
+             "home.act"
            ]
 
     assert Protocol.error_codes() == [
@@ -188,7 +183,8 @@ defmodule FermixCore.Management.ProtocolTest do
              "unknown_pairing_session",
              "primary_unreachable",
              "device_class_method",
-             "unconfirmed"
+             "unconfirmed",
+             "changed"
            ]
   end
 

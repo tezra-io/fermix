@@ -237,13 +237,8 @@
     "home.candidates.list": 2,
     "home.move.readiness": 2,
     "home.move.start": 2,
-    "home.provision.connect": 2,
     "home.provision.options": 2,
-    "home.provision.create": 2,
-    "home.provision.power": 2,
-    "home.provision.resources": 2,
-    "home.provision.delete": 2,
-    "home.provision.providers": 2
+    "home.act": 2
   },
   "$defs": {
     "request": {
@@ -354,13 +349,8 @@
             "home.candidates.list",
             "home.move.readiness",
             "home.move.start",
-            "home.provision.connect",
             "home.provision.options",
-            "home.provision.create",
-            "home.provision.power",
-            "home.provision.resources",
-            "home.provision.delete",
-            "home.provision.providers"
+            "home.act"
           ]
         },
         "params": { "type": "object" }
@@ -1039,13 +1029,6 @@
         {
           "if": {
             "required": ["method"],
-            "properties": { "method": { "const": "home.provision.connect" } }
-          },
-          "then": { "properties": { "params": { "$ref": "#/$defs/home_provision_connect_params" } } }
-        },
-        {
-          "if": {
-            "required": ["method"],
             "properties": { "method": { "const": "home.provision.options" } }
           },
           "then": { "properties": { "params": { "$ref": "#/$defs/home_provision_options_params" } } }
@@ -1053,37 +1036,9 @@
         {
           "if": {
             "required": ["method"],
-            "properties": { "method": { "const": "home.provision.create" } }
+            "properties": { "method": { "const": "home.act" } }
           },
-          "then": { "properties": { "params": { "$ref": "#/$defs/home_provision_create_params" } } }
-        },
-        {
-          "if": {
-            "required": ["method"],
-            "properties": { "method": { "const": "home.provision.power" } }
-          },
-          "then": { "properties": { "params": { "$ref": "#/$defs/home_provision_power_params" } } }
-        },
-        {
-          "if": {
-            "required": ["method"],
-            "properties": { "method": { "const": "home.provision.resources" } }
-          },
-          "then": { "properties": { "params": { "$ref": "#/$defs/home_provision_resources_params" } } }
-        },
-        {
-          "if": {
-            "required": ["method"],
-            "properties": { "method": { "const": "home.provision.delete" } }
-          },
-          "then": { "properties": { "params": { "$ref": "#/$defs/home_provision_delete_params" } } }
-        },
-        {
-          "if": {
-            "required": ["method"],
-            "properties": { "method": { "const": "home.provision.providers" } }
-          },
-          "then": { "properties": { "params": { "$ref": "#/$defs/home_provision_providers_params" } } }
+          "then": { "properties": { "params": { "$ref": "#/$defs/home_act_params" } } }
         }
       ]
     },
@@ -1130,7 +1085,8 @@
                 "unknown_pairing_session",
                 "primary_unreachable",
                 "device_class_method",
-                "unconfirmed"
+                "unconfirmed",
+                "changed"
               ]
             },
             "message": { "type": "string", "minLength": 1 },
@@ -1248,13 +1204,8 @@
         { "$ref": "#/$defs/home_candidates_list_result" },
         { "$ref": "#/$defs/home_move_readiness_result" },
         { "$ref": "#/$defs/home_move_start_result" },
-        { "$ref": "#/$defs/home_provision_connect_result" },
         { "$ref": "#/$defs/home_provision_options_result" },
-        { "$ref": "#/$defs/home_provision_create_result" },
-        { "$ref": "#/$defs/home_provision_power_result" },
-        { "$ref": "#/$defs/home_provision_resources_result" },
-        { "$ref": "#/$defs/home_provision_delete_result" },
-        { "$ref": "#/$defs/home_provision_providers_result" }
+        { "$ref": "#/$defs/home_act_result" }
       ]
     },
     "hello_params": { "type": "object", "maxProperties": 0, "additionalProperties": false },
@@ -5837,7 +5788,7 @@
       "properties": {
         "id": { "enum": ["create_server", "cancel", "move_now", "try_again", "learn_more", "turn_on", "restart_server", "start_again", "create_in", "open_console", "paste_token", "update", "back_up_now", "replace_server", "check_again", "own_server", "delete_server"] },
         "label": { "type": "string", "minLength": 1 },
-        "needs": { "type": "array", "maxItems": 3, "uniqueItems": true, "items": { "enum": ["token", "recovery_passphrase", "choice"] } },
+        "needs": { "type": "array", "maxItems": 3, "uniqueItems": true, "items": { "enum": ["token", "recovery_passphrase", "new_recovery_passphrase", "choice"] } },
         "confirm": { "type": ["string", "null"], "minLength": 1 },
         "url": { "type": ["string", "null"], "minLength": 1 },
         "key": { "type": "string", "minLength": 1, "maxLength": 64 }
@@ -6135,51 +6086,11 @@
         "sentence": { "type": "string", "minLength": 1 }
       }
     },
-    "home_provision_providers_params": { "type": "object", "maxProperties": 0, "additionalProperties": false },
-    "home_provision_providers_result": {
-      "description": "Every cloud provider Fermix creates a server on, in the order the apps offer them, with what the token and choose screens draw. A new provider is a new row: a client draws every row it is given.",
-      "type": "object",
-      "required": ["providers"],
-      "additionalProperties": false,
-      "properties": {
-        "providers": { "type": "array", "minItems": 1, "maxItems": 16, "items": { "$ref": "#/$defs/homeProvisionProvider" } }
-      }
-    },
-    "homeProvisionProvider": {
-      "type": "object",
-      "description": "One provider: id is what home.provision.connect, options and create take as provider; name how every sentence names it; token_label the token field's label; steps the How to get one steps, two-factor sign-in first and an account for Fermix alone; console_url the provider's console, which open_console opens; docs_anchor its section of the Always On docs page (#docs_anchor).",
-      "required": ["id", "name", "token_label", "steps", "console_url", "docs_anchor"],
-      "additionalProperties": false,
-      "properties": {
-        "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]{1,31}$" },
-        "name": { "type": "string", "minLength": 1 },
-        "token_label": { "type": "string", "minLength": 1 },
-        "steps": { "type": "array", "minItems": 1, "maxItems": 8, "items": { "type": "string", "minLength": 1 } },
-        "console_url": { "type": "string", "pattern": "^https://" },
-        "docs_anchor": { "type": "string", "pattern": "^[a-z0-9-]+$" }
-      }
-    },
     "homeProvisionProviderId": {
-      "description": "A provider home.provision.providers lists.",
+      "description": "A provider the summary's detail.providers lists.",
       "type": "string",
       "pattern": "^[a-z][a-z0-9-]{1,31}$"
     },
-    "home_provision_connect_params": {
-      "type": "object",
-      "required": ["provider", "token"],
-      "additionalProperties": false,
-      "properties": {
-        "provider": { "$ref": "#/$defs/homeProvisionProviderId" },
-        "token": {
-          "description": "An API token of the provider's account made for Fermix, with the permission its steps name. Kept only in this computer's device/provision/<provider>.json, never logged, traced or answered.",
-          "type": "string",
-          "minLength": 16,
-          "maxLength": 512,
-          "pattern": "^[!-~]+$"
-        }
-      }
-    },
-    "home_provision_connect_result": { "$ref": "#/$defs/homeProvisionView" },
     "home_provision_options_params": {
       "type": "object",
       "required": ["provider"],
@@ -6237,105 +6148,74 @@
         "location": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,31}$" }
       }
     },
-    "home_provision_create_params": {
+    "home_act_params": {
       "type": "object",
-      "description": "provider is one home.provision.providers lists, and location one its options name. replace (default false) is true only on the linked desktop whose ledger of that provider holds the server the home lives on: the new server is created with a 24-hour code the old server opens, and the old one is deleted once the move to the new one is done.",
-      "required": ["provider", "type", "location"],
+      "description": "One Always On step: an action the summary offers (its action, an alternative or one of on's detail.actions) and the key it was drawn with, with what the action's needs asked for. learn_more, open_console and update are opened by the surface and refused here on action. The key is checked against the summary as it is now: one that does not offer the action under it answers changed, and nothing is done.",
+      "required": ["action", "key"],
       "additionalProperties": false,
       "properties": {
-        "provider": { "$ref": "#/$defs/homeProvisionProviderId" },
-        "type": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,31}$" },
-        "location": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,31}$" },
-        "replace": { "type": "boolean" }
-      }
-    },
-    "home_provision_create_result": { "$ref": "#/$defs/jobView" },
-    "home_provision_power_params": {
-      "type": "object",
-      "required": ["action"],
-      "additionalProperties": false,
-      "properties": { "action": { "enum": ["on", "reset"] } }
-    },
-    "home_provision_power_result": { "$ref": "#/$defs/jobView" },
-    "home_provision_resources_params": { "type": "object", "maxProperties": 0, "additionalProperties": false },
-    "home_provision_resources_result": { "$ref": "#/$defs/homeProvisionView" },
-    "home_provision_delete_params": { "type": "object", "maxProperties": 0, "additionalProperties": false },
-    "home_provision_delete_result": { "$ref": "#/$defs/jobView" },
-    "homeProvisionView": {
-      "type": "object",
-      "description": "What Fermix created on a provider, from this computer's ledger of it. provider is that provider's id: the one Fermix created something on, else the one whose token was given last, else the first home.provision.providers lists (for home.provision.connect, the one connected). state is none (no token), connected, creating, created (the server exists and waits for its enrollment and move), deleting, gone (deleted outside Fermix), failed (the last create stopped; failure says why) or unreadable. replace, while one is recorded, says where a replace of the server stands, and state and server are then the new server's. other_servers is answered by home.provision.connect, checked and sentence by home.provision.resources: whether the provider was read just now, and why not. The token is never answered.",
-      "required": ["provider", "state", "token", "server", "failure", "replace", "resources", "sentence"],
-      "additionalProperties": false,
-      "properties": {
-        "provider": { "$ref": "#/$defs/homeProvisionProviderId" },
-        "state": { "enum": ["none", "connected", "creating", "created", "deleting", "gone", "failed", "unreadable"] },
-        "token": { "enum": ["none", "accepted", "refused"] },
-        "server": { "oneOf": [{ "$ref": "#/$defs/homeProvisionServer" }, { "type": "null" }] },
-        "failure": { "oneOf": [{ "$ref": "#/$defs/homeProvisionFailure" }, { "type": "null" }] },
-        "replace": { "oneOf": [{ "$ref": "#/$defs/homeProvisionReplace" }, { "type": "null" }] },
-        "resources": { "type": "array", "maxItems": 8, "items": { "$ref": "#/$defs/homeProvisionResource" } },
-        "sentence": { "type": ["string", "null"] },
-        "other_servers": { "type": "boolean" },
-        "checked": { "type": "boolean" }
-      }
-    },
-    "homeProvisionReplace": {
-      "type": "object",
-      "description": "A replace of the server from the linked desktop. state is creating (the new server), waiting (it exists and waits for its enrollment and move), moving (this desktop started the move to it; the old server serves nothing meanwhile), deleting (the move is done and the old server is being deleted, once), done, failed (failure says why: the new server's create stopped or it was deleted at its provider, reason gone, with current old; or deleting the old server stopped, with current new, and it stays listed for home.provision.delete) or cancelling (the new server is being deleted before the move). current is the server that holds the home: old until the move is done, then new. old is the old server's facts, null once it is deleted.",
-      "required": ["state", "current", "old", "failure"],
-      "additionalProperties": false,
-      "properties": {
-        "state": { "enum": ["creating", "waiting", "moving", "deleting", "done", "failed", "cancelling"] },
-        "current": { "enum": ["old", "new"] },
-        "old": { "oneOf": [{ "$ref": "#/$defs/homeProvisionServer" }, { "type": "null" }] },
-        "failure": { "oneOf": [{ "$ref": "#/$defs/homeProvisionFailure" }, { "type": "null" }] }
-      }
-    },
-    "homeProvisionServer": {
-      "type": "object",
-      "required": ["name", "type", "location", "status", "power", "ipv4", "created_at", "seen_at"],
-      "additionalProperties": false,
-      "properties": {
-        "name": { "type": "string", "pattern": "^fermix-[a-z0-9-]+-[0-9a-f]{4}$" },
-        "type": { "type": "string" },
-        "location": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,31}$" },
-        "status": { "$ref": "#/$defs/homeProvisionStatus" },
-        "power": {
-          "description": "The server's status as its provider last reported it: running, off, or another word of the provider's (starting and the like); null before it was read.",
-          "type": ["string", "null"]
+        "action": {
+          "enum": [
+            "paste_token",
+            "create_server",
+            "cancel",
+            "move_now",
+            "try_again",
+            "turn_on",
+            "restart_server",
+            "start_again",
+            "create_in",
+            "back_up_now",
+            "replace_server",
+            "check_again",
+            "own_server",
+            "delete_server"
+          ]
         },
-        "ipv4": { "type": ["string", "null"] },
-        "created_at": { "type": ["string", "null"] },
-        "seen_at": { "type": ["string", "null"] }
+        "key": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "input": { "$ref": "#/$defs/homeActInput" }
       }
     },
-    "homeProvisionStatus": {
-      "description": "requested (written before the call that creates it), creating, created, deleting or gone (deleted outside Fermix).",
-      "enum": ["requested", "creating", "created", "deleting", "gone"]
-    },
-    "homeProvisionFailure": {
+    "homeActInput": {
       "type": "object",
-      "description": "Why the last create stopped, or why deleting a replaced server stopped: reason is a word (unavailable, account_limit, read_only_token, token_refused, rate_limited, unreachable, other (the provider's own refusal, in its words), gone and the engine's own), sentence the daemon's words, next_location the next location in stock when the provider had no capacity.",
-      "required": ["reason", "sentence", "next_location", "at"],
+      "description": "What the action's needs collected: token (needs token; provider names one of detail.providers, else the one there is), recovery_passphrase (needs recovery_passphrase, typed once, or new_recovery_passphrase, typed twice and compared by the surface), type and location (needs choice: both, from home.provision.options, or neither for the recommendation). Never logged, never answered.",
       "additionalProperties": false,
       "properties": {
-        "reason": { "type": "string" },
-        "sentence": { "type": "string", "minLength": 1 },
-        "next_location": { "oneOf": [{ "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,31}$" }, { "type": "null" }] },
-        "at": { "type": "string" }
+        "token": { "type": "string", "maxLength": 512 },
+        "provider": { "$ref": "#/$defs/homeProvisionProviderId" },
+        "recovery_passphrase": { "type": "string", "minLength": 12, "maxLength": 1024 },
+        "type": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,31}$" },
+        "location": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,31}$" }
       }
     },
-    "homeProvisionResource": {
+    "home_act_result": {
       "type": "object",
-      "description": "One thing Fermix created and its provider bills for until it is deleted: the server, its firewall or one of its primary addresses (named by the address). replaced is true for the old server's, while a replace keeps it.",
-      "required": ["kind", "name", "id", "status", "replaced"],
+      "description": "The summary after the step, and the step's own result: own_server's code (answered once, never again) with the command for the server, which carries no code; move_now's and try_again's move id; null for every other step.",
+      "required": ["summary", "result"],
       "additionalProperties": false,
       "properties": {
-        "kind": { "enum": ["server", "firewall", "primary_ip"] },
-        "name": { "type": ["string", "null"] },
-        "id": { "description": "The provider's own id of the resource, opaque to Fermix; null until the provider answered with one.", "type": ["string", "null"], "minLength": 1, "maxLength": 128 },
-        "status": { "$ref": "#/$defs/homeProvisionStatus" },
-        "replaced": { "type": "boolean" }
+        "summary": { "$ref": "#/$defs/homeSummary" },
+        "result": {
+          "oneOf": [
+            {
+              "type": "object",
+              "required": ["code", "expires_at", "command"],
+              "additionalProperties": false,
+              "properties": {
+                "code": { "type": "string", "maxLength": 2048, "pattern": "^fxenroll1\\.[A-Za-z0-9_-]+$" },
+                "expires_at": { "type": "string" },
+                "command": { "type": "string", "minLength": 1 }
+              }
+            },
+            {
+              "type": "object",
+              "required": ["move_id"],
+              "additionalProperties": false,
+              "properties": { "move_id": { "type": "string", "minLength": 1 } }
+            },
+            { "type": "null" }
+          ]
+        }
       }
     },
     "homeCandidate": {

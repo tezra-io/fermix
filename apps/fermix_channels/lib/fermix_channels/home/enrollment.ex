@@ -10,7 +10,7 @@ defmodule FermixChannels.Home.Enrollment do
   relays its endpoint listens on (the ones every paired device acknowledged),
   the host's name and the expiry. A window has a kind (M75 lean v1 L15):
   `:manual`, the code a person copies onto a server of their own
-  (`home.enroll.open`), lives thirty minutes; `:provisioned`, the code Fermix
+  (Always On's `own_server`, `home.act`), lives thirty minutes; `:provisioned`, the code Fermix
   puts inside a server it creates (`FermixCore.Home.Provision`), lives 24
   hours, so a slow install or a sleeping computer does not fail it. Only one
   window is open at a time, so a manual one is refused, in one sentence,
@@ -18,9 +18,10 @@ defmodule FermixChannels.Home.Enrollment do
   the server that waits for its own), and, in another, while a used
   provisioned window's candidate is still held, or still enrolling within
   the window: replacing that window would lose which candidate the created
-  server is. `withdraw/1` releases the provisioned window when its server
-  was never created or is being deleted (an open one ends now) and leaves a
-  manual one alone. The
+  server is. `withdraw/2` releases the window of the kind it names: the
+  provisioned one when its server was never created or is being deleted,
+  the manual one when the owner cancels its code (an open one ends now); a
+  window of the other kind is left alone. The
   code is answered once and never logged; the window (its kind, secret,
   expiry, and who used it) is kept in `<home>/mobile/enrollment.json`
   (`0600`, device-local), so an engine restart between opening a code and the
@@ -123,13 +124,17 @@ defmodule FermixChannels.Home.Enrollment do
     do: GenServer.call(server, {:open, kind}, 15_000)
 
   @doc """
-  Releases a provisioned window, so it holds no copied code back: one still
-  open ends now (its secret leaves the disk), a used one stays as the record
-  of who used it. A manual window, or none, is left as it is. Answers `:ok`,
-  or `{:error, {:unavailable, sentence}}` when the window could not be kept.
+  Releases the window when it is of `kind`, so it holds no copied code back:
+  one still open ends now (its secret leaves the disk), a used one stays as
+  the record of who used it. A provisioned window is released when its
+  server was never created or is being deleted, a manual one when the owner
+  cancels its code; a window of the other kind, or none, is left as it is.
+  Answers `:ok`, or `{:error, {:unavailable, sentence}}` when the window
+  could not be kept.
   """
-  @spec withdraw(GenServer.server()) :: :ok | {:error, {:unavailable, String.t()}}
-  def withdraw(server \\ __MODULE__), do: GenServer.call(server, :withdraw)
+  @spec withdraw(GenServer.server(), kind()) :: :ok | {:error, {:unavailable, String.t()}}
+  def withdraw(server \\ __MODULE__, kind) when kind in @kinds,
+    do: GenServer.call(server, {:withdraw, kind})
 
   @doc "Whether a window is held (open, used or expired); false when no window process runs."
   @spec window?(GenServer.server()) :: boolean()
@@ -207,10 +212,10 @@ defmodule FermixChannels.Home.Enrollment do
     end
   end
 
-  def handle_call(:withdraw, _from, %{window: %{kind: :provisioned, withdrawn?: false}} = state),
+  def handle_call({:withdraw, kind}, _from, %{window: %{kind: kind, withdrawn?: false}} = state),
     do: withdraw_window(state)
 
-  def handle_call(:withdraw, _from, state), do: {:reply, :ok, state}
+  def handle_call({:withdraw, _kind}, _from, state), do: {:reply, :ok, state}
 
   def handle_call(:window?, _from, state), do: {:reply, state.window != nil, state}
   def handle_call(:secret, _from, %{window: nil} = state), do: {:reply, :none, state}
@@ -365,7 +370,7 @@ defmodule FermixChannels.Home.Enrollment do
   # disk; a used one keeps its expiry and who used it.
   defp withdraw_window(%{window: window} = state) do
     now = DateTime.truncate(state.clock.(), :second)
-    Logger.info("enrollment: the provisioned window was withdrawn")
+    Logger.info("enrollment: the #{window.kind} window was withdrawn")
 
     expires_at =
       if window_state(window, now) == :open, do: now, else: window.expires_at

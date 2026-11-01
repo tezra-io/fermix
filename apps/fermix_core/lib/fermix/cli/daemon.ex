@@ -30,9 +30,10 @@ defmodule Fermix.CLI.Daemon do
   passed this socket's own owner placement is answered here when it is
   device-class (`FermixCore.Management.Placement`) and sent to the primary
   through `FermixCore.Home.Link` when it is primary-class; no request takes
-  both paths. Beside a forwarded `home.move.start`, the Always On ledger
-  keeps that this desktop started the move to a server replacing the one the
-  home lives on (`FermixCore.Management.Provision.move_forwarded/3`). A composed request (`home.status`, `settings.sections`) is
+  both paths. The server's Always On steps (`Placement.rail_only?/1`) are
+  refused here by name in every role: a linked desktop's own `home.act`
+  sends them over the link, and keeps a replace's move in its ledger itself.
+  A composed request (`home.status`, `settings.sections`) is
   answered here, and the router asks the primary for its part through the
   same link (`:primary_forward`). On the primary, `serve_forwarded/3` answers a
   request a desktop forwarded exactly as this socket would, with the router's
@@ -63,7 +64,6 @@ defmodule Fermix.CLI.Daemon do
   alias FermixCore.Management.Mobile, as: ManagementMobile
   alias FermixCore.Management.Placement
   alias FermixCore.Management.Protocol, as: ManagementProtocol
-  alias FermixCore.Management.Provision, as: ManagementProvision
   alias FermixCore.Management.Router, as: ManagementRouter
   alias FermixCore.Management.Secrets, as: ManagementSecrets
   alias FermixCore.Management.Settings.Cues, as: SettingsCues
@@ -98,18 +98,13 @@ defmodule Fermix.CLI.Daemon do
   # on the phone that asked, closing the window, and forgetting a device.
   @mobile_decisions_v1 ~w(mobile.pair.start mobile.pair.decide mobile.pair.cancel
                           mobile.devices.revoke)
-  # Opening a code that lets a server take this home, closing the one inside
-  # a server Fermix creates (its server would never enroll), reviewing a move
-  # (the review reads every keychain secret the move would carry) and
-  # starting it, and replacing the recovery key (M75).
-  @home_decisions_v1 ~w(home.enroll.open home.enroll.withdraw home.move.readiness
-                        home.move.start home.snapshots.passphrase)
-  # Giving Fermix a cloud provider's token (it decides which account Fermix
-  # acts in), creating the Always On server, turning it on or resetting it, and
-  # deleting it: each can spend the owner's money or take the home away (M75
-  # lean v1 §4.3). The reads stay open.
-  @provision_decisions_v1 ~w(home.provision.connect home.provision.create
-                             home.provision.power home.provision.delete)
+  # Every Always On step (Always On setup §6): giving Fermix a cloud
+  # provider's token (it decides which account Fermix acts in), creating,
+  # powering and deleting the server (each spends the owner's money or can
+  # take the home away), opening a code that lets a server take this home,
+  # reviewing a move (the review reads every keychain secret it would carry)
+  # and starting it; and replacing the recovery key (M75). The reads stay open.
+  @home_decisions_v1 ~w(home.act home.snapshots.passphrase)
   # Opening the setup page: its session drives every decision the page offers,
   # the owner's included (Always On setup §6). `fermix setup` mints its own
   # launch token in-process and never asks here; the Mac app's agent is an
@@ -421,17 +416,25 @@ defmodule Fermix.CLI.Daemon do
     maybe_finalize(response, state)
   end
 
+  # The server's Always On steps answer a desktop's forward alone (Always On
+  # setup §3.5), so this socket refuses each by name before anything else.
   defp handle_v1_request(conn, request, state) do
-    family = owner_family(request.method, request.params)
-
     result =
-      case owner_caller(family, request.method, conn, state) do
-        :ok -> dispatch_management_request(request, state)
-        {:error, _verdict} -> owner_decision_refusal(family)
-      end
+      if Placement.rail_only?(request.method),
+        do: Placement.rail_only_refusal(request.method),
+        else: placed_request(request, conn, state)
 
     response = management_response(request.request_id, result)
     send_response(conn, response)
+  end
+
+  defp placed_request(request, conn, state) do
+    family = owner_family(request.method, request.params)
+
+    case owner_caller(family, request.method, conn, state) do
+      :ok -> dispatch_management_request(request, state)
+      {:error, _verdict} -> owner_decision_refusal(family)
+    end
   end
 
   # Whose decision a v1 request is, or nil when it is nobody's. The generic
@@ -441,7 +444,6 @@ defmodule Fermix.CLI.Daemon do
   # Every other secret and section stays open, as it was.
   defp owner_family(method, _params) when method in @mobile_decisions_v1, do: :mobile
   defp owner_family(method, _params) when method in @home_decisions_v1, do: :home
-  defp owner_family(method, _params) when method in @provision_decisions_v1, do: :provision
   defp owner_family(method, _params) when method in @cue_decisions_v1, do: :cues
   defp owner_family(method, _params) when method in @setup_decisions_v1, do: :setup
 
@@ -471,21 +473,13 @@ defmodule Fermix.CLI.Daemon do
   # channel is fine and doctor says so, so "not running" would send the
   # operator after the wrong fault. The capability and the sentence are the
   # request's family's: the phone's own pair for its pairing methods, the
-  # cues' for theirs and for a cue write that rides a generic method, for
-  # M75's the home move's, and the Always On server's own.
+  # cues' for theirs and for a cue write that rides a generic method, and for
+  # Always On's and the recovery key the home's.
   defp owner_decision_refusal(:home) do
     {:error, :unavailable,
      %{
        "capability" => ManagementHomeMove.capability(),
        "sentence" => ManagementHomeMove.owner_only_sentence()
-     }}
-  end
-
-  defp owner_decision_refusal(:provision) do
-    {:error, :unavailable,
-     %{
-       "capability" => ManagementProvision.capability(),
-       "sentence" => ManagementProvision.owner_only_sentence()
      }}
   end
 
@@ -529,26 +523,12 @@ defmodule Fermix.CLI.Daemon do
         route_management_request(request, opts)
 
       :primary ->
-        guarded(request.method, fn -> forward(request, forward, state) end)
+        guarded(request.method, fn -> forward.(request, []) end)
     end
   end
 
   defp dispatch_management_request(request, state),
     do: route_management_request(request, management_opts(state))
-
-  # A move the primary starts to a server that replaces it (M75 lean v1
-  # §4.3): that server serves nothing while it moves, so this desktop keeps,
-  # in its Always On ledger, that it started the move.
-  defp forward(%{method: "home.move.start"} = request, forward, state) do
-    answer = forward.(request, [])
-    _recorded = ManagementProvision.move_forwarded(request.params, answer, provision_opts(state))
-    answer
-  end
-
-  defp forward(request, forward, _state), do: forward.(request, [])
-
-  defp provision_opts(state),
-    do: state.management_opts |> Keyword.get(:operation_opts, []) |> Keyword.get(:provision, [])
 
   defp route_management_request(request, opts),
     do: guarded(request.method, fn -> ManagementRouter.route(request, opts) end)

@@ -1,6 +1,8 @@
 defmodule FermixCore.Management.HomeMoveTest do
   # M75 §7, §14: enrollment and the move in the home.* family, through the
-  # router as a daemon answers them.
+  # router as a daemon answers them. The server's Always On steps
+  # (`Placement.rail_only?/1`) are served only to a desktop's forward, and
+  # the manual code opened here is `home.act`'s, so it is called directly.
   use ExUnit.Case, async: true
 
   alias FermixCore.Home.Candidate
@@ -10,6 +12,7 @@ defmodule FermixCore.Management.HomeMoveTest do
   alias FermixCore.Home.Move
   alias FermixCore.Home.Role
   alias FermixCore.Home.Snapshot.Recipient
+  alias FermixCore.Management.HomeMove
   alias FermixCore.Management.Protocol
   alias FermixCore.Management.Router
   alias FermixTestSupport.SafeRm
@@ -18,6 +21,7 @@ defmodule FermixCore.Management.HomeMoveTest do
   @primary %{role: :primary, primary: nil}
   @candidate %{role: :candidate, primary: nil}
   @device %{role: :device, primary: "north-box"}
+  @desktop {:desktop, "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e"}
   @passphrase "invented-lantern-orchard"
 
   setup do
@@ -55,6 +59,11 @@ defmodule FermixCore.Management.HomeMoveTest do
       [engine_role: role, operation_opts: [home: seams]] ++ opts
     )
   end
+
+  # The server answering a desktop's forward over the rail, the one caller a
+  # rail-only method is served to.
+  defp forwarded(method, params, role, seams),
+    do: route(method, params, role, seams, actor: @desktop)
 
   describe "a candidate's daemon socket" do
     test "answers home.status and refuses every other method by name", ctx do
@@ -105,26 +114,25 @@ defmodule FermixCore.Management.HomeMoveTest do
         end)
 
       assert {:ok, %{"code" => "fxenroll1.abc", "expires_at" => "2031-05-04T10:10:00Z"}} =
-               route("home.enroll.open", %{}, @primary, seams)
+               HomeMove.enroll_open(nil, [engine_role: @primary] ++ seams)
 
       refused =
         Keyword.put(ctx.seams, :open_enrollment, fn :manual ->
           {:error, {:unavailable, "Remote reach is off."}}
         end)
 
-      assert {:error, :unavailable,
-              %{"capability" => "home", "sentence" => "Remote reach is off."}} =
-               route("home.enroll.open", %{}, @primary, refused)
+      assert {:error, {:unavailable, "home", "Remote reach is off."}} =
+               HomeMove.enroll_open(nil, [engine_role: @primary] ++ refused)
 
-      assert {:error, :unavailable,
-              %{"sentence" => "Only the primary enrolls candidates and starts a move."}} =
-               route("home.enroll.open", %{}, @device, seams)
+      assert {:error,
+              {:unavailable, "home", "Only the primary enrolls candidates and starts a move."}} =
+               HomeMove.enroll_open(nil, [engine_role: @device] ++ seams)
 
       assert {:error, :invalid_params, _details} =
-               route("home.enroll.open", %{"code" => "x"}, @primary, seams)
+               forwarded("home.enroll.open", %{"code" => "x"}, @primary, seams)
 
       assert {:ok, %{"code" => "fxenroll1.abc"}} =
-               route("home.enroll.open", %{"kind" => "manual"}, @primary, seams)
+               HomeMove.enroll_open("manual", [engine_role: @primary] ++ seams)
     end
 
     # M75 lean v1 L15, §4.3: the code inside a server Fermix creates lives 24
@@ -139,21 +147,27 @@ defmodule FermixCore.Management.HomeMoveTest do
         end)
 
       assert {:ok, %{"code" => "fxenroll1.def", "expires_at" => "2031-05-05T10:00:00Z"}} =
-               route("home.enroll.open", %{"kind" => "provisioned"}, @primary, seams,
-                 actor: {:desktop, "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e"}
-               )
+               forwarded("home.enroll.open", %{"kind" => "provisioned"}, @primary, seams)
 
       assert_received {:opened, :provisioned}
 
-      assert {:error, :invalid_params, %{"field" => "kind", "sentence" => sentence}} =
-               route("home.enroll.open", %{"kind" => "provisioned"}, @primary, seams)
+      # Anything but a desktop's forward is refused by name: `home.act` takes the step.
+      assert {:error, :unavailable,
+              %{
+                "capability" => "home",
+                "method" => "home.enroll.open",
+                "sentence" => <<_, _::binary>>
+              }} = route("home.enroll.open", %{"kind" => "provisioned"}, @primary, seams)
+
+      assert {:error, {:invalid_params, "kind", sentence}} =
+               HomeMove.enroll_open("provisioned", [engine_role: @primary] ++ seams)
 
       assert sentence ==
                "A code that lives 24 hours opens only for a server Fermix creates from your " <>
                  "computer."
 
       assert {:error, :invalid_params, %{"field" => "kind"}} =
-               route("home.enroll.open", %{"kind" => "forever"}, @primary, seams)
+               forwarded("home.enroll.open", %{"kind" => "forever"}, @primary, seams)
 
       refute_received {:opened, _kind}
     end
@@ -164,16 +178,18 @@ defmodule FermixCore.Management.HomeMoveTest do
       test = self()
 
       seams =
-        Keyword.put(ctx.seams, :withdraw_enrollment, fn ->
+        Keyword.put(ctx.seams, :withdraw_enrollment, fn :provisioned ->
           send(test, :withdrawn)
           :ok
         end)
 
-      assert {:ok, %{"withdrawn" => true}} = route("home.enroll.withdraw", %{}, @primary, seams)
+      assert {:ok, %{"withdrawn" => true}} =
+               forwarded("home.enroll.withdraw", %{}, @primary, seams)
+
       assert_received :withdrawn
 
       refused =
-        Keyword.put(ctx.seams, :withdraw_enrollment, fn ->
+        Keyword.put(ctx.seams, :withdraw_enrollment, fn :provisioned ->
           {:error, {:unavailable, "Fermix could not keep the enrollment window."}}
         end)
 
@@ -182,14 +198,22 @@ defmodule FermixCore.Management.HomeMoveTest do
                 "capability" => "home",
                 "sentence" => "Fermix could not keep the enrollment window."
               }} =
-               route("home.enroll.withdraw", %{}, @primary, refused)
+               forwarded("home.enroll.withdraw", %{}, @primary, refused)
 
       assert {:error, :unavailable,
               %{"sentence" => "Only the primary enrolls candidates and starts a move."}} =
-               route("home.enroll.withdraw", %{}, @device, seams)
+               forwarded("home.enroll.withdraw", %{}, @device, seams)
 
       assert {:error, :invalid_params, _details} =
-               route("home.enroll.withdraw", %{"kind" => "manual"}, @primary, seams)
+               forwarded("home.enroll.withdraw", %{"kind" => "manual"}, @primary, seams)
+
+      assert {:error, :unavailable,
+              %{
+                "capability" => "home",
+                "method" => "home.enroll.withdraw",
+                "sentence" => <<_, _::binary>>
+              }} =
+               route("home.enroll.withdraw", %{}, @primary, seams)
 
       refute_received :withdrawn
     end
@@ -240,7 +264,7 @@ defmodule FermixCore.Management.HomeMoveTest do
       {:ok, record} = Candidates.add(ctx.home, candidate_attrs(), @now)
 
       assert {:ok, %{"ready" => true, "items" => items}} =
-               route(
+               forwarded(
                  "home.move.readiness",
                  %{"candidate_id" => record.candidate_id},
                  @primary,
@@ -259,10 +283,15 @@ defmodule FermixCore.Management.HomeMoveTest do
       {:ok, record} = Candidates.add(ctx.home, candidate_attrs(), @now)
 
       assert {:error, :invalid_params, %{"field" => "candidate_id"}} =
-               route("home.move.readiness", %{"candidate_id" => "cand-0"}, @primary, ctx.seams)
+               forwarded(
+                 "home.move.readiness",
+                 %{"candidate_id" => "cand-0"},
+                 @primary,
+                 ctx.seams
+               )
 
       assert {:error, :unavailable, %{"capability" => "home"}} =
-               route(
+               forwarded(
                  "home.move.readiness",
                  %{"candidate_id" => record.candidate_id},
                  @device,
@@ -270,7 +299,7 @@ defmodule FermixCore.Management.HomeMoveTest do
                )
 
       assert {:error, :invalid_params, %{"field" => "candidate_id"}} =
-               route("home.move.readiness", %{}, @primary, ctx.seams)
+               forwarded("home.move.readiness", %{}, @primary, ctx.seams)
     end
   end
 
@@ -281,7 +310,7 @@ defmodule FermixCore.Management.HomeMoveTest do
       params = %{"candidate_id" => record.candidate_id, "recovery_passphrase" => @passphrase}
 
       assert {:error, :unavailable, %{"capability" => "home", "sentence" => sentence}} =
-               route("home.move.start", params, @primary, seams)
+               forwarded("home.move.start", params, @primary, seams)
 
       assert sentence =~ "The move cannot start yet."
       assert sentence =~ "make room first"
@@ -293,7 +322,7 @@ defmodule FermixCore.Management.HomeMoveTest do
       {:ok, record} = Candidates.add(ctx.home, candidate_attrs(), @now)
       params = %{"candidate_id" => record.candidate_id, "recovery_passphrase" => @passphrase}
 
-      assert {:ok, answer} = route("home.move.start", params, @primary, ctx.seams)
+      assert {:ok, answer} = forwarded("home.move.start", params, @primary, ctx.seams)
       assert_received :restarted
 
       assert "mv-" <> _id = answer["move_id"]
@@ -317,7 +346,7 @@ defmodule FermixCore.Management.HomeMoveTest do
       seams = Keyword.put(ctx.seams, :config, recipient: Recipient.encode(kept))
       params = %{"candidate_id" => record.candidate_id, "recovery_passphrase" => @passphrase}
 
-      assert {:ok, answer} = route("home.move.start", params, @primary, seams)
+      assert {:ok, answer} = forwarded("home.move.start", params, @primary, seams)
       assert answer["recovery_recipient"] == Recipient.encode(kept)
       assert {:ok, %{"recovery_recipient" => carried}} = Move.read_request(ctx.home)
       assert carried == Recipient.encode(kept)
@@ -334,7 +363,7 @@ defmodule FermixCore.Management.HomeMoveTest do
         "recovery_passphrase" => "invented-orchard-meridian"
       }
 
-      assert route("home.move.start", params, @primary, seams) ==
+      assert forwarded("home.move.start", params, @primary, seams) ==
                {:error, :invalid_params,
                 %{
                   "field" => "recovery_passphrase",
@@ -350,7 +379,7 @@ defmodule FermixCore.Management.HomeMoveTest do
       {:ok, record} = Candidates.add(ctx.home, candidate_attrs(), @now)
       params = %{"candidate_id" => record.candidate_id, "recovery_passphrase" => @passphrase}
 
-      assert {:ok, answer} = route("home.move.start", params, @primary, ctx.seams)
+      assert {:ok, answer} = forwarded("home.move.start", params, @primary, ctx.seams)
       assert_received {:saved, saved}
       assert answer["recovery_recipient"] == Recipient.encode(saved)
       assert {:ok, %{"recovery_recipient" => carried}} = Move.read_request(ctx.home)
@@ -361,7 +390,7 @@ defmodule FermixCore.Management.HomeMoveTest do
       {:ok, record} = Candidates.add(ctx.home, candidate_attrs(), @now)
 
       assert {:error, :invalid_params, %{"field" => "recovery_passphrase"}} =
-               route(
+               forwarded(
                  "home.move.start",
                  %{"candidate_id" => record.candidate_id, "recovery_passphrase" => "short"},
                  @primary,
@@ -369,7 +398,7 @@ defmodule FermixCore.Management.HomeMoveTest do
                )
 
       assert {:error, :invalid_params, %{"field" => "candidate_id", "sentence" => sentence}} =
-               route(
+               forwarded(
                  "home.move.start",
                  %{"candidate_id" => "cand-0", "recovery_passphrase" => @passphrase},
                  @primary,
@@ -379,15 +408,28 @@ defmodule FermixCore.Management.HomeMoveTest do
       assert sentence =~ "No server waiting for the move has the id cand-0"
 
       assert {:error, :unavailable, %{"capability" => "home"}} =
-               route(
+               forwarded(
                  "home.move.start",
                  %{"candidate_id" => record.candidate_id, "recovery_passphrase" => @passphrase},
                  @device,
                  ctx.seams
                )
 
-      assert {:error, :invalid_params, _details} =
+      assert {:error, :unavailable,
+              %{
+                "capability" => "home",
+                "method" => "home.move.start",
+                "sentence" => <<_, _::binary>>
+              }} =
                route(
+                 "home.move.start",
+                 %{"candidate_id" => record.candidate_id, "recovery_passphrase" => @passphrase},
+                 @primary,
+                 ctx.seams
+               )
+
+      assert {:error, :invalid_params, _details} =
+               forwarded(
                  "home.move.start",
                  %{
                    "candidate_id" => record.candidate_id,

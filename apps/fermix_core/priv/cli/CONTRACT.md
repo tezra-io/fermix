@@ -52,11 +52,8 @@ never parses the sentence.
 | `fermix home mark-moved --to TEXT --json` | the moved result |
 | `fermix home status --json` | the home result |
 | `fermix home snapshots status --json` | the snapshots result |
-| `fermix home snapshots run --json` | the management `home.snapshots.run` result |
 | `fermix home snapshots passphrase --passphrase-file PATH --json` | the management `home.snapshots.passphrase` result |
-| `fermix home enroll-code --json` | the management `home.enroll.open` result |
 | `fermix home candidates --json` | the candidates result |
-| `fermix home move --to ID [--recovery-passphrase-file PATH] [--retire] --json` | the move result |
 
 `fermix service run` is the systemd vendor unit's launch entry point. It is not
 a machine-mode verb: it becomes the daemon and never returns an envelope.
@@ -253,24 +250,16 @@ alone.
 | `targets` | array | One row per target: `id`, `label`, `configured`, `destination`, `last_attempt_at`, `last_result` (`verified`, `failed`, `waiting` for a target that takes it at a later run, such as a sleeping desktop, or null), `last_verified` (`at`, `name`, `epoch`, `size`, `sha256`, `location`, `key_id` (the recovery key it opens with, or null), or null), `last_error` (the newest failure's sentence, or null), `waiting` (why the last run left it waiting, or null). |
 | `sentence` | string | One sentence for the state as a whole. |
 
-`fermix home snapshots run --json` and `fermix home snapshots passphrase
---json` print the management result unchanged (`{started, snapshots}` and
-`{recipient, key_id, snapshots, sentence}`, the sentence saying that
-snapshots written before open only with the earlier passphrase); both need
-Fermix running and refuse with
-`engine_stopped` otherwise. The passphrase is read from `--passphrase-file`
-or asked twice without echo, and never printed.
+`fermix home snapshots passphrase --json` prints the management result
+unchanged (`{recipient, key_id, snapshots, sentence}`, the sentence saying
+that snapshots written before open only with the earlier passphrase); it
+needs Fermix running and refuses with `engine_stopped` otherwise. The
+passphrase is read from `--passphrase-file` or asked twice without echo, and
+never printed.
 
 Goldens: `home_status/primary.json`, `home_snapshots_status/ok.json`.
 
-## The enrollment and move results
-
-`fermix home enroll-code --json` prints the management `home.enroll.open`
-result unchanged (`{code, expires_at}`). The code is single use, valid for
-thirty minutes (an engine restart in between keeps it), shown once and never
-logged. It needs Fermix running on the primary
-and refuses with `engine_stopped` otherwise; a refusal the engine answered is
-`enrollment_refused`, carrying the engine's sentence.
+## The candidates result
 
 `fermix home candidates --json` answers `{candidates}`, the candidate primaries
 this home holds, from the engine when it runs and from the home's own file when
@@ -279,7 +268,7 @@ once, and its row is never its keys:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `candidate_id` | string | `cand-` and 16 hex digits: what `fermix home move --to` takes. |
+| `candidate_id` | string | `cand-` and 16 hex digits. |
 | `name` | string | The name the host gave itself. |
 | `os` | string | The host's operating system. |
 | `arch` | string | The host's architecture. |
@@ -291,26 +280,6 @@ once, and its row is never its keys:
 
 A refusal is `home_status_unavailable`.
 
-`fermix home move --to ID --json` answers with the move as it was written:
-`move_id` (`mv-` and 20 hex digits, ordered by when the move started), `candidate` (the row above),
-`recovery_recipient` and `key_id` (the public half of the recovery key the
-primary keeps, as `home.snapshots.passphrase` answers them: the passphrase is
-checked against it, or sets it when none is set),
-`keep_as_desktop` (true: this computer becomes a desktop of the new primary)
-and `sentence`. This is the management `home.move.start` result, and the
-engine then restarts in the device role and carries the move out. With Fermix
-stopped the move is refused as `engine_stopped`: no running engine holds the
-key to check the passphrase against. `--retire` is for a server that is itself
-the primary, being replaced by another server and then destroyed: the move
-keeps no desktop here (`home.move.start` with `keep_as_desktop` false), so
-`keep_as_desktop` is false and the engine hands the home over and then serves
-nothing. The recovery passphrase is read from
-`--recovery-passphrase-file` or asked twice without echo, and never printed. A
-refusal is `move_refused`, carrying the engine's sentence (That is not the
-recovery passphrase you set., for one that is not), or each item of the
-move's readiness report (`home.move.readiness`) that blocks it, after `The
-move cannot start yet.`
-
 `fermix home enroll --code-file PATH [--snapshot-bucket B --snapshot-region R]`
 is not a machine-mode verb: it takes no `--json` and no running Fermix, and
 makes a fresh home a candidate. It exits `0` with one line
@@ -321,7 +290,7 @@ never enrolled (its enrollment still trying, or refused) is replaced, the old
 candidate kept until the new one is in place; one that enrolled and waits for
 its move is refused, and so is any home while Fermix runs in it.
 
-Goldens: `home_candidates/ok.json`, `home_move/ok.json`, `home_move/retired.json`.
+Golden: `home_candidates/ok.json`.
 
 ## Error codes
 
@@ -354,8 +323,6 @@ sentence interpolates a fact, the example below is the golden's.
 - `engine_stopped` — Fermix is not running from this home, and this needs it. Start it, then try again.
 - `snapshots_refused` — Fermix did not do that. It said: Snapshots are off: set a recovery passphrase to turn them on.
 - `home_status_unavailable` — Fermix could not read this home's status. It said: The requested management method is not available. (method_not_found)
-- `enrollment_refused` — Fermix did not open an enrollment code. It said: Only the primary enrolls candidates and starts a move.
-- `move_refused` — Fermix did not start the move. It said: No server waiting for the move has the id cand-0f1e2d3c4b5a6978. A server waits 24 hours after it enrolls; after that, get a new code and enroll it again.
 
 A sentence ending in `It said:` carries the words of whatever refused —
 the service manager, the login manager, the filesystem. A client shows them and

@@ -2,7 +2,9 @@ defmodule FermixCore.Management.HomeMoveKeepTest do
   # M75 decision 4: replacing the server works through the same move.
   # `home.move.start` takes `keep_as_desktop`, true unless said: false when the
   # source is a server being replaced, which then becomes no desktop of the new
-  # primary. The choice travels in the request the move worker reads.
+  # primary. The choice travels in the request the move worker reads. The
+  # start is the server answering a desktop's forward, the one caller it is
+  # served to.
   use ExUnit.Case, async: true
 
   alias FermixCore.Home.Candidates
@@ -14,6 +16,7 @@ defmodule FermixCore.Management.HomeMoveKeepTest do
 
   @now ~U[2031-05-04 10:00:00Z]
   @primary %{role: :primary, primary: nil}
+  @desktop {:desktop, "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e"}
   @passphrase "invented-lantern-orchard"
 
   setup do
@@ -85,15 +88,26 @@ defmodule FermixCore.Management.HomeMoveKeepTest do
     assert {:error, :invalid_params, %{"field" => "keep_as_desktop"}} =
              route("home.move.start", params, ctx.seams)
 
+    # On `daemon.sock` even a well-formed start is refused by name.
+    assert {:error, :unavailable,
+            %{
+              "capability" => "home",
+              "method" => "home.move.start",
+              "sentence" => <<_, _::binary>>
+            }} = route("home.move.start", %{params | "keep_as_desktop" => false}, ctx.seams, nil)
+
     refute_received :restarted
     refute Move.pending?(ctx.home)
   end
 
-  defp route(method, params, seams) do
+  # From a desktop's forward unless `actor` says another caller (nil:
+  # `daemon.sock`).
+  defp route(method, params, seams, actor \\ @desktop) do
     Router.route(
       %{method: method, protocol_version: Protocol.protocol_version(), params: params},
       engine_role: @primary,
-      operation_opts: [home: seams]
+      operation_opts: [home: seams],
+      actor: actor
     )
   end
 

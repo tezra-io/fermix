@@ -4,7 +4,8 @@ defmodule FermixCore.Management.HomeMoveReviewTest do
   # after it takes that review rather than reading the keychain again, and the
   # move's capture reads it once more to carry the values. The keychain is the
   # stub store under a profile of this test's own, so a value taken out of it
-  # after the review shows whether the start read it again.
+  # after the review shows whether the start read it again. Both are the
+  # server answering a desktop's forward, the one caller they are served to.
   use ExUnit.Case, async: true
 
   alias FermixCore.Home.Candidates
@@ -17,6 +18,7 @@ defmodule FermixCore.Management.HomeMoveReviewTest do
 
   @now ~U[2031-05-04 10:00:00Z]
   @primary %{role: :primary, primary: nil}
+  @desktop {:desktop, "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e"}
   @passphrase "invented-lantern-orchard"
   @secret "sk-ant-invented-review"
 
@@ -60,8 +62,20 @@ defmodule FermixCore.Management.HomeMoveReviewTest do
 
   test "a start right after a ready review takes it, and does not read the keychain again",
        ctx do
-    assert {:ok, %{"ready" => true}} = review(ctx, ctx.seams)
     review_file = Path.join(Move.dir(ctx.home), "readiness.json")
+
+    # On `daemon.sock` the review is refused by name, and keeps nothing.
+    assert {:error, :unavailable,
+            %{
+              "capability" => "home",
+              "method" => "home.move.readiness",
+              "sentence" => <<_, _::binary>>
+            }} =
+             route("home.move.readiness", %{"candidate_id" => ctx.candidate_id}, ctx.seams, nil)
+
+    refute File.exists?(review_file)
+
+    assert {:ok, %{"ready" => true}} = review(ctx, ctx.seams)
     refute File.read!(review_file) =~ @secret
     assert Bitwise.band(File.stat!(review_file).mode, 0o777) == 0o600
 
@@ -123,11 +137,14 @@ defmodule FermixCore.Management.HomeMoveReviewTest do
     )
   end
 
-  defp route(method, params, seams) do
+  # From a desktop's forward unless `actor` says another caller (nil:
+  # `daemon.sock`).
+  defp route(method, params, seams, actor \\ @desktop) do
     Router.route(
       %{method: method, protocol_version: Protocol.protocol_version(), params: params},
       engine_role: @primary,
-      operation_opts: [home: seams]
+      operation_opts: [home: seams],
+      actor: actor
     )
   end
 

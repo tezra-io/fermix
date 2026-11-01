@@ -76,9 +76,17 @@ before the token is written into it, renamed into place), never in
 `config.toml`, the keychain or the file secret store, because a move carries
 those to the server, and `device/` is left out of every archive, snapshot and
 move and denied to sandboxed commands. It is never logged, traced or answered
-(`home.provision.*` answers only whether it is accepted). Giving Fermix the
-token and creating, powering and deleting the server are owner decisions,
-refused to a command Fermix started; while the server stands, a new token
+(the summary says only whether it is accepted). Every Always On step is one
+method, `home.act`: giving Fermix the token, creating, powering and deleting
+the server, opening a code and starting a move are owner decisions, refused
+to a command Fermix started and to a caller Fermix cannot place, in words
+that name every place the owner can act (the Fermix app, the setup page or
+their own terminal). A step runs only when the summary it was drawn from
+still offers it under its key, so a confirm accepted on an older screen does
+nothing. Its input (the token, the recovery passphrase) is decoded where it
+arrives into a struct whose inspection withholds both, so no log line, crash
+report or telemetry event carries either, and the setup page's request logs
+filter any parameter named for a passphrase. While the server stands, a new token
 replaces the kept one only when it reaches that server (the same project),
 so no token for another project can take its place; a provider's token
 never moves to another provider's file. Fermix touches only
@@ -87,12 +95,18 @@ no SSH key is dropped where the answer arrives: it reaches no file, log,
 trace, status or crash report. The
 server's cloud-init user data carries a single-use enrollment code and stays
 readable through the metadata service, which the server's first boot blocks
-for every account but root. When the desktop replaces that server, the old
-server opens the new one's 24-hour code only for a request its desktop
-forwarded over the rail (never for a local caller, who gets thirty minutes),
-the code crosses only that encrypted session, and closing it again is an
-owner decision too. The old server is deleted only once a primary one epoch
-up answered the desktop, so the server that holds the home is never deleted.
+for every account but root. The server's own Always On steps (opening a
+code, closing it, reviewing and starting a move, a backup now) are served
+only to a linked desktop's forward over the rail, sent by that desktop's own
+`home.act` after it placed its caller as the owner; on `daemon.sock` they are
+refused to every caller, by name. So when the desktop replaces that server,
+the old server opens the new one's 24-hour code only for that desktop, the
+code crosses only that encrypted session, and no local command can open,
+close or use one. The old server is deleted only once a primary one epoch up
+answered the desktop, so the server that holds the home is never deleted.
+The command for a server of the owner's own carries no code: its first boot
+asks for the code on the terminal without echo, so it never lands in a shell
+history.
 
 Opening the setup page is an owner decision on `daemon.sock` as well: a page
 session drives every decision the page offers, so `setup.session.create` is

@@ -39,6 +39,7 @@ defmodule FermixCore.Application do
   alias FermixCore.Jobs.RunnerSupervisor, as: JobRunnerSupervisor
   alias FermixCore.Jobs.Scheduler, as: JobScheduler
   alias FermixCore.Log.RedactingFormatter
+  alias FermixCore.Management.AlwaysOn, as: ManagementAlwaysOn
   alias FermixCore.Management.Doctor, as: ManagementDoctor
   alias FermixCore.Management.Jobs, as: ManagementJobs
   alias FermixCore.Management.Lifecycle, as: ManagementLifecycle
@@ -537,6 +538,10 @@ defmodule FermixCore.Application do
           restart: :temporary
         },
         ManagementJobs,
+        # Always On's steps (`home.act`), one at a time per engine, after the
+        # job family they start and before the socket and the setup page that
+        # ask for them.
+        ManagementAlwaysOn,
         # Beside the job family it serves: a workspace discovery is a job, and
         # what it found is republished on the plugin row rather than in the job.
         ManagementPluginDiscovery,

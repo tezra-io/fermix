@@ -46,8 +46,6 @@ defmodule Fermix.CLI.MachineOutput do
     engine_stopped
     snapshots_refused
     home_status_unavailable
-    enrollment_refused
-    move_refused
   )a
 
   @doc "Every error code this CLI can print, for the caller that renders them."
@@ -187,12 +185,6 @@ defmodule Fermix.CLI.MachineOutput do
 
   def sentence(:home_status_unavailable, details),
     do: "Fermix could not read this home's status." <> said(details)
-
-  def sentence(:enrollment_refused, details),
-    do: "Fermix did not open an enrollment code." <> said(details)
-
-  def sentence(:move_refused, details),
-    do: "Fermix did not start the move." <> said(details)
 
   defp said(details) do
     case Keyword.get(details, :output) do

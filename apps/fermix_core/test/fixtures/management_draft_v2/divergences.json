@@ -2750,57 +2750,9 @@
     },
     {
       "method": "(schema)",
-      "field": "methods:home.provision.connect",
-      "kind": "engine_only",
-      "why": "M75 lean v1 adds the Always On provisioner (Fermix creates the owner's server on Hetzner) after the draft was written, so the draft publishes no home.provision.* method. The six methods are minimum version 2 and additive: a client built against the draft never calls them, and the app re-vendors this export before it draws the Always On pane."
-    },
-    {
-      "method": "(schema)",
-      "field": "methods:home.provision.create",
-      "kind": "engine_only",
-      "why": "M75 lean v1 adds the Always On provisioner (Fermix creates the owner's server on Hetzner) after the draft was written, so the draft publishes no home.provision.* method. The six methods are minimum version 2 and additive: a client built against the draft never calls them, and the app re-vendors this export before it draws the Always On pane."
-    },
-    {
-      "method": "(schema)",
-      "field": "methods:home.provision.delete",
-      "kind": "engine_only",
-      "why": "M75 lean v1 adds the Always On provisioner (Fermix creates the owner's server on Hetzner) after the draft was written, so the draft publishes no home.provision.* method. The six methods are minimum version 2 and additive: a client built against the draft never calls them, and the app re-vendors this export before it draws the Always On pane."
-    },
-    {
-      "method": "(schema)",
       "field": "methods:home.provision.options",
       "kind": "engine_only",
       "why": "M75 lean v1 adds the Always On provisioner (Fermix creates the owner's server on Hetzner) after the draft was written, so the draft publishes no home.provision.* method. The six methods are minimum version 2 and additive: a client built against the draft never calls them, and the app re-vendors this export before it draws the Always On pane."
-    },
-    {
-      "method": "(schema)",
-      "field": "methods:home.provision.power",
-      "kind": "engine_only",
-      "why": "M75 lean v1 adds the Always On provisioner (Fermix creates the owner's server on Hetzner) after the draft was written, so the draft publishes no home.provision.* method. The six methods are minimum version 2 and additive: a client built against the draft never calls them, and the app re-vendors this export before it draws the Always On pane."
-    },
-    {
-      "method": "(schema)",
-      "field": "methods:home.provision.resources",
-      "kind": "engine_only",
-      "why": "M75 lean v1 adds the Always On provisioner (Fermix creates the owner's server on Hetzner) after the draft was written, so the draft publishes no home.provision.* method. The six methods are minimum version 2 and additive: a client built against the draft never calls them, and the app re-vendors this export before it draws the Always On pane."
-    },
-    {
-      "method": "(schema)",
-      "field": "minimum_versions:home.provision.connect=2",
-      "kind": "engine_only",
-      "why": "M75 lean v1: every home.provision.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the provisioner, so its table has no entry for it; the addition is additive and needs no protocol bump."
-    },
-    {
-      "method": "(schema)",
-      "field": "minimum_versions:home.provision.create=2",
-      "kind": "engine_only",
-      "why": "M75 lean v1: every home.provision.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the provisioner, so its table has no entry for it; the addition is additive and needs no protocol bump."
-    },
-    {
-      "method": "(schema)",
-      "field": "minimum_versions:home.provision.delete=2",
-      "kind": "engine_only",
-      "why": "M75 lean v1: every home.provision.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the provisioner, so its table has no entry for it; the addition is additive and needs no protocol bump."
     },
     {
       "method": "(schema)",
@@ -2809,118 +2761,16 @@
       "why": "M75 lean v1: every home.provision.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the provisioner, so its table has no entry for it; the addition is additive and needs no protocol bump."
     },
     {
-      "method": "(schema)",
-      "field": "minimum_versions:home.provision.power=2",
-      "kind": "engine_only",
-      "why": "M75 lean v1: every home.provision.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the provisioner, so its table has no entry for it; the addition is additive and needs no protocol bump."
-    },
-    {
-      "method": "(schema)",
-      "field": "minimum_versions:home.provision.resources=2",
-      "kind": "engine_only",
-      "why": "M75 lean v1: every home.provision.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the provisioner, so its table has no entry for it; the addition is additive and needs no protocol bump."
-    },
-    {
-      "method": "hello",
-      "field": "capabilities.minimum_versions.home.provision.connect",
-      "kind": "engine_only",
-      "why": "M75 lean v1: hello publishes every method this daemon serves with its minimum version, the provisioner included. The draft predates it; a client ignores a method it does not know."
-    },
-    {
-      "method": "hello",
-      "field": "capabilities.minimum_versions.home.provision.create",
-      "kind": "engine_only",
-      "why": "M75 lean v1: hello publishes every method this daemon serves with its minimum version, the provisioner included. The draft predates it; a client ignores a method it does not know."
-    },
-    {
-      "method": "hello",
-      "field": "capabilities.minimum_versions.home.provision.delete",
-      "kind": "engine_only",
-      "why": "M75 lean v1: hello publishes every method this daemon serves with its minimum version, the provisioner included. The draft predates it; a client ignores a method it does not know."
-    },
-    {
       "method": "hello",
       "field": "capabilities.minimum_versions.home.provision.options",
       "kind": "engine_only",
       "why": "M75 lean v1: hello publishes every method this daemon serves with its minimum version, the provisioner included. The draft predates it; a client ignores a method it does not know."
     },
     {
-      "method": "hello",
-      "field": "capabilities.minimum_versions.home.provision.power",
-      "kind": "engine_only",
-      "why": "M75 lean v1: hello publishes every method this daemon serves with its minimum version, the provisioner included. The draft predates it; a client ignores a method it does not know."
-    },
-    {
-      "method": "hello",
-      "field": "capabilities.minimum_versions.home.provision.resources",
-      "kind": "engine_only",
-      "why": "M75 lean v1: hello publishes every method this daemon serves with its minimum version, the provisioner included. The draft predates it; a client ignores a method it does not know."
-    },
-    {
-      "method": "home.provision.connect",
-      "field": "params:token",
-      "kind": "engine_only",
-      "why": "M75 lean v1: home.provision.connect takes the API token the owner pastes for a provider's account, which the engine keeps only in this computer's device/provision/<provider>.json and never answers. The draft predates the provisioner."
-    },
-    {
-      "method": "home.provision.create",
-      "field": "params:location",
-      "kind": "engine_only",
-      "why": "M75 lean v1: home.provision.create takes the location to create the server in, one of the provider's as home.provision.options names them. The draft predates the provisioner."
-    },
-    {
-      "method": "home.provision.create",
-      "field": "params:replace",
-      "kind": "engine_only",
-      "why": "M75 lean v1: home.provision.create takes replace, true on the linked desktop whose ledger holds the server the home lives on, to create the server that replaces it; the old one is deleted once the move to the new one is done. The draft predates the provisioner."
-    },
-    {
-      "method": "home.provision.create",
-      "field": "params:type",
-      "kind": "engine_only",
-      "why": "M75 lean v1: home.provision.create takes the provider's server type, as home.provision.options names it. The draft predates the provisioner."
-    },
-    {
-      "method": "(schema)",
-      "field": "methods:home.provision.providers",
-      "kind": "engine_only",
-      "why": "M75 lean v1: every cloud provider the Always On server can be created on is a module behind one contract, and home.provision.providers answers each one's display data (id, name, token label, How to get one steps, console, docs section), so the apps draw the token and choose screens from it and need no change for a new provider. The draft predates the provisioner; a client built against it never calls the method."
-    },
-    {
-      "method": "(schema)",
-      "field": "minimum_versions:home.provision.providers=2",
-      "kind": "engine_only",
-      "why": "M75 lean v1: every home.provision.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the provisioner, so its table has no entry for it; the addition is additive and needs no protocol bump."
-    },
-    {
-      "method": "hello",
-      "field": "capabilities.minimum_versions.home.provision.providers",
-      "kind": "engine_only",
-      "why": "M75 lean v1: hello publishes every method this daemon serves with its minimum version, the provisioner included. The draft predates it; a client ignores a method it does not know."
-    },
-    {
-      "method": "home.provision.connect",
-      "field": "params:provider",
-      "kind": "engine_only",
-      "why": "M75 lean v1: home.provision.connect names the provider the token is for, one home.provision.providers lists, since each provider keeps its own token and ledger. The draft predates the provisioner."
-    },
-    {
-      "method": "home.provision.create",
-      "field": "params:provider",
-      "kind": "engine_only",
-      "why": "M75 lean v1: home.provision.create names the provider to create the server on, one home.provision.providers lists. The draft predates the provisioner."
-    },
-    {
       "method": "home.provision.options",
       "field": "params:provider",
       "kind": "engine_only",
       "why": "M75 lean v1: home.provision.options names the provider whose offers it reads live, one home.provision.providers lists. The draft predates the provisioner."
-    },
-    {
-      "method": "home.provision.power",
-      "field": "params:action",
-      "kind": "engine_only",
-      "why": "M75 lean v1: home.provision.power takes on or reset. The draft predates the provisioner."
     },
     {
       "method": "home.status",
@@ -2951,6 +2801,60 @@
       "field": "result.type",
       "kind": "engine_only",
       "why": "M75 lean v1: the export illustrates a finished home_provision job, whose flat result names the server Fermix created, its type and its location. The draft illustrates no such job; the result stays the published flat object of public scalars."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:home.act",
+      "kind": "engine_only",
+      "why": "Always On setup §3.4: every Always On step is one method, home.act, which names the action the summary offers, the key it was drawn with and its input, and the engine runs the step. The draft predates the home family; the method is minimum version 2 and additive, and the app re-vendors this export before it draws the Always On pane."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:home.act=2",
+      "kind": "engine_only",
+      "why": "Always On setup §3.4: home.act is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the home family; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.home.act",
+      "kind": "engine_only",
+      "why": "Always On setup §3.4: hello publishes every method this daemon serves with its minimum version, home.act included. The draft predates it; a client ignores a method it does not know."
+    },
+    {
+      "method": "home.act",
+      "field": "params:action",
+      "kind": "engine_only",
+      "why": "Always On setup §3.4: home.act names the action the summary offers, by its id. The draft predates the home family."
+    },
+    {
+      "method": "home.act",
+      "field": "params:key",
+      "kind": "engine_only",
+      "why": "Always On setup §3.2: home.act carries the key the action was drawn with, which the engine checks against the summary as it is now, so a confirm accepted on an older screen does nothing. The draft predates the home family."
+    },
+    {
+      "method": "home.act",
+      "field": "params:input",
+      "kind": "engine_only",
+      "why": "Always On setup §3.4: home.act carries what the action's needs asked for (a token, a recovery passphrase, a size and a place), never logged or answered. The draft predates the home family."
+    },
+    {
+      "method": "(schema)",
+      "field": "error_codes:changed",
+      "kind": "engine_only",
+      "why": "Always On setup §3.4: home.act answers the error code changed, with the summary as it is now, when the summary it was drawn from no longer offers the action under its key, and nothing is done. The draft predates the home family, so its error catalog has no such code."
+    },
+    {
+      "method": "(errors)",
+      "field": "changed:sentence,summary",
+      "kind": "engine_only",
+      "why": "Always On setup §3.4: changed carries details {summary, sentence}, the summary to draw and the sentence that says it changed. The draft predates the code."
+    },
+    {
+      "method": "(errors)",
+      "field": "unavailable:capability,method,sentence",
+      "kind": "engine_only",
+      "why": "Always On setup §3.5: the server's Always On steps (home.move.readiness, home.move.start, home.enroll.open, home.enroll.withdraw, home.snapshots.run) answer only a desktop's forward, and daemon.sock refuses each by name: unavailable with details {capability, method, sentence}. The draft predates the home family and drew only the {capability} and {capability, sentence} cases."
     }
   ]
 }

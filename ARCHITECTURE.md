@@ -607,16 +607,18 @@ refused while it is open, and while the server it enrolled is held as a
 candidate), creates the server named and labelled by the
 ledger's ref, and polls each action with a bound; a create whose answer was
 lost is found again by its labels in `reconcile/2`, which also marks a
-resource deleted outside Fermix gone. `Management.Provision` answers
-`home.provision.*` (device-class in `Placement`: the computer that created
-the server manages it and never forwards the request):
-`home.provision.providers` answers each provider's display data, so the apps
-draw the token and choose screens from it; connect, options and create name
-the provider; power, resources and delete act on `Provision.current/2`'s;
-connect, create, power and delete are owner decisions in the daemon, a new
+resource deleted outside Fermix gone. `Management.Provision` holds the
+provisioner's steps (the computer that created the server manages it and
+never forwards them): connect, start_create, start_again, power, delete,
+stop_step and the reconcile, which `Management.AlwaysOn.act/2` runs, and
+`home.provision.options`, the one method of the family left on the wire
+(device-class in `Placement`); the summary carries each provider's display
+data (`detail.providers`), so every surface draws the token screen from it;
+connect, options and create name the provider; power and delete act on
+`Provision.current/2`'s; a new
 token replaces the kept one only when it reaches the ledger's server or
 firewall (one read by id, the same account), a create is refused while any
-provider holds a server, and create, power and delete run as one
+provider holds a server, and create, Start again, power and delete run as one
 `home_provision` management job at a time; delete refuses while a move to the server runs
 and once this engine is its linked desktop (or the home carries the moved
 marker). `Ledger.state/3` is the one reading of the provisioner for `home.status`'s
@@ -722,16 +724,36 @@ sleeps. While off nothing is armed and only `:ledger`, `:move` and
 write (`Provision.Ledger.update/3`, the shared driver's and the management
 family's) tells it `:ledger`.
 
-Replace the server (`home.provision.create {replace: true}`) runs on the
-linked desktop whose ledger holds the server the home lives on. The job sets
+`Management.AlwaysOn` (Always On setup §3.4, §4) runs every Always On
+step: `home.act {action, key, input}`, one function per action with its
+placement decided inside it. One named process per engine (a child of the
+daemon-socket tree, after the job family) serializes the acts; each reads the
+summary first (`Home.summary_facts/1`, `HomeSummary.find_action/3`) and
+answers `changed` with the current summary when the action is not offered
+under that key, so a confirm accepted on an older screen or two surfaces
+pressing at once do nothing twice. A step that starts a job names it in the
+ledger first (`Provision.put_action/2`) and clears it again when the start is
+refused; Cancel during a create stops the job and waits for its run to end
+(`Provision.stop_step/1`, `Jobs.cancel/2`) before the delete job starts.
+Move now reviews at the press (a kept ready review under 15 minutes old, else
+a fresh one, kept), refuses on a block, answers `changed` on a warning the
+confirm did not name, then reaches `HomeMove.move_start/3`. On a linked
+desktop it sends the server's own steps over the link as rail-only methods
+(`Placement.rail_only?/1`: served only with actor `{:desktop, _}`, refused on
+`daemon.sock` by name). `input` is `AlwaysOn.Input`, decoded at the
+boundary, whose `Inspect` withholds the token and the recovery passphrase.
+
+Replace the server (`home.act`'s `replace_server`, a create with `replace`)
+runs on the linked desktop whose ledger holds the server the home lives on. The job sets
 that server aside in the ledger (`Ledger.begin_replace/3`: the old set and
 the primary epoch it held, from `desktop.json`), then creates the new server
 as any create does, under another ref (`Provision.fresh_ref/2`), with a
 provisioned window the old server opens for a request the desktop forwards
 (`home.enroll.open {kind: provisioned}`, served only to a desktop's forward;
 `home.enroll.withdraw` releases it when the new server will not exist). The
-move is the existing one, forwarded; beside the forward of `home.move.start`
-the daemon records that the move started (`Provision.move_forwarded/3`),
+move is the existing one, sent by the desktop's `home.act` (Move now) as
+`home.move.start` with `keep_as_desktop` false; once the server answered,
+`home.act` records that the move started (`Provision.move_forwarded/3`),
 because the old server serves nothing while it runs. The desktop relay
 reports every primary epoch a session reaches (`Provision.primary_reached/2`,
 in a task): one above the old server's is the move to the new one done, the
@@ -741,7 +763,8 @@ the relay stays the one writer of `desktop.json`), and the old server is
 deleted, once, as a `home_provision` job
 (`Provision.delete_replaced/2`, the same order as any delete, refused unless
 the move is done); a failed delete stays in the ledger with its sentence for
-`home.provision.delete` to try again, and the old server answering at its own
+Delete your old server (`home.act`'s `delete_server`) to try again, and the
+old server answering at its own
 epoch after the move started is a move it undid. `Ledger.state/1`'s `replace`
 says where it stands: creating, waiting, moving, deleting, done, failed (with
 which server holds the home) or cancelling.

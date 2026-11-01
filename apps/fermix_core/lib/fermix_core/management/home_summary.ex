@@ -65,7 +65,9 @@ defmodule FermixCore.Management.HomeSummary do
 
   **Every action is one record** wherever it sits (`action`,
   `detail.alternatives`, `on`'s `detail.actions`): `id`, `label`, `needs`
-  (what the surface collects: `token`, `recovery_passphrase`, `choice`),
+  (what the surface collects: `token`; `new_recovery_passphrase`, typed
+  twice and compared, where this move's recovery key is not set yet, else
+  `recovery_passphrase`, typed once and checked by the move; `choice`),
   `confirm` (the sentence the owner accepts before Fermix spends money,
   deletes, restarts a server or moves, with no time or price in it; nil
   otherwise), `url` (the docs page at the provider's part for Learn more,
@@ -118,7 +120,7 @@ defmodule FermixCore.Management.HomeSummary do
   @actions ~w(create_server cancel move_now try_again learn_more turn_on restart_server
               start_again create_in open_console paste_token update back_up_now replace_server
               check_again own_server delete_server)
-  @needs ~w(token recovery_passphrase choice)
+  @needs ~w(token recovery_passphrase new_recovery_passphrase choice)
 
   @unreachable_ms 10 * 60_000
   @setup_ms 30 * 60_000
@@ -1057,7 +1059,7 @@ defmodule FermixCore.Management.HomeSummary do
 
   defp record(%{"id" => id, "label" => label, values: values}, facts) do
     act = String.to_existing_atom(id)
-    needs = needs(act)
+    needs = needs(act, facts)
     confirm = confirm(act, values, facts)
 
     %{
@@ -1070,10 +1072,16 @@ defmodule FermixCore.Management.HomeSummary do
     }
   end
 
-  defp needs(:paste_token), do: ["token"]
-  defp needs(act) when act in [:create_server, :replace_server], do: ["choice"]
-  defp needs(act) when act in [:move_now, :try_again], do: ["recovery_passphrase"]
-  defp needs(_act), do: []
+  defp needs(:paste_token, _facts), do: ["token"]
+  defp needs(act, _facts) when act in [:create_server, :replace_server], do: ["choice"]
+  defp needs(act, facts) when act in [:move_now, :try_again], do: [passphrase_need(facts)]
+  defp needs(_act, _facts), do: []
+
+  # A replace's move checks the server's own key, which every move to it set;
+  # here, the key this home's snapshots keep, or a new one when none is set.
+  defp passphrase_need(%{role: :device}), do: "recovery_passphrase"
+  defp passphrase_need(%{snapshots: %{"recipient_set" => true}}), do: "recovery_passphrase"
+  defp passphrase_need(_facts), do: "new_recovery_passphrase"
 
   # What the owner accepts first: whatever spends money, deletes, restarts a
   # server or moves.

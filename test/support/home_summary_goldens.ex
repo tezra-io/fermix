@@ -25,7 +25,8 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
   def rows do
     [
       {"home_status_creating", creating()},
-      {"home_status_ready", ready()},
+      {"home_status_ready", ready(s3_snapshots())},
+      {"home_status_ready_first_move", ready(unkeyed_snapshots())},
       {"home_status_candidate", candidate()},
       {"home_status_server", server()},
       {"home_status_on", on()},
@@ -48,7 +49,9 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
     })
   end
 
-  defp ready do
+  # Ready with the recovery key kept, and ready for the first move, which
+  # sets it (Move now's needs say which).
+  defp ready(snapshots) do
     review = %{
       candidate_id: @cand,
       reviewed_at: ~U[2031-05-04 11:30:00Z],
@@ -64,7 +67,7 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
       ]
     }
 
-    record(:primary, %{epoch: 4, snapshots: s3_snapshots(), disk: disk(0.31)}, %{
+    record(:primary, %{epoch: 4, snapshots: snapshots, disk: disk(0.31)}, %{
       link: link(enrollment: window(:used, @cand)),
       provision: ledger(),
       candidates: [candidate_view()],
@@ -250,8 +253,20 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
 
   defp disk(used), do: %{"used" => used, "nearly_full" => used >= 0.85}
 
+  @recipient "fxsnap1.AAECAwQFBgcICQoLDA0ODw.B3l5ExMinEfPofapoLSG57ZGCBl_fiIqFbtB5nPDNqA"
+
   defp s3_snapshots, do: snapshots_view(~U[2031-05-04 09:30:00Z])
   defp server_snapshots, do: snapshots_view(~U[2031-05-04 10:00:00Z])
+
+  # No recovery passphrase set yet: no key, so no snapshot either.
+  defp unkeyed_snapshots do
+    SnapshotStatus.view(SnapshotStatus.empty(), %{
+      config: [s3_bucket: "invented-fermix-snapshots"],
+      targets: [SnapshotS3],
+      running: false,
+      profile: "general"
+    })
+  end
 
   defp snapshots_view(at) do
     attempt = %{
@@ -272,10 +287,7 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
     }
 
     SnapshotStatus.view(status, %{
-      config: [
-        recipient: "fxsnap1.AAECAwQFBgcICQoLDA0ODw.B3l5ExMinEfPofapoLSG57ZGCBl_fiIqFbtB5nPDNqA",
-        s3_bucket: "invented-fermix-snapshots"
-      ],
+      config: [recipient: @recipient, s3_bucket: "invented-fermix-snapshots"],
       targets: [SnapshotS3],
       running: false,
       profile: "general"

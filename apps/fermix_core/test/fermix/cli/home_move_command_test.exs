@@ -125,33 +125,44 @@ defmodule Fermix.CLI.HomeMoveCommandTest do
     end
   end
 
-  describe "enroll-code" do
-    test "prints the code the engine opened, or the envelope", ctx do
-      client = fn "home.enroll.open", %{}, _opts ->
-        {:ok, %{"code" => ctx.code, "expires_at" => "2031-05-04T10:10:00Z"}}
+  # Always On setup §3.5, §8.2: `home.enroll.open` and `home.move.start` are
+  # served only to a linked desktop's forward now, so the two verbs that
+  # called them over `daemon.sock` are gone, with nothing in their place.
+  describe "enroll-code and move" do
+    test "are usage errors, reach no engine and are not in the usage", ctx do
+      test = self()
+      passphrase_file = Path.join(ctx.tmp, "recovery")
+      File.write!(passphrase_file, @passphrase <> "\n")
+
+      client = fn method, _params, _opts ->
+        send(test, {:called, method})
+        {:error, :not_running}
       end
 
-      {0, out, _err} = run(["enroll-code"], home: ctx.home, client: client)
-      assert out =~ ctx.code
-      assert out =~ "valid once until 2031-05-04T10:10:00Z"
+      move = ["move", "--to", "cand-5e2a9c1f7b3d4086", "--recovery-passphrase-file"]
 
-      {0, out, _err} = run(["enroll-code", "--json"], home: ctx.home, client: client)
-      assert %{"ok" => true, "result" => %{"code" => _code}} = Jason.decode!(out)
+      for argv <- [
+            ["enroll-code"],
+            ["enroll-code", "--json"],
+            move ++ [passphrase_file, "--json"],
+            move ++ [passphrase_file, "--retire"]
+          ] do
+        {status, out, err} = run(argv, home: ctx.home, client: client)
+        assert {status, out} == {2, ""}, inspect(argv)
+        assert err =~ "fermix home candidates [--json]", inspect(argv)
+        refute err =~ "enroll-code", inspect(argv)
+        refute err =~ "fermix home move", inspect(argv)
+      end
+
+      refute_received {:called, _method}
     end
 
-    test "needs the engine, and says what the engine refused", ctx do
-      stopped = fn _method, _params, _opts -> {:error, :not_running} end
-      {1, out, _err} = run(["enroll-code", "--json"], home: ctx.home, client: stopped)
-      assert %{"ok" => false, "error" => %{"code" => "engine_stopped"}} = Jason.decode!(out)
+    test "are not in fermix help" do
+      help = capture_io(fn -> assert Fermix.CLI.main(["help"]) == 0 end)
 
-      refused = fn _method, _params, _opts ->
-        {:error,
-         {:management_error, "unavailable", "unavailable",
-          %{"sentence" => "Remote reach is off."}}}
-      end
-
-      {1, _out, err} = run(["enroll-code"], home: ctx.home, client: refused)
-      assert err =~ "Fermix did not open an enrollment code. It said: Remote reach is off."
+      assert help =~ "fermix home candidates [--json]"
+      refute help =~ "enroll-code"
+      refute help =~ "fermix home move"
     end
   end
 
@@ -167,117 +178,16 @@ defmodule Fermix.CLI.HomeMoveCommandTest do
 
       empty = fn "home.candidates.list", %{}, _opts -> {:ok, %{"candidates" => []}} end
       {0, out, _err} = run(["candidates"], home: ctx.home, client: empty)
-      assert out =~ "No candidate is enrolled."
+      assert out == "No server is enrolled.\n"
     end
   end
 
-  describe "move" do
+  describe "status during a move" do
     setup ctx do
       File.mkdir_p!(ctx.home)
       :ok = Epoch.write(ctx.home, 4)
       {:ok, record} = Candidates.add(ctx.home, candidate_attrs(), @now)
-      passphrase_file = Path.join(ctx.tmp, "recovery")
-      File.write!(passphrase_file, @passphrase <> "\n")
-      %{candidate: record, passphrase_file: passphrase_file}
-    end
-
-    test "asks the running engine, the passphrase never on argv", ctx do
-      test = self()
-
-      client = fn "home.move.start", params, opts ->
-        send(test, {:params, params})
-        send(test, {:timeout, Keyword.fetch!(opts, :timeout)})
-
-        {:ok,
-         %{
-           "move_id" => "mv-1",
-           "candidate" => %{"name" => "north-box"},
-           "recovery_recipient" => "fxsnap1.a.b",
-           "key_id" => "00",
-           "sentence" => "Fermix restarts in the device role and moves this home to north-box."
-         }}
-      end
-
-      argv = [
-        "move",
-        "--to",
-        ctx.candidate.candidate_id,
-        "--recovery-passphrase-file",
-        ctx.passphrase_file
-      ]
-
-      {0, out, _err} = run(argv, home: ctx.home, client: client)
-
-      assert_received {:params, %{"candidate_id" => id, "recovery_passphrase" => @passphrase}}
-      assert id == ctx.candidate.candidate_id
-
-      # The start walks the home for its readiness report before it answers;
-      # the management PROTOCOL.md asks a client to allow it 65 s.
-      assert_received {:timeout, 65_000}
-      assert out =~ "Fermix restarts in the device role"
-      refute out =~ @passphrase
-    end
-
-    # A server that is itself the primary, being replaced by another and then
-    # destroyed, keeps no desktop of the new one: `--retire`.
-    test "--retire asks the running engine to keep no desktop here, and only then", ctx do
-      test = self()
-
-      client = fn "home.move.start", params, _opts ->
-        send(test, {:params, params})
-
-        {:ok,
-         %{
-           "move_id" => "mv-2",
-           "candidate" => %{"name" => "north-box"},
-           "recovery_recipient" => "fxsnap1.a.b",
-           "key_id" => "00",
-           "keep_as_desktop" => false,
-           "sentence" =>
-             "Fermix restarts, moves this home to north-box and then serves nothing here."
-         }}
-      end
-
-      base = [
-        "move",
-        "--to",
-        ctx.candidate.candidate_id,
-        "--recovery-passphrase-file",
-        ctx.passphrase_file
-      ]
-
-      {0, out, _err} = run(base ++ ["--retire"], home: ctx.home, client: client)
-      assert_received {:params, %{"keep_as_desktop" => false}}
-      assert out =~ "then serves nothing here"
-
-      {0, _out, _err} = run(base, home: ctx.home, client: client)
-      assert_received {:params, kept}
-      refute Map.has_key?(kept, "keep_as_desktop")
-    end
-
-    # Always On setup §4: the recovery passphrase is checked against the key
-    # the running engine keeps, or kept by it, so a move starts only through
-    # the engine; with Fermix stopped there is nothing to check it against.
-    test "with the engine stopped, the move is refused and nothing is written", ctx do
-      stopped = fn _method, _params, _opts -> {:error, :not_running} end
-
-      argv = [
-        "move",
-        "--to",
-        ctx.candidate.candidate_id,
-        "--recovery-passphrase-file",
-        ctx.passphrase_file,
-        "--json"
-      ]
-
-      for extra <- [[], ["--retire"]] do
-        {1, out, _err} =
-          run(argv ++ extra, [home: ctx.home, client: stopped, now: fn -> @now end] ++ ready())
-
-        assert %{"ok" => false, "error" => %{"code" => "engine_stopped"}} = Jason.decode!(out)
-        refute Move.pending?(ctx.home)
-        assert {:ok, %{role: :primary}} = Role.configured(ctx.home)
-      end
+      %{candidate: record}
     end
 
     test "home status says where the move stands", ctx do
@@ -296,11 +206,6 @@ defmodule Fermix.CLI.HomeMoveCommandTest do
       {0, out, _err} = run(["status"], home: ctx.home, client: stopped)
       assert out =~ "Role: device"
       assert out =~ "Move: The move to north-box starts when Fermix restarts."
-    end
-
-    test "a move with no candidate named is a usage error", ctx do
-      assert {2, _out, _err} =
-               run(["move", "--recovery-passphrase-file", ctx.passphrase_file], home: ctx.home)
     end
   end
 
