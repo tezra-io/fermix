@@ -62,9 +62,11 @@ Use `browser` for JavaScript-capable pages. Choose the right web tool once, read
 
 ## Handing A Tab To The Person
 
-- A tab in the Fermix app's pane (`backend` `fermix_app`) closes when your turn ends. Whenever you stop a task that is not finished to wait for the person, call `handover` (on `target`, else the tab you last used) as your last browser call, then reply. That covers a step they do in the tab (a verification code sent to their phone or email, a passkey) and an answer they give you in the chat before you go on (a payment confirmation, a delivery slot, a choice only they can make). The tab comes to the front and stays open, and your next turn in this chat carries on in it: run `tabs`, then `snapshot` (the page may have moved on, so earlier refs can be stale). Never reopen the page instead: a new tab loses the step they were on.
-- Never hand over a finished task, or one the person told you to stop. A finished task's tabs close with its turn, as they should, and a handed-over tab you do not come back to closes when the person closes it or after the browser's idle period.
-- `handover_pane_only`: the page is in another browser, whose tabs already stay open between turns. `handover_not_allowed`: this turn is not one the person is present for, so say in your reply what they need to do.
+- A tab in the Fermix app's pane (`backend` `fermix_app`) closes when your turn ends.
+- Call `handover` (with `target`, else the tab you last used) as your last browser call when you end your turn with the task unfinished because you need the person: a step they do in the tab (a verification code, a passkey) or an answer they give in the chat (a payment confirmation, a delivery slot, a choice). The tab stays open, in front.
+- Next turn, continue in that tab: `tabs`, then `snapshot` before you act. Do not open the page again.
+- Do not call `handover` when the task is finished or the person told you to stop.
+- `handover_pane_only`: the page is in another browser, whose tabs already stay open between turns. `handover_not_allowed`: the person is not present on this turn; say in your reply what they need to do.
 
 ## The Person's Own Tab
 
@@ -93,4 +95,4 @@ Use `browser` for JavaScript-capable pages. Choose the right web tool once, read
 
 ## Stop Conditions
 
-In the Fermix app's pane, `handover` before you report a stop the person can answer (2FA, payment confirmation), so their answer continues in the same tab. Stop and report for 2FA, payment confirmation, missing credentials, URL-policy blocks, unsafe dialogs, repeated launch/profile errors, or the same action failing twice with no new information.
+Stop and report for 2FA, payment confirmation, missing credentials, URL-policy blocks, unsafe dialogs, repeated launch/profile errors, or the same action failing twice with no new information. In the Fermix app's pane, call `handover` first (above).

@@ -74,7 +74,7 @@ defmodule FermixCore.Agents.BrowserGuidanceSkillTest do
     end
 
     assert definition.system_prompt =~ "a payment confirmation"
-    assert definition.system_prompt =~ "Never hand over a finished task"
+    assert definition.system_prompt =~ "Do not call `handover` when the task is finished"
 
     # A CAPTCHA is the model's own call, not a Fermix stop; the human gates stay.
     refute definition.system_prompt =~ ~r/captcha/i
