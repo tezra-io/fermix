@@ -277,6 +277,17 @@ defmodule Fermix.CLI.AlwaysOnCommand do
     end
   end
 
+  # The move may have started: said, then followed from the screen read
+  # again exactly as a move that answered.
+  defp finish({:unconfirmed, record, sentence}, summary, ctx) do
+    IO.puts(ctx.stderr, "fermix always-on: " <> sentence)
+
+    case read_status(ctx) do
+      {:ok, status} -> finish({:acted, record, unconfirmed_answer(status)}, summary, ctx)
+      {:refused, code, details} -> refuse(code, details, ctx)
+    end
+  end
+
   defp finish(:declined, _summary, ctx) do
     IO.puts(ctx.stderr, "fermix always-on: nothing was done.")
     1
@@ -302,6 +313,9 @@ defmodule Fermix.CLI.AlwaysOnCommand do
 
   defp follow(summary, record, ctx, true),
     do: summary |> Wait.follow(pressed(record), ctx) |> settled(ctx)
+
+  # An unconfirmed move answered no result of its own: its screen is read.
+  defp unconfirmed_answer(status), do: %{"summary" => status["summary"], "result" => nil}
 
   # A step that moves the home restarts this engine; every other leaves it.
   defp pressed(%{"id" => id}) when id in ~w(move_now try_again), do: :move
@@ -372,6 +386,15 @@ defmodule Fermix.CLI.AlwaysOnCommand do
   defp next({:acted, record, answer}, _summary, ctx, round) do
     print(ctx.stdout, Render.result(answer["result"]))
     guided(answer["summary"], pressed(record), ctx, round)
+  end
+
+  defp next({:unconfirmed, record, sentence}, _summary, ctx, round) do
+    IO.puts(ctx.stderr, "fermix always-on: " <> sentence)
+
+    case read_status(ctx) do
+      {:ok, status} -> guided(status["summary"], pressed(record), ctx, round)
+      {:refused, code, details} -> refuse(code, details, ctx)
+    end
   end
 
   defp next({:opened, record}, summary, ctx, round) do

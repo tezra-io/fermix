@@ -26,6 +26,9 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
   @create_confirm "Create your server? Hetzner bills it by the hour until it is deleted."
   @changed "Always On changed since this was shown, so look at it again."
   @command "curl -fsSL https://fermix.ai/always-on | sudo sh"
+  @unconfirmed "The server fermix-general-a3f9 did not confirm in time whether the move " <>
+                 "started. Its state shows once the server answers again, and starting it " <>
+                 "again never starts a second move."
 
   setup do
     tmp = SafeRm.make_tmp_dir!("always_on_command")
@@ -413,6 +416,54 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
       assert Agent.get(ctx.clock, & &1) >= 90_000
     end
 
+    # §3.4: `unconfirmed` from a desktop's forwarded Move now means the move
+    # may have started, so it is followed exactly as a started move is.
+    test "an unconfirmed Move now is said and followed to the moved screen", ctx do
+      ready = golden_summary("home_status_ready")
+      on = golden_summary("home_status_on")
+      file = passphrase_file(ctx)
+
+      client =
+        script([
+          hello(),
+          {"home.status", {:ok, status(ready)}},
+          {"home.act", unconfirmed()},
+          {"home.status", {:ok, status(moving())}},
+          {"home.status", wait_for("k-moving", {:ok, status(on)}, ctx)}
+        ])
+
+      argv = ["move-now", "--yes", "--wait", "--recovery-passphrase-file", file, "--json"]
+      {0, out, err} = run(argv, ctx, client)
+
+      assert Jason.decode!(out) == %{
+               "schema_version" => 1,
+               "ok" => true,
+               "result" => %{"summary" => on, "result" => nil}
+             }
+
+      assert err =~ "fermix always-on: #{@unconfirmed}\n"
+      refute err =~ "did not take that step"
+    end
+
+    test "an unconfirmed Move now with no wait shows the screen read again", ctx do
+      ready = golden_summary("home_status_ready")
+      file = passphrase_file(ctx)
+
+      client =
+        script([
+          hello(),
+          {"home.status", {:ok, status(ready)}},
+          {"home.act", unconfirmed()},
+          {"home.status", {:ok, status(moving())}}
+        ])
+
+      argv = ["move-now", "--yes", "--recovery-passphrase-file", file]
+      {0, out, err} = run(argv, ctx, client)
+
+      assert lines(out) == ["Moving."]
+      assert err == "fermix always-on: move_now\nfermix always-on: #{@unconfirmed}\n"
+    end
+
     test "a code for a server of your own is waited on until the server comes", ctx do
       ready = golden_summary("home_status_ready")
 
@@ -545,6 +596,28 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
       refute_act()
     end
 
+    test "an unconfirmed Move now is followed on a terminal, then the next step offered", ctx do
+      ready = golden_summary("home_status_ready")
+      on = golden_summary("home_status_on")
+
+      client =
+        script([
+          hello(),
+          {"home.status", {:ok, status(ready)}},
+          {"home.act", unconfirmed()},
+          {"home.status", {:ok, status(moving())}},
+          {"home.status", wait_for("k-moving", {:ok, status(on)}, ctx)}
+        ])
+
+      stdin = Enum.join(["", @passphrase, "y", "q"], "\n") <> "\n"
+      {{0, out, err}, _prompts} = run_tty([], ctx, client, stdin)
+
+      assert err =~ "fermix always-on: #{@unconfirmed}\n"
+      assert out =~ "Fermix runs on your server."
+      assert out =~ "  1. Back up now\n"
+      refute err =~ "did not take that step"
+    end
+
     test "after changed the screen is read again and offered anew", ctx do
       changed = {:error, {:management_error, "changed", "Changed.", %{"sentence" => @changed}}}
 
@@ -646,6 +719,30 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
       record("own_server", "Use my own Linux server", [], nil, "a-own"),
       record("cancel", "Cancel the code", [], nil, "a-cancel-code")
     ])
+  end
+
+  defp moving do
+    %{
+      "key" => "k-moving",
+      "state" => "moving",
+      "sentence" => "Moving.",
+      "action" => nil,
+      "detail" => %{},
+      "notice" => nil
+    }
+  end
+
+  defp unconfirmed do
+    details = %{
+      "method" => "home.move.start",
+      "primary" => "fermix-general-a3f9",
+      "sentence" => @unconfirmed
+    }
+
+    {:error,
+     {:management_error, "unconfirmed",
+      "The request was sent, but its answer did not arrive, so its outcome is not known yet.",
+      details}}
   end
 
   defp retired do

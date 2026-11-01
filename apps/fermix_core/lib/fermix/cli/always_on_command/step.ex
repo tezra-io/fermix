@@ -24,9 +24,11 @@ defmodule Fermix.CLI.AlwaysOnCommand.Step do
   and the passphrase, until the one call that sends it.
 
   Answers `{:acted, record, answer}`, `{:opened, record}` for a step the
-  surface opens itself, `{:changed, sentence}`, `:declined`, `{:missing,
-  flag}` (no terminal to ask on and no flag that gives it), or `{:refused,
-  code, details}` with a `MachineOutput` code.
+  surface opens itself, `{:changed, sentence}`, `{:unconfirmed, record,
+  sentence}` (a linked desktop's Move now the server had but whose answer
+  was lost: the move may have started, so it is followed as a started one),
+  `:declined`, `{:missing, flag}` (no terminal to ask on and no flag that
+  gives it), or `{:refused, code, details}` with a `MachineOutput` code.
   """
 
   alias Fermix.CLI.AlwaysOnCommand
@@ -50,6 +52,7 @@ defmodule Fermix.CLI.AlwaysOnCommand.Step do
           {:acted, map(), map()}
           | {:opened, map()}
           | {:changed, String.t()}
+          | {:unconfirmed, map(), String.t()}
           | :declined
           | {:missing, String.t()}
           | {:refused, atom(), keyword()}
@@ -272,6 +275,9 @@ defmodule Fermix.CLI.AlwaysOnCommand.Step do
 
       {:error, {:management_error, "changed", _message, details}} ->
         {:changed, details["sentence"]}
+
+      {:error, {:management_error, "unconfirmed", _message, _details} = reason} ->
+        {:unconfirmed, record, AlwaysOnCommand.said(reason)}
 
       {:error, :not_running} ->
         {:refused, :engine_stopped, []}

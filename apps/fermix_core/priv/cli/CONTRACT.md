@@ -347,6 +347,12 @@ engine's words, or, for a step the screen does not offer, "Always On does not
 offer turn-on now. Run fermix always-on to see the steps it offers."; and
 `home_status_unavailable`. Golden: `always_on/changed.json`.
 
+`unconfirmed` (a linked desktop's Move now that the server had, whose answer
+was lost) is not a refusal: the move may have started. The verb prints the
+engine's sentence on stderr, reads the screen again and goes on exactly as
+after a move that answered (with `--wait`, or on a terminal, it follows the
+move), exits `0`, and answers the step result with `result` null.
+
 ## Error codes
 
 Every refusal a `--json` verb can print, with the sentence it carries. Where a

@@ -760,8 +760,9 @@ it, never a second writer.
   on. During Move now the engine restarts, so the wait reconnects for up to
   90 seconds and otherwise says "Start Fermix again to finish the move." If
   Always On changed since the screen was read (another window pressed first),
-  it says so (`changed`) and shows the screen again; any other refusal is the
-  engine's own sentence (`action_refused`). It needs Fermix running
+  it says so (`changed`) and shows the screen again; a Move now sent to the
+  server whose answer was lost says so and is followed as a started move;
+  any other refusal is the engine's own sentence (`action_refused`). It needs Fermix running
   (`engine_stopped` otherwise, writing nothing), and on a home the Mac app
   manages it refuses `app_managed`, naming the app's Always On pane.
   `fermix home status` ends its summary line with where the next step is
