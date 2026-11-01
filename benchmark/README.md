@@ -2,7 +2,7 @@
 
 The primary job of this harness is **change-by-change behavioral regression**:
 does Fermix still behave like a grounded chief of staff through its real agent,
-tool, memory, and trace path? The recommended 21-case core covers realistic
+tool, memory, and trace path? The recommended 23-case core covers realistic
 multi-turn work, prioritization, tool-grounded synthesis, sycophancy
 counterfactuals, evidence-sensitive recommendations, and calibrated confidence.
 It is not a benchmark.
@@ -96,7 +96,7 @@ make dry
 make regression
 ```
 
-`make dry` validates and prints the exact 21-case plan (32 real turns) without
+`make dry` validates and prints the exact 23-case plan (34 real turns) without
 contacting the daemon or judge. `make regression` runs that host-read-only core
 through the real assistant and independent judge. For targeted investigation, select
 `chief_of_staff`, `chief_of_staff_tools`, or `epistemic_integrity` directly with
