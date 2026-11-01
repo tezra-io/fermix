@@ -16,9 +16,12 @@ defmodule FermixChannels.ApplicationRoleTest do
     FermixChannels.Gateway.BackgroundSupervisor,
     FermixChannels.Gateway.Commands.Sandbox.Confirmations,
     FermixChannels.Gateway.Commands.Soul.Confirmations,
-    FermixChannels.Gateway.Idempotency,
     FermixChannels.Gateway.AlbumBuffer
   ]
+
+  # Primary-only, though no transport: each opens the database a device does
+  # not open (its home is a retired copy that a return replaces in place).
+  @database [FermixChannels.Gateway.Idempotency]
 
   @transports [
     FermixChannels.Voice.Supervisor,
@@ -85,6 +88,11 @@ defmodule FermixChannels.ApplicationRoleTest do
 
     for module <- @kept do
       assert module in modules(device), "a device tree lost #{inspect(module)}"
+    end
+
+    for module <- @database do
+      assert module in modules(primary), "the primary tree lost #{inspect(module)}"
+      refute module in modules(device), "a device tree opens the database: #{inspect(module)}"
     end
 
     assert Enum.reject(device, &(module(&1) in Role.device_only())) ==

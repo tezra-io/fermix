@@ -50,6 +50,18 @@ defmodule FermixCore.Cues.MandatesTest do
     assert Mandates.get("nothing", seams) == :error
   end
 
+  # A device opens no database (`FermixCore.Home.Role`), and its settings file
+  # is the primary's retired copy, mandates and all: the setup page it serves
+  # reads why the job is unknown here instead of losing its connection.
+  test "a mandate whose job cannot be read where no database is open says so",
+       %{fixture: fixture} do
+    absent = :"mandates_absent_repo_#{System.unique_integer([:positive])}"
+    job = fixture.job.id
+
+    assert {:inactive, sentence} = status(fixture, %{}, repo: absent)
+    assert sentence == "Job #{job} could not be read: :repo_not_running"
+  end
+
   test "auto mode needs a validator or pinned arguments", %{fixture: fixture} do
     assert status(fixture, %{"pin_args" => %{}}) ==
              {:inactive,

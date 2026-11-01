@@ -21,9 +21,9 @@ defmodule FermixCore.ComputerHistory.Controller do
   missing binary keeps the children absent (fail-closed) rather than crash-looping
   a `Capturer` that can never resolve its Port.
 
-  A device-role engine (`FermixCore.Home.Role`) runs capture only: the
-  summarizer calls a provider, which a device never does (M75 D5), and the
-  48-hour purge is the `Supervisor`'s `Retention`, which runs either way.
+  A device-role engine (`FermixCore.Home.Role`) runs neither: the summarizer
+  calls a provider (M75 D5), and capture writes the `memory.db` a device never
+  opens (a retired copy, which a return replaces), as the purge does.
   """
 
   use GenServer

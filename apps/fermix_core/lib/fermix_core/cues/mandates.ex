@@ -762,8 +762,17 @@ defmodule FermixCore.Cues.Mandates do
   defp get_job(job_id, opts) do
     case Keyword.get(opts, :get_job) do
       fun when is_function(fun, 1) -> fun.(job_id)
-      nil -> JobsRegistry.get_job(job_id, repo: Keyword.get(opts, :repo, Repo))
+      nil -> stored_job(job_id, Keyword.get(opts, :repo, Repo))
     end
+  end
+
+  # A device opens no database (`FermixCore.Home.Role`), yet its settings file
+  # is the primary's retired copy, mandates included: a Repo that is not
+  # running is named, not called.
+  defp stored_job(job_id, repo) do
+    if GenServer.whereis(repo),
+      do: JobsRegistry.get_job(job_id, repo: repo),
+      else: {:error, :repo_not_running}
   end
 
   defp owner_inbox(opts),

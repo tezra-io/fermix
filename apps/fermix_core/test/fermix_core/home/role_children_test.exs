@@ -5,6 +5,8 @@ defmodule FermixCore.Home.RoleChildrenTest do
   use ExUnit.Case, async: false
 
   alias FermixCore.Application, as: CoreApplication
+  alias FermixCore.ComputerHistory.Controller, as: ComputerHistoryController
+  alias FermixCore.ComputerHistory.Supervisor, as: ComputerHistorySupervisor
   alias FermixCore.Home.Role
   alias FermixCore.Net.Egress
 
@@ -18,7 +20,9 @@ defmodule FermixCore.Home.RoleChildrenTest do
     FermixCore.Meetings.Supervisor,
     FermixCore.Auth.TokenSupervisor,
     FermixCore.Home.Snapshot.Scheduler,
-    FermixCore.Plugins.Dist.Reinstall
+    FermixCore.Plugins.Dist.Reinstall,
+    FermixCore.Memory.Repo,
+    FermixCore.Prompt.TemplateReconciler
   ]
 
   @kept_here [
@@ -28,7 +32,6 @@ defmodule FermixCore.Home.RoleChildrenTest do
     FermixCore.Browser.Supervisor,
     FermixCore.Capabilities.Registry,
     FermixCore.Capabilities.MCP.Supervisor,
-    FermixCore.Memory.Repo,
     FermixCore.Memory.ConversationStore,
     FermixCore.Memory.Store,
     FermixCore.Setup.BootReport,
@@ -84,6 +87,40 @@ defmodule FermixCore.Home.RoleChildrenTest do
 
   test "every daemon-only and switched child a device keeps is kept" do
     assert Role.children(@kept_elsewhere, :device) == @kept_elsewhere
+  end
+
+  # A device's database is a retired copy, which a return replaces in place
+  # while the device engine runs (Always On's move back): a device opens it
+  # never, so nothing it starts captures into it, purges it or migrates it.
+  test "a device opens no database: no repo, no template pass, no screen capture or purge" do
+    database = [
+      FermixCore.Memory.Repo,
+      FermixCore.Prompt.TemplateReconciler,
+      FermixCore.ComputerHistory.Capturer,
+      FermixCore.ComputerHistory.Retention,
+      FermixCore.ComputerHistory.Summarizer.Scheduler
+    ]
+
+    assert Role.children(database, :primary) == database
+    assert Role.children(database, :device) == []
+    refute Enum.any?(modules(tree(:device)), &(&1 in database))
+
+    assert ComputerHistoryController.default_children(:device) == []
+
+    assert Enum.map(ComputerHistoryController.default_children(:primary), & &1.name) == [
+             FermixCore.ComputerHistory.Capturer,
+             FermixCore.ComputerHistory.Summarizer.Scheduler
+           ]
+
+    assert history_children(:device) == [DynamicSupervisor, ComputerHistoryController]
+
+    assert history_children(:primary) ==
+             [DynamicSupervisor, ComputerHistoryController, FermixCore.ComputerHistory.Retention]
+  end
+
+  defp history_children(role) do
+    {:ok, {_flags, children}} = ComputerHistorySupervisor.init(engine_role: role)
+    Enum.map(children, fn %{start: {module, _function, _args}} -> module end)
   end
 
   # M75 D5: the token file here is a retired copy and a realtime session calls a

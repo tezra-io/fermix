@@ -8,6 +8,9 @@ defmodule FermixCore.Home.Role do
   desktop app beside it and runs nothing that produces a turn, writes
   long-term memory or calls a provider: after a move the token file on its host
   is a retired copy, and a rotating refresh token has one live owner (M75 D5).
+  Nor does a device open `memory.db`: its database is a retired copy too, which
+  a return (Always On's move back) replaces in place while the device engine
+  runs, so its memory stores keep a session in memory alone.
   A candidate (M75 §2, B4) is a fresh engine waiting to become the primary
   through a move: it enrolls with the primary, then waits for the move, and
   starts nothing else (`children/2` keeps only `candidate_keeps/0`). It never
@@ -69,9 +72,10 @@ defmodule FermixCore.Home.Role do
 
   # Every child a device-role engine leaves out, with the reason. Everything
   # else in both trees is kept: management and the daemon socket, the
-  # companion and browser-host sockets, the native host, computer-history
-  # capture and its purge, the turn queue (whose turns `admit/1` refuses),
-  # sandbox, secrets, health, logging and trace.
+  # companion and browser-host sockets, the native host, the memory stores
+  # (which keep a device's session in memory: no database is open), the turn
+  # queue (whose turns `admit/1` refuses), sandbox, secrets, health, logging
+  # and trace.
   @primary_only [
     {FermixCore.Jobs.RunnerSupervisor, "runs a scheduled job's turn"},
     {FermixCore.Jobs.Scheduler, "fires scheduled jobs into turns"},
@@ -103,7 +107,20 @@ defmodule FermixCore.Home.Role do
     {FermixChannels.Voice.Supervisor,
      "routes realtime delegations, and a device runs no realtime session"},
     {FermixCore.ComputerHistory.Summarizer.Scheduler,
-     "summarizes captured history with a provider; capture and its purge stay"},
+     "summarizes captured history with a provider"},
+    {FermixCore.ComputerHistory.Capturer,
+     "captures this screen's history into memory.db; a device's captures are never " <>
+       "summarized and a return discards them"},
+    {FermixCore.ComputerHistory.Retention,
+     "purges captured history from memory.db, which a device does not open"},
+    {FermixCore.Memory.Repo,
+     "opens memory.db; a device's database is a retired copy, and a return replaces it in " <>
+       "place while the device engine runs"},
+    {FermixCore.Prompt.TemplateReconciler,
+     "adopts the shipped prompt templates into memory.db, which a device does not open"},
+    {FermixChannels.Gateway.Idempotency,
+     "keeps the channel events seen in memory.db and claims outbound media; a device takes " <>
+       "no channel event and sends none"},
     {FermixCore.Home.Snapshot.Scheduler,
      "writes the primary's snapshots; a device's home is a retired copy, and the move " <>
        "captures its own"},

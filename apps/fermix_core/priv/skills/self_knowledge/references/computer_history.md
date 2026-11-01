@@ -12,6 +12,8 @@ Enabling is the consent act, done in settings, never from chat.
 
 It shares the computer-use helper and its rights (Settings > Computer > **What the helper may do**). There is no backfill: capture starts at enable.
 
+It records only on the primary. A computer whose home moved to an Always On server is a desktop of that server and records nothing: its database is the retired copy of the home, which it no longer opens, and history of this screen never moves to the server.
+
 ## What it records
 
 - Default-deny, apps only: nothing is recorded from an app not on the list. Within a listed app: app switches, launches and quits, focused-window titles, focused-field role and settled value, and gap markers so a capture gap never reads as inactivity.

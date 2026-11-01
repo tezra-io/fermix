@@ -1,6 +1,7 @@
 defmodule FermixCore.ComputerHistory.ControllerRoleTest do
-  # M75 D5: a device-role engine makes no provider call, so it keeps capture and
-  # the 48-hour purge and leaves the summarizer, which calls a provider, out.
+  # M75 D5: a device-role engine makes no provider call, so it leaves the
+  # summarizer out; and it opens no database (its home is a retired copy, which a
+  # return replaces in place), so it leaves capture out too.
   use ExUnit.Case, async: true
 
   alias FermixCore.ComputerHistory.Capturer
@@ -14,8 +15,8 @@ defmodule FermixCore.ComputerHistory.ControllerRoleTest do
     assert Controller.default_children(:primary) == [@capture, @summarizer]
   end
 
-  test "a device runs capture only" do
-    assert Controller.default_children(:device) == [@capture]
+  test "a device runs neither capture nor the summarizer" do
+    assert Controller.default_children(:device) == []
   end
 
   test "a controller reconciles the children of the role it was started in" do
@@ -32,6 +33,6 @@ defmodule FermixCore.ComputerHistory.ControllerRoleTest do
         id: name
       )
 
-    assert :sys.get_state(pid).children == [@capture]
+    assert :sys.get_state(pid).children == []
   end
 end

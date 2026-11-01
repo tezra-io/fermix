@@ -40,12 +40,14 @@ it, never a second writer.
   answer.
 - A device-role engine makes no provider call and refreshes no token: it
   starts no token manager and no realtime voice (the voice socket is absent,
-  so the app sees no connection rather than a refusal), its computer history
-  captures and purges but does not summarize, and the management methods that
-  sign in, sign out, import a login, probe a provider, list a provider's live
-  models or run the network doctor answer that the engine runs in the device
-  role. `fermix memory review --now` and `fermix memory restore` refuse the
-  same way. On a home configured as a device or carrying the moved marker,
+  so the app sees no connection rather than a refusal), it opens no database
+  (its `memory.db` is the retired copy, so computer history records nothing
+  there, though its settings stay this computer's own), and the management
+  methods that sign in, sign out, import a login, probe a provider, list a
+  provider's live models or run the network doctor answer that the engine
+  runs in the device role. `fermix memory review --now` and `fermix memory
+  restore` refuse the same way. On a home configured as a device or
+  carrying the moved marker,
   `fermix auth login` and `logout`, `fermix plugins auth login`,
   `reauthorize`, `refresh` and `logout`, and storing or clearing the Anthropic
   setup token refuse with the same sentence and write nothing, and terminal

@@ -430,7 +430,10 @@ role` (`primary`, the default when absent, or `device`), resolved by
 `Role.remember!/2` as the first call of `start_supervision_tree`, before
 anything writes to the home; a marked home refuses to boot as the primary by
 name. `Role.children/2` filters both supervision trees from one named list
-(`Role.primary_only_reasons/0`), and `Role.admit/1` is the one refusal for
+(`Role.primary_only_reasons/0`; a device leaves out `Memory.Repo` and every
+child that opens `memory.db`, so it opens no database: its copy is the
+retired one, which a return replaces in place while it runs), and
+`Role.admit/1` is the one refusal for
 turns, provider calls, token refresh and memory writes in the device role,
 with `Role.admit_configured/1` answering the same question tree-less for the
 sign-in verbs. `Home.DesktopLink` is a moved desktop's link to its primary
@@ -772,8 +775,8 @@ which server holds the home) or cancelling.
 
 Architecture Invariant: one role gate, one epoch writer, one marker, one
 device-local list, one placement table; a linked device's request takes one
-path, here or the primary, never both. A device-role engine makes no provider call and refreshes
-no token. One restore path (`Archive.install/5`) for an archive and a
+path, here or the primary, never both. A device-role engine makes no provider call, refreshes
+no token and opens no database. One restore path (`Archive.install/5`) for an archive and a
 snapshot, and one writer of the snapshot status. A candidate never activates
 without `move_commit`, and a source sends `move_commit` only after its moved
 marker is written: at every crash and lost message at most one engine serves
