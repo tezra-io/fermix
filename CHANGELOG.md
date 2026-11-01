@@ -93,9 +93,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   choose. Each runs on that provider's key with nothing new to enter, and a
   provider whose key did not load is never offered or called. A decision
   model checks each item against the watcher's purpose and instructions, with
-  its keywords as hints, so a post worded differently or in another language
-  is no longer missed, in about a third of a second per item, roughly ten
-  times faster than a chat model. The filter model still makes every pass.
+  its keywords and the examples you marked ("that one wasn't useful", "you
+  should have sent me that") as hints, so a post worded differently or in
+  another language is no longer missed and a correction reaches the check
+  too, in about a third of a second per item, roughly ten times faster than a
+  chat model. The filter model still makes every pass.
   Fermix writes a watcher's keywords the same way either way, and if the
   decision model's provider fails, none is set up any more, or the one you
   chose is not set up, the watcher waits and retries instead of falling back

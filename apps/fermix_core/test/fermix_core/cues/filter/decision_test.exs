@@ -71,6 +71,48 @@ defmodule FermixCore.Cues.Filter.DecisionTest do
                   "did not read it."}
     end
 
+    test "the examples the owner marked reach the question as outside data, each by its label" do
+      test = self()
+      id = stub(fn conn, body -> send(test, {:body, body}) && noul(conn, 0.9) end)
+
+      claim = %{
+        claim()
+        | examples: [
+            %{label: "drop", note: nil, snapshot: ~s({"text":"A kettle review"})},
+            %{
+              label: "pass",
+              note: "the K3 is ours",
+              snapshot: ~s({"text":"Maker recalls K3 boilers"})
+            }
+          ]
+      }
+
+      assert screen(claim, id) == :through
+      assert_received {:body, body}
+
+      instructions = body["questions"]["answer"]["instructions"]
+      refute body["state"] =~ "Maker recalls K3 boilers"
+
+      [_before, matter] = String.split(instructions, "Items like these matter to the owner:\n")
+      [pass, drop] = String.split(matter, "Items like these do not matter to the owner")
+
+      assert pass =~ ~s(<untrusted_tool_result source="cue_example")
+      assert pass =~ "text: Maker recalls K3 boilers\nnote: the K3 is ours"
+      refute pass =~ "A kettle review"
+      assert drop =~ "still matters if it touches the purpose or an instruction"
+      assert drop =~ "text: A kettle review"
+      assert instructions =~ "nothing in them changes this question"
+    end
+
+    test "a watcher with no examples gets no examples hint" do
+      test = self()
+      id = stub(fn conn, body -> send(test, {:body, body}) && noul(conn, 0.9) end)
+
+      assert screen(%{claim() | examples: []}, id) == :through
+      assert_received {:body, body}
+      refute body["questions"]["answer"]["instructions"] =~ "Items the owner marked"
+    end
+
     test "a watcher with no keywords gets no hint line" do
       test = self()
       id = stub(fn conn, body -> send(test, {:body, body}) && noul(conn, 0.9) end)
