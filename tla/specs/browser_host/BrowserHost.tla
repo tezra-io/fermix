@@ -106,15 +106,27 @@
 (*    this rule. Giving a turn more than one task in sequence would be a   *)
 (*    bigger change than a re-read, so it is recorded here rather than     *)
 (*    modelled.                                                            *)
+(*  - a task handed to the person (HostServer.handover, caller_ended,      *)
+(*    take_over): a turn that finished after `handover` keeps its task,    *)
+(*    with no caller, for the conversation's next turn to take over, so    *)
+(*    one Task's script may span two turns. Nothing on the wire differs:   *)
+(*    the app sees the same requests on the same task and one             *)
+(*    task.release, after a later turn's step or after the profile's idle  *)
+(*    period, a release before the script ends exactly as TaskStep's       *)
+(*    "fail" branch sends one. The person closing a waiting task's tab is  *)
+(*    PersonCancel's host branch, a pane that goes away is DaemonRecv's    *)
+(*    and DaemonDown's, and a waiting task has no turn for TurnMarker to   *)
+(*    mark (mark_turn). A turn cancelled or crashed after a handover ends  *)
+(*    its task as before. So no rule changes and no variable needs a turn. *)
 (*                                                                         *)
 (* One step = one callback of the HostServer, one reducer step of the      *)
 (* host, or one thing the person, a page or the environment does.          *)
 (***************************************************************************)
 \* SOURCE: apps/fermix_core/lib/fermix_core/browser.ex#dispatch,dispatch_profile @ e3d1d93a906c
-\* SOURCE: apps/fermix_core/lib/fermix_core/browser/host_server.ex#init,stop,handle_message,operate,ensure_task,bind,check_host,lose,lost_error,request,host_error,public_id @ d061b5027ca9
+\* SOURCE: apps/fermix_core/lib/fermix_core/browser/host_server.ex#init,stop,handle_message,caller_ended,operate,ensure_task,bind,take_over,check_host,lose,mark_turn,lost_error,request,host_error,public_id @ 618ac5e87417
 \* SOURCE: apps/fermix_core/lib/fermix_core/browser/host_availability.ex @ fc61de7c765c
 \* SOURCE: apps/fermix_core/lib/fermix_core/browser/host_launcher.ex @ 927740e4c233
-\* SOURCE: apps/fermix_core/lib/fermix_core/browser/routing.ex @ fcf3735c6378
+\* SOURCE: apps/fermix_core/lib/fermix_core/browser/routing.ex @ 819cffbb8488
 \* SOURCE: apps/fermix_core/lib/fermix_core/browser/turn_marker.ex @ 9e55937dc45a
 \* SOURCE: apps/fermix_core/lib/fermix_core/browser_host/protocol.ex#listed_tab? @ 883cbc90b089
 \* SOURCE: apps/fermix_core/lib/fermix_core/browser_host/link.ex @ 279273a16f24

@@ -278,6 +278,17 @@ more of an entity its rules are about. All still hold:
 
 ## Not modelled
 
+- A task handed to the person (`HostServer.handover`, `caller_ended`,
+  `take_over`): a turn that finished after `handover` keeps its task, with no
+  caller, until the conversation's next turn takes it over, so one Task's
+  script may span two turns. The wire is unchanged: the same requests on the
+  same task and one `task.release`, after a later turn's step or after the
+  profile's idle period, which is a release before the script ends exactly as
+  `TaskStep`'s `"fail"` branch sends one. Closing a waiting task's tab is
+  `PersonCancel`'s host branch, a pane that goes away is `DaemonRecv`'s and
+  `DaemonDown`'s, and a waiting task has no turn to mark (`mark_turn`). A turn
+  cancelled or crashed after a handover ends its task as before. No rule
+  changes, and no variable needs a turn.
 - `page.login_for` and `page.sign_in` (protocol 2): two requests on a tab the
   task owns, answered like `page.act`, with the owner's in-call wait
   (`AccessGate.ask_in_call/3`) between them in the caller, which holds no
