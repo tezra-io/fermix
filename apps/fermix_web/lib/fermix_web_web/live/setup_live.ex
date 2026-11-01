@@ -259,12 +259,18 @@ defmodule FermixWebWeb.SetupLive do
   # reaches the server (M75 B14): the rest of the setup is the primary's.
   # Embedded in the Mac app the page has no Always On: the app's own pane is
   # the one surface there.
-  defp first_tab(%{role: :device}, _report, false), do: "always_on"
+  defp first_tab(%{role: :device}, report, false),
+    do: if(AlwaysOn.offered?(), do: "always_on", else: next_action_tab(report))
+
   defp first_tab(_record, report, _embed?), do: next_action_tab(report)
 
-  # Every tab the page lists: all but Always On when embedded in the Mac app.
-  defp shown_tabs(true), do: Enum.reject(@tabs, &(&1.id == "always_on"))
-  defp shown_tabs(false), do: @tabs
+  # Every tab the page lists: all but Always On when embedded in the Mac app,
+  # or in a build without Always On.
+  defp shown_tabs(embed?) do
+    if embed? or not AlwaysOn.offered?(),
+      do: Enum.reject(@tabs, &(&1.id == "always_on")),
+      else: @tabs
+  end
 
   # A pairing window this page still shows is cancelled when the page goes away
   # (the tab closed or the socket dropped).
@@ -922,9 +928,12 @@ defmodule FermixWebWeb.SetupLive do
      )}
   end
 
-  # The Always On tab (Always On setup §8.1).
-  def handle_event("always_on_" <> _rest = event, params, socket),
-    do: {:noreply, AlwaysOn.handle_event(event, params, socket)}
+  # The Always On tab (Always On setup §8.1), in a build that offers it.
+  def handle_event("always_on_" <> _rest = event, params, socket) do
+    if AlwaysOn.offered?(),
+      do: {:noreply, AlwaysOn.handle_event(event, params, socket)},
+      else: {:noreply, socket}
+  end
 
   # The Cues tab (M60 §15): `CuesState` turns each `cues_*` event into a
   # change and says what follows.

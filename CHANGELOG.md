@@ -149,7 +149,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   connected, Fermix reconnects on its own when Slack refreshes or drops the
   connection, and an event it could not take in is left for Slack to send
   again. The webhook stays the default.
-- **Always On: Fermix can move to a server you control.** Your home (its
+- **Always On: Fermix can move to a server you control.** Not in this
+  release yet: in a release build `fermix always-on` says "Always On is not
+  in this release of Fermix yet.", the setup page and the Fermix app show no
+  Always On, and it stays so until moving back to this computer is possible.
+  Your home (its
   settings, memory, secrets, skills and workspace) can now move from your
   computer to a Linux server, so Fermix keeps working with your Mac closed.
   With Reach from anywhere on, Always On on your primary gives an enrollment

@@ -479,15 +479,17 @@ settings_json="$(cat "$settings_out")"
 grep -Fq "daemon is not running" "$settings_err" ||
   fail "fermix settings did not say on stderr why it changed nothing: $(cat "$settings_err")"
 
-# ── fermix always-on with no daemon, run from this artifact ─────────────────
-# `fermix always-on` takes Always On's steps only through the running engine
-# (one `home.act` each) and never writes a home itself, so with no daemon a
-# step must refuse: exit 1, exactly one JSON envelope on stdout naming
-# `engine_stopped`, the sentence on stderr, and nothing written. The verb reads
-# the account's files to tell whether the Fermix app manages the home, so this
-# stage runs it from the artifact the release is about to publish, against a
-# home that does not exist yet. It runs before the migrate-to-app stage because
-# that stage ends the script on a Linux target.
+# ── fermix always-on in a release, run from this artifact ──────────────────
+# A release build has no Always On yet (`FermixCore.Home.AlwaysOnRelease`,
+# decided by the build's own environment), so a step must refuse before it
+# reads anything: exit 1, exactly one JSON envelope on stdout naming
+# `always_on_unavailable`, the sentence on stderr, and nothing written. An
+# artifact that reaches for the engine instead (`engine_stopped` with no
+# daemon) carries Always On and fails here. This stage runs the artifact the
+# release is about to publish, against a home that does not exist yet. It runs
+# before the migrate-to-app stage because that stage ends the script on a
+# Linux target. When Always On ships, the gate goes and this stage expects the
+# no-daemon refusal, `engine_stopped`, again.
 always_on_home="$runtime_root/always-on-home"
 always_on_out="$runtime_root/always-on.out"
 always_on_err="$runtime_root/always-on.err"
@@ -499,10 +501,10 @@ printf '%s\n' "$(cat "$always_on_err")"
 [ "$always_on_status" -eq 1 ] ||
   fail "fermix always-on create-server with no daemon must exit 1, got $always_on_status"
 always_on_json="$(cat "$always_on_out")"
-always_on_expected='{"error":{"code":"engine_stopped","sentence":"Fermix is not running from this home, and this needs it. Start it, then try again."},"ok":false,"schema_version":1}'
+always_on_expected='{"error":{"code":"always_on_unavailable","sentence":"Always On is not in this release of Fermix yet."},"ok":false,"schema_version":1}'
 [ "$always_on_json" = "$always_on_expected" ] ||
-  fail "fermix always-on --json with no daemon must print exactly the engine_stopped envelope on stdout, got: $always_on_json"
-grep -Fq "Fermix is not running from this home" "$always_on_err" ||
+  fail "fermix always-on --json in a release must print exactly the always_on_unavailable envelope on stdout, got: $always_on_json"
+grep -Fq "Always On is not in this release of Fermix yet." "$always_on_err" ||
   fail "fermix always-on did not say on stderr why it took no step: $(cat "$always_on_err")"
 [ ! -e "$always_on_home" ] ||
   fail "fermix always-on wrote a home at $always_on_home with no daemon: $(ls -A "$always_on_home")"
