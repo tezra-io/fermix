@@ -1,0 +1,83 @@
+{
+  "error": {
+    "code": "changed",
+    "sentence": "Always On changed since this was shown, so look at it again.",
+    "summary": {
+      "action": {
+        "confirm": "Move Fermix to your server now? Messages sent to Telegram while the move runs wait until it is done, and a recurring job more than an hour late is skipped. This computer serves nothing while the move runs: no chat, channels or jobs until fermix-general-a3f9 takes over.",
+        "id": "move_now",
+        "key": "0Unu8V_R8dFwxCLgUqa1fw",
+        "label": "Move now",
+        "needs": [
+          "recovery_passphrase"
+        ],
+        "url": null
+      },
+      "detail": {
+        "lines": [
+          {
+            "label": "Server",
+            "value": "fermix-general-a3f9"
+          },
+          {
+            "label": "Size",
+            "value": "CPX22"
+          },
+          {
+            "label": "Place",
+            "value": "Falkenstein"
+          },
+          {
+            "label": "Address",
+            "value": "203.0.113.7"
+          },
+          {
+            "label": "System",
+            "value": "linux x86_64"
+          },
+          {
+            "label": "Version",
+            "value": "1.2.3"
+          },
+          {
+            "label": "Waits until",
+            "value": "Monday, May 5, 2031 at 1:00 PM CEST"
+          },
+          {
+            "label": "Last checked",
+            "value": "Sunday, May 4, 2031 at 1:59 PM CEST"
+          },
+          {
+            "label": "Costs",
+            "value": "€8.33 a month, billed by the hour until deleted"
+          }
+        ],
+        "readiness": [
+          {
+            "id": "stays_here",
+            "sentence": "iMessage, voice calls and meetings stop after the move: neither this Mac nor fermix-general-a3f9 runs them.",
+            "status": "warn"
+          }
+        ],
+        "server": {
+          "ipv4": "203.0.113.7",
+          "location": "Falkenstein",
+          "name": "fermix-general-a3f9",
+          "system": "linux x86_64",
+          "type": "CPX22",
+          "version": "1.2.3"
+        },
+        "waits_until": "2031-05-05T11:00:00Z"
+      },
+      "key": "Hpj619zuAVxgXXRVumw26w",
+      "notice": {
+        "id": "ready:cand-5e2a9c1f7b3d4086",
+        "sentence": "Your server is ready for the move."
+      },
+      "sentence": "Your server is ready for the move. There is no way back to this Mac in this version.",
+      "state": "ready"
+    }
+  },
+  "ok": false,
+  "schema_version": 1
+}

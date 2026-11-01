@@ -11,6 +11,7 @@ defmodule Fermix.CLI do
 
   alias Fermix.CLI.AcpCommand
   alias Fermix.CLI.AgentsCommand
+  alias Fermix.CLI.AlwaysOnCommand
   alias Fermix.CLI.AuthCommand
   alias Fermix.CLI.BrowserBridgeCommand
   alias Fermix.CLI.BrowserCommand
@@ -90,6 +91,7 @@ defmodule Fermix.CLI do
   defp dispatch("logs", rest), do: LogsCommand.run(rest)
   defp dispatch("memory", rest), do: MemoryCommand.run(rest)
   defp dispatch("home", rest), do: HomeCommand.run(rest)
+  defp dispatch("always-on", rest), do: AlwaysOnCommand.run(rest)
   defp dispatch("upgrade", rest), do: UpgradeCommand.run(rest)
   defp dispatch("uninstall", rest), do: UninstallCommand.run(rest)
   defp dispatch("migrate-to-app", rest), do: MigrateToApp.run(rest)
@@ -161,6 +163,10 @@ defmodule Fermix.CLI do
       fermix home snapshots passphrase --passphrase-file PATH [--json]  Set the recovery passphrase
       fermix home enroll --code-file PATH [--snapshot-bucket B --snapshot-region R]  Make this fresh home a candidate primary
       fermix home candidates [--json]              List the enrolled candidate primaries
+      fermix always-on [--json]                    Show Always On; on a terminal, take each step
+      fermix always-on ACTION [--provider ID] [--type T --location L] [--stdin]
+                       [--recovery-passphrase-file PATH] [--yes] [--wait] [--json]
+                                                   Take one Always On step (create-server, move-now, ...)
       fermix logs   [-f] [-n LINES]                Show daemon log file
       fermix upgrade [--check]                     Self-update from signed releases
       fermix uninstall                             Remove a Fermix.app-managed installation

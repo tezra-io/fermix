@@ -27,6 +27,19 @@ defmodule Fermix.CLI.MachineOutputTest do
            }
   end
 
+  # `fermix always-on`'s `changed` hands over the screen read again beside
+  # its sentence (Always On setup §8.2); nothing extra replaces either.
+  test "a refusal carries what the caller reads next, never in place of its code" do
+    extra = %{"summary" => %{"state" => "off"}, "code" => "other", "sentence" => "other"}
+    envelope = Jason.decode!(MachineOutput.error(:changed, [reason: "It changed."], extra))
+
+    assert envelope["error"] == %{
+             "code" => "changed",
+             "sentence" => "It changed.",
+             "summary" => %{"state" => "off"}
+           }
+  end
+
   test "a code outside the published vocabulary raises rather than inventing one" do
     assert_raise FunctionClauseError, fn -> MachineOutput.error(:not_a_code) end
   end
@@ -42,7 +55,8 @@ defmodule Fermix.CLI.MachineOutputTest do
       output: "Access denied",
       to: "aws i-0f3b1c",
       date: "2026-10-27",
-      epoch: 3
+      epoch: 3,
+      confirm: "Create your server?"
     ]
 
     for code <- MachineOutput.codes() do
@@ -66,7 +80,8 @@ defmodule Fermix.CLI.MachineOutputTest do
       output: "o",
       to: "t",
       date: "d",
-      epoch: 1
+      epoch: 1,
+      confirm: "c"
     ]
 
     internal = ~w(linux_package standalone macos_app systemd_environment BuildInfo GenServer)

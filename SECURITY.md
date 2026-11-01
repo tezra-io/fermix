@@ -86,7 +86,10 @@ still offers it under its key, so a confirm accepted on an older screen does
 nothing. Its input (the token, the recovery passphrase) is decoded where it
 arrives into a struct whose inspection withholds both, so no log line, crash
 report or telemetry event carries either, and the setup page's request logs
-filter any parameter named for a passphrase. While the server stands, a new token
+filter any parameter named for a passphrase. `fermix always-on` takes the token
+only from a prompt that does not echo or from stdin, and the recovery passphrase
+only from such a prompt or a file, refuses either typed as an argument, and holds
+them in that struct until the one request that sends them. While the server stands, a new token
 replaces the kept one only when it reaches that server (the same project),
 so no token for another project can take its place; a provider's token
 never moves to another provider's file. Fermix touches only

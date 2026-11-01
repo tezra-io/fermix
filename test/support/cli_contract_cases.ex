@@ -13,6 +13,7 @@ defmodule FermixTestSupport.CliContractCases do
   change behind it.
   """
 
+  alias Fermix.CLI.AlwaysOnCommand
   alias Fermix.CLI.HomeMovedCommand
   alias Fermix.CLI.MachineOutput
   alias Fermix.CLI.Service.Status
@@ -22,6 +23,7 @@ defmodule FermixTestSupport.CliContractCases do
   alias FermixCore.Management.Diagnostics.Offline
   alias FermixCore.Management.Home
   alias FermixCore.Management.HomeSummary
+  alias FermixTestSupport.HomeSummaryGoldens
 
   @vendor_unit "/usr/lib/systemd/user/fermix.service"
   @legacy_unit "/home/operator/.config/systemd/user/fermix.service"
@@ -209,7 +211,26 @@ defmodule FermixTestSupport.CliContractCases do
       {"home_status/primary.json", encoded(MachineOutput.ok(home_status()))},
       {"home_snapshots_status/ok.json", encoded(MachineOutput.ok(snapshots_view()))},
       {"home_candidates/ok.json", encoded(MachineOutput.ok(candidates_view()))}
+    ] ++ always_on_cases()
+  end
+
+  # `fermix always-on`: the screen (the summary of nothing set up yet), a
+  # step's answer (the create's job running, nothing more to hand over), and
+  # `changed` with the screen read again (a server ready for the move).
+  defp always_on_cases do
+    changed = MachineOutput.error(:changed, error_details(:changed), %{"summary" => golden("ready")})
+
+    [
+      {"always_on/status.json", encoded(MachineOutput.ok(HomeSummary.summary(off_facts())))},
+      {"always_on/step.json",
+       encoded(MachineOutput.ok(AlwaysOnCommand.step_result(golden("creating"), nil)))},
+      {"always_on/changed.json", encoded(changed)}
     ]
+  end
+
+  defp golden(state) do
+    {_name, record} = List.keyfind(HomeSummaryGoldens.rows(), "home_status_" <> state, 0)
+    record["summary"]
   end
 
   # `fermix home candidates`: the one candidate the primary holds, as the
@@ -413,6 +434,20 @@ defmodule FermixTestSupport.CliContractCases do
 
   def error_details(:mark_moved_failed),
     do: [output: "could not tell whether Fermix is running (timeout)"]
+
+  def error_details(:action_refused) do
+    [
+      output:
+        "Hetzner does not accept this token, so paste a Read & Write API token from the " <>
+          "Hetzner project you made for Fermix."
+    ]
+  end
+
+  def error_details(:confirm_required),
+    do: [confirm: "Create your server? Hetzner bills it by the hour until it is deleted."]
+
+  def error_details(:changed),
+    do: [reason: "Always On changed since this was shown, so look at it again."]
 
   def error_details(_code), do: []
 

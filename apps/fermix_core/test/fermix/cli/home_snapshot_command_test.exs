@@ -203,7 +203,7 @@ defmodule Fermix.CLI.HomeSnapshotCommandTest do
 
       assert [
                "Your server is turned off.",
-               "Next: Turn it on (in the Fermix app)",
+               "Next: Turn it on (fermix always-on)",
                "Role: device" | _
              ] =
                String.split(out, "\n")
@@ -212,6 +212,38 @@ defmodule Fermix.CLI.HomeSnapshotCommandTest do
       client = fn "home.status", %{}, _opts -> {:ok, quiet} end
       {0, out, ""} = run(["status"], home: ctx.home, client: client)
       assert ["Your server is turned off.", "Role: device" | _] = String.split(out, "\n")
+    end
+
+    # Always On setup §8.2: a home the Fermix app manages takes its steps in
+    # the app; any other takes them with `fermix always-on`.
+    test "on a home the Fermix app manages, the next step is the app's", ctx do
+      answer = %{
+        "role" => "primary",
+        "summary" => %{
+          "state" => "off",
+          "sentence" => "Keep Fermix running when this Mac sleeps.",
+          "action" => %{"id" => "paste_token", "label" => "Set up"},
+          "detail" => %{}
+        },
+        "snapshots" => %{"sentence" => "Snapshots are off.", "targets" => []}
+      }
+
+      client = fn "home.status", %{}, _opts -> {:ok, answer} end
+
+      {0, out, ""} =
+        run(["status"], home: ctx.home, client: client, app_managed?: fn -> true end)
+
+      assert ["Keep Fermix running when this Mac sleeps.", "Next: Set up (in the Fermix app)" | _] =
+               String.split(out, "\n")
+
+      {0, json, ""} =
+        run(["status", "--json"],
+          home: ctx.home,
+          client: client,
+          app_managed?: fn -> flunk("--json names no surface, so it asks nothing") end
+        )
+
+      assert %{"result" => %{"summary" => %{"state" => "off"}}} = Jason.decode!(json)
     end
 
     test "with Fermix stopped, the summary comes from the home's own files too", ctx do
