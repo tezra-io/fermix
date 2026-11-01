@@ -5,10 +5,13 @@ defmodule FermixCore.Home.Moved do
   It is written once, after the home's archive has left for another host, and
   records the epoch this copy was at, when it moved and where to. A home that
   carries it refuses to boot as the primary engine by name (`FermixCore.Home.Role`,
-  M75 step 1) and may only run in the device role. Nothing removes it: a home
-  that should be primary again is restored from a snapshot into an empty root,
-  which has no marker. Writing over an existing marker is refused for the same
-  reason, since the first move is the one that counts.
+  M75 step 1) and may only run in the device role. One step removes it
+  (`remove/1`): a return (Always On's move back to this computer), once the
+  server it moved to carries its own marker and only just before this home's
+  settings make it the primary again (`FermixCore.Home.Candidate.Activation`).
+  Otherwise a home that should be primary again is restored from a snapshot
+  into an empty root, which has no marker. Writing over an existing marker is
+  refused, since the first move is the one that counts.
   """
 
   @filename "moved.json"
@@ -55,6 +58,21 @@ defmodule FermixCore.Home.Moved do
       {:error, _reason} = error -> error
       {:already, existing} -> {:error, {:already_moved, existing}}
       _other -> {:error, {:invalid_marker, file, marker}}
+    end
+  end
+
+  @doc """
+  Removes the marker under `root`; an absent one is already removed. Only a
+  return's activation calls it (see the moduledoc).
+  """
+  @spec remove(Path.t()) :: :ok | {:error, error()}
+  def remove(root) when is_binary(root) and root != "" do
+    file = path(root)
+
+    case File.rm(file) do
+      :ok -> :ok
+      {:error, :enoent} -> :ok
+      {:error, reason} -> {:error, {:file, file, reason}}
     end
   end
 

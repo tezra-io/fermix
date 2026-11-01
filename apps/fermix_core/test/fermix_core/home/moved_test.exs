@@ -30,6 +30,22 @@ defmodule FermixCore.Home.MovedTest do
     assert Moved.read(root) == {:ok, @marker}
   end
 
+  # Only a return's activation removes it, once the server's own marker exists.
+  test "remove takes the marker away, and an absent one is already removed", %{root: root} do
+    :ok = Moved.write(root, @marker)
+
+    assert :ok = Moved.remove(root)
+    assert Moved.read(root) == :absent
+    assert :ok = Moved.remove(root)
+  end
+
+  test "a marker that cannot be removed is named", %{root: root} do
+    File.mkdir_p!(Path.join(Moved.path(root), "inside"))
+    file = Moved.path(root)
+
+    assert {:error, {:file, ^file, _posix}} = Moved.remove(root)
+  end
+
   test "the destination must be short printable text", %{root: root} do
     file = Moved.path(root)
 
