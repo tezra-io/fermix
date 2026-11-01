@@ -68,6 +68,14 @@ defmodule FermixCore.Agents.BrowserGuidanceSkillTest do
       assert definition.system_prompt =~ "`#{code}`", "browser-guidance never names #{code}"
     end
 
+    # A pane tab closes with the turn, so a stop the person answers keeps it.
+    for code <- ~w(handover handover_pane_only handover_not_allowed) do
+      assert definition.system_prompt =~ "`#{code}`", "browser-guidance never names #{code}"
+    end
+
+    assert definition.system_prompt =~ "a payment confirmation"
+    assert definition.system_prompt =~ "Never hand over a finished task"
+
     # A CAPTCHA is the model's own call, not a Fermix stop; the human gates stay.
     refute definition.system_prompt =~ ~r/captcha/i
     assert definition.system_prompt =~ "Stop and report for 2FA, payment confirmation"

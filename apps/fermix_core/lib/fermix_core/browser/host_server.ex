@@ -28,8 +28,8 @@ defmodule FermixCore.Browser.HostServer do
   ## Handing the tabs to the person
 
   One exception keeps a task past its caller: a turn that handed its tabs to
-  the person (`handover/3`: a verification code, a captcha, a step only they
-  can take) and then finished. The task stays, with its tabs open in the pane
+  the person (`handover/3`: a verification code, a payment confirmation, a
+  choice only they can make) and then finished. The task stays, with its tabs open in the pane
   and no caller, until the conversation's next browser call takes it over
   (`take_over/2`); from there it is bound to that turn and ends with it as any
   task does, unless that turn hands it over again. A waiting task also ends
