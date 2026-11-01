@@ -159,9 +159,45 @@ defmodule FermixCore.Management.ProvisionTest do
       {:ok, _view} = connect(ctx)
       assert {:ok, options} = options(ctx)
 
+      assert options["provider"] == %{"id" => "hetzner", "name" => "Hetzner"}
       assert options["recommended"] == %{"type" => "cpx22", "location" => "fsn1"}
       assert options["sentence"] == "Recommended: CPX22 in Falkenstein, €20 a month."
       assert Copy.violations(options["sentence"], :prose, ["CPX22", "Falkenstein"]) == []
+    end
+
+    # Always On setup §3.1: each offer's size and price are the engine's
+    # words, so a surface draws them as sent and groups the rows by city.
+    test "words each offer: its label and its price, finished", ctx do
+      {:ok, _view} = connect(ctx)
+      assert {:ok, options} = options(ctx)
+
+      shared = Enum.find(options["offers"], &(&1["type"] == "cpx22" and &1["location"] == "fsn1"))
+      assert shared["label"] == "CPX22: 2 cores, 4 GB memory, 80 GB disk"
+      assert shared["price"] == "€20.09 a month, billed by the hour until deleted"
+
+      dedicated = Enum.find(options["offers"], &(&1["type"] == "ccx13"))
+      assert dedicated["label"] == "CCX13: 2 dedicated cores, 8 GB memory, 80 GB disk"
+
+      cities = Map.new(options["locations"], &{&1["id"], &1["city"]})
+
+      for offer <- options["offers"] do
+        assert is_binary(cities[offer["location"]]), inspect(offer)
+        assert Copy.violations(offer["label"], :prose, [offer["description"]]) == []
+
+        assert offer["price"] ==
+                 Copy.summary_line(:costs, {offer["total_monthly"], options["currency"]}, %{})[
+                   "value"
+                 ]
+      end
+    end
+
+    # A surface that restarted after the token step reads the offers with
+    # nothing to name: the provider in use is the engine's own rule.
+    test "takes no params: the provider is the one in use", ctx do
+      {:ok, _view} = connect(ctx)
+
+      assert options(ctx, %{"provider" => "hetzner"}) ==
+               {:error, :invalid_params, %{"method" => "home.provision.options"}}
     end
   end
 
@@ -808,12 +844,12 @@ defmodule FermixCore.Management.ProvisionTest do
 
   # The one method of the provisioner still on the wire, through the router
   # as a daemon answers it.
-  defp options(ctx) do
+  defp options(ctx, params \\ %{}) do
     Router.route(
       %{
         method: "home.provision.options",
         protocol_version: Protocol.protocol_version(),
-        params: %{"provider" => "hetzner"}
+        params: params
       },
       engine_role: @primary,
       operation_opts: [provision: ctx.seams]

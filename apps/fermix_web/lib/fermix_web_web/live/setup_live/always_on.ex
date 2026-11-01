@@ -50,8 +50,6 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
 
   alias FermixCore.Clock
   alias FermixCore.Home.Link
-  alias FermixCore.Home.Provision, as: HomeProvision
-  alias FermixCore.Home.Provision.Registry
   alias FermixCore.Home.Role
   alias FermixCore.Home.StatusWatch
   alias FermixCore.Management.AlwaysOn, as: ManagementAlwaysOn
@@ -388,13 +386,8 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
     end)
   end
 
-  # The one call of `home.provision.options`, for the provider Always On
-  # speaks of (`Home.Provision.current/2`), whose summary does not name it.
-  defp offers(opts) do
-    home = Keyword.get_lazy(opts, :home, &ConfigStore.fermix_home/0)
-    provider = HomeProvision.current(home, Keyword.get_lazy(opts, :providers, &Registry.all/0))
-    Provision.options(%{"provider" => provider.id()}, opts)
-  end
+  # The one call of `home.provision.options`: what the provider in use sells.
+  defp offers(opts), do: Provision.options(opts)
 
   # -- the step ------------------------------------------------------------------
 

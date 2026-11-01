@@ -734,7 +734,7 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
 
   # `home.provision.options` as the engine answers it here.
   defp options!(seams) do
-    {:ok, options} = Provision.options(%{"provider" => "nimbus"}, home_seams(seams))
+    {:ok, options} = Provision.options(home_seams(seams))
     options
   end
 

@@ -1024,6 +1024,37 @@ defmodule FermixCore.Management.CopyTest do
       end
     end
 
+    # The offers `home.provision.options` answers are words too: no surface
+    # words memory, cores, disk or a price itself.
+    test "each offer is a label and a price the engine finished" do
+      shared = %{
+        "description" => "CPX22",
+        "cores" => 2,
+        "memory_gb" => 4.0,
+        "disk_gb" => 80,
+        "dedicated" => false
+      }
+
+      dedicated = %{shared | "description" => "CCX13", "memory_gb" => 8, "dedicated" => true}
+      small = %{shared | "cores" => 1, "memory_gb" => 4.5}
+
+      assert Copy.offer_label(shared) == "CPX22: 2 cores, 4 GB memory, 80 GB disk"
+      assert Copy.offer_label(dedicated) == "CCX13: 2 dedicated cores, 8 GB memory, 80 GB disk"
+      assert Copy.offer_label(small) == "CPX22: 1 core, 4.5 GB memory, 80 GB disk"
+
+      # A fractional size is stated exactly, which the version-number rule
+      # reads as a version; every type Fermix offers today has whole gigabytes.
+      for offer <- [shared, dedicated] do
+        assert_clean(Copy.offer_label(offer), :prose, [offer["description"]], "offer")
+      end
+
+      assert Copy.offer_price("20.09", "EUR") ==
+               "€20.09 a month, billed by the hour until deleted"
+
+      assert Copy.offer_price("9.10", "CHF") ==
+               Copy.summary_line(:costs, {"9.10", "CHF"}, %{})["value"]
+    end
+
     # Move now's confirm names what the move costs the owner, in the
     # review's own words, and never a time or a price, so it is stable.
     test "Move now's confirm asks once and names each warning in its words" do

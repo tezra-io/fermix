@@ -583,17 +583,44 @@ defmodule FermixCore.Management.Copy do
     do: line(summary_line_label(key), stated(at, zone))
 
   def summary_line(key, {total, currency}, _ctx) when key in [:costs, :old_costs],
-    do:
-      line(
-        summary_line_label(key),
-        "#{money(total, currency)} a month, billed by the hour until deleted"
-      )
+    do: line(summary_line_label(key), offer_price(total, currency))
 
   def summary_line(key, value, _ctx)
       when key in [:server, :size, :place, :address, :system, :version] and is_binary(value),
       do: line(summary_line_label(key), value)
 
   defp line(label, value), do: %{"label" => label, "value" => value}
+
+  @doc """
+  One offer's size, as `home.provision.options` answers it: the type's name,
+  then its cores (dedicated where they are), memory and disk ("CPX22: 2
+  cores, 4 GB memory, 80 GB disk").
+  """
+  @spec offer_label(map()) :: String.t()
+  def offer_label(%{
+        "description" => name,
+        "cores" => cores,
+        "memory_gb" => memory,
+        "disk_gb" => disk,
+        "dedicated" => dedicated
+      })
+      when is_binary(name) and is_integer(cores) and cores > 0 and is_number(memory) and
+             is_integer(disk) and is_boolean(dedicated),
+      do: "#{name}: #{cores} #{cores(cores, dedicated)}, #{gb(memory)} GB memory, #{disk} GB disk"
+
+  @doc "One offer's price, `total` a month in `currency`, worded as the Costs line is."
+  @spec offer_price(String.t(), String.t()) :: String.t()
+  def offer_price(total, currency) when is_binary(total) and is_binary(currency),
+    do: "#{money(total, currency)} a month, billed by the hour until deleted"
+
+  defp cores(count, true), do: "dedicated " <> cores(count, false)
+  defp cores(1, false), do: "core"
+  defp cores(_count, false), do: "cores"
+
+  # A size as a person reads it: 4.0 is 4, 4.5 stays 4.5.
+  defp gb(size) when is_integer(size), do: Integer.to_string(size)
+  defp gb(size) when size == trunc(size), do: size |> trunc() |> Integer.to_string()
+  defp gb(size), do: Float.to_string(size)
 
   defp stated(at, zone), do: Clock.stated_instant(at, personalization: [timezone: zone])
 
