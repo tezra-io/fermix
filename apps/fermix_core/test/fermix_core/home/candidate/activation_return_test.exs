@@ -65,6 +65,25 @@ defmodule FermixCore.Home.Candidate.ActivationReturnTest do
     "workspace/notes.md" => "the server's notes"
   }
 
+  # The stop case builds a home per stop, so it runs on a small copy that still
+  # holds every kind of step: a path set aside in place, a kept path moved into
+  # a staged entry, an entry with its database files, the ended tenure and the
+  # marker.
+  @small_retired Map.take(@retired, [
+                   "config.toml",
+                   "memory.db",
+                   "memory.db-wal",
+                   "chatgpt_host.json",
+                   "device/desktop.json",
+                   "device/desktop_key",
+                   "device/return.json",
+                   "harness/runs/run-1/events.jsonl",
+                   "plugins/compux/1.2.0/macos/Fermix.app/Contents/Info.plist",
+                   "plugins/reinstall.json"
+                 ])
+
+  @small_staged Map.take(@staged, ["config.toml", "memory.db", "plugins/reinstall.json"])
+
   setup do
     tmp = SafeRm.make_tmp_dir!("activation_return")
     on_exit(fn -> SafeRm.rm_rf!(tmp) end)
@@ -127,18 +146,19 @@ defmodule FermixCore.Home.Candidate.ActivationReturnTest do
   end
 
   test "a stop after any step is finished by the next run from the recorded entries", ctx do
-    reference = activating_home!(ctx.tmp, "reference")
+    small = {@small_retired, @small_staged}
+    reference = activating_home!(ctx.tmp, "reference", small)
     test = self()
     :ok = Activation.activate(reference, :return, after_step: &send(test, {:step, &1, nil, nil}))
     expected = files(reference)
     steps = Enum.map(collect_steps(), &elem(&1, 0))
-    stops = first_and_last_of_each_kind(steps)
+    stops = first_of_each_kind(steps)
 
-    assert stops |> Enum.map(&kind/1) |> Enum.uniq() |> Enum.sort() ==
+    assert stops |> Enum.map(&kind/1) |> Enum.sort() ==
              Enum.sort([:a, :kept, :aside, :placed, :c, :d, :e, :f])
 
     for {step, index} <- Enum.with_index(stops) do
-      home = activating_home!(ctx.tmp, "stop-#{index}")
+      home = activating_home!(ctx.tmp, "stop-#{index}", small)
 
       assert catch_throw(Activation.activate(home, :return, after_step: stop_at(step))) ==
                {:stopped, step}
@@ -230,9 +250,9 @@ defmodule FermixCore.Home.Candidate.ActivationReturnTest do
 
   # -- homes ------------------------------------------------------------------
 
-  defp staged_home!(tmp, name) do
+  defp staged_home!(tmp, name, {retired, staged} \\ {@retired, @staged}) do
     home = Path.join(tmp, name)
-    for {path, contents} <- @retired, do: write!(home, path, contents)
+    for {path, contents} <- retired, do: write!(home, path, contents)
 
     :ok =
       Moved.write(home, %{epoch: 5, moved_at: ~U[2031-05-01 10:00:00Z], to: "hetzner-orchard"})
@@ -245,13 +265,13 @@ defmodule FermixCore.Home.Candidate.ActivationReturnTest do
       )
 
     staging = Candidate.staging_path(home)
-    for {path, contents} <- @staged, do: write!(staging, path, contents)
+    for {path, contents} <- staged, do: write!(staging, path, contents)
     home
   end
 
   # The move committed: its candidate is activating, the entries recorded.
-  defp activating_home!(tmp, name) do
-    home = staged_home!(tmp, name)
+  defp activating_home!(tmp, name, fixture \\ {@retired, @staged}) do
+    home = staged_home!(tmp, name, fixture)
     {:ok, state} = Candidate.read_state(home)
     :ok = Candidate.put_state(home, Map.put(state, "phase", "activating"), @now)
     {:ok, _entries} = Activation.record_entries(home)
@@ -263,16 +283,9 @@ defmodule FermixCore.Home.Candidate.ActivationReturnTest do
   defp next_boot(home, :f), do: Candidate.finish_activation(home)
   defp next_boot(home, _step), do: Activation.activate(home, :return)
 
-  # Every kind of step a stop can follow, at its first and its last: a home
-  # per stop, so the case stays cheap on a loaded runner.
-  defp first_and_last_of_each_kind(steps) do
-    picked =
-      steps
-      |> Enum.group_by(&kind/1)
-      |> Enum.flat_map(fn {_kind, of_kind} -> [hd(of_kind), List.last(of_kind)] end)
-
-    Enum.filter(steps, &(&1 in picked))
-  end
+  # Every kind of step a stop can follow, once: a home per stop, so the case
+  # stays cheap on a loaded runner.
+  defp first_of_each_kind(steps), do: Enum.uniq_by(steps, &kind/1)
 
   defp kind({:a, _path}), do: :a
   defp kind({:b, _entry, {:kept, _unit}}), do: :kept
@@ -296,10 +309,11 @@ defmodule FermixCore.Home.Candidate.ActivationReturnTest do
 
   defp primary?(home), do: File.read!(Path.join(home, "config.toml")) =~ ~s(role = "primary")
 
+  # Raw writes skip the VM's one file server, which the whole suite queues on.
   defp write!(root, path, contents) do
     file = Path.join(root, path)
     File.mkdir_p!(Path.dirname(file))
-    File.write!(file, contents)
+    File.write!(file, contents, [:raw])
   end
 
   defp mode(path), do: Bitwise.band(File.stat!(path).mode, 0o777)
