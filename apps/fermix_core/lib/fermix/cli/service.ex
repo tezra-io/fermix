@@ -269,9 +269,9 @@ defmodule Fermix.CLI.Service do
   The evidence differs by distribution. A standalone release is supervised when
   a unit it wrote is installed. A packaged engine's unit is owned by the package
   and is installed on every host, so its presence proves nothing about **this**
-  process: systemd exports `INVOCATION_ID` into every service it starts, and its
-  presence in this process's own environment is what says the vendor unit
-  launched this daemon rather than an operator running the binary from a shell.
+  process: that it runs inside that unit (`systemd_invocation?/1`) is what says
+  the vendor unit launched this daemon rather than an operator running the
+  binary from a shell.
   """
   @spec supervised?(keyword()) :: boolean()
   def supervised?(opts \\ []) when is_list(opts) do
@@ -280,14 +280,31 @@ defmodule Fermix.CLI.Service do
 
   defp started_by_service?(opts) do
     if packaged?(opts),
-      do: service_invocation?(opts),
+      do: systemd_invocation?(opts),
       else: installed?(:user, opts) or installed?(:system, opts)
   end
 
-  defp service_invocation?(opts) do
-    case Keyword.get_lazy(opts, :invocation_id, fn -> System.get_env("INVOCATION_ID") end) do
-      value when is_binary(value) and value != "" -> true
-      _absent_or_blank -> false
+  @doc """
+  Whether this process runs inside Fermix's own systemd unit, the one `spec/2`
+  names (`#{@linux_unit}`), in either scope: its cgroup (v2, the `0::` line of
+  `/proc/self/cgroup`) ends in that unit. A shell another unit opened (a
+  terminal server is a user unit too, and its shells inherit its
+  `INVOCATION_ID`), a terminal tab's or a login's scope, and a host with no
+  cgroup file (a Mac) are not. `opts`: `:cgroup`, a 0-arity reader in place of
+  the file's.
+  """
+  @spec systemd_invocation?(keyword()) :: boolean()
+  def systemd_invocation?(opts \\ []) when is_list(opts) do
+    case Keyword.get(opts, :cgroup, fn -> File.read("/proc/self/cgroup") end).() do
+      {:ok, text} -> own_unit?(text)
+      {:error, _no_cgroup_file} -> false
+    end
+  end
+
+  defp own_unit?(text) do
+    case text |> String.split("\n", trim: true) |> List.last("") do
+      "0::" <> path -> List.last(String.split(path, "/", trim: true)) == @linux_unit
+      _cgroup_v1_or_none -> false
     end
   end
 

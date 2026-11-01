@@ -1,7 +1,6 @@
 defmodule FermixWebWeb.SetupLive do
   use FermixWebWeb, :live_view
 
-  alias Fermix.CLI.Service
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Auth.AnthropicLogin
   alias FermixCore.Auth.ChatGPT
@@ -24,6 +23,7 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.Home.Role
   alias FermixCore.IMessage
   alias FermixCore.IMessage.Control, as: IMessageControl
+  alias FermixCore.Management.Lifecycle
   alias FermixCore.Management.Protocol, as: ManagementProtocol
   alias FermixCore.Management.Settings, as: ManagementSettings
   alias FermixCore.Management.Settings.Voice, as: VoiceSettings
@@ -941,8 +941,11 @@ defmodule FermixWebWeb.SetupLive do
     end
   end
 
+  # Only where something brings Fermix back once it stops: the Mac app's
+  # engine, Fermix's own systemd unit, a `fermix service` install
+  # (`Lifecycle.restarts_itself?/0`, the one predicate a move's review reads).
   def handle_event("apply_restart", _params, socket) do
-    if Service.supervised?() do
+    if restarts_itself?() do
       Process.send_after(self(), :perform_restart, 600)
       # Stamp the current tab into the URL so the post-restart reconnect lands
       # here instead of next_action_tab bouncing the operator to a partial tab.
@@ -1020,12 +1023,17 @@ defmodule FermixWebWeb.SetupLive do
       do: {:noreply, Phone.handle_info(message, socket)}
 
   def handle_info(:perform_restart, socket) do
-    # Supervised release only (gated in apply_restart): exit non-zero so the OS
-    # supervisor relaunches the daemon — launchd KeepAlive on any exit, systemd
+    # Only an engine something brings back (gated in apply_restart): exit
+    # non-zero so it is relaunched — launchd KeepAlive on any exit, systemd
     # Restart=on-failure on non-zero. The LiveView reconnects once it is back.
-    System.stop(1)
+    restart_stop().()
     {:noreply, socket}
   end
+
+  defp restarts_itself?,
+    do: Application.get_env(:fermix_web, :restarts_itself, &Lifecycle.restarts_itself?/0).()
+
+  defp restart_stop, do: Application.get_env(:fermix_web, :restart_stop, fn -> System.stop(1) end)
 
   @impl true
   def handle_async(:doctor_provider_probe, {:ok, result}, socket) do

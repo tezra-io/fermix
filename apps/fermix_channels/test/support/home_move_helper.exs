@@ -41,7 +41,8 @@ defmodule FermixChannels.Test.HomeMove do
       now: @now,
       free_bytes: fn _dir -> {:ok, @plenty} end,
       version: "0.16.0",
-      host: "macos-aarch64"
+      host: "macos-aarch64",
+      restarts_itself: true
     ]
   end
 

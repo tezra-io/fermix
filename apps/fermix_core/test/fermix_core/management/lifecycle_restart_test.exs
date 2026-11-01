@@ -61,4 +61,34 @@ defmodule FermixCore.Management.LifecycleRestartTest do
       answer
     end
   end
+
+  # Always On setup §9: what brings Fermix back once it stops itself. The Mac
+  # app's engine (launchd), Fermix's own systemd unit, and a `fermix service`
+  # install do; `fermix run` at a terminal does not, even in a shell another
+  # unit opened.
+  describe "restarts_itself?/1" do
+    test "the app engine, Fermix's own unit and a fermix service install each restart" do
+      assert Lifecycle.restarts_itself?(Keyword.put(nothing(), :app_engine?, true))
+
+      for unit <- [@user_unit, "0::/system.slice/fermix.service\n"] do
+        assert Lifecycle.restarts_itself?(Keyword.put(nothing(), :cgroup, fn -> {:ok, unit} end))
+      end
+
+      assert Lifecycle.restarts_itself?(Keyword.put(nothing(), :supervised?, true))
+    end
+
+    test "an engine run from a terminal does not" do
+      refute Lifecycle.restarts_itself?(nothing())
+
+      terminal =
+        "0::/user.slice/user-1000.slice/user@1000.service/app.slice/gnome-terminal-server.service\n"
+
+      refute Lifecycle.restarts_itself?(
+               Keyword.put(nothing(), :cgroup, fn -> {:ok, terminal} end)
+             )
+    end
+  end
+
+  # No cgroup file, as on a Mac: nothing but the seams decides.
+  defp nothing, do: [app_engine?: false, cgroup: fn -> {:error, :enoent} end, supervised?: false]
 end

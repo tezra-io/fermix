@@ -5900,6 +5900,33 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert html =~ "Nothing to restart from here"
     end
 
+    # Always On setup §9: the Mac app's engine (launchd), Fermix's own systemd
+    # unit and a `fermix service` install each bring Fermix back, so the button
+    # restarts there, where it once said there was nothing to restart.
+    test "Apply & restart restarts an engine that starts again by itself", %{conn: conn} do
+      test = self()
+      restarts = Application.fetch_env(:fermix_web, :restarts_itself)
+      stop = Application.fetch_env(:fermix_web, :restart_stop)
+      Application.put_env(:fermix_web, :restarts_itself, fn -> true end)
+      Application.put_env(:fermix_web, :restart_stop, fn -> send(test, :restart_stopped) end)
+
+      on_exit(fn ->
+        restore_env(:fermix_web, :restarts_itself, restarts)
+        restore_env(:fermix_web, :restart_stop, stop)
+      end)
+
+      {:ok, view, _html} = live(conn, "/setup")
+      view |> element("button[phx-value-tab=\"doctor\"]") |> render_click()
+
+      html = view |> element("button", "Apply & restart") |> render_click()
+      assert html =~ "Restarting Fermix"
+      refute html =~ "Nothing to restart from here"
+
+      # The restart's own timer is delivered by hand rather than waited out.
+      send(view.pid, :perform_restart)
+      assert_receive :restart_stopped
+    end
+
     test "saving channels keeps an inline restart action visible", %{conn: conn} do
       {:ok, view, _html} = live(conn, "/setup")
       view |> element("button[phx-value-tab=\"channels\"]") |> render_click()

@@ -11,7 +11,6 @@ defmodule FermixCore.Home.MoveTest do
   alias FermixTestSupport.SafeRm
 
   @now ~U[2031-05-04 10:00:00Z]
-  @passphrase "invented-lantern-orchard"
   @primary %{role: :primary, primary: nil}
 
   setup do
@@ -25,24 +24,29 @@ defmodule FermixCore.Home.MoveTest do
     )
 
     {:ok, candidate} = Candidates.add(home, candidate_attrs(), @now)
-    %{home: home, candidate: candidate}
+    # The key the primary keeps, as `Snapshot.Recovery.verify_or_set/2` answers it.
+    %{home: home, candidate: candidate, recipient: Recipient.public(Recipient.generate())}
   end
 
   test "start writes the request and hands the home to the device role", ctx do
     assert {:ok, started} =
-             Move.start(ctx.home, @primary, ctx.candidate.candidate_id, @passphrase, opts())
+             Move.start(ctx.home, @primary, ctx.candidate.candidate_id, ctx.recipient, opts())
 
     assert "mv-" <> _hex = started.move_id
     assert started.candidate.name == "north-box"
-    assert {:ok, recipient} = Recipient.decode(started.recovery_recipient)
+    assert started.recovery_recipient == Recipient.encode(ctx.recipient)
+
+    assert started.key_id ==
+             Base.encode16(Recipient.key_id(ctx.recipient.public_key), case: :lower)
+
     assert Bitwise.band(File.stat!(Move.dir(ctx.home)).mode, 0o777) == 0o700
 
+    # The request carries the key the primary keeps, never one of its own.
     assert {:ok, request} = Move.read_request(ctx.home)
     assert request["move_id"] == started.move_id
     assert request["source_epoch"] == 4
     assert request["candidate"].noise_pk == ctx.candidate.noise_pk
-    assert request["recovery_recipient"] == Recipient.encode(recipient)
-    refute File.read!(Path.join([Move.dir(ctx.home), "request.json"])) =~ @passphrase
+    assert request["recovery_recipient"] == Recipient.encode(ctx.recipient)
 
     assert {:ok, %{"phase" => "requested", "candidate" => "north-box"}} =
              Move.read_phase(ctx.home)
@@ -64,23 +68,20 @@ defmodule FermixCore.Home.MoveTest do
     id = ctx.candidate.candidate_id
 
     assert {:error, {:not_primary, :device}} =
-             Move.start(ctx.home, %{role: :device, primary: nil}, id, @passphrase, opts())
+             Move.start(ctx.home, %{role: :device, primary: nil}, id, ctx.recipient, opts())
 
     assert {:error, {:unknown_candidate, "cand-0"}} =
-             Move.start(ctx.home, @primary, "cand-0", @passphrase, opts())
-
-    assert {:error, :passphrase_too_short} =
-             Move.start(ctx.home, @primary, id, "short", opts())
+             Move.start(ctx.home, @primary, "cand-0", ctx.recipient, opts())
 
     later = DateTime.add(@now, 24 * 3_600, :second)
 
     assert {:error, {:unknown_candidate, ^id}} =
-             Move.start(ctx.home, @primary, id, @passphrase, opts(now: later))
+             Move.start(ctx.home, @primary, id, ctx.recipient, opts(now: later))
 
     :ok = Moved.write(ctx.home, %{epoch: 4, moved_at: @now, to: "elsewhere"})
 
     assert {:error, {:not_primary, :device}} =
-             Move.start(ctx.home, @primary, id, @passphrase, opts())
+             Move.start(ctx.home, @primary, id, ctx.recipient, opts())
 
     refute File.exists?(Move.dir(ctx.home))
     assert {:ok, %{role: :device}} = Role.configured(ctx.home)
@@ -89,15 +90,15 @@ defmodule FermixCore.Home.MoveTest do
 
   test "a move a device is running is not started again; a stale request is replaced", ctx do
     id = ctx.candidate.candidate_id
-    {:ok, first} = Move.start(ctx.home, @primary, id, @passphrase, opts())
+    {:ok, first} = Move.start(ctx.home, @primary, id, ctx.recipient, opts())
 
     :ok = Move.put_phase(ctx.home, "streaming", %{}, @now)
 
     assert {:error, {:move_pending, "streaming"}} =
-             Move.start(ctx.home, @primary, id, @passphrase, opts())
+             Move.start(ctx.home, @primary, id, ctx.recipient, opts())
 
     :ok = Move.put_phase(ctx.home, "requested", %{}, @now)
-    assert {:ok, second} = Move.start(ctx.home, @primary, id, @passphrase, opts())
+    assert {:ok, second} = Move.start(ctx.home, @primary, id, ctx.recipient, opts())
     refute second.move_id == first.move_id
 
     :ok = Move.put_phase(ctx.home, "aborted", %{"sentence" => "It was undone."}, @now)
@@ -110,7 +111,7 @@ defmodule FermixCore.Home.MoveTest do
     tight = opts(free_bytes: fn _dir -> {:ok, 1_000} end)
 
     assert {:error, {:not_ready, [sentence]}} =
-             Move.start(ctx.home, @primary, id, @passphrase, tight)
+             Move.start(ctx.home, @primary, id, ctx.recipient, tight)
 
     assert sentence =~ "make room first"
     assert Move.error_sentence({:not_ready, [sentence]}) =~ "make room first"
@@ -120,7 +121,7 @@ defmodule FermixCore.Home.MoveTest do
 
   test "an ending is published by the engine that survives the restart", ctx do
     id = ctx.candidate.candidate_id
-    {:ok, _started} = Move.start(ctx.home, @primary, id, @passphrase, opts())
+    {:ok, _started} = Move.start(ctx.home, @primary, id, ctx.recipient, opts())
 
     assert Move.moving_to(ctx.home) == {:ok, "north-box"}
 

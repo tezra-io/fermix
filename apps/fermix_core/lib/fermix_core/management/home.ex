@@ -66,9 +66,10 @@ defmodule FermixCore.Management.Home do
   `primary_home`. `version` is this engine's.
 
   `home.snapshots.run` starts a snapshot now (`busy` while one runs);
-  `home.snapshots.passphrase` derives the recovery key from
+  `home.snapshots.passphrase` derives a new recovery key from
   `recovery_passphrase` and keeps only its public half in
-  `[fermix_core.snapshots] recipient`: the passphrase is never stored, logged
+  `[fermix_core.snapshots] recipient` (`Snapshot.Recovery.set/2`, the
+  derivation a move's check shares): the passphrase is never stored, logged
   or answered; the answer's `sentence` says that snapshots written before it
   open only with the earlier passphrase, and each attempt in the status names
   the key it was written for (`key_id`). Both are the primary's; the device
@@ -102,8 +103,8 @@ defmodule FermixCore.Management.Home do
   alias FermixCore.Home.MoveSecrets
   alias FermixCore.Home.Role
   alias FermixCore.Home.Snapshot.Recipient
+  alias FermixCore.Home.Snapshot.Recovery
   alias FermixCore.Home.Snapshot.Scheduler
-  alias FermixCore.Home.Snapshot.Settings, as: SnapshotSettings
   alias FermixCore.Home.Snapshot.Status
   alias FermixCore.Home.StatusWatch
   alias FermixCore.Home.UnreadableFiles
@@ -120,8 +121,6 @@ defmodule FermixCore.Management.Home do
   @candidate_sentence "Snapshots are the primary's to write; this engine is a candidate " <>
                         "waiting for its move."
   @not_running_sentence "Snapshots are not running in this engine."
-  @short_sentence "The recovery passphrase must be at least 12 bytes long."
-  @max_passphrase_bytes 1_024
   @primary_statuses ~w(connected renewing unreachable revoked stale)a
   # The states whose summary rests on what the provider last said.
   @fresh_states ~w(problem creating ready)
@@ -430,10 +429,7 @@ defmodule FermixCore.Management.Home do
   @spec snapshots_passphrase(term(), keyword()) :: {:ok, map()} | {:error, term()}
   def snapshots_passphrase(passphrase, opts \\ []) when is_list(opts) do
     with :ok <- primary(role(opts)),
-         {:ok, passphrase} <- passphrase(passphrase),
-         {:ok, pair} <- Recipient.from_passphrase(passphrase),
-         recipient = Recipient.public(pair),
-         {:ok, _saved} <- saved(save_recipient(opts).(recipient)) do
+         {:ok, recipient} <- recovery_result(Recovery.set(passphrase, opts)) do
       {:ok, view} =
         snapshots_status(Keyword.put(opts, :config, recipient_config(recipient, opts)))
 
@@ -453,32 +449,36 @@ defmodule FermixCore.Management.Home do
 
   defp started({:ok, view}), do: {:ok, %{"started" => true, "snapshots" => view}}
 
-  # The settings write's own refusals cross as they are; anything else names
-  # files on this disk, so it goes to the log and the answer stays fixed.
-  defp saved({:ok, _report} = ok), do: ok
-  defp saved({:error, {:external_change, _sections}} = error), do: error
-  defp saved({:error, {:config_unreadable, _sentence}} = error), do: error
+  @doc """
+  `Snapshot.Recovery`'s answer as this family answers it, for
+  `home.snapshots.passphrase` and `home.move.start`: the key, or a passphrase
+  the owner must type again (`invalid_params` on `recovery_passphrase`, with
+  the sentence), or a key that cannot be read or kept (`unavailable`). The
+  settings write's own refusals cross as they are; any other names files on
+  this disk, so it goes to the log and the answer stays fixed.
+  """
+  @spec recovery_result({:ok, Recipient.t()} | {:error, Recovery.error()}) ::
+          {:ok, Recipient.t()} | {:error, term()}
+  def recovery_result({:ok, %{salt: _salt, public_key: _public_key} = recipient}),
+    do: {:ok, recipient}
 
-  defp saved({:error, reason}) do
-    Logger.error("home.snapshots.passphrase: the recovery key was not saved: #{inspect(reason)}")
+  def recovery_result({:error, {:not_saved, {:external_change, _sections} = reason}}),
+    do: {:error, reason}
 
-    {:error,
-     {:unavailable, capability(), "The recovery key could not be saved. See the daemon log."}}
+  def recovery_result({:error, {:not_saved, {:config_unreadable, _sentence} = reason}}),
+    do: {:error, reason}
+
+  def recovery_result({:error, {:not_saved, reason} = error}) do
+    Logger.error("recovery passphrase: the recovery key was not saved: #{inspect(reason)}")
+    {:error, {:unavailable, capability(), Recovery.error_sentence(error)}}
   end
 
-  defp passphrase(value)
-       when is_binary(value) and byte_size(value) >= 12 and
-              byte_size(value) <= @max_passphrase_bytes,
-       do: {:ok, value}
+  def recovery_result({:error, :key_unreadable}),
+    do: {:error, {:unavailable, capability(), Recovery.error_sentence(:key_unreadable)}}
 
-  defp passphrase(value) when is_binary(value) and byte_size(value) < 12,
-    do: {:error, {:invalid_params, "recovery_passphrase", @short_sentence}}
-
-  defp passphrase(_value),
-    do:
-      {:error,
-       {:invalid_params, "recovery_passphrase",
-        "The recovery passphrase is text of at most #{@max_passphrase_bytes} bytes."}}
+  def recovery_result({:error, reason})
+      when reason in [:passphrase_too_short, :passphrase_not_text, :wrong_passphrase],
+      do: {:error, {:invalid_params, "recovery_passphrase", Recovery.error_sentence(reason)}}
 
   defp snapshots_view(home, role, opts) do
     status =
@@ -586,9 +586,6 @@ defmodule FermixCore.Management.Home do
         nil
     end
   end
-
-  defp save_recipient(opts),
-    do: Keyword.get(opts, :save_recipient, &SnapshotSettings.put_recipient/1)
 
   defp home(opts), do: Keyword.get_lazy(opts, :home, &ConfigStore.fermix_home/0)
   defp role(opts), do: Keyword.get_lazy(opts, :engine_role, &Role.recorded/0)

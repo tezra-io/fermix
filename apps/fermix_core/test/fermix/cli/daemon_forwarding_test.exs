@@ -9,7 +9,8 @@ defmodule Fermix.CLI.DaemonForwardingTest do
   device with the primary's own part, asked within 5 s, or the sentence that
   says why it is missing.
 
-  The rail is stood in for by `:forward` (its own tests run it for real).
+  The rail is stood in for by the daemon's `:forwarding` (its own tests run it
+  for real).
   """
 
   use ExUnit.Case, async: true
@@ -366,11 +367,16 @@ defmodule Fermix.CLI.DaemonForwardingTest do
     socket_path = Path.join(root, "d.sock")
     name = :"daemon_forwarding_#{System.unique_integer([:positive])}"
     {role, opts} = Keyword.pop!(opts, :engine_role)
+    {linked?, opts} = Keyword.pop(opts, :desktop_link?, false)
 
-    forward = fn request, forward_opts ->
+    recorded = fn request, forward_opts ->
       send(test, {:forwarded, request, forward_opts})
       primary_answer(request)
     end
+
+    {forward, opts} = Keyword.pop(opts, :forward, recorded)
+    # As `Home.Link.forwarding/0` answers it for a linked desktop, or any other engine.
+    forwarding = if linked?, do: [primary_forward: forward], else: []
 
     start_supervised!(
       {Daemon,
@@ -378,7 +384,7 @@ defmodule Fermix.CLI.DaemonForwardingTest do
          name: name,
          socket_path: socket_path,
          task_supervisor: ctx.tasks,
-         forward: forward,
+         forwarding: forwarding,
          management_opts: [
            engine_role: role,
            settings_reader: fn section, _opts ->
@@ -394,7 +400,6 @@ defmodule Fermix.CLI.DaemonForwardingTest do
            ]
          ]
        ]
-       |> Keyword.put(:desktop_link?, false)
        |> Keyword.merge(opts)},
       id: name
     )

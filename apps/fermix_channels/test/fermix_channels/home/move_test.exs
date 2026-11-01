@@ -23,11 +23,11 @@ defmodule FermixChannels.Home.MoveTest do
   alias FermixCore.Home.Moved
   alias FermixCore.Home.Role
   alias FermixCore.Home.Snapshot
+  alias FermixCore.Home.Snapshot.Recipient
   alias FermixCore.Setup.SecretWriter
   alias FermixTestSupport.SafeRm
   alias FermixTestSupport.TelemetryCapture
 
-  @passphrase "invented-lantern-orchard"
   @destination %{"s3_bucket" => "invented-bucket-91", "s3_region" => "eu-north-1"}
   @primary_record %{role: :primary, primary: nil}
 
@@ -38,11 +38,21 @@ defmodule FermixChannels.Home.MoveTest do
     candidate = HomeMove.start_candidate!(home, primary)
     %{"candidate_id" => candidate_id} = HomeMove.await_phase(home, "enrolled")
 
+    # The recovery key the primary keeps (`Snapshot.Recovery.verify_or_set/2`).
+    recipient = Recipient.public(Recipient.generate())
+
     {:ok, started} =
-      Move.start(primary.root, @primary_record, candidate_id, @passphrase, HomeMove.start_opts())
+      Move.start(primary.root, @primary_record, candidate_id, recipient, HomeMove.start_opts())
 
     TelemetryCapture.attach([[:fermix, :home, :move]], move_id: started.move_id)
-    %{primary: primary, candidate: candidate, home: home, started: started}
+
+    %{
+      primary: primary,
+      candidate: candidate,
+      home: home,
+      started: started,
+      recipient: recipient
+    }
   end
 
   test "the home moves: the source is retired and linked, the candidate is the primary", ctx do
@@ -78,7 +88,8 @@ defmodule FermixChannels.Home.MoveTest do
     assert config =~ ~s(s3_bucket = "invented-bucket-91")
     assert config =~ ~s(s3_region = "eu-north-1")
     refute config =~ "s3_credentials"
-    assert config =~ ~s(recipient = "#{ctx.started.recovery_recipient}")
+    # The new primary's snapshots are encrypted to the key the old one kept.
+    assert config =~ ~s(recipient = "#{Recipient.encode(ctx.recipient)}")
     assert File.read!(Path.join([home, "journals", "day.md"])) == "an invented day\n"
 
     # The identity bundle moved; the desktop's row travelled, its key did not.

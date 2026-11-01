@@ -60,8 +60,7 @@ defmodule FermixChannels.Desktop.ManageTest do
 
     device_socket =
       start_daemon!(:device, task_supervisor,
-        desktop_link?: true,
-        forward: &Relay.forward(relay, &1, &2)
+        forwarding: [primary_forward: &Relay.forward(relay, &1, &2)]
       )
 
     %{primary: primary, relay: relay, socket: device_socket, gate: gate, tasks: task_supervisor}
@@ -98,8 +97,7 @@ defmodule FermixChannels.Desktop.ManageTest do
   test "an owner decision from a process this engine started is refused here", ctx do
     socket =
       start_daemon!(:device, ctx.tasks,
-        desktop_link?: true,
-        forward: &Relay.forward(ctx.relay, &1, &2),
+        forwarding: [primary_forward: &Relay.forward(ctx.relay, &1, &2)],
         daemon_os_pid: ParentProcess.os_pid()
       )
 
@@ -215,7 +213,7 @@ defmodule FermixChannels.Desktop.ManageTest do
          socket_path: socket_path,
          task_supervisor: task_supervisor,
          management_opts: management_opts(engine)
-       ] ++ Keyword.put_new(opts, :desktop_link?, false)},
+       ] ++ Keyword.put_new(opts, :forwarding, [])},
       id: name
     )
 

@@ -42,9 +42,13 @@ defmodule FermixCore.Home.MoveReadiness do
     * `cutover_gap`: Telegram messages sent during the move wait until it
       is done (Telegram keeps them, `Channels.Telegram.Poller`), and a
       recurring job more than an hour late is skipped;
-    * `serves_nothing`: this computer serves nothing during the move.
+    * `serves_nothing`: this computer serves nothing during the move;
+    * `service`: Fermix run from a terminal (`fermix run`) warns, since the
+      move stops it and nothing starts it again
+      (`Management.Lifecycle.restarts_itself?/1`): it has to be started again
+      to finish the move.
 
-  The last six are `summary_items/4`: what a review reads from this home's
+  The last seven are `summary_items/4`: what a review reads from this home's
   settings alone, needing neither the keychain nor a walk of the home, so
   `home.status`'s summary builds Move now's confirm from them before any
   review (`Management.HomeSummary`), in the words the review says them.
@@ -53,7 +57,9 @@ defmodule FermixCore.Home.MoveReadiness do
   `CommandRunner` and the keychain read from a tree-less verb), `:version`
   (this engine's, `BuildInfo.product_version/0`), `:host` (this host's plugin
   target, `Archive.host/1`), `:home_bytes` (the home's size, in place of
-  walking it), `:index_opts` (`Plugins.Dist.Index.load/1`'s, the catalog).
+  walking it), `:index_opts` (`Plugins.Dist.Index.load/1`'s, the catalog),
+  `:restarts_itself` (a boolean, in place of
+  `Management.Lifecycle.restarts_itself?/0`).
   """
 
   alias FermixCore.BuildInfo
@@ -64,6 +70,7 @@ defmodule FermixCore.Home.MoveReadiness do
   alias FermixCore.Home.Snapshot.S3
   alias FermixCore.Home.UnreadableFiles
   alias FermixCore.Management.Copy
+  alias FermixCore.Management.Lifecycle
   alias FermixCore.Management.Settings
   alias FermixCore.Plugins.Dist.Index
 
@@ -106,8 +113,8 @@ defmodule FermixCore.Home.MoveReadiness do
   but `config` (this home's settings, as `settings/2` reads them) and this
   engine, in the review's order and words: `stays_here` (iMessage only when
   `macos?`), `whatsapp`, `slack`, `coding_agents`, `cutover_gap`,
-  `serves_nothing`. `report/3` ends with them, and `home.status`'s summary
-  builds Move now's confirm from them before any review. `opts` are
+  `serves_nothing`, `service`. `report/3` ends with them, and `home.status`'s
+  summary builds Move now's confirm from them before any review. `opts` are
   `report/3`'s.
   """
   @spec summary_items({:ok, String.t()} | {:error, String.t()}, boolean(), String.t(), keyword()) ::
@@ -125,7 +132,8 @@ defmodule FermixCore.Home.MoveReadiness do
         :warn,
         "This computer serves nothing while the move runs: no chat, channels or jobs " <>
           "until #{name} takes over."
-      )
+      ),
+      service(Keyword.get_lazy(opts, :restarts_itself, &Lifecycle.restarts_itself?/0))
     ]
   end
 
@@ -483,6 +491,20 @@ defmodule FermixCore.Home.MoveReadiness do
       :absent -> :absent
     end
   end
+
+  # The move stops this engine to hand the home over; one started from a
+  # terminal is not brought back, so the move waits until it is started again.
+  defp service(true),
+    do: item("service", :ok, "Fermix starts again by itself here once the move stops it.")
+
+  defp service(false),
+    do:
+      item(
+        "service",
+        :warn,
+        "Fermix runs from a terminal here, so it stops when the move starts. Start it again " <>
+          "to finish."
+      )
 
   defp cutover_sentence,
     do:

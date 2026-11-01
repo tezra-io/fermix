@@ -14,8 +14,8 @@ defmodule FermixChannels.Home.MoveKeepTest do
   alias FermixCore.Home.Move
   alias FermixCore.Home.Moved
   alias FermixCore.Home.Role
+  alias FermixCore.Home.Snapshot.Recipient
 
-  @passphrase "invented-lantern-orchard"
   @primary_record %{role: :primary, primary: nil}
 
   test "a source not kept as a desktop is retired with no desktop key, row or link" do
@@ -28,7 +28,7 @@ defmodule FermixChannels.Home.MoveKeepTest do
     opts = Keyword.put(HomeMove.start_opts(), :keep_as_desktop, false)
 
     {:ok, %{keep_as_desktop: false}} =
-      Move.start(primary.root, @primary_record, candidate_id, @passphrase, opts)
+      Move.start(primary.root, @primary_record, candidate_id, recipient(), opts)
 
     source = primary.root
     worker = HomeMove.worker_opts(source, candidate, [])
@@ -52,4 +52,6 @@ defmodule FermixChannels.Home.MoveKeepTest do
     assert {:ok, devices} = DeviceStore.list(root: home)
     refute Enum.any?(devices, &(&1.kind == :desktop))
   end
+
+  defp recipient, do: Recipient.public(Recipient.generate())
 end

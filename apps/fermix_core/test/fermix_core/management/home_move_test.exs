@@ -9,6 +9,7 @@ defmodule FermixCore.Management.HomeMoveTest do
   alias FermixCore.Home.Epoch
   alias FermixCore.Home.Move
   alias FermixCore.Home.Role
+  alias FermixCore.Home.Snapshot.Recipient
   alias FermixCore.Management.Protocol
   alias FermixCore.Management.Router
   alias FermixTestSupport.SafeRm
@@ -34,9 +35,14 @@ defmodule FermixCore.Management.HomeMoveTest do
       free_bytes: fn _dir -> {:ok, 1_099_511_627_776} end,
       version: "0.16.0",
       host: "macos-aarch64",
+      restarts_itself: true,
       restart: fn ->
         send(test, :restarted)
         :ok
+      end,
+      save_recipient: fn recipient ->
+        send(test, {:saved, recipient})
+        {:ok, %{}}
       end
     ]
 
@@ -243,7 +249,7 @@ defmodule FermixCore.Management.HomeMoveTest do
 
       assert Enum.map(items, & &1["id"]) ==
                ~w(keychain_secrets engine_version disk s3_size plugins stays_here whatsapp slack
-                  coding_agents cutover_gap serves_nothing)
+                  coding_agents cutover_gap serves_nothing service)
 
       assert Enum.all?(items, &(&1["status"] in ~w(ok warn block) and &1["sentence"] != ""))
       refute_received :restarted
@@ -303,6 +309,54 @@ defmodule FermixCore.Management.HomeMoveTest do
                route("home.status", %{}, @primary, ctx.seams)
     end
 
+    # Always On setup §4: the passphrase is the one set, checked against the
+    # key this primary keeps, so a move carries that key rather than a second.
+    test "a passphrase that is the one set carries the kept key, and saves nothing", ctx do
+      {:ok, record} = Candidates.add(ctx.home, candidate_attrs(), @now)
+      kept = kept_key()
+      seams = Keyword.put(ctx.seams, :config, recipient: Recipient.encode(kept))
+      params = %{"candidate_id" => record.candidate_id, "recovery_passphrase" => @passphrase}
+
+      assert {:ok, answer} = route("home.move.start", params, @primary, seams)
+      assert answer["recovery_recipient"] == Recipient.encode(kept)
+      assert {:ok, %{"recovery_recipient" => carried}} = Move.read_request(ctx.home)
+      assert carried == Recipient.encode(kept)
+      assert_received :restarted
+      refute_received {:saved, _recipient}
+    end
+
+    test "a passphrase that is not the one set is refused, and nothing moves", ctx do
+      {:ok, record} = Candidates.add(ctx.home, candidate_attrs(), @now)
+      seams = Keyword.put(ctx.seams, :config, recipient: Recipient.encode(kept_key()))
+
+      params = %{
+        "candidate_id" => record.candidate_id,
+        "recovery_passphrase" => "invented-orchard-meridian"
+      }
+
+      assert route("home.move.start", params, @primary, seams) ==
+               {:error, :invalid_params,
+                %{
+                  "field" => "recovery_passphrase",
+                  "sentence" => "That is not the recovery passphrase you set."
+                }}
+
+      refute Move.pending?(ctx.home)
+      refute_received :restarted
+      refute_received {:saved, _recipient}
+    end
+
+    test "with no passphrase set, the move sets it and carries the key it kept", ctx do
+      {:ok, record} = Candidates.add(ctx.home, candidate_attrs(), @now)
+      params = %{"candidate_id" => record.candidate_id, "recovery_passphrase" => @passphrase}
+
+      assert {:ok, answer} = route("home.move.start", params, @primary, ctx.seams)
+      assert_received {:saved, saved}
+      assert answer["recovery_recipient"] == Recipient.encode(saved)
+      assert {:ok, %{"recovery_recipient" => carried}} = Move.read_request(ctx.home)
+      assert carried == Recipient.encode(saved)
+    end
+
     test "refuses by field and by role, and restarts nothing", ctx do
       {:ok, record} = Candidates.add(ctx.home, candidate_attrs(), @now)
 
@@ -347,6 +401,11 @@ defmodule FermixCore.Management.HomeMoveTest do
       refute_received :restarted
       refute Move.pending?(ctx.home)
     end
+  end
+
+  defp kept_key do
+    {:ok, pair} = Recipient.derive(@passphrase, :binary.copy(<<5>>, 16))
+    Recipient.public(pair)
   end
 
   defp enrolled!(home) do

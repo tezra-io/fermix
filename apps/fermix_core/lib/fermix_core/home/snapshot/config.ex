@@ -84,8 +84,11 @@ defmodule FermixCore.Home.Snapshot.Config do
   def to_keyword(config) when is_list(config) or is_map(config) or is_nil(config),
     do: normalize(config)
 
-  @doc "The recipient, `:absent` when none is set."
-  @spec recipient(t()) :: {:ok, Recipient.t()} | :absent
+  @doc """
+  The recipient, `:absent` when none is set, `{:error, :invalid_recipient}`
+  for text `Recipient.decode/1` refuses.
+  """
+  @spec recipient(t()) :: {:ok, Recipient.t()} | :absent | {:error, :invalid_recipient}
   def recipient(config) when is_list(config) do
     case Keyword.get(config, :recipient) do
       nil -> :absent

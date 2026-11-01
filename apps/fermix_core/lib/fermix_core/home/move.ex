@@ -8,8 +8,10 @@ defmodule FermixCore.Home.Move do
     * `.move/request.json` (`0600`): the move id (ordered by when the move
       started), the candidate's record as the
       primary held it (`FermixCore.Home.Candidates`), and the recovery
-      recipient derived from the owner's passphrase (`Snapshot.Recipient`);
-      the passphrase itself is never stored or logged;
+      recipient the primary keeps (`Snapshot.Recovery.verify_or_set/2`, which
+      the caller ran on the owner's passphrase), so the new primary's
+      snapshots are encrypted to the key the owner already has; no passphrase
+      reaches this module;
     * `.move/phase.json` (`0600`): where the move stands;
     * `[fermix_core.engine] role = "device"` in `config.toml`.
 
@@ -88,34 +90,34 @@ defmodule FermixCore.Home.Move do
   def phases, do: @phases
 
   @doc """
-  Starts a move of the primary `home` to `candidate_id`: refuses a home that
+  Starts a move of the primary `home` to `candidate_id`, carrying `recipient`
+  (the public half of the recovery key the primary keeps,
+  `Snapshot.Recovery.verify_or_set/2`'s answer): refuses a home that
   is not a primary (`{:not_primary, role}`, by `record`), a move already
   pending (`{:move_pending, phase}`), a home with no epoch (`:epoch_absent`),
-  a candidate the home does not hold (`{:unknown_candidate, id}`), a
-  passphrase under 12 bytes (`:passphrase_too_short`), and a move whose
-  readiness report blocks (`{:not_ready, sentences}`). `opts`: `:now`,
+  a candidate the home does not hold (`{:unknown_candidate, id}`), and a move
+  whose readiness report blocks (`{:not_ready, sentences}`). `opts`: `:now`,
   `:keep_as_desktop` (default true: this computer becomes a desktop of the new
   primary; false for a server being replaced, which then serves nothing),
   `:readiness` (the report the owner was just shown, from `review/3`, in
   place of making one), and `FermixCore.Home.MoveReadiness.report/3`'s.
   Writes the request and the role; a failure part-way removes `.move/`.
   """
-  @spec start(Path.t(), map(), String.t(), binary(), keyword()) ::
+  @spec start(Path.t(), map(), String.t(), Recipient.t(), keyword()) ::
           {:ok, map()} | {:error, term()}
-  def start(home, record, candidate_id, passphrase, opts \\ [])
+  def start(home, record, candidate_id, recipient, opts \\ [])
       when is_binary(home) and is_map(record) and is_binary(candidate_id) and
-             is_binary(passphrase) and is_list(opts) do
+             is_map(recipient) and is_list(opts) do
     now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
     keep_as_desktop = Keyword.get(opts, :keep_as_desktop, true)
     true = is_boolean(keep_as_desktop)
+    recipient = Recipient.public(recipient)
 
     with :ok <- primary(record),
          :ok <- not_pending(home),
          {:ok, epoch} <- epoch(home),
          {:ok, candidate} <- Candidates.fetch(home, candidate_id, now),
-         {:ok, pair} <- Recipient.from_passphrase(passphrase),
          :ok <- ready(home, candidate, opts) do
-      recipient = Recipient.public(pair)
       move_id = move_id(now)
 
       request = %{
@@ -491,9 +493,6 @@ defmodule FermixCore.Home.Move do
     do:
       "No server waiting for the move has the id #{id}. A server waits 24 hours after it " <>
         "enrolls; after that, get a new code and enroll it again."
-
-  def error_sentence(:passphrase_too_short),
-    do: "The recovery passphrase must be at least 12 bytes long."
 
   def error_sentence({:not_ready, sentences}) when is_list(sentences),
     do: "The move cannot start yet. " <> Enum.join(sentences, " ")

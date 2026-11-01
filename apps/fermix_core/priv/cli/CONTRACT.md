@@ -294,22 +294,22 @@ A refusal is `home_status_unavailable`.
 `fermix home move --to ID --json` answers with the move as it was written:
 `move_id` (`mv-` and 20 hex digits, ordered by when the move started), `candidate` (the row above),
 `recovery_recipient` and `key_id` (the public half of the recovery key the
-passphrase derived, as `home.snapshots.passphrase` answers them),
+primary keeps, as `home.snapshots.passphrase` answers them: the passphrase is
+checked against it, or sets it when none is set),
 `keep_as_desktop` (true: this computer becomes a desktop of the new primary)
-and `sentence`. With Fermix running this is the management `home.move.start`
-result, and the engine then restarts in the device role and carries the move
-out. With Fermix stopped the move is written here, and `sentence` says so: The
-move to north-box is set up. Start Fermix: it starts in the device role and
-moves this home. `--retire` is for a server that is itself the primary, being
-replaced by another server and then destroyed: the move keeps no desktop here
-(`home.move.start` with `keep_as_desktop` false), so `keep_as_desktop` is
-false, the engine hands the home over and then serves nothing, and a move
-written while Fermix is stopped says: The move to north-box is set up. Start
-Fermix: it moves this home and then serves nothing here. The recovery passphrase is read from
+and `sentence`. This is the management `home.move.start` result, and the
+engine then restarts in the device role and carries the move out. With Fermix
+stopped the move is refused as `engine_stopped`: no running engine holds the
+key to check the passphrase against. `--retire` is for a server that is itself
+the primary, being replaced by another server and then destroyed: the move
+keeps no desktop here (`home.move.start` with `keep_as_desktop` false), so
+`keep_as_desktop` is false and the engine hands the home over and then serves
+nothing. The recovery passphrase is read from
 `--recovery-passphrase-file` or asked twice without echo, and never printed. A
-refusal is `move_refused`, carrying the engine's sentence or why the move could
-not be written here, or each item of the move's readiness report
-(`home.move.readiness`) that blocks it, after `The move cannot start yet.`
+refusal is `move_refused`, carrying the engine's sentence (That is not the
+recovery passphrase you set., for one that is not), or each item of the
+move's readiness report (`home.move.readiness`) that blocks it, after `The
+move cannot start yet.`
 
 `fermix home enroll --code-file PATH [--snapshot-bucket B --snapshot-region R]`
 is not a machine-mode verb: it takes no `--json` and no running Fermix, and

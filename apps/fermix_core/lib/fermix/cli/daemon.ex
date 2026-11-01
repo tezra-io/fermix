@@ -26,7 +26,7 @@ defmodule Fermix.CLI.Daemon do
 
   After a move (M75 §6, B12) a desktop's engine runs in the device role and
   its app keeps speaking this socket. When the boot found the desktop link
-  (`FermixCore.Home.DesktopLink.linked?/2`, decided once), a request that
+  (`FermixCore.Home.Link.forwarding/0`, decided once), a request that
   passed this socket's own owner placement is answered here when it is
   device-class (`FermixCore.Management.Placement`) and sent to the primary
   through `FermixCore.Home.Link` when it is primary-class; no request takes
@@ -52,7 +52,6 @@ defmodule Fermix.CLI.Daemon do
   alias FermixCore.BuildInfo
   alias FermixCore.Capabilities.MCP.RuntimeStatus, as: McpRuntimeStatus
   alias FermixCore.Health
-  alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.Link, as: HomeLink
   alias FermixCore.Home.Role
   alias FermixCore.Introspection.Agents
@@ -71,7 +70,6 @@ defmodule Fermix.CLI.Daemon do
   alias FermixCore.Management.Text
   alias FermixCore.Observability
   alias FermixCore.Plugins.Runtime, as: PluginsRuntime
-  alias FermixCore.Setup.ConfigStore
   alias FermixCore.SocketPath
   alias FermixCore.SocketPeer
   alias FermixCore.Trace
@@ -112,6 +110,14 @@ defmodule Fermix.CLI.Daemon do
   # lean v1 §4.3). The reads stay open.
   @provision_decisions_v1 ~w(home.provision.connect home.provision.create
                              home.provision.power home.provision.delete)
+  # Opening the setup page: its session drives every decision the page offers,
+  # the owner's included (Always On setup §6). `fermix setup` mints its own
+  # launch token in-process and never asks here; the Mac app's agent is an
+  # independent peer.
+  @setup_decisions_v1 ~w(setup.session.create)
+  @setup_capability "setup_session"
+  @setup_owner_sentence "Only the owner can open the setup page: use the Fermix app or your " <>
+                          "own terminal."
   @owner_decisions_v0 ~w(mobile_pair_begin mobile_pair_decide mobile_pair_cancel
                          mobile_device_revoke)
   # The cue writes that widen what reaches a task or what a task may do, the
@@ -250,12 +256,11 @@ defmodule Fermix.CLI.Daemon do
            os: Keyword.get(opts, :os, :os.type()),
            stopper: Keyword.get(opts, :stopper, default_stopper()),
            started_at_ms: System.monotonic_time(:millisecond),
-           # M75 §6: decided once, at boot. A device-role engine holding its
-           # desktop link forwards primary-class requests (`forward`, the
-           # rail's `Home.Link`, given the request and its options); any other
-           # engine answers every one here.
-           linked?: Keyword.get_lazy(opts, :desktop_link?, &linked_at_boot?/0),
-           forward: Keyword.get(opts, :forward, &forward_to_primary/2)
+           # M75 §6: decided once, at boot (`Home.Link.forwarding/0`). A
+           # device-role engine holding its desktop link forwards primary-class
+           # requests (`:primary_forward`, the rail's, given the request and its
+           # options); any other engine answers every one here.
+           forwarding: Keyword.get_lazy(opts, :forwarding, &HomeLink.forwarding/0)
          }}
 
       {:error, reason} ->
@@ -298,10 +303,6 @@ defmodule Fermix.CLI.Daemon do
       {:error, reason} -> {:error, {:stale_socket_unlink_failed, reason, socket_path}}
     end
   end
-
-  defp linked_at_boot?, do: DesktopLink.linked?(Role.recorded(), ConfigStore.fermix_home())
-
-  defp forward_to_primary(request, opts), do: HomeLink.impl().forward(request, opts)
 
   # The options this daemon passes its router, for a request a desktop
   # forwarded (`serve_forwarded/3`).
@@ -442,6 +443,7 @@ defmodule Fermix.CLI.Daemon do
   defp owner_family(method, _params) when method in @home_decisions_v1, do: :home
   defp owner_family(method, _params) when method in @provision_decisions_v1, do: :provision
   defp owner_family(method, _params) when method in @cue_decisions_v1, do: :cues
+  defp owner_family(method, _params) when method in @setup_decisions_v1, do: :setup
 
   defp owner_family(method, %{"id" => @cue_secret_prefix <> _ref}) when method in @secret_writes,
     do: :cues
@@ -495,6 +497,11 @@ defmodule Fermix.CLI.Daemon do
      }}
   end
 
+  defp owner_decision_refusal(:setup) do
+    {:error, :unavailable,
+     %{"capability" => @setup_capability, "sentence" => @setup_owner_sentence}}
+  end
+
   defp owner_decision_refusal(:mobile) do
     {:error, :unavailable,
      %{"capability" => "mobile", "sentence" => ManagementMobile.owner_only_sentence()}}
@@ -515,14 +522,14 @@ defmodule Fermix.CLI.Daemon do
   # a primary-class one to the primary, never both; any other engine routes
   # every request here. A composed request is answered here, and the router
   # asks the primary for its part through the same link.
-  defp dispatch_management_request(request, %{linked?: true} = state) do
+  defp dispatch_management_request(request, %{forwarding: [primary_forward: forward]} = state) do
     case Placement.place(request.method, request.params) do
       :device ->
-        opts = Keyword.put(management_opts(state), :primary_forward, state.forward)
+        opts = Keyword.put(management_opts(state), :primary_forward, forward)
         route_management_request(request, opts)
 
       :primary ->
-        guarded(request.method, fn -> forward(request, state) end)
+        guarded(request.method, fn -> forward(request, forward, state) end)
     end
   end
 
@@ -532,13 +539,13 @@ defmodule Fermix.CLI.Daemon do
   # A move the primary starts to a server that replaces it (M75 lean v1
   # §4.3): that server serves nothing while it moves, so this desktop keeps,
   # in its Always On ledger, that it started the move.
-  defp forward(%{method: "home.move.start"} = request, state) do
-    answer = state.forward.(request, [])
+  defp forward(%{method: "home.move.start"} = request, forward, state) do
+    answer = forward.(request, [])
     _recorded = ManagementProvision.move_forwarded(request.params, answer, provision_opts(state))
     answer
   end
 
-  defp forward(request, state), do: state.forward.(request, [])
+  defp forward(request, forward, _state), do: forward.(request, [])
 
   defp provision_opts(state),
     do: state.management_opts |> Keyword.get(:operation_opts, []) |> Keyword.get(:provision, [])
