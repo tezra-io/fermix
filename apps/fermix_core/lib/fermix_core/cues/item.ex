@@ -10,8 +10,13 @@ defmodule FermixCore.Cues.Item do
   - **Size:** the canonical encoding of `data` is at most 64 KiB.
   - **Staleness:** an item whose time is older than the 7-day receipt horizon is
     `{:error, :stale}`. An item with no time is never stale.
-  - **Snapshot:** JSON of type, subject and `text` (the title, else the first
-    280 characters of the text form of the data).
+  - **Snapshot:** JSON of type, subject and `text`, the item's own words where
+    it has them, by one rule: the title; else the data when it is text; else
+    the data's `"text"` field when that is a string with something in it (an X
+    post, a stream that keeps one); else the canonical JSON of the data. Cut at
+    280 characters, which holds a whole standard X post: a marked example's
+    snapshot reaches every filter and screen call of its watcher, 20 of them at
+    most, so the bound sizes that prompt.
   - `self_caused?` marks Fermix's own action coming back (stored, never routed);
     `receipt_only?` stores a receipt with no delivery (a feed's undated items on
     the first poll after the source is added); `body_hash` is a webhook's raw
@@ -240,8 +245,17 @@ defmodule FermixCore.Cues.Item do
   end
 
   defp excerpt(nil, _payload), do: nil
-  defp excerpt(text, _payload) when is_binary(text), do: String.slice(text, 0, @excerpt_chars)
-  defp excerpt(_data, payload), do: String.slice(payload, 0, @excerpt_chars)
+  defp excerpt(text, _payload) when is_binary(text), do: cut(text)
+  defp excerpt(data, payload), do: cut(words(data) || payload)
+
+  # The item's own words in data that is not text: its `"text"` field, when that
+  # is a string with something in it.
+  defp words(%{"text" => text}) when is_binary(text),
+    do: if(String.trim(text) == "", do: nil, else: text)
+
+  defp words(_data), do: nil
+
+  defp cut(text), do: String.slice(text, 0, @excerpt_chars)
 
   defp invalid(message), do: {:error, {:invalid, message}}
 end

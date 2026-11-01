@@ -348,6 +348,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **An X post you mark as an example now teaches the filter and the screen
+  its own words.** A cue kept its post as the start of raw JSON, so the
+  post's text was mostly cut off; it now keeps the text itself (any item
+  whose data has a `text` field does), up to 280 characters. Cues already
+  stored keep what they had.
+
 - **A busy computer no longer quietly costs you a watcher's notices.** When
   the computer was so busy that Fermix's memory database fell behind, every
   request waiting on it gave up after a few seconds, yet each one still ran
