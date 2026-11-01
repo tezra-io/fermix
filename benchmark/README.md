@@ -598,7 +598,7 @@ Notes:
 
 | Goal | Command | Notes |
 |---|---|---|
-| Behavioral regression (did a change break anything) | `make regression` | 21-case `host-safe-core`, independent external Claude judge, development daemon |
+| Behavioral regression (did a change break anything) | `make regression` | 23-case `host-safe-core`, independent external Claude judge, development daemon |
 | Overfitting check (public vs held-out) | put your held-out suites in a dir OUTSIDE the repo, set `private_suites.dir` in config.yaml, run `… --private`, compare the `provider/model` vs `…:private` rows | golds stay out of the repo and no held-out dataset/experiment is written; candidate prompts/replies still enter the configured Opik trace project, so choose project separation appropriate to the data; see `suites/capability/private/holdout.example.yaml` |
 | **Uplift** (Fermix vs raw model) | `make baseline` then `bin/run_uplift.py --fermix <results.json> --baseline <results.json>` | needs `EVAL_BASELINE_API_KEY` + `EVAL_BASELINE_MODEL` (same model the Fermix arm served). The claim is **the whole Fermix system vs a raw single call**, not the contribution of tools — the arms also differ in scaffold, memory and execution policy |
 | **Configuration arms** (Fermix against another Fermix) | `make arms ARMS=arms/<name>.yaml` | one task selection against several daemon CONFIGURATIONS — §5e |

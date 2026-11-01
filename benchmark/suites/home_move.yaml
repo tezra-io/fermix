@@ -276,12 +276,14 @@ scenarios:
   # alone. The floor is either way in, by name; the not-matches gate catches
   # an answer that sends the owner to install the app first, and its
   # lookbehinds spare one that says the app is not needed. The rubric owns
-  # the rest.
+  # the rest. Tagged `host-safe-core`, so it runs on every `make regression`:
+  # a question and an answer, read-only on the host, with no consent gate for
+  # an eval home to pre-grant. The suite's other scenarios stay out of it.
   - id: always_on_without_the_app
     title: "Setting up Always On on an install with no Fermix app"
     severity: normal
     risk: host_readonly
-    tags: [home, always-on, cli, self-knowledge]
+    tags: [home, always-on, cli, self-knowledge, host-readonly, host-safe-core]
     cases:
       - id: homebrew_owner_keeps_fermix_running
         query: >
