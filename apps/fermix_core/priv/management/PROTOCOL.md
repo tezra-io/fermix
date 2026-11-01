@@ -1256,7 +1256,9 @@ Notes that the shapes alone do not carry:
   model"), which checks each item by meaning, with the watcher's purpose,
   instructions and keywords as hints, so only an item it lets through reaches
   the filter model. The option's `hint` names the decision model in use
-  ("Uses OpenAI · gpt-6-luna"). While none is set up, `decision_model` is
+  ("Uses OpenAI · gpt-6-luna"), or, while the chosen one is not set up, what
+  to set up ("Set up OpenRouter first: the screen's decision model runs on its
+  key.", also the refusal of that choice). While none is set up, `decision_model` is
   disabled with the hint "Set up OpenAI, OpenRouter or Venice first.", which
   is also the refusal; a saved `decision_model` keeps its value, and its
   watchers are held until one is set up or `keyword` is picked.
@@ -1316,7 +1318,10 @@ Notes that the shapes alone do not carry:
 - **A watcher row is read-only**: watchers are made and changed in a chat with
   Fermix, and every `llm` watcher filters with the one Cues filter model.
   `state` is `on`, `paused`, `needs_update` or `held` (its filter cannot reach
-  its model). `needs_update` is a watcher saved before a rule every save now
+  its model; while the screen's decision model cannot run, `status_sentence`
+  names it in the words of the hold's notice: "Held: The screen's decision
+  model is OpenRouter's, which is not set up: set it up or pick another in the
+  Cues settings. 3 items are waiting."). `needs_update` is a watcher saved before a rule every save now
   keeps, which gets nothing until a change in chat: one that filters needs
   keywords to listen for ("Needs keywords to listen for: update it in chat."), and
   one with no filter cannot listen to a stream ("Passes everything, so it

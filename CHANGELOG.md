@@ -101,8 +101,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Fermix writes a watcher's keywords the same way either way, and if the
   decision model's provider fails, none is set up any more, or the one you
   chose is not set up, the watcher waits and retries instead of falling back
-  to keyword match or to another provider; when one is missing, its notice
-  says what to set up. A watcher's words to listen for are now called keywords
+  to keyword match or to another provider; when one is missing, its notice,
+  its row in the Cues lists and the Screen setting say what to set up. A watcher's words to listen for are now called keywords
   everywhere Fermix names them.
 - **Watch X accounts with the X sign-in you already have.** A new X accounts
   preset for feed sources takes up to 20 handles, typed with or without `@`,

@@ -129,6 +129,22 @@ defmodule FermixCore.Cues.FilterChoicesTest do
       assert %{disabled?: true} = List.last(FilterChoices.screen_choices(snapshot))
     end
 
+    test "a chosen decision model that is not set up is named as what to set up, never as in use" do
+      snapshot =
+        Map.update!(
+          snapshot(openai: [api_key: "sk-invented"], venice: [api_key: "@keyring"]),
+          :fermix_core,
+          &Keyword.put(&1, :cues, decision_provider: :venice)
+        )
+
+      assert List.last(FilterChoices.screen_choices(snapshot)) == %{
+               id: "decision_model",
+               label: "Decision model",
+               hint: "Set up Venice first: the screen's decision model runs on its key.",
+               disabled?: false
+             }
+    end
+
     test "a chosen decision model is the one the screen names" do
       snapshot =
         Map.update!(

@@ -93,15 +93,40 @@ defmodule FermixCore.Cues.Filter.Decision do
     end
   end
 
-  defp route(choice) do
-    case DecisionModel.route(choice) do
-      {:ok, route} -> {:ok, route}
-      {:error, :not_set_up} -> {:error, {:no_route, @no_route}}
-      {:error, {:not_set_up, provider}} -> {:error, {:no_route, chosen_not_set_up(provider)}}
+  @doc """
+  Fermix's sentence for a screen whose decision model cannot run now, read
+  from `cues` (the `[fermix_core.cues]` keyword): the one a filter call holds
+  its watcher with (`no_route`), or nil while it can run or the screen is
+  keyword match. A surface names a held watcher's cause with it.
+  """
+  @spec no_route_sentence(CuesConfig.t()) :: String.t() | nil
+  def no_route_sentence(cues) when is_list(cues) do
+    case CuesConfig.screen(cues) do
+      :keyword -> nil
+      :decision_model -> route_sentence(route(CuesConfig.decision_provider(cues)))
     end
   end
 
-  defp chosen_not_set_up(provider) do
+  defp route_sentence({:ok, _route}), do: nil
+  defp route_sentence({:error, {:no_route, sentence}}), do: sentence
+
+  defp route(choice) do
+    case DecisionModel.route(choice) do
+      {:ok, route} -> {:ok, route}
+      {:error, :not_set_up} -> {:error, {:no_route, not_set_up_sentence(nil)}}
+      {:error, {:not_set_up, provider}} -> {:error, {:no_route, not_set_up_sentence(provider)}}
+    end
+  end
+
+  @doc """
+  The sentence a filter call holds its watcher with while the decision model
+  on `choice` is not set up: the chosen provider's, or, for nil (Automatic),
+  none of the three.
+  """
+  @spec not_set_up_sentence(DecisionModel.provider() | nil) :: String.t()
+  def not_set_up_sentence(nil), do: @no_route
+
+  def not_set_up_sentence(provider) when is_atom(provider) do
     "The screen's decision model is #{Descriptor.fetch!(provider).label}'s, which is not set " <>
       "up: set it up or pick another in the Cues settings."
   end

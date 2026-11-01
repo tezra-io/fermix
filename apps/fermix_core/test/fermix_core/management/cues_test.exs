@@ -1682,6 +1682,34 @@ defmodule FermixCore.Management.CuesTest do
       assert "needs_update" in WatcherRow.states()
     end
 
+    test "one held because the screen's decision model cannot run says why; other holds as before",
+         %{opts: opts, conn: conn} do
+      Application.put_env(:fermix_core, :providers,
+        anthropic: [api_key: "sk-ant-invented", primary: true],
+        openai: [api_key: "sk-invented"]
+      )
+
+      held = CueFixtures.insert_watcher(conn, %{name: "held-news", filter: "llm", sources: ["s"]})
+      listen_for!(conn, held, ["outage"])
+      CueFixtures.exec!(conn, "UPDATE cue_watchers SET filter_failures = 3 WHERE id = ?", [held])
+
+      screen =
+        CuesConfig.normalize(%{"screen" => "decision_model", "decision_provider" => "openrouter"})
+
+      assert {:ok, %{"watchers" => [row]}} =
+               Cues.watchers_list(Keyword.put(opts, :config, screen))
+
+      assert {row["state"], row["status_sentence"]} ==
+               {"held",
+                "Held: The screen's decision model is OpenRouter's, which is not set up: set it " <>
+                  "up or pick another in the Cues settings. 0 items are waiting."}
+
+      assert {:ok, %{"watchers" => [row]}} = Cues.watchers_list(Keyword.put(opts, :config, []))
+
+      assert row["status_sentence"] ==
+               "Held: it cannot reach its filter model. 0 items are waiting."
+    end
+
     # M60_CUE_INTAKE_AT_SCALE.md §3.4: a stream keeps only what passes, so
     # what its watcher was offered, dropped or failed is counted, not stored.
     # A stream's pass is a stored delivery and a counted offer, so `offered`
@@ -2295,7 +2323,7 @@ defmodule FermixCore.Management.CuesTest do
 
       screen = Enum.find(rows, &(&1["key"] == "cues_screen"))
 
-      assert %{"hint" => "Uses Venice · Jev"} =
+      assert %{"hint" => "Set up Venice first: the screen's decision model runs on its key."} =
                Enum.find(screen["options"], &(&1["value"] == "decision_model"))
     end
 

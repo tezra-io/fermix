@@ -39,7 +39,6 @@ defmodule FermixCore.Cues.Settings do
   alias FermixCore.Cues.Presets
   alias FermixCore.Cues.SourceName
   alias FermixCore.Providers.DecisionModel
-  alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.RoutingOverrides
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.RestartState
@@ -175,13 +174,8 @@ defmodule FermixCore.Cues.Settings do
 
     if is_nil(provider) or FilterChoices.decision_model_set_up?(plan.snapshot, provider),
       do: :ok,
-      else: {:error, {:invalid, decision_provider_not_set_up(provider)}}
+      else: {:error, {:invalid, FilterChoices.decision_model_not_set_up(provider)}}
   end
-
-  defp decision_provider_not_set_up(provider),
-    do:
-      "Set up #{Descriptor.fetch!(provider).label} first: the screen's decision model runs on " <>
-        "its key."
 
   @doc """
   Saves the default filter model (`[fermix_core.routing] filter_provider` and

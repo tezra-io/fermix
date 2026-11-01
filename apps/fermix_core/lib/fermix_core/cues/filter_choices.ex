@@ -93,12 +93,17 @@ defmodule FermixCore.Cues.FilterChoices do
   @doc """
   The two screens, keyword match first. The decision model's hint names the
   one the screen uses, the owner's choice or else the one Fermix picks ("Uses
-  OpenAI · gpt-6-luna"); while none is set up it is disabled, with the hint
-  that says what to set up.
+  OpenAI · gpt-6-luna"), or, while the owner's choice is not set up, what to
+  set up (`decision_model_not_set_up/1`); while none is set up it is disabled,
+  with the hint that says what to set up.
   """
   @spec screen_choices(Source.snapshot()) :: [screen_choice()]
   def screen_choices(snapshot) when is_map(snapshot) do
-    chosen = CuesConfig.decision_provider(CuesConfig.normalize(Source.core(snapshot, :cues)))
+    chosen =
+      case CuesConfig.decision_provider(CuesConfig.normalize(Source.core(snapshot, :cues))) do
+        nil -> nil
+        provider -> {provider, decision_model_set_up?(snapshot, provider)}
+      end
 
     [
       %{id: "keyword", label: "Keyword match", hint: nil, disabled?: false},
@@ -114,13 +119,26 @@ defmodule FermixCore.Cues.FilterChoices do
       disabled?: true
     }
 
-  defp decision_model_choice(%{label: label}, nil), do: decision_model_in_use(label)
+  defp decision_model_choice(%{label: label}, nil), do: decision_model_hint("Uses #{label}")
 
-  defp decision_model_choice(_automatic, chosen),
-    do: decision_model_in_use(DecisionModel.label(chosen))
+  defp decision_model_choice(_automatic, {chosen, true}),
+    do: decision_model_hint("Uses #{DecisionModel.label(chosen)}")
 
-  defp decision_model_in_use(label),
-    do: %{id: "decision_model", label: "Decision model", hint: "Uses #{label}", disabled?: false}
+  defp decision_model_choice(_automatic, {chosen, false}),
+    do: decision_model_hint(decision_model_not_set_up(chosen))
+
+  defp decision_model_hint(hint),
+    do: %{id: "decision_model", label: "Decision model", hint: hint, disabled?: false}
+
+  @doc """
+  What to set up before the owner's chosen decision model can run: the
+  screen's hint while it is not set up, and the save's refusal.
+  """
+  @spec decision_model_not_set_up(DecisionModel.provider()) :: String.t()
+  def decision_model_not_set_up(provider) when is_atom(provider) do
+    "Set up #{Descriptor.fetch!(provider).label} first: the screen's decision model runs on " <>
+      "its key."
+  end
 
   @doc """
   The decision model Automatic runs on, picked from the snapshot as
