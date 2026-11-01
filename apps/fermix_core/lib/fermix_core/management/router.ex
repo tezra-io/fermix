@@ -47,7 +47,7 @@ defmodule FermixCore.Management.Router do
     mobile.devices.list browser.install.start imessage.permissions.get imessage.policy.confirm
     mcp.servers.list mcp.servers.import.scan cues.status cues.sources.list cues.watchers.list
     cues.mandates.list cues.mandates.choices home.snapshots.status home.snapshots.run
-    home.enroll.withdraw home.candidates.list
+    home.enroll.withdraw home.candidates.list home.provision.options
   )
   @lease_params ~w(lease_id)
   @doctor_session_params ~w(session_id)
@@ -87,7 +87,6 @@ defmodule FermixCore.Management.Router do
   @home_readiness_params ~w(candidate_id)
   @home_move_params ~w(candidate_id recovery_passphrase keep_as_desktop)
   @home_act_params ~w(action key input)
-  @provision_options_params ~w(provider)
   # A candidate (M75 §2) answers the protocol's hello and home.status, and
   # refuses every other method by name.
   @candidate_methods ~w(hello home.status)
@@ -356,12 +355,10 @@ defmodule FermixCore.Management.Router do
   end
 
   # The Always On provisioner's offers (M75 lean v1 §4.3): device-class,
-  # answered on the computer that creates the server.
-  defp route_home("home.provision.options", params, opts) do
-    with :ok <- reject_unknown_params(params, @provision_options_params) do
-      operation_result(Provision.options(params, provision_opts(opts)))
-    end
-  end
+  # answered on the computer that creates the server, for the provider in
+  # use, which the call need not name.
+  defp route_home("home.provision.options", %{}, opts),
+    do: operation_result(Provision.options(provision_opts(opts)))
 
   # Every Always On step (Always On setup §3.4): `input` is decoded here into
   # `AlwaysOn.Input`, which withholds its token and recovery passphrase from

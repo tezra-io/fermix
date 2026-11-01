@@ -159,9 +159,19 @@ defmodule FermixCore.Management.ProvisionTest do
       {:ok, _view} = connect(ctx)
       assert {:ok, options} = options(ctx)
 
+      assert options["provider"] == %{"id" => "hetzner", "name" => "Hetzner"}
       assert options["recommended"] == %{"type" => "cpx22", "location" => "fsn1"}
       assert options["sentence"] == "Recommended: CPX22 in Falkenstein, €20 a month."
       assert Copy.violations(options["sentence"], :prose, ["CPX22", "Falkenstein"]) == []
+    end
+
+    # A surface that restarted after the token step reads the offers with
+    # nothing to name: the provider in use is the engine's own rule.
+    test "takes no params: the provider is the one in use", ctx do
+      {:ok, _view} = connect(ctx)
+
+      assert options(ctx, %{"provider" => "hetzner"}) ==
+               {:error, :invalid_params, %{"method" => "home.provision.options"}}
     end
   end
 
@@ -808,12 +818,12 @@ defmodule FermixCore.Management.ProvisionTest do
 
   # The one method of the provisioner still on the wire, through the router
   # as a daemon answers it.
-  defp options(ctx) do
+  defp options(ctx, params \\ %{}) do
     Router.route(
       %{
         method: "home.provision.options",
         protocol_version: Protocol.protocol_version(),
-        params: %{"provider" => "hetzner"}
+        params: params
       },
       engine_role: @primary,
       operation_opts: [provision: ctx.seams]

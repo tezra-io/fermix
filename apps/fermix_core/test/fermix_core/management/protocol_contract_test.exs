@@ -1499,7 +1499,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
     connected = provision_home!(stub, false)
 
     [
-      {"home.provision.options", %{"provider" => "hetzner"}, provision_opts(connected, stub)},
+      {"home.provision.options", %{}, provision_opts(connected, stub)},
       act_case(stub)
     ]
   end

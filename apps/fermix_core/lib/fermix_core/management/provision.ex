@@ -22,10 +22,12 @@ defmodule FermixCore.Management.Provision do
       stopped working is replaced and one for another account is refused,
       also on `token`. Answers that provider's view (below) and
       `other_servers` (the account holds servers Fermix did not create).
-    * `options/2` (`home.provision.options {provider}`) reads the orderable
-      types per location live, with their monthly prices as the account is
-      billed, the L2 recommendation, "more room", and the recommendation in
-      one `sentence`.
+    * `options/1` (`home.provision.options`, no params) reads what the
+      provider in use (`Provision.current/2`) sells, live: the orderable
+      types per location, with their monthly prices as the account is
+      billed, the L2 recommendation, "more room", the recommendation in one
+      `sentence`, and that `provider` (`{id, name}`) for display; refused
+      until the provider in use holds a token.
     * `start_create/2` (`create_server`, `create_in`, `replace_server`)
       starts a job, kind `home_provision`, that creates the firewall and the
       server, the 24-hour enrollment code inside. Refused while any provider
@@ -313,16 +315,27 @@ defmodule FermixCore.Management.Provision do
 
   defp provider_param(_params, _opts), do: invalid("provider", @provider_sentence)
 
-  @doc "`home.provision.options`."
-  @spec options(map(), keyword()) :: {:ok, map()} | {:error, term()}
-  def options(params, opts \\ []) when is_map(params) and is_list(opts) do
-    with {:ok, provider} <- provider_param(params, opts),
-         {:ok, token} <- stored_token(provider, opts) do
+  @doc """
+  `home.provision.options`: what the provider in use sells now (the
+  moduledoc), with that provider's id and name.
+  """
+  @spec options(keyword()) :: {:ok, map()} | {:error, term()}
+  def options(opts \\ []) when is_list(opts) do
+    provider = current(opts)
+
+    with {:ok, token} <- stored_token(provider, opts) do
       case Driver.options(provider, token, provider_opts(opts)) do
-        {:ok, options} -> {:ok, Map.put(options, "sentence", recommendation(options, provider))}
+        {:ok, options} -> {:ok, offers(options, provider)}
         {:error, reason} -> refused(reason, provider, opts)
       end
     end
+  end
+
+  defp offers(options, provider) do
+    Map.merge(options, %{
+      "sentence" => recommendation(options, provider),
+      "provider" => %{"id" => provider.id(), "name" => provider.display().name}
+    })
   end
 
   defp recommendation(%{"recommended" => nil}, provider),

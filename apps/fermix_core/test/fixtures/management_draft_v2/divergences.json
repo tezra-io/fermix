@@ -2767,12 +2767,6 @@
       "why": "M75 lean v1: hello publishes every method this daemon serves with its minimum version, the provisioner included. The draft predates it; a client ignores a method it does not know."
     },
     {
-      "method": "home.provision.options",
-      "field": "params:provider",
-      "kind": "engine_only",
-      "why": "M75 lean v1: home.provision.options names the provider whose offers it reads live, one home.provision.providers lists. The draft predates the provisioner."
-    },
-    {
       "method": "home.status",
       "field": "params:after",
       "kind": "engine_only",
