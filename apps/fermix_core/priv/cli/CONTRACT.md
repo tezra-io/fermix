@@ -326,8 +326,9 @@ Under `--json`, or with no terminal, the verb never prompts. A step needs what
 the action's `needs` lists, from flags only: `--stdin` the token (with
 `--provider ID` when the screen offers more than one provider),
 `--recovery-passphrase-file PATH` the recovery passphrase, `--type` with
-`--location` the size and place (both, or neither for Fermix's own
-recommendation). A need no flag gives is a usage error, exit `2`, naming the
+`--location` the size and place (both; with neither, the verb reads
+`home.provision.options` and sends its recommended row, or refuses
+`action_refused` with that answer's sentence when it recommends none). A need no flag gives is a usage error, exit `2`, naming the
 flag. A step whose `confirm` is not null needs `--yes`; without it the verb
 refuses `confirm_required`. A token or passphrase typed as an argument is a
 usage error. `--wait` follows the step until nothing is moving (a step's job,

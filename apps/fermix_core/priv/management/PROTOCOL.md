@@ -259,7 +259,12 @@ it with their "update Fermix" screen, so they raise their own minimum for
   (where one is set, and on a linked desktop's replace, whose key is the
   server's own: asked once, and the move checks it), or `choice` (the size
   and place: read `home.provision.options`, which takes no params and
-  answers for the provider in use, whose recommendation is the default). Either passphrase is sent as `input.recovery_passphrase`.
+  answers for the provider in use, whose recommendation is the default, and
+  send the row chosen as `input.type` and `input.location`, the
+  recommendation's own included: the engine makes no choice itself, so what
+  it creates is what the owner was shown). `start_again` needs `choice` only
+  when the server it creates again has no size and place kept (the server's,
+  else its failure's). Either passphrase is sent as `input.recovery_passphrase`.
 - `confirm` is the sentence the owner accepts before Fermix spends money,
   deletes, restarts a server or moves; null otherwise. It never carries a
   time or a price, so it is stable. Move now's is built at `ready` from the
@@ -393,10 +398,10 @@ update.
 | `id` | What the engine does on `home.act` |
 |---|---|
 | `paste_token` | checks `input.token` with `input.provider` (or the one provider) and keeps it on this computer |
-| `create_server` | the create job, with `input.type` and `input.location` (both, or neither for the recommendation) |
-| `replace_server` | on a linked desktop: the create job with `replace`, the new server's code asked of the server over the link |
+| `create_server` | the create job, with `input.type` and `input.location`, both, the row the owner chose (a create without them is refused `invalid_params` on `type`) |
+| `replace_server` | on a linked desktop: the create job with `replace` and `input.type` and `input.location` as `create_server`'s, the new server's code asked of the server over the link |
 | `create_in` | the create job in `detail.next_location`, with the failure's size (`replace` on a linked desktop) |
-| `start_again` | one job: what stands is deleted, then the server is created again with its size and place, else the failure's (`replace` on a linked desktop) |
+| `start_again` | one job: what stands is deleted, then the server is created again with its size and place, else the failure's, else `input.type` and `input.location` (its `needs` then lists `choice`; `replace` on a linked desktop) |
 | `turn_on`, `restart_server` | the power job |
 | `delete_server` | the delete job (its label names the new or the old server during a replace) |
 | `cancel` | on `connect`, closes the code for a server of the owner's own; while a create runs, cancels it and, once its run has stopped, deletes what it made; otherwise deletes the server that stands (during a replace, the new one) |

@@ -6184,7 +6184,7 @@
     },
     "homeActInput": {
       "type": "object",
-      "description": "What the action's needs collected: token (needs token; provider names one of detail.providers, else the one there is), recovery_passphrase (needs recovery_passphrase, typed once, or new_recovery_passphrase, typed twice and compared by the surface), type and location (needs choice: read home.provision.options, which takes no params; both, or neither for the recommendation). Never logged, never answered.",
+      "description": "What the action's needs collected: token (needs token; provider names one of detail.providers, else the one there is), recovery_passphrase (needs recovery_passphrase, typed once, or new_recovery_passphrase, typed twice and compared by the surface), type and location (needs choice: read home.provision.options, which takes no params, and send both, the row the owner chose, the recommendation's own by default; the engine makes no choice itself). Never logged, never answered.",
       "additionalProperties": false,
       "properties": {
         "token": { "type": "string", "maxLength": 512 },

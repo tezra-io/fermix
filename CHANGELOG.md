@@ -350,6 +350,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   problem, saying your server still runs Fermix, with Replace the server
   again. A step that stopped inside Fermix, or was stopped, is kept on
   screen however it ended, with Start again, and its reason in Fermix's log.
+  The size and place you were shown is the one Fermix creates: every create
+  names it, the recommendation included, and Fermix never picks one again
+  behind your back (`fermix always-on create-server` with no `--type` and
+  `--location` sends the recommended one it read).
 - **A mandate's proposal is a short card too.** It names the tool and the
   watcher, quotes the item, says why it passed, and shows each argument on its
   own line, with every argument whole and the whole item behind Details, in

@@ -17,8 +17,9 @@ defmodule Fermix.CLI.AlwaysOnCommand.Step do
       checks it.
     * `choice`: `--type` and `--location`; on a terminal, a numbered list of
       `home.provision.options` (the provider in use: the read names none,
-      `options_request/0`) with the recommendation first; else Fermix's own
-      recommendation.
+      `options_request/0`) with the recommendation first, Enter taking it;
+      else the recommendation that read answers. Either way the step sends
+      the size and place of the row chosen, the one the owner was shown.
 
   The input is held as `AlwaysOn.Input`, whose `Inspect` withholds the token
   and the passphrase, until the one call that sends it.
@@ -191,14 +192,12 @@ defmodule Fermix.CLI.AlwaysOnCommand.Step do
   defp choice(input, %{flags: %{type: type, location: location}}) when is_binary(type),
     do: {:ok, %{input | type: type, location: location}}
 
-  defp choice(input, %{interactive?: true} = ctx) do
+  defp choice(input, ctx) do
     case options(ctx) do
       {:ok, options} -> choose(options, input, ctx)
       other -> other
     end
   end
-
-  defp choice(input, _ctx), do: {:ok, input}
 
   @doc """
   The params of the `home.provision.options` read: none, since the engine
@@ -221,6 +220,15 @@ defmodule Fermix.CLI.AlwaysOnCommand.Step do
   defp choose(%{"offers" => []} = options, _input, _ctx),
     do: {:refused, :action_refused, output: options["sentence"]}
 
+  # With nothing to ask on, the row the engine recommends.
+  defp choose(%{"recommended" => nil} = options, _input, %{interactive?: false}),
+    do: {:refused, :action_refused, output: options["sentence"]}
+
+  defp choose(%{"recommended" => %{"type" => type, "location" => location}}, input, %{
+         interactive?: false
+       }),
+       do: chosen({type, location}, input)
+
   defp choose(options, input, ctx) do
     {lines, choices} = Render.offers(options)
     print(ctx.stdout, lines)
@@ -232,7 +240,6 @@ defmodule Fermix.CLI.AlwaysOnCommand.Step do
     end
   end
 
-  defp chosen(:recommended, input), do: {:ok, input}
   defp chosen({type, location}, input), do: {:ok, %{input | type: type, location: location}}
 
   # A number from 1 to `count`, or Enter for the default; asked again at

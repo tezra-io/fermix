@@ -254,8 +254,10 @@ defmodule FermixCore.Management.AlwaysOn do
     job("create", fn -> Provision.start_create(choice, opts) end, opts)
   end
 
-  defp step(%{action: "start_again"}, _seen, opts),
-    do: job("create", fn -> Provision.start_again(%{replace: desktop?(opts)}, opts) end, opts)
+  defp step(%{action: "start_again", input: input}, _seen, opts) do
+    again = %{replace: desktop?(opts), type: input.type, location: input.location}
+    job("create", fn -> Provision.start_again(again, opts) end, opts)
+  end
 
   defp step(%{action: "turn_on"}, _seen, opts),
     do: job("power_on", fn -> Provision.power(%{"action" => "on"}, opts) end, opts)

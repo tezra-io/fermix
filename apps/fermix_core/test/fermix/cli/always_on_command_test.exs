@@ -170,7 +170,8 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
     test "a confirm needs --yes, and refuses with its own sentence otherwise", ctx do
       client = script([hello(), {"home.status", {:ok, status(choose())}}])
 
-      {1, out, err} = run(["create-server", "--json"], ctx, client)
+      {1, out, err} =
+        run(["create-server", "--type", "cpx22", "--location", "fsn1", "--json"], ctx, client)
 
       assert %{"error" => %{"code" => "confirm_required", "sentence" => sentence}} =
                Jason.decode!(out)
@@ -180,10 +181,13 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
       refute_act()
     end
 
-    test "a choice is the recommendation unless both --type and --location are given", ctx do
-      for {flags, input} <- [
-            {[], nil},
-            {["--type", "cpx32", "--location", "hel1"],
+    # The recommendation is a row the owner was shown like any other, so the
+    # step names its size and place, read from the engine's offers.
+    test "a choice is the recommended row unless both --type and --location are given", ctx do
+      for {flags, reads, input} <- [
+            {[], [{"home.provision.options", {:ok, options()}}],
+             %{"type" => "cpx22", "location" => "fsn1"}},
+            {["--type", "cpx32", "--location", "hel1"], [],
              %{"type" => "cpx32", "location" => "hel1"}}
           ] do
         act = fn params ->
@@ -197,11 +201,30 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
           {:ok, %{"summary" => creating(), "result" => nil}}
         end
 
-        client = script([hello(), {"home.status", {:ok, status(choose())}}, {"home.act", act}])
+        client =
+          script(
+            [hello(), {"home.status", {:ok, status(choose())}}] ++ reads ++ [{"home.act", act}]
+          )
 
         {0, out, _err} = run(["create-server", "--yes"] ++ flags, ctx, client)
         assert hd(lines(out)) == "Starting your server…"
       end
+    end
+
+    test "with no offer recommended and no flags, it sends nothing and says why", ctx do
+      none = %{options() | "recommended" => nil, "sentence" => "Hetzner has nothing in stock."}
+
+      client =
+        script([
+          hello(),
+          {"home.status", {:ok, status(choose())}},
+          {"home.provision.options", {:ok, none}}
+        ])
+
+      {1, out, err} = run(["create-server", "--yes", "--json"], ctx, client)
+      assert %{"error" => %{"code" => "action_refused"}} = Jason.decode!(out)
+      assert err =~ "Hetzner has nothing in stock."
+      refute_act()
     end
 
     test "Move now takes the recovery passphrase from its file, never a prompt", ctx do
@@ -270,6 +293,7 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
         script([
           hello(),
           {"home.status", {:ok, status(choose())}},
+          {"home.provision.options", {:ok, options()}},
           {"home.act", changed},
           {"home.status", {:ok, status(creating())}}
         ])
@@ -330,6 +354,7 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
         script([
           hello(),
           {"home.status", {:ok, status(choose())}},
+          {"home.provision.options", {:ok, options()}},
           {"home.act", {:ok, %{"summary" => creating(), "result" => nil}}},
           {"home.status", wait_for("k-creating", {:ok, status(installing)}, ctx)},
           {"home.status", wait_for("k-creating", {:ok, status(installing)}, ctx)},
@@ -499,6 +524,7 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
           [
             hello(),
             {"home.status", {:ok, status(choose())}},
+            {"home.provision.options", {:ok, options()}},
             {"home.act", {:ok, %{"summary" => creating(), "result" => nil}}}
           ] ++ waits
         )
@@ -521,7 +547,7 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
       end
 
       create = fn params ->
-        refute Map.has_key?(params, "input")
+        assert params["input"] == %{"type" => "cpx22", "location" => "fsn1"}
         {:ok, %{"summary" => creating(), "result" => nil}}
       end
 

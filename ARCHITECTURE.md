@@ -627,16 +627,20 @@ summary: none, connected, creating, created, deleting, gone, failed (with the
 reason, before anything else the ledger holds) or unreadable, beside whether
 the token is still accepted, the step whose job runs (`action`, written by
 `Management.Provision.put_action/2` before the job starts and cleared by the
-job's end in the family's one job wrapper) and when the provider was last
+step's one ending, which the job family itself runs once the run is over
+however it ended, a raise, an exit or a kill included: `Management.Jobs`'
+`:ending`) and when the provider was last
 read back (`checked_at`, the reconcile's). Every step's ending lands there:
 a create's, a power action's and a delete's failure carry the step, the
-server's size and place; an action older than the job budget reads as the
-failure `interrupted`, and the boot, before the job family and the socket
+server's size and place; a run that answered nothing (it raised, exited, was
+killed or ran past its budget) and an action older than the job budget read
+as the failure `interrupted`, and the boot, before the job family and the socket
 start, writes it so (`Management.Provision.interrupt_at_boot/0`, a child that
-starts no process). A create's job prices its choice from the live offer
-(or makes it, the recommendation, when none is given:
-`Management.Provision.start_create/2`), keeps it on the action and writes the
-price into the server record. `Management.Home.status/1` starts one
+starts no process). A create names the size and place the owner was
+shown, the recommendation being one row like any other
+(`Management.Provision.start_create/2` refuses a create without them and
+keeps them on the step's action before its job starts); the job prices it
+from the live offer and writes the price into the server record. `Management.Home.status/1` starts one
 reconcile (`Management.Provision.start_reconcile/1`, a job of the same family,
 so single-flight and never beside a step) when its summary rests on the
 provider's word and the ledger was last checked over a minute ago. The apps

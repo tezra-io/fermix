@@ -361,6 +361,25 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
       assert {:ok, %{server: %{type: "large-8", location: "osl1"}}} = Ledger.read(home, "nimbus")
     end
 
+    # The recommendation is the row checked when the step opens, and the
+    # step sends that row's size and place: the engine makes none up.
+    test "the step as drawn creates the recommended row", %{
+      conn: conn,
+      home: home,
+      seams: seams
+    } do
+      {view, _html} = open_view!(conn)
+      press(view, "create_server")
+      render_async(view)
+
+      view |> form(~s(#always-on-step form)) |> render_submit()
+      settle!(view)
+      settle_jobs!(seams)
+
+      %{"recommended" => %{"type" => type, "location" => location}} = options!(seams)
+      assert {:ok, %{server: %{type: ^type, location: ^location}}} = Ledger.read(home, "nimbus")
+    end
+
     test "offers the provider cannot give are said in its words, and Back closes the step", %{
       conn: conn,
       world: world

@@ -31,7 +31,8 @@ defmodule FermixCore.Management.Provision do
       until the provider in use holds a token.
     * `start_create/2` (`create_server`, `create_in`, `replace_server`)
       starts a job, kind `home_provision`, that creates the firewall and the
-      server, the 24-hour enrollment code inside. Refused while any provider
+      server of the size and place the owner was shown, the 24-hour
+      enrollment code inside. Refused while any provider
       holds a server Fermix created. On the primary only, unless `replace`:
       then on the linked desktop whose ledger of that provider holds the
       server the home lives on, which asks that server over the link for the
@@ -78,10 +79,10 @@ defmodule FermixCore.Management.Provision do
   every create, power and delete job clears it (`clear_action/1` for a step
   that never started its job). Every ending lands in the ledger: a create's,
   a power action's and a delete's failure, with the step, the server's size
-  and place, except a refusal of the token, which marks the token. A create's
-  job reads the live offer first (`start_create/2`): the offer the choice
-  names, or the recommendation when it names none, whose price the server
-  is written with and whose size and place the step's action keeps. At boot
+  and place, except a refusal of the token, which marks the token. A
+  create's size and place are the owner's, kept on the step's action before
+  its job starts; the job reads the live offer first, whose price the server
+  is written with. At boot
   a step left with no job, since jobs live in memory, becomes the failure
   `interrupted` (`interrupt_left_actions/1`). `start_reconcile/1` reads the
   ledger back from the provider as a job of the same kind, named by the
@@ -382,11 +383,12 @@ defmodule FermixCore.Management.Provision do
   @doc """
   Starts the create job on the provider Always On speaks of, which creates
   the firewall and the server, the 24-hour enrollment code inside: `type`
-  and `location` both given, or both nil for the recommendation the job
-  reads from the live offer; `replace` true to replace the server the home
-  lives on. Refused by field when only one is given, or either is not one
-  Fermix offers; refused while any provider holds a server Fermix created,
-  and on a linked desktop unless `replace`.
+  and `location`, the offer the owner was shown (the recommendation is one
+  like any other, and the job never makes one), kept on the step's action
+  before the job starts; `replace` true to replace the server the home
+  lives on. Refused by field when either is missing or not one Fermix
+  offers; refused while any provider holds a server Fermix created, and on
+  a linked desktop unless `replace`.
   """
   @spec start_create(
           %{type: String.t() | nil, location: String.t() | nil, replace: boolean()},
@@ -405,17 +407,24 @@ defmodule FermixCore.Management.Provision do
   ledger holds is deleted first (the step's action, `create`, stays named
   while it runs, so the summary says the delete), then a server is created
   with the size and place of the one that stood, else of the failure the
-  step answers, else the recommendation; with `replace`, on the linked
-  desktop whose ledger holds the server the home lives on. A delete that
-  stops ends the job with its failure kept, as a delete's is.
+  step answers, else of `type` and `location` (refused by field without
+  them, as a create is); with `replace`, on the linked desktop whose ledger
+  holds the server the home lives on. A delete that stops ends the job with
+  its failure kept, as a delete's is.
   """
-  @spec start_again(%{replace: boolean()}, keyword()) :: {:ok, map()} | {:error, term()}
-  def start_again(%{replace: replace?}, opts \\ []) when is_boolean(replace?) and is_list(opts) do
+  @spec start_again(
+          %{replace: boolean(), type: String.t() | nil, location: String.t() | nil},
+          keyword()
+        ) :: {:ok, map()} | {:error, term()}
+  def start_again(%{replace: replace?, type: type, location: location}, opts \\ [])
+      when is_boolean(replace?) and is_list(opts) do
     provider = current(opts)
 
     with {:ok, ledger} <- ledger(provider, opts),
-         {:ok, _token} <- stored_token(provider, opts) do
-      request = Map.put(again(ledger), :profile, profile(opts))
+         {:ok, _token} <- stored_token(provider, opts),
+         {:ok, choice} <- again(ledger, type, location, provider),
+         :ok <- keep_choice(provider, choice, opts) do
+      request = Map.put(choice, :profile, profile(opts))
 
       start(
         provider,
@@ -426,16 +435,16 @@ defmodule FermixCore.Management.Provision do
     end
   end
 
-  # The server's size and place, else the failure's: both, or neither.
-  defp again(%{server: %{type: type, location: location}})
+  # The server's size and place, else the failure's, else the owner's.
+  defp again(%{server: %{type: type, location: location}}, _type, _location, _provider)
        when is_binary(type) and is_binary(location),
-       do: %{type: type, location: location}
+       do: {:ok, %{type: type, location: location}}
 
-  defp again(%{failure: %{type: type, location: location}})
+  defp again(%{failure: %{type: type, location: location}}, _type, _location, _provider)
        when is_binary(type) and is_binary(location),
-       do: %{type: type, location: location}
+       do: {:ok, %{type: type, location: location}}
 
-  defp again(_ledger), do: %{type: nil, location: nil}
+  defp again(_ledger, type, location, provider), do: choice(type, location, provider)
 
   defp run_again(provider, replace?, request, report, opts) do
     with {:ok, _deleted} <- cleared(provider, report, opts),
@@ -466,7 +475,8 @@ defmodule FermixCore.Management.Provision do
   defp begin_create(provider, choice, replace?, opts) do
     request = Map.put(choice, :profile, profile(opts))
 
-    with {:ok, plan} <- create_plan(provider, replace?, opts) do
+    with {:ok, plan} <- create_plan(provider, replace?, opts),
+         :ok <- keep_choice(provider, choice, opts) do
       start(
         provider,
         opts,
@@ -476,9 +486,7 @@ defmodule FermixCore.Management.Provision do
     end
   end
 
-  # Both given, or neither: the recommendation, which the job reads.
-  defp choice(nil, nil, _provider), do: {:ok, %{type: nil, location: nil}}
-
+  # The size and place the owner was shown: both.
   defp choice(type, location, provider) do
     with {:ok, type} <- matching(%{"type" => type}, "type", @type_pattern),
          {:ok, location} <- location(%{"location" => location}, provider),
@@ -576,14 +584,11 @@ defmodule FermixCore.Management.Provision do
     end)
   end
 
-  # The live offer prices the choice (or makes it, when the owner chose
-  # nothing), and the step's action keeps it, before the create writes
-  # anything of its own.
+  # The live offer prices the choice before the create writes anything of
+  # its own.
   defp run_create(provider, plan, request, report, opts) do
-    with {:ok, priced} <- priced(provider, request, opts),
-         :ok <- keep_choice(provider, priced, opts) do
-      run_plan(provider, plan, priced, report, opts)
-    else
+    case priced(provider, request, opts) do
+      {:ok, priced} -> run_plan(provider, plan, priced, report, opts)
       {:error, reason} -> create_failed(reason, provider, request, opts)
     end
   end
@@ -593,11 +598,6 @@ defmodule FermixCore.Management.Provision do
          {:ok, options} <- Driver.options(provider, token, provider_opts(opts)),
          do: offered(options, request)
   end
-
-  defp offered(%{"recommended" => nil}, %{type: nil}), do: {:error, :nothing_in_stock}
-
-  defp offered(%{"recommended" => pick} = options, %{type: nil} = request),
-    do: offered(options, %{request | type: pick["type"], location: pick["location"]})
 
   # An offer the catalog does not hold now is priced at nothing: the create's
   # own check of the stock refuses it before anything is written.
@@ -619,17 +619,19 @@ defmodule FermixCore.Management.Provision do
     end
   end
 
-  defp keep_choice(provider, request, opts) do
-    case Ledger.update(home(opts), provider.id(), &chosen(&1, request)) do
+  # The step's action keeps the size and place before its job starts, so a
+  # step that never ends keeps them for Start again; a create started with
+  # no step named keeps them nowhere.
+  defp keep_choice(provider, choice, opts) do
+    case Ledger.update(home(opts), provider.id(), &chosen(&1, choice)) do
       {:ok, _ledger} -> :ok
       {:error, :no_action} -> :ok
-      {:error, reason} -> {:error, {:ledger, reason}}
+      {:error, reason} -> refused({:ledger, reason}, provider, opts)
     end
   end
 
-  # A create started with no step named keeps it nowhere.
-  defp chosen(%{action: nil}, _request), do: {:error, :no_action}
-  defp chosen(ledger, request), do: {:ok, Ledger.choose(ledger, request)}
+  defp chosen(%{action: nil}, _choice), do: {:error, :no_action}
+  defp chosen(ledger, choice), do: {:ok, Ledger.choose(ledger, choice)}
 
   # The server a replace leaves is set aside first, so a refusal from here on
   # is the new server's.

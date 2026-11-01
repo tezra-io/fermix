@@ -148,10 +148,6 @@ defmodule FermixCore.Management.HomeSummaryTest do
        facts(provision: ledger(:failed, failure: step_failure("create", "interrupted"))),
        "problem", "Fermix stopped before your server was created, so start again.",
        "start_again"},
-      {"nothing in stock for the recommendation",
-       facts(provision: ledger(:failed, failure: failure("nothing_in_stock"))), "problem",
-       "Hetzner has no server type with 4 GB in stock in Falkenstein, Nuremberg or Helsinki " <>
-         "right now.", "start_again"},
       {"a move undone, the server still held",
        ready_facts(move: move("aborted"), link: link(enrollment: provisioned(:used, @cand))),
        "undone", "The move was undone. Fermix still runs on this Mac.", "try_again"},
@@ -672,13 +668,12 @@ defmodule FermixCore.Management.HomeSummaryTest do
     end
 
     test "no stock anywhere offers to start again, and Learn more beside it" do
-      for reason <- ["unavailable", "nothing_in_stock"] do
-        summary = HomeSummary.summary(facts(provision: ledger(:failed, failure: failure(reason))))
+      summary =
+        HomeSummary.summary(facts(provision: ledger(:failed, failure: failure("unavailable"))))
 
-        assert %{"id" => "start_again", "confirm" => confirm} = summary["action"]
-        assert confirm =~ "create your server again"
-        assert ids(summary["detail"]["alternatives"]) == ["learn_more"]
-      end
+      assert %{"id" => "start_again", "confirm" => confirm} = summary["action"]
+      assert confirm =~ "create your server again"
+      assert ids(summary["detail"]["alternatives"]) == ["learn_more"]
     end
 
     # Review R2: what Fermix created for a move that has not begun can be
@@ -1725,10 +1720,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
           "token from your Hetzner project.",
       "other" =>
         "Hetzner had not finished starting your server after five minutes; Always On " <>
-          "checks again when it opens.",
-      "nothing_in_stock" =>
-        "Hetzner has no server type with 4 GB in stock in Falkenstein, Nuremberg or Helsinki " <>
-          "right now."
+          "checks again when it opens."
     }
 
     %{

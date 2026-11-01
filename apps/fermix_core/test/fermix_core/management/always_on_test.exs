@@ -37,6 +37,8 @@ defmodule FermixCore.Management.AlwaysOnTest do
   @manual_code "fxenroll1.eyJ2IjoxLCJuYW1lIjoib3duLXNlcnZlciJ9"
   @server_code "fxenroll1.eyJ2IjoxLCJuYW1lIjoib2xkLXNlcnZlciJ9"
   @recommended %{type: "small-4", location: "osl1", profile: "general"}
+  # The offer the owner was shown and chose: a create always names one.
+  @choice %Input{type: "small-4", location: "osl1"}
 
   setup ctx do
     home = SafeRm.make_tmp_dir!("always_on")
@@ -181,7 +183,7 @@ defmodule FermixCore.Management.AlwaysOnTest do
          ctx do
       connect!(ctx)
       key = offered!(summary(ctx.opts), "create_server")["key"]
-      request = %{action: "create_server", key: key, input: %Input{}}
+      request = %{action: "create_server", key: key, input: @choice}
 
       answers =
         [request, request]
@@ -234,7 +236,8 @@ defmodule FermixCore.Management.AlwaysOnTest do
     test "names the step before the job, so the answer already says it runs, and the " <>
            "job's end clears it",
          ctx do
-      assert {:ok, %{"summary" => summary, "result" => nil}} = press(ctx, "create_server")
+      assert {:ok, %{"summary" => summary, "result" => nil}} =
+               press(ctx, "create_server", @choice)
 
       assert summary["state"] == "creating"
       assert summary["sentence"] == "Starting your server…"
@@ -256,6 +259,45 @@ defmodule FermixCore.Management.AlwaysOnTest do
                Ledger.read(ctx.home, "nimbus")
     end
 
+    test "with no size and place chosen it is refused on the type, and leaves no step behind",
+         ctx do
+      assert {:error, :invalid_params, %{"field" => "type", "sentence" => _sentence}} =
+               press(ctx, "create_server")
+
+      assert {:ok, %{action: nil, server: nil}} = Ledger.read(ctx.home, "nimbus")
+      assert jobs(ctx) == []
+    end
+
+    test "keeps the size and place chosen on the step from the press on", ctx do
+      test = self()
+
+      # The job holds before its first read of the provider.
+      spy = fn
+        :catalog ->
+          send(test, {:holding, self()})
+
+          receive do
+            :go -> :ok
+          end
+
+        _other ->
+          :ok
+      end
+
+      held = %{ctx | opts: put_provider_opt(ctx.opts, :spy, spy)}
+
+      assert {:ok, _answer} =
+               press(held, "create_server", %Input{type: "large-8", location: "osl1"})
+
+      assert_receive {:holding, run}, 10_000
+
+      assert {:ok, %{action: %{kind: "create", type: "large-8", location: "osl1"}}} =
+               Ledger.read(ctx.home, "nimbus")
+
+      send(run, :go)
+      settle!(held)
+    end
+
     test "a size with no place is refused on the place, and leaves no step behind", ctx do
       assert {:error, :invalid_params, %{"field" => "location", "sentence" => _sentence}} =
                press(ctx, "create_server", %Input{type: "large-8"})
@@ -271,7 +313,7 @@ defmodule FermixCore.Management.AlwaysOnTest do
       hold_reconcile!(ctx)
 
       assert {:error, :unavailable, %{"capability" => "home", "sentence" => sentence}} =
-               press(ctx, "create_server")
+               press(ctx, "create_server", @choice)
 
       assert sentence =~ "server"
       assert {:ok, %{action: nil}} = Ledger.read(ctx.home, "nimbus")
@@ -326,14 +368,36 @@ defmodule FermixCore.Management.AlwaysOnTest do
 
     test "after a step the engine's restart left, creates again with what it kept", ctx do
       :ok = Provision.put_action("create", ctx.opts)
+      choice = %{type: "large-8", location: "osl1"}
+      {:ok, _ledger} = Ledger.update(ctx.home, "nimbus", &{:ok, Ledger.choose(&1, choice)})
       :ok = Provision.interrupt_left_actions(ctx.opts)
 
       assert %{"detail" => %{"kind" => "create_failed"}} = summary(ctx.opts)
+      assert offered!(summary(ctx.opts), "start_again")["needs"] == []
       assert {:ok, _answer} = press(ctx, "start_again")
 
       settle!(ctx)
 
-      assert {:ok, %{server: %{status: :created}, failure: nil, action: nil}} =
+      assert {:ok, %{server: %{status: :created, type: "large-8"}, failure: nil, action: nil}} =
+               Ledger.read(ctx.home, "nimbus")
+    end
+
+    test "with no size and place kept, asks for them and creates the one chosen", ctx do
+      failure = %{
+        reason: "interrupted",
+        sentence: "Fermix stopped before your server was created, so start again.",
+        next_location: nil,
+        at: @at
+      }
+
+      {:ok, _ledger} = Ledger.update(ctx.home, "nimbus", &{:ok, Ledger.put_failure(&1, failure)})
+      assert offered!(summary(ctx.opts), "start_again")["needs"] == ["choice"]
+
+      assert {:error, :invalid_params, %{"field" => "type"}} = press(ctx, "start_again")
+      assert {:ok, _answer} = press(ctx, "start_again", %Input{type: "large-8", location: "osl1"})
+      settle!(ctx)
+
+      assert {:ok, %{server: %{status: :created, type: "large-8"}, failure: nil}} =
                Ledger.read(ctx.home, "nimbus")
     end
   end
@@ -427,7 +491,7 @@ defmodule FermixCore.Management.AlwaysOnTest do
       opts = put_provider_opt(ctx.opts, :spy, spy)
       ctx = %{ctx | opts: opts}
 
-      assert {:ok, _answer} = press(ctx, "create_server")
+      assert {:ok, _answer} = press(ctx, "create_server", @choice)
       assert_receive :create_holding, 10_000
       assert %{"state" => "creating", "action" => %{"id" => "cancel"}} = summary(opts)
 
@@ -626,7 +690,7 @@ defmodule FermixCore.Management.AlwaysOnTest do
     # is the desktop's own problem, offered another Replace; never on.
     test "a replace that failed before the new server is a problem of its own", ctx do
       FakeCloudProvider.fault(ctx.world, :catalog, {:unreachable, :timeout})
-      assert {:ok, _answer} = press(ctx, "replace_server")
+      assert {:ok, _answer} = press(ctx, "replace_server", @choice)
       settle!(ctx)
 
       assert {:ok, %{failure: %{action: "create"}, replace: nil}} =
@@ -638,7 +702,7 @@ defmodule FermixCore.Management.AlwaysOnTest do
       offered = Enum.map(screen["detail"]["alternatives"], & &1["id"])
       refute Enum.any?(offered, &(&1 in ["start_again", "delete_server"]))
 
-      assert {:ok, _answer} = press(ctx, "replace_server")
+      assert {:ok, _answer} = press(ctx, "replace_server", @choice)
       settle!(ctx)
 
       assert {:ok, %{replace: %{old: %{server: %{}}}, server: %{status: :created}, failure: nil}} =
@@ -676,7 +740,7 @@ defmodule FermixCore.Management.AlwaysOnTest do
     end
 
     test "Replace the server creates the new one here, with the server's own code", ctx do
-      assert {:ok, %{"summary" => summary}} = press(ctx, "replace_server")
+      assert {:ok, %{"summary" => summary}} = press(ctx, "replace_server", @choice)
       assert summary["state"] == "creating"
 
       settle!(ctx)
@@ -852,7 +916,7 @@ defmodule FermixCore.Management.AlwaysOnTest do
       end
 
       raising = %{ctx | opts: put_provider_opt(ctx.opts, :spy, spy)}
-      assert {:ok, _answer} = press(raising, "create_server")
+      assert {:ok, _answer} = press(raising, "create_server", @choice)
       settle!(raising)
       assert Enum.any?(jobs(ctx), &(&1["status"] == "failed"))
       assert {:ok, %{action: nil, failure: failure}} = Ledger.read(ctx.home, "nimbus")
@@ -876,7 +940,7 @@ defmodule FermixCore.Management.AlwaysOnTest do
       end
 
       killed = %{ctx | opts: put_provider_opt(ctx.opts, :spy, spy)}
-      assert {:ok, _answer} = press(killed, "create_server")
+      assert {:ok, _answer} = press(killed, "create_server", @choice)
       settle!(killed)
 
       assert {:ok, %{action: nil, failure: %{reason: "interrupted", action: "create"}}} =
@@ -889,7 +953,7 @@ defmodule FermixCore.Management.AlwaysOnTest do
       assert {:ok, _answer} =
                press(ctx, "paste_token", %Input{token: FakeCloudProvider.read_only_token()})
 
-      assert {:ok, _answer} = press(ctx, "create_server")
+      assert {:ok, _answer} = press(ctx, "create_server", @choice)
       settle!(ctx)
       assert summary(ctx.opts)["detail"]["kind"] == "read_only_token"
       assert {:ok, %{"summary" => screen}} = press(ctx, "paste_token", token_input())
@@ -904,7 +968,7 @@ defmodule FermixCore.Management.AlwaysOnTest do
       assert Enum.any?(actions, &(&1["id"] in ["create_server", "start_again"])), inspect(screen)
       assert screen["state"] == "choose"
 
-      assert {:ok, _answer} = press(ctx, "create_server")
+      assert {:ok, _answer} = press(ctx, "create_server", @choice)
       settle!(ctx)
       assert {:ok, %{server: %{status: :created}, failure: nil}} = Ledger.read(ctx.home, "nimbus")
     end
@@ -912,7 +976,7 @@ defmodule FermixCore.Management.AlwaysOnTest do
     test "an account limit the owner lifted offers the create again", ctx do
       connect!(ctx)
       FakeCloudProvider.fault(ctx.world, :create_server, :account_limit)
-      assert {:ok, _answer} = press(ctx, "create_server")
+      assert {:ok, _answer} = press(ctx, "create_server", @choice)
       settle!(ctx)
       screen = summary(ctx.opts)
       assert screen["detail"]["kind"] == "account_limit"

@@ -761,8 +761,8 @@ it, never a second writer.
   `open-console` print their page). With no terminal or with `--json` it asks
   nothing: `--stdin` reads the token from a pipe (`--provider ID` when more
   than one provider is offered), `--recovery-passphrase-file PATH` the
-  passphrase, `--type` with `--location` the size and place (else Fermix's
-  recommendation), `--yes` accepts the step's confirm, and `--wait` waits; a
+  passphrase, `--type` with `--location` the size and place (else the
+  recommended one Fermix offers, sent as that size and place), `--yes` accepts the step's confirm, and `--wait` waits; a
   need no flag gives exits 2 naming the flag, and a confirm without `--yes`
   refuses `confirm_required`. A token or passphrase typed as an argument is
   refused. The wait asks `home.status` with the screen's key and stops after

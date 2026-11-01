@@ -106,10 +106,10 @@ defmodule Fermix.CLI.AlwaysOnCommand.Render do
   words them: its sentence, then the offers grouped under the city of their
   place (the recommendation's city first, the rest in the engine's order),
   each numbered with its `label` and, beneath, its `price`, the
-  recommendation first in its city. Also what each number chooses:
-  `:recommended` (Fermix takes its own recommendation) or `{type, location}`.
+  recommendation first in its city. Also what each number chooses: its
+  `{type, location}`.
   """
-  @spec offers(map()) :: {[String.t()], [:recommended | {String.t(), String.t()}]}
+  @spec offers(map()) :: {[String.t()], [{String.t(), String.t()}]}
   def offers(%{"offers" => offers, "locations" => locations} = options) do
     groups = groups(offers, locations, options["recommended"])
     {lines, choices} = groups |> Enum.reduce({[], []}, &group/2)
@@ -127,7 +127,7 @@ defmodule Fermix.CLI.AlwaysOnCommand.Render do
     offers
     |> Enum.filter(&(&1["location"] == location))
     |> Enum.sort_by(&(not same_offer?(&1, recommended)))
-    |> Enum.map(&{&1, choice(&1, recommended)})
+    |> Enum.map(&{&1, {&1["type"], &1["location"]}})
   end
 
   # Lines and choices accumulate reversed; the next number is one past the
@@ -147,12 +147,6 @@ defmodule Fermix.CLI.AlwaysOnCommand.Render do
     do: offer["type"] == type and offer["location"] == location
 
   defp same_offer?(_offer, nil), do: false
-
-  defp choice(offer, recommended) do
-    if same_offer?(offer, recommended),
-      do: :recommended,
-      else: {offer["type"], offer["location"]}
-  end
 
   @doc "What a step answered beyond its screen: the own-server code, shown this once."
   @spec result(map() | nil) :: [String.t()]

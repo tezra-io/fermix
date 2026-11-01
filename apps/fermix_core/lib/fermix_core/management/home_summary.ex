@@ -407,7 +407,6 @@ defmodule FermixCore.Management.HomeSummary do
     {kind, act, alternatives} =
       case reason do
         "unavailable" -> {"no_capacity", :start_again, [:learn_more]}
-        "nothing_in_stock" -> {"no_capacity", :start_again, [:learn_more]}
         "account_limit" -> {"account_limit", :open_console, [:start_again, :own_server]}
         "read_only_token" -> {"read_only_token", :paste_token, []}
         "gone" -> {"deleted", :start_again, []}
@@ -1108,7 +1107,20 @@ defmodule FermixCore.Management.HomeSummary do
   defp needs(:paste_token, _facts), do: ["token"]
   defp needs(act, _facts) when act in [:create_server, :replace_server], do: ["choice"]
   defp needs(act, facts) when act in [:move_now, :try_again], do: [passphrase_need(facts)]
+  defp needs(:start_again, facts), do: again_need(facts.provision)
   defp needs(_act, _facts), do: []
+
+  # Start again creates the server of the size and place the ledger keeps
+  # (the server's, else the failure's); with neither, the owner chooses.
+  defp again_need(%{server: %{type: type, location: location}})
+       when is_binary(type) and is_binary(location),
+       do: []
+
+  defp again_need(%{failure: %{type: type, location: location}})
+       when is_binary(type) and is_binary(location),
+       do: []
+
+  defp again_need(_provision), do: ["choice"]
 
   # A replace's move checks the server's own key, which every move to it set;
   # here, the key this home's snapshots keep, or a new one when none is set.

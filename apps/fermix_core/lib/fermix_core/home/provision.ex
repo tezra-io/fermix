@@ -215,7 +215,6 @@ defmodule FermixCore.Home.Provision do
           | :invalid_code
           | :interrupted
           | {:interrupted, String.t()}
-          | :nothing_in_stock
           | :no_token
           | :no_server
           | :server_exists
@@ -541,11 +540,6 @@ defmodule FermixCore.Home.Provision do
     do: "Fermix stopped before your server restarted, so restart it again."
 
   defp sentence(:no_token, words), do: "Paste a #{words.token_label} first."
-
-  defp sentence(:nothing_in_stock, words),
-    do:
-      "#{words.name} has no server type with 4 GB in stock in " <>
-        "#{words.locations |> Enum.map(& &1.city) |> listed()} right now."
 
   defp sentence(:no_server, words),
     do: "Fermix has no server on #{words.name} to turn on or restart."

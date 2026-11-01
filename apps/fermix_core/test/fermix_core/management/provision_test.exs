@@ -425,7 +425,16 @@ defmodule FermixCore.Management.ProvisionTest do
       assert {total, currency} == {offer["total_monthly"], options["currency"]}
     end
 
-    test "with no choice the job creates the recommendation, and keeps the choice", ctx do
+    # The recommendation is an offer the owner was shown like any other: a
+    # create names its size and place, and the job never makes one up.
+    test "with no choice the create is refused on the type, and starts no job", ctx do
+      assert {:error, {:invalid_params, "type", _sentence}} =
+               Provision.start_create(%{type: nil, location: nil, replace: false}, ctx.seams)
+
+      assert {:ok, []} = Jobs.list(ctx.seams[:jobs])
+    end
+
+    test "the size and place chosen are the step's before its job starts", ctx do
       assert :ok = Provision.put_action("create", ctx.seams)
       test = self()
 
@@ -437,10 +446,10 @@ defmodule FermixCore.Management.ProvisionTest do
           end)
         end)
 
-      {:ok, job} = Provision.start_create(%{type: nil, location: nil, replace: false}, spy)
+      {:ok, job} = Provision.start_create(%{type: "cpx32", location: "hel1", replace: false}, spy)
       assert %{"status" => "completed", "result" => result} = finished(job, ctx)
-      assert %{"type" => "cpx22", "location" => "fsn1"} = result
-      assert_received {:action, %{kind: "create", type: "cpx22", location: "fsn1"}}
+      assert %{"type" => "cpx32", "location" => "hel1"} = result
+      assert_received {:action, %{kind: "create", type: "cpx32", location: "hel1"}}
     end
 
     test "a choice of one without the other is refused by field", ctx do
