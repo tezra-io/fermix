@@ -26,7 +26,8 @@ defmodule FermixCore.Management.Provision do
       provider in use (`Provision.current/2`) sells, live: the orderable
       types per location, with their monthly prices as the account is
       billed, the L2 recommendation, "more room", the recommendation in one
-      `sentence`, and that `provider` (`{id, name}`) for display; refused
+      `sentence`, each offer's `label` and `price` in `Management.Copy`'s
+      words, and that `provider` (`{id, name}`) for display; refused
       until the provider in use holds a token.
     * `start_create/2` (`create_server`, `create_in`, `replace_server`)
       starts a job, kind `home_provision`, that creates the firewall and the
@@ -113,6 +114,7 @@ defmodule FermixCore.Management.Provision do
   alias FermixCore.Home.Provision.Ledger
   alias FermixCore.Home.Provision.Registry
   alias FermixCore.Home.Role
+  alias FermixCore.Management.Copy
   alias FermixCore.Management.Jobs
   alias FermixCore.Management.Protocol
   alias FermixCore.Setup.ConfigStore
@@ -333,8 +335,17 @@ defmodule FermixCore.Management.Provision do
 
   defp offers(options, provider) do
     Map.merge(options, %{
+      "offers" => Enum.map(options["offers"], &worded(&1, options["currency"])),
       "sentence" => recommendation(options, provider),
       "provider" => %{"id" => provider.id(), "name" => provider.display().name}
+    })
+  end
+
+  # Each offer's size and price in the engine's words, drawn as sent.
+  defp worded(offer, currency) do
+    Map.merge(offer, %{
+      "label" => Copy.offer_label(offer),
+      "price" => Copy.offer_price(offer["total_monthly"], currency)
     })
   end
 
