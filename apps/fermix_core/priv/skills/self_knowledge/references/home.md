@@ -662,7 +662,8 @@ it, never a second writer.
     **Cancel** while it creates); ready (**Move now**, with the review's
     warnings, and that there is no way back to this Mac in this version,
     and **Delete your server** beside it for the server Fermix created, never
-    for one of the owner's own); the move undone (**Try again**);
+    for one of the owner's own); the move undone (**Try again**, and
+    **Delete your server** for the server Fermix created);
   - on the computer the move leaves: moving ("Waiting for your server to
     confirm the move. Fermix keeps trying." once it waits on the server);
     "Fermix runs on your server. Last backup 2 hours ago." once linked; no

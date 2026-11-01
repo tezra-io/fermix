@@ -731,6 +731,24 @@ defmodule FermixCore.Management.HomeSummaryTest do
                "Your server costs its monthly price until it is deleted."
     end
 
+    test "a move undone with the server Fermix created still held offers to delete it" do
+      summary = HomeSummary.summary(ready_facts(move: move("aborted")))
+
+      assert %{"state" => "undone", "action" => %{"id" => "try_again"}} = summary
+
+      assert [%{"id" => "delete_server", "label" => "Delete your server"}] =
+               summary["detail"]["alternatives"]
+
+      own =
+        facts(
+          candidates: [candidate()],
+          link: link(enrollment: manual(:used, @cand)),
+          move: move("aborted")
+        )
+
+      assert HomeSummary.summary(own)["detail"]["alternatives"] in [nil, []]
+    end
+
     test "no delete is offered for a server of the owner's own, nor while a move runs" do
       own = facts(candidates: [candidate()], link: link(enrollment: manual(:used, @cand)))
       assert HomeSummary.summary(own)["detail"]["alternatives"] in [nil, []]

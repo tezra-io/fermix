@@ -373,8 +373,11 @@ defmodule FermixCore.Management.HomeSummary do
     Enum.find_value(checks, & &1.(facts)) || off(facts)
   end
 
+  # A move undone while its server is still held: Try again, and, once the
+  # undo is over, the delete of a server Fermix created (`cleanup/2`).
   defp undone(%{move: %{"phase" => phase}} = facts) when phase in ["aborted", "undoing"] do
-    if target(facts), do: view("undone", sentence(:undone, facts), action(:try_again), %{})
+    if target(facts),
+      do: view("undone", sentence(:undone, facts), action(:try_again), %{}) |> cleanup(facts)
   end
 
   defp undone(_facts), do: nil

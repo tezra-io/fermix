@@ -1027,6 +1027,17 @@ defmodule FermixCore.Management.AlwaysOnTest do
       assert {:ok, %{server: nil, firewall: nil}} = Ledger.read(ctx.home, "nimbus")
     end
 
+    test "a server whose move was undone can be deleted", ctx do
+      first_move_ready!(ctx)
+      File.mkdir_p!(Move.dir(ctx.home))
+      :ok = Move.put_phase(ctx.home, "aborted", %{"candidate" => "fermix-general-a3f9"}, @at)
+      assert %{"state" => "undone"} = summary(ctx.opts)
+
+      assert {:ok, _answer} = press(ctx, "delete_server")
+      settle!(ctx)
+      assert {:ok, %{server: nil, firewall: nil}} = Ledger.read(ctx.home, "nimbus")
+    end
+
     test "a server whose review blocks the first move can be deleted", ctx do
       candidate_id = first_move_ready!(ctx)
       items = [%{id: "disk", status: :block, sentence: "Too full."}]

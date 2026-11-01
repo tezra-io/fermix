@@ -343,7 +343,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   showing it, so it never lands in a shell history.
 - **Always On never leaves you without a next step, and a server waiting
   for its move can always be deleted.** A server Fermix created that is
-  ready for the move, or whose review blocks it, offers Delete your server
+  ready for the move, whose review blocks it, or whose move was undone,
+  offers Delete your server
   beside Move now (during a replace, Delete your new server, never the one
   your home lives on), so a move you no longer want stops costing money
   from Always On itself; a server of your own is never offered for
