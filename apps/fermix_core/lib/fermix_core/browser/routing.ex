@@ -19,7 +19,8 @@ defmodule FermixCore.Browser.Routing do
   profile, which for the owner is one per device and shared by every owner
   conversation (one Chrome), and the conversation's own pane profile
   (`Scope.pane_key/2`). A pane task is bound to the turn that started it and
-  ends with it (`HostServer`), so the pane is never shared: it runs under the
+  ends with it, or with the conversation's next turn when it was handed to the
+  person (`HostServer`), so the pane is never shared: it runs under the
   conversation's pane key, and Chrome under the scope's key. A guest's two keys
   are one, its conversation's.
 

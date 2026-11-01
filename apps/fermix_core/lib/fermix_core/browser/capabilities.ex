@@ -23,6 +23,11 @@ defmodule FermixCore.Browser.Capabilities do
                "task already runs in Chrome), check that `backend` is `fermix_app`, and sign " <>
                "in there. Never ask the owner for the password instead."
 
+  @handover_pane_only "Handing a tab over is for the Fermix app's own browser, whose tabs " <>
+                        "close when your turn ends, and this page is in another browser, " <>
+                        "whose tabs stay open between your turns. Tell the person what to do " <>
+                        "there if they can see it, and find the tab with `tabs` next turn."
+
   @type capability ::
           :download_redirect
           | :target_discovery
@@ -35,6 +40,7 @@ defmodule FermixCore.Browser.Capabilities do
           | :downloads
           | :webmcp
           | :sign_in
+          | :handover
 
   @type t :: %{capability() => boolean()}
 
@@ -42,7 +48,10 @@ defmodule FermixCore.Browser.Capabilities do
   # oldest of them back to `max_tabs` after an `open`: the browser it launched,
   # never one somebody else started. `sign_in` is whether a login the owner
   # saved can be typed here: the logins live in the Fermix Mac app and only its
-  # own pane types them, so every Chrome answers false.
+  # own pane types them, so every Chrome answers false. `handover` is whether
+  # a task's tabs close when its turn ends, so keeping them open for the person
+  # is a step of its own: only the pane's do (`HostServer`); Chrome's stay open
+  # between turns.
   @managed %{
     download_redirect: true,
     target_discovery: true,
@@ -54,7 +63,8 @@ defmodule FermixCore.Browser.Capabilities do
     cookies: true,
     downloads: true,
     webmcp: true,
-    sign_in: false
+    sign_in: false,
+    handover: false
   }
 
   @attached_browser %{@managed | tab_cap: false}
@@ -70,7 +80,8 @@ defmodule FermixCore.Browser.Capabilities do
     cookies: false,
     downloads: false,
     webmcp: true,
-    sign_in: false
+    sign_in: false,
+    handover: false
   }
 
   # The Fermix app's own browser pane, driven over the app's local wire: the
@@ -95,7 +106,8 @@ defmodule FermixCore.Browser.Capabilities do
     cookies: true,
     downloads: false,
     webmcp: false,
-    sign_in: true
+    sign_in: true,
+    handover: true
   }
 
   @doc """
@@ -124,11 +136,16 @@ defmodule FermixCore.Browser.Capabilities do
   granted tab to do something browser-wide, or the app's pane for something its
   wire does not carry — and one sentence per capability, because the next move
   is not. A sign-in is refused alike in every mode that cannot do it, because
-  its one next move is the same everywhere: the app's own pane.
+  its one next move is the same everywhere: the app's own pane; so is a
+  handover, whose tabs already stay open everywhere else.
   """
   @spec refuse(atom(), capability()) :: {:error, Error.t()}
   def refuse(mode, :sign_in) when is_atom(mode) and mode != :fermix_app do
     {:error, Error.new("sign_in_pane_only", @pane_only)}
+  end
+
+  def refuse(mode, :handover) when is_atom(mode) and mode != :fermix_app do
+    {:error, Error.new("handover_pane_only", @handover_pane_only)}
   end
 
   def refuse(:attached_tab, capability) when is_atom(capability) do

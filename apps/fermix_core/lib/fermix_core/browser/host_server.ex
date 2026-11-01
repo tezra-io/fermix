@@ -25,6 +25,19 @@ defmodule FermixCore.Browser.HostServer do
     included, the task ends and the profile stops, so the next browser use is
     decided afresh.
 
+  ## Handing the tabs to the person
+
+  One exception keeps a task past its caller: a turn that handed its tabs to
+  the person (`handover/3`: a verification code, a captcha, a step only they
+  can take) and then finished. The task stays, with its tabs open in the pane
+  and no caller, until the conversation's next browser call takes it over
+  (`take_over/2`); from there it is bound to that turn and ends with it as any
+  task does, unless that turn hands it over again. A waiting task also ends
+  when the person closes its tab (`task.cancel`), when the pane goes away, and
+  when the profile has been idle for `idle_profile_ttl_ms` (`ProfileServer`),
+  so a tab nobody comes back to is closed. A turn that was cancelled or
+  crashed after a handover ends its task at once.
+
   A task ends by telling the connection so (`Link.release/2`), which writes the
   task's `task.release` behind every request the task sent: both leave this
   one process in order, so a release can never overtake a queued `tab.open`,
@@ -136,7 +149,7 @@ defmodule FermixCore.Browser.HostServer do
   def stop(%{task: task} = state) do
     :ok = Link.release(task.connection, task.id)
     Process.demonitor(task.connection_ref, [:flush])
-    Process.demonitor(task.caller_ref, [:flush])
+    demonitor_caller(task.caller_ref)
 
     trace(task.agent, "browser_host_task_end", state, %{
       "task_id" => task.id,
@@ -157,11 +170,16 @@ defmodule FermixCore.Browser.HostServer do
   defp lost?(%{lost: nil}), do: false
   defp lost?(_state), do: true
 
-  # The caller ended (its turn finished or was cancelled): the task ends with
-  # it, and so does the profile.
+  # A task waiting for its next turn has no caller to let go of.
+  defp demonitor_caller(nil), do: true
+  defp demonitor_caller(ref), do: Process.demonitor(ref, [:flush])
+
+  # The caller ended (its turn finished, was cancelled or crashed): the task
+  # ends with it, and so does the profile, unless the turn finished after
+  # handing the tabs to the person (`caller_ended/2`).
   @impl true
-  def handle_message({:DOWN, ref, :process, _pid, _reason}, %{task: %{caller_ref: ref}} = state),
-    do: {:stop, stop(state)}
+  def handle_message({:DOWN, ref, :process, _pid, reason}, %{task: %{caller_ref: ref}} = state),
+    do: caller_ended(reason, state)
 
   def handle_message(
         {:DOWN, ref, :process, _pid, _reason},
@@ -191,6 +209,15 @@ defmodule FermixCore.Browser.HostServer do
   # A server traps exits, and a late answer to a request that timed out lands
   # here: both are dropped.
   def handle_message(_message, state), do: state
+
+  # Only a turn that finished normally keeps a task it handed over: one that
+  # was cancelled or crashed ends it, as a turn with no handover always does.
+  defp caller_ended(:normal, %{task: %{held: true} = task} = state) do
+    trace(task.agent, "browser_host_task_handed_over", state, %{"task_id" => task.id})
+    %{state | task: %{task | caller: nil, caller_ref: nil, held: false}}
+  end
+
+  defp caller_ended(_reason, state), do: {:stop, stop(state)}
 
   defp lost_between_requests(state, reason) do
     {:reap, _error, state} = lose(state, reason)
@@ -279,15 +306,31 @@ defmodule FermixCore.Browser.HostServer do
 
   @impl true
   def focus(args, context, state) do
+    operate(context, state, &focus_tab(args["target"], &1))
+  end
+
+  # The person is to finish something in the tab (`target`, else the one last
+  # used): it comes to the front, and the task is kept past this turn when the
+  # turn finishes (`caller_ended/2`).
+  @impl true
+  def handover(args, context, state) do
     operate(context, state, fn state ->
-      with {:ok, tab} <- resolve_tab(args["target"], state),
-           {:ok, result, state} <-
-             request(state, "tab.focus", %{"tab_id" => tab.wire}, action_timeout(state)) do
-        state = %{put_page(state, tab.id, result) | active: tab.id}
-        {row, state} = tab_row(state.tabs[tab.id], state)
-        {:ok, row, state}
+      with {:ok, row, state} <- focus_tab(args["target"], state) do
+        trace(state.task.agent, "browser_host_task_handover", state, %{"task_id" => state.task.id})
+
+        {:ok, Map.put(row, "handed_over", true), %{state | task: %{state.task | held: true}}}
       end
     end)
+  end
+
+  defp focus_tab(target, state) do
+    with {:ok, tab} <- resolve_tab(target, state),
+         {:ok, result, state} <-
+           request(state, "tab.focus", %{"tab_id" => tab.wire}, action_timeout(state)) do
+      state = %{put_page(state, tab.id, result) | active: tab.id}
+      {row, state} = tab_row(state.tabs[tab.id], state)
+      {:ok, row, state}
+    end
   end
 
   @impl true
@@ -453,6 +496,7 @@ defmodule FermixCore.Browser.HostServer do
 
   defp ensure_task(_context, %{lost: %Error{} = error} = state), do: {:reap, error, state}
   defp ensure_task(context, %{task: nil} = state), do: bind(context, state)
+  defp ensure_task(context, %{task: %{caller: nil}} = state), do: take_over(context, state)
   defp ensure_task(_context, state), do: check_host(state)
 
   defp bind(context, state) do
@@ -468,7 +512,8 @@ defmodule FermixCore.Browser.HostServer do
         protocol_version: host.protocol_version,
         connection_ref: Process.monitor(host.connection),
         caller: caller,
-        caller_ref: Process.monitor(caller)
+        caller_ref: Process.monitor(caller),
+        held: false
       }
 
       trace(task.agent, "browser_host_task_start", state, %{
@@ -482,6 +527,16 @@ defmodule FermixCore.Browser.HostServer do
       :ok = TurnMarker.mark(state.turn_marker, state.owner_key, caller, error)
       {:reap, error, %{state | lost: error}}
     end
+  end
+
+  # The conversation's next turn takes over the task its last turn handed to
+  # the person: the same tabs and refs, bound now to this turn, which ends it
+  # as any turn does.
+  defp take_over(context, %{task: task} = state) do
+    caller = Map.fetch!(context, :caller)
+    task = %{task | caller: caller, caller_ref: Process.monitor(caller)}
+    trace(task.agent, "browser_host_task_taken_over", state, %{"task_id" => task.id})
+    check_host(%{state | task: task})
   end
 
   # The task runs on the connection it was bound to, while that host's last
@@ -505,9 +560,15 @@ defmodule FermixCore.Browser.HostServer do
   # tabs on a connection that is up; one that is gone took them with it.
   defp lose(state, reason) do
     error = lost_error(reason)
-    :ok = TurnMarker.mark(state.turn_marker, state.owner_key, state.task.caller, error)
+    :ok = mark_turn(state, error)
     {:reap, error, %{state | lost: error}}
   end
+
+  # A task waiting for its next turn has no turn to mark.
+  defp mark_turn(%{task: %{caller: nil}}, _error), do: :ok
+
+  defp mark_turn(state, error),
+    do: TurnMarker.mark(state.turn_marker, state.owner_key, state.task.caller, error)
 
   defp lost_error(reason) do
     reason = reason |> String.slice(0, @reason_chars) |> String.trim_trailing(".")
@@ -518,7 +579,7 @@ defmodule FermixCore.Browser.HostServer do
   # sentence is the daemon's own, not the app's reason.
   defp lose_cancelled(state) do
     error = Error.new("cancelled", @cancelled_sentence)
-    :ok = TurnMarker.mark(state.turn_marker, state.owner_key, state.task.caller, error)
+    :ok = mark_turn(state, error)
     {:reap, error, %{state | lost: error}}
   end
 

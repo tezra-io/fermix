@@ -333,7 +333,8 @@ defmodule FermixCore.Browser.AttachedTabTest do
     target_discovery: :not_an_action,
     target_attach: :not_an_action,
     tab_cap: :not_an_action,
-    sign_in: {"login_for", %{"site" => "example.com"}}
+    sign_in: {"login_for", %{"site" => "example.com"}},
+    handover: {"handover", %{}}
   }
 
   test "every browser-wide capability the grant lacks refuses by name", ctx do
@@ -359,6 +360,13 @@ defmodule FermixCore.Browser.AttachedTabTest do
   defp assert_capability_refusal(pid, {action, args}, :sign_in) do
     assert {:error, %Error{code: "sign_in_pane_only", message: message}} = req(pid, action, args)
     assert message =~ "only in the Fermix app's own browser"
+  end
+
+  # Only the pane's tabs close with the turn, so every other browser refuses a
+  # handover with the same next move.
+  defp assert_capability_refusal(pid, {action, args}, :handover) do
+    assert {:error, %Error{code: "handover_pane_only", message: message}} = req(pid, action, args)
+    assert message =~ "stay open between your turns"
   end
 
   defp assert_capability_refusal(pid, {action, args}, capability) do
@@ -389,6 +397,7 @@ defmodule FermixCore.Browser.AttachedTabTest do
       "a navigation — the destination is refused first; the page it hands back goes through " <>
         "the gate in its own test below",
     "focus" => "refused as a browser-wide capability",
+    "handover" => "refused as a browser-wide capability",
     "close" => "refused as a browser-wide capability",
     "dialog" => "answers or lists a JS dialog; needed to unblock a stuck page",
     "cookies" => "refused as a browser-wide capability",

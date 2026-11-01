@@ -14,7 +14,7 @@ defmodule FermixCore.Browser do
   alias FermixCore.Temporal.Access
 
   @actions ~w(doctor status start stop open navigate snapshot tabs focus close screenshot act pdf
-              console dialog cookies storage upload download webmcp)
+              console dialog cookies storage upload download webmcp handover)
   @profile_actions @actions -- ["doctor", "status"]
   # The `act` kinds — page interactions, reachable only as `act`'s `kind`. Listed
   # here so an unknown action that IS one can say so (see `action/1`); the kinds
@@ -26,7 +26,7 @@ defmodule FermixCore.Browser do
   # lives here, beside `@actions`, because this is where the action vocabulary
   # is. `cookies`, `storage` and `webmcp` each read by default and write in one
   # form, so they are decided from their arguments in `mutating?/2`.
-  @mutating_actions ~w(open navigate act close upload download dialog focus)
+  @mutating_actions ~w(open navigate act close upload download dialog focus handover)
   @mutating_act_kinds @act_kinds -- ["get", "wait"]
   # The `act` kinds that fill a form and can send it in the same call
   # (`submit: true`, composed in `run/5`).
@@ -87,6 +87,7 @@ defmodule FermixCore.Browser do
          {:ok, affinity} <- Scope.tab_affinity(context),
          {:ok, profile, profile_name} <- Config.profile(config, Map.get(args, "profile")),
          :ok <- allowed_turn(profile, context),
+         :ok <- allowed_handover(action, context),
          :ok <- validate_args(action, args) do
       # The profile is shared; the tab a call without `target` acts on is its
       # conversation's own (`Scope.tab_affinity/1`, read by the backend), and
@@ -132,6 +133,24 @@ defmodule FermixCore.Browser do
   end
 
   defp allowed_turn(_profile, _context), do: :ok
+
+  # A tab is kept open for the person only when they are there to finish in it:
+  # on any other turn nobody would, and the tab would wait out the profile's
+  # idle period for nothing.
+  defp allowed_handover("handover", context) do
+    if Access.attended_operator_turn?(context),
+      do: :ok,
+      else:
+        {:error,
+         Error.new(
+           "handover_not_allowed",
+           "A tab is handed to the person only on a turn they are present for. Guest, " <>
+             "scheduled, background, delegated and coding-continuation runs end their tabs " <>
+             "with the turn: say in your reply what the person needs to do."
+         )}
+  end
+
+  defp allowed_handover(_action, _context), do: :ok
 
   defp dispatch("doctor", _args, _context, _keys, _profile_name, _profile, config) do
     {{:ok, encode(%{"ok" => true, "chrome" => chrome_diagnostics(config)})}, nil}

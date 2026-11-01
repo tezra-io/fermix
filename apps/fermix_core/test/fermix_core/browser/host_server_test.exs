@@ -490,4 +490,181 @@ defmodule FermixCore.Browser.HostServerTest do
     assert {:error, %Error{code: "host_lost", message: message}} = req(pid, "start")
     assert message =~ "nothing in this engine serves it"
   end
+
+  # ── a task handed to the person ──────────────────────────────────────────
+
+  @verify "https://example.com/verify"
+
+  defp handover_host do
+    usable_host(%{
+      "tab.open" => {:ok, %{"tab_id" => "t1", "url" => @verify, "title" => "Verify"}},
+      "tab.focus" => {:ok, %{"tab_id" => "t1", "url" => @verify, "title" => "Verify"}},
+      "tab.list" =>
+        {:ok, %{"tabs" => [%{"tab_id" => "t1", "url" => @verify, "title" => "Verify"}]}}
+    })
+  end
+
+  # A turn of its own, so the test can end it the way a turn ends: by
+  # returning (`finish/1`), or shut down as a cancelled turn is.
+  defp start_turn, do: spawn(&turn_loop/0)
+
+  defp turn_loop do
+    receive do
+      {:call, from, pid, action, args} ->
+        send(from, {:turn_answer, req(pid, action, args)})
+        turn_loop()
+
+      :finish ->
+        :ok
+    end
+  end
+
+  defp in_turn(turn, pid, action, args \\ %{}) do
+    send(turn, {:call, self(), pid, action, args})
+    assert_receive {:turn_answer, answer}, 5_000
+    answer
+  end
+
+  defp finish(turn) do
+    ref = Process.monitor(turn)
+    send(turn, :finish)
+    assert_receive {:DOWN, ^ref, :process, ^turn, :normal}
+  end
+
+  defp open_and_hand_over(turn, pid) do
+    assert {:ok, _} = in_turn(turn, pid, "open", %{"url" => @verify, "observe" => false})
+    assert {:ok, %{"handed_over" => true, "id" => "h1:t1"}} = in_turn(turn, pid, "handover")
+  end
+
+  test "a turn that hands nothing over still ends its task with it" do
+    {host, connection} = handover_host()
+    pid = start_server(host_availability: host)
+    ref = Process.monitor(pid)
+    turn = start_turn()
+
+    assert {:ok, _} = in_turn(turn, pid, "open", %{"url" => @verify, "observe" => false})
+    finish(turn)
+
+    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}
+    assert [_released] = FakeBrowserHostConnection.releases(connection)
+  end
+
+  test "a handed-over task outlives its turn, and the next turn carries on in it and ends it" do
+    {host, connection} = handover_host()
+    pid = start_server(host_availability: host)
+    ref = Process.monitor(pid)
+    first = start_turn()
+
+    open_and_hand_over(first, pid)
+    assert {"tab.focus", %{"tab_id" => "t1"}} in FakeBrowserHostConnection.requests(connection)
+    finish(first)
+
+    assert {:ok, %{"running" => true, "tabs" => 1}} = req(pid, "status")
+    assert FakeBrowserHostConnection.releases(connection) == []
+
+    second = start_turn()
+    assert {:ok, %{"tabs" => [%{"id" => "h1:t1"}]}} = in_turn(second, pid, "tabs")
+    finish(second)
+
+    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}
+    assert [released] = FakeBrowserHostConnection.releases(connection)
+
+    opened =
+      for {"tab.open", %{"task_id" => id}} <- FakeBrowserHostConnection.requests(connection),
+          do: id
+
+    assert opened == [released]
+  end
+
+  test "a turn cancelled after a handover ends its task at once" do
+    {host, connection} = handover_host()
+    pid = start_server(host_availability: host)
+    ref = Process.monitor(pid)
+    turn = start_turn()
+
+    open_and_hand_over(turn, pid)
+    Process.exit(turn, :shutdown)
+
+    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}
+    assert [_released] = FakeBrowserHostConnection.releases(connection)
+  end
+
+  test "a handed-over task nobody comes back to ends with the profile's idle period" do
+    {:ok, config} = Config.current(%{})
+    {host, connection} = handover_host()
+    pid = start_server(host_availability: host, config: %{config | idle_profile_ttl_ms: 200})
+    ref = Process.monitor(pid)
+    turn = start_turn()
+
+    open_and_hand_over(turn, pid)
+    finish(turn)
+    assert {:ok, %{"running" => true}} = req(pid, "status")
+
+    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+    assert [_released] = FakeBrowserHostConnection.releases(connection)
+  end
+
+  test "the person closing a handed-over tab ends the waiting task, with no turn to mark" do
+    {host, connection} = handover_host()
+    pid = start_server(host_availability: host)
+    ref = Process.monitor(pid)
+    turn = start_turn()
+
+    open_and_hand_over(turn, pid)
+    finish(turn)
+    :ok = Link.cancelled(pid, connection, "cancelled by the person")
+
+    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}
+    assert [_released] = FakeBrowserHostConnection.releases(connection)
+    assert TurnMarker.lookup("owner-pane", turn) == nil
+  end
+
+  test "a pane that goes away while a handed-over task waits reaps it" do
+    {host, connection} = handover_host()
+    pid = start_server(host_availability: host)
+    ref = Process.monitor(pid)
+    turn = start_turn()
+
+    open_and_hand_over(turn, pid)
+    finish(turn)
+    Process.exit(connection, :kill)
+
+    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}
+  end
+
+  test "a handover with no tab open is refused, and nothing is kept" do
+    {host, connection} = handover_host()
+    pid = start_server(host_availability: host)
+
+    assert {:error, %Error{code: "no_tab"}} = req(pid, "handover")
+
+    refute Enum.any?(
+             FakeBrowserHostConnection.requests(connection),
+             &match?({"tab.focus", _}, &1)
+           )
+  end
+
+  test "a browser whose tabs stay open between turns refuses a handover before it is asked" do
+    pid = start_server(backend: UpBackend, test_pid: self(), profile: %{@pane | mode: :managed})
+
+    assert {:error, %Error{code: "handover_pane_only", message: message}} = req(pid, "handover")
+    refute_received {:backend_asked, _op}
+    assert message =~ "`tabs`"
+  end
+
+  test "a handover is refused on every turn the person is not present for" do
+    base = %{agent_name: "main", conversation_key: {"cli", "1", :root}}
+    attended = Map.merge(base, %{source_trust: :operator, computer_use_origin: :interactive})
+
+    for context <- [
+          Map.merge(base, %{source_trust: :guest, computer_use_origin: :interactive}),
+          Map.merge(base, %{source_trust: :operator}),
+          Map.merge(base, %{source_trust: :operator, computer_use_origin: :unattended}),
+          Map.put(attended, :subagent_depth, 1),
+          Map.put(attended, :harness_continuation_depth, 1)
+        ] do
+      assert {{:error, %Error{code: "handover_not_allowed"}}, nil} =
+               FermixCore.Browser.execute(%{"action" => "handover"}, context)
+    end
+  end
 end

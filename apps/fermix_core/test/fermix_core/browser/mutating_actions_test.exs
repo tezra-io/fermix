@@ -23,6 +23,7 @@ defmodule FermixCore.Browser.MutatingActionsTest do
     "navigate" => {true, %{"url" => "https://example.com"}},
     "close" => {true, %{}},
     "focus" => {true, %{}},
+    "handover" => {true, %{}},
     "dialog" => {true, %{"decision" => "accept"}},
     "upload" => {true, %{"ref" => "file_1", "path" => "/w/a.csv"}},
     "download" => {true, %{}}

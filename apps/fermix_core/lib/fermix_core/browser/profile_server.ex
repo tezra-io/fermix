@@ -59,7 +59,8 @@ defmodule FermixCore.Browser.ProfileServer do
     "act" => :act,
     "webmcp" => :webmcp,
     "login_for" => :login_for,
-    "sign_in" => :sign_in
+    "sign_in" => :sign_in,
+    "handover" => :handover
   }
 
   # The two halves of a sign-in (`Browser.SignIn`). Not tool actions: only
@@ -207,6 +208,12 @@ defmodule FermixCore.Browser.ProfileServer do
   defp run_request(%{action: action}, %{caps: %{sign_in: false}} = state)
        when action in @sign_in_operations do
     {Capabilities.refuse(state.mode, :sign_in), state}
+  end
+
+  # A browser whose tabs stay open between turns has nothing to hand over, so
+  # it is refused before that browser is started or asked.
+  defp run_request(%{action: "handover"}, %{caps: %{handover: false}} = state) do
+    {Capabilities.refuse(state.mode, :handover), state}
   end
 
   defp run_request(%{action: action} = request, state) when is_map_key(@gated, action) do

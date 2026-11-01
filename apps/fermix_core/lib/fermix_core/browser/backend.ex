@@ -146,9 +146,17 @@ defmodule FermixCore.Browser.Backend do
   """
   @callback sign_in(args(), context(), state()) :: result()
 
+  @doc """
+  Bring a tab (`target`, else the one last used) to the front for the person
+  and keep the task's tabs open past the end of this turn, for the
+  conversation's next turn to carry on in.
+  """
+  @callback handover(args(), context(), state()) :: result()
+
   # Only a backend whose mode signs in (`Capabilities`, `:sign_in`) answers
-  # these; `ProfileServer` refuses them for every other mode before it asks.
-  @optional_callbacks login_for: 3, sign_in: 3
+  # the first two, and only one whose tabs close with the turn (`:handover`)
+  # the third; `ProfileServer` refuses each for every other mode before it asks.
+  @optional_callbacks login_for: 3, sign_in: 3, handover: 3
 
   @doc "The backend that implements a profile mode."
   @spec for_mode(atom()) :: module()

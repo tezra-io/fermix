@@ -60,6 +60,12 @@ Use `browser` for JavaScript-capable pages. Choose the right web tool once, read
 - `sign_in_denied`: the owner said no. Stop; do not retry or sign in another way. `sign_in_unanswered`: no answer in time; tell the owner, and ask again only once they are back. `sign_in_not_delivered`, `sign_in_not_allowed` and `sign_in_not_on_voice`: the request has to come from the owner's own chat or the Fermix app.
 - `sign_in_wrong_site`, `sign_in_page_moved` and `sign_in_field`: snapshot again, read the address's host, and use the form's own fields. `sign_in_insecure_page`: the page is not `https`, so nothing is typed. `sign_in_app_too_old` and `sign_in_store_unavailable`: tell the owner (update the app; the keychain's own words). `secret_on_screen`: a filled password shows on the page, so it is not captured.
 
+## Handing A Tab To The Person
+
+- A tab in the Fermix app's pane (`backend` `fermix_app`) closes when your turn ends. When the person must do a step in it themselves (a verification code sent to their phone or email, a captcha, a passkey), call `handover` (on `target`, else the tab you last used) as your last browser call, then reply saying what to do there. The tab comes to the front and stays open for them, and your next turn in this chat carries on in it: run `tabs`, then `snapshot` (the page has moved on, so earlier refs are stale). Never reopen the page instead: a new tab loses the step they were on.
+- Only hand over a task that is not finished. A finished task's tabs close with its turn, as they should, and a handed-over tab you do not come back to closes when the person closes it or after the browser's idle period.
+- `handover_pane_only`: the page is in another browser, whose tabs already stay open between turns. `handover_not_allowed`: this turn is not one the person is present for, so say in your reply what they need to do.
+
 ## The Person's Own Tab
 
 - The default profile is Fermix's OWN managed browser. `profile: "selected_tab"` is instead ONE tab of the person's own browser, signed in as them, which they hand over by clicking the Fermix browser extension on it. Use it only when they ask about the tab they have open; for a new web task the managed profile is simpler and borrows nothing.
