@@ -211,8 +211,9 @@ Golden: `home_mark_moved/ok.json`.
 
 ## The home result
 
-`fermix home status --json` answers with the record the management method
-`home.status` answers (`priv/management/PROTOCOL.md`), whether or not Fermix
+`fermix home status --json` (in a build with Always On; a release build
+refuses `always_on_unavailable`, *Always On* below) answers with the record
+the management method `home.status` answers (`priv/management/PROTOCOL.md`), whether or not Fermix
 runs: from the engine over its control socket when it runs, and from the
 home's own files when it does not (the role its settings configure, a device
 when it carries the moved marker, the epoch, the marker, the snapshot section
@@ -359,8 +360,10 @@ and `step_unfinished` ("Always On is still at it after 45 minutes; fermix
 always-on shows where it stands."). Golden: `always_on/changed.json`.
 
 In a build without Always On (a release build, until it ships), every use of
-`fermix always-on` refuses `always_on_unavailable`, exit `1` ("Always On is
-not in this release of Fermix yet."), before anything is read or sent.
+`fermix always-on`, and `fermix home status` (Always On's screen, *The home
+result*), refuses `always_on_unavailable`, exit `1` ("Always On is not in
+this release of Fermix yet."), before anything is read or sent; `fermix home
+snapshots` is as ever.
 
 `unconfirmed` (a linked desktop's Move now that the server had, whose answer
 was lost) is not a refusal: the move may have started. The verb prints the

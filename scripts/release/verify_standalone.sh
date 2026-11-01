@@ -561,21 +561,23 @@ grep -Fq "\"$home_dst/workspace\"" "$home_dst/config.toml" 2>/dev/null ||
   fail "fermix home import did not move the setting that named the old home to the new one"
 [ ! -e "$home_dst/moved.json" ] || fail "fermix home import marked the restored home moved"
 
-# `fermix home status --json` with no daemon answers from the home's own
-# files: the role its settings configure and its primary epoch, through the
-# packaged binary's tree-less path.
+# `fermix home status` is Always On's screen, and a release build has no
+# Always On yet (`FermixCore.Home.AlwaysOnRelease`), so it refuses as
+# `fermix always-on` does, before reading anything: exit 1 and exactly the
+# `always_on_unavailable` envelope. An artifact that answers the home's
+# facts instead carries Always On. When Always On ships, the gate goes and
+# this stage reads the role and the epoch from the home's files again.
 status_out="$runtime_root/home-status.out"
 status_err="$runtime_root/home-status.err"
 home_status=0
 env -u FERMIX_OPIK_ENABLED HOME="$home" FERMIX_HOME="$home_src" \
   "$artifact" home status --json < /dev/null > "$status_out" 2> "$status_err" || home_status=$?
 printf '%s\n' "$(cat "$status_err")"
-[ "$home_status" -eq 0 ] ||
-  fail "fermix home status must exit 0 with no daemon, got $home_status: $(cat "$status_out")"
-grep -Fq '"role":"primary"' "$status_out" ||
-  fail "fermix home status did not read the role from the home: $(cat "$status_out")"
-grep -Fq '"epoch":5' "$status_out" ||
-  fail "fermix home status did not read the home's primary epoch: $(cat "$status_out")"
+[ "$home_status" -eq 1 ] ||
+  fail "fermix home status in a release must exit 1, got $home_status: $(cat "$status_out")"
+status_expected='{"error":{"code":"always_on_unavailable","sentence":"Always On is not in this release of Fermix yet."},"ok":false,"schema_version":1}'
+[ "$(cat "$status_out")" = "$status_expected" ] ||
+  fail "fermix home status --json in a release must print exactly the always_on_unavailable envelope on stdout, got: $(cat "$status_out")"
 
 moved_out="$runtime_root/home-moved.out"
 moved_err="$runtime_root/home-moved.err"

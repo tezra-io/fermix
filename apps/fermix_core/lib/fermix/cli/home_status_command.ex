@@ -14,7 +14,10 @@ defmodule Fermix.CLI.HomeStatusCommand do
   the same projection the engine answers with (`Management.Home`). It prints
   the summary first (M75 lean v1 §7): its sentence, and its one action with
   where to take it: `fermix always-on`, or the Fermix app on a home the app
-  manages (`HomeOwner.app_managed?/1`; Always On setup §8.2). `passphrase` needs
+  manages (`HomeOwner.app_managed?/1`; Always On setup §8.2). In a build
+  without Always On (`Home.AlwaysOnRelease`) `status`, Always On's screen,
+  refuses `always_on_unavailable` as `fermix always-on` does, before it reads
+  anything; the snapshots verbs are as ever. `passphrase` needs
   the engine: the recovery key is saved through the running settings path.
   With the engine stopped it refuses with `engine_stopped`.
 
@@ -31,6 +34,7 @@ defmodule Fermix.CLI.HomeStatusCommand do
   alias Fermix.CLI.HomeOwner
   alias Fermix.CLI.MachineOutput
   alias Fermix.CLI.SecretInput
+  alias FermixCore.Home.AlwaysOnRelease
   alias FermixCore.Home.Role
   alias FermixCore.Management.Home
   alias FermixCore.Setup.ConfigStore
@@ -50,11 +54,16 @@ defmodule Fermix.CLI.HomeStatusCommand do
   Runs `fermix home status ARGS`. `deps`: `:home`, `:client` (a 3-arity
   management call, as `Client.request_v1/3`), `:terminal`, `:app_managed?`
   (a 0-arity check, asked only when the human output names where the next
-  step is taken).
+  step is taken), `:always_on` (what the build compiles in,
+  `Home.AlwaysOnRelease.available?/0`).
   """
   @spec status([String.t()], keyword()) :: non_neg_integer()
   def status(argv, deps \\ []) when is_list(argv) and is_list(deps) do
-    with_json(argv, fn json? -> read(json?, deps, "home.status", &status_lines(&1, deps)) end)
+    with_json(argv, fn json? ->
+      if Keyword.get_lazy(deps, :always_on, &AlwaysOnRelease.available?/0),
+        do: read(json?, deps, "home.status", &status_lines(&1, deps)),
+        else: refuse(json?, :always_on_unavailable, [])
+    end)
   end
 
   @doc "Runs `fermix home snapshots ARGS`, with the dependencies `status/2` takes."

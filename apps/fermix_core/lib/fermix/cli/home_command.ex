@@ -79,7 +79,8 @@ defmodule Fermix.CLI.HomeCommand do
     end
   end
 
-  defp status_deps(deps), do: Keyword.take(deps, [:home, :client, :terminal, :app_managed?])
+  defp status_deps(deps),
+    do: Keyword.take(deps, [:home, :client, :terminal, :app_managed?, :always_on])
 
   defp move_deps(deps), do: Keyword.take(deps, [:home, :client, :now])
 

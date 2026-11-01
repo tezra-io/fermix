@@ -137,7 +137,8 @@ writes that marker right after the archive is sealed, so a service that
 relaunches the engine between two commands cannot start the old home as the
 primary. \fBstatus\fR shows the home's role, primary epoch, moved marker and
 snapshots, from the running engine or, when it is stopped, from the home's own
-files. A primary writes encrypted snapshots of itself to S3 on a cadence once
+files; a release build has no Always On yet, whose screen it is, so there it
+says "Always On is not in this release of Fermix yet." and exits 1. A primary writes encrypted snapshots of itself to S3 on a cadence once
 a recovery passphrase is set with \fBsnapshots passphrase\fR; Fermix keeps
 only the key derived from it, never the passphrase. \fBsnapshots status\fR
 shows the last stored one. \fBimport\fR

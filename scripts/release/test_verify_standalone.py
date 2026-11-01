@@ -500,13 +500,27 @@ class VerifyStandaloneTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("fermix home mark-moved wrote no marker", result.stderr)
 
-    def test_rejects_a_home_status_that_does_not_read_the_epoch(self):
-        self._write_artifact(create_disclaim=True, home="status_blind")
+    # A release build has no Always On yet, and home status is its screen:
+    # the verb refuses as fermix always-on does. One that answers the home's
+    # facts instead has Always On compiled in.
+    def test_rejects_a_release_whose_home_status_answers(self):
+        self._write_artifact(create_disclaim=True, home="status_answers")
 
         result = self._run("macos_aarch64")
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("fermix home status did not read the home's primary epoch", result.stderr)
+        self.assertIn("fermix home status in a release must exit 1, got 0", result.stderr)
+
+    def test_rejects_a_home_status_that_refuses_with_another_code(self):
+        self._write_artifact(create_disclaim=True, home="status_other_refusal")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "fermix home status --json in a release must print exactly the always_on_unavailable envelope",
+            result.stderr,
+        )
 
     # The class the enroll stage exists for: the packaged binary taking a code
     # file that holds no enrollment code and making the home a candidate anyway.
@@ -1228,14 +1242,30 @@ class VerifyStandaloneTest(unittest.TestCase):
             '  printf \'{"ok":true,"result":{"epoch":5}}\\n\'\n'
             "  exit 0\n"
         )
+        refusal = (
+            '    printf \'{"error":{"code":"always_on_unavailable","sentence":"Always On is not in '
+            'this release of Fermix yet."},"ok":false,"schema_version":1}\\n\'\n'
+        )
+        answers = (
+            '    epoch="$(cat "$FERMIX_HOME/mobile/primary_epoch")"\n'
+            '    printf \'{"ok":true,"result":{"role":"primary","epoch":%s}}\\n\' "$epoch"\n'
+            "    exit 0\n"
+        )
+        other = (
+            '    printf \'{"error":{"code":"home_status_unavailable","sentence":"Fermix could not '
+            'read this home\'"\'"\'s status."},"ok":false,"schema_version":1}\\n\'\n'
+        )
+        if home == "status_answers":
+            status_body = answers
+        elif home == "status_other_refusal":
+            status_body = other + "    exit 1\n"
+        else:
+            status_body = refusal + "    exit 1\n"
         status = (
             '  if [ "$2" = "status" ]; then\n'
             '    [ "$3" = "--json" ] || exit 64\n'
-            '    epoch="$(cat "$FERMIX_HOME/mobile/primary_epoch")"\n'
-            + ("    epoch=null\n" if home == "status_blind" else "")
-            + '    printf \'{"ok":true,"result":{"role":"primary","epoch":%s}}\\n\' "$epoch"\n'
-            "    exit 0\n"
-            "  fi\n"
+            + status_body
+            + "  fi\n"
         )
         if home == "marks_twice":
             marked = (
@@ -1248,7 +1278,8 @@ class VerifyStandaloneTest(unittest.TestCase):
             "carries",
             "marks_twice",
             "not_moved",
-            "status_blind",
+            "status_answers",
+            "status_other_refusal",
             "enroll_accepts",
             "enroll_leaves_home",
             "enroll_consumes",

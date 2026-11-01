@@ -150,8 +150,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   connection, and an event it could not take in is left for Slack to send
   again. The webhook stays the default.
 - **Always On: Fermix can move to a server you control.** Not in this
-  release yet: in a release build `fermix always-on` says "Always On is not
-  in this release of Fermix yet.", the setup page and the Fermix app show no
+  release yet: in a release build `fermix always-on` and `fermix home status`
+  say "Always On is not in this release of Fermix yet.", the setup page and
+  the Fermix app show no
   Always On, and it stays so until moving back to this computer is possible.
   Your home (its
   settings, memory, secrets, skills and workspace) can now move from your

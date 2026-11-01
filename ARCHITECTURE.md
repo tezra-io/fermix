@@ -732,7 +732,7 @@ family's) tells it `:ledger`.
 `Home.AlwaysOnRelease` keeps Always On out of a release build until it
 ships: compiled for `:prod`, `hello` lists none of its methods and the router
 refuses them by name, the setup page lists no Always On tab, and `fermix
-always-on` refuses in one sentence; decided from
+always-on` and `fermix home status` refuse in one sentence; decided from
 `Mix.env/0` at compile time, with no setting, and removed by deleting that
 module and its callers.
 
