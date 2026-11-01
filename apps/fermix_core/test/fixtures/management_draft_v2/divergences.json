@@ -2917,6 +2917,18 @@
       "why": "M75 lean v1: home.provision.power takes on or reset. The draft predates the provisioner."
     },
     {
+      "method": "home.status",
+      "field": "params:after",
+      "kind": "engine_only",
+      "why": "Always On setup 3.3: home.status takes after, a summary.key, with wait_ms, and is answered once the summary's key is not after, held by the Always On watch, so a surface follows a step without polling. The draft predates the summary; a request with no params is answered at once as before."
+    },
+    {
+      "method": "home.status",
+      "field": "params:wait_ms",
+      "kind": "engine_only",
+      "why": "Always On setup 3.3: home.status takes wait_ms, at most 25000, with after: how long the daemon holds the request for the summary's key to move. The draft predates the summary; a request with no params is answered at once as before."
+    },
+    {
       "method": "job.get",
       "field": "result.location",
       "kind": "engine_only",
