@@ -8,7 +8,8 @@ defmodule FermixCore.Cues.Overview do
 
   Nothing here carries cue text: a watcher is its ids, switches and counts, and
   a source is Fermix's own status columns. Watchers are made in chat (design
-  §8.1), so the page lists them and changes nothing.
+  §8.1), so the page lists them and changes nothing but a follow-up's Always
+  allow, which it only takes back (`Cues.Watchers.ask_first/3`).
 
   A stream keeps only what passes (M60_CUE_INTAKE_AT_SCALE.md §3.4), so what it
   received and what its watchers were offered or judged without keeping are

@@ -5,9 +5,10 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
   watchers' switch, the door and its port, then how watchers judge items: the
   Screen, then the filter model); on a first run one card in place of the
   empty lists, else the sources with their editor; the watchers made in chat
-  (counts and ids only) once a source or a watcher exists; and the mandates
-  with their approval once a watcher or a mandate exists. Every control posts
-  a `cues_*` event the LiveView hands to `CuesState.handle/4`.
+  (counts and ids only, and each follow-up with Ask first again while it is
+  always allowed) once a source or a watcher exists; and the mandates with
+  their approval once a watcher or a mandate exists. Every control posts a
+  `cues_*` event the LiveView hands to `CuesState.handle/4`.
 
   A new source starts from what to watch, then asks only what that choice
   needs. Every label, info, example, fold and line on the source form is
@@ -1406,9 +1407,17 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
         <p class="mt-0.5 truncate text-xs text-base-content/50">
           {filter_word(@watcher.filter)} ·
           <span class="font-mono">{Enum.join(@watcher.sources, ", ")}</span>
-          · task
-          <span title={@watcher.task_job_id}>{@watcher.task_name || @watcher.task_job_id}</span>
+          <span :if={@watcher.task_job_id}>
+            · task
+            <span title={@watcher.task_job_id}>{@watcher.task_name || @watcher.task_job_id}</span>
+          </span>
         </p>
+        <.follow_up_line
+          :if={@watcher.follow_up}
+          watcher_id={@watcher.id}
+          watcher_name={@watcher.name}
+          follow_up={@watcher.follow_up}
+        />
       </div>
       <div
         class="ml-auto flex shrink-0 items-center gap-3 text-xs text-base-content/50 tabular-nums"
@@ -1422,6 +1431,43 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
     </div>
     """
   end
+
+  # A watcher's follow-up, one quiet line in the engine's words (the management
+  # row's `follow_up`), in the warning colour while held. The tab only takes an
+  # Always allow back; a card's tap alone grants one.
+  attr :watcher_id, :string, required: true
+  attr :watcher_name, :string, required: true
+  attr :follow_up, :map, required: true
+
+  defp follow_up_line(assigns) do
+    ~H"""
+    <div
+      id={"cue-watcher-#{@watcher_id}-follow-up"}
+      class={[
+        "mt-0.5 flex flex-wrap items-center gap-x-2 text-xs",
+        follow_up_tone(@follow_up["state"])
+      ]}
+    >
+      <span>
+        Follow-up
+        <span title={@follow_up["job_id"]}>{@follow_up["name"] || @follow_up["job_id"]}</span>
+        · {@follow_up["status_sentence"]}
+      </span>
+      <button
+        :if={@follow_up["always_allowed"]}
+        type="button"
+        class="btn btn-ghost btn-xs"
+        phx-click="cues_ask_first"
+        phx-value-name={@watcher_name}
+      >
+        Ask first again
+      </button>
+    </div>
+    """
+  end
+
+  defp follow_up_tone("held"), do: "text-warning"
+  defp follow_up_tone("ready"), do: "text-base-content/50"
 
   attr :n, :integer, required: true
   attr :label, :string, required: true

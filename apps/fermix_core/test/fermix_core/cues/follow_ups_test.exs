@@ -302,6 +302,27 @@ defmodule FermixCore.Cues.FollowUpsTest do
       assert {:error, "Watcher both has no follow-up."} =
                Watchers.set_follow_up(both.name, %{always_allow: false}, context(), opts(ctx))
     end
+
+    # The setup page's Cues tab takes it back too, traced as its own origin;
+    # the origins are a closed list.
+    test "the setup page takes it back, traced from the setup page", ctx do
+      watcher = follow_up_watcher!(ctx)
+      TelemetryCapture.attach([[:fermix, :cue, :lifecycle]], watcher_id: watcher.id)
+      approve!(ctx, watcher)
+
+      assert {:ok, %{echo: echo}} = Watchers.ask_first(watcher.name, "setup_page", opts(ctx))
+      assert echo =~ "Watcher codex-limits's follow-up asks first again"
+      assert approval_columns(ctx, watcher) == [nil, nil]
+
+      assert_receive {:telemetry, _event, _measurements,
+                      %{phase: :follow_up_always_allow_revoked, kind: "setup_page"} = meta}
+
+      assert meta.job_id == watcher.follow_up_job_id
+
+      assert_raise FunctionClauseError, fn ->
+        Watchers.ask_first(watcher.name, "phone", opts(ctx))
+      end
+    end
   end
 
   # --- the card and its answers (§4.5) ------------------------------------------------
