@@ -731,9 +731,22 @@ it, never a second writer.
   moved; while the server is unreachable the chat connection is refused, and
   the app reads the summary then. A server's disk filling is seen at the next
   thing that happens (on the server, every backup run).
-- The browser setup page's **Always On** tab sets nothing up yet and shows
-  the summary, read when the tab opens and on **Refresh**: its sentence, and
-  its action as the Fermix app's to take, or Learn more.
+- The browser setup page's **Always On** tab is the same screen as the
+  apps' pane and takes every step the App column below lists, so an owner
+  with no app (a Homebrew or Linux install) sets Always On up there: `fermix
+  setup` opens it, over SSH through the tunnel it prints. It draws the
+  summary's sentence, the step in hand and the one action; the token screen
+  of each provider with the token field, never shown again; the
+  recommendation with its price and **Change** for every offer, by city; the
+  sentence to accept before Fermix spends money, deletes, restarts a server
+  or moves; the recovery passphrase at **Move now**, typed twice where none is
+  set yet; the code for a server of your own, shown once with **Copy** and
+  until when, beside the command; and Details. It reads the summary when the
+  tab opens and whenever Fermix says it changed, never on a timer, and if
+  Always On changed since the screen was drawn a press does nothing and says
+  so. **Move now** on the computer that sets it up shows Fermix restarting,
+  and the page opens on Always On again once it is back. Inside the Mac app
+  the page has no Always On tab: the app's own pane is there.
 
 | Fact or action | App | CLI |
 |---|---|---|
@@ -762,9 +775,9 @@ it, never a second writer.
 | On a linked desktop: the server's own recovery, its move, and the secrets it could not resolve (the composed `primary_home`, or why it is missing) | The server's recovery (**Back up now** asks the server), The server's move | `fermix home status --json` |
 | On a linked desktop: replace the server (a code from the server, the review on it, then the move with `keep_as_desktop` false) | Replace the server, then **Move now** with the server's recovery passphrase (the server restarts, never this computer) | none |
 
-- In the device role the browser setup page opens on Always On and leads
-  with a notice that Fermix-wide settings live on the server and are changed
-  in the Fermix app on this computer. Its tabs for providers,
+- In the device role the browser setup page opens on Always On, which acts
+  there too, and leads with a notice that Fermix-wide settings live on the
+  server and that the page sets up this computer and Always On. Its tabs for providers,
   voice, channels, voice notes, plugins, search, images, coding agents,
   memory, personalization and cues show that sentence instead of their forms;
   its Sandbox and Doctor tabs set up this computer.

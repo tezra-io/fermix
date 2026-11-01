@@ -1744,12 +1744,19 @@ The router exposes:
 asynchronously; a failed handoff returns 503 with the duplicate record rolled
 back, and a device-role engine answers every webhook route 503. `HealthController` reports `FermixCore.Health`'s status.
 `SetupLive` drives `Setup.Wizard` and the core setup modules. Its Always On tab
-(`SetupLive.AlwaysOn`, M75 B14) is read-only: the summary every surface
-prints (`home.status.summary`), drawn from `Management.Home.status/1` in the
-page's own process when the tab opens and on Refresh, its action named as
-the app's to take; setting Always On up is the apps'. On a device-role
-engine the page leads with a notice that Fermix-wide settings live on the
-server and draws every tab whose request
+(`SetupLive.AlwaysOn` for the state and events, `SetupLive.AlwaysOnPane`
+for the drawing, Always On setup §8.1) is a renderer of the summary
+(`home.status.summary`): it collects what the pressed action `needs`, asks
+its `confirm` and sends one `Management.AlwaysOn.act/2` in the page's own
+process with `actor: :setup_page`, then draws the answer. Reads
+(`Management.Home.status/1`) and acts run in `start_async`, with the
+engine's way to its server (`Home.Link.forwarding/2`) on a linked desktop;
+the page subscribes to `Home.StatusWatch` and reads again at each
+`:home_status_changed`. No token or passphrase sits in an assign, and the
+one-time code is held in a struct whose inspection withholds it. Embedded
+in the Mac app (`?embed=1`) the page lists no Always On tab. On a
+device-role engine the page leads with a notice that Fermix-wide settings
+live on the server and draws every tab whose request
 `Management.Placement` places on the primary as unavailable. Not all ingress is
 Phoenix: the mobile listener, the OAuth loopback listener, and the Unix sockets
 (`daemon.sock`, `realtime.sock`, `acp.sock`, `companion.sock`) live in core and

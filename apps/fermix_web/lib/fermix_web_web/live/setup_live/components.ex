@@ -4,7 +4,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   alias FermixCore.Auth.Redaction
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.ModelCatalog
-  alias FermixWebWeb.SetupLive.AlwaysOn
+  alias FermixWebWeb.SetupLive.AlwaysOnPane
   alias FermixWebWeb.SetupLive.CuesPane
   alias FermixWebWeb.SetupLive.Phone
 
@@ -395,7 +395,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   defp render_active_pane("personalization", assigns), do: personalization_pane(assigns)
   defp render_active_pane("doctor", assigns), do: doctor_pane(assigns)
   defp render_active_pane("cues", assigns), do: CuesPane.pane(assigns)
-  defp render_active_pane("always_on", assigns), do: AlwaysOn.pane(assigns)
+  defp render_active_pane("always_on", assigns), do: AlwaysOnPane.pane(assigns)
 
   defp provider_pane(assigns) do
     ~H"""

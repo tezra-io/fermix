@@ -226,6 +226,24 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   commands in its traces are kept about a day (through the previous UTC
   day), and the rest of each trace 14 days; snapshots and every link stay
   encrypted end to end.
+- **Set up Always On from the setup page, with no app.** On a Homebrew or
+  Linux install, `fermix setup` opens the setup page, and its Always On tab
+  now takes every step the Fermix app's pane takes: paste a Hetzner token
+  (each provider's How to get one beside the field), take the recommended
+  server with its monthly price or change its size and place, create it and
+  follow each step as it runs; turn the server on, restart it, start it again or
+  delete it; open a code for a Linux server of your own, shown once with its
+  command, Copy and until when; back up now; and Move now with your recovery
+  passphrase, typed twice the first time. Each button is one step Fermix
+  runs, after the sentence you accept for anything that costs money,
+  deletes, restarts a server or moves, and if Always On changed meanwhile
+  nothing runs and the tab says so and shows it again. The tab follows
+  Always On as it changes with no Refresh, and after Move now the page waits
+  for Fermix to start again and opens on Always On. On a computer your home
+  left, the setup page sets up this computer and Always On and no longer
+  points to the Fermix app for Fermix-wide settings, which live on your
+  server. Inside the Mac app the page has no Always On tab: the app's own
+  pane is there.
 - **A server gets ready for Always On from one command.** On a Debian 12,
   Debian 13 or Ubuntu 24.04 server (arm64 or x86_64) running Linux 6.2 or
   later with Landlock enabled (Debian 13 and Ubuntu 24.04 do by default),

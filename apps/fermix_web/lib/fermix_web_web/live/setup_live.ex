@@ -197,7 +197,8 @@ defmodule FermixWebWeb.SetupLive do
   @impl true
   def mount(params, session, socket) do
     if AccessToken.session_authorized?(setup_authorization(session)) do
-      mount_authorized(socket, requested_tab(params), params["embed"] == "1")
+      embed? = params["embed"] == "1"
+      mount_authorized(socket, requested_tab(params, shown_tabs(embed?)), embed?)
     else
       {:ok, redirect(socket, to: ~p"/")}
     end
@@ -214,7 +215,7 @@ defmodule FermixWebWeb.SetupLive do
   defp mount_authorized(socket, requested_tab, embed?) do
     report = Wizard.report()
     record = engine_record()
-    active_tab = requested_tab || first_tab(record, report)
+    active_tab = requested_tab || first_tab(record, report, embed?)
 
     socket =
       socket
@@ -248,6 +249,7 @@ defmodule FermixWebWeb.SetupLive do
       |> assign(:meetings_config_open?, false)
       |> assign(:phone, Phone.initial())
       |> assign_report(report)
+      |> AlwaysOn.watch()
       |> AlwaysOn.on_tab(active_tab)
 
     {:ok, socket}
@@ -255,8 +257,14 @@ defmodule FermixWebWeb.SetupLive do
 
   # A device-role page opens on Always On, which says whether this computer
   # reaches the server (M75 B14): the rest of the setup is the primary's.
-  defp first_tab(%{role: :device}, _report), do: "always_on"
-  defp first_tab(_record, report), do: next_action_tab(report)
+  # Embedded in the Mac app the page has no Always On: the app's own pane is
+  # the one surface there.
+  defp first_tab(%{role: :device}, _report, false), do: "always_on"
+  defp first_tab(_record, report, _embed?), do: next_action_tab(report)
+
+  # Every tab the page lists: all but Always On when embedded in the Mac app.
+  defp shown_tabs(true), do: Enum.reject(@tabs, &(&1.id == "always_on"))
+  defp shown_tabs(false), do: @tabs
 
   # A pairing window this page still shows is cancelled when the page goes away
   # (the tab closed or the socket dropped).
@@ -269,7 +277,8 @@ defmodule FermixWebWeb.SetupLive do
 
   @impl true
   def handle_event("select_tab", %{"tab" => tab_id}, socket) do
-    active_tab = if tab_known?(tab_id), do: tab_id, else: socket.assigns.active_tab
+    active_tab =
+      if tab_known?(tab_id, socket.assigns.tabs), do: tab_id, else: socket.assigns.active_tab
 
     {:noreply,
      socket
@@ -280,11 +289,13 @@ defmodule FermixWebWeb.SetupLive do
   end
 
   def handle_event("next_step", _params, socket) do
-    {:noreply, assign(socket, :active_tab, next_tab(socket.assigns.active_tab))}
+    {:noreply,
+     assign(socket, :active_tab, adjacent_tab(socket.assigns.tabs, socket.assigns.active_tab, 1))}
   end
 
   def handle_event("previous_step", _params, socket) do
-    {:noreply, assign(socket, :active_tab, previous_tab(socket.assigns.active_tab))}
+    {:noreply,
+     assign(socket, :active_tab, adjacent_tab(socket.assigns.tabs, socket.assigns.active_tab, -1))}
   end
 
   def handle_event("provider_changed", %{"provider_form" => params}, socket) do
@@ -911,7 +922,7 @@ defmodule FermixWebWeb.SetupLive do
      )}
   end
 
-  # The Always On tab (M75 B14).
+  # The Always On tab (Always On setup §8.1).
   def handle_event("always_on_" <> _rest = event, params, socket),
     do: {:noreply, AlwaysOn.handle_event(event, params, socket)}
 
@@ -1022,6 +1033,18 @@ defmodule FermixWebWeb.SetupLive do
       when phone_read in [:phone_poll, :phone_reach],
       do: {:noreply, Phone.handle_info(message, socket)}
 
+  # Always On changed (`Home.StatusWatch`): the tab, when it is open, reads
+  # it again.
+  def handle_info(:home_status_changed, socket),
+    do: {:noreply, AlwaysOn.on_tab(socket, socket.assigns.active_tab)}
+
+  # The watch went away, or the time to look for it again came.
+  def handle_info({:always_on_watch, _ref, :process, _pid, _reason} = message, socket),
+    do: {:noreply, AlwaysOn.handle_info(message, socket)}
+
+  def handle_info({:always_on_watch, :retry} = message, socket),
+    do: {:noreply, AlwaysOn.handle_info(message, socket)}
+
   def handle_info(:perform_restart, socket) do
     # Only an engine something brings back (gated in apply_restart): exit
     # non-zero so it is relaunched — launchd KeepAlive on any exit, systemd
@@ -1036,6 +1059,9 @@ defmodule FermixWebWeb.SetupLive do
   defp restart_stop, do: Application.get_env(:fermix_web, :restart_stop, fn -> System.stop(1) end)
 
   @impl true
+  def handle_async({:always_on, _what} = key, result, socket),
+    do: {:noreply, AlwaysOn.handle_async(key, result, socket)}
+
   def handle_async(:doctor_provider_probe, {:ok, result}, socket) do
     {:noreply, finish_doctor_provider_probe(socket, result)}
   end
@@ -1224,7 +1250,7 @@ defmodule FermixWebWeb.SetupLive do
       realtime_form={@realtime_form}
       report={@report}
       restart_pending?={@restart_pending?}
-      restarting={@restarting}
+      restarting={@restarting or AlwaysOn.restarting?(@always_on)}
       sandbox_form={@sandbox_form}
       search_form={@search_form}
       image_form={@image_form}
@@ -1284,7 +1310,7 @@ defmodule FermixWebWeb.SetupLive do
 
     socket
     |> assign(:report, report)
-    |> assign(:tabs, @tabs)
+    |> assign(:tabs, shown_tabs(socket.assigns.embed?))
     |> assign_config_banner()
     |> assign(:provider_form, provider_form)
     |> assign_model_sources(provider_form)
@@ -1740,7 +1766,7 @@ defmodule FermixWebWeb.SetupLive do
   end
 
   defp maybe_advance(socket, "next") do
-    assign(socket, :active_tab, next_tab(socket.assigns.active_tab))
+    assign(socket, :active_tab, adjacent_tab(socket.assigns.tabs, socket.assigns.active_tab, 1))
   end
 
   defp maybe_advance(socket, _nav), do: socket
@@ -4601,16 +4627,17 @@ defmodule FermixWebWeb.SetupLive do
     end
   end
 
-  defp tab_known?(tab_id), do: Enum.any?(@tabs, &(&1.id == tab_id))
+  defp tab_known?(tab_id, tabs), do: Enum.any?(tabs, &(&1.id == tab_id))
 
-  # Honor an explicit `?tab=` only when it names a real tab; otherwise fall
-  # through to next_action_tab. Lets apply_restart return the operator to the
-  # tab they restarted from rather than the first incomplete tab.
-  defp requested_tab(%{"tab" => tab}) when is_binary(tab) do
-    if tab_known?(tab), do: tab, else: nil
+  # Honor an explicit `?tab=` only when it names a tab the page lists;
+  # otherwise fall through to next_action_tab. Lets apply_restart return the
+  # operator to the tab they restarted from rather than the first incomplete
+  # tab.
+  defp requested_tab(%{"tab" => tab}, tabs) when is_binary(tab) do
+    if tab_known?(tab, tabs), do: tab, else: nil
   end
 
-  defp requested_tab(_params), do: nil
+  defp requested_tab(_params, _tabs), do: nil
 
   defp next_action_tab(report) do
     Enum.find_value(@tabs, "provider", fn tab ->
@@ -4618,14 +4645,11 @@ defmodule FermixWebWeb.SetupLive do
     end)
   end
 
-  defp next_tab(tab_id), do: adjacent_tab(tab_id, 1)
-  defp previous_tab(tab_id), do: adjacent_tab(tab_id, -1)
-
-  defp adjacent_tab(tab_id, delta) do
-    index = Enum.find_index(@tabs, &(&1.id == tab_id)) || 0
+  defp adjacent_tab(tabs, tab_id, delta) do
+    index = Enum.find_index(tabs, &(&1.id == tab_id)) || 0
     next_index = index + delta
-    next_index = max(0, min(next_index, length(@tabs) - 1))
-    Enum.at(@tabs, next_index).id
+    next_index = max(0, min(next_index, length(tabs) - 1))
+    Enum.at(tabs, next_index).id
   end
 
   defp tab_status(%{component: nil}, _report), do: :ready

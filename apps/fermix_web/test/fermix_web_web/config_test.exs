@@ -41,6 +41,23 @@ defmodule FermixWebWeb.ConfigTest do
     assert filtered["id"] == "move_now"
   end
 
+  # The Always On tab's step form, under the names the page draws: neither
+  # secret reaches a log, whichever filter word catches it.
+  test "Phoenix filters the Always On tab's token and passphrase fields" do
+    filtered =
+      Phoenix.Logger.filter_values(%{
+        "always_on_step" => %{
+          "token" => "invented-provider-token",
+          "passphrase" => "invented-lighthouse-meridian",
+          "passphrase_again" => "invented-lighthouse-meridian",
+          "choice" => "fsn1/cpx22"
+        }
+      })
+
+    refute inspect(filtered) =~ "invented-provider-token"
+    refute inspect(filtered) =~ "invented-lighthouse-meridian"
+  end
+
   test "Phoenix filters API-key parameters for every provider and search backend" do
     # Setup-page secret fields are all `*_api_key`. The filter word `api_key` must
     # redact them regardless of which form (or none) wraps them, so adding a new
