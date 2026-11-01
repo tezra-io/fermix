@@ -389,6 +389,69 @@ class VerifyStandaloneTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("must exit 3, got 1", result.stderr)
 
+    # ── the fermix always-on no-daemon stage ──────────────────────────────
+
+    def test_always_on_with_no_daemon_refuses_engine_stopped_and_writes_nothing(self):
+        self._write_artifact(create_disclaim=True)
+
+        result = self._run("macos_aarch64")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("fermix always-on: Fermix is not running from this home", result.stdout)
+
+    # The release that lacks the verb: the dispatcher's unknown-command exit.
+    def test_rejects_an_artifact_without_the_always_on_verb(self):
+        self._write_artifact(create_disclaim=True, always_on="unknown_verb")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("fermix always-on create-server with no daemon must exit 1, got 2", result.stderr)
+
+    # The class this stage exists for: a step that answers as done with no
+    # engine to take it.
+    def test_rejects_an_always_on_step_that_succeeds_with_no_daemon(self):
+        self._write_artifact(create_disclaim=True, always_on="acts")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must exit 1, got 0", result.stderr)
+
+    def test_rejects_always_on_json_with_a_log_line_on_stdout(self):
+        self._write_artifact(create_disclaim=True, always_on="noisy_stdout")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must print exactly the engine_stopped envelope", result.stderr)
+
+    def test_rejects_always_on_that_does_not_say_why_on_stderr(self):
+        self._write_artifact(create_disclaim=True, always_on="silent")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("did not say on stderr why it took no step", result.stderr)
+
+    def test_rejects_always_on_that_writes_a_home_with_no_daemon(self):
+        self._write_artifact(create_disclaim=True, always_on="writes_home")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("fermix always-on wrote a home at", result.stderr)
+
+    # The stage runs before migrate-to-app, which ends the script on Linux.
+    def test_linux_artifact_runs_the_always_on_stage_too(self):
+        self.artifact = self.base / "fermix_linux_x86_64"
+        self._write_artifact(create_disclaim=False, migrate="refused:not_macos", always_on="acts")
+
+        result = self._run("linux_x86_64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must exit 1, got 0", result.stderr)
+
     # ── the fermix home stage ─────────────────────────────────────────────
 
     def test_home_exports_imports_and_marks_moved_once(self):
@@ -935,6 +998,7 @@ class VerifyStandaloneTest(unittest.TestCase):
         auth_logout="removes",
         browser_bridge="works",
         settings="refuses",
+        always_on="refuses",
         home="carries",
         iroh_helper="pinned",
         iroh_notices="pinned",
@@ -973,6 +1037,9 @@ class VerifyStandaloneTest(unittest.TestCase):
             "fi\n"
             'if [ "${1:-}" = "settings" ]; then\n'
             f"{self._settings_behaviour(settings)}"
+            "fi\n"
+            'if [ "${1:-}" = "always-on" ]; then\n'
+            f"{self._always_on_behaviour(always_on)}"
             "fi\n"
             'if [ "${1:-}" = "home" ]; then\n'
             f"{self._home_behaviour(home)}"
@@ -1074,6 +1141,31 @@ class VerifyStandaloneTest(unittest.TestCase):
         if settings == "silent":
             return argv + json + "  exit 3\n"
         raise ValueError(f"unknown settings behaviour: {settings}")
+
+    # The real verb's shape with no daemon: the engine_stopped envelope alone on
+    # stdout, the sentence on stderr, exit 1, and no home written. The argv is
+    # pinned so a stage that stops asking for `--json` cannot pass against it.
+    def _always_on_behaviour(self, always_on):
+        if always_on == "unknown_verb":
+            return "  printf 'fermix: unknown command: always-on\\n' >&2\n  exit 2\n"
+        argv = '  [ "$*" = "always-on create-server --json" ] || exit 64\n'
+        sentence = "Fermix is not running from this home, and this needs it. Start it, then try again."
+        envelope = (
+            '  printf \'{"error":{"code":"engine_stopped","sentence":"'
+            + sentence
+            + '"},"ok":false,"schema_version":1}\\n\'\n'
+        )
+        said = f"  printf 'fermix always-on: {sentence}\\n' >&2\n"
+        shapes = {
+            "refuses": argv + envelope + said + "  exit 1\n",
+            "acts": argv + '  printf \'{"ok":true,"result":{}}\\n\'\n' + said + "  exit 0\n",
+            "noisy_stdout": argv + "  printf 'boot notice nobody asked for\\n'\n" + envelope + said + "  exit 1\n",
+            "silent": argv + envelope + "  exit 1\n",
+            "writes_home": argv + '  mkdir -p "$FERMIX_HOME"\n' + envelope + said + "  exit 1\n",
+        }
+        if always_on not in shapes:
+            raise ValueError(f"unknown always-on behaviour: {always_on}")
+        return shapes[always_on]
 
     # The real verbs' shapes in the throwaway world: export seals the home the
     # environment names, import makes the next primary with the home's own path

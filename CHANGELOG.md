@@ -264,6 +264,23 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   anything is installed. `--snapshot-bucket` and `--snapshot-region` name
   where the server will keep its snapshots, and `--restore` prepares a server
   to restore your home from a snapshot instead.
+- **Always On from a terminal: `fermix always-on`.** On a Homebrew or Linux
+  install without the Fermix app you can now set up Always On, the server
+  Fermix creates on Hetzner or one of your own, from the terminal. `fermix
+  always-on` shows where Always On stands and walks you through each step: it
+  shows how to get a Hetzner token and asks for it without showing it, lists
+  the sizes and places Hetzner has in stock with the recommendation first,
+  asks before anything costs money, deletes or moves (No unless you say yes),
+  asks for your recovery passphrase without showing it (twice the first
+  time), and waits until each step is done before offering the next. `fermix
+  always-on STEP` takes one step (`paste-token`, `create-server`,
+  `own-server`, `move-now`, and the rest), and scripts can run it with no
+  terminal: `--stdin` for the token, `--recovery-passphrase-file`, `--type` and
+  `--location`, `--yes` to accept what a step asks first, `--wait` to wait,
+  and `--json` for one machine-readable answer. A token or passphrase typed as
+  an argument is refused, so it never lands in your shell history. On a Mac
+  whose Fermix the app manages, it points you to the app's Always On pane, and
+  `fermix home status` now says where the next step is taken.
 - **The browser fills a form and sends it in one step.** When the agent fills
   in a form, or signs you in with a login saved in the Mac app, it can send
   the form in the same step instead of a second one, and it sees the page the

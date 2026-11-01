@@ -731,6 +731,43 @@ it, never a second writer.
   moved; while the server is unreachable the chat connection is refused, and
   the app reads the summary then. A server's disk filling is seen at the next
   thing that happens (on the server, every backup run).
+- **From a terminal: `fermix always-on`.** On a Homebrew or Linux install
+  without the Fermix app, this is how Always On is set up. With no step it
+  prints the summary (its sentence, the step in hand, Details) and each step
+  with its command; on a terminal it numbers them, Enter takes the main one
+  and `q` quits, and for the step taken it asks what the step needs: the
+  provider's How to get one and the token without echo (with the count of
+  characters it read), the size and place as a numbered list of what Hetzner
+  has in stock, grouped by city, with the recommendation first and each
+  offer and its price in Fermix's words, the recovery passphrase without
+  echo (twice where none is set yet), and the confirm as `[y/N]`, No unless
+  answered. It prints the step's id as it runs, never what was typed, then
+  waits for Always On to move on (a step's job, the move, a code waiting for
+  its server) and offers the next step. The code for a server of your own is
+  printed once, under the command to run on it. `fermix always-on STEP` takes
+  one step, by the action's id with `-` for `_` (`paste-token`,
+  `create-server`, `create-in`, `cancel`, `turn-on`, `restart-server`,
+  `start-again`, `delete-server`, `own-server`, `back-up-now`,
+  `replace-server`, `check-again`, `move-now`, `try-again`; `learn-more` and
+  `open-console` print their page). With no terminal or with `--json` it asks
+  nothing: `--stdin` reads the token from a pipe (`--provider ID` when more
+  than one provider is offered), `--recovery-passphrase-file PATH` the
+  passphrase, `--type` with `--location` the size and place (else Fermix's
+  recommendation), `--yes` accepts the step's confirm, and `--wait` waits; a
+  need no flag gives exits 2 naming the flag, and a confirm without `--yes`
+  refuses `confirm_required`. A token or passphrase typed as an argument is
+  refused. The wait asks `home.status` with the screen's key and stops after
+  45 minutes with the screen as it stands; Ctrl-C stops it and the step goes
+  on. During Move now the engine restarts, so the wait reconnects for up to
+  90 seconds and otherwise says "Start Fermix again to finish the move." If
+  Always On changed since the screen was read (another window pressed first),
+  it says so (`changed`) and shows the screen again; a Move now sent to the
+  server whose answer was lost says so and is followed as a started move;
+  any other refusal is the engine's own sentence (`action_refused`). It needs Fermix running
+  (`engine_stopped` otherwise, writing nothing), and on a home the Mac app
+  manages it refuses `app_managed`, naming the app's Always On pane.
+  `fermix home status` ends its summary line with where the next step is
+  taken: `fermix always-on`, or the Fermix app on a home the app manages.
 - The browser setup page's **Always On** tab is the same screen as the
   apps' pane and takes every step the App column below lists, so an owner
   with no app (a Homebrew or Linux install) sets Always On up there: `fermix
@@ -750,7 +787,7 @@ it, never a second writer.
 
 | Fact or action | App | CLI |
 |---|---|---|
-| Where Always On stands: one sentence and at most one action (`summary`) | The pane's first line and its button | `fermix home status`, first |
+| Where Always On stands: one sentence and at most one action (`summary`) | The pane's first line and its button | `fermix home status`, first; `fermix always-on` |
 | The role and the epoch | This computer | `fermix home status` |
 | On a desktop: the primary (connected or not, since when, its sentence), or where the home moved | The primary | `fermix home status` |
 | On the primary: its desktops, each connected or not | Desktops | `fermix home status --json` |
@@ -758,22 +795,22 @@ it, never a second writer.
 | Set the recovery passphrase | Recovery: typed twice, never shown; a change says which snapshots open with which passphrase | `fermix home snapshots passphrase` |
 | On the primary: the secrets that did not resolve on this host (`secrets_missing`), by id | Secrets to enter again | `fermix home status` |
 | Where snapshots are kept (bucket, region, the S3-compatible address, how often) and the two access keys | Recovery: the `snapshots` section; the keys as hidden fields, never shown again | `fermix settings set snapshots …`, `fermix settings secret set snapshot_s3_access_key_id` |
-| Take a snapshot now (`home.act` `back_up_now`) | **Back up now**, offered once snapshots have somewhere to go | none |
-| An enrollment code for a server of your own (`home.act` `own_server`) | **Use my own Linux server**: the code shown once with **Copy** and when it expires, beside the command for the server, which carries no code; **Cancel the code** closes it | none |
+| Take a snapshot now (`home.act` `back_up_now`) | **Back up now**, offered once snapshots have somewhere to go | `fermix always-on back-up-now` |
+| An enrollment code for a server of your own (`home.act` `own_server`) | **Use my own Linux server**: the code shown once with **Copy** and when it expires, beside the command for the server, which carries no code; **Cancel the code** closes it | `fermix always-on own-server`, the code printed once under the command; `cancel` closes it |
 | The cloud providers Fermix creates the server on (Hetzner today), each with its name, token label, How to get one and console (the summary's `detail.providers`) | The token screen | `fermix home status --json` |
-| A Hetzner token: pasted once, checked at once, kept on this computer (`home.act` `paste_token`) | Paste a token, with How to get one | none |
-| The sizes and locations Hetzner has in stock, with the monthly price (`home.provision.options`) | The recommendation, and Change | none |
-| Create the server on Hetzner (`home.act` `create_server`, a job), in the next place when the first had none (`create_in`) | **Create server**, **Create in CITY** | none |
+| A Hetzner token: pasted once, checked at once, kept on this computer (`home.act` `paste_token`) | Paste a token, with How to get one | `fermix always-on paste-token`: asked without echo, or `--stdin` |
+| The sizes and locations Hetzner has in stock, with the monthly price (`home.provision.options`) | The recommendation, and Change | Numbered on a terminal, the recommendation first; `--type` and `--location` |
+| Create the server on Hetzner (`home.act` `create_server`, a job), in the next place when the first had none (`create_in`) | **Create server**, **Create in CITY** | `fermix always-on create-server`, `create-in` |
 | The server Fermix created, what it costs and when Hetzner was last read back (the summary's Details) | Details | `fermix home status` |
-| Turn the created server on, or restart it (`home.act` `turn_on`, `restart_server`) | **Turn it on**, **Restart server** | none |
-| Delete what Fermix created on Hetzner (`home.act` `delete_server`, `cancel`, `start_again`), never the server the home moved to | **Delete your server**, **Cancel**, **Start again** | none |
-| On a linked desktop: replace a server Fermix created on Hetzner (`home.act` `replace_server`), the move to it as below, then the old one deleted by itself | Replace the server, then Move now; the old server listed with Delete if its delete failed | none |
+| Turn the created server on, or restart it (`home.act` `turn_on`, `restart_server`) | **Turn it on**, **Restart server** | `fermix always-on turn-on`, `restart-server` |
+| Delete what Fermix created on Hetzner (`home.act` `delete_server`, `cancel`, `start_again`), never the server the home moved to | **Delete your server**, **Cancel**, **Start again** | `fermix always-on delete-server`, `cancel`, `start-again` |
+| On a linked desktop: replace a server Fermix created on Hetzner (`home.act` `replace_server`), the move to it as below, then the old one deleted by itself | Replace the server, then Move now; the old server listed with Delete if its delete failed | `fermix always-on replace-server`, then `move-now` |
 | The servers waiting for the move | Servers waiting for the move | `fermix home candidates` |
-| Review the move: each item ready, a note or a block | Move now reviews at the press; **Check again** on a block | none |
-| Start the move (`home.act` `move_now`, `try_again`) | **Move now**, the recovery passphrase asked first | none |
+| Review the move: each item ready, a note or a block | Move now reviews at the press; **Check again** on a block | The same; `fermix always-on check-again` |
+| Start the move (`home.act` `move_now`, `try_again`) | **Move now**, the recovery passphrase asked first | `fermix always-on move-now`, `try-again`: the passphrase asked without echo, or `--recovery-passphrase-file` |
 | Where the move stands (its phase and sentence) | The move | `fermix home status` |
 | On a linked desktop: the server's own recovery, its move, and the secrets it could not resolve (the composed `primary_home`, or why it is missing) | The server's recovery (**Back up now** asks the server), The server's move | `fermix home status --json` |
-| On a linked desktop: replace the server (a code from the server, the review on it, then the move with `keep_as_desktop` false) | Replace the server, then **Move now** with the server's recovery passphrase (the server restarts, never this computer) | none |
+| On a linked desktop: replace the server (a code from the server, the review on it, then the move with `keep_as_desktop` false) | Replace the server, then **Move now** with the server's recovery passphrase (the server restarts, never this computer) | `fermix always-on replace-server`, then `move-now` with the server's recovery passphrase |
 
 - In the device role the browser setup page opens on Always On, which acts
   there too, and leads with a notice that Fermix-wide settings live on the

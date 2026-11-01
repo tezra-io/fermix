@@ -153,6 +153,25 @@ the new server keeps its snapshots in. The primary holds the candidate for
 it under the recovery passphrase, the engine then restarts in the device role
 and carries the move out, and \fBstatus\fR shows where it stands.
 .TP
+.B fermix always-on
+.RI "[--json] | " ACTION " [--provider " ID "] [--type " TYPE " --location " PLACE "] [--stdin] [--recovery-passphrase-file " PATH "] [--yes] [--wait] [--json]"
+Set up Always On from a terminal, the same steps the setup page and the
+Fermix app offer: Fermix moves to a server you own, one it creates on Hetzner from a token you
+paste, or a Linux server of your own. With no \fIACTION\fR it prints where
+Always On stands and the steps it offers; on a terminal it then asks which to
+take, asks what that step needs (the token and the recovery passphrase
+without echo, the size and place as a numbered list with the recommendation
+first), asks before anything costs money, deletes or moves, waits until the
+step is done and offers the next one. \fIACTION\fR takes one step by its
+name, such as \fBpaste\-token\fR, \fBcreate\-server\fR, \fBown\-server\fR or
+\fBmove\-now\fR. With no terminal, or with \fB\-\-json\fR, nothing is
+asked: \fB\-\-stdin\fR reads the token from a pipe,
+\fB\-\-recovery\-passphrase\-file\fR reads the passphrase, \fB\-\-type\fR
+and \fB\-\-location\fR choose the size and place (else Fermix takes its
+recommendation), \fB\-\-yes\fR accepts what the step asks first, and
+\fB\-\-wait\fR waits for the step to settle. A token or passphrase is never
+taken as an argument. It needs Fermix running.
+.TP
 .B fermix logs
 Show the daemon's own log file.
 .TP

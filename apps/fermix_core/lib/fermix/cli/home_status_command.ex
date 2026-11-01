@@ -12,8 +12,9 @@ defmodule Fermix.CLI.HomeStatusCommand do
   not: the role its settings configure (`Home.Role.configured/1`), the epoch,
   the marker, `[fermix_core.snapshots]` and `snapshots/status.json`, through
   the same projection the engine answers with (`Management.Home`). It prints
-  the summary first (M75 lean v1 §7): its sentence, and its one action as the
-  Fermix app names it, since production is managed there. `passphrase` needs
+  the summary first (M75 lean v1 §7): its sentence, and its one action with
+  where to take it: `fermix always-on`, or the Fermix app on a home the app
+  manages (`HomeOwner.app_managed?/1`; Always On setup §8.2). `passphrase` needs
   the engine: the recovery key is saved through the running settings path.
   With the engine stopped it refuses with `engine_stopped`.
 
@@ -27,11 +28,13 @@ defmodule Fermix.CLI.HomeStatusCommand do
 
   alias Fermix.CLI.Daemon.Client
   alias Fermix.CLI.HomeCommand
+  alias Fermix.CLI.HomeOwner
   alias Fermix.CLI.MachineOutput
   alias Fermix.CLI.SecretInput
   alias FermixCore.Home.Role
   alias FermixCore.Management.Home
   alias FermixCore.Setup.ConfigStore
+  alias FermixCore.Setup.EngineOwner
 
   @json [json: :boolean]
   @passphrase_switches [passphrase_file: :string, json: :boolean]
@@ -45,11 +48,13 @@ defmodule Fermix.CLI.HomeStatusCommand do
 
   @doc """
   Runs `fermix home status ARGS`. `deps`: `:home`, `:client` (a 3-arity
-  management call, as `Client.request_v1/3`), `:terminal`.
+  management call, as `Client.request_v1/3`), `:terminal`, `:app_managed?`
+  (a 0-arity check, asked only when the human output names where the next
+  step is taken).
   """
   @spec status([String.t()], keyword()) :: non_neg_integer()
   def status(argv, deps \\ []) when is_list(argv) and is_list(deps) do
-    with_json(argv, fn json? -> read(json?, deps, "home.status", &status_lines/1) end)
+    with_json(argv, fn json? -> read(json?, deps, "home.status", &status_lines(&1, deps)) end)
   end
 
   @doc "Runs `fermix home snapshots ARGS`, with the dependencies `status/2` takes."
@@ -197,8 +202,8 @@ defmodule Fermix.CLI.HomeStatusCommand do
     1
   end
 
-  defp status_lines(status) do
-    summary_lines(status["summary"]) ++
+  defp status_lines(status, deps) do
+    summary_lines(status["summary"], deps) ++
       [
         "Role: #{status["role"]}",
         "Primary epoch: #{status["epoch"] || "none yet"}"
@@ -209,11 +214,23 @@ defmodule Fermix.CLI.HomeStatusCommand do
   end
 
   # Where Always On stands, first; an engine from before the summary has none.
-  defp summary_lines(%{"sentence" => sentence, "action" => %{"label" => label}}),
-    do: [sentence, "Next: #{label} (in the Fermix app)"]
+  defp summary_lines(%{"sentence" => sentence, "action" => %{"label" => label}}, deps),
+    do: [sentence, "Next: #{label} (#{where(deps)})"]
 
-  defp summary_lines(%{"sentence" => sentence}), do: [sentence]
-  defp summary_lines(nil), do: []
+  defp summary_lines(%{"sentence" => sentence}, _deps), do: [sentence]
+  defp summary_lines(nil, _deps), do: []
+
+  # A home the Fermix app manages takes its Always On steps in the app; any
+  # other takes them with `fermix always-on`.
+  defp where(deps) do
+    check = Keyword.get_lazy(deps, :app_managed?, fn -> app_managed_check(home(deps)) end)
+    if check.(), do: "in the Fermix app", else: "fermix always-on"
+  end
+
+  defp app_managed_check(home) do
+    marker = Path.join(home, Path.basename(EngineOwner.path()))
+    fn -> HomeOwner.app_managed?(socket_path: Path.join(home, "daemon.sock"), path: marker) end
+  end
 
   # The secret references this primary could not resolve, by the id
   # `fermix setup` and `secret.set` take: each must be entered again here.

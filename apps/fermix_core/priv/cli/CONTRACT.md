@@ -54,6 +54,8 @@ never parses the sentence.
 | `fermix home snapshots status --json` | the snapshots result |
 | `fermix home snapshots passphrase --passphrase-file PATH --json` | the management `home.snapshots.passphrase` result |
 | `fermix home candidates --json` | the candidates result |
+| `fermix always-on --json` | the Always On screen |
+| `fermix always-on ACTION --json [--provider ID] [--type T --location L] [--stdin] [--recovery-passphrase-file PATH] [--yes] [--wait]` | the Always On step result |
 
 `fermix service run` is the systemd vendor unit's launch entry point. It is not
 a machine-mode verb: it becomes the daemon and never returns an envelope.
@@ -231,7 +233,7 @@ its enrollment stands).
 | `secrets_missing` | array | On a running primary, the ids (as `fermix setup` and `secret.set` take them) of the secret references in its settings that did not resolve on this host: each needs entering again. Empty in every other role, and while Fermix is stopped. The human output names them on a line of its own. |
 | `primary_home` | object, null | On a running linked desktop, the primary's own record (this table's fields, as the primary answers them), asked within 5 s; its recovery, enrollment, candidates and move are the server's. Null on any other engine, while it is missing, and while Fermix is stopped. |
 | `primary_missing` | string, null | On a running linked desktop whose primary is unreachable or did not answer within 5 s, the sentence that says why `primary_home` is missing. Null otherwise. |
-| `summary` | object | Where Always On stands, as every surface prints it: `state`, `sentence`, `action` (`{id, label}` or null) and `detail`, as the management `home.status` answers it (`priv/management/PROTOCOL.md`, "The Always On summary"). With Fermix stopped it is worked out from the home's own files, so the link, the window and the server's own part read as absent. The human output leads with its sentence and, on a line of its own, its action as the Fermix app names it. |
+| `summary` | object | Where Always On stands, as every surface prints it: `key`, `state`, `sentence`, `action` (the action record, or null), `detail` and `notice`, as the management `home.status` answers it (`priv/management/PROTOCOL.md`, "The Always On summary"). With Fermix stopped it is worked out from the home's own files, so the link, the window and the server's own part read as absent. The human output leads with its sentence and, on a line of its own, its action and where to take it: `fermix always-on`, or the Fermix app on a home the app manages. |
 | `disk` | object, null | On the primary, how full its disk is: `used` (a fraction from 0 to 1) and `nearly_full` (from 0.85). Null in every other role and when it cannot be read. |
 | `version` | string | This engine's version. |
 
@@ -292,6 +294,65 @@ its move is refused, and so is any home while Fermix runs in it.
 
 Golden: `home_candidates/ok.json`.
 
+## Always On
+
+`fermix always-on` takes the Always On steps from a terminal, on a home the
+Fermix app does not manage (Always On setup §8.2). The engine runs every step;
+the verb draws the summary, collects what a step needs, and sends the one
+management `home.act` (`priv/management/PROTOCOL.md`, "Acting on it").
+
+`fermix always-on --json` answers the Always On screen: the `summary` object
+of the home result, alone. Golden: `always_on/status.json`.
+
+`fermix always-on ACTION --json` takes the one step `ACTION` names, the
+action's `id` with `-` for `_` (`create-server`, `move-now`, `own-server`, …),
+and answers the step result:
+
+```json
+{"summary": { }, "result": null}
+```
+
+- `summary` — object. The screen after the step, as `home.status` answers it;
+  with `--wait`, the screen once the step settled.
+- `result` — object or null. What the step answered beyond its screen: for
+  `own-server`, `code` (the enrollment code, answered this once and never
+  again), `expires_at` and `command` (what to run on the server, which carries
+  no code); for `move-now` and `try-again`, `move_id`; for `learn-more` and
+  `open-console`, which send nothing, `url`; null for every other step.
+
+Golden: `always_on/step.json`.
+
+Under `--json`, or with no terminal, the verb never prompts. A step needs what
+the action's `needs` lists, from flags only: `--stdin` the token (with
+`--provider ID` when the screen offers more than one provider),
+`--recovery-passphrase-file PATH` the recovery passphrase, `--type` with
+`--location` the size and place (both, or neither for Fermix's own
+recommendation). A need no flag gives is a usage error, exit `2`, naming the
+flag. A step whose `confirm` is not null needs `--yes`; without it the verb
+refuses `confirm_required`. A token or passphrase typed as an argument is a
+usage error. `--wait` follows the step until nothing is moving (a step's job,
+the move, a code waiting for its server), for at most 45 minutes, and then
+answers the screen as it stands; a connection that closes during the wait is
+the move restarting Fermix, followed for up to 90 seconds before
+`engine_stopped`.
+
+A refusal prints its sentence on stderr as well as its envelope on stdout:
+`app_managed` on a home the Fermix app manages ("This Fermix home is managed
+by the Fermix app, so Always On is set up in the app's Always On pane.");
+`engine_stopped` with Fermix stopped, and, once a move started and Fermix did
+not come back, "Fermix stopped for the move and has not started again. Start
+Fermix again to finish the move."; `confirm_required`; `changed`, whose `error`
+object also carries `summary`, the screen read again; `action_refused`, in the
+engine's words, or, for a step the screen does not offer, "Always On does not
+offer turn-on now. Run fermix always-on to see the steps it offers."; and
+`home_status_unavailable`. Golden: `always_on/changed.json`.
+
+`unconfirmed` (a linked desktop's Move now that the server had, whose answer
+was lost) is not a refusal: the move may have started. The verb prints the
+engine's sentence on stderr, reads the screen again and goes on exactly as
+after a move that answered (with `--wait`, or on a terminal, it follows the
+move), exits `0`, and answers the step result with `result` null.
+
 ## Error codes
 
 Every refusal a `--json` verb can print, with the sentence it carries. Where a
@@ -323,6 +384,9 @@ sentence interpolates a fact, the example below is the golden's.
 - `engine_stopped` — Fermix is not running from this home, and this needs it. Start it, then try again.
 - `snapshots_refused` — Fermix did not do that. It said: Snapshots are off: set a recovery passphrase to turn them on.
 - `home_status_unavailable` — Fermix could not read this home's status. It said: The requested management method is not available. (method_not_found)
+- `action_refused` — Fermix did not take that step. It said: Hetzner does not accept this token, so paste a Read & Write API token from the Hetzner project you made for Fermix.
+- `confirm_required` — Create your server? Hetzner bills it by the hour until it is deleted. Pass --yes to accept it.
+- `changed` — Always On changed since this was shown, so look at it again.
 
 A sentence ending in `It said:` carries the words of whatever refused —
 the service manager, the login manager, the filesystem. A client shows them and

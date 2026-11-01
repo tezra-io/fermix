@@ -2,7 +2,7 @@
 
 The primary job of this harness is **change-by-change behavioral regression**:
 does Fermix still behave like a grounded chief of staff through its real agent,
-tool, memory, and trace path? The recommended 21-case core covers realistic
+tool, memory, and trace path? The recommended 23-case core covers realistic
 multi-turn work, prioritization, tool-grounded synthesis, sycophancy
 counterfactuals, evidence-sensitive recommendations, and calibrated confidence.
 It is not a benchmark.
@@ -96,7 +96,7 @@ make dry
 make regression
 ```
 
-`make dry` validates and prints the exact 21-case plan (32 real turns) without
+`make dry` validates and prints the exact 23-case plan (34 real turns) without
 contacting the daemon or judge. `make regression` runs that host-read-only core
 through the real assistant and independent judge. For targeted investigation, select
 `chief_of_staff`, `chief_of_staff_tools`, or `epistemic_integrity` directly with
@@ -598,7 +598,7 @@ Notes:
 
 | Goal | Command | Notes |
 |---|---|---|
-| Behavioral regression (did a change break anything) | `make regression` | 21-case `host-safe-core`, independent external Claude judge, development daemon |
+| Behavioral regression (did a change break anything) | `make regression` | 23-case `host-safe-core`, independent external Claude judge, development daemon |
 | Overfitting check (public vs held-out) | put your held-out suites in a dir OUTSIDE the repo, set `private_suites.dir` in config.yaml, run `… --private`, compare the `provider/model` vs `…:private` rows | golds stay out of the repo and no held-out dataset/experiment is written; candidate prompts/replies still enter the configured Opik trace project, so choose project separation appropriate to the data; see `suites/capability/private/holdout.example.yaml` |
 | **Uplift** (Fermix vs raw model) | `make baseline` then `bin/run_uplift.py --fermix <results.json> --baseline <results.json>` | needs `EVAL_BASELINE_API_KEY` + `EVAL_BASELINE_MODEL` (same model the Fermix arm served). The claim is **the whole Fermix system vs a raw single call**, not the contribution of tools — the arms also differ in scaffold, memory and execution policy |
 | **Configuration arms** (Fermix against another Fermix) | `make arms ARMS=arms/<name>.yaml` | one task selection against several daemon CONFIGURATIONS — §5e |

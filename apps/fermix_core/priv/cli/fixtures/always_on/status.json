@@ -1,0 +1,48 @@
+{
+  "ok": true,
+  "result": {
+    "action": {
+      "confirm": null,
+      "id": "paste_token",
+      "key": "ypJXbXCwrSQSdVK8_tXftA",
+      "label": "Set up",
+      "needs": [
+        "token"
+      ],
+      "url": null
+    },
+    "detail": {
+      "alternatives": [
+        {
+          "confirm": null,
+          "id": "own_server",
+          "key": "Mx_U6542oONDPqGb3qliTQ",
+          "label": "Use my own Linux server",
+          "needs": [],
+          "url": null
+        }
+      ],
+      "providers": [
+        {
+          "console_url": "https://console.hetzner.cloud/",
+          "docs_url": "https://fermix.ai/docs/always-on/#hetzner",
+          "id": "hetzner",
+          "name": "Hetzner",
+          "sentence": "Paste a Hetzner API token to let Fermix create your server.",
+          "steps": [
+            "Sign in to Hetzner's console and turn on two-factor sign-in for your account.",
+            "Make a new project for Fermix alone, so the token reaches nothing else.",
+            "In that project, open Security, then API Tokens, and generate a token with Read & Write permission.",
+            "Paste the token here: Fermix checks it at once."
+          ],
+          "token_label": "Hetzner API token"
+        }
+      ]
+    },
+    "key": "WwwCtpM5-2otfTa1t5s38A",
+    "notice": null,
+    "sentence": "Keep Fermix running when this Mac sleeps. It moves to a server you own. iMessage, voice calls and meetings stop after the move.",
+    "state": "off"
+  },
+  "schema_version": 1
+}

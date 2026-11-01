@@ -1,7 +1,7 @@
 # fish completion for fermix, installed by the fermix package.
 # The verb list is the one `fermix help` prints; a test keeps them in step.
 
-set -l fermix_verbs setup auth ask chat run sandbox grant revoke service start stop restart status health voice acp browser browser-bridge agents capabilities skills plugins pair devices settings memory home logs upgrade uninstall migrate-to-app doctor diagnostics version help
+set -l fermix_verbs setup auth ask chat run sandbox grant revoke service start stop restart status health voice acp browser browser-bridge agents capabilities skills plugins pair devices settings memory home always-on logs upgrade uninstall migrate-to-app doctor diagnostics version help
 
 complete -c fermix -f
 
@@ -32,6 +32,7 @@ complete -c fermix -n "not __fish_seen_subcommand_from $fermix_verbs" -a devices
 complete -c fermix -n "not __fish_seen_subcommand_from $fermix_verbs" -a settings -d "Show and change settings"
 complete -c fermix -n "not __fish_seen_subcommand_from $fermix_verbs" -a memory -d "Review and restore memory"
 complete -c fermix -n "not __fish_seen_subcommand_from $fermix_verbs" -a home -d "Move, restore and snapshot this home"
+complete -c fermix -n "not __fish_seen_subcommand_from $fermix_verbs" -a always-on -d "Set up Always On and take its steps"
 complete -c fermix -n "not __fish_seen_subcommand_from $fermix_verbs" -a logs -d "Show the daemon log file"
 complete -c fermix -n "not __fish_seen_subcommand_from $fermix_verbs" -a upgrade -d "Update the engine"
 complete -c fermix -n "not __fish_seen_subcommand_from $fermix_verbs" -a uninstall -d "Remove an app-managed install"
@@ -65,7 +66,15 @@ complete -c fermix -n "__fish_seen_subcommand_from browser" -a "bridge install u
 complete -c fermix -n "__fish_seen_subcommand_from acp" -a "forget"
 complete -c fermix -n "__fish_seen_subcommand_from diagnostics" -a "export"
 complete -c fermix -n "__fish_seen_subcommand_from diagnostics" -l offline -d "Collect without a running daemon"
-complete -c fermix -n "__fish_seen_subcommand_from service install status uninstall status health agents voice ask chat capabilities skills plugins settings memory diagnostics restart" -l json -d "Print a machine-readable envelope"
+complete -c fermix -n "__fish_seen_subcommand_from always-on; and not __fish_seen_subcommand_from paste-token create-server cancel move-now try-again turn-on restart-server start-again create-in back-up-now replace-server check-again own-server delete-server learn-more open-console update" -a "paste-token create-server cancel move-now try-again turn-on restart-server start-again create-in back-up-now replace-server check-again own-server delete-server learn-more open-console update"
+complete -c fermix -n "__fish_seen_subcommand_from always-on" -l provider -r -d "The provider the token is for"
+complete -c fermix -n "__fish_seen_subcommand_from always-on" -l type -r -d "The server type to create"
+complete -c fermix -n "__fish_seen_subcommand_from always-on" -l location -r -d "The place to create it in"
+complete -c fermix -n "__fish_seen_subcommand_from always-on" -l stdin -d "Read the token from standard input"
+complete -c fermix -n "__fish_seen_subcommand_from always-on" -l recovery-passphrase-file -r -d "Read the recovery passphrase from this file"
+complete -c fermix -n "__fish_seen_subcommand_from always-on" -l yes -d "Accept what the step asks first"
+complete -c fermix -n "__fish_seen_subcommand_from always-on" -l wait -d "Wait for the step to settle"
+complete -c fermix -n "__fish_seen_subcommand_from service install status uninstall status health agents voice ask chat capabilities skills plugins settings memory always-on diagnostics restart" -l json -d "Print a machine-readable envelope"
 complete -c fermix -n "__fish_seen_subcommand_from service install" -l home -r -d "The Fermix home this service runs from"
 complete -c fermix -n "__fish_seen_subcommand_from service install" -l port -r -d "The listener port"
 complete -c fermix -n "__fish_seen_subcommand_from doctor status" -l full -d "Show every check"

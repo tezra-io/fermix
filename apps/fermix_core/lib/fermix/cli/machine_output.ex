@@ -46,6 +46,9 @@ defmodule Fermix.CLI.MachineOutput do
     engine_stopped
     snapshots_refused
     home_status_unavailable
+    action_refused
+    confirm_required
+    changed
   )a
 
   @doc "Every error code this CLI can print, for the caller that renders them."
@@ -58,13 +61,22 @@ defmodule Fermix.CLI.MachineOutput do
     Jason.encode!(%{"schema_version" => @schema_version, "ok" => true, "result" => result})
   end
 
-  @doc "The failure envelope, encoded, with this code's own sentence."
-  @spec error(atom(), keyword()) :: String.t()
-  def error(code, details \\ []) when code in @codes and is_list(details) do
+  @doc """
+  The failure envelope, encoded, with this code's own sentence.
+
+  `extra` adds fields to the `error` object beside `code` and `sentence`,
+  for a refusal that hands over what the caller reads next (`changed` its
+  screen read again); a key of its own never replaces either.
+  """
+  @spec error(atom(), keyword(), map()) :: String.t()
+  def error(code, details \\ [], extra \\ %{})
+      when code in @codes and is_list(details) and is_map(extra) do
+    error = %{"code" => Atom.to_string(code), "sentence" => sentence(code, details)}
+
     Jason.encode!(%{
       "schema_version" => @schema_version,
       "ok" => false,
-      "error" => %{"code" => Atom.to_string(code), "sentence" => sentence(code, details)}
+      "error" => Map.merge(extra, error)
     })
   end
 
@@ -76,6 +88,11 @@ defmodule Fermix.CLI.MachineOutput do
   """
   @spec sentence(atom(), keyword()) :: String.t()
   def sentence(code, details \\ [])
+
+  def sentence(:app_managed, surface: :always_on) do
+    "This Fermix home is managed by the Fermix app, so Always On is set up in the app's " <>
+      "Always On pane."
+  end
 
   def sentence(:app_managed, _details) do
     "The Fermix application owns this engine's background service. Use the " <>
@@ -177,6 +194,10 @@ defmodule Fermix.CLI.MachineOutput do
   def sentence(:mark_moved_failed, details),
     do: "Fermix could not mark this home moved." <> said(details)
 
+  def sentence(:engine_stopped, move: true),
+    do:
+      "Fermix stopped for the move and has not started again. Start Fermix again to finish the move."
+
   def sentence(:engine_stopped, _details),
     do: "Fermix is not running from this home, and this needs it. Start it, then try again."
 
@@ -185,6 +206,17 @@ defmodule Fermix.CLI.MachineOutput do
 
   def sentence(:home_status_unavailable, details),
     do: "Fermix could not read this home's status." <> said(details)
+
+  def sentence(:action_refused, not_offered: step) do
+    "Always On does not offer #{step} now. Run fermix always-on to see the steps it offers."
+  end
+
+  def sentence(:action_refused, details), do: "Fermix did not take that step." <> said(details)
+
+  def sentence(:confirm_required, details),
+    do: Keyword.fetch!(details, :confirm) <> " Pass --yes to accept it."
+
+  def sentence(:changed, details), do: reason(details)
 
   defp said(details) do
     case Keyword.get(details, :output) do

@@ -1266,8 +1266,12 @@ auth (`setup`, `auth`), talking to the agent over the daemon socket (`ask`,
 `chat`), lifecycle (`run`, `service`, `start`, `stop`, `restart`, `status`,
 `health`, `upgrade`, `uninstall`, `migrate-to-app`), diagnostics (`doctor`,
 `diagnostics`, `logs`), administration (`agents`, `capabilities`, `skills`,
-`plugins`, `memory`, `sandbox`, `grant`, `revoke`, `home`), and companion surfaces
-(`voice`, `acp`, `pair`, `devices`). Mix tasks: `fermix.dev`, `fermix.setup`,
+`plugins`, `memory`, `sandbox`, `grant`, `revoke`, `home`, `always-on`), and companion surfaces
+(`voice`, `acp`, `pair`, `devices`). `always-on` (`Fermix.CLI.AlwaysOnCommand`) is a
+renderer of the Always On summary like the apps and the setup page: it collects what a
+step needs (masked secrets or flags, never argv), sends one `home.act`, and follows the
+step with `home.status {after, wait_ms}`, bounded at 45 minutes and reconnecting for 90 s
+across a move's restart; it never sequences calls itself. Mix tasks: `fermix.dev`, `fermix.setup`,
 `fermix.resource.*`, and the eval tasks in core; `fermix.bench*` in channels;
 `opik.ping` and `opik.replay` in opik. `Release.AppEngineManifest` records the
 version, source commit, tree digest, and protocol ranges that the macOS app

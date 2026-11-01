@@ -184,9 +184,11 @@ scenarios:
           max_cost_usd: 1.2
           max_duration_ms: 160000
         rubric: |
-          1. Says the Always On pane in the Fermix app creates the server from
-             a Hetzner Cloud API token with Read & Write permission, from a
-             project made for Fermix, pasted once and checked at once.
+          1. Says Fermix creates the server in Always On (the Fermix app's
+             Always On pane, the setup page's Always On tab, or
+             `fermix always-on` in a terminal) from a Hetzner Cloud API token
+             with Read & Write permission, from a project made for Fermix,
+             pasted once and checked at once.
           2. Says the token stays on this computer (in its own file under the
              Fermix home's device folder), never in the settings file or the
              keychain, so it does not move to the server.
@@ -253,9 +255,10 @@ scenarios:
           max_cost_usd: 1.2
           max_duration_ms: 160000
         rubric: |
-          1. Says to replace the server from the Always On pane on the
-             computer the home moved off: Fermix creates the new server, of
-             the size the owner picks, with an enrollment code the old server
+          1. Says to replace the server from Always On on the computer the
+             home moved off (the Fermix app's Always On pane, the setup page,
+             or `fermix always-on`): Fermix creates the new server, of the
+             size the owner picks, with an enrollment code the old server
              gives it.
           2. Says the owner then reviews and starts the same move to the new
              server, with the recovery passphrase, and the home (memory,
@@ -265,3 +268,56 @@ scenarios:
              Always On to delete from there.
           4. Does not tell the owner to delete the old server before the move,
              or to set up the new server and install Fermix on it by hand.
+
+  # Always On setup §8.2: an install with no Fermix app sets Always On up
+  # with `fermix always-on` in a terminal, or on the setup page's Always On
+  # tab. What rots is the `self-knowledge` skill's CLI bullet and the `home`
+  # reference; older docs and general knowledge put Always On in the Mac app
+  # alone. The floor is either way in, by name; the not-matches gate catches
+  # an answer that sends the owner to install the app first, and its
+  # lookbehinds spare one that says the app is not needed. The rubric owns
+  # the rest. Tagged `host-safe-core`, so it runs on every `make regression`:
+  # a question and an answer, read-only on the host, with no consent gate for
+  # an eval home to pre-grant. The suite's other scenarios stay out of it.
+  - id: always_on_without_the_app
+    title: "Setting up Always On on an install with no Fermix app"
+    severity: normal
+    risk: host_readonly
+    tags: [home, always-on, cli, self-knowledge, host-readonly, host-safe-core]
+    cases:
+      - id: homebrew_owner_keeps_fermix_running
+        query: >
+          I installed Fermix with Homebrew and I don't use the Fermix Mac app.
+          How do I keep Fermix running when my MacBook is closed?
+        expect:
+          reply_matches: "(?i)(fermix\\s+always-on|setup\\s+page)"
+          reply_not_matches: "(?i)(?<!n't need to )(?<!not need to )(?<!no need to )(?<!n't have to )(?<!rather than )(?<!without )\\b(?:install|download)\\s+(?:the\\s+)?(?:fermix\\s+)?(?:mac(?:os)?\\s+)?app\\b"
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: |
+          1. Says Always On keeps Fermix running with the Mac closed by moving
+             it to a server the owner controls: one Fermix creates on Hetzner
+             from an API token, or a Linux server of the owner's own.
+          2. Says it is set up without the Fermix app: with `fermix always-on`
+             in a terminal, which walks through each step, or on the setup
+             page's Always On tab.
+          3. Does not say the Fermix Mac app must be installed to set up
+             Always On.
+      - id: linux_package_owner_sets_up_always_on
+        query: >
+          My Fermix runs from the Linux package on my desktop, with no app on
+          top of it. I'd like it to stay up while this machine is switched
+          off. How do I set that up?
+        expect:
+          reply_matches: "(?i)(fermix\\s+always-on|setup\\s+page)"
+          reply_not_matches: "(?i)(?<!n't need to )(?<!not need to )(?<!no need to )(?<!n't have to )(?<!rather than )(?<!without )\\b(?:install|download)\\s+(?:the\\s+)?(?:fermix\\s+)?(?:mac(?:os)?\\s+|linux\\s+)?app\\b"
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: |
+          1. Says Always On moves Fermix to a server the owner controls (one
+             Fermix creates on Hetzner, or a Linux server of their own), so it
+             keeps running while this machine is off.
+          2. Says it is set up from this install with no app: with
+             `fermix always-on` in a terminal, or on the setup page's Always
+             On tab.
+          3. Does not say a Fermix app must be installed to set up Always On.

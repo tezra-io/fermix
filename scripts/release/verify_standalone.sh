@@ -479,6 +479,34 @@ settings_json="$(cat "$settings_out")"
 grep -Fq "daemon is not running" "$settings_err" ||
   fail "fermix settings did not say on stderr why it changed nothing: $(cat "$settings_err")"
 
+# ── fermix always-on with no daemon, run from this artifact ─────────────────
+# `fermix always-on` takes Always On's steps only through the running engine
+# (one `home.act` each) and never writes a home itself, so with no daemon a
+# step must refuse: exit 1, exactly one JSON envelope on stdout naming
+# `engine_stopped`, the sentence on stderr, and nothing written. The verb reads
+# the account's files to tell whether the Fermix app manages the home, so this
+# stage runs it from the artifact the release is about to publish, against a
+# home that does not exist yet. It runs before the migrate-to-app stage because
+# that stage ends the script on a Linux target.
+always_on_home="$runtime_root/always-on-home"
+always_on_out="$runtime_root/always-on.out"
+always_on_err="$runtime_root/always-on.err"
+always_on_status=0
+env -u FERMIX_OPIK_ENABLED HOME="$home" FERMIX_HOME="$always_on_home" \
+  "$artifact" always-on create-server --json < /dev/null > "$always_on_out" 2> "$always_on_err" ||
+  always_on_status=$?
+printf '%s\n' "$(cat "$always_on_err")"
+[ "$always_on_status" -eq 1 ] ||
+  fail "fermix always-on create-server with no daemon must exit 1, got $always_on_status"
+always_on_json="$(cat "$always_on_out")"
+always_on_expected='{"error":{"code":"engine_stopped","sentence":"Fermix is not running from this home, and this needs it. Start it, then try again."},"ok":false,"schema_version":1}'
+[ "$always_on_json" = "$always_on_expected" ] ||
+  fail "fermix always-on --json with no daemon must print exactly the engine_stopped envelope on stdout, got: $always_on_json"
+grep -Fq "Fermix is not running from this home" "$always_on_err" ||
+  fail "fermix always-on did not say on stderr why it took no step: $(cat "$always_on_err")"
+[ ! -e "$always_on_home" ] ||
+  fail "fermix always-on wrote a home at $always_on_home with no daemon: $(ls -A "$always_on_home")"
+
 # ── fermix home export, import and mark-moved, run from this artifact ──────
 # `fermix home` runs without the supervision tree and carries a whole home: it
 # probes the control socket, seals and opens the archive with the packaged

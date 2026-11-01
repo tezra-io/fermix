@@ -91,7 +91,10 @@ passphrase lives only in the submitted form and the one step it becomes:
 every such field is drawn empty and replaced after each submit, none is kept
 in the page's state, and the one-time code for a server of the owner's own
 is held where no crash report prints it and copied from the page, never
-sent back in an event. While the server stands, a new token
+sent back in an event. `fermix always-on` takes the token
+only from a prompt that does not echo or from stdin, and the recovery passphrase
+only from such a prompt or a file, refuses either typed as an argument, and holds
+them in that struct until the one request that sends them. While the server stands, a new token
 replaces the kept one only when it reaches that server (the same project),
 so no token for another project can take its place; a provider's token
 never moves to another provider's file. Fermix touches only
