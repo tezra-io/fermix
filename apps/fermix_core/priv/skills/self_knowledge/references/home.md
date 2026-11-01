@@ -738,7 +738,8 @@ it, never a second writer.
   and `q` quits, and for the step taken it asks what the step needs: the
   provider's How to get one and the token without echo (with the count of
   characters it read), the size and place as a numbered list of what Hetzner
-  has in stock with the recommendation first, the recovery passphrase without
+  has in stock, grouped by city, with the recommendation first and each
+  offer and its price in Fermix's words, the recovery passphrase without
   echo (twice where none is set yet), and the confirm as `[y/N]`, No unless
   answered. It prints the step's id as it runs, never what was typed, then
   waits for Always On to move on (a step's job, the move, a code waiting for

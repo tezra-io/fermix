@@ -543,7 +543,10 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
       assert out =~ "Make a new project for Fermix alone"
 
       assert out =~
-               "  1. CPX22 in Falkenstein: 2 cores, 4 GB memory, 80 GB disk, 20.09 EUR a month (recommended)"
+               "Recommended: CPX22 in Falkenstein, €20 a month.\nFalkenstein\n" <>
+                 "  1. CPX22: 2 cores, 4 GB memory, 80 GB disk\n" <>
+                 "     €20.09 a month, billed by the hour until deleted\n" <>
+                 "  2. CPX32: 4 cores, 8 GB memory, 160 GB disk\n"
 
       assert out =~ "  1. Move now\n"
       assert prompts =~ "Hetzner API token: "
@@ -567,6 +570,64 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
 
       assert out =~ "  1. Set up\n  2. Use my own Linux server\n  3. Cancel the code\n"
       refute_received {:called, "home.status", %{"after" => _key}, _opts}
+    end
+
+    # The menu is the engine's answer as sent: the recommendation first, the
+    # rest grouped by city, each offer its label and its price, and a number
+    # chooses that offer's size and place.
+    test "the size-and-place menu groups the engine's offers by city, and a pick sends it",
+         ctx do
+      act = fn params ->
+        assert params == %{
+                 "action" => "create_server",
+                 "key" => "a-create",
+                 "input" => %{"type" => "cpx32", "location" => "hel1"}
+               }
+
+        {:ok, %{"summary" => creating(), "result" => nil}}
+      end
+
+      ready = golden_summary("home_status_ready")
+
+      client =
+        script([
+          hello(),
+          {"home.status", {:ok, status(choose())}},
+          {"home.provision.options", {:ok, options()}},
+          {"home.act", act},
+          {"home.status", wait_for("k-creating", {:ok, status(ready)}, ctx)}
+        ])
+
+      {{0, out, err}, _prompts} = run_tty(["create-server"], ctx, client, "7\ny\n")
+
+      menu = out |> lines() |> Enum.drop_while(&(not String.starts_with?(&1, "Recommended:")))
+
+      assert Enum.take(menu, 20) == [
+               "Recommended: CPX22 in Falkenstein, €20 a month.",
+               "Falkenstein",
+               "  1. CPX22: 2 cores, 4 GB memory, 80 GB disk",
+               "     €20.09 a month, billed by the hour until deleted",
+               "  2. CPX32: 4 cores, 8 GB memory, 160 GB disk",
+               "     €36.09 a month, billed by the hour until deleted",
+               "  3. CCX13: 2 dedicated cores, 8 GB memory, 80 GB disk",
+               "     €42.24 a month, billed by the hour until deleted",
+               "Nuremberg",
+               "  4. CPX22: 2 cores, 4 GB memory, 80 GB disk",
+               "     €20.09 a month, billed by the hour until deleted",
+               "  5. CCX13: 2 dedicated cores, 8 GB memory, 80 GB disk",
+               "     €42.24 a month, billed by the hour until deleted",
+               "Helsinki",
+               "  6. CPX22: 2 cores, 4 GB memory, 80 GB disk",
+               "     €20.09 a month, billed by the hour until deleted",
+               "  7. CPX32: 4 cores, 8 GB memory, 160 GB disk",
+               "     €36.09 a month, billed by the hour until deleted",
+               "  8. CCX13: 2 dedicated cores, 8 GB memory, 80 GB disk",
+               "     €42.24 a month, billed by the hour until deleted"
+             ]
+
+      assert err =~ "Size and place (Enter: 1): "
+      assert err =~ @create_confirm <> " [y/N] "
+      assert out =~ "Your server is ready for the move."
     end
 
     test "No at the confirm sends nothing", ctx do
@@ -771,37 +832,13 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
         "action" => record("turn_on", "Turn it on", [], nil, "a-on")
     }
 
+  # The engine's own answer, the management golden: the CLI draws it as sent.
   defp options do
-    offer = fn type, location, cores, memory, disk, total ->
-      %{
-        "type" => type,
-        "description" => String.upcase(type),
-        "cores" => cores,
-        "memory_gb" => memory,
-        "disk_gb" => disk,
-        "dedicated" => false,
-        "location" => location,
-        "monthly" => total,
-        "ipv4_monthly" => "0.60",
-        "total_monthly" => total
-      }
-    end
-
-    %{
-      "currency" => "EUR",
-      "locations" => [
-        %{"id" => "fsn1", "city" => "Falkenstein", "country" => "DE"},
-        %{"id" => "hel1", "city" => "Helsinki", "country" => "FI"}
-      ],
-      "offers" => [
-        offer.("cpx22", "fsn1", 2, 4, 80, "20.09"),
-        offer.("cpx22", "hel1", 2, 4, 80, "20.09"),
-        offer.("cpx32", "fsn1", 4, 8, 160, "36.09")
-      ],
-      "recommended" => %{"type" => "cpx22", "location" => "fsn1"},
-      "more_room" => %{"type" => "cpx32", "location" => "fsn1"},
-      "sentence" => "Recommended: CPX22 in Falkenstein, €20 a month."
-    }
+    Application.app_dir(:fermix_core, "priv/management/fixtures/success.jsonl")
+    |> File.stream!()
+    |> Enum.map(&Jason.decode!/1)
+    |> Enum.find(&(&1["name"] == "home_provision_options"))
+    |> get_in(["response", "result"])
   end
 
   defp golden_summary(name) do

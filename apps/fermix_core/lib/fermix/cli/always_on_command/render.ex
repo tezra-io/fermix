@@ -4,10 +4,10 @@ defmodule Fermix.CLI.AlwaysOnCommand.Render do
   (Always On setup §8.2). Pure: every function takes a summary, a record
   or an answer and returns lines; nothing here reads or writes.
 
-  Every sentence, label, Details line and confirm is the engine's, printed
-  as it came. What is the CLI's own is how it draws them: the step's
-  command (`fermix always-on create-server`), the numbered menu, the list
-  of sizes and places, and the frame around the own-server code. An
+  Every sentence, label, Details line, confirm, offer and price is the
+  engine's, printed as it came. What is the CLI's own is how it draws them:
+  the step's command (`fermix always-on create-server`), the numbers and
+  the grouping of the menus, and the frame around the own-server code. An
   action's id is printed in its kebab form, the one the command takes.
   """
 
@@ -102,42 +102,56 @@ defmodule Fermix.CLI.AlwaysOnCommand.Render do
   end
 
   @doc """
-  The sizes and places `home.provision.options` answered, numbered with the
-  recommendation first, and what each number chooses: `:recommended` (Fermix
-  takes its own recommendation) or `{type, location}`.
+  The sizes and places `home.provision.options` answered, as the engine
+  words them: its sentence, then the offers grouped under the city of their
+  place (the recommendation's city first, the rest in the engine's order),
+  each numbered with its `label` and, beneath, its `price`, the
+  recommendation first in its city. Also what each number chooses:
+  `:recommended` (Fermix takes its own recommendation) or `{type, location}`.
   """
   @spec offers(map()) :: {[String.t()], [:recommended | {String.t(), String.t()}]}
-  def offers(%{"offers" => offers, "recommended" => recommended} = options) do
-    {first, rest} = Enum.split_with(offers, &same_offer?(&1, recommended))
-    cities = Map.new(options["locations"] || [], &{&1["id"], &1["city"]})
-
-    priced =
-      Enum.map(first, &{&1, " (recommended)", :recommended}) ++
-        Enum.map(rest, &{&1, "", choice(&1)})
-
-    lines =
-      priced
-      |> Enum.with_index(1)
-      |> Enum.map(fn {{offer, mark, _choice}, i} ->
-        "  #{i}. #{offer_line(offer, cities, options["currency"])}#{mark}"
-      end)
-
-    {[options["sentence"] | lines], Enum.map(priced, &elem(&1, 2))}
+  def offers(%{"offers" => offers, "locations" => locations} = options) do
+    groups = groups(offers, locations, options["recommended"])
+    {lines, choices} = groups |> Enum.reduce({[], []}, &group/2)
+    {[options["sentence"] | Enum.reverse(lines)], Enum.reverse(choices)}
   end
+
+  defp groups(offers, locations, recommended) do
+    locations
+    |> Enum.sort_by(&(not same_place?(&1, recommended)))
+    |> Enum.map(&{&1["city"], placed(offers, &1["id"], recommended)})
+    |> Enum.reject(fn {_city, rows} -> rows == [] end)
+  end
+
+  defp placed(offers, location, recommended) do
+    offers
+    |> Enum.filter(&(&1["location"] == location))
+    |> Enum.sort_by(&(not same_offer?(&1, recommended)))
+    |> Enum.map(&{&1, choice(&1, recommended)})
+  end
+
+  # Lines and choices accumulate reversed; the next number is one past the
+  # choices so far.
+  defp group({city, rows}, {lines, choices}) do
+    Enum.reduce(rows, {[city | lines], choices}, fn {offer, choice}, {lines, choices} ->
+      number = length(choices) + 1
+      row = ["     " <> offer["price"], "  #{number}. #{offer["label"]}"]
+      {row ++ lines, [choice | choices]}
+    end)
+  end
+
+  defp same_place?(location, %{"location" => id}), do: location["id"] == id
+  defp same_place?(_location, nil), do: false
 
   defp same_offer?(offer, %{"type" => type, "location" => location}),
     do: offer["type"] == type and offer["location"] == location
 
   defp same_offer?(_offer, nil), do: false
 
-  defp choice(offer), do: {offer["type"], offer["location"]}
-
-  defp offer_line(offer, cities, currency) do
-    city = Map.get(cities, offer["location"], offer["location"])
-    dedicated = if offer["dedicated"], do: ", dedicated cores", else: ""
-
-    "#{offer["description"]} in #{city}: #{offer["cores"]} cores, #{offer["memory_gb"]} GB " <>
-      "memory, #{offer["disk_gb"]} GB disk#{dedicated}, #{offer["total_monthly"]} #{currency} a month"
+  defp choice(offer, recommended) do
+    if same_offer?(offer, recommended),
+      do: :recommended,
+      else: {offer["type"], offer["location"]}
   end
 
   @doc "What a step answered beyond its screen: the own-server code, shown this once."
