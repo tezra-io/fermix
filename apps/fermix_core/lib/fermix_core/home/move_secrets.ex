@@ -22,6 +22,17 @@ defmodule FermixCore.Home.MoveSecrets do
   (`adopt/2`), so the new primary resolves every secret the source had. A
   reference whose file did not arrive is left as it is.
 
+  **On a return** (Always On's move back to the computer the home left), the
+  server's copy comes back with those secrets in its file store, some of them
+  changed there since. Where this computer kept its secrets in the keychain,
+  `restore/3`, the inverse of `adopt/2`, writes each `@file` reference's value
+  back into the keychain under the staged settings' profile, replacing
+  whatever the item held, so a value changed on the server wins and a stale
+  item is never read; the reference becomes `@keyring` again and the file is
+  removed. A reference whose file did not come back, or one Fermix cannot
+  name, is left as it is. A keychain that refuses a write stops it there and
+  names every secret it did not take.
+
   **Everywhere.** `missing/1` names the registry's references that did not
   resolve on this host (a sentinel still in the live settings), which
   `home.status` answers as `secrets_missing`.
@@ -38,6 +49,8 @@ defmodule FermixCore.Home.MoveSecrets do
   alias FermixCore.Setup.SecretPaths
   alias FermixCore.Setup.SecretStore
   alias FermixCore.Setup.SecretWriter
+
+  require Logger
 
   @cue_prefix "fermix_core.cues.sources."
 
@@ -154,6 +167,86 @@ defmodule FermixCore.Home.MoveSecrets do
       end)
 
     {:ok, text, Enum.map(carried, & &1.id)}
+  end
+
+  @doc """
+  Writes the value of each `@file` reference of `config_text` whose file the
+  staged home at `staging` holds into the keychain, under the profile
+  `config_text` names, turns the reference into `@keyring` and removes the
+  file; every other byte is kept. `opts` go to `SecretWriter.put/3`
+  (`:supervised`, and `:impl` in a test). Answers the text and the ids it
+  restored, or stops at the first write the keychain refuses and names every
+  secret it did not take.
+  """
+  @spec restore(String.t(), Path.t(), keyword()) ::
+          {:ok, String.t(), [String.t()]}
+          | {:error, {:keychain_refused, [String.t(), ...]} | {:file, Path.t(), term()}}
+  def restore(config_text, staging, opts)
+      when is_binary(config_text) and is_binary(staging) and is_list(opts) do
+    write_opts =
+      Keyword.merge(Keyword.take(opts, [:supervised, :impl]),
+        profile: profile(config_text),
+        store: :keyring
+      )
+
+    config_text
+    |> ConfigText.file_keys()
+    |> Enum.map(fn {section, key} -> reference(section, key) end)
+    |> Enum.filter(&(match?(%{}, &1) and File.regular?(Path.join(staging, &1.file))))
+    |> restore_each(config_text, staging, write_opts)
+  end
+
+  defp restore_each(refs, text, staging, write_opts) do
+    refs
+    |> Enum.reduce_while({:ok, text, []}, fn ref, {:ok, text, done} ->
+      case restore_one(ref, text, staging, write_opts) do
+        {:ok, text} -> {:cont, {:ok, text, [ref.id | done]}}
+        {:error, :refused} -> {:halt, {:refused, Enum.map(refs -- written(refs, done), & &1.id)}}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+    |> restored()
+  end
+
+  defp written(refs, ids), do: Enum.filter(refs, &(&1.id in ids))
+
+  defp restored({:ok, text, done}), do: {:ok, text, Enum.reverse(done)}
+  defp restored({:refused, ids}), do: {:error, {:keychain_refused, ids}}
+  defp restored({:error, _reason} = error), do: error
+
+  defp restore_one(ref, text, staging, write_opts) do
+    file = Path.join(staging, ref.file)
+
+    with {:ok, value} <- read_secret(file),
+         :ok <- put_secret(ref, value, write_opts),
+         :ok <- remove_secret(file) do
+      {:ok, ConfigText.put(text, ref.section, ref.key, Jason.encode!(SecretWriter.sentinel()))}
+    end
+  end
+
+  defp read_secret(file) do
+    case File.read(file) do
+      {:ok, value} -> {:ok, value}
+      {:error, reason} -> {:error, {:file, file, reason}}
+    end
+  end
+
+  defp put_secret(ref, value, write_opts) do
+    case SecretWriter.put(ref.secret, value, write_opts) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error("return: the keychain refused #{ref.id}: #{inspect(reason)}")
+        {:error, :refused}
+    end
+  end
+
+  defp remove_secret(file) do
+    case File.rm(file) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:file, file, reason}}
+    end
   end
 
   @doc """

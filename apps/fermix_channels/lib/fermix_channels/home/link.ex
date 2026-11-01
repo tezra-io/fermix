@@ -9,7 +9,8 @@ defmodule FermixChannels.Home.Link do
   `status/0`'s `desktops` by the primary's desktop peers
   (`FermixChannels.Desktop.Peer`), and `open_enrollment/1`,
   `withdraw_enrollment/1` and `status/0`'s `enrollment` by the enrollment
-  window.
+  window, and `drop_desktop_row/2` by the device store of the staged home it
+  names.
 
   The desktop relay (`FermixChannels.Desktop.Relay`) runs only in a device
   role whose home holds its desktop link, which is also the only engine whose
@@ -56,6 +57,17 @@ defmodule FermixChannels.Home.Link do
   @impl true
   def withdraw_enrollment(kind) when kind in [:manual, :provisioned] do
     if Process.whereis(Enrollment), do: Enrollment.withdraw(Enrollment, kind), else: :ok
+  end
+
+  # A staged home's list, by its root: never the running store's.
+  @impl true
+  def drop_desktop_row(root, <<_::256>> = noise_pk) when is_binary(root) and root != "" do
+    case DeviceStore.find_by_noise_pk(noise_pk, root: root) do
+      {:ok, %{kind: :desktop, device_id: id}} -> DeviceStore.delete(id, root: root)
+      {:ok, %{device_id: id}} -> {:error, {:not_a_desktop, id}}
+      {:error, {:noise_identity_not_found, _key}} -> :ok
+      {:error, _reason} = error -> error
+    end
   end
 
   # Every desktop row the primary holds, with whether its session is up now.

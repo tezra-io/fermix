@@ -99,6 +99,15 @@ defmodule FermixCore.Home.Link do
   """
   @callback rename_primary(String.t()) :: :ok | {:error, term()}
 
+  @doc """
+  Any role: removes the desktop row whose Noise key is `noise_pk` from the
+  device list of the home at `root` (a staged home, never the running one's):
+  a return stages the server's home on the computer it left, whose own row
+  that list holds. A list with no such row, or no list, has nothing to drop;
+  a row of that key that is no desktop is refused by name.
+  """
+  @callback drop_desktop_row(Path.t(), <<_::256>>) :: :ok | {:error, term()}
+
   @typedoc "How a request reaches the primary: the rail's `forward/2` on a linked desktop."
   @type forwarding ::
           [primary_forward: (Protocol.request(), keyword() -> Protocol.route_result())] | []

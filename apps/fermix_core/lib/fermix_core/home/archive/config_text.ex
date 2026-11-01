@@ -62,26 +62,35 @@ defmodule FermixCore.Home.Archive.ConfigText do
   header names it (`put/4` takes it back).
   """
   @spec keyring_keys(String.t()) :: [{String.t(), String.t()}]
-  def keyring_keys(contents) when is_binary(contents) do
+  def keyring_keys(contents) when is_binary(contents), do: sentinel_keys(contents, :keyring)
+
+  @doc """
+  Where the file keeps a reference to a secret held in its file store: each
+  `{section, key}` whose value is `@file`, in file order, as `keyring_keys/1`.
+  """
+  @spec file_keys(String.t()) :: [{String.t(), String.t()}]
+  def file_keys(contents) when is_binary(contents), do: sentinel_keys(contents, :file)
+
+  defp sentinel_keys(contents, store) do
     {_section, keys} =
       contents
       |> String.split("\n")
       |> Enum.reduce({"", []}, fn line, {section, keys} ->
         case header(line) do
           {:ok, name} -> {name, keys}
-          :none -> {section, keyring_key(line, section) ++ keys}
+          :none -> {section, sentinel_key(line, section, store) ++ keys}
         end
       end)
 
     Enum.reverse(keys)
   end
 
-  defp keyring_key(line, section) do
+  defp sentinel_key(line, section, store) do
     with key when is_binary(key) <- key_of(line),
          true <-
            Enum.any?(
              value_tokens(line),
-             &(SecretWriter.store_of_sentinel(&1.value) == {:ok, :keyring})
+             &(SecretWriter.store_of_sentinel(&1.value) == {:ok, store})
            ) do
       [{section, key}]
     else
@@ -120,6 +129,52 @@ defmodule FermixCore.Home.Archive.ConfigText do
     end
     |> Enum.join("\n")
   end
+
+  @doc """
+  The tables of the file named `table` or beneath it (`table.<name>…`), each
+  as its header line and every line after it up to the next header, in file
+  order.
+  """
+  @spec tables(String.t(), String.t()) :: [String.t()]
+  def tables(contents, table)
+      when is_binary(contents) and is_binary(table) and table != "" do
+    contents
+    |> String.split("\n")
+    |> blocks()
+    |> Enum.filter(fn {name, _lines} -> under_table?(name, table) end)
+    |> Enum.map(fn {_name, lines} -> Enum.join(lines, "\n") end)
+  end
+
+  @doc "The file without the tables `tables/2` answers for `table`; every other line kept."
+  @spec drop_tables(String.t(), String.t()) :: String.t()
+  def drop_tables(contents, table)
+      when is_binary(contents) and is_binary(table) and table != "" do
+    contents
+    |> String.split("\n")
+    |> blocks()
+    |> Enum.reject(fn {name, _lines} -> under_table?(name, table) end)
+    |> Enum.flat_map(fn {_name, lines} -> lines end)
+    |> Enum.join("\n")
+  end
+
+  # The file's lines grouped by the table each belongs to: the lines before the
+  # first header belong to the root table, named "".
+  defp blocks(lines) do
+    lines
+    |> Enum.chunk_while(
+      {"", []},
+      fn line, {name, acc} ->
+        case header(line) do
+          {:ok, next} -> {:cont, {name, Enum.reverse(acc)}, {next, [line]}}
+          :none -> {:cont, {name, [line | acc]}}
+        end
+      end,
+      fn {name, acc} -> {:cont, {name, Enum.reverse(acc)}, nil} end
+    )
+    |> Enum.reject(&match?({"", []}, &1))
+  end
+
+  defp under_table?(name, table), do: name == table or String.starts_with?(name, table <> ".")
 
   @doc "The string a raw TOML basic or literal string value holds, or `:error`."
   @spec string(String.t()) :: {:ok, String.t()} | :error

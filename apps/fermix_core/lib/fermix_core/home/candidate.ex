@@ -35,15 +35,33 @@ defmodule FermixCore.Home.Candidate do
   otherwise): the new one is built beside it and swapped in, and a failure
   part-way puts the old one back. Activation is
   `FermixCore.Home.Candidate.Activation`.
+
+  **A return** (Always On's move back to the computer the home left) writes
+  the candidate beside that computer's moved home instead
+  (`prepare_return/3`), with `"kind"` in `state.json`: `return` for one the
+  server's move fills over the rail (the files above but the settings file,
+  and `destination.json` empty: the server's settings name its snapshots
+  already), `local` for one restored from a copy this computer holds
+  (`state.json` alone). The home keeps its settings and its moved marker
+  until the return's activation. It is refused unless this engine runs in
+  the device role as a service that restarts itself, the home carries the
+  marker and, for `return`, its desktop link, no move is under way here, and
+  no candidate is under way: one that ended (`failed`, `expired`) is
+  replaced. It is built in a private sibling directory renamed into place,
+  and a builder a crash left is removed first.
   """
 
   alias FermixCore.Home.Candidate.Activation
   alias FermixCore.Home.DaemonProbe
+  alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.DeviceLocal
   alias FermixCore.Home.EnrollmentCode
   alias FermixCore.Home.Epoch
+  alias FermixCore.Home.Move
   alias FermixCore.Home.Moved
+  alias FermixCore.Home.Role
   alias FermixCore.Home.Snapshot.Recipient
+  alias FermixCore.Management.Lifecycle
 
   @dir "candidate"
   @version 1
@@ -51,6 +69,8 @@ defmodule FermixCore.Home.Candidate do
   @file_mode 0o600
   @phases ~w(enrolling enrolled receiving staged activating expired failed)
   @config_text ~s([fermix_core.engine]\nrole = "candidate"\n)
+  @builder_prefix ".candidate-"
+  @ended ~w(failed expired)
 
   @type phase :: String.t()
   @type state :: %{required(String.t()) => term()}
@@ -107,6 +127,30 @@ defmodule FermixCore.Home.Candidate do
   defp enroll_into(created_home?, home, code, destination, now, consume) do
     write_all(home, code, destination, now, consume)
     |> undo_on_error(home, created_home?)
+  end
+
+  @doc """
+  Writes a return's candidate beside the moved home at `home` (see the
+  moduledoc): `{:return, code_text}` for one the server's move fills, from the
+  manual enrollment code the server opened, or `{:local, from}` for one
+  restored from a copy this computer holds of the server named `from`.
+  Answers the state written. `opts`: `:now`, and the seams `:role` (this
+  engine's, `Role.current/0`) and `:restarts_itself?`
+  (`Lifecycle.restarts_itself?/0`).
+  """
+  @spec prepare_return(Path.t(), {:return, String.t()} | {:local, String.t()}, keyword()) ::
+          {:ok, state()} | {:error, term()}
+  def prepare_return(home, source, opts \\ [])
+      when is_binary(home) and home != "" and is_tuple(source) and is_list(opts) do
+    now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
+
+    with :ok <- returnable_engine(opts),
+         :ok <- returnable_home(home, source),
+         {:ok, found} <- replaceable_return(home),
+         {:ok, state} <- return_state(source, now),
+         :ok <- remove_builders(home) do
+      build_return(home, source, state, found)
+    end
   end
 
   @doc "Reads `state.json`."
@@ -230,6 +274,28 @@ defmodule FermixCore.Home.Candidate do
       "This home was becoming the primary from a move, and its restored settings are not " <>
         "in place yet. Start it in the candidate role to finish the move."
 
+  def error_sentence(:not_device),
+    do:
+      "Fermix does not run as a desktop of a server here, so there is nothing to move back " <>
+        "from."
+
+  def error_sentence(:not_supervised),
+    do:
+      "Fermix runs from a terminal here, so it could not start again on its own after the " <>
+        "move back. Install it as a service first."
+
+  def error_sentence(:not_moved),
+    do: "This home never moved to a server, so there is nothing to move back."
+
+  def error_sentence(:not_linked),
+    do: "This computer is not linked to a server any more, so Fermix cannot move back from one."
+
+  def error_sentence(:move_pending),
+    do: "A move is under way on this computer; move back once it is done."
+
+  def error_sentence(:candidate_present),
+    do: "Fermix is already getting ready to move back to this computer."
+
   def error_sentence({:code_file, file, reason}),
     do:
       "The code file #{file} could not be removed (#{:file.format_error(reason)}), so " <>
@@ -298,6 +364,147 @@ defmodule FermixCore.Home.Candidate do
     end
   end
 
+  # -- prepare_return ---------------------------------------------------------
+
+  defp returnable_engine(opts) do
+    cond do
+      Keyword.get_lazy(opts, :role, &Role.current/0) != :device ->
+        {:error, :not_device}
+
+      not Keyword.get_lazy(opts, :restarts_itself?, &Lifecycle.restarts_itself?/0) ->
+        {:error, :not_supervised}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp returnable_home(home, source) do
+    case Moved.read(home) do
+      {:ok, _marker} -> linked_and_still(home, source)
+      :absent -> {:error, :not_moved}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp linked_and_still(home, {:return, _code}) do
+    if File.regular?(DesktopLink.path(home)),
+      do: no_move_here(home),
+      else: {:error, :not_linked}
+  end
+
+  defp linked_and_still(home, {:local, _from}), do: no_move_here(home)
+
+  defp no_move_here(home) do
+    case Move.moving_to(home) do
+      :none -> :ok
+      {:ok, _name} -> {:error, :move_pending}
+    end
+  end
+
+  # A candidate that ended holds nothing anyone waits for, so it is replaced.
+  defp replaceable_return(home) do
+    case read_state(home) do
+      {:ok, %{"phase" => phase}} when phase in @ended -> {:ok, :replace}
+      {:ok, _under_way} -> {:error, :candidate_present}
+      {:error, {:file, _path, :enoent}} -> absent_candidate(home)
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp absent_candidate(home) do
+    if present?(home), do: {:error, {:invalid_state, path(home, "state.json")}}, else: {:ok, :new}
+  end
+
+  defp return_state({:return, code_text}, now) when is_binary(code_text) do
+    with {:ok, code} <- EnrollmentCode.decode(code_text),
+         :ok <- not_expired(code, now) do
+      {:ok,
+       %{
+         "v" => @version,
+         "phase" => "enrolling",
+         "kind" => "return",
+         "primary" => primary_facts(code),
+         "updated_at" => iso(now)
+       }}
+    end
+  end
+
+  defp return_state({:local, from}, now) when is_binary(from) and from != "",
+    do:
+      {:ok,
+       %{
+         "v" => @version,
+         "phase" => "receiving",
+         "kind" => "local",
+         "primary" => %{"name" => from},
+         "updated_at" => iso(now)
+       }}
+
+  defp remove_builders(home) do
+    with {:ok, names} <- list_home(home) do
+      names
+      |> Enum.filter(&String.starts_with?(&1, @builder_prefix))
+      |> Enum.reduce_while(:ok, fn name, :ok -> remove_builder(Path.join(home, name)) end)
+    end
+  end
+
+  defp remove_builder(builder) do
+    case File.rm_rf(builder) do
+      {:ok, _removed} -> {:cont, :ok}
+      {:error, reason, file} -> {:halt, {:error, {:file, file, reason}}}
+    end
+  end
+
+  defp list_home(home) do
+    case File.ls(home) do
+      {:ok, names} -> {:ok, names}
+      {:error, reason} -> {:error, {:file, home, reason}}
+    end
+  end
+
+  defp build_return(home, source, state, found) do
+    building = Path.join(home, @builder_prefix <> Base.encode16(:crypto.strong_rand_bytes(4)))
+
+    result =
+      with :ok <- make_dir(building),
+           :ok <- write_return_files(building, source, state),
+           :ok <- drop_ended(home, found),
+           :ok <- rename(building, dir(home)) do
+        {:ok, state}
+      end
+
+    _ = File.rm_rf(building)
+    result
+  end
+
+  defp write_return_files(building, {:return, code_text}, state) do
+    with :ok <- write_keys(building, code_text, %{}) do
+      write_private(Path.join(building, "state.json"), Jason.encode!(state))
+    end
+  end
+
+  defp write_return_files(building, {:local, _from}, state),
+    do: write_private(Path.join(building, "state.json"), Jason.encode!(state))
+
+  defp drop_ended(_home, :new), do: :ok
+
+  defp drop_ended(home, :replace) do
+    case File.rm_rf(dir(home)) do
+      {:ok, _removed} -> :ok
+      {:error, reason, file} -> {:error, {:file, file, reason}}
+    end
+  end
+
+  defp primary_facts(code),
+    do: %{
+      "name" => code.name,
+      "gateway_pk" => Base.encode64(code.gateway_pk),
+      "node_id" => code.node_id
+    }
+
+  defp iso(%DateTime{} = at), do: at |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+
   # Everything goes into a private sibling directory first and is renamed into
   # place whole, then the settings file is created; a failure removes what was
   # written (`undo_on_error/3`).
@@ -362,19 +569,22 @@ defmodule FermixCore.Home.Candidate do
   end
 
   defp write_files(building, code, code_text, destination, now) do
-    {_public, noise_private} = :crypto.generate_key(:ecdh, :x25519)
-    recipient = Recipient.generate()
-
     state = %{
       "v" => @version,
       "phase" => "enrolling",
-      "primary" => %{
-        "name" => code.name,
-        "gateway_pk" => Base.encode64(code.gateway_pk),
-        "node_id" => code.node_id
-      },
-      "updated_at" => now |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+      "primary" => primary_facts(code),
+      "updated_at" => iso(now)
     }
+
+    with :ok <- write_keys(building, code_text, destination) do
+      write_private(Path.join(building, "state.json"), Jason.encode!(state))
+    end
+  end
+
+  # The code and every key a candidate enrolls and receives a move with.
+  defp write_keys(building, code_text, destination) do
+    {_public, noise_private} = :crypto.generate_key(:ecdh, :x25519)
+    recipient = Recipient.generate()
 
     with :ok <- write_private(Path.join(building, "code"), String.trim(code_text)),
          :ok <- write_private(Path.join(building, "destination.json"), Jason.encode!(destination)),
@@ -384,13 +594,8 @@ defmodule FermixCore.Home.Candidate do
              Path.join(building, "recipient_key"),
              recipient.salt <> recipient.secret_key
            ),
-         :ok <- make_dir(Path.join(building, "mobile")),
-         :ok <-
-           write_private(
-             Path.join([building, "mobile", "iroh_key"]),
-             :crypto.strong_rand_bytes(32)
-           ) do
-      write_private(Path.join(building, "state.json"), Jason.encode!(state))
+         :ok <- make_dir(Path.join(building, "mobile")) do
+      write_private(Path.join([building, "mobile", "iroh_key"]), :crypto.strong_rand_bytes(32))
     end
   end
 

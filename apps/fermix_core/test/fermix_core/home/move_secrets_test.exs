@@ -113,6 +113,113 @@ defmodule FermixCore.Home.MoveSecretsTest do
     assert text =~ "# kept in the Mac's keychain"
   end
 
+  describe "restore/3, a return's inverse of adopt/2" do
+    # The server's copy, as it comes back: its file store holds what the Mac's
+    # keychain held before the move, some of it changed on the server since.
+    defp returned(profile) do
+      """
+      [fermix_core]
+      profile = "#{profile}"
+      secret_store = "keyring"
+
+      [fermix_core.providers.anthropic]
+      api_key = "@file" # changed on the server
+
+      [fermix_channels.telegram]
+      bot_token = "@file"
+
+      [fermix_core.cues.sources.invented-feed]
+      kind = "webhook"
+      key = "@file"
+
+      [fermix_core.mystery]
+      token = "@file"
+
+      [fermix_core.tools.web_search]
+      tavily_api_key = "tvly-invented-plaintext"
+      """
+    end
+
+    defp staged_secrets(tmp, files) do
+      staging = Path.join(tmp, "staging")
+      File.mkdir_p!(Path.join(staging, "secrets"))
+      for {name, value} <- files, do: File.write!(Path.join([staging, "secrets", name]), value)
+      staging
+    end
+
+    test "each carried file goes into the keychain under the staged profile, and is removed",
+         %{tmp: tmp, profile: profile} do
+      # The keychain item the Mac kept from before the move is stale.
+      :ok =
+        SecretWriter.put(:anthropic_api_key, "sk-ant-stale", profile: profile, store: :keyring)
+
+      staging =
+        staged_secrets(tmp, [
+          {"ANTHROPIC_API_KEY", "sk-ant-changed-on-server"},
+          {"cue_source.invented-feed.key", "invented-cue-key"},
+          {"mystery-file", "kept"}
+        ])
+
+      assert {:ok, text, restored} = MoveSecrets.restore(returned(profile), staging, [])
+      assert restored == ["anthropic_api_key", "cue_source:invented-feed:key"]
+
+      assert SecretWriter.get(:anthropic_api_key, profile: profile, store: :keyring) ==
+               {:ok, "sk-ant-changed-on-server"}
+
+      assert SecretWriter.get({:cue_source, "invented-feed", :key},
+               profile: profile,
+               store: :keyring
+             ) == {:ok, "invented-cue-key"}
+
+      assert ConfigText.value(text, "fermix_core.providers.anthropic", "api_key") ==
+               {:ok, ~s("@keyring")}
+
+      assert text =~ "# changed on the server"
+
+      assert ConfigText.value(text, "fermix_core.cues.sources.invented-feed", "key") ==
+               {:ok, ~s("@keyring")}
+
+      refute File.exists?(Path.join(staging, "secrets/ANTHROPIC_API_KEY"))
+      refute File.exists?(Path.join(staging, "secrets/cue_source.invented-feed.key"))
+      # A file no reference names stays where it is.
+      assert File.read!(Path.join(staging, "secrets/mystery-file")) == "kept"
+    end
+
+    test "a reference with no file, or one Fermix cannot name, is left as it is",
+         %{tmp: tmp, profile: profile} do
+      staging = staged_secrets(tmp, [{"ANTHROPIC_API_KEY", "sk-ant-invented"}])
+
+      assert {:ok, text, ["anthropic_api_key"]} =
+               MoveSecrets.restore(returned(profile), staging, [])
+
+      # No file came back for it: it stays a file reference, reported missing.
+      assert ConfigText.value(text, "fermix_channels.telegram", "bot_token") ==
+               {:ok, ~s("@file")}
+
+      assert ConfigText.value(text, "fermix_core.mystery", "token") == {:ok, ~s("@file")}
+
+      assert SecretWriter.get(:telegram_bot_token, profile: profile, store: :keyring) ==
+               {:error, :missing_secret}
+    end
+
+    test "a keychain that refuses names what it did not take, and leaves the files",
+         %{tmp: tmp, profile: profile} do
+      staging =
+        staged_secrets(tmp, [
+          {"ANTHROPIC_API_KEY", "sk-ant-invented"},
+          {"cue_source.invented-feed.key", "invented-cue-key"}
+        ])
+
+      assert MoveSecrets.restore(returned(profile), staging,
+               impl: FermixTestSupport.UnavailableSecretWriter
+             ) ==
+               {:error,
+                {:keychain_refused, ["anthropic_api_key", "cue_source:invented-feed:key"]}}
+
+      assert File.read!(Path.join(staging, "secrets/ANTHROPIC_API_KEY")) == "sk-ant-invented"
+    end
+  end
+
   test "the references that did not resolve here, by id" do
     snapshot = %{
       fermix_core: [
