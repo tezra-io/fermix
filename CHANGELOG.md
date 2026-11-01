@@ -299,6 +299,14 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   each step of its thinking arrives as it finishes. The app shows them under
   its thinking line once it reads them; nothing of either is kept after the
   answer.
+- **Files you attach in the Mac app's chat reach Fermix.** A picture, a
+  recording or a document you attach in the chat is handed to Fermix on the
+  same computer and read exactly as one sent from a phone, with the same size
+  limit (20 MB unless you changed it). A file Fermix cannot take, because it
+  is too large or changed before Fermix read it, is not sent, and the chat
+  says why in a sentence. The app shows the files in your message, and so do
+  your phones. The app also learns from Fermix which slash commands to offer.
+  Attaching takes an app that speaks the new chat protocol.
 
 ### Changed
 

@@ -1,5 +1,5 @@
-{"type":"client_hello","protocol_version":6}
-{"type":"client_hello","protocol_version":6,"primary_epoch":2}
+{"type":"client_hello","protocol_version":7}
+{"type":"client_hello","protocol_version":7,"primary_epoch":2}
 {"type":"msg","client_msg_id":"mac-1","profile_id":"main","text":"What is on my calendar today?","attach_ids":[]}
 {"type":"command","client_msg_id":"mac-2","profile_id":"main","name":"confirm","args":"opaque-token"}
 {"type":"cancel","profile_id":"main","client_msg_id":"mac-3"}
@@ -35,3 +35,7 @@
 {"type":"checklist_edit","client_msg_id":"mac-36","profile_id":"main","list_id":"ck_2b7n5r8c3j","op":{"op":"restore","title":"Packing, spring"}}
 {"type":"checklist_edit","client_msg_id":"mac-37","profile_id":"main","list_id":"ck_2b7n5r8c3j","op":{"op":"remove_list"}}
 {"type":"proposal_answer","client_msg_id":"mac-12","profile_id":"main","proposal_id":"cft_5d2e8a1c9b4f7e3a6c0d1b2e","decision":"always_allow"}
+{"type":"attach_file","attach_id":"mac-att-7f3a9c","kind":"image","mime":"image/jpeg","size_bytes":183204,"sha256":"5f0d1c3a9e7b4c2d8a6f1e0b3c5d7a9e2f4b6d8c0a1e3f5b7d9c2e4a6f8b0d1c","name":"IMG_0412.jpg"}
+{"type":"attach_file","attach_id":"mac-att-2b81d0","kind":"voice","mime":"audio/mp4","size_bytes":40817,"sha256":"c4e1a7b9d3f5028e6a1c9b7d5f3e1a0c8b6d4f2e0a9c7b5d3f1e8a6c4b2d0f9e"}
+{"type":"msg","client_msg_id":"mac-40","profile_id":"main","text":"What is in this picture?","attach_ids":["mac-att-7f3a9c"]}
+{"type":"msg","client_msg_id":"mac-41","profile_id":"main","text":"","attach_ids":["mac-att-2b81d0"]}

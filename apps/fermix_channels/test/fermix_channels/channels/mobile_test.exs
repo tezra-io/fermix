@@ -8,7 +8,6 @@ defmodule FermixChannels.Channels.MobileTest do
   alias FermixChannels.Companion.Approvals
   alias FermixChannels.Companion.Output
   alias FermixChannels.Companion.Turns
-  alias FermixChannels.Gateway.Commands.Registry, as: CommandRegistry
   alias FermixChannels.Gateway.Message
   alias FermixChannels.Gateway.Queue
   alias FermixChannels.Mobile.DeviceRegistry
@@ -355,17 +354,6 @@ defmodule FermixChannels.Channels.MobileTest do
              min_draft_chars: 1,
              max_edits: :infinity
            }
-  end
-
-  test "command catalog is generated from the live command registry" do
-    assert Mobile.command_catalog() ==
-             Enum.map(CommandRegistry.list(), fn command ->
-               %{
-                 "name" => command.name(),
-                 "aliases" => command.aliases(),
-                 "description" => command.description()
-               }
-             end)
   end
 
   test "draft, activity, terminal, reaction, approval, text, and media callbacks fan out by profile" do

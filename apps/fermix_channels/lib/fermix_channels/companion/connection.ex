@@ -87,6 +87,28 @@ defmodule FermixChannels.Companion.Connection do
   (`metadata.draws_lists`) once it has pulled the index. `:checklist_opts` are
   the Registry's options (a test's repo and notifier).
 
+  ## Files (version 7)
+
+  The hello tells the owner's connection (`:independent`) where to hand the
+  daemon a file, `attachments: {dir, max_bytes}`, read from
+  `Companion.Inbox` (`:inbox`) while the media store runs; any other
+  connection, a connection with no inbox (`nil`, as a desktop's tunnel on the
+  primary is started, since the app is on another computer) and a hello
+  while the store is down get none. Every hello carries `commands`, the slash
+  commands of `Gateway.Commands.Registry.catalog/0`, the phone's list.
+
+  An `attach_file` from a version 7 owner's connection is served in the step
+  that read it, as a grant is: the inbox reads the file into the media store
+  and removes it, and the answer is `attach_status` (`present`) or
+  `error: request_failed` with the inbox's sentence and the `attach_id`. From
+  any other connection it is refused the same way and its file removed
+  unread, and with no inbox it is refused too (an engine in the device role
+  refuses it as every write, naming the `attach_id`). A `msg` that names an
+  attachment is taken only from a
+  version 7 owner's connection, and refused `attachments_unsupported` (and the
+  connection closed) from any other; one whose attachment the store no longer
+  holds fails after `accepted` with its sentence, the connection kept.
+
   ## The primary epoch (M75 D14)
 
   The hello carries the home's primary epoch, read through
@@ -129,11 +151,13 @@ defmodule FermixChannels.Companion.Connection do
   alias FermixChannels.Companion.Approvals
   alias FermixChannels.Companion.Checklists
   alias FermixChannels.Companion.Fanout
+  alias FermixChannels.Companion.Inbox
   alias FermixChannels.Companion.MediaGrants
   alias FermixChannels.Companion.Output
   alias FermixChannels.Companion.Proposals
   alias FermixChannels.Companion.Requests
   alias FermixChannels.Companion.Turns
+  alias FermixChannels.Gateway.Commands.Registry, as: CommandRegistry
   alias FermixChannels.Mobile.Identity
   alias FermixCore.Checklists.Registry, as: ChecklistRegistry
   alias FermixCore.Companion.Protocol
@@ -155,6 +179,7 @@ defmodule FermixChannels.Companion.Connection do
   @task_not_running_message "No task of that call is still running under that revision."
   @checklist_window_ms 100
   @max_error_message_bytes 512
+  @attachment_gone_message "Fermix no longer has a file this message names. Attach it again."
 
   # The closed vocabulary of `error.reason` this socket sends, besides
   # `unsupported_protocol_version`, `max_clients_reached` (the endpoint's),
@@ -212,6 +237,8 @@ defmodule FermixChannels.Companion.Connection do
       # The grants server, and the module that speaks to it (a test's stand-in).
       media_grants: Keyword.get(opts, :media_grants, MediaGrants),
       media_grants_module: Keyword.get(opts, :media_grants_module, MediaGrants),
+      # The attachment inbox (version 7), nil for none.
+      inbox: Keyword.get(opts, :inbox),
       proposal_opts: Keyword.get(opts, :proposal_opts, []),
       # The Always On watch a version 6 connection subscribes to.
       status_watch: Keyword.get(opts, :status_watch, StatusWatch),
@@ -354,14 +381,26 @@ defmodule FermixChannels.Companion.Connection do
   # An event a later version brought is not in the vocabulary of a connection
   # whose hello declared an older one.
   defp dispatch(%{type: type} = event, state) do
-    if Protocol.client_event_version(type) <= state.version,
-      do: serve_admitted(event, state),
-      else: refuse({:unknown_event, type}, state)
+    cond do
+      Protocol.client_event_version(type) > state.version -> refuse({:unknown_event, type}, state)
+      not attachments_admitted?(event, state) -> refuse(:attachments_unsupported, state)
+      true -> serve_admitted(event, state)
+    end
   end
+
+  # A `msg` names an attachment only on the version that brought
+  # `attach_file`, from the owner's connection, the only one an `attach_file`
+  # is taken from (moduledoc).
+  defp attachments_admitted?(%{type: "msg", payload: %{"attach_ids" => [_ | _]}}, state) do
+    state.version >= Protocol.client_event_version("attach_file") and
+      state.caller == :independent
+  end
+
+  defp attachments_admitted?(_event, _state), do: true
 
   # The events that write the home's store, besides a `msg` or `command`, which
   # `Requests.request/3` refuses itself before it claims anything.
-  @writing_events ~w(cancel read_state proposal_answer checklist_edit)
+  @writing_events ~w(cancel read_state proposal_answer checklist_edit attach_file)
 
   # A device-role engine runs a retired copy of a moved home (M75): every event
   # that would write it is refused by name, before any write, with the
@@ -387,6 +426,13 @@ defmodule FermixChannels.Companion.Connection do
       :ok -> {:cont, state}
       {:error, _reason} -> {:stop, state}
     end
+  end
+
+  # A file's refusal names it, and the file goes unread.
+  defp refuse_write(%{type: "attach_file", payload: %{"attach_id" => id}}, refusal, state) do
+    :ok = discard_attachment(id, state)
+    error = refusal |> while_moving(state) |> error_payload(nil) |> Map.put("attach_id", id)
+    written(send_event("error", error, state), state)
   end
 
   defp refuse_write(_event, refusal, state) do
@@ -441,6 +487,8 @@ defmodule FermixChannels.Companion.Connection do
   defp serve(%{type: "checklist_edit", payload: payload}, state),
     do: checklist_edit(payload, state)
 
+  defp serve(%{type: "attach_file", payload: payload}, state), do: attach_file(payload, state)
+
   # A repeat hello is a protocol violation: the handshake is one transition.
   defp hello(_payload, %{version: version} = state) when is_integer(version),
     do: refuse(:unexpected_client_hello, state)
@@ -479,7 +527,11 @@ defmodule FermixChannels.Companion.Connection do
 
   defp join(version, epoch, state) do
     {min, max} = Protocol.supported_version_range()
-    server_hello = Map.merge(%{"min_version" => min, "max_version" => max}, epoch)
+
+    server_hello =
+      %{"min_version" => min, "max_version" => max, "commands" => CommandRegistry.catalog()}
+      |> Map.merge(epoch)
+      |> offer_attachments(state)
 
     with {:ok, _owner} <- Registry.register(state.registry, @profile, version),
          :ok <- watch_home(version, state),
@@ -492,6 +544,17 @@ defmodule FermixChannels.Companion.Connection do
       _failed -> {:stop, state}
     end
   end
+
+  # The inbox and the largest file it takes, for the owner's connection alone
+  # and only while the store runs (moduledoc).
+  defp offer_attachments(hello, %{caller: :independent, inbox: inbox}) when inbox != nil do
+    case Inbox.offer(inbox) do
+      {:ok, offer} -> Map.put(hello, "attachments", offer)
+      {:error, :store_not_running} -> hello
+    end
+  end
+
+  defp offer_attachments(hello, _state), do: hello
 
   # Before the hello is written, so the watch's first word follows it.
   defp watch_home(version, %{status_watch: watch}) do
@@ -652,6 +715,37 @@ defmodule FermixChannels.Companion.Connection do
       :ok -> {:cont, state}
       {:error, _reason} -> {:stop, state}
     end
+  end
+
+  # --- files (moduledoc) ------------------------------------------------------------
+
+  # Answered in the step that read it, as a grant is: `attach_status` once the
+  # store holds the file, or the inbox's sentence naming the attach id.
+  defp attach_file(%{"attach_id" => id} = payload, state) do
+    {type, answer} = payload |> take_attachment(state) |> attachment_answer(id)
+    written(send_event(type, answer, state), state)
+  end
+
+  defp take_attachment(%{"attach_id" => id}, %{caller: caller} = state)
+       when caller != :independent do
+    :ok = discard_attachment(id, state)
+    {:error, :not_owner}
+  end
+
+  defp take_attachment(_payload, %{inbox: nil}), do: {:error, :no_inbox}
+  defp take_attachment(payload, state), do: Inbox.take(state.inbox, payload)
+
+  defp discard_attachment(_attach_id, %{inbox: nil}), do: :ok
+  defp discard_attachment(attach_id, state), do: Inbox.discard(state.inbox, attach_id)
+
+  defp attachment_answer({:ok, :present}, id),
+    do: {"attach_status", %{"attach_id" => id, "status" => "present"}}
+
+  defp attachment_answer({:error, reason}, id) do
+    Logger.warning("companion connection refused attachment #{id}: #{inspect(reason)}")
+
+    {"error",
+     %{"reason" => "request_failed", "message" => Inbox.describe_error(reason), "attach_id" => id}}
   end
 
   # --- lists (moduledoc) ----------------------------------------------------------
@@ -1027,6 +1121,11 @@ defmodule FermixChannels.Companion.Connection do
 
   defp error_fields({:primary_unreachable, sentence}) when is_binary(sentence),
     do: %{"reason" => "primary_unreachable", "message" => sentence}
+
+  # A `msg` naming a file the store no longer holds (version 7): its id expired
+  # or was never taken.
+  defp error_fields({:attachment_unavailable, _attach_id, _reason}),
+    do: %{"reason" => "request_failed", "message" => @attachment_gone_message}
 
   # A failure reason can carry an exception and its stacktrace: the message is
   # bounded so the error that reports it can always be written.

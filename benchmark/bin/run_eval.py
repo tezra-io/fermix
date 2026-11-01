@@ -1128,7 +1128,7 @@ def run_companion_case(cfg, client, suite, scn, case, run_id, trial, judge_on):
                 "incomplete": True, "gate_passed": False, "turns": [rec], "rubric": None}
 
     evidence = companion.drive(cfg.daemon.fermix_home, case.companion, query, marker,
-                               timeout_s)
+                               timeout_s, attachments=case.images)
     rec["duration_ms"] = evidence.elapsed_ms
     rec["reply"] = evidence.target.reply()
     if not evidence.ok:

@@ -38,6 +38,9 @@ defmodule FermixCore.Companion.ProtocolContractTest do
   # The events version 6 brought for the owner's lists (M85 §07).
   @version_6_list_client_events ~w(checklists_pull checklist_pull checklist_edit)
   @version_6_list_server_events ~w(checklists checklist)
+  # The events version 7 brought: the owner's files, by path.
+  @version_7_client_events ~w(attach_file)
+  @version_7_server_events ~w(attach_status)
   # The follow-up's fields of a card version 5 brought (M60_WATCHER_CODING_RUNS.md §6.2).
   @follow_up_fields ~w(asks offers_always_allow name instructions tools reports_to)
 
@@ -164,9 +167,6 @@ defmodule FermixCore.Companion.ProtocolContractTest do
     schema: schema,
     protocol: protocol
   } do
-    assert Protocol.protocol_version() == 6
-    assert Protocol.supported_version_range() == {5, 6}
-
     assert Protocol.server_event_version("reasoning") == 6
     assert schema["$defs"]["reasoning"]["x-since-version"] == 6
     refute "reasoning" in Protocol.shared_server_events()
@@ -198,8 +198,6 @@ defmodule FermixCore.Companion.ProtocolContractTest do
     schema: schema,
     protocol: protocol
   } do
-    assert Protocol.protocol_version() == 6
-    assert Protocol.supported_version_range() == {5, 6}
     assert Protocol.server_event_version("home_status_changed") == 6
 
     definition = schema["$defs"]["home_status_changed"]
@@ -274,6 +272,80 @@ defmodule FermixCore.Companion.ProtocolContractTest do
     for op <- ChecklistRegistry.device_ops() do
       assert protocol =~ ~r/^\| `#{op}`|, `#{op}` \|/m, "PROTOCOL.md has no row for the #{op} op"
     end
+  end
+
+  # Version 7: the owner's files cross by path, on this wire alone (the
+  # phone's uploads stream their bytes), taken from and sent to the owner's
+  # connection; the hello carries the inbox and the command palette, both
+  # additive, with goldens of every shape the Mac app builds against.
+  test "the owner's files are version 7 events this wire does not share, with goldens", %{
+    schema: schema,
+    protocol: protocol
+  } do
+    defs = schema["$defs"]
+    assert Protocol.protocol_version() == 7
+    assert Protocol.supported_version_range() == {6, 7}
+
+    for type <- @version_7_client_events do
+      assert Protocol.client_event_version(type) == 7, "#{type} is not a version 7 event"
+      assert defs[type]["x-since-version"] == 7
+      refute type in Protocol.shared_client_events()
+    end
+
+    for type <- @version_7_server_events do
+      assert Protocol.server_event_version(type) == 7, "#{type} is not a version 7 event"
+      assert defs[type]["x-since-version"] == 7
+      refute type in Protocol.shared_server_events()
+    end
+
+    attach = defs["attach_file"]["properties"]
+    assert attach["kind"]["enum"] == Protocol.attach_kinds()
+    assert attach["mime"]["x-max-bytes"] == Protocol.max_attach_field_bytes()
+    assert attach["name"]["x-max-bytes"] == Protocol.max_attach_field_bytes()
+    refute Map.has_key?(attach, "path")
+    assert defs["attach_status"]["properties"]["status"]["enum"] == ["present"]
+    assert defs["error"]["properties"]["attach_id"] == attach["attach_id"]
+
+    hello = defs["server_hello"]
+    refute "commands" in hello["required"]
+    refute "attachments" in hello["required"]
+    assert hello["properties"]["commands"]["items"] == %{"$ref" => "#/$defs/commandDescriptor"}
+    assert Enum.sort(hello["properties"]["attachments"]["required"]) == ~w(dir max_bytes)
+
+    client = jsonl(@client_fixtures)
+    server = jsonl(@server_fixtures)
+
+    assert Enum.any?(server, &(&1["type"] == "server_hello" and is_map(&1["attachments"])))
+    assert Enum.all?(server, &(&1["type"] != "server_hello" or &1["commands"] != []))
+    assert Enum.any?(client, &(&1["type"] == "attach_file" and Map.has_key?(&1, "name")))
+    assert Enum.any?(client, &(&1["type"] == "attach_file" and not Map.has_key?(&1, "name")))
+    assert Enum.any?(client, &(&1["type"] == "msg" and &1["attach_ids"] != []))
+
+    assert Enum.any?(
+             client,
+             &(&1["type"] == "msg" and &1["attach_ids"] != [] and &1["text"] == "")
+           )
+
+    assert Enum.any?(server, &(&1["type"] == "attach_status"))
+
+    assert Enum.any?(
+             server,
+             &(&1["reason"] == "request_failed" and is_binary(&1["attach_id"]) and
+                 &1["message"] =~ "Fermix takes files of up to")
+           )
+
+    assert Enum.any?(
+             server,
+             &(&1["type"] == "row" and &1["role"] == "user" and &1["kind"] == "media" and
+                 &1["media_refs"] != [])
+           )
+
+    flat = String.replace(protocol, ~r/\s+/, " ")
+    assert protocol =~ "### Version 7: files the owner attaches"
+    assert protocol =~ "Every version 6 event, field and rule holds unchanged on version 7."
+    assert protocol =~ "## Attachments"
+    assert flat =~ "removes `<dir>/<attach_id>` before it answers"
+    assert flat =~ "There is no path field."
   end
 
   # The schema names every field of the card the engine builds, and bounds the
@@ -364,7 +436,11 @@ defmodule FermixCore.Companion.ProtocolContractTest do
     assert defs["history_search"]["properties"]["query"]["maxLength"] ==
              Protocol.max_query_length()
 
-    assert defs["msg"]["properties"]["attach_ids"]["maxItems"] == 0
+    # Since version 7 a message may name files, as the phone's does.
+    assert defs["msg"]["properties"]["attach_ids"] == %{
+             "type" => "array",
+             "items" => %{"type" => "string", "minLength" => 1}
+           }
   end
 
   test "each event def requires what the codec requires", %{schema: schema} do
@@ -417,7 +493,8 @@ defmodule FermixCore.Companion.ProtocolContractTest do
     mobile = @mobile_schema_path |> File.read!() |> Jason.decode!()
 
     for def <-
-          ~w(mediaRef linkPreviewCard replyBlock placesBlock place checklistsBlock checklistRef) do
+          ~w(mediaRef linkPreviewCard replyBlock placesBlock place checklistsBlock checklistRef
+             commandDescriptor) do
       assert schema["$defs"][def] == mobile["$defs"][def], "#{def} differs between the wires"
     end
 
@@ -705,10 +782,12 @@ defmodule FermixCore.Companion.ProtocolContractTest do
 
   test "the golden server_hello advertises the module's live window" do
     {min, max} = Protocol.supported_version_range()
-    hello = @server_fixtures |> jsonl() |> Enum.find(&(&1["type"] == "server_hello"))
+    hellos = @server_fixtures |> jsonl() |> Enum.filter(&(&1["type"] == "server_hello"))
 
-    assert Map.drop(hello, ~w(primary_epoch role)) ==
-             %{"type" => "server_hello", "min_version" => min, "max_version" => max}
+    for hello <- hellos do
+      assert Map.drop(hello, ~w(primary_epoch role commands attachments)) ==
+               %{"type" => "server_hello", "min_version" => min, "max_version" => max}
+    end
   end
 
   # M75 D14: both hellos carry the primary epoch, optional on each, with a
@@ -821,14 +900,30 @@ defmodule FermixCore.Companion.ProtocolContractTest do
     refute schema_errors(both, ref("clientEvent"), schema) == []
 
     attached = %{
-      "type" => "msg",
-      "client_msg_id" => "c",
-      "profile_id" => "main",
-      "text" => "look",
-      "attach_ids" => ["photo"]
+      "type" => "attach_file",
+      "attach_id" => "../photo",
+      "kind" => "image",
+      "mime" => "image/jpeg",
+      "size_bytes" => 12,
+      "sha256" => String.duplicate("a", 64)
     }
 
     refute schema_errors(attached, ref("clientEvent"), schema) == []
+
+    refute schema_errors(
+             %{attached | "attach_id" => "photo", "kind" => "picture"},
+             ref("clientEvent"),
+             schema
+           ) == []
+
+    offered = %{
+      "type" => "server_hello",
+      "min_version" => 6,
+      "max_version" => 7,
+      "attachments" => %{"dir" => "companion/inbox", "max_bytes" => 1}
+    }
+
+    refute schema_errors(offered, ref("serverEvent"), schema) == []
     refute schema_errors(%{"type" => "ping"}, ref("clientEvent"), schema) == []
   end
 
@@ -889,6 +984,13 @@ defmodule FermixCore.Companion.ProtocolContractTest do
         "client_msg_id" => "c",
         "profile_id" => "main",
         "op" => %{"op" => "clear_done"}
+      },
+      "attach_file" => %{
+        "attach_id" => "a",
+        "kind" => "file",
+        "mime" => "application/pdf",
+        "size_bytes" => 0,
+        "sha256" => String.duplicate("a", 64)
       }
     }
   end

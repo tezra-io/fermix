@@ -5,9 +5,9 @@ defmodule FermixChannels.Companion.ConnectionChecklistsTest do
   holds at most 16, edits by row id through the same transaction the model
   uses, once per `client_msg_id`, and every holder hears each committed change
   as the whole list, at most once per window per list, whoever made it. A
-  connection the daemon started reads and changes nothing, a version 5 one
-  hears nothing, and a turn says it draws lists only when its connection
-  pulled the index.
+  connection the daemon started reads and changes nothing, and a turn says it
+  draws lists only when its connection pulled the index. Every version in the
+  window, {6, 7}, has the lists.
 
   Most tests deliver the coalescing window's end by hand (`flush!/1`), so no
   assertion races a clock; one keeps the real 100 ms window.
@@ -492,40 +492,6 @@ defmodule FermixChannels.Companion.ConnectionChecklistsTest do
 
     assert [%{"list_id" => ^list_id}] = pull_index(mac)
     assert %{"list_id" => ^list_id} = pull(mac, list_id)
-  end
-
-  test "a version 5 connection hears no list event, cannot pull one, and its turns still work",
-       ctx do
-    list_id = groceries!(ctx)
-    old = hello(ctx.socket_path, 5)
-    mac = hello(ctx.socket_path, 6)
-    _ = pull(mac, list_id)
-    _ = pull_index(mac)
-
-    model_edit!(ctx, [%{"list" => "Groceries", "ops" => [%{"op" => "add", "text" => "Eggs"}]}])
-    flush!(ctx.registry)
-    assert %{"type" => type} = recv(mac)
-    assert type in ["checklist", "checklists"]
-
-    send_line(old, %{
-      "type" => "msg",
-      "client_msg_id" => "old-1",
-      "profile_id" => "main",
-      "text" => "hi",
-      "attach_ids" => []
-    })
-
-    assert %{"type" => "accepted", "client_msg_id" => "old-1"} = recv(old)
-    assert_receive {:gateway_ingest, message}, @arrival_ms
-    refute Map.has_key?(message.metadata, :draws_lists)
-
-    send_line(old, %{"type" => "checklists_pull", "profile_id" => "main"})
-
-    # Everything the old connection was sent, up to the refusal of the pull:
-    # its own row, and no list event.
-    {lines, refusal} = until_frame(old, "error")
-    assert %{"reason" => "unknown_event", "event" => "checklists_pull"} = refusal
-    refute Enum.any?(lines, &(&1["type"] in ["checklist", "checklists"])), inspect(lines)
   end
 
   # --- the card line --------------------------------------------------------------

@@ -52,11 +52,11 @@ defmodule FermixChannels.Mobile.Session do
 
   require Logger
 
-  alias FermixChannels.Channels.Mobile
   alias FermixChannels.Companion.Approvals
   alias FermixChannels.Companion.Fanout
   alias FermixChannels.Companion.Output
   alias FermixChannels.Desktop.Peer, as: DesktopPeer
+  alias FermixChannels.Gateway.Commands.Registry, as: CommandRegistry
   alias FermixChannels.Home.EnrollmentResponder
   alias FermixChannels.Mobile.Attestation
   alias FermixChannels.Mobile.DeviceRegistry
@@ -1060,7 +1060,7 @@ defmodule FermixChannels.Mobile.Session do
          "history_head_seq" => history_head,
          "read_up_to_seq" => read_up_to,
          "caps" => %{
-           "commands" => Mobile.command_catalog(),
+           "commands" => CommandRegistry.catalog(),
            "media" => true,
            "streaming" => true,
            "turn_done" => true,

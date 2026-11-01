@@ -1,4 +1,5 @@
-{"type":"server_hello","min_version":5,"max_version":6,"primary_epoch":2,"role":"primary"}
+{"type":"server_hello","min_version":6,"max_version":7,"primary_epoch":2,"role":"primary","commands":[{"name":"new","aliases":["clear"],"description":"Start a fresh conversation session."},{"name":"help","aliases":[],"description":"List available commands."},{"name":"stop","aliases":[],"description":"Stop all running Fermix work and clear queued messages."},{"name":"background","aliases":["bg"],"description":"Run a task in the background without blocking this chat. Usage: /background <prompt>"}]}
+{"type":"server_hello","min_version":6,"max_version":7,"primary_epoch":2,"role":"primary","commands":[{"name":"new","aliases":["clear"],"description":"Start a fresh conversation session."},{"name":"help","aliases":[],"description":"List available commands."},{"name":"stop","aliases":[],"description":"Stop all running Fermix work and clear queued messages."},{"name":"background","aliases":["bg"],"description":"Run a task in the background without blocking this chat. Usage: /background <prompt>"}],"attachments":{"dir":"/Users/me/.fermix/companion/inbox","max_bytes":20971520}}
 {"type":"accepted","client_msg_id":"mac-1","duplicate":false}
 {"type":"row","profile_id":"main","server_seq":12,"role":"user","text":"What is on my calendar today?","ts":"2026-09-25T09:00:00Z","client_msg_id":"mac-1","media_refs":[]}
 {"type":"accepted","client_msg_id":"mac-1","duplicate":true,"server_seq":13}
@@ -53,7 +54,7 @@
 {"type":"checklist","profile_id":"main","list":{"list_id":"ck_2b7n5r8c3j","title":"Packing","rev":3,"rows":[{"row_id":"ci_7l1z4a9f2o","kind":"item","text":"Passport","done":false}],"removed_at":"2031-05-20T08:00:00.000000Z"}}
 {"type":"accepted","client_msg_id":"mac-21","duplicate":true}
 {"type":"error","reason":"handshake_required"}
-{"type":"error","reason":"unsupported_protocol_version","direction":"client_too_new","client_version":7,"min_version":5,"max_version":6}
+{"type":"error","reason":"unsupported_protocol_version","direction":"client_too_new","client_version":8,"min_version":6,"max_version":7}
 {"type":"error","reason":"stale_primary","message":"This engine is at epoch 2; you have seen epoch 3: the primary moved, reconnect to the current one"}
 {"type":"error","reason":"client_message_conflict","client_msg_id":"mac-2"}
 {"type":"error","reason":"invalid_field","field":"limit"}
@@ -68,3 +69,8 @@
 {"type":"error","reason":"primary_unreachable","message":"The server fermix-vm is unreachable. Fermix keeps your message until it is back."}
 {"type":"error","reason":"desktop_revoked","message":"The server fermix-vm does not know this computer: it was removed from the server's devices, or the server was restored from a snapshot taken before this computer joined it. Fermix stopped reaching it."}
 {"type":"error","reason":"unattended_client","message":"Only the Fermix app chats with the server from this computer, and this process was started by Fermix or runs detached."}
+{"type":"attach_status","attach_id":"mac-att-7f3a9c","status":"present"}
+{"type":"row","profile_id":"main","server_seq":30,"role":"user","text":"What is in this picture?","ts":"2026-11-01T09:00:00Z","client_msg_id":"mac-40","kind":"media","media_refs":[{"ref":"5f0d1c3a9e7b4c2d8a6f1e0b3c5d7a9e2f4b6d8c0a1e3f5b7d9c2e4a6f8b0d1c","kind":"image","mime":"image/jpeg","size_bytes":183204,"filename":"IMG_0412.jpg"}]}
+{"type":"error","reason":"request_failed","message":"This file is too large: Fermix takes files of up to 20 MB.","attach_id":"mac-att-9d04e2"}
+{"type":"error","reason":"request_failed","message":"This file changed before Fermix could read it. Attach it again.","attach_id":"mac-att-2b81d0"}
+{"type":"error","reason":"request_failed","message":"Fermix no longer has a file this message names. Attach it again.","client_msg_id":"mac-41"}
