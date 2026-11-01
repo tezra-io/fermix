@@ -342,6 +342,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Cancelling a long step answers once it has really stopped.** Cancel on a
+  plugin install, a sign-in, a download or an Always On step now answers when
+  the work has stopped (it is given five seconds to finish cleanly, then
+  stopped), where it used to answer at once while the work could still run,
+  so a step started right after a cancel never runs beside the one you
+  cancelled. Until then the work still shows as running.
 - **A busy computer no longer quietly costs you a watcher's notices.** When
   the computer was so busy that Fermix's memory database fell behind, every
   request waiting on it gave up after a few seconds, yet each one still ran

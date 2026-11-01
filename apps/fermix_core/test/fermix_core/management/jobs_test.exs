@@ -30,6 +30,24 @@ defmodule FermixCore.Management.JobsTest do
     end
   end
 
+  # A run that traps exits, so a stop reaches it as a message: it says it is
+  # stopping, then holds its cleanup until this test releases it.
+  defp stopping_run(owner) do
+    fn _job_id, _report ->
+      Process.flag(:trap_exit, true)
+      send(owner, {:running, self()})
+
+      receive do
+        {:EXIT, _from, :shutdown} ->
+          send(owner, {:stopping, self()})
+
+          receive do
+            :release -> {:ok, %{}}
+          end
+      end
+    end
+  end
+
   describe "the job view" do
     test "a started job carries every published field", %{server: server} do
       owner = self()
@@ -244,6 +262,61 @@ defmodule FermixCore.Management.JobsTest do
       assert view["phase"] == nil
       assert view["failure"] == nil
       assert_receive {:DOWN, ^ref, :process, ^pid, _reason}
+    end
+
+    # Always On setup §5: a delete started right after a cancel must never run
+    # beside the cancelled create still inside its provider call, so a stopped
+    # run stays running until its task is gone, and the cancel answers then.
+    test "cancel answers once the run has stopped, and the run counts as running until then",
+         %{server: server} do
+      owner = self()
+      run = stopping_run(owner)
+
+      assert {:ok, started} = Jobs.start(:home_provision, opts(server, name: "hetzner", run: run))
+      assert_receive {:running, pid}
+
+      canceller = Task.async(fn -> Jobs.cancel(started["job_id"], opts(server)) end)
+      assert_receive {:stopping, ^pid}
+
+      # The run is still inside its own cleanup.
+      assert {:ok, %{"status" => "running"}} = Jobs.get(started["job_id"], opts(server))
+
+      assert {:error, :busy} =
+               Jobs.start(:home_provision, opts(server, name: "hetzner", run: run))
+
+      assert Task.yield(canceller, 0) == nil
+
+      send(pid, :release)
+      assert {:ok, %{"status" => "cancelled"} = view} = Task.await(canceller)
+      assert view["failure"] == nil
+      refute Process.alive?(pid)
+
+      assert {:ok, _next} =
+               Jobs.start(
+                 :home_provision,
+                 opts(server, name: "hetzner", run: blocking_run(owner))
+               )
+
+      assert_receive {:running, next_pid}
+      send(next_pid, {:finish, {:ok, %{}}})
+    end
+
+    test "a run past its budget counts as running until it has stopped", %{server: server} do
+      owner = self()
+      run = stopping_run(owner)
+
+      assert {:ok, started} =
+               Jobs.start(:provider_probe, opts(server, name: "slow", run: run, budget_ms: 30))
+
+      assert_receive {:running, pid}
+      assert_receive {:stopping, ^pid}, 10_000
+
+      assert {:ok, %{"status" => "running"}} = Jobs.get(started["job_id"], opts(server))
+      assert {:error, :busy} = Jobs.start(:provider_probe, opts(server, name: "slow", run: run))
+
+      send(pid, :release)
+      assert {:ok, view} = eventually_terminal(server, started["job_id"])
+      assert view["status"] == "timed_out"
     end
 
     test "cancelling a finished job is a no-op, not an error", %{server: server} do

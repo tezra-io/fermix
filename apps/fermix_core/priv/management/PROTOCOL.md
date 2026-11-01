@@ -384,7 +384,7 @@ daemon onto anything else.
 | `providers.models.list` | `provider`, `live`, `query`, `cursor`, `limit` | One page of models, from the catalog this build ships or from the provider's own live listing, with the cursor for the next page. Minimum version `2`. |
 | `providers.probe.start` | `provider` | Starts a metered call against the provider. A job; the result carries the model and the latency. Minimum version `2`. |
 | `job.get` | `job_id` | One job's uniform view. Minimum version `2`. |
-| `job.cancel` | `job_id` | Stops a running job and answers its terminal view. Cancelling a finished job is a no-op, not an error. Minimum version `2`. |
+| `job.cancel` | `job_id` | Stops a running job and answers its terminal view once its run has stopped: the run is signalled to stop and killed if it is still running 5 s later, so the answer can take that long, and a step started after it never runs beside the run it cancelled. Cancelling a finished job is a no-op, not an error. Minimum version `2`. |
 | `job.list` | none | Every job this daemon retains, oldest first. What lets a reopened surface find a run it started rather than starting a second one. Minimum version `2`. |
 | `auth.start` | `provider` | Starts a browser sign-in and answers with the job plus the authorize url and its lifetime, returned once. `openai_codex` signs in with ChatGPT: a sign-in that leaves ChatGPT plan usage off fails the job with its sentence, and a completed one first makes sure the default model is one the account lists. When that check cannot be made (the account's model list could not be read, or the model could not be saved), the sign-in still completes and its result carries `model_warning`, the daemon's sentence saying the default model was not checked and why, beside `account_label`. The field is optional: absent means the check was made, and a client that does not know it shows the sign-in as completed. `mcp:<name>` signs in one MCP server the owner added, a remote one whose `auth` is `auto`, and is refused with `invalid_params` on `provider` and a sentence for a name no server has, a server on this Mac, one that sends a key and one set to need no sign-in. Minimum version `2`. |
 | `auth.import.start` | `source` | Adopts a sign-in this Mac already has, from Claude Code. A job, because reading the keychain can prompt. `codex_cli` is still accepted as a source and refused with `invalid_params` and a sentence: a Codex CLI sign-in is no longer adopted, and `openai_codex` signs in with ChatGPT through `auth.start`. Minimum version `2`. |
@@ -487,7 +487,10 @@ Notes that the shapes alone do not carry:
   `home_provision` 900000 ms. At most 4 jobs run at once, at most one per
   kind and name (`busy` beyond either), and at most 16 finished jobs are
   retained, none older than 600000 ms. A `job_id` this daemon does not retain
-  answers `unknown_job`.
+  answers `unknown_job`. A job that is stopped (cancelled, past its budget, or
+  never minting the value its start waits for) stays `running` until its run
+  has stopped, at most 5 s more, and holds its place against `busy` until then;
+  it then finishes `cancelled`, `timed_out` or `failed`.
 - **`phase` is display copy, never a state.** It names the current step from a
   closed per-kind vocabulary — `provider_probe`: `calling`; `auth`: `binding`,
   `discovering`, `registering`, `awaiting_browser`, `verifying` (an MCP server's
