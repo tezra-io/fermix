@@ -94,6 +94,12 @@ the code crosses only that encrypted session, and closing it again is an
 owner decision too. The old server is deleted only once a primary one epoch
 up answered the desktop, so the server that holds the home is never deleted.
 
+Opening the setup page is an owner decision on `daemon.sock` as well: a page
+session drives every decision the page offers, so `setup.session.create` is
+refused to a command Fermix started and to a caller it cannot place. The Mac
+app's agent opens the page, and `fermix setup` mints its one-time link in its
+own process.
+
 What this deliberately does not cover:
 
 - Only the turn that read the content waits. Replayed history on a later turn,

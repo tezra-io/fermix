@@ -363,7 +363,7 @@ daemon onto anything else.
 |---|---|---|
 | `hello` | none | Supported range, method catalog, immutable engine identity, PID, and the loopback Setup endpoint. |
 | `overview.get` | none | Typed projection of readiness, health, daemon, provider, channels, memory, jobs, agents, realtime, and capability counts. |
-| `setup.session.create` | none | A one-use Setup URL and its absolute expiry. The durable token is never returned. |
+| `setup.session.create` | none | A one-use Setup URL and its absolute expiry. The durable token is never returned. An owner decision. |
 | `doctor.start` | `scope` (`local` \| `network`, default `local`) | A session view; the run continues in the background. |
 | `doctor.get` | `session_id` | The session view with the checks that have landed so far. |
 | `doctor.cancel` | `session_id` | The terminal session view. Cancelling a finished session is a no-op, not an error. |
@@ -628,6 +628,13 @@ Notes that the shapes alone do not carry:
   to a caller the daemon cannot place, and the daemon log says so. The
   sentence is what tells this refusal from a channel that is not running.
   Reading a session and the status stay open to every caller.
+- **Opening the setup page is the owner's decision too.** A setup page
+  session drives every decision the page offers, so `setup.session.create`
+  answers `unavailable` {`capability`: `setup_session`, `sentence`: "Only the
+  owner can open the setup page: use the Fermix app, or run fermix setup in
+  your own terminal."} to the same callers. The Mac app's agent is an
+  independent caller, and `fermix setup` mints the page's link in its own
+  process without asking this socket.
 - **Cue writes, the two values handed out and a proposal's answer are the
   owner's decisions too.** `cues.sources.add`, `.update`, `.remove`,
   `.enable`, `.disable`, `.token.new`, `.url.get`, `cues.mandates.add`,

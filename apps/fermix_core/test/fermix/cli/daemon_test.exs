@@ -1178,6 +1178,59 @@ defmodule Fermix.CLI.DaemonTest do
     end
   end
 
+  # Always On setup §6: a setup page session drives every decision the page
+  # offers, the owner's included, so a command the agent ran cannot mint one;
+  # the Mac app (a launchd process) still opens the page.
+  describe "owner decisions on the setup page" do
+    test "a process the daemon started is refused a setup session, and so is one it cannot place" do
+      golden = setup_owner_golden()
+
+      for peer <- [[daemon_os_pid: ParentProcess.os_pid()], [os: {:win32, :nt}]] do
+        socket_path = start_peer_daemon(peer)
+
+        log =
+          ExUnit.CaptureLog.capture_log(fn ->
+            assert {:error, {:management_error, "unavailable", _message, ^golden}} =
+                     Client.request_v1("setup.session.create", %{},
+                       socket_path: socket_path,
+                       timeout: 5_000
+                     )
+          end)
+
+        assert log =~ "Refused setup.session.create: only the owner may"
+      end
+    end
+
+    test "a process the daemon did not start is given the page's one-use URL", %{
+      socket_path: socket_path
+    } do
+      assert {:ok, %{"url" => "http://127.0.0.1:4041/setup?t=daemon-launch-token"}} =
+               Client.request_v1("setup.session.create", %{},
+                 socket_path: socket_path,
+                 timeout: 5_000
+               )
+    end
+
+    defp setup_owner_golden do
+      golden =
+        :fermix_core
+        |> Application.app_dir("priv/management/fixtures/errors.jsonl")
+        |> File.stream!()
+        |> Enum.map(&Jason.decode!/1)
+        |> Enum.find(&(&1["name"] == "unavailable_setup_owner_decision"))
+        |> get_in(["response", "error", "details"])
+
+      assert golden == %{
+               "capability" => "setup_session",
+               "sentence" =>
+                 "Only the owner can open the setup page: use the Fermix app, or run " <>
+                   "fermix setup in your own terminal."
+             }
+
+      golden
+    end
+  end
+
   # M75 lean v1 §4.3: a provider's token decides which account Fermix acts in,
   # and creating, powering and deleting the Always On server spend the owner's
   # money and can take Fermix's home away, so a command the agent ran is

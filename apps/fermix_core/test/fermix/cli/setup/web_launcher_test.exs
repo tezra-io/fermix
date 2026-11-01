@@ -4,6 +4,7 @@ defmodule Fermix.CLI.Setup.WebLauncherTest do
   import ExUnit.CaptureIO
 
   alias Fermix.CLI.Setup.WebLauncher
+  alias FermixCore.Setup.AccessToken
 
   setup do
     previous_home = System.get_env("FERMIX_HOME")
@@ -130,6 +131,28 @@ defmodule Fermix.CLI.Setup.WebLauncherTest do
     end)
 
     assert_received :browser_opened
+  end
+
+  # Always On setup §6: opening the page through daemon.sock is the owner's
+  # decision, and `fermix setup` never asks for it there: it mints the page's
+  # one-use link in its own process, so that gate does not touch it.
+  test "run mints the page's one-use link itself, with no daemon to ask" do
+    output =
+      capture_io(fn ->
+        assert :ok =
+                 WebLauncher.run(
+                   scope: :user,
+                   no_browser: true,
+                   service: fake_service(installed?: true),
+                   standalone?: fn -> true end,
+                   live_probe: fn -> :ok end
+                 )
+      end)
+
+    assert [_url, token] =
+             Regex.run(~r{http://127\.0\.0\.1:4030/setup\?t=([A-Za-z0-9_-]+)}, output)
+
+    assert {:ok, _fingerprint} = AccessToken.consume_launch_token(token)
   end
 
   test "run uses PORT when no explicit setup port is passed" do

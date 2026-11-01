@@ -13,9 +13,18 @@ defmodule FermixCore.Home.Link do
   continuation dispatcher use. The implementation is
   `FermixChannels.Home.Link`. An unconfigured key is a configuration error and
   raises at the call.
+
+  `forwarding/0` is the one answer to how this engine reaches its primary
+  (Always On setup §7): on a linked desktop, the rail's `forward/2` as
+  `:primary_forward`, the option the management router composes a request
+  with; on any other engine, nothing. The daemon's dispatch, the Always On
+  watch and the setup page all read it, so each draws the same summary.
   """
 
+  alias FermixCore.Home.DesktopLink
+  alias FermixCore.Home.Role
   alias FermixCore.Management.Protocol
+  alias FermixCore.Setup.ConfigStore
 
   @typedoc """
   What the rail knows for `home.status`. `primary` is the device role's link to
@@ -85,6 +94,27 @@ defmodule FermixCore.Home.Link do
   `{:error, reason}` when no link runs or the name could not be kept.
   """
   @callback rename_primary(String.t()) :: :ok | {:error, term()}
+
+  @typedoc "How a request reaches the primary: the rail's `forward/2` on a linked desktop."
+  @type forwarding ::
+          [primary_forward: (Protocol.request(), keyword() -> Protocol.route_result())] | []
+
+  @doc """
+  How this engine reaches its primary, decided from the role it booted in and
+  its desktop link (`DesktopLink.linked?/2`): `[primary_forward: forward]` on a
+  linked desktop, `[]` otherwise. Read once at a reader's start, as the boot's
+  role is, so no request takes both paths in one boot.
+  """
+  @spec forwarding() :: forwarding()
+  def forwarding, do: forwarding(Role.recorded(), ConfigStore.fermix_home())
+
+  @doc "`forwarding/0` for an engine booted as `record` serving `home`."
+  @spec forwarding(Role.record(), Path.t()) :: forwarding()
+  def forwarding(record, home) when is_map(record) and is_binary(home) do
+    if DesktopLink.linked?(record, home),
+      do: [primary_forward: Function.capture(impl(), :forward, 2)],
+      else: []
+  end
 
   @doc "The configured implementation; raises when none is configured."
   @spec impl() :: module()
