@@ -1265,13 +1265,15 @@ defmodule Fermix.CLI.DaemonTest do
                  Client.request_v1(method, %{}, socket_path: socket_path, timeout: 5_000)
       end
 
-      result =
-        Client.request_v1("home.provision.options", %{}, socket_path: socket_path, timeout: 5_000)
-
-      refute match?(
-               {:error, {:management_error, "unavailable", _message, %{"capability" => "home"}}},
-               result
-             )
+      # A read for the provider in use, answered to a caller Fermix started:
+      # here, with no token, the provisioner's own sentence, never the owner's.
+      assert {:error,
+              {:management_error, "unavailable", _message,
+               %{"capability" => "home", "sentence" => "Paste a Hetzner API token first."}}} =
+               Client.request_v1("home.provision.options", %{},
+                 socket_path: socket_path,
+                 timeout: 5_000
+               )
     end
 
     defp rail_only_golden do

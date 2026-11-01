@@ -614,7 +614,8 @@ stop_step and the reconcile, which `Management.AlwaysOn.act/2` runs, and
 `home.provision.options`, the one method of the family left on the wire
 (device-class in `Placement`); the summary carries each provider's display
 data (`detail.providers`), so every surface draws the token screen from it;
-connect, options and create name the provider; power and delete act on
+connect names the provider; options (no params, answering that provider's
+`{id, name}`), create, Start again, power and delete act on
 `Provision.current/2`'s; a new
 token replaces the kept one only when it reaches the ledger's server or
 firewall (one read by id, the same account), a create is refused while any

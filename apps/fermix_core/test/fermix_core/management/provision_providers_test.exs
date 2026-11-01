@@ -1,6 +1,6 @@
 defmodule FermixCore.Management.ProvisionProvidersTest do
   # M75 lean v1 §4.3: Always On's provisioner is the same for every provider
-  # in `Provision.Registry`. Connect and options name the provider; create,
+  # in `Provision.Registry`. Connect names the provider; options, create,
   # power, the read back and delete act on the one Always On speaks of
   # (`Provision.current/2`). Run here on an invented provider alone
   # (`FermixTestSupport.FakeCloudProvider`), so the provisioner is shown to
@@ -66,6 +66,7 @@ defmodule FermixCore.Management.ProvisionProvidersTest do
       refute File.exists?(Ledger.path(ctx.home, "hetzner"))
 
       assert {:ok, options} = options(ctx)
+      assert options["provider"] == %{"id" => "nimbus", "name" => "Nimbus"}
       assert options["sentence"] == "Recommended: Small 4 in Oslo, €12 a month."
 
       assert {:ok, job} = create(ctx)
@@ -132,17 +133,28 @@ defmodule FermixCore.Management.ProvisionProvidersTest do
   end
 
   describe "the provider a call names" do
-    test "connect and options need one, and only one Fermix offers", ctx do
-      for {step, params} <- [
-            {&connect/2, %{"token" => FakeCloudProvider.token()}},
-            {&options/2, %{}}
-          ],
-          provider <- [:absent, "hetzner", 7] do
+    test "connect needs one, and only one Fermix offers", ctx do
+      for provider <- [:absent, "hetzner", 7] do
+        params = %{"token" => FakeCloudProvider.token()}
         params = if provider == :absent, do: params, else: Map.put(params, "provider", provider)
 
-        assert {:error, :invalid_params, %{"field" => "provider"}} = step.(ctx, params),
-               "#{inspect(step)} #{inspect(provider)}"
+        assert {:error, :invalid_params, %{"field" => "provider"}} = connect(ctx, params),
+               inspect(provider)
       end
+    end
+
+    test "options reads the provider in use: the one whose token Fermix has", ctx do
+      ctx = put_in(ctx.seams[:providers], [Hetzner, FakeCloudProvider])
+
+      assert {:error, :unavailable, %{"sentence" => "Paste a Hetzner API token first."}} =
+               options(ctx)
+
+      {:ok, _view} = connect(ctx)
+
+      assert {:ok, %{"provider" => %{"id" => "nimbus", "name" => "Nimbus"}} = options} =
+               options(ctx)
+
+      assert options["sentence"] == "Recommended: Small 4 in Oslo, €12 a month."
     end
 
     test "a create waits while another provider holds Fermix's server", ctx do
@@ -209,8 +221,7 @@ defmodule FermixCore.Management.ProvisionProvidersTest do
 
   # The one method of the provisioner still on the wire, through the router
   # as a daemon answers it.
-  defp options(ctx, params \\ %{"provider" => "nimbus"}),
-    do: route("home.provision.options", params, ctx)
+  defp options(ctx), do: route("home.provision.options", %{}, ctx)
 
   defp seams(ctx), do: Keyword.put(ctx.seams, :engine_role, @primary)
 
