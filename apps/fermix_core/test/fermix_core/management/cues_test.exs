@@ -2323,8 +2323,10 @@ defmodule FermixCore.Management.CuesTest do
 
       screen = Enum.find(rows, &(&1["key"] == "cues_screen"))
 
-      assert %{"hint" => "Set up Venice first: the screen's decision model runs on its key."} =
-               Enum.find(screen["options"], &(&1["value"] == "decision_model"))
+      assert %{
+               "disabled" => true,
+               "hint" => "Set up Venice first: the screen's decision model runs on its key."
+             } = Enum.find(screen["options"], &(&1["value"] == "decision_model"))
     end
 
     test "the decision model and the screen are one write, applied live, and back to Automatic",

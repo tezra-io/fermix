@@ -93,9 +93,9 @@ defmodule FermixCore.Cues.FilterChoices do
   @doc """
   The two screens, keyword match first. The decision model's hint names the
   one the screen uses, the owner's choice or else the one Fermix picks ("Uses
-  OpenAI · gpt-6-luna"), or, while the owner's choice is not set up, what to
-  set up (`decision_model_not_set_up/1`); while none is set up it is disabled,
-  with the hint that says what to set up.
+  OpenAI · gpt-6-luna"). While the owner's choice is not set up, or none is,
+  it is disabled, with the hint that says what to set up
+  (`decision_model_not_set_up/1`).
   """
   @spec screen_choices(Source.snapshot()) :: [screen_choice()]
   def screen_choices(snapshot) when is_map(snapshot) do
@@ -124,8 +124,10 @@ defmodule FermixCore.Cues.FilterChoices do
   defp decision_model_choice(_automatic, {chosen, true}),
     do: decision_model_hint("Uses #{DecisionModel.label(chosen)}")
 
+  # Disabled as a saved choice that is no longer set up is elsewhere: it stays
+  # the screen's value, and its watchers are held until it is set up.
   defp decision_model_choice(_automatic, {chosen, false}),
-    do: decision_model_hint(decision_model_not_set_up(chosen))
+    do: %{decision_model_hint(decision_model_not_set_up(chosen)) | disabled?: true}
 
   defp decision_model_hint(hint),
     do: %{id: "decision_model", label: "Decision model", hint: hint, disabled?: false}
