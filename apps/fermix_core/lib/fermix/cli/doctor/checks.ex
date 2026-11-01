@@ -1865,6 +1865,201 @@ defmodule Fermix.CLI.Doctor.Checks do
   defp imessage_config, do: Application.get_env(:fermix_channels, :imessage, [])
 
   @doc """
+  The computer-use rows from ONE probe: the `computer use` row
+  (`computer_use_permissions/2`), then, on a Linux helper, a row per fact its probe
+  reports — the display server, the accessibility bus, the ATK bridge, each toolkit
+  note, the X11 pixel route, the desktop portal and its stored Screenshot answer.
+
+  Read-only on every path: the probe raises no prompt and starts no service, and
+  these rows only format what it read. macOS, and every state that probed nothing,
+  add no row.
+  """
+  @spec computer_use({:ok, map()} | {:error, term()}, keyword()) :: [result()]
+  def computer_use(result \\ ProviderProbe.computer_use_permissions(), opts \\ [])
+      when is_list(opts) do
+    [computer_use_permissions(result, opts) | linux_computer_use_rows(result)]
+  end
+
+  defp linux_computer_use_rows({:ok, %{state: :probed, platform: "linux"} = probe}) do
+    [
+      display_server_row(probe),
+      accessibility_bus_row(probe.accessibility_bus),
+      atk_bridge_row(probe.accessibility_packages)
+    ] ++
+      toolkit_rows(probe.toolkit_notes) ++
+      [x11_pixels_row(probe), desktop_portal_row(probe), portal_screenshot_row(probe.portal)]
+  end
+
+  defp linux_computer_use_rows(_result), do: []
+
+  defp display_server_row(%{display_server: server, display_adopted: adopted})
+       when server in ["x11", "wayland"],
+       do: ok("display server", server <> adoption(adopted))
+
+  defp display_server_row(%{display_server: "none"}),
+    do: warn("display server", "none: no display answers, so computer use reaches no screen")
+
+  defp display_server_row(%{display_server: server}),
+    do: warn("display server", "#{server}: the helper named no display server this build knows")
+
+  defp adoption(true) do
+    ", adopted from the user manager: the helper had no display of its own and reaches the " <>
+      "session's as its own"
+  end
+
+  defp adoption(false), do: ", the helper's own"
+  defp adoption(nil), do: "; whether it was adopted from the user manager is unknown"
+
+  defp accessibility_bus_row(%{state: "answering", applications: count})
+       when is_integer(count) and count > 0 do
+    noun = if count == 1, do: "application", else: "applications"
+    ok("accessibility bus", "answering, with #{count} #{noun}")
+  end
+
+  defp accessibility_bus_row(%{state: "empty"}) do
+    warn(
+      "accessibility bus",
+      "answering, but no application is on it, so there is no control to list yet"
+    )
+  end
+
+  defp accessibility_bus_row(%{state: "unavailable", cause: cause, detail: detail}),
+    do: warn("accessibility bus", "unavailable" <> bus_reason(cause, detail))
+
+  defp accessibility_bus_row(_unknown) do
+    warn("accessibility bus", "unknown: the helper did not say whether its registry answers")
+  end
+
+  defp bus_reason(nil, nil), do: ": the helper gave no reason"
+  defp bus_reason(cause, nil), do: " (#{cause})"
+  defp bus_reason(nil, detail), do: ": #{detail}"
+  defp bus_reason(cause, detail), do: " (#{cause}): #{detail}"
+
+  # Information, never a warning: an ATK bridge older than 2.52 aborts a GTK 3
+  # application asked for its action list, and the helper never asks it.
+  defp atk_bridge_row(%{source: source, atk_bridge: version})
+       when is_binary(source) and is_binary(version),
+       do: ok("atk bridge", atk_bridge_text(version))
+
+  defp atk_bridge_row(%{source: source, atk_bridge: nil}) when is_binary(source),
+    do: ok("atk bridge", "not installed")
+
+  defp atk_bridge_row(_unread), do: ok("atk bridge", "unknown: no package database was read")
+
+  defp atk_bridge_text(version) do
+    case bridge_release(version) do
+      {:ok, release} when release < {2, 52} ->
+        "#{version}, older than 2.52: a GTK 3 application asked for its action list aborts " <>
+          "on that call, and computer use never asks it"
+
+      {:ok, _release} ->
+        version
+
+      :error ->
+        "#{version}, which does not say whether it is older than 2.52"
+    end
+  end
+
+  # A Debian version: an optional epoch, then the upstream major and minor.
+  defp bridge_release(version) do
+    case Regex.run(~r/^(?:\d+:)?(\d+)\.(\d+)/, version) do
+      [_match, major, minor] -> {:ok, {String.to_integer(major), String.to_integer(minor)}}
+      nil -> :error
+    end
+  end
+
+  defp toolkit_rows(notes) when is_list(notes),
+    do: Enum.map(notes, &ok("toolkit #{&1.toolkit}", &1.note))
+
+  defp toolkit_rows(nil), do: []
+
+  # XTEST and the keyboard map are the X11 route's two needs. On Wayland the
+  # route is the portal, so they are information there.
+  defp x11_pixels_row(%{x11_pixels: pixels, display_server: server}) do
+    detail = x11_pixels_text(pixels)
+
+    if server == "x11" and pixels != %{xtest: true, keymap: true},
+      do: warn("x11 pixels", detail <> "; the X11 pixel route needs both"),
+      else: ok("x11 pixels", detail)
+  end
+
+  defp x11_pixels_text(nil), do: "no X endpoint answers"
+
+  defp x11_pixels_text(%{xtest: xtest, keymap: keymap}),
+    do: "XTEST #{presence(xtest)}, keyboard map #{presence(keymap)}"
+
+  defp presence(true), do: "present"
+  defp presence(false), do: "missing"
+  defp presence(nil), do: "unknown"
+
+  # Without the host Registry (xdg-desktop-portal 1.18 and later) the helper would
+  # share the empty app id with every host process, so it refuses pixels on
+  # Wayland. On X11 the pixel route never asks the portal.
+  defp desktop_portal_row(%{portal: nil}),
+    do: ok("desktop portal", "not read: no session bus answered")
+
+  defp desktop_portal_row(%{portal: portal, display_server: server}) do
+    detail =
+      Enum.join(
+        [
+          portal_version(portal.version),
+          portal_running(portal.running),
+          portal_registry(portal.registry)
+        ],
+        "; "
+      )
+
+    if server == "wayland" and portal.registry == false,
+      do: warn("desktop portal", detail),
+      else: ok("desktop portal", detail)
+  end
+
+  defp portal_version(nil), do: "xdg-desktop-portal version unknown"
+  defp portal_version(version), do: "xdg-desktop-portal #{version}"
+
+  # `false` is the bus saying nobody runs it; `nil` is an error that said neither.
+  defp portal_running(true), do: "running"
+  defp portal_running(false), do: "not running"
+  defp portal_running(nil), do: "unknown whether it runs"
+
+  defp portal_registry(true), do: "has the Registry"
+
+  defp portal_registry(false),
+    do: "no Registry (it needs 1.18 or later), so pixels on Wayland are refused"
+
+  defp portal_registry(nil), do: "whether it has the Registry is unknown until it answers"
+
+  # The helper never writes the permission store, so a stored no is the person's
+  # to reset, and this is the one command that does it.
+  @screenshot_reset "gdbus call --session --dest org.freedesktop.impl.portal.PermissionStore " <>
+                      "--object-path /org/freedesktop/impl/portal/PermissionStore --method " <>
+                      "org.freedesktop.impl.portal.PermissionStore.DeletePermission screenshot " <>
+                      "screenshot io.tezra.fermix.ComputerUse"
+
+  defp portal_screenshot_row(nil),
+    do: ok("portal screenshot", "not read: no session bus answered")
+
+  defp portal_screenshot_row(%{screenshot_permission: "no"}) do
+    warn(
+      "portal screenshot",
+      "a stored no refuses every screenshot on Wayland until it is reset: " <> @screenshot_reset
+    )
+  end
+
+  defp portal_screenshot_row(%{screenshot_permission: answer}),
+    do: ok("portal screenshot", stored_answer(answer))
+
+  defp stored_answer("yes"), do: "allowed, by an answer the desktop keeps"
+
+  defp stored_answer("unset"),
+    do: "no answer stored; the desktop asks on the first screenshot on Wayland"
+
+  defp stored_answer("not_running"),
+    do: "the permission store is not running, so nothing was read"
+
+  defp stored_answer(nil), do: "unknown: the permission store did not answer"
+
+  @doc """
   Computer-use OS-permission state (docs/design/COMPUTER_USE_V2.md, Phase A). The
   load-bearing case is macOS: a GRANTED screen capture but DENIED input control is
   the silent-dropped-click symptom — `CGEventPost` is discarded without Accessibility,
@@ -2002,6 +2197,20 @@ defmodule Fermix.CLI.Doctor.Checks do
     Keyword.get_lazy(opts, :sidecar_target, &Compux.Binary.target/0)
   end
 
+  # On GNOME Wayland the route is the desktop portal, which asks the person on the
+  # first pixel action and keeps the answer, so the route being there is no grant.
+  defp format_computer_use_probe(%{
+         screen_capture: true,
+         input_control: true,
+         display_server: "wayland"
+       }) do
+    ok(
+      "computer use",
+      "screen capture and input control go through the desktop portal, which asks the " <>
+        "person on first use (wayland)#{sidecar_version_suffix()}"
+    )
+  end
+
   defp format_computer_use_probe(%{screen_capture: true, input_control: true} = probe) do
     ok(
       "computer use",
@@ -2037,21 +2246,12 @@ defmodule Fermix.CLI.Doctor.Checks do
 
   defp compux_version, do: to_string(Application.spec(:compux, :vsn))
 
-  # Platform-specific remediation: name the exact pane (macOS) or the X11 requirement
-  # (Linux/Wayland) so the fix is one step, not a hunt.
+  # Platform-specific remediation: name the exact pane (macOS) so the fix is one
+  # step, not a hunt. On Linux one route serves both halves, so input alone has no
+  # cause of its own to name.
   defp computer_use_input_hint(%{platform: "macos"}) do
     "screen capture OK but input control is NOT granted — clicks and keystrokes are " <>
       "silently dropped. Grant Accessibility: System Settings → Privacy & Security → Accessibility."
-  end
-
-  # M38 §8.2: the old string told every Wayland user to "use an X11 session" on
-  # desktops that no longer offer one, which is worse than naming no remedy.
-  # Each replacement says what is refused, why, and what remains true.
-  defp computer_use_input_hint(%{display_server: "wayland"}) do
-    "input control unavailable on this Wayland session. The computer-use sidecar " <>
-      "injects input through XTEST only; Wayland input needs the RemoteDesktop portal " <>
-      "and libei, which it does not implement yet. An X11 session still works on " <>
-      "desktops that offer one, and GNOME 50 and later do not."
   end
 
   defp computer_use_input_hint(probe) do
@@ -2491,11 +2691,15 @@ defmodule Fermix.CLI.Doctor.Checks do
       "Recording: System Settings → Privacy & Security → Screen Recording."
   end
 
+  # One route serves both halves on Wayland: GNOME's desktop portal under the
+  # helper's own app id. Where that cannot be had (another compositor, a portal
+  # without its Registry, one that does not run) the helper refuses it, and the
+  # portal rows say which. Never "use an X11 session": GNOME 50 and later offer none.
   defp computer_use_capture_hint(%{display_server: "wayland"}) do
-    "screen capture unavailable on this Wayland session. The computer-use sidecar " <>
-      "captures through X11 only; Wayland capture needs the ScreenCast portal, which it " <>
-      "does not implement yet. An X11 session still works on desktops that offer one, " <>
-      "and GNOME 50 and later do not."
+    "screen capture and input control unavailable on this Wayland session. Computer use " <>
+      "reaches a Wayland screen only through GNOME's desktop portal, under its own app id, " <>
+      "which needs xdg-desktop-portal 1.18 or later; the desktop portal row says what this " <>
+      "one has. Controls still work wherever the accessibility bus answers."
   end
 
   defp computer_use_capture_hint(probe) do

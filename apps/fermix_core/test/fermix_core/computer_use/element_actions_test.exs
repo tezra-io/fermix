@@ -437,6 +437,9 @@ defmodule FermixCore.ComputerUse.ElementActionsTest do
           {"text_outside_layout", "Send it with `paste` instead"},
           {"consent_refused", "Ask them whether they want to allow it"},
           {"consent_timeout", "watch for that prompt"},
+          {"no_active_window", "never brings a window forward itself"},
+          {"keyboard_not_neutral", "ask the user to clear it"},
+          {"capture_unavailable", "Work by control meanwhile"},
           {"unknown_action", "does not offer"},
           {"malformed_frame", "different versions"},
           {"untagged_frame", "different versions"},
@@ -490,6 +493,48 @@ defmodule FermixCore.ComputerUse.ElementActionsTest do
         refute result.error =~ "action failed:", "#{code} renders as a raw term"
         :ok = stop_supervised!({:every_refusal, code})
       end
+    end
+
+    # Each Linux refusal says what was not sent and what to do instead, and the
+    # ones whose cause the helper names in its detail carry that detail: how many
+    # windows claim ACTIVE, which key state is on, why this desktop's pixel route
+    # is refused.
+    for code <- ~w(no_active_window keyboard_not_neutral pixels_unavailable) do
+      test "the helper's #{code} says what was not sent, with its detail", %{config: config} do
+        session =
+          start_supervised!(
+            {Session,
+             [
+               config: config,
+               driver: {RefusingDriver, [code: unquote(code), detail: "2 applications"]},
+               origin: :interactive,
+               session_id: "cua_linux_#{System.unique_integer([:positive])}"
+             ]},
+            id: {:linux_refusal, unquote(code)}
+          )
+
+        assert {:ok, result} = run(session, config, press())
+        assert result.error =~ "this action was not sent"
+        assert result.error =~ "(2 applications)"
+      end
+    end
+
+    test "a stored no is the person's to reset, and the sentence says where", %{config: config} do
+      session =
+        start_supervised!(
+          {Session,
+           [
+             config: config,
+             driver: {RefusingDriver, [code: "consent_refused"]},
+             origin: :interactive,
+             session_id: "cua_consent_#{System.unique_integer([:positive])}"
+           ]},
+          id: {:consent_refused, :stored}
+        )
+
+      assert {:ok, result} = run(session, config, press())
+      assert result.error =~ "Do not retry"
+      assert result.error =~ "`fermix doctor` prints how"
     end
 
     # The argument and check refusals name an argument only where the reading

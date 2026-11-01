@@ -112,11 +112,14 @@ TYPED_CODE_ANCHORS = {
     "scope_not_found": "that scope has nothing in it right now",
     # ... and the ones only the Linux helper answers at first.
     "accessibility_unavailable": "cannot read or act on controls at all",
-    "pixels_unavailable": "only act on its controls",
+    "pixels_unavailable": "cannot do this by pixels on this desktop",
     "toolkit_accessibility_off": "this application is not publishing its controls",
     "text_outside_layout": "the keyboard layout in use cannot type some of that text",
     "consent_refused": "the person declined the desktop's request",
     "consent_timeout": "request for permission to see or control the screen was not answered",
+    "no_active_window": "no single window is active to take the keys",
+    "keyboard_not_neutral": "the keyboard is not in its plain state",
+    "capture_unavailable": "the desktop's screen-sharing service could not serve it",
 }
 # The routes a labelled sanity case may require (`sanity_route` in the desktop
 # corpus; AGENTS.md allows a route assertion only for safety and in labelled

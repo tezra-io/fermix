@@ -78,13 +78,19 @@ defmodule FermixCore.ComputerUse.BackgroundGateTest do
     @behaviour Compux.Driver
 
     @impl true
-    def start(opts), do: {:ok, %{code: Keyword.fetch!(opts, :code)}}
+    def start(opts) do
+      {:ok,
+       %{
+         code: Keyword.fetch!(opts, :code),
+         actions: Keyword.get(opts, :actions, Protocol.actions())
+       }}
+    end
 
     @impl true
     def execute(_state, %{"action" => "probe"}), do: {:ok, %{"input_control" => true}}
 
-    def execute(_state, %{"action" => "hello"}),
-      do: {:ok, %{"actions" => Protocol.actions(), "capabilities" => %{}}}
+    def execute(%{actions: actions}, %{"action" => "hello"}),
+      do: {:ok, %{"actions" => actions, "capabilities" => %{}}}
 
     def execute(_state, %{"action" => "idle_ms"}), do: {:ok, %{"ok" => true, "idle_ms" => 10_000}}
 
@@ -146,12 +152,12 @@ defmodule FermixCore.ComputerUse.BackgroundGateTest do
     end
   end
 
-  defp start_refusing_session(code) do
+  defp start_refusing_session(code, actions \\ Protocol.actions()) do
     start_supervised!(
       {Session,
        [
          config: Config.current(),
-         driver: {RefusingDriver, [code: code]},
+         driver: {RefusingDriver, [code: code, actions: actions]},
          origin: :interactive,
          session_id: "cua_refuse_#{System.unique_integer([:positive])}"
        ]},
@@ -331,5 +337,56 @@ defmodule FermixCore.ComputerUse.BackgroundGateTest do
 
       refute Map.has_key?(request, "target_id")
     end
+  end
+
+  # One code, two sources: a bound window's own stream, on a helper that can bind
+  # one, and the desktop's own capture on Linux (GNOME Wayland's portal), whose
+  # helper lists no binding at all. The sentence follows which of the two this
+  # helper can be.
+  describe "capture_unavailable, which the desktop's own capture answers too" do
+    test "is not one of the codes only a bound window answers" do
+      refute "capture_unavailable" in Background.codes()
+    end
+
+    test "with the flag off it is the desktop's sentence, and teaches no binding" do
+      put_background(false)
+      sentence = capture_unavailable_sentence()
+
+      assert sentence =~ "screen-sharing service"
+      assert_generic(sentence, "the sentence for capture_unavailable")
+    end
+
+    test "with the flag on and a helper that lists no binding, it is the desktop's" do
+      put_background(true)
+      linux = Protocol.actions() -- ~w(inspect select_target release_target)
+
+      assert capture_unavailable_sentence(linux) =~ "screen-sharing service"
+    end
+
+    test "with the flag on and a helper that binds, it is the bound window's" do
+      put_background(true)
+
+      assert capture_unavailable_sentence() =~ "the picture of the window you bound"
+    end
+  end
+
+  # The session records its helper's `hello` at start, which is the reading the
+  # sentence is chosen by.
+  defp capture_unavailable_sentence(actions \\ Protocol.actions()) do
+    session = start_refusing_session("capture_unavailable", actions)
+    context = %{computer_use_session: session, computer_use_config: Config.current()}
+
+    assert {:ok, %{success: false, error: sentence}} =
+             ComputerUse.execute(
+               %{
+                 "action" => "left_click",
+                 "observation_id" => ComputerUseObservations.id(),
+                 "x" => 1,
+                 "y" => 2
+               },
+               context
+             )
+
+    sentence
   end
 end

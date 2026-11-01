@@ -514,6 +514,25 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     end
   end
 
+  # The Linux helper reads controls through the accessibility bus on X11 and
+  # Wayland, and drives GNOME Wayland's pixels through the desktop portal. The
+  # self-reference says so, and never again that Linux is pixels only or that
+  # Wayland input does not work.
+  test "says what computer use offers on Linux" do
+    body = File.read!(self_knowledge_path())
+    reference = File.read!(reference_path("computer_use"))
+
+    for text <- [body, reference] do
+      refute text =~ "pixels only"
+      refute text =~ "XTEST only"
+      assert text =~ "desktop portal"
+    end
+
+    for required <- ["accessibility bus", "asks the person on first use", "controls only"] do
+      assert reference =~ required, "the computer_use reference does not say #{required}"
+    end
+  end
+
   # GPT-Live has no noise or echo settings, so "why does it hear my keyboard or
   # its own voice?" is answered by the Mac's voice processing and the daemon's
   # echo window, and a Linux client has to bring its own.

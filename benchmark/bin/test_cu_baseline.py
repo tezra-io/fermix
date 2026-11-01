@@ -245,7 +245,8 @@ def test_each_expectable_code_is_the_sentence_its_own_clause_renders():
 PROTOCOL_12_EXPECTABLE = {"stale_element", "ax_action_unsupported", "state_unreadable",
                           "focus_refused", "scope_not_found", "accessibility_unavailable",
                           "pixels_unavailable", "toolkit_accessibility_off", "text_outside_layout",
-                          "consent_refused", "consent_timeout"}
+                          "consent_refused", "consent_timeout", "no_active_window",
+                          "keyboard_not_neutral", "capture_unavailable"}
 
 
 def test_the_protocol_12_refusals_can_be_expected():

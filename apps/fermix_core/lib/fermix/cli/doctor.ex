@@ -30,6 +30,7 @@ defmodule Fermix.CLI.Doctor do
   alias Fermix.CLI.Doctor.Checks
   alias Fermix.CLI.Doctor.Remote
   alias FermixCore.BuildInfo
+  alias FermixCore.Setup.Doctor, as: ProviderProbe
 
   @spec run([String.t()]) :: non_neg_integer()
   def run(argv), do: run(argv, [])
@@ -79,7 +80,7 @@ defmodule Fermix.CLI.Doctor do
   defp remote_message(reason), do: Client.describe_error(reason)
 
   defp run_local(full?, deps) do
-    collect = Keyword.get(deps, :collect_results, &collect_results/1)
+    collect = Keyword.get(deps, :collect_results, &collect_results(&1, deps))
     if full?, do: ensure_http_pool()
     results = collect.(full?)
     print_report(results)
@@ -94,7 +95,7 @@ defmodule Fermix.CLI.Doctor do
   # the daemon's own constructor, so a probe leaves by the route a turn would.
   defp ensure_http_pool, do: FermixCore.Application.ensure_finch_pools()
 
-  defp collect_results(full?) do
+  defp collect_results(full?, deps) do
     base = [
       Checks.readiness(),
       Checks.provider_health(),
@@ -132,7 +133,7 @@ defmodule Fermix.CLI.Doctor do
       Checks.imessage_helper(),
       Checks.imessage_permissions(),
       Checks.acp(),
-      Checks.computer_use_permissions(),
+      Checks.computer_use(computer_use_probe(deps)),
       Checks.computer_use_background(),
       Checks.computer_history(),
       Checks.browser_disclaim(),
@@ -153,8 +154,13 @@ defmodule Fermix.CLI.Doctor do
         ],
         else: []
 
-    Enum.reject(base ++ network, &is_nil/1)
+    Enum.reject(List.flatten(base ++ network), &is_nil/1)
   end
+
+  # One probe for every computer-use row, so a run starts the helper once.
+  # `:computer_use_probe` is the tests' seam (`Setup.Doctor.computer_use_permissions/1`).
+  defp computer_use_probe(deps),
+    do: ProviderProbe.computer_use_permissions(Keyword.get(deps, :computer_use_probe, []))
 
   @doc false
   @spec print_report([Checks.result()]) :: :ok

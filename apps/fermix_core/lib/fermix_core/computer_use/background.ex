@@ -58,8 +58,10 @@ defmodule FermixCore.ComputerUse.Background do
   # actions are: with the flag off nothing can produce one, and a sentence that
   # taught the model about window binding through the ERROR path would be the
   # surface leaking out the back.
+  # `capture_unavailable` is not among them: the desktop's own capture on Linux
+  # answers it too, so the tool picks its sentence by whether a window can be bound.
   @codes ~w(target_unavailable target_minimized target_obstructed ax_binding_unavailable
-            control_surface_unavailable capture_unavailable capture_budget_exceeded
+            control_surface_unavailable capture_budget_exceeded
             screen_recording_not_granted target_binding_unavailable)
 
   @doc "The helper codes whose sentences belong to this surface."

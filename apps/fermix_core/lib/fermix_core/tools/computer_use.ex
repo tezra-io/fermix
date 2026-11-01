@@ -34,6 +34,9 @@ defmodule FermixCore.Tools.ComputerUse do
   # reveals, so a guard can use it and there is no second copy to drift.
   @background_codes Background.codes()
   @scroll_directions ~w(up down left right)
+  # The most notches one `scroll` turns. The helper refuses anything outside
+  # 1..50 (its library first), and never turns a larger amount down to the cap.
+  @max_scroll_notches 50
 
   # The verbs a control lists (M86 P2), `type` aside: it is a verb only when it
   # names a control.
@@ -317,7 +320,12 @@ defmodule FermixCore.Tools.ComputerUse do
             "enum" => @scroll_directions,
             "description" => "Scroll direction"
           },
-          "amount" => %{"type" => "integer", "description" => "Scroll amount (positive)"},
+          "amount" => %{
+            "type" => "integer",
+            "minimum" => 1,
+            "maximum" => @max_scroll_notches,
+            "description" => "Notches to scroll, 1 to #{@max_scroll_notches}"
+          },
           "text" => %{
             "type" => "string",
             "description" =>
@@ -827,6 +835,12 @@ defmodule FermixCore.Tools.ComputerUse do
         tag: "text_outside_layout",
         description: "the keyboard layout cannot type that text; nothing was sent — use paste"
       },
+      %{
+        tag: "no_active_window / keyboard_not_neutral",
+        description:
+          "no single window is active to take the keys, or Caps Lock, a held key or another " <>
+            "layout is on; nothing was sent. Act on the control by reference, or ask the user"
+      },
       # A mark and coordinates on one action are refused by any helper that mints
       # marks; a reference joins them only where controls are listed.
       %{
@@ -887,6 +901,12 @@ defmodule FermixCore.Tools.ComputerUse do
         description:
           "focus on a control in a window that is not the active one; focus never brings a " <>
             "window forward, so nothing was sent"
+      },
+      %{
+        tag: "pixels_unavailable",
+        description:
+          "this desktop cannot serve that action by pixels, as the detail says; nothing was " <>
+            "sent. Work by control: `elements`, then a verb on a reference"
       },
       %{
         tag: "scope_not_found / toolkit_accessibility_off",
@@ -1400,9 +1420,14 @@ defmodule FermixCore.Tools.ComputerUse do
   # `target_obstructed` is here too: its sentence ends by promising the helper's
   # own words for what is in front, which is the one fact that decides whether the
   # model aims elsewhere or asks the person to move something.
+  # The Linux refusals are here too where the helper's detail is the cause: how
+  # many applications claim the active window, which key state is on, why this
+  # desktop's pixel route is refused. None of them arrives on a check, because
+  # each is refused before any input goes out.
   @detailed_codes ~w(point_outside_observation capture_geometry_mismatch
                      ax_timed_out ax_action_failed target_obstructed scope_not_found
-                     toolkit_accessibility_off invalid_argument)
+                     toolkit_accessibility_off invalid_argument no_active_window
+                     keyboard_not_neutral pixels_unavailable)
 
   # A check the helper refused after the input had already gone out is a SUCCESS
   # here — the action happened — so the code it refused with would otherwise reach
@@ -1777,14 +1802,47 @@ defmodule FermixCore.Tools.ComputerUse do
       "controls at all. Work by pixels: take a `screenshot` and act in the image it names."
   end
 
-  # The mirror image: a Linux helper that found its display through the user's
-  # session can reach the controls on it but not capture or drive its pixels, so a
-  # screenshot, a click by point, typing at the focus and an image check are all
-  # refused. Controls are the honest alternative, and the only one.
+  # The mirror image, on Linux: this session's pixel route is refused (a
+  # compositor with no qualified route, a portal without its Registry or one that
+  # is not running, no display), or the route does not serve this verb (`paste`
+  # and `windows` on GNOME Wayland). The helper's detail says which, so it rides
+  # after the sentence. Controls are the honest alternative.
   defp action_error_message("pixels_unavailable") do
-    "this action was not sent: the computer-use helper on this machine cannot see or drive " <>
-      "the screen by pixels right now, only act on its controls. Work by control: list them " <>
-      "with `elements` and act with a verb on a reference it gives."
+    "this action was not sent: the computer-use helper cannot do this by pixels on this " <>
+      "desktop, as the detail below says, but it can still act on controls. Work by control: " <>
+      "list them with `elements` and act with a verb on a reference it gives."
+  end
+
+  # Linux: keys go only into a window that reads ACTIVE on the accessibility bus,
+  # and none does, or several do, so they would land where nobody chose. Neither
+  # the helper nor this side activates a window to make room; the detail says
+  # which it was.
+  defp action_error_message("no_active_window") do
+    "this action was not sent: no single window is active to take the keys — none is, or " <>
+      "several applications claim one, as the detail below says — and computer use never " <>
+      "brings a window forward itself. Act on the control by reference instead (`type` or " <>
+      "`set_value` with its `element_ref`, or `press`), or ask the user to click into the " <>
+      "window they mean."
+  end
+
+  # Linux (X11): Caps Lock, a held modifier or a layout other than the first would
+  # change what the keys type. The detail says which; clearing it is the person's.
+  defp action_error_message("keyboard_not_neutral") do
+    "this action was not sent: the keyboard is not in its plain state — Caps Lock is on, a " <>
+      "key is held, or another layout is selected, as the detail below says — so the text " <>
+      "would come out different. Send it with `paste`, or into the control by reference " <>
+      "(`type` or `set_value` with its `element_ref`), or ask the user to clear it."
+  end
+
+  # The desktop's own capture or input session (GNOME Wayland's portal) failed,
+  # went unanswered, or covers more than the one monitor shared. A bound window's
+  # stream answers the same code, with its own sentence, where a window can be
+  # bound at all (`code_message/2`).
+  defp action_error_message("capture_unavailable") do
+    "this action was not sent: the desktop's screen-sharing service could not serve it — " <>
+      "the service failed or did not answer, or the screen is more than the one monitor that " <>
+      "was shared. Work by control meanwhile: list them with `elements` and act with a verb " <>
+      "on a reference it gives. If it keeps happening, tell the user."
   end
 
   # Re-validation found several controls where the reference named one, or could
@@ -1813,10 +1871,12 @@ defmodule FermixCore.Tools.ComputerUse do
   end
 
   # The person declined the desktop's own consent prompt for screen capture or
-  # remote control. Theirs to decide; never worked around.
+  # remote control, now or by an answer the desktop keeps. Theirs to decide; never
+  # worked around, and a kept no is theirs to reset.
   defp action_error_message("consent_refused") do
     "this action was not sent: the person declined the desktop's request to let computer use " <>
-      "see or control the screen. Do not retry. Ask them whether they want to allow it."
+      "see or control the screen. Do not retry. Ask them whether they want to allow it; a no " <>
+      "the desktop remembers stays until they reset it, and `fermix doctor` prints how."
   end
 
   defp action_error_message("consent_timeout") do
@@ -2020,6 +2080,16 @@ defmodule FermixCore.Tools.ComputerUse do
   defp code_message("check_unsupported", offered), do: check_unsupported_message(offered)
   defp code_message("invalid_argument", offered), do: invalid_argument_message(offered)
   defp code_message("addressing_conflict", offered), do: addressing_conflict_message(offered)
+
+  # One code, two sources: a bound window's stream, and the desktop's own capture
+  # on a Linux helper, which lists no binding at all. Only a helper that can bind
+  # (with the flag on) can mean the window.
+  defp code_message("capture_unavailable", offered) do
+    if bound?(offered),
+      do: background_code_message("capture_unavailable"),
+      else: action_error_message("capture_unavailable")
+  end
+
   defp code_message(code, _offered), do: action_error_message(code)
 
   # Two answers to "where" on one request. Guessing which the model meant is a

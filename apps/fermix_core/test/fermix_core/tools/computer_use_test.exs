@@ -320,6 +320,40 @@ defmodule FermixCore.Tools.ComputerUseTest do
         assert tag in tags, "#{tag} can be returned and is not a declared failure mode"
       end
     end
+
+    test "the Linux refusals are declared failure modes" do
+      tags = Enum.map_join(ComputerUse.failure_modes(), " ", & &1.tag)
+
+      for code <- ~w(no_active_window keyboard_not_neutral pixels_unavailable) do
+        assert tags =~ code, "#{code} can be returned and is not a declared failure mode"
+      end
+    end
+
+    # The helper turns at most 50 notches and refuses anything else, as its
+    # library does first, so the schema says the same bounds the library holds.
+    test "scroll's amount is the notches the helper turns, 1 to 50" do
+      amount = ComputerUse.parameters()["properties"]["amount"]
+
+      assert amount["type"] == "integer"
+      assert amount["minimum"] == 1
+      assert amount["maximum"] == 50
+      assert amount["description"] =~ "1 to 50"
+
+      assert {:ok, _request} = Protocol.validate(scroll(amount["maximum"]))
+      assert {:error, _reason} = Protocol.validate(scroll(amount["maximum"] + 1))
+      assert {:error, _reason} = Protocol.validate(scroll(amount["minimum"] - 1))
+    end
+  end
+
+  defp scroll(amount) do
+    %{
+      "action" => "scroll",
+      "observation_id" => @obs,
+      "x" => 1,
+      "y" => 1,
+      "direction" => "down",
+      "amount" => amount
+    }
   end
 
   describe "dynamic_parameters/1 — live access mode folded into the action schema" do
