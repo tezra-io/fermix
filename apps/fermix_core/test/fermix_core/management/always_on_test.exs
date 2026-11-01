@@ -716,10 +716,7 @@ defmodule FermixCore.Management.AlwaysOnTest do
       screen = summary(ctx.opts)
       assert screen["state"] == "ready"
 
-      actions =
-        List.wrap(screen["action"]) ++
-          Map.get(screen["detail"], "alternatives", []) ++
-          Map.get(screen["detail"], "actions", [])
+      actions = HomeSummary.offered(screen)
 
       assert Enum.any?(actions, &(&1["id"] in ["cancel", "delete_server"]))
 
@@ -960,10 +957,7 @@ defmodule FermixCore.Management.AlwaysOnTest do
       assert {:ok, %{token: token}} = Ledger.read(ctx.home, "nimbus")
       assert token == FakeCloudProvider.token()
 
-      actions =
-        List.wrap(screen["action"]) ++
-          Map.get(screen["detail"], "alternatives", []) ++
-          Map.get(screen["detail"], "actions", [])
+      actions = HomeSummary.offered(screen)
 
       assert Enum.any?(actions, &(&1["id"] in ["create_server", "start_again"])), inspect(screen)
       assert screen["state"] == "choose"
@@ -983,10 +977,7 @@ defmodule FermixCore.Management.AlwaysOnTest do
       # The fault was one-shot: the same provider now accepts the create.
       assert FakeCloudProvider.world(ctx.world).faults == []
 
-      actions =
-        List.wrap(screen["action"]) ++
-          Map.get(screen["detail"], "alternatives", []) ++
-          Map.get(screen["detail"], "actions", [])
+      actions = HomeSummary.offered(screen)
 
       assert Enum.any?(actions, &(&1["id"] in ["create_server", "start_again", "check_again"])),
              inspect(screen)
@@ -1066,10 +1057,7 @@ defmodule FermixCore.Management.AlwaysOnTest do
   defp summary(opts), do: opts |> Home.summary_facts() |> HomeSummary.summary()
 
   defp offered!(summary, id) do
-    detail = summary["detail"]
-
-    offered =
-      List.wrap(summary["action"]) ++ (detail["alternatives"] || []) ++ (detail["actions"] || [])
+    offered = HomeSummary.offered(summary)
 
     Enum.find(offered, &(&1["id"] == id)) ||
       flunk("#{summary["state"]} offers no #{id}: #{inspect(Enum.map(offered, & &1["id"]))}")

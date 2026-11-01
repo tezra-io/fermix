@@ -769,9 +769,8 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
   end
 
   defp action!(summary, id) do
-    detail = summary["detail"]
-    offered = List.wrap(summary["action"]) ++ (detail["alternatives"] || [])
-    Enum.find(offered, &(&1["id"] == id)) || flunk("#{summary["state"]} offers no #{id}")
+    Enum.find(HomeSummary.offered(summary), &(&1["id"] == id)) ||
+      flunk("#{summary["state"]} offers no #{id}")
   end
 
   # -- the world -----------------------------------------------------------------

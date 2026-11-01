@@ -849,6 +849,22 @@ defmodule FermixCore.Management.HomeSummaryTest do
 
   # -- the summary is the screen (Always On setup §3.1) -------------------------
 
+  # Review simplification 3: one reading of what a screen offers.
+  test "what a screen offers is its action, then the alternatives, then Details' actions" do
+    assert ids(HomeSummary.offered(HomeSummary.summary(desktop([])))) ==
+             ["back_up_now", "replace_server"]
+
+    not_set_up = facts(provision: created_ledger(), link: link(enrollment: provisioned(:expired)))
+
+    assert ids(HomeSummary.offered(HomeSummary.summary(not_set_up))) ==
+             ["start_again", "own_server", "open_console", "delete_server"]
+
+    summary = HomeSummary.summary(ready_facts([]))
+
+    for %{"id" => id, "key" => key} = record <- HomeSummary.offered(summary),
+        do: assert(HomeSummary.find_action(summary, id, key) == {:ok, record})
+  end
+
   describe "every action is one record" do
     test "each action anywhere has its needs, confirm, url and key" do
       for {name, facts, _state, _sentence, _action} <- cases(),
@@ -1866,23 +1882,16 @@ defmodule FermixCore.Management.HomeSummaryTest do
 
   defp ids(actions), do: Enum.map(actions, & &1["id"])
 
-  defp every_action(%{"action" => action, "detail" => detail}),
-    do: List.wrap(action) ++ Map.get(detail, "alternatives", []) ++ Map.get(detail, "actions", [])
+  defp every_action(summary), do: HomeSummary.offered(summary)
 
   # The main action and every one Details offers.
-  defp all_actions(%{"action" => action, "detail" => detail}) do
-    ids(List.wrap(action)) ++
-      ids(Map.get(detail, "alternatives", [])) ++ ids(Map.get(detail, "actions", []))
-  end
+  defp all_actions(summary), do: ids(HomeSummary.offered(summary))
 
   # Every word a surface prints as prose: the sentence, each action's label
   # and confirm, the notes, the token screens, the step in hand, the labels
   # of Details' lines and the notice.
-  defp printed(%{"sentence" => sentence, "action" => action, "detail" => detail} = summary) do
-    actions =
-      List.wrap(action) ++ (detail["alternatives"] || []) ++ (detail["actions"] || [])
-
-    words = Enum.flat_map(actions, &[&1["label"] | List.wrap(&1["confirm"])])
+  defp printed(%{"sentence" => sentence, "detail" => detail} = summary) do
+    words = Enum.flat_map(HomeSummary.offered(summary), &[&1["label"] | List.wrap(&1["confirm"])])
     notes = for key <- ~w(note billing data progress), is_binary(detail[key]), do: detail[key]
     screens = Enum.flat_map(detail["providers"] || [], &[&1["sentence"] | &1["steps"]])
     lines = for %{"label" => label} <- detail["lines"] || [], do: label

@@ -254,7 +254,7 @@ defmodule Fermix.CLI.AlwaysOnCommand do
   defp take(step, summary, ctx) do
     id = String.replace(step, "-", "_")
 
-    case Enum.find(Render.records(summary), &(&1["id"] == id)) do
+    case Enum.find(HomeSummary.offered(summary), &(&1["id"] == id)) do
       nil -> refuse(:action_refused, [not_offered: step], ctx)
       record -> record |> Step.press(summary, ctx) |> finish(summary, ctx)
     end
@@ -376,7 +376,7 @@ defmodule Fermix.CLI.AlwaysOnCommand do
   end
 
   defp offer(summary, ctx, round) do
-    records = Render.records(summary)
+    records = HomeSummary.offered(summary)
     print(ctx.stdout, Render.screen(summary) ++ Render.menu(records))
 
     case pick(summary, records, ctx) do

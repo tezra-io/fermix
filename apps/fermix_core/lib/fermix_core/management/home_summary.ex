@@ -251,17 +251,23 @@ defmodule FermixCore.Management.HomeSummary do
       do: digest([id, label, confirm, needs, target])
 
   @doc """
-  The action `id` that `summary` offers under `key`, wherever it sits (its
-  action, `detail.alternatives`, `detail.actions`), or `:error` when it
-  offers none such: what says the owner saw the step they asked for.
+  Every action record `summary` offers, wherever it sits: its action, then
+  `detail.alternatives`, then `detail.actions` (review simplification 3).
+  The one reading of what a screen offers: `find_action/3`, the CLI's
+  steps and menus, and the tests read it here.
+  """
+  @spec offered(summary()) :: [map()]
+  def offered(%{"action" => action, "detail" => detail}) when is_map(detail),
+    do: List.wrap(action) ++ Map.get(detail, "alternatives", []) ++ Map.get(detail, "actions", [])
+
+  @doc """
+  The action `id` that `summary` offers under `key` (`offered/1`), or
+  `:error` when it offers none such: what says the owner saw the step they
+  asked for.
   """
   @spec find_action(summary(), String.t(), String.t()) :: {:ok, map()} | :error
-  def find_action(%{"action" => action, "detail" => detail}, id, key)
-      when is_binary(id) and is_binary(key) do
-    offered =
-      List.wrap(action) ++ Map.get(detail, "alternatives", []) ++ Map.get(detail, "actions", [])
-
-    case Enum.find(offered, &(&1["id"] == id and &1["key"] == key)) do
+  def find_action(summary, id, key) when is_binary(id) and is_binary(key) do
+    case Enum.find(offered(summary), &(&1["id"] == id and &1["key"] == key)) do
       nil -> :error
       found -> {:ok, found}
     end
@@ -1209,14 +1215,9 @@ defmodule FermixCore.Management.HomeSummary do
 
   # Every provider's token screen, wherever a token is asked for.
   defp providers(view, facts) do
-    if "paste_token" in offered_ids(view),
+    if Enum.any?(offered(view), &(&1["id"] == "paste_token")),
       do: Enum.map(facts.providers, &provider_screen/1),
       else: []
-  end
-
-  defp offered_ids(%{"action" => action, "detail" => detail}) do
-    actions = List.wrap(action) ++ Map.get(detail, "alternatives", [])
-    Enum.map(actions, & &1["id"])
   end
 
   defp provider_screen(provider) do
