@@ -167,10 +167,12 @@ name, such as \fBpaste\-token\fR, \fBcreate\-server\fR, \fBown\-server\fR or
 \fBmove\-now\fR. With no terminal, or with \fB\-\-json\fR, nothing is
 asked: \fB\-\-stdin\fR reads the token from a pipe,
 \fB\-\-recovery\-passphrase\-file\fR reads the passphrase, \fB\-\-type\fR
-and \fB\-\-location\fR choose the size and place (else Fermix takes its
-recommendation), \fB\-\-yes\fR accepts what the step asks first, and
-\fB\-\-wait\fR waits for the step to settle. A token or passphrase is never
-taken as an argument. It needs Fermix running.
+and \fB\-\-location\fR choose the size and place (else the one Fermix
+recommends), \fB\-\-yes\fR accepts what the step asks first, and
+\fB\-\-wait\fR waits for the step to settle, exiting 1 when it ends on a
+problem or is still at it after 45 minutes. A token or passphrase is never
+taken as an argument. It needs Fermix running. A release build has no Always
+On yet: there it says "Always On is not in this release of Fermix yet."
 .TP
 .B fermix logs
 Show the daemon's own log file.
