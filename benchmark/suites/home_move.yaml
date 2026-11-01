@@ -13,12 +13,15 @@
 # WHY BEHAVIORAL. There is no end state to check: the answer is advice.
 #
 # GATES. One labelled sanity case pins that the answer comes from the skill
-# (`skill_view`); every other gate is a floor any correct answer meets (the
-# export and the import; the primary the device-role Mac points at; WhatsApp,
-# which the owner named, in the answer about what stops). The rubric
-# owns the wording. No `reply_not_matches`: the wrong move (copying the home
-# folder by hand) is something a correct answer may well warn against, and a
-# pattern cannot tell the two polarities apart.
+# (`skill_view`); every other gate is a floor any correct answer meets (one of
+# the two ways a home moves, Always On or the archive by hand; the primary the
+# device-role Mac points at; WhatsApp, which the owner named, in the answer
+# about what stops). The rubric owns the wording. The one `reply_not_matches`
+# is the verbs Fermix removed (`fermix home move`, `--retire`, `fermix home
+# enroll-code`), which no correct answer names in either polarity; the wrong
+# move (copying the home folder by hand) is something a correct answer may
+# well warn against, and a pattern cannot tell the two polarities apart, so
+# the rubric holds it.
 #
 # NO NEW CONSENT GATE. Nothing here is gated on a human decision, so
 # `bin/seed_capability_home.py` needs no pre-grant (these are `host_readonly`,
@@ -42,7 +45,10 @@ scenarios:
     cases:
       # SANITY CASE — the one route assertion in this suite. The move's verbs and
       # their order are not general knowledge; they are in the skill's `home`
-      # reference, so this case pins that the model opened it.
+      # reference, so this case pins that the model opened it. A rented VM is
+      # a server of the owner's own, so Always On's own-server path is a
+      # correct answer as much as the archive by hand, and neither is
+      # penalized.
       - id: move_to_vm_sanity
         query: >
           I've rented a small Linux VM so Fermix can keep running when my Mac
@@ -50,18 +56,24 @@ scenarios:
           memory and settings, and what will I have to redo on the VM?
         expect:
           tools_any: [skill_view]
-          reply_matches: '(?is)(?=.*\bexport)(?=.*\bimport)'
+          reply_matches: '(?is)\balways[\s-]on\b|\benroll|\bexport\b.*\bimport\b|\bimport\b.*\bexport\b'
+          reply_not_matches: '(?i)\bfermix\s+home\s+move\b|--retire\b|\benroll-code\b'
           max_tool_calls: 8
           max_cost_usd: 1.2
           max_duration_ms: 160000
         rubric: |
-          1. Says the move is an export of the home, with Fermix stopped on the
-             Mac, into one archive protected by a passphrase the owner keeps
-             (`fermix home export`), copied to the VM and imported there into an
-             empty directory (`fermix home import ... --into ...`).
-          2. Says the Mac's home is marked as moved (`--mark-moved` on the
-             export, or `fermix home mark-moved`) so it can no longer start as
-             the primary.
+          1. Gives a way that moves the whole home, memory and settings
+             included, either one being correct: Always On onto a server of
+             the owner's own (Use my own Linux server, or `fermix always-on
+             own-server`: an enrollment code, the installer run on the VM that
+             asks for it, then Move now with a recovery passphrase), or the
+             archive by hand (`fermix home export` with Fermix stopped on the
+             Mac, under a passphrase the owner keeps, then `fermix home import`
+             into an empty directory on the VM).
+          2. Says the Mac no longer runs as the primary once the home moved:
+             after Always On's move it stays a desktop of the VM, and by hand
+             its home is marked moved (`--mark-moved` on the export, or
+             `fermix home mark-moved`).
           3. Names at least two things that do not travel and are redone on the
              VM: secrets kept in the operating system's keyring, browser
              sign-ins (browser profiles stay with the Mac), coding-agent
