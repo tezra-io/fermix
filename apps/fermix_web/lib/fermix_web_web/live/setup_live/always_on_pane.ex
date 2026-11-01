@@ -7,9 +7,10 @@ defmodule FermixWebWeb.SetupLive.AlwaysOnPane do
   dialog with the confirm sentence and the recovery passphrase), Details from
   `detail.lines`, and the code of a server of the owner's own.
 
-  Every word is the engine's (the summary's, `home.provision.options`' and
-  `Management.Copy`'s labels and price line) but a field's label, an offer's
-  size, and the page's own Back, Change, Copy, Done and Details.
+  Every word is the engine's (the summary's, `home.provision.options`' with
+  each offer's `label` and `price`, and `Management.Copy`'s action labels)
+  but a field's label and the page's own Back, Change, Copy, Done and
+  Details.
   """
 
   use FermixWebWeb, :html
@@ -306,13 +307,13 @@ defmodule FermixWebWeb.SetupLive.AlwaysOnPane do
         >
           <summary class="cursor-pointer px-3 py-2 text-sm">Change</summary>
           <div class="space-y-3 px-3 pb-3">
-            <fieldset :for={{city, offers} <- by_city(@options)} class="space-y-1">
+            <fieldset
+              :for={{location, city, offers} <- by_city(@options)}
+              data-location={location}
+              class="space-y-1"
+            >
               <legend class="text-xs font-semibold text-base-content/60">{city}</legend>
-              <.offer
-                :for={offer <- offers}
-                offer={offer}
-                options={@options}
-              />
+              <.offer :for={offer <- offers} offer={offer} options={@options} />
             </fieldset>
           </div>
         </details>
@@ -341,10 +342,9 @@ defmodule FermixWebWeb.SetupLive.AlwaysOnPane do
         checked={recommended?(@offer, @options)}
         class="radio radio-sm mt-0.5"
       />
-      <span>
-        <span class="font-medium">{@offer["description"]}</span>
-        · {@offer["memory_gb"]} GB memory, {@offer["cores"]} cores, {@offer["disk_gb"]} GB disk
-        · {price(@offer, @options)}
+      <span class="min-w-0">
+        <span class="block font-medium" data-offer="label">{@offer["label"]}</span>
+        <span class="block text-xs text-base-content/70" data-offer="price">{@offer["price"]}</span>
       </span>
     </label>
     """
@@ -355,14 +355,11 @@ defmodule FermixWebWeb.SetupLive.AlwaysOnPane do
     for %{"id" => id, "city" => city} <- locations,
         here = Enum.filter(offers, &(&1["location"] == id)),
         here != [],
-        do: {city, here}
+        do: {id, city, here}
   end
 
   defp recommended?(%{"type" => type, "location" => location}, %{"recommended" => recommended}),
     do: recommended == %{"type" => type, "location" => location}
-
-  defp price(%{"total_monthly" => total}, %{"currency" => currency}),
-    do: Copy.summary_line(:costs, {total, currency}, %{})["value"]
 
   defp dialog_step(assigns) do
     open = assigns.always_on.open

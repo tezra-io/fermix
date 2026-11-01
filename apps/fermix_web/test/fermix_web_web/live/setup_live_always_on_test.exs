@@ -335,9 +335,20 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
       options = options!(seams)
       assert text(html, "#always-on-step") =~ options["sentence"]
       assert text(html, "#always-on-step") =~ create["confirm"]
-      assert text(html, "#always-on-offers") =~ "Oslo"
-      assert text(html, "#always-on-offers") =~ "Lisbon"
-      assert text(html, "#always-on-offers") =~ "Large 8"
+      # Each place under its city, and each offer as the engine words it,
+      # its label and price and nothing of the page's own.
+      for %{"id" => id, "city" => city} <- options["locations"],
+          here = Enum.filter(options["offers"], &(&1["location"] == id)),
+          here != [] do
+        place = ~s(#always-on-offers [data-location="#{id}"])
+        assert text(html, "#{place} legend") == city
+
+        assert texts(html, "#{place} label") == Enum.map(here, &"#{&1["label"]}#{&1["price"]}")
+        assert texts(html, ~s(#{place} [data-offer="label"])) == Enum.map(here, & &1["label"])
+        assert texts(html, ~s(#{place} [data-offer="price"])) == Enum.map(here, & &1["price"])
+      end
+
+      assert text(html, "#always-on-offers") =~ "Large 8: 4 cores, 8 GB memory, 160 GB disk"
 
       assert ["osl1/small-4"] =
                field_values(html, ~s(input[name="always_on_step[choice]"][checked]))
@@ -1025,6 +1036,14 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
     |> LazyHTML.text()
     |> String.split()
     |> Enum.join(" ")
+  end
+
+  # The text of each element `selector` matches, in order.
+  defp texts(html, selector) do
+    html
+    |> LazyHTML.from_fragment()
+    |> LazyHTML.query(selector)
+    |> Enum.map(&(&1 |> LazyHTML.text() |> String.split() |> Enum.join(" ")))
   end
 
   defp tab_ids(html) do
