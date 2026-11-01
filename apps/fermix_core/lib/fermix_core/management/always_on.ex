@@ -12,7 +12,8 @@ defmodule FermixCore.Management.AlwaysOn do
   **One rule for "the owner saw this".** Acts run one at a time per engine,
   in this process, and each reads the summary first: one that does not offer
   `action` under `key` (`HomeSummary.find_action/3`) is answered `changed`,
-  with the summary as it is now and a sentence, and nothing is done. That
+  in a sentence and nothing else, and nothing is done; the surface reads
+  `home.status` again, as it does after any act. That
   covers a confirm accepted on an older screen, two surfaces pressing at once
   and a server that changed under the owner. An act whose caller stopped
   waiting (its deadline, `deadline_ms/0`, passed while it queued) is not run.
@@ -59,7 +60,7 @@ defmodule FermixCore.Management.AlwaysOn do
   guard: an act that meets a running read of the provider is refused in
   words.
 
-  Refusals, each with a sentence: `changed` (the summary now),
+  Refusals, each with a sentence: `changed` (its sentence alone),
   `invalid_params` (a missing or bad input, a passphrase that is not the one
   set, an action a surface opens itself), `unavailable` with capability
   `home` (busy, a block, nothing to move to), the settings write's
@@ -217,7 +218,7 @@ defmodule FermixCore.Management.AlwaysOn do
   end
 
   # `seen`: the facts the screen was drawn from, and the screen.
-  defp offered(:error, _request, seen, _opts), do: changed(seen.summary)
+  defp offered(:error, _request, _seen, _opts), do: changed()
 
   defp offered({:ok, _action}, request, seen, opts) do
     Logger.info("always on: #{request.action}, asked by #{inspect(Keyword.get(opts, :actor))}")
@@ -231,8 +232,7 @@ defmodule FermixCore.Management.AlwaysOn do
   defp answer({:error, code, details}, _opts) when is_atom(code), do: {:error, code, details}
   defp answer({:error, reason}, _opts), do: refusal(reason)
 
-  defp changed(summary),
-    do: {:error, :changed, %{"summary" => summary, "sentence" => @changed_sentence}}
+  defp changed, do: {:error, :changed, %{"sentence" => @changed_sentence}}
 
   defp summary(opts), do: opts |> Home.summary_facts() |> HomeSummary.summary()
 
@@ -404,11 +404,9 @@ defmodule FermixCore.Management.AlwaysOn do
   defp blocks(items), do: for(%{"status" => "block", "sentence" => said} <- items, do: said)
 
   defp still_offered(%{action: action, key: key}, opts) do
-    summary = summary(opts)
-
-    case HomeSummary.find_action(summary, action, key) do
+    case HomeSummary.find_action(summary(opts), action, key) do
       {:ok, _action} -> :ok
-      :error -> changed(summary)
+      :error -> changed()
     end
   end
 

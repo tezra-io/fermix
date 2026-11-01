@@ -12,7 +12,6 @@ defmodule FermixCore.Management.AlwaysOnTest do
   alias FermixCore.Home.Epoch
   alias FermixCore.Home.Move
   alias FermixCore.Home.Moved
-  alias FermixCore.Home.MoveReadiness
   alias FermixCore.Home.Provision.Driver
   alias FermixCore.Home.Provision.Ledger
   alias FermixCore.Home.Snapshot.Recipient
@@ -164,17 +163,17 @@ defmodule FermixCore.Management.AlwaysOnTest do
   end
 
   describe "the key rule" do
-    test "an action not offered under its key is answered changed, with the summary now, " <>
-           "and nothing is done",
+    test "an action not offered under its key is answered changed in a sentence, and " <>
+           "nothing is done",
          ctx do
       request = %{action: "paste_token", key: "an-older-key", input: token_input()}
 
-      assert {:error, :changed, %{"summary" => summary, "sentence" => sentence}} =
+      assert {:error, :changed, %{"sentence" => sentence} = details} =
                AlwaysOn.act(request, ctx.opts)
 
-      assert summary == summary(ctx.opts)
-      assert summary["state"] == "off"
+      assert Map.keys(details) == ["sentence"]
       assert sentence =~ "changed"
+      assert summary(ctx.opts)["state"] == "off"
       refute File.exists?(Ledger.path(ctx.home, "nimbus"))
     end
 
@@ -189,8 +188,10 @@ defmodule FermixCore.Management.AlwaysOnTest do
         |> Enum.map(fn request -> Task.async(fn -> AlwaysOn.act(request, ctx.opts) end) end)
         |> Enum.map(&Task.await(&1, 15_000))
 
-      assert [{:error, :changed, %{"summary" => %{"state" => "creating"}}}, {:ok, _answer}] =
+      assert [{:error, :changed, %{"sentence" => _}}, {:ok, %{"summary" => after_first}}] =
                Enum.sort_by(answers, &elem(&1, 0))
+
+      assert after_first["state"] == "creating"
 
       settle!(ctx)
       assert length(jobs(ctx)) == 1
@@ -522,18 +523,21 @@ defmodule FermixCore.Management.AlwaysOnTest do
       assert Move.read_phase(ctx.home) == :absent
     end
 
-    test "a warning the screen did not name answers changed with it, and nothing moves", ctx do
+    test "a warning the screen did not name answers changed, the screen then names it, and " <>
+           "nothing moves",
+         ctx do
       lockfile = Path.join(ctx.home, "plugins/installed.json")
       File.mkdir_p!(Path.dirname(lockfile))
       File.write!(lockfile, ~s({"invented-plugin": {"version": "0.0.1"}}))
       opts = Keyword.put(ctx.opts, :host, "macos-aarch64")
       before = summary(opts)["action"]
 
-      assert {:error, :changed, %{"summary" => summary}} =
+      assert {:error, :changed, %{"sentence" => _sentence}} =
                press(%{ctx | opts: opts}, "move_now", %Input{recovery_passphrase: @passphrase})
 
-      assert summary["action"]["confirm"] =~ "invented-plugin"
-      assert summary["action"]["key"] != before["key"]
+      now = summary(opts)["action"]
+      assert now["confirm"] =~ "invented-plugin"
+      assert now["key"] != before["key"]
       refute_received :restarted
       assert Move.read_phase(ctx.home) == :absent
     end
@@ -703,63 +707,21 @@ defmodule FermixCore.Management.AlwaysOnTest do
     end
   end
 
-  # `changed` carries the whole summary in its details, which the protocol
-  # bounds at 4,096 bytes: a ready screen whose review warns of everything
-  # it can (eight plugins named among them), each warning named again in
-  # Move now's confirm, measured 3,866 bytes, so a home with many more
-  # plugins would not fit.
+  # `changed` says only that the screen moved on (Always On setup §3.4, the
+  # lead's call on the error details' bound): the surface reads home.status
+  # again, as it does after any act, so no refusal carries a summary.
   describe "the changed refusal" do
-    test "carries a ready screen that names every review warning", ctx do
-      File.write!(Path.join(ctx.home, "config.toml"), """
-      [fermix_core.harness]
-      approved = true
+    test "holds only its sentence, on the wire too", ctx do
+      params = %{"action" => "paste_token", "key" => "an-older-key"}
 
-      [fermix_core.meetings]
-      enabled = true
+      assert {:error, :changed, details} = route("home.act", params, ctx)
 
-      [fermix_core.realtime]
-      enabled = true
+      assert details == %{
+               "sentence" => "Always On changed since this was shown, so look at it again."
+             }
 
-      [fermix_channels.whatsapp]
-      enabled = true
-
-      [fermix_channels.slack]
-      enabled = true
-
-      [fermix_channels.imessage]
-      enabled = true
-      """)
-
-      lockfile = Path.join(ctx.home, "plugins/installed.json")
-      File.mkdir_p!(Path.dirname(lockfile))
-
-      plugins =
-        Map.new(1..8, &{"invented-plugin-with-a-long-name-#{&1}", %{"version" => "0.0.#{&1}"}})
-
-      File.write!(lockfile, Jason.encode!(plugins))
-
-      attrs = %{candidate_attrs() | snapshots: %{"s3_bucket" => "invented-bucket"}}
-      {:ok, held} = Candidates.add(ctx.home, attrs, @at)
-      Agent.update(ctx.link, &%{&1 | enrollment: window(:manual, :used, held.candidate_id, 0)})
-
-      report =
-        MoveReadiness.report(ctx.home, held,
-          home_bytes: 6 * 1_073_741_824,
-          free_bytes: fn _dir -> {:ok, 1_099_511_627_776} end,
-          host: "macos-aarch64",
-          version: "0.16.0",
-          restarts_itself: false
-        )
-
-      :ok = Move.put_review(ctx.home, held.candidate_id, report, @at)
-      opts = Keyword.merge(ctx.opts, host_os: :macos, restarts_itself: false)
-      summary = summary(opts)
-
-      assert summary["state"] == "ready"
-      assert length(summary["detail"]["readiness"]) >= 8
-
-      details = %{"summary" => summary, "sentence" => "Always On changed."}
-      assert {:ok, _envelope} = Protocol.respond("req-1", {:error, :changed, details})
+      assert {:ok, %{"error" => %{"details" => ^details}}} =
+               Protocol.respond("req-1", {:error, :changed, details})
     end
   end
 

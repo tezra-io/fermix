@@ -6150,7 +6150,7 @@
     },
     "home_act_params": {
       "type": "object",
-      "description": "One Always On step: an action the summary offers (its action, an alternative or one of on's detail.actions) and the key it was drawn with, with what the action's needs asked for. learn_more, open_console and update are opened by the surface and refused here on action. The key is checked against the summary as it is now: one that does not offer the action under it answers changed, and nothing is done.",
+      "description": "One Always On step: an action the summary offers (its action, an alternative or one of on's detail.actions) and the key it was drawn with, with what the action's needs asked for. learn_more, open_console and update are opened by the surface and refused here on action. The key is checked against the summary as it is now: one that does not offer the action under it answers changed with details {sentence} alone, nothing is done, and the surface reads home.status again.",
       "required": ["action", "key"],
       "additionalProperties": false,
       "properties": {

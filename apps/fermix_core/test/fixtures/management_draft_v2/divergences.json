@@ -2846,9 +2846,9 @@
     },
     {
       "method": "(errors)",
-      "field": "changed:sentence,summary",
+      "field": "changed:sentence",
       "kind": "engine_only",
-      "why": "Always On setup §3.4: changed carries details {summary, sentence}, the summary to draw and the sentence that says it changed. The draft predates the code."
+      "why": "Always On setup §3.4: changed carries details {sentence} alone, the sentence that says the screen moved on; the surface then reads home.status again, as after any act. The draft predates the code."
     },
     {
       "method": "(errors)",

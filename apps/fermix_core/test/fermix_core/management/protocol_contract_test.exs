@@ -659,7 +659,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
 
   # Always On setup §3.4: `home.act`'s golden is the router's own answer to
   # its case, the token pasted on the first screen, and its `changed`
-  # refusal carries a summary the engine draws.
+  # refusal says so in a sentence and carries nothing else.
   test "the golden home.act answer and its changed refusal are the engine's own" do
     {"home.act", params, opts} = Enum.find(router_cases(), &(elem(&1, 0) == "home.act"))
     request = %{request_id: "req-1", protocol_version: 2, method: "home.act", params: params}
@@ -667,8 +667,9 @@ defmodule FermixCore.Management.ProtocolContractTest do
 
     assert named_fixture_result("home_act") == json(answer)
 
-    assert golden_error_details("changed")["summary"] ==
-             named_fixture_result("home_status")["summary"]
+    assert golden_error_details("changed") == %{
+             "sentence" => "Always On changed since this was shown, so look at it again."
+           }
   end
 
   test "the schema's row vocabulary matches the settings module", %{schema: schema} do

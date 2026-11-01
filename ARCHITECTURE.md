@@ -729,8 +729,8 @@ step: `home.act {action, key, input}`, one function per action with its
 placement decided inside it. One named process per engine (a child of the
 daemon-socket tree, after the job family) serializes the acts; each reads the
 summary first (`Home.summary_facts/1`, `HomeSummary.find_action/3`) and
-answers `changed` with the current summary when the action is not offered
-under that key, so a confirm accepted on an older screen or two surfaces
+answers `changed`, in a sentence alone, when the action is not offered under
+that key (the surface reads `home.status` again), so a confirm accepted on an older screen or two surfaces
 pressing at once do nothing twice. A step that starts a job names it in the
 ledger first (`Provision.put_action/2`) and clears it again when the start is
 refused; Cancel during a create stops the job and waits for its run to end

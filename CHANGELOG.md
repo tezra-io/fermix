@@ -288,7 +288,7 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a server of your own, a backup now, checking the move again and Move now
   are each one request with the screen it was pressed on; if Always On
   changed meanwhile (another window pressed first, the server moved on), Fermix
-  does nothing and answers with the screen as it is, so a confirm you
+  does nothing and says so, and the screen is read again, so a confirm you
   accepted on an older screen never runs. Cancel during a create stops the
   create and waits until it has really stopped before deleting what it made;
   Cancel the code closes a code for a server of your own; Start again deletes
