@@ -17,13 +17,20 @@ defmodule FermixCore.Providers.DecisionModel do
   | OpenRouter | `POST <base without /v1>/alpha/decisions` | `~typesafe/jev-latest` (TypeSafe's Jev) |
   | Venice | `POST <base>/decisions` | `jev-latest` (TypeSafe's Jev) |
 
-  Fermix picks the provider, never the owner (`route/0`): the primary provider
-  when it serves a decision model and is set up, otherwise the first of the
-  three that is set up, in the order above. `pick/2` is that rule alone, over
-  a primary and a set-up check the caller passes, so a settings surface answers
-  from its own snapshot. The Jev routes follow the vendor's newest Jev; the
-  answer names the model that answered, and the call's telemetry carries it,
-  so an upgrade stays visible.
+  The caller passes the owner's choice (`route/1`): one of the three, or nil
+  for Automatic, where Fermix picks the primary provider when it serves a
+  decision model and is set up, otherwise the first of the three that is set
+  up, in the order above. A chosen provider that is not set up is no route,
+  never another provider. `pick/2` is the Automatic rule alone, over a primary
+  and a set-up check the caller passes, so a settings surface answers from its
+  own snapshot. The Jev routes follow the vendor's newest Jev; the answer names
+  the model that answered, and the call's telemetry carries it, so an upgrade
+  stays visible.
+
+  Set up means `ready?/2`: the provider is configured (`Selection.configured?/2`)
+  and its key loaded. A keychain or file secret that never resolved stays in
+  application env as its sentinel (`@keyring`, `@file`); sent as a bearer
+  token it is a refused call, so here it is no key.
 
   ## The call
 
@@ -46,6 +53,7 @@ defmodule FermixCore.Providers.DecisionModel do
   alias FermixCore.Providers.Error, as: ProviderError
   alias FermixCore.Providers.Selection
   alias FermixCore.Providers.Telemetry, as: ProviderTelemetry
+  alias FermixCore.Setup.SecretWriter
 
   @providers [:openai, :openrouter, :venice]
   @models %{openai: "gpt-6-luna", openrouter: "~typesafe/jev-latest", venice: "jev-latest"}
@@ -68,9 +76,24 @@ defmodule FermixCore.Providers.DecisionModel do
           | {:refused, String.t()}
           | {:parser_changed, String.t()}
 
+  @doc "The providers that serve a decision model, in catalog order."
+  @spec providers() :: [provider()]
+  def providers, do: @providers
+
   @doc "How a surface names the decision model on `provider`."
   @spec label(provider()) :: String.t()
   def label(provider) when provider in @providers, do: Map.fetch!(@labels, provider)
+
+  @doc """
+  Whether `block`, `provider`'s settings as application env holds them (live,
+  or a settings snapshot read from it), can carry a decision call: configured,
+  with a key that loaded rather than a secret's sentinel.
+  """
+  @spec ready?(provider(), keyword()) :: boolean()
+  def ready?(provider, block) when provider in @providers and is_list(block) do
+    Selection.configured?(provider, block) and
+      not SecretWriter.sentinel?(Keyword.get(block, :api_key))
+  end
 
   @doc """
   The provider a decision model runs on: the primary (`primary`, shaped as
@@ -94,21 +117,36 @@ defmodule FermixCore.Providers.DecisionModel do
   defp lead({:error, _reason}), do: []
 
   @doc """
-  The route of the decision model `pick/2` picks from application env, or
-  `:not_set_up` when no provider that serves one is set up.
+  The route of the decision model on `choice`, read from application env:
+  that provider's when it is `ready?/2`, `{:not_set_up, provider}` when it is
+  not; for nil (Automatic) the one `pick/2` picks, or `:not_set_up` when no
+  provider that serves one is ready.
   """
-  @spec route() :: {:ok, route()} | {:error, :not_set_up}
-  def route do
-    with {:ok, provider} <- pick(Selection.primary_provider(), &Selection.configured?/1) do
-      {:ok, build_route(provider)}
+  @spec route(provider() | nil) ::
+          {:ok, route()} | {:error, :not_set_up | {:not_set_up, provider()}}
+  def route(nil) do
+    with {:ok, provider} <- pick(Selection.primary_provider(), &ready?(&1, env_block(&1))),
+         do: route(provider)
+  end
+
+  def route(provider) when provider in @providers do
+    block = env_block(provider)
+
+    if ready?(provider, block),
+      do: {:ok, build_route(provider, block)},
+      else: {:error, {:not_set_up, provider}}
+  end
+
+  defp env_block(provider) do
+    case Config.provider(provider) do
+      {:ok, block} -> block
+      {:error, :not_configured} -> []
     end
   end
 
-  # Only a provider `Selection.configured?/1` passed gets here, so its block and
-  # key are there; a missing one is a bug that fails loud.
-  defp build_route(provider) do
-    {:ok, block} = Config.provider(provider)
-
+  # Only a block `ready?/2` passed gets here, so its key is there; a missing one
+  # is a bug that fails loud.
+  defp build_route(provider, block) do
     %{
       provider: provider,
       model: Map.fetch!(@models, provider),

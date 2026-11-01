@@ -44,6 +44,7 @@ defmodule FermixCore.Tools.ManageWatcher do
   alias FermixCore.Cues
   alias FermixCore.Cues.FollowUpReadiness
   alias FermixCore.Cues.FollowUps
+  alias FermixCore.Cues.Overview
   alias FermixCore.Cues.Watchers
   alias FermixCore.Jobs.Registry, as: JobsRegistry
   alias FermixCore.Memory.Repo
@@ -547,6 +548,7 @@ defmodule FermixCore.Tools.ManageWatcher do
       "Watcher #{watcher.name} (#{watcher.id}): #{state_word(watcher, streams)}; " <>
         "#{filter_word(watcher)}; #{jobs_words(watcher)}; task notes " <>
         "#{if watcher.task_notes?, do: "on", else: "off"}.",
+      filter_hold_line(watcher, context),
       follow_up_line(watcher, context),
       needs_line(Watchers.update_needed(watcher, streams)),
       "Sources: #{Enum.join(watcher.sources, ", ")}." <> missing(watcher, context),
@@ -560,6 +562,16 @@ defmodule FermixCore.Tools.ManageWatcher do
     ]
     |> Enum.reject(&is_nil/1)
     |> Enum.join("\n")
+  end
+
+  # A filter held because the screen's decision model cannot run, in the words
+  # of its notice (`Cues.Overview.filter_hold/2`); any other hold is not shown.
+  defp filter_hold_line(watcher, context) do
+    case Overview.filter_hold(watcher.id, opts(context)) do
+      {:ok, nil} -> nil
+      {:ok, sentence} -> "Its filter is held. #{sentence}"
+      {:error, reason} -> "Its filter's hold could not be read (#{inspect(reason)})."
+    end
   end
 
   defp jobs_words(%{task_job_id: nil} = watcher), do: "no task" <> follow_up_words(watcher)

@@ -17,7 +17,8 @@ defmodule FermixCore.Cues.Filter.Prompt do
   The user message is `criteria/1` (the watcher and its instructions, the
   owner's side) then `evidence/1` (the examples and the cue, outside data). A
   decision model (`Cues.Filter.Decision`) takes the two apart: the first as its
-  question, the second as the content it reads.
+  question, the second as the content it reads, with each example framed the
+  same way (`example_frame/1`) among its question's hints.
   """
 
   alias FermixCore.Capabilities.UntrustedContent
@@ -79,6 +80,14 @@ defmodule FermixCore.Cues.Filter.Prompt do
     |> Enum.join("\n\n")
   end
 
+  @doc """
+  One example the owner marked, its snapshot and note in an `UntrustedContent`
+  frame (`cue_example`): outside data that someone else wrote.
+  """
+  @spec example_frame(map()) :: String.t()
+  def example_frame(%{note: note, snapshot: snapshot}),
+    do: UntrustedContent.frame(@example_source, snapshot_text(snapshot) <> note_line(note))
+
   defp watcher_block(watcher) do
     "Watcher: #{watcher.name}\nPurpose: #{watcher.purpose || "(none set)"}"
   end
@@ -105,10 +114,8 @@ defmodule FermixCore.Cues.Filter.Prompt do
     "Items the owner marked, oldest first:\n" <> framed
   end
 
-  defp example_text(%{label: label, note: note, snapshot: snapshot}, index) do
-    body = snapshot_text(snapshot) <> note_line(note)
-    "Example #{index}, #{label_words(label)}:\n" <> UntrustedContent.frame(@example_source, body)
-  end
+  defp example_text(%{label: label} = example, index),
+    do: "Example #{index}, #{label_words(label)}:\n" <> example_frame(example)
 
   defp label_words("pass"), do: "the owner said it should have passed"
   defp label_words("drop"), do: "the owner said it should have been dropped"

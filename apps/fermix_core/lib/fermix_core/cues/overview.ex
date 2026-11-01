@@ -26,6 +26,7 @@ defmodule FermixCore.Cues.Overview do
 
   alias FermixCore.Cues.Deliveries
   alias FermixCore.Cues.Door
+  alias FermixCore.Cues.Filter.Decision
   alias FermixCore.Cues.FollowUps
   alias FermixCore.Cues.Mandates
   alias FermixCore.Cues.Pins
@@ -64,6 +65,7 @@ defmodule FermixCore.Cues.Overview do
           follow_up: follow_up() | nil,
           enabled?: boolean(),
           held?: boolean(),
+          held_sentence: String.t() | nil,
           needs_update: Watchers.update_needed(),
           offered: non_neg_integer(),
           waiting: non_neg_integer(),
@@ -202,7 +204,9 @@ defmodule FermixCore.Cues.Overview do
 
   @doc """
   Every watcher, by name, with its task's name and whether the task is paused,
-  its follow-up (`t:follow_up/0`), whether its filter is held by provider failures, the update it needs to keep
+  its follow-up (`t:follow_up/0`), whether its filter is held by provider
+  failures and, for a hold whose cause is the screen's decision model, Fermix's
+  sentence naming it (`held_sentence`, `filter_hold/2`), the update it needs to keep
   the rules (`Cues.Watchers.update_needed/2`), its budgets and instruction
   count, and what it received in the day before `now`: `offered` (every item
   its words let through, kept or not), `waiting` (pending or being filtered),
@@ -223,6 +227,7 @@ defmodule FermixCore.Cues.Overview do
            {:ok, follow_ups} <- follow_ups(watchers, jobs, opts) do
         facts = %{
           held_ids: MapSet.new(held, & &1.watcher_id),
+          screen_hold: Decision.no_route_sentence(cues_config(opts)),
           stored: Map.new(summary.watchers, &{&1.watcher_id, &1}),
           counted: counted,
           jobs: Map.new(jobs, &{&1.id, job_view(&1)}),
@@ -335,6 +340,7 @@ defmodule FermixCore.Cues.Overview do
       follow_up: Map.get(facts.follow_ups, watcher.id),
       enabled?: watcher.enabled?,
       held?: MapSet.member?(facts.held_ids, watcher.id),
+      held_sentence: held_sentence(MapSet.member?(facts.held_ids, watcher.id), facts.screen_hold),
       needs_update: Watchers.update_needed(watcher, facts.streams),
       offered: Enum.sum(Map.values(not_streamed)) + count(live, ["offered"]),
       waiting: count(by_state, @waiting_states),
@@ -350,6 +356,31 @@ defmodule FermixCore.Cues.Overview do
       created_at: watcher.created_at
     }
   end
+
+  # A held filter's every call meets the screen first, so while the screen's
+  # decision model cannot run, that is what holds it. Any other hold is a
+  # provider's failure, whose words reach no surface.
+  defp held_sentence(true, screen_hold), do: screen_hold
+  defp held_sentence(false, _screen_hold), do: nil
+
+  @doc """
+  Watcher `id`'s filter hold in Fermix's own words: the screen's sentence
+  (`Cues.Filter.Decision.no_route_sentence/1`) while its filter is held and the
+  screen's decision model cannot run, else nil. Takes `:repo` and
+  `:cues_config`.
+  """
+  @spec filter_hold(String.t(), keyword()) ::
+          {:ok, String.t() | nil} | {:error, :memory_off | term()}
+  def filter_hold(id, opts) when is_binary(id) and is_list(opts) do
+    with {:ok, held} <- call(CuesFilterSql, {:held_watchers}, opts) do
+      held? = Enum.any?(held, &(&1.watcher_id == id))
+      {:ok, held_sentence(held?, Decision.no_route_sentence(cues_config(opts)))}
+    end
+  end
+
+  defp cues_config(opts),
+    do:
+      Keyword.get_lazy(opts, :cues_config, fn -> Application.get_env(:fermix_core, :cues, []) end)
 
   defp count(counts, keys), do: keys |> Enum.map(&Map.get(counts, &1, 0)) |> Enum.sum()
 

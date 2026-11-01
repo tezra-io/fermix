@@ -489,6 +489,26 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
       assert screen_hint(html) == "Set up OpenAI, OpenRouter or Venice first."
     end
 
+    test "picking an option highlights it at once, before Save, with the decision model's picker",
+         %{conn: conn} do
+      Application.put_env(:fermix_core, :providers, openai: [api_key: "invented-key-2207"])
+      {:ok, view, _html} = live(conn, "/setup")
+      open_cues(view)
+
+      html =
+        view
+        |> form("#cues-settings-form", cues_settings: %{screen: "decision_model"})
+        |> render_change()
+
+      assert screen_options(html) == [
+               {"", "Keyword match", false},
+               {"decision_model", "Decision model", true}
+             ]
+
+      assert html =~ ~s(id="cues-decision-provider")
+      assert persisted_cues() == []
+    end
+
     test "the decision model is refused under the Screen while none is set up, and nothing is written",
          %{conn: conn} do
       Application.put_env(:fermix_core, :providers, anthropic: [api_key: "invented-key-2207"])
@@ -504,6 +524,90 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
                "Set up OpenAI, OpenRouter or Venice first: a decision model runs on one of them."
 
       assert persisted_cues() == []
+    end
+
+    test "while Decision model is picked, its decision model sits under the Screen, and one Save writes both",
+         %{conn: conn} do
+      Application.put_env(:fermix_core, :providers,
+        openai: [api_key: "invented-key-2207"],
+        openrouter: [api_key: "invented-key-3318"]
+      )
+
+      {:ok, view, _html} = live(conn, "/setup")
+      html = open_cues(view)
+
+      refute html =~ ~s(name="cues_settings[decision_provider]")
+
+      html =
+        view
+        |> form("#cues-settings-form", cues_settings: %{screen: "decision_model"})
+        |> render_change()
+
+      page = LazyHTML.from_fragment(html)
+
+      select =
+        LazyHTML.query(page, ~s(#cues-screen select[name="cues_settings[decision_provider]"]))
+
+      options = LazyHTML.query(select, "option")
+
+      assert LazyHTML.attribute(options, "value") == ["", "openai", "openrouter", "venice"]
+
+      assert options |> Enum.map(&(&1 |> LazyHTML.text() |> squish())) == [
+               "Automatic (Uses OpenAI · gpt-6-luna)",
+               "OpenAI · gpt-6-luna",
+               "OpenRouter · Jev",
+               "Venice · Jev"
+             ]
+
+      assert page |> LazyHTML.query(~s(option[value="venice"][disabled])) |> Enum.any?()
+      assert html =~ escaped(FilterChoices.decision_provider_info())
+
+      html =
+        view
+        |> form("#cues-settings-form",
+          cues_settings: %{screen: "decision_model", decision_provider: "openrouter"}
+        )
+        |> render_submit()
+
+      assert html =~ "Cues saved."
+      cues = persisted_cues()
+      assert Keyword.get(cues, :screen) == :decision_model
+      assert Keyword.get(cues, :decision_provider) == :openrouter
+
+      # Back to keyword match, the chosen decision model is kept for later.
+      view
+      |> form("#cues-settings-form", cues_settings: %{screen: ""})
+      |> render_change()
+
+      html = view |> form("#cues-settings-form", cues_settings: %{screen: ""}) |> render_submit()
+
+      refute html =~ ~s(name="cues_settings[decision_provider]")
+      refute Keyword.has_key?(persisted_cues(), :screen)
+      assert Keyword.get(persisted_cues(), :decision_provider) == :openrouter
+    end
+
+    test "a decision model that is not set up is refused under it, and nothing is written",
+         %{conn: conn} do
+      Application.put_env(:fermix_core, :providers,
+        openai: [api_key: "invented-key-2207"],
+        openrouter: [api_key: "@keyring"]
+      )
+
+      Application.put_env(:fermix_core, :cues, screen: :decision_model)
+      {:ok, view, _html} = live(conn, "/setup")
+      open_cues(view)
+
+      html =
+        view
+        |> element("#cues-settings-form")
+        |> render_submit(%{
+          cues_settings: %{screen: "decision_model", decision_provider: "openrouter"}
+        })
+
+      assert settings_refusal(html, "cues_decision_provider") ==
+               "Set up OpenRouter first: the screen's decision model runs on its key."
+
+      refute Keyword.has_key?(persisted_cues(), :decision_provider)
     end
 
     test "a running door shows where it listens", %{conn: conn} do

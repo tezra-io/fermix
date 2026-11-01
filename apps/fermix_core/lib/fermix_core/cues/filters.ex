@@ -449,7 +449,7 @@ defmodule FermixCore.Cues.Filters do
     base = %{watcher_name: outcome.watcher_name, waiting: outcome.waiting}
 
     if outcome.held_now?,
-      do: notify(context, run.watcher_id, :filter_held, Map.put(base, :error, message))
+      do: notify(context, run.watcher_id, :filter_held, held_data(base, result, message))
 
     if outcome.recovered?, do: notify(context, run.watcher_id, :filter_recovered, base)
 
@@ -463,6 +463,14 @@ defmodule FermixCore.Cues.Filters do
 
   defp failure_message({_status, %{message: message}}), do: message
   defp failure_message(_decision), do: nil
+
+  # A missing route's sentence is Fermix's own and says what to set up, so the
+  # hold's notice carries it; a provider's message may echo the item, and a
+  # notice carries no cue text.
+  defp held_data(base, {:provider_failure, %{kind: :no_route}}, message),
+    do: Map.merge(base, %{error: message, sentence: message})
+
+  defp held_data(base, _result, message), do: Map.put(base, :error, message)
 
   defp budget_data(over) do
     %{watcher_name: over.watcher_name, waiting: over.waiting, budget: over.budget}

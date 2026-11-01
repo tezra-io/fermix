@@ -880,6 +880,30 @@ FERMIX_EVAL_HOME=~/.fermix-capability-eval uv run bin/run_eval.py --suite cues \
 bin/capability-daemon.sh down
 ```
 
+### The Cues screen (`make capability-screen`)
+
+While `[fermix_core.cues] screen` is `decision_model`, a decision model judges each
+item before the filter model reads it, and an item under its bar never reaches the
+filter. `bin/run_screen_eval.py` measures that screen on a labelled set
+(`suites/capability/fixtures/cues/screen_set.yaml`: invented watchers with stacked
+conditions and items labelled `should_screen_through` or `irrelevant`; its
+`labelling` key says how the labels were decided). For each pair it takes the
+screen's own request from `Cues.Filter.Decision.request/1` (form A, today's
+question) and the same request without the numbered instructions (form B, built in
+the harness only), asks both through `Providers.DecisionModel.yes_no/4` on every
+decision model whose key is in the environment, and reports recall and the share of
+irrelevant items dropped at bars 0.1 to 0.4, split by kind, with the pairs only one
+form gets right. It needs no daemon: the engine half (`bin/screen_eval.exs`) runs in
+a temporary `FERMIX_HOME` that is removed afterwards, and the keys come only from
+`OPENAI_API_KEY`, `OPENROUTER_API_KEY` and `VENICE_API_KEY`, as the explicit seed
+mode reads them; a provider without one is reported skipped. `risk: host_readonly`.
+
+```sh
+make capability-screen-dry                    # validate, render, plan; spends nothing
+uv run bin/run_screen_eval.py                 # every provider with a key (make capability-screen)
+uv run bin/run_screen_eval.py --provider openai
+```
+
 ---
 
 ## 5e. Configuration arms (`make arms`)

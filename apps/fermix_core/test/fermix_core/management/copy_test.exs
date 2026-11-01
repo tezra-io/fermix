@@ -18,6 +18,7 @@ defmodule FermixCore.Management.CopyTest do
   alias FermixCore.Capabilities.MCP.Config, as: McpConfig
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Cues.Config, as: CuesConfig
+  alias FermixCore.Cues.Filter.Decision
   alias FermixCore.Cues.FollowUpReadiness
   alias FermixCore.Cues.FollowUps
   alias FermixCore.Cues.Mandates
@@ -49,6 +50,7 @@ defmodule FermixCore.Management.CopyTest do
   alias FermixCore.Management.Plugins.Row, as: PluginRow
   alias FermixCore.Management.Protocol
   alias FermixCore.Management.Settings
+  alias FermixCore.Providers.DecisionModel
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Readiness
   alias FermixCore.Sandbox.Config, as: SandboxConfig
@@ -1495,10 +1497,16 @@ defmodule FermixCore.Management.CopyTest do
             %{base | filter: "none", needs_update: :filter},
             %{base | filter: "none"},
             %{base | filter: "none", task_job_id: nil, follow_up: follow_up_view(false)}
-          ] ++ Enum.map(follow_up_views(), &%{base | follow_up: &1}) do
+          ] ++
+            Enum.map(follow_up_views(), &%{base | follow_up: &1}) ++
+            Enum.map(screen_holds(), &Map.merge(base, %{held?: true, held_sentence: &1})) do
       CueWatcherRow.build(watcher, %{window_s: 86_400})
     end
   end
+
+  # Every sentence a hold whose cause is the screen's decision model names.
+  defp screen_holds,
+    do: Enum.map([nil | DecisionModel.providers()], &Decision.not_set_up_sentence/1)
 
   # A watcher's follow-up asking first and always allowed, and held for each
   # reason the readiness check words (M60_WATCHER_CODING_RUNS.md §3.2).

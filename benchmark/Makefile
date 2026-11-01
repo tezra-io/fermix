@@ -8,13 +8,13 @@ AIM_DISPLAY_ATTEST := $(if $(filter 1 true yes,$(CONFIRM_AIM_LIVE_DISPLAY)),--co
 AIM_HANDS_ATTEST := $(if $(filter 1 true yes,$(CONFIRM_AIM_HANDS_OFF)),--confirm-hands-off,)
 AIM_ATTEST := $(AIM_DISPLAY_ATTEST) $(AIM_HANDS_ATTEST)
 
-.PHONY: help tests check dry regression behavioral-isolated capability capability-auto capability-judged capability-readonly capability-private estimate rank baseline uplift arms gaia lmeval aim aim-calibrate
+.PHONY: help tests check dry regression behavioral-isolated capability capability-auto capability-judged capability-readonly capability-private capability-screen capability-screen-dry estimate rank baseline uplift arms gaia lmeval aim aim-calibrate
 
 help:
-	@echo "targets: tests check dry regression behavioral-isolated capability capability-auto capability-judged capability-readonly capability-private estimate rank baseline uplift arms gaia lmeval aim aim-calibrate"
+	@echo "targets: tests check dry regression behavioral-isolated capability capability-auto capability-judged capability-readonly capability-private capability-screen capability-screen-dry estimate rank baseline uplift arms gaia lmeval aim aim-calibrate"
 
 tests:        ## developer tests for harness code; does not run behavioral/capability E2E
-	@for t in scoring pricing aggregate leaderboard leaderboard_html halden_ops untrusted_content private_suites release_gate experiments uplift baseline lmeval gaia capability_runner checker grade suites companion judge eval_safety seed_home opik_client tier tier_exit_code eval_box eval_nightly aim fixture_server browser_host_fixture arms voice cue_drive judgment; do \
+	@for t in scoring pricing aggregate leaderboard leaderboard_html halden_ops untrusted_content private_suites release_gate experiments uplift baseline lmeval gaia capability_runner checker grade suites companion judge eval_safety seed_home opik_client tier tier_exit_code eval_box eval_nightly aim fixture_server browser_host_fixture arms voice cue_drive judgment screen_eval; do \
 	  echo "== $$t =="; $(UV) bin/test_$$t.py || exit 1; done
 
 check:        ## preconditions (Opik + daemon)
@@ -50,6 +50,22 @@ capability-readonly:  ## capability score of the READ-ONLY suites vs the dev dae
 
 capability-private:  ## the private holdout (config private_suites.dir), judged, vs an isolated daemon
 	bin/tier.sh capability-private
+
+# The Cues screen's decision models (bin/run_screen_eval.py): every decision model whose
+# key is in this shell's environment (OPENAI_API_KEY, OPENROUTER_API_KEY, VENICE_API_KEY;
+# none from the keychain) scores the labelled set in two question forms. risk:
+# host_readonly (invented items, a temporary home, no daemon), so it needs no isolation
+# attestation, but it is not part of capability-auto: it drives no daemon turn, scores a
+# threshold table rather than pass/fail, and spends keys the sweep does not. COST: two
+# short decision requests per labelled pair on each provider with a key (166 for the
+# shipped set); capability-screen-dry prints the plan and spends nothing. Through make
+# every failure exits 2; run the script itself for its own codes (3 = every provider
+# skipped). SCREEN_FLAGS=--provider openai asks one provider only.
+capability-screen:      ## the Cues screen eval on each decision model with a key in the env (COST: see above)
+	$(UV) bin/run_screen_eval.py $(SCREEN_FLAGS)
+
+capability-screen-dry:  ## validate the screen set, render every request through the engine, plan; no spend
+	$(UV) bin/run_screen_eval.py --dry-run
 
 estimate:     ## print the capability turn-count/cost plan (no spend)
 	$(UV) bin/run_capability.py --trials 5 --estimate

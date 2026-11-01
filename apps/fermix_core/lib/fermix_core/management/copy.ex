@@ -152,6 +152,9 @@ defmodule FermixCore.Management.Copy do
     "Providers",
     "Channels",
     "Plugins",
+    "Cues",
+    # The Cues screen's option, named as the settings label it.
+    "Keyword match",
     "Voice",
     "Telegram",
     "WhatsApp",

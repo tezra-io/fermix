@@ -45,7 +45,9 @@ description: >
   through an X accounts source that reads with the X plugin's sign-in; a
   GitHub repository's events come in through a GitHub source whose secret
   Fermix makes and shows once; a watcher whose keywords miss reworded items
-  is pointed to the Screen setting; a watcher's follow-up uses the tool the owner
+  is pointed to the Screen setting, and a wish for OpenRouter's decision model
+  to the Decision model setting under it, which Fermix cannot change from chat;
+  a watcher's follow-up uses the tool the owner
   names and asks first, one whose tool is not ready is still made and Fermix
   says what is missing, one naming a project folder Fermix can't open yet is set
   up waiting for that folder's grant and Fermix says how to grant it, one asked
@@ -584,11 +586,11 @@ scenarios:
              of them must be set up first.
           3. The reply says the filter model still judges the items the decision
              model lets through, or that the keywords still help as hints.
-          4. The reply does not claim that Fermix changed the setting itself, and
-             does not tell the owner to pick a provider for the screen.
+          4. The reply does not claim that Fermix changed the setting itself.
           Not required: naming the model, the provider Fermix would use, or the
-          exact speed. Also offering to add keywords in chat is correct and must
-          never be penalized.
+          exact speed. Also offering to add keywords in chat, or saying the
+          Decision model setting under the Screen can stay on Automatic or pick a
+          provider, is correct and must never be penalized.
       - id: screen_on_a_fallback_provider
         drive: companion
         query: >
@@ -604,17 +606,48 @@ scenarios:
           1. The reply says yes: picking Decision model under Screen in the Cues
              settings (the Mac app's Cues pane or the setup page's Cues tab) makes a
              decision model check items before the filter model reads them.
-          2. The reply says Fermix picks the provider itself, with no provider to
-             choose in the setting: since Claude serves no decision model, it uses
-             the first set up of OpenAI, OpenRouter and Venice, so OpenRouter's key
-             already set up serves it with nothing new to enter (OpenAI instead, if
-             OpenAI is set up too).
-          3. The reply does not claim that Fermix changed the setting itself, and
-             does not tell the owner to pick OpenRouter in the Screen setting.
+          2. The reply says OpenRouter's decision model can serve it with the key
+             already set up and nothing new to enter: by picking OpenRouter in the
+             Decision model setting under the Screen, or by leaving it on Automatic,
+             which uses the first set up of OpenAI, OpenRouter and Venice since
+             Claude serves no decision model (OpenAI instead, if OpenAI is set up
+             too).
+          3. The reply does not claim that Fermix changed the setting itself.
           Not required: naming the model (TypeSafe's Jev) or the exact speed.
           Saying the filter model still makes the final call, that the setting
           names the decision model it uses, or that the decision model gives no
           reason for a drop, is correct and must never be penalized.
+      - id: pick_the_screens_decision_model
+        drive: companion
+        query: >
+          I'd rather my watchers' first check went through OpenRouter's decision
+          model instead of whatever it picks on its own. Can you switch it over, and
+          which one is it using right now?
+        expect:
+          status: ok
+          reply_not_matches: "(?i)\\bI(?:['’]ve| have)?\\s+(?:just\\s+|now\\s+)?(switched|changed|set|moved|updated|pointed)\\b[^.?!]{0,80}\\b(OpenRouter|decision model|screen|first check)\\b"
+          wire:
+            events_all: [accepted, turn_started, text_done]
+            events_none: [turn_error]
+        rubric: |
+          1. The reply says the owner makes this change in the Cues settings (the
+             Mac app's Cues pane or the setup page's Cues tab): the Decision model
+             setting under the Screen, where OpenRouter can be picked in place of
+             Automatic, with the Screen on Decision model.
+          2. The reply answers which one is used now in a way that holds whatever
+             is set up: either it names the one this home's settings show, or it
+             explains that Automatic uses the main provider's decision model when it
+             has one, otherwise the first set up of OpenAI, OpenRouter and Venice,
+             and that the setting's own label names the one it resolves to.
+          3. The reply says OpenRouter must be set up, with its key, for its
+             decision model to be picked or to run, or that it is offered only once
+             it is.
+          4. The reply does not claim that Fermix switched the decision model, the
+             screen or any setting itself, and does not ask for a key in the chat.
+          Not required: naming the model (TypeSafe's Jev) or the exact speed.
+          Saying that a chosen provider that is not set up holds the watchers
+          rather than falling back, or that the filter model still makes the
+          final call, is correct and must never be penalized.
 
   - id: which_mandates_are_set_up
     title: "The owner asks which mandates exist and whether each is approved"

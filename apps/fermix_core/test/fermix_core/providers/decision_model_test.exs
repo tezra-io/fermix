@@ -42,14 +42,14 @@ defmodule FermixCore.Providers.DecisionModelTest do
     end
   end
 
-  describe "route/0" do
+  describe "route/1" do
     test "a primary that serves one leads, on its own key" do
       Application.put_env(:fermix_core, :providers,
         openai: [api_key: "sk-invented"],
         venice: [api_key: "vn-invented", primary: true]
       )
 
-      assert {:ok, venice} = DecisionModel.route()
+      assert {:ok, venice} = DecisionModel.route(nil)
       assert venice.model == "jev-latest"
       assert venice.url == "https://api.venice.ai/api/v1/decisions"
       assert venice.api_key == "vn-invented"
@@ -62,7 +62,7 @@ defmodule FermixCore.Providers.DecisionModelTest do
         openrouter: [api_key: "sk-or-invented"]
       )
 
-      assert {:ok, openrouter} = DecisionModel.route()
+      assert {:ok, openrouter} = DecisionModel.route(nil)
       assert openrouter.model == "~typesafe/jev-latest"
       assert openrouter.url == "https://openrouter.ai/api/alpha/decisions"
       assert openrouter.api_key == "sk-or-invented"
@@ -73,7 +73,7 @@ defmodule FermixCore.Providers.DecisionModelTest do
         openai: [api_key: "sk-invented", base_url: "https://gw.example.net/v1/"]
       )
 
-      assert {:ok, route} = DecisionModel.route()
+      assert {:ok, route} = DecisionModel.route(nil)
       assert {route.provider, route.model} == {:openai, "gpt-6-luna"}
       assert route.url == "https://gw.example.net/v1/decisions"
     end
@@ -84,7 +84,62 @@ defmodule FermixCore.Providers.DecisionModelTest do
         openrouter: [default_model: "openai/gpt-5.5"]
       )
 
-      assert DecisionModel.route() == {:error, :not_set_up}
+      assert DecisionModel.route(nil) == {:error, :not_set_up}
+    end
+
+    test "a chosen provider runs on its own key, whatever Fermix would pick" do
+      Application.put_env(:fermix_core, :providers,
+        openai: [api_key: "sk-invented", primary: true],
+        venice: [api_key: "vn-invented"]
+      )
+
+      assert {:ok, venice} = DecisionModel.route(:venice)
+      assert {venice.provider, venice.api_key} == {:venice, "vn-invented"}
+    end
+
+    test "a chosen provider that is not set up is no route, never another provider" do
+      Application.put_env(:fermix_core, :providers,
+        openai: [api_key: "sk-invented", primary: true],
+        openrouter: [default_model: "openai/gpt-5.5"]
+      )
+
+      assert DecisionModel.route(:openrouter) == {:error, {:not_set_up, :openrouter}}
+      assert DecisionModel.route(:venice) == {:error, {:not_set_up, :venice}}
+    end
+
+    # A keychain or file secret that never resolved stays as its sentinel in
+    # application env; sending it would be `Authorization: Bearer @keyring`.
+    test "a key that did not load is not set up, chosen or picked" do
+      Application.put_env(:fermix_core, :providers,
+        openrouter: [api_key: "@keyring", primary: true],
+        venice: [api_key: "@file"],
+        openai: [api_key: "  "]
+      )
+
+      assert DecisionModel.route(nil) == {:error, :not_set_up}
+      assert DecisionModel.route(:openrouter) == {:error, {:not_set_up, :openrouter}}
+      assert DecisionModel.route(:venice) == {:error, {:not_set_up, :venice}}
+
+      Application.put_env(:fermix_core, :providers,
+        openrouter: [api_key: "@keyring", primary: true],
+        venice: [api_key: "vn-invented"]
+      )
+
+      assert {:ok, %{provider: :venice}} = DecisionModel.route(nil)
+    end
+  end
+
+  describe "ready?/2" do
+    test "a provider's block is ready with a key that loaded, and only then" do
+      assert DecisionModel.ready?(:openai, api_key: "sk-invented")
+      refute DecisionModel.ready?(:openai, [])
+      refute DecisionModel.ready?(:openai, api_key: "")
+      refute DecisionModel.ready?(:openrouter, api_key: "@keyring")
+      refute DecisionModel.ready?(:venice, api_key: "@file")
+    end
+
+    test "the providers that serve a decision model, in catalog order" do
+      assert DecisionModel.providers() == [:openai, :openrouter, :venice]
     end
   end
 

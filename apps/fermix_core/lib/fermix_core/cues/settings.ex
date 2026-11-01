@@ -2,10 +2,11 @@ defmodule FermixCore.Cues.Settings do
   @moduledoc """
   The owner's changes to the cue settings (M60 §6.2, §8.2, §10.1, §15), made
   from the setup page and from the management socket (`cues.*`, M60 app
-  surface §3.1): the switches and the door's port, the default filter model,
-  sources with their secrets, and mandates. Both doors call these functions,
-  so every refusal and side effect is the same from either. At most
-  `Cues.Config.max_sources/0` sources and `max_mandates/0` mandates are added.
+  surface §3.1): the switches and the door's port, the screen and its
+  decision model, the default filter model, sources with their secrets, and
+  mandates. Both doors call these functions, so every refusal and side effect
+  is the same from either. At most `Cues.Config.max_sources/0` sources and
+  `max_mandates/0` mandates are added.
 
   Every change is one save through the wizard's shared write tail
   (`Setup.Wizard.commit_snapshot/2`), as `Meetings.Config.save/1` makes its
@@ -37,6 +38,7 @@ defmodule FermixCore.Cues.Settings do
   alias FermixCore.Cues.Pins
   alias FermixCore.Cues.Presets
   alias FermixCore.Cues.SourceName
+  alias FermixCore.Providers.DecisionModel
   alias FermixCore.Providers.RoutingOverrides
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.RestartState
@@ -129,6 +131,51 @@ defmodule FermixCore.Cues.Settings do
   end
 
   defp screen_ready(_value), do: :ok
+
+  @doc """
+  Saves which decision model the screen uses
+  (`[fermix_core.cues] decision_provider`): `"openai"`, `"openrouter"` or
+  `"venice"`, refused while that provider is not set up with a key that loaded
+  (`FilterChoices.decision_model_set_up?/2`), or nil or `""` for Automatic,
+  the one Fermix picks, saved as no key. It is checked and saved whatever the
+  screen is, so one save can pick both. Read at every filter call, so it
+  applies at once.
+  """
+  @spec save_decision_provider(String.t() | nil) ::
+          {:ok, %{decision_provider: DecisionModel.provider() | nil}}
+          | {:error, refusal() | term()}
+  def save_decision_provider(provider) when is_binary(provider) or is_nil(provider) do
+    with {:ok, plan} <- decision_provider_plan(blank_to_nil(provider)),
+         {:ok, _report} <- commit(plan) do
+      {:ok,
+       %{decision_provider: plan.new |> CuesConfig.normalize() |> CuesConfig.decision_provider()}}
+    end
+  end
+
+  @doc """
+  Checks a `save_decision_provider/1` value as that save does, and writes
+  nothing; that save stays its one write.
+  """
+  @spec check_decision_provider(String.t() | nil) :: :ok | {:error, refusal()}
+  def check_decision_provider(provider) when is_binary(provider) or is_nil(provider) do
+    with {:ok, _plan} <- decision_provider_plan(blank_to_nil(provider)), do: :ok
+  end
+
+  # The section's normalizer refuses a provider that serves no decision model
+  # (`plan/1`), before the set-up check reads the plan's snapshot.
+  defp decision_provider_plan(value) do
+    with {:ok, plan} <- plan(&{:ok, put_or_delete(&1, :decision_provider, value), nil}),
+         :ok <- decision_provider_ready(plan),
+         do: {:ok, plan}
+  end
+
+  defp decision_provider_ready(plan) do
+    provider = plan.new |> CuesConfig.normalize() |> CuesConfig.decision_provider()
+
+    if is_nil(provider) or FilterChoices.decision_model_set_up?(plan.snapshot, provider),
+      do: :ok,
+      else: {:error, {:invalid, FilterChoices.decision_model_not_set_up(provider)}}
+  end
 
   @doc """
   Saves the default filter model (`[fermix_core.routing] filter_provider` and

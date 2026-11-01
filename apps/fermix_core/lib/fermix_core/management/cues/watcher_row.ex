@@ -139,6 +139,11 @@ defmodule FermixCore.Management.Cues.WatcherRow do
 
   defp sentence("needs_update", watcher), do: needs_update_sentence(watcher.needs_update)
 
+  # A hold whose cause is the screen's decision model says so, in the words its
+  # notice used; any other hold is a provider's, named as before.
+  defp sentence("held", %{held_sentence: cause} = watcher) when is_binary(cause),
+    do: "Held: #{cause} #{waiting_words(watcher.waiting)}"
+
   defp sentence("held", %{waiting: 1}),
     do: "Held: it cannot reach its filter model. One item is waiting."
 
@@ -150,6 +155,9 @@ defmodule FermixCore.Management.Cues.WatcherRow do
 
   defp sentence("on", %{filter: "none"}), do: "Passes every item to its task."
   defp sentence("on", _watcher), do: "Filtering normally."
+
+  defp waiting_words(1), do: "One item is waiting."
+  defp waiting_words(waiting), do: "#{waiting} items are waiting."
 
   defp task(%{task_job_id: nil, follow_up: follow_up}),
     do: %{"job_id" => follow_up.job_id, "name" => follow_up.name, "paused" => follow_up.paused?}

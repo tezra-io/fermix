@@ -466,6 +466,36 @@ defmodule FermixCore.Tools.ManageWatcherTest do
       refute shown =~ "It needs words"
     end
 
+    test "show says why a filter is held when the screen's decision model cannot run, and only then",
+         ctx do
+      providers = Application.get_env(:fermix_core, :providers)
+      on_exit(fn -> Application.put_env(:fermix_core, :providers, providers) end)
+      Application.put_env(:fermix_core, :providers, openai: [api_key: "sk-invented"])
+
+      watcher = watcher!(ctx, "market-news", [])
+
+      CueFixtures.exec!(ctx.conn, "UPDATE cue_watchers SET filter_failures = 3 WHERE id = ?", [
+        watcher.id
+      ])
+
+      show = %{"action" => "show", "name" => "market-news"}
+      screen = [screen: :decision_model, decision_provider: :openrouter]
+
+      assert {:ok, %{success: true, output: shown}} =
+               ManageWatcher.execute(show, turn(ctx, cues_config: screen))
+
+      assert ("Its filter is held. The screen's decision model is OpenRouter's, which is not " <>
+                "set up: set it up or pick another in the Cues settings.") in String.split(
+               shown,
+               "\n"
+             )
+
+      assert {:ok, %{success: true, output: shown}} =
+               ManageWatcher.execute(show, turn(ctx, cues_config: []))
+
+      refute shown =~ "Its filter is held"
+    end
+
     test "a stream watcher's recent drop is labelled by its key", ctx do
       watcher = watcher!(ctx, "market-news", [])
       RecentDrops.new_table()

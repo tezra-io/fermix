@@ -92,6 +92,37 @@ defmodule FermixCore.Cues.ItemTest do
     assert Jason.decode!(json.snapshot)["text"] == ~s({"disk":"/dev/sda","free_pct":3})
   end
 
+  test "an X post's snapshot text is the post's own words, not its JSON" do
+    post = %{
+      "author" => %{"id" => "4417", "name" => "Tavi Okonkwo", "username" => "tavi_okonkwo"},
+      "author_id" => "4417",
+      "created_at" => "2026-10-30T21:14:05.000Z",
+      "edit_history_tweet_ids" => ["881902"],
+      "id" => "881902",
+      "text" => "lumen reset is on its way. enjoy.",
+      "url" => "https://x.com/tavi_okonkwo/status/881902"
+    }
+
+    {:ok, item} = Item.new(fields(%{type: "x.post", subject: "4417", data: post}), @now)
+
+    assert Jason.decode!(item.snapshot) == %{
+             "type" => "x.post",
+             "subject" => "4417",
+             "text" => "lumen reset is on its way. enjoy."
+           }
+
+    long = %{"id" => "881903", "text" => String.duplicate("é", 300)}
+    {:ok, long_post} = Item.new(fields(%{data: long}), @now)
+    assert Jason.decode!(long_post.snapshot)["text"] == String.duplicate("é", 280)
+  end
+
+  test "data whose text field is missing, blank or not a string keeps the payload's start" do
+    for data <- [%{"body" => "hi"}, %{"text" => "  "}, %{"text" => 3}, [%{"text" => "a"}]] do
+      {:ok, item} = Item.new(fields(%{data: data}), @now)
+      assert Jason.decode!(item.snapshot)["text"] == String.slice(item.payload, 0, 280)
+    end
+  end
+
   test "flags and the webhook body hash are kept" do
     {:ok, item} =
       Item.new(fields(%{self_caused?: true, receipt_only?: true, body_hash: "abc123"}), @now)

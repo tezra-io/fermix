@@ -158,9 +158,10 @@ defmodule FermixWebWeb.SetupLive.CuesState do
 
   defp event("dismiss_reveal", _params, state, _opts), do: {:edit, state}
 
-  # Choosing a filter provider brings its models; nothing is saved before Save.
+  # Choosing a filter provider brings its models, and choosing the decision
+  # model screen its decision model; nothing is saved before Save.
   defp event("settings_changed", %{"cues_settings" => params}, state, _opts),
-    do: {:edit, put_filter(state, params)}
+    do: {:edit, state |> put_filter(params) |> put_screen(params)}
 
   # One Save writes what the owner changed above through the `cues` section's
   # writer, the one `settings.apply` uses, so this page and the Mac app write
@@ -168,7 +169,7 @@ defmodule FermixWebWeb.SetupLive.CuesState do
   defp event("save_settings", %{"cues_settings" => params}, state, _opts) do
     case changed_settings(params, state) do
       [] -> {:saved, "Nothing changed.", []}
-      changes -> save_settings(changes, put_filter(state, params))
+      changes -> save_settings(changes, state |> put_filter(params) |> put_screen(params))
     end
   end
 
@@ -299,7 +300,8 @@ defmodule FermixWebWeb.SetupLive.CuesState do
       enabled: state.switches.enabled,
       mandates_enabled: state.switches.mandates_enabled,
       door_port: state.switches.door_port,
-      screen: state.screen.value
+      screen: state.screen.value,
+      decision_provider: state.screen.decision_provider
     ]
 
     pair = [
@@ -312,8 +314,16 @@ defmodule FermixWebWeb.SetupLive.CuesState do
       filter_model: state.filter.saved.model
     ]
 
-    (form -- saved) ++ if(pair == saved_pair, do: [], else: pair)
+    changed = (form ++ decision_provider(params)) -- saved
+    changed ++ if(pair == saved_pair, do: [], else: pair)
   end
+
+  # The decision model's field is on the form only while the decision model
+  # screen is picked; without it, it is unchanged.
+  defp decision_provider(%{"decision_provider" => provider}),
+    do: [decision_provider: text(provider)]
+
+  defp decision_provider(_params), do: []
 
   # A refusal names its row, and the page says it under that field as well as
   # in the banner. Turning cues on or off or moving the door needs a restart.
@@ -343,17 +353,29 @@ defmodule FermixWebWeb.SetupLive.CuesState do
   # Keyword match is the form's empty option, as it is saved as no key. The
   # decision model is always offered, so a saved one stays the form's value;
   # `Settings.save_screen/1` refuses it while none is set up, and its hint says
-  # which one Fermix uses or what to set up.
+  # which one is used or what to set up. `selected` follows the form, and while
+  # it is the decision model, the form carries which one (`""`, Automatic, is
+  # saved as no key) from the same choices the `cues_decision_provider` row
+  # offers.
   defp screen_view(cues, snapshot) do
     [keyword, decision_model] = FilterChoices.screen_choices(snapshot)
+    value = if(CuesConfig.screen(cues) == :keyword, do: "", else: "decision_model")
 
     %{
-      value: if(CuesConfig.screen(cues) == :keyword, do: "", else: "decision_model"),
+      value: value,
+      selected: value,
       keyword: keyword,
       decision_model: decision_model,
-      info: FilterChoices.screen_info()
+      info: FilterChoices.screen_info(),
+      decision_provider: text(CuesConfig.decision_provider(cues)),
+      decision_providers: FilterChoices.decision_provider_choices(snapshot)
     }
   end
+
+  defp put_screen(state, %{"screen" => screen}),
+    do: %{state | screen: %{state.screen | selected: text(screen)}}
+
+  defp put_screen(state, _params), do: state
 
   # --- default filter model ----------------------------------------------------
 

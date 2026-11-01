@@ -297,6 +297,13 @@ defmodule FermixCore.Cues.Notices do
 
   # --- Fermix's words ------------------------------------------------------------------
 
+  # A hold whose cause is Fermix's own sentence (`:sentence`, what to set up)
+  # says it; a provider's words never reach a notice.
+  defp watcher_text(:filter_held, name, %{sentence: sentence} = data) when is_binary(sentence),
+    do:
+      "Watcher #{name}: its filter is held, and #{waiting(data)} #{sentence} Fermix tries " <>
+        "again every 10 minutes."
+
   defp watcher_text(:filter_held, name, data),
     do:
       "Watcher #{name}: its filter model cannot be reached; #{waiting(data)} Fermix tries " <>

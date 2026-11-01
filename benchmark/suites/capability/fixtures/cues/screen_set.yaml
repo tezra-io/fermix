@@ -1,0 +1,876 @@
+# The Cues screen eval's labelled set, read by bin/run_screen_eval.py (`make
+# capability-screen`). Not a capability suite: run_capability.py globs only
+# suites/capability/*.yaml, and this file sits under fixtures/, so no sweep loads it.
+#
+# Every name, handle, product, school, place, version, price and date is invented;
+# a handle or a product may echo the shape of a real one, never the thing.
+set: cues_screen
+title: "Cues screen: does the decision model let through what the filter model should read?"
+risk: host_readonly
+description: >
+  Watchers written the way Fermix writes them (a one-line purpose, single-criterion
+  numbered instructions, keywords drafted broadly), several with stacked conditions,
+  and for each one a set of items labelled `should_screen_through` (the filter model
+  should get to read it) or `irrelevant`. The runner sends each item through the
+  engine's own screen request (`Cues.Filter.Decision.request/1` and
+  `Providers.DecisionModel.yes_no/4`) in two question forms, A (today's) and B (no
+  numbered instructions), on every decision model whose key is in the environment,
+  and reports recall and the share of irrelevant items dropped at four bars.
+labelling: >
+  Labels were written by hand from the rule below, from each item's text alone,
+  before any decision model scored the set; nothing was tuned to a model's answers.
+  Each watcher carries a `subject`, written for labelling only and never sent to a
+  model: the kind of event the watcher exists for, read from its purpose with every
+  narrowing condition left to the numbered instructions. An item is
+  `should_screen_through` when it is about that subject, whether or not it meets the
+  instructions: the screen's question asks for a yes whenever an item touches the
+  purpose or any instruction, and the filter model, which reads every item the screen
+  lets through, is the one that applies the conditions. An item is `irrelevant` when
+  it is about something else, even when it shares a keyword, an author, a source or a
+  surface form with items that matter. Each pair also has a `kind`, which only splits
+  the report: `wanted` (it meets every instruction as far as its text shows, so the
+  owner wants it delivered and a screen drop loses it), `wanted_oblique` (the same, in
+  words that carry few or none of the watcher's keywords: terse, slang, buried),
+  `fails_condition` (about the subject, but an instruction excludes it, so the filter
+  model, not the screen, should drop it: a screen that scores whether an item meets
+  ALL the instructions drops these first); and for irrelevant items `keyword_decoy`
+  (shares a keyword or a name, another subject), `same_source_off_topic` (the right
+  author, feed or repository, another subject) and `off_topic`. The item the
+  2026-11-01 incident turned on (a terse post saying a reset is on its way) is shared
+  by two watchers, one broad and one with stacked conditions, and marked `incident`.
+
+shared_items:
+  lumen_reset_terse:
+    source: x-ai-voices
+    at: "2026-10-30T21:14:05Z"
+    x: {username: tavi_okonkwo, name: Tavi Okonkwo, text: "lumen reset is on its way. enjoy."}
+  lumen_twice_messages:
+    source: x-ai-voices
+    at: "2026-10-31T16:40:00Z"
+    x: {username: tavi_okonkwo, name: Tavi Okonkwo,
+        text: "Pro gets twice the messages next month. Details Monday."}
+
+watchers:
+  # The incident's strict watcher: three stacked conditions.
+  - id: lumen_resets
+    name: lumen-resets
+    subject: "a reset (a refill) of Lumen Chat's usage limits"
+    purpose: "Let me know when Lumen Chat's team announces a usage-limit reset that is still coming."
+    instructions:
+      - "Pass only posts authored by @tavi_okonkwo."
+      - "Pass only an upcoming reset: one that has not happened yet."
+      - "Pass announcements, not questions or speculation about a reset."
+    listen_for: [reset, usage limits, limits, rate limit, quota, refill, Lumen, Lumen Chat]
+    items:
+      - id: reset_terse
+        ref: lumen_reset_terse
+        label: should_screen_through
+        kind: wanted_oblique
+        incident: true
+        why: "The author the watcher names says a reset is still coming; terse, lowercase, no long keyword."
+      - id: reset_dated
+        source: x-ai-voices
+        at: "2026-10-28T16:02:00Z"
+        x: {username: tavi_okonkwo, name: Tavi Okonkwo,
+            text: "Heads up: we're resetting usage limits for every Lumen Chat plan this Thursday, Oct 29, at 17:00 UTC. Use them up."}
+        label: should_screen_through
+        kind: wanted
+        why: "An upcoming, dated reset announced by the named author."
+      - id: refill_tonight
+        source: x-ai-voices
+        at: "2026-10-26T19:40:00Z"
+        x: {username: tavi_okonkwo, name: Tavi Okonkwo, text: "everyone's meter gets topped back up tonight 🎉"}
+        label: should_screen_through
+        kind: wanted_oblique
+        why: "A refill still to come from the named author, with no reset or limit word."
+      - id: weekly_refill
+        source: x-ai-voices
+        at: "2026-11-01T09:00:00Z"
+        x: {username: tavi_okonkwo, name: Tavi Okonkwo,
+            text: "Starting Monday, Pro limits refill every week instead of every month. First weekly refill: Monday, Nov 9."}
+        label: should_screen_through
+        kind: wanted
+        why: "An announced, dated refill of the limits, still ahead."
+      - id: reset_done
+        source: x-ai-voices
+        at: "2026-10-29T17:06:00Z"
+        x: {username: tavi_okonkwo, name: Tavi Okonkwo,
+            text: "Reset is done ✅ everyone's limits are back to full. enjoy the weekend"}
+        label: should_screen_through
+        kind: fails_condition
+        why: "A reset, but it already happened (instruction 2)."
+      - id: reset_poll
+        source: x-ai-voices
+        at: "2026-10-31T10:15:00Z"
+        x: {username: tavi_okonkwo, name: Tavi Okonkwo,
+            text: "should we do one more limit reset before the holidays? tell me below"}
+        label: should_screen_through
+        kind: fails_condition
+        why: "A reset, asked as a question (instruction 3)."
+      - id: reset_other_author
+        source: x-ai-voices
+        at: "2026-10-30T08:30:00Z"
+        x: {username: devon_ruiz, name: Devon Ruiz,
+            text: "Lumen usage reset is rolling out tomorrow morning for all plans. Confirmed."}
+        label: should_screen_through
+        kind: fails_condition
+        why: "An upcoming reset, from an author the watcher does not name (instruction 1)."
+      - id: reset_rumour
+        source: x-ai-voices
+        at: "2026-10-31T14:00:00Z"
+        x: {username: pax_ai_watch, name: PAX AI Watch,
+            text: "hearing Lumen might reset limits next week 👀 nothing official yet"}
+        label: should_screen_through
+        kind: fails_condition
+        why: "A reset, as speculation from another author (instructions 1 and 3)."
+      - id: twice_messages
+        ref: lumen_twice_messages
+        label: irrelevant
+        kind: same_source_off_topic
+        why: "The named author on Lumen's limits, but a raise, not a reset; lumen-plan-changes wants it."
+      - id: voice_mode
+        source: x-ai-voices
+        at: "2026-10-30T15:00:00Z"
+        x: {username: tavi_okonkwo, name: Tavi Okonkwo,
+            text: "Voice mode is live in Lumen Chat on Android today. Tell me what breaks."}
+        label: irrelevant
+        kind: same_source_off_topic
+        why: "The named author on Lumen Chat, about voice mode."
+      - id: bouldering
+        source: x-ai-voices
+        at: "2026-10-31T18:20:00Z"
+        x: {username: tavi_okonkwo, name: Tavi Okonkwo,
+            text: "Spent all Saturday at the bouldering gym. My forearms have resigned."}
+        label: irrelevant
+        kind: same_source_off_topic
+        why: "The named author, about her weekend."
+      - id: router_reset
+        source: x-ai-voices
+        at: "2026-10-29T11:00:00Z"
+        x: {username: gridwise_help, name: Gridwise Support,
+            text: "Router acting up? Hold the reset button for 10 seconds to restore factory settings."}
+        label: irrelevant
+        kind: keyword_decoy
+        why: "A reset of a router."
+      - id: kestrel_limits
+        source: x-ai-voices
+        at: "2026-10-30T12:00:00Z"
+        x: {username: kestrel_cloud, name: Kestrel Cloud,
+            text: "Kestrel API rate limits reset early on Nov 4 for every free account."}
+        label: irrelevant
+        kind: keyword_decoy
+        why: "An upcoming, announced limit reset of another product."
+      - id: lamp_lumens
+        source: x-ai-voices
+        at: "2026-10-28T09:30:00Z"
+        x: {username: brightnook_shop, name: Brightnook,
+            text: "Our 1,600-lumen desk lamp is back in stock. Limit two per customer."}
+        label: irrelevant
+        kind: keyword_decoy
+        why: "Lumens of a lamp and a purchase limit."
+      - id: sourdough
+        source: x-ai-voices
+        at: "2026-10-27T08:00:00Z"
+        x: {username: marisol_bakes, name: Marisol Bakes,
+            text: "Cold kitchen? Put your sourdough starter in the oven with only the light on."}
+        label: irrelevant
+        kind: off_topic
+        why: "Baking."
+
+  # The broad watcher the same post passed.
+  - id: lumen_plans
+    name: lumen-plan-changes
+    subject: "a change to Lumen Chat's plans, usage limits or prices"
+    purpose: "Changes to Lumen Chat's plans, usage limits and prices that could affect my Pro subscription."
+    instructions:
+      - "Pass news of Lumen Chat usage limits changing or being reset."
+      - "Pass price changes for Lumen Pro in any currency."
+      - "Drop memes and jokes about Lumen Chat that announce no change."
+    listen_for: [Lumen, Lumen Chat, Lumen Pro, limits, reset, price, pricing, plan, tier, subscription]
+    examples:
+      - label: pass
+        note: "price changes always matter"
+        source: lumen-blog
+        at: "2026-10-12T14:00:00Z"
+        feed: {title: "Lumen Pro moves to $24 a month from December 1",
+               summary: "Existing subscribers keep their price until their next renewal.",
+               link: "https://blog.lumenchat.example/pro-price-december"}
+      - label: drop
+        note: "memes"
+        source: x-ai-voices
+        at: "2026-10-14T22:10:00Z"
+        x: {username: cassius_memes, name: Cassius,
+            text: "me refreshing lumen chat every five minutes like it owes me money"}
+    items:
+      - id: reset_terse
+        ref: lumen_reset_terse
+        label: should_screen_through
+        kind: wanted_oblique
+        incident: true
+        why: "A reset is a change to the limits (instruction 1); the incident's broad watcher."
+      - id: eu_price
+        source: lumen-blog
+        at: "2026-10-27T10:00:00Z"
+        feed: {title: "Lumen Chat Pro rises to €22 a month in the EU from January",
+               summary: "The change applies to new and renewing subscriptions in euro markets.",
+               link: "https://blog.lumenchat.example/eu-pricing-2027"}
+        label: should_screen_through
+        kind: wanted
+        why: "A Lumen Pro price change (instruction 2)."
+      - id: free_halved
+        source: x-ai-voices
+        at: "2026-10-29T13:25:00Z"
+        x: {username: lumen_status, name: Lumen Chat Status,
+            text: "Free plan message limits are temporarily halved while we work through high demand."}
+        label: should_screen_through
+        kind: wanted
+        why: "Usage limits changing (instruction 1)."
+      - id: team_tier
+        source: lumen-blog
+        at: "2026-10-28T15:30:00Z"
+        feed: {title: "Introducing Lumen Team: one plan, pooled usage across seats",
+               summary: "Lumen Team joins Free and Pro as a third plan for groups of three or more.",
+               link: "https://blog.lumenchat.example/lumen-team"}
+        label: should_screen_through
+        kind: wanted
+        why: "A new plan tier."
+      - id: twice_messages
+        ref: lumen_twice_messages
+        label: should_screen_through
+        kind: wanted_oblique
+        why: "Pro's limits double; it says messages, not limits."
+      - id: limits_meme
+        source: x-ai-voices
+        at: "2026-10-30T23:59:00Z"
+        x: {username: cassius_memes, name: Cassius,
+            text: "lumen users at 11:59pm waiting for the limit reset like it's new year's eve"}
+        label: should_screen_through
+        kind: fails_condition
+        why: "About the limit reset, but a joke that announces nothing (instruction 3)."
+      - id: dark_mode
+        source: lumen-blog
+        at: "2026-10-26T12:00:00Z"
+        feed: {title: "Dark mode comes to Lumen Chat on desktop",
+               summary: "Switch it on from Settings, or follow your system theme.",
+               link: "https://blog.lumenchat.example/dark-mode-desktop"}
+        label: irrelevant
+        kind: same_source_off_topic
+        why: "Lumen's own blog, about a theme."
+      - id: outage
+        source: x-ai-voices
+        at: "2026-10-31T07:45:00Z"
+        x: {username: lumen_status, name: Lumen Chat Status,
+            text: "We're investigating elevated error rates in Lumen Chat. Updates in this thread."}
+        label: irrelevant
+        kind: same_source_off_topic
+        why: "Lumen's status account, about an outage."
+      - id: maintenance
+        source: x-ai-voices
+        at: "2026-10-30T18:00:00Z"
+        x: {username: lumen_status, name: Lumen Chat Status,
+            text: "Scheduled maintenance Sunday 02:00-03:00 UTC. Lumen Chat may be briefly unavailable."}
+        label: irrelevant
+        kind: same_source_off_topic
+        why: "Lumen's status account, about maintenance."
+      - id: lumen_health
+        source: x-ai-voices
+        at: "2026-10-28T08:15:00Z"
+        x: {username: lumen_health, name: Lumen Health,
+            text: "Lumen Health opens a new walk-in clinic on Harbor Street. Book online, no subscription needed."}
+        label: irrelevant
+        kind: keyword_decoy
+        why: "Another company called Lumen."
+      - id: orrery_price
+        source: ai-news
+        at: "2026-10-29T09:00:00Z"
+        feed: {title: "Orrery Assistant cuts its Pro plan to $15 a month",
+               summary: "The rival assistant also doubles its free message allowance.",
+               link: "https://news.circuitdesk.example/orrery-pro-15"}
+        label: irrelevant
+        kind: keyword_decoy
+        why: "A Pro price change of another product."
+      - id: freelance_pricing
+        source: x-ai-voices
+        at: "2026-10-27T17:30:00Z"
+        x: {username: studio_juniper, name: Studio Juniper,
+            text: "How to price your freelance design work: a thread on tiers, plans and retainers 🧵"}
+        label: irrelevant
+        kind: keyword_decoy
+        why: "Pricing and plans of freelance work."
+      - id: eclipse
+        source: x-ai-voices
+        at: "2026-10-28T20:00:00Z"
+        x: {username: skywatch_daily, name: Skywatch Daily,
+            text: "Tonight's lunar eclipse: totality from 03:12 to 04:05 UTC."}
+        label: irrelevant
+        kind: off_topic
+        why: "Astronomy."
+
+  - id: orrin_security
+    name: orrin-security
+    subject: "a security flaw or advisory concerning Orrin DB"
+    purpose: "Security advisories for Orrin DB that affect the servers we run ourselves."
+    instructions:
+      - "Pass only advisories that affect Orrin DB 7.2 or 7.3."
+      - "Pass only high or critical severity, or a CVSS score of 7.0 or more."
+      - "Ignore issues in the Orrin Cloud managed service; we self-host."
+    listen_for: [Orrin, Orrin DB, OrrinDB, CVE, ORSA, advisory, security, vulnerability, exploit, patch]
+    examples:
+      - label: pass
+        note: "anything high or critical on 7.x"
+        source: orrin-news
+        at: "2026-09-21T09:00:00Z"
+        feed: {title: "ORSA-2026-009: High-severity privilege escalation in Orrin DB 7.1 to 7.3",
+               summary: "Fixed in 7.1.12, 7.2.8 and 7.3.3.",
+               link: "https://orrindb.example/security/orsa-2026-009"}
+    items:
+      - id: auth_bypass
+        source: orrin-news
+        at: "2026-10-27T09:00:00Z"
+        feed: {title: "ORSA-2026-014: Critical authentication bypass in Orrin DB 7.2.0 to 7.3.4 (CVSS 9.1)",
+               summary: "An unauthenticated client can open a session as any role. Fixed in 7.2.9 and 7.3.5.",
+               link: "https://orrindb.example/security/orsa-2026-014"}
+        label: should_screen_through
+        kind: wanted
+        why: "Critical, on 7.2 and 7.3, self-hosted."
+      - id: two_flaws
+        source: orrin-news
+        at: "2026-10-31T09:00:00Z"
+        feed: {title: "Orrin DB 7.2.10 and 7.3.7 fix two high-severity flaws",
+               summary: "Both are reachable by authenticated users. Upgrading is advised.",
+               link: "https://orrindb.example/news/7-3-7"}
+        label: should_screen_through
+        kind: wanted
+        why: "High severity, on both versions we run."
+      - id: release_buried
+        source: orrin-news
+        at: "2026-10-29T09:00:00Z"
+        feed: {title: "Orrin DB 7.3.6 released",
+               summary: "This release fixes a replication slot leak, speeds up the planner for wide joins, and fixes a crash any authenticated user can trigger with a crafted JSON path (CVE-2026-41102, high).",
+               link: "https://orrindb.example/news/7-3-6"}
+        label: should_screen_through
+        kind: wanted_oblique
+        why: "A high-severity flaw on 7.3, buried in a release note whose title says nothing of security."
+      - id: researcher_post
+        source: x-sec
+        at: "2026-10-30T19:10:00Z"
+        x: {username: kai_secworks, name: Kai Lindgren,
+            text: "Pre-auth crash in Orrin DB's wire protocol on 7.3. CVSS 7.5 by my count. Vendor patch due Tuesday."}
+        label: should_screen_through
+        kind: wanted_oblique
+        why: "A high-severity flaw on 7.3 from a researcher, with no advisory id or wording."
+      - id: medium_leak
+        source: orrin-news
+        at: "2026-10-28T09:00:00Z"
+        feed: {title: "ORSA-2026-015: Medium-severity information leak in Orrin DB 7.3 (CVSS 5.3)",
+               summary: "Error messages can reveal column names to roles without access. Fixed in 7.3.6.",
+               link: "https://orrindb.example/security/orsa-2026-015"}
+        label: should_screen_through
+        kind: fails_condition
+        why: "An advisory on 7.3, below the severity bar (instruction 2)."
+      - id: old_version
+        source: orrin-news
+        at: "2026-10-26T09:00:00Z"
+        feed: {title: "ORSA-2026-011: Critical remote code execution in Orrin DB 6.4 and earlier",
+               summary: "Orrin DB 7.x is not affected. 6.4 reached end of life in June.",
+               link: "https://orrindb.example/security/orsa-2026-011"}
+        label: should_screen_through
+        kind: fails_condition
+        why: "A critical advisory, for versions we do not run (instruction 1)."
+      - id: cloud_incident
+        source: orrin-news
+        at: "2026-10-30T11:00:00Z"
+        feed: {title: "Orrin Cloud: tenant isolation flaw fixed on managed clusters",
+               summary: "No action is needed by Orrin Cloud customers. Self-hosted Orrin DB is not affected.",
+               link: "https://orrindb.example/cloud/incident-2026-10"}
+        label: should_screen_through
+        kind: fails_condition
+        why: "A security flaw, in the managed service (instruction 3)."
+      - id: hardening_guide
+        source: orrin-news
+        at: "2026-10-28T15:00:00Z"
+        feed: {title: "A hardening checklist for Orrin DB 7.3 in production",
+               summary: "Twelve settings to review before you expose a cluster: TLS, roles, audit logging and more.",
+               link: "https://orrindb.example/blog/hardening-7-3"}
+        label: irrelevant
+        kind: same_source_off_topic
+        why: "Security advice for Orrin DB, but no flaw and no advisory."
+      - id: vector_beta
+        source: orrin-news
+        at: "2026-10-29T16:00:00Z"
+        feed: {title: "Orrin DB 7.4 beta adds vector indexes",
+               summary: "Try approximate nearest-neighbour search on a beta cluster today.",
+               link: "https://orrindb.example/news/7-4-beta"}
+        label: irrelevant
+        kind: same_source_off_topic
+        why: "Orrin's own news, about a feature."
+      - id: summit_cfp
+        source: orrin-news
+        at: "2026-10-26T13:00:00Z"
+        feed: {title: "Orrin Summit 2027: the call for talks is open",
+               summary: "Submit by December 15. The summit is in Rotterdam in April.",
+               link: "https://orrindb.example/news/summit-2027-cfp"}
+        label: irrelevant
+        kind: same_source_off_topic
+        why: "Orrin's own news, about a conference."
+      - id: pelican_cve
+        source: cve-feed
+        at: "2026-10-30T07:00:00Z"
+        feed: {title: "CVE-2026-39001: Critical heap overflow in Pelican HTTP server 3.x (CVSS 9.8)",
+               summary: "A crafted chunked request can overwrite heap memory. Fixed in Pelican 3.8.2.",
+               link: "https://cvewire.example/CVE-2026-39001"}
+        label: irrelevant
+        kind: keyword_decoy
+        why: "A critical advisory for another product."
+      - id: autovacuum
+        source: eng-blogs
+        at: "2026-10-27T18:00:00Z"
+        feed: {title: "How we tuned autovacuum on our Orrin DB fleet",
+               summary: "Lessons from three years of running Orrin DB at Tallyhouse.",
+               link: "https://engineering.tallyhouse.example/orrin-autovacuum"}
+        label: irrelevant
+        kind: keyword_decoy
+        why: "Orrin DB operations, nothing about security."
+      - id: cat_orrin
+        source: x-sec
+        at: "2026-10-28T12:30:00Z"
+        x: {username: bramble_orrin, name: Bramble & Orrin,
+            text: "Orrin (the cat) had his vaccines today. Zero drama, one treat."}
+        label: irrelevant
+        kind: keyword_decoy
+        why: "A cat called Orrin."
+      - id: pasta
+        source: eng-blogs
+        at: "2026-10-29T17:00:00Z"
+        feed: {title: "Five weeknight pasta recipes from the Lindqvist test kitchen",
+               summary: "Quick dinners from pantry staples, among them a lemon ricotta orzo.",
+               link: "https://lindqvistkitchen.example/weeknight-pasta"}
+        label: irrelevant
+        kind: off_topic
+        why: "Cooking."
+
+  - id: quarry_trails
+    name: quarry-ridge-trails
+    subject: "a closure, reroute, hazard or change of condition on the Quarry Ridge trails"
+    purpose: "Closures and hazards on the Quarry Ridge trails that would change my Saturday morning run."
+    instructions:
+      - "Pass closures, reroutes or hazards on the Quarry Ridge trails, including the North Loop and the Fen Boardwalk."
+      - "Pass only what affects a Saturday between 6:00 and 10:00."
+      - "Ignore notices about parking lots unless the trails themselves close."
+    listen_for: [Quarry Ridge, North Loop, Fen Boardwalk, trail, trails, closure, closed, detour, reroute]
+    items:
+      - id: harvest_10k
+        source: quarry-ridge-parks
+        at: "2026-10-29T14:00:00Z"
+        feed: {title: "North Loop closed Saturday, Nov 7, 7:00 to 12:00 for the Harvest 10K",
+               summary: "Runners and walkers can use the Fen Boardwalk and the ridge connector during the race.",
+               link: "https://parks.quarryridge.example/notices/harvest-10k"}
+        label: should_screen_through
+        kind: wanted
+        why: "A Saturday morning closure of the North Loop."
+      - id: boardwalk_storm
+        source: x-local
+        at: "2026-10-30T07:20:00Z"
+        x: {username: qr_parks, name: Quarry Ridge Parks,
+            text: "Storm lifted planks on the Fen Boardwalk. Please stay off it until crews inspect."}
+        label: should_screen_through
+        kind: wanted
+        why: "A hazard on the Fen Boardwalk with no end date, so it covers Saturday."
+      - id: mud_connector
+        source: x-local
+        at: "2026-10-30T18:45:00Z"
+        x: {username: qr_parks, name: Quarry Ridge Parks,
+            text: "Early birds this weekend: the ridge connector past the second bridge is pure mud. Poles help."}
+        label: should_screen_through
+        kind: wanted_oblique
+        why: "A weekend-morning hazard, with no trail, closure or loop word."
+      - id: tuesday_repairs
+        source: quarry-ridge-parks
+        at: "2026-10-30T10:00:00Z"
+        feed: {title: "Fen Boardwalk closed Tuesday, Nov 10, 9:00 to 15:00 for repairs",
+               summary: "Crews will replace storm-damaged planks. The North Loop stays open.",
+               link: "https://parks.quarryridge.example/notices/boardwalk-repairs"}
+        label: should_screen_through
+        kind: fails_condition
+        why: "A closure on a Tuesday (instruction 2)."
+      - id: afternoon_run
+        source: quarry-ridge-parks
+        at: "2026-10-31T09:00:00Z"
+        feed: {title: "North Loop down to one lane for the Kids' Fun Run, Saturday, Nov 14, 13:00 to 15:00",
+               summary: "Please give way to young runners on the eastern half of the loop.",
+               link: "https://parks.quarryridge.example/notices/kids-fun-run"}
+        label: should_screen_through
+        kind: fails_condition
+        why: "A Saturday restriction in the afternoon (instruction 2)."
+      - id: lot_resurfacing
+        source: quarry-ridge-parks
+        at: "2026-10-31T11:00:00Z"
+        feed: {title: "Trailhead lot B resurfaced Saturday, Nov 14; trails stay open",
+               summary: "Park in lot A or on Fen Road. All trails remain open.",
+               link: "https://parks.quarryridge.example/notices/lot-b"}
+        label: should_screen_through
+        kind: fails_condition
+        why: "A Saturday notice about a parking lot, trails open (instruction 3)."
+      - id: bridge_reopened
+        source: x-local
+        at: "2026-10-28T16:00:00Z"
+        x: {username: qr_parks, name: Quarry Ridge Parks,
+            text: "The North Loop footbridge has reopened after repairs. Thanks for your patience."}
+        label: should_screen_through
+        kind: fails_condition
+        why: "A change of condition on the North Loop, but a reopening, not a closure or hazard (instruction 1)."
+      - id: seed_night
+        source: x-local
+        at: "2026-10-27T12:00:00Z"
+        x: {username: qr_parks, name: Quarry Ridge Parks,
+            text: "Volunteer night: native seed sorting at the nature center, Thursday 18:00. Snacks provided."}
+        label: irrelevant
+        kind: same_source_off_topic
+        why: "The parks account, about a volunteer evening."
+      - id: budget_hearing
+        source: quarry-ridge-parks
+        at: "2026-10-26T15:00:00Z"
+        feed: {title: "Quarry Ridge parks budget hearing set for December 2",
+               summary: "Residents can comment in person or in writing.",
+               link: "https://parks.quarryridge.example/news/budget-hearing"}
+        label: irrelevant
+        kind: same_source_off_topic
+        why: "The parks feed, about a budget hearing."
+      - id: bake_sale
+        source: local-news
+        at: "2026-10-29T08:00:00Z"
+        feed: {title: "Quarry Ridge Elementary bake sale this Saturday, 9:00 to 12:00",
+               summary: "Proceeds go to the new library corner.",
+               link: "https://quarryridgegazette.example/bake-sale"}
+        label: irrelevant
+        kind: keyword_decoy
+        why: "Quarry Ridge, Saturday morning, a school event."
+      - id: other_park
+        source: local-news
+        at: "2026-10-28T10:00:00Z"
+        feed: {title: "Ridgeline Trail in Stonebrook Forest closed for logging through December",
+               summary: "Stonebrook County asks hikers to use the Millrace Trail instead.",
+               link: "https://quarryridgegazette.example/ridgeline-logging"}
+        label: irrelevant
+        kind: keyword_decoy
+        why: "A trail closure in another park."
+      - id: captions
+        source: x-local
+        at: "2026-10-30T13:00:00Z"
+        x: {username: hallway_cinema, name: Hallway Cinema,
+            text: "Closed captions are now on every screening, every day."}
+        label: irrelevant
+        kind: keyword_decoy
+        why: "Closed captions."
+      - id: trail_shoes
+        source: local-news
+        at: "2026-10-27T09:00:00Z"
+        feed: {title: "The best budget trail running shoes of 2026",
+               summary: "Eight pairs tested on mud, rock and wet boardwalk.",
+               link: "https://quarryridgegazette.example/trail-shoes"}
+        label: irrelevant
+        kind: keyword_decoy
+        why: "Trail running gear."
+      - id: sunset_frost
+        source: x-local
+        at: "2026-10-31T16:00:00Z"
+        x: {username: skywatch_daily, name: Skywatch Daily,
+            text: "Sunset tonight at 16:49. First frost possible by morning."}
+        label: irrelevant
+        kind: off_topic
+        why: "Weather and sunset, nothing about the trails."
+
+  - id: birchfield_asks
+    name: birchfield-asks
+    subject: "something Birchfield Primary asks parents to do: a form, a payment, an item to send in, or a date to keep"
+    purpose: "Things Birchfield Primary asks parents to do, so I never miss one for Ada's class."
+    instructions:
+      - "Pass only notices for Year 3 (Willow class) or for the whole school."
+      - "Pass only if the deadline or date is still ahead."
+      - "Ignore requests for parent volunteers; I can't help during school hours."
+    listen_for: [Birchfield, Year 3, Willow, permission, form, slip, payment, deadline, trip, parents]
+    examples:
+      - label: pass
+        note: "anything Willow class must bring"
+        source: school-app
+        at: "2026-09-08T07:30:00Z"
+        raw: {type: schoolapp.notice,
+              data: {title: "Willow class", body: "Please send in a named water bottle every day.",
+                     audience: "Willow (Year 3)", sent_by: "Ms Farrow"}}
+      - label: drop
+        note: "class news with nothing to do"
+        source: birchfield-news
+        at: "2026-10-02T15:00:00Z"
+        feed: {title: "Year 3 enjoyed a visit from the fire service",
+               summary: "Photos are in the gallery.",
+               link: "https://birchfieldprimary.example/news/fire-service-visit"}
+    items:
+      - id: farm_trip
+        source: school-app
+        at: "2026-10-29T07:45:00Z"
+        raw: {type: schoolapp.notice,
+              data: {title: "Year 3 trip to Marsh Lane Farm",
+                     body: "Our trip is on Thursday, Nov 19. Please return the permission slip and £6 by Thursday, Nov 12.",
+                     audience: "Year 3", sent_by: "Ms Farrow"}}
+        label: should_screen_through
+        kind: wanted
+        why: "A slip and a payment for Year 3, due ahead."
+      - id: non_uniform
+        source: school-app
+        at: "2026-11-02T07:30:00Z"
+        raw: {type: schoolapp.notice,
+              data: {title: "Non-uniform day",
+                     body: "Friday, Nov 6 is a non-uniform day. Please bring £1 for the library fund.",
+                     audience: "Whole school", sent_by: "School office"}}
+        label: should_screen_through
+        kind: wanted
+        why: "A whole-school payment for a date ahead."
+      - id: parents_evening
+        source: birchfield-news
+        at: "2026-10-30T12:00:00Z"
+        feed: {title: "Parents' evening bookings are open for all years",
+               summary: "Choose a slot by Friday, Nov 13. Appointments run from Nov 17 to Nov 19.",
+               link: "https://birchfieldprimary.example/news/parents-evening"}
+        label: should_screen_through
+        kind: wanted
+        why: "A booking every parent must make, due ahead."
+      - id: shoebox
+        source: school-app
+        at: "2026-10-30T14:10:00Z"
+        raw: {type: schoolapp.notice,
+              data: {title: "Design project",
+                     body: "Could every child bring an empty shoebox on Monday? Thank you!",
+                     audience: "Willow", sent_by: "Ms Farrow"}}
+        label: should_screen_through
+        kind: wanted_oblique
+        why: "An item Willow class must send in, with no Year 3, form or deadline word."
+      - id: year5_payment
+        source: school-app
+        at: "2026-10-28T08:00:00Z"
+        raw: {type: schoolapp.notice,
+              data: {title: "Year 5 residential",
+                     body: "The final payment for the Year 5 residential is due by Friday, Nov 20.",
+                     audience: "Year 5", sent_by: "Mr Osei"}}
+        label: should_screen_through
+        kind: fails_condition
+        why: "A payment asked of parents, for Year 5 (instruction 1)."
+      - id: volunteers
+        source: school-app
+        at: "2026-10-27T09:00:00Z"
+        raw: {type: schoolapp.notice,
+              data: {title: "Reading volunteers",
+                     body: "We need parent volunteers to hear readers on Tuesday mornings. Sign up at the office.",
+                     audience: "Whole school", sent_by: "School office"}}
+        label: should_screen_through
+        kind: fails_condition
+        why: "A whole-school ask of parents, for volunteers (instruction 3)."
+      - id: late_forms
+        source: birchfield-news
+        at: "2026-11-02T08:10:00Z"
+        feed: {title: "Flu spray consent forms: the deadline has passed",
+               summary: "Forms were due on Friday, Oct 30 and late forms can no longer be accepted.",
+               link: "https://birchfieldprimary.example/news/flu-spray-forms"}
+        label: should_screen_through
+        kind: fails_condition
+        why: "A form asked of parents whose deadline is past (instruction 2)."
+      - id: museum_news
+        source: birchfield-news
+        at: "2026-10-27T15:30:00Z"
+        feed: {title: "Year 3 had a wonderful time at the science museum",
+               summary: "Thank you to everyone who came along. Photos are in the gallery.",
+               link: "https://birchfieldprimary.example/news/science-museum"}
+        label: irrelevant
+        kind: same_source_off_topic
+        why: "Year 3 news that asks nothing of parents."
+      - id: chess_cup
+        source: birchfield-news
+        at: "2026-10-29T16:00:00Z"
+        feed: {title: "Birchfield Primary wins the county chess cup",
+               summary: "Our team of six beat eleven schools at the county final.",
+               link: "https://birchfieldprimary.example/news/chess-cup"}
+        label: irrelevant
+        kind: same_source_off_topic
+        why: "School news that asks nothing of parents."
+      - id: site_manager
+        source: birchfield-news
+        at: "2026-10-26T16:00:00Z"
+        feed: {title: "Staff news: Mr Adebayo joins us as site manager",
+               summary: "Please say hello when you see him at the gate.",
+               link: "https://birchfieldprimary.example/news/site-manager"}
+        label: irrelevant
+        kind: same_source_off_topic
+        why: "Staff news."
+      - id: academy_open
+        source: local-news
+        at: "2026-10-28T11:00:00Z"
+        feed: {title: "Birchfield Academy open evening for families of Year 6 pupils",
+               summary: "Tours run from 17:30 on Wednesday, Nov 11. No booking needed.",
+               link: "https://quarryridgegazette.example/birchfield-academy-open-evening"}
+        label: irrelevant
+        kind: keyword_decoy
+        why: "Another school called Birchfield, for Year 6 families."
+      - id: council_tax
+        source: council-app
+        at: "2026-10-30T09:00:00Z"
+        raw: {type: council.notice,
+              data: {title: "Council tax", body: "Your next council tax payment of £142 is due on Nov 15.",
+                     account: "QR-58213"}}
+        label: irrelevant
+        kind: keyword_decoy
+        why: "A payment with a deadline, from the council."
+      - id: tax_form
+        source: x-local
+        at: "2026-10-31T12:00:00Z"
+        x: {username: ledgerly_tips, name: Ledgerly,
+            text: "Freelancers: the Form 1099 deadline is closer than you think. Here is our checklist."}
+        label: irrelevant
+        kind: keyword_decoy
+        why: "A form and a deadline, for freelancers."
+      - id: weather
+        source: local-news
+        at: "2026-10-30T17:00:00Z"
+        feed: {title: "Weekend weather: bright, cold and calm",
+               summary: "Highs of 9C on Saturday and 8C on Sunday.",
+               link: "https://quarryridgegazette.example/weekend-weather"}
+        label: irrelevant
+        kind: off_topic
+        why: "Weather."
+
+  - id: halyard_breaking
+    name: halyard-breaking
+    subject: "a Halyard release or note that changes behaviour an app relies on: a breaking change, a deprecation or a changed default"
+    purpose: "Halyard web framework releases that could break our app or need code changes."
+    instructions:
+      - "Pass only stable releases, not release candidates, betas or nightlies."
+      - "Pass only the core halyard package, not plugins such as halyard-auth."
+      - "Pass only if it removes, renames or deprecates something, or changes a default."
+    listen_for: [Halyard, release, breaking, deprecated, deprecation, migration, removed, default, v4]
+    items:
+      - id: v4
+        source: github-deps
+        at: "2026-10-27T15:00:00Z"
+        raw: {type: release,
+              data: {action: published, repository: {full_name: halyard/halyard},
+                     release: {tag_name: v4.0.0, name: "Halyard 4.0.0", prerelease: false,
+                               body: "Breaking: the legacy router is removed. See the migration guide.",
+                               html_url: "https://github.example/halyard/halyard/releases/tag/v4.0.0"}}}
+        label: should_screen_through
+        kind: wanted
+        why: "A stable core release that removes the router."
+      - id: deprecation_390
+        source: github-deps
+        at: "2026-10-26T11:00:00Z"
+        raw: {type: release,
+              data: {action: published, repository: {full_name: halyard/halyard},
+                     release: {tag_name: v3.9.0, name: "Halyard 3.9.0", prerelease: false,
+                               body: "Deprecates Session.fetch/2 in favour of Session.get/2; removal planned for 4.0.",
+                               html_url: "https://github.example/halyard/halyard/releases/tag/v3.9.0"}}}
+        label: should_screen_through
+        kind: wanted
+        why: "A stable core release with a deprecation."
+      - id: maint_post
+        source: x-ai-voices
+        at: "2026-10-27T15:30:00Z"
+        x: {username: halyard_maint, name: Halyard,
+            text: "Halyard 4 is out. Read the migration guide before you upgrade: the old router is gone."}
+        label: should_screen_through
+        kind: wanted
+        why: "The maintainers on the stable 4.0 release and what it removes."
+      - id: default_change
+        source: github-deps
+        at: "2026-10-29T10:00:00Z"
+        raw: {type: release,
+              data: {action: published, repository: {full_name: halyard/halyard},
+                     release: {tag_name: v3.8.2, name: "Halyard 3.8.2", prerelease: false,
+                               body: "Fixes cookies dropped on redirect. strict_cookies now defaults to true.",
+                               html_url: "https://github.example/halyard/halyard/releases/tag/v3.8.2"}}}
+        label: should_screen_through
+        kind: wanted_oblique
+        why: "A changed default in a patch release, with no breaking or deprecation word."
+      - id: rc
+        source: github-deps
+        at: "2026-10-31T10:00:00Z"
+        raw: {type: release,
+              data: {action: published, repository: {full_name: halyard/halyard},
+                     release: {tag_name: v4.1.0-rc.1, name: "Halyard 4.1.0-rc.1", prerelease: true,
+                               body: "Breaking: drops support for Node 18.",
+                               html_url: "https://github.example/halyard/halyard/releases/tag/v4.1.0-rc.1"}}}
+        label: should_screen_through
+        kind: fails_condition
+        why: "A breaking change in a release candidate (instruction 1)."
+      - id: auth_plugin
+        source: github-deps
+        at: "2026-10-30T10:00:00Z"
+        raw: {type: release,
+              data: {action: published, repository: {full_name: halyard/halyard-auth},
+                     release: {tag_name: v2.0.0, name: "halyard-auth 2.0.0", prerelease: false,
+                               body: "Breaking: tokens use a new format, so existing sessions are signed out.",
+                               html_url: "https://github.example/halyard/halyard-auth/releases/tag/v2.0.0"}}}
+        label: should_screen_through
+        kind: fails_condition
+        why: "A breaking change in a plugin (instruction 2)."
+      - id: docs_release
+        source: github-deps
+        at: "2026-10-30T16:00:00Z"
+        raw: {type: release,
+              data: {action: published, repository: {full_name: halyard/halyard},
+                     release: {tag_name: v3.8.3, name: "Halyard 3.8.3", prerelease: false,
+                               body: "Documentation fixes and CI updates. No code changes.",
+                               html_url: "https://github.example/halyard/halyard/releases/tag/v3.8.3"}}}
+        label: irrelevant
+        kind: same_source_off_topic
+        why: "A core release that changes nothing an app relies on."
+      - id: perf_release
+        source: github-deps
+        at: "2026-10-31T16:00:00Z"
+        raw: {type: release,
+              data: {action: published, repository: {full_name: halyard/halyard},
+                     release: {tag_name: v3.8.4, name: "Halyard 3.8.4", prerelease: false,
+                               body: "Template rendering is about 12% faster. No API changes.",
+                               html_url: "https://github.example/halyard/halyard/releases/tag/v3.8.4"}}}
+        label: irrelevant
+        kind: same_source_off_topic
+        why: "A core release that only speeds things up."
+      - id: meetup
+        source: x-ai-voices
+        at: "2026-10-28T09:00:00Z"
+        x: {username: halyard_maint, name: Halyard,
+            text: "Halyard meetup in Lisbon on Nov 20. Come say hi!"}
+        label: irrelevant
+        kind: same_source_off_topic
+        why: "The maintainers, about a meetup."
+      - id: rivet_breaking
+        source: github-deps
+        at: "2026-10-29T14:00:00Z"
+        raw: {type: release,
+              data: {action: published, repository: {full_name: rivet/rivet},
+                     release: {tag_name: v2.0.0, name: "Rivet 2.0.0", prerelease: false,
+                               body: "Breaking: removes the legacy middleware API.",
+                               html_url: "https://github.example/rivet/rivet/releases/tag/v2.0.0"}}}
+        label: irrelevant
+        kind: keyword_decoy
+        why: "A breaking stable release of another framework."
+      - id: sailing
+        source: x-ai-voices
+        at: "2026-10-31T11:00:00Z"
+        x: {username: harbour_sail, name: Harbourline Sailing,
+            text: "New halyard and mainsail fitted on the Kittiwake today. Ready for Sunday."}
+        label: irrelevant
+        kind: keyword_decoy
+        why: "A halyard on a boat."
+      - id: job_post
+        source: x-ai-voices
+        at: "2026-10-30T09:30:00Z"
+        x: {username: talentbay_jobs, name: TalentBay,
+            text: "Hiring: senior engineer, Halyard and Orrin DB, remote within Europe."}
+        label: irrelevant
+        kind: keyword_decoy
+        why: "A job advert naming Halyard."
+      - id: brown_butter
+        source: x-ai-voices
+        at: "2026-10-29T19:00:00Z"
+        x: {username: marisol_bakes, name: Marisol Bakes,
+            text: "Brown butter makes everything better. Even cabbage."}
+        label: irrelevant
+        kind: off_topic
+        why: "Cooking."

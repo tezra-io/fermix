@@ -2,8 +2,8 @@ defmodule FermixCore.Cues.Config do
   @moduledoc """
   `[fermix_core.cues]` config (M60 §6.2, §10.1, §15).
 
-  Four scalar keys (`enabled`, `mandates_enabled`, `screen`, `door_port`)
-  and two tables
+  Five scalar keys (`enabled`, `mandates_enabled`, `screen`,
+  `decision_provider`, `door_port`) and two tables
   of sections: `[fermix_core.cues.sources.<ref>]` and
   `[fermix_core.cues.mandates.<name>]`, a mandate's `pin_args` being its own
   sub-table (`[fermix_core.cues.mandates.<name>.pin_args]`), because the config
@@ -41,6 +41,7 @@ defmodule FermixCore.Cues.Config do
   alias FermixCore.Cues.Presets
   alias FermixCore.Cues.Webhook
   alias FermixCore.Cues.XAccounts
+  alias FermixCore.Providers.DecisionModel
   alias FermixCore.Setup.SecretWriter
 
   @default_door_port 4032
@@ -57,7 +58,15 @@ defmodule FermixCore.Cues.Config do
   # A float the config parser reads back as the same float.
   @float_text_pattern ~r/\A-?\d+\.\d+\z/
 
-  @config_keys [:enabled, :mandates_enabled, :screen, :door_port, :sources, :mandates]
+  @config_keys [
+    :enabled,
+    :mandates_enabled,
+    :screen,
+    :decision_provider,
+    :door_port,
+    :sources,
+    :mandates
+  ]
   @screens [:keyword, :decision_model]
   @kinds [:stream, :feed, :webhook, :local_push]
   @verify_methods [:shared_secret, :hmac, :standard_webhooks]
@@ -312,6 +321,10 @@ defmodule FermixCore.Cues.Config do
       normalize_boolean(lookup(config, :mandates_enabled), "cues.mandates_enabled")
     )
     |> put_present(:screen, normalize_screen(lookup(config, :screen)))
+    |> put_present(
+      :decision_provider,
+      normalize_decision_provider(lookup(config, :decision_provider))
+    )
     |> put_present(:door_port, normalize_door_port(lookup(config, :door_port)))
     |> put_present(:sources, normalize_table(lookup(config, :sources), :sources))
     |> put_present(:mandates, normalize_table(lookup(config, :mandates), :mandates))
@@ -331,6 +344,7 @@ defmodule FermixCore.Cues.Config do
       {:sources, sources} -> {:sources, Map.new(sources, &persist_section/1)}
       {:mandates, mandates} -> {:mandates, Map.new(mandates, &persist_section/1)}
       {:screen, screen} -> {:screen, Atom.to_string(screen)}
+      {:decision_provider, provider} -> {:decision_provider, Atom.to_string(provider)}
       {key, value} -> {key, value}
     end)
   end
@@ -353,6 +367,16 @@ defmodule FermixCore.Cues.Config do
   """
   @spec screen(t()) :: :keyword | :decision_model
   def screen(config \\ current()), do: Keyword.get(config, :screen, :keyword)
+
+  @doc """
+  The provider whose decision model the screen uses while it is
+  `:decision_model`, one of `Providers.DecisionModel.providers/0`, or nil (no
+  key) for Automatic, the one `Providers.DecisionModel.route/1` picks. Read at
+  every filter call; whether it is set up is the call's to find, as for the
+  screen.
+  """
+  @spec decision_provider(t()) :: DecisionModel.provider() | nil
+  def decision_provider(config \\ current()), do: Keyword.get(config, :decision_provider)
 
   @doc "The loopback port the door listens on."
   @spec door_port(t()) :: :inet.port_number()
@@ -834,6 +858,11 @@ defmodule FermixCore.Cues.Config do
 
   defp normalize_screen(nil), do: nil
   defp normalize_screen(value), do: enum!(value, @screens, "cues.screen")
+
+  defp normalize_decision_provider(nil), do: nil
+
+  defp normalize_decision_provider(value),
+    do: enum!(value, DecisionModel.providers(), "cues.decision_provider")
 
   defp normalize_door_port(nil), do: nil
   defp normalize_door_port(port) when is_integer(port) and port in @door_ports, do: port
