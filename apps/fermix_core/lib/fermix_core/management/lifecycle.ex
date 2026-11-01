@@ -33,7 +33,9 @@ defmodule FermixCore.Management.Lifecycle do
 
   use GenServer
 
+  alias Fermix.CLI.Service
   alias Fermix.CLI.Service.Systemd
+  alias FermixCore.BuildInfo
 
   require Logger
 
@@ -196,6 +198,24 @@ defmodule FermixCore.Management.Lifecycle do
   end
 
   defp user_unit({:error, _no_cgroup}), do: :none
+
+  @doc """
+  Whether something brings this engine back once it stops itself (Always On
+  setup §9): the Mac app's engine (launchd's `KeepAlive`,
+  `BuildInfo.app_engine?/0`), a process systemd started (a unit's `Restart=`,
+  `Service.systemd_invocation?/1`), or a `fermix service` install
+  (`Service.supervised?/1`). False for `fermix run` at a terminal, where the
+  stop is the end: a move then warns (`MoveReadiness`'s `service` item), and
+  the setup page's Apply & restart says it cannot restart from there.
+
+  `opts` (tests): `:app_engine?`, `:invocation_id` and `:supervised?`.
+  """
+  @spec restarts_itself?(keyword()) :: boolean()
+  def restarts_itself?(opts \\ []) when is_list(opts) do
+    Keyword.get_lazy(opts, :app_engine?, &BuildInfo.app_engine?/0) or
+      Service.systemd_invocation?(Keyword.take(opts, [:invocation_id])) or
+      Keyword.get_lazy(opts, :supervised?, fn -> Service.supervised?() end)
+  end
 
   @doc "The shared default stopper, so every stop call site can name one function."
   @spec default_stopper() :: (-> :ok)

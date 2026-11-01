@@ -18,10 +18,12 @@ defmodule Fermix.CLI.HomeMoveCommand do
     it, and the code file too. Human output only.
   - `candidates` lists the candidates the primary holds: from the engine
     (`home.candidates.list`), or from the home's file when it is stopped.
-  - `move` starts the move (`home.move.start`): the running engine writes the
-    request and restarts in the device role; with the engine stopped the
-    request and the role are written here, and the move starts when the engine
-    does. The recovery passphrase never enters argv: `--recovery-passphrase-file`
+  - `move` starts the move (`home.move.start`): the running engine checks
+    the recovery passphrase against the key it keeps (or keeps it when none
+    is set), writes the request and restarts in the device role. It needs the
+    running engine (`engine_stopped` otherwise), since a stopped one has no
+    key to check the passphrase against. The recovery passphrase never enters
+    argv: `--recovery-passphrase-file`
     (one line, a trailing newline dropped) or, on a terminal, asked twice
     without echo. This computer becomes a desktop of the new primary, unless
     `--retire` says otherwise (`keep_as_desktop: false`): a server that is
@@ -38,9 +40,6 @@ defmodule Fermix.CLI.HomeMoveCommand do
   alias Fermix.CLI.SecretInput
   alias FermixCore.Home.Candidate
   alias FermixCore.Home.Candidates
-  alias FermixCore.Home.Move
-  alias FermixCore.Home.Role
-  alias FermixCore.Management.HomeMove
   alias FermixCore.Setup.ConfigStore
 
   @json [json: :boolean]
@@ -272,40 +271,10 @@ defmodule Fermix.CLI.HomeMoveCommand do
 
     case client(deps).("home.move.start", params, call_opts(home, @move_timeout_ms)) do
       {:ok, result} -> report(json?, result, &move_lines/1)
-      {:error, :not_running} -> offline_move(home, json?, {to, retire?}, passphrase, deps)
+      {:error, :not_running} -> refuse(json?, :engine_stopped, [])
       {:error, reason} -> refuse(json?, :move_refused, output: said(reason))
     end
   end
-
-  # With the engine stopped the request and the role are written here, and
-  # the move starts at the engine's next start.
-  defp offline_move(home, json?, {to, retire?}, passphrase, deps) do
-    with {:ok, record} <- Role.configured(home),
-         {:ok, started} <-
-           Move.start(
-             home,
-             record,
-             to,
-             passphrase,
-             [now: now(deps), supervised: false, keep_as_desktop: not retire?] ++
-               Keyword.take(deps, [:free_bytes, :version, :host])
-           ) do
-      view =
-        Map.put(
-          HomeMove.started_view(started),
-          "sentence",
-          "The move to #{started.candidate.name} is set up. Start Fermix: " <>
-            offline_start(retire?)
-        )
-
-      report(json?, view, &move_lines/1)
-    else
-      {:error, reason} -> refuse(json?, :move_refused, output: Move.error_sentence(reason))
-    end
-  end
-
-  defp offline_start(false), do: "it starts in the device role and moves this home."
-  defp offline_start(true), do: "it moves this home and then serves nothing here."
 
   defp move_lines(result) do
     [

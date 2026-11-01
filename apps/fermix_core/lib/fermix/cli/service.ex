@@ -280,11 +280,16 @@ defmodule Fermix.CLI.Service do
 
   defp started_by_service?(opts) do
     if packaged?(opts),
-      do: service_invocation?(opts),
+      do: systemd_invocation?(opts),
       else: installed?(:user, opts) or installed?(:system, opts)
   end
 
-  defp service_invocation?(opts) do
+  @doc """
+  Whether systemd started this process: it exports `INVOCATION_ID` into every
+  unit it starts. `opts`: `:invocation_id` in place of the environment's.
+  """
+  @spec systemd_invocation?(keyword()) :: boolean()
+  def systemd_invocation?(opts \\ []) when is_list(opts) do
     case Keyword.get_lazy(opts, :invocation_id, fn -> System.get_env("INVOCATION_ID") end) do
       value when is_binary(value) and value != "" -> true
       _absent_or_blank -> false

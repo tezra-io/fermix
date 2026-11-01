@@ -43,13 +43,13 @@ defmodule FermixChannels.Home.MoveEndToEndTest do
   alias FermixCore.Home.Move
   alias FermixCore.Home.Moved
   alias FermixCore.Home.Role
+  alias FermixCore.Home.Snapshot.Recipient
   alias FermixTestSupport.SafeRm
 
   @moduletag :iroh_end_to_end
   @moduletag timeout: 180_000
 
   @relay %{"url" => "https://relay.invalid/", "quic_port" => 7842}
-  @passphrase "invented-lantern-orchard"
 
   setup do
     dir = System.fetch_env!("FERMIX_IROH_DIR") |> Path.expand()
@@ -71,7 +71,11 @@ defmodule FermixChannels.Home.MoveEndToEndTest do
     refute File.exists?(Candidate.path(candidate.home, "code"))
 
     {:ok, _started} =
-      Move.start(primary.root, %{role: :primary, primary: nil}, candidate_id, @passphrase,
+      Move.start(
+        primary.root,
+        %{role: :primary, primary: nil},
+        candidate_id,
+        Recipient.public(Recipient.generate()),
         now: HomeMove.now()
       )
 

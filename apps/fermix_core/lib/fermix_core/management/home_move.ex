@@ -26,7 +26,12 @@ defmodule FermixCore.Management.HomeMove do
     each item `ok`, `warn` or `block` with its sentence. The review is kept
     (`Move.put_review/4`) for the start that follows it.
   - `home.move.start {candidate_id, recovery_passphrase}` (primary only)
-    writes the move's request (`FermixCore.Home.Move.start/5`), refused while
+    first checks the recovery passphrase against the key this primary keeps,
+    or sets it when none is kept (`FermixCore.Home.Snapshot.Recovery.verify_or_set/2`):
+    one that is not the one set is refused on `recovery_passphrase`, and the
+    move carries the kept key, never a second one. A start refused after
+    that keeps the passphrase it set. It then writes the move's request
+    (`FermixCore.Home.Move.start/5`), refused while
     the readiness report blocks: the ready review the owner was just shown
     (`Move.review/3`), so the keychain is not read again, else a report made
     now. That hands the home to the device role,
@@ -34,19 +39,21 @@ defmodule FermixCore.Management.HomeMove do
     (`Management.Lifecycle.restart_self/0`), which the service manager brings
     back (launchd's `KeepAlive` for the Mac app's
     agent, systemd's `Restart=always` for the Linux service). The passphrase
-    derives the recovery recipient and is never stored, logged or answered.
+    lives only inside that check: it is never stored, logged or answered.
   - In `home.status`: `enrollment` is the window (`state` `open`, `used` or
     `expired`, `expires_at`, its `kind`, `manual` or `provisioned`, and the
     `candidate_id` that enrolled through it, null until one did) or null; `candidates` the held candidates on
     a primary, empty elsewhere; `move` the move's `phase`, `candidate` (its
     name, null on the candidate itself) and `sentence`, or null.
 
-  Test seams in `opts`: those of `Management.Home`, plus `:now` (a
+  Test seams in `opts`: those of `Management.Home` (its `:config` and
+  `:save_recipient` reach the passphrase check), plus `:now` (a
   `DateTime`), `:open_enrollment` (a 1-arity stand-in for the rail's, given
   the kind), `:withdraw_enrollment` (in place of the rail's), `:actor`
   (`{:desktop, device_id}` for a request a desktop forwarded), `:restart` (in
   place of the restart), `:boot_ending` (in place of `Move.boot_ending/0`),
-  and the readiness report's `:free_bytes`, `:version` and `:host`.
+  and the readiness report's `:free_bytes`, `:version`, `:host` and
+  `:restarts_itself`.
   """
 
   alias FermixCore.Home.Candidate
@@ -55,13 +62,14 @@ defmodule FermixCore.Management.HomeMove do
   alias FermixCore.Home.Move
   alias FermixCore.Home.MoveReadiness
   alias FermixCore.Home.Role
+  alias FermixCore.Home.Snapshot.Recovery
+  alias FermixCore.Management.Home
   alias FermixCore.Management.Lifecycle
   alias FermixCore.Setup.ConfigStore
 
   require Logger
 
   @capability "home"
-  @max_passphrase_bytes 1_024
   @not_primary "Only the primary enrolls candidates and starts a move."
   @provisioned_here "A code that lives 24 hours opens only for a server Fermix creates from " <>
                       "your computer."
@@ -187,7 +195,8 @@ defmodule FermixCore.Management.HomeMove do
   @spec move_start(term(), term(), keyword()) :: {:ok, map()} | {:error, term()}
   def move_start(candidate_id, passphrase, opts \\ []) when is_list(opts) do
     with {:ok, candidate_id} <- candidate_id(candidate_id),
-         {:ok, passphrase} <- passphrase(passphrase),
+         :ok <- refused(primary_role(role(opts))),
+         {:ok, recipient} <- Home.recovery_result(Recovery.verify_or_set(passphrase, opts)),
          {:ok, reviewed} <- refused(reviewed(home(opts), candidate_id, now(opts))),
          {:ok, started} <-
            refused(
@@ -195,7 +204,7 @@ defmodule FermixCore.Management.HomeMove do
                home(opts),
                role(opts),
                candidate_id,
-               passphrase,
+               recipient,
                [now: now(opts), keep_as_desktop: Keyword.get(opts, :keep_as_desktop, true)] ++
                  reviewed ++ readiness_opts(opts)
              )
@@ -302,22 +311,12 @@ defmodule FermixCore.Management.HomeMove do
   defp candidate_id(_id),
     do: {:error, {:invalid_params, "candidate_id", "Name the candidate by its id."}}
 
-  defp passphrase(value)
-       when is_binary(value) and byte_size(value) >= 12 and
-              byte_size(value) <= @max_passphrase_bytes,
-       do: {:ok, value}
+  # Before the passphrase is checked or set: only the primary keeps a
+  # recovery key, and `Move.start/5` refuses any other role in these words.
+  defp primary_role(%{role: :primary}), do: :ok
+  defp primary_role(%{role: role}), do: {:error, {:not_primary, role}}
 
-  defp passphrase(value) when is_binary(value) and byte_size(value) < 12,
-    do:
-      {:error,
-       {:invalid_params, "recovery_passphrase", Move.error_sentence(:passphrase_too_short)}}
-
-  defp passphrase(_value),
-    do:
-      {:error,
-       {:invalid_params, "recovery_passphrase",
-        "The recovery passphrase is text of at most #{@max_passphrase_bytes} bytes."}}
-
+  defp refused(:ok), do: :ok
   defp refused({:ok, started}), do: {:ok, started}
 
   defp refused({:error, {:not_ready, _sentences} = reason}),
@@ -340,7 +339,8 @@ defmodule FermixCore.Management.HomeMove do
   defp primary(%{role: :primary}), do: :ok
   defp primary(_record), do: {:error, {:unavailable, @capability, @not_primary}}
 
-  defp readiness_opts(opts), do: Keyword.take(opts, [:free_bytes, :version, :host])
+  defp readiness_opts(opts),
+    do: Keyword.take(opts, [:free_bytes, :version, :host, :restarts_itself])
 
   defp home(opts), do: Keyword.get_lazy(opts, :home, &ConfigStore.fermix_home/0)
   defp role(opts), do: Keyword.get_lazy(opts, :engine_role, &Role.recorded/0)

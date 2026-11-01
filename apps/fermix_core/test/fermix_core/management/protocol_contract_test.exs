@@ -1599,7 +1599,8 @@ defmodule FermixCore.Management.ProtocolContractTest do
     do: [
       free_bytes: fn _dir -> {:ok, 1_099_511_627_776} end,
       version: "0.9.0",
-      host: "macos-aarch64"
+      host: "macos-aarch64",
+      restarts_itself: true
     ]
 
   # `home.move.start` writes the move and the device role into its home, so it
@@ -1616,7 +1617,10 @@ defmodule FermixCore.Management.ProtocolContractTest do
         home: home,
         engine_role: %{role: :primary, primary: nil},
         now: ~U[2026-10-27 09:30:00Z],
-        restart: fn -> :ok end
+        restart: fn -> :ok end,
+        # No recovery passphrase is set yet, so the start keeps the one typed.
+        config: [],
+        save_recipient: fn _recipient -> {:ok, %{}} end
       ] ++ readiness_seams()
 
     params = %{

@@ -100,6 +100,13 @@ refused to a command Fermix started and to a caller it cannot place. The Mac
 app's agent opens the page, and `fermix setup` mints its one-time link in its
 own process.
 
+The recovery passphrase typed for an Always On move is checked against the
+recovery key the primary keeps (derived under that key's own salt, it must
+give its public half), so a mistyped passphrase is refused rather than
+becoming the key the server's snapshots are encrypted to, and a move never
+mints a second key; with none kept, the move sets one. The passphrase lives
+only inside that check: never stored, logged, answered or carried in an error.
+
 What this deliberately does not cover:
 
 - Only the turn that read the content waits. Replayed history on a later turn,

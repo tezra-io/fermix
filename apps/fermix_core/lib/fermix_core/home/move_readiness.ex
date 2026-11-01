@@ -42,13 +42,23 @@ defmodule FermixCore.Home.MoveReadiness do
     * `cutover_gap`: Telegram messages sent during the move wait until it
       is done (Telegram keeps them, `Channels.Telegram.Poller`), and a
       recurring job more than an hour late is skipped;
-    * `serves_nothing`: this computer serves nothing during the move.
+    * `serves_nothing`: this computer serves nothing during the move;
+    * `service`: Fermix run from a terminal (`fermix run`) warns, since the
+      move stops it and nothing starts it again
+      (`Management.Lifecycle.restarts_itself?/1`): it has to be started again
+      to finish the move.
+
+  `config_items/3` answers the last seven alone, from the settings file and
+  facts of this engine: the items that need neither the keychain nor a walk of
+  the home, which Move now's confirm names before the owner presses it.
 
   `opts`: `:free_bytes` (a 1-arity reader of free space), `:supervised` (for
   `CommandRunner` and the keychain read from a tree-less verb), `:version`
   (this engine's, `BuildInfo.product_version/0`), `:host` (this host's plugin
   target, `Archive.host/1`), `:home_bytes` (the home's size, in place of
-  walking it), `:index_opts` (`Plugins.Dist.Index.load/1`'s, the catalog).
+  walking it), `:index_opts` (`Plugins.Dist.Index.load/1`'s, the catalog),
+  `:restarts_itself` (a boolean, in place of
+  `Management.Lifecycle.restarts_itself?/0`).
   """
 
   alias FermixCore.BuildInfo
@@ -59,6 +69,7 @@ defmodule FermixCore.Home.MoveReadiness do
   alias FermixCore.Home.Snapshot.S3
   alias FermixCore.Home.UnreadableFiles
   alias FermixCore.Management.Copy
+  alias FermixCore.Management.Lifecycle
   alias FermixCore.Management.Settings
   alias FermixCore.Plugins.Dist.Index
 
@@ -84,12 +95,46 @@ defmodule FermixCore.Home.MoveReadiness do
         :error -> home_bytes(home)
       end
 
-    items = [
-      keychain(config, opts),
-      version(candidate, Keyword.get_lazy(opts, :version, &BuildInfo.product_version/0)),
-      disk(home, home_bytes, name, opts),
-      s3_size(candidate, home_bytes),
-      plugins(home, host, candidate, opts),
+    items =
+      [
+        keychain(config, opts),
+        version(candidate, Keyword.get_lazy(opts, :version, &BuildInfo.product_version/0)),
+        disk(home, home_bytes, name, opts),
+        s3_size(candidate, home_bytes),
+        plugins(home, host, candidate, opts)
+      ] ++ from_config(config, host, name, opts)
+
+    %{ready: not Enum.any?(items, &(&1.status == :block)), items: items}
+  end
+
+  @doc """
+  The review's items that read the settings file of `home` and this engine's
+  own facts alone, for a move to the candidate called `name`: `stays_here`,
+  `whatsapp`, `slack`, `coding_agents`, `cutover_gap`, `serves_nothing` and
+  `service`, exactly as `report/3` gives them. A summary reads them on every
+  poll, so an unreadable file is logged once when it stops being readable
+  and once when it reads again (`opts`' `:unreadable_files`, as
+  `stays_here/3`); `:host` and `:restarts_itself` as `report/3`'s.
+  """
+  @spec config_items(Path.t(), String.t(), keyword()) :: [item()]
+  def config_items(home, name, opts \\ [])
+      when is_binary(home) and is_binary(name) and is_list(opts) do
+    file = config_path(home)
+    read = config_text(file)
+    memory = Keyword.get(opts, :unreadable_files, UnreadableFiles)
+    :ok = UnreadableFiles.log_read(file, "home status", read, memory)
+
+    config =
+      case read do
+        {:ok, text} -> {:ok, text}
+        {:error, _reason} -> {:error, @unreadable_settings}
+      end
+
+    from_config(config, host(opts), name, opts)
+  end
+
+  defp from_config(config, host, name, opts) do
+    [
       stays_here_item(config, host, name),
       whatsapp(config, name),
       slack(config, name),
@@ -100,10 +145,9 @@ defmodule FermixCore.Home.MoveReadiness do
         :warn,
         "This computer serves nothing while the move runs: no chat, channels or jobs " <>
           "until #{name} takes over."
-      )
+      ),
+      service(Keyword.get_lazy(opts, :restarts_itself, &Lifecycle.restarts_itself?/0))
     ]
-
-    %{ready: not Enum.any?(items, &(&1.status == :block)), items: items}
   end
 
   @doc """
@@ -448,6 +492,20 @@ defmodule FermixCore.Home.MoveReadiness do
       :absent -> :absent
     end
   end
+
+  # The move stops this engine to hand the home over; one started from a
+  # terminal is not brought back, so the move waits until it is started again.
+  defp service(true),
+    do: item("service", :ok, "Fermix starts again by itself here once the move stops it.")
+
+  defp service(false),
+    do:
+      item(
+        "service",
+        :warn,
+        "Fermix runs from a terminal here, so it stops when the move starts. Start it again " <>
+          "to finish."
+      )
 
   defp cutover_sentence,
     do:

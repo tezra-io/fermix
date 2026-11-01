@@ -83,7 +83,8 @@ defmodule FermixCore.Home.MoveReadinessTest do
              {"slack", :warn},
              {"coding_agents", :warn},
              {"cutover_gap", :warn},
-             {"serves_nothing", :warn}
+             {"serves_nothing", :warn},
+             {"service", :ok}
            ]
 
     sentence = fn id -> Enum.find(items, &(&1.id == id)).sentence end
@@ -229,6 +230,67 @@ defmodule FermixCore.Home.MoveReadinessTest do
     assert sentence =~ "5 GiB"
   end
 
+  # Always On setup §9: under `fermix run` at a terminal a move stops Fermix
+  # and nothing starts it again.
+  test "Fermix run from a terminal warns that the move stops it", ctx do
+    terminal = Keyword.put(opts(ctx), :restarts_itself, false)
+
+    assert %{items: items} = report = MoveReadiness.report(ctx.home, ctx.candidate, terminal)
+    refute Enum.any?(MoveReadiness.blocks(report), &(&1 =~ "terminal"))
+
+    assert item_in(items, "service") == %{
+             id: "service",
+             status: :warn,
+             sentence:
+               "Fermix runs from a terminal here, so it stops when the move starts. Start it " <>
+                 "again to finish."
+           }
+
+    assert %{items: items} = MoveReadiness.report(ctx.home, ctx.candidate, opts(ctx))
+    assert %{status: :ok} = item_in(items, "service")
+  end
+
+  # What Move now's confirm is built from before the owner presses it: the
+  # items that read the settings alone, as the full review gives them.
+  test "the items that read the settings alone are the review's, in its order", ctx do
+    report = MoveReadiness.report(ctx.home, ctx.candidate, opts(ctx))
+
+    for restarts? <- [true, false] do
+      seams = Keyword.put(opts(ctx), :restarts_itself, restarts?)
+      items = MoveReadiness.config_items(ctx.home, ctx.candidate.name, seams)
+
+      assert Enum.map(items, & &1.id) ==
+               ~w(stays_here whatsapp slack coding_agents cutover_gap serves_nothing service)
+
+      full = MoveReadiness.report(ctx.home, ctx.candidate, seams).items
+      assert items == Enum.filter(full, &(&1.id in Enum.map(items, fn item -> item.id end)))
+    end
+
+    assert Enum.take(report.items, -7) ==
+             MoveReadiness.config_items(ctx.home, ctx.candidate.name, opts(ctx))
+  end
+
+  test "the items that read the settings alone say an unreadable file", ctx do
+    File.rm!(Path.join(ctx.home, "config.toml"))
+    File.mkdir!(Path.join(ctx.home, "config.toml"))
+    seams = opts(ctx) ++ [unreadable_files: nil]
+
+    {items, log} =
+      ExUnit.CaptureLog.with_log(fn ->
+        MoveReadiness.config_items(ctx.home, ctx.candidate.name, seams)
+      end)
+
+    assert log =~ "could not be read"
+
+    for id <- ~w(stays_here whatsapp slack coding_agents) do
+      assert item_in(items, id) == %{
+               id: id,
+               status: :warn,
+               sentence: "The settings file could not be read; Fermix's log says why."
+             }
+    end
+  end
+
   test "the report as the wire carries it" do
     report = %{ready: false, items: [%{id: "disk", status: :block, sentence: "No room."}]}
 
@@ -276,7 +338,8 @@ defmodule FermixCore.Home.MoveReadinessTest do
       free_bytes: fn _dir -> {:ok, @plenty} end,
       version: "0.16.9",
       host: "macos-aarch64",
-      index_opts: [seed_path: ctx.index]
+      index_opts: [seed_path: ctx.index],
+      restarts_itself: true
     ]
 
   defp item_in(items, id), do: Enum.find(items, &(&1.id == id))

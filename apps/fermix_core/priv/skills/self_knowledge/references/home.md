@@ -299,8 +299,12 @@ it, never a second writer.
   coding agents approved here (warns: a move withdraws that approval, as
   every restore does, so they ask again on the server); the cutover gap
   (Telegram messages sent during the move wait until it is done, and a
-  recurring job more than an hour late is skipped); and this computer
-  serving nothing while the move runs. The move does not start while
+  recurring job more than an hour late is skipped); this computer
+  serving nothing while the move runs; and Fermix run from a terminal
+  (`fermix run`, warns: "Fermix runs from a terminal here, so it stops when
+  the move starts. Start it again to finish."; the Mac app's engine, a
+  systemd unit and a `fermix service` install start again by themselves). The
+  move does not start while
   anything blocks, from the apps or
   from `fermix home move`, which says each block. Checking the keychain reads
   each secret, which opens the keychain and can ask the owner to allow it; a
@@ -311,17 +315,23 @@ it, never a second writer.
   started is refused on `daemon.sock`.
 - **Starting the move.** `fermix home move --to ID [--recovery-passphrase-file
   PATH] [--retire]` (or `home.move.start {candidate_id, recovery_passphrase,
-  keep_as_desktop?}`) writes
-  `<home>/.move/request.json` (the move id, the candidate, and the recovery
-  key derived from the passphrase, which itself is never stored), sets the
+  keep_as_desktop?}`), with Fermix running, first checks the recovery
+  passphrase: with one set, it must be that one ("That is not the recovery
+  passphrase you set." otherwise, and nothing moves); with none set, it sets
+  it, as setting the passphrase does. The move then carries the recovery key
+  this computer already keeps, never a second one, so the new primary's
+  snapshots open with the passphrase the owner has. It writes
+  `<home>/.move/request.json` (the move id, the candidate, and that recovery
+  key; the passphrase itself is never stored), sets the
   role to `device` and restarts Fermix through its own stop, which the service
   manager brings back (the Mac app's agent and launchd units keep it alive;
   the Linux service restarts always). Under a systemd user service a restart
   Fermix chooses resets the service's start budget first, so moves never use
   up the starts a crash loop is held to. An engine started by hand with `fermix
-  run` just stops; start it again. With Fermix stopped the command writes the
-  request and the role itself, and the move starts when Fermix does. Keep the
-  recovery passphrase: the new primary's snapshots open only with it.
+  run` just stops; start it again (the review warns of it). With Fermix
+  stopped the command refuses (`engine_stopped`): there is no running engine
+  to check the passphrase against. Keep the recovery passphrase: the new
+  primary's snapshots open only with it.
 - **What happens** (`home.status`'s `move`: phase, candidate, sentence; also
   `fermix home status`). On this computer: `requested`; `streaming`, the
   desktop's own key goes to `device/desktop_key` and its row into the device
@@ -472,9 +482,10 @@ it, never a second writer.
   needs about twice the home free on the disk and is refused with the
   numbers otherwise.
 - Each stored point names the recovery key it was written for (its key id,
-  as setting the passphrase shows it). After the passphrase changes, the
-  snapshots written before open only with the earlier one, and setting it
-  says so.
+  as setting the passphrase shows it). Setting the passphrase again replaces
+  the key; the snapshots written before open only with the earlier
+  passphrase, and setting it says so. A move never replaces it: it checks the
+  passphrase typed against the one set.
 - `fermix home status` (and `fermix home snapshots status`) shows the role,
   the epoch, the moved marker, whether snapshots are on, the last one stored,
   the last error and the next run, from the running engine or, with Fermix

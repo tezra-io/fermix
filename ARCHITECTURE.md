@@ -467,7 +467,11 @@ the associated data) into a file or a function; `restore/4` decrypts into a
 private staging directory inside the empty root and hands the verified files
 to `Archive.install/5`, the one restore path both share. The recipient is the
 public half of a key derived from the recovery passphrase (PBKDF2, as the
-seal); the passphrase is never stored. `Snapshot.Scheduler` (primary only,
+seal); the passphrase is never stored. `Snapshot.Recovery` is the one rule for
+a typed passphrase: `set/2` (`home.snapshots.passphrase`) derives a new key,
+and `verify_or_set/2` (the move) checks it against the kept key's own salt and
+public half, or sets one when none is kept, so a move carries the kept key and
+never mints a second. `Snapshot.Scheduler` (primary only,
 `Role`) runs `Snapshot.Run` every `[fermix_core.snapshots] interval_hours` to
 each `Snapshot.Target` (`Snapshot.S3`: SigV4 `PutObject` with
 `x-amz-checksum-sha256`, streamed through `Net.HttpClient`; then the targets
@@ -509,8 +513,11 @@ those of iMessage, voice calls and meetings the home has turned on
 (`MoveReadiness.stays_here/3`, which the summary's `off` line reads too),
 WhatsApp, and Slack without Socket Mode;
 coding agents asking for approval again, read from `config.toml`; the
-cutover gap) and
-`Home.Move.start/5` refuses while an item blocks; the review is kept in
+cutover gap; an engine nothing starts again, `Lifecycle.restarts_itself?/1`,
+which the setup page's Apply & restart reads too; the settings-only items
+alone are `MoveReadiness.config_items/3`) and
+`Home.Move.start/5`, given the recipient `Snapshot.Recovery` answered,
+refuses while an item blocks; the review is kept in
 `.move/readiness.json` and a start within 15 minutes of a ready one takes it
 (`Move.review/3`), so a move reads the keychain in the review and once more in
 its capture, never a third time. `Home.Move` is the source's

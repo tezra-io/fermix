@@ -6051,7 +6051,7 @@
     },
     "homeReadinessItem": {
       "type": "object",
-      "description": "One fact about the move. id is keychain_secrets, engine_version, disk, s3_size, plugins, stays_here, whatsapp, slack, coding_agents, cutover_gap or serves_nothing; a client that does not know an id shows its sentence as it is.",
+      "description": "One fact about the move. id is keychain_secrets, engine_version, disk, s3_size, plugins, stays_here, whatsapp, slack, coding_agents, cutover_gap, serves_nothing or service; a client that does not know an id shows its sentence as it is.",
       "required": ["id", "status", "sentence"],
       "additionalProperties": false,
       "properties": {

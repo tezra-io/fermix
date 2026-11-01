@@ -151,8 +151,13 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   move, and you review the move (the secrets that travel, the server's Fermix,
   free disk, the plugins with no build for the server, and what stops: those
   of iMessage, voice calls and meetings you use, WhatsApp, and Slack unless it
-  uses Socket Mode; coding agents ask for your approval again on the server) and
-  start it from the app with a recovery passphrase. Your Mac (or Linux
+  uses Socket Mode; coding agents ask for your approval again on the server;
+  a Fermix you started from a terminal stops when the move starts and needs
+  starting again) and start it from the app with a recovery passphrase: the
+  first move sets it if you have not, and every move after checks that it is
+  the one you set ("That is not the recovery passphrase you set."), so a typo
+  never becomes the key your server's snapshots are encrypted to, and a move
+  never makes a second key. `fermix home move` needs Fermix running. Your Mac (or Linux
   computer) stays awake while the move runs, and only then. The computer the
   home left stays a desktop of the server: the app's chat and Fermix-wide
   settings go to the server through it, and paired phones see a reconnect. The
@@ -348,6 +353,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   stopped), where it used to answer at once while the work could still run,
   so a step started right after a cancel never runs beside the one you
   cancelled. Until then the work still shows as running.
+- **Apply & restart on the setup page restarts Fermix under the Mac app.**
+  The button used to say there was nothing to restart unless Fermix ran as a
+  `fermix service` install. It now restarts whenever something brings Fermix
+  back: the Mac app, a systemd service, or `fermix service`. Under `fermix
+  run` in a terminal it still says it cannot.
 - **A busy computer no longer quietly costs you a watcher's notices.** When
   the computer was so busy that Fermix's memory database fell behind, every
   request waiting on it gave up after a few seconds, yet each one still ran

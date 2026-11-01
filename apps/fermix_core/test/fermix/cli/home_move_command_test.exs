@@ -12,6 +12,7 @@ defmodule Fermix.CLI.HomeMoveCommandTest do
   alias FermixCore.Home.Epoch
   alias FermixCore.Home.Move
   alias FermixCore.Home.Role
+  alias FermixCore.Home.Snapshot.Recipient
   alias FermixTestSupport.SafeRm
 
   @now ~U[2031-05-04 10:00:00Z]
@@ -254,33 +255,10 @@ defmodule Fermix.CLI.HomeMoveCommandTest do
       refute Map.has_key?(kept, "keep_as_desktop")
     end
 
-    test "with the engine stopped, --retire writes a request that keeps no desktop", ctx do
-      stopped = fn _method, _params, _opts -> {:error, :not_running} end
-
-      argv = [
-        "move",
-        "--to",
-        ctx.candidate.candidate_id,
-        "--recovery-passphrase-file",
-        ctx.passphrase_file,
-        "--retire",
-        "--json"
-      ]
-
-      {0, out, _err} =
-        run(argv, [home: ctx.home, client: stopped, now: fn -> @now end] ++ ready())
-
-      assert %{"ok" => true, "result" => %{"keep_as_desktop" => false, "sentence" => sentence}} =
-               Jason.decode!(out)
-
-      assert sentence =~ "Start Fermix"
-      assert sentence =~ "serves nothing here"
-      refute sentence =~ "device role"
-      assert {:ok, request} = Move.read_request(ctx.home)
-      refute Move.keep_as_desktop?(request)
-    end
-
-    test "with the engine stopped, writes the request and the role itself", ctx do
+    # Always On setup §4: the recovery passphrase is checked against the key
+    # the running engine keeps, or kept by it, so a move starts only through
+    # the engine; with Fermix stopped there is nothing to check it against.
+    test "with the engine stopped, the move is refused and nothing is written", ctx do
       stopped = fn _method, _params, _opts -> {:error, :not_running} end
 
       argv = [
@@ -292,81 +270,35 @@ defmodule Fermix.CLI.HomeMoveCommandTest do
         "--json"
       ]
 
-      {0, out, _err} =
-        run(argv, [home: ctx.home, client: stopped, now: fn -> @now end] ++ ready())
+      for extra <- [[], ["--retire"]] do
+        {1, out, _err} =
+          run(argv ++ extra, [home: ctx.home, client: stopped, now: fn -> @now end] ++ ready())
 
-      assert %{"ok" => true, "result" => %{"move_id" => "mv-" <> _id, "sentence" => sentence}} =
-               Jason.decode!(out)
-
-      assert sentence =~ "Start Fermix"
-      assert Move.pending?(ctx.home)
-      assert {:ok, %{role: :device}} = Role.configured(ctx.home)
+        assert %{"ok" => false, "error" => %{"code" => "engine_stopped"}} = Jason.decode!(out)
+        refute Move.pending?(ctx.home)
+        assert {:ok, %{role: :primary}} = Role.configured(ctx.home)
+      end
     end
 
     test "home status says where the move stands", ctx do
       stopped = fn _method, _params, _opts -> {:error, :not_running} end
+      {:ok, pair} = Recipient.from_passphrase(@passphrase)
 
-      argv = [
-        "move",
-        "--to",
-        ctx.candidate.candidate_id,
-        "--recovery-passphrase-file",
-        ctx.passphrase_file
-      ]
-
-      {0, _out, _err} =
-        run(argv, [home: ctx.home, client: stopped, now: fn -> @now end] ++ ready())
+      {:ok, _started} =
+        Move.start(
+          ctx.home,
+          %{role: :primary, primary: nil},
+          ctx.candidate.candidate_id,
+          Recipient.public(pair),
+          [now: @now] ++ ready()
+        )
 
       {0, out, _err} = run(["status"], home: ctx.home, client: stopped)
       assert out =~ "Role: device"
       assert out =~ "Move: The move to north-box starts when Fermix restarts."
     end
 
-    test "with the engine stopped, a readiness item that blocks refuses the move by its words",
-         ctx do
-      stopped = fn _method, _params, _opts -> {:error, :not_running} end
-      tight = Keyword.put(ready(), :free_bytes, fn _dir -> {:ok, 1_000} end)
-
-      argv = [
-        "move",
-        "--to",
-        ctx.candidate.candidate_id,
-        "--recovery-passphrase-file",
-        ctx.passphrase_file,
-        "--json"
-      ]
-
-      {1, out, _err} =
-        run(argv, [home: ctx.home, client: stopped, now: fn -> @now end] ++ tight)
-
-      assert %{"error" => %{"code" => "move_refused", "sentence" => sentence}} =
-               Jason.decode!(out)
-
-      assert sentence =~ "The move cannot start yet."
-      refute Move.pending?(ctx.home)
-    end
-
-    test "refuses by name and starts nothing", ctx do
-      stopped = fn _method, _params, _opts -> {:error, :not_running} end
-
-      argv = [
-        "move",
-        "--to",
-        "cand-0",
-        "--recovery-passphrase-file",
-        ctx.passphrase_file,
-        "--json"
-      ]
-
-      {1, out, _err} =
-        run(argv, [home: ctx.home, client: stopped, now: fn -> @now end] ++ ready())
-
-      assert %{"error" => %{"code" => "move_refused", "sentence" => sentence}} =
-               Jason.decode!(out)
-
-      assert sentence =~ "No server waiting for the move has the id cand-0"
-      refute Move.pending?(ctx.home)
-
+    test "a move with no candidate named is a usage error", ctx do
       assert {2, _out, _err} =
                run(["move", "--recovery-passphrase-file", ctx.passphrase_file], home: ctx.home)
     end

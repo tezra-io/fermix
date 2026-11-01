@@ -47,10 +47,12 @@ defmodule FermixCore.Management.HomeMoveReviewTest do
       free_bytes: fn _dir -> {:ok, 1_099_511_627_776} end,
       version: "0.16.0",
       host: "macos-aarch64",
+      restarts_itself: true,
       restart: fn ->
         send(test, :restarted)
         :ok
-      end
+      end,
+      save_recipient: fn _recipient -> {:ok, %{}} end
     ]
 
     %{home: home, profile: profile, candidate_id: record.candidate_id, seams: seams}
