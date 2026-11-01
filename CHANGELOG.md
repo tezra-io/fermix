@@ -44,7 +44,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   watcher with a task is still made, so you ask again once it is installed;
   one that is here but not ready (signed out, a plugin not connected, the
   channel it reports to not set up) is set up waiting, and starts by itself
-  once the gap is fixed. A run you confirmed that cannot start when its turn
+  once the gap is fixed. The same goes for the folders your instructions
+  name: a follow-up runs with nobody there to approve a folder, so one that
+  names a folder Fermix can't open yet is set up waiting, says which folder
+  and how to grant it (`/grant path` in chat), and starts once you do, while
+  a protected folder such as `~/.ssh` is refused at setup, since no grant
+  opens it. A run you confirmed that cannot start when its turn
   comes (it is still running, paused, or held) tells you why where it
   reports. Items
   older than 15 minutes set nothing off, it runs one at a time, and "stop the

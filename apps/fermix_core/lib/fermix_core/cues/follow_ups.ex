@@ -14,7 +14,8 @@ defmodule FermixCore.Cues.FollowUps do
   A follow-up is held while the owner's one switch stops every watcher action
   (`[fermix_core.cues] mandates_enabled`, "Let watchers act") or it is not
   ready (`readiness/2`, `Cues.FollowUpReadiness`: a tool it names is not set
-  up, or the channel it reports to is not). A held trigger is refused with
+  up, a folder its instructions name is outside the sandbox's roots, or the
+  channel it reports to is not set up). A held trigger is refused with
   Fermix's sentence before its card goes out or its run starts (`check/3`),
   and the watcher sends one `:follow_up_held` notice per hold and one
   `:follow_up_recovered` when the follow-up next passes the check.
@@ -132,7 +133,7 @@ defmodule FermixCore.Cues.FollowUps do
 
   @doc """
   Whether follow-up `job` is held (§4.6): `{label, sentence}` while the switch
-  is off or a tool it names is not set up, else nil.
+  is off or it is not ready (`readiness/2`), else nil.
   """
   @spec held(map(), keyword()) :: hold() | nil
   def held(%{allowed_tools: tools} = job, opts) when is_list(tools) and is_list(opts) do
@@ -149,8 +150,9 @@ defmodule FermixCore.Cues.FollowUps do
   @doc """
   Whether follow-up `job` can run now (§3.2, `Cues.FollowUpReadiness`): every
   tool it names set up on this computer, in its family's words where it has
-  them (a coding agent, a plugin), and the channel it reports to set up. The
-  one check the setup and every trigger use.
+  them (a coding agent, a plugin), every folder its instructions name inside
+  the sandbox's roots, and the channel it reports to set up. The one check the
+  setup and every trigger use.
   """
   @spec readiness(map(), keyword()) :: :ready | {:not_ready, String.t()}
   def readiness(%{allowed_tools: tools} = job, opts) when is_list(tools) and is_list(opts),

@@ -525,10 +525,10 @@ def test_a_default_seeded_home_holds_both_cue_suites_out_as_not_evaluated(
                   if s.name in ("cues", "memory")]
     kept, held = run_eval.hold_out_unseeded(_cfg(home), behavioral)
     assert [suite.name for suite, _scns in kept] == ["memory"]
-    assert {suite for suite, _case, _reason in held} == {"cues"} and len(held) == 32
+    assert {suite for suite, _case, _reason in held} == {"cues"} and len(held) == 34
     run_eval.print_not_evaluated(held)
     out = capsys.readouterr().out
-    assert "NOT EVALUATED — 32 case(s)" in out and "cues/releases_and_outages" in out
+    assert "NOT EVALUATED — 34 case(s)" in out and "cues/releases_and_outages" in out
 
 
 def test_a_home_seeded_with_cues_runs_them(tmp_path, monkeypatch):

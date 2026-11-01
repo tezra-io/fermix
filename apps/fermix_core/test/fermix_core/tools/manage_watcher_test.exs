@@ -13,6 +13,7 @@ defmodule FermixCore.Tools.ManageWatcherTest do
   alias FermixCore.Jobs.Registry, as: JobsRegistry
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Repo.CuesWatchersSql
+  alias FermixCore.Sandbox.PathPolicy
   alias FermixCore.Tools.ListJobs
   alias FermixCore.Tools.ManageWatcher
   alias FermixCore.Tools.RemoveJob
@@ -565,8 +566,14 @@ defmodule FermixCore.Tools.ManageWatcherTest do
       start_supervised!({CapabilityRegistry, name: registry})
       Enum.each(["shell", "web_fetch", "codex_run"], &register!(registry, &1))
       test = self()
+      root = SafeRm.make_tmp_dir!("manage-watcher-sandbox")
+      on_exit(fn -> SafeRm.rm_rf!(root) end)
+      home = Path.join(root, "home")
 
       seams = [
+        # A strict sandbox whose home folder is temporary, granting the ~/ops the
+        # follow-ups name.
+        sandbox_config: sandbox(root, [Path.join(home, "ops")]),
         capability_registry: registry,
         cues_config: [],
         # The follow-ups report to Telegram, which the test config leaves off.
@@ -585,7 +592,7 @@ defmodule FermixCore.Tools.ManageWatcherTest do
         proposal_listener: fn event -> send(test, {:event, event}) end
       ]
 
-      %{seams: seams}
+      %{seams: seams, root: root, home: home}
     end
 
     test "is set up with the watcher, and its summary is Fermix's", ctx do
@@ -690,6 +697,69 @@ defmodule FermixCore.Tools.ManageWatcherTest do
 
       assert {:ok, %{follow_up_job_id: job_id}} = Watchers.show("deploy-watch", repo: ctx.repo)
       assert {:ok, %{allowed_tools: ["codex_run"]}} = JobsRegistry.get_job(job_id, repo: ctx.repo)
+    end
+
+    # A follow-up runs unattended, so nobody can be asked for a folder then: one
+    # its instructions name outside the sandbox's roots is written held, with the
+    # grant that opens it, and the grant releases it with no new request.
+    test "naming a folder Fermix can't open yet is written held; a grant releases it", ctx do
+      reports = PathPolicy.canonical_path(Path.join(ctx.home, "reports/deploys"))
+
+      args =
+        put_in(
+          follow_up_args(),
+          ["follow_up", "instructions"],
+          "Run the deploy check script in ~/ops and write its report into ~/reports/deploys."
+        )
+
+      assert {:ok, %{success: true, output: echo}} =
+               ManageWatcher.execute(args, follow_up_turn(ctx))
+
+      assert echo =~
+               "Held until it is ready: Fermix can't open `#{reports}` yet: grant it with " <>
+                 "`/grant path #{reports}` in chat, or `fermix grant path #{reports}` in a " <>
+                 "terminal on Linux. The watcher is set up"
+
+      assert {:ok, %{follow_up_job_id: job_id}} = Watchers.show("deploy-watch", repo: ctx.repo)
+      assert {:ok, %{allowed_tools: ["shell"]}} = JobsRegistry.get_job(job_id, repo: ctx.repo)
+
+      show = %{"action" => "show", "name" => "deploy-watch"}
+      assert {:ok, %{output: held}} = ManageWatcher.execute(show, follow_up_turn(ctx))
+      assert held =~ "asks first on a card; held: Fermix can't open `#{reports}` yet"
+
+      grants = [Path.join(ctx.home, "ops"), Path.join(ctx.home, "reports")]
+      granted = follow_up_turn(ctx, sandbox_config: sandbox(ctx.root, grants))
+      assert {:ok, %{output: ready}} = ManageWatcher.execute(show, granted)
+      assert ready =~ "asks first on a card; ready."
+    end
+
+    # No grant opens a protected path, and Fermix checks at most 10 paths, so
+    # either would hold the follow-up for good: it is refused, and nothing is set up.
+    test "naming a protected path, or more paths than Fermix checks, is refused", ctx do
+      keys = PathPolicy.canonical_path(Path.join(ctx.home, ".ssh/config"))
+
+      protected =
+        put_in(
+          follow_up_args(),
+          ["follow_up", "instructions"],
+          "Copy ~/.ssh/config to the deploy host, then run the check in ~/ops."
+        )
+
+      assert {:ok, %{success: false, error: error}} =
+               ManageWatcher.execute(protected, follow_up_turn(ctx))
+
+      assert error ==
+               "Fermix never opens `#{keys}`: the sandbox protects it in every mode, even " <>
+                 "with a grant, so leave it out of the follow-up's instructions."
+
+      paths = Enum.map_join(1..11, ", ", &"~/ops/service-#{&1}")
+      many = put_in(follow_up_args(), ["follow_up", "instructions"], "Check #{paths}.")
+
+      assert {:ok,
+              %{success: false, error: "The follow-up's instructions name more than 10 " <> _}} =
+               ManageWatcher.execute(many, follow_up_turn(ctx))
+
+      assert {:error, _sentence} = Watchers.show("deploy-watch", repo: ctx.repo)
     end
 
     test "gets at most the tools of the turn that sets it up, as a scheduled job does", ctx do
@@ -869,6 +939,16 @@ defmodule FermixCore.Tools.ManageWatcherTest do
 
   defp follow_up_turn(ctx, overrides \\ []),
     do: turn(ctx, ctx.seams |> Keyword.merge(overrides))
+
+  # A strict sandbox under the test's temporary `root`, granting `grants`.
+  defp sandbox(root, grants),
+    do: %{
+      mode: :strict,
+      home: Path.join(root, "fermix"),
+      os_home: Path.join(root, "home"),
+      workspace_root: Path.join(root, "workspace"),
+      allowed_roots: grants
+    }
 
   # A registry with Claude Code's run tool too, so both coding agents are loaded.
   defp claude_too do

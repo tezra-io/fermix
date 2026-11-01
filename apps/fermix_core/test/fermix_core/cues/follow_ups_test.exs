@@ -23,8 +23,10 @@ defmodule FermixCore.Cues.FollowUpsTest do
   alias FermixCore.Memory.Repo.CuesFollowUpSql
   alias FermixCore.Memory.Repo.CuesRunsSql
   alias FermixCore.Memory.Repo.CuesSql
+  alias FermixCore.Sandbox.PathPolicy
   alias FermixCore.Tools.JobRegistrySupport
   alias FermixCore.Tools.ListJobs
+  alias FermixTestSupport.SafeRm
   alias FermixTestSupport.TelemetryCapture
 
   @now ~U[2026-10-30 12:00:00.000000Z]
@@ -530,6 +532,47 @@ defmodule FermixCore.Cues.FollowUpsTest do
       refute_received {:event, {:resolved, _resolved}}
     end
 
+    # A grant taken back after the card went out: the hold check at the run's
+    # turn finds the folder, so the owner who tapped Run hears which folder and
+    # the grant that opens it, never a run the sandbox refuses halfway.
+    test "a folder whose grant was taken back holds it when its turn comes", ctx do
+      root = SafeRm.make_tmp_dir!("follow-ups-folder")
+      on_exit(fn -> SafeRm.rm_rf!(root) end)
+      project = Path.join(root, "src/quarry")
+      watcher = follow_up_watcher!(ctx, prompt: "Review the last day's commits in #{project}.")
+      pass!(ctx, 1)
+      [trigger] = claim_offers!(ctx)
+
+      granted = Keyword.put(offer_opts(ctx), :sandbox_config, sandbox(root, [project]))
+      assert :offered = FollowUps.offer(trigger, granted)
+      {:ok, "Starting " <> _line} = FollowUps.confirm(@token, @owner, wake_opts(ctx))
+
+      test = self()
+
+      admission = [
+        repo_opts: [server: ctx.repo],
+        notice: fn watcher_id, kind, data -> send(test, {:notice, watcher_id, kind, data}) end,
+        capability_registry: ctx.registry,
+        cues_config: [],
+        channel_ready?: fn :telegram -> true end,
+        sandbox_config: sandbox(root, []),
+        refused: &FollowUps.refused(&1, &2, notice_opts(ctx))
+      ]
+
+      assert [] = CueAdmission.claim_follow_ups(1, @now, &%{id: &1}, admission)
+
+      folder = PathPolicy.canonical_path(project)
+
+      sentence =
+        "Fermix can't open `#{folder}` yet: grant it with `/grant path #{folder}` in chat, or " <>
+          "`fermix grant path #{folder}` in a terminal on Linux."
+
+      assert [%{state: "refused", reason: ^sentence}] = triggers(ctx, watcher)
+      assert_received {:notice, _id, :follow_up_held, %{reason: ^sentence}}
+      assert_received {:delivered, "chat-1", told}
+      assert told =~ ~s("Codex review" for post-1's post did not start. ) <> sentence
+    end
+
     test "the held and recovered notices go once each, through the follow-up's delivery", ctx do
       watcher = follow_up_watcher!(ctx)
       notice_opts = notice_opts(ctx)
@@ -695,7 +738,11 @@ defmodule FermixCore.Cues.FollowUpsTest do
   # --- fixtures --------------------------------------------------------------------------
 
   defp follow_up_watcher!(ctx, attrs \\ []) do
-    follow_up = follow_up_params(%{allowed_tools: Keyword.get(attrs, :tools, ["shell"])})
+    follow_up =
+      follow_up_params(%{
+        allowed_tools: Keyword.get(attrs, :tools, ["shell"]),
+        prompt: Keyword.get(attrs, :prompt, @prompt)
+      })
 
     params =
       params(ctx, %{
@@ -841,6 +888,16 @@ defmodule FermixCore.Cues.FollowUpsTest do
     ]
 
   defp registry_opts(ctx), do: [repo: ctx.repo, scheduler: nil]
+
+  # A strict sandbox under the test's temporary `root`, granting `grants`.
+  defp sandbox(root, grants),
+    do: %{
+      mode: :strict,
+      home: Path.join(root, "fermix"),
+      os_home: Path.join(root, "home"),
+      workspace_root: Path.join(root, "workspace"),
+      allowed_roots: grants
+    }
 
   defp wake_opts(ctx), do: opts(ctx) ++ [wake_scheduler: fn -> send(self(), :woken) end]
 

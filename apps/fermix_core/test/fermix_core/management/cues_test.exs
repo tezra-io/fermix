@@ -27,6 +27,7 @@ defmodule FermixCore.Management.CuesTest do
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Repo.CuesSql
   alias FermixCore.Providers.Descriptor
+  alias FermixCore.Sandbox.PathPolicy
   alias FermixCore.Setup.RestartState
   alias FermixTestSupport.CueDeliveryFixtures, as: Rows
   alias FermixTestSupport.CueFixtures
@@ -1496,6 +1497,81 @@ defmodule FermixCore.Management.CuesTest do
                "always_allowed" => true,
                "status_sentence" => "Always allowed: it runs on each passing item with no card."
              } = detail["follow_up"]
+    end
+
+    # A follow-up held for a folder its instructions name says which folder and
+    # the grant that opens it, on the row an app draws; granted, it is ready.
+    test "a follow-up held for a folder names it and the grant that opens it",
+         %{opts: opts, conn: conn, repo: repo} do
+      root = SafeRm.make_tmp_dir!("cues-follow-up-folder")
+      on_exit(fn -> SafeRm.rm_rf!(root) end)
+      project = Path.join(root, "src/quarry")
+
+      id =
+        CueFixtures.insert_watcher(conn, %{name: "deploy-watch", filter: "none", sources: ["s"]})
+
+      {:ok, job} =
+        JobsRegistry.create_follow_up_job(
+          %{
+            name: "Deploy check",
+            task_prompt: "Run the deploy check in #{project}.",
+            allowed_tools: ["deploy_check"],
+            delivery_mode: "channel",
+            delivery_target: %{"platform" => "slack", "channel_id" => "C1"},
+            created_by_trust: "operator"
+          },
+          repo: repo,
+          scheduler: nil
+        )
+
+      CueFixtures.exec!(conn, "UPDATE cue_watchers SET follow_up_job_id = ? WHERE id = ?", [
+        job.id,
+        id
+      ])
+
+      registry = :"cues_test_folder_caps_#{System.unique_integer([:positive])}"
+      start_supervised!({CapabilityRegistry, name: registry})
+
+      :ok =
+        CapabilityRegistry.register(
+          registry,
+          Capability.new(%{
+            name: "deploy_check",
+            description: "a test tool",
+            parameters: %{"type" => "object", "properties" => %{}},
+            kind: :builtin,
+            executor: {__MODULE__, :never, []},
+            policy_class: :exec
+          })
+        )
+
+      seams = fn grants ->
+        Keyword.put(opts, :follow_up_opts,
+          capability_registry: registry,
+          channel_ready?: fn :slack -> true end,
+          sandbox_config: %{
+            mode: :strict,
+            home: Path.join(root, "fermix"),
+            os_home: Path.join(root, "home"),
+            workspace_root: Path.join(root, "workspace"),
+            allowed_roots: grants
+          }
+        )
+      end
+
+      folder = PathPolicy.canonical_path(project)
+
+      assert {:ok, %{"watchers" => [%{"follow_up" => held}]}} = Cues.watchers_list(seams.([]))
+      assert held["state"] == "held"
+
+      assert held["status_sentence"] ==
+               "Fermix can't open `#{folder}` yet: grant it with `/grant path #{folder}` in " <>
+                 "chat, or `fermix grant path #{folder}` in a terminal on Linux."
+
+      assert {:ok, %{"watcher" => %{"follow_up" => ready}}} =
+               Cues.watchers_get("deploy-watch", seams.([project]))
+
+      assert ready["state"] == "ready"
     end
 
     # The 2026-10-31 revision of M60_WATCHER_CODING_RUNS.md: the app takes a

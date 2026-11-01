@@ -3,13 +3,15 @@ defmodule FermixCore.Cues.FollowUpReadinessTest do
   A follow-up's readiness (M60_WATCHER_CODING_RUNS.md §3.2): each family says
   what is missing in its words, with where to fix it, from cheap reads only.
   Every read is a seam here: the harness config, `PATH`, the vendors' config
-  dirs (temporary), the plugins and their status, and the channels.
+  dirs (temporary), the plugins and their status, the channels, and the
+  sandbox (a strict one in a temporary folder).
   """
   use ExUnit.Case, async: true
 
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Cues.FollowUpReadiness
+  alias FermixCore.Sandbox.PathPolicy
   alias FermixTestSupport.SafeRm
 
   setup do
@@ -135,6 +137,98 @@ defmodule FermixCore.Cues.FollowUpReadinessTest do
     end
   end
 
+  # The folders its instructions name, checked against the sandbox as a
+  # follow-up's run meets it (no request folder): every root is a seam here, a
+  # strict sandbox in a temporary folder with only the grants a test gives.
+  describe "the folders its instructions name" do
+    test "one outside the sandbox's roots holds it, naming the grant that opens it", ctx do
+      project = Path.join(ctx.root, "src/quarry")
+      instructions = "Have Codex review the last day's commits in #{project} and report."
+
+      assert FollowUpReadiness.check(folder_job(instructions), opts(ctx)) ==
+               {:not_ready, cant_open(project)}
+
+      # A grant fixes it, so the setup writes it, held.
+      assert FollowUpReadiness.unopenable(instructions, opts(ctx)) == nil
+    end
+
+    test "granted, it is ready, and so is a folder the run will make inside a grant", ctx do
+      src = Path.join(ctx.root, "src")
+
+      instructions =
+        "Review #{src}/quarry, then write a report into #{src}/reports/new-folder."
+
+      assert FollowUpReadiness.check(folder_job(instructions), opts(ctx, grants: [src])) ==
+               :ready
+    end
+
+    test "says each folder once, and reads ~/ as the sandbox's home folder", ctx do
+      project = Path.join([ctx.root, "home", "src", "quarry"])
+      notes = Path.join([ctx.root, "home", "notes"])
+      instructions = "Run the tests in ~/src/quarry (#{project}) and note it in `~/notes`."
+
+      assert FollowUpReadiness.check(folder_job(instructions), opts(ctx)) ==
+               {:not_ready, cant_open(project) <> " " <> cant_open(notes)}
+    end
+
+    test "one the sandbox blocks holds it, naming the setting", ctx do
+      # Canonical: the policy matches a blocked root as written.
+      src = canonical(Path.join(ctx.root, "src"))
+      vault = Path.join(src, "vault")
+
+      assert FollowUpReadiness.check(
+               folder_job("Back up #{vault}/keys."),
+               opts(ctx, grants: [src], blocked: [vault])
+             ) ==
+               {:not_ready,
+                "Fermix can't open `#{canonical(vault)}/keys`: the sandbox blocks it, and no " <>
+                  "grant reaches inside a blocked folder: take it out of " <>
+                  "`[sandbox] blocked_roots` in the settings file, then restart Fermix."}
+    end
+
+    test "a protected one is refused at setup, and holds it if it gets that far", ctx do
+      keys = Path.join([ctx.root, "home", ".ssh", "deploy"])
+      instructions = "Copy #{keys} to the build host."
+      opts = opts(ctx, grants: [Path.join(ctx.root, "home")])
+
+      protected =
+        "Fermix never opens `#{canonical(keys)}`: the sandbox protects it in every mode, " <>
+          "even with a grant, so leave it out of the follow-up's instructions."
+
+      assert FollowUpReadiness.unopenable(instructions, opts) == protected
+      assert FollowUpReadiness.check(folder_job(instructions), opts) == {:not_ready, protected}
+    end
+
+    test "no path on this computer, no check: URLs, relative paths, slash commands", ctx do
+      refute File.exists?("/v1")
+
+      instructions =
+        "Fetch https://example.com/releases/latest and file:///notes, run ./bin/check and " <>
+          "bin/lint on origin/dev, call POST /v1/issues on the API, then /confirm."
+
+      # The sandbox here grants nothing, so a path it checked would hold it.
+      assert FollowUpReadiness.check(folder_job(instructions), opts(ctx)) == :ready
+      assert FollowUpReadiness.unopenable(instructions, opts(ctx)) == nil
+    end
+
+    test "more than 10 is refused at setup and holds it; 10 are checked", ctx do
+      src = Path.join(ctx.root, "src")
+      paths = for n <- 1..11, do: Path.join(src, "project-#{n}")
+      eleven = "Review " <> Enum.join(paths, ", ") <> "."
+      ten = "Review " <> Enum.join(Enum.take(paths, 10), ", ") <> ", and #{hd(paths)} again."
+      opts = opts(ctx, grants: [src])
+
+      too_many =
+        "The follow-up's instructions name more than 10 folders, more than Fermix checks " <>
+          "before a run: name at most 10."
+
+      assert FollowUpReadiness.unopenable(eleven, opts) == too_many
+      assert FollowUpReadiness.check(folder_job(eleven), opts) == {:not_ready, too_many}
+      assert FollowUpReadiness.unopenable(ten, opts) == nil
+      assert FollowUpReadiness.check(folder_job(ten), opts) == :ready
+    end
+  end
+
   test "every gap is said, once each", ctx do
     assert {:not_ready, sentence} =
              FollowUpReadiness.check(
@@ -180,8 +274,22 @@ defmodule FermixCore.Cues.FollowUpReadinessTest do
   defp job(tools, target \\ %{"platform" => "telegram", "chat_id" => "chat-1"}),
     do: %{allowed_tools: tools, delivery_mode: "channel", delivery_target: target}
 
+  # A follow-up that names no tool, so only its instructions' folders can hold it.
+  defp folder_job(instructions), do: Map.put(job([]), :task_prompt, instructions)
+
+  defp cant_open(path) do
+    path = canonical(path)
+
+    "Fermix can't open `#{path}` yet: grant it with `/grant path #{path}` in chat, or " <>
+      "`fermix grant path #{path}` in a terminal on Linux."
+  end
+
+  # The sandbox's own form of a path (symlinks resolved: macOS's /var is /private/var).
+  defp canonical(path), do: PathPolicy.canonical_path(path)
+
   # Allowed and installed, Codex signed in, Claude Code's config dir present, no
-  # plugin but GitHub, and every channel set up, unless `overrides` says otherwise.
+  # plugin but GitHub, every channel set up, and a strict sandbox granting nothing,
+  # unless `overrides` says otherwise.
   defp opts(ctx, overrides \\ []) do
     codex_home = Path.join(ctx.root, "codex")
     claude? = Keyword.get(overrides, :claude_dir, true)
@@ -210,7 +318,15 @@ defmodule FermixCore.Cues.FollowUpReadinessTest do
          Keyword.get(overrides, :plugins, [plugin("github", "GitHub", ["github_create_issue"])])}
       end,
       plugin_status: Keyword.get(overrides, :plugin_status, fn _plugin -> :needs_auth end),
-      channel_ready?: fn channel -> channel in channels end
+      channel_ready?: fn channel -> channel in channels end,
+      sandbox_config: %{
+        mode: :strict,
+        home: Path.join(ctx.root, "fermix"),
+        os_home: Path.join(ctx.root, "home"),
+        workspace_root: Path.join(ctx.root, "workspace"),
+        allowed_roots: Keyword.get(overrides, :grants, []),
+        blocked_roots: Keyword.get(overrides, :blocked, [])
+      }
     ]
   end
 

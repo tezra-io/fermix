@@ -13,6 +13,10 @@ defmodule FermixCore.Tools.ManageWatcher.FollowUp do
     sentence (`Cues.FollowUpReadiness.unoffered/2`) and the owner asks again
     once it is installed; the watcher is still made when it has a task. A
     tool it offers that is not ready yet is written, held.
+  - **Folders** its instructions name: one no grant opens (a protected path)
+    or more than Fermix checks refuses the change with the sandbox's sentence
+    (`Cues.FollowUpReadiness.unopenable/2`); one outside the sandbox's roots
+    is written, held, its sentence naming the grant.
   - **The coding agent**: `coding_agent` in place of a tool, when the owner
     names no coding agent, is the configured default, else the one that is
     ready, else Fermix asks which (`Cues.FollowUpReadiness.coding_agent/1`).
@@ -112,6 +116,7 @@ defmodule FermixCore.Tools.ManageWatcher.FollowUp do
 
   def params(args, context, opts) when is_map(args) and is_map(context) and is_list(opts) do
     with {:ok, tools} <- tools(args, context, opts),
+         :ok <- openable(args, opts),
          {:ok, skill} <- skill(args, context),
          {:ok, route} <- route(args) do
       plain =
@@ -156,6 +161,18 @@ defmodule FermixCore.Tools.ManageWatcher.FollowUp do
       sentence -> {:unoffered, sentence}
     end
   end
+
+  # A path no grant opens (one the sandbox protects) or more paths than Fermix
+  # checks would hold the follow-up for good, so it is not written (§3.2). A
+  # folder a grant would open is written, held.
+  defp openable(%{"instructions" => instructions}, opts) when is_binary(instructions) do
+    case FollowUpReadiness.unopenable(instructions, opts) do
+      nil -> :ok
+      sentence -> {:error, sentence}
+    end
+  end
+
+  defp openable(_args, _opts), do: :ok
 
   # `schedule_job`'s bounds (audit F-08 and the run's own tools), on tools this
   # computer offers. An empty list is left for `Cues.Watchers`, which asks for

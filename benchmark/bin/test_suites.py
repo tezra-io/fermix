@@ -607,7 +607,9 @@ def test_the_shipped_numbered_rubrics_parse():
                       "screen_on_a_fallback_provider": 3, "mandates_and_approval": 3,
                       "mandates_needing_approval": 3, "codex_review_on_release": 4,
                       "status_script_on_outage": 3, "claude_code_changelog_on_release": 3,
-                      "claude_code_issue_triage_on_report": 3, "codex_quotes_the_post": 3,
+                      "claude_code_issue_triage_on_report": 3,
+                      "codex_on_ungranted_project": 4, "codex_on_ungranted_work_repo": 4,
+                      "codex_quotes_the_post": 3,
                       "summarise_each_post_into_notes": 3, "run_every_time_without_asking": 4,
                       "stop_asking_me_each_time": 4,
                       # lists.yaml

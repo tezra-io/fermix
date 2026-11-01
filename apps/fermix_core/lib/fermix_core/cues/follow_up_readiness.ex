@@ -17,6 +17,16 @@ defmodule FermixCore.Cues.FollowUpReadiness do
       (`Plugins.Status`).
     * **Channels**: the channel the follow-up reports to is turned on and set
       up (`Readiness.channel_enabled?/1`, `Readiness.channel_configured?/1`).
+    * **Folders**: every absolute path its instructions name (`~/`, the
+      sandbox's home folder, or `/` and a folder at the top of this computer,
+      so a URL, a relative path, an API route or a slash command is none; at
+      most 10) is inside the sandbox's roots as the follow-up's run meets
+      them: unattended, so with no request folder (`Sandbox.Mode.effective_roots/1`)
+      and nobody to approve a folder. `Sandbox.PathPolicy.allowed_path?/4` is
+      the gate every file tool's read and write ends in; a path that does not
+      exist yet (a report folder the run makes) is judged where it would be
+      made. One outside the roots names the grant that opens it, one the
+      sandbox blocks names the setting.
 
   A tool no capability carries and no plugin declares is named as not set up.
 
@@ -25,19 +35,27 @@ defmodule FermixCore.Cues.FollowUpReadiness do
   capability carries it), since a tool loaded later was never checked against
   the turn that set the follow-up up. A tool it offers that is not ready yet
   (Codex installed and signed out, a plugin not connected) is written, held.
+  `unopenable/2` is its half for the folders: no grant opens a path the
+  sandbox protects, and Fermix checks at most 10, so instructions naming
+  either are not written, while a folder a grant would open is written, held.
+  At a trigger (instructions changed another way) either holds it, in the same
+  words.
 
   Cheap reads only, since the scheduler asks at every trigger: the
   application's config, `PATH` lookups, the Codex sign-in file, the plugin
-  manifests and the auth file. Never a subprocess, the network or the
-  keychain, so a plugin whose host runtime is a program on this computer is
-  named not ready without its runtime's rung, whose check runs that program.
+  manifests and the auth file, and for instructions that name a path, the
+  sandbox's roots and the folders on each path's way. Never a subprocess, the
+  network or the keychain, so a plugin whose host runtime is a program on this
+  computer is named not ready without its runtime's rung, whose check runs
+  that program.
 
   Seams (opts): `:capability_registry`, `:harness_config` (the
   `[fermix_core.harness]` keyword), `:vendor_opts` (`Harness.Vendors`'
   `:find_executable`, `:codex_home` and `:claude_config_dir`), `:plugins` (a
   0-arity function answering `{:ok, [Plugin.t()]}`), `:plugin_status` (a
-  1-arity function of a plugin answering its status) and `:channel_ready?` (a
-  1-arity function of a channel's config key).
+  1-arity function of a plugin answering its status), `:channel_ready?` (a
+  1-arity function of a channel's config key) and `:sandbox_config` (the
+  sandbox, default the live one).
   """
 
   require Logger
@@ -48,8 +66,18 @@ defmodule FermixCore.Cues.FollowUpReadiness do
   alias FermixCore.Plugins.Registry, as: PluginRegistry
   alias FermixCore.Plugins.Status, as: PluginStatus
   alias FermixCore.Readiness
+  alias FermixCore.Sandbox.Config, as: SandboxConfig
+  alias FermixCore.Sandbox.Mode
+  alias FermixCore.Sandbox.PathPolicy
 
-  @seams [:harness_config, :vendor_opts, :plugins, :plugin_status, :channel_ready?]
+  @seams [
+    :harness_config,
+    :vendor_opts,
+    :plugins,
+    :plugin_status,
+    :channel_ready?,
+    :sandbox_config
+  ]
 
   # Each coding run tool, its vendor and its rail.
   @coding_tools %{
@@ -81,13 +109,22 @@ defmodule FermixCore.Cues.FollowUpReadiness do
   @cloud_off "Codex cloud is off: set `[fermix_core.harness] cloud_enabled = true` in the " <>
                "settings file, then restart Fermix."
 
+  # The most paths the instructions may name; past it the follow-up is refused
+  # at setup and held at a trigger, never checked in part.
+  @max_paths 10
+  # A path as the instructions write it: `~/` or `/`, never after a letter, a
+  # dot, a colon or a slash (a URL, `./bin`, `origin/dev`), running to a space,
+  # a quote or a bracket and never ending on a sentence's punctuation.
+  @path ~r/(?<![\w.~\/:])~?\/[^\s`"'<>()\[\]{},;|]*[^\s`"'<>()\[\]{},;|.:!?]/u
+
   @doc "The opts this check reads beyond `:capability_registry`, for a caller to pass on."
   @spec seams() :: [atom()]
   def seams, do: @seams
 
   @doc """
-  Whether follow-up `job` (its `allowed_tools` and delivery) can run now:
-  `:ready`, or Fermix's sentence naming what is missing and where to fix it.
+  Whether follow-up `job` (its `allowed_tools`, the folders its `task_prompt`
+  names and its delivery) can run now: `:ready`, or Fermix's sentence naming
+  what is missing and where to fix it.
   """
   @spec check(map(), keyword()) :: :ready | {:not_ready, String.t()}
   def check(%{allowed_tools: tools} = job, opts) when is_list(tools) and is_list(opts) do
@@ -95,7 +132,8 @@ defmodule FermixCore.Cues.FollowUpReadiness do
 
     sentences =
       Enum.reverse(gaps) ++
-        plugin_gaps(Enum.reverse(unregistered), opts) ++ delivery_gap(job, opts)
+        plugin_gaps(Enum.reverse(unregistered), opts) ++
+        folder_gaps(job, opts) ++ delivery_gap(job, opts)
 
     case Enum.uniq(sentences) do
       [] -> :ready
@@ -118,6 +156,19 @@ defmodule FermixCore.Cues.FollowUpReadiness do
       missing ->
         {:not_ready, sentence} = check(%{allowed_tools: missing}, opts)
         sentence
+    end
+  end
+
+  @doc """
+  Fermix's sentence for what no grant fixes in the paths `instructions` names
+  (a path the sandbox protects, or more than #{@max_paths} paths), or nil. A
+  follow-up whose instructions say one is not written (§3.2).
+  """
+  @spec unopenable(String.t(), keyword()) :: String.t() | nil
+  def unopenable(instructions, opts) when is_binary(instructions) and is_list(opts) do
+    case instructions |> denials(opts) |> Enum.filter(&for_good?/1) do
+      [] -> nil
+      denials -> denials |> Enum.map(&folder_words/1) |> Enum.uniq() |> Enum.join(" ")
     end
   end
 
@@ -290,6 +341,81 @@ defmodule FermixCore.Cues.FollowUpReadiness do
       "#{Enum.join(tools, ", ")} are not set up on this computer (a program was not found " <>
         "or a plugin is not installed)."
     ]
+
+  # --- folders ----------------------------------------------------------------------
+
+  defp folder_gaps(%{task_prompt: instructions}, opts) when is_binary(instructions),
+    do: instructions |> denials(opts) |> Enum.map(&folder_words/1)
+
+  defp folder_gaps(_job, _opts), do: []
+
+  # What the sandbox says of each path the instructions name, as the follow-up's
+  # run meets it: unattended, so with no request folder. More paths than the
+  # bound are one denial.
+  defp denials(instructions, opts) do
+    case paths(instructions) do
+      [] -> []
+      paths when length(paths) > @max_paths -> [:too_many]
+      paths -> sandbox_denials(paths, sandbox_config(opts))
+    end
+  end
+
+  defp sandbox_denials(paths, config) do
+    protected = PathPolicy.protected_paths(config)
+    roots = Mode.effective_roots(config)
+
+    for path <- paths,
+        {:error, denial} <- [
+          PathPolicy.allowed_path?(in_home(path, config), config, protected, roots)
+        ],
+        do: denial
+  end
+
+  # The distinct paths on this computer, at most one past the bound: `~/`
+  # always, and `/` when its top folder is here.
+  defp paths(instructions) do
+    @path
+    |> Regex.scan(instructions)
+    |> Stream.map(&hd/1)
+    |> Stream.filter(&local?/1)
+    |> Stream.uniq()
+    |> Enum.take(@max_paths + 1)
+  end
+
+  defp local?("~/" <> _rest), do: true
+  defp local?("/" <> rest), do: File.dir?("/" <> hd(String.split(rest, "/", parts: 2)))
+
+  # `~/` is the sandbox's home folder, the one its protected paths sit in.
+  defp in_home("~/" <> rest, config), do: Path.join(config.os_home, rest)
+  defp in_home(path, _config), do: path
+
+  defp for_good?(:too_many), do: true
+  defp for_good?({:protected_path, _path}), do: true
+  defp for_good?(_grant_fixes_it), do: false
+
+  defp folder_words({:outside_root, path}) do
+    "Fermix can't open `#{path}` yet: grant it with `/grant path #{path}` in chat, or " <>
+      "`fermix grant path #{path}` in a terminal on Linux."
+  end
+
+  defp folder_words({:blocked_root, path}) do
+    "Fermix can't open `#{path}`: the sandbox blocks it, and no grant reaches inside a " <>
+      "blocked folder: take it out of `[sandbox] blocked_roots` in the settings file, then " <>
+      "restart Fermix."
+  end
+
+  defp folder_words({:protected_path, path}) do
+    "Fermix never opens `#{path}`: the sandbox protects it in every mode, even with a " <>
+      "grant, so leave it out of the follow-up's instructions."
+  end
+
+  defp folder_words(:too_many) do
+    "The follow-up's instructions name more than #{@max_paths} folders, more than Fermix " <>
+      "checks before a run: name at most #{@max_paths}."
+  end
+
+  defp sandbox_config(opts),
+    do: SandboxConfig.normalize(Keyword.get_lazy(opts, :sandbox_config, &SandboxConfig.current/0))
 
   # --- channels ---------------------------------------------------------------------
 

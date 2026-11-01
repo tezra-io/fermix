@@ -51,6 +51,7 @@ defmodule FermixCore.Management.CopyTest do
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Readiness
   alias FermixCore.Sandbox.Config, as: SandboxConfig
+  alias FermixCore.Sandbox.PathPolicy
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.RestartState
   alias FermixCore.Setup.SecretWriter
@@ -1475,12 +1476,47 @@ defmodule FermixCore.Management.CopyTest do
         cues_config: [mandates_enabled: false]
       )
 
-    Enum.uniq(coding ++ plugins ++ channels ++ [elem(switch_off, 1)]) -- [nil]
+    Enum.uniq(coding ++ plugins ++ channels ++ folder_sentences(base) ++ [elem(switch_off, 1)]) --
+      [nil]
+  end
+
+  # Outside the roots, blocked, protected and past the bound, against a strict
+  # sandbox in a folder never made: each path is judged where it would be.
+  defp folder_sentences(base) do
+    root =
+      Path.join(
+        PathPolicy.canonical_path(System.tmp_dir!()),
+        "fermix-copy-#{System.unique_integer([:positive])}"
+      )
+
+    sandbox = %{
+      mode: :strict,
+      home: Path.join(root, "fermix"),
+      os_home: Path.join(root, "home"),
+      workspace_root: Path.join(root, "workspace"),
+      allowed_roots: [Path.join(root, "src")],
+      blocked_roots: [Path.join(root, "src/vault")]
+    }
+
+    for instructions <- [
+          "Review #{root}/elsewhere.",
+          "Back up #{root}/src/vault/keys.",
+          "Copy ~/.ssh/config.",
+          "Review " <> Enum.map_join(1..11, ", ", &"#{root}/src/p#{&1}") <> "."
+        ] do
+      follow_up_check([], base, sandbox_config: sandbox, instructions: instructions)
+    end
   end
 
   defp follow_up_check(tools, base, extra) do
     {target, extra} = Keyword.pop(extra, :target, "companion")
-    job = %{allowed_tools: tools, delivery_target: %{"platform" => target, "chat_id" => "1"}}
+    {instructions, extra} = Keyword.pop(extra, :instructions)
+
+    job = %{
+      allowed_tools: tools,
+      task_prompt: instructions,
+      delivery_target: %{"platform" => target, "chat_id" => "1"}
+    }
 
     case FollowUpReadiness.check(job, base ++ extra) do
       :ready -> nil
