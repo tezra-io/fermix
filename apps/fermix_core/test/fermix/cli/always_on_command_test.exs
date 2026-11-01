@@ -72,6 +72,30 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
     end
   end
 
+  # Always On is not in a release build yet: the verb refuses in one
+  # sentence there, before anything is read or sent.
+  describe "in a build without Always On" do
+    test "every use of the verb refuses in one sentence, exit 1, reaching nothing", ctx do
+      for argv <- [[], ["--json"], ["create-server", "--yes", "--json"]] do
+        {status, out, err} = run(argv, ctx, script([]), always_on: false)
+
+        assert status == 1, inspect(argv)
+        assert err == "fermix always-on: Always On is not in this release of Fermix yet.\n"
+
+        if "--json" in argv,
+          do: assert(%{"error" => %{"code" => "always_on_unavailable"}} = Jason.decode!(out)),
+          else: assert(out == "")
+      end
+
+      refute_received {:called, _method, _params, _opts}
+    end
+
+    test "in a build with it, the verb reads the screen as ever", ctx do
+      client = script([hello(), {"home.status", {:ok, status(off())}}])
+      assert {0, _out, ""} = run([], ctx, client, always_on: true)
+    end
+  end
+
   describe "before anything is read" do
     # §8.2, verify_standalone: no daemon, nothing written, the code and a
     # sentence on stderr.

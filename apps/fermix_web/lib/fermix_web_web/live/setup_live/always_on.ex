@@ -49,6 +49,7 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
   use FermixWebWeb, :html
 
   alias FermixCore.Clock
+  alias FermixCore.Home.AlwaysOnRelease
   alias FermixCore.Home.Link
   alias FermixCore.Home.Role
   alias FermixCore.Home.StatusWatch
@@ -503,6 +504,14 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
   # -- seams ---------------------------------------------------------------------
 
   defp seams, do: Application.get_env(:fermix_web, :always_on, [])
+
+  @doc """
+  Whether this build offers Always On (`Home.AlwaysOnRelease`): where it
+  does not, the page lists no Always On tab and takes no Always On event.
+  The `available:` seam stands for what a build compiles in.
+  """
+  @spec offered?() :: boolean()
+  def offered?, do: Keyword.get_lazy(seams(), :available, &AlwaysOnRelease.available?/0)
 
   # Every read and act takes the same options: the seams, the role the page
   # booted in and this engine's way to its server.

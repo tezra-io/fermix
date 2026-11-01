@@ -17,6 +17,8 @@ defmodule Fermix.CLI.MachineOutput do
   as `details`, so the words stay in this module and the caller supplies facts.
   """
 
+  alias FermixCore.Home.AlwaysOnRelease
+
   @schema_version 1
 
   @codes ~w(
@@ -49,6 +51,7 @@ defmodule Fermix.CLI.MachineOutput do
     action_refused
     confirm_required
     changed
+    always_on_unavailable
   )a
 
   @doc "Every error code this CLI can print, for the caller that renders them."
@@ -218,6 +221,7 @@ defmodule Fermix.CLI.MachineOutput do
 
   def sentence(:changed, details), do: reason(details)
 
+  def sentence(:always_on_unavailable, _details), do: AlwaysOnRelease.sentence()
   defp said(details) do
     case Keyword.get(details, :output) do
       output when is_binary(output) and output != "" -> " It said: #{output}"

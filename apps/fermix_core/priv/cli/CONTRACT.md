@@ -347,6 +347,10 @@ engine's words, or, for a step the screen does not offer, "Always On does not
 offer turn-on now. Run fermix always-on to see the steps it offers."; and
 `home_status_unavailable`. Golden: `always_on/changed.json`.
 
+In a build without Always On (a release build, until it ships), every use of
+`fermix always-on` refuses `always_on_unavailable`, exit `1` ("Always On is
+not in this release of Fermix yet."), before anything is read or sent.
+
 `unconfirmed` (a linked desktop's Move now that the server had, whose answer
 was lost) is not a refusal: the move may have started. The verb prints the
 engine's sentence on stderr, reads the screen again and goes on exactly as
@@ -387,6 +391,7 @@ sentence interpolates a fact, the example below is the golden's.
 - `action_refused` — Fermix did not take that step. It said: Hetzner does not accept this token, so paste a Read & Write API token from the Hetzner project you made for Fermix.
 - `confirm_required` — Create your server? Hetzner bills it by the hour until it is deleted. Pass --yes to accept it.
 - `changed` — Always On changed since this was shown, so look at it again.
+- `always_on_unavailable` — Always On is not in this release of Fermix yet.
 
 A sentence ending in `It said:` carries the words of whatever refused —
 the service manager, the login manager, the filesystem. A client shows them and
