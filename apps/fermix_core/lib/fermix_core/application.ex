@@ -44,6 +44,7 @@ defmodule FermixCore.Application do
   alias FermixCore.Management.Lifecycle, as: ManagementLifecycle
   alias FermixCore.Management.McpServers.DraftValues, as: McpDraftValues
   alias FermixCore.Management.Plugins.Discovery, as: ManagementPluginDiscovery
+  alias FermixCore.Management.Provision, as: ManagementProvision
   alias FermixCore.Meetings.Supervisor, as: MeetingsSupervisor
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Repo
@@ -527,6 +528,14 @@ defmodule FermixCore.Application do
       [
         ManagementLifecycle,
         ManagementDoctor,
+        # Before the job family and the socket: an Always On step a restart
+        # left with no job is kept as interrupted, once, and nothing written
+        # after it is taken for one (it starts no process).
+        %{
+          id: :provision_left_steps,
+          start: {ManagementProvision, :interrupt_at_boot, []},
+          restart: :temporary
+        },
         ManagementJobs,
         # Beside the job family it serves: a workspace discovery is a job, and
         # what it found is republished on the plugin row rather than in the job.

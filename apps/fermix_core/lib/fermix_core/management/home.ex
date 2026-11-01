@@ -41,9 +41,26 @@ defmodule FermixCore.Management.Home do
   Empty in any other role.
 
   `summary` is where Always On stands in one sentence and at most one action
-  (`FermixCore.Management.HomeSummary`, M75 lean v1 §7), gathered from the
-  rest of this record and the provisioner's ledger; every surface prints it
-  first. `disk` is how full this primary's disk is (`Home.Disk.usage/2`:
+  (`FermixCore.Management.HomeSummary`, M75 lean v1 §7, Always On setup §3),
+  gathered from the rest of this record and the provisioner's ledger, with
+  its `key`; every surface draws it.
+
+  **Fresh from the provider.** A `home.status` read whose summary is a
+  `problem`, `creating` or `ready` while a server Fermix created stands, and
+  whose ledger was last read back from the provider over a minute ago (or
+  never), starts one reconcile (`Management.Provision.start_reconcile/1`), a
+  job of the provider's own family, so it is single-flight and never runs
+  beside a step; the read answers at once with what the ledger holds, and
+  the reconcile's write tells the watch. A tree without the job family (a
+  test, a verb with no engine) starts none. The read is otherwise pure.
+
+  **The wait** (`status_after/3`, `home.status {after, wait_ms}`): answered
+  at once when the summary's key is not `after`; else held in the caller,
+  subscribed to the Always On watch (`Home.StatusWatch`), reading the
+  summary again at each word from it, until its key differs or `wait_ms`
+  (at most `max_wait_ms/0`) passed. Off tells nothing and a candidate runs
+  no watch, so a wait there runs out. The caller stays subscribed until it
+  exits: the daemon serves each request in a process of its own. `disk` is how full this primary's disk is (`Home.Disk.usage/2`:
   `used`, a fraction, and `nearly_full` from 85%), null in any other role and
   when it cannot be read, so a linked desktop reads its server's from
   `primary_home`. `version` is this engine's.
@@ -64,7 +81,11 @@ defmodule FermixCore.Management.Home do
   `FermixCore.Home.Link.impl().status/0`), `:settings_snapshot` (a 0-arity
   reader of the live settings, `ConfigStore.current_snapshot/0`),
   `:disk_usage` (a 1-arity reader of a home's disk, `Home.Disk.usage/2`),
-  `:version`, `:now` and `:host_os`. `:supervised` is the caller's world for
+  `:version`, `:now` and `:host_os`; for the reconcile a read starts,
+  `Management.Provision`'s (`:providers`, `:provider_opts`, `:jobs`,
+  `:open_code`, `:withdraw_code`); for the wait, `:status_watch` (the
+  watch's name) and `:wait_timer` (a 2-arity `Process.send_after/3` to the
+  caller, given the message and the delay). `:supervised` is the caller's world for
   the disk's `df` (false from a tree-less verb), and `:unreadable_files` the
   memory that logs what this record reads (the disk, the ledger, the settings,
   the last review, a desktop's copies) once per stretch it cannot be read
@@ -84,10 +105,13 @@ defmodule FermixCore.Management.Home do
   alias FermixCore.Home.Snapshot.Scheduler
   alias FermixCore.Home.Snapshot.Settings, as: SnapshotSettings
   alias FermixCore.Home.Snapshot.Status
+  alias FermixCore.Home.StatusWatch
   alias FermixCore.Home.UnreadableFiles
   alias FermixCore.Management.HomeMove
   alias FermixCore.Management.HomeSummary
+  alias FermixCore.Management.Jobs
   alias FermixCore.Management.Placement
+  alias FermixCore.Management.Provision
   alias FermixCore.Setup.ConfigStore
 
   require Logger
@@ -99,6 +123,13 @@ defmodule FermixCore.Management.Home do
   @short_sentence "The recovery passphrase must be at least 12 bytes long."
   @max_passphrase_bytes 1_024
   @primary_statuses ~w(connected renewing unreachable revoked stale)a
+  # The states whose summary rests on what the provider last said.
+  @fresh_states ~w(problem creating ready)
+  @fresh_ms 60_000
+  @max_wait_ms 25_000
+  # Each word from the watch is one read again; a wait answers at the first
+  # that moved the key, and reads at most this many.
+  @max_rereads 64
 
   @doc "The closed set of words `home.status`'s `primary.status` takes, in order."
   @spec primary_statuses() :: [String.t()]
@@ -108,11 +139,95 @@ defmodule FermixCore.Management.Home do
   @spec capability() :: String.t()
   def capability, do: "snapshots"
 
-  @doc "`home.status`: the whole picture of this home."
+  @doc """
+  `home.status`: the whole picture of this home. A read that rests on the
+  provider's word, gone stale, starts one reconcile (the moduledoc).
+  """
   @spec status(keyword()) :: {:ok, map()}
   def status(opts \\ []) when is_list(opts) do
     {facts, gathered} = gather(opts)
-    {:ok, picture(Map.put(facts, :summary, HomeSummary.summary(gathered)))}
+    summary = HomeSummary.summary(gathered)
+    :ok = refresh_provider(summary, gathered, opts)
+    {:ok, picture(Map.put(facts, :summary, summary))}
+  end
+
+  @doc "The longest a `home.status` wait holds, in milliseconds."
+  @spec max_wait_ms() :: pos_integer()
+  def max_wait_ms, do: @max_wait_ms
+
+  @doc """
+  `home.status {after, wait_ms}`: the picture once its summary's key is not
+  `after_key`, or when `wait_ms` passed (the moduledoc's *The wait*).
+  """
+  @spec status_after(String.t(), non_neg_integer(), keyword()) :: {:ok, map()}
+  def status_after(after_key, wait_ms, opts \\ [])
+      when is_binary(after_key) and is_integer(wait_ms) and wait_ms >= 0 and
+             wait_ms <= @max_wait_ms and is_list(opts) do
+    {:ok, record} = status(opts)
+
+    if record["summary"]["key"] == after_key and wait_ms > 0,
+      do: hold(after_key, wait_ms, opts),
+      else: {:ok, record}
+  end
+
+  # Subscribed first, then the timer: a change between the read and the
+  # subscribe is told by the watch's first word, which always comes unless
+  # Always On is off.
+  defp hold(after_key, wait_ms, opts) do
+    :ok = StatusWatch.subscribe(Keyword.get(opts, :status_watch, StatusWatch), self())
+    token = make_ref()
+    timer = Keyword.get(opts, :wait_timer, &Process.send_after(self(), &1, &2))
+    _timer = timer.({:home_status_wait, token}, wait_ms)
+    held(after_key, token, opts, @max_rereads)
+  end
+
+  defp held(_after_key, _token, opts, 0), do: status(opts)
+
+  defp held(after_key, token, opts, rereads) do
+    receive do
+      :home_status_changed -> reread(after_key, token, opts, rereads)
+      {:home_status_wait, ^token} -> status(opts)
+    end
+  end
+
+  defp reread(after_key, token, opts, rereads) do
+    {:ok, record} = status(opts)
+
+    if record["summary"]["key"] == after_key,
+      do: held(after_key, token, opts, rereads - 1),
+      else: {:ok, record}
+  end
+
+  # The one side effect of a read: a stale word from the provider is read
+  # again, as a job the read does not wait for.
+  defp refresh_provider(%{"state" => state}, %{provision: provision, now: now}, opts)
+       when state in @fresh_states do
+    if standing_server?(provision) and stale?(provision.checked_at, now) and jobs?(opts),
+      do: start_reconcile(opts),
+      else: :ok
+  end
+
+  defp refresh_provider(_summary, _gathered, _opts), do: :ok
+
+  defp standing_server?(provision),
+    do: Enum.any?([provision.server, get_in(provision, [:replace, :old])], &standing?/1)
+
+  defp standing?(%{status: status}), do: status != :gone
+  defp standing?(nil), do: false
+
+  defp stale?(nil, _now), do: true
+  defp stale?(%DateTime{} = at, now), do: DateTime.diff(now, at, :millisecond) > @fresh_ms
+
+  defp jobs?(opts),
+    do: opts |> Keyword.get(:jobs, []) |> Keyword.get(:server, Jobs) |> GenServer.whereis() != nil
+
+  # One at a time: a reconcile or a step already running is the provider's
+  # read in hand.
+  defp start_reconcile(opts) do
+    case Provision.start_reconcile(opts) do
+      {:ok, _job} -> :ok
+      {:error, {:busy, _kind}} -> :ok
+    end
   end
 
   @doc """

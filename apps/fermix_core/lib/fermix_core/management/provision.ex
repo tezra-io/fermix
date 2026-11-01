@@ -73,6 +73,22 @@ defmodule FermixCore.Management.Provision do
   is kept in the ledger, so the summary and `home.provision.resources` say
   it after the job is gone; a refusal for the token marks it refused.
 
+  **A step and its ending** (Always On setup §5). The step a job runs is
+  named in the ledger before the job starts (`put_action/2`, which
+  `Management.AlwaysOn.act/2` writes ahead of `Jobs.start`), and the end of
+  every create, power and delete job clears it (`clear_action/1` for a step
+  that never started its job). Every ending lands in the ledger: a create's,
+  a power action's and a delete's failure, with the step, the server's size
+  and place, except a refusal of the token, which marks the token. A create's
+  job reads the live offer first (`start_create/2`): the offer the choice
+  names, or the recommendation when it names none, whose price the server
+  is written with and whose size and place the step's action keeps. At boot
+  a step left with no job, since jobs live in memory, becomes the failure
+  `interrupted` (`interrupt_left_actions/1`). `start_reconcile/1` reads the
+  ledger back from the provider as a job of the same kind, named by the
+  provider, so it never runs beside a step; `home.status` starts it when the
+  ledger was last checked over a minute ago.
+
   The view: `provider` (the provider's id), `state` (`none`, `connected`,
   `creating`, `created`, `deleting`, `gone`, `failed`, `unreadable`, as
   `Ledger.state/3`), `token` (`none`, `accepted`, `refused`), `server` (or
@@ -149,6 +165,79 @@ defmodule FermixCore.Management.Provision do
       "console_url" => display.console_url,
       "docs_anchor" => display.docs_anchor
     }
+  end
+
+  @doc """
+  Writes, under the ledger's lock, that a step's job is about to start on
+  the provider Always On speaks of: `kind` (one of
+  `Home.Provision.Ledger.action_kinds/0`), from now. Refused `busy` while
+  another step's action stands; the job's end clears it.
+  """
+  @spec put_action(String.t(), keyword()) :: :ok | {:error, term()}
+  def put_action(kind, opts \\ []) when is_binary(kind) and is_list(opts) do
+    provider = current(opts)
+
+    case Ledger.update(home(opts), provider.id(), &Ledger.put_action(&1, kind, now(opts))) do
+      {:ok, _ledger} -> :ok
+      {:error, :busy} -> {:error, {:busy, Atom.to_string(@kind)}}
+      {:error, reason} -> refused({:ledger, reason}, provider, opts)
+    end
+  end
+
+  @doc """
+  Clears the step's action on the provider Always On speaks of, for a step
+  whose job never started (its start was refused); `:ok` when none stands.
+  """
+  @spec clear_action(keyword()) :: :ok | {:error, term()}
+  def clear_action(opts \\ []) when is_list(opts) do
+    provider = current(opts)
+
+    case Ledger.update(home(opts), provider.id(), &Ledger.clear_action/1) do
+      {:ok, _ledger} -> :ok
+      {:error, :no_action} -> :ok
+      {:error, reason} -> refused({:ledger, reason}, provider, opts)
+    end
+  end
+
+  @doc """
+  At boot: on every provider, a step left standing with no job (jobs live
+  in memory, so a restart ends every one) becomes the failure `interrupted`,
+  keeping the step and its size and place, so the summary offers what
+  starts it again. Each is logged; a ledger that cannot be read or written
+  is logged and left as it is.
+  """
+  @spec interrupt_left_actions(keyword()) :: :ok
+  def interrupt_left_actions(opts \\ []) when is_list(opts),
+    do: Enum.each(providers_of(opts), &interrupt_left(&1, opts))
+
+  @doc """
+  The supervision child that runs `interrupt_left_actions/1` once, before
+  the job family and the socket start, so no step written after the boot is
+  taken for one the restart left; it starts no process.
+  """
+  @spec interrupt_at_boot() :: :ignore
+  def interrupt_at_boot do
+    :ok = interrupt_left_actions()
+    :ignore
+  end
+
+  defp interrupt_left(provider, opts) do
+    case Ledger.update(home(opts), provider.id(), &Ledger.interrupt(&1, provider, now(opts))) do
+      {:ok, ledger} ->
+        Logger.warning(
+          "provision: the #{ledger.failure.action} step on #{provider.id()} stopped with " <>
+            "the engine; it is kept as interrupted"
+        )
+
+      {:error, :no_action} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error(
+          "provision: a step the last run left on #{provider.id()} could not be kept as " <>
+            "interrupted: #{inspect(reason)}"
+        )
+    end
   end
 
   @doc "`home.provision.connect`."
@@ -275,9 +364,39 @@ defmodule FermixCore.Management.Provision do
   """
   @spec create(map(), keyword()) :: {:ok, map()} | {:error, term()}
   def create(params, opts \\ []) when is_map(params) and is_list(opts) do
-    with {:ok, provider, request, replace?} <- create_params(params, opts),
-         {:ok, plan} <- create_plan(provider, replace?, opts) do
-      start(provider, opts, fn report -> run_create(provider, plan, request, report, opts) end)
+    with {:ok, provider, choice, replace?} <- create_params(params, opts),
+         do: begin_create(provider, choice, replace?, opts)
+  end
+
+  @doc """
+  Starts the create job on the provider Always On speaks of, as
+  `home.provision.create` does: `type` and `location` both given, or both
+  nil for the recommendation the job reads from the live offer; `replace`
+  true to replace the server the home lives on. Refused by field when only
+  one is given, or either is not one Fermix offers.
+  """
+  @spec start_create(
+          %{type: String.t() | nil, location: String.t() | nil, replace: boolean()},
+          keyword()
+        ) :: {:ok, map()} | {:error, term()}
+  def start_create(%{type: type, location: location, replace: replace?}, opts \\ [])
+      when is_boolean(replace?) and is_list(opts) do
+    provider = current(opts)
+
+    with {:ok, choice} <- choice(type, location, provider),
+         do: begin_create(provider, choice, replace?, opts)
+  end
+
+  defp begin_create(provider, choice, replace?, opts) do
+    request = Map.put(choice, :profile, profile(opts))
+
+    with {:ok, plan} <- create_plan(provider, replace?, opts) do
+      start(
+        provider,
+        opts,
+        fn report -> run_create(provider, plan, request, report, opts) end,
+        :clears_action
+      )
     end
   end
 
@@ -287,8 +406,17 @@ defmodule FermixCore.Management.Provision do
          {:ok, type} <- matching(params, "type", @type_pattern),
          {:ok, location} <- location(params, provider),
          {:ok, replace?} <- replace_param(params) do
-      {:ok, provider, %{type: type, location: location, profile: profile(opts)}, replace?}
+      {:ok, provider, %{type: type, location: location}, replace?}
     end
+  end
+
+  # Both given, or neither: the recommendation, which the job reads.
+  defp choice(nil, nil, _provider), do: {:ok, %{type: nil, location: nil}}
+
+  defp choice(type, location, provider) do
+    with {:ok, type} <- matching(%{"type" => type}, "type", @type_pattern),
+         {:ok, location} <- location(%{"location" => location}, provider),
+         do: {:ok, %{type: type, location: location}}
   end
 
   defp replace_param(params) do
@@ -389,43 +517,102 @@ defmodule FermixCore.Management.Provision do
     end)
   end
 
+  # The live offer prices the choice (or makes it, when the owner chose
+  # nothing), and the step's action keeps it, before the create writes
+  # anything of its own.
+  defp run_create(provider, plan, request, report, opts) do
+    with {:ok, priced} <- priced(provider, request, opts),
+         :ok <- keep_choice(provider, priced, opts) do
+      run_plan(provider, plan, priced, report, opts)
+    else
+      {:error, reason} -> job_failure(remembered(reason, provider, request, opts), provider)
+    end
+  end
+
+  defp priced(provider, request, opts) do
+    with {:ok, token} <- job_token(provider, opts),
+         {:ok, options} <- Driver.options(provider, token, provider_opts(opts)),
+         do: offered(options, request)
+  end
+
+  defp offered(%{"recommended" => nil}, %{type: nil}), do: {:error, :nothing_in_stock}
+
+  defp offered(%{"recommended" => pick} = options, %{type: nil} = request),
+    do: offered(options, %{request | type: pick["type"], location: pick["location"]})
+
+  # An offer the catalog does not hold now is priced at nothing: the create's
+  # own check of the stock refuses it before anything is written.
+  defp offered(options, %{type: type, location: location} = request) do
+    offer = Enum.find(options["offers"], &(&1["type"] == type and &1["location"] == location))
+
+    {:ok,
+     Map.merge(request, %{
+       total_monthly: offer && offer["total_monthly"],
+       currency: offer && options["currency"]
+     })}
+  end
+
+  defp job_token(provider, opts) do
+    case Ledger.read(home(opts), provider.id()) do
+      {:ok, %{token: token}} when is_binary(token) -> {:ok, token}
+      {:ok, _ledger} -> {:error, :no_token}
+      {:error, reason} -> {:error, {:ledger, reason}}
+    end
+  end
+
+  defp keep_choice(provider, request, opts) do
+    case Ledger.update(home(opts), provider.id(), &chosen(&1, request)) do
+      {:ok, _ledger} -> :ok
+      {:error, :no_action} -> :ok
+      {:error, reason} -> {:error, {:ledger, reason}}
+    end
+  end
+
+  # A create started with no step named (`home.provision.create`) keeps it
+  # nowhere.
+  defp chosen(%{action: nil}, _request), do: {:error, :no_action}
+  defp chosen(ledger, request), do: {:ok, Ledger.choose(ledger, request)}
+
   # The server a replace leaves is set aside first, so a refusal from here on
   # is the new server's.
-  defp run_create(provider, {:replace, from_epoch}, request, report, opts) do
+  defp run_plan(provider, {:replace, from_epoch}, request, report, opts) do
     case Ledger.update(
            home(opts),
            provider.id(),
            &Ledger.begin_replace(&1, from_epoch, now(opts))
          ) do
-      {:ok, _ledger} -> run_create(provider, :create, request, report, opts)
+      {:ok, _ledger} -> run_plan(provider, :create, request, report, opts)
       {:error, reason} when reason in @replace_refusals -> job_failure(reason, provider)
       {:error, reason} -> job_failure({:ledger, reason}, provider)
     end
   end
 
-  defp run_create(provider, :create, request, report, opts) do
+  defp run_plan(provider, :create, request, report, opts) do
     case Driver.create(provider, home(opts), request, run_opts(provider, report, opts)) do
       {:ok, server} ->
         {:ok, %{"server" => server.name, "type" => server.type, "location" => server.location}}
 
       {:error, reason} ->
-        job_failure(remembered(reason, provider, opts), provider)
+        job_failure(remembered(reason, provider, request, opts), provider)
     end
   end
 
-  # A create's refusal stays in the ledger, for the summary; one for the
-  # token marks it refused.
-  defp remembered(reason, _provider, _opts) when reason in [:server_exists, :no_token],
+  # A create's refusal stays in the ledger with the size and place it was
+  # for, for the summary; one for the token marks it refused.
+  defp remembered(reason, _provider, _request, _opts) when reason in [:server_exists, :no_token],
     do: reason
 
-  defp remembered(reason, provider, opts) do
+  defp remembered(reason, provider, request, opts) do
     reason = token_reason(reason, provider, opts)
 
     failure = %{
       reason: Provision.failure_word(reason),
       sentence: Provision.error_sentence(reason, provider),
       next_location: next_location(reason),
-      at: now(opts)
+      at: now(opts),
+      action: "create",
+      type: request.type,
+      location: request.location
     }
 
     case Ledger.update(home(opts), provider.id(), &{:ok, Ledger.put_failure(&1, failure)}) do
@@ -451,7 +638,12 @@ defmodule FermixCore.Management.Provision do
          {:ok, action} <- power_action(params),
          {:ok, _token} <- stored_token(provider, opts),
          :ok <- has_server(provider, opts) do
-      start(provider, opts, fn report -> run_power(provider, action, report, opts) end)
+      start(
+        provider,
+        opts,
+        fn report -> run_power(provider, action, report, opts) end,
+        :clears_action
+      )
     end
   end
 
@@ -469,10 +661,16 @@ defmodule FermixCore.Management.Provision do
 
   defp run_power(provider, action, report, opts) do
     case Driver.power(provider, home(opts), action, run_opts(provider, report, opts)) do
-      :ok -> {:ok, %{"action" => Atom.to_string(action)}}
-      {:error, reason} -> job_failure(token_reason(reason, provider, opts), provider)
+      :ok ->
+        {:ok, %{"action" => Atom.to_string(action)}}
+
+      {:error, reason} ->
+        job_failure(step_failed(reason, power_step(action), provider, opts), provider)
     end
   end
+
+  defp power_step(:on), do: "power_on"
+  defp power_step(:reset), do: "power_reset"
 
   @doc "`home.provision.resources`: the ledger, read back from its provider."
   @spec resources(keyword()) :: {:ok, map()}
@@ -523,7 +721,12 @@ defmodule FermixCore.Management.Provision do
          {:ok, target} <- delete_target(ledger, provider, home(opts), role(opts)),
          {:ok, _token} <- stored_token(provider, opts),
          :ok <- something(ledger, provider) do
-      start(provider, opts, fn report -> run_delete(provider, target, report, opts) end)
+      start(
+        provider,
+        opts,
+        fn report -> run_delete(provider, target, report, opts) end,
+        :clears_action
+      )
     end
   end
 
@@ -558,7 +761,7 @@ defmodule FermixCore.Management.Provision do
   defp run_delete(provider, :current, report, opts) do
     case Driver.delete(provider, home(opts), run_opts(provider, report, opts)) do
       :ok -> {:ok, %{"deleted" => true}}
-      {:error, reason} -> job_failure(token_reason(reason, provider, opts), provider)
+      {:error, reason} -> job_failure(step_failed(reason, "delete", provider, opts), provider)
     end
   end
 
@@ -603,6 +806,39 @@ defmodule FermixCore.Management.Provision do
         provider.id(),
         &{:ok, Ledger.put_replace_failure(&1, failure)}
       )
+
+  # A power action or a delete that stopped stays in the ledger with the
+  # step and the server's size and place, unless the token's refusal, which
+  # marks the token, says it.
+  defp step_failed(reason, step, provider, opts) do
+    case token_reason(reason, provider, opts) do
+      :token_refused -> :token_refused
+      reason -> keep_step_failure(reason, step, provider, opts)
+    end
+  end
+
+  defp keep_step_failure(reason, step, provider, opts) do
+    change = fn ledger ->
+      {:ok, Ledger.put_failure(ledger, step_failure(reason, step, ledger.server, provider, opts))}
+    end
+
+    case Ledger.update(home(opts), provider.id(), change) do
+      {:ok, _ledger} -> reason
+      {:error, why} -> log_unkept(why, reason)
+    end
+  end
+
+  defp step_failure(reason, step, server, provider, opts) do
+    %{
+      reason: Provision.failure_word(reason),
+      sentence: Provision.error_sentence(reason, provider),
+      next_location: nil,
+      at: now(opts),
+      action: step,
+      type: server && server.type,
+      location: server && server.location
+    }
+  end
 
   # -- after a replace's move ---------------------------------------------------
 
@@ -676,7 +912,12 @@ defmodule FermixCore.Management.Provision do
   end
 
   defp reached(:clean_up, provider, epoch, opts) do
-    case start(provider, opts, fn report -> run_clean_up(provider, epoch, report, opts) end) do
+    case start(
+           provider,
+           opts,
+           fn report -> run_clean_up(provider, epoch, report, opts) end,
+           :keeps_action
+         ) do
       {:ok, view} ->
         Logger.info("provision: the move to your new server is done; deleting the old one")
         {:deleting, view}
@@ -821,19 +1062,65 @@ defmodule FermixCore.Management.Provision do
 
   # -- jobs -----------------------------------------------------------------------
 
-  defp start(provider, opts, run) do
+  @doc """
+  Starts one reconcile of the provider Always On speaks of: its ledger read
+  back from the provider (`Provision.Driver.reconcile/3`), which writes when
+  it was checked and anything that changed. A job of the family, named by
+  the provider, so it is refused `busy` beside any other step and never
+  runs twice at once; it names no step and clears none.
+  """
+  @spec start_reconcile(keyword()) :: {:ok, map()} | {:error, {:busy, String.t()}}
+  def start_reconcile(opts \\ []) when is_list(opts) do
+    provider = current(opts)
+    start(provider, opts, fn _report -> run_reconcile(provider, opts) end, :keeps_action)
+  end
+
+  defp run_reconcile(provider, opts) do
+    case Driver.reconcile(provider, home(opts), provider_opts(opts) ++ code_opts(provider, opts)) do
+      {:ok, _ledger} -> {:ok, %{"checked" => true}}
+      {:error, reason} -> job_failure(token_reason(reason, provider, opts), provider)
+    end
+  end
+
+  # A step's job (`:clears_action`) ends by clearing the step's action,
+  # whatever its run answered or raised; a reconcile and the clean-up after
+  # a replace's move name no step (`:keeps_action`).
+  defp start(provider, opts, run, ending) when ending in [:clears_action, :keeps_action] do
     started =
       Jobs.start(
         @kind,
         Keyword.merge(Keyword.get(opts, :jobs, []),
           name: provider.id(),
-          run: fn _job_id, report -> run.(&report.({:phase, &1})) end
+          run: fn _job_id, report ->
+            step(provider, opts, ending, fn -> run.(&report.({:phase, &1})) end)
+          end
         )
       )
 
     case started do
       {:ok, view} -> {:ok, view}
       {:error, :busy} -> {:error, {:busy, Atom.to_string(@kind)}}
+    end
+  end
+
+  defp step(_provider, _opts, :keeps_action, run), do: run.()
+
+  defp step(provider, opts, :clears_action, run) do
+    run.()
+  after
+    end_step(provider, opts)
+  end
+
+  defp end_step(provider, opts) do
+    case Ledger.update(home(opts), provider.id(), &Ledger.clear_action/1) do
+      {:ok, _ledger} ->
+        :ok
+
+      {:error, :no_action} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error("provision: the end of a step could not be kept: #{inspect(reason)}")
     end
   end
 

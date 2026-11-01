@@ -5715,7 +5715,16 @@
         }
       }
     },
-    "home_status_params": { "type": "object", "maxProperties": 0, "additionalProperties": false },
+    "home_status_params": {
+      "type": "object",
+      "description": "None for the picture as it stands; or after (a summary.key) and wait_ms (at most 25000) together, to be answered once the summary's key is not after, or when wait_ms passed.",
+      "additionalProperties": false,
+      "dependentRequired": { "after": ["wait_ms"], "wait_ms": ["after"] },
+      "properties": {
+        "after": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "wait_ms": { "type": "integer", "minimum": 0, "maximum": 25000 }
+      }
+    },
     "home_status_result": {
       "type": "object",
       "required": ["role", "epoch", "moved", "primary", "desktops", "snapshots", "enrollment", "candidates", "move", "secrets_missing", "primary_home", "primary_missing"],
@@ -5794,42 +5803,81 @@
     },
     "homeSummary": {
       "type": "object",
-      "description": "Where Always On stands: state maps to a screen, sentence and action.label are printed as they are, detail sits behind Details.",
-      "required": ["state", "sentence", "action", "detail"],
+      "description": "Where Always On stands, the screen every surface draws: state maps to a screen, sentence and every label are printed as they are, detail sits behind Details, key is the digest a home.status wait and the watch compare (PROTOCOL.md, The Always On summary).",
+      "required": ["key", "state", "sentence", "action", "detail", "notice"],
       "additionalProperties": false,
       "properties": {
+        "key": { "type": "string", "minLength": 1, "maxLength": 64 },
         "state": { "enum": ["off", "connect", "choose", "creating", "ready", "moving", "on", "undone", "retired", "candidate", "primary", "problem"] },
         "sentence": { "type": "string", "minLength": 1 },
         "action": { "oneOf": [{ "$ref": "#/$defs/homeSummaryAction" }, { "type": "null" }] },
-        "detail": { "$ref": "#/$defs/homeSummaryDetail" }
+        "detail": { "$ref": "#/$defs/homeSummaryDetail" },
+        "notice": {
+          "description": "The occurrence an app raises as a system notification when its id changes, or null.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": ["id", "sentence"],
+              "additionalProperties": false,
+              "properties": {
+                "id": { "type": "string", "pattern": "^(ready|moved|cannot_reach|not_set_up|backup_week):.+$" },
+                "sentence": { "type": "string", "minLength": 1 }
+              }
+            },
+            { "type": "null" }
+          ]
+        }
       }
     },
     "homeSummaryAction": {
       "type": "object",
-      "description": "One action a summary offers: its id (PROTOCOL.md says what a client does for each) and the label it is shown under.",
-      "required": ["id", "label"],
+      "description": "One action a summary offers, the same record wherever it sits: its id, the label it is shown under, what the surface collects first (needs), the sentence the owner accepts first (confirm, null when none), the page a surface opens for it (url, null when none) and its key.",
+      "required": ["id", "label", "needs", "confirm", "url", "key"],
       "additionalProperties": false,
       "properties": {
-        "id": { "enum": ["set_up", "create_server", "cancel", "move_now", "try_again", "learn_more", "turn_on", "restart_server", "start_again", "create_in", "open_console", "paste_token", "update", "back_up_now", "replace_server", "check_again", "own_server", "delete_server"] },
-        "label": { "type": "string", "minLength": 1 }
+        "id": { "enum": ["create_server", "cancel", "move_now", "try_again", "learn_more", "turn_on", "restart_server", "start_again", "create_in", "open_console", "paste_token", "update", "back_up_now", "replace_server", "check_again", "own_server", "delete_server"] },
+        "label": { "type": "string", "minLength": 1 },
+        "needs": { "type": "array", "maxItems": 3, "uniqueItems": true, "items": { "enum": ["token", "recovery_passphrase", "choice"] } },
+        "confirm": { "type": ["string", "null"], "minLength": 1 },
+        "url": { "type": ["string", "null"], "minLength": 1 },
+        "key": { "type": "string", "minLength": 1, "maxLength": 64 }
+      }
+    },
+    "homeSummaryProvider": {
+      "type": "object",
+      "description": "One provider's token screen: its id (what a token is given for), name, the token's label, the screen's sentence, its How to get one steps, its console and the docs page at its part.",
+      "required": ["id", "name", "token_label", "sentence", "steps", "console_url", "docs_url"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "token_label": { "type": "string", "minLength": 1 },
+        "sentence": { "type": "string", "minLength": 1 },
+        "steps": { "type": "array", "maxItems": 8, "items": { "type": "string", "minLength": 1 } },
+        "console_url": { "type": "string", "minLength": 1 },
+        "docs_url": { "type": "string", "minLength": 1 }
       }
     },
     "homeSummaryDetail": {
       "type": "object",
-      "description": "What Details holds for the state, and nothing else: on off the token step its action opens (connect); on connect the steps and alternatives; on choose billing; on ready server, readiness and waits_until; on on server, backups, copies_bytes, disk_used, data and actions; on problem kind, note, seen_at and alternatives (next_location and readiness where the problem has them).",
+      "description": "What Details holds for the state: on off and connect the token screen of every provider (providers) and alternatives; on choose billing; on ready server, readiness and waits_until; on on server, backups, copies_bytes, disk_used, data and actions; on problem kind, note, seen_at and alternatives (next_location and readiness where the problem has them); lines on creating, ready, on and problem wherever there are any; progress while a step's job runs.",
       "additionalProperties": false,
       "properties": {
-        "connect": {
-          "type": "object",
-          "required": ["sentence", "steps", "alternatives"],
-          "additionalProperties": false,
-          "properties": {
-            "sentence": { "type": "string", "minLength": 1 },
-            "steps": { "type": "array", "maxItems": 8, "items": { "type": "string", "minLength": 1 } },
-            "alternatives": { "type": "array", "maxItems": 4, "items": { "$ref": "#/$defs/homeSummaryAction" } }
+        "providers": { "type": "array", "minItems": 1, "maxItems": 8, "items": { "$ref": "#/$defs/homeSummaryProvider" } },
+        "lines": {
+          "type": "array",
+          "maxItems": 24,
+          "items": {
+            "type": "object",
+            "required": ["label", "value"],
+            "additionalProperties": false,
+            "properties": {
+              "label": { "type": "string", "minLength": 1 },
+              "value": { "type": "string", "minLength": 1 }
+            }
           }
         },
-        "steps": { "type": "array", "maxItems": 8, "items": { "type": "string", "minLength": 1 } },
+        "progress": { "type": "string", "minLength": 1 },
         "alternatives": { "type": "array", "maxItems": 4, "items": { "$ref": "#/$defs/homeSummaryAction" } },
         "actions": { "type": "array", "maxItems": 4, "items": { "$ref": "#/$defs/homeSummaryAction" } },
         "billing": { "type": "string", "minLength": 1 },
@@ -5852,7 +5900,7 @@
         "copies_bytes": { "type": ["integer", "null"], "minimum": 0 },
         "disk_used": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
         "data": { "type": "string", "minLength": 1 },
-        "kind": { "enum": ["turned_off", "cannot_reach", "deleted", "not_set_up", "waited_too_long", "no_capacity", "account_limit", "read_only_token", "token_refused", "create_failed", "update", "disk_full", "backup_old", "not_ready", "unreadable", "delete_failed"] },
+        "kind": { "enum": ["turned_off", "cannot_reach", "deleted", "not_set_up", "waited_too_long", "no_capacity", "account_limit", "read_only_token", "token_refused", "create_failed", "update", "disk_full", "backup_old", "not_ready", "unreadable", "delete_failed", "power_failed"] },
         "note": { "type": ["string", "null"] },
         "seen_at": { "type": ["string", "null"] },
         "next_location": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,31}$" }

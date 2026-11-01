@@ -213,6 +213,25 @@ defmodule FermixChannels.Desktop.RelayTest do
     assert %{connected: false, down_ms: 600_000} = Relay.status(relay)
   end
 
+  # Always On setup §3.1: the summary's notice names an outage by when it
+  # began, on the wall clock, so the same outage is one notice however long
+  # this computer slept through it.
+  test "when the link went down is said on the wall clock, and is none while a session is up" do
+    primary = DesktopRail.primary!()
+    root = DesktopRail.desktop_home!(primary)
+    {:ok, clock} = Agent.start_link(fn -> ~U[2031-05-04 11:00:00Z] end)
+    relay = DesktopRail.start_relay!(root, primary, clock: fn -> Agent.get(clock, & &1) end)
+
+    assert %{connected: true, down_at: nil} = DesktopRail.await_connected(relay)
+
+    Agent.update(clock, fn _ -> ~U[2031-05-04 11:49:00Z] end)
+    :ok = drop_sessions(primary)
+    assert_receive {:scheduled, {:relay_timer, :reconnect, _token}, 1_000}, 10_000
+    Agent.update(clock, fn _ -> ~U[2031-05-04 12:30:00Z] end)
+
+    assert %{connected: false, down_at: ~U[2031-05-04 11:49:00Z]} = Relay.status(relay)
+  end
+
   # Companion protocol 6 (M75 lean v1 §7): the link feeds the Always On
   # summary, so a session coming up or ending tells the watch.
   test "a session that comes up, ends and is revoked each tells the Always On watch" do

@@ -252,6 +252,26 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Always On's screen comes whole from Fermix, so every surface draws the
+  same one.** Each action now says what it needs you to give (a token, your
+  recovery passphrase, or a size and place), the sentence you accept before
+  Fermix spends money, deletes, restarts a server or moves, and the page it
+  opens, and Move now asks once, naming what stops or waits after the move
+  from your settings. The moment a step starts the screen says so (creating,
+  deleting, turning on or restarting your server, and the step in hand), and
+  every way a step ends stays on screen afterwards: a power action or a delete
+  that stopped is a problem of its own with the one action that tries again,
+  a refused create keeps its size and place for Create in and Start again,
+  and a step a restart of Fermix cut short offers Start again. Details are
+  finished for you: the server, its size, place and address, until when it
+  waits, each backup, the server's disk, when Hetzner was last checked and
+  what the server costs a month, from the offer it was created from, with
+  dates and times in your own time zone. The apps get the occurrence to raise
+  as a notification (the server ready, the move done, the server out of
+  reach, a server to set up again, the last backup a week old), once each.
+  Fermix checks with Hetzner at most once a minute while the screen shows a
+  problem, a step or a ready server, never beside a step, and `home.status`
+  can wait for the screen to change instead of being asked again and again.
 - **A mandate's proposal is a short card too.** It names the tool and the
   watcher, quotes the item, says why it passed, and shows each argument on its
   own line, with every argument whole and the whole item behind Details, in

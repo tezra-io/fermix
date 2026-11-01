@@ -1,36 +1,47 @@
 defmodule FermixCore.Management.HomeSummary do
   @moduledoc """
-  `home.status.summary` (M75 lean v1 §7): where Always On stands, in one
-  sentence with at most one action, worked out once here so the Mac app, the
-  Linux app, the setup page and `fermix home status` all say the same thing.
+  `home.status.summary` (M75 lean v1 §7, Always On setup §3): where Always
+  On stands, worked out once here so the Mac app, the Linux app, the setup
+  page and the CLI draw the same screen.
 
-      summary: {state, sentence, action: {id, label} | null, detail}
+      summary: {key, state, sentence, action, detail, notice}
 
   `summary/1` is pure: it reads the facts `gather/5` collects (the role, the
   move's phase, the candidates held, the cloud provider Always On speaks of
-  (`Home.Provision.current/2`) and its ledger (`Provision.Ledger.state/3`),
-  the enrollment window and the link as the rail
-  says them (`Home.Link.status/0`), the last readiness review, the snapshots,
-  the disk, and on a linked desktop the server's own `home.status`). Its words
-  are `Management.Copy`'s (`summary_sentence/2`, `summary_label/2`), with the
-  provider's own (its name, its token's label, its cities, its type names and
-  its "How to get one" steps) from its display data; nothing here names a
-  provider.
+  (`Home.Provision.current/2`), every provider offered, and the ledger of
+  the one in use (`Provision.Ledger.state/3`), the enrollment window and the
+  link as the rail says them (`Home.Link.status/0`), the last readiness
+  review, the review's items this home's settings decide
+  (`MoveReadiness.summary_items/4`), the snapshots, the disk, the owner's
+  time zone, and on a linked desktop the server's own `home.status`). Its
+  words are `Management.Copy`'s, with the provider's own (its name, its
+  token's label, its cities, its type names and its "How to get one" steps)
+  from its display data; nothing here names a provider.
 
   `state` is one of `states/0`:
 
     * the computer that sets Always On up, before the move: `off`, `connect`
       (a code for a server of the owner's own is open, or the provider refused
       the token before anything was created), `choose` (the token works),
-      `creating` (starting, installing, connecting, or deleting), `ready`,
-      `undone` (a move was undone and its server is still held);
+      `creating` (a step's job runs, or the server starts, installs or
+      connects), `ready`, `undone` (a move was undone and its server is still
+      held);
     * the computer the move left: `moving` (its last word, once it waits on
       the server's confirmation, is that Fermix keeps trying), `undone` while
       it restarts as it was, `on`, `retired` (no link, or the server forgot
-      this computer);
+      this computer), and `creating` while a step's job runs;
     * the server: `candidate` while it waits for its move, `primary` after;
     * `problem`, with its `kind` (`problems/0`) in `detail` and the one action
       that fixes it, or Learn more where none does.
+
+  **A step that runs.** While the ledger names a step's job (its `action`,
+  written before the job starts), the summary is `creating` in that step's
+  sentence (creating, deleting, turning on, restarting), with Cancel during
+  a create, before anything the job writes; `detail.progress` says the step
+  in hand, from what the job wrote so far. An action the job outlived reads
+  as the failure `interrupted` (`Ledger.state/3`), and every step's failure
+  is a problem: the create's by its reason, a power action's `power_failed`,
+  a delete's `delete_failed`.
 
   Times count the way the design asks: a server that never checked in is a
   problem after 30 minutes of its code being open while this computer is
@@ -49,24 +60,47 @@ defmodule FermixCore.Management.HomeSummary do
   Delete when the old server could not be deleted). Until the move is done
   the old server is the one the home lives on, and the provider's power
   actions, which reach only the new one, are not offered for it. The new
-  server's
-  code lives on the old server, which never sleeps, so its 30 minutes count
-  from its creation.
+  server's code lives on the old server, which never sleeps, so its 30
+  minutes count from its creation.
 
-  `detail` holds what §7 lists and nothing else: on `off` the token step its
-  Set up opens, on `connect` the "How to get one" steps, on `choose` how
-  the provider bills, on `ready` the server's facts, the readiness warnings and
-  blocks and until when it waits, on `on` the server, each backup, the space
-  this computer's copies take, the disk, what lives on the server and the two
-  actions Details offers (Back up now, Replace the server), and on `problem`
-  its kind, what Fermix last saw and when, one note, and the other actions.
+  **Every action is one record** wherever it sits (`action`,
+  `detail.alternatives`, `on`'s `detail.actions`): `id`, `label`, `needs`
+  (what the surface collects: `token`, `recovery_passphrase`, `choice`),
+  `confirm` (the sentence the owner accepts before Fermix spends money,
+  deletes, restarts a server or moves, with no time or price in it; nil
+  otherwise), `url` (the docs page at the provider's part for Learn more,
+  the provider's console for Open, nil otherwise) and `key` (`action_key/5`).
+  Move now's confirm is built here, before any review, from the review's
+  items this home's settings decide and any other warning the last review of
+  the same server gave (`s3_size`, `plugins`), so the full review at the
+  press moves it, and its key, only when it found something the screen did
+  not say.
 
-  `watch/1` is what `FermixCore.Home.StatusWatch` reads (companion protocol
-  6, which lets the apps stop polling): the key a change is told by, whether
-  Always On is off, and when the summary next changes by the clock alone,
-  from the same time rules.
+  `detail` holds what the state draws: on `off` and `connect` the token
+  screen of every provider (`providers`) and the own-server link, on
+  `choose` how the provider bills, on `ready` the server's facts, the
+  readiness warnings and blocks and until when it waits, on `on` the server,
+  each backup, the space this computer's copies take, the disk, what lives on
+  the server and the two actions Details offers (Back up now, Replace the
+  server), and on `problem` its kind, what Fermix last saw and when, one note,
+  and the other actions; wherever there are any, the Details `lines`
+  (`Copy.summary_line/3`), `providers` wherever a token is asked for, and
+  `progress` while a step runs.
+
+  `notice` is the occurrence the apps raise as a system notification, or
+  nil: the server ready (`ready:<candidate>`), the move done
+  (`moved:<epoch>`, until the first backup after it), the server out of
+  reach (`cannot_reach:<since>`), a server that must be set up again
+  (`not_set_up:<created_at>`) and the newest backup a week old
+  (`backup_week:<at>`). An app posts when the id changes.
+
+  `key/1` is the one digest of the summary (`summary.key`, and what
+  `FermixCore.Home.StatusWatch` tells by, `watch/1`): every change a surface
+  draws moves it, and the clock alone (the last check, what was last seen,
+  an age in a sentence) never does.
   """
 
+  alias FermixCore.Clock
   alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.Move
   alias FermixCore.Home.MoveReadiness
@@ -80,10 +114,11 @@ defmodule FermixCore.Management.HomeSummary do
   @states ~w(off connect choose creating ready moving on undone retired candidate primary problem)
   @problems ~w(turned_off cannot_reach deleted not_set_up waited_too_long no_capacity
                account_limit read_only_token token_refused create_failed update disk_full
-               backup_old not_ready unreadable delete_failed)
-  @actions ~w(set_up create_server cancel move_now try_again learn_more turn_on restart_server
+               backup_old not_ready unreadable delete_failed power_failed)
+  @actions ~w(create_server cancel move_now try_again learn_more turn_on restart_server
               start_again create_in open_console paste_token update back_up_now replace_server
               check_again own_server delete_server)
+  @needs ~w(token recovery_passphrase choice)
 
   @unreachable_ms 10 * 60_000
   @setup_ms 30 * 60_000
@@ -91,34 +126,42 @@ defmodule FermixCore.Management.HomeSummary do
   @day_s 86_400
   # The apps raise their notification once the newest backup is this old.
   @backup_week_s 7 * @day_s
-  # The states whose sentence `watch/1`'s key leaves out: on `on` and
-  # `problem` it carries a figure that moves with the clock (a backup's age, a
-  # count of days, how full a disk is), and their state, action and kind say
-  # every change of note; on `off` an app forgets Always On (the owner's rule),
-  # so the line naming what stops is read when its pane opens, never told.
+  # The states whose sentence `key/1` leaves out: on `on` and `problem` it
+  # carries a figure that moves with the clock (a backup's age, a count of
+  # days, how full a disk is), and their state, action and kind say every
+  # change of note; on `off` an app forgets Always On (the owner's rule), so
+  # the line naming what stops is read when its pane opens, never told.
   @untold_sentences ~w(off on problem)
   @moving ~w(requested streaming committed)
   @undoing ~w(aborting undoing)
   @receiving ~w(receiving staged activating)
+  @power_steps ~w(power_on power_reset)
+  # The states whose Details have lines.
+  @detailed_states ~w(creating ready on problem)
+  # The bytes of a digest a key keeps.
+  @key_bytes 16
 
   @type facts :: %{
-          role: :primary | :device | :candidate,
-          host_os: :macos | :linux,
-          now: DateTime.t(),
-          linked: boolean(),
-          moved: map() | nil,
-          move: map() | nil,
-          link: map(),
-          candidates: [map()],
-          provider: module(),
-          provision: map(),
-          review: map() | nil,
-          snapshots: map(),
-          disk: map() | nil,
-          primary_home: map() | nil,
-          primary_too_old: boolean(),
-          copies_bytes: non_neg_integer() | nil,
-          stays_here: [:imessage | :voice | :meetings]
+          required(:role) => :primary | :device | :candidate,
+          required(:host_os) => :macos | :linux,
+          required(:now) => DateTime.t(),
+          required(:linked) => boolean(),
+          required(:moved) => map() | nil,
+          required(:move) => map() | nil,
+          required(:link) => map(),
+          required(:candidates) => [map()],
+          required(:provider) => module(),
+          required(:providers) => [module(), ...],
+          required(:provision) => map(),
+          required(:review) => map() | nil,
+          required(:move_items) => [MoveReadiness.item()],
+          required(:snapshots) => map(),
+          required(:disk) => map() | nil,
+          required(:primary_home) => map() | nil,
+          required(:primary_too_old) => boolean(),
+          required(:copies_bytes) => non_neg_integer() | nil,
+          required(:stays_here) => [:imessage | :voice | :meetings],
+          required(:zone) => String.t()
         }
   @type summary :: %{String.t() => term()}
 
@@ -134,85 +177,175 @@ defmodule FermixCore.Management.HomeSummary do
   @spec actions() :: [String.t()]
   def actions, do: @actions
 
+  @doc "Every word an action's `needs` lists."
+  @spec needs() :: [String.t()]
+  def needs, do: @needs
+
   @doc "The summary for `facts` (`gather/5`'s)."
   @spec summary(facts()) :: summary()
-  def summary(%{role: :candidate} = facts), do: candidate(facts)
-  def summary(%{role: :device} = facts), do: device(facts)
-  def summary(%{role: :primary, link: %{desktops: [_ | _]}} = facts), do: server(facts)
-  def summary(%{role: :primary} = facts), do: setup(facts)
+  def summary(facts) when is_map(facts), do: facts |> screen() |> finish(facts)
+
+  defp screen(%{role: :candidate} = facts), do: candidate(facts)
+  defp screen(%{role: :device} = facts), do: device(facts)
+  defp screen(%{role: :primary, link: %{desktops: [_ | _]}} = facts), do: server(facts)
+  defp screen(%{role: :primary} = facts), do: setup(facts)
+
+  @doc """
+  The one digest of `summary`, `summary.key`: of everything it holds but
+  the key itself, the sentence of an `off`, `on` or `problem` (whose figures
+  move with the clock), what was last seen (`detail.seen_at`) and the line
+  that says when the provider was last checked. A change of the state, the
+  sentence of a step, an action, a confirm, an alternative, a line, the
+  progress or the notice moves it; a check of the provider that found
+  nothing new does not.
+  """
+  @spec key(summary()) :: String.t()
+  def key(%{"state" => state, "detail" => detail} = summary) when is_map(detail) do
+    sentence = if state in @untold_sentences, do: nil, else: summary["sentence"]
+
+    summary
+    |> Map.drop(["key", "sentence"])
+    |> Map.put("detail", keyed_detail(detail))
+    |> Map.put("told", sentence)
+    |> digest()
+  end
+
+  defp keyed_detail(detail) do
+    checked = Copy.checked_label()
+
+    detail
+    |> Map.delete("seen_at")
+    |> Map.update("lines", [], fn lines -> Enum.reject(lines, &(&1["label"] == checked)) end)
+  end
+
+  @doc """
+  An action's `key`: the digest of its `id`, `label`, `confirm`, `needs` and
+  `target`, the one thing it acts on: the server a move goes to
+  (`move_now`, `try_again`, `check_again`), the provider's id of the server
+  Fermix created (`turn_on`, `restart_server`, `delete_server`,
+  `start_again`, `cancel`; the old server's for Delete your old server), the
+  provider's id (`paste_token`), the place (`create_in`), or nil.
+  """
+  @spec action_key(String.t(), String.t(), String.t() | nil, [String.t()], String.t() | nil) ::
+          String.t()
+  def action_key(id, label, confirm, needs, target)
+      when id in @actions and is_binary(label) and is_list(needs),
+      do: digest([id, label, confirm, needs, target])
+
+  @doc """
+  The action `id` that `summary` offers under `key`, wherever it sits (its
+  action, `detail.alternatives`, `detail.actions`), or `:error` when it
+  offers none such: what says the owner saw the step they asked for.
+  """
+  @spec find_action(summary(), String.t(), String.t()) :: {:ok, map()} | :error
+  def find_action(%{"action" => action, "detail" => detail}, id, key)
+      when is_binary(id) and is_binary(key) do
+    offered =
+      List.wrap(action) ++ Map.get(detail, "alternatives", []) ++ Map.get(detail, "actions", [])
+
+    case Enum.find(offered, &(&1["id"] == id and &1["key"] == key)) do
+      nil -> :error
+      found -> {:ok, found}
+    end
+  end
+
+  @doc """
+  The server a move goes to, by the engine's one rule: on the computer that
+  sets Always On up, the one the created server's code enrolled, else the
+  newest held; on a linked desktop during a replace, the one the old server's
+  code for the new server enrolled, as the old server's own `home.status`
+  holds it (`primary_home`); nil when there is none. Reads `facts`' `role`,
+  `candidates`, `link` and `primary_home`.
+  """
+  @spec target(map()) :: map() | nil
+  def target(%{role: :device} = facts) do
+    case new_window(facts) do
+      %{"candidate_id" => id} when is_binary(id) -> held_by_server(facts, id)
+      _none -> nil
+    end
+  end
+
+  def target(%{candidates: []}), do: nil
+
+  def target(%{candidates: [_ | _]} = facts) do
+    case window(facts) do
+      %{candidate_id: id} when is_binary(id) -> held(facts, id) || newest(facts.candidates)
+      _window -> newest(facts.candidates)
+    end
+  end
 
   @doc """
   What `FermixCore.Home.StatusWatch` watches, from `facts` (`gather/5`'s):
 
-    * `key` changes exactly when the summary changes the way a surface draws
-      it: its state, its action (id and label), its problem kind, and its
-      sentence on every state but `on` and `problem`, whose sentences carry a
-      figure that moves with the clock, and `off`, which an app forgets until
-      it ends (an `off` summary has one key). On a server with desktops it also
-      holds what their own summaries read from its `home.status`: its newest
-      backup, its enrollment code (kind, state, who used it) and the servers
-      it holds. On a desktop and on a server with desktops it holds whether
-      the newest backup the summary counts from is 7 days old, the mark the
-      apps raise their notification at, which the summary's words do not
-      show. `detail` alone is no change.
+    * `key`: the summary's own (`key/1`), and on a server with desktops what
+      their summaries read from its `home.status` (its newest backup, its
+      enrollment code's kind, state and who used it, and the servers it
+      holds), which its own summary does not show.
     * `off`: whether the summary is `off`.
     * `next_change_ms`: the milliseconds until the summary next changes by
       the clock alone (a created server's code open 30 minutes awake, a link
       down 10 minutes awake, a held server's 24 hours, a backup's 3 days and
-      its 7), or nil when nothing does; always nil while off. A deadline may
-      change nothing when it comes (another rule decided first): the watch
-      then reads a same key and tells nobody.
+      its 7, a step's job budget), or nil when nothing does; always nil while
+      off. A deadline may change nothing when it comes (another rule decided
+      first): the watch then reads a same key and tells nobody.
   """
   @spec watch(facts()) :: %{key: term(), off: boolean(), next_change_ms: pos_integer() | nil}
   def watch(facts) when is_map(facts) do
     summary = summary(facts)
     off = summary["state"] == "off"
     next = if off, do: nil, else: next_change(facts)
-    %{key: {key(summary), drawn(facts), backup_week?(facts)}, off: off, next_change_ms: next}
+    %{key: {summary["key"], drawn(facts)}, off: off, next_change_ms: next}
   end
 
   @doc """
   The facts of `home`'s summary: `status` is the `home.status` record's own
   facts (`Management.Home.status/1` has gathered them, with
   `primary_too_old`), `link` the rail's status, and `opts` the seams `:now`,
-  `:host_os`, `:providers` (in place of `Provision.Registry.all/0`), and
+  `:host_os`, `:providers` (in place of `Provision.Registry.all/0`),
+  `:personalization` (the owner's time zone, `FermixCore.Clock`'s seam) and
   `:unreadable_files` (`Home.UnreadableFiles`, or nil for a verb with no
-  engine tree). Reads the provider's ledger, the last readiness
-  review, on the primary what its settings turn on that stops after a move,
-  and, on a desktop, the size of its stored copies.
+  engine tree); `MoveReadiness.summary_items/4` is given `opts` as they are.
+  Reads the provider's ledger, the last readiness review, on the primary
+  what its settings turn on that stops after a move and the review's items
+  they decide, and, on a desktop, the size of its stored copies.
   """
   @spec gather(Path.t(), map(), map(), map(), keyword()) :: facts()
   def gather(home, %{role: role} = record, link, status, opts)
       when is_binary(home) and is_map(link) and is_map(status) and is_list(opts) do
     host_os = Keyword.get_lazy(opts, :host_os, &host_os/0)
     reads = Keyword.take(opts, [:unreadable_files])
-    provider = Provision.current(home, Keyword.get_lazy(opts, :providers, &Registry.all/0))
+    providers = Keyword.get_lazy(opts, :providers, &Registry.all/0)
+    provider = Provision.current(home, providers)
+    now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
 
     %{
       role: role,
       host_os: host_os,
-      now: Keyword.get_lazy(opts, :now, &DateTime.utc_now/0),
+      now: now,
       linked: DesktopLink.linked?(record, home),
       moved: status.moved,
       move: status.move,
       link: link,
       candidates: status.candidates,
       provider: provider,
-      provision: Ledger.state(home, provider, reads),
+      providers: providers,
+      provision: Ledger.state(home, provider, Keyword.put(reads, :now, now)),
       review: review(home, role, reads),
+      move_items: move_items(home, role, host_os, {status, link}, opts),
       snapshots: status.snapshots,
       disk: status.disk,
       primary_home: status.primary_home,
       primary_too_old: Map.get(status, :primary_too_old, false),
       copies_bytes: copies_bytes(home, role, reads),
-      stays_here: stays_here(home, role, host_os, reads)
+      stays_here: stays_here(home, role, host_os, reads),
+      zone: Clock.shown_zone(Keyword.take(opts, [:personalization]))
     }
   end
 
   # -- the computer that sets Always On up ---------------------------------------
 
   defp setup(facts) do
-    checks = [&undone/1, &ledger_problem/1, &provisioned/1, &own_server/1, &chosen/1]
+    checks = [&running/1, &undone/1, &ledger_problem/1, &provisioned/1, &own_server/1, &chosen/1]
     Enum.find_value(checks, & &1.(facts)) || off(facts)
   end
 
@@ -237,11 +370,25 @@ defmodule FermixCore.Management.HomeSummary do
 
   defp ledger_problem(_facts), do: nil
 
+  # A step that stopped, by the step: a power action's and a delete's, then
+  # a create's by its reason.
+  defp failure_problem(%{action: action} = failure, facts) when action in @power_steps,
+    do: failure |> power_failed() |> before_move(facts)
+
+  defp failure_problem(%{action: "delete"} = failure, facts) do
+    {note, delete} = server_costs(facts.provision)
+
+    problem("delete_failed", failure.sentence, delete, %{
+      "note" => note,
+      "seen_at" => iso(failure.at)
+    })
+  end
+
   defp failure_problem(%{reason: "unavailable", next_location: next} = failure, facts)
        when is_binary(next) do
     city = Provision.city(facts.provider, next)
 
-    problem("no_capacity", failure.sentence, action(:create_in, %{city: city}), %{
+    problem("no_capacity", failure.sentence, action(:create_in, %{city: city, next: next}), %{
       "next_location" => next,
       "seen_at" => iso(failure.at)
     })
@@ -252,6 +399,7 @@ defmodule FermixCore.Management.HomeSummary do
     {kind, act, alternatives} =
       case reason do
         "unavailable" -> {"no_capacity", :learn_more, []}
+        "nothing_in_stock" -> {"no_capacity", :learn_more, []}
         "account_limit" -> {"account_limit", :open_console, [:own_server]}
         "read_only_token" -> {"read_only_token", :paste_token, []}
         "gone" -> {"deleted", :start_again, []}
@@ -263,6 +411,11 @@ defmodule FermixCore.Management.HomeSummary do
       "alternatives" => Enum.map(alternatives, &action(&1, words(facts)))
     })
     |> before_move(facts)
+  end
+
+  defp power_failed(%{action: action} = failure) do
+    act = if action == "power_on", do: :turn_on, else: :restart_server
+    problem("power_failed", failure.sentence, act, %{"seen_at" => iso(failure.at)})
   end
 
   defp provisioned(%{provision: %{state: :deleting}}),
@@ -341,17 +494,26 @@ defmodule FermixCore.Management.HomeSummary do
   defp chosen(_facts), do: nil
 
   defp off(facts) do
-    view("off", sentence(:off, facts, %{stays_here: facts.stays_here}), action(:set_up), %{
-      "connect" => Map.put(connect_detail(facts), "sentence", sentence(:connect, facts))
-    })
+    view(
+      "off",
+      sentence(:off, facts, %{stays_here: facts.stays_here}),
+      action(:paste_token, %{first: true}),
+      %{"alternatives" => [action(:own_server)]}
+    )
   end
 
-  defp connect(facts),
-    do: view("connect", sentence(:connect, facts), nil, connect_detail(facts))
+  # The token screen: the first one, while a code for a server of the
+  # owner's own is open (which Cancel closes), or after the provider refused
+  # the token before anything was created.
+  defp connect(facts) do
+    code? = match?(%{kind: :manual, state: :open}, window(facts))
+    paste = action(:paste_token, %{first: facts.provision.token != :refused})
+    cancel = if code?, do: [action(:cancel, %{code: true})], else: []
 
-  # The provider's own "How to get one" steps.
-  defp connect_detail(facts),
-    do: %{"steps" => facts.provider.display().steps, "alternatives" => [action(:own_server)]}
+    view("connect", sentence(:connect, facts), paste, %{
+      "alternatives" => [action(:own_server) | cancel]
+    })
+  end
 
   defp creating(step),
     do: view("creating", Copy.summary_sentence(step, %{}), action(:cancel), %{})
@@ -420,6 +582,57 @@ defmodule FermixCore.Management.HomeSummary do
   defp server_costs(_provision),
     do: {Copy.summary_sentence(:server_costs, %{}), action(:delete_server)}
 
+  # -- a step whose job runs -----------------------------------------------------
+
+  # The ledger names the step's job before it starts, so this is what the
+  # summary says from the press on, whatever the job has written yet.
+  defp running(%{provision: %{action: %{kind: kind}}} = facts), do: running_step(kind, facts)
+  defp running(_facts), do: nil
+
+  # Start again deletes what stands first, which no one cancels.
+  defp running_step("create", %{provision: %{state: :deleting}} = facts), do: deleting_step(facts)
+
+  defp running_step("create", %{provision: %{replace: %{}}} = facts),
+    do: new_server_step(:replace_creating, facts)
+
+  defp running_step("create", _facts), do: creating(:starting)
+  defp running_step("delete", facts), do: deleting_step(facts)
+
+  defp running_step("power_on", %{provision: %{replace: %{}}} = facts),
+    do: view("creating", sentence(:replace_turning_on, facts), nil, %{})
+
+  defp running_step("power_on", facts),
+    do: view("creating", sentence(:turning_on, facts), nil, %{})
+
+  defp running_step("power_reset", facts),
+    do: view("creating", sentence(:restarting, facts), nil, %{})
+
+  defp deleting_step(%{provision: %{replace: %{current: :new}}} = facts),
+    do: view("creating", sentence(:replace_deleting, facts), nil, %{})
+
+  defp deleting_step(%{provision: %{replace: %{}}} = facts),
+    do: view("creating", sentence(:replace_cancelling, facts), nil, %{})
+
+  defp deleting_step(_facts),
+    do: view("creating", Copy.summary_sentence(:deleting, %{}), nil, %{})
+
+  # The step in hand, from what the job wrote so far.
+  defp progress(%{provision: %{action: %{kind: kind}} = provision} = facts),
+    do: Copy.summary_sentence(progress_key(kind, provision), words(facts))
+
+  defp progress(_facts), do: nil
+
+  defp progress_key(kind, _provision) when kind in @power_steps, do: :progress_power
+  defp progress_key(_kind, %{state: :deleting}), do: :progress_deleting
+  defp progress_key("delete", _provision), do: :progress_deleting
+
+  defp progress_key("create", %{server: %{status: status}}) when status in [:creating, :created],
+    do: :progress_starting
+
+  defp progress_key("create", %{server: %{status: :requested}}), do: :progress_server
+  defp progress_key("create", %{state: :creating}), do: :progress_firewall
+  defp progress_key("create", _provision), do: :progress_checking
+
   # -- the computer the move left ------------------------------------------------
 
   defp device(%{move: %{"phase" => "committing"}} = facts),
@@ -439,6 +652,8 @@ defmodule FermixCore.Management.HomeSummary do
 
   defp desktop(facts) do
     checks = [
+      &running/1,
+      &failed_step/1,
       &replace_moving/1,
       &away/1,
       &too_old/1,
@@ -450,6 +665,14 @@ defmodule FermixCore.Management.HomeSummary do
 
     Enum.find_value(checks, & &1.(facts)) || on(facts)
   end
+
+  # A power action on the server the home lives on that stopped: tried again,
+  # and never with a delete beside it, since that server holds the home.
+  defp failed_step(%{provision: %{replace: nil, failure: %{action: action} = failure}})
+       when action in @power_steps,
+       do: power_failed(failure)
+
+  defp failed_step(_facts), do: nil
 
   # No session with the server: what the provider last said, else ten
   # minutes of silence while this computer is awake.
@@ -731,17 +954,6 @@ defmodule FermixCore.Management.HomeSummary do
 
   defp window(%{link: link}), do: Map.get(link, :enrollment)
 
-  # The server the move goes to: the one the created server's code enrolled,
-  # else the newest held.
-  defp target(%{candidates: []}), do: nil
-
-  defp target(facts) do
-    case window(facts) do
-      %{candidate_id: id} when is_binary(id) -> held(facts, id) || newest(facts.candidates)
-      _window -> newest(facts.candidates)
-    end
-  end
-
   defp held(facts, id), do: Enum.find(facts.candidates, &(&1["candidate_id"] == id))
   defp newest(candidates), do: Enum.max_by(candidates, & &1["enrolled_at"])
 
@@ -784,9 +996,11 @@ defmodule FermixCore.Management.HomeSummary do
   defp problem(kind, sentence, act, extra) when is_atom(act),
     do: problem(kind, sentence, action(act), extra)
 
+  # An action as a view names it: its id, its label, and the values its
+  # record is finished from (`record/2`).
   defp action(id, values \\ %{}) when is_atom(id) do
     true = Atom.to_string(id) in @actions
-    %{"id" => Atom.to_string(id), "label" => Copy.summary_label(id, values)}
+    %{"id" => Atom.to_string(id), "label" => Copy.summary_label(id, values), values: values}
   end
 
   defp sentence(key, facts, values \\ %{}),
@@ -809,11 +1023,305 @@ defmodule FermixCore.Management.HomeSummary do
   defp iso(nil), do: nil
   defp iso(%DateTime{} = at), do: at |> DateTime.truncate(:second) |> DateTime.to_iso8601()
 
+  # -- finishing the screen ------------------------------------------------------
+
+  # Every action a record, then what Details draws, the notice and the key.
+  defp finish(view, facts) do
+    summary =
+      view
+      |> Map.update!("action", &(&1 && record(&1, facts)))
+      |> Map.update!("detail", &finish_detail(&1, view, facts))
+      |> Map.put("notice", notice(view, facts))
+
+    Map.put(summary, "key", key(summary))
+  end
+
+  defp finish_detail(detail, view, facts) do
+    detail
+    |> records_at("alternatives", facts)
+    |> records_at("actions", facts)
+    |> put_some("lines", lines(view, facts))
+    |> put_some("providers", providers(view, facts))
+    |> put_some("progress", progress(facts))
+  end
+
+  defp records_at(detail, field, facts) do
+    case Map.fetch(detail, field) do
+      {:ok, actions} -> Map.put(detail, field, Enum.map(actions, &record(&1, facts)))
+      :error -> detail
+    end
+  end
+
+  defp put_some(detail, _field, empty) when empty in [nil, []], do: detail
+  defp put_some(detail, field, value), do: Map.put(detail, field, value)
+
+  defp record(%{"id" => id, "label" => label, values: values}, facts) do
+    act = String.to_existing_atom(id)
+    needs = needs(act)
+    confirm = confirm(act, values, facts)
+
+    %{
+      "id" => id,
+      "label" => label,
+      "needs" => needs,
+      "confirm" => confirm,
+      "url" => url(act, facts),
+      "key" => action_key(id, label, confirm, needs, target_of(act, values, facts))
+    }
+  end
+
+  defp needs(:paste_token), do: ["token"]
+  defp needs(act) when act in [:create_server, :replace_server], do: ["choice"]
+  defp needs(act) when act in [:move_now, :try_again], do: ["recovery_passphrase"]
+  defp needs(_act), do: []
+
+  # What the owner accepts first: whatever spends money, deletes, restarts a
+  # server or moves.
+  defp confirm(:create_server, _values, facts), do: sentence(:confirm_create, facts)
+
+  defp confirm(:create_in, %{city: city}, facts),
+    do: sentence(:confirm_create_in, facts, %{city: city})
+
+  defp confirm(:start_again, _values, facts), do: sentence(:confirm_start_again, facts)
+  defp confirm(:replace_server, _values, facts), do: sentence(:confirm_replace, facts)
+  defp confirm(:restart_server, _values, facts), do: sentence(:confirm_restart, facts)
+  defp confirm(:delete_server, values, facts), do: sentence(:confirm_delete, facts, values)
+  defp confirm(:cancel, %{code: true}, _facts), do: nil
+
+  defp confirm(:cancel, _values, %{provision: %{replace: %{}}} = facts),
+    do: sentence(:confirm_cancel, facts, %{which: "new"})
+
+  defp confirm(:cancel, _values, facts), do: sentence(:confirm_cancel, facts)
+  defp confirm(act, _values, facts) when act in [:move_now, :try_again], do: move_confirm(facts)
+  defp confirm(_act, _values, _facts), do: nil
+
+  # During a replace the review is the old server's own, so the confirm
+  # says what every such move does; otherwise each warning this home's
+  # settings give, after any other the last review of the same server gave.
+  defp move_confirm(%{role: :device} = facts), do: sentence(:confirm_replace_move, facts)
+
+  defp move_confirm(facts) do
+    own = Enum.map(facts.move_items, & &1.id)
+    target_id = target(facts)["candidate_id"]
+
+    reviewed =
+      for %{"status" => "warn", "id" => id, "sentence" => said} <-
+            review_items(facts.review, target_id),
+          id not in own,
+          do: said
+
+    Copy.move_confirm(
+      reviewed ++ for(%{status: :warn} = item <- facts.move_items, do: item.sentence)
+    )
+  end
+
+  defp url(:learn_more, facts), do: Copy.always_on_docs_url(facts.provider.display().docs_anchor)
+  defp url(:open_console, facts), do: facts.provider.display().console_url
+  defp url(_act, _facts), do: nil
+
+  defp target_of(act, _values, facts) when act in [:move_now, :try_again, :check_again],
+    do: candidate_id(target(facts))
+
+  defp target_of(:delete_server, %{which: "old"}, facts),
+    do: server_id(get_in(facts, [:provision, :replace, :old]))
+
+  defp target_of(act, _values, facts)
+       when act in [:turn_on, :restart_server, :delete_server, :start_again, :cancel],
+       do: server_id(facts.provision.server)
+
+  defp target_of(:paste_token, _values, facts), do: facts.provider.id()
+  defp target_of(:create_in, %{next: next}, _facts), do: next
+  defp target_of(_act, _values, _facts), do: nil
+
+  defp candidate_id(%{"candidate_id" => id}), do: id
+  defp candidate_id(nil), do: nil
+
+  defp server_id(%{id: id}), do: id
+  defp server_id(nil), do: nil
+
+  # Every provider's token screen, wherever a token is asked for.
+  defp providers(view, facts) do
+    if "paste_token" in offered_ids(view),
+      do: Enum.map(facts.providers, &provider_screen/1),
+      else: []
+  end
+
+  defp offered_ids(%{"action" => action, "detail" => detail}) do
+    actions = List.wrap(action) ++ Map.get(detail, "alternatives", [])
+    Enum.map(actions, & &1["id"])
+  end
+
+  defp provider_screen(provider) do
+    display = provider.display()
+
+    %{
+      "id" => provider.id(),
+      "name" => display.name,
+      "token_label" => display.token_label,
+      "sentence" => Copy.summary_sentence(:connect, %{token_label: display.token_label}),
+      "steps" => display.steps,
+      "console_url" => display.console_url,
+      "docs_url" => Copy.always_on_docs_url(display.docs_anchor)
+    }
+  end
+
+  # -- Details' lines --------------------------------------------------------------
+
+  # The states whose Details name a server: from the facts the state's
+  # detail holds, else the server Fermix created, then when the provider was
+  # last read back and what the servers cost.
+  defp lines(%{"state" => state, "detail" => detail}, facts) when state in @detailed_states do
+    ctx = %{zone: facts.zone, machine: machine(facts.host_os)}
+
+    Enum.concat([
+      server_lines(detail["server"] || created_facts(facts), ctx),
+      time_line(:waits_until, detail["waits_until"], ctx),
+      backup_lines(detail["backups"], ctx),
+      value_line(:copies, detail["copies_bytes"], ctx),
+      value_line(:disk, detail["disk_used"], ctx),
+      checked_line(facts, ctx),
+      cost_line(:costs, facts.provision.server, ctx),
+      cost_line(:old_costs, get_in(facts, [:provision, :replace, :old]), ctx)
+    ])
+  end
+
+  defp lines(_view, _facts), do: []
+
+  @server_lines [
+    server: "name",
+    size: "type",
+    place: "location",
+    address: "ipv4",
+    system: "system",
+    version: "version"
+  ]
+
+  defp server_lines(nil, _ctx), do: []
+
+  defp server_lines(server, ctx) do
+    for {key, field} <- @server_lines,
+        is_binary(server[field]),
+        do: Copy.summary_line(key, server[field], ctx)
+  end
+
+  # The server Fermix created, while it stands and no state names another.
+  defp created_facts(%{provision: %{server: %{status: status} = server}} = facts)
+       when status != :gone do
+    %{
+      "name" => server.name,
+      "type" => facts.provider.type_name(server.type),
+      "location" => Provision.city(facts.provider, server.location),
+      "ipv4" => server.ipv4
+    }
+  end
+
+  defp created_facts(_facts), do: nil
+
+  defp time_line(key, text, ctx) when is_binary(text),
+    do: [Copy.summary_line(key, time(text), ctx)]
+
+  defp time_line(_key, _text, _ctx), do: []
+
+  defp backup_lines(nil, _ctx), do: []
+
+  defp backup_lines(backups, ctx),
+    do:
+      for(
+        %{"place" => place, "at" => at} <- backups,
+        do: Copy.summary_line(:backup, {place, time(at)}, ctx)
+      )
+
+  defp value_line(_key, nil, _ctx), do: []
+  defp value_line(key, value, ctx), do: [Copy.summary_line(key, value, ctx)]
+
+  defp checked_line(%{provision: %{checked_at: %DateTime{} = at, server: server}}, ctx) do
+    if standing?(server), do: [Copy.summary_line(:checked, at, ctx)], else: []
+  end
+
+  defp checked_line(_facts, _ctx), do: []
+
+  defp cost_line(key, %{status: status, total_monthly: total, currency: currency}, ctx)
+       when status != :gone and is_binary(total) and is_binary(currency),
+       do: [Copy.summary_line(key, {total, currency}, ctx)]
+
+  defp cost_line(_key, _server, _ctx), do: []
+
+  # -- the notice ------------------------------------------------------------------
+
+  # The occurrence the state stands for, newest kind first; nil when none.
+  defp notice(view, facts) do
+    case occurrence(view, facts) do
+      {id, said} -> %{"id" => id, "sentence" => said}
+      nil -> nil
+    end
+  end
+
+  defp occurrence(_view, %{role: :primary, link: %{desktops: [_ | _]}} = facts),
+    do: week_occurrence(facts, :notice_server_backup_week)
+
+  defp occurrence(view, %{role: role} = facts) when role in [:primary, :device] do
+    Enum.find_value(
+      [
+        &reach_occurrence/2,
+        &set_up_occurrence/2,
+        &ready_occurrence/2,
+        fn _view, facts -> week_occurrence(facts, :notice_backup_week) end,
+        &moved_occurrence/2
+      ],
+      & &1.(view, facts)
+    )
+  end
+
+  defp occurrence(_view, _facts), do: nil
+
+  defp reach_occurrence(%{"detail" => %{"kind" => "cannot_reach"}} = view, facts) do
+    case get_in(facts, [:link, :primary, :down_at]) do
+      %DateTime{} = at -> {"cannot_reach:" <> iso(at), view["sentence"]}
+      nil -> nil
+    end
+  end
+
+  defp reach_occurrence(_view, _facts), do: nil
+
+  defp set_up_occurrence(%{"detail" => %{"kind" => kind}} = view, facts)
+       when kind in ["not_set_up", "waited_too_long"] do
+    case facts.provision.server do
+      %{created_at: %DateTime{} = at} -> {"not_set_up:" <> iso(at), view["sentence"]}
+      _none -> nil
+    end
+  end
+
+  defp set_up_occurrence(_view, _facts), do: nil
+
+  defp ready_occurrence(%{"state" => "ready"}, facts) do
+    key = if facts.role == :device, do: :replace_ready, else: :notice_ready
+    {"ready:" <> target(facts)["candidate_id"], sentence(key, facts)}
+  end
+
+  defp ready_occurrence(_view, _facts), do: nil
+
+  defp week_occurrence(facts, key) do
+    if backup_week?(facts),
+      do: {"backup_week:" <> iso(backup_since(facts)), sentence(key, facts)}
+  end
+
+  # The move is told until the first backup after it.
+  defp moved_occurrence(%{"state" => "on"}, %{moved: %{epoch: epoch, moved_at: moved_at}} = facts) do
+    newest = newest_backup(get_in(facts, [:primary_home, "snapshots"]))
+
+    if newest == nil or DateTime.compare(newest, moved_at) != :gt,
+      do: {"moved:#{epoch}", sentence(:notice_moved, facts)}
+  end
+
+  defp moved_occurrence(_view, _facts), do: nil
+
   # -- watching ------------------------------------------------------------------
 
-  defp key(%{"state" => state, "action" => action, "detail" => detail} = summary) do
-    sentence = if state in @untold_sentences, do: nil, else: summary["sentence"]
-    {state, action, Map.get(detail, "kind"), sentence}
+  defp digest(term) do
+    :sha256
+    |> :crypto.hash(:erlang.term_to_binary(term, [:deterministic]))
+    |> binary_part(0, @key_bytes)
+    |> Base.url_encode64(padding: false)
   end
 
   # What a desktop's own summary reads from its server's `home.status`
@@ -857,8 +1365,12 @@ defmodule FermixCore.Management.HomeSummary do
   defp deadlines(%{role: :device} = facts) do
     since = backup_since(facts)
 
-    [link_deadline(facts), backup_deadline(since, facts), week_deadline(since, facts)] ++
-      replace_deadlines(facts)
+    [
+      link_deadline(facts),
+      backup_deadline(since, facts),
+      week_deadline(since, facts),
+      action_deadline(facts)
+    ] ++ replace_deadlines(facts)
   end
 
   defp deadlines(%{role: :primary, link: %{desktops: [_ | _]}} = facts) do
@@ -867,13 +1379,22 @@ defmodule FermixCore.Management.HomeSummary do
   end
 
   defp deadlines(%{role: :primary} = facts),
-    do: [window_deadline(window(facts)) | expiries(facts.candidates, facts)]
+    do: [
+      window_deadline(window(facts)),
+      action_deadline(facts) | expiries(facts.candidates, facts)
+    ]
 
   # A created server's code, open while this computer is awake (`not_set_up`).
   defp window_deadline(%{kind: :provisioned, state: :open} = window),
     do: @setup_ms - Map.get(window, :awake_ms, 0)
 
   defp window_deadline(_window), do: nil
+
+  # A step's action is read as interrupted once its job's budget is out.
+  defp action_deadline(%{provision: %{action: %{started_at: at}}} = facts),
+    do: ms_until(DateTime.add(at, Ledger.action_budget_ms(), :millisecond), facts)
+
+  defp action_deadline(_facts), do: nil
 
   # A held server is dropped at its expiry (`Home.Candidates`).
   defp expiries(candidates, facts),
@@ -953,6 +1474,22 @@ defmodule FermixCore.Management.HomeSummary do
   end
 
   defp stays_here(_home, _role, _host_os, _reads), do: []
+
+  # The review's items this home's settings decide, for the server a move
+  # would go to, which Move now's confirm names: only the computer that sets
+  # Always On up, while a server is held.
+  defp move_items(home, :primary, host_os, {status, link}, opts) do
+    case target(%{role: :primary, candidates: status.candidates, link: link}) do
+      %{"name" => name} ->
+        settings = MoveReadiness.settings(home, Keyword.take(opts, [:unreadable_files]))
+        MoveReadiness.summary_items(settings, host_os == :macos, name, opts)
+
+      nil ->
+        []
+    end
+  end
+
+  defp move_items(_home, _role, _host_os, _status_link, _opts), do: []
 
   # The space the server's backups take on this desktop (`Desktop.SnapshotStore`).
   defp copies_bytes(home, :device, reads) do

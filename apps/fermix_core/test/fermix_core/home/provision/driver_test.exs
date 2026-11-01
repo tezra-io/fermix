@@ -78,6 +78,23 @@ defmodule FermixCore.Home.Provision.DriverTest do
       assert_received :code_opened
     end
 
+    # Always On setup §5: what the server costs is the offer its create
+    # chose, kept from the server's first write, so Details never asks the
+    # provider for a price.
+    test "the server is written with the price of the offer it was asked for", ctx do
+      test = self()
+      spy = fn primitive -> send(test, {:at, primitive, ledger!(ctx.home)}) end
+      priced = Map.merge(@request, %{total_monthly: "12.00", currency: "EUR"})
+
+      assert {:ok, %{total_monthly: "12.00", currency: "EUR"}} =
+               Driver.create(Nimbus, ctx.home, priced, Keyword.put(ctx.opts, :spy, spy))
+
+      assert_received {:at, :create_server,
+                       %{server: %{status: :requested, total_monthly: "12.00", currency: "EUR"}}}
+
+      assert %{server: %{total_monthly: "12.00", currency: "EUR"}} = ledger!(ctx.home)
+    end
+
     test "keeps nothing of an answer but its facts", ctx do
       {:ok, _server} = Driver.create(Nimbus, ctx.home, @request, ctx.opts)
 
@@ -186,6 +203,42 @@ defmodule FermixCore.Home.Provision.DriverTest do
       assert :ok = Driver.power(Nimbus, ctx.home, :reset, ctx.opts)
       assert {:power, {_id, :reset}} = ctx.world |> Nimbus.calls() |> Enum.take(-2) |> hd()
       assert_received {:phase, "power"}
+    end
+
+    test "a reconcile writes when it read the provider back", ctx do
+      assert ledger!(ctx.home).checked_at == nil
+      later = ~U[2031-05-04 10:05:00Z]
+
+      assert {:ok, %{checked_at: ^later}} =
+               Driver.reconcile(Nimbus, ctx.home, Keyword.put(ctx.opts, :now, fn -> later end))
+    end
+
+    # A failed power action stays in the ledger (`power_failed`) until the
+    # server's power is known to be on: a power action that succeeds, or a
+    # reconcile that reads it running.
+    test "a power failure goes once the server is known to run", ctx do
+      failure = %{
+        reason: "unreachable",
+        sentence: "Fermix could not reach Nimbus.",
+        next_location: nil,
+        at: @now,
+        action: "power_on",
+        type: "small-4",
+        location: "osl1"
+      }
+
+      {:ok, _ledger} = Ledger.update(ctx.home, "nimbus", &{:ok, Ledger.put_failure(&1, failure)})
+      assert :ok = Driver.power(Nimbus, ctx.home, :on, ctx.opts)
+      assert ledger!(ctx.home).failure == nil
+
+      {:ok, _ledger} = Ledger.update(ctx.home, "nimbus", &{:ok, Ledger.put_failure(&1, failure)})
+      assert {:ok, %{failure: nil}} = Driver.reconcile(Nimbus, ctx.home, ctx.opts)
+
+      # A create's failure is not the power's to clear.
+      create = %{failure | action: "create"}
+      {:ok, _ledger} = Ledger.update(ctx.home, "nimbus", &{:ok, Ledger.put_failure(&1, create)})
+      assert :ok = Driver.power(Nimbus, ctx.home, :on, ctx.opts)
+      assert %{failure: %{action: "create"}} = ledger!(ctx.home)
     end
 
     test "what was deleted outside Fermix is marked gone", ctx do

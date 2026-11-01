@@ -48,8 +48,21 @@ defmodule FermixCore.Management.Copy do
   token's label, its cities, its "How to get one" steps) are its own display
   data (`FermixCore.Home.Provision`), passed in as values; the proper nouns
   they use are read from the provider registry.
+
+  Beside them sit the rest of what an Always On screen shows (Always On
+  setup §3.1): the sentence each action's confirm asks (`summary_sentence/2`'s
+  `confirm_*` keys, and `move_confirm/1` for Move now, built from the
+  review's own warnings), never with a time or a price in it; the sentence
+  of the step a job is in (`progress_*`); a notice's sentence (`notice_*`);
+  the Details lines (`summary_line/3`), each a label and a value finished
+  here, times stated absolutely in the owner's zone (`FermixCore.Clock`),
+  prices as the ledger keeps them; the Always On docs page
+  (`always_on_docs_url/1`); and the command for a server of the owner's own
+  (`own_server_command/0`), which carries no code.
   """
 
+  alias FermixCore.Clock
+  alias FermixCore.Home.Disk
   alias FermixCore.Home.Provision.Registry, as: ProvisionRegistry
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Setup.SecretPaths
@@ -80,7 +93,30 @@ defmodule FermixCore.Management.Copy do
                    replace_creating replace_starting replace_installing replace_connecting
                    replace_ready replace_moving replace_deleting replace_cancelling
                    replace_turned_off replace_not_set_up replace_waited_too_long
-                   new_server_costs old_server_costs)a
+                   new_server_costs old_server_costs turning_on replace_turning_on restarting
+                   progress_checking progress_firewall progress_server progress_starting
+                   progress_deleting progress_power confirm_create confirm_create_in
+                   confirm_start_again confirm_replace confirm_restart confirm_delete
+                   confirm_cancel confirm_replace_move notice_ready notice_moved
+                   notice_backup_week notice_server_backup_week)a
+  # Each Details line's label, by its key.
+  @line_labels [
+    server: "Server",
+    size: "Size",
+    place: "Place",
+    address: "Address",
+    system: "System",
+    version: "Version",
+    waits_until: "Waits until",
+    checked: "Last checked",
+    costs: "Costs",
+    old_costs: "Old server costs",
+    disk: "Server disk"
+  ]
+  @line_keys Keyword.keys(@line_labels) ++ [:backup, :copies]
+  @docs_url "https://fermix.ai/docs/always-on/"
+  @own_server_command "curl -fsSL https://fermix.ai/always-on | sudo sh"
+  @currency_signs %{"EUR" => "€", "USD" => "$", "GBP" => "£"}
   # A sentence starts at the beginning of the string and after a terminator or
   # a colon, which is how this copy introduces a command or a list.
   @sentence_break ~r/(?<=[.?:])\s+/
@@ -407,6 +443,68 @@ defmodule FermixCore.Management.Copy do
   def summary_sentence(:old_server_costs, _values),
     do: "Your old server costs its monthly price until it is deleted."
 
+  def summary_sentence(:turning_on, _values), do: "Turning your server on…"
+  def summary_sentence(:replace_turning_on, _values), do: "Turning your new server on…"
+  def summary_sentence(:restarting, _values), do: "Restarting your server…"
+
+  def summary_sentence(:progress_checking, %{provider: provider}),
+    do: "Checking that #{provider} has the server in stock."
+
+  def summary_sentence(:progress_firewall, _values), do: "Creating the server's firewall."
+  def summary_sentence(:progress_server, _values), do: "Creating the server."
+  def summary_sentence(:progress_starting, _values), do: "Waiting for the server to start."
+
+  def summary_sentence(:progress_deleting, _values),
+    do: "Deleting the server and what came with it."
+
+  def summary_sentence(:progress_power, %{provider: provider}),
+    do: "Waiting for #{provider} to finish."
+
+  def summary_sentence(:confirm_create, %{provider: provider}),
+    do: "Create your server? #{provider} bills it by the hour until it is deleted."
+
+  def summary_sentence(:confirm_create_in, %{provider: provider, city: city}),
+    do: "Create your server in #{city}? #{provider} bills it by the hour until it is deleted."
+
+  def summary_sentence(:confirm_start_again, %{provider: provider}),
+    do:
+      "Delete what Fermix created and create your server again? #{provider} bills it by " <>
+        "the hour until it is deleted."
+
+  def summary_sentence(:confirm_replace, %{provider: provider}),
+    do:
+      "Create a new server to replace this one? #{provider} bills it by the hour until it " <>
+        "is deleted, and Fermix deletes the old one once the move to it is done."
+
+  def summary_sentence(:confirm_restart, _values),
+    do: "Restart your server? Fermix on it stops until it starts again."
+
+  def summary_sentence(:confirm_delete, %{which: which}) when which in ["new", "old"],
+    do: "Delete your #{which} server? Everything on it is deleted."
+
+  def summary_sentence(:confirm_delete, _values),
+    do: "Delete your server? Everything on it is deleted."
+
+  def summary_sentence(:confirm_cancel, %{which: "new"}),
+    do: "Cancel and delete your new server? Everything Fermix created for it is deleted."
+
+  def summary_sentence(:confirm_cancel, _values),
+    do: "Cancel and delete your server? Everything Fermix created for it is deleted."
+
+  def summary_sentence(:confirm_replace_move, _values),
+    do:
+      "Move Fermix to your new server now? Your old server serves nothing while the move " <>
+        "runs, and Fermix deletes it once the move is done."
+
+  def summary_sentence(:notice_ready, _values), do: "Your server is ready for the move."
+  def summary_sentence(:notice_moved, _values), do: "Fermix moved to your server."
+
+  def summary_sentence(:notice_backup_week, %{machine: machine}),
+    do: "Your last backup is a week old. It runs when this #{machine} is online."
+
+  def summary_sentence(:notice_server_backup_week, _values),
+    do: "The last backup is a week old. It runs when your Mac is online."
+
   def summary_sentence(:data, %{provider: provider}),
     do:
       "Your conversations and memories, the secrets, the browser and traces live on your " <>
@@ -438,13 +536,95 @@ defmodule FermixCore.Management.Copy do
   defp capitalised(<<first::utf8, rest::binary>>), do: String.upcase(<<first::utf8>>) <> rest
 
   @doc """
+  Move now's confirm: the question, then each warning of the review in its
+  own words (`warnings`, the sentences, in the review's order).
+  """
+  @spec move_confirm([String.t()]) :: String.t()
+  def move_confirm(warnings) when is_list(warnings),
+    do: Enum.join(["Move Fermix to your server now?" | warnings], " ")
+
+  @doc "Every key `summary_line/3` takes."
+  @spec summary_line_keys() :: [atom()]
+  def summary_line_keys, do: @line_keys
+
+  @doc "The label of the Details line `key` (`summary_line_keys/0`)."
+  @spec summary_line_label(atom()) :: String.t()
+  def summary_line_label(:backup), do: "Last backup to your desktop"
+  def summary_line_label(:copies), do: "Backups on this Mac"
+  def summary_line_label(key), do: Keyword.fetch!(@line_labels, key)
+
+  @doc "The label of the line that says when the provider was last read back."
+  @spec checked_label() :: String.t()
+  def checked_label, do: summary_line_label(:checked)
+
+  @doc """
+  One Details line, `%{"label", "value"}`, its value finished here from
+  `value`: a name, a city, an address, a system or a version as it is; a
+  time (`waits_until`, `checked`, a `backup`'s `{place, at}`) stated in
+  `ctx`'s `zone`; the space this computer's `copies` take, in bytes, on
+  `ctx`'s `machine`; how full the server's `disk` is, a fraction; what the
+  server (`costs`) or the old one (`old_costs`) costs, `{total_monthly,
+  currency}` as the ledger keeps them.
+  """
+  @spec summary_line(atom(), term(), map()) :: %{String.t() => String.t()}
+  def summary_line(:backup, {place, %DateTime{} = at}, %{zone: zone}),
+    do: line("Last backup to #{place}", stated(at, zone))
+
+  def summary_line(:copies, bytes, %{machine: machine}) when is_integer(bytes),
+    do: line("Backups on this #{machine}", Disk.gib(bytes))
+
+  def summary_line(:disk, used, _ctx) when is_number(used),
+    do: line(summary_line_label(:disk), "#{round(used * 100)}% used")
+
+  def summary_line(key, %DateTime{} = at, %{zone: zone}) when key in [:waits_until, :checked],
+    do: line(summary_line_label(key), stated(at, zone))
+
+  def summary_line(key, {total, currency}, _ctx) when key in [:costs, :old_costs],
+    do:
+      line(
+        summary_line_label(key),
+        "#{money(total, currency)} a month, billed by the hour until deleted"
+      )
+
+  def summary_line(key, value, _ctx)
+      when key in [:server, :size, :place, :address, :system, :version] and is_binary(value),
+      do: line(summary_line_label(key), value)
+
+  defp line(label, value), do: %{"label" => label, "value" => value}
+
+  defp stated(at, zone), do: Clock.stated_instant(at, personalization: [timezone: zone])
+
+  # A price as the ledger keeps it ("8.33"), after its currency's sign or code.
+  defp money(total, currency) do
+    case Map.fetch(@currency_signs, currency) do
+      {:ok, sign} -> sign <> total
+      :error -> "#{currency} #{total}"
+    end
+  end
+
+  @doc "The Always On docs page, at the provider's own part (`docs_anchor`)."
+  @spec always_on_docs_url(String.t()) :: String.t()
+  def always_on_docs_url(anchor) when is_binary(anchor) and anchor != "",
+    do: @docs_url <> "#" <> anchor
+
+  @doc """
+  The command an owner runs on a Linux server of their own to install Fermix
+  there: it carries no code, which the server's first boot asks for on the
+  terminal without echo, so the code never lands in its shell history.
+  """
+  @spec own_server_command() :: String.t()
+  def own_server_command, do: @own_server_command
+
+  @doc """
   The label of one summary action, by its id; `create_in` names a `city`,
-  `open_console` the `provider`, and `delete_server` the server a replace
-  deletes (`which`: `"new"` or `"old"`) when there are two.
+  `open_console` the `provider`, `delete_server` the server a replace
+  deletes (`which`: `"new"` or `"old"`) when there are two, `paste_token` is
+  `Set up` on the first token screen (`first`), and `cancel` closes an open
+  code (`code`).
   """
   @spec summary_label(atom(), map()) :: String.t()
-  def summary_label(:set_up, _values), do: "Set up"
   def summary_label(:create_server, _values), do: "Create server"
+  def summary_label(:cancel, %{code: true}), do: "Cancel the code"
   def summary_label(:cancel, _values), do: "Cancel"
   def summary_label(:move_now, _values), do: "Move now"
   def summary_label(:try_again, _values), do: "Try again"
@@ -454,6 +634,7 @@ defmodule FermixCore.Management.Copy do
   def summary_label(:start_again, _values), do: "Start again"
   def summary_label(:create_in, %{city: city}), do: "Create in #{city}"
   def summary_label(:open_console, %{provider: provider}), do: "Open #{provider}"
+  def summary_label(:paste_token, %{first: true}), do: "Set up"
   def summary_label(:paste_token, _values), do: "Paste a new token"
   def summary_label(:update, _values), do: "Update"
   def summary_label(:back_up_now, _values), do: "Back up now"

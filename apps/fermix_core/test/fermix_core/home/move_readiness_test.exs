@@ -271,6 +271,35 @@ defmodule FermixCore.Home.MoveReadinessTest do
                "settings, then check again."
   end
 
+  # Always On setup §3.1: Move now's confirm is built at `ready` from the
+  # items that need neither the keychain nor a walk of the home, which the
+  # summary reads on every `home.status`; they are the review's own, so the
+  # full review at the press names them in the same words.
+  describe "the items the summary reads" do
+    test "are the review's last items, in its order and its words", ctx do
+      %{items: items} = MoveReadiness.report(ctx.home, ctx.candidate, opts(ctx))
+      settings = MoveReadiness.settings(ctx.home, unreadable_files: nil)
+      summary = MoveReadiness.summary_items(settings, true, "north-box", opts(ctx))
+
+      assert Enum.map(summary, & &1.id) ==
+               ~w(stays_here whatsapp slack coding_agents cutover_gap serves_nothing)
+
+      assert Enum.take(items, -length(summary)) == summary
+    end
+
+    test "read settings that cannot be read as the review does", ctx do
+      File.write!(Path.join(ctx.home, "config.toml"), "not = [toml")
+      File.chmod!(Path.join(ctx.home, "config.toml"), 0o000)
+      on_exit(fn -> File.chmod(Path.join(ctx.home, "config.toml"), 0o600) end)
+
+      assert {:error, sentence} = MoveReadiness.settings(ctx.home, unreadable_files: nil)
+      items = MoveReadiness.summary_items({:error, sentence}, false, "north-box", opts(ctx))
+
+      assert %{status: :warn, sentence: ^sentence} = item_in(items, "whatsapp")
+      assert %{status: :warn} = item_in(items, "serves_nothing")
+    end
+  end
+
   defp opts(ctx),
     do: [
       free_bytes: fn _dir -> {:ok, @plenty} end,

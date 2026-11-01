@@ -548,18 +548,16 @@ version 6 connection:
   follow it, unless Always On is `off`: an app that connects while Always On
   is set up, moving or running reads its state once, and one that connects
   while it is off reads nothing and asks nothing until it is told;
-- **at each change** of the summary after that: of its `state`, its
-  `action` (id and label) or its problem kind (`detail.kind`), or of its
-  `sentence` on any state but `on` and `problem`, where the sentence carries
-  a figure that moves with the clock (the last backup's age, a count of days,
-  how full the disk is) and the state, action and kind already say every
-  change of note, and `off`. `detail` alone never counts: an app reads it
-  when the owner opens Details. On the server, which its desktops' summaries
-  read in their `primary_home`, a change of its newest backup, of its
-  enrollment code or of the servers it holds counts as well. On a desktop and
-  on the server, the newest backup the summary counts from turning 7 days old
-  counts once, though its words do not change there: it is when the app
-  raises its notification that the last backup is a week old.
+- **at each change** of the summary after that: each time its `key` moves
+  (management's *The Always On summary*), which is every change the app
+  draws (the state, an action and its confirm, an alternative, a Details
+  line, the step in hand, the notice) and never the clock alone (a sentence
+  on `on` and `problem` and `off` with an age or a percentage in it, when
+  the provider was last checked, what was last seen). On the server, which
+  its desktops' summaries read in their `primary_home`, a change of its
+  newest backup, of its enrollment code or of the servers it holds counts as
+  well. The newest backup the summary counts from turning 7 days old moves
+  the summary's notice, so it is told once.
 - **never while Always On stays `off`**: an app forgets Always On while it is
   off. A settings write that changes what the `off` sentence names (iMessage,
   voice calls, meetings) is not told; the app reads that line when the owner
@@ -576,9 +574,9 @@ computer is awake, a link down 10 minutes while it is awake, a waiting
 server's 24 hours, a backup's 3 days and its 7), on one timer, armed again
 at each read; and only while a version 6 connection is attached. While Always On is
 `off` it arms nothing and reads only on what could end `off` (a token, a
-code, a move). It never calls the cloud provider: the
-provider is read when the app asks (`home.provision.resources`) or a job
-runs.
+code, a move). It never calls the cloud provider: the provider is read by a
+job, one of which a management `home.status` read starts when the summary
+rests on the provider's word and the last check is over a minute old.
 
 A notice sent while the app was disconnected is lost, so an app that
 connects reads nothing on its own: the notice after `server_hello` is its

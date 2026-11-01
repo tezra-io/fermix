@@ -45,7 +45,7 @@ defmodule FermixCore.Management.Router do
     computer_use.grant.start computer_use.permissions.get mobile.status mobile.pair.start
     mobile.devices.list browser.install.start imessage.permissions.get imessage.policy.confirm
     mcp.servers.list mcp.servers.import.scan cues.status cues.sources.list cues.watchers.list
-    cues.mandates.list cues.mandates.choices home.status home.snapshots.status home.snapshots.run
+    cues.mandates.list cues.mandates.choices home.snapshots.status home.snapshots.run
     home.enroll.withdraw home.candidates.list home.provision.providers home.provision.resources
     home.provision.delete
   )
@@ -79,6 +79,9 @@ defmodule FermixCore.Management.Router do
   @mcp_draft_params ~w(text)
   @mcp_import_params ~w(servers)
   @mcp_tool_params ~w(name tool enabled)
+  @home_status_params ~w(after wait_ms)
+  # A summary's key is a short digest; the bound only refuses junk.
+  @max_status_key_bytes 64
   @home_passphrase_params ~w(recovery_passphrase)
   @home_enroll_params ~w(kind)
   @home_readiness_params ~w(candidate_id)
@@ -285,7 +288,17 @@ defmodule FermixCore.Management.Router do
   defp route_known("home." <> _rest = method, params, opts), do: route_home(method, params, opts)
 
   # Answered locally in every role (M75 §14): a device reads its own home.
-  defp route_home("home.status", %{}, opts), do: operation_result(Home.status(home_opts(opts)))
+  # With `after` and `wait_ms` it waits for the summary's key to move
+  # (Always On setup §3.3), held in this request's own process.
+  defp route_home("home.status", params, opts) do
+    with :ok <- reject_unknown_params(params, @home_status_params),
+         {:ok, wait} <- status_wait(params) do
+      case wait do
+        :now -> operation_result(Home.status(home_opts(opts)))
+        {key, ms} -> operation_result(Home.status_after(key, ms, home_opts(opts)))
+      end
+    end
+  end
 
   defp route_home("home.snapshots.status", %{}, opts),
     do: operation_result(Home.snapshots_status(home_opts(opts)))
@@ -365,6 +378,26 @@ defmodule FermixCore.Management.Router do
 
   defp route_home("home.provision.delete", %{}, opts),
     do: operation_result(Provision.delete(provision_opts(opts)))
+
+  defp status_wait(params) when map_size(params) == 0, do: {:ok, :now}
+
+  defp status_wait(params) do
+    with {:ok, key} <- status_key(Map.get(params, "after")),
+         {:ok, ms} <- wait_ms(Map.get(params, "wait_ms")),
+         do: {:ok, {key, ms}}
+  end
+
+  defp status_key(key)
+       when is_binary(key) and byte_size(key) > 0 and byte_size(key) <= @max_status_key_bytes,
+       do: {:ok, key}
+
+  defp status_key(_key), do: invalid_params("after")
+
+  defp wait_ms(ms) when is_integer(ms) and ms >= 0 do
+    if ms <= Home.max_wait_ms(), do: {:ok, ms}, else: invalid_params("wait_ms")
+  end
+
+  defp wait_ms(_ms), do: invalid_params("wait_ms")
 
   defp keep_as_desktop(params) do
     case Map.get(params, "keep_as_desktop", true) do

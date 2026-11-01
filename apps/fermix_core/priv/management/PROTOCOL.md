@@ -211,15 +211,20 @@ the primary's.
 
 ## The Always On summary
 
-`home.status.summary` says where Always On stands, worked out once by the
-engine (M75 lean v1 §7), so the Mac app, the Linux app, the setup page and
-`fermix home status` print the same thing:
+`home.status.summary` is the Always On screen, worked out once by the engine
+(M75 lean v1 §7, Always On setup §3), so the Mac app, the Linux app, the
+setup page and `fermix home status` draw the same thing:
 
 ```json
-{"state": "problem", "sentence": "Your server is turned off.",
- "action": {"id": "turn_on", "label": "Turn it on"},
+{"key": "Hpj619zuAVxgXXRVumw26w", "state": "problem",
+ "sentence": "Your server is turned off.",
+ "action": {"id": "turn_on", "label": "Turn it on", "needs": [], "confirm": null,
+            "url": null, "key": "er-r-ReXG6gOEo4Q7ANhcQ"},
  "detail": {"kind": "turned_off", "note": "A turned-off server still costs its monthly price.",
-            "seen_at": "2031-05-04T11:50:00Z", "alternatives": []}}
+            "seen_at": "2031-05-04T11:50:00Z", "alternatives": [],
+            "lines": [{"label": "Server", "value": "fermix-general-a3f9"},
+                      {"label": "Costs", "value": "€8.33 a month, billed by the hour until deleted"}]},
+ "notice": null}
 ```
 
 A client maps `state` to its screen, prints `sentence` as it is and, when
@@ -230,18 +235,86 @@ An engine that sends no `summary` is older than this record: the apps answer
 it with their "update Fermix" screen, so they raise their own minimum for
 `home.status` to an engine that sends it.
 
+**Every action is one record**, wherever it sits (`action`,
+`detail.alternatives`, `on`'s `detail.actions`): `id`, `label`, `needs`,
+`confirm`, `url` and `key`.
+
+- `needs` lists what the surface collects before it acts: `token` (the
+  provider's token, from the token screen in `detail.providers`, with a
+  provider pick when it lists more than one), `recovery_passphrase`, or
+  `choice` (the size and place, from `home.provision.options`, whose
+  recommendation is the default).
+- `confirm` is the sentence the owner accepts before Fermix spends money,
+  deletes, restarts a server or moves; null otherwise. It never carries a
+  time or a price, so it is stable. Move now's is built at `ready` from the
+  review's items this home's settings decide (`stays_here`, `whatsapp`,
+  `slack`, `coding_agents`, `cutover_gap`, `serves_nothing`, in their own
+  words) and any other warning the last review of the same server gave;
+  during a replace it says what every such move does.
+- `url` is the Always On docs page at the provider's part for `learn_more`
+  (`https://fermix.ai/docs/always-on/#<anchor>`) and the provider's console
+  for `open_console`; null otherwise.
+- `key` is the digest of the action's `id`, `label`, `confirm`, `needs` and
+  the one thing it acts on: the server a move goes to (`move_now`,
+  `try_again`, `check_again`), the provider's id of the server Fermix created
+  (`turn_on`, `restart_server`, `delete_server`, `start_again`, `cancel`; the
+  old server's for Delete your old server), the provider (`paste_token`), the
+  place (`create_in`), or nothing.
+
+**The keys.** `summary.key` is the one digest of the summary: of everything
+it holds but `key` itself, the sentence of an `off`, `on` or `problem` (whose
+figures move with the clock), what was last seen (`detail.seen_at`) and the
+`Last checked` line. A change of the state, a step's sentence, an action, a
+confirm, an alternative, a line, the progress or the notice moves it; a check
+of the provider that found nothing new does not. It is what the companion
+socket's `home_status_changed` and a waiting `home.status` (below) compare.
+
+**`detail`** holds what the state draws, a field only where it has
+something: `providers` (every provider's token screen, `{id, name,
+token_label, sentence, steps, console_url, docs_url}`, wherever a token is
+asked for: `off`, `connect`, `token_refused`, `read_only_token`); `lines`
+(the Details, `{label, value}` each, finished by the engine: the server, its
+size, place, address, system and version, until when it waits, each place's
+newest backup, the space this computer's copies take, the server's disk,
+when the provider was last checked and what the servers cost; times stated
+absolutely in the owner's zone, prices as the ledger keeps them; on
+`creating`, `ready`, `on` and `problem`); and `progress` (the sentence of the
+step in hand while a step's job runs).
+
+**`notice`** is the occurrence the apps raise as a system notification, or
+null: the server ready (`ready:<candidate>`), the move done
+(`moved:<epoch>`, until the first backup after it), the server out of reach
+(`cannot_reach:<since>`, since the link went down), a server that must be set
+up again (`not_set_up:<created_at>`) and the newest backup a week old
+(`backup_week:<at>`). Its `id` stays the same while the occurrence stands, so
+an app posts when the id changes and keeps the last one; the page and the
+CLI ignore it.
+
+**Waiting for a change.** `home.status {after, wait_ms}` (`wait_ms` at most
+25,000) answers at once when `summary.key` is not `after`; otherwise the
+daemon holds the request, reading the summary again each time the Always On
+watch says something it rests on changed, and answers when the key differs or
+`wait_ms` passed. Off tells nothing and a candidate runs no watch, so a wait
+there runs out. A client gives the call `wait_ms` plus 5 seconds.
+
 A client need not read the summary on a timer: on the companion chat socket,
 `home_status_changed` (companion protocol 6) says when it changed, once after
 the hello unless the state is `off` (`priv/companion/PROTOCOL.md`, *When
 Always On changes*).
 
+**Fresh from the provider.** A `home.status` read in `problem`, `creating` or
+`ready`, while a server Fermix created stands and was last checked with the
+provider over a minute ago, starts one reconcile as a `home_provision` job
+named by the provider (one at a time, never beside a step); its write moves
+the summary.
+
 | `state` | Where it is answered | What it means |
 |---|---|---|
-| `off` | the computer that sets Always On up | Nothing is set up. The sentence's second line names what this home has turned on that stops after the move (iMessage on a Mac, voice calls, meetings), only when there is something. Its action, `set_up`, opens the token screen, whose words `detail.connect` holds (`{sentence, steps, alternatives}`); pressing it records nothing. |
-| `connect` | the same | A code for a server of the owner's own is open, or the provider refused the token before anything was created. `detail.steps` are the provider's "How to get one" steps (two-factor sign-in first, an account for Fermix alone) and `detail.alternatives` the own-server link. No action: the token is checked when pasted. |
+| `off` | the computer that sets Always On up | Nothing is set up. The sentence's second line names what this home has turned on that stops after the move (iMessage on a Mac, voice calls, meetings), only when there is something. Its action is `paste_token`, labelled `Set up`, which needs a token: `detail.providers` holds each provider's token screen, and `detail.alternatives` the own-server link. |
+| `connect` | the same | A code for a server of the owner's own is open, or the provider refused the token before anything was created. The action is `paste_token` (`Set up`, or `Paste a new token` once a token was refused); `detail.providers` the token screens, `detail.alternatives` the own-server link and, while a code is open, `cancel` (`Cancel the code`). |
 | `choose` | the same | The token works. `detail.billing` says the provider bills by the hour until the server is deleted; the recommendation, the prices and the other offers are `home.provision.options`'s. |
-| `creating` | the same, and a linked desktop during a replace | Starting, installing Fermix on, connecting, or deleting the server, each in its own sentence. `cancel` while Fermix's own server sets up. During a replace of the server (`home.provision.resources`' `replace`): creating, starting, installing Fermix on or connecting the new server (`cancel`), as the old server's own code for it says (`primary_home`'s `enrollment` and `candidates`), removing the old server after the move, or deleting the new one before it (no action). |
-| `ready` | the same, and a linked desktop during a replace | The server is held and waits for Move now. `detail`: `server` (`{name, type, location, ipv4, system, version}`, the provider's facts null for a server of the owner's own), `readiness` (the last review's warnings and blocks, `home.move.readiness`'s items; empty when all is well or no review was made, and always during a replace, whose review is the old server's own) and `waits_until`. During a replace the new server is held by the old one, and Move now is the move to it from there (see `move_now`). |
+| `creating` | the same, and a linked desktop | A step's job runs, from before it wrote anything: creating (`cancel`), deleting, turning on or restarting the server, each in its own sentence, with `detail.progress`. Or the server starts, installs Fermix or connects, each in its own sentence, `cancel` while Fermix's own server sets up. During a replace of the server: creating, starting, installing Fermix on or connecting the new server (`cancel`), as the old server's own code for it says (`primary_home`'s `enrollment` and `candidates`), removing the old server after the move, or deleting the new one before it (no action). |
+| `ready` | the same, and a linked desktop during a replace | The server is held and waits for Move now. `detail`: `server` (`{name, type, location, ipv4, system, version}`, the provider's facts null for a server of the owner's own), `readiness` (the last review's warnings and blocks, `home.move.readiness`'s items; empty when all is well or no review was made, and always during a replace, whose review is the old server's own) and `waits_until`. During a replace the new server is held by the old one, and Move now is the move to it from there. |
 | `moving` | the computer the move leaves, and a linked desktop during a replace | The move runs; once that computer waits on the server's confirmation the sentence says Fermix keeps trying. During a replace, the move to the new server, which this desktop started: the old server serves nothing until it is done, so its silence then is no problem. |
 | `on` | a linked desktop | Fermix runs on the server. `detail`: `server` (`{name, location, version}`), `backups` (`{place, at}` for each place's newest verified backup), `copies_bytes` (the space this computer's copies take), `disk_used`, `data` (what lives on the server, and that its host can technically read its disk) and `actions` (`back_up_now`, `replace_server`). |
 | `undone` | the computer the move left | The move was undone and its server is still held (`try_again`), or the engine is restarting as it was (no action). |
@@ -258,13 +331,17 @@ for a server of the owner's own), `deleted` (gone from its provider), `not_set_u
 awake), `waited_too_long` (enrolled, but waited past its 24 hours),
 `no_capacity` (`create_in`, its location in `detail.next_location`, or
 `learn_more` when nothing is in stock), `account_limit`, `read_only_token`,
-`token_refused`, `create_failed`, `update` (the server speaks a protocol this
+`token_refused`, `create_failed` (a create stopped, or a step the engine's
+restart cut short: `start_again`), `update` (the server speaks a protocol this
 engine is too old for), `disk_full` (85% or more), `backup_old` (the newest
 backup is over 3 days old, or none since a move that long ago), `not_ready`
 (the last review blocks the move: `check_again`, every item in
-`detail.readiness`), `unreadable` (the provisioner's file) and
-`delete_failed` (after a replace's move, deleting the old server stopped:
-`delete_server` tries again, and `note` says it costs money until then).
+`detail.readiness`), `unreadable` (the provisioner's file), `delete_failed`
+(deleting a server stopped: `delete_server` tries again, and `note` says it
+costs money until then; after a replace's move, the old server) and
+`power_failed` (turning the server on or restarting it stopped: `turn_on` or
+`restart_server` tries again). Every step's ending is kept in the
+provisioner's ledger, so these outlive the job that met them.
 During a replace, a problem of the new server says so in its sentence
 (`turned_off`, `not_set_up`, `waited_too_long`, `deleted` when its provider no
 longer has it, and the create's own), and `alternatives` ends with
@@ -278,10 +355,10 @@ provider in use is `home.provision.resources`' `provider`; every
 
 | `id` | The client |
 |---|---|
-| `set_up` | opens the token screen (each provider's, from `home.provision.providers`) |
+| `paste_token` | the token screen of the provider (`detail.providers`), then `home.provision.connect` |
 | `create_server` | reads `home.provision.options`, then `home.provision.create` |
-| `cancel` | `job.cancel` on the running `home_provision` job, then `home.provision.delete` (during a replace, it deletes the new server) |
-| `move_now` | `home.move.readiness`, then `home.move.start` (asking for the passphrase first when none is set); during a replace, both for the candidate `primary_home.enrollment.candidate_id` names, and `home.move.start` with `keep_as_desktop: false` |
+| `cancel` | `job.cancel` on the running `home_provision` job, then `home.provision.delete` (during a replace, it deletes the new server); while a code for a server of the owner's own is open, it closes that code |
+| `move_now` | `home.move.readiness`, then `home.move.start`; during a replace, both for the candidate `primary_home.enrollment.candidate_id` names, and `home.move.start` with `keep_as_desktop: false` |
 | `try_again` | the same, for the server still held |
 | `check_again` | `home.move.readiness` |
 | `turn_on` | `home.provision.power` `{action: on}` |
@@ -289,13 +366,12 @@ provider in use is `home.provision.resources`' `provider`; every
 | `start_again` | `home.provision.delete`, then `home.provision.create` with the same type and location (on a linked desktop, with `replace: true`) |
 | `create_in` | `home.provision.create` in `detail.next_location` (on a linked desktop, with `replace: true`) |
 | `delete_server` | `home.provision.delete` (its label names the new or the old server during a replace) |
-| `paste_token` | the token field of the provider in use, `home.provision.connect` |
 | `own_server` | `home.enroll.open`, and the command for the owner's own Linux server |
-| `open_console` | opens the console of the provider in use (`home.provision.providers`' `console_url`) |
+| `open_console` | opens `url`, the provider's console |
 | `back_up_now` | `home.snapshots.run` |
 | `replace_server` | reads `home.provision.options`, then `home.provision.create` with `replace: true` |
 | `update` | the app's own update |
-| `learn_more` | opens the Always On docs page |
+| `learn_more` | opens `url`, the Always On docs page |
 
 The server also tells the paired phones, once per occurrence, when its newest
 backup passes 7 days, as a message in the owner's phone chat ("Your last
@@ -451,7 +527,7 @@ daemon onto anything else.
 | `cues.proposals.list` | `state` (`waiting`, the default, or `recent`) | Fermix's record of each waiting proposal (oldest first, at most 100) or of the last 7 days (at most 50), and `waiting`. No arguments and no cue text. Minimum version `2`. |
 | `cues.proposals.get` | `proposal_id` | `{proposal}`: the record plus the card, the outside text apart. Minimum version `2`. |
 | `cues.proposals.decide` | `proposal_id`, `decision` (`confirm` or `deny`) | Answers a waiting proposal and returns `{proposal}` once the decision is recorded: `denied`, or `confirmed` with a null `result_status` while the call runs. Minimum version `2`. |
-| `home.status` | none | The one picture of this home every surface draws: `role` (`primary`, `device` or `candidate`), `epoch` (null before the home's first boot as the primary), `moved` (`{to, moved_at, epoch}` or null), `snapshots` (as `home.snapshots.status`), `primary` (in the device role after a move, the primary this desktop reaches: `{name, connected, status, since, epoch, sentence}`, `status` one of `connected`, `renewing`, `unreachable`, `revoked` or `stale` (see *After a move*), `since` null while not connected and `epoch` the highest primary epoch this desktop has seen; null otherwise), `desktops` (on the primary, each desktop that holds a session to it: `{device_id, name, connected, since}`, `since` null while not connected; empty otherwise), `enrollment` (on the primary, the enrollment window opened since the engine started: `{state, expires_at, kind, candidate_id}`, `state` `open`, `used` or `expired`, `kind` `manual` or `provisioned` (the code inside a server Fermix created), `candidate_id` the candidate that enrolled with it, null until one did, which is how the server Fermix created is known, never the code; null otherwise), `candidates` (on the primary, the candidate primaries it holds, as `home.candidates.list` answers them; empty otherwise), `move` (the move this home started or, on a candidate, the one it waits for: `{phase, candidate, sentence}`; null when there is none), `secrets_missing` (on the primary, the ids `secret.set` takes of the secret references in its settings that did not resolve on this host, each one to enter again; empty otherwise), `primary_home` (on a linked desktop, the primary's own `home.status`, asked within 5 s; null otherwise), `primary_missing` (on a linked desktop, the sentence while `primary_home` is missing; null otherwise), `summary` (where Always On stands, in one sentence and at most one action: `{state, sentence, action, detail}`, see *The Always On summary*), `disk` (on the primary, how full its disk is: `{used, nearly_full}`, `used` a fraction from 0 to 1 and `nearly_full` from 0.85; null in any other role and when it cannot be read) and `version` (this engine's version). Answered locally in every role; composed on a linked desktop (see *After a move*), whose own `snapshots` list no target, its status file being a retired copy. `summary`, `disk` and `version` came after the method: an engine that does not send `summary` is drawn as one that needs updating. Minimum version `2`. |
+| `home.status` | none; or `after` (a `summary.key`) and `wait_ms` (at most 25,000) together, to wait for a change (see *The Always On summary*) | The one picture of this home every surface draws: `role` (`primary`, `device` or `candidate`), `epoch` (null before the home's first boot as the primary), `moved` (`{to, moved_at, epoch}` or null), `snapshots` (as `home.snapshots.status`), `primary` (in the device role after a move, the primary this desktop reaches: `{name, connected, status, since, epoch, sentence}`, `status` one of `connected`, `renewing`, `unreachable`, `revoked` or `stale` (see *After a move*), `since` null while not connected and `epoch` the highest primary epoch this desktop has seen; null otherwise), `desktops` (on the primary, each desktop that holds a session to it: `{device_id, name, connected, since}`, `since` null while not connected; empty otherwise), `enrollment` (on the primary, the enrollment window opened since the engine started: `{state, expires_at, kind, candidate_id}`, `state` `open`, `used` or `expired`, `kind` `manual` or `provisioned` (the code inside a server Fermix created), `candidate_id` the candidate that enrolled with it, null until one did, which is how the server Fermix created is known, never the code; null otherwise), `candidates` (on the primary, the candidate primaries it holds, as `home.candidates.list` answers them; empty otherwise), `move` (the move this home started or, on a candidate, the one it waits for: `{phase, candidate, sentence}`; null when there is none), `secrets_missing` (on the primary, the ids `secret.set` takes of the secret references in its settings that did not resolve on this host, each one to enter again; empty otherwise), `primary_home` (on a linked desktop, the primary's own `home.status`, asked within 5 s; null otherwise), `primary_missing` (on a linked desktop, the sentence while `primary_home` is missing; null otherwise), `summary` (the Always On screen: `{key, state, sentence, action, detail, notice}`, see *The Always On summary*), `disk` (on the primary, how full its disk is: `{used, nearly_full}`, `used` a fraction from 0 to 1 and `nearly_full` from 0.85; null in any other role and when it cannot be read) and `version` (this engine's version). Answered locally in every role; composed on a linked desktop (see *After a move*), whose own `snapshots` list no target, its status file being a retired copy. `summary`, `disk` and `version` came after the method: an engine that does not send `summary` is drawn as one that needs updating. Minimum version `2`. |
 | `home.snapshots.status` | none | The snapshots view: `configured`, `recipient_set`, `interval_hours`, `running`, `next_run_at`, one row per target (`id`, `label`, `configured`, `destination`, `last_attempt_at`, `last_result` (`verified`, `failed`, `waiting` or null), `last_verified` `{at, name, epoch, size, sha256, location, key_id}` or null, `last_error`, `waiting`) and one `sentence`. Minimum version `2`. |
 | `home.snapshots.run` | none | Starts a snapshot now and answers `{started: true, snapshots}`. `busy` while one runs; `unavailable` {`capability`: `snapshots`} with the daemon's sentence when nothing is configured, in the device role, or with no scheduler. Minimum version `2`. |
 | `home.snapshots.passphrase` | `recovery_passphrase` (12 to 1024 bytes) | Derives the recovery key from the passphrase and keeps only its public half as `[fermix_core.snapshots] recipient`; answers `{recipient, key_id, snapshots, sentence}`, the sentence saying that snapshots written before now open only with the earlier passphrase. The passphrase is never stored, logged or answered. A shorter one is `invalid_params` with a sentence; the device role answers `unavailable`. Minimum version `2`. |

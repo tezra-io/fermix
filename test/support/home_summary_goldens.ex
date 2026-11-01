@@ -9,6 +9,7 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
   answers for the same facts, so a golden can only say what the engine says.
   """
 
+  alias FermixCore.Home.MoveReadiness
   alias FermixCore.Home.Provision.Hetzner
   alias FermixCore.Home.Snapshot.S3, as: SnapshotS3
   alias FermixCore.Home.Snapshot.Status, as: SnapshotStatus
@@ -68,6 +69,7 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
       provision: ledger(),
       candidates: [candidate_view()],
       review: review,
+      move_items: MoveReadiness.summary_items({:ok, ""}, true, @server_name, []),
       enrollment: %{
         "state" => "used",
         "expires_at" => "2031-05-05T11:00:00Z",
@@ -149,14 +151,17 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
         link: link,
         candidates: facts.candidates,
         provider: Hetzner,
+        providers: [Hetzner],
         provision: Map.get(extra, :provision, none()),
         review: Map.get(extra, :review),
+        move_items: Map.get(extra, :move_items, []),
         snapshots: facts.snapshots,
         disk: facts.disk,
         primary_home: facts.primary_home,
         primary_too_old: false,
         copies_bytes: Map.get(extra, :copies_bytes),
-        stays_here: []
+        stays_here: [],
+        zone: "Europe/Berlin"
       })
 
     Home.picture(Map.put(facts, :summary, summary))
@@ -187,12 +192,22 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
           do: "Fermix is connected to the server #{@server_name}.",
           else: "The server #{@server_name} is unreachable: it did not answer."
         ),
-      down_ms: down_ms
+      down_ms: down_ms,
+      down_at: if(status == :connected, do: nil, else: ~U[2031-05-04 11:49:00Z])
     }
   end
 
   defp none,
-    do: %{state: :none, token: :none, server: nil, failure: nil, sentence: nil, replace: nil}
+    do: %{
+      state: :none,
+      token: :none,
+      server: nil,
+      failure: nil,
+      sentence: nil,
+      replace: nil,
+      action: nil,
+      checked_at: nil
+    }
 
   defp ledger do
     %{
@@ -201,6 +216,8 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
       failure: nil,
       sentence: nil,
       replace: nil,
+      action: nil,
+      checked_at: ~U[2031-05-04 11:59:00Z],
       server: %{
         name: @server_name,
         id: "61839204",
@@ -210,7 +227,9 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
         ipv4: "203.0.113.7",
         power: "running",
         created_at: ~U[2031-05-04 10:58:00Z],
-        seen_at: ~U[2031-05-04 11:50:00Z]
+        seen_at: ~U[2031-05-04 11:50:00Z],
+        total_monthly: "8.33",
+        currency: "EUR"
       }
     }
   end

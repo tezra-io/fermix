@@ -416,6 +416,130 @@ defmodule FermixCore.Management.ProvisionTest do
     end
   end
 
+  # Always On setup §5: a step's action is written before its job and
+  # cleared by its end; every ending lands in the ledger with the step, size
+  # and place it was for; the server costs what its offer cost; an action
+  # whose job is gone is an interrupted step; and a reconcile is a job.
+  describe "a step's action and every ending" do
+    setup ctx do
+      {:ok, _view} = connect(ctx)
+      :ok
+    end
+
+    test "the action stands from before the job until its end clears it", ctx do
+      assert :ok = Provision.put_action("create", ctx.seams)
+      assert {:error, {:busy, "home_provision"}} = Provision.put_action("delete", ctx.seams)
+      assert %{action: %{kind: "create"}} = Ledger.state(ctx.home, Hetzner)
+
+      done = finished(elem(create(ctx), 1), ctx)
+      assert done["status"] == "completed"
+      assert %{action: nil, state: :created} = Ledger.state(ctx.home, Hetzner)
+
+      # A failed step ends the same way.
+      assert :ok = Provision.put_action("power_on", ctx.seams)
+      HetznerStub.fault(ctx.stub, "POST", ~r"/actions/poweron$", 500, "server_error")
+      {:ok, job} = route("home.provision.power", %{"action" => "on"}, ctx)
+      assert %{"status" => "failed"} = finished(job, ctx)
+      assert %{action: nil} = Ledger.state(ctx.home, Hetzner)
+
+      assert :ok = Provision.clear_action(ctx.seams)
+    end
+
+    test "the server costs what the offer it was created from costs", ctx do
+      {:ok, options} = route("home.provision.options", %{"provider" => "hetzner"}, ctx)
+      offer = Enum.find(options["offers"], &(&1["type"] == "cpx22" and &1["location"] == "fsn1"))
+
+      finished(elem(create(ctx), 1), ctx)
+
+      assert %{server: %{total_monthly: total, currency: currency}} =
+               Ledger.state(ctx.home, Hetzner)
+
+      assert {total, currency} == {offer["total_monthly"], options["currency"]}
+    end
+
+    test "with no choice the job creates the recommendation, and keeps the choice", ctx do
+      assert :ok = Provision.put_action("create", ctx.seams)
+      test = self()
+
+      spy =
+        Keyword.update!(ctx.seams, :provider_opts, fn host ->
+          Keyword.put(host, :sleep, fn _ms ->
+            send(test, {:action, Ledger.state(ctx.home, Hetzner).action})
+            :ok
+          end)
+        end)
+
+      {:ok, job} = Provision.start_create(%{type: nil, location: nil, replace: false}, spy)
+      assert %{"status" => "completed", "result" => result} = finished(job, ctx)
+      assert %{"type" => "cpx22", "location" => "fsn1"} = result
+      assert_received {:action, %{kind: "create", type: "cpx22", location: "fsn1"}}
+    end
+
+    test "a choice of one without the other is refused by field", ctx do
+      assert {:error, {:invalid_params, "location", _sentence}} =
+               Provision.start_create(%{type: "cpx22", location: nil, replace: false}, ctx.seams)
+
+      assert {:error, {:invalid_params, "type", _sentence}} =
+               Provision.start_create(%{type: nil, location: "fsn1", replace: false}, ctx.seams)
+    end
+
+    test "a refused create keeps its step, size and place", ctx do
+      HetznerStub.fault(ctx.stub, "POST", ~r"^/v1/servers$", 412, "resource_unavailable")
+      finished(elem(create(ctx), 1), ctx)
+
+      assert %{failure: %{action: "create", type: "cpx22", location: "fsn1"}} =
+               Ledger.state(ctx.home, Hetzner)
+    end
+
+    test "a failed power action stays in the ledger as the power's failure", ctx do
+      finished(elem(create(ctx), 1), ctx)
+      HetznerStub.fault(ctx.stub, "POST", ~r"/actions/reset$", 500, "server_error")
+
+      {:ok, job} = route("home.provision.power", %{"action" => "reset"}, ctx)
+      assert %{"status" => "failed", "failure" => %{"sentence" => sentence}} = finished(job, ctx)
+
+      assert %{
+               state: :failed,
+               failure: %{action: "power_reset", type: "cpx22", location: "fsn1"} = failure
+             } = Ledger.state(ctx.home, Hetzner)
+
+      assert failure.sentence == sentence
+    end
+
+    test "a delete that fails stays in the ledger as the delete's failure", ctx do
+      finished(elem(create(ctx), 1), ctx)
+      HetznerStub.fault(ctx.stub, "DELETE", ~r"^/v1/servers/", 500, "server_error")
+
+      {:ok, job} = route("home.provision.delete", %{}, ctx)
+      assert %{"status" => "failed"} = finished(job, ctx)
+
+      assert %{state: :failed, failure: %{action: "delete", type: "cpx22"}} =
+               Ledger.state(ctx.home, Hetzner)
+    end
+
+    test "at boot, an action whose job is gone becomes the interrupted step", ctx do
+      assert :ok = Provision.put_action("delete", ctx.seams)
+      assert :ok = Provision.interrupt_left_actions(ctx.seams)
+
+      assert %{state: :failed, action: nil, failure: failure} = Ledger.state(ctx.home, Hetzner)
+      assert %{reason: "interrupted", action: "delete", at: @now} = failure
+
+      # Nothing stood: nothing is written.
+      before = File.read!(Ledger.path(ctx.home, "hetzner"))
+      assert :ok = Provision.interrupt_left_actions(ctx.seams)
+      assert File.read!(Ledger.path(ctx.home, "hetzner")) == before
+    end
+
+    test "a reconcile is a job of the family, and writes when it read Hetzner back", ctx do
+      finished(elem(create(ctx), 1), ctx)
+      assert %{checked_at: nil} = Ledger.state(ctx.home, Hetzner)
+
+      assert {:ok, %{"kind" => "home_provision"} = job} = Provision.start_reconcile(ctx.seams)
+      assert %{"status" => "completed"} = finished(job, ctx)
+      assert %{checked_at: @now} = Ledger.state(ctx.home, Hetzner)
+    end
+  end
+
   describe "home.provision.resources" do
     test "with no token, answers none and asks Hetzner nothing", ctx do
       assert {:ok, %{"state" => "none", "token" => "none", "resources" => [], "checked" => false}} =

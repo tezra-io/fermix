@@ -6,13 +6,20 @@ defmodule FermixCore.Management.HomeTest do
   alias FermixCore.Home.Epoch
   alias FermixCore.Home.Move
   alias FermixCore.Home.Moved
+  alias FermixCore.Home.Provision.Driver
   alias FermixCore.Home.Provision.Ledger
   alias FermixCore.Home.Snapshot.Capture
   alias FermixCore.Home.Snapshot.Recipient
   alias FermixCore.Home.Snapshot.Scheduler
   alias FermixCore.Home.Snapshot.Status
+  alias FermixCore.Home.StatusWatch
+  alias FermixCore.Management.Home
+  alias FermixCore.Management.HomeSummary
+  alias FermixCore.Management.Jobs
   alias FermixCore.Management.Router
+  alias FermixTestSupport.FakeCloudProvider
   alias FermixTestSupport.SafeRm
+  alias FermixTestSupport.TelemetryCapture
 
   @primary %{role: :primary, primary: nil}
   @device %{role: :device, primary: "invented host"}
@@ -162,7 +169,8 @@ defmodule FermixCore.Management.HomeTest do
                route("home.status", %{}, opts(home, disk_usage: disk(0.42), version: "9.9.9"))
 
       assert status["summary"]["state"] == "off"
-      assert status["summary"]["action"]["id"] == "set_up"
+      assert status["summary"]["action"]["id"] == "paste_token"
+      assert status["summary"]["key"] == HomeSummary.key(status["summary"])
       assert status["disk"] == %{"used" => 0.42, "nearly_full" => false}
       assert status["version"] == "9.9.9"
     end
@@ -479,8 +487,208 @@ defmodule FermixCore.Management.HomeTest do
   end
 
   test "the reads take no params" do
-    for method <- ~w(home.status home.snapshots.status home.snapshots.run) do
+    for method <- ~w(home.snapshots.status home.snapshots.run) do
       assert route(method, %{"x" => 1}, []) == {:error, :invalid_params, %{"method" => method}}
+    end
+  end
+
+  # Always On setup §5: freshness is the engine's. A read that draws a state
+  # resting on the provider, while a server Fermix created stands and was
+  # last checked over a minute ago, starts one reconcile, as a job of the
+  # provider's family: one at a time, and never beside a step.
+  describe "home.status keeps the provider's word fresh" do
+    setup %{home: home} = ctx do
+      world = FakeCloudProvider.start!()
+      jobs = jobs!(ctx)
+      seams = nimbus_seams(world)
+
+      {:ok, _ledger} =
+        Ledger.update(home, "nimbus", &{:ok, Ledger.connect(&1, FakeCloudProvider.token(), @at)})
+
+      request = %{type: "small-4", location: "osl1", profile: "general"}
+      {:ok, _server} = Driver.create(FakeCloudProvider, home, request, seams[:provider_opts])
+      %{world: world, jobs: jobs, seams: seams}
+    end
+
+    test "a read in a problem with an unchecked server starts one reconcile", ctx do
+      opts = opts(ctx.home, [jobs: ctx.jobs] ++ ctx.seams)
+
+      assert {:ok, %{"summary" => %{"state" => "problem"}}} = route("home.status", %{}, opts)
+      assert [%{"kind" => "home_provision"} = job] = jobs(ctx.jobs)
+      assert %{"status" => "completed"} = finished(job, ctx.jobs)
+      assert %{checked_at: @at} = Ledger.state(ctx.home, FakeCloudProvider)
+
+      # Checked just now: the next read starts nothing.
+      {:ok, _status} = route("home.status", %{}, opts)
+      assert length(jobs(ctx.jobs)) == 1
+
+      # Over a minute later it reads the provider again.
+      later = DateTime.add(@at, 61, :second)
+
+      {:ok, _status} =
+        route("home.status", %{}, opts(ctx.home, [jobs: ctx.jobs, now: later] ++ ctx.seams))
+
+      assert length(jobs(ctx.jobs)) == 2
+    end
+
+    test "a read while a step runs starts nothing beside it", ctx do
+      gate = self()
+
+      {:ok, _view} =
+        Jobs.start(:home_provision,
+          name: "nimbus",
+          server: ctx.jobs[:server],
+          run: fn _id, _report ->
+            send(gate, :holding)
+
+            receive do
+              :go -> {:ok, %{}}
+            end
+          end
+        )
+
+      opts = opts(ctx.home, [jobs: ctx.jobs] ++ ctx.seams)
+      assert {:ok, %{"summary" => %{"state" => "problem"}}} = route("home.status", %{}, opts)
+      assert [%{"status" => "running"}] = jobs(ctx.jobs)
+      assert %{checked_at: nil} = Ledger.state(ctx.home, FakeCloudProvider)
+    end
+
+    test "a state that rests on nothing the provider says starts nothing", ctx do
+      {:ok, _ledger} = Ledger.update(ctx.home, "nimbus", &{:ok, Ledger.clear(&1)})
+      opts = opts(ctx.home, [jobs: ctx.jobs] ++ ctx.seams)
+
+      assert {:ok, %{"summary" => %{"state" => "choose"}}} = route("home.status", %{}, opts)
+      assert jobs(ctx.jobs) == []
+    end
+  end
+
+  # Always On setup §3.3: `home.status {after, wait_ms}` waits for the
+  # summary to change, held in the caller by the Always On watch, so the CLI
+  # follows a step without an interval.
+  describe "home.status waits for a change" do
+    setup %{home: home} = ctx do
+      watch = :"home_status_watch_#{:erlang.phash2(ctx.test)}"
+      home_opts = [home: home, engine_role: @primary, scheduler: nil, now: @at]
+
+      start_supervised!(
+        {StatusWatch,
+         name: watch,
+         read: fn -> HomeSummary.watch(Home.summary_facts(home_opts)) end,
+         timer: fn _message, _delay -> make_ref() end,
+         clock_monitor: false}
+      )
+
+      test = self()
+
+      wait_timer = fn message, delay ->
+        send(test, {:wait_timer, self(), message, delay})
+        make_ref()
+      end
+
+      %{watch: watch, waits: [status_watch: watch, wait_timer: wait_timer]}
+    end
+
+    test "a key that is not the summary's is answered at once", ctx do
+      opts = opts(ctx.home, ctx.waits)
+
+      assert {:ok, %{"summary" => %{"state" => "off"}}} =
+               route("home.status", %{"after" => "not-the-key", "wait_ms" => 25_000}, opts)
+
+      refute_received {:wait_timer, _pid, _message, _delay}
+    end
+
+    test "the summary's key is held until the watch tells it moved", ctx do
+      opts = opts(ctx.home, ctx.waits)
+      {:ok, %{"summary" => %{"key" => key}}} = route("home.status", %{}, opts)
+
+      waiting =
+        Task.async(fn -> route("home.status", %{"after" => key, "wait_ms" => 25_000}, opts) end)
+
+      assert_receive {:wait_timer, _pid, {:home_status_wait, _token}, 25_000}
+
+      {:ok, _ledger} =
+        Ledger.update(ctx.home, "hetzner", &{:ok, Ledger.connect(&1, "invented-token-0001", @at)})
+
+      :ok = StatusWatch.changed(ctx.watch, :ledger)
+
+      assert {:ok, %{"summary" => %{"state" => "choose", "key" => moved}}} =
+               Task.await(waiting, 10_000)
+
+      refute moved == key
+    end
+
+    test "off is quiet, so the wait runs out with the summary as it is", ctx do
+      opts = opts(ctx.home, ctx.waits)
+      {:ok, %{"summary" => %{"key" => key}}} = route("home.status", %{}, opts)
+
+      waiting =
+        Task.async(fn -> route("home.status", %{"after" => key, "wait_ms" => 5_000}, opts) end)
+
+      assert_receive {:wait_timer, pid, {:home_status_wait, _token} = expiry, 5_000}
+      send(pid, expiry)
+
+      assert {:ok, %{"summary" => %{"state" => "off", "key" => ^key}}} =
+               Task.await(waiting, 10_000)
+    end
+
+    test "the wait is asked for whole, and for at most 25 seconds", ctx do
+      opts = opts(ctx.home, ctx.waits)
+
+      assert {:error, :invalid_params, %{"field" => "wait_ms"}} =
+               route("home.status", %{"after" => "k"}, opts)
+
+      assert {:error, :invalid_params, %{"field" => "after"}} =
+               route("home.status", %{"wait_ms" => 1_000}, opts)
+
+      assert {:error, :invalid_params, %{"field" => "wait_ms"}} =
+               route("home.status", %{"after" => "k", "wait_ms" => 25_001}, opts)
+
+      assert {:error, :invalid_params, %{"field" => "x"}} =
+               route("home.status", %{"x" => 1}, opts)
+    end
+  end
+
+  defp jobs!(ctx) do
+    tasks = :"home_tasks_#{:erlang.phash2(ctx.test)}"
+    start_supervised!({Task.Supervisor, name: tasks}, id: tasks)
+    name = :"home_jobs_#{:erlang.phash2(ctx.test)}"
+    start_supervised!({Jobs, name: name, task_supervisor: tasks})
+    [server: name]
+  end
+
+  defp jobs(jobs) do
+    {:ok, views} = Jobs.list(jobs)
+    views
+  end
+
+  defp nimbus_seams(world) do
+    [
+      providers: [FakeCloudProvider],
+      provider_opts: [
+        world: world,
+        now: fn -> @at end,
+        sleep: fn _ms -> :ok end,
+        open_code: fn -> {:ok, "fxenroll1.eyJ2IjoxLCJuYW1lIjoiaW52ZW50ZWQifQ"} end,
+        withdraw_code: fn -> :ok end
+      ],
+      open_code: fn -> {:ok, "fxenroll1.eyJ2IjoxLCJuYW1lIjoiaW52ZW50ZWQifQ"} end,
+      withdraw_code: fn -> :ok end
+    ]
+  end
+
+  # The job's end is its completion event; one that ended before the handler
+  # was attached is read as it stands.
+  defp finished(%{"job_id" => id}, jobs) do
+    TelemetryCapture.attach([[:fermix, :management_job, :complete]], session_id: id)
+
+    case Jobs.get(id, jobs) do
+      {:ok, %{"status" => "running"}} ->
+        assert_receive {:telemetry, _event, _measurements, %{session_id: ^id}}, 10_000
+        {:ok, view} = Jobs.get(id, jobs)
+        view
+
+      {:ok, view} ->
+        view
     end
   end
 

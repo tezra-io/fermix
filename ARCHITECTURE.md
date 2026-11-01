@@ -614,7 +614,22 @@ provider holds a server, and create, power and delete run as one
 and once this engine is its linked desktop (or the home carries the moved
 marker). `Ledger.state/3` is the one reading of the provisioner for `home.status`'s
 summary: none, connected, creating, created, deleting, gone, failed (with the
-reason) or unreadable, beside whether the token is still accepted. The apps
+reason, before anything else the ledger holds) or unreadable, beside whether
+the token is still accepted, the step whose job runs (`action`, written by
+`Management.Provision.put_action/2` before the job starts and cleared by the
+job's end in the family's one job wrapper) and when the provider was last
+read back (`checked_at`, the reconcile's). Every step's ending lands there:
+a create's, a power action's and a delete's failure carry the step, the
+server's size and place; an action older than the job budget reads as the
+failure `interrupted`, and the boot, before the job family and the socket
+start, writes it so (`Management.Provision.interrupt_at_boot/0`, a child that
+starts no process). A create's job prices its choice from the live offer
+(or makes it, the recommendation, when none is given:
+`Management.Provision.start_create/2`), keeps it on the action and writes the
+price into the server record. `Management.Home.status/1` starts one
+reconcile (`Management.Provision.start_reconcile/1`, a job of the same family,
+so single-flight and never beside a step) when its summary rests on the
+provider's word and the ledger was last checked over a minute ago. The apps
 read `home.status` often, so everything it reads on each read (the ledger, the
 settings its summary reads, `MoveReadiness.stays_here/3`, the primary's
 disk, the last review of the move and each copy a desktop stores) logs a
@@ -644,9 +659,15 @@ copies beside the record `Management.Home.status/1` already holds (the role,
 the move's phase, the candidates, the rail's window and link, the snapshots,
 the primary's disk, `Home.Disk.usage/2`, and a linked desktop's composed
 `primary_home`, or `Placement.primary_part/2`'s `too_old` when the server
-refused this engine's protocol), and the pure `summary/1` answers `{state,
-sentence, action, detail}` in `Management.Copy`'s words and the provider's
-display data, which `CopyTest`
+refused this engine's protocol), the review's items the home's settings
+decide (`MoveReadiness.summary_items/4`, which `report/3` ends with) and the
+owner's zone (`Clock.shown_zone/1`), and the pure `summary/1` answers `{key,
+state, sentence, action, detail, notice}` in `Management.Copy`'s words and
+the provider's display data: every action one record (`needs`, `confirm`,
+`url`, `key`, `HomeSummary.action_key/5`; `find_action/3` finds one by its
+key), Details' `lines`, `providers` and `progress`, the notice the apps raise,
+and `key/1`, the one digest, which leaves out the clock (an `off`, `on` or
+`problem` sentence, `seen_at`, the last check), which `CopyTest`
 holds to the copy rules and to `Copy.summary_violations/1` (no internal word,
 no backticked code), as it does every sentence the summary prints as it is
 from elsewhere: it sweeps the provisioner's refusals, the ledger's, the
@@ -671,13 +692,12 @@ started by `Companion.Supervisor` before the connections (a restart that
 forgets its subscribers takes them down too), keeps the last
 `HomeSummary.watch/1` read (`Management.Home.summary_facts/1`, gathered as
 `home.status` gathers them, through the server on a linked desktop): its key
-(state, action, problem kind, and the sentence except on `on` and `problem`,
-whose figures move with the clock, and on `off`, which an app forgets until it
-ends, so a settings write tells nothing; on a server with desktops also its newest
-backup, its window and its candidates, which their summaries read; on a desktop
-and a server with desktops whether the newest backup is 7 days old, when the
-apps notify), whether it is `off`, and the milliseconds to its next change by
-the clock alone. A
+(the summary's own `key/1`, so a settings write while `off` tells nothing; on a
+server with desktops also its newest backup, its window and its candidates,
+which their summaries read), whether it is `off`, and the milliseconds to its
+next change by the clock alone. A `home.status {after, wait_ms}`
+(`Management.Home.status_after/3`) subscribes the request's own process and
+reads again at each word until the key moves or the wait runs out. A
 version 6 `Companion.Connection` subscribes before its `server_hello` and
 writes `home_status_changed` when told: once after the hello unless off, then
 at each change of key. It reads only while subscribed, on `changed/2` from the

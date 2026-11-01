@@ -11,6 +11,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
   alias FermixTestSupport.FakeCloudProvider
 
   @now ~U[2031-05-04 12:00:00Z]
+  @step_at ~U[2031-05-04 11:59:00Z]
   @minute 60_000
   @cand "cand-5e2a9c1f7b3d4086"
   @new_cand "cand-9d41c7e2b05a3f68"
@@ -27,26 +28,27 @@ defmodule FermixCore.Management.HomeSummaryTest do
 
     [
       {"a home with nothing", facts([]), "off",
-       "Keep Fermix running when this Mac sleeps. It moves to a server you own.", "set_up"},
+       "Keep Fermix running when this Mac sleeps. It moves to a server you own.", "paste_token"},
       {"a home that uses iMessage and meetings", facts(stays_here: [:imessage, :meetings]), "off",
        "Keep Fermix running when this Mac sleeps. It moves to a server you own. iMessage and " <>
-         "meetings stop after the move.", "set_up"},
+         "meetings stop after the move.", "paste_token"},
       {"a home that uses all three", facts(stays_here: [:imessage, :voice, :meetings]), "off",
        "Keep Fermix running when this Mac sleeps. It moves to a server you own. iMessage, " <>
-         "voice calls and meetings stop after the move.", "set_up"},
+         "voice calls and meetings stop after the move.", "paste_token"},
       {"a home that uses only iMessage", facts(stays_here: [:imessage]), "off",
        "Keep Fermix running when this Mac sleeps. It moves to a server you own. iMessage " <>
-         "stops after the move.", "set_up"},
+         "stops after the move.", "paste_token"},
       {"a Linux home with nothing", facts(host_os: :linux), "off",
-       "Keep Fermix running when this computer sleeps. It moves to a server you own.", "set_up"},
+       "Keep Fermix running when this computer sleeps. It moves to a server you own.",
+       "paste_token"},
       {"a Linux home with voice calls on", facts(host_os: :linux, stays_here: [:voice]), "off",
        "Keep Fermix running when this computer sleeps. It moves to a server you own. Voice " <>
-         "calls stop after the move.", "set_up"},
+         "calls stop after the move.", "paste_token"},
       {"a code for a server of the owner's own", facts(link: link(enrollment: manual(:open))),
-       "connect", "Paste a Hetzner API token to let Fermix create your server.", nil},
+       "connect", "Paste a Hetzner API token to let Fermix create your server.", "paste_token"},
       {"a token Hetzner refused before anything was made",
        facts(provision: ledger(:failed, token: :refused, failure: failure("token_refused"))),
-       "connect", "Paste a Hetzner API token to let Fermix create your server.", nil},
+       "connect", "Paste a Hetzner API token to let Fermix create your server.", "paste_token"},
       {"a token Hetzner accepted", facts(provision: ledger(:connected)), "choose",
        "Your Hetzner token works, so choose the server Fermix creates.", "create_server"},
       {"the create under way", facts(provision: ledger(:creating)), "creating",
@@ -121,11 +123,40 @@ defmodule FermixCore.Management.HomeSummaryTest do
          "Fermix's log says why.", "learn_more"},
       {"the server being deleted", facts(provision: created_ledger(state: :deleting)), "creating",
        "Deleting your server…", nil},
+      {"a create's step, before its job wrote anything",
+       facts(provision: ledger(:connected) |> stepping("create")), "creating",
+       "Starting your server…", "cancel"},
+      {"Start again's step, deleting what stood first",
+       facts(provision: created_ledger(state: :deleting) |> stepping("create")), "creating",
+       "Deleting your server…", nil},
+      {"a delete's step", facts(provision: created_ledger() |> stepping("delete")), "creating",
+       "Deleting your server…", nil},
+      {"turning the server on",
+       facts(provision: created_ledger(power: "off") |> stepping("power_on")), "creating",
+       "Turning your server on…", nil},
+      {"a power action that stopped",
+       facts(provision: created_ledger(state: :failed) |> failed(step_failure("power_on"))),
+       "problem",
+       "Fermix could not reach Hetzner, so check this computer's connection and try again.",
+       "turn_on"},
+      {"a delete that stopped",
+       facts(provision: created_ledger(state: :failed) |> failed(step_failure("delete"))),
+       "problem",
+       "Fermix could not reach Hetzner, so check this computer's connection and try again.",
+       "delete_server"},
+      {"a create a restart cut short",
+       facts(provision: ledger(:failed, failure: step_failure("create", "interrupted"))),
+       "problem", "Fermix stopped before your server was created, so start again.",
+       "start_again"},
+      {"nothing in stock for the recommendation",
+       facts(provision: ledger(:failed, failure: failure("nothing_in_stock"))), "problem",
+       "Hetzner has no server type with 4 GB in stock in Falkenstein, Nuremberg or Helsinki " <>
+         "right now.", "learn_more"},
       {"a move undone, the server still held",
        ready_facts(move: move("aborted"), link: link(enrollment: provisioned(:used, @cand))),
        "undone", "The move was undone. Fermix still runs on this Mac.", "try_again"},
       {"a move undone long ago, nothing held", facts(move: move("aborted")), "off",
-       "Keep Fermix running when this Mac sleeps. It moves to a server you own.", "set_up"}
+       "Keep Fermix running when this Mac sleeps. It moves to a server you own.", "paste_token"}
     ]
   end
 
@@ -179,6 +210,18 @@ defmodule FermixCore.Management.HomeSummaryTest do
        ), "problem", "Your server was deleted in Hetzner.", "learn_more"},
       {"a server this Mac is too old for", desktop(primary_too_old: true, primary_home: nil),
        "problem", "Update Fermix on this Mac to keep using Always On.", "update"},
+      {"restarting the server",
+       desktop(
+         link_primary: primary(:unreachable, 11 * @minute),
+         provision: created_ledger() |> stepping("power_reset")
+       ), "creating", "Restarting your server…", nil},
+      {"a restart that stopped",
+       desktop(
+         link_primary: primary(:unreachable, 11 * @minute),
+         provision: created_ledger(state: :failed) |> failed(step_failure("power_reset"))
+       ), "problem",
+       "Fermix could not reach Hetzner, so check this computer's connection and try again.",
+       "restart_server"},
       {"a token that stopped working after the move",
        desktop(provision: %{created_ledger() | token: :refused}), "problem",
        "Hetzner no longer accepts Fermix's token.", "paste_token"},
@@ -204,6 +247,16 @@ defmodule FermixCore.Management.HomeSummaryTest do
       {"a replace creating the new server",
        desktop(provision: replacing(:creating, server: nil, ledger_state: :creating)), "creating",
        "Creating your new server…", "cancel"},
+      {"a replace's create step, before its job wrote anything",
+       desktop(
+         provision:
+           replacing(:creating, server: nil, ledger_state: :connected) |> stepping("create")
+       ), "creating", "Creating your new server…", "cancel"},
+      {"turning a replace's new server on",
+       desktop(
+         provision: replacing(:waiting, server: new_server(power: "off")) |> stepping("power_on"),
+         primary_home: server_home(enrollment: new_window("open"))
+       ), "creating", "Turning your new server on…", nil},
       {"a replace's new server still starting",
        desktop(
          provision: replacing(:waiting, server: new_server(power: "starting")),
@@ -394,11 +447,11 @@ defmodule FermixCore.Management.HomeSummaryTest do
   # an invented provider reads in its own words throughout.
   describe "on a provider that is not Hetzner" do
     test "the token step, the choice and the bill name the provider" do
-      %{"detail" => %{"connect" => connect}} =
-        HomeSummary.summary(facts(provider: FakeCloudProvider))
+      %{"detail" => %{"providers" => [screen]}} =
+        HomeSummary.summary(facts(provider: FakeCloudProvider, providers: [FakeCloudProvider]))
 
-      assert connect["sentence"] == "Paste a Nimbus access key to let Fermix create your server."
-      assert connect["steps"] == FakeCloudProvider.display().steps
+      assert screen["sentence"] == "Paste a Nimbus access key to let Fermix create your server."
+      assert screen["steps"] == FakeCloudProvider.display().steps
 
       summary =
         HomeSummary.summary(facts(provider: FakeCloudProvider, provision: ledger(:connected)))
@@ -418,7 +471,11 @@ defmodule FermixCore.Management.HomeSummaryTest do
           facts(provider: FakeCloudProvider, provision: ledger(:failed, failure: limit))
         )
 
-      assert summary["action"] == %{"id" => "open_console", "label" => "Open Nimbus"}
+      assert %{
+               "id" => "open_console",
+               "label" => "Open Nimbus",
+               "url" => "https://console.nimbus.invalid/"
+             } = summary["action"]
 
       full = %{failure("unavailable", "lis1") | sentence: "Oslo has no Small 4 right now."}
 
@@ -427,7 +484,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
           facts(provider: FakeCloudProvider, provision: ledger(:failed, failure: full))
         )
 
-      assert summary["action"] == %{"id" => "create_in", "label" => "Create in Lisbon"}
+      assert %{"id" => "create_in", "label" => "Create in Lisbon"} = summary["action"]
     end
 
     test "a server's facts are the provider's, and so is who can read its disk" do
@@ -460,19 +517,54 @@ defmodule FermixCore.Management.HomeSummaryTest do
   # -- what Details holds -------------------------------------------------------
 
   describe "the detail" do
-    test "the first screen carries the token step its Set up opens" do
-      %{"detail" => %{"connect" => connect}} = HomeSummary.summary(facts([]))
+    test "the first screen is Set up: the token every provider's screen asks for" do
+      summary = HomeSummary.summary(facts([]))
 
-      assert connect["sentence"] == "Paste a Hetzner API token to let Fermix create your server."
-      assert_token_steps(connect["steps"])
-      assert ids(connect["alternatives"]) == ["own_server"]
+      assert %{"id" => "paste_token", "label" => "Set up", "needs" => ["token"]} =
+               summary["action"]
+
+      assert [screen] = summary["detail"]["providers"]
+
+      assert %{
+               "id" => "hetzner",
+               "name" => "Hetzner",
+               "token_label" => "Hetzner API token",
+               "sentence" => "Paste a Hetzner API token to let Fermix create your server.",
+               "console_url" => "https://console.hetzner.cloud/",
+               "docs_url" => "https://fermix.ai/docs/always-on/#hetzner"
+             } = screen
+
+      assert_token_steps(screen["steps"])
+      assert ids(summary["detail"]["alternatives"]) == ["own_server"]
+      refute Map.has_key?(summary["detail"], "connect")
     end
 
     test "the token step names two-factor sign-in and a project for Fermix alone" do
+      summary = HomeSummary.summary(facts(link: link(enrollment: manual(:open))))
+
+      assert %{"id" => "paste_token", "label" => "Set up"} = summary["action"]
+      assert_token_steps(hd(summary["detail"]["providers"])["steps"])
+    end
+
+    # Always On setup §4: Cancel closes an open code for a server of the
+    # owner's own, which deletes nothing and so asks nothing.
+    test "an open code for a server of the owner's own is closed by Cancel" do
       %{"detail" => detail} = HomeSummary.summary(facts(link: link(enrollment: manual(:open))))
 
-      assert_token_steps(detail["steps"])
-      assert ids(detail["alternatives"]) == ["own_server"]
+      assert [%{"id" => "own_server"}, %{"id" => "cancel", "label" => "Cancel the code"} = cancel] =
+               detail["alternatives"]
+
+      assert cancel["confirm"] == nil
+
+      # A token refused before anything was made asks for a new one, and no
+      # code is open to close.
+      summary =
+        HomeSummary.summary(
+          facts(provision: ledger(:failed, token: :refused, failure: failure("token_refused")))
+        )
+
+      assert %{"id" => "paste_token", "label" => "Paste a new token"} = summary["action"]
+      assert ids(summary["detail"]["alternatives"]) == ["own_server"]
     end
 
     test "choose says Hetzner bills by the hour until the server is deleted" do
@@ -550,7 +642,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
           )
         )
 
-      assert detail == %{
+      assert Map.delete(detail, "lines") == %{
                "kind" => "turned_off",
                "note" => "A turned-off server still costs its monthly price.",
                "seen_at" => "2031-05-04T11:50:00Z",
@@ -583,14 +675,14 @@ defmodule FermixCore.Management.HomeSummaryTest do
           facts(provision: ledger(:failed, failure: failure("unavailable", "nbg1")))
         )
 
-      assert summary["action"] == %{"id" => "create_in", "label" => "Create in Nuremberg"}
+      assert %{"id" => "create_in", "label" => "Create in Nuremberg"} = summary["action"]
       assert summary["detail"]["next_location"] == "nbg1"
     end
 
     test "a replace's ready holds the new server's facts and until when it waits" do
       %{"detail" => detail} = HomeSummary.summary(replace_ready([]))
 
-      assert detail == %{
+      assert Map.delete(detail, "lines") == %{
                "server" => %{
                  "name" => "fermix-general-5d2e",
                  "type" => "CPX32",
@@ -616,9 +708,8 @@ defmodule FermixCore.Management.HomeSummaryTest do
       assert summary["detail"]["note"] ==
                "Your new server costs its monthly price until it is deleted."
 
-      assert summary["detail"]["alternatives"] == [
-               %{"id" => "delete_server", "label" => "Delete your new server"}
-             ]
+      assert [%{"id" => "delete_server", "label" => "Delete your new server"}] =
+               summary["detail"]["alternatives"]
     end
 
     test "an old server left after a replace says it costs money, and Delete tries again" do
@@ -627,9 +718,9 @@ defmodule FermixCore.Management.HomeSummaryTest do
           desktop(provision: replacing(:failed, current: :new, failure: old_server_failure()))
         )
 
-      assert summary["action"] == %{"id" => "delete_server", "label" => "Delete your old server"}
+      assert %{"id" => "delete_server", "label" => "Delete your old server"} = summary["action"]
 
-      assert summary["detail"] == %{
+      assert Map.delete(summary["detail"], "lines") == %{
                "kind" => "delete_failed",
                "note" => "Your old server costs its monthly price until it is deleted.",
                "seen_at" => "2031-05-04T11:00:00Z",
@@ -646,6 +737,375 @@ defmodule FermixCore.Management.HomeSummaryTest do
           ] do
         assert HomeSummary.summary(facts)["detail"] == %{}
       end
+    end
+  end
+
+  # -- the summary is the screen (Always On setup §3.1) -------------------------
+
+  describe "every action is one record" do
+    test "each action anywhere has its needs, confirm, url and key" do
+      for {name, facts, _state, _sentence, _action} <- cases(),
+          summary = HomeSummary.summary(facts),
+          action <- every_action(summary) do
+        assert Map.keys(action) |> Enum.sort() == ~w(confirm id key label needs url), name
+        assert Enum.all?(action["needs"], &(&1 in HomeSummary.needs())), name
+        assert is_binary(action["key"]), name
+
+        assert {:ok, ^action} = HomeSummary.find_action(summary, action["id"], action["key"]),
+               name
+
+        # A confirm is stable: no time and no price in it.
+        if action["confirm"] do
+          refute action["confirm"] =~ ~r/[€$£]|\d:\d\d|\b\d{4}\b|\ba month\b/,
+                 "#{name}: #{action["confirm"]}"
+        end
+      end
+    end
+
+    test "what spends, deletes, restarts a server or moves asks first; nothing else does" do
+      asks =
+        for {_name, facts, _state, _sentence, _action} <- cases(),
+            action <- every_action(HomeSummary.summary(facts)),
+            into: %{},
+            do: {action["id"], action["confirm"] != nil}
+
+      for id <- ~w(create_server create_in start_again replace_server restart_server
+                   delete_server move_now try_again),
+          do: assert(asks[id], id)
+
+      for id <- ~w(learn_more turn_on open_console paste_token update back_up_now check_again
+                   own_server),
+          do: refute(asks[id], id)
+    end
+
+    test "what each one needs the surface to collect" do
+      needs = fn facts -> HomeSummary.summary(facts)["action"]["needs"] end
+
+      assert needs.(facts([])) == ["token"]
+      assert needs.(facts(provision: ledger(:connected))) == ["choice"]
+      assert needs.(ready_facts([])) == ["recovery_passphrase"]
+
+      assert needs.(facts(provision: ledger(:failed, failure: failure("unavailable", "nbg1")))) ==
+               []
+
+      %{"detail" => %{"actions" => [back_up, replace]}} = HomeSummary.summary(desktop([]))
+      assert {back_up["needs"], replace["needs"]} == {[], ["choice"]}
+    end
+
+    test "Learn more opens the docs at the provider's part, Open its console" do
+      %{"action" => learn} =
+        HomeSummary.summary(facts(provision: ledger(:failed, failure: failure("unavailable"))))
+
+      assert learn["url"] == "https://fermix.ai/docs/always-on/#hetzner"
+
+      %{"action" => console} =
+        HomeSummary.summary(facts(provision: ledger(:failed, failure: failure("account_limit"))))
+
+      assert console["url"] == "https://console.hetzner.cloud/"
+      assert HomeSummary.summary(facts([]))["action"]["url"] == nil
+    end
+
+    test "an action's key is its id, label, confirm, needs and what it acts on" do
+      %{"action" => move} = HomeSummary.summary(ready_facts([]))
+
+      assert move["key"] ==
+               HomeSummary.action_key(
+                 "move_now",
+                 "Move now",
+                 move["confirm"],
+                 move["needs"],
+                 @cand
+               )
+
+      %{"action" => turn_on} =
+        HomeSummary.summary(
+          facts(
+            provision: created_ledger(power: "off"),
+            link: link(enrollment: provisioned(:open))
+          )
+        )
+
+      assert turn_on["key"] ==
+               HomeSummary.action_key("turn_on", "Turn it on", nil, [], "61839204")
+
+      %{"action" => paste} = HomeSummary.summary(facts([]))
+
+      assert paste["key"] ==
+               HomeSummary.action_key("paste_token", "Set up", nil, ["token"], "hetzner")
+
+      %{"action" => create_in} =
+        HomeSummary.summary(
+          facts(provision: ledger(:failed, failure: failure("unavailable", "nbg1")))
+        )
+
+      assert create_in["key"] ==
+               HomeSummary.action_key(
+                 "create_in",
+                 "Create in Nuremberg",
+                 create_in["confirm"],
+                 [],
+                 "nbg1"
+               )
+
+      # Another server to move to is another key.
+      other = %{candidate() | "candidate_id" => "cand-0a1b2c3d4e5f6071"}
+
+      moved_key =
+        HomeSummary.summary(
+          ready_facts(
+            candidates: [other],
+            link: link(enrollment: provisioned(:used, "cand-0a1b2c3d4e5f6071"))
+          )
+        )["action"]["key"]
+
+      refute moved_key == move["key"]
+    end
+
+    test "find_action/3 finds an action by its id and key wherever it sits, and nothing else" do
+      summary = HomeSummary.summary(desktop([]))
+      [_back_up, replace] = summary["detail"]["actions"]
+
+      assert {:ok, ^replace} = HomeSummary.find_action(summary, "replace_server", replace["key"])
+      assert :error = HomeSummary.find_action(summary, "replace_server", "another-key")
+      assert :error = HomeSummary.find_action(summary, "move_now", replace["key"])
+    end
+  end
+
+  # B2: Move now asks once, at `ready`, naming what this home's settings
+  # say stops or waits; the full review at the press changes it, and its
+  # key, only when it found a warning the screen did not name.
+  describe "Move now's confirm" do
+    test "names each warning this home's settings give, in the review's words" do
+      summary = HomeSummary.summary(ready_facts(move_items: move_items()))
+
+      assert summary["action"]["confirm"] ==
+               "Move Fermix to your server now? " <>
+                 "WhatsApp stops after the move: it needs an address on the internet that " <>
+                 "WhatsApp can send messages to, and fermix-general-a3f9 has none. " <>
+                 "This computer serves nothing while the move runs."
+    end
+
+    test "a warning the last review of the same server gave beside them moves it, and the key" do
+      plain = HomeSummary.summary(ready_facts(move_items: move_items()))
+
+      # The review said the same warnings: Move now's confirm and key are the same.
+      same = review([warn()])
+      reviewed_same = HomeSummary.summary(ready_facts(move_items: move_items(), review: same))
+      assert reviewed_same["action"]["key"] == plain["action"]["key"]
+
+      s3 = %{
+        "id" => "s3_size",
+        "status" => "warn",
+        "sentence" => "This home is about 6 GiB, more than one S3 upload carries (5 GiB)."
+      }
+
+      reviewed = HomeSummary.summary(ready_facts(move_items: move_items(), review: review([s3])))
+
+      assert reviewed["action"]["confirm"] =~
+               "Move Fermix to your server now? This home is about 6 GiB"
+
+      refute reviewed["action"]["key"] == plain["action"]["key"]
+      refute reviewed["key"] == plain["key"]
+    end
+
+    test "during a replace it says what every such move does" do
+      %{"action" => move} = HomeSummary.summary(replace_ready([]))
+
+      assert move["confirm"] ==
+               "Move Fermix to your new server now? Your old server serves nothing while the " <>
+                 "move runs, and Fermix deletes it once the move is done."
+    end
+  end
+
+  describe "a step whose job runs" do
+    test "the step in hand follows what the job wrote" do
+      progress = fn ledger ->
+        HomeSummary.summary(facts(provision: ledger))["detail"]["progress"]
+      end
+
+      assert progress.(ledger(:connected) |> stepping("create")) ==
+               "Checking that Hetzner has the server in stock."
+
+      assert progress.(ledger(:creating) |> stepping("create")) ==
+               "Creating the server's firewall."
+
+      assert progress.(created_ledger(status: :requested, state: :creating) |> stepping("create")) ==
+               "Creating the server."
+
+      assert progress.(created_ledger(status: :creating, state: :creating) |> stepping("create")) ==
+               "Waiting for the server to start."
+
+      assert progress.(created_ledger(state: :deleting) |> stepping("delete")) ==
+               "Deleting the server and what came with it."
+
+      assert progress.(created_ledger(power: "off") |> stepping("power_on")) ==
+               "Waiting for Hetzner to finish."
+
+      assert progress.(created_ledger()) == nil
+    end
+
+    test "the step's progress moves the key, a minute of the clock does not" do
+      first = HomeSummary.summary(facts(provision: ledger(:connected) |> stepping("create")))
+      written = HomeSummary.summary(facts(provision: ledger(:creating) |> stepping("create")))
+
+      assert first["state"] == written["state"] and first["sentence"] == written["sentence"]
+      refute first["key"] == written["key"]
+
+      assert HomeSummary.watch(
+               later(facts(provision: ledger(:creating) |> stepping("create")), @minute)
+             ).key ==
+               HomeSummary.watch(facts(provision: ledger(:creating) |> stepping("create"))).key
+    end
+
+    test "the job's budget is a deadline: the summary reads it again then" do
+      %{next_change_ms: next} =
+        HomeSummary.watch(facts(provision: ledger(:connected) |> stepping("create")))
+
+      assert next == 15 * @minute - @minute
+    end
+  end
+
+  describe "Details' lines" do
+    test "ready: the server, its size, place, address, system, version, until when, and cost" do
+      priced =
+        created_ledger(total_monthly: "8.33", currency: "EUR")
+        |> Map.put(:checked_at, ~U[2031-05-04 11:58:00Z])
+
+      %{"detail" => %{"lines" => lines}} =
+        HomeSummary.summary(ready_facts(provision: priced, zone: "Europe/Berlin"))
+
+      assert lines == [
+               %{"label" => "Server", "value" => "fermix-general-a3f9"},
+               %{"label" => "Size", "value" => "CPX22"},
+               %{"label" => "Place", "value" => "Falkenstein"},
+               %{"label" => "Address", "value" => "203.0.113.7"},
+               %{"label" => "System", "value" => "linux x86_64"},
+               %{"label" => "Version", "value" => "0.9.0"},
+               %{"label" => "Waits until", "value" => "Monday, May 5, 2031 at 1:00 PM CEST"},
+               %{"label" => "Last checked", "value" => "Sunday, May 4, 2031 at 1:58 PM CEST"},
+               %{
+                 "label" => "Costs",
+                 "value" => "€8.33 a month, billed by the hour until deleted"
+               }
+             ]
+    end
+
+    test "on: the server, each backup, this Mac's copies and the server's disk" do
+      %{"detail" => %{"lines" => lines}} =
+        HomeSummary.summary(desktop(copies_bytes: 3_221_225_472))
+
+      assert lines == [
+               %{"label" => "Server", "value" => "fermix-general-a3f9"},
+               %{"label" => "Place", "value" => "Falkenstein"},
+               %{"label" => "Version", "value" => "0.9.0"},
+               %{
+                 "label" => "Last backup to your desktop",
+                 "value" => "Sunday, May 4, 2031 at 10:00 AM UTC"
+               },
+               %{
+                 "label" => "Last backup to S3",
+                 "value" => "Saturday, May 3, 2031 at 10:00 AM UTC"
+               },
+               %{"label" => "Backups on this Mac", "value" => "3 GiB"},
+               %{"label" => "Server disk", "value" => "42% used"}
+             ]
+    end
+
+    test "a check of the provider that found nothing new tells nobody" do
+      checked = fn at ->
+        facts(provision: created_ledger() |> Map.put(:checked_at, at)) |> later_seen(at)
+      end
+
+      a = HomeSummary.summary(checked.(~U[2031-05-04 11:00:00Z]))
+      b = HomeSummary.summary(checked.(~U[2031-05-04 11:59:00Z]))
+
+      refute a["detail"]["lines"] == b["detail"]["lines"]
+      assert a["key"] == b["key"]
+    end
+
+    test "states that name no server have none" do
+      for facts <- [
+            facts([]),
+            facts(provision: ledger(:connected)),
+            device(move: move("streaming"))
+          ],
+          do: refute(Map.has_key?(HomeSummary.summary(facts)["detail"], "lines"))
+    end
+  end
+
+  # The notice an app raises (Always On setup §3.1): one id per occurrence,
+  # stable while it stands, so an app that keeps the last id posts it once.
+  describe "the notice" do
+    test "ready, until another server is held" do
+      assert %{"id" => "ready:" <> @cand, "sentence" => "Your server is ready for the move."} =
+               HomeSummary.summary(ready_facts([]))["notice"]
+
+      assert %{"id" => "ready:" <> @new_cand} = HomeSummary.summary(replace_ready([]))["notice"]
+      assert HomeSummary.summary(facts([]))["notice"] == nil
+    end
+
+    test "the move done, until the first backup after it" do
+      no_backup =
+        desktop(primary_home: server_home(backups: []), moved: moved(~U[2031-05-04 09:00:00Z]))
+
+      assert %{"id" => "moved:5", "sentence" => "Fermix moved to your server."} =
+               HomeSummary.summary(no_backup)["notice"]
+
+      assert HomeSummary.summary(desktop([]))["notice"] == nil
+    end
+
+    test "the server out of reach, since the link went down" do
+      down = Map.put(primary(:unreachable, 11 * @minute), :down_at, ~U[2031-05-04 11:49:00Z])
+      summary = HomeSummary.summary(desktop(link_primary: down))
+
+      assert %{"id" => "cannot_reach:2031-05-04T11:49:00Z"} = summary["notice"]
+      assert summary["notice"]["sentence"] == summary["sentence"]
+
+      # The same outage later is the same notice.
+      assert HomeSummary.summary(later(desktop(link_primary: down), 30 * @minute))["notice"] ==
+               summary["notice"]
+    end
+
+    test "a server that must be set up again, by when it was created" do
+      summary =
+        HomeSummary.summary(
+          facts(provision: created_ledger(), link: link(enrollment: provisioned(:expired)))
+        )
+
+      assert %{"id" => "not_set_up:2031-05-04T10:00:00Z"} = summary["notice"]
+    end
+
+    test "the newest backup a week old, once for that backup" do
+      week = desktop(primary_home: server_home(backups: [{"desktop", ~U[2031-04-27 11:00:00Z]}]))
+
+      assert %{"id" => "backup_week:2031-04-27T11:00:00Z", "sentence" => said} =
+               HomeSummary.summary(week)["notice"]
+
+      assert said == "Your last backup is a week old. It runs when this Mac is online."
+
+      assert HomeSummary.summary(later(week, 2 * 86_400_000))["notice"] ==
+               HomeSummary.summary(week)["notice"]
+    end
+  end
+
+  describe "the server a move goes to" do
+    test "the one the created server's code enrolled, else the newest held" do
+      older = %{
+        candidate()
+        | "candidate_id" => "cand-old",
+          "enrolled_at" => "2031-05-04T09:00:00Z"
+      }
+
+      assert HomeSummary.target(ready_facts(candidates: [older, candidate()]))["candidate_id"] ==
+               @cand
+
+      assert HomeSummary.target(facts(candidates: [older, candidate()]))["candidate_id"] == @cand
+      assert HomeSummary.target(facts([])) == nil
+    end
+
+    test "during a replace, the one the old server's code for the new one enrolled" do
+      assert HomeSummary.target(replace_ready([]))["candidate_id"] == @new_cand
+      assert HomeSummary.target(desktop([])) == nil
     end
   end
 
@@ -748,8 +1208,12 @@ defmodule FermixCore.Management.HomeSummaryTest do
       assert HomeSummary.summary(desktop(primary_home: an_hour_ago))["sentence"] ==
                "Fermix runs on your server. Last backup 1 hour ago."
 
-      assert HomeSummary.watch(desktop([])).key ==
-               HomeSummary.watch(desktop(primary_home: an_hour_ago)).key
+      assert HomeSummary.summary(later(desktop(primary_home: an_hour_ago), 60 * @minute))[
+               "sentence"
+             ] == "Fermix runs on your server. Last backup 2 hours ago."
+
+      assert HomeSummary.watch(desktop(primary_home: an_hour_ago)).key ==
+               HomeSummary.watch(later(desktop(primary_home: an_hour_ago), 60 * @minute)).key
 
       assert HomeSummary.watch(desktop(primary_home: server_home(disk: 0.9))).key ==
                HomeSummary.watch(desktop(primary_home: server_home(disk: 0.96))).key
@@ -902,14 +1366,17 @@ defmodule FermixCore.Management.HomeSummaryTest do
         link: link([]),
         candidates: [],
         provider: Hetzner,
+        providers: [Hetzner],
         provision: ledger(:none),
         review: nil,
+        move_items: [],
         snapshots: snapshots([]),
         disk: nil,
         primary_home: nil,
         primary_too_old: false,
         copies_bytes: nil,
-        stays_here: []
+        stays_here: [],
+        zone: "Etc/UTC"
       },
       Map.new(overrides)
     )
@@ -986,9 +1453,43 @@ defmodule FermixCore.Management.HomeSummaryTest do
     token = if state == :none, do: :none, else: :accepted
 
     Map.merge(
-      %{state: state, token: token, server: nil, failure: nil, sentence: nil},
+      %{
+        state: state,
+        token: token,
+        server: nil,
+        failure: nil,
+        sentence: nil,
+        replace: nil,
+        action: nil,
+        checked_at: nil
+      },
       Map.new(overrides)
     )
+  end
+
+  # The ledger with a step's job running, started a minute ago.
+  defp stepping(ledger, kind),
+    do: %{ledger | action: %{kind: kind, started_at: @step_at, type: nil, location: nil}}
+
+  defp failed(ledger, failure), do: %{ledger | failure: failure}
+
+  # A step's failure as `Management.Provision` keeps it.
+  defp step_failure(action, reason \\ "unreachable") do
+    sentences = %{
+      "unreachable" =>
+        "Fermix could not reach Hetzner, so check this computer's connection and try again.",
+      "interrupted" => "Fermix stopped before your server was created, so start again."
+    }
+
+    %{
+      reason: reason,
+      sentence: Map.fetch!(sentences, reason),
+      next_location: nil,
+      at: ~U[2031-05-04 11:00:00Z],
+      action: action,
+      type: "cpx22",
+      location: "fsn1"
+    }
   end
 
   defp created_ledger(overrides \\ []) do
@@ -1025,6 +1526,8 @@ defmodule FermixCore.Management.HomeSummaryTest do
       server: Keyword.get(overrides, :server, new_server()),
       failure: nil,
       sentence: nil,
+      action: nil,
+      checked_at: nil,
       replace: %{
         state: state,
         current: Keyword.get(overrides, :current, current),
@@ -1110,6 +1613,9 @@ defmodule FermixCore.Management.HomeSummaryTest do
       token: :none,
       server: nil,
       failure: nil,
+      replace: nil,
+      action: nil,
+      checked_at: nil,
       sentence:
         "Fermix could not read its Hetzner file, so it shows nothing it created there; " <>
           "Fermix's log says why."
@@ -1126,7 +1632,10 @@ defmodule FermixCore.Management.HomeSummaryTest do
           "token from your Hetzner project.",
       "other" =>
         "Hetzner had not finished starting your server after five minutes; Always On " <>
-          "checks again when it opens."
+          "checks again when it opens.",
+      "nothing_in_stock" =>
+        "Hetzner has no server type with 4 GB in stock in Falkenstein, Nuremberg or Helsinki " <>
+          "right now."
     }
 
     %{
@@ -1217,6 +1726,24 @@ defmodule FermixCore.Management.HomeSummaryTest do
     %{"configured" => targets != [], "targets" => targets}
   end
 
+  # The review's items this home's settings give, as `MoveReadiness` words
+  # them (the summary carries no copy of its own for them).
+  defp move_items do
+    [
+      %{id: "stays_here", status: :ok, sentence: "Voice calls and meetings are not turned on."},
+      %{id: "whatsapp", status: :warn, sentence: warn()["sentence"]},
+      %{
+        id: "serves_nothing",
+        status: :warn,
+        sentence: "This computer serves nothing while the move runs."
+      }
+    ]
+  end
+
+  # The same facts, the provider having last seen the server at `at`.
+  defp later_seen(facts, at),
+    do: put_in(facts, [:provision, :server, :seen_at], at)
+
   # -- reading a summary --------------------------------------------------------
 
   defp action_id(%{"action" => nil}), do: nil
@@ -1226,35 +1753,29 @@ defmodule FermixCore.Management.HomeSummaryTest do
 
   defp ids(actions), do: Enum.map(actions, & &1["id"])
 
+  defp every_action(%{"action" => action, "detail" => detail}),
+    do: List.wrap(action) ++ Map.get(detail, "alternatives", []) ++ Map.get(detail, "actions", [])
+
   # The main action and every one Details offers.
   defp all_actions(%{"action" => action, "detail" => detail}) do
-    connect = get_in(detail, ["connect", "alternatives"]) || []
-
     ids(List.wrap(action)) ++
-      ids(Map.get(detail, "alternatives", [])) ++
-      ids(Map.get(detail, "actions", [])) ++ ids(connect)
+      ids(Map.get(detail, "alternatives", [])) ++ ids(Map.get(detail, "actions", []))
   end
 
-  defp printed(%{"sentence" => sentence, "action" => action, "detail" => detail}) do
-    labels = for %{"label" => label} <- List.wrap(action), do: label
-
-    lines = for key <- ~w(note billing data), is_binary(detail[key]), do: detail[key]
-
+  # Every word a surface prints as prose: the sentence, each action's label
+  # and confirm, the notes, the token screens, the step in hand, the labels
+  # of Details' lines and the notice.
+  defp printed(%{"sentence" => sentence, "action" => action, "detail" => detail} = summary) do
     actions =
-      for list <- [detail["alternatives"], detail["actions"]],
-          action <- list || [],
-          do: action["label"]
+      List.wrap(action) ++ (detail["alternatives"] || []) ++ (detail["actions"] || [])
 
-    connect =
-      case detail["connect"] do
-        %{"sentence" => s, "steps" => steps, "alternatives" => alts} ->
-          [s | steps] ++ Enum.map(alts, & &1["label"])
+    words = Enum.flat_map(actions, &[&1["label"] | List.wrap(&1["confirm"])])
+    notes = for key <- ~w(note billing data progress), is_binary(detail[key]), do: detail[key]
+    screens = Enum.flat_map(detail["providers"] || [], &[&1["sentence"] | &1["steps"]])
+    lines = for %{"label" => label} <- detail["lines"] || [], do: label
+    notice = for %{"sentence" => said} <- List.wrap(summary["notice"]), do: said
 
-        nil ->
-          []
-      end
-
-    [sentence | labels] ++ lines ++ actions ++ connect ++ (detail["steps"] || [])
+    [sentence | words] ++ notes ++ screens ++ lines ++ notice
   end
 
   defp assert_token_steps(steps) do

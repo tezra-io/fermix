@@ -915,6 +915,66 @@ defmodule FermixCore.Management.CopyTest do
       assert Copy.summary_violations(quoted) == [], inspect(quoted)
     end
 
+    # Always On setup §3.1: Details are lines the engine finishes, its times
+    # absolute in the owner's zone and its prices from the ledger, so no
+    # surface formats a time, a size or money.
+    test "each Details line is a label and a value the engine finished" do
+      ctx = %{zone: "Europe/Berlin", machine: "Mac"}
+      at = ~U[2031-05-04 10:00:00Z]
+
+      assert Copy.summary_line(:waits_until, at, ctx) ==
+               %{"label" => "Waits until", "value" => "Sunday, May 4, 2031 at 12:00 PM CEST"}
+
+      assert Copy.summary_line(:backup, {"S3", at}, ctx) ==
+               %{
+                 "label" => "Last backup to S3",
+                 "value" => "Sunday, May 4, 2031 at 12:00 PM CEST"
+               }
+
+      assert Copy.summary_line(:checked, at, %{ctx | zone: "Etc/UTC"})["value"] ==
+               "Sunday, May 4, 2031 at 10:00 AM UTC"
+
+      assert Copy.summary_line(:copies, 3_221_225_472, ctx) ==
+               %{"label" => "Backups on this Mac", "value" => "3 GiB"}
+
+      assert Copy.summary_line(:disk, 0.42, ctx) ==
+               %{"label" => "Server disk", "value" => "42% used"}
+
+      assert Copy.summary_line(:costs, {"8.33", "EUR"}, ctx) ==
+               %{"label" => "Costs", "value" => "€8.33 a month, billed by the hour until deleted"}
+
+      assert Copy.summary_line(:costs, {"12.00", "USD"}, ctx)["value"] =~ "$12.00 a month"
+      assert Copy.summary_line(:costs, {"9.10", "CHF"}, ctx)["value"] =~ "CHF 9.10 a month"
+      assert Copy.summary_line(:server, "fermix-general-a3f9", ctx)["label"] == "Server"
+      assert Copy.checked_label() == Copy.summary_line(:checked, at, ctx)["label"]
+
+      for key <- Copy.summary_line_keys() do
+        assert Copy.violations(Copy.summary_line_label(key), :name) == [], inspect(key)
+      end
+    end
+
+    # Move now's confirm names what the move costs the owner, in the
+    # review's own words, and never a time or a price, so it is stable.
+    test "Move now's confirm asks once and names each warning in its words" do
+      warnings = [
+        "WhatsApp stops after the move: it needs an address on the internet that WhatsApp " <>
+          "can send messages to, and north-box has none."
+      ]
+
+      assert Copy.move_confirm(warnings) ==
+               "Move Fermix to your server now? WhatsApp stops after the move: it needs an " <>
+                 "address on the internet that WhatsApp can send messages to, and north-box " <>
+                 "has none."
+
+      assert Copy.move_confirm([]) == "Move Fermix to your server now?"
+    end
+
+    test "the docs and the own-server command are the engine's to word" do
+      assert Copy.always_on_docs_url("hetzner") == "https://fermix.ai/docs/always-on/#hetzner"
+      assert Copy.own_server_command() == "curl -fsSL https://fermix.ai/always-on | sudo sh"
+      refute Copy.own_server_command() =~ "FERMIX_ENROLL_CODE"
+    end
+
     test "every key and every action answers its words" do
       assert length(Copy.summary_keys()) >= 38
       assert length(HomeSummary.actions()) == length(Enum.uniq(HomeSummary.actions()))
@@ -943,7 +1003,8 @@ defmodule FermixCore.Management.CopyTest do
     labels =
       for provider <- ProvisionRegistry.all(),
           id <- HomeSummary.actions(),
-          values = provider_values(provider),
+          extra <- [%{}, %{first: true, code: true}],
+          values = Map.merge(provider_values(provider), extra),
           do: {"action #{id}", Copy.summary_label(String.to_existing_atom(id), values), :name}
 
     steps =

@@ -275,14 +275,26 @@ defmodule FermixTestSupport.CliContractCases do
       link: %{primary: nil, desktops: [], enrollment: nil},
       candidates: [],
       provider: FermixCore.Home.Provision.Hetzner,
-      provision: %{state: :none, token: :none, server: nil, failure: nil, sentence: nil},
+      providers: [FermixCore.Home.Provision.Hetzner],
+      provision: %{
+        state: :none,
+        token: :none,
+        server: nil,
+        failure: nil,
+        sentence: nil,
+        replace: nil,
+        action: nil,
+        checked_at: nil
+      },
       review: nil,
+      move_items: [],
       snapshots: snapshots_view(),
       disk: nil,
       primary_home: nil,
       primary_too_old: false,
       copies_bytes: nil,
-      stays_here: [:imessage, :voice, :meetings]
+      stays_here: [:imessage, :voice, :meetings],
+      zone: "Etc/UTC"
     }
   end
 

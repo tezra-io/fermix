@@ -44,6 +44,11 @@ defmodule FermixCore.Home.MoveReadiness do
       recurring job more than an hour late is skipped;
     * `serves_nothing`: this computer serves nothing during the move.
 
+  The last six are `summary_items/4`: what a review reads from this home's
+  settings alone, needing neither the keychain nor a walk of the home, so
+  `home.status`'s summary builds Move now's confirm from them before any
+  review (`Management.HomeSummary`), in the words the review says them.
+
   `opts`: `:free_bytes` (a 1-arity reader of free space), `:supervised` (for
   `CommandRunner` and the keychain read from a tree-less verb), `:version`
   (this engine's, `BuildInfo.product_version/0`), `:host` (this host's plugin
@@ -84,13 +89,33 @@ defmodule FermixCore.Home.MoveReadiness do
         :error -> home_bytes(home)
       end
 
-    items = [
-      keychain(config, opts),
-      version(candidate, Keyword.get_lazy(opts, :version, &BuildInfo.product_version/0)),
-      disk(home, home_bytes, name, opts),
-      s3_size(candidate, home_bytes),
-      plugins(home, host, candidate, opts),
-      stays_here_item(config, host, name),
+    items =
+      [
+        keychain(config, opts),
+        version(candidate, Keyword.get_lazy(opts, :version, &BuildInfo.product_version/0)),
+        disk(home, home_bytes, name, opts),
+        s3_size(candidate, home_bytes),
+        plugins(home, host, candidate, opts)
+      ] ++ summary_items(config, String.starts_with?(host, "macos-"), name, opts)
+
+    %{ready: not Enum.any?(items, &(&1.status == :block)), items: items}
+  end
+
+  @doc """
+  The items of a review of the move to the server `name` that read nothing
+  but `config` (this home's settings, as `settings/2` reads them) and this
+  engine, in the review's order and words: `stays_here` (iMessage only when
+  `macos?`), `whatsapp`, `slack`, `coding_agents`, `cutover_gap`,
+  `serves_nothing`. `report/3` ends with them, and `home.status`'s summary
+  builds Move now's confirm from them before any review. `opts` are
+  `report/3`'s.
+  """
+  @spec summary_items({:ok, String.t()} | {:error, String.t()}, boolean(), String.t(), keyword()) ::
+          [item()]
+  def summary_items(config, macos?, name, opts)
+      when is_boolean(macos?) and is_binary(name) and is_list(opts) do
+    [
+      stays_here_item(config, macos?, name),
       whatsapp(config, name),
       slack(config, name),
       coding_agents(config, name),
@@ -102,8 +127,27 @@ defmodule FermixCore.Home.MoveReadiness do
           "until #{name} takes over."
       )
     ]
+  end
 
-    %{ready: not Enum.any?(items, &(&1.status == :block)), items: items}
+  @doc """
+  This home's settings as `summary_items/4` reads them: the text of its
+  `config.toml` (none is an empty one), or the sentence that says it could
+  not be read. `home.status` reads it on every poll, so an unreadable file
+  is logged once when it stops being readable and once when it reads again
+  (`Home.UnreadableFiles`, `opts`' `:unreadable_files`: that memory, or nil
+  for none).
+  """
+  @spec settings(Path.t(), keyword()) :: {:ok, String.t()} | {:error, String.t()}
+  def settings(home, opts \\ []) when is_binary(home) and is_list(opts) do
+    file = config_path(home)
+    read = config_text(file)
+    memory = Keyword.get(opts, :unreadable_files, UnreadableFiles)
+    :ok = UnreadableFiles.log_read(file, "home status", read, memory)
+
+    case read do
+      {:ok, text} -> {:ok, text}
+      {:error, _reason} -> {:error, @unreadable_settings}
+    end
   end
 
   @doc """
@@ -119,15 +163,7 @@ defmodule FermixCore.Home.MoveReadiness do
           {:ok, [:imessage | :voice | :meetings]} | {:error, String.t()}
   def stays_here(home, macos?, opts \\ [])
       when is_binary(home) and is_boolean(macos?) and is_list(opts) do
-    file = config_path(home)
-    read = config_text(file)
-    memory = Keyword.get(opts, :unreadable_files, UnreadableFiles)
-    :ok = UnreadableFiles.log_read(file, "home status", read, memory)
-
-    case read do
-      {:ok, text} -> {:ok, features(text, macos?)}
-      {:error, _reason} -> {:error, @unreadable_settings}
-    end
+    with {:ok, text} <- settings(home, opts), do: {:ok, features(text, macos?)}
   end
 
   @doc "The block sentences of `report`, in order; none when it is ready."
@@ -362,16 +398,15 @@ defmodule FermixCore.Home.MoveReadiness do
           "#{Enum.join(names, ", ")}."
       )
 
-  defp stays_here_item({:ok, text}, host, name) do
-    macos? = String.starts_with?(host, "macos-")
-
+  defp stays_here_item({:ok, text}, macos?, name) do
     case features(text, macos?) do
       [] -> item("stays_here", :ok, none_on(macos?))
       features -> item("stays_here", :warn, stops(features, macos?, name))
     end
   end
 
-  defp stays_here_item({:error, sentence}, _host, _name), do: item("stays_here", :warn, sentence)
+  defp stays_here_item({:error, sentence}, _macos?, _name),
+    do: item("stays_here", :warn, sentence)
 
   defp stops(features, macos?, name) do
     machine = if macos?, do: "Mac", else: "computer"

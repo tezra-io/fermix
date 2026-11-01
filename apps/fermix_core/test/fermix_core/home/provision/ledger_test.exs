@@ -244,6 +244,123 @@ defmodule FermixCore.Home.Provision.LedgerTest do
     end
   end
 
+  # Always On setup §5: a step's job is named in the ledger before it starts
+  # (`action`), so the summary says what runs without asking the job; every
+  # ending lands there, and a step whose job is gone reads as interrupted.
+  describe "a step and its ending" do
+    setup %{home: home} do
+      put!(home, &Ledger.connect(&1, @token, @now))
+      :ok
+    end
+
+    test "a step's action is written once, refused while it stands, and cleared after", %{
+      home: home
+    } do
+      assert {:ok, _ledger} =
+               Ledger.update(home, "nimbus", &Ledger.put_action(&1, "create", @now))
+
+      assert %{action: %{kind: "create", started_at: @now, type: nil, location: nil}} =
+               Ledger.state(home, FakeCloudProvider, now: @now)
+
+      later = DateTime.add(@now, 60, :second)
+
+      assert {:error, :busy} =
+               Ledger.update(home, "nimbus", &Ledger.put_action(&1, "delete", later))
+
+      put!(home, &Ledger.choose(&1, %{type: "small-4", location: "osl1"}))
+      {:ok, ledger} = Ledger.read(home, "nimbus")
+      assert %{kind: "create", type: "small-4", location: "osl1"} = ledger.action
+
+      assert {:ok, %{action: nil}} = Ledger.update(home, "nimbus", &Ledger.clear_action/1)
+      assert {:error, :no_action} = Ledger.update(home, "nimbus", &Ledger.clear_action/1)
+      assert %{action: nil} = Ledger.state(home, FakeCloudProvider, now: later)
+    end
+
+    test "every new field is kept and read back, and the file stays version 1", %{home: home} do
+      {:ok, _ledger} = Ledger.update(home, "nimbus", &Ledger.put_action(&1, "power_on", @now))
+      put!(home, &Ledger.begin_create(&1, "a3f9", server_facts()))
+
+      put!(
+        home,
+        &Ledger.put_server(&1, Map.merge(created_server(:created), priced()))
+      )
+
+      put!(home, &Ledger.checked(&1, @now))
+      put!(home, &Ledger.put_failure(&1, Map.merge(failure("unreachable"), choice("power_on"))))
+
+      assert %{"v" => 1} = home |> Ledger.path("nimbus") |> File.read!() |> Jason.decode!()
+      {:ok, ledger} = Ledger.read(home, "nimbus")
+
+      assert %{kind: "power_on", started_at: @now} = ledger.action
+      assert ledger.checked_at == @now
+      assert %{total_monthly: "8.33", currency: "EUR"} = ledger.server
+      assert %{action: "power_on", type: "small-4", location: "osl1"} = ledger.failure
+    end
+
+    test "a failure written without its step reads with none", %{home: home} do
+      put!(home, &Ledger.put_failure(&1, failure("unreachable")))
+      {:ok, ledger} = Ledger.read(home, "nimbus")
+      assert %{action: nil, type: nil, location: nil, reason: "unreachable"} = ledger.failure
+    end
+
+    test "an action older than the job budget reads as an interrupted step", %{home: home} do
+      {:ok, _ledger} = Ledger.update(home, "nimbus", &Ledger.put_action(&1, "create", @now))
+      put!(home, &Ledger.choose(&1, %{type: "small-4", location: "osl1"}))
+
+      budget = Ledger.action_budget_ms()
+      inside = DateTime.add(@now, budget - 1_000, :millisecond)
+      due = DateTime.add(@now, budget, :millisecond)
+
+      assert %{state: :connected, action: %{kind: "create"}, failure: nil} =
+               Ledger.state(home, FakeCloudProvider, now: inside)
+
+      assert %{state: :failed, action: nil, failure: failure} =
+               Ledger.state(home, FakeCloudProvider, now: due)
+
+      assert %{reason: "interrupted", action: "create", type: "small-4", location: "osl1"} =
+               failure
+
+      assert failure.at == due
+      assert failure.sentence == "Fermix stopped before your server was created, so start again."
+
+      # A read changes nothing: the file still holds the action.
+      {:ok, ledger} = Ledger.read(home, "nimbus")
+      assert %{kind: "create"} = ledger.action
+    end
+
+    test "an interrupted step becomes the failure the summary offers to start again from", %{
+      home: home
+    } do
+      {:ok, _ledger} = Ledger.update(home, "nimbus", &Ledger.put_action(&1, "delete", @now))
+
+      assert {:ok, ledger} =
+               Ledger.update(home, "nimbus", &Ledger.interrupt(&1, FakeCloudProvider, @now))
+
+      assert ledger.action == nil
+
+      assert %{reason: "interrupted", action: "delete", at: @now, sentence: sentence} =
+               ledger.failure
+
+      assert sentence == "Fermix stopped before your server was deleted, so delete it again."
+
+      assert {:error, :no_action} =
+               Ledger.update(home, "nimbus", &Ledger.interrupt(&1, FakeCloudProvider, @now))
+    end
+
+    test "a failure is the state though a delete it stopped left something deleting", %{
+      home: home
+    } do
+      put!(home, &Ledger.begin_create(&1, "a3f9", server_facts()))
+      put!(home, &Ledger.put_server(&1, created_server(:deleting)))
+      assert %{state: :deleting} = Ledger.state(home, FakeCloudProvider)
+
+      put!(home, &Ledger.put_failure(&1, Map.merge(failure("unreachable"), choice("delete"))))
+
+      assert %{state: :failed, failure: %{action: "delete"}} =
+               Ledger.state(home, FakeCloudProvider)
+    end
+  end
+
   # M75 lean v1 §4.3, §7 `on` Details "Replace the server": a linked desktop
   # creates a new server for the home, the old one keeps the home until the
   # move to the new one is done, and only then is the old one deleted.
@@ -437,6 +554,10 @@ defmodule FermixCore.Home.Provision.LedgerTest do
 
   defp failure(reason),
     do: %{reason: reason, sentence: "Invented sentence.", next_location: nil, at: @now}
+
+  defp choice(action), do: %{action: action, type: "small-4", location: "osl1"}
+
+  defp priced, do: %{total_monthly: "8.33", currency: "EUR"}
 
   defp put!(home, transform) do
     {:ok, _ledger} = Ledger.update(home, "nimbus", &{:ok, transform.(&1)})

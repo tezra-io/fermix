@@ -604,9 +604,15 @@ it, never a second writer.
   Linux apps' **Always On** pane and the CLI. Nothing on one surface is
   missing from the other except where the table says so.
 - **One summary says where Always On stands.** `home.status` carries
-  `summary`: one sentence and at most one action, worked out once by the
-  engine, which the apps, the setup page and `fermix home status` (first,
-  before the rest) all print as they are. Its words never name an epoch, the
+  `summary`, the Always On screen: one sentence and at most one action,
+  worked out once by the engine, which the apps, the setup page and `fermix
+  home status` (first, before the rest) all print as they are. Every action,
+  wherever it sits, says what the surface must collect first (a token, the
+  recovery passphrase, or a choice of size and place), the sentence the owner
+  accepts before Fermix spends money, deletes, restarts a server or moves
+  (never with a time or a price in it; Move now's names what stops or waits
+  after the move, from this home's settings), the page Learn more and Open
+  Hetzner open, and a key. Its words never name an epoch, the
   primary, a candidate, the relay, the rail, a phase, the daemon (a problem
   points to Fermix's log) or an error code (a refusal of Hetzner's is said in
   its message alone), and a secret is named as its settings row labels it.
@@ -615,13 +621,16 @@ it, never a second writer.
     Fermix running when this Mac sleeps. It moves to a server you own.", with
     a second line only when this home uses something that stops after the
     move, naming only that: iMessage on a Mac, voice calls, meetings; and
-    **Set up**); the token step ("Paste a
+    **Set up**, which asks for the token); the token step ("Paste a
     Hetzner API token…", whose How to get one says to turn on two-factor
-    sign-in in Hetzner and make a project for Fermix alone); the token works
-    (choose the server); creating (starting, installing Fermix, connecting,
-    with **Cancel**); ready (**Move now**, with the review's warnings, and
-    that there is no way back to this Mac in this version); the move undone
-    (**Try again**);
+    sign-in in Hetzner and make a project for Fermix alone; **Cancel the
+    code** while a code for a server of the owner's own is open); the token
+    works (choose the server); creating (from the moment a step starts:
+    creating, deleting, turning on or restarting the server, each with the
+    step in hand, then starting, installing Fermix, connecting, with
+    **Cancel** while it creates); ready (**Move now**, with the review's
+    warnings, and that there is no way back to this Mac in this version); the
+    move undone (**Try again**);
   - on the computer the move leaves: moving ("Waiting for your server to
     confirm the move. Fermix keeps trying." once it waits on the server);
     "Fermix runs on your server. Last backup 2 hours ago." once linked; no
@@ -642,27 +651,38 @@ it, never a second writer.
     path), a token that can only read or stopped working (**Paste a new
     token**), this computer too old for its server (**Update**), the server's
     disk 85% full or more, the last backup over 3 days old (**Back up now**),
-    a review that blocks the move (**Check again**). Before the move, while
+    a review that blocks the move (**Check again**), turning the server on or
+    restarting it that stopped (**Turn it on**, **Restart server** again), a
+    delete that stopped (**Delete your server** again), and a step Fermix's
+    own restart cut short (**Start again**). Every step's ending is kept on
+    this computer, so the problem outlives the step. Before the move, while
     the created server stands, Details also says it costs money and offers to
     delete it.
-- Details holds the rest: the token steps, how Hetzner bills, the server's
-  facts and the review's items, until when it waits, each place's last backup
-  and the space this computer's copies take, the server's disk and engine
-  version, Back up now and Replace the server, and what lives on the server
-  (conversations and memories, the secrets, the browser, traces) with the
-  plain fact that its host can technically read its disk; snapshots are
-  encrypted to the recovery passphrase. Learn more opens the Always On docs.
+- Details holds the rest: every provider's token screen, how Hetzner bills,
+  the server's facts and the review's items, Back up now and Replace the
+  server, what lives on the server (conversations and memories, the secrets,
+  the browser, traces) with the plain fact that its host can technically read
+  its disk (snapshots are encrypted to the recovery passphrase), and lines the
+  engine finishes: the server, its size, place, address, system and version,
+  until when it waits, each place's last backup, the space this computer's
+  copies take, the server's disk, when Hetzner was last checked and what the
+  server costs a month, from the offer its create chose. Times are stated in
+  the owner's time zone as dates and times, never as ages. Learn more opens
+  the Always On docs at Hetzner's part.
+- The summary also names the latest occurrence the apps raise as a system
+  notification (`notice`): the server ready, the move done, the server out of
+  reach, a server that must be set up again, the last backup a week old. Each
+  keeps one id while it stands, so an app posts it once.
 - When the server's newest backup passes 7 days it tells the paired phones,
   once per occurrence, as a message in the owner's phone chat: open Fermix on
   the Mac to back up now.
 - **No polling.** The apps never ask for the summary on a timer. The chat
   socket tells a connected app that it changed (`home_status_changed`, which
   carries nothing; the app then reads `home.status`): once when the app
-  connects unless Always On is off, and at each change of the state, the
-  action, the problem kind, or a step's sentence (a backup's age or a disk's
-  percentage moving is no change; the app reads them again when the pane
-  opens), and once when the last backup turns a week old, for the app's
-  notification. Nothing is told while Always On stays off, not even a settings
+  connects unless Always On is off, and whenever the summary's key moves:
+  anything a surface draws, the step in hand, a confirm, an alternative, a
+  Details line or the notice included, but never the clock alone (a
+  backup's age in a sentence, when Hetzner was last checked). Nothing is told while Always On stays off, not even a settings
   change to what the off line names: the app forgets Always On while it is
   off and reads that line when the pane opens. Fermix works the change out
   without polling: it reads the summary
@@ -674,9 +694,13 @@ it, never a second writer.
   of silence, a waiting server's 24 hours, a backup's 3 days and its 7), on
   one timer, armed again at each read and after a wake from sleep, and only while an app
   is connected. While Always On is off nothing is armed, and only a token, a
-  code or a move is read. It never asks the cloud provider on its own: the
-  provider is read when the pane asks (`home.provision.resources`) or a job
-  runs. After a move the desktop's Fermix tells its app about its own
+  code or a move is read. The watch never asks the cloud provider itself: a
+  `home.status` read that shows a problem, a step or a ready server, while a
+  server Fermix created stands, checks with Hetzner at most once a minute, as
+  a job of the same family as every step, so never beside one. A
+  `home.status` asked with the key it was drawn with and a wait (`after`,
+  `wait_ms`, at most 25 seconds) is answered once the key moves, which is how
+  a terminal follows a step without polling. After a move the desktop's Fermix tells its app about its own
   summary, reading the server's part again when the server says its own
   moved; while the server is unreachable the chat connection is refused, and
   the app reads the summary then. A server's disk filling is seen at the next

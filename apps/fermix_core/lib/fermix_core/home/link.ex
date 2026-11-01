@@ -21,7 +21,8 @@ defmodule FermixCore.Home.Link do
   What the rail knows for `home.status`. `primary` is the device role's link to
   its primary (`nil` on any other role, or a device role with no desktop link),
   with `down_ms`, how long it has had no session while this computer was
-  awake (nil while one is up). `desktops` are the primary's desktop peers.
+  awake, and `down_at`, when that stretch began on the wall clock (both nil
+  while one is up). `desktops` are the primary's desktop peers.
   `enrollment` is the primary's enrollment window: `state` `:open`, `:used` or
   `:expired`, when it expires, its `kind` (`:manual`, the code a person
   copies, or `:provisioned`, the code inside a server Fermix created), the

@@ -16,7 +16,9 @@ defmodule FermixCore.Home.Provision.Driver do
   money), the system image, a fresh provisioned enrollment code (24 hours,
   L15) inside the first boot (`Provision.FirstBoot`, refused past the
   provider's limit), and the server, named and labelled by the ledger's ref
-  (`Provision.server_name/2`, `Provision.labels/2`). Its actions are polled
+  (`Provision.server_name/2`, `Provision.labels/2`) and written with the
+  monthly price and currency of the offer the request names (nil when it
+  names none) from its first write. Its actions are polled
   (every 2 s, at most 150 reads each; a rate-limited read waits 10 s, and one
   that got no answer is tried again, both counted), then the server is read
   once more to record it running. A create that stopped after its firewall
@@ -33,7 +35,10 @@ defmodule FermixCore.Home.Provision.Driver do
   the create failed `interrupted` unless it recorded why, and its code
   withdrawn; found is recorded, and a lost create recovers its addresses.
   Changes apply only where the ledger still names what was read, and
-  nothing is asked while a job runs (`:running?`).
+  nothing is asked while a job runs (`:running?`). A reconcile that read the
+  provider writes when it did (`checked_at`); one that finds the server
+  running ends a power action's failure, as a power action that succeeds
+  does.
 
   **Delete.** Withdraws the code, then the server (polled; already gone is
   as good as deleted), each primary address unless it went with the server,
@@ -128,7 +133,7 @@ defmodule FermixCore.Home.Provision.Driver do
 
   # The type as the provider sells it now, and the places' names, before
   # anything is written.
-  defp checked(provider, token, %{type: type, location: location}, opts) do
+  defp checked(provider, token, %{type: type, location: location} = request, opts) do
     with {:ok, %{type: found, cities: cities}} <- plain(provider.server_type(token, type, opts)),
          :ok <- eligible(found, type) do
       places = Provision.location_ids(provider)
@@ -139,7 +144,9 @@ defmodule FermixCore.Home.Provision.Driver do
         location: location,
         city: Map.get(cities, location, location),
         stock: Enum.filter(places, &(&1 in found.stock)),
-        cities: Map.new(places, &{&1, Map.get(cities, &1, &1)})
+        cities: Map.new(places, &{&1, Map.get(cities, &1, &1)}),
+        total_monthly: Map.get(request, :total_monthly),
+        currency: Map.get(request, :currency)
       }
 
       if location in facts.stock, do: {:ok, facts}, else: {:error, unavailable(facts)}
@@ -226,7 +233,15 @@ defmodule FermixCore.Home.Provision.Driver do
 
   defp server(provider, home, token, plan, parts, opts) do
     report(opts, "server")
-    asked = %{name: plan.name, type: plan.type, location: plan.location, status: :requested}
+
+    asked = %{
+      name: plan.name,
+      type: plan.type,
+      location: plan.location,
+      status: :requested,
+      total_monthly: plan.total_monthly,
+      currency: plan.currency
+    }
 
     spec =
       Map.merge(parts, %{
@@ -294,10 +309,22 @@ defmodule FermixCore.Home.Provision.Driver do
          {:ok, started} <- plain(provider.power(token, id, action, opts)),
          :ok <- await_all(provider, token, [started], opts),
          {:ok, server} <- plain(provider.get(token, :server, id, opts)) do
-      change = &{:ok, Ledger.put_server(&1, %{power: server.power, seen_at: now(opts)})}
+      change =
+        &{:ok,
+         &1
+         |> Ledger.put_server(%{power: server.power, seen_at: now(opts)})
+         |> powered(server.power)}
+
       with {:ok, _ledger} <- update(provider, home, change), do: :ok
     end
   end
+
+  # The server runs: a power action's failure is over.
+  defp powered(%{failure: %{action: action}} = ledger, "running")
+       when action in ["power_on", "power_reset"],
+       do: Ledger.put_failure(ledger, nil)
+
+  defp powered(ledger, _power), do: ledger
 
   defp server_id(%{server: %{status: :created, id: id}}) when is_binary(id), do: {:ok, id}
   defp server_id(_ledger), do: {:error, :no_server}
@@ -323,7 +350,10 @@ defmodule FermixCore.Home.Provision.Driver do
            update(
              provider,
              home,
-             &{:ok, observed(&1, ledger, {server, firewall}, provider, opts)}
+             &{:ok,
+              &1
+              |> observed(ledger, {server, firewall}, provider, opts)
+              |> Ledger.checked(now(opts))}
            ),
          :ok <- withdraw_unborn(ledger, server, opts) do
       reconciled_replaced(provider, home, token, Ledger.replaced_set(ledger), changed, opts)
@@ -414,7 +444,7 @@ defmodule FermixCore.Home.Provision.Driver do
         created_at: found.created_at
       })
 
-    current |> Ledger.put_server(facts) |> recovered(id, found)
+    current |> Ledger.put_server(facts) |> recovered(id, found) |> powered(found.power)
   end
 
   defp apply_server(current, _read, _observed, _seams), do: current

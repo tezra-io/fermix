@@ -212,6 +212,8 @@ defmodule FermixCore.Home.Provision do
           | :user_data_too_large
           | :invalid_code
           | :interrupted
+          | {:interrupted, String.t()}
+          | :nothing_in_stock
           | :no_token
           | :no_server
           | :server_exists
@@ -267,9 +269,17 @@ defmodule FermixCore.Home.Provision do
 
   @typedoc """
   What a create asks for: the type and location (`Driver.options/3` names
-  them) and the profile the server is named and labelled by.
+  them), the profile the server is named and labelled by, and the monthly
+  price and currency of the offer chosen (`total_monthly`, `currency`), which
+  the server is written with.
   """
-  @type request :: %{type: String.t(), location: String.t(), profile: String.t()}
+  @type request :: %{
+          required(:type) => String.t(),
+          required(:location) => String.t(),
+          required(:profile) => String.t(),
+          optional(:total_monthly) => String.t() | nil,
+          optional(:currency) => String.t() | nil
+        }
 
   @typedoc """
   The seams: the driver's own (`:now`, a 0-arity clock; `:sleep`, the pause
@@ -361,12 +371,10 @@ defmodule FermixCore.Home.Provision do
   "Falkenstein, Nuremberg or Helsinki".
   """
   @spec cities(module()) :: String.t()
-  def cities(provider) do
-    case Enum.map(provider.display().locations, & &1.city) do
-      [city] -> city
-      cities -> Enum.join(Enum.drop(cities, -1), ", ") <> " or " <> List.last(cities)
-    end
-  end
+  def cities(provider), do: provider.display().locations |> Enum.map(& &1.city) |> listed()
+
+  defp listed([city]), do: city
+  defp listed(cities), do: Enum.join(Enum.drop(cities, -1), ", ") <> " or " <> List.last(cities)
 
   @max_profile_label 40
 
@@ -516,7 +524,23 @@ defmodule FermixCore.Home.Provision do
   defp sentence(:interrupted, _words),
     do: "Fermix stopped before your server was created, so start again."
 
+  defp sentence({:interrupted, "create"}, words), do: sentence(:interrupted, words)
+
+  defp sentence({:interrupted, "delete"}, _words),
+    do: "Fermix stopped before your server was deleted, so delete it again."
+
+  defp sentence({:interrupted, "power_on"}, _words),
+    do: "Fermix stopped before your server was turned on, so turn it on again."
+
+  defp sentence({:interrupted, "power_reset"}, _words),
+    do: "Fermix stopped before your server restarted, so restart it again."
+
   defp sentence(:no_token, words), do: "Paste a #{words.token_label} first."
+
+  defp sentence(:nothing_in_stock, words),
+    do:
+      "#{words.name} has no server type with 4 GB in stock in " <>
+        "#{words.locations |> Enum.map(& &1.city) |> listed()} right now."
 
   defp sentence(:no_server, words),
     do: "Fermix has no server on #{words.name} to turn on or restart."

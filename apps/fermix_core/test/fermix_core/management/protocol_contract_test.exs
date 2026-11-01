@@ -1571,8 +1571,17 @@ defmodule FermixCore.Management.ProtocolContractTest do
   # Enrollment and the move as the `home.status` golden shows them: the
   # candidate the used window enrolled, and a move to it undone before the
   # candidate was ready, which leaves the home the primary.
+  # The held server under the id the golden shows, so the summary's keys,
+  # which name the server a move goes to, are the golden's own.
   defp seed_move(home) do
-    {:ok, _held} = HomeCandidates.add(home, contract_candidate(), ~U[2026-10-27 09:12:00Z])
+    {:ok, held} = HomeCandidates.add(home, contract_candidate(), ~U[2026-10-27 09:12:00Z])
+    file = HomeCandidates.path(home)
+
+    File.write!(
+      file,
+      String.replace(File.read!(file), held.candidate_id, "cand-5e2a9c1f7b3d4086")
+    )
+
     File.mkdir_p!(HomeMove.dir(home))
     HomeMove.put_phase(home, "aborted", %{"candidate" => "north-box"}, ~U[2026-10-27 09:25:00Z])
   end

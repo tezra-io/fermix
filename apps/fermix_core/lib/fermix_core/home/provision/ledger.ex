@@ -25,12 +25,16 @@ defmodule FermixCore.Home.Provision.Ledger do
         "ref": "a3f9",
         "server": {"name": "fermix-general-a3f9", "id": "61839204", "status": "created",
                    "type": "cpx22", "location": "fsn1", "ipv4": "203.0.113.7",
-                   "power": "running", "created_at": "...", "seen_at": "..."},
+                   "power": "running", "created_at": "...", "seen_at": "...",
+                   "total_monthly": "8.33", "currency": "EUR"},
         "firewall": {"name": "fermix-general-a3f9", "id": "1203", "status": "created"},
         "primary_ips": [{"id": "91", "type": "ipv4", "ip": "203.0.113.7"}],
         "failure": {"reason": "resource_unavailable", "sentence": "...",
-                    "next_location": "nbg1", "at": "..."},
-        "replace": null
+                    "next_location": "nbg1", "at": "...",
+                    "action": "create", "type": "cpx22", "location": "fsn1"},
+        "replace": null,
+        "action": {"kind": "create", "started_at": "...", "type": "cpx22", "location": "fsn1"},
+        "checked_at": "..."
       }
 
   - `token_state` is `accepted` once the provider accepted the token,
@@ -47,8 +51,25 @@ defmodule FermixCore.Home.Provision.Ledger do
     and its action runs), `created`, `deleting` (written before the call that
     deletes it) or `gone` (deleted outside Fermix). A resource Fermix deleted
     leaves the ledger.
-  - `failure` is why the last create stopped, in the daemon's words; null
-    when nothing failed.
+  - A server's `total_monthly` and `currency` are the price of the offer its
+    create chose (the server and its IPv4 address, a month, as the account is
+    billed), written with the server's first write; null for one created
+    before Fermix kept it.
+  - `failure` is why the last step stopped, in the daemon's words; null when
+    nothing failed. Its `action` is the step (`create`, `delete`,
+    `power_on`, `power_reset`; null for one written before Fermix kept it),
+    and `type` and `location` the size and place it was for, so a refused
+    create keeps them for Create in and Start again.
+  - `action` is the step whose job runs now (`Management.Provision`'s
+    `put_action/2`, written before the job starts): its `kind` (one of
+    `action_kinds/0`), `started_at`, and the `type` and `location` a
+    create's job chose (null until it chose); null when no step runs. The
+    job's end clears it. One whose job is gone, which a restart leaves, is
+    turned into a failure with the reason `interrupted` (`interrupt/3`, at
+    boot), and `state/3` reads one older than the job budget
+    (`action_budget_ms/0`) the same way, without writing.
+  - `checked_at` is when the provider was last read back (a reconcile);
+    null until it was.
   - `replace` is a replace of the server (§7 `on` Details "Replace the
     server", run from a linked desktop): null, or `{from_epoch, started_at,
     old, move_started_at, candidate_id, moved_at, deleted_at, failure}`. When
@@ -73,8 +94,10 @@ defmodule FermixCore.Home.Provision.Ledger do
   `state/1` is what `home.status`'s summary reads: one of `none`,
   `connected`, `creating`, `created` (the server exists and waits for its
   enrollment and move, which the summary reads elsewhere), `deleting`,
-  `gone`, `failed` (with the failure) and `unreadable`, beside whether the
-  token is accepted, and the server's facts. It never answers the token.
+  `gone`, `failed` (with the failure, whatever else the ledger holds) and
+  `unreadable`, beside whether the token is accepted, the server's facts, the
+  step that runs and when the provider was last read back. It never answers
+  the token.
 
   While a replace is recorded, `state/1`'s `replace` says where it stands,
   and `state` and `server` are the new server's:
@@ -108,12 +131,16 @@ defmodule FermixCore.Home.Provision.Ledger do
   alias FermixCore.Home.Provision.Ledger.Lock
   alias FermixCore.Home.StatusWatch
   alias FermixCore.Home.UnreadableFiles
+  alias FermixCore.Management.Jobs
 
   @version 1
   @dir_mode 0o700
   @file_mode 0o600
   @statuses ~w(requested creating created deleting gone)a
   @status_words Map.new(@statuses, &{Atom.to_string(&1), &1})
+  @action_kinds ~w(create delete power_on power_reset)
+  # What a failure keeps beside its reason; null for one written before it.
+  @failure_step %{action: nil, type: nil, location: nil}
 
   @type status :: :requested | :creating | :created | :deleting | :gone
   @type server :: %{
@@ -125,7 +152,9 @@ defmodule FermixCore.Home.Provision.Ledger do
           ipv4: String.t() | nil,
           power: String.t() | nil,
           created_at: DateTime.t() | nil,
-          seen_at: DateTime.t() | nil
+          seen_at: DateTime.t() | nil,
+          total_monthly: String.t() | nil,
+          currency: String.t() | nil
         }
   @type firewall :: %{name: String.t(), id: String.t() | nil, status: status()}
   @type primary_ip :: %{id: String.t(), type: String.t(), ip: String.t() | nil}
@@ -133,7 +162,16 @@ defmodule FermixCore.Home.Provision.Ledger do
           reason: String.t(),
           sentence: String.t(),
           next_location: String.t() | nil,
-          at: DateTime.t()
+          at: DateTime.t(),
+          action: String.t() | nil,
+          type: String.t() | nil,
+          location: String.t() | nil
+        }
+  @type action :: %{
+          kind: String.t(),
+          started_at: DateTime.t(),
+          type: String.t() | nil,
+          location: String.t() | nil
         }
   @typedoc "One server and what came with it: the ledger's own places, or a replace's `old`."
   @type set :: %{
@@ -161,7 +199,9 @@ defmodule FermixCore.Home.Provision.Ledger do
           firewall: firewall() | nil,
           primary_ips: [primary_ip()],
           failure: failure() | nil,
-          replace: replace() | nil
+          replace: replace() | nil,
+          action: action() | nil,
+          checked_at: DateTime.t() | nil
         }
   @type replace_state ::
           :creating | :waiting | :moving | :deleting | :done | :failed | :cancelling
@@ -178,8 +218,21 @@ defmodule FermixCore.Home.Provision.Ledger do
           server: map() | nil,
           failure: failure() | nil,
           sentence: String.t() | nil,
-          replace: replace_view() | nil
+          replace: replace_view() | nil,
+          action: action() | nil,
+          checked_at: DateTime.t() | nil
         }
+
+  @doc "The kinds of step a ledger's `action` names, ordered."
+  @spec action_kinds() :: [String.t()]
+  def action_kinds, do: @action_kinds
+
+  @doc """
+  How long a step's action stands before it is read as interrupted: the
+  budget of the job it names (`Management.Jobs`, `home_provision`).
+  """
+  @spec action_budget_ms() :: pos_integer()
+  def action_budget_ms, do: Jobs.budget_ms(:home_provision)
 
   @doc "Where the file of the provider `id` lives under `home`."
   @spec path(Path.t(), String.t()) :: Path.t()
@@ -198,7 +251,9 @@ defmodule FermixCore.Home.Provision.Ledger do
       firewall: nil,
       primary_ips: [],
       failure: nil,
-      replace: nil
+      replace: nil,
+      action: nil,
+      checked_at: nil
     }
   end
 
@@ -289,7 +344,16 @@ defmodule FermixCore.Home.Provision.Ledger do
   """
   @spec put_server(t() | set(), map()) :: t() | set()
   def put_server(ledger, attrs) when is_map(attrs) do
-    blank = %{id: nil, ipv4: nil, power: nil, created_at: nil, seen_at: nil}
+    blank = %{
+      id: nil,
+      ipv4: nil,
+      power: nil,
+      created_at: nil,
+      seen_at: nil,
+      total_monthly: nil,
+      currency: nil
+    }
+
     %{ledger | server: blank |> Map.merge(ledger.server || %{}) |> Map.merge(attrs)}
   end
 
@@ -302,10 +366,74 @@ defmodule FermixCore.Home.Provision.Ledger do
   @spec put_primary_ips(t(), [primary_ip()]) :: t()
   def put_primary_ips(ledger, ips) when is_list(ips), do: %{ledger | primary_ips: ips}
 
-  @doc "Why the last create stopped, or nil."
-  @spec put_failure(t(), failure() | nil) :: t()
+  @doc """
+  Why the last step stopped, or nil; a failure given without its step
+  (`action`, `type`, `location`) is kept with none.
+  """
+  @spec put_failure(t(), map() | nil) :: t()
   def put_failure(ledger, failure) when is_map(failure) or is_nil(failure),
-    do: %{ledger | failure: failure}
+    do: %{ledger | failure: with_step(failure)}
+
+  defp with_step(nil), do: nil
+  defp with_step(failure), do: Map.merge(@failure_step, failure)
+
+  @doc """
+  A step's job is about to start: `kind` (one of `action_kinds/0`) from
+  `now`. Refused `:busy` while another step's action stands inside the job
+  budget; one older than it is an interrupted step's, which this one takes
+  over.
+  """
+  @spec put_action(t(), String.t(), DateTime.t()) :: {:ok, t()} | {:error, :busy}
+  def put_action(ledger, kind, %DateTime{} = now) when kind in @action_kinds do
+    if live_action?(ledger.action, now),
+      do: {:error, :busy},
+      else: {:ok, %{ledger | action: %{kind: kind, started_at: now, type: nil, location: nil}}}
+  end
+
+  @doc "The size and place a create's job chose, kept on its action; unchanged with none."
+  @spec choose(t(), %{type: String.t(), location: String.t()}) :: t()
+  def choose(%{action: %{} = action} = ledger, %{type: type, location: location})
+      when is_binary(type) and is_binary(location),
+      do: %{ledger | action: %{action | type: type, location: location}}
+
+  def choose(%{action: nil} = ledger, %{type: _type, location: _location}), do: ledger
+
+  @doc "The step's job ended: its action goes; `:no_action` when none stood."
+  @spec clear_action(t()) :: {:ok, t()} | {:error, :no_action}
+  def clear_action(%{action: nil}), do: {:error, :no_action}
+  def clear_action(ledger), do: {:ok, %{ledger | action: nil}}
+
+  @doc """
+  The step's job is gone without ending it (a restart, a job outliving its
+  budget): its action becomes the failure `interrupted`, in `provider`'s
+  sentence for that step, at `at`, keeping the step and its size and place.
+  `:no_action` when none stood.
+  """
+  @spec interrupt(t(), module(), DateTime.t()) :: {:ok, t()} | {:error, :no_action}
+  def interrupt(%{action: nil}, _provider, _at), do: {:error, :no_action}
+
+  def interrupt(%{action: action} = ledger, provider, %DateTime{} = at) when is_atom(provider) do
+    failure = %{
+      reason: "interrupted",
+      sentence: Provision.error_sentence({:interrupted, action.kind}, provider),
+      next_location: nil,
+      at: at,
+      action: action.kind,
+      type: action.type,
+      location: action.location
+    }
+
+    {:ok, %{ledger | action: nil, failure: failure}}
+  end
+
+  @doc "The provider was read back at `now`."
+  @spec checked(t(), DateTime.t()) :: t()
+  def checked(ledger, %DateTime{} = now), do: %{ledger | checked_at: now}
+
+  defp live_action?(nil, _now), do: false
+
+  defp live_action?(%{started_at: started_at}, now),
+    do: DateTime.diff(now, started_at, :millisecond) < action_budget_ms()
 
   @doc "Removes a resource Fermix deleted (`:server` or `:firewall`)."
   @spec remove(t() | set(), :server | :firewall) :: t() | set()
@@ -488,18 +616,22 @@ defmodule FermixCore.Home.Provision.Ledger do
   @spec put_replace_failure(t(), failure() | nil) :: t()
   def put_replace_failure(%{replace: %{} = replace} = ledger, failure)
       when is_map(failure) or is_nil(failure),
-      do: %{ledger | replace: %{replace | failure: failure}}
+      do: %{ledger | replace: %{replace | failure: with_step(failure)}}
 
   # -- the summary --------------------------------------------------------------
 
   @doc """
   What the summary reads of `provider`'s ledger (a module of the
   `Home.Provision` contract): the state, whether the token is accepted, the
-  server's facts and the last failure, in the provider's words. An
-  unreadable file is answered `unreadable` with its sentence on every read,
-  and logged once when it stops being readable and once when it reads again
+  server's facts, the last failure in the provider's words, the step that
+  runs and when the provider was last read back. An unreadable file is
+  answered `unreadable` with its sentence on every read, and logged once
+  when it stops being readable and once when it reads again
   (`Home.UnreadableFiles`, `opts`' `:unreadable_files`: that memory, or nil
-  for none), since `home.status` is polled.
+  for none), since `home.status` is polled. A step's action older than the
+  job budget at `opts`' `:now` (the clock by default) reads as the failure
+  `interrupt/3` would write, due when the budget ran out; nothing is
+  written.
   """
   @spec state(Path.t(), module(), keyword()) :: state_view()
   def state(home, provider, opts \\ [])
@@ -510,14 +642,8 @@ defmodule FermixCore.Home.Provision.Ledger do
 
     case read do
       {:ok, ledger} ->
-        %{
-          state: derive(ledger),
-          token: token_word(ledger),
-          server: ledger.server,
-          failure: ledger.failure,
-          sentence: nil,
-          replace: replace_view(ledger, provider)
-        }
+        now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
+        ledger |> settled(provider, now) |> state_view(provider)
 
       {:error, _reason} ->
         %{
@@ -526,10 +652,38 @@ defmodule FermixCore.Home.Provision.Ledger do
           server: nil,
           failure: nil,
           sentence: Provision.error_sentence(:unreadable, provider),
-          replace: nil
+          replace: nil,
+          action: nil,
+          checked_at: nil
         }
     end
   end
+
+  defp state_view(ledger, provider) do
+    %{
+      state: derive(ledger),
+      token: token_word(ledger),
+      server: ledger.server,
+      failure: ledger.failure,
+      sentence: nil,
+      replace: replace_view(ledger, provider),
+      action: ledger.action,
+      checked_at: ledger.checked_at
+    }
+  end
+
+  # An action its job outlived is read as the interruption it is.
+  defp settled(%{action: %{started_at: started_at} = action} = ledger, provider, now) do
+    if live_action?(action, now) do
+      ledger
+    else
+      due = DateTime.add(started_at, action_budget_ms(), :millisecond)
+      {:ok, interrupted} = interrupt(ledger, provider, due)
+      interrupted
+    end
+  end
+
+  defp settled(ledger, _provider, _now), do: ledger
 
   defp replace_view(%{replace: nil}, _provider), do: nil
 
@@ -554,11 +708,12 @@ defmodule FermixCore.Home.Provision.Ledger do
     end
   end
 
-  # Before the move the new server's own places say where the replace is.
+  # Before the move the new server's own places say where the replace is; a
+  # failure first, a delete it stopped included.
   defp before_move(ledger, provider) do
     cond do
-      deleting?(ledger) -> {:cancelling, nil}
       ledger.failure != nil -> {:failed, ledger.failure}
+      deleting?(ledger) -> {:cancelling, nil}
       match?(%{status: :gone}, ledger.server) -> {:failed, gone(ledger.server, provider)}
       match?(%{status: :created}, ledger.server) -> {:waiting, nil}
       true -> {:creating, nil}
@@ -568,20 +723,21 @@ defmodule FermixCore.Home.Provision.Ledger do
   # The new server deleted at the provider before the move: the replace
   # starts again.
   defp gone(server, provider) do
-    %{
+    with_step(%{
       reason: "gone",
       sentence: Provision.error_sentence(:replacement_gone, provider),
       next_location: nil,
       at: server.seen_at || server.created_at
-    }
+    })
   end
 
   defp derive(%{token: nil}), do: :none
 
+  # A failure first: a delete that stopped leaves something deleting.
   defp derive(ledger) do
     cond do
-      deleting?(ledger) -> :deleting
       ledger.failure != nil -> :failed
+      deleting?(ledger) -> :deleting
       creating?(ledger) -> :creating
       match?(%{status: :created}, ledger.server) -> :created
       match?(%{status: :gone}, ledger.server) -> :gone
@@ -668,7 +824,18 @@ defmodule FermixCore.Home.Provision.Ledger do
       "firewall" => ledger.firewall && encode_firewall(ledger.firewall),
       "primary_ips" => Enum.map(ledger.primary_ips, &encode_ip/1),
       "failure" => ledger.failure && encode_failure(ledger.failure),
-      "replace" => ledger.replace && encode_replace(ledger.replace)
+      "replace" => ledger.replace && encode_replace(ledger.replace),
+      "action" => ledger.action && encode_action(ledger.action),
+      "checked_at" => iso(ledger.checked_at)
+    }
+  end
+
+  defp encode_action(action) do
+    %{
+      "kind" => action.kind,
+      "started_at" => iso(action.started_at),
+      "type" => action.type,
+      "location" => action.location
     }
   end
 
@@ -704,7 +871,9 @@ defmodule FermixCore.Home.Provision.Ledger do
       "ipv4" => server.ipv4,
       "power" => server.power,
       "created_at" => iso(server.created_at),
-      "seen_at" => iso(server.seen_at)
+      "seen_at" => iso(server.seen_at),
+      "total_monthly" => server.total_monthly,
+      "currency" => server.currency
     }
   end
 
@@ -722,7 +891,10 @@ defmodule FermixCore.Home.Provision.Ledger do
       "reason" => failure.reason,
       "sentence" => failure.sentence,
       "next_location" => failure.next_location,
-      "at" => iso(failure.at)
+      "at" => iso(failure.at),
+      "action" => failure.action,
+      "type" => failure.type,
+      "location" => failure.location
     }
   end
 
@@ -747,7 +919,9 @@ defmodule FermixCore.Home.Provision.Ledger do
          {:ok, firewall} <- optional(map["firewall"], &decode_firewall/1),
          {:ok, ips} <- decode_ips(map["primary_ips"]),
          {:ok, failure} <- optional(map["failure"], &decode_failure/1),
-         {:ok, replace} <- optional(map["replace"], &decode_replace/1) do
+         {:ok, replace} <- optional(map["replace"], &decode_replace/1),
+         {:ok, action} <- optional(map["action"], &decode_action/1),
+         {:ok, checked_at} <- optional_time(map["checked_at"]) do
       {:ok,
        %{
          token: token,
@@ -758,10 +932,22 @@ defmodule FermixCore.Home.Provision.Ledger do
          firewall: firewall,
          primary_ips: ips,
          failure: failure,
-         replace: replace
+         replace: replace,
+         action: action,
+         checked_at: checked_at
        }}
     end
   end
+
+  defp decode_action(%{"kind" => kind} = map) when kind in @action_kinds do
+    with {:ok, %DateTime{} = started_at} <- optional_time(map["started_at"]),
+         {:ok, type} <- optional_text(map["type"]),
+         {:ok, location} <- optional_text(map["location"]) do
+      {:ok, %{kind: kind, started_at: started_at, type: type, location: location}}
+    end
+  end
+
+  defp decode_action(_map), do: :error
 
   defp decode_replace(%{"from_epoch" => epoch} = map) when is_integer(epoch) and epoch > 0 do
     with {:ok, %DateTime{} = started_at} <- optional_time(map["started_at"]),
@@ -806,7 +992,9 @@ defmodule FermixCore.Home.Provision.Ledger do
          {:ok, ipv4} <- optional_text(map["ipv4"]),
          {:ok, power} <- optional_text(map["power"]),
          {:ok, created_at} <- optional_time(map["created_at"]),
-         {:ok, seen_at} <- optional_time(map["seen_at"]) do
+         {:ok, seen_at} <- optional_time(map["seen_at"]),
+         {:ok, total_monthly} <- optional_text(map["total_monthly"]),
+         {:ok, currency} <- optional_text(map["currency"]) do
       {:ok,
        %{
          name: name,
@@ -817,7 +1005,9 @@ defmodule FermixCore.Home.Provision.Ledger do
          ipv4: ipv4,
          power: power,
          created_at: created_at,
-         seen_at: seen_at
+         seen_at: seen_at,
+         total_monthly: total_monthly,
+         currency: currency
        }}
     end
   end
@@ -854,8 +1044,20 @@ defmodule FermixCore.Home.Provision.Ledger do
   defp decode_failure(%{"reason" => reason, "sentence" => sentence} = map)
        when is_binary(reason) and is_binary(sentence) do
     with {:ok, next} <- optional_text(map["next_location"]),
-         {:ok, %DateTime{} = at} <- optional_time(map["at"]) do
-      {:ok, %{reason: reason, sentence: sentence, next_location: next, at: at}}
+         {:ok, %DateTime{} = at} <- optional_time(map["at"]),
+         {:ok, action} <- optional_kind(map["action"]),
+         {:ok, type} <- optional_text(map["type"]),
+         {:ok, location} <- optional_text(map["location"]) do
+      {:ok,
+       %{
+         reason: reason,
+         sentence: sentence,
+         next_location: next,
+         at: at,
+         action: action,
+         type: type,
+         location: location
+       }}
     end
   end
 
@@ -876,6 +1078,10 @@ defmodule FermixCore.Home.Provision.Ledger do
 
   defp optional_text(nil), do: {:ok, nil}
   defp optional_text(value), do: text(value)
+
+  defp optional_kind(nil), do: {:ok, nil}
+  defp optional_kind(kind) when kind in @action_kinds, do: {:ok, kind}
+  defp optional_kind(_kind), do: :error
 
   defp optional_word(nil, _words), do: {:ok, nil}
 
