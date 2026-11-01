@@ -509,6 +509,32 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
       assert persisted_cues() == []
     end
 
+    test "the decision model's picker is hidden while Keyword match is picked, saved or not",
+         %{conn: conn} do
+      Application.put_env(:fermix_core, :providers, openai: [api_key: "invented-key-2207"])
+      {:ok, view, _html} = live(conn, "/setup")
+      html = open_cues(view)
+
+      # Keyword match, the saved default: no picker.
+      refute html =~ ~s(id="cues-decision-provider")
+
+      # Saved as the decision model, the picker shows; picking Keyword match
+      # hides it at once, before Save.
+      view
+      |> form("#cues-settings-form", cues_settings: %{screen: "decision_model"})
+      |> render_submit()
+
+      assert render(view) =~ ~s(id="cues-decision-provider")
+
+      html = view |> form("#cues-settings-form", cues_settings: %{screen: ""}) |> render_change()
+      refute html =~ ~s(id="cues-decision-provider")
+
+      assert screen_options(html) == [
+               {"", "Keyword match", true},
+               {"decision_model", "Decision model", false}
+             ]
+    end
+
     test "the decision model is refused under the Screen while none is set up, and nothing is written",
          %{conn: conn} do
       Application.put_env(:fermix_core, :providers, anthropic: [api_key: "invented-key-2207"])
