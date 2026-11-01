@@ -1172,8 +1172,9 @@ defmodule FermixCore.Tools.ComputerUse do
     ]
   end
 
-  # The refusals of a verb on a control that the Linux build answers: a pixel route
-  # refused, and a toolkit that publishes no controls until a switch is set.
+  # A pixel route the Linux build refuses, and a listing with nothing to read: a scope
+  # with no root on either OS, or a Linux toolkit that publishes no controls until a
+  # switch is set.
   defp linux_control_failure_modes(offered) do
     [
       %{
