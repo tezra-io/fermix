@@ -820,6 +820,7 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
           "Ask first",
           "Always allow",
           "always_allow: false",
+          "Ask first again",
           "/always",
           "Let watchers act",
           "runs when watcher <name> passes an item",

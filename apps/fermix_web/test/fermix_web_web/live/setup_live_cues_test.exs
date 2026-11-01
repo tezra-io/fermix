@@ -6,10 +6,14 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
 
   import Phoenix.LiveViewTest
 
+  alias FermixCore.Capabilities.Capability
+  alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Cues.Door
   alias FermixCore.Cues.FilterChoices
+  alias FermixCore.Cues.Overview
   alias FermixCore.Cues.Pins
   alias FermixCore.Cues.Webhook
+  alias FermixCore.Jobs.Registry, as: JobsRegistry
   alias FermixCore.Management.Cues.SourceForm
   alias FermixCore.Management.Settings.Cues, as: SettingsCues
   alias FermixCore.Memory.Repo
@@ -23,6 +27,7 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
   alias FermixTestSupport.CueDeliveryFixtures
   alias FermixTestSupport.CueFixtures
   alias FermixTestSupport.SecretWriterStub
+  alias FermixTestSupport.TelemetryCapture
 
   @now ~U[2026-10-17 12:00:00Z]
   @cue_text "Invented outside text 7781 that must stay off the owner page"
@@ -1730,6 +1735,101 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
       assert html =~ "Needs keywords to listen for: update it in chat."
       assert html =~ ~s(data-watcher-offered="7")
     end
+
+    # M60_WATCHER_CODING_RUNS.md §3.5: a watcher's follow-up is one quiet line
+    # under it, in the engine's words; the tab never grants Always allow.
+    test "a follow-up that asks first shows its name and sentence and offers nothing", %{
+      conn: conn
+    } do
+      %{repo: repo, conn: db} = CueFixtures.start_repo("setup_follow_up_asks")
+      put_pane_opts(repo: repo, follow_up_opts: follow_up_seams())
+      id = follow_up_watcher!(db, repo, "deploy-watch", "deploy_check")
+      plain = CueDeliveryFixtures.watcher(db, %{name: "release-notes", sources: ["eng-blogs"]})
+
+      {:ok, view, _html} = live(conn, "/setup?tab=cues")
+
+      assert follow_up_line(view, id) ==
+               "Follow-up Deploy check · Asks first: you confirm each run on a short card, " <>
+                 "where you can also always allow it."
+
+      refute has_element?(view, "#cue-watcher-#{id}-follow-up button")
+      refute has_element?(view, "#cue-watcher-#{id}-follow-up.text-warning")
+      # A watcher with only a follow-up has no task to name.
+      refute section_text(render(view), "#cue-watcher-#{id}") =~ "· task"
+      refute has_element?(view, "#cue-watcher-#{plain.id}-follow-up")
+    end
+
+    test "an always allowed follow-up asks first again from the tab, which says so", %{
+      conn: conn
+    } do
+      %{repo: repo, conn: db} = CueFixtures.start_repo("setup_follow_up_allowed")
+      seams = follow_up_seams()
+      put_pane_opts(repo: repo, follow_up_opts: seams)
+      id = follow_up_watcher!(db, repo, "deploy-watch", "deploy_check")
+      CueFixtures.always_allow!(db, id)
+      TelemetryCapture.attach([[:fermix, :cue, :lifecycle]], watcher_id: id)
+
+      {:ok, view, _html} = live(conn, "/setup?tab=cues")
+
+      assert follow_up_line(view, id) ==
+               "Follow-up Deploy check · Always allowed: it runs on each passing item with no " <>
+                 "card. Ask first again"
+
+      html =
+        view
+        |> element(
+          ~s(#cue-watcher-#{id}-follow-up button[phx-click="cues_ask_first"]) <>
+            ~s([phx-value-name="deploy-watch"])
+        )
+        |> render_click()
+
+      assert html =~
+               escaped(
+                 "Watcher deploy-watch's follow-up asks first again: each run waits for your " <>
+                   "tap on its card."
+               )
+
+      assert_receive {:telemetry, _event, _measurements,
+                      %{phase: :follow_up_always_allow_revoked, kind: "setup_page"}}
+
+      assert {:ok, [%{follow_up: %{always_allowed?: false}}]} =
+               Overview.watchers(@now, repo: repo, follow_up_opts: seams)
+
+      assert follow_up_line(view, id) =~ "Follow-up Deploy check · Asks first:"
+      refute has_element?(view, "#cue-watcher-#{id}-follow-up button")
+    end
+
+    test "a refused Ask first again is said in the engine's words", %{conn: conn} do
+      %{repo: repo, conn: db} = CueFixtures.start_repo("setup_follow_up_renamed")
+      put_pane_opts(repo: repo, follow_up_opts: follow_up_seams())
+      id = follow_up_watcher!(db, repo, "deploy-watch", "deploy_check")
+      CueFixtures.always_allow!(db, id)
+
+      {:ok, view, _html} = live(conn, "/setup?tab=cues")
+      # Renamed in chat after the page was drawn.
+      CueFixtures.exec!(db, "UPDATE cue_watchers SET name = 'ship-watch' WHERE id = ?", [id])
+
+      html =
+        view
+        |> element(~s(#cue-watcher-#{id}-follow-up button[phx-click="cues_ask_first"]))
+        |> render_click()
+
+      assert alert_with(html, "Save failed: There is no watcher named deploy-watch.")
+    end
+
+    test "a held follow-up says why in the warning colour", %{conn: conn} do
+      %{repo: repo, conn: db} = CueFixtures.start_repo("setup_follow_up_held")
+      put_pane_opts(repo: repo, follow_up_opts: follow_up_seams())
+      id = follow_up_watcher!(db, repo, "deploy-watch", "release_check")
+
+      {:ok, view, _html} = live(conn, "/setup?tab=cues")
+
+      assert has_element?(view, "#cue-watcher-#{id}-follow-up.text-warning")
+
+      assert follow_up_line(view, id) ==
+               "Follow-up Deploy check · release_check is not set up on this computer (its " <>
+                 "program was not found or its plugin is not installed)."
+    end
   end
 
   describe "mandates" do
@@ -1908,6 +2008,61 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
     put_pane_opts(repo: repo)
     CueDeliveryFixtures.watcher(db, %{name: "release-notes", sources: ["eng-blogs"]})
   end
+
+  # A watcher with only a follow-up, made as the engine's own tests make one:
+  # its job through `Jobs.Registry`, set on the watcher's row. It runs `tool`
+  # and reports to Slack. Returns the watcher's id.
+  defp follow_up_watcher!(db, repo, name, tool) do
+    id = CueFixtures.insert_watcher(db, %{name: name, filter: "none", sources: ["eng-blogs"]})
+
+    {:ok, job} =
+      JobsRegistry.create_follow_up_job(
+        %{
+          name: "Deploy check",
+          task_prompt: "Run the deploy check.",
+          allowed_tools: [tool],
+          delivery_mode: "channel",
+          delivery_target: %{"platform" => "slack", "channel_id" => "C1"},
+          created_by_trust: "operator"
+        },
+        repo: repo,
+        scheduler: nil
+      )
+
+    CueFixtures.exec!(
+      db,
+      "UPDATE cue_watchers SET task_job_id = NULL, follow_up_job_id = ? WHERE id = ?",
+      [job.id, id]
+    )
+
+    id
+  end
+
+  # A follow-up's readiness seams: a private capability registry that carries
+  # `deploy_check` alone, no plugins, and Slack set up.
+  defp follow_up_seams do
+    registry = :"setup_cues_caps_#{System.unique_integer([:positive])}"
+    start_supervised!({CapabilityRegistry, name: registry})
+
+    :ok =
+      CapabilityRegistry.register(
+        registry,
+        Capability.new(%{
+          name: "deploy_check",
+          description: "a test tool",
+          parameters: %{"type" => "object", "properties" => %{}},
+          kind: :builtin,
+          executor: {__MODULE__, :never, []},
+          policy_class: :exec
+        })
+      )
+
+    [capability_registry: registry, plugins: fn -> {:ok, []} end, channel_ready?: &(&1 == :slack)]
+  end
+
+  # The follow-up line under watcher `id`, as one line of text.
+  defp follow_up_line(view, id),
+    do: section_text(render(view), "#cue-watcher-#{id}-follow-up")
 
   defp put_pane_opts(opts) do
     defaults = [now: fn -> @now end, x_sign_in: fn -> @x_signed_out end]

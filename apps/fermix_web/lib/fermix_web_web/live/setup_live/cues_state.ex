@@ -20,6 +20,11 @@ defmodule FermixWebWeb.SetupLive.CuesState do
   A new source starts from what to watch (`SourceForm.choices/0`): the
   editor opens on that list, and the choice fixes the kind and preset.
 
+  Watchers are made and changed in chat, so the tab changes one thing about
+  them: a follow-up's Always allow, which it only takes back
+  (`Cues.Watchers.ask_first/3`, from `"setup_page"`). Each follow-up is the
+  management row's (`WatcherRow.follow_up/1`), in the engine's words.
+
   The filter model offers what `FermixCore.Cues.FilterChoices` offers: the
   main model (the empty choice) and the providers that are set up. `clock`
   carries `now` and the owner's zone (`[fermix_core.personalization]
@@ -34,9 +39,11 @@ defmodule FermixWebWeb.SetupLive.CuesState do
   Mac app shows.
 
   Seams (the LiveView's `:cues_pane_opts`): `:repo`, `:door`, `:now`
-  (zero-arity, a `DateTime`), `:mandate_opts`, `:webhook_opts` (the options
-  of `Cues.Webhook.ensure_path_secret/2`) and `:x_sign_in` (zero-arity, the X
-  sign-in the X accounts form reads, `SourceForm.requirement/2`).
+  (zero-arity, a `DateTime`), `:mandate_opts`, `:follow_up_opts` (the
+  readiness seams a follow-up reads, `Cues.Overview`), `:webhook_opts` (the
+  options of `Cues.Webhook.ensure_path_secret/2`) and `:x_sign_in`
+  (zero-arity, the X sign-in the X accounts form reads,
+  `SourceForm.requirement/2`).
   """
 
   alias FermixCore.ComputerHistory.Config, as: ComputerHistoryConfig
@@ -45,9 +52,11 @@ defmodule FermixWebWeb.SetupLive.CuesState do
   alias FermixCore.Cues.Overview
   alias FermixCore.Cues.Presets
   alias FermixCore.Cues.Settings
+  alias FermixCore.Cues.Watchers
   alias FermixCore.Cues.Webhook
   alias FermixCore.Cues.XAccounts
   alias FermixCore.Management.Cues.SourceForm
+  alias FermixCore.Management.Cues.WatcherRow
   alias FermixCore.Management.Settings.Cues, as: SettingsCues
   alias FermixCore.Memory.Config, as: MemoryConfig
   alias FermixCore.Setup.ConfigStore
@@ -115,7 +124,7 @@ defmodule FermixWebWeb.SetupLive.CuesState do
       filter: filter_view(Keyword.get(core, :routing, []), snapshot),
       sources: Enum.map(CuesConfig.sources(cues), &source_view(&1, rows, now)),
       sources_error: rows_error(rows),
-      watchers: Overview.watchers(now, Keyword.put(opts, :cues_config, cues)),
+      watchers: watchers(now, Keyword.put(opts, :cues_config, cues)),
       mandates: Enum.map(Overview.mandates(cues, opts), &mandate_view/1),
       cue_jobs: cue_jobs(opts),
       raw: %{sources: Keyword.get(raw, :sources, %{}), mandates: Keyword.get(raw, :mandates, %{})},
@@ -254,6 +263,15 @@ defmodule FermixWebWeb.SetupLive.CuesState do
     end
   end
 
+  # The one change the tab makes to a watcher: taking back its follow-up's
+  # Always allow, so its next item asks first. Only a card's tap grants it.
+  defp event("ask_first", %{"name" => name}, state, opts) do
+    case Watchers.ask_first(name, "setup_page", Keyword.take(opts, [:repo])) do
+      {:ok, %{echo: echo}} -> {:saved, echo, []}
+      {:error, sentence} -> {:error, {:invalid, sentence}, state}
+    end
+  end
+
   # Removing a webhook source leaves a Tailscale Funnel mount of it in place.
   defp funnel_note(state, ref) do
     if Enum.any?(state.sources, &(&1.ref == ref and &1.kind == "webhook")),
@@ -360,6 +378,17 @@ defmodule FermixWebWeb.SetupLive.CuesState do
     provider = text(params["filter_provider"])
     filter = %{state.filter | provider: provider, model: text(params["filter_model"])}
     %{state | filter: %{filter | models: FilterChoices.models(provider)}}
+  end
+
+  # --- watchers ------------------------------------------------------------------
+
+  # Each watcher as `Overview` reads it, with its follow-up as the management
+  # row publishes it (`WatcherRow.follow_up/1`), so the page says it in the
+  # engine's words.
+  defp watchers(now, opts) do
+    with {:ok, watchers} <- Overview.watchers(now, opts) do
+      {:ok, Enum.map(watchers, &%{&1 | follow_up: WatcherRow.follow_up(&1.follow_up)})}
+    end
   end
 
   # --- sources -------------------------------------------------------------------

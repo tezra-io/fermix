@@ -871,13 +871,15 @@ defmodule FermixCore.Cues.Watchers do
   @doc """
   Takes back the Always allow of watcher `name`'s follow-up, so its next item
   asks first again: from chat (`kind` `"chat"`, on the owner's consent turn,
-  which the caller checked) or from an app (`"management"`). It only ever
-  lowers what the follow-up may do, and a follow-up that already asks first is
-  told so. Traced as `follow_up_always_allow_revoked` when it took one back.
+  which the caller checked), from an app (`"management"`) or from the setup
+  page's Cues tab (`"setup_page"`). It only ever lowers what the follow-up may
+  do, and a follow-up that already asks first is told so. Traced as
+  `follow_up_always_allow_revoked`, with `kind` as its origin, when it took one
+  back.
   """
   @spec ask_first(String.t(), String.t(), opts()) :: result()
   def ask_first(name, kind, opts \\ [])
-      when is_binary(name) and kind in ["chat", "management"] do
+      when is_binary(name) and kind in ["chat", "management", "setup_page"] do
     with {:ok, watcher} <- fetch(name, opts),
          :ok <- has_follow_up(watcher),
          {:ok, revoked?} <- revoke(watcher, opts),

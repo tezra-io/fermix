@@ -112,6 +112,24 @@ defmodule FermixCore.Management.Cues.WatcherRow do
     })
   end
 
+  @doc """
+  The row's `follow_up` from a `Cues.Overview` watcher's follow-up: its job,
+  name, `always_allowed`, `state` and Fermix's sentence; nil with no
+  follow-up. The setup page's Cues tab says a follow-up from it, in these words.
+  """
+  @spec follow_up(Overview.follow_up() | nil) :: map() | nil
+  def follow_up(nil), do: nil
+
+  def follow_up(follow_up) when is_map(follow_up) do
+    %{
+      "job_id" => follow_up.job_id,
+      "name" => follow_up.name,
+      "always_allowed" => follow_up.always_allowed?,
+      "state" => if(follow_up.held, do: "held", else: "ready"),
+      "status_sentence" => follow_up_sentence(follow_up)
+    }
+  end
+
   defp state(%{enabled?: false}, _facts), do: "paused"
   defp state(%{needs_update: needed}, _facts) when not is_nil(needed), do: "needs_update"
   defp state(%{held?: true}, _facts), do: "held"
@@ -142,18 +160,6 @@ defmodule FermixCore.Management.Cues.WatcherRow do
       "name" => watcher.task_name,
       "paused" => watcher.task_paused?
     }
-
-  defp follow_up(nil), do: nil
-
-  defp follow_up(follow_up) do
-    %{
-      "job_id" => follow_up.job_id,
-      "name" => follow_up.name,
-      "always_allowed" => follow_up.always_allowed?,
-      "state" => if(follow_up.held, do: "held", else: "ready"),
-      "status_sentence" => follow_up_sentence(follow_up)
-    }
-  end
 
   defp follow_up_sentence(%{held: held}) when is_binary(held), do: held
 
