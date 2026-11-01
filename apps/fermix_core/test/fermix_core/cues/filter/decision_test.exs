@@ -62,6 +62,23 @@ defmodule FermixCore.Cues.Filter.DecisionTest do
       assert Map.keys(criteria) == ["false", "true"]
     end
 
+    test "sends exactly the item and the question request/1 builds" do
+      test = self()
+      id = stub(fn conn, body -> send(test, {:body, body}) && noul(conn, 0.9) end)
+      claim = claim()
+      {item, question} = Decision.request(claim)
+
+      assert screen(claim, id) == :through
+      assert_received {:body, body}
+      assert body["state"] == item
+
+      assert body["questions"]["answer"] == %{
+               "type" => "noul",
+               "instructions" => question.instructions,
+               "criteria" => %{"true" => question.yes, "false" => question.no}
+             }
+    end
+
     test "an item under 30% is dropped with Fermix's own reason, unread by the filter model" do
       id = stub(fn conn, _body -> noul(conn, 0.29) end)
 

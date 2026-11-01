@@ -83,15 +83,25 @@ defmodule FermixCore.Cues.Filter.Decision do
       req_options: Keyword.get(opts, :req_options, [])
     ]
 
-    item = Prompt.evidence(%{claim | examples: []})
+    {item, question} = request(claim)
 
     with {:ok, route} <- route(CuesConfig.decision_provider()),
-         {:ok, answer} <- DecisionModel.yes_no(route, item, question(claim), call_opts) do
+         {:ok, answer} <- DecisionModel.yes_no(route, item, question, call_opts) do
       outcome(answer.probability)
     else
       {:error, reason} -> classify(reason)
     end
   end
+
+  @doc """
+  The item and the question the screen asks about `claim`, as
+  `DecisionModel.yes_no/4` takes them, with no call made: `screen/2` sends
+  exactly these, and the screen eval (`benchmark/bin/screen_eval.exs`) reads
+  them to measure the question on each decision model.
+  """
+  @spec request(map()) :: {String.t(), DecisionModel.question()}
+  def request(%{watcher: watcher} = claim) when is_map(watcher),
+    do: {Prompt.evidence(%{claim | examples: []}), question(claim)}
 
   @doc """
   Fermix's sentence for a screen whose decision model cannot run now, read
