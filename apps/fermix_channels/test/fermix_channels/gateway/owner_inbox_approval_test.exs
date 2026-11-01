@@ -217,8 +217,8 @@ defmodule FermixChannels.Gateway.OwnerInboxApprovalTest do
       assert "cp_" <> _rest = spec.token
       assert hd(spec.lines) == ~s(Run "Deploy check"?)
       assert List.last(spec.lines) =~ "· reports here"
-      assert spec.actions == %{confirm: "▶ Run", deny: "Skip"}
-      assert spec.text =~ "Reply /confirm to run or /deny to skip."
+      assert spec.actions == %{confirm: "▶ Run", deny: "Skip", always_allow: "Always allow"}
+      assert spec.text =~ "Reply /confirm to run, /deny to skip, or /always to always allow it."
 
       assert binding == %{
                token_digest: CueProposals.digest(spec.token),
@@ -226,18 +226,6 @@ defmodule FermixChannels.Gateway.OwnerInboxApprovalTest do
                chat_id: "owner-1",
                user_id: "owner-1"
              }
-    end
-
-    test "an automatic follow-up's prompt asks to approve or keep asking" do
-      opts = telegram_owner(adapter: CardAdapter)
-
-      assert {:ok, %{token_digest: digest}} =
-               OwnerInboxApproval.send_follow_up(approval_card(), opts)
-
-      assert_received {:card_adapter, _message, spec}
-      assert spec.actions == %{confirm: "✅ Approve", deny: "❌ Keep asking"}
-      assert spec.text =~ "at most 5 a day"
-      assert digest == CueProposals.digest(spec.token)
     end
 
     test "with no DM it goes to the apps alone when one can show it, else nowhere" do
@@ -290,7 +278,7 @@ defmodule FermixChannels.Gateway.OwnerInboxApprovalTest do
       trigger_id: "cft_1",
       state: "waiting",
       expires_at: ~U[2026-10-30 12:30:00Z],
-      watcher: %{id: "cwt_1", name: "release-watch"},
+      watcher: %{id: "cwt_1", name: "release-watch", sources: ["releases"], listen_for: []},
       follow_up: %{
         job_id: "job_1",
         name: "Deploy check",
@@ -307,24 +295,6 @@ defmodule FermixChannels.Gateway.OwnerInboxApprovalTest do
         text: "Kestrel 2.4 is out.",
         reason: nil
       }
-    }
-  end
-
-  defp approval_card do
-    %{
-      id: "cfa_1",
-      shown_digest: "digest",
-      watcher_name: "release-watch",
-      expires_at: ~U[2026-10-30 12:30:00Z],
-      daily_cap: 5,
-      sources: ["releases"],
-      listen_for: [],
-      job_id: "job_1",
-      job_name: "Deploy check",
-      task_prompt: "Run the deploy check script and report what failed.",
-      allowed_tools: ["shell"],
-      delivery_mode: "origin",
-      delivery_target: %{"platform" => "telegram", "chat_id" => "owner-1"}
     }
   end
 end

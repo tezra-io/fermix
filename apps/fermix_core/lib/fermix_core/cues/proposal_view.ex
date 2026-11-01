@@ -24,15 +24,15 @@ defmodule FermixCore.Cues.ProposalView do
 
   ## A watcher's follow-up (M60_WATCHER_CODING_RUNS.md §6.2)
 
-  A follow-up's card (`follow_up_card/2`, from `Cues.FollowUps.card/2`) and an
-  automatic approval's prompt (`approval_card/2`, from
-  `Cues.FollowUpApprovals.card/2`) are cards of the same shape, keyed by the
-  trigger's or the prompt's id, with `follow_up` in place of `mandate`,
-  `tool` and the call's arguments: the follow-up's `name`, the owner's
-  `instructions`, its `tools`, where it `reports_to`, and what the card
-  `asks` (`run`, once now, or `automatic`, with the watcher's `daily_cap` and
-  what sets it off, `set_off_by`). Their states read as a proposal's:
-  `starting` and `started` are `confirmed`, `skipped` is `denied`.
+  A follow-up's card (`follow_up_card/2`, from `Cues.FollowUps.card/2`) is a
+  card of the same shape, keyed by the trigger's id, with `follow_up` in
+  place of `mandate`, `tool` and the call's arguments: the follow-up's
+  `name`, the owner's `instructions`, its `tools`, where it `reports_to`, what
+  the card `asks` (`run`, once now), and `offers_always_allow`, which says
+  the card also takes Always allow (the 2026-10-31 revision of §3.4): run
+  this one, and the follow-up's later items with no card. Its states read as
+  a proposal's: `starting` and `started` are `confirmed`, `skipped` is
+  `denied`.
 
   Times are RFC 3339 UTC strings to the second; every field is present, nil
   where it does not apply.
@@ -168,53 +168,11 @@ defmodule FermixCore.Cues.ProposalView do
       },
       follow_up: %{
         asks: "run",
+        offers_always_allow: true,
         name: follow_up.name || follow_up.job_id,
         instructions: follow_up.instructions,
         tools: follow_up.tools,
         reports_to: Card.reports_to(follow_up.delivery, opts)
-      }
-    }
-  end
-
-  @doc """
-  The card of an automatic approval's prompt (`Cues.FollowUpApprovals.card/2`):
-  what the follow-up runs and what sets it off, all Fermix's and the owner's
-  words, so nothing is outside text.
-  """
-  @spec approval_card(map(), keyword()) :: card()
-  def approval_card(%{id: id} = card, opts) when is_binary(id) and is_list(opts) do
-    state = approval_state(card.state)
-    name = card.job_name || card.job_id
-
-    %{
-      proposal_id: id,
-      state: state,
-      mandate: nil,
-      tool: nil,
-      task: %{job_id: card.job_id || "", name: card.job_name},
-      watcher: card.watcher_name,
-      source_ref: nil,
-      created_at: time(card.created_at),
-      expires_at: time(card.expires_at),
-      decided_at: time(card.decided_at),
-      decided_from: surface(card.decided_from),
-      result_status: nil,
-      status_sentence: approval_sentence(state),
-      received_at: nil,
-      summary:
-        "Watcher #{card.watcher_name || "(removed)"} asks to run its follow-up #{quoted(name)} " <>
-          "on its own, with no card, at most #{card.daily_cap} a day. It does so only if you " <>
-          "approve.",
-      outside: %{},
-      follow_up: %{
-        asks: "automatic",
-        name: name,
-        instructions: card.task_prompt,
-        tools: card.allowed_tools,
-        reports_to:
-          Card.reports_to(%{mode: card.delivery_mode, target: card.delivery_target}, opts),
-        daily_cap: card.daily_cap,
-        set_off_by: Card.set_off_by(card)
       }
     }
   end
@@ -225,11 +183,6 @@ defmodule FermixCore.Cues.ProposalView do
   def follow_up_state(state) when state in ["starting", "started"], do: "confirmed"
   def follow_up_state("skipped"), do: "denied"
   def follow_up_state(state) when state in ["expired", "refused"], do: state
-
-  @doc "The state an approval's prompt shows as a card's (`approved` is `confirmed`)."
-  @spec approval_state(String.t()) :: String.t()
-  def approval_state("approved"), do: "confirmed"
-  def approval_state(state) when state in ["waiting", "denied", "expired"], do: state
 
   @doc """
   `text` cut to at most `max` characters, its last one an ellipsis when cut;
@@ -274,20 +227,14 @@ defmodule FermixCore.Cues.ProposalView do
   defp follow_up_sentence("waiting", _card),
     do: "Waiting for your answer; it runs only if you confirm."
 
+  defp follow_up_sentence("confirmed", %{always_allow: "allowed"}),
+    do: "Confirmed; the follow-up is starting, and runs with no card from now on."
+
   defp follow_up_sentence("confirmed", _card), do: "Confirmed; the follow-up is starting."
   defp follow_up_sentence("denied", _card), do: "Skipped; the follow-up did not run."
   defp follow_up_sentence("expired", _card), do: "Expired with no answer; nothing ran."
   defp follow_up_sentence("refused", %{reason: reason}) when is_binary(reason), do: reason
   defp follow_up_sentence("refused", _card), do: "Not run: Fermix refused it."
-
-  defp approval_sentence("waiting"),
-    do: "Waiting for your answer; it runs on its own only if you approve."
-
-  defp approval_sentence("confirmed"), do: "Approved; it runs on its own."
-  defp approval_sentence("denied"), do: "Kept asking; each run waits for your tap."
-
-  defp approval_sentence("expired"),
-    do: "Expired with no answer; each run still waits for your tap."
 
   defp follow_up_cue(%{type: nil, subject: nil, text: nil}), do: nil
 

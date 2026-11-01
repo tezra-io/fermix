@@ -644,7 +644,7 @@ defmodule FermixCore.Companion.ProtocolTest do
 
   # M60 app surface §3.7 (D28): a proposal's card, its end, and the owner's answer.
   describe "proposals (version 4)" do
-    test "proposal_answer names the proposal and a decision, confirm or deny" do
+    test "proposal_answer names the proposal and a decision, confirm, deny or always_allow" do
       answer = %{
         "type" => "proposal_answer",
         "client_msg_id" => "mac-9",
@@ -655,6 +655,7 @@ defmodule FermixCore.Companion.ProtocolTest do
 
       assert {:ok, %{type: "proposal_answer"}} = decode(answer)
       assert {:ok, _event} = decode(%{answer | "decision" => "deny"})
+      assert {:ok, _event} = decode(%{answer | "decision" => "always_allow"})
       assert {:error, {:invalid_field, "decision"}} = decode(%{answer | "decision" => "maybe"})
       assert {:error, {:invalid_field, "proposal_id"}} = decode(%{answer | "proposal_id" => ""})
       assert {:error, {:missing_field, "decision"}} = decode(Map.delete(answer, "decision"))
@@ -711,7 +712,9 @@ defmodule FermixCore.Companion.ProtocolTest do
     # follow-up in place of a mandate's call, and never carries arguments.
     test "a follow-up's card is version 5's, names the follow-up and carries no call" do
       assert :ok = validate_card(follow_up_card())
-      assert :ok = validate_card(approval_card())
+
+      assert :ok =
+               validate_card(put_in(follow_up_card(), ["follow_up", "offers_always_allow"], true))
 
       assert Protocol.server_payload_version("proposal", %{"proposal" => follow_up_card()}) == 5
       assert Protocol.server_payload_version("proposal_resolved", %{}) == 4
@@ -722,10 +725,11 @@ defmodule FermixCore.Companion.ProtocolTest do
             put_in(follow_up_card(), ["outside", "args_text"], "{}"),
             put_in(follow_up_card(), ["follow_up", "asks"], "maybe"),
             put_in(follow_up_card(), ["follow_up", "tools"], [""]),
+            put_in(follow_up_card(), ["follow_up", "asks"], "automatic"),
             put_in(follow_up_card(), ["follow_up", "daily_cap"], 5),
-            Map.update!(follow_up_card(), "follow_up", &Map.delete(&1, "instructions")),
-            Map.update!(approval_card(), "follow_up", &Map.delete(&1, "daily_cap")),
-            put_in(approval_card(), ["follow_up", "daily_cap"], 0)
+            put_in(follow_up_card(), ["follow_up", "set_off_by"], "x-feed"),
+            put_in(follow_up_card(), ["follow_up", "offers_always_allow"], "yes"),
+            Map.update!(follow_up_card(), "follow_up", &Map.delete(&1, "instructions"))
           ] do
         assert {:error, {:invalid_field, "proposal"}} = validate_card(drift),
                "accepted #{inspect(drift)}"
@@ -921,18 +925,6 @@ defmodule FermixCore.Companion.ProtocolTest do
         "reports_to" => "Telegram (owner-1)"
       }
     }
-  end
-
-  defp approval_card do
-    follow_up_card()
-    |> Map.merge(%{"proposal_id" => "cfa_1", "outside" => %{}})
-    |> Map.update!("follow_up", fn follow_up ->
-      Map.merge(follow_up, %{
-        "asks" => "automatic",
-        "daily_cap" => 5,
-        "set_off_by" => "x-feed; listens for reset"
-      })
-    end)
   end
 
   defp validate_card(card),

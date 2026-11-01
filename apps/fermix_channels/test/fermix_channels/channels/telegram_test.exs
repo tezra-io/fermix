@@ -233,6 +233,24 @@ defmodule FermixChannels.Channels.TelegramTest do
       assert msg.metadata.user_id == "111"
     end
 
+    # The 2026-10-31 revision of M60_WATCHER_CODING_RUNS.md: a follow-up's card's
+    # Always allow taps the same typed path as `/always`.
+    test "synthesizes an /always message from an Always allow tap, naming its card" do
+      update = %{
+        "callback_query" => %{
+          "id" => "cbq-3",
+          "data" => "always:cp_AB12CD34",
+          "from" => %{"id" => 111, "username" => "alice"},
+          "message" => %{"message_id" => 56, "chat" => %{"id" => 123, "type" => "private"}}
+        }
+      }
+
+      assert {:ok, [msg]} = Telegram.parse_update(update)
+      assert msg.content == "/always cp_AB12CD34"
+      assert msg.metadata.user_id == "111"
+      assert msg.metadata.approval_message_id == "56"
+    end
+
     test "declares a photo as its largest variant (file_id only, hinted :photo)" do
       update = %{
         "message" => %{
@@ -1194,6 +1212,24 @@ defmodule FermixChannels.Channels.TelegramTest do
                  ]
                ]
       end
+    end
+
+    # The 2026-10-31 revision: a follow-up's card has three answers, Always allow
+    # in a row of its own under Run and Skip.
+    test "a follow-up's card adds Always allow under Run and Skip" do
+      stub_telegram(self(), 200, %{"ok" => true})
+      spec = put_in(card_spec(:follow_up), [:actions, :always_allow], "Always allow")
+      assert :ok = Telegram.send_approval(card_message(), spec)
+
+      assert_received {:telegram_request, "/bottest-bot-token/sendMessage", body}
+
+      assert body["reply_markup"]["inline_keyboard"] == [
+               [
+                 %{"text" => "▶ Run", "callback_data" => "grant:cp_TOKEN"},
+                 %{"text" => "Skip", "callback_data" => "deny:cp_TOKEN"}
+               ],
+               [%{"text" => "Always allow", "callback_data" => "always:cp_TOKEN"}]
+             ]
     end
 
     test "a sandbox approval gets the one-tap buttons; a SOUL.md change its text alone" do

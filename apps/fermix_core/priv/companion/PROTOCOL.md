@@ -158,12 +158,10 @@ version 4 the window is {3, 4}, so a version 2 client is refused with
 
 Version 5 lets the owner answer a watcher's follow-up in the Mac's chat. A
 watcher may have a follow-up, a job of the owner's own words that an item
-passing the watcher sets off; asked first, it waits for the owner on a card,
-and an automatic one waits once for the owner's approval before it runs on
-its own. Both are cards of the `proposal` event, keyed by their own
-`proposal_id` (`cft_…` for a follow-up's card, `cfa_…` for an approval's
-prompt), and both are answered with `proposal_answer` and ended with
-`proposal_resolved`, as a mandate's proposal is. It adds no event:
+passing the watcher sets off; it waits for the owner on a card, a card of
+the `proposal` event keyed by its own `proposal_id` (`cft_…`), answered with
+`proposal_answer` and ended with `proposal_resolved`, as a mandate's proposal
+is. It adds no event:
 
 - one card field, `follow_up`, in place of `mandate`, `tool` and
   `outside.args_text`, which a follow-up's card does not carry (see
@@ -175,6 +173,18 @@ prompt), and both are answered with `proposal_answer` and ended with
 A mandate's card gains `outside.args` and `outside.reason`, the compact card's
 lines. They are additive, so they are sent on every version and an older
 client ignores them.
+
+A follow-up's card also offers Always allow: `follow_up.offers_always_allow`
+is `true`, and `proposal_answer` takes the `decision` `always_allow` for it,
+which runs it as `confirm` does and lets the follow-up's later items run with
+no card until what it runs or what sets it off changes. Neither needs a
+version: the field is additive, so an older client ignores it and answers
+with `confirm` and `deny` as before, and a client sends `always_allow` only to
+a card whose `offers_always_allow` it read, which a daemon that takes it
+alone writes. A mandate's card does not offer it, and refuses it with
+`error: request_failed`. The approval prompt (`cfa_…`) a daemon before Always
+allow sent for an automatic follow-up is gone, with its `follow_up.asks`
+value `automatic` and the `daily_cap` and `set_off_by` it carried.
 
 Every version 4 event, field and rule holds unchanged on version 5. Since
 version 5 the window is {4, 5}, so a version 3 client is refused with
@@ -342,7 +352,7 @@ in a fixed order:
 | `read_state` | `profile_id`, `read_up_to_seq` | Advances the monotonic read frontier, never past the newest row. |
 | `media_fetch` | `profile_id`, `ref` (64 lowercase hex digits) | Version 3. Asks for a managed local file holding the bytes of `ref`, a media ref a row of the profile names. Answered by `media_path`, `media_missing`, or `error: request_failed` with `ref`. Any other `ref` is refused with `error: invalid_field` (`ref`) and the connection is closed. See *Managed media files*. |
 | `media_release` | `profile_id`, `ref` (64 lowercase hex digits) | Version 3. The client has finished with the file `media_path` granted for `ref`. Never answered. Releasing a ref this connection does not hold changes nothing. |
-| `proposal_answer` | `client_msg_id`, `profile_id`, `proposal_id`, `decision` (`confirm` or `deny`) | Version 4. The owner's answer to a proposal. Answered `accepted` (`duplicate: false`) once the decision is recorded, then `proposal_resolved`; a refusal is `error: request_failed` with the daemon's sentence and `client_msg_id`. Taken only from a connection placed as the owner's; see *Proposals*. |
+| `proposal_answer` | `client_msg_id`, `profile_id`, `proposal_id`, `decision` (`confirm`, `deny`, or `always_allow` for a follow-up's card that offers it) | Version 4. The owner's answer to a proposal. Answered `accepted` (`duplicate: false`) once the decision is recorded, then `proposal_resolved`; a refusal is `error: request_failed` with the daemon's sentence and `client_msg_id`. Taken only from a connection placed as the owner's; see *Proposals*. |
 | `checklists_pull` | `profile_id` | Version 6. Asks for the index of the owner's lists, answered `checklists`; from then on this connection is sent the index again after any change. Taken only from a connection placed as the owner's; see *Lists*. |
 | `checklist_pull` | `profile_id`, `list_id` (`ck_` id); `removed?` (boolean) | Version 6. Asks for one whole list, answered `checklist`; the connection then holds it (at most 16) and is sent it again after every change. `removed: true` adds the rows removed in the last 30 days. Owner's connection only; see *Lists*. |
 | `checklist_edit` | `client_msg_id` (at most 128 characters), `profile_id`, `op`; `list_id?` (`ck_` id, for every op but `create`) | Version 6. One op on the owner's lists, by row id. Answered `accepted` once applied, `duplicate: true` when the `client_msg_id` was already applied; a refusal is `error: request_failed` with the engine's sentence and `client_msg_id`, and changes nothing. Owner's connection only; see *Lists*. |
@@ -895,15 +905,14 @@ it survives a restart.
   filter's one-sentence reason for passing the item. A client draws `outside`
   as outside text, never as Fermix's words. Times are RFC 3339 UTC.
 - **A follow-up's card** (version 5). In place of `mandate`, `tool` and the
-  call's arguments it carries `follow_up { asks, name, instructions, tools,
-  reports_to, daily_cap?, set_off_by? }`, the follow-up in Fermix's and the
-  owner's words: `asks` is `run` (once, now) or `automatic` (on every item that
-  passes, with no card, at most `daily_cap` a day, set off by `set_off_by`,
-  the watcher's sources and words). `task` is the follow-up's job; `outside`
-  holds only the item (`cue?`) and the filter's `reason?`, since the
-  follow-up is handed nothing of the item; an approval's prompt has an empty
-  `outside`. Its states read as a proposal's: a confirmed card is starting
-  its run, and a denied one was skipped.
+  call's arguments it carries `follow_up { asks, offers_always_allow?, name,
+  instructions, tools, reports_to }`, the follow-up in Fermix's and the
+  owner's words: `asks` is `run` (once, now), and `offers_always_allow`, when
+  `true`, says the card also takes `always_allow`. `task` is the follow-up's
+  job; `outside` holds only the item (`cue?`) and the filter's `reason?`,
+  since the follow-up is handed nothing of the item. Its states read as a
+  proposal's: a confirmed card is starting its run, whether by `confirm` or
+  `always_allow`, and a denied one was skipped.
 - **When.** A card is sent when the proposal is stored. Right after
   `server_hello`, the daemon sends the card of every proposal still waiting,
   oldest first (at most 100). A client keys cards by `proposal_id`, so a card
@@ -915,7 +924,12 @@ it survives a restart.
   one write moves the proposal out of `waiting`, fenced on its id and its
   expiry. `deny` runs nothing. `confirm` checks the mandate's switches, its
   pins, its grant and its validator again, and runs exactly the recorded call,
-  once, with no model. `accepted` comes as soon as the decision is recorded,
+  once, with no model; on a follow-up's card it starts the follow-up's run.
+  `always_allow`, on a follow-up's card only, starts the run as `confirm` does
+  and, in the same write, lets the follow-up's later items run with no card
+  for what the card showed; one whose follow-up or what sets it off changed
+  since the card was shown allows nothing, and its `proposal_resolved`
+  sentence says which. `accepted` comes as soon as the decision is recorded,
   before the call has run. A second answer, from this socket, a phone, the
   management socket or the owner's chat, is refused with its sentence ("That
   call was already confirmed; it runs at most once."); so is an answer after

@@ -138,6 +138,7 @@ defmodule FermixCore.Management.ProtocolTest do
              "cues.sources.url.get",
              "cues.watchers.list",
              "cues.watchers.get",
+             "cues.watchers.always_allow.revoke",
              "cues.mandates.list",
              "cues.mandates.choices",
              "cues.mandates.add",

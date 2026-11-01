@@ -2,11 +2,10 @@ defmodule FermixCore.Cues.FollowUpAnswersTest do
   @moduledoc """
   Answering a watcher's follow-up (M60_WATCHER_CODING_RUNS.md §3.4, §4.5, §5,
   §6.2, §9): every `cp_` token goes through `Cues.Proposals`, the one place
-  answers go, which hands a follow-up's card to `Cues.FollowUps` and an
-  automatic follow-up's approval prompt to `Cues.FollowUpApprovals`; a card's
-  id answers only from the chat it waits in (the bare `/confirm`); the app
-  surfaces are offered each card and told its end; and the approval applies
-  only what the prompt showed.
+  answers go, which hands a follow-up's card to `Cues.FollowUps`; a card's id
+  answers only from the chat it waits in (the bare `/confirm`); the app
+  surfaces are offered each card and told its end; and Always allow allows
+  only what the card showed.
   """
   use ExUnit.Case, async: true
 
@@ -14,7 +13,6 @@ defmodule FermixCore.Cues.FollowUpAnswersTest do
 
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
-  alias FermixCore.Cues.FollowUpApprovals
   alias FermixCore.Cues.FollowUps
   alias FermixCore.Cues.Ingest
   alias FermixCore.Cues.Proposals
@@ -22,6 +20,7 @@ defmodule FermixCore.Cues.FollowUpAnswersTest do
   alias FermixCore.Jobs.CueAdmission
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Repo.CuesFollowUpSql
+  alias FermixTestSupport.TelemetryCapture
 
   @now ~U[2026-10-30 12:00:00.000000Z]
   @owner %{platform: "telegram", chat_id: "chat-1", user_id: "owner-1"}
@@ -180,113 +179,107 @@ defmodule FermixCore.Cues.FollowUpAnswersTest do
     end
   end
 
-  # --- the automatic approval's prompt (§3.4, §5) ----------------------------------------
+  # --- Always allow (2026-10-31 revision of §3.4, §5) -------------------------------------
 
-  describe "an automatic follow-up's prompt" do
-    test "is refused for a follow-up that asks first", ctx do
+  describe "Always allow on a follow-up's card" do
+    test "runs this one and allows what the card showed, so the next item needs no card", ctx do
       watcher = follow_up_watcher!(ctx)
+      TelemetryCapture.attach([[:fermix, :cue, :lifecycle]], watcher_id: watcher.id)
+      _trigger = offer!(ctx, "cp_allow-one")
 
-      assert {:error, "Watcher codex-limits's follow-up asks first; make it automatic first."} =
-               FollowUpApprovals.ask(watcher.name, prompt_opts(ctx, "cp_unused"))
+      assert_received {:event, {:offered, %{follow_up: %{asks: "run"} = follow_up}}}
+      assert follow_up.offers_always_allow == true
+
+      assert {:ok, line} = Proposals.always_allow("cp_allow-one", @owner, opts(ctx))
+      assert line =~ ~s(Starting "Codex review" for post-1's post · )
+      assert line =~ "Always allowed: from now on it runs with no card."
+      assert_received :woken
+
+      assert_received {:event, {:resolved, %{state: "confirmed", sentence: sentence}}}
+
+      assert sentence ==
+               "Confirmed; the follow-up is starting, and runs with no card from now on."
+
+      assert_receive {:telemetry, _event, _measurements,
+                      %{phase: :follow_up_decided, decision: :always_allow} = decided}
+
+      assert {decided.outcome, decided.kind, decided.state} == {"allowed", "telegram", "starting"}
+
+      pass!(ctx, 2)
+
+      assert [%{state: "starting", mode: "approve"}, %{state: "starting", mode: "auto"}] =
+               states(ctx, watcher)
+
+      assert {:ok, []} =
+               Repo.cues_call(CuesFollowUpSql, {:claim_offers, @now, 10}, server: ctx.repo)
+
+      assert {:error, "That follow-up is already starting."} =
+               Proposals.always_allow("cp_allow-one", @owner, opts(ctx))
     end
 
-    test "goes to the sender, and the owner's yes approves exactly what it showed", ctx do
-      watcher = follow_up_watcher!(ctx, mode: "auto")
-
-      assert {:ok, "Fermix sent you a prompt to approve it" <> _rest} =
-               FollowUpApprovals.ask(watcher.name, prompt_opts(ctx, "cp_prompt-one"))
-
-      assert_received {:card, card}
-      assert card.watcher_name == watcher.name
-      assert card.daily_cap == 5
-      assert card.task_prompt == @prompt
-      assert card.sources == [ctx.ref]
-      assert_received {:event, {:offered, %{follow_up: %{asks: "automatic", daily_cap: 5}}}}
-
-      assert {:ok, [%{kind: :approval}]} = Proposals.waiting_in_chat(@owner, opts(ctx))
-
-      assert {:ok, ~s(Approved: "Codex review" runs on its own, at most 5 a day.)} =
-               Proposals.confirm("cp_prompt-one", @owner, opts(ctx))
-
-      assert_received {:event, {:resolved, %{state: "confirmed"}}}
-      pass!(ctx, 1)
-      assert [%{state: "starting"}] = states(ctx, watcher)
-    end
-
-    test "a change since the prompt approves nothing, and it keeps asking first", ctx do
-      watcher = follow_up_watcher!(ctx, mode: "auto")
-      {:ok, _sent} = FollowUpApprovals.ask(watcher.name, prompt_opts(ctx, "cp_prompt-two"))
+    test "a change since the card was shown allows nothing; the run still starts", ctx do
+      watcher = follow_up_watcher!(ctx)
+      TelemetryCapture.attach([[:fermix, :cue, :lifecycle]], watcher_id: watcher.id)
+      _trigger = offer!(ctx, "cp_allow-two")
 
       {:ok, _} =
         Watchers.update(watcher.name, %{sources: [ctx.ref, "github-releases"]}, opts(ctx))
 
-      assert {:error, "The follow-up or what sets it off changed since you were asked" <> _} =
-               Proposals.confirm("cp_prompt-two", @owner, opts(ctx))
+      assert {:ok, line} = Proposals.always_allow("cp_allow-two", @owner, opts(ctx))
+      assert line =~ ~s(Starting "Codex review" for post-1's post · )
 
-      pass!(ctx, 1)
-      assert [%{state: "waiting", mode: "approve"}] = states(ctx, watcher)
+      assert line =~
+               "Not always allowed: it changed since this card was shown, so the next item " <>
+                 "asks again."
+
+      assert_receive {:telemetry, _event, _measurements,
+                      %{phase: :follow_up_decided, outcome: "changed"}}
+
+      pass!(ctx, 2)
+      assert [%{state: "starting"}, %{state: "waiting", mode: "approve"}] = states(ctx, watcher)
     end
 
-    # "Keep asking" clears an approval that stands, so the follow-up asks first
-    # until the owner approves it again (§5).
-    test "the owner's no keeps it asking first, and clears an approval it had", ctx do
-      watcher = follow_up_watcher!(ctx, mode: "auto")
-      {:ok, digest} = Watchers.current_follow_up_digest(watcher.name, opts(ctx))
-      {:ok, _approved} = Watchers.approve_follow_up(watcher.name, digest, opts(ctx))
-      {:ok, _sent} = FollowUpApprovals.ask(watcher.name, prompt_opts(ctx, "cp_prompt-three"))
+    test "an app answers it by the card's id", ctx do
+      watcher = follow_up_watcher!(ctx)
+      trigger = offer!(ctx, "cp_allow-three")
 
-      assert {:ok, ~s(Kept asking: each run of "Codex review" waits for your tap.)} =
-               Proposals.deny("cp_prompt-three", @owner, opts(ctx))
+      assert {:ok, %{proposal_id: id, state: "confirmed"}} =
+               Proposals.decide(trigger.id, :always_allow, @app, opts(ctx))
 
-      pass!(ctx, 1)
-      assert [%{state: "waiting", mode: "approve"}] = states(ctx, watcher)
+      assert id == trigger.id
+      assert_received :woken
+      assert [%{state: "starting", decided_from: "companion"}] = states(ctx, watcher)
+
+      pass!(ctx, 2)
+      assert [_card, %{state: "starting", mode: "auto"}] = states(ctx, watcher)
     end
 
-    test "answers only from the chat it went to; an app answers by its id", ctx do
-      watcher = follow_up_watcher!(ctx, mode: "auto")
-      {:ok, _sent} = FollowUpApprovals.ask(watcher.name, prompt_opts(ctx, "cp_prompt-four"))
-      assert {:ok, [%{id: id}]} = FollowUpApprovals.waiting_in_chat(@owner, opts(ctx))
+    test "its id answers only from the chat it waits in", ctx do
+      watcher = follow_up_watcher!(ctx)
+      trigger = offer!(ctx, "cp_allow-four")
 
-      assert {:error, "Answer it from the chat Fermix sent it to."} =
-               Proposals.confirm("cp_prompt-four", @stranger, opts(ctx))
+      assert {:error, "That card is not waiting in this chat; nothing ran."} =
+               Proposals.always_allow(trigger.id, @stranger, opts(ctx))
 
-      assert {:ok, %{proposal_id: ^id, state: "confirmed"}} =
-               Proposals.decide(id, :confirm, @app, opts(ctx))
-
-      assert {:error, "That prompt was already approved."} =
-               Proposals.confirm("cp_prompt-four", @owner, opts(ctx))
+      assert {:ok, "Starting" <> _rest} = Proposals.always_allow(trigger.id, @owner, opts(ctx))
+      assert [%{state: "starting"}] = states(ctx, watcher)
     end
 
-    test "a new prompt expires the one before it; nobody's answer expires the last", ctx do
-      watcher = follow_up_watcher!(ctx, mode: "auto")
-      {:ok, _sent} = FollowUpApprovals.ask(watcher.name, prompt_opts(ctx, "cp_prompt-five"))
-      {:ok, _sent} = FollowUpApprovals.ask(watcher.name, prompt_opts(ctx, "cp_prompt-six"))
-
-      assert_received {:event, {:resolved, %{state: "expired"}}}
-
-      assert {:error, "That prompt expired; each run still asks first."} =
-               Proposals.confirm("cp_prompt-five", @owner, opts(ctx))
-
-      later = DateTime.add(@now, 30 * 60, :second)
-      assert {:ok, 1} = FollowUpApprovals.expire([server: ctx.repo], later, 10)
-      assert {:ok, []} = FollowUpApprovals.waiting_in_chat(@owner, opts(ctx))
+    test "a mandate's proposal offers no Always allow", ctx do
+      assert {:error, "Only a follow-up's card offers Always allow; nothing ran."} =
+               Proposals.decide("cpr_9a0b1c2d3e4f5a6b7c8d9e0f", :always_allow, @app, opts(ctx))
     end
   end
 
   # --- fixtures --------------------------------------------------------------------------
 
-  defp follow_up_watcher!(ctx, attrs \\ []) do
+  defp follow_up_watcher!(ctx) do
     params = %{
       name: "codex-limits",
       filter: "none",
       daily_cap: 5,
       sources: [ctx.ref],
-      follow_up: %{
-        name: "Codex review",
-        prompt: @prompt,
-        allowed_tools: ["shell"],
-        mode: Keyword.get(attrs, :mode, "approve")
-      }
+      follow_up: %{name: "Codex review", prompt: @prompt, allowed_tools: ["shell"]}
     }
 
     {:ok, %{watcher: watcher}} = Watchers.create(params, context(), opts(ctx))
@@ -381,8 +374,6 @@ defmodule FermixCore.Cues.FollowUpAnswersTest do
     opts(ctx) ++
       [notice: fn _watcher, _kind, _data -> :ok end, follow_up_sender: sender(token)]
   end
-
-  defp prompt_opts(ctx, token), do: opts(ctx) ++ [follow_up_sender: sender(token)]
 
   defp sender(token) do
     test = self()

@@ -1,8 +1,8 @@
 defmodule FermixCore.Cues.CardTest do
   @moduledoc """
   The compact card (M60_WATCHER_CODING_RUNS.md §6): a follow-up's card (§6.1),
-  an automatic follow-up's approval prompt (§3.4) and a mandate's proposal
-  (§6.3), one layout made for a phone. Pure.
+  with Always allow beside Run and Skip, and a mandate's proposal (§6.3), one
+  layout made for a phone. Pure.
   """
   use ExUnit.Case, async: true
 
@@ -31,7 +31,7 @@ defmodule FermixCore.Cues.CardTest do
       assert String.ends_with?(quote, ~s(…"))
       assert String.starts_with?(will, "It will: Use Codex in ~/projects/fermix")
       assert String.length(will) == String.length("It will: ") + 120
-      assert card.actions == %{confirm: "▶ Run", deny: "Skip"}
+      assert card.actions == %{confirm: "▶ Run", deny: "Skip", always_allow: "Always allow"}
     end
 
     test "keeps the whole item, the whole instructions, the tools and the delivery in Details" do
@@ -43,6 +43,7 @@ defmodule FermixCore.Cues.CardTest do
       assert card.detail =~ "Uses: codex_run"
       assert card.detail =~ "Reports to: this chat"
       assert card.detail =~ "Watcher: codex-limits"
+      assert card.detail =~ "Set off by: x-feed; listens for reset, limits"
       refute card.detail =~ "{"
     end
 
@@ -73,7 +74,13 @@ defmodule FermixCore.Cues.CardTest do
 
       assert spec.kind == :follow_up
       assert spec.token == "cp_token"
-      assert String.ends_with?(spec.text, "Reply /confirm to run or /deny to skip.")
+
+      assert String.ends_with?(
+               spec.text,
+               "Reply /confirm to run, /deny to skip, or /always to always allow it."
+             )
+
+      assert spec.actions.always_allow == "Always allow"
       assert spec.text =~ ~s(Run "Codex review"?\n)
       refute spec.text =~ "cp_token"
     end
@@ -85,6 +92,20 @@ defmodule FermixCore.Cues.CardTest do
       assert Card.skipped(follow_up()) == ~s(Skipped "Codex review"; it did not run.)
     end
 
+    test "after Always allow says whether it is allowed from now on" do
+      allowed = Map.put(follow_up(), :always_allow, "allowed")
+      changed = Map.put(follow_up(), :always_allow, "changed")
+
+      assert Card.starting(allowed, @opts) ==
+               ~s(Starting "Codex review" for @limits_bot's post · 2:02 PM UTC. ) <>
+                 "Always allowed: from now on it runs with no card."
+
+      assert Card.starting(changed, @opts) ==
+               ~s(Starting "Codex review" for @limits_bot's post · 2:02 PM UTC. ) <>
+                 "Not always allowed: it changed since this card was shown, so the next item " <>
+                 "asks again."
+    end
+
     test "confirmed and then refused, it tells the owner why it did not start" do
       refused =
         %{follow_up() | state: "refused"} |> Map.put(:reason, "Not started: it is paused.")
@@ -92,28 +113,6 @@ defmodule FermixCore.Cues.CardTest do
       assert Card.not_started(refused) ==
                ~s(Watcher codex-limits: "Codex review" for @limits_bot's post did not start. ) <>
                  "Not started: it is paused."
-    end
-  end
-
-  describe "an automatic follow-up's prompt (§3.4)" do
-    test "names what it runs, how often at most, and in Details what it is bound to" do
-      card = Card.approval(approval(), @opts)
-
-      assert [first, cost, "Expires 2:32 PM UTC"] = card.lines
-
-      assert first =~
-               ~s(Automatic follow-up for codex-limits: whenever an item passes, run "Codex review")
-
-      assert first =~ "with no card."
-
-      assert cost ==
-               "That is a run with codex_run each time, at most 5 a day (the watcher's daily cap)."
-
-      assert card.actions == %{confirm: "✅ Approve", deny: "❌ Keep asking"}
-      assert card.detail =~ @instructions
-      assert card.detail =~ "Set off by: x-feed; listens for reset, limits"
-      assert Card.text(card) =~ "Reply /confirm to approve or /deny to keep asking."
-      assert Card.approved(approval()) =~ ~s(Approved: "Codex review" runs on its own, at most 5)
     end
   end
 
@@ -138,6 +137,8 @@ defmodule FermixCore.Cues.CardTest do
       assert card.detail =~ "Kestrel 2.4 released with a breaking cache change."
       assert card.detail =~ "Mandate: release-issues · task: release issues"
       refute Card.text(card) =~ "untrusted_tool_result"
+      assert card.actions == %{confirm: "▶ Run", deny: "Skip"}
+      assert String.ends_with?(Card.text(card), "Reply /confirm to run or /deny to skip.")
     end
   end
 
@@ -151,7 +152,12 @@ defmodule FermixCore.Cues.CardTest do
       trigger_id: "cft_1",
       state: "waiting",
       expires_at: ~U[2026-10-30 14:32:00Z],
-      watcher: %{id: "cwt_1", name: "codex-limits"},
+      watcher: %{
+        id: "cwt_1",
+        name: "codex-limits",
+        sources: ["x-feed"],
+        listen_for: ["reset", "limits"]
+      },
       follow_up: %{
         job_id: "job_1",
         name: "Codex review",
@@ -168,24 +174,6 @@ defmodule FermixCore.Cues.CardTest do
         text: long_post(),
         reason: "the post says usage limits reset."
       }
-    }
-  end
-
-  defp approval do
-    %{
-      id: "cfa_1",
-      shown_digest: "d",
-      watcher_name: "codex-limits",
-      expires_at: ~U[2026-10-30 14:32:00Z],
-      daily_cap: 5,
-      sources: ["x-feed"],
-      listen_for: ["reset", "limits"],
-      job_id: "job_1",
-      job_name: "Codex review",
-      task_prompt: @instructions,
-      allowed_tools: ["codex_run"],
-      delivery_mode: "origin",
-      delivery_target: %{"platform" => "telegram", "chat_id" => "owner-1"}
     }
   end
 

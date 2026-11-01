@@ -257,8 +257,9 @@ defmodule FermixChannels.Channels.Telegram do
   commands, never `/confirm`, so it goes as its text alone. A watcher's card
   (`:follow_up`, `:mandate`; M60_WATCHER_CODING_RUNS.md §6.2) goes as raw
   HTML: its lines, the first in bold, its detail as an expandable quote (Bot
-  API 7.3), which a phone shows as one line until it is tapped, and its two
-  answers as buttons whose taps send the same `/confirm` and `/deny`.
+  API 7.3), which a phone shows as one line until it is tapped, and its
+  answers as buttons whose taps send the same `/confirm` and `/deny`, and on a
+  follow-up's card a second row with Always allow, whose tap sends `/always`.
   """
   @impl true
   @spec send_approval(Message.t(), map()) :: :ok | {:error, term()}
@@ -273,18 +274,27 @@ defmodule FermixChannels.Channels.Telegram do
         %{kind: kind, token: token, lines: [_title | _rest] = lines, detail: detail} = spec
       )
       when kind in [:follow_up, :mandate] and is_binary(token) and is_binary(detail) do
-    markup = %{
-      inline_keyboard: [
-        [
-          %{text: spec.actions.confirm, callback_data: ApprovalButton.approve_payload(token)},
-          %{text: spec.actions.deny, callback_data: ApprovalButton.deny_payload(token)}
-        ]
-      ]
-    }
-
+    markup = %{inline_keyboard: card_buttons(spec.actions, token)}
     opts = [parse_mode: "HTML", reply_markup: markup]
     opts = if thread_ts, do: Keyword.put(opts, :message_thread_id, thread_ts), else: opts
     send_message(reply_target, card_html(lines, detail), opts)
+  end
+
+  # Run and Skip in one row; a follow-up's Always allow in a row of its own,
+  # wide enough for its words on a phone.
+  defp card_buttons(actions, token) do
+    answers = [
+      %{text: actions.confirm, callback_data: ApprovalButton.approve_payload(token)},
+      %{text: actions.deny, callback_data: ApprovalButton.deny_payload(token)}
+    ]
+
+    case Map.fetch(actions, :always_allow) do
+      {:ok, words} ->
+        [answers, [%{text: words, callback_data: ApprovalButton.always_payload(token)}]]
+
+      :error ->
+        [answers]
+    end
   end
 
   @doc """

@@ -63,7 +63,7 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
   """
 
   alias FermixCore.Cues
-  alias FermixCore.Memory.Repo.CuesFollowUpApprovalsSql
+  alias FermixCore.Memory.Repo.CuesFollowUpAllowSql
   alias FermixCore.Memory.Repo.CuesFollowUpSql
   alias FermixCore.Memory.Repo.CuesSql
 
@@ -74,8 +74,7 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
   @watcher_select """
   SELECT id, name, purpose, filter, listen_for, task_job_id, task_notes,
     daily_cap, filter_budget, filter_failures, filter_retry_at, held_notified_at, notices,
-    enabled, created_from, created_at, updated_at, follow_up_job_id, follow_up_mode,
-    follow_up_approved_at
+    enabled, created_from, created_at, updated_at, follow_up_job_id, follow_up_approved_at
   FROM cue_watchers
   """
 
@@ -89,7 +88,6 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
     :filter_budget,
     :enabled,
     :follow_up_job_id,
-    :follow_up_mode,
     :follow_up_approved_at,
     :follow_up_approval_digest
   ]
@@ -324,8 +322,8 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
       """
       INSERT INTO cue_watchers (id, name, purpose, filter, listen_for, task_job_id, task_notes,
         daily_cap, filter_budget, enabled, created_from, created_at, updated_at,
-        follow_up_job_id, follow_up_mode)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
+        follow_up_job_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
       """,
       [
         attrs.id,
@@ -340,8 +338,7 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
         Map.get(attrs, :created_from),
         stamp,
         stamp,
-        Map.get(attrs, :follow_up_job_id),
-        Map.get(attrs, :follow_up_mode)
+        Map.get(attrs, :follow_up_job_id)
       ]
     )
   end
@@ -499,7 +496,6 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
          created_at,
          updated_at,
          follow_up_job_id,
-         follow_up_mode,
          follow_up_approved_at
        ]) do
     %{
@@ -520,7 +516,6 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
       created_at: CuesSql.parse_stamp(created_at),
       updated_at: CuesSql.parse_stamp(updated_at),
       follow_up_job_id: follow_up_job_id,
-      follow_up_mode: follow_up_mode,
       follow_up_approved_at: CuesSql.parse_stamp(follow_up_approved_at)
     }
   end
@@ -551,16 +546,16 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
 
   # --- update --------------------------------------------------------------------
 
-  # A change to its sources or filter clears an automatic follow-up's approval
-  # it no longer matches, in the same write (M60_WATCHER_CODING_RUNS.md §5), as
-  # does a change to its instructions below.
+  # A change to its sources or filter clears a follow-up's Always allow it no
+  # longer matches, in the same write (M60_WATCHER_CODING_RUNS.md §5), as does a
+  # change to its instructions below.
   defp update_watcher(conn, id, expected, patch, sources, now) do
     with :ok <- check_patch(patch),
          :ok <- check_relink(conn, id, patch),
          :ok <- write_patch(conn, id, expected, patch, now),
          {:ok, expired} <- replace_sources(conn, id, sources, now),
          {:ok, passed} <- pass_pending(conn, id, patch, now),
-         :ok <- CuesFollowUpApprovalsSql.clear_stale_approval(conn, {:watcher, id}),
+         :ok <- CuesFollowUpAllowSql.clear_stale_approval(conn, {:watcher, id}),
          {:ok, watcher} <- get_watcher(conn, "id", id) do
       {:ok, %{watcher: watcher, passed: passed, expired: expired}}
     end
@@ -750,12 +745,7 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
   # refused, and its columns cleared; the watcher keeps its task (the table's
   # CHECK holds that). The job is the caller's to remove.
   defp remove_follow_up(conn, id, expected, now) do
-    patch = %{
-      follow_up_job_id: nil,
-      follow_up_mode: nil,
-      follow_up_approved_at: nil,
-      follow_up_approval_digest: nil
-    }
+    patch = %{follow_up_job_id: nil, follow_up_approved_at: nil, follow_up_approval_digest: nil}
 
     with :ok <- check_follow_up_idle(conn, id),
          {:ok, refused} <- refuse_open_triggers(conn, id),
@@ -861,7 +851,7 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
          :ok <- mark_removed(conn, removed, from, stamp, nil),
          {:ok, next} <- next_number(conn, id),
          {:ok, added} <- insert_instructions(conn, id, next, adds, from, stamp),
-         :ok <- CuesFollowUpApprovalsSql.clear_stale_approval(conn, {:watcher, id}) do
+         :ok <- CuesFollowUpAllowSql.clear_stale_approval(conn, {:watcher, id}) do
       {:ok, %{added: added, removed: removed}}
     end
   end
@@ -878,7 +868,7 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
                "replaced_by = NULL WHERE id = ?",
              [row.id]
            ),
-         :ok <- CuesFollowUpApprovalsSql.clear_stale_approval(conn, {:watcher, id}) do
+         :ok <- CuesFollowUpAllowSql.clear_stale_approval(conn, {:watcher, id}) do
       {:ok, %{restored: row}}
     end
   end
@@ -892,7 +882,7 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
          {:ok, next} <- next_number(conn, id),
          {:ok, [added]} <- insert_instructions(conn, id, next, [text], from, stamp),
          :ok <- mark_removed(conn, removed, from, stamp, added.id),
-         :ok <- CuesFollowUpApprovalsSql.clear_stale_approval(conn, {:watcher, id}) do
+         :ok <- CuesFollowUpAllowSql.clear_stale_approval(conn, {:watcher, id}) do
       {:ok, %{added: [added], removed: removed}}
     end
   end

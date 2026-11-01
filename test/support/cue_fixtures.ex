@@ -13,6 +13,7 @@ defmodule FermixTestSupport.CueFixtures do
   alias Exqlite.Sqlite3
   alias FermixCore.Cues.Item
   alias FermixCore.Memory.Repo
+  alias FermixCore.Memory.Repo.CuesFollowUpAllowSql
 
   @doc """
   Starts a Repo on a fresh temp database and opens a second connection to it.
@@ -118,6 +119,25 @@ defmodule FermixTestSupport.CueFixtures do
     end)
 
     id
+  end
+
+  @doc """
+  Always allows watcher `watcher_id`'s follow-up for what it runs and what sets
+  it off now, written straight to its row as the owner's Always allow on a card
+  writes it. Returns the digest it allowed.
+  """
+  @spec always_allow!(term(), String.t()) :: String.t()
+  def always_allow!(conn, watcher_id) when is_binary(watcher_id) do
+    {:ok, digest} = CuesFollowUpAllowSql.current_digest(conn, watcher_id)
+
+    exec!(
+      conn,
+      "UPDATE cue_watchers SET follow_up_approved_at = ?, follow_up_approval_digest = ? " <>
+        "WHERE id = ?",
+      ["2026-10-01T00:00:00.000000Z", digest, watcher_id]
+    )
+
+    digest
   end
 
   @doc "A valid item built at `now`; raises when the fields are refused."

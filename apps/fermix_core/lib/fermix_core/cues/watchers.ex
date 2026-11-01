@@ -25,13 +25,14 @@ defmodule FermixCore.Cues.Watchers do
   A watcher has a task (a job that runs on cues and reads each item), a
   follow-up (a job of its own kind, `Jobs.Registry.create_follow_up_job/2`,
   that its passing items set off and that is handed nothing from them), or
-  both. A follow-up asks first (`approve`, the default) or runs on its own
-  (`auto`), which needs the watcher's daily cap and the owner's one approval
-  (`approve_follow_up/3`), bound to `follow_up_digest/2` of what it runs and
-  what sets it off: any change to those clears the approval in its own write
-  (`Memory.Repo.CuesFollowUpApprovalsSql.clear_stale_approval/2`), so undoing
-  the change does not bring it back, and the follow-up asks first until it is
-  approved again. Removing the watcher removes its follow-up's job.
+  both. A follow-up asks first: each run waits for the owner's tap on a card.
+  The owner's Always allow on one of its cards (`Cues.FollowUps`) lets it run
+  with no card from then on, bound to `follow_up_digest/2` of what it runs and
+  what sets it off: any change to those clears it in its own write
+  (`Memory.Repo.CuesFollowUpAllowSql.clear_stale_approval/2`), so undoing the
+  change does not bring it back, and the owner takes it back with
+  `ask_first/3`. Nothing here grants it. The watcher's own `daily_cap`, when
+  set, counts its runs. Removing the watcher removes its follow-up's job.
 
   ## Options
 
@@ -57,7 +58,7 @@ defmodule FermixCore.Cues.Watchers do
   alias FermixCore.Jobs.DeliveryDefaults
   alias FermixCore.Jobs.Registry, as: JobsRegistry
   alias FermixCore.Memory.Repo
-  alias FermixCore.Memory.Repo.CuesFollowUpApprovalsSql
+  alias FermixCore.Memory.Repo.CuesFollowUpAllowSql
   alias FermixCore.Memory.Repo.CuesSql
   alias FermixCore.Memory.Repo.CuesWatchersSql
 
@@ -83,15 +84,13 @@ defmodule FermixCore.Cues.Watchers do
   @must_report "A watcher's task must reach you: pick where it reports."
   @stale "The watcher changed while this change was being made; look at it again and retry."
   @report_choices "Telegram, Slack, Discord, WhatsApp, the phone or the Mac app"
-  @suggested_cap 5
-  @auto_needs_cap "An automatic follow-up needs a daily cap on the watcher: say how many runs " <>
-                    "a day it may cause (Fermix suggests #{@suggested_cap})."
   @needs_one "A watcher needs a task or a follow-up; give it a task before stopping its " <>
                "follow-up."
   @follow_up_needed "Give the follow-up its instructions: what it does when an item passes."
   @names_tools "Name the tools the follow-up may use."
   @follow_up_must_report "A watcher's follow-up must reach you: pick where it reports."
   @no_approval %{follow_up_approved_at: nil, follow_up_approval_digest: nil}
+  @only_the_card "Only your Always allow on one of its cards lets it run with no card."
 
   @channel_names %{
     "telegram" => "Telegram",
@@ -149,11 +148,10 @@ defmodule FermixCore.Cues.Watchers do
   `follow_up` (a map) gives it a follow-up, made through
   `Jobs.Registry.create_follow_up_job/2`: `prompt` (the owner's instructions),
   `allowed_tools` (its grant, at least one), `name`, `skill_name`, `model`,
-  `provider`, `timeout_minutes`, `delivery_mode` / `delivery_target` (as the
-  task's) and `mode` (`"approve"`, the default, or `"auto"`, which needs a
-  daily cap and is written unapproved). A watcher needs a task or a
-  follow-up. The caller bounds the follow-up's tools by its own turn, as
-  `schedule_job` bounds a job's.
+  `provider`, `timeout_minutes` and `delivery_mode` / `delivery_target` (as
+  the task's). It asks first. A watcher needs a task or a follow-up. The
+  caller bounds the follow-up's tools by its own turn, as `schedule_job`
+  bounds a job's.
   """
   @spec create(map(), map(), opts()) :: result()
   def create(params, context, opts \\ []) when is_map(params) and is_map(context) do
@@ -162,7 +160,7 @@ defmodule FermixCore.Cues.Watchers do
          {:ok, sources} <- check_sources(Map.get(params, :sources)),
          :ok <- keeps_rules(Map.put(settings, :sources, sources), opts),
          {:ok, instructions} <- check_instructions(Map.get(params, :instructions) || []),
-         {:ok, spec} <- follow_up_spec(Map.get(params, :follow_up), settings.daily_cap),
+         {:ok, spec} <- follow_up_spec(Map.get(params, :follow_up)),
          :ok <- name_free(name, opts),
          {:ok, jobs} <- jobs_for(name, params, spec, context, opts) do
       attrs =
@@ -171,7 +169,6 @@ defmodule FermixCore.Cues.Watchers do
           name: name,
           task_job_id: jobs.task && jobs.task.id,
           follow_up_job_id: jobs.follow_up && jobs.follow_up.id,
-          follow_up_mode: spec && spec.mode,
           task_notes: Map.get(params, :task_notes, false) == true,
           created_from: origin(context)
         })
@@ -611,21 +608,25 @@ defmodule FermixCore.Cues.Watchers do
 
   # --- the follow-up (M60_WATCHER_CODING_RUNS.md §4.1, §5) -------------------------------
 
-  # The owner's follow-up as given, checked before any job is made.
-  defp follow_up_spec(nil, _daily_cap), do: {:ok, nil}
+  # The owner's follow-up as given, checked before any job is made. A new one
+  # asks first, so it takes no Always allow.
+  defp follow_up_spec(nil), do: {:ok, nil}
 
-  defp follow_up_spec(params, daily_cap) when is_map(params) do
-    with {:ok, prompt} <- follow_up_prompt(Map.get(params, :prompt)),
+  defp follow_up_spec(params) when is_map(params) do
+    with :ok <- never_granted(params),
+         {:ok, prompt} <- follow_up_prompt(Map.get(params, :prompt)),
          {:ok, tools} <- follow_up_tools(Map.get(params, :allowed_tools)),
-         {:ok, timeout} <- task_timeout(Map.get(params, :timeout_minutes)),
-         {:ok, mode} <- follow_up_mode(Map.get(params, :mode, "approve")),
-         :ok <- mode_keeps_cap(mode, daily_cap) do
-      {:ok, %{params: params, prompt: prompt, tools: tools, timeout: timeout, mode: mode}}
+         {:ok, timeout} <- task_timeout(Map.get(params, :timeout_minutes)) do
+      {:ok, %{params: params, prompt: prompt, tools: tools, timeout: timeout}}
     end
   end
 
-  defp follow_up_spec(_params, _daily_cap),
-    do: {:error, "A follow-up is given as its instructions, its tools and its mode."}
+  defp follow_up_spec(_params),
+    do: {:error, "A follow-up is given as its instructions and its tools."}
+
+  # Always allow is granted only by the owner's answer on a card, never here.
+  defp never_granted(%{always_allow: true}), do: {:error, @only_the_card}
+  defp never_granted(_params), do: :ok
 
   defp follow_up_prompt(prompt) when is_binary(prompt) do
     prompt = String.trim(prompt)
@@ -651,14 +652,6 @@ defmodule FermixCore.Cues.Watchers do
   end
 
   defp follow_up_tools(_tools), do: {:error, @names_tools}
-
-  defp follow_up_mode(mode) when mode in ["approve", "auto"], do: {:ok, mode}
-
-  defp follow_up_mode(_mode),
-    do: {:error, ~s|A follow-up asks first ("approve") or runs on its own ("auto").|}
-
-  defp mode_keeps_cap("auto", 0), do: {:error, @auto_needs_cap}
-  defp mode_keeps_cap(_mode, _daily_cap), do: :ok
 
   defp follow_up_job_for(_name, nil, _context, _opts), do: {:ok, nil}
 
@@ -714,30 +707,33 @@ defmodule FermixCore.Cues.Watchers do
   owner's consent turn (`context`, which the caller checked). A new follow-up
   takes `create/3`'s `follow_up` map; a change takes any of its keys, and its
   job changes through `Jobs.Registry.update_follow_up_job/3`, whose write
-  clears an approval it no longer matches. A change of `mode` clears any
-  approval, and `"auto"` needs the watcher's daily cap. The caller bounds the
-  tools by its own turn.
+  clears an Always allow it no longer matches. `always_allow: false` takes
+  the Always allow back (`ask_first/3`); `true` is refused, since only the
+  owner's answer on a card grants it. The caller bounds the tools by its own
+  turn.
   """
   @spec set_follow_up(String.t(), map(), map(), opts()) :: result()
   def set_follow_up(name, params, context, opts \\ [])
       when is_binary(name) and is_map(params) and is_map(context) do
     with {:ok, watcher} <- fetch(name, opts) do
-      if watcher.follow_up_job_id,
-        do: change_follow_up(watcher, params, context, opts),
-        else: add_follow_up(watcher, params, context, opts)
+      cond do
+        watcher.follow_up_job_id -> change_follow_up(watcher, params, context, opts)
+        Map.keys(params) == [:always_allow] -> {:error, "Watcher #{name} has no follow-up."}
+        true -> add_follow_up(watcher, params, context, opts)
+      end
     end
   end
 
   defp add_follow_up(watcher, params, context, opts) do
-    with {:ok, spec} <- follow_up_spec(params, watcher.daily_cap),
+    with {:ok, spec} <- follow_up_spec(params),
          {:ok, job} <- follow_up_job_for(watcher.name, spec, context, opts) do
-      patch = Map.merge(%{follow_up_job_id: job.id, follow_up_mode: spec.mode}, @no_approval)
+      patch = Map.merge(%{follow_up_job_id: job.id}, @no_approval)
 
       case write(watcher, patch, nil, opts) do
         {:ok, %{watcher: updated}} ->
           echo =
             "Watcher #{updated.name} now has a follow-up.\n" <>
-              follow_up_echo(updated, job, chat(context))
+              follow_up_echo(updated, job, chat(context), false)
 
           {:ok, %{watcher: updated, follow_up_job: job, echo: echo}}
 
@@ -748,34 +744,43 @@ defmodule FermixCore.Cues.Watchers do
     end
   end
 
+  # A change to its job, taking its Always allow back, or both: the job first,
+  # whose write clears an Always allow it no longer matches.
   defp change_follow_up(watcher, params, context, opts) do
-    with {:ok, mode_patch} <- mode_patch(watcher, params),
-         {:ok, job_attrs} <- follow_up_job_attrs(params, context),
-         :ok <- something_to_change(mode_patch, job_attrs),
-         {:ok, job} <- update_follow_up_job(watcher.follow_up_job_id, job_attrs, opts),
-         {:ok, updated} <- write_mode(watcher, mode_patch, opts) do
+    with {:ok, ask_first?} <- asks_first_again(params),
+         {:ok, job_attrs} <- follow_up_job_attrs(params, context) do
+      case {map_size(job_attrs), ask_first?} do
+        {0, false} -> {:error, "Say what to change on the follow-up."}
+        {0, true} -> ask_first(watcher.name, "chat", opts)
+        {_changes, _ask_first?} -> change_job(watcher, job_attrs, ask_first?, context, opts)
+      end
+    end
+  end
+
+  defp asks_first_again(params) do
+    case Map.fetch(params, :always_allow) do
+      :error -> {:ok, false}
+      {:ok, false} -> {:ok, true}
+      {:ok, true} -> {:error, @only_the_card}
+      {:ok, _other} -> {:error, "always_allow takes false, which makes it ask first again."}
+    end
+  end
+
+  defp change_job(watcher, job_attrs, ask_first?, context, opts) do
+    with {:ok, job} <- update_follow_up_job(watcher.follow_up_job_id, job_attrs, opts),
+         {:ok, _asked} <- maybe_ask_first(ask_first?, watcher.name, opts),
+         {:ok, updated} <- fetch(watcher.name, opts),
+         {:ok, allowed?} <- always_allowed(updated, opts) do
       echo =
         "Watcher #{updated.name}'s follow-up changed.\n" <>
-          follow_up_echo(updated, job, chat(context))
+          follow_up_echo(updated, job, chat(context), allowed?)
 
       {:ok, %{watcher: updated, follow_up_job: job, echo: echo}}
     end
   end
 
-  defp mode_patch(watcher, params) do
-    case Map.fetch(params, :mode) do
-      :error ->
-        {:ok, %{}}
-
-      {:ok, mode} ->
-        with {:ok, mode} <- follow_up_mode(mode),
-             :ok <- mode_keeps_cap(mode, watcher.daily_cap) do
-          {:ok, if(mode == watcher.follow_up_mode, do: %{}, else: mode_change(mode))}
-        end
-    end
-  end
-
-  defp mode_change(mode), do: Map.put(@no_approval, :follow_up_mode, mode)
+  defp maybe_ask_first(false, _name, _opts), do: {:ok, nil}
+  defp maybe_ask_first(true, name, opts), do: ask_first(name, "chat", opts)
 
   # The follow-up's job fields a change names, each checked as at creation.
   defp follow_up_job_attrs(params, context) do
@@ -811,27 +816,12 @@ defmodule FermixCore.Cues.Watchers do
   defp put_given(map, _key, nil), do: map
   defp put_given(map, key, value), do: Map.put(map, key, value)
 
-  defp something_to_change(mode_patch, job_attrs)
-       when map_size(mode_patch) == 0 and map_size(job_attrs) == 0,
-       do: {:error, "Say what to change on the follow-up."}
-
-  defp something_to_change(_mode_patch, _job_attrs), do: :ok
-
-  defp update_follow_up_job(job_id, attrs, opts) when map_size(attrs) == 0,
-    do: fetch_job(job_id, opts)
-
   defp update_follow_up_job(job_id, attrs, opts),
     do:
       registry_result(
         JobsRegistry.update_follow_up_job(job_id, attrs, registry_opts(opts)),
         job_id
       )
-
-  defp write_mode(watcher, patch, _opts) when map_size(patch) == 0, do: {:ok, watcher}
-
-  defp write_mode(watcher, patch, opts) do
-    with {:ok, %{watcher: updated}} <- write(watcher, patch, nil, opts), do: {:ok, updated}
-  end
 
   @doc """
   Stops the watcher's follow-up (§3.5): its waiting card and any trigger left
@@ -879,42 +869,51 @@ defmodule FermixCore.Cues.Watchers do
   end
 
   @doc """
-  Records the owner's approval of the watcher's automatic follow-up (§3.4, §5),
-  bound to `shown_digest`, the `current_follow_up_digest/2` of what the owner
-  was shown: refused when the follow-up or what sets it off changed since, so
-  the owner approves exactly what they read. Only the owner's confirm calls it.
+  Takes back the Always allow of watcher `name`'s follow-up, so its next item
+  asks first again: from chat (`kind` `"chat"`, on the owner's consent turn,
+  which the caller checked) or from an app (`"management"`). It only ever
+  lowers what the follow-up may do, and a follow-up that already asks first is
+  told so. Traced as `follow_up_always_allow_revoked` when it took one back.
   """
-  @spec approve_follow_up(String.t(), String.t(), opts()) :: result()
-  def approve_follow_up(name, shown_digest, opts \\ [])
-      when is_binary(name) and is_binary(shown_digest) do
-    with {:ok, watcher} <- fetch(name, opts) do
-      case follow_up_call({:approve, watcher.id, shown_digest, now(opts)}, opts) do
-        {:ok, _digest} -> {:ok, %{echo: approved_echo(watcher)}}
-        {:error, reason} -> follow_up_refusal(reason, name)
-      end
+  @spec ask_first(String.t(), String.t(), opts()) :: result()
+  def ask_first(name, kind, opts \\ [])
+      when is_binary(name) and kind in ["chat", "management"] do
+    with {:ok, watcher} <- fetch(name, opts),
+         :ok <- has_follow_up(watcher),
+         {:ok, revoked?} <- revoke(watcher, opts),
+         {:ok, updated} <- fetch(name, opts) do
+      if revoked?, do: emit_revoked(watcher, kind)
+      {:ok, %{watcher: updated, echo: asks_first_echo(name, revoked?)}}
     end
   end
 
-  @doc """
-  The digest of what the watcher's follow-up runs and what sets it off, as
-  stored now: what an automatic approval prompt shows and `approve_follow_up/3`
-  is given back.
-  """
-  @spec current_follow_up_digest(String.t(), opts()) :: {:ok, String.t()} | {:error, String.t()}
-  def current_follow_up_digest(name, opts \\ []) when is_binary(name) do
-    with {:ok, watcher} <- fetch(name, opts) do
-      case follow_up_call({:follow_up_digest, watcher.id}, opts) do
-        {:ok, digest} -> {:ok, digest}
-        {:error, reason} -> follow_up_refusal(reason, name)
-      end
+  defp revoke(watcher, opts) do
+    case allow_call({:revoke, watcher.id}, opts) do
+      {:ok, revoked?} -> {:ok, revoked?}
+      {:error, reason} -> follow_up_refusal(reason, watcher.name)
     end
   end
 
+  defp emit_revoked(watcher, kind) do
+    Telemetry.lifecycle(:follow_up_always_allow_revoked, %{}, %{
+      watcher_id: watcher.id,
+      job_id: watcher.follow_up_job_id,
+      kind: kind
+    })
+  end
+
+  defp asks_first_echo(name, true),
+    do: "Watcher #{name}'s follow-up asks first again: each run waits for your tap on its card."
+
+  defp asks_first_echo(name, false),
+    do: "Watcher #{name}'s follow-up already asks first: each run waits for your tap on its card."
+
   @doc """
-  The digest an automatic follow-up's approval is bound to (§5): the job's
-  prompt, tools, skill, model, provider and delivery target, and the watcher's
-  sources and filter (its kind, purpose, words and active instructions). Pure;
-  `CuesFollowUpApprovalsSql` computes it from the stored rows for every pass.
+  The digest a follow-up's Always allow is bound to (§5): the job's prompt,
+  tools, skill, model, provider and delivery target, and the watcher's sources
+  and filter (its kind, purpose, words and active instructions). Pure;
+  `CuesFollowUpAllowSql` computes it from the stored rows for a card, its
+  Always allow and every pass.
   """
   @spec follow_up_digest(map(), map()) :: String.t()
   def follow_up_digest(job, watcher) when is_map(job) and is_map(watcher) do
@@ -941,32 +940,18 @@ defmodule FermixCore.Cues.Watchers do
   defp pairs(map) when is_map(map),
     do: map |> Enum.map(fn {k, v} -> [to_string(k), v] end) |> Enum.sort()
 
-  defp follow_up_call(request, opts) do
+  defp allow_call(request, opts) do
     repo_opts =
       [server: Keyword.get(opts, :repo, Repo)] ++ Keyword.take(opts, [:timeout, :on_timeout])
 
-    Repo.cues_call(CuesFollowUpApprovalsSql, request, repo_opts)
+    Repo.cues_call(CuesFollowUpAllowSql, request, repo_opts)
   end
-
-  defp follow_up_refusal(:changed, _name),
-    do:
-      {:error,
-       "The follow-up or what sets it off changed since you were asked; nothing was approved. " <>
-         "Ask again to see what it does now."}
-
-  defp follow_up_refusal(:not_automatic, name),
-    do: {:error, "Watcher #{name}'s follow-up asks first; make it automatic first."}
 
   defp follow_up_refusal(:no_follow_up, name), do: {:error, "Watcher #{name} has no follow-up."}
   defp follow_up_refusal(reason, name), do: refusal(reason, name)
 
-  defp approved_echo(watcher) do
-    "Watcher #{watcher.name}'s follow-up now runs on each passing item with no card, at most " <>
-      "#{watcher.daily_cap} a day."
-  end
-
   # The follow-up as design §3.1 sums it up, below the watcher it belongs to.
-  defp follow_up_echo(watcher, job, chat) do
+  defp follow_up_echo(watcher, job, chat, allowed?) do
     delivery = %{mode: job.delivery_mode, target: job.delivery_target}
 
     Enum.join(
@@ -975,7 +960,7 @@ defmodule FermixCore.Cues.Watchers do
         "  It will: #{job.task_prompt}",
         "  Uses: #{Enum.join(job.allowed_tools, ", ")}",
         "  Reports to: #{Card.reports_to(delivery, chat: chat)}",
-        "  Mode: #{mode_words(watcher.follow_up_mode)}",
+        "  #{allow_words(allowed?)}",
         "  Limits: #{limits_words(watcher.daily_cap)}",
         "It is never handed the item: the item only decides when it runs."
       ],
@@ -983,10 +968,12 @@ defmodule FermixCore.Cues.Watchers do
     )
   end
 
-  defp mode_words("auto"),
-    do: "Automatic: with your approval, it runs on each passing item with no card."
+  defp allow_words(true), do: "Always allowed: it runs on each passing item with no card."
 
-  defp mode_words(_approve), do: "Ask first: you confirm each run on a short card."
+  defp allow_words(false),
+    do:
+      "Asks first: each run waits for your tap on a short card, whose Always allow lets it " <>
+        "run with no card from then on."
 
   defp limits_words(0),
     do: "items older than 15 minutes are ignored; one run at a time."
@@ -1003,20 +990,16 @@ defmodule FermixCore.Cues.Watchers do
   defp chat(_context), do: nil
 
   @doc """
-  Where watcher `watcher`'s follow-up stands on running by itself (§3.4, §5):
-  nil with no follow-up, `:asks_first`, `:approved` (automatic, and its
-  approval still matches what it runs and what sets it off) or `:unapproved`
-  (automatic and not approved for what it is now, so each run asks first).
+  Whether watcher `watcher`'s follow-up is always allowed for what it runs and
+  what sets it off now, so a passing item runs it with no card (§5); nil with
+  no follow-up.
   """
-  @spec follow_up_approval(watcher(), opts()) ::
-          {:ok, nil | :asks_first | :approved | :unapproved} | {:error, String.t()}
-  def follow_up_approval(%{follow_up_job_id: nil}, _opts), do: {:ok, nil}
-  def follow_up_approval(%{follow_up_mode: "approve"}, _opts), do: {:ok, :asks_first}
+  @spec always_allowed(watcher(), opts()) :: {:ok, boolean() | nil} | {:error, String.t()}
+  def always_allowed(%{follow_up_job_id: nil}, _opts), do: {:ok, nil}
 
-  def follow_up_approval(%{id: id, name: name, follow_up_mode: "auto"}, opts) do
-    case follow_up_call({:effective_mode, id}, opts) do
-      {:ok, "auto"} -> {:ok, :approved}
-      {:ok, _asks_first} -> {:ok, :unapproved}
+  def always_allowed(%{id: id, name: name}, opts) when is_binary(id) do
+    case allow_call({:allowed, id}, opts) do
+      {:ok, allowed?} -> {:ok, allowed?}
       {:error, reason} -> follow_up_refusal(reason, name)
     end
   end
@@ -1379,7 +1362,6 @@ defmodule FermixCore.Cues.Watchers do
          {:ok, sources} <- update_sources(changes),
          :ok <- something_changed(patch, sources),
          :ok <- keeps_rules(changed(watcher, patch, sources), opts),
-         :ok <- keeps_auto_cap(watcher, patch),
          {:ok, job} <- relinked_job(patch, opts),
          {:ok, %{watcher: updated, passed: passed, expired: expired}} <-
            write(watcher, patch, sources, opts) do
@@ -1420,10 +1402,6 @@ defmodule FermixCore.Cues.Watchers do
 
     FollowUps.emit_triggered(passed.follow_up, passed.source_ref)
   end
-
-  # An automatic follow-up keeps its watcher's daily cap (§3.4).
-  defp keeps_auto_cap(%{follow_up_mode: "auto"}, %{daily_cap: 0}), do: {:error, @auto_needs_cap}
-  defp keeps_auto_cap(_watcher, _patch), do: :ok
 
   defp wake_for_passed([], _opts), do: :ok
 
@@ -1582,7 +1560,7 @@ defmodule FermixCore.Cues.Watchers do
       cap_line(watcher),
       missing_line(missing_sources(watcher.sources, opts)),
       jobs.task && lacking_line(jobs.task, watcher, opts),
-      jobs.follow_up && follow_up_echo(watcher, jobs.follow_up, chat)
+      jobs.follow_up && follow_up_echo(watcher, jobs.follow_up, chat, false)
     ]
     |> Enum.reject(&(&1 in [nil, ""]))
     |> Enum.join("\n")

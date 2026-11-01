@@ -262,7 +262,7 @@ defmodule FermixChannels.Gateway.Channel do
   A rich approval card with an explicit kind, expiry, and command routes. A
   watcher's card (`:follow_up`, and a mandate's proposal, `:mandate`;
   `FermixCore.Cues.Card`) also carries its visible `lines`, its expandable
-  `detail` and its two `actions`' words.
+  `detail` and its `actions`' words (a follow-up's card adds Always allow).
   """
   @type approval_spec :: %{
           required(:kind) => :sandbox | :soul | :follow_up | :mandate,
@@ -272,7 +272,11 @@ defmodule FermixChannels.Gateway.Channel do
           optional(:detail) => String.t(),
           optional(:ttl_s) => pos_integer(),
           optional(:lines) => [String.t()],
-          optional(:actions) => %{confirm: String.t(), deny: String.t()}
+          optional(:actions) => %{
+            required(:confirm) => String.t(),
+            required(:deny) => String.t(),
+            optional(:always_allow) => String.t()
+          }
         }
 
   @doc "Deliver a structured approval card when the caller knows its approval kind."

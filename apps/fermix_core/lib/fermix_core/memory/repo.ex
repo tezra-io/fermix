@@ -14,7 +14,7 @@ defmodule FermixCore.Memory.Repo do
   alias FermixCore.Memory.Repo.ComputerHistorySql
   alias FermixCore.Memory.Repo.CuesDeliveriesSql
   alias FermixCore.Memory.Repo.CuesFilterSql
-  alias FermixCore.Memory.Repo.CuesFollowUpApprovalsSql
+  alias FermixCore.Memory.Repo.CuesFollowUpAllowSql
   alias FermixCore.Memory.Repo.CuesFollowUpSql
   alias FermixCore.Memory.Repo.CuesMandateSql
   alias FermixCore.Memory.Repo.CuesRunsSql
@@ -87,6 +87,7 @@ defmodule FermixCore.Memory.Repo do
   @cue_delivery_window_index_migration_version 55
   @checklists_migration_version 56
   @checklist_edits_migration_version 57
+  @follow_up_always_allow_migration_version 58
   @sqlite_open_intent :readwritecreate
 
   # The cue SQL modules (M60), one per lane, all served by `cues_call/3`.
@@ -98,7 +99,7 @@ defmodule FermixCore.Memory.Repo do
     CuesDeliveriesSql,
     CuesMandateSql,
     CuesFollowUpSql,
-    CuesFollowUpApprovalsSql
+    CuesFollowUpAllowSql
   ]
 
   @base_schema_sql """
@@ -5146,7 +5147,8 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_watcher_follow_up_migration(conn, versions),
          :ok <- apply_cue_delivery_window_index_migration(conn, versions),
          :ok <- apply_checklists_migration(conn, versions),
-         :ok <- apply_checklist_edits_migration(conn, versions) do
+         :ok <- apply_checklist_edits_migration(conn, versions),
+         :ok <- apply_follow_up_always_allow_migration(conn, versions) do
       :ok
     end
   end
@@ -5335,13 +5337,15 @@ defmodule FermixCore.Memory.Repo do
 
   # Watcher follow-ups (M60_WATCHER_CODING_RUNS.md §4.1, §4.3): `cue_watchers`
   # and `cue_deliveries` rebuilt (`CuesSql.follow_up_rebuilds/0`) and the
-  # trigger and approval tables, with the version, in one transaction. The
-  # rebuild drops the parent of three cascading foreign keys, so foreign keys
-  # are off around it, toggled outside the transaction as for migration 11.
-  # Each rebuilt table keeps every index it had, whichever migration made it:
-  # their DDL is read before the drop and replayed after. Reapplying it changes
-  # nothing: a table already in the new shape is not rebuilt, and the new tables
-  # are made only if missing. A table whose columns match neither shape is
+  # trigger table, with the version, in one transaction. The table of
+  # automatic approval prompts this migration once made is gone since 58,
+  # which drops it where it exists. The rebuild drops the parent of three
+  # cascading foreign keys, so foreign keys are off around it, toggled outside
+  # the transaction as for migration 11. Each rebuilt table keeps every index
+  # it had, whichever migration made it: their DDL is read before the drop and
+  # replayed after. Reapplying it changes nothing: a table already in the new
+  # shape, or in a later migration's (`later`), is not rebuilt, and the new
+  # table is made only if missing. A table whose columns match neither shape is
   # refused, never cut.
   defp apply_watcher_follow_up_migration(conn, versions) do
     if Enum.member?(versions, @watcher_follow_up_migration_version) do
@@ -5360,12 +5364,87 @@ defmodule FermixCore.Memory.Repo do
          {:ok, indexes} <- table_indexes(conn, Enum.map(rebuilds, & &1.table)),
          :ok <- execute_each(conn, Enum.map(rebuilds, & &1.sql)),
          :ok <- replay_indexes(conn, indexes),
-         :ok <- Sqlite3.execute(conn, CuesFollowUpSql.schema_sql()),
-         :ok <- Sqlite3.execute(conn, CuesFollowUpApprovalsSql.schema_sql()) do
+         :ok <- Sqlite3.execute(conn, CuesFollowUpSql.schema_sql()) do
       Sqlite3.execute(
         conn,
         "INSERT INTO schema_migrations(version) VALUES (#{@watcher_follow_up_migration_version});"
       )
+    end
+  end
+
+  # Always allow replaces automatic mode (the 2026-10-31 revision of
+  # M60_WATCHER_CODING_RUNS.md), with zero new config: `cue_watchers` rebuilt
+  # without `follow_up_mode` (`CuesSql.always_allow_rebuilds/0`), an automatic
+  # approval that no longer matches what its follow-up runs and what sets it
+  # off cleared first, so only a matching one stays allowed and every other
+  # follow-up asks first; the approval prompts' table dropped with its rows,
+  # since nothing answers a prompt any more; and the trigger table given the
+  # digest its card showed and what the owner's Always allow came to
+  # (`CuesFollowUpSql.always_allow_columns/0`). One transaction with the
+  # version, foreign keys off around it as for 54. Reapplying it changes
+  # nothing: the rebuild runs only while the marker is missing, the columns
+  # are added only while absent, and the drop is `IF EXISTS`. A table whose
+  # columns match neither shape is refused, never cut.
+  defp apply_follow_up_always_allow_migration(conn, versions) do
+    if Enum.member?(versions, @follow_up_always_allow_migration_version) do
+      :ok
+    else
+      with :ok <- Sqlite3.execute(conn, "PRAGMA foreign_keys=OFF;"),
+           :ok <- Sqlite3.execute(conn, "BEGIN;"),
+           :ok <- conn |> always_allow_migration_in_tx() |> commit_migration(conn) do
+        Sqlite3.execute(conn, "PRAGMA foreign_keys=ON;")
+      end
+    end
+  end
+
+  defp always_allow_migration_in_tx(conn) do
+    with {:ok, rebuilds} <- pending_rebuilds(conn, CuesSql.always_allow_rebuilds()),
+         :ok <- clear_stale_automatic_approvals(conn, rebuilds),
+         {:ok, indexes} <- table_indexes(conn, Enum.map(rebuilds, & &1.table)),
+         :ok <- execute_each(conn, Enum.map(rebuilds, & &1.sql)),
+         :ok <- replay_indexes(conn, indexes),
+         :ok <- Sqlite3.execute(conn, "DROP TABLE IF EXISTS cue_follow_up_approvals;"),
+         :ok <-
+           add_columns(conn, "cue_follow_up_triggers", CuesFollowUpSql.always_allow_columns()) do
+      Sqlite3.execute(
+        conn,
+        "INSERT INTO schema_migrations(version) VALUES " <>
+          "(#{@follow_up_always_allow_migration_version});"
+      )
+    end
+  end
+
+  # Before the copy keeps an automatic follow-up's approval, one that no longer
+  # matches what it runs and what sets it off is cleared, as the write that
+  # changed it would clear it now. Only while the rebuild is pending.
+  defp clear_stale_automatic_approvals(_conn, []), do: :ok
+
+  defp clear_stale_automatic_approvals(conn, [_watchers]) do
+    sql =
+      "SELECT id FROM cue_watchers WHERE follow_up_mode = 'auto' " <>
+        "AND follow_up_approval_digest IS NOT NULL"
+
+    with {:ok, rows} <- query_all(conn, sql, []) do
+      Enum.reduce_while(List.flatten(rows), :ok, &clear_stale_automatic_approval(conn, &1, &2))
+    end
+  end
+
+  defp clear_stale_automatic_approval(conn, watcher_id, :ok) do
+    case CuesFollowUpAllowSql.clear_stale_approval(conn, {:watcher, watcher_id}) do
+      :ok -> {:cont, :ok}
+      {:error, reason} -> {:halt, {:error, reason}}
+    end
+  end
+
+  # Columns a migration adds with ALTER: added while the table holds `before`,
+  # nothing while it holds `after`, refused for any other set.
+  defp add_columns(conn, table, %{before: before, after: added, sql: sql}) do
+    with {:ok, columns} <- table_columns(conn, table) do
+      cond do
+        MapSet.new(columns) == MapSet.new(added) -> :ok
+        MapSet.new(columns) == MapSet.new(before) -> Sqlite3.execute(conn, sql)
+        true -> {:error, {:unexpected_columns, table, columns}}
+      end
     end
   end
 
@@ -5385,10 +5464,12 @@ defmodule FermixCore.Memory.Repo do
     with {:ok, ddl} <- table_ddl(conn, table),
          {:ok, columns} <- table_columns(conn, table) do
       rebuilt? = String.contains?(ddl, rebuild.marker)
-      expected = if rebuilt?, do: rebuild.after, else: rebuild.before
+
+      expected =
+        if rebuilt?, do: [rebuild.after | Map.get(rebuild, :later, [])], else: [rebuild.before]
 
       cond do
-        MapSet.new(columns) != MapSet.new(expected) ->
+        MapSet.new(columns) not in Enum.map(expected, &MapSet.new/1) ->
           {:error, {:unexpected_columns, table, columns}}
 
         rebuilt? ->
@@ -8083,8 +8164,8 @@ defmodule FermixCore.Memory.Repo do
     end
   end
 
-  # A watcher's follow-up is a job: an edit that changes what its automatic
-  # approval is bound to clears that approval in the same transaction
+  # A watcher's follow-up is a job: an edit that changes what its Always allow
+  # is bound to clears that approval in the same transaction
   # (M60_WATCHER_CODING_RUNS.md §5), whichever path changed the job.
   defp update_scheduled_job_fields_row(conn, id, assignments) do
     {columns, values} = Enum.unzip(assignments)
@@ -8093,7 +8174,7 @@ defmodule FermixCore.Memory.Repo do
 
     CuesSql.with_immediate_transaction(conn, fn ->
       with :ok <- execute(conn, update, values ++ [id]),
-           :ok <- CuesFollowUpApprovalsSql.clear_stale_approval(conn, {:follow_up_job, id}) do
+           :ok <- CuesFollowUpAllowSql.clear_stale_approval(conn, {:follow_up_job, id}) do
         fetch_scheduled_job(conn, id)
       end
     end)

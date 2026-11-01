@@ -40,7 +40,6 @@ defmodule FermixCore.Memory.RepoFollowUpMigrationTest do
   DROP TABLE cue_watchers;
   ALTER TABLE cue_watchers_53 RENAME TO cue_watchers;
   DROP TABLE cue_follow_up_triggers;
-  DROP TABLE cue_follow_up_approvals;
   """
 
   setup do
@@ -64,19 +63,9 @@ defmodule FermixCore.Memory.RepoFollowUpMigrationTest do
     columns = columns(ctx.db_path, "cue_watchers")
     assert columns["task_job_id"] == 0
     assert Map.has_key?(columns, "follow_up_job_id")
-    assert Map.has_key?(columns, "follow_up_mode")
     assert Map.has_key?(columns, "follow_up_approved_at")
     assert Map.has_key?(columns, "follow_up_approval_digest")
     assert "cue_follow_up_triggers_state" in index_names(ctx.db_path, "cue_follow_up_triggers")
-
-    # The automatic approval's prompts (§3.4, §5), in the same migration.
-    approvals = columns(ctx.db_path, "cue_follow_up_approvals")
-
-    assert Enum.sort(Map.keys(approvals)) ==
-             Enum.sort(~w(id watcher_id shown_digest token_digest chat_platform chat_id
-                          chat_user_id expires_at state decided_from decided_at created_at))
-
-    assert "cue_follow_up_approvals_state" in index_names(ctx.db_path, "cue_follow_up_approvals")
   end
 
   test "an upgraded store keeps every row, child row, index and id, and takes follow_up", ctx do
@@ -111,9 +100,8 @@ defmodule FermixCore.Memory.RepoFollowUpMigrationTest do
     INSERT INTO scheduled_jobs (id, name, schedule_kind, schedule_expr, timezone, task_prompt,
       memory_source_id, created_by_trust)
     VALUES ('job_fu', 'fu', 'watcher', 'watcher', 'UTC', 'Run it.', 'src_old', 'operator');
-    INSERT INTO cue_watchers (id, name, filter, follow_up_job_id, follow_up_mode, created_at,
-      updated_at)
-    VALUES ('cwt_fu', 'fu-only', 'none', 'job_fu', 'approve', '#{@stamp}', '#{@stamp}');
+    INSERT INTO cue_watchers (id, name, filter, follow_up_job_id, created_at, updated_at)
+    VALUES ('cwt_fu', 'fu-only', 'none', 'job_fu', '#{@stamp}', '#{@stamp}');
     """)
 
     assert [["cwt_fu"]] =
@@ -176,14 +164,15 @@ defmodule FermixCore.Memory.RepoFollowUpMigrationTest do
 
   # Back to the tables 53 left (a task always set, no trigger table), with a
   # watcher, its children, a delivery kept and one pruned, and an index
-  # another migration added.
+  # another migration added. Migration 58, which reshapes what 54 made, runs
+  # again after it.
   defp seed_store_53(db_path) do
     raw(db_path, "PRAGMA foreign_keys=OFF;")
 
     raw(db_path, """
     BEGIN;
     #{@watchers_53}
-    DELETE FROM schema_migrations WHERE version = #{@version};
+    DELETE FROM schema_migrations WHERE version IN (#{@version}, 58);
     COMMIT;
     """)
 

@@ -34,3 +34,4 @@
 {"type":"checklist_edit","client_msg_id":"mac-35","profile_id":"main","list_id":"ck_2b7n5r8c3j","op":{"op":"restore"}}
 {"type":"checklist_edit","client_msg_id":"mac-36","profile_id":"main","list_id":"ck_2b7n5r8c3j","op":{"op":"restore","title":"Packing, spring"}}
 {"type":"checklist_edit","client_msg_id":"mac-37","profile_id":"main","list_id":"ck_2b7n5r8c3j","op":{"op":"remove_list"}}
+{"type":"proposal_answer","client_msg_id":"mac-12","profile_id":"main","proposal_id":"cft_5d2e8a1c9b4f7e3a6c0d1b2e","decision":"always_allow"}

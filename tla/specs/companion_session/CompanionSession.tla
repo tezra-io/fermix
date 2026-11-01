@@ -176,7 +176,7 @@
 (* One step = one callback of one process, one Memory.Repo call, or one    *)
 (* thing a client or the environment does.                                 *)
 (***************************************************************************)
-\* SOURCE: apps/fermix_core/priv/companion/PROTOCOL.md @ 818ae89e57c0
+\* SOURCE: apps/fermix_core/priv/companion/PROTOCOL.md @ b9e6fd23a74e
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/requests.ex#request,cancel,claim_and_run,acquire_and_run,run_started,ingest_span,settle_after_ingest,settle_unless_handed_off,handoff_settlement,fail_attempt,report_failure,settle_failed,append_user,after_user_append,settle_inline,ingest_gateway,approval_resolution_fn,history,fit_page,cut_page,take_within,accepted_event,history_event,emit,best_effort_emit @ 97be58f8e741
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/turns.ex @ b14ce70b09b6
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/output.ex#text_done,turn_error,row,timeline_message,approval,approval_resolved,persist_text,persist_output,complete_request,fail_request @ ba55e94f8827
@@ -251,7 +251,7 @@ CONSTANTS
                          \* sent through Fanout.announce; FALSE announces no user row
     SingleAnswer,        \* an approval token is consumed once: Confirmations.take is
                          \* an :ets.take (confirmations.ex:21-26, take_pending
-                         \* sandbox.ex:697-706)
+                         \* sandbox.ex:730-739)
     ResendsPendingApprovals, \* the Connection writes every card still waiting right
                          \* after server_hello, in the step that joined the registry
                          \* (join, send_pending_approvals, connection.ex:480-543, from
@@ -597,11 +597,11 @@ OnCancel(m) ==
                       dupWhileRunning, refused, told>>
 
 \* /confirm TOKEN or /deny TOKEN: a command request through the same path,
-\* answered by the Gateway's command (confirm, deny, sandbox.ex:280-300).
+\* answered by the Gateway's command (confirm, deny, sandbox.ex:293-313).
 \* take_pending peeks, checks the expiry and origin, then takes the token
-\* (sandbox.ex:697-714, Confirmations.take, confirmations.ex:21-26). Only a
+\* (sandbox.ex:730-747, Confirmations.take, confirmations.ex:21-26). Only a
 \* take that finds the token applies the answer and announces
-\* approval_resolved (notify_approval, sandbox.ex:371-379 ->
+\* approval_resolved (notify_approval, sandbox.ex:384-392 ->
 \* approval_resolution_fn, requests.ex:619-624 -> Approvals.resolve,
 \* approvals.ex:97-105, :136-143, which forgets the card first). Without
 \* SingleAnswer the token survives its first answer.
@@ -895,7 +895,7 @@ TurnsNext ==
 
 \* A tool of m's turn needs the owner's approval (a directory grant, or a
 \* coding run's vendor-config change to acknowledge; one path for both): the
-\* gateway stores a pending token (store_pending_grant, sandbox.ex:227-239)
+\* gateway stores a pending token (store_pending_grant, sandbox.ex:240-252)
 \* and the channel's approval store keeps the card, then announces it to this
 \* transport's connections alone, through the announce it announces the
 \* card's end with (send_approval, channels/companion.ex:236-239 ->
@@ -909,7 +909,7 @@ Ask(m) ==
                    applied, reqs, queue, store, env, obs>>
 
 \* The card's ttl_s runs out: the token is refused from then on
-\* (validate_pending, sandbox.ex:708-714), and Approvals drops the card and
+\* (validate_pending, sandbox.ex:741-747), and Approvals drops the card and
 \* announces approval_resolved{expired} to its transport (handle_info
 \* {:approval_expired, ...}, expire, approvals.ex:150-155, :208-217). The two
 \* clocks start a moment apart; either order leaves no card that can be

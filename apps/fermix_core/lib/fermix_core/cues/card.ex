@@ -1,19 +1,20 @@
 defmodule FermixCore.Cues.Card do
   @moduledoc """
   The card a chat shows when a watcher asks the owner first
-  (M60_WATCHER_CODING_RUNS.md §6): a follow-up waiting to run (§6.1), the
-  prompt that lets an automatic follow-up run on its own (§3.4), and a
+  (M60_WATCHER_CODING_RUNS.md §6): a follow-up waiting to run (§6.1) and a
   mandate's proposal (§6.3). One layout, made for a phone: a few short lines
-  the owner decides from, everything in full behind a Details part, and two
-  answers. No JSON, no model frames, no ids.
+  the owner decides from, everything in full behind a Details part, and the
+  answers: Run and Skip, and on a follow-up's card Always allow, which runs
+  this one and lets the follow-up's later items run with no card (the
+  2026-10-31 revision of §3.4). No JSON, no model frames, no ids.
 
   Pure. A card is `lines` (what a chat shows at once, the question first),
   `detail` (the expandable part, its first line its label), `actions` (the
-  two buttons' words) and `reply` (the line a chat without buttons ends
-  with). `spec/2` makes it the approval spec a channel delivers
+  buttons' words) and `reply` (the line a chat without buttons ends with).
+  `spec/2` makes it the approval spec a channel delivers
   (`FermixCore.Reply.approval_spec/0`): Telegram draws the lines, the detail
-  as an expandable quote and the two buttons; every other chat gets `text`,
-  the lines, the detail and the reply line.
+  as an expandable quote and the buttons; every other chat gets `text`, the
+  lines, the detail and the reply line.
 
   Outside text (the item, the filter's reason, a mandate's arguments) is cut
   on the visible lines and kept whole in the detail. A mandate's arguments
@@ -36,9 +37,9 @@ defmodule FermixCore.Cues.Card do
   @instructions_chars 120
   @argument_chars 80
   @run_actions %{confirm: "▶ Run", deny: "Skip"}
-  @approval_actions %{confirm: "✅ Approve", deny: "❌ Keep asking"}
+  @follow_up_actions Map.put(@run_actions, :always_allow, "Always allow")
   @run_reply "Reply /confirm to run or /deny to skip."
-  @approval_reply "Reply /confirm to approve or /deny to keep asking."
+  @follow_up_reply "Reply /confirm to run, /deny to skip, or /always to always allow it."
   @platform_names %{
     "telegram" => "Telegram",
     "signal" => "Signal",
@@ -50,8 +51,12 @@ defmodule FermixCore.Cues.Card do
     "mobile" => "your phone"
   }
 
-  @typedoc "A card's two answers, in a chat's words."
-  @type actions :: %{confirm: String.t(), deny: String.t()}
+  @typedoc "A card's answers, in a chat's words: a follow-up's card adds Always allow."
+  @type actions :: %{
+          required(:confirm) => String.t(),
+          required(:deny) => String.t(),
+          optional(:always_allow) => String.t()
+        }
 
   @typedoc "A compact card, ready for `spec/2`."
   @type t :: %{
@@ -67,17 +72,10 @@ defmodule FermixCore.Cues.Card do
   def max_chars, do: @max_chars
 
   @doc """
-  The card the follow-up sender is handed (`:cue_follow_up_sender`): a
-  follow-up's card from `Cues.FollowUps.card/2`, or an approval's prompt from
-  `Cues.FollowUpApprovals.card/2`.
-  """
-  @spec of(map(), keyword()) :: t()
-  def of(%{trigger_id: _id} = card, opts), do: follow_up(card, opts)
-  def of(%{shown_digest: _digest} = card, opts), do: approval(card, opts)
-
-  @doc """
-  The card of a follow-up waiting to run (§6.1), from `Cues.FollowUps.card/2`.
-  The item's text in the detail is cut to what fits: the run never gets it.
+  The card of a follow-up waiting to run (§6.1), from `Cues.FollowUps.card/2`,
+  the card the follow-up sender is handed (`:cue_follow_up_sender`). Its
+  detail names what sets it off, since Always allow covers that too. The
+  item's text in the detail is cut to what fits: the run never gets it.
   """
   @spec follow_up(map(), keyword()) :: t()
   def follow_up(%{follow_up: follow_up, outside: outside} = card, opts) when is_list(opts) do
@@ -96,7 +94,8 @@ defmodule FermixCore.Cues.Card do
       "It will, in full:",
       follow_up.instructions || "",
       "Uses: " <> Enum.join(follow_up.tools, ", "),
-      "Reports to: " <> reports_to(follow_up.delivery, opts)
+      "Reports to: " <> reports_to(follow_up.delivery, opts),
+      "Set off by: " <> set_off_by(card.watcher)
     ]
 
     # The item's text takes the room the rest leaves: the run never gets it.
@@ -108,42 +107,7 @@ defmodule FermixCore.Cues.Card do
 
   defp follow_up_card(lines, item, fixed) do
     detail = Enum.join(["Details" | item] ++ fixed, "\n")
-    card(:follow_up, lines, detail, @run_actions, @run_reply)
-  end
-
-  @doc """
-  The prompt that lets an automatic follow-up run on its own (§3.4), from
-  `Cues.FollowUpApprovals.card/2`: what it runs, how often at most, and in
-  the detail everything its approval is bound to (§5).
-  """
-  @spec approval(map(), keyword()) :: t()
-  def approval(%{watcher_name: watcher} = card, opts) when is_list(opts) do
-    name = quoted(card.job_name || card.job_id || "the follow-up")
-    tools = Enum.join(card.allowed_tools, ", ")
-
-    lines = [
-      "Automatic follow-up for #{watcher}: whenever an item passes, run #{name} " <>
-        "(#{one_line(card.task_prompt, @instructions_chars)}), with no card.",
-      "That is a run with #{tools} each time, at most #{card.daily_cap} a day " <>
-        "(the watcher's daily cap).",
-      "Expires #{time(card.expires_at, opts)}"
-    ]
-
-    detail =
-      Enum.join(
-        [
-          "Details",
-          "It will, in full:",
-          card.task_prompt || "",
-          "Uses: " <> tools,
-          "Reports to: " <>
-            reports_to(%{mode: card.delivery_mode, target: card.delivery_target}, opts),
-          "Set off by: " <> set_off_by(card)
-        ],
-        "\n"
-      )
-
-    card(:follow_up, lines, detail, @approval_actions, @approval_reply)
+    card(:follow_up, lines, detail, @follow_up_actions, @follow_up_reply)
   end
 
   @doc """
@@ -200,15 +164,23 @@ defmodule FermixCore.Cues.Card do
     do: Enum.join(lines, "\n") <> "\n\n" <> detail <> "\n\n" <> reply
 
   @doc """
-  The one line a follow-up's card becomes once the owner said yes (§3.3): it
-  is starting, naming the item so the run's report can be matched to it. Its
-  turn may still refuse it, and `not_started/1` then says why.
+  The one line a follow-up's card becomes once the owner said Run or Always
+  allow (§3.3): it is starting, naming the item so the run's report can be
+  matched to it, and after Always allow whether its later items run with no
+  card (`always_allow`, `allowed` or `changed`). Its turn may still refuse it,
+  and `not_started/1` then says why.
   """
   @spec starting(map(), keyword()) :: String.t()
   def starting(%{outside: outside} = card, opts) do
     "Starting #{quoted(follow_up_name(card))} for #{post(outside)} · " <>
-      Clock.stated_time(now(opts), opts)
+      Clock.stated_time(now(opts), opts) <> allow_note(Map.get(card, :always_allow))
   end
+
+  defp allow_note(nil), do: ""
+  defp allow_note("allowed"), do: ". Always allowed: from now on it runs with no card."
+
+  defp allow_note("changed"),
+    do: ". Not always allowed: it changed since this card was shown, so the next item asks again."
 
   @doc """
   What the owner is told when a follow-up they confirmed did not start: the
@@ -224,18 +196,6 @@ defmodule FermixCore.Cues.Card do
   @doc "The one line a follow-up's card becomes once the owner said no."
   @spec skipped(map()) :: String.t()
   def skipped(card), do: "Skipped #{quoted(follow_up_name(card))}; it did not run."
-
-  @doc "The one line an approval's prompt becomes once the owner approved it."
-  @spec approved(map()) :: String.t()
-  def approved(card) do
-    "Approved: #{quoted(card.job_name || "the follow-up")} runs on its own, at most " <>
-      "#{card.daily_cap} a day."
-  end
-
-  @doc "The one line an approval's prompt becomes once the owner kept asking."
-  @spec kept_asking(map()) :: String.t()
-  def kept_asking(card),
-    do: "Kept asking: each run of #{quoted(card.job_name || "the follow-up")} waits for your tap."
 
   # --- lines ----------------------------------------------------------------------------
 
@@ -290,10 +250,9 @@ defmodule FermixCore.Cues.Card do
     |> Enum.reject(&is_nil/1)
   end
 
-  @doc "What sets an automatic follow-up off: the watcher's sources and the words it listens for."
-  @spec set_off_by(map()) :: String.t()
-  def set_off_by(%{sources: sources, listen_for: words})
-      when is_list(sources) and is_list(words) do
+  # What sets a follow-up off: the watcher's sources and the words it listens for.
+  defp set_off_by(%{sources: sources, listen_for: words})
+       when is_list(sources) and is_list(words) do
     sources = Enum.join(sources, ", ")
 
     case words do

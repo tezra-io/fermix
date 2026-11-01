@@ -17,11 +17,13 @@ defmodule FermixCore.Management.Cues.WatcherRow do
   `task` is the job a passing item starts: its task, or for a watcher with only
   a follow-up, that follow-up's job, so `task` is never null and an app that
   predates follow-ups still reads every row. `follow_up` is null for one with no
-  follow-up, else its job, name, `mode` (`approve` or `auto`), whether an
-  automatic one is `approved` (null for one that asks first), `state` (`ready`,
-  or `held` while it cannot run: the owner's switch is off, or a tool or the
-  channel it needs is not set up) and Fermix's sentence, which says what is
-  missing and where to fix it while it is held. Read-only, like the rest.
+  follow-up, else its job, name, `always_allowed` (whether the owner's Always
+  allow on one of its cards lets it run with no card for what it runs and what
+  sets it off now; false while it asks first), `state` (`ready`, or `held`
+  while it cannot run: the owner's switch is off, or a tool or the channel it
+  needs is not set up) and Fermix's sentence, which says what is missing and
+  where to fix it while it is held. Only `cues.watchers.always_allow.revoke`
+  changes it here, and only ever to asking first.
   """
 
   alias FermixCore.Cues.Filter.Llm
@@ -147,8 +149,7 @@ defmodule FermixCore.Management.Cues.WatcherRow do
     %{
       "job_id" => follow_up.job_id,
       "name" => follow_up.name,
-      "mode" => follow_up.mode,
-      "approved" => follow_up.approved?,
+      "always_allowed" => follow_up.always_allowed?,
       "state" => if(follow_up.held, do: "held", else: "ready"),
       "status_sentence" => follow_up_sentence(follow_up)
     }
@@ -156,14 +157,11 @@ defmodule FermixCore.Management.Cues.WatcherRow do
 
   defp follow_up_sentence(%{held: held}) when is_binary(held), do: held
 
-  defp follow_up_sentence(%{mode: "approve"}),
-    do: "Asks first: you confirm each run on a short card."
+  defp follow_up_sentence(%{always_allowed?: true}),
+    do: "Always allowed: it runs on each passing item with no card."
 
-  defp follow_up_sentence(%{approved?: true}),
-    do: "Runs on its own on each passing item, within the daily cap."
-
-  defp follow_up_sentence(_unapproved),
-    do: "Asks first until you approve it to run on its own."
+  defp follow_up_sentence(_asks_first),
+    do: "Asks first: you confirm each run on a short card, where you can also always allow it."
 
   # The one Cues filter model every `llm` watcher uses; null when that is the
   # main model, and for a watcher with no filter.

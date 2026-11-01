@@ -45,8 +45,8 @@ description: >
   is pointed to the Screen setting; a watcher's follow-up uses the tool the owner
   names and asks first, one whose tool is not ready is still made and Fermix
   says what is missing, one asked to use the post is told it is never handed the
-  post, and asking for automatic names the cost and the cap and asks the owner
-  to approve.
+  post, and one asked to run every time without asking is set up asking first,
+  its cards offering Always allow, with no cap or number asked for.
 defaults:
   timeout_ms: 240000
   judge: true
@@ -661,9 +661,10 @@ scenarios:
   # daemon's PATH, a stub Codex sign-in) and leaves Claude Code unready (a config
   # dir never made), with the harness consent granted; the follow-up never runs
   # here, so neither does Codex. Fermix answers a follow-up with its own summary
-  # (`Follow-up "<name>", run when an item passes:`, its `Uses:`, `Mode:` and,
-  # while it is held, "Held until it is ready: …"); what was set up and said is
-  # the rubric's. Starting a coding run in the setup turn is the one route gate.
+  # (`Follow-up "<name>", run when an item passes:`, its `Uses:`, its
+  # `Asks first:` line and, while it is held, "Held until it is ready: …"); what
+  # was set up and said is the rubric's. Starting a coding run in the setup turn
+  # is the one route gate.
   - id: follow_up_with_a_named_tool
     title: "A watcher's follow-up uses the tool the owner names, asking first by default"
     severity: critical
@@ -816,37 +817,41 @@ scenarios:
              or summarise the post. Creating the watcher with a task, or asking the
              owner which way to go first, is correct and must never be penalized.
 
-  # Automatic runs on each passing item with no card, within the watcher's daily
-  # cap, and only once the owner approves it on the prompt Fermix sends.
-  - id: follow_up_automatic
-    title: "Asking for an automatic follow-up: Fermix names the cost and the cap and asks to approve"
+  # A follow-up always starts asking first: each card offers Always allow, the
+  # owner's tap that lets later items run it with no card, and nothing in chat
+  # grants it. No limit is asked for: the watcher's own daily cap is optional.
+  # The reply gate is the incident's failure class, asking for a number of runs
+  # a day; the rest is the rubric's.
+  - id: follow_up_always_allow
+    title: "Asking for a follow-up that never asks: set up asking first, Always allow named, no cap asked"
     severity: critical
-    tags: [cues, watchers, follow_ups, approval]
+    risk: isolated_mutation
+    tags: [cues, watchers, follow_ups, always_allow]
     cases:
-      - id: automatic_with_a_cap
+      - id: run_every_time_without_asking
         drive: companion
         query: >
           Watch eng-blogs, and whenever there's a post about a new Orrin DB release,
           have Codex review the last day's commits in ~/src/orrin and report here.
-          Run it automatically, no need to ask me each time, but no more than 3
-          times a day.
+          Just run it every time, I don't want to be asked each time.
         expect:
           status: ok
           tools_none: [schedule_job, event_store, codex_run, claude_code_run]
+          reply_not_matches: "(?i)(how many (runs|times)|max(imum)?( number of)?( automatic)? runs|(a|per) day\\?|suggest(ing)? \\d)"
           wire:
             events_all: [accepted, turn_started, text_done]
             events_none: [turn_error]
         rubric: |
-          1. A watcher listening to eng-blogs was created with an automatic
-             follow-up that uses codex_run and a daily cap of 3: a tool result from
-             Fermix says so and says a prompt to approve it was sent or is shown in
-             the app.
-          2. The reply names the cost: a Codex run each time a post passes, at most
-             3 a day.
-          3. The reply asks the owner to approve it on that prompt, and says each
-             run asks first until they do; it does not claim the follow-up already
-             runs on its own.
-      - id: automatic_without_a_cap
+          1. A watcher listening to eng-blogs was created with a follow-up that uses
+             codex_run: a tool result from Fermix says the watcher is set up and
+             shows the follow-up with codex_run under "Uses".
+          2. The reply tells the owner that for now each run waits for their tap on
+             a card, and that the card offers Always allow, which lets later runs go
+             ahead with no card.
+          3. The reply does not claim the follow-up already runs without asking.
+          4. The reply does not ask the owner for a daily cap, a number of runs a
+             day or any other limit, and does not suggest one.
+      - id: stop_asking_me_each_time
         drive: companion
         query: >
           Whenever eng-blogs posts about an Orrin DB security fix, have Codex audit
@@ -855,15 +860,17 @@ scenarios:
         expect:
           status: ok
           tools_none: [schedule_job, event_store, codex_run, claude_code_run]
+          reply_not_matches: "(?i)(how many (runs|times)|max(imum)?( number of)?( automatic)? runs|(a|per) day\\?|suggest(ing)? \\d)"
           wire:
             events_all: [accepted, turn_started, text_done]
             events_none: [turn_error]
         rubric: |
-          1. The reply says an automatic follow-up needs a daily cap on the watcher
-             and asks the owner how many runs a day it may make, suggesting 5, or
-             tells them it set none because they gave none.
-          2. The reply makes clear each automatic run is a Codex run.
-          3. The reply does not claim the follow-up already runs on its own.
-             Creating the watcher with a follow-up that asks first meanwhile, or
-             waiting for the owner's answer before creating anything, is correct and
-             must never be penalized.
+          1. A watcher listening to eng-blogs was created with a follow-up that uses
+             codex_run: a tool result from Fermix says the watcher is set up and
+             shows the follow-up with codex_run under "Uses".
+          2. The reply tells the owner that for now each run waits for their tap on
+             a card, and that the card offers Always allow, which lets later runs go
+             ahead with no card.
+          3. The reply does not claim the follow-up already runs without asking.
+          4. The reply does not ask the owner for a daily cap, a number of runs a
+             day or any other limit, and does not suggest one.

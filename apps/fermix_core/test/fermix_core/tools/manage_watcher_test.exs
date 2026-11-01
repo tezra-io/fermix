@@ -558,7 +558,7 @@ defmodule FermixCore.Tools.ManageWatcherTest do
   end
 
   # M60_WATCHER_CODING_RUNS.md §3: a follow-up set up, bounded, checked and
-  # summed up in the consent turn, and its automatic approval asked for.
+  # summed up in the consent turn, and its Always allow taken back there.
   describe "a follow-up" do
     setup do
       registry = :"manage_watcher_caps_#{System.unique_integer([:positive])}"
@@ -598,7 +598,10 @@ defmodule FermixCore.Tools.ManageWatcherTest do
       assert "  It will: Run the deploy check script in ~/ops and report what it says." in lines
       assert "  Uses: shell" in lines
       assert "  Reports to: this chat" in lines
-      assert "  Mode: Ask first: you confirm each run on a short card." in lines
+
+      assert ("  Asks first: each run waits for your tap on a short card, whose Always allow " <>
+                "lets it run with no card from then on.") in lines
+
       assert "  Limits: items older than 15 minutes are ignored; one run at a time." in lines
       assert "It is never handed the item: the item only decides when it runs." in lines
       refute echo =~ "Held"
@@ -731,66 +734,59 @@ defmodule FermixCore.Tools.ManageWatcherTest do
                )
     end
 
-    test "automatic needs the watcher's daily cap, then asks for its approval and names the cost",
-         ctx do
-      auto = put_in(follow_up_args(), ["follow_up", "mode"], "auto")
-
-      assert {:ok, %{success: false, error: error}} =
-               ManageWatcher.execute(auto, follow_up_turn(ctx))
-
-      assert error ==
-               "An automatic follow-up needs a daily cap on the watcher: say how many runs a " <>
-                 "day it may cause (Fermix suggests 5)."
+    # The 2026-10-31 revision: a follow-up always asks first, and only the owner's
+    # Always allow on one of its cards lets it run with no card; no cap is asked for.
+    test "asks first, with no mode and no daily cap to give", ctx do
+      follow_up = ManageWatcher.parameters().properties.follow_up
+      refute Map.has_key?(follow_up.properties, :mode)
+      assert follow_up.properties.always_allow.enum == [false]
+      refute ManageWatcher.parameters().properties.daily_cap.description =~ "automatic"
+      refute inspect(ManageWatcher.parameters()) =~ "suggesting 5"
 
       assert {:ok, %{success: true, output: echo}} =
-               ManageWatcher.execute(Map.put(auto, "daily_cap", "5"), follow_up_turn(ctx))
+               ManageWatcher.execute(follow_up_args(), follow_up_turn(ctx))
 
-      assert echo =~
-               ~s(Automatic means a run of "Deploy check" with shell each time an item passes, ) <>
-                 "at most 5 a day."
-
-      assert echo =~ "until you do, each run asks first."
-      assert_received {:prompt, %{watcher_name: "deploy-watch", daily_cap: 5}}
+      refute echo =~ "daily cap"
+      refute_received {:prompt, _card}
+      assert {:ok, %{daily_cap: 0}} = Watchers.show("deploy-watch", repo: ctx.repo)
     end
 
-    test "a change that clears an automatic follow-up's approval asks again; others do not",
-         ctx do
-      auto = follow_up_args() |> put_in(["follow_up", "mode"], "auto") |> Map.put("daily_cap", 5)
-      assert {:ok, %{success: true}} = ManageWatcher.execute(auto, follow_up_turn(ctx))
-      assert_received {:prompt, _card}
+    test "always_allow false takes its Always allow back; true is refused", ctx do
+      assert {:ok, %{success: true}} =
+               ManageWatcher.execute(follow_up_args(), follow_up_turn(ctx))
 
-      {:ok, digest} = Watchers.current_follow_up_digest("deploy-watch", repo: ctx.repo)
-      {:ok, _approved} = Watchers.approve_follow_up("deploy-watch", digest, repo: ctx.repo)
+      {:ok, watcher} = Watchers.show("deploy-watch", repo: ctx.repo)
+      CueFixtures.always_allow!(ctx.conn, watcher.id)
 
-      assert {:ok, %{success: true, output: paused}} =
+      assert {:ok, %{success: true, output: shown}} =
                ManageWatcher.execute(
-                 %{"action" => "pause", "name" => "deploy-watch"},
+                 %{"action" => "show", "name" => "deploy-watch"},
                  follow_up_turn(ctx)
                )
 
-      refute paused =~ "approve"
-      refute_received {:prompt, _card}
+      assert shown =~ "always allowed, so it runs with no card"
 
-      change = %{
+      grant = %{
         "action" => "update",
         "name" => "deploy-watch",
-        "follow_up" => %{"instructions" => "Run the deploy check script twice."}
+        "follow_up" => %{"always_allow" => true}
       }
 
+      assert {:ok, %{success: false, error: refused}} =
+               ManageWatcher.execute(grant, follow_up_turn(ctx))
+
+      assert refused == "Only your Always allow on one of its cards lets it run with no card."
+
+      revoke = put_in(grant, ["follow_up", "always_allow"], false)
+
       assert {:ok, %{success: true, output: echo}} =
-               ManageWatcher.execute(change, follow_up_turn(ctx))
+               ManageWatcher.execute(revoke, follow_up_turn(ctx))
 
-      assert echo =~ "Watcher deploy-watch's follow-up changed."
-      assert echo =~ "Automatic means a run of"
-      assert_received {:prompt, %{task_prompt: "Run the deploy check script twice."}}
+      assert echo =~ "Watcher deploy-watch's follow-up asks first again"
+      assert {:ok, false} = Watchers.always_allowed(watcher, repo: ctx.repo)
 
-      words = %{"action" => "update", "name" => "deploy-watch", "listen_for" => ["deploy"]}
-
-      assert {:ok, %{success: true, output: unchanged}} =
-               ManageWatcher.execute(words, follow_up_turn(ctx))
-
-      assert unchanged =~ "It is not approved to run on its own yet, so each run asks first."
-      refute_received {:prompt, _card}
+      tainted = follow_up_turn(ctx, outside_sources: MapSet.new([{:tool, "list_cues"}]))
+      assert {:ok, %{success: false, error: @tainted}} = ManageWatcher.execute(revoke, tainted)
     end
 
     test "is stopped, and run by hand, from the consent turn", ctx do

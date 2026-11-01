@@ -39,7 +39,7 @@ defmodule FermixCore.Companion.ProtocolContractTest do
   @version_6_list_client_events ~w(checklists_pull checklist_pull checklist_edit)
   @version_6_list_server_events ~w(checklists checklist)
   # The follow-up's fields of a card version 5 brought (M60_WATCHER_CODING_RUNS.md §6.2).
-  @follow_up_fields ~w(asks name instructions tools reports_to daily_cap set_off_by)
+  @follow_up_fields ~w(asks offers_always_allow name instructions tools reports_to)
 
   setup_all do
     %{
@@ -149,7 +149,8 @@ defmodule FermixCore.Companion.ProtocolContractTest do
     goldens = @server_fixtures |> jsonl() |> Enum.filter(&(&1["type"] == "proposal"))
     {follow_ups, mandates} = Enum.split_with(goldens, &Map.has_key?(&1["proposal"], "follow_up"))
 
-    assert Enum.map(follow_ups, & &1["proposal"]["follow_up"]["asks"]) == ["run", "automatic"]
+    assert Enum.map(follow_ups, & &1["proposal"]["follow_up"]["asks"]) == ["run"]
+    assert Enum.map(follow_ups, & &1["proposal"]["follow_up"]["offers_always_allow"]) == [true]
     assert Enum.all?(follow_ups, &(Protocol.server_payload_version("proposal", &1) == 5))
     assert Enum.all?(mandates, &(Protocol.server_payload_version("proposal", &1) == 4))
     assert protocol =~ "### Version 5: a watcher's follow-ups on the owner's devices"

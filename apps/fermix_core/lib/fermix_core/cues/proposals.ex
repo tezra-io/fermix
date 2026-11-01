@@ -32,14 +32,13 @@ defmodule FermixCore.Cues.Proposals do
 
   ## One place every answer goes (M60_WATCHER_CODING_RUNS.md §4.5)
 
-  A `cp_` token answers a mandate's proposal, a watcher's follow-up card
-  (`Cues.FollowUps`) or an automatic follow-up's approval prompt
-  (`Cues.FollowUpApprovals`): `confirm/3` and `deny/3` look the token's digest
-  up and hand it to the one that holds it. They take a card's id too
-  (`cpr_`, `cft_`, `cfa_`), but only from the chat the card went to and while
-  it waits there (`waiting_in_chat/2`), which is how a bare `/confirm` and a
-  listed card are answered. `decide/4` dispatches an app's answer by id the
-  same way. `owner_chat/1`, `new_token/0` and `digest/1` are the reach rule,
+  A `cp_` token answers a mandate's proposal or a watcher's follow-up card
+  (`Cues.FollowUps`): `confirm/3` and `deny/3` look the token's digest up and
+  hand it to the one that holds it, and `always_allow/3`, which only a
+  follow-up's card offers, to `Cues.FollowUps`. They take a card's id too
+  (`cpr_`, `cft_`), but only from the chat the card went to and while it waits
+  there (`waiting_in_chat/2`), which is how a bare `/confirm` and a listed card
+  are answered. `decide/4` dispatches an app's answer by id the same way. `owner_chat/1`, `new_token/0` and `digest/1` are the reach rule,
   the token and its digest every card is sent with, and `announce/2` the one
   way any card reaches the app surfaces.
 
@@ -93,7 +92,6 @@ defmodule FermixCore.Cues.Proposals do
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Capabilities.UntrustedContent
   alias FermixCore.Cues.Card
-  alias FermixCore.Cues.FollowUpApprovals
   alias FermixCore.Cues.FollowUps
   alias FermixCore.Cues.Mandates
   alias FermixCore.Cues.Pins
@@ -108,9 +106,8 @@ defmodule FermixCore.Cues.Proposals do
   alias FermixCore.Memory.Repo.CuesMandateSql
 
   @token_prefix "cp_"
-  # A card's id names what it asks: a mandate's proposal, a follow-up's card
-  # or an automatic follow-up's approval prompt.
-  @id_kinds %{"cpr_" => :mandate, "cft_" => :follow_up, "cfa_" => :approval}
+  # A card's id names what it asks: a mandate's proposal or a follow-up's card.
+  @id_kinds %{"cpr_" => :mandate, "cft_" => :follow_up}
   @max_message_chars 3_500
   @max_result_chars 2_000
   @max_reply_chars 1_500
@@ -133,6 +130,7 @@ defmodule FermixCore.Cues.Proposals do
   @unreachable "Fermix could not reach you, so the proposal was not sent."
   @recheck_failed "Fermix could not finish checking it"
   @unverified "Fermix could not verify the mandate's pins; the mandate stays on"
+  @no_always_allow "Only a follow-up's card offers Always allow; nothing ran."
   @reapproved "the mandate was approved again while this call was checked"
 
   @typedoc "What a proposal needs from the mandate call that makes it."
@@ -163,7 +161,7 @@ defmodule FermixCore.Cues.Proposals do
         }
 
   @typedoc "One thing waiting in a chat for its owner's answer."
-  @type waiting :: %{kind: :mandate | :follow_up | :approval, id: String.t(), title: String.t()}
+  @type waiting :: %{kind: :mandate | :follow_up, id: String.t(), title: String.t()}
 
   @typedoc "Where a `/confirm` or `/deny` came from."
   @type origin :: %{platform: String.t(), chat_id: String.t(), user_id: String.t() | nil}
@@ -281,20 +279,28 @@ defmodule FermixCore.Cues.Proposals do
     do: answer(token, :deny, origin, opts)
 
   @doc """
+  The owner's `/always` from `origin`, as `confirm/3`: a follow-up's card runs
+  this one and allows the follow-up for what the card showed
+  (`Cues.FollowUps.always_allow/3`); a mandate's proposal offers no Always
+  allow and is left as it waits. Returns the reply for the owner.
+  """
+  @spec always_allow(String.t(), origin(), keyword()) :: {:ok, String.t()} | {:error, String.t()}
+  def always_allow(token, origin, opts \\ []) when is_binary(token) and is_list(opts),
+    do: answer(token, :always_allow, origin, opts)
+
+  @doc """
   Everything waiting for an answer in chat `origin`, oldest first within each
-  kind: mandate proposals, follow-up cards and approval prompts that went
-  there. What a bare `/confirm` resolves to.
+  kind: mandate proposals and follow-up cards that went there. What a bare
+  `/confirm` resolves to.
   """
   @spec waiting_in_chat(origin(), keyword()) :: {:ok, [waiting()]} | {:error, String.t()}
   def waiting_in_chat(origin, opts \\ []) when is_list(opts) do
     with {:ok, origin} <- checked_origin(origin),
          {:ok, proposals} <- read({:proposal_cards, {:chat, origin}, now(opts)}, opts),
-         {:ok, triggers} <- FollowUps.waiting_in_chat(origin, opts),
-         {:ok, approvals} <- FollowUpApprovals.waiting_in_chat(origin, opts) do
+         {:ok, triggers} <- FollowUps.waiting_in_chat(origin, opts) do
       {:ok,
        Enum.map(proposals, &waiting_proposal/1) ++
-         Enum.map(triggers, &waiting_follow_up(&1, opts)) ++
-         Enum.map(approvals, &waiting_approval/1)}
+         Enum.map(triggers, &waiting_follow_up(&1, opts))}
     else
       {:error, why} -> {:error, refusal_reply(why)}
     end
@@ -315,14 +321,6 @@ defmodule FermixCore.Cues.Proposals do
       end
 
     %{kind: :follow_up, id: trigger.id, title: title}
-  end
-
-  defp waiting_approval(approval) do
-    %{
-      kind: :approval,
-      id: approval.id,
-      title: "Let watcher #{approval.watcher_name || "(removed)"}'s follow-up run on its own?"
-    }
   end
 
   defp answer(arg, decision, origin, opts) do
@@ -356,6 +354,9 @@ defmodule FermixCore.Cues.Proposals do
     end
   end
 
+  defp dispatch({_by, :mandate}, _arg, :always_allow, _origin, _opts),
+    do: {:error, @no_always_allow}
+
   defp dispatch({:token, :mandate}, token, :confirm, origin, opts),
     do: confirm_mandate(token, origin, opts)
 
@@ -368,11 +369,8 @@ defmodule FermixCore.Cues.Proposals do
   defp dispatch({:token, :follow_up}, token, :deny, origin, opts),
     do: FollowUps.deny(token, origin, opts)
 
-  defp dispatch({:token, :approval}, token, :confirm, origin, opts),
-    do: FollowUpApprovals.confirm(token, origin, opts)
-
-  defp dispatch({:token, :approval}, token, :deny, origin, opts),
-    do: FollowUpApprovals.deny(token, origin, opts)
+  defp dispatch({:token, :follow_up}, token, :always_allow, origin, opts),
+    do: FollowUps.always_allow(token, origin, opts)
 
   defp dispatch({:id, :mandate}, id, decision, origin, opts),
     do: decide_mandate_in_chat(id, decision, origin, opts)
@@ -381,9 +379,6 @@ defmodule FermixCore.Cues.Proposals do
     with {:ok, trigger} <- FollowUps.decide(id, decision, chat_label(origin), opts),
          do: FollowUps.answered(trigger, opts)
   end
-
-  defp dispatch({:id, :approval}, id, decision, origin, opts),
-    do: FollowUpApprovals.decide(id, decision, chat_label(origin), opts)
 
   defp confirm_mandate(token, origin, opts) do
     now = now(opts)
@@ -462,15 +457,14 @@ defmodule FermixCore.Cues.Proposals do
 
   @doc """
   The card of every proposal still waiting, oldest first (at most
-  #{@max_waiting}), then every follow-up card and approval prompt still
-  waiting: what an app that connects is shown.
+  #{@max_waiting}), then every follow-up card still waiting: what an app that
+  connects is shown.
   """
   @spec waiting_cards(keyword()) :: {:ok, [ProposalView.card()]} | {:error, :memory_off | term()}
   def waiting_cards(opts \\ []) when is_list(opts) do
     with {:ok, rows} <- read(list_request(:waiting, now(opts)), opts),
-         {:ok, follow_ups} <- memory_read(&FollowUps.waiting_cards(@max_waiting, &1), opts),
-         {:ok, approvals} <- memory_read(&FollowUpApprovals.waiting_cards(@max_waiting, &1), opts) do
-      {:ok, Enum.map(rows, &ProposalView.compact_card/1) ++ follow_ups ++ approvals}
+         {:ok, follow_ups} <- memory_read(&FollowUps.waiting_cards(@max_waiting, &1), opts) do
+      {:ok, Enum.map(rows, &ProposalView.compact_card/1) ++ follow_ups}
     end
   end
 
@@ -490,37 +484,28 @@ defmodule FermixCore.Cues.Proposals do
   its own. Answers Fermix's record as soon as the decision is recorded:
   `denied`, or `confirmed` with no `result_status` while its call runs; every
   app surface hears the outcome (`{:resolved, …}`). A refusal is the owner's
-  sentence, and nothing ran. A follow-up's card (`cft_`) or an approval's
-  prompt (`cfa_`) goes to `Cues.FollowUps.decide/4` or
-  `Cues.FollowUpApprovals.decide/4`, answering its card as it now stands.
+  sentence, and nothing ran. A follow-up's card (`cft_`) goes to
+  `Cues.FollowUps.decide/4`, answering its card as it now stands; only it
+  takes `:always_allow`.
   """
-  @spec decide(String.t(), :confirm | :deny, app_origin(), keyword()) ::
+  @spec decide(String.t(), :confirm | :deny | :always_allow, app_origin(), keyword()) ::
           {:ok, ProposalView.record() | map()} | {:error, String.t()}
   def decide(proposal_id, decision, %{surface: surface} = origin, opts \\ [])
-      when is_binary(proposal_id) and decision in [:confirm, :deny] and
+      when is_binary(proposal_id) and decision in [:confirm, :deny, :always_allow] and
              surface in @app_surfaces and is_list(opts) do
-    case id_kind(proposal_id) do
-      :follow_up -> decide_follow_up(proposal_id, decision, origin, opts)
-      :approval -> decide_approval(proposal_id, decision, origin, opts)
-      _mandate_or_unknown -> decide_mandate(proposal_id, decision, origin, opts)
+    case {id_kind(proposal_id), decision} do
+      {:follow_up, _decision} -> decide_follow_up(proposal_id, decision, origin, opts)
+      {_mandate_or_unknown, :always_allow} -> {:error, @no_always_allow}
+      {_mandate_or_unknown, _decision} -> decide_mandate(proposal_id, decision, origin, opts)
     end
   end
 
-  # A follow-up's card or an approval's prompt, answered from a device: its
-  # record is the card as it now stands.
+  # A follow-up's card, answered from a device: its record is the card as it
+  # now stands.
   defp decide_follow_up(id, decision, origin, opts) do
     with {:ok, _trigger} <- FollowUps.decide(id, decision, decided_from(origin), opts) do
       case FollowUps.card(id, opts) do
         {:ok, card} -> {:ok, Map.drop(ProposalView.follow_up_card(card, opts), [:outside])}
-        other -> decided_record(other, id)
-      end
-    end
-  end
-
-  defp decide_approval(id, decision, origin, opts) do
-    with {:ok, _line} <- FollowUpApprovals.decide(id, decision, decided_from(origin), opts) do
-      case FollowUpApprovals.card(id, opts) do
-        {:ok, card} -> {:ok, ProposalView.approval_card(card, opts)}
         other -> decided_record(other, id)
       end
     end

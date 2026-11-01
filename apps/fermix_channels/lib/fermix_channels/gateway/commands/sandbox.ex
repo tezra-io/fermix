@@ -23,6 +23,10 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
   # or is already running); the confirm's twin is core's own sentence.
   @access_deny_not_found "That request expired or was already handled."
 
+  # `/always` answers nothing but a waiting follow-up's card.
+  @always_cards_only "Nothing here offers Always allow: only a follow-up's card waiting in " <>
+                       "this chat does."
+
   # What the owner is told when a confirmed access-sensitive run crashed.
   @access_outcome_unknown "Confirmed, but the command failed before it reported, so whether it " <>
                             "reached the device is unknown. Check it before sending it again."
@@ -67,7 +71,7 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
   def name, do: "sandbox"
 
   @impl true
-  def aliases, do: ["grant", "revoke", "confirm", "deny"]
+  def aliases, do: ["grant", "revoke", "confirm", "deny", "always"]
 
   @impl true
   def description, do: "Inspect or update sandbox policy."
@@ -80,7 +84,7 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
   # remaining /sandbox subcommands keep the owner-or-allowlist gate. Every
   # subcommand is in the approval family, so a process Fermix started cannot
   # answer or mint a prompt (`Authorization.in_person/1`).
-  @operator_subcommands ["grant", "revoke", "confirm", "deny"]
+  @operator_subcommands ["grant", "revoke", "confirm", "deny", "always"]
 
   @impl true
   def authorize(message, metadata, context) do
@@ -146,10 +150,12 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
   defp dispatch("revoke", ["path", path], _message, reply_fn, _context),
     do: apply_now({:remove_allowed_root, path}, reply_fn)
 
-  # A watcher's card (a mandate's proposal, M60 §10.9, a follow-up's card or
-  # an automatic follow-up's approval prompt) is core's, by its `cp_` token or
-  # its id: durable in `memory.db`, and core checks the message's origin
-  # against the chat it was sent to. Every other token is this store's.
+  # A watcher's card (a mandate's proposal, M60 §10.9, or a follow-up's card)
+  # is core's, by its `cp_` token or its id: durable in `memory.db`, and core
+  # checks the message's origin against the chat it was sent to. Every other
+  # token is this store's. `/always` answers a follow-up's card alone: Run, and
+  # no card for its later items (the 2026-10-31 revision of
+  # M60_WATCHER_CODING_RUNS.md §3.4); nothing in this store takes it.
   defp dispatch("confirm", [token], message, reply_fn, context) do
     if Proposals.answerable?(token),
       do: confirm_proposal(token, message, reply_fn, context),
@@ -162,8 +168,15 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
       else: deny(token, message, reply_fn, context)
   end
 
-  defp dispatch(command, [], message, reply_fn, context) when command in ["confirm", "deny"],
-    do: answer_bare(command, message, reply_fn, context)
+  defp dispatch("always", [token], message, reply_fn, context) do
+    if Proposals.answerable?(token),
+      do: always_allow_proposal(token, message, reply_fn, context),
+      else: reply(reply_fn, @always_cards_only)
+  end
+
+  defp dispatch(command, [], message, reply_fn, context)
+       when command in ["confirm", "deny", "always"],
+       do: answer_bare(command, message, reply_fn, context)
 
   defp dispatch(_name, _args, _message, reply_fn, _context),
     do:
@@ -173,7 +186,7 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
           "/sandbox env allow NAME, /sandbox env deny NAME, /sandbox env set NAME -- CMD [ARGS...], " <>
           "/sandbox env unset NAME, /sandbox commands enable PRESET, " <>
           "/sandbox commands disable PRESET, /grant path PATH, /revoke path PATH, " <>
-          "/confirm [TOKEN], /deny [TOKEN]"
+          "/confirm [TOKEN], /deny [TOKEN], /always [TOKEN]"
       )
 
   defp propose(mutation, message, reply_fn) do
@@ -532,6 +545,13 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
     answer_card(reply_fn, message, proposal_text(result))
   end
 
+  # Only a follow-up's card takes it, whose answer is one Repo call that leaves
+  # the run to the scheduler, so it is answered here, as a deny is.
+  defp always_allow_proposal(token, message, reply_fn, context) do
+    result = Proposals.always_allow(token, proposal_origin(message), proposal_opts(context))
+    answer_card(reply_fn, message, proposal_text(result))
+  end
+
   # A tap on a watcher's card is answered on the card: it becomes the answer's
   # line, and its buttons go (M60_WATCHER_CODING_RUNS.md §6.2). A typed answer
   # is a reply.
@@ -546,23 +566,36 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
 
   # A bare `/confirm` or `/deny` answers the one thing waiting in this chat: a
   # watcher's card held in core, or a parked command or sandbox change held
-  # here. With more than one it answers none, and lists each with the command
-  # that answers it (M60_WATCHER_CODING_RUNS.md §6.2).
+  # here. A bare `/always` answers the one follow-up's card waiting, the only
+  # thing that takes it. With more than one it answers none, and lists each
+  # with the command that answers it (M60_WATCHER_CODING_RUNS.md §6.2).
   defp answer_bare(command, message, reply_fn, context) do
     case Proposals.waiting_in_chat(proposal_origin(message), proposal_opts(context)) do
       {:ok, cards} ->
-        answer_one(command, cards, waiting_here(message), message, reply_fn, context)
+        {cards, held} = answerable_by(command, cards, waiting_here(message))
+        answer_one(command, cards, held, message, reply_fn, context)
 
       {:error, sentence} ->
         reply(reply_fn, sentence)
     end
   end
 
+  defp answerable_by("always", cards, _held),
+    do: {Enum.filter(cards, &(&1.kind == :follow_up)), []}
+
+  defp answerable_by(_command, cards, held), do: {cards, held}
+
   defp answer_one("confirm", [card], [], message, reply_fn, context),
     do: confirm_proposal(card.id, message, reply_fn, context)
 
   defp answer_one("deny", [card], [], message, reply_fn, context),
     do: deny_proposal(card.id, message, reply_fn, context)
+
+  defp answer_one("always", [card], [], message, reply_fn, context),
+    do: always_allow_proposal(card.id, message, reply_fn, context)
+
+  defp answer_one("always", [], [], _message, reply_fn, _context),
+    do: reply(reply_fn, @always_cards_only)
 
   defp answer_one(command, [], [{token, _record}], message, reply_fn, context),
     do: dispatch(command, [token], message, reply_fn, context)

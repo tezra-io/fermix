@@ -31,14 +31,15 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   shell command, a browser task, a plugin action, a message to a channel or an
   image. Fermix hands it nothing from the item, so a stranger's post decides
   when it runs, never what it does; work on the post itself stays the
-  watcher's task or a mandate. By default each run asks first on a short card
-  made for a phone (the post quoted, why it passed, what will run, with
-  Details behind a tap, and Run and Skip on Telegram); automatic, once you
-  approve it on the prompt Fermix sends, runs on its own within the watcher's
-  daily cap, which it needs (Fermix suggests 5), and any change to what it
-  runs or what sets it off asks for that approval again. Fermix checks at
-  setup that everything it needs is ready and says in one sentence what is
-  missing and where to fix it. A tool this computer does not have (a coding
+  watcher's task or a mandate. Each run asks first on a short card made for a
+  phone (the post quoted, why it passed, what will run, with Details behind a
+  tap, and Run, Skip and Always allow on Telegram). Always allow runs that one
+  and lets every later item run it with no card, until you change what it
+  runs or what sets it off, when it asks again; "make it ask first again" in
+  chat, or the Fermix app, takes it back. There is no limit to set: the
+  watcher's own daily cap counts its runs only if you gave it one. Fermix
+  checks at setup that everything it needs is ready and says in one sentence
+  what is missing and where to fix it. A tool this computer does not have (a coding
   agent not installed, a plugin not added) leaves the follow-up out, while a
   watcher with a task is still made, so you ask again once it is installed;
   one that is here but not ready (signed out, a plugin not connected, the
@@ -49,7 +50,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   older than 15 minutes set nothing off, it runs one at a time, and "stop the
   follow-up" or "run the follow-up now" works in chat. A
   bare /confirm or /deny answers the one thing waiting in that chat, and lists
-  the choices when several wait.
+  the choices when several wait; /always answers a follow-up's card the way
+  its Always allow button does.
 - **The agent signs in to websites with logins you save in the Mac app.**
   Save a site, a username and a password in Settings > Browser > Website
   logins in the Fermix app, and the agent can sign in there from the app's own

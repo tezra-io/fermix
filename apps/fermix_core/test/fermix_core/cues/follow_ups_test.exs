@@ -2,8 +2,8 @@ defmodule FermixCore.Cues.FollowUpsTest do
   @moduledoc """
   Watcher follow-ups (M60_WATCHER_CODING_RUNS.md §4, §5, §9): a passing item
   writes one trigger keyed by its delivery, within freshness, the daily cap and
-  one waiting card; a task-less watcher settles its item at once; an automatic
-  follow-up runs alone only while its approval's digest holds; the card's
+  one waiting card; a task-less watcher settles its item at once; an always
+  allowed follow-up runs alone only while its approval's digest holds; the card's
   answers, the hold, the expiry, the notices and the follow-up's lifecycle.
   """
   use ExUnit.Case, async: true
@@ -19,6 +19,7 @@ defmodule FermixCore.Cues.FollowUpsTest do
   alias FermixCore.Jobs.CueAdmission
   alias FermixCore.Jobs.Registry, as: JobsRegistry
   alias FermixCore.Memory.Repo
+  alias FermixCore.Memory.Repo.CuesFollowUpAllowSql
   alias FermixCore.Memory.Repo.CuesFollowUpSql
   alias FermixCore.Memory.Repo.CuesRunsSql
   alias FermixCore.Memory.Repo.CuesSql
@@ -100,7 +101,7 @@ defmodule FermixCore.Cues.FollowUpsTest do
     end
 
     test "the daily cap counts follow-ups started or proposed, never one skipped", ctx do
-      watcher = follow_up_watcher!(ctx, daily_cap: 2, mode: "auto")
+      watcher = follow_up_watcher!(ctx, daily_cap: 2)
       approve!(ctx, watcher)
 
       pass!(ctx, 1, DateTime.add(@now, -20 * 60, :second))
@@ -137,53 +138,52 @@ defmodule FermixCore.Cues.FollowUpsTest do
     end
   end
 
-  # --- automatic and its approval (§3.4, §5) ------------------------------------------
+  # --- Always allow (2026-10-31 revision of §3.4, §5) ---------------------------------
 
-  describe "an automatic follow-up" do
-    test "needs the watcher's daily cap, and Fermix suggests 5", ctx do
-      sentence =
-        "An automatic follow-up needs a daily cap on the watcher: say how many runs a day it " <>
-          "may cause (Fermix suggests 5)."
-
-      assert {:error, ^sentence} =
+  describe "an always-allowed follow-up" do
+    test "is set up asking first, with no daily cap and nothing to approve", ctx do
+      assert {:ok, %{watcher: watcher, echo: echo}} =
                Watchers.create(
                  params(ctx, %{
                    filter: "llm",
                    purpose: "limits",
                    listen_for: ["reset"],
                    daily_cap: "none",
-                   follow_up: follow_up_params(%{mode: "auto"})
+                   follow_up: follow_up_params(%{})
                  }),
                  context(),
                  opts(ctx)
                )
 
-      watcher = follow_up_watcher!(ctx, daily_cap: 3, mode: "auto")
-      assert {:error, ^sentence} = Watchers.update(watcher.name, %{daily_cap: "none"}, opts(ctx))
+      assert watcher.daily_cap == 0
+      refute Map.has_key?(watcher, :follow_up_mode)
+      assert {:ok, false} = Watchers.always_allowed(watcher, opts(ctx))
 
-      asking = follow_up_watcher!(ctx, name: "asking", daily_cap: 3)
-      assert {:ok, _} = Watchers.update(asking.name, %{daily_cap: "none"}, opts(ctx))
+      assert echo =~
+               "  Asks first: each run waits for your tap on a short card, whose Always allow " <>
+                 "lets it run with no card from then on."
 
-      assert {:error, ^sentence} =
-               Watchers.set_follow_up(asking.name, %{mode: "auto"}, context(), opts(ctx))
+      refute echo =~ "daily cap"
+      refute echo =~ "approve"
     end
 
-    test "asks first until approved, then runs alone", ctx do
-      watcher = follow_up_watcher!(ctx, mode: "auto")
+    test "asks first until always allowed, then runs alone", ctx do
+      watcher = follow_up_watcher!(ctx)
 
       pass!(ctx, 1)
       approve!(ctx, watcher)
+      assert {:ok, true} = Watchers.always_allowed(watcher, opts(ctx))
       pass!(ctx, 2)
 
       assert [%{state: "waiting", mode: "approve"}, %{state: "starting", mode: "auto"}] =
                triggers(ctx, watcher)
     end
 
-    test "a change to what it runs or what sets it off clears the approval", ctx do
-      watcher = follow_up_watcher!(ctx, mode: "auto")
+    test "a change to what it runs or what sets it off clears it", ctx do
+      watcher = follow_up_watcher!(ctx)
       job_id = watcher.follow_up_job_id
 
-      # Approved, then changed through `update_job` itself: the next item asks first.
+      # Allowed, then changed through `update_job` itself: the next item asks first.
       approve!(ctx, watcher)
       {:ok, _} = JobsRegistry.update_job(job_id, %{task_prompt: "Other."}, registry_opts(ctx))
       pass!(ctx, 1)
@@ -230,19 +230,17 @@ defmodule FermixCore.Cues.FollowUpsTest do
       ]
 
       for change <- changes do
-        approve!(ctx, watcher)
-        {:ok, approved} = Watchers.current_follow_up_digest(watcher.name, opts(ctx))
+        approved = approve!(ctx, watcher)
         assert {:ok, _changed} = change.()
-        {:ok, now} = Watchers.current_follow_up_digest(watcher.name, opts(ctx))
-        refute now == approved
+        refute current_digest(ctx, watcher) == approved
         assert approval_columns(ctx, watcher) == [nil, nil]
       end
     end
 
-    # §5: the approval is cleared, never left to match again, so a change and its
-    # undoing leave the follow-up asking first until the owner approves it again.
-    test "a change undone does not bring the approval back", ctx do
-      watcher = follow_up_watcher!(ctx, mode: "auto")
+    # The approval is cleared, never left to match again, so a change and its
+    # undoing leave the follow-up asking first until the owner allows it again.
+    test "a change undone does not bring it back", ctx do
+      watcher = follow_up_watcher!(ctx)
       job_id = watcher.follow_up_job_id
 
       approve!(ctx, watcher)
@@ -259,28 +257,50 @@ defmodule FermixCore.Cues.FollowUpsTest do
       {:ok, _} = JobsRegistry.update_job(job_id, %{task_prompt: @prompt}, registry_opts(ctx))
       assert approval_columns(ctx, watcher) == [nil, nil]
 
-      # A change outside what it is bound to keeps it.
+      # A change outside what it is bound to keeps it, a daily cap among them.
       approve!(ctx, watcher)
       {:ok, _} = Watchers.update(watcher.name, %{daily_cap: 4}, opts(ctx))
+      {:ok, _} = Watchers.update(watcher.name, %{daily_cap: "none"}, opts(ctx))
       assert [approved_at, digest] = approval_columns(ctx, watcher)
       assert is_binary(approved_at) and is_binary(digest)
     end
 
-    test "the approval is refused for what the owner was not shown", ctx do
-      watcher = follow_up_watcher!(ctx, mode: "auto")
-      {:ok, shown} = Watchers.current_follow_up_digest(watcher.name, opts(ctx))
+    test "the owner takes it back in chat, and the next item asks again", ctx do
+      watcher = follow_up_watcher!(ctx)
+      TelemetryCapture.attach([[:fermix, :cue, :lifecycle]], watcher_id: watcher.id)
+      approve!(ctx, watcher)
 
-      {:ok, _} =
-        Watchers.set_follow_up(watcher.name, %{prompt: "Something else."}, context(), opts(ctx))
+      assert {:error, "Only your Always allow on one of its cards lets it run with no card."} =
+               Watchers.set_follow_up(watcher.name, %{always_allow: true}, context(), opts(ctx))
 
-      assert {:error, "The follow-up or what sets it off changed since you were asked" <> _} =
-               Watchers.approve_follow_up(watcher.name, shown, opts(ctx))
+      assert {:ok, %{echo: echo}} =
+               Watchers.set_follow_up(watcher.name, %{always_allow: false}, context(), opts(ctx))
 
-      asking = follow_up_watcher!(ctx, name: "asking")
-      {:ok, digest} = Watchers.current_follow_up_digest(asking.name, opts(ctx))
+      assert echo ==
+               "Watcher codex-limits's follow-up asks first again: each run waits for your " <>
+                 "tap on its card."
 
-      assert {:error, "Watcher asking's follow-up asks first; make it automatic first."} =
-               Watchers.approve_follow_up(asking.name, digest, opts(ctx))
+      assert approval_columns(ctx, watcher) == [nil, nil]
+
+      assert_receive {:telemetry, _event, _measurements,
+                      %{phase: :follow_up_always_allow_revoked, kind: "chat"} = meta}
+
+      assert meta.job_id == watcher.follow_up_job_id
+
+      pass!(ctx, 1)
+      assert [%{state: "waiting", mode: "approve"}] = triggers(ctx, watcher)
+
+      assert {:ok, %{echo: "Watcher codex-limits's follow-up already asks first" <> _}} =
+               Watchers.set_follow_up(watcher.name, %{always_allow: false}, context(), opts(ctx))
+
+      refute_received {:telemetry, _event, _measurements,
+                       %{phase: :follow_up_always_allow_revoked}}
+
+      both = follow_up_watcher!(ctx, name: "both", task: "Tell me.", ref: "b")
+      {:ok, _stopped} = Watchers.remove_follow_up(both.name, opts(ctx))
+
+      assert {:error, "Watcher both has no follow-up."} =
+               Watchers.set_follow_up(both.name, %{always_allow: false}, context(), opts(ctx))
     end
   end
 
@@ -443,7 +463,7 @@ defmodule FermixCore.Cues.FollowUpsTest do
 
     # The owner tapped Run and was told it is starting: a hold found when its turn
     # comes reaches them through where the follow-up reports, and every app hears
-    # its end. An automatic trigger, which nobody confirmed, is traced only.
+    # its end. An always-allowed trigger, which nobody confirmed, is traced only.
     test "a confirmed trigger held when its turn comes reaches the owner", ctx do
       watcher = follow_up_watcher!(ctx)
       pass!(ctx, 1)
@@ -480,7 +500,7 @@ defmodule FermixCore.Cues.FollowUpsTest do
 
       assert id == trigger.id
 
-      automatic = follow_up_watcher!(ctx, name: "automatic", mode: "auto", ref: "auto-feed")
+      automatic = follow_up_watcher!(ctx, name: "automatic", ref: "auto-feed")
       approve!(ctx, automatic)
       pass!(ctx, 2, @now, "auto-feed")
       assert [] = CueAdmission.claim_follow_ups(1, @now, &%{id: &1}, admission)
@@ -646,7 +666,7 @@ defmodule FermixCore.Cues.FollowUpsTest do
       both = follow_up_watcher!(ctx, name: "both", task: "Tell me.", ref: "b")
       assert {:ok, _stopped} = Watchers.remove_follow_up(both.name, opts(ctx))
       assert {:ok, shown} = Watchers.show(both.name, opts(ctx))
-      assert {shown.follow_up_job_id, shown.follow_up_mode} == {nil, nil}
+      assert shown.follow_up_job_id == nil
       assert {:error, :not_found} = JobsRegistry.get_job(both.follow_up_job_id, repo: ctx.repo)
     end
   end
@@ -654,11 +674,7 @@ defmodule FermixCore.Cues.FollowUpsTest do
   # --- fixtures --------------------------------------------------------------------------
 
   defp follow_up_watcher!(ctx, attrs \\ []) do
-    follow_up =
-      follow_up_params(%{
-        mode: Keyword.get(attrs, :mode, "approve"),
-        allowed_tools: Keyword.get(attrs, :tools, ["shell"])
-      })
+    follow_up = follow_up_params(%{allowed_tools: Keyword.get(attrs, :tools, ["shell"])})
 
     params =
       params(ctx, %{
@@ -685,9 +701,11 @@ defmodule FermixCore.Cues.FollowUpsTest do
   defp follow_up_params(extra),
     do: Map.merge(%{name: "Codex review", prompt: @prompt, allowed_tools: ["shell"]}, extra)
 
-  defp approve!(ctx, watcher) do
-    {:ok, digest} = Watchers.current_follow_up_digest(watcher.name, opts(ctx))
-    {:ok, _approved} = Watchers.approve_follow_up(watcher.name, digest, opts(ctx))
+  defp approve!(ctx, watcher), do: always_allow!(ctx.conn, watcher.id)
+
+  defp current_digest(ctx, watcher) do
+    {:ok, digest} = CuesFollowUpAllowSql.current_digest(ctx.conn, watcher.id)
+    digest
   end
 
   defp pass!(ctx, n, occurred_at \\ @now, ref \\ nil) do

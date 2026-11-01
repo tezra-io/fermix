@@ -17,10 +17,10 @@ defmodule FermixCore.Tools.ManageWatcher.FollowUp do
     names no coding agent, is the configured default, else the one that is
     ready, else Fermix asks which (`Cues.FollowUpReadiness.coding_agent/1`).
   - **The summary** adds the readiness check's sentence while the follow-up is
-    held (`Cues.FollowUps.held/2`), a plugin skill's lower trust, and the
-    automatic approval: a follow-up that became automatic, or stayed automatic
-    after a change that cleared its approval, gets its prompt
-    (`Cues.FollowUpApprovals.ask/2`), and the summary says what that costs.
+    held (`Cues.FollowUps.held/2`) and a plugin skill's lower trust.
+  - **Always allow** is granted only by the owner's answer on one of its cards
+    (`Cues.FollowUps`), never here; `always_allow: false` takes it back
+    (`Cues.Watchers.ask_first/3`).
 
   The caller has checked consent (the owner's consent turn) before any of this.
   """
@@ -28,22 +28,20 @@ defmodule FermixCore.Tools.ManageWatcher.FollowUp do
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Capabilities.AccessGate
   alias FermixCore.Cues.Card
-  alias FermixCore.Cues.FollowUpApprovals
   alias FermixCore.Cues.FollowUpReadiness
   alias FermixCore.Cues.FollowUps
   alias FermixCore.Cues.Watchers
-  alias FermixCore.Jobs.Registry, as: JobsRegistry
   alias FermixCore.Jobs.Scheduler
   alias FermixCore.Tools.JobRegistrySupport
 
   @coding_agent "coding_agent"
-  @not_an_object "follow_up is an object: its instructions, its tools and its mode."
+  @not_an_object "follow_up is an object: its instructions and its tools."
 
   # The argument's keys and the `Cues.Watchers` follow-up keys they become.
   @plain_keys %{
     "name" => :name,
     "instructions" => :prompt,
-    "mode" => :mode,
+    "always_allow" => :always_allow,
     "timeout_minutes" => :timeout_minutes,
     "delivery_target" => :delivery_target,
     "delivery_mode" => :delivery_mode
@@ -80,14 +78,12 @@ defmodule FermixCore.Tools.ManageWatcher.FollowUp do
         skill: %{type: "string", description: "A skill to run it in."},
         provider: %{type: "string", description: "With model: the route its runs use."},
         model: %{type: "string", description: "With provider: the model its runs use."},
-        mode: %{
-          type: "string",
-          enum: ["approve", "auto"],
+        always_allow: %{
+          type: "boolean",
+          enum: [false],
           description:
-            "approve (the default): each run waits for the owner's tap on a short card. " <>
-              "auto: only when the owner asks; it runs on each passing item within the " <>
-              "watcher's daily cap once the owner approves it on the prompt Fermix sends, and " <>
-              "it needs daily_cap: when the owner gave none, ask for one, suggesting 5."
+            "update only: false takes back the owner's Always allow, so each run asks first " <>
+              "again. Only the owner's tap on one of its cards grants it."
         },
         timeout_minutes: %{type: "integer", description: "Its run limit, 1 to 30."},
         delivery_target: %{
@@ -220,48 +216,17 @@ defmodule FermixCore.Tools.ManageWatcher.FollowUp do
   # --- the summary ------------------------------------------------------------------
 
   @doc """
-  Where watcher `name`'s follow-up stands on running by itself before a change
-  (`Cues.Watchers.follow_up_approval/2`), so the summary can tell a change that
-  cleared the approval. A watcher that cannot be read is nil: the change then
-  reads it and answers why.
-  """
-  @spec approval_before(String.t(), keyword()) :: atom() | nil
-  def approval_before(name, opts) when is_binary(name) and is_list(opts) do
-    with {:ok, watcher} <- Watchers.show(name, opts),
-         {:ok, approval} <- Watchers.follow_up_approval(watcher, opts) do
-      approval
-    else
-      {:error, _sentence} -> nil
-    end
-  end
-
-  @doc """
-  The summary of a change to watcher `name`: `result`'s echo, then, for a
+  The summary of a change to a watcher: `result`'s echo, then, for a
   follow-up set or changed (`result.follow_up_job`), the readiness check's
-  sentence while it is held and a plugin skill's lower trust, then the
-  automatic approval. `before` is `approval_before/2`'s; `asked_auto?` says the
-  owner asked for automatic in this change.
+  sentence while it is held and a plugin skill's lower trust.
   """
-  @spec summarize(
-          {:ok, map()} | {:error, String.t()},
-          String.t(),
-          atom() | nil,
-          boolean(),
-          map(),
-          keyword()
-        ) ::
+  @spec summarize({:ok, map()} | {:error, String.t()}, map(), keyword()) ::
           {:ok, String.t()} | {:error, String.t()}
-  def summarize({:error, sentence}, _name, _before, _asked_auto?, _context, _opts),
-    do: {:error, sentence}
+  def summarize({:error, sentence}, _context, _opts), do: {:error, sentence}
 
-  def summarize({:ok, %{echo: echo} = result}, name, before, asked_auto?, context, opts) do
+  def summarize({:ok, %{echo: echo} = result}, context, opts) do
     job = Map.get(result, :follow_up_job)
-
-    lines =
-      [echo] ++
-        held_lines(job, opts) ++
-        skill_lines(job, context) ++ approval_lines(name, before, asked_auto?, opts)
-
+    lines = [echo] ++ held_lines(job, opts) ++ skill_lines(job, context)
     {:ok, Enum.join(lines, "\n")}
   end
 
@@ -301,40 +266,6 @@ defmodule FermixCore.Tools.ManageWatcher.FollowUp do
   end
 
   defp skill_lines(_job, _context), do: []
-
-  # A follow-up that became automatic, or stayed automatic while a change left its
-  # approval behind, gets the prompt; one already waiting for it (the owner kept
-  # asking, or a prompt is out) is asked again only when the owner asks for automatic.
-  defp approval_lines(name, before, asked_auto?, opts) do
-    with {:ok, watcher} <- Watchers.show(name, opts),
-         {:ok, now} <- Watchers.follow_up_approval(watcher, opts) do
-      cond do
-        now != :unapproved -> []
-        before != :unapproved or asked_auto? -> [cost_line(watcher, opts), ask(name, opts)]
-        true -> ["It is not approved to run on its own yet, so each run asks first."]
-      end
-    else
-      {:error, sentence} -> [sentence]
-    end
-  end
-
-  defp cost_line(watcher, opts) do
-    case JobsRegistry.get_job(watcher.follow_up_job_id, repo: Keyword.fetch!(opts, :repo)) do
-      {:ok, job} ->
-        ~s(Automatic means a run of "#{job.name}" with #{Enum.join(job.allowed_tools, ", ")} ) <>
-          "each time an item passes, at most #{watcher.daily_cap} a day."
-
-      {:error, reason} ->
-        "Fermix could not read the follow-up's job: #{inspect(reason)}"
-    end
-  end
-
-  defp ask(name, opts) do
-    case FollowUpApprovals.ask(name, opts) do
-      {:ok, sentence} -> sentence
-      {:error, sentence} -> sentence <> " Until it is approved, each run asks first."
-    end
-  end
 
   # --- run by hand ------------------------------------------------------------------
 

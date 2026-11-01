@@ -1940,6 +1940,12 @@
     },
     {
       "method": "(schema)",
+      "field": "methods:cues.watchers.always_allow.revoke",
+      "kind": "engine_only",
+      "why": "The 2026-10-31 revision of M60_WATCHER_CODING_RUNS.md: a follow-up's Always allow, which the owner grants on a card, is taken back from the app. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls it; the app finds it in hello's methods."
+    },
+    {
+      "method": "(schema)",
       "field": "methods:cues.watchers.get",
       "kind": "engine_only",
       "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build, and every build has cues. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
@@ -2081,6 +2087,12 @@
       "field": "minimum_versions:cues.status=2",
       "kind": "engine_only",
       "why": "The cue methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:cues.watchers.always_allow.revoke=2",
+      "kind": "engine_only",
+      "why": "Always allow's revoke is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates it, so its table has no entry; the addition is additive and needs no protocol bump."
     },
     {
       "method": "(schema)",
@@ -2245,6 +2257,12 @@
       "why": "M60 app surface: the cue methods postdate the draft. A source is named by its ref and a mandate or a watcher by its name; an add or an update carries the form's values by row key, and a source's add its kind or preset; a proposal is answered by its id and a decision, with no token."
     },
     {
+      "method": "cues.watchers.always_allow.revoke",
+      "field": "params:name",
+      "kind": "engine_only",
+      "why": "The 2026-10-31 revision of M60_WATCHER_CODING_RUNS.md postdates the draft: a watcher is named by its name, as cues.watchers.get names it."
+    },
+    {
       "method": "cues.watchers.get",
       "field": "params:name",
       "kind": "engine_only",
@@ -2381,6 +2399,12 @@
       "field": "capabilities.minimum_versions.cues.status",
       "kind": "engine_only",
       "why": "The cue methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.cues.watchers.always_allow.revoke",
+      "kind": "engine_only",
+      "why": "Always allow's revoke is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates it, so its table has no entry; the addition is additive and needs no protocol bump."
     },
     {
       "method": "hello",

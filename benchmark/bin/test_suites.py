@@ -608,8 +608,8 @@ def test_the_shipped_numbered_rubrics_parse():
                       "mandates_needing_approval": 3, "codex_review_on_release": 4,
                       "status_script_on_outage": 3, "claude_code_changelog_on_release": 3,
                       "claude_code_issue_triage_on_report": 3, "codex_quotes_the_post": 3,
-                      "summarise_each_post_into_notes": 3, "automatic_with_a_cap": 3,
-                      "automatic_without_a_cap": 3,
+                      "summarise_each_post_into_notes": 3, "run_every_time_without_asking": 4,
+                      "stop_asking_me_each_time": 4,
                       # lists.yaml
                       "batteries": 2, "garden_and_kitchen": 3, "groceries": 2,
                       "hardware": 2, "landing_page": 2, "newsletter": 2,

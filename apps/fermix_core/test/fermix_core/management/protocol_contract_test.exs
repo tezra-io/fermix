@@ -1679,7 +1679,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
       watcher
     ])
 
-    # The watcher's follow-up, which asks first (M60_WATCHER_CODING_RUNS.md §3.5).
+    # The watcher's follow-up (M60_WATCHER_CODING_RUNS.md §3.5).
     {:ok, follow_up} =
       JobsRegistry.create_follow_up_job(
         %{
@@ -1694,11 +1694,14 @@ defmodule FermixCore.Management.ProtocolContractTest do
         scheduler: nil
       )
 
-    CueFixtures.exec!(
-      conn,
-      "UPDATE cue_watchers SET follow_up_job_id = ?, follow_up_mode = 'approve' WHERE id = ?",
-      [follow_up.id, watcher]
-    )
+    CueFixtures.exec!(conn, "UPDATE cue_watchers SET follow_up_job_id = ? WHERE id = ?", [
+      follow_up.id,
+      watcher
+    ])
+
+    # Always allowed from one of its cards, so the list and get goldens show it
+    # and the revoke golden shows it taken back.
+    CueFixtures.always_allow!(conn, watcher)
 
     for request <- [
           {:source_reject, "gh-hooks", %{"unauthorized" => 3}, now},
@@ -1760,6 +1763,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
       {"cues.sources.form", %{"preset" => "github"}, opts},
       {"cues.watchers.list", %{}, opts},
       {"cues.watchers.get", %{"name" => "release-watch"}, opts},
+      {"cues.watchers.always_allow.revoke", %{"name" => "release-watch"}, opts},
       {"cues.mandates.list", %{}, opts},
       {"cues.mandates.choices", %{}, opts},
       {"cues.proposals.list", %{}, opts},

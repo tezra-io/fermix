@@ -160,6 +160,7 @@ defmodule FermixChannels.Companion.ConnectionProposalsTest do
     assert %{"type" => "proposal", "proposal" => wire} = recv(owner)
     assert wire["proposal_id"] == "cft_1"
     assert wire["follow_up"]["asks"] == "run"
+    assert wire["follow_up"]["offers_always_allow"] == true
     assert wire["follow_up"]["tools"] == ["shell"]
     refute Map.has_key?(wire, "mandate")
     refute Map.has_key?(wire["outside"], "args_text")
@@ -320,6 +321,26 @@ defmodule FermixChannels.Companion.ConnectionProposalsTest do
            } = recv(owner)
 
     refute_receive {:executed, _tool, _args, _context}, 100
+  end
+
+  # The 2026-10-31 revision of M60_WATCHER_CODING_RUNS.md: `always_allow` is a
+  # follow-up's card's answer; the wire takes it, and a mandate's card refuses it.
+  test "always_allow on a mandate's proposal is refused by core, and it still waits", ctx do
+    id = propose!(ctx)
+    owner = hello(ctx.socket_path, 6)
+    assert %{"type" => "proposal"} = recv(owner)
+
+    send_line(owner, answer("mac-6", id, "always_allow"))
+
+    assert recv(owner) == %{
+             "type" => "error",
+             "reason" => "request_failed",
+             "message" => "Only a follow-up's card offers Always allow; nothing ran.",
+             "client_msg_id" => "mac-6"
+           }
+
+    refute_receive {:executed, _tool, _args, _context}, 100
+    assert [{^id, "waiting"}] = F.proposals(ctx.fixture.conn)
   end
 
   test "an answer after the proposal expired runs nothing", ctx do
