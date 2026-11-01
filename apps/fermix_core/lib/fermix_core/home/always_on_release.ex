@@ -10,7 +10,8 @@ defmodule FermixCore.Home.AlwaysOnRelease do
   Where it is off, the management wire's `hello` lists none of Always On's
   methods (`methods/0`) and the router refuses each by name (`refusal/1`),
   the setup page lists no Always On tab and takes no Always On event, and
-  `fermix always-on` refuses with `sentence/0` before it reads anything.
+  `fermix always-on` and `fermix home status` refuse with `sentence/0`
+  before they read anything.
   Everything else of the home is as it was: snapshots and the recovery
   passphrase, the link of a desktop to its server, and a server's own
   `fermix home enroll`.
