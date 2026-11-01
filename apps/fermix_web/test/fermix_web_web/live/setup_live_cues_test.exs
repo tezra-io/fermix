@@ -489,6 +489,26 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
       assert screen_hint(html) == "Set up OpenAI, OpenRouter or Venice first."
     end
 
+    test "picking an option highlights it at once, before Save, with the decision model's picker",
+         %{conn: conn} do
+      Application.put_env(:fermix_core, :providers, openai: [api_key: "invented-key-2207"])
+      {:ok, view, _html} = live(conn, "/setup")
+      open_cues(view)
+
+      html =
+        view
+        |> form("#cues-settings-form", cues_settings: %{screen: "decision_model"})
+        |> render_change()
+
+      assert screen_options(html) == [
+               {"", "Keyword match", false},
+               {"decision_model", "Decision model", true}
+             ]
+
+      assert html =~ ~s(id="cues-decision-provider")
+      assert persisted_cues() == []
+    end
+
     test "the decision model is refused under the Screen while none is set up, and nothing is written",
          %{conn: conn} do
       Application.put_env(:fermix_core, :providers, anthropic: [api_key: "invented-key-2207"])

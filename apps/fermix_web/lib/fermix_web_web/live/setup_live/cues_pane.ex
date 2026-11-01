@@ -522,11 +522,11 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
         Screen <.info text={@screen.info} />
       </span>
       <div role="radiogroup" aria-label="Screen" class="grid gap-2 sm:grid-cols-2">
-        <.screen_option value="" choice={@screen.keyword} checked={@screen.value == ""} />
+        <.screen_option value="" choice={@screen.keyword} checked={@screen.selected == ""} />
         <.screen_option
           value="decision_model"
           choice={@screen.decision_model}
-          checked={@screen.value == "decision_model"}
+          checked={@screen.selected == "decision_model"}
         />
       </div>
       <.decision_provider
