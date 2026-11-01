@@ -22,18 +22,24 @@ The modules it describes:
   (stop the job, wait for its run, clear the name, delete what stands), and
   the forwarded Move now with its bookkeeping.
 - `FermixCore.Management.Provision`: `put_action`, `clear_action`,
-  `holding`, `stop_step`, the family's job wrapper (`start`, `step`,
-  `end_step`), `delete`, `move_forwarded` (`started?`, `record_move`) and
-  `primary_reached` (`reached`, `run_clean_up`).
+  `holding`, `stop_step`, the family's job wrapper (`start`, which gives a
+  step's job its ending) and a step's one ending (`ended`, `ending`: the
+  failure the run answered, or the interruption of a run that answered
+  nothing, then the name cleared, in one write), `delete`, `move_forwarded`
+  (`started?`, `record_move`) and `primary_reached` (`reached`,
+  `run_clean_up`).
 - `FermixCore.Home.Provision.Ledger`: `put_action` (refused while a live
-  step's name stands), `clear_action`, `move_started`, `replace_due` and
-  `moved`.
+  step's name stands), `clear_action`, `end_step` and `interrupt` (what a
+  step's ending writes), `move_started`, `replace_due` and `moved`.
 - `FermixCore.Management.Jobs`: one running job per kind and name
-  (`running?`), and `cancel`, which answers after the run's `:DOWN`
-  (`cancel_job`, `stop_job`, `task_down`).
+  (`running?`), `cancel`, which answers after the run's `:DOWN`
+  (`cancel_job`, `stop_job`, `task_down`, `stopped`), and a job's ending,
+  which the family runs however the run ended, before the job leaves
+  running (`finish`, `begin_ending`, `end_closing`).
 - `FermixCore.Management.HomeSummary`: the actions a desktop's summary offers
   during a replace (`running`, `running_step`, `replace_moving`,
-  `new_server_step`) and `find_action`.
+  `new_server_step`, and `cleanup`, the ready new server's Delete, which the
+  spec's Cancel stands for), `offered` and `find_action`.
 - The old server (its `home.move.start` and its move) and the desktop relay
   (`Desktop.Relay`, which calls `primary_reached/2` at each session's epoch)
   are **unpinned mirrors**: the old server takes a forwarded
@@ -60,18 +66,19 @@ the spec STALE when one of them changes:
 
 - `apps/fermix_core/lib/fermix_core/management/always_on.ex`, whole;
 - `apps/fermix_core/lib/fermix_core/management/provision.ex`, by function:
-  `put_action`, `clear_action`, `holding`, `stop_step`, `start`, `step`,
-  `end_step`, `delete`, `move_forwarded`, `started?`, `record_move`,
+  `put_action`, `clear_action`, `holding`, `stop_step`, `start`, `ended`,
+  `ending`, `delete`, `move_forwarded`, `started?`, `record_move`,
   `primary_reached`, `reached`, `run_clean_up`;
 - `apps/fermix_core/lib/fermix_core/home/provision/ledger.ex`, by function:
-  `put_action`, `clear_action`, `live_action?`, `move_started`,
-  `replace_due`, `moving?`, `moved`;
+  `put_action`, `clear_action`, `end_step`, `interrupt`, `live_action?`,
+  `move_started`, `replace_due`, `moving?`, `moved`;
 - `apps/fermix_core/lib/fermix_core/management/jobs.ex`, by function:
   `start`, `cancel`, `handle_call`, `start_job`, `cancel_job`, `stop_job`,
-  `task_down`, `running?`;
+  `task_down`, `stopped`, `finish`, `begin_ending`, `end_closing`,
+  `running?`;
 - `apps/fermix_core/lib/fermix_core/management/home_summary.ex`, by function:
-  `find_action`, `running`, `running_step`, `replace_moving`,
-  `new_server_step`.
+  `offered`, `find_action`, `running`, `running_step`, `replace_moving`,
+  `new_server_step`, `cleanup`.
 
 ## Switches
 
@@ -81,12 +88,14 @@ the spec STALE when one of them changes:
 | `AnswerCanBeLost` | environment | the old server had the move's start and its answer was lost (`unconfirmed`) |
 | `LinkCanDrop` | environment | the link is down: the old server never had the request |
 | `ReadsReconcile` | environment | a `home.status` read starts the family's reconcile |
+| `RunCanCrash` | environment | a step's run raises, exits or is killed before it answers |
 | `Serialized` | mechanism | acts run one at a time in the `AlwaysOn` process (`act/2`'s call, `handle_call`) |
 | `KeyRule` | mechanism | the act runs only an action the summary offers now (`find_action/3`); `FALSE` runs what the surface drew |
 | `JobsBusy` | mechanism | the family runs one job at a time (`Jobs.running?`) |
 | `UnstartedClears` | mechanism | a start refused after the name was written clears it (`AlwaysOn.unstarted`) |
-| `ClearOnEnd` | mechanism | a step's job ends by clearing its name (`Provision.step` `:clears_action`) |
-| `KeepFailure` | mechanism | a step that stopped keeps its failure in the ledger |
+| `ClearOnEnd` | mechanism | a step's ending clears its name (`Provision.ended/3`, `:clears_action`) |
+| `KeepFailure` | mechanism | a step that stopped keeps its failure in the ledger: the one its run answered, or the interruption of one that answered nothing |
+| `OwnerEnds` | mechanism | the job family runs the step's ending however its run ended (`Jobs`' `:ending`), a run that crashed, exited or was killed included; `FALSE` ends only a run that answered, as a task-local `after` would |
 | `CancelWaits` | mechanism | `Jobs.cancel/2` answers after the run's `:DOWN`, the job counted running until then |
 | `RecordOnAnswer` | mechanism | the replace's move is kept only once the old server had it, started or unconfirmed (`move_forwarded`'s `started?`) |
 | `EpochGuard` | mechanism | the old server is cleaned up only for an epoch above its own (`replace_due/2`, `moved/3`) |
@@ -94,12 +103,13 @@ the spec STALE when one of them changes:
 ## What holds
 
 `01_one_run_and_endings` (two surfaces, two presses each, two reports, one
-read): one run of the family lives at a time (`AtMostOneRun`, needs
+read, runs that may crash): one run of the family lives at a time (`AtMostOneRun`, needs
 `JobsBusy`), the delete a cancel starts never runs beside the create it
 stopped (`NoDeleteBesideCancelled`, needs `CancelWaits`), a step's name stands
 only while its step runs or its act is between the name and the start
 (`ActionMeansStep`, needs `ClearOnEnd` and `UnstartedClears`), and every
-ending is kept (`EndingKept`, needs `KeepFailure`).
+ending is kept, a run that crashed, exited or was killed included
+(`EndingKept`, needs `KeepFailure` and `OwnerEnds`).
 
 `07_move_rules` (the same bounds): no delete removes the server a move goes
 to (`CancelNeverDeletesMoveTarget`, needs `KeyRule` and `Serialized`), the
@@ -121,7 +131,8 @@ act keeps the move. `Ledger.move_started/3` then finds no replace waiting
 no Cancel, so nothing deletes the new server.
 
 Run once by hand with one more surface (three surfaces, two presses each, two
-reports, one read), every rule of both checks together: no error, 7,202,419 distinct states, about two minutes on two workers.
+reports, one read, runs that may crash), every rule of both checks together:
+no error, 8,983,692 distinct states, about a minute and a half on two workers.
 
 ## Findings
 

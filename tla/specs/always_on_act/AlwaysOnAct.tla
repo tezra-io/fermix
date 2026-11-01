@@ -24,14 +24,20 @@
 (*    forwarded_move sends home.move.start and keeps the replace's move   *)
 (*    (Provision.move_forwarded/3).                                       *)
 (*  - Management.Provision: put_action, clear_action, holding, stop_step, *)
-(*    start (the family's one job wrapper) and step (a step's job ends by *)
-(*    clearing its name, end_step), delete, move_forwarded with started?  *)
-(*    and record_move, primary_reached with reached and run_clean_up.     *)
+(*    start (the family's one job wrapper, which gives a step's job its   *)
+(*    ending) and ended/ending (the one ending of a step: the failure the *)
+(*    run answered, or the interruption of a run that answered nothing,   *)
+(*    then its name cleared, in one write), delete, move_forwarded with   *)
+(*    started? and record_move, primary_reached with reached and          *)
+(*    run_clean_up.                                                        *)
 (*  - Home.Provision.Ledger: put_action (refused while a live step's name *)
-(*    stands), clear_action, move_started, replace_due and moved.        *)
-(*  - Management.Jobs: one running job per kind and name (running?), and  *)
+(*    stands), clear_action, end_step and interrupt (what a step's ending *)
+(*    writes), move_started, replace_due and moved.                       *)
+(*  - Management.Jobs: one running job per kind and name (running?),      *)
 (*    cancel, which answers after the run's :DOWN (cancel_job, stop_job,  *)
-(*    task_down).                                                          *)
+(*    task_down, stopped), and a job's ending, which the family runs once *)
+(*    the run is over however it ended, before the job leaves running    *)
+(*    (finish, begin_ending, end_closing).                                *)
 (*  - Management.HomeSummary: the actions a desktop's summary offers      *)
 (*    during a replace (Offered below: running, running_step,            *)
 (*    replace_moving, new_server_step) and find_action.                   *)
@@ -60,11 +66,11 @@
 (* run, one answer over the link, or one report of the relay.            *)
 (***************************************************************************)
 
-\* SOURCE: apps/fermix_core/lib/fermix_core/management/always_on.ex @ b8861ebfbb8b
-\* SOURCE: apps/fermix_core/lib/fermix_core/management/provision.ex#put_action,clear_action,holding,stop_step,start,step,end_step,delete,move_forwarded,started?,record_move,primary_reached,reached,run_clean_up @ 309735f51667
-\* SOURCE: apps/fermix_core/lib/fermix_core/home/provision/ledger.ex#put_action,clear_action,live_action?,move_started,replace_due,moving?,moved @ f562176b8bc8
-\* SOURCE: apps/fermix_core/lib/fermix_core/management/jobs.ex#start,cancel,handle_call,start_job,cancel_job,stop_job,task_down,running? @ 7489b0734b3d
-\* SOURCE: apps/fermix_core/lib/fermix_core/management/home_summary.ex#find_action,running,running_step,replace_moving,new_server_step @ 95a2bc971e65
+\* SOURCE: apps/fermix_core/lib/fermix_core/management/always_on.ex @ c0beab2b0b5b
+\* SOURCE: apps/fermix_core/lib/fermix_core/management/provision.ex#put_action,clear_action,holding,stop_step,start,ended,ending,delete,move_forwarded,started?,record_move,primary_reached,reached,run_clean_up @ 78b2a113f946
+\* SOURCE: apps/fermix_core/lib/fermix_core/home/provision/ledger.ex#put_action,clear_action,end_step,interrupt,live_action?,move_started,replace_due,moving?,moved @ 9511a1ceeb6f
+\* SOURCE: apps/fermix_core/lib/fermix_core/management/jobs.ex#start,cancel,handle_call,start_job,cancel_job,stop_job,task_down,stopped,finish,begin_ending,end_closing,running? @ 4edd8b3647b0
+\* SOURCE: apps/fermix_core/lib/fermix_core/management/home_summary.ex#offered,find_action,running,running_step,replace_moving,new_server_step,cleanup @ 7a1cc24ac349
 
 EXTENDS Naturals, FiniteSets, TLC
 
@@ -78,6 +84,8 @@ CONSTANTS
     AnswerCanBeLost,  \* the old server had the move's start and its answer was lost
     LinkCanDrop,      \* the link is down: the old server never had the request
     ReadsReconcile,   \* a home.status read starts the family's reconcile
+    RunCanCrash,      \* a step's run raises, exits or is killed before it
+                      \* answers
     \* Mechanism switches: TRUE is the code.
     Serialized,       \* acts run one at a time in the AlwaysOn process
                       \* (act/2's GenServer.call, handle_call); FALSE
@@ -89,10 +97,15 @@ CONSTANTS
                       \* in handle_call {:start, ...})
     UnstartedClears,  \* a start refused after the name was written clears
                       \* it (AlwaysOn.unstarted, Provision.clear_action/1)
-    ClearOnEnd,       \* a step's job ends by clearing the name (Provision
-                      \* step/4 :clears_action, end_step)
+    ClearOnEnd,       \* a step's ending clears its name (Provision.ended/3,
+                      \* :clears_action)
     KeepFailure,      \* a step that stopped keeps its failure in the ledger
-                      \* (Provision.step_failed, remembered)
+                      \* (the run's answered failure, or the interruption,
+                      \* Provision.ended/3)
+    OwnerEnds,        \* the job family runs the step's ending however its
+                      \* run ended (Jobs :ending, begin_ending): a run that
+                      \* crashed, exited or was killed is ended too; FALSE
+                      \* ends only a run that answered (a task-local after)
     CancelWaits,      \* Jobs.cancel/2 answers after the run's :DOWN, and the
                       \* job counts as running until then (cancel_job,
                       \* task_down); FALSE closes it at once
@@ -188,7 +201,8 @@ Init ==
 \* failed with the new server standing. Nothing while the move runs, and
 \* once it is done the new server is the one the home lives on (the
 \* replace's state `done`, read as `on`), whose own actions are no part
-\* of this spec.
+\* of this spec. Cancel stands for Delete your new server too, which the
+\* ready new server offers (HomeSummary.cleanup): both start the delete.
 Replacing == ~moveStarted /\ ~moved /\ old = "standing"
 
 Offered ==
@@ -306,7 +320,8 @@ CancelWait(c) ==
     /\ UNCHANGED <<ledger_vars, job_vars, world_vars, drawn, want, kind, ans, acts, holder,
                    hist_vars>>
 
-\* A cancelled run ends with no clear of its own, so the act clears it.
+\* The act clears the name too: the cancelled run's ending cleared it
+\* already, or a name whose job is gone (a family that restarted) stands.
 CancelClear(c) ==
     /\ pc[c] = "cancel_clear"
     /\ Goto(c, "cancel_holding")
@@ -415,13 +430,32 @@ StepEnds(k) ==
     /\ UNCHANGED <<server, failure, old, moveStarted, moved, records, world_vars, caller_vars,
                    hist_vars>>
 
-\* A run told to stop dies with no end of its own (no end_step), and the
-\* family takes its :DOWN.
+\* A run told to stop dies with no end of its own, and the family takes
+\* its :DOWN; with OwnerEnds it runs the step's ending, cancelled: the name
+\* goes and nothing else is kept.
 RunDies(k) ==
     /\ k \in tasks \cap killed
     /\ tasks' = tasks \ {k} /\ jobs' = jobs \ {k} /\ killed' = killed \ {k}
     /\ phase' = [phase EXCEPT ![k] = "idle"]
-    /\ UNCHANGED <<ledger_vars, world_vars, caller_vars, hist_vars>>
+    /\ action' = IF OwnerEnds /\ ClearOnEnd /\ k \in {"create", "delete"} THEN "none" ELSE action
+    /\ UNCHANGED <<server, failure, old, moveStarted, moved, records, world_vars, caller_vars,
+                   hist_vars>>
+
+\* A step's run raises, exits or is killed before it answers. With
+\* OwnerEnds the family runs its ending, which keeps the interruption as the
+\* step's failure and clears the name; without, nothing does.
+RunCrashes(k) ==
+    /\ RunCanCrash /\ k \in {"create", "delete"} /\ k \in tasks \ killed
+    /\ phase[k] \in {"p1", "p2"}
+    /\ tasks' = tasks \ {k} /\ jobs' = jobs \ {k}
+    /\ phase' = [phase EXCEPT ![k] = "idle"]
+    /\ IF OwnerEnds
+          THEN /\ action' = IF ClearOnEnd THEN "none" ELSE action
+               /\ failure' = (failure \/ KeepFailure)
+               /\ lostEnding' = (lostEnding \/ ~KeepFailure)
+          ELSE /\ lostEnding' = TRUE /\ UNCHANGED <<action, failure>>
+    /\ UNCHANGED <<server, old, moveStarted, moved, records, killed, world_vars, caller_vars,
+                   deletedTarget, recordedUngot, changedSeen>>
 
 \* A home.status read whose summary rests on the provider starts one
 \* reconcile (Management.Home.refresh_provider), refused busy beside a run.
@@ -499,7 +533,7 @@ Next ==
           \/ CancelJob(c) \/ CancelWait(c) \/ CancelClear(c) \/ CancelHolding(c)
           \/ Forward(c) \/ Record(c) \/ Finish(c)
     \/ CreateWrites \/ CreateAnswered \/ DeleteAnswered
-    \/ \E k \in Kinds : StepEnds(k) \/ RunDies(k) \/ OtherEnds(k)
+    \/ \E k \in Kinds : StepEnds(k) \/ RunDies(k) \/ RunCrashes(k) \/ OtherEnds(k)
     \/ ReadStartsReconcile \/ MoveDone \/ Report \/ CleanUp \/ CleanUpEnds
     \/ Terminated
 
@@ -527,7 +561,8 @@ ActionMeansStep ==
                                           "cancel_clear"}
 
 \* "Every ending lands in the ledger" (Always On setup §5): a step that
-\* ended changed the server or left its failure.
+\* ended changed the server or left its failure, a run that crashed, exited
+\* or was killed included (review R5).
 EndingKept == ~lostEnding
 
 \* "cancel never deletes a server a move is going to" (Always On setup §10).
