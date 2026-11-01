@@ -109,7 +109,7 @@ defmodule FermixCore.Management.Cues.SourceForm do
   }
 
   # What the owner wants watched, in the order a client lists them: the
-  # featured ones first, the rest under "Something else".
+  # featured ones first, then the rest.
   @choices [
     %{
       id: "rss",
@@ -413,8 +413,8 @@ defmodule FermixCore.Management.Cues.SourceForm do
   @doc """
   What the owner can ask Fermix to watch, in the order a client lists them:
   each with its `id`, `label`, `sentence`, the `kind` and `preset` (or nil)
-  its form takes, and whether it is `featured` (drawn first; the rest under
-  "Something else"). The same on every form.
+  its form takes, and whether it is `featured` (drawn first, the rest after
+  them). The same on every form.
   """
   @spec choices() :: [map()]
   def choices do

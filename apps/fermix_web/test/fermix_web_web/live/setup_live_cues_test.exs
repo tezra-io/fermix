@@ -519,7 +519,7 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
   end
 
   describe "adding a source" do
-    test "starts from what to watch: the featured four, then the other three under Something else",
+    test "starts from what to watch: every choice in one list, the featured four first",
          %{conn: conn} do
       {:ok, view, _html} = live(conn, "/setup")
       open_cues(view)
@@ -528,7 +528,11 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
       assert choice_ids(html, "#cue-source-choices") ==
                ~w(rss x_accounts github local_push feed stream webhook)
 
-      assert choice_ids(html, "#cue-source-something-else") == ~w(feed stream webhook)
+      assert choice_ids(html, "#cue-source-choice-list") ==
+               ~w(rss x_accounts github local_push feed stream webhook)
+
+      # Nothing is folded away behind a disclosure.
+      refute html =~ "Something else"
 
       # Each row is the engine's label and line; nothing to type yet.
       for choice <- SourceForm.choices() do

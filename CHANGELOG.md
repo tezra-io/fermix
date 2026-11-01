@@ -289,7 +289,7 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cover the phone and desktop keys and `/run/fermix`.
 - **Adding a cue source starts from what you want watched.** The add form
   now opens on a list: Website or blog, X accounts, GitHub and Your scripts,
-  with Any feed address, Live stream and Any webhook under Something else.
+  then Any feed address, Live stream and Any webhook, in one list.
   Each asks only for what it needs (a feed address, the X accounts, or
   nothing at all for GitHub and scripts) and keeps the rest under More
   options. The name is optional: left empty, Fermix names the source from

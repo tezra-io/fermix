@@ -863,27 +863,18 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
   attr :editor, :map, required: true
   attr :cues, :map, required: true
 
-  # A new source asks what to watch first: the featured choices, then the
-  # rest under Something else, each in the engine's words
-  # (`SourceForm.choices/0`).
+  # A new source asks what to watch first: every choice in one list, the
+  # featured ones first, each in the engine's words (`SourceForm.choices/0`).
   defp source_editor(%{editor: %{mode: :create, choice: nil}} = assigns) do
-    {featured, others} = Enum.split_with(assigns.cues.choices, & &1["featured"])
-    assigns = assign(assigns, featured: featured, others: others)
-
     ~H"""
     <div
       id="cue-source-choices"
       class="space-y-3 rounded-box border border-base-300 bg-base-200/40 p-4"
     >
       <h4 class="text-sm font-semibold">What should Fermix watch?</h4>
-      <ul id="cue-source-featured" class="grid gap-2 sm:grid-cols-2">
-        <li :for={choice <- @featured}><.choice_button choice={choice} /></li>
+      <ul id="cue-source-choice-list" class="grid gap-2 sm:grid-cols-2">
+        <li :for={choice <- @cues.choices}><.choice_button choice={choice} /></li>
       </ul>
-      <.disclosure id="cue-source-something-else" label="Something else">
-        <ul class="mt-2 grid gap-2 sm:grid-cols-2">
-          <li :for={choice <- @others}><.choice_button choice={choice} /></li>
-        </ul>
-      </.disclosure>
       <button type="button" class="btn btn-ghost btn-sm" phx-click="cues_close_source">
         Cancel
       </button>
