@@ -384,13 +384,16 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
     socket
     |> put(options: :reading)
     |> Phoenix.LiveView.start_async({:always_on, :options}, fn ->
-      {form_gen, Provision.options(%{"provider" => current_provider(opts)}, opts)}
+      {form_gen, offers(opts)}
     end)
   end
 
-  defp current_provider(opts) do
+  # The one call of `home.provision.options`, for the provider Always On
+  # speaks of (`Home.Provision.current/2`), whose summary does not name it.
+  defp offers(opts) do
     home = Keyword.get_lazy(opts, :home, &ConfigStore.fermix_home/0)
-    HomeProvision.current(home, Keyword.get_lazy(opts, :providers, &Registry.all/0)).id()
+    provider = HomeProvision.current(home, Keyword.get_lazy(opts, :providers, &Registry.all/0))
+    Provision.options(%{"provider" => provider.id()}, opts)
   end
 
   # -- the step ------------------------------------------------------------------
@@ -417,9 +420,14 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
   defp restarts_here?(%{"id" => id}, %{forwarding: []}), do: id in @moves
   defp restarts_here?(_action, _state), do: false
 
-  # The reload after the restart lands on this tab.
-  defp overlay(socket, true),
-    do: Phoenix.LiveView.push_patch(socket, to: ~p"/setup?tab=always_on")
+  # The overlay is the one thing on top, so the step it came from closes
+  # (a refusal then shows on the card), and the reload after the restart
+  # lands on this tab.
+  defp overlay(socket, true) do
+    socket
+    |> put(open: nil, options: nil)
+    |> Phoenix.LiveView.push_patch(to: ~p"/setup?tab=always_on")
+  end
 
   defp overlay(socket, false), do: socket
 

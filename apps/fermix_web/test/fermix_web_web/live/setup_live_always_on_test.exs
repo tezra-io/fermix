@@ -332,7 +332,7 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
       press(view, "create_server")
       html = render_async(view)
 
-      {:ok, options} = Provision.options(%{"provider" => "nimbus"}, home_seams(seams))
+      options = options!(seams)
       assert text(html, "#always-on-step") =~ options["sentence"]
       assert text(html, "#always-on-step") =~ create["confirm"]
       assert text(html, "#always-on-offers") =~ "Oslo"
@@ -480,6 +480,8 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
 
       assert_received {:overlay, overlay}
       assert overlay =~ "Restarting Fermix"
+      # The overlay is the one thing on top: the step it came from has closed.
+      refute overlay =~ ~s(id="always-on-step")
       assert_received {:after, after_move}
       assert_received {:saved, _recipient}
       assert_received :restarted
@@ -728,6 +730,12 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
   defp summary!(seams) do
     opts = Keyword.put(home_seams(seams), :engine_role, @primary)
     opts |> Home.summary_facts() |> HomeSummary.summary()
+  end
+
+  # `home.provision.options` as the engine answers it here.
+  defp options!(seams) do
+    {:ok, options} = Provision.options(%{"provider" => "nimbus"}, home_seams(seams))
+    options
   end
 
   defp action!(summary, id) do
