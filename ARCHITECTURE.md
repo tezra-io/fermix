@@ -729,6 +729,13 @@ sleeps. While off nothing is armed and only `:ledger`, `:move` and
 write (`Provision.Ledger.update/3`, the shared driver's and the management
 family's) tells it `:ledger`.
 
+`Home.AlwaysOnRelease` keeps Always On out of a release build until it
+ships: compiled for `:prod`, `hello` lists none of its methods and the router
+refuses them by name, the setup page lists no Always On tab, and `fermix
+always-on` refuses in one sentence; decided from
+`Mix.env/0` at compile time, with no setting, and removed by deleting that
+module and its callers.
+
 `Management.AlwaysOn` (Always On setup §3.4, §4) runs every Always On
 step: `home.act {action, key, input}`, one function per action with its
 placement decided inside it. One named process per engine (a child of the

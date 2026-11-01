@@ -358,6 +358,10 @@ ended on a problem: <the screen's sentence> Run fermix always-on to fix it.")
 and `step_unfinished` ("Always On is still at it after 45 minutes; fermix
 always-on shows where it stands."). Golden: `always_on/changed.json`.
 
+In a build without Always On (a release build, until it ships), every use of
+`fermix always-on` refuses `always_on_unavailable`, exit `1` ("Always On is
+not in this release of Fermix yet."), before anything is read or sent.
+
 `unconfirmed` (a linked desktop's Move now that the server had, whose answer
 was lost) is not a refusal: the move may have started. The verb prints the
 engine's sentence on stderr, reads the screen again and goes on exactly as
@@ -400,6 +404,7 @@ sentence interpolates a fact, the example below is the golden's.
 - `changed` — Always On changed since this was shown, so look at it again.
 - `step_failed` — That step ended on a problem: Falkenstein has no CPX22 right now. Run fermix always-on to fix it.
 - `step_unfinished` — Always On is still at it after 45 minutes; fermix always-on shows where it stands.
+- `always_on_unavailable` — Always On is not in this release of Fermix yet.
 
 A sentence ending in `It said:` carries the words of whatever refused —
 the service manager, the login manager, the filesystem. A client shows them and

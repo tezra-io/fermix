@@ -223,6 +223,14 @@ the primary's.
 
 ## The Always On summary
 
+**Not in a release build yet.** A build compiled for production serves no
+Always On: `hello` lists none of `home.status`, `home.act` and
+`home.provision.options` (in `methods` or `minimum_versions`), and each is
+refused by name, `unavailable` {`capability`: `always_on`, `method`,
+`sentence`: "Always On is not in this release of Fermix yet."}. A client
+shows no Always On where `hello` lists no `home.act`. Every other `home.*`
+method is served as ever.
+
 `home.status.summary` is the Always On screen, worked out once by the engine
 (M75 lean v1 §7, Always On setup §3), so the Mac app, the Linux app, the
 setup page and `fermix home status` draw the same thing:

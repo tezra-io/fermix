@@ -125,6 +125,11 @@ it, never a second writer.
 
 ## Moving to a VM (Always On)
 
+- Always On is not in released builds of Fermix yet: there `fermix
+  always-on` and the engine say "Always On is not in this release of Fermix
+  yet.", the setup page has no Always On tab and the Fermix app no Always On
+  pane, and a home moves only by hand (`fermix home export` and `import`,
+  below).
 - Always On puts the primary on a Linux server the owner controls, so Fermix
   keeps working with the Mac closed. The server enrolls with an enrollment
   code the primary opens (one use, 30 minutes), on an existing Debian 12,

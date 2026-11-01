@@ -39,6 +39,8 @@ defmodule Fermix.CLI.AlwaysOnCommand do
   On a home the Fermix app manages (`HomeOwner.app_managed?/1`, given this
   verb's own `hello`) it refuses `app_managed`, naming the app's Always On
   pane. With Fermix stopped it refuses `engine_stopped` and writes nothing.
+  In a build without Always On (`Home.AlwaysOnRelease`) every use refuses
+  `always_on_unavailable` before anything is read.
 
   **A step that waits reports how it ended**, from the screen's `outcome`,
   the engine's word: `failed` (the step ended on a problem) is
@@ -53,7 +55,8 @@ defmodule Fermix.CLI.AlwaysOnCommand do
   Dependencies: `:home`, `:client` (a 3-arity management call, as
   `Client.request_v1/3`), `:terminal` (the `SecretInput` terminal), `:stdin`,
   `:stdout`, `:stderr`, `:app_managed?` (as `HomeOwner.app_managed?/1`),
-  `:now_ms` (a 0-arity monotonic clock) and `:sleep`.
+  `:now_ms` (a 0-arity monotonic clock), `:sleep` and `:always_on` (what
+  the build compiles in, `Home.AlwaysOnRelease.available?/0`).
   """
 
   alias Fermix.CLI.AlwaysOnCommand.Render
@@ -63,6 +66,7 @@ defmodule Fermix.CLI.AlwaysOnCommand do
   alias Fermix.CLI.HomeOwner
   alias Fermix.CLI.MachineOutput
   alias Fermix.CLI.SecretInput
+  alias FermixCore.Home.AlwaysOnRelease
   alias FermixCore.Management.HomeSummary
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.EngineOwner
@@ -100,10 +104,27 @@ defmodule Fermix.CLI.AlwaysOnCommand do
   @doc "Runs `fermix always-on ARGS` with the dependencies the moduledoc names."
   @spec run([String.t()], keyword()) :: non_neg_integer()
   def run(argv, deps \\ []) when is_list(argv) and is_list(deps) do
+    if Keyword.get_lazy(deps, :always_on, &AlwaysOnRelease.available?/0),
+      do: parsed(argv, deps),
+      else: unreleased(argv, deps)
+  end
+
+  defp parsed(argv, deps) do
     case parse(argv) do
       {:ok, step, flags} -> deps |> context(flags) |> start(step)
       {:usage, sentence} -> usage(sentence, deps)
     end
+  end
+
+  # Not in this build: one sentence on stderr, and the envelope under --json.
+  defp unreleased(argv, deps) do
+    sentence = MachineOutput.sentence(:always_on_unavailable)
+    IO.puts(Keyword.get(deps, :stderr, :stderr), "fermix always-on: " <> sentence)
+
+    if "--json" in argv,
+      do: IO.puts(Keyword.get(deps, :stdout, :stdio), MachineOutput.error(:always_on_unavailable))
+
+    1
   end
 
   @doc "Every step the verb takes, in the kebab form `ACTION` names it."
