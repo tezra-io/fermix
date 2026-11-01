@@ -227,7 +227,7 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
   end
 
   describe "settings" do
-    test "one form holds Run cues, the watchers' switch, the door's port, the Screen and the filter model, with one Save",
+    test "one form holds Run cues, the watchers' switch, the door's port, the Screen and the filter model, saved from the tab's footer",
          %{conn: conn} do
       {:ok, view, _html} = live(conn, "/setup")
       html = open_cues(view)
@@ -236,10 +236,16 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
       assert settings_fields(html) ==
                ~w(enabled mandates_enabled door_port screen filter_provider)
 
-      assert page |> LazyHTML.query("#cues-settings-form button") |> Enum.map(&button_type/1) ==
-               ["submit"]
+      # The form holds no button of its own: the tab's footer saves it, as
+      # every setup tab's does, with Back, Save cues and Save & next.
+      assert page |> LazyHTML.query("#cues-settings-form button") |> Enum.to_list() == []
 
-      assert page |> LazyHTML.query("#cues-settings-form button") |> LazyHTML.text() =~ "Save"
+      footer = LazyHTML.query(page, ~s(button[form="cues-settings-form"]))
+      assert footer |> Enum.map(&button_type/1) == ["submit", "submit"]
+      assert footer |> LazyHTML.attribute("value") == ["stay", "next"]
+      assert footer |> LazyHTML.text() |> squish() =~ "Save cues"
+      assert footer |> LazyHTML.text() |> squish() =~ "Save & next"
+      assert page |> LazyHTML.query(~s(button[phx-click="previous_step"])) |> Enum.any?()
 
       # Screen and the filter model sit under one heading, in that order, and
       # the door's port under Advanced.
@@ -256,6 +262,19 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
       # No other form in the pane saves a setting.
       forms = page |> LazyHTML.query("#cues-pane form") |> LazyHTML.attribute("id")
       assert forms == ["cues-settings-form"]
+    end
+
+    test "Save & next saves the settings and moves to the next step", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup")
+      open_cues(view)
+
+      html =
+        view
+        |> form("#cues-settings-form", cues_settings: %{enabled: "true"})
+        |> render_submit(%{"__nav" => "next"})
+
+      assert Keyword.get(persisted_cues(), :enabled) == true
+      refute html =~ ~s(id="cues-settings-form")
     end
 
     test "the watchers' switch takes its label and info from the engine's cues section", %{
@@ -507,6 +526,32 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
 
       assert html =~ ~s(id="cues-decision-provider")
       assert persisted_cues() == []
+    end
+
+    test "the decision model's picker is hidden while Keyword match is picked, saved or not",
+         %{conn: conn} do
+      Application.put_env(:fermix_core, :providers, openai: [api_key: "invented-key-2207"])
+      {:ok, view, _html} = live(conn, "/setup")
+      html = open_cues(view)
+
+      # Keyword match, the saved default: no picker.
+      refute html =~ ~s(id="cues-decision-provider")
+
+      # Saved as the decision model, the picker shows; picking Keyword match
+      # hides it at once, before Save.
+      view
+      |> form("#cues-settings-form", cues_settings: %{screen: "decision_model"})
+      |> render_submit()
+
+      assert render(view) =~ ~s(id="cues-decision-provider")
+
+      html = view |> form("#cues-settings-form", cues_settings: %{screen: ""}) |> render_change()
+      refute html =~ ~s(id="cues-decision-provider")
+
+      assert screen_options(html) == [
+               {"", "Keyword match", true},
+               {"decision_model", "Decision model", false}
+             ]
     end
 
     test "the decision model is refused under the Screen while none is set up, and nothing is written",

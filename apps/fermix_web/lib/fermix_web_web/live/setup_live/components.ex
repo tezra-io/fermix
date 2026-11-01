@@ -2664,8 +2664,12 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :active_tab, :string, required: true
   attr :tabs, :list, required: true
   attr :save_label, :string, required: true
+  # The form its buttons submit, when they sit outside it (the Cues tab's
+  # footer, below the lists).
+  attr :form, :string, default: nil
 
-  defp form_actions(assigns) do
+  @doc "A step's footer: Back, then its Save and Save & next."
+  def form_actions(assigns) do
     ~H"""
     <div class="mt-8 flex flex-wrap items-center justify-between gap-3 border-t border-base-300 pt-5">
       <button
@@ -2682,6 +2686,7 @@ defmodule FermixWebWeb.SetupLive.Components do
         <button
           :if={!last_step?(@active_tab, @tabs)}
           type="submit"
+          form={@form}
           name="__nav"
           value="stay"
           class="btn btn-ghost btn-sm"
@@ -2691,6 +2696,7 @@ defmodule FermixWebWeb.SetupLive.Components do
         <button
           :if={!last_step?(@active_tab, @tabs)}
           type="submit"
+          form={@form}
           name="__nav"
           value="next"
           class="btn btn-primary btn-sm"
@@ -2700,6 +2706,7 @@ defmodule FermixWebWeb.SetupLive.Components do
         <button
           :if={last_step?(@active_tab, @tabs)}
           type="submit"
+          form={@form}
           name="__nav"
           value="stay"
           class="btn btn-primary btn-sm"

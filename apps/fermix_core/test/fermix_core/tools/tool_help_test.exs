@@ -2,11 +2,34 @@ defmodule FermixCore.Tools.ToolHelpTest do
   use ExUnit.Case, async: true
 
   alias FermixCore.Capabilities.Builtin
+  alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry
   alias FermixCore.Tools.ContentSearch
   alias FermixCore.Tools.ToolHelp
 
   @context %{agent_name: "test_agent", conversation_key: :test}
+
+  # A tool whose words are only known once the daemon runs, so a turn reads them
+  # through `dynamic_description/1` rather than the copy registered at boot.
+  defmodule DescribedTool do
+    @spec dynamic_description(map()) :: String.t()
+    def dynamic_description(context) when is_map(context),
+      do: "Described for #{Map.fetch!(context, :agent_name)}."
+
+    @spec execute(map(), map()) :: {:ok, map()}
+    def execute(_args, _context), do: {:ok, %{success: true, output: "unused"}}
+  end
+
+  defp described_capability do
+    Capability.new(%{
+      name: "described_tool",
+      description: "Registered at boot.",
+      parameters: %{"type" => "object", "properties" => %{}},
+      kind: :builtin,
+      executor: {DescribedTool, :execute, []},
+      policy_class: :read_only
+    })
+  end
 
   test "returns full docs for a registered capability" do
     name = :"tool_help_#{System.unique_integer([:positive])}"
@@ -25,6 +48,23 @@ defmodule FermixCore.Tools.ToolHelpTest do
     assert result.output =~ "## Examples"
     assert result.output =~ "## Failure modes"
     assert result.output =~ "`pattern`"
+  end
+
+  # The docs say what a turn is told, not what was registered before the daemon
+  # knew it: the same hook `Capabilities.Advertisement` refreshes a turn with.
+  test "renders a tool's per-turn description when it has one" do
+    name = :"tool_help_described_#{System.unique_integer([:positive])}"
+    start_supervised!({Registry, name: name})
+    :ok = Registry.register(name, described_capability())
+
+    assert {:ok, result} =
+             ToolHelp.execute(
+               %{"name" => "described_tool"},
+               Map.put(@context, :capability_registry, name)
+             )
+
+    assert result.output =~ "Described for test_agent."
+    refute result.output =~ "Registered at boot."
   end
 
   test "returns a clear error for an unknown capability" do

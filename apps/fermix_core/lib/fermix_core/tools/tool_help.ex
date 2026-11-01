@@ -5,6 +5,7 @@ defmodule FermixCore.Tools.ToolHelp do
 
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
+  alias FermixCore.Capabilities.Advertisement
   alias FermixCore.Capabilities.Builtin.Tool
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry
@@ -75,7 +76,7 @@ defmodule FermixCore.Tools.ToolHelp do
           {:ok, String.t()} | {:error, String.t()}
   def render(registry, cap_name, context \\ %{}) when is_binary(cap_name) and is_map(context) do
     with {:ok, capability} <- find_capability(registry, cap_name, context) do
-      {:ok, format_capability(capability)}
+      {:ok, format_capability(capability, context)}
     end
   end
 
@@ -113,11 +114,14 @@ defmodule FermixCore.Tools.ToolHelp do
   defp class_visible?(%Capability{policy_class: class}, classes) when is_list(classes),
     do: class in classes
 
-  defp format_capability(capability) do
+  # The description is the one a turn reads (`Advertisement.description/2`), so a
+  # tool whose words are only known at runtime is not documented by the copy it
+  # registered at boot.
+  defp format_capability(capability, context) do
     [
       "# #{capability.name}",
       "",
-      capability.description,
+      Advertisement.description(capability, context),
       builtin_note(capability),
       "",
       "## Parameters",

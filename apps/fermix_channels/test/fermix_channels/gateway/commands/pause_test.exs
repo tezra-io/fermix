@@ -28,6 +28,11 @@ defmodule FermixChannels.Gateway.Commands.PauseTest do
     @impl true
     def execute(_state, %{"action" => "probe"}), do: {:ok, %{"input_control" => true}}
 
+    # The handshake reading every session takes at start (M86 F1) is not an
+    # action, so it answers at once, as a real helper's cached identity does.
+    def execute(_state, %{"action" => "hello"}),
+      do: {:ok, %{"actions" => Compux.Protocol.actions(), "capabilities" => %{}}}
+
     def execute(%{test_pid: pid, in_flight: in_flight}, request) do
       send(pid, {:driver_entered, request, self()})
       Agent.update(in_flight, fn _ -> "r-" <> request["action"] end)

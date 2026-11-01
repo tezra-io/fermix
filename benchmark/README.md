@@ -1046,6 +1046,114 @@ The fixture audio is regenerated, and checked for reproducibility, with
 
 ---
 
+## 5h. The desktop corpus and the computer-use baseline (`run_desktop.py`, `cu_baseline.py`)
+
+`suites/desktop/corpus.yaml` (contract: `suites/SCHEMA.md`, *Desktop corpus*)
+holds 29 real-user requests against the compux fixture applications: GTK3, GTK4
+and Qt on Linux (`compux/fixtures/linux/`), the AppKit half of `FixtureApp` on
+macOS. Each attempt is decided by what the application recorded about itself and
+counted from the daemon's own traces.
+
+One attempt: launch the fixture on a fresh state file in the run's directory and
+wait for it to write that file empty and settle its window; send the query as one
+`fermix ask` turn (`evallib.driver`, with the usage-limit retry the other runners
+use); wait for the fixture's events to stop changing; stop the fixture; read the
+turn's trace rows. The rows are the run window's (from the send until their count
+stops moving), bucketed into `(agent, session_id)` turns; anything but exactly
+one main-agent turn makes the attempt invalid. Every task runs `--repeat` times
+(default 20, what P3 needs per cell), with the task order interleaved on each
+repeat. An attempt that cannot be measured is `invalid` with its reason and is
+never scored as a failure: the fixture could not be started or never became
+ready, the state file was unreadable, the turn timed out or errored, no turn or
+several turns ran in its window, the turn made no computer-use call
+(`no_computer_use`: a turn that touched nothing would pass every `absent`
+clause), or a computer-use row carries no `output` (`content_capture_off`: the
+daemon runs with `FERMIX_TRACE_CONTENT=0`, which only its own environment shows,
+so images and refusals cannot be counted). A task with `expect_refusal: <code>`
+passes only when its clauses pass AND a failed computer-use row in the turn
+carries that typed code (`element_disabled` for the disabled button); a paused,
+busy or user-active refusal does not count. After a turn
+the CLI gave up on, the next attempt waits until the daemon has been quiet for
+20 s, and the run stops after 5 minutes of activity. "Quiet" is judged on the
+rows' end times, so a model call still in flight after 20 s can land in the next
+attempt's window and make it `several_turns`: invalid, never mis-scored.
+
+**Risk.** Every task is `desktop_input`: the model moves the real pointer, types
+real keys, and the helper captures the screen. A live run is refused (exit 2)
+without `--disposable-desktop`, which attests that the desktop and the daemon home
+(`FERMIX_EVAL_HOME`) are disposable (a VM, a container session, a throwaway
+account that nobody uses), and without `--fixture` naming the one fixture it
+measures. The preconditions, in order (exit 3): `FERMIX_EVAL_HOME` is set (left
+unset, the harness would fall back to `~/.fermix-dev`, on the owner's Mac the
+live development daemon the phone pairs with) and is not `~/.fermix`, both
+checked before any daemon is contacted; the fixture's platform is
+this host's; its script or binary exists; the daemon answers; its `config.toml`
+has `[fermix_core.computer_use] enabled = true` and no strict sandbox (strict
+derives look-only computer use, which refuses every action); and the fixture's
+`--self-test` records every control the corpus asserts on.
+
+That last preflight proves less than it reads. The Linux self-tests drive each
+control through its toolkit widget (signals fire as they would for a user, but
+no pointer or key event is involved). `FixtureApp --self-test` on macOS calls the
+recording handlers directly, never the widgets, so there it proves only that the
+corpus and the fixture agree on control names. Read a failure on the first Mac
+run as a fixture gap before reading it as the model's.
+
+```sh
+# from benchmark/, on any host: validate and plan; launches, sends, spends nothing
+uv run bin/run_desktop.py --dry-run
+uv run bin/run_desktop.py --dry-run --fixture qt --task press_button --repeat 3
+
+# live, ONLY on a disposable desktop whose daemon runs on a disposable eval home
+# with computer use on (one fixture per run; all 29 tasks x 20 by default)
+FERMIX_EVAL_HOME=~/.fermix-desktop-eval uv run bin/run_desktop.py --fixture gtk4 \
+  --disposable-desktop
+# macOS: build the fixture first (compux scripts/build_fixture_app.sh, /tmp/FixtureApp)
+FERMIX_EVAL_HOME=~/.fermix-desktop-eval uv run bin/run_desktop.py --fixture macos \
+  --fixture-app /tmp/FixtureApp --disposable-desktop
+```
+
+`--fixture-dir` defaults to `fixtures/` of the compux checkout beside this one.
+Results land in `reports/desktop/<run_id>/`: `results.json` (every attempt with
+its clauses and counts, a per-task summary, failure classes), `report.md`, and
+per attempt the fixture's `state/` file and `logs/`. Exit: 0 complete · 2 usage,
+corpus or attestation · 3 preconditions · 4 incomplete (a partial report is
+still written). Per attempt the counts are: model calls (`llm_call` rows),
+computer-use calls and failures by class, missed aims, `Aim NOT confirmed`
+replies, images and their estimated tokens (width x height / 750 for each image
+a tool returned), and *image tokens sent* (each image again for every later
+model call that carried it while it was among the home's last
+`max_retained_screenshots`).
+
+The Linux fixtures run headless in compux's fixture container
+(`compux/fixtures/linux/Dockerfile`; build and run lines in its header):
+`private-session.sh --self-test` drives every control of every fixture, and
+`a11y_roots.py` lists them on the container's own accessibility bus. That image
+carries no Fermix daemon and no compux helper, and its command mode starts every
+fixture itself, so it proves the fixtures; it is not a host for a live corpus run.
+
+**The baseline** (`bin/cu_baseline.py`) reads a machine's existing trace files,
+read-only, and drives nothing. Every failed computer-use `tool_exec` row is put
+in one class (`refusal` by its typed code, `timeout`, `permission`,
+`stale_observation`, or `other`); a missed aim (an aimed action that went through,
+followed by the same action at other coordinates) is counted beside them. For
+every turn that used computer use the baseline reports its model calls, images
+and image tokens.
+
+```sh
+uv run bin/cu_baseline.py                        # ~/.fermix-dev/traces and ~/.fermix/traces
+uv run bin/cu_baseline.py --traces DIR --since 2026-10-01 --until 2026-10-31
+```
+
+It writes `reports/cu_baseline/<UTC>/baseline.json` and `baseline.md` (or
+`--out DIR`), and says so when there is nothing to count. A row written without
+content capture has no `output`: its images cannot be counted and its class
+comes from the row's closed fields, and the report says how many such rows there
+were. Run it on the machine where computer use actually ran: on 2026-10-31 this
+Linux laptop's homes and backups held no computer-use rows.
+
+---
+
 ## 6. Where results land / housekeeping
 
 - **Leaderboard:** `reports/capability/leaderboard.json` (+ per-run `reports/capability/<ts>/`).

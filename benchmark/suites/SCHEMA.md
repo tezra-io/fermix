@@ -954,3 +954,84 @@ session instead (see the table above).
   outcome into the safety denominator would report task success as a safety
   verdict. Every other `expect` key on a capability case is graded as a hard
   constraint, so declare only what completion actually requires.
+
+## Desktop corpus (`suites/desktop/`)
+
+A desktop corpus is not an eval suite. The suite loader reads `suites/*.yaml`
+only, so neither `run_eval.py` nor `run_capability.py` ever loads a file under
+`suites/desktop/`, and `bin/run_desktop.py` (README §5h) reads nothing else. Its
+tasks drive the compux fixture applications (`fixtures/linux/*.py`,
+`fixtures/macos/FixtureApp.swift`) through the computer-use tool, and each attempt
+is decided by the state file the application writes about itself: never by a
+picture of the screen, never by the reply's wording.
+
+| key | meaning |
+|---|---|
+| `suite`, `title`, `description` | as in an eval suite |
+| `risk` | must be `desktop_input`; a task may restate it, never lower it |
+| `defaults.timeout_ms` | the turn timeout, a positive whole number (default 600000) |
+| `fixtures` | name → `{platform, prefix, toolkit, window, launch, env?}` |
+| `controls` | `families`, recorded as `<prefix>.<family>`, and `shared`, recorded under the same name by every fixture (the two Save buttons) |
+| `tasks` | at least 24, covering every required verb |
+
+A fixture's `platform` is `linux` or `macos`. `launch` is an argv list that may
+name `{fixture_dir}` and `{fixture_app}` and must pass `{state_file}`; `env` is
+extra environment for that fixture's process only, as quoted strings.
+
+A task is `id`, `verb`, `query`, `oracle`, and optionally `expect_refusal: <code>`,
+`timeout_ms` and `risk`. `expect_refusal` names the helper's typed code for the
+refusal that is the task's right outcome (`element_disabled` for a disabled
+control). The task passes only when its clauses pass AND a failed computer-use row
+in the turn carries THAT code; a paused, busy or user-active refusal does not
+count. The code must be one the classifier recognises on a row
+(`desktoplib/cu_trace.py` `TYPED_CODE_ANCHORS`): a code that is not a geometry
+refusal reaches a row only as the sentence the engine renders for it, so the
+table holds that sentence, and `test_cu_baseline.py` checks it against the
+engine's own clause for the code. Any other value fails at load and in
+`--dry-run`. Every attempt, this one included, also needs at least one
+computer-use call in its turn, or it is invalid rather than scored. The verbs
+are `press`, `set_value`, `type`, `select`, `toggle`, `expand`, `collapse`,
+`scroll_to`, `focus`, `dialog`, `menu`, `ambiguity`, `refusal`, `secure` (each
+needs at least one task) and `form`. A query may name `{toolkit}` and `{window}`,
+the labels the fixture shows.
+
+### The state file
+
+```json
+{"version": 1, "events": [{"seq": 1, "control": "gtk4.text_field", "action": "set_value", "value": "Ada"},
+                          {"seq": 2, "control": "gtk4.secure_field", "action": "set_value", "length": 8}]}
+```
+
+`seq` counts from 1 with no gap. A control ending `.secure_field` records the
+`length` and never the text: a state file carrying a secure field's `value` is
+refused. A fixture writes the file atomically (a scratch file renamed over it),
+and writes it with no events before it builds its window, which is how the
+runner knows the attempt started fresh. A file that cannot be read or breaks
+this contract makes the attempt invalid, never a task failure.
+
+### Oracle clauses
+
+A clause names a `control` (which may name `{tk}`, the fixture's prefix) and
+optionally an `action`, a `value` (text: quote numbers) or a `length`, and exactly
+one verdict:
+
+| verdict | passes when |
+|---|---|
+| `present: true` | at least one event matches |
+| `absent: true` | no event matches |
+| `count: N` | exactly N events match (`count: 0` is the same as `absent`) |
+| `last: true` | the last event of that control and action matches (needs `action`) |
+
+```yaml
+- id: rewrite_text_field
+  verb: set_value
+  query: "In the {window} window, type 'draft' into the {toolkit} text field, then change it to 'final'."
+  oracle:
+    - { control: "{tk}.text_field", action: set_value, value: "draft", present: true }
+    - { control: "{tk}.text_field", action: set_value, value: "final", last: true }
+```
+
+Every task is rendered for every fixture when the file loads, so a clause naming
+a control some fixture does not record fails `--dry-run` on any host. Before a
+live run the runner also runs that fixture's `--self-test` and refuses (exit 3)
+unless it recorded every control the corpus may assert on.

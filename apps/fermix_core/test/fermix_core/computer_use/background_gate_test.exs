@@ -24,6 +24,7 @@ defmodule FermixCore.ComputerUse.BackgroundGateTest do
   alias FermixCore.ComputerUse.Background
   alias FermixCore.ComputerUse.Capabilities
   alias FermixCore.ComputerUse.Config
+  alias FermixCore.ComputerUse.HelperActions
   alias FermixCore.ComputerUse.Session
   alias FermixCore.Management.Settings
   alias FermixCore.Prompt.RuntimeSections
@@ -37,7 +38,13 @@ defmodule FermixCore.ComputerUse.BackgroundGateTest do
   setup do
     previous = Application.get_env(:fermix_core, :computer_use, [])
     on_exit(fn -> Application.put_env(:fermix_core, :computer_use, previous) end)
-    :ok
+
+    # A helper that offers every action the library encodes, so it is the flag
+    # alone that hides this surface: the schema is built from the helper's
+    # `hello` (M86 F1), and a reading without the actions would pass every
+    # assertion below without the flag doing anything.
+    start_supervised!({HelperActions, read_at_boot?: false})
+    :ok = HelperActions.record(Protocol.actions())
   end
 
   defp put_background(background?) do
@@ -73,7 +80,10 @@ defmodule FermixCore.ComputerUse.BackgroundGateTest do
 
     @impl true
     def execute(_state, %{"action" => "probe"}), do: {:ok, %{"input_control" => true}}
-    def execute(_state, %{"action" => "hello"}), do: {:ok, %{"capabilities" => %{}}}
+
+    def execute(_state, %{"action" => "hello"}),
+      do: {:ok, %{"actions" => Protocol.actions(), "capabilities" => %{}}}
+
     def execute(_state, %{"action" => "idle_ms"}), do: {:ok, %{"ok" => true, "idle_ms" => 10_000}}
 
     def execute(%{code: code}, _request) do
@@ -116,7 +126,11 @@ defmodule FermixCore.ComputerUse.BackgroundGateTest do
   end
 
   defp hello(capabilities) do
-    %{"protocol_version" => Protocol.protocol_version(), "capabilities" => capabilities}
+    %{
+      "protocol_version" => Protocol.protocol_version(),
+      "actions" => Protocol.actions(),
+      "capabilities" => capabilities
+    }
   end
 
   defp assert_generic(sentence, where) do
