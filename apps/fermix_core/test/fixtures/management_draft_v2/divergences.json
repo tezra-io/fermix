@@ -2752,7 +2752,7 @@
       "method": "(schema)",
       "field": "methods:home.provision.options",
       "kind": "engine_only",
-      "why": "M75 lean v1 adds the Always On provisioner (Fermix creates the owner's server on Hetzner) after the draft was written, so the draft publishes no home.provision.* method. The six methods are minimum version 2 and additive: a client built against the draft never calls them, and the app re-vendors this export before it draws the Always On pane."
+      "why": "M75 lean v1 adds the Always On provisioner (Fermix creates the owner's server on Hetzner) after the draft was written, so the draft publishes no home.provision.* method. The one left on the wire, home.provision.options (no params), is minimum version 2 and additive: a client built against the draft never calls it, and the app re-vendors this export before it draws the Always On pane."
     },
     {
       "method": "(schema)",
