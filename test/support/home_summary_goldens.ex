@@ -69,7 +69,7 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
       provision: ledger(),
       candidates: [candidate_view()],
       review: review,
-      move_items: MoveReadiness.summary_items({:ok, ""}, true, @server_name, []),
+      move_items: MoveReadiness.summary_items({:ok, ""}, true, @server_name, restarts_itself: true),
       enrollment: %{
         "state" => "used",
         "expires_at" => "2031-05-05T11:00:00Z",

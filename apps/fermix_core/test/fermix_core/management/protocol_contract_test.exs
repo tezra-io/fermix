@@ -1428,6 +1428,8 @@ defmodule FermixCore.Management.ProtocolContractTest do
           now: ~U[2026-10-27 09:30:00Z],
           host_os: :macos,
           version: "1.2.3",
+          # The app engine, which starts again by itself after a move.
+          restarts_itself: true,
           disk_usage: fn _home -> {:ok, %{used: 0.42, nearly_full: false}} end,
           link_status: fn ->
             %{

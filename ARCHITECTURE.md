@@ -515,7 +515,7 @@ WhatsApp, and Slack without Socket Mode;
 coding agents asking for approval again, read from `config.toml`; the
 cutover gap; an engine nothing starts again, `Lifecycle.restarts_itself?/1`,
 which the setup page's Apply & restart reads too; the settings-only items
-alone are `MoveReadiness.config_items/3`) and
+alone are `MoveReadiness.summary_items/4`) and
 `Home.Move.start/5`, given the recipient `Snapshot.Recovery` answered,
 refuses while an item blocks; the review is kept in
 `.move/readiness.json` and a start within 15 minutes of a ready one takes it

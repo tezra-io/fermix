@@ -769,9 +769,11 @@ defmodule FermixCore.Management.CopyTest do
       service =
         for restarts? <- [true, false],
             item <-
-              MoveReadiness.config_items(unwritten_home(), "north-box",
-                restarts_itself: restarts?,
-                unreadable_files: nil
+              MoveReadiness.summary_items(
+                MoveReadiness.settings(unwritten_home(), unreadable_files: nil),
+                false,
+                "north-box",
+                restarts_itself: restarts?
               ),
             item.id == "service",
             do: {"service", item.sentence}

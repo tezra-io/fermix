@@ -257,7 +257,7 @@ defmodule FermixCore.Home.MoveReadinessTest do
 
     for restarts? <- [true, false] do
       seams = Keyword.put(opts(ctx), :restarts_itself, restarts?)
-      items = MoveReadiness.config_items(ctx.home, ctx.candidate.name, seams)
+      items = settings_items(ctx, seams)
 
       assert Enum.map(items, & &1.id) ==
                ~w(stays_here whatsapp slack coding_agents cutover_gap serves_nothing service)
@@ -266,8 +266,7 @@ defmodule FermixCore.Home.MoveReadinessTest do
       assert items == Enum.filter(full, &(&1.id in Enum.map(items, fn item -> item.id end)))
     end
 
-    assert Enum.take(report.items, -7) ==
-             MoveReadiness.config_items(ctx.home, ctx.candidate.name, opts(ctx))
+    assert Enum.take(report.items, -7) == settings_items(ctx, opts(ctx))
   end
 
   test "the items that read the settings alone say an unreadable file", ctx do
@@ -277,7 +276,7 @@ defmodule FermixCore.Home.MoveReadinessTest do
 
     {items, log} =
       ExUnit.CaptureLog.with_log(fn ->
-        MoveReadiness.config_items(ctx.home, ctx.candidate.name, seams)
+        settings_items(ctx, seams)
       end)
 
     assert log =~ "could not be read"
@@ -344,7 +343,7 @@ defmodule FermixCore.Home.MoveReadinessTest do
       summary = MoveReadiness.summary_items(settings, true, "north-box", opts(ctx))
 
       assert Enum.map(summary, & &1.id) ==
-               ~w(stays_here whatsapp slack coding_agents cutover_gap serves_nothing)
+               ~w(stays_here whatsapp slack coding_agents cutover_gap serves_nothing service)
 
       assert Enum.take(items, -length(summary)) == summary
     end
@@ -372,6 +371,12 @@ defmodule FermixCore.Home.MoveReadinessTest do
     ]
 
   defp item_in(items, id), do: Enum.find(items, &(&1.id == id))
+
+  # The items Move now's confirm is built from, read as the summary reads them.
+  defp settings_items(ctx, seams) do
+    settings = MoveReadiness.settings(ctx.home, seams)
+    MoveReadiness.summary_items(settings, true, ctx.candidate.name, seams)
+  end
 
   defp catalog_entry(name, version, targets) do
     %{
