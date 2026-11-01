@@ -27,6 +27,7 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
   alias FermixCore.Cues.Webhook
   alias FermixCore.Management.Cues.SourceForm
   alias FermixCore.Management.Cues.WatcherRow
+  alias FermixWebWeb.SetupLive.Components
   alias FermixWebWeb.SetupLive.CuesState
 
   @card "rounded-box border border-base-300 bg-base-100/80 shadow-sm"
@@ -92,7 +93,11 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
   }
 
   attr :cues, :map, required: true
+  attr :active_tab, :string, required: true
+  attr :tabs, :list, required: true
 
+  # The tab ends as every setup step does: Back, then Save cues and Save & next,
+  # which submit the settings form from below the lists.
   def pane(assigns) do
     ~H"""
     <div id="cues-pane" class="space-y-8">
@@ -102,6 +107,12 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
       <.sources :if={!first_run?(@cues)} cues={@cues} />
       <.watchers :if={watchers_shown?(@cues)} watchers={@cues.watchers} />
       <.mandates :if={mandates_shown?(@cues)} cues={@cues} />
+      <Components.form_actions
+        active_tab={@active_tab}
+        tabs={@tabs}
+        save_label="Save cues"
+        form="cues-settings-form"
+      />
     </div>
     """
   end
@@ -350,9 +361,6 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
         <.screen screen={@cues.screen} words={@cues.words} refusal={@cues.settings_refusal} />
         <.filter_model filter={@cues.filter} words={@cues.words} refusal={@cues.settings_refusal} />
       </section>
-      <div class="flex justify-end">
-        <button type="submit" class="btn btn-primary btn-sm">Save</button>
-      </div>
     </form>
     """
   end

@@ -919,7 +919,7 @@ defmodule FermixWebWeb.SetupLive do
   # change and says what follows.
   def handle_event("cues_" <> action, params, socket) do
     result = CuesState.handle(action, params, socket.assigns.cues, cues_opts())
-    {:noreply, apply_cues(socket, result)}
+    {:noreply, socket |> apply_cues(result) |> cues_advance(action, result, params)}
   end
 
   # The one action offered while the settings file has changed outside this
@@ -1313,6 +1313,13 @@ defmodule FermixWebWeb.SetupLive do
 
   defp refresh_cues_on(socket, _tab),
     do: assign(socket, :cues, %{socket.assigns.cues | reveal: nil})
+
+  # The settings' Save & next moves on once the save went through, as every
+  # other step's does; a refused save stays on the tab.
+  defp cues_advance(socket, "save_settings", {:saved, _message, _opts}, params),
+    do: maybe_advance(socket, Map.get(params, "__nav"))
+
+  defp cues_advance(socket, _action, _result, _params), do: socket
 
   defp apply_cues(socket, {:edit, cues}), do: assign(socket, :cues, cues)
   defp apply_cues(socket, :refresh), do: refresh_cues_on(socket, "cues")
