@@ -59,8 +59,8 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/capturer.ex @ 175128b2e817
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/wire.ex @ 35da392f4930
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/ingest.ex @ bcf44c4e67ca
-\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/controller.ex @ a1e70e15b5f2
-\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/supervisor.ex @ 457bfb76bf4e
+\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/controller.ex @ cf02ad463000
+\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/supervisor.ex @ 88929c762dcc
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history.ex @ a209702c717c
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/purge.ex @ 2f22405f1e30
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_use/sidecar_installer.ex @ a2681ba9c881
@@ -423,7 +423,7 @@ CapturerCrash ==
 CapturerStep == FlushCheck \/ FlushInsert \/ TermCheck \/ TermInsert \/ TermStop
 
 -----------------------------------------------------------------------------
-(* The DynamicSupervisor that owns the Capturer (supervisor.ex:55).        *)
+(* The DynamicSupervisor that owns the Capturer (supervisor.ex:61).        *)
 (* OTP semantics: it handles its mailbox in order; a child is :permanent   *)
 (* (the use GenServer default), so an EXIT it did not ask for restarts    *)
 (* it in the same message; terminate_child/2 monitors and unlinks the      *)
@@ -498,7 +498,7 @@ DynSupStep == DsRestart \/ DsTerminate \/ DsReaped
 -----------------------------------------------------------------------------
 (* The Controller (controller.ex), the middle child of the :rest_for_one   *)
 (* ComputerHistory.Supervisor: DynamicSupervisor, Controller, Retention    *)
-(* (supervisor.ex:54-60).                                                  *)
+(* (supervisor.ex:60-66).                                                  *)
 
 CtrlUnchanged ==
     UNCHANGED <<clock, where, ts, exitQueued, dsBusy, dsFor, ctrl, ctrlGen, env, config,
@@ -568,7 +568,7 @@ ControllerCrash ==
                    ctrlGen, env, config, pauseUntil, pausePc, purges>>
     /\ GhostsUnchanged
 
-\* ComputerHistory.Supervisor (:rest_for_one, supervisor.ex:60) restarts the
+\* ComputerHistory.Supervisor (:rest_for_one, supervisor.ex:66) restarts the
 \* Controller (and Retention after it); init continues to :reconcile.
 ControllerRestart ==
     /\ ctrl = "down"

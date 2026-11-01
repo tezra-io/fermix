@@ -416,7 +416,7 @@ the fixed code.
 - **Confidence, check 12:** it needs the Controller to die **alone**, for
   example `do_reconcile` raising (`controller.ex:82-85`), right at
   `/history off`. A DynamicSupervisor crash also restarts the Controller
-  (`:rest_for_one`, `supervisor.ex:49-60`), but it shuts the Capturer down
+  (`:rest_for_one`, `supervisor.ex:55-66`), but it shuts the Capturer down
   first, so it cannot cause this. The window is then the supervisor's
   restart latency.
 - **Confidence, check 15:** it needs the reconcile to take longer than the
@@ -475,7 +475,7 @@ the fixed code.
   - `ensure_stopped` returns `:ok` on a nil pid and ignores a `terminate_child`
     error (`controller.ex:112-121`).
   - The Capturer is a `:permanent` child (the `use GenServer` default,
-    `capturer.ex:49`) of the DynamicSupervisor (`supervisor.ex:55`).
+    `capturer.ex:49`) of the DynamicSupervisor (`supervisor.ex:61`).
   - Its `init` (`capturer.ex:112-162`) and Ingest never check the enable bit.
   - `reconcile_runtime` is called only from `history.ex:448`.
 - **Impact:** capture continues after "Computer history disabled — nothing new
@@ -619,7 +619,7 @@ ExUnit or a doc fix.
   unnecessary on the normal path; for the pause, Ingest's per-event stamp
   check now does its job (CH-1).
 - Resolved: `controller.ex` called the Controller "the LAST child of the
-  Supervisor", but `Retention` comes after it (`supervisor.ex:54-58`). The
+  Supervisor", but `Retention` comes after it (`supervisor.ex:60-64`). The
   moduledoc now says it follows the DynamicSupervisor (`controller.ex:12-15`).
 - Resolved: `controller.ex` said reconcile re-runs "on every enable/disable
   act (the wizard's enable, `/history off`)". The moduledoc now says it runs
