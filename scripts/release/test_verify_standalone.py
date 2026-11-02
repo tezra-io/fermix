@@ -475,7 +475,9 @@ class VerifyStandaloneTest(unittest.TestCase):
         result = self._run("macos_aarch64")
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("fermix always-on wrote a home at", result.stderr)
+        self.assertIn(
+            "fermix always-on wrote more than the boot's secret_key_base into", result.stderr
+        )
 
     # The stage runs before migrate-to-app, which ends the script on Linux.
     def test_linux_artifact_runs_the_always_on_stage_too(self):
@@ -582,7 +584,20 @@ class VerifyStandaloneTest(unittest.TestCase):
         result = self._run("macos_aarch64")
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("fermix home enroll left a home behind", result.stderr)
+        self.assertIn(
+            "fermix home enroll left more than the boot's secret_key_base at", result.stderr
+        )
+
+    # The state a refusal must never leave: a role in the home's settings.
+    def test_rejects_an_enroll_refusal_that_writes_a_role(self):
+        self._write_artifact(create_disclaim=True, home="enroll_writes_role")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "fermix home enroll left more than the boot's secret_key_base at", result.stderr
+        )
 
     def test_rejects_an_enroll_refusal_that_removes_the_code_file(self):
         self._write_artifact(create_disclaim=True, home="enroll_consumes")
@@ -1084,6 +1099,7 @@ class VerifyStandaloneTest(unittest.TestCase):
             "#!/bin/sh\n"
             "set -eu\n"
             f"{marker_line}"
+            f"{self._BOOT_KEY}"
             f"{self._payload_line(version)}"
             'if [ "${1:-}" = "maintenance" ]; then\n'
             f"{self._maintenance_behaviour(maintenance)}"
@@ -1240,13 +1256,26 @@ class VerifyStandaloneTest(unittest.TestCase):
             "acts": '  printf \'{"ok":true,"result":{}}\\n\'\n' + said + "  exit 0\n",
             "noisy_stdout": "  printf 'boot notice nobody asked for\\n'\n" + envelope + said + "  exit 1\n",
             "silent": envelope + "  exit 1\n",
-            "writes_home": '  mkdir -p "$FERMIX_HOME"\n' + envelope + said + "  exit 1\n",
+            "writes_home": '  printf \'[fermix_core.engine]\\n\' > "$FERMIX_HOME/config.toml"\n'
+            + envelope
+            + said
+            + "  exit 1\n",
             "ignores_switch": envelope + said + "  exit 1\n",
             "rewrites_settings": envelope + said + "  exit 1\n",
         }
         if always_on not in shapes:
             raise ValueError(f"unknown always-on behaviour: {always_on}")
         return argv + self._SWITCHED + "  then\n" + switched + "  fi\n" + shapes[always_on]
+
+    # What every boot of the real release writes before any verb runs
+    # (`config/runtime.exs`, `SecretKeyBase.read_or_create!/1`): the home the
+    # environment names, created if it is missing, and its `secret_key_base`.
+    _BOOT_KEY = (
+        'if [ -n "${FERMIX_HOME:-}" ] && [ ! -e "$FERMIX_HOME/secret_key_base" ]; then\n'
+        '  mkdir -p "$FERMIX_HOME"\n'
+        "  printf 'invented-boot-key\\n' > \"$FERMIX_HOME/secret_key_base\"\n"
+        "fi\n"
+    )
 
     # Whether the home the environment names turns Always On on, read from its
     # settings file as the real verbs read it.
@@ -1358,6 +1387,7 @@ class VerifyStandaloneTest(unittest.TestCase):
             "status_without_ceiling",
             "enroll_accepts",
             "enroll_leaves_home",
+            "enroll_writes_role",
             "enroll_consumes",
         ):
             return export + restored + status + enroll + marked
@@ -1381,6 +1411,10 @@ class VerifyStandaloneTest(unittest.TestCase):
                 "    exit 0\n"
             ),
             "enroll_leaves_home": '    mkdir -p "$FERMIX_HOME/logs"\n' + refusal,
+            "enroll_writes_role": (
+                '    printf \'[fermix_core.engine]\\nrole = "candidate"\\n\' > "$FERMIX_HOME/config.toml"\n'
+                + refusal
+            ),
             "enroll_consumes": '    rm -f "$4"\n' + refusal,
         }.get(home, refusal)
         return (

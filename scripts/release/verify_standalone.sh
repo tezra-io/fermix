@@ -103,6 +103,15 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Every boot of a release writes `secret_key_base` into its FERMIX_HOME before
+# any verb runs (`config/runtime.exs`, `SecretKeyBase.read_or_create!/1`), so a
+# verb that writes nothing leaves a home that does not exist, or one that
+# holds that file and nothing else.
+holds_only_boot_key() {
+  [ ! -e "$1" ] && return 0
+  [ -d "$1" ] && [ ! -L "$1" ] && [ "$(ls -A "$1")" = "secret_key_base" ]
+}
+
 chmod +x "$artifact"
 if ! version_output="$(HOME="$home" FERMIX_HOME="$fermix_home" "$artifact" --version 2>&1)"; then
   printf '%s\n' "$version_output" >&2
@@ -486,7 +495,9 @@ grep -Fq "daemon is not running" "$settings_err" ||
 # with no engine and no tree. So in a home that does not exist yet a step
 # must refuse before it reads anything: exit 1, exactly one JSON envelope on
 # stdout naming `always_on_unavailable`, the sentence on stderr, and nothing
-# written. An artifact that reaches for the engine instead (`engine_stopped`
+# written but the `secret_key_base` every release boot writes
+# (`holds_only_boot_key`): no settings, no role, no Always On state. An
+# artifact that reaches for the engine instead (`engine_stopped`
 # with no daemon) offers Always On to every home and fails here. In a
 # throwaway home whose settings carry the switch, the same step must reach
 # for the engine instead, exactly `engine_stopped` with no daemon, and leave
@@ -511,8 +522,8 @@ always_on_expected='{"error":{"code":"always_on_unavailable","sentence":"Always 
   fail "fermix always-on --json in a release must print exactly the always_on_unavailable envelope on stdout, got: $always_on_json"
 grep -Fq "Always On is not in this release of Fermix yet." "$always_on_err" ||
   fail "fermix always-on did not say on stderr why it took no step: $(cat "$always_on_err")"
-[ ! -e "$always_on_home" ] ||
-  fail "fermix always-on wrote a home at $always_on_home with no daemon: $(ls -A "$always_on_home")"
+holds_only_boot_key "$always_on_home" ||
+  fail "fermix always-on wrote more than the boot's secret_key_base into $always_on_home with no daemon: $(ls -A "$always_on_home")"
 
 switched_home="$runtime_root/always-on-switched-home"
 switched_settings='[fermix_core.always_on]
@@ -643,8 +654,10 @@ grep -Fq '"code":"already_moved"' "$moved_out" ||
 # it reads the code file and decodes the code through the packaged binary's
 # tree-less path, and a refusal must leave the home and the code file as it
 # found them. The home does not exist yet and the code file holds text that is
-# no enrollment code, so the verb must exit 1, say why on stderr, and leave no
-# home behind: no candidate, no role, no directory at all. The code file stays.
+# no enrollment code, so the verb must exit 1, say why on stderr, and leave
+# nothing in the home but the `secret_key_base` every release boot writes
+# (`holds_only_boot_key`): no candidate, no settings, no role, nothing else.
+# The code file stays.
 enroll_home="$runtime_root/enroll-home"
 enroll_code="$runtime_root/enroll-code"
 enroll_err="$runtime_root/enroll.err"
@@ -658,8 +671,8 @@ printf '%s\n' "$(cat "$enroll_err")"
 grep -Fq "not an enrollment code" "$enroll_err" ||
   fail "fermix home enroll did not say on stderr why it refused: $(cat "$enroll_err")"
 [ ! -e "$enroll_home/candidate" ] || fail "fermix home enroll wrote a candidate from an invalid code"
-[ ! -e "$enroll_home" ] ||
-  fail "fermix home enroll left a home behind at $enroll_home: $(ls -A "$enroll_home")"
+holds_only_boot_key "$enroll_home" ||
+  fail "fermix home enroll left more than the boot's secret_key_base at $enroll_home: $(ls -A "$enroll_home")"
 [ -f "$enroll_code" ] || fail "fermix home enroll removed the code file it refused"
 
 # ── migrate-to-app preflight, run from this artifact ────────────────────────
