@@ -6,6 +6,7 @@ defmodule FermixCore.Management.ProvisionTest do
   # job's own completion event, never waited for by the clock.
   use ExUnit.Case, async: true
 
+  alias FermixCore.BuildInfo
   alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.Epoch
   alias FermixCore.Home.Move
@@ -565,7 +566,9 @@ defmodule FermixCore.Management.ProvisionTest do
       assert_received {:forwarded, "home.enroll.open", %{"kind" => "provisioned"}}
       refute_received :code_opened
 
-      {:ok, user_data} = FirstBoot.user_data(@server_code, Hetzner.max_user_data())
+      # The new server installs the release this computer runs.
+      {:ok, user_data} =
+        FirstBoot.user_data(@server_code, BuildInfo.product_version(), Hetzner.max_user_data())
 
       assert [%{"user_data" => ^user_data, "name" => ^new_name}] =
                for({"POST", "/v1/servers", _q, body} <- HetznerStub.requests(ctx.stub), do: body)
