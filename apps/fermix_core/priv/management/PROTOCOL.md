@@ -428,17 +428,24 @@ no action), `undone` when the server undid it (`try_again`, `cancel`), and
 `problem` `return_failed`. Move now records its start before the request
 leaves, and keeps it unless the server refused it or it never left; from
 then on `cancel` is offered only once the server undid the move, or answers
-as the primary with no move under way (`ready` again), never while its move
-runs or once it retired. A move back the home went past (another
+as the primary with no move under way (`ready` again, or `undone` while
+this computer had begun to receive), never while its move runs, once it
+retired, or once the home is being put in place here. A stop part-way that
+leaves the start recorded with no candidate, while the server answers as
+the primary with no move, is `return_failed` with `cancel`. A move back the home went past (another
 desktop took it, at a newer epoch) is dropped, and not drawn. Where a server
 Fermix created stopped answering (`cannot_reach`, `turned_off`, `deleted`,
-`retired`), and this computer keeps a copy of its snapshots,
+`retired`, once it has had no session for 10 minutes, or none at all),
+or which a restore here already asked to delete and the ledger no longer
+holds, and this computer keeps a copy of its snapshots,
 `detail.alternatives` adds `restore_here` (needs `recovery_passphrase`; its
 confirm says what is lost and that a server only restarting or offline is
 deleted all the same), with the copy's date and when the server was last
 seen in `lines`. It deletes the server first: while that runs the screen is
 `creating`, then `moving` while the copy is restored; a delete the provider
-refused restores nothing (`delete_failed`, `restore_here` again). A server
+refused restores nothing (`delete_failed`, `restore_here` again), and a
+server that answers again by then is not deleted: nothing is restored, the
+request is dropped, and the screen is the linked one. A server
 of the owner's own gets no `restore_here`: nothing here can delete it.
 Back on this computer as the primary, while the server Fermix created for
 the home still stands, the screen is `server_retired`, ahead of the setup's

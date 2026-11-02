@@ -797,7 +797,8 @@ it sends `home.move.start` to the desktop's own candidate (the server restarts
 into the move as it answers), never into the ledger's `replace`, and takes it
 back only when the server refused or the request never left; Cancel (offered
 only where the server has no move under way) stops the subtree, closes the window
-(`home.enroll.withdraw {kind: manual}`) and removes both. Restore here
+(`home.enroll.withdraw {kind: manual}`) and removes both, the record first (a
+stop between them leaves a candidate, which Cancel clears). Restore here
 (`restore_here`) chooses the newest copy under `snapshots/` the passphrase
 opens (`Home.LocalReturn.choose/2`, a wrong one refused before anything is
 deleted), writes `fence_requested`, and runs one `home_provision` job
@@ -805,16 +806,21 @@ deleted), writes `fence_requested`, and runs one `home_provision` job
 `:return_fence` (asked for, the server silent past the summary's limit or out
 of any link, no candidate here, no move under way), is `Driver.delete/3` of
 the server the home lives on and nothing else, recorded as `fenced_at`; a
-delete refused ends the job as the delete's failure and restores nothing;
+delete the provider refused ends the job as the delete's failure and
+restores nothing, and a server that answers again by then is no failure:
+nothing is deleted or restored, and `fence_requested` is dropped;
 then `Home.LocalReturn.restore/3` (a `local` candidate, the copy staged as a
 return's, activated in place, the engine restarted). The job is never
 resumed: jobs live in memory, so a stop part-way leaves the step interrupted
 and a `local` candidate the device's next start discards, and Restore here is
-offered again (with `fenced_at` set it deletes nothing twice). The primary's
+offered again, keyed on `fence_requested` with the ledger's server gone, so a
+stop between the delete and `fenced_at` still offers it (a ledger that holds
+nothing deletes nothing twice). The primary's
 summary reads `return.json`'s `moved_at` with the ledger's server standing as
 `server_retired` first; its delete removes the record with the server. While
-a move back's `candidate/` is here, in any phase, `delete_target` refuses
-every delete but the fence (between the activation's marker removal and its
+a move back's `candidate/` is here, in any phase, or `return.json` says its
+move started and this computer has not booted as the primary, `delete_target`
+refuses every delete but the fence (between the activation's marker removal and its
 settings this home has neither link nor marker).
 
 Architecture Invariant: one role gate, one epoch writer, one marker, one

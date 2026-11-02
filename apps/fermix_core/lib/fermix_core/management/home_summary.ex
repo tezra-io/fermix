@@ -1049,11 +1049,19 @@ defmodule FermixCore.Management.HomeSummary do
 
   # This computer's own candidate for the home, by its kind and phase, else
   # the move the server started, until this computer is the primary again.
+  # A started record with no candidate: the move in its last second, or a
+  # leftover whose server answers as the primary with no move under way,
+  # which Cancel clears (the move back's TLA spec, HR-2).
   defp returning(%{returning: nil, return: record} = facts) do
-    if started?(record) and not stale?(facts), do: return_moving(facts)
+    cond do
+      not started?(record) or stale?(facts) -> nil
+      server_idle?(facts) -> return_stopped(facts, true)
+      true -> return_moving(facts)
+    end
   end
 
-  defp returning(%{returning: :unreadable} = facts), do: return_stopped(facts)
+  defp returning(%{returning: :unreadable} = facts),
+    do: return_stopped(facts, not started?(facts.return))
 
   defp returning(%{returning: %{"kind" => "local"} = state} = facts),
     do: restore_view(state, facts)
@@ -1061,7 +1069,7 @@ defmodule FermixCore.Management.HomeSummary do
   defp returning(%{returning: %{"phase" => phase} = state} = facts) do
     cond do
       stale?(facts) -> nil
-      facts.return == nil and phase in @before_move -> return_stopped(facts)
+      facts.return == nil and phase in @before_move -> return_stopped(facts, true)
       true -> return_view(state, facts)
     end
   end
@@ -1087,7 +1095,19 @@ defmodule FermixCore.Management.HomeSummary do
     end
   end
 
-  defp return_view(_receiving, facts), do: return_moving(facts)
+  # Receiving or staged while the server serves again with no move under
+  # way (it undid the move after the offer; a primary holds no marker): as an
+  # enrolled candidate, Try again or Cancel, which also lets this computer
+  # sleep again (HR-2). Putting the home in place is never stopped.
+  defp return_view(%{"phase" => phase}, facts) when phase in ["receiving", "staged"] do
+    cond do
+      not server_idle?(facts) -> return_moving(facts)
+      facts.return == nil -> return_stopped(facts, true)
+      true -> return_undone(facts)
+    end
+  end
+
+  defp return_view(_activating, facts), do: return_moving(facts)
 
   defp return_ready(state, facts) do
     view("ready", sentence(:return_ready, facts), action(:move_now), %{
@@ -1108,10 +1128,11 @@ defmodule FermixCore.Management.HomeSummary do
     })
   end
 
-  # A candidate with no record of its return (a stop between the two
-  # writes), or one whose state cannot be read: Cancel clears both.
-  defp return_stopped(facts) do
-    act = if started?(facts.return), do: action(:learn_more), else: return_cancel()
+  # A move back left part-way by a stop between two writes (a candidate with
+  # no record, a record with no candidate, or a state that cannot be read):
+  # Cancel clears what is left where no move can be under way.
+  defp return_stopped(facts, cancellable?) do
+    act = if cancellable?, do: return_cancel(), else: action(:learn_more)
     problem("return_failed", sentence(:return_stopped, facts), act, %{})
   end
 
@@ -1151,7 +1172,9 @@ defmodule FermixCore.Management.HomeSummary do
   defp restore_step(_record, facts),
     do: view("creating", sentence(:restore_deleting, facts), nil, %{})
 
-  defp fence_failed?(record, %{failure: %{action: "delete"}}),
+  # A fence whose delete went through holds no server any more, whatever
+  # stopped after it (HR-3): that is no failure.
+  defp fence_failed?(record, %{failure: %{action: "delete"}, server: %{}}),
     do: not Map.has_key?(record, :fenced_at)
 
   defp fence_failed?(_record, _provision), do: false
@@ -1167,10 +1190,15 @@ defmodule FermixCore.Management.HomeSummary do
   end
 
   # Restore here (design §8): only for a server Fermix created, which is
-  # deleted first (the fence), or one already deleted for it, never during a
-  # replace, and only while this computer holds a copy; the newest is named.
+  # deleted first (the fence), or one a restore asked to delete and whose
+  # ledger no longer holds it (deleted for it, its record written or not:
+  # HR-3); only while the server is as silent as the fence asks, never
+  # during a replace, and only while this computer holds a copy, the newest
+  # named.
   defp restore_offer(%{copies: [newest | _], provision: %{replace: nil} = provision} = facts) do
-    if provision.server != nil or match?(%{fenced_at: %DateTime{}}, facts.return),
+    fence? = provision.server != nil or match?(%{fence_requested: _copy}, facts.return)
+
+    if fence? and silent?(facts),
       do:
         action(:restore_here, %{copy: newest.name, at: newest.at, machine: machine(facts.host_os)})
   end
@@ -1228,6 +1256,17 @@ defmodule FermixCore.Management.HomeSummary do
        do: not Map.has_key?(record, :moved_at)
 
   defp stale?(_facts), do: false
+
+  # The server as silent as the fence asks (`Management.Provision`): no link,
+  # forgotten, or no session for the limit.
+  defp silent?(%{link: %{primary: nil}}), do: true
+  defp silent?(%{link: %{primary: %{status: :revoked}}}), do: true
+
+  defp silent?(%{link: %{primary: %{status: status} = link}})
+       when status in [:unreachable, :stale],
+       do: (Map.get(link, :down_ms) || 0) >= @unreachable_ms
+
+  defp silent?(_facts), do: false
 
   defp server_move(facts), do: get_in(facts, [:primary_home, "move", "phase"])
 

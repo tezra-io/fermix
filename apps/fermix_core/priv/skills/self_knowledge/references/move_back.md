@@ -39,8 +39,9 @@ The move to a server, the roles and the epoch: skill_view(name:
   come back from before the move, and Fermix restarts as the primary, one
   epoch up from the server. Phones follow; the desktop link ends. A server
   that undid the move ("The move back was undone. Fermix still runs on your
-  server.") offers **Try again**. A move back that ended or stopped part-way
-  is a problem (`return_failed`) with **Move back** again, or **Cancel**.
+  server.") offers **Try again** and **Cancel**, also when this computer
+  had begun to receive. A move back that ended or stopped part-way is a
+  problem (`return_failed`) with **Move back** again, or **Cancel**.
   When another computer took the home back first, this computer's move back
   is dropped quietly.
 - **Afterwards.** Back on this computer as the primary, while the server
@@ -52,8 +53,9 @@ The move to a server, the roles and the epoch: skill_view(name:
   delete it."); nothing here deletes it. Screen history recorded here before
   the move is not brought back (the server never had it).
 - **Restore here, when the server is gone.** When a server Fermix created
-  stopped answering (cannot reach it for 10 minutes, turned off, deleted in
-  its provider, or no longer connected) and this computer keeps a copy of
+  stopped answering (no answer for 10 minutes, whether it is turned off,
+  deleted in its provider or unreachable, or no longer connected) and this
+  computer keeps a copy of
   its backups, Always On offers **Restore on this Mac** beside the problem,
   with the copy's date and when the server was last seen. It asks for the
   recovery passphrase (the newest copy that passphrase opens is restored; one
@@ -64,7 +66,10 @@ The move to a server, the roles and the epoch: skill_view(name:
   provider, then restores the copy here and restarts as the primary; a
   delete the provider refuses restores nothing ("Fermix could not delete
   your server, so it did not restore here: a restored copy beside a running
-  server would answer twice."). A server of the owner's own gets no Restore
+  server would answer twice."); a server that answers again by then is not
+  deleted, nothing is restored, and Always On shows it running again. A
+  Restore here stopped right after the delete is offered again. A server of
+  the owner's own gets no Restore
   here, since nothing here can delete it: stop Fermix on that server (or run
   `fermix home mark-moved` there), then `fermix home import` a copy here.
 - `fermix always-on move-back` and `fermix always-on restore-here

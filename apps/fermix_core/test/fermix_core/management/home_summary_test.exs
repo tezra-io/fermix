@@ -405,18 +405,20 @@ defmodule FermixCore.Management.HomeSummaryTest do
       {"the move back asked of the server",
        returning(back("enrolled"), started: true, server_move: "requested"), "moving",
        "Moving Fermix back to this Mac. Messages wait until it is done.", nil},
-      {"the move back arriving", returning(back("receiving"), started: true), "moving",
+      {"the move back arriving",
+       returning(back("receiving"), started: true, server_move: "streaming"), "moving",
        "Moving Fermix back to this Mac. Messages wait until it is done.", nil},
       {"the move back arriving while the server serves nothing",
        returning(back("receiving"), started: true, link_primary: unreachable, primary_home: nil),
        "moving", "Moving Fermix back to this Mac. Messages wait until it is done.", nil},
-      {"the move back staged", returning(back("staged"), started: true), "moving",
+      {"the move back staged",
+       returning(back("staged"), started: true, server_move: "committing"), "moving",
        "Moving Fermix back to this Mac. Messages wait until it is done.", nil},
       {"the move back put in place, the link gone",
        returning(back("activating"), started: true, linked: false), "moving",
        "Moving Fermix back to this Mac. Messages wait until it is done.", nil},
       {"the move back done here, the restart to come",
-       returning(nil, started: true, linked: false), "moving",
+       returning(nil, started: true, linked: false, primary_home: nil), "moving",
        "Moving Fermix back to this Mac. Messages wait until it is done.", nil},
       {"the server undid the move back",
        returning(back("enrolled"), started: true, server_move: "aborted"), "undone",
@@ -427,8 +429,24 @@ defmodule FermixCore.Management.HomeSummaryTest do
       {"a start recorded that the server, still the primary, never took",
        returning(back("enrolled"), started: true), "ready",
        "This Mac is ready to take Fermix back.", "move_now"},
-      {"a move back arriving with no record of it", returning(back("receiving"), record: false),
-       "moving", "Moving Fermix back to this Mac. Messages wait until it is done.", nil},
+      {"a move back arriving with no record of it",
+       returning(back("receiving"), record: false, server_move: "streaming"), "moving",
+       "Moving Fermix back to this Mac. Messages wait until it is done.", nil},
+      {"a move back arriving, the server serving again",
+       returning(back("receiving"), started: true, server_move: "aborted"), "undone",
+       "The move back was undone. Fermix still runs on your server.", "try_again"},
+      {"a move back staged, the server the primary with no move",
+       returning(back("staged"), started: true), "undone",
+       "The move back was undone. Fermix still runs on your server.", "try_again"},
+      {"a move back arriving with no record, the server serving again",
+       returning(back("receiving"), record: false), "problem",
+       "Moving back stopped part-way, so cancel it and move back again.", "cancel"},
+      {"a move back put in place, the server answering as the primary",
+       returning(back("activating"), started: true), "moving",
+       "Moving Fermix back to this Mac. Messages wait until it is done.", nil},
+      {"a started record left alone, the server the primary with no move",
+       returning(nil, started: true), "problem",
+       "Moving back stopped part-way, so cancel it and move back again.", "cancel"},
       {"the move back that failed", returning(back("failed")), "problem",
        "This Mac could not get ready to take Fermix back. Move back to try again.", "move_back"},
       {"the move back that waited past its day", returning(back("expired")), "problem",
@@ -441,8 +459,11 @@ defmodule FermixCore.Management.HomeSummaryTest do
       {"a restore from this Mac's backup", returning(restore("receiving")), "moving",
        "Restoring Fermix on this Mac from its backup. Messages wait until it is done.", nil},
       {"a restore from this Mac's backup that failed",
-       returning(restore("failed"), copies: [copy()]), "problem",
-       "Fermix could not restore its backup on this Mac.", "restore_here"},
+       returning(restore("failed"),
+         copies: [copy()],
+         link_primary: unreachable,
+         primary_home: nil
+       ), "problem", "Fermix could not restore its backup on this Mac.", "restore_here"},
       {"deleting the server before restoring here",
        desktop(
          link_primary: unreachable,
@@ -1402,10 +1423,10 @@ defmodule FermixCore.Management.HomeSummaryTest do
             returning(back("enrolled"), started: true, server_move: "streaming"),
             returning(back("enrolled"), started: true, server_move: "undoing"),
             returning(back("enrolled"), started: true, primary_home: nil, link_primary: silent),
-            returning(back("receiving"), started: true),
+            returning(back("receiving"), started: true, server_move: "streaming"),
             returning(back("activating"), started: true, linked: false),
             returning(back("activating"), record: false),
-            returning(nil, started: true, linked: false),
+            returning(nil, started: true, linked: false, primary_home: nil),
             returning(:unreadable, started: true)
           ] do
         refute "cancel" in offers.(facts), inspect(facts.returning)
@@ -1414,7 +1435,10 @@ defmodule FermixCore.Management.HomeSummaryTest do
     end
 
     test "the move back's progress follows what this Mac's receiver wrote" do
-      progress = &HomeSummary.summary(returning(back(&1), started: true))["detail"]["progress"]
+      progress =
+        &HomeSummary.summary(returning(back(&1), started: true, server_move: "streaming"))[
+          "detail"
+        ]["progress"]
 
       assert progress.("receiving") == "Receiving your Fermix from the server…"
       assert progress.("staged") == "Waiting for your server to hand over…"
@@ -1475,7 +1499,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
         desktop(silent),
         desktop([provision: created_ledger(power: "off")] ++ silent),
         desktop([provision: created_ledger(status: :gone, state: :gone)] ++ silent),
-        desktop(linked: false, copies: [copy()]),
+        desktop(linked: false, link_primary: nil, copies: [copy()]),
         desktop(link_primary: primary(:revoked), copies: [copy()])
       ]
 
@@ -1509,6 +1533,35 @@ defmodule FermixCore.Management.HomeSummaryTest do
       assert "restore_here" in all_actions(
                HomeSummary.summary(
                  desktop([provision: ledger(:connected), return: fenced] ++ silent)
+               )
+             )
+    end
+
+    # HR-3 (the move back's TLA spec): a stop between the fence's delete and
+    # its record leaves the ledger empty and no `fenced_at`; the request
+    # alone keeps Restore here offered, and that delete is no failure.
+    test "Restore here stays offered once its fence deleted the server, recorded or not" do
+      silent = [link_primary: primary(:unreachable, 11 * @minute), primary_home: nil]
+      gone = [provision: ledger(:connected), return: fence_record(), copies: [copy()]] ++ silent
+
+      assert "restore_here" in all_actions(HomeSummary.summary(desktop(gone)))
+
+      interrupted = Keyword.put(gone, :provision, failed(ledger(:failed), fence_failure()))
+      summary = HomeSummary.summary(desktop(interrupted))
+      refute kind(summary) == "delete_failed"
+      assert "restore_here" in all_actions(summary)
+    end
+
+    test "Restore here is offered only once the server was silent long enough to be deleted" do
+      off = [provision: created_ledger(power: "off"), primary_home: nil, copies: [copy()]]
+
+      refute "restore_here" in all_actions(
+               HomeSummary.summary(desktop([link_primary: primary(:unreachable, @minute)] ++ off))
+             )
+
+      assert "restore_here" in all_actions(
+               HomeSummary.summary(
+                 desktop([link_primary: primary(:unreachable, 11 * @minute)] ++ off)
                )
              )
     end

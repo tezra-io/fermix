@@ -364,12 +364,21 @@ defmodule FermixCore.Management.AlwaysOn do
   # By what the screen showed: a move back's, on the token screen the code
   # of a server of the owner's own, while a create runs that create,
   # otherwise the server that stands.
-  defp cancel(%{facts: %{role: :device, returning: returning}}, opts) when returning != nil,
-    do: cancel_return(opts)
+  defp cancel(%{facts: facts} = seen, opts) do
+    if returning?(facts), do: cancel_return(opts), else: cancel_step(seen, opts)
+  end
 
-  defp cancel(%{summary: %{"state" => "connect"}}, opts), do: withdraw_code(opts)
+  # A move back's screen: its candidate, or its started record alone.
+  defp returning?(%{role: :device, returning: returning}) when returning != nil, do: true
 
-  defp cancel(%{facts: %{provision: %{action: %{kind: "create"}}}}, opts) do
+  defp returning?(%{role: :device, return: %{move_started_at: %DateTime{}} = record}),
+    do: not Map.has_key?(record, :moved_at)
+
+  defp returning?(_facts), do: false
+
+  defp cancel_step(%{summary: %{"state" => "connect"}}, opts), do: withdraw_code(opts)
+
+  defp cancel_step(%{facts: %{provision: %{action: %{kind: "create"}}}}, opts) do
     with :ok <- Provision.stop_step(opts),
          :ok <- Provision.clear_action(opts),
          {:ok, holding?} <- Provision.holding(opts) do
@@ -377,7 +386,7 @@ defmodule FermixCore.Management.AlwaysOn do
     end
   end
 
-  defp cancel(_seen, opts), do: delete_job(opts)
+  defp cancel_step(_seen, opts), do: delete_job(opts)
 
   defp withdraw_code(opts) do
     withdraw =
@@ -633,8 +642,11 @@ defmodule FermixCore.Management.AlwaysOn do
   defp closed({:error, code, _details}),
     do: Logger.warning("always on: the server did not close the move back's code (#{code})")
 
+  # The record first: a stop before the candidate goes leaves a candidate
+  # alone, which the screen offers to Cancel, never a started record alone
+  # (the move back's TLA spec, HR-2).
   defp forget_return(home) do
-    with :ok <- Candidate.remove(home), do: Return.remove(home)
+    with :ok <- Return.remove(home), do: Candidate.remove(home)
   end
 
   defp not_kept(reason) do
