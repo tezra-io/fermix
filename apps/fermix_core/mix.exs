@@ -39,7 +39,7 @@ defmodule FermixCore.MixProject do
       {:anubis_mcp, "~> 2.0.0"},
       {:floki, "~> 0.36"},
       {:jason, "~> 1.4"},
-      {:compux, github: "tezra-io/compux", ref: "2f4ad34243fd8c6b599e1eb1e19205627092cef1"},
+      {:compux, github: "tezra-io/compux", ref: "752988397d5477f41b344f06fb2780d16e146ec5"},
       # Native kill(2) process-group shim used by the command-sweep (ProcessGroup).
       {:fermix_nif, in_umbrella: true},
       # The cue door (M60 §6.7): a loopback Bandit listener with a Plug router,
