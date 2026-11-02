@@ -232,12 +232,49 @@ scenarios:
           1. Says Fermix refuses to delete the server the home moved to, since
              it holds the home now; replacing the server (moving the home to a
              new one) is the way to retire it.
-          2. Says there is no moving back to the Mac in this version, and that
-             deleting the server in Hetzner's console does not bring Fermix
-             back to the Mac: the home would have to be restored from a
-             snapshot onto a new server.
+          2. Says to move Fermix back to the Mac first, a way back Always On
+             offers, and to delete the server after it, as a separate step
+             once the Mac runs Fermix again, not before; and that deleting
+             the server in Hetzner's console does not bring Fermix back by
+             itself.
           3. Does not claim the delete removes the server and moves Fermix
              back to the Mac.
+      # Always On's move back (design §10): an owner back at their desk wants
+      # Fermix on the Mac again and to stop paying for the server. What rots
+      # is the self-knowledge `home` reference's *Moving back*; general
+      # knowledge (and the old docs) says there is no way back. The floor is
+      # phrasing-free; the one not-matches is that old claim, which no
+      # correct answer makes in either polarity; the rubric owns the facts
+      # and never asks for the action's label word for word.
+      - id: moving_back_to_the_mac
+        query: >
+          A month ago I moved my Fermix to the Hetzner server it set up for
+          me. I'm back at my desk for good now. Can I bring Fermix back onto
+          my Mac and stop paying for that server? What would I get back, and
+          what happens to the server?
+        expect:
+          reply_matches: '(?i)\bserver\b'
+          reply_not_matches: '(?i)\bno\s+way\s+back\s+(?:(?:to|onto)\s+(?:your|the|this)\s+(?:mac|computer)|in\s+this\s+version)\b|\bcan(?:no|''|’)t\s+(?:be\s+)?(?:moved|brought|move|bring)\s+(?:it\s+|fermix\s+)?back\b|\b(?:moving|move)\s+back\s+is\s+not\s+possible\b|\bnot\s+possible\s+to\s+(?:move|bring)\s+(?:it\s+|fermix\s+)?back\b'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: |
+          1. Says Fermix can come back to the Mac: Always On offers a way
+             back (in the Fermix app's Always On pane, the setup page's
+             Always On tab, or `fermix always-on` in a terminal) that moves
+             the home from the server back onto this Mac, its memory,
+             settings, secrets and chats with it.
+          2. Says it asks for the recovery passphrase to start the move
+             back.
+          3. Says the server is deleted after the move back, as a separate
+             step once the Mac runs Fermix again (it keeps costing money
+             until then), and not as part of the move or before it.
+          4. Says what comes back on the Mac, at least one of: iMessage,
+             voice calls or meetings running there again as before the
+             move; the Mac's own files and keychain kept; the phones
+             following.
+          5. Does not say the server should be deleted first, does not send
+             the owner to export and import the home by hand, and does not
+             say Fermix cannot be moved back.
       - id: what_the_always_on_pane_says
         query: >
           The Always On pane on my Mac says "Your server is turned off." with a
