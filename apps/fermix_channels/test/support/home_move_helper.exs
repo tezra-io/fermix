@@ -40,7 +40,7 @@ defmodule FermixChannels.Test.HomeMove do
     [
       now: @now,
       free_bytes: fn _dir -> {:ok, @plenty} end,
-      version: "0.16.0",
+      version: "9.9.9",
       host: "macos-aarch64",
       restarts_itself: true
     ]
@@ -71,8 +71,6 @@ defmodule FermixChannels.Test.HomeMove do
     root = DesktopRail.root!("fx-hp")
     File.mkdir_p!(root)
     :ok = Epoch.write(root, Keyword.get(opts, :epoch, 4))
-    {:ok, identity} = Identity.ensure(root: root)
-    {:ok, %{endpoint_id: node_id}} = Key.ensure(root)
 
     File.write!(
       Path.join(root, "config.toml"),
@@ -81,7 +79,19 @@ defmodule FermixChannels.Test.HomeMove do
 
     File.mkdir_p!(Path.join(root, "journals"))
     File.write!(Path.join([root, "journals", "day.md"]), "an invented day\n")
+    serve!(root, opts)
+  end
 
+  @doc """
+  `primary!/1`'s engine for a home that is the primary already (one a move
+  made the primary, say): its identity and iroh key as the home holds them,
+  its device store, its enrollment window and its bridge. Options as
+  `primary!/1`'s but `:epoch`, and `:name`, the host name its codes carry
+  ("studio-mac" unless said).
+  """
+  def serve!(root, opts \\ []) do
+    {:ok, identity} = Identity.ensure(root: root)
+    {:ok, %{endpoint_id: node_id}} = Key.ensure(root)
     suffix = System.unique_integer([:positive])
     clock = start_supervised!({Agent, fn -> @now end}, id: {:clock, suffix})
     store = :"home_move_store_#{suffix}"
@@ -102,7 +112,7 @@ defmodule FermixChannels.Test.HomeMove do
          helper: rail,
          device_store: store,
          clock: fn -> Agent.get(clock, & &1) end,
-         host_name: fn -> {:ok, "studio-mac"} end
+         host_name: fn -> {:ok, Keyword.get(opts, :name, "studio-mac")} end
        ] ++ Keyword.take(opts, [:schedule, :monotonic, :status_changed])},
       id: {:enrollment, suffix}
     )
@@ -215,6 +225,8 @@ defmodule FermixChannels.Test.HomeMove do
   Starts the candidate process for `home`, reaching `primary` for its
   enrollment, and its own bridge serving the move. Timers and the restart
   come to the test as `{:scheduled, message, delay}` and `:candidate_restart`.
+  Options: `:now`, `:free_bytes`, and the candidate's own `:host` facts and
+  `:restore_opts` (a Linux server's unless said).
   """
   def start_candidate!(home, primary, opts \\ []) do
     test = self()
@@ -235,9 +247,16 @@ defmodule FermixChannels.Test.HomeMove do
          :ok
        end,
        rail_opts: [connect: DesktopRail.bridge_connect(primary.bridge_socket)],
-       restore_opts: [host: "linux-aarch64", keyring_usable?: fn -> false end],
+       restore_opts:
+         Keyword.get(opts, :restore_opts, host: "linux-aarch64", keyring_usable?: fn -> false end),
        free_bytes: Keyword.get(opts, :free_bytes, fn _dir -> {:ok, @plenty} end),
-       host: %{"name" => "north-box", "os" => "linux", "arch" => "aarch64", "version" => "9.9.9"}},
+       host:
+         Keyword.get(opts, :host, %{
+           "name" => "north-box",
+           "os" => "linux",
+           "arch" => "aarch64",
+           "version" => "9.9.9"
+         })},
       id: {:candidate, suffix}
     )
 

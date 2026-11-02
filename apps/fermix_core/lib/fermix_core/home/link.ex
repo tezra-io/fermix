@@ -3,8 +3,8 @@ defmodule FermixCore.Home.Link do
   The rail-side half of the home (M75), as `fermix_core` sees it: forwarding a
   Fermix-wide management call from a desktop's device-role engine to its
   primary, the rail's facts for `home.status`, opening an enrollment window
-  on a primary, and naming a desktop's primary anew after a replace of the
-  server.
+  on a primary, naming a desktop's primary anew after a replace of the
+  server, and receiving the home back on a desktop (Always On's move back).
 
   `fermix_core` must never compile-depend on `fermix_channels`, so the
   implementation is injected **by module** through
@@ -107,6 +107,23 @@ defmodule FermixCore.Home.Link do
   a row of that key that is no desktop is refused by name.
   """
   @callback drop_desktop_row(Path.t(), <<_::256>>) :: :ok | {:error, term()}
+
+  @doc """
+  Device role: starts receiving the home back from the server (Always On's
+  move back) beside the relay: the candidate subtree under the running device
+  tree, for the candidate `FermixCore.Home.Candidate.prepare_return/3` wrote
+  under `home`. `:ok` once it runs, as it may already; `{:error,
+  :no_device_tree}` on an engine that runs no device tree, `{:error,
+  reason}` when it could not start.
+  """
+  @callback start_return(Path.t()) :: :ok | {:error, term()}
+
+  @doc """
+  Device role: stops receiving the home back (Cancel): the candidate subtree
+  ends, and with it what kept the computer awake for it. One that is not
+  running is nothing to stop.
+  """
+  @callback stop_return() :: :ok
 
   @typedoc "How a request reaches the primary: the rail's `forward/2` on a linked desktop."
   @type forwarding ::

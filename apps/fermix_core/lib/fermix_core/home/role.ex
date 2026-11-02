@@ -138,7 +138,8 @@ defmodule FermixCore.Home.Role do
   # primary never starts them (M75 §2).
   @device_only [
     {FermixChannels.Desktop.DeviceSupervisor,
-     "dials the primary from a desktop whose home moved, and carries the move from its source"}
+     "dials the primary from a desktop whose home moved, carries the move from its source, " <>
+       "and receives the home back on a move back"}
   ]
 
   @device_only_modules Enum.map(@device_only, &elem(&1, 0))
@@ -165,7 +166,10 @@ defmodule FermixCore.Home.Role do
 
   @candidate_keep_modules Enum.map(@candidate_keeps, &elem(&1, 0))
 
-  # Children only a candidate starts: the primary and a device leave them out.
+  # Children only a candidate starts at the top of its tree: the primary and a
+  # device leave them out there. A device receiving the home back (Always On's
+  # move back) runs the same candidate subtree under its device tree instead,
+  # beside the relay (`FermixChannels.Desktop.DeviceSupervisor`).
   @candidate_only_modules [FermixChannels.Home.CandidateSupervisor]
 
   @type role :: :primary | :device | :candidate

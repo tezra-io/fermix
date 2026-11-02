@@ -7,7 +7,9 @@ defmodule FermixCore.Home.MoveAwake do
   desktop of the new primary, or as the primary again when the move was
   undone. The primary that takes Move now holds nothing: it restarts into the
   worker at once. Nothing is held while a server waits for Move now: it keeps
-  trying until its code expires.
+  trying until its code expires. On a move back, the computer the home comes
+  back to holds it too (`FermixChannels.Home.Candidate` of kind `return`):
+  from `receiving` until the restart that makes it the primary again.
 
   Each inhibitor ends when the engine ends, by its own rule:
 
@@ -27,6 +29,9 @@ defmodule FermixCore.Home.MoveAwake do
   inhibitor that ends by itself is logged with what it printed. A hold that
   cannot start (no inhibitor on this system, a refused spawn) is an error
   the worker logs: the move goes on, and the computer may sleep.
+
+  `:why` is the reason systemd-inhibit lists ("Fermix is moving to your server" unless
+  said).
 
   Seams: `:os_type`, `:os_pid` (the BEAM's, `System.pid/0`), `:disclaim` and
   `:caffeinate` (paths, or nil), `:find_executable`, `:spawn` (2-arity, the
@@ -117,7 +122,7 @@ defmodule FermixCore.Home.MoveAwake do
     case {find.("systemd-inhibit"), find.("tail")} do
       {nil, _tail} -> {:error, {:not_found, "systemd-inhibit"}}
       {_inhibit, nil} -> {:error, {:not_found, "tail"}}
-      {inhibit, tail} -> {:ok, {inhibit, inhibit_args(tail, os_pid(opts))}}
+      {inhibit, tail} -> {:ok, {inhibit, inhibit_args(tail, os_pid(opts), why(opts))}}
     end
   end
 
@@ -224,11 +229,11 @@ defmodule FermixCore.Home.MoveAwake do
 
   defp kill_group(os_pid), do: ProcessGroup.signal(os_pid, :sigkill)
 
-  defp inhibit_args(tail, os_pid) do
+  defp inhibit_args(tail, os_pid, why) do
     [
       "--what=sleep:idle",
       "--who=Fermix",
-      "--why=#{@why}",
+      "--why=#{why}",
       "--mode=block",
       tail,
       "--pid=#{os_pid}",
@@ -238,6 +243,7 @@ defmodule FermixCore.Home.MoveAwake do
   end
 
   defp os_pid(opts), do: Keyword.get_lazy(opts, :os_pid, &System.pid/0)
+  defp why(opts), do: Keyword.get(opts, :why, @why)
 
   defp caffeinate, do: if(File.regular?(@caffeinate), do: @caffeinate)
 

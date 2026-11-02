@@ -74,7 +74,9 @@ defmodule FermixCore.Home.RoleCandidateTest do
              [FermixCore.Management.Lifecycle, Fermix.CLI.Daemon]
   end
 
-  test "the channels tree of a candidate is its own supervisor, which no other role starts" do
+  # A device receiving the home back runs the same subtree under its device
+  # tree, never at the top of its own (`Desktop.DeviceSupervisorTest`).
+  test "the channels tree of a candidate is its own supervisor, which no other role starts at its top" do
     readiness = %{status: :ready, missing: []}
     plan = FermixChannels.Application.boot_plan(readiness, "epoch-1", :candidate)
 

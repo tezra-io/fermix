@@ -32,7 +32,9 @@ defmodule FermixCore.Home.Return do
   - `move_started_at`, `candidate_id`, `move_id`: once the server started the
     move.
   - `moved_at`, `epoch`: once this computer booted as the primary again
-    (`done/2`).
+    (`done/2`, which the primary's boot runs before anything reads the home;
+    one it could not write is remembered, `remember_unrecorded/0`, and each
+    `home.status` read of that engine tries it again).
 
   A record left without its `candidate/` by a crash, or the other way round, is
   harmless: the next return writes both again.
@@ -51,6 +53,7 @@ defmodule FermixCore.Home.Return do
   @epochs [:primary_epoch, :epoch]
   @keys @times ++ @texts ++ @epochs
   @required [:from, :started_at]
+  @boot_key {__MODULE__, :boot}
 
   @type record :: %{
           required(:from) => String.t(),
@@ -115,6 +118,22 @@ defmodule FermixCore.Home.Return do
       {:error, _reason} = error -> error
     end
   end
+
+  @doc """
+  At boot, once `done/2` could not write: records that this engine's boot
+  left the return unrecorded, for the reads after it. Written once, before
+  any child starts, like the engine role (`FermixCore.Home.Role`).
+  """
+  @spec remember_unrecorded() :: :ok
+  def remember_unrecorded, do: :persistent_term.put(@boot_key, :unrecorded)
+
+  @doc """
+  Whether this engine's boot left the return unrecorded (`:unrecorded`), or
+  recorded it or had none to record (`:recorded`, also in a process that
+  booted no engine, which so never writes it).
+  """
+  @spec boot_done() :: :recorded | :unrecorded
+  def boot_done, do: :persistent_term.get(@boot_key, :recorded)
 
   @doc "Removes the record; an absent one is already removed."
   @spec remove(Path.t()) :: :ok | {:error, error()}

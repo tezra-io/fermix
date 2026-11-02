@@ -49,6 +49,16 @@ defmodule FermixCore.Home.MoveAwakeTest do
                    "/dev/null"
                  ]}}
 
+      # A move back names its own reason.
+      assert {:ok, {_inhibit, args}} =
+               MoveAwake.plan({:unix, :linux},
+                 os_pid: "4711",
+                 find_executable: found,
+                 why: "Fermix is moving back to this computer"
+               )
+
+      assert "--why=Fermix is moving back to this computer" in args
+
       missing = fn
         "systemd-inhibit" -> nil
         "tail" -> "/usr/bin/tail"

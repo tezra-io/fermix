@@ -33,6 +33,7 @@ defmodule FermixCore.Application do
   alias FermixCore.Home.Candidate
   alias FermixCore.Home.Epoch
   alias FermixCore.Home.Move
+  alias FermixCore.Home.Return
   alias FermixCore.Home.Role
   alias FermixCore.Home.Snapshot.Scheduler, as: SnapshotScheduler
   alias FermixCore.HostFacts
@@ -191,14 +192,17 @@ defmodule FermixCore.Application do
   # restored one into place, so it gets no workspace, no epoch, no prompt
   # files and no token-file check. A primary first finishes a candidate's
   # activation that a crash cut short after the restored settings were in place
-  # (`Candidate.finish_activation/1`), before anything reads the home. Then
-  # either role says the ending of a move the engine before this restart
-  # left half-said (`Move.finish_at_boot/2`): only the engine that came back
-  # publishes `done` or `aborted`.
+  # (`Candidate.finish_activation/1`), before anything reads the home, and
+  # records that this computer took Fermix back when a move back made it the
+  # primary again (`Home.Return.done/2`). Then either role says the ending of
+  # a move the engine before this restart left half-said
+  # (`Move.finish_at_boot/2`): only the engine that came back publishes `done`
+  # or `aborted`.
   defp prepare_home(_root, :candidate), do: :ok
 
   defp prepare_home(root, role) do
     :ok = finish_activation(root, role)
+    :ok = finish_return(root, role)
     :ok = finish_move(root, role)
     :ok = ConfigStore.ensure_workspace()
     :ok = initialise_primary_epoch(root, role)
@@ -213,6 +217,26 @@ defmodule FermixCore.Application do
     case Candidate.finish_activation(root) do
       :ok -> :ok
       {:error, reason} -> raise Candidate.error_sentence(reason)
+    end
+  end
+
+  # A failure here does not stop the boot, and is not dropped: the boot
+  # remembers it, and each `home.status` read tries the write again
+  # (`Management.Home`). The log says so now.
+  defp finish_return(_root, :device), do: :ok
+
+  defp finish_return(root, :primary) do
+    case Return.done(root, DateTime.utc_now()) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error(
+          "move back: that this computer took Fermix back could not be recorded at boot " <>
+            "(#{inspect(reason)}); home.status tries again at each read"
+        )
+
+        Return.remember_unrecorded()
     end
   end
 

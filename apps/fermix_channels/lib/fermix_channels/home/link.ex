@@ -9,8 +9,10 @@ defmodule FermixChannels.Home.Link do
   `status/0`'s `desktops` by the primary's desktop peers
   (`FermixChannels.Desktop.Peer`), and `open_enrollment/1`,
   `withdraw_enrollment/1` and `status/0`'s `enrollment` by the enrollment
-  window, and `drop_desktop_row/2` by the device store of the staged home it
-  names.
+  window, `drop_desktop_row/2` by the device store of the staged home it
+  names, and `start_return/1` and `stop_return/0` by the device tree
+  (`FermixChannels.Desktop.DeviceSupervisor`), whose candidate subtree
+  receives a move back beside the relay.
 
   The desktop relay (`FermixChannels.Desktop.Relay`) runs only in a device
   role whose home holds its desktop link, which is also the only engine whose
@@ -23,6 +25,7 @@ defmodule FermixChannels.Home.Link do
 
   require Logger
 
+  alias FermixChannels.Desktop.DeviceSupervisor
   alias FermixChannels.Desktop.Peer
   alias FermixChannels.Desktop.Relay
   alias FermixChannels.Home.Enrollment
@@ -69,6 +72,13 @@ defmodule FermixChannels.Home.Link do
       {:error, _reason} = error -> error
     end
   end
+
+  @impl true
+  def start_return(home) when is_binary(home) and home != "",
+    do: DeviceSupervisor.start_candidate(home)
+
+  @impl true
+  def stop_return, do: DeviceSupervisor.stop_candidate()
 
   # Every desktop row the primary holds, with whether its session is up now.
   # A store or registry that is not running (any role but the primary) holds

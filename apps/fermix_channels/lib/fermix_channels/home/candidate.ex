@@ -43,11 +43,36 @@ defmodule FermixChannels.Home.Candidate do
   (`Management.Lifecycle.restart_self/0`: the systemd start budget reset first,
   then the one stop path), which the service manager brings back.
 
+  **A move back** (Always On's return to the computer the home left, a
+  candidate of kind `return` in `state.json`): the same process runs under
+  that computer's device tree, beside its relay
+  (`FermixChannels.Desktop.DeviceSupervisor`). It stages the server's home as
+  a return (`Activation.stage/6`: this computer's device settings, secret
+  store and keychain, without its own desktop row; a keychain that refuses is
+  named as the settings rows name each secret), and on `move_commit` records
+  the staged entries once and puts the home in place of the retired copy
+  (`Activation.record_entries/1`, `Activation.activate/2`), then restarts, and
+  the engine comes back as the primary. A room check that fails names this
+  computer. It keeps the computer awake (`FermixCore.Home.MoveAwake`) from
+  `receiving` until that restart: a staging that fails, an ending and a
+  Cancel (which stops the process) let it sleep again. A restart part-way is
+  finished by the next start, as for a move: before the settings are in place
+  by this process, after it by the primary's boot.
+
+  A candidate of kind `local` (restored from a copy this computer holds,
+  which no rail carries) waits for no `move_commit`: found `activating` at a
+  start, its activation is finished and the engine restarts; found in any
+  other phase, the restore that wrote it stopped, so it is removed, and the
+  restore is offered again.
+
   Test seams: `:home`, `:helper`, `:name`, `:clock` (0-arity `DateTime`),
   `:schedule` (2-arity `Process.send_after/3` stand-in), `:restart`,
   `:rail_opts` (extra `Mobile.Rail.open/3` options, such as `:connect`),
-  `:restore_opts` (for `Snapshot.restore/4`), `:task_supervisor`, `:host`,
-  `:free_bytes` (a 1-arity reader of free space).
+  `:restore_opts` (for `Snapshot.restore/4`, and a return's settling seams),
+  `:task_supervisor`, `:host`, `:free_bytes` (a 1-arity reader of free
+  space), `:awake` (0-arity, as `MoveAwake.hold/1`; a test VM holds nothing
+  unless a case injects it), `:secret_names` (0-arity, as
+  `Management.Settings.secret_names/0`).
   """
 
   use GenServer
@@ -59,9 +84,12 @@ defmodule FermixChannels.Home.Candidate do
   alias FermixCore.BuildInfo
   alias FermixCore.Home.Candidate, as: Files
   alias FermixCore.Home.Candidate.Activation
+  alias FermixCore.Home.Candidate.Return
   alias FermixCore.Home.Disk
+  alias FermixCore.Home.MoveAwake
   alias FermixCore.Home.MoveTelemetry
   alias FermixCore.Management.Lifecycle
+  alias FermixCore.Management.Settings
   alias FermixCore.Setup.ConfigStore
 
   @listen_s 24 * 3_600
@@ -73,6 +101,11 @@ defmodule FermixChannels.Home.Candidate do
   @max_activation_retry_ms 300_000
   @max_activation_tries 12
   @moving ~w(enrolled receiving staged activating)
+  # The phases a return keeps the computer awake through: its home is on
+  # the way here, and after the server's marker nobody else serves it.
+  @awake_phases ~w(receiving staged activating)
+  @awake_why "Fermix is moving back to this computer"
+  @compiled_env Mix.env()
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) when is_list(opts),
@@ -132,6 +165,9 @@ defmodule FermixChannels.Home.Candidate do
       tasks: Keyword.get(opts, :task_supervisor, FermixCore.TaskSupervisor),
       host: Keyword.get_lazy(opts, :host, &host_facts/0),
       free_bytes: Keyword.get(opts, :free_bytes, &Disk.free_bytes/1),
+      hold_awake: Keyword.get(opts, :awake, default_awake()),
+      secret_names: Keyword.get(opts, :secret_names, &Settings.secret_names/0),
+      awake: nil,
       activation_tries: 0,
       phase: nil,
       enroll: nil,
@@ -152,10 +188,17 @@ defmodule FermixChannels.Home.Candidate do
     end
   end
 
-  defp carry_on(%{phase: %{"phase" => "activating"}} = state), do: finish_activation(state)
+  defp carry_on(%{phase: %{"kind" => "local", "phase" => "activating"}} = state),
+    do: finish_activation(state)
+
+  defp carry_on(%{phase: %{"kind" => "local"}} = state), do: drop_local(state)
+
+  defp carry_on(%{phase: %{"phase" => "activating"}} = state),
+    do: state |> keep_awake() |> finish_activation()
+
   defp carry_on(%{phase: %{"phase" => "enrolling"}} = state), do: start_enroll(state)
   defp carry_on(%{phase: %{"phase" => "enrolled"}} = state), do: arm_listen_end(state)
-  defp carry_on(state), do: state
+  defp carry_on(state), do: keep_awake(state)
 
   @impl true
   def handle_call(:serving?, _from, state),
@@ -223,8 +266,10 @@ defmodule FermixChannels.Home.Candidate do
 
   def handle_info(:activate, state), do: {:noreply, state}
   def handle_info(:listen_end, state), do: {:noreply, listen_end(state)}
+  def handle_info(:keep_awake, state), do: {:noreply, keep_awake(state)}
 
   def handle_info(:restart, state) do
+    state = let_sleep(state)
     :ok = state.restart.()
     {:noreply, state}
   end
@@ -373,7 +418,9 @@ defmodule FermixChannels.Home.Candidate do
   end
 
   defp listen_end(%{phase: %{"phase" => "enrolled"}} = state) do
-    put(state, "expired", %{
+    state
+    |> let_sleep()
+    |> put("expired", %{
       "sentence" => "No move came from #{primary_name(state)} within 24 hours; enroll again."
     })
   end
@@ -418,6 +465,8 @@ defmodule FermixChannels.Home.Candidate do
          {:ok, pair} <- Files.recipient_pair(state.home) do
       state = started(facts["move_id"], facts["source_epoch"], state)
       state = put(state, "receiving", %{"move" => facts, "sentence" => nil})
+      # After the answer, which the hold must not hold up.
+      send(self(), :keep_awake)
 
       {:reply,
        {:ok,
@@ -442,16 +491,29 @@ defmodule FermixChannels.Home.Candidate do
         :ok
 
       {:ok, free} ->
-        {:error,
-         {:no_room,
-          "This server needs about #{Disk.gib(need)} free for the move and has " <>
-            "#{Disk.gib(free)}: give its disk more space, then move again."}}
+        {:error, {:no_room, no_room_sentence(state, need, free)}}
 
       {:error, reason} ->
         Logger.error("candidate: the free space could not be read: #{inspect(reason)}")
-        {:error, {:no_room, "This server could not tell how much space its disk has."}}
+        {:error, {:no_room, "This #{place(state)} could not tell how much space its disk has."}}
     end
   end
+
+  defp no_room_sentence(%{phase: %{"kind" => "return"}} = state, need, free),
+    do:
+      "This #{place(state)} needs about #{Disk.gib(need)} free to take Fermix back and has " <>
+        "#{Disk.gib(free)}: make room on its disk, then move back again."
+
+  defp no_room_sentence(state, need, free),
+    do:
+      "This #{place(state)} needs about #{Disk.gib(need)} free for the move and has " <>
+        "#{Disk.gib(free)}: give its disk more space, then move again."
+
+  # The computer a return comes back to, by the word the owner knows it by;
+  # a move's candidate is the server.
+  defp place(%{phase: %{"kind" => "return"}, host: %{"os" => "darwin"}}), do: "Mac"
+  defp place(%{phase: %{"kind" => "return"}}), do: "computer"
+  defp place(_state), do: "server"
 
   defp stage_move(
          move_id,
@@ -462,13 +524,8 @@ defmodule FermixChannels.Home.Candidate do
     {:ok, destination} = Files.destination(state.home)
     facts = %{"destination" => destination, "recovery_recipient" => move["recovery_recipient"]}
     incoming = Files.incoming_path(state.home)
-    restore_opts = state.restore_opts
-    home = state.home
-
-    task =
-      Task.Supervisor.async_nolink(state.tasks, fn ->
-        Activation.stage(home, incoming, pair, facts, restore_opts)
-      end)
+    staging = stage_fun(state, incoming, pair, facts)
+    task = Task.Supervisor.async_nolink(state.tasks, staging)
 
     {:reply, :ok, %{state | restore: %{ref: task.ref, move_id: move_id, reply_to: reply_to}}}
   end
@@ -477,6 +534,15 @@ defmodule FermixChannels.Home.Candidate do
     do:
       {:reply, {:error, "move_mismatch", "That is not the move this candidate is receiving."},
        state}
+
+  # A return stages the server's home for the computer the home left.
+  defp stage_fun(%{phase: %{"kind" => "return"}} = state, incoming, pair, facts) do
+    %{home: home, restore_opts: opts} = state
+    fn -> Activation.stage(home, incoming, pair, facts, :return, opts) end
+  end
+
+  defp stage_fun(%{home: home, restore_opts: opts}, incoming, pair, facts),
+    do: fn -> Activation.stage(home, incoming, pair, facts, opts) end
 
   defp restored({:ok, epoch}, %{restore: %{move_id: move_id, reply_to: reply_to}} = state) do
     _ = discard(Files.incoming_path(state.home))
@@ -488,17 +554,26 @@ defmodule FermixChannels.Home.Candidate do
 
   defp restored({:error, reason}, %{restore: %{move_id: move_id, reply_to: reply_to}} = state) do
     Logger.error("candidate: the move #{move_id} could not be restored: #{inspect(reason)}")
-    sentence = "The home from #{primary_name(state)} could not be restored here."
+    sentence = restore_sentence(reason, state)
     finished(move_id, nil, {:failed, reason}, state)
 
     state =
       %{state | restore: nil}
+      |> let_sleep()
       |> put("enrolled", %{"move" => nil, "sentence" => sentence})
       |> arm_listen_end()
 
     send(reply_to, {:candidate_staged, move_id, {:error, sentence}})
     state
   end
+
+  # A keychain that refused a return's secrets is the owner's to unlock, so
+  # each is named as its settings row names it.
+  defp restore_sentence({:keychain_refused, [_ | _]} = refused, state),
+    do: Return.error_sentence(refused, state.secret_names.())
+
+  defp restore_sentence(_reason, state),
+    do: "The home from #{primary_name(state)} could not be restored here."
 
   # A second move_commit after the home is in place (from a session its source
   # gave up on) is answered as the first was: the candidate's files are gone.
@@ -515,7 +590,7 @@ defmodule FermixChannels.Home.Candidate do
        when phase in ["staged", "activating"] do
     state = put(state, "activating", %{"move" => move})
 
-    case Activation.activate(state.home) do
+    case activate(state) do
       :ok ->
         finished(move_id, move["epoch"], :done, state)
         Logger.info("candidate: the move #{move_id} committed; restarting as the primary")
@@ -536,7 +611,7 @@ defmodule FermixChannels.Home.Candidate do
        state}
 
   defp finish_activation(state) do
-    case Activation.activate(state.home) do
+    case activate(state) do
       :ok ->
         Logger.info("candidate: finished putting the moved home in place; restarting")
         state.schedule.(:restart, @restart_after_ms)
@@ -546,6 +621,68 @@ defmodule FermixChannels.Home.Candidate do
         activation_failed(state, reason)
     end
   end
+
+  # A return's entries are recorded once, before its first rename, and every
+  # run after reads them back.
+  defp activate(%{phase: %{"kind" => kind}, home: home}) when kind in ~w(return local) do
+    with {:ok, _entries} <- Activation.record_entries(home),
+         do: Activation.activate(home, :return)
+  end
+
+  defp activate(state), do: Activation.activate(state.home)
+
+  # A restore from this computer's copy that stopped before it was put in
+  # place: nothing of it is in use, so it goes, and the restore is offered
+  # again. The process stays, with nothing to do, until the engine's next
+  # start.
+  defp drop_local(state) do
+    Logger.warning(
+      "move back: a restore from this computer's copy stopped before it was put in place; " <>
+        "it is removed and offered again"
+    )
+
+    case discard_tree(Files.dir(state.home)) do
+      :ok -> %{state | phase: nil}
+      {:error, reason} -> raise "the stopped restore could not be removed: #{inspect(reason)}"
+    end
+  end
+
+  # -- the hold on sleep ------------------------------------------------------
+
+  # Only a return keeps its computer awake, through the phases its home is on
+  # the way here in; a hold that cannot start leaves the computer free to
+  # sleep, and the log says why.
+  defp keep_awake(%{phase: %{"kind" => "return", "phase" => phase}, awake: nil} = state)
+       when phase in @awake_phases do
+    case state.hold_awake.() do
+      {:ok, holder} ->
+        %{state | awake: holder}
+
+      {:error, reason} ->
+        Logger.warning(
+          "move back: this computer may sleep while it takes Fermix back: " <>
+            MoveAwake.describe(reason)
+        )
+
+        state
+    end
+  end
+
+  defp keep_awake(state), do: state
+
+  defp let_sleep(%{awake: nil} = state), do: state
+
+  defp let_sleep(state) do
+    :ok = MoveAwake.release(state.awake)
+    %{state | awake: nil}
+  end
+
+  # A test VM never holds its host awake; a case injects `:awake` to see it.
+  defp default_awake do
+    if @compiled_env == :test, do: fn -> {:ok, nil} end, else: &hold_awake/0
+  end
+
+  defp hold_awake, do: MoveAwake.hold(why: @awake_why)
 
   # The renames are idempotent, so the next try carries on from where this one
   # stopped; the sentence says so in home.status meanwhile. Bounded per run of
@@ -594,6 +731,8 @@ defmodule FermixChannels.Home.Candidate do
 
   # Every ending of an enrollment drops the code with it.
   defp fail(state, sentence) do
+    state = let_sleep(state)
+
     case Files.drop_code(state.home) do
       :ok ->
         :ok

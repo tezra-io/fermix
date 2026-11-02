@@ -2,7 +2,12 @@ defmodule FermixChannels.Home.CandidateSupervisor do
   @moduledoc """
   What a `candidate`-role engine runs (M75 §2, B4), and the only channels
   child it runs (`FermixCore.Home.Role.candidate_keeps/0`): its own iroh
-  endpoint and the candidate process, all under `<home>/candidate/`.
+  endpoint and the candidate process, all under `<home>/candidate/`. A
+  desktop receiving the home back (Always On's move back, a candidate of kind
+  `return`) runs it under its device tree beside the relay
+  (`FermixChannels.Desktop.DeviceSupervisor`), with its own endpoint, bridge
+  socket and names. A candidate of kind `local` (restored from a copy this
+  computer holds, which no rail carries) runs the candidate process alone.
 
   `:rest_for_one`, in start order:
 
@@ -43,6 +48,14 @@ defmodule FermixChannels.Home.CandidateSupervisor do
   @doc "The candidate's children for the home at `home`, in start order."
   @spec children(Path.t()) :: [Supervisor.child_spec() | {module(), keyword()}]
   def children(home) when is_binary(home) and home != "" do
+    case Files.read_state(home) do
+      {:ok, %{"kind" => "local"}} -> [{Candidate, home: home}]
+      _rail_or_unread -> rail_children(home)
+    end
+  end
+
+  # A state it cannot read is the candidate process's to name and stop on.
+  defp rail_children(home) do
     root = Files.dir(home)
     socket = Bridge.socket_path(root)
 
