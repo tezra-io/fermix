@@ -1,7 +1,7 @@
 defmodule FermixChannels.Gateway.Commands.RegistryTest do
   use ExUnit.Case, async: false
 
-  alias FermixChannels.Gateway.Commands.Registry
+  alias FermixChannels.Gateway.Commands.{New, Registry, Stop}
 
   # Minimal command stub whose name collides with the built-in `/new`.
   defmodule DupName do
@@ -42,12 +42,12 @@ defmodule FermixChannels.Gateway.Commands.RegistryTest do
              %{
                "name" => "new",
                "aliases" => ["clear"],
-               "description" => FermixChannels.Gateway.Commands.New.description()
+               "description" => New.description()
              },
              %{
                "name" => "stop",
                "aliases" => [],
-               "description" => FermixChannels.Gateway.Commands.Stop.description()
+               "description" => Stop.description()
              }
            ]
   end
