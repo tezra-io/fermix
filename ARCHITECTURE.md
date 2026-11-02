@@ -792,9 +792,11 @@ back by that fact, never by an OS), writes the desktop's own candidate
 (`Candidate.prepare_return/3`, kind `return`) and `Home.Return`'s record
 (`device/return.json`: the server's name, the ledger's server, the epoch the
 link reached), and starts the candidate subtree (`Home.Link`'s
-`start_return/1`). Move now on it sends `home.move.start` to the desktop's own
-candidate and keeps the start in `return.json`, never in the ledger's
-`replace`; Cancel stops the subtree, closes the window
+`start_return/1`). Move now on it writes the start into `return.json` before
+it sends `home.move.start` to the desktop's own candidate (the server restarts
+into the move as it answers), never into the ledger's `replace`, and takes it
+back only when the server refused or the request never left; Cancel (offered
+only where the server has no move under way) stops the subtree, closes the window
 (`home.enroll.withdraw {kind: manual}`) and removes both. Restore here
 (`restore_here`) chooses the newest copy under `snapshots/` the passphrase
 opens (`Home.LocalReturn.choose/2`, a wrong one refused before anything is
@@ -810,7 +812,10 @@ resumed: jobs live in memory, so a stop part-way leaves the step interrupted
 and a `local` candidate the device's next start discards, and Restore here is
 offered again (with `fenced_at` set it deletes nothing twice). The primary's
 summary reads `return.json`'s `moved_at` with the ledger's server standing as
-`server_retired` first; its delete removes the record with the server.
+`server_retired` first; its delete removes the record with the server. While
+a move back's `candidate/` is here, in any phase, `delete_target` refuses
+every delete but the fence (between the activation's marker removal and its
+settings this home has neither link nor marker).
 
 Architecture Invariant: one role gate, one epoch writer, one marker, one
 device-local list, one placement table; a linked device's request takes one

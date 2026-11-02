@@ -23,9 +23,10 @@ The move to a server, the roles and the epoch: skill_view(name:
   what runs on this computer again (iMessage, voice calls and meetings, as
   its own settings turn them on), that coding agents ask for approval again,
   that Telegram messages wait, and that the server stays until it is
-  deleted. **Cancel** is offered until the server starts the move (and again
-  if the server undid it): it stops receiving, closes the code on the server
-  and forgets the move back.
+  deleted. **Cancel** is offered until Move now, and again only once the
+  server undid the move or answers with no move at all, never while it
+  moves: it stops receiving, closes the code on the server and forgets the
+  move back.
 - **The move itself.** Move now sends the move to the server, which moves
   the home here as it would to any server and then serves nothing. While
   it runs: "Moving Fermix back to this Mac. Messages wait until it is done."
