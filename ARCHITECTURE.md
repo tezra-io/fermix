@@ -735,9 +735,16 @@ family's) tells it `:ledger`.
 `Home.AlwaysOnRelease` keeps Always On out of a release build until it
 ships: compiled for `:prod`, `hello` lists none of its methods and the router
 refuses them by name, the setup page lists no Always On tab, and `fermix
-always-on` and `fermix home status` refuse in one sentence; decided from
-`Mix.env/0` at compile time, with no setting, and removed by deleting that
-module and its callers.
+always-on` and `fermix home status` refuse in one sentence, unless the home's
+settings file carries the unsupported test switch `[fermix_core.always_on]
+enabled = true`. `Mix.env/0` decides at compile time (`:dev` and `:test`
+always serve it) and within `:prod` the switch: the engine reads it from
+application environment, which the boot hydrates from the file, and the
+tree-less verbs read the same section from the home's file
+(`ConfigStore.always_on_config/1`). The switch travels with the home (no
+device-class section holds it), a candidate's settings are written with it
+on, and the gate is removed by deleting that module, its section and its
+callers.
 
 `Management.AlwaysOn` (Always On setup §3.4, §4) runs every Always On
 step: `home.act {action, key, input}`, one function per action with its

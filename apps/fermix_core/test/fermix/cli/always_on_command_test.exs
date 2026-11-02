@@ -90,6 +90,24 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
       refute_received {:called, _method, _params, _opts}
     end
 
+    # With no seam the verb asks the resolver of this home's own settings
+    # file, the one the engine's boot reads (`Home.AlwaysOnRelease`), before
+    # it reaches the engine: a switch it cannot read is named with its file.
+    test "it reads Always On's switch from this home's own settings file", ctx do
+      File.mkdir_p!(ctx.home)
+      file = Path.join(ctx.home, "config.toml")
+      File.write!(file, "[fermix_core.always_on]\nenabled = \"yes\"\n")
+
+      {status, out, err} = run(["--json"], ctx, script([]))
+
+      assert status == 1
+      assert %{"error" => %{"code" => "home_status_unavailable"}} = Jason.decode!(out)
+      assert err =~ "fermix always-on: Fermix could not read this home's status."
+      assert err =~ file
+      assert err =~ "[fermix_core.always_on] enabled takes true or false"
+      refute_received {:called, _method, _params, _opts}
+    end
+
     test "in a build with it, the verb reads the screen as ever", ctx do
       client = script([hello(), {"home.status", {:ok, status(off())}}])
       assert {0, _out, ""} = run([], ctx, client, always_on: true)

@@ -39,8 +39,11 @@ defmodule Fermix.CLI.AlwaysOnCommand do
   On a home the Fermix app manages (`HomeOwner.app_managed?/1`, given this
   verb's own `hello`) it refuses `app_managed`, naming the app's Always On
   pane. With Fermix stopped it refuses `engine_stopped` and writes nothing.
-  In a build without Always On (`Home.AlwaysOnRelease`) every use refuses
-  `always_on_unavailable` before anything is read.
+  Where this build offers no Always On in the home
+  (`Home.AlwaysOnRelease.available_in/1`, read from the home's own settings
+  file, the one its engine boots from) every use refuses
+  `always_on_unavailable` before anything else is read, and a switch it
+  cannot read is `home_status_unavailable` naming the file.
 
   **A step that waits reports how it ended**, from the screen's `outcome`,
   the engine's word: `failed` (the step ended on a problem) is
@@ -55,8 +58,9 @@ defmodule Fermix.CLI.AlwaysOnCommand do
   Dependencies: `:home`, `:client` (a 3-arity management call, as
   `Client.request_v1/3`), `:terminal` (the `SecretInput` terminal), `:stdin`,
   `:stdout`, `:stderr`, `:app_managed?` (as `HomeOwner.app_managed?/1`),
-  `:now_ms` (a 0-arity monotonic clock), `:sleep` and `:always_on` (what
-  the build compiles in, `Home.AlwaysOnRelease.available?/0`).
+  `:now_ms` (a 0-arity monotonic clock), `:sleep` and `:always_on` (a
+  boolean standing for the answer of `Home.AlwaysOnRelease.available_in/1`
+  for the home).
   """
 
   alias Fermix.CLI.AlwaysOnCommand.Render
@@ -104,9 +108,24 @@ defmodule Fermix.CLI.AlwaysOnCommand do
   @doc "Runs `fermix always-on ARGS` with the dependencies the moduledoc names."
   @spec run([String.t()], keyword()) :: non_neg_integer()
   def run(argv, deps \\ []) when is_list(argv) and is_list(deps) do
-    if Keyword.get_lazy(deps, :always_on, &AlwaysOnRelease.available?/0),
-      do: parsed(argv, deps),
-      else: unreleased(argv, deps)
+    case always_on(deps) do
+      {:ok, true} ->
+        parsed(argv, deps)
+
+      {:ok, false} ->
+        refused_first(argv, deps, :always_on_unavailable, [])
+
+      {:error, reason} ->
+        output = AlwaysOnRelease.unreadable_sentence(reason)
+        refused_first(argv, deps, :home_status_unavailable, output: output)
+    end
+  end
+
+  defp always_on(deps) do
+    case Keyword.fetch(deps, :always_on) do
+      {:ok, available?} when is_boolean(available?) -> {:ok, available?}
+      :error -> AlwaysOnRelease.available_in(home(deps))
+    end
   end
 
   defp parsed(argv, deps) do
@@ -116,13 +135,14 @@ defmodule Fermix.CLI.AlwaysOnCommand do
     end
   end
 
-  # Not in this build: one sentence on stderr, and the envelope under --json.
-  defp unreleased(argv, deps) do
-    sentence = MachineOutput.sentence(:always_on_unavailable)
+  # Not offered here, or its switch unreadable: one sentence on stderr, and
+  # the envelope under --json, before the arguments are read.
+  defp refused_first(argv, deps, code, details) do
+    sentence = MachineOutput.sentence(code, details)
     IO.puts(Keyword.get(deps, :stderr, :stderr), "fermix always-on: " <> sentence)
 
     if "--json" in argv,
-      do: IO.puts(Keyword.get(deps, :stdout, :stdio), MachineOutput.error(:always_on_unavailable))
+      do: IO.puts(Keyword.get(deps, :stdout, :stdio), MachineOutput.error(code, details))
 
     1
   end
@@ -188,8 +208,10 @@ defmodule Fermix.CLI.AlwaysOnCommand do
     }
   end
 
+  defp home(deps), do: Path.expand(Keyword.get_lazy(deps, :home, &ConfigStore.fermix_home/0))
+
   defp context(deps, flags) do
-    home = Path.expand(Keyword.get_lazy(deps, :home, &ConfigStore.fermix_home/0))
+    home = home(deps)
     stdin = Keyword.get(deps, :stdin, :stdio)
     secret = [terminal: Keyword.get(deps, :terminal), device: stdin]
 

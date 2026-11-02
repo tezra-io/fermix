@@ -391,8 +391,9 @@ class VerifyStandaloneTest(unittest.TestCase):
 
     # ── the fermix always-on no-daemon stage ──────────────────────────────
 
-    # A release build has no Always On yet (`Home.AlwaysOnRelease`): the
-    # verb refuses in one sentence before it reads anything.
+    # A release build offers Always On only in a home whose settings turn it
+    # on (`Home.AlwaysOnRelease`): elsewhere the verb refuses in one sentence
+    # before it reads anything, and in such a home it reaches for the engine.
     def test_always_on_in_a_release_refuses_unreleased_and_writes_nothing(self):
         self._write_artifact(create_disclaim=True)
 
@@ -400,6 +401,28 @@ class VerifyStandaloneTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("fermix always-on: Always On is not in this release of Fermix yet.", result.stdout)
+        self.assertIn("fermix always-on: Fermix is not running from this home", result.stdout)
+
+    # The class the switch's half exists for: a release that does not read
+    # the switch from the home's own settings file.
+    def test_rejects_an_always_on_that_ignores_the_home_switch(self):
+        self._write_artifact(create_disclaim=True, always_on="ignores_switch")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "whose settings turn Always On on must print exactly the engine_stopped envelope",
+            result.stderr,
+        )
+
+    def test_rejects_an_always_on_that_rewrites_the_switched_settings(self):
+        self._write_artifact(create_disclaim=True, always_on="rewrites_settings")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("fermix always-on changed the settings of", result.stderr)
 
     # The class the release gate exists for: a release whose build carries
     # Always On, which reaches for the engine.
@@ -510,6 +533,27 @@ class VerifyStandaloneTest(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("fermix home status in a release must exit 1, got 0", result.stderr)
+
+    # With the switch in the home's settings the verb answers from the home's
+    # own files, as an Always On server's first boot and nightly update read it.
+    def test_rejects_a_home_status_that_ignores_the_switch(self):
+        self._write_artifact(create_disclaim=True, home="status_ignores_switch")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "fermix home status in a home whose settings turn Always On on must exit 0, got 1",
+            result.stderr,
+        )
+
+    def test_rejects_a_home_status_that_answers_no_update_ceiling(self):
+        self._write_artifact(create_disclaim=True, home="status_without_ceiling")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must answer the home's role and update ceiling", result.stderr)
 
     def test_rejects_a_home_status_that_refuses_with_another_code(self):
         self._write_artifact(create_disclaim=True, home="status_other_refusal")
@@ -1168,9 +1212,12 @@ class VerifyStandaloneTest(unittest.TestCase):
             return argv + json + "  exit 3\n"
         raise ValueError(f"unknown settings behaviour: {settings}")
 
-    # The real verb's shape with no daemon: the engine_stopped envelope alone on
-    # stdout, the sentence on stderr, exit 1, and no home written. The argv is
-    # pinned so a stage that stops asking for `--json` cannot pass against it.
+    # The real verb's shape in a release with no daemon: in a home whose
+    # settings carry Always On's switch, the engine_stopped envelope alone on
+    # stdout and the sentence on stderr; in any other, the
+    # always_on_unavailable envelope; exit 1 and nothing written either way.
+    # The argv is pinned so a stage that stops asking for `--json` cannot pass
+    # against it.
     def _always_on_behaviour(self, always_on):
         if always_on == "unknown_verb":
             return "  printf 'fermix: unknown command: always-on\\n' >&2\n  exit 2\n"
@@ -1182,17 +1229,31 @@ class VerifyStandaloneTest(unittest.TestCase):
             "engine_stopped",
             "Fermix is not running from this home, and this needs it. Start it, then try again.",
         )
+        stops = stopped + stopped_said + "  exit 1\n"
+        switched = {
+            "ignores_switch": envelope + said + "  exit 1\n",
+            "rewrites_settings": '  printf \'enabled = false\\n\' > "$FERMIX_HOME/config.toml"\n' + stops,
+        }.get(always_on, stops)
         shapes = {
-            "refuses": argv + envelope + said + "  exit 1\n",
-            "compiled_in": argv + stopped + stopped_said + "  exit 1\n",
-            "acts": argv + '  printf \'{"ok":true,"result":{}}\\n\'\n' + said + "  exit 0\n",
-            "noisy_stdout": argv + "  printf 'boot notice nobody asked for\\n'\n" + envelope + said + "  exit 1\n",
-            "silent": argv + envelope + "  exit 1\n",
-            "writes_home": argv + '  mkdir -p "$FERMIX_HOME"\n' + envelope + said + "  exit 1\n",
+            "refuses": envelope + said + "  exit 1\n",
+            "compiled_in": stops,
+            "acts": '  printf \'{"ok":true,"result":{}}\\n\'\n' + said + "  exit 0\n",
+            "noisy_stdout": "  printf 'boot notice nobody asked for\\n'\n" + envelope + said + "  exit 1\n",
+            "silent": envelope + "  exit 1\n",
+            "writes_home": '  mkdir -p "$FERMIX_HOME"\n' + envelope + said + "  exit 1\n",
+            "ignores_switch": envelope + said + "  exit 1\n",
+            "rewrites_settings": envelope + said + "  exit 1\n",
         }
         if always_on not in shapes:
             raise ValueError(f"unknown always-on behaviour: {always_on}")
-        return shapes[always_on]
+        return argv + self._SWITCHED + "  then\n" + switched + "  fi\n" + shapes[always_on]
+
+    # Whether the home the environment names turns Always On on, read from its
+    # settings file as the real verbs read it.
+    _SWITCHED = (
+        '  if grep -Fqx \'[fermix_core.always_on]\' "$FERMIX_HOME/config.toml" 2>/dev/null &&\n'
+        '    grep -Fqx \'enabled = true\' "$FERMIX_HOME/config.toml"\n'
+    )
 
     # One refusal's envelope on stdout and its sentence on stderr, as the
     # verb prints them.
@@ -1248,13 +1309,22 @@ class VerifyStandaloneTest(unittest.TestCase):
         )
         answers = (
             '    epoch="$(cat "$FERMIX_HOME/mobile/primary_epoch")"\n'
-            '    printf \'{"ok":true,"result":{"role":"primary","epoch":%s}}\\n\' "$epoch"\n'
+            '    printf \'{"ok":true,"result":{"epoch":%s,"role":"primary","update_ceiling":null}}\\n\' "$epoch"\n'
+            "    exit 0\n"
+        )
+        no_ceiling = (
+            '    epoch="$(cat "$FERMIX_HOME/mobile/primary_epoch")"\n'
+            '    printf \'{"ok":true,"result":{"epoch":%s,"role":"primary"}}\\n\' "$epoch"\n'
             "    exit 0\n"
         )
         other = (
             '    printf \'{"error":{"code":"home_status_unavailable","sentence":"Fermix could not '
             'read this home\'"\'"\'s status."},"ok":false,"schema_version":1}\\n\'\n'
         )
+        switched_body = {
+            "status_ignores_switch": refusal + "    exit 1\n",
+            "status_without_ceiling": no_ceiling,
+        }.get(home, answers)
         if home == "status_answers":
             status_body = answers
         elif home == "status_other_refusal":
@@ -1264,6 +1334,10 @@ class VerifyStandaloneTest(unittest.TestCase):
         status = (
             '  if [ "$2" = "status" ]; then\n'
             '    [ "$3" = "--json" ] || exit 64\n'
+            + self._SWITCHED
+            + "  then\n"
+            + switched_body
+            + "  fi\n"
             + status_body
             + "  fi\n"
         )
@@ -1280,6 +1354,8 @@ class VerifyStandaloneTest(unittest.TestCase):
             "not_moved",
             "status_answers",
             "status_other_refusal",
+            "status_ignores_switch",
+            "status_without_ceiling",
             "enroll_accepts",
             "enroll_leaves_home",
             "enroll_consumes",

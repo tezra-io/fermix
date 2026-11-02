@@ -506,9 +506,10 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
   defp seams, do: Application.get_env(:fermix_web, :always_on, [])
 
   @doc """
-  Whether this build offers Always On (`Home.AlwaysOnRelease`): where it
-  does not, the page lists no Always On tab and takes no Always On event.
-  The `available:` seam stands for what a build compiles in.
+  Whether this engine offers Always On (`Home.AlwaysOnRelease.available?/0`:
+  the build's environment, and in a release build the home's switch): where
+  it does not, the page lists no Always On tab and takes no Always On event.
+  The `available:` seam stands for that answer.
   """
   @spec offered?() :: boolean()
   def offered?, do: Keyword.get_lazy(seams(), :available, &AlwaysOnRelease.available?/0)

@@ -57,8 +57,10 @@ defmodule FermixCore.Home.Candidate.ReturnSettleTest do
     refute config =~ "SERVER_ONLY"
     assert value(config, "fermix_core.computer_use", "enabled") == "true"
     assert value(config, "fermix_core.computer_history", "apps") == ~s(["Safari"])
-    # Everything else is the server's.
+    # Everything else is the server's: Always On's switch, which this
+    # computer's own settings no longer carry, comes back with the home.
     assert value(config, "fermix_core.memory", "enabled") == "true"
+    assert value(config, "fermix_core.always_on", "enabled") == "true"
     assert value(config, "fermix_core.agent", "name") == ~s("Orchard")
     # Every restore withdraws coding-agent consent.
     assert value(config, "fermix_core.harness", "approved") == "false"
@@ -255,6 +257,9 @@ defmodule FermixCore.Home.Candidate.ReturnSettleTest do
     approved = true
 
     [fermix_core.memory]
+    enabled = true
+
+    [fermix_core.always_on]
     enabled = true
 
     [fermix_core.providers.anthropic]

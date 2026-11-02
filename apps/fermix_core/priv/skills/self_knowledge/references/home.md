@@ -136,7 +136,11 @@ it, never a second writer.
   always-on`, `fermix home status` and the engine say "Always On is not in
   this release of Fermix yet.", the setup page has no Always On tab and the Fermix app no Always On
   pane, and a home moves only by hand (`fermix home export` and `import`,
-  below).
+  below). A home whose `config.toml` carries `[fermix_core.always_on]
+  enabled = true` gets it in a released build too: a switch for testing
+  only, unsupported and not offered to owners. The switch is the home's
+  setting, so it moves with the home, and the restart after editing it by
+  hand is what applies it.
 - Always On puts the primary on a Linux server the owner controls, so Fermix
   keeps working with the Mac closed. The server enrolls with an enrollment
   code the primary opens (one use, 30 minutes), on an existing Debian 12,

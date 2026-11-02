@@ -1,6 +1,7 @@
 defmodule FermixCore.Home.Candidate.ActivationTest do
   use ExUnit.Case, async: true
 
+  alias FermixCore.Home.AlwaysOnRelease
   alias FermixCore.Home.Candidate
   alias FermixCore.Home.Candidate.Activation
   alias FermixCore.Home.EnrollmentCode
@@ -173,6 +174,42 @@ defmodule FermixCore.Home.Candidate.ActivationTest do
 
     config = File.read!(Path.join(Candidate.staging_path(ctx.home), "config.toml"))
     assert config =~ "[fermix_channels.imessage]\nenabled = true"
+  end
+
+  # Always On's switch is the home's own setting, not this computer's
+  # (`Home.AlwaysOnRelease`): the settings file the move renames into place
+  # last carries it to the new primary.
+  test "the home's Always On switch travels to the new primary", ctx do
+    File.write!(
+      Path.join(ctx.source, "config.toml"),
+      "\n[fermix_core.always_on]\nenabled = true\n",
+      [:append]
+    )
+
+    SafeRm.rm!(ctx.incoming)
+
+    {:ok, _written} =
+      Snapshot.write(ctx.source, Recipient.public(ctx.pair), ctx.incoming, host: "macos-aarch64")
+
+    {:ok, 7} = Activation.stage(ctx.home, ctx.incoming, ctx.pair, %{}, restore_opts())
+
+    assert File.read!(Path.join(Candidate.staging_path(ctx.home), "config.toml")) =~
+             "[fermix_core.always_on]\nenabled = true"
+
+    assert :ok = Activation.activate(ctx.home)
+    assert File.read!(Path.join(ctx.home, "config.toml")) =~ ~s(role = "primary")
+    assert AlwaysOnRelease.available_in(ctx.home, :prod) == {:ok, true}
+  end
+
+  # The candidate's own switch, on while it waits for the move, goes with
+  # the candidate's settings: the new primary's is the home's.
+  test "a home whose switch is off is off on the new primary", ctx do
+    assert AlwaysOnRelease.available_in(ctx.home, :prod) == {:ok, true}
+
+    {:ok, 7} = Activation.stage(ctx.home, ctx.incoming, ctx.pair, %{}, restore_opts())
+    assert :ok = Activation.activate(ctx.home)
+
+    assert AlwaysOnRelease.available_in(ctx.home, :prod) == {:ok, false}
   end
 
   test "a stream to another key stages nothing", ctx do

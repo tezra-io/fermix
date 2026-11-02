@@ -26,7 +26,8 @@ case "$verb" in
     code_file=$4
     sha256sum <"$code_file" | cut -d' ' -f1 >"$log/code-file.sha256"
     mkdir -p "$FERMIX_HOME"
-    printf '[fermix_core.engine]\nrole = "candidate"\n' >"$FERMIX_HOME/config.toml"
+    printf '[fermix_core.engine]\nrole = "candidate"\n\n[fermix_core.always_on]\nenabled = true\n' \
+      >"$FERMIX_HOME/config.toml"
     ;;
   "service install")
     printf '%s\n' "$XDG_RUNTIME_DIR" >"$log/service-runtime-dir"

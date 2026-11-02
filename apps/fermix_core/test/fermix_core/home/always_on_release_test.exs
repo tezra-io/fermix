@@ -1,10 +1,14 @@
 defmodule FermixCore.Home.AlwaysOnReleaseTest do
   @moduledoc """
   Always On is not in a release build yet: a build compiled for `:prod`
-  serves none of it, a `:dev` or `:test` build all of it, decided by the
-  build's own environment and nothing else. Both branches are asked of the
-  management wire here through the router's `:always_on` seam, which stands
-  for what a prod build compiles in.
+  serves none of it unless its home's settings file turns it on
+  (`[fermix_core.always_on] enabled = true`), and a `:dev` or `:test` build
+  serves all of it whatever the file says. The build's environment decides
+  first, and within a `:prod` build the home's switch. Both branches are
+  asked of the management wire here through the router's `:always_on` seam,
+  which stands for the resolver's answer; the resolver itself is asked with
+  each build environment named, and a home's own file is read through an
+  explicit home, so nothing here touches application environment.
   """
 
   use ExUnit.Case, async: true
@@ -12,17 +16,73 @@ defmodule FermixCore.Home.AlwaysOnReleaseTest do
   alias FermixCore.Home.AlwaysOnRelease
   alias FermixCore.Management.Protocol
   alias FermixCore.Management.Router
+  alias FermixTestSupport.SafeRm
 
   @sentence "Always On is not in this release of Fermix yet."
   @gated ~w(home.status home.act home.provision.options)
 
-  test "a prod build has no Always On, a dev or test build has all of it" do
-    refute AlwaysOnRelease.available?(:prod)
-    assert AlwaysOnRelease.available?(:dev)
-    assert AlwaysOnRelease.available?(:test)
-    assert AlwaysOnRelease.available?() == AlwaysOnRelease.available?(Mix.env())
+  test "a prod build offers Always On only where its home turns it on, dev and test always" do
+    refute AlwaysOnRelease.available?(:prod, [])
+    refute AlwaysOnRelease.available?(:prod, enabled: false)
+    assert AlwaysOnRelease.available?(:prod, enabled: true)
+
+    for env <- [:dev, :test], config <- [[], [enabled: false], [enabled: true]] do
+      assert AlwaysOnRelease.available?(env, config), inspect({env, config})
+    end
+
     assert AlwaysOnRelease.methods() == @gated
     assert AlwaysOnRelease.sentence() == @sentence
+  end
+
+  test "a process with no engine reads the switch from the home's own settings file" do
+    home = SafeRm.make_tmp_dir!("always_on_release_home")
+    on_exit(fn -> SafeRm.rm_rf!(home) end)
+    file = Path.join(home, "config.toml")
+
+    # A fresh home has no settings file at all.
+    assert AlwaysOnRelease.available_in(home, :prod) == {:ok, false}
+    assert AlwaysOnRelease.available_in(home, :test) == {:ok, true}
+    refute File.exists?(file)
+
+    File.write!(file, ~s([fermix_core.engine]\nrole = "primary"\n))
+    assert AlwaysOnRelease.available_in(home, :prod) == {:ok, false}
+
+    File.write!(file, "[fermix_core.always_on]\nenabled = true\n")
+    assert AlwaysOnRelease.available_in(home, :prod) == {:ok, true}
+    assert AlwaysOnRelease.available_in(home) == AlwaysOnRelease.available_in(home, Mix.env())
+
+    File.write!(file, "[fermix_core.always_on]\nenabled = false\n")
+    assert AlwaysOnRelease.available_in(home, :prod) == {:ok, false}
+
+    # A switch Fermix cannot read is named with its file, in every build,
+    # never read as off: the engine of this home would not start on it either.
+    File.write!(file, ~s([fermix_core.always_on]\nenabled = "yes"\n))
+
+    for env <- [:prod, :dev, :test] do
+      assert {:error, {:config, ^file, message}} = AlwaysOnRelease.available_in(home, env)
+      assert message =~ "[fermix_core.always_on] enabled takes true or false"
+    end
+  end
+
+  test "the section's two shapes are inverses, and a bad one is refused by name" do
+    assert AlwaysOnRelease.normalize(nil) == []
+    assert AlwaysOnRelease.normalize(%{"enabled" => true}) == [enabled: true]
+    assert AlwaysOnRelease.normalize(%{"enabled" => false}) == [enabled: false]
+
+    for app_env <- [[], [enabled: true], [enabled: false]] do
+      assert AlwaysOnRelease.normalize(app_env) == app_env
+      assert AlwaysOnRelease.normalize(AlwaysOnRelease.to_keyword(app_env)) == app_env
+      assert AlwaysOnRelease.to_keyword(app_env) == app_env
+    end
+
+    error = assert_raise ArgumentError, fn -> AlwaysOnRelease.normalize(%{"enable" => true}) end
+    assert error.message =~ "config.toml [fermix_core.always_on] has unknown key(s): enable"
+
+    error = assert_raise ArgumentError, fn -> AlwaysOnRelease.normalize(%{"enabled" => 1}) end
+    assert error.message =~ "[fermix_core.always_on] enabled takes true or false"
+
+    error = assert_raise ArgumentError, fn -> AlwaysOnRelease.normalize(true) end
+    assert error.message =~ "config.toml [fermix_core.always_on] is not a table"
   end
 
   test "where it is off, hello lists none of Always On's methods, and the rest as ever" do

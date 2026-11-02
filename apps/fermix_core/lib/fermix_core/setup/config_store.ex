@@ -17,6 +17,7 @@ defmodule FermixCore.Setup.ConfigStore do
   alias FermixCore.Cues.Config, as: CuesConfig
   alias FermixCore.Cues.SourceManager
   alias FermixCore.Harness.Config, as: HarnessConfig
+  alias FermixCore.Home.AlwaysOnRelease
   alias FermixCore.Home.Archive.ConfigText
   alias FermixCore.Home.Role
   alias FermixCore.Home.Snapshot.Config, as: SnapshotConfig
@@ -158,7 +159,8 @@ defmodule FermixCore.Setup.ConfigStore do
         profile: Application.get_env(:fermix_core, :profile, "general"),
         secret_store: Application.get_env(:fermix_core, :secret_store, :keyring),
         engine: Application.get_env(:fermix_core, :engine, []),
-        snapshots: Application.get_env(:fermix_core, :snapshots, [])
+        snapshots: Application.get_env(:fermix_core, :snapshots, []),
+        always_on: Application.get_env(:fermix_core, :always_on, [])
       ],
       sandbox: Application.get_env(:fermix_core, :sandbox, SandboxConfig.default()),
       fermix_channels: [
@@ -231,6 +233,23 @@ defmodule FermixCore.Setup.ConfigStore do
 
     case File.read(file) do
       {:ok, contents} -> decode_section(contents, file, "snapshots", &SnapshotConfig.normalize/1)
+      {:error, :enoent} -> {:ok, []}
+      {:error, reason} -> {:error, {:config, file, reason}}
+    end
+  end
+
+  @doc """
+  The `[fermix_core.always_on]` section of the settings file under `home`,
+  decoded and normalised alone (`Home.AlwaysOnRelease.normalize/1`), as
+  `engine_config/1` reads the engine section: for `fermix always-on` and
+  `fermix home status`, which ask it before anything else.
+  """
+  @spec always_on_config(Path.t()) :: {:ok, keyword()} | {:error, {:config, Path.t(), term()}}
+  def always_on_config(home) when is_binary(home) and home != "" do
+    file = Path.join(home, "config.toml")
+
+    case File.read(file) do
+      {:ok, contents} -> decode_section(contents, file, "always_on", &AlwaysOnRelease.normalize/1)
       {:error, :enoent} -> {:ok, []}
       {:error, reason} -> {:error, {:config, file, reason}}
     end
@@ -351,6 +370,7 @@ defmodule FermixCore.Setup.ConfigStore do
     apply_secret_store_config(Keyword.get(persisted.fermix_core, :secret_store, :keyring))
     apply_engine_config(Keyword.get(persisted.fermix_core, :engine, []))
     apply_snapshots_config(Keyword.get(persisted.fermix_core, :snapshots, []))
+    apply_always_on_config(Keyword.get(persisted.fermix_core, :always_on, []))
     apply_sandbox_config(Map.get(persisted, :sandbox, SandboxConfig.default()))
 
     apply_channel_config(:telegram, Keyword.get(persisted.fermix_channels, :telegram, []))
@@ -766,7 +786,12 @@ defmodule FermixCore.Setup.ConfigStore do
           snapshot
           |> Map.get(:fermix_core, [])
           |> Keyword.get(:snapshots, [])
-          |> SnapshotConfig.to_keyword()
+          |> SnapshotConfig.to_keyword(),
+        always_on:
+          snapshot
+          |> Map.get(:fermix_core, [])
+          |> Keyword.get(:always_on, [])
+          |> AlwaysOnRelease.to_keyword()
       ],
       sandbox:
         snapshot
@@ -921,7 +946,8 @@ defmodule FermixCore.Setup.ConfigStore do
         profile: "general",
         secret_store: :keyring,
         engine: [],
-        snapshots: []
+        snapshots: [],
+        always_on: []
       ],
       sandbox: SandboxConfig.default(),
       fermix_channels: [
@@ -1205,6 +1231,14 @@ defmodule FermixCore.Setup.ConfigStore do
     :ok
   end
 
+  # Replace (not merge), re-normalized on the way in like the snapshots
+  # section. `hello` and the router read it at every call
+  # (`Home.AlwaysOnRelease.available?/0`).
+  defp apply_always_on_config(always_on_config) do
+    Application.put_env(:fermix_core, :always_on, AlwaysOnRelease.normalize(always_on_config))
+    :ok
+  end
+
   # Where new secrets are written: the OS keyring (the default and the
   # unconfigured case) or the file store under the Fermix home. An unknown
   # value is refused by name rather than read as the keyring, because a
@@ -1453,6 +1487,7 @@ defmodule FermixCore.Setup.ConfigStore do
     secret_store = fermix_core |> Keyword.get(:secret_store, :keyring) |> normalize_secret_store()
     engine = Keyword.get(fermix_core, :engine, [])
     snapshots = Keyword.get(fermix_core, :snapshots, [])
+    always_on = Keyword.get(fermix_core, :always_on, [])
     sandbox = Map.get(snapshot, :sandbox, [])
     channels = Map.get(snapshot, :fermix_channels, [])
     web = snapshot |> Map.get(:fermix_web, []) |> normalize_web() |> web_to_keyword()
@@ -1467,6 +1502,7 @@ defmodule FermixCore.Setup.ConfigStore do
       ),
       render_section(["fermix_core", "engine"], engine),
       render_section(["fermix_core", "snapshots"], snapshots),
+      render_section(["fermix_core", "always_on"], always_on),
       render_section(["fermix_core", "agent"], agent),
       Enum.map(Descriptor.ids(), fn id ->
         render_section(
@@ -1855,7 +1891,8 @@ defmodule FermixCore.Setup.ConfigStore do
         profile: normalize_profile(get_in(document, ["fermix_core", "profile"])),
         secret_store: normalize_secret_store(get_in(document, ["fermix_core", "secret_store"])),
         engine: Role.normalize(get_in(document, ["fermix_core", "engine"])),
-        snapshots: SnapshotConfig.normalize(get_in(document, ["fermix_core", "snapshots"]))
+        snapshots: SnapshotConfig.normalize(get_in(document, ["fermix_core", "snapshots"])),
+        always_on: AlwaysOnRelease.normalize(get_in(document, ["fermix_core", "always_on"]))
       ],
       sandbox: SandboxConfig.normalize(Map.get(document, "sandbox")),
       fermix_channels: [

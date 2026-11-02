@@ -14,10 +14,13 @@ defmodule Fermix.CLI.HomeStatusCommand do
   the same projection the engine answers with (`Management.Home`). It prints
   the summary first (M75 lean v1 §7): its sentence, and its one action with
   where to take it: `fermix always-on`, or the Fermix app on a home the app
-  manages (`HomeOwner.app_managed?/1`; Always On setup §8.2). In a build
-  without Always On (`Home.AlwaysOnRelease`) `status`, Always On's screen,
-  refuses `always_on_unavailable` as `fermix always-on` does, before it reads
-  anything; the snapshots verbs are as ever. `passphrase` needs
+  manages (`HomeOwner.app_managed?/1`; Always On setup §8.2). Where this
+  build offers no Always On in the home (`Home.AlwaysOnRelease.available_in/1`,
+  read from the home's own settings file, the one its engine boots from)
+  `status`, Always On's screen, refuses `always_on_unavailable` as `fermix
+  always-on` does, before it reads anything else, and a switch it cannot read
+  is `home_status_unavailable` naming the file; the snapshots verbs are as
+  ever. `passphrase` needs
   the engine: the recovery key is saved through the running settings path.
   With the engine stopped it refuses with `engine_stopped`.
 
@@ -54,17 +57,28 @@ defmodule Fermix.CLI.HomeStatusCommand do
   Runs `fermix home status ARGS`. `deps`: `:home`, `:client` (a 3-arity
   management call, as `Client.request_v1/3`), `:terminal`, `:app_managed?`
   (a 0-arity check, asked only when the human output names where the next
-  step is taken), `:always_on` (what the build compiles in,
-  `Home.AlwaysOnRelease.available?/0`).
+  step is taken), `:always_on` (a boolean standing for the answer of
+  `Home.AlwaysOnRelease.available_in/1` for the home).
   """
   @spec status([String.t()], keyword()) :: non_neg_integer()
   def status(argv, deps \\ []) when is_list(argv) and is_list(deps) do
     with_json(argv, fn json? ->
-      if Keyword.get_lazy(deps, :always_on, &AlwaysOnRelease.available?/0),
-        do: read(json?, deps, "home.status", &status_lines(&1, deps)),
-        else: refuse(json?, :always_on_unavailable, [])
+      case always_on(deps) do
+        {:ok, true} -> read(json?, deps, "home.status", &status_lines(&1, deps))
+        {:ok, false} -> refuse(json?, :always_on_unavailable, [])
+        {:error, reason} -> refuse(json?, :home_status_unavailable, output: unreadable(reason))
+      end
     end)
   end
+
+  defp always_on(deps) do
+    case Keyword.fetch(deps, :always_on) do
+      {:ok, available?} when is_boolean(available?) -> {:ok, available?}
+      :error -> AlwaysOnRelease.available_in(home(deps))
+    end
+  end
+
+  defp unreadable(reason), do: AlwaysOnRelease.unreadable_sentence(reason)
 
   @doc "Runs `fermix home snapshots ARGS`, with the dependencies `status/2` takes."
   @spec snapshots([String.t()], keyword()) :: non_neg_integer()

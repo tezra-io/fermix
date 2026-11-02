@@ -279,6 +279,24 @@ defmodule Fermix.CLI.HomeSnapshotCommandTest do
       refute File.exists?(absent)
     end
 
+    # With no seam the verb asks the resolver of this home's own settings
+    # file, the one the engine's boot reads (`Home.AlwaysOnRelease`), with
+    # no engine and no tree: a switch it cannot read is named with its
+    # file, never read as off.
+    test "it reads Always On's switch from this home's own settings file", ctx do
+      file = Path.join(ctx.home, "config.toml")
+      File.write!(file, "\n[fermix_core.always_on]\nenabled = 1\n", [:append])
+      client = fn method, _params, _opts -> flunk("#{method} was called") end
+
+      {1, out, ""} = run(["status", "--json"], home: ctx.home, client: client)
+
+      assert %{"error" => %{"code" => "home_status_unavailable", "sentence" => sentence}} =
+               Jason.decode!(out)
+
+      assert sentence =~ file
+      assert sentence =~ "[fermix_core.always_on] enabled takes true or false"
+    end
+
     test "in a build with Always On, it reads the home as ever", ctx do
       {0, out, ""} = run(["status", "--json"], home: ctx.home, client: stopped(), always_on: true)
       assert %{"ok" => true, "result" => %{"role" => "primary"}} = Jason.decode!(out)

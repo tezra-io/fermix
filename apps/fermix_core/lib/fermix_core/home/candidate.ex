@@ -17,7 +17,12 @@ defmodule FermixCore.Home.Candidate do
       as its root;
     * `state.json`: the phase and what it learned;
 
-  and `config.toml` with `[fermix_core.engine] role = "candidate"`.
+  and `config.toml` with `[fermix_core.engine] role = "candidate"` and
+  `[fermix_core.always_on] enabled = true`: a candidate exists only for an
+  Always On move, and a release build offers Always On only where the home
+  turns it on (`FermixCore.Home.AlwaysOnRelease`), so its server's first boot
+  can read `fermix home status` while it waits. Activation replaces that
+  file with the home's own.
 
   **Phases** (`state.json`): `enrolling` (the code is held), `enrolled` (the
   primary accepted it; waiting for the move up to 24 hours), `receiving` (a
@@ -69,7 +74,13 @@ defmodule FermixCore.Home.Candidate do
   @dir_mode 0o700
   @file_mode 0o600
   @phases ~w(enrolling enrolled receiving staged activating expired failed)
-  @config_text ~s([fermix_core.engine]\nrole = "candidate"\n)
+  @config_text """
+  [fermix_core.engine]
+  role = "candidate"
+
+  [fermix_core.always_on]
+  enabled = true
+  """
   @builder_prefix ".candidate-"
   @ended ~w(failed expired)
 

@@ -5,6 +5,7 @@ defmodule FermixCore.Home.Candidate.ActivationReturnTest do
   # staging leaves (`return_settle_test.exs` covers that).
   use ExUnit.Case, async: true
 
+  alias FermixCore.Home.AlwaysOnRelease
   alias FermixCore.Home.Candidate
   alias FermixCore.Home.Candidate.Activation
   alias FermixCore.Home.Moved
@@ -51,9 +52,10 @@ defmodule FermixCore.Home.Candidate.ActivationReturnTest do
     ".candidate-3F2A" => "a stray builder"
   }
 
-  # The server's copy as the return staged it.
+  # The server's copy as the return staged it, Always On's switch with it.
   @staged %{
-    "config.toml" => ~s([fermix_core.engine]\nrole = "primary"\n),
+    "config.toml" =>
+      ~s([fermix_core.engine]\nrole = "primary"\n\n[fermix_core.always_on]\nenabled = true\n),
     "memory.db" => "the server's database",
     "auth.json" => "the server's tokens",
     "mobile/devices.toml" => "the server's device list",
@@ -115,6 +117,8 @@ defmodule FermixCore.Home.Candidate.ActivationReturnTest do
       |> Map.put(Path.relative_to(Status.path(home), home), File.read!(Status.path(home)))
 
     assert files(home) == expected
+    # The home is back with its own Always On switch.
+    assert AlwaysOnRelease.available_in(home, :prod) == {:ok, true}
     assert {:ok, %{run_at_boot: true}} = Status.read(home)
     assert Moved.read(home) == :absent
     refute Candidate.present?(home)

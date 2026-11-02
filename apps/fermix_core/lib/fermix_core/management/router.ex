@@ -1089,7 +1089,7 @@ defmodule FermixCore.Management.Router do
     end
   end
 
-  # Always On's methods, where this build serves them (`Home.AlwaysOnRelease`),
+  # Always On's methods, where this engine serves them (`Home.AlwaysOnRelease`),
   # and every other.
   defp capabilities(true),
     do: %{
@@ -1106,7 +1106,9 @@ defmodule FermixCore.Management.Router do
     }
   end
 
-  # The `:always_on` seam stands for what a build compiles in.
+  # The `:always_on` seam stands for the resolver's answer: the build's
+  # environment, and in a release build the home's switch, read from
+  # application environment at every call.
   defp always_on?(opts), do: Keyword.get_lazy(opts, :always_on, &AlwaysOnRelease.available?/0)
 
   defp setup_state(opts) do
