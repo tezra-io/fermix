@@ -860,6 +860,23 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       refute Enum.any?(rows(linux(toolkit_notes: nil)), &String.starts_with?(&1.name, "toolkit"))
     end
 
+    # Whether the desktop will ask is the portal screenshot row's to say: with a
+    # stored no it never asks, so no row beside that one may promise a prompt.
+    test "with a stored no on the portal route, no row says the desktop asks" do
+      refused =
+        linux(
+          display_server: "wayland",
+          screen_capture: false,
+          pixel_route: pixel_route("portal"),
+          portal: portal(registry: true, screenshot_permission: "no")
+        )
+
+      details = Enum.map(Checks.computer_use({:ok, refused}), & &1.detail)
+
+      assert Enum.any?(details, &String.starts_with?(&1, "a stored no refuses every screenshot"))
+      refute Enum.any?(details, &(&1 =~ ~r/\basks (the person )?on (the )?first\b/))
+    end
+
     # The route the helper took leads the pixel rows: what it is, then what each
     # route's own facts say.
     test "the pixel route: X11 and GNOME's desktop portal" do
@@ -875,7 +892,7 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
         row(linux(display_server: "wayland", pixel_route: pixel_route("portal")), "pixel route")
 
       assert portal.status == :ok
-      assert portal.detail == "GNOME's desktop portal, which asks on first use"
+      assert portal.detail == "GNOME's desktop portal"
 
       names = Enum.map(rows(linux()), & &1.name)
       at = Enum.find_index(names, &(&1 == "pixel route"))

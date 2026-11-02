@@ -2008,8 +2008,9 @@ defmodule Fermix.CLI.Doctor.Checks do
   defp pixel_route_row(%{route: "x11"}),
     do: ok("pixel route", "X11, through this session's X server")
 
-  defp pixel_route_row(%{route: "portal"}),
-    do: ok("pixel route", "GNOME's desktop portal, which asks on first use")
+  # Whether the desktop asks is the portal screenshot row's to say: a stored answer
+  # means it never asks again.
+  defp pixel_route_row(%{route: "portal"}), do: ok("pixel route", "GNOME's desktop portal")
 
   defp pixel_route_row(%{route: "none"} = route) do
     warn(

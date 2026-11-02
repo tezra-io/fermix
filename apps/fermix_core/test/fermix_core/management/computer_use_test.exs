@@ -146,7 +146,7 @@ defmodule FermixCore.Management.ComputerUseTest do
              }
 
       assert row(view, "pixel route") ==
-               %{"status" => "ok", "detail" => "GNOME's desktop portal, which asks on first use"}
+               %{"status" => "ok", "detail" => "GNOME's desktop portal"}
     end
 
     # KDE and other Wayland desktops: no pixel route, so both booleans are false,
