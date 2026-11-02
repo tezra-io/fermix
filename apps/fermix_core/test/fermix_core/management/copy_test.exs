@@ -36,6 +36,7 @@ defmodule FermixCore.Management.CopyTest do
   alias FermixCore.Home.Snapshot.Status, as: SnapshotStatus
   alias FermixCore.Management.AlwaysOn
   alias FermixCore.Management.AlwaysOn.Input, as: AlwaysOnInput
+  alias FermixCore.Management.ComputerUse
   alias FermixCore.Management.Copy
   alias FermixCore.Management.Cues, as: ManagementCues
   alias FermixCore.Management.Cues.MandateRow, as: CueMandateRow
@@ -409,6 +410,59 @@ defmodule FermixCore.Management.CopyTest do
         assert_clean(sentence, :prose, [], "import failure #{inspect(failure)}")
         assert internal_terms(sentence) == []
       end
+    end
+  end
+
+  # The Linux rows of `computer_use.permissions.get` are the doctor's own, and
+  # the Linux app's Computer pane renders them verbatim. The case set reaches
+  # every branch of every producer through the management answer; what the
+  # helper or the package database supplies (the bus's free-text detail, a
+  # toolkit's name and note, the portal and bridge versions, a display server
+  # word this build does not know) is declared as data. The bus's cause is a
+  # closed word the row backticks, so the wire-token rule reads it.
+  describe "the Linux computer-use rows" do
+    # Every fault in one answer, by the row it is in: one sentence is reached by
+    # many cases, and the first failure alone hides the rest.
+    test "every row name and detail obeys the rules, with what the helper said declared" do
+      cases = linux_computer_use_cases()
+
+      assert length(cases) > 60
+
+      broken =
+        for {probe, names} <- cases,
+            row <- linux_computer_use_rows(probe),
+            fault <-
+              Copy.violations(row["name"], :name, names) ++
+                Copy.violations(row["detail"], :prose, names) ++
+                internal_terms(row["detail"]),
+            uniq: true,
+            do: {row["name"], fault}
+
+      assert broken == [], "the Linux computer-use rows break the copy rules: #{inspect(broken)}"
+    end
+
+    # Each fact's producer answers more than one sentence, so a case set that
+    # stopped reaching a branch would pass on the ones left. These are the
+    # distinct sentences the set must reach, counted per row.
+    test "the case set reaches every sentence each producer writes" do
+      reached =
+        linux_computer_use_cases()
+        |> Enum.flat_map(fn {probe, _names} -> linux_computer_use_rows(probe) end)
+        |> Enum.group_by(& &1["name"], & &1["detail"])
+        |> Map.new(fn {name, details} -> {name, details |> Enum.uniq() |> length()} end)
+
+      floors = %{
+        "display server" => 9,
+        "accessibility bus" => 15,
+        "atk bridge" => 6,
+        "x11 pixels" => 5,
+        "desktop portal" => 11,
+        "portal screenshot" => 6
+      }
+
+      for {name, floor} <- floors, do: assert(Map.get(reached, name, 0) >= floor, name)
+
+      assert Map.has_key?(reached, "toolkit qt") and Map.has_key?(reached, "toolkit chromium")
     end
   end
 
@@ -1308,7 +1362,14 @@ defmodule FermixCore.Management.CopyTest do
       plugin_copy() ++
       Enum.map(provision_copy(), &elem(&1, 1)) ++
       Enum.map(summary_copy(), &elem(&1, 1)) ++
-      Enum.map(source_sentences(), &elem(&1, 1))
+      Enum.map(source_sentences(), &elem(&1, 1)) ++
+      linux_computer_use_copy()
+  end
+
+  defp linux_computer_use_copy do
+    for {probe, _names} <- linux_computer_use_cases(),
+        row <- linux_computer_use_rows(probe),
+        do: row["detail"]
   end
 
   defp section_copy do
@@ -1361,6 +1422,124 @@ defmodule FermixCore.Management.CopyTest do
     snapshot = Map.put(ConfigStore.current_snapshot(), :sandbox, sandbox)
     {:ok, view} = Settings.get("sandbox", snapshot: snapshot)
     Enum.filter(view["rows"], &String.starts_with?(&1["key"], "env:"))
+  end
+
+  # compux's own toolkit notes, word for word: the helper's sentences, not ours.
+  @qt_note "the session's accessibility status reads off, so a Qt application publishes no " <>
+             "tree: start it with QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1 in its environment"
+  @chromium_note "a Chromium-based application publishes no page tree by itself: start it " <>
+                   "with --force-renderer-accessibility, and with ACCESSIBILITY_ENABLED=1 " <>
+                   "in its environment"
+  @linux_base_names ["1.14.4-1ubuntu2~22.04.2", "2.38.0-3", "qt", "chromium", @qt_note] ++
+                      [@chromium_note]
+
+  defp linux_computer_use_rows(probe) do
+    {:ok, view} = ComputerUse.permissions(probe: fn -> {:ok, probe} end)
+    view["rows"]
+  end
+
+  # One fact's states at a time against a 22.04 base, each on X11 and on
+  # Wayland, since the pixel route's facts read differently by server. A case
+  # is the probe and the data it carries.
+  defp linux_computer_use_cases do
+    states =
+      linux_display_states() ++
+        Enum.map(linux_bus_states(), fn {bus, names} -> {%{accessibility_bus: bus}, names} end) ++
+        linux_package_states() ++
+        linux_pixel_states() ++ linux_portal_states() ++ linux_screenshot_states()
+
+    for {overrides, names} <- states, server <- ~w(x11 wayland) do
+      probe = linux_base_probe() |> Map.put(:display_server, server) |> Map.merge(overrides)
+      {probe, names ++ @linux_base_names}
+    end
+  end
+
+  defp linux_base_probe do
+    %{
+      state: :probed,
+      platform: "linux",
+      display_server: "x11",
+      screen_capture: true,
+      input_control: true,
+      display_adopted: false,
+      x11_pixels: %{xtest: true, keymap: true},
+      portal: %{
+        running: true,
+        version: "1.14.4-1ubuntu2~22.04.2",
+        registry: false,
+        screenshot_permission: "unset"
+      },
+      accessibility_bus: %{state: "answering", applications: 7, cause: nil, detail: nil},
+      accessibility_packages: %{source: "dpkg", at_spi2_core: "2.44.0-3", atk_bridge: "2.38.0-3"},
+      toolkit_notes: [
+        %{toolkit: "qt", note: @qt_note},
+        %{toolkit: "chromium", note: @chromium_note}
+      ]
+    }
+  end
+
+  # A display server word this build does not know is the helper's, so data.
+  defp linux_display_states do
+    for(
+      server <- ~w(x11 wayland none),
+      adopted <- [true, false, nil],
+      do: {%{display_server: server, display_adopted: adopted}, []}
+    ) ++ for(word <- ~w(mir unknown), do: {%{display_server: word}, [word]})
+  end
+
+  # Every cause compux names, with and without its detail, and neither. A cause
+  # is a word the row backticks, so only the helper's free-text detail is data.
+  defp linux_bus_states do
+    detail = "org.a11y.Bus is not provided"
+    causes = [nil | ~w(no_session_bus not_installed no_address unreachable not_answering)]
+    bus = &%{state: &1, applications: &2, cause: &3, detail: &4}
+
+    for(count <- [1, 7, nil, 0], do: {bus.("answering", count, nil, nil), []}) ++
+      for(
+        cause <- causes,
+        said <- [nil, detail],
+        do: {bus.("unavailable", nil, cause, said), Enum.reject([said], &is_nil/1)}
+      ) ++
+      [{bus.("empty", 0, nil, nil), []}, {bus.("unknown", nil, nil, nil), []}, {nil, []}]
+  end
+
+  # The ATK bridge older, older with an epoch, current, unreadable, not
+  # installed and unread; then the toolkit notes present and none.
+  defp linux_package_states do
+    packages = &%{source: &1, at_spi2_core: "2.44.0-3", atk_bridge: &2}
+
+    bridges =
+      for version <- ["2.38.0-3", "1:2.50.1-1", "2.52.0-1build1", "snapshot"],
+          do: {%{accessibility_packages: packages.("dpkg", version)}, [version]}
+
+    bridges ++
+      [
+        {%{accessibility_packages: packages.("dpkg", nil)}, []},
+        {%{accessibility_packages: %{source: nil, at_spi2_core: nil, atk_bridge: nil}}, []},
+        {%{accessibility_packages: nil}, []},
+        {%{toolkit_notes: []}, []},
+        {%{toolkit_notes: nil}, []}
+      ]
+  end
+
+  defp linux_pixel_states do
+    for pixels <- [nil, %{xtest: false, keymap: nil}, %{xtest: true, keymap: false}],
+        do: {%{x11_pixels: pixels}, []}
+  end
+
+  defp linux_portal_states do
+    portal = &Map.merge(linux_base_probe().portal, &1)
+
+    [{%{portal: nil}, []}, {%{portal: portal.(%{version: nil})}, []}] ++
+      for running <- [true, false, nil],
+          registry <- [true, false, nil],
+          do: {%{portal: portal.(%{running: running, registry: registry})}, []}
+  end
+
+  defp linux_screenshot_states do
+    for answer <- ["yes", "no", "unset", "not_running", nil] do
+      {%{portal: %{linux_base_probe().portal | screenshot_permission: answer}}, []}
+    end
   end
 
   @mcp_servers ~S"""

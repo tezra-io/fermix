@@ -2849,6 +2849,42 @@
       "field": "unavailable:capability,method,sentence",
       "kind": "engine_only",
       "why": "Always On setup §3.5: the server's Always On steps (home.move.readiness, home.move.start, home.enroll.open, home.enroll.withdraw, home.snapshots.run) answer only a desktop's forward, and daemon.sock refuses each by name: unavailable with details {capability, method, sentence}. The draft predates the home family and drew only the {capability} and {capability, sentence} cases."
+    },
+    {
+      "method": "computer_use.permissions.get",
+      "field": "display_server",
+      "kind": "engine_only",
+      "why": "A Linux answer carries the display server the helper found (x11, wayland, none, or another word), by which a client picks the pixel route: X11, the desktop portal, or none, where computer use works by controls alone. Optional within protocol 2; the draft predates the Linux helper."
+    },
+    {
+      "method": "computer_use.permissions.get",
+      "field": "platform",
+      "kind": "engine_only",
+      "why": "A probed answer names the helper's platform (macos, linux), because on Linux nothing is granted and the two booleans say what the session's pixel route serves. Optional within protocol 2: a state that probed nothing carries none, and a client that finds none renders the two booleans as before."
+    },
+    {
+      "method": "computer_use.permissions.get",
+      "field": "rows",
+      "kind": "engine_only",
+      "why": "A Linux answer carries the rows fermix doctor prints after its computer use row, from the same producers, so the pane and doctor read one source. Optional within protocol 2; the draft predates the Linux helper, and a Mac answer never carries them."
+    },
+    {
+      "method": "computer_use.permissions.get",
+      "field": "rows[].detail",
+      "kind": "engine_only",
+      "why": "Each Linux row's detail is the daemon's sentence, rendered verbatim, a backticked span in it a literal the person types. A Linux answer carries the rows fermix doctor prints after its computer use row, from the same producers, so the pane and doctor read one source. Optional within protocol 2; the draft predates the Linux helper, and a Mac answer never carries them."
+    },
+    {
+      "method": "computer_use.permissions.get",
+      "field": "rows[].name",
+      "kind": "engine_only",
+      "why": "Each Linux row's name is the doctor's own (display server, accessibility bus, atk bridge, toolkit <name>, x11 pixels, desktop portal, portal screenshot). A Linux answer carries the rows fermix doctor prints after its computer use row, from the same producers, so the pane and doctor read one source. Optional within protocol 2; the draft predates the Linux helper, and a Mac answer never carries them."
+    },
+    {
+      "method": "computer_use.permissions.get",
+      "field": "rows[].status",
+      "kind": "engine_only",
+      "why": "Each Linux row's status is the doctor's: ok, warn, fail or not_applicable. A Linux answer carries the rows fermix doctor prints after its computer use row, from the same producers, so the pane and doctor read one source. Optional within protocol 2; the draft predates the Linux helper, and a Mac answer never carries them."
     }
   ]
 }

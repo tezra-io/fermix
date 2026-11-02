@@ -1880,7 +1880,18 @@ defmodule Fermix.CLI.Doctor.Checks do
     [computer_use_permissions(result, opts) | linux_computer_use_rows(result)]
   end
 
-  defp linux_computer_use_rows({:ok, %{state: :probed, platform: "linux"} = probe}) do
+  @doc """
+  The rows `computer_use/2` prints after its `computer use` row: on a Linux
+  helper, one per fact its probe reports, in that order; none for macOS or for a
+  state that probed nothing.
+
+  `computer_use.permissions.get` answers these rows as they are, and the Linux
+  app renders their details verbatim, so they are held to the management copy
+  rules (`FermixCore.Management.Copy`) and doctor and the app's pane read one
+  producer. The `computer use` row is not one of them.
+  """
+  @spec linux_computer_use_rows({:ok, map()} | {:error, term()}) :: [result()]
+  def linux_computer_use_rows({:ok, %{state: :probed, platform: "linux"} = probe}) do
     [
       display_server_row(probe),
       accessibility_bus_row(probe.accessibility_bus),
@@ -1890,7 +1901,8 @@ defmodule Fermix.CLI.Doctor.Checks do
       [x11_pixels_row(probe), desktop_portal_row(probe), portal_screenshot_row(probe)]
   end
 
-  defp linux_computer_use_rows(_result), do: []
+  def linux_computer_use_rows({:ok, %{state: _state}}), do: []
+  def linux_computer_use_rows({:error, _reason}), do: []
 
   defp display_server_row(%{display_server: server, display_adopted: adopted})
        when server in ["x11", "wayland"],
@@ -1935,13 +1947,18 @@ defmodule Fermix.CLI.Doctor.Checks do
     warn("accessibility bus", "unknown: the helper did not say whether its registry answers")
   end
 
+  # The cause is one of compux's closed words (`no_session_bus`, `not_installed`
+  # and the rest), so it is backticked as the literal it is; the detail is the
+  # helper's own sentence.
   defp bus_reason(nil, nil), do: ": the helper gave no reason"
-  defp bus_reason(cause, nil), do: " (#{cause})"
+  defp bus_reason(cause, nil), do: " (`#{cause}`)"
   defp bus_reason(nil, detail), do: ": #{detail}"
-  defp bus_reason(cause, detail), do: " (#{cause}): #{detail}"
+  defp bus_reason(cause, detail), do: " (`#{cause}`): #{detail}"
 
   # Information, never a warning: an ATK bridge older than 2.52 aborts a GTK 3
-  # application asked for its action list, and the helper never asks it.
+  # application asked for its action list, and the helper never asks it. The
+  # sentence names the person's own version and no version of ours, which the
+  # next release would make stale.
   defp atk_bridge_row(%{source: source, atk_bridge: version})
        when is_binary(source) and is_binary(version),
        do: ok("atk bridge", atk_bridge_text(version))
@@ -1954,14 +1971,15 @@ defmodule Fermix.CLI.Doctor.Checks do
   defp atk_bridge_text(version) do
     case bridge_release(version) do
       {:ok, release} when release < {2, 52} ->
-        "#{version}, older than 2.52: a GTK 3 application asked for its action list aborts " <>
+        "#{version}, old enough that a GTK 3 application asked for its action list aborts " <>
           "on that call, and computer use never asks it"
 
       {:ok, _release} ->
         version
 
       :error ->
-        "#{version}, which does not say whether it is older than 2.52"
+        "#{version}, which does not say whether it is old enough to abort a GTK 3 " <>
+          "application asked for its action list"
     end
   end
 
@@ -2035,15 +2053,16 @@ defmodule Fermix.CLI.Doctor.Checks do
   defp portal_running(false), do: "not running"
   defp portal_running(nil), do: "unknown whether it runs"
 
-  defp portal_registry(true), do: "has the Registry"
+  defp portal_registry(true), do: "has the host registry"
 
   defp portal_registry(false),
-    do: "no Registry (it needs 1.18 or later), so pixels on Wayland are refused"
+    do: "no host registry, which only a newer portal has, so pixels on Wayland are refused"
 
-  defp portal_registry(nil), do: "whether it has the Registry is unknown until it answers"
+  defp portal_registry(nil), do: "whether it has the host registry is unknown until it answers"
 
   # The helper never writes the permission store, so a stored no is the person's
-  # to reset, and this is the one command that does it.
+  # to reset, and this is the one command that does it. It is backticked in the
+  # sentence: a literal the person types, which the Linux app shows as code.
   @screenshot_reset "gdbus call --session --dest org.freedesktop.impl.portal.PermissionStore " <>
                       "--object-path /org/freedesktop/impl/portal/PermissionStore --method " <>
                       "org.freedesktop.impl.portal.PermissionStore.DeletePermission screenshot " <>
@@ -2057,7 +2076,7 @@ defmodule Fermix.CLI.Doctor.Checks do
   defp portal_screenshot_row(%{portal: %{screenshot_permission: "no"}, display_server: server}) do
     portal_status(server, false).(
       "portal screenshot",
-      "a stored no refuses every screenshot on Wayland until it is reset: " <> @screenshot_reset
+      "a stored no refuses every screenshot on Wayland until it is reset: `#{@screenshot_reset}`"
     )
   end
 

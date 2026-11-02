@@ -11,6 +11,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
   use ExUnit.Case, async: true
 
   alias Fermix.CLI.Daemon.Client
+  alias Fermix.CLI.Doctor.Checks
   alias FermixCore.Capabilities.MCP.Config, as: McpConfig
   alias FermixCore.Capabilities.MCP.RuntimeStatus
   alias FermixCore.Cues.Config, as: CuesConfig
@@ -421,6 +422,41 @@ defmodule FermixCore.Management.ProtocolContractTest do
     assert {:ok, finished} = eventually_terminal(jobs, started["job_id"])
 
     assert shape(finished) == shape(fixture_result("computer_use.grant.start", %{}))
+  end
+
+  # The Linux golden is the router's own answer to its facts, word for word:
+  # its rows are the doctor's, so the golden shows exactly what the app renders.
+  # The macOS golden names its platform, the one field a Mac answer gained.
+  test "the golden Linux computer-use answer is the router's own" do
+    request = %{
+      request_id: "req-1",
+      protocol_version: 2,
+      method: "computer_use.permissions.get",
+      params: %{}
+    }
+
+    probe = fn -> {:ok, linux_permissions()} end
+    assert {:ok, answer} = Router.route(request, operation_opts: [probe: probe])
+
+    golden = named_fixture_result("computer_use_permissions_get_linux")
+    assert json(%{answer | "probed_at" => golden["probed_at"]}) == golden
+    assert named_fixture_result("computer_use_permissions_get")["platform"] == "macos"
+  end
+
+  # A row is closed and every field is always present. Its status is the
+  # doctor's, so the enum is read from `Checks.status()` rather than repeated.
+  test "the schema declares exactly what a computer-use row carries", %{schema: schema} do
+    result = schema["$defs"]["computer_use_permissions_get_result"]
+    rows = result["properties"]["rows"]
+    golden = named_fixture_result("computer_use_permissions_get_linux")["rows"]
+    fields = golden |> hd() |> Map.keys() |> Enum.sort()
+
+    assert result["required"] == ~w(installed screen_capture input_control probed_at)
+    assert rows["items"]["additionalProperties"] == false
+    assert Enum.sort(rows["items"]["required"]) == fields
+    assert rows["items"]["properties"] |> Map.keys() |> Enum.sort() == fields
+    assert rows["items"]["properties"]["status"]["enum"] == doctor_statuses()
+    assert length(golden) < rows["maxItems"]
   end
 
   # The iMessage grant and confirmation goldens are terminal job views, because
@@ -2136,6 +2172,54 @@ defmodule FermixCore.Management.ProtocolContractTest do
 
   defp permissions do
     %{state: :probed, screen_capture: true, input_control: false, platform: "macos"}
+  end
+
+  # The Linux golden's facts: Ubuntu 24.04 on GNOME Wayland, where the desktop
+  # portal is the pixel route and a stored Screenshot no refuses it.
+  defp linux_permissions do
+    %{
+      state: :probed,
+      platform: "linux",
+      display_server: "wayland",
+      screen_capture: true,
+      input_control: true,
+      display_adopted: false,
+      x11_pixels: %{xtest: true, keymap: true},
+      portal: %{
+        running: true,
+        version: "1.18.4-1ubuntu2",
+        registry: true,
+        screenshot_permission: "no"
+      },
+      accessibility_bus: %{state: "answering", applications: 12, cause: nil, detail: nil},
+      accessibility_packages: %{
+        source: "dpkg",
+        at_spi2_core: "2.52.0-1build1",
+        atk_bridge: "2.52.0-1build1"
+      },
+      toolkit_notes: [
+        %{
+          toolkit: "qt",
+          note:
+            "the session's accessibility status reads off, so a Qt application publishes " <>
+              "no tree: start it with QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1 in its environment"
+        },
+        %{
+          toolkit: "chromium",
+          note:
+            "a Chromium-based application publishes no page tree by itself: start it with " <>
+              "--force-renderer-accessibility, and with ACCESSIBILITY_ENABLED=1 in its environment"
+        }
+      ]
+    }
+  end
+
+  defp doctor_statuses do
+    {:ok, types} = Code.Typespec.fetch_types(Checks)
+    status = Enum.find(types, &match?({:type, {:status, _ast, []}}, &1))
+    {:type, {:status, {:type, _anno, :union, members}, []}} = status
+
+    Enum.map(members, fn {:atom, _anno, word} -> Atom.to_string(word) end)
   end
 
   # Sources for the iMessage methods: the helper's probe, its stored policy and

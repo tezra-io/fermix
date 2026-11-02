@@ -134,6 +134,8 @@ defmodule FermixCore.Management.Copy do
     # its server with.
     "Linux",
     "Debian",
+    # The display server the Linux computer-use rows name.
+    "Wayland",
     "Apple ID",
     "Apple",
     "Full Disk Access",

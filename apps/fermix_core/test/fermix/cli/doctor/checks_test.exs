@@ -531,6 +531,20 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       end
     end
 
+    # The management answer reads the rows from `linux_computer_use_rows/1`, so
+    # doctor and the Linux app's pane print one producer's rows.
+    test "the rows after the computer use row are linux_computer_use_rows/1's own" do
+      for probe <- [linux(), linux(display_server: "wayland", toolkit_notes: [])] do
+        assert rows(probe) == Checks.linux_computer_use_rows({:ok, probe})
+      end
+
+      mac = %{state: :probed, platform: "macos", screen_capture: true, input_control: true}
+
+      for result <- [{:ok, mac}, {:ok, %{state: :disabled}}, {:error, :sidecar_unavailable}] do
+        assert Checks.linux_computer_use_rows(result) == []
+      end
+    end
+
     test "the display server, and whether it was adopted from the user manager" do
       own = row(linux(), "display server")
       assert own.status == :ok
@@ -592,7 +606,13 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
         )
 
       assert %{status: :warn, detail: detail} = row(down, "accessibility bus")
-      assert detail =~ "unavailable (not_installed): org.a11y.Bus is not provided"
+      assert detail == "unavailable (`not_installed`): org.a11y.Bus is not provided"
+
+      # The cause is compux's closed word, backticked as the literal it is.
+      caused = bus(state: "unavailable", applications: nil, cause: "no_session_bus")
+
+      assert row(linux(accessibility_bus: caused), "accessibility bus").detail ==
+               "unavailable (`no_session_bus`)"
 
       silent = linux(accessibility_bus: bus(state: "unavailable", applications: nil))
       assert row(silent, "accessibility bus").detail =~ "the helper gave no reason"
@@ -606,24 +626,31 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     end
 
     # Information, never a warning: compux never asks the call that aborts on it.
+    # The sentence names the person's own version and what is wrong with it, and
+    # no version of ours, which would be stale once the next one ships.
     test "an ATK bridge older than 2.52 is information" do
       old = row(linux(), "atk bridge")
       assert old.status == :ok
-      assert old.detail =~ "2.38.0-3, older than 2.52"
-      assert old.detail =~ "never asks"
+
+      assert old.detail ==
+               "2.38.0-3, old enough that a GTK 3 application asked for its action list " <>
+                 "aborts on that call, and computer use never asks it"
 
       epoch = row(linux(accessibility_packages: bridge("1:2.50.1-1")), "atk bridge")
-      assert epoch.detail =~ "older than 2.52"
+      assert epoch.detail =~ "1:2.50.1-1, old enough that"
 
       current = row(linux(accessibility_packages: bridge("2.52.0-1build1")), "atk bridge")
       assert current.status == :ok
       assert current.detail == "2.52.0-1build1"
 
       later = row(linux(accessibility_packages: bridge("2.56.2-1")), "atk bridge")
-      refute later.detail =~ "older"
+      assert later.detail == "2.56.2-1"
 
       odd = row(linux(accessibility_packages: bridge("snapshot")), "atk bridge")
-      assert odd.detail =~ "snapshot, which does not say whether it is older than 2.52"
+
+      assert odd.detail ==
+               "snapshot, which does not say whether it is old enough to abort a GTK 3 " <>
+                 "application asked for its action list"
 
       none = row(linux(accessibility_packages: bridge(nil)), "atk bridge")
       assert none.detail =~ "not installed"
@@ -674,12 +701,13 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert lost.detail =~ "the X11 pixel route needs one"
     end
 
-    test "the portal's version and whether the Registry is there" do
+    test "the portal's version and whether the host registry is there" do
       old = row(linux(), "desktop portal")
-      assert old.detail =~ "xdg-desktop-portal 1.14.4-1ubuntu2~22.04.2"
-      assert old.detail =~ "running"
-      assert old.detail =~ "no Registry"
-      assert old.detail =~ "pixels on Wayland are refused"
+
+      assert old.detail ==
+               "xdg-desktop-portal 1.14.4-1ubuntu2~22.04.2; running; no host registry, which " <>
+                 "only a newer portal has, so pixels on Wayland are refused"
+
       # On X11 the pixel route never asks the portal.
       assert old.status == :ok
 
@@ -690,7 +718,10 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
         row(linux(display_server: "wayland", portal: portal(registry: true)), "desktop portal")
 
       assert registered.status == :ok
-      assert registered.detail =~ "has the Registry"
+      assert registered.detail =~ "; has the host registry"
+
+      unasked = row(linux(portal: portal(running: nil, registry: nil)), "desktop portal")
+      assert unasked.detail =~ "whether it has the host registry is unknown until it answers"
 
       unversioned = row(linux(portal: portal(version: nil)), "desktop portal")
       assert unversioned.detail =~ "version unknown"
@@ -733,11 +764,14 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       refute unknown.detail =~ "not running"
     end
 
-    test "a stored Screenshot no prints the reset exactly" do
+    # The reset is a literal the person types, so it is backticked: the Linux app
+    # shows it as inline code, and the paths in it are never read as prose.
+    test "a stored Screenshot no prints the reset exactly, in backticks" do
       refused = linux(display_server: "wayland", portal: portal(screenshot_permission: "no"))
       assert %{status: :warn, detail: detail} = row(refused, "portal screenshot")
-      assert detail =~ "stored no"
-      assert String.ends_with?(detail, @reset)
+
+      assert detail ==
+               "a stored no refuses every screenshot on Wayland until it is reset: `#{@reset}`"
     end
 
     # The X11 pixel route never asks the portal, so there the stored no refuses
@@ -746,7 +780,7 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       refused = linux(portal: portal(screenshot_permission: "no"))
       assert %{status: :ok, detail: detail} = row(refused, "portal screenshot")
       assert detail =~ "stored no"
-      assert String.ends_with?(detail, @reset)
+      assert String.ends_with?(detail, "`#{@reset}`")
     end
 
     test "every other stored Screenshot answer is information, with no reset" do

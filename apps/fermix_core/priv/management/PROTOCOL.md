@@ -69,11 +69,14 @@ work against a daemon one release behind, so a client can always read the state,
 explain it, and restart that daemon onto a newer engine. Only the v2-only
 surfaces refuse until then.
 
-Fields a v2 daemon adds to a v1-minimum method are **optional**, with a defined
-absent rendering, because the direction that breaks is a new client talking to
-an old daemon. `overview.get`'s `health.restart_reasons` absent means "restart to
-apply" with no reason list; a Doctor check's `remediation` absent means the
-summary renders with no action button.
+Fields a daemon adds to a method after that method's minimum version, whether
+a v2 daemon adding to a v1-minimum method or a later protocol-2 engine adding
+to a v2 method, are **optional**, with a defined absent rendering, and move
+neither the protocol version nor the method's minimum, because the direction
+that breaks is a new client talking to an old daemon. `overview.get`'s
+`health.restart_reasons` absent means "restart to apply" with no reason list; a
+Doctor check's `remediation` absent means the summary renders with no action
+button.
 
 ## Request envelope
 
@@ -534,7 +537,7 @@ daemon onto anything else.
 | `capabilities.install.start` | `target` | Installs the computer use helper, the meeting notetaker, the on-device speech backend, or the iMessage helper (`imessage_helper`). A job. Minimum version `2`. |
 | `meetings.signin.start` | none | Starts the notetaker's one-time interactive sign-in. A job, because it waits for a person. Minimum version `2`. |
 | `computer_use.grant.start` | none | Raises the OS permission prompts and answers with what was granted. A job, and only ever on an explicit ask. Minimum version `2`. |
-| `computer_use.permissions.get` | none | The current, non-prompting permission state: whether the helper is installed, which grants it holds, and when they were read. Minimum version `2`. |
+| `computer_use.permissions.get` | none | The current, non-prompting permission state: whether the helper is installed, which grants it holds (on Linux, what this session's pixel route serves), and when they were read. A probed answer names the helper's `platform`; a Linux one adds its `display_server` and the doctor's Linux `rows`. Minimum version `2`. |
 | `mobile.status` | none | The phone channel as it stands: whether it is enabled, whether it started, whether it was refused this boot and the class of that refusal, whether it is held until setup is finished, the listener (`status`, `reason`, `port`, `bind`, `candidates`), the local-network announcement, detected tailnet addresses, the gateway identity's presence and fingerprint, remote reach, push credentials and delivery, the paired-phone count, the mobile protocol version this daemon serves, and the pairing session open or newest retained. Answers with the channel off. Minimum version `2`. |
 | `mobile.pair.start` | none | Opens the pairing window and answers with the pairing session view plus, once, the pairing link as `uri`. `busy` while a window is open. Minimum version `2`. |
 | `mobile.pair.get` | `session_id` | The pairing session as it stands. The pane polls it until the session is terminal. Minimum version `2`. |
@@ -868,7 +871,31 @@ Notes that the shapes alone do not carry:
 - **`computer_use.permissions.get` never prompts**, and `installed` comes from
   the installer rather than from the probe: the feature being switched off says
   nothing about whether the helper is on disk, and that is exactly what decides
-  whether a surface offers "install it" or "turn it on".
+  whether a surface offers "install it" or "turn it on". An answer whose
+  `probed_at` is not null carries `platform`, the helper's own word for its
+  system (`macos`, `linux`, `unknown` where it named none); one that probed
+  nothing (switched off, not installed) carries none, and a macOS answer carries
+  nothing else new. On Linux nothing is granted: `screen_capture` and
+  `input_control` say whether this session's pixel route serves screenshots, and
+  the pointer and keys, and are not grants, so a Linux client offers no grant
+  and `computer_use.grant.start` stays the Mac's. A Linux answer adds
+  `display_server`, the probe's word (`x11`, `wayland`, `none`, or another,
+  `unknown` where the helper named none), by which a client picks the pixel
+  route: X11 for `x11`, the desktop portal for `wayland`. Any other word
+  (`none`, `unknown`, or one this contract does not list) names no pixel route:
+  the client names none, says what the two booleans say and leaves the rest to
+  the rows, and never guesses a route from the word or from a sentence. It adds
+  `rows` too: the rows `fermix doctor` prints after its `computer use` row, in
+  that order and from the same producers, each `{name, status, detail}`.
+  `status` is the doctor's `ok`, `warn`, `fail` or `not_applicable`; `detail` is
+  the daemon's sentence, rendered verbatim, and a backticked span in it is a
+  literal shown as written (the command that resets a stored screenshot
+  refusal, the word the helper names an unavailable accessibility bus's cause
+  by). The `computer use` row is not among them: its Linux wording speaks of
+  grants. The three fields are optional for older protocol-2 engines (see
+  *Per-method minimum versions*), so neither the protocol version nor the
+  method's minimum moves: a client that finds no `platform` renders the two
+  booleans as the screen capture and input control rows it always has.
 - **iMessage exists only on a Mac.** The three `imessage.*` methods answer
   `unavailable` {`capability`: `imessage`} anywhere else, `settings.sections`
   publishes no `channels.imessage` there, and `settings.get` refuses that
@@ -1733,8 +1760,9 @@ own client tests against the same golden frames the daemon is tested against.
 - `fixtures/success.jsonl` — one full success envelope per method, for
   `settings.get` one per section, because a section with no golden result is a
   pane whose row keys nothing on the far side is held to, for
-  `mobile.pair.get` one per session state, and for `job.get` a browser download
-  both completed and failed.
+  `mobile.pair.get` one per session state, for `job.get` a browser download
+  both completed and failed, and for `computer_use.permissions.get` a Mac
+  answer and a Linux one.
 - `fixtures/errors.jsonl` — one full error envelope per published code,
   including the fixed `message` text. `method_not_found` appears twice: once
   for a method this daemon does not serve at all, and once as
@@ -1745,9 +1773,10 @@ own client tests against the same golden frames the daemon is tested against.
   (`expect: refused_by_router`, answered by the router with `method_not_found`
   and `requires`, once for a settings method, once for the plugin surface, once
   for the phone pairing surface and once for the browser download),
-  and one golden response (`expect: response`) showing every optional field of
-  a plugin row absent at once, which is the rendering a client owes a daemon
-  that knows less than it does.
+  and golden responses (`expect: response`) showing optional fields absent at
+  once (a plugin row, a sign-in client row, and a probed
+  `computer_use.permissions.get` answer from before `platform`), which is the
+  rendering a client owes a daemon that knows less than it does.
 
 Re-vendor whenever `protocol_version` changes, a method or error code is added,
 or a bound moves. The daemon ships first; see *Rollout / rollback order*.
