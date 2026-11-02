@@ -464,7 +464,7 @@ class AlwaysOnTestDaemonTest(unittest.TestCase):
             "[fermix_core.cues]\ndoor_port = 4742\n",
             "[fermix_channels.mobile]\nport = 4741\n",
             "[fermix_web]\nport = 4740\n",
-            "[always_on]\nenabled = true\n",
+            "[fermix_core.always_on]\nenabled = true\n",
         ):
             self.assertIn(line, config)
         state = (self.root / "state").read_text(encoding="utf-8")

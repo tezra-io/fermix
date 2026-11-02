@@ -269,6 +269,10 @@ render_config() {
 [fermix_core]
 profile = "$PROFILE"
 
+# Always On, which a release build offers only where this says so.
+[fermix_core.always_on]
+enabled = true
+
 # Its own ports: the cue door, the phone listener and the web setup.
 [fermix_core.cues]
 door_port = $(($1 + 2))
@@ -278,9 +282,6 @@ port = $(($1 + 1))
 
 [fermix_web]
 port = $1
-
-[always_on]
-enabled = true
 CONFIG
 }
 
