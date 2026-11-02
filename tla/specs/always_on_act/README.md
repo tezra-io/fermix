@@ -67,8 +67,11 @@ the spec STALE when one of them changes:
 - `apps/fermix_core/lib/fermix_core/management/always_on.ex`, whole;
 - `apps/fermix_core/lib/fermix_core/management/provision.ex`, by function:
   `put_action`, `clear_action`, `holding`, `stop_step`, `start`, `ended`,
-  `ending`, `delete`, `move_forwarded`, `started?`, `record_move`,
-  `primary_reached`, `reached`, `run_clean_up`;
+  `ending`, `delete`, `delete_target`, `move_forwarded`, `started?`,
+  `record_move`, `primary_reached`, `reached`, `run_clean_up` (`delete_target`
+  is not modelled here, the key rule standing in front of it; it is pinned so
+  that a change to which server a delete may reach, the move back's fence
+  among them, brings this spec back to be read);
 - `apps/fermix_core/lib/fermix_core/home/provision/ledger.ex`, by function:
   `put_action`, `clear_action`, `end_step`, `interrupt`, `live_action?`,
   `move_started`, `replace_due`, `moving?`, `moved`;
