@@ -8,6 +8,40 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Computer use does more with an app's controls, and waits on them.**
+  Beyond pressing a button and filling in a field, Fermix can now focus,
+  select, tick or untick, expand, collapse and scroll to a control by its
+  name, and type into a field where the app takes text that way, all without
+  moving your pointer or aiming at a spot on the screen. It finds controls by
+  kind and name, reads a large window in outline before opening the part it
+  needs, and can read just the focused control, the open menu or the open
+  dialog. It can wait, up to 25 seconds, for a control to appear, go away,
+  become enabled or hold a value, in the same step as the action meant to
+  cause it, and after each action it is told which dialogs, alerts, menus or
+  popups that action left open. When it could look at only part of a window,
+  it says it could not prove something is gone rather than assuming it is.
+  Every change is read back before Fermix reports it, a control already in
+  the state asked for is left alone, and a password field's contents are
+  never shown. Screenshots and clicks remain for whatever an app does not list
+  as a control. This works on macOS and Linux alike.
+
+- **Computer use on Linux reaches more desktops.** On Linux x86_64 Fermix now
+  reads and acts on an app's controls through the accessibility bus on any
+  desktop, X11 or Wayland. Screenshots, mouse and keyboard work on X11 and on
+  GNOME Wayland through the desktop portal: GNOME asks you once, the first
+  time Fermix takes a screenshot, and there Fermix cannot paste or list
+  windows. A "no" is remembered by the desktop until it is reset, and
+  `fermix doctor` shows the command that resets it. On KDE and other Wayland
+  desktops Fermix works by control alone, and knows to. Work inside one window
+  (experimental, off by default) now works under X11 too, with a small badge
+  above the window Fermix is in; it is never offered on Wayland, and a GTK 4
+  window it is bound to is worked in by screenshot and click. Some apps list
+  no controls until switched on (Qt apps need their accessibility switch,
+  Chromium-based apps an assistive client), and Fermix says which.
+  `fermix doctor` adds rows for the display server, the accessibility bus,
+  the ATK bridge, X11 input, the desktop portal and a stored screenshot
+  refusal. Linux arm64 still has no helper.
+
 - **Lists: a list per project, a shopping list, anything to tick off, kept as
   lists and never in memory.** Ask in your own chat ("start a list for the
   garden in my Projects folder", "add lemons to groceries", "tick off the
