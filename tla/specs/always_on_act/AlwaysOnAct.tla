@@ -66,8 +66,8 @@
 (* run, one answer over the link, or one report of the relay.            *)
 (***************************************************************************)
 
-\* SOURCE: apps/fermix_core/lib/fermix_core/management/always_on.ex @ c0beab2b0b5b
-\* SOURCE: apps/fermix_core/lib/fermix_core/management/provision.ex#put_action,clear_action,holding,stop_step,start,ended,ending,delete,move_forwarded,started?,record_move,primary_reached,reached,run_clean_up @ 78b2a113f946
+\* SOURCE: apps/fermix_core/lib/fermix_core/management/always_on.ex @ 2766a6974452
+\* SOURCE: apps/fermix_core/lib/fermix_core/management/provision.ex#put_action,clear_action,holding,stop_step,start,ended,ending,delete,delete_target,move_forwarded,started?,record_move,primary_reached,reached,run_clean_up @ 018c48a2be90
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/provision/ledger.ex#put_action,clear_action,end_step,interrupt,live_action?,move_started,replace_due,moving?,moved @ 9511a1ceeb6f
 \* SOURCE: apps/fermix_core/lib/fermix_core/management/jobs.ex#start,cancel,handle_call,start_job,cancel_job,stop_job,task_down,stopped,finish,begin_ending,end_closing,running? @ 4edd8b3647b0
 \* SOURCE: apps/fermix_core/lib/fermix_core/management/home_summary.ex#offered,find_action,running,running_step,replace_moving,new_server_step,cleanup @ 7a1cc24ac349

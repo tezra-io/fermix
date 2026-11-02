@@ -12,6 +12,7 @@ defmodule FermixCore.Home.MoveReadinessTest do
   alias FermixTestSupport.SafeRm
 
   @now ~U[2031-05-04 10:00:00Z]
+  @desktop_id "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e"
   @plenty 1_099_511_627_776
 
   setup do
@@ -215,11 +216,15 @@ defmodule FermixCore.Home.MoveReadinessTest do
                "back. Update Fermix on this computer first."
   end
 
-  # The same review on the server, when the candidate is the Mac the home
-  # left: what stops on a server runs there again, and a Mac newer than the
-  # server takes the home as any newer engine takes an older one's.
-  test "moving back to a Mac: what the server leaves off runs there again, and only an " <>
-         "older Mac blocks",
+  # The same review on the server, when the candidate is the desktop the
+  # home left (it enrolled through the window that desktop opened to move
+  # back): what stops on a server runs there again, and a desktop newer than
+  # the server takes the home as any newer engine takes an older one's. The
+  # direction is that fact, never the candidate's system: a Linux desktop
+  # moving back is a move back, and a Mac enrolled through any other window
+  # is not.
+  test "moving back to the desktop the home left: what the server leaves off runs there " <>
+         "again, and only an older desktop blocks",
        ctx do
     File.write!(Path.join(ctx.home, "config.toml"), """
     [fermix_core.realtime]
@@ -229,33 +234,45 @@ defmodule FermixCore.Home.MoveReadinessTest do
     enabled = true
     """)
 
-    {:ok, mac} =
-      Candidates.add(ctx.home, %{candidate_attrs() | name: "studio-mac", os: "darwin"}, @now)
+    back = Map.merge(candidate_attrs(), %{name: "studio-box", returning: @desktop_id})
+    {:ok, desktop} = Candidates.add(ctx.home, back, @now)
 
     server = Keyword.merge(opts(ctx), host: "linux-x86_64", version: "0.17.0")
-    newer_mac = %{mac | version: "0.18.0"}
+    newer = %{desktop | version: "0.18.0"}
 
-    assert %{items: items} = MoveReadiness.report(ctx.home, newer_mac, server)
+    assert %{items: items} = MoveReadiness.report(ctx.home, newer, server)
 
     assert %{
              status: :ok,
-             sentence: "Voice calls and meetings run on studio-mac again after the move."
+             sentence: "Voice calls and meetings run on studio-box again after the move."
            } =
              item_in(items, "stays_here")
 
-    assert %{status: :ok, sentence: "studio-mac runs this computer's Fermix, or a newer one."} =
+    assert %{status: :ok, sentence: "studio-box runs this computer's Fermix, or a newer one."} =
              item_in(items, "engine_version")
 
-    older_mac = %{mac | version: "0.16.0"}
-    assert %{ready: false, items: items} = MoveReadiness.report(ctx.home, older_mac, server)
+    older = %{desktop | version: "0.16.0"}
+    assert %{ready: false, items: items} = MoveReadiness.report(ctx.home, older, server)
     assert %{status: :block, sentence: sentence} = item_in(items, "engine_version")
-    assert sentence =~ "studio-mac runs an older Fermix than this computer: update Fermix on"
+    assert sentence =~ "studio-box runs an older Fermix than this computer: update Fermix on"
 
     File.write!(Path.join(ctx.home, "config.toml"), "")
-    assert %{items: items} = MoveReadiness.report(ctx.home, newer_mac, server)
+    assert %{items: items} = MoveReadiness.report(ctx.home, newer, server)
 
     assert %{status: :ok, sentence: "Voice calls and meetings are not turned on."} =
              item_in(items, "stays_here")
+  end
+
+  test "a Mac that enrolled through any other window is a move to a server, not back",
+       ctx do
+    {:ok, mac} =
+      Candidates.add(ctx.home, %{candidate_attrs() | name: "studio-mac", os: "darwin"}, @now)
+
+    assert %{ready: false, items: items} =
+             MoveReadiness.report(ctx.home, %{mac | version: "0.18.0"}, opts(ctx))
+
+    assert %{status: :block, sentence: sentence} = item_in(items, "engine_version")
+    assert sentence =~ "studio-mac runs a newer Fermix than this computer"
   end
 
   test "on a Linux computer, voice calls on are named, and iMessage never is", ctx do

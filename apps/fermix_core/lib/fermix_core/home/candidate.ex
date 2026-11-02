@@ -61,6 +61,7 @@ defmodule FermixCore.Home.Candidate do
   alias FermixCore.Home.Moved
   alias FermixCore.Home.Role
   alias FermixCore.Home.Snapshot.Recipient
+  alias FermixCore.Home.StatusWatch
   alias FermixCore.Management.Lifecycle
 
   @dir "candidate"
@@ -168,7 +169,12 @@ defmodule FermixCore.Home.Candidate do
     end
   end
 
-  @doc "Writes `state.json` whole (`0600`, renamed into place), with `updated_at`."
+  @doc """
+  Writes `state.json` whole (`0600`, renamed into place), with `updated_at`,
+  and tells the Always On watch (`FermixCore.Home.StatusWatch`, `:move`): a
+  desktop moving back draws its screen from it. An engine that runs no watch
+  (a candidate server) tells nobody.
+  """
   @spec put_state(Path.t(), state(), DateTime.t()) :: :ok | {:error, term()}
   def put_state(home, %{"phase" => phase} = state, %DateTime{} = now) when phase in @phases do
     state =
@@ -176,7 +182,20 @@ defmodule FermixCore.Home.Candidate do
       |> Map.put("v", @version)
       |> Map.put("updated_at", now |> DateTime.truncate(:second) |> DateTime.to_iso8601())
 
-    write_private(path(home, "state.json"), Jason.encode!(state))
+    with :ok <- write_private(path(home, "state.json"), Jason.encode!(state)),
+         do: StatusWatch.changed(:move)
+  end
+
+  @doc """
+  Removes the candidate's directory under `home` (a move back cancelled),
+  and tells the Always On watch; one that is not there is removed already.
+  """
+  @spec remove(Path.t()) :: :ok | {:error, term()}
+  def remove(home) when is_binary(home) and home != "" do
+    case File.rm_rf(dir(home)) do
+      {:ok, _removed} -> StatusWatch.changed(:move)
+      {:error, reason, file} -> {:error, {:file, file, reason}}
+    end
   end
 
   @doc "The enrollment code the candidate holds until it is accepted."

@@ -73,10 +73,13 @@ defmodule FermixCore.Home.Link do
   minutes) or `:provisioned` (the code inside a server Fermix creates, 24
   hours, M75 lean v1 L15). One window at a time; opening another replaces it,
   except that a manual one is refused while a provisioned one is open, and
-  while a used one's candidate is still held. A refusal carries the sentence
-  a person is shown.
+  while a used one's candidate is still held. `returning` is the device id
+  of the linked desktop a manual window is opened for, to take the home back
+  (Always On's move back), else nil: the window keeps it, and so does the
+  candidate that enrolls through it. A refusal carries the sentence a person
+  is shown.
   """
-  @callback open_enrollment(:manual | :provisioned) ::
+  @callback open_enrollment(:manual | :provisioned, String.t() | nil) ::
               {:ok, %{code: String.t(), expires_at: DateTime.t()}}
               | {:error, {:unavailable, String.t()}}
 

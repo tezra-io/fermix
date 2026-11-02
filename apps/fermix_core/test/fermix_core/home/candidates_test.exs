@@ -40,6 +40,26 @@ defmodule FermixCore.Home.CandidatesTest do
              Candidates.fetch(home, "cand-0000", later)
   end
 
+  # Always On's move back: a candidate that enrolled through the window a
+  # desktop opened to take the home back names that desktop, which is how
+  # the server knows the move goes back and not to a server; any other names
+  # none. The move's request carries it.
+  test "a candidate a desktop's window enrolled names that desktop; any other none",
+       %{home: home} do
+    desktop = "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e"
+
+    {:ok, back} =
+      Candidates.add(home, Map.put(attrs("studio-mac"), :returning, desktop), @now)
+
+    {:ok, server} = Candidates.add(home, attrs("north-box"), @now)
+
+    assert back.returning == desktop
+    assert server.returning == nil
+    assert {:ok, [^back, ^server]} = Candidates.list(home, @now)
+    assert {:ok, ^back} = back |> Candidates.encode() |> Candidates.decode()
+    refute Map.has_key?(Candidates.view(back), "returning")
+  end
+
   test "a file Fermix did not write is refused, not read", %{home: home} do
     File.mkdir_p!(Path.dirname(Candidates.path(home)))
     File.write!(Candidates.path(home), ~s({"v":1,"candidates":[{"name":"x"}]}))

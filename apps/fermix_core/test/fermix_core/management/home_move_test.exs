@@ -109,7 +109,7 @@ defmodule FermixCore.Management.HomeMoveTest do
       at = ~U[2031-05-04 10:10:00Z]
 
       seams =
-        Keyword.put(ctx.seams, :open_enrollment, fn :manual ->
+        Keyword.put(ctx.seams, :open_enrollment, fn :manual, nil ->
           {:ok, %{code: "fxenroll1.abc", expires_at: at}}
         end)
 
@@ -117,7 +117,7 @@ defmodule FermixCore.Management.HomeMoveTest do
                HomeMove.enroll_open(nil, [engine_role: @primary] ++ seams)
 
       refused =
-        Keyword.put(ctx.seams, :open_enrollment, fn :manual ->
+        Keyword.put(ctx.seams, :open_enrollment, fn :manual, nil ->
           {:error, {:unavailable, "Remote reach is off."}}
         end)
 
@@ -141,15 +141,15 @@ defmodule FermixCore.Management.HomeMoveTest do
       test = self()
 
       seams =
-        Keyword.put(ctx.seams, :open_enrollment, fn kind ->
-          send(test, {:opened, kind})
+        Keyword.put(ctx.seams, :open_enrollment, fn kind, returning ->
+          send(test, {:opened, kind, returning})
           {:ok, %{code: "fxenroll1.def", expires_at: ~U[2031-05-05 10:00:00Z]}}
         end)
 
       assert {:ok, %{"code" => "fxenroll1.def", "expires_at" => "2031-05-05T10:00:00Z"}} =
                forwarded("home.enroll.open", %{"kind" => "provisioned"}, @primary, seams)
 
-      assert_received {:opened, :provisioned}
+      assert_received {:opened, :provisioned, nil}
 
       # Anything but a desktop's forward is refused by name: `home.act` takes the step.
       assert {:error, :unavailable,
@@ -169,7 +169,31 @@ defmodule FermixCore.Management.HomeMoveTest do
       assert {:error, :invalid_params, %{"field" => "kind"}} =
                forwarded("home.enroll.open", %{"kind" => "forever"}, @primary, seams)
 
-      refute_received {:opened, _kind}
+      refute_received {:opened, _kind, _returning}
+    end
+
+    # Always On's move back: the copied-code window a linked desktop opens
+    # on its server names that desktop, so the server knows the candidate
+    # enrolled through it is the desktop taking the home back.
+    test "a copied code a desktop asks for over the link names that desktop", ctx do
+      test = self()
+
+      seams =
+        Keyword.put(ctx.seams, :open_enrollment, fn kind, returning ->
+          send(test, {:opened, kind, returning})
+          {:ok, %{code: "fxenroll1.ghi", expires_at: ~U[2031-05-04 10:40:00Z]}}
+        end)
+
+      assert {:ok, %{"code" => "fxenroll1.ghi"}} =
+               forwarded("home.enroll.open", %{}, @primary, seams)
+
+      {:desktop, desktop_id} = @desktop
+      assert_received {:opened, :manual, ^desktop_id}
+
+      assert {:ok, %{"code" => "fxenroll1.ghi"}} =
+               HomeMove.enroll_open(nil, [engine_role: @primary] ++ seams)
+
+      assert_received {:opened, :manual, nil}
     end
   end
 
@@ -204,8 +228,8 @@ defmodule FermixCore.Management.HomeMoveTest do
               %{"sentence" => "Only the primary enrolls candidates and starts a move."}} =
                forwarded("home.enroll.withdraw", %{}, @device, seams)
 
-      assert {:error, :invalid_params, _details} =
-               forwarded("home.enroll.withdraw", %{"kind" => "manual"}, @primary, seams)
+      assert {:error, :invalid_params, %{"field" => "kind"}} =
+               forwarded("home.enroll.withdraw", %{"kind" => "forever"}, @primary, seams)
 
       assert {:error, :unavailable,
               %{
@@ -216,6 +240,28 @@ defmodule FermixCore.Management.HomeMoveTest do
                route("home.enroll.withdraw", %{}, @primary, seams)
 
       refute_received :withdrawn
+    end
+
+    # Always On's move back: Cancel closes the copied code the desktop opened
+    # on its server, so `kind` names the window (`provisioned` unless said).
+    test "closes the copied code when the desktop names it", ctx do
+      test = self()
+
+      seams =
+        Keyword.put(ctx.seams, :withdraw_enrollment, fn kind ->
+          send(test, {:withdrawn, kind})
+          :ok
+        end)
+
+      assert {:ok, %{"withdrawn" => true}} =
+               forwarded("home.enroll.withdraw", %{"kind" => "manual"}, @primary, seams)
+
+      assert_received {:withdrawn, :manual}
+
+      assert {:ok, %{"withdrawn" => true}} =
+               forwarded("home.enroll.withdraw", %{"kind" => "provisioned"}, @primary, seams)
+
+      assert_received {:withdrawn, :provisioned}
     end
   end
 

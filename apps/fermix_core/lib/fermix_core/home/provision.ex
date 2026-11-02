@@ -223,6 +223,7 @@ defmodule FermixCore.Home.Provision do
           | :not_primary
           | :live_home
           | :move_under_way
+          | :moving_back
           | :replace_only
           | :nothing_to_replace
           | :replacement_exists
@@ -570,6 +571,11 @@ defmodule FermixCore.Home.Provision do
 
   defp sentence(:move_under_way, _words),
     do: "Fermix is moving to your server, so it is not deleted while the move runs."
+
+  defp sentence(:moving_back, _words),
+    do:
+      "Fermix is moving back to this computer, so your server is not deleted while it " <>
+        "does."
 
   defp sentence(:replace_only, _words),
     do: "Fermix runs on your server now, so a new server from here can only replace it."

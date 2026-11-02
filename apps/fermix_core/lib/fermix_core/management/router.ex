@@ -48,7 +48,7 @@ defmodule FermixCore.Management.Router do
     mobile.devices.list browser.install.start imessage.permissions.get imessage.policy.confirm
     mcp.servers.list mcp.servers.import.scan cues.status cues.sources.list cues.watchers.list
     cues.mandates.list cues.mandates.choices home.snapshots.status home.snapshots.run
-    home.enroll.withdraw home.candidates.list home.provision.options
+    home.candidates.list home.provision.options
   )
   @lease_params ~w(lease_id)
   @doctor_session_params ~w(session_id)
@@ -334,8 +334,13 @@ defmodule FermixCore.Management.Router do
     end
   end
 
-  defp route_home("home.enroll.withdraw", %{}, opts),
-    do: operation_result(HomeMove.enroll_withdraw(home_opts(opts)))
+  # `kind` `manual`, from a desktop cancelling its move back: the copied code
+  # it opened; `provisioned` otherwise.
+  defp route_home("home.enroll.withdraw", params, opts) do
+    with :ok <- reject_unknown_params(params, @home_enroll_params) do
+      operation_result(HomeMove.enroll_withdraw(Map.get(params, "kind"), home_opts(opts)))
+    end
+  end
 
   defp route_home("home.candidates.list", %{}, opts),
     do: operation_result(HomeMove.candidates_list(home_opts(opts)))

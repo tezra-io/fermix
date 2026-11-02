@@ -79,13 +79,13 @@
         },
         "waits_until": "2031-05-05T11:00:00Z"
       },
-      "key": "fdp-Dj9Y6fX4jR6a8bmO2g",
+      "key": "N2WYUQpUQIHFfnF8mIEplg",
       "notice": {
         "id": "ready:cand-5e2a9c1f7b3d4086",
         "sentence": "Your server is ready for the move."
       },
       "outcome": "done",
-      "sentence": "Your server is ready for the move. There is no way back to this Mac in this version.",
+      "sentence": "Your server is ready for the move. You can move Fermix back to this Mac from Always On whenever you want.",
       "state": "ready"
     }
   },

@@ -99,7 +99,12 @@ defmodule FermixCore.Management.Copy do
                    progress_deleting progress_power confirm_create confirm_create_in
                    confirm_start_again confirm_replace confirm_restart confirm_delete
                    confirm_cancel confirm_replace_move notice_ready notice_moved
-                   notice_backup_week notice_server_backup_week)a
+                   notice_backup_week notice_server_backup_week return_connecting return_ready
+                   return_moving return_undone return_failed return_stopped restore_moving
+                   restore_deleting restore_failed fence_failed server_retired notice_back
+                   progress_return_receiving progress_return_staged progress_return_placing
+                   progress_restoring confirm_delete_back confirm_restore_here
+                   confirm_return_move)a
   # Each Details line's label, by its key.
   @line_labels [
     server: "Server",
@@ -112,9 +117,11 @@ defmodule FermixCore.Management.Copy do
     checked: "Last checked",
     costs: "Costs",
     old_costs: "Old server costs",
-    disk: "Server disk"
+    disk: "Server disk",
+    seen: "Last seen",
+    runs_again: "Runs here again"
   ]
-  @line_keys Keyword.keys(@line_labels) ++ [:backup, :copies]
+  @line_keys Keyword.keys(@line_labels) ++ [:backup, :copies, :backup_here]
   @docs_url "https://fermix.ai/docs/always-on/"
   @own_server_command "curl -fsSL https://fermix.ai/always-on | sudo sh -s -- --version "
   @currency_signs %{"EUR" => "€", "USD" => "$", "GBP" => "£"}
@@ -338,8 +345,8 @@ defmodule FermixCore.Management.Copy do
 
   def summary_sentence(:ready, %{machine: machine}),
     do:
-      "Your server is ready for the move. There is no way back to this #{machine} in this " <>
-        "version."
+      "Your server is ready for the move. You can move Fermix back to this #{machine} from " <>
+        "Always On whenever you want."
 
   def summary_sentence(:moving, %{machine: machine}),
     do:
@@ -512,6 +519,79 @@ defmodule FermixCore.Management.Copy do
   def summary_sentence(:notice_server_backup_week, _values),
     do: "The last backup is a week old. It runs when your Mac is online."
 
+  def summary_sentence(:return_connecting, %{machine: machine}),
+    do: "Connecting this #{machine} to your server…"
+
+  def summary_sentence(:return_ready, %{machine: machine}),
+    do: "This #{machine} is ready to take Fermix back."
+
+  def summary_sentence(:return_moving, %{machine: machine}),
+    do: "Moving Fermix back to this #{machine}. Messages wait until it is done."
+
+  def summary_sentence(:return_undone, _values),
+    do: "The move back was undone. Fermix still runs on your server."
+
+  def summary_sentence(:return_failed, %{machine: machine}),
+    do: "This #{machine} could not get ready to take Fermix back. Move back to try again."
+
+  def summary_sentence(:return_stopped, _values),
+    do: "Moving back stopped part-way, so cancel it and move back again."
+
+  def summary_sentence(:restore_moving, %{machine: machine}),
+    do: "Restoring Fermix on this #{machine} from its backup. Messages wait until it is done."
+
+  def summary_sentence(:restore_deleting, %{machine: machine}),
+    do: "Deleting your server, then restoring Fermix on this #{machine} from its backup…"
+
+  def summary_sentence(:restore_failed, %{machine: machine}),
+    do: "Fermix could not restore its backup on this #{machine}."
+
+  def summary_sentence(:fence_failed, _values),
+    do:
+      "Fermix could not delete your server, so it did not restore here: a restored copy " <>
+        "beside a running server would answer twice."
+
+  def summary_sentence(:server_retired, %{machine: machine}),
+    do:
+      "Fermix is back on this #{machine}. Your server still runs and costs money until you " <>
+        "delete it."
+
+  def summary_sentence(:notice_back, %{machine: machine}),
+    do:
+      "Fermix is back on this #{machine}. Your own server still runs its retired copy: turn " <>
+        "it off or delete it."
+
+  def summary_sentence(:progress_return_receiving, _values),
+    do: "Receiving your Fermix from the server…"
+
+  def summary_sentence(:progress_return_staged, _values),
+    do: "Waiting for your server to hand over…"
+
+  def summary_sentence(:progress_return_placing, %{machine: machine}),
+    do: "Putting Fermix in place on this #{machine}…"
+
+  def summary_sentence(:progress_restoring, %{machine: machine}),
+    do: "Restoring Fermix from the backup on this #{machine}…"
+
+  def summary_sentence(:confirm_delete_back, _values),
+    do:
+      "Delete your server? Fermix no longer runs on it, and everything still on it is gone " <>
+        "for good."
+
+  def summary_sentence(:confirm_restore_here, %{machine: machine}),
+    do:
+      "Restore Fermix on this #{machine} from its backup? Messages, memory and jobs since " <>
+        "that backup are gone, and Telegram keeps nothing older than 24 hours. If your " <>
+        "server is only restarting or offline, wait: Fermix deletes it before it restores " <>
+        "here, and everything on it since that backup is gone."
+
+  def summary_sentence(:confirm_return_move, %{machine: machine, stays_here: features}),
+    do:
+      "Move Fermix back to this #{machine} now?" <>
+        runs_here_line(features) <>
+        " Coding agents ask for your approval again. Messages sent to Telegram while it " <>
+        "moves wait until it is done. Your server stays until you delete it."
+
   def summary_sentence(:data, %{provider: provider}),
     do:
       "Your conversations and memories, the secrets, the browser and traces live on your " <>
@@ -549,6 +629,21 @@ defmodule FermixCore.Management.Copy do
   defp stops_line([]), do: ""
   defp stops_line(features), do: " #{stops_after_move(features)}."
 
+  defp runs_here_line([]), do: ""
+
+  defp runs_here_line(features) do
+    verb = if features == [:imessage], do: "runs", else: "run"
+    " #{feature_names(features)} #{verb} here again."
+  end
+
+  # What runs only on this computer among `features`, named in order, as a
+  # sentence starts.
+  defp feature_names(features) do
+    names = for {feature, name} <- @stays_here, feature in features, do: name
+    true = length(names) == length(Enum.uniq(features))
+    names |> join_names() |> capitalised()
+  end
+
   defp join_names([name]), do: name
   defp join_names(names), do: Enum.join(Enum.drop(names, -1), ", ") <> " and " <> List.last(names)
 
@@ -572,6 +667,7 @@ defmodule FermixCore.Management.Copy do
   @spec summary_line_label(atom()) :: String.t()
   def summary_line_label(:backup), do: "Last backup to your desktop"
   def summary_line_label(:copies), do: "Backups on this Mac"
+  def summary_line_label(:backup_here), do: "Backup on this Mac"
   def summary_line_label(key), do: Keyword.fetch!(@line_labels, key)
 
   @doc "The label of the line that says when the provider was last read back."
@@ -585,7 +681,10 @@ defmodule FermixCore.Management.Copy do
   `ctx`'s `zone`; the space this computer's `copies` take, in bytes, on
   `ctx`'s `machine`; how full the server's `disk` is, a fraction; what the
   server (`costs`) or the old one (`old_costs`) costs, `{total_monthly,
-  currency}` as the ledger keeps them.
+  currency}` as the ledger keeps them; when the server was last `seen`; the
+  copy on `ctx`'s `machine` a restore takes (`backup_here`, when it was
+  written); and what runs on this computer again after a move back
+  (`runs_again`, the features).
   """
   @spec summary_line(atom(), term(), map()) :: %{String.t() => String.t()}
   def summary_line(:backup, {place, %DateTime{} = at}, %{zone: zone}),
@@ -594,11 +693,18 @@ defmodule FermixCore.Management.Copy do
   def summary_line(:copies, bytes, %{machine: machine}) when is_integer(bytes),
     do: line("Backups on this #{machine}", Disk.gib(bytes))
 
+  def summary_line(:backup_here, %DateTime{} = at, %{machine: machine, zone: zone}),
+    do: line("Backup on this #{machine}", stated(at, zone))
+
+  def summary_line(:runs_again, [_ | _] = features, _ctx),
+    do: line(summary_line_label(:runs_again), feature_names(features))
+
   def summary_line(:disk, used, _ctx) when is_number(used),
     do: line(summary_line_label(:disk), "#{round(used * 100)}% used")
 
-  def summary_line(key, %DateTime{} = at, %{zone: zone}) when key in [:waits_until, :checked],
-    do: line(summary_line_label(key), stated(at, zone))
+  def summary_line(key, %DateTime{} = at, %{zone: zone})
+      when key in [:waits_until, :checked, :seen],
+      do: line(summary_line_label(key), stated(at, zone))
 
   def summary_line(key, {total, currency}, _ctx) when key in [:costs, :old_costs],
     do: line(summary_line_label(key), offer_price(total, currency))
@@ -669,8 +775,9 @@ defmodule FermixCore.Management.Copy do
   The label of one summary action, by its id; `create_in` names a `city`,
   `open_console` the `provider`, `delete_server` the server a replace
   deletes (`which`: `"new"` or `"old"`) when there are two, `paste_token` is
-  `Set up` on the first token screen (`first`), and `cancel` closes an open
-  code (`code`).
+  `Set up` on the first token screen (`first`), `cancel` closes an open
+  code (`code`), and `move_back` and `restore_here` name this computer
+  (`machine`).
   """
   @spec summary_label(atom(), map()) :: String.t()
   def summary_label(:create_server, _values), do: "Create server"
@@ -691,6 +798,8 @@ defmodule FermixCore.Management.Copy do
   def summary_label(:replace_server, _values), do: "Replace the server"
   def summary_label(:check_again, _values), do: "Check again"
   def summary_label(:own_server, _values), do: "Use my own Linux server"
+  def summary_label(:move_back, %{machine: machine}), do: "Move back to this #{machine}"
+  def summary_label(:restore_here, %{machine: machine}), do: "Restore on this #{machine}"
 
   def summary_label(:delete_server, %{which: which}) when which in ["new", "old"],
     do: "Delete your #{which} server"

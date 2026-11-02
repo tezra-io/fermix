@@ -7,13 +7,17 @@ defmodule FermixCore.Management.AlwaysOnTest do
   # is read from its own completion event, never waited for by the clock.
   use ExUnit.Case, async: true
 
+  alias FermixCore.Home.Candidate
   alias FermixCore.Home.Candidates
   alias FermixCore.Home.DesktopLink
+  alias FermixCore.Home.EnrollmentCode
   alias FermixCore.Home.Epoch
   alias FermixCore.Home.Move
   alias FermixCore.Home.Moved
   alias FermixCore.Home.Provision.Driver
   alias FermixCore.Home.Provision.Ledger
+  alias FermixCore.Home.Return
+  alias FermixCore.Home.Snapshot
   alias FermixCore.Home.Snapshot.Recipient
   alias FermixCore.Home.Snapshot.Scheduler
   alias FermixCore.Home.Snapshot.Status
@@ -36,6 +40,7 @@ defmodule FermixCore.Management.AlwaysOnTest do
   @code "fxenroll1.eyJ2IjoxLCJuYW1lIjoiaW52ZW50ZWQifQ"
   @manual_code "fxenroll1.eyJ2IjoxLCJuYW1lIjoib3duLXNlcnZlciJ9"
   @server_code "fxenroll1.eyJ2IjoxLCJuYW1lIjoib2xkLXNlcnZlciJ9"
+  @back_cand "cand-7a3e1c9b5d2f4086"
   @recommended %{type: "small-4", location: "osl1", profile: "general"}
   # The offer the owner was shown and chose: a create always names one.
   @choice %Input{type: "small-4", location: "osl1"}
@@ -77,7 +82,7 @@ defmodule FermixCore.Management.AlwaysOnTest do
         send(test, :code_withdrawn)
         :ok
       end,
-      open_enrollment: fn kind ->
+      open_enrollment: fn kind, _desktop ->
         send(test, {:enrollment_opened, kind})
         {:ok, %{code: @manual_code, expires_at: ~U[2031-05-04 12:30:00Z]}}
       end,
@@ -818,6 +823,303 @@ defmodule FermixCore.Management.AlwaysOnTest do
     end
   end
 
+  # Always On's move back (design §8, §9, §14): a linked desktop takes the
+  # home back from its server over the link in two presses, Move back and
+  # Move now, or restores its own copy of a server Fermix created that is
+  # gone, deleting the server first. The server's steps go over a scripted
+  # link; the candidate's subtree, the restore and the restart are stand-ins.
+  describe "moving back, on a linked desktop" do
+    setup ctx do
+      :ok = DesktopLink.write(ctx.home, desktop_link())
+      :ok = Moved.write(ctx.home, %{epoch: 4, moved_at: @at, to: "fermix-general-a3f9"})
+      connect!(ctx)
+      created!(ctx, @recommended)
+      script = start_supervised!({Agent, fn -> server_part(:on) end}, id: :script)
+      test = self()
+
+      forward = fn %{method: method, params: params}, _opts ->
+        send(test, {:forwarded, method, params})
+        Agent.get(script, & &1).(method, params)
+      end
+
+      Agent.update(ctx.link, &%{&1 | primary: primary(nil)})
+
+      opts =
+        ctx.opts
+        |> Keyword.drop([:open_code, :withdraw_code])
+        |> Keyword.merge(
+          engine_role: @device,
+          primary_forward: forward,
+          role: :device,
+          restarts_itself?: true,
+          start_return: fn home ->
+            send(test, {:return_started, home})
+            :ok
+          end,
+          stop_return: fn ->
+            send(test, :return_stopped)
+            :ok
+          end,
+          local_return: fn home, copy ->
+            send(test, {:restored, home, copy})
+            {:ok, %{"restored" => true, "epoch" => 6}}
+          end
+        )
+
+      %{ctx | opts: opts} |> Map.put(:script, script)
+    end
+
+    test "Move back asks the server for a code, writes the candidate and the record, and " <>
+           "starts receiving beside the link",
+         ctx do
+      assert {:ok, %{"summary" => summary, "result" => nil}} = press(ctx, "move_back")
+
+      assert_received {:forwarded, "home.enroll.open", %{}}
+      assert_received {:return_started, home} when home == ctx.home
+
+      assert {:ok, %{"kind" => "return", "phase" => "enrolling"} = state} =
+               Candidate.read_state(ctx.home)
+
+      assert state["primary"]["name"] == "invented"
+
+      assert {:ok, record} = Return.read(ctx.home)
+      assert %{from: "invented", primary_epoch: 5, started_at: @at} = record
+      assert record.provider_server == server_id(ctx)
+
+      assert summary["state"] == "creating"
+      assert summary["sentence"] == "Connecting this computer to your server…"
+    end
+
+    test "Move back is refused while the server reports a move of its own, and while " <>
+           "Fermix would not start again by itself",
+         ctx do
+      Agent.update(ctx.script, fn script ->
+        fn
+          "home.status", params ->
+            {:ok, part} = script.("home.status", params)
+
+            {:ok,
+             Map.put(part, "move", %{
+               "phase" => "streaming",
+               "candidate" => "x",
+               "sentence" => "."
+             })}
+
+          method, params ->
+            script.(method, params)
+        end
+      end)
+
+      assert {:error, :unavailable, %{"sentence" => sentence}} = press(ctx, "move_back")
+      assert sentence == "Your server is moving Fermix right now, so move back once that is done."
+      refute_received {:forwarded, "home.enroll.open", _params}
+
+      Agent.update(ctx.script, fn _script -> server_part(:on) end)
+      terminal = Keyword.put(ctx.opts, :restarts_itself?, false)
+
+      assert {:error, :unavailable, %{"sentence" => sentence}} =
+               press(%{ctx | opts: terminal}, "move_back")
+
+      assert sentence =~ "Install it as a service first."
+      refute Candidate.present?(ctx.home)
+      assert Return.read(ctx.home) == :absent
+      refute_received {:return_started, _home}
+    end
+
+    test "a replace begun since the screen was drawn answers changed, and writes nothing", ctx do
+      key = offered!(summary(ctx.opts), "move_back")["key"]
+      replacing_ready!(ctx)
+
+      assert {:error, :changed, _details} =
+               AlwaysOn.act(%{action: "move_back", key: key, input: %Input{}}, ctx.opts)
+
+      refute Candidate.present?(ctx.home)
+    end
+
+    test "Move now sends the move to the server and records it in the return, never as a " <>
+           "replace",
+         ctx do
+      enrolled!(ctx)
+      assert %{"state" => "ready", "action" => %{"id" => "move_now"}} = summary(ctx.opts)
+      script = ctx.script
+
+      # The server takes the move: its own part says so from then on.
+      Agent.update(script, fn on ->
+        fn
+          "home.move.start", _params ->
+            Agent.update(script, fn _on -> server_moving(on) end)
+            {:ok, %{"move_id" => "mv-0002"}}
+
+          method, params ->
+            on.(method, params)
+        end
+      end)
+
+      assert {:ok, %{"result" => %{"move_id" => "mv-0002"}, "summary" => after_move}} =
+               press(ctx, "move_now", %Input{recovery_passphrase: @passphrase})
+
+      assert_received {:forwarded, "home.move.start", params}
+
+      assert params == %{
+               "candidate_id" => @back_cand,
+               "recovery_passphrase" => @passphrase,
+               "keep_as_desktop" => false
+             }
+
+      assert {:ok, %{move_started_at: @at, candidate_id: @back_cand, move_id: "mv-0002"}} =
+               Return.read(ctx.home)
+
+      assert {:ok, %{replace: nil}} = Ledger.read(ctx.home, "nimbus")
+      assert after_move["state"] == "moving"
+      refute "cancel" in Enum.map(HomeSummary.offered(after_move), & &1["id"])
+    end
+
+    # HR-1 (the move back's TLA spec): the server restarts into the move as
+    # it answers, so the start is recorded before the request leaves; a
+    # stop at any point after that never leaves Cancel offered while the
+    # server moves.
+    test "Move now records the start before it sends the move", ctx do
+      enrolled!(ctx)
+      home = ctx.home
+      test = self()
+
+      Agent.update(ctx.script, fn script ->
+        fn
+          "home.move.start", _params ->
+            send(test, {:recorded_when_sent, Return.read(home)})
+            {:ok, %{"move_id" => "mv-0003"}}
+
+          method, params ->
+            script.(method, params)
+        end
+      end)
+
+      assert {:ok, _answer} = press(ctx, "move_now", %Input{recovery_passphrase: @passphrase})
+
+      assert_received {:recorded_when_sent,
+                       {:ok, %{move_started_at: @at, candidate_id: @back_cand} = sent}}
+
+      refute Map.has_key?(sent, :move_id)
+    end
+
+    test "a move the server refused, or that never left, forgets its start; one unconfirmed " <>
+           "keeps it",
+         ctx do
+      enrolled!(ctx)
+
+      refusal = %{
+        "capability" => "home",
+        "sentence" => "That is not the recovery passphrase you set."
+      }
+
+      down = %{"sentence" => "The server is unreachable."}
+
+      for {answer, kept?} <- [
+            {{:error, :invalid_params, refusal}, false},
+            {{:error, :primary_unreachable, down}, false},
+            {{:error, :unconfirmed, %{"method" => "home.move.start", "sentence" => "."}}, true}
+          ] do
+        Agent.update(ctx.script, fn _script ->
+          fn
+            "home.move.start", _params -> answer
+            method, params -> server_part(:on).(method, params)
+          end
+        end)
+
+        assert {:error, _code, _details} =
+                 press(ctx, "move_now", %Input{recovery_passphrase: @passphrase})
+
+        {:ok, record} = Return.read(ctx.home)
+        assert Map.has_key?(record, :move_started_at) == kept?, inspect(answer)
+        refute Map.has_key?(record, :move_id)
+        if kept?, do: :ok, else: refute(Map.has_key?(record, :candidate_id))
+      end
+    end
+
+    test "Cancel stops receiving, closes the code on the server and forgets the move back",
+         ctx do
+      enrolled!(ctx)
+
+      assert {:ok, %{"summary" => after_cancel}} = press(ctx, "cancel")
+
+      assert_received :return_stopped
+      assert_received {:forwarded, "home.enroll.withdraw", %{"kind" => "manual"}}
+      refute Candidate.present?(ctx.home)
+      assert Return.read(ctx.home) == :absent
+      assert after_cancel["state"] == "on"
+    end
+
+    test "Cancel goes on when the server cannot be reached: its code lapses by itself", ctx do
+      enrolled!(ctx)
+
+      Agent.update(ctx.script, fn script ->
+        fn
+          "home.enroll.withdraw", _params -> {:error, :primary_unreachable, %{"sentence" => "."}}
+          method, params -> script.(method, params)
+        end
+      end)
+
+      assert {:ok, _answer} = press(ctx, "cancel")
+      refute Candidate.present?(ctx.home)
+    end
+
+    test "Restore here deletes the server first, then restores the newest copy the " <>
+           "passphrase opens",
+         ctx do
+      copy = copy!(ctx)
+      {:ok, %{server: %{name: server}}} = Ledger.read(ctx.home, "nimbus")
+      Agent.update(ctx.link, &%{&1 | primary: primary(11 * 60_000)})
+      assert %{"detail" => %{"kind" => "cannot_reach"}} = summary(ctx.opts)
+
+      assert {:ok, %{"summary" => running}} =
+               press(ctx, "restore_here", %Input{recovery_passphrase: @passphrase})
+
+      assert running["sentence"] =~ "Deleting your server, then restoring Fermix"
+      settle!(ctx)
+
+      assert_received {:restored, home, chosen} when home == ctx.home
+      assert %{name: name, from: ^server, pair: %{secret_key: _key}} = chosen
+      assert name == Path.basename(copy)
+
+      assert {:delete, {:server, _id}} =
+               List.keyfind(FakeCloudProvider.calls(ctx.world), :delete, 0)
+
+      assert {:ok, %{fence_requested: ^name, fenced_at: @at}} = Return.read(ctx.home)
+      assert %{action: nil, failure: nil, server: nil} = Ledger.state(ctx.home, FakeCloudProvider)
+    end
+
+    test "Restore here with a passphrase that opens no copy deletes nothing", ctx do
+      copy!(ctx)
+      Agent.update(ctx.link, &%{&1 | primary: primary(11 * 60_000)})
+
+      assert {:error, :invalid_params, %{"field" => "recovery_passphrase", "sentence" => said}} =
+               press(ctx, "restore_here", %Input{recovery_passphrase: "a-wrong-passphrase-here"})
+
+      assert said == "That is not the recovery passphrase you set."
+      assert jobs(ctx) == []
+      assert Return.read(ctx.home) == :absent
+      assert %{server: %{status: :created}} = Ledger.state(ctx.home, FakeCloudProvider)
+    end
+
+    test "Restore here restores nothing when the server cannot be deleted", ctx do
+      copy!(ctx)
+      Agent.update(ctx.link, &%{&1 | primary: primary(11 * 60_000)})
+      FakeCloudProvider.fault(ctx.world, :delete, {:unreachable, "invented timeout"})
+
+      assert {:ok, _answer} =
+               press(ctx, "restore_here", %Input{recovery_passphrase: @passphrase})
+
+      settle!(ctx)
+      refute_received {:restored, _home, _copy}
+
+      assert %{"state" => "problem", "detail" => %{"kind" => "delete_failed"}} =
+               screen = summary(ctx.opts)
+
+      assert screen["sentence"] =~ "so it did not restore here"
+      assert screen["action"]["id"] == "restore_here"
+    end
+  end
+
   # `changed` says only that the screen moved on (Always On setup §3.4, the
   # lead's call on the error details' bound): the surface reads home.status
   # again, as it does after any act, so no refusal carries a summary.
@@ -1195,11 +1497,51 @@ defmodule FermixCore.Management.AlwaysOnTest do
     part = server_status(which)
 
     fn
-      "home.status", _params -> {:ok, part}
-      "home.snapshots.run", _params -> {:ok, %{"started" => true, "snapshots" => %{}}}
-      "home.enroll.open", %{"kind" => "provisioned"} -> {:ok, %{"code" => @server_code}}
-      "home.enroll.withdraw", _params -> {:ok, %{"withdrawn" => true}}
+      "home.status", _params ->
+        {:ok, part}
+
+      "home.snapshots.run", _params ->
+        {:ok, %{"started" => true, "snapshots" => %{}}}
+
+      "home.enroll.open", %{"kind" => "provisioned"} ->
+        {:ok, %{"code" => @server_code}}
+
+      "home.enroll.open", %{} ->
+        {:ok, %{"code" => return_code(), "expires_at" => "2031-05-04T12:30:00Z"}}
+
+      "home.enroll.withdraw", _params ->
+        {:ok, %{"withdrawn" => true}}
     end
+  end
+
+  # The server's part once it took a move: its move requested.
+  defp server_moving(script) do
+    fn
+      "home.status", params ->
+        {:ok, part} = script.("home.status", params)
+
+        {:ok,
+         Map.put(part, "move", %{"phase" => "requested", "candidate" => "x", "sentence" => "."})}
+
+      method, params ->
+        script.(method, params)
+    end
+  end
+
+  # The copied code the server opens for a desktop moving back.
+  defp return_code(name \\ "invented") do
+    {:ok, code} =
+      EnrollmentCode.encode(%{
+        secret: :binary.copy(<<9>>, 32),
+        gateway_pk: :binary.copy(<<3>>, 32),
+        node_id: String.duplicate("c4", 32),
+        relays: [%{"url" => "https://eu1.relay.invalid/", "quic_port" => 7842}],
+        relays_rev: String.duplicate("a1", 8),
+        name: name,
+        expires_at: ~U[2031-05-04 12:30:00Z]
+      })
+
+    code
   end
 
   defp server_status(:on) do
@@ -1315,6 +1657,58 @@ defmodule FermixCore.Management.AlwaysOnTest do
     )
 
     name
+  end
+
+  # -- moving back -------------------------------------------------------------
+
+  # This desktop's candidate for a move back, held by the server, and the
+  # record of the return, as Move back and the candidate's enrolment leave
+  # them.
+  defp enrolled!(ctx) do
+    {:ok, state} =
+      Candidate.prepare_return(ctx.home, {:return, return_code("fermix-general-a3f9")},
+        now: @at,
+        role: :device,
+        restarts_itself?: true
+      )
+
+    enrolled =
+      Map.merge(state, %{
+        "phase" => "enrolled",
+        "candidate_id" => @back_cand,
+        "listen_until" => "2031-05-05T12:00:00Z"
+      })
+
+    :ok = Candidate.put_state(ctx.home, enrolled, @at)
+
+    :ok =
+      Return.write(ctx.home, %{
+        from: "fermix-general-a3f9",
+        started_at: @at,
+        primary_epoch: 5,
+        provider_server: server_id(ctx)
+      })
+  end
+
+  # A copy of the server's snapshots this desktop keeps, written for the
+  # owner's recovery passphrase.
+  defp copy!(ctx) do
+    server = Path.join(ctx.home, "invented-server")
+    File.mkdir_p!(server)
+    File.write!(Path.join(server, "config.toml"), "[fermix_core.engine]\nrole = \"primary\"\n")
+    :ok = Epoch.write(server, 5)
+    {:ok, pair} = Recipient.from_passphrase(@passphrase)
+    File.mkdir_p!(Path.join(ctx.home, "snapshots"))
+    path = Path.join([ctx.home, "snapshots", "20310504T093000Z-e5.fxsnap"])
+
+    {:ok, _written} =
+      Snapshot.write(server, Recipient.public(pair), path,
+        host: "linux-x86_64",
+        now: fn -> ~U[2031-05-04 09:30:00Z] end
+      )
+
+    SafeRm.rm_rf!(server)
+    path
   end
 
   # -- jobs --------------------------------------------------------------------

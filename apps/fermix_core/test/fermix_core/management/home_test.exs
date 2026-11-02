@@ -1,9 +1,11 @@
 defmodule FermixCore.Management.HomeTest do
   use ExUnit.Case, async: true
 
+  alias FermixCore.Home.Candidate
   alias FermixCore.Home.Candidates
   alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.EngineCeiling
+  alias FermixCore.Home.EnrollmentCode
   alias FermixCore.Home.Epoch
   alias FermixCore.Home.Move
   alias FermixCore.Home.Moved
@@ -409,6 +411,90 @@ defmodule FermixCore.Management.HomeTest do
       assert summary["sentence"] == "Your new server is ready for the move."
       assert summary["action"]["id"] == "move_now"
       assert summary["detail"]["server"]["name"] == "fermix-general-5d2e"
+    end
+
+    # Always On's move back (design §9, §14): a desktop's screen reads its own
+    # candidate for the home and the return's record, and the copies it keeps.
+    test "a desktop moving back reads its candidate and the return's record", %{home: home} do
+      :ok = DesktopLink.write(home, desktop_link())
+      :ok = Moved.write(home, %{epoch: 4, moved_at: @at, to: "invented-vm"})
+      enrolled!(home)
+      :ok = Return.write(home, %{from: "invented-vm", started_at: @at, primary_epoch: 5})
+
+      assert {:ok, %{"summary" => summary}} = desktop_status(home, link(primary: primary(nil)))
+
+      assert summary["state"] == "ready"
+      assert summary["sentence"] == "This computer is ready to take Fermix back."
+      assert summary["action"]["id"] == "move_now"
+    end
+
+    test "a server it cannot reach offers Restore here with the newest copy it keeps",
+         %{home: home} do
+      :ok = DesktopLink.write(home, desktop_link())
+      :ok = Moved.write(home, %{epoch: 4, moved_at: @at, to: "invented-vm"})
+
+      {:ok, _ledger} =
+        Ledger.update(home, "hetzner", fn ledger ->
+          {:ok,
+           ledger |> Ledger.connect("invented-token-0001", @at) |> Ledger.put_server(server())}
+        end)
+
+      File.mkdir_p!(Capture.dir(home))
+
+      for name <- ~w(20310503T100000Z-e5.fxsnap 20310504T100000Z-e5.fxsnap notes.fxsnap) do
+        File.write!(Path.join(Capture.dir(home), name), "a copy")
+      end
+
+      assert {:ok, %{"summary" => summary}} =
+               desktop_status(home, link(primary: primary(11 * 60_000)))
+
+      assert "restore_here" in Enum.map(HomeSummary.offered(summary), & &1["id"])
+
+      assert %{
+               "label" => "Backup on this computer",
+               "value" => "Sunday, May 4, 2031 at 10:00 AM UTC"
+             } in summary[
+               "detail"
+             ]["lines"]
+    end
+
+    # A second desktop's move back the home went past (design §14): the link
+    # reached a newer epoch than the one it was asked at, so its candidate is
+    # stopped and removed with the record, saying nothing.
+    test "a move back the home went past is discarded at the next read", %{home: home} do
+      test = self()
+      :ok = DesktopLink.write(home, desktop_link())
+      :ok = Moved.write(home, %{epoch: 4, moved_at: @at, to: "invented-vm"})
+      enrolled!(home)
+      :ok = Return.write(home, %{from: "invented-vm", started_at: @at, primary_epoch: 5})
+
+      stop = fn ->
+        send(test, :return_stopped)
+        :ok
+      end
+
+      ahead = link(primary: %{primary(nil) | epoch: 7})
+
+      assert {:ok, %{"summary" => summary}} = desktop_status(home, ahead, stop_return: stop)
+
+      assert_received :return_stopped
+      refute File.exists?(Path.join(home, "candidate"))
+      assert Return.read(home) == :absent
+      assert summary["state"] == "on"
+
+      # The record of this computer's own move back is never one.
+      :ok =
+        Return.write(home, %{
+          from: "invented-vm",
+          started_at: @at,
+          primary_epoch: 5,
+          moved_at: @at,
+          epoch: 6
+        })
+
+      assert {:ok, _status} = desktop_status(home, ahead, stop_return: stop)
+      refute_received :return_stopped
+      assert {:ok, %{moved_at: @at}} = Return.read(home)
     end
 
     test "a server this desktop is too old for asks to update it", %{home: home} do
@@ -858,6 +944,47 @@ defmodule FermixCore.Management.HomeTest do
       },
       epoch: 5
     }
+  end
+
+  defp desktop_status(home, link, extra \\ []) do
+    forward = fn _request, _opts -> {:ok, %{"role" => "primary", "version" => "9.9.9"}} end
+
+    route(
+      "home.status",
+      %{},
+      opts(home, [engine_role: @device, link_status: link, host_os: :linux] ++ extra)
+      |> Keyword.put(:primary_forward, forward)
+    )
+  end
+
+  # This desktop's candidate for a move back, enrolled with its server.
+  defp enrolled!(home) do
+    {:ok, code} =
+      EnrollmentCode.encode(%{
+        secret: :binary.copy(<<9>>, 32),
+        gateway_pk: :binary.copy(<<3>>, 32),
+        node_id: String.duplicate("c4", 32),
+        relays: [%{"url" => "https://eu1.relay.invalid/", "quic_port" => 7842}],
+        relays_rev: String.duplicate("a1", 8),
+        name: "invented-vm",
+        expires_at: ~U[2031-05-04 12:30:00Z]
+      })
+
+    {:ok, state} =
+      Candidate.prepare_return(home, {:return, code},
+        now: @at,
+        role: :device,
+        restarts_itself?: true
+      )
+
+    enrolled =
+      Map.merge(state, %{
+        "phase" => "enrolled",
+        "candidate_id" => "cand-7a3e1c9b5d2f4086",
+        "listen_until" => "2031-05-05T12:00:00Z"
+      })
+
+    :ok = Candidate.put_state(home, enrolled, @at)
   end
 
   defp route(method, params, opts) do

@@ -5776,7 +5776,7 @@
               "required": ["id", "sentence"],
               "additionalProperties": false,
               "properties": {
-                "id": { "type": "string", "pattern": "^(ready|moved|cannot_reach|not_set_up|backup_week):.+$" },
+                "id": { "type": "string", "pattern": "^(ready|moved|cannot_reach|not_set_up|backup_week|back):.+$" },
                 "sentence": { "type": "string", "minLength": 1 }
               }
             },
@@ -5795,7 +5795,7 @@
       "required": ["id", "label", "needs", "confirm", "url", "key"],
       "additionalProperties": false,
       "properties": {
-        "id": { "enum": ["create_server", "cancel", "move_now", "try_again", "learn_more", "turn_on", "restart_server", "start_again", "create_in", "open_console", "paste_token", "update", "back_up_now", "replace_server", "check_again", "own_server", "delete_server"] },
+        "id": { "enum": ["create_server", "cancel", "move_now", "try_again", "learn_more", "turn_on", "restart_server", "start_again", "create_in", "open_console", "paste_token", "update", "back_up_now", "replace_server", "check_again", "own_server", "delete_server", "move_back", "restore_here"] },
         "label": { "type": "string", "minLength": 1 },
         "needs": { "type": "array", "maxItems": 3, "uniqueItems": true, "items": { "enum": ["token", "recovery_passphrase", "new_recovery_passphrase", "choice"] } },
         "confirm": { "type": ["string", "null"], "minLength": 1 },
@@ -5860,7 +5860,7 @@
         "copies_bytes": { "type": ["integer", "null"], "minimum": 0 },
         "disk_used": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
         "data": { "type": "string", "minLength": 1 },
-        "kind": { "enum": ["turned_off", "cannot_reach", "deleted", "not_set_up", "waited_too_long", "no_capacity", "account_limit", "read_only_token", "token_refused", "create_failed", "update", "disk_full", "backup_old", "not_ready", "unreadable", "delete_failed", "power_failed"] },
+        "kind": { "enum": ["turned_off", "cannot_reach", "deleted", "not_set_up", "waited_too_long", "no_capacity", "account_limit", "read_only_token", "token_refused", "create_failed", "update", "disk_full", "backup_old", "not_ready", "unreadable", "delete_failed", "power_failed", "server_retired", "return_failed"] },
         "note": { "type": ["string", "null"] },
         "seen_at": { "type": ["string", "null"] },
         "next_location": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,31}$" }
@@ -6008,7 +6008,7 @@
     },
     "home_enroll_open_params": {
       "type": "object",
-      "description": "kind is manual (the default: thirty minutes, the code a person copies) or provisioned (24 hours, the code inside a server Fermix creates), which the primary opens only for a request a desktop forwarded.",
+      "description": "kind is manual (the default: thirty minutes, the code a person copies) or provisioned (24 hours, the code inside a server Fermix creates), which the primary opens only for a request a desktop forwarded. A manual window a desktop asks for is that desktop's move back, and the window names it.",
       "additionalProperties": false,
       "properties": { "kind": { "enum": ["manual", "provisioned"] } }
     },
@@ -6022,9 +6022,14 @@
         "expires_at": { "type": "string" }
       }
     },
-    "home_enroll_withdraw_params": { "type": "object", "maxProperties": 0, "additionalProperties": false },
+    "home_enroll_withdraw_params": {
+      "type": "object",
+      "description": "kind names the window released: provisioned (the default, the 24-hour code inside a server Fermix creates) or manual (the copied code a desktop opened to move back, when its owner cancels).",
+      "additionalProperties": false,
+      "properties": { "kind": { "enum": ["manual", "provisioned"] } }
+    },
     "home_enroll_withdraw_result": {
-      "description": "The primary's 24-hour window is released: an open one ended, a used one no longer holds a manual code back.",
+      "description": "The window of the kind named is released: an open one ended, a used one no longer holds a manual code back.",
       "type": "object",
       "required": ["withdrawn"],
       "additionalProperties": false,
@@ -6184,7 +6189,9 @@
             "replace_server",
             "check_again",
             "own_server",
-            "delete_server"
+            "delete_server",
+            "move_back",
+            "restore_here"
           ]
         },
         "key": { "type": "string", "minLength": 1, "maxLength": 64 },
@@ -6193,7 +6200,7 @@
     },
     "homeActInput": {
       "type": "object",
-      "description": "What the action's needs collected: token (needs token; provider names one of detail.providers, else the one there is), recovery_passphrase (needs recovery_passphrase, typed once, or new_recovery_passphrase, typed twice and compared by the surface), type and location (needs choice: read home.provision.options, which takes no params, and send both, the row the owner chose, the recommendation's own by default; the engine makes no choice itself). Never logged, never answered.",
+      "description": "What the action's needs collected: token (needs token; provider names one of detail.providers, else the one there is), recovery_passphrase (needs recovery_passphrase, typed once, or new_recovery_passphrase, typed twice and compared by the surface; restore_here's opens the copy it restores), type and location (needs choice: read home.provision.options, which takes no params, and send both, the row the owner chose, the recommendation's own by default; the engine makes no choice itself). Never logged, never answered.",
       "additionalProperties": false,
       "properties": {
         "token": { "type": "string", "maxLength": 512 },

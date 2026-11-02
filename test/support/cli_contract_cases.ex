@@ -298,7 +298,10 @@ defmodule FermixTestSupport.CliContractCases do
       primary_too_old: false,
       copies_bytes: nil,
       stays_here: [:imessage, :voice, :meetings],
-      zone: "Etc/UTC"
+      zone: "Etc/UTC",
+      return: nil,
+      returning: nil,
+      copies: []
     }
   end
 

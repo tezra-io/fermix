@@ -564,6 +564,7 @@ def test_the_shipped_numbered_rubrics_parse():
                       "security_patches_and_reboots_on_the_server": 3,
                       "hetzner_server_from_a_token": 5,
                       "deleting_the_server_the_home_moved_to": 3,
+                      "moving_back_to_the_mac": 5,
                       "what_the_always_on_pane_says": 4,
                       "replacing_the_hetzner_server": 4,
                       "homebrew_owner_keeps_fermix_running": 3,

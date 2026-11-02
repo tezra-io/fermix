@@ -21,8 +21,9 @@ defmodule FermixCore.Home.MoveReadiness do
       `Archive.install/5`), as does a version that cannot be read; so does a
       newer one, which could never move the home back here (Always On's move
       back: a server runs its desktop's Fermix exactly). A move back, to the
-      Mac the home left (a candidate whose `os` is macOS), blocks only a Mac
-      older than the server;
+      desktop the home left (a candidate that enrolled through the window
+      that desktop opened, `Home.Candidates`' `returning`), blocks only a
+      desktop older than the server;
     * `disk`: the capture needs about twice the home free on this computer
       (`FermixCore.Home.Disk`); short of it, or with the free space unknown,
       it blocks, saying how much is needed; the server needs as much again;
@@ -36,8 +37,8 @@ defmodule FermixCore.Home.MoveReadiness do
     * `stays_here`: what the home has turned on that runs only on this
       computer (iMessage on a Mac, voice calls, meetings; `stays_here/2`)
       stops after the move, each named; with none of them on it is `ok`. On
-      a move back to a Mac, what the server's settings turn on of them runs
-      there again, named, and is `ok`;
+      a move back, what the server's settings turn on of them runs there
+      again, named, and is `ok`;
     * `whatsapp`: WhatsApp turned on warns: it needs an inbound address Meta
       can reach, which the server does not have, so it stops after the move;
     * `slack`: Slack turned on in its Events (webhook) mode warns for the
@@ -66,8 +67,8 @@ defmodule FermixCore.Home.MoveReadiness do
   walking it), `:index_opts` (`Plugins.Dist.Index.load/1`'s, the catalog),
   `:restarts_itself` (a boolean, in place of
   `Management.Lifecycle.restarts_itself?/0`). `summary_items/4` also reads
-  `:candidate_os`, the move's destination system (`report/3` gives the
-  candidate's), which tells a move back from a move.
+  `:returning` (a boolean, `report/3` gives the candidate's), which tells a
+  move back from a move.
   """
 
   alias FermixCore.BuildInfo
@@ -116,7 +117,7 @@ defmodule FermixCore.Home.MoveReadiness do
           config,
           String.starts_with?(host, "macos-"),
           name,
-          Keyword.put(opts, :candidate_os, candidate.os)
+          Keyword.put(opts, :returning, returning?(candidate))
         )
 
     %{ready: not Enum.any?(items, &(&1.status == :block)), items: items}
@@ -136,7 +137,7 @@ defmodule FermixCore.Home.MoveReadiness do
   def summary_items(config, macos?, name, opts)
       when is_boolean(macos?) and is_binary(name) and is_list(opts) do
     [
-      stays_here_item(config, macos?, name, returning?(Keyword.get(opts, :candidate_os))),
+      stays_here_item(config, macos?, name, Keyword.get(opts, :returning, false)),
       whatsapp(config, name),
       slack(config, name),
       coding_agents(config, name),
@@ -280,10 +281,10 @@ defmodule FermixCore.Home.MoveReadiness do
   # The versions themselves are on the candidate's row; the sentence says
   # which way they differ. An older one can never restore this home; a newer
   # server could never move it back here.
-  defp version(%{name: name, version: theirs, os: os}, ours) do
+  defp version(%{name: name, version: theirs} = candidate, ours) do
     case {Version.parse(theirs), Version.parse(ours)} do
       {{:ok, there}, {:ok, here}} ->
-        versions(Version.compare(there, here), returning?(os), name)
+        versions(Version.compare(there, here), returning?(candidate), name)
 
       _unreadable ->
         item(
@@ -319,9 +320,9 @@ defmodule FermixCore.Home.MoveReadiness do
   defp versions(:eq, _returning?, name),
     do: item("engine_version", :ok, "#{name} runs this computer's Fermix.")
 
-  # A move back goes to the Mac the home left: the only candidate whose
-  # system is macOS, since a server Always On sets up runs Linux.
-  defp returning?(os), do: os in ["darwin", "macos"]
+  # A move back goes to the desktop the home left: the candidate that
+  # enrolled through the window that desktop opened on this server.
+  defp returning?(%{returning: desktop}), do: is_binary(desktop)
 
   defp disk(_home, {:error, reason}, _name, _opts) do
     Logger.error("move readiness: the home could not be measured: #{inspect(reason)}")

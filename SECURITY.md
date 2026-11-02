@@ -129,6 +129,23 @@ becoming the key the server's snapshots are encrypted to, and a move never
 mints a second key; with none kept, the move sets one. The passphrase lives
 only inside that check: never stored, logged, answered or carried in an error.
 
+Moving back to the computer the home left keeps one primary at a time the
+same way a move does: the server writes its moved marker before it lets the
+computer put the home in place, and the computer removes its own marker only
+then, its settings naming it the primary last. The secrets come back into
+that computer's keychain by value, under the settings' profile, replacing
+whatever stale item was there. Restore here, which takes the home back from
+the computer's own copy of the server's backups when the server cannot be
+reached, deletes that server first, through its provider, and restores
+nothing when the delete is refused: a copy restored beside a running server
+would answer twice. It deletes the server only while the owner asked for it,
+the server has been silent for ten minutes (or no longer knows the computer,
+or no link runs), and no move is under way. The passphrase opens the copy
+only in memory, for the restore's length: the derived key is never written,
+and a passphrase that opens no copy is refused before anything is deleted.
+A server of the owner's own is never deleted: nothing the computer can check
+would prove it is down.
+
 What this deliberately does not cover:
 
 - Only the turn that read the content waits. Replayed history on a later turn,

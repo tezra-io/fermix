@@ -699,7 +699,8 @@ defmodule FermixCore.Management.CopyTest do
         os: "linux",
         arch: "aarch64",
         version: "0.9.0",
-        snapshots: %{"s3_bucket" => "invented-bucket", "s3_region" => "eu-central-1"}
+        snapshots: %{"s3_bucket" => "invented-bucket", "s3_region" => "eu-central-1"},
+        returning: nil
       }
 
       for {free, version, bytes, restarts?} <- [
@@ -1110,7 +1111,8 @@ defmodule FermixCore.Management.CopyTest do
       for provider <- ProvisionRegistry.all(),
           id <- HomeSummary.actions(),
           extra <- [%{}, %{first: true, code: true}],
-          values = Map.merge(provider_values(provider), extra),
+          machine <- ["Mac", "computer"],
+          values = provider |> provider_values() |> Map.merge(extra) |> Map.put(:machine, machine),
           do: {"action #{id}", Copy.summary_label(String.to_existing_atom(id), values), :name}
 
     steps =

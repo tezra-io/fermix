@@ -68,7 +68,7 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/move.ex#start,move_id,write_request,put_phase,pending?,not_pending,max_attempts,@max_attempts,@pending,@running,@phases,finish_at_boot,finish_due,ending,finish,view,remember_unrecorded_ending,boot_ending,@boot_key @ be988598314f
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/role.ex#resolve,primary,configured_role @ 6b56d83c809d
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/moved.ex#write,exclusive_write,read @ f1fa82381547
-\* SOURCE: apps/fermix_core/lib/fermix_core/home/candidate.ex#put_state,write_private @ b39833e3c49c
+\* SOURCE: apps/fermix_core/lib/fermix_core/home/candidate.ex#put_state,write_private @ 622ba87194f2
 \* SOURCE: apps/fermix_core/lib/fermix_core/management/home_move.ex#move_start,move_view @ bf229d4d4fd7
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/device_supervisor.ex#children,dial_children @ 0206b0220a81
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/rail.ex#@moduledoc @ eea53ac3d395

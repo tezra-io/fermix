@@ -238,10 +238,11 @@ it, never a second writer.
   made, **Start again** deletes what stands and creates it again as one step,
   and **Delete your server** deletes everything it created (the server, then
   its addresses, then the firewall). It never deletes the server the
-  home moved to: replace the server instead. There is no moving back to the
-  Mac in this version, and deleting that server in Hetzner's console does not
-  bring Fermix back to it: the home is restored from a snapshot onto a new
-  server. Hetzner's root password for the
+  home moved to: replace the server instead, or move back to the computer
+  the home left (*Moving back*, below), after which **Delete your server** is
+  offered there. Deleting that server in Hetzner's console does not bring
+  Fermix back by itself: Restore here on that computer does, from its own
+  copy. Hetzner's root password for the
   server is never kept, and restoring a lost one starts from Hetzner's
   root-password reset (below). Pasting the token, creating, restarting and
   deleting the server are the owner's decisions, refused to a command Fermix
@@ -318,8 +319,10 @@ it, never a second writer.
   labels it, "your Anthropic key", one no row shows counted, never by its id
   or its value); the server's Fermix (an older one blocks, and so does a
   newer one, which could never move the home back here: update Fermix on
-  this computer first; a move back to the Mac blocks only a Mac older than
-  the server); free disk here (the
+  this computer first; a move back, to the desktop the home left, blocks only
+  a desktop older than the server: the server knows it is one because that
+  desktop's candidate enrolled through the code it opened for it, never by
+  its system); free disk here (the
   capture needs about twice the home; short of it blocks, with the numbers);
   a home over one S3 upload (5 GiB) when the server keeps snapshots in S3
   (warns: it would never back up there); on a server of another system, the
@@ -649,6 +652,15 @@ it, never a second writer.
   since when, the epoch, and the sentence. On the primary the same picture
   lists its desktops, each with whether it is connected.
 
+## Moving back to the computer the home left
+
+- Fermix can move back from the server to the computer the home left
+  (**Move back to this Mac**, then **Move now**), and a computer whose server
+  Fermix created is gone can restore its own copy (**Restore on this Mac**);
+  afterwards the server is deleted in a step of its own. Every step, what
+  comes back and what is lost: skill_view(name: "self-knowledge", file:
+  "move_back").
+
 ## Where each Always On fact and action lives
 
 - Every surface draws one picture, the engine's `home.status`, and acts
@@ -681,8 +693,9 @@ it, never a second writer.
     creating, deleting, turning on or restarting the server, each with the
     step in hand, then starting, installing Fermix, connecting, with
     **Cancel** while it creates); ready (**Move now**, with the review's
-    warnings, and that there is no way back to this Mac in this version,
-    and **Delete your server** beside it for the server Fermix created, never
+    warnings, and that Fermix can move back to this Mac from Always On
+    whenever the owner wants, and **Delete your server** beside it for the
+    server Fermix created, never
     for one of the owner's own); the move undone (**Try again**, and
     **Delete your server** for the server Fermix created);
   - on the computer the move leaves: moving ("Waiting for your server to

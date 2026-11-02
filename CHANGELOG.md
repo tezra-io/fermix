@@ -192,9 +192,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   again. The webhook stays the default.
 - **Always On: Fermix can move to a server you control.** Not in this
   release yet: in a release build `fermix always-on` and `fermix home status`
-  say "Always On is not in this release of Fermix yet.", the setup page and
-  the Fermix app show no
-  Always On, and it stays so until moving back to this computer is possible.
+  say "Always On is not in this release of Fermix yet.", and the setup page
+  and the Fermix app show no Always On.
   Your home (its
   settings, memory, secrets, skills and workspace) can now move from your
   computer to a Linux server, so Fermix keeps working with your Mac closed.
@@ -271,6 +270,20 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tries again. The same one sentence follows the replace: creating and
   setting up the new server (Cancel), ready for the move (Move now), moving,
   removing the old server, and what went wrong with its one action.
+  And you can move back whenever you want: Move back to this Mac (in Always
+  On's details on the computer your home left, or `fermix always-on
+  move-back`) gets this computer ready in seconds, and Move now with your
+  recovery passphrase brings Fermix back in place. Your Mac's own files
+  (logs, browser profiles, iMessage, the helper apps, models, coding runs)
+  stay where they were, your secrets go back into its keychain, iMessage,
+  voice calls and meetings run there again as they did before, and your
+  phones follow. Cancel stops it until the server starts the move. Once
+  your Mac runs Fermix again, Delete your server is a separate step, since
+  the server still costs money. When a server Fermix created is gone or
+  cannot be reached, Restore on this Mac takes Fermix back from the copy of
+  its backups your Mac keeps: it deletes the server first, and restores
+  nothing if the server cannot be deleted. A server of your own is never
+  deleted by Fermix: stop it, then import a copy by hand.
   Hetzner is the first cloud provider Fermix creates a server with: every
   surface draws the token and choose screens from the providers Fermix's
   screen lists, each with its own How to get one and console, so a provider

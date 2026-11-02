@@ -54,6 +54,12 @@ defmodule FermixCore.Management.Home do
   the reconcile's write tells the watch. A tree without the job family (a
   test, a verb with no engine) starts none. The read is otherwise pure.
 
+  **A move back the home went past.** On a desktop whose move back was
+  asked at an older epoch than its link has since reached (another desktop
+  took the home back), a read stops that candidate and removes it with the
+  return's record, saying nothing to the owner (Always On's move back design
+  §14); the log says it.
+
   **The wait** (`status_after/3`, `home.status {after, wait_ms}`): answered
   at once when the summary's key is not `after`; else held in the caller,
   subscribed to the Always On watch (`Home.StatusWatch`), reading the
@@ -85,8 +91,10 @@ defmodule FermixCore.Management.Home do
   `FermixCore.Home.Link.impl().status/0`), `:settings_snapshot` (a 0-arity
   reader of the live settings, `ConfigStore.current_snapshot/0`),
   `:disk_usage` (a 1-arity reader of a home's disk, `Home.Disk.usage/2`),
-  `:version`, `:now`, `:host_os` and `:return_boot` (in place of
-  `Home.Return.boot_done/0`); for the reconcile a read starts,
+  `:version`, `:now`, `:host_os`, `:return_boot` (in place of
+  `Home.Return.boot_done/0`) and `:stop_return` (in place of the rail's,
+  which a desktop's move back the home went past is stopped with); for the
+  reconcile a read starts,
   `Management.Provision`'s (`:providers`, `:provider_opts`, `:jobs`,
   `:open_code`, `:withdraw_code`); for the wait, `:status_watch` (the
   watch's name) and `:wait_timer` (a 2-arity `Process.send_after/3` to the
@@ -100,6 +108,7 @@ defmodule FermixCore.Management.Home do
   """
 
   alias FermixCore.BuildInfo
+  alias FermixCore.Home.Candidate
   alias FermixCore.Home.Disk
   alias FermixCore.Home.EngineCeiling
   alias FermixCore.Home.Epoch
@@ -252,6 +261,7 @@ defmodule FermixCore.Management.Home do
     role = role(opts)
     :ok = return_done(home, role, opts)
     link = Keyword.get(opts, :link_status, fn -> Link.impl().status() end).()
+    :ok = passed_return(home, role, link, opts)
     move = HomeMove.facts(home, role, link, opts)
     {primary_home, primary_missing, too_old?} = primary_home(opts)
 
@@ -296,6 +306,35 @@ defmodule FermixCore.Management.Home do
   end
 
   defp return_done(_home, _record, _opts), do: :ok
+
+  # A desktop's move back the home went past (Always On's move back design
+  # §14: another desktop took the home back, and the link reached it at a
+  # newer epoch than the one this one was asked at): its candidate stops and
+  # goes with the record, saying nothing to the owner; the log says it.
+  defp passed_return(home, %{role: :device}, %{primary: %{epoch: seen}}, opts)
+       when is_integer(seen) do
+    case Return.read(home) do
+      {:ok, %{primary_epoch: asked} = record} when seen > asked ->
+        if Map.has_key?(record, :moved_at), do: :ok, else: forget_return(home, seen, opts)
+
+      _none_or_current ->
+        :ok
+    end
+  end
+
+  defp passed_return(_home, _record, _link, _opts), do: :ok
+
+  defp forget_return(home, seen, opts) do
+    :ok = Keyword.get(opts, :stop_return, fn -> Link.impl().stop_return() end).()
+
+    with :ok <- Candidate.remove(home),
+         :ok <- Return.remove(home) do
+      Logger.info("move back: the home moved on to epoch #{seen}; this computer's is dropped")
+    else
+      {:error, reason} ->
+        Logger.error("move back: one the home went past could not be dropped: #{inspect(reason)}")
+    end
+  end
 
   # How full a primary's disk is; a desktop reads its server's in
   # `primary_home`, and a disk that cannot be read is said in the log, once
