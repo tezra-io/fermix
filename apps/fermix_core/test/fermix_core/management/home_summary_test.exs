@@ -1491,6 +1491,14 @@ defmodule FermixCore.Management.HomeSummaryTest do
       assert HomeSummary.summary(back_here([]))["notice"] == nil
     end
 
+    test "an off that carries a notice is told: the engine that took the home back says so" do
+      back = facts(return: back_record(provider_server: nil))
+
+      assert HomeSummary.summary(back)["state"] == "off"
+      assert %{off: false} = HomeSummary.watch(back)
+      assert %{off: true} = HomeSummary.watch(facts([]))
+    end
+
     test "Restore here is offered on the four screens of a server Fermix created, with a copy" do
       unreachable = primary(:unreachable, 11 * @minute)
       silent = [link_primary: unreachable, primary_home: nil, copies: [copy()]]

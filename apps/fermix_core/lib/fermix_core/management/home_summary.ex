@@ -363,7 +363,10 @@ defmodule FermixCore.Management.HomeSummary do
       their summaries read from its `home.status` (its newest backup, its
       enrollment code's kind, state and who used it, and the servers it
       holds), which its own summary does not show.
-    * `off`: whether the summary is `off`.
+    * `off`: whether the summary is `off` with no notice to raise. An `off`
+      that carries one (Fermix back on this computer from a server of the
+      owner's own) is told as any other summary, or an engine that took the
+      home back would never tell the apps.
     * `next_change_ms`: the milliseconds until the summary next changes by
       the clock alone (a created server's code open 30 minutes awake, a link
       down 10 minutes awake, a held server's 24 hours, a backup's 3 days and
@@ -374,7 +377,7 @@ defmodule FermixCore.Management.HomeSummary do
   @spec watch(facts()) :: %{key: term(), off: boolean(), next_change_ms: pos_integer() | nil}
   def watch(facts) when is_map(facts) do
     summary = summary(facts)
-    off = summary["state"] == "off"
+    off = summary["state"] == "off" and summary["notice"] == nil
     next = if off, do: nil, else: next_change(facts)
     %{key: {summary["key"], drawn(facts)}, off: off, next_change_ms: next}
   end

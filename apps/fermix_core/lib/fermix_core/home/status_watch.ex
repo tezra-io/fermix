@@ -39,7 +39,9 @@ defmodule FermixCore.Home.StatusWatch do
   reads that line when its pane opens). Nothing is armed, and only an event
   that could end `off` is read (`:ledger`, `:enrollment`, `:move`); a backup
   run, the link and the clock are not. Entering `off` from another state is a
-  change, told once.
+  change, told once. An `off` that carries a notice (Fermix back on this
+  computer from a server of the owner's own) is not quiet: the engine that
+  took the home back starts with it, and its first subscriber is told.
 
   It never calls the cloud provider: the provider is read by a job of its
   family (a step, or the reconcile a stale `home.status` read starts), and
