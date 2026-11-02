@@ -61,6 +61,7 @@ defmodule FermixCore.Management.Copy do
   (`own_server_command/0`), which carries no code.
   """
 
+  alias FermixCore.BuildInfo
   alias FermixCore.Clock
   alias FermixCore.Home.Disk
   alias FermixCore.Home.Provision.Registry, as: ProvisionRegistry
@@ -115,7 +116,7 @@ defmodule FermixCore.Management.Copy do
   ]
   @line_keys Keyword.keys(@line_labels) ++ [:backup, :copies]
   @docs_url "https://fermix.ai/docs/always-on/"
-  @own_server_command "curl -fsSL https://fermix.ai/always-on | sudo sh"
+  @own_server_command "curl -fsSL https://fermix.ai/always-on | sudo sh -s -- --version "
   @currency_signs %{"EUR" => "€", "USD" => "$", "GBP" => "£"}
   # A sentence starts at the beginning of the string and after a terminator or
   # a colon, which is how this copy introduces a command or a list.
@@ -531,6 +532,20 @@ defmodule FermixCore.Management.Copy do
     "#{names |> join_names() |> capitalised()} #{verb} after the move"
   end
 
+  @doc """
+  What a move back brings back among `features` (`:imessage`, `:voice`,
+  `:meetings`) on the computer `name` it returns to, as a sentence starts:
+  "Voice calls and meetings run on studio-mac again after the move".
+  """
+  @spec runs_again([:imessage | :voice | :meetings, ...], String.t()) :: String.t()
+  def runs_again([_ | _] = features, name) when is_binary(name) do
+    names = for {feature, label} <- @stays_here, feature in features, do: label
+    true = length(names) == length(Enum.uniq(features))
+    verb = if features == [:imessage], do: "runs", else: "run"
+
+    "#{names |> join_names() |> capitalised()} #{verb} on #{name} again after the move"
+  end
+
   defp stops_line([]), do: ""
   defp stops_line(features), do: " #{stops_after_move(features)}."
 
@@ -643,10 +658,12 @@ defmodule FermixCore.Management.Copy do
   @doc """
   The command an owner runs on a Linux server of their own to install Fermix
   there: it carries no code, which the server's first boot asks for on the
-  terminal without echo, so the code never lands in its shell history.
+  terminal without echo, so the code never lands in its shell history, and
+  it names the release this computer runs, which the server installs (a
+  server runs exactly its desktop's Fermix, so the home can move back).
   """
   @spec own_server_command() :: String.t()
-  def own_server_command, do: @own_server_command
+  def own_server_command, do: @own_server_command <> BuildInfo.product_version()
 
   @doc """
   The label of one summary action, by its id; `create_in` names a `city`,

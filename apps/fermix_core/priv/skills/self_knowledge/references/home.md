@@ -148,7 +148,9 @@ it, never a second writer.
   later kernel is not). Below it every command Fermix runs would be refused,
   so the first boot checks the kernel before it installs anything and names
   what is missing. After `sh -s --`:
-  `--snapshot-bucket NAME --snapshot-region REGION`, `--restore`.
+  `--snapshot-bucket NAME --snapshot-region REGION`, `--restore`, and
+  `--version X`, the release to install (Always On's command names this
+  computer's; without it, the latest).
 - The first boot, as root: writes the code to `/run/fermix/enroll.code`
   (memory only, the engine account's), blocks the instance metadata service
   for every account but root at every boot (every packet to
@@ -169,8 +171,13 @@ it, never a second writer.
   installs it where the image lacks it and sets its two daily switches in
   `/etc/apt/apt.conf.d/21fermix-always-on`). Fermix: the package comes from
   release files, not an apt source, so `fermix-update.timer` (root) runs
-  `/usr/local/sbin/fermix-update` every night at 04:00 UTC: the installer
-  again, `fermix restart` as `fermix` when `fermix service status` says the
+  `/usr/local/sbin/fermix-update` every night at 04:00 UTC: it installs the
+  release the computers it serves run (`fermix home status --json`'s
+  `update_ceiling`: the oldest Fermix among the desktops that reached it in
+  the last 30 days, which the server records from each one's connection),
+  only when that is newer than the installed one and never back down, and
+  nothing on a night no computer was seen; then `fermix restart` as `fermix`
+  when `fermix service status` says the
   running engine is behind the installed one (so a restart a night skipped is
   done the next night), then a reboot when `/run/reboot-required` exists.
   While a move is under way on the server (sending its home, or as a
@@ -181,7 +188,10 @@ it, never a second writer.
   failed stops the night and leaves the running engine as it was, while one
   that could not be downloaded changed nothing, so the restart and the reboot
   are still decided; the next night tries again.
-  So a server's engine can be a day or more behind the Mac's.
+  So a server always runs the Fermix of the computer it serves, from its
+  first install (Fermix creates it with that release, and Always On's
+  command for your own server names it): a fix reaches the server the night
+  after that computer has it, and the home can always move back there.
 - **Memory.** Out of memory the kernel stops one process. The swap file makes
   that rarer, and on Linux the engine starts Chrome, and so every Chrome
   process, with `oom_score_adj` 1000, so the kernel stops Chrome before the
@@ -254,9 +264,10 @@ it, never a second writer.
 - **The code.** On the primary, Always On's **Use my own Linux server**
   (`home.act`'s `own_server`) opens an enrollment window and shows its code
   once, with the command to run on the server, `curl -fsSL
-  https://fermix.ai/always-on | sudo sh`, which carries no code: the server's
-  first boot asks for it on the terminal without echo, so it never lands in a
-  shell history. **Cancel the code** on the token screen closes it. The code
+  https://fermix.ai/always-on | sudo sh -s -- --version X` (X this
+  computer's release, which the server installs), which carries no code: the
+  server's first boot asks for it on the terminal without echo, so it never
+  lands in a shell history. **Cancel the code** on the token screen closes it. The code
   is `fxenroll1.` and a long string that carries
   a one-time secret, the primary's gateway key, its iroh endpoint id and
   relays, its name and when the window closes. The window lasts thirty
@@ -305,7 +316,10 @@ it, never a second writer.
   `block`: the secrets this computer keeps in its keychain, which move with
   the home (one the keychain will not give blocks, named as its settings row
   labels it, "your Anthropic key", one no row shows counted, never by its id
-  or its value); the server's Fermix (an older one blocks); free disk here (the
+  or its value); the server's Fermix (an older one blocks, and so does a
+  newer one, which could never move the home back here: update Fermix on
+  this computer first; a move back to the Mac blocks only a Mac older than
+  the server); free disk here (the
   capture needs about twice the home; short of it blocks, with the numbers);
   a home over one S3 upload (5 GiB) when the server keeps snapshots in S3
   (warns: it would never back up there); on a server of another system, the

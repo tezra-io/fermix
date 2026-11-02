@@ -100,6 +100,8 @@ defmodule FermixCore.Home.MoveReadinessTest do
              "These plugins have no build for north-box, so they stop working after the " <>
                "move: invented-notes."
 
+    assert sentence.("engine_version") == "north-box runs this computer's Fermix."
+
     # Only what this home uses of what runs here alone is named.
     assert sentence.("stays_here") ==
              "iMessage and meetings stop after the move: neither this Mac nor north-box " <>
@@ -195,6 +197,65 @@ defmodule FermixCore.Home.MoveReadinessTest do
 
     assert version =~ "north-box runs an older Fermix"
     assert disk =~ "make room first"
+  end
+
+  # Always On's move back (design §6): a server always runs its desktop's
+  # Fermix, and the review is the net, so a server newer than this computer
+  # blocks too: the home could never come back here.
+  test "a server newer than this computer blocks the move: the home could not come back",
+       ctx do
+    newer = %{ctx.candidate | version: "0.18.0"}
+
+    assert %{ready: false, items: items} = MoveReadiness.report(ctx.home, newer, opts(ctx))
+
+    assert %{status: :block, sentence: sentence} = item_in(items, "engine_version")
+
+    assert sentence ==
+             "north-box runs a newer Fermix than this computer, so Fermix could not move " <>
+               "back. Update Fermix on this computer first."
+  end
+
+  # The same review on the server, when the candidate is the Mac the home
+  # left: what stops on a server runs there again, and a Mac newer than the
+  # server takes the home as any newer engine takes an older one's.
+  test "moving back to a Mac: what the server leaves off runs there again, and only an " <>
+         "older Mac blocks",
+       ctx do
+    File.write!(Path.join(ctx.home, "config.toml"), """
+    [fermix_core.realtime]
+    enabled = true
+
+    [fermix_core.meetings]
+    enabled = true
+    """)
+
+    {:ok, mac} =
+      Candidates.add(ctx.home, %{candidate_attrs() | name: "studio-mac", os: "darwin"}, @now)
+
+    server = Keyword.merge(opts(ctx), host: "linux-x86_64", version: "0.17.0")
+    newer_mac = %{mac | version: "0.18.0"}
+
+    assert %{items: items} = MoveReadiness.report(ctx.home, newer_mac, server)
+
+    assert %{
+             status: :ok,
+             sentence: "Voice calls and meetings run on studio-mac again after the move."
+           } =
+             item_in(items, "stays_here")
+
+    assert %{status: :ok, sentence: "studio-mac runs this computer's Fermix, or a newer one."} =
+             item_in(items, "engine_version")
+
+    older_mac = %{mac | version: "0.16.0"}
+    assert %{ready: false, items: items} = MoveReadiness.report(ctx.home, older_mac, server)
+    assert %{status: :block, sentence: sentence} = item_in(items, "engine_version")
+    assert sentence =~ "studio-mac runs an older Fermix than this computer: update Fermix on"
+
+    File.write!(Path.join(ctx.home, "config.toml"), "")
+    assert %{items: items} = MoveReadiness.report(ctx.home, newer_mac, server)
+
+    assert %{status: :ok, sentence: "Voice calls and meetings are not turned on."} =
+             item_in(items, "stays_here")
   end
 
   test "on a Linux computer, voice calls on are named, and iMessage never is", ctx do
@@ -364,7 +425,7 @@ defmodule FermixCore.Home.MoveReadinessTest do
   defp opts(ctx),
     do: [
       free_bytes: fn _dir -> {:ok, @plenty} end,
-      version: "0.16.9",
+      version: "0.17.0",
       host: "macos-aarch64",
       index_opts: [seed_path: ctx.index],
       restarts_itself: true

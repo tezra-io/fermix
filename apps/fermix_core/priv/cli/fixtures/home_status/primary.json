@@ -90,6 +90,7 @@
       "sentence": "Keep Fermix running when this Mac sleeps. It moves to a server you own. iMessage, voice calls and meetings stop after the move.",
       "state": "off"
     },
+    "update_ceiling": null,
     "version": "1.2.3"
   },
   "schema_version": 1

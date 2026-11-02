@@ -94,6 +94,37 @@ defmodule FermixChannels.Mobile.DesktopSessionTest do
     assert_receive {:family_event, "companion_line", %{"channel" => 4}, ^line}
   end
 
+  # Always On's move back, design §6: the server records each desktop's
+  # engine version (a desktop's hello carries its engine's in `app_version`),
+  # the version its nightly update never goes past; a phone's names its app.
+  test "a desktop's hello records its engine's version; a phone's records nothing", ctx do
+    test = self()
+
+    record = fn id, version, at ->
+      send(test, {:engine_recorded, id, version, at})
+      :ok
+    end
+
+    {_driver, _client} = ready_desktop!(ctx, %{}, record_engine_version: record)
+    assert_receive {:engine_recorded, @desktop_id, "0.17.0", @seen}
+
+    {_driver, _client} = ready!(ctx, ctx.phone, @phone_id, record_engine_version: record)
+    refute_received {:engine_recorded, @phone_id, _version, _at}
+  end
+
+  test "a version that could not be recorded is logged, and the desktop is served", ctx do
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        {_driver, _client} =
+          ready_desktop!(ctx, %{},
+            record_engine_version: fn _id, _version, _at -> {:error, {:file, "/x", :eacces}} end
+          )
+      end)
+
+    assert log =~ "the engine version of desktop #{@desktop_id} could not be recorded"
+    assert [%{device_id: @desktop_id}] = Peer.connected(ctx.peers)
+  end
+
   test "a family this primary does not serve yet is unsupported_event, and the session stays open",
        ctx do
     {driver, client} = ready_desktop!(ctx, %{})
@@ -305,13 +336,20 @@ defmodule FermixChannels.Mobile.DesktopSessionTest do
     ]
   end
 
-  defp ready_desktop!(ctx, families) do
+  defp ready_desktop!(ctx, families, opts \\ []) do
     supervisor = ctx.peer_supervisor
 
-    ready!(ctx, ctx.desktop, @desktop_id,
-      start_desktop_peer: fn opts ->
-        Peer.start(supervisor, Keyword.put(opts, :families, families))
-      end
+    ready!(
+      ctx,
+      ctx.desktop,
+      @desktop_id,
+      [
+        start_desktop_peer: fn opts ->
+          Peer.start(supervisor, Keyword.put(opts, :families, families))
+        end,
+        record_engine_version: fn _id, _version, _at -> :ok end
+      ]
+      |> Keyword.merge(opts)
     )
   end
 

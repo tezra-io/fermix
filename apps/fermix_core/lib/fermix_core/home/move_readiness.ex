@@ -18,7 +18,11 @@ defmodule FermixCore.Home.MoveReadiness do
       opens the keychain here and once more in its capture;
     * `engine_version`: a server that runs an older Fermix than this computer
       blocks (a restore by an older engine is refused anyway,
-      `Archive.install/5`), as does a version that cannot be read;
+      `Archive.install/5`), as does a version that cannot be read; so does a
+      newer one, which could never move the home back here (Always On's move
+      back: a server runs its desktop's Fermix exactly). A move back, to the
+      Mac the home left (a candidate whose `os` is macOS), blocks only a Mac
+      older than the server;
     * `disk`: the capture needs about twice the home free on this computer
       (`FermixCore.Home.Disk`); short of it, or with the free space unknown,
       it blocks, saying how much is needed; the server needs as much again;
@@ -31,7 +35,9 @@ defmodule FermixCore.Home.MoveReadiness do
       (`FermixCore.Plugins.Dist.Reinstall`), through the plugin installer;
     * `stays_here`: what the home has turned on that runs only on this
       computer (iMessage on a Mac, voice calls, meetings; `stays_here/2`)
-      stops after the move, each named; with none of them on it is `ok`;
+      stops after the move, each named; with none of them on it is `ok`. On
+      a move back to a Mac, what the server's settings turn on of them runs
+      there again, named, and is `ok`;
     * `whatsapp`: WhatsApp turned on warns: it needs an inbound address Meta
       can reach, which the server does not have, so it stops after the move;
     * `slack`: Slack turned on in its Events (webhook) mode warns for the
@@ -59,7 +65,9 @@ defmodule FermixCore.Home.MoveReadiness do
   target, `Archive.host/1`), `:home_bytes` (the home's size, in place of
   walking it), `:index_opts` (`Plugins.Dist.Index.load/1`'s, the catalog),
   `:restarts_itself` (a boolean, in place of
-  `Management.Lifecycle.restarts_itself?/0`).
+  `Management.Lifecycle.restarts_itself?/0`). `summary_items/4` also reads
+  `:candidate_os`, the move's destination system (`report/3` gives the
+  candidate's), which tells a move back from a move.
   """
 
   alias FermixCore.BuildInfo
@@ -103,7 +111,13 @@ defmodule FermixCore.Home.MoveReadiness do
         disk(home, home_bytes, name, opts),
         s3_size(candidate, home_bytes),
         plugins(home, host, candidate, opts)
-      ] ++ summary_items(config, String.starts_with?(host, "macos-"), name, opts)
+      ] ++
+        summary_items(
+          config,
+          String.starts_with?(host, "macos-"),
+          name,
+          Keyword.put(opts, :candidate_os, candidate.os)
+        )
 
     %{ready: not Enum.any?(items, &(&1.status == :block)), items: items}
   end
@@ -122,7 +136,7 @@ defmodule FermixCore.Home.MoveReadiness do
   def summary_items(config, macos?, name, opts)
       when is_boolean(macos?) and is_binary(name) and is_list(opts) do
     [
-      stays_here_item(config, macos?, name),
+      stays_here_item(config, macos?, name, returning?(Keyword.get(opts, :candidate_os))),
       whatsapp(config, name),
       slack(config, name),
       coding_agents(config, name),
@@ -264,20 +278,12 @@ defmodule FermixCore.Home.MoveReadiness do
   defp them(_many), do: "them"
 
   # The versions themselves are on the candidate's row; the sentence says
-  # which way they differ.
-  defp version(%{name: name, version: theirs}, ours) do
+  # which way they differ. An older one can never restore this home; a newer
+  # server could never move it back here.
+  defp version(%{name: name, version: theirs, os: os}, ours) do
     case {Version.parse(theirs), Version.parse(ours)} do
-      {{:ok, server}, {:ok, here}} ->
-        if Version.compare(server, here) == :lt,
-          do:
-            item(
-              "engine_version",
-              :block,
-              "#{name} runs an older Fermix than this computer: update Fermix on #{name} " <>
-                "first, then check again."
-            ),
-          else:
-            item("engine_version", :ok, "#{name} runs this computer's Fermix, or a newer one.")
+      {{:ok, there}, {:ok, here}} ->
+        versions(Version.compare(there, here), returning?(os), name)
 
       _unreadable ->
         item(
@@ -288,6 +294,34 @@ defmodule FermixCore.Home.MoveReadiness do
         )
     end
   end
+
+  defp versions(:lt, _returning?, name),
+    do:
+      item(
+        "engine_version",
+        :block,
+        "#{name} runs an older Fermix than this computer: update Fermix on #{name} " <>
+          "first, then check again."
+      )
+
+  defp versions(:gt, false, name),
+    do:
+      item(
+        "engine_version",
+        :block,
+        "#{name} runs a newer Fermix than this computer, so Fermix could not move back. " <>
+          "Update Fermix on this computer first."
+      )
+
+  defp versions(:gt, true, name),
+    do: item("engine_version", :ok, "#{name} runs this computer's Fermix, or a newer one.")
+
+  defp versions(:eq, _returning?, name),
+    do: item("engine_version", :ok, "#{name} runs this computer's Fermix.")
+
+  # A move back goes to the Mac the home left: the only candidate whose
+  # system is macOS, since a server Always On sets up runs Linux.
+  defp returning?(os), do: os in ["darwin", "macos"]
 
   defp disk(_home, {:error, reason}, _name, _opts) do
     Logger.error("move readiness: the home could not be measured: #{inspect(reason)}")
@@ -406,14 +440,15 @@ defmodule FermixCore.Home.MoveReadiness do
           "#{Enum.join(names, ", ")}."
       )
 
-  defp stays_here_item({:ok, text}, macos?, name) do
-    case features(text, macos?) do
-      [] -> item("stays_here", :ok, none_on(macos?))
-      features -> item("stays_here", :warn, stops(features, macos?, name))
+  defp stays_here_item({:ok, text}, macos?, name, returning?) do
+    case {features(text, macos?), returning?} do
+      {[], _returning?} -> item("stays_here", :ok, none_on(macos?))
+      {features, false} -> item("stays_here", :warn, stops(features, macos?, name))
+      {features, true} -> item("stays_here", :ok, "#{Copy.runs_again(features, name)}.")
     end
   end
 
-  defp stays_here_item({:error, sentence}, _macos?, _name),
+  defp stays_here_item({:error, sentence}, _macos?, _name, _returning?),
     do: item("stays_here", :warn, sentence)
 
   defp stops(features, macos?, name) do

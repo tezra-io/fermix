@@ -32,7 +32,7 @@ defmodule FermixCore.Management.HomeMoveKeepTest do
       now: @now,
       link_status: fn -> %{primary: nil, desktops: [], enrollment: nil} end,
       free_bytes: fn _dir -> {:ok, 1_099_511_627_776} end,
-      version: "0.16.0",
+      version: "9.9.9",
       host: "macos-aarch64",
       restarts_itself: true,
       restart: fn ->

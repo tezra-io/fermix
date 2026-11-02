@@ -213,6 +213,7 @@ defmodule FermixCore.Home.Provision do
           | {:code_unavailable, String.t()}
           | :user_data_too_large
           | :invalid_code
+          | :invalid_version
           | :interrupted
           | {:interrupted, String.t()}
           | :no_token
@@ -524,6 +525,13 @@ defmodule FermixCore.Home.Provision do
 
   defp sentence(:invalid_code, _words),
     do: "Fermix made an enrollment code it could not put on the server, so start again."
+
+  # A server installs exactly the release this computer runs, and only a
+  # release's version names one it can install.
+  defp sentence(:invalid_version, _words),
+    do:
+      "This Fermix is not a release a server can install, so Fermix created no server: " <>
+        "install a released Fermix here, then start again."
 
   defp sentence(:interrupted, _words),
     do: "Fermix stopped before your server was created, so start again."

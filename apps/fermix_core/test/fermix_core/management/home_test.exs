@@ -3,11 +3,13 @@ defmodule FermixCore.Management.HomeTest do
 
   alias FermixCore.Home.Candidates
   alias FermixCore.Home.DesktopLink
+  alias FermixCore.Home.EngineCeiling
   alias FermixCore.Home.Epoch
   alias FermixCore.Home.Move
   alias FermixCore.Home.Moved
   alias FermixCore.Home.Provision.Driver
   alias FermixCore.Home.Provision.Ledger
+  alias FermixCore.Home.Return
   alias FermixCore.Home.Snapshot.Capture
   alias FermixCore.Home.Snapshot.Recipient
   alias FermixCore.Home.Snapshot.Scheduler
@@ -144,6 +146,61 @@ defmodule FermixCore.Management.HomeTest do
       SafeRm.rm!(Epoch.path(home))
 
       assert {:ok, %{"epoch" => nil}} = route("home.status", %{}, opts(home))
+    end
+
+    # Always On's move back, §3.1 M7: the primary's boot records that this
+    # computer took Fermix back (`Home.Return.done/2`); one it could not record
+    # is tried again at each read, as an ending of a move is.
+    test "a move back the primary's boot could not record is recorded by the next read",
+         %{home: home} do
+      :ok = Return.write(home, %{from: "north-box", started_at: ~U[2031-05-04 11:00:00Z]})
+
+      # Nothing is written by an engine whose boot recorded it, or by a device.
+      assert {:ok, _status} = route("home.status", %{}, opts(home, return_boot: :recorded))
+
+      assert {:ok, _status} =
+               route(
+                 "home.status",
+                 %{},
+                 opts(home, return_boot: :unrecorded, engine_role: @device)
+               )
+
+      assert {:ok, record} = Return.read(home)
+      refute Map.has_key?(record, :moved_at)
+
+      assert {:ok, _status} = route("home.status", %{}, opts(home, return_boot: :unrecorded))
+      assert {:ok, %{moved_at: @at, epoch: 4}} = Return.read(home)
+    end
+
+    # Design §6: the version a server's nightly update installs, the oldest
+    # of its desktops' seen in the last 30 days, in every role.
+    test "the update ceiling is the oldest desktop's engine, or null", %{home: home} do
+      assert {:ok, %{"update_ceiling" => nil}} = route("home.status", %{}, opts(home))
+
+      :ok = EngineCeiling.record(home, "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e", "0.18.0", @at)
+      :ok = EngineCeiling.record(home, "0d3f8a7e-5c21-4b9e-8f60-2a4c6e8b1d37", "0.17.1", @at)
+
+      assert {:ok, %{"update_ceiling" => "0.17.1"}} = route("home.status", %{}, opts(home))
+
+      assert {:ok, %{"update_ceiling" => "0.17.1"}} =
+               route("home.status", %{}, opts(home, engine_role: @device))
+    end
+
+    test "an update ceiling that cannot be read is null, and the log says why", %{home: home} do
+      :ok = EngineCeiling.record(home, "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e", "0.18.0", @at)
+
+      File.write!(
+        Path.join(EngineCeiling.dir(home), "0d3f8a7e-5c21-4b9e-8f60-2a4c6e8b1d37.json"),
+        "{"
+      )
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:ok, %{"update_ceiling" => nil}} =
+                   route("home.status", %{}, opts(home, unreadable_files: nil))
+        end)
+
+      assert log =~ "engine_ceiling could not be read"
     end
 
     test "the next run and a run in progress come from a running scheduler",

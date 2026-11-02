@@ -28,6 +28,7 @@ FEED_BUILDER = ROOT / "scripts/release/build_releases_json.sh"
 VERSION = "9.9.9"
 ORIGIN = "https://github.com/tezra-io/fermix/releases/download"
 MANIFEST_URL = "https://github.com/tezra-io/fermix/releases/latest/download/releases.json"
+RELEASE_MANIFEST_URL = f"{ORIGIN}/v{VERSION}/releases.json"
 
 # The real tools the installer may call. Everything else on PATH is a stand-in,
 # so a host's own apt-get, rpm or cosign can never answer for the test.
@@ -480,6 +481,73 @@ class InstallerTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("fermix is installed, but 'fermix setup' did not finish", result.stderr)
 
+    # -- a named release ---------------------------------------------------------
+    #
+    # Always On's servers run exactly their desktop's Fermix (move back, design
+    # §6): first boot and the nightly update install a named release, never
+    # the latest.
+
+    def test_a_named_release_is_installed_from_its_own_manifest_and_signature(self):
+        self._host("apt")
+        self._fake("cosign", FAKE_COSIGN)
+        self._serve(MANIFEST_URL, b"")
+        self._publish(self._manifest(), RELEASE_MANIFEST_URL)
+
+        result = self._run("--version", VERSION)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = self._calls()
+        self.assertEqual(calls[0], f"curl {RELEASE_MANIFEST_URL}")
+        self.assertNotIn(f"curl {MANIFEST_URL}", calls)
+        self.assertIn(
+            "--certificate-identity "
+            f"https://github.com/tezra-io/fermix/.github/workflows/release.yml@refs/tags/v{VERSION}",
+            self._one(calls, "cosign "),
+        )
+        self._one(calls, "apt-get ")
+
+    def test_a_named_release_already_installed_downloads_nothing(self):
+        self._host("apt")
+        self._publish(self._manifest(), RELEASE_MANIFEST_URL)
+
+        result = self._run("--version", VERSION, extra_env={"FAKE_INSTALLED_VERSION": VERSION})
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"fermix {VERSION} is already installed.", result.stdout)
+        self.assertNotIn("latest release", result.stdout)
+        self.assertEqual(self._calls(), [f"curl {RELEASE_MANIFEST_URL}"])
+
+    def test_an_older_install_is_updated_to_the_named_release(self):
+        self._host("apt")
+        self._publish(self._manifest(), RELEASE_MANIFEST_URL)
+
+        result = self._run("--version", VERSION, extra_env={"FAKE_INSTALLED_VERSION": "9.9.8"})
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"Updated fermix 9.9.8 to {VERSION}", result.stdout)
+
+    def test_a_manifest_of_another_release_is_refused_before_any_artifact_is_fetched(self):
+        self._host("apt")
+        self._publish(self._manifest(), f"{ORIGIN}/v9.9.7/releases.json")
+
+        result = self._run("--version", "9.9.7")
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(f"is release {VERSION}, not 9.9.7", result.stderr)
+        self.assertEqual(self._calls(), [f"curl {ORIGIN}/v9.9.7/releases.json"])
+
+    def test_a_named_release_that_is_not_a_version_is_refused_before_anything_is_fetched(self):
+        for version in ("latest", "v9.9.9", "9.9", "9.9.9-rc.1", ""):
+            with self.subTest(version=version):
+                self.log.write_text("", encoding="utf-8")
+                self._host("apt")
+
+                result = self._run("--version", version)
+
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("--version takes a release, such as 0.17.0", result.stderr)
+                self.assertEqual(self._calls(), [])
+
     # -- the contract with the release rail -----------------------------------
 
     def test_the_installer_reads_the_feed_the_release_rail_writes(self):
@@ -636,13 +704,13 @@ class InstallerTest(unittest.TestCase):
         path.write_bytes(payload)
         return url
 
-    def _publish(self, manifest):
+    def _publish(self, manifest, url=MANIFEST_URL):
         # jq's layout, which is what the installer's line scanner reads: two
         # spaces, one key per line.
-        self._publish_text(json.dumps(manifest, indent=2) + "\n")
+        self._publish_text(json.dumps(manifest, indent=2) + "\n", url)
 
-    def _publish_text(self, text):
-        self._serve(MANIFEST_URL, text.encode())
+    def _publish_text(self, text, url=MANIFEST_URL):
+        self._serve(url, text.encode())
 
     def _real_feed(self):
         """Run the release rail's own feed builder over this test's payloads."""

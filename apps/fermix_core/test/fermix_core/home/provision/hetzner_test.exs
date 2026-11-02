@@ -9,6 +9,7 @@ defmodule FermixCore.Home.Provision.HetznerTest do
 
   import ExUnit.CaptureLog
 
+  alias FermixCore.BuildInfo
   alias FermixCore.Home.Provision.Driver
   alias FermixCore.Home.Provision.FirstBoot
   alias FermixCore.Home.Provision.Hetzner
@@ -168,7 +169,9 @@ defmodule FermixCore.Home.Provision.HetznerTest do
       assert {"GET", "/v1/images",
               %{"type" => "system", "name" => "debian-13", "architecture" => "x86"}, nil} = image
 
-      {:ok, user_data} = FirstBoot.user_data(@code, Hetzner.max_user_data())
+      {:ok, user_data} =
+        FirstBoot.user_data(@code, BuildInfo.product_version(), Hetzner.max_user_data())
+
       firewall_id = String.to_integer(ledger!(ctx.home).firewall.id)
 
       assert {"POST", "/v1/servers", %{},
@@ -314,7 +317,10 @@ defmodule FermixCore.Home.Provision.HetznerTest do
 
     test "the first boot fits the 32 KiB of user data Hetzner takes" do
       assert Hetzner.max_user_data() == 32_768
-      assert {:ok, user_data} = FirstBoot.user_data(@code, Hetzner.max_user_data())
+
+      assert {:ok, user_data} =
+               FirstBoot.user_data(@code, BuildInfo.product_version(), Hetzner.max_user_data())
+
       assert byte_size(user_data) <= 32_768
     end
 

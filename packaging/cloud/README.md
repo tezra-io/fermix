@@ -11,6 +11,10 @@ script, two modes:
   `curl -fsSL https://fermix.ai/always-on | sudo sh`, which serves
   `first-boot.sh` byte for byte and asks for the code without echo. Cloud-init
   user data can run it with the code in `FERMIX_ENROLL_CODE` instead.
+  `--version X` names the release to install: the one the computer that sets
+  the server up runs, which Always On's own-server command and the cloud-init
+  of a server Fermix creates both pass, so the home can always move back
+  there; without it, the latest.
 - **Enroll** (the default) makes the server a candidate the primary moves
   to. **Restore** (`--restore`) takes no code and enrolls nothing: it prepares
   the same hardened server and prints the exact steps that restore the newest
@@ -67,8 +71,9 @@ step:
    memory the kernel stops a Chromium process before the engine. Both values
    are constants until a measurement on the smallest server Fermix creates
    sets them (M75 §3).
-4. Installs the Linux package through `https://fermix.ai/install --no-setup`,
-   the installer every host uses, with its checks. The package's user unit
+4. Installs the Linux package through `https://fermix.ai/install --no-setup`
+   (`--version X` when it was given one), the installer every host uses, with
+   its checks. The package's user unit
    runs the engine with `Restart=always` and at most five starts in ten
    minutes, so a crash loop stops and the budget comes back.
 5. Updates, as nobody logs in to the server. Debian's own: `unattended-upgrades`
@@ -82,8 +87,17 @@ step:
    restarts nothing. `fermix-update.timer` (root, `OnCalendar=*-*-* 04:00:00
    UTC`, `Persistent=true`) runs `fermix-update.service`, a oneshot bounded
    by `TimeoutStartSec=30min` that runs `/usr/local/sbin/fermix-update`: the
-   installer again (`--no-setup`, with its sha256 check and the cosign
-   signature check through the package's own cosign); then `fermix restart`
+   release the computers this server serves run, read from `fermix home
+   status --json`'s `update_ceiling` (the oldest engine among the desktops
+   that reached it in the last 30 days), installed with the installer again
+   (`--no-setup --version X`, with its sha256 check and the cosign signature
+   check through the package's own cosign) when it is newer than the
+   installed one in `dpkg --compare-versions`' order; an installed release
+   newer than it is never installed back down, and no home, no computer seen
+   or a `home status` that fails installs nothing that night (the last fails
+   the night). So the home can always move back to its computer, the server's
+   Fermix follows that computer's: a fix reaches the server the night after
+   the computer has it. Then `fermix restart`
    as `fermix` when `fermix service status --json` says `pending_restart`
    (the running engine is older than the installed one, so a restart a night
    skipped or failed is still due the next night, and an engine that is not
@@ -184,16 +198,19 @@ code in the environment and a bucket, after the refusals (a stock Debian 12
 host and kernels with Landlock ABI 2 or none, by the ABI sentence, among
 them); a restore host and its printed steps; the failures that stop the
 first boot, each by its exit status and its one sentence on stderr; an
-Ubuntu host with swap of its own; the nightly update, one night per case (no
-new release, a new one, a failed installer while a reboot is asked for, the
-reboot, an installer that cannot be downloaded (the reboot all the same), a
-failed `service status` and a failed `home status` (no restart, the
-reboot all the same), three nights under a move (the reboot waits two, then
-goes), a move in an ended phase, a failed restart (the reboot all the same),
-no home yet); and the distribution's Chromium installed with
+Ubuntu host with swap of its own; the nightly update, one night per case (the
+computers' release already installed, a newer one, a failed installer while
+a reboot is asked for, the reboot, an installer that cannot be downloaded
+(the reboot all the same), a failed `service status` and a failed `home
+status` (no restart, the reboot all the same), three nights under a move
+(the reboot waits two, then goes), a move in an ended phase, a failed
+restart (the reboot all the same), an older release never installed back
+down, no computer seen, no home yet); and the distribution's Chromium installed with
 the real `apt-get` and started headless as `fermix` through the engine's
 `oom_score_adj` shell, with its own sandbox (that container runs without
 Docker's seccomp profile, which refuses the user namespaces a server's kernel
-gives an unprivileged account). It is not wired into CI. What only a real
+gives an unprivileged account). It is not wired into CI;
+`scripts/release/test_fermix_update.py` runs the nightly update's release
+choice and first boot's `--version` hermetically, in CI. What only a real
 server proves: the user manager starting behind the drop-in, the swap file
 turning on, the timer firing at 04:00 UTC and the reboot.

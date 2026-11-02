@@ -237,6 +237,7 @@ its enrollment stands).
 | `summary` | object | Where Always On stands, as every surface prints it: `key`, `state`, `sentence`, `action` (the action record, or null), `detail` and `notice`, as the management `home.status` answers it (`priv/management/PROTOCOL.md`, "The Always On summary"). With Fermix stopped it is worked out from the home's own files, so the link, the window and the server's own part read as absent. The human output leads with its sentence and, on a line of its own, its action and where to take it: `fermix always-on`, or the Fermix app on a home the app manages. |
 | `disk` | object, null | On the primary, how full its disk is: `used` (a fraction from 0 to 1) and `nearly_full` (from 0.85). Null in every other role and when it cannot be read. |
 | `version` | string | This engine's version. |
+| `update_ceiling` | string, null | The Fermix version a server's nightly update installs: the oldest engine among the desktops this machine served as their primary in the last 30 days, so the home can always move back to one of them. Null when none was, or when it cannot be read. |
 
 ## The snapshots result
 

@@ -1053,7 +1053,7 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
         :ok
       end,
       free_bytes: fn _dir -> {:ok, 1_099_511_627_776} end,
-      version: "0.16.0",
+      version: "9.9.9",
       host: "linux-x86_64",
       restarts_itself: true,
       restart: fn ->

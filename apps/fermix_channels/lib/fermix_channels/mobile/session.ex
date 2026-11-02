@@ -47,7 +47,10 @@ defmodule FermixChannels.Mobile.Session do
   event its kind may not be sent is dropped as an event it cannot encode is.
   A desktop's session starts its `Desktop.Peer` once `hello` is answered and
   hands it every desktop-family event; it gets no approval cards, and phone
-  broadcasts never reach it.
+  broadcasts never reach it. A desktop's `hello` names its engine's version
+  (`app_version`), which the session records for the server's nightly update
+  (`FermixCore.Home.EngineCeiling`, under the identity's home); a record that
+  fails is logged and the desktop is served all the same.
   """
 
   require Logger
@@ -73,6 +76,8 @@ defmodule FermixChannels.Mobile.Session do
   alias FermixChannels.Mobile.RequestCoordinator
   alias FermixChannels.Telemetry, as: ChannelTelemetry
   alias FermixCore.Companion.Timeline
+  alias FermixCore.Home.EngineCeiling
+  alias FermixCore.Setup.ConfigStore
 
   @max_wire_bytes 65_535
   # The modes a phone or a desktop dials in, and M75's own preludes with the
@@ -447,7 +452,16 @@ defmodule FermixChannels.Mobile.Session do
     |> Map.put_new(:media_descriptor, &Timeline.media_descriptor/2)
     |> Map.put_new(:event_router, &EventRouter.route/3)
     |> Map.put_new(:run_request, &Task.Supervisor.start_child(FermixCore.TaskSupervisor, &1))
+    |> Map.put_new(:record_engine_version, engine_recorder(state.identity_root))
     |> put_peer_dependencies()
+  end
+
+  # The home the session's identity is read from: a test's root, or this
+  # engine's own home.
+  defp engine_recorder(root) do
+    fn device_id, version, at ->
+      EngineCeiling.record(root || ConfigStore.fermix_home(), device_id, version, at)
+    end
   end
 
   # A desktop's peer.
@@ -624,6 +638,7 @@ defmodule FermixChannels.Mobile.Session do
     with {:ok, event, state} <- decrypt_event(ciphertext, state),
          {:ok, state} <- consume_event(event, state),
          {:ok, state} <- accept_hello(event, state),
+         :ok <- record_engine_version(event, state),
          {:ok, frames, state} <- hello_ack(state, event),
          {:ok, frames, state} <- after_hello_ack(session_kind(state), frames, state) do
       reply(frames, state)
@@ -889,6 +904,28 @@ defmodule FermixChannels.Mobile.Session do
   end
 
   defp accept_hello(_event, state), do: {:error, :hello_required, state}
+
+  # A desktop's engine version, for the version a server installs at most
+  # (Always On's move back). It never refuses the desktop: a record that
+  # fails is said in the log, and the next hello records it again.
+  defp record_engine_version(%{payload: payload}, %{peer_kind: :desktop} = state) do
+    case state.record_engine_version.(
+           state.device_id,
+           payload["app_version"],
+           state.wall_clock.()
+         ) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error(
+          "the engine version of desktop #{state.device_id} could not be recorded: " <>
+            inspect(reason)
+        )
+    end
+  end
+
+  defp record_engine_version(_event, _state), do: :ok
 
   # The phone's highest-seen epoch against the one this session's identity
   # carries; a phone that has seen none, or no higher one, is served.

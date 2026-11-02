@@ -3,7 +3,10 @@ defmodule FermixCore.Home.Provision.FirstBoot do
   The cloud-init user data of a server Fermix creates (M75 lean v1 §4.3): the
   provider-neutral first boot, `packaging/cloud/first-boot.sh`, run once as
   root with the enrollment code in `FERMIX_ENROLL_CODE`, as
-  `packaging/cloud/README.md` says cloud-init passes it.
+  `packaging/cloud/README.md` says cloud-init passes it, and `--version` the
+  release the desktop that creates it runs, which first boot installs: a
+  server always runs exactly its desktop's Fermix, so the home can move back
+  (Always On's move back, `FermixCore.Home.EngineCeiling`).
 
   The script is the one the release was built from, embedded at compile
   time: gzip-compressed and base64-encoded inside a `#!/bin/sh` user data
@@ -12,7 +15,8 @@ defmodule FermixCore.Home.Provision.FirstBoot do
   runs it. The code appears once, as the value of `FERMIX_ENROLL_CODE` on the
   line that runs the script: never on a command line, and first boot
   `unset`s it before anything else runs. It is accepted only as
-  `fxenroll1.` and base64url characters, so it cannot leave its quotes.
+  `fxenroll1.` and base64url characters, so it cannot leave its quotes; the
+  release only as a plain `MAJOR.MINOR.PATCH`.
 
   User data stays readable through the provider's metadata service for the
   server's life, which is why first boot blocks that service for every
@@ -33,30 +37,30 @@ defmodule FermixCore.Home.Provision.FirstBoot do
         |> Enum.map_join("\n", &hd/1)
   @install_path "/usr/local/lib/fermix-always-on/first-boot.sh"
   @code ~r/\Afxenroll1\.[A-Za-z0-9_-]{1,2048}\z/
+  @release ~r/\A[0-9]+\.[0-9]+\.[0-9]+\z/
 
   @doc "The SHA-256 of the embedded first boot, which the server checks before running it."
   @spec script_sha256() :: String.t()
   def script_sha256, do: @sha256
 
   @doc """
-  The user data for a server that enrolls with `code`, for a provider that
-  takes at most `max_bytes` of it: `{:ok, user_data}`, `{:error,
-  :invalid_code}` for anything but an enrollment code, and `{:error,
+  The user data for a server that enrolls with `code` and installs Fermix
+  `release`, for a provider that takes at most `max_bytes` of it: `{:ok,
+  user_data}`, `{:error, :invalid_code}` for anything but an enrollment code,
+  `{:error, :invalid_version}` for anything but a release, and `{:error,
   :too_large}` past `max_bytes`.
   """
-  @spec user_data(term(), pos_integer()) ::
-          {:ok, String.t()} | {:error, :invalid_code | :too_large}
-  def user_data(code, max_bytes)
-      when is_binary(code) and is_integer(max_bytes) and max_bytes > 0 do
-    if Regex.match?(@code, code),
-      do: bounded(render(code), max_bytes),
-      else: {:error, :invalid_code}
+  @spec user_data(term(), term(), pos_integer()) ::
+          {:ok, String.t()} | {:error, :invalid_code | :invalid_version | :too_large}
+  def user_data(code, release, max_bytes) when is_integer(max_bytes) and max_bytes > 0 do
+    cond do
+      not (is_binary(code) and Regex.match?(@code, code)) -> {:error, :invalid_code}
+      not (is_binary(release) and Regex.match?(@release, release)) -> {:error, :invalid_version}
+      true -> bounded(render(code, release), max_bytes)
+    end
   end
 
-  def user_data(_code, max_bytes) when is_integer(max_bytes) and max_bytes > 0,
-    do: {:error, :invalid_code}
-
-  defp render(code) do
+  defp render(code, release) do
     """
     #!/bin/sh
     # Fermix Always On: unpack the first boot, check it, and run it once.
@@ -67,7 +71,7 @@ defmodule FermixCore.Home.Provision.FirstBoot do
     #{@blob}
     FERMIX_FIRST_BOOT
     printf '%s  %s\\n' #{@sha256} #{@install_path} | sha256sum -c --quiet
-    FERMIX_ENROLL_CODE='#{code}' sh #{@install_path}
+    FERMIX_ENROLL_CODE='#{code}' sh #{@install_path} --version #{release}
     """
   end
 

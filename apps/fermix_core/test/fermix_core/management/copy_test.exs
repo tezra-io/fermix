@@ -1073,7 +1073,11 @@ defmodule FermixCore.Management.CopyTest do
 
     test "the docs and the own-server command are the engine's to word" do
       assert Copy.always_on_docs_url("hetzner") == "https://fermix.ai/docs/always-on/#hetzner"
-      assert Copy.own_server_command() == "curl -fsSL https://fermix.ai/always-on | sudo sh"
+      # The server installs the release this computer runs (design §6).
+      assert Copy.own_server_command() ==
+               "curl -fsSL https://fermix.ai/always-on | sudo sh -s -- --version " <>
+                 FermixCore.BuildInfo.product_version()
+
       refute Copy.own_server_command() =~ "FERMIX_ENROLL_CODE"
     end
 

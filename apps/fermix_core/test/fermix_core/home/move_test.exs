@@ -168,7 +168,7 @@ defmodule FermixCore.Home.MoveTest do
       [
         now: @now,
         free_bytes: fn _dir -> {:ok, 1_099_511_627_776} end,
-        version: "0.16.0",
+        version: "9.9.9",
         host: "macos-aarch64"
       ],
       extra

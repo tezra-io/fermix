@@ -63,7 +63,10 @@ defmodule FermixCore.Management.Home do
   exits: the daemon serves each request in a process of its own. `disk` is how full this primary's disk is (`Home.Disk.usage/2`:
   `used`, a fraction, and `nearly_full` from 85%), null in any other role and
   when it cannot be read, so a linked desktop reads its server's from
-  `primary_home`. `version` is this engine's.
+  `primary_home`. `version` is this engine's. `update_ceiling` is the version
+  a server's nightly update installs, in every role: the oldest engine among
+  the desktops this machine served in the last 30 days
+  (`Home.EngineCeiling`), null when none was or it cannot be read.
 
   `home.snapshots.run` starts a snapshot now (`busy` while one runs);
   `home.snapshots.passphrase` derives a new recovery key from
@@ -82,7 +85,8 @@ defmodule FermixCore.Management.Home do
   `FermixCore.Home.Link.impl().status/0`), `:settings_snapshot` (a 0-arity
   reader of the live settings, `ConfigStore.current_snapshot/0`),
   `:disk_usage` (a 1-arity reader of a home's disk, `Home.Disk.usage/2`),
-  `:version`, `:now` and `:host_os`; for the reconcile a read starts,
+  `:version`, `:now`, `:host_os` and `:return_boot` (in place of
+  `Home.Return.boot_done/0`); for the reconcile a read starts,
   `Management.Provision`'s (`:providers`, `:provider_opts`, `:jobs`,
   `:open_code`, `:withdraw_code`); for the wait, `:status_watch` (the
   watch's name) and `:wait_timer` (a 2-arity `Process.send_after/3` to the
@@ -97,10 +101,12 @@ defmodule FermixCore.Management.Home do
 
   alias FermixCore.BuildInfo
   alias FermixCore.Home.Disk
+  alias FermixCore.Home.EngineCeiling
   alias FermixCore.Home.Epoch
   alias FermixCore.Home.Link
   alias FermixCore.Home.Moved
   alias FermixCore.Home.MoveSecrets
+  alias FermixCore.Home.Return
   alias FermixCore.Home.Role
   alias FermixCore.Home.Snapshot.Recipient
   alias FermixCore.Home.Snapshot.Recovery
@@ -244,6 +250,7 @@ defmodule FermixCore.Management.Home do
   defp gather(opts) do
     home = home(opts)
     role = role(opts)
+    :ok = return_done(home, role, opts)
     link = Keyword.get(opts, :link_status, fn -> Link.impl().status() end).()
     move = HomeMove.facts(home, role, link, opts)
     {primary_home, primary_missing, too_old?} = primary_home(opts)
@@ -262,7 +269,8 @@ defmodule FermixCore.Management.Home do
       primary_missing: primary_missing,
       secrets_missing: secrets_missing(role, opts),
       disk: disk(home, role, opts),
-      version: Keyword.get_lazy(opts, :version, &BuildInfo.product_version/0)
+      version: Keyword.get_lazy(opts, :version, &BuildInfo.product_version/0),
+      update_ceiling: update_ceiling(home, opts)
     }
 
     gathered =
@@ -270,6 +278,24 @@ defmodule FermixCore.Management.Home do
 
     {facts, gathered}
   end
+
+  # That this computer took Fermix back (Always On's move back), which the
+  # primary's boot could not record: tried again at each read, and logged once
+  # while it fails (`Home.UnreadableFiles`). An engine whose boot recorded it,
+  # or had none to record, writes nothing here.
+  defp return_done(home, %{role: :primary}, opts) do
+    case Keyword.get_lazy(opts, :return_boot, &Return.boot_done/0) do
+      :recorded ->
+        :ok
+
+      :unrecorded ->
+        done = Return.done(home, Keyword.get_lazy(opts, :now, &DateTime.utc_now/0))
+        memory = Keyword.get(opts, :unreadable_files, UnreadableFiles)
+        UnreadableFiles.log_read(Return.path(home), "home status", done, memory)
+    end
+  end
+
+  defp return_done(_home, _record, _opts), do: :ok
 
   # How full a primary's disk is; a desktop reads its server's in
   # `primary_home`, and a disk that cannot be read is said in the log, once
@@ -291,6 +317,20 @@ defmodule FermixCore.Management.Home do
   end
 
   defp disk(_home, _record, _opts), do: nil
+
+  # The version a server's nightly update installs (`Home.EngineCeiling`),
+  # from this machine's own record in any role; one that cannot be read is
+  # null, said in the log once while it stays so.
+  defp update_ceiling(home, opts) do
+    read = EngineCeiling.ceiling(home, Keyword.get_lazy(opts, :now, &DateTime.utc_now/0))
+    memory = Keyword.get(opts, :unreadable_files, UnreadableFiles)
+    :ok = UnreadableFiles.log_read(EngineCeiling.dir(home), "home status", read, memory)
+
+    case read do
+      {:ok, ceiling} -> ceiling
+      {:error, _reason} -> nil
+    end
+  end
 
   defp secrets_missing(%{role: :primary}, opts),
     do:
@@ -322,8 +362,9 @@ defmodule FermixCore.Management.Home do
   the rail's `primary` (or nil) and `desktops` (none when absent),
   `HomeMove.facts/4`'s `enrollment`, `candidates` and `move` (null, none and
   null when absent), a linked desktop's `primary_home` and `primary_missing`
-  (null when absent), and the primary's `disk` (null when absent). Pure, so
-  the CLI's goldens are built from it.
+  (null when absent), the primary's `disk` (null when absent) and the
+  `update_ceiling` (null when absent). Pure, so the CLI's goldens are built
+  from it.
   """
   @spec picture(%{
           required(:role) => Role.role(),
@@ -340,7 +381,8 @@ defmodule FermixCore.Management.Home do
           optional(:move) => map() | nil,
           optional(:primary_home) => map() | nil,
           optional(:primary_missing) => String.t() | nil,
-          optional(:secrets_missing) => [String.t()]
+          optional(:secrets_missing) => [String.t()],
+          optional(:update_ceiling) => String.t() | nil
         }) :: map()
   def picture(
         %{
@@ -368,7 +410,8 @@ defmodule FermixCore.Management.Home do
       "primary_missing" => Map.get(facts, :primary_missing),
       "secrets_missing" => Map.get(facts, :secrets_missing, []),
       "disk" => Map.get(facts, :disk),
-      "version" => version
+      "version" => version,
+      "update_ceiling" => Map.get(facts, :update_ceiling)
     }
   end
 

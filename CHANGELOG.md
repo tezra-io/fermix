@@ -8,6 +8,13 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The Linux installer installs a release you name.** `curl -fsSL
+  https://fermix.ai/install | sh -s -- --version X.Y.Z` installs that
+  release instead of the latest, from that release's own files, under the
+  same checksum and signature checks, and does nothing when it is installed
+  already. A version that is not a release is refused before anything is
+  downloaded.
+
 - **Lists: a list per project, a shopping list, anything to tick off, kept as
   lists and never in memory.** Ask in your own chat ("start a list for the
   garden in my Projects folder", "add lemons to groceries", "tick off the
@@ -160,7 +167,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   With Reach from anywhere on, Always On on your primary gives an enrollment
   code, good once for thirty minutes; a server enrolled with it waits for the
   move, and you review the move (the secrets that travel, the server's Fermix,
-  free disk, the plugins with no build for the server, and what stops: those
+  which must be this computer's own, since a newer one could never move the
+  home back, free disk, the plugins with no build for the server, and what stops: those
   of iMessage, voice calls and meetings you use, WhatsApp, and Slack unless it
   uses Socket Mode; coding agents ask for your approval again on the server;
   a Fermix you started from a terminal stops when the move starts and needs
@@ -178,6 +186,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cannot link it again and it keeps copies of the server's backups. Right
   after the move the server installs your plugins again for itself, checked as
   any install is; one it could not install says so in Plugins, with Install….
+  A server always runs the Fermix of the computer it serves: a server Fermix
+  creates installs that release, Use my own Linux server's command names it,
+  and each night the server installs the oldest release among the computers
+  that reached it in the last 30 days (`update_ceiling` in `fermix home
+  status --json`), never past it and never back down, so a fix reaches the
+  server the night after your computer has it.
   Once a recovery passphrase is set, a primary keeps encrypted snapshots of
   itself in an S3 bucket, every six hours by default, and after a move on your
   desktop too, and a lost server is restored from the newest one. A move or

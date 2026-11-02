@@ -53,6 +53,7 @@ defmodule FermixCore.Home.Provision.Driver do
   `{:unknown, _}` unwrapped once the driver has acted on it.
   """
 
+  alias FermixCore.BuildInfo
   alias FermixCore.Home.Provision
   alias FermixCore.Home.Provision.FirstBoot
   alias FermixCore.Home.Provision.Ledger
@@ -224,10 +225,11 @@ defmodule FermixCore.Home.Provision.Driver do
 
   defp user_data(provider, opts) do
     with {:ok, code} <- open_code(opts) do
-      case FirstBoot.user_data(code, provider.max_user_data()) do
+      case FirstBoot.user_data(code, BuildInfo.product_version(), provider.max_user_data()) do
         {:ok, user_data} -> {:ok, user_data}
         {:error, :too_large} -> withdrawn(opts, :user_data_too_large)
         {:error, :invalid_code} -> withdrawn(opts, :invalid_code)
+        {:error, :invalid_version} -> withdrawn(opts, :invalid_version)
       end
     end
   end

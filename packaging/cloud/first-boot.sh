@@ -11,12 +11,15 @@
 # With --restore it takes no code and enrolls nothing: it prepares the same
 # server and prints the steps that restore a snapshot onto it. Either way the
 # server gets swap when it has none, and keeps itself up to date: Debian's
-# security updates every day, Fermix every night at 04:00 UTC.
+# security updates every day, Fermix every night at 04:00 UTC to the release
+# the computers it serves run, never past it, so the home can always move
+# back to one of them.
 #
 # Options: --restore, --snapshot-bucket NAME --snapshot-region REGION
-# (together). It never prints the code, never logs it
-# and never puts it on a command line. Run again, it converges on the same
-# state; a host whose Fermix home exists is not enrolled again.
+# (together), --version X (the release to install: the one the computer that
+# sets the server up runs; the latest without it). It never prints the code,
+# never logs it and never puts it on a command line. Run again, it converges
+# on the same state; a host whose Fermix home exists is not enrolled again.
 set -eu
 
 ENGINE_USER=fermix
@@ -57,6 +60,8 @@ UPDATE_SCRIPT=/usr/local/sbin/fermix-update
 LANDLOCK_ABI_MIN=3
 
 CODE=""
+RELEASE=""
+RELEASE_GIVEN=0
 RESTORE=0
 SNAPSHOT_BUCKET=""
 SNAPSHOT_REGION=""
@@ -94,17 +99,24 @@ parse_args() {
   while [ $# -gt 0 ]; do
     case "$1" in
       --restore) RESTORE=1; shift ;;
-      --snapshot-bucket | --snapshot-region)
+      --snapshot-bucket | --snapshot-region | --version)
         [ $# -ge 2 ] || fail "$1 needs a value."
         case "$1" in
           --snapshot-bucket) SNAPSHOT_BUCKET=$2 ;;
           --snapshot-region) SNAPSHOT_REGION=$2 ;;
+          --version) RELEASE=$2 RELEASE_GIVEN=1 ;;
         esac
         shift 2
         ;;
-      *) fail "An option was not recognised. This script takes --restore, --snapshot-bucket and --snapshot-region." ;;
+      *) fail "An option was not recognised. This script takes --restore, --snapshot-bucket, --snapshot-region and --version." ;;
     esac
   done
+
+  # A release is a plain MAJOR.MINOR.PATCH, as every release's packages are.
+  if [ "$RELEASE_GIVEN" -eq 1 ]; then
+    matches "$RELEASE" '^[0-9]+\.[0-9]+\.[0-9]+$' ||
+      fail "--version is not a Fermix release, such as 0.17.0."
+  fi
 
   if [ -n "$SNAPSHOT_BUCKET" ] || [ -n "$SNAPSHOT_REGION" ]; then
     matches "$SNAPSHOT_BUCKET" '^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$' ||
@@ -312,13 +324,21 @@ add_swap() {
   fi
 }
 
-# 4. The signed Linux package, through the same installer every host uses.
+# 4. The signed Linux package, through the same installer every host uses:
+# the release it was given, which the computer that set it up runs, so the
+# home can always move back there; the latest without one.
 install_fermix() {
-  say "Installing Fermix with $INSTALL_URL"
+  set -- --no-setup
+  if [ -n "$RELEASE" ]; then
+    say "Installing Fermix $RELEASE, the release your computer runs, with $INSTALL_URL"
+    set -- "$@" --version "$RELEASE"
+  else
+    say "Installing Fermix with $INSTALL_URL"
+  fi
   apt_install ca-certificates curl
   curl -fsSL --proto '=https' "$INSTALL_URL" -o "$WORK/install.sh" ||
     fail "Could not download the Fermix installer from $INSTALL_URL."
-  sh "$WORK/install.sh" --no-setup </dev/null || fail "The Fermix installer stopped; its message above says why."
+  sh "$WORK/install.sh" "$@" </dev/null || fail "The Fermix installer stopped; its message above says why."
   [ -x "$FERMIX_BIN" ] || fail "The installer finished, but $FERMIX_BIN is not there."
 }
 
@@ -359,6 +379,8 @@ ENGINE_FAILED=0
 # nothing on disk changed and the night goes on to the restart and the
 # reboot, then ends non-zero.
 INSTALLER_UNREACHABLE=0
+# The release tonight installs, once read (ceiling_due).
+CEILING=""
 
 # One sentence and a non-zero exit, ending the night there.
 fail() {
@@ -390,14 +412,13 @@ fetch_installer() {
   fi
 }
 
-# The installer, with its sha256 and cosign checks: it installs the newest
-# release's package, or nothing when that one is installed. The package
-# restarts nothing, so the running engine is untouched until the restart. Its
-# exit status does not say whether it failed before or after the package
-# manager ran, so any failure stops the night before the restart and the
-# reboot.
+# The installer, with its sha256 and cosign checks: it installs the release
+# tonight's ceiling names. The package restarts nothing, so the running engine
+# is untouched until the restart. Its exit status does not say whether it
+# failed before or after the package manager ran, so any failure stops the
+# night before the restart and the reboot.
 update_fermix() {
-  sh "$WORK/install.sh" --no-setup </dev/null ||
+  sh "$WORK/install.sh" --no-setup --version "$CEILING" </dev/null ||
     fail "The Fermix installer stopped, so the engine keeps running; its message above says why."
 }
 
@@ -414,6 +435,39 @@ as_engine() {
 # A line on stderr for a failure the night carries on past.
 warn() {
   printf 'fermix update: %s\n' "$1" >&2
+}
+
+# Whether tonight installs a release, and which (CEILING): the
+# `update_ceiling` of `fermix home status --json`, the oldest Fermix among the
+# computers this server served as their primary in the last 30 days, so the
+# home can always move back to one of them. Due only when the installed
+# release ($1) is older, in dpkg's own order: a newer one is never installed
+# back down. No home yet, no computer seen, or an answer that cannot be read
+# installs nothing tonight; only the last fails the night.
+ceiling_due() {
+  if [ ! -e "$FERMIX_HOME_DIR" ]; then
+    say "This server has no Fermix home yet, so no computer names the release to install; Fermix stays at $1"
+    return 1
+  fi
+  if ! as_engine home status --json >"$WORK/ceiling.json"; then
+    warn "fermix home status stopped, so Fermix is not updated tonight; its message above says why."
+    ENGINE_FAILED=1
+    return 1
+  fi
+  CEILING=$(tr -d '\n' <"$WORK/ceiling.json" |
+    sed -n 's/.*"update_ceiling": *"\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)".*/\1/p')
+  if [ -z "$CEILING" ]; then
+    say "No computer has reached this server in the last 30 days, so Fermix stays at $1"
+    return 1
+  fi
+  if [ "$CEILING" = "$1" ]; then
+    say "Fermix $1 is the release your computers run"
+    return 1
+  fi
+  if dpkg --compare-versions "$CEILING" lt "$1"; then
+    say "Fermix $1 is newer than $CEILING, the oldest release your computers run, and is never installed back down: moving Fermix back to that computer waits until it updates"
+    return 1
+  fi
 }
 
 # Whether the running engine is older than the installed one: the `alignment`
@@ -535,7 +589,7 @@ restart_and_reboot() {
 report_versions() {
   after=$(installed_version) || exit 1
   if [ "$after" = "$1" ]; then
-    say "Fermix $after is the newest release"
+    say "Fermix stays at $after"
   else
     say "Fermix went from $1 to $after"
   fi
@@ -559,10 +613,12 @@ main() {
   export APT_CONFIG
 
   before=$(installed_version) || exit 1
-  say "Updating Fermix $before through $INSTALL_URL"
-  if fetch_installer; then
-    update_fermix
-    report_versions "$before"
+  if ceiling_due "$before"; then
+    say "Updating Fermix $before to $CEILING, the release your computers run, through $INSTALL_URL"
+    if fetch_installer; then
+      update_fermix
+      report_versions "$before"
+    fi
   fi
   restart_and_reboot
   [ "$ENGINE_FAILED" -eq 0 ] && [ "$INSTALLER_UNREACHABLE" -eq 0 ] || exit 1
@@ -578,7 +634,9 @@ FERMIX_UPDATE
 # provider's image lacks it, and its two daily switches set in a file of
 # Fermix's. Fermix's own: the package comes from the release files, not an apt
 # source, so unattended-upgrades never sees it; a root timer runs the
-# installer every night at 04:00 UTC, restarts the engine when it runs an
+# installer every night at 04:00 UTC for the release the computers this server
+# serves run (the engine's update ceiling; nothing when none was seen, and
+# never back down), restarts the engine when it runs an
 # older release than the one installed (not while a move is under way, nor
 # when the engine's answers fail) and reboots when an update asks for it (a
 # move may hold that off two nights in a row, no more). An installer that

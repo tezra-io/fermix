@@ -1306,9 +1306,9 @@ compiled-in build identity, never from runtime detection.
 
 `packaging/cloud/first-boot.sh` is the root half of a server that becomes the
 owner's primary (M75 step 6). It runs once as root, from cloud-init user data
-(the code in `FERMIX_ENROLL_CODE`) or as
-`curl -fsSL https://fermix.ai/always-on | sudo sh` (the code read from the
-terminal without echo). It refuses, before it installs anything, any host but
+(the code in `FERMIX_ENROLL_CODE`, the release in `--version`) or as
+`curl -fsSL https://fermix.ai/always-on | sudo sh -s -- --version X` (the
+code read from the terminal without echo). It refuses, before it installs anything, any host but
 Debian 12, Debian 13 or Ubuntu 24.04 and, deciding, any kernel below Landlock
 ABI 3 (asked through `perl`'s `syscall`; a stock Debian 12 is one), where the
 engine would refuse every command; then in order: writes the enrollment code
@@ -1322,9 +1322,15 @@ host's own processes, which is why the server runs no containers), with a root
 unit that loads it before the network at every boot and a `user@<uid>` drop-in
 that will not start the engine account's service manager without it; gives a
 host with no swap a 2 GB `/swapfile`; installs the Linux package through
-`https://fermix.ai/install --no-setup`; turns on Debian's daily
+`https://fermix.ai/install --no-setup --version X`, the release the computer
+that sets it up runs; turns on Debian's daily
 unattended-upgrades and installs `fermix-update.timer`, a root timer that at
-04:00 UTC runs the installer again, `fermix restart` as the engine account
+04:00 UTC installs `fermix home status --json`'s `update_ceiling` (the
+oldest engine among the desktops the server served in the last 30 days,
+`FermixCore.Home.EngineCeiling`, which the server records from each
+desktop's `hello`) when it is newer than the installed release in
+`dpkg --compare-versions`' order, never back down and nothing when there is
+none, then `fermix restart` as the engine account
 when `fermix service status` says the running engine is behind the installed
 one (not while `fermix home status` shows a pending move phase, nor when
 either read fails), and `systemctl reboot` when `/run/reboot-required`
@@ -1345,7 +1351,10 @@ primary, the move) is the engine's own candidate role.
 containers against stand-ins for systemd, curl, apt and `fermix`, and once
 with the real apt and Chromium.
 
-Architecture Invariant: no engine process reaches the instance metadata
+Architecture Invariant: a server's Fermix is never newer than the oldest of
+the desktops it serves, so the home can always move back to one of them
+(the move's review refuses a server newer than the computer moving to it).
+No engine process reaches the instance metadata
 service. The enrollment code reaches the engine only as a file, never in an
 argument, an environment the engine inherits, or the console output. A failed
 nightly update leaves the running engine as it was, and nothing the engine
@@ -1515,9 +1524,14 @@ Current channels:
   reassemble `Mobile.Chunks` payloads themselves.
 - After a move (M75 §6, B1, B12) the desktop's device-role engine reaches its
   primary through `Desktop.DeviceSupervisor`, the one device-only child
-  (`Role`'s device-only list; its children are one list with each start
-  condition: the dial-only `Iroh.Helper`, then `Desktop.Relay`, both when
-  `device/desktop.json` exists). The relay reads
+  (`Role`'s device-only list), `:one_for_one` over two subtrees: the dial
+  subtree (`:rest_for_one`, one list with each start condition: the
+  dial-only `Iroh.Helper`, then `Desktop.Relay`, both when
+  `device/desktop.json` exists), and, while the home receives a move back,
+  the candidate subtree (`Home.CandidateSupervisor`, `:temporary`, started
+  with the tree when `candidate/` exists and on a running one through
+  `Home.Link`'s `start_return/1`, stopped by `stop_return/0`; one that
+  cannot start or gives up is logged and never takes the relay down). The relay reads
   `FermixCore.Home.DesktopLink` (`device/desktop.json` and the 0600
   `device/desktop_key`, refused by name otherwise), opens one `IK` session
   through `Mobile.Rail` from a linked connector process (the rail's owner, so
@@ -1607,7 +1621,18 @@ Current channels:
   which enrolls through `Mobile.Rail` and answers `Home.MoveResponder`'s
   steps (offer, refused without room for the stream and the restored home;
   stage in a task; commit, an activation that fails part-way retried on a
-  timer while a resume is refused; resume). On the source,
+  timer while a resume is refused; resume). A desktop receiving the home back
+  (Always On's move back) runs the same subtree under its device tree: its
+  candidate of kind `return` stages the server's capture as a return
+  (`Candidate.Activation.stage/6`: this computer's device settings, secret
+  store and keychain, without its own desktop row) and on `move_commit`
+  records the staged entries once and activates in place
+  (`Activation.activate/2`, `moved.json` removed before `config.toml` is the
+  primary's), then restarts; it holds `MoveAwake` from `receiving` until
+  that restart, and a stop part-way is finished by the device's next start
+  (before the settings) or the primary's boot (after), which also records
+  the return (`Home.Return.done/2`). A candidate of kind `local` waits for
+  no commit: only an activation in progress is finished. On the source,
   `Home.MoveWorker` (a line of `Desktop.DeviceSupervisor`, started while
   `Home.Move.pending?/1`) holds the computer awake for its whole run
   (`FermixCore.Home.MoveAwake`: `caffeinate -i -w <BEAM pid>` through the

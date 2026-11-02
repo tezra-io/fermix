@@ -95,10 +95,17 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
   defp server do
     desktop = %{device_id: "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e", name: "studio-mac"}
 
-    record(:primary, %{epoch: 5, snapshots: server_snapshots(), disk: disk(0.42)}, %{
-      link:
-        link(desktops: [Map.merge(desktop, %{connected: true, since: ~U[2031-05-04 09:00:00Z]})])
-    })
+    # The server installs the version its desktop runs, at most.
+    record(
+      :primary,
+      %{epoch: 5, snapshots: server_snapshots(), disk: disk(0.42), update_ceiling: "1.2.3"},
+      %{
+        link:
+          link(
+            desktops: [Map.merge(desktop, %{connected: true, since: ~U[2031-05-04 09:00:00Z]})]
+          )
+      }
+    )
   end
 
   defp on, do: desktop(primary(:connected, nil), server())

@@ -87,7 +87,7 @@ defmodule FermixCore.Management.AlwaysOnTest do
         :ok
       end,
       free_bytes: fn _dir -> {:ok, 1_099_511_627_776} end,
-      version: "0.16.0",
+      version: "9.9.9",
       host: "linux-x86_64",
       restarts_itself: true,
       restart: fn ->
@@ -508,14 +508,18 @@ defmodule FermixCore.Management.AlwaysOnTest do
   end
 
   describe "a server of the owner's own" do
-    test "opens a manual code, answered once with the command, which carries no code", ctx do
+    test "opens a manual code, answered once with the command, which carries no code and " <>
+           "names the release this computer runs",
+         ctx do
       assert {:ok, %{"result" => result, "summary" => summary}} = press(ctx, "own_server")
       assert_received {:enrollment_opened, :manual}
 
       assert result == %{
                "code" => @manual_code,
                "expires_at" => "2031-05-04T12:30:00Z",
-               "command" => "curl -fsSL https://fermix.ai/always-on | sudo sh"
+               "command" =>
+                 "curl -fsSL https://fermix.ai/always-on | sudo sh -s -- --version " <>
+                   FermixCore.BuildInfo.product_version()
              }
 
       refute summary |> Jason.encode!() |> String.contains?(@manual_code)

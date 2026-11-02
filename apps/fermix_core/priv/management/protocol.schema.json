@@ -5749,6 +5749,11 @@
           "description": "This engine's version.",
           "type": "string",
           "minLength": 1
+        },
+        "update_ceiling": {
+          "description": "The Fermix version a server's nightly update installs, in every role: the oldest engine among the desktops this machine served as their primary in the last 30 days, so the home can always move back to one of them; null when none was, or when it cannot be read. Absent from an engine older than it.",
+          "type": ["string", "null"],
+          "minLength": 1
         }
       }
     },

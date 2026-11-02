@@ -11,9 +11,11 @@ defmodule FermixCore.Home.Provision.FirstBootTest do
   @code "fxenroll1.eyJ2IjoxLCJuYW1lIjoiaW52ZW50ZWQifQ_-Zx9"
   # A provider's user data limit, as its module passes it in.
   @max 32_768
+  # The release the desktop that creates the server runs.
+  @release "0.17.0"
 
   test "the user data unpacks the first boot byte for byte and checks it before it runs" do
-    {:ok, user_data} = FirstBoot.user_data(@code, @max)
+    {:ok, user_data} = FirstBoot.user_data(@code, @release, @max)
 
     assert String.starts_with?(user_data, "#!/bin/sh\n")
 
@@ -32,27 +34,37 @@ defmodule FermixCore.Home.Provision.FirstBootTest do
              "printf '%s  %s\\n' #{digest} /usr/local/lib/fermix-always-on/first-boot.sh | sha256sum -c --quiet"
   end
 
-  test "the code reaches the first boot only in its environment, never on a command line" do
-    {:ok, user_data} = FirstBoot.user_data(@code, @max)
+  # Always On's move back, design §6: the server installs exactly the
+  # release its desktop runs, from its first boot, so the home can come back.
+  test "the code reaches the first boot only in its environment, never on a command line, " <>
+         "and the release to install is named on it" do
+    {:ok, user_data} = FirstBoot.user_data(@code, @release, @max)
 
     assert user_data =~
-             "FERMIX_ENROLL_CODE='#{@code}' sh /usr/local/lib/fermix-always-on/first-boot.sh\n"
+             "FERMIX_ENROLL_CODE='#{@code}' sh /usr/local/lib/fermix-always-on/first-boot.sh " <>
+               "--version 0.17.0\n"
 
     assert length(String.split(user_data, @code)) == 2
   end
 
+  test "anything but a release is refused before it can reach a shell" do
+    for bad <- ["latest", "v0.17.0", "0.17", "0.17.0-rc.1", "0.17.0 --restore", "0.17.0\nrm", nil] do
+      assert FirstBoot.user_data(@code, bad, @max) == {:error, :invalid_version}, inspect(bad)
+    end
+  end
+
   test "the user data is shell the server can parse" do
-    {:ok, user_data} = FirstBoot.user_data(@code, @max)
+    {:ok, user_data} = FirstBoot.user_data(@code, @release, @max)
 
     {output, status} = System.cmd("sh", ["-n", "-c", user_data], stderr_to_stdout: true)
     assert {output, status} == {"", 0}
   end
 
   test "user data past the provider's limit is refused, never cut" do
-    {:ok, user_data} = FirstBoot.user_data(@code, @max)
+    {:ok, user_data} = FirstBoot.user_data(@code, @release, @max)
 
-    assert FirstBoot.user_data(@code, byte_size(user_data)) == {:ok, user_data}
-    assert FirstBoot.user_data(@code, byte_size(user_data) - 1) == {:error, :too_large}
+    assert FirstBoot.user_data(@code, @release, byte_size(user_data)) == {:ok, user_data}
+    assert FirstBoot.user_data(@code, @release, byte_size(user_data) - 1) == {:error, :too_large}
   end
 
   test "anything but an enrollment code is refused before it can reach a shell" do
@@ -64,7 +76,7 @@ defmodule FermixCore.Home.Provision.FirstBootTest do
           "fxenroll1.abc\nrm",
           String.duplicate("a", 10)
         ] do
-      assert FirstBoot.user_data(bad, @max) == {:error, :invalid_code}, inspect(bad)
+      assert FirstBoot.user_data(bad, @release, @max) == {:error, :invalid_code}, inspect(bad)
     end
   end
 end

@@ -4,7 +4,9 @@
 # environment; `home enroll` records the SHA-256 of the code file it can read
 # and writes a candidate home the way the real verb does. `home status --json`
 # answers the candidate's phases from /etc/fermix-test/phases, one line per
-# call ("phase|sentence"), the last repeated (enrolled without the file).
+# call ("phase|sentence"), the last repeated (enrolled without the file), and
+# its update_ceiling from /etc/fermix-test/ceiling (1.2.3 without it, null
+# when it says none).
 # The release the service runs is kept in $state/running-version: `service
 # install` and `restart` start the installed one (the fake installer records
 # it in $state/installed-version), and `service status --json` answers
@@ -59,7 +61,10 @@ case "$verb" in
     line="enrolled|Enrolled with Invented Mac; waiting for its move."
     if [ -f "$fixtures/phases" ]; then line=$(sed -n "${calls}p" "$fixtures/phases"); fi
     if [ -z "$line" ]; then line=$(tail -n 1 "$fixtures/phases"); fi
-    printf '{\n  "ok": true,\n  "result": {\n    "move": {\n      "candidate": null,\n      "phase": "%s",\n      "sentence": "%s"\n    },\n    "moved": null,\n    "role": "candidate"\n  },\n  "schema_version": 1\n}\n' \
-      "${line%%|*}" "${line#*|}"
+    ceiling='"1.2.3"'
+    if [ -f "$fixtures/ceiling" ]; then ceiling="\"$(cat "$fixtures/ceiling")\""; fi
+    if [ "$ceiling" = '"none"' ]; then ceiling=null; fi
+    printf '{\n  "ok": true,\n  "result": {\n    "move": {\n      "candidate": null,\n      "phase": "%s",\n      "sentence": "%s"\n    },\n    "moved": null,\n    "role": "candidate",\n    "update_ceiling": %s\n  },\n  "schema_version": 1\n}\n' \
+      "${line%%|*}" "${line#*|}" "$ceiling"
     ;;
 esac

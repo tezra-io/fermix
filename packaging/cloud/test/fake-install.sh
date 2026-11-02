@@ -2,7 +2,7 @@
 # What the curl stand-in serves for https://fermix.ai/install: puts the
 # stand-in fermix where the package puts the real one, and the package's own
 # systemd user unit where the package puts it, and records the release it
-# installed (/etc/fermix-test/release, else 1.2.3) where the dpkg-query
+# installed (the one --version names, else 1.2.3) where the dpkg-query
 # stand-in reads it. It stops, as a failed download or install does, while
 # /etc/fermix-test/installer-fails exists.
 set -eu
@@ -12,7 +12,7 @@ if [ -f /etc/fermix-test/installer-fails ]; then
   exit 1
 fi
 release=1.2.3
-if [ -f /etc/fermix-test/release ]; then release=$(cat /etc/fermix-test/release); fi
+if [ "${2-}" = --version ]; then release=$3; fi
 install -m 0755 /cloud/test/stubs/fermix /usr/bin/fermix
 install -D -m 0644 /linux-systemd/fermix.service /usr/lib/systemd/user/fermix.service
 # Shared with the stand-in fermix, which runs as the engine account.
