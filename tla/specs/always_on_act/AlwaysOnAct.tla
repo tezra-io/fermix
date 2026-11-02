@@ -66,8 +66,8 @@
 (* run, one answer over the link, or one report of the relay.            *)
 (***************************************************************************)
 
-\* SOURCE: apps/fermix_core/lib/fermix_core/management/always_on.ex @ 2766a6974452
-\* SOURCE: apps/fermix_core/lib/fermix_core/management/provision.ex#put_action,clear_action,holding,stop_step,start,ended,ending,delete,delete_target,move_forwarded,started?,record_move,primary_reached,reached,run_clean_up @ 018c48a2be90
+\* SOURCE: apps/fermix_core/lib/fermix_core/management/always_on.ex @ f33a26e926ca
+\* SOURCE: apps/fermix_core/lib/fermix_core/management/provision.ex#put_action,clear_action,holding,stop_step,start,ended,ending,delete,delete_target,move_forwarded,started?,record_move,primary_reached,reached,run_clean_up @ 16b54c44cec1
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/provision/ledger.ex#put_action,clear_action,end_step,interrupt,live_action?,move_started,replace_due,moving?,moved @ 9511a1ceeb6f
 \* SOURCE: apps/fermix_core/lib/fermix_core/management/jobs.ex#start,cancel,handle_call,start_job,cancel_job,stop_job,task_down,stopped,finish,begin_ending,end_closing,running? @ 4edd8b3647b0
 \* SOURCE: apps/fermix_core/lib/fermix_core/management/home_summary.ex#offered,find_action,running,running_step,replace_moving,new_server_step,cleanup @ 7a1cc24ac349
@@ -253,7 +253,8 @@ Take(c) ==
     /\ UNCHANGED <<ledger_vars, job_vars, world_vars, drawn, want, kind, ans, acts, hist_vars>>
 
 \* run/offered: the summary as it is now, and the key rule; then the step
-\* by what the screen showed (step/3; cancel/2 by the step that runs).
+\* by what the screen showed (step/3; cancel/2, outside a move back
+\* cancel_step/2, by the step that runs).
 Check(c) ==
     /\ pc[c] = "check"
     /\ IF KeyRule /\ want[c] \notin Offered
@@ -302,7 +303,7 @@ Unstart(c) ==
     /\ UNCHANGED <<server, failure, old, moveStarted, moved, records, job_vars, world_vars,
                    drawn, want, kind, ans, acts, holder, hist_vars>>
 
-\* cancel/2 while a create runs: Provision.stop_step/1 cancels the family's
+\* cancel_step/2 while a create runs: Provision.stop_step/1 cancels the family's
 \* running job; Jobs.cancel/2 tells its run to stop and, with CancelWaits,
 \* answers only after the run's :DOWN, the job still counted running.
 CancelJob(c) ==

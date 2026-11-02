@@ -1049,6 +1049,41 @@ defmodule FermixCore.Management.AlwaysOnTest do
       assert after_cancel["state"] == "on"
     end
 
+    # HR-2a (the move back's TLA spec): Cancel forgets the record before the
+    # candidate, so a stop between the two leaves a candidate alone, which
+    # the screen offers to Cancel; never a started record alone.
+    test "Cancel forgets the record before the candidate", ctx do
+      enrolled!(ctx)
+      key = offered!(summary(ctx.opts), "cancel")["key"]
+      # The candidate cannot be removed: the home's own folder is read-only.
+      File.chmod!(ctx.home, 0o500)
+      on_exit(fn -> File.chmod(ctx.home, 0o700) end)
+
+      assert {:error, :unavailable, _details} =
+               AlwaysOn.act(%{action: "cancel", key: key, input: %Input{}}, ctx.opts)
+
+      File.chmod!(ctx.home, 0o700)
+      assert Return.read(ctx.home) == :absent
+      assert Candidate.present?(ctx.home)
+      assert "cancel" in Enum.map(HomeSummary.offered(summary(ctx.opts)), & &1["id"])
+    end
+
+    test "a started record left alone, the server the primary with no move, is cancelled",
+         ctx do
+      :ok =
+        Return.write(ctx.home, %{
+          from: "fermix-general-a3f9",
+          started_at: @at,
+          move_started_at: @at,
+          candidate_id: @back_cand
+        })
+
+      assert %{"state" => "problem", "detail" => %{"kind" => "return_failed"}} = summary(ctx.opts)
+      assert {:ok, %{"summary" => after_cancel}} = press(ctx, "cancel")
+      assert Return.read(ctx.home) == :absent
+      assert after_cancel["state"] == "on"
+    end
+
     test "Cancel goes on when the server cannot be reached: its code lapses by itself", ctx do
       enrolled!(ctx)
 

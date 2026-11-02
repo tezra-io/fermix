@@ -434,22 +434,32 @@ defmodule FermixCore.Management.ProvisionTest do
       assert_received :restored
     end
 
-    test "a server silent for less than ten minutes, or answering, is not deleted, and " <>
-           "nothing is restored",
+    # A server that answers again (or was not silent long enough) by the time
+    # the job's fence runs is no delete failure: nothing is deleted or
+    # restored, the request is dropped, and the screen is the linked one.
+    test "a server silent for less than ten minutes, or answering, is not deleted, nothing " <>
+           "is restored, and the request is dropped",
          ctx do
       for link <- [link_down(9 * 60_000), link_up()] do
+        :ok =
+          Return.write(ctx.home, %{
+            from: "fermix-general-a3f9",
+            started_at: @now,
+            fence_requested: "20310504T093000Z-e5.fxsnap"
+          })
+
         {:ok, job} = restore(ctx, link)
 
         assert %{"status" => "failed", "failure" => %{"sentence" => sentence}} =
                  finished(job, ctx)
 
         assert sentence ==
-                 "Fermix could not delete your server, so it did not restore here: a restored " <>
-                   "copy beside a running server would answer twice."
+                 "Your server answers again, so Fermix deleted nothing and restored nothing here."
 
-        assert %{state: :failed, failure: %{action: "delete"}, server: %{status: :created}} =
+        assert %{failure: nil, action: nil, server: %{status: :created}} =
                  Ledger.state(ctx.home, Hetzner)
 
+        refute Map.has_key?(elem(Return.read(ctx.home), 1), :fence_requested)
         refute_received :restored
       end
     end
@@ -541,6 +551,31 @@ defmodule FermixCore.Management.ProvisionTest do
                    "it does."
       end
 
+      assert %{server: %{status: :created}} = Ledger.state(ctx.home, Hetzner)
+    end
+
+    # The TLA spec's check 09, its last second: after a move back's last
+    # step and before its restart this computer has no candidate, no link
+    # and no marker, but the record says the move started and it has not
+    # booted as the primary yet.
+    test "while the record says a move back started and is not done, the server is not " <>
+           "deleted",
+         ctx do
+      SafeRm.rm!(DesktopLink.path(ctx.home))
+      :ok = Moved.remove(ctx.home)
+
+      :ok =
+        Return.write(ctx.home, %{
+          from: "fermix-general-a3f9",
+          started_at: @now,
+          move_started_at: @now,
+          candidate_id: "cand-7a3e1c9b5d2f4086"
+        })
+
+      assert {:error, :unavailable, %{"sentence" => sentence}} =
+               answered(Provision.delete(seams(ctx, role: @primary)))
+
+      assert sentence =~ "Fermix is moving back to this computer"
       assert %{server: %{status: :created}} = Ledger.state(ctx.home, Hetzner)
     end
 

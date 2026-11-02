@@ -104,7 +104,7 @@ defmodule FermixCore.Management.Copy do
                    restore_deleting restore_failed fence_failed server_retired notice_back
                    progress_return_receiving progress_return_staged progress_return_placing
                    progress_restoring confirm_delete_back confirm_restore_here
-                   confirm_return_move)a
+                   confirm_return_move fence_server_back)a
   # Each Details line's label, by its key.
   @line_labels [
     server: "Server",
@@ -550,6 +550,9 @@ defmodule FermixCore.Management.Copy do
     do:
       "Fermix could not delete your server, so it did not restore here: a restored copy " <>
         "beside a running server would answer twice."
+
+  def summary_sentence(:fence_server_back, _values),
+    do: "Your server answers again, so Fermix deleted nothing and restored nothing here."
 
   def summary_sentence(:server_retired, %{machine: machine}),
     do:

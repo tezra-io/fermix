@@ -780,7 +780,7 @@ defmodule FermixCore.Management.Provision do
     cond do
       Move.moving_to(home) != :none -> refusal(:move_under_way, provider)
       return_fence?(home, opts) -> {:ok, :return_fence}
-      Candidate.present?(home) -> refusal(:moving_back, provider)
+      moving_back?(home) -> refusal(:moving_back, provider)
       DesktopLink.linked?(record, home) -> not_holding(ledger, provider)
       Moved.read(home) != :absent -> not_holding(ledger, provider)
       true -> {:ok, :current}
@@ -793,8 +793,21 @@ defmodule FermixCore.Management.Provision do
   defp return_fence?(home, opts) do
     match?({:ok, %{fence_requested: _copy}}, Return.read(home)) and
       not Candidate.present?(home) and
-      server_silent?(Keyword.get(opts, :link_status, fn -> Link.impl().status() end).())
+      server_silent?(link_status(opts))
   end
+
+  # A move back in any phase: its candidate here, or its record saying the
+  # move started while this computer has not booted as the primary (the
+  # second between its last step and its restart, when neither candidate,
+  # link nor marker is left).
+  defp moving_back?(home), do: Candidate.present?(home) or started_back?(Return.read(home))
+
+  defp started_back?({:ok, %{move_started_at: %DateTime{}} = record}),
+    do: not Map.has_key?(record, :moved_at)
+
+  defp started_back?(_read), do: false
+
+  defp link_status(opts), do: Keyword.get(opts, :link_status, fn -> Link.impl().status() end).()
 
   defp server_silent?(%{primary: nil}), do: true
   defp server_silent?(%{primary: %{status: :revoked}}), do: true
@@ -960,8 +973,26 @@ defmodule FermixCore.Management.Provision do
         with {:ok, _deleted} <- run_delete(provider, :return_fence, report, opts), do: :ok
 
       _refused ->
-        fence_failed(:not_fenced, opts)
+        fence_refused(opts)
     end
+  end
+
+  # A server that answers again by the time the fence runs is not deleted,
+  # and that is no failure of a delete: the request is dropped, and the
+  # screen is the linked one again. Any other refusal is the fence's.
+  defp fence_refused(opts) do
+    if server_silent?(link_status(opts)),
+      do: fence_failed(:not_fenced, opts),
+      else: server_back(home(opts))
+  end
+
+  defp server_back(home) do
+    with {:ok, record} <- Return.read(home),
+         {:error, reason} <- Return.write(home, Map.delete(record, :fence_requested)) do
+      Logger.error("provision: restore here's request stays: #{inspect(reason)}")
+    end
+
+    {:error, {:refused, Copy.summary_sentence(:fence_server_back, %{})}}
   end
 
   # The server went for a restore before: a step that stopped since says
