@@ -129,6 +129,13 @@ defmodule FermixOpik.TraceFile do
        # application name.
        :target_kind,
        :cu_mode,
+       # Protocol 12 (M86 P2): the verb sent to a control by name, the dialogs or
+       # menus left open, why a walk stopped short, and its accessibility
+       # messages. A closed word, a closed reason and two counts — never a label.
+       :cu_verb,
+       :cu_surfaces_count,
+       :cu_truncated,
+       :cu_ax_messages,
        # A voice call's task function (M70 §09): the terminal word and the
        # Fermix-minted task id that tell a refused or cancelled call from one
        # that ran. Never the request the model sent.

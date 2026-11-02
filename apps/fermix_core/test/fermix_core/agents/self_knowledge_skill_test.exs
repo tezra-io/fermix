@@ -514,6 +514,49 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     end
   end
 
+  # The Linux helper reads controls through the accessibility bus on X11 and
+  # Wayland, and drives GNOME Wayland's pixels through the desktop portal. The
+  # self-reference says so, and never again that Linux is pixels only or that
+  # Wayland input does not work.
+  test "says what computer use offers on Linux" do
+    body = File.read!(self_knowledge_path())
+    reference = File.read!(reference_path("computer_use"))
+
+    for text <- [body, reference] do
+      refute text =~ "pixels only"
+      refute text =~ "XTEST only"
+      assert text =~ "desktop portal"
+    end
+
+    for required <- ["accessibility bus", "asks the person on first use", "controls only"] do
+      assert reference =~ required, "the computer_use reference does not say #{required}"
+    end
+  end
+
+  # A window binds on macOS and on Linux under X11, where the helper's own badge
+  # stands in for the Mac panel; never on Wayland. The refusal for a window that
+  # cannot be proven the one bound is real again, and the doctor bullet is not
+  # filed under macOS.
+  test "says where a window can be bound" do
+    body = File.read!(self_knowledge_path())
+    reference = File.read!(reference_path("computer_use"))
+    [_before, window] = String.split(reference, "## Work inside one window", parts: 2)
+    [window | _rest] = String.split(window, "\n## ", parts: 2)
+    [_before, mac] = String.split(reference, "## Permissions and identity (macOS)", parts: 2)
+    [mac | _rest] = String.split(mac, "\n## ", parts: 2)
+
+    assert body =~ "Linux under X11, never Wayland"
+
+    for required <- ["Linux under X11", "never on Wayland", "badge"] do
+      assert window =~ required, "the window binding section does not say #{required}"
+    end
+
+    refute window =~ ~r/\A \(experimental, off by default, macOS\)/
+    assert reference =~ "a window that cannot be proven to be the one bound"
+    refute mac =~ "`fermix doctor`"
+    assert reference =~ "`fermix doctor`'s `computer use` row"
+  end
+
   # GPT-Live has no noise or echo settings, so "why does it hear my keyboard or
   # its own voice?" is answered by the Mac's voice processing and the daemon's
   # echo window, and a Linux client has to bring its own.

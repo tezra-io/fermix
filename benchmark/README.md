@@ -1049,10 +1049,12 @@ The fixture audio is regenerated, and checked for reproducibility, with
 ## 5h. The desktop corpus and the computer-use baseline (`run_desktop.py`, `cu_baseline.py`)
 
 `suites/desktop/corpus.yaml` (contract: `suites/SCHEMA.md`, *Desktop corpus*)
-holds 29 real-user requests against the compux fixture applications: GTK3, GTK4
+holds 35 real-user requests against the compux fixture applications: GTK3, GTK4
 and Qt on Linux (`compux/fixtures/linux/`), the AppKit half of `FixtureApp` on
-macOS. Each attempt is decided by what the application recorded about itself and
-counted from the daemon's own traces.
+macOS. Two of them are marked `platforms: [linux]` (a refusal only the Linux
+fixtures can produce) and are planned on those fixtures alone. Each attempt is
+decided by what the application recorded about itself and counted from the
+daemon's own traces.
 
 One attempt: launch the fixture on a fresh state file in the run's directory and
 wait for it to write that file empty and settle its window; send the query as one

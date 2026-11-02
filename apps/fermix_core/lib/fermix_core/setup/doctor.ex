@@ -342,23 +342,30 @@ defmodule FermixCore.Setup.Doctor do
     * `%{state: :not_installed}` — enabled, but the native sidecar isn't installed.
     * `%{state: :probed, ...}`   — the live grant breakdown (`screen_capture`,
       `input_control`, `display_server`, `platform`) from a non-prompting sidecar
-      probe.
+      probe, with the Linux facts `ComputerUse.Probe` carries for the doctor's
+      Linux rows (each `nil` from a helper that reports none).
 
   `{:error, reason}` only when an installed sidecar could not be probed. The probe
   is the only path that spawns the sidecar, so the disabled/not-installed cases stay
   cheap.
+
+  Options (tests only): `:installed?` (a zero-arity check, default the
+  installer's), and `:driver` and `:binary_path`, which `ComputerUse.Probe.run/1`
+  takes.
   """
-  @spec computer_use_permissions() :: {:ok, map()} | {:error, term()}
-  def computer_use_permissions do
+  @spec computer_use_permissions(keyword()) :: {:ok, map()} | {:error, term()}
+  def computer_use_permissions(opts \\ []) when is_list(opts) do
+    installed? = Keyword.get(opts, :installed?, &SidecarInstaller.installed?/0)
+
     cond do
       not ComputerUse.enabled?() -> {:ok, %{state: :disabled}}
-      not SidecarInstaller.installed?() -> {:ok, %{state: :not_installed}}
-      true -> probe_computer_use()
+      not installed?.() -> {:ok, %{state: :not_installed}}
+      true -> probe_computer_use(Keyword.take(opts, [:driver, :binary_path]))
     end
   end
 
-  defp probe_computer_use do
-    case ComputerUseProbe.run() do
+  defp probe_computer_use(probe_opts) do
+    case ComputerUseProbe.run(probe_opts) do
       {:ok, result} -> {:ok, Map.put(result, :state, :probed)}
       {:error, reason} -> {:error, reason}
     end

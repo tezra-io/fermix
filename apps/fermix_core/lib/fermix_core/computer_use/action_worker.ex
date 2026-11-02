@@ -60,8 +60,9 @@ defmodule FermixCore.ComputerUse.ActionWorker do
 
   @doc """
   Whether macOS is delivering this session's synthetic input, as answered by the
-  one-time start-up probe. Read once by the `Session` at init; the probe itself is
-  a driver call, so it runs where the driver is.
+  one-time start-up probe; always true for a Linux helper, which never drops
+  input silently. Read once by the `Session` at init; the probe itself is a driver
+  call, so it runs where the driver is.
   """
   @spec input_control?(GenServer.server()) :: boolean()
   def input_control?(worker), do: GenServer.call(worker, :input_control?)
@@ -227,8 +228,18 @@ defmodule FermixCore.ComputerUse.ActionWorker do
   # cannot brick looking. A probe that times out is no longer a hazard beyond that
   # — the wire correlates a reply to the request that asked for it, so its late
   # frame is dropped by id and can never answer the first action.
+  #
+  # The denied state is macOS's alone: `input_control: false` from a helper whose
+  # `platform` is `macos`, or that names none (the helpers that predate the field
+  # were macOS-only). A Linux helper's `false` says its pixel route does not serve
+  # the pointer; nothing is dropped silently there, because the helper refuses a
+  # pixel action itself with a sentence, and its controls still act.
   defp probe_input_control(driver_mod, driver_state) do
     case driver_mod.execute(driver_state, %{"action" => "probe"}) do
+      {:ok, %{"input_control" => false, "platform" => platform}}
+      when is_binary(platform) and platform != "macos" ->
+        true
+
       {:ok, %{"input_control" => false}} ->
         false
 

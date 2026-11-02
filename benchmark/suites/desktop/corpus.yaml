@@ -31,7 +31,12 @@ description: >
   names the helper's typed code for the refusal that is the right outcome: the
   task passes only when its clauses pass and a failed computer-use row in the
   turn carries THAT code (a paused, busy or user-active refusal does not). A turn
-  that made no computer-use call is invalid, never a pass. Contract:
+  that made no computer-use call is invalid, never a pass. `platforms` marks a
+  task only some fixtures can produce (a refusal only the Linux fixtures' own
+  windows or keyboard give); it is planned on those fixtures alone.
+  `sanity_route` labels a sanity case: a task the fixture's state would pass by
+  any route also needs a computer-use row in the turn that took that route
+  (`wait_for`, or `type_by_reference`). Contract:
   `suites/SCHEMA.md`, "Desktop corpus".
 defaults:
   # A desktop task is several look/act round trips through the computer-use tool.
@@ -275,3 +280,81 @@ tasks:
     query: "Press the {toolkit} disabled button in the {window} window."
     oracle:
       - { control: "{tk}.disabled_button", absent: true }
+
+  # --- M86 P2: waiting by name, typing into a control, and the protocol-12 refusals ---
+
+  - id: confirm_once_asked
+    # The question takes a moment to appear: wait for it by name (`until` on the
+    # press, or `wait_for`) rather than by screenshots, then answer it. Labelled
+    # sanity case: the dialog records the same events however the turn waited, so
+    # the route is asserted too.
+    verb: wait_for
+    sanity_route: wait_for
+    query: "In the {window} window, choose Clear All…, wait until it asks, then confirm it."
+    oracle:
+      - { control: "{tk}.dialog", action: open, present: true }
+      - { control: "{tk}.dialog", action: accept, count: 1 }
+      - { control: "{tk}.dialog", action: cancel, absent: true }
+
+  - id: export_once_menu_opens
+    # Labelled sanity case: the menu records the same activation however the turn
+    # waited for it to open, so the route is asserted too.
+    verb: wait_for
+    sanity_route: wait_for
+    query: >
+      Open the Actions menu of the {window} application, wait until it is showing, and
+      choose Export Report from it.
+    oracle:
+      - { control: "{tk}.menu", action: activate, value: Export Report, count: 1 }
+      - { control: "{tk}.menu", action: activate, value: Print Preview, absent: true }
+
+  - id: type_into_text_field
+    # `type` with the field's `element_ref` puts the text in that control; no
+    # click to focus it first. Labelled sanity case: the field records the same
+    # value from a click and keystrokes, so the route is asserted too.
+    verb: type
+    sanity_route: type_by_reference
+    query: "Type 'hello world' into the {toolkit} text field of the {window} window."
+    oracle:
+      - { control: "{tk}.text_field", action: set_value, value: "hello world", last: true }
+
+  - id: read_a_dialog_that_is_not_open
+    # No dialog is open, so listing the open dialog (`elements` with scope
+    # `dialog`) is refused `scope_not_found`, and the answer is that nothing is
+    # asking. Opening Clear All… to have something to read is the wrong move.
+    verb: refusal
+    expect_refusal: scope_not_found
+    query: "What is the open dialog in the {window} window asking me? Don't open anything."
+    oracle:
+      - { control: "{tk}.dialog", absent: true }
+      - { control: "{tk}.menu", absent: true }
+
+  - id: focus_behind_a_dialog
+    # Linux fixtures only: their Clear All… dialog is a window of its own, so
+    # while it is open the main window is not the active one and `focus` on its
+    # search box is refused `focus_refused` (focus never brings a window
+    # forward). The macOS fixture's dialog is a sheet inside its window, which
+    # stays the focused one, so it cannot produce this refusal.
+    verb: refusal
+    platforms: [linux]
+    expect_refusal: focus_refused
+    query: >
+      In the {window} window, open Clear All… and, without answering it, put the cursor
+      in the search box.
+    oracle:
+      - { control: "{tk}.dialog", action: open, present: true }
+      - { control: "{tk}.dialog", action: accept, absent: true }
+      - { control: "{tk}.search", action: focus, absent: true }
+
+  - id: type_outside_the_layout
+    # Linux fixtures only: keystrokes go through the keyboard layout, which
+    # cannot produce these characters, so typing them is refused
+    # `text_outside_layout` and the text goes in by `paste`. macOS types any text.
+    verb: refusal
+    platforms: [linux]
+    expect_refusal: text_outside_layout
+    query: >
+      Click into the {toolkit} text field of the {window} window and type
+      '東京 → Zürich' there.
+    oracle:
+      - { control: "{tk}.text_field", action: set_value, value: "東京 → Zürich", last: true }

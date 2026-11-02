@@ -2,13 +2,17 @@ defmodule FermixCore.Tools.ComputerUseTest do
   use ExUnit.Case, async: false
 
   alias Compux.Protocol
+  alias FermixCore.Capabilities.Builtin
+  alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.ComputerUse.Background
   alias FermixCore.ComputerUse.Config
   alias FermixCore.ComputerUse.HelperActions
   alias FermixCore.ComputerUse.Session
   alias FermixCore.ComputerUse.Supervisor, as: CuSupervisor
+  alias FermixCore.Prompt.RuntimeSections
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Tools.ComputerUse
+  alias FermixCore.Tools.ToolHelp
   alias FermixTestSupport.ComputerUseObservations
 
   # The image a pointer action names. Addressing is checked before any driver
@@ -22,12 +26,31 @@ defmodule FermixCore.Tools.ComputerUseTest do
   # The reading the schema is built from (M86 F1), as a helper that lists every
   # action the library encodes answers it: today's pinned helper does, on every
   # system.
-  defp read_helper(actions) do
+  defp read_helper(actions, input_methods \\ []) do
     start_supervised!({HelperActions, read_at_boot?: false})
-    :ok = HelperActions.record(actions)
+    record(actions, input_methods)
   end
 
+  # A later helper's reading, over the one `read_helper/2` started with.
+  defp record(actions, input_methods \\ []),
+    do: :ok = HelperActions.record(%{actions: actions, input_methods: input_methods})
+
   @accessibility ~w(elements inspect press set_value)
+
+  # What a Linux helper whose pixel route was refused lists: every pixel verb,
+  # `inspect` and the binding left out.
+  @controls_only Protocol.actions() --
+                   ~w(screenshot left_click right_click double_click mouse_move left_click_drag
+                      scroll key wait_for_change paste windows inspect select_target release_target)
+
+  # The pixel verbs, and the words that describe working by them.
+  @pixel_words ~w(screenshot screenshots left_click right_click double_click mouse_move
+                  left_click_drag scroll key wait_for_change paste windows inspect click clicks
+                  clicked clicking drag mouse pixel pixels zoom aim coordinates)
+
+  # The fields that exist only for a pixel verb.
+  @pixel_fields ~w(x y modifiers from to direction amount chord timeout_ms poll_ms region
+                   confirm_grid marks mark)
 
   # Every place in the schema a model reads an action's name from.
   defp schemas do
@@ -292,7 +315,7 @@ defmodule FermixCore.Tools.ComputerUseTest do
       assert "press" in params["properties"]["action"]["enum"]
       assert "set_value" in params["properties"]["action"]["enum"]
       assert ref["type"] == "string"
-      assert ref["description"] =~ "REQUIRED by `press`/`set_value`"
+      assert ref["description"] =~ "REQUIRED by `press`, `set_value`"
       assert ref["description"] =~ "Never send both a reference and coordinates"
       assert params["properties"]["value"]["description"] =~ "set_value"
       assert action =~ "cannot miss"
@@ -312,6 +335,40 @@ defmodule FermixCore.Tools.ComputerUseTest do
         assert tag in tags, "#{tag} can be returned and is not a declared failure mode"
       end
     end
+
+    test "the Linux refusals are declared failure modes" do
+      tags = Enum.map_join(ComputerUse.failure_modes(), " ", & &1.tag)
+
+      for code <- ~w(no_active_window keyboard_not_neutral pixels_unavailable) do
+        assert tags =~ code, "#{code} can be returned and is not a declared failure mode"
+      end
+    end
+
+    # The helper turns at most 50 notches and refuses anything else, as its
+    # library does first, so the schema says the same bounds the library holds.
+    test "scroll's amount is the notches the helper turns, 1 to 50" do
+      amount = ComputerUse.parameters()["properties"]["amount"]
+
+      assert amount["type"] == "integer"
+      assert amount["minimum"] == 1
+      assert amount["maximum"] == 50
+      assert amount["description"] =~ "1 to 50"
+
+      assert {:ok, _request} = Protocol.validate(scroll(amount["maximum"]))
+      assert {:error, _reason} = Protocol.validate(scroll(amount["maximum"] + 1))
+      assert {:error, _reason} = Protocol.validate(scroll(amount["minimum"] - 1))
+    end
+  end
+
+  defp scroll(amount) do
+    %{
+      "action" => "scroll",
+      "observation_id" => @obs,
+      "x" => 1,
+      "y" => 1,
+      "direction" => "down",
+      "amount" => amount
+    }
   end
 
   describe "dynamic_parameters/1 — live access mode folded into the action schema" do
@@ -425,11 +482,11 @@ defmodule FermixCore.Tools.ComputerUseTest do
       assert ComputerUse.dynamic_description(%{conversation_key: {"cli", "other", :root}}) ==
                full
 
-      :ok = HelperActions.record(HelperActions.pixel())
+      record(HelperActions.pixel())
       pixel = ComputerUse.dynamic_description(%{})
       refute pixel == full
 
-      :ok = HelperActions.record(Protocol.actions())
+      record(Protocol.actions())
       assert ComputerUse.dynamic_description(%{}) == full
     end
 
@@ -490,6 +547,331 @@ defmodule FermixCore.Tools.ComputerUseTest do
       assert ComputerUse.dynamic_description(%{}) =~ "select_target"
       assert Map.has_key?(ComputerUse.dynamic_parameters(%{})["properties"], "window_id")
       assert action_desc(ComputerUse.dynamic_parameters(%{})) =~ "release_target"
+    end
+  end
+
+  # Protocol 12 (M86 P2): the verbs on a control, the listing's arguments and the
+  # wait on the tree are offered — in the enum, the fields and the words — only
+  # where the helper's reading offers them. Four readings: a helper of the
+  # previous surface (every protocol-11 action, no new verb), today's macOS
+  # helper, the Linux pixel helper, and the boot reading before any helper has
+  # answered.
+  describe "the protocol 12 surface follows the helper's reading (M86 P2)" do
+    setup do
+      previous = Application.get_env(:fermix_core, :computer_use, [])
+      on_exit(fn -> Application.put_env(:fermix_core, :computer_use, previous) end)
+      Application.put_env(:fermix_core, :computer_use, enabled: true, background: false)
+      :ok
+    end
+
+    @new_verbs ~w(focus select toggle expand collapse scroll_to wait_for)
+    # The words that offer `type` with an `element_ref`, in the schema.
+    @type_by_reference ~r/`type` (with an `element_ref`|takes it)/
+    @listing_fields ~w(scope query skeleton root)
+    @previous_surface ~w(screenshot left_click right_click double_click mouse_move
+                         left_click_drag scroll type key wait inspect wait_for_change paste
+                         elements windows press set_value select_target release_target)
+
+    # How many calls `holder` received while `fun` ran, read off an Erlang trace of
+    # its mailbox; `trace_delivered` makes sure every trace message is in before
+    # they are counted.
+    defp holder_calls(holder, fun) do
+      1 = :erlang.trace(holder, true, [:receive])
+      fun.()
+      1 = :erlang.trace(holder, false, [:receive])
+      ref = :erlang.trace_delivered(holder)
+      assert_receive {:trace_delivered, ^holder, ^ref}
+      count_calls(holder, 0)
+    end
+
+    defp count_calls(holder, count) do
+      receive do
+        {:trace, ^holder, :receive, {:"$gen_call", _from, _request}} ->
+          count_calls(holder, count + 1)
+
+        {:trace, ^holder, :receive, _other} ->
+          count_calls(holder, count)
+      after
+        0 -> count
+      end
+    end
+
+    defp texts do
+      [
+        {"the per-turn description", ComputerUse.dynamic_description(%{})},
+        {"the runtime steering", steering()}
+      ] ++ for({where, schema} <- schemas(), do: {where, Jason.encode!(schema)})
+    end
+
+    # The Runtime Contract's computer-use lines: the rest of the prompt is other
+    # tools' words ("a press-release ID", the browser's own elements in the
+    # catalog), which no reading decides.
+    defp steering do
+      [_before, contract] =
+        String.split(RuntimeSections.build([]), "## Runtime Contract", parts: 2)
+
+      [contract | _rest] = String.split(contract, "\n## ")
+
+      contract
+      |> String.split("\n")
+      |> Enum.filter(&(&1 =~ "computer_use"))
+      |> Enum.join("\n")
+    end
+
+    defp lacked(offered), do: Enum.reject(Protocol.actions(), &(&1 in offered))
+
+    test "today's macOS helper is offered every verb, its fields and the words for them" do
+      read_helper(Protocol.actions(), ~w(foreground_hid ax))
+
+      for {where, schema} <- schemas() do
+        enum = schema["properties"]["action"]["enum"]
+        for verb <- @new_verbs, do: assert(verb in enum, "#{where} lacks `#{verb}`")
+
+        for field <- ["on", "until" | @listing_fields] do
+          assert Map.has_key?(schema["properties"], field), "#{where} lacks `#{field}`"
+        end
+
+        assert schema["properties"]["element_ref"]["description"] =~ "`toggle`"
+        assert schema["properties"]["element_ref"]["description"] =~ @type_by_reference
+        assert schema["properties"]["text"]["description"] =~ @type_by_reference
+        assert schema["properties"]["scope"]["description"] =~ "inside `until`"
+      end
+
+      description = ComputerUse.dynamic_description(%{})
+      assert description =~ "CONTROLS FIRST"
+      assert description =~ "canvases, games, remote desktops"
+      assert description =~ "`until` on an action"
+      assert steering() =~ "work by control"
+      # Only a plain listing wakes an app that builds its tree late (PROTOCOL.md §2.2).
+      assert steering() =~ "List an app plainly the first time"
+      assert description =~ "after a plain first listing"
+    end
+
+    test "a helper of the previous surface is offered none of the new verbs or the wait" do
+      read_helper(@previous_surface)
+
+      for {where, schema} <- schemas() do
+        enum = schema["properties"]["action"]["enum"]
+        for verb <- @new_verbs, do: refute(verb in enum, "#{where} offers `#{verb}`")
+        refute Map.has_key?(schema["properties"], "on"), "#{where} offers `on`"
+        refute Map.has_key?(schema["properties"], "until"), "#{where} offers `until`"
+      end
+
+      for {where, text} <- texts(), verb <- lacked(@previous_surface) do
+        refute names?(text, verb), "#{where} names `#{verb}`, which this helper lacks"
+      end
+
+      # `scope` is offered here, and the words beside it must not name a wait or a
+      # bound window the reading and the flag do not offer (the verb check above
+      # cannot see either).
+      for {where, text} <- texts() do
+        refute text =~ "`until`", where
+        refute text =~ @type_by_reference, where
+      end
+
+      for {where, schema} <- schemas() do
+        refute schema["properties"]["scope"]["description"] =~ "bound", where
+      end
+    end
+
+    # Typing into a control rides the contract's own signal, the helper's
+    # `input_methods` (PROTOCOL.md §1): a helper that lists controls but types only
+    # at the keyboard is not offered it anywhere.
+    test "a helper that types only at the keyboard is not offered typing into a control" do
+      read_helper(Protocol.actions(), ~w(foreground_hid))
+
+      for {where, schema} <- schemas() do
+        assert Map.has_key?(schema["properties"], "element_ref"), "#{where} lists no controls"
+      end
+
+      for {where, text} <- texts() do
+        refute text =~ @type_by_reference, "#{where} offers typing into a control"
+      end
+    end
+
+    # One schema is one reading: the holder is asked once per build, so a helper
+    # that answers between two asks cannot leave half of each in the schema.
+    test "each schema is built from one read of the holder" do
+      read_helper(Protocol.actions(), ~w(foreground_hid ax))
+      holder = Process.whereis(HelperActions)
+
+      assert holder_calls(holder, fn -> ComputerUse.parameters() end) == 1
+      assert holder_calls(holder, fn -> ComputerUse.dynamic_parameters(%{}) end) == 1
+    end
+
+    test "the Linux pixel helper is offered no control, no listing argument and no wait" do
+      read_helper(HelperActions.pixel())
+
+      for {where, schema} <- schemas(),
+          field <- ["element_ref", "value", "on", "until" | @listing_fields] do
+        refute Map.has_key?(schema["properties"], field), "#{where} offers `#{field}`"
+      end
+
+      for {where, text} <- texts(), verb <- lacked(HelperActions.pixel()) do
+        refute names?(text, verb), "#{where} names `#{verb}`, which this helper lacks"
+      end
+
+      for {where, text} <- texts() do
+        refute text =~ "CONTROLS FIRST", where
+        refute text =~ "`until`", where
+        refute text =~ "work by control", where
+      end
+    end
+
+    test "before any helper has answered, the words are the pixel helper's" do
+      for {where, text} <- texts(), verb <- lacked(HelperActions.pixel()) do
+        refute names?(text, verb), "#{where} names `#{verb}` before any helper answered"
+      end
+    end
+
+    # The description and the steering ride the provider's cached prompt prefix:
+    # the same reading must give the same bytes, whatever the turn.
+    test "the description and the steering are the same for the same reading" do
+      read_helper(Protocol.actions())
+      description = ComputerUse.dynamic_description(%{})
+      full_steering = steering()
+
+      record(HelperActions.pixel())
+      refute ComputerUse.dynamic_description(%{}) == description
+      refute steering() == full_steering
+
+      record(Protocol.actions())
+
+      assert ComputerUse.dynamic_description(%{conversation_key: {"cli", "other", :root}}) ==
+               description
+
+      assert steering() == full_steering
+    end
+
+    # `tool_help` documents the reading too, not the pixel copy registered at boot,
+    # and never a verb this helper lacks (M86 P2).
+    test "tool_help documents the parameters, examples and failure modes of the reading" do
+      registry = :"tool_help_cu_#{System.unique_integer([:positive])}"
+      start_supervised!({CapabilityRegistry, name: registry})
+      # Registered before any helper answered, as at boot: the pixel copy.
+      :ok = CapabilityRegistry.register(registry, Builtin.from_tool_module(ComputerUse))
+      read_helper(Protocol.actions())
+
+      assert {:ok, docs} = ToolHelp.render(registry, "computer_use", %{})
+
+      for field <- ~w(until on scope query root skeleton element_ref) do
+        assert docs =~ "`#{field}`", "the docs lack `#{field}`"
+      end
+
+      assert docs =~ "focus_refused"
+      assert docs =~ ~s("toggle")
+
+      record(HelperActions.pixel())
+      assert {:ok, pixel} = ToolHelp.render(registry, "computer_use", %{})
+
+      refute pixel =~ "`until`"
+      refute pixel =~ "`element_ref`"
+
+      for verb <- lacked(HelperActions.pixel()) do
+        refute names?(pixel, verb), "the pixel docs name `#{verb}`"
+      end
+    end
+
+    # GNOME Wayland's portal serves no `windows`, so nothing the model reads may
+    # send it there: the description says to read a window's bounds in a full
+    # screenshot instead. Helpers that list it read what they always did.
+    test "`windows` is named only where the helper lists it" do
+      wayland = Protocol.actions() -- ~w(inspect select_target release_target paste windows)
+      read_helper(wayland, ~w(foreground_hid ax))
+
+      for {where, text} <- texts() do
+        refute text =~ "`windows`", "#{where} names `windows`"
+        refute text =~ "windows (list", "#{where} offers `windows`"
+      end
+
+      description = ComputerUse.dynamic_description(%{})
+      assert description =~ "`screenshot` and `elements` each return an `observation_id`"
+      assert description =~ "Read the window's bounds in a full `screenshot`"
+
+      for actions <- [Protocol.actions(), Protocol.actions() -- ["inspect"]] do
+        record(actions, ~w(foreground_hid ax))
+        description = ComputerUse.dynamic_description(%{})
+
+        assert description =~ "`screenshot`, `elements` and `windows` each return"
+        assert description =~ "Call `windows` to get the exact bounds"
+        assert action_desc(ComputerUse.dynamic_parameters(%{})) =~ "windows (list the open"
+      end
+    end
+
+    # GNOME Wayland's portal has no clipboard to paste through, so its helper does
+    # not list `paste`, and nothing the model reads may offer it there. Helpers
+    # that list it read what they always did.
+    test "`paste` is named only where the helper lists it" do
+      wayland = Protocol.actions() -- ~w(inspect select_target release_target paste windows)
+      read_helper(wayland, ~w(foreground_hid ax))
+      modes = {"the failure modes", Jason.encode!(ComputerUse.failure_modes())}
+
+      for {where, text} <- [modes | texts()] do
+        refute names?(text, "paste"), "#{where} names `paste`"
+      end
+
+      params = ComputerUse.dynamic_parameters(%{})
+      assert action_desc(params) =~ "left_click_drag, scroll, type, key"
+      assert action_desc(params) =~ "`type` remains for text that must go through real keystrokes"
+      assert params["properties"]["text"]["description"] =~ "Text to type (for action=type)"
+
+      for actions <- [Protocol.actions(), HelperActions.pixel()] do
+        record(actions, ~w(foreground_hid ax))
+        params = ComputerUse.dynamic_parameters(%{})
+
+        assert action_desc(params) =~ "type, paste (clipboard — prefer for long text), key"
+        assert params["properties"]["text"]["description"] =~ "Text to type or paste"
+        assert ComputerUse.dynamic_description(%{}) =~ "keystroke or paste returns the VIEW"
+        assert Jason.encode!(ComputerUse.failure_modes()) =~ "nothing was sent — use paste"
+      end
+    end
+
+    # A Linux session whose pixel route was refused lists the controls and nothing
+    # else: no capture, no pointer, no keys, input by accessibility alone. Nothing
+    # the model reads may describe pixels to it, or a verb it cannot send.
+    test "a controls-only reading is never described with pixel verbs" do
+      read_helper(@controls_only, ["ax"])
+
+      docs = [
+        {"the failure modes", Jason.encode!(ComputerUse.failure_modes())},
+        {"the examples", Jason.encode!(ComputerUse.examples())} | texts()
+      ]
+
+      for {where, text} <- docs, word <- @pixel_words do
+        refute names?(text, word), "#{where} says #{word}"
+      end
+
+      # Only a Linux session reads this way, so the macOS hints go with the pixels.
+      for {where, text} <- docs, hint <- ["open -a", "osascript", "AppleScript"] do
+        refute text =~ hint, "#{where} says #{hint}"
+      end
+
+      for {_where, schema} <- schemas(), field <- @pixel_fields do
+        refute Map.has_key?(schema["properties"], field), "the schema offers `#{field}`"
+      end
+
+      refute Enum.any?(
+               ComputerUse.examples(),
+               &(&1.args == %{"action" => "type", "text" => "hello"})
+             )
+    end
+
+    test "the examples and failure modes name only what the reading offers" do
+      read_helper(HelperActions.pixel())
+
+      pixel_docs = Jason.encode!(%{e: ComputerUse.examples(), f: ComputerUse.failure_modes()})
+      # A mark and coordinates on one action is refused by any helper that mints marks.
+      assert Enum.any?(ComputerUse.failure_modes(), &(&1.tag == "addressing_conflict"))
+
+      for verb <- lacked(HelperActions.pixel()) do
+        refute names?(pixel_docs, verb), "the pixel docs name `#{verb}`"
+      end
+
+      record(Protocol.actions())
+      actions = Enum.map(ComputerUse.examples(), & &1.args["action"])
+      assert "toggle" in actions
+      assert "elements" in actions
+      assert Enum.any?(ComputerUse.failure_modes(), &(&1.tag == "focus_refused"))
     end
   end
 
@@ -920,11 +1302,62 @@ defmodule FermixCore.Tools.ComputerUseTest do
       assert result.success == false
       assert result.error =~ "another conversation"
       assert result.error =~ "was not sent"
-      assert result.error =~ "Read-only actions"
+      assert result.error =~ "Looking still works: a `screenshot` sends no input"
       refute result.error =~ "action failed"
+
+      # The sentence is read whatever the helper offers, so it names only the look
+      # every helper has (M86 P2): a Linux helper has neither of these.
+      refute result.error =~ "elements"
+      refute result.error =~ "inspect"
 
       assert_receive {:tool_exec, meta}
       assert meta.outcome == :refused
+    end
+
+    # Which conversation holds the seat is unknown, which is not the same fact and
+    # not the same next move — and the look it offers is one every helper has.
+    test "an unknown seat holder names the next move, and only the look every helper has", %{
+      config: config,
+      turn: turn
+    } do
+      session = scripted_session(reply: {:error, {:refused, :input_unavailable}})
+
+      assert {:ok, result} =
+               ComputerUse.execute(
+                 %{"action" => "left_click", "observation_id" => @obs, "x" => 1, "y" => 2},
+                 tool_context(session, config, turn)
+               )
+
+      assert result.error =~ "could not be established"
+      assert result.error =~ "Looking still works: a `screenshot` sends no input"
+      refute result.error =~ "elements"
+      refute result.error =~ "inspect"
+    end
+
+    # The refusal for want of an image names the look every helper has, and a
+    # listing in general, never an action a Linux helper lacks (M86 P2).
+    test "a target with no image names the look every helper has", %{config: config, turn: turn} do
+      session =
+        start_supervised!(
+          {Session,
+           [
+             config: config,
+             driver: {StubDriver, [test_pid: self()]},
+             origin: :interactive,
+             session_id: "cua_unaddressed_#{System.unique_integer([:positive])}"
+           ]}
+        )
+
+      assert {:ok, result} =
+               ComputerUse.execute(
+                 %{"action" => "left_click", "x" => 1, "y" => 2},
+                 tool_context(session, config, turn)
+               )
+
+      assert result.error =~ "it names no `observation_id`"
+      assert result.error =~ "a `screenshot`, or the listing the target came from"
+      refute result.error =~ "`elements`"
+      refute result.error =~ "element_ref"
     end
 
     # A helper that will not say what it did with the input has broken the contract

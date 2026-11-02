@@ -65,7 +65,9 @@ def test_the_corpus_loads_with_every_required_verb_on_every_fixture():
     assert set(loaded.fixtures) == {"gtk3", "gtk4", "qt", "macos"}
     assert all(task.risk == "desktop_input" for task in loaded.tasks)
     rendered = corpus.render_all(loaded, sorted(loaded.fixtures))
-    assert len(rendered) == len(loaded.tasks) * 4
+    expected = sum(1 for task in loaded.tasks for fixture_def in loaded.fixtures.values()
+                   if fixture_def.platform in task.platforms)
+    assert len(rendered) == expected
 
 
 def test_a_rendered_task_names_the_fixtures_own_labels_and_controls():
@@ -79,11 +81,31 @@ def test_a_rendered_task_names_the_fixtures_own_labels_and_controls():
     assert macos.clauses[0].control == "appkit.button"
 
 
-def test_the_disabled_button_task_expects_a_refusal():
+def test_the_refusal_tasks_expect_their_codes_on_their_platforms():
     loaded = corpus.load(CORPUS)
-    refusals = [t for t in loaded.tasks if t.expect_refusal]
-    assert [(t.id, t.expect_refusal) for t in refusals] == [("press_disabled_button",
-                                                            "element_disabled")]
+    refusals = {t.id: (t.expect_refusal, t.platforms) for t in loaded.tasks if t.expect_refusal}
+    assert refusals == {
+        "press_disabled_button": ("element_disabled", ("linux", "macos")),
+        "read_a_dialog_that_is_not_open": ("scope_not_found", ("linux", "macos")),
+        "focus_behind_a_dialog": ("focus_refused", ("linux",)),
+        "type_outside_the_layout": ("text_outside_layout", ("linux",)),
+    }
+
+
+# A task some fixtures cannot produce is marked for the platform that can (M86
+# P2): it renders for that platform's fixtures alone, and asking it of another
+# fixture is an error, never a quiet skip.
+def test_a_task_for_one_platform_renders_on_its_fixtures_alone():
+    loaded = corpus.load(CORPUS)
+    task = next(t for t in loaded.tasks if t.id == "focus_behind_a_dialog")
+    assert task.platforms == ("linux",)
+    names = {r.fixture for r in corpus.render_all(loaded, sorted(loaded.fixtures))
+             if r.task.id == task.id}
+    assert names == {"gtk3", "gtk4", "qt"}
+    assert corpus.render_all(loaded, ["macos"]) and all(
+        r.task.id != task.id for r in corpus.render_all(loaded, ["macos"]))
+    with pytest.raises(corpus.CorpusError, match="linux"):
+        corpus.render(loaded, task, "macos")
 
 
 def _write_corpus(tmp_path, mutate) -> str:
@@ -115,6 +137,12 @@ def _disabled_task(raw) -> dict:
     (lambda raw: raw["tasks"][0].update(oracle=[]), "oracle"),
     (lambda raw: raw.update(tasks=raw["tasks"][:5]), "at least"),
     (lambda raw: raw.update(tasks=[t for t in raw["tasks"] if t["verb"] != "focus"]), "focus"),
+    (lambda raw: raw.update(tasks=[t for t in raw["tasks"] if t["verb"] != "wait_for"]),
+     "wait_for"),
+    (lambda raw: raw["tasks"][0].update(platforms=["windows"]), "platforms"),
+    (lambda raw: raw["tasks"][0].update(platforms=[]), "platforms"),
+    (lambda raw: raw["tasks"][0].update(platforms="linux"), "platforms"),
+    (lambda raw: raw["tasks"][0].update(sanity_route="teleport"), "sanity_route"),
     (lambda raw: raw["fixtures"]["gtk3"].update(platform="windows"), "platform"),
     (lambda raw: raw["tasks"][0]["oracle"][0].update(count=-1), "count"),
     (lambda raw: raw["tasks"][0]["oracle"][0].update(value=80), "text"),
@@ -478,6 +506,24 @@ def test_dry_run_validates_and_plans_without_launching_anything(monkeypatch, cap
         assert name in out
 
 
+def test_dry_run_plans_a_task_for_one_platform_on_its_fixtures_alone(monkeypatch, capsys):
+    _forbid(monkeypatch, *NOTHING_SPAWNED)
+    argv = ["--dry-run", "--repeat", "1", "--task", "focus_behind_a_dialog"]
+    assert run_desktop.main(argv) == run_desktop.EXIT_OK
+    out = capsys.readouterr().out
+    assert "gtk3: In the Compux Fixture GTK3 window" in out
+    assert "macos: not planned (the task is for linux)" in out
+    assert "1 turn(s) on gtk3" in out
+    assert "0 turn(s) on macos" in out
+
+
+def test_dry_run_names_a_sanity_case_route(monkeypatch, capsys):
+    _forbid(monkeypatch, *NOTHING_SPAWNED)
+    argv = ["--dry-run", "--repeat", "1", "--task", "confirm_once_asked"]
+    assert run_desktop.main(argv) == run_desktop.EXIT_OK
+    assert "sanity route wait_for" in capsys.readouterr().out
+
+
 # Every refusal test forbids what lies past its guard: with the guard removed (a
 # planted regression), the run must fail here, never reach a daemon or a display.
 def test_a_live_run_is_refused_without_the_disposable_desktop_attestation(monkeypatch, capsys):
@@ -565,6 +611,77 @@ def test_a_daemon_quiet_since_the_abandoned_turn_lets_the_run_go_on(tmp_path):
     with open(day / "llm_call.jsonl", "w", encoding="utf-8") as handle:
         handle.write(json.dumps(llm_row(long_ago, duration=10)) + "\n")
     run_desktop.wait_for_quiet(SimpleNamespace(traces_root=str(tmp_path)), long_ago - 1000)
+
+
+# --- labelled sanity cases: a route the fixture's state alone cannot show ---------
+
+# AGENTS.md allows a route assertion only for safety and in labelled sanity
+# cases. These three tasks pass on the fixture's state by any route, so each is
+# labelled with the route it is there to show.
+def test_the_sanity_cases_name_their_route():
+    loaded = corpus.load(CORPUS)
+    routes = {t.id: t.sanity_route for t in loaded.tasks if t.sanity_route}
+    assert routes == {"confirm_once_asked": "wait_for", "export_once_menu_opens": "wait_for",
+                      "type_into_text_field": "type_by_reference"}
+
+
+UNTIL_KEY = '%{"action" => "key", "chord" => "cmd+s", "until" => %{"kind" => "menu_open"}}'
+
+
+@pytest.mark.parametrize("row, route, took", [
+    (cu_row(BASE_MS, "wait_for"), "wait_for", True),
+    (cu_row(BASE_MS, "key", args=UNTIL_KEY), "wait_for", True),
+    (cu_row(BASE_MS, "key", args='%{"action" => "key", "chord" => "cmd+s"}'), "wait_for", False),
+    (cu_row(BASE_MS, "type", args='%{"action" => "type", "element_ref" => "e2", "text" => "a"}'),
+     "type_by_reference", True),
+    (cu_row(BASE_MS, "type", args='%{"action" => "type", "text" => "a"}'),
+     "type_by_reference", False),
+    # A mark on `type` names the control to type into: the session sends the
+    # badged control's `element_ref` in its place.
+    (cu_row(BASE_MS, "type", args='%{"action" => "type", "mark" => 4, "text" => "a"}'),
+     "type_by_reference", True),
+    # A refused row took no route: a mark with no reference, or a reference refused,
+    # leaves the model to type some other way.
+    (cu_row(BASE_MS, "type", success=False,
+            args='%{"action" => "type", "mark" => 4, "text" => "a"}'),
+     "type_by_reference", False),
+    (cu_row(BASE_MS, "type", success=False,
+            args='%{"action" => "type", "element_ref" => "e2", "text" => "a"}'),
+     "type_by_reference", False),
+    (cu_row(BASE_MS, "wait_for", success=False), "wait_for", False),
+    (cu_row(BASE_MS, "type", args='%{"action" => "type", "element_'), "type_by_reference", False),
+    (cu_row(BASE_MS, "type"), "type_by_reference", False),
+    (llm_row(BASE_MS), "wait_for", False),
+])
+def test_a_route_is_taken_only_by_a_computer_use_row_that_took_it(row, route, took):
+    assert cu_trace.took_route(row, route) is took
+
+
+def test_an_unknown_route_is_refused():
+    with pytest.raises(ValueError):
+        cu_trace.took_route(cu_row(BASE_MS, "wait_for"), "teleport")
+
+
+TYPED = '%{"action" => "type", "observation_id" => "7c1e-4", "element_ref" => "e2", ' \
+        '"text" => "hello world"}'
+
+
+@pytest.mark.parametrize("typed_args, passes", [
+    ('%{"action" => "type", "text" => "hello world"}', False), (TYPED, True)])
+def test_a_sanity_case_passes_only_by_its_route(tmp_path, fake_fixture, monkeypatch,
+                                                typed_args, passes):
+    def rows(now):
+        return [llm_row(now + 10, duration=5), cu_row(now + 20, "elements", output="1 control"),
+                cu_row(now + 30, "type", args=typed_args, output="typed"),
+                llm_row(now + 60, duration=5)]
+    events = [event(1, "gtk3.text_field", "set_value", value="hello world")]
+    ctx, task = _attempt_world(tmp_path, fake_fixture, monkeypatch, events, rows,
+                               "type_into_text_field")
+    attempt = run_desktop.run_attempt(ctx, task, repeat_index=1, run_id="desktop-test")
+    assert attempt["status"] == "scored", attempt
+    assert all(c["passed"] for c in attempt["clauses"])
+    assert attempt["sanity_route_seen"] is passes
+    assert attempt["success"] is passes
 
 
 def _attempt_world(tmp_path, fake_fixture, monkeypatch, events, rows, task_id="save_document"):

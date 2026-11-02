@@ -5,7 +5,9 @@ One task list serves every fixture. A task's query may name `{toolkit}` and
 `{tk}.<family>`, `{tk}` being the fixture's prefix (`gtk3`, `qt`, `appkit`), or
 by a shared name such as `document.save`. `load` renders every task for every
 fixture before it returns, so a clause naming a control some fixture does not
-record fails at load (and in `--dry-run`) on any host, not mid-run on one.
+record fails at load (and in `--dry-run`) on any host, not mid-run on one. A
+task with `platforms` is for those platforms' fixtures alone: a refusal only
+one platform's fixtures can produce is never planned on the other.
 
 Every task carries `risk: desktop_input`, the suite's, and nothing else is
 accepted: this corpus injects real input and captures the screen, and a lower
@@ -25,7 +27,7 @@ RISK = "desktop_input"
 MIN_TASKS = 24
 REQUIRED_VERBS = frozenset({
     "press", "set_value", "type", "select", "toggle", "expand", "collapse", "scroll_to",
-    "focus", "dialog", "menu", "ambiguity", "refusal", "secure"})
+    "focus", "wait_for", "dialog", "menu", "ambiguity", "refusal", "secure"})
 VERBS = REQUIRED_VERBS | {"form"}
 PLATFORMS = ("linux", "macos")
 QUERY_FIELDS = frozenset({"toolkit", "window"})
@@ -33,7 +35,8 @@ CONTROL_FIELDS = frozenset({"tk"})
 LAUNCH_FIELDS = frozenset({"fixture_dir", "fixture_app", "state_file"})
 _SUITE_KEYS = {"suite", "title", "risk", "description", "defaults", "fixtures", "controls",
                "tasks"}
-_TASK_KEYS = {"id", "verb", "query", "oracle", "expect_refusal", "timeout_ms", "risk"}
+_TASK_KEYS = {"id", "verb", "query", "oracle", "expect_refusal", "timeout_ms", "risk",
+              "platforms", "sanity_route"}
 _FIXTURE_KEYS = {"platform", "prefix", "toolkit", "window", "launch", "env"}
 
 
@@ -68,6 +71,12 @@ class Task:
     expect_refusal: str | None
     timeout_ms: int
     risk: str
+    # The platforms whose fixtures can produce this task; every platform unless
+    # the task says otherwise (a refusal only one platform's fixtures answer).
+    platforms: tuple[str, ...] = PLATFORMS
+    # A labelled sanity case: the route (`cu_trace.ROUTES`) a computer-use row in
+    # the turn must take, for a task whose fixture state any route could produce.
+    sanity_route: str | None = None
 
 
 @dataclass(frozen=True)
@@ -237,11 +246,21 @@ def _task(index: int, spec, timeout_ms: int, problems: list[str]) -> Task | None
                         f"the codes the classifier recognises on a row "
                         f"{sorted(cu_trace.TYPED_CODE_ANCHORS)}")
     _check_oracle(where, spec.get("oracle"), problems)
+    route = spec.get("sanity_route")
+    if route is not None and route not in cu_trace.ROUTES:
+        problems.append(f"{where}: `sanity_route` names {route!r}, which is not one of "
+                        f"{', '.join(cu_trace.ROUTES)}")
+    platforms = spec.get("platforms", list(PLATFORMS))
+    if (not isinstance(platforms, list) or not platforms
+            or not set(platforms) <= set(PLATFORMS)):
+        problems.append(f"{where}: `platforms` must be a non-empty list of "
+                        f"{', '.join(PLATFORMS)}; it is {platforms!r}")
     if len(problems) > before:
         return None
     return Task(id=spec["id"], verb=spec["verb"], query=" ".join(query.split()),
                 oracle=tuple(spec["oracle"]), expect_refusal=spec.get("expect_refusal"),
-                timeout_ms=spec.get("timeout_ms", timeout_ms), risk=RISK)
+                timeout_ms=spec.get("timeout_ms", timeout_ms), risk=RISK,
+                platforms=tuple(p for p in PLATFORMS if p in platforms), sanity_route=route)
 
 
 def _check_oracle(where: str, clauses, problems: list[str]) -> None:
@@ -269,9 +288,12 @@ def _coverage(tasks: list[Task], problems: list[str]) -> None:
 # --- rendering -------------------------------------------------------------------
 
 def render(corpus: Corpus, task: Task, fixture_name: str) -> RenderedTask:
-    """The task as asked of one fixture. Raises CorpusError when a clause names a
-    control that fixture does not record."""
+    """The task as asked of one fixture. Raises CorpusError when the task is not
+    for that fixture's platform, or a clause names a control it does not record."""
     fixture = corpus.fixtures[fixture_name]
+    if fixture.platform not in task.platforms:
+        raise CorpusError([f"task {task.id} is for {', '.join(task.platforms)}; the "
+                           f"{fixture_name} fixture runs on {fixture.platform}"])
     allowed = fixture.controls(corpus.families, corpus.shared)
     clauses, problems = [], []
     for number, raw in enumerate(task.oracle, start=1):
@@ -288,9 +310,12 @@ def render(corpus: Corpus, task: Task, fixture_name: str) -> RenderedTask:
 
 
 def render_all(corpus: Corpus, fixture_names: list[str]) -> list[RenderedTask]:
-    """Every task for every named fixture; every problem reported together."""
+    """Every task for every named fixture on that task's platforms (a task for
+    another platform is not planned there); every problem reported together."""
     rendered, problems = [], []
-    for name, task in ((name, task) for name in fixture_names for task in corpus.tasks):
+    pairs = ((name, task) for name in fixture_names for task in corpus.tasks
+             if corpus.fixtures[name].platform in task.platforms)
+    for name, task in pairs:
         try:
             rendered.append(render(corpus, task, name))
         except CorpusError as exc:

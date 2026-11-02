@@ -304,22 +304,26 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.detail =~ "Screen Recording"
     end
 
-    # M38 §8.2. The shipped string told every Wayland user to "use an X11
-    # session" on desktops that no longer offer one, which is worse than naming
-    # no remedy at all. Each replacement says what is refused, why, and what
-    # remains true — and never instructs an impossible action.
-    test "wayland capture names the portal it needs and hedges the X11 advice" do
+    # The helper reaches a Wayland screen through GNOME's desktop portal under its
+    # own app id, and refuses the route where that cannot be had. The row says what
+    # is refused, why, and what remains true, never that the portal is unbuilt, and
+    # never instructs an impossible action.
+    test "wayland capture names the portal it needs and what still works" do
       probe = probed(platform: "linux", display_server: "wayland", screen_capture: false)
       result = Checks.computer_use_permissions({:ok, probe})
 
       assert result.status == :warn
-      assert result.detail =~ "screen capture unavailable on this Wayland session"
-      assert result.detail =~ "ScreenCast portal"
-      assert result.detail =~ "GNOME 50 and later do not"
+      assert result.detail =~ "unavailable on this Wayland session"
+      assert result.detail =~ "GNOME's desktop portal"
+      assert result.detail =~ "xdg-desktop-portal 1.18 or later"
+      assert result.detail =~ "Controls still work"
+      refute result.detail =~ "does not implement"
       refute result.detail =~ "Wayland is unsupported"
     end
 
-    test "wayland input names libei and the RemoteDesktop portal" do
+    # One route serves both halves, so this state has no cause of its own to name:
+    # the row says only what is missing, and claims nothing about libei.
+    test "wayland input alone missing names no unbuilt mechanism" do
       probe =
         probed(
           platform: "linux",
@@ -331,10 +335,27 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       result = Checks.computer_use_permissions({:ok, probe})
 
       assert result.status == :warn
-      assert result.detail =~ "input control unavailable on this Wayland session"
-      assert result.detail =~ "RemoteDesktop portal"
-      assert result.detail =~ "libei"
-      refute result.detail =~ "global input injection is blocked"
+      assert result.detail =~ "input control is not available (linux/wayland)"
+      refute result.detail =~ "libei"
+      refute result.detail =~ "does not implement"
+    end
+
+    # On GNOME Wayland the portal asks the person on the first pixel action, so a
+    # route that serves both halves is available, not granted.
+    test "wayland with the portal route says the person is asked, not that it is granted" do
+      probe =
+        probed(
+          platform: "linux",
+          display_server: "wayland",
+          screen_capture: true,
+          input_control: true
+        )
+
+      result = Checks.computer_use_permissions({:ok, probe})
+
+      assert result.status == :ok
+      assert result.detail =~ "desktop portal, which asks the person on first use"
+      refute result.detail =~ "granted"
     end
 
     # An install button whose only outcome is `{:error, {:unsupported_target,
@@ -433,6 +454,318 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     end
   end
 
+  describe "computer_use/1, the Linux rows" do
+    @reset "gdbus call --session --dest org.freedesktop.impl.portal.PermissionStore " <>
+             "--object-path /org/freedesktop/impl/portal/PermissionStore --method " <>
+             "org.freedesktop.impl.portal.PermissionStore.DeletePermission screenshot " <>
+             "screenshot io.tezra.fermix.ComputerUse"
+
+    # The owner's 22.04 desktop as the helper reports it: X11, a portal too old for
+    # its Registry, both Qt and Chromium notes.
+    defp linux(overrides \\ []) do
+      %{
+        state: :probed,
+        platform: "linux",
+        display_server: "x11",
+        screen_capture: true,
+        input_control: true,
+        display_adopted: false,
+        x11_pixels: %{xtest: true, keymap: true},
+        portal: %{
+          running: true,
+          version: "1.14.4-1ubuntu2~22.04.2",
+          registry: false,
+          screenshot_permission: "unset"
+        },
+        accessibility_bus: %{state: "answering", applications: 7, cause: nil, detail: nil},
+        accessibility_packages: %{
+          source: "dpkg",
+          at_spi2_core: "2.44.0-3",
+          atk_bridge: "2.38.0-3"
+        },
+        toolkit_notes: [
+          %{toolkit: "qt", note: "a Qt application publishes no tree: start it with QT_X=1"},
+          %{toolkit: "chromium", note: "start it with --force-renderer-accessibility"}
+        ]
+      }
+      |> Map.merge(Map.new(overrides))
+    end
+
+    defp rows(probe), do: tl(Checks.computer_use({:ok, probe}))
+
+    defp row(probe, name) do
+      case Enum.find(rows(probe), &(&1.name == name)) do
+        nil -> flunk("no #{name} row in #{inspect(Enum.map(rows(probe), & &1.name))}")
+        row -> row
+      end
+    end
+
+    defp portal(overrides), do: Map.merge(linux().portal, Map.new(overrides))
+    defp bus(overrides), do: Map.merge(linux().accessibility_bus, Map.new(overrides))
+    defp bridge(version), do: %{linux().accessibility_packages | atk_bridge: version}
+
+    test "the computer use row leads, and every state of it is still the row it was" do
+      for result <- [{:ok, %{state: :disabled}}, {:ok, linux()}, {:error, :sidecar_unavailable}] do
+        assert hd(Checks.computer_use(result)) == Checks.computer_use_permissions(result)
+      end
+    end
+
+    # macOS rows must not change: the Mac helper reports none of these facts.
+    test "macOS and every state that probed nothing add no row" do
+      mac = %{
+        state: :probed,
+        platform: "macos",
+        display_server: "quartz",
+        screen_capture: true,
+        input_control: true
+      }
+
+      for result <- [
+            {:ok, mac},
+            {:ok, %{state: :disabled}},
+            {:ok, %{state: :not_installed}},
+            {:error, :sidecar_unavailable}
+          ] do
+        assert [_computer_use] =
+                 Checks.computer_use(result, sidecar_target: {:ok, "macos-aarch64"})
+      end
+    end
+
+    test "the display server, and whether it was adopted from the user manager" do
+      own = row(linux(), "display server")
+      assert own.status == :ok
+      assert own.detail =~ "x11"
+      refute own.detail =~ "adopted"
+
+      adopted = row(linux(display_adopted: true), "display server")
+      assert adopted.status == :ok
+      assert adopted.detail =~ "adopted from the user manager"
+
+      unknown = row(linux(display_server: "wayland", display_adopted: nil), "display server")
+      assert unknown.detail =~ "wayland"
+      assert unknown.detail =~ "whether it was adopted from the user manager is unknown"
+
+      none = row(linux(display_server: "none"), "display server")
+      assert none.status == :warn
+      assert none.detail =~ "no display answers"
+    end
+
+    test "the accessibility bus: answering with N applications" do
+      assert %{status: :ok, detail: detail} = row(linux(), "accessibility bus")
+      assert detail =~ "answering, with 7 applications"
+
+      one = row(linux(accessibility_bus: bus(applications: 1)), "accessibility bus")
+      assert one.detail =~ "with 1 application"
+      refute one.detail =~ "applications"
+    end
+
+    test "the accessibility bus: answering but empty" do
+      empty = linux(accessibility_bus: bus(state: "empty", applications: 0))
+      assert %{status: :warn, detail: detail} = row(empty, "accessibility bus")
+      assert detail =~ "answering, but no application is on it"
+    end
+
+    # The bus said it answers; only the count is missing or none. Neither is an
+    # unknown bus.
+    test "the accessibility bus: answering with no application, or with a count not given" do
+      none = linux(accessibility_bus: bus(applications: 0))
+      assert %{status: :warn, detail: detail} = row(none, "accessibility bus")
+      assert detail =~ "answering, but no application is on it"
+
+      uncounted = linux(accessibility_bus: bus(applications: nil))
+      assert %{status: :ok, detail: detail} = row(uncounted, "accessibility bus")
+      assert detail =~ "answering"
+      assert detail =~ "did not say how many applications are on it"
+      refute detail =~ "unknown:"
+    end
+
+    test "the accessibility bus: unavailable with the reason the probe gives" do
+      down =
+        linux(
+          accessibility_bus:
+            bus(
+              state: "unavailable",
+              applications: nil,
+              cause: "not_installed",
+              detail: "org.a11y.Bus is not provided"
+            )
+        )
+
+      assert %{status: :warn, detail: detail} = row(down, "accessibility bus")
+      assert detail =~ "unavailable (not_installed): org.a11y.Bus is not provided"
+
+      silent = linux(accessibility_bus: bus(state: "unavailable", applications: nil))
+      assert row(silent, "accessibility bus").detail =~ "the helper gave no reason"
+
+      odd = linux(accessibility_bus: bus(state: "unknown", applications: nil))
+      assert %{status: :warn, detail: unknown} = row(odd, "accessibility bus")
+      assert unknown =~ "unknown"
+
+      absent = linux(accessibility_bus: nil)
+      assert row(absent, "accessibility bus").detail =~ "unknown"
+    end
+
+    # Information, never a warning: compux never asks the call that aborts on it.
+    test "an ATK bridge older than 2.52 is information" do
+      old = row(linux(), "atk bridge")
+      assert old.status == :ok
+      assert old.detail =~ "2.38.0-3, older than 2.52"
+      assert old.detail =~ "never asks"
+
+      epoch = row(linux(accessibility_packages: bridge("1:2.50.1-1")), "atk bridge")
+      assert epoch.detail =~ "older than 2.52"
+
+      current = row(linux(accessibility_packages: bridge("2.52.0-1build1")), "atk bridge")
+      assert current.status == :ok
+      assert current.detail == "2.52.0-1build1"
+
+      later = row(linux(accessibility_packages: bridge("2.56.2-1")), "atk bridge")
+      refute later.detail =~ "older"
+
+      odd = row(linux(accessibility_packages: bridge("snapshot")), "atk bridge")
+      assert odd.detail =~ "snapshot, which does not say whether it is older than 2.52"
+
+      none = row(linux(accessibility_packages: bridge(nil)), "atk bridge")
+      assert none.detail =~ "not installed"
+
+      unread =
+        linux(accessibility_packages: %{source: nil, at_spi2_core: nil, atk_bridge: nil})
+
+      assert row(unread, "atk bridge").detail =~ "unknown"
+      assert row(linux(accessibility_packages: nil), "atk bridge").detail =~ "unknown"
+    end
+
+    test "toolkit notes are shown as the probe gives them, one row each" do
+      qt = row(linux(), "toolkit qt")
+      assert qt.status == :ok
+      assert qt.detail == "a Qt application publishes no tree: start it with QT_X=1"
+
+      chromium = row(linux(), "toolkit chromium")
+      assert chromium.detail == "start it with --force-renderer-accessibility"
+
+      quiet = rows(linux(toolkit_notes: []))
+      refute Enum.any?(quiet, &String.starts_with?(&1.name, "toolkit"))
+      refute Enum.any?(rows(linux(toolkit_notes: nil)), &String.starts_with?(&1.name, "toolkit"))
+    end
+
+    test "the X11 pixel route: XTEST and the keymap present" do
+      assert %{status: :ok, detail: detail} = row(linux(), "x11 pixels")
+      assert detail =~ "XTEST present, keyboard map present"
+
+      no_xtest = row(linux(x11_pixels: %{xtest: false, keymap: true}), "x11 pixels")
+      assert no_xtest.status == :warn
+      assert no_xtest.detail =~ "XTEST missing"
+
+      unread = row(linux(x11_pixels: %{xtest: nil, keymap: true}), "x11 pixels")
+      assert unread.status == :warn
+      assert unread.detail =~ "XTEST unknown"
+
+      # On Wayland the pixel route is the portal, so X11's needs are information.
+      beside = linux(display_server: "wayland", x11_pixels: %{xtest: false, keymap: true})
+      assert row(beside, "x11 pixels").status == :ok
+
+      none = row(linux(display_server: "wayland", x11_pixels: nil), "x11 pixels")
+      assert none.detail =~ "no X endpoint answers"
+
+      lost = row(linux(x11_pixels: nil), "x11 pixels")
+      assert lost.status == :warn
+      assert lost.detail =~ "no X endpoint answers"
+      refute lost.detail =~ "both"
+      assert lost.detail =~ "the X11 pixel route needs one"
+    end
+
+    test "the portal's version and whether the Registry is there" do
+      old = row(linux(), "desktop portal")
+      assert old.detail =~ "xdg-desktop-portal 1.14.4-1ubuntu2~22.04.2"
+      assert old.detail =~ "running"
+      assert old.detail =~ "no Registry"
+      assert old.detail =~ "pixels on Wayland are refused"
+      # On X11 the pixel route never asks the portal.
+      assert old.status == :ok
+
+      wayland = row(linux(display_server: "wayland"), "desktop portal")
+      assert wayland.status == :warn
+
+      registered =
+        row(linux(display_server: "wayland", portal: portal(registry: true)), "desktop portal")
+
+      assert registered.status == :ok
+      assert registered.detail =~ "has the Registry"
+
+      unversioned = row(linux(portal: portal(version: nil)), "desktop portal")
+      assert unversioned.detail =~ "version unknown"
+
+      absent = row(linux(portal: nil), "desktop portal")
+      assert absent.detail =~ "not read: no session bus answered"
+      assert absent.status == :ok
+    end
+
+    # On Wayland the portal is the pixel route, so any portal that cannot serve
+    # it refuses pixels there: none read, one not running or not saying whether
+    # it runs, and one without the Registry.
+    test "on Wayland a portal that cannot serve pixels warns, as on X11 it does not" do
+      for portal <- [
+            nil,
+            portal(running: false, registry: nil),
+            portal(running: nil, registry: nil),
+            portal(registry: false)
+          ] do
+        wayland = row(linux(display_server: "wayland", portal: portal), "desktop portal")
+        assert wayland.status == :warn, inspect(portal)
+
+        x11 = row(linux(portal: portal), "desktop portal")
+        assert x11.status == :ok, inspect(portal)
+      end
+
+      serving = linux(display_server: "wayland", portal: portal(registry: true))
+      assert row(serving, "desktop portal").status == :ok
+    end
+
+    # `running: false` is the bus saying nobody runs it; `nil` is an error that
+    # said neither, which is unknown and never "not running".
+    test "a portal that is not running and one whose state is unknown are told apart" do
+      stopped = row(linux(portal: portal(running: false, registry: nil)), "desktop portal")
+      assert stopped.detail =~ "not running"
+      refute stopped.detail =~ "unknown whether"
+
+      unknown = row(linux(portal: portal(running: nil, registry: nil)), "desktop portal")
+      assert unknown.detail =~ "unknown whether it runs"
+      refute unknown.detail =~ "not running"
+    end
+
+    test "a stored Screenshot no prints the reset exactly" do
+      refused = linux(display_server: "wayland", portal: portal(screenshot_permission: "no"))
+      assert %{status: :warn, detail: detail} = row(refused, "portal screenshot")
+      assert detail =~ "stored no"
+      assert String.ends_with?(detail, @reset)
+    end
+
+    # The X11 pixel route never asks the portal, so there the stored no refuses
+    # nothing yet: information, with the same reset.
+    test "a stored Screenshot no is information on X11" do
+      refused = linux(portal: portal(screenshot_permission: "no"))
+      assert %{status: :ok, detail: detail} = row(refused, "portal screenshot")
+      assert detail =~ "stored no"
+      assert String.ends_with?(detail, @reset)
+    end
+
+    test "every other stored Screenshot answer is information, with no reset" do
+      for {answer, words} <- [
+            {"yes", "allowed"},
+            {"unset", "no answer stored"},
+            {"not_running", "the permission store is not running"},
+            {nil, "unknown"}
+          ] do
+        result = row(linux(portal: portal(screenshot_permission: answer)), "portal screenshot")
+        assert result.status == :ok, inspect(answer)
+        assert result.detail =~ words, inspect(answer)
+        refute result.detail =~ "DeletePermission", inspect(answer)
+      end
+
+      assert row(linux(portal: nil), "portal screenshot").detail =~ "no session bus answered"
+    end
+  end
+
   describe "computer_use_background/1" do
     alias FermixCore.ComputerUse.Capabilities
 
@@ -502,6 +835,92 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
 
       assert result.status == :fail
       assert result.detail =~ "could not read what the helper supports"
+    end
+
+    # A Linux helper binds a window under X11 with its badge beside it, and binds
+    # none on Wayland. The row has to be true there for every indicator it can
+    # report, and never send a Wayland user to update a helper that cannot help.
+    test "on Linux the row is true for an indicator present, missing or unknown" do
+      linux = [sidecar_target: {:ok, "linux-x86_64"}]
+
+      present =
+        Checks.computer_use_background(
+          read(%{
+            "targets" => true,
+            "indicator" => "present",
+            "capture_methods" => ["display", "window"],
+            "input_methods" => ["foreground_hid", "ax"]
+          }),
+          linux
+        )
+
+      assert present.status == :ok
+      assert present.detail =~ "can bind a window and its on-screen indicator is present"
+
+      missing =
+        Checks.computer_use_background(
+          read(%{"targets" => true, "indicator" => "missing"}),
+          linux
+        )
+
+      assert missing.status == :warn
+      assert missing.detail =~ "no on-screen indicator installed beside it"
+      refute missing.detail =~ "bundle"
+
+      unknown = Checks.computer_use_background(read(%{"targets" => true}), linux)
+      assert unknown.status == :warn
+      assert unknown.detail =~ "does not report an on-screen indicator"
+      refute unknown.detail =~ "bundle"
+    end
+
+    test "on Linux a helper that binds nothing names X11, not an update" do
+      result =
+        Checks.computer_use_background(
+          read(%{"indicator" => "present", "capture_methods" => ["display"]}),
+          sidecar_target: {:ok, "linux-x86_64"}
+        )
+
+      assert result.status == :warn
+      assert result.detail =~ "only under X11, never on Wayland"
+      assert result.detail =~ "display server"
+      refute result.detail =~ "publishes no target support"
+
+      mac =
+        Checks.computer_use_background(
+          read(%{"indicator" => "present"}),
+          sidecar_target: {:ok, "macos-aarch64"}
+        )
+
+      assert mac.detail =~ "Update the helper from setup"
+      refute mac.detail =~ "X11"
+    end
+
+    # The Linux words came with the X11 binding; a macOS helper still reads what it
+    # read before them, word for word.
+    test "on macOS a missing indicator or no binding reads as it always did" do
+      mac = [sidecar_target: {:ok, "macos-aarch64"}]
+
+      missing =
+        Checks.computer_use_background(
+          read(%{"targets" => true, "indicator" => "missing"}),
+          mac
+        )
+
+      assert String.starts_with?(
+               missing.detail,
+               "on, but this computer-use helper's bundle has no on-screen indicator, and " <>
+                 "Fermix will not work inside a window without one visible. Reinstall the " <>
+                 "helper from setup."
+             )
+
+      none = Checks.computer_use_background(read(%{"indicator" => "present"}), mac)
+
+      assert String.starts_with?(
+               none.detail,
+               "on, but this computer-use helper cannot bind a window — it publishes no " <>
+                 "target support, so every select_target is refused. Update the helper from " <>
+                 "setup."
+             )
     end
 
     defp read(capabilities) do

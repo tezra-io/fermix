@@ -54,6 +54,53 @@ defmodule Fermix.CLI.DoctorTest do
            ]) == 1
   end
 
+  # A helper that tells the test each time it is started, and answers its probe as
+  # a Linux helper, so the run prints the Linux rows from the same answer.
+  defmodule CountingDriver do
+    @behaviour Compux.Driver
+
+    @impl true
+    def start(_opts) do
+      send(self(), :helper_started)
+      {:ok, %{}}
+    end
+
+    @impl true
+    def execute(_state, %{"action" => "probe"}) do
+      {:ok,
+       %{
+         "platform" => "linux",
+         "display_server" => "x11",
+         "screen_capture" => true,
+         "input_control" => true,
+         "accessibility_bus" => %{"state" => "answering", "applications" => 3}
+       }}
+    end
+
+    @impl true
+    def stop(_state), do: :ok
+  end
+
+  # The `computer use` row and the Linux rows read ONE probe, so a doctor run
+  # starts the helper once, however many computer-use rows it prints.
+  test "a doctor run starts the computer-use helper once for all its rows" do
+    previous = Application.get_env(:fermix_core, :computer_use)
+    Application.put_env(:fermix_core, :computer_use, enabled: true)
+    on_exit(fn -> restore_computer_use(previous) end)
+    ensure_fermix_on_path()
+
+    probe = [installed?: fn -> true end, driver: CountingDriver, binary_path: "/fake/compux"]
+    output = capture_io(fn -> Doctor.run([], computer_use_probe: probe) end)
+
+    assert_received :helper_started
+    refute_received :helper_started, "the helper was started more than once in one run"
+    assert output =~ "screen capture and input control granted (x11)"
+    assert output =~ "answering, with 3 applications"
+  end
+
+  defp restore_computer_use(nil), do: Application.delete_env(:fermix_core, :computer_use)
+  defp restore_computer_use(value), do: Application.put_env(:fermix_core, :computer_use, value)
+
   test "rejects unknown options with non-zero exit" do
     test_self = self()
 
