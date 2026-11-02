@@ -27,7 +27,11 @@ doing (version 6): `reasoning`, and the `activity` a `tool_event` that starts
 a tool carries here, which the phone's `tool_event` does not. So are the
 owner's lists (version 6): the phone's wire does not carry them yet, and gains
 them with the Android app's lists. So is `home_status_changed` (version 6):
-Always On is set up and watched from the computer, never from a phone.
+Always On is set up and watched from the computer, never from a phone. So are
+the owner's files (version 7): `attach_file` and `attach_status` hand the
+daemon a file by path on the same machine, where the phone's `attach_begin`,
+`attach_chunk` and `attach_end` stream its bytes; both land in the same media
+store, and the `msg` that names them is the shared one.
 
 ## Transport
 
@@ -68,9 +72,9 @@ previous one (or the same value while only one version exists).
 
 | Field | Value |
 |---|---|
-| `protocol_version` (companion declares) | `6` |
-| daemon `min_version` | `5` |
-| daemon `max_version` | `6` |
+| `protocol_version` (companion declares) | `7` |
+| daemon `min_version` | `6` |
+| daemon `max_version` | `7` |
 
 ### Version 2: a turn that ends with no reply
 
@@ -246,6 +250,42 @@ Every version 5 event, field and rule holds unchanged on version 6. Since
 version 6 the window is {5, 6}, so a version 4 client is refused with
 `error: unsupported_protocol_version` (`client_too_old`).
 
+### Version 7: files the owner attaches
+
+Version 7 lets the owner attach files in the Mac's chat: a picture, a
+recording, a document. The Mac and the daemon share a file system, so a file
+crosses by path, never in chunks on this line. It adds:
+
+- one client event: `attach_file { attach_id, kind, mime, size_bytes, sha256,
+  name? }`, which hands the daemon a file the client wrote in the inbox (see
+  *Attachments*);
+- one server event: `attach_status { attach_id, status }`, its answer once the
+  daemon holds the file; a refusal is `error: request_failed` with the
+  daemon's sentence and the `attach_id`;
+- a non-empty `msg.attach_ids`, naming those files: the message's turn reads
+  them as it reads a phone's attachments, and its user's `row` carries them
+  in `media_refs`.
+
+Each of the two events names version 7 as its `x-since-version`. The daemon
+takes `attach_file`, and a `msg` that names a file, only from a version 7
+connection placed as the owner's (see *Transport*), and sends `attach_status`
+only to that connection. A version 6 connection that sends `attach_file` is
+refused with `error: unknown_event` and closed; a `msg` that names a file from
+a version 6 connection, or from one not placed as the owner's, is refused with
+`error: attachments_unsupported` and closed, as every such `msg` was before.
+
+`server_hello` gains two fields, additive and optional, so on every version:
+`commands`, the slash commands an app offers in its palette, each `{ name,
+aliases[], description }`, the list the phone's `caps.commands` carries,
+sent on every hello from this daemon; and `attachments { dir, max_bytes }`,
+the inbox and the largest file the daemon takes, sent only to a connection
+placed as the owner's and only while the media store runs. An app offers
+attachments only when its hello carried `attachments`.
+
+Every version 6 event, field and rule holds unchanged on version 7. Since
+version 7 the window is {6, 7}, so a version 5 client is refused with
+`error: unsupported_protocol_version` (`client_too_old`).
+
 ## Handshake state machine
 
 The connection opens with a **mandatory, one-shot handshake**, exactly as the
@@ -255,7 +295,7 @@ Realtime voice socket's. No other event is serviced until it completes.
 companion: connect socket
 companion -> daemon:  client_hello { protocol_version: P, primary_epoch?: E }
                       daemon negotiates P against {min, max}:
-                        P in [min, max] -> daemon -> companion: server_hello { min_version, max_version, primary_epoch?, role }
+                        P in [min, max] -> daemon -> companion: server_hello { min_version, max_version, primary_epoch?, role, commands, attachments? }
                         P < min         -> error(unsupported_protocol_version, client_too_old); close
                         P > max         -> error(unsupported_protocol_version, client_too_new); close
                       then, on the primary, E against the home's primary epoch M:
@@ -304,8 +344,8 @@ older daemon and is treated as `primary`. An engine in the device role runs on
 a home that is a retired copy of the primary, or never was one, so its epoch
 can be lower than the primary's without anything being wrong. Since that copy
 is retired, it refuses every event that would write it (`msg`, `command`,
-`cancel`, `read_state`, `proposal_answer`, `checklist_edit`) with
-`error: request_failed` and the `message` `This engine runs in the device
+`cancel`, `read_state`, `proposal_answer`, `checklist_edit`, `attach_file`)
+with `error: request_failed` and the `message` `This engine runs in the device
 role; the primary is <host>.`, writing nothing, and serves the reads
 (`history_pull`, `history_search`, `media_fetch`, `checklists_pull`,
 `checklist_pull`) as before.
@@ -344,7 +384,7 @@ in a fixed order:
 | `type` | Fields | Notes |
 |---|---|---|
 | `client_hello` | `protocol_version` (int > 0); `primary_epoch?` (int > 0) | First frame. Opens the handshake. `primary_epoch` is the highest primary epoch the client has seen, absent when it has seen none; see *Primary epoch*. |
-| `msg` | `client_msg_id`, `profile_id`, `text`, `attach_ids[]` | A message to the agent. `text` must not be blank. `attach_ids` is **empty** on this wire in version 1; a non-empty list is refused with `error: attachments_unsupported`. |
+| `msg` | `client_msg_id`, `profile_id`, `text`, `attach_ids[]` | A message to the agent. `text` must not be blank unless `attach_ids` names a file. Version 7: `attach_ids` names files whose `attach_file` was answered `present`, from a version 7 connection placed as the owner's only; on version 6, or from any other connection, a non-empty list is refused with `error: attachments_unsupported`. See *Attachments*. |
 | `command` | `client_msg_id`, `profile_id`, `name`; `args?` | A slash command, `/name args`. An approval's routes are sent this way. |
 | `cancel` | `profile_id`, `client_msg_id`; `task_ref?` | Stops the turn of that request, running or waiting, and no other, whichever client sent the request (the Mac or a phone). Never answered itself; see *Streaming a turn*. Version 2: with `task_ref { call_uuid, task_id, revision }` it stops instead the GPT-Live task those ids name, one that outlived its call, and `client_msg_id` names the cancel itself; see *A Live call's rows*. |
 | `history_pull` | `profile_id`, `limit` (1–200), and exactly one of `after_seq` (≥ 0) or `before_seq` (≥ 1) | `after_seq` pages forward (the catch-up read); `before_seq` pages backward from it (scroll to the top). Either is any unsigned 64-bit value. |
@@ -356,6 +396,7 @@ in a fixed order:
 | `checklists_pull` | `profile_id` | Version 6. Asks for the index of the owner's lists, answered `checklists`; from then on this connection is sent the index again after any change. Taken only from a connection placed as the owner's; see *Lists*. |
 | `checklist_pull` | `profile_id`, `list_id` (`ck_` id); `removed?` (boolean) | Version 6. Asks for one whole list, answered `checklist`; the connection then holds it (at most 16) and is sent it again after every change. `removed: true` adds the rows removed in the last 30 days. Owner's connection only; see *Lists*. |
 | `checklist_edit` | `client_msg_id` (at most 128 characters), `profile_id`, `op`; `list_id?` (`ck_` id, for every op but `create`) | Version 6. One op on the owner's lists, by row id. Answered `accepted` once applied, `duplicate: true` when the `client_msg_id` was already applied; a refusal is `error: request_failed` with the engine's sentence and `client_msg_id`, and changes nothing. Owner's connection only; see *Lists*. |
+| `attach_file` | `attach_id` (1–64 of `A–Z a–z 0–9 _ -`), `kind`, `mime` (at most 255 bytes), `size_bytes`, `sha256` (64 lowercase hex digits); `name?` (at most 255 bytes) | Version 7. Hands the daemon the file the client wrote at `<attachments.dir>/<attach_id>`; there is no path field. `kind` is `image`, `animation`, `video`, `audio`, `voice`, `document` or `file`, a hint. Answered `attach_status` (`present`), or `error: request_failed` with the daemon's sentence and `attach_id`; the daemon removes the file either way. Owner's connection only; see *Attachments*. |
 
 `profile_id` is `main`, the one profile; any other is refused with
 `error: unsupported_profile`, and the connection stays open.
@@ -364,7 +405,7 @@ in a fixed order:
 
 | `type` | Fields | Notes |
 |---|---|---|
-| `server_hello` | `min_version`, `max_version`; `primary_epoch?`, `role?` | Handshake reply. `primary_epoch` is the home's primary epoch, absent only from a home that has never booted as the primary; `role` is the engine's, `primary` or `device`, which this daemon always sends and an older daemon leaves out; see *Primary epoch*. |
+| `server_hello` | `min_version`, `max_version`; `primary_epoch?`, `role?`, `commands[]?`, `attachments?` | Handshake reply. `primary_epoch` is the home's primary epoch, absent only from a home that has never booted as the primary; `role` is the engine's, `primary` or `device`, which this daemon always sends and an older daemon leaves out; see *Primary epoch*. `commands` is the slash command palette, each `{name, aliases[], description}`, which this daemon always sends; `attachments` is `{dir, max_bytes}`, sent only to a connection placed as the owner's while the media store runs; see *Version 7* and *Attachments*. |
 | `accepted` | `client_msg_id`, `duplicate`; `server_seq?` | Durable receipt for a `msg`, a `command` or (version 6) a `checklist_edit`; clears the outbox item. `server_seq` is present only on a duplicate whose request already has a reply row: that reply's seq. A first `accepted` never carries it; the request's own row arrives as a `row`. |
 | `turn_started` | `profile_id`, `turn_id`, `in_reply_to` | A turn began answering `in_reply_to`. |
 | `text_delta` | `turn_id`, `text` | Text to append to the turn's draft, exactly as sent. |
@@ -387,7 +428,8 @@ in a fixed order:
 | `home_status_changed` | none | Version 6. Always On's summary changed: read `home.status` over management. Carries no content. Sent once after `server_hello` unless Always On is off, then at each change, never while it stays off, only to a connection on version 6; see *When Always On changes*. |
 | `checklists` | `profile_id`, `lists[]` | Version 6. The index: every live list as `{list_id, title, folder?, open, done, rev}`, in picker order. The answer to `checklists_pull`, and pushed again, whole, after any change. Sent only to a version 6 connection placed as the owner's that pulled the index; see *Lists*. |
 | `checklist` | `profile_id`, `list`; `made?` | Version 6. One whole list, `{list_id, title, rev, rows[], removed[]?, removed_at?}`. The answer to `checklist_pull`, and pushed again, whole, after every committed change to it, at most once per 100 ms. Sent only to a version 6 connection placed as the owner's that holds the list; see *Lists*. |
-| `error` | `reason`; `message?`, `field?`, `event?`, `client_msg_id?`, `ref?`, `direction?`, `client_version?`, `min_version?`, `max_version?` | A refusal; see *Errors*. |
+| `attach_status` | `attach_id`, `status` | Version 7. The answer to an `attach_file` the daemon now holds: `status` is `present`, the only value this wire sends, and a `msg` may name `attach_id` from then on. Sent only to the version 7 owner's connection that sent it; see *Attachments*. |
+| `error` | `reason`; `message?`, `field?`, `event?`, `client_msg_id?`, `ref?`, `attach_id?`, `direction?`, `client_version?`, `min_version?`, `max_version?` | A refusal; see *Errors*. |
 
 ### Timeline shapes
 
@@ -518,6 +560,57 @@ rules:
 
 The two numbers are the schema's `x-media-budget-bytes` (536,870,912) and
 `x-media-release-grace-s` (60).
+
+## Attachments
+
+The owner's connection hands the daemon a file by writing it where the daemon
+reads it, on the same machine (version 7):
+
+1. **The inbox.** `server_hello.attachments.dir` is the inbox,
+   `$FERMIX_HOME/companion/inbox` (default `~/.fermix/companion/inbox`), which
+   the daemon makes at mode `0700`. `max_bytes` is the largest file the daemon
+   takes: the media store's bound, the same `max_media_bytes` setting the
+   phone's `caps.max_media_bytes` comes from, 20 MiB by default. A hello
+   without `attachments` (a connection not placed as the owner's, the media
+   store not running, a desktop whose home moved) means no file can be handed
+   over, and the app offers none.
+2. **Write, then announce.** The client picks an `attach_id`, 1 to 64 ASCII
+   letters, digits, `_` or `-`, new for each file it attaches (it is the
+   file's name: an `attach_id` the daemon already took is refused), writes
+   the whole file at `<dir>/<attach_id>` with mode `0600`, and then sends
+   `attach_file { attach_id, kind, mime, size_bytes, sha256, name? }`.
+   `size_bytes` and `sha256` (lowercase hex) are the file's. `kind` is
+   `image`, `animation`, `video`, `audio`, `voice`, `document` or `file`, a
+   hint as the phone's is: the daemon names the kind from the bytes, `voice`
+   is a recording the owner made in the app, and the row names it `audio`.
+   `name` is the file's name to show; it and `mime` are at most 255 bytes.
+   There is no path field.
+3. **The daemon reads it.** It reads `<dir>/<attach_id>`, a regular file and
+   never a symlink, into the media store the phone's uploads use, under the
+   same limits and with the same checks: the bytes must be `size_bytes` long
+   and hash to `sha256`, or nothing is kept. A file whose bytes the store
+   already holds is taken without being read again.
+4. **One answer.** `attach_status { attach_id, status: "present" }` once the
+   store holds the file, or `error { reason: "request_failed", message,
+   attach_id }`, the daemon's sentence for why not: the file is too large
+   (`This file is too large: Fermix takes files of up to 20 MB.`), the store
+   has no room, the file is missing or not a plain file, its bytes do not
+   match what was announced, the store is not running, or the connection is
+   not the owner's. The connection stays open either way, and a client shows
+   the sentence.
+5. **The daemon removes the file.** Once it has read the file, or refused it,
+   the daemon removes `<dir>/<attach_id>` before it answers, so the inbox
+   holds nothing of it when the answer arrives. The app never deletes
+   anything in the inbox. Every file in it is removed when the daemon starts.
+6. **Then the message.** A `msg` names files by their `attach_id` in
+   `attach_ids`, each one whose `attach_file` was answered `present`; its
+   `text` may be blank when it names at least one. Its turn reads them as it reads a phone's
+   attachments, and the user's `row` carries each in `media_refs` (`kind:
+   "media"`), as a phone message's does. The daemon keeps an `attach_id` for
+   48 hours after it took it: a message naming one it no longer holds is
+   answered `accepted` and then `error { reason: "request_failed", message,
+   client_msg_id }`, `message` `Fermix no longer has a file this message
+   names. Attach it again.`, and runs no turn.
 
 ## When a row changes
 
@@ -675,6 +768,10 @@ refuses a client that has seen a later primary.
   it against its ref and grants the managed file under its own home, as
   *Managed media files* says, once the connection's `client_hello` declared a
   version that has it. `media_release` is answered by nothing, as always.
+- **No files to attach.** The app writes a file on the desktop, which the
+  primary's inbox is not on, so the primary's `server_hello` carries no
+  `attachments` there and the app offers none; an `attach_file` sent anyway
+  is refused with `error: request_failed` and its sentence.
 - **Always On is the desktop's.** The app's Always On pane reads this
   computer's `home.status`, so on a connection whose `client_hello` declared
   version 6 the desktop's engine sends its own `home_status_changed` after
@@ -1033,7 +1130,7 @@ The ops, the model's by row id without its `replace`, with `clear_done` and
 | `invalid_json`, `invalid_event`, `missing_type` | — | closed |
 | `unknown_event` | `event` | closed |
 | `missing_field`, `invalid_field` | `field` | closed |
-| `attachments_unsupported` | — | closed |
+| `attachments_unsupported` | — | closed (a `msg` that names a file on version 6, or from a connection not placed as the owner's) |
 | `line_too_large` | — | closed |
 | `handshake_required`, `unexpected_client_hello` | — | closed |
 | `missing_protocol_version`, `invalid_protocol_version` | — | closed |
@@ -1047,7 +1144,7 @@ The ops, the model's by row id without its `replace`, with `clear_done` and
 | `client_message_conflict` | `client_msg_id` | open |
 | `unsupported_profile` | `client_msg_id?` | open |
 | `request_backlog_full` | — | open |
-| `request_failed` | `message` (at most 512 bytes), `client_msg_id?`, `ref?` | open |
+| `request_failed` | `message` (at most 512 bytes), `client_msg_id?`, `ref?`, `attach_id?` | open |
 
 `unknown_event` also refuses an event newer than the version the connection's
 `client_hello` declared. `unattended_client`, `primary_unreachable` and
@@ -1057,7 +1154,10 @@ away: while the move runs, a `msg`, `command`, `cancel` or `read_state` there
 is answered `primary_unreachable` with `Fermix is moving this home to <name>;
 your message is kept until it is done.` and the connection is closed; the app
 keeps its outbox and sends again once the engine is back. `ref` is set only on the `request_failed` that answers
-a `media_fetch`. A refused `proposal_answer` is a `request_failed` whose
+a `media_fetch`, and `attach_id` only on an error that answers an
+`attach_file`, whose `message` is the daemon's sentence (see *Attachments*); a
+`msg` naming a file the daemon no longer holds fails with its sentence and the
+message's `client_msg_id`. A refused `proposal_answer` is a `request_failed` whose
 `message` is the daemon's sentence, with the answer's `client_msg_id`. So is
 a refused `checklist_edit`, with the edit's `client_msg_id`; a refused
 `checklists_pull` or `checklist_pull` carries none.
@@ -1065,8 +1165,8 @@ a refused `checklist_edit`, with the edit's `client_msg_id`; a refused
 ## Chat sequence
 
 ```
-companion -> daemon:  client_hello { protocol_version: 6 }
-daemon -> companion:  server_hello { min_version: 5, max_version: 6 }
+companion -> daemon:  client_hello { protocol_version: 7 }
+daemon -> companion:  server_hello { min_version: 6, max_version: 7, commands: [...], attachments: { dir, max_bytes } }
 daemon -> companion:  home_status_changed {}                                (Always On is not off)
                       (the app reads management home.status)
 companion -> daemon:  history_pull { profile_id: "main", after_seq: 12, limit: 200 }
@@ -1084,6 +1184,19 @@ daemon -> companion:  read_state { profile_id: "main", read_up_to_seq: 14 }
                       (reconnect; the outbox resends "mac-1")
 companion -> daemon:  msg { client_msg_id: "mac-1", … }
 daemon -> companion:  accepted { client_msg_id: "mac-1", duplicate: true, server_seq: 14 }
+```
+
+A picture the owner attaches, on version 7:
+
+```
+                      (the app writes ~/.fermix/companion/inbox/mac-att-7f3a9c, mode 0600)
+companion -> daemon:  attach_file { attach_id: "mac-att-7f3a9c", kind: "image", mime: "image/jpeg", size_bytes: 183204, sha256: "<64 hex>", name: "IMG_0412.jpg" }
+daemon -> companion:  attach_status { attach_id: "mac-att-7f3a9c", status: "present" }       (the inbox file is gone)
+companion -> daemon:  msg { client_msg_id: "mac-40", profile_id: "main", text: "What is in this picture?", attach_ids: ["mac-att-7f3a9c"] }
+daemon -> companion:  accepted { client_msg_id: "mac-40", duplicate: false }
+daemon -> companion:  row { server_seq: 30, role: "user", text, ts, kind: "media", client_msg_id: "mac-40",
+                            media_refs: [{ ref: "<64 hex>", kind: "image", mime: "image/jpeg", size_bytes: 183204, filename: "IMG_0412.jpg" }] }
+daemon -> companion:  turn_started { turn_id: "turn-mac-40", in_reply_to: "mac-40" } …
 ```
 
 A phone's voice note, on version 3:

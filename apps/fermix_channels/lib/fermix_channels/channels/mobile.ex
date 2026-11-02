@@ -28,7 +28,6 @@ defmodule FermixChannels.Channels.Mobile do
   alias FermixChannels.Companion.Output
   alias FermixChannels.Companion.Turns
   alias FermixChannels.Gateway.Channel
-  alias FermixChannels.Gateway.Commands.Registry, as: CommandRegistry
   alias FermixChannels.Gateway.Message
   alias FermixChannels.LinkPreviews
   alias FermixChannels.Mobile.DeviceRegistry
@@ -88,18 +87,6 @@ defmodule FermixChannels.Channels.Mobile do
   def ingest_event(event, ingress_context, opts \\ [])
       when is_map(event) and is_map(ingress_context) and is_list(opts) do
     EventRouter.route(event, ingress_context, opts)
-  end
-
-  @doc "Command-palette entries derived from the live command registry."
-  @spec command_catalog() :: [map()]
-  def command_catalog do
-    Enum.map(CommandRegistry.list(), fn command ->
-      %{
-        "name" => command.name(),
-        "aliases" => command.aliases(),
-        "description" => command.description()
-      }
-    end)
   end
 
   @impl true

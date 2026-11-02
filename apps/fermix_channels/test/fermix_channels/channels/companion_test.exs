@@ -11,6 +11,7 @@ defmodule FermixChannels.Channels.CompanionTest do
   alias FermixChannels.Gateway.ChannelRegistry
   alias FermixChannels.Gateway.Message
   alias FermixChannels.Gateway.Source
+  alias FermixChannels.Mobile.MediaStore
   alias FermixCore.Delivery.ChannelSend
 
   @config_exs Path.expand("../../../../../config/config.exs", __DIR__)
@@ -239,16 +240,67 @@ defmodule FermixChannels.Channels.CompanionTest do
     assert {:error, :unsupported_profile} =
              Companion.parse_event(%{type: "msg", payload: %{"profile_id" => "work"}})
 
-    assert {:error, :attachments_unsupported} =
+    # Companion protocol 7: the request path declared the message's files,
+    # and the message carries them as a phone message carries its own.
+    declared = %{file_id: "mac-att-1", hint: :photo, mime_type: "image/jpeg", size_bytes: 3}
+
+    assert {:ok, [attached]} =
              Companion.parse_event(%{
                type: "msg",
                payload: %{
                  "client_msg_id" => "mac-3",
                  "profile_id" => "main",
                  "text" => "x",
-                 "attach_ids" => ["a"]
+                 "attach_ids" => ["mac-att-1"],
+                 "attachments" => [declared]
                }
              })
+
+    assert attached.attachments == [declared]
+    assert message.attachments == []
+  end
+
+  # Companion protocol 7: a file the owner attached is in the phone's media
+  # store under its attach id, and the turn's attachment pipeline fetches it
+  # through this channel exactly as it fetches a phone's.
+  test "download_attachment fetches a file the owner attached from the phone's media store" do
+    dir = FermixTestSupport.SafeRm.make_tmp_dir!("companion-attached-file")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
+    start_supervised!({MediaStore, root: Path.join(dir, "mobile"), name: MediaStore})
+
+    bytes = "a picture's bytes"
+    digest = Base.encode16(:crypto.hash(:sha256, bytes), case: :lower)
+    file = Path.join(dir, "mac-att-1")
+    File.write!(file, bytes)
+
+    spec = %{
+      attach_id: "mac-att-1",
+      kind: "image",
+      mime: "image/jpeg",
+      size_bytes: byte_size(bytes),
+      sha256: digest
+    }
+
+    assert {:ok, :present} = MediaStore.import_file(MediaStore, file, spec)
+
+    {:ok, [message]} =
+      Companion.parse_event(%{
+        type: "msg",
+        payload: %{
+          "client_msg_id" => "mac-att-msg",
+          "profile_id" => "main",
+          "text" => "",
+          "attach_ids" => ["mac-att-1"],
+          "attachments" => [%{file_id: "mac-att-1", hint: :photo}]
+        }
+      })
+
+    assert {:ok, path} = Companion.download_attachment(message, hd(message.attachments))
+    assert File.read!(path) == bytes
+    assert path != file
+
+    assert {:error, :unknown_attachment} =
+             Companion.download_attachment(message, %{file_id: "never-taken"})
   end
 
   test "a message ingests as the operator with the raw stream and every turn closure" do

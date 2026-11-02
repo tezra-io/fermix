@@ -72,6 +72,30 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
     end
   end
 
+  # Always On is not in a release build yet: the verb refuses in one
+  # sentence there, before anything is read or sent.
+  describe "in a build without Always On" do
+    test "every use of the verb refuses in one sentence, exit 1, reaching nothing", ctx do
+      for argv <- [[], ["--json"], ["create-server", "--yes", "--json"]] do
+        {status, out, err} = run(argv, ctx, script([]), always_on: false)
+
+        assert status == 1, inspect(argv)
+        assert err == "fermix always-on: Always On is not in this release of Fermix yet.\n"
+
+        if "--json" in argv,
+          do: assert(%{"error" => %{"code" => "always_on_unavailable"}} = Jason.decode!(out)),
+          else: assert(out == "")
+      end
+
+      refute_received {:called, _method, _params, _opts}
+    end
+
+    test "in a build with it, the verb reads the screen as ever", ctx do
+      client = script([hello(), {"home.status", {:ok, status(off())}}])
+      assert {0, _out, ""} = run([], ctx, client, always_on: true)
+    end
+  end
+
   describe "before anything is read" do
     # §8.2, verify_standalone: no daemon, nothing written, the code and a
     # sentence on stderr.
@@ -103,6 +127,58 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
       assert %{"error" => %{"code" => "app_managed", "sentence" => sentence}} = Jason.decode!(out)
       assert sentence =~ "the app's Always On pane"
       assert err =~ sentence
+    end
+  end
+
+  # Review R6: a step that waits reports how it ended.
+  describe "waiting for a step" do
+    test "a create that failed while waited on exits 1, not ok", ctx do
+      failed = %{
+        "key" => "failed",
+        "state" => "problem",
+        "sentence" => "Your server could not be created.",
+        "action" => nil,
+        "detail" => %{"kind" => "create_failed"},
+        "notice" => nil,
+        "outcome" => "failed"
+      }
+
+      client =
+        script([
+          hello(),
+          {"home.status", {:ok, status(choose())}},
+          {"home.act", {:ok, %{"summary" => creating(), "result" => nil}}},
+          {"home.status", {:ok, status(failed)}}
+        ])
+
+      argv = [
+        "create-server",
+        "--type",
+        "cpx22",
+        "--location",
+        "hel1",
+        "--yes",
+        "--wait",
+        "--json"
+      ]
+
+      {exit_status, out, _err} = run(argv, ctx, client)
+      assert exit_status == 1, "a failed step exited #{exit_status}: #{out}"
+
+      assert %{
+               "ok" => false,
+               "error" => %{"code" => "step_failed", "sentence" => sentence, "summary" => ^failed}
+             } = Jason.decode!(out)
+
+      assert sentence =~ "Your server could not be created."
+    end
+
+    test "reading a problem screen with no step is a success", ctx do
+      problem = golden_summary("home_status_problem")
+      client = script([hello(), {"home.status", {:ok, status(problem)}}])
+
+      {0, out, ""} = run(["--json"], ctx, client)
+      assert %{"ok" => true, "result" => ^problem} = Jason.decode!(out)
     end
   end
 
@@ -170,7 +246,8 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
     test "a confirm needs --yes, and refuses with its own sentence otherwise", ctx do
       client = script([hello(), {"home.status", {:ok, status(choose())}}])
 
-      {1, out, err} = run(["create-server", "--json"], ctx, client)
+      {1, out, err} =
+        run(["create-server", "--type", "cpx22", "--location", "fsn1", "--json"], ctx, client)
 
       assert %{"error" => %{"code" => "confirm_required", "sentence" => sentence}} =
                Jason.decode!(out)
@@ -180,10 +257,13 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
       refute_act()
     end
 
-    test "a choice is the recommendation unless both --type and --location are given", ctx do
-      for {flags, input} <- [
-            {[], nil},
-            {["--type", "cpx32", "--location", "hel1"],
+    # The recommendation is a row the owner was shown like any other, so the
+    # step names its size and place, read from the engine's offers.
+    test "a choice is the recommended row unless both --type and --location are given", ctx do
+      for {flags, reads, input} <- [
+            {[], [{"home.provision.options", {:ok, options()}}],
+             %{"type" => "cpx22", "location" => "fsn1"}},
+            {["--type", "cpx32", "--location", "hel1"], [],
              %{"type" => "cpx32", "location" => "hel1"}}
           ] do
         act = fn params ->
@@ -197,11 +277,30 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
           {:ok, %{"summary" => creating(), "result" => nil}}
         end
 
-        client = script([hello(), {"home.status", {:ok, status(choose())}}, {"home.act", act}])
+        client =
+          script(
+            [hello(), {"home.status", {:ok, status(choose())}}] ++ reads ++ [{"home.act", act}]
+          )
 
         {0, out, _err} = run(["create-server", "--yes"] ++ flags, ctx, client)
         assert hd(lines(out)) == "Starting your server…"
       end
+    end
+
+    test "with no offer recommended and no flags, it sends nothing and says why", ctx do
+      none = %{options() | "recommended" => nil, "sentence" => "Hetzner has nothing in stock."}
+
+      client =
+        script([
+          hello(),
+          {"home.status", {:ok, status(choose())}},
+          {"home.provision.options", {:ok, none}}
+        ])
+
+      {1, out, err} = run(["create-server", "--yes", "--json"], ctx, client)
+      assert %{"error" => %{"code" => "action_refused"}} = Jason.decode!(out)
+      assert err =~ "Hetzner has nothing in stock."
+      refute_act()
     end
 
     test "Move now takes the recovery passphrase from its file, never a prompt", ctx do
@@ -270,6 +369,7 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
         script([
           hello(),
           {"home.status", {:ok, status(choose())}},
+          {"home.provision.options", {:ok, options()}},
           {"home.act", changed},
           {"home.status", {:ok, status(creating())}}
         ])
@@ -330,6 +430,7 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
         script([
           hello(),
           {"home.status", {:ok, status(choose())}},
+          {"home.provision.options", {:ok, options()}},
           {"home.act", {:ok, %{"summary" => creating(), "result" => nil}}},
           {"home.status", wait_for("k-creating", {:ok, status(installing)}, ctx)},
           {"home.status", wait_for("k-creating", {:ok, status(installing)}, ctx)},
@@ -358,14 +459,7 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
       ready = golden_summary("home_status_ready")
       on = golden_summary("home_status_on")
 
-      moving = %{
-        "key" => "k-moving",
-        "state" => "moving",
-        "sentence" => "Moving.",
-        "action" => nil,
-        "detail" => %{},
-        "notice" => nil
-      }
+      moving = moving()
 
       file = passphrase_file(ctx)
 
@@ -373,7 +467,8 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
         script([
           hello(),
           {"home.status", {:ok, status(ready)}},
-          {"home.act", {:ok, %{"summary" => ready, "result" => %{"move_id" => "mv-1"}}}},
+          {"home.act",
+           {:ok, %{"summary" => moved_here(ready), "result" => %{"move_id" => "mv-1"}}}},
           {"home.status", {:error, :closed}},
           {"home.status", {:error, :not_running}},
           {"home.status", {:ok, status(moving)}},
@@ -400,7 +495,8 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
           [
             hello(),
             {"home.status", {:ok, status(ready)}},
-            {"home.act", {:ok, %{"summary" => ready, "result" => %{"move_id" => "mv-1"}}}},
+            {"home.act",
+             {:ok, %{"summary" => moved_here(ready), "result" => %{"move_id" => "mv-1"}}}},
             {"home.status", {:error, :closed}}
           ] ++ gone
         )
@@ -487,7 +583,7 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
       assert out =~ "Your server is ready for the move."
     end
 
-    test "the wait ends after 45 minutes with the screen as it stands", ctx do
+    test "the wait ends after 45 minutes, exit 1, with the screen as it stands", ctx do
       waits =
         List.duplicate(
           {"home.status", wait_for("k-creating", {:ok, status(creating())}, ctx)},
@@ -499,13 +595,22 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
           [
             hello(),
             {"home.status", {:ok, status(choose())}},
+            {"home.provision.options", {:ok, options()}},
             {"home.act", {:ok, %{"summary" => creating(), "result" => nil}}}
           ] ++ waits
         )
 
-      {0, out, err} = run(["create-server", "--yes", "--wait", "--json"], ctx, client)
+      {1, out, err} = run(["create-server", "--yes", "--wait", "--json"], ctx, client)
 
-      assert %{"result" => %{"summary" => %{"state" => "creating"}}} = Jason.decode!(out)
+      # Review R6: a step still at it is not a step done.
+      assert %{
+               "ok" => false,
+               "error" => %{
+                 "code" => "step_unfinished",
+                 "summary" => %{"state" => "creating", "outcome" => "running"}
+               }
+             } = Jason.decode!(out)
+
       assert err =~ "still at it after 45 minutes"
       assert Agent.get(ctx.clock, & &1) >= 45 * 60_000
     end
@@ -521,7 +626,7 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
       end
 
       create = fn params ->
-        refute Map.has_key?(params, "input")
+        assert params["input"] == %{"type" => "cpx22", "location" => "fsn1"}
         {:ok, %{"summary" => creating(), "result" => nil}}
       end
 
@@ -735,7 +840,8 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
         "alternatives" => [record("own_server", "Use my own Linux server", [], nil, "a-own")],
         "providers" => [hetzner()]
       },
-      "notice" => nil
+      "notice" => nil,
+      "outcome" => "done"
     }
   end
 
@@ -747,7 +853,8 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
       "action" =>
         record("create_server", "Create server", ["choice"], @create_confirm, "a-create"),
       "detail" => %{"billing" => "Hetzner bills by the hour until the server is deleted."},
-      "notice" => nil
+      "notice" => nil,
+      "outcome" => "done"
     }
   end
 
@@ -765,7 +872,8 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
           "a-cancel"
         ),
       "detail" => %{"progress" => "Checking that Hetzner has the server in stock."},
-      "notice" => nil
+      "notice" => nil,
+      "outcome" => "running"
     }
   end
 
@@ -774,7 +882,8 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
       off()
       | "key" => "k-connect",
         "state" => "connect",
-        "sentence" => "Paste a Hetzner API token to let Fermix create your server."
+        "sentence" => "Paste a Hetzner API token to let Fermix create your server.",
+        "outcome" => "waiting"
     }
     |> put_in(["detail", "alternatives"], [
       record("own_server", "Use my own Linux server", [], nil, "a-own"),
@@ -789,7 +898,8 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
       "sentence" => "Moving.",
       "action" => nil,
       "detail" => %{},
-      "notice" => nil
+      "notice" => nil,
+      "outcome" => "running"
     }
   end
 
@@ -821,7 +931,8 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
           "https://fermix.ai/docs/always-on/#hetzner"
         ),
       "detail" => %{},
-      "notice" => nil
+      "notice" => nil,
+      "outcome" => "done"
     }
   end
 
@@ -840,6 +951,10 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
     |> Enum.find(&(&1["name"] == "home_provision_options"))
     |> get_in(["response", "result"])
   end
+
+  # The screen Move now answers here: `ready` until the restart shows, the
+  # move it asked for running.
+  defp moved_here(ready), do: %{ready | "outcome" => "running"}
 
   defp golden_summary(name) do
     {^name, record} = List.keyfind(HomeSummaryGoldens.rows(), name, 0)

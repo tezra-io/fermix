@@ -449,6 +449,9 @@ defmodule FermixTestSupport.CliContractCases do
   def error_details(:changed),
     do: [reason: "Always On changed since this was shown, so look at it again."]
 
+  def error_details(:step_failed),
+    do: [reason: "Falkenstein has no CPX22 right now."]
+
   def error_details(_code), do: []
 
   defp invalid_binding_sentence do

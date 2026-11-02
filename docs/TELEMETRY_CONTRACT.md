@@ -1328,7 +1328,9 @@ floor for the root). A Doctor session also carries `scope` and the
 is the run's own diagnosis word (`completed | cancelled | timed_out`, plus
 `failed` for a job), never a bare "ok". A stopped job's `:complete` fires once
 its run is gone (it answered the stop, or was killed at the grace's end), so
-a provider call the run makes while stopping still nests under an open root.
+a provider call the run makes while stopping still nests under an open root;
+a job with an ending (an Always On step's) fires it once that ending is done
+too, which emits nothing of its own.
 
 What rides and what does not: check **counts** per status ride the Doctor
 bookend, a check `summary` and its `evidence` never do (both can carry operator

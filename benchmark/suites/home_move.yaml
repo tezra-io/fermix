@@ -13,12 +13,15 @@
 # WHY BEHAVIORAL. There is no end state to check: the answer is advice.
 #
 # GATES. One labelled sanity case pins that the answer comes from the skill
-# (`skill_view`); every other gate is a floor any correct answer meets (the
-# export and the import; the primary the device-role Mac points at; WhatsApp,
-# which the owner named, in the answer about what stops). The rubric
-# owns the wording. No `reply_not_matches`: the wrong move (copying the home
-# folder by hand) is something a correct answer may well warn against, and a
-# pattern cannot tell the two polarities apart.
+# (`skill_view`); every other gate is a floor any correct answer meets (one of
+# the two ways a home moves, Always On or the archive by hand; the primary the
+# device-role Mac points at; WhatsApp, which the owner named, in the answer
+# about what stops). The rubric owns the wording. The one `reply_not_matches`
+# is the verbs Fermix removed (`fermix home move`, `--retire`, `fermix home
+# enroll-code`), which no correct answer names in either polarity; the wrong
+# move (copying the home folder by hand) is something a correct answer may
+# well warn against, and a pattern cannot tell the two polarities apart, so
+# the rubric holds it.
 #
 # NO NEW CONSENT GATE. Nothing here is gated on a human decision, so
 # `bin/seed_capability_home.py` needs no pre-grant (these are `host_readonly`,
@@ -42,7 +45,10 @@ scenarios:
     cases:
       # SANITY CASE — the one route assertion in this suite. The move's verbs and
       # their order are not general knowledge; they are in the skill's `home`
-      # reference, so this case pins that the model opened it.
+      # reference, so this case pins that the model opened it. A rented VM is
+      # a server of the owner's own, so Always On's own-server path is a
+      # correct answer as much as the archive by hand, and neither is
+      # penalized.
       - id: move_to_vm_sanity
         query: >
           I've rented a small Linux VM so Fermix can keep running when my Mac
@@ -50,18 +56,24 @@ scenarios:
           memory and settings, and what will I have to redo on the VM?
         expect:
           tools_any: [skill_view]
-          reply_matches: '(?is)(?=.*\bexport)(?=.*\bimport)'
+          reply_matches: '(?is)\balways[\s-]on\b|\benroll|\bexport\b.*\bimport\b|\bimport\b.*\bexport\b'
+          reply_not_matches: '(?i)\bfermix\s+home\s+move\b|--retire\b|\benroll-code\b'
           max_tool_calls: 8
           max_cost_usd: 1.2
           max_duration_ms: 160000
         rubric: |
-          1. Says the move is an export of the home, with Fermix stopped on the
-             Mac, into one archive protected by a passphrase the owner keeps
-             (`fermix home export`), copied to the VM and imported there into an
-             empty directory (`fermix home import ... --into ...`).
-          2. Says the Mac's home is marked as moved (`--mark-moved` on the
-             export, or `fermix home mark-moved`) so it can no longer start as
-             the primary.
+          1. Gives a way that moves the whole home, memory and settings
+             included, either one being correct: Always On onto a server of
+             the owner's own (Use my own Linux server, or `fermix always-on
+             own-server`: an enrollment code, the installer run on the VM that
+             asks for it, then Move now with a recovery passphrase), or the
+             archive by hand (`fermix home export` with Fermix stopped on the
+             Mac, under a passphrase the owner keeps, then `fermix home import`
+             into an empty directory on the VM).
+          2. Says the Mac no longer runs as the primary once the home moved:
+             after Always On's move it stays a desktop of the VM, and by hand
+             its home is marked moved (`--mark-moved` on the export, or
+             `fermix home mark-moved`).
           3. Names at least two things that do not travel and are redone on the
              VM: secrets kept in the operating system's keyring, browser
              sign-ins (browser profiles stay with the Mac), coding-agent
@@ -179,8 +191,9 @@ scenarios:
           it can set up a Hetzner server for that by itself. What does it need
           from me, what does it create there and what will it cost me, and is
           my Hetzner key safe once my Fermix lives on that server?
+        # Until the release gate (Home.AlwaysOnRelease) is deleted, this case also accepts "Always On is not in this release of Fermix yet"; narrow it back then.
         expect:
-          reply_matches: '(?i)\btoken'
+          reply_matches: '(?i)\btoken|\breleas(?:e|ed|es)\b'
           max_cost_usd: 1.2
           max_duration_ms: 160000
         rubric: |
@@ -188,17 +201,21 @@ scenarios:
              Always On pane, the setup page's Always On tab, or
              `fermix always-on` in a terminal) from a Hetzner Cloud API token
              with Read & Write permission, from a project made for Fermix,
-             pasted once and checked at once.
-          2. Says the token stays on this computer (in its own file under the
-             Fermix home's device folder), never in the settings file or the
-             keychain, so it does not move to the server.
-          3. Names what Fermix creates: a firewall with no inbound rule and a
-             Debian server with the enrollment code already inside (good for
-             24 hours), and says the monthly price is shown before creating,
-             read live from Hetzner with VAT and the IPv4 address included.
-          4. Says Fermix lists what it created, can turn the server on or
-             restart it and delete it, but does not delete the server the home
-             moved to.
+             pasted once and checked at once; or says Always On is not in
+             this release of Fermix yet (a release build has none). Either is
+             correct while release builds have no Always On.
+          2. Where it describes the setup, says the token stays on this
+             computer (in its own file under the Fermix home's device
+             folder), never in the settings file or the keychain, so it does
+             not move to the server.
+          3. Where it describes the setup, names what Fermix creates: a
+             firewall with no inbound rule and a Debian server with the
+             enrollment code already inside (good for 24 hours), and says the
+             monthly price is shown before creating, read live from Hetzner
+             with VAT and the IPv4 address included.
+          4. Where it describes the setup, says Fermix lists what it created,
+             can turn the server on or restart it and delete it, but does not
+             delete the server the home moved to.
           5. Does not tell the owner to rent a server and install Fermix on it
              over SSH by hand, or to put the token into Fermix's settings or
              keychain.
@@ -279,6 +296,7 @@ scenarios:
   # the rest. Tagged `host-safe-core`, so it runs on every `make regression`:
   # a question and an answer, read-only on the host, with no consent gate for
   # an eval home to pre-grant. The suite's other scenarios stay out of it.
+  # Until the release gate (Home.AlwaysOnRelease) is deleted, both cases also accept "Always On is not in this release of Fermix yet"; narrow them back then.
   - id: always_on_without_the_app
     title: "Setting up Always On on an install with no Fermix app"
     severity: normal
@@ -290,17 +308,20 @@ scenarios:
           I installed Fermix with Homebrew and I don't use the Fermix Mac app.
           How do I keep Fermix running when my MacBook is closed?
         expect:
-          reply_matches: "(?i)(fermix\\s+always-on|setup\\s+page)"
+          reply_matches: "(?i)(fermix\\s+always-on|setup\\s+page|\\breleas(?:e|ed|es)\\b)"
           reply_not_matches: "(?i)(?<!n't need to )(?<!not need to )(?<!no need to )(?<!n't have to )(?<!rather than )(?<!without )\\b(?:install|download)\\s+(?:the\\s+)?(?:fermix\\s+)?(?:mac(?:os)?\\s+)?app\\b"
           max_cost_usd: 1.2
           max_duration_ms: 160000
         rubric: |
           1. Says Always On keeps Fermix running with the Mac closed by moving
              it to a server the owner controls: one Fermix creates on Hetzner
-             from an API token, or a Linux server of the owner's own.
-          2. Says it is set up without the Fermix app: with `fermix always-on`
-             in a terminal, which walks through each step, or on the setup
-             page's Always On tab.
+             from an API token, or a Linux server of the owner's own; or says
+             Always On is not in this release of Fermix yet (a release build,
+             as Homebrew installs, has none). Either is correct while release
+             builds have no Always On.
+          2. Where it describes the setup, says it is set up without the
+             Fermix app: with `fermix always-on` in a terminal, which walks
+             through each step, or on the setup page's Always On tab.
           3. Does not say the Fermix Mac app must be installed to set up
              Always On.
       - id: linux_package_owner_sets_up_always_on
@@ -309,15 +330,18 @@ scenarios:
           top of it. I'd like it to stay up while this machine is switched
           off. How do I set that up?
         expect:
-          reply_matches: "(?i)(fermix\\s+always-on|setup\\s+page)"
+          reply_matches: "(?i)(fermix\\s+always-on|setup\\s+page|\\breleas(?:e|ed|es)\\b)"
           reply_not_matches: "(?i)(?<!n't need to )(?<!not need to )(?<!no need to )(?<!n't have to )(?<!rather than )(?<!without )\\b(?:install|download)\\s+(?:the\\s+)?(?:fermix\\s+)?(?:mac(?:os)?\\s+|linux\\s+)?app\\b"
           max_cost_usd: 1.2
           max_duration_ms: 160000
         rubric: |
           1. Says Always On moves Fermix to a server the owner controls (one
              Fermix creates on Hetzner, or a Linux server of their own), so it
-             keeps running while this machine is off.
-          2. Says it is set up from this install with no app: with
-             `fermix always-on` in a terminal, or on the setup page's Always
-             On tab.
+             keeps running while this machine is off; or says Always On is not
+             in this release of Fermix yet (a release build, as the Linux
+             package installs, has none). Either is correct while release
+             builds have no Always On.
+          2. Where it describes the setup, says it is set up from this install
+             with no app: with `fermix always-on` in a terminal, or on the
+             setup page's Always On tab.
           3. Does not say a Fermix app must be installed to set up Always On.

@@ -53,8 +53,10 @@ defmodule FermixChannels.Companion.SupervisorTest do
   # The media grants start before the connections, so a restart of theirs,
   # which forgets every hold, takes the connections that held them down too.
   # So does the Always On watch (companion protocol 6): a restart forgets who
-  # it tells, and the connections it takes down subscribe again.
-  test "a serving boot binds companion.sock owner-only, after its coordinator, media grants and Always On watch" do
+  # it tells, and the connections it takes down subscribe again. So does the
+  # attachment inbox (companion protocol 7): a restart empties it, and takes
+  # down the connections whose files it removed.
+  test "a serving boot binds companion.sock owner-only, after its coordinator, media grants, Always On watch and inbox" do
     unique = System.unique_integer([:positive])
     socket_path = Path.join(System.tmp_dir!(), "fermix-companion-sup-#{unique}.sock")
     db_path = Path.join(System.tmp_dir!(), "fermix-companion-sup-#{unique}.db")
@@ -62,6 +64,7 @@ defmodule FermixChannels.Companion.SupervisorTest do
     # The grants' own directory, never the home's: they clear it as they start.
     media_dir = FermixTestSupport.SafeRm.make_tmp_dir!("companion-sup-media")
     media_root = Path.join(media_dir, "media")
+    inbox_dir = Path.join(media_dir, "inbox")
 
     on_exit(fn ->
       Enum.each(
@@ -92,7 +95,8 @@ defmodule FermixChannels.Companion.SupervisorTest do
            name: :"companion_sup_watch_#{unique}",
            read: fn -> %{key: :off, off: true, next_change_ms: nil} end,
            clock_monitor: false
-         ]}
+         ],
+         inbox_opts: [name: :"companion_sup_inbox_#{unique}", dir: inbox_dir]}
       )
 
     ids = supervisor |> Supervisor.which_children() |> Enum.map(&elem(&1, 0)) |> Enum.reverse()
@@ -104,6 +108,7 @@ defmodule FermixChannels.Companion.SupervisorTest do
              :"companion_sup_coordinator_#{unique}",
              :"companion_sup_media_#{unique}",
              :"companion_sup_watch_#{unique}",
+             :"companion_sup_inbox_#{unique}",
              :"companion_sup_connections_#{unique}",
              Endpoint
            ]
@@ -111,6 +116,8 @@ defmodule FermixChannels.Companion.SupervisorTest do
     assert is_pid(Process.whereis(:"companion_sup_watch_#{unique}"))
     {:ok, connection_opts} = Endpoint.connection_opts()
     assert connection_opts[:status_watch] == :"companion_sup_watch_#{unique}"
+    assert connection_opts[:inbox] == :"companion_sup_inbox_#{unique}"
+    assert Bitwise.band(File.stat!(inbox_dir).mode, 0o777) == 0o700
     assert is_pid(Process.whereis(:"companion_sup_media_#{unique}"))
     assert File.dir?(media_root)
     assert Bitwise.band(File.stat!(socket_path).mode, 0o777) == 0o600

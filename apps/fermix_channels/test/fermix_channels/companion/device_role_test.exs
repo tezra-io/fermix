@@ -96,7 +96,7 @@ defmodule FermixChannels.Companion.DeviceRoleTest do
 
     test "the Mac app is told the device-role sentence for its message", %{socket_path: path} do
       client = connect(path)
-      send_line(client, %{"type" => "client_hello", "protocol_version" => 5})
+      send_line(client, %{"type" => "client_hello", "protocol_version" => 6})
       assert %{"type" => "server_hello"} = recv(client)
 
       send_line(client, %{

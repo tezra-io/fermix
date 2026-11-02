@@ -17,7 +17,10 @@ defmodule FermixChannels.Desktop.CompanionPump do
   its own descendant), so the connection serves the channel with the owner's
   trust: the trust the desktop's own `companion.sock` gave the one process it
   carries, the owner's app, which the desktop placed with the same resolver
-  before it opened the channel. Nothing else crosses the tunnel.
+  before it opened the channel. Nothing else crosses the tunnel. The one
+  option it changes is the attachment inbox, which it starts the connection
+  without: the app writes its files on the desktop, where the primary's inbox
+  is not, so the hello offers no attachments (companion protocol 7).
 
   ## Lines
 
@@ -219,8 +222,11 @@ defmodule FermixChannels.Desktop.CompanionPump do
     {:error, reason}
   end
 
+  # The desktop's app writes its files on the desktop, which the primary's
+  # inbox is not on, so the connection offers it no attachments.
   defp start_connection(supervisor, connection_opts, server) do
-    spec = {Connection, Keyword.put(connection_opts, :socket, server)}
+    spec =
+      {Connection, connection_opts |> Keyword.put(:socket, server) |> Keyword.put(:inbox, nil)}
 
     with {:ok, connection} <- DynamicSupervisor.start_child(supervisor, spec),
          :ok <- hand_over(server, connection, supervisor) do

@@ -256,6 +256,45 @@ defmodule Fermix.CLI.HomeSnapshotCommandTest do
       assert %{"result" => %{"summary" => %{"state" => "off"}}} = Jason.decode!(json)
     end
 
+    # Always On is not in a release build yet, and home status is its screen:
+    # there it refuses as fermix always-on does, before reading anything.
+    test "in a build without Always On, it refuses in one sentence, reading nothing", ctx do
+      client = fn method, _params, _opts -> flunk("#{method} was called") end
+      absent = Path.join(ctx.tmp, "no-home")
+
+      {1, "", err} = run(["status"], home: absent, client: client, always_on: false)
+      assert err == "fermix home: Always On is not in this release of Fermix yet.\n"
+
+      {1, out, ""} = run(["status", "--json"], home: absent, client: client, always_on: false)
+
+      assert Jason.decode!(out) == %{
+               "schema_version" => 1,
+               "ok" => false,
+               "error" => %{
+                 "code" => "always_on_unavailable",
+                 "sentence" => "Always On is not in this release of Fermix yet."
+               }
+             }
+
+      refute File.exists?(absent)
+    end
+
+    test "in a build with Always On, it reads the home as ever", ctx do
+      {0, out, ""} = run(["status", "--json"], home: ctx.home, client: stopped(), always_on: true)
+      assert %{"ok" => true, "result" => %{"role" => "primary"}} = Jason.decode!(out)
+    end
+
+    test "in a build without Always On, the snapshots verbs are as ever", ctx do
+      {0, out, ""} =
+        run(["snapshots", "status", "--json"],
+          home: ctx.home,
+          client: stopped(),
+          always_on: false
+        )
+
+      assert %{"ok" => true, "result" => %{"configured" => false}} = Jason.decode!(out)
+    end
+
     test "snapshots status prints the snapshots alone", ctx do
       {0, out, ""} = run(["snapshots", "status", "--json"], home: ctx.home, client: stopped())
 

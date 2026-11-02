@@ -100,6 +100,24 @@ defmodule FermixCore.Companion.Protocol do
   to a connection that pulled: the index to one that pulled it, a list to one
   that holds it. The phone's wire does not carry lists yet.
 
+  Version 7 brings the owner's files to the Mac's chat. The Mac and the daemon
+  share a file system, so a file crosses by path, never in chunks:
+  `server_hello.attachments` tells the owner's connection, while the media
+  store runs, the inbox to write a file in (`dir`) and the largest file the
+  store takes (`max_bytes`); the client writes `<dir>/<attach_id>` and sends
+  `attach_file`, which the daemon reads into the store the phone's uploads
+  use, removes, and answers `attach_status` (`present`) or `error:
+  request_failed` with the engine's sentence and the `attach_id`. A `msg`
+  then names those ids in `attach_ids`, and its turn and its row carry them
+  as a phone message's do. `attach_file` and a `msg` that names an
+  attachment are taken only from a version 7 connection placed as the
+  owner's: such a `msg` from any other connection is refused
+  `attachments_unsupported`, as every one was before, and an `attach_file`
+  from a version 6 connection is an unknown event. `server_hello.commands`,
+  the slash commands an app offers in its palette (the list the phone's
+  `caps.commands` carries), is additive and optional, so on every version,
+  and so is `attachments`. The window is now {6, 7}.
+
   Both hellos carry the primary epoch (M75 D14), additive and optional on
   every version: `server_hello.primary_epoch` is the home's, absent only from a
   home that has never booted as the primary, and `client_hello.primary_epoch`
@@ -116,7 +134,7 @@ defmodule FermixCore.Companion.Protocol do
 
   # Bumped in lockstep with any wire-shape change. The supported range is an
   # N/N-1 window derived from this single constant.
-  @protocol_version 6
+  @protocol_version 7
   @min_supported_version max(1, @protocol_version - 1)
 
   # The inbound line cap, the same as the Realtime socket's.
@@ -163,16 +181,22 @@ defmodule FermixCore.Companion.Protocol do
   @row_id ~r/\Aci_[0-9a-z]{10}\z/
   @max_checklist_msg_id 128
   @row_kinds ~w(item section)
+  # The owner's files (version 7): an attach id names a file in the inbox, so
+  # it is a file name and never a path; a kind is a hint, as the phone's is;
+  # a mime and a name are bounded as the media store keeps them.
+  @attach_id ~r/\A[0-9A-Za-z_-]{1,64}\z/
+  @attach_kinds ~w(image animation video audio voice document file)
+  @max_attach_field_bytes 255
 
   @client_events ~w(
     client_hello msg command cancel history_pull history_search read_state media_fetch
-    media_release proposal_answer checklists_pull checklist_pull checklist_edit
+    media_release proposal_answer checklists_pull checklist_pull checklist_edit attach_file
   )
   @server_events ~w(
     server_hello accepted turn_started text_delta tool_event reasoning text_done turn_error
     turn_done row row_updated approval approval_resolved read_state history_page search_results
     media_path media_missing proposal proposal_resolved home_status_changed checklists
-    checklist error
+    checklist attach_status error
   )
 
   # The events a version after 1 brought; every other one is version 1.
@@ -182,7 +206,8 @@ defmodule FermixCore.Companion.Protocol do
     "proposal_answer" => 4,
     "checklists_pull" => 6,
     "checklist_pull" => 6,
-    "checklist_edit" => 6
+    "checklist_edit" => 6,
+    "attach_file" => 7
   }
   @server_event_versions %{
     "turn_done" => 2,
@@ -194,7 +219,8 @@ defmodule FermixCore.Companion.Protocol do
     "reasoning" => 6,
     "home_status_changed" => 6,
     "checklists" => 6,
-    "checklist" => 6
+    "checklist" => 6,
+    "attach_status" => 7
   }
 
   # The events only the owner's connection is sent or may send (versions 4 and 6).
@@ -236,7 +262,8 @@ defmodule FermixCore.Companion.Protocol do
     "proposal_answer" => ~w(client_msg_id profile_id proposal_id decision),
     "checklists_pull" => ~w(profile_id),
     "checklist_pull" => ~w(profile_id list_id),
-    "checklist_edit" => ~w(client_msg_id profile_id op)
+    "checklist_edit" => ~w(client_msg_id profile_id op),
+    "attach_file" => ~w(attach_id kind mime size_bytes sha256)
   }
 
   @server_required %{
@@ -263,6 +290,7 @@ defmodule FermixCore.Companion.Protocol do
     "home_status_changed" => [],
     "checklists" => ~w(profile_id lists),
     "checklist" => ~w(profile_id list),
+    "attach_status" => ~w(attach_id status),
     "error" => ~w(reason)
   }
 
@@ -347,6 +375,22 @@ defmodule FermixCore.Companion.Protocol do
   @doc "The longest `client_msg_id` of a `checklist_edit`, in characters (version 6)."
   @spec max_checklist_msg_id() :: pos_integer()
   def max_checklist_msg_id, do: @max_checklist_msg_id
+
+  @doc "The kinds an `attach_file` may declare (version 7), a hint as the phone's `kind` is."
+  @spec attach_kinds() :: [String.t()]
+  def attach_kinds, do: @attach_kinds
+
+  @doc "The most bytes an `attach_file`'s `mime` or `name` holds (version 7)."
+  @spec max_attach_field_bytes() :: pos_integer()
+  def max_attach_field_bytes, do: @max_attach_field_bytes
+
+  @doc """
+  Whether `value` is an attach id this wire takes (version 7): one to 64
+  ASCII letters, digits, `_` or `-`, a file name in the inbox and never a
+  path.
+  """
+  @spec attach_id?(term()) :: boolean()
+  def attach_id?(value), do: is_binary(value) and Regex.match?(@attach_id, value)
 
   @doc "The client chat events whose payload the mobile wire shares verbatim."
   @spec shared_client_events() :: [String.t()]
@@ -530,15 +574,9 @@ defmodule FermixCore.Companion.Protocol do
     end
   end
 
-  # Attachments ride on the mobile wire's media transfer, which this wire does
-  # not carry in version 1: an `attach_ids` entry could only name a blob this
-  # client has no way to have uploaded.
-  defp validate_client_event("msg", payload) do
-    with :ok <- validate_client_payload("msg", payload) do
-      if payload["attach_ids"] == [], do: :ok, else: {:error, :attachments_unsupported}
-    end
-  end
-
+  # A `msg` that names an attachment is decoded here on every version; the
+  # connection takes it only from a version 7 owner's connection, the only one
+  # an `attach_file` is taken from (moduledoc).
   defp validate_client_event(type, payload), do: validate_client_payload(type, payload)
 
   defp validate_client("msg", payload) do
@@ -599,6 +637,17 @@ defmodule FermixCore.Companion.Protocol do
 
   defp validate_client("checklists_pull", payload), do: nonempty(payload, "profile_id")
 
+  # Version 7: the file is `<inbox>/<attach_id>`, so the payload names no path.
+  defp validate_client("attach_file", payload) do
+    with :ok <- attach_id(payload),
+         :ok <- enum(payload, "kind", @attach_kinds),
+         :ok <- bytes(payload, "mime", @max_attach_field_bytes),
+         :ok <- nonnegative_u64(payload, "size_bytes"),
+         :ok <- media_ref(payload, "sha256") do
+      optional_bytes(payload, "name", @max_attach_field_bytes)
+    end
+  end
+
   defp validate_client("checklist_pull", payload) do
     with :ok <- nonempty(payload, "profile_id"),
          :ok <- pattern(payload, "list_id", @list_id) do
@@ -650,11 +699,14 @@ defmodule FermixCore.Companion.Protocol do
 
   # `primary_epoch` is absent only from a home that has never booted as the
   # primary (M75 D14); `role` is the engine's, which this daemon always names.
+  # `commands` and `attachments` are additive (version 7's moduledoc).
   defp validate_server("server_hello", payload) do
     with :ok <- positive_u64(payload, "min_version"),
          :ok <- positive_u64(payload, "max_version"),
          :ok <- optional_positive_u64(payload, "primary_epoch"),
-         :ok <- enum(payload, "role", @engine_roles) do
+         :ok <- enum(payload, "role", @engine_roles),
+         :ok <- optional_commands(payload),
+         :ok <- optional_attachments(payload) do
       valid_version_range(payload)
     end
   end
@@ -800,11 +852,62 @@ defmodule FermixCore.Companion.Protocol do
     end
   end
 
-  defp validate_server("error", payload) do
-    with :ok <- nonempty(payload, "reason") do
-      if Map.has_key?(payload, "ref"), do: media_ref(payload, "ref"), else: :ok
+  defp validate_server("attach_status", payload) do
+    with :ok <- attach_id(payload) do
+      enum(payload, "status", ~w(present))
     end
   end
+
+  defp validate_server("error", payload) do
+    with :ok <- nonempty(payload, "reason"),
+         :ok <- optional_media_ref(payload, "ref") do
+      if Map.has_key?(payload, "attach_id"), do: attach_id(payload), else: :ok
+    end
+  end
+
+  # The slash commands an app offers, as the phone's `caps.commands` carries
+  # them: each `{name, aliases, description}` and nothing else.
+  defp optional_commands(%{"commands" => commands}) when is_list(commands) do
+    if Enum.all?(commands, &command_descriptor?/1),
+      do: :ok,
+      else: {:error, {:invalid_field, "commands"}}
+  end
+
+  defp optional_commands(%{"commands" => _commands}), do: {:error, {:invalid_field, "commands"}}
+  defp optional_commands(_payload), do: :ok
+
+  defp command_descriptor?(
+         %{"name" => name, "aliases" => aliases, "description" => text} = command
+       )
+       when map_size(command) == 3 and is_list(aliases) do
+    nonempty_string?(name) and nonempty_string?(text) and Enum.all?(aliases, &nonempty_string?/1)
+  end
+
+  defp command_descriptor?(_command), do: false
+
+  defp nonempty_string?(value), do: is_binary(value) and value != ""
+
+  # The inbox the owner's connection writes a file in, and the largest file
+  # the store takes: exactly those two.
+  defp optional_attachments(%{"attachments" => %{"dir" => dir, "max_bytes" => max} = offer})
+       when map_size(offer) == 2 and is_binary(dir) and is_integer(max) and max > 0 and
+              max <= @max_u64 do
+    if Path.type(dir) == :absolute, do: :ok, else: {:error, {:invalid_field, "attachments"}}
+  end
+
+  defp optional_attachments(%{"attachments" => _offer}),
+    do: {:error, {:invalid_field, "attachments"}}
+
+  defp optional_attachments(_payload), do: :ok
+
+  defp attach_id(payload) do
+    if attach_id?(Map.get(payload, "attach_id")),
+      do: :ok,
+      else: {:error, {:invalid_field, "attach_id"}}
+  end
+
+  defp optional_media_ref(payload, field),
+    do: if(Map.has_key?(payload, field), do: media_ref(payload, field), else: :ok)
 
   # A list in the index: its id, title and counts, and its folder when it is
   # in one.

@@ -600,8 +600,6 @@ def _companion_spec(cs: dict, drive: str, case_expect: dict, turn_expects: list[
         if cs.get("rubric") is not None:
             problems.append(f"{cloc}: a cancelled companion message has no reply to judge; "
                             "drop `rubric`")
-    if cs.get("image") is not None or cs.get("images") is not None:
-        problems.append(f"{cloc}: attachments do not travel on the companion socket")
     return spec
 
 
@@ -943,7 +941,9 @@ def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None
             # album) names known local fixtures. `drive: ask` passes each one to
             # `fermix ask --attach` (on a multi-turn case, with the first turn
             # only, so a later turn can ask about it again); `telegram_operator`
-            # prints the paths so the operator can attach those exact files.
+            # prints the paths so the operator can attach those exact files;
+            # `companion` hands each over through the daemon's inbox, as the
+            # Mac app attaches a file (evallib/companion.py).
             # Paths are relative to the suite file and existence-checked so
             # validation fails loud.
             if "image" in cs and "images" in cs:

@@ -8,6 +8,7 @@ defmodule FermixCore.Management.Router do
 
   alias FermixCore.BuildInfo
   alias FermixCore.Health
+  alias FermixCore.Home.AlwaysOnRelease
   alias FermixCore.Home.Role
   alias FermixCore.Introspection.Overview
   alias FermixCore.Management.AlwaysOn
@@ -144,6 +145,12 @@ defmodule FermixCore.Management.Router do
   @spec route(Protocol.request(), keyword()) :: route_result()
   def route(%{method: method, protocol_version: version, params: params}, opts \\ [])
       when is_integer(version) and version > 0 and is_map(params) and is_list(opts) do
+    if method in AlwaysOnRelease.methods() and not always_on?(opts),
+      do: AlwaysOnRelease.refusal(method),
+      else: route_published(method, version, params, opts)
+  end
+
+  defp route_published(method, version, params, opts) do
     case Protocol.minimum_version(method) do
       {:ok, minimum} when minimum <= version ->
         with :ok <- admit(method, params, opts), do: route_known(method, params, opts)
@@ -1067,10 +1074,7 @@ defmodule FermixCore.Management.Router do
            "minimum_version" => minimum,
            "maximum_version" => maximum
          },
-         "capabilities" => %{
-           "methods" => Protocol.methods(),
-           "minimum_versions" => Protocol.method_minimum_versions()
-         },
+         "capabilities" => capabilities(always_on?(opts)),
          "engine" => identity,
          "setup" => setup
        }}
@@ -1079,6 +1083,26 @@ defmodule FermixCore.Management.Router do
       {:error, _reason} -> unavailable("engine_identity")
     end
   end
+
+  # Always On's methods, where this build serves them (`Home.AlwaysOnRelease`),
+  # and every other.
+  defp capabilities(true),
+    do: %{
+      "methods" => Protocol.methods(),
+      "minimum_versions" => Protocol.method_minimum_versions()
+    }
+
+  defp capabilities(false) do
+    gated = AlwaysOnRelease.methods()
+
+    %{
+      "methods" => Protocol.methods() -- gated,
+      "minimum_versions" => Map.drop(Protocol.method_minimum_versions(), gated)
+    }
+  end
+
+  # The `:always_on` seam stands for what a build compiles in.
+  defp always_on?(opts), do: Keyword.get_lazy(opts, :always_on, &AlwaysOnRelease.available?/0)
 
   defp setup_state(opts) do
     reporter = Keyword.get(opts, :setup_state_reporter, &SetupState.report/1)

@@ -103,7 +103,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
        facts(provision: ledger(:failed, failure: failure("unavailable", "nbg1"))), "problem",
        "Falkenstein has no CPX22 right now.", "create_in"},
       {"no capacity anywhere", facts(provision: ledger(:failed, failure: failure("unavailable"))),
-       "problem", "Falkenstein has no CPX22 right now.", "learn_more"},
+       "problem", "Falkenstein has no CPX22 right now.", "start_again"},
       {"the account's limit",
        facts(provision: ledger(:failed, failure: failure("account_limit"))), "problem",
        "Hetzner limits new servers on this account.", "open_console"},
@@ -148,10 +148,6 @@ defmodule FermixCore.Management.HomeSummaryTest do
        facts(provision: ledger(:failed, failure: step_failure("create", "interrupted"))),
        "problem", "Fermix stopped before your server was created, so start again.",
        "start_again"},
-      {"nothing in stock for the recommendation",
-       facts(provision: ledger(:failed, failure: failure("nothing_in_stock"))), "problem",
-       "Hetzner has no server type with 4 GB in stock in Falkenstein, Nuremberg or Helsinki " <>
-         "right now.", "learn_more"},
       {"a move undone, the server still held",
        ready_facts(move: move("aborted"), link: link(enrollment: provisioned(:used, @cand))),
        "undone", "The move was undone. Fermix still runs on this Mac.", "try_again"},
@@ -399,6 +395,34 @@ defmodule FermixCore.Management.HomeSummaryTest do
       assert summary["sentence"] == sentence, "#{name}: #{inspect(summary["sentence"])}"
       assert action_id(summary) == action, "#{name}: #{inspect(summary["action"])}"
     end
+  end
+
+  # Review R6: the outcome a surface following a step reads is the engine's,
+  # so no surface keeps a table of states.
+  test "every row's outcome is the engine's word for whether it moves on by itself" do
+    for {name, facts, state, _sentence, _action} <- cases() do
+      outcome = HomeSummary.summary(facts)["outcome"]
+      assert outcome in HomeSummary.outcomes(), name
+
+      expected =
+        case state do
+          "problem" -> "failed"
+          state when state in ["creating", "moving"] -> "running"
+          _settled -> outcome
+        end
+
+      assert outcome == expected, "#{name}: #{outcome}"
+    end
+
+    outcome = &HomeSummary.summary(&1)["outcome"]
+    assert outcome.(ready_facts([])) == "done"
+    assert outcome.(ready_facts(move: move("requested"))) == "running"
+    assert outcome.(facts(link: link(enrollment: manual(:open)))) == "waiting"
+    assert outcome.(facts(provision: ledger(:connected))) == "done"
+    assert outcome.(candidate_role("receiving")) == "running"
+    assert outcome.(candidate_role("enrolled")) == "done"
+    assert outcome.(device(move: move("undoing"))) == "running"
+    assert outcome.(desktop([])) == "done"
   end
 
   test "the table reaches every state, every problem and every action of the vocabulary" do
@@ -661,12 +685,78 @@ defmodule FermixCore.Management.HomeSummaryTest do
       assert ids(detail["alternatives"]) == ["own_server", "open_console", "delete_server"]
     end
 
-    test "the account's limit offers a server of the owner's own beside it" do
+    # Review R3: a refusal the owner or the provider can lift is offered again.
+    test "the account's limit offers to start again once lifted, and a server of the " <>
+           "owner's own" do
       %{"detail" => detail} =
         HomeSummary.summary(facts(provision: ledger(:failed, failure: failure("account_limit"))))
 
-      assert ids(detail["alternatives"]) == ["own_server"]
+      assert ids(detail["alternatives"]) == ["start_again", "own_server"]
       assert detail["seen_at"] == "2031-05-04T11:00:00Z"
+    end
+
+    test "no stock anywhere offers to start again, and Learn more beside it" do
+      summary =
+        HomeSummary.summary(facts(provision: ledger(:failed, failure: failure("unavailable"))))
+
+      assert %{"id" => "start_again", "confirm" => confirm} = summary["action"]
+      assert confirm =~ "create your server again"
+      assert ids(summary["detail"]["alternatives"]) == ["learn_more"]
+    end
+
+    # Review R2: what Fermix created for a move that has not begun can be
+    # deleted from every screen it waits on, and nothing else can.
+    test "a server Fermix created, ready or blocked, offers to delete it" do
+      for facts <- [ready_facts([]), ready_facts(review: review([warn(), block()]))] do
+        summary = HomeSummary.summary(facts)
+
+        assert [%{"id" => "delete_server", "label" => "Delete your server"} = delete] =
+                 summary["detail"]["alternatives"]
+
+        assert delete["confirm"] == "Delete your server? Everything on it is deleted."
+
+        assert delete["key"] ==
+                 HomeSummary.action_key(
+                   "delete_server",
+                   "Delete your server",
+                   delete["confirm"],
+                   [],
+                   "61839204"
+                 )
+      end
+
+      blocked = HomeSummary.summary(ready_facts(review: review([block()])))
+
+      assert blocked["detail"]["note"] ==
+               "Your server costs its monthly price until it is deleted."
+    end
+
+    test "a move undone with the server Fermix created still held offers to delete it" do
+      summary = HomeSummary.summary(ready_facts(move: move("aborted")))
+
+      assert %{"state" => "undone", "action" => %{"id" => "try_again"}} = summary
+
+      assert [%{"id" => "delete_server", "label" => "Delete your server"}] =
+               summary["detail"]["alternatives"]
+
+      own =
+        facts(
+          candidates: [candidate()],
+          link: link(enrollment: manual(:used, @cand)),
+          move: move("aborted")
+        )
+
+      assert HomeSummary.summary(own)["detail"]["alternatives"] in [nil, []]
+    end
+
+    test "no delete is offered for a server of the owner's own, nor while a move runs" do
+      own = facts(candidates: [candidate()], link: link(enrollment: manual(:used, @cand)))
+      assert HomeSummary.summary(own)["detail"]["alternatives"] in [nil, []]
+
+      for phase <- ["requested", "streaming", "committing", "undoing"] do
+        summary = HomeSummary.summary(ready_facts(move: move(phase)))
+        refute "delete_server" in ids(summary["detail"]["alternatives"] || []), phase
+      end
     end
 
     test "Create in names the next location and carries its id" do
@@ -682,7 +772,24 @@ defmodule FermixCore.Management.HomeSummaryTest do
     test "a replace's ready holds the new server's facts and until when it waits" do
       %{"detail" => detail} = HomeSummary.summary(replace_ready([]))
 
-      assert Map.delete(detail, "lines") == %{
+      # Review R2: the new server, and only it, can be deleted before the move.
+      assert [%{"id" => "delete_server", "label" => "Delete your new server"} = delete] =
+               detail["alternatives"]
+
+      assert delete["confirm"] == "Delete your new server? Everything on it is deleted."
+      new_id = replace_ready([]).provision.server.id
+      assert delete["key"] =~ ~r/\A[A-Za-z0-9_-]+\z/
+
+      assert delete["key"] ==
+               HomeSummary.action_key(
+                 "delete_server",
+                 "Delete your new server",
+                 delete["confirm"],
+                 [],
+                 new_id
+               )
+
+      assert Map.drop(detail, ["lines", "alternatives"]) == %{
                "server" => %{
                  "name" => "fermix-general-5d2e",
                  "type" => "CPX32",
@@ -694,6 +801,24 @@ defmodule FermixCore.Management.HomeSummaryTest do
                "readiness" => [],
                "waits_until" => "2031-05-05T11:40:00Z"
              }
+    end
+
+    # Review R4: the replace stopped before anything was made for it, so the
+    # server the home lives on is untouched and only Replace is offered.
+    test "a replace that stopped before its new server is a problem, offering Replace alone" do
+      summary =
+        HomeSummary.summary(desktop(provision: failed(created_ledger(), step_failure("create"))))
+
+      assert %{"state" => "problem", "action" => %{"id" => "replace_server"} = replace} = summary
+      assert replace["needs"] == ["choice"]
+      assert summary["detail"]["kind"] == "create_failed"
+      assert summary["detail"]["alternatives"] == []
+
+      assert summary["detail"]["note"] ==
+               "Your server still runs Fermix, so replacing it can be tried again."
+
+      assert summary["sentence"] ==
+               "Fermix could not reach Hetzner, so check this computer's connection and try again."
     end
 
     test "a replace's problem before the move offers to delete the new server" do
@@ -741,6 +866,22 @@ defmodule FermixCore.Management.HomeSummaryTest do
   end
 
   # -- the summary is the screen (Always On setup §3.1) -------------------------
+
+  # Review simplification 3: one reading of what a screen offers.
+  test "what a screen offers is its action, then the alternatives, then Details' actions" do
+    assert ids(HomeSummary.offered(HomeSummary.summary(desktop([])))) ==
+             ["back_up_now", "replace_server"]
+
+    not_set_up = facts(provision: created_ledger(), link: link(enrollment: provisioned(:expired)))
+
+    assert ids(HomeSummary.offered(HomeSummary.summary(not_set_up))) ==
+             ["start_again", "own_server", "open_console", "delete_server"]
+
+    summary = HomeSummary.summary(ready_facts([]))
+
+    for %{"id" => id, "key" => key} = record <- HomeSummary.offered(summary),
+        do: assert(HomeSummary.find_action(summary, id, key) == {:ok, record})
+  end
 
   describe "every action is one record" do
     test "each action anywhere has its needs, confirm, url and key" do
@@ -802,7 +943,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
     end
 
     test "Learn more opens the docs at the provider's part, Open its console" do
-      %{"action" => learn} =
+      %{"detail" => %{"alternatives" => [learn]}} =
         HomeSummary.summary(facts(provision: ledger(:failed, failure: failure("unavailable"))))
 
       assert learn["url"] == "https://fermix.ai/docs/always-on/#hetzner"
@@ -1641,10 +1782,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
           "token from your Hetzner project.",
       "other" =>
         "Hetzner had not finished starting your server after five minutes; Always On " <>
-          "checks again when it opens.",
-      "nothing_in_stock" =>
-        "Hetzner has no server type with 4 GB in stock in Falkenstein, Nuremberg or Helsinki " <>
-          "right now."
+          "checks again when it opens."
     }
 
     %{
@@ -1762,23 +1900,16 @@ defmodule FermixCore.Management.HomeSummaryTest do
 
   defp ids(actions), do: Enum.map(actions, & &1["id"])
 
-  defp every_action(%{"action" => action, "detail" => detail}),
-    do: List.wrap(action) ++ Map.get(detail, "alternatives", []) ++ Map.get(detail, "actions", [])
+  defp every_action(summary), do: HomeSummary.offered(summary)
 
   # The main action and every one Details offers.
-  defp all_actions(%{"action" => action, "detail" => detail}) do
-    ids(List.wrap(action)) ++
-      ids(Map.get(detail, "alternatives", [])) ++ ids(Map.get(detail, "actions", []))
-  end
+  defp all_actions(summary), do: ids(HomeSummary.offered(summary))
 
   # Every word a surface prints as prose: the sentence, each action's label
   # and confirm, the notes, the token screens, the step in hand, the labels
   # of Details' lines and the notice.
-  defp printed(%{"sentence" => sentence, "action" => action, "detail" => detail} = summary) do
-    actions =
-      List.wrap(action) ++ (detail["alternatives"] || []) ++ (detail["actions"] || [])
-
-    words = Enum.flat_map(actions, &[&1["label"] | List.wrap(&1["confirm"])])
+  defp printed(%{"sentence" => sentence, "detail" => detail} = summary) do
+    words = Enum.flat_map(HomeSummary.offered(summary), &[&1["label"] | List.wrap(&1["confirm"])])
     notes = for key <- ~w(note billing data progress), is_binary(detail[key]), do: detail[key]
     screens = Enum.flat_map(detail["providers"] || [], &[&1["sentence"] | &1["steps"]])
     lines = for %{"label" => label} <- detail["lines"] || [], do: label

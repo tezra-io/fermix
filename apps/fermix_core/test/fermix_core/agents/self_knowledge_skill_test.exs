@@ -237,9 +237,19 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
           "backward",
           "Full-text search",
           "whether or not the app is connected",
-          "Attachments do not travel",
           "companion:main"
         ] do
+      assert reference =~ required, "companion self-knowledge does not mention #{required}"
+    end
+
+    # Companion protocol 7: the owner attaches files in the Mac chat, so the
+    # skill no longer says they cannot, and says how they travel and where.
+    for text <- [paragraph, reference] do
+      assert text =~ "companion/inbox/"
+      refute text =~ ~r/(?i)no attachments from the Mac|attachments do not travel/
+    end
+
+    for required <- ["## Files the owner attaches", "max_media_bytes", "Attach it again."] do
       assert reference =~ required, "companion self-knowledge does not mention #{required}"
     end
   end

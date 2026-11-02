@@ -17,6 +17,8 @@ defmodule Fermix.CLI.MachineOutput do
   as `details`, so the words stay in this module and the caller supplies facts.
   """
 
+  alias FermixCore.Home.AlwaysOnRelease
+
   @schema_version 1
 
   @codes ~w(
@@ -49,6 +51,9 @@ defmodule Fermix.CLI.MachineOutput do
     action_refused
     confirm_required
     changed
+    step_failed
+    step_unfinished
+    always_on_unavailable
   )a
 
   @doc "Every error code this CLI can print, for the caller that renders them."
@@ -217,6 +222,14 @@ defmodule Fermix.CLI.MachineOutput do
     do: Keyword.fetch!(details, :confirm) <> " Pass --yes to accept it."
 
   def sentence(:changed, details), do: reason(details)
+
+  def sentence(:step_failed, details),
+    do: "That step ended on a problem: " <> reason(details) <> " Run fermix always-on to fix it."
+
+  def sentence(:always_on_unavailable, _details), do: AlwaysOnRelease.sentence()
+
+  def sentence(:step_unfinished, _details),
+    do: "Always On is still at it after 45 minutes; fermix always-on shows where it stands."
 
   defp said(details) do
     case Keyword.get(details, :output) do

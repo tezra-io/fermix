@@ -178,9 +178,9 @@ defmodule FermixCore.Management.ProvisionProvidersTest do
       {:ok, _view} = connect(ctx)
 
       # Always On speaks of the provider that holds it (`Provision.current/2`),
-      # whose recommendation the create would make.
+      # one of whose offers the create names.
       assert {:error, :unavailable, %{"sentence" => sentence}} =
-               create(ctx, type: nil, location: nil)
+               create(ctx, type: "cpx22", location: "fsn1")
 
       assert sentence == "Your server already exists, so delete it before creating another."
       assert {:ok, %{server: nil, ref: nil}} = Ledger.read(ctx.home, "nimbus")

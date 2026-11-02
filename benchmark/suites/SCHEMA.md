@@ -280,7 +280,9 @@ the `query` shorthand; multi-turn uses `turns`.
   rejected. With `drive: ask`, it is attached via
   `fermix ask --attach`; with `drive: telegram_operator`, the runner prints the
   resolved path and the operator attaches that exact fixture with the marked
-  prompt as its caption. Validated at load: the file must exist. Bundle under
+  prompt as its caption; with `drive: companion`, the runner hands it over as the
+  Mac app attaches a file (written into the inbox the daemon's hello names,
+  `attach_file`, then named in the message's `attach_ids`). Validated at load: the file must exist. Bundle under
   `suites/fixtures/` (e.g. a known-content image whose contents you assert on).
 - `expect` (map) — case-level structural gates, graded on the **final** turn's
   trace. `defaults.expect` is merged beneath it (case wins on conflict), and on

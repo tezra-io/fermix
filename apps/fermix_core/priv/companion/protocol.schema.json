@@ -3,8 +3,8 @@
   "$id": "https://fermix.sh/companion/protocol.schema.json",
   "title": "Fermix companion chat socket protocol",
   "description": "Newline-delimited JSON wire contract between the Fermix daemon and a native companion's chat. Source of truth: FermixCore.Companion.Protocol. See PROTOCOL.md.",
-  "x-protocol-version": 6,
-  "x-supported-version-range": { "min": 5, "max": 6 },
+  "x-protocol-version": 7,
+  "x-supported-version-range": { "min": 6, "max": 7 },
   "x-max-line-bytes": 65536,
   "x-media-budget-bytes": 536870912,
   "x-media-release-grace-s": 60,
@@ -27,7 +27,8 @@
             "proposal_answer",
             "checklists_pull",
             "checklist_pull",
-            "checklist_edit"
+            "checklist_edit",
+            "attach_file"
           ]
         }
       },
@@ -83,6 +84,10 @@
         {
           "if": { "required": ["type"], "properties": { "type": { "const": "checklist_edit" } } },
           "then": { "$ref": "#/$defs/checklist_edit" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "attach_file" } } },
+          "then": { "$ref": "#/$defs/attach_file" }
         }
       ]
     },
@@ -115,6 +120,7 @@
             "home_status_changed",
             "checklists",
             "checklist",
+            "attach_status",
             "error"
           ]
         }
@@ -222,6 +228,10 @@
           "then": { "$ref": "#/$defs/checklist" }
         },
         {
+          "if": { "required": ["type"], "properties": { "type": { "const": "attach_status" } } },
+          "then": { "$ref": "#/$defs/attach_status" }
+        },
+        {
           "if": { "required": ["type"], "properties": { "type": { "const": "error" } } },
           "then": { "$ref": "#/$defs/error" }
         }
@@ -243,14 +253,14 @@
     },
     "msg": {
       "type": "object",
-      "description": "The mobile wire's msg shape. text must not be blank, and attach_ids is empty on this wire in version 1.",
+      "description": "The mobile wire's msg shape. text must not be blank unless attach_ids names at least one file. Since version 7, attach_ids names files whose attach_file was answered present, and only a version 7 connection placed as the owner's may send a non-empty one; any other is refused with error attachments_unsupported and the connection is closed. A file the daemon no longer holds fails the message after accepted with error request_failed, its sentence and client_msg_id.",
       "required": ["type", "client_msg_id", "profile_id", "text", "attach_ids"],
       "properties": {
         "type": { "const": "msg" },
         "client_msg_id": { "type": "string", "minLength": 1 },
         "profile_id": { "type": "string", "minLength": 1 },
         "text": { "type": "string" },
-        "attach_ids": { "type": "array", "maxItems": 0 }
+        "attach_ids": { "type": "array", "items": { "type": "string", "minLength": 1 } }
       }
     },
     "command": {
@@ -394,6 +404,21 @@
         "op": { "$ref": "#/$defs/checklistOp" }
       }
     },
+    "attach_file": {
+      "type": "object",
+      "description": "Version 7. Hands the daemon a file the client wrote at <attachments.dir>/<attach_id> (mode 0600) before sending this; there is no path field. The daemon reads it into the media store the phone's uploads use, checking size_bytes and sha256 under the store's limits, removes the file whatever came of it, and answers attach_status (present) or error request_failed with its sentence and attach_id. kind is a hint, as the phone's is. Taken only from a version 7 connection placed as the owner's; any other is refused with request_failed and its file removed unread.",
+      "x-since-version": 7,
+      "required": ["type", "attach_id", "kind", "mime", "size_bytes", "sha256"],
+      "properties": {
+        "type": { "const": "attach_file" },
+        "attach_id": { "type": "string", "pattern": "^[0-9A-Za-z_-]{1,64}$" },
+        "kind": { "enum": ["image", "animation", "video", "audio", "voice", "document", "file"] },
+        "mime": { "type": "string", "minLength": 1, "x-max-bytes": 255 },
+        "size_bytes": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "name": { "type": "string", "minLength": 1, "x-max-bytes": 255 }
+      }
+    },
     "server_hello": {
       "type": "object",
       "required": ["type", "min_version", "max_version"],
@@ -410,6 +435,20 @@
         "role": {
           "enum": ["primary", "device"],
           "description": "The engine's role (M75). A client keeps the highest primary_epoch seen from a primary only; a device engine's epoch is never compared and never raises it. Absent from a daemon older than the field, which a client treats as primary."
+        },
+        "commands": {
+          "type": "array",
+          "description": "The slash commands an app offers in its palette, the list the phone's caps.commands carries. This daemon sends it on every hello; absent from an older daemon.",
+          "items": { "$ref": "#/$defs/commandDescriptor" }
+        },
+        "attachments": {
+          "type": "object",
+          "description": "Where the owner's connection hands the daemon a file (version 7): dir, the inbox's absolute path, and max_bytes, the largest file the media store takes. Sent only to a connection placed as the owner's, and only while the media store runs; absent otherwise, and then the app offers no attachments.",
+          "required": ["dir", "max_bytes"],
+          "properties": {
+            "dir": { "type": "string", "pattern": "^/" },
+            "max_bytes": { "type": "integer", "minimum": 1, "maximum": 18446744073709551615 }
+          }
         }
       }
     },
@@ -694,9 +733,20 @@
         }
       }
     },
+    "attach_status": {
+      "type": "object",
+      "description": "Version 7. The answer to an attach_file the media store now holds: status is present, the only value this wire sends. A msg may name attach_id from then on. Sent only to the version 7 owner's connection that sent the attach_file.",
+      "x-since-version": 7,
+      "required": ["type", "attach_id", "status"],
+      "properties": {
+        "type": { "const": "attach_status" },
+        "attach_id": { "type": "string", "pattern": "^[0-9A-Za-z_-]{1,64}$" },
+        "status": { "enum": ["present"] }
+      }
+    },
     "error": {
       "type": "object",
-      "description": "A refusal. reason is the code; the other fields are context. Protocol violations close the connection; request failures do not. ref is set only on the request_failed answering a media_fetch the daemon could not serve. A request_failed answering a checklists_pull, checklist_pull or checklist_edit carries the engine's sentence in message, and client_msg_id when it answers an edit. A desktop whose home moved also sends primary_unreachable (its message names the primary; the app keeps its outbox), desktop_revoked (the primary no longer knows this computer, so nothing waiting can be sent) and unattended_client, each before it closes.",
+      "description": "A refusal. reason is the code; the other fields are context. Protocol violations close the connection; request failures do not. ref is set only on the request_failed answering a media_fetch the daemon could not serve, and attach_id only on an error answering an attach_file (version 7), whose message is the engine's sentence. A request_failed answering a checklists_pull, checklist_pull or checklist_edit carries the engine's sentence in message, and client_msg_id when it answers an edit. A desktop whose home moved also sends primary_unreachable (its message names the primary; the app keeps its outbox), desktop_revoked (the primary no longer knows this computer, so nothing waiting can be sent) and unattended_client, each before it closes.",
       "required": ["type", "reason"],
       "properties": {
         "type": { "const": "error" },
@@ -706,6 +756,7 @@
         "event": { "type": "string" },
         "client_msg_id": { "type": "string", "minLength": 1 },
         "ref": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "attach_id": { "type": "string", "pattern": "^[0-9A-Za-z_-]{1,64}$" },
         "direction": { "enum": ["client_too_old", "client_too_new"] },
         "client_version": { "type": "integer" },
         "min_version": { "type": "integer" },
@@ -809,6 +860,15 @@
         "subject": { "type": "string" },
         "text": { "type": "string" },
         "occurred_at": { "type": "string" }
+      }
+    },
+    "commandDescriptor": {
+      "type": "object",
+      "required": ["name", "aliases", "description"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "aliases": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "description": { "type": "string", "minLength": 1 }
       }
     },
     "historyMessage": {

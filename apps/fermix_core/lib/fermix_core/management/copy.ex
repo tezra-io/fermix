@@ -92,7 +92,7 @@ defmodule FermixCore.Management.Copy do
                    backup_push not_ready turned_off_cost server_costs billing data
                    replace_creating replace_starting replace_installing replace_connecting
                    replace_ready replace_moving replace_deleting replace_cancelling
-                   replace_turned_off replace_not_set_up replace_waited_too_long
+                   replace_turned_off replace_not_set_up replace_waited_too_long replace_stopped
                    new_server_costs old_server_costs turning_on replace_turning_on restarting
                    progress_checking progress_firewall progress_server progress_starting
                    progress_deleting progress_power confirm_create confirm_create_in
@@ -439,6 +439,9 @@ defmodule FermixCore.Management.Copy do
 
   def summary_sentence(:replace_waited_too_long, _values),
     do: "Your new server waited too long and must be set up again."
+
+  def summary_sentence(:replace_stopped, _values),
+    do: "Your server still runs Fermix, so replacing it can be tried again."
 
   def summary_sentence(:new_server_costs, _values),
     do: "Your new server costs its monthly price until it is deleted."

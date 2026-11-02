@@ -391,13 +391,25 @@ class VerifyStandaloneTest(unittest.TestCase):
 
     # ── the fermix always-on no-daemon stage ──────────────────────────────
 
-    def test_always_on_with_no_daemon_refuses_engine_stopped_and_writes_nothing(self):
+    # A release build has no Always On yet (`Home.AlwaysOnRelease`): the
+    # verb refuses in one sentence before it reads anything.
+    def test_always_on_in_a_release_refuses_unreleased_and_writes_nothing(self):
         self._write_artifact(create_disclaim=True)
 
         result = self._run("macos_aarch64")
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("fermix always-on: Fermix is not running from this home", result.stdout)
+        self.assertIn("fermix always-on: Always On is not in this release of Fermix yet.", result.stdout)
+
+    # The class the release gate exists for: a release whose build carries
+    # Always On, which reaches for the engine.
+    def test_rejects_a_release_whose_always_on_is_compiled_in(self):
+        self._write_artifact(create_disclaim=True, always_on="compiled_in")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must print exactly the always_on_unavailable envelope", result.stderr)
 
     # The release that lacks the verb: the dispatcher's unknown-command exit.
     def test_rejects_an_artifact_without_the_always_on_verb(self):
@@ -424,7 +436,7 @@ class VerifyStandaloneTest(unittest.TestCase):
         result = self._run("macos_aarch64")
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("must print exactly the engine_stopped envelope", result.stderr)
+        self.assertIn("must print exactly the always_on_unavailable envelope", result.stderr)
 
     def test_rejects_always_on_that_does_not_say_why_on_stderr(self):
         self._write_artifact(create_disclaim=True, always_on="silent")
@@ -488,13 +500,27 @@ class VerifyStandaloneTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("fermix home mark-moved wrote no marker", result.stderr)
 
-    def test_rejects_a_home_status_that_does_not_read_the_epoch(self):
-        self._write_artifact(create_disclaim=True, home="status_blind")
+    # A release build has no Always On yet, and home status is its screen:
+    # the verb refuses as fermix always-on does. One that answers the home's
+    # facts instead has Always On compiled in.
+    def test_rejects_a_release_whose_home_status_answers(self):
+        self._write_artifact(create_disclaim=True, home="status_answers")
 
         result = self._run("macos_aarch64")
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("fermix home status did not read the home's primary epoch", result.stderr)
+        self.assertIn("fermix home status in a release must exit 1, got 0", result.stderr)
+
+    def test_rejects_a_home_status_that_refuses_with_another_code(self):
+        self._write_artifact(create_disclaim=True, home="status_other_refusal")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "fermix home status --json in a release must print exactly the always_on_unavailable envelope",
+            result.stderr,
+        )
 
     # The class the enroll stage exists for: the packaged binary taking a code
     # file that holds no enrollment code and making the home a candidate anyway.
@@ -1149,15 +1175,16 @@ class VerifyStandaloneTest(unittest.TestCase):
         if always_on == "unknown_verb":
             return "  printf 'fermix: unknown command: always-on\\n' >&2\n  exit 2\n"
         argv = '  [ "$*" = "always-on create-server --json" ] || exit 64\n'
-        sentence = "Fermix is not running from this home, and this needs it. Start it, then try again."
-        envelope = (
-            '  printf \'{"error":{"code":"engine_stopped","sentence":"'
-            + sentence
-            + '"},"ok":false,"schema_version":1}\\n\'\n'
+        envelope, said = self._always_on_refusal(
+            "always_on_unavailable", "Always On is not in this release of Fermix yet."
         )
-        said = f"  printf 'fermix always-on: {sentence}\\n' >&2\n"
+        stopped, stopped_said = self._always_on_refusal(
+            "engine_stopped",
+            "Fermix is not running from this home, and this needs it. Start it, then try again.",
+        )
         shapes = {
             "refuses": argv + envelope + said + "  exit 1\n",
+            "compiled_in": argv + stopped + stopped_said + "  exit 1\n",
             "acts": argv + '  printf \'{"ok":true,"result":{}}\\n\'\n' + said + "  exit 0\n",
             "noisy_stdout": argv + "  printf 'boot notice nobody asked for\\n'\n" + envelope + said + "  exit 1\n",
             "silent": argv + envelope + "  exit 1\n",
@@ -1166,6 +1193,16 @@ class VerifyStandaloneTest(unittest.TestCase):
         if always_on not in shapes:
             raise ValueError(f"unknown always-on behaviour: {always_on}")
         return shapes[always_on]
+
+    # One refusal's envelope on stdout and its sentence on stderr, as the
+    # verb prints them.
+    def _always_on_refusal(self, code, sentence):
+        envelope = (
+            '  printf \'{"error":{"code":"' + code + '","sentence":"'
+            + sentence
+            + '"},"ok":false,"schema_version":1}\\n\'\n'
+        )
+        return envelope, f"  printf 'fermix always-on: {sentence}\\n' >&2\n"
 
     # The real verbs' shapes in the throwaway world: export seals the home the
     # environment names, import makes the next primary with the home's own path
@@ -1205,14 +1242,30 @@ class VerifyStandaloneTest(unittest.TestCase):
             '  printf \'{"ok":true,"result":{"epoch":5}}\\n\'\n'
             "  exit 0\n"
         )
+        refusal = (
+            '    printf \'{"error":{"code":"always_on_unavailable","sentence":"Always On is not in '
+            'this release of Fermix yet."},"ok":false,"schema_version":1}\\n\'\n'
+        )
+        answers = (
+            '    epoch="$(cat "$FERMIX_HOME/mobile/primary_epoch")"\n'
+            '    printf \'{"ok":true,"result":{"role":"primary","epoch":%s}}\\n\' "$epoch"\n'
+            "    exit 0\n"
+        )
+        other = (
+            '    printf \'{"error":{"code":"home_status_unavailable","sentence":"Fermix could not '
+            'read this home\'"\'"\'s status."},"ok":false,"schema_version":1}\\n\'\n'
+        )
+        if home == "status_answers":
+            status_body = answers
+        elif home == "status_other_refusal":
+            status_body = other + "    exit 1\n"
+        else:
+            status_body = refusal + "    exit 1\n"
         status = (
             '  if [ "$2" = "status" ]; then\n'
             '    [ "$3" = "--json" ] || exit 64\n'
-            '    epoch="$(cat "$FERMIX_HOME/mobile/primary_epoch")"\n'
-            + ("    epoch=null\n" if home == "status_blind" else "")
-            + '    printf \'{"ok":true,"result":{"role":"primary","epoch":%s}}\\n\' "$epoch"\n'
-            "    exit 0\n"
-            "  fi\n"
+            + status_body
+            + "  fi\n"
         )
         if home == "marks_twice":
             marked = (
@@ -1225,7 +1278,8 @@ class VerifyStandaloneTest(unittest.TestCase):
             "carries",
             "marks_twice",
             "not_moved",
-            "status_blind",
+            "status_answers",
+            "status_other_refusal",
             "enroll_accepts",
             "enroll_leaves_home",
             "enroll_consumes",

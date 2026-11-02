@@ -27,6 +27,12 @@ defmodule FermixChannels.Channels.Companion do
   as `reasoning` to the connections on version 6, and a tool's start carries
   the engine's sentence for the step (`activity`).
 
+  A message may carry files the owner attached (companion protocol 7): the
+  connection took each into the media store the phone's uploads use, and the
+  request path declared them on the message as it declares a phone's
+  (`Companion.Requests`), so the gateway's attachment pipeline fetches each
+  through `download_attachment/2`, the phone's own, from that store.
+
   During a Live call in the chat a turn may end with no reply (M56 §4.4): a
   snapshot that could still become the sentinel is held back, so such a turn
   never shows a draft, and the runner's `:silent_reply` tells `Turns` the turn
@@ -142,8 +148,7 @@ defmodule FermixChannels.Channels.Companion do
   defp do_parse_event(%{type: "msg", payload: payload} = event) when is_map(payload) do
     with {:ok, profile} <- profile(payload),
          {:ok, client_id} <- required(payload, "client_msg_id"),
-         {:ok, text} <- binary(payload, "text"),
-         :ok <- no_attachments(payload) do
+         {:ok, text} <- binary(payload, "text") do
       {:ok, [message(client_id, profile, text, "msg", event)]}
     end
   end
@@ -177,6 +182,12 @@ defmodule FermixChannels.Channels.Companion do
 
   @impl true
   def verify_webhook(_conn), do: {:error, :unsupported_transport}
+
+  # A file the owner attached sits in the phone's media store under its attach
+  # id, so it is fetched exactly as a phone's attachment is (moduledoc).
+  @impl true
+  def download_attachment(message, attachment),
+    do: Mobile.download_attachment(message, attachment)
 
   @impl true
   def stream_capability, do: :raw
@@ -469,9 +480,13 @@ defmodule FermixChannels.Channels.Companion do
       chat_id: profile,
       reply_target: profile,
       metadata: metadata |> put_caller(event) |> put_draws_lists(event),
-      attachments: []
+      attachments: declared_attachments(event)
     })
   end
+
+  # What the request path declared for a `msg`'s `attach_ids`; a `command`
+  # and a message with none declare nothing.
+  defp declared_attachments(%{payload: payload}), do: Map.get(payload, "attachments", [])
 
   # Who connected, as the connection read it off the socket's peer
   # (`FermixCore.SocketPeer`), never from the client's payload: a process the
@@ -516,9 +531,6 @@ defmodule FermixChannels.Channels.Companion do
 
   defp validate_profile(@profile), do: :ok
   defp validate_profile(_profile), do: {:error, :unsupported_profile}
-
-  defp no_attachments(%{"attach_ids" => []}), do: :ok
-  defp no_attachments(_payload), do: {:error, :attachments_unsupported}
 
   defp command_text(payload) do
     with {:ok, name} <- required(payload, "name"),

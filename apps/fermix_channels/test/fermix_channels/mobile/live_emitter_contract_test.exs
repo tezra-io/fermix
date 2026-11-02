@@ -19,6 +19,7 @@ defmodule FermixChannels.Mobile.LiveEmitterContractTest do
   alias FermixChannels.Channels.Mobile
   alias FermixChannels.Companion.Approvals
   alias FermixChannels.Companion.Output
+  alias FermixChannels.Gateway.Commands.Registry, as: CommandRegistry
   alias FermixChannels.LinkPreviews
   alias FermixChannels.Mobile.EventRouter
   alias FermixChannels.Mobile.MediaStore
@@ -397,7 +398,7 @@ defmodule FermixChannels.Mobile.LiveEmitterContractTest do
 
       assert byte_size(frame) - 4 <= Protocol.max_header_bytes()
       assert [%{"caps" => %{"commands" => commands}}] = assert_frames!([frame], schema)
-      assert length(commands) == length(Mobile.command_catalog())
+      assert length(commands) == length(CommandRegistry.catalog())
     end
 
     test "the largest one arrives whole as an event_part run", %{schema: schema} do

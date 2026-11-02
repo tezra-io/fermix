@@ -209,12 +209,12 @@ defmodule FermixCore.Home.Provision do
           | {:action_timeout, step()}
           | :token_invalid
           | :token_refused
+          | :token_replaced
           | {:code_unavailable, String.t()}
           | :user_data_too_large
           | :invalid_code
           | :interrupted
           | {:interrupted, String.t()}
-          | :nothing_in_stock
           | :no_token
           | :no_server
           | :server_exists
@@ -464,6 +464,9 @@ defmodule FermixCore.Home.Provision do
   defp sentence(reason, words) when reason in [:unauthorized, :token_refused],
     do: "#{words.name} no longer accepts Fermix's token."
 
+  defp sentence(:token_replaced, _words),
+    do: "The new token works, so try again."
+
   defp sentence(:read_only_token, words),
     do:
       "This token can only read, so Fermix created nothing; paste #{words.write_token} " <>
@@ -537,11 +540,6 @@ defmodule FermixCore.Home.Provision do
     do: "Fermix stopped before your server restarted, so restart it again."
 
   defp sentence(:no_token, words), do: "Paste a #{words.token_label} first."
-
-  defp sentence(:nothing_in_stock, words),
-    do:
-      "#{words.name} has no server type with 4 GB in stock in " <>
-        "#{words.locations |> Enum.map(& &1.city) |> listed()} right now."
 
   defp sentence(:no_server, words),
     do: "Fermix has no server on #{words.name} to turn on or restart."

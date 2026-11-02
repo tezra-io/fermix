@@ -149,7 +149,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   connected, Fermix reconnects on its own when Slack refreshes or drops the
   connection, and an event it could not take in is left for Slack to send
   again. The webhook stays the default.
-- **Always On: Fermix can move to a server you control.** Your home (its
+- **Always On: Fermix can move to a server you control.** Not in this
+  release yet: in a release build `fermix always-on` and `fermix home status`
+  say "Always On is not in this release of Fermix yet.", the setup page and
+  the Fermix app show no
+  Always On, and it stays so until moving back to this computer is possible.
+  Your home (its
   settings, memory, secrets, skills and workspace) can now move from your
   computer to a Linux server, so Fermix keeps working with your Mac closed.
   With Reach from anywhere on, Always On on your primary gives an enrollment
@@ -296,6 +301,14 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   each step of its thinking arrives as it finishes. The app shows them under
   its thinking line once it reads them; nothing of either is kept after the
   answer.
+- **Files you attach in the Mac app's chat reach Fermix.** A picture, a
+  recording or a document you attach in the chat is handed to Fermix on the
+  same computer and read exactly as one sent from a phone, with the same size
+  limit (20 MB unless you changed it). A file Fermix cannot take, because it
+  is too large or changed before Fermix read it, is not sent, and the chat
+  says why in a sentence. The app shows the files in your message, and so do
+  your phones. The app also learns from Fermix which slash commands to offer.
+  Attaching takes an app that speaks the new chat protocol.
 
 ### Changed
 
@@ -338,6 +351,30 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the move to a new server once the server answered. The command for a
   server of your own now carries no code: the server asks for it without
   showing it, so it never lands in a shell history.
+- **Always On never leaves you without a next step, and a server waiting
+  for its move can always be deleted.** A server Fermix created that is
+  ready for the move, whose review blocks it, or whose move was undone,
+  offers Delete your server
+  beside Move now (during a replace, Delete your new server, never the one
+  your home lives on), so a move you no longer want stops costing money
+  from Always On itself; a server of your own is never offered for
+  deletion, and nothing is while a move runs. After a token that could only
+  read, the token that writes brings back Create server; after Hetzner's
+  account limit (once you lifted it) or no stock anywhere, Start again tries
+  once more with the size and place you chose. On a computer your home
+  left, a replace that stopped before Hetzner made anything shows as its own
+  problem, saying your server still runs Fermix, with Replace the server
+  again. A step that stopped inside Fermix, or was stopped, is kept on
+  screen however it ended, with Start again, and its reason in Fermix's log.
+  The size and place you were shown is the one Fermix creates: every create
+  names it, the recommendation included, and Fermix never picks one again
+  behind your back (`fermix always-on create-server` with no `--type` and
+  `--location` sends the recommended one it read). A `fermix always-on`
+  step that waits now exits 1 when it ends on a problem (`step_failed`) or
+  is still running after 45 minutes (`step_unfinished`), each with the
+  screen where it stands, instead of reporting success; reading the screen
+  alone still succeeds whatever it shows. Every surface reads whether
+  Always On is still at it from the screen itself (its `outcome`).
 - **A mandate's proposal is a short card too.** It names the tool and the
   watcher, quotes the item, says why it passed, and shows each argument on its
   own line, with every argument whole and the whole item behind Details, in

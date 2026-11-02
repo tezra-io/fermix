@@ -128,6 +128,28 @@ row, seq, request or turn, and the app answers it by reading management's
 here are as before; the header names it among what it leaves out. The line
 references into `connection.ex` moved with the code.
 
+The re-read after companion protocol 7 (2026-11-01) found the owner's files:
+the window moves to {6, 7}; every `server_hello` carries `commands`, and one
+to a connection placed as the owner's carries `attachments` while the media
+store runs, both built in the `join` step before the hello is written
+(`offer_attachments`, one call to `Companion.Inbox`); an `attach_file` is
+served in the Connection's own step through `Companion.Inbox`, which reads
+the file into the media store and removes it, answered `attach_status` or
+`request_failed` by its `attach_id`, with no seq, request or turn; `dispatch`
+refuses a `msg` that names attachments with `attachments_unsupported` before
+anything is claimed unless a version 7 owner's connection sent it, as the
+codec refused every such `msg` before; and such a `msg` takes the same
+claim, `accepted`, attempt and user row, its attachments resolved in
+`ingest_span` before the row is written (`resolve_attachments`, unchanged,
+and `Channels.Companion.message` now carries what it declared), the row
+carrying their `media_refs`. One naming a file the store no longer holds
+fails in `ingest_span` before its row, as a request error there always did.
+None of it moves a seq, a cursor or the outbox, and every row, ending and
+settlement is as before, so nothing the spec models changed; the header
+names the files among what it leaves out. The line references into
+`connection.ex` moved with the code, and those into `channels/companion.ex`,
+which had drifted before, now point at the functions they name.
+
 **The Queue is one abstract process.** The runner takes one `.tla` per spec,
 and `turn_queue` proves the Queue's rules against `queue.ex`, so this spec takes
 them as given:
@@ -260,21 +282,21 @@ the checks that show a rule needs it):
   (`request_coordinator.ex:166-173`).
 - `SeqCursor`: the client's cursor rules (`PROTOCOL.md`).
 - `SubscribeBeforePull`: the Connection joins the registry before
-  `server_hello` (`join`, `connection.ex:480-494`).
+  `server_hello` (`join`, `connection.ex:528-546`).
 - `PageWrittenInReadStep`: the Connection writes `history_page` to the socket
-  in the step that read it (`read_opts`, `connection.ex:1087-1091`). `FALSE`
+  in the step that read it (`read_opts`, `connection.ex:1186-1190`). `FALSE`
   sends it through its own mailbox, where a live row sent after the read can
   overtake it.
 - `AnnouncesEveryRow`: every row written outside a turn's completion is
   announced as a `row` as it is written: the user's row (`announce_user_row`,
-  `connection.ex:1075-1076`) and a delivery (`announce_written`,
-  `channels/companion.ex:338-339`), both built by `Companion.Output.row` and
+  `connection.ex:1174-1175`) and a delivery (`announce_written`,
+  `channels/companion.ex:407-408`), both built by `Companion.Output.row` and
   sent through `Companion.Fanout.announce`. `FALSE` announces no user row.
 - `SingleAnswer`: `Confirmations.take` is an `:ets.take`, the sole consumer of
   a token (`confirmations.ex:21-31`).
 - `ResendsPendingApprovals`: the Connection writes every card still waiting
   right after `server_hello`, in the step that joined the registry
-  (`send_pending_approvals`, `connection.ex:534-543`, from
+  (`send_pending_approvals`, `connection.ex:597-606`, from
   `Approvals.pending`). `FALSE`: a card goes out once, live.
 - `DropsCardsAtHello`: when `server_hello` arrives the client drops every card
   it shows and keeps only those sent after it (`PROTOCOL.md` "Approvals").
@@ -306,7 +328,7 @@ the checks that show a rule needs it):
   that sent the request (`settle_inline`, `run_settle`, `turns.ex:368-403`;
   `fail_attempt`, `report_failure`, `requests.ex:383-403`), through the
   transport's `report_failure`, which the connection writes as a failed
-  worker's error (`connection.ex:1063-1070`, `:281-282`). `FALSE` only logs the
+  worker's error (`connection.ex:1162-1169`, `:308-309`). `FALSE` only logs the
   failure: the request stays `running`, and the next boot runs the command
   again.
 - `SeqAssignedOnInsert`: the seq comes from the counter inside the inserting
@@ -554,7 +576,7 @@ of an entity its rules are about. All still hold:
   card's `outside.args` and `outside.reason` are additive and ride every
   version. They are proposal events, left out as above.
 - The peer check at the hand-over (`handle_info(:socket_handover)`,
-  `connection.ex:237-244`). A client the daemon cannot place is sent
+  `connection.ex:264-271`). A client the daemon cannot place is sent
   `error: unidentified_client` and closed before a line is read, which the
   client sees as a drop before `server_hello`. The caller it places rides on
   each turn (`metadata.caller`) and decides only what the turn's tools may do.
@@ -604,7 +626,7 @@ off; open `tla/out/companion_session/<check>.txt` after a run to see the path.
 
 ### COMPANION-2: a connection must join the fan-out before its history is read
 - **Status:** holds in the code (b9248004): `join` registers the Connection
-  before it writes `server_hello` (`connection.ex:480-494`).
+  before it writes `server_hello` (`connection.ex:528-546`).
 - **Checks:** 01 holds; 03 breaks `TimelineConverges` with the join after the
   first page.
 

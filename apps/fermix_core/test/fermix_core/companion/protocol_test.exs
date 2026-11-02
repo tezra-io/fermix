@@ -4,26 +4,27 @@ defmodule FermixCore.Companion.ProtocolTest do
   alias FermixCore.Companion.Protocol
 
   test "publishes the version window, the line cap and the ordered catalogs" do
-    assert Protocol.protocol_version() == 6
-    assert Protocol.supported_version_range() == {5, 6}
+    assert Protocol.protocol_version() == 7
+    assert Protocol.supported_version_range() == {6, 7}
     assert Protocol.max_line_bytes() == 65_536
 
     assert Protocol.client_events() ==
              ~w(client_hello msg command cancel history_pull history_search read_state
                 media_fetch media_release proposal_answer checklists_pull checklist_pull
-                checklist_edit)
+                checklist_edit attach_file)
 
     assert Protocol.server_events() ==
              ~w(server_hello accepted turn_started text_delta tool_event reasoning text_done
                 turn_error turn_done row row_updated approval approval_resolved read_state
                 history_page search_results media_path media_missing proposal proposal_resolved
-                home_status_changed checklists checklist error)
+                home_status_changed checklists checklist attach_status error)
   end
 
   # M56 §6: a turn that ends with no reply needs a frame an older client would
   # not survive, so it goes only to a connection that declared version 2; the
   # media grant and the changed row (M66) only to one that declared 3; what a
-  # turn is reasoning and the owner's lists (M85) only to one that declared 6.
+  # turn is reasoning and the owner's lists (M85) only to one that declared 6;
+  # a file's answer only to one that declared 7.
   test "every server event names the version that brought it" do
     later = %{
       "turn_done" => 2,
@@ -35,7 +36,8 @@ defmodule FermixCore.Companion.ProtocolTest do
       "reasoning" => 6,
       "home_status_changed" => 6,
       "checklists" => 6,
-      "checklist" => 6
+      "checklist" => 6,
+      "attach_status" => 7
     }
 
     for type <- Protocol.server_events() do
@@ -53,7 +55,8 @@ defmodule FermixCore.Companion.ProtocolTest do
       "proposal_answer" => 4,
       "checklists_pull" => 6,
       "checklist_pull" => 6,
-      "checklist_edit" => 6
+      "checklist_edit" => 6,
+      "attach_file" => 7
     }
 
     for type <- Protocol.client_events() do
@@ -64,6 +67,7 @@ defmodule FermixCore.Companion.ProtocolTest do
     refute "media_fetch" in Protocol.shared_client_events()
     refute "proposal_answer" in Protocol.shared_client_events()
     refute "checklist_edit" in Protocol.shared_client_events()
+    refute "attach_file" in Protocol.shared_client_events()
     assert_raise ArgumentError, fn -> Protocol.client_event_version("ping") end
   end
 
@@ -250,11 +254,11 @@ defmodule FermixCore.Companion.ProtocolTest do
     assert "row" in Protocol.shared_server_events()
   end
 
-  test "negotiates directionally, version 5 and version 6 both accepted, version 4 too old" do
-    assert :ok = Protocol.negotiate(5)
+  test "negotiates directionally, version 6 and version 7 both accepted, version 5 too old" do
     assert :ok = Protocol.negotiate(6)
-    assert {:error, :client_too_old} = Protocol.negotiate(4)
-    assert {:error, :client_too_new} = Protocol.negotiate(7)
+    assert :ok = Protocol.negotiate(7)
+    assert {:error, :client_too_old} = Protocol.negotiate(5)
+    assert {:error, :client_too_new} = Protocol.negotiate(8)
   end
 
   test "client_hello refuses a missing or malformed version with the Realtime reasons" do
@@ -283,7 +287,7 @@ defmodule FermixCore.Companion.ProtocolTest do
              inspect(bad)
     end
 
-    hello = %{"min_version" => 5, "max_version" => 6, "role" => "primary"}
+    hello = %{"min_version" => 6, "max_version" => 7, "role" => "primary"}
 
     assert {:ok, line} =
              Protocol.encode_server_event("server_hello", Map.put(hello, "primary_epoch", 2))
@@ -298,7 +302,9 @@ defmodule FermixCore.Companion.ProtocolTest do
     end
   end
 
-  test "a message keeps the mobile shape and carries no attachments on this wire" do
+  # Version 7: a message may name files. The codec decodes it on every
+  # version; the connection judges whether this connection may send one.
+  test "a message keeps the mobile shape, and one naming files decodes for the connection" do
     msg = %{
       "type" => "msg",
       "client_msg_id" => "c-1",
@@ -313,8 +319,10 @@ defmodule FermixCore.Companion.ProtocolTest do
     assert {:error, {:missing_field, "attach_ids"}} = decode(Map.delete(msg, "attach_ids"))
     assert {:error, {:missing_field, "content"}} = decode(%{msg | "text" => "  "})
 
-    assert {:error, :attachments_unsupported} =
-             decode(%{msg | "attach_ids" => ["attach-1"]})
+    assert {:ok, %{payload: %{"attach_ids" => ["attach-1"], "text" => ""}}} =
+             decode(%{msg | "attach_ids" => ["attach-1"], "text" => ""})
+
+    assert {:error, {:invalid_field, "attach_ids"}} = decode(%{msg | "attach_ids" => [""]})
   end
 
   test "history_pull takes exactly one cursor" do
@@ -398,8 +406,8 @@ defmodule FermixCore.Companion.ProtocolTest do
   test "the encoder writes one newline-terminated object with its type" do
     assert {:ok, line} =
              Protocol.encode_server_event("server_hello", %{
-               min_version: 5,
-               max_version: 6,
+               min_version: 6,
+               max_version: 7,
                role: "primary"
              })
 
@@ -407,15 +415,15 @@ defmodule FermixCore.Companion.ProtocolTest do
 
     assert Jason.decode!(line) == %{
              "type" => "server_hello",
-             "min_version" => 5,
-             "max_version" => 6,
+             "min_version" => 6,
+             "max_version" => 7,
              "role" => "primary"
            }
 
     assert {:error, {:invalid_field, "version_range"}} =
              Protocol.encode_server_event("server_hello", %{
-               min_version: 4,
-               max_version: 6,
+               min_version: 5,
+               max_version: 7,
                role: "primary"
              })
   end
@@ -423,7 +431,7 @@ defmodule FermixCore.Companion.ProtocolTest do
   # M75: the engine names its role on every hello, so a desktop app never
   # compares a device-role engine's epoch against the primary's.
   test "server_hello names the engine's role, primary or device" do
-    hello = %{"min_version" => 5, "max_version" => 6}
+    hello = %{"min_version" => 6, "max_version" => 7}
 
     for role <- ~w(primary device) do
       assert {:ok, line} =
@@ -640,6 +648,117 @@ defmodule FermixCore.Companion.ProtocolTest do
 
     assert {:error, {:invalid_field, "ref"}} =
              Protocol.encode_server_event("error", %{failed | "ref" => ""})
+  end
+
+  # Version 7: the owner's files, handed over by path in the inbox the hello
+  # names, and the slash commands every hello carries.
+  describe "files and the command palette (version 7)" do
+    test "attach_file names the file by an id that is a file name, never a path" do
+      assert {:ok, %{type: "attach_file", payload: payload}} = decode(attach_file())
+      assert payload == Map.delete(attach_file(), "type")
+
+      assert {:ok, _event} = decode(Map.delete(attach_file(), "name"))
+      assert {:ok, _event} = decode(%{attach_file() | "attach_id" => String.duplicate("a", 64)})
+
+      for field <- ~w(attach_id kind mime size_bytes sha256) do
+        assert {:error, {:missing_field, ^field}} = decode(Map.delete(attach_file(), field))
+      end
+
+      for {field, bad} <- [
+            {"attach_id", "../photo"},
+            {"attach_id", "inbox/photo"},
+            {"attach_id", String.duplicate("a", 65)},
+            {"attach_id", ""},
+            {"attach_id", "photo.jpg"},
+            {"kind", "picture"},
+            {"kind", ""},
+            {"mime", ""},
+            {"mime", String.duplicate("m", 256)},
+            {"size_bytes", -1},
+            {"size_bytes", "12"},
+            {"sha256", String.upcase(ref())},
+            {"sha256", "abc"},
+            {"name", ""},
+            {"name", String.duplicate("é", 128)}
+          ] do
+        assert {:error, {:invalid_field, ^field}} = decode(Map.put(attach_file(), field, bad)),
+               "#{field} #{inspect(bad)}"
+      end
+
+      for kind <- Protocol.attach_kinds() do
+        assert {:ok, _event} = decode(%{attach_file() | "kind" => kind})
+      end
+
+      assert Protocol.attach_kinds() == ~w(image animation video audio voice document file)
+      assert Protocol.max_attach_field_bytes() == 255
+    end
+
+    test "attach_status says the file is present, and an error may name the attach id" do
+      status = %{"attach_id" => "mac-att-1", "status" => "present"}
+      assert {:ok, line} = Protocol.encode_server_event("attach_status", status)
+      assert Jason.decode!(line) == Map.put(status, "type", "attach_status")
+
+      for bad <- [%{status | "status" => "upload"}, %{status | "attach_id" => "a/b"}] do
+        assert {:error, {:invalid_field, _field}} =
+                 Protocol.encode_server_event("attach_status", bad)
+      end
+
+      refused = %{
+        "reason" => "request_failed",
+        "message" => "This file is too large: Fermix takes files of up to 20 MB.",
+        "attach_id" => "mac-att-1"
+      }
+
+      assert {:ok, _line} = Protocol.encode_server_event("error", refused)
+
+      assert {:error, {:invalid_field, "attach_id"}} =
+               Protocol.encode_server_event("error", %{refused | "attach_id" => "../x"})
+    end
+
+    test "server_hello may carry the command palette and the inbox, each in its own shape" do
+      hello = %{"min_version" => 6, "max_version" => 7, "role" => "primary"}
+      command = %{"name" => "new", "aliases" => ["clear"], "description" => "Start afresh."}
+      offer = %{"dir" => "/Users/me/.fermix/companion/inbox", "max_bytes" => 20_971_520}
+      full = Map.merge(hello, %{"commands" => [command], "attachments" => offer})
+
+      assert {:ok, line} = Protocol.encode_server_event("server_hello", full)
+      assert Jason.decode!(line) == Map.put(full, "type", "server_hello")
+      assert {:ok, _line} = Protocol.encode_server_event("server_hello", hello)
+
+      assert {:ok, _line} =
+               Protocol.encode_server_event("server_hello", %{full | "commands" => []})
+
+      for bad <- [
+            %{},
+            [%{command | "aliases" => [""]}],
+            [Map.delete(command, "description")],
+            [%{command | "name" => ""}],
+            [Map.put(command, "usage", "/new")]
+          ] do
+        assert {:error, {:invalid_field, "commands"}} =
+                 Protocol.encode_server_event("server_hello", %{full | "commands" => bad}),
+               inspect(bad)
+      end
+
+      for bad <- [
+            %{offer | "dir" => "companion/inbox"},
+            %{offer | "max_bytes" => 0},
+            Map.delete(offer, "max_bytes"),
+            Map.put(offer, "kinds", ["image"]),
+            "/Users/me/.fermix/companion/inbox"
+          ] do
+        assert {:error, {:invalid_field, "attachments"}} =
+                 Protocol.encode_server_event("server_hello", %{full | "attachments" => bad}),
+               inspect(bad)
+      end
+    end
+
+    test "only an attach id the wire takes is one" do
+      assert Protocol.attach_id?("mac-att_7F3a9c")
+      refute Protocol.attach_id?("mac att")
+      refute Protocol.attach_id?(".")
+      refute Protocol.attach_id?(nil)
+    end
   end
 
   # M60 app surface §3.7 (D28): a proposal's card, its end, and the owner's answer.
@@ -932,6 +1051,18 @@ defmodule FermixCore.Companion.ProtocolTest do
       Protocol.validate_server_payload("proposal", %{"profile_id" => "main", "proposal" => card})
 
   defp decode(map), do: map |> Jason.encode!() |> Protocol.decode_client_event()
+
+  defp attach_file do
+    %{
+      "type" => "attach_file",
+      "attach_id" => "mac-att-7f3a9c",
+      "kind" => "image",
+      "mime" => "image/jpeg",
+      "size_bytes" => 183_204,
+      "sha256" => ref(),
+      "name" => "IMG_0412.jpg"
+    }
+  end
 
   defp ref, do: "9879f6d3c9efefe8c4f4aabe9d3269762264be52794e96f62ab8ffa53b7fadec"
 end

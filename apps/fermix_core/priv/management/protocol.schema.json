@@ -5754,8 +5754,8 @@
     },
     "homeSummary": {
       "type": "object",
-      "description": "Where Always On stands, the screen every surface draws: state maps to a screen, sentence and every label are printed as they are, detail sits behind Details, key is the digest a home.status wait and the watch compare (PROTOCOL.md, The Always On summary).",
-      "required": ["key", "state", "sentence", "action", "detail", "notice"],
+      "description": "Where Always On stands, the screen every surface draws: state maps to a screen, sentence and every label are printed as they are, detail sits behind Details, key is the digest a home.status wait and the watch compare, outcome is what a surface following a step reads (PROTOCOL.md, The Always On summary).",
+      "required": ["key", "state", "sentence", "action", "detail", "notice", "outcome"],
       "additionalProperties": false,
       "properties": {
         "key": { "type": "string", "minLength": 1, "maxLength": 64 },
@@ -5777,6 +5777,10 @@
             },
             { "type": "null" }
           ]
+        },
+        "outcome": {
+          "description": "running while Always On is at something that moves this screen on by itself (a step's job, the server setting up, the move, from its request until the restart shows), waiting while it waits on a server of the owner's own to use its code, failed on a problem, done when the next step is the owner's.",
+          "enum": ["running", "waiting", "done", "failed"]
         }
       }
     },
@@ -6184,7 +6188,7 @@
     },
     "homeActInput": {
       "type": "object",
-      "description": "What the action's needs collected: token (needs token; provider names one of detail.providers, else the one there is), recovery_passphrase (needs recovery_passphrase, typed once, or new_recovery_passphrase, typed twice and compared by the surface), type and location (needs choice: read home.provision.options, which takes no params; both, or neither for the recommendation). Never logged, never answered.",
+      "description": "What the action's needs collected: token (needs token; provider names one of detail.providers, else the one there is), recovery_passphrase (needs recovery_passphrase, typed once, or new_recovery_passphrase, typed twice and compared by the surface), type and location (needs choice: read home.provision.options, which takes no params, and send both, the row the owner chose, the recommendation's own by default; the engine makes no choice itself). Never logged, never answered.",
       "additionalProperties": false,
       "properties": {
         "token": { "type": "string", "maxLength": 512 },

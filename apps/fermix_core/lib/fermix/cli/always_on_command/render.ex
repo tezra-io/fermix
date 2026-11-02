@@ -11,6 +11,8 @@ defmodule Fermix.CLI.AlwaysOnCommand.Render do
   action's id is printed in its kebab form, the one the command takes.
   """
 
+  alias FermixCore.Management.HomeSummary
+
   # The one-sentence fields of `detail` a screen prints under its sentence,
   # in this order, wherever the state carries them.
   @text_fields ~w(progress note billing data)
@@ -19,13 +21,6 @@ defmodule Fermix.CLI.AlwaysOnCommand.Render do
   @doc "An action id as the command takes it: `create_server` → `create-server`."
   @spec kebab(String.t()) :: String.t()
   def kebab(id) when is_binary(id), do: String.replace(id, "_", "-")
-
-  @doc "Every action record the summary offers: its action, then the alternatives and actions."
-  @spec records(map()) :: [map()]
-  def records(%{} = summary) do
-    detail = summary["detail"] || %{}
-    List.wrap(summary["action"]) ++ (detail["alternatives"] || []) ++ (detail["actions"] || [])
-  end
 
   @doc """
   The screen: the sentence, the step in hand and the other one-sentence
@@ -54,7 +49,7 @@ defmodule Fermix.CLI.AlwaysOnCommand.Render do
   @doc "Each step the screen offers, with what takes it: its command, or the page it opens."
   @spec steps(map()) :: [String.t()]
   def steps(summary) do
-    case records(summary) do
+    case HomeSummary.offered(summary) do
       [] -> []
       records -> ["Steps:" | Enum.map(records, &"  #{&1["label"]}: #{taken_by(&1)}")]
     end
@@ -106,10 +101,10 @@ defmodule Fermix.CLI.AlwaysOnCommand.Render do
   words them: its sentence, then the offers grouped under the city of their
   place (the recommendation's city first, the rest in the engine's order),
   each numbered with its `label` and, beneath, its `price`, the
-  recommendation first in its city. Also what each number chooses:
-  `:recommended` (Fermix takes its own recommendation) or `{type, location}`.
+  recommendation first in its city. Also what each number chooses: its
+  `{type, location}`.
   """
-  @spec offers(map()) :: {[String.t()], [:recommended | {String.t(), String.t()}]}
+  @spec offers(map()) :: {[String.t()], [{String.t(), String.t()}]}
   def offers(%{"offers" => offers, "locations" => locations} = options) do
     groups = groups(offers, locations, options["recommended"])
     {lines, choices} = groups |> Enum.reduce({[], []}, &group/2)
@@ -127,7 +122,7 @@ defmodule Fermix.CLI.AlwaysOnCommand.Render do
     offers
     |> Enum.filter(&(&1["location"] == location))
     |> Enum.sort_by(&(not same_offer?(&1, recommended)))
-    |> Enum.map(&{&1, choice(&1, recommended)})
+    |> Enum.map(&{&1, {&1["type"], &1["location"]}})
   end
 
   # Lines and choices accumulate reversed; the next number is one past the
@@ -147,12 +142,6 @@ defmodule Fermix.CLI.AlwaysOnCommand.Render do
     do: offer["type"] == type and offer["location"] == location
 
   defp same_offer?(_offer, nil), do: false
-
-  defp choice(offer, recommended) do
-    if same_offer?(offer, recommended),
-      do: :recommended,
-      else: {offer["type"], offer["location"]}
-  end
 
   @doc "What a step answered beyond its screen: the own-server code, shown this once."
   @spec result(map() | nil) :: [String.t()]

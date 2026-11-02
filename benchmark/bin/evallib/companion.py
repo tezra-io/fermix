@@ -23,6 +23,13 @@ A case is one message, optionally with one of three choreographies around it
   delivery, for one). The runner grades the turn's trace inside that wait,
   before anything the turn scheduled can run.
 
+A case's `image` or `images` ride the message as files the owner attached
+(companion protocol 7), the way the app attaches them: the runner writes each
+fixture into the inbox the hello named (`server_hello.attachments.dir`, mode
+`0600`), hands it over with `attach_file`, waits for `attach_status`, and names
+it in the message's `attach_ids`. A refused file, or a hello that offers no
+inbox, makes the attempt ungradable.
+
 Every attempt starts with `/new`, so a case is its own conversation as an `ask`
 case is, and every message carries a unique marker so the attempt's trace, rows
 and search hits are its own.
@@ -33,17 +40,20 @@ is one to grade, is graded by the ordinary gates.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import mimetypes
 import os
 import re
 import socket
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from .grade import GateResult
 
-PROTOCOL_VERSION = 3
+PROTOCOL_VERSION = 7
 PROFILE = "main"
 SOCKET_NAME = "companion.sock"
 
@@ -168,8 +178,10 @@ class TurnWire:
                 for block in e.get("blocks", [])}
 
     def media_rows(self) -> int:
-        """The pictures and files the turn sent into the chat, each a media row."""
-        return sum(1 for e in self.events if e["type"] == "row" and e.get("media_refs"))
+        """The pictures and files the turn sent into the chat, each an assistant's
+        media row; the owner's own row carries the files it attached, not these."""
+        return sum(1 for e in self.events if e["type"] == "row" and e.get("media_refs")
+                   and e.get("role") == "assistant")
 
     def error_code(self) -> str | None:
         return next((e.get("code") for e in self.events if e["type"] == "turn_error"), None)
@@ -285,11 +297,12 @@ class Connection:
         except ValueError as exc:
             raise CompanionError(f"the daemon sent a line that is not JSON: {exc}") from exc
 
-    def hello(self, deadline: float) -> None:
+    def hello(self, deadline: float) -> dict:
         self.send({"type": "client_hello", "protocol_version": PROTOCOL_VERSION})
         reply = self.recv(deadline)
         if reply is None or reply.get("type") != "server_hello":
             raise CompanionError(f"handshake refused: {reply!r}")
+        return reply
 
     def close(self) -> None:
         self._sock.close()
@@ -309,12 +322,34 @@ class _Session:
         self.turns: dict[str, TurnWire] = {}
         self.pending: list[dict] = []
 
-    def message(self, client_msg_id: str, text: str) -> TurnWire:
+    def message(self, client_msg_id: str, text: str,
+                attach_ids: tuple[str, ...] = ()) -> TurnWire:
         turn = TurnWire(client_msg_id)
         self.turns[client_msg_id] = turn
         self.conn.send({"type": "msg", "client_msg_id": client_msg_id, "profile_id": PROFILE,
-                        "text": text, "attach_ids": []})
+                        "text": text, "attach_ids": list(attach_ids)})
         return turn
+
+    def attach(self, inbox: str, path: str, deadline: float) -> str:
+        """Hand the daemon one file through its inbox, as the app does; its attach id."""
+        attach_id = f"eval-{uuid.uuid4().hex}"
+        with open(path, "rb") as source:
+            data = source.read()
+        _write_private(os.path.join(inbox, attach_id), data)
+        mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
+        self.conn.send({"type": "attach_file", "attach_id": attach_id, "kind": _kind(mime),
+                        "mime": mime, "size_bytes": len(data),
+                        "sha256": hashlib.sha256(data).hexdigest(),
+                        "name": os.path.basename(path)})
+        while True:
+            reply = self.conn.recv(deadline)
+            if reply is None:
+                raise CompanionError(f"no answer to attach_file for {os.path.basename(path)}")
+            if reply.get("attach_id") == attach_id:
+                if reply.get("type") == "attach_status":
+                    return attach_id
+                raise CompanionError(f"attach_file refused: {reply.get('message')!r}")
+            self._route(reply)
 
     def command(self, client_msg_id: str, name: str) -> TurnWire:
         turn = TurnWire(client_msg_id, command=True)
@@ -408,8 +443,9 @@ class _Session:
 
 
 def drive(fermix_home: str, spec: dict, text: str, marker: str,
-          timeout_s: float) -> Evidence:
-    """Run one attempt: `/new`, the message and its choreography, the reads.
+          timeout_s: float, attachments: list[str] | tuple[str, ...] = ()) -> Evidence:
+    """Run one attempt: `/new`, the files it attaches, the message and its
+    choreography, the reads.
 
     The connection is closed on return; an `offline_wait_s` case continues with
     `catch_up`."""
@@ -423,10 +459,11 @@ def drive(fermix_home: str, spec: dict, text: str, marker: str,
         return Evidence(False, str(exc), sent_at, 0.0, target)
     session = _Session(conn)
     try:
-        conn.hello(deadline)
+        hello = conn.hello(deadline)
         _fresh_conversation(session, marker, deadline)
         head = _head(session, deadline)
-        target, blocker = _send(session, spec, text, marker, deadline)
+        attach_ids = _attach(session, hello, attachments, deadline)
+        target, blocker = _send(session, spec, text, marker, deadline, attach_ids)
         elapsed_ms = (time.monotonic() - started) * 1000.0
         reads = _reads(session, spec, marker, head, deadline)
     except CompanionError as exc:
@@ -450,14 +487,43 @@ def _head(session: _Session, deadline: float) -> int:
     return page["history_head_seq"]
 
 
-def _send(session: _Session, spec: dict, text: str, marker: str,
-          deadline: float) -> tuple[TurnWire, TurnWire | None]:
+def _attach(session: _Session, hello: dict, paths, deadline: float) -> tuple[str, ...]:
+    """Every file the case attaches, handed over before its message is sent."""
+    if not paths:
+        return ()
+    inbox = (hello.get("attachments") or {}).get("dir")
+    if not inbox:
+        raise CompanionError("the daemon's hello offered no attachment inbox")
+    return tuple(session.attach(inbox, path, deadline) for path in paths)
+
+
+def _kind(mime: str) -> str:
+    """The kind an `attach_file` declares for a mime type, a hint as the app's is."""
+    if mime == "image/gif":
+        return "animation"
+    head = mime.split("/", 1)[0]
+    if head in ("image", "video", "audio"):
+        return head
+    if mime == "application/pdf" or head == "text":
+        return "document"
+    return "file"
+
+
+def _write_private(path: str, data: bytes) -> None:
+    """Write a new file only its owner reads, as the app writes into the inbox."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as target:
+        target.write(data)
+
+
+def _send(session: _Session, spec: dict, text: str, marker: str, deadline: float,
+          attach_ids: tuple[str, ...] = ()) -> tuple[TurnWire, TurnWire | None]:
     blocker = None
     if spec.get("cancel") == "waiting":
         blocker = session.message(f"{marker}-blocker", f"{spec['blocker']} (eval:{marker})")
         if not session.pump(lambda: blocker.turn_id is not None, deadline):
             raise CompanionError("the blocker's turn never started")
-    target = session.message(f"{marker}-msg", f"{text} (eval:{marker})")
+    target = session.message(f"{marker}-msg", f"{text} (eval:{marker})", attach_ids)
     if spec.get("cancel") == "waiting":
         if not session.pump(lambda: "accepted" in target.types(), deadline):
             raise CompanionError("the waiting message was never accepted")

@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "step_failed",
+    "sentence": "That step ended on a problem: Falkenstein has no CPX22 right now. Run fermix always-on to fix it."
+  },
+  "ok": false,
+  "schema_version": 1
+}

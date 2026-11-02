@@ -106,8 +106,8 @@ defmodule FermixChannels.Companion.ConnectionProposalsTest do
 
   test "a stored proposal reaches the owner's connection as its compact card, on either version",
        ctx do
-    owner = hello(ctx.socket_path, 6)
-    old = hello(ctx.socket_path, 5)
+    owner = hello(ctx.socket_path, 7)
+    old = hello(ctx.socket_path, 6)
     id = propose!(ctx)
 
     assert %{"type" => "proposal", "profile_id" => "main", "proposal" => card} = recv(owner)
@@ -139,10 +139,10 @@ defmodule FermixChannels.Companion.ConnectionProposalsTest do
     id = propose!(ctx)
     restart_repo!(ctx.fixture)
 
-    owner = hello(ctx.socket_path, 6)
+    owner = hello(ctx.socket_path, 7)
     assert %{"type" => "proposal", "proposal" => %{"proposal_id" => ^id}} = recv(owner)
 
-    old = hello(ctx.socket_path, 5)
+    old = hello(ctx.socket_path, 6)
     assert %{"type" => "proposal", "proposal" => %{"proposal_id" => ^id}} = recv(old)
   end
 
@@ -150,8 +150,8 @@ defmodule FermixChannels.Companion.ConnectionProposalsTest do
   # tool or arguments, which a version 4 client required, so it needs version
   # 5; every version in the window reads it, and its end.
   test "a follow-up's card reaches the owner's connections on either version", ctx do
-    owner = hello(ctx.socket_path, 6)
-    old = hello(ctx.socket_path, 5)
+    owner = hello(ctx.socket_path, 7)
+    old = hello(ctx.socket_path, 6)
     registry = ctx.endpoint_opts[:connection_opts][:registry]
     card = ProposalView.follow_up_card(follow_up_card(), [])
 
@@ -186,7 +186,7 @@ defmodule FermixChannels.Companion.ConnectionProposalsTest do
     id = propose!(ctx)
     restart_endpoint(ctx, daemon_os_pid: ParentProcess.os_pid())
 
-    agent = hello(ctx.socket_path, 5)
+    agent = hello(ctx.socket_path, 6)
     send_line(agent, answer("agent-1", id, "confirm"))
 
     assert recv(agent) == %{
@@ -208,7 +208,7 @@ defmodule FermixChannels.Companion.ConnectionProposalsTest do
     role = %{role: :device, primary: "vm.example.test"}
     restart_endpoint(ctx, request_opts: [engine_role: role])
 
-    owner = hello(ctx.socket_path, 5)
+    owner = hello(ctx.socket_path, 6)
     send_line(owner, answer("mac-device-1", id, "confirm"))
 
     assert next_after_cards(owner, 3) == %{
@@ -228,7 +228,7 @@ defmodule FermixChannels.Companion.ConnectionProposalsTest do
        ctx do
     id = propose!(ctx)
     token = token!()
-    owner = hello(ctx.socket_path, 5)
+    owner = hello(ctx.socket_path, 6)
     assert %{"type" => "proposal"} = recv(owner)
 
     send_line(owner, answer("mac-1", id, "confirm"))
@@ -277,8 +277,8 @@ defmodule FermixChannels.Companion.ConnectionProposalsTest do
 
   test "a denial runs nothing, and every owner connection hears it", ctx do
     id = propose!(ctx)
-    owner = hello(ctx.socket_path, 5)
-    watcher = hello(ctx.socket_path, 5)
+    owner = hello(ctx.socket_path, 6)
+    watcher = hello(ctx.socket_path, 6)
     assert %{"type" => "proposal"} = recv(owner)
     assert %{"type" => "proposal"} = recv(watcher)
 
@@ -301,7 +301,7 @@ defmodule FermixChannels.Companion.ConnectionProposalsTest do
 
   test "an answer after the chat's confirm runs nothing; the chat's confirm is heard here", ctx do
     id = propose!(ctx)
-    owner = hello(ctx.socket_path, 5)
+    owner = hello(ctx.socket_path, 6)
     assert %{"type" => "proposal"} = recv(owner)
 
     assert {:ok, _reply} =
@@ -327,7 +327,7 @@ defmodule FermixChannels.Companion.ConnectionProposalsTest do
   # follow-up's card's answer; the wire takes it, and a mandate's card refuses it.
   test "always_allow on a mandate's proposal is refused by core, and it still waits", ctx do
     id = propose!(ctx)
-    owner = hello(ctx.socket_path, 6)
+    owner = hello(ctx.socket_path, 7)
     assert %{"type" => "proposal"} = recv(owner)
 
     send_line(owner, answer("mac-6", id, "always_allow"))
@@ -351,7 +351,7 @@ defmodule FermixChannels.Companion.ConnectionProposalsTest do
 
     restart_endpoint(ctx, proposal_opts: later)
 
-    owner = hello(ctx.socket_path, 5)
+    owner = hello(ctx.socket_path, 6)
     send_line(owner, answer("mac-5", id, "confirm"))
 
     assert recv(owner) == %{

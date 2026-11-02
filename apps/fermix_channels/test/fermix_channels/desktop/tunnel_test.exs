@@ -18,6 +18,7 @@ defmodule FermixChannels.Desktop.TunnelTest do
 
   alias FermixChannels.Channels.Companion, as: CompanionChannel
   alias FermixChannels.Companion.Endpoint
+  alias FermixChannels.Companion.Inbox
   alias FermixChannels.Companion.MediaGrants
   alias FermixChannels.Companion.Output
   alias FermixChannels.Desktop.Companion
@@ -25,6 +26,7 @@ defmodule FermixChannels.Desktop.TunnelTest do
   alias FermixChannels.Desktop.Relay.Media
   alias FermixChannels.Desktop.Tunnel
   alias FermixChannels.Mobile.DeviceRegistry
+  alias FermixChannels.Mobile.MediaStore
   alias FermixChannels.Mobile.RequestCoordinator
   alias FermixChannels.Test.DesktopRail
   alias FermixCore.Home.StatusWatch
@@ -171,7 +173,7 @@ defmodule FermixChannels.Desktop.TunnelTest do
 
   test "history, an approval card and the hello's epoch are the primary's", ctx do
     client = connect(ctx.socket)
-    send_line(client, %{"type" => "client_hello", "protocol_version" => 5, "primary_epoch" => 2})
+    send_line(client, %{"type" => "client_hello", "protocol_version" => 6, "primary_epoch" => 2})
 
     assert %{"type" => "server_hello", "role" => "primary", "primary_epoch" => 3} = recv(client)
 
@@ -192,9 +194,45 @@ defmodule FermixChannels.Desktop.TunnelTest do
   test "a client that has seen a later primary is refused by the primary, through the tunnel",
        ctx do
     client = connect(ctx.socket)
-    send_line(client, %{"type" => "client_hello", "protocol_version" => 5, "primary_epoch" => 9})
+    send_line(client, %{"type" => "client_hello", "protocol_version" => 6, "primary_epoch" => 9})
     assert %{"type" => "error", "reason" => "stale_primary"} = recv(client)
     assert closed?(client)
+  end
+
+  # Companion protocol 7: the desktop's app writes a file on the desktop,
+  # where the primary's inbox is not, so the primary's hello through the
+  # tunnel offers no attachments, while the primary's own app is offered its
+  # inbox; the command palette is the primary's either way.
+  test "the primary's hello offers its inbox to its own app, and none through the tunnel", ctx do
+    own = connect(ctx.companion.socket_path)
+    send_line(own, %{"type" => "client_hello", "protocol_version" => 7})
+
+    assert %{"type" => "server_hello", "attachments" => offer, "commands" => [_ | _]} =
+             recv(own)
+
+    assert offer == %{"dir" => ctx.companion.inbox_dir, "max_bytes" => 4_096}
+
+    client = connect(ctx.socket)
+    send_line(client, %{"type" => "client_hello", "protocol_version" => 7})
+    assert %{"type" => "server_hello", "commands" => [_ | _]} = hello = recv(client)
+    refute Map.has_key?(hello, "attachments")
+
+    send_line(client, %{
+      "type" => "attach_file",
+      "attach_id" => "desk-att-1",
+      "kind" => "file",
+      "mime" => "text/plain",
+      "size_bytes" => 2,
+      "sha256" => :crypto.hash(:sha256, "hi") |> Base.encode16(case: :lower)
+    })
+
+    assert recv(client) == %{
+             "type" => "error",
+             "reason" => "request_failed",
+             "message" =>
+               "Files cannot be attached from this computer while Fermix runs on another one.",
+             "attach_id" => "desk-att-1"
+           }
   end
 
   test "media is fetched from the primary and granted here, and released here", ctx do
@@ -365,7 +403,7 @@ defmodule FermixChannels.Desktop.TunnelTest do
       client = connect(ctx.socket)
       send_line(client, %{"type" => "client_hello", "protocol_version" => 6})
 
-      assert %{"type" => "server_hello", "role" => "primary", "max_version" => 6} = recv(client)
+      assert %{"type" => "server_hello", "role" => "primary", "max_version" => 7} = recv(client)
       assert recv(client) == %{"type" => "home_status_changed"}
 
       # Read once when the tunnel joined, once more for the primary's own
@@ -390,13 +428,18 @@ defmodule FermixChannels.Desktop.TunnelTest do
       assert recv(client) == %{"type" => "home_status_changed"}
     end
 
-    test "a version 5 app through the tunnel is never told, and this desktop reads nothing",
+    # Version 5 is outside the primary's window: the primary refuses it, and
+    # the tunnel, which watches only for an app on version 6 or later, never
+    # read this desktop's summary for it.
+    test "a version 5 app is refused by the primary through the tunnel, and this desktop reads nothing",
          ctx do
       client = connect(ctx.socket)
       send_line(client, %{"type" => "client_hello", "protocol_version" => 5})
-      assert %{"type" => "server_hello", "role" => "primary"} = recv(client)
 
-      assert_nothing_before_read_state(client)
+      assert %{"type" => "error", "reason" => "unsupported_protocol_version", "min_version" => 6} =
+               recv(client)
+
+      assert closed?(client)
       _state = :sys.get_state(ctx.watch)
       refute_received :desktop_read
     end
@@ -469,6 +512,22 @@ defmodule FermixChannels.Desktop.TunnelTest do
 
     status_watch = start_watch!(:primary_watch, fn -> Agent.get(status_read, & &1) end)
 
+    # The primary's attachment inbox (companion protocol 7), on a store of
+    # its own under the test's directory.
+    inbox_dir = Path.join(dir, "inbox")
+
+    store =
+      start_supervised!(
+        {MediaStore,
+         name: nil,
+         root: Path.join(dir, "mobile"),
+         max_media_bytes: 4_096,
+         max_store_bytes: 65_536},
+        id: :primary_media_store
+      )
+
+    inbox = start_supervised!({Inbox, name: nil, dir: inbox_dir, store: store})
+
     start_supervised!(
       {Endpoint,
        name: endpoint,
@@ -478,7 +537,8 @@ defmodule FermixChannels.Desktop.TunnelTest do
          registry: registry,
          request_opts: request_opts,
          primary_epoch: fn -> {:ok, 3} end,
-         status_watch: status_watch
+         status_watch: status_watch,
+         inbox: inbox
        ]},
       id: endpoint
     )
@@ -487,7 +547,9 @@ defmodule FermixChannels.Desktop.TunnelTest do
       endpoint: endpoint,
       registry: registry,
       status_watch: status_watch,
-      status_read: status_read
+      status_read: status_read,
+      socket_path: socket_path,
+      inbox_dir: inbox_dir
     }
   end
 
@@ -590,7 +652,7 @@ defmodule FermixChannels.Desktop.TunnelTest do
 
   defp hello(path) do
     client = connect(path)
-    send_line(client, %{"type" => "client_hello", "protocol_version" => 5})
+    send_line(client, %{"type" => "client_hello", "protocol_version" => 6})
     assert %{"type" => "server_hello", "role" => "primary"} = recv(client)
     client
   end

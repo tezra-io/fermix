@@ -111,9 +111,7 @@ defmodule FermixCore.Management.AlwaysOnLogTest do
 
   defp press(opts, id, input) do
     summary = opts |> Home.summary_facts() |> HomeSummary.summary()
-    detail = summary["detail"]
-    offered = List.wrap(summary["action"]) ++ (detail["alternatives"] || [])
-    %{"key" => key} = Enum.find(offered, &(&1["id"] == id))
+    %{"key" => key} = Enum.find(HomeSummary.offered(summary), &(&1["id"] == id))
     AlwaysOn.act(%{action: id, key: key, input: input}, opts)
   end
 
