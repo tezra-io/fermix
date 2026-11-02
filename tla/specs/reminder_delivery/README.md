@@ -424,6 +424,11 @@ Re-read on 2026-10-25 for the removal of direct FCM push (`dc3025a0`),
 which staled the `mobile.ex` pin again: `send_approval` no longer hands its
 push an id and expiry. No delivery path the spec models changed.
 
+Re-read on 2026-11-01 for companion protocol 7, which staled the `mobile.ex`
+pin: `command_catalog/0` moved to `Gateway.Commands.Registry.catalog/0`, the
+one command list both companion wires now send, and nothing else in the file
+changed. No delivery path the spec models changed.
+
 ## Code and doc drift
 
 - `delivery_worker.ex:160-163` says a claim past the validity boundary "cannot
