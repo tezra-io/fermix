@@ -951,6 +951,9 @@ defmodule FermixCore.Setup.ConfigStoreTest do
   s3_access_key_id = "@keyring"
   s3_secret_access_key = "@file"
 
+  [fermix_core.always_on]
+  enabled = true
+
   [fermix_core.providers.openai_codex]
   primary = true
   reasoning_effort = "high"

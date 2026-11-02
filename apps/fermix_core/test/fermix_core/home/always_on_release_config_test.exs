@@ -18,8 +18,15 @@ defmodule FermixCore.Home.AlwaysOnReleaseConfigTest do
   alias FermixCore.Management.Settings
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.RestartState
+  alias FermixCore.Setup.Wizard
   alias FermixTestSupport.SafeRm
   alias FermixTestSupport.SecretWriterStub
+
+  # Stands in for `McpSupervisor`: an MCP write reloads nothing here.
+  defmodule ReloadNothing do
+    @moduledoc false
+    def reload, do: {:ok, %{started: [], stopped: [], unchanged: [], failed: []}}
+  end
 
   @apps [:fermix_core, :fermix_channels, :fermix_web]
   @config_exs Path.expand("../../../../../config/config.exs", __DIR__)
@@ -100,9 +107,7 @@ defmodule FermixCore.Home.AlwaysOnReleaseConfigTest do
   test "a save through the settings door, the setup page's and the apps', keeps the switch",
        ctx do
     File.write!(ctx.config, @section <> "\n")
-    assert {:ok, loaded} = ConfigStore.load_runtime_config()
-    assert :ok = ConfigStore.apply_snapshot(loaded, supervised: false)
-    :ok = RestartState.record_persisted_baseline()
+    boot!()
 
     assert {:ok, _result} = Settings.apply("snapshots", %{"snapshots_interval_hours" => 12})
 
@@ -110,6 +115,48 @@ defmodule FermixCore.Home.AlwaysOnReleaseConfigTest do
     assert contents =~ "interval_hours = 12"
     assert contents =~ @section <> "\n"
     assert AlwaysOnRelease.available_in(ctx.home, :prod) == {:ok, true}
+  end
+
+  # The setup page's first save is usually the model key: the wizard writes
+  # the live snapshot back, so the switch the boot read must come back with
+  # it, and the next boot must read it again. Its own profile keeps the
+  # stub keychain's item apart from every other case's.
+  test "the setup page's save of a model key keeps the switch, across a boot", ctx do
+    profile = "aos-switch-#{System.unique_integer([:positive])}"
+    on_exit(fn -> SecretWriterStub.delete(:openai_api_key, profile: profile) end)
+    File.write!(ctx.config, ~s([fermix_core]\nprofile = "#{profile}"\n\n#{@section}\n))
+    boot!()
+
+    assert {:ok, _report} =
+             Wizard.save_answers(Wizard.report().wizard, openai_api_key: "sk-invented-switch")
+
+    contents = File.read!(ctx.config)
+    assert contents =~ ~s(api_key = "@keyring")
+    assert contents =~ @section <> "\n"
+
+    Application.delete_env(:fermix_core, :always_on)
+    boot!()
+    assert Application.get_env(:fermix_core, :always_on) == [enabled: true]
+  end
+
+  test "an MCP server write re-renders the file and keeps the switch", ctx do
+    File.write!(ctx.config, """
+    #{@section}
+
+    [mcp.servers.files]
+    command = "npx"
+    """)
+
+    :ok = RestartState.record_persisted_baseline()
+
+    assert :ok =
+             ConfigStore.put_mcp_server("files", %{"enabled" => false},
+               mcp_supervisor: ReloadNothing
+             )
+
+    contents = File.read!(ctx.config)
+    assert contents =~ "[mcp.servers.files]"
+    assert contents =~ @section <> "\n"
   end
 
   test "the listener port write re-renders the file and keeps the switch", ctx do
@@ -141,6 +188,14 @@ defmodule FermixCore.Home.AlwaysOnReleaseConfigTest do
       refute compiled |> Keyword.get(:fermix_core, []) |> Keyword.has_key?(:always_on),
              inspect(env)
     end
+  end
+
+  # What an engine's boot does with the file: load it, apply it, and take it
+  # as the baseline the next write compares against.
+  defp boot! do
+    assert {:ok, loaded} = ConfigStore.load_runtime_config()
+    assert :ok = ConfigStore.apply_snapshot(loaded, supervised: false)
+    :ok = RestartState.record_persisted_baseline()
   end
 
   defp restore_env(app, env) do
