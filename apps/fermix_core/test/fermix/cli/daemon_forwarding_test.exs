@@ -136,9 +136,12 @@ defmodule Fermix.CLI.DaemonForwardingTest do
   # opens no database, and every cue method reads or writes the cue rows in
   # memory.db: each is refused by name, as a linked desktop's is while its
   # server is out of reach, before anything is read. Read from the protocol's
-  # own method list, so a cue method added later is refused too.
+  # own method list, so a cue method added later is refused too. The host's
+  # own platform places the caller (an owner decision among the cue methods is
+  # placed before it is refused), so the sentence names this host's machine.
   test "without a desktop link a device refuses every cue method as retired", ctx do
-    socket = start_daemon!(ctx, engine_role: @device, desktop_link?: false, os: {:unix, :darwin})
+    socket = start_daemon!(ctx, engine_role: @device, desktop_link?: false)
+    machine = if :os.type() == {:unix, :darwin}, do: "this Mac", else: "this computer"
     cue_methods = Enum.filter(FermixCore.Management.Protocol.methods(), &(&1 =~ ~r/^cues\./))
 
     assert length(cue_methods) > 20
@@ -149,7 +152,7 @@ defmodule Fermix.CLI.DaemonForwardingTest do
              method
 
       assert details["sentence"] ==
-               "Fermix moved to your server, and this Mac is no longer connected to it.",
+               "Fermix moved to your server, and #{machine} is no longer connected to it.",
              method
     end
 
@@ -160,6 +163,16 @@ defmodule Fermix.CLI.DaemonForwardingTest do
              )
 
     refute_received {:forwarded, _request, _opts}
+  end
+
+  test "on a Mac the retired sentence names the Mac", ctx do
+    socket = start_daemon!(ctx, engine_role: @device, desktop_link?: false, os: {:unix, :darwin})
+
+    assert {:error, {:management_error, "primary_unreachable", _message, details}} =
+             Client.request_v1("cues.status", %{}, socket_path: socket, timeout: @reply_ms)
+
+    assert details["sentence"] ==
+             "Fermix moved to your server, and this Mac is no longer connected to it."
   end
 
   test "on a computer that is no Mac the retired sentence names the computer", ctx do
