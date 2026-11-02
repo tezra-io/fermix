@@ -21,9 +21,13 @@ defmodule FermixChannels.Home.Enrollment do
   server is. `withdraw/2` releases the window of the kind it names: the
   provisioned one when its server was never created or is being deleted,
   the manual one when the owner cancels its code (an open one ends now); a
-  window of the other kind is left alone. The
-  code is answered once and never logged; the window (its kind, secret,
-  expiry, and who used it) is kept in `<home>/mobile/enrollment.json`
+  window of the other kind is left alone. A manual window a linked desktop
+  opens to take the home back (Always On's move back) names that desktop
+  (`returning`, its device id), and the candidate that enrolls through it
+  carries it (`FermixCore.Home.Candidates`): the server knows a move goes
+  back by that fact. The code is answered once and never logged; the window
+  (its kind, secret, expiry, the desktop it was opened for, and who used it)
+  is kept in `<home>/mobile/enrollment.json`
   (`0600`, device-local), so an engine restart between opening a code and the
   server's check-in loses nothing. The window records which candidate used
   it, which is how a created server is known when it enrolls: the code is
@@ -115,13 +119,15 @@ defmodule FermixChannels.Home.Enrollment do
   Opens a window of `kind`, replacing any, and answers its code and expiry;
   or `{:error, {:unavailable, sentence}}` when this primary cannot be reached
   over the rail, or when a manual one is asked for while a provisioned window
-  is open.
+  is open. `returning` names the linked desktop a manual window is opened
+  for, to take the home back (nil for any other).
   """
-  @spec open(GenServer.server(), kind()) ::
+  @spec open(GenServer.server(), kind(), String.t() | nil) ::
           {:ok, %{code: String.t(), expires_at: DateTime.t()}}
           | {:error, {:unavailable, String.t()}}
-  def open(server \\ __MODULE__, kind \\ :manual) when kind in @kinds,
-    do: GenServer.call(server, {:open, kind}, 15_000)
+  def open(server \\ __MODULE__, kind \\ :manual, returning \\ nil)
+      when kind in @kinds and (is_nil(returning) or (kind == :manual and is_binary(returning))),
+      do: GenServer.call(server, {:open, kind, returning}, 15_000)
 
   @doc """
   Releases the window when it is of `kind`, so it holds no copied code back:
@@ -203,10 +209,10 @@ defmodule FermixChannels.Home.Enrollment do
   end
 
   @impl true
-  def handle_call({:open, kind}, _from, state) do
+  def handle_call({:open, kind, returning}, _from, state) do
     with :ok <- room_for(kind, state),
          {:ok, facts} <- code_facts(state) do
-      open_window(kind, facts, state)
+      open_window({kind, returning}, facts, state)
     else
       {:error, sentence} -> {:reply, {:error, {:unavailable, sentence}}, state}
     end
@@ -252,7 +258,9 @@ defmodule FermixChannels.Home.Enrollment do
   end
 
   def handle_call({:enroll, request, noise_pk}, _from, state) do
-    case Candidates.add(state.home, attrs(request, noise_pk), state.clock.()) do
+    attrs = Map.put(attrs(request, noise_pk), :returning, state.window.returning)
+
+    case Candidates.add(state.home, attrs, state.clock.()) do
       {:ok, record} ->
         Logger.info("enrollment: candidate #{record.candidate_id} (#{record.name}) enrolled")
         reply = {:ok, %{candidate_id: record.candidate_id, primary_name: state.window.name}}
@@ -330,7 +338,7 @@ defmodule FermixChannels.Home.Enrollment do
     end
   end
 
-  defp open_window(kind, facts, state) do
+  defp open_window({kind, returning}, facts, state) do
     now = state.clock.()
     expires_at = now |> DateTime.add(window_s(kind), :second) |> DateTime.truncate(:second)
     secret = :crypto.strong_rand_bytes(32)
@@ -345,7 +353,8 @@ defmodule FermixChannels.Home.Enrollment do
           used?: false,
           name: facts.name,
           used_by: nil,
-          candidate_id: nil
+          candidate_id: nil,
+          returning: returning
         }
 
         Logger.info(
@@ -530,7 +539,8 @@ defmodule FermixChannels.Home.Enrollment do
         "used" => window.used?,
         "name" => window.name,
         "used_by" => window.used_by && Base.encode64(window.used_by),
-        "candidate_id" => window.candidate_id
+        "candidate_id" => window.candidate_id,
+        "returning" => window.returning
       })
 
     with :ok <- File.mkdir_p(Path.dirname(file)),
@@ -585,7 +595,8 @@ defmodule FermixChannels.Home.Enrollment do
        when kind in ["manual", "provisioned"] and is_boolean(withdrawn?) and is_boolean(used?) do
     with {:ok, secret} <- optional_key(secret),
          {:ok, expires_at, 0} <- DateTime.from_iso8601(at),
-         {:ok, used_by} <- optional_key(map["used_by"]) do
+         {:ok, used_by} <- optional_key(map["used_by"]),
+         true <- is_nil(map["returning"]) or is_binary(map["returning"]) do
       {:ok,
        %{
          kind: String.to_existing_atom(kind),
@@ -595,7 +606,8 @@ defmodule FermixChannels.Home.Enrollment do
          used?: used?,
          name: map["name"],
          used_by: used_by,
-         candidate_id: map["candidate_id"]
+         candidate_id: map["candidate_id"],
+         returning: map["returning"]
        }}
     else
       _invalid -> {:error, :invalid_window}

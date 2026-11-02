@@ -784,6 +784,34 @@ epoch after the move started is a move it undid. `Ledger.state/1`'s `replace`
 says where it stands: creating, waiting, moving, deleting, done, failed (with
 which server holds the home) or cancelling.
 
+Move back (`home.act`'s `move_back`, Always On's move back) runs on a linked
+desktop: it asks the server for a manual window (`home.enroll.open`, which
+records the desktop that asked, so the candidate enrolled through it carries
+`returning` in `Home.Candidates` and the server's review knows the move goes
+back by that fact, never by an OS), writes the desktop's own candidate
+(`Candidate.prepare_return/3`, kind `return`) and `Home.Return`'s record
+(`device/return.json`: the server's name, the ledger's server, the epoch the
+link reached), and starts the candidate subtree (`Home.Link`'s
+`start_return/1`). Move now on it sends `home.move.start` to the desktop's own
+candidate and keeps the start in `return.json`, never in the ledger's
+`replace`; Cancel stops the subtree, closes the window
+(`home.enroll.withdraw {kind: manual}`) and removes both. Restore here
+(`restore_here`) chooses the newest copy under `snapshots/` the passphrase
+opens (`Home.LocalReturn.choose/2`, a wrong one refused before anything is
+deleted), writes `fence_requested`, and runs one `home_provision` job
+(`Provision.start_return_restore/2`): the fence, `delete_target`'s
+`:return_fence` (asked for, the server silent past the summary's limit or out
+of any link, no candidate here, no move under way), is `Driver.delete/3` of
+the server the home lives on and nothing else, recorded as `fenced_at`; a
+delete refused ends the job as the delete's failure and restores nothing;
+then `Home.LocalReturn.restore/3` (a `local` candidate, the copy staged as a
+return's, activated in place, the engine restarted). The job is never
+resumed: jobs live in memory, so a stop part-way leaves the step interrupted
+and a `local` candidate the device's next start discards, and Restore here is
+offered again (with `fenced_at` set it deletes nothing twice). The primary's
+summary reads `return.json`'s `moved_at` with the ledger's server standing as
+`server_retired` first; its delete removes the record with the server.
+
 Architecture Invariant: one role gate, one epoch writer, one marker, one
 device-local list, one placement table; a linked device's request takes one
 path, here or the primary, never both. A device-role engine makes no provider call, refreshes

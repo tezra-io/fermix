@@ -15,12 +15,16 @@ defmodule FermixCore.Management.HomeSummaryTest do
   @minute 60_000
   @cand "cand-5e2a9c1f7b3d4086"
   @new_cand "cand-9d41c7e2b05a3f68"
+  @back_cand "cand-7a3e1c9b5d2f4086"
+  @copy "20310504T093000Z-e5.fxsnap"
 
   # -- the table ----------------------------------------------------------------
 
   # {name, facts, state, sentence, action id or nil}
   defp cases do
-    setup_cases() ++ device_cases() ++ replace_cases() ++ server_cases() ++ candidate_cases()
+    setup_cases() ++
+      device_cases() ++
+      replace_cases() ++ server_cases() ++ candidate_cases() ++ return_cases()
   end
 
   defp setup_cases do
@@ -65,19 +69,19 @@ defmodule FermixCore.Management.HomeSummaryTest do
        facts(provision: created, link: link(enrollment: provisioned(:used))), "creating",
        "Connecting your server…", "cancel"},
       {"a server waiting for its move", ready_facts([]), "ready",
-       "Your server is ready for the move. There is no way back to this Mac in this version.",
-       "move_now"},
+       "Your server is ready for the move. You can move Fermix back to this Mac from Always " <>
+         "On whenever you want.", "move_now"},
       {"a server waiting, the review warning", ready_facts(review: review([warn()])), "ready",
-       "Your server is ready for the move. There is no way back to this Mac in this version.",
-       "move_now"},
+       "Your server is ready for the move. You can move Fermix back to this Mac from Always " <>
+         "On whenever you want.", "move_now"},
       {"a server waiting, the review blocking", ready_facts(review: review([warn(), block()])),
        "problem",
        "The move cannot start yet. This home is about 4 GiB; the move needs about 9 GiB free.",
        "check_again"},
       {"a server of the owner's own waiting",
        facts(candidates: [candidate()], link: link(enrollment: manual(:used, @cand))), "ready",
-       "Your server is ready for the move. There is no way back to this Mac in this version.",
-       "move_now"},
+       "Your server is ready for the move. You can move Fermix back to this Mac from Always " <>
+         "On whenever you want.", "move_now"},
       {"a server of the owner's own presenting its code",
        facts(link: link(enrollment: manual(:used))), "creating", "Connecting your server…", nil},
       {"a server Hetzner turned off",
@@ -385,6 +389,92 @@ defmodule FermixCore.Management.HomeSummaryTest do
     ]
   end
 
+  # Always On's move back (design §9): the desktop takes the home back from
+  # its server over the link, or restores its own backup when a server Fermix
+  # created is gone; afterwards the server is deleted in a step of its own.
+  defp return_cases do
+    unreachable = primary(:unreachable, 11 * @minute)
+
+    [
+      {"a desktop asking its server for the code to move back", returning(back("enrolling")),
+       "creating", "Connecting this Mac to your server…", "cancel"},
+      {"a desktop ready to take Fermix back", returning(back("enrolled")), "ready",
+       "This Mac is ready to take Fermix back.", "move_now"},
+      {"a Linux desktop ready to take Fermix back", returning(back("enrolled"), host_os: :linux),
+       "ready", "This computer is ready to take Fermix back.", "move_now"},
+      {"the move back asked of the server",
+       returning(back("enrolled"), started: true, server_move: "requested"), "moving",
+       "Moving Fermix back to this Mac. Messages wait until it is done.", nil},
+      {"the move back arriving", returning(back("receiving"), started: true), "moving",
+       "Moving Fermix back to this Mac. Messages wait until it is done.", nil},
+      {"the move back arriving while the server serves nothing",
+       returning(back("receiving"), started: true, link_primary: unreachable, primary_home: nil),
+       "moving", "Moving Fermix back to this Mac. Messages wait until it is done.", nil},
+      {"the move back staged", returning(back("staged"), started: true), "moving",
+       "Moving Fermix back to this Mac. Messages wait until it is done.", nil},
+      {"the move back put in place, the link gone",
+       returning(back("activating"), started: true, linked: false), "moving",
+       "Moving Fermix back to this Mac. Messages wait until it is done.", nil},
+      {"the move back done here, the restart to come",
+       returning(nil, started: true, linked: false), "moving",
+       "Moving Fermix back to this Mac. Messages wait until it is done.", nil},
+      {"the server undid the move back",
+       returning(back("enrolled"), started: true, server_move: "aborted"), "undone",
+       "The move back was undone. Fermix still runs on your server.", "try_again"},
+      {"the server undoing the move back",
+       returning(back("enrolled"), started: true, server_move: "undoing"), "moving",
+       "Moving Fermix back to this Mac. Messages wait until it is done.", nil},
+      {"a start recorded that the server, still the primary, never took",
+       returning(back("enrolled"), started: true), "ready",
+       "This Mac is ready to take Fermix back.", "move_now"},
+      {"a move back arriving with no record of it", returning(back("receiving"), record: false),
+       "moving", "Moving Fermix back to this Mac. Messages wait until it is done.", nil},
+      {"the move back that failed", returning(back("failed")), "problem",
+       "This Mac could not get ready to take Fermix back. Move back to try again.", "move_back"},
+      {"the move back that waited past its day", returning(back("expired")), "problem",
+       "This Mac could not get ready to take Fermix back. Move back to try again.", "move_back"},
+      {"a move back stopped part-way with no record of it",
+       returning(back("enrolled"), record: false), "problem",
+       "Moving back stopped part-way, so cancel it and move back again.", "cancel"},
+      {"a move back whose state cannot be read", returning(:unreadable), "problem",
+       "Moving back stopped part-way, so cancel it and move back again.", "cancel"},
+      {"a restore from this Mac's backup", returning(restore("receiving")), "moving",
+       "Restoring Fermix on this Mac from its backup. Messages wait until it is done.", nil},
+      {"a restore from this Mac's backup that failed",
+       returning(restore("failed"), copies: [copy()]), "problem",
+       "Fermix could not restore its backup on this Mac.", "restore_here"},
+      {"deleting the server before restoring here",
+       desktop(
+         link_primary: unreachable,
+         primary_home: nil,
+         provision: created_ledger() |> stepping("delete"),
+         return: fence_record(),
+         copies: [copy()]
+       ), "creating", "Deleting your server, then restoring Fermix on this Mac from its backup…",
+       nil},
+      {"the server Fermix could not delete, so nothing restored",
+       desktop(
+         link_primary: unreachable,
+         primary_home: nil,
+         provision: created_ledger(state: :failed) |> failed(fence_failure()),
+         return: fence_record(),
+         copies: [copy()]
+       ), "problem", fence_failure().sentence, "restore_here"},
+      {"back on this Mac, the server still standing", back_here([]), "problem",
+       "Fermix is back on this Mac. Your server still runs and costs money until you " <>
+         "delete it.", "delete_server"},
+      {"back on this Mac beside a second desktop",
+       back_here(link: server_link([]), snapshots: snapshots([])), "problem",
+       "Fermix is back on this Mac. Your server still runs and costs money until you " <>
+         "delete it.", "delete_server"},
+      {"back on this Mac, deleting the server", back_here(action: "delete"), "creating",
+       "Deleting your server…", nil},
+      {"back on this Mac from a server of the owner's own",
+       facts(return: back_record(provider_server: nil)), "off",
+       "Keep Fermix running when this Mac sleeps. It moves to a server you own.", "paste_token"}
+    ]
+  end
+
   # -- the table, read --------------------------------------------------------
 
   test "every row answers its state, sentence and action" do
@@ -621,7 +711,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
       assert detail["readiness"] == [warn(), block()]
     end
 
-    test "on holds the server, each backup, this Mac's copies, the disk and the two actions" do
+    test "on holds the server, each backup, this Mac's copies, the disk and its actions" do
       %{"detail" => detail} = HomeSummary.summary(desktop(copies_bytes: 3_221_225_472))
 
       assert detail["server"] == %{
@@ -637,7 +727,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
 
       assert detail["copies_bytes"] == 3_221_225_472
       assert detail["disk_used"] == 0.42
-      assert ids(detail["actions"]) == ["back_up_now", "replace_server"]
+      assert ids(detail["actions"]) == ["back_up_now", "replace_server", "move_back"]
 
       assert detail["data"] ==
                "Your conversations and memories, the secrets, the browser and traces live on " <>
@@ -870,7 +960,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
   # Review simplification 3: one reading of what a screen offers.
   test "what a screen offers is its action, then the alternatives, then Details' actions" do
     assert ids(HomeSummary.offered(HomeSummary.summary(desktop([])))) ==
-             ["back_up_now", "replace_server"]
+             ["back_up_now", "replace_server", "move_back"]
 
     not_set_up = facts(provision: created_ledger(), link: link(enrollment: provisioned(:expired)))
 
@@ -938,8 +1028,10 @@ defmodule FermixCore.Management.HomeSummaryTest do
       assert needs.(facts(provision: ledger(:failed, failure: failure("unavailable", "nbg1")))) ==
                []
 
-      %{"detail" => %{"actions" => [back_up, replace]}} = HomeSummary.summary(desktop([]))
-      assert {back_up["needs"], replace["needs"]} == {[], ["choice"]}
+      %{"detail" => %{"actions" => [back_up, replace, move_back]}} =
+        HomeSummary.summary(desktop([]))
+
+      assert {back_up["needs"], replace["needs"], move_back["needs"]} == {[], ["choice"], []}
     end
 
     test "Learn more opens the docs at the provider's part, Open its console" do
@@ -1013,7 +1105,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
 
     test "find_action/3 finds an action by its id and key wherever it sits, and nothing else" do
       summary = HomeSummary.summary(desktop([]))
-      [_back_up, replace] = summary["detail"]["actions"]
+      [_back_up, replace, _move_back] = summary["detail"]["actions"]
 
       assert {:ok, ^replace} = HomeSummary.find_action(summary, "replace_server", replace["key"])
       assert :error = HomeSummary.find_action(summary, "replace_server", "another-key")
@@ -1238,6 +1330,220 @@ defmodule FermixCore.Management.HomeSummaryTest do
     end
   end
 
+  describe "moving back" do
+    test "on offers Move back beside Back up now and Replace the server, asking nothing" do
+      %{"detail" => %{"actions" => actions}} = HomeSummary.summary(desktop([]))
+      move_back = Enum.find(actions, &(&1["id"] == "move_back"))
+
+      assert %{"label" => "Move back to this Mac", "needs" => [], "confirm" => nil} = move_back
+
+      linux = HomeSummary.summary(desktop(host_os: :linux))["detail"]["actions"]
+      assert Enum.find(linux, &(&1["id"] == "move_back"))["label"] == "Move back to this computer"
+    end
+
+    test "ready names the server, what runs here again and until when it waits, and Move " <>
+           "now asks the server's passphrase with a confirm built here, Cancel beside it" do
+      summary = HomeSummary.summary(returning(back("enrolled")))
+
+      assert %{"id" => "move_now", "needs" => ["recovery_passphrase"]} = summary["action"]
+
+      assert summary["action"]["confirm"] ==
+               "Move Fermix back to this Mac now? iMessage, voice calls and meetings run " <>
+                 "here again. Coding agents ask for your approval again. Messages sent to " <>
+                 "Telegram while it moves wait until it is done. Your server stays until you " <>
+                 "delete it."
+
+      assert [%{"id" => "cancel", "confirm" => nil, "label" => "Cancel"}] =
+               summary["detail"]["alternatives"]
+
+      assert %{"label" => "Server", "value" => "fermix-general-a3f9"} in summary["detail"][
+               "lines"
+             ]
+
+      assert %{"label" => "Runs here again", "value" => "iMessage, voice calls and meetings"} in summary[
+               "detail"
+             ]["lines"]
+
+      assert Enum.any?(summary["detail"]["lines"], &(&1["label"] == "Waits until"))
+
+      quiet = HomeSummary.summary(returning(back("enrolled"), stays_here: []))
+
+      assert quiet["action"]["confirm"] ==
+               "Move Fermix back to this Mac now? Coding agents ask for your approval again. " <>
+                 "Messages sent to Telegram while it moves wait until it is done. Your server " <>
+                 "stays until you delete it."
+
+      assert summary["notice"] == %{
+               "id" => "ready:" <> @back_cand,
+               "sentence" => "This Mac is ready to take Fermix back."
+             }
+    end
+
+    # HR-1: Cancel only where no move of the server's is under way: before
+    # the start, once the server undid it, and where the server answers as
+    # the primary with no move although the start was recorded; never while
+    # the server moves, once it retired, or once this computer took the home.
+    test "Cancel is offered only where the server has no move under way" do
+      offers = &all_actions(HomeSummary.summary(&1))
+
+      assert "cancel" in offers.(returning(back("enrolling")))
+      assert "cancel" in offers.(returning(back("enrolled")))
+
+      assert "cancel" in offers.(
+               returning(back("enrolled"), started: true, server_move: "aborted")
+             )
+
+      assert "cancel" in offers.(returning(back("enrolled"), started: true))
+      assert "cancel" in offers.(returning(back("enrolled"), record: false))
+
+      silent = primary(:unreachable, 11 * @minute)
+
+      for facts <- [
+            returning(back("enrolled"), started: true, server_move: "streaming"),
+            returning(back("enrolled"), started: true, server_move: "undoing"),
+            returning(back("enrolled"), started: true, primary_home: nil, link_primary: silent),
+            returning(back("receiving"), started: true),
+            returning(back("activating"), started: true, linked: false),
+            returning(back("activating"), record: false),
+            returning(nil, started: true, linked: false),
+            returning(:unreadable, started: true)
+          ] do
+        refute "cancel" in offers.(facts), inspect(facts.returning)
+        refute "restore_here" in offers.(Map.put(facts, :copies, [copy()]))
+      end
+    end
+
+    test "the move back's progress follows what this Mac's receiver wrote" do
+      progress = &HomeSummary.summary(returning(back(&1), started: true))["detail"]["progress"]
+
+      assert progress.("receiving") == "Receiving your Fermix from the server…"
+      assert progress.("staged") == "Waiting for your server to hand over…"
+      assert progress.("activating") == "Putting Fermix in place on this Mac…"
+    end
+
+    test "a second desktop's move back the home went past is not drawn" do
+      ahead = %{primary(:connected) | epoch: 7}
+
+      summary =
+        HomeSummary.summary(returning(back("enrolled"), link_primary: ahead))
+
+      assert summary["state"] == "on"
+    end
+
+    test "the server is deleted only once this Mac is the primary again" do
+      for facts <- [
+            returning(back("enrolled")),
+            returning(back("activating"), started: true),
+            returning(back("enrolled"), started: true, server_move: "aborted")
+          ] do
+        refute "delete_server" in all_actions(HomeSummary.summary(facts))
+      end
+
+      summary = HomeSummary.summary(back_here([]))
+
+      assert %{"detail" => %{"kind" => "server_retired"}, "action" => delete} = summary
+
+      assert delete["confirm"] ==
+               "Delete your server? Fermix no longer runs on it, and everything still on it " <>
+                 "is gone for good."
+
+      assert ids(summary["detail"]["alternatives"]) == ["learn_more"]
+
+      # A server created after the return is not the one it left.
+      other = put_in(back_here([]), [:provision, :server, :id], "61900117")
+      refute HomeSummary.summary(other)["detail"]["kind"] == "server_retired"
+    end
+
+    test "back from a server of the owner's own is told once, by the epoch it came back at" do
+      summary = HomeSummary.summary(facts(return: back_record(provider_server: nil)))
+
+      assert summary["notice"] == %{
+               "id" => "back:6",
+               "sentence" =>
+                 "Fermix is back on this Mac. Your own server still runs its retired copy: " <>
+                   "turn it off or delete it."
+             }
+
+      assert HomeSummary.summary(back_here([]))["notice"] == nil
+    end
+
+    test "Restore here is offered on the four screens of a server Fermix created, with a copy" do
+      unreachable = primary(:unreachable, 11 * @minute)
+      silent = [link_primary: unreachable, primary_home: nil, copies: [copy()]]
+
+      screens = [
+        desktop(silent),
+        desktop([provision: created_ledger(power: "off")] ++ silent),
+        desktop([provision: created_ledger(status: :gone, state: :gone)] ++ silent),
+        desktop(linked: false, copies: [copy()]),
+        desktop(link_primary: primary(:revoked), copies: [copy()])
+      ]
+
+      for facts <- screens do
+        assert "restore_here" in all_actions(HomeSummary.summary(facts)), inspect(facts.link)
+      end
+
+      for facts <- [
+            desktop(copies: [copy()]),
+            desktop(link_primary: primary(:unreachable, 5 * @minute), copies: [copy()]),
+            desktop(link_primary: unreachable, primary_home: nil, copies: []),
+            desktop(
+              link_primary: unreachable,
+              primary_home: nil,
+              copies: [copy()],
+              provision: ledger(:none)
+            ),
+            desktop(
+              link_primary: unreachable,
+              primary_home: nil,
+              copies: [copy()],
+              provision: replacing(:waiting)
+            )
+          ] do
+        refute "restore_here" in all_actions(HomeSummary.summary(facts))
+      end
+
+      # Once the server was deleted for it, it is offered again.
+      fenced = Map.put(fence_record(), :fenced_at, ~U[2031-05-04 11:56:00Z])
+
+      assert "restore_here" in all_actions(
+               HomeSummary.summary(
+                 desktop([provision: ledger(:connected), return: fenced] ++ silent)
+               )
+             )
+    end
+
+    test "Restore here asks the passphrase, says what is lost and that a silent server is " <>
+           "deleted all the same, and names the backup's date; a newer copy moves its key" do
+      facts = desktop(link_primary: primary(:unreachable, 11 * @minute), copies: [copy()])
+      summary = HomeSummary.summary(facts)
+      restore = Enum.find(HomeSummary.offered(summary), &(&1["id"] == "restore_here"))
+
+      assert %{"label" => "Restore on this Mac", "needs" => ["recovery_passphrase"]} = restore
+
+      assert restore["confirm"] ==
+               "Restore Fermix on this Mac from its backup? Messages, memory and jobs since " <>
+                 "that backup are gone, and Telegram keeps nothing older than 24 hours. If " <>
+                 "your server is only restarting or offline, wait: Fermix deletes it before " <>
+                 "it restores here, and everything on it since that backup is gone."
+
+      assert %{"label" => "Backup on this Mac", "value" => "Sunday, May 4, 2031 at 9:30 AM UTC"} in summary[
+               "detail"
+             ]["lines"]
+
+      assert %{"label" => "Last seen", "value" => "Sunday, May 4, 2031 at 11:50 AM UTC"} in summary[
+               "detail"
+             ]["lines"]
+
+      newer = %{facts | copies: [copy("20310504T120000Z-e5.fxsnap"), copy()]}
+
+      moved =
+        Enum.find(HomeSummary.offered(HomeSummary.summary(newer)), &(&1["id"] == "restore_here"))
+
+      refute moved["key"] == restore["key"]
+    end
+  end
+
   describe "the server a move goes to" do
     test "the one the created server's code enrolled, else the newest held" do
       older = %{
@@ -1256,6 +1562,13 @@ defmodule FermixCore.Management.HomeSummaryTest do
     test "during a replace, the one the old server's code for the new one enrolled" do
       assert HomeSummary.target(replace_ready([]))["candidate_id"] == @new_cand
       assert HomeSummary.target(desktop([])) == nil
+    end
+
+    # Design §9: a desktop moving back moves to its own candidate.
+    test "during a move back, this desktop's own candidate, once it enrolled" do
+      assert HomeSummary.target(returning(back("enrolled")))["candidate_id"] == @back_cand
+      assert HomeSummary.target(returning(back("enrolling"))) == nil
+      assert HomeSummary.target(returning(restore("receiving"))) == nil
     end
   end
 
@@ -1526,7 +1839,10 @@ defmodule FermixCore.Management.HomeSummaryTest do
         primary_too_old: false,
         copies_bytes: nil,
         stays_here: [],
-        zone: "Etc/UTC"
+        zone: "Etc/UTC",
+        return: nil,
+        returning: nil,
+        copies: []
       },
       Map.new(overrides)
     )
@@ -1553,6 +1869,102 @@ defmodule FermixCore.Management.HomeSummaryTest do
         overrides
     )
   end
+
+  # A desktop moving back: its candidate's state (`state`, nil for none) and
+  # the return's record (`record: false` for none; `started:` once the
+  # server started the move), the server's own part saying its move's phase
+  # (`server_move:`).
+  defp returning(state, overrides \\ []) do
+    {record?, overrides} = Keyword.pop(overrides, :record, true)
+    {started?, overrides} = Keyword.pop(overrides, :started, false)
+    {server_move, overrides} = Keyword.pop(overrides, :server_move)
+
+    record = if started?, do: started_record(), else: return_record()
+    home = server_home([]) |> Map.put("move", server_move && move(server_move))
+
+    desktop(
+      [
+        returning: state,
+        return: if(record?, do: record),
+        primary_home: home,
+        stays_here: [:imessage, :voice, :meetings]
+      ] ++ overrides
+    )
+  end
+
+  defp back(phase) do
+    enrolled = phase not in ["enrolling"]
+
+    %{
+      "v" => 1,
+      "phase" => phase,
+      "kind" => "return",
+      "primary" => %{"name" => "fermix-general-a3f9"},
+      "candidate_id" => if(enrolled, do: @back_cand),
+      "listen_until" => if(enrolled, do: "2031-05-05T11:00:00Z")
+    }
+    |> Map.reject(fn {_key, value} -> is_nil(value) end)
+  end
+
+  defp restore(phase) do
+    %{
+      "v" => 1,
+      "phase" => phase,
+      "kind" => "local",
+      "primary" => %{"name" => "fermix-general-a3f9"}
+    }
+  end
+
+  defp return_record do
+    %{
+      from: "fermix-general-a3f9",
+      provider_server: "61839204",
+      primary_epoch: 5,
+      started_at: ~U[2031-05-04 11:30:00Z]
+    }
+  end
+
+  defp started_record,
+    do:
+      Map.merge(return_record(), %{
+        move_started_at: ~U[2031-05-04 11:40:00Z],
+        candidate_id: @back_cand,
+        move_id: "mv-0001"
+      })
+
+  defp back_record(overrides) do
+    started_record()
+    |> Map.merge(%{moved_at: ~U[2031-05-04 11:50:00Z], epoch: 6})
+    |> Map.merge(Map.new(overrides))
+    |> Map.reject(fn {_key, value} -> is_nil(value) end)
+  end
+
+  # This Mac booted as the primary again with the server Fermix created still
+  # standing in its ledger (`action:` a step's job of it running).
+  defp back_here(overrides) do
+    {action, overrides} = Keyword.pop(overrides, :action)
+    ledger = if action, do: stepping(created_ledger(), action), else: created_ledger()
+    facts([return: back_record([]), provision: ledger] ++ overrides)
+  end
+
+  defp fence_record,
+    do: Map.put(return_record(), :fence_requested, @copy)
+
+  defp fence_failure do
+    %{
+      reason: "unauthorized",
+      sentence:
+        "Fermix could not delete your server, so it did not restore here: a restored copy " <>
+          "beside a running server would answer twice.",
+      next_location: nil,
+      at: ~U[2031-05-04 11:55:00Z],
+      action: "delete",
+      type: "cpx22",
+      location: "fsn1"
+    }
+  end
+
+  defp copy(name \\ @copy, at \\ ~U[2031-05-04 09:30:00Z]), do: %{name: name, at: at}
 
   defp server(overrides) do
     desktop_row = %{device_id: "6d2b3c1e", name: "Studio Mac", connected: true}

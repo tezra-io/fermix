@@ -8,6 +8,7 @@ defmodule FermixChannels.Home.EnrollmentKindTest do
 
   alias FermixChannels.Home.Enrollment
   alias FermixChannels.Test.HomeMove
+  alias FermixCore.Home.Candidates
   alias FermixCore.Home.EnrollmentCode
   alias FermixCore.Management.Copy
 
@@ -233,6 +234,41 @@ defmodule FermixChannels.Home.EnrollmentKindTest do
 
     assert Enrollment.take(ctx.primary.enrollment, :binary.copy(<<7>>, 32)) ==
              {:error, :expired}
+  end
+
+  # Always On's move back: a linked desktop opens a copied-code window on its
+  # server to take the home back, and the server keeps which desktop asked, so
+  # the candidate that enrolls through it is that desktop's return: a fact the
+  # server records, never a guess from the candidate's system.
+  test "a window a desktop opened to move back names it, across a restart, and so does " <>
+         "the candidate it enrolls",
+       ctx do
+    desktop = "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e"
+    {:ok, _code} = Enrollment.open(ctx.primary.enrollment, :manual, desktop)
+    assert kept(ctx.primary)["returning"] == desktop
+
+    restart!(ctx.primary.enrollment)
+
+    remote = :binary.copy(<<7>>, 32)
+    :ok = Enrollment.take(ctx.primary.enrollment, remote)
+    {:ok, %{candidate_id: id}} = Enrollment.enroll(ctx.primary.enrollment, request(), remote)
+
+    assert {:ok, %{returning: ^desktop}} =
+             Candidates.fetch(ctx.primary.root, id, HomeMove.now())
+  end
+
+  test "a window opened for anything else names no desktop, nor does its candidate", ctx do
+    for kind <- [:manual, :provisioned] do
+      {:ok, _code} = Enrollment.open(ctx.primary.enrollment, kind)
+      assert kept(ctx.primary)["returning"] == nil
+
+      remote = :crypto.strong_rand_bytes(32)
+      :ok = Enrollment.take(ctx.primary.enrollment, remote)
+      {:ok, %{candidate_id: id}} = Enrollment.enroll(ctx.primary.enrollment, request(), remote)
+
+      assert {:ok, %{returning: nil}} = Candidates.fetch(ctx.primary.root, id, HomeMove.now())
+      :ok = Enrollment.withdraw(ctx.primary.enrollment, kind)
+    end
   end
 
   test "the window keeps its kind across an engine restart", ctx do

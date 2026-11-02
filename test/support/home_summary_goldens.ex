@@ -3,14 +3,17 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
   The `home.status` goldens beyond the first (`success.jsonl`), one for each
   family of the summary's states (M75 lean v1 §7): the computer that sets
   Always On up while its server installs and once it is ready, the server
-  before and after its move, and a linked desktop when all is well and when
-  its server stopped answering. Each is the record `Management.Home.picture/1`
+  before and after its move, and a linked desktop when all is well (Move back
+  among its actions) and when its server stopped answering (Restore here
+  beside it, from the copies the desktop keeps). Each is the record
+  `Management.Home.picture/1`
   builds from invented facts, with the summary `HomeSummary.summary/1`
   answers for the same facts, so a golden can only say what the engine says.
   """
 
   alias FermixCore.Home.MoveReadiness
   alias FermixCore.Home.Provision.Hetzner
+  alias FermixCore.Home.Snapshot
   alias FermixCore.Home.Snapshot.S3, as: SnapshotS3
   alias FermixCore.Home.Snapshot.Status, as: SnapshotStatus
   alias FermixCore.Management.Home
@@ -122,7 +125,8 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
       primary_home: primary_home,
       primary_missing:
         if(primary_home, do: nil, else: "The server #{@server_name} is unreachable."),
-      copies_bytes: 3 * 48_211
+      copies_bytes: 3 * 48_211,
+      copies: copies()
     })
   end
 
@@ -171,10 +175,22 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
         primary_too_old: false,
         copies_bytes: Map.get(extra, :copies_bytes),
         stays_here: [],
-        zone: "Europe/Berlin"
+        zone: "Europe/Berlin",
+        return: nil,
+        returning: nil,
+        copies: Map.get(extra, :copies, [])
       })
 
     Home.picture(Map.put(facts, :summary, summary))
+  end
+
+  # The three copies of the server's snapshots this desktop keeps, newest
+  # first: what Restore here takes the home back from.
+  defp copies do
+    for hour <- [10, 4, 0] do
+      at = DateTime.new!(~D[2031-05-04], Time.new!(hour, 0, 0), "Etc/UTC")
+      %{name: Snapshot.name(at, 4), at: at}
+    end
   end
 
   defp link(overrides),

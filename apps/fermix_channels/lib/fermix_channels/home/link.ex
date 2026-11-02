@@ -7,7 +7,7 @@ defmodule FermixChannels.Home.Link do
   `forward/1`, `rename_primary/1` and `status/0`'s `primary` by the desktop
   relay (device role),
   `status/0`'s `desktops` by the primary's desktop peers
-  (`FermixChannels.Desktop.Peer`), and `open_enrollment/1`,
+  (`FermixChannels.Desktop.Peer`), and `open_enrollment/2`,
   `withdraw_enrollment/1` and `status/0`'s `enrollment` by the enrollment
   window, `drop_desktop_row/2` by the device store of the staged home it
   names, and `start_return/1` and `stop_return/0` by the device tree
@@ -50,9 +50,10 @@ defmodule FermixChannels.Home.Link do
   # with no window running here, none opens, said in words an owner reads
   # (a create keeps it as its failure, which Always On shows).
   @impl true
-  def open_enrollment(kind) when kind in [:manual, :provisioned] do
+  def open_enrollment(kind, returning)
+      when kind in [:manual, :provisioned] and (is_binary(returning) or is_nil(returning)) do
     if Process.whereis(Enrollment),
-      do: Enrollment.open(Enrollment, kind),
+      do: Enrollment.open(Enrollment, kind, returning),
       else: {:error, {:unavailable, "Fermix cannot open a code here right now."}}
   end
 

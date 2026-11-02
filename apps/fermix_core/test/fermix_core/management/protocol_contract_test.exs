@@ -1459,7 +1459,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
               }
             }
           end,
-          open_enrollment: fn :manual ->
+          open_enrollment: fn :manual, _desktop ->
             {:ok, %{code: "fxenroll1.aW52ZW50ZWQ", expires_at: ~U[2026-10-27 09:40:00Z]}}
           end,
           withdraw_enrollment: fn :provisioned -> :ok end,

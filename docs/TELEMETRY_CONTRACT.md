@@ -1123,6 +1123,13 @@ phase files (`.move/phase.json`, `candidate/state.json`) hold the sentence
 `home.status` shows. `Trace.TelemetryHandler` records each as a `home_move`
 `agent_event` row keyed on the side; the Opik exporter does not subscribe
 (no session to nest under), as for snapshots and the channel points below.
+A move back to the computer the home left is the same move, side
+`:candidate` on that computer with the server's move id. Restore here, which
+restores that computer's own copy with no server sending it
+(`FermixCore.Home.LocalReturn`), brackets the restore as side `:candidate`
+too, its move id `local-<unix time>`; the job it runs in keeps the
+`home_provision` job family's own bookends, and the delete of the server
+before it is that job's step.
 
 The sign-in loopback forward (M75 D17) adds no event: the sign-in it serves is
 the `auth` management job it always was, and a port the desktop could not open

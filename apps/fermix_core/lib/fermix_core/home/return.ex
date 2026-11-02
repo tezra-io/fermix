@@ -19,6 +19,8 @@ defmodule FermixCore.Home.Return do
         "move_started_at": "2031-06-01T09:05:00Z",
         "candidate_id": "c-91",
         "move_id": "m-12",
+        "fence_requested": "20310601T080000Z-e6.fxsnap",
+        "fenced_at": "2031-06-01T09:02:00Z",
         "moved_at": "2031-06-01T09:20:00Z",
         "epoch": 7
       }
@@ -31,16 +33,24 @@ defmodule FermixCore.Home.Return do
   - `primary_epoch`: the epoch the link had seen when the return was asked for.
   - `move_started_at`, `candidate_id`, `move_id`: once the server started the
     move.
+  - `fence_requested`: the copy this computer restores itself from when the
+    server Fermix created for the home cannot answer (Restore here, the
+    name of a copy under `snapshots/`), asked for before the server is
+    deleted; `fenced_at`: once it was (`Management.Provision`'s fence), so a
+    stop after it never deletes again.
   - `moved_at`, `epoch`: once this computer booted as the primary again
     (`done/2`, which the primary's boot runs before anything reads the home;
     one it could not write is remembered, `remember_unrecorded/0`, and each
     `home.status` read of that engine tries it again).
 
   A record left without its `candidate/` by a crash, or the other way round, is
-  harmless: the next return writes both again.
+  harmless: the next return writes both again. Every write and removal tells
+  the Always On watch (`FermixCore.Home.StatusWatch`, `:move`), whose screen
+  the record leads.
   """
 
   alias FermixCore.Home.Epoch
+  alias FermixCore.Home.StatusWatch
 
   @dir "device"
   @filename "return.json"
@@ -48,8 +58,8 @@ defmodule FermixCore.Home.Return do
   @dir_mode 0o700
   @file_mode 0o600
   @max_text_bytes 128
-  @times [:started_at, :move_started_at, :moved_at]
-  @texts [:from, :provider_server, :candidate_id, :move_id]
+  @times [:started_at, :move_started_at, :fenced_at, :moved_at]
+  @texts [:from, :provider_server, :candidate_id, :move_id, :fence_requested]
   @epochs [:primary_epoch, :epoch]
   @keys @times ++ @texts ++ @epochs
   @required [:from, :started_at]
@@ -63,6 +73,8 @@ defmodule FermixCore.Home.Return do
           optional(:move_started_at) => DateTime.t(),
           optional(:candidate_id) => String.t(),
           optional(:move_id) => String.t(),
+          optional(:fence_requested) => String.t(),
+          optional(:fenced_at) => DateTime.t(),
           optional(:moved_at) => DateTime.t(),
           optional(:epoch) => pos_integer()
         }
@@ -91,8 +103,9 @@ defmodule FermixCore.Home.Return do
     file = path(home)
 
     with :ok <- valid(record, file),
-         :ok <- make_dir(Path.dirname(file)) do
-      write_private(file, encode(record))
+         :ok <- make_dir(Path.dirname(file)),
+         :ok <- write_private(file, encode(record)) do
+      StatusWatch.changed(:move)
     end
   end
 
@@ -141,7 +154,7 @@ defmodule FermixCore.Home.Return do
     file = path(home)
 
     case File.rm(file) do
-      :ok -> :ok
+      :ok -> StatusWatch.changed(:move)
       {:error, :enoent} -> :ok
       {:error, reason} -> {:error, {:file, file, reason}}
     end

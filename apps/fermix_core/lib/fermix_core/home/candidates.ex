@@ -13,6 +13,11 @@ defmodule FermixCore.Home.Candidates do
   24 hours after it enrolled; an expired one is dropped at the next read or
   write.
 
+  `returning` is the device id of the linked desktop whose window the
+  candidate enrolled through to take the home back (Always On's move back),
+  nil for any other: the one fact that says a move goes back to the computer
+  the home left. The move's request carries it; `view/1` does not show it.
+
   One writer: the primary's enrollment window (`FermixChannels.Home.Enrollment`).
   Readers: `home.candidates.list`, `home.status` and `home.move.start`.
   Written whole to a temporary file and renamed.
@@ -36,6 +41,7 @@ defmodule FermixCore.Home.Candidates do
           noise_pk: <<_::256>>,
           recipient: <<_::256>>,
           snapshots: map() | nil,
+          returning: String.t() | nil,
           enrolled_at: DateTime.t(),
           expires_at: DateTime.t()
         }
@@ -73,7 +79,7 @@ defmodule FermixCore.Home.Candidates do
   @doc """
   Holds a new candidate enrolled at `now`, under a fresh id: refused as
   `{:error, :limit}` while #{@max_candidates} are held. `attrs` is the
-  record without its id and its times.
+  record without its id and its times (`returning` nil when absent).
   """
   @spec add(Path.t(), map(), DateTime.t()) :: {:ok, record()} | {:error, term()}
   def add(home, attrs, %DateTime{} = now) when is_binary(home) and is_map(attrs) do
@@ -81,6 +87,7 @@ defmodule FermixCore.Home.Candidates do
          :ok <- room(held) do
       record =
         Map.merge(attrs, %{
+          returning: Map.get(attrs, :returning),
           candidate_id: "cand-" <> Base.encode16(:crypto.strong_rand_bytes(8), case: :lower),
           enrolled_at: DateTime.truncate(now, :second),
           expires_at: now |> DateTime.add(@lifetime_s, :second) |> DateTime.truncate(:second)
@@ -124,7 +131,8 @@ defmodule FermixCore.Home.Candidates do
     |> Map.merge(%{
       "relays" => record.relays,
       "noise_pk" => Base.encode64(record.noise_pk),
-      "recipient" => Base.encode64(record.recipient)
+      "recipient" => Base.encode64(record.recipient),
+      "returning" => record.returning
     })
   end
 
@@ -136,6 +144,7 @@ defmodule FermixCore.Home.Candidates do
          {:ok, enrolled_at, _offset} <- DateTime.from_iso8601(map["enrolled_at"] || ""),
          {:ok, expires_at, _offset} <- DateTime.from_iso8601(map["expires_at"] || ""),
          true <- Enum.all?(~w(candidate_id name os arch version node_id), &is_binary(map[&1])),
+         true <- is_nil(map["returning"]) or is_binary(map["returning"]),
          [_ | _] = relays <- map["relays"] do
       {:ok,
        %{
@@ -149,6 +158,7 @@ defmodule FermixCore.Home.Candidates do
          noise_pk: noise_pk,
          recipient: recipient,
          snapshots: map["snapshots"],
+         returning: map["returning"],
          enrolled_at: enrolled_at,
          expires_at: expires_at
        }}

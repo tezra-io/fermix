@@ -333,6 +333,51 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
       refute err =~ @passphrase
     end
 
+    # Always On's move back: its two actions are verbs the day the engine
+    # offers them, by the one rule that names an action's step.
+    test "move-back sends the step the on screen offers, asking nothing", ctx do
+      on = golden_summary("home_status_on")
+      move_back = Enum.find(on["detail"]["actions"], &(&1["id"] == "move_back"))
+      assert "move-back" in AlwaysOnCommand.steps()
+
+      act = fn params ->
+        assert params == %{"action" => "move_back", "key" => move_back["key"]}
+        {:ok, %{"summary" => on, "result" => nil}}
+      end
+
+      client = script([hello(), {"home.status", {:ok, status(on)}}, {"home.act", act}])
+      assert {0, out, _err} = run(["move-back", "--json"], ctx, client)
+      assert %{"result" => %{"result" => nil}} = Jason.decode!(out)
+    end
+
+    test "restore-here takes the recovery passphrase from its file and needs --yes", ctx do
+      problem = golden_summary("home_status_problem")
+      restore = Enum.find(problem["detail"]["alternatives"], &(&1["id"] == "restore_here"))
+      assert restore["needs"] == ["recovery_passphrase"]
+      file = passphrase_file(ctx)
+
+      client = script([hello(), {"home.status", {:ok, status(problem)}}])
+      argv = ["restore-here", "--recovery-passphrase-file", file, "--json"]
+      {1, out, _err} = run(argv, ctx, client)
+      assert %{"error" => %{"code" => "confirm_required"}} = Jason.decode!(out)
+      refute_act()
+
+      act = fn params ->
+        assert params == %{
+                 "action" => "restore_here",
+                 "key" => restore["key"],
+                 "input" => %{"recovery_passphrase" => @passphrase}
+               }
+
+        {:ok, %{"summary" => problem, "result" => nil}}
+      end
+
+      client = script([hello(), {"home.status", {:ok, status(problem)}}, {"home.act", act}])
+      {0, out, err} = run(["restore-here", "--yes" | tl(argv)], ctx, client)
+      refute out =~ @passphrase
+      refute err =~ @passphrase
+    end
+
     test "a step the screen does not offer is refused before anything is sent", ctx do
       client = script([hello(), {"home.status", {:ok, status(off())}}])
 

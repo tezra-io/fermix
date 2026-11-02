@@ -15,6 +15,7 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
 
   alias FermixCore.Home.Candidates
   alias FermixCore.Home.DesktopLink
+  alias FermixCore.Home.EnrollmentCode
   alias FermixCore.Home.Epoch
   alias FermixCore.Home.Move
   alias FermixCore.Home.Moved
@@ -722,6 +723,35 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
       assert text(html, "#always-on-sentence") =~ "Moving"
     end
 
+    # Always On's move back is drawn as any step is: pressed from Details'
+    # actions, sent to the server over the link, and this page does not
+    # restart (the restart comes at the activation, and the page reconnects).
+    test "linked: Move back is sent to the server, and the page draws the connecting " <>
+           "screen with no restart",
+         %{conn: conn, seams: seams, home: home} do
+      test = self()
+      :ok = Moved.write(home, %{epoch: 4, moved_at: @at, to: "invented-vm"})
+
+      linked!(seams,
+        role: :device,
+        restarts_itself?: true,
+        start_return: fn _home ->
+          send(test, :return_started)
+          :ok
+        end
+      )
+
+      {view, _html} = open_view!(conn, "/setup")
+      press(view, "move_back")
+      html = settle!(view)
+
+      refute html =~ "Restarting Fermix"
+      assert_received {:forwarded, "home.enroll.open", %{}}
+      assert_received :return_started
+      assert text(html, "#always-on-sentence") == "Connecting this computer to your server…"
+      assert text(html, "#always-on-action") == "Cancel"
+    end
+
     test "linked and silent for ten minutes: the page reads again on the watch's word", %{
       conn: conn,
       link: link,
@@ -846,7 +876,7 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
 
   # A desktop linked to its server after a move, whose server answers its own
   # `home.status` and the steps sent to it.
-  defp linked!(seams) do
+  defp linked!(seams, overrides \\ []) do
     :ok = DesktopLink.write(seams.home, desktop_link())
     Agent.update(seams.link, &%{&1 | primary: primary(nil)})
     test = seams.test
@@ -856,7 +886,7 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
       server_part(method)
     end
 
-    put_seams(seams, [], fn -> [primary_forward: forward] end)
+    put_seams(seams, overrides, fn -> [primary_forward: forward] end)
   end
 
   defp server_part("home.status") do
@@ -874,6 +904,22 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
   end
 
   defp server_part("home.snapshots.run"), do: {:ok, %{"started" => true, "snapshots" => %{}}}
+
+  # The copied code the server opens for this desktop to move back with.
+  defp server_part("home.enroll.open") do
+    {:ok, code} =
+      EnrollmentCode.encode(%{
+        secret: :binary.copy(<<9>>, 32),
+        gateway_pk: :binary.copy(<<3>>, 32),
+        node_id: String.duplicate("c4", 32),
+        relays: [%{"url" => "https://eu1.relay.invalid/", "quic_port" => 7842}],
+        relays_rev: String.duplicate("a1", 8),
+        name: "invented-vm",
+        expires_at: ~U[2031-05-04 12:30:00Z]
+      })
+
+    {:ok, %{"code" => code, "expires_at" => "2031-05-04T12:30:00Z"}}
+  end
 
   # The server the home lives on is being replaced: its new server stands and
   # waits for the move, as the old server's own part says.
@@ -1043,7 +1089,7 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
       jobs: seams.jobs,
       open_code: fn -> {:ok, @server_code} end,
       withdraw_code: fn -> :ok end,
-      open_enrollment: fn :manual ->
+      open_enrollment: fn :manual, nil ->
         Agent.update(link, &%{&1 | enrollment: window(:manual, :open, nil, 0)})
         {:ok, %{code: @manual_code, expires_at: ~U[2031-05-04 12:30:00Z]}}
       end,

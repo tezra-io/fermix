@@ -7,12 +7,15 @@ defmodule FermixCore.Management.ProvisionTest do
   use ExUnit.Case, async: true
 
   alias FermixCore.BuildInfo
+  alias FermixCore.Home.Candidate
   alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.Epoch
   alias FermixCore.Home.Move
+  alias FermixCore.Home.Moved
   alias FermixCore.Home.Provision.FirstBoot
   alias FermixCore.Home.Provision.Hetzner
   alias FermixCore.Home.Provision.Ledger
+  alias FermixCore.Home.Return
   alias FermixCore.Management.Copy
   alias FermixCore.Management.Jobs
   alias FermixCore.Management.Placement
@@ -382,6 +385,181 @@ defmodule FermixCore.Management.ProvisionTest do
 
       assert {:error, :unavailable,
               %{"sentence" => "Fermix created nothing on Hetzner to delete."}} = delete(ctx)
+    end
+  end
+
+  # Always On's move back (design §7, §8): Restore here deletes the server
+  # the home lives on first, through the ledger (the fence), and only while
+  # that server cannot answer; a delete the provider refuses restores
+  # nothing. Back as the primary, Delete your server clears the return's
+  # record with the server.
+  describe "after a move back" do
+    setup ctx do
+      {:ok, _view} = connect(ctx)
+      finished(elem(create(ctx), 1), ctx)
+      linked_desktop!(ctx.home)
+      :ok = Moved.write(ctx.home, %{epoch: 4, moved_at: @now, to: "fermix-general-a3f9"})
+
+      :ok =
+        Return.write(ctx.home, %{
+          from: "fermix-general-a3f9",
+          started_at: @now,
+          provider_server: server_id(ctx),
+          fence_requested: "20310504T093000Z-e5.fxsnap"
+        })
+
+      :ok
+    end
+
+    test "the fence deletes the server this desktop cannot reach, then the restore runs",
+         ctx do
+      {:ok, job} = restore(ctx, link_down(11 * 60_000))
+      assert %{"status" => "completed", "result" => %{"restored" => true}} = finished(job, ctx)
+
+      assert_received :restored
+      assert %{"state" => "connected", "resources" => []} = Provision.view(ctx.home, ctx.seams)
+      assert {:ok, %{fenced_at: @now}} = Return.read(ctx.home)
+      assert %{action: nil, failure: nil} = Ledger.state(ctx.home, Hetzner)
+    end
+
+    test "a server that forgot this desktop is fenced the same way", ctx do
+      {:ok, job} = restore(ctx, link_revoked())
+      assert %{"status" => "completed"} = finished(job, ctx)
+      assert_received :restored
+    end
+
+    test "with no link running at all, the server is fenced the same way", ctx do
+      {:ok, job} = restore(ctx, %{primary: nil, desktops: [], enrollment: nil})
+      assert %{"status" => "completed"} = finished(job, ctx)
+      assert_received :restored
+    end
+
+    test "a server silent for less than ten minutes, or answering, is not deleted, and " <>
+           "nothing is restored",
+         ctx do
+      for link <- [link_down(9 * 60_000), link_up()] do
+        {:ok, job} = restore(ctx, link)
+
+        assert %{"status" => "failed", "failure" => %{"sentence" => sentence}} =
+                 finished(job, ctx)
+
+        assert sentence ==
+                 "Fermix could not delete your server, so it did not restore here: a restored " <>
+                   "copy beside a running server would answer twice."
+
+        assert %{state: :failed, failure: %{action: "delete"}, server: %{status: :created}} =
+                 Ledger.state(ctx.home, Hetzner)
+
+        refute_received :restored
+      end
+    end
+
+    test "a delete the provider refuses restores nothing, in the fence's words", ctx do
+      HetznerStub.fault(ctx.stub, "DELETE", ~r"^/v1/servers/", 500, "server_error")
+
+      {:ok, job} = restore(ctx, link_down(11 * 60_000))
+      assert %{"status" => "failed"} = finished(job, ctx)
+      refute_received :restored
+
+      assert %{failure: %{action: "delete", sentence: sentence}} =
+               Ledger.state(ctx.home, Hetzner)
+
+      assert sentence =~ "Fermix could not delete your server, so it did not restore here"
+      refute Map.has_key?(elem(Return.read(ctx.home), 1), :fenced_at)
+    end
+
+    test "without the request, or while a candidate is here, it is the live home and is " <>
+           "not deleted",
+         ctx do
+      :ok = Return.write(ctx.home, %{from: "fermix-general-a3f9", started_at: @now})
+
+      down =
+        Keyword.put(seams(ctx, role: @device), :link_status, fn -> link_down(11 * 60_000) end)
+
+      assert {:error, :unavailable, %{"sentence" => sentence}} =
+               answered(Provision.delete(down))
+
+      assert sentence =~ "Your server runs Fermix now"
+
+      :ok =
+        Return.write(ctx.home, %{
+          from: "fermix-general-a3f9",
+          started_at: @now,
+          fence_requested: "20310504T093000Z-e5.fxsnap"
+        })
+
+      File.mkdir_p!(Candidate.dir(ctx.home))
+      {:ok, job} = restore(ctx, link_down(11 * 60_000))
+      assert %{"status" => "failed"} = finished(job, ctx)
+      refute_received :restored
+      assert %{server: %{status: :created}} = Ledger.state(ctx.home, Hetzner)
+    end
+
+    test "once fenced, a restore again deletes nothing and clears what stopped before", ctx do
+      {:ok, job} = restore(ctx, link_down(11 * 60_000))
+      finished(job, ctx)
+      assert_received :restored
+
+      {:ok, _ledger} =
+        Ledger.update(ctx.home, "hetzner", fn ledger ->
+          {:ok,
+           Ledger.put_failure(ledger, %{
+             reason: "interrupted",
+             sentence: "Stopped.",
+             action: "delete",
+             next_location: nil,
+             at: @now
+           })}
+        end)
+
+      calls = length(HetznerStub.requests(ctx.stub))
+      {:ok, job} = restore(ctx, link_down(11 * 60_000))
+      assert %{"status" => "completed"} = finished(job, ctx)
+      assert_received :restored
+      assert length(HetznerStub.requests(ctx.stub)) == calls
+      assert %{failure: nil} = Ledger.state(ctx.home, Hetzner)
+    end
+
+    # The TLA spec's check 09: between a move back's marker removal and its
+    # settings (steps e and f) this computer has no link and no marker, yet
+    # its candidate is still here: the server it is taking the home from is
+    # not deleted then, in any phase.
+    test "while a candidate for a move back is here, the server is not deleted", ctx do
+      SafeRm.rm!(DesktopLink.path(ctx.home))
+      :ok = Moved.remove(ctx.home)
+      :ok = Return.write(ctx.home, %{from: "fermix-general-a3f9", started_at: @now})
+
+      for phase <- ~w(enrolled receiving staged activating) do
+        File.mkdir_p!(Candidate.dir(ctx.home))
+        :ok = Candidate.put_state(ctx.home, %{"phase" => phase, "kind" => "return"}, @now)
+
+        assert {:error, :unavailable, %{"sentence" => sentence}} =
+                 answered(Provision.delete(seams(ctx, role: @primary)))
+
+        assert sentence ==
+                 "Fermix is moving back to this computer, so your server is not deleted while " <>
+                   "it does."
+      end
+
+      assert %{server: %{status: :created}} = Ledger.state(ctx.home, Hetzner)
+    end
+
+    test "Delete your server, back as the primary, clears the return's record with it", ctx do
+      SafeRm.rm!(DesktopLink.path(ctx.home))
+      :ok = Moved.remove(ctx.home)
+
+      :ok =
+        Return.write(ctx.home, %{
+          from: "fermix-general-a3f9",
+          started_at: @now,
+          provider_server: server_id(ctx),
+          moved_at: @now,
+          epoch: 6
+        })
+
+      {:ok, job} = delete(ctx)
+      assert %{"status" => "completed"} = finished(job, ctx)
+      assert Return.read(ctx.home) == :absent
     end
   end
 
@@ -899,6 +1077,34 @@ defmodule FermixCore.Management.ProvisionTest do
         view
     end
   end
+
+  # Restore here's job on this desktop, with the link as `link` says, and a
+  # restore that says it ran.
+  defp restore(ctx, link) do
+    test = self()
+
+    restore = fn _report ->
+      send(test, :restored)
+      {:ok, %{"restored" => true}}
+    end
+
+    seams = Keyword.merge(seams(ctx, role: @device), link_status: fn -> link end)
+    answered(Provision.start_return_restore(restore, seams))
+  end
+
+  defp link_down(ms), do: link(%{status: :unreachable, connected: false, down_ms: ms})
+  defp link_up, do: link(%{status: :connected, connected: true, down_ms: nil})
+  defp link_revoked, do: link(%{status: :revoked, connected: false, down_ms: nil})
+
+  defp link(primary) do
+    %{
+      primary: Map.merge(%{name: "fermix-general-a3f9", epoch: 5, sentence: "."}, primary),
+      desktops: [],
+      enrollment: nil
+    }
+  end
+
+  defp server_id(ctx), do: Ledger.state(ctx.home, Hetzner).server.id
 
   # This computer after its home moved to the server: the device role, the
   # link and the move's ending.
