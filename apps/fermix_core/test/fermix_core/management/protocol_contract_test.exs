@@ -2175,13 +2175,14 @@ defmodule FermixCore.Management.ProtocolContractTest do
   end
 
   # The Linux golden's facts: Ubuntu 24.04 on GNOME Wayland, where the desktop
-  # portal is the pixel route and a stored Screenshot no refuses it.
+  # portal is the pixel route and a stored Screenshot no refuses its screenshots,
+  # while the pointer and keys still go through it.
   defp linux_permissions do
     %{
       state: :probed,
       platform: "linux",
       display_server: "wayland",
-      screen_capture: true,
+      screen_capture: false,
       input_control: true,
       display_adopted: false,
       x11_pixels: %{xtest: true, keymap: true},
@@ -2210,7 +2211,8 @@ defmodule FermixCore.Management.ProtocolContractTest do
             "a Chromium-based application publishes no page tree by itself: start it with " <>
               "--force-renderer-accessibility, and with ACCESSIBILITY_ENABLED=1 in its environment"
         }
-      ]
+      ],
+      pixel_route: %{route: "portal", cause: nil, desktop: nil, interface: nil}
     }
   end
 

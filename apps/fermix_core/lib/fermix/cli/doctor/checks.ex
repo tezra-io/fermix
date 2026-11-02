@@ -1868,7 +1868,8 @@ defmodule Fermix.CLI.Doctor.Checks do
   The computer-use rows from ONE probe: the `computer use` row
   (`computer_use_permissions/2`), then, on a Linux helper, a row per fact its probe
   reports — the display server, the accessibility bus, the ATK bridge, each toolkit
-  note, the X11 pixel route, the desktop portal and its stored Screenshot answer.
+  note, the pixel route the helper took (where it names one), the X11 pixel route,
+  the desktop portal and its stored Screenshot answer.
 
   Read-only on every path: the probe raises no prompt and starts no service, and
   these rows only format what it read. macOS, and every state that probed nothing,
@@ -1898,6 +1899,7 @@ defmodule Fermix.CLI.Doctor.Checks do
       atk_bridge_row(probe.accessibility_packages)
     ] ++
       toolkit_rows(probe.toolkit_notes) ++
+      pixel_route_rows(probe.pixel_route) ++
       [x11_pixels_row(probe), desktop_portal_row(probe), portal_screenshot_row(probe)]
   end
 
@@ -1995,6 +1997,64 @@ defmodule Fermix.CLI.Doctor.Checks do
     do: Enum.map(notes, &ok("toolkit #{&1.toolkit}", &1.note))
 
   defp toolkit_rows(nil), do: []
+
+  # The route the helper took for pixels. A helper from before the pixel route
+  # names none, and then there is no row. No route warns, as an unavailable
+  # route does everywhere in these rows and in the `computer use` row: Fermix
+  # still works by control, so nothing has failed.
+  defp pixel_route_rows(nil), do: []
+  defp pixel_route_rows(route), do: [pixel_route_row(route)]
+
+  defp pixel_route_row(%{route: "x11"}),
+    do: ok("pixel route", "X11, through this session's X server")
+
+  defp pixel_route_row(%{route: "portal"}),
+    do: ok("pixel route", "GNOME's desktop portal, which asks on first use")
+
+  defp pixel_route_row(%{route: "none"} = route) do
+    warn(
+      "pixel route",
+      "none: #{no_route_reason(route)}; Fermix works by controls alone, wherever the " <>
+        "accessibility bus answers"
+    )
+  end
+
+  defp pixel_route_row(_unknown),
+    do: warn("pixel route", "unknown: the helper named a pixel route this build does not know")
+
+  # One sentence per closed cause. The portal interface is the helper's closed
+  # word, backticked as the literal it is.
+  defp no_route_reason(%{cause: "no_display"}),
+    do: "no display answers this session, neither Wayland nor X11"
+
+  defp no_route_reason(%{cause: "no_session_bus"}),
+    do: "this Wayland session has no session bus to reach the desktop portal on"
+
+  defp no_route_reason(%{cause: "unsupported_desktop", desktop: "kde"}),
+    do: "on Wayland only GNOME's desktop portal gives Fermix pixels, and this desktop is KDE"
+
+  defp no_route_reason(%{cause: "unsupported_desktop"}) do
+    "on Wayland only GNOME's desktop portal gives Fermix pixels, and this desktop is not GNOME"
+  end
+
+  defp no_route_reason(%{cause: "portal_not_running"}),
+    do: "the desktop portal is not running on this session and did not start"
+
+  defp no_route_reason(%{cause: "portal_unanswered"}),
+    do: "the desktop portal answered with an error that does not say whether it runs"
+
+  defp no_route_reason(%{cause: "portal_no_registry"}) do
+    "the desktop portal has no host registry, which only a newer portal has, so Fermix " <>
+      "cannot ask it for pixels under its own app id"
+  end
+
+  defp no_route_reason(%{cause: "portal_missing", interface: nil}),
+    do: "the desktop portal on this session lacks an interface the pixel route needs"
+
+  defp no_route_reason(%{cause: "portal_missing", interface: interface}),
+    do: "the desktop portal on this session has no `#{interface}` interface"
+
+  defp no_route_reason(%{cause: nil}), do: "the helper gave no reason this build knows"
 
   # XTEST and the keyboard map are the X11 route's two needs. On Wayland the
   # route is the portal, so they are information there.
@@ -2269,6 +2329,20 @@ defmodule Fermix.CLI.Doctor.Checks do
     )
   end
 
+  # On X11 nothing is granted either: the route is the session's own X server.
+  defp format_computer_use_probe(%{
+         screen_capture: true,
+         input_control: true,
+         platform: "linux",
+         display_server: "x11"
+       }) do
+    ok(
+      "computer use",
+      "screen capture and input control go through this session's X server " <>
+        "(x11)#{sidecar_version_suffix()}"
+    )
+  end
+
   defp format_computer_use_probe(%{screen_capture: true, input_control: true} = probe) do
     ok(
       "computer use",
@@ -2305,11 +2379,17 @@ defmodule Fermix.CLI.Doctor.Checks do
   defp compux_version, do: to_string(Application.spec(:compux, :vsn))
 
   # Platform-specific remediation: name the exact pane (macOS) so the fix is one
-  # step, not a hunt. On Linux one route serves both halves, so input alone has no
-  # cause of its own to name.
+  # step, not a hunt. On X11 input alone has a cause of its own, XTEST or the
+  # keyboard map, which the x11 pixels row names; on Wayland one route serves both
+  # halves, so input alone has none to name.
   defp computer_use_input_hint(%{platform: "macos"}) do
     "screen capture OK but input control is NOT granted — clicks and keystrokes are " <>
       "silently dropped. Grant Accessibility: System Settings → Privacy & Security → Accessibility."
+  end
+
+  defp computer_use_input_hint(%{display_server: "x11"} = probe) do
+    "input control is not available (#{probe.platform}/x11): the X11 pixel route needs XTEST " <>
+      "and the keyboard map, and the x11 pixels row says what this session has."
   end
 
   defp computer_use_input_hint(probe) do
@@ -2749,20 +2829,60 @@ defmodule Fermix.CLI.Doctor.Checks do
       "Recording: System Settings → Privacy & Security → Screen Recording."
   end
 
-  # One route serves both halves on Wayland: GNOME's desktop portal under the
-  # helper's own app id. Where that cannot be had (another compositor, a portal
-  # without its Registry, one that does not run) the helper refuses it, and the
-  # portal rows say which. Never "use an X11 session": GNOME 50 and later offer none.
-  defp computer_use_capture_hint(%{display_server: "wayland"}) do
-    "screen capture and input control unavailable on this Wayland session. Computer use " <>
-      "reaches a Wayland screen only through GNOME's desktop portal, under its own app id, " <>
-      "which needs xdg-desktop-portal 1.18 or later; the desktop portal row says what this " <>
-      "one has. Controls still work wherever the accessibility bus answers."
+  # With no pixel route the helper serves neither half, and the pixel route row
+  # names the cause; this row never guesses it.
+  defp computer_use_capture_hint(%{pixel_route: %{route: "none"}} = probe) do
+    "#{unavailable_halves(probe)} (#{probe.platform}/#{probe.display_server}): this session " <>
+      "has no pixel route, and the pixel route row says why. Controls still work wherever " <>
+      "the accessibility bus answers."
+  end
+
+  # On the portal route a stored Screenshot no refuses screenshots, and on
+  # Wayland a point comes only from a screenshot, so the helper refuses every
+  # pointer verb until the no is reset; keys and the verbs on a control still act.
+  # The helper never resets it, and the portal screenshot row carries the command.
+  defp computer_use_capture_hint(
+         %{pixel_route: %{route: "portal"}, portal: %{screenshot_permission: "no"}} = probe
+       ) do
+    "#{unavailable_halves(probe)} (#{probe.platform}/#{probe.display_server}): the desktop " <>
+      "keeps a \"no\" for Fermix's screenshots, so nothing can be aimed by point until it is " <>
+      "reset, and the portal screenshot row has the command that resets it." <>
+      keys_still_work(probe)
+  end
+
+  # A helper from before the pixel route names no cause. One route serves both
+  # halves on Wayland: GNOME's desktop portal under the helper's own app id. Where
+  # that cannot be had (another compositor, a portal without its Registry, one
+  # that does not run) the helper refuses it, and the portal rows say which.
+  # Never "use an X11 session": GNOME 50 and later offer none. The row names only
+  # the halves the probe says are missing.
+  defp computer_use_capture_hint(%{display_server: "wayland"} = probe) do
+    "#{unavailable_halves(probe)} on this Wayland session. Computer use reaches a Wayland " <>
+      "screen only through GNOME's desktop portal, under its own app id, which needs " <>
+      "xdg-desktop-portal 1.18 or later; the desktop portal row says what this one has. " <>
+      "Controls still work wherever the accessibility bus answers."
+  end
+
+  # On X11 the x11 pixels row says what the X server answered: no endpoint at
+  # all, or which of XTEST and the keyboard map it lacks.
+  defp computer_use_capture_hint(%{display_server: "x11"} = probe) do
+    "#{unavailable_halves(probe)} (#{probe.platform}/x11): the x11 pixels row says why."
   end
 
   defp computer_use_capture_hint(probe) do
     "screen capture is not available (#{probe.platform}/#{probe.display_server})."
   end
+
+  # The halves a probe whose screen capture is false says are missing.
+  defp unavailable_halves(%{input_control: false}),
+    do: "screen capture and input control are not available"
+
+  defp unavailable_halves(%{input_control: true}), do: "screen capture is not available"
+
+  defp keys_still_work(%{input_control: true}),
+    do: " Keys and typing still work, and controls wherever the accessibility bus answers."
+
+  defp keys_still_work(%{input_control: false}), do: ""
 
   defp format_channel_health([]), do: ok("channel health", "no enabled channels configured")
 

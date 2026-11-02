@@ -935,19 +935,23 @@ Notes that the shapes alone do not carry:
   the pointer and keys, and are not grants, so a Linux client offers no grant
   and `computer_use.grant.start` stays the Mac's. A Linux answer adds
   `display_server`, the probe's word (`x11`, `wayland`, `none`, or another,
-  `unknown` where the helper named none), by which a client picks the pixel
-  route: X11 for `x11`, the desktop portal for `wayland`. Any other word
-  (`none`, `unknown`, or one this contract does not list) names no pixel route:
-  the client names none, says what the two booleans say and leaves the rest to
-  the rows, and never guesses a route from the word or from a sentence. It adds
+  `unknown` where the helper named none), which names the session's display,
+  not its pixel route: on Wayland only GNOME's desktop portal gives pixels, so
+  another Wayland desktop, or a portal that cannot serve, has a display and no
+  route. The route is what the `pixel route` row says, rendered verbatim like
+  every row; from an older helper, which sends no route and so no such row, the
+  client names no route and says what the two booleans say. Either way it never
+  guesses a route from the word or from a sentence. It adds
   `rows` too: the rows `fermix doctor` prints after its `computer use` row, in
   that order and from the same producers, each `{name, status, detail}`.
   `status` is the doctor's `ok`, `warn`, `fail` or `not_applicable`; `detail` is
   the daemon's sentence, rendered verbatim, and a backticked span in it is a
   literal shown as written (the command that resets a stored screenshot
   refusal, the word the helper names an unavailable accessibility bus's cause
-  by). The `computer use` row is not among them: its Linux wording speaks of
-  grants. The three fields are optional for older protocol-2 engines (see
+  by, the desktop portal interface a session without a pixel route lacks). The
+  `computer use` row is not among them: it ends with the helper's build suffix,
+  an internal name and version the copy rules keep out of what an app renders.
+  The three fields are optional for older protocol-2 engines (see
   *Per-method minimum versions*), so neither the protocol version nor the
   method's minimum moves: a client that finds no `platform` renders the two
   booleans as the screen capture and input control rows it always has.

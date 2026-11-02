@@ -2789,11 +2789,11 @@
           "type": "string"
         },
         "display_server": {
-          "description": "Linux only: the display server the helper found (`x11`, `wayland`, `none`, or another word, `unknown` where it named none). A client picks the pixel route by it: X11 for `x11`, the desktop portal for `wayland`. Any other word names no pixel route: the client names none, says what the two booleans say and leaves the rest to the rows, and never guesses a route from the word.",
+          "description": "Linux only: the display server the helper found (`x11`, `wayland`, `none`, or another word, `unknown` where it named none). It names the session's display, not its pixel route: on Wayland only GNOME's desktop portal gives pixels. The route is what the `pixel route` row says; with no such row (an older helper) the client names no route and says what the two booleans say, and it never guesses a route from the word.",
           "type": "string"
         },
         "rows": {
-          "description": "Linux only: the rows `fermix doctor` prints after its `computer use` row, in its order, from the same producers. `detail` is the daemon's sentence, rendered verbatim; a backticked span in it is a literal shown as written (a command the person types, or the helper's word for a cause).",
+          "description": "Linux only: the rows `fermix doctor` prints after its `computer use` row, in its order, from the same producers. `detail` is the daemon's sentence, rendered verbatim; a backticked span in it is a literal shown as written (a command the person types, the helper's word for a cause, or the name of a desktop portal interface).",
           "type": "array",
           "maxItems": 32,
           "items": {

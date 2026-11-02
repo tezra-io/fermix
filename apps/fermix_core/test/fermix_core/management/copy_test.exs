@@ -455,6 +455,7 @@ defmodule FermixCore.Management.CopyTest do
         "display server" => 9,
         "accessibility bus" => 15,
         "atk bridge" => 6,
+        "pixel route" => 15,
         "x11 pixels" => 5,
         "desktop portal" => 11,
         "portal screenshot" => 6
@@ -1448,7 +1449,8 @@ defmodule FermixCore.Management.CopyTest do
       linux_display_states() ++
         Enum.map(linux_bus_states(), fn {bus, names} -> {%{accessibility_bus: bus}, names} end) ++
         linux_package_states() ++
-        linux_pixel_states() ++ linux_portal_states() ++ linux_screenshot_states()
+        linux_pixel_states() ++
+        linux_route_states() ++ linux_portal_states() ++ linux_screenshot_states()
 
     for {overrides, names} <- states, server <- ~w(x11 wayland) do
       probe = linux_base_probe() |> Map.put(:display_server, server) |> Map.merge(overrides)
@@ -1476,7 +1478,8 @@ defmodule FermixCore.Management.CopyTest do
       toolkit_notes: [
         %{toolkit: "qt", note: @qt_note},
         %{toolkit: "chromium", note: @chromium_note}
-      ]
+      ],
+      pixel_route: %{route: "x11", cause: nil, desktop: nil, interface: nil}
     }
   end
 
@@ -1527,6 +1530,37 @@ defmodule FermixCore.Management.CopyTest do
   defp linux_pixel_states do
     for pixels <- [nil, %{xtest: false, keymap: nil}, %{xtest: true, keymap: false}],
         do: {%{x11_pixels: pixels}, []}
+  end
+
+  # Every route and every cause of none, with each desktop and interface a cause
+  # names and neither; a route this build does not know; and no route named. The
+  # interface is a closed word the row backticks, so the wire-token and case
+  # rules read it.
+  defp linux_route_states do
+    route = &%{route: &1, cause: &2, desktop: &3, interface: &4}
+
+    causes =
+      for cause <-
+            [nil | ~w(no_display no_session_bus portal_not_running portal_unanswered
+                       portal_no_registry)],
+          do: route.("none", cause, nil, nil)
+
+    desktops =
+      for desktop <- [nil, "kde", "other"],
+          do: route.("none", "unsupported_desktop", desktop, nil)
+
+    interfaces =
+      for interface <- [nil | ~w(Screenshot RemoteDesktop ScreenCast)],
+          do: route.("none", "portal_missing", nil, interface)
+
+    routes = [
+      route.("x11", nil, nil, nil),
+      route.("portal", nil, nil, nil),
+      route.("unknown", nil, nil, nil)
+    ]
+
+    for pixel_route <- [nil | routes ++ causes ++ desktops ++ interfaces],
+        do: {%{pixel_route: pixel_route}, []}
   end
 
   defp linux_portal_states do

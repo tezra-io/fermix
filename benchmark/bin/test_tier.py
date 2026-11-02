@@ -9,13 +9,16 @@ Every assertion goes through `tier.sh --print`, which renders the argv the tier
 would exec instead of execing it: no daemon, no network, no spend. The judge's
 Anthropic credential is exercised with ANTHROPIC_API_KEY exported, and with a stub
 `security` first on PATH that answers (or not) for the one keychain item tier.sh
-may read, so no test ever reads the real keychain. Run: `uv run bin/test_tier.py`."""
+may read, so no test ever reads the real keychain. Every run gets a HOME of its
+own, so the operator's ~/.fermix-dev never decides which item that is. Run:
+`uv run bin/test_tier.py`."""
 from __future__ import annotations
 
 import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 
 import pytest
 
@@ -26,19 +29,21 @@ BENCH = os.path.dirname(HERE)
 # Anything the script reads must be established by the test, never inherited.
 CONTROLLED = ("ANTHROPIC_API_KEY", "EVAL_JUDGE_API_KEY", "CONFIRM_DAEMON_ISOLATED",
               "CONFIRM_ISOLATED_ENV", "CONFIRM_COST", "STUB_KEYCHAIN_KEY",
-              "STUB_SECURITY_LOG")
+              "STUB_KEYCHAIN_ITEM", "STUB_SECURITY_LOG", "HOME")
 KEYCHAIN_ITEM = "fermix:ANTHROPIC_API_KEY"
 KEYCHAIN_SOURCE = f"<keychain {KEYCHAIN_ITEM}>"
 # An invented key: it may reach the runner's environment, never any output.
 INVENTED_KEY = "invented-anthropic-key-5c1e"
 JUDGE_KEY = "ANTHROPIC_API_KEY"
 
-# Holds exactly one item, the daemon's Anthropic key, and answers for it only when
-# the test sets STUB_KEYCHAIN_KEY; every lookup is logged when STUB_SECURITY_LOG is set.
+# Holds exactly one item, the daemon's Anthropic key (STUB_KEYCHAIN_ITEM, else the
+# default profile's), and answers for it only when the test sets STUB_KEYCHAIN_KEY;
+# every lookup is logged when STUB_SECURITY_LOG is set.
 SECURITY_STUB = """#!/bin/sh
 [ -z "${STUB_SECURITY_LOG:-}" ] || printf '%s\\n' "$*" >> "$STUB_SECURITY_LOG"
+item="${STUB_KEYCHAIN_ITEM:-fermix:ANTHROPIC_API_KEY}"
 if [ -n "${STUB_KEYCHAIN_KEY:-}" ] && \\
-   [ "$*" = "find-generic-password -s fermix:ANTHROPIC_API_KEY -a fermix -w" ]; then
+   [ "$*" = "find-generic-password -s $item -a fermix -w" ]; then
   printf '%s\\n' "$STUB_KEYCHAIN_KEY"; exit 0
 fi
 exit 44
@@ -56,9 +61,14 @@ def stub_path(tmp_path_factory):
     return str(d)
 
 
+# A HOME with no ~/.fermix-dev: the default profile's keychain item.
+BARE_HOME = tempfile.mkdtemp(prefix="tier-test-home-")
+
+
 def run_print(tier, stub_path, *, args=None, **env_overrides):
     env = {k: v for k, v in os.environ.items() if k not in CONTROLLED}
     env["PATH"] = stub_path + os.pathsep + env.get("PATH", "")
+    env["HOME"] = BARE_HOME
     env.update({k: v for k, v in env_overrides.items() if v is not None})
     argv = [TIER_SH] + (args if args is not None else ["--print", tier])
     return subprocess.run(argv, cwd=BENCH, env=env, capture_output=True, text=True)
@@ -148,6 +158,37 @@ def test_the_judge_key_value_is_never_printed(stub_path):
 def test_the_keychain_item_is_the_daemons_anthropic_key(stub_path, tmp_path):
     log = tmp_path / "security.log"
     judge, _argv = plan("regression", stub_path, STUB_KEYCHAIN_KEY=INVENTED_KEY,
+                        STUB_SECURITY_LOG=str(log))
+    assert judge == KEYCHAIN_SOURCE
+    assert log.read_text().splitlines() == [
+        f"find-generic-password -s {KEYCHAIN_ITEM} -a fermix -w"]
+
+
+def dev_home(tmp_path, config):
+    """A HOME whose ~/.fermix-dev/config.toml is `config`."""
+    dev = tmp_path / "home" / ".fermix-dev"
+    dev.mkdir(parents=True)
+    (dev / "config.toml").write_text(config)
+    return str(tmp_path / "home")
+
+
+def test_a_named_dev_profile_names_the_judges_keychain_item(stub_path, tmp_path):
+    # The item the dev daemon's `@keyring` resolves to (`SecretWriter.scoped_prefix`),
+    # read from [fermix_core] only: another section's `profile` names nothing here.
+    home = dev_home(tmp_path, '[fermix_core]\nprofile = "studio-dev"\n\n'
+                              '[fermix_core.mobile]\nprofile = "extended"\n')
+    item = "fermix:studio-dev:ANTHROPIC_API_KEY"
+    log = tmp_path / "security.log"
+    judge, _argv = plan("regression", stub_path, HOME=home, STUB_KEYCHAIN_ITEM=item,
+                        STUB_KEYCHAIN_KEY=INVENTED_KEY, STUB_SECURITY_LOG=str(log))
+    assert judge == f"<keychain {item}>"
+    assert log.read_text().splitlines() == [f"find-generic-password -s {item} -a fermix -w"]
+
+
+def test_the_general_dev_profile_keeps_the_bare_prefix(stub_path, tmp_path):
+    home = dev_home(tmp_path, '[fermix_core]\nprofile = "general"\n')
+    log = tmp_path / "security.log"
+    judge, _argv = plan("regression", stub_path, HOME=home, STUB_KEYCHAIN_KEY=INVENTED_KEY,
                         STUB_SECURITY_LOG=str(log))
     assert judge == KEYCHAIN_SOURCE
     assert log.read_text().splitlines() == [

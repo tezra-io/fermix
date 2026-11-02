@@ -80,9 +80,9 @@ defmodule FermixCore.Management.ComputerUseTest do
   end
 
   # On Linux nothing is granted: the two booleans say what this session's pixel
-  # route serves, so the answer carries the platform, the display server the app
-  # picks the route by, and the doctor's own Linux rows, from the producer
-  # `fermix doctor` prints them with. Every probe here is the map
+  # route serves, so the answer carries the platform, the session's display
+  # server, and the doctor's own Linux rows, the pixel route among them, from the
+  # producer `fermix doctor` prints them with. Every probe here is the map
   # `Setup.Doctor.computer_use_permissions/0` answers, so nothing is spawned.
   describe "computer_use.permissions.get" do
     test "an X11 session answers its pixel route by X11, with the doctor's rows in order" do
@@ -102,6 +102,7 @@ defmodule FermixCore.Management.ComputerUseTest do
                "atk bridge",
                "toolkit qt",
                "toolkit chromium",
+               "pixel route",
                "x11 pixels",
                "desktop portal",
                "portal screenshot"
@@ -112,9 +113,12 @@ defmodule FermixCore.Management.ComputerUseTest do
 
       assert row(view, "x11 pixels") ==
                %{"status" => "ok", "detail" => "XTEST present, keyboard map present"}
+
+      assert row(view, "pixel route") ==
+               %{"status" => "ok", "detail" => "X11, through this session's X server"}
     end
 
-    test "the computer use summary row, with its grant wording, is never one of the rows" do
+    test "the computer use summary row, with its build suffix, is never one of the rows" do
       for probe <- [linux(), linux(display_server: "wayland", portal: portal(registry: true))] do
         names = Enum.map(permissions(probe)["rows"], & &1["name"])
         refute "computer use" in names
@@ -125,7 +129,8 @@ defmodule FermixCore.Management.ComputerUseTest do
       probe =
         linux(
           display_server: "wayland",
-          portal: portal(version: "1.18.4-1ubuntu2", registry: true)
+          portal: portal(version: "1.18.4-1ubuntu2", registry: true),
+          pixel_route: %{route: "portal", cause: nil, desktop: nil, interface: nil}
         )
 
       view = permissions(probe)
@@ -139,17 +144,27 @@ defmodule FermixCore.Management.ComputerUseTest do
                "status" => "ok",
                "detail" => "xdg-desktop-portal 1.18.4-1ubuntu2; running; has the host registry"
              }
+
+      assert row(view, "pixel route") ==
+               %{"status" => "ok", "detail" => "GNOME's desktop portal, which asks on first use"}
     end
 
     # KDE and other Wayland desktops: no pixel route, so both booleans are false,
-    # while the accessibility bus answers and controls work.
+    # while the accessibility bus answers and controls work. The pixel route row
+    # says why, in the helper's closed word's sentence.
     test "a controls-only Wayland session answers no pixels and a bus that answers" do
       probe =
         linux(
           display_server: "wayland",
           screen_capture: false,
           input_control: false,
-          portal: portal(registry: true)
+          portal: portal(registry: true),
+          pixel_route: %{
+            route: "none",
+            cause: "unsupported_desktop",
+            desktop: "kde",
+            interface: nil
+          }
         )
 
       view = permissions(probe)
@@ -161,6 +176,25 @@ defmodule FermixCore.Management.ComputerUseTest do
 
       assert row(view, "accessibility bus") ==
                %{"status" => "ok", "detail" => "answering, with 7 applications"}
+
+      assert row(view, "pixel route") == %{
+               "status" => "warn",
+               "detail" =>
+                 "none: on Wayland only GNOME's desktop portal gives Fermix pixels, and this " <>
+                   "desktop is KDE; Fermix works by controls alone, wherever the accessibility " <>
+                   "bus answers"
+             }
+    end
+
+    # A helper from before the pixel route names none, so the answer carries no
+    # row for it and every other row as it was.
+    test "a Linux answer from a helper that names no pixel route has no pixel route row" do
+      view = permissions(linux(pixel_route: nil))
+
+      refute Enum.any?(view["rows"], &(&1["name"] == "pixel route"))
+
+      assert view["rows"] ==
+               Enum.reject(permissions(linux())["rows"], &(&1["name"] == "pixel route"))
     end
 
     test "an accessibility bus that is unavailable warns with the helper's reason" do
@@ -272,7 +306,8 @@ defmodule FermixCore.Management.ComputerUseTest do
       toolkit_notes: [
         %{toolkit: "qt", note: "a Qt application publishes no tree: start it with QT_X=1"},
         %{toolkit: "chromium", note: "start it with --force-renderer-accessibility"}
-      ]
+      ],
+      pixel_route: %{route: "x11", cause: nil, desktop: nil, interface: nil}
     }
     |> Map.merge(Map.new(overrides))
   end

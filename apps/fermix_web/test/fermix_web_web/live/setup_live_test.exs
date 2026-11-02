@@ -3,12 +3,14 @@ defmodule FermixWebWeb.SetupLiveTest do
 
   import Phoenix.LiveViewTest
 
+  alias Fermix.CLI.Doctor.Checks
   alias Fermix.CLI.Upgrade.Manifest
   alias FermixCore.Auth.AnthropicLogin
   alias FermixCore.Auth.ChatGPT.Registration, as: ChatGPTRegistration
   alias FermixCore.Auth.ClientRejection
   alias FermixCore.Auth.Store
   alias FermixCore.Capabilities.MCP.RuntimeStatus
+  alias FermixCore.Management.Copy
   alias FermixCore.Management.Protocol, as: ManagementProtocol
   alias FermixCore.Management.Settings, as: ManagementSettings
   alias FermixCore.Meetings.SidecarInstaller, as: MeetbotInstaller
@@ -193,6 +195,7 @@ defmodule FermixWebWeb.SetupLiveTest do
     anthropic_login_impl = Application.get_env(:fermix_web, :anthropic_login_impl)
     doctor_probe_opts = Application.get_env(:fermix_web, :doctor_probe_opts)
     computer_use_grant_impl = Application.get_env(:fermix_web, :computer_use_grant_impl)
+    cu_permissions_impl = Application.get_env(:fermix_web, :computer_use_permissions_impl)
     local_installer = Application.get_env(:fermix_web, :local_installer)
     local_transcription_opts = Application.get_env(:fermix_web, :local_transcription_opts)
     meetbot_installer = Application.get_env(:fermix_web, :meetbot_installer)
@@ -269,6 +272,7 @@ defmodule FermixWebWeb.SetupLiveTest do
     Application.put_env(:fermix_web, :anthropic_login_impl, AnthropicLoginStub)
     Application.delete_env(:fermix_web, :doctor_probe_opts)
     Application.delete_env(:fermix_web, :computer_use_grant_impl)
+    Application.delete_env(:fermix_web, :computer_use_permissions_impl)
     # iMessage ships off, and a card case names the platform it means; every
     # other case runs as a machine with no iMessage card at all.
     Application.put_env(:fermix_channels, :imessage, enabled: false)
@@ -310,6 +314,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       restore_env(:fermix_web, :anthropic_login_impl, anthropic_login_impl)
       restore_env(:fermix_web, :doctor_probe_opts, doctor_probe_opts)
       restore_env(:fermix_web, :computer_use_grant_impl, computer_use_grant_impl)
+      restore_env(:fermix_web, :computer_use_permissions_impl, cu_permissions_impl)
       restore_env(:fermix_web, :local_installer, local_installer)
       restore_env(:fermix_web, :local_transcription_opts, local_transcription_opts)
       restore_env(:fermix_web, :meetbot_installer, meetbot_installer)
@@ -5812,6 +5817,264 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       contents = File.read!(Path.join(tmp_home, "config.toml"))
       assert contents =~ "approved = true"
+    end
+  end
+
+  # The computer use row of the setup page's doctor is the setup surface of a
+  # Linux install, where nothing is granted: the two booleans say whether this
+  # session's pixel route serves screenshots, and the pointer and keys. On Linux
+  # the card shows the doctor's Linux rows under its sentence, the rows the Linux
+  # app's pane shows, and the sentence names the row below that says why and that
+  # controls still work; it never says "granted", gives macOS steps or asks for a
+  # `fermix` command there, and offers no grant button.
+  describe "the doctor's computer use row" do
+    @controls "Controls still work wherever the accessibility bus answers."
+    # A `fermix` verb is what the CLI's user types, never what the setup page asks
+    # of its owner (the copy gate's rule for the management surfaces).
+    @fermix_command ~r/\bfermix\s+[a-z]/
+
+    test "Linux on X11 with both halves names the X server, not a grant", %{conn: conn} do
+      html = computer_use_card(conn, linux_probe())
+
+      assert_card(html, "Screen capture and input control go through this session's X server.")
+      refute html =~ "granted"
+      refute html =~ "Grant macOS permissions"
+    end
+
+    test "Linux on GNOME Wayland with both halves names the portal", %{conn: conn} do
+      probe = linux_probe(display_server: "wayland", pixel_route: route("portal"))
+      html = computer_use_card(conn, probe)
+
+      assert_card(
+        html,
+        "Screen capture and input control go through GNOME's desktop portal, which " <>
+          "asks on first use."
+      )
+    end
+
+    test "Linux on X11 without input names the x11 pixels row", %{conn: conn} do
+      html = computer_use_card(conn, linux_probe(input_control: false))
+
+      assert_card(
+        html,
+        "Input control is not available: the X11 pixel route needs XTEST and the " <>
+          "keyboard map, and the x11 pixels row below says what this session has. " <>
+          @controls
+      )
+
+      refute html =~ "silently dropped"
+      refute html =~ "Grant macOS permissions"
+    end
+
+    test "Linux on X11 with no X endpoint names the x11 pixels row", %{conn: conn} do
+      probe = linux_probe(screen_capture: false, input_control: false, x11_pixels: nil)
+      html = computer_use_card(conn, probe)
+
+      assert_card(
+        html,
+        "Screen capture and input control are not available: the x11 pixels row below " <>
+          "says why. " <> @controls
+      )
+    end
+
+    # A stored no refuses screenshots, and on Wayland a point comes only from a
+    # screenshot, so nothing can be aimed by point; keys and controls still act.
+    test "Linux with a stored Screenshot no names the kept no and its reset", %{conn: conn} do
+      probe =
+        linux_probe(
+          display_server: "wayland",
+          screen_capture: false,
+          pixel_route: route("portal"),
+          portal: %{running: true, version: nil, registry: true, screenshot_permission: "no"}
+        )
+
+      html = computer_use_card(conn, probe)
+
+      assert_card(
+        html,
+        "Screen capture is not available: the desktop keeps a \"no\" for Fermix's " <>
+          "screenshots, so nothing can be aimed by point until the command in the portal " <>
+          "screenshot row below resets it. Keys and typing still work, and controls " <>
+          "wherever the accessibility bus answers."
+      )
+
+      refute html =~ "Screen Recording"
+      refute html =~ "Grant macOS permissions"
+    end
+
+    test "Linux with no pixel route names the pixel route row", %{conn: conn} do
+      none = %{route("none") | cause: "unsupported_desktop", desktop: "kde"}
+
+      probe =
+        linux_probe(
+          display_server: "wayland",
+          screen_capture: false,
+          input_control: false,
+          pixel_route: none
+        )
+
+      html = computer_use_card(conn, probe)
+
+      assert_card(
+        html,
+        "Screen capture and input control are not available: this session has no " <>
+          "pixel route, and the pixel route row below says why. " <> @controls
+      )
+
+      refute html =~ "1.18"
+    end
+
+    # A probe with no route named (an older helper), and a stored no with input
+    # refused too, a state the helper never reports, still read true.
+    test "Linux with no cause this page reads names the rows below", %{conn: conn} do
+      older =
+        linux_probe(
+          display_server: "wayland",
+          screen_capture: false,
+          input_control: false,
+          pixel_route: nil
+        )
+
+      assert_card(
+        computer_use_card(conn, older),
+        "Screen capture and input control are not available: the rows below say why. " <>
+          @controls
+      )
+
+      refused =
+        linux_probe(
+          display_server: "wayland",
+          screen_capture: false,
+          input_control: false,
+          pixel_route: route("portal"),
+          portal: %{running: true, version: nil, registry: true, screenshot_permission: "no"}
+        )
+
+      assert_card(
+        computer_use_card(conn, refused),
+        "Screen capture and input control are not available: the desktop keeps a \"no\" for " <>
+          "Fermix's screenshots, so nothing can be aimed by point until the command in the " <>
+          "portal screenshot row below resets it. " <> @controls
+      )
+    end
+
+    # The card draws the doctor's Linux rows itself, in the doctor's order, so the
+    # sentence above can name them; they are the rows the Linux app's pane shows.
+    test "a Linux probe shows the doctor's Linux rows under the sentence, in order", %{
+      conn: conn
+    } do
+      probe =
+        linux_probe(
+          display_server: "wayland",
+          screen_capture: false,
+          pixel_route: route("portal"),
+          portal: %{running: true, version: nil, registry: true, screenshot_permission: "no"}
+        )
+
+      html = computer_use_card(conn, probe)
+      rows = Checks.linux_computer_use_rows({:ok, Map.put(probe, :state, :probed)})
+
+      assert length(rows) > 5
+      assert row_names(html) == Enum.map(rows, & &1.name)
+      for row <- rows, do: assert(html =~ escaped(row.detail), row.name)
+      assert html =~ "pixel route"
+    end
+
+    test "a macOS probe shows no rows under its sentence", %{conn: conn} do
+      for probe <- [
+            %{platform: "macos", screen_capture: false, input_control: false},
+            %{screen_capture: true, input_control: true}
+          ] do
+        assert row_names(computer_use_card(conn, probe)) == [], inspect(probe)
+      end
+    end
+
+    # The rule bites: a sentence that asks the owner for a `fermix` command fails it.
+    test "the card's sentences are held to the fermix command rule" do
+      assert Regex.match?(@fermix_command, "the fermix doctor rows say why")
+      refute Regex.match?(@fermix_command, "Fermix works by controls alone")
+    end
+
+    # The Mac's sentences name its panes and offer its grant, word for word, and a
+    # probe that names no system reads as one.
+    test "macOS and a probe with no platform are unchanged, word for word", %{conn: conn} do
+      cases = [
+        {%{platform: "macos", screen_capture: true, input_control: true},
+         "Screen capture and input control are granted.", false},
+        {%{platform: "macos", screen_capture: true, input_control: false},
+         "Input control isn't granted; clicks and keystrokes are silently dropped. On macOS, " <>
+           "grant Accessibility in System Settings → Privacy & Security.", true},
+        {%{platform: "macos", screen_capture: false, input_control: true},
+         "Screen capture isn't granted. On macOS, grant Screen Recording in System Settings → " <>
+           "Privacy & Security.", true},
+        {%{screen_capture: false, input_control: false},
+         "Screen capture isn't granted. On macOS, grant Screen Recording in System Settings → " <>
+           "Privacy & Security.", false}
+      ]
+
+      for {probe, sentence, grant?} <- cases do
+        html = computer_use_card(conn, probe)
+        assert html =~ escaped(sentence), inspect(probe)
+        assert html =~ "Grant macOS permissions" == grant?, inspect(probe)
+      end
+    end
+
+    defp computer_use_card(conn, probe) do
+      Application.put_env(:fermix_web, :computer_use_permissions_impl, fn ->
+        {:ok, Map.put(probe, :state, :probed)}
+      end)
+
+      Req.Test.set_req_test_to_shared()
+      stub_setup_doctor_probe()
+
+      Application.put_env(:fermix_web, :doctor_probe_opts,
+        req_options: [plug: {Req.Test, :setup_doctor_probe}]
+      )
+
+      {:ok, view, _html} = live(conn, "/setup?tab=doctor")
+      html = view |> element("button", "Run probe") |> render_click()
+
+      # The row alone: the doctor's computer use block, to the end of its section.
+      [_before, block] = String.split(html, ~s|<h3 class="font-semibold">Computer use</h3>|)
+      block |> String.split("</section>") |> hd()
+    end
+
+    # The sentence is on the card, and held to the copy rules the doctor's rows
+    # obey: no version, no helper name, no wire token.
+    defp assert_card(html, sentence) do
+      assert html =~ escaped(sentence)
+      assert Copy.violations(sentence, :prose) == []
+      refute Regex.match?(@fermix_command, sentence), "asks for a fermix command: #{sentence}"
+      refute sentence =~ "compux"
+    end
+
+    # The names of the rows the card draws, in order.
+    defp row_names(html) do
+      ~r|<p class="font-medium">([^<]*)</p>|
+      |> Regex.scan(html, capture: :all_but_first)
+      |> List.flatten()
+    end
+
+    defp route(word), do: %{route: word, cause: nil, desktop: nil, interface: nil}
+
+    # Every fact a Linux helper reports, since the card draws the rows that read them.
+    defp linux_probe(overrides \\ []) do
+      Map.merge(
+        %{
+          platform: "linux",
+          display_server: "x11",
+          screen_capture: true,
+          input_control: true,
+          display_adopted: false,
+          x11_pixels: %{xtest: true, keymap: true},
+          portal: %{running: true, version: nil, registry: false, screenshot_permission: "unset"},
+          accessibility_bus: %{state: "answering", applications: 4, cause: nil, detail: nil},
+          accessibility_packages: %{source: "dpkg", at_spi2_core: nil, atk_bridge: nil},
+          toolkit_notes: [],
+          pixel_route: route("x11")
+        },
+        Map.new(overrides)
+      )
     end
   end
 
