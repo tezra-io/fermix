@@ -87,7 +87,7 @@ FAILURE_ANCHORS = (
         # action_error_message/1 for the three stale observation codes
         "the image its `observation_id` names is no longer one",
         # action_error_message("stale_element")
-        "its `element_ref` names is no longer one",
+        "its `element_ref` is not one this request can use",
     )),
     ("refusal", (
         "this action was not sent",            # the lead of every typed refusal
@@ -105,11 +105,11 @@ FAILURE_ANCHORS = (
 TYPED_CODE_ANCHORS = {
     "element_disabled": "that control is DISABLED right now",
     # Protocol 12 (M86 P2): the control refusals macOS answers ...
-    "stale_element": "its `element_ref` names is no longer one",
+    "stale_element": "its `element_ref` is not one this request can use",
     "ax_action_unsupported": "that control has no route for this verb",
     "state_unreadable": "the control's current state could not be read",
     "focus_refused": "`focus` never brings a window forward",
-    "scope_not_found": "that scope has nothing in it right now",
+    "scope_not_found": "that scope gave nothing to list right now",
     # ... and the ones only the Linux helper answers at first.
     "accessibility_unavailable": "cannot read or act on controls at all",
     "pixels_unavailable": "cannot do this by pixels on this desktop",

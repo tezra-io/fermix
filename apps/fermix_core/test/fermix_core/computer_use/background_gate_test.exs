@@ -584,8 +584,24 @@ defmodule FermixCore.ComputerUse.BackgroundGateTest do
     test "a window the desktop will not list is no longer one to act in" do
       sentence = refusal_sentence("target_unavailable")
 
-      assert sentence =~ "it was closed, its application quit"
-      assert sentence =~ "the desktop would not say which windows are open"
+      assert sentence =~ "it was closed or its application quit"
+      assert sentence =~ "the desktop would not say which windows exist"
+      assert sentence =~ "take `windows` and `select_target` the window you want"
+    end
+
+    # Binding again cannot help when the desktop will not say which windows are the
+    # bound one's own: the helper's detail says to release the target, and the
+    # sentence sends the model there rather than round the same binding again.
+    test "a binding the desktop cannot read the windows of says to release the target" do
+      detail =
+        "the window server would not say which windows are the bound window's (the X " <>
+          "server closed the connection): release the target to read the application's"
+
+      sentence = refusal_sentence("target_unavailable", detail)
+
+      assert sentence =~ "which are the bound window's"
+      assert sentence =~ "Where the detail says to release the target, `release_target`"
+      assert sentence =~ "(#{detail})"
     end
 
     test "a window on another desktop is as out of reach as a minimized one" do
@@ -634,14 +650,14 @@ defmodule FermixCore.ComputerUse.BackgroundGateTest do
   # has to be meant.
   describe "a reading that lists `screenshot`" do
     @renderings %{
-      {"macOS", false} => "a169d8e1a7872c290772db15ac8b7f3bbc84ffd2a325b5f7ea097e41a5425f2b",
-      {"macOS", true} => "6a5b2bb0701dfaa20f14372cead5b4f0d2de340132920fc2d8a46957a98aae84",
-      {"Linux X11", false} => "3159007f5868c5aaa06baa68128f09e730ee2a4ce13b56c235bf79de3971b9c3",
-      {"Linux X11", true} => "bcaf3b6dbe6459209876ecc4082617ed1214930dc8ed171a785023b05f1c0157",
+      {"macOS", false} => "b6f809c85416628e9e5f338303dcb6c0b331d2076ac2b0502088455fd2fb45ac",
+      {"macOS", true} => "908fa0cdc692e5cd859efd64573c6fef0b8b8d56a8906c7d7a6dc3ff1c82f872",
+      {"Linux X11", false} => "df8fcf7e21249520dbfb3038d48698d45c34aa86b06eb2d8e5e4410e797ba4ae",
+      {"Linux X11", true} => "7f78371742326cf270dc6b1bff68156488a045ee79d8d8f4b9d971494c5efb93",
       {"GNOME Wayland", false} =>
-        "d35597c45fa23859ec07a8897fd192d5584d28d2beccf26653aff39d0dd418c3",
+        "1a98a6da9c6b139d9abacb44a1cf7741ac19a67c070a0cac8d57afa991fd4452",
       {"GNOME Wayland", true} =>
-        "d35597c45fa23859ec07a8897fd192d5584d28d2beccf26653aff39d0dd418c3"
+        "1a98a6da9c6b139d9abacb44a1cf7741ac19a67c070a0cac8d57afa991fd4452"
     }
 
     test "renders byte for byte as it did before the controls-only words" do

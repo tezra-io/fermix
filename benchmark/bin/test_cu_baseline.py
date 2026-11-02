@@ -88,8 +88,8 @@ def click(x, y, observation="7c1e-1", action="left_click"):
     ("this action was not sent: the image its `observation_id` names is no longer one the "
      "computer-use helper holds — it has been replaced by newer ones", "stale_observation"),
     # action_error_message("stale_element")
-    ("this action was not sent: the control its `element_ref` names is no longer one the "
-     "computer-use helper holds", "stale_observation"),
+    ("this action was not sent: its `element_ref` is not one this request can use — the "
+     "listing it came from is gone or never had it", "stale_observation"),
     # refusal_message(:observation_required)
     ("this action was not sent: it names no `observation_id`, so there is no reply its "
      "target belongs to", "refusal"),

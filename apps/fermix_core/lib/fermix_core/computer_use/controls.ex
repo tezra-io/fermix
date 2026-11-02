@@ -107,7 +107,8 @@ defmodule FermixCore.ComputerUse.Controls do
   kind and label. A surface carries no reference, so the text names the scope
   an `elements` listing reads it with. Absent means the helper did not look,
   and `[]` means nothing is open: both say nothing here, because neither is a
-  thing the model has to act on.
+  thing the model has to act on. A scan that stopped short is `surfaces_cut/1`'s
+  to say.
   """
   @spec surfaces([map()] | nil) :: String.t()
   def surfaces(surfaces) when is_list(surfaces) do
@@ -122,6 +123,20 @@ defmodule FermixCore.ComputerUse.Controls do
   end
 
   def surfaces(_absent), do: ""
+
+  @doc """
+  Said beside `surfaces/1` when the helper's scan for them stopped before it
+  finished: what it named is not every surface open, and none named is not none
+  open.
+  """
+  @spec surfaces_cut(String.t() | nil) :: String.t()
+  def surfaces_cut(reason) when reason in ~w(nodes depth time) do
+    " The look for open dialogs, alerts, menus and popups stopped before it finished, " <>
+      "because #{truncation_cause(reason)}, so one may be open that is not named here; " <>
+      ~s(`elements` with `scope` "dialog" or "menu" lists them.)
+  end
+
+  def surfaces_cut(_complete), do: ""
 
   @doc """
   What a state-reading verb found (§4): the state before and after it, or that
@@ -163,7 +178,7 @@ defmodule FermixCore.ComputerUse.Controls do
 
   def until(%{until: "not_met"} = check, receipt) when is_map(receipt) do
     " What you waited for did not hold within its timeout" <>
-      not_met_tail(receipt) <> cut_note(check)
+      not_met_tail(receipt) <> cut_note(check) <> unproven_note(check)
   end
 
   def until(%{until: "held_before"}, receipt) when is_map(receipt) do
@@ -224,7 +239,7 @@ defmodule FermixCore.ComputerUse.Controls do
 
   def wait(%{"met" => false} = reply) do
     "The condition did not hold#{within_ms(reply)}. Nothing was sent. Look (`elements` or " <>
-      "`screenshot`) before deciding what to do next." <> cut_note(reply)
+      "`screenshot`) before deciding what to do next." <> cut_note(reply) <> unproven_note(reply)
   end
 
   @doc """
@@ -479,6 +494,24 @@ defmodule FermixCore.ComputerUse.Controls do
 
   defp cut_sentence,
     do: " The wait was cut short by this request's deadline, before its own timeout."
+
+  # A wait for something to go away whose last look stopped before it finished: no
+  # match in a look that did not reach the end proves nothing gone, so the helper
+  # kept waiting, and says why it could not stop.
+  defp unproven_note(%{"truncated" => reason}) when reason in ~w(nodes depth time),
+    do: unproven_sentence(reason)
+
+  defp unproven_note(%{truncated: reason}) when reason in ~w(nodes depth time),
+    do: unproven_sentence(reason)
+
+  defp unproven_note(_check), do: ""
+
+  defp unproven_sentence(reason) do
+    " The absence could not be proven: the last look stopped before it finished, because " <>
+      truncation_cause(reason) <>
+      ". Wait on the control itself (`disappears` with its `element_ref`) or on a narrower " <>
+      "`scope`."
+  end
 
   defp after_ms(%{"waited_ms" => ms}) when is_integer(ms) and ms >= 0, do: " after #{ms} ms"
   defp after_ms(_reply), do: ""

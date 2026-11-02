@@ -143,14 +143,16 @@ defmodule FermixCore.ComputerUse.Session do
   # cannot answer them, and absent means unknown here as everywhere else.
   # A semantic check that waited on a condition (M86 P2, PROTOCOL.md §5.2) adds
   # what it found: `until` (`met`, `not_met`, `held_before`), how many looks and
-  # how long it took, and whether the request's deadline cut the wait short.
+  # how long it took, whether the request's deadline cut the wait short, and,
+  # on an absence it could not prove, why its last look stopped short.
   @type check :: %{
           kind: String.t(),
           settle: String.t() | nil,
           changed: boolean() | nil,
           until: String.t() | nil,
           waited_ms: non_neg_integer() | nil,
-          deadline_cut: boolean()
+          deadline_cut: boolean(),
+          truncated: String.t() | nil
         }
 
   # How long each phase of a mutating action took, from the helper's monotonic
@@ -171,6 +173,7 @@ defmodule FermixCore.ComputerUse.Session do
   # Protocol 12 adds what a verb found (M86 P2): `already` when the control held
   # the asked state so nothing was sent, the state before and after it, and the
   # dialogs and menus open once it ran with the observation that names them.
+  # `surfaces_truncated` says why the scan for those stopped before it finished.
   @type receipt :: %{
           dispatch: dispatch(),
           effect: effect() | nil,
@@ -181,7 +184,8 @@ defmodule FermixCore.ComputerUse.Session do
           already: boolean(),
           state_before: String.t() | nil,
           state_after: String.t() | nil,
-          surfaces: [map()] | nil
+          surfaces: [map()] | nil,
+          surfaces_truncated: String.t() | nil
         }
 
   # What happened to the INPUT — the closed set every `computer_use` tool exec
@@ -362,6 +366,9 @@ defmodule FermixCore.ComputerUse.Session do
         # into one typed refusal per mutating action. Absent/failed probe reads as
         # available: only the explicit denied state is refused, so drivers that
         # predate the probe keep working and a broken probe cannot brick looking.
+        # That state is macOS's alone: a Linux helper with no pixel route also
+        # says `input_control: false`, but it refuses a pixel action itself, with
+        # a sentence, and acts on controls, so it reads as available here.
         input_control?: ActionWorker.input_control?(worker),
         # What the installed helper says it can do, read once from its handshake
         # identity. The doctor row reads the same facts through its own spawn; a
@@ -863,7 +870,8 @@ defmodule FermixCore.ComputerUse.Session do
   defp check_value_type(_params), do: :ok
 
   # Refuse what macOS would silently drop. Read-only actions never need the
-  # input grant, so looking keeps working ungated.
+  # input grant, so looking keeps working ungated. A Linux helper never reaches
+  # the `false` clause: it drops nothing silently (see `input_control?` in init).
   defp check_input_control(_request, %{input_control?: true}), do: :ok
 
   defp check_input_control(request, %{input_control?: false}) do
@@ -1235,7 +1243,8 @@ defmodule FermixCore.ComputerUse.Session do
       already: false,
       state_before: nil,
       state_after: nil,
-      surfaces: nil
+      surfaces: nil,
+      surfaces_truncated: nil
     }
 
   defp parse_receipt(%{"dispatch" => dispatch} = receipt)
@@ -1251,7 +1260,8 @@ defmodule FermixCore.ComputerUse.Session do
        already: receipt["already"] == true,
        state_before: state_word(receipt["state_before"]),
        state_after: state_word(receipt["state_after"]),
-       surfaces: surfaces(receipt["surfaces"])
+       surfaces: surfaces(receipt["surfaces"]),
+       surfaces_truncated: truncated(receipt["surfaces_truncated"])
      }}
   end
 
@@ -1269,7 +1279,8 @@ defmodule FermixCore.ComputerUse.Session do
       changed: changed(check["changed"]),
       until: until(check["until"]),
       waited_ms: waited_ms(check["waited_ms"]),
-      deadline_cut: check["deadline_cut"] == true
+      deadline_cut: check["deadline_cut"] == true,
+      truncated: truncated(check["truncated"])
     }
   end
 
@@ -1821,6 +1832,7 @@ defmodule FermixCore.ComputerUse.Session do
     effect_note(request, receipt, capabilities) <>
       verb_note(request, response, receipt) <>
       Controls.surfaces(receipt.surfaces) <>
+      Controls.surfaces_cut(receipt.surfaces_truncated) <>
       foreground_note(receipt)
   end
 

@@ -400,6 +400,17 @@ defmodule FermixCore.ComputerUse.ControlsTest do
 
       assert text =~ ~s(dialog "a e9 'b'")
     end
+
+    # A scan that stopped before it finished names only part of what is open, and
+    # an empty list from it is not nothing open.
+    test "a scan that stopped short says one may be open that it did not name" do
+      text = Controls.surfaces_cut("time")
+
+      assert text =~ "stopped before it finished, because it ran out of its time budget"
+      assert text =~ "one may be open that is not named here"
+      assert text =~ ~s(`elements` with `scope` "dialog" or "menu")
+      assert Controls.surfaces_cut(nil) == ""
+    end
   end
 
   describe "what a state-reading verb found" do
@@ -487,6 +498,22 @@ defmodule FermixCore.ComputerUse.ControlsTest do
 
       assert Controls.wait(%{"met" => false, "waited_ms" => 24_000, "deadline_cut" => true}) =~
                "cut short"
+    end
+
+    # No match in a look that stopped before the end of the tree proves nothing gone.
+    test "an absence a cut look could not prove says so, and what to wait on instead" do
+      for text <- [
+            Controls.until(%{until: "not_met", truncated: "nodes"}, @sent),
+            Controls.wait(%{"met" => false, "waited_ms" => 5004, "truncated" => "nodes"})
+          ] do
+        assert text =~ "The absence could not be proven"
+        assert text =~ "because it reached the element cap"
+        assert text =~ "`disappears` with its `element_ref`"
+        assert text =~ "a narrower `scope`"
+      end
+
+      refute Controls.until(%{until: "not_met"}, @sent) =~ "could not be proven"
+      refute Controls.wait(%{"met" => false, "waited_ms" => 5004}) =~ "could not be proven"
     end
 
     test "wait_for met, with what matched listed like elements" do

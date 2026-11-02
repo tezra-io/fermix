@@ -385,6 +385,22 @@ defmodule FermixCore.ComputerUse.SessionTest do
       assert result.summary =~ "Delete"
     end
 
+    test "a wait_for whose absence a cut look could not prove says so" do
+      response = %{"ok" => true, "met" => false, "waited_ms" => 5004, "truncated" => "depth"}
+      session = start_session(driver_opts: [response: response])
+
+      assert {:ok, request} =
+               wrap_classify(session, %{
+                 "action" => "wait_for",
+                 "until" => %{"kind" => "disappears", "name" => "Save"}
+               })
+
+      assert {:ok, %{summary: summary}} = Session.execute(session, request)
+      assert summary =~ "The condition did not hold within 5004 ms."
+      assert summary =~ "The absence could not be proven"
+      assert summary =~ "because it reached the depth limit"
+    end
+
     # A title, an application's name, a control's value and the helper's note on
     # one are all text something else chose. Each reaches the model the way the
     # select reply shows a bound window's title: one line, no delimiter quotes,

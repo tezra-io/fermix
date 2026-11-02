@@ -684,7 +684,8 @@ defmodule FermixCore.Tools.ComputerUse do
           "description" =>
             "A condition on the controls. On `wait_for` it is what to wait for; on an action " <>
               "that sends input it waits for that action's effect in the same call. kind: " <>
-              "appears / disappears (role and/or name, or disappears by element_ref), enabled " <>
+              "appears / disappears (role and/or name, or disappears by element_ref: exact, so " <>
+              "use it for a control you listed), enabled " <>
               "(element_ref), value (element_ref + value), window_title / text (contains), " <>
               "menu_open / menu_closed. Optional scope, and timeout_ms 1–25000 (default 5000)"
         }
@@ -1700,11 +1701,12 @@ defmodule FermixCore.Tools.ComputerUse do
   # whose detail is the cause: how many applications claim the active window,
   # which key state is on, why this desktop's pixel route is refused, and why a
   # capture could not serve (a bound window not yet proven its own, the desktop's
-  # screen-sharing service).
+  # screen-sharing service), why a reference cannot be used, and why a bound window
+  # cannot be.
   @detailed_codes ~w(point_outside_observation capture_geometry_mismatch ax_timed_out
                      ax_action_failed target_obstructed scope_not_found toolkit_accessibility_off
                      invalid_argument no_active_window keyboard_not_neutral pixels_unavailable
-                     capture_unavailable)
+                     capture_unavailable stale_element target_unavailable)
 
   # The codes the capture behind a check can answer once the input has gone out,
   # each with a sentence true after it: the display's geometry, a capture that
@@ -2009,16 +2011,17 @@ defmodule FermixCore.Tools.ComputerUse do
       "and give them both sizes below."
   end
 
-  # The control a reference names is gone: the listing that minted it has been
-  # replaced or aged out, the window was rebuilt under it, or its application
-  # restarted. A reference is only as live as the listing it came from, and there
-  # is no re-finding it from here — the same control in a fresh listing has a fresh
-  # reference.
+  # A reference this request cannot use: its listing is gone or never had it, the
+  # control changed, went away or did not answer its check, or, under a binding, it
+  # was listed outside the bound window. The helper's detail says which, so it rides
+  # after the sentence. There is no re-finding it from here — the same control in a
+  # fresh listing has a fresh reference.
   defp action_error_message("stale_element") do
-    "this action was not sent: the control its `element_ref` names is no longer one the " <>
-      "computer-use helper holds — the listing that minted it has been replaced or aged out, " <>
-      "or the window was rebuilt under it. Take `elements` again and use the reference from " <>
-      "THAT reply; do not re-send this one."
+    "this action was not sent: its `element_ref` is not one this request can use — the " <>
+      "listing it came from is gone or never had it, the control changed, went away or " <>
+      "could not be checked, or it was listed outside the window this request is bound to " <>
+      "(the detail below says which, when there is one). Take `elements` again and use the " <>
+      "reference from THAT reply; do not re-send this one."
   end
 
   # The control is there and it is off. Retrying presses the same dead button, so
@@ -2076,12 +2079,15 @@ defmodule FermixCore.Tools.ComputerUse do
       "user to switch to that one first."
   end
 
-  # The scope the listing or the condition asked for has no root right now. The
-  # helper's detail says which, so it rides after the sentence.
+  # The scope the listing or the condition asked for gave nothing to list right
+  # now: it is empty, what is open belongs to a window other than the bound one, or
+  # the look stopped before it finished, so it is never simply called empty. The
+  # helper's detail says which, so it rides after the sentence; `code_message/2`
+  # adds the next step the reading offers.
   defp action_error_message("scope_not_found") do
-    "this action was not sent: that scope has nothing in it right now — no focused window, " <>
-      "nothing focused, or no menu or dialog open, as the detail below says. Use another " <>
-      "`scope`, or take a `screenshot` to see what is there."
+    "this action was not sent: that scope gave nothing to list right now — it is empty, what " <>
+      "is open belongs to a window other than the bound one, or the look stopped before it " <>
+      "finished, as the detail below says."
   end
 
   # A build with no accessibility API (the Linux helper before it has a reader)
@@ -2261,15 +2267,19 @@ defmodule FermixCore.Tools.ComputerUse do
   defp helper_reason(reason) when is_binary(reason), do: Controls.safe_sentence(reason)
   defp helper_reason(reason), do: format_reason(reason)
 
-  # The window is gone: closed, or its application quit, or the desktop would no
-  # longer list its windows. A reused window number or a relaunched application
-  # never revives a binding, so there is nothing to re-point at — the window has
-  # to be found again from scratch.
+  # The window cannot be bound or worked in: most causes are a window that is gone
+  # (closed, or its application quit), and a reused window number or a relaunched
+  # application never revives a binding, so it has to be found again from scratch.
+  # One cause is not cured by binding again — the desktop would not say which
+  # windows are the bound window's own — and its detail says to release the target.
+  # The helper's detail rides after the sentence.
   defp background_code_message("target_unavailable") do
-    "this action was not sent: the window you bound is gone — it was closed, its " <>
-      "application quit, or the desktop would not say which windows are open. Nothing was " <>
-      "done to whatever is there now. Take `windows` to see what is open and `select_target` " <>
-      "the window you want; do not re-send this one against the old binding."
+    "this action was not sent: that window cannot be bound or worked in right now — for " <>
+      "example it was closed or its application quit, or the desktop would not say which " <>
+      "windows exist or which are the bound window's; the detail below, when there is one, " <>
+      "says why. Nothing was done to whatever is there now. Where the detail says to release " <>
+      "the target, `release_target`; otherwise take `windows` and `select_target` the window " <>
+      "you want, and do not re-send this one against the old binding."
   end
 
   # Minimized, or on another desktop, is recoverable by the PERSON, not by the
@@ -2408,6 +2418,18 @@ defmodule FermixCore.Tools.ComputerUse do
     if "paste" in offered,
       do: action_error_message(code),
       else: keys_without_paste_message(code)
+  end
+
+  # A reading without `screenshot` (a Linux helper with controls alone) is never
+  # sent to look at one.
+  defp code_message("scope_not_found", offered) do
+    action_error_message("scope_not_found") <>
+      naming(
+        offered,
+        ["screenshot"],
+        " Use another `scope`, or take a `screenshot` to see what is there.",
+        " List another `scope` instead."
+      )
   end
 
   defp code_message(code, _offered), do: action_error_message(code)

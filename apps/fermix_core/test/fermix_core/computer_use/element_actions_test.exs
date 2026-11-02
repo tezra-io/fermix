@@ -128,6 +128,44 @@ defmodule FermixCore.ComputerUse.ElementActionsTest do
     def stop(_state), do: :ok
   end
 
+  # A helper whose start-up probe the test names. A click is answered the way
+  # compux's Linux build answers one on a desktop it has no pixel route on: its
+  # own refusal, its own sentence, nothing sent. Everything else is a
+  # `ReceiptDriver`'s answer.
+  defmodule ProbedDriver do
+    @behaviour Compux.Driver
+
+    @no_route "KDE Plasma on Wayland has no pixel route compux has qualified; only GNOME's " <>
+                "portal is; work by control (`elements` and the verbs on a reference); " <>
+                "nothing was sent"
+
+    @impl true
+    def start(opts) do
+      {:ok, state} = ReceiptDriver.start(opts)
+      {:ok, Map.put(state, :probe, Keyword.fetch!(opts, :probe))}
+    end
+
+    @impl true
+    def execute(%{probe: probe}, %{"action" => "probe"}), do: {:ok, probe}
+
+    def execute(%{test_pid: pid}, %{"action" => "left_click"} = request) do
+      send(pid, {:driver_execute, request})
+
+      {:error,
+       {:action_failed,
+        %{
+          "error" => "pixels_unavailable",
+          "detail" => @no_route,
+          "receipt" => ComputerUseReceipts.receipt(:not_sent)
+        }}}
+    end
+
+    def execute(state, request), do: ReceiptDriver.execute(state, request)
+
+    @impl true
+    def stop(_state), do: :ok
+  end
+
   setup do
     handler = "cu-elements-#{System.unique_integer([:positive])}"
     test_pid = self()
@@ -427,7 +465,7 @@ defmodule FermixCore.ComputerUse.ElementActionsTest do
           {"observation_required", "it names no `observation_id`"},
           {"state_unreadable", "nothing was sent rather than guessed"},
           {"focus_refused", "`focus` never brings a window forward"},
-          {"scope_not_found", "that scope has nothing in it right now"},
+          {"scope_not_found", "that scope gave nothing to list right now"},
           {"accessibility_unavailable", "Work by pixels"},
           {"pixels_unavailable", "Work by control"},
           {"ambiguous_element", "could not be told apart"},
@@ -518,6 +556,109 @@ defmodule FermixCore.ComputerUse.ElementActionsTest do
         assert result.error =~ "this action was not sent"
         assert result.error =~ "(2 applications)"
       end
+    end
+
+    # A scope gives nothing for one of three reasons, and the sentence is true of
+    # each: it is empty, what is open belongs to another window than the bound one,
+    # or the look stopped before it finished. The helper's detail says which.
+    test "a scope that gave nothing is called empty only as one of its causes",
+         %{config: config} do
+      for detail <- [
+            "no menu is open in the application",
+            "no menu of the bound window is open, and one in another window is not this " <>
+              "window's: release the target to list the application's",
+            "the look stopped before it finished, so whether a menu is open is not known"
+          ] do
+        session =
+          start_supervised!(
+            {Session,
+             [
+               config: config,
+               driver: {RefusingDriver, [code: "scope_not_found", detail: detail]},
+               origin: :interactive,
+               session_id: "cua_scope_#{System.unique_integer([:positive])}"
+             ]},
+            id: {:scope_not_found, detail}
+          )
+
+        assert {:ok, result} = run(session, config, %{"action" => "elements", "scope" => "menu"})
+
+        assert result.error =~
+                 "that scope gave nothing to list right now — it is empty, what is open " <>
+                   "belongs to a window other than the bound one, or the look stopped before " <>
+                   "it finished, as the detail below says."
+
+        assert result.error =~ "(#{detail})"
+        refute result.error =~ "has nothing in it"
+      end
+    end
+
+    # A reference cannot be used for one of several reasons, and the sentence is true
+    # of each: its listing is gone or never had it, the control changed, went away or
+    # could not be checked, or it was listed outside the window the request is bound
+    # to. The helper's detail says which.
+    test "a reference that cannot be used carries the helper's reason", %{config: config} do
+      for detail <- [
+            "e3 was listed without a window binding, and this request is bound to one " <>
+              "window, so nothing was sent: list the bound window (`elements` with this " <>
+              "target_id) and use a reference from the new list",
+            "that control did not answer within the accessibility timeout, so it could not " <>
+              "be checked and nothing was sent; take `elements` again",
+            "the listing this request names has no e9: list the controls again"
+          ] do
+        session =
+          start_supervised!(
+            {Session,
+             [
+               config: config,
+               driver: {RefusingDriver, [code: "stale_element", detail: detail]},
+               origin: :interactive,
+               session_id: "cua_stale_#{System.unique_integer([:positive])}"
+             ]},
+            id: {:stale_element, detail}
+          )
+
+        assert {:ok, result} = run(session, config, press())
+
+        assert result.error =~
+                 "its `element_ref` is not one this request can use — the listing it came " <>
+                   "from is gone or never had it, the control changed, went away or could not " <>
+                   "be checked, or it was listed outside the window this request is bound to"
+
+        assert result.error =~ "(#{detail})"
+        refute result.error =~ "no longer one the computer-use helper holds"
+      end
+    end
+
+    # The next step names `screenshot` only where the reading lists it.
+    test "a scope that gave nothing points at a screenshot only where there is one",
+         %{config: config} do
+      session =
+        start_supervised!(
+          {Session,
+           [
+             config: config,
+             driver: {RefusingDriver, [code: "scope_not_found"]},
+             origin: :interactive,
+             session_id: "cua_scope_next_#{System.unique_integer([:positive])}"
+           ]}
+        )
+
+      elements = %{"action" => "elements", "scope" => "dialog"}
+
+      assert {:ok, pixel} = run(session, config, elements)
+      assert pixel.error =~ "Use another `scope`, or take a `screenshot` to see what is there."
+
+      read_helper(
+        Protocol.actions() --
+          ~w(screenshot left_click right_click double_click mouse_move left_click_drag scroll key
+             wait_for_change paste windows inspect select_target release_target),
+        ["ax"]
+      )
+
+      assert {:ok, controls} = run(session, config, elements)
+      assert controls.error =~ "List another `scope` instead."
+      refute controls.error =~ "screenshot"
     end
 
     test "a stored no is the person's to reset, and the sentence says where", %{config: config} do
@@ -780,6 +921,20 @@ defmodule FermixCore.ComputerUse.ElementActionsTest do
       assert_receive {:tool_exec, %{cu_surfaces_count: 0}}
     end
 
+    test "a surfaces scan that stopped short never reads as all that is open", %{config: config} do
+      for surfaces <- [[], [%{"kind" => "menu", "native_kind" => "AXMenu"}]] do
+        receipt =
+          ax_receipt("not_observed", %{"surfaces" => surfaces, "surfaces_truncated" => "nodes"})
+
+        session = start_session(config, receipt: receipt)
+
+        assert {:ok, result} = run(session, config, press())
+
+        assert result.output =~ "one may be open that is not named here"
+        assert result.output =~ "because it reached the element cap"
+      end
+    end
+
     test "a receipt that did not look carries no count", %{config: config} do
       session = start_session(config, receipt: ax_receipt("not_observed", %{}))
 
@@ -827,6 +982,30 @@ defmodule FermixCore.ComputerUse.ElementActionsTest do
 
       assert result.output =~ "What you waited for did not hold within its timeout"
       assert result.output =~ "do not repeat it for that"
+    end
+
+    test "a condition whose absence a cut look could not prove says so", %{config: config} do
+      check = %{
+        "kind" => "semantic",
+        "until" => "not_met",
+        "waited_ms" => 5004,
+        "truncated" => "time"
+      }
+
+      receipt =
+        ComputerUseReceipts.receipt(:sent,
+          effect: "not_observed",
+          input_method: "ax",
+          check: check
+        )
+
+      session = start_session(config, receipt: receipt)
+
+      assert {:ok, result} = run(session, config, press())
+
+      assert result.output =~ "What you waited for did not hold within its timeout"
+      assert result.output =~ "The absence could not be proven"
+      assert result.output =~ "because it ran out of its time budget"
     end
 
     # A secure field's value is never read back (PROTOCOL.md §4.7). A reply that
@@ -1057,6 +1236,75 @@ defmodule FermixCore.ComputerUse.ElementActionsTest do
                })
 
       assert_receive {:driver_execute, %{"action" => "left_click", "x" => 30, "y" => 40}}
+    end
+  end
+
+  # The gate exists for one fact: macOS drops synthetic input without a word when
+  # Accessibility is not granted. A Linux helper with no pixel route also says
+  # `input_control: false`, but it drops nothing silently: it refuses a pixel action
+  # itself, and acts on controls over the accessibility bus.
+  describe "the input-control gate follows the helper's system" do
+    defp probed_session(config, platform) do
+      start_supervised!(
+        {Session,
+         [
+           config: config,
+           driver:
+             {ProbedDriver,
+              [
+                test_pid: self(),
+                probe: %{"ok" => true, "platform" => platform, "input_control" => false}
+              ]},
+           origin: :interactive,
+           session_id: "cua_probed_#{platform}"
+         ]}
+      )
+    end
+
+    defp control_verbs do
+      [
+        press(),
+        %{
+          "action" => "set_value",
+          "observation_id" => @obs,
+          "element_ref" => "e2",
+          "value" => "a"
+        },
+        %{"action" => "type", "observation_id" => @obs, "element_ref" => "e2", "text" => "a"}
+      ]
+    end
+
+    defp click, do: %{"action" => "left_click", "observation_id" => @obs, "x" => 10, "y" => 10}
+
+    test "a Linux helper with no pixel route acts on controls", %{config: config} do
+      session = probed_session(config, "linux")
+
+      for %{"action" => action} = verb <- control_verbs() do
+        assert {:ok, %{success: true}} = run(session, config, verb)
+        assert_receive {:driver_execute, %{"action" => ^action}}
+      end
+    end
+
+    test "a Linux helper's click gets the helper's own refusal", %{config: config} do
+      session = probed_session(config, "linux")
+
+      assert {:ok, result} = run(session, config, click())
+
+      assert_receive {:driver_execute, %{"action" => "left_click"}}
+      assert result.success == false
+      assert result.error =~ "cannot do this by pixels on this desktop"
+      assert result.error =~ "(KDE Plasma on Wayland has no pixel route"
+      refute result.error =~ "macOS"
+    end
+
+    test "a macOS helper without the grant still refuses controls and clicks", %{config: config} do
+      session = probed_session(config, "macos")
+
+      for %{"action" => action} = verb <- [press(), click()] do
+        assert {:ok, result} = run(session, config, verb)
+        assert result.error =~ "macOS is silently dropping synthetic clicks and keystrokes"
+        refute_received {:driver_execute, %{"action" => ^action}}
+      end
     end
   end
 end
