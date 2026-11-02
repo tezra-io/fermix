@@ -61,9 +61,9 @@ defmodule FermixCore.Realtime.ScreenShare do
 
   @doc """
   Whether a feed may START now: the setting is on, the origin is attended,
-  computer-use is installed, the OS actually grants screen capture, and the
-  capture breaker is closed. Every refusal is typed so the model can say WHY
-  rather than silently not sharing.
+  computer-use is installed, the OS actually grants screen capture (on Linux,
+  the session gives screenshots), and the capture breaker is closed. Every
+  refusal is typed so the model can say WHY rather than silently not sharing.
 
   `:probe` replaces the one-shot OS-permission read (tests only).
   """
@@ -92,12 +92,15 @@ defmodule FermixCore.Realtime.ScreenShare do
   # content — so a feed started here would stream blank desktops while the model
   # described an empty screen. Read the grant instead (never PROMPT for it: raising
   # the dialog belongs to the setup card, not to a live call), and keep "denied"
-  # distinct from "could not ask" so the operator is sent to the right place.
+  # distinct from "could not ask" so the operator is sent to the right place. On
+  # Linux nothing is granted: a session that gives no screenshots (no pixel route,
+  # or a stored Screenshot no) is a reason of its own, never a grant to ask for.
   defp screen_grant(opts) do
     probe = Keyword.get(opts, :probe, &Probe.run/0)
 
     case probe.() do
       {:ok, %{screen_capture: true}} -> :ok
+      {:ok, %{screen_capture: false, platform: "linux"}} -> {:error, :screen_capture_unavailable}
       {:ok, %{screen_capture: false}} -> {:error, :screen_recording_denied}
       {:error, reason} -> {:error, {:capture_probe_failed, reason}}
     end

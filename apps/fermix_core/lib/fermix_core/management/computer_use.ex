@@ -101,9 +101,9 @@ defmodule FermixCore.Management.ComputerUse do
   end
 
   # On Linux nothing is granted, so the two booleans say what this session's
-  # pixel route serves. The display server is what a client picks the route by,
-  # and the rows are the doctor's own, from its producer, so the pane and
-  # `fermix doctor` cannot disagree.
+  # pixel route serves. The display server names the session's display, not its
+  # route, and the rows (the pixel route among them) are the doctor's own, from
+  # its producer, so the pane and `fermix doctor` cannot disagree.
   defp linux_view(%{platform: "linux"} = state) do
     %{
       "display_server" => Map.fetch!(state, :display_server),

@@ -2854,7 +2854,7 @@
       "method": "computer_use.permissions.get",
       "field": "display_server",
       "kind": "engine_only",
-      "why": "A Linux answer carries the display server the helper found (x11, wayland, none, or another word), by which a client picks the pixel route: X11, the desktop portal, or none, where computer use works by controls alone. Optional within protocol 2; the draft predates the Linux helper."
+      "why": "A Linux answer carries the display server the helper found (x11, wayland, none, or another word), which names the session's display and not its pixel route: the route is what the pixel route row says, and where there is none computer use works by controls alone. Optional within protocol 2; the draft predates the Linux helper."
     },
     {
       "method": "computer_use.permissions.get",

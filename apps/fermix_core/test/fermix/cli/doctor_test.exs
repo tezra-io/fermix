@@ -94,7 +94,7 @@ defmodule Fermix.CLI.DoctorTest do
 
     assert_received :helper_started
     refute_received :helper_started, "the helper was started more than once in one run"
-    assert output =~ "screen capture and input control granted (x11)"
+    assert output =~ "screen capture and input control go through this session's X server (x11)"
     assert output =~ "answering, with 3 applications"
   end
 

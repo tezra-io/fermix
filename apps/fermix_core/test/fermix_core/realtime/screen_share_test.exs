@@ -1,6 +1,7 @@
 defmodule FermixCore.Realtime.ScreenShareTest do
   use ExUnit.Case, async: false
 
+  alias FermixCore.ComputerUse
   alias FermixCore.ComputerUse.CaptureHealth
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.ScreenShare
@@ -93,6 +94,45 @@ defmodule FermixCore.Realtime.ScreenShareTest do
 
     assert {:error, {:host_start_refused, :unattended}} =
              ScreenShare.gate(Config.normalize([]), :unattended)
+  end
+
+  # The capture read names its system's reason. On macOS a capture that is not
+  # granted is the Screen Recording grant; on Linux nothing is granted, so a
+  # session that gives no screenshots is its own reason, which the model never
+  # turns into "grant Screen Recording". A probe that names no system keeps the
+  # Mac's word, as it always had.
+  test "a capture the probe says is unavailable refuses with its system's reason" do
+    case gate_with_probe() do
+      :skip ->
+        # No helper artifact for this host: the gate stops at
+        # `computer_use_unavailable` before any probe, as the tests above cover.
+        :ok
+
+      gate ->
+        linux = %{platform: "linux", display_server: "wayland", input_control: true}
+        mac = %{platform: "macos", display_server: "quartz", input_control: false}
+
+        assert gate.(Map.put(linux, :screen_capture, false)) ==
+                 {:error, :screen_capture_unavailable}
+
+        assert gate.(Map.put(mac, :screen_capture, false)) == {:error, :screen_recording_denied}
+
+        assert gate.(%{platform: "unknown", screen_capture: false}) ==
+                 {:error, :screen_recording_denied}
+
+        assert gate.(%{screen_capture: false}) == {:error, :screen_recording_denied}
+
+        for probe <- [linux, mac, %{}],
+            do: assert(gate.(Map.put(probe, :screen_capture, true)) == :ok)
+    end
+  end
+
+  defp gate_with_probe do
+    Application.put_env(:fermix_core, :computer_use, enabled: true)
+
+    if ComputerUse.ready?(),
+      do: &ScreenShare.gate(Config.normalize([]), :voice, probe: fn -> {:ok, &1} end),
+      else: :skip
   end
 
   test "decode reads the action and defaults the display to the configured one" do

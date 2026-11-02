@@ -106,8 +106,31 @@ defmodule FermixCore.ComputerUse.ProbeTest do
          },
          "toolkit_notes" => [
            %{"toolkit" => "qt", "note" => "start it with QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1"}
-         ]
+         ],
+         "pixel_route" => %{"route" => "x11"}
        }}
+    end
+
+    @impl true
+    def stop(_state), do: :ok
+  end
+
+  # A Linux helper whose pixel route the test names: the test sends it the
+  # `pixel_route` value before the probe, and the stub answers with it, inline
+  # in the test process like every stub here.
+  defmodule RouteStub do
+    @behaviour Compux.Driver
+    @impl true
+    def start(_opts), do: {:ok, %{}}
+
+    @impl true
+    def execute(_state, _request) do
+      receive do
+        {:pixel_route, route} ->
+          {:ok, %{"ok" => true, "platform" => "linux", "pixel_route" => route}}
+      after
+        0 -> raise "the test named no pixel route"
+      end
     end
 
     @impl true
@@ -152,7 +175,8 @@ defmodule FermixCore.ComputerUse.ProbeTest do
     portal: nil,
     accessibility_bus: nil,
     accessibility_packages: nil,
-    toolkit_notes: nil
+    toolkit_notes: nil,
+    pixel_route: nil
   }
 
   test "normalizes the sidecar probe response and asks for the probe action" do
@@ -224,6 +248,66 @@ defmodule FermixCore.ComputerUse.ProbeTest do
     assert result.toolkit_notes == [
              %{toolkit: "qt", note: "start it with QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1"}
            ]
+
+    assert result.pixel_route == %{route: "x11", cause: nil, desktop: nil, interface: nil}
+  end
+
+  # The route the helper took for pixels, and when it took none, the closed word
+  # for why, with the desktop or the portal interface that word names.
+  test "the pixel route decodes each closed word the helper names" do
+    route = &Map.merge(%{route: &1, cause: nil, desktop: nil, interface: nil}, &2)
+
+    cases = [
+      {%{"route" => "x11"}, route.("x11", %{})},
+      {%{"route" => "portal"}, route.("portal", %{})},
+      {%{"route" => "none", "cause" => "unsupported_desktop", "desktop" => "kde"},
+       route.("none", %{cause: "unsupported_desktop", desktop: "kde"})},
+      {%{"route" => "none", "cause" => "unsupported_desktop", "desktop" => "other"},
+       route.("none", %{cause: "unsupported_desktop", desktop: "other"})}
+    ]
+
+    causes =
+      for cause <-
+            ~w(no_display no_session_bus portal_not_running portal_unanswered portal_no_registry),
+          do: {%{"route" => "none", "cause" => cause}, route.("none", %{cause: cause})}
+
+    interfaces =
+      for interface <- ~w(Screenshot RemoteDesktop ScreenCast) do
+        {%{"route" => "none", "cause" => "portal_missing", "interface" => interface},
+         route.("none", %{cause: "portal_missing", interface: interface})}
+      end
+
+    for {sent, decoded} <- cases ++ causes ++ interfaces do
+      send(self(), {:pixel_route, sent})
+      assert {:ok, result} = Probe.run(driver: RouteStub, binary_path: "/fake")
+      assert result.pixel_route == decoded, inspect(sent)
+    end
+  end
+
+  # A word this build does not know is unknown, never the nearest one it does:
+  # a route it cannot name is "unknown", and a cause, desktop or interface it
+  # cannot name is nil. A value that is not an object is no route at all.
+  test "a pixel route word this build does not know reads as unknown, never guessed" do
+    odd = %{
+      "route" => "pipewire",
+      "cause" => "portal_asleep",
+      "desktop" => "sway",
+      "interface" => "Clipboard"
+    }
+
+    unknown = %{route: "unknown", cause: nil, desktop: nil, interface: nil}
+
+    for {sent, decoded} <- [
+          {odd, unknown},
+          {%{"route" => 11, "cause" => true}, unknown},
+          {%{}, unknown},
+          {"x11", nil},
+          {nil, nil}
+        ] do
+      send(self(), {:pixel_route, sent})
+      assert {:ok, result} = Probe.run(driver: RouteStub, binary_path: "/fake")
+      assert result.pixel_route == decoded, inspect(sent)
+    end
   end
 
   # A value this build does not know is unknown (nil, or "unknown" for the bus's

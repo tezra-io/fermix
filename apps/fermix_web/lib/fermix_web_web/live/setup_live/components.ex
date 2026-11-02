@@ -4166,6 +4166,7 @@ defmodule FermixWebWeb.SetupLive.Components do
       |> assign(:channel_results, channel_probe_results(assigns.result))
       |> assign(:auth_tokens, auth_tokens_probe_result(assigns.result))
       |> assign(:computer_use, computer_use_probe_result(assigns.result))
+      |> assign(:computer_use_rows, computer_use_rows(assigns.result))
 
     ~H"""
     <section class="rounded-box border border-base-300 p-4">
@@ -4239,6 +4240,17 @@ defmodule FermixWebWeb.SetupLive.Components do
             {channel_probe_label(@computer_use.status)}
           </span>
         </div>
+        <ul :if={@computer_use_rows != []} class="mt-3 space-y-2">
+          <li :for={row <- @computer_use_rows} class="flex items-start justify-between gap-3 text-sm">
+            <div class="min-w-0">
+              <p class="font-medium">{row.name}</p>
+              <p class={["mt-0.5", channel_probe_text_class(row.status)]}>{row.detail}</p>
+            </div>
+            <span class={channel_probe_badge_class(row.status)}>
+              {channel_probe_label(row.status)}
+            </span>
+          </li>
+        </ul>
         <button
           :if={@computer_use && @computer_use.grant?}
           type="button"
@@ -4775,6 +4787,10 @@ defmodule FermixWebWeb.SetupLive.Components do
 
   defp computer_use_probe_result(%{computer_use: result}), do: result
   defp computer_use_probe_result(_result), do: nil
+
+  # A Linux probe carries the doctor's Linux rows; every other state draws none.
+  defp computer_use_rows(%{computer_use: %{rows: rows}}), do: rows
+  defp computer_use_rows(_result), do: []
 
   defp channel_probe_text_class(:ok), do: "text-success"
   defp channel_probe_text_class(:warn), do: "text-warning"

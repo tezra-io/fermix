@@ -313,7 +313,7 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       result = Checks.computer_use_permissions({:ok, probe})
 
       assert result.status == :warn
-      assert result.detail =~ "unavailable on this Wayland session"
+      assert result.detail =~ "are not available on this Wayland session"
       assert result.detail =~ "GNOME's desktop portal"
       assert result.detail =~ "xdg-desktop-portal 1.18 or later"
       assert result.detail =~ "Controls still work"
@@ -356,6 +356,30 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.status == :ok
       assert result.detail =~ "desktop portal, which asks the person on first use"
       refute result.detail =~ "granted"
+    end
+
+    # The Mac's sentences name the panes that fix them, and nothing on Linux
+    # moves them by a word.
+    test "macOS sentences are unchanged, word for word" do
+      suffix = " · sidecar compux v#{Application.spec(:compux, :vsn)}"
+
+      both =
+        Checks.computer_use_permissions({:ok, probed(screen_capture: true, input_control: true)})
+
+      assert both.detail == "screen capture and input control granted (quartz)" <> suffix
+
+      input = Checks.computer_use_permissions({:ok, probed(screen_capture: true)})
+
+      assert input.detail ==
+               "screen capture OK but input control is NOT granted — clicks and keystrokes are " <>
+                 "silently dropped. Grant Accessibility: System Settings → Privacy & Security → " <>
+                 "Accessibility." <> suffix
+
+      capture = Checks.computer_use_permissions({:ok, probed(input_control: true)})
+
+      assert capture.detail ==
+               "screen capture is NOT granted — captures return wallpaper only. Grant Screen " <>
+                 "Recording: System Settings → Privacy & Security → Screen Recording." <> suffix
     end
 
     # An install button whose only outcome is `{:error, {:unsupported_target,
@@ -486,9 +510,33 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
         toolkit_notes: [
           %{toolkit: "qt", note: "a Qt application publishes no tree: start it with QT_X=1"},
           %{toolkit: "chromium", note: "start it with --force-renderer-accessibility"}
-        ]
+        ],
+        pixel_route: pixel_route("x11")
       }
       |> Map.merge(Map.new(overrides))
+    end
+
+    defp pixel_route(route, named \\ %{}),
+      do: Map.merge(%{route: route, cause: nil, desktop: nil, interface: nil}, named)
+
+    # The closed causes of no pixel route, with the desktop or interface each
+    # names, and a cause the helper did not name or this build does not know.
+    defp no_routes do
+      none = &pixel_route("none", &1)
+
+      Enum.map(
+        ~w(no_display no_session_bus portal_not_running portal_unanswered portal_no_registry),
+        &none.(%{cause: &1})
+      ) ++
+        [
+          none.(%{cause: "unsupported_desktop", desktop: "kde"}),
+          none.(%{cause: "unsupported_desktop", desktop: "other"}),
+          none.(%{cause: "portal_missing", interface: "Screenshot"}),
+          none.(%{cause: "portal_missing", interface: "RemoteDesktop"}),
+          none.(%{cause: "portal_missing", interface: "ScreenCast"}),
+          none.(%{cause: "portal_missing"}),
+          none.(%{})
+        ]
     end
 
     defp rows(probe), do: tl(Checks.computer_use({:ok, probe}))
@@ -543,6 +591,143 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       for result <- [{:ok, mac}, {:ok, %{state: :disabled}}, {:error, :sidecar_unavailable}] do
         assert Checks.linux_computer_use_rows(result) == []
       end
+    end
+
+    # On X11 nothing is granted: the route is the session's own X server.
+    test "the computer use row on X11 with both halves names the X server, not a grant" do
+      result = Checks.computer_use_permissions({:ok, linux()})
+      assert result.status == :ok
+
+      assert result.detail =~
+               "screen capture and input control go through this session's X server (x11)"
+
+      refute result.detail =~ "granted"
+    end
+
+    # A stored no refuses screenshots, and on Wayland a point comes only from a
+    # screenshot, so no pointer verb has anything to aim at until it is reset; keys
+    # and the verbs on a control still act. The row names the row that carries the
+    # reset rather than the portal's version.
+    test "the computer use row with a stored Screenshot no on Wayland names the kept no" do
+      probe =
+        linux(
+          display_server: "wayland",
+          screen_capture: false,
+          input_control: true,
+          pixel_route: pixel_route("portal"),
+          portal: portal(registry: true, screenshot_permission: "no")
+        )
+
+      result = Checks.computer_use_permissions({:ok, probe})
+      assert result.status == :warn
+
+      assert result.detail =~
+               "screen capture is not available (linux/wayland): the desktop keeps a \"no\" for " <>
+                 "Fermix's screenshots, so nothing can be aimed by point until it is reset, and the " <>
+                 "portal screenshot row has the command that resets it. Keys and typing still " <>
+                 "work, and controls wherever the accessibility bus answers."
+
+      refute result.detail =~ "click"
+      refute result.detail =~ "1.18"
+
+      # Were input refused too, the row would claim neither keys nor typing.
+      refused = Checks.computer_use_permissions({:ok, %{probe | input_control: false}})
+
+      assert refused.detail =~
+               "screen capture and input control are not available (linux/wayland): the desktop " <>
+                 "keeps a \"no\" for Fermix's screenshots, so nothing can be aimed by point until " <>
+                 "it is reset, and the portal screenshot row has the command that resets it."
+
+      refute refused.detail =~ "Keys"
+    end
+
+    # A Wayland probe whose screen capture is false for no cause this build reads
+    # (an older helper's, or a portal route with no stored no) says only the halves
+    # that are missing: input still served is never called unavailable.
+    test "the computer use row on Wayland names only the halves that are missing" do
+      for portal <- [portal(registry: true, screenshot_permission: "unset"), nil] do
+        served =
+          linux(
+            display_server: "wayland",
+            screen_capture: false,
+            input_control: true,
+            pixel_route: pixel_route("portal"),
+            portal: portal
+          )
+
+        result = Checks.computer_use_permissions({:ok, served})
+        assert result.status == :warn, inspect(portal)
+
+        assert result.detail =~ "screen capture is not available on this Wayland session.",
+               inspect(portal)
+
+        refute result.detail =~ "input control", inspect(portal)
+      end
+
+      older = linux(display_server: "wayland", screen_capture: false, input_control: false)
+      older = %{older | pixel_route: nil}
+
+      assert Checks.computer_use_permissions({:ok, older}).detail =~
+               "screen capture and input control are not available on this Wayland session."
+    end
+
+    # With no pixel route the cause is the pixel route row's to say, whichever it
+    # is; the computer use row never guesses it from the portal's version.
+    test "the computer use row with no pixel route points at the pixel route row" do
+      for route <- no_routes() do
+        probe =
+          linux(
+            display_server: "wayland",
+            screen_capture: false,
+            input_control: false,
+            pixel_route: route
+          )
+
+        result = Checks.computer_use_permissions({:ok, probe})
+        assert result.status == :warn, inspect(route)
+
+        assert result.detail =~
+                 "screen capture and input control are not available (linux/wayland): this " <>
+                   "session has no pixel route, and the pixel route row says why. Controls still " <>
+                   "work wherever the accessibility bus answers.",
+               inspect(route)
+
+        refute result.detail =~ "1.18", inspect(route)
+        refute result.detail =~ "desktop portal row", inspect(route)
+      end
+
+      none =
+        linux(
+          display_server: "none",
+          screen_capture: false,
+          input_control: false,
+          pixel_route: pixel_route("none", %{cause: "no_display"})
+        )
+
+      assert Checks.computer_use_permissions({:ok, none}).detail =~
+               "are not available (linux/none): this session has no pixel route"
+    end
+
+    # XTEST and the keyboard map are the X11 route's input needs, and the x11
+    # pixels row says which this session has.
+    test "the computer use row on X11 without input points at the x11 pixels row" do
+      for pixels <- [%{xtest: false, keymap: true}, %{xtest: true, keymap: false}] do
+        probe = linux(input_control: false, x11_pixels: pixels)
+        result = Checks.computer_use_permissions({:ok, probe})
+        assert result.status == :warn
+
+        assert result.detail =~
+                 "input control is not available (linux/x11): the X11 pixel route needs XTEST and " <>
+                   "the keyboard map, and the x11 pixels row says what this session has."
+      end
+
+      lost = linux(screen_capture: false, input_control: false, x11_pixels: nil)
+      result = Checks.computer_use_permissions({:ok, lost})
+      assert result.status == :warn
+
+      assert result.detail =~
+               "screen capture and input control are not available (linux/x11): the x11 pixels " <>
+                 "row says why."
     end
 
     test "the display server, and whether it was adopted from the user manager" do
@@ -673,6 +858,94 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       quiet = rows(linux(toolkit_notes: []))
       refute Enum.any?(quiet, &String.starts_with?(&1.name, "toolkit"))
       refute Enum.any?(rows(linux(toolkit_notes: nil)), &String.starts_with?(&1.name, "toolkit"))
+    end
+
+    # The route the helper took leads the pixel rows: what it is, then what each
+    # route's own facts say.
+    test "the pixel route: X11 and GNOME's desktop portal" do
+      x11 = row(linux(), "pixel route")
+
+      assert x11 == %{
+               name: "pixel route",
+               status: :ok,
+               detail: "X11, through this session's X server"
+             }
+
+      portal =
+        row(linux(display_server: "wayland", pixel_route: pixel_route("portal")), "pixel route")
+
+      assert portal.status == :ok
+      assert portal.detail == "GNOME's desktop portal, which asks on first use"
+
+      names = Enum.map(rows(linux()), & &1.name)
+      at = Enum.find_index(names, &(&1 == "pixel route"))
+
+      assert Enum.slice(names, at, 4) == [
+               "pixel route",
+               "x11 pixels",
+               "desktop portal",
+               "portal screenshot"
+             ]
+    end
+
+    # No route is a warning, as an unavailable route is everywhere in these rows,
+    # never a failure: one sentence per cause, and each ends with what still works.
+    test "no pixel route warns with the cause in one sentence that ends with control" do
+      tail = "; Fermix works by controls alone, wherever the accessibility bus answers"
+
+      expected = [
+        "none: no display answers this session, neither Wayland nor X11",
+        "none: this Wayland session has no session bus to reach the desktop portal on",
+        "none: the desktop portal is not running on this session and did not start",
+        "none: the desktop portal answered with an error that does not say whether it runs",
+        "none: the desktop portal has no host registry, which only a newer portal has, so " <>
+          "Fermix cannot ask it for pixels under its own app id",
+        "none: on Wayland only GNOME's desktop portal gives Fermix pixels, and this desktop is KDE",
+        "none: on Wayland only GNOME's desktop portal gives Fermix pixels, and this desktop is " <>
+          "not GNOME",
+        "none: the desktop portal on this session has no `Screenshot` interface",
+        "none: the desktop portal on this session has no `RemoteDesktop` interface",
+        "none: the desktop portal on this session has no `ScreenCast` interface",
+        "none: the desktop portal on this session lacks an interface the pixel route needs",
+        "none: the helper gave no reason this build knows"
+      ]
+
+      details =
+        for route <- no_routes() do
+          probe =
+            linux(
+              display_server: "wayland",
+              screen_capture: false,
+              input_control: false,
+              pixel_route: route
+            )
+
+          assert %{status: :warn, detail: detail} = row(probe, "pixel route")
+          detail
+        end
+
+      assert details == Enum.map(expected, &(&1 <> tail))
+
+      # A desktop this build does not name reads as one that is not GNOME.
+      unnamed = pixel_route("none", %{cause: "unsupported_desktop"})
+
+      assert row(linux(pixel_route: unnamed), "pixel route").detail =~
+               "this desktop is not GNOME;"
+    end
+
+    test "a pixel route this build does not know is unknown, not a route" do
+      unknown = row(linux(pixel_route: pixel_route("unknown")), "pixel route")
+      assert unknown.status == :warn
+      assert unknown.detail == "unknown: the helper named a pixel route this build does not know"
+    end
+
+    # A helper from before the pixel route names none: the doctor says nothing
+    # it was not told, and every other row is as it was.
+    test "no pixel route row when the helper names none" do
+      older = linux(pixel_route: nil)
+      refute Enum.any?(rows(older), &(&1.name == "pixel route"))
+
+      assert rows(older) == Enum.reject(rows(linux()), &(&1.name == "pixel route"))
     end
 
     test "the X11 pixel route: XTEST and the keymap present" do

@@ -1,6 +1,7 @@
 defmodule FermixWebWeb.SetupLive do
   use FermixWebWeb, :live_view
 
+  alias Fermix.CLI.Doctor.Checks
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Auth.AnthropicLogin
   alias FermixCore.Auth.ChatGPT
@@ -1655,7 +1656,7 @@ defmodule FermixWebWeb.SetupLive do
   # the enabled+installed case spawns the sidecar to probe; off/uninstalled resolve
   # cheaply, so this stays on the synchronous up-front path like the token check.
   defp computer_use_permissions_result do
-    case Doctor.computer_use_permissions() do
+    case computer_use_permissions_impl().() do
       {:ok, %{state: :disabled}} ->
         %{status: :ok, grant?: false, detail: "Off. Computer use is disabled."}
 
@@ -1672,6 +1673,29 @@ defmodule FermixWebWeb.SetupLive do
           detail: "Couldn't probe the helper: #{Redaction.format(reason)}"
         }
     end
+  end
+
+  # Injectable so a LiveView test names the probe it means and spawns no helper.
+  defp computer_use_permissions_impl do
+    Application.get_env(
+      :fermix_web,
+      :computer_use_permissions_impl,
+      &Doctor.computer_use_permissions/0
+    )
+  end
+
+  # On Linux nothing is granted: the two booleans say whether this session's pixel
+  # route serves screenshots, and the pointer and keys. The card draws the doctor's
+  # Linux rows under its sentence (the rows the Linux app's pane shows), and the
+  # sentence names the row below that says why, as the doctor's own `computer use`
+  # row does; no grant is offered, and no `fermix` command is asked for.
+  defp computer_use_probe_detail(%{platform: "linux"} = probe) do
+    %{
+      status: linux_status(probe),
+      grant?: false,
+      detail: linux_detail(probe),
+      rows: Checks.linux_computer_use_rows({:ok, probe})
+    }
   end
 
   # `grant?` drives the "Grant macOS permissions" button — offered only on macOS when
@@ -1702,6 +1726,61 @@ defmodule FermixWebWeb.SetupLive do
 
   defp macos_probe?(%{platform: "macos"}), do: true
   defp macos_probe?(_probe), do: false
+
+  defp linux_status(%{screen_capture: true, input_control: true}), do: :ok
+  defp linux_status(_missing), do: :warn
+
+  # Off X11 only GNOME's desktop portal serves both halves.
+  defp linux_detail(%{screen_capture: true, input_control: true, display_server: "x11"}),
+    do: "Screen capture and input control go through this session's X server."
+
+  defp linux_detail(%{screen_capture: true, input_control: true}) do
+    "Screen capture and input control go through GNOME's desktop portal, which asks on " <>
+      "first use."
+  end
+
+  defp linux_detail(probe), do: "#{linux_missing(probe)}: #{linux_why(probe)}"
+
+  defp linux_missing(%{screen_capture: false, input_control: false}),
+    do: "Screen capture and input control are not available"
+
+  defp linux_missing(%{screen_capture: false}), do: "Screen capture is not available"
+  defp linux_missing(%{input_control: false}), do: "Input control is not available"
+
+  @controls_still_work "Controls still work wherever the accessibility bus answers."
+
+  defp linux_why(%{pixel_route: %{route: "none"}}) do
+    "this session has no pixel route, and the pixel route row below says why. " <>
+      @controls_still_work
+  end
+
+  # On Wayland a point comes only from a screenshot, so a stored no leaves nothing
+  # to aim at; keys and the verbs on a control still act.
+  defp linux_why(
+         %{
+           pixel_route: %{route: "portal"},
+           portal: %{screenshot_permission: "no"},
+           screen_capture: false
+         } = probe
+       ) do
+    "the desktop keeps a \"no\" for Fermix's screenshots, so nothing can be aimed by point " <>
+      "until the command in the portal screenshot row below resets it. " <> still_work(probe)
+  end
+
+  defp linux_why(%{display_server: "x11", screen_capture: true}) do
+    "the X11 pixel route needs XTEST and the keyboard map, and the x11 pixels row below " <>
+      "says what this session has. " <> @controls_still_work
+  end
+
+  defp linux_why(%{display_server: "x11"}),
+    do: "the x11 pixels row below says why. " <> @controls_still_work
+
+  defp linux_why(_probe), do: "the rows below say why. " <> @controls_still_work
+
+  defp still_work(%{input_control: true}),
+    do: "Keys and typing still work, and controls wherever the accessibility bus answers."
+
+  defp still_work(%{input_control: false}), do: @controls_still_work
 
   # The token-freshness check is offline and instant, so it resolves up front
   # alongside the running provider/channel probes rather than going through the

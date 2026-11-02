@@ -46,8 +46,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   no controls until switched on (Qt apps need their accessibility switch,
   Chromium-based apps an assistive client), and Fermix says which.
   `fermix doctor` adds rows for the display server, the accessibility bus,
-  the ATK bridge, X11 input, the desktop portal and a stored screenshot
-  refusal. Linux arm64 still has no helper.
+  the ATK bridge, the pixel route (and why a session has none), X11 input,
+  the desktop portal and a stored screenshot refusal. Linux arm64 still has
+  no helper.
 
 - **Lists: a list per project, a shopping list, anything to tick off, kept as
   lists and never in memory.** Ask in your own chat ("start a list for the

@@ -20,9 +20,11 @@ defmodule FermixCore.ComputerUse.Probe do
   A Linux helper also reports, read-only, what the doctor's Linux rows show: whether
   the display was adopted from the user manager, the X11 pixel route's two needs,
   the desktop portal, the accessibility bus, the accessibility package versions and
-  the toolkit notes. Each is carried as the helper said it. A value this build does
-  not know reads as unknown (`nil`, or `"unknown"` for the bus's state), never as
-  the nearest one it does; a build that reports none (macOS) leaves each `nil`.
+  the toolkit notes, and the pixel route it took: X11, the desktop portal, or none,
+  with a closed word for why. Each is carried as the helper said it. A value this
+  build does not know reads as unknown (`nil`, or `"unknown"` for the bus's state
+  and the route), never as the nearest one it does; a build that reports none
+  (macOS, or a Linux helper from before the pixel route) leaves each `nil`.
   """
 
   alias FermixCore.ComputerUse.PortDriver
@@ -48,6 +50,13 @@ defmodule FermixCore.ComputerUse.Probe do
           atk_bridge: String.t() | nil
         }
 
+  @type pixel_route :: %{
+          route: String.t(),
+          cause: String.t() | nil,
+          desktop: String.t() | nil,
+          interface: String.t() | nil
+        }
+
   @type result :: %{
           platform: String.t(),
           display_server: String.t(),
@@ -58,11 +67,17 @@ defmodule FermixCore.ComputerUse.Probe do
           portal: portal() | nil,
           accessibility_bus: bus() | nil,
           accessibility_packages: packages() | nil,
-          toolkit_notes: [%{toolkit: String.t(), note: String.t()}] | nil
+          toolkit_notes: [%{toolkit: String.t(), note: String.t()}] | nil,
+          pixel_route: pixel_route() | nil
         }
 
   @bus_states ~w(answering empty unavailable)
   @stored_answers ~w(yes no unset not_running)
+  @routes ~w(x11 portal none)
+  @route_causes ~w(no_display no_session_bus unsupported_desktop portal_not_running
+                   portal_unanswered portal_no_registry portal_missing)
+  @route_desktops ~w(kde other)
+  @portal_interfaces ~w(Screenshot RemoteDesktop ScreenCast)
 
   @doc """
   Probe the installed sidecar. Returns the grant breakdown, or `{:error, reason}`
@@ -110,7 +125,8 @@ defmodule FermixCore.ComputerUse.Probe do
       portal: portal(response["portal"]),
       accessibility_bus: bus(response["accessibility_bus"]),
       accessibility_packages: packages(response["accessibility_packages"]),
-      toolkit_notes: notes(response["toolkit_notes"])
+      toolkit_notes: notes(response["toolkit_notes"]),
+      pixel_route: pixel_route(response["pixel_route"])
     }
   end
 
@@ -167,6 +183,20 @@ defmodule FermixCore.ComputerUse.Probe do
   end
 
   defp notes(_absent), do: nil
+
+  # A cause is named only with route `none`, a desktop only with
+  # `unsupported_desktop` and an interface only with `portal_missing`; each is
+  # read as it came, and the doctor reads each only where it belongs.
+  defp pixel_route(%{} = route) do
+    %{
+      route: one_of(route["route"], @routes) || "unknown",
+      cause: one_of(route["cause"], @route_causes),
+      desktop: one_of(route["desktop"], @route_desktops),
+      interface: one_of(route["interface"], @portal_interfaces)
+    }
+  end
+
+  defp pixel_route(_absent), do: nil
 
   defp boolean(value) when is_boolean(value), do: value
   defp boolean(_unknown), do: nil
