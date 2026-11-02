@@ -62,7 +62,7 @@
 (* one wait the worker ends.                                               *)
 (***************************************************************************)
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/home/move_worker.ex @ 174049035bfe
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/home/candidate.ex @ 75587263f63d
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/home/candidate.ex @ 02a276b26b35
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/home/move_responder.ex @ 31d80078d517
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/candidate/activation.ex @ 41d05d90bb47
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/move.ex#start,move_id,write_request,put_phase,pending?,not_pending,max_attempts,@max_attempts,@pending,@running,@phases,finish_at_boot,finish_due,ending,finish,view,remember_unrecorded_ending,boot_ending,@boot_key @ be988598314f
@@ -70,9 +70,9 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/moved.ex#write,exclusive_write,read @ f1fa82381547
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/candidate.ex#put_state,write_private @ b39833e3c49c
 \* SOURCE: apps/fermix_core/lib/fermix_core/management/home_move.ex#move_start,move_view @ bf229d4d4fd7
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/device_supervisor.ex#children @ 1d7d689451c7
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/device_supervisor.ex#children,dial_children @ 0206b0220a81
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/rail.ex#@moduledoc @ eea53ac3d395
-\* SOURCE: apps/fermix_core/lib/fermix_core/application.ex#prepare_home,finish_activation,finish_move,left_to_status @ 72deb4c9e847
+\* SOURCE: apps/fermix_core/lib/fermix_core/application.ex#prepare_home,finish_activation,finish_move,left_to_status @ 832168565d5f
 EXTENDS Naturals, FiniteSets
 
 CONSTANTS
@@ -99,20 +99,20 @@ CONSTANTS
                         \* holds once the socket closes is the helper's (outside this repo)
     \* Mechanism switches: what the code does about it. TRUE is the real code.
     CandidateWaitsForCommit, \* the candidate activates only on move_commit for the move
-                             \* it staged (commit_move/2, candidate.ex:503-536)
+                             \* it staged (commit_move/2, candidate.ex:578-611)
     MarkerBeforeCommit,      \* the worker writes moved.json and records committing before
                              \* it sends move_commit (commit/4 then retired/4,
                              \* move_worker.ex:420-442)
     OffersFenced,            \* the candidate takes an offer only when it is later than the
                              \* move it holds: a later move id, or a later attempt of the
                              \* same move (fenced_offer/2 and later?/2,
-                             \* candidate.ex:400-412). move_offer carries the attempt
+                             \* candidate.ex:447-459). move_offer carries the attempt
                              \* (stream/3, move_worker.ex:370), which only grows across
                              \* restarts; move ids are ordered by when the move started
                              \* (move_id/1, move.ex:505-514)
     ReadyAfterStaged,        \* move_ready goes out only once staged is written: restored/2
                              \* records staged, then tells the responder
-                             \* (candidate.ex:481-487), which answers move_ready only then
+                             \* (candidate.ex:547-553), which answers move_ready only then
                              \* (move_responder.ex:65-69)
     AwaitPinsRail,           \* the worker takes an answer only from the rail it waits on
                              \* (await_any/3 matches {:rail, ^rail, _},
@@ -233,8 +233,8 @@ OldRequest ==
                     THEN oldOffers \cup {attempts} ELSE oldOffers
 
 \* The source boots from its files r, m, p (its service manager, after
-\* the deliberate self-restart, Lifecycle.restart_self/0, or a crash). DeviceSupervisor.children/1 starts the
-\* worker only on a device boot while a move is pending (device_supervisor.ex:50-64,
+\* the deliberate self-restart, Lifecycle.restart_self/0, or a crash). DeviceSupervisor.dial_children/1 starts the
+\* worker only on a device boot while a move is pending (device_supervisor.ex:81-95,
 \* Move.pending?/1, move.ex:313-318). Its rails end with it: an owner that exits
 \* takes its session down (rail.ex moduledoc). A request already sent may still
 \* arrive; an answer reaches no one.
@@ -576,7 +576,7 @@ UndoEnd ==
 \* role: the responder runs under CandidateSupervisor (candidate_supervisor.ex).
 CandIdle == candUp = "candidate" /\ cpc = "idle"
 
-\* move_offer -> Candidate.offer/2 -> offer_move/2 (candidate.ex:385-393): an
+\* move_offer -> Candidate.offer/2 -> offer_move/2 (candidate.ex:432-440): an
 \* enrolled, receiving or staged candidate takes the offer through
 \* fenced_offer/2 (:400-407); any other phase refuses it (move_failed). With
 \* OffersFenced it takes only an offer later than the move it holds
@@ -595,7 +595,7 @@ OnOffer(tag, a) ==
          /\ lateOfferFenced' = (lateOfferFenced \/ (moved /\ cand = "staged"))
 
 \* move_end -> end_stream/1 -> Candidate.stage/3 -> stage_move/3
-\* (move_responder.ex:196-218, candidate.ex:456-479): a receiving candidate
+\* (move_responder.ex:196-218, candidate.ex:518-545): a receiving candidate
 \* starts the restore task in place of any earlier one; the answer waits for
 \* it. Without ReadyAfterStaged the responder answers move_ready at once.
 OnStream(tag) ==
@@ -604,7 +604,7 @@ OnStream(tag) ==
          /\ IF ReadyAfterStaged THEN NoAnswer ELSE Answer(tag, "ready")
     ELSE /\ Answer(tag, "error") /\ UNCHANGED CandAll
 
-\* move_commit -> Candidate.commit/2 -> commit_move/2 (candidate.ex:503-536).
+\* move_commit -> Candidate.commit/2 -> commit_move/2 (candidate.ex:578-611).
 \* Once the home is in place (the activated? flag, set where activate/1
 \* succeeded, :523, :543), a second move_commit for the move, from a rail its
 \* source gave up on, is answered as the first was (:505-509). Staged or
@@ -662,7 +662,7 @@ HandleOldOffer(a) ==
     /\ OnOffer("gone", a)
     /\ UNCHANGED <<railUp, req, oldReq, SrcFiles, boot, unsaid, wpc, Budgets, doneLost>>
 
-\* The restore task's result -> restored/2 (candidate.ex:211-214, :481-487):
+\* The restore task's result -> restored/2 (candidate.ex:254-257, :547-553):
 \* record staged, then tell the responder of the rail that staged it, which
 \* answers move_ready (move_responder.ex:65-69).
 Restored ==
@@ -682,7 +682,7 @@ SelfActivate ==
 \* Activation.activate/1 (activation.ex:129-138): the staged entries, then
 \* config.toml last (place_config/2, :364-369), the commit point: the next boot
 \* reads role = "primary". Then candidate/ goes, the restart is scheduled
-\* (candidate.ex:522, :542), and commit_move/2 answers, so the responder sends
+\* (candidate.ex:597, :617), and commit_move/2 answers, so the responder sends
 \* move_done and closes (move_responder.ex:119-124). A crash between the
 \* rename and the answer is a crash after this step, which loses the answer.
 Activate ==
@@ -692,9 +692,9 @@ Activate ==
     /\ IF cpc = "activate_cur" THEN Answer("cur", "done") ELSE NoAnswer
     /\ UNCHANGED <<candUp, restore, held, railUp, req, oldReq, oldOffers, SrcFiles, boot, unsaid, wpc, Budgets, Hist>>
 
-\* handle_info(:restart) (candidate.ex:227-230) -> Lifecycle.restart_self/0. The
+\* handle_info(:restart) (candidate.ex:271-275) -> Lifecycle.restart_self/0. The
 \* boot reads role = "primary" and finishes the activation
-\* (FermixCore.Application, application.ex:195-214).
+\* (FermixCore.Application, application.ex:201-221).
 Restart ==
     /\ CandIdle /\ cand = "active"
     /\ candUp' = "primary"
@@ -753,7 +753,7 @@ OfferRefusedForRoom ==
     /\ Answer("cur", "error")
     /\ UNCHANGED <<CandAll, railUp, oldReq, oldOffers, SrcFiles, boot, unsaid, wpc, Budgets, Hist>>
 
-\* restored/2's error clause (candidate.ex:489-501): back to enrolled, holding
+\* restored/2's error clause (candidate.ex:555-569): back to enrolled, holding
 \* no move (put/3 drops the nil "move"), and the
 \* responder refuses (move_failed, move_responder.ex:71-75).
 RestoreFails ==
@@ -773,8 +773,8 @@ SourceCrash ==
 
 \* The candidate engine dies and boots again: as the primary once config.toml
 \* is in place; otherwise as the candidate, whose handle_continue/2 runs
-\* carry_on/1 first (candidate.ex:148-158), and activating finishes the
-\* activation (finish_activation/1, :538-548). Its restore task dies with it.
+\* carry_on/1 first (candidate.ex:184-201), and activating finishes the
+\* activation (finish_activation/1, :613-623). Its restore task dies with it.
 CandidateCrash ==
     /\ CandidateCanCrash /\ candCrashes < MaxCrashes /\ candUp = "candidate"
     /\ candCrashes' = candCrashes + 1

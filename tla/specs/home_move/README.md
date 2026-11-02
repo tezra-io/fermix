@@ -57,21 +57,21 @@ Models one move of M75 §7.2 (B5). Three parts take part:
 
 **Mechanism switches** (`TRUE` is the real code):
 - `CandidateWaitsForCommit`: the candidate activates only on `move_commit`
-  for the move it staged (`commit_move/2`, `candidate.ex:503-536`).
+  for the move it staged (`commit_move/2`, `candidate.ex:578-611`).
 - `MarkerBeforeCommit`: the worker writes `moved.json` and records
   `committing` before it sends `move_commit` (`commit/4`, then `retired/4`,
   `move_worker.ex:420-442`).
 - `OffersFenced`: the candidate takes an offer only when it is later than the
   move it holds, a later move id or a later attempt of the same move, and
   refuses an earlier or equal one (`move_mismatch`), leaving what it holds
-  untouched (`fenced_offer/2`, `later?/2`, `candidate.ex:400-412`).
+  untouched (`fenced_offer/2`, `later?/2`, `candidate.ex:447-459`).
   `move_offer` carries the attempt (`stream/3`, `move_worker.ex:370`), which
   only grows across restarts. Move ids are ordered by when the move started
   (`move_id/1`, `move.ex:505-514`); with one move id, the fence orders by
   attempt.
 - `ReadyAfterStaged`: `move_ready` goes out only after `staged` is written.
   `restored/2` records `staged`, then tells the responder
-  (`candidate.ex:481-487`), which answers `move_ready` only then
+  (`candidate.ex:547-553`), which answers `move_ready` only then
   (`move_responder.ex:65-69`).
 - `AwaitPinsRail`: the worker takes an answer only from the rail it waits on
   (`await_any/3` matches `{:rail, ^rail, _}`, `move_worker.ex:742-755`).
@@ -226,7 +226,7 @@ Nothing in Fermix's own code fenced it.
   home untouched.
 
 The same change answers a second `move_commit` after activation from the
-`activated?` flag (`candidate.ex:505-509`). Before, it crashed in `put/3`,
+`activated?` flag (`candidate.ex:580-584`). Before, it crashed in `put/3`,
 because `activate/1` had removed `candidate/`. The model's `OnCommit` now
 answers it `move_done`.
 
