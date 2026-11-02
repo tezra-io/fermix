@@ -30,10 +30,10 @@
 (* Restore here's job, and Home.LocalReturn; the summary's offers         *)
 (* (Offered) mirror HomeSummary's returning/1, settled/1 and back/1. The   *)
 (* spec was first written from the design ahead of them: its finding HR-1  *)
-(* became the code's write-ahead of move_started_at (StartKeptFirst).      *)
-(* Two findings are open against the code, each a proposed rule the code   *)
-(* breaks (README.md): HR-2 (UndoneReturnCanEnd) and HR-3                  *)
-(* (GoneServerCanBeRestored).                                              *)
+(* became the code's write-ahead of move_started_at (StartKeptFirst), and   *)
+(* its findings HR-2 (UndoneReturnCanEnd) and HR-3 (GoneServerCanBeRestored)*)
+(* became StoppedReturnClears, UndoneInAnyPhase and RestoreOnFenceRequest  *)
+(* (README.md).                                                            *)
 (*                                                                         *)
 (* Rails are named from the server's worker's side, as in home_move:      *)
 (* "cur" is the rail it waits on now, "gone" one it left. A request on a  *)
@@ -70,7 +70,9 @@
 (*  - a second desktop: the link reaching a newer epoch than return.json   *)
 (*    was asked at (stale?/1, Management.Home's drop of a passed return);  *)
 (*  - the fence's failure kept in the ledger and its delete_failed screen  *)
-(*    (restoring/1): a refused fence here just ends the job;               *)
+(*    (restoring/1, fence_failed?/2): a fence refused here just ends the   *)
+(*    job, and one refused for a server that answers again drops the       *)
+(*    request (server_back/1);                                             *)
 (*  - the copy's choice and a wrong passphrase, refused before anything is *)
 (*    written (LocalReturn.choose/2);                                      *)
 (*  - the deriving of the key: part of the staging step (RhStage).        *)
@@ -94,10 +96,10 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/management/home_move.ex#move_start @ 81c5ae5fa852
 \* SOURCE: apps/fermix_core/lib/fermix_core/management/placement.ex#unconfirmed_on_loss?,unconfirmed,@unconfirmed_methods @ 0881001a46d0
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/relay.ex#lost_answer @ dfb459724267
-\* SOURCE: apps/fermix_core/lib/fermix_core/management/provision.ex#delete,delete_target,return_fence?,server_silent?,not_holding,run_delete,returned_deleted,start_return_restore,run_return_restore,fenced_restore,fence,fence_delete,fenced_before,fenced,fence_failed @ cfb854f4d22d
+\* SOURCE: apps/fermix_core/lib/fermix_core/management/provision.ex#delete,delete_target,return_fence?,moving_back?,started_back?,link_status,server_silent?,not_holding,run_delete,returned_deleted,start_return_restore,run_return_restore,fenced_restore,fence,fence_delete,fence_refused,server_back,fenced_before,fenced,fence_failed @ 2f3883fde410
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/provision/driver.ex#delete @ 4074091d2c54
-\* SOURCE: apps/fermix_core/lib/fermix_core/management/always_on.ex @ 2766a6974452
-\* SOURCE: apps/fermix_core/lib/fermix_core/management/home_summary.ex#screen,target,device,settled,retired,away,away_here,on,returning,return_view,return_ready,return_moving,return_undone,return_stopped,restore_view,return_cancel,restoring,restore_step,fence_failed?,fence_failed,restore_offer,restorable,back,server_retired,started?,stale?,server_move,server_idle?,@before_move,@ended,@server_moves @ 90bdc82a0b6a
+\* SOURCE: apps/fermix_core/lib/fermix_core/management/always_on.ex @ f33a26e926ca
+\* SOURCE: apps/fermix_core/lib/fermix_core/management/home_summary.ex#screen,target,device,settled,retired,away,away_here,on,returning,return_view,return_ready,return_moving,return_undone,return_stopped,restore_view,return_cancel,restoring,restore_step,fence_failed?,fence_failed,restore_offer,restorable,back,server_retired,started?,stale?,silent?,server_move,server_idle?,@before_move,@ended,@server_moves @ 3bddc014f287
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/local_return.ex#restore,restored,staged,placed,failed,restart @ b07d4dc0d235
 EXTENDS Naturals
 
@@ -138,20 +140,38 @@ CONSTANTS
     DeleteBeforeRestore, \* the return_restore job deletes the server (the fence) before
                          \* it stages anything, and restores nothing when the delete is
                          \* refused (run_return_restore/4, fenced_restore/3,
-                         \* provision.ex:940-949); FALSE restores first
+                         \* provision.ex:954-962); FALSE restores first
     DeleteOfferedOnlyBack, \* the summary offers Delete your server on this computer only
                            \* once return.json has moved_at (back/1, home_summary.ex:
-                           \* 1201-1210); FALSE offers it on any screen while the ledger's
+                           \* 1229-1238); FALSE offers it on any screen while the ledger's
                            \* server stands, leaving the delete to delete_target/4 alone
     UnconfirmedKept,     \* Move now on a return keeps move_started_at when the forwarded
                          \* home.move.start is answered unconfirmed too
-                         \* (return_answered/3, always_on.ex:518-524), as a replace's
+                         \* (return_answered/3, always_on.ex:527-533), as a replace's
                          \* Provision.move_forwarded/3 does; FALSE keeps it only on
                          \* {ok, move_id}
-    StartKeptFirst       \* Move now writes move_started_at before it forwards
-                         \* home.move.start (return_start_ahead/2, always_on.ex:503-516),
+    StartKeptFirst,      \* Move now writes move_started_at before it forwards
+                         \* home.move.start (return_start_ahead/2, always_on.ex:512-525),
                          \* and the answer settles it; FALSE is the design's draft 2, which
                          \* writes it after the answer (finding HR-1, fixed)
+    MovingBackRefused,   \* delete_target/4 refuses moving_back while a candidate/ exists
+                         \* or return.json says the move back started and is not done
+                         \* (moving_back?/1, started_back?/1, provision.ex:777-808); FALSE
+                         \* has no such clause (before wave 3)
+    StoppedReturnClears, \* a move back a stop left part-way clears: Cancel removes
+                         \* return.json before candidate/ (forget_return/1), and a started
+                         \* record left alone, whose server answers with no move, offers
+                         \* Cancel (returning/1 with server_idle?/1, return_stopped/2;
+                         \* cancel/2's returning?/1). Either half alone closes the path;
+                         \* FALSE is neither (finding HR-2, fixed)
+    UndoneInAnyPhase,    \* a candidate receiving or staged whose server answers as the
+                         \* primary with no move under way draws undone, or Cancel with no
+                         \* record (return_view/2, home_summary.ex:1102-1108); FALSE draws
+                         \* moving whatever the server says (finding HR-2, fixed)
+    RestoreOnFenceRequest \* Restore here is offered for a ledger server or a requested
+                          \* fence (restore_offer/1: fence_requested); FALSE needs fenced_at,
+                          \* which a stop after the delete never writes (finding HR-3,
+                          \* fixed)
 
 VARIABLES
     \* The server: files under its home.
@@ -742,7 +762,7 @@ CandRestart ==
 -----------------------------------------------------------------------------
 (* The Mac's acts: home.act through Management.AlwaysOn, from the design   *)
 
-\* returning/1 (home_summary.ex:1052-1067), the first clause of the
+\* returning/1 (home_summary.ex:1055-1075), the first clause of the
 \* device's summary (device/1, :772): any candidate of this computer's, or,
 \* with none, return.json with move_started_at and no moved_at. (The stale
 \* check against a newer epoch the link reached needs a second desktop: not
@@ -750,19 +770,27 @@ CandRestart ==
 Returning == cPhase # "none" \/ rj = "started"
 
 \* The server answers as the primary (its part of the composed home.status)
-\* and has undone the move, or has no move at all (server_idle?/1, :1234-1237;
-\* @server_moves).
+\* and has undone the move, or has no move at all (server_idle?/1, @server_moves:
+\* aborted counts as idle).
 ServerAborted == LinkUp /\ sPhase = "aborted"
-ServerIdle == LinkUp /\ sPhase = "none"
+ServerIdle == LinkUp /\ sPhase \in {"none", "aborted"}
 
-\* Restore here (restore_offer/1, :1172-1178): this computer holds a copy
-\* (always, here), no replace runs, and the ledger has the server, or the
-\* fence deleted it (fenced_at).
-RestoreOffer == IF ledger = "standing" \/ rj = "fenced" THEN {"restore_here"} ELSE {}
+\* Restore here (restore_offer/1): this computer holds a copy (always, here),
+\* no replace runs, the server is as silent as the fence asks (silent?/1:
+\* no link, forgotten, or no session for ten minutes, which here is the link
+\* down), and the ledger has the server, or a fence was asked for (with
+\* RestoreOnFenceRequest), or the fence deleted it (fenced_at).
+RestoreOffer ==
+    IF /\ ~LinkUp
+       /\ \/ ledger = "standing" \/ rj = "fenced"
+          \/ (RestoreOnFenceRequest /\ rj = "fence")
+    THEN {"restore_here"} ELSE {}
 
-\* What returning/1 offers (return_view/2, :1069-1111; return_stopped/1,
-\* :1113-1116; restore_view/2, :1118-1130):
-\*  - a started record with no candidate: moving, nothing;
+\* What returning/1 offers (returning/1, return_view/2, return_stopped/2,
+\* restore_view/2):
+\*  - a started record with no candidate: Cancel where the server answers
+\*    with no move (StoppedReturnClears), else moving, nothing (the second
+\*    after g, or a server that does not answer);
 \*  - a local candidate: moving, or, failed, return_failed with Restore here;
 \*  - a return candidate with no record at all (a stop between Move back's
 \*    writes): return_stopped, Cancel;
@@ -771,10 +799,11 @@ RestoreOffer == IF ledger = "standing" \/ rj = "fenced" THEN {"restore_here"} EL
 \*    the server undid it: undone, Cancel (Try again is not modelled);
 \*    started and the server answers with no move: ready again; otherwise
 \*    moving, nothing;
-\*  - receiving, staged, activating: moving, nothing, whatever the server
-\*    says (finding HR-2).
+\*  - receiving, staged: with the server answering with no move, undone, or
+\*    Cancel with no record (UndoneInAnyPhase); otherwise moving, nothing;
+\*  - activating: moving, nothing.
 ReturnOffers ==
-    CASE cPhase = "none" -> {}
+    CASE cPhase = "none" -> IF StoppedReturnClears /\ ServerIdle THEN {"cancel"} ELSE {}
       [] cKind = "local" -> IF cPhase = "failed" THEN RestoreOffer ELSE {}
       [] rj = "none" /\ cPhase \in {"enrolling", "enrolled"} -> {"cancel"}
       [] cPhase = "enrolling" -> {"cancel"}
@@ -783,6 +812,8 @@ ReturnOffers ==
                [] ServerAborted -> {"cancel"}
                [] ServerIdle -> {"move_now", "cancel"}
                [] OTHER -> {}
+      [] cPhase \in {"receiving", "staged"} ->
+             IF UndoneInAnyPhase /\ ServerIdle THEN {"cancel"} ELSE {}
       [] OTHER -> {}
 
 \* Not returning (settled/1, :774-785): a desktop whose server answers draws
@@ -793,11 +824,11 @@ ReturnOffers ==
 \* Ten minutes of silence are not modelled: the link is down or up.
 DeviceOffers ==
     (IF LinkUp THEN {"move_back"} ELSE {})
-    \cup (IF ~LinkUp THEN RestoreOffer ELSE {})
+    \cup RestoreOffer
 
 \* The actions the Mac's summary offers now (screen/1, :254-256). A primary
 \* with moved_at and the ledger's server standing offers Delete your server
-\* (back/1 and server_retired/1, :1201-1219).
+\* (back/1 and server_retired/1, :1229-1247).
 Offered ==
     LET extra == IF ~DeleteOfferedOnlyBack /\ ledger = "standing"
                  THEN {"delete_server"} ELSE {}
@@ -835,7 +866,7 @@ Preparable(kind) ==
     /\ (kind = "return" => mLink)
     /\ cPhase \in {"none", "failed"}
 
-\* Move back (move_back/2, always_on.ex:542-607): the server's move is
+\* Move back (move_back/2, always_on.ex:551-616): the server's move is
 \* checked (server_still/1, a press while it reports one refused) and
 \* home.enroll.open forwarded and answered, both folded into the press (a link
 \* down refuses it there, as Offered does); then Candidate.prepare_return/3
@@ -866,7 +897,7 @@ MbStart ==
     /\ UNCHANGED <<srvFiles, srvRun, rail, macFiles, mBoot, restore, apc, aOwner, aTo,
                    activated, budgets, hist>>
 
-\* Move now on a return (forwarded_move/5, always_on.ex:470-486):
+\* Move now on a return (forwarded_move/5, always_on.ex:479-495):
 \* home.move.start {candidate_id, passphrase, keep_as_desktop: false}
 \* forwarded over the link. The server's HomeMove.move_start/3 runs
 \* Move.start/5 (request, phase requested, role device) and restarts into the
@@ -924,15 +955,16 @@ MnUnmark ==
                    cRec, stDb, stCfg, ledger, mBoot, cUp, restore, apc, aOwner, aTo,
                    activated, budgets, hist>>
 
-\* Cancel on a return (cancel_return/1, always_on.ex:609-638):
-\* Link.stop_return/0 stops the candidate subtree
-\* (DeviceSupervisor.stop_candidate/1: its process is stopped where it is,
-\* an activation part-way included, and its rails end); home.enroll.withdraw
-\* {kind: manual} is forwarded (nothing here reads the window); then
-\* candidate/ (Candidate.remove/1) and return.json (Return.remove/1) go, in
-\* that order.
+\* Cancel on a return (cancel/2 when returning?/1, cancel_return/1,
+\* always_on.ex:367-377, :618-650): Link.stop_return/0 stops the candidate
+\* subtree (DeviceSupervisor.stop_candidate/1: its process is stopped where
+\* it is, an activation part-way included, and its rails end);
+\* home.enroll.withdraw {kind: manual} is forwarded (nothing here reads the
+\* window); then return.json (Return.remove/1) and candidate/
+\* (Candidate.remove/1) go: in that order with StoppedReturnClears
+\* (forget_return/1), the other way round without.
 CxStop ==
-    /\ act = "cx_stop" /\ AGoto("cx_remove")
+    /\ act = "cx_stop" /\ AGoto(IF StoppedReturnClears THEN "cx_forget" ELSE "cx_remove")
     /\ cUp' = FALSE /\ apc' = "idle" /\ restore' = "none" /\ aTo' = "none"
     /\ activated' = FALSE
     /\ req' = "none" /\ rep' = "none" /\ railUp' = FALSE
@@ -941,13 +973,13 @@ CxStop ==
                    crashEF, deletedAfter, fromCopy>>
 
 CxRemove ==
-    /\ act = "cx_remove" /\ AGoto("cx_forget")
+    /\ act = "cx_remove" /\ AGoto(IF StoppedReturnClears THEN "idle" ELSE "cx_forget")
     /\ cPhase' = "none" /\ cRec' = FALSE /\ stDb' = FALSE /\ stCfg' = FALSE
     /\ UNCHANGED <<srvFiles, srvRun, rail, mCfg, mMarker, mLink, mDb, mStale, rj, cKind, ledger,
                    mBoot, cUp, restore, apc, aOwner, aTo, activated, budgets, hist>>
 
 CxForget ==
-    /\ act = "cx_forget" /\ AGoto("idle")
+    /\ act = "cx_forget" /\ AGoto(IF StoppedReturnClears THEN "cx_remove" ELSE "idle")
     /\ rj' = "none"
     /\ UNCHANGED <<srvFiles, srvRun, rail, mCfg, mMarker, mLink, mDb, mStale, cPhase, cKind,
                    cRec, stDb, stCfg, ledger, mBoot, cUp, restore, apc, aOwner, aTo,
@@ -959,22 +991,23 @@ DeleteAllowed ==
     \/ rj = "back"
     \/ cPhase = "none" /\ ~stDb /\ ~stCfg /\ mCfg = "device"
 
-\* Provision.delete_target/4 (provision.ex:777-807), in order: Restore here's
+\* Provision.delete_target/4 (provision.ex:777-819), in order: Restore here's
 \* fence (return_fence?/2: fence_requested, no candidate/, the server silent:
-\* no link, revoked, or unreachable for the summary's limit); any candidate/,
-\* refused moving_back; a linked or marked device, refused (not_holding/2:
-\* live_home, with no replace here); otherwise the server that stands.
+\* no link, revoked, or unreachable for the summary's limit); a move back in
+\* any phase, refused moving_back (MovingBackRefused); a linked or marked
+\* device, refused (not_holding/2: live_home, with no replace here);
+\* otherwise the server that stands.
 DeleteTarget ==
     CASE rj \in {"fence", "fenced"} /\ cPhase = "none" /\ ~LinkUp -> "return_fence"
-      [] cPhase # "none" -> "moving_back"
+      [] MovingBackRefused /\ (cPhase # "none" \/ rj = "started") -> "moving_back"
       [] mBoot = "device" /\ (mLink \/ mMarker) -> "live_home"
       [] OTHER -> "current"
 
 \* Delete your server: the delete job (Provision.delete/1, provision.ex:756-775,
-\* run_delete/4, :825-843). Driver.delete/3 removes the server and clears it
+\* run_delete/4, :838-856). Driver.delete/3 removes the server and clears it
 \* from the ledger, or the provider refuses. Then, for :current, return.json
-\* goes when it has moved_at (returned_deleted/1, :854-861); for
-\* :return_fence, fenced_at is written (fenced/2, :976-987).
+\* goes when it has moved_at (returned_deleted/1, :867-874); for
+\* :return_fence, fenced_at is written (fenced/2, :1007-1018).
 DsDelete ==
     /\ act = "ds_delete"
     /\ IF DeleteTarget \in {"current", "return_fence"} /\ ledger = "standing"
@@ -1004,14 +1037,15 @@ DsFenced ==
                    cRec, stDb, stCfg, ledger, mBoot, cUp, restore, apc, aOwner, aTo,
                    activated, budgets, hist>>
 
-\* Restore here (restore_here/3, always_on.ex:648-664): the copy is chosen
+\* Restore here (restore_here/3, always_on.ex:660-676): the copy is chosen
 \* first (a wrong passphrase deletes nothing, not modelled), return.json
 \* gains fence_requested (restore_record/3, :666-672: the record kept, or a
 \* new one), then the return_restore job (Provision.start_return_restore/2,
-\* provision.ex:929-946), which is never resumed after a restart:
-\*  (1) the fence (fence/4, fence_delete/4, :951-967): with the ledger
-\*      holding a server, delete_target/4 must answer :return_fence, else
-\*      the job ends and restores nothing; Driver.delete/3 removes the server
+\* provision.ex:942-962), which is never resumed after a restart:
+\*  (1) the fence (fence/4, fence_delete/4): with the ledger holding a
+\*      server, delete_target/4 must answer :return_fence, else the job ends
+\*      and restores nothing (a server that answers again drops
+\*      fence_requested: server_back/1); Driver.delete/3 removes the server
 \*      and clears it from the ledger, or the provider refuses; then fenced/2
 \*      writes fenced_at, a write of its own. With nothing in the ledger
 \*      (fenced before) the restore runs alone (fenced_before/2);
@@ -1032,18 +1066,25 @@ RhDelete ==
     /\ act = "rh_delete"
     /\ CASE ledger = "gone" ->
                 /\ AGoto(AfterFence)
-                /\ UNCHANGED <<sAlive, wpc, ledger, rail, restore, aTo, hist>>
+                /\ UNCHANGED <<sAlive, wpc, ledger, rail, restore, aTo, rj, hist>>
          [] DeleteTarget = "return_fence" ->
-                \/ /\ ServerDeleted
-                   /\ badDelete' = (badDelete \/ ~DeleteAllowed)
-                   /\ AGoto("rh_fenced")
-                   /\ UNCHANGED <<doneLost, crashEF, deletedAfter, fromCopy>>
-                \/ /\ DeleteCanFail /\ AGoto("idle")
-                   /\ UNCHANGED <<sAlive, wpc, ledger, rail, restore, aTo, hist>>
+                /\ UNCHANGED rj
+                /\ \/ /\ ServerDeleted
+                      /\ badDelete' = (badDelete \/ ~DeleteAllowed)
+                      /\ AGoto("rh_fenced")
+                      /\ UNCHANGED <<doneLost, crashEF, deletedAfter, fromCopy>>
+                   \/ /\ DeleteCanFail /\ AGoto("idle")
+                      /\ UNCHANGED <<sAlive, wpc, ledger, rail, restore, aTo, hist>>
+         [] LinkUp ->
+                \* fence_refused/1 -> server_back/1 (provision.ex:983-998): the server
+                \* answers again, so the request is dropped and nothing is deleted
+                /\ AGoto("idle")
+                /\ rj' = IF rj = "fence" THEN "asked" ELSE rj
+                /\ UNCHANGED <<sAlive, wpc, ledger, rail, restore, aTo, hist>>
          [] OTHER ->
                 /\ AGoto("idle")
-                /\ UNCHANGED <<sAlive, wpc, ledger, rail, restore, aTo, hist>>
-    /\ UNCHANGED <<srvFiles, sBoot, mCfg, mMarker, mLink, mDb, mStale, rj, cPhase, cKind, cRec,
+                /\ UNCHANGED <<sAlive, wpc, ledger, rail, restore, aTo, rj, hist>>
+    /\ UNCHANGED <<srvFiles, sBoot, mCfg, mMarker, mLink, mDb, mStale, cPhase, cKind, cRec,
                    stDb, stCfg, mBoot, cUp, apc, aOwner, activated, budgets>>
 
 RhFenced ==
@@ -1187,24 +1228,22 @@ Quiet ==
     /\ act = "idle" /\ apc = "idle" /\ restore = "none" /\ ~activated
     /\ req = "none" /\ rep = "none"
 
-\* Proposed rule (finding HR-3): a Mac whose server is gone, and which serves
-\* nothing itself, is offered Restore here once nothing runs.
+\* Proposed rule (finding HR-3, fixed): a Mac whose server is gone, and which
+\* serves nothing itself, is offered Restore here once nothing runs.
 GoneServerCanBeRestored ==
     (~sAlive /\ mBoot = "device" /\ ~MacServes /\ Quiet) => "restore_here" \in Offered
 
-\* The ends: the home is back on the Mac (the server retired or deleted; its
-\* worker may still be resuming, which never stops here); the server serves
-\* it and the Mac waits, whatever its candidate holds (finding HR-2's rule,
-\* UndoneReturnCanEnd, says when that wait is a dead end); or the server was
-\* deleted as the fence and the restore here did not finish, with the
-\* owner's presses spent (Restore here is offered again) or, finding HR-3,
-\* with Restore here no longer offered: that end is not legitimate, and
-\* GoneServerCanBeRestored's check records it.
+\* The legitimate ends: the home is back on the Mac (the server retired or
+\* deleted; its worker may still be resuming, which never stops here); the
+\* server serves it and the Mac waits, whatever its candidate holds
+\* (UndoneReturnCanEnd holds that the screen then offers a step wherever the
+\* server answers); or the server was deleted as the fence and the owner's
+\* presses are spent before the restore here finished (Restore here is
+\* offered again: GoneServerCanBeRestored).
 Done ==
     \/ Quiet /\ mBoot = "primary" /\ ~ServerServes
     \/ Quiet /\ mBoot = "device" /\ ServerServes /\ wpc = "off"
-    \/ /\ Quiet /\ mBoot = "device" /\ ~sAlive
-       /\ (presses = MaxPresses \/ ~GoneServerCanBeRestored)
+    \/ Quiet /\ mBoot = "device" /\ ~sAlive /\ presses = MaxPresses
 
 Terminated == Done /\ UNCHANGED vars
 
@@ -1274,10 +1313,10 @@ ServerDeletedOnlyAfterReturn == ~badDelete
 RetiredOnlyForStagedReturn ==
     sMoved => (MacServes \/ (cKind = "return" /\ cPhase \in {"staged", "activating"}))
 
-\* Proposed rule (finding HR-2): while the server answers as the primary with
-\* no move under way, the Mac's screen offers a step once nothing runs on the
-\* Mac: a return the server undid, or never started, can be cancelled or
-\* tried again.
+\* Proposed rule (finding HR-2, fixed): while the server answers as the
+\* primary with no move under way, the Mac's screen offers a step once
+\* nothing runs on the Mac: a return the server undid, or never started, can
+\* be cancelled or tried again.
 UndoneReturnCanEnd ==
     (mBoot = "device" /\ LinkUp /\ sPhase \in {"none", "aborted"} /\ Quiet) => Offered # {}
 
