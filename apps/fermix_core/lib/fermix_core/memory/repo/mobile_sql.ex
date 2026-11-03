@@ -632,6 +632,122 @@ defmodule FermixCore.Memory.Repo.MobileSql do
     end)
   end
 
+  # The rows a scheduled job's or a cue's run sent with no origin yet
+  # (`Companion.OriginBackfill`): an assistant row under `job:<run id>`, or
+  # `job:<run id>:<part id>` for a part of the message (a run id holds no
+  # colon), whose metadata is none or an object without `origin`, after a
+  # rowid, in rowid order. Beside each, what its run's record names: the
+  # trigger, the job's name as the run recorded it and as it reads now, and
+  # the watcher a cue run's delivery or a follow-up's trigger names
+  # (`Jobs.CueRun.load/2`, `Cues.FollowUps.run_trigger/2`). Each is NULL once
+  # its row is gone.
+  @origin_candidates_sql """
+  WITH sent AS (
+    SELECT t.rowid AS row_id, t.agent_id, t.owner_id, t.profile_id, t.server_seq,
+           t.metadata_json, substr(t.proactive_key || ':', 5) AS key_tail
+    FROM mobile_timeline AS t
+    WHERE t.rowid > ? AND t.role = 'assistant' AND t.proactive_key GLOB 'job:*'
+      AND CASE
+        WHEN t.metadata_json IS NULL THEN 1
+        WHEN json_valid(t.metadata_json) THEN json_type(t.metadata_json) = 'object'
+          AND json_type(t.metadata_json, '$.origin') IS NULL
+        ELSE 0
+      END
+    ORDER BY t.rowid
+    LIMIT ?
+  )
+  SELECT s.row_id, s.agent_id, s.owner_id, s.profile_id, s.server_seq, s.metadata_json,
+         r.trigger,
+         CASE WHEN json_valid(r.job_config_snapshot_json)
+           THEN json_extract(r.job_config_snapshot_json, '$.name') END,
+         j.name,
+         CASE r.trigger
+           WHEN 'cue' THEN (SELECT w.name FROM cue_deliveries AS d
+             JOIN cue_watchers AS w ON w.id = d.watcher_id WHERE d.id = r.cue_delivery_id)
+           WHEN 'watcher' THEN (SELECT w.name FROM cue_follow_up_triggers AS f
+             JOIN cue_watchers AS w ON w.id = f.watcher_id WHERE f.run_id = r.id)
+         END
+  FROM sent AS s
+  LEFT JOIN job_runs AS r ON r.id = substr(s.key_tail, 1, instr(s.key_tail, ':') - 1)
+  LEFT JOIN scheduled_jobs AS j ON j.id = r.job_id
+  ORDER BY s.row_id
+  """
+
+  # A row's metadata, written only while it is still what was read.
+  @fill_origin_sql """
+  UPDATE mobile_timeline SET metadata_json = ?
+  WHERE agent_id = ? AND owner_id = ? AND profile_id = ? AND server_seq = ?
+    AND metadata_json IS ?
+  RETURNING server_seq
+  """
+
+  @doc """
+  At most `limit` rows a scheduled job's or a cue's run sent that carry no
+  `metadata.origin` yet, after rowid `after_rowid`, oldest first, each with
+  its stored `metadata_json` and what its run's record names (`:trigger`,
+  `:recorded_job_name`, `:job_name`, `:watcher_name`), nil for what is not on
+  record.
+  """
+  @spec origin_candidates(term(), non_neg_integer(), pos_integer()) ::
+          {:ok, [map()]} | {:error, term()}
+  def origin_candidates(conn, after_rowid, limit) do
+    with {:ok, rows} <- query_all(conn, @origin_candidates_sql, [after_rowid, limit]) do
+      {:ok, Enum.map(rows, &origin_candidate/1)}
+    end
+  end
+
+  defp origin_candidate([
+         row_id,
+         agent_id,
+         owner_id,
+         profile_id,
+         server_seq,
+         metadata_json,
+         trigger,
+         recorded_job_name,
+         job_name,
+         watcher_name
+       ]) do
+    %{
+      rowid: row_id,
+      agent_id: agent_id,
+      owner_id: owner_id,
+      profile_id: profile_id,
+      server_seq: server_seq,
+      metadata_json: metadata_json,
+      trigger: trigger,
+      recorded_job_name: recorded_job_name,
+      job_name: job_name,
+      watcher_name: watcher_name
+    }
+  end
+
+  @doc """
+  Writes each row's `metadata` (the row's own, its `origin` added) in one
+  transaction, only where its stored metadata is still the `metadata_json` it
+  was read with; answers how many rows it wrote.
+  """
+  @spec fill_origins(term(), [map()]) :: {:ok, non_neg_integer()} | {:error, term()}
+  def fill_origins(_conn, []), do: {:ok, 0}
+
+  def fill_origins(conn, rows) when is_list(rows) do
+    transaction(conn, fn -> fill_origin_rows(conn, rows, 0) end)
+  end
+
+  defp fill_origin_rows(_conn, [], written), do: {:ok, written}
+
+  defp fill_origin_rows(conn, [row | rest], written) do
+    case query_all(conn, @fill_origin_sql, fill_origin_params(row)) do
+      {:ok, rows} -> fill_origin_rows(conn, rest, written + length(rows))
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp fill_origin_params(%{metadata: %{"origin" => _origin} = metadata} = row) do
+    [encode_json(metadata)] ++
+      profile_params(normalize_profile(row)) ++ [row.server_seq, row.metadata_json]
+  end
+
   @doc """
   Advance the read frontier to the reported seq, clamped to the history head
   in the same transaction: it never moves back, and never past the newest row.

@@ -867,6 +867,33 @@ defmodule FermixCore.Memory.Repo do
           media: map()
         }
 
+  @typedoc """
+  A timeline row a scheduled job's or a cue's run sent, with no origin yet,
+  beside what its run's record names; nil for what is not on record.
+  """
+  @type mobile_origin_candidate :: %{
+          rowid: pos_integer(),
+          agent_id: String.t(),
+          owner_id: String.t(),
+          profile_id: String.t(),
+          server_seq: pos_integer(),
+          metadata_json: String.t() | nil,
+          trigger: String.t() | nil,
+          recorded_job_name: term(),
+          job_name: String.t() | nil,
+          watcher_name: String.t() | nil
+        }
+
+  @typedoc "A row's metadata to write, `origin` added, and the metadata it was read with."
+  @type mobile_origin_fill :: %{
+          agent_id: String.t(),
+          owner_id: String.t(),
+          profile_id: String.t(),
+          server_seq: pos_integer(),
+          metadata_json: String.t() | nil,
+          metadata: %{required(String.t()) => term()}
+        }
+
   @type mobile_client_request_row :: %{
           agent_id: String.t(),
           owner_id: String.t(),
@@ -1469,6 +1496,52 @@ defmodule FermixCore.Memory.Repo do
              is_map(preview) do
     call({:attach_mobile_link_preview, selector, server_seq, preview}, opts)
   end
+
+  @doc """
+  At most `limit` (1 to 1,000) timeline rows a scheduled job's or a cue's
+  run sent that carry no `metadata.origin` yet, after rowid `after_rowid`,
+  oldest first, each beside what its run's record names
+  (`MobileSql.origin_candidates/3`). Only `Companion.OriginBackfill` reads it.
+  """
+  @spec mobile_origin_candidates(non_neg_integer(), pos_integer(), keyword()) ::
+          {:ok, [mobile_origin_candidate()]} | {:error, term()}
+  def mobile_origin_candidates(after_rowid, limit, opts \\ [])
+      when is_sqlite_seq(after_rowid) and is_integer(limit) and limit > 0 and limit <= 1_000 do
+    call({:mobile_origin_candidates, after_rowid, limit}, opts)
+  end
+
+  @doc """
+  Writes each row's `metadata`, its own with `origin` added, in one
+  transaction, only where the row's stored metadata is still the
+  `metadata_json` it was read with (`MobileSql.fill_origins/2`); answers how
+  many rows it wrote. Each row is checked here, in the caller, so a bad one
+  fails there and never inside the Repo.
+  """
+  @spec fill_mobile_origins([mobile_origin_fill()], keyword()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def fill_mobile_origins(rows, opts \\ []) when is_list(rows) do
+    Enum.each(rows, &check_origin_fill!/1)
+    call({:fill_mobile_origins, rows}, opts)
+  end
+
+  defp check_origin_fill!(
+         %{
+           agent_id: agent_id,
+           owner_id: owner_id,
+           profile_id: profile_id,
+           server_seq: server_seq,
+           metadata_json: metadata_json,
+           metadata: %{"origin" => %{}}
+         } = row
+       )
+       when is_binary(agent_id) and is_binary(owner_id) and is_binary(profile_id) and
+              is_sqlite_seq(server_seq) and (is_binary(metadata_json) or is_nil(metadata_json)) do
+    {:ok, _json} = Jason.encode(row.metadata)
+    :ok
+  end
+
+  defp check_origin_fill!(row),
+    do: raise(ArgumentError, "not a timeline origin to write: #{inspect(row)}")
 
   @spec advance_mobile_read_frontier(
           mobile_profile_selector(),
@@ -4140,6 +4213,16 @@ defmodule FermixCore.Memory.Repo do
         &MobileSql.attach_link_preview(&1, selector, server_seq, preview)
       )
 
+    {:reply, reply, state}
+  end
+
+  def handle_call({:mobile_origin_candidates, after_rowid, limit}, _from, state) do
+    reply = with_connection(state, &MobileSql.origin_candidates(&1, after_rowid, limit))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:fill_mobile_origins, rows}, _from, state) do
+    reply = with_connection(state, &MobileSql.fill_origins(&1, rows))
     {:reply, reply, state}
   end
 

@@ -377,7 +377,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   result, or a notice about it) carries the watcher's name, so the app can
   show it above the message and open that watcher from there. A picture or
   file the job sends carries it too. Replies to you, reminders and voice call
-  rows carry none.
+  rows carry none. Messages already in your chat from before say where they
+  came from too: when Fermix starts, each one a job sent is given the job's
+  name, and each one a watcher set off in about the last 30 days the
+  watcher's name. A watcher's notice from before, and a message from a job or
+  watcher you have since removed, stay as they were.
 
 ### Changed
 

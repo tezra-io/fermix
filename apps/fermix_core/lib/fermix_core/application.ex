@@ -22,6 +22,7 @@ defmodule FermixCore.Application do
   alias FermixCore.Capabilities.MCP.Supervisor, as: McpSupervisor
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.CommandHost.Supervisor, as: CommandHostSupervisor
+  alias FermixCore.Companion.OriginBackfill
   alias FermixCore.ComputerHistory
   alias FermixCore.ComputerHistory.Supervisor, as: ComputerHistorySupervisor
   alias FermixCore.ComputerUse
@@ -406,6 +407,12 @@ defmodule FermixCore.Application do
         maybe_computer_use_supervisor(),
         maybe_computer_history_supervisor(),
         maybe_skill_curation_scheduler(),
+        # Says where a scheduled job's or a cue's message came from on the
+        # timeline rows written before `metadata.origin` existed, once most of
+        # the tree is up, in short batches the boot never waits for.
+        # `:temporary`, so a crash restarts nothing after it; dark under `mix
+        # test`, whose suites run their own pass on their own Repo.
+        {OriginBackfill, enabled: @compiled_env != :test},
         # The primary's snapshots (M75 §8), before the cue tree so a crash of
         # either restarts nothing but the cue tree. Its timers stay dark under
         # `mix test`; tests start their own with an injected clock and timer.

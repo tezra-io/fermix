@@ -528,7 +528,14 @@ turn's reply, a slash command's answer, a Live call's row, a reminder,
 Fermix's notice about a cue source, a mandate or a confirmed call whose
 outcome is unknown, and a run with no name to give (a follow-up whose
 watcher was removed before it ran). A name is never
-made up. The key is additive, so it is sent on every version: a client that
+made up. A row a job's or a cue's run wrote before `origin` existed is given
+the origin its run gives a row today when the daemon starts, as long as what
+names it is still on record: the run, and for a cue the watcher and the cue
+delivery or follow-up trigger that led to the run, which are kept about 30
+days after they end. A watcher's notice from then, and a row whose run,
+delivery, trigger or watcher is gone, have none. Nothing is announced: a
+client sees it the next time a history page carries the row. The key is
+additive, so it is sent on every version: a client that
 does not know `origin`, or meets a `kind` it does not know, ignores it and
 draws the row as it draws any other.
 

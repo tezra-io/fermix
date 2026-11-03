@@ -129,7 +129,10 @@ defmodule FermixCore.Home.Role do
        "can be moved"},
     {FermixCore.Plugins.Dist.Reinstall,
      "installs again the plugins a move brought to the new primary; a device's home is a " <>
-       "retired copy"}
+       "retired copy"},
+    {FermixCore.Companion.OriginBackfill,
+     "says where earlier messages came from on memory.db's timeline, which a device does " <>
+       "not open"}
   ]
 
   @primary_only_modules Enum.map(@primary_only, &elem(&1, 0))

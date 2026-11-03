@@ -21,6 +21,7 @@ defmodule FermixCore.Home.RoleChildrenTest do
     FermixCore.Auth.TokenSupervisor,
     FermixCore.Home.Snapshot.Scheduler,
     FermixCore.Plugins.Dist.Reinstall,
+    FermixCore.Companion.OriginBackfill,
     FermixCore.Memory.Repo,
     FermixCore.Prompt.TemplateReconciler
   ]
@@ -91,11 +92,13 @@ defmodule FermixCore.Home.RoleChildrenTest do
 
   # A device's database is a retired copy, which a return replaces in place
   # while the device engine runs (Always On's move back): a device opens it
-  # never, so nothing it starts captures into it, purges it or migrates it.
+  # never, so nothing it starts captures into it, purges it, migrates it or
+  # fills in its timeline.
   test "a device opens no database: no repo, no template pass, no screen capture or purge" do
     database = [
       FermixCore.Memory.Repo,
       FermixCore.Prompt.TemplateReconciler,
+      FermixCore.Companion.OriginBackfill,
       FermixCore.ComputerHistory.Capturer,
       FermixCore.ComputerHistory.Retention,
       FermixCore.ComputerHistory.Summarizer.Scheduler
