@@ -532,3 +532,15 @@ README calls the init request dead code, and check 37 pins the tick); and the
 reaper's final failure report marks the run row's delivery `pending` before
 its send (its witness 45 is no longer reachable in the code and is owed a
 `holds` check with a `needs` check).
+
+## Re-read for earlier messages' origin (2026-11-02)
+
+The core tree gained `Companion.OriginBackfill`, a `:temporary` task before
+the snapshot scheduler that fills in `metadata.origin` on timeline rows a
+job's or a cue's run wrote before it existed. It staled the `application.ex`
+pin. The task reads `job_runs`, `scheduled_jobs`, `cue_deliveries`,
+`cue_follow_up_triggers` and `cue_watchers`, and writes only
+`mobile_timeline.metadata_json`: it claims, settles and moves no delivery or
+run. The cue tree is still the tree's last child, a crash of anything before
+it restarts it as before, and the task's own exit restarts nothing, so
+nothing the spec models changed.

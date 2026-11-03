@@ -42,7 +42,7 @@ attempt like every platform's, so nothing here models it separately.
   (`delivery_worker.ex:197-200`, `:66`).
 - `SchedulerCanRestart`: the scheduler crashes while the BEAM stays up. Any
   earlier child of the flat `:rest_for_one` list (`Repo`, `MainAgent`,
-  `JobScheduler`, …; `application.ex:259-362`) restarts it too. A scheduler
+  `JobScheduler`, …; `application.ex:260-363`) restarts it too. A scheduler
   Repo call that times out no longer does: it returns an error (see
   `RepoCanFail`).
 - `DaemonCanCrash`: the whole daemon dies and boots again.
@@ -68,10 +68,10 @@ least one check):
 - `ClaimRequiresPending`: the claim takes only pending rows. The load-bearing
   filter is the due scan's `status = 'pending'` (`temporal_sql.ex:1573`). The
   per-row re-read (`:1593`) and the UPDATE's `WHERE status = 'pending'`
-  (`:1033`) repeat it inside the same Repo callback (`repo.ex:3061-3064`), where
+  (`:1033`) repeat it inside the same Repo callback (`repo.ex:3134-3137`), where
   no other writer can interleave, so removing only them would change nothing.
 - `WorkersDieWithScheduler`: `DeliverySupervisor` starts after the scheduler
-  under `:rest_for_one` (`application.ex:362-363`, `:182`).
+  under `:rest_for_one` (`application.ex:363-364`, `:183`).
 - `SendsDieWithWorker`: a worker's send process is spawned linked to it
   (`Process.spawn(fun, [:link, :monitor])`, `channel_send.ex:219-224`), so a
   worker killed mid-send takes its send with it. Off, it is the code before the
@@ -97,7 +97,7 @@ least one check):
   - No sixth attempt (`scheduler.ex:332-335`). This rests on `AttemptCap`
     (check 02).
   - Never two workers for the row (`delivery_supervisor.ex:5-10`,
-    `application.ex:355-363`). This rests on `ClaimRequiresPending` (check 03),
+    `application.ex:356-364`). This rests on `ClaimRequiresPending` (check 03),
     `WorkersDieWithScheduler` (check 04) and `ResetSkipsMonitored` (check 05),
     and on the timing fact `DownHandledBeforeRetryDue` (check 20).
   - Never two sends for the row either (the premise of M30 §19.10's no-lease
@@ -305,7 +305,7 @@ counterexample, run `tla/bin/check.py reminder_delivery` and open
   - `ChannelSend.with_timeout` ran the adapter call in a `spawn_monitor`ed
     process. It was not linked to the worker, and no supervisor owns it.
   - The worker does not trap exits, so the `DeliverySupervisor` shutdown under
-    `:rest_for_one` (`application.ex:269-270`, `:300`) kills it at once, inside
+    `:rest_for_one` (`application.ex:270-271`, `:301`) kills it at once, inside
     the watchdog's `receive`.
   - The watchdog is the worker's own `receive … after`, so the orphan was
     bounded only by the HTTP client's own timeouts (for example the 15 s pool
@@ -434,6 +434,16 @@ and `output.ex` pins: a media row now stores the `origin` a scheduled job's
 or a cue's send names, and `persist_output` checks a given origin before it
 writes. A reminder's send names no origin, so its row, its proactive dedupe
 and its push are as before; the comment's `output.ex` numbers moved with the
+code. No delivery path the spec models changed.
+
+Re-read on 2026-11-02 for earlier messages' origin, which staled the
+`mobile_sql.ex` and `application.ex` pins: `MobileSql` gained a read of the
+rows a job's or a cue's run sent with no origin and a write of their
+metadata, made only while it is still what was read, and the core tree a
+`:temporary` task (`Companion.OriginBackfill`) that runs them at start.
+Neither touches a reminder's `temporal:` row, the proactive append or its
+dedupe, and the temporal scheduler and its delivery supervisor keep their
+order; the comments' `application.ex` and `repo.ex` numbers moved with the
 code. No delivery path the spec models changed.
 
 ## Code and doc drift

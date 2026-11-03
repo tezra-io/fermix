@@ -161,6 +161,16 @@ its write and announcement are as before. Every row, seq, ending and
 settlement is unchanged, so nothing the spec models changed. The line
 references into `channels/companion.ex` moved with the code.
 
+The re-read for earlier messages' origin (2026-11-02) found `PROTOCOL.md`
+saying that a row a job's or a cue's run wrote before `origin` existed is
+given it when the daemon starts (`Companion.OriginBackfill`). That pass
+rewrites only the stored `metadata_json` of rows already written, and only
+while it is still what the pass read: it appends no row, takes no
+`server_seq`, settles no request and sends no event, so every row, seq,
+ending and settlement the spec models is unchanged. Its read and write sit
+above most of the `mobile_sql.ex` functions the spec cites, and the line
+references below them moved with the code.
+
 **The Queue is one abstract process.** The runner takes one `.tla` per spec,
 and `turn_queue` proves the Queue's rules against `queue.ex`, so this spec takes
 them as given:
@@ -318,7 +328,7 @@ the checks that show a rule needs it):
   is the conversation stop.
 - `CancelMarksRequest`: a cancel is recorded on its request first
   (`Requests.cancel`, `requests.ex:192-208`; `cancel_request`,
-  `mobile_sql.ex:705-724`). `Turns` reads the mark and enqueues in one step
+  `mobile_sql.ex:821-840`). `Turns` reads the mark and enqueues in one step
   (`hand_off`, `turns.ex:335-350`), and sends every stop of a turn it handed
   off itself, after the enqueue (`turns.ex:249-253`, `stop_in_queue`,
   `:449-460`). `FALSE` is the code before 431d5663: the Connection called
@@ -343,7 +353,7 @@ the checks that show a rule needs it):
   failure: the request stays `running`, and the next boot runs the command
   again.
 - `SeqAssignedOnInsert`: the seq comes from the counter inside the inserting
-  transaction (`append_in_tx`, `mobile_sql.ex:940-947`). `FALSE`: a writer
+  transaction (`append_in_tx`, `mobile_sql.ex:1056-1063`). `FALSE`: a writer
   reads the counter, then inserts in a second call.
 - `SilenceGate`: a turn may end with no reply only if every client joined
   when it started declared version 2 (`MainAgent.live_call`,
