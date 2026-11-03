@@ -891,14 +891,19 @@ runs, journals, grants, bootstrap, browser, harness, eval-mcp) and `config.toml`
 never `auth.json`, whose OAuth refresh token the daemon may rotate. With the flag,
 `run_eval.py` runs `capability-daemon.sh reset` before each attempt of an
 `isolated_mutation` `drive: companion` case, `--fail-retries` re-drives included:
-stop the daemon, restore the snapshot, start it and wait until it answers. It is
+stop the daemon, restore the snapshot, start it and wait until it answers on its
+control socket. The runner then waits, up to 30 s, until the companion socket
+answers the drive's own hello: the daemon serves that socket after the control
+socket, and a drive that connected in between was refused. It is
 off by default, needs `--profile isolated_mutation`, and refuses to start a run on
 a home with no snapshot. `reset` (like `snapshot`) refuses any home whose leaf
 names neither `eval` nor `e2e` before it stops or touches anything, with the
 seeder's own guard (`bin/eval_home_state.py`). Each attempt pays one daemon
-restart, a few seconds, and the run prints each reset's time. A reset that fails
-stops the run: the case is reported INCOMPLETE and the rest are left unrun, as an
-exhausted account does.
+restart, a few seconds, and the run prints each reset's time. A reset that fails,
+a companion socket that never answers included, stops the run: the case is
+reported INCOMPLETE, the rest are left unrun, as an exhausted account does, and the
+banner names the harness. Reports redact every `drive_error` by default;
+`--include-content` keeps the text.
 
 ### The Cues screen (`make capability-screen`)
 

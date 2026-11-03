@@ -76,6 +76,11 @@ STICKY_GATES = ALWAYS_STICKY_GATES
 # stop, READY_TIMEOUT's 90 s for the new one to answer) with room to spare.
 DAEMON_SCRIPT = os.path.join(HERE, "capability-daemon.sh")
 _RESET_TIMEOUT_S = 180
+# The script's readiness is the control socket's `status`; the companion socket the
+# drive uses comes up after it. In the first --reset-home cues run it followed by 85 to
+# 941 ms in the 45 boots where it came up, and five drives that connected before it did
+# were INCOMPLETE. 30 s is about 30 times the slowest gap.
+_COMPANION_READY_S = 30
 # Why a run stopped early, said in its console banner and its report.
 _ACCOUNT_ABORT_WHY = "This is an external account condition, not a product failure."
 _RESET_ABORT_WHY = ("The eval home could not be put back to its seeded state, so no later "
@@ -605,10 +610,12 @@ def reset_home_precondition_error(fermix_home: str) -> str | None:
 
 def home_resetter(cfg):
     """The reset --reset-home runs before an attempt: `capability-daemon.sh reset` on
-    this run's eval home, its daemon exporting to this run's Opik project. The
-    callable returns None, or why the home could not be reset."""
-    env = {**os.environ, "FERMIX_CAP_HOME": os.path.expanduser(cfg.daemon.fermix_home),
-           "FERMIX_CAP_PROJECT": cfg.opik.project}
+    this run's eval home, its daemon exporting to this run's Opik project, then the
+    wait until the companion socket answers the drive's hello, since the script is
+    ready once the control socket answers and the companion socket comes up after it.
+    The callable returns None, or why the home could not be reset."""
+    home = os.path.expanduser(cfg.daemon.fermix_home)
+    env = {**os.environ, "FERMIX_CAP_HOME": home, "FERMIX_CAP_PROJECT": cfg.opik.project}
 
     def reset() -> str | None:
         started = time.monotonic()
@@ -622,6 +629,9 @@ def home_resetter(cfg):
         if done.returncode != 0:
             tail = "\n".join(done.stderr.strip().splitlines()[-5:])
             return f"capability-daemon.sh reset exited {done.returncode}: {tail}"
+        not_ready = companion.await_hello(home, _COMPANION_READY_S)
+        if not_ready:
+            return f"the daemon answered its control socket after the reset, but {not_ready}"
         print(f"    eval home reset to its seeded state "
               f"({time.monotonic() - started:.1f}s)", flush=True)
         return None

@@ -312,6 +312,38 @@ def socket_path(fermix_home: str) -> str:
     return os.path.join(os.path.expanduser(fermix_home), SOCKET_NAME)
 
 
+# How often `await_hello` knocks again while the socket is not up yet.
+_READY_POLL_S = 0.2
+
+
+def await_hello(fermix_home: str, timeout_s: float) -> str | None:
+    """Wait until the companion socket answers the drive's own handshake (connect,
+    `client_hello`, `server_hello`); None once it does, or why it did not within
+    `timeout_s`.
+
+    A daemon answers its control socket before it serves this one (FermixCore boots
+    before FermixChannels), so a daemon that just answered `status` can still refuse
+    a drive's connect."""
+    path = socket_path(fermix_home)
+    deadline = time.monotonic() + timeout_s
+    attempts = int(timeout_s / _READY_POLL_S) + 1
+    last = "never tried"
+    for _ in range(attempts):
+        try:
+            conn = Connection(path, timeout_s)
+            try:
+                conn.hello(deadline)
+            finally:
+                conn.close()
+            return None
+        except CompanionError as exc:
+            last = str(exc)
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(_READY_POLL_S)
+    return f"the companion socket {path} did not answer a hello within {timeout_s}s: {last}"
+
+
 # --- one attempt --------------------------------------------------------------
 
 class _Session:

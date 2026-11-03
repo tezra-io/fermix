@@ -29,7 +29,7 @@ sys.path.insert(0, HERE)
 import eval_home_state as state  # noqa: E402
 import run_eval  # noqa: E402
 import seed_capability_home as seed  # noqa: E402
-from evallib import report, safe_rm, suites  # noqa: E402
+from evallib import companion, report, safe_rm, suites  # noqa: E402
 
 DAEMON_SCRIPT = os.path.join(HERE, "capability-daemon.sh")
 SCRIPT_TIMEOUT_S = 120
@@ -37,8 +37,12 @@ SCRIPT_TIMEOUT_S = 120
 # Stands in for `mix`: `mix compile` succeeds, and `mix fermix.dev` is a daemon that
 # records each start with what memory.db held then, writes to memory.db as a real
 # daemon would, answers the control socket ({packet, 4} JSON), and exits on SIGTERM.
+# Its companion socket comes up only after the control socket answered, as the real
+# daemon's does (FermixChannels starts after FermixCore's control socket), and
+# FAKE_COMPANION_DELAY_S seconds later; it speaks just enough of the chat for one
+# `companion.drive`: the hello, `/new`, a history page, and a message that completes.
 MIX_STUB = r'''#!/usr/bin/env python3
-import json, os, signal, socket, struct, sys
+import json, os, signal, socket, struct, sys, threading, time
 args = sys.argv[1:]
 if args[:1] == ["compile"]:
     sys.exit(0)
@@ -52,14 +56,47 @@ with open(os.path.join(home, "fake-daemon.log"), "a") as log:
 with open(db, "a") as fh:
     fh.write("+written-by-the-daemon")
 path = os.path.join(home, "daemon.sock")
+companion_path = os.path.join(home, "companion.sock")
 server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 server.bind(path)
 server.listen(4)
+answered = threading.Event()
 def stop(*_):
     server.close()
-    os.remove(path)
+    for sock in (path, companion_path):
+        if os.path.exists(sock):
+            os.remove(sock)
     sys.exit(0)
 signal.signal(signal.SIGTERM, stop)
+def chat(event):
+    kind = event["type"]
+    if kind == "client_hello":
+        return [{"type": "server_hello", "min_version": 1, "max_version": 7}]
+    if kind == "command":
+        return [{"type": "row", "role": "assistant", "text": "New conversation.",
+                 "server_seq": 1}]
+    if kind == "history_pull":
+        return [{"type": "history_page", "messages": [], "history_head_seq": 1}]
+    if kind == "msg":
+        cid = event["client_msg_id"]
+        return [{"type": "accepted", "client_msg_id": cid},
+                {"type": "turn_started", "in_reply_to": cid, "turn_id": "turn-1"},
+                {"type": "text_done", "turn_id": "turn-1", "text": "Done.",
+                 "server_seq": 2, "blocks": []}]
+    return []
+def serve_companion():
+    answered.wait()
+    time.sleep(float(os.environ.get("FAKE_COMPANION_DELAY_S", "0")))
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(companion_path)
+    listener.listen(4)
+    while True:
+        conn, _ = listener.accept()
+        with conn, conn.makefile("rb") as lines:
+            for line in lines:
+                for event in chat(json.loads(line)):
+                    conn.sendall(json.dumps(event).encode() + b"\n")
+threading.Thread(target=serve_companion, daemon=True).start()
 while True:
     conn, _ = server.accept()
     with conn:
@@ -69,6 +106,7 @@ while True:
             body += conn.recv(size - len(body))
         reply = json.dumps({"status": "ok", "pid": os.getpid()}).encode()
         conn.sendall(struct.pack(">I", len(reply)) + reply)
+    answered.set()
 '''
 
 SEEDED = {"memory.db": "seeded rows", "memory.db-wal": "seeded wal",
@@ -370,6 +408,44 @@ def test_the_runner_resets_through_the_daemon_script(scratch, fake_mix, stray_da
     try:
         assert run_eval.home_resetter(cfg)() is None
         assert [start["memory_db"] for start in _starts(home)] == ["seeded rows"]
+    finally:
+        _down(home, stray_daemons)
+
+
+def test_a_companion_socket_that_comes_up_after_the_control_socket_fails_no_drive(
+        scratch, fake_mix, stray_daemons, monkeypatch):
+    # The live cues run lost five attempts this way: the reset returned once the
+    # control socket answered, and the drive's connect beat the companion socket.
+    home = _seeded_home(scratch)
+    assert _script("snapshot", home).returncode == 0
+    monkeypatch.setenv("FAKE_COMPANION_DELAY_S", "2")
+    cfg = SimpleNamespace(daemon=SimpleNamespace(fermix_home=str(home)),
+                          opik=SimpleNamespace(project="fermix-capability-eval"))
+    try:
+        assert run_eval.home_resetter(cfg)() is None
+        evidence = companion.drive(str(home), {}, "Brindle status", "e2e-mark-brindle",
+                                   timeout_s=10)
+        assert evidence.ok, evidence.error
+        assert evidence.target.reply() == "Done."
+    finally:
+        _down(home, stray_daemons)
+
+
+def test_a_companion_socket_that_never_answers_fails_the_reset_loudly(
+        scratch, fake_mix, stray_daemons, monkeypatch):
+    # A reset error stops the run as the harness's (test_a_failed_reset_stops_the_run…).
+    home = _seeded_home(scratch)
+    assert _script("snapshot", home).returncode == 0
+    monkeypatch.setenv("FAKE_COMPANION_DELAY_S", "600")
+    monkeypatch.setattr(run_eval, "_COMPANION_READY_S", 0.5)
+    cfg = SimpleNamespace(daemon=SimpleNamespace(fermix_home=str(home)),
+                          opik=SimpleNamespace(project="fermix-capability-eval"))
+    try:
+        error = run_eval.home_resetter(cfg)()
+        assert error is not None
+        assert "answered its control socket" in error
+        assert "did not answer a hello within 0.5s" in error
+        assert f"{home / companion.SOCKET_NAME}: [Errno 2]" in error
     finally:
         _down(home, stray_daemons)
 
