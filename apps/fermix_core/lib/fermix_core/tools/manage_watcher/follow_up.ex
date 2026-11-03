@@ -75,9 +75,10 @@ defmodule FermixCore.Tools.ManageWatcher.FollowUp do
           type: "array",
           items: %{type: "string"},
           description:
-            "The tools it may use, from this turn's (#{@coding_agent} when the owner asks " <>
-              "for a coding agent without naming Codex or Claude Code). A tool this computer " <>
-              "does not have leaves the follow-up out, and Fermix says what to install."
+            "Every tool its instructions need, from this turn's (#{@coding_agent} when the " <>
+              "owner asks for a coding agent without naming Codex or Claude Code): its run " <>
+              "has only these, so a step with no tool here cannot be done. A tool this " <>
+              "computer does not have leaves the follow-up out, and Fermix says what to install."
         },
         skill: %{type: "string", description: "A skill to run it in."},
         provider: %{type: "string", description: "With model: the route its runs use."},

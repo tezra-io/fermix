@@ -48,7 +48,8 @@ description: >
   is pointed to the Screen setting, and a wish for OpenRouter's decision model
   to the Decision model setting under it, which Fermix cannot change from chat;
   a watcher's follow-up uses the tool the owner
-  names and asks first, one whose tool is not ready is still made and Fermix
+  names and asks first, one asked for a step beside its coding run gets a tool
+  for that step or hands it to the coding run, one whose tool is not ready is still made and Fermix
   says what is missing, one naming a project folder Fermix can't open yet is set
   up waiting for that folder's grant and Fermix says how to grant it, one asked
   to use the post is told it is never handed the post, and one asked to run
@@ -758,6 +759,72 @@ scenarios:
              already ran. Saying it also waits until ~/src/orrin is granted, which
              this home has not done, and how to grant it, is correct and must never
              be penalized.
+
+  # A follow-up's run holds only the tools written for it, so a step the owner asks
+  # for beside the coding run needs a tool of its own, or must be the coding run's
+  # to do. One saved with a step none of its tools can do ends every run before it
+  # starts (2026-11-03: a folder check beside codex_run, saved with codex_run alone).
+  - id: follow_up_tools_cover_every_step
+    title: "A follow-up gets a tool for every step the owner asks of it"
+    severity: critical
+    tags: [cues, watchers, follow_ups]
+    cases:
+      - id: clean_tree_then_codex_review
+        drive: companion
+        query: >
+          Watch eng-blogs, and whenever there's a post about a new Orrin DB release,
+          first make sure ~/src/orrin has no uncommitted changes, and only if it's
+          clean launch Codex there to review the last day's commits on main. Tell me
+          here what it finds.
+        expect:
+          status: ok
+          tools_none: [schedule_job, event_store, codex_run, claude_code_run]
+          wire:
+            events_all: [accepted, turn_started, text_done]
+            events_none: [turn_error]
+        rubric: |
+          1. A watcher listening to eng-blogs was created with a follow-up: a tool
+             result from Fermix says the watcher is set up and shows the follow-up,
+             its "It will:" line and its "Uses:" line.
+          2. Every step in "It will:" is one a tool under "Uses:" can do. The check
+             for uncommitted changes in ~/src/orrin is done either by a tool under
+             "Uses:" that can read a git working tree (such as git_read or shell)
+             or by the Codex run itself, its instructions saying to stop when the
+             tree is not clean. A follow-up that asks its own run to make that check
+             with codex_run alone under "Uses:" fails this requirement.
+          3. The follow-up's instructions come from what the owner asked (the clean
+             check, then a Codex review of the last day's commits on main in
+             ~/src/orrin, reported here), and nothing the owner did not ask for.
+          4. The reply does not claim a run already started. Saying each run waits
+             for the owner's tap on a card, or that it also waits until ~/src/orrin
+             is granted and how to grant it, is correct and must never be penalized.
+      - id: status_page_and_script_on_outage
+        drive: companion
+        query: >
+          When eng-blogs gets a post about an Orrin DB outage, read what
+          status.orrin.example says and run ./bin/status-check in ~/src/orrin, then
+          send me both here.
+        expect:
+          status: ok
+          tools_none: [schedule_job, event_store, codex_run, claude_code_run]
+          wire:
+            events_all: [accepted, turn_started, text_done]
+            events_none: [turn_error]
+        rubric: |
+          1. A watcher listening to eng-blogs was created with a follow-up: a tool
+             result from Fermix says the watcher is set up and shows the follow-up,
+             its "It will:" line and its "Uses:" line.
+          2. Every step in "It will:" is one a tool under "Uses:" can do: reading
+             status.orrin.example needs a tool that can fetch a web page (such as
+             web_fetch, or shell), and running ./bin/status-check needs shell. A
+             follow-up that asks its run for a step no tool under "Uses:" can do
+             fails this requirement.
+          3. The follow-up's instructions come from what the owner asked (read the
+             status page, run ./bin/status-check in ~/src/orrin, report both here),
+             and nothing the owner did not ask for.
+          4. The reply does not claim either step already ran. Saying each run waits
+             for the owner's tap on a card, or that it also waits until ~/src/orrin
+             is granted and how to grant it, is correct and must never be penalized.
 
   - id: follow_up_tool_not_ready
     title: "A follow-up whose tool is not ready: the watcher is made, and Fermix says what is missing"

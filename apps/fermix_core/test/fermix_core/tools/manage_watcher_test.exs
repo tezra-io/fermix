@@ -834,6 +834,15 @@ defmodule FermixCore.Tools.ManageWatcherTest do
                )
     end
 
+    # A follow-up's run holds only the tools written for it: one saved with a step
+    # no tool of its own can do (a folder check beside a coding-agent launch) ends
+    # that run before it starts, so the model is asked for a tool for every step.
+    test "asks for every tool its instructions need, since its run has no others" do
+      tools = ManageWatcher.parameters().properties.follow_up.properties.tools.description
+      assert tools =~ "Every tool its instructions need"
+      assert tools =~ "its run has only these"
+    end
+
     # The 2026-10-31 revision: a follow-up always asks first, and only the owner's
     # Always allow on one of its cards lets it run with no card; no cap is asked for.
     test "asks first, with no mode and no daily cap to give", ctx do
