@@ -49,7 +49,10 @@ defmodule FermixCore.Tools.AdminToolsTest do
 
     assert result.success == true
     skill_dir = Path.join([home, "skills", "research_helper"])
-    assert File.read!(Path.join(skill_dir, "SKILL.md")) =~ "name: research_helper"
+    skill_md = File.read!(Path.join(skill_dir, "SKILL.md"))
+    assert skill_md =~ "name: research_helper"
+    # No tool list: a new skill runs with the tools of the run that calls it.
+    refute skill_md =~ "allowed_tools"
     assert File.exists?(Path.join([skill_dir, "evals", "evals.json"]))
 
     assert {:ok, duplicate} =

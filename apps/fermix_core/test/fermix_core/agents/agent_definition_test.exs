@@ -97,6 +97,50 @@ defmodule FermixCore.Agents.AgentDefinitionTest do
                  "allowed_tools" => "shell"
                })
     end
+
+    # A tool field Fermix does not read (the Agent Skills `allowed-tools`, a
+    # Claude Code `tools`) is never taken as "no list": an author who named
+    # tools meant a limit, so the skill runs with none and the key is kept for
+    # its run to name.
+    test "a tool list under a misspelled key leaves the skill no tools and is recorded" do
+      for key <- ["allowed-tools", "tools", "allowedTools"] do
+        assert {:ok, definition} =
+                 AgentDefinition.new(%{
+                   "name" => "skill-f",
+                   "description" => "Use skill f.",
+                   "system_prompt" => "Do things.",
+                   key => "Read Bash(git:*)"
+                 })
+
+        assert {key, definition.allowed_tools, definition.misspelled_tool_keys} ==
+                 {key, [], [key]}
+      end
+    end
+
+    test "allowed_tools beside a misspelled key keeps its list and records the key" do
+      assert {:ok, definition} =
+               AgentDefinition.new(%{
+                 "name" => "skill-g",
+                 "description" => "Use skill g.",
+                 "system_prompt" => "Do things.",
+                 "allowed_tools" => ["web_search"],
+                 "tools" => "shell"
+               })
+
+      assert definition.allowed_tools == ["web_search"]
+      assert definition.misspelled_tool_keys == ["tools"]
+    end
+
+    test "a skill with only allowed_tools, or none, records no misspelled key" do
+      for attrs <- [%{}, %{"allowed_tools" => ["web_search"]}, %{"allowed_tools" => []}] do
+        assert {:ok, definition} =
+                 %{"name" => "skill-h", "description" => "Use h.", "system_prompt" => "Do."}
+                 |> Map.merge(attrs)
+                 |> AgentDefinition.new()
+
+        assert definition.misspelled_tool_keys == []
+      end
+    end
   end
 
   describe "policy field" do

@@ -10,7 +10,8 @@ defmodule FermixCore.Jobs.CueSurface do
 
     * the base readers `file_read`, `view_image`, `glob_search`,
       `content_search` and `git_read`, narrowed by the job's allowlist and the
-      skill's (a missing allowlist narrows nothing from its side);
+      skill's (a missing allowlist, or a job's empty one, narrows nothing from
+      its side; a skill's empty one names no tools, so it takes them all);
     * `cue_history` always (its own watcher's deliveries, framed);
     * `memory_store`, `memory_recall` and `memory_forget` only when the
       watcher's task notes are on (they reach only the task's own notes);
@@ -68,8 +69,8 @@ defmodule FermixCore.Jobs.CueSurface do
       when is_map(job) and (is_map(skill) or is_nil(skill)) and is_boolean(notes?) do
     base =
       @base_tools
-      |> narrow(allowlist(job))
-      |> narrow(allowlist(skill))
+      |> narrow(job_allowlist(job))
+      |> narrow(skill_allowlist(skill))
 
     Enum.uniq(base ++ [@history_tool] ++ note_tools(notes?) ++ mandate_tools(mandate))
   end
@@ -83,20 +84,28 @@ defmodule FermixCore.Jobs.CueSurface do
   def lacking(job, skill, watcher, mandate) do
     offered = tools(job, skill, watcher, mandate)
 
-    case named_tools(allowlist(job), allowlist(skill)) do
+    case named_tools(job_allowlist(job), skill_allowlist(skill)) do
       nil -> []
       named -> named |> Enum.reject(&(&1 in offered)) |> Enum.uniq() |> Enum.sort()
     end
   end
 
-  # The runner's rule (`Jobs.Runner.narrow_allowed_tools/1`): an absent or empty
-  # allowlist narrows nothing from its side.
-  defp allowlist(nil), do: nil
-
-  defp allowlist(map) when is_map(map) do
-    case Map.get(map, :allowed_tools) do
+  # The runner's rules (`Jobs.Runner.effective_allowed_tools/2`): a job's absent
+  # or empty allowlist narrows nothing from its side, while a skill's is taken
+  # as written, so its `[]` names no tools.
+  defp job_allowlist(job) do
+    case Map.get(job, :allowed_tools) do
       nil -> nil
       [] -> nil
+      list when is_list(list) -> list
+    end
+  end
+
+  defp skill_allowlist(nil), do: nil
+
+  defp skill_allowlist(skill) when is_map(skill) do
+    case Map.get(skill, :allowed_tools) do
+      nil -> nil
       list when is_list(list) -> list
     end
   end

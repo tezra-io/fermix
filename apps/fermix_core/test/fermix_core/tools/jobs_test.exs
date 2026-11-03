@@ -1017,6 +1017,55 @@ defmodule FermixCore.Tools.JobsTest do
              Jason.decode(elem(ListJobs.execute(%{}, context), 1).output)
   end
 
+  # A skill whose list names a tool Fermix does not have runs without it, so
+  # binding a job to one says which, and the owner can have the list fixed.
+  test "binding a job to a skill whose tool list Fermix cannot honour says why", %{
+    context: context
+  } do
+    registry = :"skill_bind_caps_#{System.unique_integer([:positive])}"
+    start_supervised!({CapabilityRegistry, name: registry})
+    register_stand_in(registry, "web_search", :network)
+
+    {:ok, skill_registry} =
+      SkillRegistryStub.start_link([
+        {"typo", ["web_search", "web_serch"]},
+        {"misspelled", %{allowed_tools: [], misspelled_tool_keys: ["tools"]}},
+        {"weather", ["web_search"]}
+      ])
+
+    context = Map.merge(context, %{skill_registry: skill_registry, capability_registry: registry})
+
+    created =
+      for skill <- ["typo", "misspelled", "weather"] do
+        assert {:ok, %{success: true, output: output}} =
+                 ScheduleJob.execute(
+                   %{
+                     "name" => "Bound #{skill}",
+                     "schedule" => "every 15 minutes",
+                     "task" => "Report.",
+                     "skill_name" => skill
+                   },
+                   context
+                 )
+
+        {skill, Jason.decode!(output)}
+      end
+
+    created = Map.new(created)
+    assert created["typo"]["note"] =~ "web_serch"
+    refute created["typo"]["note"] =~ "web_search,"
+    assert created["misspelled"]["note"] =~ "`tools`"
+    refute Map.has_key?(created["weather"], "note")
+
+    assert {:ok, %{success: true, output: updated}} =
+             UpdateJob.execute(
+               %{"job_id" => created["weather"]["id"], "skill_name" => "typo"},
+               context
+             )
+
+    assert Jason.decode!(updated)["note"] =~ "web_serch"
+  end
+
   test "update_job exposes delivery and skill_name parameters" do
     params = UpdateJob.parameters()
     assert Map.has_key?(params.properties, :skill_name)

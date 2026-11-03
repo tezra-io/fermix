@@ -125,6 +125,54 @@ scenarios:
           unique eval-greeter name appears; it does not claim the scaffold
           already implements French greeting behavior.
 
+  # A skill whose tool list Fermix cannot honour still runs, without what it
+  # lacks, and the owner hears what was left out so they can have the skill
+  # fixed. The two fixture skills live in suites/capability/fixtures/skills and
+  # are installed only in the disposable eval home (seed_capability_home.py), so
+  # the scenario is isolated_mutation: a dev daemon's home has neither. Each floor
+  # is an identifier only Fermix's note on the handed-off run supplies (neither
+  # skill's body names it), so no phrasing is pinned. dock-ledger lists ONLY the
+  # missing tool: the eval home makes its skills folder readable (a real home does
+  # not), and a handed-off run that kept file_read read its own frontmatter and
+  # named the tool without Fermix's note (seen on the code before the note).
+  # Neither skill's data exists anywhere, so a model that goes looking for it
+  # meets sandbox refusals; that search is not what is graded, so these cases
+  # drop the suite's no_tool_errors gate and the floor and rubric carry the grade.
+  - id: skill_tool_list_gaps
+    risk: isolated_mutation
+    title: "Says what a skill's tool list lacks, so the owner can have it fixed"
+    severity: normal
+    tags: [skills, delegation]
+    cases:
+      - id: skill_names_a_tool_fermix_lacks
+        query: >
+          hand this off to your dock-ledger skill: how many crates came in at pier 4
+          on mar 3 2026?
+        expect:
+          reply_matches: "(?i)dock[_ ]ledger[_ ]lookup"
+          no_tool_errors: false
+          max_cost_usd: 0.8
+          max_duration_ms: 150000
+        rubric: >
+          The dock-ledger skill names a tool Fermix does not have. The reply must
+          tell the owner that dock_ledger_lookup is not available to the skill and
+          what would make it work (installing whatever provides it, or correcting
+          the skill's tool list if the name is wrong; either remedy satisfies this),
+          and must not invent a crate count.
+      - id: skill_lists_its_tools_under_the_wrong_key
+        query: >
+          pass this to your quay-rota skill: who's on the quay rota on friday mar 5
+          2027?
+        expect:
+          reply_matches: "(?i)allowed[_ ]tools"
+          no_tool_errors: false
+          max_cost_usd: 0.8
+          max_duration_ms: 150000
+        rubric: >
+          The quay-rota skill lists its tools under a key Fermix does not read, so
+          it ran with no tools. The reply must tell the owner the skill's tools
+          belong under allowed_tools, and must not invent a name on the rota.
+
   # M38 §13.4. Gated with a command-name floor (a command cannot be paraphrased)
   # plus a prohibition on the answers that are wrong on Linux, and a rubric that
   # owns the wording — never a positive allowlist of phrasings. Install and

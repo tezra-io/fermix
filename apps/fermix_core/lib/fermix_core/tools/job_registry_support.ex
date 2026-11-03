@@ -7,6 +7,7 @@ defmodule FermixCore.Tools.JobRegistrySupport do
   alias FermixCore.Capabilities.AccessGate
   alias FermixCore.Capabilities.Builtin.Tool
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Capabilities.Skill, as: SkillCapability
   alias FermixCore.Clock
   alias FermixCore.Cues.Watchers
   alias FermixCore.Jobs.Registry, as: JobsRegistry
@@ -229,6 +230,23 @@ defmodule FermixCore.Tools.JobRegistrySupport do
       is_nil(skill) or not JobsRegistry.cue_job?(job) -> :ok
       Runner.cue_history_on_surface?(job, skill, registry(context)) -> :ok
       true -> {:error, Runner.cue_skill_sentence(skill)}
+    end
+  end
+
+  @doc """
+  `payload` with the bound `skill`'s tool warning
+  (`Capabilities.Skill.tool_warning/2`) added to its `:note`: what the skill's
+  list asks for that the job's runs will not get. A job bound to no skill, or
+  to one whose list Fermix honours, is unchanged.
+  """
+  @spec put_skill_tools_note(map(), map() | nil, map()) :: map()
+  def put_skill_tools_note(payload, nil, _context) when is_map(payload), do: payload
+
+  def put_skill_tools_note(payload, skill, context)
+      when is_map(payload) and is_map(skill) and is_map(context) do
+    case SkillCapability.tool_warning(skill, context) do
+      nil -> payload
+      warning -> Map.update(payload, :note, warning, &(&1 <> " " <> warning))
     end
   end
 

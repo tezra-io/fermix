@@ -384,6 +384,57 @@ defmodule FermixCore.Capabilities.SkillTest do
       end
     end
 
+    # A name no capability carries is left out of the run and named in its
+    # result, so the owner can have the skill's list fixed.
+    test "a tool the skill names that Fermix does not have is named in the result", %{
+      context: context
+    } do
+      definition =
+        build_definition("alpha", "Alpha skill body.", %{
+          "allowed_tools" => ["web_search", "web_serch"]
+        })
+
+      MockProvider.set_responses([mock_response("Done.")])
+
+      assert {:ok, %{success: true, output: output}} =
+               Skill.invoke(%{"task" => "Work."}, context, definition)
+
+      assert [["web_search"]] = MockProvider.take_tools()
+      assert output =~ "Done."
+      assert output =~ "web_serch"
+      refute output =~ "web_search,"
+      assert output =~ "allowed_tools"
+    end
+
+    test "a tool list under a key Fermix does not read runs with no tools and says so", %{
+      context: context
+    } do
+      definition =
+        build_definition("alpha", "Alpha skill body.", %{
+          "allowed_tools" => nil,
+          "allowed-tools" => "web_search"
+        })
+
+      MockProvider.set_responses([mock_response("Done.")])
+
+      assert {:ok, %{success: true, output: output}} =
+               Skill.invoke(%{"task" => "Work."}, context, definition)
+
+      assert [[]] = MockProvider.take_tools()
+      assert output =~ "`allowed-tools`"
+      assert output =~ "allowed_tools"
+    end
+
+    test "a skill naming only tools Fermix has, or none, carries no tool warning", %{
+      context: context,
+      tools: tools
+    } do
+      for attrs <- [tools, %{"allowed_tools" => nil}] do
+        definition = build_definition("alpha", "Alpha skill body.", attrs)
+        assert Skill.tool_warning(definition, context) == nil
+      end
+    end
+
     test "an un-narrowed parent's worker gets the skill's own tools, unchanged", %{
       context: context,
       tools: tools
