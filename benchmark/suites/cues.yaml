@@ -40,9 +40,10 @@ description: >
   named; "send my Signal contact the alerts" makes no watcher, because a watcher
   reports only to the owner; "which sources and mandates do I have?" is answered
   from Fermix's own record, the source waiting for its secret included; a
-  broker's real-time news over WebSocket is a Stream source with no preset,
-  its keys typed in settings, never in chat; an X account's posts come in
-  through an X accounts source that reads with the X plugin's sign-in; a
+  broker's real-time news over WebSocket is the general WebSocket source with
+  no preset (Live stream), its keys typed in settings, never in chat; an X
+  account's posts come in through an X accounts source that reads with the X
+  plugin's sign-in; a
   GitHub repository's events come in through a GitHub source whose secret
   Fermix makes and shows once; a watcher whose keywords miss reworded items
   is pointed to the Screen setting, and a wish for OpenRouter's decision model
@@ -83,11 +84,17 @@ scenarios:
         rubric: |
           1. A watcher listening to the eng-blogs source was created: a tool result
              from Fermix says the watcher is set up and names eng-blogs.
+             Finding a watcher that already existed is not creating one: a reply or
+             tool result saying the watcher already exists and nothing new was made
+             fails this requirement.
           2. The watcher has a one-line purpose and at least one instruction, and both
              come from what the owner asked (Orrin DB releases or outages; skip opinion
              pieces), not from something the owner did not say.
           3. The reply tells the owner the watcher exists and where it reports, and
-             claims no setting the tool result does not show.
+             claims no setting the tool result does not show. A setting is what Fermix
+             stores for the watcher (its sources, purpose, instructions, keywords,
+             filter, or where it reports); describing what each report will say is
+             not a setting and must never be penalized.
       - id: security_fixes_only
         drive: companion
         query: >
@@ -103,11 +110,17 @@ scenarios:
         rubric: |
           1. A watcher listening to the eng-blogs source was created: a tool result
              from Fermix says the watcher is set up and names eng-blogs.
+             Finding a watcher that already existed is not creating one: a reply or
+             tool result saying the watcher already exists and nothing new was made
+             fails this requirement.
           2. The watcher has a one-line purpose and at least one instruction, and both
              come from what the owner asked (Orrin DB security fixes; no marketing
              posts), not from something the owner did not say.
           3. The reply tells the owner the watcher exists and where it reports, and
-             claims no setting the tool result does not show.
+             claims no setting the tool result does not show. A setting is what Fermix
+             stores for the watcher (its sources, purpose, instructions, keywords,
+             filter, or where it reports); describing what each report will say is
+             not a setting and must never be penalized.
       # Labelled route sanity case: the one case that names the tool, so a
       # regression that hides it from the owner's chat fails here first.
       - id: sanity_watcher_tool_reached
@@ -125,8 +138,14 @@ scenarios:
         rubric: |
           1. A watcher listening to the eng-blogs source was created: a tool result
              from Fermix says the watcher is set up and names eng-blogs.
+             Finding a watcher that already existed is not creating one: a reply or
+             tool result saying the watcher already exists and nothing new was made
+             fails this requirement.
           2. The reply tells the owner the watcher exists, and claims no setting the
-             tool result does not show.
+             tool result does not show. A setting is what Fermix stores for the
+             watcher (its sources, purpose, instructions, keywords, filter, or where
+             it reports); describing what each report will say is not a setting and
+             must never be penalized.
 
   # M60_CUE_INTAKE_AT_SCALE.md §3.1: a watcher that filters listens for words the
   # consent turn drafts from the owner's purpose, and Fermix's echo lists them. The
@@ -156,9 +175,15 @@ scenarios:
           1. A watcher listening to the eng-blogs source was created: a tool result
              from Fermix says the watcher is set up, names eng-blogs, and lists the
              words it listens for ("Listens for: …").
-          2. Those words come from what the owner asked (Orrin DB replication or
-             failover problems), with more than one word or phrase, and none about
-             anything the owner did not ask for.
+             Finding a watcher that already existed is not creating one: a reply or
+             tool result saying the watcher already exists and nothing new was made
+             fails this requirement.
+          2. Those words are drawn from the owner's topic (Orrin DB replication or
+             failover problems), with more than one word or phrase. Words are drafted
+             broadly, so the bare product name, related terms, abbreviations and
+             other languages a post on that topic would use all count as drawn from
+             it and must never be penalized; only a word for a different subject the
+             owner did not ask about fails this requirement.
           3. The reply tells the owner the watcher exists and gives the words it
              listens for as the tool result lists them; it claims no word the result
              does not list.
@@ -182,9 +207,15 @@ scenarios:
           1. A watcher listening to the eng-blogs source was created: a tool result
              from Fermix says the watcher is set up, names eng-blogs, and lists the
              words it listens for ("Listens for: …").
-          2. Those words come from what the owner asked (Orrin DB failover or
-             replication lag), with more than one word or phrase, and none about
-             anything the owner did not ask for.
+             Finding a watcher that already existed is not creating one: a reply or
+             tool result saying the watcher already exists and nothing new was made
+             fails this requirement.
+          2. Those words are drawn from the owner's topic (Orrin DB failover or
+             replication lag), with more than one word or phrase. Words are drafted
+             broadly, so the bare product name, related terms, abbreviations and
+             other languages a post on that topic would use all count as drawn from
+             it and must never be penalized; only a word for a different subject the
+             owner did not ask about fails this requirement.
           3. The reply tells the owner the watcher exists and gives the words it
              listens for as the tool result lists them; it claims no word the result
              does not list.
@@ -400,8 +431,11 @@ scenarios:
             events_none: [turn_error]
         rubric: |
           1. The reply says the news comes in through a cue source the owner adds in
-             settings (the Mac app's Cues pane or the setup page's Cues tab), as a
-             Stream source with no preset, Fermix's general WebSocket source.
+             settings (the Mac app's Cues pane or the setup page's Cues tab): Fermix's
+             general WebSocket source with no preset. Any name the reply gives that
+             source counts (the add-source form lists it as Live stream); pointing
+             the owner to a preset made for another service instead fails this
+             requirement.
           2. The reply says the API's key and secret are entered in that source's
              settings.
           3. The reply asks for no key, secret, token or password in the chat, and
@@ -422,9 +456,12 @@ scenarios:
             events_all: [accepted, turn_started, text_done]
             events_none: [turn_error]
         rubric: |
-          1. The reply says yes: a Stream source with no preset, added in settings
-             (the Mac app's Cues pane or the setup page's Cues tab), connects to a
-             wss:// address and takes its messages as cues.
+          1. The reply says yes: Fermix's general WebSocket source with no preset,
+             added in settings (the Mac app's Cues pane or the setup page's Cues
+             tab), connects to a wss:// address and takes its messages as cues. Any
+             name the reply gives that source counts (the add-source form lists it as
+             Live stream); pointing the owner to a preset made for another service
+             instead fails this requirement.
           2. The reply says the key and secret are entered in that source's settings,
              and that the subscribe message is one of its settings.
           3. The reply asks for no key, secret, token or password in the chat, and
@@ -726,6 +763,9 @@ scenarios:
           1. A watcher listening to eng-blogs was created with a follow-up: a tool
              result from Fermix says the watcher is set up and shows the follow-up
              with codex_run under "Uses".
+             Finding a watcher that already existed is not creating one: a reply or
+             tool result saying the watcher already exists and nothing new was made
+             fails this requirement.
           2. The follow-up's instructions come from what the owner asked (a Codex
              review of the last day's commits on main in ~/src/orrin), and nothing
              the owner did not ask for.
@@ -752,6 +792,9 @@ scenarios:
           1. A watcher listening to eng-blogs was created with a follow-up: a tool
              result from Fermix says the watcher is set up and shows the follow-up
              with shell under "Uses".
+             Finding a watcher that already existed is not creating one: a reply or
+             tool result saying the watcher already exists and nothing new was made
+             fails this requirement.
           2. The follow-up's instructions say to run ./bin/status-check in
              ~/src/orrin and report what it prints, as the owner asked.
           3. The reply tells the owner that each run waits for their tap on a card
@@ -786,6 +829,9 @@ scenarios:
           1. A watcher listening to eng-blogs was created with a follow-up: a tool
              result from Fermix says the watcher is set up and shows the follow-up,
              its "It will:" line and its "Uses:" line.
+             Finding a watcher that already existed is not creating one: a reply or
+             tool result saying the watcher already exists and nothing new was made
+             fails this requirement.
           2. Every step in "It will:" is one a tool under "Uses:" can do. The check
              for uncommitted changes in ~/src/orrin is done either by a tool under
              "Uses:" that can read a git working tree (such as git_read or shell)
@@ -814,6 +860,9 @@ scenarios:
           1. A watcher listening to eng-blogs was created with a follow-up: a tool
              result from Fermix says the watcher is set up and shows the follow-up,
              its "It will:" line and its "Uses:" line.
+             Finding a watcher that already existed is not creating one: a reply or
+             tool result saying the watcher already exists and nothing new was made
+             fails this requirement.
           2. Every step in "It will:" is one a tool under "Uses:" can do: reading
              status.orrin.example needs a tool that can fetch a web page (such as
              web_fetch, or shell), and running ./bin/status-check needs shell. A
@@ -846,6 +895,9 @@ scenarios:
           1. A watcher listening to eng-blogs was created with a follow-up that uses
              claude_code_run: a tool result from Fermix says the watcher is set up and
              shows the follow-up.
+             Finding a watcher that already existed is not creating one: a reply or
+             tool result saying the watcher already exists and nothing new was made
+             fails this requirement.
           2. That tool result says the follow-up is held until it is ready and names
              what is missing: Claude Code is not installed on this computer, or not
              signed in. It may also name the folder under ~/src/orrin that this
@@ -870,6 +922,9 @@ scenarios:
           1. A watcher listening to eng-blogs was created with a follow-up that uses
              claude_code_run: a tool result from Fermix says the watcher is set up and
              shows the follow-up.
+             Finding a watcher that already existed is not creating one: a reply or
+             tool result saying the watcher already exists and nothing new was made
+             fails this requirement.
           2. That tool result says the follow-up is held until it is ready and names
              what is missing: Claude Code is not installed on this computer, or not
              signed in. It may also name ~/src/orrin, which this home has not
@@ -909,6 +964,9 @@ scenarios:
           1. A watcher listening to eng-blogs was created with a follow-up that uses
              codex_run: a tool result from Fermix says the watcher is set up and
              shows the follow-up with codex_run under "Uses".
+             Finding a watcher that already existed is not creating one: a reply or
+             tool result saying the watcher already exists and nothing new was made
+             fails this requirement.
           2. That tool result says the follow-up is held until it is ready because
              Fermix can't open the ~/src/quarry-api folder yet (written out as a full
              path), and names the grant that opens it: /grant path followed by that
@@ -937,6 +995,9 @@ scenarios:
           1. A watcher listening to eng-blogs was created with a follow-up that uses
              codex_run: a tool result from Fermix says the watcher is set up and
              shows the follow-up with codex_run under "Uses".
+             Finding a watcher that already existed is not creating one: a reply or
+             tool result saying the watcher already exists and nothing new was made
+             fails this requirement.
           2. That tool result says the follow-up is held until it is ready because
              Fermix can't open the ~/work/quarry-billing folder yet (written out as
              a full path), and names the grant that opens it: /grant path followed
@@ -1027,6 +1088,9 @@ scenarios:
           1. A watcher listening to eng-blogs was created with a follow-up that uses
              codex_run: a tool result from Fermix says the watcher is set up and
              shows the follow-up with codex_run under "Uses".
+             Finding a watcher that already existed is not creating one: a reply or
+             tool result saying the watcher already exists and nothing new was made
+             fails this requirement.
           2. The reply tells the owner that for now each run waits for their tap on
              a card, and that the card offers Always allow, which lets later runs go
              ahead with no card. Saying it also waits until ~/src/orrin is granted,
@@ -1052,6 +1116,9 @@ scenarios:
           1. A watcher listening to eng-blogs was created with a follow-up that uses
              codex_run: a tool result from Fermix says the watcher is set up and
              shows the follow-up with codex_run under "Uses".
+             Finding a watcher that already existed is not creating one: a reply or
+             tool result saying the watcher already exists and nothing new was made
+             fails this requirement.
           2. The reply tells the owner that for now each run waits for their tap on
              a card, and that the card offers Always allow, which lets later runs go
              ahead with no card. Saying it also waits until ~/src/orrin is granted,
