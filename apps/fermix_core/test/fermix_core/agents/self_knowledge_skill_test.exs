@@ -278,17 +278,23 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
 
   # M76 §4.10: the Linux desktop app's own labels, read from tezra-io/fermix-linux
   # (`desktop/core/src/settings.rs` PANES, `desktop/app/src/shell.rs` PAGES, Home's
-  # switches, the tray, `desktop/io.tezra.Fermix.yml`). A Linux app owner is
-  # answered with them for anything the app has a control for.
+  # switches, the tray, Chat's cards in `desktop/app/src/chat/`, its updater's words
+  # in `desktop/core/src/update/view.rs`). A Linux app owner is answered with them
+  # for anything the app has a control for. The reference names the app by its id
+  # and labels, never by a package or binary name. Its chat is the companion chat
+  # the phone shares, so `/new` works and no New conversation button exists.
   test "the linux_app reference names the Linux app's pages, panes and controls" do
     reference = "linux_app" |> reference_path() |> File.read!() |> String.replace(~r/\s+/, " ")
 
     panes =
-      ~w(Providers Personality Memory Channels Integrations Voice Meetings Computer) ++
-        ["Coding agents"] ++ ~w(Search Images Secrets Sandbox Permissions)
+      ~w(Providers Personality Memory Channels Integrations Cues Voice Meetings Computer) ++
+        ["Coding agents"] ++ ~w(Search Images Secrets Sandbox Permissions Updates)
 
     assert reference =~ Enum.join(panes, ", "),
-           "linux_app reference does not list the fourteen panes in order"
+           "linux_app reference does not list the app's panes in order"
+
+    refute reference =~ ~r/\b(Fourteen|fourteen|Fifteen|fifteen|Sixteen|sixteen) panes\b/,
+           "linux_app reference counts panes, which Cues shows only where cues are served"
 
     for label <- [
           "**Chat**",
@@ -300,7 +306,6 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
           "**Run in the background**",
           "**Open at login**",
           "**Begin voice call**",
-          "**New conversation**",
           "**Restart Fermix…**",
           "**Run Doctor**"
         ] do
@@ -310,17 +315,37 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     for fact <- [
           "io.tezra.Fermix",
           "daemon.sock",
-          "acp.sock",
+          "companion.sock",
           "realtime.sock",
           "fermix.service",
           "**Phone** row",
           "**Pair a phone…**",
-          "read-only"
+          "read-only",
+          "carries the engine and replaces the engine-only package",
+          "**Check for Updates…**",
+          "**Check Now** in Settings > Updates",
+          "signed update feed",
+          "(PackageKit)",
+          "The earlier Flatpak app had no bundled engine and no updater of its own",
+          "Installing the package does not remove the Flatpak",
+          "`/new` starts the conversation afresh",
+          "a card with **Approve** and **Deny**",
+          "a card with **Deny** and **Confirm**",
+          "**Something needs your answer**: the owner answers it in their own chat",
+          "never from a paired phone",
+          "**A task is waiting for your decision**",
+          "**Continue Setup…**"
         ] do
       assert reference =~ fact, "linux_app reference does not say #{fact}"
     end
 
-    refute reference =~ "fermix-desktop"
+    for stale <- ["fermix-desktop", "acp.sock", "**New conversation**", "no slash commands"] do
+      refute reference =~ stale, "linux_app reference still says #{stale}"
+    end
+
+    # A Linux daemon never runs iMessage (it reads the Mac's Messages), so no
+    # owner chat on this host is one.
+    refute reference =~ "iMessage", "linux_app reference names iMessage as a Linux owner chat"
   end
 
   # The reference drifted from the code twice over (M76 §8): it named five
@@ -464,7 +489,9 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
   # Production Fermix on a Mac is the app, which ships no `fermix` command, so
   # an owner asking "how do I set up / update you?" must get the app's own
   # labels. Each label below is a control a correct answer cannot do without.
-  # The refutation names a withdrawn artifact: no desktop package ships.
+  # The refutation keeps the skill naming an app by its labels and id, never by a
+  # package or binary name: the name first belonged to a withdrawn companion
+  # package, and the Linux app's own package is called the desktop app's package.
   test "answers a Mac app owner with the app's own controls" do
     body = File.read!(self_knowledge_path())
     reference = File.read!(macos_app_reference_path())
@@ -589,7 +616,9 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
 
   # No repository serves the packages, so the family commands `fermix upgrade`
   # prints find nothing. An agent asked "how do I update you?" on a packaged
-  # host must not stop at `apt upgrade`.
+  # host must not stop at `apt upgrade`. The desktop app's own package carries
+  # the engine and replaces the engine-only one, so on its host the app updates
+  # both and the installer is not the answer.
   test "documents the Linux package installer, and that running it again is the update" do
     paragraph = service_paragraph()
     reference = File.read!(service_unit_reference_path())
@@ -597,6 +626,7 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     assert paragraph =~ "curl -fsSL https://fermix.ai/install | sh"
     assert paragraph =~ "fermix restart"
     assert paragraph =~ "until a repository is published"
+    assert paragraph =~ "the desktop app's own package is updated by the app instead"
 
     for required <- [
           "curl -fsSL https://fermix.ai/install | sh",
@@ -606,7 +636,9 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
           "--standalone",
           "not a repository",
           "Until a repository is published, those lines find nothing",
-          "fermix restart"
+          "fermix restart",
+          "the desktop app's own package: the app's **Check for Updates…**",
+          "A host with the Fermix desktop app's own package is the exception"
         ] do
       assert reference =~ required, "service_unit reference does not mention #{required}"
     end
@@ -900,7 +932,15 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
       assert jobs =~ required, "jobs self-knowledge does not mention #{required}"
     end
 
-    for gone <- ["Development builds only", "development daemon", "no published release"] do
+    # The Linux app's Chat draws a task's proposal as a card answered in place.
+    assert reference =~ "The Linux app's Chat shows it as a card with **Deny** and **Confirm**"
+
+    for gone <- [
+          "Development builds only",
+          "development daemon",
+          "no published release",
+          "The Linux app shows no proposal card"
+        ] do
       refute paragraph =~ gone, "the Cues paragraph still says #{gone}"
       refute reference =~ gone, "cues self-knowledge still says #{gone}"
     end

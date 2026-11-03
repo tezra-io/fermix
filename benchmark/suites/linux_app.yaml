@@ -1,14 +1,15 @@
 # The Fermix desktop app on Linux — M76 §4.10 and §4.11 stage 1, graded through
 # the real agent path.
 #
-# WHAT ROTS HERE. A Linux owner with the Flatpak desktop app (`io.tezra.Fermix`)
-# changes settings, keeps the service running and restarts it from the app's own
-# pages and panes. General Linux knowledge says the opposite ("a daemon is
-# managed with systemctl and a config file"), and the self-knowledge skill used
-# to give every Linux owner `fermix setup` and `config.toml`. The app's labels
-# live in the skill's `linux_app` reference, which the model has to reach and
-# read. ExUnit proves the labels are in the file; this suite proves an owner
-# asking in their own words gets them.
+# WHAT ROTS HERE. A Linux owner with the desktop app (`io.tezra.Fermix`, its own
+# .deb or .rpm package or the earlier Flatpak) changes settings, keeps the
+# service running and restarts it from the app's own pages and panes. General
+# Linux knowledge says the opposite ("a daemon is managed with systemctl and a
+# config file"), and the self-knowledge skill used to give every Linux owner
+# `fermix setup` and `config.toml`. The app's labels live in the skill's
+# `linux_app` reference, which the model has to reach and read. ExUnit proves
+# the labels are in the file; this suite proves an owner asking in their own
+# words gets them.
 #
 # WHY BEHAVIORAL AND NOT CAPABILITY. There is no end state to check: the answer
 # is advice, and the capability runner scores ground truth.
@@ -42,8 +43,8 @@ description: >
   Ordinary owner questions from someone who runs Fermix on Linux with the
   Fermix desktop app installed: changing the provider, adding a key, keeping
   Fermix running after logout, opening the app at login, starting a fresh
-  chat, finding out what is wrong, restarting after a change, and whether a
-  timer pops up on the desktop. Each case gates on a label any correct answer
+  chat, finding out what is wrong, restarting after a change, updating the
+  app, and whether a timer pops up on the desktop. Each case gates on a label any correct answer
   contains plus the wrong-surface refusals; the rubric owns the wording. One labelled sanity case pins that
   the answer comes from the self-knowledge skill rather than from what the
   model assumes about Linux daemons.
@@ -128,49 +129,55 @@ scenarios:
           log in, so it's sitting in the tray?
         expect:
           reply_matches: '(?i)open at login'
-          reply_not_matches: '(?i)(\.config/autostart|\blaunchctl\b|\blogin\s+items\b)'
+          reply_not_matches: '(?i)(\blaunchctl\b|\blogin\s+items\b)'
           max_cost_usd: 1.2
           max_duration_ms: 160000
         rubric: >
           Says yes: Open at login on the app's Home page opens the app in the
-          tray at login (through the desktop's Background portal). Mentioning
+          tray at login (the app keeps its own login entry). Mentioning
           that the Fermix service itself runs whether or not the app opens, when
           Run in the background is on, is correct and must never be penalized.
           Does not tell the user to write an autostart file by hand.
 
+  # The app's chat is the companion chat the phone shares: slash commands run
+  # there and it has no button for a fresh start. The floor is `/new` itself.
   - id: linux_app_chat
-    title: "The app's chat starts afresh with New conversation"
+    title: "The app's chat starts afresh with /new, shared with the phone"
     severity: normal
     risk: host_readonly
     tags: [linux-app, chat, self-knowledge]
     cases:
-      - id: fresh_conversation_new_did_nothing
+      - id: fresh_conversation_no_button
         query: >
           In the Fermix desktop app's chat on Linux, how do I start a fresh
-          conversation? Typing /new didn't do anything.
+          conversation? I can't find a button for it.
         expect:
-          reply_matches: '(?i)new conversation'
+          reply_matches: '/new\b'
           max_cost_usd: 1.2
           max_duration_ms: 160000
         rubric: >
-          Says the Linux app's chat does not run slash commands, and that New
-          conversation, at the top of the Chat page, starts a fresh one. Saying
-          that each conversation there is its own, apart from other chats such
-          as Telegram, is correct and must never be penalized. Does not claim
-          /new works there or tell the user to restart Fermix to clear it.
+          Says typing /new in the app's chat starts the conversation afresh,
+          and that the app has no button for it. Saying the chat is the same
+          conversation as a paired phone's, so /new starts afresh there too
+          and clears neither screen, is correct and must never be penalized.
+          Does not name a New conversation button, does not claim slash
+          commands do not run in the app, and does not tell the user to
+          restart Fermix or delete files to clear it.
       - id: clear_chat_like_telegram
         query: >
           On Telegram I clear my chat with Fermix using /new. Is there a way to
           do the same in the Fermix desktop app on my Linux box?
         expect:
-          reply_matches: '(?i)new conversation'
+          reply_matches: '/new\b'
           max_cost_usd: 1.2
           max_duration_ms: 160000
         rubric: >
-          Says the desktop app's chat has New conversation for this, at the top
-          of the Chat page, since slash commands do not run in that chat. Does
-          not claim /new works in the app, and does not suggest deleting files
-          or restarting Fermix to clear it.
+          Says /new works in the desktop app's chat too and starts the
+          conversation afresh. Saying it does not erase the messages already
+          shown is correct and must never be penalized. Does not claim slash
+          commands do not run in the app, does not name a New conversation
+          button, and does not suggest deleting files or restarting Fermix to
+          clear it.
 
   - id: linux_app_troubleshoot
     title: "What is wrong, and a restart, are found in the app"
@@ -208,6 +215,55 @@ scenarios:
           attention row, or the tray menu). Mentioning that `fermix restart` in a
           terminal does the same is correct and must never be penalized. Does
           not tell the user to kill the process or run systemctl by hand.
+
+  # The app's .deb or .rpm package carries the engine and updates itself, so an
+  # owner who installed it is answered with the app's updater. The floor is its
+  # label. A correct answer may name the Flatpak, the package manager or the
+  # engine-only package's installer only to say they are not the way, so none
+  # of them is a reply_not_matches; the rubric owns that.
+  - id: linux_app_updates
+    title: "The app updates itself, and the engine with it"
+    severity: normal
+    risk: host_readonly
+    tags: [linux-app, updates, self-knowledge]
+    cases:
+      - id: update_the_app
+        query: >
+          I installed the Fermix desktop app on my Ubuntu laptop from the .deb
+          on the download page. How do I update it, and does Fermix itself get
+          updated too?
+        expect:
+          reply_matches: '(?i)(check for updates|check now|settings\W+updates)'
+          reply_not_matches: '(?i)\b(launchctl|brew\s+(upgrade|services))\b'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Points at the app's own updater: Check for Updates… in the main menu
+          or the tray, or Settings > Updates with Check Now and the automatic
+          check, which installs a release only when asked, through the
+          system's password prompt, and then restarts Fermix into it. Says
+          Fermix itself (the engine) comes in the same package and updates with
+          the app. Mentioning that the system may call the package untrusted
+          because it is not from the system's software sources is correct and
+          must never be penalized. Does not tell the user to update through
+          Flatpak, `fermix upgrade` or the engine-only package's installer, and
+          does not describe a Mac.
+      - id: updates_on_its_own
+        query: >
+          Does the Fermix desktop app on my Fedora laptop update itself, or do
+          I have to keep an eye out for new versions?
+        expect:
+          reply_matches: '(?i)(check for updates|check now|settings\W+updates)'
+          reply_not_matches: '(?i)\b(launchctl|brew\s+(upgrade|services))\b'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Says the app checks for updates by itself when Fermix starts and then
+          once a day (Check for updates automatically, in Settings > Updates),
+          and installs one only when the owner asks, with Check for Updates… or
+          Check Now to look right away. Does not claim it installs updates
+          without asking, does not send the user to Flatpak, `fermix upgrade`
+          or a package manager command for it, and does not describe a Mac.
 
   # M76 stage 2: on Linux a reminder rings as a desktop notification the daemon
   # posts itself on the session bus, so the app needs nothing for it: no grant,

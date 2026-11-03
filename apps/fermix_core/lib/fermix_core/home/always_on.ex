@@ -15,8 +15,9 @@ defmodule FermixCore.Home.AlwaysOn do
     * the install is the Linux package on Linux (`FermixCore.HostFacts`, from
       `FermixCore.BootProfile`): what an Always On server's first boot
       installs, and never the Mac app, a standalone binary or a source run;
-    * no Fermix Linux app on the machine (`HostFacts`' `linux_app`): a Linux
-      desktop runs the same package beside its app;
+    * no Fermix Linux app on the machine (`HostFacts`' `linux_app`, its .deb
+      or .rpm package or the earlier Flatpak): a Linux desktop runs the same
+      engine, in the app's own package or beside its Flatpak;
     * the primary epoch is above 1 (`FermixCore.Home.Epoch`): the home moved
       here or was restored here, the only two ways a home reaches an Always On
       server, so a Linux machine that has run its own home from the start

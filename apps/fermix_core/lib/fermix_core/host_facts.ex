@@ -15,10 +15,17 @@ defmodule FermixCore.HostFacts do
       `Browser.HostLauncher` reads a bundle's `Info.plist`; on Linux
       `PRETTY_NAME` of `/etc/os-release`. A read that fails is `:unknown`,
       logged with its reason, never a placeholder;
-    * on Linux, whether Flatpak exported the desktop app's entry
-      (`io.tezra.Fermix.desktop`) in the system or the user installation.
-      It is a file the engine does not own, looked at once: an app installed
-      later is seen at the next start, which the section says.
+    * on Linux, whether the desktop app's entry (`io.tezra.Fermix.desktop`)
+      is where an install of the app puts it: `/usr/share/applications` for
+      its .deb or .rpm package, or Flatpak's exports in the system or the user
+      installation for the earlier Flatpak. The list is closed and
+      `$XDG_DATA_DIRS` is not followed: `/usr/local/share/applications` and
+      `~/.local/share/applications` do not count, since no install of the app
+      writes there and an entry there (a hand-copied file, a menu editor's
+      copy) outlives the app it names. An app counted that is not there would
+      hold the owner's proposals for no one and keep an Always On server from
+      being one. It is a file the engine does not own, looked at once: an app
+      installed later is seen at the next start, which the section says.
 
   Never read: the hostname, the account name, the serial, any address, or the
   engine's own version.
@@ -31,7 +38,7 @@ defmodule FermixCore.HostFacts do
   `remember/0` reads through the module `config :fermix_core,
   :host_facts_reader` names (this one by default): `config/test.exs` pins
   `FermixTestSupport.HostFactsStub`, and `read/3` takes `plutil:`,
-  `os_release:` and `flatpak_exports:` seams, so a test names the host it
+  `os_release:` and `app_entry_dirs:` seams, so a test names the host it
   means and no test reads this machine.
   """
 
@@ -45,6 +52,7 @@ defmodule FermixCore.HostFacts do
   @plutil "/usr/bin/plutil"
   @system_version "/System/Library/CoreServices/SystemVersion.plist"
   @os_release "/etc/os-release"
+  @package_entries "/usr/share/applications"
   @system_exports "/var/lib/flatpak/exports/share/applications"
   @user_exports "flatpak/exports/share/applications"
   @linux_app_entry "io.tezra.Fermix.desktop"
@@ -87,8 +95,8 @@ defmodule FermixCore.HostFacts do
   @doc """
   Reads the facts of `host` on `architecture`. `opts` may carry `plutil:`
   (`[String.t()] -> {:ok, stdout} | {:error, reason}`), `os_release:`
-  (`-> {:ok, contents} | {:error, reason}`) and `flatpak_exports:` (the
-  directories an exported desktop entry is looked for in); each defaults to
+  (`-> {:ok, contents} | {:error, reason}`) and `app_entry_dirs:` (the
+  directories the desktop app's entry is looked for in); each defaults to
   the real one. Only the reads `host`'s system has are made.
   """
   @spec read(BootProfile.host(), String.t(), keyword()) :: t()
@@ -104,14 +112,18 @@ defmodule FermixCore.HostFacts do
   end
 
   @doc """
-  Where Flatpak exports an installed app's desktop entry: the system
-  installation, then the user's under `$XDG_DATA_HOME`, which the XDG base
-  directory rule replaces with `~/.local/share` when it is unset, empty or
-  relative.
+  Where an install of the desktop app puts its entry: its .deb or .rpm
+  package's `/usr/share/applications`, then Flatpak's system exports, then
+  the user's under `$XDG_DATA_HOME`, which the XDG base directory rule
+  replaces with `~/.local/share` when it is unset, empty or relative.
   """
-  @spec flatpak_export_dirs(String.t() | nil, String.t()) :: [Path.t()]
-  def flatpak_export_dirs(xdg_data_home, home) when is_binary(home) do
-    [@system_exports, Path.join(data_home(xdg_data_home, home), @user_exports)]
+  @spec app_entry_dirs(String.t() | nil, String.t()) :: [Path.t()]
+  def app_entry_dirs(xdg_data_home, home) when is_binary(home) do
+    [
+      @package_entries,
+      @system_exports,
+      Path.join(data_home(xdg_data_home, home), @user_exports)
+    ]
   end
 
   @doc """
@@ -206,14 +218,14 @@ defmodule FermixCore.HostFacts do
 
   defp linux_app(:linux, opts) do
     opts
-    |> Keyword.get_lazy(:flatpak_exports, &default_export_dirs/0)
+    |> Keyword.get_lazy(:app_entry_dirs, &default_entry_dirs/0)
     |> Enum.any?(&File.exists?(Path.join(&1, @linux_app_entry)))
   end
 
   defp linux_app(_os, _opts), do: :not_asked
 
-  defp default_export_dirs,
-    do: flatpak_export_dirs(System.get_env("XDG_DATA_HOME"), System.user_home!())
+  defp default_entry_dirs,
+    do: app_entry_dirs(System.get_env("XDG_DATA_HOME"), System.user_home!())
 
   defp data_home(xdg_data_home, home) do
     if is_binary(xdg_data_home) and Path.type(xdg_data_home) == :absolute,
@@ -253,7 +265,7 @@ defmodule FermixCore.HostFacts do
 
   # Read once at boot, so the sentence says when it was true.
   defp linux_app_sentence(true) do
-    "The Fermix desktop app (Flatpak io.tezra.Fermix) was installed when Fermix started: " <>
+    "The Fermix desktop app (io.tezra.Fermix) was installed when Fermix started: " <>
       "it shows settings, chat, voice and logs, so answer \"how do I\" with its own labels " <>
       "for anything it has a control for."
   end

@@ -136,7 +136,8 @@ defmodule FermixCore.Cues.Mandates do
   @doc """
   Whether this engine has an app to ask the owner in (the reach rule): the Mac
   app's own engine, or the Linux desktop app when it was installed as Fermix
-  started. The Linux app is a Flatpak beside the host's package, so a package
+  started. The Linux app's package carries the same engine a headless
+  server's package does, and the earlier Flatpak sat beside it, so a package
   build alone says nothing about it (a headless server would hold every
   proposal unseen); `FermixCore.HostFacts` reads its entry at boot, and an app
   installed later counts at the next restart. A paired phone is not one until

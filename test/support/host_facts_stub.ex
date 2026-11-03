@@ -5,7 +5,7 @@ defmodule FermixTestSupport.HostFactsStub do
   # architecture are the run's own, from `BootProfile` and `BuildInfo`; what
   # `HostFacts` itself would read from the machine is fixed: macOS 26.1, Ubuntu
   # 24.04 LTS, and no Linux desktop app, so no test reads this machine's
-  # SystemVersion.plist, os-release or Flatpak exports.
+  # SystemVersion.plist, os-release or desktop entry directories.
   @behaviour FermixCore.HostFacts
 
   alias FermixCore.HostFacts
@@ -15,7 +15,7 @@ defmodule FermixTestSupport.HostFactsStub do
     HostFacts.read(host, architecture,
       plutil: &plutil/1,
       os_release: fn -> {:ok, ~s(NAME="Ubuntu"\nPRETTY_NAME="Ubuntu 24.04 LTS"\n)} end,
-      flatpak_exports: []
+      app_entry_dirs: []
     )
   end
 

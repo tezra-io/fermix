@@ -10,6 +10,7 @@ defmodule FermixCore.Home.AlwaysOnTest do
 
   alias FermixCore.Home.AlwaysOn
   alias FermixCore.Home.Epoch
+  alias FermixCore.HostFacts
   alias FermixTestSupport.SafeRm
 
   @server %{role: :primary, install: :linux_package_cli, os: :linux, linux_app: false, epoch: 2}
@@ -87,6 +88,34 @@ defmodule FermixCore.Home.AlwaysOnTest do
 
       assert %{role: :candidate, epoch: nil} =
                AlwaysOn.facts(home, %{role: :candidate, primary: nil}, @linux_host)
+    end
+
+    # Boot's decision as boot makes it, from the facts HostFacts reads: the
+    # app's .deb or .rpm package installs its entry in /usr/share/applications,
+    # and a desktop with that package is no server however its home came.
+    test "a moved home on a desktop with the app's package entry is no server", %{home: home} do
+      :ok = Epoch.write(home, 2)
+      root = SafeRm.make_tmp_dir!("always_on_app_entry")
+      on_exit(fn -> SafeRm.rm_rf!(root) end)
+
+      server? = fn ->
+        host =
+          HostFacts.read(%{profile: :linux_package_cli, os: :linux}, "x86_64",
+            os_release: fn -> {:ok, ~s(PRETTY_NAME="Ubuntu 24.04 LTS"\n)} end,
+            app_entry_dirs:
+              Enum.map(HostFacts.app_entry_dirs(nil, "/home/me"), &Path.join(root, &1))
+          )
+
+        home |> AlwaysOn.facts(%{role: :primary, primary: nil}, host) |> AlwaysOn.server?()
+      end
+
+      assert server?.()
+
+      package = Path.join(root, "/usr/share/applications")
+      File.mkdir_p!(package)
+      File.write!(Path.join(package, "io.tezra.Fermix.desktop"), "[Desktop Entry]\n")
+
+      refute server?.()
     end
 
     test "a primary's epoch file that cannot be read fails loud", %{home: home} do

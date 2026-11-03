@@ -102,7 +102,7 @@
       "prompt": "How do I update you?",
       "expectations": [
         "invokes skill self_knowledge",
-        "answers for the one install the prompt's ## This Fermix section names (the Mac app's Check for Updates…, the Linux package's installer run again then fermix restart, a Homebrew formula's brew upgrade fermix then fermix restart, or a standalone binary's fermix upgrade) and does not ask the person which install they have or list the others"
+        "answers for the one install the prompt's ## This Fermix section names (the Mac app's Check for Updates…, the Linux engine-only package's installer run again then fermix restart, the Linux desktop app's own package's Check for Updates… in that app, a Homebrew formula's brew upgrade fermix then fermix restart, or a standalone binary's fermix upgrade) and does not ask the person which install they have or list the others"
       ]
     },
     {

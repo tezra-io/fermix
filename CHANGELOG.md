@@ -553,6 +553,17 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Fermix sees the Linux desktop app installed as a package.** Fermix
+  looked for the desktop app only where the earlier Flatpak put it, so on a
+  computer with the app's .deb or .rpm package it took the app for missing.
+  Where you have no chat with Fermix (Telegram, Signal or WhatsApp), a
+  mandate in approve mode stayed inactive. If that computer's home had been
+  moved or restored there, Fermix also took it for an Always On server and
+  kept its traces' message bodies for only about a day. Fermix now counts
+  the app wherever its package or the Flatpak installs it, as it starts, so
+  with no chat a mandate in approve mode is active and its proposal waits
+  for you in the app's Chat. A watcher's follow-up card is not shown in the
+  Linux app yet: with no chat it waits until it expires.
 - **A Codex run's failure says what Codex said.** A Codex run that failed used
   to report only `reason: exit_1` and Codex's "Reading additional input from
   stdin..." line, because Codex gives its reason on an event Fermix did not

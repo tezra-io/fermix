@@ -13,6 +13,7 @@ defmodule FermixCore.Cues.MandatesTest do
   alias FermixCore.Cues.Config
   alias FermixCore.Cues.Mandates
   alias FermixCore.Cues.Pins
+  alias FermixCore.HostFacts
   alias FermixCore.Jobs.CueRun
   alias FermixCore.Jobs.CueSurface
   alias FermixCore.Memory.Repo
@@ -91,15 +92,38 @@ defmodule FermixCore.Cues.MandatesTest do
     assert status(fixture, approve, configured_owners: %{}, app_surface?: true) == :active
   end
 
-  # The Linux desktop app is a Flatpak beside the host's package, so a package
-  # build alone says nothing about it: a headless server with the package and
-  # no app would hold every proposal unseen until it expired. What counts is
-  # whether its entry was installed when Fermix started (HostFacts).
+  # The Linux desktop app's package carries the same engine a headless server's
+  # package does, and the earlier Flatpak sat beside it, so a package build
+  # alone says nothing about it: a headless server with the package and no app
+  # would hold every proposal unseen until it expired. What counts is whether
+  # its entry was installed when Fermix started (HostFacts).
   test "the Linux desktop app counts as somewhere to ask only when it is installed" do
     assert Mandates.app_surface?(host_facts: %{linux_app: true})
     refute Mandates.app_surface?(host_facts: %{linux_app: false})
     refute Mandates.app_surface?(host_facts: %{linux_app: :not_asked})
     refute Mandates.app_surface?(host_facts: %{})
+  end
+
+  # The app's .deb or .rpm package installs its entry in /usr/share/applications:
+  # a host with that alone has an owner to ask, read the way boot reads it.
+  test "the Linux desktop app's package entry alone is somewhere to ask" do
+    root = SafeRm.make_tmp_dir!("mandates_app_entry")
+    on_exit(fn -> SafeRm.rm_rf!(root) end)
+
+    read = fn ->
+      HostFacts.read(%{profile: :linux_package_cli, os: :linux}, "x86_64",
+        os_release: fn -> {:ok, ~s(PRETTY_NAME="Ubuntu 24.04 LTS"\n)} end,
+        app_entry_dirs: Enum.map(HostFacts.app_entry_dirs(nil, "/home/me"), &Path.join(root, &1))
+      )
+    end
+
+    refute Mandates.app_surface?(host_facts: read.())
+
+    package = Path.join(root, "/usr/share/applications")
+    File.mkdir_p!(package)
+    File.write!(Path.join(package, "io.tezra.Fermix.desktop"), "[Desktop Entry]\n")
+
+    assert Mandates.app_surface?(host_facts: read.())
   end
 
   test "tools name http plugin tools only: an MCP tool, a command or web_fetch is refused",
