@@ -77,11 +77,13 @@ defmodule FermixCore.Tools.ManageWatcher do
       "streams, webhooks), judges each item against its one-line purpose and numbered " <>
       "instructions with a filter model (or passes every item when its filter is none), and " <>
       "wakes its task, a job that runs on cues, for each item that passes. A watcher that " <>
-      "filters listens for keywords (listen_for): only an item containing one of them reaches " <>
-      "its filter, and the keywords never decide a pass. Draft them yourself, broadly, from the " <>
-      "owner's purpose and instructions: names, products, common abbreviations, and the " <>
-      "languages the source likely carries, since an item no keyword matches is never judged; " <>
-      "never ask the owner for a pattern. A watcher with no filter cannot listen to a stream " <>
+      "filters listens for keywords (listen_for), which never decide a pass. Under the " <>
+      "owner's Screen (Settings → Cues → Screen; not changed in chat), Keyword match " <>
+      "passes only items containing one to the filter; Decision model checks every item " <>
+      "by meaning, keywords as hints. Draft them yourself, broadly, from the owner's " <>
+      "purpose and instructions: names, products, common abbreviations, and the languages " <>
+      "the source likely carries; never ask the owner for a pattern. A watcher with no " <>
+      "filter cannot listen to a stream " <>
       "source. Instructions are a list of single criteria that Fermix never rewrites: read " <>
       "the list with show before adding, and remove one that a new instruction contradicts in " <>
       "the same change. A watcher holds at most 20 active instructions of at most 300 " <>

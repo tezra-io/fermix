@@ -808,10 +808,17 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
           "off by default",
           "Signal",
           "Cues pane",
-          "keywords to listen for"
+          "keywords to listen for",
+          "Screen",
+          "Keyword match",
+          "Decision model"
         ] do
       assert paragraph =~ required, "the Cues paragraph does not mention #{required}"
     end
+
+    # Under Decision model every item is checked by meaning, so the keywords are
+    # not what an item must contain to be judged.
+    refute paragraph =~ "must contain to be judged"
 
     for required <- [
           "[fermix_core.cues] enabled = true",

@@ -417,6 +417,19 @@ defmodule FermixCore.Tools.ManageWatcherTest do
       assert ManageWatcher.description() =~ "never ask the owner for a pattern"
     end
 
+    # The keywords gate items only under the Screen's Keyword match; under
+    # Decision model every item is checked by meaning. A description that says an
+    # unmatched item is never judged sends the owner away from that setting.
+    test "the description states both screens and that the owner sets the Screen" do
+      description = ManageWatcher.description()
+
+      for fact <- ["Settings → Cues → Screen", "Keyword match", "Decision model", "by meaning"] do
+        assert description =~ fact, "the description does not say #{fact}"
+      end
+
+      refute description =~ "an item no keyword matches is never judged"
+    end
+
     test "a watcher with no filter cannot listen to a stream", ctx do
       cues = Application.get_env(:fermix_core, :cues)
       on_exit(fn -> Application.put_env(:fermix_core, :cues, cues || []) end)
