@@ -55,7 +55,12 @@ _ISOLATED_PROFILES = {"isolated_mutation", "external_write", "desktop_input", "d
 FIXTURE_PAGES_DIR = os.path.join(SKILL_DIR, "suites", "fixtures", "browser")
 SUITE_FIXTURES_DIR = os.path.join(SKILL_DIR, "suites", "fixtures")
 _EVIDENCE_TOOL_LIMIT = 12
-_EVIDENCE_TOOL_MAX_BYTES = 2_000
+# One tool span's evidence, cut from its tail. The largest list_cues and manage_watcher
+# spans in the first full live cues run measured 2,908 and 3,375 bytes, and a 2,000 cap
+# hid the last sources a reply listed and a follow-up's held line from the judge. 5,000
+# keeps about 1.5x the largest whole; a turn of several larger spans fills the record
+# budget sooner and lists the rest in omitted_tool_spans.
+_EVIDENCE_TOOL_MAX_BYTES = 5_000
 _EVIDENCE_RECORD_MAX_BYTES = 30_000
 # The gates that assert something did NOT happen. A failed one is proved by what
 # IS in the trace — the forbidden tool span, the forbidden text — so it stays

@@ -935,8 +935,26 @@ def test_judge_tool_evidence_is_deterministically_bounded():
     evidence = run_eval._tool_evidence(view, 0)
     encoded = json.dumps(evidence, sort_keys=True).encode("utf-8")
     assert len(encoded) <= run_eval._EVIDENCE_RECORD_MAX_BYTES
-    assert evidence["omitted_tool_spans"] == 18
+    # Five spans cut at the per-tool cap fill the record budget; the rest are counted.
+    assert evidence["omitted_tool_spans"] == 25
     assert "[truncated]" in encoded.decode("utf-8")
+
+
+def test_judge_tool_evidence_keeps_a_cue_tool_result_whole():
+    # The largest list_cues (2,908 bytes) and manage_watcher (3,375 bytes) evidence in the
+    # first full live cues run: the old 2,000-byte cap cut the last sources a reply
+    # listed and a follow-up's held line, so the judge failed replies that were right.
+    held = "Held until it is ready: grant it with /grant path /Users/vela/src/brindle."
+    span = {
+        "name": "manage_watcher",
+        "input": {"action": "create", "name": "brindle-watch"},
+        "output": {"content": "s" * 3_200 + held},
+        "error_info": None,
+    }
+    evidence = run_eval._tool_evidence(SimpleNamespace(tool_spans=[span]), 0)
+    text = evidence["tools"][0]["evidence"]
+    assert held in text
+    assert "[truncated]" not in text
 
 
 def test_judge_usage_is_recorded_when_the_api_reports_it():
