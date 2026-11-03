@@ -142,4 +142,28 @@ defmodule FermixCore.Jobs.DeliveryTest do
     assert Agent.get(@counter, & &1) == 1
     assert log =~ "Delivery send raised"
   end
+
+  # The timeline row a run's message becomes names where it came from
+  # (companion PROTOCOL.md, *Where a message came from*): a name is never made
+  # up, so a run with none to give sends no origin.
+  describe "put_origin/3" do
+    test "names a job's run by the job and a cue's by the watcher" do
+      assert Delivery.put_origin([proactive_key: "job:r1"], :job, "Morning briefing") == [
+               origin: %{"kind" => "job", "name" => "Morning briefing"},
+               proactive_key: "job:r1"
+             ]
+
+      assert Delivery.put_origin([], :cue, "codex-limits") == [
+               origin: %{"kind" => "cue", "name" => "codex-limits"}
+             ]
+    end
+
+    test "a run with no name to give sends no origin" do
+      assert Delivery.put_origin([proactive_key: "job:r1"], :job, nil) == [
+               proactive_key: "job:r1"
+             ]
+
+      assert Delivery.put_origin([], :cue, "") == []
+    end
+  end
 end

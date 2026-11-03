@@ -371,6 +371,13 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   says why in a sentence. The app shows the files in your message, and so do
   your phones. The app also learns from Fermix which slash commands to offer.
   Attaching takes an app that speaks the new chat protocol.
+- **A message Fermix sends on its own says where it came from.** In the Mac
+  app's chat and on your phones, a message from a scheduled job carries the
+  job's name, and one a watcher set off (its task's report, its follow-up's
+  result, or a notice about it) carries the watcher's name, so the app can
+  show it above the message and open that watcher from there. A picture or
+  file the job sends carries it too. Replies to you, reminders and voice call
+  rows carry none.
 
 ### Changed
 

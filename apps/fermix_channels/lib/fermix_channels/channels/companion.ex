@@ -298,7 +298,9 @@ defmodule FermixChannels.Channels.Companion do
   answers no request, is pushed to the phones as well while their channel
   runs (M56 D9), as one through the phone's own channel is. A reply's
   `:blocks` (M72) are stored and announced with its row, and the links they
-  do not draw are previewed, as every row's are.
+  do not draw are previewed, as every row's are. A scheduled job's or a
+  cue's message names where it came from in its row's `metadata.origin`
+  (`:origin`, `Output.persist_output/5`).
   """
   @impl true
   @spec send_message(String.t(), String.t()) :: :ok | {:error, term()}

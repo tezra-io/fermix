@@ -239,6 +239,11 @@ defmodule FermixCore.Companion.Protocol do
   @call_engine_max_bytes 64
   @uuid ~r/\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/
 
+  # A message a scheduled job's or a cue's run sent carries `metadata.origin`:
+  # which of the two, and its name.
+  @origin_kinds ~w(job cue)
+  @origin_keys ~w(kind name)
+
   # The chat events whose payload the mobile wire carries verbatim. `history_pull`
   # and `history_page` are not among them: this wire's version 1 adds the
   # backward cursor (`before_seq`, `next_before_seq`) the mobile wire lacks.
@@ -555,6 +560,41 @@ defmodule FermixCore.Companion.Protocol do
     case Map.fetch(call, key) do
       :error -> :ok
       {:ok, value} -> if valid?.(value), do: :ok, else: {:error, {:invalid_field, "call." <> key}}
+    end
+  end
+
+  @doc """
+  Validate the `origin` map the row of a message a scheduled job's or a cue's
+  run sent carries in its `metadata`, string keyed as the timeline stores it:
+  `kind` (`job` or `cue`) and `name`, a non-empty string (the job's name, or
+  the watcher's as `cues.status` publishes it). Both are required, and a key
+  outside them is refused. The timeline's writer validates here, the one
+  place the shape is held.
+  """
+  @spec validate_origin_metadata(term()) :: :ok | {:error, term()}
+  def validate_origin_metadata(origin) when is_map(origin) do
+    with :ok <- known_origin_keys(origin),
+         :ok <- origin_field(origin, "kind", &(&1 in @origin_kinds)) do
+      origin_field(origin, "name", &(is_binary(&1) and &1 != ""))
+    end
+  end
+
+  def validate_origin_metadata(_origin), do: {:error, {:invalid_field, "origin"}}
+
+  defp known_origin_keys(origin) do
+    case Enum.find(Map.keys(origin), &(&1 not in @origin_keys)) do
+      nil -> :ok
+      key -> {:error, {:unknown_field, "origin.#{key}"}}
+    end
+  end
+
+  defp origin_field(origin, key, valid?) do
+    case Map.fetch(origin, key) do
+      :error ->
+        {:error, {:missing_field, "origin." <> key}}
+
+      {:ok, value} ->
+        if valid?.(value), do: :ok, else: {:error, {:invalid_field, "origin." <> key}}
     end
   end
 

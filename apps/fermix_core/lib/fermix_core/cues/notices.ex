@@ -28,7 +28,8 @@ defmodule FermixCore.Cues.Notices do
   A watcher notice goes to its task's delivery target, or, for a watcher with
   no task, its follow-up's (M60_WATCHER_CODING_RUNS.md §4.6), through
   `Jobs.CueRun.deliver/3`, the one send path of everything a cue causes (only
-  to a channel a cue run may reach), prefixed "Watcher <name>"; a source or
+  to a channel a cue run may reach), prefixed "Watcher <name>" and naming the
+  watcher as where it came from (`Jobs.Delivery.put_origin/3`); a source or
   mandate notice goes to the owner inbox (`Delivery.OwnerInbox`), as
   skill-curation proposals do. Every send asks the channel for no link
   previews.
@@ -45,6 +46,7 @@ defmodule FermixCore.Cues.Notices do
   alias FermixCore.Delivery.ChannelSend
   alias FermixCore.Delivery.OwnerInbox
   alias FermixCore.Jobs.CueRun
+  alias FermixCore.Jobs.Delivery
   alias FermixCore.Jobs.Registry, as: JobsRegistry
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Repo.CuesSql
@@ -116,7 +118,7 @@ defmodule FermixCore.Cues.Notices do
         text = watcher_text(kind, target.name, data)
 
         target.notice_job_id
-        |> send_to_task(text, opts)
+        |> send_to_task(target.name, text, opts)
         |> settle(
           {:release_watcher_notice, watcher_id, Atom.to_string(kind), rule, target.previous},
           opts
@@ -134,13 +136,16 @@ defmodule FermixCore.Cues.Notices do
   Tells the owner that a follow-up run they confirmed did not start
   (M60_WATCHER_CODING_RUNS.md §4.2, §4.6): `text`, Fermix's line naming the
   card and why (`Cues.Card.not_started/1`), through the delivery of follow-up
-  job `job_id`. Once per trigger, with no claim: only the refusal that ended
-  the trigger sends it.
+  job `job_id`, from watcher `watcher_name` (nil once the watcher is gone).
+  Once per trigger, with no claim: only the refusal that ended the trigger
+  sends it.
   """
-  @spec follow_up_not_started(String.t(), String.t(), keyword()) :: :sent | {:error, term()}
-  def follow_up_not_started(job_id, text, opts)
-      when is_binary(job_id) and is_binary(text) and is_list(opts) do
-    case send_to_task(job_id, text, opts) do
+  @spec follow_up_not_started(String.t(), String.t() | nil, String.t(), keyword()) ::
+          :sent | {:error, term()}
+  def follow_up_not_started(job_id, watcher_name, text, opts)
+      when is_binary(job_id) and (is_binary(watcher_name) or is_nil(watcher_name)) and
+             is_binary(text) and is_list(opts) do
+    case send_to_task(job_id, watcher_name, text, opts) do
       :ok -> :sent
       {:error, reason} -> failed("follow-up #{job_id} not started", reason)
     end
@@ -218,7 +223,7 @@ defmodule FermixCore.Cues.Notices do
     case call({:claim_gap_notice, gap.gap_id, now(opts)}, [skip_when_late: true] ++ opts) do
       {:ok, :claimed} ->
         gap.notice_job_id
-        |> send_to_task(gap_text(gap), opts)
+        |> send_to_task(gap.name, gap_text(gap), opts)
         |> settle({:release_gap_notice, gap.gap_id, stamp}, opts)
 
       {:ok, :already_sent} ->
@@ -238,15 +243,19 @@ defmodule FermixCore.Cues.Notices do
 
   # --- sending -----------------------------------------------------------------------
 
-  defp send_to_task(job_id, text, opts) do
+  # Sent through the task, the notice names its watcher as where it came from.
+  defp send_to_task(job_id, watcher_name, text, opts) do
     lookup = [repo: Keyword.get(opts, :repo, Repo)] ++ Keyword.take(opts, [:timeout, :on_timeout])
 
     with {:ok, job} <- JobsRegistry.get_job(job_id, lookup) do
+      send_opts =
+        opts |> Keyword.get(:delivery_opts, []) |> Delivery.put_origin(:cue, watcher_name)
+
       delivery_opts =
         opts
         |> Keyword.take([:adapter, :channels])
         |> Keyword.merge(
-          delivery_opts: Keyword.get(opts, :delivery_opts, []),
+          delivery_opts: send_opts,
           timeout_ms: Keyword.get(opts, :timeout_ms, @send_timeout_ms)
         )
 

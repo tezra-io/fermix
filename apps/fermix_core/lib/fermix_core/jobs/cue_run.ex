@@ -397,8 +397,10 @@ defmodule FermixCore.Jobs.CueRun do
   through `deliver/3`. As the runner's own send does, the run row's delivery
   reads `pending` (`Delivery.initial_status/2`) before the send and its result
   after it, so a daemon that dies around the send leaves a row the reconcile
-  pass finishes; a refused first write sends nothing. `opts`: `:repo`, `:now`,
-  and `deliver/3`'s (`:adapter`, `:channels`, `:delivery_opts`, `:timeout_ms`).
+  pass finishes; a refused first write sends nothing. Like the run's own
+  message, it names the run's watcher as where it came from
+  (`Delivery.put_origin/3`). `opts`: `:repo`, `:now`, and `deliver/3`'s
+  (`:adapter`, `:channels`, `:delivery_opts`, `:timeout_ms`).
   """
   @spec report_final_failure(map(), map(), keyword()) :: {:ok, String.t()} | {:error, term()}
   def report_final_failure(job, %{id: run_id, cue_delivery_id: delivery_id} = run, opts)
@@ -407,12 +409,19 @@ defmodule FermixCore.Jobs.CueRun do
          {:ok, calls} <- list_run_calls(run_id, opts),
          text = failure_message(ctx, stopped_text(job, run), calls),
          :ok <- mark_attempted(job, run, text, opts) do
-      sent = job |> deliver(text, opts) |> record_delivery(run, opts)
+      sent = job |> deliver(text, from_watcher(opts, ctx)) |> record_delivery(run, opts)
       mark_named_gaps(ctx, run_id, opts)
       sent
     else
       {:error, reason} -> report_failed(run_id, reason)
     end
+  end
+
+  defp from_watcher(opts, ctx) do
+    send_opts =
+      opts |> Keyword.get(:delivery_opts, []) |> Delivery.put_origin(:cue, ctx.watcher.name)
+
+    Keyword.put(opts, :delivery_opts, send_opts)
   end
 
   defp mark_attempted(job, run, text, opts) do

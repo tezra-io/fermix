@@ -690,7 +690,7 @@ defmodule FermixCore.Jobs.Runner do
     opts = [
       adapter: state.delivery_adapter,
       channels: state.delivery_channels,
-      delivery_opts: state.delivery_opts,
+      delivery_opts: send_opts(state),
       delivery_timeout_ms: state.delivery_timeout_ms,
       deadline_ms: run_deadline_ms(state),
       active: active,
@@ -1773,10 +1773,26 @@ defmodule FermixCore.Jobs.Runner do
     [
       adapter: state.delivery_adapter,
       channels: state.delivery_channels,
-      delivery_opts: Keyword.put(state.delivery_opts, :proactive_key, "job:#{state.run.id}"),
+      delivery_opts: Keyword.put(send_opts(state), :proactive_key, "job:#{state.run.id}"),
       timeout_ms: state.delivery_timeout_ms
     ]
   end
+
+  # What every message of the run, its text and its media, is sent with: the
+  # configured options and where it came from (`Delivery.put_origin/3`). A cue
+  # run and a follow-up name their watcher, any other run its job. A cue run
+  # whose context was not read, or a follow-up whose trigger was not, has no
+  # name to give.
+  defp send_opts(%{cue: {:ok, cue}} = state),
+    do: Delivery.put_origin(state.delivery_opts, :cue, cue.watcher.name)
+
+  defp send_opts(%{follow_up: {:ok, %{watcher_name: name}}} = state),
+    do: Delivery.put_origin(state.delivery_opts, :cue, name)
+
+  defp send_opts(%{cue: nil, follow_up: nil} = state),
+    do: Delivery.put_origin(state.delivery_opts, :job, Map.get(state.job, :name))
+
+  defp send_opts(state), do: state.delivery_opts
 
   # A job's message carries the lists its run read or changed (M85 §07), as a
   # turn's reply does, so the evening check-in's row names them too. The run's

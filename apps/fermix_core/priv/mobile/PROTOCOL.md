@@ -636,7 +636,9 @@ A `row` is the same message with `text` in place of `content`, plus
 carries only `server_seq`, `role`, `text`, `ts`, `client_msg_id`, `kind` and
 `metadata`; on this wire it carries the whole message, so a phone shows a row
 it did not write as a history page would. A GPT-Live call's row carries
-`metadata.call` (`priv/companion/PROTOCOL.md`, *A Live call's rows*).
+`metadata.call` (`priv/companion/PROTOCOL.md`, *A Live call's rows*), and a
+message a scheduled job's or a cue's run sent carries `metadata.origin`
+(`priv/companion/PROTOCOL.md`, *Where a message came from*).
 
 ## One timeline
 

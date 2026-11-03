@@ -1340,6 +1340,7 @@ defmodule FermixCore.Jobs.RunnerTest do
 
     assert_receive {:delivery_send, "123", "Digest ready.", opts}
     assert Keyword.fetch!(opts, :proactive_key) == "job:#{run.id}"
+    assert Keyword.fetch!(opts, :origin) == %{"kind" => "job", "name" => "Delivery Check"}
 
     assert {:ok, delivered_run} = Repo.get_job_run(run.id, server: repo)
     assert delivered_run.status == "ok"
@@ -2931,6 +2932,7 @@ defmodule FermixCore.Jobs.RunnerTest do
       assert part.caption == "Outfit preview"
       assert Keyword.fetch!(media_opts, :proactive_key) == "job:#{run.id}"
       assert Keyword.fetch!(media_opts, :proactive_part_id) == "media-1"
+      assert Keyword.fetch!(media_opts, :origin) == %{"kind" => "job", "name" => "Outfit Preview"}
 
       assert_receive {:adapter_continue, [%{output: tool_output}]}
       assert tool_output =~ "Sent attachment"

@@ -547,7 +547,7 @@
     },
     "row": {
       "type": "object",
-      "description": "A timeline row this socket did not stream (the sender's own message, a slash command's answer, a scheduled delivery, a message from a phone, the reply to a phone's turn, a Live call's row), announced to every connection watching the profile as it is written. client_msg_id is on a user's row, for the sender to match its outbox. kind, metadata, media_refs, link_previews and blocks are the history message's, as a history_page carries them; a Live call's row carries metadata.call (PROTOCOL.md, A Live call's rows).",
+      "description": "A timeline row this socket did not stream (the sender's own message, a slash command's answer, a scheduled delivery, a message from a phone, the reply to a phone's turn, a Live call's row), announced to every connection watching the profile as it is written. client_msg_id is on a user's row, for the sender to match its outbox. kind, metadata, media_refs, link_previews and blocks are the history message's, as a history_page carries them; a Live call's row carries metadata.call (PROTOCOL.md, A Live call's rows), and a message a scheduled job's or a cue's run sent carries metadata.origin (PROTOCOL.md, Where a message came from).",
       "required": ["type", "profile_id", "server_seq", "role", "text", "ts", "media_refs"],
       "properties": {
         "type": { "const": "row" },

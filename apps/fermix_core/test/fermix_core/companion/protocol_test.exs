@@ -965,6 +965,38 @@ defmodule FermixCore.Companion.ProtocolTest do
     end
   end
 
+  # PROTOCOL.md, *Where a message came from*: a scheduled job's or a cue's
+  # message names its source by kind and name, and nothing else.
+  describe "validate_origin_metadata/1" do
+    test "a job's message names the job and a cue's the watcher" do
+      assert :ok =
+               Protocol.validate_origin_metadata(%{"kind" => "job", "name" => "Morning briefing"})
+
+      assert :ok = Protocol.validate_origin_metadata(%{"kind" => "cue", "name" => "codex-limits"})
+    end
+
+    test "both keys are required, the kind is one of two and the name is never empty" do
+      origin = %{"kind" => "cue", "name" => "codex-limits"}
+
+      for key <- ~w(kind name) do
+        assert {:error, {:missing_field, "origin." <> ^key}} =
+                 Protocol.validate_origin_metadata(Map.delete(origin, key))
+      end
+
+      for {key, value} <- [{"kind", "reminder"}, {"kind", :cue}, {"name", ""}, {"name", 7}] do
+        assert {:error, {:invalid_field, "origin." <> ^key}} =
+                 Protocol.validate_origin_metadata(Map.put(origin, key, value))
+      end
+    end
+
+    test "a key the origin does not have is refused, and so is anything not a map" do
+      assert {:error, {:unknown_field, "origin.id"}} =
+               Protocol.validate_origin_metadata(%{"kind" => "job", "name" => "a", "id" => "j1"})
+
+      assert {:error, {:invalid_field, "origin"}} = Protocol.validate_origin_metadata(nil)
+    end
+  end
+
   defp ended_call do
     %{
       "uuid" => "3f2b8c1e-5a4d-4e6f-9b8a-7c6d5e4f3a2b",

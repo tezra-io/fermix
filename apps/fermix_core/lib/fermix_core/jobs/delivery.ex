@@ -94,6 +94,22 @@ defmodule FermixCore.Jobs.Delivery do
   @spec resolve_target(map()) :: {:ok, target()} | {:error, term()}
   def resolve_target(job) when is_map(job), do: delivery_target(job)
 
+  @doc """
+  Names where a message a run sends came from, as the send option `:origin`
+  on `send_opts`: `:job` and the job's name for a scheduled job's run, `:cue`
+  and the watcher's name for what a cue causes (its run, a follow-up it set
+  off, a watcher's notice). The Mac's and the phone's timeline store it on the
+  message's row as `metadata.origin` (`Companion.Protocol.validate_origin_metadata/1`);
+  every other channel ignores it. A name is never made up: with none, the
+  options are returned as they are.
+  """
+  @spec put_origin(keyword(), :job | :cue, String.t() | nil) :: keyword()
+  def put_origin(send_opts, kind, name) when is_list(send_opts) and kind in [:job, :cue] do
+    if is_binary(name) and name != "",
+      do: Keyword.put(send_opts, :origin, %{"kind" => Atom.to_string(kind), "name" => name}),
+      else: send_opts
+  end
+
   defp deliver_to_channel(job, text, opts) do
     with {:ok, target} <- resolve_target(job) do
       send_opts = target.opts ++ delivery_opts(opts)

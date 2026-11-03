@@ -150,4 +150,30 @@ defmodule FermixChannels.Companion.OutputTest do
 
     assert_received {:append, "main", %{metadata: %{"turn_id" => "turn-1"}}}
   end
+
+  # PROTOCOL.md, *Where a message came from*: a scheduled job's or a cue's
+  # message stores its origin with its row, its text and its media alike.
+  test "a job's or a cue's message stores where it came from with its row" do
+    origin = %{"kind" => "cue", "name" => "codex-limits"}
+
+    assert {:ok, {:created, row}} =
+             Output.persist_text(AppendStore, "main", "Codex limits", %{origin: origin})
+
+    assert row.metadata == %{"origin" => origin}
+    assert {:ok, %{"metadata" => %{"origin" => ^origin}}} = Output.timeline_message(row_at(row))
+
+    assert Output.media_metadata(%{origin: origin}) == %{"origin" => origin}
+    assert Output.media_metadata(%{proactive_key: "reminder:r1"}) == nil
+  end
+
+  test "an origin outside its shape writes nothing" do
+    for origin <- [%{"kind" => "reminder", "name" => "x"}, %{"kind" => "job", "name" => ""}] do
+      assert {:error, {:invalid_field, _field}} =
+               Output.persist_text(AppendStore, "main", "hi", %{origin: origin})
+    end
+
+    refute_received {:append, "main", _attrs}
+  end
+
+  defp row_at(row), do: Map.merge(row, %{role: "assistant", created_at: ~U[2026-11-02 07:00:00Z]})
 end

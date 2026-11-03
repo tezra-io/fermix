@@ -77,7 +77,7 @@ defmodule FermixCore.Jobs.RunnerFollowUpTest do
   defmodule RecordingDelivery do
     @moduledoc false
     def send_message(target, text, opts) do
-      send(Keyword.fetch!(opts, :test_pid), {:delivery_send, target, text})
+      send(Keyword.fetch!(opts, :test_pid), {:delivery_send, target, text, opts})
       :ok
     end
   end
@@ -132,6 +132,18 @@ defmodule FermixCore.Jobs.RunnerFollowUpTest do
     assert meta.trigger_id == claim.trigger.id
     assert meta.cue_id == claim.trigger.cue_id
     assert meta.watcher_id == claim.trigger.watcher_id
+  end
+
+  # Its message's row names the watcher that set it off, as `cues.status`
+  # names it, never the follow-up job the watcher runs.
+  test "the run's message names the watcher that set it off as where it came from", ctx do
+    claim = claimed_follow_up!(ctx)
+    refute claim.job.name == "codex-limits"
+
+    run!(ctx, claim, [%{content: "Reviewed."}])
+
+    assert_receive {:delivery_send, "chat-1", "Reviewed.", opts}
+    assert Keyword.fetch!(opts, :origin) == %{"kind" => "cue", "name" => "codex-limits"}
   end
 
   # --- fixtures --------------------------------------------------------------------------

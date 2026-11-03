@@ -433,7 +433,8 @@ defmodule FermixChannels.Channels.Mobile do
       content: value(media, :caption) || "",
       kind: "media",
       in_reply_to: value(attrs, :in_reply_to),
-      media_refs: [timeline_ref]
+      media_refs: [timeline_ref],
+      metadata: Output.media_metadata(attrs)
     }
 
     Output.persist_output(

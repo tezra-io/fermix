@@ -841,6 +841,18 @@ defmodule FermixChannels.Channels.CompanionTest do
 
       refute_received {:append, "main", _attrs}
     end
+
+    # A picture a scheduled job's run sends names the job as its text does.
+    test "a picture a job's run sends stores where it came from with its row", %{path: path} do
+      origin = %{"kind" => "job", "name" => "Outfit Preview"}
+      media = %{kind: :image, path: path, mime_type: "image/png"}
+      opts = [proactive_key: "job:run_1", proactive_part_id: "media-1", origin: origin]
+
+      assert :ok = Companion.send_media("main", media, opts)
+
+      assert_receive {:proactive, "main", "job:run_1:media-1",
+                      %{kind: "media", metadata: %{"origin" => ^origin}}}
+    end
   end
 
   # The hand-off is sent to Turns, not awaited: once Turns and then the queue

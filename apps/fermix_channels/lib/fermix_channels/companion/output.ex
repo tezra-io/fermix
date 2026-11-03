@@ -249,10 +249,11 @@ defmodule FermixChannels.Companion.Output do
   `:in_reply_to` and `:attempt` make it that attempt's output, keyed by the
   text's digest; a `:proactive_key` (with an optional `:proactive_part_id`)
   makes it a deduplicated proactive delivery; neither makes it a plain row.
-  The row's metadata carries the `:turn_id` that wrote it and a Live call's
-  `:call` map (M56 §6), already validated by its writer, each when given; a
-  non-empty `:blocks` (M72, `FermixCore.ReplyBlocks.build/2`) is stored with
-  the row in the same write.
+  The row's metadata carries the `:turn_id` that wrote it, a Live call's
+  `:call` map (M56 §6), already validated by its writer, and the `:origin` of
+  a scheduled job's or a cue's message (`persist_output/5`), each when given;
+  a non-empty `:blocks` (M72, `FermixCore.ReplyBlocks.build/2`) is stored
+  with the row in the same write.
   """
   @spec persist_text(store(), String.t(), String.t(), map()) :: persisted()
   def persist_text(store, profile_id, text, attrs) when is_binary(text) and is_map(attrs) do
@@ -261,10 +262,35 @@ defmodule FermixChannels.Companion.Output do
 
   @doc """
   Persist one reply part under an explicit output key; the router behind
-  `persist_text/4`, also used for media parts.
+  `persist_text/4`, also used for media parts. An `:origin` in `attrs` (where
+  a scheduled job's or a cue's message came from, its row's
+  `metadata.origin`) is checked first against
+  `Protocol.validate_origin_metadata/1`: one outside that shape writes
+  nothing.
   """
   @spec persist_output(store(), String.t(), map(), map(), String.t()) :: persisted()
   def persist_output(store, profile_id, timeline_attrs, attrs, output_key) do
+    with :ok <- validate_origin(value(attrs, :origin)) do
+      route_output(store, profile_id, timeline_attrs, attrs, output_key)
+    end
+  end
+
+  @doc """
+  The metadata a picture or file a delivery sends stores with its row: the
+  `origin` of a scheduled job's or a cue's message, or none.
+  """
+  @spec media_metadata(map()) :: map() | nil
+  def media_metadata(attrs) when is_map(attrs) do
+    case value(attrs, :origin) do
+      nil -> nil
+      origin -> %{"origin" => origin}
+    end
+  end
+
+  defp validate_origin(nil), do: :ok
+  defp validate_origin(origin), do: Protocol.validate_origin_metadata(origin)
+
+  defp route_output(store, profile_id, timeline_attrs, attrs, output_key) do
     cond do
       client_output?(attrs) ->
         store.append_client_output(
@@ -339,15 +365,19 @@ defmodule FermixChannels.Companion.Output do
       content: text,
       kind: "text",
       in_reply_to: value(attrs, :in_reply_to),
-      metadata: text_metadata(value(attrs, :turn_id), value(attrs, :call))
+      metadata: text_metadata(attrs)
     }
     |> maybe_put(:blocks, present_list(value(attrs, :blocks)))
   end
 
-  # A reply outside any turn (a delivery) has no turn to name, and only a Live
-  # call's row has a call. A row with neither stores no metadata.
-  defp text_metadata(turn_id, call) do
-    case Enum.reject([{"turn_id", turn_id}, {"call", call}], &is_nil(elem(&1, 1))) do
+  # A reply outside any turn (a delivery) has no turn to name, only a Live
+  # call's row has a call, and only a scheduled job's or a cue's message has an
+  # origin. A row with none stores no metadata.
+  defp text_metadata(attrs) do
+    [{"turn_id", :turn_id}, {"call", :call}, {"origin", :origin}]
+    |> Enum.map(fn {name, key} -> {name, value(attrs, key)} end)
+    |> Enum.reject(&is_nil(elem(&1, 1)))
+    |> case do
       [] -> nil
       present -> Map.new(present)
     end

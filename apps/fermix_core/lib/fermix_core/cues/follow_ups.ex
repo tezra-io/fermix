@@ -521,7 +521,12 @@ defmodule FermixCore.Cues.FollowUps do
 
     case card(trigger.id, opts) do
       {:ok, card} ->
-        Notices.follow_up_not_started(trigger.job_id, Card.not_started(card), opts)
+        Notices.follow_up_not_started(
+          trigger.job_id,
+          card.watcher.name,
+          Card.not_started(card),
+          opts
+        )
 
       {:error, reason} ->
         Logger.error(

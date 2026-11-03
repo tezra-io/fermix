@@ -27,7 +27,12 @@ defmodule FermixChannels.Gateway.Channel do
           # `false` asks the channel to fetch nothing the text links to: no
           # embed, unfurl or preview card (every message a cue run causes,
           # M60 §9.5). Absent means the channel's own default.
-          link_previews: boolean()
+          link_previews: boolean(),
+          # Where a scheduled job's or a cue's message came from,
+          # `%{"kind" => "job" | "cue", "name" => name}`: the Mac's and the
+          # phone's timeline store it on the row (`metadata.origin`); every
+          # other channel ignores it.
+          origin: %{required(String.t()) => String.t()}
         ]
 
   @type media_part :: Reply.media_part()

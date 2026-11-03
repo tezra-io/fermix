@@ -38,6 +38,7 @@ defmodule FermixCore.Cues.FollowUpsTest do
     @moduledoc false
     def send_message(target, text, opts) do
       send(Keyword.fetch!(opts, :test_pid), {:delivered, target, text})
+      send(Keyword.fetch!(opts, :test_pid), {:delivered_opts, text, opts})
       :ok
     end
   end
@@ -517,6 +518,9 @@ defmodule FermixCore.Cues.FollowUpsTest do
       assert text ==
                ~s(Watcher codex-limits: "Codex review" for post-1's post did not start. ) <>
                  switch_off
+
+      assert_received {:delivered_opts, ^text, send_opts}
+      assert Keyword.fetch!(send_opts, :origin) == %{"kind" => "cue", "name" => "codex-limits"}
 
       assert_received {:event,
                        {:resolved, %{proposal_id: id, state: "refused", sentence: ^switch_off}}}

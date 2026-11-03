@@ -414,7 +414,7 @@ in a fixed order:
 | `text_done` | `turn_id`, `server_seq`, `text`; `blocks[]?` | A reply's canonical text at its timeline row, sent once the turn has completed; replaces the draft. A turn may send more than one. `blocks` are the row's, present only when it has one; see *Blocks under a reply*. |
 | `turn_error` | `turn_id`, `code`, `message` | The turn's terminal failure: `code` is `cancelled` after a `cancel`, `interrupted` when the daemon lost the turn, `uncertain_after_restart` when the request may have run before the daemon restarted (see *Delivery and the outbox*). `message` is at most 512 bytes. |
 | `turn_done` | `turn_id` | Version 2. The turn completed and wrote no reply: it ends the turn, and nothing of its draft is kept. Sent only to a connection on version 2; see *Version 2*. |
-| `row` | `profile_id`, `server_seq`, `role`, `text`, `ts`, `media_refs[]`; `client_msg_id?`, `kind?`, `metadata?`, `link_previews[]?`, `blocks[]?` | A timeline row this socket did not stream, announced to every connection as it is written: the sender's own message (with its `client_msg_id`, to match the outbox), a slash command's answer, a scheduled delivery, a message from a phone, the reply to a phone's turn, and a Live call's row. `kind`, `metadata`, `media_refs`, `link_previews` and `blocks` are the history message's, as a `history_page` carries them (see *Timeline shapes*); a Live call's row carries `metadata.call` (see *A Live call's rows*). |
+| `row` | `profile_id`, `server_seq`, `role`, `text`, `ts`, `media_refs[]`; `client_msg_id?`, `kind?`, `metadata?`, `link_previews[]?`, `blocks[]?` | A timeline row this socket did not stream, announced to every connection as it is written: the sender's own message (with its `client_msg_id`, to match the outbox), a slash command's answer, a scheduled delivery, a message from a phone, the reply to a phone's turn, and a Live call's row. `kind`, `metadata`, `media_refs`, `link_previews` and `blocks` are the history message's, as a `history_page` carries them (see *Timeline shapes*); a Live call's row carries `metadata.call` (see *A Live call's rows*), and a message a scheduled job's or a cue's run sent carries `metadata.origin` (see *Where a message came from*). |
 | `row_updated` | `profile_id`, `server_seq` | Version 3. A row already written changed: its text, its media refs or its link previews. Carries no content; see *When a row changes*. Sent only to a connection on version 3. |
 | `approval` | `approval_id`, `kind`, `text`, `token`, `ttl_s`, `approve_command`, `deny_command`; `detail?` | An owner-approval card raised by a turn on this socket. The token is submitted, never rendered. Routes are nonempty and at most 1,024 characters. Sent again after `server_hello` while it waits; see *Approvals*. |
 | `approval_resolved` | `approval_id`, `outcome` | `approved` or `denied` when the owner answered, `expired` when its `ttl_s` ran out. |
@@ -509,6 +509,28 @@ No other key appears in it. A call's row is written once: a write repeated for
 the same task revision and event, or for the same call's end, finds the row
 already written, and the realtime wire's `task.server_seq` names a task's, so
 the app can say the result is in the chat.
+
+### Where a message came from
+
+A message Fermix sends on its own, from a scheduled job's run or from what a
+cue set off, is an assistant row like a reply. Its `metadata.origin` says
+where it came from, so a client can name the source above it:
+
+| Key | Type | Notes |
+|---|---|---|
+| `kind` | `job` \| `cue` | `job`: a run of a scheduled job, whether its schedule or the owner's Run now started it. `cue`: what a cue set off through a watcher: the run of the watcher's task (its reply, Fermix's report of it, and its final failure), the run of the watcher's follow-up, and the watcher's notices (a hold, a reached cap, a gap, a follow-up that did not start). Always present. |
+| `name` | string, never empty | For `job`, the job's name, as the owner's jobs list names it. For `cue`, the watcher's name exactly as `cues.status` publishes it in a watcher's `name`, the key a client opens that watcher's page by, never the name of the task or follow-up the watcher runs. Always present. |
+
+No other key appears in it. Every row of such a message carries the same
+origin: its text, and each picture or file the run sends (`kind: "media"`).
+A row with nothing to name has no `origin`: the owner's own message, a
+turn's reply, a slash command's answer, a Live call's row, a reminder,
+Fermix's notice about a cue source, a mandate or a confirmed call whose
+outcome is unknown, and a run with no name to give (a follow-up whose
+watcher was removed before it ran). A name is never
+made up. The key is additive, so it is sent on every version: a client that
+does not know `origin`, or meets a `kind` it does not know, ignores it and
+draws the row as it draws any other.
 
 ## Managed media files
 

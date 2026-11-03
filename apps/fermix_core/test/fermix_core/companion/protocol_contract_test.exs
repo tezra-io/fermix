@@ -545,6 +545,42 @@ defmodule FermixCore.Companion.ProtocolContractTest do
     refute protocol =~ "This wire's `row` is unchanged"
   end
 
+  # A message a scheduled job's or a cue's run sent names where it came from in
+  # its row's metadata, additive and on every version, with a golden of each
+  # kind as a `row` and as a history page carries it.
+  test "a job's or a cue's message names where it came from, with goldens of both kinds", %{
+    schema: schema,
+    protocol: protocol
+  } do
+    goldens = jsonl(@server_fixtures)
+    rows = Enum.filter(goldens, &(&1["type"] == "row"))
+
+    paged =
+      goldens
+      |> Enum.filter(&(&1["type"] == "history_page"))
+      |> Enum.flat_map(& &1["messages"])
+
+    origins = for row <- rows ++ paged, origin = get_in(row, ["metadata", "origin"]), do: origin
+
+    for origin <- origins, do: assert(:ok = Protocol.validate_origin_metadata(origin))
+
+    for kind <- ~w(job cue) do
+      assert Enum.any?(rows, &(get_in(&1, ["metadata", "origin", "kind"]) == kind)),
+             "no golden row carries a #{kind} origin"
+    end
+
+    assert Enum.any?(paged, &get_in(&1, ["metadata", "origin"])),
+           "no golden history page carries an origin"
+
+    [_before, section] = String.split(protocol, "### Where a message came from", parts: 2)
+    [section | _rest] = String.split(section, "\n## ", parts: 2)
+
+    for key <- ~w(kind name), do: assert(section =~ "| `#{key}` |")
+    assert section =~ "`cues.status`"
+    assert protocol =~ "carries `metadata.origin` (see *Where a message came from*)"
+    assert schema["$defs"]["row"]["description"] =~ "metadata.origin"
+  end
+
   # M66: a row carries the history message's media refs, always, and its link
   # previews when it has one, on every version, so a new row needs no read.
   test "every golden row carries its media refs, one a voice note, one a picture and a preview",
