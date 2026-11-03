@@ -189,10 +189,10 @@
 (* One step = one callback of one process, one Memory.Repo call, or one    *)
 (* thing a client or the environment does.                                 *)
 (***************************************************************************)
-\* SOURCE: apps/fermix_core/priv/companion/PROTOCOL.md @ e2e15cee8051
+\* SOURCE: apps/fermix_core/priv/companion/PROTOCOL.md @ ec434135388b
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/requests.ex#request,cancel,claim_and_run,acquire_and_run,run_started,ingest_span,settle_after_ingest,settle_unless_handed_off,handoff_settlement,fail_attempt,report_failure,settle_failed,append_user,after_user_append,settle_inline,ingest_gateway,approval_resolution_fn,history,fit_page,cut_page,take_within,accepted_event,history_event,emit,best_effort_emit @ 97be58f8e741
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/turns.ex @ b14ce70b09b6
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/output.ex#text_done,turn_error,row,timeline_message,approval,approval_resolved,persist_text,persist_output,complete_request,fail_request @ ba55e94f8827
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/output.ex#text_done,turn_error,row,timeline_message,approval,approval_resolved,persist_text,persist_output,complete_request,fail_request @ 1273ba13c1f4
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/connection.ex#handle_info,dispatch,hello,join,send_pending_approvals,write_pending_approval,write_event,send_event,transport,request_failure_reporter,announce_user_row,request_opts,read_opts,sink @ f4eb02967933
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/fanout.ex @ abddae4baafe
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/approvals.ex @ 59c135c36360
@@ -260,7 +260,7 @@ CONSTANTS
     AnnouncesEveryRow,   \* every row written outside a turn's completion is announced as
                          \* a row as it is written: the user's (announce_user_row,
                          \* connection.ex:1174-1175) and a delivery's (announce_written,
-                         \* channels/companion.ex:407-408), both built by Output.row and
+                         \* channels/companion.ex:409-410), both built by Output.row and
                          \* sent through Fanout.announce; FALSE announces no user row
     SingleAnswer,        \* an approval token is consumed once: Confirmations.take is
                          \* an :ets.take (confirmations.ex:21-26, take_pending
@@ -446,7 +446,7 @@ Cursor(c) == IF view[c] = <<>> THEN 0 ELSE view[c][Len(view[c])]
 NextSeq == MaxOf(Range(tl)) + 1
 
 \* Companion.Fanout.announce (fanout.ex:47-67) -> Channels.Companion.broadcast
-\* (channels/companion.ex:175-178, dispatch :462-466): one send to every
+\* (channels/companion.ex:175-178, dispatch :464-468): one send to every
 \* Connection registered under the profile, each event the companion wire
 \* carries, a row (built once, by Output.row) projected to the fields this
 \* wire's row has (its kind and metadata among them, which no rule reads). A row and a text_done are both a live row here.
@@ -960,7 +960,7 @@ Finish(m) ==
 
 -----------------------------------------------------------------------------
 (* A scheduled job reporting back: Channels.Companion.send_message in the   *)
-(* job's own process (channels/companion.ex:306-321). A GPT-Live call's    *)
+(* job's own process (channels/companion.ex:308-323). A GPT-Live call's    *)
 (* rows (write_call_row, :340-359, M56 sections 4.2 and 4.5) are written   *)
 (* and announced the same way: a result shown, from the call's session,    *)
 (* and the call's one row when it ends, from the task that made its gist   *)
@@ -984,7 +984,7 @@ JobWrite ==
     /\ UNCHANGED <<client, conn, turns, reqs, queue, env, obs>>
 
 \* announce_written -> Fanout.announce: the job announces its row
-\* (channels/companion.ex:407-408).
+\* (channels/companion.ex:409-410).
 JobAnnounce ==
     /\ job = "written"
     /\ job' = "done"

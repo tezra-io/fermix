@@ -429,6 +429,13 @@ pin: `command_catalog/0` moved to `Gateway.Commands.Registry.catalog/0`, the
 one command list both companion wires now send, and nothing else in the file
 changed. No delivery path the spec models changed.
 
+Re-read on 2026-11-02 for a message's origin, which staled the `mobile.ex`
+and `output.ex` pins: a media row now stores the `origin` a scheduled job's
+or a cue's send names, and `persist_output` checks a given origin before it
+writes. A reminder's send names no origin, so its row, its proactive dedupe
+and its push are as before; the comment's `output.ex` numbers moved with the
+code. No delivery path the spec models changed.
+
 ## Code and doc drift
 
 - `delivery_worker.ex:160-163` says a claim past the validity boundary "cannot

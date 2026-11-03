@@ -150,6 +150,17 @@ names the files among what it leaves out. The line references into
 `connection.ex` moved with the code, and those into `channels/companion.ex`,
 which had drifted before, now point at the functions they name.
 
+The re-read after a message's origin (2026-11-02) found `PROTOCOL.md`'s new
+*Where a message came from*: a scheduled job's or a cue's message carries
+`metadata.origin` (`kind` and `name`) on its row, additive and on every
+version, which no client rule reads. `Output.persist_output` now checks a
+given origin before it writes and, for one outside its shape, writes nothing
+and answers an error, as a refused store write does; the job's row the spec
+models is written by engine code that builds only well-formed origins, so
+its write and announcement are as before. Every row, seq, ending and
+settlement is unchanged, so nothing the spec models changed. The line
+references into `channels/companion.ex` moved with the code.
+
 **The Queue is one abstract process.** The runner takes one `.tla` per spec,
 and `turn_queue` proves the Queue's rules against `queue.ex`, so this spec takes
 them as given:
@@ -290,7 +301,7 @@ the checks that show a rule needs it):
 - `AnnouncesEveryRow`: every row written outside a turn's completion is
   announced as a `row` as it is written: the user's row (`announce_user_row`,
   `connection.ex:1174-1175`) and a delivery (`announce_written`,
-  `channels/companion.ex:407-408`), both built by `Companion.Output.row` and
+  `channels/companion.ex:409-410`), both built by `Companion.Output.row` and
   sent through `Companion.Fanout.announce`. `FALSE` announces no user row.
 - `SingleAnswer`: `Confirmations.take` is an `:ets.take`, the sole consumer of
   a token (`confirmations.ex:21-31`).

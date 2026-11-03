@@ -651,6 +651,19 @@ models changed and no reference moved.
 - **Line numbers** were moved through the diff, so each moved reference
   points at the same line it did.
 
+## Re-read for a message's origin (2026-11-02)
+
+A run's message now names where it came from, the send option `origin` the
+Mac's and the phone's timeline store as `metadata.origin`. It staled
+`runner.ex`, `delivery.ex` and `report_final_failure` in `cue_run.ex`.
+`Delivery.put_origin/3` is a pure function on the send options; the runner
+builds them once more for the final text and the media route
+(`send_opts/1`, from the job, or the watcher its cue or trigger names, read
+at the run's start as before), and the reaper's report adds its watcher's
+name from the context it already loaded. No Repo call, step, row, helper,
+delivery or report changes, and nothing moved below a line the spec cites,
+so nothing the spec models changed.
+
 ## Plan hypotheses
 
 The plan (`docs/design/TLA_PLUS_MODELS.md` §4.3) listed four expected
