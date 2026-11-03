@@ -132,9 +132,10 @@ scenarios:
   # the scenario is isolated_mutation: a dev daemon's home has neither. Each floor
   # is an identifier only Fermix's note on the handed-off run supplies (neither
   # skill's body names it), so no phrasing is pinned. dock-ledger lists ONLY the
-  # missing tool: the eval home makes its skills folder readable (a real home does
-  # not), and a handed-off run that kept file_read read its own frontmatter and
-  # named the tool without Fermix's note (seen on the code before the note).
+  # missing tool: the skills folder is a sandbox root (in the default standard
+  # mode and in the eval home), so a handed-off run that kept file_read read its
+  # own frontmatter and named the tool without Fermix's note on the code before
+  # the note, and the case could not tell the two apart.
   # Neither skill's data exists anywhere, so a model that goes looking for it
   # meets sandbox refusals; that search is not what is graded, so these cases
   # drop the suite's no_tool_errors gate and the floor and rubric carry the grade.
