@@ -247,8 +247,8 @@ will be part of a future release; nothing in this group is in a release yet.
 - **The Linux installer installs a release you name.** `curl -fsSL
   https://fermix.ai/install | sh -s -- --version X.Y.Z` installs that
   release instead of the latest, from that release's own files, under the
-  same checksum and signature checks, and does nothing when it is installed
-  already. A version that is not a release is refused before anything is
+  same checksum and signature checks, and, installing a package, does nothing
+  when that release is installed already. A version that is not a release is refused before anything is
   downloaded.
 
 - **Computer use does more with an app's controls, and waits on them.**
@@ -290,7 +290,8 @@ will be part of a future release; nothing in this group is in a release yet.
   lists and never in memory.** Ask in your own chat ("start a list for the
   garden in my Projects folder", "add lemons to groceries", "tick off the
   keychain logins") and Fermix keeps each list as a record of its own, with
-  sections, notes on items, and 30 days to bring back anything removed. One
+  sections, notes on items, and 30 days to bring back anything removed from
+  the Mac app's lists. One
   message can file items into several lists, and they land together or not
   at all; an item that could belong to two lists is asked about, never
   guessed. Fermix reads and changes your lists only in your own private chats
@@ -432,8 +433,8 @@ will be part of a future release; nothing in this group is in a release yet.
   itself with an app-level token, so there is no public URL, tunnel or open
   port to set up, which is how Slack runs on a server. Choose Socket Mode in
   the Channels settings or the setup page's Slack card, save the bot token and
-  the app-level token, and restart. `/health` and Doctor say whether it is
-  connected, Fermix reconnects on its own when Slack refreshes or drops the
+  the app-level token, and restart. `fermix health` and Doctor say whether it
+  is connected, Fermix reconnects on its own when Slack refreshes or drops the
   connection, and an event it could not take in is left for Slack to send
   again. The webhook stays the default.
 - **The browser fills a form and sends it in one step.** When the agent fills
@@ -498,13 +499,14 @@ will be part of a future release; nothing in this group is in a release yet.
   the date with its weekday, the time and time zone, and how far away it is.
   The "Reminder:" label is gone, and reminders still arrive on time with no
   model involved.
-- **One browser sign-in now serves all your conversations.** Every
-  conversation you run on a Fermix (a chat on any channel, a scheduled job's
-  runs, a cue run) shares one browser profile, so a site you sign in to once
-  stays signed in for all of them and a scheduled job no longer starts signed
-  out on every run. Each conversation still works in its own tab. A guest's
-  conversation keeps a profile of its own, and signing in on one Fermix does
-  not sign another in. Profiles were kept per conversation before and are not
+- **One browser sign-in now serves all your conversations.** In the Chrome
+  Fermix runs for the agent, every conversation you run on a Fermix (a chat
+  on any channel, a scheduled job's runs, a cue run) shares one browser
+  profile, so a site you sign in to once stays signed in for all of them and
+  a scheduled job no longer starts signed out on every run. Each
+  conversation still works in its own tab. The Mac app's browser pane keeps
+  a profile per conversation, as a guest's conversation does, and signing in
+  on one Fermix does not sign another in. Profiles were kept per conversation before and are not
   carried over, so sign in to each site once more.
 - **On Linux the kernel now holds every command Fermix runs for you to the
   sandbox, as it does on a Mac.** The shell, git and operator commands run

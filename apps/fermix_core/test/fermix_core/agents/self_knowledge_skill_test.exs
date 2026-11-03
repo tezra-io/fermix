@@ -363,6 +363,10 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
       assert reference =~ "`#{tool}`"
     end
 
+    # The owner's Mac app draws lists (companion protocol 6), so the skill's
+    # summary must say so, as the reference and the turn's own prompt do.
+    assert body =~ "under the reply, live"
+
     for sentence <- [
           ChecklistAccess.outside_refusal(),
           ChecklistRegistry.describe_error({:list_full, "Fermix"}),
