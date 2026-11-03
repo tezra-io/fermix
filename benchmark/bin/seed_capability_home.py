@@ -188,6 +188,17 @@ fi
 echo "codex stub: the cue evals never run Codex" >&2
 exit 1
 """
+# The stub account's model list, as Codex caches it in its own config dir. Fermix
+# checks a requested Codex model against it before launching, so a case asking
+# for a model by its shown name finds the id only in Fermix's refusal. Invented.
+CODEX_MODEL_LIST = {
+    "fetched_at": "2026-11-03T04:00:00Z",
+    "models": [
+        {"slug": "gpt-lantern-gray-latest", "display_name": "Lantern Gray", "visibility": "list"},
+        {"slug": "gpt-harbor-mist", "display_name": "Harbor Mist", "visibility": "list"},
+        {"slug": "gpt-quiet-reserve", "display_name": "Quiet Reserve", "visibility": "hide"},
+    ],
+}
 _ENV_KEY_PROVIDERS = {
     "openai": "OPENAI_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
@@ -454,21 +465,25 @@ def clear_cue_fixtures(home: str) -> None:
     so the runners hold the cue suites out instead of driving a home with cues off,
     and the coding stubs, so no other suite's daemon finds the stub `codex`."""
     for name in (CUE_MANIFEST, CUE_WATCHERS_MANIFEST,
-                 os.path.join(CUE_BIN_DIR, "codex"), os.path.join(CUE_CODEX_HOME, "auth.json")):
+                 os.path.join(CUE_BIN_DIR, "codex"), os.path.join(CUE_CODEX_HOME, "auth.json"),
+                 os.path.join(CUE_CODEX_HOME, "models_cache.json")):
         path = os.path.join(home, name)
         if os.path.isfile(path):
             os.remove(safe_rm.check(path, home, min_below=1))
 
 
 def write_coding_stubs(home: str) -> None:
-    """The follow-up cases' coding agents: the stub `codex` (executable) and its
+    """The follow-up cases' coding agents: the stub `codex` (executable), its
     stub sign-in, a refresh token the Codex readiness check reads and nothing
-    uses. Claude Code's config dir is left unmade, so it is never ready."""
+    uses, and its account's model list. Claude Code's config dir is left unmade,
+    so it is never ready."""
     stub = os.path.join(home, CUE_BIN_DIR, "codex")
     write_private(stub, CODEX_STUB)
     os.chmod(stub, 0o700)
     auth = {"tokens": {"refresh_token": "eval-stub-refresh-token"}}
     write_private(os.path.join(home, CUE_CODEX_HOME, "auth.json"), json.dumps(auth))
+    write_private(os.path.join(home, CUE_CODEX_HOME, "models_cache.json"),
+                  json.dumps(CODEX_MODEL_LIST))
 
 
 def write_private(path: str, text: str) -> None:

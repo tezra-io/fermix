@@ -195,6 +195,62 @@ defmodule FermixCore.Harness.Vendors do
     end
   end
 
+  @doc """
+  The models the signed-in Codex account offers, read from the list Codex itself
+  caches in its config dir (`models_cache.json`, which Codex refreshes): a file
+  read only. Each model is its `id` (what `-m` takes), the `name` Codex shows, and
+  whether Codex lists it in its picker (`listed?`; a hidden one still runs). No
+  file is `:no_codex_model_list`, since Codex writes it once it has listed the
+  account's models; a file that cannot be read or decoded is its own refusal.
+  Tests inject `:codex_home`.
+  """
+  @spec codex_models(keyword()) ::
+          {:ok, [%{id: String.t(), name: String.t(), listed?: boolean()}]}
+          | {:error, :no_codex_model_list | {:codex_model_list_unreadable, term()}}
+  def codex_models(opts) when is_list(opts) do
+    path = Path.join(codex_home(opts), "models_cache.json")
+
+    with {:ok, body} <- read_model_list(path),
+         {:ok, entries} <- decode_model_list(body) do
+      collect_models(entries, [])
+    end
+  end
+
+  defp read_model_list(path) do
+    case File.read(path) do
+      {:ok, body} -> {:ok, body}
+      {:error, :enoent} -> {:error, :no_codex_model_list}
+      {:error, reason} -> {:error, {:codex_model_list_unreadable, reason}}
+    end
+  end
+
+  defp decode_model_list(body) do
+    case Jason.decode(body) do
+      {:ok, %{"models" => entries}} when is_list(entries) -> {:ok, entries}
+      {:ok, _other} -> {:error, {:codex_model_list_unreadable, :no_models_key}}
+      {:error, error} -> {:error, {:codex_model_list_unreadable, Exception.message(error)}}
+    end
+  end
+
+  # An entry with no id is a list Fermix does not understand, never one to skip.
+  defp collect_models([], acc), do: {:ok, Enum.reverse(acc)}
+
+  defp collect_models([%{"slug" => id} = entry | rest], acc) when is_binary(id) and id != "" do
+    model = %{
+      id: id,
+      name: model_name(entry, id),
+      listed?: Map.get(entry, "visibility") != "hide"
+    }
+
+    collect_models(rest, [model | acc])
+  end
+
+  defp collect_models([_entry | _rest], _acc),
+    do: {:error, {:codex_model_list_unreadable, :entry_without_id}}
+
+  defp model_name(%{"display_name" => name}, _id) when is_binary(name) and name != "", do: name
+  defp model_name(_entry, id), do: id
+
   # Through `Harness.Identity` so detection probes the store a run will actually
   # use: an operator who exports `CODEX_HOME`/`CLAUDE_CONFIG_DIR` keeps credentials
   # somewhere Fermix's own config never names, and reporting on the default while

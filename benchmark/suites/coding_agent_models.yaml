@@ -1,0 +1,64 @@
+# A Codex model asked for by the name Codex shows, not its id (2026-11-03: a
+# follow-up launched Codex with "daybreak blue" and the run died in 4 s, after the
+# follow-up had ended). Fermix checks a requested model against the account's own
+# list before starting anything and refuses an unknown one with the listed ids and
+# names, saying nothing was started; the model reads that and launches again with
+# the id.
+#
+# Rides the cues seed's stub Codex (`requires: [cues]`): a stub `codex` first on
+# the daemon's PATH, a stub sign-in, the harness consent granted, and the stub
+# account's model list in its Codex home (seed_capability_home.py
+# CODEX_MODEL_LIST: Lantern Gray is gpt-lantern-gray-latest, Harbor Mist is
+# gpt-harbor-mist). The ids are invented, so a launch naming one learned it from
+# Fermix's refusal. The stub exits 1 once launched, out of the turn, so only the
+# launch is graded; what the run then reports arrives later and is not.
+suite: coding_agent_models
+risk: isolated_mutation
+requires: [cues]
+title: "Coding agent models — a model asked for by its shown name launches by its id"
+description: >
+  The owner asks for a Codex run on a model by the name Codex shows. Fermix's
+  check of the account's model list refuses that name before anything starts,
+  listing each model's id beside its name, and the model launches again with the
+  id, without asking the owner for it or swapping in another model, and says the
+  run started without claiming its results.
+defaults:
+  timeout_ms: 240000
+  judge: true
+
+scenarios:
+  - id: model_by_shown_name
+    title: "A Codex model named as Codex shows it is launched by its id"
+    severity: critical
+    tags: [harness, models]
+    cases:
+      - id: lantern_gray_notes
+        query: >
+          In your workspace, start Codex on the Lantern Gray model to write a short
+          NOTES.md about what's in there. Just tell me once it's going.
+        expect:
+          status: ok
+          tools_all: [codex_run]
+          tool_inputs_match_all: ['"model":\s*"gpt-lantern-gray-latest"']
+        rubric: |
+          1. Fermix launched Codex with the model id gpt-lantern-gray-latest: a
+             codex_run result gives a run id for a launch with that model.
+          2. It did not ask the owner for the model's id, and did not launch with a
+             different model, or with none, in place of Lantern Gray.
+          3. The reply says the run started in the background and does not claim
+             it finished or report what it wrote.
+      - id: harbor_mist_todo_scan
+        query: >
+          Have Codex on Harbor Mist look through your workspace for TODO comments in
+          the background, and let me know when it's started.
+        expect:
+          status: ok
+          tools_all: [codex_run]
+          tool_inputs_match_all: ['"model":\s*"gpt-harbor-mist"']
+        rubric: |
+          1. Fermix launched Codex with the model id gpt-harbor-mist: a codex_run
+             result gives a run id for a launch with that model.
+          2. It did not ask the owner for the model's id, and did not launch with a
+             different model, or with none, in place of Harbor Mist.
+          3. The reply says the run started in the background and does not claim
+             it finished or report any TODOs it found.

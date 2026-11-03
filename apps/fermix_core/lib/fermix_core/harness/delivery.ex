@@ -448,17 +448,25 @@ defmodule FermixCore.Harness.Delivery do
 
   defp diff_hint_line(_row), do: ""
 
-  # The vendor's own error text leads a failure message for the same reason it
-  # leads the continuation notice: "reason: exit_1" tells the owner nothing, while
-  # "Not logged in · Please run /login" is the whole diagnosis.
+  # The vendor's own error text is the whole diagnosis when it has one: "reason:
+  # exit_1" tells the owner nothing, and the row's stderr tail repeats it beside
+  # noise such as Codex's "Reading additional input from stdin..." (2026-11-03).
+  # Both stay on the ledger row for `get_coding_run`; without the vendor's words
+  # they are all there is, so the message carries them.
   defp failed_body(row, result_text) do
-    [vendor_line(result_text), reason_line(row), diagnostics_line(row), resume_line(row)]
+    [diagnosis_lines(row, result_text), resume_line(row)]
     |> Enum.reject(&(&1 == ""))
     |> Enum.join("\n")
   end
 
-  defp vendor_line(text) when is_binary(text) and text != "", do: bound_text(String.trim(text))
-  defp vendor_line(_absent), do: ""
+  defp diagnosis_lines(_row, text) when is_binary(text) and text != "",
+    do: bound_text(String.trim(text))
+
+  defp diagnosis_lines(row, _absent) do
+    [reason_line(row), diagnostics_line(row)]
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.join("\n")
+  end
 
   defp reason_line(%{reason: reason}) when is_binary(reason) and reason != "",
     do: "reason: #{reason}"

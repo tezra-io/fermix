@@ -550,6 +550,8 @@ def test_the_shipped_numbered_rubrics_parse():
                     counts[case.id] = len(texts)
     assert counts == {"launch_day_update": 5, "people_and_customer_update": 4,
                       "hiring_decision": 5,
+                      # coding_agent_models.yaml
+                      "lantern_gray_notes": 3, "harbor_mist_todo_scan": 3,
                       # grok_voice.yaml
                       "intake_on_the_thirteenth": 2, "van_on_the_twentieth": 2,
                       "curry_question_while_stocktake_runs": 3,

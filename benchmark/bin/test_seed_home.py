@@ -479,11 +479,16 @@ def test_cues_ready_codex_and_leave_claude_code_unready_for_the_follow_up_cases(
     assert subprocess.run([str(stub), "exec", "anything"], capture_output=True).returncode == 1
     auth = json.loads((home / seed.CUE_CODEX_HOME / "auth.json").read_text())
     assert auth["tokens"]["refresh_token"]
+    # The stub account's model list, which Fermix checks a requested model against.
+    models = json.loads((home / seed.CUE_CODEX_HOME / "models_cache.json").read_text())
+    assert ("gpt-lantern-gray-latest", "Lantern Gray") in {
+        (m["slug"], m["display_name"]) for m in models["models"]}
 
     # A seed without --cues takes the stubs away, so no other suite finds them.
     off = _seed_main(monkeypatch, home)
     assert off["fermix_core"]["harness"] == {"approved": True}
     assert not stub.exists() and not (home / seed.CUE_CODEX_HOME / "auth.json").exists()
+    assert not (home / seed.CUE_CODEX_HOME / "models_cache.json").exists()
 
 
 @pytest.mark.parametrize("flags", [["--cue-mandates"], ["--cue-filter-model", "openai/m"]])

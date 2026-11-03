@@ -349,6 +349,7 @@ defmodule FermixCore.Harness.Run do
     |> capture_session(Map.get(fields, :vendor_session_id))
     |> capture_usage(Map.get(fields, :usage))
     |> capture_result_text(Map.get(fields, :result_text))
+    |> capture_failure_text(Map.get(fields, :failure_text))
   end
 
   defp capture_session(%{vendor_session_id: nil} = state, sid) when is_binary(sid) do
@@ -365,6 +366,11 @@ defmodule FermixCore.Harness.Run do
     do: %{state | streamed_result_text: text}
 
   defp capture_result_text(state, _text), do: state
+
+  defp capture_failure_text(state, text) when is_binary(text),
+    do: %{state | streamed_failure_text: text}
+
+  defp capture_failure_text(state, _text), do: state
 
   defp mark_activity(state) do
     state
@@ -463,21 +469,37 @@ defmodule FermixCore.Harness.Run do
     {status, reason, extra} = classify_terminal(state, result, summary)
     fields = terminal_fields(state, summary) |> Map.put(:reason, reason) |> Map.merge(extra)
     {status, fields} = persist_streamed_result(state, status, fields)
+    {status, fields} = persist_vendor_failure(state, status, fields)
     {status, backfill_diagnostics(status, fields)}
   end
 
   # A vendor that reports its failure as well-formed JSON (claude's terminal
-  # `result` event) leaves the non-JSON diagnostics tail empty, so the ledger
-  # row said only `exit_1` while the only real diagnosis lived in result.txt
-  # (2026-07-31: "You've hit your session limit…"). Backfill the row so
-  # surfaces that read only the ledger carry the vendor's words too.
+  # `result` event, codex's `turn.failed`) leaves the non-JSON diagnostics tail
+  # empty or holding only noise, so the ledger row said only `exit_1`
+  # (2026-07-31: "You've hit your session limit…") or Codex's stdin banner
+  # (2026-11-03) while the real diagnosis lived in result.txt. Lead the row's
+  # tail with the vendor's words so surfaces that read only the ledger carry them.
   defp backfill_diagnostics("completed", fields), do: fields
 
-  defp backfill_diagnostics(_status, %{diagnostics_tail: [], result_text: text} = fields)
-       when is_binary(text) and text != "",
-       do: %{fields | diagnostics_tail: [String.slice(text, 0, 2_000)]}
+  defp backfill_diagnostics(_status, %{diagnostics_tail: tail, result_text: text} = fields)
+       when is_list(tail) and is_binary(text) and text != "",
+       do: %{fields | diagnostics_tail: [String.slice(text, 0, 2_000) | tail]}
 
   defp backfill_diagnostics(_status, fields), do: fields
+
+  # Codex reports why a turn failed on `turn.failed` and writes no `-o` result for
+  # it, so a failed codex run carried no vendor words at all (2026-11-03: a refused
+  # model read as `exit_1`). Its words become the failed run's result, persisted as
+  # a failed claude run's are.
+  defp persist_vendor_failure(
+         %{streamed_failure_text: text} = state,
+         status,
+         %{result_text: nil} = fields
+       )
+       when status != "completed" and is_binary(text),
+       do: persist_diagnosis(state, status, %{fields | result_text: bound_text(text)})
+
+  defp persist_vendor_failure(_state, status, fields), do: {status, fields}
 
   # Codex writes its authoritative result to the `-o` artifact; claude carries it
   # on the terminal `result` event, so nothing has written `result.txt` yet. It is
@@ -503,7 +525,12 @@ defmodule FermixCore.Harness.Run do
   # so a write failure is logged and dropped: it must never overwrite the real
   # failure reason with `artifact_write`.
   defp persist_streamed_result(state, status, %{result_text: text} = fields)
-       when is_binary(text) and text != "" do
+       when is_binary(text) and text != "",
+       do: persist_diagnosis(state, status, fields)
+
+  defp persist_streamed_result(_state, status, fields), do: {status, fields}
+
+  defp persist_diagnosis(state, status, %{result_text: text} = fields) do
     case Artifacts.write_result(state.artifacts_dir, text) do
       {:ok, _path} ->
         {status, fields}
@@ -519,8 +546,6 @@ defmodule FermixCore.Harness.Run do
         {status, Map.put(fields, :artifact_truncated, true)}
     end
   end
-
-  defp persist_streamed_result(_state, status, fields), do: {status, fields}
 
   defp artifact_write_fields(state, fields, reason) do
     Logger.warning("harness run #{state.run_id} result artifact write failed: #{inspect(reason)}")
@@ -785,6 +810,7 @@ defmodule FermixCore.Harness.Run do
       spool_bytes: 0,
       vendor_session_id: nil,
       streamed_result_text: nil,
+      streamed_failure_text: nil,
       usage: nil,
       first_event_seen?: false,
       artifact_truncated: false,

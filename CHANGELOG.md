@@ -553,6 +553,22 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A Codex run's failure says what Codex said.** A Codex run that failed used
+  to report only `reason: exit_1` and Codex's "Reading additional input from
+  stdin..." line, because Codex gives its reason on an event Fermix did not
+  read. The message now shows Codex's own words (such as "The 'daybreak blue'
+  model is not supported when using Codex with a ChatGPT account.") and the
+  resume command, as a failed Claude Code run's does.
+- **A Codex model is checked before anything starts.** A model Codex does not
+  list for your account, such as the name Codex shows ("Daybreak Blue") in
+  place of its id, used to start a run that failed seconds later. It is now
+  refused before launch, saying nothing was started and listing each model's
+  id beside its name, so the agent launches again with the id, a follow-up's
+  run included.
+- **A follow-up gets a tool for every step it is asked to do.** A follow-up
+  saved with a step none of its tools could do (a folder check beside a Codex
+  launch, saved with the Codex launch alone) stopped every approved run before
+  it started.
 - **Cancelling a long step answers once it has really stopped.** Cancel on a
   plugin install, a sign-in, a download or an Always On step now answers when
   the work has stopped (it is given five seconds to finish cleanly, then
