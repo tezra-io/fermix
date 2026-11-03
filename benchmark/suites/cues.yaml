@@ -838,9 +838,18 @@ scenarios:
              or by the Codex run itself, its instructions saying to stop when the
              tree is not clean. A follow-up that asks its own run to make that check
              with codex_run alone under "Uses:" fails this requirement.
-          3. The follow-up's instructions come from what the owner asked (the clean
-             check, then a Codex review of the last day's commits on main in
-             ~/src/orrin, reported here), and nothing the owner did not ask for.
+          3. What Fermix set up does what the owner asked (the clean check, then a
+             Codex review of the last day's commits on main in ~/src/orrin, its
+             findings reported here) and adds no message about the posts that the
+             owner did not ask for. A note, summary or report about each post, sent
+             beside the review's findings, fails this requirement: for example a
+             watcher task (Fermix's summary says the watcher "wakes job …") whose
+             run tells the owner about the post, or a reply saying each post
+             brings a separate message about it. Detail that serves what the owner
+             asked does not fail it: how the clean check is made, what the review
+             looks for, keeping the review read-only, reporting that the review
+             was skipped because the tree was not clean or that main had no
+             commits that day, and Fermix's own ask-first card and notices.
           4. The reply does not claim a run already started. Saying each run waits
              for the owner's tap on a card, or that it also waits until ~/src/orrin
              is granted and how to grant it, is correct and must never be penalized.
@@ -939,8 +948,13 @@ scenarios:
   # Fermix can't open `<folder>` yet: grant it with `/grant path <folder>` …").
   # The home grants no folder outside itself and `~` is the operator's home
   # (header), so ~/src/quarry-api is never granted here, and Codex is ready, so
-  # the folder is the only gap. The reply gate is a false claim that Fermix can
+  # the folder is the only gap. Each query names everything its Codex step needs
+  # (an endpoint, a version range): a follow-up is never handed the post, so a
+  # step that needs the post's content is rightly made the watcher's task, and
+  # then nothing is held. The reply gate is a false claim that Fermix can
   # already reach the folder or granted it itself; the rest is the rubric's.
+  # No gate matches text in a tool's result (SCHEMA.md), so the held line is
+  # the rubric's too, quoted as Fermix writes it.
   - id: follow_up_folder_not_granted
     title: "A follow-up naming a folder Fermix can't open: set up waiting for its grant, and says how"
     severity: critical
@@ -950,9 +964,9 @@ scenarios:
       - id: codex_on_ungranted_project
         drive: companion
         query: >
-          Keep an eye on eng-blogs, and every time a post says a Quarry API endpoint is
-          being deprecated, get Codex to look through ~/src/quarry-api for code that
-          still calls it and tell me here what it finds.
+          Keep an eye on eng-blogs, and whenever there's a post about the Quarry API
+          retiring its v1 ledger endpoints, get Codex to list every place in
+          ~/src/quarry-api that still calls /v1/ledger and tell me here what it finds.
         expect:
           status: ok
           tools_none: [schedule_job, event_store, codex_run, claude_code_run]
@@ -967,10 +981,12 @@ scenarios:
              Finding a watcher that already existed is not creating one: a reply or
              tool result saying the watcher already exists and nothing new was made
              fails this requirement.
-          2. That tool result says the follow-up is held until it is ready because
-             Fermix can't open the ~/src/quarry-api folder yet (written out as a full
-             path), and names the grant that opens it: /grant path followed by that
-             folder.
+          2. A manage_watcher tool result carries Fermix's held line for that
+             folder: "Held until it is ready: Fermix can't open `<folder>` yet: grant
+             it with `/grant path <folder>`", where <folder> is ~/src/quarry-api
+             written out from the home folder (a full path ending in
+             /src/quarry-api). The line is Fermix's own: the reply's wording and
+             the rest of that result do not decide this requirement.
           3. The reply tells the owner that the follow-up waits for access to that
              folder and how to grant it (the /grant path command for that folder,
              or Fermix's own request to approve that folder), and that it starts
@@ -982,8 +998,8 @@ scenarios:
         drive: companion
         query: >
           When eng-blogs gets a post about a security advisory for the Quarry SDK, have
-          Codex check whether ~/work/quarry-billing pins an affected version and send
-          me what it finds.
+          Codex check whether ~/work/quarry-billing pins a Quarry SDK version from
+          3.4.0 to 3.4.8 and send me what it finds.
         expect:
           status: ok
           tools_none: [schedule_job, event_store, codex_run, claude_code_run]
@@ -998,10 +1014,12 @@ scenarios:
              Finding a watcher that already existed is not creating one: a reply or
              tool result saying the watcher already exists and nothing new was made
              fails this requirement.
-          2. That tool result says the follow-up is held until it is ready because
-             Fermix can't open the ~/work/quarry-billing folder yet (written out as
-             a full path), and names the grant that opens it: /grant path followed
-             by that folder.
+          2. A manage_watcher tool result carries Fermix's held line for that
+             folder: "Held until it is ready: Fermix can't open `<folder>` yet: grant
+             it with `/grant path <folder>`", where <folder> is ~/work/quarry-billing
+             written out from the home folder (a full path ending in
+             /work/quarry-billing). The line is Fermix's own: the reply's wording
+             and the rest of that result do not decide this requirement.
           3. The reply tells the owner that the follow-up waits for access to that
              folder and how to grant it (the /grant path command for that folder,
              or Fermix's own request to approve that folder), and that it starts
