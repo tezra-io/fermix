@@ -505,7 +505,7 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
       page = LazyHTML.from_fragment(html)
       assert page |> LazyHTML.query("#cues-screen select") |> Enum.count() == 0
       assert page |> LazyHTML.query(~s(#cues-screen input[type="radio"])) |> Enum.count() == 2
-      assert screen_hint(html) == "Set up OpenAI, OpenRouter or Venice first."
+      assert screen_hint(html) == "Set up OpenRouter, Venice or OpenAI first."
     end
 
     test "picking an option highlights it at once, before Save, with the decision model's picker",
@@ -566,7 +566,7 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
         |> render_submit()
 
       assert settings_refusal(html, "cues_screen") ==
-               "Set up OpenAI, OpenRouter or Venice first: a decision model runs on one of them."
+               "Set up OpenRouter, Venice or OpenAI first: a decision model runs on one of them."
 
       assert persisted_cues() == []
     end
@@ -595,13 +595,13 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
 
       options = LazyHTML.query(select, "option")
 
-      assert LazyHTML.attribute(options, "value") == ["", "openai", "openrouter", "venice"]
+      assert LazyHTML.attribute(options, "value") == ["", "openrouter", "venice", "openai"]
 
       assert options |> Enum.map(&(&1 |> LazyHTML.text() |> squish())) == [
                "Automatic (Uses OpenAI · gpt-6-luna)",
-               "OpenAI · gpt-6-luna",
                "OpenRouter · Jev",
-               "Venice · Jev"
+               "Venice · Jev",
+               "OpenAI · gpt-6-luna"
              ]
 
       assert page |> LazyHTML.query(~s(option[value="venice"][disabled])) |> Enum.any?()

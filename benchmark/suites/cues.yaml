@@ -620,7 +620,7 @@ scenarios:
              app's Cues pane or the setup page's Cues tab) and says picking Decision
              model there checks items by meaning instead of by keyword match.
           2. The reply says the decision model runs on a provider already set up
-             (OpenAI, OpenRouter or Venice) with that provider's own key, or that one
+             (OpenRouter, Venice or OpenAI) with that provider's own key, or that one
              of them must be set up first.
           3. The reply says the filter model still judges the items the decision
              model lets through, or that the keywords still help as hints.
@@ -647,9 +647,8 @@ scenarios:
           2. The reply says OpenRouter's decision model can serve it with the key
              already set up and nothing new to enter: by picking OpenRouter in the
              Decision model setting under the Screen, or by leaving it on Automatic,
-             which uses the first set up of OpenAI, OpenRouter and Venice since
-             Claude serves no decision model (OpenAI instead, if OpenAI is set up
-             too).
+             which uses the first set up of OpenRouter, Venice and OpenAI since
+             Claude serves no decision model, so OpenRouter.
           3. The reply does not claim that Fermix changed the setting itself.
           Not required: naming the model (TypeSafe's Jev) or the exact speed.
           Saying the filter model still makes the final call, that the setting
@@ -675,7 +674,7 @@ scenarios:
           2. The reply answers which one is used now in a way that holds whatever
              is set up: either it names the one this home's settings show, or it
              explains that Automatic uses the main provider's decision model when it
-             has one, otherwise the first set up of OpenAI, OpenRouter and Venice,
+             has one, otherwise the first set up of OpenRouter, Venice and OpenAI,
              and that the setting's own label names the one it resolves to.
           3. The reply says OpenRouter must be set up, with its key, for its
              decision model to be picked or to run, or that it is offered only once

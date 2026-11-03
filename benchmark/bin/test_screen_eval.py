@@ -180,7 +180,7 @@ def test_a_feed_entry_and_a_raw_item_keep_their_fields():
 def test_a_provider_is_available_only_when_its_key_variable_is_set_and_not_blank():
     providers = screen.plan_providers(None, {"OPENAI_API_KEY": "sk-x", "VENICE_API_KEY": "  "})
     assert [(p.name, p.available) for p in providers] == [
-        ("openai", True), ("openrouter", False), ("venice", False)]
+        ("openrouter", False), ("venice", False), ("openai", True)]
     assert [p.name for p in screen.plan_providers(["venice"], {})] == ["venice"]
 
 
@@ -243,7 +243,7 @@ def test_fake_probabilities_give_the_right_table():
         ("B", 0.1): (3, 3, 0, 2), ("B", 0.2): (3, 3, 1, 2),
         ("B", 0.3): (3, 3, 1, 2), ("B", 0.4): (3, 3, 2, 2),
     }
-    assert [s.state for s in result["statuses"].values()] == ["measured", "skipped", "skipped"]
+    assert [s.state for s in result["statuses"].values()] == ["skipped", "skipped", "measured"]
 
 
 def test_the_kind_split_and_the_paired_view_follow_the_same_bars():

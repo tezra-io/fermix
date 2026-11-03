@@ -43,9 +43,9 @@ defmodule FermixCore.Cues.FilterChoices do
                  "than a chat model."
   @decision_provider_info "Which decision model checks items while the screen uses one, on " <>
                             "that provider's own key. Automatic: your main provider's when it " <>
-                            "serves one, otherwise the first set up of OpenAI, OpenRouter and " <>
-                            "Venice."
-  @no_decision_model "Set up OpenAI, OpenRouter or Venice first."
+                            "serves one, otherwise the first set up of OpenRouter, Venice and " <>
+                            "OpenAI."
+  @no_decision_model "Set up OpenRouter, Venice or OpenAI first."
   @provider_not_set_up "Set up this provider first."
 
   @doc """

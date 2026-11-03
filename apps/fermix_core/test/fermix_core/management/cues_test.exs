@@ -2149,7 +2149,7 @@ defmodule FermixCore.Management.CuesTest do
                  %{
                    "value" => "decision_model",
                    "label" => "Decision model",
-                   "hint" => "Uses OpenAI · gpt-6-luna",
+                   "hint" => "Uses Venice · Jev",
                    "disabled" => false
                  }
                ]
@@ -2179,7 +2179,7 @@ defmodule FermixCore.Management.CuesTest do
                Settings.apply("cues", %{"cues_screen" => "decision_model"})
 
       # The disabled option's hint is the refusal.
-      assert sentence == "Set up OpenAI, OpenRouter or Venice first."
+      assert sentence == "Set up OpenRouter, Venice or OpenAI first."
       refute File.exists?(Path.join(home, "config.toml"))
 
       Application.put_env(:fermix_core, :providers,
@@ -2207,7 +2207,7 @@ defmodule FermixCore.Management.CuesTest do
       refusal =
         {:error,
          {:invalid,
-          "Set up OpenAI, OpenRouter or Venice first: a decision model runs on one of them."}}
+          "Set up OpenRouter, Venice or OpenAI first: a decision model runs on one of them."}}
 
       assert CueSettings.check_screen("decision_model") == refusal
       assert CueSettings.save_screen("decision_model") == refusal
@@ -2235,7 +2235,7 @@ defmodule FermixCore.Management.CuesTest do
       assert screen["value"] == "decision_model"
       assert Enum.map(screen["options"], & &1["value"]) == ["keyword", "decision_model"]
 
-      assert %{"disabled" => true, "hint" => "Set up OpenAI, OpenRouter or Venice first."} =
+      assert %{"disabled" => true, "hint" => "Set up OpenRouter, Venice or OpenAI first."} =
                Enum.find(screen["options"], &(&1["value"] == "decision_model"))
     end
 
@@ -2256,18 +2256,12 @@ defmodule FermixCore.Management.CuesTest do
       assert row["info"] ==
                "Which decision model checks items while the screen uses one, on that " <>
                  "provider's own key. Automatic: your main provider's when it serves one, " <>
-                 "otherwise the first set up of OpenAI, OpenRouter and Venice."
+                 "otherwise the first set up of OpenRouter, Venice and OpenAI."
 
       assert Enum.map(row["options"], &Map.take(&1, ["value", "label", "hint", "disabled"])) == [
                %{
                  "value" => "",
                  "label" => "Automatic (Uses OpenAI · gpt-6-luna)",
-                 "hint" => nil,
-                 "disabled" => false
-               },
-               %{
-                 "value" => "openai",
-                 "label" => "OpenAI · gpt-6-luna",
                  "hint" => nil,
                  "disabled" => false
                },
@@ -2282,6 +2276,12 @@ defmodule FermixCore.Management.CuesTest do
                  "label" => "Venice · Jev",
                  "hint" => "Set up this provider first.",
                  "disabled" => true
+               },
+               %{
+                 "value" => "openai",
+                 "label" => "OpenAI · gpt-6-luna",
+                 "hint" => nil,
+                 "disabled" => false
                }
              ]
     end
@@ -2297,7 +2297,7 @@ defmodule FermixCore.Management.CuesTest do
       assert %{
                "value" => "",
                "label" => "Automatic",
-               "hint" => "Set up OpenAI, OpenRouter or Venice first.",
+               "hint" => "Set up OpenRouter, Venice or OpenAI first.",
                "disabled" => true
              } = hd(row["options"])
     end
@@ -2445,7 +2445,7 @@ defmodule FermixCore.Management.CuesTest do
              ) ==
                {:error,
                 {:invalid_value, "cues_screen",
-                 "Set up OpenAI, OpenRouter or Venice first: a decision model runs on one of them."}}
+                 "Set up OpenRouter, Venice or OpenAI first: a decision model runs on one of them."}}
 
       refute File.exists?(Path.join(home, "config.toml"))
 

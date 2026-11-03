@@ -187,7 +187,7 @@ defmodule FermixCore.Cues.ConfigTest do
         {%{"screen" => "openai"}, ~r/cues\.screen "openai".*keyword, decision_model/},
         {%{"screen" => true}, ~r/cues\.screen/},
         {%{"decision_provider" => "anthropic"},
-         ~r/cues\.decision_provider "anthropic".*openai, openrouter, venice/},
+         ~r/cues\.decision_provider "anthropic".*openrouter, venice, openai/},
         {%{"decision_provider" => ""}, ~r/cues\.decision_provider/},
         {%{"door_port" => 80}, ~r/cues\.door_port.*1024/},
         {%{"door_port" => 70_000}, ~r/cues\.door_port/},

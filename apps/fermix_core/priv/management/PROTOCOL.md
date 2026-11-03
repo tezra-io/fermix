@@ -1479,19 +1479,19 @@ Notes that the shapes alone do not carry:
   ("Uses OpenAI · gpt-6-luna"), or, while the chosen one is not set up, what
   to set up ("Set up OpenRouter first: the screen's decision model runs on its
   key.", also the refusal of that choice). While none is set up, `decision_model` is
-  disabled with the hint "Set up OpenAI, OpenRouter or Venice first.", which
+  disabled with the hint "Set up OpenRouter, Venice or OpenAI first.", which
   is also the refusal; a saved `decision_model` keeps its value, and its
   watchers are held until one is set up or `keyword` is picked.
   `cues_decision_provider` ("Decision model") is which decision model the
   screen uses, published whatever `cues_screen` is, so a client shows or
   hides it as the screen's choice changes, with no read. Its first option is
   `""`, Automatic: the daemon uses the primary provider's decision model when
-  it serves one and is set up, otherwise the first set up of OpenAI,
-  OpenRouter and Venice, and the label names it ("Automatic (Uses OpenAI ·
+  it serves one and is set up, otherwise the first set up of OpenRouter,
+  Venice and OpenAI, and the label names it ("Automatic (Uses OpenAI ·
   gpt-6-luna)"); while none is set up it is "Automatic", disabled with the
-  hint "Set up OpenAI, OpenRouter or Venice first.". Then always `openai`
-  ("OpenAI · gpt-6-luna"), `openrouter` ("OpenRouter · Jev") and `venice`
-  ("Venice · Jev"), each disabled with the hint "Set up this provider first."
+  hint "Set up OpenRouter, Venice or OpenAI first.". Then always `openrouter`
+  ("OpenRouter · Jev"), `venice` ("Venice · Jev") and `openai` ("OpenAI ·
+  gpt-6-luna"), each disabled with the hint "Set up this provider first."
   while its provider is not set up with a key that loaded, a saved one
   included, so the value is always an option. A chosen provider that is not
   set up holds the watchers with a sentence naming it, and never falls back to

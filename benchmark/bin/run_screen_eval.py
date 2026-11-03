@@ -92,8 +92,8 @@ REPORTS_DIR = os.path.join(BENCH_DIR, "reports", "screen")
 
 # DecisionModel's providers, in its catalog order, each with the variable
 # config/runtime.exs reads its key from.
-PROVIDERS = {"openai": "OPENAI_API_KEY", "openrouter": "OPENROUTER_API_KEY",
-             "venice": "VENICE_API_KEY"}
+PROVIDERS = {"openrouter": "OPENROUTER_API_KEY", "venice": "VENICE_API_KEY",
+             "openai": "OPENAI_API_KEY"}
 FORMS = ("A", "B")
 BARS = (0.1, 0.2, 0.3, 0.4)
 THROUGH = "should_screen_through"

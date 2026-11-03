@@ -64,7 +64,7 @@ defmodule FermixCore.Cues.Filter.Decision do
   @pass_heading "Items like these matter to the owner:"
   @drop_heading "Items like these do not matter to the owner, though an item like one of them " <>
                   "still matters if it touches the purpose or an instruction:"
-  @no_route "No decision model is set up: set up OpenAI, OpenRouter or Venice, or switch the " <>
+  @no_route "No decision model is set up: set up OpenRouter, Venice or OpenAI, or switch the " <>
               "screen back to Keyword match in the Cues settings."
 
   @type outcome :: :through | Llm.result()

@@ -164,7 +164,7 @@ defmodule FermixCore.Cues.Filter.DecisionTest do
                 %{
                   kind: :no_route,
                   message:
-                    "No decision model is set up: set up OpenAI, OpenRouter or Venice, or " <>
+                    "No decision model is set up: set up OpenRouter, Venice or OpenAI, or " <>
                       "switch the screen back to Keyword match in the Cues settings."
                 }}
     end

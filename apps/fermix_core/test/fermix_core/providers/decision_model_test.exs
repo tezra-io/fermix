@@ -36,6 +36,18 @@ defmodule FermixCore.Providers.DecisionModelTest do
       assert DecisionModel.pick({:ok, :anthropic}, &(&1 == :venice)) == {:ok, :venice}
     end
 
+    test "under a primary that serves none, OpenRouter, then Venice, then OpenAI" do
+      assert DecisionModel.pick({:ok, :anthropic}, &(&1 in [:openai, :openrouter])) ==
+               {:ok, :openrouter}
+
+      assert DecisionModel.pick({:ok, :anthropic}, &(&1 in [:openai, :venice])) == {:ok, :venice}
+      assert DecisionModel.pick({:ok, :anthropic}, &(&1 == :openai)) == {:ok, :openai}
+    end
+
+    test "OpenAI as the primary leads the providers ahead of it in catalog order" do
+      assert DecisionModel.pick({:ok, :openai}, fn _provider -> true end) == {:ok, :openai}
+    end
+
     test "none set up" do
       assert DecisionModel.pick({:ok, :openai}, fn _provider -> false end) ==
                {:error, :not_set_up}
@@ -139,7 +151,7 @@ defmodule FermixCore.Providers.DecisionModelTest do
     end
 
     test "the providers that serve a decision model, in catalog order" do
-      assert DecisionModel.providers() == [:openai, :openrouter, :venice]
+      assert DecisionModel.providers() == [:openrouter, :venice, :openai]
     end
   end
 

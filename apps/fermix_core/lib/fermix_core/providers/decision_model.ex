@@ -13,9 +13,9 @@ defmodule FermixCore.Providers.DecisionModel do
 
   | Provider | Endpoint | Model |
   |---|---|---|
-  | OpenAI | `POST <base>/decisions` (the Decisions API) | `gpt-6-luna` |
   | OpenRouter | `POST <base without /v1>/alpha/decisions` | `~typesafe/jev-latest` (TypeSafe's Jev) |
   | Venice | `POST <base>/decisions` | `jev-latest` (TypeSafe's Jev) |
+  | OpenAI | `POST <base>/decisions` (the Decisions API) | `gpt-6-luna` |
 
   The caller passes the owner's choice (`route/1`): one of the three, or nil
   for Automatic, where Fermix picks the primary provider when it serves a
@@ -55,7 +55,7 @@ defmodule FermixCore.Providers.DecisionModel do
   alias FermixCore.Providers.Telemetry, as: ProviderTelemetry
   alias FermixCore.Setup.SecretWriter
 
-  @providers [:openai, :openrouter, :venice]
+  @providers [:openrouter, :venice, :openai]
   @models %{openai: "gpt-6-luna", openrouter: "~typesafe/jev-latest", venice: "jev-latest"}
   @labels %{openai: "OpenAI · gpt-6-luna", openrouter: "OpenRouter · Jev", venice: "Venice · Jev"}
   @adapter :decisions

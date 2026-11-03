@@ -99,8 +99,7 @@ defmodule FermixCore.Cues.FilterChoicesTest do
           openai: [api_key: "sk-invented"]
         )
 
-      assert %{provider: :openai, label: "OpenAI · gpt-6-luna"} =
-               FilterChoices.decision_model(snapshot)
+      assert %{provider: :venice, label: "Venice · Jev"} = FilterChoices.decision_model(snapshot)
     end
 
     test "with none set up, the decision model is disabled with what to set up" do
@@ -115,7 +114,7 @@ defmodule FermixCore.Cues.FilterChoicesTest do
       assert %{id: "decision_model", disabled?: true, hint: hint} =
                List.last(FilterChoices.screen_choices(snapshot))
 
-      assert hint == "Set up OpenAI, OpenRouter or Venice first."
+      assert hint == "Set up OpenRouter, Venice or OpenAI first."
     end
 
     test "a key that did not load is not set up" do
@@ -174,7 +173,6 @@ defmodule FermixCore.Cues.FilterChoicesTest do
                  hint: nil,
                  disabled?: false
                },
-               %{id: "openai", label: "OpenAI · gpt-6-luna", hint: nil, disabled?: false},
                %{
                  id: "openrouter",
                  label: "OpenRouter · Jev",
@@ -186,7 +184,8 @@ defmodule FermixCore.Cues.FilterChoicesTest do
                  label: "Venice · Jev",
                  hint: "Set up this provider first.",
                  disabled?: true
-               }
+               },
+               %{id: "openai", label: "OpenAI · gpt-6-luna", hint: nil, disabled?: false}
              ]
     end
 
@@ -198,7 +197,7 @@ defmodule FermixCore.Cues.FilterChoicesTest do
       assert automatic == %{
                id: "",
                label: "Automatic",
-               hint: "Set up OpenAI, OpenRouter or Venice first.",
+               hint: "Set up OpenRouter, Venice or OpenAI first.",
                disabled?: true
              }
 

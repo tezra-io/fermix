@@ -50,7 +50,7 @@ defmodule FermixCore.Cues.Settings do
   # are made by Fermix (`new_token/1`, `Cues.Webhook.ensure_path_secret/2`).
   @typed_secret_fields [:key, :secret]
   @token_bytes 32
-  @no_decision_model "Set up OpenAI, OpenRouter or Venice first: a decision model runs on one " <>
+  @no_decision_model "Set up OpenRouter, Venice or OpenAI first: a decision model runs on one " <>
                        "of them."
 
   @type refusal :: {:invalid, String.t()}

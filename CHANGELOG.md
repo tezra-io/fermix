@@ -129,9 +129,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   how items are checked before the filter model reads them: **Keyword
   match**, as before, or **Decision model**. A **Decision model** setting
   under it picks which one: **Automatic**, your main provider's decision
-  model when it has one, otherwise the first you set up of OpenAI (its
-  Decisions API with gpt-6-luna), OpenRouter and Venice (both TypeSafe's
-  Jev), named by the one it resolves to; or one of those three that you
+  model when it has one, otherwise the first you set up of OpenRouter,
+  Venice (both TypeSafe's Jev) and OpenAI (its Decisions API with
+  gpt-6-luna), named by the one it resolves to; or one of those three that you
   choose. Each runs on that provider's key with nothing new to enter, and a
   provider whose key did not load is never offered or called. A decision
   model checks each item against the watcher's purpose and instructions, with
