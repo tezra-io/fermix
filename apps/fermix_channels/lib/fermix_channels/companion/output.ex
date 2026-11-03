@@ -67,12 +67,20 @@ defmodule FermixChannels.Companion.Output do
   def text_delta(turn_id, text), do: %{"t" => "text_delta", "turn_id" => turn_id, "text" => text}
 
   @doc """
-  A reply's canonical text, at its timeline row, with the row's `blocks`
-  (M72) when it has any.
+  A reply's canonical text, at the timeline row `row` that stores it: the
+  row's `server_seq`, its time as `ts` (`row_ts/1`, what its history message
+  carries), and the row's `blocks` (M72) when it has any.
   """
-  @spec text_done(String.t(), pos_integer(), String.t(), [map()]) :: event()
-  def text_done(turn_id, server_seq, text, blocks \\ []) when is_list(blocks) do
-    %{"t" => "text_done", "turn_id" => turn_id, "server_seq" => server_seq, "text" => text}
+  @spec text_done(String.t(), map(), String.t(), [map()]) :: event()
+  def text_done(turn_id, %{server_seq: seq, created_at: %DateTime{}} = row, text, blocks \\ [])
+      when is_integer(seq) and seq > 0 and is_list(blocks) do
+    %{
+      "t" => "text_done",
+      "turn_id" => turn_id,
+      "server_seq" => seq,
+      "text" => text,
+      "ts" => row_ts(row)
+    }
     |> maybe_put("blocks", present_list(blocks))
   end
 
@@ -187,8 +195,7 @@ defmodule FermixChannels.Companion.Output do
   """
   @spec timeline_message(map()) :: {:ok, map()} | {:error, term()}
   def timeline_message(
-        %{server_seq: seq, role: role, content: content, created_at: %DateTime{} = created_at} =
-          row
+        %{server_seq: seq, role: role, content: content, created_at: %DateTime{}} = row
       )
       when is_integer(seq) and seq > 0 and is_binary(role) and is_binary(content) do
     message =
@@ -196,7 +203,7 @@ defmodule FermixChannels.Companion.Output do
         "server_seq" => seq,
         "role" => role,
         "content" => content,
-        "ts" => DateTime.to_iso8601(created_at),
+        "ts" => row_ts(row),
         "media_refs" => Map.get(row, :media_refs) || []
       }
       |> maybe_put("kind", Map.get(row, :kind))
@@ -210,6 +217,10 @@ defmodule FermixChannels.Companion.Output do
   end
 
   def timeline_message(row), do: {:error, {:invalid_timeline_row, Map.get(row, :server_seq)}}
+
+  # A row's time on the wire, RFC 3339 in UTC, from the time the timeline
+  # stored with it: one form for a history message, a `row` and a `text_done`.
+  defp row_ts(%{created_at: %DateTime{} = created_at}), do: DateTime.to_iso8601(created_at)
 
   @doc """
   An owner-approval card with its exact approve and deny command routes. The

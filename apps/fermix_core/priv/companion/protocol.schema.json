@@ -509,13 +509,14 @@
     },
     "text_done": {
       "type": "object",
-      "description": "A reply's canonical text at its timeline row, sent once the turn has completed; it replaces the turn's draft. blocks, present only when the reply has one, are the row's, as a history page carries them (PROTOCOL.md, Blocks under a reply).",
+      "description": "A reply's canonical text at its timeline row, sent once the turn has completed; it replaces the turn's draft. ts is the time the row stores, RFC 3339 in UTC, exactly as the row's row event and history message carry it; this daemon always sends it and an older daemon leaves it out. blocks, present only when the reply has one, are the row's, as a history page carries them (PROTOCOL.md, Blocks under a reply).",
       "required": ["type", "turn_id", "server_seq", "text"],
       "properties": {
         "type": { "const": "text_done" },
         "turn_id": { "type": "string", "minLength": 1 },
         "server_seq": { "type": "integer", "minimum": 1 },
         "text": { "type": "string" },
+        "ts": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}" },
         "blocks": {
           "type": "array",
           "minItems": 1,

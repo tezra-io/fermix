@@ -118,6 +118,12 @@ defmodule FermixCore.Companion.Protocol do
   `caps.commands` carries), is additive and optional, so on every version,
   and so is `attachments`. The window is now {6, 7}.
 
+  A reply's `text_done` carries `ts`, the time its row stores, as its `row`
+  and its history message give it, so a client shows when a reply that
+  finished while it watched was written without reading history again. This
+  daemon always sends it and an older one in the same window does not, so it
+  is additive and optional, on every version and on the phone's wire too.
+
   Both hellos carry the primary epoch (M75 D14), additive and optional on
   every version: `server_hello.primary_epoch` is the home's, absent only from a
   home that has never booted as the primary, and `client_hello.primary_epoch`
@@ -780,7 +786,8 @@ defmodule FermixCore.Companion.Protocol do
 
   defp validate_server("text_done", payload) do
     with :ok <- text_event(payload),
-         :ok <- positive_u64(payload, "server_seq") do
+         :ok <- positive_u64(payload, "server_seq"),
+         :ok <- optional_nonempty(payload, "ts") do
       optional_blocks(payload)
     end
   end

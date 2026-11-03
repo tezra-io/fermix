@@ -39,6 +39,30 @@ defmodule FermixChannels.Companion.OutputTest do
     assert_raise FunctionClauseError, fn -> Output.tool_start("turn-1", "web_search", "") end
   end
 
+  # A reply's text_done says when its row was written: the row's own time, in
+  # the form its history message gives it, never a clock read here.
+  test "a reply's text_done carries its row's time, as its history message does" do
+    row = %{
+      server_seq: 14,
+      role: "assistant",
+      content: "Hello",
+      created_at: ~U[2026-11-02 07:00:00.123456Z]
+    }
+
+    assert Output.text_done("turn-1", row, "Hello") == %{
+             "t" => "text_done",
+             "turn_id" => "turn-1",
+             "server_seq" => 14,
+             "text" => "Hello",
+             "ts" => "2026-11-02T07:00:00.123456Z"
+           }
+
+    assert {:ok, %{"ts" => ts}} = Output.timeline_message(row)
+    assert Output.text_done("turn-1", row, "Hello")["ts"] == ts
+    assert :ok = Protocol.validate_server_payload("text_done", text_done_payload(row))
+    assert_raise FunctionClauseError, fn -> Output.text_done("turn-1", 14, "Hello") end
+  end
+
   test "a reasoning summary is trimmed and bounded in bytes on a UTF-8 boundary" do
     summary = "\n  **Weighing it**\n\n" <> String.duplicate("日本", 1_000)
     event = Output.reasoning("turn-1", summary)
@@ -176,4 +200,7 @@ defmodule FermixChannels.Companion.OutputTest do
   end
 
   defp row_at(row), do: Map.merge(row, %{role: "assistant", created_at: ~U[2026-11-02 07:00:00Z]})
+
+  defp text_done_payload(row),
+    do: "turn-1" |> Output.text_done(row, "Hello") |> Map.delete("t")
 end

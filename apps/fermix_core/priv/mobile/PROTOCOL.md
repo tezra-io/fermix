@@ -557,7 +557,7 @@ A client must not upload chunks after `present`.
 | `turn_started` | `profile_id`, `turn_id`, `in_reply_to` | begins streamed draft |
 | `text_delta` | `turn_id`, `text`; `replace?` | streamed delta; `replace: true` makes `text` the whole bubble |
 | `tool_event` | `turn_id`, `tool`, `phase`; `detail?` | phase is `start` or `stop`; detail ≤512 bytes |
-| `text_done` | `turn_id`, `server_seq`, `text`; `blocks[]?`, `truncated?` | seals one bubble of a turn: its canonical text at its row |
+| `text_done` | `turn_id`, `server_seq`, `text`; `ts?`, `blocks[]?`, `truncated?` | seals one bubble of a turn: its canonical text at its row, and `ts`, the time that row stores as its `row` and history message carry it (absent from an older daemon) |
 | `turn_done` | `turn_id` | a completed turn's ending, once, after its last `text_done` |
 | `media_begin` | `ref`, `server_seq`, `kind`, `mime`, `size_bytes`, `sha256`; `filename?`, `caption?` | starts outbound media |
 | `media_chunk` | `ref`, `index` + raw bytes | contiguous zero-based indexes; raw bytes ≤60 KiB |

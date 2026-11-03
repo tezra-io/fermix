@@ -548,7 +548,7 @@ defmodule FermixChannels.Companion.Turns do
     case written do
       {:ok, {:created, row}} ->
         ChannelTelemetry.emit_message(:companion, :outbound, 1, duration_us)
-        done = Output.text_done(turn.turn_id, row.server_seq, text, blocks)
+        done = Output.text_done(turn.turn_id, row, text, blocks)
         :ok = Fanout.announce(turn.profile, done, audience: :companion)
         _ = Fanout.announce(turn.profile, Output.row(turn.profile, row), audience: :mobile)
         links = ReplyBlocks.links(text, blocks)

@@ -395,6 +395,74 @@ defmodule FermixChannels.Companion.TurnsTest do
     end
   end
 
+  # A reply that finishes while a client watches says when it was written, the
+  # time its row stores, as a history page gives it for that seq: the client
+  # shows it without reading history again.
+  describe "a reply's time (text_done.ts)" do
+    test "each reply of a Mac turn carries its own row's time, as history gives it", ctx do
+      id = unique()
+      msg = %{type: "msg", payload: msg_payload(id, "two things, please")}
+
+      assert :ok = Requests.request(msg, companion_transport(), request_opts(ctx))
+      assert_receive {:enqueued, turn}
+
+      assert :ok = turn.reply_fn.({:text, "The first thing."})
+      assert :ok = turn.reply_fn.({:text, "The second thing."})
+      turn.turn_result_fn.({:completed})
+
+      assert_receive {:companion_event,
+                      %{"t" => "text_done", "server_seq" => first, "ts" => first_ts} = done}
+
+      assert {:ok, _line} = CompanionProtocol.encode_server_event("text_done", done)
+
+      assert_receive {:companion_event,
+                      %{"t" => "text_done", "server_seq" => second, "ts" => second_ts}}
+
+      assert second == first + 1
+
+      assert :ok =
+               Requests.history(
+                 %{"profile_id" => "main", "after_seq" => first - 1, "limit" => 2},
+                 companion_transport(),
+                 request_opts(ctx)
+               )
+
+      assert_receive {:reply, _target, %{"t" => "history_page", "messages" => messages}}
+      assert [%{"server_seq" => ^first}, %{"server_seq" => ^second}] = messages
+      assert Enum.map(messages, & &1["ts"]) == [first_ts, second_ts]
+
+      # The time its row stores, never a clock read when the event was built.
+      assert {:ok, %{messages: rows}} =
+               RepoTimeline.history_page("main", after_seq: first - 1, limit: 2)
+
+      assert Enum.map(rows, &DateTime.to_iso8601(&1.created_at)) == [first_ts, second_ts]
+    end
+
+    test "a phone turn's reply carries its row's time too", ctx do
+      id = unique()
+      command = decoded("command", command_payload(id, "model", "fast"))
+
+      assert :ok = EventRouter.route(command, mobile_context(ctx), request_opts(ctx))
+      assert_receive {:enqueued, turn}
+
+      assert :ok = turn.reply_fn.({:text, "switched"})
+      turn.turn_result_fn.({:completed})
+
+      assert {:ok, %{status: "completed", result_server_seq: seq}} = request(id)
+
+      assert_receive {:mobile_event, "main",
+                      %{"t" => "text_done", "server_seq" => ^seq, "ts" => ts} = done}
+
+      assert {:ok, _frame} =
+               MobileProtocol.encode_server_event("text_done", Map.delete(done, "t"), 1, <<>>, [])
+
+      assert {:ok, %{messages: [row]}} =
+               RepoTimeline.history_page("main", after_seq: seq - 1, limit: 1)
+
+      assert DateTime.to_iso8601(row.created_at) == ts
+    end
+  end
+
   describe "a command that becomes a turn (STB-3)" do
     test "on the Mac, /ultra is answered and settled by its turn", ctx do
       id = unique()

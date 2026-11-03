@@ -99,7 +99,7 @@ defmodule FermixChannels.Mobile.LiveEmitterContractTest do
     events = [
       Output.turn_started("main", "turn-client-1", "client-1"),
       Output.text_delta("turn-client-1", "Hel"),
-      Output.text_done("turn-client-1", 14, "Hello"),
+      Output.text_done("turn-client-1", reply_row(14), "Hello"),
       Output.tool_event("turn-client-1", {:tool_start, "web_search"}),
       Output.tool_event("turn-client-1", {:tool_finish, "web_search", huge}),
       Output.tool_event("turn-client-1", {:something, :else}),
@@ -348,14 +348,14 @@ defmodule FermixChannels.Mobile.LiveEmitterContractTest do
        %{schema: schema, dir: dir} do
     {store, digest} = stored_blob!(dir, 10)
     state = ready_state(store, digest)
-    long = Output.text_done("turn-client-1", 20, String.duplicate("é", 40_000))
+    long = Output.text_done("turn-client-1", reply_row(20), String.duplicate("é", 40_000))
 
     {frames, state} = pushed(SocketHandler.handle_info({:mobile_event, long}, state))
     assert length(frames) >= 2
     assert [%{"text" => text}] = assert_frames!(frames, schema)
     assert text == long["text"]
 
-    giant = Output.text_done("turn-client-1", 21, String.duplicate("\"", 700_000))
+    giant = Output.text_done("turn-client-1", reply_row(21), String.duplicate("\"", 700_000))
     {frames, _state} = pushed(SocketHandler.handle_info({:mobile_event, giant}, state))
     assert [%{"truncated" => true}] = assert_frames!(frames, schema)
   end
@@ -412,6 +412,9 @@ defmodule FermixChannels.Mobile.LiveEmitterContractTest do
   end
 
   # -- encoding, reassembly and validation, as a phone does them --
+
+  # The row a reply is stored at, as the timeline hands it back.
+  defp reply_row(seq), do: %{server_seq: seq, created_at: ~U[2026-09-27 09:00:04.000000Z]}
 
   defp assert_on_the_wire!(event, schema) do
     assert {:ok, frames} = encode(event)

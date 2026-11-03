@@ -609,6 +609,40 @@ defmodule FermixCore.Companion.ProtocolContractTest do
     refute "link_previews" in row["required"]
   end
 
+  # A reply that finishes while a client watches says when its row was written:
+  # `text_done.ts` is that row's time in the form its `row` and its history
+  # message carry, so the client needs no history read for it. This daemon
+  # always sends it; an older one in the same window does not, so the schema
+  # leaves it optional and the codec takes a text_done without it.
+  test "a reply's text_done carries its row's time, as its row and history do", %{
+    schema: schema,
+    protocol: protocol
+  } do
+    done_def = schema["$defs"]["text_done"]
+    assert done_def["properties"]["ts"] == schema["$defs"]["row"]["properties"]["ts"]
+    refute "ts" in done_def["required"]
+
+    server = jsonl(@server_fixtures)
+    stored = stored_times(server)
+    dones = Enum.filter(server, &(&1["type"] == "text_done"))
+    assert dones != []
+
+    for done <- dones, payload = Map.delete(done, "type") do
+      assert is_binary(done["ts"]), "golden text_done #{done["server_seq"]} carries no ts"
+      assert Map.get(stored, done["server_seq"], done["ts"]) == done["ts"]
+      assert :ok = Protocol.validate_server_payload("text_done", payload)
+      assert :ok = Protocol.validate_server_payload("text_done", Map.delete(payload, "ts"))
+
+      assert {:error, _reason} =
+               Protocol.validate_server_payload("text_done", Map.put(payload, "ts", ""))
+    end
+
+    assert Enum.any?(dones, &Map.has_key?(stored, &1["server_seq"])),
+           "no golden text_done shares its seq with a golden row or history message"
+
+    assert protocol =~ "| `text_done` | `turn_id`, `server_seq`, `text`; `ts?`, `blocks[]?` |"
+  end
+
   # M72 §8.3: a reply's blocks have one shape wherever the reply is carried, the
   # caps are the ones the builder keeps, and a golden of each is exactly what
   # the builder makes of its places for its text.
@@ -1060,6 +1094,18 @@ defmodule FermixCore.Companion.ProtocolContractTest do
   defp fixture_lines(path), do: path |> File.read!() |> String.split("\n", trim: true)
 
   defp jsonl(path), do: path |> fixture_lines() |> Enum.map(&Jason.decode!/1)
+
+  # The time each golden row and history message gives its seq.
+  defp stored_times(server) do
+    rows = for %{"type" => "row"} = row <- server, do: row
+
+    messages =
+      for %{"type" => "history_page", "messages" => messages} <- server,
+          message <- messages,
+          do: message
+
+    Map.new(rows ++ messages, &{&1["server_seq"], &1["ts"]})
+  end
 
   defp ref(name), do: %{"$ref" => "#/$defs/#{name}"}
 

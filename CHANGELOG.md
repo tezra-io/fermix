@@ -382,6 +382,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   name, and each one a watcher set off in about the last 30 days the
   watcher's name. A watcher's notice from before, and a message from a job or
   watcher you have since removed, stay as they were.
+- **A reply says when it was written as soon as it arrives.** A reply that
+  finishes while the Mac app or your phone is watching now carries the time
+  Fermix stored it at, the same time the chat shows for it later, so the app
+  can show it beside the reply at once instead of only after it reads the
+  chat's history again. A reply in several parts carries each part's own
+  time.
 
 ### Changed
 

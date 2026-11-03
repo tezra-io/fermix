@@ -150,7 +150,7 @@ defmodule FermixChannels.Channels.Mobile do
   def seal_draft(%Message{} = message, %{turn_id: turn_id, state: state}, text)
       when is_binary(turn_id) and is_pid(state) and is_binary(text) do
     with {:ok, {status, row}} <- persist_final_text(message, text) do
-      _ = emit_after_commit(message.chat_id, Output.text_done(turn_id, row.server_seq, text))
+      _ = emit_after_commit(message.chat_id, Output.text_done(turn_id, row, text))
       _ = announce_to_companion(status, message.chat_id, row)
 
       _ =
@@ -463,7 +463,7 @@ defmodule FermixChannels.Channels.Mobile do
   defp delivered_text(profile, text, row, opts) do
     case Keyword.get(opts, :turn_id) do
       nil -> Output.row(profile, row)
-      turn_id -> Output.text_done(turn_id, row.server_seq, text)
+      turn_id -> Output.text_done(turn_id, row, text)
     end
   end
 
