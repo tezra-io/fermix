@@ -131,8 +131,15 @@ defmodule FermixCore.SocketPeer do
     :gen_tcp.close(socket)
   end
 
-  defp proc_status(pid) do
-    case File.read(Path.join([@proc, Integer.to_string(pid), "status"])) do
+  @doc """
+  The `/proc/<pid>/status` text of `pid`, read raw: never through the VM's file
+  server, which every file call in the node queues on, so a busy node cannot hold
+  up a socket's accept loop, where `admit/2` runs. `proc` is the proc root, a
+  test seam.
+  """
+  @spec proc_status(pos_integer(), String.t()) :: {:ok, binary()} | {:error, term()}
+  def proc_status(pid, proc \\ @proc) when is_integer(pid) and pid > 0 and is_binary(proc) do
+    case :file.read_file(Path.join([proc, Integer.to_string(pid), "status"]), [:raw]) do
       {:ok, status} -> {:ok, status}
       {:error, reason} -> {:error, {:proc_status_unreadable, pid, reason}}
     end
