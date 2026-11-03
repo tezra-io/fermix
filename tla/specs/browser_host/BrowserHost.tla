@@ -42,7 +42,7 @@
 (*  - FermixCore.Browser.execute/dispatch (browser.ex): where a call first *)
 (*    meets a lost turn's TurnMarker mark and, past that, Routing;         *)
 (*  - FermixChannels.BrowserHost.{Endpoint,Connection,Supervisor}: the     *)
-(*    listener (one host at a time, endpoint.ex:209-219) and its           *)
+(*    listener (one host at a time, endpoint.ex:225-235) and its           *)
 (*    connection process, the handshake and the line codec. A connection   *)
 (*    forwards every task's request and release in the order its own      *)
 (*    process took them off its mailbox -- BROWSER-1's fix -- and its exit *)
@@ -87,7 +87,7 @@
 (*    unavailable: one reason, "locked", stands for all three;             *)
 (*  - a new connection attaching before the daemon has taken the old one's *)
 (*    :DOWN: Endpoint refuses a second client while one is attached        *)
-(*    (accept_connection, host_already_attached, endpoint.ex:209-219), so  *)
+(*    (accept_connection, host_already_attached, endpoint.ex:225-235), so  *)
 (*    the model attaching only after it is the code, not a shortcut taken  *)
 (*    for the model's sake; the daemon itself restarting is not modelled;  *)
 (*  - the socket's 0600 mode, the peer check and the line codec: single-   *)
@@ -131,7 +131,7 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/browser_host/protocol.ex#listed_tab? @ 883cbc90b089
 \* SOURCE: apps/fermix_core/lib/fermix_core/browser_host/link.ex @ 279273a16f24
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/browser_host/connection.ex#attach,availability,host_stopping,task_request,bind_task,release_task,task_exited,write_request,cancel_task @ 03447d148ae1
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/browser_host/endpoint.ex @ 50e6a7f26529
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/browser_host/endpoint.ex @ 3de784287a04
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/browser_host/supervisor.ex @ a91e3fe95333
 \* SOURCE: apps/fermix_core/priv/browser_host/PROTOCOL.md @ 8a311fa4e7cc
 EXTENDS Naturals, Sequences, FiniteSets, TLC
@@ -666,7 +666,7 @@ PersonCancel(t) ==
 \* treats "attached, no report yet" the same whichever of the two just
 \* landed). A new connection waits for HostServer to have taken the last
 \* one's :DOWN: Endpoint refuses a second client outright while one is
-\* attached (accept_connection, endpoint.ex:209-219, `host_already_attached`)
+\* attached (accept_connection, endpoint.ex:225-235, `host_already_attached`)
 \* rather than queuing it, so this is the code, not a simplification (see the
 \* header).
 Attach ==

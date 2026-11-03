@@ -308,7 +308,7 @@ more of an entity its rules are about. All still hold:
 - A new connection attaching before HostServer has taken the old one's
   `:DOWN`: the model attaches only after it, and this is the code, not a
   simplification — `Endpoint` refuses a second client while one is attached
-  (`error: host_already_attached`, `endpoint.ex:209-219`) rather than queuing
+  (`error: host_already_attached`, `endpoint.ex:225-235`) rather than queuing
   it. The connection binding (BROWSER-4) is what makes the other order safe
   too, but the code never takes that order. The daemon itself restarting is
   not modelled.
