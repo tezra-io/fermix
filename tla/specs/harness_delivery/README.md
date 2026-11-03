@@ -472,7 +472,7 @@ showed them are now `reachable` witnesses.
   3. The restarted Manager's reconciliation finds the row still active and
      terminalizes it `interrupted`.
 - **Code:**
-  - The report is only a message in the Manager's mailbox (`run.ex:634`,
+  - The report is only a message in the Manager's mailbox (`run.ex:659`,
     `manager.ex:298-299`), and the mailbox dies with the process.
   - `reconcile_row/2` finalizes every active local row as `interrupted`
     (`manager.ex:1442-1446`, `:1362-1364`).
