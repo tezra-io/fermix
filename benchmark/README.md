@@ -876,9 +876,29 @@ FERMIX_CAP_SEED_ARGS="--cues --cue-mandates" bin/capability-daemon.sh up
 uv run bin/run_capability.py --candidates --suite cap_cues --trials 3 \
   --confirm-daemon-isolated --confirm-isolated-env
 FERMIX_EVAL_HOME=~/.fermix-capability-eval uv run bin/run_eval.py --suite cues \
-  --profile isolated_mutation --judge --confirm-daemon-isolated --confirm-isolated-env
+  --profile isolated_mutation --judge --confirm-daemon-isolated --confirm-isolated-env \
+  --reset-home
 bin/capability-daemon.sh down
 ```
+
+`--reset-home` starts every attempt of the suite from the seeded world. Without
+it, what one case's model did stays in the home for the next: a watcher it made on
+eng-blogs is the next case's "already exists", and a memory directive it stored
+steers every later turn. `capability-daemon.sh up` snapshots the seeded state into
+`<home>/eval-snapshot` once seeding ends, with the daemon still down: what
+`reset_state` clears (memory.db with its -wal and -shm, `memory/`, `skills/`, job
+runs, journals, grants, bootstrap, browser, harness, eval-mcp) and `config.toml`,
+never `auth.json`, whose OAuth refresh token the daemon may rotate. With the flag,
+`run_eval.py` runs `capability-daemon.sh reset` before each attempt of an
+`isolated_mutation` `drive: companion` case, `--fail-retries` re-drives included:
+stop the daemon, restore the snapshot, start it and wait until it answers. It is
+off by default, needs `--profile isolated_mutation`, and refuses to start a run on
+a home with no snapshot. `reset` (like `snapshot`) refuses any home whose leaf
+names neither `eval` nor `e2e` before it stops or touches anything, with the
+seeder's own guard (`bin/eval_home_state.py`). Each attempt pays one daemon
+restart, a few seconds, and the run prints each reset's time. A reset that fails
+stops the run: the case is reported INCOMPLETE and the rest are left unrun, as an
+exhausted account does.
 
 ### The Cues screen (`make capability-screen`)
 

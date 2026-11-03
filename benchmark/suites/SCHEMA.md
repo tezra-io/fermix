@@ -508,8 +508,12 @@ socket).
 The runner (`bin/evallib/companion.py`) connects to
 `<FERMIX_HOME>/companion.sock`, completes the handshake, sends `/new` so the
 attempt is its own conversation, and sends the query with a unique marker
-appended, `(eval:<marker>)`. The case's `companion:` map is the choreography
-around that message:
+appended, `(eval:<marker>)`. `/new` starts a conversation, not a world: what an
+earlier case left in the home (a watcher it made, a memory it stored) is still
+there, so with `run_eval.py --reset-home` every attempt of an `isolated_mutation`
+companion case, a retry's included, first restores the eval home's seeded state
+and restarts its daemon (`capability-daemon.sh reset`; see the README's Cues
+section). The case's `companion:` map is the choreography around that message:
 
 - `cancel: running` — `cancel` by the message's client id as soon as its
   `turn_started` arrives. `cancel: waiting` — send `blocker` first, wait for its

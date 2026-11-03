@@ -2985,7 +2985,8 @@ def test_report_states_an_aborted_run_stopped_early(tmp_path):
             "judge_calls", "judge_usage_reported_calls", "judge_tokens_reported")},
         "suites": [], "reliability": [],
         "aborted": {"suite": "acme", "case": "one", "tool": "acme_read_board",
-                    "fragment": "out_of_credits", "unrun": 9},
+                    "fragment": "out_of_credits", "unrun": 9,
+                    "why": run_eval._ACCOUNT_ABORT_WHY},
     }
     paths = report.write(results, str(tmp_path / "out"))
     md = pathlib.Path(paths["md"]).read_text()
@@ -2994,6 +2995,7 @@ def test_report_states_an_aborted_run_stopped_early(tmp_path):
         assert "RUN STOPPED EARLY" in text
         assert "9 case(s) were not run" in text
         assert "UNKNOWN, not failed" in text
+        assert "external account condition, not a product failure" in text
 
 
 def test_vendor_error_text_is_redacted_but_the_tool_name_survives():
