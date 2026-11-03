@@ -212,6 +212,13 @@ device is registered throughout, and its `platform` is the push service. The
 spec models changed; the comments' `session.ex` numbers, which had drifted
 since `e6042f1f`, now point at the committed file.
 
+Re-read on 2026-11-02 for a reply's time, which staled the `mobile.ex` pin:
+`delivered_text` and `seal_draft` hand `Output.text_done` the row the write
+returned rather than its `server_seq`, so a phone's `text_done` carries the
+row's time as `ts`. The event, its row and the push decisions after it are
+as before, so nothing the spec models changed, and no line the spec cites
+moved.
+
 ## What the spec changed in the design
 
 - **The `ack` rule.** M51 §7 first said the app acks "as soon as the row is

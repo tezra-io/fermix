@@ -171,6 +171,15 @@ ending and settlement the spec models is unchanged. Its read and write sit
 above most of the `mobile_sql.ex` functions the spec cites, and the line
 references below them moved with the code.
 
+The re-read for a reply's time (2026-11-02) found `text_done` carrying `ts`,
+the time its row stores, in `PROTOCOL.md`, in `Output.text_done`, and in the
+one line of `turns.ex` that builds it: `Output.text_done` now takes the row
+the write just returned, where it took that row's `server_seq`, and reads
+the row's time from it, as `timeline_message` does. No read, write, seq or
+announcement is added or moved, and the event reaches the same connections
+at the same point, so nothing the spec models changed. No line the spec
+cites moved.
+
 **The Queue is one abstract process.** The runner takes one `.tla` per spec,
 and `turn_queue` proves the Queue's rules against `queue.ex`, so this spec takes
 them as given:
