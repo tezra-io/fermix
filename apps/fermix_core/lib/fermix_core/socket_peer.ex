@@ -32,9 +32,15 @@ defmodule FermixCore.SocketPeer do
   started through launchd, systemd, `open`, or a terminal app driven by
   `osascript`. CommandHost's end-of-command group sweep does not help there: it
   kills a process, not a prompt the daemon has already accepted.
+
+  Whether a socket answers a peer at all is a separate, stronger question
+  (`admit/2`): a command Fermix confines gets no answer from any of its sockets,
+  and on Linux that is decided by a flag the kernel keeps, never by placement.
   """
 
   alias FermixCore.CommandRunner
+
+  require Logger
 
   @typedoc """
   Whether the peer runs beneath the daemon's own OS process, is detached (no
@@ -70,6 +76,76 @@ defmodule FermixCore.SocketPeer do
       classify_pid(peer, daemon_os_pid, table)
     end
   end
+
+  @doc """
+  Whether a Fermix socket answers the process on the other end of `socket` at
+  all. Fermix's sockets never answer a command it confines (OS sandbox
+  enforcement): on macOS the Seatbelt profile refuses the connect itself, so
+  every peer that reaches a socket is answered.
+
+  Landlock cannot refuse a connect to a pathname socket, so on Linux the peer is
+  judged here, by its no_new_privs flag: `fermix_landlock` sets it before it
+  confines a command, and the kernel keeps it for that command and everything
+  it starts, through a new session, a double fork or a parent that exits. A
+  peer that carries it is refused, and so is one whose flag cannot be read (it
+  has gone, or it is in another pid namespace). Every other sandbox sets the
+  flag as well (a Flatpak app, a no-new-privileges container), so a Fermix
+  client run inside one is refused too.
+
+  On any other system Fermix confines no command, and every peer is answered.
+  `os` is the platform-injection seam.
+  """
+  @spec admit(:inet.socket(), {atom(), atom()}) :: :ok | {:error, term()}
+  def admit(socket, os \\ :os.type())
+
+  def admit(socket, {:unix, :linux} = os) do
+    with {:ok, pid} <- peer_os_pid(socket, os),
+         {:ok, status} <- proc_status(pid) do
+      judge(pid, no_new_privs(status))
+    end
+  end
+
+  def admit(_socket, os) when is_tuple(os), do: :ok
+
+  @doc """
+  The no_new_privs flag in a Linux `/proc/<pid>/status` text, or `:error` when
+  the text holds no line the kernel would print for it.
+  """
+  @spec no_new_privs(String.t()) :: {:ok, boolean()} | :error
+  def no_new_privs(status) when is_binary(status) do
+    case Regex.run(~r/^NoNewPrivs:\t([01])$/m, status) do
+      [_line, "1"] -> {:ok, true}
+      [_line, "0"] -> {:ok, false}
+      nil -> :error
+    end
+  end
+
+  @doc """
+  Close a connection `admit/2` refused, and log once which socket refused whom
+  and why. Nothing is written to the peer: a confined command on macOS gets no
+  connection at all, and on Linux one that closes unanswered.
+  """
+  @spec refuse(:inet.socket(), String.t(), term()) :: :ok
+  def refuse(socket, socket_path, reason) when is_binary(socket_path) do
+    Logger.warning("#{socket_path} refused a connection: #{refusal(reason)}")
+    :gen_tcp.close(socket)
+  end
+
+  defp proc_status(pid) do
+    case File.read(Path.join([@proc, Integer.to_string(pid), "status"])) do
+      {:ok, status} -> {:ok, status}
+      {:error, reason} -> {:error, {:proc_status_unreadable, pid, reason}}
+    end
+  end
+
+  defp judge(_pid, {:ok, false}), do: :ok
+  defp judge(pid, {:ok, true}), do: {:error, {:sandboxed, pid}}
+  defp judge(pid, :error), do: {:error, {:no_new_privs_unreadable, pid}}
+
+  defp refusal({:sandboxed, pid}),
+    do: "process #{pid} runs sandboxed (no_new_privs), and Fermix's sockets never answer one"
+
+  defp refusal(reason), do: "its process could not be judged (#{inspect(reason)})"
 
   @doc """
   The OS pid of the process on the other end of a connected local `socket`, as the

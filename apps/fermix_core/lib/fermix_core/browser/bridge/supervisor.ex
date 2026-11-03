@@ -45,7 +45,7 @@ defmodule FermixCore.Browser.Bridge.Supervisor do
 
   defp endpoint_opts(opts, grants, peer_supervisor) do
     opts
-    |> Keyword.take([:socket_path, :max_connections])
+    |> Keyword.take([:socket_path, :max_connections, :peer_gate])
     |> Keyword.put(:name, Keyword.get(opts, :endpoint_name, Endpoint))
     |> Keyword.put(:grants, grants)
     |> Keyword.put(:peer_supervisor, peer_supervisor)

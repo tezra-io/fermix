@@ -36,6 +36,7 @@ defmodule FermixChannels.Companion.Endpoint do
   alias FermixCore.Companion.Protocol
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.SocketPath
+  alias FermixCore.SocketPeer
 
   @max_clients 4
   @accept_idle_ms 50
@@ -101,7 +102,7 @@ defmodule FermixChannels.Companion.Endpoint do
   def handle_info(:accept, state) do
     case :gen_tcp.accept(state.listen_socket, @accept_idle_ms) do
       {:ok, socket} ->
-        accept_connection(socket, state)
+        serve_admitted(socket, state)
         send(self(), :accept)
         {:noreply, state}
 
@@ -133,7 +134,9 @@ defmodule FermixChannels.Companion.Endpoint do
       connection_supervisor: Keyword.fetch!(opts, :connection_supervisor),
       connection_module: Keyword.get(opts, :connection_module, Connection),
       connection_opts: Keyword.get(opts, :connection_opts, []),
-      max_clients: Keyword.get(opts, :max_clients, @max_clients)
+      max_clients: Keyword.get(opts, :max_clients, @max_clients),
+      # Whether this socket answers a peer at all (`SocketPeer.admit/2`).
+      peer_gate: Keyword.get(opts, :peer_gate, &SocketPeer.admit/1)
     }
   end
 
@@ -235,6 +238,15 @@ defmodule FermixChannels.Companion.Endpoint do
   defp connections(state) do
     %{active: active} = DynamicSupervisor.count_children(state.connection_supervisor)
     active
+  end
+
+  # A command Fermix confines gets no answer here: no history, no turn, no
+  # approval card answered.
+  defp serve_admitted(socket, state) do
+    case state.peer_gate.(socket) do
+      :ok -> accept_connection(socket, state)
+      {:error, reason} -> SocketPeer.refuse(socket, state.socket_path, reason)
+    end
   end
 
   defp accept_connection(socket, state) do

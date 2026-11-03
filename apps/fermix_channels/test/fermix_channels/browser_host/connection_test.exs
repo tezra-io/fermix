@@ -47,6 +47,24 @@ defmodule FermixChannels.BrowserHost.ConnectionTest do
     assert Bitwise.band(mode, 0o777) == 0o600
   end
 
+  # A command Fermix confines gets no answer here (`SocketPeer.admit/2`; the
+  # real kernel check runs in `SocketReachTest`): it never attaches as the host.
+  test "a peer the socket does not answer is closed before any connection starts", ctx do
+    stop_supervised!(Endpoint)
+    gate = fn _socket -> {:error, {:sandboxed, 4242}} end
+    start_supervised!({Endpoint, ctx.endpoint_opts ++ [peer_gate: gate]})
+
+    log =
+      capture_log(fn ->
+        client = connect(ctx.socket_path)
+        send_line(client, %{"type" => "client_hello", "protocol_version" => 2})
+        assert :gen_tcp.recv(client, 0, 2_000) == {:error, :closed}
+      end)
+
+    assert log =~ "#{ctx.socket_path} refused a connection: process 4242 runs sandboxed"
+    assert DynamicSupervisor.which_children(ctx.connections) == []
+  end
+
   test "the handshake is mandatory and one-shot", %{socket_path: path} do
     early = connect(path)
     send_line(early, %{"type" => "attached", "host_version" => "0.2.0", "profile_id" => "p"})

@@ -702,6 +702,16 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Security
 
+- **On Linux, a command the agent runs gets no answer from Fermix's
+  sockets.** Landlock cannot refuse a connection to a socket file, so a
+  sandboxed command could reach Fermix's control socket and change a setting
+  or add an MCP server that then ran outside the sandbox, or reach the voice
+  socket and speak as you. Every Fermix socket on Linux now closes, unanswered,
+  a connection from a process running sandboxed (the kernel's no_new_privs
+  flag, which the command and everything it starts keep), as a Mac already
+  refused it. Your terminal, the Fermix app and your browser are answered as
+  before; a Fermix client you run inside another sandbox, such as a Flatpak
+  app, is refused too.
 - **A command Fermix started can no longer take an Always On step, and no
   local caller can take the server's own.** Every Always On step is the
   owner's decision, refused to a command Fermix runs in words that name the

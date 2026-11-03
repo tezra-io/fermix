@@ -26,7 +26,9 @@ defmodule FermixCore.Sandbox.OsSandbox do
   one filtered write allowance, as a `require-not`.
 
   On Linux the command runs under the `fermix_landlock` exec shim with Landlock
-  rules carved from the same path sets (`Sandbox.Landlock`). A kernel that
+  rules carved from the same path sets (`Sandbox.Landlock`). Landlock cannot
+  refuse a connect to a pathname socket, so there each of Fermix's sockets
+  refuses a confined command itself (`SocketPeer.admit/2`). A kernel that
   cannot hold them (no Landlock, or ABI below 3: Linux before 6.2) refuses
   every command by name; nothing runs unconfined. On any other system commands
   run as before, and `Capabilities.AccessGate` asks the owner before one runs

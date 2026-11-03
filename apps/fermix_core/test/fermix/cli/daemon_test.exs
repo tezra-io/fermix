@@ -1122,6 +1122,32 @@ defmodule Fermix.CLI.DaemonTest do
     end
   end
 
+  # A command Fermix confines gets no answer from this socket, whatever it asks
+  # (`SocketPeer.admit/2`; the real kernel check runs in `SocketReachTest`).
+  describe "a peer the socket does not answer" do
+    test "its request is closed unanswered, reaches no writer, and is logged once" do
+      socket_path =
+        start_peer_daemon(
+          management_opts: recording_writers(),
+          peer_gate: fn _conn -> {:error, {:sandboxed, 4242}} end
+        )
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          for {method, params, _write} <- @other_writes do
+            assert Client.request_v1(method, params,
+                     socket_path: socket_path,
+                     timeout: @reply_ms
+                   ) == {:error, :closed},
+                   method
+          end
+        end)
+
+      assert log =~ "#{socket_path} refused a connection: process 4242 runs sandboxed"
+      refute_received {:written, _write, _target}
+    end
+  end
+
   # M75, Always On setup §6: every Always On step (`home.act`: a token, a
   # server Fermix creates, powers or deletes, a code that lets a server take
   # this home, the move) and the recovery key are the owner's decisions; a

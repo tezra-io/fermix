@@ -42,6 +42,25 @@ defmodule FermixCore.NativeHost.LinkTest do
     assert HostAvailability.current(ctx.host).listening
   end
 
+  # A command Fermix confines gets no answer here (`SocketPeer.admit/2`; the
+  # real kernel check runs in `SocketReachTest`): it never attaches as the host.
+  test "a peer the socket does not answer is closed before any link starts", ctx do
+    stop_supervised!(ctx.opts[:name])
+    gate = fn _socket -> {:error, {:sandboxed, 4242}} end
+    opts = Keyword.put(ctx.opts, :peer_gate, gate)
+    start_supervised!({NativeHostSupervisor, opts}, id: opts[:name])
+
+    log =
+      capture_log(fn ->
+        client = connect(ctx.socket_path)
+        send_line(client, %{"type" => "client_hello", "protocol_version" => 1})
+        assert :gen_tcp.recv(client, 0, 2_000) == {:error, :closed}
+      end)
+
+    assert log =~ "#{ctx.socket_path} refused a connection: process 4242 runs sandboxed"
+    assert DynamicSupervisor.which_children(ctx.opts[:connection_supervisor]) == []
+  end
+
   test "the handshake is mandatory and one-shot", %{socket_path: path} do
     early = connect(path)
     send_line(early, %{"type" => "attached", "host_version" => "0.6.0"})

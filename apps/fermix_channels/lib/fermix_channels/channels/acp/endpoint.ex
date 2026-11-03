@@ -32,6 +32,7 @@ defmodule FermixChannels.Channels.Acp.Endpoint do
   alias FermixChannels.Channels.Acp.Peer
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.SocketPath
+  alias FermixCore.SocketPeer
 
   # Two Buzz agents at max parallelism (32 slots each) fit inside this.
   @max_connections 64
@@ -83,7 +84,7 @@ defmodule FermixChannels.Channels.Acp.Endpoint do
   def handle_info(:accept, state) do
     case :gen_tcp.accept(state.listen_socket, @accept_idle_ms) do
       {:ok, socket} ->
-        accept_connection(socket, state)
+        serve_admitted(socket, state)
         send(self(), :accept)
         {:noreply, state}
 
@@ -115,7 +116,9 @@ defmodule FermixChannels.Channels.Acp.Endpoint do
       registry: Keyword.get(opts, :registry, Acp.registry()),
       peer_supervisor: Keyword.get(opts, :peer_supervisor, Acp.Supervisor.peer_supervisor()),
       peer_opts: Keyword.get(opts, :peer_opts, []),
-      max_connections: Keyword.get(opts, :max_connections, @max_connections)
+      max_connections: Keyword.get(opts, :max_connections, @max_connections),
+      # Whether this socket answers a peer at all (`SocketPeer.admit/2`).
+      peer_gate: Keyword.get(opts, :peer_gate, &SocketPeer.admit/1)
     }
   end
 
@@ -232,6 +235,14 @@ defmodule FermixChannels.Channels.Acp.Endpoint do
   defp connections(state) do
     %{active: active} = DynamicSupervisor.count_children(state.peer_supervisor)
     active
+  end
+
+  # A command Fermix confines gets no answer here: no session at operator trust.
+  defp serve_admitted(socket, state) do
+    case state.peer_gate.(socket) do
+      :ok -> accept_connection(socket, state)
+      {:error, reason} -> SocketPeer.refuse(socket, state.socket_path, reason)
+    end
   end
 
   defp accept_connection(socket, state) do

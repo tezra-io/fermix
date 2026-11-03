@@ -35,7 +35,7 @@ defmodule FermixCore.NativeHost.Supervisor do
       {HostAvailability, name: host_availability},
       {DynamicSupervisor, name: connection_supervisor, strategy: :one_for_one},
       {Server,
-       Keyword.take(opts, [:socket_path, :link_opts]) ++
+       Keyword.take(opts, [:socket_path, :link_opts, :peer_gate]) ++
          [
            name: Keyword.get(opts, :server_name, Server),
            host_availability: host_availability,

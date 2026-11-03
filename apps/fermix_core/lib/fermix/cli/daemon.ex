@@ -251,6 +251,8 @@ defmodule Fermix.CLI.Daemon do
            # a different one in.
            daemon_os_pid: Keyword.get(opts, :daemon_os_pid, String.to_integer(System.pid())),
            os: Keyword.get(opts, :os, :os.type()),
+           # Whether this socket answers a peer at all (`SocketPeer.admit/2`).
+           peer_gate: Keyword.get(opts, :peer_gate, &SocketPeer.admit/1),
            stopper: Keyword.get(opts, :stopper, default_stopper()),
            started_at_ms: System.monotonic_time(:millisecond),
            # M75 §6: decided once, at boot (`Home.Link.forwarding/0`). A
@@ -310,7 +312,7 @@ defmodule Fermix.CLI.Daemon do
   def handle_info(:accept, state) do
     case :gen_tcp.accept(state.listen_socket, @accept_idle_ms) do
       {:ok, conn} ->
-        spawn_handler(state, conn)
+        serve_admitted(state, conn)
         send(self(), :accept)
         {:noreply, state}
 
@@ -352,6 +354,14 @@ defmodule Fermix.CLI.Daemon do
     )
 
     :ok
+  end
+
+  # A command Fermix confines gets no answer here, whatever it asks.
+  defp serve_admitted(state, conn) do
+    case state.peer_gate.(conn) do
+      :ok -> spawn_handler(state, conn)
+      {:error, reason} -> SocketPeer.refuse(conn, state.socket_path, reason)
+    end
   end
 
   defp spawn_handler(%{task_supervisor: sup} = state, conn) do

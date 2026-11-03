@@ -20,6 +20,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
   alias FermixCore.Realtime.SessionSupervisor
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.SocketPath
+  alias FermixCore.SocketPeer
 
   require Logger
 
@@ -99,6 +100,8 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
          session_starter: Keyword.get(opts, :session_starter, &default_session_starter/1),
          session_module: Keyword.get(opts, :session_module, SessionControl),
          session_opts: Keyword.get(opts, :session_opts, []),
+         # Whether this socket answers a peer at all (`SocketPeer.admit/2`).
+         peer_gate: Keyword.get(opts, :peer_gate, &SocketPeer.admit/1),
          max_clients: positive_int_opt(opts, :max_clients, @default_max_clients),
          # handler pid -> bound session pid (or nil before `call_start`). This map
          # IS both the client count (its size) and the crash-safe teardown ledger:
@@ -121,7 +124,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
   def handle_info(:accept, state) do
     case :gen_tcp.accept(state.listen_socket, @accept_idle_ms) do
       {:ok, conn} ->
-        state = spawn_client_handler(conn, state)
+        state = serve_admitted(conn, state)
         send(self(), :accept)
         {:noreply, state}
 
@@ -256,6 +259,19 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
       :ok -> :ok
       {:error, :enoent} -> :ok
       {:error, reason} -> {:error, {:stale_socket_unlink_failed, reason, socket_path}}
+    end
+  end
+
+  # A command Fermix confines gets no answer here: no session, no bill, no
+  # audio taken as the operator's voice.
+  defp serve_admitted(conn, state) do
+    case state.peer_gate.(conn) do
+      :ok ->
+        spawn_client_handler(conn, state)
+
+      {:error, reason} ->
+        :ok = SocketPeer.refuse(conn, state.socket_path, reason)
+        state
     end
   end
 

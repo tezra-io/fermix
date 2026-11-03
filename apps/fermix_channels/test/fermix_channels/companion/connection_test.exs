@@ -187,6 +187,33 @@ defmodule FermixChannels.Companion.ConnectionTest do
     assert Bitwise.band(mode, 0o777) == 0o600
   end
 
+  # A command Fermix confines gets no answer here (`SocketPeer.admit/2`; the
+  # real kernel check runs in `SocketReachTest`): no history, no turn, no card.
+  test "a peer the socket does not answer is closed before any connection starts", ctx do
+    path = Path.join(System.tmp_dir!(), "fermix-companion-gated-#{System.unique_integer()}.sock")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm(path) end)
+    name = :"companion_gated_endpoint_#{System.unique_integer([:positive])}"
+
+    gated =
+      Keyword.merge(ctx.endpoint_opts,
+        name: name,
+        socket_path: path,
+        peer_gate: fn _socket -> {:error, {:sandboxed, 4242}} end
+      )
+
+    start_supervised!({Endpoint, gated}, id: :gated_endpoint)
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        client = connect(path)
+        send_line(client, %{"type" => "client_hello", "protocol_version" => 6})
+        assert :gen_tcp.recv(client, 0, 2_000) == {:error, :closed}
+      end)
+
+    assert log =~ "#{path} refused a connection: process 4242 runs sandboxed"
+    assert Endpoint.connection_count(name) == 0
+  end
+
   test "the handshake is mandatory and one-shot", %{socket_path: path} do
     early = connect(path)
     send_line(early, %{"type" => "read_state", "profile_id" => "main", "read_up_to_seq" => 1})

@@ -55,7 +55,7 @@ defmodule FermixChannels.Channels.Acp.Supervisor do
 
   defp endpoint_opts(opts, registry, peer_supervisor) do
     opts
-    |> Keyword.take([:socket_path, :max_connections, :peer_opts])
+    |> Keyword.take([:socket_path, :max_connections, :peer_opts, :peer_gate])
     |> Keyword.put(:registry, registry)
     |> Keyword.put(:peer_supervisor, peer_supervisor)
   end
