@@ -669,10 +669,14 @@ into `return.json`, and runs one `home_restore` job:
 return's, activated in place, the engine restarted). Fermix deletes no
 server for it. The summary reads the request beside its running job
 (`Management.Home` asks the job family) as `moving`; the job's ending, however
-the run ended, takes the request back. The job is never resumed: jobs live in
-memory, so a stop part-way leaves a request beside no job and a `local`
-candidate the device's next start discards, and Restore here is offered
-again. Back on this computer as the primary after a move back
+the run ended, takes the request back, and after a run stopped from outside
+(past its budget, cancelled) settles what it left as the next start would:
+a `local` candidate not yet being put in place is discarded
+(`Home.Candidate.remove/1`, the function that start uses), and one being
+put in place is finished by restarting the engine. The job is never
+resumed: jobs live in memory, so an engine stop part-way leaves a request
+beside no job and a `local` candidate the device's next start discards, and
+Restore here is offered again. Back on this computer as the primary after a move back
 (`return.json`'s `moved_at` beside its `move_started_at`), the summary tells
 once that the owner's server still runs its retired copy (`back:<epoch>`); a
 restore here, whose server the owner deleted or stopped, tells nothing.

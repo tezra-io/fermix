@@ -107,6 +107,7 @@ defmodule FermixCore.Management.AlwaysOn do
   alias FermixCore.Management.HomeMove
   alias FermixCore.Management.HomeSummary
   alias FermixCore.Management.Jobs
+  alias FermixCore.Management.Lifecycle
   alias FermixCore.Management.Protocol
   alias FermixCore.Setup.ConfigStore
 
@@ -598,7 +599,7 @@ defmodule FermixCore.Management.AlwaysOn do
     job = [
       name: "restore_here",
       run: fn _job_id, _report -> restore.() end,
-      ending: fn _ended -> request_done(home) end
+      ending: fn ended -> restore_ended(home, ended, opts) end
     ]
 
     case Jobs.start(@restore_kind, Keyword.merge(Keyword.get(opts, :jobs, []), job)) do
@@ -609,6 +610,39 @@ defmodule FermixCore.Management.AlwaysOn do
         :ok = request_done(home)
         {:error, {:busy, Atom.to_string(@restore_kind)}}
     end
+  end
+
+  # A run stopped from outside (past its budget, cancelled, or crashed) ran
+  # nothing after the stop, so its ending settles the copy it left as the
+  # next start of this engine would: one not yet being put in place is
+  # discarded (`Home.Candidate.remove/1`, as the candidate's start drops
+  # it), and one being put in place is finished by that start, so the
+  # engine restarts (`LocalReturn`'s restart). A run that answered settled
+  # its own: it restarted, or kept its failure to show.
+  defp restore_ended(home, ended, opts) do
+    :ok = request_done(home)
+
+    case {Candidate.read_state(home), ended} do
+      {{:ok, %{"kind" => "local", "phase" => "receiving"}}, _ended} -> discard_left(home)
+      {{:ok, %{"kind" => "local", "phase" => "activating"}}, {:answered, _}} -> :ok
+      {{:ok, %{"kind" => "local", "phase" => "activating"}}, _stopped} -> restart_left(opts)
+      _nothing_left -> :ok
+    end
+  end
+
+  defp discard_left(home) do
+    case Candidate.remove(home) do
+      :ok ->
+        Logger.warning("restore here: stopped before its copy was put in place; it is removed")
+
+      {:error, reason} ->
+        Logger.error("restore here: the stopped restore could not be removed: #{inspect(reason)}")
+    end
+  end
+
+  defp restart_left(opts) do
+    Logger.warning("restore here: stopped while its copy was put in place; restarting to finish")
+    :ok = Keyword.get(opts, :restart, &Lifecycle.restart_self/0).()
   end
 
   defp request_done(home) do

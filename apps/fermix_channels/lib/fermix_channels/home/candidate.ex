@@ -641,7 +641,7 @@ defmodule FermixChannels.Home.Candidate do
         "it is removed and offered again"
     )
 
-    case discard_tree(Files.dir(state.home)) do
+    case Files.remove(state.home) do
       :ok -> %{state | phase: nil}
       {:error, reason} -> raise "the stopped restore could not be removed: #{inspect(reason)}"
     end

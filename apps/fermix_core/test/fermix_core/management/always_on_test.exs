@@ -707,6 +707,86 @@ defmodule FermixCore.Management.AlwaysOnTest do
       settle!(ctx)
     end
 
+    # A restore job stopped from outside (past its budget, or cancelled) runs
+    # no code of its own after the stop; its ending settles what it left as
+    # the next start would: a copy not yet being put in place goes, and one
+    # being put in place is finished by a restart.
+    test "a restore job stopped before its copy was being put in place leaves nothing behind " <>
+           "and offers Restore here again",
+         ctx do
+      copy!(ctx)
+      Agent.update(ctx.link, &%{&1 | primary: primary(11 * 60_000)})
+      test = self()
+
+      left =
+        ctx.opts
+        |> Keyword.put(:local_return, fn home, chosen ->
+          {:ok, _state} =
+            Candidate.prepare_return(home, {:local, chosen.from},
+              now: @at,
+              role: :device,
+              restarts_itself?: true
+            )
+
+          send(test, {:restoring, self()})
+          receive do: (:never -> :ok)
+        end)
+        |> Keyword.put(:restart, fn ->
+          send(test, :restarted)
+          :ok
+        end)
+
+      assert {:ok, _answer} =
+               press(%{ctx | opts: left}, "restore_here", %Input{recovery_passphrase: @passphrase})
+
+      assert_receive {:restoring, _run}, 10_000
+      assert summary(ctx.opts)["state"] == "moving"
+
+      [%{"job_id" => id}] = jobs(ctx)
+      assert {:ok, %{"status" => "cancelled"}} = Jobs.cancel(id, ctx.opts[:jobs])
+
+      refute Candidate.present?(ctx.home)
+      refute_received :restarted
+      assert "restore_here" in Enum.map(HomeSummary.offered(summary(ctx.opts)), & &1["id"])
+    end
+
+    test "a restore job stopped while its copy was being put in place restarts the engine, " <>
+           "whose start finishes it",
+         ctx do
+      copy!(ctx)
+      Agent.update(ctx.link, &%{&1 | primary: primary(11 * 60_000)})
+      test = self()
+
+      left =
+        ctx.opts
+        |> Keyword.put(:local_return, fn home, chosen ->
+          {:ok, state} =
+            Candidate.prepare_return(home, {:local, chosen.from},
+              now: @at,
+              role: :device,
+              restarts_itself?: true
+            )
+
+          :ok = Candidate.put_state(home, Map.put(state, "phase", "activating"), @at)
+          send(test, {:restoring, self()})
+          receive do: (:never -> :ok)
+        end)
+        |> Keyword.put(:restart, fn ->
+          send(test, :restarted)
+          :ok
+        end)
+
+      assert {:ok, _answer} =
+               press(%{ctx | opts: left}, "restore_here", %Input{recovery_passphrase: @passphrase})
+
+      assert_receive {:restoring, _run}, 10_000
+      [%{"job_id" => id}] = jobs(ctx)
+      assert {:ok, %{"status" => "cancelled"}} = Jobs.cancel(id, ctx.opts[:jobs])
+
+      assert_received :restarted
+      assert {:ok, %{"kind" => "local", "phase" => "activating"}} = Candidate.read_state(ctx.home)
+    end
+
     test "a restore that stopped before its copy was in place offers Restore here again", ctx do
       copy!(ctx)
       Agent.update(ctx.link, &%{&1 | primary: primary(11 * 60_000)})
