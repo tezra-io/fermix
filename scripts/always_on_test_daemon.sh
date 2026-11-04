@@ -454,11 +454,13 @@ cmd_status() {
 
 # ── down ──────────────────────────────────────────────────────────────────────
 
-# The states in which Always On holds no server and no move: nothing set up, or
-# a code for the owner's server that no server used yet.
+# The states in which Always On holds no server and no move: nothing set up, a
+# code for the owner's server that no server used yet, or (`choose`, in
+# v0.18.0, which this script may install) a provider token that created
+# nothing yet.
 holds_nothing() {
   case "$1" in
-    off | connect) return 0 ;;
+    off | connect | choose) return 0 ;;
     *) return 1 ;;
   esac
 }

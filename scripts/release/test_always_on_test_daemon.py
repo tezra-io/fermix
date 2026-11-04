@@ -629,8 +629,10 @@ class AlwaysOnTestDaemonTest(unittest.TestCase):
         self.assertFalse(self.root.exists())
         self.assertIn("service uninstall --user\n", self.log("fermix"))
 
+    # `choose` is v0.18.0's screen for a provider token that created nothing
+    # yet: the script installs a published release, so it still meets it.
     def test_down_proceeds_where_always_on_holds_nothing(self):
-        for state in ("off", "connect"):
+        for state in ("off", "connect", "choose"):
             with self.subTest(state=state):
                 self.up()
                 self.screen(state)
