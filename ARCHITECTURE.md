@@ -679,7 +679,10 @@ beside no job and a `local` candidate the device's next start discards, and
 Restore here is offered again. Back on this computer as the primary after a move back
 (`return.json`'s `moved_at` beside its `move_started_at`), the summary tells
 once that the owner's server still runs its retired copy (`back:<epoch>`); a
-restore here, whose server the owner deleted or stopped, tells nothing.
+restore here, whose server the owner deleted or stopped, tells nothing. The
+record stays until a move away from this home starts
+(`HomeMove.move_start/3` removes it), so no later move's progress, move
+back or notice is drawn from it.
 
 Architecture Invariant: one role gate, one epoch writer, one marker, one
 device-local list, one placement table; a linked device's request takes one

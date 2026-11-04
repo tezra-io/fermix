@@ -30,8 +30,9 @@ defmodule FermixCore.Management.HomeMove do
     (`FermixCore.Home.Move.start/5`), refused while
     the readiness report blocks: the ready review the owner was just shown
     (`Move.review/3`), so the keychain is not read again, else a report made
-    now. That hands the home to the device role,
-    and then restarts the engine through its deliberate self-restart
+    now. That hands the home to the device role, removes the record of a
+    move back that ended here (`FermixCore.Home.Return`), and then restarts
+    the engine through its deliberate self-restart
     (`Management.Lifecycle.restart_self/0`), which the service manager brings
     back (launchd's `KeepAlive` for the Mac app's
     agent, systemd's `Restart=always` for the Linux service). The passphrase
@@ -58,6 +59,7 @@ defmodule FermixCore.Management.HomeMove do
   alias FermixCore.Home.Link
   alias FermixCore.Home.Move
   alias FermixCore.Home.MoveReadiness
+  alias FermixCore.Home.Return
   alias FermixCore.Home.Role
   alias FermixCore.Home.Snapshot.Recovery
   alias FermixCore.Management.Home
@@ -194,8 +196,25 @@ defmodule FermixCore.Management.HomeMove do
                  reviewed ++ readiness_opts(opts)
              )
            ) do
+      :ok = forget_ended_return(home(opts))
       :ok = Keyword.get(opts, :restart, &Lifecycle.restart_self/0).()
       {:ok, started_view(started)}
+    end
+  end
+
+  # A move away from this home starts a tenure elsewhere: the record of a
+  # move back that ended here (`device/return.json`) describes nothing any
+  # more, and read on it would draw the new move's progress, a later move
+  # back's screen and its notice from that old one. It goes, which tells the
+  # Always On watch; one that cannot go is said in the log, and the move,
+  # already written, goes on.
+  defp forget_ended_return(home) do
+    case Return.remove(home) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error("move: the ended move back's record stays: #{inspect(reason)}")
     end
   end
 

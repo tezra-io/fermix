@@ -223,6 +223,68 @@ defmodule FermixCore.Management.AlwaysOnTest do
       assert Recipient.matches?(again, recipient)
     end
 
+    # A move back that ended keeps its record (`device/return.json`, with
+    # `moved_at`) on the primary it came back to. A move away from that home
+    # starts a new tenure: the record describes nothing any more, so the
+    # start removes it, and none of the three screens below reads it.
+    test "a move away from a home that once moved back draws no move back's progress", ctx do
+      :ok = Return.write(ctx.home, ended_return())
+      assert {:ok, _answer} = press(ctx, "move_now", %Input{recovery_passphrase: @passphrase})
+
+      moving = summary(Keyword.put(ctx.opts, :engine_role, @device))
+
+      assert moving["state"] == "moving"
+      assert get_in(moving, ["detail", "progress"]) == nil
+    end
+
+    test "a later move back stopped between its two writes draws the stopped screen, not the " <>
+           "ended move back's server",
+         ctx do
+      :ok = Return.write(ctx.home, ended_return())
+      assert {:ok, _answer} = press(ctx, "move_now", %Input{recovery_passphrase: @passphrase})
+
+      # The move done, as the device's boot records it, and this computer a
+      # desktop of the new server; then Move back stops after its candidate
+      # and before its record.
+      :ok = Move.put_phase(ctx.home, "done", %{}, @at)
+      :ok = Move.remove_request(ctx.home)
+      :ok = DesktopLink.write(ctx.home, desktop_link())
+      :ok = Moved.write(ctx.home, %{epoch: 4, moved_at: @at, to: "fermix-general-a3f9"})
+
+      {:ok, state} =
+        Candidate.prepare_return(ctx.home, {:return, return_code("fermix-general-a3f9")},
+          now: @at,
+          role: :device,
+          restarts_itself?: true
+        )
+
+      enrolled =
+        Map.merge(state, %{
+          "phase" => "enrolled",
+          "candidate_id" => @back_cand,
+          "listen_until" => "2031-05-05T12:00:00Z"
+        })
+
+      :ok = Candidate.put_state(ctx.home, enrolled, @at)
+
+      stopped = summary(Keyword.put(ctx.opts, :engine_role, @device))
+
+      assert stopped["state"] == "problem"
+      assert stopped["detail"]["kind"] == "return_failed"
+      assert stopped["action"]["id"] == "cancel"
+    end
+
+    test "a later move undone tells nothing of the ended move back", ctx do
+      :ok = Return.write(ctx.home, ended_return())
+      assert {:ok, _answer} = press(ctx, "move_now", %Input{recovery_passphrase: @passphrase})
+
+      # The move undone: the engine comes back as the primary.
+      :ok = Move.put_phase(ctx.home, "aborted", %{}, @at)
+      :ok = Move.remove_request(ctx.home)
+
+      assert summary(ctx.opts)["notice"] == nil
+    end
+
     test "with a key set, another passphrase is refused and nothing moves", ctx do
       {:ok, kept} = Recipient.from_passphrase("invented-orchard-meridian-77")
       opts = Keyword.put(ctx.opts, :config, recipient: Recipient.encode(kept))
@@ -1048,6 +1110,18 @@ defmodule FermixCore.Management.AlwaysOnTest do
       sentence: "The link's own words.",
       down_ms: down_ms,
       down_at: if(down_ms, do: DateTime.add(@at, -down_ms, :millisecond))
+    }
+  end
+
+  # The record a move back that ended leaves on the primary it came back to.
+  defp ended_return do
+    %{
+      from: "fermix-orchard-old",
+      primary_epoch: 2,
+      started_at: ~U[2031-04-01 09:00:00Z],
+      move_started_at: ~U[2031-04-01 09:05:00Z],
+      moved_at: ~U[2031-04-01 09:20:00Z],
+      epoch: 3
     }
   end
 
