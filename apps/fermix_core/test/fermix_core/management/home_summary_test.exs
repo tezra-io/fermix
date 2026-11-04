@@ -854,10 +854,10 @@ defmodule FermixCore.Management.HomeSummaryTest do
       assert %{"label" => "Restore on this Mac", "needs" => ["recovery_passphrase"]} = restore
 
       assert restore["confirm"] ==
-               "Restore Fermix on this Mac from its backup? Confirm only once you deleted or " <>
-                 "stopped your server: if it still runs, two copies of Fermix answer the same " <>
-                 "channels. Messages, memory and jobs since that backup are gone, and Telegram " <>
-                 "keeps nothing older than 24 hours."
+               "Restore Fermix on this Mac from its backup? Confirm only once you deleted " <>
+                 "your server, or stopped it for good: if it runs again, two copies of Fermix " <>
+                 "answer the same channels. Messages, memory and jobs since that backup are " <>
+                 "gone, and Telegram keeps nothing older than 24 hours."
 
       assert summary["detail"]["lines"] == [
                %{"label" => "Backup on this Mac", "value" => "Sunday, May 4, 2031 at 9:30 AM UTC"}

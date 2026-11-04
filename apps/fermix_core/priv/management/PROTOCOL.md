@@ -277,7 +277,7 @@ it with their "update Fermix" screen, so they raise their own minimum for
   `serves_nothing`, in their own words) and any other warning the last review
   of the same server gave; during a move back, what runs on this computer
   again and what the move back costs. Restore here's asks the owner's word
-  that the server is deleted or stopped.
+  that the server is deleted, or stopped for good.
 - `url` is the Always On docs page (`https://fermix.ai/docs/always-on/`) for
   `learn_more`; null otherwise.
 - `key` is the digest of the action's `id`, `label`, `confirm`, `needs` and
@@ -389,8 +389,8 @@ no longer knows this computer, or a retired copy that answers, is not
 silent) and this computer keeps a copy of its snapshots,
 `detail.alternatives` adds `restore_here` (needs
 `recovery_passphrase`; its confirm asks the owner's word that the server is
-deleted or stopped, since a server that still runs answers the same
-channels as the restored copy, and says what is lost), with the copy's date
+deleted, or stopped for good, since a server that runs again answers the
+same channels as the restored copy, and says what is lost), with the copy's date
 in `lines`. Fermix deletes no server for it: one job of its own
 (`home_restore`) restores the copy, and the screen is `moving` from the
 press until this computer restarts as the primary. A restore that stopped

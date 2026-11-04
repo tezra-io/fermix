@@ -577,7 +577,7 @@ it, never a second writer.
 - Fermix can move back from the server to the computer the home left
   (**Move back to this Mac**, then **Move now**), and a computer whose server
   is gone can restore its own copy (**Restore on this Mac**), once the owner
-  confirms they deleted or stopped the server. Every step, what
+  confirms they deleted the server, or stopped it for good. Every step, what
   comes back and what is lost: skill_view(name: "self-knowledge", file:
   "move_back").
 

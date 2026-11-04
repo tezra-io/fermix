@@ -428,10 +428,10 @@ defmodule FermixCore.Management.Copy do
 
   def summary_sentence(:confirm_restore_here, %{machine: machine}),
     do:
-      "Restore Fermix on this #{machine} from its backup? Confirm only once you deleted or " <>
-        "stopped your server: if it still runs, two copies of Fermix answer the same " <>
-        "channels. Messages, memory and jobs since that backup are gone, and Telegram keeps " <>
-        "nothing older than 24 hours."
+      "Restore Fermix on this #{machine} from its backup? Confirm only once you deleted " <>
+        "your server, or stopped it for good: if it runs again, two copies of Fermix answer " <>
+        "the same channels. Messages, memory and jobs since that backup are gone, and " <>
+        "Telegram keeps nothing older than 24 hours."
 
   def summary_sentence(:confirm_return_move, %{machine: machine, stays_here: features}),
     do:

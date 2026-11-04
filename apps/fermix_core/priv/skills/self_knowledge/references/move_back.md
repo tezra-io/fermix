@@ -49,20 +49,21 @@ The move to a server, the roles and the epoch: skill_view(name:
   turn it off or delete it."); nothing here deletes it. Screen history
   recorded here before the move is not brought back (the server never had
   it).
-- **Restore here, when the server is gone.** When the server stopped
-  answering (no answer for 10 minutes, whether it is turned off, deleted or
-  unreachable, or no longer connected) and this computer keeps a copy of its
-  backups, Always On offers **Restore on this
-  Mac** beside the problem, with the copy's date. It asks for the recovery
-  passphrase (the newest copy that passphrase opens is restored; one that
-  opens none is refused before anything is written), and its confirm asks
-  the owner to go on only once they deleted or stopped the server ("if it
-  still runs, two copies of Fermix answer the same channels") and says what
-  is lost: messages, memory and jobs since that backup, and Telegram
-  messages older than 24 hours. Fermix deletes no server: it restores the
-  copy here and restarts as the primary. A restore that stopped before its
-  copy was in place is offered again. Before confirming, delete the server,
-  or stop Fermix on it (or run `fermix home mark-moved` there).
+- **Restore here, when the server is gone.** When nothing answers from the
+  server (no answer for 10 minutes, whether it is turned off, deleted or
+  unreachable, or no link to it at all; a server that answers, even one that
+  no longer knows this computer, is never silent) and this computer keeps a
+  copy of its backups, Always On offers **Restore on this Mac** beside the
+  problem, with the copy's date. It asks for the recovery passphrase (the
+  newest copy that passphrase opens is restored; one that opens none is
+  refused before anything is written), and its confirm asks the owner to go
+  on only once they deleted the server, or stopped it for good ("if it runs
+  again, two copies of Fermix answer the same channels"), and says what is
+  lost: messages, memory and jobs since that backup, and Telegram messages
+  older than 24 hours. Fermix deletes no server: it restores the copy here
+  and restarts as the primary. A restore that stopped before its copy was in
+  place is offered again. Before confirming, delete the server, or stop
+  Fermix on it for good (or run `fermix home mark-moved` there).
 - `fermix always-on move-back` and `fermix always-on restore-here
   --recovery-passphrase-file PATH --yes` take the same steps from a
   terminal; the setup page's Always On tab draws them as any step.

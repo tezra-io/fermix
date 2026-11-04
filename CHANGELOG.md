@@ -76,8 +76,9 @@ will be part of a future release; nothing in this group is in a release yet.
   runs its retired copy, for you to turn off or delete. To change servers,
   move back, then set up the new one from Always On. When your server is
   gone or cannot be reached, Restore on this Mac takes Fermix back from the
-  copy of its backups your Mac keeps, once you confirm you deleted or stopped
-  the server: one that still runs would answer the same channels beside it.
+  copy of its backups your Mac keeps, once you confirm you deleted the
+  server, or stopped it for good: one that runs again would answer the same
+  channels beside it.
   Fermix deletes no server.
   The server's hosting provider can technically read its disk, so Fermix
   keeps less there: the prompts, replies, tool input and output and shell
