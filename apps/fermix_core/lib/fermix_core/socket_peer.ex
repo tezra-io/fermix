@@ -267,16 +267,30 @@ defmodule FermixCore.SocketPeer do
   defp ps_tdev("??"), do: {:ok, false}
   defp ps_tdev(tdev), do: if(tdev =~ ~r/\A\d+\/\d+\z/, do: {:ok, true}, else: :error)
 
-  defp proc_table do
-    case File.ls(@proc) do
-      {:ok, names} -> names |> Enum.filter(&(&1 =~ ~r/\A\d+\z/)) |> read_stats()
-      {:error, reason} -> {:error, {:proc_unreadable, reason}}
+  @doc """
+  The process table of the Linux proc root `proc`: each process's parent,
+  process group and whether it has a controlling terminal. Read raw, never
+  through the VM's file server, which every file call in the node queues on:
+  `classify/3` runs it, one read per process, as a connection is handed its
+  socket. `proc` is a test seam.
+  """
+  @spec proc_table(String.t()) :: {:ok, process_table()} | {:error, term()}
+  def proc_table(proc \\ @proc) when is_binary(proc) do
+    case :prim_file.list_dir(proc) do
+      {:ok, names} ->
+        names
+        |> Enum.map(&IO.chardata_to_string/1)
+        |> Enum.filter(&(&1 =~ ~r/\A\d+\z/))
+        |> read_stats(proc)
+
+      {:error, reason} ->
+        {:error, {:proc_unreadable, reason}}
     end
   end
 
-  defp read_stats(pid_names) do
+  defp read_stats(pid_names, proc) do
     Enum.reduce_while(pid_names, {:ok, %{}}, fn name, {:ok, table} ->
-      case File.read(Path.join([@proc, name, "stat"])) do
+      case :file.read_file(Path.join([proc, name, "stat"]), [:raw]) do
         {:ok, stat} -> stat |> stat_fields() |> parse_row(&proc_tty_nr/1) |> put_row(stat, table)
         # It exited after the listing, or belongs to another account under
         # hidepid: either way this account cannot place it, as ps would not list it.
