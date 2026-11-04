@@ -23,9 +23,9 @@ defmodule FermixCore.Management.AlwaysOn do
   move back and Restore here itself and sends its server's steps over the
   link as the rail-only methods (`Management.Placement`).
 
-    * `own_server`: a manual code (`HomeMove.enroll_open/2`) for the owner's
+    * `own_server`: a code (`HomeMove.enroll_open/1`) for the owner's
       server, answered with the command that installs Fermix there.
-    * `cancel` on the code's screen: the manual code is withdrawn.
+    * `cancel` on the code's screen: the code is withdrawn.
     * `back_up_now` and `check_again`: run here, or on a linked desktop sent
       as `home.snapshots.run` and `home.move.readiness`.
     * `move_now`, `try_again`: the server a move goes to is the engine's

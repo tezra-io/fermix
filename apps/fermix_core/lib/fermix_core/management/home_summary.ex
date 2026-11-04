@@ -135,8 +135,7 @@ defmodule FermixCore.Management.HomeSummary do
   @untold_sentences ~w(off on problem)
   @moving ~w(requested streaming committed)
   @undoing ~w(aborting undoing)
-  # A move under way, from its request to its undoing: nothing it goes to is
-  # offered for deletion.
+  # A move under way, from its request to its undoing: the screen runs.
   @in_flight @moving ++ ["committing" | @undoing]
   @receiving ~w(receiving staged activating)
   # A move back's candidate that ended (`FermixCore.Home.Candidate`), and
@@ -146,7 +145,7 @@ defmodule FermixCore.Management.HomeSummary do
   # A move the server reports under way, from its request to its undoing.
   @server_moves ~w(requested streaming committing aborting committed undoing)
   # The states whose Details have lines.
-  @detailed_states ~w(creating ready on problem)
+  @detailed_states ~w(ready on problem)
   # The bytes of a digest a key keeps.
   @key_bytes 16
 

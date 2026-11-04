@@ -364,8 +364,8 @@ defmodule FermixCore.Management.Router do
   end
 
   # Every Always On step (Always On setup §3.4): `input` is decoded here into
-  # `AlwaysOn.Input`, which withholds its token and recovery passphrase from
-  # any log, and the raw map goes no further.
+  # `AlwaysOn.Input`, which withholds its recovery passphrase from any log,
+  # and the raw map goes no further.
   defp route_home("home.act", params, opts) do
     with :ok <- reject_unknown_params(params, @home_act_params) do
       case AlwaysOn.decode(params) do

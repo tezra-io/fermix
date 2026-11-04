@@ -112,7 +112,8 @@ defmodule FermixChannels.Home.EnrollmentWindowTest do
 
   # A window file of version 1 named its window's kind, and the 24-hour kind
   # is gone: such a file is no window this version reads, said in the log, and
-  # its code admits nobody. Nothing released wrote one.
+  # its code admits nobody. v0.18.0 writes one, but only with Always On's
+  # unsupported release switch on, so there is no migration.
   test "a window file of the earlier version, which named a kind, is no window, and says so",
        ctx do
     file = Enrollment.path(ctx.primary.root)
