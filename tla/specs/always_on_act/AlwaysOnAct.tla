@@ -54,7 +54,7 @@
 (* or one step of a job's ending.                                          *)
 (***************************************************************************)
 
-\* SOURCE: apps/fermix_core/lib/fermix_core/management/always_on.ex @ 434f3f77c627
+\* SOURCE: apps/fermix_core/lib/fermix_core/management/always_on.ex @ ada0395d00fd
 \* SOURCE: apps/fermix_core/lib/fermix_core/management/jobs.ex#start,handle_call,start_job,running?,running_count,complete_task,task_down,finish,begin_ending,ending_done,ending_down,end_closing @ 5095f2e28157
 \* SOURCE: apps/fermix_core/lib/fermix_core/management/home_summary.ex#offered,find_action,device,restoring,restore_running?,restore_offer @ 9afc8810cd4f
 \* SOURCE: apps/fermix_core/lib/fermix_core/management/home.ex#restoring? @ 10524f88be3d

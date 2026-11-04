@@ -102,7 +102,7 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/management/home_move.ex#move_start @ 81c5ae5fa852
 \* SOURCE: apps/fermix_core/lib/fermix_core/management/placement.ex#unconfirmed_on_loss?,unconfirmed,@unconfirmed_methods @ 0881001a46d0
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/relay.ex#lost_answer @ dfb459724267
-\* SOURCE: apps/fermix_core/lib/fermix_core/management/always_on.ex @ 434f3f77c627
+\* SOURCE: apps/fermix_core/lib/fermix_core/management/always_on.ex @ ada0395d00fd
 \* SOURCE: apps/fermix_core/lib/fermix_core/management/home.ex#restoring? @ 10524f88be3d
 \* SOURCE: apps/fermix_core/lib/fermix_core/management/home_summary.ex#screen,target,device,settled,retired,away,away_here,on,returning,return_view,return_ready,return_moving,return_undone,return_stopped,restore_view,return_cancel,restoring,restore_running?,restore_offer,restorable,started?,stale?,silent?,server_move,server_idle?,@before_move,@ended,@server_moves @ 6f8a065aa6bc
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/local_return.ex#restore,restored,staged,placed,failed,restart @ b07d4dc0d235
@@ -951,7 +951,7 @@ MnUnmark ==
 \* always_on.ex:296-306, :521-553): Link.stop_return/0 stops the candidate
 \* subtree (DeviceSupervisor.stop_candidate/1: its process is stopped where
 \* it is, an activation part-way included, and its rails end);
-\* home.enroll.withdraw {kind: manual} is forwarded (nothing here reads the
+\* home.enroll.withdraw is forwarded (nothing here reads the
 \* window); then return.json (Return.remove/1) and candidate/
 \* (Candidate.remove/1) go: in that order with StoppedReturnClears
 \* (forget_return/1), the other way round without. Removing return.json
