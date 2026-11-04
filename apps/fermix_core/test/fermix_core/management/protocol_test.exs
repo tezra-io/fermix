@@ -159,7 +159,6 @@ defmodule FermixCore.Management.ProtocolTest do
              "home.candidates.list",
              "home.move.readiness",
              "home.move.start",
-             "home.provision.options",
              "home.act"
            ]
 

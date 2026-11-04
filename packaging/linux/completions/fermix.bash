@@ -83,7 +83,7 @@ _fermix() {
       mapfile -t COMPREPLY < <(compgen -W "export import mark-moved status snapshots passphrase enroll candidates --into --passphrase-file --mark-moved --to --code-file --snapshot-bucket --snapshot-region --json" -- "$current")
       ;;
     always-on)
-      mapfile -t COMPREPLY < <(compgen -W "paste-token create-server cancel move-now try-again turn-on restart-server start-again create-in back-up-now replace-server check-again own-server delete-server learn-more open-console update --provider --type --location --stdin --recovery-passphrase-file --yes --wait --json" -- "$current")
+      mapfile -t COMPREPLY < <(compgen -W "cancel move-now try-again learn-more update back-up-now check-again own-server move-back restore-here --recovery-passphrase-file --yes --wait --json" -- "$current")
       ;;
     logs)
       mapfile -t COMPREPLY < <(compgen -W "-f -n" -- "$current")

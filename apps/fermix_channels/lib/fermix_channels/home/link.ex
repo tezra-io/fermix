@@ -4,8 +4,7 @@ defmodule FermixChannels.Home.Link do
   place `fermix_core` reaches the rail through.
 
   Each callback is owned by the part of the rail that knows its answer:
-  `forward/1`, `rename_primary/1` and `status/0`'s `primary` by the desktop
-  relay (device role),
+  `forward/1` and `status/0`'s `primary` by the desktop relay (device role),
   `status/0`'s `desktops` by the primary's desktop peers
   (`FermixChannels.Desktop.Peer`), and `open_enrollment/2`,
   `withdraw_enrollment/1` and `status/0`'s `enrollment` by the enrollment
@@ -34,12 +33,6 @@ defmodule FermixChannels.Home.Link do
   @impl true
   def forward(%{method: method} = request, opts) when is_binary(method) and is_list(opts),
     do: Relay.forward(Relay, request, opts)
-
-  # Only a running relay holds the link it names.
-  @impl true
-  def rename_primary(name) when is_binary(name) do
-    if Process.whereis(Relay), do: Relay.rename(Relay, name), else: {:error, :no_relay}
-  end
 
   @impl true
   def status do

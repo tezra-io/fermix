@@ -1361,12 +1361,12 @@ one and inherit the bookends rather than minting a sixth event.
 
 Always On's two methods are sessionless the same way. `home.status` (its
 held wait included) reads and answers; `home.act` (Always On setup §9) emits
-nothing of its own: a step that starts a job (a create, a power action, a
-delete, Start again) inherits that `home_provision` job's bookends, and the
-synchronous ones (a token check, a review, a code, a move's start) stay
-sessionless as their functions are. An act logs its action id and who asked,
-and its `input` (a token, a recovery passphrase) never enters any log line or
-any event's metadata.
+nothing of its own: Restore here, the one step that starts a job, inherits
+that `home_restore` job's bookends, and the synchronous ones (a code, a
+review, a backup's start, a move's start, a move back) stay sessionless as
+their functions are. An act logs its action id and who asked, and its
+`input` (a recovery passphrase) never enters any log line or any event's
+metadata.
 
 ## Computer-use sessions
 

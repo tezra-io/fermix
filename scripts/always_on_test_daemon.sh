@@ -10,8 +10,8 @@
 #                                               Always On screen
 #   always_on_test_daemon.sh down               stop it and remove all of it
 #
-# Everything the owner does after `up` (model key, Hetzner token, create the
-# server, move, move back, delete the server) is done in the web setup.
+# Everything the owner does after `up` (model key, the code for their own
+# server, move, move back) is done in the web setup.
 #
 # What keeps it apart from the owner's own Fermix:
 #   * Root: ~/fermix-always-on-test (bin/, home/), carrying a marker file. Only
@@ -454,16 +454,16 @@ cmd_status() {
 
 # ── down ──────────────────────────────────────────────────────────────────────
 
-# The states in which Always On holds no server and no move: nothing set up, a
-# code for a server of the owner's own, or a token that created nothing yet.
+# The states in which Always On holds no server and no move: nothing set up, or
+# a code for the owner's server that no server used yet.
 holds_nothing() {
   case "$1" in
-    off | connect | choose) return 0 ;;
+    off | connect) return 0 ;;
     *) return 1 ;;
   esac
 }
 
-# A build without Always On made no server: one that refuses it by name, or
+# A build without Always On holds no server: one that refuses it by name, or
 # one older than it, which has no `home` verb at all. Anything else this cannot
 # read keeps the home.
 refuse_held_server() {
@@ -474,12 +474,12 @@ refuse_held_server() {
     1)
       [ "$(screen_field "$out" error code)" = always_on_unavailable ] ||
         fail "fermix home status refused: $(screen_field "$out" error sentence)"
-      say "Fermix $(state_get version) serves no Always On here, so it made no server."
+      say "Fermix $(state_get version) serves no Always On here, so it holds no server."
       ;;
     2)
       [ "$(head -n 1 "$err")" = "fermix: unknown command: home" ] ||
         { cat "$err" >&2; fail "fermix home status did not answer"; }
-      say "Fermix $(state_get version) predates Always On, so it made no server."
+      say "Fermix $(state_get version) predates Always On, so it holds no server."
       ;;
     *) cat "$err" >&2; fail "fermix home status exited $code" ;;
   esac
@@ -500,7 +500,7 @@ check_screen() {
     say "Always On holds no server here ($state)."
     return 0
   fi
-  fail "Always On says \"$sentence\" ($role, $state); delete the server in the web setup (http://127.0.0.1:$(state_get port)/setup) first, then run $prog down again"
+  fail "Always On says \"$sentence\" ($role, $state); move back or cancel in the web setup (http://127.0.0.1:$(state_get port)/setup) first, then run $prog down again"
 }
 
 # The service is this root's or absent; another's is never touched.

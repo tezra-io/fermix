@@ -511,11 +511,11 @@ always_on_out="$runtime_root/always-on.out"
 always_on_err="$runtime_root/always-on.err"
 always_on_status=0
 env -u FERMIX_OPIK_ENABLED HOME="$home" FERMIX_HOME="$always_on_home" \
-  "$artifact" always-on create-server --json < /dev/null > "$always_on_out" 2> "$always_on_err" ||
+  "$artifact" always-on own-server --json < /dev/null > "$always_on_out" 2> "$always_on_err" ||
   always_on_status=$?
 printf '%s\n' "$(cat "$always_on_err")"
 [ "$always_on_status" -eq 1 ] ||
-  fail "fermix always-on create-server with no daemon must exit 1, got $always_on_status"
+  fail "fermix always-on own-server with no daemon must exit 1, got $always_on_status"
 always_on_json="$(cat "$always_on_out")"
 always_on_expected='{"error":{"code":"always_on_unavailable","sentence":"Always On is not in this release of Fermix yet."},"ok":false,"schema_version":1}'
 [ "$always_on_json" = "$always_on_expected" ] ||
@@ -533,11 +533,11 @@ printf '%s\n' "$switched_settings" > "$switched_home/config.toml"
 chmod 600 "$switched_home/config.toml"
 always_on_status=0
 env -u FERMIX_OPIK_ENABLED HOME="$home" FERMIX_HOME="$switched_home" \
-  "$artifact" always-on create-server --json < /dev/null > "$always_on_out" 2> "$always_on_err" ||
+  "$artifact" always-on own-server --json < /dev/null > "$always_on_out" 2> "$always_on_err" ||
   always_on_status=$?
 printf '%s\n' "$(cat "$always_on_err")"
 [ "$always_on_status" -eq 1 ] ||
-  fail "fermix always-on create-server with the switch and no daemon must exit 1, got $always_on_status"
+  fail "fermix always-on own-server with the switch and no daemon must exit 1, got $always_on_status"
 always_on_json="$(cat "$always_on_out")"
 always_on_expected='{"error":{"code":"engine_stopped","sentence":"Fermix is not running from this home, and this needs it. Start it, then try again."},"ok":false,"schema_version":1}'
 [ "$always_on_json" = "$always_on_expected" ] ||

@@ -9,8 +9,6 @@ defmodule FermixCore.Management.HomeTest do
   alias FermixCore.Home.Epoch
   alias FermixCore.Home.Move
   alias FermixCore.Home.Moved
-  alias FermixCore.Home.Provision.Driver
-  alias FermixCore.Home.Provision.Ledger
   alias FermixCore.Home.Return
   alias FermixCore.Home.Snapshot.Capture
   alias FermixCore.Home.Snapshot.Recipient
@@ -21,9 +19,7 @@ defmodule FermixCore.Management.HomeTest do
   alias FermixCore.Management.HomeSummary
   alias FermixCore.Management.Jobs
   alias FermixCore.Management.Router
-  alias FermixTestSupport.FakeCloudProvider
   alias FermixTestSupport.SafeRm
-  alias FermixTestSupport.TelemetryCapture
 
   @primary %{role: :primary, primary: nil}
   @device %{role: :device, primary: "invented host"}
@@ -220,16 +216,16 @@ defmodule FermixCore.Management.HomeTest do
   end
 
   # The gatherer behind `home.status.summary` (M75 lean v1 §7), with each of
-  # its sources a real file in a temp home or an injected seam: the ledger,
-  # the candidates, the window and link as the rail says them, the review,
-  # the disk, the server's own part and this desktop's copies.
+  # its sources a real file in a temp home or an injected seam: the
+  # candidates, the window and link as the rail says them, the review, the
+  # disk, the server's own part, this desktop's copies and its restore job.
   describe "home.status's summary" do
     test "a primary with nothing says off, and publishes its disk and version", %{home: home} do
       assert {:ok, status} =
                route("home.status", %{}, opts(home, disk_usage: disk(0.42), version: "9.9.9"))
 
       assert status["summary"]["state"] == "off"
-      assert status["summary"]["action"]["id"] == "paste_token"
+      assert status["summary"]["action"]["id"] == "own_server"
       assert status["summary"]["key"] == HomeSummary.key(status["summary"])
       assert status["disk"] == %{"used" => 0.42, "nearly_full" => false}
       assert status["version"] == "9.9.9"
@@ -263,20 +259,13 @@ defmodule FermixCore.Management.HomeTest do
       assert sentence == "Keep Fermix running when this Mac sleeps. It moves to a server you own."
     end
 
-    test "the ledger's token makes choose, and its created server waiting makes ready, " <>
-           "with the last review's warnings",
+    test "a server held with its code makes ready, with the last review's warnings",
          %{home: home} do
-      {:ok, _ledger} =
-        Ledger.update(home, "hetzner", &{:ok, Ledger.connect(&1, "invented-token-0001", @at)})
-
-      assert {:ok, %{"summary" => %{"state" => "choose"}}} = route("home.status", %{}, opts(home))
-
       {:ok, held} = Candidates.add(home, candidate_attrs(), @at)
-      {:ok, _ledger} = Ledger.update(home, "hetzner", &{:ok, Ledger.put_server(&1, server())})
       report = %{ready: true, items: [%{id: "whatsapp", status: :warn, sentence: "Warned."}]}
       :ok = Move.put_review(home, held.candidate_id, report, @at)
 
-      window = provisioned(:used, held.candidate_id)
+      window = manual(:used, held.candidate_id)
 
       assert {:ok, %{"summary" => summary}} =
                route("home.status", %{}, opts(home, link_status: link(enrollment: window)))
@@ -288,24 +277,7 @@ defmodule FermixCore.Management.HomeTest do
                %{"id" => "whatsapp", "status" => "warn", "sentence" => "Warned."}
              ]
 
-      assert summary["detail"]["server"]["location"] == "Falkenstein"
-    end
-
-    test "a created server whose code has been open thirty minutes awake did not set up",
-         %{home: home} do
-      {:ok, _ledger} =
-        Ledger.update(home, "hetzner", fn ledger ->
-          {:ok,
-           ledger |> Ledger.connect("invented-token-0001", @at) |> Ledger.put_server(server())}
-        end)
-
-      window = %{provisioned(:open, nil) | awake_ms: 31 * 60_000}
-
-      assert {:ok, %{"summary" => summary}} =
-               route("home.status", %{}, opts(home, link_status: link(enrollment: window)))
-
-      assert summary["state"] == "problem"
-      assert summary["detail"]["kind"] == "not_set_up"
+      assert summary["detail"]["server"]["name"] == "fermix-general-a3f9"
     end
 
     test "a linked desktop reads the server's part, its own copies and the link's silence",
@@ -357,62 +329,6 @@ defmodule FermixCore.Management.HomeTest do
       assert summary["action"]["id"] == "learn_more"
     end
 
-    test "a linked desktop replacing its server reads the replace from its ledger and the " <>
-           "new server's code from the old one",
-         %{home: home} do
-      :ok = DesktopLink.write(home, desktop_link())
-      new_server = %{server() | name: "fermix-general-5d2e", id: "61900117"}
-
-      {:ok, _ledger} =
-        Ledger.update(home, "hetzner", fn ledger ->
-          {:ok, replacing} =
-            ledger
-            |> Ledger.connect("invented-token-0001", @at)
-            |> Ledger.put_server(server())
-            |> Ledger.begin_replace(5, @at)
-
-          {:ok, Ledger.put_server(replacing, new_server)}
-        end)
-
-      candidate = %{
-        "candidate_id" => "cand-9d41c7e2b05a3f68",
-        "name" => "fermix-general-5d2e",
-        "os" => "linux",
-        "arch" => "x86_64",
-        "version" => "9.9.9",
-        "enrolled_at" => "2031-05-04T10:05:00Z",
-        "expires_at" => "2031-05-05T10:05:00Z"
-      }
-
-      server_part = %{
-        "role" => "primary",
-        "version" => "9.9.9",
-        "disk" => %{"used" => 0.4, "nearly_full" => false},
-        "snapshots" => %{"targets" => []},
-        "enrollment" => %{
-          "state" => "used",
-          "expires_at" => "2031-05-05T10:00:00Z",
-          "kind" => "provisioned",
-          "candidate_id" => "cand-9d41c7e2b05a3f68"
-        },
-        "candidates" => [candidate]
-      }
-
-      forward = fn _request, _opts -> {:ok, server_part} end
-
-      assert {:ok, %{"summary" => summary}} =
-               route(
-                 "home.status",
-                 %{},
-                 opts(home, engine_role: @device, link_status: link(primary: primary(nil)))
-                 |> Keyword.put(:primary_forward, forward)
-               )
-
-      assert summary["sentence"] == "Your new server is ready for the move."
-      assert summary["action"]["id"] == "move_now"
-      assert summary["detail"]["server"]["name"] == "fermix-general-5d2e"
-    end
-
     # Always On's move back (design §9, §14): a desktop's screen reads its own
     # candidate for the home and the return's record, and the copies it keeps.
     test "a desktop moving back reads its candidate and the return's record", %{home: home} do
@@ -432,13 +348,6 @@ defmodule FermixCore.Management.HomeTest do
          %{home: home} do
       :ok = DesktopLink.write(home, desktop_link())
       :ok = Moved.write(home, %{epoch: 4, moved_at: @at, to: "invented-vm"})
-
-      {:ok, _ledger} =
-        Ledger.update(home, "hetzner", fn ledger ->
-          {:ok,
-           ledger |> Ledger.connect("invented-token-0001", @at) |> Ledger.put_server(server())}
-        end)
-
       File.mkdir_p!(Capture.dir(home))
 
       for name <- ~w(20310503T100000Z-e5.fxsnap 20310504T100000Z-e5.fxsnap notes.fxsnap) do
@@ -647,73 +556,47 @@ defmodule FermixCore.Management.HomeTest do
     end
   end
 
-  # Always On setup §5: freshness is the engine's. A read that draws a state
-  # resting on the provider, while a server Fermix created stands and was
-  # last checked over a minute ago, starts one reconcile, as a job of the
-  # provider's family: one at a time, and never beside a step.
-  describe "home.status keeps the provider's word fresh" do
-    setup %{home: home} = ctx do
-      world = FakeCloudProvider.start!()
+  # Restore here's job (`home_restore`) runs on this desktop: a read draws it
+  # running beside the return's request for it, from the job family's own
+  # record, and draws nothing of it once the job is gone.
+  describe "home.status reads Restore here's job" do
+    test "a restore asked for and running is moving; one beside no job is not", ctx do
+      %{home: home} = ctx
+      :ok = DesktopLink.write(home, desktop_link())
+      :ok = Moved.write(home, %{epoch: 4, moved_at: @at, to: "invented-vm"})
+
+      :ok =
+        Return.write(home, %{
+          from: "invented-vm",
+          started_at: @at,
+          restore_requested: "20310504T100000Z-e5.fxsnap"
+        })
+
       jobs = jobs!(ctx)
-      seams = nimbus_seams(world)
+      silent = link(primary: primary(11 * 60_000))
 
-      {:ok, _ledger} =
-        Ledger.update(home, "nimbus", &{:ok, Ledger.connect(&1, FakeCloudProvider.token(), @at)})
+      assert {:ok, %{"summary" => %{"state" => "problem"}}} =
+               desktop_status(home, silent, jobs: jobs)
 
-      request = %{type: "small-4", location: "osl1", profile: "general"}
-      {:ok, _server} = Driver.create(FakeCloudProvider, home, request, seams[:provider_opts])
-      %{world: world, jobs: jobs, seams: seams}
-    end
-
-    test "a read in a problem with an unchecked server starts one reconcile", ctx do
-      opts = opts(ctx.home, [jobs: ctx.jobs] ++ ctx.seams)
-
-      assert {:ok, %{"summary" => %{"state" => "problem"}}} = route("home.status", %{}, opts)
-      assert [%{"kind" => "home_provision"} = job] = jobs(ctx.jobs)
-      assert %{"status" => "completed"} = finished(job, ctx.jobs)
-      assert %{checked_at: @at} = Ledger.state(ctx.home, FakeCloudProvider)
-
-      # Checked just now: the next read starts nothing.
-      {:ok, _status} = route("home.status", %{}, opts)
-      assert length(jobs(ctx.jobs)) == 1
-
-      # Over a minute later it reads the provider again.
-      later = DateTime.add(@at, 61, :second)
-
-      {:ok, _status} =
-        route("home.status", %{}, opts(ctx.home, [jobs: ctx.jobs, now: later] ++ ctx.seams))
-
-      assert length(jobs(ctx.jobs)) == 2
-    end
-
-    test "a read while a step runs starts nothing beside it", ctx do
-      gate = self()
+      test = self()
 
       {:ok, _view} =
-        Jobs.start(:home_provision,
-          name: "nimbus",
-          server: ctx.jobs[:server],
+        Jobs.start(:home_restore,
+          name: "restore_here",
+          server: jobs[:server],
           run: fn _id, _report ->
-            send(gate, :holding)
-
-            receive do
-              :go -> {:ok, %{}}
-            end
+            send(test, {:restoring, self()})
+            receive do: (:go -> {:ok, %{}})
           end
         )
 
-      opts = opts(ctx.home, [jobs: ctx.jobs] ++ ctx.seams)
-      assert {:ok, %{"summary" => %{"state" => "problem"}}} = route("home.status", %{}, opts)
-      assert [%{"status" => "running"}] = jobs(ctx.jobs)
-      assert %{checked_at: nil} = Ledger.state(ctx.home, FakeCloudProvider)
-    end
+      assert_receive {:restoring, run}, 10_000
 
-    test "a state that rests on nothing the provider says starts nothing", ctx do
-      {:ok, _ledger} = Ledger.update(ctx.home, "nimbus", &{:ok, Ledger.clear(&1)})
-      opts = opts(ctx.home, [jobs: ctx.jobs] ++ ctx.seams)
+      assert {:ok, %{"summary" => %{"state" => "moving", "sentence" => sentence}}} =
+               desktop_status(home, silent, jobs: jobs)
 
-      assert {:ok, %{"summary" => %{"state" => "choose"}}} = route("home.status", %{}, opts)
-      assert jobs(ctx.jobs) == []
+      assert sentence =~ "Restoring Fermix on this computer from its backup."
+      send(run, :go)
     end
   end
 
@@ -761,12 +644,10 @@ defmodule FermixCore.Management.HomeTest do
 
       assert_receive {:wait_timer, _pid, {:home_status_wait, _token}, 25_000}
 
-      {:ok, _ledger} =
-        Ledger.update(ctx.home, "hetzner", &{:ok, Ledger.connect(&1, "invented-token-0001", @at)})
+      {:ok, _held} = Candidates.add(ctx.home, candidate_attrs(), @at)
+      :ok = StatusWatch.changed(ctx.watch, :enrollment)
 
-      :ok = StatusWatch.changed(ctx.watch, :ledger)
-
-      assert {:ok, %{"summary" => %{"state" => "choose", "key" => moved}}} =
+      assert {:ok, %{"summary" => %{"state" => "ready", "key" => moved}}} =
                Task.await(waiting, 10_000)
 
       refute moved == key
@@ -811,42 +692,6 @@ defmodule FermixCore.Management.HomeTest do
     [server: name]
   end
 
-  defp jobs(jobs) do
-    {:ok, views} = Jobs.list(jobs)
-    views
-  end
-
-  defp nimbus_seams(world) do
-    [
-      providers: [FakeCloudProvider],
-      provider_opts: [
-        world: world,
-        now: fn -> @at end,
-        sleep: fn _ms -> :ok end,
-        open_code: fn -> {:ok, "fxenroll1.eyJ2IjoxLCJuYW1lIjoiaW52ZW50ZWQifQ"} end,
-        withdraw_code: fn -> :ok end
-      ],
-      open_code: fn -> {:ok, "fxenroll1.eyJ2IjoxLCJuYW1lIjoiaW52ZW50ZWQifQ"} end,
-      withdraw_code: fn -> :ok end
-    ]
-  end
-
-  # The job's end is its completion event; one that ended before the handler
-  # was attached is read as it stands.
-  defp finished(%{"job_id" => id}, jobs) do
-    TelemetryCapture.attach([[:fermix, :management_job, :complete]], session_id: id)
-
-    case Jobs.get(id, jobs) do
-      {:ok, %{"status" => "running"}} ->
-        assert_receive {:telemetry, _event, _measurements, %{session_id: ^id}}, 10_000
-        {:ok, view} = Jobs.get(id, jobs)
-        view
-
-      {:ok, view} ->
-        view
-    end
-  end
-
   test "a status file the scheduler wrote is what the view reads", %{
     home: home,
     recipient: recipient
@@ -882,11 +727,11 @@ defmodule FermixCore.Management.HomeTest do
     fn -> status end
   end
 
-  defp provisioned(state, candidate_id) do
+  defp manual(state, candidate_id) do
     %{
       state: state,
-      expires_at: ~U[2031-05-05 10:00:00Z],
-      kind: :provisioned,
+      expires_at: ~U[2031-05-04 12:30:00Z],
+      kind: :manual,
       candidate_id: candidate_id,
       awake_ms: 60_000
     }
@@ -901,20 +746,6 @@ defmodule FermixCore.Management.HomeTest do
       epoch: 5,
       sentence: "The link's own words.",
       down_ms: down_ms
-    }
-  end
-
-  defp server do
-    %{
-      name: "fermix-general-a3f9",
-      id: "61839204",
-      status: :created,
-      type: "cpx22",
-      location: "fsn1",
-      ipv4: "203.0.113.7",
-      power: "running",
-      created_at: @at,
-      seen_at: @at
     }
   end
 

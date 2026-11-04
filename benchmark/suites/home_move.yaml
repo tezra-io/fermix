@@ -172,73 +172,71 @@ scenarios:
           3. Does not tell the owner to log in to install security updates or
              to reboot the server by hand.
 
-  # M75 lean v1 §4.3: Fermix creates the Always On server on Hetzner itself.
-  # What rots is the self-knowledge `home` reference: the token's custody (one
-  # file on this computer, never moved), the firewall first, the 24-hour code
-  # inside the server, and the guard on the server the home moved to.
-  # General knowledge says "rent a VPS, SSH in and install it", or "put the API
-  # token in your settings". The floor is phrasing-free (the answer names the
-  # token it asks for); the rubric owns the facts.
-  - id: always_on_server_on_hetzner
-    title: "Letting Fermix create the always-on server on Hetzner"
+  # Always On runs on a Linux server the owner sets up; Fermix creates,
+  # powers, replaces and deletes none. What rots is the self-knowledge `home`
+  # and `move_back` references: the code and the command for the owner's
+  # server, the move back, Restore here and what it asks of the owner, and
+  # changing servers by moving back first. General knowledge says "Fermix can
+  # rent the VPS for you" or "copy the folder over", and an older reference
+  # said Fermix made and deleted the server itself. Each floor is
+  # phrasing-free (the answer names the server, or the backup the owner
+  # asked about); the rubric owns the facts.
+  - id: always_on_on_an_owners_server
+    title: "Always On on the owner's own Linux server: setting up, moving back, restoring"
     severity: normal
     risk: host_readonly
-    tags: [home, always-on, hetzner, self-knowledge]
+    tags: [home, always-on, self-knowledge]
     cases:
-      - id: hetzner_server_from_a_token
+      - id: own_server_for_always_on
         query: >
-          I'd like Fermix to keep running when my Mac is closed, and I've heard
-          it can set up a Hetzner server for that by itself. What does it need
-          from me, what does it create there and what will it cost me, and is
-          my Hetzner key safe once my Fermix lives on that server?
+          I'd like Fermix to keep running when my Mac is closed. I already
+          rent a small Debian server. How do I get my Fermix onto it, and
+          could Fermix just order a server from a cloud company for me
+          instead?
         # Until the release gate (Home.AlwaysOnRelease) is deleted, this case also accepts "Always On is not in this release of Fermix yet"; narrow it back then.
         expect:
-          reply_matches: '(?i)\btoken|\breleas(?:e|ed|es)\b'
+          reply_matches: '(?i)\bserver\b|\breleas(?:e|ed|es)\b'
           max_cost_usd: 1.2
           max_duration_ms: 160000
         rubric: |
-          1. Says Fermix creates the server in Always On (the Fermix app's
+          1. Says Always On moves Fermix to a Linux server of the owner's
+             own: Use my own Linux server in Always On (the Fermix app's
              Always On pane, the setup page's Always On tab, or
-             `fermix always-on` in a terminal) from a Hetzner Cloud API token
-             with Read & Write permission, from a project made for Fermix,
-             pasted once and checked at once; or says Always On is not in
-             this release of Fermix yet (a release build has none). Either is
+             `fermix always-on` in a terminal) gives a one-time enrollment
+             code and a command to run on the server, which asks for the
+             code without showing it; or says Always On is not in this
+             release of Fermix yet (a release build has none). Either is
              correct while release builds have no Always On.
-          2. Where it describes the setup, says the token stays on this
-             computer (in its own file under the Fermix home's device
-             folder), never in the settings file or the keychain, so it does
-             not move to the server.
-          3. Where it describes the setup, names what Fermix creates: a
-             firewall with no inbound rule and a Debian server with the
-             enrollment code already inside (good for 24 hours), and says the
-             monthly price is shown before creating, read live from Hetzner
-             with VAT and the IPv4 address included.
-          4. Where it describes the setup, says Fermix lists what it created,
-             can turn the server on or restart it and delete it, but does not
-             delete the server the home moved to.
-          5. Does not tell the owner to rent a server and install Fermix on it
-             over SSH by hand, or to put the token into Fermix's settings or
-             keychain.
+          2. Where it describes the setup, says the owner then reviews the
+             move and starts it with Move now and a recovery passphrase, and
+             the home (memory, settings, secrets) moves with it.
+          3. Says Fermix does not order or create a server with a cloud
+             company: the owner sets the server up themselves (Debian 12,
+             Debian 13 or Ubuntu 24.04), or says Always On is not in this
+             release of Fermix yet.
+          4. Does not tell the owner to give Fermix a cloud provider's API
+             token, or to copy the Fermix home folder onto the server by
+             hand.
       - id: deleting_the_server_the_home_moved_to
         query: >
-          Fermix made a Hetzner server for me last week and my Fermix runs on it
-          now. It costs more than I thought, so can I just hit delete in the
-          Fermix app and be done with it? What happens to my Fermix?
+          My Fermix runs on my own server now, but it costs more than I
+          thought and I want to cancel it with the hosting company. Can I just
+          delete the server? What happens to my Fermix?
         expect:
           reply_matches: '(?i)\bserver\b'
           max_cost_usd: 1.2
           max_duration_ms: 160000
         rubric: |
-          1. Says Fermix refuses to delete the server the home moved to, since
-             it holds the home now; replacing the server (moving the home to a
-             new one) is the way to retire it.
-          2. Says to move Fermix back to the Mac first, a way back Always On
-             offers, and to delete the server after it, as a separate step
-             once the Mac runs Fermix again, not before; and that deleting
-             the server in Hetzner's console does not bring Fermix back by
-             itself.
-          3. Does not claim the delete removes the server and moves Fermix
-             back to the Mac.
+          1. Says to move Fermix back to the Mac first (Always On's way back,
+             with the recovery passphrase) and to turn off or delete the
+             server only afterwards, since the server holds the home now;
+             Fermix itself deletes no server.
+          2. Says that a server deleted first leaves only the Mac's copy of
+             its backups: Always On can restore Fermix on the Mac from that
+             copy once the owner confirms the server is deleted or stopped,
+             and what changed since that backup is lost.
+          3. Does not claim deleting the server moves Fermix back to the Mac
+             by itself.
       # Always On's move back (design §10): an owner back at their desk wants
       # Fermix on the Mac again and to stop paying for the server. What rots
       # is the self-knowledge `home` reference's *Moving back*; general
@@ -248,10 +246,10 @@ scenarios:
       # and never asks for the action's label word for word.
       - id: moving_back_to_the_mac
         query: >
-          A month ago I moved my Fermix to the Hetzner server it set up for
-          me. I'm back at my desk for good now. Can I bring Fermix back onto
-          my Mac and stop paying for that server? What would I get back, and
-          what happens to the server?
+          A month ago I moved my Fermix to my own Linux server. I'm back at my
+          desk for good now. Can I bring Fermix back onto my Mac and stop
+          paying for that server? What would I get back, and what happens to
+          the server?
         expect:
           reply_matches: '(?i)\bserver\b'
           reply_not_matches: '(?i)\bno\s+way\s+back\s+(?:(?:to|onto)\s+(?:your|the|this)\s+(?:mac|computer)|in\s+this\s+version)\b|\bcan(?:no|''|’)t\s+(?:be\s+)?(?:moved|brought|move|bring)\s+(?:it\s+|fermix\s+)?back\b|\b(?:moving|move)\s+back\s+is\s+not\s+possible\b|\bnot\s+possible\s+to\s+(?:move|bring)\s+(?:it\s+|fermix\s+)?back\b'
@@ -265,9 +263,9 @@ scenarios:
              settings, secrets and chats with it.
           2. Says it asks for the recovery passphrase to start the move
              back.
-          3. Says the server is deleted after the move back, as a separate
-             step once the Mac runs Fermix again (it keeps costing money
-             until then), and not as part of the move or before it.
+          3. Says the server is the owner's to turn off or delete after the
+             move back, once the Mac runs Fermix again, not as part of the
+             move or before it; Fermix deletes no server.
           4. Says what comes back on the Mac, at least one of: iMessage,
              voice calls or meetings running there again as before the
              move; the Mac's own files and keychain kept; the phones
@@ -277,51 +275,54 @@ scenarios:
              say Fermix cannot be moved back.
       - id: what_the_always_on_pane_says
         query: >
-          The Always On pane on my Mac says "Your server is turned off." with a
-          Turn it on button, and yesterday my phone told me my last backup is 8
-          days old. I never turned anything off. Does a turned-off server still
-          cost me, what does that button do, and why would my backup be old?
+          The Always On pane on my Mac says "Fermix cannot reach your server.
+          Your messages wait until it is back.", and yesterday my phone told
+          me my last backup is 8 days old. What can I do about the server from
+          the pane, and why would my backup be old?
         expect:
           reply_matches: '(?i)\bbackup'
           max_cost_usd: 1.2
           max_duration_ms: 160000
         rubric: |
-          1. Says a turned-off Hetzner server still costs its monthly price:
-             Hetzner bills for it until it is deleted.
-          2. Says Turn it on in the pane asks Hetzner to turn the server Fermix
-             created back on, after which Fermix runs there again and the
-             messages that waited arrive.
-          3. Says the server keeps its backups on the Mac while the Mac is
-             online (and in an S3 bucket when one is set), so a Mac that was
-             asleep or away leaves the last backup old, that Back up now in
-             the pane takes one now, and that the phones are told once when
-             the newest backup is a week old.
-          4. Does not tell the owner to sign in to the server over SSH or run
-             commands on it to fix either problem.
-      - id: replacing_the_hetzner_server
+          1. Says the pane says so once the server gave no answer for 10
+             minutes while the Mac was awake, that the server is the owner's
+             own to check with whoever hosts it (is it on, is it online), and
+             that Fermix reconnects by itself and the waiting messages
+             arrive once it answers.
+          2. Says the pane can restore Fermix on the Mac from the Mac's copy
+             of the server's backups, but only once the owner deleted or
+             stopped the server, since two copies would answer the same
+             channels, and that what changed since that backup is lost.
+          3. Says the server keeps copies of its backups on the Mac while the
+             Mac is online (and in an S3 bucket when one is set), so a server
+             the Mac cannot reach, or a Mac that was asleep or away, leaves
+             the last backup old, that Back up now takes one once the server
+             answers, and that the phones are told once when the newest
+             backup is a week old.
+          4. Does not say Fermix can turn the server on or restart it
+             itself.
+      - id: swapping_for_a_bigger_server
         query: >
-          My Fermix has been living on the Hetzner server it made for me for a
-          month, and I want a bigger one now. How do I swap it without losing
-          my chats and settings, and do I have to get rid of the old server
-          myself afterwards?
+          My Fermix has been living on my own Linux server for a month, and I
+          want to switch to a bigger one. How do I swap it without losing my
+          chats and settings, and what do I do with the old server?
         expect:
           reply_matches: '(?i)\bserver\b'
           max_cost_usd: 1.2
           max_duration_ms: 160000
         rubric: |
-          1. Says to replace the server from Always On on the computer the
-             home moved off (the Fermix app's Always On pane, the setup page,
-             or `fermix always-on`): Fermix creates the new server, of the
-             size the owner picks, with an enrollment code the old server
-             gives it.
-          2. Says the owner then reviews and starts the same move to the new
-             server, with the recovery passphrase, and the home (memory,
-             settings, secrets) moves with it.
-          3. Says Fermix deletes the old server by itself once the move to the
-             new one is done, and that one it could not delete stays listed in
-             Always On to delete from there.
-          4. Does not tell the owner to delete the old server before the move,
-             or to set up the new server and install Fermix on it by hand.
+          1. Says to move Fermix back to the Mac first (Always On's way back,
+             with the recovery passphrase), then set up the new server from
+             Always On as the first time (its enrollment code and the command
+             to run there) and move to it, the home (memory, settings,
+             secrets) moving each time. Restoring the newest snapshot onto
+             the new server (the installer's restore mode, then `fermix home
+             import`) once the old one is stopped is also correct.
+          2. Says the old server is the owner's to turn off or delete once
+             the home is off it; Fermix deletes no server.
+          3. Does not tell the owner to delete the old server while the home
+             still lives on it, or to copy the Fermix home folder over by
+             hand.
 
   # Always On setup §8.2: an install with no Fermix app sets Always On up
   # with `fermix always-on` in a terminal, or on the setup page's Always On
@@ -351,8 +352,7 @@ scenarios:
           max_duration_ms: 160000
         rubric: |
           1. Says Always On keeps Fermix running with the Mac closed by moving
-             it to a server the owner controls: one Fermix creates on Hetzner
-             from an API token, or a Linux server of the owner's own; or says
+             it to a Linux server of the owner's own; or says
              Always On is not in this release of Fermix yet (a release build,
              as Homebrew installs, has none). Either is correct while release
              builds have no Always On.
@@ -372,9 +372,8 @@ scenarios:
           max_cost_usd: 1.2
           max_duration_ms: 160000
         rubric: |
-          1. Says Always On moves Fermix to a server the owner controls (one
-             Fermix creates on Hetzner, or a Linux server of their own), so it
-             keeps running while this machine is off; or says Always On is not
+          1. Says Always On moves Fermix to a Linux server of the owner's
+             own, so it keeps running while this machine is off; or says Always On is not
              in this release of Fermix yet (a release build, as the Linux
              package installs, has none). Either is correct while release
              builds have no Always On.

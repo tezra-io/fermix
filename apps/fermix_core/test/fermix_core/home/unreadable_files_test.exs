@@ -11,8 +11,7 @@ defmodule FermixCore.Home.UnreadableFilesTest do
   alias Fermix.CLI.HomeStatusCommand
   alias FermixCore.Home.Move
   alias FermixCore.Home.MoveReadiness
-  alias FermixCore.Home.Provision.Hetzner
-  alias FermixCore.Home.Provision.Ledger
+  alias FermixCore.Home.Return
   alias FermixCore.Home.Snapshot.Capture
   alias FermixCore.Home.UnreadableFiles
   alias FermixCore.Management.Home
@@ -73,37 +72,9 @@ defmodule FermixCore.Home.UnreadableFilesTest do
              UnreadableFiles.transition(failing, "/invented/b.json", {:error, :eio})
   end
 
-  test "the ledger the summary polls is logged once while unreadable, and once when it reads",
+  test "the settings the summary reads for what stops after a move are logged once while " <>
+         "unreadable, and once when they read",
        ctx do
-    file = unreadable_ledger!(ctx.home)
-
-    log =
-      capture_log(fn ->
-        for _poll <- 1..3 do
-          assert %{state: :unreadable, sentence: sentence} =
-                   Ledger.state(ctx.home, Hetzner, unreadable_files: ctx.server)
-
-          assert sentence =~ "could not read its Hetzner file"
-        end
-      end)
-
-    assert [line] = lines(log, file)
-    assert line =~ "could not be read"
-
-    :ok = SafeRm.rm!(file)
-
-    log =
-      capture_log(fn ->
-        for _poll <- 1..2 do
-          assert %{state: :none} = Ledger.state(ctx.home, Hetzner, unreadable_files: ctx.server)
-        end
-      end)
-
-    assert [line] = lines(log, file)
-    assert line =~ "reads again after 3 failed reads"
-  end
-
-  test "the settings the summary reads for what stops after a move do the same", ctx do
     file = unreadable_settings!(ctx.home)
 
     log =
@@ -132,19 +103,16 @@ defmodule FermixCore.Home.UnreadableFilesTest do
     assert line =~ "reads again after 3 failed reads"
   end
 
-  test "the summary's gather passes its memory to both reads", ctx do
-    ledger = unreadable_ledger!(ctx.home)
+  test "the summary's gather passes its memory to the settings read", ctx do
     settings = unreadable_settings!(ctx.home)
 
     log =
       capture_log(fn ->
         for _poll <- 1..3 do
-          facts = gather(ctx.home, unreadable_files: ctx.server)
-          assert %{provision: %{state: :unreadable}, stays_here: []} = facts
+          assert %{stays_here: []} = gather(ctx.home, unreadable_files: ctx.server)
         end
       end)
 
-    assert [_line] = lines(log, ledger)
     assert [_line] = lines(log, settings)
   end
 
@@ -225,26 +193,18 @@ defmodule FermixCore.Home.UnreadableFilesTest do
   # A verb with no engine running reads once and exits: nothing is
   # remembered, so no process is asked, and each read is its first.
   test "a tree-less read remembers nothing", ctx do
-    file = unreadable_ledger!(ctx.home)
+    file = Return.path(ctx.home)
+    File.mkdir_p!(Path.dirname(file))
+    File.write!(file, "{")
 
     log =
       capture_log(fn ->
         for _run <- 1..2 do
-          assert %{state: :unreadable} = Ledger.state(ctx.home, Hetzner, unreadable_files: nil)
-
-          assert {:ok, %{"summary" => %{"state" => "problem"}}} =
-                   HomeStatusCommand.offline(ctx.home)
+          assert {:ok, %{"summary" => %{"state" => "off"}}} = HomeStatusCommand.offline(ctx.home)
         end
       end)
 
-    assert length(lines(log, file)) == 4
-  end
-
-  defp unreadable_ledger!(home) do
-    file = Ledger.path(home, "hetzner")
-    File.mkdir_p!(Path.dirname(file))
-    File.write!(file, ~s({"v": 1, "token": 5}))
-    file
+    assert length(lines(log, file)) == 2
   end
 
   # A folder where the settings file belongs: unreadable for any user, root

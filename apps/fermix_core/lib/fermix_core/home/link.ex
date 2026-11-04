@@ -3,8 +3,8 @@ defmodule FermixCore.Home.Link do
   The rail-side half of the home (M75), as `fermix_core` sees it: forwarding a
   Fermix-wide management call from a desktop's device-role engine to its
   primary, the rail's facts for `home.status`, opening an enrollment window
-  on a primary, naming a desktop's primary anew after a replace of the
-  server, and receiving the home back on a desktop (Always On's move back).
+  on a primary, and receiving the home back on a desktop (Always On's move
+  back).
 
   `fermix_core` must never compile-depend on `fermix_channels`, so the
   implementation is injected **by module** through
@@ -93,14 +93,6 @@ defmodule FermixCore.Home.Link do
   """
   @callback withdraw_enrollment(:manual | :provisioned) ::
               :ok | {:error, {:unavailable, String.t()}}
-
-  @doc """
-  Device role: the server this desktop reaches is known by `name` from now on
-  (the new server of a replace, once the move to it is done; it is reached at
-  the same node id). The desktop link keeps it and every sentence names it.
-  `{:error, reason}` when no link runs or the name could not be kept.
-  """
-  @callback rename_primary(String.t()) :: :ok | {:error, term()}
 
   @doc """
   Any role: removes the desktop row whose Noise key is `noise_pk` from the

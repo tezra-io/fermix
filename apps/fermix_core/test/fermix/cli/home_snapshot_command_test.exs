@@ -191,9 +191,9 @@ defmodule Fermix.CLI.HomeSnapshotCommandTest do
         "role" => "device",
         "summary" => %{
           "state" => "problem",
-          "sentence" => "Your server is turned off.",
-          "action" => %{"id" => "turn_on", "label" => "Turn it on"},
-          "detail" => %{"kind" => "turned_off"}
+          "sentence" => "Your server's disk is 90% full.",
+          "action" => %{"id" => "learn_more", "label" => "Learn more"},
+          "detail" => %{"kind" => "disk_full"}
         },
         "snapshots" => %{"sentence" => "Snapshots are the server's.", "targets" => []}
       }
@@ -202,8 +202,8 @@ defmodule Fermix.CLI.HomeSnapshotCommandTest do
       {0, out, ""} = run(["status"], home: ctx.home, client: client)
 
       assert [
-               "Your server is turned off.",
-               "Next: Turn it on (fermix always-on)",
+               "Your server's disk is 90% full.",
+               "Next: Learn more (fermix always-on)",
                "Role: device" | _
              ] =
                String.split(out, "\n")
@@ -211,7 +211,7 @@ defmodule Fermix.CLI.HomeSnapshotCommandTest do
       quiet = put_in(answer, ["summary", "action"], nil)
       client = fn "home.status", %{}, _opts -> {:ok, quiet} end
       {0, out, ""} = run(["status"], home: ctx.home, client: client)
-      assert ["Your server is turned off.", "Role: device" | _] = String.split(out, "\n")
+      assert ["Your server's disk is 90% full.", "Role: device" | _] = String.split(out, "\n")
     end
 
     # Always On setup §8.2: a home the Fermix app manages takes its steps in
@@ -222,7 +222,7 @@ defmodule Fermix.CLI.HomeSnapshotCommandTest do
         "summary" => %{
           "state" => "off",
           "sentence" => "Keep Fermix running when this Mac sleeps.",
-          "action" => %{"id" => "paste_token", "label" => "Set up"},
+          "action" => %{"id" => "own_server", "label" => "Use my own Linux server"},
           "detail" => %{}
         },
         "snapshots" => %{"sentence" => "Snapshots are off.", "targets" => []}
@@ -233,8 +233,10 @@ defmodule Fermix.CLI.HomeSnapshotCommandTest do
       {0, out, ""} =
         run(["status"], home: ctx.home, client: client, app_managed?: fn -> true end)
 
-      assert ["Keep Fermix running when this Mac sleeps.", "Next: Set up (in the Fermix app)" | _] =
-               String.split(out, "\n")
+      assert [
+               "Keep Fermix running when this Mac sleeps.",
+               "Next: Use my own Linux server (in the Fermix app)" | _
+             ] = String.split(out, "\n")
 
       {0, json, ""} =
         run(["status", "--json"],

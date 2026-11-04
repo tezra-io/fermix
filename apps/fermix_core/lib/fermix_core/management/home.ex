@@ -42,17 +42,10 @@ defmodule FermixCore.Management.Home do
 
   `summary` is where Always On stands in one sentence and at most one action
   (`FermixCore.Management.HomeSummary`, M75 lean v1 §7, Always On setup §3),
-  gathered from the rest of this record and the provisioner's ledger, with
-  its `key`; every surface draws it.
-
-  **Fresh from the provider.** A `home.status` read whose summary is a
-  `problem`, `creating` or `ready` while a server Fermix created stands, and
-  whose ledger was last read back from the provider over a minute ago (or
-  never), starts one reconcile (`Management.Provision.start_reconcile/1`), a
-  job of the provider's own family, so it is single-flight and never runs
-  beside a step; the read answers at once with what the ledger holds, and
-  the reconcile's write tells the watch. A tree without the job family (a
-  test, a verb with no engine) starts none. The read is otherwise pure.
+  gathered from the rest of this record and, on a desktop, whether Restore
+  here's job runs (the job family's own record; a tree without the job
+  family, a test or a verb with no engine, has none), with its `key`; every
+  surface draws it.
 
   **A move back the home went past.** On a desktop whose move back was
   asked at an older epoch than its link has since reached (another desktop
@@ -93,14 +86,12 @@ defmodule FermixCore.Management.Home do
   `:disk_usage` (a 1-arity reader of a home's disk, `Home.Disk.usage/2`),
   `:version`, `:now`, `:host_os`, `:return_boot` (in place of
   `Home.Return.boot_done/0`) and `:stop_return` (in place of the rail's,
-  which a desktop's move back the home went past is stopped with); for the
-  reconcile a read starts,
-  `Management.Provision`'s (`:providers`, `:provider_opts`, `:jobs`,
-  `:open_code`, `:withdraw_code`); for the wait, `:status_watch` (the
+  which a desktop's move back the home went past is stopped with); `:jobs`
+  (the job family Restore here's job runs in); for the wait, `:status_watch` (the
   watch's name) and `:wait_timer` (a 2-arity `Process.send_after/3` to the
   caller, given the message and the delay). `:supervised` is the caller's world for
   the disk's `df` (false from a tree-less verb), and `:unreadable_files` the
-  memory that logs what this record reads (the disk, the ledger, the settings,
+  memory that logs what this record reads (the disk, the settings,
   the last review, a desktop's copies) once per stretch it cannot be read
   (`Home.UnreadableFiles`, the default; nil from a tree-less verb).
   `:primary_forward` is the daemon's way to the primary, given only on a
@@ -127,7 +118,6 @@ defmodule FermixCore.Management.Home do
   alias FermixCore.Management.HomeSummary
   alias FermixCore.Management.Jobs
   alias FermixCore.Management.Placement
-  alias FermixCore.Management.Provision
   alias FermixCore.Setup.ConfigStore
 
   require Logger
@@ -137,9 +127,6 @@ defmodule FermixCore.Management.Home do
                         "waiting for its move."
   @not_running_sentence "Snapshots are not running in this engine."
   @primary_statuses ~w(connected renewing unreachable revoked stale)a
-  # The states whose summary rests on what the provider last said.
-  @fresh_states ~w(problem creating ready)
-  @fresh_ms 60_000
   @max_wait_ms 25_000
   # Each word from the watch is one read again; a wait answers at the first
   # that moved the key, and reads at most this many.
@@ -153,16 +140,11 @@ defmodule FermixCore.Management.Home do
   @spec capability() :: String.t()
   def capability, do: "snapshots"
 
-  @doc """
-  `home.status`: the whole picture of this home. A read that rests on the
-  provider's word, gone stale, starts one reconcile (the moduledoc).
-  """
+  @doc "`home.status`: the whole picture of this home."
   @spec status(keyword()) :: {:ok, map()}
   def status(opts \\ []) when is_list(opts) do
     {facts, gathered} = gather(opts)
-    summary = HomeSummary.summary(gathered)
-    :ok = refresh_provider(summary, gathered, opts)
-    {:ok, picture(Map.put(facts, :summary, summary))}
+    {:ok, picture(Map.put(facts, :summary, HomeSummary.summary(gathered)))}
   end
 
   @doc "The longest a `home.status` wait holds, in milliseconds."
@@ -212,26 +194,6 @@ defmodule FermixCore.Management.Home do
       else: {:ok, record}
   end
 
-  # The one side effect of a read: a stale word from the provider is read
-  # again, as a job the read does not wait for.
-  defp refresh_provider(%{"state" => state}, %{provision: provision, now: now}, opts)
-       when state in @fresh_states do
-    if standing_server?(provision) and stale?(provision.checked_at, now) and jobs?(opts),
-      do: start_reconcile(opts),
-      else: :ok
-  end
-
-  defp refresh_provider(_summary, _gathered, _opts), do: :ok
-
-  defp standing_server?(provision),
-    do: Enum.any?([provision.server, get_in(provision, [:replace, :old])], &standing?/1)
-
-  defp standing?(%{status: status}), do: status != :gone
-  defp standing?(nil), do: false
-
-  defp stale?(nil, _now), do: true
-  defp stale?(%DateTime{} = at, now), do: DateTime.diff(now, at, :millisecond) > @fresh_ms
-
   defp jobs?(opts),
     do: opts |> Keyword.get(:jobs, []) |> Keyword.get(:server, Jobs) |> GenServer.whereis() != nil
 
@@ -247,15 +209,6 @@ defmodule FermixCore.Management.Home do
   end
 
   defp restoring?(_record, _opts), do: false
-
-  # One at a time: a reconcile or a step already running is the provider's
-  # read in hand.
-  defp start_reconcile(opts) do
-    case Provision.start_reconcile(opts) do
-      {:ok, _job} -> :ok
-      {:error, {:busy, _kind}} -> :ok
-    end
-  end
 
   @doc """
   The facts `home.status`'s summary is worked out from

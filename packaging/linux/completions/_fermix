@@ -87,7 +87,7 @@ _fermix() {
           _values 'subcommand' 'export' 'import' 'mark-moved' 'status' 'snapshots' 'passphrase' 'enroll' 'candidates' '--into' '--passphrase-file' '--mark-moved' '--to' '--code-file' '--snapshot-bucket' '--snapshot-region' '--json'
           ;;
         always-on)
-          _values 'step' 'paste-token' 'create-server' 'cancel' 'move-now' 'try-again' 'turn-on' 'restart-server' 'start-again' 'create-in' 'back-up-now' 'replace-server' 'check-again' 'own-server' 'delete-server' 'learn-more' 'open-console' 'update' '--provider' '--type' '--location' '--stdin' '--recovery-passphrase-file' '--yes' '--wait' '--json'
+          _values 'step' 'cancel' 'move-now' 'try-again' 'learn-more' 'update' 'back-up-now' 'check-again' 'own-server' 'move-back' 'restore-here' '--recovery-passphrase-file' '--yes' '--wait' '--json'
           ;;
         logs)
           _values 'option' '-f' '-n'

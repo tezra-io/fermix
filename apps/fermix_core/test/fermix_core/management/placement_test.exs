@@ -11,7 +11,7 @@ defmodule FermixCore.Management.PlacementTest do
     doctor.start doctor.get doctor.cancel setup.session.create setup.detect
     computer_use.grant.start computer_use.permissions.get imessage.permissions.get
     imessage.grant.start imessage.policy.confirm browser.install.start
-    capabilities.install.start home.status settings.sections home.act home.provision.options
+    capabilities.install.start home.status settings.sections home.act
   )
 
   test "the device-class methods are this machine's, whatever their parameters" do

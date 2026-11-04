@@ -2722,7 +2722,7 @@
       "method": "home.move.start",
       "field": "params:keep_as_desktop",
       "kind": "engine_only",
-      "why": "M75: replacing the server runs through the same move; false keeps the replaced server as nothing rather than a desktop of the new primary. Optional, true unless said, so a client built against the draft moves as before."
+      "why": "M75: a move back runs through the same move; false keeps the server a desktop moves back from as nothing rather than a desktop of the new primary. Optional, true unless said, so a client built against the draft moves as before."
     },
     {
       "method": "settings.sections",
@@ -2744,33 +2744,9 @@
     },
     {
       "method": "(schema)",
-      "field": "job_kinds:home_provision",
-      "kind": "engine_only",
-      "why": "M75 lean v1: creating, powering and deleting the Always On server on Hetzner wait on Hetzner's actions, so each is a job of the kind home_provision, with the phases checking, firewall, server, starting, power and deleting. The draft predates it; a closed decoder that has never heard the kind refuses the job view rather than ignoring it, so the app adds it when it re-vendors."
-    },
-    {
-      "method": "(schema)",
       "field": "job_kinds:home_restore",
       "kind": "engine_only",
       "why": "M75: Always On's Restore here, the computer a home left restoring its own copy of the server's snapshots once the owner confirmed the server is deleted or stopped, runs as a job of the kind home_restore, with no phases. The draft predates it; a closed decoder that has never heard the kind refuses the job view rather than ignoring it, so the app adds it when it re-vendors."
-    },
-    {
-      "method": "(schema)",
-      "field": "methods:home.provision.options",
-      "kind": "engine_only",
-      "why": "M75 lean v1 adds the Always On provisioner (Fermix creates the owner's server on Hetzner) after the draft was written, so the draft publishes no home.provision.* method. The one left on the wire, home.provision.options (no params), is minimum version 2 and additive: a client built against the draft never calls it, and the app re-vendors this export before it draws the Always On pane."
-    },
-    {
-      "method": "(schema)",
-      "field": "minimum_versions:home.provision.options=2",
-      "kind": "engine_only",
-      "why": "M75 lean v1: every home.provision.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the provisioner, so its table has no entry for it; the addition is additive and needs no protocol bump."
-    },
-    {
-      "method": "hello",
-      "field": "capabilities.minimum_versions.home.provision.options",
-      "kind": "engine_only",
-      "why": "M75 lean v1: hello publishes every method this daemon serves with its minimum version, the provisioner included. The draft predates it; a client ignores a method it does not know."
     },
     {
       "method": "home.status",
@@ -2783,24 +2759,6 @@
       "field": "params:wait_ms",
       "kind": "engine_only",
       "why": "Always On setup 3.3: home.status takes wait_ms, at most 25000, with after: how long the daemon holds the request for the summary's key to move. The draft predates the summary; a request with no params is answered at once as before."
-    },
-    {
-      "method": "job.get",
-      "field": "result.location",
-      "kind": "engine_only",
-      "why": "M75 lean v1: the export illustrates a finished home_provision job, whose flat result names the server Fermix created, its type and its location. The draft illustrates no such job; the result stays the published flat object of public scalars."
-    },
-    {
-      "method": "job.get",
-      "field": "result.server",
-      "kind": "engine_only",
-      "why": "M75 lean v1: the export illustrates a finished home_provision job, whose flat result names the server Fermix created, its type and its location. The draft illustrates no such job; the result stays the published flat object of public scalars."
-    },
-    {
-      "method": "job.get",
-      "field": "result.type",
-      "kind": "engine_only",
-      "why": "M75 lean v1: the export illustrates a finished home_provision job, whose flat result names the server Fermix created, its type and its location. The draft illustrates no such job; the result stays the published flat object of public scalars."
     },
     {
       "method": "(schema)",

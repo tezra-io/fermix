@@ -19,23 +19,13 @@ defmodule FermixCore.Management.AlwaysOn do
   waiting (its deadline, `deadline_ms/0`, passed while it queued) is not run.
 
   **The steps.** Placement is decided here: the computer that sets Always On
-  up runs every step itself; a linked desktop (`:primary_forward`) runs what
-  its own ledger holds and sends its server's steps over the link as the
-  rail-only methods (`Management.Placement`).
+  up runs every step itself; a linked desktop (`:primary_forward`) runs a
+  move back and Restore here itself and sends its server's steps over the
+  link as the rail-only methods (`Management.Placement`).
 
-    * `paste_token`: `Provision.connect/2` with `input.provider`, or the one
-      provider offered.
-    * `create_server`, `replace_server` (the desktop's create), `create_in`
-      (the failure's size at its next place) and `start_again` (one job:
-      what stands is deleted, then a server of its size and place is
-      created, else of the failure's), with `replace` on a linked desktop:
-      the create job.
-    * `turn_on`, `restart_server`: the power job. `delete_server`: the delete
-      job.
-    * `cancel`, by what the screen showed: the manual code it offered to
-      cancel is withdrawn; a create that runs is cancelled and, once its run
-      has stopped, what it made is deleted; a server standing is deleted.
-    * `own_server`: a manual code (`HomeMove.enroll_open/2`).
+    * `own_server`: a manual code (`HomeMove.enroll_open/2`) for the owner's
+      server, answered with the command that installs Fermix there.
+    * `cancel` on the code's screen: the manual code is withdrawn.
     * `back_up_now` and `check_again`: run here, or on a linked desktop sent
       as `home.snapshots.run` and `home.move.readiness`.
     * `move_now`, `try_again`: the server a move goes to is the engine's
@@ -44,19 +34,17 @@ defmodule FermixCore.Management.AlwaysOn do
       block refuses with its sentence, and a warning the confirm did not name
       moves the confirm and the key, so it answers `changed`; then
       `HomeMove.move_start/3` checks or sets the recovery passphrase and
-      restarts the engine. On a linked desktop, `home.move.start` is sent
-      with `keep_as_desktop` false, refused only by the server's own blocks,
-      and this desktop records the replace's move once the server answered
-      (`Provision.move_forwarded/3`); during a move back, the server it goes
-      to is this desktop's own candidate, and the start is recorded in the
-      return's record (`Home.Return`), never as a replace.
+      restarts the engine. On a linked desktop moving back, the server it
+      goes to is this desktop's own candidate: `home.move.start` is sent with
+      `keep_as_desktop` false, refused only by the server's own blocks, and
+      the start is recorded in the return's record (`Home.Return`).
     * `move_back` (Always On's move back, its design §9): on a linked
       desktop, the server opens a copied code for it (`home.enroll.open`,
       which names this desktop), this desktop's candidate for the home is
       written beside the moved home (`Home.Candidate.prepare_return/3`,
       refused as it refuses: an engine that would not start again by itself
-      among them), the return's record with the server's name, the ledger's
-      server and the epoch the link reached, and the candidate's subtree
+      among them), the return's record with the server's name and the epoch
+      the link reached, and the candidate's subtree
       starts beside the link (`Home.Link`'s `start_return/1`; one that does
       not start leaves neither file). Refused while the server reports a
       move of its own.
@@ -75,15 +63,12 @@ defmodule FermixCore.Management.AlwaysOn do
       derived key lives only in that job.
 
   Every action the summary offers is one of `acts/0`, or one a surface opens
-  itself (`learn_more`, `open_console`, `update`), refused as
-  `invalid_params` on `action`.
+  itself (`learn_more`, `update`), refused as `invalid_params` on `action`.
 
-  A step that starts a job names it in the ledger first
-  (`Provision.put_action/2`), so the summary the act answers already says
-  the step runs; a start refused after that clears it again, and the job's
-  end clears it otherwise. The job family's busy rule stays the second
-  guard: an act that meets a running read of the provider is refused in
-  words.
+  Restore here keeps its request in the return's record before its job
+  starts, so the summary the act answers already says the restore runs; a
+  start refused takes it back, and the job's end takes it back otherwise.
+  The job family's busy rule stays the second guard.
 
   Refusals, each with a sentence: `changed` (its sentence alone),
   `invalid_params` (a missing or bad input, a passphrase that is not the one
@@ -97,9 +82,8 @@ defmodule FermixCore.Management.AlwaysOn do
   action and who asked (`:actor`: nil from `daemon.sock`, `:setup_page`) and
   emits no event of its own; a job keeps its own bookends.
 
-  Seams in `opts`, passed as they are to `Management.Home`,
-  `Management.Provision` and `Management.HomeMove`: `:home`,
-  `:engine_role`, `:now`, `:providers`, `:provider_opts`, `:jobs`,
+  Seams in `opts`, passed as they are to `Management.Home` and
+  `Management.HomeMove`: `:home`, `:engine_role`, `:now`, `:jobs`,
   `:link_status`, `:config`, `:scheduler`, `:save_recipient`, `:restart`,
   `:open_enrollment`, `:withdraw_enrollment` (a 1-arity stand-in for the
   rail's, given the window's kind) and the review's; for a move back,
@@ -116,7 +100,6 @@ defmodule FermixCore.Management.AlwaysOn do
   alias FermixCore.Home.Link
   alias FermixCore.Home.LocalReturn
   alias FermixCore.Home.Move
-  alias FermixCore.Home.Provision.Registry
   alias FermixCore.Home.Return
   alias FermixCore.Management.AlwaysOn.Input
   alias FermixCore.Management.Copy
@@ -125,25 +108,20 @@ defmodule FermixCore.Management.AlwaysOn do
   alias FermixCore.Management.HomeSummary
   alias FermixCore.Management.Jobs
   alias FermixCore.Management.Protocol
-  alias FermixCore.Management.Provision
   alias FermixCore.Setup.ConfigStore
 
   require Logger
 
   @capability "home"
-  @acts ~w(paste_token create_server cancel move_now try_again turn_on restart_server
-           start_again create_in back_up_now replace_server check_again own_server delete_server
-           move_back restore_here)
-  @opened ~w(learn_more open_console update)
-  # Every client allows `home.act` this long: a token check takes up to about
-  # 45 s and a review sent to the server up to 60 s.
+  @acts ~w(cancel move_now try_again back_up_now check_again own_server move_back restore_here)
+  @opened ~w(learn_more update)
+  # Every client allows `home.act` this long: a review sent to the server
+  # takes up to 60 s.
   @deadline_ms 90_000
   # A summary's key is a short digest; the bound only refuses junk.
   @max_key_bytes 64
 
   @changed_sentence "Always On changed since this was shown, so look at it again."
-  @busy_step_sentence "Fermix is already working on your server, so try again once that is " <>
-                        "done."
   @busy_backup_sentence "A backup is already running, and it finishes by itself."
   @busy_restore_sentence "Fermix is already restoring its backup here, and it finishes by itself."
   @opened_sentence "This one opens a page of its own; Fermix takes no step for it."
@@ -185,7 +163,6 @@ defmodule FermixCore.Management.AlwaysOn do
   def sentences do
     [
       @changed_sentence,
-      @busy_step_sentence,
       @busy_backup_sentence,
       @busy_restore_sentence,
       @opened_sentence,
@@ -286,34 +263,6 @@ defmodule FermixCore.Management.AlwaysOn do
 
   # -- the steps -------------------------------------------------------------
 
-  defp step(%{action: "paste_token", input: input}, _seen, opts) do
-    params = %{"provider" => input.provider || only_provider(opts), "token" => input.token}
-    with {:ok, _view} <- Provision.connect(params, opts), do: {:ok, nil}
-  end
-
-  defp step(%{action: action, input: input}, _seen, opts)
-       when action in ["create_server", "replace_server"] do
-    choice = %{type: input.type, location: input.location, replace: action == "replace_server"}
-    job("create", fn -> Provision.start_create(choice, opts) end, opts)
-  end
-
-  defp step(%{action: "create_in"}, %{facts: %{provision: %{failure: failure}}}, opts) do
-    choice = %{type: failure.type, location: failure.next_location, replace: desktop?(opts)}
-    job("create", fn -> Provision.start_create(choice, opts) end, opts)
-  end
-
-  defp step(%{action: "start_again", input: input}, _seen, opts) do
-    again = %{replace: desktop?(opts), type: input.type, location: input.location}
-    job("create", fn -> Provision.start_again(again, opts) end, opts)
-  end
-
-  defp step(%{action: "turn_on"}, _seen, opts),
-    do: job("power_on", fn -> Provision.power(%{"action" => "on"}, opts) end, opts)
-
-  defp step(%{action: "restart_server"}, _seen, opts),
-    do: job("power_reset", fn -> Provision.power(%{"action" => "reset"}, opts) end, opts)
-
-  defp step(%{action: "delete_server"}, _seen, opts), do: delete_job(opts)
   defp step(%{action: "move_back"}, seen, opts), do: move_back(seen, opts)
 
   defp step(%{action: "restore_here", input: input}, seen, opts),
@@ -338,40 +287,14 @@ defmodule FermixCore.Management.AlwaysOn do
 
   defp step(%{action: action} = request, seen, opts) when action in ["move_now", "try_again"] do
     case HomeSummary.target(seen.facts) do
-      %{"candidate_id" => id} -> move(id, request, seen, opts)
+      %{"candidate_id" => id} -> move(id, request, opts)
       nil -> unavailable(@nothing_to_move_sentence)
     end
   end
 
-  # A step's job: named in the ledger first, so the summary says it runs; a
-  # start refused after that leaves no step behind.
-  defp job(kind, start, opts) do
-    with :ok <- Provision.put_action(kind, opts) do
-      case start.() do
-        {:ok, _job} -> {:ok, nil}
-        {:error, _reason} = refused -> unstarted(refused, opts)
-      end
-    end
-  end
-
-  defp unstarted(refused, opts) do
-    case Provision.clear_action(opts) do
-      :ok ->
-        refused
-
-      {:error, reason} ->
-        Logger.error("always on: a refused step's name stays in the ledger: #{inspect(reason)}")
-        refused
-    end
-  end
-
-  defp delete_job(opts), do: job("delete", fn -> Provision.delete(opts) end, opts)
-
-  # By what the screen showed: a move back's, on the token screen the code
-  # of a server of the owner's own, while a create runs that create,
-  # otherwise the server that stands.
-  defp cancel(%{facts: facts} = seen, opts) do
-    if returning?(facts), do: cancel_return(opts), else: cancel_step(seen, opts)
+  # A move back's, else the code of the owner's server.
+  defp cancel(%{facts: facts}, opts) do
+    if returning?(facts), do: cancel_return(opts), else: withdraw_code(opts)
   end
 
   # A move back's screen: its candidate, or its started record alone.
@@ -381,18 +304,6 @@ defmodule FermixCore.Management.AlwaysOn do
     do: not Map.has_key?(record, :moved_at)
 
   defp returning?(_facts), do: false
-
-  defp cancel_step(%{summary: %{"state" => "connect"}}, opts), do: withdraw_code(opts)
-
-  defp cancel_step(%{facts: %{provision: %{action: %{kind: "create"}}}}, opts) do
-    with :ok <- Provision.stop_step(opts),
-         :ok <- Provision.clear_action(opts),
-         {:ok, holding?} <- Provision.holding(opts) do
-      if holding?, do: delete_job(opts), else: {:ok, nil}
-    end
-  end
-
-  defp cancel_step(_seen, opts), do: delete_job(opts)
 
   defp withdraw_code(opts) do
     withdraw =
@@ -425,9 +336,9 @@ defmodule FermixCore.Management.AlwaysOn do
 
   # -- the move --------------------------------------------------------------
 
-  defp move(candidate_id, request, seen, opts) do
+  defp move(candidate_id, request, opts) do
     case Keyword.fetch(opts, :primary_forward) do
-      {:ok, forward} -> forwarded_move(candidate_id, request.input, forward, seen, opts)
+      {:ok, forward} -> forwarded_move(candidate_id, request.input, forward, opts)
       :error -> local_move(candidate_id, request, opts)
     end
   end
@@ -477,21 +388,20 @@ defmodule FermixCore.Management.AlwaysOn do
     end
   end
 
-  # A replace's move: the server checks the passphrase against its own key
-  # and refuses on its own blocks; this desktop keeps that it started the
-  # move once the server answered. A move back's start is kept before the
-  # request leaves (`return_start_ahead/2`), since the server restarts into
-  # the move as it answers, and settled by the answer (`return_answered/3`).
-  defp forwarded_move(candidate_id, input, forward, %{facts: facts}, opts) do
+  # A move back: the server checks the passphrase against its own key and
+  # refuses on its own blocks. Its start is kept before the request leaves
+  # (`return_start_ahead/2`), since the server restarts into the move as it
+  # answers, and settled by the answer (`return_answered/3`).
+  defp forwarded_move(candidate_id, input, forward, opts) do
     params = %{
       "candidate_id" => candidate_id,
       "recovery_passphrase" => input.recovery_passphrase,
       "keep_as_desktop" => false
     }
 
-    with :ok <- start_ahead(facts, candidate_id, opts) do
+    with :ok <- return_start_ahead(candidate_id, opts) do
       answer = forward.(server_request("home.move.start", params), [])
-      _kept = keep_move(facts, candidate_id, answer, opts)
+      _kept = return_answered(answer, home(opts), opts)
 
       case answer do
         {:ok, %{"move_id" => move_id}} -> {:ok, %{"move_id" => move_id}}
@@ -499,17 +409,6 @@ defmodule FermixCore.Management.AlwaysOn do
       end
     end
   end
-
-  defp start_ahead(%{returning: %{"kind" => "return"}}, candidate_id, opts),
-    do: return_start_ahead(candidate_id, opts)
-
-  defp start_ahead(_facts, _candidate_id, _opts), do: :ok
-
-  defp keep_move(%{returning: %{"kind" => "return"}}, _candidate_id, answer, opts),
-    do: return_answered(answer, home(opts), opts)
-
-  defp keep_move(_facts, candidate_id, answer, opts),
-    do: Provision.move_forwarded(%{"candidate_id" => candidate_id}, answer, opts)
 
   # Move now on a move back (the move back's TLA spec, finding HR-1): the
   # start is in the return's record before the request leaves, so no stop of
@@ -528,8 +427,8 @@ defmodule FermixCore.Management.AlwaysOn do
   end
 
   # The server's answer settles the start: its move id kept; an answer lost
-  # (`unconfirmed`) keeps the start, as a replace's is kept; a request that
-  # never left (no link) or one the server refused takes it back.
+  # (`unconfirmed`) keeps the start, since the server may have it; a request
+  # that never left (no link) or one the server refused takes it back.
   defp return_answered({:ok, %{"move_id" => move_id}}, home, _opts),
     do: update_return(home, &Map.put(&1, :move_id, move_id))
 
@@ -584,13 +483,11 @@ defmodule FermixCore.Management.AlwaysOn do
     end
   end
 
-  # The server's name as its code gave it, the server the ledger holds (none
-  # for a server of the owner's own) and the epoch the link reached.
+  # The server's name as its code gave it and the epoch the link reached.
   defp return_record(facts, state, opts) do
     %{
       from: get_in(state, ["primary", "name"]),
       started_at: now(opts),
-      provider_server: get_in(facts, [:provision, :server, :id]),
       primary_epoch: get_in(facts, [:link, :primary, :epoch])
     }
     |> Map.reject(fn {_key, value} -> is_nil(value) end)
@@ -718,7 +615,6 @@ defmodule FermixCore.Management.AlwaysOn do
     end
   end
 
-  defp server_name(%{provision: %{server: %{name: name}}}) when is_binary(name), do: name
   defp server_name(%{link: %{primary: %{name: name}}}) when is_binary(name), do: name
   defp server_name(%{moved: %{to: to}}), do: to
 
@@ -730,7 +626,6 @@ defmodule FermixCore.Management.AlwaysOn do
 
   defp refusal({:busy, "home.snapshots.run"}), do: unavailable(@busy_backup_sentence)
   defp refusal({:busy, "home_restore"}), do: unavailable(@busy_restore_sentence)
-  defp refusal({:busy, _operation}), do: unavailable(@busy_step_sentence)
 
   defp refusal({:unavailable, capability, sentence}),
     do: {:error, :unavailable, %{"capability" => capability, "sentence" => sentence}}
@@ -758,17 +653,9 @@ defmodule FermixCore.Management.AlwaysOn do
     }
   end
 
-  defp only_provider(opts) do
-    case Keyword.get_lazy(opts, :providers, &Registry.all/0) do
-      [provider] -> provider.id()
-      _several -> nil
-    end
-  end
-
   defp candidate_id(%{"candidate_id" => id}), do: id
   defp candidate_id(nil), do: nil
 
-  defp desktop?(opts), do: Keyword.has_key?(opts, :primary_forward)
   defp home(opts), do: Keyword.get_lazy(opts, :home, &ConfigStore.fermix_home/0)
   defp now(opts), do: Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
 end

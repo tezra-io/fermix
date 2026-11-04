@@ -82,13 +82,6 @@ defmodule FermixCore.Management.Jobs do
     # first `npx -y` or `uvx` start downloads its package, and `MCP.Server`
     # gives that 60 s, so the connecting wait outlasts it.
     mcp_check: %{budget_ms: 75_000, phases: ["connecting", "listing"]},
-    # M75 lean v1 §4.3: creating, powering or deleting the Always On server on
-    # its provider. Each action is polled every 2 s at most 150 times, and a create
-    # waits on two (the create and the start), so 15 minutes holds the worst.
-    home_provision: %{
-      budget_ms: 900_000,
-      phases: ["checking", "firewall", "server", "starting", "power", "deleting"]
-    },
     # Always On's Restore here: the computer a home left restores its own copy
     # of the server's snapshots and restarts (`Home.LocalReturn`). Decrypting
     # and staging a whole home is bounded by the disk, so 15 minutes.
@@ -114,8 +107,8 @@ defmodule FermixCore.Management.Jobs do
   # A stop is answered once its run is gone, so a caller waits out the grace
   # and the kill: this much past the grace bounds its call.
   @stop_answer_margin_ms 5_000
-  # An ending writes what its run left (a provider's ledger, whose lock waits
-  # at most 30 s), so this much bounds it before it is killed.
+  # An ending writes what its run left (Restore here's request in the
+  # return's record), so this much bounds it before it is killed.
   @ending_ms 35_000
   @timed_out_sentence "The operation did not finish inside its time budget."
   @internal_sentence "The operation failed inside the daemon."
@@ -135,7 +128,6 @@ defmodule FermixCore.Management.Jobs do
           | :imessage_grant
           | :imessage_policy_confirm
           | :mcp_check
-          | :home_provision
           | :home_restore
   @type view :: %{String.t() => term()}
   @type report :: ({:phase, String.t()} | {:progress, map()} | {:ready, map()} -> any())

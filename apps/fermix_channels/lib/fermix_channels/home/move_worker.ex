@@ -48,11 +48,11 @@ defmodule FermixChannels.Home.MoveWorker do
   which only an activated candidate can be. Resuming retries 1 s doubling to
   60 s for 24 hours, then stops with a sentence; the next start resumes again.
 
-  A source the request does not keep as a desktop (`keep_as_desktop: false`, a
-  server being replaced) makes no desktop key, row or link: it is retired by
-  the marker and serves nothing afterwards. Having no desktop key, it cannot
-  ask the moved identity for its `hello_ack`, so a lost `move_done` there is
-  resumed through the candidate alone.
+  A source the request does not keep as a desktop (`keep_as_desktop: false`,
+  a server a desktop moves back from) makes no desktop key, row or link: it
+  is retired by the marker and serves nothing afterwards. Having no desktop
+  key, it cannot ask the moved identity for its `hello_ack`, so a lost
+  `move_done` there is resumed through the candidate alone.
 
   The restart is the daemon's deliberate self-restart
   (`Management.Lifecycle.restart_self/0`: the systemd start budget reset

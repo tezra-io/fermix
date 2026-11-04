@@ -4,8 +4,7 @@ defmodule Fermix.CLI.AlwaysOnCommand do
   a Homebrew or Linux install without the Fermix app.
 
       fermix always-on [--json]
-      fermix always-on ACTION [--provider ID] [--type T --location L] [--stdin]
-                       [--recovery-passphrase-file PATH] [--yes] [--wait] [--json]
+      fermix always-on ACTION [--recovery-passphrase-file PATH] [--yes] [--wait] [--json]
 
   The engine owns the flow. The verb reads `home.status` and draws its
   summary; for the step asked (`ACTION`, an action id in kebab form) it
@@ -16,9 +15,8 @@ defmodule Fermix.CLI.AlwaysOnCommand do
 
   **On a terminal** (and without `--json`), `fermix always-on` with no
   step prints the screen and its steps numbered, Enter taking the main one
-  and `q` quitting; it asks what the step needs (the token masked, the
-  recovery passphrase masked, twice where none is set, the size and place
-  as a numbered list with the recommendation first), shows the confirm as
+  and `q` quitting; it asks what the step needs (the recovery passphrase
+  masked, twice where none is set), shows the confirm as
   `[y/N]`, acts, waits for the screen to move on (`AlwaysOnCommand.Wait`)
   and offers the next step, until the owner quits. A step on its own waits
   too.
@@ -30,10 +28,9 @@ defmodule Fermix.CLI.AlwaysOnCommand do
   again under `--json`); any other refusal is `action_refused` with the
   engine's sentence. It waits only with `--wait`.
 
-  Secrets never enter argv: the token comes from the masked prompt or
-  `--stdin`, the recovery passphrase from the masked prompt or
-  `--recovery-passphrase-file`, and either typed as an argument is refused
-  by name. Prompts, the step's id as it runs and the wait's lines go to
+  Secrets never enter argv: the recovery passphrase comes from the masked
+  prompt or `--recovery-passphrase-file`, and typed as an argument it is
+  refused by name. Prompts, the step's id as it runs and the wait's lines go to
   stderr; the screen, or the one `--json` envelope, to stdout.
 
   On a home the Fermix app manages (`HomeOwner.app_managed?/1`, given this
@@ -76,16 +73,12 @@ defmodule Fermix.CLI.AlwaysOnCommand do
   alias FermixCore.Setup.EngineOwner
 
   @switches [
-    provider: :string,
-    type: :string,
-    location: :string,
-    stdin: :boolean,
     recovery_passphrase_file: :string,
     yes: :boolean,
     wait: :boolean,
     json: :boolean
   ]
-  @secret_flags ~w(--token --recovery-passphrase)
+  @secret_flags ~w(--recovery-passphrase)
   @hello_ms 10_000
   @status_ms 30_000
   # The guided loop's bound: a session that takes this many steps stops and
@@ -94,13 +87,11 @@ defmodule Fermix.CLI.AlwaysOnCommand do
   @usage """
   Usage:
     fermix always-on [--json]
-    fermix always-on ACTION [--provider ID] [--type T --location L] [--stdin]
-                     [--recovery-passphrase-file PATH] [--yes] [--wait] [--json]
+    fermix always-on ACTION [--recovery-passphrase-file PATH] [--yes] [--wait] [--json]
 
   ACTION is one of the steps Always On offers now:
-    paste-token create-server cancel move-now try-again turn-on restart-server
-    start-again create-in back-up-now replace-server check-again own-server
-    delete-server learn-more open-console update
+    cancel move-now try-again learn-more update back-up-now check-again own-server
+    move-back restore-here
   """
 
   @type context :: map()
@@ -169,9 +160,9 @@ defmodule Fermix.CLI.AlwaysOnCommand do
     do: arg in @secret_flags or String.starts_with?(arg, Enum.map(@secret_flags, &(&1 <> "=")))
 
   defp secret_sentence do
-    "fermix always-on: a token or a passphrase is never taken as an argument, where shell " <>
-      "history and process lists keep it. Pipe the token in with --stdin, pass " <>
-      "--recovery-passphrase-file PATH, or run on a terminal to be asked."
+    "fermix always-on: a passphrase is never taken as an argument, where shell history " <>
+      "and process lists keep it. Pass --recovery-passphrase-file PATH, or run on a " <>
+      "terminal to be asked."
   end
 
   defp parse_flags(argv) do
@@ -188,19 +179,11 @@ defmodule Fermix.CLI.AlwaysOnCommand do
   end
 
   defp one_step(step, flags) do
-    cond do
-      step not in steps() -> {:usage, nil}
-      is_nil(flags.type) != is_nil(flags.location) -> {:usage, nil}
-      true -> {:ok, step, flags}
-    end
+    if step in steps(), do: {:ok, step, flags}, else: {:usage, nil}
   end
 
   defp flags(opts) do
     %{
-      provider: Keyword.get(opts, :provider),
-      type: Keyword.get(opts, :type),
-      location: Keyword.get(opts, :location),
-      stdin: Keyword.get(opts, :stdin, false),
       passphrase_file: Keyword.get(opts, :recovery_passphrase_file),
       yes: Keyword.get(opts, :yes, false),
       wait: Keyword.get(opts, :wait, false),

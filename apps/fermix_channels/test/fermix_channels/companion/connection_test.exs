@@ -358,7 +358,7 @@ defmodule FermixChannels.Companion.ConnectionTest do
 
       # Setting it up is a change, told as any other.
       Agent.update(read, &%{&1 | key: :choose, off: false})
-      :ok = StatusWatch.changed(watch, :ledger)
+      :ok = StatusWatch.changed(watch, :move)
       settle_watch(watch)
       assert recv(six) == %{"type" => "home_status_changed"}
     end

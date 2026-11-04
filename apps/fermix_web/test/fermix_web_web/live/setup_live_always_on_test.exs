@@ -3,9 +3,9 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
   # engine's summary, collects what the pressed action needs, shows its
   # confirm and sends one `home.act` through `Management.AlwaysOn.act/2`, in
   # the page's own process, then draws the answer. Every fact comes from a
-  # temp FERMIX_HOME the core modules write, the cloud provider is the
-  # invented one (`FakeCloudProvider`), the rail's facts come from a scripted
-  # `link_status`, and a linked desktop's server answers a scripted forward.
+  # temp FERMIX_HOME the core modules write, the rail's facts come from a
+  # scripted `link_status`, and a linked desktop's server answers a scripted
+  # forward.
   # Every read and act runs in `start_async`, so each step waits for the
   # page's own tasks (`render_async`), never for the clock.
   use FermixWebWeb.ConnCase
@@ -13,23 +13,23 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
   import ExUnit.CaptureLog
   import Phoenix.LiveViewTest
 
+  alias FermixCore.Home.Candidate
   alias FermixCore.Home.Candidates
   alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.EnrollmentCode
   alias FermixCore.Home.Epoch
   alias FermixCore.Home.Move
   alias FermixCore.Home.Moved
-  alias FermixCore.Home.Provision.Driver
-  alias FermixCore.Home.Provision.Hetzner
-  alias FermixCore.Home.Provision.Ledger
+  alias FermixCore.Home.Return
+  alias FermixCore.Home.Snapshot
+  alias FermixCore.Home.Snapshot.Recipient
   alias FermixCore.Home.StatusWatch
   alias FermixCore.Management.AlwaysOn
+  alias FermixCore.Management.Copy
   alias FermixCore.Management.Home
   alias FermixCore.Management.HomeSummary
   alias FermixCore.Management.Jobs
-  alias FermixCore.Management.Provision
   alias FermixCore.Setup.RestartState
-  alias FermixTestSupport.FakeCloudProvider
   alias FermixTestSupport.SecretWriterStub
   alias FermixTestSupport.TelemetryCapture
 
@@ -39,8 +39,7 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
   @desktop_id "6d2b3c1e-1f7a-4c55-9a3e-2b8f6e0c4d71"
   @passphrase "invented-lighthouse-meridian"
   @manual_code "fxenroll1.eyJ2IjoxLCJuYW1lIjoib3duLXNlcnZlciJ9"
-  @server_code "fxenroll1.eyJ2IjoxLCJuYW1lIjoiaW52ZW50ZWQifQ"
-  @recommended %{type: "small-4", location: "osl1", profile: "general"}
+  @back_cand "cand-7a3e1c9b5d2f4086"
 
   setup %{conn: conn} = ctx do
     saved = %{
@@ -115,7 +114,6 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
     end)
 
     link = start_supervised!({Agent, fn -> %{primary: nil, desktops: [], enrollment: nil} end})
-    world = FakeCloudProvider.start!()
     jobs = jobs!(ctx)
     serializer = :"setup_always_on_#{:erlang.phash2(ctx.test)}"
     start_supervised!({AlwaysOn, name: serializer})
@@ -123,14 +121,13 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
     seams = %{
       home: tmp_home,
       link: link,
-      world: world,
       jobs: jobs,
       serializer: serializer,
       test: self()
     }
 
     put_seams(seams)
-    %{conn: authorize_setup(conn), home: tmp_home, link: link, world: world, seams: seams}
+    %{conn: authorize_setup(conn), home: tmp_home, link: link, seams: seams}
   end
 
   describe "the tab" do
@@ -182,16 +179,14 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
       refute html =~ ~s(id="device-role-notice")
     end
 
-    test "with nothing set up: the first screen, Set up and a server of your own", %{
-      conn: conn
-    } do
+    test "with nothing set up: the first screen, Use my own Linux server", %{conn: conn} do
       html = open!(conn)
 
       assert text(html, "#always-on-sentence") =~
                ~r/\AKeep Fermix running when this computer sleeps\./
 
-      assert text(html, "#always-on-action") == "Set up"
-      assert text(html, "#always-on-alternatives") =~ "Use my own Linux server"
+      assert text(html, "#always-on-action") == "Use my own Linux server"
+      refute html =~ ~s(id="always-on-alternatives")
       refute html =~ "In the Fermix app"
       assert actions(html, "#always-on-pane") |> Enum.uniq() == ["always_on_press"]
     end
@@ -220,239 +215,26 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
     end
   end
 
-  describe "the token" do
-    test "Set up opens the provider's token field, empty; a token it accepts is kept here", %{
-      conn: conn,
-      home: home
-    } do
-      {view, _html} = open_view!(conn)
-      html = press(view, "paste_token")
-
-      assert html =~ ~s(id="always-on-step")
-      assert [""] = field_values(html, ~s(input[name="always_on_step[token]"]))
-      assert html =~ ~s(type="password")
-      assert text(html, "#always-on-step") =~ "Nimbus access key"
-      assert text(html, "#always-on-step") =~ "Make a workspace for Fermix alone"
-      assert html =~ ~s(href="https://console.nimbus.invalid/")
-
-      log =
-        capture_log(fn ->
-          html = submit!(view, %{"token" => FakeCloudProvider.token()})
-          send(self(), {:html, html})
-        end)
-
-      assert_received {:html, html}
-
-      assert text(html, "#always-on-sentence") ==
-               "Your Nimbus token works, so choose the server Fermix creates."
-
-      refute html =~ ~s(id="always-on-step")
-      refute html =~ FakeCloudProvider.token()
-      refute log =~ FakeCloudProvider.token()
-      assert {:ok, %{token: token}} = Ledger.read(home, "nimbus")
-      assert token == FakeCloudProvider.token()
-    end
-
-    test "a token the provider refuses says so, and the field is open and empty again", %{
-      conn: conn,
-      home: home
-    } do
-      {view, _html} = open_view!(conn)
-      press(view, "paste_token")
-
-      html = submit!(view, %{"token" => "invented-refused-token-0a1b2c"})
-
-      assert text(html, "#always-on-error") =~ "Nimbus does not accept this"
-      assert [""] = field_values(html, ~s(input[name="always_on_step[token]"]))
-      refute html =~ "invented-refused-token"
-      refute File.exists?(Ledger.path(home, "nimbus"))
-    end
-
-    test "a field that is not text is the page's error line, never a crash", %{conn: conn} do
-      {view, _html} = open_view!(conn)
-      press(view, "paste_token")
-
-      html =
-        render_submit(view, "always_on_submit", %{"always_on_step" => %{"token" => ["x"]}})
-
-      assert text(html, "#always-on-error") == "Paste the API token as text."
-      assert Process.alive?(view.pid)
-    end
-
-    test "with several providers, each token screen is drawn and the token goes to the one " <>
-           "picked",
-         %{conn: conn, home: home, seams: seams} do
-      put_seams(seams, providers: [Hetzner, FakeCloudProvider])
-      {view, _html} = open_view!(conn)
-      html = press(view, "paste_token")
-
-      assert field_values(html, ~s(input[name="always_on_step[provider]"])) ==
-               ["hetzner", "nimbus"]
-
-      assert text(html, "#always-on-step") =~ "Hetzner"
-      assert text(html, "#always-on-step") =~ "Make a workspace for Fermix alone"
-
-      html = submit!(view, %{"provider" => "nimbus", "token" => FakeCloudProvider.token()})
-
-      assert text(html, "#always-on-sentence") ==
-               "Your Nimbus token works, so choose the server Fermix creates."
-
-      assert {:ok, %{token: token}} = Ledger.read(home, "nimbus")
-      assert token == FakeCloudProvider.token()
-    end
-
-    test "a press the screen no longer offers runs nothing and reads the screen again", %{
-      conn: conn,
-      home: home
-    } do
-      {view, _html} = open_view!(conn)
-      connect!(home)
-
-      render_click(view, "always_on_press", %{"id" => "paste_token", "key" => "an-older-key"})
-
-      assert text(settle!(view), "#always-on-sentence") ==
-               "Your Nimbus token works, so choose the server Fermix creates."
-
-      refute settle!(view) =~ ~s(id="always-on-step")
-    end
-  end
-
   # Always On is not in a release build yet: there the page lists no Always
   # On tab, opens none, and takes no Always On event.
   describe "in a build without Always On" do
     test "the page has no Always On tab, opens another, and an Always On event does nothing",
-         %{conn: conn, home: home, seams: seams} do
+         %{conn: conn, link: link, seams: seams} do
       put_seams(seams, available: false)
       {:ok, view, html} = live(conn, ~p"/setup?tab=always_on")
 
       refute html =~ ~s(phx-value-tab="always_on")
       refute html =~ ~s(id="always-on-pane")
 
-      render_click(view, "always_on_press", %{"id" => "paste_token", "key" => "k"})
+      render_click(view, "always_on_press", %{"id" => "own_server", "key" => "k"})
       refute render(view) =~ ~s(id="always-on-step")
-      refute File.exists?(Ledger.path(home, "nimbus"))
+      assert Agent.get(link, & &1.enrollment) == nil
     end
 
     test "in a build with it, the tab is listed", %{conn: conn, seams: seams} do
       put_seams(seams, available: true)
       {:ok, _view, html} = live(conn, ~p"/setup")
       assert html =~ ~s(phx-value-tab="always_on")
-    end
-  end
-
-  describe "the choice" do
-    setup ctx do
-      connect!(ctx.home)
-      ctx
-    end
-
-    test "Create server offers the recommendation and its price, Change lists the offers " <>
-           "by city, and the size and place chosen are the ones created",
-         %{conn: conn, home: home, seams: seams} do
-      {view, html} = open_view!(conn)
-      create = action!(summary!(seams), "create_server")
-      assert text(html, "#always-on-action") == "Create server"
-
-      press(view, "create_server")
-      html = render_async(view)
-
-      options = options!(seams)
-      assert text(html, "#always-on-step") =~ options["sentence"]
-      assert text(html, "#always-on-step") =~ create["confirm"]
-      # Each place under its city, and each offer as the engine words it,
-      # its label and price and nothing of the page's own.
-      for %{"id" => id, "city" => city} <- options["locations"],
-          here = Enum.filter(options["offers"], &(&1["location"] == id)),
-          here != [] do
-        place = ~s(#always-on-offers [data-location="#{id}"])
-        assert text(html, "#{place} legend") == city
-
-        assert texts(html, "#{place} label") == Enum.map(here, &"#{&1["label"]}#{&1["price"]}")
-        assert texts(html, ~s(#{place} [data-offer="label"])) == Enum.map(here, & &1["label"])
-        assert texts(html, ~s(#{place} [data-offer="price"])) == Enum.map(here, & &1["price"])
-      end
-
-      assert text(html, "#always-on-offers") =~ "Large 8: 4 cores, 8 GB memory, 160 GB disk"
-
-      assert ["osl1/small-4"] =
-               field_values(html, ~s(input[name="always_on_step[choice]"][checked]))
-
-      html = submit!(view, %{"choice" => "osl1/large-8"})
-      assert text(html, "#always-on-sentence") == "Starting your server…"
-      assert text(html, "#always-on-action") == "Cancel"
-
-      settle_jobs!(seams)
-      assert {:ok, %{server: %{type: "large-8", location: "osl1"}}} = Ledger.read(home, "nimbus")
-    end
-
-    # The recommendation is the row checked when the step opens, and the
-    # step sends that row's size and place: the engine makes none up.
-    test "the step as drawn creates the recommended row", %{
-      conn: conn,
-      home: home,
-      seams: seams
-    } do
-      {view, _html} = open_view!(conn)
-      press(view, "create_server")
-      render_async(view)
-
-      view |> form(~s(#always-on-step form)) |> render_submit()
-      settle!(view)
-      settle_jobs!(seams)
-
-      %{"recommended" => %{"type" => type, "location" => location}} = options!(seams)
-      assert {:ok, %{server: %{type: ^type, location: ^location}}} = Ledger.read(home, "nimbus")
-    end
-
-    test "offers the provider cannot give are said in its words, and Back closes the step", %{
-      conn: conn,
-      world: world
-    } do
-      {view, _html} = open_view!(conn)
-      FakeCloudProvider.fault(world, :catalog, {:unreachable, "invented timeout"})
-
-      press(view, "create_server")
-      html = render_async(view)
-
-      assert text(html, "#always-on-error") =~ "Nimbus"
-      refute html =~ ~s(id="always-on-offers")
-
-      html = view |> element(~s|#always-on-step [phx-click="always_on_back"]|) |> render_click()
-      refute html =~ ~s(id="always-on-step")
-    end
-  end
-
-  describe "a confirm" do
-    setup ctx do
-      connect!(ctx.home)
-      created!(ctx)
-      provisioned_window(ctx.link)
-      ctx
-    end
-
-    test "is asked before the step, with the action's sentence, and Back takes nothing", %{
-      conn: conn,
-      home: home,
-      world: world,
-      seams: seams
-    } do
-      {view, html} = open_view!(conn)
-      cancel = action!(summary!(seams), "cancel")
-      assert text(html, "#always-on-action") == "Cancel"
-
-      html = press(view, "cancel")
-      assert text(html, "#always-on-step") =~ cancel["confirm"]
-      refute Enum.any?(FakeCloudProvider.calls(world), &match?({:delete, _}, &1))
-
-      html = view |> element(~s|#always-on-step [phx-click="always_on_back"]|) |> render_click()
-      refute html =~ ~s(id="always-on-step")
-
-      press(view, "cancel")
-      html = submit!(view, %{})
-      assert text(html, "#always-on-sentence") == "Deleting your server…"
-
-      settle_jobs!(seams)
-      assert {:ok, %{server: nil}} = Ledger.read(home, "nimbus")
     end
   end
 
@@ -568,24 +350,55 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
       assert text(html, "#always-on-error") =~ "The move cannot start yet."
       refute_received :restarted
     end
+
+    test "a passphrase that is not text is the page's error line, never a crash", %{conn: conn} do
+      {view, _html} = open_view!(conn)
+      press(view, "move_now")
+
+      html =
+        render_submit(view, "always_on_submit", %{
+          "always_on_step" => %{"passphrase" => ["x"], "passphrase_again" => ["x"]}
+        })
+
+      assert text(html, "#always-on-error") == "Type the recovery passphrase as text."
+      assert Process.alive?(view.pid)
+      refute_received :restarted
+    end
   end
 
+  # The engine's screen moves on while the page still draws the older one:
+  # here the last review of the server came to block the move.
   describe "a screen that changed" do
-    test "a press from an older screen does nothing, says so, and the tab reads again", %{
-      conn: conn,
-      home: home
-    } do
-      {view, _html} = open_view!(conn)
-      press(view, "paste_token")
-      connect!(home)
+    setup ctx do
+      :ok = Epoch.write(ctx.home, 4)
+      {:ok, held} = Candidates.add(ctx.home, candidate_attrs(), @at)
+      Agent.update(ctx.link, &%{&1 | enrollment: window(:manual, :used, held.candidate_id)})
+      Map.put(ctx, :candidate_id, held.candidate_id)
+    end
 
-      html = submit!(view, %{"token" => FakeCloudProvider.token()})
+    test "a press from an older screen does nothing, says so, and the tab reads again", ctx do
+      {view, _html} = open_view!(ctx.conn)
+      press(view, "move_now")
+      block!(ctx)
+
+      html =
+        submit!(view, %{"passphrase" => @passphrase, "passphrase_again" => @passphrase})
 
       assert text(html, "#always-on-error") ==
                "Always On changed since this was shown, so look at it again."
 
-      assert text(html, "#always-on-sentence") ==
-               "Your Nimbus token works, so choose the server Fermix creates."
+      assert text(html, "#always-on-sentence") == "The move cannot start yet. Too full."
+      refute_received :restarted
+    end
+
+    test "a press the screen no longer offers runs nothing and reads the screen again", ctx do
+      {view, _html} = open_view!(ctx.conn)
+      block!(ctx)
+
+      render_click(view, "always_on_press", %{"id" => "move_now", "key" => "an-older-key"})
+
+      assert text(settle!(view), "#always-on-sentence") == "The move cannot start yet. Too full."
+      refute settle!(view) =~ ~s(id="always-on-step")
     end
   end
 
@@ -602,7 +415,7 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
       assert text(html, "#always-on-sentence") =~ ~r/\AKeep Fermix running/
       assert Map.has_key?(:sys.get_state(watch).subscribers, view.pid)
 
-      connect!(home)
+      held!(home, seams.link)
       :ok = stop_supervised!(:w1)
       start_supervised!({StatusWatch, name: watch, read: read, clock_monitor: false}, id: :w2)
 
@@ -612,8 +425,8 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
       render(view)
       assert Map.has_key?(:sys.get_state(watch).subscribers, view.pid)
 
-      assert text(settle!(view), "#always-on-sentence") ==
-               "Your Nimbus token works, so choose the server Fermix creates."
+      assert text(settle!(view), "#always-on-sentence") =~
+               ~r/\AYour server is ready for the move\./
     end
 
     test "a watch that does not come back is looked for a bounded number of times", %{
@@ -690,12 +503,12 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
       assert_received {:forwarded, "home.snapshots.run", %{}}
     end
 
-    # The replace moves the server to the new one; this computer stays a
-    # desktop, so the page raises no restart overlay.
-    test "linked, replacing the server: Move now is sent to the server, the passphrase " <>
-           "asked once, and this page does not restart",
+    # A move back moves the server's home here, and this computer restarts
+    # only once it is in place, so the page raises no restart overlay.
+    test "linked, moving back: Move now is sent to the server, the passphrase asked once, " <>
+           "and this page does not restart",
          ctx do
-      replacing_ready!(ctx)
+      moving_back_ready!(ctx)
       {view, html} = open_view!(ctx.conn, "/setup")
       assert text(html, "#always-on-action") == "Move now"
 
@@ -714,13 +527,55 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
       assert_received {:forwarded, "home.move.start", params}
 
       assert params == %{
-               "candidate_id" => "cand-9d41c7e2b05a3f68",
+               "candidate_id" => @back_cand,
                "recovery_passphrase" => @passphrase,
                "keep_as_desktop" => false
              }
 
       refute_received :restarted
-      assert text(html, "#always-on-sentence") =~ "Moving"
+      assert text(html, "#always-on-sentence") =~ "Moving Fermix back"
+    end
+
+    # Restore here once the server went silent: its confirm asks the owner's
+    # word that the server is deleted or stopped, Back takes nothing, and the
+    # restore runs in a job of its own, which the page draws from the press.
+    test "linked and silent with a backup: Restore here asks first, Back takes nothing, " <>
+           "and the page draws the restore running",
+         %{conn: conn, link: link, seams: seams} = ctx do
+      test = self()
+      copy!(ctx)
+
+      linked!(seams,
+        role: :device,
+        restarts_itself?: true,
+        local_return: fn _home, _copy ->
+          send(test, {:restoring, self()})
+          receive do: (:go -> {:ok, %{"restored" => true, "epoch" => 6}})
+        end
+      )
+
+      Agent.update(link, &%{&1 | primary: primary(11 * 60_000)})
+      {view, _html} = open_view!(conn, "/setup")
+
+      html = press(view, "restore_here")
+
+      assert text(html, "#always-on-step") =~
+               Copy.summary_sentence(:confirm_restore_here, %{machine: "computer"})
+
+      html = view |> element(~s|#always-on-step [phx-click="always_on_back"]|) |> render_click()
+      refute html =~ ~s(id="always-on-step")
+      refute_received {:restoring, _run}
+
+      press(view, "restore_here")
+      html = submit!(view, %{"passphrase" => @passphrase})
+
+      assert text(html, "#always-on-sentence") ==
+               "Restoring Fermix on this computer from its backup. Messages wait until it is done."
+
+      refute html =~ "Restarting Fermix"
+      assert_receive {:restoring, run}, 10_000
+      send(run, :go)
+      settle_jobs!(seams)
     end
 
     # Always On's move back is drawn as any step is: pressed from Details'
@@ -815,12 +670,6 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
     opts |> Home.summary_facts() |> HomeSummary.summary()
   end
 
-  # `home.provision.options` as the engine answers it here.
-  defp options!(seams) do
-    {:ok, options} = Provision.options(home_seams(seams))
-    options
-  end
-
   defp action!(summary, id) do
     Enum.find(HomeSummary.offered(summary), &(&1["id"] == id)) ||
       flunk("#{summary["state"]} offers no #{id}")
@@ -828,27 +677,18 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
 
   # -- the world -----------------------------------------------------------------
 
-  defp connect!(home) do
-    {:ok, _ledger} =
-      Ledger.update(home, "nimbus", &{:ok, Ledger.connect(&1, FakeCloudProvider.token(), @at)})
-
+  # The owner's server enrolled with its code and held for the move.
+  defp held!(home, link) do
+    {:ok, held} = Candidates.add(home, candidate_attrs(), @at)
+    Agent.update(link, &%{&1 | enrollment: window(:manual, :used, held.candidate_id)})
     :ok
   end
 
-  # A server the driver created, as a step's job leaves it, and read back from
-  # the provider just now, so no read of the page starts a reconcile.
-  defp created!(ctx) do
-    opts =
-      provider_opts(ctx.world) ++
-        [open_code: fn -> {:ok, @server_code} end, withdraw_code: fn -> :ok end]
-
-    {:ok, _server} = Driver.create(FakeCloudProvider, ctx.home, @recommended, opts)
-    {:ok, _ledger} = Ledger.update(ctx.home, "nimbus", &{:ok, Ledger.checked(&1, @at)})
-    :ok
+  # The last review of the held server blocks the move.
+  defp block!(ctx) do
+    blocked = %{ready: false, items: [%{id: "disk", status: :block, sentence: "Too full."}]}
+    :ok = Move.put_review(ctx.home, ctx.candidate_id, blocked, @at)
   end
-
-  defp provisioned_window(link),
-    do: Agent.update(link, &%{&1 | enrollment: window(:provisioned, :open, nil, 60_000)})
 
   defp window(kind, state, candidate_id, awake_ms \\ 0) do
     %{
@@ -906,7 +746,10 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
   defp server_part("home.snapshots.run"), do: {:ok, %{"started" => true, "snapshots" => %{}}}
 
   # The copied code the server opens for this desktop to move back with.
-  defp server_part("home.enroll.open") do
+  defp server_part("home.enroll.open"),
+    do: {:ok, %{"code" => return_code(), "expires_at" => "2031-05-04T12:30:00Z"}}
+
+  defp return_code do
     {:ok, code} =
       EnrollmentCode.encode(%{
         secret: :binary.copy(<<9>>, 32),
@@ -918,72 +761,81 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
         expires_at: ~U[2031-05-04 12:30:00Z]
       })
 
-    {:ok, %{"code" => code, "expires_at" => "2031-05-04T12:30:00Z"}}
+    code
   end
 
-  # The server the home lives on is being replaced: its new server stands and
-  # waits for the move, as the old server's own part says.
-  defp replacing_ready!(ctx) do
-    :ok = DesktopLink.write(ctx.home, desktop_link())
+  # This desktop moving back: its candidate for the home, held by the server,
+  # and the return's record; the server answers as the primary, and once it
+  # took the move, with the move under way.
+  defp moving_back_ready!(ctx) do
     :ok = Moved.write(ctx.home, %{epoch: 4, moved_at: @at, to: "invented-vm"})
-    connect!(ctx.home)
-    created!(ctx)
+    :ok = DesktopLink.write(ctx.home, desktop_link())
 
-    new_server = %{
-      name: "fermix-general-5d2e",
-      id: "nb-900",
-      status: :created,
-      type: "small-4",
-      location: "osl1",
-      ipv4: "198.51.100.9",
-      power: "running",
-      created_at: @at,
-      seen_at: @at
-    }
+    {:ok, state} =
+      Candidate.prepare_return(ctx.home, {:return, return_code()},
+        now: @at,
+        role: :device,
+        restarts_itself?: true
+      )
 
-    {:ok, _ledger} =
-      Ledger.update(ctx.home, "nimbus", fn ledger ->
-        {:ok, replacing} = Ledger.begin_replace(ledger, 5, @at)
-        {:ok, Ledger.put_server(replacing, new_server)}
-      end)
+    enrolled =
+      Map.merge(state, %{
+        "phase" => "enrolled",
+        "candidate_id" => @back_cand,
+        "listen_until" => "2031-05-05T12:00:00Z"
+      })
 
+    :ok = Candidate.put_state(ctx.home, enrolled, @at)
+    :ok = Return.write(ctx.home, %{from: "invented-vm", started_at: @at, primary_epoch: 5})
     Agent.update(ctx.link, &%{&1 | primary: primary(nil)})
+    moved = start_supervised!({Agent, fn -> false end}, id: :server_moved)
     test = self()
 
     forward = fn %{method: method, params: params}, _opts ->
       send(test, {:forwarded, method, params})
-      replacing_part(method)
+      moving_back_part(method, moved)
     end
 
-    put_seams(ctx.seams, [], fn -> [primary_forward: forward] end)
+    put_seams(ctx.seams, [role: :device, restarts_itself?: true], fn ->
+      [primary_forward: forward]
+    end)
   end
 
-  defp replacing_part("home.status") do
+  defp moving_back_part("home.status", moved) do
     {:ok, on} = server_part("home.status")
 
-    {:ok,
-     Map.merge(on, %{
-       "enrollment" => %{
-         "state" => "used",
-         "expires_at" => "2031-05-05T12:00:00Z",
-         "kind" => "provisioned",
-         "candidate_id" => "cand-9d41c7e2b05a3f68"
-       },
-       "candidates" => [
-         %{
-           "candidate_id" => "cand-9d41c7e2b05a3f68",
-           "name" => "fermix-general-5d2e",
-           "os" => "linux",
-           "arch" => "x86_64",
-           "version" => "9.9.9",
-           "enrolled_at" => "2031-05-04T11:05:00Z",
-           "expires_at" => "2031-05-05T11:05:00Z"
-         }
-       ]
-     })}
+    if Agent.get(moved, & &1),
+      do:
+        {:ok,
+         Map.put(on, "move", %{"phase" => "requested", "candidate" => "x", "sentence" => "."})},
+      else: {:ok, on}
   end
 
-  defp replacing_part("home.move.start"), do: {:ok, %{"move_id" => "mv-0001"}}
+  defp moving_back_part("home.move.start", moved) do
+    Agent.update(moved, fn _moved -> true end)
+    {:ok, %{"move_id" => "mv-0001"}}
+  end
+
+  # A copy of the server's snapshots this desktop keeps, written for the
+  # owner's recovery passphrase.
+  defp copy!(ctx) do
+    server = Path.join(ctx.home, "invented-server")
+    File.mkdir_p!(server)
+    File.write!(Path.join(server, "config.toml"), "[fermix_core.engine]\nrole = \"primary\"\n")
+    :ok = Epoch.write(server, 5)
+    {:ok, pair} = Recipient.from_passphrase(@passphrase)
+    File.mkdir_p!(Path.join(ctx.home, "snapshots"))
+    path = Path.join([ctx.home, "snapshots", "20310504T093000Z-e5.fxsnap"])
+
+    {:ok, _written} =
+      Snapshot.write(server, Recipient.public(pair), path,
+        host: "linux-x86_64",
+        now: fn -> ~U[2031-05-04 09:30:00Z] end
+      )
+
+    FermixTestSupport.SafeRm.rm_rf!(server)
+    path
+  end
 
   defp primary(down_ms) do
     %{
@@ -1084,11 +936,7 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
       scheduler: nil,
       disk_usage: fn _home -> {:ok, %{used: 0.42, nearly_full: false}} end,
       link_status: fn -> Agent.get(link, & &1) end,
-      providers: [FakeCloudProvider],
-      provider_opts: provider_opts(seams.world),
       jobs: seams.jobs,
-      open_code: fn -> {:ok, @server_code} end,
-      withdraw_code: fn -> :ok end,
       open_enrollment: fn :manual, nil ->
         Agent.update(link, &%{&1 | enrollment: window(:manual, :open, nil, 0)})
         {:ok, %{code: @manual_code, expires_at: ~U[2031-05-04 12:30:00Z]}}
@@ -1114,8 +962,6 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
     ]
   end
 
-  defp provider_opts(world), do: [world: world, now: fn -> @at end, sleep: fn _ms -> :ok end]
-
   # -- reading the page ----------------------------------------------------------
 
   defp text(html, selector) do
@@ -1125,14 +971,6 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
     |> LazyHTML.text()
     |> String.split()
     |> Enum.join(" ")
-  end
-
-  # The text of each element `selector` matches, in order.
-  defp texts(html, selector) do
-    html
-    |> LazyHTML.from_fragment()
-    |> LazyHTML.query(selector)
-    |> Enum.map(&(&1 |> LazyHTML.text() |> String.split() |> Enum.join(" ")))
   end
 
   defp tab_ids(html) do

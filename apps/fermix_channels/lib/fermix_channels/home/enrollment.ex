@@ -11,8 +11,8 @@ defmodule FermixChannels.Home.Enrollment do
   the host's name and the expiry. A window has a kind (M75 lean v1 L15):
   `:manual`, the code a person copies onto a server of their own
   (Always On's `own_server`, `home.act`), lives thirty minutes; `:provisioned`, the code Fermix
-  puts inside a server it creates (`FermixCore.Home.Provision`), lives 24
-  hours, so a slow install or a sleeping computer does not fail it. Only one
+  puts inside a server it creates, lives 24 hours, so a slow install or a
+  sleeping computer does not fail it. Only one
   window is open at a time, so a manual one is refused, in one sentence,
   while a provisioned window is open and unexpired (a new code would strand
   the server that waits for its own), and, in another, while a used

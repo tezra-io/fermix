@@ -35,8 +35,7 @@ Fermix runs as a local daemon that holds provider API keys and bot tokens,
 executes a workspace-rooted command/path sandbox, and bridges external chat
 channels. Areas of particular interest:
 
-- secret handling (config, env passthrough, `auth.json`, the Always On
-  provisioner's cloud provider tokens),
+- secret handling (config, env passthrough, `auth.json`),
 - the sandbox and its allow/deny policy,
 - inbound/outbound MCP and channel ingress authorization,
 - the signed `fermix upgrade` path.
@@ -68,53 +67,34 @@ authorization, consent and vendor-config checks.
 The same gate holds access-sensitive plugin commands (a car unlock) on every
 platform.
 
-The cloud provider API token the Always On provisioner uses (Hetzner's
-today) can create, delete and read everything in its project, so it is kept
-apart from every other secret: only in its provider's own file,
-`device/provision/<provider>.json` (`0600` in a `0700` folder, owner-only
-before the token is written into it, renamed into place), never in
-`config.toml`, the keychain or the file secret store, because a move carries
-those to the server, and `device/` is left out of every archive, snapshot and
-move and denied to sandboxed commands. It is never logged, traced or answered
-(the summary says only whether it is accepted). Every Always On step is one
-method, `home.act`: giving Fermix the token, creating, powering and deleting
-the server, opening a code and starting a move are owner decisions, refused
-to a command Fermix started and to a caller Fermix cannot place, in words
-that name every place the owner can act (the Fermix app, the setup page or
-their own terminal). A step runs only when the summary it was drawn from
-still offers it under its key, so a confirm accepted on an older screen does
-nothing. Its input (the token, the recovery passphrase) is decoded where it
-arrives into a struct whose inspection withholds both, so no log line, crash
-report or telemetry event carries either, and the setup page's request logs
-filter any parameter named for a passphrase. On the setup page a token or a
-passphrase lives only in the submitted form and the one step it becomes:
-every such field is drawn empty and replaced after each submit, none is kept
-in the page's state, and the one-time code for a server of the owner's own
-is held where no crash report prints it and copied from the page, never
-sent back in an event. `fermix always-on` takes the token
-only from a prompt that does not echo or from stdin, and the recovery passphrase
-only from such a prompt or a file, refuses either typed as an argument, and holds
-them in that struct until the one request that sends them. While the server stands, a new token
-replaces the kept one only when it reaches that server (the same project),
-so no token for another project can take its place; a provider's token
-never moves to another provider's file. Fermix touches only
-what it created (named and labelled by its own short id). The root password Hetzner answers for a server created with
-no SSH key is dropped where the answer arrives: it reaches no file, log,
-trace, status or crash report. The
-server's cloud-init user data carries a single-use enrollment code and stays
-readable through the metadata service, which the server's first boot blocks
-for every account but root. The server's own Always On steps (opening a
-code, closing it, reviewing and starting a move, a backup now) are served
-only to a linked desktop's forward over the rail, sent by that desktop's own
-`home.act` after it placed its caller as the owner; on `daemon.sock` they are
-refused to every caller, by name. So when the desktop replaces that server,
-the old server opens the new one's 24-hour code only for that desktop, the
-code crosses only that encrypted session, and no local command can open,
-close or use one. The old server is deleted only once a primary one epoch up
-answered the desktop, so the server that holds the home is never deleted.
-The command for a server of the owner's own carries no code: its first boot
-asks for the code on the terminal without echo, so it never lands in a shell
-history.
+Every Always On step is one method, `home.act`: opening a code for the
+owner's server, starting a move, moving back and restoring here are owner
+decisions, refused to a command Fermix started and to a caller Fermix cannot
+place, in words that name every place the owner can act (the Fermix app, the
+setup page or their own terminal). A step runs only when the summary it was
+drawn from still offers it under its key, so a confirm accepted on an older
+screen does nothing. Its input (the recovery passphrase) is decoded where it
+arrives into a struct whose inspection withholds it, so no log line, crash
+report or telemetry event carries it, and the setup page's request logs
+filter any parameter named for a passphrase. On the setup page a passphrase
+lives only in the submitted form and the one step it becomes: every such
+field is drawn empty and replaced after each submit, none is kept in the
+page's state, and the one-time code for the owner's server is held where no
+crash report prints it and copied from the page, never sent back in an
+event. `fermix always-on` takes the recovery passphrase only from a prompt
+that does not echo or from a file, refuses it typed as an argument, and holds
+it in that struct until the one request that sends it. Cloud-init user data
+that carries an enrollment code stays readable through the metadata service,
+which the server's first boot blocks for every account but root. The
+server's own Always On steps (opening a code, closing it, reviewing and
+starting a move, a backup now) are served only to a linked desktop's forward
+over the rail, sent by that desktop's own `home.act` after it placed its
+caller as the owner; on `daemon.sock` they are refused to every caller, by
+name. So when the desktop moves the home back, the server opens its code only
+for that desktop, the code crosses only that encrypted session, and no local
+command can open, close or use one. The command for the owner's server
+carries no code: its first boot asks for the code on the terminal without
+echo, so it never lands in a shell history.
 
 Opening the setup page is an owner decision on `daemon.sock` as well: a page
 session drives every decision the page offers, so `setup.session.create` is
@@ -143,8 +123,8 @@ server, since a copy restored beside a running server would answer the same
 channels twice. The passphrase opens the copy only in memory, for the
 restore's length: the derived key is never written, and a passphrase that
 opens no copy is refused before anything is written.
-A server of the owner's own is never deleted: nothing the computer can check
-would prove it is down.
+Fermix never deletes the server, which is the owner's own: nothing the
+computer can check would prove it is down.
 
 What this deliberately does not cover:
 

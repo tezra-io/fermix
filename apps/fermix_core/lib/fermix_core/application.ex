@@ -47,7 +47,6 @@ defmodule FermixCore.Application do
   alias FermixCore.Management.Lifecycle, as: ManagementLifecycle
   alias FermixCore.Management.McpServers.DraftValues, as: McpDraftValues
   alias FermixCore.Management.Plugins.Discovery, as: ManagementPluginDiscovery
-  alias FermixCore.Management.Provision, as: ManagementProvision
   alias FermixCore.Meetings.Supervisor, as: MeetingsSupervisor
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Repo
@@ -290,10 +289,6 @@ defmodule FermixCore.Application do
         # add no restart intensity to the tree.
         CommandHostSupervisor,
         {Task.Supervisor, name: FermixCore.TaskSupervisor},
-        # The Always On provisioner's ledger locks, before anything that can
-        # write the ledger (a management call, a job, the desktop relay). It
-        # runs no writer's code, so nothing it serves can bring it down.
-        FermixCore.Home.Provision.Ledger.Lock,
         # Which files `home.status` reads cannot be read now, so each is
         # logged once a stretch however often the apps poll; in every role,
         # before anything that answers `home.status`.
@@ -560,14 +555,6 @@ defmodule FermixCore.Application do
       [
         ManagementLifecycle,
         ManagementDoctor,
-        # Before the job family and the socket: an Always On step a restart
-        # left with no job is kept as interrupted, once, and nothing written
-        # after it is taken for one (it starts no process).
-        %{
-          id: :provision_left_steps,
-          start: {ManagementProvision, :interrupt_at_boot, []},
-          restart: :temporary
-        },
         ManagementJobs,
         # Always On's steps (`home.act`), one at a time per engine, after the
         # job family they start and before the socket and the setup page that

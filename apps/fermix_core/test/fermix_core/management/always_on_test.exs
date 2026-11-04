@@ -1,10 +1,9 @@
 defmodule FermixCore.Management.AlwaysOnTest do
   # Always On setup §3.4, §4: every step a surface asks for is one `act/2`,
-  # run by the engine under one serializer, against the invented provider
-  # (`FermixTestSupport.FakeCloudProvider`) and a home of the test's own: the
-  # sequence, the ledger and the summary after it, every refusal, and on a
-  # linked desktop the server's steps sent over a scripted link. A job's end
-  # is read from its own completion event, never waited for by the clock.
+  # run by the engine under one serializer, against a home of the test's own:
+  # the sequence and the summary after it, every refusal, and on a linked
+  # desktop the server's steps sent over a scripted link. A job's end is read
+  # from its own completion event, never waited for by the clock.
   use ExUnit.Case, async: true
 
   alias FermixCore.Home.Candidate
@@ -14,8 +13,6 @@ defmodule FermixCore.Management.AlwaysOnTest do
   alias FermixCore.Home.Epoch
   alias FermixCore.Home.Move
   alias FermixCore.Home.Moved
-  alias FermixCore.Home.Provision.Driver
-  alias FermixCore.Home.Provision.Ledger
   alias FermixCore.Home.Return
   alias FermixCore.Home.Snapshot
   alias FermixCore.Home.Snapshot.Recipient
@@ -27,9 +24,7 @@ defmodule FermixCore.Management.AlwaysOnTest do
   alias FermixCore.Management.HomeSummary
   alias FermixCore.Management.Jobs
   alias FermixCore.Management.Protocol
-  alias FermixCore.Management.Provision
   alias FermixCore.Management.Router
-  alias FermixTestSupport.FakeCloudProvider
   alias FermixTestSupport.SafeRm
   alias FermixTestSupport.TelemetryCapture
 
@@ -37,19 +32,13 @@ defmodule FermixCore.Management.AlwaysOnTest do
   @primary %{role: :primary, primary: nil}
   @device %{role: :device, primary: "fermix-general-a3f9"}
   @passphrase "invented-lighthouse-meridian"
-  @code "fxenroll1.eyJ2IjoxLCJuYW1lIjoiaW52ZW50ZWQifQ"
   @manual_code "fxenroll1.eyJ2IjoxLCJuYW1lIjoib3duLXNlcnZlciJ9"
-  @server_code "fxenroll1.eyJ2IjoxLCJuYW1lIjoib2xkLXNlcnZlciJ9"
   @back_cand "cand-7a3e1c9b5d2f4086"
-  @recommended %{type: "small-4", location: "osl1", profile: "general"}
-  # The offer the owner was shown and chose: a create always names one.
-  @choice %Input{type: "small-4", location: "osl1"}
 
   setup ctx do
     home = SafeRm.make_tmp_dir!("always_on")
     on_exit(fn -> SafeRm.rm_rf!(home) end)
     :ok = Epoch.write(home, 4)
-    world = FakeCloudProvider.start!()
     test = self()
 
     link =
@@ -71,17 +60,7 @@ defmodule FermixCore.Management.AlwaysOnTest do
       scheduler: nil,
       disk_usage: fn _home -> {:ok, %{used: 0.42, nearly_full: false}} end,
       link_status: fn -> Agent.get(link, & &1) end,
-      providers: [FakeCloudProvider],
-      provider_opts: provider_opts(world),
       jobs: jobs!(ctx),
-      open_code: fn ->
-        send(test, :code_opened)
-        {:ok, @code}
-      end,
-      withdraw_code: fn ->
-        send(test, :code_withdrawn)
-        :ok
-      end,
       open_enrollment: fn kind, _desktop ->
         send(test, {:enrollment_opened, kind})
         {:ok, %{code: @manual_code, expires_at: ~U[2031-05-04 12:30:00Z]}}
@@ -106,13 +85,13 @@ defmodule FermixCore.Management.AlwaysOnTest do
       serializer: serializer
     ]
 
-    %{home: home, world: world, link: link, opts: opts}
+    %{home: home, link: link, opts: opts}
   end
 
   describe "the input" do
     test "is text or absent, field by field, and anything else is refused without its value" do
-      assert {:ok, %Input{token: "invented-token", provider: nil}} =
-               Input.decode(%{"token" => "invented-token"})
+      assert {:ok, %Input{recovery_passphrase: @passphrase}} =
+               Input.decode(%{"recovery_passphrase" => @passphrase})
 
       assert Input.decode(nil) == {:ok, %Input{}}
 
@@ -124,31 +103,28 @@ defmodule FermixCore.Management.AlwaysOnTest do
       assert {:error, {:invalid_params, "input", _sentence}} =
                Input.decode(%{"colour" => "invented-secret-value"})
 
-      assert {:error, {:invalid_params, "input", _sentence}} = Input.decode(["token"])
+      assert {:error, {:invalid_params, "input", _sentence}} =
+               Input.decode(%{"token" => "invented-token"})
+
+      assert {:error, {:invalid_params, "input", _sentence}} =
+               Input.decode(["recovery_passphrase"])
     end
 
-    test "never shows the token or the recovery passphrase" do
-      {:ok, input} =
-        Input.decode(%{
-          "token" => "invented-token-5f2c8e1a",
-          "recovery_passphrase" => @passphrase,
-          "provider" => "nimbus"
-        })
+    test "never shows the recovery passphrase" do
+      {:ok, input} = Input.decode(%{"recovery_passphrase" => @passphrase})
 
       shown = inspect(input)
-      refute shown =~ "invented-token-5f2c8e1a"
       refute shown =~ @passphrase
-      assert shown =~ "nimbus"
       assert shown =~ "withheld"
     end
   end
 
   describe "the request" do
     test "names an action the summary offers and its key; one a surface opens is refused" do
-      assert {:ok, %{action: "create_server", key: "k", input: %Input{}}} =
-               AlwaysOn.decode(%{"action" => "create_server", "key" => "k"})
+      assert {:ok, %{action: "move_now", key: "k", input: %Input{}}} =
+               AlwaysOn.decode(%{"action" => "move_now", "key" => "k"})
 
-      for opened <- ~w(learn_more open_console update) do
+      for opened <- ~w(learn_more update) do
         assert {:error, {:invalid_params, "action", sentence}} =
                  AlwaysOn.decode(%{"action" => opened, "key" => "k"})
 
@@ -165,7 +141,7 @@ defmodule FermixCore.Management.AlwaysOnTest do
                AlwaysOn.decode(%{"action" => "cancel"})
 
       assert AlwaysOn.acts() -- HomeSummary.actions() == []
-      assert HomeSummary.actions() -- AlwaysOn.acts() == ~w(learn_more open_console update)
+      assert HomeSummary.actions() -- AlwaysOn.acts() == ~w(learn_more update)
     end
   end
 
@@ -173,7 +149,7 @@ defmodule FermixCore.Management.AlwaysOnTest do
     test "an action not offered under its key is answered changed in a sentence, and " <>
            "nothing is done",
          ctx do
-      request = %{action: "paste_token", key: "an-older-key", input: token_input()}
+      request = %{action: "own_server", key: "an-older-key", input: %Input{}}
 
       assert {:error, :changed, %{"sentence" => sentence} = details} =
                AlwaysOn.act(request, ctx.opts)
@@ -181,27 +157,7 @@ defmodule FermixCore.Management.AlwaysOnTest do
       assert Map.keys(details) == ["sentence"]
       assert sentence =~ "changed"
       assert summary(ctx.opts)["state"] == "off"
-      refute File.exists?(Ledger.path(ctx.home, "nimbus"))
-    end
-
-    test "two presses of one key at once: the first runs, the second sees what it changed",
-         ctx do
-      connect!(ctx)
-      key = offered!(summary(ctx.opts), "create_server")["key"]
-      request = %{action: "create_server", key: key, input: @choice}
-
-      answers =
-        [request, request]
-        |> Enum.map(fn request -> Task.async(fn -> AlwaysOn.act(request, ctx.opts) end) end)
-        |> Enum.map(&Task.await(&1, 15_000))
-
-      assert [{:error, :changed, %{"sentence" => _}}, {:ok, %{"summary" => after_first}}] =
-               Enum.sort_by(answers, &elem(&1, 0))
-
-      assert after_first["state"] == "creating"
-
-      settle!(ctx)
-      assert length(jobs(ctx)) == 1
+      refute_received {:enrollment_opened, _kind}
     end
 
     test "with no serializer running, an act is refused in words", ctx do
@@ -211,304 +167,6 @@ defmodule FermixCore.Management.AlwaysOnTest do
                AlwaysOn.act(%{action: "cancel", key: "k", input: %Input{}}, opts)
 
       assert is_binary(sentence)
-    end
-  end
-
-  describe "the token" do
-    test "is checked and kept, and the screen after it is the choice", ctx do
-      assert {:ok, %{"summary" => summary, "result" => nil}} =
-               press(ctx, "paste_token", token_input())
-
-      assert summary["state"] == "choose"
-      assert {:ok, %{token: token}} = Ledger.read(ctx.home, "nimbus")
-      assert token == FakeCloudProvider.token()
-    end
-
-    test "one the provider refuses is refused on the token, and kept nowhere", ctx do
-      input = %Input{token: "invented-wrong-token-00000"}
-
-      assert {:error, :invalid_params, %{"field" => "token", "sentence" => sentence}} =
-               press(ctx, "paste_token", input)
-
-      assert sentence =~ "Nimbus"
-      refute File.exists?(Ledger.path(ctx.home, "nimbus"))
-    end
-  end
-
-  describe "creating the server" do
-    setup ctx, do: connect!(ctx)
-
-    test "names the step before the job, so the answer already says it runs, and the " <>
-           "job's end clears it",
-         ctx do
-      assert {:ok, %{"summary" => summary, "result" => nil}} =
-               press(ctx, "create_server", @choice)
-
-      assert summary["state"] == "creating"
-      assert summary["sentence"] == "Starting your server…"
-      assert offered!(summary, "cancel")
-
-      settle!(ctx)
-      assert {:ok, %{server: server, action: nil}} = Ledger.read(ctx.home, "nimbus")
-      assert %{status: :created, type: "small-4", location: "osl1"} = server
-      assert server.total_monthly == "12.00"
-    end
-
-    test "takes the size and place chosen", ctx do
-      input = %Input{type: "large-8", location: "osl1"}
-      assert {:ok, _answer} = press(ctx, "create_server", input)
-
-      settle!(ctx)
-
-      assert {:ok, %{server: %{type: "large-8", location: "osl1"}}} =
-               Ledger.read(ctx.home, "nimbus")
-    end
-
-    test "with no size and place chosen it is refused on the type, and leaves no step behind",
-         ctx do
-      assert {:error, :invalid_params, %{"field" => "type", "sentence" => _sentence}} =
-               press(ctx, "create_server")
-
-      assert {:ok, %{action: nil, server: nil}} = Ledger.read(ctx.home, "nimbus")
-      assert jobs(ctx) == []
-    end
-
-    test "keeps the size and place chosen on the step from the press on", ctx do
-      test = self()
-
-      # The job holds before its first read of the provider.
-      spy = fn
-        :catalog ->
-          send(test, {:holding, self()})
-
-          receive do
-            :go -> :ok
-          end
-
-        _other ->
-          :ok
-      end
-
-      held = %{ctx | opts: put_provider_opt(ctx.opts, :spy, spy)}
-
-      assert {:ok, _answer} =
-               press(held, "create_server", %Input{type: "large-8", location: "osl1"})
-
-      assert_receive {:holding, run}, 10_000
-
-      assert {:ok, %{action: %{kind: "create", type: "large-8", location: "osl1"}}} =
-               Ledger.read(ctx.home, "nimbus")
-
-      send(run, :go)
-      settle!(held)
-    end
-
-    test "a size with no place is refused on the place, and leaves no step behind", ctx do
-      assert {:error, :invalid_params, %{"field" => "location", "sentence" => _sentence}} =
-               press(ctx, "create_server", %Input{type: "large-8"})
-
-      assert {:ok, %{action: nil, server: nil}} = Ledger.read(ctx.home, "nimbus")
-      assert jobs(ctx) == []
-      assert summary(ctx.opts)["state"] == "choose"
-    end
-
-    test "meeting a read of the provider that runs is refused busy in words, and leaves no " <>
-           "step behind",
-         ctx do
-      hold_reconcile!(ctx)
-
-      assert {:error, :unavailable, %{"capability" => "home", "sentence" => sentence}} =
-               press(ctx, "create_server", @choice)
-
-      assert sentence =~ "server"
-      assert {:ok, %{action: nil}} = Ledger.read(ctx.home, "nimbus")
-    end
-
-    test "in the next place, after the first had none, with the size the failure kept", ctx do
-      failure = %{
-        reason: "unavailable",
-        sentence: "Oslo has no Small 4 right now.",
-        next_location: "lis1",
-        at: @at,
-        action: "create",
-        type: "small-4",
-        location: "osl1"
-      }
-
-      {:ok, _ledger} = Ledger.update(ctx.home, "nimbus", &{:ok, Ledger.put_failure(&1, failure)})
-      assert %{"detail" => %{"kind" => "no_capacity"}} = summary(ctx.opts)
-
-      assert {:ok, %{"summary" => %{"state" => "creating"}}} = press(ctx, "create_in")
-
-      settle!(ctx)
-
-      assert {:ok, %{server: %{type: "small-4", location: "lis1"}, failure: nil}} =
-               Ledger.read(ctx.home, "nimbus")
-    end
-  end
-
-  describe "start again" do
-    setup ctx, do: connect!(ctx)
-
-    test "is one job: what stands is deleted, then a server of its size and place is created",
-         ctx do
-      created!(ctx, %{@recommended | type: "large-8"})
-      provisioned_window(ctx, :open, 31 * 60_000)
-      assert %{"detail" => %{"kind" => "not_set_up"}} = summary(ctx.opts)
-
-      assert {:ok, %{"summary" => summary}} = press(ctx, "start_again")
-      assert summary["state"] == "creating"
-
-      settle!(ctx)
-      assert [_one_job] = jobs(ctx)
-
-      assert {:ok, %{server: new, action: nil}} = Ledger.read(ctx.home, "nimbus")
-      assert %{status: :created, type: "large-8", location: "osl1"} = new
-
-      calls = Enum.map(FakeCloudProvider.calls(ctx.world), &elem(&1, 0))
-      deleted = Enum.find_index(calls, &(&1 == :delete))
-      created = Enum.find_index(Enum.drop(calls, deleted), &(&1 == :create_server))
-      assert is_integer(deleted) and is_integer(created)
-    end
-
-    test "after a step the engine's restart left, creates again with what it kept", ctx do
-      :ok = Provision.put_action("create", ctx.opts)
-      choice = %{type: "large-8", location: "osl1"}
-      {:ok, _ledger} = Ledger.update(ctx.home, "nimbus", &{:ok, Ledger.choose(&1, choice)})
-      :ok = Provision.interrupt_left_actions(ctx.opts)
-
-      assert %{"detail" => %{"kind" => "create_failed"}} = summary(ctx.opts)
-      assert offered!(summary(ctx.opts), "start_again")["needs"] == []
-      assert {:ok, _answer} = press(ctx, "start_again")
-
-      settle!(ctx)
-
-      assert {:ok, %{server: %{status: :created, type: "large-8"}, failure: nil, action: nil}} =
-               Ledger.read(ctx.home, "nimbus")
-    end
-
-    test "with no size and place kept, asks for them and creates the one chosen", ctx do
-      failure = %{
-        reason: "interrupted",
-        sentence: "Fermix stopped before your server was created, so start again.",
-        next_location: nil,
-        at: @at
-      }
-
-      {:ok, _ledger} = Ledger.update(ctx.home, "nimbus", &{:ok, Ledger.put_failure(&1, failure)})
-      assert offered!(summary(ctx.opts), "start_again")["needs"] == ["choice"]
-
-      assert {:error, :invalid_params, %{"field" => "type"}} = press(ctx, "start_again")
-      assert {:ok, _answer} = press(ctx, "start_again", %Input{type: "large-8", location: "osl1"})
-      settle!(ctx)
-
-      assert {:ok, %{server: %{status: :created, type: "large-8"}, failure: nil}} =
-               Ledger.read(ctx.home, "nimbus")
-    end
-  end
-
-  describe "power" do
-    setup ctx do
-      connect!(ctx)
-      created!(ctx, @recommended)
-      provisioned_window(ctx, :open, 60_000)
-      ctx
-    end
-
-    test "turn it on is the power job, and its end is kept", ctx do
-      turned_off!(ctx)
-      assert %{"detail" => %{"kind" => "turned_off"}} = summary(ctx.opts)
-
-      assert {:ok, %{"summary" => %{"sentence" => "Turning your server on…"}}} =
-               press(ctx, "turn_on")
-
-      settle!(ctx)
-      assert {:ok, %{server: %{power: "running"}, action: nil}} = Ledger.read(ctx.home, "nimbus")
-      assert {:power, {server_id(ctx), :on}} in FakeCloudProvider.calls(ctx.world)
-    end
-
-    test "a power action that stops is a problem the summary keeps", ctx do
-      turned_off!(ctx)
-      FakeCloudProvider.fault(ctx.world, :power, {:unreachable, "invented timeout"})
-
-      assert {:ok, _answer} = press(ctx, "turn_on")
-      settle!(ctx)
-
-      assert %{"state" => "problem", "detail" => %{"kind" => "power_failed"}} =
-               summary(ctx.opts)
-    end
-  end
-
-  describe "deleting" do
-    setup ctx do
-      connect!(ctx)
-      created!(ctx, @recommended)
-      ctx
-    end
-
-    test "Delete your server is the delete job", ctx do
-      provisioned_window(ctx, :open, 31 * 60_000)
-
-      assert {:ok, %{"summary" => %{"sentence" => "Deleting your server…"}}} =
-               press(ctx, "delete_server")
-
-      settle!(ctx)
-      assert {:ok, %{server: nil, firewall: nil, action: nil}} = Ledger.read(ctx.home, "nimbus")
-      assert summary(ctx.opts)["state"] == "choose"
-    end
-
-    test "Cancel with the server standing is the delete job", ctx do
-      provisioned_window(ctx, :open, 60_000)
-      assert %{"state" => "creating", "action" => %{"id" => "cancel"}} = summary(ctx.opts)
-
-      assert {:ok, _answer} = press(ctx, "cancel")
-      settle!(ctx)
-
-      assert {:ok, %{server: nil, action: nil}} = Ledger.read(ctx.home, "nimbus")
-    end
-  end
-
-  describe "cancel during a create" do
-    test "stops the create, waits for its run to end, then deletes what it made", ctx do
-      connect!(ctx)
-      test = self()
-      tracker = start_supervised!({Agent, fn -> nil end}, id: :tracker)
-
-      # The create holds inside its server's call; the delete reports whether
-      # the create's run still lived when it reached the provider.
-      spy = fn
-        :create_server ->
-          run = self()
-          Agent.update(tracker, fn _nil -> run end)
-          send(test, :create_holding)
-
-          receive do
-            :never -> :ok
-          end
-
-        :delete ->
-          send(test, {:delete_beside_create, Process.alive?(Agent.get(tracker, & &1))})
-
-        _other ->
-          :ok
-      end
-
-      opts = put_provider_opt(ctx.opts, :spy, spy)
-      ctx = %{ctx | opts: opts}
-
-      assert {:ok, _answer} = press(ctx, "create_server", @choice)
-      assert_receive :create_holding, 10_000
-      assert %{"state" => "creating", "action" => %{"id" => "cancel"}} = summary(opts)
-
-      assert {:ok, %{"summary" => summary}} = press(ctx, "cancel")
-      refute Process.alive?(Agent.get(tracker, & &1))
-      assert summary["state"] == "creating"
-
-      assert_receive {:delete_beside_create, false}, 10_000
-      settle!(ctx)
-
-      assert {:ok, %{server: nil, firewall: nil, action: nil}} = Ledger.read(ctx.home, "nimbus")
-      assert summary(opts)["state"] == "choose"
     end
   end
 
@@ -536,7 +194,6 @@ defmodule FermixCore.Management.AlwaysOnTest do
 
       assert {:ok, %{"summary" => %{"state" => "off"}}} = press(ctx, "cancel")
       assert_received {:enrollment_withdrawn, :manual}
-      refute_received :code_withdrawn
     end
   end
 
@@ -673,8 +330,6 @@ defmodule FermixCore.Management.AlwaysOnTest do
     setup ctx do
       :ok = DesktopLink.write(ctx.home, desktop_link())
       :ok = Moved.write(ctx.home, %{epoch: 4, moved_at: @at, to: "fermix-general-a3f9"})
-      connect!(ctx)
-      created!(ctx, @recommended)
       script = start_supervised!({Agent, fn -> server_part(:on) end}, id: :script)
       test = self()
 
@@ -685,57 +340,12 @@ defmodule FermixCore.Management.AlwaysOnTest do
 
       Agent.update(ctx.link, &%{&1 | primary: primary(nil)})
 
-      # The server's code comes over the link, as the daemon's forward brings it.
       opts =
         ctx.opts
-        |> Keyword.drop([:open_code, :withdraw_code])
         |> Keyword.put(:engine_role, @device)
         |> Keyword.put(:primary_forward, forward)
 
       %{ctx | opts: opts} |> Map.put(:script, script)
-    end
-
-    # Review R4: a replace that failed before the provider allocated anything
-    # is the desktop's own problem, offered another Replace; never on.
-    test "a replace that failed before the new server is a problem of its own", ctx do
-      FakeCloudProvider.fault(ctx.world, :catalog, {:unreachable, :timeout})
-      assert {:ok, _answer} = press(ctx, "replace_server", @choice)
-      settle!(ctx)
-
-      assert {:ok, %{failure: %{action: "create"}, replace: nil}} =
-               Ledger.read(ctx.home, "nimbus")
-
-      assert summary(ctx.opts)["state"] == "problem"
-      screen = summary(ctx.opts)
-      assert %{"action" => %{"id" => "replace_server"}} = screen
-      offered = Enum.map(screen["detail"]["alternatives"], & &1["id"])
-      refute Enum.any?(offered, &(&1 in ["start_again", "delete_server"]))
-
-      assert {:ok, _answer} = press(ctx, "replace_server", @choice)
-      settle!(ctx)
-
-      assert {:ok, %{replace: %{old: %{server: %{}}}, server: %{status: :created}, failure: nil}} =
-               Ledger.read(ctx.home, "nimbus")
-    end
-
-    # Review R2: a ready replacement can still be cancelled.
-    test "a new server ready for the move can be deleted", ctx do
-      live = server_id(ctx)
-      replacing_ready!(ctx)
-      screen = summary(ctx.opts)
-      assert screen["state"] == "ready"
-
-      actions = HomeSummary.offered(screen)
-
-      assert Enum.any?(actions, &(&1["id"] in ["cancel", "delete_server"]))
-
-      assert {:ok, _answer} = press(ctx, "delete_server")
-      settle!(ctx)
-
-      # The new server is gone; the one the home lives on is the ledger's again.
-      assert {:ok, %{replace: nil, server: %{id: ^live}}} = Ledger.read(ctx.home, "nimbus")
-
-      assert summary(ctx.opts)["state"] == "on"
     end
 
     test "Back up now is sent to the server", ctx do
@@ -744,96 +354,12 @@ defmodule FermixCore.Management.AlwaysOnTest do
       assert {:ok, %{"result" => nil}} = press(ctx, "back_up_now")
       assert_received {:forwarded, "home.snapshots.run", %{}}
     end
-
-    test "Replace the server creates the new one here, with the server's own code", ctx do
-      assert {:ok, %{"summary" => summary}} = press(ctx, "replace_server", @choice)
-      assert summary["state"] == "creating"
-
-      settle!(ctx)
-      assert_received {:forwarded, "home.enroll.open", %{"kind" => "provisioned"}}
-
-      assert {:ok, %{replace: %{old: %{server: %{}}}, server: %{status: :created}}} =
-               Ledger.read(ctx.home, "nimbus")
-    end
-
-    test "Restart server is the power job, on the server this desktop cannot reach", ctx do
-      Agent.update(ctx.link, &%{&1 | primary: primary(11 * 60_000)})
-      assert %{"detail" => %{"kind" => "cannot_reach"}} = summary(ctx.opts)
-
-      assert {:ok, %{"summary" => %{"sentence" => "Restarting your server…"}}} =
-               press(ctx, "restart_server")
-
-      settle!(ctx)
-      assert {:power, {server_id(ctx), :reset}} in FakeCloudProvider.calls(ctx.world)
-    end
-
-    test "Move now sends the move to the server, which keeps no desktop of the old one, " <>
-           "and records the replace once",
-         ctx do
-      candidate_id = replacing_ready!(ctx)
-      assert %{"state" => "ready", "action" => move_now} = summary(ctx.opts)
-      assert move_now["needs"] == ["recovery_passphrase"]
-
-      Agent.update(ctx.script, fn script ->
-        fn
-          "home.move.start", _params -> {:ok, %{"move_id" => "mv-0001"}}
-          method, params -> script.(method, params)
-        end
-      end)
-
-      assert {:ok, %{"result" => %{"move_id" => "mv-0001"}, "summary" => summary}} =
-               press(ctx, "move_now", %Input{recovery_passphrase: @passphrase})
-
-      assert_received {:forwarded, "home.move.start", params}
-
-      assert params == %{
-               "candidate_id" => candidate_id,
-               "recovery_passphrase" => @passphrase,
-               "keep_as_desktop" => false
-             }
-
-      assert summary["state"] == "moving"
-      assert {:ok, %{replace: %{move_started_at: @at}}} = Ledger.read(ctx.home, "nimbus")
-
-      # The move started: the screen offers no second one.
-      assert {:error, :changed, _details} =
-               AlwaysOn.act(
-                 %{action: "move_now", key: move_now["key"], input: %Input{}},
-                 ctx.opts
-               )
-    end
-
-    test "the server's own refusal of a replace's move is answered as it came, and " <>
-           "records nothing",
-         ctx do
-      replacing_ready!(ctx)
-      refusal = %{"capability" => "home", "sentence" => "The move cannot start yet. Too full."}
-
-      Agent.update(ctx.script, fn script ->
-        fn
-          "home.move.start", _params -> {:error, :unavailable, refusal}
-          method, params -> script.(method, params)
-        end
-      end)
-
-      assert press(ctx, "move_now", %Input{recovery_passphrase: @passphrase}) ==
-               {:error, :unavailable, refusal}
-
-      assert {:ok, %{replace: %{move_started_at: nil}}} = Ledger.read(ctx.home, "nimbus")
-    end
   end
 
-  # Always On's move back (design §8, §9, §14): a linked desktop takes the
-  # home back from its server over the link in two presses, Move back and
-  # Move now, or restores its own copy of a server Fermix created that is
-  # gone, deleting the server first. The server's steps go over a scripted
-  # link; the candidate's subtree, the restore and the restart are stand-ins.
   describe "moving back, on a linked desktop" do
     setup ctx do
       :ok = DesktopLink.write(ctx.home, desktop_link())
       :ok = Moved.write(ctx.home, %{epoch: 4, moved_at: @at, to: "fermix-general-a3f9"})
-      connect!(ctx)
-      created!(ctx, @recommended)
       script = start_supervised!({Agent, fn -> server_part(:on) end}, id: :script)
       test = self()
 
@@ -846,7 +372,6 @@ defmodule FermixCore.Management.AlwaysOnTest do
 
       opts =
         ctx.opts
-        |> Keyword.drop([:open_code, :withdraw_code])
         |> Keyword.merge(
           engine_role: @device,
           primary_forward: forward,
@@ -882,9 +407,8 @@ defmodule FermixCore.Management.AlwaysOnTest do
 
       assert state["primary"]["name"] == "invented"
 
-      assert {:ok, record} = Return.read(ctx.home)
-      assert %{from: "invented", primary_epoch: 5, started_at: @at} = record
-      assert record.provider_server == server_id(ctx)
+      assert Return.read(ctx.home) ==
+               {:ok, %{from: "invented", primary_epoch: 5, started_at: @at}}
 
       assert summary["state"] == "creating"
       assert summary["sentence"] == "Connecting this computer to your server…"
@@ -926,19 +450,25 @@ defmodule FermixCore.Management.AlwaysOnTest do
       refute_received {:return_started, _home}
     end
 
-    test "a replace begun since the screen was drawn answers changed, and writes nothing", ctx do
+    test "two presses of Move back at once: the first runs, the second sees what it changed",
+         ctx do
       key = offered!(summary(ctx.opts), "move_back")["key"]
-      replacing_ready!(ctx)
+      request = %{action: "move_back", key: key, input: %Input{}}
 
-      assert {:error, :changed, _details} =
-               AlwaysOn.act(%{action: "move_back", key: key, input: %Input{}}, ctx.opts)
+      answers =
+        [request, request]
+        |> Enum.map(fn request -> Task.async(fn -> AlwaysOn.act(request, ctx.opts) end) end)
+        |> Enum.map(&Task.await(&1, 15_000))
 
-      refute Candidate.present?(ctx.home)
+      assert [{:error, :changed, %{"sentence" => _}}, {:ok, %{"summary" => after_first}}] =
+               Enum.sort_by(answers, &elem(&1, 0))
+
+      assert after_first["state"] == "creating"
+      assert_received {:forwarded, "home.enroll.open", %{}}
+      refute_received {:forwarded, "home.enroll.open", %{}}
     end
 
-    test "Move now sends the move to the server and records it in the return, never as a " <>
-           "replace",
-         ctx do
+    test "Move now sends the move to the server and records it in the return", ctx do
       enrolled!(ctx)
       assert %{"state" => "ready", "action" => %{"id" => "move_now"}} = summary(ctx.opts)
       script = ctx.script
@@ -969,7 +499,6 @@ defmodule FermixCore.Management.AlwaysOnTest do
       assert {:ok, %{move_started_at: @at, candidate_id: @back_cand, move_id: "mv-0002"}} =
                Return.read(ctx.home)
 
-      assert {:ok, %{replace: nil}} = Ledger.read(ctx.home, "nimbus")
       assert after_move["state"] == "moving"
       refute "cancel" in Enum.map(HomeSummary.offered(after_move), & &1["id"])
     end
@@ -1105,7 +634,7 @@ defmodule FermixCore.Management.AlwaysOnTest do
            "and deletes nothing",
          ctx do
       copy = copy!(ctx)
-      {:ok, %{server: %{name: server}}} = Ledger.read(ctx.home, "nimbus")
+      server = "fermix-general-a3f9"
       Agent.update(ctx.link, &%{&1 | primary: primary(11 * 60_000)})
       assert %{"detail" => %{"kind" => "cannot_reach"}} = summary(ctx.opts)
       test = self()
@@ -1135,9 +664,7 @@ defmodule FermixCore.Management.AlwaysOnTest do
       settle!(ctx)
 
       assert [%{"kind" => "home_restore", "status" => "completed"}] = jobs(ctx)
-      refute List.keyfind(FakeCloudProvider.calls(ctx.world), :delete, 0)
       assert Return.read(ctx.home) == {:ok, %{from: server, started_at: @at}}
-      assert %{server: %{status: :created}} = Ledger.state(ctx.home, FakeCloudProvider)
     end
 
     test "a restore that stopped before its copy was in place offers Restore here again", ctx do
@@ -1169,7 +696,6 @@ defmodule FermixCore.Management.AlwaysOnTest do
       assert said == "That is not the recovery passphrase you set."
       assert jobs(ctx) == []
       assert Return.read(ctx.home) == :absent
-      assert %{server: %{status: :created}} = Ledger.state(ctx.home, FakeCloudProvider)
     end
   end
 
@@ -1178,7 +704,7 @@ defmodule FermixCore.Management.AlwaysOnTest do
   # again, as it does after any act, so no refusal carries a summary.
   describe "the changed refusal" do
     test "holds only its sentence, on the wire too", ctx do
-      params = %{"action" => "paste_token", "key" => "an-older-key"}
+      params = %{"action" => "own_server", "key" => "an-older-key"}
 
       assert {:error, :changed, details} = route("home.act", params, ctx)
 
@@ -1191,20 +717,14 @@ defmodule FermixCore.Management.AlwaysOnTest do
     end
   end
 
-  # The wire (§3.4, §3.5): `home.act` decodes its params at the router, the
-  # server's steps answer only a desktop's forward, and the provisioner's
-  # writes are no method.
+  # The wire (§3.4, §3.5): `home.act` decodes its params at the router, and
+  # the server's steps answer only a desktop's forward.
   describe "through the router" do
     test "home.act runs the step and answers the summary after it", ctx do
-      key = offered!(summary(ctx.opts), "paste_token")["key"]
+      key = offered!(summary(ctx.opts), "own_server")["key"]
+      params = %{"action" => "own_server", "key" => key}
 
-      params = %{
-        "action" => "paste_token",
-        "key" => key,
-        "input" => %{"token" => FakeCloudProvider.token()}
-      }
-
-      assert {:ok, %{"summary" => %{"state" => "choose"}, "result" => nil}} =
+      assert {:ok, %{"summary" => %{"state" => "off"}, "result" => %{"code" => @manual_code}}} =
                route("home.act", params, ctx)
     end
 
@@ -1252,161 +772,6 @@ defmodule FermixCore.Management.AlwaysOnTest do
 
       assert_received {:withdrawn, :provisioned}
     end
-
-    test "the provisioner's writes are no method", ctx do
-      for method <- ~w(home.provision.providers home.provision.connect home.provision.create
-                       home.provision.power home.provision.resources home.provision.delete) do
-        assert {:error, :method_not_found, %{"method" => ^method}} = route(method, %{}, ctx)
-      end
-    end
-  end
-
-  # Review R5, R1, R3: every ending of a step leaves a usable screen.
-  describe "after a step stopped" do
-    test "a create whose run raised keeps its failure on the screen", ctx do
-      connect!(ctx)
-
-      spy = fn
-        :catalog -> raise "invented provider failure"
-        _other -> :ok
-      end
-
-      raising = %{ctx | opts: put_provider_opt(ctx.opts, :spy, spy)}
-      assert {:ok, _answer} = press(raising, "create_server", @choice)
-      settle!(raising)
-      assert Enum.any?(jobs(ctx), &(&1["status"] == "failed"))
-      assert {:ok, %{action: nil, failure: failure}} = Ledger.read(ctx.home, "nimbus")
-      assert is_map(failure), "the job failed but the ledger keeps #{inspect(failure)}"
-      assert %{reason: "interrupted", action: "create"} = failure
-
-      assert %{"state" => "problem", "detail" => %{"kind" => "create_failed"}} =
-               summary(ctx.opts)
-
-      assert {:ok, _answer} = press(ctx, "start_again")
-      settle!(ctx)
-      assert {:ok, %{server: %{status: :created}, failure: nil}} = Ledger.read(ctx.home, "nimbus")
-    end
-
-    test "a create whose run was killed keeps its failure on the screen", ctx do
-      connect!(ctx)
-
-      spy = fn
-        :create_server -> Process.exit(self(), :kill)
-        _other -> :ok
-      end
-
-      killed = %{ctx | opts: put_provider_opt(ctx.opts, :spy, spy)}
-      assert {:ok, _answer} = press(killed, "create_server", @choice)
-      settle!(killed)
-
-      assert {:ok, %{action: nil, failure: %{reason: "interrupted", action: "create"}}} =
-               Ledger.read(ctx.home, "nimbus")
-
-      assert %{"detail" => %{"kind" => "create_failed"}} = summary(ctx.opts)
-    end
-
-    test "a read-only token replaced by one that writes offers the create again", ctx do
-      assert {:ok, _answer} =
-               press(ctx, "paste_token", %Input{token: FakeCloudProvider.read_only_token()})
-
-      assert {:ok, _answer} = press(ctx, "create_server", @choice)
-      settle!(ctx)
-      assert summary(ctx.opts)["detail"]["kind"] == "read_only_token"
-      assert {:ok, %{"summary" => screen}} = press(ctx, "paste_token", token_input())
-      assert {:ok, %{token: token}} = Ledger.read(ctx.home, "nimbus")
-      assert token == FakeCloudProvider.token()
-
-      actions = HomeSummary.offered(screen)
-
-      assert Enum.any?(actions, &(&1["id"] in ["create_server", "start_again"])), inspect(screen)
-      assert screen["state"] == "choose"
-
-      assert {:ok, _answer} = press(ctx, "create_server", @choice)
-      settle!(ctx)
-      assert {:ok, %{server: %{status: :created}, failure: nil}} = Ledger.read(ctx.home, "nimbus")
-    end
-
-    test "an account limit the owner lifted offers the create again", ctx do
-      connect!(ctx)
-      FakeCloudProvider.fault(ctx.world, :create_server, :account_limit)
-      assert {:ok, _answer} = press(ctx, "create_server", @choice)
-      settle!(ctx)
-      screen = summary(ctx.opts)
-      assert screen["detail"]["kind"] == "account_limit"
-      # The fault was one-shot: the same provider now accepts the create.
-      assert FakeCloudProvider.world(ctx.world).faults == []
-
-      actions = HomeSummary.offered(screen)
-
-      assert Enum.any?(actions, &(&1["id"] in ["create_server", "start_again", "check_again"])),
-             inspect(screen)
-
-      assert {:ok, _answer} = press(ctx, "start_again")
-      settle!(ctx)
-
-      assert {:ok,
-              %{server: %{status: :created, type: "small-4", location: "osl1"}, failure: nil}} =
-               Ledger.read(ctx.home, "nimbus")
-    end
-
-    test "a size out of stock everywhere offers the create again, with the size it kept", ctx do
-      connect!(ctx)
-
-      failure = %{
-        reason: "unavailable",
-        sentence: "No location Fermix offers has a Small 4 right now, Oslo included.",
-        next_location: nil,
-        at: @at,
-        action: "create",
-        type: "small-4",
-        location: "osl1"
-      }
-
-      {:ok, _ledger} = Ledger.update(ctx.home, "nimbus", &{:ok, Ledger.put_failure(&1, failure)})
-
-      assert %{"detail" => %{"kind" => "no_capacity"}, "action" => %{"id" => "start_again"}} =
-               summary(ctx.opts)
-
-      assert {:ok, _answer} = press(ctx, "start_again")
-      settle!(ctx)
-
-      assert {:ok,
-              %{server: %{status: :created, type: "small-4", location: "osl1"}, failure: nil}} =
-               Ledger.read(ctx.home, "nimbus")
-    end
-
-    # Review R2: a server Fermix created waits for the move with a way to
-    # delete it, whether it is ready or its review blocks.
-    test "a server ready for the first move can be deleted", ctx do
-      first_move_ready!(ctx)
-      assert %{"state" => "ready"} = summary(ctx.opts)
-
-      assert {:ok, _answer} = press(ctx, "delete_server")
-      settle!(ctx)
-      assert {:ok, %{server: nil, firewall: nil}} = Ledger.read(ctx.home, "nimbus")
-    end
-
-    test "a server whose move was undone can be deleted", ctx do
-      first_move_ready!(ctx)
-      File.mkdir_p!(Move.dir(ctx.home))
-      :ok = Move.put_phase(ctx.home, "aborted", %{"candidate" => "fermix-general-a3f9"}, @at)
-      assert %{"state" => "undone"} = summary(ctx.opts)
-
-      assert {:ok, _answer} = press(ctx, "delete_server")
-      settle!(ctx)
-      assert {:ok, %{server: nil, firewall: nil}} = Ledger.read(ctx.home, "nimbus")
-    end
-
-    test "a server whose review blocks the first move can be deleted", ctx do
-      candidate_id = first_move_ready!(ctx)
-      items = [%{id: "disk", status: :block, sentence: "Too full."}]
-      :ok = Move.put_review(ctx.home, candidate_id, %{ready: false, items: items}, @at)
-      assert %{"detail" => %{"kind" => "not_ready"}} = summary(ctx.opts)
-
-      assert {:ok, _answer} = press(ctx, "delete_server")
-      settle!(ctx)
-      assert {:ok, %{server: nil, firewall: nil}} = Ledger.read(ctx.home, "nimbus")
-    end
   end
 
   defp route(method, params, ctx, extra \\ []) do
@@ -1433,51 +798,7 @@ defmodule FermixCore.Management.AlwaysOnTest do
       flunk("#{summary["state"]} offers no #{id}: #{inspect(Enum.map(offered, & &1["id"]))}")
   end
 
-  defp token_input, do: %Input{token: FakeCloudProvider.token()}
-
   # -- the world ---------------------------------------------------------------
-
-  defp provider_opts(world), do: [world: world, now: fn -> @at end, sleep: fn _ms -> :ok end]
-
-  defp put_provider_opt(opts, key, value),
-    do: Keyword.update!(opts, :provider_opts, &Keyword.put(&1, key, value))
-
-  defp connect!(ctx) do
-    {:ok, _ledger} =
-      Ledger.update(
-        ctx.home,
-        "nimbus",
-        &{:ok, Ledger.connect(&1, FakeCloudProvider.token(), @at)}
-      )
-
-    ctx
-  end
-
-  # A server the driver created, as a step's job leaves it.
-  defp created!(ctx, request) do
-    opts =
-      ctx.opts[:provider_opts] ++
-        [open_code: fn -> {:ok, @code} end, withdraw_code: fn -> :ok end]
-
-    {:ok, _server} = Driver.create(FakeCloudProvider, ctx.home, request, opts)
-    :ok
-  end
-
-  defp server_id(ctx) do
-    {:ok, %{server: %{id: id}}} = Ledger.read(ctx.home, "nimbus")
-    id
-  end
-
-  defp turned_off!(ctx) do
-    {:ok, %{server: %{id: id}}} = Ledger.read(ctx.home, "nimbus")
-    Agent.update(ctx.world, &put_in(&1.servers[id].power, "off"))
-
-    {:ok, _ledger} =
-      Ledger.update(ctx.home, "nimbus", &{:ok, Ledger.put_server(&1, %{power: "off"})})
-  end
-
-  defp provisioned_window(ctx, state, awake_ms),
-    do: Agent.update(ctx.link, &%{&1 | enrollment: window(:provisioned, state, nil, awake_ms)})
 
   defp window(kind, state, candidate_id, awake_ms) do
     %{
@@ -1487,62 +808,6 @@ defmodule FermixCore.Management.AlwaysOnTest do
       candidate_id: candidate_id,
       awake_ms: awake_ms
     }
-  end
-
-  # A step of the family already runs: a read of the provider.
-  defp hold_reconcile!(ctx) do
-    test = self()
-
-    {:ok, _view} =
-      Jobs.start(:home_provision,
-        name: "nimbus",
-        server: ctx.opts[:jobs][:server],
-        run: fn _id, _report ->
-          send(test, :reconciling)
-
-          receive do
-            :never -> {:ok, %{}}
-          end
-        end
-      )
-
-    assert_receive :reconciling, 10_000
-  end
-
-  # A server Fermix created enrolled with its code and waits for the first
-  # move; the candidate it enrolled as.
-  defp first_move_ready!(ctx) do
-    connect!(ctx)
-    created!(ctx, @recommended)
-    {:ok, held} = Candidates.add(ctx.home, candidate_attrs(), @at)
-    window = window(:provisioned, :used, held.candidate_id, 60_000)
-    Agent.update(ctx.link, &%{&1 | enrollment: window})
-    held.candidate_id
-  end
-
-  # The server the home lives on is being replaced: its new server stands and
-  # waits for the move, as the old server's own part says.
-  defp replacing_ready!(ctx) do
-    new_server = %{
-      name: "fermix-general-5d2e",
-      id: "nb-900",
-      status: :created,
-      type: "small-4",
-      location: "osl1",
-      ipv4: "198.51.100.9",
-      power: "running",
-      created_at: @at,
-      seen_at: @at
-    }
-
-    {:ok, _ledger} =
-      Ledger.update(ctx.home, "nimbus", fn ledger ->
-        {:ok, replacing} = Ledger.begin_replace(ledger, 5, @at)
-        {:ok, Ledger.put_server(replacing, new_server)}
-      end)
-
-    Agent.update(ctx.script, fn _script -> server_part(:replace_ready) end)
-    "cand-9d41c7e2b05a3f68"
   end
 
   # The server's own `home.status`, and its answers to the steps sent to it.
@@ -1555,9 +820,6 @@ defmodule FermixCore.Management.AlwaysOnTest do
 
       "home.snapshots.run", _params ->
         {:ok, %{"started" => true, "snapshots" => %{}}}
-
-      "home.enroll.open", %{"kind" => "provisioned"} ->
-        {:ok, %{"code" => @server_code}}
 
       "home.enroll.open", %{} ->
         {:ok, %{"code" => return_code(), "expires_at" => "2031-05-04T12:30:00Z"}}
@@ -1610,28 +872,6 @@ defmodule FermixCore.Management.AlwaysOnTest do
       "enrollment" => nil,
       "candidates" => []
     }
-  end
-
-  defp server_status(:replace_ready) do
-    Map.merge(server_status(:on), %{
-      "enrollment" => %{
-        "state" => "used",
-        "expires_at" => "2031-05-05T12:00:00Z",
-        "kind" => "provisioned",
-        "candidate_id" => "cand-9d41c7e2b05a3f68"
-      },
-      "candidates" => [
-        %{
-          "candidate_id" => "cand-9d41c7e2b05a3f68",
-          "name" => "fermix-general-5d2e",
-          "os" => "linux",
-          "arch" => "x86_64",
-          "version" => "9.9.9",
-          "enrolled_at" => "2031-05-04T11:05:00Z",
-          "expires_at" => "2031-05-05T11:05:00Z"
-        }
-      ]
-    })
   end
 
   defp primary(down_ms) do
@@ -1738,8 +978,7 @@ defmodule FermixCore.Management.AlwaysOnTest do
       Return.write(ctx.home, %{
         from: "fermix-general-a3f9",
         started_at: @at,
-        primary_epoch: 5,
-        provider_server: server_id(ctx)
+        primary_epoch: 5
       })
   end
 

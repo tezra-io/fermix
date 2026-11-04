@@ -155,24 +155,23 @@ it under the recovery passphrase, the engine then restarts in the device role
 and carries the move out, and \fBstatus\fR shows where it stands.
 .TP
 .B fermix always-on
-.RI "[--json] | " ACTION " [--provider " ID "] [--type " TYPE " --location " PLACE "] [--stdin] [--recovery-passphrase-file " PATH "] [--yes] [--wait] [--json]"
+.RI "[--json] | " ACTION " [--recovery-passphrase-file " PATH "] [--yes] [--wait] [--json]"
 Set up Always On from a terminal, the same steps the setup page and the
-Fermix app offer: Fermix moves to a server you own, one it creates on Hetzner from a token you
-paste, or a Linux server of your own. With no \fIACTION\fR it prints where
-Always On stands and the steps it offers; on a terminal it then asks which to
-take, asks what that step needs (the token and the recovery passphrase
-without echo, the size and place as a numbered list with the recommendation
-first), asks before anything costs money, deletes or moves, waits until the
-step is done and offers the next one. \fIACTION\fR takes one step by its
-name, such as \fBpaste\-token\fR, \fBcreate\-server\fR, \fBown\-server\fR or
-\fBmove\-now\fR. With no terminal, or with \fB\-\-json\fR, nothing is
-asked: \fB\-\-stdin\fR reads the token from a pipe,
-\fB\-\-recovery\-passphrase\-file\fR reads the passphrase, \fB\-\-type\fR
-and \fB\-\-location\fR choose the size and place (else the one Fermix
-recommends), \fB\-\-yes\fR accepts what the step asks first, and
+Fermix app offer: Fermix moves to a Linux server of your own. With no
+\fIACTION\fR it prints where Always On stands and the steps it offers; on a
+terminal it then asks which to take, asks for the recovery passphrase without
+echo when the step needs it, asks before anything moves or restores, waits
+until the step is done and offers the next one. \fIACTION\fR takes one step
+by its name: \fBown\-server\fR (the command for your server, with the code
+it asks for printed once), \fBcancel\fR, \fBback\-up\-now\fR,
+\fBcheck\-again\fR, \fBmove\-now\fR, \fBtry\-again\fR,
+\fBmove\-back\fR or \fBrestore\-here\fR, while \fBlearn\-more\fR and
+\fBupdate\fR print their page. With no terminal, or with \fB\-\-json\fR,
+nothing is asked: \fB\-\-recovery\-passphrase\-file\fR reads the
+passphrase, \fB\-\-yes\fR accepts what the step asks first, and
 \fB\-\-wait\fR waits for the step to settle, exiting 1 when it ends on a
-problem or is still at it after 45 minutes. A token or passphrase is never
-taken as an argument. It needs Fermix running. A release build has no Always
+problem or is still at it after 45 minutes. A passphrase is never taken as an
+argument. It needs Fermix running. A release build has no Always
 On yet: there it says "Always On is not in this release of Fermix yet."
 .TP
 .B fermix logs

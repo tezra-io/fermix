@@ -3,46 +3,23 @@ defmodule FermixCore.Management.AlwaysOn.Input do
   What an Always On step was given (Always On setup §3.4): `home.act`'s
   `input`, decoded where it arrived (the router, the setup page's event, the
   CLI) and passed on as this struct alone, never as the map it came in. Its
-  `Inspect` withholds the token and the recovery passphrase, so a crash
-  report, a log line or a page's last event names neither.
+  `Inspect` withholds the recovery passphrase, so a crash report, a log line
+  or a page's last event never names it.
 
-    * `token`: a provider's API token, for `paste_token`;
-    * `provider`: the provider the token is for (the one provider when only
-      one is offered);
     * `recovery_passphrase`: for `move_now` and `try_again`, checked against
-      the recovery key set, or set when none is;
-    * `type` and `location`: the size and place chosen, for `create_server`
-      and `replace_server`: both, or neither for the recommendation.
+      the recovery key set, or set when none is; for `restore_here`, the one
+      that opens the copy restored.
 
-  Each is text, or nil when not given.
+  It is text, or nil when not given.
   """
 
-  @fields %{
-    "token" => :token,
-    "provider" => :provider,
-    "recovery_passphrase" => :recovery_passphrase,
-    "type" => :type,
-    "location" => :location
-  }
-  @shape_sentence "Always On takes a token, a provider, a recovery passphrase, a size and a " <>
-                    "place, each as text, and nothing else."
-  @field_sentences %{
-    "token" => "Paste the API token as text.",
-    "provider" => "Choose one of the providers Fermix creates a server on.",
-    "recovery_passphrase" => "Type the recovery passphrase as text.",
-    "type" => "Choose one of the server types Fermix offers.",
-    "location" => "Choose one of the places Fermix creates a server in."
-  }
+  @fields %{"recovery_passphrase" => :recovery_passphrase}
+  @shape_sentence "Always On takes a recovery passphrase, as text, and nothing else."
+  @field_sentences %{"recovery_passphrase" => "Type the recovery passphrase as text."}
 
-  defstruct token: nil, provider: nil, recovery_passphrase: nil, type: nil, location: nil
+  defstruct recovery_passphrase: nil
 
-  @type t :: %__MODULE__{
-          token: String.t() | nil,
-          provider: String.t() | nil,
-          recovery_passphrase: String.t() | nil,
-          type: String.t() | nil,
-          location: String.t() | nil
-        }
+  @type t :: %__MODULE__{recovery_passphrase: String.t() | nil}
 
   @doc "The fields `input` may hold, as the wire names them."
   @spec fields() :: [String.t()]
@@ -79,16 +56,9 @@ defmodule FermixCore.Management.AlwaysOn.Input do
   defimpl Inspect do
     import Inspect.Algebra
 
-    # The two secrets show only whether they were given.
+    # The secret shows only whether it was given.
     def inspect(input, opts) do
-      shown = [
-        provider: input.provider,
-        type: input.type,
-        location: input.location,
-        token: withheld(input.token),
-        recovery_passphrase: withheld(input.recovery_passphrase)
-      ]
-
+      shown = [recovery_passphrase: withheld(input.recovery_passphrase)]
       concat(["#FermixCore.Management.AlwaysOn.Input<", to_doc(shown, opts), ">"])
     end
 

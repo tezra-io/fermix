@@ -1,8 +1,7 @@
 defmodule FermixCore.Home.UnreadableFiles do
   @moduledoc """
   Which of the things `home.status` reads on every poll cannot be read now
-  (M75 lean v1 §7): the provisioner's ledger (`Provision.Ledger.state/3`),
-  the settings its summary reads for what stops after a move
+  (M75 lean v1 §7): the settings its summary reads for what stops after a move
   (`MoveReadiness.stays_here/3`), the primary's disk
   (`Management.Home.status/1`), the last review of the move and each copy a
   desktop stores (`Management.HomeSummary.gather/5`). The apps poll

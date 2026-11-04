@@ -1,14 +1,14 @@
 # Moving back to the computer the home left
 
 Always On's move back: the home comes back from the server to the computer
-it left, in place, and afterwards the server is deleted in a step of its own.
+it left, in place, and afterwards the server is the owner's to turn off or
+delete.
 The move to a server, the roles and the epoch: skill_view(name:
 "self-knowledge", file: "home").
 
 - **Move back.** On the computer the home left, Always On's Details offer
-  **Move back to this Mac** ("this computer" off a Mac), beside Back up now
-  and Replace the server, whatever server the home moved to: one Fermix
-  created or one of the owner's own. It is two presses, each one `home.act`.
+  **Move back to this Mac** ("this computer" off a Mac), beside Back up now.
+  It is two presses, each one `home.act`.
   Move back asks the server for a code (it names this desktop, which is how
   the server knows the move goes back and not to another server) and writes
   this computer's candidate for the home beside the moved home
@@ -33,7 +33,7 @@ The move to a server, the roles and the epoch: skill_view(name:
   (receiving, waiting for the server to hand over, putting Fermix in place).
   The server's copy replaces the retired one in place, this computer's own
   files (logs, browser profiles, iMessage's cursor, the helper apps, models,
-  coding runs, the provider's file, the copies of the server's backups) stay
+  coding runs, the copies of the server's backups) stay
   where they were, the secrets go back into this computer's keychain, its
   own device settings (sandbox, computer use, computer history, iMessage)
   come back from before the move, and Fermix restarts as the primary, one
@@ -44,18 +44,15 @@ The move to a server, the roles and the epoch: skill_view(name:
   problem (`return_failed`) with **Move back** again, or **Cancel**.
   When another computer took the home back first, this computer's move back
   is dropped quietly.
-- **Afterwards.** Back on this computer as the primary, while the server
-  Fermix created still stands: "Fermix is back on this Mac. Your server
-  still runs and costs money until you delete it." with **Delete your
-  server**, a separate confirmed step ("Fermix no longer runs on it, and
-  everything still on it is gone for good."). A server of the owner's own is
-  told once ("Your own server still runs its retired copy: turn it off or
-  delete it."); nothing here deletes it. Screen history recorded here before
-  the move is not brought back (the server never had it).
+- **Afterwards.** Back on this computer as the primary, Fermix says so once
+  ("Fermix is back on this Mac. Your own server still runs its retired copy:
+  turn it off or delete it."); nothing here deletes it. Screen history
+  recorded here before the move is not brought back (the server never had
+  it).
 - **Restore here, when the server is gone.** When the server stopped
   answering (no answer for 10 minutes, whether it is turned off, deleted or
-  unreachable, or no longer connected), whoever created it, and this
-  computer keeps a copy of its backups, Always On offers **Restore on this
+  unreachable, or no longer connected) and this computer keeps a copy of its
+  backups, Always On offers **Restore on this
   Mac** beside the problem, with the copy's date. It asks for the recovery
   passphrase (the newest copy that passphrase opens is restored; one that
   opens none is refused before anything is written), and its confirm asks

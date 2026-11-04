@@ -30,7 +30,6 @@ defmodule FermixCore.Home.DeviceLocalTest do
           "auth.json.broken.1793083733",
           "config.toml.pre-m5",
           "device",
-          "device/provision/srv-1.json",
           "device/return.json",
           "snapshots/2026-10-30T02:00:00Z-e5.fxsnap",
           "engine-owner.json",

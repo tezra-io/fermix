@@ -2,25 +2,20 @@ defmodule FermixWebWeb.SetupLive.AlwaysOnPane do
   @moduledoc """
   Draws the Always On tab from its state (`SetupLive.AlwaysOn`): the summary
   card (the sentence, the step in hand, the one action, the error line and
-  the alternatives), the step the pressed action opened (the token screen of
-  each provider with the token field, the choice of size and place, or a
-  dialog with the confirm sentence and the recovery passphrase), Details from
-  `detail.lines`, and the code of a server of the owner's own.
+  the alternatives), the step the pressed action opened (a dialog with the
+  confirm sentence and the recovery passphrase), Details from
+  `detail.lines`, and the code of the owner's server.
 
-  Every word is the engine's (the summary's, `home.provision.options`' with
-  each offer's `label` and `price`, and `Management.Copy`'s action labels)
-  but a field's label and the page's own Back, Change, Copy, Done and
+  Every word is the engine's (the summary's, with `Management.Copy`'s action
+  labels) but a field's label and the page's own Back, Copy, Done and
   Details.
   """
 
   use FermixWebWeb, :html
 
-  alias FermixCore.Management.Copy
-  alias FermixWebWeb.SetupLive.AlwaysOn
-
   @card "rounded-box border border-base-300 bg-base-100/80 p-5 shadow-sm"
-  # The steps that delete or stop something, drawn as such.
-  @destructive ~w(cancel delete_server start_again)
+  # The steps that stop something, drawn as such.
+  @destructive ~w(cancel)
 
   attr :always_on, :map, required: true
 
@@ -102,7 +97,7 @@ defmodule FermixWebWeb.SetupLive.AlwaysOnPane do
     """
   end
 
-  defp notes(detail), do: Enum.filter([detail["note"], detail["billing"]], &is_binary/1)
+  defp notes(detail), do: Enum.filter([detail["note"]], &is_binary/1)
 
   attr :items, :list, required: true
 
@@ -140,8 +135,8 @@ defmodule FermixWebWeb.SetupLive.AlwaysOnPane do
   attr :action, :map, required: true
   attr :acting, :string, default: nil
 
-  # Learn more and Open the console are links; Update is the sentence alone,
-  # since this page installs nothing.
+  # Learn more is a link; Update is the sentence alone, since this page
+  # installs nothing.
   defp primary(%{action: %{"url" => url}} = assigns) when is_binary(url) do
     ~H"""
     <a
@@ -210,158 +205,7 @@ defmodule FermixWebWeb.SetupLive.AlwaysOnPane do
 
   attr :always_on, :map, required: true
 
-  defp step(%{always_on: %{open: %{"needs" => ["token"]}}} = assigns), do: token_step(assigns)
-  defp step(%{always_on: %{open: %{"needs" => ["choice"]}}} = assigns), do: choice_step(assigns)
-  defp step(assigns), do: dialog_step(assigns)
-
-  defp token_step(assigns) do
-    providers = AlwaysOn.providers(assigns.always_on)
-    assigns = assign(assigns, providers: providers, open: assigns.always_on.open)
-
-    ~H"""
-    <div id="always-on-step" class="mt-4 space-y-4 border-t border-base-300 pt-4">
-      <form
-        id={"always-on-step-form-#{@always_on.form_gen}"}
-        phx-submit="always_on_submit"
-        class="space-y-4"
-        autocomplete="off"
-      >
-        <.provider_screen
-          :for={{provider, index} <- Enum.with_index(@providers)}
-          provider={provider}
-          pick?={length(@providers) > 1}
-          checked?={index == 0}
-        />
-        <label class="block max-w-md">
-          <span class="text-sm font-medium">
-            {Enum.map_join(@providers, " / ", & &1["token_label"])}
-          </span>
-          <input
-            type="password"
-            name="always_on_step[token]"
-            value=""
-            autocomplete="off"
-            spellcheck="false"
-            class="input input-sm input-bordered mt-1 w-full font-mono"
-          />
-        </label>
-        <.step_end always_on={@always_on} />
-      </form>
-    </div>
-    """
-  end
-
-  attr :provider, :map, required: true
-  attr :pick?, :boolean, required: true
-  attr :checked?, :boolean, required: true
-
-  defp provider_screen(assigns) do
-    ~H"""
-    <fieldset class="rounded-box border border-base-300 p-4">
-      <label :if={@pick?} class="mb-2 flex items-center gap-2">
-        <input
-          type="radio"
-          name="always_on_step[provider]"
-          value={@provider["id"]}
-          checked={@checked?}
-          class="radio radio-sm"
-        />
-        <span class="text-sm font-medium">{@provider["name"]}</span>
-      </label>
-      <p class="text-sm">{@provider["sentence"]}</p>
-      <ol class="mt-2 list-decimal space-y-1 pl-5 text-sm marker:text-primary">
-        <li :for={said <- @provider["steps"] || []}>{said}</li>
-      </ol>
-      <div class="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-sm">
-        <a href={@provider["console_url"]} target="_blank" rel="noopener noreferrer" class="link">
-          {Copy.summary_label(:open_console, %{provider: @provider["name"]})}
-        </a>
-        <a href={@provider["docs_url"]} target="_blank" rel="noopener noreferrer" class="link">
-          {Copy.summary_label(:learn_more, %{})}
-        </a>
-      </div>
-    </fieldset>
-    """
-  end
-
-  defp choice_step(assigns) do
-    assigns = assign(assigns, options: assigns.always_on.options, open: assigns.always_on.open)
-
-    ~H"""
-    <div id="always-on-step" class="mt-4 space-y-3 border-t border-base-300 pt-4">
-      <p :if={@options == :reading} class="text-sm text-base-content/60">
-        <span class="loading loading-spinner loading-sm" />
-      </p>
-      <form
-        :if={is_map(@options)}
-        id={"always-on-step-form-#{@always_on.form_gen}"}
-        phx-submit="always_on_submit"
-        class="space-y-3"
-      >
-        <p class="text-sm font-medium">{@options["sentence"]}</p>
-        <p :if={@open["confirm"]} class="text-sm text-base-content/70">{@open["confirm"]}</p>
-        <details
-          id="always-on-offers"
-          class="rounded-box border border-base-300"
-          phx-mounted={JS.ignore_attributes("open")}
-        >
-          <summary class="cursor-pointer px-3 py-2 text-sm">Change</summary>
-          <div class="space-y-3 px-3 pb-3">
-            <fieldset
-              :for={{location, city, offers} <- by_city(@options)}
-              data-location={location}
-              class="space-y-1"
-            >
-              <legend class="text-xs font-semibold text-base-content/60">{city}</legend>
-              <.offer :for={offer <- offers} offer={offer} options={@options} />
-            </fieldset>
-          </div>
-        </details>
-        <.step_end always_on={@always_on} />
-      </form>
-      <div :if={!is_map(@options)}>
-        <.error error={@always_on.error} />
-        <button type="button" class="btn btn-ghost btn-sm mt-2" phx-click="always_on_back">
-          Back
-        </button>
-      </div>
-    </div>
-    """
-  end
-
-  attr :offer, :map, required: true
-  attr :options, :map, required: true
-
-  defp offer(assigns) do
-    ~H"""
-    <label class="flex items-start gap-2 text-sm">
-      <input
-        type="radio"
-        name="always_on_step[choice]"
-        value={@offer["location"] <> "/" <> @offer["type"]}
-        checked={recommended?(@offer, @options)}
-        class="radio radio-sm mt-0.5"
-      />
-      <span class="min-w-0">
-        <span class="block font-medium" data-offer="label">{@offer["label"]}</span>
-        <span class="block text-xs text-base-content/70" data-offer="price">{@offer["price"]}</span>
-      </span>
-    </label>
-    """
-  end
-
-  # The offers in each place, in the order the provider recommends its places.
-  defp by_city(%{"locations" => locations, "offers" => offers}) do
-    for %{"id" => id, "city" => city} <- locations,
-        here = Enum.filter(offers, &(&1["location"] == id)),
-        here != [],
-        do: {id, city, here}
-  end
-
-  defp recommended?(%{"type" => type, "location" => location}, %{"recommended" => recommended}),
-    do: recommended == %{"type" => type, "location" => location}
-
-  defp dialog_step(assigns) do
+  defp step(assigns) do
     open = assigns.always_on.open
 
     passphrase? =

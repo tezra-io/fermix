@@ -99,7 +99,8 @@ defmodule FermixCore.Home.Move do
   a candidate the home does not hold (`{:unknown_candidate, id}`), and a move
   whose readiness report blocks (`{:not_ready, sentences}`). `opts`: `:now`,
   `:keep_as_desktop` (default true: this computer becomes a desktop of the new
-  primary; false for a server being replaced, which then serves nothing),
+  primary; false for a server a desktop moves back from, which then serves
+  nothing),
   `:readiness` (the report the owner was just shown, from `review/3`, in
   place of making one), and `FermixCore.Home.MoveReadiness.report/3`'s.
   Writes the request and the role; a failure part-way removes `.move/`.

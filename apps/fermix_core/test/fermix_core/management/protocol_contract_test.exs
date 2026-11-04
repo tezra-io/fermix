@@ -18,7 +18,6 @@ defmodule FermixCore.Management.ProtocolContractTest do
   alias FermixCore.Home.Candidates, as: HomeCandidates
   alias FermixCore.Home.Epoch
   alias FermixCore.Home.Move, as: HomeMove
-  alias FermixCore.Home.Provision.Ledger, as: ProvisionLedger
   alias FermixCore.Home.Snapshot.Recipient, as: SnapshotRecipient
   alias FermixCore.Home.Snapshot.Scheduler, as: SnapshotScheduler
   alias FermixCore.Home.Snapshot.Status, as: SnapshotStatus
@@ -54,7 +53,6 @@ defmodule FermixCore.Management.ProtocolContractTest do
   alias FermixCore.Readiness
   alias FermixCore.Setup.ConfigStore
   alias FermixTestSupport.CueFixtures
-  alias FermixTestSupport.HetznerStub
   alias FermixTestSupport.HomeSummaryGoldens
   alias FermixTestSupport.MandateFixtures
   alias FermixTestSupport.SafeRm
@@ -694,7 +692,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
   end
 
   # Always On setup §3.4: `home.act`'s golden is the router's own answer to
-  # its case, the token pasted on the first screen, and its `changed`
+  # its case, the code for the owner's server cancelled, and its `changed`
   # refusal says so in a sentence and carries nothing else.
   test "the golden home.act answer and its changed refusal are the engine's own" do
     {"home.act", params, opts} = Enum.find(router_cases(), &(elem(&1, 0) == "home.act"))
@@ -1373,7 +1371,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
       mcp_cases() ++
       cues_cases() ++
       home_cases() ++
-      provision_cases()
+      [act_case()]
   end
 
   # Stands in for `Cues.Proposals` with the record and the card in the shape
@@ -1525,97 +1523,53 @@ defmodule FermixCore.Management.ProtocolContractTest do
     ]
   end
 
-  # The Always On provisioner against the recorded Hetzner API: a project the
-  # token was just pasted for, the options it sells, and a home whose server
-  # was created, which the power action and the delete read; the resources
-  # are those of a replace whose new server waits for its move, as the golden
-  # shows them. The job-backed methods answer their running job.
-  defp provision_cases do
-    stub = HetznerStub.start!()
-    connected = provision_home!(stub, false)
-
-    [
-      {"home.provision.options", %{}, provision_opts(connected, stub)},
-      act_case(stub)
-    ]
-  end
-
-  # Always On's one step method on a home with nothing set up: the token
-  # pasted on the first screen, against the recorded Hetzner API, under the
-  # key that screen gave it; the answer is the choice that follows.
-  defp act_case(stub) do
-    home = provision_home!(stub, nil)
-    serializer = :"contract_always_on_#{System.unique_integer([:positive])}"
-    start_supervised!({AlwaysOn, name: serializer}, id: serializer)
-
-    seams =
-      [
-        home: home,
-        engine_role: %{role: :primary, primary: nil},
-        profile: "general",
-        now: ~U[2026-10-30 09:00:00Z],
-        host_os: :macos,
-        config: [],
-        scheduler: nil,
-        disk_usage: fn _home -> {:ok, %{used: 0.42, nearly_full: false}} end,
-        link_status: fn -> %{primary: nil, desktops: [], enrollment: nil} end,
-        settings_snapshot: fn -> %{} end,
-        jobs: jobs(),
-        provider_opts: provision_host_opts(stub),
-        serializer: serializer
-      ] ++ code_seams()
-
-    %{"action" => %{"id" => "paste_token", "key" => key}} =
-      seams |> ManagementHome.summary_facts() |> HomeSummary.summary()
-
-    params = %{
-      "action" => "paste_token",
-      "key" => key,
-      "input" => %{"token" => HetznerStub.token()}
-    }
-
-    {"home.act", params, [operation_opts: [always_on: seams]]}
-  end
-
-  # A home with no token (`nil`), or a connected one (`false`).
-  defp provision_home!(_stub, created?) do
-    home = SafeRm.make_tmp_dir!("contract_provision")
+  # Always On's one step method on a home whose code for the owner's server
+  # is open: Cancel the code, under the key that screen gave it; the answer
+  # is the first screen again.
+  defp act_case do
+    home = SafeRm.make_tmp_dir!("contract_always_on")
     on_exit(fn -> SafeRm.rm_rf!(home) end)
     :ok = Epoch.write(home, 4)
+    unique = System.unique_integer([:positive])
+    serializer = :"contract_always_on_#{unique}"
+    start_supervised!({AlwaysOn, name: serializer}, id: serializer)
 
-    if created? != nil do
-      {:ok, _ledger} =
-        ProvisionLedger.update(
-          home,
-          "hetzner",
-          &{:ok, ProvisionLedger.connect(&1, HetznerStub.token(), ~U[2026-10-30 09:00:00Z])}
-        )
-    end
+    window = %{
+      state: :open,
+      expires_at: ~U[2026-10-30 09:30:00Z],
+      kind: :manual,
+      candidate_id: nil,
+      awake_ms: 60_000
+    }
 
-    home
-  end
+    link =
+      start_supervised!(
+        {Agent, fn -> %{primary: nil, desktops: [], enrollment: window} end},
+        id: :"contract_always_on_link_#{unique}"
+      )
 
-  defp provision_opts(home, stub) do
-    [
+    seams = [
+      home: home,
       engine_role: %{role: :primary, primary: nil},
-      operation_opts: [
-        provision:
-          [home: home, profile: "general", jobs: jobs(), provider_opts: provision_host_opts(stub)] ++
-            code_seams()
-      ]
+      profile: "general",
+      now: ~U[2026-10-30 09:00:00Z],
+      host_os: :macos,
+      config: [],
+      scheduler: nil,
+      disk_usage: fn _home -> {:ok, %{used: 0.42, nearly_full: false}} end,
+      link_status: fn -> Agent.get(link, & &1) end,
+      withdraw_enrollment: fn :manual -> Agent.update(link, &%{&1 | enrollment: nil}) end,
+      settings_snapshot: fn -> %{} end,
+      jobs: jobs(),
+      serializer: serializer
     ]
-  end
 
-  defp provision_host_opts(stub) do
-    [
-      req_options: HetznerStub.req_options(stub),
-      now: fn -> ~U[2026-10-30 09:00:00Z] end,
-      sleep: fn _ms -> :ok end
-    ]
-  end
+    %{"detail" => %{"alternatives" => alternatives}} =
+      seams |> ManagementHome.summary_facts() |> HomeSummary.summary()
 
-  defp code_seams,
-    do: [open_code: fn -> {:ok, "fxenroll1.aW52ZW50ZWQ"} end, withdraw_code: fn -> :ok end]
+    %{"key" => key} = Enum.find(alternatives, &(&1["id"] == "cancel"))
+    {"home.act", %{"action" => "cancel", "key" => key}, [operation_opts: [always_on: seams]]}
+  end
 
   # Enrollment and the move as the `home.status` golden shows them: the
   # candidate the used window enrolled, and a move to it undone before the

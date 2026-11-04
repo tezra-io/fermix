@@ -553,125 +553,17 @@ which build a host installs, shared by the installer and the readiness.
 (`MoveSecrets.missing/1`). The channels half
 (`FermixChannels.Home`) is described under `fermix_channels`.
 
-`Home.Provision` is the contract every cloud provider Fermix creates the
-Always On server on implements (M75 lean v1 §4.3), and the place a new
-provider plugs in: a module of its `@callback`s, listed in
-`Provision.Registry`, a compile-time list. A provider is only an API
-adapter, and its callbacks are its primitive operations, the plug-in
-surface: identity (`id/0`, `display/0` with the name, token label, How to
-get one steps, console URL, docs anchor, locations and the proper nouns its
-words use, `type_name/1`, `max_user_data/0`), `check_token/2`, `catalog/2`,
-`server_type/3`, `system_image/2`, `create_firewall/3`, `create_server/3`,
-`power/4`, `action/3`, `get/4`, `find/4` (by labels) and `delete/4`, each
-answering normalized facts with ids as opaque strings. `Provision.Hetzner` is
-the one provider today: Req over the Hetzner Cloud API through
-`Net.HttpClient`, its endpoints, label encoding, price parsing, error codes,
-cities, image, 32 KiB user data limit and its root password, dropped where
-the answer arrives, and nothing else. Everything around the primitives is
-`Provision.Driver`'s, the same for every provider: every ledger write before
-a call and after it, the order (firewall, image, enrollment code, server, its
-start), the labels (`Provision.labels/2`), the polling (every 2 s, at most
-150 reads, a rate-limited read waiting 10 s), a write of unknown outcome kept
-`requested` for the reconcile to find by its labels, the reconcile, the
-delete order (server, addresses, firewall, an in-use firewall tried ten
-times) and its guard, the code window, and keeping only a created server's
-facts of its answer; `Provision.Offering` is the pure L2 rule over a
-provider's catalog. A primitive answers its refusals as a closed set: the
-shared kinds (`:unauthorized`, `:read_only_token`, `:account_limit`,
-`{:rate_limited, _}`, `{:unreachable, _}`, `{:other, sentence}` with the
-provider's own plain message), the kinds the driver reads (`:not_found`,
-`:in_use`, `:no_capacity`, `:no_image`), and `{:unknown, _}` for a write that
-may have been carried out; `Provision.error_sentence/2` words every reason
-in the provider's display data. The shared code (`Provision`, the driver,
-the offering, the ledger, the job, `HomeSummary`, `Copy`,
-`Management.Provision`, the router) names no provider, which
-`provider_contract_test.exs` holds by scanning every lib file, and
-`driver_test.exs` runs the driver alone on an invented provider that is only
-primitives over a world of its own. `Provision.current/2` is the one
-resolver of which provider Always On speaks of: the one whose ledger holds
-what Fermix created (or cannot be read), else the one whose token was given
-last, else the first the registry offers. A provider's token and the ledger
-of what was created on it live in its own file, `device/provision/<id>.json`
-(`Provision.Ledger`, `0600`, device-local, never `config.toml` or the
-keyring, so a move never carries it), which is how the ledger records which
-provider each resource belongs to; only the driver writes it. Every write is
-`Ledger.update/3`, which holds the file's lock across its read, change,
-write and rename (never across a call to the provider); `Provision.Ledger.Lock`, one supervised owner in the
-primary's and a desktop's tree, serves writers in the order they asked, each
-the moment the one before is done or exits, with no retry or backoff, and
-refuses only a writer whose turn has not come in 30 s. `Provision.FirstBoot` embeds `packaging/cloud/first-boot.sh`
-at compile time and wraps it, gzip and base64 with its SHA-256, as the
-server's cloud-init user data, the enrollment code in `FERMIX_ENROLL_CODE`,
-refused past the limit its provider passes in.
-A create checks the type against the live stock, makes the firewall (the
-first write, where a read-only token fails before anything costs money),
-opens a provisioned enrollment window (24 hours; `home.enroll.open` is
-refused while it is open, and while the server it enrolled is held as a
-candidate), creates the server named and labelled by the
-ledger's ref, and polls each action with a bound; a create whose answer was
-lost is found again by its labels in `reconcile/2`, which also marks a
-resource deleted outside Fermix gone. `Management.Provision` holds the
-provisioner's steps (the computer that created the server manages it and
-never forwards them): connect, start_create, start_again, power, delete,
-stop_step and the reconcile, which `Management.AlwaysOn.act/2` runs, and
-`home.provision.options`, the one method of the family left on the wire
-(device-class in `Placement`); the summary carries each provider's display
-data (`detail.providers`), so every surface draws the token screen from it;
-connect names the provider; options (no params, answering that provider's
-`{id, name}`), create, Start again, power and delete act on
-`Provision.current/2`'s; a new
-token replaces the kept one only when it reaches the ledger's server or
-firewall (one read by id, the same account), a create is refused while any
-provider holds a server, and create, Start again, power and delete run as one
-`home_provision` management job at a time; delete refuses while a move to the server runs
-and once this engine is its linked desktop (or the home carries the moved
-marker). `Ledger.state/3` is the one reading of the provisioner for `home.status`'s
-summary: none, connected, creating, created, deleting, gone, failed (with the
-reason, before anything else the ledger holds) or unreadable, beside whether
-the token is still accepted, the step whose job runs (`action`, written by
-`Management.Provision.put_action/2` before the job starts and cleared by the
-step's one ending, which the job family itself runs once the run is over
-however it ended, a raise, an exit or a kill included: `Management.Jobs`'
-`:ending`) and when the provider was last
-read back (`checked_at`, the reconcile's). Every step's ending lands there:
-a create's, a power action's and a delete's failure carry the step, the
-server's size and place; a run that answered nothing (it raised, exited, was
-killed or ran past its budget) and an action older than the job budget read
-as the failure `interrupted`, and the boot, before the job family and the socket
-start, writes it so (`Management.Provision.interrupt_at_boot/0`, a child that
-starts no process). A create names the size and place the owner was
-shown, the recommendation being one row like any other
-(`Management.Provision.start_create/2` refuses a create without them and
-keeps them on the step's action before its job starts); the job prices it
-from the live offer and writes the price into the server record. `Management.Home.status/1` starts one
-reconcile (`Management.Provision.start_reconcile/1`, a job of the same family,
-so single-flight and never beside a step) when its summary rests on the
-provider's word and the ledger was last checked over a minute ago. The apps
-read `home.status` often, so everything it reads on each read (the ledger, the
-settings its summary reads, `MoveReadiness.stays_here/3`, the primary's
-disk, the last review of the move and each copy a desktop stores) logs a
-failure to read it through `Home.UnreadableFiles`, a supervised memory in
-every role's tree: once when it stops being readable and once, with the
-failed reads counted, when it reads again; a verb with no engine tree passes
-no memory and logs its one read.
-
-A provider served by an external plugin is not built. It would be one more
-module of the contract in the engine, listed in the registry, that forwards
-each primitive to the plugin; what the engine keeps for every provider stays
-in the engine: the token's custody (read from the provider's ledger and
-passed with each call, never stored by the plugin or seen by a command, as
-`device/` is denied to the sandbox), the owner's decisions over connect,
-create, power and delete (the daemon), the enrollment code's window, the
-display data the apps draw (answered from the plugin's manifest, held to the
-copy rules), and the ledger, which only `Provision.Driver` writes. The
-plugin answers only the primitives (create the firewall, create the server,
-read an action, get, find, delete or power one resource, read the catalog),
-with the contract's closed set of kinds and ids as strings, so a plugin
-never writes a ledger and needs nothing of the driver's order, bounds or
-guards.
+The server is always the owner's own: Fermix creates, powers, replaces and
+deletes no server. The apps read `home.status` often, so everything it reads
+on each read (the settings its summary reads, `MoveReadiness.stays_here/3`,
+the primary's disk, the last review of the move and each copy a desktop
+stores) logs a failure to read it through `Home.UnreadableFiles`, a
+supervised memory in every role's tree: once when it stops being readable
+and once, with the failed reads counted, when it reads again; a verb with no
+engine tree passes no memory and logs its one read.
 
 `Management.HomeSummary` is that summary (M75 lean v1 §7): `gather/5` reads
-the provider in use and its ledger, the last kept review (`Move.last_review/1`) and a desktop's stored
+the last kept review (`Move.last_review/1`) and a desktop's stored
 copies beside the record `Management.Home.status/1` already holds (the role,
 the move's phase, the candidates, the rail's window and link, the snapshots,
 the primary's disk, `Home.Disk.usage/2`, and a linked desktop's composed
@@ -679,27 +571,19 @@ the primary's disk, `Home.Disk.usage/2`, and a linked desktop's composed
 refused this engine's protocol), the review's items the home's settings
 decide (`MoveReadiness.summary_items/4`, which `report/3` ends with) and the
 owner's zone (`Clock.shown_zone/1`), and the pure `summary/1` answers `{key,
-state, sentence, action, detail, notice}` in `Management.Copy`'s words and
-the provider's display data: every action one record (`needs`, `confirm`,
+state, sentence, action, detail, notice}` in `Management.Copy`'s words:
+every action one record (`needs`, `confirm`,
 `url`, `key`, `HomeSummary.action_key/5`; `find_action/3` finds one by its
-key), Details' `lines`, `providers` and `progress`, the notice the apps raise,
+key), Details' `lines` and `progress`, the notice the apps raise,
 and `key/1`, the one digest, which leaves out the clock (an `off`, `on` or
-`problem` sentence, `seen_at`, the last check), which `CopyTest`
+`problem` sentence, `seen_at`), which `CopyTest`
 holds to the copy rules and to `Copy.summary_violations/1` (no internal word,
 no backticked code), as it does every sentence the summary prints as it is
-from elsewhere: it sweeps the provisioner's refusals, the ledger's, the
-readiness items and the code refusals a create keeps as its failure (the
+from elsewhere: it sweeps the readiness items and the code refusals (the
 enrollment window's and `Home.Link`'s), each template and `<>`-joined
-sentence rendered whole. The two times it
-counts are awake time on the monotonic clock: how long the created server's
-window has been held (`Enrollment`'s `awake_ms`, 30 minutes) and how long the
-desktop relay has had no session (`Relay`'s `down_ms`, 10 minutes). On a
-linked desktop a replace of the server (`Ledger.state/1`'s `replace`) leads
-while it runs, read with the old server's own window and candidates from
-`primary_home` (the new server's 30 minutes count from its creation, since
-its code lives on the old server, which never sleeps); until the move is
-done the old server is the one the home lives on, and the power actions,
-which reach the new one, are not offered for it. The snapshot scheduler tells the paired phones, once per occurrence (the point
+sentence rendered whole. The one time it counts on the monotonic clock is
+awake time: how long the desktop relay has had no session (`Relay`'s
+`down_ms`, 10 minutes). The snapshot scheduler tells the paired phones, once per occurrence (the point
 kept in `snapshots/status.json`'s `stale_notice`), when the newest verified
 snapshot passes 7 days, through the phones' own path: a message in the
 owner's phone chat (`ChannelSend` to `mobile`, its proactive key the point).
@@ -719,7 +603,7 @@ version 6 `Companion.Connection` subscribes before its `server_hello` and
 writes `home_status_changed` when told: once after the hello unless off, then
 at each change of key. It reads only while subscribed, on `changed/2` from the
 writers the summary rests on, each a cast that is a no-op with no watch
-running: `Provision.Ledger.update/3` (`:ledger`), `Move.put_phase/4`
+running: `Move.put_phase/4` and a move back's record and candidate
 (`:move`), the enrollment window's kept changes and expiry (`:enrollment`),
 a finished `Snapshot.Scheduler` run (`:snapshots`), the desktop relay's session up or
 down (`:link`) and a tunnel that heard its server's own notice (`:server`);
@@ -727,10 +611,8 @@ events that arrive together are one read (a message it sends itself, queued
 behind them). One timer, replaced at each read, at least a second and at most
 a week, waits for the next clock change; a time-offset monitor reads again
 after a wake from sleep, since the monotonic timers stop while the computer
-sleeps. While off nothing is armed and only `:ledger`, `:move` and
-`:enrollment` are read. It never calls a cloud provider; every ledger
-write (`Provision.Ledger.update/3`, the shared driver's and the management
-family's) tells it `:ledger`.
+sleeps. While off nothing is armed and only `:move` and `:enrollment` are
+read.
 
 `Home.AlwaysOnRelease` keeps Always On out of a release build until it
 ships: compiled for `:prod`, `hello` lists none of its methods and the router
@@ -753,43 +635,16 @@ daemon-socket tree, after the job family) serializes the acts; each reads the
 summary first (`Home.summary_facts/1`, `HomeSummary.find_action/3`) and
 answers `changed`, in a sentence alone, when the action is not offered under
 that key (the surface reads `home.status` again), so a confirm accepted on an older screen or two surfaces
-pressing at once do nothing twice. A step that starts a job names it in the
-ledger first (`Provision.put_action/2`) and clears it again when the start is
-refused; Cancel during a create stops the job and waits for its run to end
-(`Provision.stop_step/1`, `Jobs.cancel/2`) before the delete job starts.
-Move now reviews at the press (a kept ready review under 15 minutes old, else
+pressing at once do nothing twice. The computer that sets Always On up runs
+every step itself: Use my own Linux server opens a manual code
+(`HomeMove.enroll_open/2`) answered with the command that installs Fermix
+there, and Cancel withdraws it. Move now reviews at the press (a kept ready review under 15 minutes old, else
 a fresh one, kept), refuses on a block, answers `changed` on a warning the
 confirm did not name, then reaches `HomeMove.move_start/3`. On a linked
 desktop it sends the server's own steps over the link as rail-only methods
 (`Placement.rail_only?/1`: served only with actor `{:desktop, _}`, refused on
 `daemon.sock` by name). `input` is `AlwaysOn.Input`, decoded at the
-boundary, whose `Inspect` withholds the token and the recovery passphrase.
-
-Replace the server (`home.act`'s `replace_server`, a create with `replace`)
-runs on the linked desktop whose ledger holds the server the home lives on. The job sets
-that server aside in the ledger (`Ledger.begin_replace/3`: the old set and
-the primary epoch it held, from `desktop.json`), then creates the new server
-as any create does, under another ref (`Provision.fresh_ref/2`), with a
-provisioned window the old server opens for a request the desktop forwards
-(`home.enroll.open {kind: provisioned}`, served only to a desktop's forward;
-`home.enroll.withdraw` releases it when the new server will not exist). The
-move is the existing one, sent by the desktop's `home.act` (Move now) as
-`home.move.start` with `keep_as_desktop` false; once the server answered,
-`home.act` records that the move started (`Provision.move_forwarded/3`),
-because the old server serves nothing while it runs. The desktop relay
-reports every primary epoch a session reaches (`Provision.primary_reached/2`,
-in a task): one above the old server's is the move to the new one done, the
-desktop's link names the new server from then on (`Home.Link`'s
-`rename_primary/1`, the relay writing it with `DesktopLink.record_name/3`, so
-the relay stays the one writer of `desktop.json`), and the old server is
-deleted, once, as a `home_provision` job
-(`Provision.delete_replaced/2`, the same order as any delete, refused unless
-the move is done); a failed delete stays in the ledger with its sentence for
-Delete your old server (`home.act`'s `delete_server`) to try again, and the
-old server answering at its own
-epoch after the move started is a move it undid. `Ledger.state/1`'s `replace`
-says where it stands: creating, waiting, moving, deleting, done, failed (with
-which server holds the home) or cancelling.
+boundary, whose `Inspect` withholds the recovery passphrase.
 
 Move back (`home.act`'s `move_back`, Always On's move back) runs on a linked
 desktop: it asks the server for a manual window (`home.enroll.open`, which
@@ -797,12 +652,10 @@ records the desktop that asked, so the candidate enrolled through it carries
 `returning` in `Home.Candidates` and the server's review knows the move goes
 back by that fact, never by an OS), writes the desktop's own candidate
 (`Candidate.prepare_return/3`, kind `return`) and `Home.Return`'s record
-(`device/return.json`: the server's name, the ledger's server, the epoch the
-link reached), and starts the candidate subtree (`Home.Link`'s
+(`device/return.json`: the server's name and the epoch the link reached), and starts the candidate subtree (`Home.Link`'s
 `start_return/1`). Move now on it writes the start into `return.json` before
 it sends `home.move.start` to the desktop's own candidate (the server restarts
-into the move as it answers), never into the ledger's `replace`, and takes it
-back only when the server refused or the request never left; Cancel (offered
+into the move as it answers), and takes it back only when the server refused or the request never left; Cancel (offered
 only where the server has no move under way) stops the subtree, closes the window
 (`home.enroll.withdraw {kind: manual}`) and removes both, the record first (a
 stop between them leaves a candidate, which Cancel clears). Restore here
@@ -819,13 +672,10 @@ server for it. The summary reads the request beside its running job
 the run ended, takes the request back. The job is never resumed: jobs live in
 memory, so a stop part-way leaves a request beside no job and a `local`
 candidate the device's next start discards, and Restore here is offered
-again. The primary's
-summary reads `return.json`'s `moved_at` with the ledger's server standing as
-`server_retired` first; its delete removes the record with the server. While
-a move back's `candidate/` is here, in any phase, or `return.json` says its
-move started and this computer has not booted as the primary, `delete_target`
-refuses every delete but the fence (between the activation's marker removal and its
-settings this home has neither link nor marker).
+again. Back on this computer as the primary after a move back
+(`return.json`'s `moved_at` beside its `move_started_at`), the summary tells
+once that the owner's server still runs its retired copy (`back:<epoch>`); a
+restore here, whose server the owner deleted or stopped, tells nothing.
 
 Architecture Invariant: one role gate, one epoch writer, one marker, one
 device-local list, one placement table; a linked device's request takes one
@@ -840,11 +690,8 @@ offer later than the move it holds (move ids ordered by start, then the
 attempt), so a late offer never un-stages a home its source retired for. The
 move's ending (`done`, `aborted`) is written only by the engine that came
 back after the restart. A move's keychain values exist only in memory and
-inside the stream encrypted to the candidate's one-time key. The
-provisioner's tokens never leave the computer that pasted them, and a
-provider's root password for a created server (Hetzner's) is read for nothing. A replace deletes the
-old server only once a primary of a higher epoch answered this desktop, never
-the server that holds the home.
+inside the stream encrypted to the candidate's one-time key. Fermix holds no
+cloud account and deletes no server.
 
 ### `FermixCore.Trace` and Telemetry
 
@@ -1840,7 +1687,7 @@ process with `actor: :setup_page`, then draws the answer. Reads
 (`Management.Home.status/1`) and acts run in `start_async`, with the
 engine's way to its server (`Home.Link.forwarding/2`) on a linked desktop;
 the page subscribes to `Home.StatusWatch` and reads again at each
-`:home_status_changed`. No token or passphrase sits in an assign, and the
+`:home_status_changed`. No passphrase sits in an assign, and the
 one-time code is held in a struct whose inspection withholds it. Embedded
 in the Mac app (`?embed=1`) the page lists no Always On tab. On a
 device-role engine the page leads with a notice that Fermix-wide settings

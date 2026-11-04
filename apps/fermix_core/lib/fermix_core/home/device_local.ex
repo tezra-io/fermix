@@ -17,9 +17,7 @@ defmodule FermixCore.Home.DeviceLocal do
     {"config.toml.pre-m5", :keep, "a backup taken by a secret migration on this machine"},
     {"moved.json", :drop,
      "the marker that retires this copy; a restored home is the new primary"},
-    {"device", :keep,
-     "this machine's own Always On records: the provision ledger with its provider token, " <>
-       "and a return's"},
+    {"device", :keep, "this machine's own Always On record: a return's"},
     {"device/desktop.json", :drop, "a desktop's link to its primary"},
     {"device/desktop_key", :drop, "a desktop's own key"},
     {"snapshots", :keep,

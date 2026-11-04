@@ -164,9 +164,8 @@ defmodule Fermix.CLI do
       fermix home enroll --code-file PATH [--snapshot-bucket B --snapshot-region R]  Make this fresh home a candidate primary
       fermix home candidates [--json]              List the enrolled candidate primaries
       fermix always-on [--json]                    Show Always On; on a terminal, take each step
-      fermix always-on ACTION [--provider ID] [--type T --location L] [--stdin]
-                       [--recovery-passphrase-file PATH] [--yes] [--wait] [--json]
-                                                   Take one Always On step (create-server, move-now, ...)
+      fermix always-on ACTION [--recovery-passphrase-file PATH] [--yes] [--wait] [--json]
+                                                   Take one Always On step (own-server, move-now, ...)
       fermix logs   [-f] [-n LINES]                Show daemon log file
       fermix upgrade [--check]                     Self-update from signed releases
       fermix uninstall                             Remove a Fermix.app-managed installation

@@ -1,7 +1,7 @@
 {
   "error": {
     "code": "confirm_required",
-    "sentence": "Create your server? Hetzner bills it by the hour until it is deleted. Pass --yes to accept it."
+    "sentence": "Move Fermix to your server now? This computer serves nothing while the move runs. Pass --yes to accept it."
   },
   "ok": false,
   "schema_version": 1

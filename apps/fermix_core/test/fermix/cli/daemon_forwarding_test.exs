@@ -17,8 +17,6 @@ defmodule Fermix.CLI.DaemonForwardingTest do
 
   alias Fermix.CLI.Daemon
   alias Fermix.CLI.Daemon.Client
-  alias FermixCore.Home.Provision.Hetzner
-  alias FermixCore.Home.Provision.Ledger
   alias FermixTestSupport.ParentProcess
   alias FermixTestSupport.SafeRm
 
@@ -132,7 +130,7 @@ defmodule Fermix.CLI.DaemonForwardingTest do
     refute_received {:forwarded, _request, _opts}
   end
 
-  # A device with no link (the server revoked it, or a replace retired it)
+  # A device with no link (the server revoked it)
   # opens no database, and every cue method reads or writes the cue rows in
   # memory.db: each is refused by name, as a linked desktop's is while its
   # server is out of reach, before anything is read. Read from the protocol's
@@ -315,12 +313,10 @@ defmodule Fermix.CLI.DaemonForwardingTest do
     end
 
     # Always On setup §3.5, §7: the server's Always On steps reach it only from
-    # this desktop's own `home.act`, which records a replace's move itself, so
-    # one sent on this socket is refused here by name and never forwarded, and
-    # the ledger keeps nothing of it.
+    # this desktop's own `home.act`, which records a move back's start itself,
+    # so one sent on this socket is refused here by name and never forwarded.
     test "a server step sent on the socket is refused by name and never forwarded", ctx do
-      {socket, root} = start_daemon!(ctx, [engine_role: @device, desktop_link?: true], :both)
-      waiting_replace!(root)
+      socket = start_daemon!(ctx, engine_role: @device, desktop_link?: true)
       start = %{"candidate_id" => "cand-new", "recovery_passphrase" => "invented-lantern-orchard"}
 
       for {method, params} <- [
@@ -337,8 +333,6 @@ defmodule Fermix.CLI.DaemonForwardingTest do
       end
 
       refute_received {:forwarded, _request, _opts}
-      assert {:ok, %{replace: %{move_started_at: nil}}} = Ledger.read(root, "hetzner")
-      assert %{replace: %{state: :waiting}} = Ledger.state(root, Hetzner)
     end
   end
 
@@ -474,8 +468,7 @@ defmodule Fermix.CLI.DaemonForwardingTest do
            endpoint_opts: [port: 4041],
            operation_opts: [
              mobile: [provider: PairProvider, test: test],
-             home: [home: root, scheduler: nil, link_status: &link_status/0],
-             provision: [home: root]
+             home: [home: root, scheduler: nil, link_status: &link_status/0]
            ]
          ]
        ]
@@ -486,34 +479,7 @@ defmodule Fermix.CLI.DaemonForwardingTest do
     case answer do
       :name -> name
       :socket -> socket_path
-      :both -> {socket_path, root}
     end
-  end
-
-  # A replace whose new server stands and waits for its move, as the
-  # provisioner left it in this computer's ledger.
-  defp waiting_replace!(root) do
-    now = ~U[2031-05-04 10:00:00Z]
-    server = %{name: "fermix-general-a3f9", type: "cpx22", location: "fsn1", id: "7"}
-
-    {:ok, _ledger} =
-      Ledger.update(root, "hetzner", fn ledger ->
-        ledger
-        |> Ledger.connect("invented-hetzner-token-6d1f0c9a2b7e4f3a", now)
-        |> Ledger.begin_create("a3f9", server)
-        |> Ledger.put_server(Map.put(server, :status, :created))
-        |> Ledger.begin_replace(5, now)
-      end)
-
-    new = %{name: "fermix-general-b7c2", type: "cpx32", location: "hel1", id: "8"}
-
-    {:ok, _ledger} =
-      Ledger.update(root, "hetzner", fn ledger ->
-        {:ok,
-         ledger
-         |> Ledger.begin_create("b7c2", new)
-         |> Ledger.put_server(Map.put(new, :status, :created))}
-      end)
   end
 
   # What the primary answers each forwarded request: its own home picture and

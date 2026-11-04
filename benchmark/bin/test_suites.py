@@ -564,11 +564,11 @@ def test_the_shipped_numbered_rubrics_parse():
                       "what_stops_after_an_always_on_move": 5,
                       "new_fermix_release_on_the_server": 3,
                       "security_patches_and_reboots_on_the_server": 3,
-                      "hetzner_server_from_a_token": 5,
+                      "own_server_for_always_on": 4,
                       "deleting_the_server_the_home_moved_to": 3,
                       "moving_back_to_the_mac": 5,
                       "what_the_always_on_pane_says": 4,
-                      "replacing_the_hetzner_server": 4,
+                      "swapping_for_a_bigger_server": 3,
                       "homebrew_owner_keeps_fermix_running": 3,
                       "linux_package_owner_sets_up_always_on": 3,
                       # open_loops.yaml

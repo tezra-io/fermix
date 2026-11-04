@@ -53,7 +53,7 @@ defmodule FermixCore.Home.AlwaysOnRelease do
   alias FermixCore.Setup.ConfigStore
 
   @compiled_env Mix.env()
-  @methods ~w(home.status home.act home.provision.options)
+  @methods ~w(home.status home.act)
   @sentence "Always On is not in this release of Fermix yet."
   @section "[fermix_core.always_on]"
 

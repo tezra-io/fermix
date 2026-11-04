@@ -32,7 +32,6 @@ defmodule FermixCore.Management.Router do
   alias FermixCore.Management.Plugins
   alias FermixCore.Management.Protocol
   alias FermixCore.Management.Providers
-  alias FermixCore.Management.Provision
   alias FermixCore.Management.Secrets
   alias FermixCore.Management.Settings
   alias FermixCore.Management.SetupState
@@ -48,7 +47,7 @@ defmodule FermixCore.Management.Router do
     mobile.devices.list browser.install.start imessage.permissions.get imessage.policy.confirm
     mcp.servers.list mcp.servers.import.scan cues.status cues.sources.list cues.watchers.list
     cues.mandates.list cues.mandates.choices home.snapshots.status home.snapshots.run
-    home.candidates.list home.provision.options
+    home.candidates.list
   )
   @lease_params ~w(lease_id)
   @doctor_session_params ~w(session_id)
@@ -326,8 +325,8 @@ defmodule FermixCore.Management.Router do
     end
   end
 
-  # `kind` `provisioned`, from the desktop replacing this server: the 24-hour
-  # code it puts inside the new one.
+  # `kind` `provisioned`, only from a desktop's forward: the 24-hour window
+  # (`HomeMove.enroll_open/2`).
   defp route_home("home.enroll.open", params, opts) do
     with :ok <- reject_unknown_params(params, @home_enroll_params) do
       operation_result(HomeMove.enroll_open(Map.get(params, "kind"), home_opts(opts)))
@@ -351,8 +350,9 @@ defmodule FermixCore.Management.Router do
     end
   end
 
-  # `keep_as_desktop` (default true): false when the source is a server being
-  # replaced, which then becomes no desktop of the new primary (M75).
+  # `keep_as_desktop` (default true): false when the source is a server a
+  # desktop moves back from, which then becomes no desktop of the new primary
+  # (M75).
   defp route_home("home.move.start", params, opts) do
     with :ok <- reject_unknown_params(params, @home_move_params),
          {:ok, keep?} <- keep_as_desktop(params) do
@@ -365,12 +365,6 @@ defmodule FermixCore.Management.Router do
       )
     end
   end
-
-  # The Always On provisioner's offers (M75 lean v1 §4.3): device-class,
-  # answered on the computer that creates the server, for the provider in
-  # use, which the call need not name.
-  defp route_home("home.provision.options", %{}, opts),
-    do: operation_result(Provision.options(provision_opts(opts)))
 
   # Every Always On step (Always On setup §3.4): `input` is decoded here into
   # `AlwaysOn.Input`, which withholds its token and recovery passphrase from
@@ -865,17 +859,6 @@ defmodule FermixCore.Management.Router do
   defp jobs_opts(opts), do: opts |> operation_opts() |> Keyword.get(:jobs, [])
   defp mobile_opts(opts), do: opts |> operation_opts() |> Keyword.get(:mobile, [])
   defp cues_opts(opts), do: opts |> operation_opts() |> Keyword.get(:cues, [])
-
-  # The router's own `:engine_role` (tests) reaches the provisioner as its
-  # seam.
-  defp provision_opts(opts) do
-    provision = opts |> operation_opts() |> Keyword.get(:provision, [])
-
-    case Keyword.fetch(opts, :engine_role) do
-      {:ok, role} -> Keyword.put_new(provision, :engine_role, role)
-      :error -> provision
-    end
-  end
 
   # An act reaches every family it steps through with one set of seams, the
   # router's own `:engine_role` (tests), a linked desktop's way to its server

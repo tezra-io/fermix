@@ -21,17 +21,15 @@ defmodule FermixCore.Management.Placement do
   (`home.snapshots.*`, `home.enroll.open`, `home.enroll.withdraw`,
   `home.candidates.list`, `home.move.readiness`, `home.move.start`): after a
   move the server holds them, and the desktop reaches them only through it.
-  Always On's steps (`home.act`) and its choice of offers
-  (`home.provision.options`) are device-class: the provisioner's token and
-  the ledger of what it created stay on the computer that created the
-  server, which manages that server itself, and a linked desktop's
-  `home.act` sends the server's own steps over the link.
+  Always On's steps (`home.act`) are device-class: a linked desktop takes a
+  move back and Restore here itself, and its `home.act` sends the server's
+  own steps over the link.
 
   **Rail-only** (`rail_only?/1`, Always On setup §3.5): the server's steps a
   linked desktop's `home.act` sends (`home.move.readiness`,
   `home.move.start`, `home.enroll.open`, `home.enroll.withdraw`,
-  `home.snapshots.run`) and the create job's request for the new server's
-  code are served only to a desktop's forward (actor `{:desktop, _}`) and
+  `home.snapshots.run`) are served only to a desktop's forward (actor
+  `{:desktop, _}`) and
   refused on `daemon.sock` by name (`rail_only_refusal/1`): there, `home.act`
   takes the step.
 
@@ -66,7 +64,7 @@ defmodule FermixCore.Management.Placement do
     browser.install.start capabilities.install.start
     home.status settings.sections home.act
   )
-  @device_families ~w(lifecycle. doctor. computer_use. imessage. home.provision.)
+  @device_families ~w(lifecycle. doctor. computer_use. imessage.)
   # The primary-class families whose state is the primary's memory.db, which
   # a device never opens: one with no link refuses them as retired.
   @database_families ~w(cues.)

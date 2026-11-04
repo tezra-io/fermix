@@ -29,7 +29,7 @@ defmodule FermixCore.Home.Candidate.ActivationReturnTest do
     "logs/fermix.log" => "this computer's log",
     "device/desktop.json" => "the link to the server",
     "device/desktop_key" => "the desktop key",
-    "device/provision/srv-7f3a.json" => "the ledger with its token",
+    "device/local/window.json" => "a file of this machine's own",
     "device/return.json" => "the return's record",
     "snapshots/2031-05-30T02:00:00Z-e6.fxsnap" => "a copy of the server's",
     "harness/runs/run-1/events.jsonl" => "a coding run's spool",
@@ -102,7 +102,7 @@ defmodule FermixCore.Home.Candidate.ActivationReturnTest do
         Map.take(@retired, [
           "config.toml.lock",
           "logs/fermix.log",
-          "device/provision/srv-7f3a.json",
+          "device/local/window.json",
           "device/return.json",
           "snapshots/2031-05-30T02:00:00Z-e6.fxsnap",
           "harness/runs/run-1/events.jsonl",

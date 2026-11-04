@@ -225,12 +225,7 @@ defmodule FermixChannels.Test.DesktopRail do
           make_ref()
         end,
         cancel_timer: fn _ref -> false end,
-        emit: fn status, failures, class -> send(test, {:relay_emit, status, failures, class}) end,
-        # The Always On provisioner's part, told to the test instead.
-        primary_reached: fn epoch ->
-          send(test, {:primary_reached, epoch})
-          :ok
-        end
+        emit: fn status, failures, class -> send(test, {:relay_emit, status, failures, class}) end
       ]
       |> Keyword.merge(Keyword.drop(opts, [:connect]))
 

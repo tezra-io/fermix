@@ -34,7 +34,7 @@ defmodule Fermix.CLI.Daemon do
   primary's database (`Placement.database_family?/1`) as retired. The server's
   Always On steps (`Placement.rail_only?/1`) are
   refused here by name in every role: a linked desktop's own `home.act`
-  sends them over the link, and keeps a replace's move in its ledger itself.
+  sends them over the link, and keeps a move back's start in its record itself.
   A composed request (`home.status`, `settings.sections`) is
   answered here, and the router asks the primary for its part through the
   same link (`:primary_forward`). On the primary, `serve_forwarded/3` answers a
@@ -100,12 +100,10 @@ defmodule Fermix.CLI.Daemon do
   # on the phone that asked, closing the window, and forgetting a device.
   @mobile_decisions_v1 ~w(mobile.pair.start mobile.pair.decide mobile.pair.cancel
                           mobile.devices.revoke)
-  # Every Always On step (Always On setup §6): giving Fermix a cloud
-  # provider's token (it decides which account Fermix acts in), creating,
-  # powering and deleting the server (each spends the owner's money or can
-  # take the home away), opening a code that lets a server take this home,
-  # reviewing a move (the review reads every keychain secret it would carry)
-  # and starting it; and replacing the recovery key (M75). The reads stay open.
+  # Every Always On step (Always On setup §6): opening a code that lets a
+  # server take this home, reviewing a move (the review reads every keychain
+  # secret it would carry), starting it, moving back and restoring here; and
+  # replacing the recovery key (M75). The reads stay open.
   @home_decisions_v1 ~w(home.act home.snapshots.passphrase)
   # Opening the setup page: its session drives every decision the page offers,
   # the owner's included (Always On setup §6). `fermix setup` mints its own

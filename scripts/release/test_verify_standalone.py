@@ -441,7 +441,7 @@ class VerifyStandaloneTest(unittest.TestCase):
         result = self._run("macos_aarch64")
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("fermix always-on create-server with no daemon must exit 1, got 2", result.stderr)
+        self.assertIn("fermix always-on own-server with no daemon must exit 1, got 2", result.stderr)
 
     # The class this stage exists for: a step that answers as done with no
     # engine to take it.
@@ -1237,7 +1237,7 @@ class VerifyStandaloneTest(unittest.TestCase):
     def _always_on_behaviour(self, always_on):
         if always_on == "unknown_verb":
             return "  printf 'fermix: unknown command: always-on\\n' >&2\n  exit 2\n"
-        argv = '  [ "$*" = "always-on create-server --json" ] || exit 64\n'
+        argv = '  [ "$*" = "always-on own-server --json" ] || exit 64\n'
         envelope, said = self._always_on_refusal(
             "always_on_unavailable", "Always On is not in this release of Fermix yet."
         )

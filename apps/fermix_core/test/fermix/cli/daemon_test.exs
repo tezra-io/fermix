@@ -1260,13 +1260,10 @@ defmodule Fermix.CLI.DaemonTest do
 
   # Always On setup §3.5: the server's steps a linked desktop's `home.act`
   # sends over the link are served only to a desktop's forward, so this
-  # socket refuses each by name whoever asks, before any owner placement; the
-  # provisioner's writes left the wire, `home.act` runs them.
-  describe "the rail-only steps and the provisioner's writes" do
+  # socket refuses each by name whoever asks, before any owner placement.
+  describe "the rail-only steps" do
     @rail_only ~w(home.move.readiness home.move.start home.enroll.open home.enroll.withdraw
                   home.snapshots.run)
-    @gone ~w(home.provision.providers home.provision.connect home.provision.create
-             home.provision.power home.provision.resources home.provision.delete)
 
     test "a rail-only step is refused on the socket by name, the owner's peer included", %{
       socket_path: socket_path
@@ -1281,25 +1278,6 @@ defmodule Fermix.CLI.DaemonTest do
 
         assert details == %{golden | "method" => method}
       end
-    end
-
-    test "the provisioner's writes are no method, and its choice of offers is no decision" do
-      socket_path = start_peer_daemon(daemon_os_pid: ParentProcess.os_pid())
-
-      for method <- @gone do
-        assert {:error, {:management_error, "method_not_found", _message, %{"method" => ^method}}} =
-                 Client.request_v1(method, %{}, socket_path: socket_path, timeout: 5_000)
-      end
-
-      # A read for the provider in use, answered to a caller Fermix started:
-      # here, with no token, the provisioner's own sentence, never the owner's.
-      assert {:error,
-              {:management_error, "unavailable", _message,
-               %{"capability" => "home", "sentence" => "Paste a Hetzner API token first."}}} =
-               Client.request_v1("home.provision.options", %{},
-                 socket_path: socket_path,
-                 timeout: 5_000
-               )
     end
 
     defp rail_only_golden do

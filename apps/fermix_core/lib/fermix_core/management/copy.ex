@@ -44,27 +44,23 @@ defmodule FermixCore.Management.Copy do
   more, `summary_violations/1`: none of the engine's own words for the move
   or itself (epoch, primary, candidate, relay, rail, phase, ledger, daemon,
   key id) reaches an owner (`internal_words/1`), and no backticked literal,
-  code or secret id does either. A cloud provider's words (its name, its
-  token's label, its cities, its "How to get one" steps) are its own display
-  data (`FermixCore.Home.Provision`), passed in as values; the proper nouns
-  they use are read from the provider registry.
+  code or secret id does either.
 
   Beside them sit the rest of what an Always On screen shows (Always On
   setup §3.1): the sentence each action's confirm asks (`summary_sentence/2`'s
   `confirm_*` keys, and `move_confirm/1` for Move now, built from the
-  review's own warnings), never with a time or a price in it; the sentence
-  of the step a job is in (`progress_*`); a notice's sentence (`notice_*`);
-  the Details lines (`summary_line/3`), each a label and a value finished
-  here, times stated absolutely in the owner's zone (`FermixCore.Clock`),
-  prices as the ledger keeps them; the Always On docs page
-  (`always_on_docs_url/1`); and the command for a server of the owner's own
-  (`own_server_command/0`), which carries no code.
+  review's own warnings), never with a time in it; the sentence of the step
+  a move back or a restore is in (`progress_*`); a notice's sentence
+  (`notice_*`); the Details lines (`summary_line/3`), each a label and a
+  value finished here, times stated absolutely in the owner's zone
+  (`FermixCore.Clock`); the Always On docs page (`always_on_docs_url/0`);
+  and the command for the owner's server (`own_server_command/0`), which
+  carries no code.
   """
 
   alias FermixCore.BuildInfo
   alias FermixCore.Clock
   alias FermixCore.Home.Disk
-  alias FermixCore.Home.Provision.Registry, as: ProvisionRegistry
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Setup.SecretPaths
 
@@ -85,61 +81,40 @@ defmodule FermixCore.Management.Copy do
   @internal_words ~r/\b(?:epochs?|primar(?:y|ies)|candidates?|relays?|rails?|phases?|ledgers?|daemons?|(?<!access )key ids?)\b/i
   # What runs only on the computer a move leaves, in the order it is named.
   @stays_here [imessage: "iMessage", voice: "voice calls", meetings: "meetings"]
-  @summary_keys ~w(off connect choose starting installing connecting deleting ready moving
-                   waiting on on_backup on_no_backup undone retired candidate_waiting
-                   candidate_receiving primary turned_off cannot_reach deleted not_set_up
-                   server_not_set_up waited_too_long server_waited_too_long token_refused
-                   update disk_full server_disk_full backup_old backup_none server_backup_old
-                   backup_push not_ready turned_off_cost server_costs billing data
-                   replace_creating replace_starting replace_installing replace_connecting
-                   replace_ready replace_moving replace_deleting replace_cancelling
-                   replace_turned_off replace_not_set_up replace_waited_too_long replace_stopped
-                   new_server_costs old_server_costs turning_on replace_turning_on restarting
-                   progress_checking progress_firewall progress_server progress_starting
-                   progress_deleting progress_power confirm_create confirm_create_in
-                   confirm_start_again confirm_replace confirm_restart confirm_delete
-                   confirm_cancel confirm_replace_move notice_ready notice_moved
-                   notice_backup_week notice_server_backup_week return_connecting return_ready
-                   return_moving return_undone return_failed return_stopped restore_moving
-                   restore_failed server_retired notice_back progress_return_receiving
-                   progress_return_staged progress_return_placing progress_restoring
-                   confirm_delete_back confirm_restore_here confirm_return_move)a
+  @summary_keys ~w(off connect connecting ready moving waiting on on_backup on_no_backup undone
+                   retired candidate_waiting candidate_receiving primary cannot_reach
+                   server_not_set_up server_waited_too_long update disk_full server_disk_full
+                   backup_old backup_none server_backup_old backup_push not_ready data
+                   notice_ready notice_moved notice_backup_week notice_server_backup_week
+                   return_connecting return_ready return_moving return_undone return_failed
+                   return_stopped restore_moving restore_failed notice_back
+                   progress_return_receiving progress_return_staged progress_return_placing
+                   progress_restoring confirm_restore_here confirm_return_move)a
   # Each Details line's label, by its key.
   @line_labels [
     server: "Server",
-    size: "Size",
-    place: "Place",
-    address: "Address",
     system: "System",
     version: "Version",
     waits_until: "Waits until",
-    checked: "Last checked",
-    costs: "Costs",
-    old_costs: "Old server costs",
     disk: "Server disk",
-    seen: "Last seen",
     runs_again: "Runs here again"
   ]
   @line_keys Keyword.keys(@line_labels) ++ [:backup, :copies, :backup_here]
   @docs_url "https://fermix.ai/docs/always-on/"
   @own_server_command "curl -fsSL https://fermix.ai/always-on | sudo sh -s -- --version "
-  @currency_signs %{"EUR" => "€", "USD" => "$", "GBP" => "£"}
   # A sentence starts at the beginning of the string and after a terminator or
   # a colon, which is how this copy introduces a command or a list.
   @sentence_break ~r/(?<=[.?:])\s+/
 
   # The hand-maintained half, and the only one. Every entry is asserted used by
   # a live string, so a name that leaves the copy leaves this list in the same
-  # change. Provider labels, and the names a cloud provider's own words use,
-  # are derived below rather than repeated here.
+  # change. Provider labels are derived below rather than repeated here.
   @proper_nouns [
     "Fermix Computer Use",
     "Fermix Messages",
     "Always On",
-    # The system of the server Always On moves to, and the one Fermix creates
-    # its server with.
+    # The system of the server Always On moves to.
     "Linux",
-    "Debian",
     # The display server the Linux computer-use rows name.
     "Wayland",
     "Apple ID",
@@ -200,14 +175,13 @@ defmodule FermixCore.Management.Copy do
   @doc """
   The proper nouns and proper phrases the sentence-case rule accepts.
 
-  Provider labels are read from the descriptor registry, and the names each
-  Always On cloud provider's words use from its display data, so a provider
-  added in Elixir needs no entry here; the rest is the hand-maintained list
-  this module documents.
+  Provider labels are read from the descriptor registry, so a provider added
+  in Elixir needs no entry here; the rest is the hand-maintained list this
+  module documents.
   """
   @spec proper_nouns() :: [String.t()]
   def proper_nouns do
-    (@proper_nouns ++ descriptor_names() ++ provision_names())
+    (@proper_nouns ++ descriptor_names())
     |> Enum.uniq()
     |> Enum.sort_by(&(-String.length(&1)))
   end
@@ -321,11 +295,9 @@ defmodule FermixCore.Management.Copy do
   @doc """
   One sentence of `home.status.summary`, by its key, with the values it
   names: `machine` ("Mac" or "computer"), `age` (seconds since the last
-  backup), `days`, `percent`, `block` (a readiness sentence), `provider` (a
-  cloud provider's name, or who hosts the server), `token_label` (the
-  provider's token, as its field is labelled) or `stays_here` (what this home
-  uses that stops after a move, `off`'s second line only when there is
-  something).
+  backup), `days`, `percent`, `block` (a readiness sentence) or `stays_here`
+  (what this home uses that stops after a move, `off`'s second line only
+  when there is something).
   """
   @spec summary_sentence(atom(), map()) :: String.t()
   def summary_sentence(:off, %{machine: machine, stays_here: features}),
@@ -333,16 +305,10 @@ defmodule FermixCore.Management.Copy do
       "Keep Fermix running when this #{machine} sleeps. It moves to a server you own." <>
         stops_line(features)
 
-  def summary_sentence(:connect, %{token_label: label}),
-    do: "Paste a #{label} to let Fermix create your server."
+  def summary_sentence(:connect, _values),
+    do: "Waiting for your server: run the command on it and paste the code when it asks."
 
-  def summary_sentence(:choose, %{provider: provider}),
-    do: "Your #{provider} token works, so choose the server Fermix creates."
-
-  def summary_sentence(:starting, _values), do: "Starting your server…"
-  def summary_sentence(:installing, _values), do: "Installing Fermix on your server…"
   def summary_sentence(:connecting, _values), do: "Connecting your server…"
-  def summary_sentence(:deleting, _values), do: "Deleting your server…"
 
   def summary_sentence(:ready, %{machine: machine}),
     do:
@@ -374,25 +340,14 @@ defmodule FermixCore.Management.Copy do
   def summary_sentence(:candidate_waiting, _values), do: "This server is waiting for its move."
   def summary_sentence(:candidate_receiving, _values), do: "Your home is moving to this server."
   def summary_sentence(:primary, _values), do: "Fermix runs here."
-  def summary_sentence(:turned_off, _values), do: "Your server is turned off."
 
   def summary_sentence(:cannot_reach, _values),
     do: "Fermix cannot reach your server. Your messages wait until it is back."
 
-  def summary_sentence(:deleted, %{provider: provider}),
-    do: "Your server was deleted in #{provider}."
-
-  def summary_sentence(:not_set_up, _values), do: "Your server did not finish setting up."
   def summary_sentence(:server_not_set_up, _values), do: "This server did not finish setting up."
-
-  def summary_sentence(:waited_too_long, _values),
-    do: "Your server waited too long and must be set up again."
 
   def summary_sentence(:server_waited_too_long, _values),
     do: "This server waited too long for its move and must be set up again."
-
-  def summary_sentence(:token_refused, %{provider: provider}),
-    do: "#{provider} no longer accepts Fermix's token."
 
   def summary_sentence(:update, %{machine: machine}),
     do: "Update Fermix on this #{machine} to keep using Always On."
@@ -420,96 +375,6 @@ defmodule FermixCore.Management.Copy do
         "on your Mac to back up now."
 
   def summary_sentence(:not_ready, %{block: block}), do: "The move cannot start yet. #{block}"
-
-  def summary_sentence(:turned_off_cost, _values),
-    do: "A turned-off server still costs its monthly price."
-
-  def summary_sentence(:server_costs, _values),
-    do: "Your server costs its monthly price until it is deleted."
-
-  def summary_sentence(:billing, %{provider: provider}),
-    do: "#{provider} bills by the hour until the server is deleted."
-
-  def summary_sentence(:replace_creating, _values), do: "Creating your new server…"
-  def summary_sentence(:replace_starting, _values), do: "Starting your new server…"
-  def summary_sentence(:replace_installing, _values), do: "Installing Fermix on your new server…"
-  def summary_sentence(:replace_connecting, _values), do: "Connecting your new server…"
-  def summary_sentence(:replace_ready, _values), do: "Your new server is ready for the move."
-
-  def summary_sentence(:replace_moving, _values),
-    do: "Moving to your new server. Messages wait until it is done."
-
-  def summary_sentence(:replace_deleting, _values), do: "Removing your old server…"
-  def summary_sentence(:replace_cancelling, _values), do: "Deleting your new server…"
-  def summary_sentence(:replace_turned_off, _values), do: "Your new server is turned off."
-
-  def summary_sentence(:replace_not_set_up, _values),
-    do: "Your new server did not finish setting up."
-
-  def summary_sentence(:replace_waited_too_long, _values),
-    do: "Your new server waited too long and must be set up again."
-
-  def summary_sentence(:replace_stopped, _values),
-    do: "Your server still runs Fermix, so replacing it can be tried again."
-
-  def summary_sentence(:new_server_costs, _values),
-    do: "Your new server costs its monthly price until it is deleted."
-
-  def summary_sentence(:old_server_costs, _values),
-    do: "Your old server costs its monthly price until it is deleted."
-
-  def summary_sentence(:turning_on, _values), do: "Turning your server on…"
-  def summary_sentence(:replace_turning_on, _values), do: "Turning your new server on…"
-  def summary_sentence(:restarting, _values), do: "Restarting your server…"
-
-  def summary_sentence(:progress_checking, %{provider: provider}),
-    do: "Checking that #{provider} has the server in stock."
-
-  def summary_sentence(:progress_firewall, _values), do: "Creating the server's firewall."
-  def summary_sentence(:progress_server, _values), do: "Creating the server."
-  def summary_sentence(:progress_starting, _values), do: "Waiting for the server to start."
-
-  def summary_sentence(:progress_deleting, _values),
-    do: "Deleting the server and what came with it."
-
-  def summary_sentence(:progress_power, %{provider: provider}),
-    do: "Waiting for #{provider} to finish."
-
-  def summary_sentence(:confirm_create, %{provider: provider}),
-    do: "Create your server? #{provider} bills it by the hour until it is deleted."
-
-  def summary_sentence(:confirm_create_in, %{provider: provider, city: city}),
-    do: "Create your server in #{city}? #{provider} bills it by the hour until it is deleted."
-
-  def summary_sentence(:confirm_start_again, %{provider: provider}),
-    do:
-      "Delete what Fermix created and create your server again? #{provider} bills it by " <>
-        "the hour until it is deleted."
-
-  def summary_sentence(:confirm_replace, %{provider: provider}),
-    do:
-      "Create a new server to replace this one? #{provider} bills it by the hour until it " <>
-        "is deleted, and Fermix deletes the old one once the move to it is done."
-
-  def summary_sentence(:confirm_restart, _values),
-    do: "Restart your server? Fermix on it stops until it starts again."
-
-  def summary_sentence(:confirm_delete, %{which: which}) when which in ["new", "old"],
-    do: "Delete your #{which} server? Everything on it is deleted."
-
-  def summary_sentence(:confirm_delete, _values),
-    do: "Delete your server? Everything on it is deleted."
-
-  def summary_sentence(:confirm_cancel, %{which: "new"}),
-    do: "Cancel and delete your new server? Everything Fermix created for it is deleted."
-
-  def summary_sentence(:confirm_cancel, _values),
-    do: "Cancel and delete your server? Everything Fermix created for it is deleted."
-
-  def summary_sentence(:confirm_replace_move, _values),
-    do:
-      "Move Fermix to your new server now? Your old server serves nothing while the move " <>
-        "runs, and Fermix deletes it once the move is done."
 
   def summary_sentence(:notice_ready, _values), do: "Your server is ready for the move."
   def summary_sentence(:notice_moved, _values), do: "Fermix moved to your server."
@@ -544,11 +409,6 @@ defmodule FermixCore.Management.Copy do
   def summary_sentence(:restore_failed, %{machine: machine}),
     do: "Fermix could not restore its backup on this #{machine}."
 
-  def summary_sentence(:server_retired, %{machine: machine}),
-    do:
-      "Fermix is back on this #{machine}. Your server still runs and costs money until you " <>
-        "delete it."
-
   def summary_sentence(:notice_back, %{machine: machine}),
     do:
       "Fermix is back on this #{machine}. Your own server still runs its retired copy: turn " <>
@@ -566,11 +426,6 @@ defmodule FermixCore.Management.Copy do
   def summary_sentence(:progress_restoring, %{machine: machine}),
     do: "Restoring Fermix from the backup on this #{machine}…"
 
-  def summary_sentence(:confirm_delete_back, _values),
-    do:
-      "Delete your server? Fermix no longer runs on it, and everything still on it is gone " <>
-        "for good."
-
   def summary_sentence(:confirm_restore_here, %{machine: machine}),
     do:
       "Restore Fermix on this #{machine} from its backup? Confirm only once you deleted or " <>
@@ -585,11 +440,11 @@ defmodule FermixCore.Management.Copy do
         " Coding agents ask for your approval again. Messages sent to Telegram while it " <>
         "moves wait until it is done. Your server stays until you delete it."
 
-  def summary_sentence(:data, %{provider: provider}),
+  def summary_sentence(:data, _values),
     do:
       "Your conversations and memories, the secrets, the browser and traces live on your " <>
-        "server, and #{provider} can technically read its disk. Backups are encrypted to " <>
-        "your recovery passphrase."
+        "server, and whoever hosts it can technically read its disk. Backups are encrypted " <>
+        "to your recovery passphrase."
 
   @doc """
   What a move stops among `features` (`:imessage`, `:voice`, `:meetings`),
@@ -663,21 +518,14 @@ defmodule FermixCore.Management.Copy do
   def summary_line_label(:backup_here), do: "Backup on this Mac"
   def summary_line_label(key), do: Keyword.fetch!(@line_labels, key)
 
-  @doc "The label of the line that says when the provider was last read back."
-  @spec checked_label() :: String.t()
-  def checked_label, do: summary_line_label(:checked)
-
   @doc """
   One Details line, `%{"label", "value"}`, its value finished here from
-  `value`: a name, a city, an address, a system or a version as it is; a
-  time (`waits_until`, `checked`, a `backup`'s `{place, at}`) stated in
-  `ctx`'s `zone`; the space this computer's `copies` take, in bytes, on
-  `ctx`'s `machine`; how full the server's `disk` is, a fraction; what the
-  server (`costs`) or the old one (`old_costs`) costs, `{total_monthly,
-  currency}` as the ledger keeps them; when the server was last `seen`; the
-  copy on `ctx`'s `machine` a restore takes (`backup_here`, when it was
-  written); and what runs on this computer again after a move back
-  (`runs_again`, the features).
+  `value`: a name, a system or a version as it is; a time (`waits_until`, a
+  `backup`'s `{place, at}`) stated in `ctx`'s `zone`; the space this
+  computer's `copies` take, in bytes, on `ctx`'s `machine`; how full the
+  server's `disk` is, a fraction; the copy on `ctx`'s `machine` a restore
+  takes (`backup_here`, when it was written); and what runs on this computer
+  again after a move back (`runs_again`, the features).
   """
   @spec summary_line(atom(), term(), map()) :: %{String.t() => String.t()}
   def summary_line(:backup, {place, %DateTime{} = at}, %{zone: zone}),
@@ -695,64 +543,20 @@ defmodule FermixCore.Management.Copy do
   def summary_line(:disk, used, _ctx) when is_number(used),
     do: line(summary_line_label(:disk), "#{round(used * 100)}% used")
 
-  def summary_line(key, %DateTime{} = at, %{zone: zone})
-      when key in [:waits_until, :checked, :seen],
-      do: line(summary_line_label(key), stated(at, zone))
-
-  def summary_line(key, {total, currency}, _ctx) when key in [:costs, :old_costs],
-    do: line(summary_line_label(key), offer_price(total, currency))
+  def summary_line(:waits_until, %DateTime{} = at, %{zone: zone}),
+    do: line(summary_line_label(:waits_until), stated(at, zone))
 
   def summary_line(key, value, _ctx)
-      when key in [:server, :size, :place, :address, :system, :version] and is_binary(value),
+      when key in [:server, :system, :version] and is_binary(value),
       do: line(summary_line_label(key), value)
 
   defp line(label, value), do: %{"label" => label, "value" => value}
 
-  @doc """
-  One offer's size, as `home.provision.options` answers it: the type's name,
-  then its cores (dedicated where they are), memory and disk ("CPX22: 2
-  cores, 4 GB memory, 80 GB disk").
-  """
-  @spec offer_label(map()) :: String.t()
-  def offer_label(%{
-        "description" => name,
-        "cores" => cores,
-        "memory_gb" => memory,
-        "disk_gb" => disk,
-        "dedicated" => dedicated
-      })
-      when is_binary(name) and is_integer(cores) and cores > 0 and is_number(memory) and
-             is_integer(disk) and is_boolean(dedicated),
-      do: "#{name}: #{cores} #{cores(cores, dedicated)}, #{gb(memory)} GB memory, #{disk} GB disk"
-
-  @doc "One offer's price, `total` a month in `currency`, worded as the Costs line is."
-  @spec offer_price(String.t(), String.t()) :: String.t()
-  def offer_price(total, currency) when is_binary(total) and is_binary(currency),
-    do: "#{money(total, currency)} a month, billed by the hour until deleted"
-
-  defp cores(count, true), do: "dedicated " <> cores(count, false)
-  defp cores(1, false), do: "core"
-  defp cores(_count, false), do: "cores"
-
-  # A size as a person reads it: 4.0 is 4, 4.5 stays 4.5.
-  defp gb(size) when is_integer(size), do: Integer.to_string(size)
-  defp gb(size) when size == trunc(size), do: size |> trunc() |> Integer.to_string()
-  defp gb(size), do: Float.to_string(size)
-
   defp stated(at, zone), do: Clock.stated_instant(at, personalization: [timezone: zone])
 
-  # A price as the ledger keeps it ("8.33"), after its currency's sign or code.
-  defp money(total, currency) do
-    case Map.fetch(@currency_signs, currency) do
-      {:ok, sign} -> sign <> total
-      :error -> "#{currency} #{total}"
-    end
-  end
-
-  @doc "The Always On docs page, at the provider's own part (`docs_anchor`)."
-  @spec always_on_docs_url(String.t()) :: String.t()
-  def always_on_docs_url(anchor) when is_binary(anchor) and anchor != "",
-    do: @docs_url <> "#" <> anchor
+  @doc "The Always On docs page."
+  @spec always_on_docs_url() :: String.t()
+  def always_on_docs_url, do: @docs_url
 
   @doc """
   The command an owner runs on a Linux server of their own to install Fermix
@@ -765,39 +569,22 @@ defmodule FermixCore.Management.Copy do
   def own_server_command, do: @own_server_command <> BuildInfo.product_version()
 
   @doc """
-  The label of one summary action, by its id; `create_in` names a `city`,
-  `open_console` the `provider`, `delete_server` the server a replace
-  deletes (`which`: `"new"` or `"old"`) when there are two, `paste_token` is
-  `Set up` on the first token screen (`first`), `cancel` closes an open
-  code (`code`), and `move_back` and `restore_here` name this computer
+  The label of one summary action, by its id; `cancel` closes an open code
+  (`code`), and `move_back` and `restore_here` name this computer
   (`machine`).
   """
   @spec summary_label(atom(), map()) :: String.t()
-  def summary_label(:create_server, _values), do: "Create server"
   def summary_label(:cancel, %{code: true}), do: "Cancel the code"
   def summary_label(:cancel, _values), do: "Cancel"
   def summary_label(:move_now, _values), do: "Move now"
   def summary_label(:try_again, _values), do: "Try again"
   def summary_label(:learn_more, _values), do: "Learn more"
-  def summary_label(:turn_on, _values), do: "Turn it on"
-  def summary_label(:restart_server, _values), do: "Restart server"
-  def summary_label(:start_again, _values), do: "Start again"
-  def summary_label(:create_in, %{city: city}), do: "Create in #{city}"
-  def summary_label(:open_console, %{provider: provider}), do: "Open #{provider}"
-  def summary_label(:paste_token, %{first: true}), do: "Set up"
-  def summary_label(:paste_token, _values), do: "Paste a new token"
   def summary_label(:update, _values), do: "Update"
   def summary_label(:back_up_now, _values), do: "Back up now"
-  def summary_label(:replace_server, _values), do: "Replace the server"
   def summary_label(:check_again, _values), do: "Check again"
   def summary_label(:own_server, _values), do: "Use my own Linux server"
   def summary_label(:move_back, %{machine: machine}), do: "Move back to this #{machine}"
   def summary_label(:restore_here, %{machine: machine}), do: "Restore on this #{machine}"
-
-  def summary_label(:delete_server, %{which: which}) when which in ["new", "old"],
-    do: "Delete your #{which} server"
-
-  def summary_label(:delete_server, _values), do: "Delete your server"
 
   # How long ago, in the largest whole unit: minutes, hours or days.
   defp ago(seconds) when seconds < 60, do: "just now"
@@ -807,8 +594,6 @@ defmodule FermixCore.Management.Copy do
 
   defp count(1, unit), do: "1 #{unit}"
   defp count(n, unit), do: "#{n} #{unit}s"
-
-  defp provision_names, do: Enum.flat_map(ProvisionRegistry.all(), & &1.display().proper_nouns)
 
   defp descriptor_names do
     Descriptor.all()

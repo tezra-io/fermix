@@ -12,9 +12,8 @@ script, two modes:
   `first-boot.sh` byte for byte and asks for the code without echo. Cloud-init
   user data can run it with the code in `FERMIX_ENROLL_CODE` instead.
   `--version X` names the release to install: the one the computer that sets
-  the server up runs, which Always On's own-server command and the cloud-init
-  of a server Fermix creates both pass, so the home can always move back
-  there; without it, the latest.
+  the server up runs, which Always On's command for the server passes, so the
+  home can always move back there; without it, the latest.
 - **Enroll** (the default) makes the server a candidate the primary moves
   to. **Restore** (`--restore`) takes no code and enrolls nothing: it prepares
   the same hardened server and prints the exact steps that restore the newest
@@ -50,8 +49,8 @@ step:
    and tcp 53) and time (udp 123), through
    `fermix-metadata-block.service`: before `network-pre.target` at every boot,
    again after `nftables.service` starts or reloads (which flushes the
-   ruleset). The server's user data, which holds the enrollment code, stays
-   readable through the metadata service for the server's life. Some clouds
+   ruleset). User data that holds the enrollment code stays readable
+   through the metadata service for the server's life. Some clouds
    serve DNS and time from the same address, so those two are accepted before
    the drop and keep working for every account; anything else a cloud serves
    there stays root's. An accept ends only this table's chain, whose policy is
@@ -61,16 +60,16 @@ step:
    which is one reason the server runs no containers: Fermix's Linux sandbox
    is Landlock, which confines commands in place. A container runtime would
    need its own rule.
-3. Swap, the memory guard's first half: a host with no swap (Hetzner's images
-   have none) gets a 2 GB swap file, `/swapfile` (0600, made with
+3. Swap, the memory guard's first half: a host with no swap (many cloud
+   images have none) gets a 2 GB swap file, `/swapfile` (0600, made with
    `fallocate` and `mkswap`, listed in `/etc/fstab`, turned on), so memory
    pressure slows the server before the kernel stops a process. A host with
    swap of its own keeps it and gets none, and a run again changes nothing.
    The guard's second half is the engine's: on Linux it starts Chromium with
    `oom_score_adj` 1000, inherited by each of Chromium's processes, so out of
    memory the kernel stops a Chromium process before the engine. Both values
-   are constants until a measurement on the smallest server Fermix creates
-   sets them (M75 §3).
+   are constants until a measurement on a small real server sets them
+   (M75 §3).
 4. Installs the Linux package through `https://fermix.ai/install --no-setup`
    (`--version X` when it was given one), the installer every host uses, with
    its checks. The package's user unit

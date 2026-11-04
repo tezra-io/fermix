@@ -2,7 +2,7 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
   @moduledoc """
   The `home.status` goldens beyond the first (`success.jsonl`), one for each
   family of the summary's states (M75 lean v1 §7): the computer that sets
-  Always On up while its server installs and once it is ready, the server
+  Always On up while its server connects and once it is ready, the server
   before and after its move, and a linked desktop when all is well (Move back
   among its actions) and when its server stopped answering (Restore here
   beside it, from the copies the desktop keeps). Each is the record
@@ -12,7 +12,6 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
   """
 
   alias FermixCore.Home.MoveReadiness
-  alias FermixCore.Home.Provision.Hetzner
   alias FermixCore.Home.Snapshot
   alias FermixCore.Home.Snapshot.S3, as: SnapshotS3
   alias FermixCore.Home.Snapshot.Status, as: SnapshotStatus
@@ -37,16 +36,16 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
     ]
   end
 
+  # The owner's server used its code and connects.
   defp creating do
-    window = window(:open, nil)
+    window = window(:used, nil, ~U[2031-05-04 12:25:00Z])
 
     record(:primary, %{epoch: 4, snapshots: s3_snapshots(), disk: disk(0.31)}, %{
       link: link(enrollment: window),
-      provision: ledger(),
       enrollment: %{
-        "state" => "open",
-        "expires_at" => "2031-05-05T11:00:00Z",
-        "kind" => "provisioned",
+        "state" => "used",
+        "expires_at" => "2031-05-04T12:25:00Z",
+        "kind" => "manual",
         "candidate_id" => nil
       }
     })
@@ -71,15 +70,14 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
     }
 
     record(:primary, %{epoch: 4, snapshots: snapshots, disk: disk(0.31)}, %{
-      link: link(enrollment: window(:used, @cand)),
-      provision: ledger(),
+      link: link(enrollment: window(:used, @cand, ~U[2031-05-04 11:15:00Z])),
       candidates: [candidate_view()],
       review: review,
       move_items: MoveReadiness.summary_items({:ok, ""}, true, @server_name, restarts_itself: true),
       enrollment: %{
         "state" => "used",
-        "expires_at" => "2031-05-05T11:00:00Z",
-        "kind" => "provisioned",
+        "expires_at" => "2031-05-04T11:15:00Z",
+        "kind" => "manual",
         "candidate_id" => @cand
       }
     })
@@ -121,7 +119,6 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
     record(:device, %{epoch: 4, moved: moved, snapshots: retired_snapshots(:device)}, %{
       link: link(primary: link_primary),
       linked: true,
-      provision: ledger(),
       primary_home: primary_home,
       primary_missing:
         if(primary_home, do: nil, else: "The server #{@server_name} is unreachable."),
@@ -164,9 +161,6 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
         move: facts.move,
         link: link,
         candidates: facts.candidates,
-        provider: Hetzner,
-        providers: [Hetzner],
-        provision: Map.get(extra, :provision, none()),
         review: Map.get(extra, :review),
         move_items: Map.get(extra, :move_items, []),
         snapshots: facts.snapshots,
@@ -197,11 +191,11 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
   defp link(overrides),
     do: Map.merge(%{primary: nil, desktops: [], enrollment: nil}, Map.new(overrides))
 
-  defp window(state, candidate_id) do
+  defp window(state, candidate_id, expires_at) do
     %{
       state: state,
-      expires_at: ~U[2031-05-05 11:00:00Z],
-      kind: :provisioned,
+      expires_at: expires_at,
+      kind: :manual,
       candidate_id: candidate_id,
       awake_ms: 9 * 60_000
     }
@@ -221,43 +215,6 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
         ),
       down_ms: down_ms,
       down_at: if(status == :connected, do: nil, else: ~U[2031-05-04 11:49:00Z])
-    }
-  end
-
-  defp none,
-    do: %{
-      state: :none,
-      token: :none,
-      server: nil,
-      failure: nil,
-      sentence: nil,
-      replace: nil,
-      action: nil,
-      checked_at: nil
-    }
-
-  defp ledger do
-    %{
-      state: :created,
-      token: :accepted,
-      failure: nil,
-      sentence: nil,
-      replace: nil,
-      action: nil,
-      checked_at: ~U[2031-05-04 11:59:00Z],
-      server: %{
-        name: @server_name,
-        id: "61839204",
-        status: :created,
-        type: "cpx22",
-        location: "fsn1",
-        ipv4: "203.0.113.7",
-        power: "running",
-        created_at: ~U[2031-05-04 10:58:00Z],
-        seen_at: ~U[2031-05-04 11:50:00Z],
-        total_monthly: "8.33",
-        currency: "EUR"
-      }
     }
   end
 

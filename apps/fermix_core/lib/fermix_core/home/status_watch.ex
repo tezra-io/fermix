@@ -12,8 +12,8 @@ defmodule FermixCore.Home.StatusWatch do
   the app reads `home.status` itself.
 
   **When it reads.** On `changed/2` from the writes that feed the summary:
-  `:ledger` (the provisioner's file, `Provision.Ledger.update/3`), `:move`
-  (a move's phase, `Move.put_phase/4`), `:enrollment` (the enrollment window
+  `:move` (a move's phase, `Move.put_phase/4`; a move back's record and
+  candidate, `Home.Return`, `Home.Candidate`), `:enrollment` (the enrollment window
   opened, used, enrolled, withdrawn or expired, `FermixChannels.Home.Enrollment`),
   `:snapshots` (a backup run finished,
   `Snapshot.Scheduler`), `:link` (the desktop's session to its server up or
@@ -37,18 +37,14 @@ defmodule FermixCore.Home.StatusWatch do
   told while it stays off, a settings write that changes the line naming what
   stops included (no write of settings tells this process at all; the app
   reads that line when its pane opens). Nothing is armed, and only an event
-  that could end `off` is read (`:ledger`, `:enrollment`, `:move`); a backup
+  that could end `off` is read (`:enrollment`, `:move`); a backup
   run, the link and the clock are not. Entering `off` from another state is a
   change, told once. An `off` that carries a notice (Fermix back on this
   computer from a server of the owner's own) is not quiet: the engine that
   took the home back starts with it, and its first subscriber is told.
 
-  It never calls the cloud provider: the provider is read by a job of its
-  family (a step, or the reconcile a stale `home.status` read starts), and
-  every write of its ledger
-  (`Provision.Ledger.update/3`, through which `Provision.Driver` and the
-  management family write) tells the watch `:ledger`. A read that fails is logged;
-  the last read stands, with no deadline until the next read.
+  A read that fails is logged; the last read stands, with no deadline until
+  the next read.
 
   It runs beside the companion socket (`FermixChannels.Companion.Supervisor`),
   before its connections, so a restart of this process, which forgets its
@@ -72,15 +68,15 @@ defmodule FermixCore.Home.StatusWatch do
   alias FermixCore.Management.Home
   alias FermixCore.Management.HomeSummary
 
-  @kinds [:ledger, :move, :enrollment, :snapshots, :link, :server]
+  @kinds [:move, :enrollment, :snapshots, :link, :server]
   # While Always On is off, only these can end it.
-  @off_wakes [:ledger, :move, :enrollment]
+  @off_wakes [:move, :enrollment]
   @min_delay_ms 1_000
   # Within the runtime's timer bound; a deadline further off is looked at
   # again then.
   @max_delay_ms 7 * 86_400_000
 
-  @type kind :: :ledger | :move | :enrollment | :snapshots | :link | :server
+  @type kind :: :move | :enrollment | :snapshots | :link | :server
   @type read :: %{key: term(), off: boolean(), next_change_ms: pos_integer() | nil}
 
   @spec start_link(keyword()) :: GenServer.on_start()

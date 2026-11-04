@@ -1,11 +1,10 @@
 defmodule FermixCore.Home.Return do
   @moduledoc """
-  The one record of a return (Always On's move back to this computer):
-  `<home>/device/return.json`, for a server Fermix created and an owner's own
-  server alike. `device/` stays on this machine and is kept through the
-  return's activation (`FermixCore.Home.DeviceLocal`), so the record is still
-  here once this computer is the primary again. The provider ledger
-  (`FermixCore.Home.Provision.Ledger`) is never touched by a return.
+  The one record of a return (Always On's move back to this computer, or
+  Restore here): `<home>/device/return.json`. `device/` stays on this
+  machine and is kept through the return's activation
+  (`FermixCore.Home.DeviceLocal`), so the record is still here once this
+  computer is the primary again.
 
   Mode `0600` under a `0700` `device/`, written whole to a temporary file and
   renamed, so a reader never sees half of one:
@@ -13,7 +12,6 @@ defmodule FermixCore.Home.Return do
       {
         "v": 1,
         "from": "orchard-server",
-        "provider_server": "srv-7f3a",
         "primary_epoch": 5,
         "started_at": "2031-06-01T09:00:00Z",
         "move_started_at": "2031-06-01T09:05:00Z",
@@ -28,7 +26,6 @@ defmodule FermixCore.Home.Return do
     holds it, so the screen can name it afterwards; 1 to 128 bytes of
     printable text.
   - `started_at` (required): when the owner asked to move back.
-  - `provider_server`: the ledger's server, absent for an owner's own server.
   - `primary_epoch`: the epoch the link had seen when the return was asked for.
   - `move_started_at`, `candidate_id`, `move_id`: once the server started the
     move.
@@ -58,7 +55,7 @@ defmodule FermixCore.Home.Return do
   @file_mode 0o600
   @max_text_bytes 128
   @times [:started_at, :move_started_at, :moved_at]
-  @texts [:from, :provider_server, :candidate_id, :move_id, :restore_requested]
+  @texts [:from, :candidate_id, :move_id, :restore_requested]
   @epochs [:primary_epoch, :epoch]
   @keys @times ++ @texts ++ @epochs
   @required [:from, :started_at]
@@ -67,7 +64,6 @@ defmodule FermixCore.Home.Return do
   @type record :: %{
           required(:from) => String.t(),
           required(:started_at) => DateTime.t(),
-          optional(:provider_server) => String.t(),
           optional(:primary_epoch) => pos_integer(),
           optional(:move_started_at) => DateTime.t(),
           optional(:candidate_id) => String.t(),

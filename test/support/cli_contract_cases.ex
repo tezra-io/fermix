@@ -278,18 +278,6 @@ defmodule FermixTestSupport.CliContractCases do
       move: nil,
       link: %{primary: nil, desktops: [], enrollment: nil},
       candidates: [],
-      provider: FermixCore.Home.Provision.Hetzner,
-      providers: [FermixCore.Home.Provision.Hetzner],
-      provision: %{
-        state: :none,
-        token: :none,
-        server: nil,
-        failure: nil,
-        sentence: nil,
-        replace: nil,
-        action: nil,
-        checked_at: nil
-      },
       review: nil,
       move_items: [],
       snapshots: snapshots_view(),
@@ -337,7 +325,7 @@ defmodule FermixTestSupport.CliContractCases do
 
   # The marker `fermix home mark-moved` writes and prints.
   defp moved,
-    do: %{epoch: 4, moved_at: ~U[2026-10-27 09:30:00Z], to: "hetzner fermix-home 48151623"}
+    do: %{epoch: 4, moved_at: ~U[2026-10-27 09:30:00Z], to: "fermix-home 48151623"}
 
   defp action(past_tense), do: %{"action" => past_tense, "scope" => "user"}
 
@@ -428,7 +416,7 @@ defmodule FermixTestSupport.CliContractCases do
   def error_details(:systemctl_failed), do: [output: "Unit fermix.service not found."]
   def error_details(:lifecycle_refused), do: [output: "the daemon returned no lease"]
   def error_details(:diagnostics_unavailable), do: [output: "collecting it took too long"]
-  def error_details(:already_moved), do: [to: "hetzner cx22", date: "2026-10-20", epoch: 3]
+  def error_details(:already_moved), do: [to: "fermix-home", date: "2026-10-20", epoch: 3]
 
   def error_details(:snapshots_refused),
     do: [output: "Snapshots are off: set a recovery passphrase to turn them on."]
@@ -439,22 +427,17 @@ defmodule FermixTestSupport.CliContractCases do
   def error_details(:mark_moved_failed),
     do: [output: "could not tell whether Fermix is running (timeout)"]
 
-  def error_details(:action_refused) do
-    [
-      output:
-        "Hetzner does not accept this token, so paste a Read & Write API token from the " <>
-          "Hetzner project you made for Fermix."
-    ]
-  end
+  def error_details(:action_refused),
+    do: [output: "That is not the recovery passphrase you set."]
 
   def error_details(:confirm_required),
-    do: [confirm: "Create your server? Hetzner bills it by the hour until it is deleted."]
+    do: [confirm: "Move Fermix to your server now? This computer serves nothing while the move runs."]
 
   def error_details(:changed),
     do: [reason: "Always On changed since this was shown, so look at it again."]
 
   def error_details(:step_failed),
-    do: [reason: "Falkenstein has no CPX22 right now."]
+    do: [reason: "Fermix cannot reach your server. Your messages wait until it is back."]
 
   def error_details(_code), do: []
 

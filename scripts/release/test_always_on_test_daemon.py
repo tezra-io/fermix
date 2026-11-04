@@ -584,7 +584,7 @@ class AlwaysOnTestDaemonTest(unittest.TestCase):
 
                 self.assertEqual(result.returncode, 1)
                 self.assertIn(f'Always On says "The {case["state"]} sentence."', result.stderr)
-                self.assertIn("delete the server in the web setup (http://127.0.0.1:4730/setup) first", result.stderr)
+                self.assertIn("move back or cancel in the web setup (http://127.0.0.1:4730/setup) first", result.stderr)
                 self.assertTrue(self.plist.exists())
                 self.assertTrue((self.root / "bin/fermix").exists())
                 self.assertEqual(self.keychain_left(), ["fermix:always-on-test:OPENAI_API_KEY"])
@@ -608,8 +608,8 @@ class AlwaysOnTestDaemonTest(unittest.TestCase):
         self.keychain(
             "fermix:always-on-test:OPENAI_API_KEY",
             "fermix:OPENAI_API_KEY",
-            "fermix:always-on-test:HCLOUD_TOKEN",
-            "fermix:always-on-test:HCLOUD_TOKEN",
+            "fermix:always-on-test:ANTHROPIC_API_KEY",
+            "fermix:always-on-test:ANTHROPIC_API_KEY",
             "fermix:fermix-dev:OPENAI_API_KEY",
             "fermix:always-on-tester:OPENAI_API_KEY",
         )
@@ -617,7 +617,7 @@ class AlwaysOnTestDaemonTest(unittest.TestCase):
         result = self.run_script("down")
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn(f"Fermix {VERSION} predates Always On, so it made no server.", result.stdout)
+        self.assertIn(f"Fermix {VERSION} predates Always On, so it holds no server.", result.stdout)
         self.assertIn("Removed 2 Keychain items of profile always-on-test.", result.stdout)
         self.assertEqual(
             self.keychain_left(),
@@ -630,7 +630,7 @@ class AlwaysOnTestDaemonTest(unittest.TestCase):
         self.assertIn("service uninstall --user\n", self.log("fermix"))
 
     def test_down_proceeds_where_always_on_holds_nothing(self):
-        for state in ("off", "connect", "choose"):
+        for state in ("off", "connect"):
             with self.subTest(state=state):
                 self.up()
                 self.screen(state)
@@ -651,7 +651,7 @@ class AlwaysOnTestDaemonTest(unittest.TestCase):
         result = self.run_script("down")
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn(f"Fermix {VERSION} serves no Always On here, so it made no server.", result.stdout)
+        self.assertIn(f"Fermix {VERSION} serves no Always On here, so it holds no server.", result.stdout)
         self.assertFalse(self.root.exists())
 
     def test_down_finishes_what_a_failed_up_left(self):

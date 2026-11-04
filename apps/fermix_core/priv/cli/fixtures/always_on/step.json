@@ -3,46 +3,12 @@
   "result": {
     "result": null,
     "summary": {
-      "action": {
-        "confirm": "Cancel and delete your server? Everything Fermix created for it is deleted.",
-        "id": "cancel",
-        "key": "lW7Sx3Zz1dpg_Diwa6TmhA",
-        "label": "Cancel",
-        "needs": [],
-        "url": null
-      },
-      "detail": {
-        "lines": [
-          {
-            "label": "Server",
-            "value": "fermix-general-a3f9"
-          },
-          {
-            "label": "Size",
-            "value": "CPX22"
-          },
-          {
-            "label": "Place",
-            "value": "Falkenstein"
-          },
-          {
-            "label": "Address",
-            "value": "203.0.113.7"
-          },
-          {
-            "label": "Last checked",
-            "value": "Sunday, May 4, 2031 at 1:59 PM CEST"
-          },
-          {
-            "label": "Costs",
-            "value": "€8.33 a month, billed by the hour until deleted"
-          }
-        ]
-      },
-      "key": "IurlVhODFUU1O0uKPI2ezA",
+      "action": null,
+      "detail": {},
+      "key": "A_S4DotDEeo8_E_syGkw8g",
       "notice": null,
       "outcome": "running",
-      "sentence": "Installing Fermix on your server…",
+      "sentence": "Connecting your server…",
       "state": "creating"
     }
   },
