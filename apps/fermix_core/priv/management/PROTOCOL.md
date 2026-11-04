@@ -436,20 +436,18 @@ this computer had begun to receive), never while its move runs, once it
 retired, or once the home is being put in place here. A stop part-way that
 leaves the start recorded with no candidate, while the server answers as
 the primary with no move, is `return_failed` with `cancel`. A move back the home went past (another
-desktop took it, at a newer epoch) is dropped, and not drawn. Where a server
-Fermix created stopped answering (`cannot_reach`, `turned_off`, `deleted`,
+desktop took it, at a newer epoch) is dropped, and not drawn. Where the
+server stopped answering (`cannot_reach`, `turned_off`, `deleted`,
 `retired`, once it has had no session for 10 minutes, or none at all),
-or which a restore here already asked to delete and the ledger no longer
-holds, and this computer keeps a copy of its snapshots,
+whoever created it, and this computer keeps a copy of its snapshots,
 `detail.alternatives` adds `restore_here` (needs `recovery_passphrase`; its
-confirm says what is lost and that a server only restarting or offline is
-deleted all the same), with the copy's date and when the server was last
-seen in `lines`. It deletes the server first: while that runs the screen is
-`creating`, then `moving` while the copy is restored; a delete the provider
-refused restores nothing (`delete_failed`, `restore_here` again), and a
-server that answers again by then is not deleted: nothing is restored, the
-request is dropped, and the screen is the linked one. A server
-of the owner's own gets no `restore_here`: nothing here can delete it.
+confirm asks the owner's word that the server is deleted or stopped, since
+a server that still runs answers the same channels as the restored copy,
+and says what is lost), with the copy's date and when the server was last
+seen in `lines`. Fermix deletes no server for it: one job of its own
+(`home_restore`) restores the copy, and the screen is `moving` from the
+press until this computer restarts as the primary. A restore that stopped
+before its copy was in place offers `restore_here` again.
 Back on this computer as the primary, while the server Fermix created for
 the home still stands, the screen is `server_retired`, ahead of the setup's
 own and a second desktop's; once it is deleted, the setup's own screens.
@@ -485,7 +483,7 @@ update.
 | `move_now`, `try_again` | reviews at the press (a block refuses; a warning the confirm did not name answers `changed`), checks or sets the recovery passphrase, starts the move and restarts the engine; `result` is `{move_id}`. On a linked desktop's replace it sends the move to the server, which checks the passphrase against its own key and keeps no desktop of itself; during a move back, the same to this desktop's own candidate, kept in the move back's own record |
 | `move_back` | on a linked desktop: asks the server for a copied code (`home.enroll.open`, which names this desktop), writes this desktop's candidate for the home beside it and the move back's record, and starts receiving beside the link. Refused, `unavailable` with a sentence, while the server reports a move of its own, and where Fermix would not start again by itself (run from a terminal) |
 | `cancel` (a move back) | stops receiving, closes the server's copied code (`home.enroll.withdraw {kind: manual}`; one the server cannot be asked to close lapses by itself) and forgets the move back |
-| `restore_here` | chooses the newest copy `input.recovery_passphrase` opens (none: `invalid_params` on `recovery_passphrase`, before anything else), then one job deletes the server first and restores the copy, and the engine restarts as the primary; a delete the provider refused restores nothing |
+| `restore_here` | chooses the newest copy `input.recovery_passphrase` opens (none: `invalid_params` on `recovery_passphrase`, before anything else), keeps the request in the move back's record, then one job (`home_restore`) restores the copy, and the engine restarts as the primary; it deletes no server |
 
 The server also tells the paired phones, once per occurrence, when its newest
 backup passes 7 days, as a message in the owner's phone chat ("Your last
@@ -669,7 +667,7 @@ Notes that the shapes alone do not carry:
   `capability_install` 900000 ms, `meetings_signin` 660000 ms,
   `computer_use_grant` 120000 ms, `browser_install` 900000 ms, `imessage_grant`
   120000 ms, `imessage_policy_confirm` 180000 ms, `mcp_check` 75000 ms,
-  `home_provision` 900000 ms. At most 4 jobs run at once, at most one per
+  `home_provision` 900000 ms, `home_restore` 900000 ms. At most 4 jobs run at once, at most one per
   kind and name (`busy` beyond either), and at most 16 finished jobs are
   retained, none older than 600000 ms. A `job_id` this daemon does not retain
   answers `unknown_job`. A job that is stopped (cancelled, past its budget, or
@@ -679,7 +677,8 @@ Notes that the shapes alone do not carry:
   job (`home_provision`) is ended by the daemon itself once its run is over,
   however it ended, before it finishes: what the run left is written to the
   provisioner's ledger then (at most 35 s more), so a job read as finished
-  never left its step half-kept.
+  never left its step half-kept. Restore here's job (`home_restore`) is ended
+  the same way: its request in the move back's record is taken back then.
 - **`phase` is display copy, never a state.** It names the current step from a
   closed per-kind vocabulary — `provider_probe`: `calling`; `auth`: `binding`,
   `discovering`, `registering`, `awaiting_browser`, `verifying` (an MCP server's
@@ -692,7 +691,7 @@ Notes that the shapes alone do not carry:
   `browser_install`: `sidecar_downloading`, `downloading`; `imessage_grant`: none;
   `imessage_policy_confirm`: none; `mcp_check`: `connecting`, `listing`;
   `home_provision`: `checking`, `firewall`, `server`, `starting` (a create),
-  `power`, `deleting`.
+  `power`, `deleting`; `home_restore`: none.
   `status` is the state a client switches on. A terminal job clears its phase
   unless it `failed` or `timed_out`, where the step it stopped in is part of the
   diagnosis. A run that reports a phase outside its vocabulary fails the job:

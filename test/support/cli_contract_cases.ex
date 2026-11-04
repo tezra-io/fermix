@@ -301,6 +301,7 @@ defmodule FermixTestSupport.CliContractCases do
       zone: "Etc/UTC",
       return: nil,
       returning: nil,
+      restoring: false,
       copies: []
     }
   end

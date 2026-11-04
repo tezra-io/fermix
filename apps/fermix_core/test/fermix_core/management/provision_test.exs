@@ -388,146 +388,25 @@ defmodule FermixCore.Management.ProvisionTest do
     end
   end
 
-  # Always On's move back (design §7, §8): Restore here deletes the server
-  # the home lives on first, through the ledger (the fence), and only while
-  # that server cannot answer; a delete the provider refuses restores
-  # nothing. Back as the primary, Delete your server clears the return's
-  # record with the server.
+  # Always On's move back (design §7): a server a move back is under way
+  # from is not deleted, and back as the primary, Delete your server clears
+  # the return's record with the server.
   describe "after a move back" do
     setup ctx do
       {:ok, _view} = connect(ctx)
       finished(elem(create(ctx), 1), ctx)
       linked_desktop!(ctx.home)
       :ok = Moved.write(ctx.home, %{epoch: 4, moved_at: @now, to: "fermix-general-a3f9"})
-
-      :ok =
-        Return.write(ctx.home, %{
-          from: "fermix-general-a3f9",
-          started_at: @now,
-          provider_server: server_id(ctx),
-          fence_requested: "20310504T093000Z-e5.fxsnap"
-        })
-
       :ok
     end
 
-    test "the fence deletes the server this desktop cannot reach, then the restore runs",
-         ctx do
-      {:ok, job} = restore(ctx, link_down(11 * 60_000))
-      assert %{"status" => "completed", "result" => %{"restored" => true}} = finished(job, ctx)
-
-      assert_received :restored
-      assert %{"state" => "connected", "resources" => []} = Provision.view(ctx.home, ctx.seams)
-      assert {:ok, %{fenced_at: @now}} = Return.read(ctx.home)
-      assert %{action: nil, failure: nil} = Ledger.state(ctx.home, Hetzner)
-    end
-
-    test "a server that forgot this desktop is fenced the same way", ctx do
-      {:ok, job} = restore(ctx, link_revoked())
-      assert %{"status" => "completed"} = finished(job, ctx)
-      assert_received :restored
-    end
-
-    test "with no link running at all, the server is fenced the same way", ctx do
-      {:ok, job} = restore(ctx, %{primary: nil, desktops: [], enrollment: nil})
-      assert %{"status" => "completed"} = finished(job, ctx)
-      assert_received :restored
-    end
-
-    # A server that answers again (or was not silent long enough) by the time
-    # the job's fence runs is no delete failure: nothing is deleted or
-    # restored, the request is dropped, and the screen is the linked one.
-    test "a server silent for less than ten minutes, or answering, is not deleted, nothing " <>
-           "is restored, and the request is dropped",
-         ctx do
-      for link <- [link_down(9 * 60_000), link_up()] do
-        :ok =
-          Return.write(ctx.home, %{
-            from: "fermix-general-a3f9",
-            started_at: @now,
-            fence_requested: "20310504T093000Z-e5.fxsnap"
-          })
-
-        {:ok, job} = restore(ctx, link)
-
-        assert %{"status" => "failed", "failure" => %{"sentence" => sentence}} =
-                 finished(job, ctx)
-
-        assert sentence ==
-                 "Your server answers again, so Fermix deleted nothing and restored nothing here."
-
-        assert %{failure: nil, action: nil, server: %{status: :created}} =
-                 Ledger.state(ctx.home, Hetzner)
-
-        refute Map.has_key?(elem(Return.read(ctx.home), 1), :fence_requested)
-        refute_received :restored
-      end
-    end
-
-    test "a delete the provider refuses restores nothing, in the fence's words", ctx do
-      HetznerStub.fault(ctx.stub, "DELETE", ~r"^/v1/servers/", 500, "server_error")
-
-      {:ok, job} = restore(ctx, link_down(11 * 60_000))
-      assert %{"status" => "failed"} = finished(job, ctx)
-      refute_received :restored
-
-      assert %{failure: %{action: "delete", sentence: sentence}} =
-               Ledger.state(ctx.home, Hetzner)
-
-      assert sentence =~ "Fermix could not delete your server, so it did not restore here"
-      refute Map.has_key?(elem(Return.read(ctx.home), 1), :fenced_at)
-    end
-
-    test "without the request, or while a candidate is here, it is the live home and is " <>
-           "not deleted",
-         ctx do
+    test "without a move back, it is the live home and is not deleted", ctx do
       :ok = Return.write(ctx.home, %{from: "fermix-general-a3f9", started_at: @now})
 
-      down =
-        Keyword.put(seams(ctx, role: @device), :link_status, fn -> link_down(11 * 60_000) end)
-
       assert {:error, :unavailable, %{"sentence" => sentence}} =
-               answered(Provision.delete(down))
+               answered(Provision.delete(seams(ctx, role: @device)))
 
       assert sentence =~ "Your server runs Fermix now"
-
-      :ok =
-        Return.write(ctx.home, %{
-          from: "fermix-general-a3f9",
-          started_at: @now,
-          fence_requested: "20310504T093000Z-e5.fxsnap"
-        })
-
-      File.mkdir_p!(Candidate.dir(ctx.home))
-      {:ok, job} = restore(ctx, link_down(11 * 60_000))
-      assert %{"status" => "failed"} = finished(job, ctx)
-      refute_received :restored
-      assert %{server: %{status: :created}} = Ledger.state(ctx.home, Hetzner)
-    end
-
-    test "once fenced, a restore again deletes nothing and clears what stopped before", ctx do
-      {:ok, job} = restore(ctx, link_down(11 * 60_000))
-      finished(job, ctx)
-      assert_received :restored
-
-      {:ok, _ledger} =
-        Ledger.update(ctx.home, "hetzner", fn ledger ->
-          {:ok,
-           Ledger.put_failure(ledger, %{
-             reason: "interrupted",
-             sentence: "Stopped.",
-             action: "delete",
-             next_location: nil,
-             at: @now
-           })}
-        end)
-
-      calls = length(HetznerStub.requests(ctx.stub))
-      {:ok, job} = restore(ctx, link_down(11 * 60_000))
-      assert %{"status" => "completed"} = finished(job, ctx)
-      assert_received :restored
-      assert length(HetznerStub.requests(ctx.stub)) == calls
-      assert %{failure: nil} = Ledger.state(ctx.home, Hetzner)
     end
 
     # The TLA spec's check 09: between a move back's marker removal and its
@@ -1111,32 +990,6 @@ defmodule FermixCore.Management.ProvisionTest do
       {:ok, view} ->
         view
     end
-  end
-
-  # Restore here's job on this desktop, with the link as `link` says, and a
-  # restore that says it ran.
-  defp restore(ctx, link) do
-    test = self()
-
-    restore = fn _report ->
-      send(test, :restored)
-      {:ok, %{"restored" => true}}
-    end
-
-    seams = Keyword.merge(seams(ctx, role: @device), link_status: fn -> link end)
-    answered(Provision.start_return_restore(restore, seams))
-  end
-
-  defp link_down(ms), do: link(%{status: :unreachable, connected: false, down_ms: ms})
-  defp link_up, do: link(%{status: :connected, connected: true, down_ms: nil})
-  defp link_revoked, do: link(%{status: :revoked, connected: false, down_ms: nil})
-
-  defp link(primary) do
-    %{
-      primary: Map.merge(%{name: "fermix-general-a3f9", epoch: 5, sentence: "."}, primary),
-      desktops: [],
-      enrollment: nil
-    }
   end
 
   defp server_id(ctx), do: Ledger.state(ctx.home, Hetzner).server.id

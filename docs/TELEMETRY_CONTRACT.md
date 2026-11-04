@@ -1128,8 +1128,7 @@ A move back to the computer the home left is the same move, side
 restores that computer's own copy with no server sending it
 (`FermixCore.Home.LocalReturn`), brackets the restore as side `:candidate`
 too, its move id `local-<unix time>`; the job it runs in keeps the
-`home_provision` job family's own bookends, and the delete of the server
-before it is that job's step.
+`home_restore` job's own bookends.
 
 The sign-in loopback forward (M75 D17) adds no event: the sign-in it serves is
 the `auth` management job it always was, and a port the desktop could not open

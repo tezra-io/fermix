@@ -80,12 +80,14 @@ defmodule FermixCore.Management.HomeSummary do
   record of it (Cancel). Cancel is never offered while the server's move is
   under way, once it retired, or once the home is coming in here. A move
   back the home went past (the link reached a newer epoch than the one it
-  was asked at, without this computer's return) is not drawn. Where a server
-  Fermix created stopped answering (`cannot_reach`, `turned_off`,
-  `deleted`, `retired`) and this computer holds a copy of it, Restore here
-  is offered, with the copy's date; while it runs it deletes the server
-  first and a delete the provider refused restores nothing
-  (`delete_failed`). Back on this computer as the primary, while the server
+  was asked at, without this computer's return) is not drawn. Where the
+  server went silent (`cannot_reach`, `turned_off`, `deleted`, `retired`)
+  and this computer holds a copy of it, Restore here is offered, with the
+  copy's date, whoever created the server; its confirm asks the owner's word
+  that the server is deleted or stopped, and Fermix deletes nothing. While
+  its job runs (`restoring`, the job family's own record) beside the
+  return's request for it (`restore_requested`), the screen is `moving`.
+  Back on this computer as the primary, while the server
   Fermix created for the home stands, the screen is `server_retired` with
   Delete your server, ahead of the server's own screen and the setup's; a
   server of the owner's own is told once, `back:<epoch>`.
@@ -215,6 +217,7 @@ defmodule FermixCore.Management.HomeSummary do
           required(:zone) => String.t(),
           required(:return) => map() | nil,
           required(:returning) => map() | :unreadable | nil,
+          required(:restoring) => boolean(),
           required(:copies) => [%{name: String.t(), at: DateTime.t()}]
         }
   @type summary :: %{String.t() => term()}
@@ -237,8 +240,8 @@ defmodule FermixCore.Management.HomeSummary do
 
   @doc """
   How long a linked desktop's server may be silent, while this computer is
-  awake, before the summary says it cannot be reached (and Restore here may
-  delete it as its fence), in milliseconds.
+  awake, before the summary says it cannot be reached and offers Restore
+  here, in milliseconds.
   """
   @spec unreachable_ms() :: pos_integer()
   def unreachable_ms, do: @unreachable_ms
@@ -430,6 +433,7 @@ defmodule FermixCore.Management.HomeSummary do
       zone: Clock.shown_zone(Keyword.take(opts, [:personalization])),
       return: return_record(home, reads),
       returning: returning_state(home, role, reads),
+      restoring: Map.get(status, :restoring, false),
       copies: copies(home, role)
     }
   end
@@ -744,13 +748,14 @@ defmodule FermixCore.Management.HomeSummary do
        when phase in @receiving,
        do: return_step(kind, phase)
 
-  defp return_progress(%{returning: nil, return: %{fenced_at: %DateTime{}}}),
-    do: :progress_restoring
-
-  defp return_progress(%{returning: nil, return: %{move_started_at: %DateTime{}}}),
-    do: :progress_return_placing
+  defp return_progress(%{returning: nil} = facts) do
+    if restore_running?(facts), do: :progress_restoring, else: return_placing(facts)
+  end
 
   defp return_progress(_facts), do: nil
+
+  defp return_placing(%{return: %{move_started_at: %DateTime{}}}), do: :progress_return_placing
+  defp return_placing(_facts), do: nil
 
   defp return_step(_kind, "activating"), do: :progress_return_placing
   defp return_step("local", _phase), do: :progress_restoring
@@ -771,7 +776,8 @@ defmodule FermixCore.Management.HomeSummary do
   # -- the computer the move left ------------------------------------------------
 
   # A move back leads, whatever the link says (its activation ends the
-  # tenure's link); then Restore here's job; then the computer's own move.
+  # tenure's link); then Restore here's job, before its candidate is
+  # written; then the computer's own move.
   defp device(facts), do: returning(facts) || restoring(facts) || settled(facts)
 
   defp settled(%{move: %{"phase" => "committing"}} = facts),
@@ -1156,52 +1162,21 @@ defmodule FermixCore.Management.HomeSummary do
   defp return_cancel, do: action(:cancel, %{return: true})
   defp move_back(facts), do: action(:move_back, %{machine: machine(facts.host_os)})
 
-  # Restore here's job: the server is deleted first, then the copy restored;
-  # a delete the provider refused restored nothing, said while Restore here
-  # can be pressed again.
-  defp restoring(%{return: %{fence_requested: _} = record, provision: provision} = facts) do
-    cond do
-      match?(%{action: %{kind: "delete"}}, provision) -> restore_step(record, facts)
-      fence_failed?(record, provision) -> fence_failed(provision.failure, facts)
-      true -> nil
-    end
+  defp restoring(facts) do
+    if restore_running?(facts), do: view("moving", sentence(:restore_moving, facts), nil, %{})
   end
 
-  defp restoring(_facts), do: nil
+  # Restore here's request beside its running job; a request a restart left
+  # stands beside none.
+  defp restore_running?(%{restoring: true, return: %{restore_requested: _copy}}), do: true
+  defp restore_running?(_facts), do: false
 
-  defp restore_step(%{fenced_at: %DateTime{}}, facts),
-    do: view("moving", sentence(:restore_moving, facts), nil, %{})
-
-  defp restore_step(_record, facts),
-    do: view("creating", sentence(:restore_deleting, facts), nil, %{})
-
-  # A fence whose delete went through holds no server any more, whatever
-  # stopped after it (HR-3): that is no failure.
-  defp fence_failed?(record, %{failure: %{action: "delete"}, server: %{}}),
-    do: not Map.has_key?(record, :fenced_at)
-
-  defp fence_failed?(_record, _provision), do: false
-
-  defp fence_failed(failure, facts) do
-    case restore_offer(facts) do
-      nil ->
-        nil
-
-      restore ->
-        problem("delete_failed", failure.sentence, restore, %{"seen_at" => iso(failure.at)})
-    end
-  end
-
-  # Restore here (design §8): only for a server Fermix created, which is
-  # deleted first (the fence), or one a restore asked to delete and whose
-  # ledger no longer holds it (deleted for it, its record written or not:
-  # HR-3); only while the server is as silent as the fence asks, never
-  # during a replace, and only while this computer holds a copy, the newest
-  # named.
-  defp restore_offer(%{copies: [newest | _], provision: %{replace: nil} = provision} = facts) do
-    fence? = provision.server != nil or match?(%{fence_requested: _copy}, facts.return)
-
-    if fence? and silent?(facts),
+  # Restore here (design §8): wherever the server is silent (no link, the
+  # server forgot this computer, or no session for the limit), whoever
+  # created it, never during a replace, and only while this computer holds a
+  # copy, the newest named.
+  defp restore_offer(%{copies: [newest | _], provision: %{replace: nil}} = facts) do
+    if silent?(facts),
       do:
         action(:restore_here, %{copy: newest.name, at: newest.at, machine: machine(facts.host_os)})
   end
@@ -1260,8 +1235,7 @@ defmodule FermixCore.Management.HomeSummary do
 
   defp stale?(_facts), do: false
 
-  # The server as silent as the fence asks (`Management.Provision`): no link,
-  # forgotten, or no session for the limit.
+  # The server silent: no link, forgotten, or no session for the limit.
   defp silent?(%{link: %{primary: nil}}), do: true
   defp silent?(%{link: %{primary: %{status: :revoked}}}), do: true
 

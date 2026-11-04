@@ -806,23 +806,20 @@ back only when the server refused or the request never left; Cancel (offered
 only where the server has no move under way) stops the subtree, closes the window
 (`home.enroll.withdraw {kind: manual}`) and removes both, the record first (a
 stop between them leaves a candidate, which Cancel clears). Restore here
-(`restore_here`) chooses the newest copy under `snapshots/` the passphrase
-opens (`Home.LocalReturn.choose/2`, a wrong one refused before anything is
-deleted), writes `fence_requested`, and runs one `home_provision` job
-(`Provision.start_return_restore/2`): the fence, `delete_target`'s
-`:return_fence` (asked for, the server silent past the summary's limit or out
-of any link, no candidate here, no move under way), is `Driver.delete/3` of
-the server the home lives on and nothing else, recorded as `fenced_at`; a
-delete the provider refused ends the job as the delete's failure and
-restores nothing, and a server that answers again by then is no failure:
-nothing is deleted or restored, and `fence_requested` is dropped;
-then `Home.LocalReturn.restore/3` (a `local` candidate, the copy staged as a
-return's, activated in place, the engine restarted). The job is never
-resumed: jobs live in memory, so a stop part-way leaves the step interrupted
-and a `local` candidate the device's next start discards, and Restore here is
-offered again, keyed on `fence_requested` with the ledger's server gone, so a
-stop between the delete and `fenced_at` still offers it (a ledger that holds
-nothing deletes nothing twice). The primary's
+(`restore_here`), offered for any server silent past the summary's limit (or
+out of any link) while this computer keeps a copy, and pressed once the
+owner confirmed they deleted or stopped the server, chooses the newest copy
+under `snapshots/` the passphrase opens (`Home.LocalReturn.choose/2`, a
+wrong one refused before anything is written), writes `restore_requested`
+into `return.json`, and runs one `home_restore` job:
+`Home.LocalReturn.restore/3` (a `local` candidate, the copy staged as a
+return's, activated in place, the engine restarted). Fermix deletes no
+server for it. The summary reads the request beside its running job
+(`Management.Home` asks the job family) as `moving`; the job's ending, however
+the run ended, takes the request back. The job is never resumed: jobs live in
+memory, so a stop part-way leaves a request beside no job and a `local`
+candidate the device's next start discards, and Restore here is offered
+again. The primary's
 summary reads `return.json`'s `moved_at` with the ledger's server standing as
 `server_retired` first; its delete removes the record with the server. While
 a move back's `candidate/` is here, in any phase, or `return.json` says its

@@ -235,6 +235,19 @@ defmodule FermixCore.Management.Home do
   defp jobs?(opts),
     do: opts |> Keyword.get(:jobs, []) |> Keyword.get(:server, Jobs) |> GenServer.whereis() != nil
 
+  # Restore here's job runs on this desktop (`Management.AlwaysOn`): the job
+  # family's own record, so a restart that ended the job ends it here too.
+  defp restoring?(%{role: :device}, opts) do
+    if jobs?(opts) do
+      {:ok, views} = Jobs.list(Keyword.get(opts, :jobs, []))
+      Enum.any?(views, &match?(%{"kind" => "home_restore", "status" => "running"}, &1))
+    else
+      false
+    end
+  end
+
+  defp restoring?(_record, _opts), do: false
+
   # One at a time: a reconcile or a step already running is the provider's
   # read in hand.
   defp start_reconcile(opts) do
@@ -283,8 +296,10 @@ defmodule FermixCore.Management.Home do
       update_ceiling: update_ceiling(home, opts)
     }
 
-    gathered =
-      HomeSummary.gather(home, role, link, Map.put(facts, :primary_too_old, too_old?), opts)
+    summary_status =
+      Map.merge(facts, %{primary_too_old: too_old?, restoring: restoring?(role, opts)})
+
+    gathered = HomeSummary.gather(home, role, link, summary_status, opts)
 
     {facts, gathered}
   end

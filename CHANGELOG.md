@@ -98,11 +98,11 @@ will be part of a future release; nothing in this group is in a release yet.
   voice calls and meetings run there again as they did before, and your
   phones follow. Cancel stops it until the server starts the move. Once
   your Mac runs Fermix again, Delete your server is a separate step, since
-  the server still costs money. When a server Fermix created is gone or
-  cannot be reached, Restore on this Mac takes Fermix back from the copy of
-  its backups your Mac keeps: it deletes the server first, and restores
-  nothing if the server cannot be deleted. A server of your own is never
-  deleted by Fermix: stop it, then import a copy by hand.
+  the server still costs money. When your server is gone or cannot be
+  reached, Restore on this Mac takes Fermix back from the copy of its backups
+  your Mac keeps, once you confirm you deleted or stopped the server: one
+  that still runs would answer the same channels beside it. Fermix deletes
+  no server for it.
   Hetzner is the first cloud provider Fermix creates a server with: every
   surface draws the token and choose screens from the providers Fermix's
   screen lists, each with its own How to get one and console, so a provider

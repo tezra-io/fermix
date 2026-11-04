@@ -2,9 +2,9 @@ defmodule FermixCore.Home.LocalReturn do
   @moduledoc """
   Restore here (Always On's move back design §8): the computer a home left
   takes it back from its own copy of the server's snapshots, when the server
-  Fermix created for it cannot answer. `Management.AlwaysOn` runs it as
-  `restore_here`, inside the job that deletes the server first
-  (`Management.Provision.start_return_restore/2`, the fence).
+  cannot answer and the owner confirmed they deleted or stopped it.
+  `Management.AlwaysOn` runs it as `restore_here`, in a job of its own
+  (`home_restore`).
 
   **The copy** (`choose/2`). A desktop keeps the server's newest snapshots
   under `snapshots/` (`<UTC>-e<epoch>.fxsnap`, written by its snapshot store),

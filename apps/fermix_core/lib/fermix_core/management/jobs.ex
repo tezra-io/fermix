@@ -88,7 +88,11 @@ defmodule FermixCore.Management.Jobs do
     home_provision: %{
       budget_ms: 900_000,
       phases: ["checking", "firewall", "server", "starting", "power", "deleting"]
-    }
+    },
+    # Always On's Restore here: the computer a home left restores its own copy
+    # of the server's snapshots and restarts (`Home.LocalReturn`). Decrypting
+    # and staging a whole home is bounded by the disk, so 15 minutes.
+    home_restore: %{budget_ms: 900_000, phases: []}
   ]
   @kind_names Keyword.keys(@kinds)
   # The closed failure vocabulary a run may answer with. `timed_out` and
@@ -132,6 +136,7 @@ defmodule FermixCore.Management.Jobs do
           | :imessage_policy_confirm
           | :mcp_check
           | :home_provision
+          | :home_restore
   @type view :: %{String.t() => term()}
   @type report :: ({:phase, String.t()} | {:progress, map()} | {:ready, map()} -> any())
   @type outcome ::

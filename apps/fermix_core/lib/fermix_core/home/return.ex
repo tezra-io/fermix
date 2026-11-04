@@ -19,8 +19,7 @@ defmodule FermixCore.Home.Return do
         "move_started_at": "2031-06-01T09:05:00Z",
         "candidate_id": "c-91",
         "move_id": "m-12",
-        "fence_requested": "20310601T080000Z-e6.fxsnap",
-        "fenced_at": "2031-06-01T09:02:00Z",
+        "restore_requested": "20310601T080000Z-e6.fxsnap",
         "moved_at": "2031-06-01T09:20:00Z",
         "epoch": 7
       }
@@ -33,11 +32,11 @@ defmodule FermixCore.Home.Return do
   - `primary_epoch`: the epoch the link had seen when the return was asked for.
   - `move_started_at`, `candidate_id`, `move_id`: once the server started the
     move.
-  - `fence_requested`: the copy this computer restores itself from when the
-    server Fermix created for the home cannot answer (Restore here, the
-    name of a copy under `snapshots/`), asked for before the server is
-    deleted; `fenced_at`: once it was (`Management.Provision`'s fence), so a
-    stop after it never deletes again.
+  - `restore_requested`: the copy Restore here restores this computer from
+    (the name of a copy under `snapshots/`), kept before its job starts and
+    taken back when the job ends, however it ended (`Management.AlwaysOn`);
+    one left by a restart that ended the job stands beside no job, which the
+    summary reads as no restore.
   - `moved_at`, `epoch`: once this computer booted as the primary again
     (`done/2`, which the primary's boot runs before anything reads the home;
     one it could not write is remembered, `remember_unrecorded/0`, and each
@@ -58,8 +57,8 @@ defmodule FermixCore.Home.Return do
   @dir_mode 0o700
   @file_mode 0o600
   @max_text_bytes 128
-  @times [:started_at, :move_started_at, :fenced_at, :moved_at]
-  @texts [:from, :provider_server, :candidate_id, :move_id, :fence_requested]
+  @times [:started_at, :move_started_at, :moved_at]
+  @texts [:from, :provider_server, :candidate_id, :move_id, :restore_requested]
   @epochs [:primary_epoch, :epoch]
   @keys @times ++ @texts ++ @epochs
   @required [:from, :started_at]
@@ -73,8 +72,7 @@ defmodule FermixCore.Home.Return do
           optional(:move_started_at) => DateTime.t(),
           optional(:candidate_id) => String.t(),
           optional(:move_id) => String.t(),
-          optional(:fence_requested) => String.t(),
-          optional(:fenced_at) => DateTime.t(),
+          optional(:restore_requested) => String.t(),
           optional(:moved_at) => DateTime.t(),
           optional(:epoch) => pos_integer()
         }

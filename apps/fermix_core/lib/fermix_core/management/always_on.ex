@@ -65,12 +65,13 @@ defmodule FermixCore.Management.AlwaysOn do
       server's copied code is closed (`home.enroll.withdraw {kind: manual}`;
       one the server cannot be asked to close lapses by itself), and the
       candidate and the record go.
-    * `restore_here` (design §8): the newest copy of the server's snapshots
-      this desktop keeps that the recovery passphrase opens
-      (`Home.LocalReturn.choose/2`; none is the wrong passphrase, before
-      anything else), the request in the return's record, then one job that
-      deletes the server first and restores the copy
-      (`Provision.start_return_restore/2`, `Home.LocalReturn.restore/3`); the
+    * `restore_here` (design §8), offered once the server went silent and
+      pressed once the owner confirmed they deleted or stopped it: the
+      newest copy of the server's snapshots this desktop keeps that the
+      recovery passphrase opens (`Home.LocalReturn.choose/2`; none is the
+      wrong passphrase, before anything else), the return's record, then
+      one job of its own (`home_restore`) that restores the copy
+      (`Home.LocalReturn.restore/3`); Fermix deletes no server, and the
       derived key lives only in that job.
 
   Every action the summary offers is one of `acts/0`, or one a surface opens
@@ -122,6 +123,7 @@ defmodule FermixCore.Management.AlwaysOn do
   alias FermixCore.Management.Home
   alias FermixCore.Management.HomeMove
   alias FermixCore.Management.HomeSummary
+  alias FermixCore.Management.Jobs
   alias FermixCore.Management.Protocol
   alias FermixCore.Management.Provision
   alias FermixCore.Setup.ConfigStore
@@ -143,6 +145,7 @@ defmodule FermixCore.Management.AlwaysOn do
   @busy_step_sentence "Fermix is already working on your server, so try again once that is " <>
                         "done."
   @busy_backup_sentence "A backup is already running, and it finishes by itself."
+  @busy_restore_sentence "Fermix is already restoring its backup here, and it finishes by itself."
   @opened_sentence "This one opens a page of its own; Fermix takes no step for it."
   @unknown_sentence "Name one of the steps Always On offers."
   @key_sentence "Send the key the action came with."
@@ -157,6 +160,8 @@ defmodule FermixCore.Management.AlwaysOn do
   @not_receiving_sentence "Fermix could not start receiving the move back here, so nothing " <>
                             "was kept; Fermix's log says why."
   @no_copy_sentence "There is no backup on this computer to restore."
+  # Restore here's job.
+  @restore_kind :home_restore
   # A move the server reports, from its request to its undoing.
   @server_moves ~w(requested streaming committing aborting committed undoing)
 
@@ -182,6 +187,7 @@ defmodule FermixCore.Management.AlwaysOn do
       @changed_sentence,
       @busy_step_sentence,
       @busy_backup_sentence,
+      @busy_restore_sentence,
       @opened_sentence,
       @unknown_sentence,
       @key_sentence,
@@ -655,8 +661,9 @@ defmodule FermixCore.Management.AlwaysOn do
   end
 
   # Restore here (design §8): the copy is chosen before anything else, so a
-  # passphrase that opens none deletes nothing; then the request is kept and
-  # one job deletes the server and restores the copy.
+  # passphrase that opens none writes nothing; then the request is kept and
+  # one job restores the copy. The owner deleted or stopped the server, as
+  # the confirm asks: Fermix deletes nothing.
   defp restore_here(passphrase, %{facts: facts}, opts) do
     home = home(opts)
 
@@ -664,8 +671,7 @@ defmodule FermixCore.Management.AlwaysOn do
          :ok <- keep_record(home, restore_record(facts, copy, opts)) do
       copy = Map.put(copy, :from, server_name(facts))
       restore = Keyword.get(opts, :local_return, &LocalReturn.restore(&1, &2, restore_opts(opts)))
-      run = fn _report -> restore.(home, copy) end
-      job("delete", fn -> Provision.start_return_restore(run, opts) end, opts)
+      start_restore(home, fn -> restore.(home, copy) end, opts)
     end
   end
 
@@ -674,21 +680,47 @@ defmodule FermixCore.Management.AlwaysOn do
   defp chosen({:error, reason}), do: Home.recovery_result({:error, reason})
 
   # The request in the return's record: a record of its own when none was
-  # kept, the server the ledger holds named, the copy to restore asked for.
+  # kept, the server named, the copy to restore asked for.
   defp restore_record(facts, copy, opts) do
     kept = facts.return || %{from: server_name(facts), started_at: now(opts)}
+    Map.put(kept, :restore_requested, copy.name)
+  end
 
-    kept
-    |> Map.put(:fence_requested, copy.name)
-    |> maybe_put(:provider_server, get_in(facts, [:provision, :server, :id]))
+  # The restore's own job (`home_restore`): while it runs beside the request
+  # the summary says it runs, from the press on; its ending, however the run
+  # ended, takes the request back, which tells the watch, so a run that
+  # stopped before its copy was in place offers Restore here again. A start
+  # refused takes it back too.
+  defp start_restore(home, restore, opts) do
+    job = [
+      name: "restore_here",
+      run: fn _job_id, _report -> restore.() end,
+      ending: fn _ended -> request_done(home) end
+    ]
+
+    case Jobs.start(@restore_kind, Keyword.merge(Keyword.get(opts, :jobs, []), job)) do
+      {:ok, _view} ->
+        {:ok, nil}
+
+      {:error, :busy} ->
+        :ok = request_done(home)
+        {:error, {:busy, Atom.to_string(@restore_kind)}}
+    end
+  end
+
+  defp request_done(home) do
+    with {:ok, record} <- Return.read(home),
+         :ok <- Return.write(home, Map.delete(record, :restore_requested)) do
+      :ok
+    else
+      unkept ->
+        Logger.error("always on: restore here's request was not taken back: #{inspect(unkept)}")
+    end
   end
 
   defp server_name(%{provision: %{server: %{name: name}}}) when is_binary(name), do: name
   defp server_name(%{link: %{primary: %{name: name}}}) when is_binary(name), do: name
   defp server_name(%{moved: %{to: to}}), do: to
-
-  defp maybe_put(map, _key, nil), do: map
-  defp maybe_put(map, key, value), do: Map.put_new(map, key, value)
 
   defp restore_opts(opts),
     do:
@@ -697,6 +729,7 @@ defmodule FermixCore.Management.AlwaysOn do
   # -- refusals and seams ----------------------------------------------------
 
   defp refusal({:busy, "home.snapshots.run"}), do: unavailable(@busy_backup_sentence)
+  defp refusal({:busy, "home_restore"}), do: unavailable(@busy_restore_sentence)
   defp refusal({:busy, _operation}), do: unavailable(@busy_step_sentence)
 
   defp refusal({:unavailable, capability, sentence}),

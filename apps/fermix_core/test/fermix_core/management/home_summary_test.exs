@@ -464,23 +464,15 @@ defmodule FermixCore.Management.HomeSummaryTest do
          link_primary: unreachable,
          primary_home: nil
        ), "problem", "Fermix could not restore its backup on this Mac.", "restore_here"},
-      {"deleting the server before restoring here",
+      {"restoring here, before the restore wrote anything",
        desktop(
          link_primary: unreachable,
          primary_home: nil,
-         provision: created_ledger() |> stepping("delete"),
-         return: fence_record(),
+         restoring: true,
+         return: restore_record(),
          copies: [copy()]
-       ), "creating", "Deleting your server, then restoring Fermix on this Mac from its backup…",
-       nil},
-      {"the server Fermix could not delete, so nothing restored",
-       desktop(
-         link_primary: unreachable,
-         primary_home: nil,
-         provision: created_ledger(state: :failed) |> failed(fence_failure()),
-         return: fence_record(),
-         copies: [copy()]
-       ), "problem", fence_failure().sentence, "restore_here"},
+       ), "moving",
+       "Restoring Fermix on this Mac from its backup. Messages wait until it is done.", nil},
       {"back on this Mac, the server still standing", back_here([]), "problem",
        "Fermix is back on this Mac. Your server still runs and costs money until you " <>
          "delete it.", "delete_server"},
@@ -1499,12 +1491,14 @@ defmodule FermixCore.Management.HomeSummaryTest do
       assert %{off: true} = HomeSummary.watch(facts([]))
     end
 
-    test "Restore here is offered on the four screens of a server Fermix created, with a copy" do
+    test "Restore here is offered wherever the server went silent and this Mac holds a copy, " <>
+           "whoever created the server" do
       unreachable = primary(:unreachable, 11 * @minute)
       silent = [link_primary: unreachable, primary_home: nil, copies: [copy()]]
 
       screens = [
         desktop(silent),
+        desktop([provision: ledger(:none)] ++ silent),
         desktop([provision: created_ledger(power: "off")] ++ silent),
         desktop([provision: created_ledger(status: :gone, state: :gone)] ++ silent),
         desktop(linked: false, link_primary: nil, copies: [copy()]),
@@ -1523,45 +1517,38 @@ defmodule FermixCore.Management.HomeSummaryTest do
               link_primary: unreachable,
               primary_home: nil,
               copies: [copy()],
-              provision: ledger(:none)
-            ),
-            desktop(
-              link_primary: unreachable,
-              primary_home: nil,
-              copies: [copy()],
               provision: replacing(:waiting)
             )
           ] do
         refute "restore_here" in all_actions(HomeSummary.summary(facts))
       end
+    end
 
-      # Once the server was deleted for it, it is offered again.
-      fenced = Map.put(fence_record(), :fenced_at, ~U[2031-05-04 11:56:00Z])
+    # The move back's TLA spec, `GoneServerCanBeRestored`: a restore that
+    # stopped before its copy was in place leaves no candidate, and its
+    # request either taken back by the job's end or beside no running job
+    # after a restart, so Restore here is offered again; while its job runs
+    # beside the request it is not.
+    test "Restore here is offered again once a restore stopped before its copy was in place" do
+      silent = [link_primary: primary(:unreachable, 11 * @minute), primary_home: nil]
+      stopped = [provision: ledger(:none), return: restore_record(), copies: [copy()]] ++ silent
+
+      assert "restore_here" in all_actions(HomeSummary.summary(desktop(stopped)))
+
+      taken_back = Keyword.put(stopped, :return, return_record())
 
       assert "restore_here" in all_actions(
-               HomeSummary.summary(
-                 desktop([provision: ledger(:connected), return: fenced] ++ silent)
-               )
+               HomeSummary.summary(desktop([restoring: true] ++ taken_back))
              )
+
+      running = HomeSummary.summary(desktop([restoring: true] ++ stopped))
+      assert running["state"] == "moving"
+      refute "restore_here" in all_actions(running)
+      assert running["detail"]["progress"] == "Restoring Fermix from the backup on this Mac…"
     end
 
-    # HR-3 (the move back's TLA spec): a stop between the fence's delete and
-    # its record leaves the ledger empty and no `fenced_at`; the request
-    # alone keeps Restore here offered, and that delete is no failure.
-    test "Restore here stays offered once its fence deleted the server, recorded or not" do
-      silent = [link_primary: primary(:unreachable, 11 * @minute), primary_home: nil]
-      gone = [provision: ledger(:connected), return: fence_record(), copies: [copy()]] ++ silent
-
-      assert "restore_here" in all_actions(HomeSummary.summary(desktop(gone)))
-
-      interrupted = Keyword.put(gone, :provision, failed(ledger(:failed), fence_failure()))
-      summary = HomeSummary.summary(desktop(interrupted))
-      refute kind(summary) == "delete_failed"
-      assert "restore_here" in all_actions(summary)
-    end
-
-    test "Restore here is offered only once the server was silent long enough to be deleted" do
-      off = [provision: created_ledger(power: "off"), primary_home: nil, copies: [copy()]]
+    test "Restore here is offered only once the server was silent long enough" do
+      off = [provision: ledger(:none), primary_home: nil, copies: [copy()]]
 
       refute "restore_here" in all_actions(
                HomeSummary.summary(desktop([link_primary: primary(:unreachable, @minute)] ++ off))
@@ -1574,8 +1561,9 @@ defmodule FermixCore.Management.HomeSummaryTest do
              )
     end
 
-    test "Restore here asks the passphrase, says what is lost and that a silent server is " <>
-           "deleted all the same, and names the backup's date; a newer copy moves its key" do
+    test "Restore here asks the passphrase and the owner's word that the server is deleted " <>
+           "or stopped, says what two running copies and the restore cost, and names the " <>
+           "backup's date; a newer copy moves its key" do
       facts = desktop(link_primary: primary(:unreachable, 11 * @minute), copies: [copy()])
       summary = HomeSummary.summary(facts)
       restore = Enum.find(HomeSummary.offered(summary), &(&1["id"] == "restore_here"))
@@ -1583,10 +1571,10 @@ defmodule FermixCore.Management.HomeSummaryTest do
       assert %{"label" => "Restore on this Mac", "needs" => ["recovery_passphrase"]} = restore
 
       assert restore["confirm"] ==
-               "Restore Fermix on this Mac from its backup? Messages, memory and jobs since " <>
-                 "that backup are gone, and Telegram keeps nothing older than 24 hours. If " <>
-                 "your server is only restarting or offline, wait: Fermix deletes it before " <>
-                 "it restores here, and everything on it since that backup is gone."
+               "Restore Fermix on this Mac from its backup? Confirm only once you deleted or " <>
+                 "stopped your server: if it still runs, two copies of Fermix answer the same " <>
+                 "channels. Messages, memory and jobs since that backup are gone, and Telegram " <>
+                 "keeps nothing older than 24 hours."
 
       assert %{"label" => "Backup on this Mac", "value" => "Sunday, May 4, 2031 at 9:30 AM UTC"} in summary[
                "detail"
@@ -1903,6 +1891,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
         zone: "Etc/UTC",
         return: nil,
         returning: nil,
+        restoring: false,
         copies: []
       },
       Map.new(overrides)
@@ -2008,22 +1997,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
     facts([return: back_record([]), provision: ledger] ++ overrides)
   end
 
-  defp fence_record,
-    do: Map.put(return_record(), :fence_requested, @copy)
-
-  defp fence_failure do
-    %{
-      reason: "unauthorized",
-      sentence:
-        "Fermix could not delete your server, so it did not restore here: a restored copy " <>
-          "beside a running server would answer twice.",
-      next_location: nil,
-      at: ~U[2031-05-04 11:55:00Z],
-      action: "delete",
-      type: "cpx22",
-      location: "fsn1"
-    }
-  end
+  defp restore_record, do: Map.put(return_record(), :restore_requested, @copy)
 
   defp copy(name \\ @copy, at \\ ~U[2031-05-04 09:30:00Z]), do: %{name: name, at: at}
 

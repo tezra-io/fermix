@@ -55,17 +55,6 @@ defmodule FermixCore.Management.Provision do
       job first, answering once its run has stopped. Back on the computer
       the home left after a move back, the delete of the server it left
       clears the return's record (`Home.Return`) with it.
-    * `start_return_restore/2` (`restore_here`): one job that deletes the
-      server the home lives on as the fence of a restore from this
-      computer's own copy, then runs the restore it is given. The fence is
-      the one delete of the server a linked desktop lives on
-      (`delete_target`'s `:return_fence`): only while the return's record
-      asks for it, the server cannot answer (no session for ten minutes, the
-      server forgot this desktop, or no link at all), no move runs here and
-      no candidate for a move back is here. It records `fenced_at`; a
-      ledger that holds nothing (fenced already) deletes nothing again. A
-      fence refused, or a delete the provider refused, ends the job as the
-      delete's failure, in one sentence, and restores nothing.
 
   These act on the provider Always On speaks of (`Provision.current/2`): the
   one Fermix created something on, else the one whose token was given last,
@@ -115,9 +104,8 @@ defmodule FermixCore.Management.Provision do
   place of `Provision.Registry.all/0`), `:provider_opts` (the providers' own
   seams), `:jobs`, `:open_code` and `:withdraw_code` (in place of the rail's
   provisioned window), and `:primary_forward`, the daemon's way to the server
-  on a linked desktop, `:rename_primary` (in place of the rail's, given
-  the new server's name) and `:link_status` (in place of the rail's
-  `Home.Link.impl().status/0`, which the fence reads).
+  on a linked desktop, and `:rename_primary` (in place of the rail's, given
+  the new server's name).
   """
 
   alias FermixCore.Home.Candidate
@@ -132,7 +120,6 @@ defmodule FermixCore.Management.Provision do
   alias FermixCore.Home.Return
   alias FermixCore.Home.Role
   alias FermixCore.Management.Copy
-  alias FermixCore.Management.HomeSummary
   alias FermixCore.Management.Jobs
   alias FermixCore.Management.Protocol
   alias FermixCore.Setup.ConfigStore
@@ -772,28 +759,17 @@ defmodule FermixCore.Management.Provision do
   # The server the home moved to holds it (this engine is its linked
   # desktop, or this home is retired); a move to it under way is refused too,
   # and so is a move back to this computer, in any phase (between its marker's
-  # removal and its settings this home has neither link nor marker). A
-  # restore here may delete it as its fence, while it cannot answer.
+  # removal and its settings this home has neither link nor marker).
   defp delete_target(ledger, provider, home, opts) do
     record = role(opts)
 
     cond do
       Move.moving_to(home) != :none -> refusal(:move_under_way, provider)
-      return_fence?(home, opts) -> {:ok, :return_fence}
       moving_back?(home) -> refusal(:moving_back, provider)
       DesktopLink.linked?(record, home) -> not_holding(ledger, provider)
       Moved.read(home) != :absent -> not_holding(ledger, provider)
       true -> {:ok, :current}
     end
-  end
-
-  # Restore here's fence (move back design §8): asked for, the server
-  # silent for the summary's limit, forgotten or out of reach of any link,
-  # and no candidate for a move back here.
-  defp return_fence?(home, opts) do
-    match?({:ok, %{fence_requested: _copy}}, Return.read(home)) and
-      not Candidate.present?(home) and
-      server_silent?(link_status(opts))
   end
 
   # A move back in any phase: its candidate here, or its record saying the
@@ -806,17 +782,6 @@ defmodule FermixCore.Management.Provision do
     do: not Map.has_key?(record, :moved_at)
 
   defp started_back?(_read), do: false
-
-  defp link_status(opts), do: Keyword.get(opts, :link_status, fn -> Link.impl().status() end).()
-
-  defp server_silent?(%{primary: nil}), do: true
-  defp server_silent?(%{primary: %{status: :revoked}}), do: true
-
-  defp server_silent?(%{primary: %{status: status, down_ms: down}})
-       when status in [:unreachable, :stale] and is_integer(down),
-       do: down >= HomeSummary.unreachable_ms()
-
-  defp server_silent?(_link), do: false
 
   # On the computer the home left, only what does not hold it: the new server
   # before a replace's move (Cancel), the old one after it.
@@ -839,17 +804,6 @@ defmodule FermixCore.Management.Provision do
     case Driver.delete(provider, home(opts), run_opts(provider, report, opts)) do
       :ok -> returned_deleted(home(opts))
       {:error, reason} -> step_failed(reason, "delete", provider, opts)
-    end
-  end
-
-  # The fence deletes the server a restore here replaces, which holds no
-  # code to withdraw: it is being deleted.
-  defp run_delete(provider, :return_fence, report, opts) do
-    run = Keyword.put(run_opts(provider, report, opts), :withdraw_code, fn -> :ok end)
-
-    case Driver.delete(provider, home(opts), run) do
-      :ok -> fenced(home(opts), now(opts))
-      {:error, reason} -> fence_failed(reason, opts)
     end
   end
 
@@ -925,111 +879,6 @@ defmodule FermixCore.Management.Provision do
 
         step_failure(reason, provider, failure)
     end
-  end
-
-  # -- restore here (move back design §8) ----------------------------------------
-
-  @doc """
-  Starts Restore here's job (`restore_here`): the fence, the delete of the
-  server the home lives on (the moduledoc), then `restore`, given the job's
-  report function, whose answer is the job's. A fence refused, or a delete
-  the provider refused, ends the job as the delete's failure and never runs
-  `restore`; with nothing in the ledger (fenced already) only `restore` runs,
-  and what stopped before is cleared.
-  """
-  @spec start_return_restore((function() -> {:ok, map()} | {:error, term()}), keyword()) ::
-          {:ok, map()} | {:error, term()}
-  def start_return_restore(restore, opts \\ [])
-      when is_function(restore, 1) and is_list(opts) do
-    provider = current(opts)
-
-    start(
-      provider,
-      opts,
-      fn report -> run_return_restore(provider, restore, report, opts) end,
-      :clears_action
-    )
-  end
-
-  defp run_return_restore(provider, restore, report, opts) do
-    case Ledger.read(home(opts), provider.id()) do
-      {:ok, ledger} -> fenced_restore(fence(ledger, provider, report, opts), restore, report)
-      {:error, reason} -> job_failure({:ledger, reason}, provider)
-    end
-  end
-
-  defp fenced_restore(:ok, restore, report), do: restore.(report)
-  defp fenced_restore(refused, _restore, _report), do: refused
-
-  defp fence(ledger, provider, report, opts) do
-    if Ledger.holding?(ledger),
-      do: fence_delete(ledger, provider, report, opts),
-      else: fenced_before(provider, opts)
-  end
-
-  defp fence_delete(ledger, provider, report, opts) do
-    case delete_target(ledger, provider, home(opts), opts) do
-      {:ok, :return_fence} ->
-        with {:ok, _deleted} <- run_delete(provider, :return_fence, report, opts), do: :ok
-
-      _refused ->
-        fence_refused(opts)
-    end
-  end
-
-  # A server that answers again by the time the fence runs is not deleted,
-  # and that is no failure of a delete: the request is dropped, and the
-  # screen is the linked one again. Any other refusal is the fence's.
-  defp fence_refused(opts) do
-    if server_silent?(link_status(opts)),
-      do: fence_failed(:not_fenced, opts),
-      else: server_back(home(opts))
-  end
-
-  defp server_back(home) do
-    with {:ok, record} <- Return.read(home),
-         {:error, reason} <- Return.write(home, Map.delete(record, :fence_requested)) do
-      Logger.error("provision: restore here's request stays: #{inspect(reason)}")
-    end
-
-    {:error, {:refused, Copy.summary_sentence(:fence_server_back, %{})}}
-  end
-
-  # The server went for a restore before: a step that stopped since says
-  # nothing now.
-  defp fenced_before(provider, opts) do
-    case Ledger.update(home(opts), provider.id(), &{:ok, Ledger.put_failure(&1, nil)}) do
-      {:ok, _ledger} -> :ok
-      {:error, reason} -> job_failure({:ledger, reason}, provider)
-    end
-  end
-
-  defp fenced(home, now) do
-    with {:ok, record} <- Return.read(home),
-         :ok <- Return.write(home, Map.put(record, :fenced_at, now)) do
-      {:ok, %{"deleted" => true}}
-    else
-      unrecorded ->
-        Logger.error("provision: the restore's fence was not recorded: #{inspect(unrecorded)}")
-        {:ok, %{"deleted" => true}}
-    end
-  end
-
-  # A server that could answer, or a delete the provider refused: nothing is
-  # restored beside it, in one sentence; the reason goes to the log.
-  defp fence_failed(reason, opts) do
-    Logger.warning("provision: restore here did not delete the server: #{inspect(reason)}")
-    sentence = Copy.summary_sentence(:fence_failed, %{})
-
-    failure = %{
-      reason: Provision.failure_word(reason),
-      sentence: sentence,
-      next_location: nil,
-      at: now(opts),
-      action: "delete"
-    }
-
-    {:error, {:refused, sentence}, failure}
   end
 
   # -- after a replace's move ---------------------------------------------------

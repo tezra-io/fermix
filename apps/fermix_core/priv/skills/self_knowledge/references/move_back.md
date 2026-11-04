@@ -52,26 +52,20 @@ The move to a server, the roles and the epoch: skill_view(name:
   told once ("Your own server still runs its retired copy: turn it off or
   delete it."); nothing here deletes it. Screen history recorded here before
   the move is not brought back (the server never had it).
-- **Restore here, when the server is gone.** When a server Fermix created
-  stopped answering (no answer for 10 minutes, whether it is turned off,
-  deleted in its provider or unreachable, or no longer connected) and this
-  computer keeps a copy of
-  its backups, Always On offers **Restore on this Mac** beside the problem,
-  with the copy's date and when the server was last seen. It asks for the
-  recovery passphrase (the newest copy that passphrase opens is restored; one
-  that opens none is refused before anything is deleted), and its confirm
-  says what is lost: messages, memory and jobs since that backup, Telegram
-  messages older than 24 hours, and that a server only restarting or offline
-  is deleted all the same. Fermix deletes the server first, through the
-  provider, then restores the copy here and restarts as the primary; a
-  delete the provider refuses restores nothing ("Fermix could not delete
-  your server, so it did not restore here: a restored copy beside a running
-  server would answer twice."); a server that answers again by then is not
-  deleted, nothing is restored, and Always On shows it running again. A
-  Restore here stopped right after the delete is offered again. A server of
-  the owner's own gets no Restore
-  here, since nothing here can delete it: stop Fermix on that server (or run
-  `fermix home mark-moved` there), then `fermix home import` a copy here.
+- **Restore here, when the server is gone.** When the server stopped
+  answering (no answer for 10 minutes, whether it is turned off, deleted or
+  unreachable, or no longer connected), whoever created it, and this
+  computer keeps a copy of its backups, Always On offers **Restore on this
+  Mac** beside the problem, with the copy's date. It asks for the recovery
+  passphrase (the newest copy that passphrase opens is restored; one that
+  opens none is refused before anything is written), and its confirm asks
+  the owner to go on only once they deleted or stopped the server ("if it
+  still runs, two copies of Fermix answer the same channels") and says what
+  is lost: messages, memory and jobs since that backup, and Telegram
+  messages older than 24 hours. Fermix deletes no server: it restores the
+  copy here and restarts as the primary. A restore that stopped before its
+  copy was in place is offered again. Before confirming, delete the server,
+  or stop Fermix on it (or run `fermix home mark-moved` there).
 - `fermix always-on move-back` and `fermix always-on restore-here
   --recovery-passphrase-file PATH --yes` take the same steps from a
   terminal; the setup page's Always On tab draws them as any step.

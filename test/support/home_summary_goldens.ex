@@ -178,6 +178,7 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
         zone: "Europe/Berlin",
         return: nil,
         returning: nil,
+        restoring: false,
         copies: Map.get(extra, :copies, [])
       })
 

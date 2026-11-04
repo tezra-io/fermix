@@ -1098,29 +1098,65 @@ defmodule FermixCore.Management.AlwaysOnTest do
       refute Candidate.present?(ctx.home)
     end
 
-    test "Restore here deletes the server first, then restores the newest copy the " <>
-           "passphrase opens",
+    # The owner deleted or stopped the server, as the confirm asks: Fermix
+    # deletes nothing and restores the copy in a job of its own, which the
+    # screen says runs from the press on.
+    test "Restore here restores the newest copy the passphrase opens in a job of its own, " <>
+           "and deletes nothing",
          ctx do
       copy = copy!(ctx)
       {:ok, %{server: %{name: server}}} = Ledger.read(ctx.home, "nimbus")
       Agent.update(ctx.link, &%{&1 | primary: primary(11 * 60_000)})
       assert %{"detail" => %{"kind" => "cannot_reach"}} = summary(ctx.opts)
+      test = self()
 
-      assert {:ok, %{"summary" => running}} =
-               press(ctx, "restore_here", %Input{recovery_passphrase: @passphrase})
+      held =
+        Keyword.put(ctx.opts, :local_return, fn home, chosen ->
+          send(test, {:restoring, self(), home, chosen})
+          receive do: (:go -> {:ok, %{"restored" => true, "epoch" => 6}})
+        end)
 
-      assert running["sentence"] =~ "Deleting your server, then restoring Fermix"
-      settle!(ctx)
+      assert {:ok, %{"summary" => running, "result" => nil}} =
+               press(%{ctx | opts: held}, "restore_here", %Input{recovery_passphrase: @passphrase})
 
-      assert_received {:restored, home, chosen} when home == ctx.home
+      assert running["state"] == "moving"
+
+      assert running["sentence"] ==
+               "Restoring Fermix on this computer from its backup. Messages wait until it is done."
+
+      assert_receive {:restoring, run, home, chosen}, 10_000
+      assert home == ctx.home
       assert %{name: name, from: ^server, pair: %{secret_key: _key}} = chosen
       assert name == Path.basename(copy)
+      assert [%{"kind" => "home_restore", "status" => "running"}] = jobs(ctx)
+      assert {:ok, %{restore_requested: ^name}} = Return.read(ctx.home)
 
-      assert {:delete, {:server, _id}} =
-               List.keyfind(FakeCloudProvider.calls(ctx.world), :delete, 0)
+      send(run, :go)
+      settle!(ctx)
 
-      assert {:ok, %{fence_requested: ^name, fenced_at: @at}} = Return.read(ctx.home)
-      assert %{action: nil, failure: nil, server: nil} = Ledger.state(ctx.home, FakeCloudProvider)
+      assert [%{"kind" => "home_restore", "status" => "completed"}] = jobs(ctx)
+      refute List.keyfind(FakeCloudProvider.calls(ctx.world), :delete, 0)
+      assert Return.read(ctx.home) == {:ok, %{from: server, started_at: @at}}
+      assert %{server: %{status: :created}} = Ledger.state(ctx.home, FakeCloudProvider)
+    end
+
+    test "a restore that stopped before its copy was in place offers Restore here again", ctx do
+      copy!(ctx)
+      Agent.update(ctx.link, &%{&1 | primary: primary(11 * 60_000)})
+      sentence = "The backup on this computer could not be restored here; Fermix's log says why."
+
+      refused =
+        Keyword.put(ctx.opts, :local_return, fn _home, _copy -> {:error, {:refused, sentence}} end)
+
+      assert {:ok, _answer} =
+               press(%{ctx | opts: refused}, "restore_here", %Input{
+                 recovery_passphrase: @passphrase
+               })
+
+      settle!(ctx)
+
+      assert [%{"kind" => "home_restore", "status" => "failed"}] = jobs(ctx)
+      assert "restore_here" in Enum.map(HomeSummary.offered(summary(ctx.opts)), & &1["id"])
     end
 
     test "Restore here with a passphrase that opens no copy deletes nothing", ctx do
@@ -1134,24 +1170,6 @@ defmodule FermixCore.Management.AlwaysOnTest do
       assert jobs(ctx) == []
       assert Return.read(ctx.home) == :absent
       assert %{server: %{status: :created}} = Ledger.state(ctx.home, FakeCloudProvider)
-    end
-
-    test "Restore here restores nothing when the server cannot be deleted", ctx do
-      copy!(ctx)
-      Agent.update(ctx.link, &%{&1 | primary: primary(11 * 60_000)})
-      FakeCloudProvider.fault(ctx.world, :delete, {:unreachable, "invented timeout"})
-
-      assert {:ok, _answer} =
-               press(ctx, "restore_here", %Input{recovery_passphrase: @passphrase})
-
-      settle!(ctx)
-      refute_received {:restored, _home, _copy}
-
-      assert %{"state" => "problem", "detail" => %{"kind" => "delete_failed"}} =
-               screen = summary(ctx.opts)
-
-      assert screen["sentence"] =~ "so it did not restore here"
-      assert screen["action"]["id"] == "restore_here"
     end
   end
 

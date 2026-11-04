@@ -2750,6 +2750,12 @@
     },
     {
       "method": "(schema)",
+      "field": "job_kinds:home_restore",
+      "kind": "engine_only",
+      "why": "M75: Always On's Restore here, the computer a home left restoring its own copy of the server's snapshots once the owner confirmed the server is deleted or stopped, runs as a job of the kind home_restore, with no phases. The draft predates it; a closed decoder that has never heard the kind refuses the job view rather than ignoring it, so the app adds it when it re-vendors."
+    },
+    {
+      "method": "(schema)",
       "field": "methods:home.provision.options",
       "kind": "engine_only",
       "why": "M75 lean v1 adds the Always On provisioner (Fermix creates the owner's server on Hetzner) after the draft was written, so the draft publishes no home.provision.* method. The one left on the wire, home.provision.options (no params), is minimum version 2 and additive: a client built against the draft never calls it, and the app re-vendors this export before it draws the Always On pane."

@@ -2238,7 +2238,8 @@
         "imessage_grant",
         "imessage_policy_confirm",
         "mcp_check",
-        "home_provision"
+        "home_provision",
+        "home_restore"
       ]
     },
     "jobStatus": {

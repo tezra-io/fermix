@@ -101,10 +101,9 @@ defmodule FermixCore.Management.Copy do
                    confirm_cancel confirm_replace_move notice_ready notice_moved
                    notice_backup_week notice_server_backup_week return_connecting return_ready
                    return_moving return_undone return_failed return_stopped restore_moving
-                   restore_deleting restore_failed fence_failed server_retired notice_back
-                   progress_return_receiving progress_return_staged progress_return_placing
-                   progress_restoring confirm_delete_back confirm_restore_here
-                   confirm_return_move fence_server_back)a
+                   restore_failed server_retired notice_back progress_return_receiving
+                   progress_return_staged progress_return_placing progress_restoring
+                   confirm_delete_back confirm_restore_here confirm_return_move)a
   # Each Details line's label, by its key.
   @line_labels [
     server: "Server",
@@ -542,19 +541,8 @@ defmodule FermixCore.Management.Copy do
   def summary_sentence(:restore_moving, %{machine: machine}),
     do: "Restoring Fermix on this #{machine} from its backup. Messages wait until it is done."
 
-  def summary_sentence(:restore_deleting, %{machine: machine}),
-    do: "Deleting your server, then restoring Fermix on this #{machine} from its backup…"
-
   def summary_sentence(:restore_failed, %{machine: machine}),
     do: "Fermix could not restore its backup on this #{machine}."
-
-  def summary_sentence(:fence_failed, _values),
-    do:
-      "Fermix could not delete your server, so it did not restore here: a restored copy " <>
-        "beside a running server would answer twice."
-
-  def summary_sentence(:fence_server_back, _values),
-    do: "Your server answers again, so Fermix deleted nothing and restored nothing here."
 
   def summary_sentence(:server_retired, %{machine: machine}),
     do:
@@ -585,10 +573,10 @@ defmodule FermixCore.Management.Copy do
 
   def summary_sentence(:confirm_restore_here, %{machine: machine}),
     do:
-      "Restore Fermix on this #{machine} from its backup? Messages, memory and jobs since " <>
-        "that backup are gone, and Telegram keeps nothing older than 24 hours. If your " <>
-        "server is only restarting or offline, wait: Fermix deletes it before it restores " <>
-        "here, and everything on it since that backup is gone."
+      "Restore Fermix on this #{machine} from its backup? Confirm only once you deleted or " <>
+        "stopped your server: if it still runs, two copies of Fermix answer the same " <>
+        "channels. Messages, memory and jobs since that backup are gone, and Telegram keeps " <>
+        "nothing older than 24 hours."
 
   def summary_sentence(:confirm_return_move, %{machine: machine, stays_here: features}),
     do:

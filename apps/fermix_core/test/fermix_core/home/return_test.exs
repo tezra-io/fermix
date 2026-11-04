@@ -81,6 +81,25 @@ defmodule FermixCore.Home.ReturnTest do
     end
   end
 
+  # Restore here deletes no server (the owner did), so the record keeps the
+  # copy asked for and no request for a delete or time one happened.
+  test "a restore here keeps the copy it asked for, and no request to delete the server " <>
+         "and no time of a delete",
+       %{home: home} do
+    file = Return.path(home)
+    asked = %{from: "x", started_at: @started, restore_requested: "20310601T080000Z-e6.fxsnap"}
+
+    assert :ok = Return.write(home, asked)
+    assert Return.read(home) == {:ok, asked}
+
+    for record <- [
+          %{from: "x", started_at: @started, fence_requested: "20310601T080000Z-e6.fxsnap"},
+          %{from: "x", started_at: @started, fenced_at: @moving}
+        ] do
+      assert {:error, {:invalid_record, ^file, :unknown_key}} = Return.write(home, record)
+    end
+  end
+
   describe "done/2, at the primary's boot" do
     test "records when this computer became the primary again, at the epoch it holds",
          %{home: home} do
