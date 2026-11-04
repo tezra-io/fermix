@@ -333,6 +333,12 @@ class ReleaseWorkflowTest(unittest.TestCase):
         # lock when the loop's next one ran ("Another `brew update` process is
         # already running", v0.18.0's release), so the job turns it off.
         self.assertIn('HOMEBREW_NO_AUTO_UPDATE: "1"', self._job("homebrew"))
+        # The check loop needs only the tap's newest formula, so it pulls the
+        # tap with git and never takes Homebrew's update lock again: the one
+        # `brew update` is the one that brings `brew trust`.
+        self.assertIn('tap_repo="$(brew --repository tezra-io/tap)"', self._job("homebrew"))
+        self.assertIn('git -C "$tap_repo" pull --ff-only', self._job("homebrew"))
+        self.assertEqual(self._job("homebrew").count("brew update >/dev/null"), 1)
 
     def _job(self, name):
         job = re.search(

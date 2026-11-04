@@ -680,10 +680,11 @@ jobs:
         env:
           TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           VERSION: ${{ github.ref_name }}
-          # The step runs its own `brew update` before each read. Homebrew's
-          # auto-update, which `brew tap` and `brew trust` start, held the
-          # update lock when the next of them ran ("Another `brew update`
-          # process is already running", v0.18.0), so it stays off here.
+          # Homebrew updated itself inside this step (its "You have N outdated
+          # formulae" report), and the next `brew update` found the update lock
+          # held ("Another `brew update` process is already running", v0.18.0,
+          # twice). The step updates Homebrew once, itself, and refreshes only
+          # the tap after that.
           HOMEBREW_NO_AUTO_UPDATE: "1"
         run: |
           set -euo pipefail
@@ -715,9 +716,12 @@ jobs:
           # `brew trust` to an older runner image.
           brew update >/dev/null
           brew trust --formula tezra-io/tap/fermix
+          # The loop needs only the tap's newest formula: a git pull of the tap
+          # takes no Homebrew lock, where a second `brew update` would.
+          tap_repo="$(brew --repository tezra-io/tap)"
           visible_version=""
           for attempt in $(seq 1 12); do
-            brew update >/dev/null
+            git -C "$tap_repo" pull --ff-only --quiet
             visible_version="$(brew info --formula --json=v2 tezra-io/tap/fermix | jq -r '.formulae[0].versions.stable // empty')"
             [ "$visible_version" = "$version" ] && break
             [ "$attempt" -eq 12 ] || sleep 10
