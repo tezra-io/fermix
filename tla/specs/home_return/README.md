@@ -67,6 +67,7 @@ primary over the three copies" is two rules here:
 | `MessagesCanBeLost` | environment | A rail loses a request or an answer. An answer comes after the worker stopped waiting. Or the forwarded `home.move.start`'s answer is lost (`unconfirmed`), before or after the server had it. At most `MaxLosses` in all |
 | `ServerCanCrash`, `MacCanCrash` | environment | The engine dies and boots again from its files (at most `MaxCrashes` each) |
 | `TransferCanFail` | environment | A staging fails: the rail's (a keychain that refuses, a restore that fails: `restored/2`'s error clause) or a local copy's (`LocalReturn`'s `failed`). Or the server's ready epoch or marker cannot be written (`commit/4` aborts) |
+| `JobCanStop` | environment | Restore here's job is stopped from outside, past its budget or cancelled: its run runs nothing after the stop |
 | `NetCanFail` | environment | The network between the Mac and its server fails for good. The link and every rail end; a server that runs runs on |
 | `MaxPresses` | bound | The owner's presses on the Mac's Always On screen |
 | `MarkerBeforeCommit` | mechanism | The server writes its `moved.json` and records `committing` before it sends `move_commit` (`commit/4`, `retired/4`) |
@@ -79,6 +80,7 @@ primary over the three copies" is two rules here:
 | `StoppedReturnClears` | mechanism | A move back that a stop left part-way can be cleared. This switch stands for two changes, either of which alone closes the path (checked by hand): Cancel removes `return.json` before `candidate/` (`forget_return/1`), and a started record left alone, whose server answers with no move, offers Cancel (`returning/1` with `server_idle?/1`, `return_stopped/2`; `cancel/2`'s `returning?/1`). `FALSE` is neither change (HR-2) |
 | `UndoneInAnyPhase` | mechanism | A candidate receiving or staged, whose server answers as the primary with no move under way, draws undone, or Cancel when it has no record (`return_view/2`). `FALSE` draws moving whatever the server says (HR-2) |
 | `RequestBesideJob` | mechanism | The summary draws Restore here running only while its request in `return.json` stands beside its running job (`restore_running?/1`, `Home`'s `restoring?/2`). `FALSE` takes the request alone, which a stop of the engine leaves behind |
+| `EndingSettles` | mechanism | The job's ending settles a `local` candidate a stopped run left, as the next start would (`restore_ended/3`): one receiving is discarded (`Home.Candidate.remove/1`), one activating is finished by a restart. `FALSE` takes back only the request |
 
 Every check sets every switch.
 
@@ -86,8 +88,9 @@ Every check sets every switch.
 
 Every check runs with every failure on: losses, late answers and lost
 forwarded answers; both engines crashing; the stagings and the server's
-marker failing; the network failing for good; and the owner deleting the
-server where Restore here is offered.
+marker failing; the network failing for good; Restore here's job stopped
+from outside; and the owner deleting the server where Restore here is
+offered.
 
 **Check 01**: three rules.
 - `AtMostOnePrimary`: never both the server and the Mac serve as the
@@ -133,10 +136,15 @@ the Mac, the Mac's screen offers a step. It rests on two mechanisms:
 
 **Check 20**: `GoneServerCanBeRestored`, a proposed rule (HR-3). A Mac whose
 server is gone, and which serves nothing itself, is offered Restore here
-once nothing runs. It rests on `RequestBesideJob` (check 24, 6 states): the
-network fails, the owner deletes the server, Restore here keeps its request,
-and the Mac's engine stops before its job writes anything else. Taken
-alone, the request it leaves draws moving with nothing to press.
+once nothing runs. It rests on two mechanisms:
+- `RequestBesideJob` (check 24, 6 states): the network fails, the owner
+  deletes the server, Restore here keeps its request, and the Mac's engine
+  stops before its job writes anything else. Taken alone, the request it
+  leaves draws moving with nothing to press.
+- `EndingSettles` (check 25, 9 states): the same, but the job is stopped
+  from outside once its `local` candidate is written. The ending takes the
+  request back, and the candidate left receiving draws moving with nothing
+  to press until the next start.
 
 **Witnesses**:
 - **13**: the round trip. The server retires, and the Mac boots as the
@@ -304,6 +312,19 @@ Walked again against 63207f61, Restore here with no delete:
 - the owner deletes or stops the server outside Fermix, where Restore
   here's confirm asks for it (`OwnerDeletes`).
 
+Walked again after the review of the cut:
+- `silent?/1` is silent only where nothing answers (no link, or no session
+  for ten minutes). A server that answers as one that is not the primary
+  (`revoked`, `stale`) is not silent. `RestoreOffer` follows it
+  (`ServerSilent`): here a server that runs answers unless the network
+  failed.
+- `restore_record/3` starts a record of its own over a move back that
+  ended. Here the home moves away once only, so it never meets one.
+- `restore_ended/3`: the job's ending settles what a stopped run left
+  (`RhStopped`, `RhSettle`, `EndingSettles`).
+
+Each is modelled as built. Walking them found nothing new.
+
 Each is modelled as built. Walking them found nothing new.
 
 ## Done
@@ -323,13 +344,13 @@ Deadlock checking is on. `Done` has these ends:
 
 The checks run with `MaxLosses = 2`, `MaxCrashes = 1` per engine and
 `MaxPresses = 4`. Each takes about one to two seconds. The holds checks
-explore 51,675 states.
+explore 54,682 states.
 
 Every rule of the holds checks was run by hand, together:
 - with one more of each (`MaxLosses = 3`, `MaxCrashes = 2`,
-  `MaxPresses = 5`): no error, 359,896 states, 6 s;
+  `MaxPresses = 5`): no error, 378,985 states, 7 s;
 - with two more (`MaxLosses = 4`, `MaxCrashes = 3`, `MaxPresses = 6`): no
-  error, 1,278,276 states, 21 s.
+  error, 1,342,200 states, 21 s.
 
 ## Not modelled
 

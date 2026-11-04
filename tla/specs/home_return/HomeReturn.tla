@@ -88,7 +88,7 @@
 (* the server.                                                             *)
 (***************************************************************************)
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/home/move_worker.ex @ f4052fcd5f08
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/home/candidate.ex @ 02a276b26b35
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/home/candidate.ex @ 7ae624f715a6
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/home/move_responder.ex @ 31d80078d517
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/candidate/activation.ex @ 41d05d90bb47
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/candidate.ex#prepare_return,returnable_engine,returnable_home,linked_and_still,no_move_here,replaceable_return,present?,remove @ 649c6a74f681
@@ -102,9 +102,9 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/management/home_move.ex#move_start @ 81c5ae5fa852
 \* SOURCE: apps/fermix_core/lib/fermix_core/management/placement.ex#unconfirmed_on_loss?,unconfirmed,@unconfirmed_methods @ 0881001a46d0
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/relay.ex#lost_answer @ dfb459724267
-\* SOURCE: apps/fermix_core/lib/fermix_core/management/always_on.ex @ ada0395d00fd
+\* SOURCE: apps/fermix_core/lib/fermix_core/management/always_on.ex @ 1d7e7af36334
 \* SOURCE: apps/fermix_core/lib/fermix_core/management/home.ex#restoring? @ 10524f88be3d
-\* SOURCE: apps/fermix_core/lib/fermix_core/management/home_summary.ex#screen,target,device,settled,retired,away,away_here,on,returning,return_view,return_ready,return_moving,return_undone,return_stopped,restore_view,return_cancel,restoring,restore_running?,restore_offer,restorable,started?,stale?,silent?,server_move,server_idle?,@before_move,@ended,@server_moves @ 6f8a065aa6bc
+\* SOURCE: apps/fermix_core/lib/fermix_core/management/home_summary.ex#screen,target,device,settled,retired,away,away_here,on,returning,return_view,return_ready,return_moving,return_undone,return_stopped,restore_view,return_cancel,restoring,restore_running?,restore_offer,restorable,started?,stale?,silent?,server_move,server_idle?,@before_move,@ended,@server_moves @ c0c439e2400e
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/local_return.ex#restore,restored,staged,placed,failed,restart @ b07d4dc0d235
 EXTENDS Naturals
 
@@ -122,6 +122,8 @@ CONSTANTS
     TransferCanFail,    \* the Mac's staging fails (restored/2's error clause: a keychain
                         \* that refuses, a restore that fails), or the server's ready
                         \* epoch or marker cannot be written (commit/4 aborts)
+    JobCanStop,         \* Restore here's job is stopped from outside: past its budget, or
+                        \* cancelled (Jobs: the run is killed and runs nothing after)
     NetCanFail,         \* the network between the Mac and its server fails, for good:
                         \* the link and every rail with it (the server may still run)
     MaxPresses,         \* the owner's presses on the Mac's Always On screen (a bound)
@@ -147,10 +149,10 @@ CONSTANTS
                          \* channels"); FALSE confirms with the server still running
     UnconfirmedKept,     \* Move now on a return keeps move_started_at when the forwarded
                          \* home.move.start is answered unconfirmed too
-                         \* (return_answered/3, always_on.ex:432-438); FALSE keeps it
+                         \* (return_answered/3, always_on.ex:435-441); FALSE keeps it
                          \* only on {ok, move_id}
     StartKeptFirst,      \* Move now writes move_started_at before it forwards
-                         \* home.move.start (return_start_ahead/2, always_on.ex:417-430),
+                         \* home.move.start (return_start_ahead/2, always_on.ex:420-433),
                          \* and the answer settles it; FALSE is the design's draft 2, which
                          \* writes it after the answer (finding HR-1, fixed)
     StoppedReturnClears, \* a move back a stop left part-way clears: Cancel removes
@@ -161,13 +163,18 @@ CONSTANTS
                          \* FALSE is neither (finding HR-2, fixed)
     UndoneInAnyPhase,    \* a candidate receiving or staged whose server answers as the
                          \* primary with no move under way draws undone, or Cancel with no
-                         \* record (return_view/2, home_summary.ex:621-627); FALSE draws
+                         \* record (return_view/2, home_summary.ex:620-626); FALSE draws
                          \* moving whatever the server says (finding HR-2, fixed)
-    RequestBesideJob     \* the summary draws Restore here running only while its request
+    RequestBesideJob,    \* the summary draws Restore here running only while its request
                          \* in return.json stands beside its running job
-                         \* (restore_running?/1, home_summary.ex:681-682; Home's
+                         \* (restore_running?/1, home_summary.ex:680-681; Home's
                          \* restoring?/2); FALSE takes the request alone, which a stop of
                          \* the engine leaves behind
+    EndingSettles        \* the job's ending settles a local candidate a stopped run left,
+                         \* as the next start would (restore_ended/3, always_on.ex:
+                         \* 632-656): one receiving discarded (Home.Candidate.remove/1),
+                         \* one activating finished by a restart; FALSE takes back only
+                         \* the request
 
 VARIABLES
     \* The server: files under its home.
@@ -247,13 +254,13 @@ WorkerStates ==
 ActSteps ==
     {"idle", "mb_prepare", "mb_record", "mb_start", "mn_mark", "mn_forward", "mn_record",
      "mn_unmark", "cx_stop", "cx_remove", "cx_forget", "rh_request", "rh_prepare",
-     "rh_stage", "rh_activating", "rh_activate", "rh_end", "rh_restart"}
+     "rh_stage", "rh_activating", "rh_activate", "rh_end", "rh_settle", "rh_restart"}
 Actions == {"move_back", "move_now", "cancel", "restore_here"}
 
 \* The steps of Restore here's act and of the home_restore job it starts.
 RhSteps ==
     {"rh_request", "rh_prepare", "rh_stage", "rh_activating", "rh_activate", "rh_end",
-     "rh_restart"}
+     "rh_settle", "rh_restart"}
 
 ASSUME MaxLosses \in Nat /\ MaxCrashes \in Nat /\ MaxPresses \in Nat
 
@@ -756,8 +763,8 @@ CandRestart ==
 -----------------------------------------------------------------------------
 (* The Mac's acts: home.act through Management.AlwaysOn, from the design   *)
 
-\* returning/1 (home_summary.ex:574-594), the first clause of the
-\* device's summary (device/1, :469): any candidate of this computer's, or,
+\* returning/1 (home_summary.ex:573-593), the first clause of the
+\* device's summary (device/1, :468): any candidate of this computer's, or,
 \* with none, return.json with move_started_at and no moved_at. (The stale
 \* check against a newer epoch the link reached needs a second desktop: not
 \* modelled.)
@@ -769,12 +776,17 @@ Returning == cPhase # "none" \/ rj = "started"
 ServerAborted == LinkUp /\ sPhase = "aborted"
 ServerIdle == LinkUp /\ sPhase \in {"none", "aborted"}
 
-\* Restore here (restore_offer/1, home_summary.ex:687-693): this computer
-\* holds a copy (always, here) and the server is silent (silent?/1: no link,
-\* forgotten, or no session for ten minutes, which here is the link down).
-RestoreOffer == IF ~LinkUp THEN {"restore_here"} ELSE {}
+\* Restore here (restore_offer/1, home_summary.ex:685-691): this computer
+\* holds a copy (always, here) and nothing answers from the server
+\* (silent?/1, :724-729: no link, or no session for ten minutes, which here is
+\* the network down or the server gone). A server that runs answers, as the
+\* primary or, moving or retired, as one that is not (`stale`, `revoked`):
+\* not silent.
+ServerSilent == ~net \/ ~sAlive \/ ~mLink
 
-\* restoring/1 (home_summary.ex:675-682), the second clause of the device's
+RestoreOffer == IF ServerSilent THEN {"restore_here"} ELSE {}
+
+\* restoring/1 (home_summary.ex:674-681), the second clause of the device's
 \* summary: moving, with nothing to press, while Restore here's request
 \* stands beside its running job (Home's restoring?/2 reads the job family:
 \* the act's steps here). Without RequestBesideJob the request alone.
@@ -810,8 +822,8 @@ ReturnOffers ==
              IF UndoneInAnyPhase /\ ServerIdle THEN {"cancel"} ELSE {}
       [] OTHER -> {}
 
-\* Neither (settled/1, :471-482): a desktop whose server answers draws on
-\* (on/1, :540-549), which offers Move back (the act refuses it while the
+\* Neither (settled/1, :470-481): a desktop whose server answers draws on
+\* (on/1, :539-548), which offers Move back (the act refuses it while the
 \* server reports a move, which it cannot while it answers as the primary);
 \* one whose server does not answer (away_here/1 and retired/1:
 \* cannot_reach, retired) offers Restore here beside its own action. Ten
@@ -820,7 +832,7 @@ DeviceOffers ==
     (IF LinkUp THEN {"move_back"} ELSE {})
     \cup RestoreOffer
 
-\* The actions the Mac's summary offers now (screen/1, :202-204). A primary
+\* The actions the Mac's summary offers now (screen/1, :201-203). A primary
 \* offers none of this spec's actions.
 Offered ==
     IF mBoot # "device" THEN {}
@@ -858,7 +870,7 @@ Preparable(kind) ==
     /\ (kind = "return" => mLink)
     /\ cPhase \in {"none", "failed"}
 
-\* Move back (move_back/2, always_on.ex:456-519): the server's move is
+\* Move back (move_back/2, always_on.ex:459-522): the server's move is
 \* checked (server_still/1, a press while it reports one refused) and
 \* home.enroll.open forwarded and answered, both folded into the press (a link
 \* down refuses it there, as Offered does); then Candidate.prepare_return/3
@@ -889,15 +901,15 @@ MbStart ==
     /\ UNCHANGED <<srvFiles, srvRun, rail, macFiles, mBoot, restore, apc, aOwner, aTo,
                    activated, budgets, hist>>
 
-\* Move now on a return (forwarded_move/4, always_on.ex:395-411):
+\* Move now on a return (forwarded_move/4, always_on.ex:398-414):
 \* home.move.start {candidate_id, passphrase, keep_as_desktop: false}
 \* forwarded over the link. The server's HomeMove.move_start/3 runs
 \* Move.start/5 (request, phase requested, role device) and restarts into the
 \* move. Its answer arrives, or is lost (unconfirmed: placement.ex:185-205),
 \* after the server had it or before; a link that is down never sent it.
-\* With StartKeptFirst (the code: return_start_ahead/2, :417-430) return.json
+\* With StartKeptFirst (the code: return_start_ahead/2, :420-433) return.json
 \* gains move_started_at before the request leaves (MnMark), and the answer
-\* settles it (return_answered/3, :432-438): a move id keeps it (adding the
+\* settles it (return_answered/3, :435-441): a move id keeps it (adding the
 \* move id, a field no rule reads), unconfirmed keeps it (UnconfirmedKept),
 \* any other answer takes it back (MnUnmark). Without StartKeptFirst, the
 \* design's draft 2: the record after the answer (MnRecord).
@@ -948,7 +960,7 @@ MnUnmark ==
                    activated, budgets, hist>>
 
 \* Cancel on a return (cancel/2 when returning?/1, cancel_return/1,
-\* always_on.ex:296-306, :521-553): Link.stop_return/0 stops the candidate
+\* always_on.ex:299-309, :524-556): Link.stop_return/0 stops the candidate
 \* subtree (DeviceSupervisor.stop_candidate/1: its process is stopped where
 \* it is, an activation part-way included, and its rails end);
 \* home.enroll.withdraw is forwarded (nothing here reads the
@@ -978,16 +990,19 @@ CxForget ==
                    cRec, stDb, stCfg, mBoot, cUp, restore, apc, aOwner, aTo,
                    activated, budgets, hist>>
 
-\* Restore here (restore_here/3, always_on.ex:564-573): the copy is chosen
+\* Restore here (restore_here/3, always_on.ex:567-576): the copy is chosen
 \* first (a wrong passphrase writes nothing, not modelled), then return.json
-\* gains restore_requested (restore_record/3, :581-584: the record kept, or a
-\* new one naming the server, which reads as asked), then the home_restore
-\* job (start_restore/3, :591-606), which is never resumed after a restart:
+\* gains restore_requested (restore_record/3, :587-593: the record of a move
+\* back not yet done, or a new one naming the server, which reads as asked;
+\* the home moves away once only here, so no record of an ended move back
+\* meets a restore), then the home_restore job (start_restore/3, :600-615),
+\* which is never resumed after a restart:
 \* LocalReturn.restore/3 (local_return.ex:91-240): Candidate.prepare_return
 \* (:local), Activation.stage of the copy (a failure records failed and ends
 \* the run), activating recorded, record_entries/1 and activate(:return),
 \* then the restart. However the run ends, the job's ending takes the
-\* request back (request_done/1, :608-616: RhEnd).
+\* request back (request_done/1, :658-666: RhEnd), then settles what a run
+\* stopped from outside left (restore_ended/3, :632-656: RhSettle).
 RhRequest ==
     /\ act = "rh_request" /\ AGoto("rh_prepare")
     /\ rq' = TRUE
@@ -1028,14 +1043,47 @@ RhActivating ==
     /\ UNCHANGED <<srvFiles, srvRun, rail, mCfg, mMarker, mLink, mDb, mStale, rj, cKind, cRec,
                    stDb, stCfg, rq, mBoot, cUp, restore, aTo, activated, budgets, hist>>
 
-\* The job's ending (request_done/1): the request taken back, then the job
-\* leaves running.
+\* The job's ending, first request_done/1: the request taken back.
 RhEnd ==
-    /\ act = "rh_end" /\ AGoto("idle")
+    /\ act = "rh_end" /\ AGoto("rh_settle")
     /\ rq' = FALSE
     /\ UNCHANGED <<srvFiles, srvRun, rail, mCfg, mMarker, mLink, mDb, mStale, rj, cPhase, cKind,
                    cRec, stDb, stCfg, mBoot, cUp, restore, apc, aOwner, aTo, activated,
                    budgets, hist>>
+
+\* Then what a run stopped from outside left, as the next start would settle
+\* it (restore_ended/3), with EndingSettles: a local candidate receiving is
+\* discarded (Home.Candidate.remove/1, which the candidate's start uses), one
+\* activating is finished by a restart (the restart LocalReturn uses), whose
+\* start carries the activation on. A run that answered left none of either:
+\* it restarted, or kept its failure. Then the job leaves running.
+RhSettle ==
+    /\ act = "rh_settle"
+    /\ LET local == EndingSettles /\ cKind = "local"
+       IN CASE local /\ cPhase = "receiving" ->
+                 /\ AGoto("idle")
+                 /\ cPhase' = "none" /\ cRec' = FALSE /\ stDb' = FALSE /\ stCfg' = FALSE
+                 /\ UNCHANGED <<srvFiles, srvRun, rail, mCfg, mMarker, mLink, mDb, mStale, rj,
+                                rq, cKind, mBoot, cUp, restore, apc, aOwner, aTo, activated,
+                                budgets, hist>>
+            [] local /\ cPhase = "activating" ->
+                 /\ fromCopy' = TRUE
+                 /\ MacBoots
+                 /\ UNCHANGED <<srvFiles, srvRun, budgets, crashEF>>
+            [] OTHER ->
+                 /\ AGoto("idle")
+                 /\ UNCHANGED <<srvFiles, srvRun, rail, macFiles, mBoot, cUp, restore, apc,
+                                aOwner, aTo, activated, budgets, hist>>
+
+\* The job's run is stopped from outside (JobCanStop: past its budget, or
+\* cancelled): it runs nothing after the stop, an activation it ran part-way
+\* included, and the job's ending runs (Jobs: begin_ending/4).
+RhStopped ==
+    /\ JobCanStop /\ act \in {"rh_prepare", "rh_stage", "rh_activating", "rh_activate"}
+    /\ AGoto("rh_end")
+    /\ apc' = IF act = "rh_activate" THEN "idle" ELSE apc
+    /\ UNCHANGED <<srvFiles, srvRun, rail, macFiles, mBoot, cUp, restore, aOwner, aTo,
+                   activated, budgets, hist>>
 
 \* The run's restart (Lifecycle.restart_self/0) stops the engine, its ending
 \* run first or not.
@@ -1179,10 +1227,10 @@ ActStep ==
     \/ MbPrepare \/ MbRecord \/ MbStart
     \/ MnMark \/ MnForward \/ MnForwardLost \/ MnRecord \/ MnUnmark
     \/ CxStop \/ CxRemove \/ CxForget
-    \/ RhRequest \/ RhPrepare \/ RhStage \/ RhActivating \/ RhEnd \/ RhRestart
+    \/ RhRequest \/ RhPrepare \/ RhStage \/ RhActivating \/ RhEnd \/ RhSettle \/ RhRestart
 
 Environment ==
-    \/ OwnerDeletes
+    \/ OwnerDeletes \/ RhStopped
     \/ Lose \/ Late \/ RestoreFails \/ RetireFails \/ ServerCrash \/ MacCrash \/ NetFails
 
 Next == ServerStep \/ MacStep \/ ActStep \/ Environment \/ Terminated

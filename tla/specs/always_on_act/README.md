@@ -34,7 +34,10 @@ Not modelled, each covered elsewhere:
   one act each through the same serializer and key rule, with no job of the
   family (`always_on_test.exs`; `home_return` models the move back's);
 - the run itself (`LocalReturn.restore/3`), its candidate, which draws
-  moving once written, and the restart its success ends in (`home_return`);
+  moving once written, the restart its success ends in, and what the ending
+  settles after a run stopped from outside (`home_return`);
+- which sentence a busy refusal says (a restore runs, or other work fills
+  the family): the request is taken back either way (`always_on_test.exs`);
 - an engine that stops while the job runs: it leaves the request beside no
   job, which the summary draws as nothing (`home_return`'s
   `RequestBesideJob`);

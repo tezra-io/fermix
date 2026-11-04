@@ -62,7 +62,7 @@
 (* one wait the worker ends.                                               *)
 (***************************************************************************)
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/home/move_worker.ex @ f4052fcd5f08
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/home/candidate.ex @ 02a276b26b35
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/home/candidate.ex @ 7ae624f715a6
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/home/move_responder.ex @ 31d80078d517
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/candidate/activation.ex @ 41d05d90bb47
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/move.ex#start,move_id,write_request,put_phase,pending?,not_pending,max_attempts,@max_attempts,@pending,@running,@phases,finish_at_boot,finish_due,ending,finish,view,remember_unrecorded_ending,boot_ending,@boot_key @ be988598314f
