@@ -20,6 +20,7 @@ defmodule FermixCore.Management.AlwaysOnTest do
   alias FermixCore.Home.Snapshot.Status
   alias FermixCore.Management.AlwaysOn
   alias FermixCore.Management.AlwaysOn.Input
+  alias FermixCore.Management.Copy
   alias FermixCore.Management.Home
   alias FermixCore.Management.HomeSummary
   alias FermixCore.Management.Jobs
@@ -785,6 +786,55 @@ defmodule FermixCore.Management.AlwaysOnTest do
 
       assert_received :restarted
       assert {:ok, %{"kind" => "local", "phase" => "activating"}} = Candidate.read_state(ctx.home)
+    end
+
+    # The job family refuses a start busy for two reasons: a restore already
+    # runs, or the family runs as many jobs as it takes, of other kinds. The
+    # sentence says which.
+    test "a restore refused busy says a restore runs only when one does", ctx do
+      copy!(ctx)
+      Agent.update(ctx.link, &%{&1 | primary: primary(11 * 60_000)})
+      test = self()
+
+      blocking = fn _id, _report ->
+        send(test, {:blocking, self()})
+        receive do: (:go -> {:ok, %{}})
+      end
+
+      {:ok, _view} =
+        Jobs.start(:home_restore, ctx.opts[:jobs] ++ [name: "restore_here", run: blocking])
+
+      assert_receive {:blocking, restore}, 10_000
+
+      assert press(ctx, "restore_here", %Input{recovery_passphrase: @passphrase}) ==
+               {:error, :unavailable,
+                %{
+                  "capability" => "home",
+                  "sentence" =>
+                    "Fermix is already restoring its backup here, and it finishes by itself."
+                }}
+
+      send(restore, :go)
+      settle!(ctx)
+
+      runs =
+        for index <- 1..Jobs.max_concurrent() do
+          {:ok, _view} =
+            Jobs.start(:plugin_check, ctx.opts[:jobs] ++ [name: "check-#{index}", run: blocking])
+
+          assert_receive {:blocking, run}, 10_000
+          run
+        end
+
+      assert {:error, :unavailable, %{"sentence" => sentence}} =
+               press(ctx, "restore_here", %Input{recovery_passphrase: @passphrase})
+
+      assert sentence == "Fermix is busy with other work right now, so try again in a minute."
+      assert Copy.violations(sentence, :prose) == []
+      refute match?({:ok, %{restore_requested: _copy}}, Return.read(ctx.home))
+
+      for run <- runs, do: send(run, :go)
+      settle!(ctx)
     end
 
     test "a restore that stopped before its copy was in place offers Restore here again", ctx do

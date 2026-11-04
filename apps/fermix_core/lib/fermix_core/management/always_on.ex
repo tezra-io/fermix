@@ -125,6 +125,7 @@ defmodule FermixCore.Management.AlwaysOn do
   @changed_sentence "Always On changed since this was shown, so look at it again."
   @busy_backup_sentence "A backup is already running, and it finishes by itself."
   @busy_restore_sentence "Fermix is already restoring its backup here, and it finishes by itself."
+  @busy_sentence "Fermix is busy with other work right now, so try again in a minute."
   @opened_sentence "This one opens a page of its own; Fermix takes no step for it."
   @unknown_sentence "Name one of the steps Always On offers."
   @key_sentence "Send the key the action came with."
@@ -166,6 +167,7 @@ defmodule FermixCore.Management.AlwaysOn do
       @changed_sentence,
       @busy_backup_sentence,
       @busy_restore_sentence,
+      @busy_sentence,
       @opened_sentence,
       @unknown_sentence,
       @key_sentence,
@@ -608,8 +610,16 @@ defmodule FermixCore.Management.AlwaysOn do
 
       {:error, :busy} ->
         :ok = request_done(home)
-        {:error, {:busy, Atom.to_string(@restore_kind)}}
+        {:error, {:busy, busy_with(opts)}}
     end
+  end
+
+  # The family refuses a start busy beside a restore already running, and
+  # when it runs as many jobs as it takes, of other kinds.
+  defp busy_with(opts) do
+    {:ok, views} = Jobs.list(Keyword.get(opts, :jobs, []))
+    restoring? = Enum.any?(views, &match?(%{"kind" => "home_restore", "status" => "running"}, &1))
+    if restoring?, do: Atom.to_string(@restore_kind), else: :jobs
   end
 
   # A run stopped from outside (past its budget, cancelled, or crashed) ran
@@ -666,6 +676,7 @@ defmodule FermixCore.Management.AlwaysOn do
 
   defp refusal({:busy, "home.snapshots.run"}), do: unavailable(@busy_backup_sentence)
   defp refusal({:busy, "home_restore"}), do: unavailable(@busy_restore_sentence)
+  defp refusal({:busy, :jobs}), do: unavailable(@busy_sentence)
 
   defp refusal({:unavailable, capability, sentence}),
     do: {:error, :unavailable, %{"capability" => capability, "sentence" => sentence}}
