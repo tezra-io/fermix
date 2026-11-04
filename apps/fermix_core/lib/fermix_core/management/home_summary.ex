@@ -681,9 +681,8 @@ defmodule FermixCore.Management.HomeSummary do
   defp restore_running?(%{restoring: true, return: %{restore_requested: _copy}}), do: true
   defp restore_running?(_facts), do: false
 
-  # Restore here (design §8): wherever the server is silent (no link, the
-  # server forgot this computer, or no session for the limit), and only while
-  # this computer holds a copy, the newest named.
+  # Restore here (design §8): wherever the server is silent (`silent?/1`),
+  # and only while this computer holds a copy, the newest named.
   defp restore_offer(%{copies: [newest | _]} = facts) do
     if silent?(facts),
       do:
@@ -719,13 +718,14 @@ defmodule FermixCore.Management.HomeSummary do
 
   defp stale?(_facts), do: false
 
-  # The server silent: no link, forgotten, or no session for the limit.
+  # The server silent: nothing answers, so no link (none, or forgotten) or
+  # no session for the limit. One that answers it forgot this computer
+  # (`revoked`), or a retired copy that answers (`stale`: the home lives
+  # elsewhere), is not silent.
   defp silent?(%{link: %{primary: nil}}), do: true
-  defp silent?(%{link: %{primary: %{status: :revoked}}}), do: true
 
-  defp silent?(%{link: %{primary: %{status: status} = link}})
-       when status in [:unreachable, :stale],
-       do: (Map.get(link, :down_ms) || 0) >= @unreachable_ms
+  defp silent?(%{link: %{primary: %{status: :unreachable} = link}}),
+    do: (Map.get(link, :down_ms) || 0) >= @unreachable_ms
 
   defp silent?(_facts), do: false
 

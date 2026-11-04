@@ -382,10 +382,12 @@ this computer had begun to receive), never while its move runs, once it
 retired, or once the home is being put in place here. A stop part-way that
 leaves the start recorded with no candidate, while the server answers as
 the primary with no move, is `return_failed` with `cancel`. A move back the home went past (another
-desktop took it, at a newer epoch) is dropped, and not drawn. Where the
-server stopped answering (`cannot_reach`, `retired`, once it has had no
-session for 10 minutes, or none at all) and this computer keeps a copy of
-its snapshots, `detail.alternatives` adds `restore_here` (needs
+desktop took it, at a newer epoch) is dropped, and not drawn. Where
+nothing answers from the server (`cannot_reach` once it has had no session
+for 10 minutes, or `retired` with no link at all; a server that answers it
+no longer knows this computer, or a retired copy that answers, is not
+silent) and this computer keeps a copy of its snapshots,
+`detail.alternatives` adds `restore_here` (needs
 `recovery_passphrase`; its confirm asks the owner's word that the server is
 deleted or stopped, since a server that still runs answers the same
 channels as the restored copy, and says what is lost), with the copy's date

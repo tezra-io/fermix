@@ -773,14 +773,17 @@ defmodule FermixCore.Management.HomeSummaryTest do
       assert %{off: true} = HomeSummary.watch(facts([]))
     end
 
+    # Only where nothing answers: no link, a link forgotten, or no session for
+    # ten minutes. A server that answers that it forgot this Mac (revoked), or
+    # a retired copy that answers (stale: the home lives somewhere else), is
+    # not silent: a restore beside it would make a second primary.
     test "Restore here is offered wherever the server went silent and this Mac holds a copy" do
       unreachable = primary(:unreachable, 11 * @minute)
       silent = [link_primary: unreachable, primary_home: nil, copies: [copy()]]
 
       screens = [
         desktop(silent),
-        desktop(linked: false, link_primary: nil, copies: [copy()]),
-        desktop(link_primary: primary(:revoked), copies: [copy()])
+        desktop(linked: false, link_primary: nil, copies: [copy()])
       ]
 
       for facts <- screens do
@@ -790,9 +793,15 @@ defmodule FermixCore.Management.HomeSummaryTest do
       for facts <- [
             desktop(copies: [copy()]),
             desktop(link_primary: primary(:unreachable, 5 * @minute), copies: [copy()]),
-            desktop(link_primary: unreachable, primary_home: nil, copies: [])
+            desktop(link_primary: unreachable, primary_home: nil, copies: []),
+            desktop(link_primary: primary(:revoked), copies: [copy()]),
+            desktop(
+              link_primary: primary(:stale, 11 * @minute),
+              primary_home: nil,
+              copies: [copy()]
+            )
           ] do
-        refute "restore_here" in all_actions(HomeSummary.summary(facts))
+        refute "restore_here" in all_actions(HomeSummary.summary(facts)), inspect(facts.link)
       end
     end
 
