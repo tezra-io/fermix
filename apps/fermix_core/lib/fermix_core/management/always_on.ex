@@ -576,12 +576,18 @@ defmodule FermixCore.Management.AlwaysOn do
   defp chosen({:error, :no_copy}), do: unavailable(@no_copy_sentence)
   defp chosen({:error, reason}), do: Home.recovery_result({:error, reason})
 
-  # The request in the return's record: a record of its own when none was
-  # kept, the server named, the copy to restore asked for.
+  # The request in the return's record: the one kept for a move back not yet
+  # done, else a record of its own, the server named, the copy to restore
+  # asked for. A move back that ended (`moved_at`) is one the home moved away
+  # from since: merged into, the restored primary's boot would keep its old
+  # `moved_at` and raise its notice again.
   defp restore_record(facts, copy, opts) do
-    kept = facts.return || %{from: server_name(facts), started_at: now(opts)}
+    kept = unfinished(facts.return) || %{from: server_name(facts), started_at: now(opts)}
     Map.put(kept, :restore_requested, copy.name)
   end
+
+  defp unfinished(%{moved_at: %DateTime{}}), do: nil
+  defp unfinished(record), do: record
 
   # The restore's own job (`home_restore`): while it runs beside the request
   # the summary says it runs, from the press on; its ending, however the run

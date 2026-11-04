@@ -667,6 +667,46 @@ defmodule FermixCore.Management.AlwaysOnTest do
       assert Return.read(ctx.home) == {:ok, %{from: server, started_at: @at}}
     end
 
+    # A move back that ended keeps its record (`moved_at`) after the home moves
+    # away again. Restore here starts a record of its own: merged into that
+    # one, the restored primary's boot would keep the old `moved_at` and raise
+    # the old move back's notice again.
+    test "Restore here over a move back that already ended keeps a record of its own", ctx do
+      copy = copy!(ctx)
+      server = "fermix-general-a3f9"
+
+      :ok =
+        Return.write(ctx.home, %{
+          from: "fermix-orchard-old",
+          primary_epoch: 2,
+          started_at: ~U[2031-04-01 09:00:00Z],
+          move_started_at: ~U[2031-04-01 09:05:00Z],
+          moved_at: ~U[2031-04-01 09:20:00Z],
+          epoch: 3
+        })
+
+      Agent.update(ctx.link, &%{&1 | primary: primary(11 * 60_000)})
+      test = self()
+
+      held =
+        Keyword.put(ctx.opts, :local_return, fn _home, _chosen ->
+          send(test, {:restoring, self()})
+          receive do: (:go -> {:ok, %{"restored" => true, "epoch" => 6}})
+        end)
+
+      assert {:ok, _answer} =
+               press(%{ctx | opts: held}, "restore_here", %Input{recovery_passphrase: @passphrase})
+
+      assert_receive {:restoring, run}, 10_000
+      name = Path.basename(copy)
+
+      assert Return.read(ctx.home) ==
+               {:ok, %{from: server, started_at: @at, restore_requested: name}}
+
+      send(run, :go)
+      settle!(ctx)
+    end
+
     test "a restore that stopped before its copy was in place offers Restore here again", ctx do
       copy!(ctx)
       Agent.update(ctx.link, &%{&1 | primary: primary(11 * 60_000)})
