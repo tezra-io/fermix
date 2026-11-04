@@ -820,8 +820,8 @@ will be part of a future release; nothing in this group is in a release yet.
 - **A voice call remembers what its tasks read.** On a GPT-Live or Grok call,
   once one task reads a web page, an attachment or a plugin result, every
   later task in that call counts as having read it: an access-sensitive
-  command then waits for your spoken yes, and a coding agent is refused, as
-  in a call that read it itself. A call whose tasks read
+  command then waits for your spoken yes, and a command on Linux or a coding
+  agent is refused, as in a call that read it itself. A call whose tasks read
   nothing is unchanged.
 
 ## [0.17.0] - 2026-10-26
