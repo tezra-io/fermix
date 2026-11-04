@@ -99,7 +99,7 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/moved.ex#write,exclusive_write,read,remove @ 27b13b295c9c
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/role.ex#resolve,primary,configured_role @ 6b56d83c809d
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/move.ex#start,pending?,@pending,max_attempts,@max_attempts,finish_at_boot,finish_due,ending,finish @ 84b4f8c190f1
-\* SOURCE: apps/fermix_core/lib/fermix_core/management/home_move.ex#move_start @ 81c5ae5fa852
+\* SOURCE: apps/fermix_core/lib/fermix_core/management/home_move.ex#move_start @ 428bcf251b24
 \* SOURCE: apps/fermix_core/lib/fermix_core/management/placement.ex#unconfirmed_on_loss?,unconfirmed,@unconfirmed_methods @ 0881001a46d0
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/relay.ex#lost_answer @ dfb459724267
 \* SOURCE: apps/fermix_core/lib/fermix_core/management/always_on.ex @ 1d7e7af36334
@@ -904,8 +904,9 @@ MbStart ==
 \* Move now on a return (forwarded_move/4, always_on.ex:398-414):
 \* home.move.start {candidate_id, passphrase, keep_as_desktop: false}
 \* forwarded over the link. The server's HomeMove.move_start/3 runs
-\* Move.start/5 (request, phase requested, role device) and restarts into the
-\* move. Its answer arrives, or is lost (unconfirmed: placement.ex:185-205),
+\* Move.start/5 (request, phase requested, role device), removes its own
+\* record of a move back that ended there (none here) and restarts into the
+\* move. Its answer arrives, or is lost (unconfirmed: placement.ex:189-204),
 \* after the server had it or before; a link that is down never sent it.
 \* With StartKeptFirst (the code: return_start_ahead/2, :420-433) return.json
 \* gains move_started_at before the request leaves (MnMark), and the answer

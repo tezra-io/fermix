@@ -69,7 +69,7 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/role.ex#resolve,primary,configured_role @ 6b56d83c809d
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/moved.ex#write,exclusive_write,read @ f1fa82381547
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/candidate.ex#put_state,write_private @ 622ba87194f2
-\* SOURCE: apps/fermix_core/lib/fermix_core/management/home_move.ex#move_start,move_view @ bf229d4d4fd7
+\* SOURCE: apps/fermix_core/lib/fermix_core/management/home_move.ex#move_start,move_view @ 5bb0dcb71b91
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/device_supervisor.ex#children,dial_children @ 0206b0220a81
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/rail.ex#@moduledoc @ eea53ac3d395
 \* SOURCE: apps/fermix_core/lib/fermix_core/application.ex#prepare_home,finish_activation,finish_move,left_to_status @ 832168565d5f
@@ -316,14 +316,15 @@ Goto(w) ==
     /\ wpc' = w
     /\ UNCHANGED <<SrcFiles, boot, unsaid, CandAll, Net, Budgets, Hist>>
 
-\* home.move.start (HomeMove.move_start/3, home_move.ex:196-215): the recovery
+\* home.move.start (HomeMove.move_start/3, home_move.ex:183-203): the recovery
 \* passphrase is checked against the kept key, or kept when none is
 \* (Snapshot.Recovery.verify_or_set/2: a config.toml key no rule reads, and a
 \* refusal writes nothing here), then Move.start/5, given that key,
 \* writes request.json, phase "requested", then role = "device", the last
 \* write (write_request/3, move.ex:558-587: a failure part-way removes .move/,
-\* so a part-way start leaves the primary as it was), and the handler restarts
-\* through Lifecycle.restart_self/0. The boot is a device with a move pending,
+\* so a part-way start leaves the primary as it was), and the handler removes
+\* the record of a move back that ended here (device/return.json, a file no
+\* rule reads) and restarts through Lifecycle.restart_self/0. The boot is a device with a move pending,
 \* so the worker starts. One step: until the restart the engine still runs as
 \* the primary, and nothing of the move acts.
 Start ==
