@@ -1105,8 +1105,9 @@ terminals only) and ABI 6's signal and abstract-socket scopes are asked only
 of a kernel that has them. `Sandbox.Landlock` carves the rules folder by folder around the
 protected paths, since Landlock only grants, and the shim refuses every command
 by name on a kernel that cannot hold them. Doctor's `os sandbox` row checks
-either kernel. Where `OsSandbox.enforced?/1` is false (another system, or Linux
-without Landlock ABI 3), a built-in marked `host_command?`
+either kernel. Everywhere but macOS (`OsSandbox.seatbelt?/1` false: Linux, whose
+Landlock cannot refuse a command's connect to the account's service manager or
+session bus, and any other system), a built-in marked `host_command?`
 (`shell`, `git_write`, a declared command) in a turn that read outside content
 goes through `Capabilities.AccessGate` like an access-sensitive plugin command.
 One that runs unconfined everywhere

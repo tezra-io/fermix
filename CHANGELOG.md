@@ -528,8 +528,10 @@ will be part of a future release; nothing in this group is in a release yet.
   command), and from Linux 6.12 it cannot signal a process outside the command
   or connect to an abstract unix socket made outside it. Every command runs in
   a session of its own, so it cannot type into the terminal of a `fermix` you
-  started by hand. So a command in a turn that read outside content no longer
-  waits for your confirmation there. A Linux kernel without Landlock, or older
+  started by hand. A command in a turn that read outside content still waits
+  for your confirmation there, since Landlock cannot stop a command reaching
+  your account's service manager (`systemd-run --user`), which would start a
+  program outside the sandbox. A Linux kernel without Landlock, or older
   than 6.2 (a stock Debian 12's 6.1 included; Debian 12 on a 6.2 or later
   kernel runs commands), runs no command and says why, `fermix doctor` gains
   an `os sandbox` row on both systems, and tool caches move into the

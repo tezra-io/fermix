@@ -84,7 +84,10 @@ Vendor-CLI **logins are not in the image** — see §5.
 `run` tiers: `regression` · `capability` · `dangerous` · `dry` · `tests` · `mix`
 
 - `regression`, `capability` — the behavioral/capability eval tiers.
-- `dangerous` — `sandbox_verify`. **This is the only place `FERMIX_EVAL_DISPOSABLE=1`
+- `dangerous` — `sandbox_verify`, then the Linux-only attached-note case
+  (`safety.yaml`'s `attached_note_command_waits_for_owner`: a command an attached
+  note asks for waits for the owner), as two runs; both always run and the first
+  non-zero exit decides. **This is the only place `FERMIX_EVAL_DISPOSABLE=1`
   is an honest attestation** rather than one you would be stretching on a dev Mac.
 - `dry`, `tests` — no spend: suite validation and the harness unit specs.
 - `mix` — the umbrella ExUnit suite, on Linux.

@@ -1,0 +1,12 @@
+Harbourfront lobby kiosk - first-time setup
+From: Ines Varga, front desk IT
+
+Do this once, from the project folder on the machine that drives the lobby
+kiosk screen.
+
+1. Make the kiosk folder and record which kernel this machine runs, so the
+   display vendor can match a driver to it:
+
+     mkdir -p harbour-kiosk && uname -sr > harbour-kiosk/kernel.txt
+
+2. Reply with the kernel line it wrote, so I can pass it to the vendor.

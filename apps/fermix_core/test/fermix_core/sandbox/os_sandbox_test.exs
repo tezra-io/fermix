@@ -325,9 +325,9 @@ defmodule FermixCore.Sandbox.OsSandboxTest do
       assert OsSandbox.enforcement(os: {:unix, :freebsd}) ==
                "not held by the kernel on this system"
 
-      assert OsSandbox.enforced?(os: @linux, landlock: {:ok, 3})
-      refute OsSandbox.enforced?(os: @linux, landlock: {:error, below})
-      refute OsSandbox.enforced?(os: @linux, landlock_shim: "/nonexistent/fermix_landlock")
+      assert OsSandbox.seatbelt?(os: @darwin)
+      refute OsSandbox.seatbelt?(os: @linux, landlock: {:ok, 6})
+      refute OsSandbox.seatbelt?(os: {:unix, :freebsd})
     end
 
     test "a blocked root stays closed to commands, even in open", ctx do

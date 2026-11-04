@@ -14,18 +14,16 @@ defmodule FermixCore.Capabilities.AccessGate do
   decided only when the turn read outside content and Fermix cannot sandbox the
   call. The taint is rule 5's `:outside_sources` half alone: a shared Buzz
   channel does not hold one by itself, since a Buzz session answers through
-  `shell`. Fermix cannot sandbox the call when the host's kernel does not hold
-  commands (`Sandbox.OsSandbox.enforced?/1` false: a system other than macOS
-  and Linux, or a Linux host without Landlock ABI 3, where every confined
-  command refuses anyway; read through the context's `:os_sandbox` seam), or
-  when the command runs unconfined even where it does
+  `shell`. Fermix cannot sandbox the call anywhere but macOS
+  (`Sandbox.OsSandbox.seatbelt?/1` false, read through the context's
+  `:os_sandbox` seam): on Linux, Landlock holds a command's files but not its
+  connect to the account's service manager or session bus, which start what it
+  asks for outside the sandbox (`systemd-run --user`), and on any other system
+  nothing holds it. Nor can it when the command runs unconfined even on macOS
   (`metadata.host_command_confined?` false: the `codex` and `claude_code`
   presets, and the coding runs, whose vendor CLI acts with the owner's account
-  authority outside the sandbox), so those are decided on every platform.
-  Without the kernel, nothing but the starting folder and the hardline patterns
-  stands between a hostile page's instruction and the owner's files. A
-  confined call on a host where `enforced?/1` holds is not decided here, as
-  `shell` is not on macOS (Seatbelt) or on Linux with Landlock.
+  authority outside the sandbox), so those are decided on every platform. A
+  confined call on macOS is not decided here, as `shell` is not.
 
   `Capability.execute/3` — the single invoke boundary for the agent loop and the
   realtime voice bridge — asks `admit/3` first, and every other capability
@@ -677,14 +675,14 @@ defmodule FermixCore.Capabilities.AccessGate do
         Map.get(context, :computer_use_origin) == :voice
 
   # A host command is gated when the turn read outside content and Fermix cannot
-  # sandbox this call: the host has no kernel enforcement (Linux without
-  # Landlock), or the call runs unconfined even where it does (the
-  # `codex`/`claude_code` presets, the coding runs). Its taint is only what the turn read, never the shared Buzz
-  # channel on its own (owner decision): a Buzz session answers by running the
-  # `buzz` CLI through `shell`.
+  # sandbox this call: anywhere but macOS (Landlock leaves a Linux command the
+  # account's service manager, so it is not enough), or the call runs unconfined
+  # even there (the `codex`/`claude_code` presets, the coding runs). Its taint is
+  # only what the turn read, never the shared Buzz channel on its own (owner
+  # decision): a Buzz session answers by running the `buzz` CLI through `shell`.
   defp host_command_gated?(capability, context) do
     read_outside?(capability, context) and
-      (not confined_call?(capability) or not OsSandbox.enforced?(os_opts(context)))
+      (not confined_call?(capability) or not OsSandbox.seatbelt?(os_opts(context)))
   end
 
   # What a chained run may carry: its task and folder, and settings that widen

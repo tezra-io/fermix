@@ -31,8 +31,11 @@ defmodule FermixCore.Sandbox.OsSandbox do
   refuses a confined command itself (`SocketPeer.admit/2`). A kernel that
   cannot hold them (no Landlock, or ABI below 3: Linux before 6.2) refuses
   every command by name; nothing runs unconfined. On any other system commands
-  run as before, and `Capabilities.AccessGate` asks the owner before one runs
-  in a turn that read outside content (`enforced?/1`).
+  run as before. Everywhere but macOS `Capabilities.AccessGate` asks the owner
+  before one runs in a turn that read outside content (`seatbelt?/1`), Linux
+  included: Landlock holds a command's files, not its connect to the account's
+  service manager or session bus, which start what it asks for outside the
+  sandbox (`systemd-run --user`).
   """
 
   alias FermixCore.Browser.Bridge.HostManifest
@@ -271,22 +274,16 @@ defmodule FermixCore.Sandbox.OsSandbox do
   defp landlock_enforcement({:error, reason}), do: "refused: " <> Landlock.describe(reason)
 
   @doc """
-  Whether the kernel holds commands to the sandbox on this host: macOS
-  (Seatbelt), and Linux where the Landlock shim is installed and the kernel's
-  ABI is 3 or later, which asks the shim (one short process; `:landlock` pins
-  its answer in tests). `:os` is the platform seam, as in `wrap/5`. The one
-  source of this fact: `Capabilities.AccessGate` reads it too, to ask the owner
-  before a host command runs after outside content where it is false. A Linux
-  host where it is false refuses every confined command anyway.
+  Whether commands here run under Seatbelt: macOS. `Capabilities.AccessGate`
+  reads it to let a confined host command run after outside content without
+  asking the owner there alone. Linux's Landlock is not enough for that: it
+  cannot refuse a command's connect to a pathname socket, so a command still
+  reaches the account's service manager and session bus, and
+  `systemd-run --user` starts whatever it asks for outside the sandbox. `:os`
+  is the platform seam, as in `wrap/5`.
   """
-  @spec enforced?(keyword()) :: boolean()
-  def enforced?(opts \\ []) when is_list(opts) do
-    case platform(opts) do
-      @darwin -> true
-      @linux -> match?({:ok, _abi}, landlock_probe(opts))
-      _other -> false
-    end
-  end
+  @spec seatbelt?(keyword()) :: boolean()
+  def seatbelt?(opts \\ []) when is_list(opts), do: platform(opts) == @darwin
 
   defp landlock_probe(opts),
     do: Keyword.get_lazy(opts, :landlock, fn -> Landlock.probe(landlock_shim(opts)) end)
