@@ -242,6 +242,8 @@ will be part of a future release; nothing in this group is in a release yet.
   on the way, and the setup page's request logs hide any field named for a
   passphrase.
 
+## [0.18.0] - 2026-11-03
+
 ### Added
 
 - **The Linux installer installs a release you name.** `curl -fsSL
