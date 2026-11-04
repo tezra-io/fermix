@@ -328,6 +328,11 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertIn("brew info --formula --json=v2 tezra-io/tap/fermix", self.release)
         self.assertIn("brew install --formula tezra-io/tap/fermix", self.release)
         self.assertIn('fermix --version | grep -F "$version"', self.release)
+        # The step runs its own `brew update` before each read. Homebrew's
+        # auto-update, started by `brew tap` or `brew trust`, held the update
+        # lock when the loop's next one ran ("Another `brew update` process is
+        # already running", v0.18.0's release), so the job turns it off.
+        self.assertIn('HOMEBREW_NO_AUTO_UPDATE: "1"', self._job("homebrew"))
 
     def _job(self, name):
         job = re.search(

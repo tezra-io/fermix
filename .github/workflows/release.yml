@@ -680,6 +680,11 @@ jobs:
         env:
           TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           VERSION: ${{ github.ref_name }}
+          # The step runs its own `brew update` before each read. Homebrew's
+          # auto-update, which `brew tap` and `brew trust` start, held the
+          # update lock when the next of them ran ("Another `brew update`
+          # process is already running", v0.18.0), so it stays off here.
+          HOMEBREW_NO_AUTO_UPDATE: "1"
         run: |
           set -euo pipefail
           if [ -z "${TAP_TOKEN:-}" ]; then
