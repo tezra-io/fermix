@@ -1488,15 +1488,14 @@ defmodule FermixCore.Management.ProtocolContractTest do
               enrollment: %{
                 state: :used,
                 expires_at: ~U[2026-10-27 09:22:00Z],
-                kind: :manual,
                 candidate_id: "cand-5e2a9c1f7b3d4086"
               }
             }
           end,
-          open_enrollment: fn :manual, _desktop ->
+          open_enrollment: fn _desktop ->
             {:ok, %{code: "fxenroll1.aW52ZW50ZWQ", expires_at: ~U[2026-10-27 09:40:00Z]}}
           end,
-          withdraw_enrollment: fn :provisioned -> :ok end,
+          withdraw_enrollment: fn -> :ok end,
           # A keychain reference this host could not resolve, as a home a
           # restore carried here without its values shows it.
           settings_snapshot: fn ->
@@ -1537,9 +1536,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
     window = %{
       state: :open,
       expires_at: ~U[2026-10-30 09:30:00Z],
-      kind: :manual,
-      candidate_id: nil,
-      awake_ms: 60_000
+      candidate_id: nil
     }
 
     link =
@@ -1558,7 +1555,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
       scheduler: nil,
       disk_usage: fn _home -> {:ok, %{used: 0.42, nearly_full: false}} end,
       link_status: fn -> Agent.get(link, & &1) end,
-      withdraw_enrollment: fn :manual -> Agent.update(link, &%{&1 | enrollment: nil}) end,
+      withdraw_enrollment: fn -> Agent.update(link, &%{&1 | enrollment: nil}) end,
       settings_snapshot: fn -> %{} end,
       jobs: jobs(),
       serializer: serializer

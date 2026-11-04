@@ -636,8 +636,8 @@ summary first (`Home.summary_facts/1`, `HomeSummary.find_action/3`) and
 answers `changed`, in a sentence alone, when the action is not offered under
 that key (the surface reads `home.status` again), so a confirm accepted on an older screen or two surfaces
 pressing at once do nothing twice. The computer that sets Always On up runs
-every step itself: Use my own Linux server opens a manual code
-(`HomeMove.enroll_open/2`) answered with the command that installs Fermix
+every step itself: Use my own Linux server opens a code
+(`HomeMove.enroll_open/1`) answered with the command that installs Fermix
 there, and Cancel withdraws it. Move now reviews at the press (a kept ready review under 15 minutes old, else
 a fresh one, kept), refuses on a block, answers `changed` on a warning the
 confirm did not name, then reaches `HomeMove.move_start/3`. On a linked
@@ -647,7 +647,7 @@ desktop it sends the server's own steps over the link as rail-only methods
 boundary, whose `Inspect` withholds the recovery passphrase.
 
 Move back (`home.act`'s `move_back`, Always On's move back) runs on a linked
-desktop: it asks the server for a manual window (`home.enroll.open`, which
+desktop: it asks the server for a window (`home.enroll.open`, which
 records the desktop that asked, so the candidate enrolled through it carries
 `returning` in `Home.Candidates` and the server's review knows the move goes
 back by that fact, never by an OS), writes the desktop's own candidate
@@ -657,7 +657,7 @@ back by that fact, never by an OS), writes the desktop's own candidate
 it sends `home.move.start` to the desktop's own candidate (the server restarts
 into the move as it answers), and takes it back only when the server refused or the request never left; Cancel (offered
 only where the server has no move under way) stops the subtree, closes the window
-(`home.enroll.withdraw {kind: manual}`) and removes both, the record first (a
+(`home.enroll.withdraw`) and removes both, the record first (a
 stop between them leaves a candidate, which Cancel clears). Restore here
 (`restore_here`), offered for any server silent past the summary's limit (or
 out of any link) while this computer keeps a copy, and pressed once the

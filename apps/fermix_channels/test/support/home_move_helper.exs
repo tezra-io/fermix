@@ -113,7 +113,7 @@ defmodule FermixChannels.Test.HomeMove do
          device_store: store,
          clock: fn -> Agent.get(clock, & &1) end,
          host_name: fn -> {:ok, Keyword.get(opts, :name, "studio-mac")} end
-       ] ++ Keyword.take(opts, [:schedule, :monotonic, :status_changed])},
+       ] ++ Keyword.take(opts, [:schedule, :status_changed])},
       id: {:enrollment, suffix}
     )
 

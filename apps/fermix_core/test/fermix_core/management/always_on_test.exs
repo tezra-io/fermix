@@ -61,12 +61,12 @@ defmodule FermixCore.Management.AlwaysOnTest do
       disk_usage: fn _home -> {:ok, %{used: 0.42, nearly_full: false}} end,
       link_status: fn -> Agent.get(link, & &1) end,
       jobs: jobs!(ctx),
-      open_enrollment: fn kind, _desktop ->
-        send(test, {:enrollment_opened, kind})
+      open_enrollment: fn _desktop ->
+        send(test, :enrollment_opened)
         {:ok, %{code: @manual_code, expires_at: ~U[2031-05-04 12:30:00Z]}}
       end,
-      withdraw_enrollment: fn kind ->
-        send(test, {:enrollment_withdrawn, kind})
+      withdraw_enrollment: fn ->
+        send(test, :enrollment_withdrawn)
         Agent.update(link, &%{&1 | enrollment: nil})
         :ok
       end,
@@ -157,7 +157,7 @@ defmodule FermixCore.Management.AlwaysOnTest do
       assert Map.keys(details) == ["sentence"]
       assert sentence =~ "changed"
       assert summary(ctx.opts)["state"] == "off"
-      refute_received {:enrollment_opened, _kind}
+      refute_received :enrollment_opened
     end
 
     test "with no serializer running, an act is refused in words", ctx do
@@ -175,7 +175,7 @@ defmodule FermixCore.Management.AlwaysOnTest do
            "names the release this computer runs",
          ctx do
       assert {:ok, %{"result" => result, "summary" => summary}} = press(ctx, "own_server")
-      assert_received {:enrollment_opened, :manual}
+      assert_received :enrollment_opened
 
       assert result == %{
                "code" => @manual_code,
@@ -189,18 +189,18 @@ defmodule FermixCore.Management.AlwaysOnTest do
     end
 
     test "Cancel the code releases the manual window", ctx do
-      Agent.update(ctx.link, &%{&1 | enrollment: window(:manual, :open, nil, 60_000)})
+      Agent.update(ctx.link, &%{&1 | enrollment: window(:open, nil)})
       assert %{"state" => "connect"} = summary(ctx.opts)
 
       assert {:ok, %{"summary" => %{"state" => "off"}}} = press(ctx, "cancel")
-      assert_received {:enrollment_withdrawn, :manual}
+      assert_received :enrollment_withdrawn
     end
   end
 
   describe "the move, on the computer that sets up" do
     setup ctx do
       {:ok, held} = Candidates.add(ctx.home, candidate_attrs(), @at)
-      Agent.update(ctx.link, &%{&1 | enrollment: window(:manual, :used, held.candidate_id, 0)})
+      Agent.update(ctx.link, &%{&1 | enrollment: window(:used, held.candidate_id)})
       Map.put(ctx, :candidate_id, held.candidate_id)
     end
 
@@ -572,7 +572,7 @@ defmodule FermixCore.Management.AlwaysOnTest do
       assert {:ok, %{"summary" => after_cancel}} = press(ctx, "cancel")
 
       assert_received :return_stopped
-      assert_received {:forwarded, "home.enroll.withdraw", %{"kind" => "manual"}}
+      assert_received {:forwarded, "home.enroll.withdraw", %{}}
       refute Candidate.present?(ctx.home)
       assert Return.read(ctx.home) == :absent
       assert after_cancel["state"] == "on"
@@ -755,8 +755,8 @@ defmodule FermixCore.Management.AlwaysOnTest do
     end
 
     test "a server step answers only a desktop's forward", ctx do
-      withdraw = fn kind ->
-        send(self(), {:withdrawn, kind})
+      withdraw = fn ->
+        send(self(), :withdrawn)
         :ok
       end
 
@@ -765,12 +765,12 @@ defmodule FermixCore.Management.AlwaysOnTest do
       assert {:error, :unavailable, %{"method" => "home.enroll.withdraw", "sentence" => _}} =
                route("home.enroll.withdraw", %{}, ctx, opts)
 
-      refute_received {:withdrawn, _kind}
+      refute_received :withdrawn
 
       assert {:ok, %{"withdrawn" => true}} =
                route("home.enroll.withdraw", %{}, ctx, [actor: {:desktop, "desk-1"}] ++ opts)
 
-      assert_received {:withdrawn, :provisioned}
+      assert_received :withdrawn
     end
   end
 
@@ -800,14 +800,8 @@ defmodule FermixCore.Management.AlwaysOnTest do
 
   # -- the world ---------------------------------------------------------------
 
-  defp window(kind, state, candidate_id, awake_ms) do
-    %{
-      state: state,
-      expires_at: ~U[2031-05-05 12:00:00Z],
-      kind: kind,
-      candidate_id: candidate_id,
-      awake_ms: awake_ms
-    }
+  defp window(state, candidate_id) do
+    %{state: state, expires_at: ~U[2031-05-05 12:00:00Z], candidate_id: candidate_id}
   end
 
   # The server's own `home.status`, and its answers to the steps sent to it.

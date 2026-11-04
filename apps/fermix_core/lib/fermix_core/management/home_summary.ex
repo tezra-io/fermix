@@ -372,10 +372,10 @@ defmodule FermixCore.Management.HomeSummary do
       {%{} = candidate, _window} ->
         ready(candidate, facts)
 
-      {nil, %{kind: :manual, state: :open}} ->
+      {nil, %{state: :open}} ->
         connect(facts)
 
-      {nil, %{kind: :manual, state: :used, candidate_id: nil}} ->
+      {nil, %{state: :used, candidate_id: nil}} ->
         view("creating", Copy.summary_sentence(:connecting, %{}), nil, %{})
 
       _nothing ->
@@ -1028,7 +1028,7 @@ defmodule FermixCore.Management.HomeSummary do
       moving?(facts) ->
         "running"
 
-      view["state"] == "connect" and match?(%{kind: :manual, state: :open}, window(facts)) ->
+      view["state"] == "connect" and match?(%{state: :open}, window(facts)) ->
         "waiting"
 
       true ->

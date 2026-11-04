@@ -36,9 +36,7 @@ defmodule FermixCore.Management.AlwaysOnLogTest do
     window = %{
       state: :used,
       expires_at: ~U[2031-05-04 12:30:00Z],
-      kind: :manual,
-      candidate_id: held.candidate_id,
-      awake_ms: 0
+      candidate_id: held.candidate_id
     }
 
     opts = [

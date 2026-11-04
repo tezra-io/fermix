@@ -6,8 +6,8 @@ defmodule FermixChannels.Home.Link do
   Each callback is owned by the part of the rail that knows its answer:
   `forward/1` and `status/0`'s `primary` by the desktop relay (device role),
   `status/0`'s `desktops` by the primary's desktop peers
-  (`FermixChannels.Desktop.Peer`), and `open_enrollment/2`,
-  `withdraw_enrollment/1` and `status/0`'s `enrollment` by the enrollment
+  (`FermixChannels.Desktop.Peer`), and `open_enrollment/1`,
+  `withdraw_enrollment/0` and `status/0`'s `enrollment` by the enrollment
   window, `drop_desktop_row/2` by the device store of the staged home it
   names, and `start_return/1` and `stop_return/0` by the device tree
   (`FermixChannels.Desktop.DeviceSupervisor`), whose candidate subtree
@@ -40,20 +40,18 @@ defmodule FermixChannels.Home.Link do
   end
 
   # The window runs on the primary alone (`FermixChannels.Home.Enrollment`);
-  # with no window running here, none opens, said in words an owner reads
-  # (a create keeps it as its failure, which Always On shows).
+  # with no window running here, none opens, said in words an owner reads.
   @impl true
-  def open_enrollment(kind, returning)
-      when kind in [:manual, :provisioned] and (is_binary(returning) or is_nil(returning)) do
+  def open_enrollment(returning) when is_binary(returning) or is_nil(returning) do
     if Process.whereis(Enrollment),
-      do: Enrollment.open(Enrollment, kind, returning),
+      do: Enrollment.open(Enrollment, returning),
       else: {:error, {:unavailable, "Fermix cannot open a code here right now."}}
   end
 
   # No window runs outside the primary, so there is none to close.
   @impl true
-  def withdraw_enrollment(kind) when kind in [:manual, :provisioned] do
-    if Process.whereis(Enrollment), do: Enrollment.withdraw(Enrollment, kind), else: :ok
+  def withdraw_enrollment do
+    if Process.whereis(Enrollment), do: Enrollment.withdraw(Enrollment), else: :ok
   end
 
   # A staged home's list, by its root: never the running store's.

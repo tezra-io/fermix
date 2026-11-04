@@ -45,7 +45,6 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
       enrollment: %{
         "state" => "used",
         "expires_at" => "2031-05-04T12:25:00Z",
-        "kind" => "manual",
         "candidate_id" => nil
       }
     })
@@ -77,7 +76,6 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
       enrollment: %{
         "state" => "used",
         "expires_at" => "2031-05-04T11:15:00Z",
-        "kind" => "manual",
         "candidate_id" => @cand
       }
     })
@@ -195,9 +193,7 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
     %{
       state: state,
       expires_at: expires_at,
-      kind: :manual,
-      candidate_id: candidate_id,
-      awake_ms: 9 * 60_000
+      candidate_id: candidate_id
     }
   end
 

@@ -83,7 +83,6 @@ defmodule FermixCore.Management.Router do
   # A summary's key is a short digest; the bound only refuses junk.
   @max_status_key_bytes 64
   @home_passphrase_params ~w(recovery_passphrase)
-  @home_enroll_params ~w(kind)
   @home_readiness_params ~w(candidate_id)
   @home_move_params ~w(candidate_id recovery_passphrase keep_as_desktop)
   @home_act_params ~w(action key input)
@@ -325,19 +324,17 @@ defmodule FermixCore.Management.Router do
     end
   end
 
-  # `kind` `provisioned`, only from a desktop's forward: the 24-hour window
-  # (`HomeMove.enroll_open/2`).
+  # No params: a param sent is refused by name.
   defp route_home("home.enroll.open", params, opts) do
-    with :ok <- reject_unknown_params(params, @home_enroll_params) do
-      operation_result(HomeMove.enroll_open(Map.get(params, "kind"), home_opts(opts)))
+    with :ok <- reject_unknown_params(params, []) do
+      operation_result(HomeMove.enroll_open(home_opts(opts)))
     end
   end
 
-  # `kind` `manual`, from a desktop cancelling its move back: the copied code
-  # it opened; `provisioned` otherwise.
+  # From a desktop cancelling its move back: the copied code it opened.
   defp route_home("home.enroll.withdraw", params, opts) do
-    with :ok <- reject_unknown_params(params, @home_enroll_params) do
-      operation_result(HomeMove.enroll_withdraw(Map.get(params, "kind"), home_opts(opts)))
+    with :ok <- reject_unknown_params(params, []) do
+      operation_result(HomeMove.enroll_withdraw(home_opts(opts)))
     end
   end
 

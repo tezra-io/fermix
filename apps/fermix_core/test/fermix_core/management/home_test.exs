@@ -731,9 +731,7 @@ defmodule FermixCore.Management.HomeTest do
     %{
       state: state,
       expires_at: ~U[2031-05-04 12:30:00Z],
-      kind: :manual,
-      candidate_id: candidate_id,
-      awake_ms: 60_000
+      candidate_id: candidate_id
     }
   end
 

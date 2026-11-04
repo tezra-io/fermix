@@ -5,25 +5,16 @@ defmodule FermixCore.Management.HomeMove do
   `home.move.start`, and the `enrollment`, `candidates` and `move` places of
   `home.status`.
 
-  - `home.enroll.open {kind?}` (primary only) opens the one enrollment
-    window, a manual one of thirty minutes, replacing an open one, through the
-    rail (`FermixCore.Home.Link.impl().open_enrollment/2`), and answers the
-    code and when it expires; while a server Fermix created waits on its own
-    24-hour window (M75 lean v1 L15), and while it is held as the candidate
-    that window enrolled, it is refused with the rail's sentence. A manual
-    window a desktop asks for over the link is that desktop's move back
-    (Always On's Move back), and the window names it (its device id), as
-    does the candidate that enrolls through it. With `kind` `provisioned` it
-    opens that 24-hour window instead, under the same one-window rules, and
-    only for a request a desktop forwarded: the desktop replacing this
-    server puts the code inside the new server it creates. The code is
-    answered once and never logged or kept in a status.
-  - `home.enroll.withdraw {kind?}` (primary only) releases the window of
-    `kind` (`provisioned` unless said)
-    (`FermixCore.Home.Link.impl().withdraw_enrollment/1`): the 24-hour one
-    when the server it was opened for was never created or is being
-    deleted, so a copied code can open again; the copied code a desktop
-    opened to move back when its owner cancels.
+  - `home.enroll.open` (primary only) opens the one enrollment window, of
+    thirty minutes, replacing an open one, through the rail
+    (`FermixCore.Home.Link.impl().open_enrollment/1`), and answers the code
+    and when it expires. A window a desktop asks for over the link is that
+    desktop's move back (Always On's Move back), and the window names it
+    (its device id), as does the candidate that enrolls through it. The code
+    is answered once and never logged or kept in a status.
+  - `home.enroll.withdraw` (primary only) releases the window
+    (`FermixCore.Home.Link.impl().withdraw_enrollment/0`): the copied code a
+    desktop opened to move back, when its owner cancels.
   - `home.candidates.list` answers the candidates the primary holds
     (`FermixCore.Home.Candidates`), never their keys.
   - `home.move.readiness {candidate_id}` (primary only) answers what the owner
@@ -46,16 +37,16 @@ defmodule FermixCore.Management.HomeMove do
     agent, systemd's `Restart=always` for the Linux service). The passphrase
     lives only inside that check: it is never stored, logged or answered.
   - In `home.status`: `enrollment` is the window (`state` `open`, `used` or
-    `expired`, `expires_at`, its `kind`, `manual` or `provisioned`, and the
-    `candidate_id` that enrolled through it, null until one did) or null; `candidates` the held candidates on
+    `expired`, `expires_at`, and the `candidate_id` that enrolled through
+    it, null until one did) or null; `candidates` the held candidates on
     a primary, empty elsewhere; `move` the move's `phase`, `candidate` (its
     name, null on the candidate itself) and `sentence`, or null.
 
   Test seams in `opts`: those of `Management.Home` (its `:config` and
   `:save_recipient` reach the passphrase check), plus `:now` (a
-  `DateTime`), `:open_enrollment` (a 2-arity stand-in for the rail's, given
-  the kind and the desktop it is opened for, or nil), `:withdraw_enrollment`
-  (a 1-arity stand-in for the rail's, given the kind), `:actor`
+  `DateTime`), `:open_enrollment` (a 1-arity stand-in for the rail's, given
+  the desktop it is opened for, or nil), `:withdraw_enrollment` (a 0-arity
+  stand-in for the rail's), `:actor`
   (`{:desktop, device_id}` for a request a desktop forwarded), `:restart` (in
   place of the restart), `:boot_ending` (in place of `Move.boot_ending/0`),
   and the readiness report's `:free_bytes`, `:version`, `:host` and
@@ -77,10 +68,6 @@ defmodule FermixCore.Management.HomeMove do
 
   @capability "home"
   @not_primary "Only the primary enrolls candidates and starts a move."
-  @provisioned_here "A code that lives 24 hours opens only for a server Fermix creates from " <>
-                      "your computer."
-  @kind_sentence "A code is `manual`, or `provisioned` for a server Fermix creates."
-  @kinds %{"manual" => :manual, "provisioned" => :provisioned}
   @owner_sentence "Only the owner can set up Always On, move Fermix or set its recovery " <>
                     "passphrase: use the Fermix app, the setup page or your own terminal."
 
@@ -111,19 +98,16 @@ defmodule FermixCore.Management.HomeMove do
     }
   end
 
-  @doc "`home.enroll.open`, a window of `kind` (`\"manual\"` unless said)."
-  @spec enroll_open(term(), keyword()) :: {:ok, map()} | {:error, term()}
-  def enroll_open(kind, opts \\ []) when is_list(opts) do
+  @doc "`home.enroll.open`: the enrollment window."
+  @spec enroll_open(keyword()) :: {:ok, map()} | {:error, term()}
+  def enroll_open(opts \\ []) when is_list(opts) do
     open =
-      Keyword.get(opts, :open_enrollment, fn kind, returning ->
-        Link.impl().open_enrollment(kind, returning)
+      Keyword.get(opts, :open_enrollment, fn returning ->
+        Link.impl().open_enrollment(returning)
       end)
 
-    actor = Keyword.get(opts, :actor)
-
-    with {:ok, kind} <- window_kind(kind, actor),
-         :ok <- primary(role(opts)) do
-      case open.(kind, returning(kind, actor)) do
+    with :ok <- primary(role(opts)) do
+      case open.(returning(Keyword.get(opts, :actor))) do
         {:ok, %{code: code, expires_at: %DateTime{} = at}} ->
           {:ok, %{"code" => code, "expires_at" => DateTime.to_iso8601(at)}}
 
@@ -133,50 +117,25 @@ defmodule FermixCore.Management.HomeMove do
     end
   end
 
-  # The 24-hour code is the one a desktop puts inside the server it creates in
-  # place of this one; nobody copies it.
-  defp window_kind(nil, _actor), do: {:ok, :manual}
-  defp window_kind("provisioned", {:desktop, _device_id}), do: {:ok, :provisioned}
-
-  defp window_kind("provisioned", _actor),
-    do: {:error, {:invalid_params, "kind", @provisioned_here}}
-
-  defp window_kind(kind, _actor) do
-    case Map.fetch(@kinds, kind) do
-      {:ok, :manual} -> {:ok, :manual}
-      _unknown -> {:error, {:invalid_params, "kind", @kind_sentence}}
-    end
-  end
-
   # The copied code a linked desktop asks its server for is the one it takes
   # the home back with: the window names that desktop.
-  defp returning(:manual, {:desktop, device_id}), do: device_id
-  defp returning(_kind, _actor), do: nil
+  defp returning({:desktop, device_id}), do: device_id
+  defp returning(_actor), do: nil
 
-  @doc "`home.enroll.withdraw`: releases the window of `kind` (`\"provisioned\"` unless said)."
-  @spec enroll_withdraw(term(), keyword()) :: {:ok, map()} | {:error, term()}
-  def enroll_withdraw(kind, opts \\ []) when is_list(opts) do
+  @doc "`home.enroll.withdraw`: releases the enrollment window."
+  @spec enroll_withdraw(keyword()) :: {:ok, map()} | {:error, term()}
+  def enroll_withdraw(opts \\ []) when is_list(opts) do
     withdraw =
-      Keyword.get(opts, :withdraw_enrollment, fn kind -> Link.impl().withdraw_enrollment(kind) end)
+      Keyword.get(opts, :withdraw_enrollment, fn -> Link.impl().withdraw_enrollment() end)
 
-    with {:ok, kind} <- withdraw_kind(kind),
-         :ok <- primary(role(opts)) do
-      case withdraw.(kind) do
+    with :ok <- primary(role(opts)) do
+      case withdraw.() do
         :ok ->
           {:ok, %{"withdrawn" => true}}
 
         {:error, {:unavailable, sentence}} when is_binary(sentence) ->
           {:error, {:unavailable, @capability, sentence}}
       end
-    end
-  end
-
-  defp withdraw_kind(nil), do: {:ok, :provisioned}
-
-  defp withdraw_kind(kind) do
-    case Map.fetch(@kinds, kind) do
-      {:ok, kind} -> {:ok, kind}
-      :error -> {:error, {:invalid_params, "kind", @kind_sentence}}
     end
   end
 
@@ -302,12 +261,11 @@ defmodule FermixCore.Management.HomeMove do
 
   defp enrollment_view(nil), do: nil
 
-  defp enrollment_view(%{state: state, expires_at: %DateTime{} = at, kind: kind} = window)
-       when state in [:open, :used, :expired] and kind in [:manual, :provisioned],
+  defp enrollment_view(%{state: state, expires_at: %DateTime{} = at} = window)
+       when state in [:open, :used, :expired],
        do: %{
          "state" => Atom.to_string(state),
          "expires_at" => DateTime.to_iso8601(at),
-         "kind" => Atom.to_string(kind),
          "candidate_id" => window.candidate_id
        }
 

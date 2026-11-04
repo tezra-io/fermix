@@ -5998,12 +5998,7 @@
         }
       }
     },
-    "home_enroll_open_params": {
-      "type": "object",
-      "description": "kind is manual (the default: thirty minutes, the code a person copies) or provisioned (24 hours), which the primary opens only for a request a desktop forwarded. A manual window a desktop asks for is that desktop's move back, and the window names it.",
-      "additionalProperties": false,
-      "properties": { "kind": { "enum": ["manual", "provisioned"] } }
-    },
+    "home_enroll_open_params": { "type": "object", "maxProperties": 0, "additionalProperties": false },
     "home_enroll_open_result": {
       "description": "The enrollment code, shown once: single use, valid until expires_at, never logged and never answered again.",
       "type": "object",
@@ -6014,14 +6009,9 @@
         "expires_at": { "type": "string" }
       }
     },
-    "home_enroll_withdraw_params": {
-      "type": "object",
-      "description": "kind names the window released: provisioned (the default, the 24-hour code) or manual (the copied code a desktop opened to move back, when its owner cancels).",
-      "additionalProperties": false,
-      "properties": { "kind": { "enum": ["manual", "provisioned"] } }
-    },
+    "home_enroll_withdraw_params": { "type": "object", "maxProperties": 0, "additionalProperties": false },
     "home_enroll_withdraw_result": {
-      "description": "The window of the kind named is released: an open one ended, a used one no longer holds a manual code back.",
+      "description": "The window is released: an open one ended, a used one stays as the record of who used it.",
       "type": "object",
       "required": ["withdrawn"],
       "additionalProperties": false,
@@ -6183,13 +6173,12 @@
     },
     "homeEnrollment": {
       "type": "object",
-      "description": "The primary's enrollment window: open until expires_at, used once a candidate enrolled with it, or expired. kind is manual (the code a person copies) or provisioned (the 24-hour code); candidate_id is the candidate that enrolled with it, null until one did.",
-      "required": ["state", "expires_at", "kind", "candidate_id"],
+      "description": "The primary's enrollment window: open until expires_at, used once a candidate enrolled with it, or expired. candidate_id is the candidate that enrolled with it, null until one did.",
+      "required": ["state", "expires_at", "candidate_id"],
       "additionalProperties": false,
       "properties": {
         "state": { "enum": ["open", "used", "expired"] },
         "expires_at": { "type": "string" },
-        "kind": { "enum": ["manual", "provisioned"] },
         "candidate_id": { "oneOf": [{ "type": "string", "pattern": "^cand-[0-9a-f]{16}$" }, { "type": "null" }] }
       }
     },

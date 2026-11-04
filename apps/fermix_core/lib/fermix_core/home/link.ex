@@ -33,12 +33,10 @@ defmodule FermixCore.Home.Link do
   awake, and `down_at`, when that stretch began on the wall clock (both nil
   while one is up). `desktops` are the primary's desktop peers.
   `enrollment` is the primary's enrollment window: `state` `:open`, `:used` or
-  `:expired`, when it expires, its `kind` (`:manual`, the code a person
-  copies, or `:provisioned`, the code inside a server Fermix created), the
-  `candidate_id` that enrolled through it (nil until one did) and `awake_ms`,
-  how long this engine has held it while the computer was awake; `nil` when
-  no window is kept. Both counts are on the monotonic clock, which stops
-  while the computer sleeps (`home.status.summary`, M75 lean v1 §7).
+  `:expired`, when it expires and the `candidate_id` that enrolled through it
+  (nil until one did); `nil` when no window is kept. `down_ms` is on the
+  monotonic clock, which stops while the computer sleeps
+  (`home.status.summary`, M75 lean v1 §7).
   """
   @type status :: %{
           primary: map() | nil,
@@ -47,9 +45,7 @@ defmodule FermixCore.Home.Link do
             %{
               state: :open | :used | :expired,
               expires_at: DateTime.t(),
-              kind: :manual | :provisioned,
-              candidate_id: String.t() | nil,
-              awake_ms: non_neg_integer()
+              candidate_id: String.t() | nil
             }
             | nil
         }
@@ -68,30 +64,23 @@ defmodule FermixCore.Home.Link do
   @callback status() :: status()
 
   @doc """
-  Primary role: opens the enrollment window (spec §7.1) of `kind` and answers
-  the code and when it expires: `:manual` (`home.enroll.open`, thirty
-  minutes) or `:provisioned` (the code inside a server Fermix creates, 24
-  hours, M75 lean v1 L15). One window at a time; opening another replaces it,
-  except that a manual one is refused while a provisioned one is open, and
-  while a used one's candidate is still held. `returning` is the device id
-  of the linked desktop a manual window is opened for, to take the home back
-  (Always On's move back), else nil: the window keeps it, and so does the
-  candidate that enrolls through it. A refusal carries the sentence a person
-  is shown.
+  Primary role: opens the enrollment window (spec §7.1, `home.enroll.open`,
+  thirty minutes) and answers the code and when it expires. One window at a
+  time; opening another replaces it. `returning` is the device id of the
+  linked desktop the window is opened for, to take the home back (Always
+  On's move back), else nil: the window keeps it, and so does the candidate
+  that enrolls through it. A refusal carries the sentence a person is shown.
   """
-  @callback open_enrollment(:manual | :provisioned, String.t() | nil) ::
+  @callback open_enrollment(String.t() | nil) ::
               {:ok, %{code: String.t(), expires_at: DateTime.t()}}
               | {:error, {:unavailable, String.t()}}
 
   @doc """
-  Primary role: releases the enrollment window when it is of `kind`: the
-  provisioned one when the server it was opened for was never created or is
-  being deleted (a used one then no longer holds a manual code back), the
-  manual one when the owner cancels its code (Always On's Cancel the code).
-  An open one ends now. A window of the other kind, or none, and any other
-  role, is left as it is.
+  Primary role: releases the enrollment window when the owner cancels its
+  code (Always On's Cancel). An open one ends now. None, and any other role,
+  is left as it is.
   """
-  @callback withdraw_enrollment(:manual | :provisioned) ::
+  @callback withdraw_enrollment() ::
               :ok | {:error, {:unavailable, String.t()}}
 
   @doc """

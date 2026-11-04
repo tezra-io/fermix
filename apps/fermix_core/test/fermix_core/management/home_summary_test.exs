@@ -1059,18 +1059,12 @@ defmodule FermixCore.Management.HomeSummaryTest do
     ]
   end
 
-  # The same facts `ms` later: the clock, the awake counts of a code and of a
-  # link that is down, and the servers held only while they have not expired
+  # The same facts `ms` later: the clock, the awake count of a link that is
+  # down, and the servers held only while they have not expired
   # (`Home.Candidates` drops one at its expiry).
   defp later(facts, ms) do
     now = DateTime.add(facts.now, ms, :millisecond)
-    link = facts.link
-
-    link = %{
-      link
-      | enrollment: advance(link.enrollment, :awake_ms, ms),
-        primary: advance(link.primary, :down_ms, ms)
-    }
+    link = %{facts.link | primary: advance(facts.link.primary, :down_ms, ms)}
 
     %{facts | now: now, link: link, candidates: live(facts.candidates, now)}
   end
@@ -1236,17 +1230,8 @@ defmodule FermixCore.Management.HomeSummaryTest do
     }
   end
 
-  defp manual(state, candidate_id \\ nil), do: window(:manual, state, candidate_id, @minute)
-
-  defp window(kind, state, candidate_id, awake_ms) do
-    %{
-      state: state,
-      expires_at: ~U[2031-05-05 10:00:00Z],
-      kind: kind,
-      candidate_id: candidate_id,
-      awake_ms: awake_ms
-    }
-  end
+  defp manual(state, candidate_id \\ nil),
+    do: %{state: state, expires_at: ~U[2031-05-05 10:00:00Z], candidate_id: candidate_id}
 
   defp candidate do
     %{

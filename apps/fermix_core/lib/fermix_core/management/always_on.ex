@@ -50,7 +50,7 @@ defmodule FermixCore.Management.AlwaysOn do
       move of its own.
     * `cancel` during a move back (offered until the server started the
       move, and again once it undid it): the candidate's subtree stops, the
-      server's copied code is closed (`home.enroll.withdraw {kind: manual}`;
+      server's copied code is closed (`home.enroll.withdraw`;
       one the server cannot be asked to close lapses by itself), and the
       candidate and the record go.
     * `restore_here` (design §8), offered once the server went silent and
@@ -85,8 +85,8 @@ defmodule FermixCore.Management.AlwaysOn do
   Seams in `opts`, passed as they are to `Management.Home` and
   `Management.HomeMove`: `:home`, `:engine_role`, `:now`, `:jobs`,
   `:link_status`, `:config`, `:scheduler`, `:save_recipient`, `:restart`,
-  `:open_enrollment`, `:withdraw_enrollment` (a 1-arity stand-in for the
-  rail's, given the window's kind) and the review's; for a move back,
+  `:open_enrollment`, `:withdraw_enrollment` (a 0-arity stand-in for the
+  rail's) and the review's; for a move back,
   `Home.Candidate.prepare_return/3`'s `:role` and `:restarts_itself?`,
   `:start_return` and `:stop_return` (in place of the rail's), and
   `:local_return` (a 2-arity stand-in for `Home.LocalReturn.restore/3`,
@@ -307,16 +307,16 @@ defmodule FermixCore.Management.AlwaysOn do
 
   defp withdraw_code(opts) do
     withdraw =
-      Keyword.get(opts, :withdraw_enrollment, fn kind -> Link.impl().withdraw_enrollment(kind) end)
+      Keyword.get(opts, :withdraw_enrollment, fn -> Link.impl().withdraw_enrollment() end)
 
-    case withdraw.(:manual) do
+    case withdraw.() do
       :ok -> {:ok, nil}
       {:error, {:unavailable, sentence}} when is_binary(sentence) -> unavailable(sentence)
     end
   end
 
   defp own_server(opts) do
-    with {:ok, %{"code" => code, "expires_at" => at}} <- HomeMove.enroll_open(nil, opts),
+    with {:ok, %{"code" => code, "expires_at" => at}} <- HomeMove.enroll_open(opts),
          do: {:ok, %{"code" => code, "expires_at" => at, "command" => Copy.own_server_command()}}
   end
 
@@ -532,7 +532,7 @@ defmodule FermixCore.Management.AlwaysOn do
   # close (no link runs here, or the server did not answer) lapses by
   # itself within its half hour.
   defp close_return_code(opts) do
-    request = server_request("home.enroll.withdraw", %{"kind" => "manual"})
+    request = server_request("home.enroll.withdraw", %{})
 
     case Keyword.fetch(opts, :primary_forward) do
       {:ok, forward} -> closed(forward.(request, []))

@@ -2548,7 +2548,7 @@
       "method": "(schema)",
       "field": "methods:home.enroll.withdraw",
       "kind": "engine_only",
-      "why": "M75 lean v1: a desktop replacing the Always On server Fermix created asks that server to release the 24-hour code it opened for the new one when the new server will not exist or is deleted, so a copied code can open again. The draft predates the home family; the method is minimum version 2 and additive, and a client never calls it: the desktop's own engine forwards it."
+      "why": "M75 lean v1: a desktop cancelling its move back asks its server to release the copied code it opened. The draft predates the home family; the method is minimum version 2 and additive, and a client never calls it: the desktop's own engine forwards it."
     },
     {
       "method": "(schema)",

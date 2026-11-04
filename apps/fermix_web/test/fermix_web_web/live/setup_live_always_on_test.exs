@@ -257,7 +257,7 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
       html = settle!(view)
       refute html =~ @manual_code
       refute html =~ ~s(id="always-on-code")
-      assert_received {:enrollment_withdrawn, :manual}
+      assert_received :enrollment_withdrawn
     end
   end
 
@@ -265,7 +265,7 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
     setup ctx do
       :ok = Epoch.write(ctx.home, 4)
       {:ok, held} = Candidates.add(ctx.home, candidate_attrs(), @at)
-      Agent.update(ctx.link, &%{&1 | enrollment: window(:manual, :used, held.candidate_id)})
+      Agent.update(ctx.link, &%{&1 | enrollment: window(:used, held.candidate_id)})
       ctx
     end
 
@@ -372,7 +372,7 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
     setup ctx do
       :ok = Epoch.write(ctx.home, 4)
       {:ok, held} = Candidates.add(ctx.home, candidate_attrs(), @at)
-      Agent.update(ctx.link, &%{&1 | enrollment: window(:manual, :used, held.candidate_id)})
+      Agent.update(ctx.link, &%{&1 | enrollment: window(:used, held.candidate_id)})
       Map.put(ctx, :candidate_id, held.candidate_id)
     end
 
@@ -680,7 +680,7 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
   # The owner's server enrolled with its code and held for the move.
   defp held!(home, link) do
     {:ok, held} = Candidates.add(home, candidate_attrs(), @at)
-    Agent.update(link, &%{&1 | enrollment: window(:manual, :used, held.candidate_id)})
+    Agent.update(link, &%{&1 | enrollment: window(:used, held.candidate_id)})
     :ok
   end
 
@@ -690,14 +690,8 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
     :ok = Move.put_review(ctx.home, ctx.candidate_id, blocked, @at)
   end
 
-  defp window(kind, state, candidate_id, awake_ms \\ 0) do
-    %{
-      state: state,
-      expires_at: ~U[2031-05-05 12:00:00Z],
-      kind: kind,
-      candidate_id: candidate_id,
-      awake_ms: awake_ms
-    }
+  defp window(state, candidate_id) do
+    %{state: state, expires_at: ~U[2031-05-05 12:00:00Z], candidate_id: candidate_id}
   end
 
   defp candidate_attrs do
@@ -937,12 +931,12 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
       disk_usage: fn _home -> {:ok, %{used: 0.42, nearly_full: false}} end,
       link_status: fn -> Agent.get(link, & &1) end,
       jobs: seams.jobs,
-      open_enrollment: fn :manual, nil ->
-        Agent.update(link, &%{&1 | enrollment: window(:manual, :open, nil, 0)})
+      open_enrollment: fn nil ->
+        Agent.update(link, &%{&1 | enrollment: window(:open, nil)})
         {:ok, %{code: @manual_code, expires_at: ~U[2031-05-04 12:30:00Z]}}
       end,
-      withdraw_enrollment: fn kind ->
-        send(test, {:enrollment_withdrawn, kind})
+      withdraw_enrollment: fn ->
+        send(test, :enrollment_withdrawn)
         Agent.update(link, &%{&1 | enrollment: nil})
         :ok
       end,

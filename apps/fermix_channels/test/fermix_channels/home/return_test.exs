@@ -57,7 +57,7 @@ defmodule FermixChannels.Home.ReturnTest do
     {:ok, recipient} = Recovery.set(@passphrase, config: [], save_recipient: &{:ok, &1})
 
     # Forward: the Mac moves to the server and stays as its desktop.
-    {:ok, %{code: code}} = Enrollment.open(mac.enrollment, :manual)
+    {:ok, %{code: code}} = Enrollment.open(mac.enrollment)
     server_root = HomeMove.candidate_home!(code)
     to_server = HomeMove.start_candidate!(server_root, mac)
     %{"candidate_id" => to_server_id} = HomeMove.await_phase(server_root, "enrolled")
@@ -331,7 +331,7 @@ defmodule FermixChannels.Home.ReturnTest do
   # candidate and its record of the return, and its candidate enrolls with
   # the server (`start: false` stops before that, as an engine that stopped).
   defp move_back!(ctx, opts \\ []) do
-    {:ok, %{code: code}} = Enrollment.open(ctx.server.enrollment, :manual)
+    {:ok, %{code: code}} = Enrollment.open(ctx.server.enrollment)
 
     {:ok, _state} =
       Candidate.prepare_return(ctx.mac.root, {:return, code},
