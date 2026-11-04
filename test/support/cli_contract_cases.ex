@@ -13,9 +13,17 @@ defmodule FermixTestSupport.CliContractCases do
   change behind it.
   """
 
+  alias Fermix.CLI.AlwaysOnCommand
+  alias Fermix.CLI.HomeMovedCommand
   alias Fermix.CLI.MachineOutput
   alias Fermix.CLI.Service.Status
+  alias FermixCore.Home.Candidates
+  alias FermixCore.Home.Snapshot.S3, as: SnapshotS3
+  alias FermixCore.Home.Snapshot.Status, as: SnapshotStatus
   alias FermixCore.Management.Diagnostics.Offline
+  alias FermixCore.Management.Home
+  alias FermixCore.Management.HomeSummary
+  alias FermixTestSupport.HomeSummaryGoldens
 
   @vendor_unit "/usr/lib/systemd/user/fermix.service"
   @legacy_unit "/home/operator/.config/systemd/user/fermix.service"
@@ -198,9 +206,137 @@ defmodule FermixTestSupport.CliContractCases do
       {"service_install/unit.json", encoded(MachineOutput.ok(action("installed")))},
       {"service_uninstall/ok.json", encoded(MachineOutput.ok(action("uninstalled")))},
       {"restart/ok.json", encoded(MachineOutput.ok(restart("4711")))},
-      {"restart/recovered.json", encoded(MachineOutput.ok(restart(nil)))}
+      {"restart/recovered.json", encoded(MachineOutput.ok(restart(nil)))},
+      {"home_mark_moved/ok.json", encoded(MachineOutput.ok(HomeMovedCommand.result(moved())))},
+      {"home_status/primary.json", encoded(MachineOutput.ok(home_status()))},
+      {"home_snapshots_status/ok.json", encoded(MachineOutput.ok(snapshots_view()))},
+      {"home_candidates/ok.json", encoded(MachineOutput.ok(candidates_view()))}
+    ] ++ always_on_cases()
+  end
+
+  # `fermix always-on`: the screen (the summary of nothing set up yet), a
+  # step's answer (the create's job running, nothing more to hand over), and
+  # `changed` with the screen read again (a server ready for the move).
+  defp always_on_cases do
+    changed = MachineOutput.error(:changed, error_details(:changed), %{"summary" => golden("ready")})
+
+    [
+      {"always_on/status.json", encoded(MachineOutput.ok(HomeSummary.summary(off_facts())))},
+      {"always_on/step.json",
+       encoded(MachineOutput.ok(AlwaysOnCommand.step_result(golden("creating"), nil)))},
+      {"always_on/changed.json", encoded(changed)}
     ]
   end
+
+  defp golden(state) do
+    {_name, record} = List.keyfind(HomeSummaryGoldens.rows(), "home_status_" <> state, 0)
+    record["summary"]
+  end
+
+  # `fermix home candidates`: the one candidate the primary holds, as the
+  # engine answers it or, stopped, as the home's own file holds it.
+  defp candidates_view, do: %{"candidates" => [Candidates.view(candidate())]}
+
+  # The facts a candidate's view publishes, with the bucket the host
+  # reported, so the goldens draw it.
+  defp candidate do
+    %{
+      candidate_id: "cand-5e2a9c1f7b3d4086",
+      name: "north-box",
+      os: "linux",
+      arch: "aarch64",
+      version: "1.2.3",
+      node_id: "bb716f238ec342e512e3400c6f8363f0fc3fd3ba2b6b749dd6130b81d7cb5827",
+      snapshots: %{"s3_bucket" => "invented-fermix-snapshots", "s3_region" => "eu-central-1"},
+      enrolled_at: ~U[2026-10-27 09:12:00Z],
+      expires_at: ~U[2026-10-28 09:12:00Z]
+    }
+  end
+
+  # `fermix home status`: a primary at epoch 4 whose last snapshot S3 stored,
+  # with nothing of Always On set up yet, so its summary is the first screen;
+  # it uses iMessage, voice calls and meetings, which that screen names.
+  defp home_status do
+    Home.picture(%{
+      role: :primary,
+      epoch: 4,
+      moved: nil,
+      snapshots: snapshots_view(),
+      summary: HomeSummary.summary(off_facts()),
+      disk: %{"used" => 0.42, "nearly_full" => false},
+      version: "1.2.3"
+    })
+  end
+
+  defp off_facts do
+    %{
+      role: :primary,
+      host_os: :macos,
+      now: ~U[2026-10-27 09:30:00Z],
+      linked: false,
+      moved: nil,
+      move: nil,
+      link: %{primary: nil, desktops: [], enrollment: nil},
+      candidates: [],
+      provider: FermixCore.Home.Provision.Hetzner,
+      providers: [FermixCore.Home.Provision.Hetzner],
+      provision: %{
+        state: :none,
+        token: :none,
+        server: nil,
+        failure: nil,
+        sentence: nil,
+        replace: nil,
+        action: nil,
+        checked_at: nil
+      },
+      review: nil,
+      move_items: [],
+      snapshots: snapshots_view(),
+      disk: nil,
+      primary_home: nil,
+      primary_too_old: false,
+      copies_bytes: nil,
+      stays_here: [:imessage, :voice, :meetings],
+      zone: "Etc/UTC",
+      return: nil,
+      returning: nil,
+      copies: []
+    }
+  end
+
+  defp snapshots_view do
+    attempt = %{
+      at: ~U[2026-10-27 09:30:00Z],
+      result: :verified,
+      name: "20261027T093000Z-e4.fxsnap",
+      epoch: 4,
+      size: 48_211,
+      sha256: "9c1f4e2a7b3d5c6e8f0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f6a",
+      location: "s3://invented-fermix-snapshots/fermix/general/20261027T093000Z-e4.fxsnap",
+      key_id: "08c15ca36dd935c4",
+      error: nil
+    }
+
+    status = %{
+      SnapshotStatus.record(SnapshotStatus.empty(), "s3", attempt)
+      | next_run_at: ~U[2026-10-27 15:30:00Z]
+    }
+
+    SnapshotStatus.view(status, %{
+      config: [
+        recipient: "fxsnap1.AAECAwQFBgcICQoLDA0ODw.B3l5ExMinEfPofapoLSG57ZGCBl_fiIqFbtB5nPDNqA",
+        s3_bucket: "invented-fermix-snapshots"
+      ],
+      targets: [SnapshotS3],
+      running: false,
+      profile: "general"
+    })
+  end
+
+  # The marker `fermix home mark-moved` writes and prints.
+  defp moved,
+    do: %{epoch: 4, moved_at: ~U[2026-10-27 09:30:00Z], to: "hetzner fermix-home 48151623"}
 
   defp action(past_tense), do: %{"action" => past_tense, "scope" => "user"}
 
@@ -291,6 +427,34 @@ defmodule FermixTestSupport.CliContractCases do
   def error_details(:systemctl_failed), do: [output: "Unit fermix.service not found."]
   def error_details(:lifecycle_refused), do: [output: "the daemon returned no lease"]
   def error_details(:diagnostics_unavailable), do: [output: "collecting it took too long"]
+  def error_details(:already_moved), do: [to: "hetzner cx22", date: "2026-10-20", epoch: 3]
+
+  def error_details(:snapshots_refused),
+    do: [output: "Snapshots are off: set a recovery passphrase to turn them on."]
+
+  def error_details(:home_status_unavailable),
+    do: [output: "The requested management method is not available. (method_not_found)"]
+
+  def error_details(:mark_moved_failed),
+    do: [output: "could not tell whether Fermix is running (timeout)"]
+
+  def error_details(:action_refused) do
+    [
+      output:
+        "Hetzner does not accept this token, so paste a Read & Write API token from the " <>
+          "Hetzner project you made for Fermix."
+    ]
+  end
+
+  def error_details(:confirm_required),
+    do: [confirm: "Create your server? Hetzner bills it by the hour until it is deleted."]
+
+  def error_details(:changed),
+    do: [reason: "Always On changed since this was shown, so look at it again."]
+
+  def error_details(:step_failed),
+    do: [reason: "Falkenstein has no CPX22 right now."]
+
   def error_details(_code), do: []
 
   defp invalid_binding_sentence do

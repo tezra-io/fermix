@@ -7,10 +7,23 @@ defmodule FermixWebWeb.SetupLive.CuesState do
   `[fermix_core.routing] filter_*` from the wizard's snapshot, and what the
   daemon reports through `FermixCore.Cues.Overview` (the door, each source's
   status row, the watchers' counts, each mandate's load status and approval).
-  `handle/4` turns one tab event into a change through
-  `FermixCore.Cues.Settings` (or `Cues.Webhook.ensure_path_secret/2` for a
-  webhook's URL, on request and right after a new webhook source is saved)
-  and tells the LiveView what to do next.
+  `handle/4` turns one tab event into a change and tells the LiveView what
+  to do next. The settings at the top (Run cues, the watchers' switch, the
+  door's port, the Screen and the filter model) are one form with one Save,
+  which writes the keys the owner changed through
+  `Management.Settings.Cues.save/1`, the `cues` section's writer that
+  `settings.apply` uses. Sources and mandates change through
+  `FermixCore.Cues.Settings` (a new source through `add_source/3`, which
+  names one left unnamed; `Cues.Webhook.ensure_path_secret/2` for a webhook's
+  URL, on request and right after a new webhook source is saved).
+
+  A new source starts from what to watch (`SourceForm.choices/0`): the
+  editor opens on that list, and the choice fixes the kind and preset.
+
+  Watchers are made and changed in chat, so the tab changes one thing about
+  them: a follow-up's Always allow, which it only takes back
+  (`Cues.Watchers.ask_first/3`, from `"setup_page"`). Each follow-up is the
+  management row's (`WatcherRow.follow_up/1`), in the engine's words.
 
   The filter model offers what `FermixCore.Cues.FilterChoices` offers: the
   main model (the empty choice) and the providers that are set up. `clock`
@@ -19,14 +32,18 @@ defmodule FermixWebWeb.SetupLive.CuesState do
   write a row's time short and local.
 
   Nothing here shows cue text: watchers are counts and ids, sources are Fermix's own
-  status columns, and a secret is shown as set or not set. The two values a
-  page shows once (a new local-push token, a webhook URL) live in `reveal`,
-  which every following event clears. The presets are
-  `Management.Cues.SourceForm`'s, with the labels the Mac app shows.
+  status columns, and a secret is shown as set or not set. The values a page
+  shows once (a new local-push token, a webhook URL, the secret Fermix makes
+  for a new GitHub source) live in `reveal`, which every following event
+  clears. The choices are `Management.Cues.SourceForm`'s, with the words the
+  Mac app shows.
 
   Seams (the LiveView's `:cues_pane_opts`): `:repo`, `:door`, `:now`
-  (zero-arity, a `DateTime`), `:mandate_opts` and `:webhook_opts` (the options
-  of `Cues.Webhook.ensure_path_secret/2`).
+  (zero-arity, a `DateTime`), `:mandate_opts`, `:follow_up_opts` (the
+  readiness seams a follow-up reads, `Cues.Overview`), `:webhook_opts` (the
+  options of `Cues.Webhook.ensure_path_secret/2`) and `:x_sign_in`
+  (zero-arity, the X sign-in the X accounts form reads,
+  `SourceForm.requirement/2`).
   """
 
   alias FermixCore.ComputerHistory.Config, as: ComputerHistoryConfig
@@ -35,8 +52,12 @@ defmodule FermixWebWeb.SetupLive.CuesState do
   alias FermixCore.Cues.Overview
   alias FermixCore.Cues.Presets
   alias FermixCore.Cues.Settings
+  alias FermixCore.Cues.Watchers
   alias FermixCore.Cues.Webhook
+  alias FermixCore.Cues.XAccounts
   alias FermixCore.Management.Cues.SourceForm
+  alias FermixCore.Management.Cues.WatcherRow
+  alias FermixCore.Management.Settings.Cues, as: SettingsCues
   alias FermixCore.Memory.Config, as: MemoryConfig
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.SecretWriter
@@ -44,12 +65,11 @@ defmodule FermixWebWeb.SetupLive.CuesState do
   @url_note "Keep it private: it is half of what a request needs."
   @door FermixCore.Cues.Door
 
-  # The kinds and webhook methods the page offers, in the Mac sheet's order; a
-  # new source opens on a feed, the common case. `Cues.Config` is still the one
-  # that accepts or refuses a section.
+  # The kinds the page draws a form for; a source with neither kind nor
+  # preset reads as a feed. `Cues.Config` is still the one that accepts or
+  # refuses a section.
   @kinds ~w(feed stream webhook local_push)
   @default_kind "feed"
-  @verify_methods ~w(hmac shared_secret standard_webhooks)
   # The method a webhook with no preset starts on: the menu's first, so the
   # form draws the fields of the method it shows and a save stores it.
   @default_verify "hmac"
@@ -64,10 +84,10 @@ defmodule FermixWebWeb.SetupLive.CuesState do
   @general_stream_rows SourceForm.general_stream_rows() |> Enum.reject(&(&1.field == :url))
   @general_stream_fields Enum.map(@general_stream_rows, & &1.field)
   @path_fields ~w(items_path id_path revision_path type_path subject_path time_path)a
-  @form_fields ~w(preset kind enabled url interval)a ++
+  @form_fields ~w(preset kind enabled url handles interval)a ++
                  @general_stream_fields ++
                  ~w(daily_budget verify header algorithm prefix id_header id type_header)a
-  @list_fields for(row <- @general_stream_rows, row.kind == :list, do: row.field)
+  @list_fields [:handles | for(row <- @general_stream_rows, row.kind == :list, do: row.field)]
   # The secrets the form takes, each read from the submit alone.
   @typed_secret_keys ~w(key secret)
   @integer_fields ~w(interval daily_budget)a
@@ -99,28 +119,37 @@ defmodule FermixWebWeb.SetupLive.CuesState do
         memory_on?: MemoryConfig.enabled?()
       },
       door: Overview.door(Keyword.get(opts, :door, @door)),
+      words: section_words(snapshot),
+      screen: screen_view(cues, snapshot),
       filter: filter_view(Keyword.get(core, :routing, []), snapshot),
       sources: Enum.map(CuesConfig.sources(cues), &source_view(&1, rows, now)),
       sources_error: rows_error(rows),
-      watchers: Overview.watchers(now, Keyword.put(opts, :cues_config, cues)),
+      watchers: watchers(now, Keyword.put(opts, :cues_config, cues)),
       mandates: Enum.map(Overview.mandates(cues, opts), &mandate_view/1),
       cue_jobs: cue_jobs(opts),
       raw: %{sources: Keyword.get(raw, :sources, %{}), mandates: Keyword.get(raw, :mandates, %{})},
-      presets: SourceForm.presets(),
-      kinds: @kinds,
-      verify_methods: @verify_methods,
+      choices: SourceForm.choices(),
       source_editor: nil,
       mandate_editor: nil,
       reveal: nil,
+      settings_refusal: nil,
       clock: %{now: now, zone: owner_zone(core)}
     }
+  end
+
+  # The `cues` section's rows in their own words (label and info), by key, so
+  # a new label or explanation there reaches this page unchanged.
+  defp section_words(snapshot) do
+    "cues"
+    |> SettingsCues.rows(snapshot)
+    |> Map.new(&{&1["key"], %{label: &1["label"], info: &1["info"]}})
   end
 
   @doc "One tab event (`action` is the event name after `cues_`)."
   @spec handle(String.t(), map(), map(), keyword()) :: result()
   def handle(action, params, state, opts)
       when is_binary(action) and is_map(params) and is_map(state) do
-    event(action, params, %{state | reveal: nil}, opts)
+    event(action, params, %{state | reveal: nil, settings_refusal: nil}, opts)
   end
 
   # --- events ----------------------------------------------------------------
@@ -129,36 +158,33 @@ defmodule FermixWebWeb.SetupLive.CuesState do
 
   defp event("dismiss_reveal", _params, state, _opts), do: {:edit, state}
 
-  defp event("save_switches", %{"cues_switches" => params}, state, _opts) do
-    changes = [
-      enabled: checked?(params["enabled"]),
-      mandates_enabled: checked?(params["mandates_enabled"]),
-      door_port: integer_or_text(params["door_port"])
-    ]
+  # Choosing a filter provider brings its models, and choosing the decision
+  # model screen its decision model; nothing is saved before Save.
+  defp event("settings_changed", %{"cues_settings" => params}, state, _opts),
+    do: {:edit, state |> put_filter(params) |> put_screen(params)}
 
-    case Settings.save_switches(changes) do
-      {:ok, %{restart?: true}} -> {:saved, "Cues saved. Restart to apply.", restart?: true}
-      {:ok, %{restart?: false}} -> {:saved, "Cues saved.", []}
-      {:error, reason} -> {:error, reason, state}
-    end
-  end
-
-  defp event("filter_changed", %{"cues_filter" => params}, state, _opts),
-    do: {:edit, put_filter(state, params)}
-
-  defp event("save_filter", %{"cues_filter" => params}, state, _opts) do
-    case Settings.save_filter_model(params["provider"], params["model"]) do
-      {:ok, %{cleared?: true}} -> {:saved, "Filter model set to the main model.", []}
-      {:ok, %{cleared?: false}} -> {:saved, "Filter model saved.", []}
-      {:error, reason} -> {:error, reason, put_filter(state, params)}
+  # One Save writes what the owner changed above through the `cues` section's
+  # writer, the one `settings.apply` uses, so this page and the Mac app write
+  # alike; with nothing changed it writes nothing.
+  defp event("save_settings", %{"cues_settings" => params}, state, _opts) do
+    case changed_settings(params, state) do
+      [] -> {:saved, "Nothing changed.", []}
+      changes -> save_settings(changes, state |> put_filter(params) |> put_screen(params))
     end
   end
 
   defp event("new_source", _params, state, _opts),
     do: {:edit, %{state | source_editor: new_source_editor(), mandate_editor: nil}}
 
-  defp event("edit_source", %{"ref" => ref}, state, _opts),
-    do: {:edit, %{state | source_editor: edit_source_editor(state, ref), mandate_editor: nil}}
+  defp event("pick_source", %{"choice" => id}, state, opts),
+    do: {:edit, %{state | source_editor: picked_source_editor(state.choices, id, opts)}}
+
+  defp event("back_to_choices", _params, %{source_editor: %{mode: :create}} = state, _opts),
+    do: {:edit, %{state | source_editor: new_source_editor()}}
+
+  defp event("edit_source", %{"ref" => ref}, state, opts),
+    do:
+      {:edit, %{state | source_editor: edit_source_editor(state, ref, opts), mandate_editor: nil}}
 
   defp event("close_source", _params, state, _opts), do: {:edit, %{state | source_editor: nil}}
 
@@ -238,6 +264,15 @@ defmodule FermixWebWeb.SetupLive.CuesState do
     end
   end
 
+  # The one change the tab makes to a watcher: taking back its follow-up's
+  # Always allow, so its next item asks first. Only a card's tap grants it.
+  defp event("ask_first", %{"name" => name}, state, opts) do
+    case Watchers.ask_first(name, "setup_page", Keyword.take(opts, [:repo])) do
+      {:ok, %{echo: echo}} -> {:saved, echo, []}
+      {:error, sentence} -> {:error, {:invalid, sentence}, state}
+    end
+  end
+
   # Removing a webhook source leaves a Tailscale Funnel mount of it in place.
   defp funnel_note(state, ref) do
     if Enum.any?(state.sources, &(&1.ref == ref and &1.kind == "webhook")),
@@ -249,16 +284,112 @@ defmodule FermixWebWeb.SetupLive.CuesState do
       else: []
   end
 
+  # --- settings ----------------------------------------------------------------
+
+  # What the owner changed on the form, as `cues` section answers. The filter
+  # pair is written whole, so a change to either half sends both.
+  defp changed_settings(params, state) do
+    form = [
+      enabled: checked?(params["enabled"]),
+      mandates_enabled: checked?(params["mandates_enabled"]),
+      door_port: integer_or_text(params["door_port"]),
+      screen: text(params["screen"])
+    ]
+
+    saved = [
+      enabled: state.switches.enabled,
+      mandates_enabled: state.switches.mandates_enabled,
+      door_port: state.switches.door_port,
+      screen: state.screen.value,
+      decision_provider: state.screen.decision_provider
+    ]
+
+    pair = [
+      filter_provider: text(params["filter_provider"]),
+      filter_model: text(params["filter_model"])
+    ]
+
+    saved_pair = [
+      filter_provider: state.filter.saved.provider,
+      filter_model: state.filter.saved.model
+    ]
+
+    changed = (form ++ decision_provider(params)) -- saved
+    changed ++ if(pair == saved_pair, do: [], else: pair)
+  end
+
+  # The decision model's field is on the form only while the decision model
+  # screen is picked; without it, it is unchanged.
+  defp decision_provider(%{"decision_provider" => provider}),
+    do: [decision_provider: text(provider)]
+
+  defp decision_provider(_params), do: []
+
+  # A refusal names its row, and the page says it under that field as well as
+  # in the banner. Turning cues on or off or moving the door needs a restart.
+  defp save_settings(changes, state) do
+    restart? = Keyword.has_key?(changes, :enabled) or Keyword.has_key?(changes, :door_port)
+
+    case SettingsCues.save(changes) do
+      {:ok, _saved} when restart? ->
+        {:saved, "Cues saved. Restart to apply.", restart?: true}
+
+      {:ok, _saved} ->
+        {:saved, "Cues saved.", []}
+
+      {:error, {:invalid_value, row, sentence}} ->
+        {:error, {:invalid, sentence}, refused(state, row, sentence)}
+
+      {:error, reason} ->
+        {:error, reason, state}
+    end
+  end
+
+  defp refused(state, row, sentence),
+    do: %{state | settings_refusal: %{row: row, sentence: sentence}}
+
+  # --- the screen ----------------------------------------------------------------
+
+  # Keyword match is the form's empty option, as it is saved as no key. The
+  # decision model is always offered, so a saved one stays the form's value;
+  # `Settings.save_screen/1` refuses it while none is set up, and its hint says
+  # which one is used or what to set up. `selected` follows the form, and while
+  # it is the decision model, the form carries which one (`""`, Automatic, is
+  # saved as no key) from the same choices the `cues_decision_provider` row
+  # offers.
+  defp screen_view(cues, snapshot) do
+    [keyword, decision_model] = FilterChoices.screen_choices(snapshot)
+    value = if(CuesConfig.screen(cues) == :keyword, do: "", else: "decision_model")
+
+    %{
+      value: value,
+      selected: value,
+      keyword: keyword,
+      decision_model: decision_model,
+      info: FilterChoices.screen_info(),
+      decision_provider: text(CuesConfig.decision_provider(cues)),
+      decision_providers: FilterChoices.decision_provider_choices(snapshot)
+    }
+  end
+
+  defp put_screen(state, %{"screen" => screen}),
+    do: %{state | screen: %{state.screen | selected: text(screen)}}
+
+  defp put_screen(state, _params), do: state
+
   # --- default filter model ----------------------------------------------------
 
   # The empty provider is the main model; only providers that are set up are
-  # offered, each with its catalog models as suggestions.
+  # offered, each with its catalog models as suggestions. `provider` and
+  # `model` follow the form; `saved` is what Save compares them with.
   defp filter_view(routing, snapshot) do
     provider = routing |> Keyword.get(:filter_provider) |> text()
+    model = routing |> Keyword.get(:filter_model) |> text()
 
     %{
       provider: provider,
-      model: routing |> Keyword.get(:filter_model) |> text(),
+      model: model,
+      saved: %{provider: provider, model: model},
       main_label: FilterChoices.main_model_label(snapshot),
       providers: FilterChoices.providers(snapshot),
       models: FilterChoices.models(provider)
@@ -266,9 +397,20 @@ defmodule FermixWebWeb.SetupLive.CuesState do
   end
 
   defp put_filter(state, params) do
-    provider = text(params["provider"])
-    filter = %{state.filter | provider: provider, model: text(params["model"])}
+    provider = text(params["filter_provider"])
+    filter = %{state.filter | provider: provider, model: text(params["filter_model"])}
     %{state | filter: %{filter | models: FilterChoices.models(provider)}}
+  end
+
+  # --- watchers ------------------------------------------------------------------
+
+  # Each watcher as `Overview` reads it, with its follow-up as the management
+  # row publishes it (`WatcherRow.follow_up/1`), so the page says it in the
+  # engine's words.
+  defp watchers(now, opts) do
+    with {:ok, watchers} <- Overview.watchers(now, opts) do
+      {:ok, Enum.map(watchers, &%{&1 | follow_up: WatcherRow.follow_up(&1.follow_up)})}
+    end
   end
 
   # --- sources -------------------------------------------------------------------
@@ -303,6 +445,7 @@ defmodule FermixWebWeb.SetupLive.CuesState do
 
     %{
       status: row.status,
+      stop_reason: row.stop_reason,
       last_good_at: row.last_good_at,
       last_accepted_at: row.last_accepted_at,
       items_today: if(row.items_day == today, do: row.items_today, else: 0),
@@ -311,40 +454,84 @@ defmodule FermixWebWeb.SetupLive.CuesState do
     }
   end
 
-  # A new source opens on its kind's first preset, as the Mac sheet does.
-  # `missing` lists the fields a refused save found empty; `refusal` is the
-  # page's sentence for the last refused save, said inside the editor.
+  # A new source opens on what to watch (`SourceForm.choices/0`), with no
+  # choice yet. `missing` lists the fields a refused save found empty;
+  # `refusal` is the page's sentence for the last refused save, said inside
+  # the editor; `requirement` is what the choice needs set up first, and
+  # `notes` how its items come in.
   defp new_source_editor do
-    values = %{
-      "ref" => "",
-      "preset" => first_preset(@default_kind),
-      "kind" => @default_kind,
-      "enabled" => "true"
-    }
-
     %{
       mode: :create,
+      choice: nil,
       ref: nil,
-      values: default_verify(values),
+      values: %{},
       secrets: %{},
       missing: [],
-      refusal: nil
+      refusal: nil,
+      requirement: nil,
+      notes: []
     }
   end
 
-  defp edit_source_editor(state, ref) do
+  # A choice brings its kind, its preset, the method a webhook starts on, and
+  # the form answer's notes and requirement: X accounts says whether the X
+  # sign-in is there, which never stops the add.
+  defp picked_source_editor(choices, id, opts) do
+    choice = Enum.find(choices, &(&1["id"] == id))
+
+    if is_nil(choice), do: raise(ArgumentError, "the source form offers no choice #{inspect(id)}")
+
+    values = %{
+      "ref" => "",
+      "preset" => text(choice["preset"]),
+      "kind" => choice["kind"],
+      "enabled" => "true"
+    }
+
+    form = form_answer(choice["kind"], choice["preset"], opts)
+
+    %{
+      new_source_editor()
+      | choice: id,
+        values: default_verify(values),
+        requirement: form["requirement"],
+        notes: form["notes"]
+    }
+  end
+
+  # An edit carries its kind's and preset's notes too, and no requirement.
+  defp edit_source_editor(state, ref, opts) do
     section = Map.fetch!(state.raw.sources, ref)
 
     values = Map.new(@form_fields, fn field -> {to_key(field), form_text(section, field)} end)
+    preset = blank(text(Map.get(values, "preset")))
 
     %{
       mode: :update,
+      choice: choice_of(state.choices, values),
       ref: ref,
       values: Map.put(values, "enabled", to_string(Keyword.get(section, :enabled, true))),
       secrets: Map.new(Keyword.take(section, SecretWriter.cue_secret_fields())),
       missing: [],
-      refusal: nil
+      refusal: nil,
+      requirement: nil,
+      notes: form_answer(source_kind(values), preset, opts)["notes"]
     }
+  end
+
+  # The engine's add form for a kind and preset (`SourceForm.form/4`), read
+  # for its notes and requirement. Both come from the page's own choices and
+  # saved sections, so a refusal is a bug and fails loud.
+  defp form_answer(kind, preset, opts) do
+    {:ok, form} = SourceForm.form(kind, preset, nil, Keyword.take(opts, [:x_sign_in]))
+    form
+  end
+
+  # The choice a saved source's kind and preset make.
+  defp choice_of(choices, values) do
+    preset = blank(text(Map.get(values, "preset")))
+    kind = source_kind(values)
+    Enum.find_value(choices, &(&1["kind"] == kind and &1["preset"] == preset and &1["id"]))
   end
 
   defp form_text(section, :id), do: to_string(Keyword.get(section, :id) == "content_hash")
@@ -356,12 +543,7 @@ defmodule FermixWebWeb.SetupLive.CuesState do
 
   # A typed secret is read from the submit alone and never kept in the editor.
   defp update_source_editor(%{source_editor: editor} = state, params) do
-    values =
-      editor.values
-      |> merge_values(Map.drop(params, @typed_secret_keys))
-      |> preset_of_kind(editor.values, editor.mode)
-      |> verify_of_choice(editor.values)
-
+    values = merge_values(editor.values, Map.drop(params, @typed_secret_keys))
     missing = still_missing(editor.missing, values)
     %{state | source_editor: %{editor | values: values, refusal: nil, missing: missing}}
   end
@@ -377,17 +559,6 @@ defmodule FermixWebWeb.SetupLive.CuesState do
     end)
   end
 
-  # A new kind or preset brings its own method, as the Mac sheet does: the
-  # preset's where it names one, else the menu's first.
-  defp verify_of_choice(values, before) do
-    chosen? =
-      source_kind(values) != source_kind(before) or
-        text(Map.get(values, "preset")) != text(Map.get(before, "preset"))
-
-    values = if chosen?, do: Map.put(values, "verify", ""), else: values
-    default_verify(values)
-  end
-
   defp default_verify(values) do
     preset_method = values |> Map.get("preset") |> preset_defaults() |> Map.get(:verify)
     blank? = text(Map.get(values, "verify")) == ""
@@ -396,21 +567,6 @@ defmodule FermixWebWeb.SetupLive.CuesState do
       do: Map.put(values, "verify", @default_verify),
       else: values
   end
-
-  # On a new source a kind chosen brings its first preset, as the Mac sheet
-  # opens on one; No preset stays in the menu. An edit cannot change either.
-  defp preset_of_kind(values, before, :create) do
-    chosen = text(Map.get(values, "kind"))
-
-    if chosen != "" and chosen != source_kind(before),
-      do: Map.put(values, "preset", first_preset(chosen)),
-      else: values
-  end
-
-  defp preset_of_kind(values, _before, :update), do: values
-
-  defp first_preset(kind),
-    do: Enum.find_value(SourceForm.presets(), "", &(&1["kind"] == kind && &1["id"]))
 
   defp merge_values(values, params) do
     Enum.reduce(params, values, fn
@@ -421,15 +577,15 @@ defmodule FermixWebWeb.SetupLive.CuesState do
   end
 
   defp save_source(editor, typed, state, opts) do
-    ref = editor.ref || String.trim(Map.get(editor.values, "ref", ""))
-    existing = Map.get(state.raw.sources, ref, [])
+    existing = Map.get(state.raw.sources, editor.ref, [])
     section = source_section(editor.values, existing)
     secrets = typed_secrets(typed, source_form(editor.values))
 
-    with :ok <- same_choice(editor.mode, editor.values, existing),
+    with :ok <- same_choice(editor.values, fixed_choice(editor, state.choices, existing)),
          :ok <- needed_fields(editor.values, section),
-         {:ok, %{token: token}} <- Settings.save_source(ref, section, secrets, editor.mode) do
-      saved_source(ref, token, source_kind(editor.values), editor.mode, opts)
+         {:ok, section} <- x_handles(section),
+         {:ok, saved} <- store_source(editor, section, secrets) do
+      saved_source(saved, source_kind(editor.values), editor.mode, opts)
     else
       {:error, {:missing, fields}} ->
         editor = %{editor | missing: fields}
@@ -470,15 +626,40 @@ defmodule FermixWebWeb.SetupLive.CuesState do
     ]
   end
 
-  # The name, kind and preset cannot change on an edit, as in the management
-  # form; the page shows them as text, and a submit that names others anyway
-  # is refused before anything is written.
-  defp same_choice(:create, _values, _existing), do: :ok
+  # X accounts keeps its handles as X spells them in a search, as the
+  # management form does (`Cues.XAccounts.handles/1`); one X would not take is
+  # refused in its words before anything is written.
+  defp x_handles(section) do
+    with {:ok, typed} <- Keyword.fetch(section, :handles),
+         {:ok, handles} <- XAccounts.handles(typed) do
+      {:ok, List.keyreplace(section, :handles, 0, {:handles, handles})}
+    else
+      :error -> {:ok, section}
+      {:error, words} -> {:error, {:invalid, "Handles: " <> words}}
+    end
+  end
 
-  defp same_choice(:update, values, existing) do
-    saved = %{"preset" => Keyword.get(existing, :preset), "kind" => Keyword.get(existing, :kind)}
+  # A new source is added under the name typed or, left empty, the one Fermix
+  # makes (`Settings.add_source/3`); an edit replaces its own section.
+  defp store_source(%{mode: :create, values: values}, section, secrets),
+    do: Settings.add_source(form_value(values, :ref), section, secrets)
 
-    if choice(values) == choice(saved),
+  defp store_source(%{mode: :update, ref: ref}, section, secrets),
+    do: Settings.save_source(ref, section, secrets, :update)
+
+  # The kind and preset are the choice's on a new source and the section's on
+  # an edit, as in the management form; the page draws neither as a field, and
+  # a submit that names others anyway is refused before anything is written.
+  defp fixed_choice(%{mode: :create, choice: id}, choices, _existing) when is_binary(id) do
+    choice = Enum.find(choices, &(&1["id"] == id))
+    %{"preset" => choice["preset"], "kind" => choice["kind"]}
+  end
+
+  defp fixed_choice(%{mode: :update}, _choices, existing),
+    do: %{"preset" => Keyword.get(existing, :preset), "kind" => Keyword.get(existing, :kind)}
+
+  defp same_choice(values, fixed) do
+    if choice(values) == choice(fixed),
       do: :ok,
       else: {:error, {:invalid, "A source's kind cannot change. Remove it and add a new one."}}
   end
@@ -489,26 +670,38 @@ defmodule FermixWebWeb.SetupLive.CuesState do
      source_kind(values)}
   end
 
-  # A new local push source's first token is shown once. A new webhook
+  # Every name is the one the save answered, which Fermix made when none was
+  # typed. A new local push source's first token is shown once. A new webhook
   # source's URL is made with its save and shown at once, as Generate URL shows
-  # it; the source is saved either way, and a URL that could not be made carries
-  # its refusal where the URL would be, for the page to say in its own words.
-  defp saved_source(ref, token, _kind, _mode, _opts) when is_binary(token),
+  # it, beside the secret Fermix made for a GitHub source; the source is saved
+  # either way, and a URL that could not be made carries its refusal where the
+  # URL would be, for the page to say in its own words, and the secret still.
+  defp saved_source(%{ref: ref, token: token}, _kind, :create, _opts) when is_binary(token),
     do: {:saved, "Source #{ref} saved.", reveal: %{kind: :token, ref: ref, value: token}}
 
-  defp saved_source(ref, nil, "webhook", :create, opts) do
+  defp saved_source(%{ref: ref, secret: secret}, "webhook", :create, opts) do
     case Webhook.ensure_path_secret(ref, webhook_opts(opts)) do
       {:ok, path} ->
-        {:saved, "Source #{ref} saved. Its URL is below. #{@url_note}",
-         reveal: %{kind: :url, ref: ref, value: path}}
+        url_saved(ref, path, secret)
 
       {:error, reason} ->
         {:saved, "Source #{ref} saved, but its URL could not be made.",
-         reveal: %{kind: :url_failed, ref: ref, reason: url_refusal(reason)}, tone: :error}
+         reveal: %{kind: :url_failed, ref: ref, reason: url_refusal(reason), secret: secret},
+         tone: :error}
     end
   end
 
-  defp saved_source(ref, nil, _kind, _mode, _opts), do: {:saved, "Source #{ref} saved.", []}
+  defp saved_source(%{ref: ref}, _kind, _mode, _opts), do: {:saved, "Source #{ref} saved.", []}
+
+  defp url_saved(ref, path, nil),
+    do:
+      {:saved, "Source #{ref} saved. Its URL is below. #{@url_note}",
+       reveal: %{kind: :url, ref: ref, value: path}}
+
+  defp url_saved(ref, path, secret),
+    do:
+      {:saved, "Source #{ref} saved. Its secret and URL are below, shown once.",
+       reveal: %{kind: :github, ref: ref, value: path, secret: secret}}
 
   # `ensure_path_secret`'s own sentence, or the write guard's refusal as is.
   defp url_refusal(sentence) when is_binary(sentence), do: {:invalid, sentence}
@@ -582,7 +775,9 @@ defmodule FermixWebWeb.SetupLive.CuesState do
     base ++ kind_fields(kind, preset, verify)
   end
 
-  # A stream shows the general WebSocket source's fields.
+  # A stream shows the general WebSocket source's fields; X accounts shows its
+  # handles where a feed shows its URL.
+  defp kind_fields("feed", "x_accounts", _verify), do: [:handles, :interval]
   defp kind_fields("feed", _preset, _verify), do: [:url, :interval]
   defp kind_fields("stream", nil, _verify), do: [:url | @general_stream_fields]
 

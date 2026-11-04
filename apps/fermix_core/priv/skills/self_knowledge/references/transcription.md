@@ -32,10 +32,10 @@ The sender gets a reply and no turn is scheduled:
 
 | Condition | Reply | Fix on a Mac |
 |---|---|---|
-| No backend configured | "…no transcription backend is configured. Run `fermix setup` to add one." | Settings > Voice > **Voice notes** |
+| No backend configured | "…no transcription backend is configured. Choose one in Fermix's Voice notes settings." | Settings > Voice > **Voice notes** |
 | File over `max_file_mb` | the size limit | send a shorter clip |
 | Over the 20 MB download limit, or the download failed | names the voice note and why | send a shorter clip, or send it again |
-| On-device helper or model missing | "…Install it from `fermix setup` → Transcription." | choose a hosted backend in **Transcribe with** |
+| On-device helper or model missing | "…Install it in Fermix's Voice notes settings." | install it there, or choose a hosted backend in **Transcribe with** |
 | No on-device build for this machine | choose another backend | **Transcribe with** |
 | No speech in the recording | "I couldn't hear any speech in your voice note — check your microphone…" | check the microphone and record again |
 | Provider error | "transcription failed. Please try again." | try again; check the key |

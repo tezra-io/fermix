@@ -3,6 +3,29 @@ defmodule FermixCore.ConfigTest do
 
   alias FermixCore.Config
 
+  # Every key these tests put or delete. Boot pins most of them (`config.exs`,
+  # `config/test.exs`), and the suite runs every app in one VM, so each is put
+  # back after every test, deleted only when it was absent: a key this file
+  # removed would otherwise be read, or saved and restored as nil, by any later
+  # test that relies on the pinned default.
+  @touched [
+    {:fermix_core, :providers},
+    {:fermix_core, :max_conversation_history},
+    {:fermix_core, :some_missing_key},
+    {:fermix_channels, :telegram},
+    {:fermix_channels, :signal},
+    {:fermix_channels, :imessage}
+  ]
+
+  setup do
+    saved = for {app, key} <- @touched, do: {app, key, Application.fetch_env(app, key)}
+    on_exit(fn -> Enum.each(saved, &restore/1) end)
+    :ok
+  end
+
+  defp restore({app, key, {:ok, value}}), do: Application.put_env(app, key, value)
+  defp restore({app, key, :error}), do: Application.delete_env(app, key)
+
   describe "provider/1" do
     test "returns provider config when configured" do
       Application.put_env(:fermix_core, :providers,
@@ -12,16 +35,12 @@ defmodule FermixCore.ConfigTest do
       assert {:ok, config} = Config.provider(:openai)
       assert config[:base_url] == "https://api.openai.com/v1"
       assert config[:default_model] == "gpt-5.4-mini"
-    after
-      Application.delete_env(:fermix_core, :providers)
     end
 
     test "returns error when provider not configured" do
       Application.put_env(:fermix_core, :providers, [])
 
       assert {:error, :not_configured} = Config.provider(:openai)
-    after
-      Application.delete_env(:fermix_core, :providers)
     end
 
     test "returns error when no providers config exists" do
@@ -36,8 +55,6 @@ defmodule FermixCore.ConfigTest do
       Application.put_env(:fermix_core, :providers, openai: [api_key: "sk-test-123"])
 
       assert {:ok, "sk-test-123"} = Config.provider_api_key(:openai)
-    after
-      Application.delete_env(:fermix_core, :providers)
     end
 
     test "returns error when provider exists but no api_key" do
@@ -46,8 +63,6 @@ defmodule FermixCore.ConfigTest do
       )
 
       assert {:error, :not_configured} = Config.provider_api_key(:openai)
-    after
-      Application.delete_env(:fermix_core, :providers)
     end
 
     test "returns error when provider not configured" do
@@ -60,8 +75,6 @@ defmodule FermixCore.ConfigTest do
       Application.put_env(:fermix_core, :providers, openai: [api_key: ""])
 
       assert {:error, :not_configured} = Config.provider_api_key(:openai)
-    after
-      Application.delete_env(:fermix_core, :providers)
     end
   end
 
@@ -75,8 +88,6 @@ defmodule FermixCore.ConfigTest do
       assert {:ok, config} = Config.channel(:telegram)
       assert config[:enabled] == true
       assert config[:webhook_path] == "/webhook/telegram"
-    after
-      Application.delete_env(:fermix_channels, :telegram)
     end
 
     test "returns error when channel not configured" do
@@ -99,8 +110,6 @@ defmodule FermixCore.ConfigTest do
 
       assert Config.channel_ingress_user_ids(:telegram) == ["111"]
       assert Config.channel_command_owner_user_id(:telegram) == "111"
-    after
-      Application.delete_env(:fermix_channels, :telegram)
     end
 
     test "preserves explicitly configured ingress allowlists" do
@@ -110,8 +119,6 @@ defmodule FermixCore.ConfigTest do
       )
 
       assert Config.channel_ingress_user_ids(:telegram) == []
-    after
-      Application.delete_env(:fermix_channels, :telegram)
     end
 
     test "derives command owner from a single explicit ingress id" do
@@ -120,24 +127,12 @@ defmodule FermixCore.ConfigTest do
 
       assert Config.channel_command_owner_user_id(:telegram) == "111"
       assert Config.channel_command_owner_user_id(:signal) == "+15551234567"
-    after
-      Application.delete_env(:fermix_channels, :telegram)
-      Application.delete_env(:fermix_channels, :signal)
     end
 
     # M54 §9.2: iMessage takes the M53 OWN-3 semantics from its first release —
     # the ingress list is the owner AND the guests, so an empty guest list means
     # "no guests", never "no owner".
     test "imessage ingress is the owner and the guests, and an empty guest list keeps the owner" do
-      previous = Application.fetch_env(:fermix_channels, :imessage)
-
-      on_exit(fn ->
-        case previous do
-          {:ok, value} -> Application.put_env(:fermix_channels, :imessage, value)
-          :error -> Application.delete_env(:fermix_channels, :imessage)
-        end
-      end)
-
       Application.put_env(:fermix_channels, :imessage,
         owner_user_id: "+15551234567",
         allowed_sender_ids: []
@@ -161,8 +156,6 @@ defmodule FermixCore.ConfigTest do
 
       Application.put_env(:fermix_channels, :telegram, allowed_user_ids: ["111", "222"])
       assert Config.channel_command_owner_user_id(:telegram) == nil
-    after
-      Application.delete_env(:fermix_channels, :telegram)
     end
   end
 
@@ -171,8 +164,6 @@ defmodule FermixCore.ConfigTest do
       Application.put_env(:fermix_core, :max_conversation_history, 50)
 
       assert {:ok, 50} = Config.get(:max_conversation_history)
-    after
-      Application.delete_env(:fermix_core, :max_conversation_history)
     end
 
     test "returns default when not configured" do

@@ -16,13 +16,15 @@ defmodule FermixCore.Management.Cues do
   and `Cues.SourceManager.reconcile/0` apply identically from either door.
   Nothing here writes `config.toml`.
 
-  **Two values handed out.** A new local push source's first token
-  (`cues.sources.add`) and a fresh one (`cues.sources.token.new`) are returned
-  once and never logged, traced or kept; a webhook's address is returned by
-  `cues.sources.url.get` alone, on every ask. Neither is on a list.
+  **Three values handed out.** A new local push source's first token
+  (`cues.sources.add`) and a fresh one (`cues.sources.token.new`), and the
+  secret Fermix makes for a new GitHub source (`cues.sources.add`), are
+  returned once and never logged, traced or kept; a webhook's address is
+  returned by `cues.sources.url.get` alone, on every ask. None is on a list.
 
   Watchers are read-only here: changing what a watcher reads is a consent
-  turn in chat. Which callers may write is the daemon socket's owner check
+  turn in chat. The one watcher write is `cues.watchers.always_allow.revoke`,
+  which only ever lowers what a follow-up may do. Which callers may write is the daemon socket's owner check
   (`Fermix.CLI.Daemon`), not this module's.
 
   Seams (opts): `:memory?`, `:running?` (booleans for memory and the cue
@@ -31,8 +33,11 @@ defmodule FermixCore.Management.Cues do
   `:repo`, `:door`, `:now` (zero-arity, a
   `DateTime`), `:mandate_opts` (the `Cues.Mandates` and `Cues.Pins` seams),
   `:plugins` and `:enabled_plugins` (zero-arity: the plugin list and the
-  enabled names the mandate choices read), and `:proposals` (the module that
-  answers `records/2`, `card/2` and `decide/4`, default `Cues.Proposals`).
+  enabled names the mandate choices read), `:x_sign_in` (zero-arity: the X
+  sign-in the X accounts form reads, `SourceForm.requirement/2`), `:proposals`
+  (the module that answers `records/2`, `card/2` and `decide/4`, default
+  `Cues.Proposals`), and `:follow_up_opts` (the `Cues.FollowUpReadiness` seams a
+  watcher's follow-up reads).
   """
 
   require Logger
@@ -42,6 +47,7 @@ defmodule FermixCore.Management.Cues do
   alias FermixCore.Cues.Deliveries
   alias FermixCore.Cues.Overview
   alias FermixCore.Cues.Settings, as: CueSettings
+  alias FermixCore.Cues.Watchers
   alias FermixCore.Cues.Webhook
   alias FermixCore.Management.Cues.MandateRow
   alias FermixCore.Management.Cues.SourceForm
@@ -220,26 +226,32 @@ defmodule FermixCore.Management.Cues do
     end
   end
 
-  @doc "`cues.sources.form`: the add form for a kind, preset and verification method."
+  @doc """
+  `cues.sources.form`: the add form for a kind, preset and verification
+  method. `:x_sign_in` (opts) answers the X accounts requirement in place of
+  the X plugin's sign-in (`SourceForm.requirement/2`).
+  """
   @spec sources_form(String.t() | nil, String.t() | nil, String.t() | nil, keyword()) ::
           {:ok, map()} | {:error, error()}
   def sources_form(kind, preset, verify, opts \\ []) when is_list(opts) do
-    kind |> SourceForm.form(preset, verify) |> refused_field()
+    kind |> SourceForm.form(preset, verify, Keyword.take(opts, [:x_sign_in])) |> refused_field()
   end
 
   @doc """
   `cues.sources.add`: saves a new source from its form values and answers its
-  row, plus the first token of a new local push source, returned once.
+  row, under the name given or, nil or empty, the one Fermix makes; plus the
+  first token of a new local push source and the secret Fermix makes for a
+  new GitHub source, each returned once.
   """
-  @spec sources_add(String.t(), String.t() | nil, String.t() | nil, map(), keyword()) ::
+  @spec sources_add(String.t() | nil, String.t() | nil, String.t() | nil, map(), keyword()) ::
           {:ok, map()} | {:error, error()}
   def sources_add(ref, kind, preset, values, opts \\ [])
-      when is_binary(ref) and is_map(values) and is_list(opts) do
+      when (is_binary(ref) or is_nil(ref)) and is_map(values) and is_list(opts) do
     with {:ok, section} <- kind |> SourceForm.new_section(preset, values) |> refused_field(),
-         {:ok, %{token: token}} <-
-           save(CueSettings.save_source(ref, section, %{}, :create), "ref"),
-         {:ok, source} <- fetch_source(ref, opts) do
-      {:ok, %{"source" => source_row(source, opts), "token" => token}}
+         {:ok, %{ref: named, token: token, secret: secret}} <-
+           save(CueSettings.add_source(ref, section, %{}), "ref"),
+         {:ok, source} <- fetch_source(named, opts) do
+      {:ok, %{"source" => source_row(source, opts), "token" => token, "secret" => secret}}
     end
   end
 
@@ -475,6 +487,30 @@ defmodule FermixCore.Management.Cues do
          {:ok, row} <- find_watcher(rows, name),
          {:ok, stored} <- stored_watcher(name, opts) do
       {:ok, %{"watcher" => WatcherRow.detail(row, stored)}}
+    end
+  end
+
+  @doc """
+  `cues.watchers.always_allow.revoke`: takes back the owner's Always allow of
+  watcher `name`'s follow-up from the Fermix app, so its next item asks first
+  again (`Cues.Watchers.ask_first/3`), and answers the watcher's row. It only
+  ever lowers what the follow-up may do; granting is the owner's answer on a
+  card alone.
+  """
+  @spec watchers_always_allow_revoke(String.t(), keyword()) :: {:ok, map()} | {:error, error()}
+  def watchers_always_allow_revoke(name, opts \\ []) when is_binary(name) and is_list(opts) do
+    with :ok <- memory(opts),
+         {:ok, _asks_first} <- ask_first(name, opts),
+         {:ok, rows} <- watcher_rows(facts(opts), opts),
+         {:ok, row} <- find_watcher(rows, name) do
+      {:ok, %{"watcher" => row}}
+    end
+  end
+
+  defp ask_first(name, opts) do
+    case Watchers.ask_first(name, "management", repo: repo(opts)) do
+      {:ok, result} -> {:ok, result}
+      {:error, sentence} -> invalid("name", sentence)
     end
   end
 
@@ -851,8 +887,14 @@ defmodule FermixCore.Management.Cues do
   defp repo_opts(opts), do: [repo: repo(opts)]
   defp repo(opts), do: Keyword.get(opts, :repo, Repo)
 
-  # A watcher's state reads the stream sources in the cue settings a read uses.
-  defp watcher_opts(opts), do: [repo: repo(opts), cues_config: cue_config(opts)]
+  # A watcher's state reads the stream sources in the cue settings a read uses,
+  # and its follow-up's readiness its seams.
+  defp watcher_opts(opts),
+    do: [
+      repo: repo(opts),
+      cues_config: cue_config(opts),
+      follow_up_opts: Keyword.get(opts, :follow_up_opts, [])
+    ]
 
   defp mandate_seams(opts),
     do: [repo: repo(opts), mandate_opts: Keyword.get(opts, :mandate_opts, [])]

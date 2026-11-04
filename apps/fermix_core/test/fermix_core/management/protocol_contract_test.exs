@@ -11,10 +11,19 @@ defmodule FermixCore.Management.ProtocolContractTest do
   use ExUnit.Case, async: true
 
   alias Fermix.CLI.Daemon.Client
+  alias Fermix.CLI.Doctor.Checks
   alias FermixCore.Capabilities.MCP.Config, as: McpConfig
   alias FermixCore.Capabilities.MCP.RuntimeStatus
   alias FermixCore.Cues.Config, as: CuesConfig
+  alias FermixCore.Home.Candidates, as: HomeCandidates
+  alias FermixCore.Home.Epoch
+  alias FermixCore.Home.Move, as: HomeMove
+  alias FermixCore.Home.Provision.Ledger, as: ProvisionLedger
+  alias FermixCore.Home.Snapshot.Recipient, as: SnapshotRecipient
+  alias FermixCore.Home.Snapshot.Scheduler, as: SnapshotScheduler
+  alias FermixCore.Home.Snapshot.Status, as: SnapshotStatus
   alias FermixCore.Jobs.Registry, as: JobsRegistry
+  alias FermixCore.Management.AlwaysOn
   alias FermixCore.Management.Cues.MandateRow, as: CueMandateRow
   alias FermixCore.Management.Cues.SourceRow, as: CueSourceRow
   alias FermixCore.Management.Cues.WatcherRow, as: CueWatcherRow
@@ -22,6 +31,8 @@ defmodule FermixCore.Management.ProtocolContractTest do
   alias FermixCore.Management.Doctor
   alias FermixCore.Management.Doctor.Descriptor
   alias FermixCore.Management.Doctor.Remediation
+  alias FermixCore.Management.Home, as: ManagementHome
+  alias FermixCore.Management.HomeSummary
   alias FermixCore.Management.Jobs
   alias FermixCore.Management.Lifecycle
   alias FermixCore.Management.Logs
@@ -32,6 +43,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
   alias FermixCore.Management.McpServers.Interchange
   alias FermixCore.Management.McpServers.PastedValues
   alias FermixCore.Management.McpServers.Row, as: McpRow
+  alias FermixCore.Management.Placement
   alias FermixCore.Management.Plugins.Row, as: PluginRow
   alias FermixCore.Management.Protocol
   alias FermixCore.Management.Router
@@ -42,6 +54,8 @@ defmodule FermixCore.Management.ProtocolContractTest do
   alias FermixCore.Readiness
   alias FermixCore.Setup.ConfigStore
   alias FermixTestSupport.CueFixtures
+  alias FermixTestSupport.HetznerStub
+  alias FermixTestSupport.HomeSummaryGoldens
   alias FermixTestSupport.MandateFixtures
   alias FermixTestSupport.SafeRm
 
@@ -51,6 +65,8 @@ defmodule FermixCore.Management.ProtocolContractTest do
   @successes Application.app_dir(:fermix_core, "priv/management/fixtures/success.jsonl")
   @errors Application.app_dir(:fermix_core, "priv/management/fixtures/errors.jsonl")
   @compatibility Application.app_dir(:fermix_core, "priv/management/fixtures/compatibility.jsonl")
+  # The desktop whose forward the server's Always On steps answer.
+  @desktop_id "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e"
 
   @mcp_router_toml ~S"""
   [mcp.servers.filesystem]
@@ -368,15 +384,22 @@ defmodule FermixCore.Management.ProtocolContractTest do
   # green while the vendored macOS target validated against a shape the daemon
   # no longer produces. This drives the real router and compares key shapes.
   test "every golden success result carries the key shape the router returns", %{} do
-    for {method, params, opts} <- router_cases() do
-      {:ok, minimum} = Protocol.minimum_version(method)
-      request = %{request_id: "req-1", protocol_version: minimum, method: method, params: params}
+    for {method, params, opts} <- router_cases(), do: assert_router_shape(method, params, opts)
 
-      assert {:ok, result} = Router.route(request, opts), "router refused #{method}"
+    # Minted only now, each just before it is read: a job left running holds
+    # that state only for its kind's budget, and a loaded runner has taken
+    # longer than a probe's 15 s to get through the cases above.
+    for {method, params, opts} <- job_view_cases(), do: assert_router_shape(method, params, opts)
+  end
 
-      assert shape(result) == shape(fixture_result(method, params)),
-             "the golden #{method} fixture no longer matches the router's own result shape"
-    end
+  defp assert_router_shape(method, params, opts) do
+    {:ok, minimum} = Protocol.minimum_version(method)
+    request = %{request_id: "req-1", protocol_version: minimum, method: method, params: params}
+
+    assert {:ok, result} = Router.route(request, opts), "router refused #{method}"
+
+    assert shape(result) == shape(fixture_result(method, params)),
+           "the golden #{method} fixture no longer matches the router's own result shape"
   end
 
   # The one flow method whose golden result is a job in its TERMINAL state: the
@@ -399,6 +422,41 @@ defmodule FermixCore.Management.ProtocolContractTest do
     assert {:ok, finished} = eventually_terminal(jobs, started["job_id"])
 
     assert shape(finished) == shape(fixture_result("computer_use.grant.start", %{}))
+  end
+
+  # The Linux golden is the router's own answer to its facts, word for word:
+  # its rows are the doctor's, so the golden shows exactly what the app renders.
+  # The macOS golden names its platform, the one field a Mac answer gained.
+  test "the golden Linux computer-use answer is the router's own" do
+    request = %{
+      request_id: "req-1",
+      protocol_version: 2,
+      method: "computer_use.permissions.get",
+      params: %{}
+    }
+
+    probe = fn -> {:ok, linux_permissions()} end
+    assert {:ok, answer} = Router.route(request, operation_opts: [probe: probe])
+
+    golden = named_fixture_result("computer_use_permissions_get_linux")
+    assert json(%{answer | "probed_at" => golden["probed_at"]}) == golden
+    assert named_fixture_result("computer_use_permissions_get")["platform"] == "macos"
+  end
+
+  # A row is closed and every field is always present. Its status is the
+  # doctor's, so the enum is read from `Checks.status()` rather than repeated.
+  test "the schema declares exactly what a computer-use row carries", %{schema: schema} do
+    result = schema["$defs"]["computer_use_permissions_get_result"]
+    rows = result["properties"]["rows"]
+    golden = named_fixture_result("computer_use_permissions_get_linux")["rows"]
+    fields = golden |> hd() |> Map.keys() |> Enum.sort()
+
+    assert result["required"] == ~w(installed screen_capture input_control probed_at)
+    assert rows["items"]["additionalProperties"] == false
+    assert Enum.sort(rows["items"]["required"]) == fields
+    assert rows["items"]["properties"] |> Map.keys() |> Enum.sort() == fields
+    assert rows["items"]["properties"]["status"]["enum"] == doctor_statuses()
+    assert length(golden) < rows["maxItems"]
   end
 
   # The iMessage grant and confirmation goldens are terminal job views, because
@@ -586,6 +644,68 @@ defmodule FermixCore.Management.ProtocolContractTest do
 
     assert Map.has_key?(realtime["properties"], "engine")
     assert "engine" in realtime["required"]
+  end
+
+  # A desktop's link to its primary names its state in one closed word, so an
+  # app draws a quiet renewal apart from an outage.
+  test "the schema's primary status vocabulary is the one home.status answers", %{
+    schema: schema
+  } do
+    primary = schema["$defs"]["homePrimary"]
+
+    assert "status" in primary["required"]
+
+    assert primary["properties"]["status"]["enum"] == ManagementHome.primary_statuses()
+  end
+
+  # The summary's closed words (M75 lean v1 §7): an app maps each state to a
+  # screen, each kind to a problem and each id to what it calls, and refuses
+  # one outside its set.
+  test "the schema's summary vocabulary is the one home.status answers", %{schema: schema} do
+    defs = schema["$defs"]
+
+    assert defs["homeSummary"]["properties"]["state"]["enum"] == HomeSummary.states()
+    assert defs["homeSummaryDetail"]["properties"]["kind"]["enum"] == HomeSummary.problems()
+    assert defs["homeSummaryAction"]["properties"]["id"]["enum"] == HomeSummary.actions()
+
+    result = defs["home_status_result"]["properties"]
+    assert Enum.all?(~w(summary disk version), &Map.has_key?(result, &1))
+  end
+
+  # Each state family's golden is the record the engine builds from invented
+  # facts (`HomeSummaryGoldens`), and the first one's summary is what the
+  # router answers for its case, so no golden says what the engine does not.
+  test "the golden home.status summaries are the engine's own" do
+    for {name, result} <- HomeSummaryGoldens.rows() do
+      assert named_fixture_result(name) == json(result),
+             "the #{name} golden no longer matches what the engine builds"
+    end
+
+    {"home.status", params, opts} = Enum.find(router_cases(), &(elem(&1, 0) == "home.status"))
+    request = %{request_id: "req-1", protocol_version: 2, method: "home.status", params: params}
+    {:ok, %{"summary" => summary}} = Router.route(request, opts)
+
+    assert named_fixture_result("home_status")["summary"] == json(summary)
+
+    detail_keys = Map.keys(schema_detail_properties())
+
+    for {_name, %{"summary" => %{"detail" => detail}}} <- HomeSummaryGoldens.rows(),
+        do: assert(Map.keys(detail) -- detail_keys == [])
+  end
+
+  # Always On setup §3.4: `home.act`'s golden is the router's own answer to
+  # its case, the token pasted on the first screen, and its `changed`
+  # refusal says so in a sentence and carries nothing else.
+  test "the golden home.act answer and its changed refusal are the engine's own" do
+    {"home.act", params, opts} = Enum.find(router_cases(), &(elem(&1, 0) == "home.act"))
+    request = %{request_id: "req-1", protocol_version: 2, method: "home.act", params: params}
+    {:ok, answer} = Router.route(request, opts)
+
+    assert named_fixture_result("home_act") == json(answer)
+
+    assert golden_error_details("changed") == %{
+             "sentence" => "Always On changed since this was shown, so look at it again."
+           }
   end
 
   test "the schema's row vocabulary matches the settings module", %{schema: schema} do
@@ -986,6 +1106,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
     assert published["source_states"] == CueSourceRow.states()
     assert published["source_actions"] == CueSourceRow.actions()
     assert published["watcher_states"] == CueWatcherRow.states()
+    assert published["follow_up_states"] == CueWatcherRow.follow_up_states()
     assert published["mandate_actions"] == CueMandateRow.actions()
     assert defs["cueSourceAction"]["enum"] == CueSourceRow.actions()
     assert defs["cueMandateAction"]["enum"] == CueMandateRow.actions()
@@ -1183,6 +1304,29 @@ defmodule FermixCore.Management.ProtocolContractTest do
     end
   end
 
+  # A client looks a method up in the catalog, so every method's row is there,
+  # once; the forward deadlines under "After a move" list only deadlines.
+  test "PROTOCOL.md lists every method once in its catalog, and only deadlines as deadlines" do
+    doc = File.read!(@protocol_doc)
+    [_before, catalog] = String.split(doc, "\n## Method catalog\n", parts: 2)
+    [catalog | _rest] = String.split(catalog, "\n## ", parts: 2)
+
+    rows = Regex.scan(~r/^\| `([a-z_.]+)` \|/m, catalog, capture: :all_but_first)
+    listed = List.flatten(rows)
+
+    for method <- Protocol.methods() do
+      assert Enum.count(listed, &(&1 == method)) == 1,
+             "the method catalog does not list #{method} exactly once"
+    end
+
+    [_before, after_move] = String.split(doc, "- **Forward deadlines.**", parts: 2)
+    [deadlines | _rest] = String.split(after_move, "\n- **", parts: 2)
+    deadline_rows = Regex.scan(~r/^\s*\| `([a-z_.]+)` \|/m, deadlines, capture: :all_but_first)
+
+    assert Enum.sort(List.flatten(deadline_rows)) ==
+             Enum.sort(Map.keys(Placement.long_forward_deadlines()))
+  end
+
   # Every seam here injects a *source*, never a result: the projection,
   # scrubbing, bounding, and cursor logic under test is the daemon's own.
   defp router_cases do
@@ -1224,7 +1368,12 @@ defmodule FermixCore.Management.ProtocolContractTest do
       {"plugins.list", %{}, []}
     ] ++
       settings_cases() ++
-      job_view_cases() ++ flow_cases() ++ mobile_cases() ++ mcp_cases() ++ cues_cases()
+      flow_cases() ++
+      mobile_cases() ++
+      mcp_cases() ++
+      cues_cases() ++
+      home_cases() ++
+      provision_cases()
   end
 
   # Stands in for `Cues.Proposals` with the record and the card in the shape
@@ -1274,6 +1423,288 @@ defmodule FermixCore.Management.ProtocolContractTest do
   # The cue reads against settings of this case's own (`:config`), a temp Repo
   # of its own and the proposal stand-in above; every write answers from a home
   # and is pinned to its golden in `CuesTest`.
+  # The home family against a home holding what the goldens show: epoch 4, no
+  # marker, one verified S3 snapshot, a recipient and a bucket, and a scheduler
+  # whose run starts and finishes at once; and, for enrollment and the move, a
+  # window a candidate used, that candidate, and a move to it that was undone.
+  defp home_cases do
+    home = SafeRm.make_tmp_dir!("contract_home")
+    on_exit(fn -> SafeRm.rm_rf!(home) end)
+    :ok = Epoch.write(home, 4)
+    :ok = seed_move(home)
+
+    attempt = %{
+      at: ~U[2026-10-27 09:30:00Z],
+      result: :verified,
+      name: "20261027T093000Z-e4.fxsnap",
+      epoch: 4,
+      size: 48_211,
+      sha256: String.duplicate("9", 64),
+      location: "s3://invented-fermix-snapshots/fermix/general/20261027T093000Z-e4.fxsnap",
+      key_id: "08c15ca36dd935c4",
+      error: nil
+    }
+
+    status = SnapshotStatus.record(SnapshotStatus.empty(), "s3", attempt)
+
+    :ok = SnapshotStatus.write(home, status)
+
+    recipient = SnapshotRecipient.generate()
+
+    config = [
+      recipient: SnapshotRecipient.encode(recipient),
+      s3_bucket: "invented-fermix-snapshots"
+    ]
+
+    scheduler = :"contract_snapshot_scheduler_#{System.unique_integer([:positive])}"
+
+    start_supervised!(
+      {SnapshotScheduler,
+       name: scheduler,
+       home: home,
+       config: fn -> config end,
+       now: fn -> ~U[2026-10-27 09:30:00Z] end,
+       timer: fn _message, _delay -> make_ref() end,
+       run: fn _home, _config, _targets, _opts -> :not_configured end}
+    )
+
+    opts = [
+      operation_opts: [
+        home: [
+          home: home,
+          engine_role: %{role: :primary, primary: nil},
+          config: config,
+          scheduler: scheduler,
+          profile: "general",
+          save_recipient: fn _recipient -> {:ok, %{}} end,
+          now: ~U[2026-10-27 09:30:00Z],
+          host_os: :macos,
+          version: "1.2.3",
+          # The app engine, which starts again by itself after a move.
+          restarts_itself: true,
+          disk_usage: fn _home -> {:ok, %{used: 0.42, nearly_full: false}} end,
+          link_status: fn ->
+            %{
+              primary: nil,
+              desktops: [],
+              enrollment: %{
+                state: :used,
+                expires_at: ~U[2026-10-27 09:22:00Z],
+                kind: :manual,
+                candidate_id: "cand-5e2a9c1f7b3d4086"
+              }
+            }
+          end,
+          open_enrollment: fn :manual, _desktop ->
+            {:ok, %{code: "fxenroll1.aW52ZW50ZWQ", expires_at: ~U[2026-10-27 09:40:00Z]}}
+          end,
+          withdraw_enrollment: fn :provisioned -> :ok end,
+          # A keychain reference this host could not resolve, as a home a
+          # restore carried here without its values shows it.
+          settings_snapshot: fn ->
+            %{fermix_core: [providers: [anthropic: [api_key: "@keyring"]]]}
+          end
+        ]
+      ]
+    ]
+
+    # The server's Always On steps answer a desktop's forward alone.
+    rail = [actor: {:desktop, @desktop_id}] ++ opts
+
+    [
+      {"home.status", %{}, opts},
+      {"home.snapshots.status", %{}, opts},
+      {"home.snapshots.run", %{}, rail},
+      {"home.snapshots.passphrase", %{"recovery_passphrase" => "invented-lighthouse-meridian"},
+       opts},
+      {"home.enroll.open", %{}, rail},
+      {"home.enroll.withdraw", %{}, rail},
+      {"home.candidates.list", %{}, opts},
+      move_readiness_case(),
+      move_start_case()
+    ]
+  end
+
+  # The Always On provisioner against the recorded Hetzner API: a project the
+  # token was just pasted for, the options it sells, and a home whose server
+  # was created, which the power action and the delete read; the resources
+  # are those of a replace whose new server waits for its move, as the golden
+  # shows them. The job-backed methods answer their running job.
+  defp provision_cases do
+    stub = HetznerStub.start!()
+    connected = provision_home!(stub, false)
+
+    [
+      {"home.provision.options", %{}, provision_opts(connected, stub)},
+      act_case(stub)
+    ]
+  end
+
+  # Always On's one step method on a home with nothing set up: the token
+  # pasted on the first screen, against the recorded Hetzner API, under the
+  # key that screen gave it; the answer is the choice that follows.
+  defp act_case(stub) do
+    home = provision_home!(stub, nil)
+    serializer = :"contract_always_on_#{System.unique_integer([:positive])}"
+    start_supervised!({AlwaysOn, name: serializer}, id: serializer)
+
+    seams =
+      [
+        home: home,
+        engine_role: %{role: :primary, primary: nil},
+        profile: "general",
+        now: ~U[2026-10-30 09:00:00Z],
+        host_os: :macos,
+        config: [],
+        scheduler: nil,
+        disk_usage: fn _home -> {:ok, %{used: 0.42, nearly_full: false}} end,
+        link_status: fn -> %{primary: nil, desktops: [], enrollment: nil} end,
+        settings_snapshot: fn -> %{} end,
+        jobs: jobs(),
+        provider_opts: provision_host_opts(stub),
+        serializer: serializer
+      ] ++ code_seams()
+
+    %{"action" => %{"id" => "paste_token", "key" => key}} =
+      seams |> ManagementHome.summary_facts() |> HomeSummary.summary()
+
+    params = %{
+      "action" => "paste_token",
+      "key" => key,
+      "input" => %{"token" => HetznerStub.token()}
+    }
+
+    {"home.act", params, [operation_opts: [always_on: seams]]}
+  end
+
+  # A home with no token (`nil`), or a connected one (`false`).
+  defp provision_home!(_stub, created?) do
+    home = SafeRm.make_tmp_dir!("contract_provision")
+    on_exit(fn -> SafeRm.rm_rf!(home) end)
+    :ok = Epoch.write(home, 4)
+
+    if created? != nil do
+      {:ok, _ledger} =
+        ProvisionLedger.update(
+          home,
+          "hetzner",
+          &{:ok, ProvisionLedger.connect(&1, HetznerStub.token(), ~U[2026-10-30 09:00:00Z])}
+        )
+    end
+
+    home
+  end
+
+  defp provision_opts(home, stub) do
+    [
+      engine_role: %{role: :primary, primary: nil},
+      operation_opts: [
+        provision:
+          [home: home, profile: "general", jobs: jobs(), provider_opts: provision_host_opts(stub)] ++
+            code_seams()
+      ]
+    ]
+  end
+
+  defp provision_host_opts(stub) do
+    [
+      req_options: HetznerStub.req_options(stub),
+      now: fn -> ~U[2026-10-30 09:00:00Z] end,
+      sleep: fn _ms -> :ok end
+    ]
+  end
+
+  defp code_seams,
+    do: [open_code: fn -> {:ok, "fxenroll1.aW52ZW50ZWQ"} end, withdraw_code: fn -> :ok end]
+
+  # Enrollment and the move as the `home.status` golden shows them: the
+  # candidate the used window enrolled, and a move to it undone before the
+  # candidate was ready, which leaves the home the primary.
+  # The held server under the id the golden shows, so the summary's keys,
+  # which name the server a move goes to, are the golden's own.
+  defp seed_move(home) do
+    {:ok, held} = HomeCandidates.add(home, contract_candidate(), ~U[2026-10-27 09:12:00Z])
+    file = HomeCandidates.path(home)
+
+    File.write!(
+      file,
+      String.replace(File.read!(file), held.candidate_id, "cand-5e2a9c1f7b3d4086")
+    )
+
+    File.mkdir_p!(HomeMove.dir(home))
+    HomeMove.put_phase(home, "aborted", %{"candidate" => "north-box"}, ~U[2026-10-27 09:25:00Z])
+  end
+
+  # The readiness report reads a home of its own holding one candidate, with
+  # the free space, this engine's version and host as seams.
+  defp move_readiness_case do
+    home = SafeRm.make_tmp_dir!("contract_readiness")
+    on_exit(fn -> SafeRm.rm_rf!(home) end)
+    :ok = Epoch.write(home, 4)
+    {:ok, held} = HomeCandidates.add(home, contract_candidate(), ~U[2026-10-27 09:12:00Z])
+
+    seams = [
+      home: home,
+      engine_role: %{role: :primary, primary: nil},
+      now: ~U[2026-10-27 09:30:00Z]
+    ]
+
+    {"home.move.readiness", %{"candidate_id" => held.candidate_id},
+     [actor: {:desktop, @desktop_id}, operation_opts: [home: seams ++ readiness_seams()]]}
+  end
+
+  defp readiness_seams,
+    do: [
+      free_bytes: fn _dir -> {:ok, 1_099_511_627_776} end,
+      version: "0.9.0",
+      host: "macos-aarch64",
+      restarts_itself: true
+    ]
+
+  # `home.move.start` writes the move and the device role into its home, so it
+  # runs against a home of its own holding epoch 4 and one candidate, and the
+  # restart that follows it is a stand-in.
+  defp move_start_case do
+    home = SafeRm.make_tmp_dir!("contract_move")
+    on_exit(fn -> SafeRm.rm_rf!(home) end)
+    :ok = Epoch.write(home, 4)
+    {:ok, held} = HomeCandidates.add(home, contract_candidate(), ~U[2026-10-27 09:12:00Z])
+
+    seams =
+      [
+        home: home,
+        engine_role: %{role: :primary, primary: nil},
+        now: ~U[2026-10-27 09:30:00Z],
+        restart: fn -> :ok end,
+        # No recovery passphrase is set yet, so the start keeps the one typed.
+        config: [],
+        save_recipient: fn _recipient -> {:ok, %{}} end
+      ] ++ readiness_seams()
+
+    params = %{
+      "candidate_id" => held.candidate_id,
+      "recovery_passphrase" => "invented-harbor-juniper-lantern"
+    }
+
+    {"home.move.start", params, [actor: {:desktop, @desktop_id}, operation_opts: [home: seams]]}
+  end
+
+  # A candidate as the primary holds it after enrollment: invented facts, and
+  # the bucket a host reports, so the goldens draw it.
+  defp contract_candidate do
+    %{
+      name: "north-box",
+      os: "linux",
+      arch: "aarch64",
+      version: "0.9.0",
+      node_id: String.duplicate("b7", 32),
+      relays: [%{"url" => "https://eu1.relay.invalid/", "quic_port" => 7842}],
+      noise_pk: :binary.copy(<<1>>, 32),
+      recipient: :binary.copy(<<2>>, 32),
+      snapshots: %{"s3_bucket" => "invented-fermix-snapshots", "s3_region" => "eu-central-1"}
+    }
+  end
+
   defp cues_cases do
     %{repo: repo, conn: conn} = CueFixtures.start_repo("contract")
     now = ~U[2026-10-17 12:00:00.000000Z]
@@ -1309,6 +1740,30 @@ defmodule FermixCore.Management.ProtocolContractTest do
       Jason.encode!(["release", "outage"]),
       watcher
     ])
+
+    # The watcher's follow-up (M60_WATCHER_CODING_RUNS.md §3.5).
+    {:ok, follow_up} =
+      JobsRegistry.create_follow_up_job(
+        %{
+          name: "Deploy check",
+          task_prompt: "Run the deploy check and report what it says.",
+          allowed_tools: ["shell"],
+          delivery_mode: "channel",
+          delivery_target: %{"platform" => "telegram", "chat_id" => "4417"},
+          created_by_trust: "operator"
+        },
+        repo: repo,
+        scheduler: nil
+      )
+
+    CueFixtures.exec!(conn, "UPDATE cue_watchers SET follow_up_job_id = ? WHERE id = ?", [
+      follow_up.id,
+      watcher
+    ])
+
+    # Always allowed from one of its cards, so the list and get goldens show it
+    # and the revoke golden shows it taken back.
+    CueFixtures.always_allow!(conn, watcher)
 
     for request <- [
           {:source_reject, "gh-hooks", %{"unauthorized" => 3}, now},
@@ -1357,7 +1812,8 @@ defmodule FermixCore.Management.ProtocolContractTest do
           proposals: FakeProposals,
           mandate_opts: [plugin_tool: MandateFixtures.plugin_tool()],
           plugins: fn -> {:ok, [plugin]} end,
-          enabled_plugins: fn -> ["github"] end
+          enabled_plugins: fn -> ["github"] end,
+          follow_up_opts: [plugins: fn -> {:ok, []} end, channel_ready?: fn _channel -> true end]
         ]
       ]
     ]
@@ -1369,6 +1825,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
       {"cues.sources.form", %{"preset" => "github"}, opts},
       {"cues.watchers.list", %{}, opts},
       {"cues.watchers.get", %{"name" => "release-watch"}, opts},
+      {"cues.watchers.always_allow.revoke", %{"name" => "release-watch"}, opts},
       {"cues.mandates.list", %{}, opts},
       {"cues.mandates.choices", %{}, opts},
       {"cues.proposals.list", %{}, opts},
@@ -1499,17 +1956,38 @@ defmodule FermixCore.Management.ProtocolContractTest do
            device_id: @device_id,
            name: "Sam's phone",
            model: "Google Pixel 9 Pro",
+           kind: :phone,
            platform: nil,
            signer_role: nil,
            boot_state: nil,
            push_registered: false,
            created_at: "2026-09-26T12:01:05Z",
            last_seen: "2026-09-26T12:04:40Z"
-         }
+         },
+         desktop()
        ]}
     end
 
+    # The desktop a move linked is refused, as the phone channel refuses it.
+    def devices_revoke("c41e9d27-5a8b-4f63-9e20-7d1b3c5a8f94", _opts),
+      do: {:error, :desktop_device}
+
     def devices_revoke(device_id, _opts), do: {:ok, %{device_id: device_id}}
+
+    defp desktop do
+      %{
+        device_id: "c41e9d27-5a8b-4f63-9e20-7d1b3c5a8f94",
+        name: "Studio Mac",
+        model: "Mac15,8",
+        kind: :desktop,
+        platform: nil,
+        signer_role: nil,
+        boot_state: nil,
+        push_registered: false,
+        created_at: "2026-10-20T07:15:00Z",
+        last_seen: "2026-10-21T08:02:11Z"
+      }
+    end
 
     defp session(state, ttl_ms, request, outcome) do
       %{
@@ -1534,6 +2012,16 @@ defmodule FermixCore.Management.ProtocolContractTest do
         attestation: :verified
       }
     end
+  end
+
+  test "forgetting the desktop a move linked is refused with the golden's sentence" do
+    opts = [operation_opts: [mobile: [provider: FakeMobileProvider]]]
+    params = %{"device_id" => "c41e9d27-5a8b-4f63-9e20-7d1b3c5a8f94"}
+
+    assert {:error, :unavailable, details} =
+             Router.route(request("mobile.devices.revoke", params), opts)
+
+    assert details == golden_error_details("unavailable_mobile_desktop_revoke")
   end
 
   # The seven phone methods against the fake above: what is compared is the view
@@ -1631,8 +2119,8 @@ defmodule FermixCore.Management.ProtocolContractTest do
     {:ok, _terminal} = eventually_terminal(finished, completed)
 
     # One job, still running, for each of the other two: both golden results are
-    # of a job that has not finished, and a probe that never answers is what
-    # holds that state without a clock.
+    # of a job that has not finished. A probe that never answers holds that
+    # state until the kind's budget runs out, so the caller reads these at once.
     listed = jobs()
     _running = probe_job(listed, blocking_probe())
 
@@ -1684,6 +2172,56 @@ defmodule FermixCore.Management.ProtocolContractTest do
 
   defp permissions do
     %{state: :probed, screen_capture: true, input_control: false, platform: "macos"}
+  end
+
+  # The Linux golden's facts: Ubuntu 24.04 on GNOME Wayland, where the desktop
+  # portal is the pixel route and a stored Screenshot no refuses its screenshots,
+  # while the pointer and keys still go through it.
+  defp linux_permissions do
+    %{
+      state: :probed,
+      platform: "linux",
+      display_server: "wayland",
+      screen_capture: false,
+      input_control: true,
+      display_adopted: false,
+      x11_pixels: %{xtest: true, keymap: true},
+      portal: %{
+        running: true,
+        version: "1.18.4-1ubuntu2",
+        registry: true,
+        screenshot_permission: "no"
+      },
+      accessibility_bus: %{state: "answering", applications: 12, cause: nil, detail: nil},
+      accessibility_packages: %{
+        source: "dpkg",
+        at_spi2_core: "2.52.0-1build1",
+        atk_bridge: "2.52.0-1build1"
+      },
+      toolkit_notes: [
+        %{
+          toolkit: "qt",
+          note:
+            "the session's accessibility status reads off, so a Qt application publishes " <>
+              "no tree: start it with QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1 in its environment"
+        },
+        %{
+          toolkit: "chromium",
+          note:
+            "a Chromium-based application publishes no page tree by itself: start it with " <>
+              "--force-renderer-accessibility, and with ACCESSIBILITY_ENABLED=1 in its environment"
+        }
+      ],
+      pixel_route: %{route: "portal", cause: nil, desktop: nil, interface: nil}
+    }
+  end
+
+  defp doctor_statuses do
+    {:ok, types} = Code.Typespec.fetch_types(Checks)
+    status = Enum.find(types, &match?({:type, {:status, _ast, []}}, &1))
+    {:type, {:status, {:type, _anno, :union, members}, []}} = status
+
+    Enum.map(members, fn {:atom, _anno, word} -> Atom.to_string(word) end)
   end
 
   # Sources for the iMessage methods: the helper's probe, its stored policy and
@@ -1848,6 +2386,16 @@ defmodule FermixCore.Management.ProtocolContractTest do
       end
 
     %{resolution: resolution, conflict: golden["conflict"], draft_id: golden["draft_id"]}
+  end
+
+  # A result as it crosses the wire: what `Jason` makes of it.
+  defp json(value), do: value |> Jason.encode!() |> Jason.decode!()
+
+  defp schema_detail_properties do
+    @schema_path
+    |> File.read!()
+    |> Jason.decode!()
+    |> get_in(["$defs", "homeSummaryDetail", "properties"])
   end
 
   defp named_fixture_result(name) do

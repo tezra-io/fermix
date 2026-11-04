@@ -121,14 +121,21 @@ defmodule FermixChannels.Mobile.EventRouter do
   end
 
   defp request_outcome(request) do
-    %{"client_msg_id" => request.client_msg_id, "status" => request.status}
+    %{"client_msg_id" => request.client_msg_id, "status" => wire_status(request.status)}
     |> maybe_put("turn_id", request.turn_id)
     |> maybe_put("result_server_seq", request.result_server_seq)
     |> maybe_put("error", failure_code(request))
   end
 
+  # A request another boot held is settled `uncertain` (M75); on this wire it
+  # is a failed one whose word says why, so every phone ends its turn.
+  defp wire_status("uncertain"), do: "failed"
+  defp wire_status(status), do: status
+
   # A failed request's word, as its turn's `turn_error` would have carried
-  # it: `cancelled` when it was stopped, `request_failed` otherwise.
+  # it: `cancelled` when it was stopped, `uncertain_after_restart` when another
+  # boot held it, `request_failed` otherwise.
+  defp failure_code(%{status: "uncertain"}), do: Requests.uncertain_reason()
   defp failure_code(%{status: "failed", cancelled_at: %DateTime{}}), do: "cancelled"
   defp failure_code(%{status: "failed"}), do: "request_failed"
   defp failure_code(_request), do: nil

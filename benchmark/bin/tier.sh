@@ -39,7 +39,30 @@ usage() {
 # answers nothing is exported and the SDK resolves a profile on its own (an `ant
 # auth login` profile); the runner's judge precondition refuses the run with a
 # sentence when nothing resolves.
-JUDGE_KEYCHAIN_ITEM="fermix:ANTHROPIC_API_KEY"
+#
+# That entry is named by the dev home's profile, as the engine names it
+# (`SecretWriter.scoped_prefix/1`): `fermix:<profile>:ANTHROPIC_API_KEY` for a
+# named profile, `fermix:ANTHROPIC_API_KEY` for the default one (no profile, or
+# "general"). The eval daemon keeps that profile (seed_capability_home.py), so the
+# judge signs in with the key of the daemon it judges.
+dev_profile() {
+  local config="$HOME/.fermix-dev/config.toml"
+  [ -f "$config" ] || return 0
+  awk '
+    /^\[/ { core = ($0 ~ /^\[fermix_core\][[:space:]]*(#.*)?$/); next }
+    core && /^[[:space:]]*profile[[:space:]]*=/ {
+      sub(/^[^=]*=[[:space:]]*"/, ""); sub(/".*$/, ""); print; exit
+    }' "$config"
+}
+judge_keychain_item() {
+  local profile
+  profile="$(dev_profile)"
+  case "$profile" in
+    "" | general) printf 'fermix:ANTHROPIC_API_KEY' ;;
+    *) printf 'fermix:%s:ANTHROPIC_API_KEY' "$profile" ;;
+  esac
+}
+JUDGE_KEYCHAIN_ITEM="$(judge_keychain_item)"
 judge_keychain_key() {
   security find-generic-password -s "$JUDGE_KEYCHAIN_ITEM" -a fermix -w 2>/dev/null || true
 }

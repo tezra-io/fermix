@@ -363,6 +363,39 @@ defmodule FermixCore.Sandbox.PathPolicyTest do
     end
   end
 
+  # M84 §9: the Mac app's browser pane keeps its websites' cookies and storage
+  # under ~/Library by bundle id; a file tool must not read or plant them.
+  test "open mode refuses the browser pane's website data, released and dev builds alike" do
+    os_home = FermixTestSupport.SafeRm.make_tmp_dir!("path-policy-pane")
+    fermix_home = Path.join(os_home, ".fermix")
+    File.mkdir_p!(fermix_home)
+    pin_env!("FERMIX_HOME", fermix_home)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(os_home) end)
+
+    config = open_config(os_home, fermix_home)
+
+    for relative <- [
+          "Library/WebKit/io.tezra.FermixPet/WebsiteDataStore/probe/Cookies/Cookies.binarycookies",
+          "Library/WebKit/io.tezra.FermixPet.dev/WebsiteDataStore/probe/IndexedDB/x",
+          "Library/HTTPStorages/io.tezra.FermixPet/httpstorages.sqlite",
+          "Library/HTTPStorages/io.tezra.FermixPet.binarycookies",
+          "Library/Caches/io.tezra.FermixPet/Cache.db-wal",
+          "Library/Cookies/io.tezra.FermixPet.dev.binarycookies"
+        ] do
+      assert {:error, {:protected_path, _path}} =
+               PathPolicy.allowed_path?(Path.join(os_home, relative), config),
+             "expected #{relative} to be protected"
+    end
+
+    for relative <- [
+          "Library/WebKit/com.example.Other/WebsiteDataStore/x",
+          "Library/Caches/com.example.Other/Cache.db",
+          "Library/Preferences/io.tezra.FermixPet.plist"
+        ] do
+      assert :ok = PathPolicy.allowed_path?(Path.join(os_home, relative), config)
+    end
+  end
+
   test "every secret location the engine itself writes sits inside the protected floor" do
     os_home = FermixTestSupport.SafeRm.make_tmp_dir!("path-policy-writers")
     fermix_home = Path.join(os_home, ".fermix")

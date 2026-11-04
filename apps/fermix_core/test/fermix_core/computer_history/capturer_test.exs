@@ -73,7 +73,16 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
       operative_fun: fn -> true end
     ]
 
+    opts = Keyword.update(opts, :sidecar_env, fake_env([]), &fake_env/1)
     start_supervised!({Capturer, Keyword.merge(defaults, opts)}, id: id)
+  end
+
+  # The fake reports the library's own protocol unless a case says otherwise, so
+  # a protocol bump moves the fake with it.
+  defp fake_env(env) do
+    if List.keymember?(env, ~c"FAKE_PROTO", 0),
+      do: env,
+      else: [{~c"FAKE_PROTO", ~c"#{@protocol}"} | env]
   end
 
   defp stored(repo), do: elem(Repo.computer_history_events_after_id(0, 1_000, server: repo), 1)
@@ -757,10 +766,11 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
         flush_interval_ms: 60_000,
         batch_size: 50,
         operative_fun: fn -> true end,
-        sidecar_env: [
-          {~c"FAKE_EVENTS_FILE", String.to_charlist(events_file(ctx, [app_event(1)]))},
-          {~c"FAKE_PID_FILE", String.to_charlist(pid_file)}
-        ]
+        sidecar_env:
+          fake_env([
+            {~c"FAKE_EVENTS_FILE", String.to_charlist(events_file(ctx, [app_event(1)]))},
+            {~c"FAKE_PID_FILE", String.to_charlist(pid_file)}
+          ])
       ]
 
       {:ok, pid} = DynamicSupervisor.start_child(sup, {Capturer, opts})

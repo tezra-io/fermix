@@ -228,6 +228,27 @@ defmodule FermixChannels.Gateway.ChannelRegistryTest do
     test "returns no children when readiness is not ready" do
       assert ChannelRegistry.transport_children(%{status: :setup_required, failures: []}) == []
     end
+
+    # M75: Slack runs a connection only over Socket Mode. The webhook is the
+    # default, so a config that names no mode (or the webhook) starts nothing.
+    test "slack starts its Socket Mode connection only when the mode says socket" do
+      previous = Application.get_env(:fermix_channels, :slack)
+      on_exit(fn -> restore_app_env(:fermix_channels, :slack, previous) end)
+      socket_mode = {FermixChannels.Channels.Slack.SocketMode, []}
+
+      for {mode, started?} <- [{:socket, true}, {:webhook, false}, {nil, false}] do
+        config = [enabled: true, owner_user_id: "U0OWNER"]
+        config = if mode, do: Keyword.put(config, :mode, mode), else: config
+        Application.put_env(:fermix_channels, :slack, config)
+
+        assert socket_mode in ChannelRegistry.transport_children(%{status: :ready}) == started?,
+               "mode #{inspect(mode)}"
+      end
+
+      # Like every remote transport, it never starts without an owner or allow-list.
+      Application.put_env(:fermix_channels, :slack, enabled: true, mode: :socket)
+      refute socket_mode in ChannelRegistry.transport_children(%{status: :ready})
+    end
   end
 
   # MILESTONE_54 §12: the helper reads the Messages of the Mac it runs on, so the

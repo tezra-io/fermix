@@ -21,8 +21,17 @@ history message. This wire's `row` carries the message's `kind`, `metadata`,
 `media_fetch` (version 3) is not the phone's: the phone's streams the bytes in
 chunks inside its envelope, and this one grants a managed file on the same
 machine, so neither it nor its answers are shared. The proposal events
-(version 4) are this wire's alone for now: the phone's wire carries them at its
-next version.
+(version 4, and the follow-up's card of version 5) are this wire's alone for
+now: the phone's wire carries them at its next version. So are what a turn is
+doing (version 6): `reasoning`, and the `activity` a `tool_event` that starts
+a tool carries here, which the phone's `tool_event` does not. So are the
+owner's lists (version 6): the phone's wire does not carry them yet, and gains
+them with the Android app's lists. So is `home_status_changed` (version 6):
+Always On is set up and watched from the computer, never from a phone. So are
+the owner's files (version 7): `attach_file` and `attach_status` hand the
+daemon a file by path on the same machine, where the phone's `attach_begin`,
+`attach_chunk` and `attach_end` stream its bytes; both land in the same media
+store, and the `msg` that names them is the shared one.
 
 ## Transport
 
@@ -45,6 +54,9 @@ next version.
   the outbox*).
 - **Clients:** at most **4** connections at once. A fifth is answered with
   `error: max_clients_reached` and closed.
+- **After a move:** a desktop whose home moved to another host keeps this
+  socket; its engine carries each connection to the primary (see *After a
+  move: the desktop's tunnel*). Everything in this document holds there.
 - **Direction:** *client events* flow companion → daemon; *server events* flow
   daemon → companion.
 - **Absent is absent:** an optional field the daemon has no value for is an
@@ -60,9 +72,9 @@ previous one (or the same value while only one version exists).
 
 | Field | Value |
 |---|---|
-| `protocol_version` (companion declares) | `4` |
-| daemon `min_version` | `3` |
-| daemon `max_version` | `4` |
+| `protocol_version` (companion declares) | `7` |
+| daemon `min_version` | `6` |
+| daemon `max_version` | `7` |
 
 ### Version 2: a turn that ends with no reply
 
@@ -93,11 +105,11 @@ reads `turn_done`.
 
 Version 3 lets the Mac's chat show what the phones put in the timeline: a
 voice note, a picture or a file sent from a phone, a picture Fermix sent to
-one, and the picture of a link preview stored on a row. A picture or file
-Fermix sends in the Mac's chat, or from a voice call, is the same: an
-assistant row of `kind: "media"` whose `media_refs[]` names it, announced as a
-`row`. Their bytes are in the daemon's media store, by `ref`, the sha256 of
-the bytes. It adds:
+one, and the picture and site icon of a link preview stored on a row. A
+picture or file Fermix sends in the Mac's chat, or from a voice call, is the
+same: an assistant row of `kind: "media"` whose `media_refs[]` names it,
+announced as a `row`. Their bytes are in the daemon's media store, by `ref`,
+the sha256 of the bytes. It adds:
 
 - two client events: `media_fetch { profile_id, ref }` asks for a managed
   local file holding the bytes of a ref, and `media_release { profile_id,
@@ -146,6 +158,134 @@ Every version 3 event, field and rule holds unchanged on version 4. Since
 version 4 the window is {3, 4}, so a version 2 client is refused with
 `error: unsupported_protocol_version` (`client_too_old`).
 
+### Version 5: a watcher's follow-ups on the owner's devices
+
+Version 5 lets the owner answer a watcher's follow-up in the Mac's chat. A
+watcher may have a follow-up, a job of the owner's own words that an item
+passing the watcher sets off; it waits for the owner on a card, a card of
+the `proposal` event keyed by its own `proposal_id` (`cft_…`), answered with
+`proposal_answer` and ended with `proposal_resolved`, as a mandate's proposal
+is. It adds no event:
+
+- one card field, `follow_up`, in place of `mandate`, `tool` and
+  `outside.args_text`, which a follow-up's card does not carry (see
+  *Proposals*). A version 4 client requires those three, so a card that
+  carries `follow_up` is sent only to a version 5 connection; its
+  `proposal_resolved` goes to every owner connection, and a client that never
+  held the card has nothing to show for it.
+
+A mandate's card gains `outside.args` and `outside.reason`, the compact card's
+lines. They are additive, so they are sent on every version and an older
+client ignores them.
+
+A follow-up's card also offers Always allow: `follow_up.offers_always_allow`
+is `true`, and `proposal_answer` takes the `decision` `always_allow` for it,
+which runs it as `confirm` does and lets the follow-up's later items run with
+no card until what it runs or what sets it off changes. Neither needs a
+version: the field is additive, so an older client ignores it and answers
+with `confirm` and `deny` as before, and a client sends `always_allow` only to
+a card whose `offers_always_allow` it read, which a daemon that takes it
+alone writes. A mandate's card does not offer it, and refuses it with
+`error: request_failed`. The approval prompt (`cfa_…`) a daemon before Always
+allow sent for an automatic follow-up is gone, with its `follow_up.asks`
+value `automatic` and the `daily_cap` and `set_off_by` it carried.
+
+Every version 4 event, field and rule holds unchanged on version 5. Since
+version 5 the window is {4, 5}, so a version 3 client is refused with
+`error: unsupported_protocol_version` (`client_too_old`).
+
+### Version 6: what a turn is doing, the owner's lists, and Always On without polling
+
+Version 6 says what a turn is doing while it runs, in words a person reads,
+never a tool's name, so a long turn shows its steps rather than only that it
+is thinking. It adds:
+
+- one server event: `reasoning { turn_id, text }`, the model's summary of one
+  step of its reasoning, sent as the step completes, as the provider wrote it
+  (markdown, often opening with a bold line that names the step), trimmed and
+  at most 4,096 bytes, cut on a character. A turn may send several, or none:
+  only a provider that writes a summary of its reasoning sends one (today, a
+  ChatGPT sign-in). It is live-only, like `text_delta`: it carries no seq, it
+  is never stored, and a client that joins mid-turn has not seen the earlier
+  ones. It names version 6 as its `x-since-version` and reaches version 6
+  connections only;
+- one field: `activity` on a `tool_event` whose `phase` is `start`, the
+  engine's sentence for the step (`Searching the web`, `Running a command`,
+  `Using Notion`): sentence case, no final period, at most 120 bytes, never
+  the tool's name. A built-in tool says its own; a tool a plugin brings says
+  `Using` and the plugin's name, and one from an MCP server the owner added
+  `Using` and the name the owner gave the server; anything else, a skill
+  among them, says `Working on it`. This daemon sends it on every start. It is
+  additive, so it is sent on every version and an older client ignores it.
+
+A client shows the latest of the two as the turn's current step, and keeps
+`tool` for its logs: the activity is the words, the tool is the id.
+
+Version 6 also brings the owner's lists (M85) to the Mac, drawn and changed
+live beside the chat. It adds:
+
+- three client events: `checklists_pull { profile_id }`, the index;
+  `checklist_pull { profile_id, list_id, removed? }`, one whole list; and
+  `checklist_edit { client_msg_id, profile_id, list_id?, op }`, one change by
+  row id;
+- two server events: `checklists`, the index, and `checklist`, one whole list,
+  each the answer to its pull and pushed again, whole, after every committed
+  change (see *Lists*).
+
+Each of the five names version 6 as its `x-since-version`. The daemon takes
+them from, and sends them to, only a version 6 connection placed as the
+owner's, and sends a list event only to a connection that pulled: the index
+to one that pulled the index, a list to one that holds it. A version 5
+connection that sends one is refused with `error: unknown_event` and closed,
+and is never sent one. The phone's wire does not carry lists in this version.
+
+Version 6 also lets an app stop asking for Always On's state on a timer. It
+adds one more server event, `home_status_changed`, with no fields: Always
+On's summary (management `home.status`'s `summary`, the one source of its
+words) changed, and the app reads `home.status` again over management for
+what it is now (see *When Always On changes*). It names version 6 as its
+`x-since-version` and reaches version 6 connections only.
+
+Every version 5 event, field and rule holds unchanged on version 6. Since
+version 6 the window is {5, 6}, so a version 4 client is refused with
+`error: unsupported_protocol_version` (`client_too_old`).
+
+### Version 7: files the owner attaches
+
+Version 7 lets the owner attach files in the Mac's chat: a picture, a
+recording, a document. The Mac and the daemon share a file system, so a file
+crosses by path, never in chunks on this line. It adds:
+
+- one client event: `attach_file { attach_id, kind, mime, size_bytes, sha256,
+  name? }`, which hands the daemon a file the client wrote in the inbox (see
+  *Attachments*);
+- one server event: `attach_status { attach_id, status }`, its answer once the
+  daemon holds the file; a refusal is `error: request_failed` with the
+  daemon's sentence and the `attach_id`;
+- a non-empty `msg.attach_ids`, naming those files: the message's turn reads
+  them as it reads a phone's attachments, and its user's `row` carries them
+  in `media_refs`.
+
+Each of the two events names version 7 as its `x-since-version`. The daemon
+takes `attach_file`, and a `msg` that names a file, only from a version 7
+connection placed as the owner's (see *Transport*), and sends `attach_status`
+only to that connection. A version 6 connection that sends `attach_file` is
+refused with `error: unknown_event` and closed; a `msg` that names a file from
+a version 6 connection, or from one not placed as the owner's, is refused with
+`error: attachments_unsupported` and closed, as every such `msg` was before.
+
+`server_hello` gains two fields, additive and optional, so on every version:
+`commands`, the slash commands an app offers in its palette, each `{ name,
+aliases[], description }`, the list the phone's `caps.commands` carries,
+sent on every hello from this daemon; and `attachments { dir, max_bytes }`,
+the inbox and the largest file the daemon takes, sent only to a connection
+placed as the owner's and only while the media store runs. An app offers
+attachments only when its hello carried `attachments`.
+
+Every version 6 event, field and rule holds unchanged on version 7. Since
+version 7 the window is {6, 7}, so a version 5 client is refused with
+`error: unsupported_protocol_version` (`client_too_old`).
+
 ## Handshake state machine
 
 The connection opens with a **mandatory, one-shot handshake**, exactly as the
@@ -153,11 +293,13 @@ Realtime voice socket's. No other event is serviced until it completes.
 
 ```
 companion: connect socket
-companion -> daemon:  client_hello { protocol_version: P }
+companion -> daemon:  client_hello { protocol_version: P, primary_epoch?: E }
                       daemon negotiates P against {min, max}:
-                        P in [min, max] -> daemon -> companion: server_hello { min_version, max_version }
+                        P in [min, max] -> daemon -> companion: server_hello { min_version, max_version, primary_epoch?, role, commands, attachments? }
                         P < min         -> error(unsupported_protocol_version, client_too_old); close
                         P > max         -> error(unsupported_protocol_version, client_too_new); close
+                      then, on the primary, E against the home's primary epoch M:
+                        E > M           -> error(stale_primary); close
 companion: on server_hello, validate its own version V in [min_version, max_version]:
              in range     -> connected
              out of range -> refuse; report which side must update
@@ -184,6 +326,48 @@ Rules the companion enforces:
 update the app; `client_too_new`: update Fermix), `client_version`,
 `min_version`, and `max_version`.
 
+### Primary epoch
+
+`server_hello` carries `primary_epoch`, a positive integer: how many times this
+home has become the primary engine. It is 1 from the home's first boot as the
+primary and goes up by one each time the home moves to another host or is
+restored from a snapshot; it never goes down. It is also the generation id of
+the home's store: rows a client cached under one epoch belong to another store
+than rows served under a different one. The field is absent only from a home
+that has never booted as the primary, which an engine in the device role can
+be, and from a daemon older than the epoch. Both hellos' fields are additive
+and optional, so neither needs a version bump.
+
+`server_hello` also carries `role`, the engine's role: `primary` or `device`.
+This daemon sends it on every hello; a `server_hello` without it comes from an
+older daemon and is treated as `primary`. An engine in the device role runs on
+a home that is a retired copy of the primary, or never was one, so its epoch
+can be lower than the primary's without anything being wrong. Since that copy
+is retired, it refuses every event that would write it (`msg`, `command`,
+`cancel`, `read_state`, `proposal_answer`, `checklist_edit`, `attach_file`)
+with `error: request_failed` and the `message` `This engine runs in the device
+role; the primary is <host>.`, writing nothing, and serves the reads
+(`history_pull`, `history_search`, `media_fetch`, `checklists_pull`,
+`checklist_pull`) as before.
+
+A client keeps the highest `primary_epoch` it has seen from a `primary` only,
+and sends it as `client_hello.primary_epoch`. A `device` engine's epoch is
+never compared and never raises the highest-seen value. A `server_hello` from
+a `primary` with a lower epoch, or with none once the client has seen one, is a
+stale primary: the client refuses it by that name, sends nothing more, and
+tells the owner that this Fermix is an older copy of the one that moved.
+
+The primary refuses a `client_hello` whose `primary_epoch` is greater than its
+own with `error: stale_primary`, `message` `This engine is at epoch <mine>; you
+have seen epoch <theirs>: the primary moved, reconnect to the current one`, and
+closes the connection; it joins nothing and sends no `server_hello`. A lower or
+absent `primary_epoch` is served, and a home with no epoch compares none. An
+engine in the device role announces its home's epoch and refuses no client for
+having seen a higher one: its home is a retired copy of the primary, and
+refusing a lower primary is the client's rule. An epoch file the daemon cannot
+read refuses the hello with `error: primary_epoch_unavailable`, its `message`
+naming why, and closes.
+
 ## Rollout / rollback order
 
 The daemon and the app ship from separate repositories, so a version bump lands
@@ -199,8 +383,8 @@ in a fixed order:
 
 | `type` | Fields | Notes |
 |---|---|---|
-| `client_hello` | `protocol_version` (int > 0) | First frame. Opens the handshake. |
-| `msg` | `client_msg_id`, `profile_id`, `text`, `attach_ids[]` | A message to the agent. `text` must not be blank. `attach_ids` is **empty** on this wire in version 1; a non-empty list is refused with `error: attachments_unsupported`. |
+| `client_hello` | `protocol_version` (int > 0); `primary_epoch?` (int > 0) | First frame. Opens the handshake. `primary_epoch` is the highest primary epoch the client has seen, absent when it has seen none; see *Primary epoch*. |
+| `msg` | `client_msg_id`, `profile_id`, `text`, `attach_ids[]` | A message to the agent. `text` must not be blank unless `attach_ids` names a file. Version 7: `attach_ids` names files whose `attach_file` was answered `present`, from a version 7 connection placed as the owner's only; on version 6, or from any other connection, a non-empty list is refused with `error: attachments_unsupported`. See *Attachments*. |
 | `command` | `client_msg_id`, `profile_id`, `name`; `args?` | A slash command, `/name args`. An approval's routes are sent this way. |
 | `cancel` | `profile_id`, `client_msg_id`; `task_ref?` | Stops the turn of that request, running or waiting, and no other, whichever client sent the request (the Mac or a phone). Never answered itself; see *Streaming a turn*. Version 2: with `task_ref { call_uuid, task_id, revision }` it stops instead the GPT-Live task those ids name, one that outlived its call, and `client_msg_id` names the cancel itself; see *A Live call's rows*. |
 | `history_pull` | `profile_id`, `limit` (1–200), and exactly one of `after_seq` (≥ 0) or `before_seq` (≥ 1) | `after_seq` pages forward (the catch-up read); `before_seq` pages backward from it (scroll to the top). Either is any unsigned 64-bit value. |
@@ -208,7 +392,11 @@ in a fixed order:
 | `read_state` | `profile_id`, `read_up_to_seq` | Advances the monotonic read frontier, never past the newest row. |
 | `media_fetch` | `profile_id`, `ref` (64 lowercase hex digits) | Version 3. Asks for a managed local file holding the bytes of `ref`, a media ref a row of the profile names. Answered by `media_path`, `media_missing`, or `error: request_failed` with `ref`. Any other `ref` is refused with `error: invalid_field` (`ref`) and the connection is closed. See *Managed media files*. |
 | `media_release` | `profile_id`, `ref` (64 lowercase hex digits) | Version 3. The client has finished with the file `media_path` granted for `ref`. Never answered. Releasing a ref this connection does not hold changes nothing. |
-| `proposal_answer` | `client_msg_id`, `profile_id`, `proposal_id`, `decision` (`confirm` or `deny`) | Version 4. The owner's answer to a proposal. Answered `accepted` (`duplicate: false`) once the decision is recorded, then `proposal_resolved`; a refusal is `error: request_failed` with the daemon's sentence and `client_msg_id`. Taken only from a connection placed as the owner's; see *Proposals*. |
+| `proposal_answer` | `client_msg_id`, `profile_id`, `proposal_id`, `decision` (`confirm`, `deny`, or `always_allow` for a follow-up's card that offers it) | Version 4. The owner's answer to a proposal. Answered `accepted` (`duplicate: false`) once the decision is recorded, then `proposal_resolved`; a refusal is `error: request_failed` with the daemon's sentence and `client_msg_id`. Taken only from a connection placed as the owner's; see *Proposals*. |
+| `checklists_pull` | `profile_id` | Version 6. Asks for the index of the owner's lists, answered `checklists`; from then on this connection is sent the index again after any change. Taken only from a connection placed as the owner's; see *Lists*. |
+| `checklist_pull` | `profile_id`, `list_id` (`ck_` id); `removed?` (boolean) | Version 6. Asks for one whole list, answered `checklist`; the connection then holds it (at most 16) and is sent it again after every change. `removed: true` adds the rows removed in the last 30 days. Owner's connection only; see *Lists*. |
+| `checklist_edit` | `client_msg_id` (at most 128 characters), `profile_id`, `op`; `list_id?` (`ck_` id, for every op but `create`) | Version 6. One op on the owner's lists, by row id. Answered `accepted` once applied, `duplicate: true` when the `client_msg_id` was already applied; a refusal is `error: request_failed` with the engine's sentence and `client_msg_id`, and changes nothing. Owner's connection only; see *Lists*. |
+| `attach_file` | `attach_id` (1–64 of `A–Z a–z 0–9 _ -`), `kind`, `mime` (at most 255 bytes), `size_bytes`, `sha256` (64 lowercase hex digits); `name?` (at most 255 bytes) | Version 7. Hands the daemon the file the client wrote at `<attachments.dir>/<attach_id>`; there is no path field. `kind` is `image`, `animation`, `video`, `audio`, `voice`, `document` or `file`, a hint. Answered `attach_status` (`present`), or `error: request_failed` with the daemon's sentence and `attach_id`; the daemon removes the file either way. Owner's connection only; see *Attachments*. |
 
 `profile_id` is `main`, the one profile; any other is refused with
 `error: unsupported_profile`, and the connection stays open.
@@ -217,15 +405,16 @@ in a fixed order:
 
 | `type` | Fields | Notes |
 |---|---|---|
-| `server_hello` | `min_version`, `max_version` | Handshake reply. |
-| `accepted` | `client_msg_id`, `duplicate`; `server_seq?` | Durable receipt for a `msg` or `command`; clears the outbox item. `server_seq` is present only on a duplicate whose request already has a reply row: that reply's seq. A first `accepted` never carries it; the request's own row arrives as a `row`. |
+| `server_hello` | `min_version`, `max_version`; `primary_epoch?`, `role?`, `commands[]?`, `attachments?` | Handshake reply. `primary_epoch` is the home's primary epoch, absent only from a home that has never booted as the primary; `role` is the engine's, `primary` or `device`, which this daemon always sends and an older daemon leaves out; see *Primary epoch*. `commands` is the slash command palette, each `{name, aliases[], description}`, which this daemon always sends; `attachments` is `{dir, max_bytes}`, sent only to a connection placed as the owner's while the media store runs; see *Version 7* and *Attachments*. |
+| `accepted` | `client_msg_id`, `duplicate`; `server_seq?` | Durable receipt for a `msg`, a `command` or (version 6) a `checklist_edit`; clears the outbox item. `server_seq` is present only on a duplicate whose request already has a reply row: that reply's seq. A first `accepted` never carries it; the request's own row arrives as a `row`. |
 | `turn_started` | `profile_id`, `turn_id`, `in_reply_to` | A turn began answering `in_reply_to`. |
 | `text_delta` | `turn_id`, `text` | Text to append to the turn's draft, exactly as sent. |
-| `tool_event` | `turn_id`, `tool`, `phase`; `detail?` | `phase` is `start` or `stop`. `detail` is at most 512 bytes. |
-| `text_done` | `turn_id`, `server_seq`, `text`; `blocks[]?` | A reply's canonical text at its timeline row, sent once the turn has completed; replaces the draft. A turn may send more than one. `blocks` are the row's, present only when it has one; see *Blocks under a reply*. |
-| `turn_error` | `turn_id`, `code`, `message` | The turn's terminal failure: `code` is `cancelled` after a `cancel`, `interrupted` when the daemon lost the turn. `message` is at most 512 bytes. |
+| `tool_event` | `turn_id`, `tool`, `phase`; `detail?`, `activity?` | `phase` is `start` or `stop`. `detail` is at most 512 bytes. `activity`, on a start, is the engine's sentence for the step, at most 120 bytes; see *Version 6*. |
+| `reasoning` | `turn_id`, `text` | Version 6. The model's summary of one step of its reasoning, at most 4,096 bytes. Live-only, no seq; see *Version 6*. Sent only to a connection on version 6. |
+| `text_done` | `turn_id`, `server_seq`, `text`; `ts?`, `blocks[]?` | A reply's canonical text at its timeline row, sent once the turn has completed; replaces the draft. A turn may send more than one, each at its own row. `ts` is the time that row stores, exactly as its `row` and its `history_page` message carry it, so a client shows when the reply was written without reading history; this daemon always sends it and an older daemon leaves it out. `blocks` are the row's, present only when it has one; see *Blocks under a reply*. |
+| `turn_error` | `turn_id`, `code`, `message` | The turn's terminal failure: `code` is `cancelled` after a `cancel`, `interrupted` when the daemon lost the turn, `uncertain_after_restart` when the request may have run before the daemon restarted (see *Delivery and the outbox*). `message` is at most 512 bytes. |
 | `turn_done` | `turn_id` | Version 2. The turn completed and wrote no reply: it ends the turn, and nothing of its draft is kept. Sent only to a connection on version 2; see *Version 2*. |
-| `row` | `profile_id`, `server_seq`, `role`, `text`, `ts`, `media_refs[]`; `client_msg_id?`, `kind?`, `metadata?`, `link_previews[]?`, `blocks[]?` | A timeline row this socket did not stream, announced to every connection as it is written: the sender's own message (with its `client_msg_id`, to match the outbox), a slash command's answer, a scheduled delivery, a message from a phone, the reply to a phone's turn, and a Live call's row. `kind`, `metadata`, `media_refs`, `link_previews` and `blocks` are the history message's, as a `history_page` carries them (see *Timeline shapes*); a Live call's row carries `metadata.call` (see *A Live call's rows*). |
+| `row` | `profile_id`, `server_seq`, `role`, `text`, `ts`, `media_refs[]`; `client_msg_id?`, `kind?`, `metadata?`, `link_previews[]?`, `blocks[]?` | A timeline row this socket did not stream, announced to every connection as it is written: the sender's own message (with its `client_msg_id`, to match the outbox), a slash command's answer, a scheduled delivery, a message from a phone, the reply to a phone's turn, and a Live call's row. `kind`, `metadata`, `media_refs`, `link_previews` and `blocks` are the history message's, as a `history_page` carries them (see *Timeline shapes*); a Live call's row carries `metadata.call` (see *A Live call's rows*), and a message a scheduled job's or a cue's run sent carries `metadata.origin` (see *Where a message came from*). |
 | `row_updated` | `profile_id`, `server_seq` | Version 3. A row already written changed: its text, its media refs or its link previews. Carries no content; see *When a row changes*. Sent only to a connection on version 3. |
 | `approval` | `approval_id`, `kind`, `text`, `token`, `ttl_s`, `approve_command`, `deny_command`; `detail?` | An owner-approval card raised by a turn on this socket. The token is submitted, never rendered. Routes are nonempty and at most 1,024 characters. Sent again after `server_hello` while it waits; see *Approvals*. |
 | `approval_resolved` | `approval_id`, `outcome` | `approved` or `denied` when the owner answered, `expired` when its `ttl_s` ran out. |
@@ -236,7 +425,11 @@ in a fixed order:
 | `media_missing` | `ref` | Version 3. Nothing to grant for `ref`; see *Managed media files*. Sent only to a connection on version 3. |
 | `proposal` | `profile_id`, `proposal` (the card) | Version 4. A proposal waiting for the owner: sent when it is stored, and again after `server_hello` for each still waiting, oldest first. Sent only to a connection on version 4 placed as the owner's; see *Proposals*. |
 | `proposal_resolved` | `profile_id`, `proposal_id`, `state`, `sentence`; `result_status?`, `result_text?` | Version 4. A proposal left `waiting`: `denied`, `expired` or `refused`, or `confirmed` once its call has finished, whichever surface decided it. Sent only to a connection on version 4 placed as the owner's; see *Proposals*. |
-| `error` | `reason`; `message?`, `field?`, `event?`, `client_msg_id?`, `ref?`, `direction?`, `client_version?`, `min_version?`, `max_version?` | A refusal; see *Errors*. |
+| `home_status_changed` | none | Version 6. Always On's summary changed: read `home.status` over management. Carries no content. Sent once after `server_hello` unless Always On is off, then at each change, never while it stays off, only to a connection on version 6; see *When Always On changes*. |
+| `checklists` | `profile_id`, `lists[]` | Version 6. The index: every live list as `{list_id, title, folder?, open, done, rev}`, in picker order. The answer to `checklists_pull`, and pushed again, whole, after any change. Sent only to a version 6 connection placed as the owner's that pulled the index; see *Lists*. |
+| `checklist` | `profile_id`, `list`; `made?` | Version 6. One whole list, `{list_id, title, rev, rows[], removed[]?, removed_at?}`. The answer to `checklist_pull`, and pushed again, whole, after every committed change to it, at most once per 100 ms. Sent only to a version 6 connection placed as the owner's that holds the list; see *Lists*. |
+| `attach_status` | `attach_id`, `status` | Version 7. The answer to an `attach_file` the daemon now holds: `status` is `present`, the only value this wire sends, and a `msg` may name `attach_id` from then on. Sent only to the version 7 owner's connection that sent it; see *Attachments*. |
+| `error` | `reason`; `message?`, `field?`, `event?`, `client_msg_id?`, `ref?`, `attach_id?`, `direction?`, `client_version?`, `min_version?`, `max_version?` | A refusal; see *Errors*. |
 
 ### Timeline shapes
 
@@ -251,10 +444,11 @@ written, whichever client's row it is: `url` (at most 2,048 bytes), where the
 page answered from after redirects, `site` (120), `title` (300), and optional
 `link` (2,048), the address the row's text wrote, which is what a client pairs
 the card with (a preview stored before links were kept has none, and pairs by
-its `url`), `description` (600) and `image_ref`; a row carries at most 4, and
-has the key only when it has one. A reply's previews are of the links its
-`blocks[]` do not draw. `metadata` never holds a null. Internal storage columns
-are never shipped.
+its `url`), `description` (600), `image_ref` (the page's picture) and
+`icon_ref` (the site's icon, read by the daemon under the phone protocol's
+bounds); a row carries at most 4, and has the key only when it has one. A
+reply's previews are of the links its `blocks[]` do not draw. `metadata` never
+holds a null. Internal storage columns are never shipped.
 
 A `search_results` hit carries `server_seq`, `role`, `ts`, `excerpt` (plain
 text around the matches, `…` where it was cut), and `ranges[]`, each
@@ -316,10 +510,39 @@ the same task revision and event, or for the same call's end, finds the row
 already written, and the realtime wire's `task.server_seq` names a task's, so
 the app can say the result is in the chat.
 
+### Where a message came from
+
+A message Fermix sends on its own, from a scheduled job's run or from what a
+cue set off, is an assistant row like a reply. Its `metadata.origin` says
+where it came from, so a client can name the source above it:
+
+| Key | Type | Notes |
+|---|---|---|
+| `kind` | `job` \| `cue` | `job`: a run of a scheduled job, whether its schedule or the owner's Run now started it. `cue`: what a cue set off through a watcher: the run of the watcher's task (its reply, Fermix's report of it, and its final failure), the run of the watcher's follow-up, and the watcher's notices (a hold, a reached cap, a gap, a follow-up that did not start). Always present. |
+| `name` | string, never empty | For `job`, the job's name, as the owner's jobs list names it. For `cue`, the watcher's name exactly as `cues.status` publishes it in a watcher's `name`, the key a client opens that watcher's page by, never the name of the task or follow-up the watcher runs. Always present. |
+
+No other key appears in it. Every row of such a message carries the same
+origin: its text, and each picture or file the run sends (`kind: "media"`).
+A row with nothing to name has no `origin`: the owner's own message, a
+turn's reply, a slash command's answer, a Live call's row, a reminder,
+Fermix's notice about a cue source, a mandate or a confirmed call whose
+outcome is unknown, and a run with no name to give (a follow-up whose
+watcher was removed before it ran). A name is never
+made up. A row a job's or a cue's run wrote before `origin` existed is given
+the origin its run gives a row today when the daemon starts, as long as what
+names it is still on record: the run, and for a cue the watcher and the cue
+delivery or follow-up trigger that led to the run, which are kept about 30
+days after they end. A watcher's notice from then, and a row whose run,
+delivery, trigger or watcher is gone, have none. Nothing is announced: a
+client sees it the next time a history page carries the row. The key is
+additive, so it is sent on every version: a client that
+does not know `origin`, or meets a `kind` it does not know, ignores it and
+draws the row as it draws any other.
+
 ## Managed media files
 
 A `media_fetch` names a ref a row of the profile names, in its `media_refs` or
-as a link preview's `image_ref`. The daemon answers with one of:
+as a link preview's `image_ref` or `icon_ref`. The daemon answers with one of:
 
 - `media_path { ref, path, kind, mime, size_bytes, sha256 }`, the grant.
   `path` is absolute: the managed file `$FERMIX_HOME/companion/media/<ref><ext>`,
@@ -367,6 +590,57 @@ rules:
 The two numbers are the schema's `x-media-budget-bytes` (536,870,912) and
 `x-media-release-grace-s` (60).
 
+## Attachments
+
+The owner's connection hands the daemon a file by writing it where the daemon
+reads it, on the same machine (version 7):
+
+1. **The inbox.** `server_hello.attachments.dir` is the inbox,
+   `$FERMIX_HOME/companion/inbox` (default `~/.fermix/companion/inbox`), which
+   the daemon makes at mode `0700`. `max_bytes` is the largest file the daemon
+   takes: the media store's bound, the same `max_media_bytes` setting the
+   phone's `caps.max_media_bytes` comes from, 20 MiB by default. A hello
+   without `attachments` (a connection not placed as the owner's, the media
+   store not running, a desktop whose home moved) means no file can be handed
+   over, and the app offers none.
+2. **Write, then announce.** The client picks an `attach_id`, 1 to 64 ASCII
+   letters, digits, `_` or `-`, new for each file it attaches (it is the
+   file's name: an `attach_id` the daemon already took is refused), writes
+   the whole file at `<dir>/<attach_id>` with mode `0600`, and then sends
+   `attach_file { attach_id, kind, mime, size_bytes, sha256, name? }`.
+   `size_bytes` and `sha256` (lowercase hex) are the file's. `kind` is
+   `image`, `animation`, `video`, `audio`, `voice`, `document` or `file`, a
+   hint as the phone's is: the daemon names the kind from the bytes, `voice`
+   is a recording the owner made in the app, and the row names it `audio`.
+   `name` is the file's name to show; it and `mime` are at most 255 bytes.
+   There is no path field.
+3. **The daemon reads it.** It reads `<dir>/<attach_id>`, a regular file and
+   never a symlink, into the media store the phone's uploads use, under the
+   same limits and with the same checks: the bytes must be `size_bytes` long
+   and hash to `sha256`, or nothing is kept. A file whose bytes the store
+   already holds is taken without being read again.
+4. **One answer.** `attach_status { attach_id, status: "present" }` once the
+   store holds the file, or `error { reason: "request_failed", message,
+   attach_id }`, the daemon's sentence for why not: the file is too large
+   (`This file is too large: Fermix takes files of up to 20 MB.`), the store
+   has no room, the file is missing or not a plain file, its bytes do not
+   match what was announced, the store is not running, or the connection is
+   not the owner's. The connection stays open either way, and a client shows
+   the sentence.
+5. **The daemon removes the file.** Once it has read the file, or refused it,
+   the daemon removes `<dir>/<attach_id>` before it answers, so the inbox
+   holds nothing of it when the answer arrives. The app never deletes
+   anything in the inbox. Every file in it is removed when the daemon starts.
+6. **Then the message.** A `msg` names files by their `attach_id` in
+   `attach_ids`, each one whose `attach_file` was answered `present`; its
+   `text` may be blank when it names at least one. Its turn reads them as it reads a phone's
+   attachments, and the user's `row` carries each in `media_refs` (`kind:
+   "media"`), as a phone message's does. The daemon keeps an `attach_id` for
+   48 hours after it took it: a message naming one it no longer holds is
+   answered `accepted` and then `error { reason: "request_failed", message,
+   client_msg_id }`, `message` `Fermix no longer has a file this message
+   names. Attach it again.`, and runs no turn.
+
 ## When a row changes
 
 `row_updated { profile_id, server_seq }` (version 3) says a row already
@@ -385,18 +659,73 @@ The phones are not sent it: their wire has `link_preview`, which reaches them
 as before. A notice sent while a client was disconnected is lost, so a client
 that reconnects reads again the rows it shows.
 
+## When Always On changes
+
+`home_status_changed` (version 6) says that Always On's summary changed, and
+carries none of it: the app reads management's `home.status` and draws its
+`summary`, so the words come from one place. The daemon sends it to every
+version 6 connection:
+
+- **once after `server_hello`**, after the approvals and proposals that
+  follow it, unless Always On is `off`: an app that connects while Always On
+  is set up, moving or running reads its state once, and one that connects
+  while it is off reads nothing and asks nothing until it is told;
+- **at each change** of the summary after that: each time its `key` moves
+  (management's *The Always On summary*), which is every change the app
+  draws (the state, an action and its confirm, an alternative, a Details
+  line, the step in hand, the notice) and never the clock alone (a sentence
+  on `on` and `problem` and `off` with an age or a percentage in it, when
+  the provider was last checked, what was last seen). On the server, which
+  its desktops' summaries read in their `primary_home`, a change of its
+  newest backup, of its enrollment code or of the servers it holds counts as
+  well. The newest backup the summary counts from turning 7 days old moves
+  the summary's notice, so it is told once.
+- **never while Always On stays `off`**: an app forgets Always On while it is
+  off. A settings write that changes what the `off` sentence names (iMessage,
+  voice calls, meetings) is not told; the app reads that line when the owner
+  opens the pane. Entering `off` from another state (a server deleted before
+  the move, a cancelled setup) is a change, told once.
+
+The daemon works this out without polling anything. It reads the summary
+again only when something it rests on happens (the move's phase, a server
+enrolling or its code being opened, used, withdrawn or expiring, the Always
+On provisioner's file being written, the link to the server going up or
+down, a backup run finishing) and at the next time the
+summary changes by the clock alone (a code open 30 minutes while the
+computer is awake, a link down 10 minutes while it is awake, a waiting
+server's 24 hours, a backup's 3 days and its 7), on one timer, armed again
+at each read; and only while a version 6 connection is attached. While Always On is
+`off` it arms nothing and reads only on what could end `off` (a token, a
+code, a move). It never calls the cloud provider: the provider is read by a
+job, one of which a management `home.status` read starts when the summary
+rests on the provider's word and the last check is over a minute old.
+
+A notice sent while the app was disconnected is lost, so an app that
+connects reads nothing on its own: the notice after `server_hello` is its
+cue. The figures in `on` and `problem` sentences move without a notice, so
+an app that shows one reads `home.status` again when the owner opens the
+pane. A server's disk filling has no event of its own: its summary is read
+again at the next event (on the server, every backup run).
+
+**After a move.** The app's Always On pane reads the desktop's own
+`home.status`, so the desktop's engine sends the notice for its summary, not
+the server's (see *After a move: the desktop's tunnel*). While the server is
+unreachable the tunnel refuses every connection with `primary_unreachable`,
+so the app reads `home.status` when it is refused and when its connection
+ends that way: that is when the summary moves to `cannot_reach` and back.
+
 ## Blocks under a reply
 
-A reply can carry `blocks[]`: records its text links, which a client draws
-beside the text. Its `text_done`, its `row` and its history message carry the
+A reply can carry `blocks[]`: records its text links, and the lists its turn
+read or changed, which a client draws beside the text. Its `text_done`, its `row` and its history message carry the
 same `blocks`, and have the key only when the reply has one. The rules:
 
 - **The text stands alone.** Every reply is complete as text, each place it
   recommends linked by name. A block adds to the text and never replaces it,
   so a client that draws no blocks, every other channel and the transcript
   search lose nothing.
-- **A client skips a block `type` it does not know.** `places` is the only
-  type so far, and `blocks` holds at most one block of each type.
+- **A client skips a block `type` it does not know.** The types are `places`
+  and `checklists`, and `blocks` holds at most one block of each type.
 - **Additive, so no version bump.** An older client ignores the key (*Absent
   is absent*, under *Transport*).
 - **Places, in first-link order.** A `places` block holds the places a
@@ -429,9 +758,74 @@ same `blocks`, and have the key only when the reply has one. The rules:
 - **Bounds.** The counts are the search's own: at most 10 places and 5
   categories a place. Strings are as the source gave them, inside its 1 MiB
   response.
+- **Lists, by id.** A `checklists` block (M85) names the owner's lists that
+  `checklist_read` or `checklist_edit` read or changed in the reply's turn, in
+  the order the turn first touched them, one to eight: each `{list_id, title,
+  rows[]}`, `list_id` a `ck_` id, `title` the list's title when the turn ended
+  (at most 80 characters), and `rows` the `ci_` ids of the rows the turn added
+  or changed, empty for a list it only read. It holds ids and the title, never
+  an item's words: a client that draws it draws each list's rows as they stand
+  now (on version 6, by `checklist_pull`; see *Lists*), and the reply's text
+  stays the record of what happened. A scheduled
+  job's message carries one the same way.
 
 The phones' `row` carries the history message whole, so it carries `blocks`
 too, and a phone app may ignore them.
+
+## After a move: the desktop's tunnel
+
+When a desktop's home moves to another host (M75), the desktop's engine keeps
+running in the device role and keeps serving this socket at the same path, so
+the app changes nothing. Each connection is carried over the engine's one
+encrypted session to the primary as one channel of the mobile wire
+(`priv/mobile/PROTOCOL.md`, *Desktop sessions*: `companion_open`,
+`companion_line`, `companion_close`), and the primary serves it with an
+ordinary connection of its own companion socket and the owner's trust. So
+the hello, history, search, requests, streams, approvals and proposals are
+the primary's, exactly as described here: `server_hello` comes from the
+primary, with its `role` (`primary`) and `primary_epoch`, and the primary
+refuses a client that has seen a later primary.
+
+- **Who may connect.** Before it reads a line, the desktop's engine places the
+  process that connected, as above, and carries only the owner's app: a
+  client the engine itself started, or a detached one, is answered with
+  `error: unattended_client` and its sentence, and one it cannot identify with
+  `error: unidentified_client`; either is closed, and nothing reaches the
+  primary. The 4-client bound holds on this socket.
+- **Media stays local.** `media_fetch` asks for a file on this machine, so the
+  desktop's engine answers it: it fetches the blob from the primary, checks
+  it against its ref and grants the managed file under its own home, as
+  *Managed media files* says, once the connection's `client_hello` declared a
+  version that has it. `media_release` is answered by nothing, as always.
+- **No files to attach.** The app writes a file on the desktop, which the
+  primary's inbox is not on, so the primary's `server_hello` carries no
+  `attachments` there and the app offers none; an `attach_file` sent anyway
+  is refused with `error: request_failed` and its sentence.
+- **Always On is the desktop's.** The app's Always On pane reads this
+  computer's `home.status`, so on a connection whose `client_hello` declared
+  version 6 the desktop's engine sends its own `home_status_changed` after
+  the primary's `server_hello` and at each change of its own summary. The
+  primary's `home_status_changed` on that connection is never passed on: it
+  says the primary's part of the desktop's `home.status` (`primary_home`) may
+  have moved, and the desktop reads its summary again, telling the app only
+  if that changed.
+- **The primary unreachable.** A connection made while the engine cannot reach
+  the primary is answered with
+  `error: primary_unreachable` and closed, its `message` naming the primary:
+  `The server <name> is unreachable. Fermix keeps your message until it is
+  back.` Every open connection is ended the same way when the session to the
+  primary drops. The app keeps its outbox (see *Delivery and the outbox*) and
+  reconnects; the engine reconnects on its own, after 1 s and doubling to
+  60 s.
+- **This desktop revoked.** Once the primary no longer knows this computer
+  (it was removed from the server's devices, or the server was restored from
+  a snapshot taken before this computer joined it), the engine stops trying
+  until it restarts, and every open connection, and every one made after, is
+  answered with `error: desktop_revoked` and closed, its `message` saying so:
+  `The server <name> does not know this computer: it was removed from the
+  server's devices, or the server was restored from a snapshot taken before
+  this computer joined it. Fermix stopped reaching it.` Nothing waiting in the
+  outbox can be sent: the app says so rather than keeping it for later.
 
 ## One timeline with the phone
 
@@ -483,9 +877,23 @@ same row. So a client keeps a cursor, the last `server_seq` it shows, and:
 claims `client_msg_id` before it answers `accepted`; a resend of the same
 request is answered `accepted` with `duplicate: true` and never runs the turn
 twice. The same `client_msg_id` with different content is refused with
-`error: client_message_conflict`. A request the daemon accepted but could not
-finish because it stopped is run again when it next starts, so `accepted` is
-the point after which the companion stops resending. Claims last 24 hours.
+`error: client_message_conflict`. `accepted` is the point after which the
+companion stops resending. Claims last 24 hours.
+
+After a restart the daemon never runs again a request that may already have
+run. One it accepted but never started runs when it comes back; one whose
+turn had started does not; and when its home moved to another host or was
+restored from a snapshot (its primary epoch changed), none it had not
+finished runs. A request still accepted from before the daemon recorded
+which boot claimed it (one waiting when the daemon was upgraded to this rule)
+counts as started: it is settled once, not run. Each that does not run ends,
+once, whether recovery or a resend reaches it first, with a `turn_error` of
+code `uncertain_after_restart` (`cancelled` when it carried a cancel) to every
+connection attached then. Its `client_msg_id` stays claimed: a resend under it
+is a `duplicate: true` that never runs, since a resend the user meant looks
+like a blind outbox retry, and after that `accepted` the connection that
+resent it alone is sent the same `turn_error` again. To run it again the
+companion sends it under a new `client_msg_id`, only when the user asks.
 
 History is recovered exactly: `history_pull(after_seq)` returns the rows after
 a cursor, oldest first, with `next_after_seq` (the last row returned, or the
@@ -525,6 +933,12 @@ a new stretch and is appended after the previous one. A connection that joins
 mid-turn receives the text so far as its first `text_delta` for that turn,
 possibly without having seen `turn_started`. Deltas are live-only.
 
+Between them, a `tool_event` pair brackets each tool the turn runs, its start
+carrying the step's `activity`, and on version 6 a `reasoning` carries the
+model's summary of each step of its reasoning as it completes (see *Version
+6*). Both say what the turn is doing; neither is part of its reply, and
+neither is kept once the turn ends.
+
 A turn ends on the wire exactly once, and only from its outcome in the
 daemon's turn queue:
 
@@ -538,6 +952,8 @@ daemon's turn queue:
   code), and nothing of its draft is kept;
 - the daemon lost the turn (its queue restarted under it): one `turn_error`
   with code `interrupted`;
+- the request may have run before the daemon restarted: one `turn_error`
+  with code `uncertain_after_restart` (see *Delivery and the outbox*);
 - the request could not be handed to the turn queue: one `turn_error` with
   code `turn_failed`.
 
@@ -607,9 +1023,20 @@ it survives a restart.
   kept apart by structure: `args_text`, the recorded call's arguments as pretty
   JSON (at most 3,500 characters), and `cue? { type?, subject?, text?,
   occurred_at? }`, the cue's snapshot, absent when Fermix no longer keeps it
-  (`occurred_at` is the producer's claim, so it is outside text too). A client
-  draws `outside` as outside text, never as Fermix's words. Times are RFC 3339
-  UTC.
+  (`occurred_at` is the producer's claim, so it is outside text too). Beside
+  them, for the compact card's lines: `args?`, each argument as `{ name,
+  value }` (a string value as itself, any other as JSON), and `reason?`, the
+  filter's one-sentence reason for passing the item. A client draws `outside`
+  as outside text, never as Fermix's words. Times are RFC 3339 UTC.
+- **A follow-up's card** (version 5). In place of `mandate`, `tool` and the
+  call's arguments it carries `follow_up { asks, offers_always_allow?, name,
+  instructions, tools, reports_to }`, the follow-up in Fermix's and the
+  owner's words: `asks` is `run` (once, now), and `offers_always_allow`, when
+  `true`, says the card also takes `always_allow`. `task` is the follow-up's
+  job; `outside` holds only the item (`cue?`) and the filter's `reason?`,
+  since the follow-up is handed nothing of the item. Its states read as a
+  proposal's: a confirmed card is starting its run, whether by `confirm` or
+  `always_allow`, and a denied one was skipped.
 - **When.** A card is sent when the proposal is stored. Right after
   `server_hello`, the daemon sends the card of every proposal still waiting,
   oldest first (at most 100). A client keys cards by `proposal_id`, so a card
@@ -621,7 +1048,12 @@ it survives a restart.
   one write moves the proposal out of `waiting`, fenced on its id and its
   expiry. `deny` runs nothing. `confirm` checks the mandate's switches, its
   pins, its grant and its validator again, and runs exactly the recorded call,
-  once, with no model. `accepted` comes as soon as the decision is recorded,
+  once, with no model; on a follow-up's card it starts the follow-up's run.
+  `always_allow`, on a follow-up's card only, starts the run as `confirm` does
+  and, in the same write, lets the follow-up's later items run with no card
+  for what the card showed; one whose follow-up or what sets it off changed
+  since the card was shown allows nothing, and its `proposal_resolved`
+  sentence says which. `accepted` comes as soon as the decision is recorded,
   before the call has run. A second answer, from this socket, a phone, the
   management socket or the owner's chat, is refused with its sentence ("That
   call was already confirmed; it runs at most once."); so is an answer after
@@ -636,6 +1068,90 @@ it survives a restart.
   again: its waiting card is dropped at the next `server_hello`, since the
   daemon does not send it back.
 
+## Lists
+
+The owner's lists (M85) live in the engine's store, and the model, a scheduled
+job and the Mac change them through one transaction. Version 6 brings them to
+this socket: the Mac reads the index and whole lists, changes them by row id,
+and draws every change as it commits, whoever made it.
+
+- **Who.** List events go only to version 6 connections the daemon placed as
+  the owner's (see *Transport*). A pull or an edit from any other connection
+  is refused with `error: request_failed`, `message` "Only the owner's own
+  Fermix app can read or change the owner's lists.", and reads or changes
+  nothing.
+- **The index** (`checklists_pull`, answered `checklists`). Every live list
+  in picker order, each `{list_id, title, folder?, open, done, rev}`: `open`
+  and `done` count its items, and `rev` moves with every change to it. Once a
+  connection has pulled the index it is sent the index again, whole, after any
+  change to any list.
+- **A list** (`checklist_pull`, answered `checklist`). `list` is `{list_id,
+  title, rev, rows[]}`, the rows in order: an item is `{row_id, kind: "item",
+  text, done, note?, done_at?}` and a section heading `{row_id, kind:
+  "section", text}`. With `removed: true` the list also carries `removed[]`,
+  the rows removed in the last 30 days, newest first, each with its
+  `removed_at`; Recently removed is drawn from it. A list itself removed and
+  not yet swept still answers, with `removed_at`, so it can be restored. A
+  list that is gone is `error: request_failed` ("No list has that id; it may
+  have been removed more than 30 days ago."). Times are RFC 3339 UTC with
+  microseconds.
+- **Holding.** A connection holds each list it pulled, and the list a
+  `create` from it made, at most 16: pulling another lets the one it pulled
+  longest ago go, and nothing more of that list is sent to it until it pulls
+  it again. A list is held with or without its removed rows, as its last pull
+  asked. A list swept while held is let go.
+- **Pushes.** After every committed change to a list, by the model, a job or
+  any device, every connection that holds it is sent `checklist`, the whole
+  list again, and every connection that pulled the index `checklists`, at
+  most once per 100 ms per connection: a burst of changes is one push of each
+  list carrying the rev it ended on, then the index. Every push is whole
+  state, never a delta; a client drops one whose `rev` is below the one it
+  shows. A connection that never pulled is sent nothing.
+- **An edit** (`checklist_edit`). One `op`, applied in the same transaction
+  as the model's edits, its rows recorded as made from the Mac. `list_id`
+  names the list for every op but `create`. It is answered `accepted`
+  (`duplicate: false`) once applied, and its change reaches every holder as a
+  push, the sender too. An edit sent again with a `client_msg_id` already
+  applied (kept 30 days) is answered `accepted` with `duplicate: true`,
+  changes nothing, and the sender, when it holds the list, is sent it again.
+  `made` on the next push of a list maps the `client_msg_id` of each `create`
+  or `add` a device sent since the last one to what it made: a `create`'s
+  `list_id`, an `add`'s `row_id`. A client matches the ids it sent and
+  ignores the rest.
+- **Refusals.** An op the engine cannot take changes nothing and is answered
+  `error: request_failed` with the engine's sentence as `message` and the
+  edit's `client_msg_id`; the connection stays open. A client shows the
+  sentence and pulls the list again. A `row_id` the list no longer has is
+  "That row is not in this list any more; pull the list again."
+- **Bounds.** A title is at most 80 characters, a folder 40, an item's or a
+  section's text 280 and a note 1,000, each one line, trimmed (a note may
+  hold line breaks). The owner keeps at most 50 lists and a list holds at
+  most 500 rows. Ids are the engine's: `ck_` and ten lowercase letters or
+  digits for a list, `ci_` for a row, stable for the row's life.
+- **The reply.** A turn this connection carries after it pulled the index is
+  told the app draws lists, so the reply says in a sentence what changed and
+  leaves the items to the list drawn under it (the reply's `checklists` block,
+  see *Blocks under a reply*). A turn from a connection that never pulled the
+  index writes the list out as text.
+
+The ops, the model's by row id without its `replace`, with `clear_done` and
+`restore`:
+
+| `op` | Fields | Effect |
+|---|---|---|
+| `create` | `title`; `folder?` | Makes a list, held by the sending connection. A live list with the title is refused. |
+| `add` | `text`; `note?`; `section_id?` or `after_id?` | Adds an item at the end of that section, or right after that row; with neither, at the end of the list's first group. |
+| `check`, `uncheck` | `row_id` | Marks the item done or not done. |
+| `edit` | `row_id`; `text?`, `note?` (one at least) | Changes the item's words; `note: ""` clears its note. |
+| `move` | `row_id`; `section_id?` or `after_id?`; `to_list_id?` (one at least) | Moves the item within the list, or to another list, placed as an add is. |
+| `section` | `text`; `after_id?` | Adds a section heading after that row, which must end its section, or at the end. |
+| `remove` | `row_id` | Removes the row; it stays in Recently removed for 30 days. A section must be empty. |
+| `folder` | `folder` | Puts the list in that folder; `""` takes it out of its folder. |
+| `rename` | `text` | Renames the list. |
+| `remove_list` | — | Removes the list; it can be restored for 30 days. |
+| `clear_done` | — | Removes every done item; each stays in Recently removed. |
+| `restore` | `row_id?`; `title?` | With `row_id`, brings that removed row back at its place. Without it, brings the removed list back, under `title` when given, else under its own; a live list holding that title refuses it ("Another list is named "…" now, so this one cannot come back under that name; restore it with a new title, or rename the other list first."). |
+
 ## Errors
 
 | `reason` | Context | Connection |
@@ -643,42 +1159,73 @@ it survives a restart.
 | `invalid_json`, `invalid_event`, `missing_type` | — | closed |
 | `unknown_event` | `event` | closed |
 | `missing_field`, `invalid_field` | `field` | closed |
-| `attachments_unsupported` | — | closed |
+| `attachments_unsupported` | — | closed (a `msg` that names a file on version 6, or from a connection not placed as the owner's) |
 | `line_too_large` | — | closed |
 | `handshake_required`, `unexpected_client_hello` | — | closed |
 | `missing_protocol_version`, `invalid_protocol_version` | — | closed |
 | `unsupported_protocol_version` | `direction`, `client_version`, `min_version`, `max_version` | closed |
+| `stale_primary`, `primary_epoch_unavailable` | `message` | closed |
 | `max_clients_reached` | — | closed |
 | `unidentified_client` | `message` | closed |
+| `unattended_client` | `message` | closed |
+| `primary_unreachable` | `message` | closed |
+| `desktop_revoked` | `message` | closed |
 | `client_message_conflict` | `client_msg_id` | open |
 | `unsupported_profile` | `client_msg_id?` | open |
 | `request_backlog_full` | — | open |
-| `request_failed` | `message` (at most 512 bytes), `client_msg_id?`, `ref?` | open |
+| `request_failed` | `message` (at most 512 bytes), `client_msg_id?`, `ref?`, `attach_id?` | open |
 
 `unknown_event` also refuses an event newer than the version the connection's
-`client_hello` declared. `ref` is set only on the `request_failed` that answers
-a `media_fetch`. A refused `proposal_answer` is a `request_failed` whose
-`message` is the daemon's sentence, with the answer's `client_msg_id`.
+`client_hello` declared. `unattended_client`, `primary_unreachable` and
+`desktop_revoked` come only from a desktop whose home moved (see *After a
+move: the desktop's tunnel*), and `primary_unreachable` also from an engine whose home is moving
+away: while the move runs, a `msg`, `command`, `cancel` or `read_state` there
+is answered `primary_unreachable` with `Fermix is moving this home to <name>;
+your message is kept until it is done.` and the connection is closed; the app
+keeps its outbox and sends again once the engine is back. `ref` is set only on the `request_failed` that answers
+a `media_fetch`, and `attach_id` only on an error that answers an
+`attach_file`, whose `message` is the daemon's sentence (see *Attachments*); a
+`msg` naming a file the daemon no longer holds fails with its sentence and the
+message's `client_msg_id`. A refused `proposal_answer` is a `request_failed` whose
+`message` is the daemon's sentence, with the answer's `client_msg_id`. So is
+a refused `checklist_edit`, with the edit's `client_msg_id`; a refused
+`checklists_pull` or `checklist_pull` carries none.
 
 ## Chat sequence
 
 ```
-companion -> daemon:  client_hello { protocol_version: 4 }
-daemon -> companion:  server_hello { min_version: 3, max_version: 4 }
+companion -> daemon:  client_hello { protocol_version: 7 }
+daemon -> companion:  server_hello { min_version: 6, max_version: 7, commands: [...], attachments: { dir, max_bytes } }
+daemon -> companion:  home_status_changed {}                                (Always On is not off)
+                      (the app reads management home.status)
 companion -> daemon:  history_pull { profile_id: "main", after_seq: 12, limit: 200 }
 daemon -> companion:  history_page { messages: [...], next_after_seq: 12, history_head_seq: 12 }
 companion -> daemon:  msg { client_msg_id: "mac-1", profile_id: "main", text, attach_ids: [] }
 daemon -> companion:  accepted { client_msg_id: "mac-1", duplicate: false }
 daemon -> companion:  row { server_seq: 13, role: "user", text, ts, media_refs: [], client_msg_id: "mac-1" }
 daemon -> companion:  turn_started { turn_id: "turn-mac-1", in_reply_to: "mac-1" }
-daemon -> companion:  tool_event { turn_id, tool, phase: "start" } / { phase: "stop" }
+daemon -> companion:  reasoning { turn_id, text: "**Checking today's calendar**\n\n…" }
+daemon -> companion:  tool_event { turn_id, tool, phase: "start", activity: "Checking your reminders and events" } / { phase: "stop" }
 daemon -> companion:  text_delta { turn_id, text } …
-daemon -> companion:  text_done { turn_id, server_seq: 14, text }
+daemon -> companion:  text_done { turn_id, server_seq: 14, text, ts }
 companion -> daemon:  read_state { profile_id: "main", read_up_to_seq: 14 }
 daemon -> companion:  read_state { profile_id: "main", read_up_to_seq: 14 }
                       (reconnect; the outbox resends "mac-1")
 companion -> daemon:  msg { client_msg_id: "mac-1", … }
 daemon -> companion:  accepted { client_msg_id: "mac-1", duplicate: true, server_seq: 14 }
+```
+
+A picture the owner attaches, on version 7:
+
+```
+                      (the app writes ~/.fermix/companion/inbox/mac-att-7f3a9c, mode 0600)
+companion -> daemon:  attach_file { attach_id: "mac-att-7f3a9c", kind: "image", mime: "image/jpeg", size_bytes: 183204, sha256: "<64 hex>", name: "IMG_0412.jpg" }
+daemon -> companion:  attach_status { attach_id: "mac-att-7f3a9c", status: "present" }       (the inbox file is gone)
+companion -> daemon:  msg { client_msg_id: "mac-40", profile_id: "main", text: "What is in this picture?", attach_ids: ["mac-att-7f3a9c"] }
+daemon -> companion:  accepted { client_msg_id: "mac-40", duplicate: false }
+daemon -> companion:  row { server_seq: 30, role: "user", text, ts, kind: "media", client_msg_id: "mac-40",
+                            media_refs: [{ ref: "<64 hex>", kind: "image", mime: "image/jpeg", size_bytes: 183204, filename: "IMG_0412.jpg" }] }
+daemon -> companion:  turn_started { turn_id: "turn-mac-40", in_reply_to: "mac-40" } …
 ```
 
 A phone's voice note, on version 3:
@@ -692,6 +1239,15 @@ daemon -> companion:  history_page { messages: [{ server_seq: 21, content: "Pick
 companion -> daemon:  media_fetch { profile_id: "main", ref: "<64 hex>" }          (the person pressed play)
 daemon -> companion:  media_path { ref, path: "/Users/me/.fermix/companion/media/<ref>.ogg", kind: "audio", mime: "audio/ogg", size_bytes: 48213, sha256: "<same>" }
 companion -> daemon:  media_release { profile_id: "main", ref: "<64 hex>" }        (the player let it go)
+```
+
+A follow-up's card, on version 5:
+
+```
+daemon -> companion:  proposal { profile_id: "main", proposal: { proposal_id: "cft_…", state: "waiting", task, watcher: "codex-limits", summary, outside: { reason, cue }, follow_up: { asks: "run", name: "Codex review", instructions, tools: ["codex_run"], reports_to }, … } }
+companion -> daemon:  proposal_answer { client_msg_id: "mac-12", profile_id: "main", proposal_id: "cft_…", decision: "confirm" }
+daemon -> companion:  accepted { client_msg_id: "mac-12", duplicate: false }
+daemon -> companion:  proposal_resolved { profile_id: "main", proposal_id: "cft_…", state: "confirmed", sentence: "Confirmed; the follow-up is starting." }
 ```
 
 A proposal, on version 4:

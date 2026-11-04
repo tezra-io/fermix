@@ -163,6 +163,10 @@ defmodule FermixCore.Management.Secrets do
   @spec mcp_prefix() :: String.t()
   def mcp_prefix, do: @mcp_prefix
 
+  @doc "The `secret.set` id prefix for one value a cue source's kind declares."
+  @spec cue_prefix() :: String.t()
+  def cue_prefix, do: @cue_prefix
+
   defp plugin_ids do
     SecretPaths.all()
     |> Enum.filter(&Map.has_key?(&1, :plugin))

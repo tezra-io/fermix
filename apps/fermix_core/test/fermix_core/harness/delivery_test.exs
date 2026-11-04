@@ -309,29 +309,28 @@ defmodule FermixCore.Harness.DeliveryTest do
     end
 
     # Regression: "reason: exit_1" tells the owner nothing. When the vendor
-    # explained itself on its terminal event, that text is the whole diagnosis and
-    # must reach the delivered message.
-    test "a failed run leads with the vendor's own error text when it has one" do
+    # explained itself on its terminal event, that text is the whole diagnosis:
+    # the message is the status line, the vendor's words and the way back in, with
+    # no exit reason and no stderr tail (2026-11-03: Codex's refusal arrived as
+    # `exit_1` and "Reading additional input from stdin..."). The ledger row keeps
+    # both for `get_coding_run`.
+    test "a failed run the vendor explained reads as the vendor's words alone" do
       row =
         completed_row(%{
           id: "hr_000000000009",
           status: "failed",
           cwd: "/repo",
           reason: "exit_1",
-          diagnostics_tail: nil
+          diagnostics_tail:
+            "Not logged in · Please run /login\nReading additional input from stdin..."
         })
 
       message = Delivery.compose(row, "Not logged in · Please run /login")
 
-      assert message =~ "Not logged in · Please run /login"
-      assert message =~ "reason: exit_1"
-
-      # Position, not just presence: reordering failed_body/2 would keep bare
-      # presence assertions green while the message opened with "reason: exit_1"
-      # again — the exact uninformative lead this change removed.
-      vendor_at = :binary.match(message, "Not logged in") |> elem(0)
-      reason_at = :binary.match(message, "reason: exit_1") |> elem(0)
-      assert vendor_at < reason_at
+      assert message ==
+               "[run hr_000000000009] failed — codex · repo · 2m14s\n" <>
+                 "Not logged in · Please run /login\n" <>
+                 "Resume: cd /repo && codex exec resume sess-1 --json"
     end
 
     test "an interrupted run offers the resume hint" do

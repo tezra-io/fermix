@@ -96,21 +96,30 @@ defmodule FermixCore.Prompt.ChannelPresentation do
     end
   end
 
-  @doc """
-  Whether `chat_type` names a shared room rather than a private chat, by the
-  same positive list the addressing line keys on: an absent or unrecognised
-  value is not a group. Public so the open-loop due note (MILESTONE_78 §08)
-  stays out of shared chats by this one list.
-  """
-  @spec group_chat?(String.t() | nil) :: boolean()
-  def group_chat?(chat_type) when is_binary(chat_type) or is_nil(chat_type),
-    do: chat_type in @group_chat_types
-
   defp compose(channel_line, chat_type) do
     (@core_lines ++ [channel_line, group_line(chat_type)])
     |> Enum.reject(&is_nil/1)
     |> Enum.join("\n")
   end
+
+  @doc """
+  The line about the owner's lists (MILESTONE_85 §05), which
+  `Checklists.Note.rules/3` carries on the owner's private turns only. The
+  card's line goes to a turn on the Mac's chat whose connection draws lists
+  (`draws?`: it pulled their index), never to a version alone, since a Mac
+  app on the version may not draw them; every other turn is told to write the
+  list.
+  """
+  @spec checklist_line(String.t() | nil, boolean()) :: String.t()
+  def checklist_line("companion", true) do
+    "A list you read or change is drawn under your reply, live: say in a sentence what " <>
+      "changed and never repeat its items."
+  end
+
+  def checklist_line(channel, draws?)
+      when (is_binary(channel) or is_nil(channel)) and is_boolean(draws?),
+      do:
+        "No list is drawn here: when the owner asks to see a list, write it as a short checklist."
 
   defp group_line(chat_type) when chat_type in @group_chat_types do
     "- This is a shared chat: answer the person who asked, briefly addressing them, without lecturing the room."

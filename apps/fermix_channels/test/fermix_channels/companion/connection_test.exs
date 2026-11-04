@@ -11,9 +11,11 @@ defmodule FermixChannels.Companion.ConnectionTest do
   alias FermixChannels.Companion.Connection
   alias FermixChannels.Companion.Endpoint
   alias FermixChannels.Companion.Output
+  alias FermixChannels.Gateway.Commands.Registry, as: CommandRegistry
   alias FermixChannels.Mobile.RequestCoordinator
   alias FermixCore.Agents.TurnRunner
   alias FermixCore.Companion.Timeline
+  alias FermixCore.Home.StatusWatch
   alias FermixCore.Memory.Repo
   alias FermixTestSupport.ParentProcess
 
@@ -146,7 +148,9 @@ defmodule FermixChannels.Companion.ConnectionTest do
       request_coordinator: coordinator,
       gateway: GatewayStub,
       agent_server: queue_owner,
-      settlement_owner: turns
+      settlement_owner: turns,
+      # The engine's role (`Home.Role`), set here so no test reads the boot's.
+      engine_role: %{role: :primary, primary: nil}
     ]
 
     endpoint_opts = [
@@ -158,7 +162,8 @@ defmodule FermixChannels.Companion.ConnectionTest do
         registry: registry,
         request_opts: request_opts,
         media_grants: grants,
-        media_grants_module: GrantsDouble
+        media_grants_module: GrantsDouble,
+        primary_epoch: fn -> {:ok, 2} end
       ]
     ]
 
@@ -182,6 +187,33 @@ defmodule FermixChannels.Companion.ConnectionTest do
     assert Bitwise.band(mode, 0o777) == 0o600
   end
 
+  # A command Fermix confines gets no answer here (`SocketPeer.admit/2`; the
+  # real kernel check runs in `SocketReachTest`): no history, no turn, no card.
+  test "a peer the socket does not answer is closed before any connection starts", ctx do
+    path = Path.join(System.tmp_dir!(), "fermix-companion-gated-#{System.unique_integer()}.sock")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm(path) end)
+    name = :"companion_gated_endpoint_#{System.unique_integer([:positive])}"
+
+    gated =
+      Keyword.merge(ctx.endpoint_opts,
+        name: name,
+        socket_path: path,
+        peer_gate: fn _socket -> {:error, {:sandboxed, 4242}} end
+      )
+
+    start_supervised!({Endpoint, gated}, id: :gated_endpoint)
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        client = connect(path)
+        send_line(client, %{"type" => "client_hello", "protocol_version" => 6})
+        assert :gen_tcp.recv(client, 0, 2_000) == {:error, :closed}
+      end)
+
+    assert log =~ "#{path} refused a connection: process 4242 runs sandboxed"
+    assert Endpoint.connection_count(name) == 0
+  end
+
   test "the handshake is mandatory and one-shot", %{socket_path: path} do
     early = connect(path)
     send_line(early, %{"type" => "read_state", "profile_id" => "main", "read_up_to_seq" => 1})
@@ -189,19 +221,27 @@ defmodule FermixChannels.Companion.ConnectionTest do
     assert closed?(early)
 
     client = connect(path)
-    send_line(client, %{"type" => "client_hello", "protocol_version" => 4})
-    assert recv(client) == %{"type" => "server_hello", "min_version" => 3, "max_version" => 4}
+    send_line(client, %{"type" => "client_hello", "protocol_version" => 7})
 
-    send_line(client, %{"type" => "client_hello", "protocol_version" => 4})
+    assert recv(client) == %{
+             "type" => "server_hello",
+             "min_version" => 6,
+             "max_version" => 7,
+             "primary_epoch" => 2,
+             "role" => "primary",
+             "commands" => CommandRegistry.catalog()
+           }
+
+    send_line(client, %{"type" => "client_hello", "protocol_version" => 7})
     assert %{"type" => "error", "reason" => "unexpected_client_hello"} = recv(client)
     assert closed?(client)
   end
 
-  # M60 app surface §3.7: version 4 adds the proposals, and version 3 is
-  # still served. Each connection is known by the version its hello declared.
-  test "a version 3 and a version 4 client are both served, each known by its version", ctx do
-    old = hello(ctx.socket_path, 3)
-    new = hello(ctx.socket_path, 4)
+  # Version 7 adds the owner's files, and version 6 is still served. Each
+  # connection is known by the version its hello declared.
+  test "a version 6 and a version 7 client are both served, each known by its version", ctx do
+    old = hello(ctx.socket_path, 6)
+    new = hello(ctx.socket_path, 7)
 
     versions =
       ctx.registry
@@ -209,7 +249,7 @@ defmodule FermixChannels.Companion.ConnectionTest do
       |> Enum.map(fn {_connection, version} -> version end)
       |> Enum.sort()
 
-    assert versions == [3, 4]
+    assert versions == [6, 7]
 
     for client <- [old, new] do
       send_line(client, %{"type" => "read_state", "profile_id" => "main", "read_up_to_seq" => 0})
@@ -217,11 +257,16 @@ defmodule FermixChannels.Companion.ConnectionTest do
     end
   end
 
-  # Every client now reads `turn_done` (version 2) and `row_updated` (version
-  # 3); a proposal is version 4's, so a version 3 client never sees one.
-  test "turn_done and row_updated reach both; a proposal the version 4 client only", ctx do
-    old = hello(ctx.socket_path, 3)
-    new = hello(ctx.socket_path, 4)
+  # Every client now reads `row_updated` (version 3), a proposal's end
+  # (version 4), a follow-up's card (version 5), a step's reasoning and a
+  # tool's start with its words (version 6). An event a later version brought
+  # still never reaches an older client: `attach_status`, the one version 7
+  # brought, stands for it here, though the daemon only ever writes it in
+  # answer to its own connection's `attach_file`.
+  test "every event of version 6 reaches both clients; one version 7 brought the version 7 client only",
+       ctx do
+    old = hello(ctx.socket_path, 6)
+    new = hello(ctx.socket_path, 7)
 
     :ok = Companion.broadcast("main", Output.turn_done("turn-quiet"), ctx.registry)
     :ok = Companion.broadcast("main", Output.row_updated("main", 21), ctx.registry)
@@ -235,6 +280,11 @@ defmodule FermixChannels.Companion.ConnectionTest do
     }
 
     :ok = Companion.broadcast("main", resolved, ctx.registry)
+    :ok = Companion.broadcast("main", follow_up_card(), ctx.registry)
+    :ok = Companion.broadcast("main", Output.reasoning("turn-next", "**Reading**"), ctx.registry)
+
+    start = Output.tool_start("turn-next", "web_search", "Searching the web")
+    :ok = Companion.broadcast("main", start, ctx.registry)
 
     done = %{"t" => "text_done", "turn_id" => "turn-next", "server_seq" => 3, "text" => "Hi"}
     :ok = Companion.broadcast("main", done, ctx.registry)
@@ -249,22 +299,95 @@ defmodule FermixChannels.Companion.ConnectionTest do
              }
     end
 
-    assert %{"type" => "proposal_resolved", "proposal_id" => "cpr_1"} = recv(new)
-    assert %{"type" => "text_done", "turn_id" => "turn-next"} = recv(new)
-    assert %{"type" => "text_done", "turn_id" => "turn-next"} = recv(old)
+    for client <- [new, old] do
+      assert %{"type" => "proposal_resolved", "proposal_id" => "cpr_1"} = recv(client)
+    end
+
+    for client <- [new, old] do
+      assert %{"type" => "proposal", "proposal" => %{"proposal_id" => "cft_1"}} = recv(client)
+
+      assert recv(client) == %{
+               "type" => "reasoning",
+               "turn_id" => "turn-next",
+               "text" => "**Reading**"
+             }
+    end
+
+    for client <- [new, old] do
+      assert %{"type" => "tool_event", "activity" => "Searching the web"} = recv(client)
+      assert %{"type" => "text_done", "turn_id" => "turn-next"} = recv(client)
+    end
+
+    status = %{"t" => "attach_status", "attach_id" => "mac-att-1", "status" => "present"}
+    :ok = Companion.broadcast("main", status, ctx.registry)
+    assert %{"type" => "attach_status", "attach_id" => "mac-att-1"} = recv(new)
+    assert_nothing_before_read_state([old, new])
   end
 
-  test "a version 2 client is refused as too old", %{socket_path: path} do
+  # Companion protocol 6 (M75 lean v1 §7): the app reads `home.status` when
+  # Always On changed, never on a timer. A connection in the window, version
+  # 6 or 7, is told once after its hello unless Always On is off, and again at
+  # every change.
+  describe "Always On (version 6)" do
+    test "a version 6 and a version 7 client are told after their hello and at a change", ctx do
+      {watch, read} = start_watch!(%{key: :ready, off: false, next_change_ms: nil})
+      restart_endpoint(ctx, status_watch: watch)
+
+      six = hello(ctx.socket_path, 6)
+      seven = hello(ctx.socket_path, 7)
+      settle_watch(watch)
+
+      for client <- [six, seven], do: assert(recv(client) == %{"type" => "home_status_changed"})
+      assert_nothing_before_read_state([six, seven])
+
+      Agent.update(read, &%{&1 | key: :moving})
+      :ok = StatusWatch.changed(watch, :move)
+      settle_watch(watch)
+
+      for client <- [six, seven], do: assert(recv(client) == %{"type" => "home_status_changed"})
+      assert_nothing_before_read_state([six, seven])
+    end
+
+    test "a version 6 client is told nothing at its hello while Always On is off", ctx do
+      {watch, read} = start_watch!(%{key: :off, off: true, next_change_ms: nil})
+      restart_endpoint(ctx, status_watch: watch)
+
+      six = hello(ctx.socket_path, 6)
+      settle_watch(watch)
+      assert_nothing_before_read_state([six])
+
+      # Setting it up is a change, told as any other.
+      Agent.update(read, &%{&1 | key: :choose, off: false})
+      :ok = StatusWatch.changed(watch, :ledger)
+      settle_watch(watch)
+      assert recv(six) == %{"type" => "home_status_changed"}
+    end
+
+    test "an unchanged read tells nobody", ctx do
+      {watch, _read} = start_watch!(%{key: :on, off: false, next_change_ms: nil})
+      restart_endpoint(ctx, status_watch: watch)
+
+      six = hello(ctx.socket_path, 6)
+      settle_watch(watch)
+      assert recv(six) == %{"type" => "home_status_changed"}
+
+      :ok = StatusWatch.changed(watch, :snapshots)
+      settle_watch(watch)
+      assert_nothing_before_read_state([six])
+    end
+  end
+
+  test "a version 5 client is refused as too old", %{socket_path: path} do
     client = connect(path)
-    send_line(client, %{"type" => "client_hello", "protocol_version" => 2})
+    send_line(client, %{"type" => "client_hello", "protocol_version" => 5})
 
     assert recv(client) == %{
              "type" => "error",
              "reason" => "unsupported_protocol_version",
              "direction" => "client_too_old",
-             "client_version" => 2,
-             "min_version" => 3,
-             "max_version" => 4
+             "client_version" => 5,
+             "min_version" => 6,
+             "max_version" => 7
            }
 
     assert closed?(client)
@@ -292,7 +415,7 @@ defmodule FermixChannels.Companion.ConnectionTest do
     restart_endpoint(ctx, approvals: approvals)
 
     client = connect(ctx.socket_path)
-    send_line(client, %{"type" => "client_hello", "protocol_version" => 3})
+    send_line(client, %{"type" => "client_hello", "protocol_version" => 6})
     assert %{"type" => "server_hello"} = recv(client)
 
     assert %{"type" => "approval", "approval_id" => id, "ttl_s" => ttl} = recv(client)
@@ -353,15 +476,15 @@ defmodule FermixChannels.Companion.ConnectionTest do
 
   test "a client outside the window learns which side must update", %{socket_path: path} do
     client = connect(path)
-    send_line(client, %{"type" => "client_hello", "protocol_version" => 5})
+    send_line(client, %{"type" => "client_hello", "protocol_version" => 8})
 
     assert recv(client) == %{
              "type" => "error",
              "reason" => "unsupported_protocol_version",
              "direction" => "client_too_new",
-             "client_version" => 5,
-             "min_version" => 3,
-             "max_version" => 4
+             "client_version" => 8,
+             "min_version" => 6,
+             "max_version" => 7
            }
 
     assert closed?(client)
@@ -413,13 +536,18 @@ defmodule FermixChannels.Companion.ConnectionTest do
        ctx do
     test_pid = self()
     handler = "companion-inbound-#{System.unique_integer([:positive])}"
+    connections = ctx.endpoint_opts[:connection_supervisor]
 
+    # The events carry no id of this test, and other async tests run companion
+    # connections too: forward only what one of this test's own connections
+    # (or a worker it started) emitted.
     :ok =
       :telemetry.attach_many(
         handler,
         [[:fermix, :channel, :parse], [:fermix, :channel, :message]],
         fn event, measurements, metadata, _config ->
-          if metadata.channel == :companion, do: send(test_pid, {event, measurements, metadata})
+          if metadata.channel == :companion and own_connection?(connections),
+            do: send(test_pid, {event, measurements, metadata})
         end,
         nil
       )
@@ -706,7 +834,7 @@ defmodule FermixChannels.Companion.ConnectionTest do
   # error builder, as a failed worker is; at boot recovery nobody is waiting.
   test "a request's late failure is told in this socket's own error", ctx do
     client = hello(ctx.socket_path)
-    [{connection, 3}] = Registry.lookup(ctx.registry, "main")
+    [{connection, 6}] = Registry.lookup(ctx.registry, "main")
 
     assert :ok = Connection.transport(connection).report_failure.("mac-late", {:exit, :timeout})
 
@@ -723,7 +851,7 @@ defmodule FermixChannels.Companion.ConnectionTest do
   test "turn events reach the socket, and each stream snapshot is sent as its unsent suffix",
        ctx do
     client = hello(ctx.socket_path)
-    [{connection, 3}] = Registry.lookup(ctx.registry, "main")
+    [{connection, 6}] = Registry.lookup(ctx.registry, "main")
 
     send(connection, {:companion_stream, "turn-1", {:snapshot, "Hel"}})
     send(connection, {:companion_stream, "turn-1", {:snapshot, "Hello"}})
@@ -775,7 +903,7 @@ defmodule FermixChannels.Companion.ConnectionTest do
   # call; one not running under exactly those ids is refused with a sentence,
   # and the connection stays open.
   test "a cancel naming a task that is not running is refused and the connection kept", ctx do
-    client = hello(ctx.socket_path, 3)
+    client = hello(ctx.socket_path, 6)
 
     task_ref = %{
       "call_uuid" => "3f2b8c1e-5a4d-4e6f-9b8a-7c6d5e4f3a2b",
@@ -814,8 +942,9 @@ defmodule FermixChannels.Companion.ConnectionTest do
     assert closed?(unknown)
   end
 
-  test "a message carrying attachments is refused on this wire", ctx do
-    client = hello(ctx.socket_path)
+  # Before version 7 no file could have been handed over on this wire.
+  test "a version 6 message carrying attachments is refused, and the connection closed", ctx do
+    client = hello(ctx.socket_path, 6)
     send_line(client, %{message("mac-3", "look") | "attach_ids" => ["photo"]})
     assert %{"type" => "error", "reason" => "attachments_unsupported"} = recv(client)
     assert closed?(client)
@@ -830,50 +959,242 @@ defmodule FermixChannels.Companion.ConnectionTest do
     assert closed?(third)
   end
 
-  test "boot recovery reruns a companion request an earlier boot left running", ctx do
+  # M75: a request an earlier boot left running may have run before the
+  # restart, so recovery settles it uncertain and never runs it again; its
+  # turn ends for every Mac connection with the word that says so. A home
+  # with no primary epoch yet is the same engine.
+  test "boot recovery settles a request an earlier boot left running, never runs it", ctx do
     store_opts = [transport: "companion"] ++ ctx.store_opts
-
-    payload = %{
-      "client_msg_id" => "mac-9",
-      "profile_id" => "main",
-      "text" => "again",
-      "attach_ids" => []
-    }
-
-    assert {:ok, {:claimed, _request}} =
-             Timeline.claim_client_request("main", "mac-9", "msg", payload, store_opts)
+    claim_held(store_opts, "mac-restart-9", "boot-earlier")
 
     assert {:ok, {:started, _request}} =
-             Timeline.start_client_request("main", "mac-9", "boot-earlier", store_opts)
+             Timeline.start_client_request("main", "mac-restart-9", "boot-earlier", store_opts)
 
-    queue_owner = ctx.queue_owner
+    # Boot recovery speaks to the connections of the daemon's own registry.
+    {:ok, _owner} = Registry.register(Companion.registry(), "main", 4)
+    start_recovering_coordinator(ctx, store_opts, "boot-later")
 
-    turns = ctx.turns
+    assert_receive {:companion_event,
+                    %{
+                      "t" => "turn_error",
+                      "turn_id" => "turn-mac-restart-9",
+                      "code" => "uncertain_after_restart"
+                    }},
+                   @arrival_ms
 
-    recover = fn row, context, opts ->
-      Connection.recover_request(
-        row,
-        context,
-        opts ++ [gateway: GatewayStub, agent_server: queue_owner, settlement_owner: turns]
+    refute_receive {:gateway_ingest, _message, _opts}, 200
+
+    assert {:ok, %{status: "uncertain", attempt: 1, runner_epoch: "boot-earlier"}} =
+             Timeline.get_client_request("main", "mac-restart-9", ctx.store_opts)
+  end
+
+  # A request an earlier boot of this engine accepted but never started has had
+  # no effect, so it runs.
+  test "boot recovery runs a request an earlier boot accepted and never started", ctx do
+    store_opts = [transport: "companion"] ++ ctx.store_opts
+    claim_held(store_opts, "mac-waiting-9", "boot-earlier")
+    start_recovering_coordinator(ctx, store_opts, "boot-later")
+
+    assert_receive {:gateway_ingest, message, _opts}, @arrival_ms
+    assert message.metadata.client_msg_id == "mac-waiting-9"
+    assert message.metadata.companion_attempt == 1
+
+    assert {:ok, %{status: "running", runner_epoch: "boot-later"}} =
+             Timeline.get_client_request("main", "mac-waiting-9", ctx.store_opts)
+  end
+
+  # M75: a device-role engine runs the retired copy of a moved home. Its
+  # recovery runs nothing and writes nothing into that timeline, and announces
+  # nothing: the request is the new primary's to settle.
+  test "a device-role boot recovers nothing: no row written, no event, no turn", ctx do
+    test_pid = self()
+    store_opts = [transport: "companion"] ++ ctx.store_opts
+    claim_held(store_opts, "mac-retired-9", "boot-earlier")
+    {:ok, _owner} = Registry.register(Companion.registry(), "main", 4)
+
+    coordinator =
+      start_recovering_coordinator(ctx, store_opts, "boot-device",
+        engine_role: %{role: :device, primary: "vm.example.test"},
+        recovery_launcher: fn task ->
+          send(test_pid, :recovery_launched)
+          {:ok, spawn(task)}
+        end
       )
-    end
 
-    start_supervised!(
-      {RequestCoordinator,
-       name: nil,
-       boot_epoch: "boot-later",
-       store_opts: store_opts,
-       recover_request: recover,
-       recovery_launcher: fn task -> {:ok, spawn(task)} end},
-      id: :recovering_coordinator
+    # Recovery is decided in `handle_continue`, before this call is served.
+    assert is_binary(RequestCoordinator.epoch(coordinator))
+    refute_received :recovery_launched
+    refute_received {:gateway_ingest, _message, _opts}
+    refute_received {:companion_event, %{"t" => "turn_error"}}
+
+    assert {:ok, %{status: "accepted", attempt: 0, runner_epoch: "boot-earlier"}} =
+             Timeline.get_client_request("main", "mac-retired-9", ctx.store_opts)
+
+    assert {:ok, %{messages: []}} = Timeline.history_page("main", ctx.store_opts)
+  end
+
+  # M75: a device-role engine runs a retired copy of a moved home, and opens no
+  # database. A read receipt or a cancel from the app would write that copy, and
+  # a page of history, a search or the lists would read it, so each is refused
+  # by name, and nothing is read or written.
+  test "a device-role engine refuses the store's reads and writes by name", ctx do
+    store_opts = [transport: "companion"] ++ ctx.store_opts
+    claim_held(store_opts, "mac-retired-1", "boot-earlier")
+    assert {:ok, _row} = Timeline.append("main", %{role: "user", content: "kept"}, ctx.store_opts)
+    assert {:ok, frontier} = Timeline.read_frontier("main", ctx.store_opts)
+    restart_in_role(ctx, %{role: :device, primary: "vm.example.test"})
+    client = hello(ctx.socket_path)
+
+    refusal = %{
+      "type" => "error",
+      "reason" => "request_failed",
+      "message" => "This engine runs in the device role; the primary is vm.example.test."
+    }
+
+    send_line(client, %{"type" => "read_state", "profile_id" => "main", "read_up_to_seq" => 1})
+    assert recv(client) == refusal
+
+    cancel = %{"type" => "cancel", "profile_id" => "main", "client_msg_id" => "mac-retired-1"}
+    send_line(client, cancel)
+    assert recv(client) == refusal
+
+    pull = %{"type" => "history_pull", "profile_id" => "main", "after_seq" => 0, "limit" => 10}
+    send_line(client, pull)
+    assert recv(client) == refusal
+
+    search = %{
+      "type" => "history_search",
+      "profile_id" => "main",
+      "query" => "kept",
+      "limit" => 5
+    }
+
+    send_line(client, search)
+    assert recv(client) == refusal
+
+    lists = hello(ctx.socket_path, 6)
+    send_line(lists, %{"type" => "checklists_pull", "profile_id" => "main"})
+    assert recv(lists) == refusal
+    list_id = "ck_0a1b2c3d4e"
+    send_line(lists, %{"type" => "checklist_pull", "profile_id" => "main", "list_id" => list_id})
+    assert recv(lists) == refusal
+
+    refute_received {:turns_cancel, _profile, _id}
+    assert {:ok, ^frontier} = Timeline.read_frontier("main", ctx.store_opts)
+
+    assert {:ok, %{status: "accepted", cancelled_at: nil}} =
+             Timeline.get_client_request("main", "mac-retired-1", ctx.store_opts)
+  end
+
+  # M75: while this home moves, a device-role engine holds the message the way
+  # a desktop does while its server is unreachable: the app keeps it and sends
+  # it again once the move ends and the engine is back.
+  test "while the home moves, a message is refused as primary_unreachable, kept", ctx do
+    restart_in_role(ctx, %{role: :device, primary: nil},
+      move_in_progress: fn -> {:ok, "north-box"} end
     )
 
-    assert_receive {:gateway_ingest, message, _opts}, 2_000
+    client = hello(ctx.socket_path)
+    send_line(client, message("mac-moving-1", "did the move work?"))
+
+    assert recv(client) == %{
+             "type" => "error",
+             "reason" => "primary_unreachable",
+             "message" =>
+               "Fermix is moving this home to north-box; your message is kept until it is done.",
+             "client_msg_id" => "mac-moving-1"
+           }
+
+    # Closed, as for an unreachable server: the app reconnects and sends again.
+    assert closed?(client)
+    refute_received {:gateway_ingest, _message, _opts}
+    assert "primary_unreachable" in Connection.error_reasons()
+  end
+
+  test "a device with no move under way still refuses a message as request_failed", ctx do
+    restart_in_role(ctx, %{role: :device, primary: "vm.example.test"},
+      move_in_progress: fn -> :none end
+    )
+
+    client = hello(ctx.socket_path)
+    send_line(client, message("mac-retired-2", "hello?"))
+
+    assert %{"type" => "error", "reason" => "request_failed"} = recv(client)
+  end
+
+  # The same boot, its coordinator restarted after a runner died: the request
+  # is still this boot's, and runs again as it always did.
+  test "boot recovery runs again a request this boot holds", ctx do
+    store_opts = [transport: "companion"] ++ ctx.store_opts
+    claim_held(store_opts, "mac-mine-9", "boot-now")
+
+    assert {:ok, {:started, %{attempt: 1}}} =
+             Timeline.start_client_request("main", "mac-mine-9", "boot-now", store_opts)
+
+    assert {:ok, %{status: "accepted", runner_epoch: "boot-now"}} =
+             Timeline.abandon_client_request("main", "mac-mine-9", 1, store_opts)
+
+    start_recovering_coordinator(ctx, store_opts, "boot-now")
+
+    assert_receive {:gateway_ingest, message, _opts}, @arrival_ms
     assert message.content == "again"
     assert message.metadata.companion_attempt == 2
 
-    assert {:ok, %{status: "running", runner_epoch: "boot-later"}} =
-             Timeline.get_client_request("main", "mac-9", ctx.store_opts)
+    assert {:ok, %{status: "running", runner_epoch: "boot-now"}} =
+             Timeline.get_client_request("main", "mac-mine-9", ctx.store_opts)
+  end
+
+  # A resend can reach a request an earlier boot held before recovery does: it
+  # is settled uncertain there, once, and its id never runs. Running it again
+  # takes a new id.
+  test "a resend of a request an earlier boot held ends it uncertain once, never runs", ctx do
+    store_opts = [transport: "companion"] ++ ctx.store_opts
+    claim_held(store_opts, "mac-held-1", "boot-earlier")
+
+    assert {:ok, {:started, %{attempt: 1}}} =
+             Timeline.start_client_request("main", "mac-held-1", "boot-earlier", store_opts)
+
+    client = hello(ctx.socket_path)
+    watcher = hello(ctx.socket_path)
+    held = message("mac-held-1", "again")
+
+    send_line(client, held)
+
+    assert %{"type" => "accepted", "client_msg_id" => "mac-held-1", "duplicate" => true} =
+             recv(client)
+
+    ending = %{
+      "type" => "turn_error",
+      "turn_id" => "turn-mac-held-1",
+      "code" => "uncertain_after_restart",
+      "message" => "uncertain_after_restart"
+    }
+
+    assert recv(client) == ending
+    assert recv(watcher) == ending
+
+    # Settled once: the same id again (an outbox that missed the ending) is a
+    # duplicate that never runs, and that client alone is told the ending again.
+    send_line(client, held)
+
+    assert %{"type" => "accepted", "client_msg_id" => "mac-held-1", "duplicate" => true} =
+             recv(client)
+
+    assert recv(client) == ending
+
+    send_line(client, message("mac-held-2", "again"))
+
+    assert %{"type" => "accepted", "client_msg_id" => "mac-held-2", "duplicate" => false} =
+             recv(client)
+
+    # The watcher's next line is the new request's row, not a second ending.
+    assert %{"type" => "row", "client_msg_id" => "mac-held-2"} = recv(watcher)
+
+    assert_receive {:gateway_ingest, message, _opts}, @arrival_ms
+    assert message.metadata.client_msg_id == "mac-held-2"
+
+    assert {:ok, %{status: "uncertain", attempt: 1}} =
+             Timeline.get_client_request("main", "mac-held-1", ctx.store_opts)
   end
 
   describe "who is on the other end (SIDE-V1)" do
@@ -963,7 +1284,7 @@ defmodule FermixChannels.Companion.ConnectionTest do
 
       assert_receive {:granted, media, holder}
       assert media == %{ref: @voice_ref, kind: "audio", mime: "audio/ogg", size_bytes: 48_213}
-      assert [{^holder, 3}] = Registry.lookup(ctx.registry, "main")
+      assert [{^holder, 6}] = Registry.lookup(ctx.registry, "main")
     end
 
     test "a ref no row names is missing, and nothing is granted for it", ctx do
@@ -1009,7 +1330,7 @@ defmodule FermixChannels.Companion.ConnectionTest do
 
     test "a release reaches the grants for this connection and is never answered", ctx do
       client = hello(ctx.socket_path)
-      [{connection, 3}] = Registry.lookup(ctx.registry, "main")
+      [{connection, 6}] = Registry.lookup(ctx.registry, "main")
 
       send_line(client, media_event("media_release", @voice_ref))
       assert_receive {:released, @voice_ref, ^connection}
@@ -1049,8 +1370,8 @@ defmodule FermixChannels.Companion.ConnectionTest do
   # announced, and a text that did change is announced to every connection
   # (each in the window reads version 3's `row_updated`).
   test "an enrichment announces row_updated only when it changed the row's text", ctx do
-    old = hello(ctx.socket_path, 3)
-    new = hello(ctx.socket_path, 4)
+    old = hello(ctx.socket_path, 6)
+    new = hello(ctx.socket_path, 7)
 
     send_line(new, message("mac-enrich", "pick up milk"))
     assert %{"type" => "accepted", "client_msg_id" => "mac-enrich"} = recv(new)
@@ -1077,6 +1398,102 @@ defmodule FermixChannels.Companion.ConnectionTest do
              }
 
       assert %{"type" => "read_state"} = recv(client)
+    end
+  end
+
+  # M75 D14: the hello carries the home's primary epoch, read when the hello
+  # arrives; a client that has seen a higher one met the engine this copy of
+  # the home moved to, and is served nothing.
+  @primary_role %{role: :primary, primary: nil}
+  @device_role %{role: :device, primary: "aws i-0f3b1c"}
+
+  describe "the primary epoch" do
+    test "server_hello carries the home's epoch; a lower or absent one is served", ctx do
+      for seen <- [nil, 1, 2] do
+        client = connect(ctx.socket_path)
+        epoch = if seen, do: %{"primary_epoch" => seen}, else: %{}
+        send_line(client, Map.merge(%{"type" => "client_hello", "protocol_version" => 6}, epoch))
+
+        assert recv(client) == %{
+                 "type" => "server_hello",
+                 "min_version" => 6,
+                 "max_version" => 7,
+                 "primary_epoch" => 2,
+                 "role" => "primary",
+                 "commands" => CommandRegistry.catalog()
+               }
+
+        :ok = :gen_tcp.close(client)
+      end
+    end
+
+    test "the primary refuses a client that has seen a higher epoch, and closes", ctx do
+      restart_with_epoch(ctx, fn -> {:ok, 2} end, @primary_role)
+      client = connect(ctx.socket_path)
+
+      send_line(client, %{"type" => "client_hello", "protocol_version" => 6, "primary_epoch" => 3})
+
+      assert recv(client) == %{
+               "type" => "error",
+               "reason" => "stale_primary",
+               "message" =>
+                 "This engine is at epoch 2; you have seen epoch 3: " <>
+                   "the primary moved, reconnect to the current one"
+             }
+
+      assert closed?(client)
+    end
+
+    # A device-role engine's home is a retired copy of the primary, or was never
+    # one: refusing a lower primary is the client's rule, so the device
+    # announces its epoch and refuses no client for having met a later one.
+    test "a device-role engine announces its epoch and refuses no client", ctx do
+      restart_with_epoch(ctx, fn -> {:ok, 2} end, @device_role)
+
+      for seen <- [3, 2, nil] do
+        client = connect(ctx.socket_path)
+        epoch = if seen, do: %{"primary_epoch" => seen}, else: %{}
+        send_line(client, Map.merge(%{"type" => "client_hello", "protocol_version" => 6}, epoch))
+
+        assert recv(client) == %{
+                 "type" => "server_hello",
+                 "min_version" => 6,
+                 "max_version" => 7,
+                 "primary_epoch" => 2,
+                 "role" => "device",
+                 "commands" => CommandRegistry.catalog()
+               }
+
+        :ok = :gen_tcp.close(client)
+      end
+    end
+
+    test "a home with no epoch announces none and refuses none", ctx do
+      restart_with_epoch(ctx, fn -> :absent end)
+      client = connect(ctx.socket_path)
+
+      send_line(client, %{"type" => "client_hello", "protocol_version" => 6, "primary_epoch" => 3})
+
+      assert recv(client) == %{
+               "type" => "server_hello",
+               "min_version" => 6,
+               "max_version" => 7,
+               "role" => "primary",
+               "commands" => CommandRegistry.catalog()
+             }
+    end
+
+    test "an epoch the daemon cannot read refuses the hello by name", ctx do
+      unreadable = {:epoch, {:invalid_epoch, "/home/mobile/primary_epoch", ~s("x\n")}}
+      restart_with_epoch(ctx, fn -> {:error, unreadable} end)
+      client = connect(ctx.socket_path)
+      send_line(client, %{"type" => "client_hello", "protocol_version" => 6})
+
+      assert %{"type" => "error", "reason" => "primary_epoch_unavailable", "message" => message} =
+               recv(client)
+
+      assert message =~ "invalid_epoch"
+      assert closed?(client)
     end
   end
 
@@ -1126,19 +1543,95 @@ defmodule FermixChannels.Companion.ConnectionTest do
     forward(test_pid)
   end
 
-  defp hello(path, version \\ 3) do
+  defp hello(path, version \\ 6) do
     client = connect(path)
     send_line(client, %{"type" => "client_hello", "protocol_version" => version})
     assert %{"type" => "server_hello"} = recv(client)
     client
   end
 
+  # A follow-up's card (version 5) as core announces it.
+  defp follow_up_card do
+    %{
+      "t" => "proposal",
+      "profile_id" => "main",
+      "proposal" => %{
+        "proposal_id" => "cft_1",
+        "state" => "waiting",
+        "task" => %{"job_id" => "job_1", "name" => "Codex review"},
+        "created_at" => "2026-10-30T12:00:00Z",
+        "expires_at" => "2026-10-30T12:30:00Z",
+        "status_sentence" => "Waiting for your answer; it runs only if you confirm.",
+        "summary" => "Watcher codex-limits wants to run its follow-up.",
+        "outside" => %{},
+        "follow_up" => %{
+          "asks" => "run",
+          "name" => "Codex review",
+          "instructions" => "Review the last day's commits.",
+          "tools" => ["codex_run"],
+          "reports_to" => "this chat"
+        }
+      }
+    }
+  end
+
   # The endpoint again, with `connection_opts` added to the ones setup gave it.
+  # The Always On watch (`Home.StatusWatch`) with a read of the test's: an
+  # Agent the test changes, and no timer of its own.
+  defp start_watch!(read_value) do
+    {:ok, read} = Agent.start_link(fn -> read_value end)
+
+    watch =
+      start_supervised!(
+        {StatusWatch,
+         name: nil,
+         read: fn -> Agent.get(read, & &1) end,
+         timer: fn _message, _delay -> make_ref() end,
+         cancel_timer: fn _ref -> false end,
+         clock_monitor: false},
+        id: {:status_watch, System.unique_integer([:positive])}
+      )
+
+    {watch, read}
+  end
+
+  # The watch handled every message sent before, and the read a change asks
+  # for, which it sends itself behind them.
+  defp settle_watch(watch) do
+    _state = :sys.get_state(watch)
+    _state = :sys.get_state(watch)
+  end
+
+  # Each client's next line is the answer to its read_state: nothing came
+  # before it.
+  defp assert_nothing_before_read_state(clients) do
+    for client <- clients do
+      send_line(client, %{"type" => "read_state", "profile_id" => "main", "read_up_to_seq" => 0})
+      assert %{"type" => "read_state"} = recv(client)
+    end
+  end
+
   defp restart_endpoint(ctx, connection_opts) do
     stop_supervised!(Endpoint)
 
     ctx.endpoint_opts
     |> Keyword.update!(:connection_opts, &(&1 ++ connection_opts))
+    |> then(&start_supervised!({Endpoint, &1}))
+  end
+
+  # The endpoint again, its connections reading the primary epoch from `read`
+  # in an engine of `role` (`Home.Role`'s record, as `:engine_role` stands in).
+  defp restart_with_epoch(ctx, read, role \\ @primary_role) do
+    stop_supervised!(Endpoint)
+
+    connection_opts =
+      ctx.endpoint_opts
+      |> Keyword.fetch!(:connection_opts)
+      |> Keyword.put(:primary_epoch, read)
+      |> Keyword.update!(:request_opts, &Keyword.put(&1, :engine_role, role))
+
+    ctx.endpoint_opts
+    |> Keyword.put(:connection_opts, connection_opts)
     |> then(&start_supervised!({Endpoint, &1}))
   end
 
@@ -1150,6 +1643,68 @@ defmodule FermixChannels.Companion.ConnectionTest do
     assert %{"type" => "accepted", "client_msg_id" => ^client_msg_id} = recv(client)
     assert_receive {:gateway_ingest, message, _opts}, 2_000
     message
+  end
+
+  # A request claimed by the boot `epoch`, as this socket would have sent it.
+  defp claim_held(store_opts, client_msg_id, epoch) do
+    payload = client_msg_id |> message("again") |> Map.delete("type")
+
+    assert {:ok, {:claimed, _request}} =
+             Timeline.claim_client_request(
+               "main",
+               client_msg_id,
+               "msg",
+               payload,
+               store_opts ++ [runner_epoch: epoch]
+             )
+  end
+
+  # The endpoint again, its connections in an engine of `role` (`Home.Role`'s
+  # record, as `:engine_role` stands in).
+  defp restart_in_role(ctx, role, extra \\ []) do
+    stop_supervised!(Endpoint)
+
+    connection_opts =
+      ctx.endpoint_opts
+      |> Keyword.fetch!(:connection_opts)
+      |> Keyword.update!(:request_opts, &Keyword.put(&1, :engine_role, role))
+      |> Keyword.merge(extra)
+
+    ctx.endpoint_opts
+    |> Keyword.put(:connection_opts, connection_opts)
+    |> then(&start_supervised!({Endpoint, &1}))
+  end
+
+  # A coordinator for `epoch` whose boot recovery runs at once through this
+  # socket's recovery path, on a primary engine whose home has no primary
+  # epoch yet; `extra` overrides any of that.
+  defp start_recovering_coordinator(ctx, store_opts, epoch, extra \\ []) do
+    queue_owner = ctx.queue_owner
+    turns = ctx.turns
+
+    recover = fn row, context, opts ->
+      Connection.recover_request(
+        row,
+        context,
+        opts ++ [gateway: GatewayStub, agent_server: queue_owner, settlement_owner: turns]
+      )
+    end
+
+    options =
+      Keyword.merge(
+        [
+          name: nil,
+          boot_epoch: epoch,
+          store_opts: store_opts,
+          recover_request: recover,
+          primary_epoch: fn -> :absent end,
+          engine_role: %{role: :primary, primary: nil},
+          recovery_launcher: fn task -> {:ok, spawn(task)} end
+        ],
+        extra
+      )
+
+    start_supervised!({RequestCoordinator, options}, id: :recovering_coordinator)
   end
 
   defp message(client_msg_id, text) do
@@ -1175,6 +1730,22 @@ defmodule FermixChannels.Companion.ConnectionTest do
   end
 
   defp send_line(socket, map), do: :ok = :gen_tcp.send(socket, Jason.encode!(map) <> "\n")
+
+  # Whether the calling process is, or was started by, a connection under this
+  # test's own connection supervisor (a telemetry handler runs in the emitter).
+  defp own_connection?(connections) do
+    emitters = [self() | Process.get(:"$callers", [])]
+
+    case Process.whereis(connections) do
+      nil ->
+        false
+
+      _supervisor ->
+        connections
+        |> DynamicSupervisor.which_children()
+        |> Enum.any?(fn {_id, pid, _type, _modules} -> pid in emitters end)
+    end
+  end
 
   defp recv(socket) do
     {:ok, line} = :gen_tcp.recv(socket, 0, @arrival_ms)

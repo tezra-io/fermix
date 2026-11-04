@@ -288,19 +288,15 @@ defmodule FermixCore.Tools.EventToolsTest do
       assert result.error =~ "not exist"
     end
 
-    test "an unflagged store confirms no follow-up", %{repo: repo} do
-      assert payload(store_birthday(repo))["followup"] === false
+    # A reminder is the whole promise: open loops own every check-in, so the
+    # store confirmation names no follow-up and the schema offers none to set.
+    test "the stored event's view carries no follow-up flag", %{repo: repo} do
+      refute Map.has_key?(payload(store_birthday(repo)), "followup")
     end
 
-    test "a flagged store confirms the follow-up in the same acknowledgement", %{repo: repo} do
-      stored = payload(store_birthday(repo, %{"followup" => true}))
-
-      assert stored["followup"] === true
-    end
-
-    test "declares the follow-up parameter as a boolean and directs the confirmation" do
-      assert EventStore.parameters().properties.followup.type == "boolean"
-      assert EventStore.description() =~ ~r/(?i)check in/
+    test "advertises no follow-up parameter and promises no check-in" do
+      refute Map.has_key?(EventStore.parameters().properties, :followup)
+      refute EventStore.description() =~ ~r/(?i)followup|check in/
     end
 
     test "emits one tool telemetry event carrying the model's arguments", %{repo: repo} do
@@ -537,19 +533,10 @@ defmodule FermixCore.Tools.EventToolsTest do
       assert description =~ ~r/(?i)weekday/
     end
 
-    test "sets the follow-up flag without owner_direction and keeps it through a retitle", %{
-      repo: repo
-    } do
+    test "advertises no follow-up parameter, and an edit's view carries none", %{repo: repo} do
+      refute Map.has_key?(EventUpdate.parameters().properties, :followup)
+
       stored = payload(store_birthday(repo))
-
-      {:ok, flagged} =
-        EventUpdate.execute(
-          %{"event_id" => stored["event_id"], "followup" => true},
-          context(repo)
-        )
-
-      assert flagged.success == true
-      assert payload(flagged)["followup"] === true
 
       {:ok, retitled} =
         EventUpdate.execute(
@@ -558,11 +545,7 @@ defmodule FermixCore.Tools.EventToolsTest do
         )
 
       assert payload(retitled)["title"] == "Sarah's birthday party"
-      assert payload(retitled)["followup"] === true
-    end
-
-    test "declares the follow-up parameter as a boolean" do
-      assert EventUpdate.parameters().properties.followup.type == "boolean"
+      refute Map.has_key?(payload(retitled), "followup")
     end
 
     test "rebinds to the current default target on explicit request", %{repo: repo} do

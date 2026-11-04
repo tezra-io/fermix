@@ -4,6 +4,9 @@ defmodule FermixCore.Memory.Repo.MobileSql do
   alias Exqlite.Sqlite3
 
   @request_sweep_limit 200
+  # The word a request settled uncertain records: another boot held it, so it
+  # may have run there before this engine started (M75).
+  @uncertain_reason "uncertain_after_restart"
   @max_link_previews 4
   @sha256 ~r/\A[0-9a-f]{64}\z/
   @transports ~w(mobile companion)
@@ -249,6 +252,56 @@ defmodule FermixCore.Memory.Repo.MobileSql do
   WHERE json_type(timeline.media_refs_json, refs.fullkey || '.ref') = 'text';
   """
 
+  # The index rows for the icons one written preview row names, by position
+  # in `previews_json`, as `@index_preview_images_sql` indexes its images.
+  @index_preview_icons_sql """
+  INSERT INTO mobile_timeline_icons (agent_id, owner_id, profile_id, server_seq, idx, ref)
+  SELECT new.agent_id, new.owner_id, new.profile_id, new.server_seq,
+         CAST(previews.key AS INTEGER),
+         json_extract(new.previews_json, previews.fullkey || '.icon.ref')
+  FROM json_each(new.previews_json) AS previews
+  WHERE json_type(new.previews_json, previews.fullkey || '.icon.ref') = 'text';
+  """
+
+  # Migration 50, the icon index (Links in the sentence, note 01). A preview's
+  # icon is a media descriptor beside its image, served by `media_fetch` the
+  # same way, but indexed in a table of its own rather than under a new
+  # `source` of `mobile_timeline_media`: that table's query in every engine
+  # before this one reads an unknown source as a preview image, and would
+  # answer an icon ref with its image's descriptor or crash on a preview that
+  # has none. The media index never names an icon, so an older engine answers
+  # an icon ref `not_found`, which no client of its own ever asks it for.
+  # Triggers on the preview table keep it, for every writer, as migration 36's
+  # keep the media index; no column is added, and no row before it has an icon
+  # to backfill.
+  @icon_index_schema_sql """
+  CREATE TABLE IF NOT EXISTS mobile_timeline_icons (
+    agent_id TEXT NOT NULL,
+    owner_id TEXT NOT NULL,
+    profile_id TEXT NOT NULL,
+    server_seq INTEGER NOT NULL CHECK (server_seq > 0),
+    idx INTEGER NOT NULL CHECK (idx >= 0),
+    ref TEXT NOT NULL,
+    PRIMARY KEY (agent_id, owner_id, profile_id, server_seq, idx)
+  ) WITHOUT ROWID;
+
+  CREATE INDEX IF NOT EXISTS idx_mobile_timeline_icons_ref
+    ON mobile_timeline_icons(agent_id, owner_id, profile_id, ref, server_seq DESC, idx);
+
+  CREATE TRIGGER IF NOT EXISTS mobile_timeline_icons_ai
+  AFTER INSERT ON mobile_timeline_link_previews BEGIN
+    #{@index_preview_icons_sql}
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS mobile_timeline_icons_au
+  AFTER UPDATE OF previews_json ON mobile_timeline_link_previews BEGIN
+    DELETE FROM mobile_timeline_icons
+    WHERE agent_id = old.agent_id AND owner_id = old.owner_id AND profile_id = old.profile_id
+      AND server_seq = old.server_seq;
+    #{@index_preview_icons_sql}
+  END;
+  """
+
   # Migration 41, a reply's blocks (M72): the records its text links, kept in
   # their own row beside the timeline row as link previews are, so no column
   # is added and an older engine reads the timeline as before. A row's blocks
@@ -288,6 +341,60 @@ defmodule FermixCore.Memory.Repo.MobileSql do
   authenticated_device_id, runner_epoch, attempt, transport, cancelled_at
   """
 
+  # Migration 52, the uncertain request (M75). A request that may have run
+  # before a restart is settled `uncertain` rather than run again. SQLite
+  # cannot widen a CHECK in place, so the table is rebuilt: the same nineteen
+  # columns in the same order (an engine that reads a request row by position
+  # still reads it), every row copied, both indexes made again. Beside it, the
+  # primary epoch each transport's requests last booted at, which tells a move
+  # or a restore (another engine) from a restart of this one.
+  @uncertain_schema_sql """
+  CREATE TABLE IF NOT EXISTS mobile_request_primary_epochs (
+    agent_id TEXT NOT NULL,
+    owner_id TEXT NOT NULL,
+    transport TEXT NOT NULL CHECK (transport IN ('mobile', 'companion')),
+    primary_epoch INTEGER NOT NULL CHECK (primary_epoch > 0),
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (agent_id, owner_id, transport)
+  ) WITHOUT ROWID;
+
+  CREATE TABLE mobile_client_requests_uncertain (
+    agent_id TEXT NOT NULL,
+    owner_id TEXT NOT NULL,
+    profile_id TEXT NOT NULL,
+    client_msg_id TEXT NOT NULL,
+    request_type TEXT NOT NULL,
+    status TEXT NOT NULL
+      CHECK (status IN ('accepted', 'running', 'completed', 'failed', 'uncertain')),
+    payload_digest TEXT NOT NULL CHECK (length(payload_digest) = 64),
+    payload_json TEXT NOT NULL,
+    turn_id TEXT,
+    result_server_seq INTEGER CHECK (result_server_seq IS NULL OR result_server_seq > 0),
+    error_json TEXT,
+    claimed_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    authenticated_device_id TEXT,
+    runner_epoch TEXT,
+    attempt INTEGER NOT NULL DEFAULT 0 CHECK (attempt >= 0),
+    transport TEXT NOT NULL DEFAULT 'mobile' CHECK (transport IN ('mobile', 'companion')),
+    cancelled_at TEXT,
+    PRIMARY KEY (agent_id, owner_id, profile_id, client_msg_id)
+  );
+
+  INSERT INTO mobile_client_requests_uncertain (#{@request_columns})
+  SELECT #{@request_columns} FROM mobile_client_requests;
+
+  DROP TABLE mobile_client_requests;
+  ALTER TABLE mobile_client_requests_uncertain RENAME TO mobile_client_requests;
+
+  CREATE INDEX idx_mobile_client_requests_expiry
+    ON mobile_client_requests(expires_at);
+
+  CREATE INDEX idx_mobile_client_requests_recovery
+    ON mobile_client_requests(agent_id, owner_id, status, claimed_at, profile_id, client_msg_id);
+  """
+
   # The newest row naming the ref wins, and within it an attachment before a
   # preview image, first position first.
   @media_descriptor_sql """
@@ -305,6 +412,19 @@ defmodule FermixCore.Memory.Repo.MobileSql do
    AND previews.profile_id = media.profile_id AND previews.server_seq = media.server_seq
   WHERE media.agent_id = ? AND media.owner_id = ? AND media.profile_id = ? AND media.ref = ?
   ORDER BY media.server_seq DESC, media.source ASC, media.idx ASC
+  LIMIT 1
+  """
+
+  # The newest preview naming the ref as its icon wins, first position first.
+  @icon_descriptor_sql """
+  SELECT icons.server_seq,
+         json_extract(previews.previews_json, '$[' || icons.idx || '].icon')
+  FROM mobile_timeline_icons AS icons
+  JOIN mobile_timeline_link_previews AS previews
+    ON previews.agent_id = icons.agent_id AND previews.owner_id = icons.owner_id
+   AND previews.profile_id = icons.profile_id AND previews.server_seq = icons.server_seq
+  WHERE icons.agent_id = ? AND icons.owner_id = ? AND icons.profile_id = ? AND icons.ref = ?
+  ORDER BY icons.server_seq DESC, icons.idx ASC
   LIMIT 1
   """
 
@@ -334,8 +454,14 @@ defmodule FermixCore.Memory.Repo.MobileSql do
   @spec cancel_schema_sql() :: String.t()
   def cancel_schema_sql, do: @cancel_schema_sql
 
+  @spec uncertain_schema_sql() :: String.t()
+  def uncertain_schema_sql, do: @uncertain_schema_sql
+
   @spec media_index_schema_sql() :: String.t()
   def media_index_schema_sql, do: @media_index_schema_sql
+
+  @spec icon_index_schema_sql() :: String.t()
+  def icon_index_schema_sql, do: @icon_index_schema_sql
 
   @spec reply_blocks_schema_sql() :: String.t()
   def reply_blocks_schema_sql, do: @reply_blocks_schema_sql
@@ -347,6 +473,10 @@ defmodule FermixCore.Memory.Repo.MobileSql do
   @doc "The media authorization query, whose plan a test pins to its index."
   @spec media_descriptor_sql() :: String.t()
   def media_descriptor_sql, do: @media_descriptor_sql
+
+  @doc "The icon authorization query, whose plan a test pins to its index."
+  @spec icon_descriptor_sql() :: String.t()
+  def icon_descriptor_sql, do: @icon_descriptor_sql
 
   @doc "The search page query, whose plan a test pins to the full-text index's order."
   @spec search_rows_sql() :: String.t()
@@ -468,18 +598,26 @@ defmodule FermixCore.Memory.Repo.MobileSql do
           {:ok, %{server_seq: pos_integer(), media: map()}}
           | {:error, :not_found | {:malformed_media_descriptor, term()} | term()}
   def media_descriptor(conn, selector, ref) do
-    profile = normalize_profile(selector)
+    params = profile_params(normalize_profile(selector)) ++ [ref]
 
-    with {:ok, rows} <- query_all(conn, @media_descriptor_sql, profile_params(profile) ++ [ref]) do
+    with {:ok, media_rows} <- query_all(conn, @media_descriptor_sql, params),
+         {:ok, rows} <- icon_descriptor_rows(conn, media_rows, params) do
       media_descriptor_result(rows, ref)
     end
   end
 
+  # A ref is an attachment or a preview image (the media index), or else a
+  # preview icon (the icon index): one index lookup each, the first that
+  # names it answering.
+  defp icon_descriptor_rows(conn, [], params), do: query_all(conn, @icon_descriptor_sql, params)
+  defp icon_descriptor_rows(_conn, media_rows, _params), do: {:ok, media_rows}
+
   @doc """
   Add one link preview to a row: its `url`, `site` and `title`, an optional
-  `description`, and an optional `image` media descriptor, which `media_fetch`
-  then serves through this row. A preview whose url the row already has is
-  the same preview. A request output from an older attempt is refused.
+  `description`, and optional `image` and `icon` media descriptors, which
+  `media_fetch` then serves through this row. A preview whose url the row
+  already has is the same preview. A request output from an older attempt is
+  refused.
   """
   @spec attach_link_preview(term(), map(), pos_integer(), map()) ::
           {:ok, map()} | {:error, term()}
@@ -492,6 +630,122 @@ defmodule FermixCore.Memory.Repo.MobileSql do
            :ok <- ensure_timeline_attachment_fence(conn, profile, row),
            do: append_link_preview(conn, profile, row, preview)
     end)
+  end
+
+  # The rows a scheduled job's or a cue's run sent with no origin yet
+  # (`Companion.OriginBackfill`): an assistant row under `job:<run id>`, or
+  # `job:<run id>:<part id>` for a part of the message (a run id holds no
+  # colon), whose metadata is none or an object without `origin`, after a
+  # rowid, in rowid order. Beside each, what its run's record names: the
+  # trigger, the job's name as the run recorded it and as it reads now, and
+  # the watcher a cue run's delivery or a follow-up's trigger names
+  # (`Jobs.CueRun.load/2`, `Cues.FollowUps.run_trigger/2`). Each is NULL once
+  # its row is gone.
+  @origin_candidates_sql """
+  WITH sent AS (
+    SELECT t.rowid AS row_id, t.agent_id, t.owner_id, t.profile_id, t.server_seq,
+           t.metadata_json, substr(t.proactive_key || ':', 5) AS key_tail
+    FROM mobile_timeline AS t
+    WHERE t.rowid > ? AND t.role = 'assistant' AND t.proactive_key GLOB 'job:*'
+      AND CASE
+        WHEN t.metadata_json IS NULL THEN 1
+        WHEN json_valid(t.metadata_json) THEN json_type(t.metadata_json) = 'object'
+          AND json_type(t.metadata_json, '$.origin') IS NULL
+        ELSE 0
+      END
+    ORDER BY t.rowid
+    LIMIT ?
+  )
+  SELECT s.row_id, s.agent_id, s.owner_id, s.profile_id, s.server_seq, s.metadata_json,
+         r.trigger,
+         CASE WHEN json_valid(r.job_config_snapshot_json)
+           THEN json_extract(r.job_config_snapshot_json, '$.name') END,
+         j.name,
+         CASE r.trigger
+           WHEN 'cue' THEN (SELECT w.name FROM cue_deliveries AS d
+             JOIN cue_watchers AS w ON w.id = d.watcher_id WHERE d.id = r.cue_delivery_id)
+           WHEN 'watcher' THEN (SELECT w.name FROM cue_follow_up_triggers AS f
+             JOIN cue_watchers AS w ON w.id = f.watcher_id WHERE f.run_id = r.id)
+         END
+  FROM sent AS s
+  LEFT JOIN job_runs AS r ON r.id = substr(s.key_tail, 1, instr(s.key_tail, ':') - 1)
+  LEFT JOIN scheduled_jobs AS j ON j.id = r.job_id
+  ORDER BY s.row_id
+  """
+
+  # A row's metadata, written only while it is still what was read.
+  @fill_origin_sql """
+  UPDATE mobile_timeline SET metadata_json = ?
+  WHERE agent_id = ? AND owner_id = ? AND profile_id = ? AND server_seq = ?
+    AND metadata_json IS ?
+  RETURNING server_seq
+  """
+
+  @doc """
+  At most `limit` rows a scheduled job's or a cue's run sent that carry no
+  `metadata.origin` yet, after rowid `after_rowid`, oldest first, each with
+  its stored `metadata_json` and what its run's record names (`:trigger`,
+  `:recorded_job_name`, `:job_name`, `:watcher_name`), nil for what is not on
+  record.
+  """
+  @spec origin_candidates(term(), non_neg_integer(), pos_integer()) ::
+          {:ok, [map()]} | {:error, term()}
+  def origin_candidates(conn, after_rowid, limit) do
+    with {:ok, rows} <- query_all(conn, @origin_candidates_sql, [after_rowid, limit]) do
+      {:ok, Enum.map(rows, &origin_candidate/1)}
+    end
+  end
+
+  defp origin_candidate([
+         row_id,
+         agent_id,
+         owner_id,
+         profile_id,
+         server_seq,
+         metadata_json,
+         trigger,
+         recorded_job_name,
+         job_name,
+         watcher_name
+       ]) do
+    %{
+      rowid: row_id,
+      agent_id: agent_id,
+      owner_id: owner_id,
+      profile_id: profile_id,
+      server_seq: server_seq,
+      metadata_json: metadata_json,
+      trigger: trigger,
+      recorded_job_name: recorded_job_name,
+      job_name: job_name,
+      watcher_name: watcher_name
+    }
+  end
+
+  @doc """
+  Writes each row's `metadata` (the row's own, its `origin` added) in one
+  transaction, only where its stored metadata is still the `metadata_json` it
+  was read with; answers how many rows it wrote.
+  """
+  @spec fill_origins(term(), [map()]) :: {:ok, non_neg_integer()} | {:error, term()}
+  def fill_origins(_conn, []), do: {:ok, 0}
+
+  def fill_origins(conn, rows) when is_list(rows) do
+    transaction(conn, fn -> fill_origin_rows(conn, rows, 0) end)
+  end
+
+  defp fill_origin_rows(_conn, [], written), do: {:ok, written}
+
+  defp fill_origin_rows(conn, [row | rest], written) do
+    case query_all(conn, @fill_origin_sql, fill_origin_params(row)) do
+      {:ok, rows} -> fill_origin_rows(conn, rest, written + length(rows))
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp fill_origin_params(%{metadata: %{"origin" => _origin} = metadata} = row) do
+    [encode_json(metadata)] ++
+      profile_params(normalize_profile(row)) ++ [row.server_seq, row.metadata_json]
   end
 
   @doc """
@@ -619,8 +873,25 @@ defmodule FermixCore.Memory.Repo.MobileSql do
          do: {:ok, {:settled, request}}
   end
 
+  @doc """
+  Start the next attempt of a request under this boot (`runner_epoch`): one
+  that never started a turn, whichever boot of this engine claimed it, or one
+  this boot ran whose runner died. A turn another boot started, and a request
+  that names no boot of this engine, may have run, so the request is settled
+  once instead and never started: `:settled_cancelled` when it carried a
+  cancel, `:settled_uncertain` otherwise. A settled request answers its
+  status, and one running under this boot answers `:active`.
+  """
   @spec start_request(term(), map(), String.t(), String.t(), DateTime.t()) ::
-          {:ok, {:started | :active | :completed | :failed, map()}} | {:error, term()}
+          {:ok,
+           {:started
+            | :active
+            | :completed
+            | :failed
+            | :uncertain
+            | :settled_uncertain
+            | :settled_cancelled, map()}}
+          | {:error, term()}
   def start_request(conn, selector, client_msg_id, runner_epoch, now) do
     profile = normalize_profile(selector)
     epoch = nonempty_string!(runner_epoch, :runner_epoch)
@@ -653,6 +924,31 @@ defmodule FermixCore.Memory.Repo.MobileSql do
     end
   end
 
+  @doc """
+  Record the primary epoch one transport's requests boot at, against the one
+  its last boot recorded. A different epoch is another engine (the home moved
+  to another host, or was restored from a snapshot): in the same transaction
+  every request of the transport still accepted or running is released from
+  its boot, so its next start settles it (`start_request/5`). The first epoch
+  recorded releases nothing.
+  """
+  @spec record_boot_primary_epoch(term(), map(), pos_integer(), DateTime.t()) ::
+          {:ok, :recorded | :unchanged | {:moved, pos_integer(), non_neg_integer()}}
+          | {:error, term()}
+  def record_boot_primary_epoch(conn, selector, primary_epoch, now)
+      when is_integer(primary_epoch) and primary_epoch > 0 do
+    owner = normalize_owner(selector)
+    transport = transport!(selector)
+
+    transaction(conn, fn ->
+      with {:ok, stored} <- stored_primary_epoch(conn, owner, transport),
+           {:ok, outcome} <- release_if_moved(conn, owner, transport, stored, primary_epoch, now),
+           :ok <- put_primary_epoch(conn, owner, transport, primary_epoch, now) do
+        {:ok, outcome}
+      end
+    end)
+  end
+
   @spec settle_request(term(), map(), String.t(), String.t(), map(), DateTime.t()) ::
           {:ok, map()} | {:error, term()}
   def settle_request(conn, selector, client_msg_id, status, fields, now) do
@@ -667,10 +963,12 @@ defmodule FermixCore.Memory.Repo.MobileSql do
   @doc """
   Release a running attempt whose runner died without settling it.
 
-  The claim returns to `accepted` with its attempt counter intact, so the next
-  start — a client resend or the next boot's recovery scan — runs as a new
-  attempt. Fenced on the exact attempt, so a settled or superseded request is
-  never dragged back into flight.
+  The claim returns to `accepted` with its attempt counter intact and still
+  held by the boot that ran it, so that boot's next start (a client resend, or
+  its coordinator's recovery scan after a restart) runs it as a new attempt,
+  and any other boot settles it uncertain (`start_request/5`). Fenced on the
+  exact attempt, so a settled or superseded request is never dragged back
+  into flight.
   """
   @spec abandon_request(term(), map(), String.t(), non_neg_integer(), DateTime.t()) ::
           {:ok, map()} | {:error, term()}
@@ -682,7 +980,7 @@ defmodule FermixCore.Memory.Repo.MobileSql do
              conn,
              """
              UPDATE mobile_client_requests
-             SET status = 'accepted', runner_epoch = NULL, updated_at = ?
+             SET status = 'accepted', updated_at = ?
              WHERE agent_id = ? AND owner_id = ? AND profile_id = ? AND client_msg_id = ?
                AND status = 'running' AND attempt = ?
              RETURNING #{@request_columns}
@@ -1028,9 +1326,9 @@ defmodule FermixCore.Memory.Repo.MobileSql do
                payload_digest, payload_json, turn_id, result_server_seq, error_json,
                claimed_at, expires_at, updated_at, authenticated_device_id,
                runner_epoch, attempt, transport
-             ) VALUES (?, ?, ?, ?, ?, 'accepted', ?, ?, NULL, NULL, NULL, ?, ?, ?, ?, NULL, ?, ?)
+             ) VALUES (?, ?, ?, ?, ?, 'accepted', ?, ?, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, ?)
              """,
-             request_insert_params(request) ++ [attempt, request.transport]
+             request_insert_params(request) ++ [request.runner_epoch, attempt, request.transport]
            ),
          {:ok, row} <- get_request(conn, request, request.client_msg_id) do
       {:ok, {:claimed, row}}
@@ -1108,12 +1406,28 @@ defmodule FermixCore.Memory.Repo.MobileSql do
   defp start_request_by_status(_conn, _profile, %{status: "failed"} = row, _epoch, _now),
     do: {:ok, {:failed, row}}
 
+  defp start_request_by_status(_conn, _profile, %{status: "uncertain"} = row, _epoch, _now),
+    do: {:ok, {:uncertain, row}}
+
   defp start_request_by_status(_conn, _profile, %{status: "running"} = row, epoch, _now)
        when row.runner_epoch == epoch,
        do: {:ok, {:active, row}}
 
+  # A turn another boot started (a request running there, or one released
+  # after its turn began) may have run, and a request that names no boot of
+  # this engine (written before claims recorded one, or released by a move or
+  # a restore, `record_boot_primary_epoch/4`) may have run anywhere: neither is
+  # started here.
   defp start_request_by_status(conn, profile, request, epoch, now)
-       when request.status in ["accepted", "running"] do
+       when request.runner_epoch != epoch and
+              (request.status == "running" or request.attempt > 0 or
+                 is_nil(request.runner_epoch)),
+       do: settle_unrun(conn, profile, request, now)
+
+  # An accepted request that never started a turn has had no effect, so this
+  # engine runs it whichever of its boots claimed it.
+  defp start_request_by_status(conn, profile, request, epoch, now)
+       when request.status == "accepted" do
     with {:ok, rows} <-
            query_all(
              conn,
@@ -1140,13 +1454,99 @@ defmodule FermixCore.Memory.Repo.MobileSql do
   defp started_request_result(_conn, _profile, _client_msg_id, _epoch, []),
     do: {:error, :start_conflict}
 
+  # A request that carried a cancel ends as the cancel the owner asked for;
+  # any other ends `uncertain`. Fenced on the status and attempt it was read
+  # with, inside the start's own transaction. Its boot, turn and reply row stay
+  # as they were.
+  defp settle_unrun(conn, profile, %{cancelled_at: %DateTime{}} = request, now),
+    do: settle_unrun(conn, profile, request, {"failed", "cancelled", :settled_cancelled}, now)
+
+  defp settle_unrun(conn, profile, request, now),
+    do:
+      settle_unrun(
+        conn,
+        profile,
+        request,
+        {"uncertain", @uncertain_reason, :settled_uncertain},
+        now
+      )
+
+  defp settle_unrun(conn, profile, request, {status, reason, settled}, now) do
+    with {:ok, rows} <-
+           query_all(
+             conn,
+             """
+             UPDATE mobile_client_requests
+             SET status = ?, error_json = ?, updated_at = ?
+             WHERE agent_id = ? AND owner_id = ? AND profile_id = ? AND client_msg_id = ?
+               AND status = ? AND attempt = ?
+             RETURNING #{@request_columns}
+             """,
+             [status, Jason.encode!(%{"reason" => reason}), timestamp(now)] ++
+               profile_params(profile) ++
+               [request.client_msg_id, request.status, request.attempt]
+           ) do
+      unrun_result(rows, settled)
+    end
+  end
+
+  defp unrun_result([row], settled), do: {:ok, {settled, request_row(row)}}
+  defp unrun_result([], _settled), do: {:error, :start_conflict}
+
+  defp stored_primary_epoch(conn, owner, transport) do
+    with {:ok, rows} <-
+           query_all(
+             conn,
+             """
+             SELECT primary_epoch FROM mobile_request_primary_epochs
+             WHERE agent_id = ? AND owner_id = ? AND transport = ?
+             """,
+             [owner.agent_id, owner.owner_id, transport]
+           ) do
+      {:ok, rows |> List.flatten() |> List.first()}
+    end
+  end
+
+  defp release_if_moved(_conn, _owner, _transport, nil, _epoch, _now), do: {:ok, :recorded}
+  defp release_if_moved(_conn, _owner, _transport, epoch, epoch, _now), do: {:ok, :unchanged}
+
+  defp release_if_moved(conn, owner, transport, stored, _epoch, now) do
+    with {:ok, rows} <-
+           query_all(
+             conn,
+             """
+             UPDATE mobile_client_requests SET runner_epoch = NULL, updated_at = ?
+             WHERE agent_id = ? AND owner_id = ? AND transport = ?
+               AND status IN ('accepted', 'running')
+             RETURNING client_msg_id
+             """,
+             [timestamp(now), owner.agent_id, owner.owner_id, transport]
+           ) do
+      {:ok, {:moved, stored, length(rows)}}
+    end
+  end
+
+  defp put_primary_epoch(conn, owner, transport, epoch, now) do
+    execute(
+      conn,
+      """
+      INSERT INTO mobile_request_primary_epochs (
+        agent_id, owner_id, transport, primary_epoch, updated_at
+      ) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT (agent_id, owner_id, transport)
+      DO UPDATE SET primary_epoch = excluded.primary_epoch, updated_at = excluded.updated_at
+      """,
+      [owner.agent_id, owner.owner_id, transport, epoch, timestamp(now)]
+    )
+  end
+
   defp matching_attempt(%{attempt: attempt}, attempt), do: :ok
   defp matching_attempt(_request, _attempt), do: {:error, :stale_attempt}
 
   defp request_transition("running", _next), do: :update
   defp request_transition(status, status) when status in ["completed", "failed"], do: :unchanged
 
-  defp request_transition(status, _next) when status in ["completed", "failed"] do
+  defp request_transition(status, _next) when status in ["completed", "failed", "uncertain"] do
     {:error, :already_settled}
   end
 
@@ -1408,6 +1808,7 @@ defmodule FermixCore.Memory.Repo.MobileSql do
       payload_digest: digest!(attrs, :payload_digest),
       transport: transport,
       authenticated_device_id: claimant_device!(attrs, transport),
+      runner_epoch: nonempty_string!(Map.get(attrs, :runner_epoch), :runner_epoch),
       claimed_at: datetime!(attrs, :claimed_at),
       expires_at: datetime!(attrs, :expires_at)
     })
@@ -1522,22 +1923,23 @@ defmodule FermixCore.Memory.Repo.MobileSql do
 
   # What a stored preview may hold: a url, a site and a title, the link the
   # row wrote when present (a preview stored before links were kept has
-  # none), a description as text when present, and an image that is a
-  # well-formed media descriptor of its own ref. An absent field is an absent
-  # key, never a null.
+  # none), a description as text when present, and an image and an icon that
+  # are each a well-formed media descriptor of its own ref. An absent field
+  # is an absent key, never a null.
   defp validate_link_preview(preview) when is_map(preview) do
     with :ok <- known_preview_keys(preview),
          :ok <- required_preview_text(preview, ~w(url site title)),
          :ok <- optional_preview_link(preview),
-         :ok <- optional_preview_text(preview, "description") do
-      preview_image(Map.fetch(preview, "image"))
+         :ok <- optional_preview_text(preview, "description"),
+         :ok <- preview_media(preview, :image) do
+      preview_media(preview, :icon)
     end
   end
 
   defp validate_link_preview(_preview), do: invalid_preview(:not_a_map)
 
   defp known_preview_keys(preview) do
-    case Map.keys(preview) -- ~w(link url site title description image) do
+    case Map.keys(preview) -- ~w(link url site title description image icon) do
       [] -> :ok
       [key | _rest] -> invalid_preview({:unknown_field, key})
     end
@@ -1568,16 +1970,20 @@ defmodule FermixCore.Memory.Repo.MobileSql do
     end
   end
 
-  defp preview_image(:error), do: :ok
-
-  defp preview_image({:ok, %{"ref" => ref} = image}) do
-    case validate_media_descriptor(image, ref) do
-      :ok -> :ok
-      {:error, {:malformed_media_descriptor, reason}} -> invalid_preview({:image, reason})
+  defp preview_media(preview, key) do
+    case Map.fetch(preview, Atom.to_string(key)) do
+      :error -> :ok
+      {:ok, %{"ref" => ref} = media} -> preview_media_descriptor(media, ref, key)
+      {:ok, _media} -> invalid_preview({key, {:missing_field, "ref"}})
     end
   end
 
-  defp preview_image({:ok, _image}), do: invalid_preview({:image, {:missing_field, "ref"}})
+  defp preview_media_descriptor(media, ref, key) do
+    case validate_media_descriptor(media, ref) do
+      :ok -> :ok
+      {:error, {:malformed_media_descriptor, reason}} -> invalid_preview({key, reason})
+    end
+  end
 
   defp invalid_preview(reason), do: {:error, {:invalid_link_preview, reason}}
 
@@ -1599,7 +2005,7 @@ defmodule FermixCore.Memory.Repo.MobileSql do
   defp preview_key(preview), do: Map.get(preview, "link", preview["url"])
 
   # A row's previews are one row of their own, keyed like it; its triggers
-  # index their images.
+  # index their images and icons.
   defp update_link_previews(conn, profile, row, previews) do
     with :ok <-
            execute(

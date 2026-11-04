@@ -43,7 +43,7 @@ config :logger, :default_formatter,
 
 config :phoenix,
   filter_parameters:
-    ~w(password secret token t _csrf_token access_token refresh_token bot_token verify_token api_key mobile_push_key mobile_apns_key)
+    ~w(password passphrase secret token t _csrf_token access_token refresh_token bot_token verify_token api_key mobile_push_key mobile_apns_key)
 
 config :fermix_core,
   providers: [
@@ -133,6 +133,18 @@ config :fermix_core, :jobs,
 config :fermix_core,
        :harness_continuation_dispatcher,
        FermixChannels.Harness.ContinuationDispatcher
+
+# The rail-side half of the home (M75): forwarding a desktop's management calls
+# to its primary, the rail's facts for `home.status`, the enrollment window.
+# Injected by module for the same reason as the dispatcher above
+# (`FermixCore.Home.Link`).
+config :fermix_core, :home_link, FermixChannels.Home.Link
+
+# Where the primary keeps snapshots beyond S3 (M75 §8, D19): its connected
+# desktops, over the rail. Injected by module for the same reason as the
+# dispatcher above; the scheduler writes to `Snapshot.S3` and then these
+# (`FermixCore.Home.Snapshot.Scheduler.targets/0`).
+config :fermix_core, :snapshot_targets, [FermixChannels.Desktop.SnapshotTarget]
 
 config :fermix_core, :prompt_bootstrap,
   bootstrap_dir: Path.expand("~/.fermix/bootstrap"),

@@ -12,9 +12,12 @@ defmodule FermixCore.Realtime.SessionServerAccessTest do
   alias FermixCore.Capabilities.Builtin
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Capabilities.UntrustedContent
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.SessionServer
   alias FermixCore.Tools.ListCues
+  alias FermixCore.Tools.OpenLoopList
+  alias FermixCore.Tools.OpenLoopUpdate
 
   # The test registers under this name to be told about each provider event as it
   # is sent, so a confirmed run's status item is awaited rather than polled for.
@@ -40,6 +43,22 @@ defmodule FermixCore.Realtime.SessionServerAccessTest do
   end
 
   def read_page(_args, _context), do: {:ok, %{success: true, output: "page text", error: nil}}
+
+  # The owner's loops as `open_loop_list` shows them: one noted after outside
+  # content is framed when the test asks for it.
+  def list_loops(%{"framed" => framed?}, _context) do
+    words = Jason.encode!("Wire the Ostrander deposit")
+    intention = if framed?, do: UntrustedContent.frame("open_loop_note", words), else: words
+    {:ok, %{success: true, output: Jason.encode!(%{open_loops: [%{intention: intention}]})}}
+  end
+
+  # An answer's result as `open_loop_update` shows it: the loop as the list
+  # shows it, framed when the test asks for it.
+  def answer_loop(%{"framed" => framed?}, _context) do
+    words = Jason.encode!("Wire the Ostrander deposit")
+    intention = if framed?, do: UntrustedContent.frame("open_loop_note", words), else: words
+    {:ok, %{success: true, output: Jason.encode!(%{intention: intention, state: "open"})}}
+  end
 
   def speak(_args, _context, test_pid) do
     send(test_pid, :spoke)
@@ -68,6 +87,8 @@ defmodule FermixCore.Realtime.SessionServerAccessTest do
     web = web_capability()
     shell = shell_capability(self())
     cue_reader = cue_reader_capability()
+    loop_lister = loop_lister_capability()
+    loop_answerer = loop_answerer_capability()
     :ok = CapabilityRegistry.register(registry, unlock)
     :ok = CapabilityRegistry.register(registry, trunk)
     :ok = CapabilityRegistry.register(registry, honk)
@@ -83,7 +104,7 @@ defmodule FermixCore.Realtime.SessionServerAccessTest do
         openai_client: FakeOpenAIClient,
         api_key: "sk-test",
         safety_identifier: "safe-id",
-        capabilities: [unlock, trunk, honk, web, shell, cue_reader],
+        capabilities: [unlock, trunk, honk, web, shell, cue_reader, loop_lister, loop_answerer],
         capability_registry: registry,
         task_supervisor: task_supervisor,
         reconnect_backoff_ms: [10, 10, 10],
@@ -148,6 +169,15 @@ defmodule FermixCore.Realtime.SessionServerAccessTest do
   # call's taint is read from the tool and the view it asked for, not the answer.
   defp cue_reader_capability,
     do: %{Builtin.from_tool_module(ListCues) | executor: {__MODULE__, :read_page, []}}
+
+  # `open_loop_list` as the bridge offers it, answering with the list the test
+  # chooses: its taint is read from the answer, what it framed.
+  defp loop_lister_capability,
+    do: %{Builtin.from_tool_module(OpenLoopList) | executor: {__MODULE__, :list_loops, []}}
+
+  # `open_loop_update` likewise, answering with the loop the test chooses.
+  defp loop_answerer_capability,
+    do: %{Builtin.from_tool_module(OpenLoopUpdate) | executor: {__MODULE__, :answer_loop, []}}
 
   # Stands in for `shell`: a command whose audio (`say yes`) the owner's mic
   # would pick up.
@@ -380,6 +410,34 @@ defmodule FermixCore.Realtime.SessionServerAccessTest do
     assert_received {:unlocked, %{"vin" => "5YJ"}}
 
     call_tool(server, "c3", "list_cues", ~s({"view":"deliveries"}))
+    call_tool(server, "c4", "tesla_unlock_doors")
+    refute_received {:unlocked, _}
+  end
+
+  # A loop noted after outside content is framed in the list, and what it says
+  # may steer the call; a list of clean loops leaves the call clean.
+  test "listing clean loops leaves the call clean; listing a framed one taints it", %{
+    server: server
+  } do
+    call_tool(server, "c1", "open_loop_list", ~s({"framed":false}))
+    call_tool(server, "c2", "tesla_unlock_doors")
+    assert_received {:unlocked, %{"vin" => "5YJ"}}
+
+    call_tool(server, "c3", "open_loop_list", ~s({"framed":true}))
+    call_tool(server, "c4", "tesla_unlock_doors")
+    refute_received {:unlocked, _}
+  end
+
+  # An answer's result shows its loop as the list does, so a framed one taints
+  # the call as the list's does, and a clean one leaves it clean.
+  test "an answer's result for a clean loop leaves the call clean; a framed one taints it", %{
+    server: server
+  } do
+    call_tool(server, "c1", "open_loop_update", ~s({"framed":false}))
+    call_tool(server, "c2", "tesla_unlock_doors")
+    assert_received {:unlocked, %{"vin" => "5YJ"}}
+
+    call_tool(server, "c3", "open_loop_update", ~s({"framed":true}))
     call_tool(server, "c4", "tesla_unlock_doors")
     refute_received {:unlocked, _}
   end

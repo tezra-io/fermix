@@ -1,0 +1,93 @@
+{
+  "unauthorized": {
+    "error": {
+      "code": "unauthorized",
+      "message": "unable to authenticate",
+      "details": null
+    }
+  },
+  "forbidden": {
+    "error": {
+      "code": "forbidden",
+      "message": "insufficient permissions",
+      "details": null
+    }
+  },
+  "resource_unavailable": {
+    "error": {
+      "code": "resource_unavailable",
+      "message": "server type cpx22 unavailable in location fsn1",
+      "details": null
+    }
+  },
+  "resource_limit_exceeded": {
+    "error": {
+      "code": "resource_limit_exceeded",
+      "message": "project limit exceeded",
+      "details": {
+        "limits": [
+          {
+            "name": "project_limit"
+          }
+        ]
+      }
+    }
+  },
+  "rate_limit_exceeded": {
+    "error": {
+      "code": "rate_limit_exceeded",
+      "message": "limit of 3600 requests per hour reached",
+      "details": null
+    }
+  },
+  "not_found": {
+    "error": {
+      "code": "not_found",
+      "message": "server with ID '61839204' not found",
+      "details": null
+    }
+  },
+  "resource_in_use": {
+    "error": {
+      "code": "resource_in_use",
+      "message": "firewall with ID '1203' is still in use",
+      "details": null
+    }
+  },
+  "invalid_input": {
+    "error": {
+      "code": "invalid_input",
+      "message": "invalid input in field 'server_type'",
+      "details": {
+        "fields": [
+          {
+            "name": "server_type",
+            "messages": [
+              "unknown server type"
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "server_error": {
+    "error": {
+      "code": "server_error",
+      "message": "internal server error",
+      "details": null
+    }
+  },
+  "uniqueness_error": {
+    "error": {
+      "code": "uniqueness_error",
+      "message": "server name is already used",
+      "details": {
+        "fields": [
+          {
+            "name": "name"
+          }
+        ]
+      }
+    }
+  }
+}

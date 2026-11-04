@@ -43,13 +43,16 @@ defmodule FermixCore.ComputerUse.Observations do
 
   # Actions whose target is read off an image — a point, or a control named by
   # `element_ref` — so each must name the image it was read in. `scroll` carries
-  # optional coordinates too; keyboard actions never do.
+  # optional coordinates too; keyboard actions never do. `type` is one only when
+  # it names a control, and `elements` only when it drills into one
+  # (`addressed?/1`, M86 P2).
   @addressed_actions ~w(left_click right_click double_click mouse_move left_click_drag scroll
-                        inspect press set_value)
+                        inspect press set_value focus select toggle expand collapse scroll_to)
 
-  # The accessibility half of that set: these name a control and never a point, so
-  # a mark on one resolves to the badged control rather than to its badge's pixel.
-  @element_actions ~w(press set_value)
+  # The accessibility half: these name a control and never a point, so a mark on
+  # one resolves to the badged control rather than to its badge's pixel. `type`
+  # is here because a mark on it can only mean the control to type into.
+  @element_actions ~w(press set_value focus select toggle expand collapse scroll_to type)
 
   # The actions that accept EITHER form, so that naming a target twice is a choice
   # the model has to make rather than a shape the action never had. `Compux.Protocol`
@@ -153,12 +156,20 @@ defmodule FermixCore.ComputerUse.Observations do
           :ok | {:error, :observation_required | :addressing_conflict}
   def check_addressing(table, request) when is_list(table) and is_map(request) do
     cond do
-      request["action"] not in @addressed_actions -> :ok
+      not addressed?(request) -> :ok
       not is_binary(request["observation_id"]) -> {:error, :observation_required}
       addressed_twice?(request) -> {:error, :addressing_conflict}
       true -> :ok
     end
   end
+
+  defp addressed?(%{"action" => action}) when action in @addressed_actions, do: true
+
+  defp addressed?(%{"action" => "type"} = request),
+    do: Map.has_key?(request, "element_ref") or Map.has_key?(request, "mark")
+
+  defp addressed?(%{"action" => "elements"} = request), do: Map.has_key?(request, "root")
+  defp addressed?(_request), do: false
 
   defp addressed_twice?(%{"action" => action} = request) when action in @either_form,
     do: length(addressing_forms(request)) > 1
@@ -181,7 +192,7 @@ defmodule FermixCore.ComputerUse.Observations do
 
   @doc """
   Resolve `mark: N` to what the action carrying it needs: the badge's point for a
-  pointer action, the badged control's `element_ref` for `press`/`set_value`.
+  pointer action, the badged control's `element_ref` for a verb on a control.
 
   A mark names its observation like any other coordinate, so the badge table is a
   property of the image it was drawn on: an image with no badges answers

@@ -1614,6 +1614,46 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
       assert second == "assistant: booked \nuser: and email Ana"
     end
 
+    # The voice model hears every reply, so what one hand-off read can steer the
+    # next hand-off's words. The turn tells the call what it read, and every
+    # later hand-off of the call starts with it; a call whose hand-offs read
+    # nothing hands off clean.
+    test "a later hand-off starts with what an earlier hand-off read", %{clock: clock} do
+      session = start_session(clock: clock)
+      :ok = SessionControl.call_start(session)
+      start_provider_session(session)
+      read = MapSet.new([{:tool, "web_fetch"}])
+
+      speak(session, "read me the bulletin", 1_000, 4_000)
+      send(session, {:openai_live_event, {:delegation_created, "dg_1", 4_200}})
+      assert_receive {:bridge_submit, _handle, %{delegation_id: "dg_1"} = first}
+      assert first.outside_sources == MapSet.new()
+
+      :ok = FakeBridge.fire("dg_1", :outside_sources, read)
+      :ok = FakeBridge.fire("dg_1", :result, {:ok, "It asks residents to book a slot."})
+
+      speak(session, "and mark the deposit done", 8_000, 9_000)
+      send(session, {:openai_live_event, {:delegation_created, "dg_2", 9_200}})
+      assert_receive {:bridge_submit, _handle, %{delegation_id: "dg_2"} = second}
+      assert second.outside_sources == read
+    end
+
+    test "a call whose hand-offs read nothing hands off clean", %{clock: clock} do
+      session = start_session(clock: clock)
+      :ok = SessionControl.call_start(session)
+      start_provider_session(session)
+
+      speak(session, "book the room", 1_000, 4_000)
+      send(session, {:openai_live_event, {:delegation_created, "dg_1", 4_200}})
+      assert_receive {:bridge_submit, _handle, %{delegation_id: "dg_1"}}
+      :ok = FakeBridge.fire("dg_1", :result, {:ok, "Booked for ten."})
+
+      speak(session, "and email Ana", 8_000, 9_000)
+      send(session, {:openai_live_event, {:delegation_created, "dg_2", 9_200}})
+      assert_receive {:bridge_submit, _handle, %{delegation_id: "dg_2"} = second}
+      assert second.outside_sources == MapSet.new()
+    end
+
     # Live can raise two tasks from one sentence. The second has no word of
     # the owner's after the first went out, and a request without the words
     # that asked for it is no request (an empty user turn is refused by a

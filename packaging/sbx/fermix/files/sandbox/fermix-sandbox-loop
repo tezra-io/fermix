@@ -1,11 +1,11 @@
 #!/bin/bash
 # Keeps `fermix run` up inside a Docker sandbox, which has no service manager.
 #
-# The rule is the packaged systemd unit's (packaging/linux/systemd/fermix.service):
-# Restart=always with RestartSec=5, and StartLimitBurst=5 under
-# StartLimitIntervalSec=infinity, so the fifth exit is the last one. Apply &
-# restart exits the daemon on purpose and counts as one of the five, as it does
-# under systemd.
+# A restart five seconds after every exit, and a stop after the fifth start,
+# however far apart they were. The packaged systemd unit
+# (packaging/linux/systemd/fermix.service) counts only the last ten minutes
+# (StartLimitIntervalSec=600); this loop keeps no clock, so Apply & restart,
+# which exits the daemon on purpose, counts as one of the five for good.
 set -uo pipefail
 
 readonly burst=5

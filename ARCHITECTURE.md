@@ -206,6 +206,14 @@ with mode 0600. Login flows are per vendor (`Auth.ChatGPT`, Sign in with ChatGPT
 for `openai_codex`, under the `chatgpt` profile; `OAuthFlow` with a loopback
 listener; `AnthropicLogin`, `XAILogin`, and plugin providers through
 `OAuthProviders`), and `TokenSupervisor` runs one `TokenManager` per profile.
+Every loopback listener a sign-in opens (the provider, plugin and MCP
+sign-ins all run `OAuthFlow`) is recorded in `Auth.LoopbackRegistry` while it
+is open, with its port, its deadline and the management caller that started
+it (M75 D17): a sign-in a desktop started over the rail (router `:actor`
+`{:desktop, device_id}`, threaded through `Management.Auth` to the flow as
+`:loopback_owner`) is forwarded there by the channels side, which subscribes
+to the registry, and a desktop that cannot listen on the port ends the flow
+with `{:loopback_forward_failed, failure}` through `LoopbackRegistry.fail/3`.
 
 `Net.HttpClient` sends outbound HTTP on the shared `FermixCore.Finch` pool,
 retrying once on a stale socket and never on a timeout. `Net.Egress` decides how
@@ -255,7 +263,7 @@ not from a shared Buzz channel (`Acp.Identity.multi_principal?/1`), that read no
 outside content (`:outside_sources`, seeded by `TurnRunner` from
 `UntrustedContent.message_sources/1` with a forwarded message and the message's
 attachments, a voice note aside, and a Recent Activity note that rendered, then
-folded per call by the agent loop from `UntrustedContent.outside_source/2`), or
+folded per call by the agent loop from `UntrustedContent.outside_source/3`), or
 on a scheduled run whose job names it; otherwise the call is parked in
 `AccessGate.Pending` for one owner confirmation, or refused. A built-in marked
 `host_command?` meets the same rule where the kernel does not hold commands,
@@ -318,7 +326,11 @@ Memory has two layers:
 
 The same database also holds full-text search, versioned resources, scheduled
 jobs and their runs, temporal events and reminders, harness runs, meetings,
-skill usage and curation, the companion timeline, and computer-history rows.
+skill usage and curation, the companion timeline, computer-history rows, and
+the inbound channel event ids `Gateway.Idempotency` keeps for 24 hours
+(`channel_event_ids`, migration 53, M75), so a provider's retry, or a
+Telegram update sent again, that arrives after a restart, or on the new host
+after the home moved, is still a duplicate.
 
 Durable memory has two writers, and both end by having `PromptFiles` rebuild
 `USER.md` and `MEMORY.md` under `FERMIX_HOME/memory/<agent>/`. `Memory.Reviewer`
@@ -406,6 +418,437 @@ status, restart state, and the version into the runtime health report.
 Architecture Invariant: setup logic belongs in core. The CLI, web, and app
 surfaces collect answers and call core.
 
+### `FermixCore.Home`: the primary, its epoch, roles and moves
+
+A home is the one primary copy of Fermix, and `FermixCore.Home` holds what
+makes it movable. `Home.Epoch` is the primary epoch (`mobile/primary_epoch`):
+1 from the home's first boot as the primary, one more on every move or
+restore; both handshakes announce it and a client that has seen a higher one
+is refused as `stale_primary`. `Home.Moved` is the marker (`moved.json`) that
+retires a home as the primary. `Home.Role` is the role: `[fermix_core.engine]
+role` (`primary`, the default when absent, or `device`), resolved by
+`Role.remember!/2` as the first call of `start_supervision_tree`, before
+anything writes to the home; a marked home refuses to boot as the primary by
+name. `Role.children/2` filters both supervision trees from one named list
+(`Role.primary_only_reasons/0`; a device leaves out `Memory.Repo` and every
+child that opens `memory.db`, so it opens no database: its copy is the
+retired one, which a return replaces in place while it runs), and
+`Role.admit/1` is the one refusal for
+turns, provider calls, token refresh and memory writes in the device role,
+with `Role.admit_configured/1` answering the same question tree-less for the
+sign-in verbs. `Home.DesktopLink` is a moved desktop's link to its primary
+(`device/desktop.json`, `device/desktop_key`): the move worker writes it, the
+desktop relay reads it, and `DesktopLink.linked?/2` decides once per boot
+whether the daemon forwards primary-class management requests
+(`Management.Placement`, the one table of device-class methods and settings
+sections; the home's recovery, enrollment and move are primary-class) through
+`Home.Link` and whether the companion socket tunnels. `home.status` and
+`settings.sections` are composed (`Placement.composed?/1`): the device answers
+its own part and the router adds the primary's through the daemon's
+`:primary_forward` (`Placement.primary_part/2`, within 5 s), or the sentence
+in `primary_missing` while it is missing; the primary answers a forwarded one
+as its own. `Placement.forward_deadline_ms/1` is the one table of how long a
+desktop waits for a forwarded answer (8 s; 60 s for `home.move.readiness` and
+`home.move.start`, which walk the whole home first), and a forwarded
+`home.move.start` the primary had whose answer was lost is `unconfirmed`
+(`Placement.unconfirmed/2`), never a failure.
+`Epoch.initialise/1` runs after `ConfigStore.ensure_workspace`
+on a primary boot and is the only writer of the first epoch. `Home.Archive`
+seals a stopped home (manifest, PBKDF2 key, AES-256-GCM) minus
+`Home.DeviceLocal`, the single list both export exclusion and restore refusal
+read; `Archive.RestoredConfig` rebases the old home path, resets coding-harness
+consent and moves a keyring-mode home to the file store on a keyring-less host
+in the restored `config.toml` through `Archive.ConfigText`, `Archive.ScreenHistory`
+clears computer-history rows from the restored database, and a restore writes
+the archived epoch plus one. `Home.Snapshot` is the streaming twin of the
+archive: `write/4` captures a running home (`Snapshot.Capture`: the archive's
+`collect/2` set, each file copied once while hashed, `memory.db` by
+`VACUUM INTO`, never the live WAL) and streams the stage-1 manifest and the
+files through `Snapshot.Format` (`FXSNAP1`: X25519 to a `Snapshot.Recipient`,
+HKDF, AES-256-GCM in 1 MiB chunks with the index and the last-chunk flag in
+the associated data) into a file or a function; `restore/4` decrypts into a
+private staging directory inside the empty root and hands the verified files
+to `Archive.install/5`, the one restore path both share. The recipient is the
+public half of a key derived from the recovery passphrase (PBKDF2, as the
+seal); the passphrase is never stored. `Snapshot.Recovery` is the one rule for
+a typed passphrase: `set/2` (`home.snapshots.passphrase`) derives a new key,
+and `verify_or_set/2` (the move) checks it against the kept key's own salt and
+public half, or sets one when none is kept, so a move carries the kept key and
+never mints a second. `Snapshot.Scheduler` (primary only,
+`Role`) runs `Snapshot.Run` every `[fermix_core.snapshots] interval_hours` to
+each `Snapshot.Target` (`Snapshot.S3`: SigV4 `PutObject` with
+`x-amz-checksum-sha256`, streamed through `Net.HttpClient`; then the targets
+`:snapshot_targets` injects, `FermixChannels.Desktop.SnapshotTarget`, the
+connected desktops over the rail) and is the one
+writer of `snapshots/status.json` (`Snapshot.Status`: per attempt the
+recovery key it was written for, and `waiting` for a target that takes it at
+a later run, a sleeping desktop), which
+`Management.Home` (`home.*`, answered locally in every role) and
+`fermix home status` read. A capture needs about twice the home free
+(`Home.Disk`, which reads `df -Pk`'s available column so that a space in a
+filesystem's name or mount point moves nothing) and is refused by number
+otherwise. `Home.Disk.usage/2` reads how full the home's filesystem is (used
+over used plus available) and whether it reached 85%, where the disk warning
+of M75 L14 starts. The
+companion request store settles a request another boot started, or anything
+in flight after the epoch changed, as `uncertain` rather than re-running it.
+
+The Always On move (M75 §7) adds a third role, `candidate`: a fresh server
+that `fermix home enroll` (`Home.Candidate.enroll/3`, tree-less) made one from
+an enrollment code (`Home.EnrollmentCode`, `fxenroll1.`), with its own keys,
+facts and phase under `<home>/candidate/`. `Role.children/2` keeps only
+`Role.candidate_keeps/0` for it (the command host, which the offer's `df` and
+the restore's keyring probe run under, task supervisor, trace, the daemon socket
+and its stop path, `FermixChannels.Home.CandidateSupervisor`, and the web app's
+endpoint-less children; `CandidateTreeTest` runs a move's candidate side in a
+VM holding only those); `start_supervision_tree` writes nothing into its home
+and initialises no epoch, and the router answers it `hello` and `home.status`
+alone. The primary opens the window through `Home.Link` and keeps candidates
+in `mobile/candidates.json` (`Home.Candidates`, at most four, 24 hours);
+`Management.HomeMove` answers `home.enroll.open`, `home.candidates.list`,
+`home.move.readiness`, `home.move.start` and the `enrollment`, `candidates`
+and `move` places of `home.status`. `Home.MoveReadiness` is the report the
+owner reviews (keychain secrets, a secret it cannot read named as its
+settings row labels it, `Management.Settings.secret_names/1`, the one reading
+of those labels, never by its id; engine versions, free disk, the S3 upload
+bound, the plugins the catalog has no build of for the server, what stops:
+those of iMessage, voice calls and meetings the home has turned on
+(`MoveReadiness.stays_here/3`, which the summary's `off` line reads too),
+WhatsApp, and Slack without Socket Mode;
+coding agents asking for approval again, read from `config.toml`; the
+cutover gap; an engine nothing starts again, `Lifecycle.restarts_itself?/1`,
+which the setup page's Apply & restart reads too; the settings-only items
+alone are `MoveReadiness.summary_items/4`) and
+`Home.Move.start/5`, given the recipient `Snapshot.Recovery` answered,
+refuses while an item blocks; the review is kept in
+`.move/readiness.json` and a start within 15 minutes of a ready one takes it
+(`Move.review/3`), so a move reads the keychain in the review and once more in
+its capture, never a third time. `Home.Move` is the source's
+`.move/` (request, phase, the kept review) and writes the device role with
+`ConfigStore.put_engine_role/2` (one line of `config.toml`, under the config
+lock) before the restart, which is the daemon's deliberate self-restart
+(`Lifecycle.restart_self/0`: on a systemd user unit the start budget is reset
+first, then the one stop path) that launchd or systemd brings back; the boot
+after it records the move's ending (`Move.finish_at_boot/2`; a write that
+fails there is tried again at each `home.status` read, whose sentence says why
+until it is recorded, `Move.view/3`, only in the engine whose boot left it
+unrecorded), never the engine about to stop. `Home.MoveSecrets` reads the
+keychain's value of every `@keyring` reference before the move's capture and
+hands them to it as file store entries that exist only inside the encrypted
+stream; on the candidate
+`Home.Candidate.Activation` restores the stream into `candidate/staging`,
+turns each carried reference into `@file`, and later renames it into place,
+`config.toml` last, asking the new primary's first boot for a snapshot at
+once. Its staging names the plugins the stream brought from another system
+(`Plugins.Dist.Reinstall.request/2`, `plugins/reinstall.json`, device-local),
+and the new primary's first boot installs each again at its locked version
+through `Dist.Installer.run_install/2` (`Dist.Reinstall`, a `:temporary`
+primary-only child right after the installer, so a crash restarts nothing
+under `:rest_for_one`); one it could not install is the plugin status
+`reinstall_failed`, one with no build there `incompatible`, until an install
+records another build. `Dist.Index.target_artifact/2` is the one rule for
+which build a host installs, shared by the installer and the readiness.
+`Home.MoveTelemetry` emits the move's bookends. `home.status`'s
+`secrets_missing` names the references that did not resolve on the primary
+(`MoveSecrets.missing/1`). The channels half
+(`FermixChannels.Home`) is described under `fermix_channels`.
+
+`Home.Provision` is the contract every cloud provider Fermix creates the
+Always On server on implements (M75 lean v1 §4.3), and the place a new
+provider plugs in: a module of its `@callback`s, listed in
+`Provision.Registry`, a compile-time list. A provider is only an API
+adapter, and its callbacks are its primitive operations, the plug-in
+surface: identity (`id/0`, `display/0` with the name, token label, How to
+get one steps, console URL, docs anchor, locations and the proper nouns its
+words use, `type_name/1`, `max_user_data/0`), `check_token/2`, `catalog/2`,
+`server_type/3`, `system_image/2`, `create_firewall/3`, `create_server/3`,
+`power/4`, `action/3`, `get/4`, `find/4` (by labels) and `delete/4`, each
+answering normalized facts with ids as opaque strings. `Provision.Hetzner` is
+the one provider today: Req over the Hetzner Cloud API through
+`Net.HttpClient`, its endpoints, label encoding, price parsing, error codes,
+cities, image, 32 KiB user data limit and its root password, dropped where
+the answer arrives, and nothing else. Everything around the primitives is
+`Provision.Driver`'s, the same for every provider: every ledger write before
+a call and after it, the order (firewall, image, enrollment code, server, its
+start), the labels (`Provision.labels/2`), the polling (every 2 s, at most
+150 reads, a rate-limited read waiting 10 s), a write of unknown outcome kept
+`requested` for the reconcile to find by its labels, the reconcile, the
+delete order (server, addresses, firewall, an in-use firewall tried ten
+times) and its guard, the code window, and keeping only a created server's
+facts of its answer; `Provision.Offering` is the pure L2 rule over a
+provider's catalog. A primitive answers its refusals as a closed set: the
+shared kinds (`:unauthorized`, `:read_only_token`, `:account_limit`,
+`{:rate_limited, _}`, `{:unreachable, _}`, `{:other, sentence}` with the
+provider's own plain message), the kinds the driver reads (`:not_found`,
+`:in_use`, `:no_capacity`, `:no_image`), and `{:unknown, _}` for a write that
+may have been carried out; `Provision.error_sentence/2` words every reason
+in the provider's display data. The shared code (`Provision`, the driver,
+the offering, the ledger, the job, `HomeSummary`, `Copy`,
+`Management.Provision`, the router) names no provider, which
+`provider_contract_test.exs` holds by scanning every lib file, and
+`driver_test.exs` runs the driver alone on an invented provider that is only
+primitives over a world of its own. `Provision.current/2` is the one
+resolver of which provider Always On speaks of: the one whose ledger holds
+what Fermix created (or cannot be read), else the one whose token was given
+last, else the first the registry offers. A provider's token and the ledger
+of what was created on it live in its own file, `device/provision/<id>.json`
+(`Provision.Ledger`, `0600`, device-local, never `config.toml` or the
+keyring, so a move never carries it), which is how the ledger records which
+provider each resource belongs to; only the driver writes it. Every write is
+`Ledger.update/3`, which holds the file's lock across its read, change,
+write and rename (never across a call to the provider); `Provision.Ledger.Lock`, one supervised owner in the
+primary's and a desktop's tree, serves writers in the order they asked, each
+the moment the one before is done or exits, with no retry or backoff, and
+refuses only a writer whose turn has not come in 30 s. `Provision.FirstBoot` embeds `packaging/cloud/first-boot.sh`
+at compile time and wraps it, gzip and base64 with its SHA-256, as the
+server's cloud-init user data, the enrollment code in `FERMIX_ENROLL_CODE`,
+refused past the limit its provider passes in.
+A create checks the type against the live stock, makes the firewall (the
+first write, where a read-only token fails before anything costs money),
+opens a provisioned enrollment window (24 hours; `home.enroll.open` is
+refused while it is open, and while the server it enrolled is held as a
+candidate), creates the server named and labelled by the
+ledger's ref, and polls each action with a bound; a create whose answer was
+lost is found again by its labels in `reconcile/2`, which also marks a
+resource deleted outside Fermix gone. `Management.Provision` holds the
+provisioner's steps (the computer that created the server manages it and
+never forwards them): connect, start_create, start_again, power, delete,
+stop_step and the reconcile, which `Management.AlwaysOn.act/2` runs, and
+`home.provision.options`, the one method of the family left on the wire
+(device-class in `Placement`); the summary carries each provider's display
+data (`detail.providers`), so every surface draws the token screen from it;
+connect names the provider; options (no params, answering that provider's
+`{id, name}`), create, Start again, power and delete act on
+`Provision.current/2`'s; a new
+token replaces the kept one only when it reaches the ledger's server or
+firewall (one read by id, the same account), a create is refused while any
+provider holds a server, and create, Start again, power and delete run as one
+`home_provision` management job at a time; delete refuses while a move to the server runs
+and once this engine is its linked desktop (or the home carries the moved
+marker). `Ledger.state/3` is the one reading of the provisioner for `home.status`'s
+summary: none, connected, creating, created, deleting, gone, failed (with the
+reason, before anything else the ledger holds) or unreadable, beside whether
+the token is still accepted, the step whose job runs (`action`, written by
+`Management.Provision.put_action/2` before the job starts and cleared by the
+step's one ending, which the job family itself runs once the run is over
+however it ended, a raise, an exit or a kill included: `Management.Jobs`'
+`:ending`) and when the provider was last
+read back (`checked_at`, the reconcile's). Every step's ending lands there:
+a create's, a power action's and a delete's failure carry the step, the
+server's size and place; a run that answered nothing (it raised, exited, was
+killed or ran past its budget) and an action older than the job budget read
+as the failure `interrupted`, and the boot, before the job family and the socket
+start, writes it so (`Management.Provision.interrupt_at_boot/0`, a child that
+starts no process). A create names the size and place the owner was
+shown, the recommendation being one row like any other
+(`Management.Provision.start_create/2` refuses a create without them and
+keeps them on the step's action before its job starts); the job prices it
+from the live offer and writes the price into the server record. `Management.Home.status/1` starts one
+reconcile (`Management.Provision.start_reconcile/1`, a job of the same family,
+so single-flight and never beside a step) when its summary rests on the
+provider's word and the ledger was last checked over a minute ago. The apps
+read `home.status` often, so everything it reads on each read (the ledger, the
+settings its summary reads, `MoveReadiness.stays_here/3`, the primary's
+disk, the last review of the move and each copy a desktop stores) logs a
+failure to read it through `Home.UnreadableFiles`, a supervised memory in
+every role's tree: once when it stops being readable and once, with the
+failed reads counted, when it reads again; a verb with no engine tree passes
+no memory and logs its one read.
+
+A provider served by an external plugin is not built. It would be one more
+module of the contract in the engine, listed in the registry, that forwards
+each primitive to the plugin; what the engine keeps for every provider stays
+in the engine: the token's custody (read from the provider's ledger and
+passed with each call, never stored by the plugin or seen by a command, as
+`device/` is denied to the sandbox), the owner's decisions over connect,
+create, power and delete (the daemon), the enrollment code's window, the
+display data the apps draw (answered from the plugin's manifest, held to the
+copy rules), and the ledger, which only `Provision.Driver` writes. The
+plugin answers only the primitives (create the firewall, create the server,
+read an action, get, find, delete or power one resource, read the catalog),
+with the contract's closed set of kinds and ids as strings, so a plugin
+never writes a ledger and needs nothing of the driver's order, bounds or
+guards.
+
+`Management.HomeSummary` is that summary (M75 lean v1 §7): `gather/5` reads
+the provider in use and its ledger, the last kept review (`Move.last_review/1`) and a desktop's stored
+copies beside the record `Management.Home.status/1` already holds (the role,
+the move's phase, the candidates, the rail's window and link, the snapshots,
+the primary's disk, `Home.Disk.usage/2`, and a linked desktop's composed
+`primary_home`, or `Placement.primary_part/2`'s `too_old` when the server
+refused this engine's protocol), the review's items the home's settings
+decide (`MoveReadiness.summary_items/4`, which `report/3` ends with) and the
+owner's zone (`Clock.shown_zone/1`), and the pure `summary/1` answers `{key,
+state, sentence, action, detail, notice}` in `Management.Copy`'s words and
+the provider's display data: every action one record (`needs`, `confirm`,
+`url`, `key`, `HomeSummary.action_key/5`; `find_action/3` finds one by its
+key), Details' `lines`, `providers` and `progress`, the notice the apps raise,
+and `key/1`, the one digest, which leaves out the clock (an `off`, `on` or
+`problem` sentence, `seen_at`, the last check), which `CopyTest`
+holds to the copy rules and to `Copy.summary_violations/1` (no internal word,
+no backticked code), as it does every sentence the summary prints as it is
+from elsewhere: it sweeps the provisioner's refusals, the ledger's, the
+readiness items and the code refusals a create keeps as its failure (the
+enrollment window's and `Home.Link`'s), each template and `<>`-joined
+sentence rendered whole. The two times it
+counts are awake time on the monotonic clock: how long the created server's
+window has been held (`Enrollment`'s `awake_ms`, 30 minutes) and how long the
+desktop relay has had no session (`Relay`'s `down_ms`, 10 minutes). On a
+linked desktop a replace of the server (`Ledger.state/1`'s `replace`) leads
+while it runs, read with the old server's own window and candidates from
+`primary_home` (the new server's 30 minutes count from its creation, since
+its code lives on the old server, which never sleeps); until the move is
+done the old server is the one the home lives on, and the power actions,
+which reach the new one, are not offered for it. The snapshot scheduler tells the paired phones, once per occurrence (the point
+kept in `snapshots/status.json`'s `stale_notice`), when the newest verified
+snapshot passes 7 days, through the phones' own path: a message in the
+owner's phone chat (`ChannelSend` to `mobile`, its proactive key the point).
+
+The apps do not poll the summary (companion protocol 6). `Home.StatusWatch`,
+started by `Companion.Supervisor` before the connections (a restart that
+forgets its subscribers takes them down too), keeps the last
+`HomeSummary.watch/1` read (`Management.Home.summary_facts/1`, gathered as
+`home.status` gathers them, through the server on a linked desktop): its key
+(the summary's own `key/1`, so a settings write while `off` tells nothing; on a
+server with desktops also its newest backup, its window and its candidates,
+which their summaries read), whether it is `off`, and the milliseconds to its
+next change by the clock alone. A `home.status {after, wait_ms}`
+(`Management.Home.status_after/3`) subscribes the request's own process and
+reads again at each word until the key moves or the wait runs out. A
+version 6 `Companion.Connection` subscribes before its `server_hello` and
+writes `home_status_changed` when told: once after the hello unless off, then
+at each change of key. It reads only while subscribed, on `changed/2` from the
+writers the summary rests on, each a cast that is a no-op with no watch
+running: `Provision.Ledger.update/3` (`:ledger`), `Move.put_phase/4`
+(`:move`), the enrollment window's kept changes and expiry (`:enrollment`),
+a finished `Snapshot.Scheduler` run (`:snapshots`), the desktop relay's session up or
+down (`:link`) and a tunnel that heard its server's own notice (`:server`);
+events that arrive together are one read (a message it sends itself, queued
+behind them). One timer, replaced at each read, at least a second and at most
+a week, waits for the next clock change; a time-offset monitor reads again
+after a wake from sleep, since the monotonic timers stop while the computer
+sleeps. While off nothing is armed and only `:ledger`, `:move` and
+`:enrollment` are read. It never calls a cloud provider; every ledger
+write (`Provision.Ledger.update/3`, the shared driver's and the management
+family's) tells it `:ledger`.
+
+`Home.AlwaysOnRelease` keeps Always On out of a release build until it
+ships: compiled for `:prod`, `hello` lists none of its methods and the router
+refuses them by name, the setup page lists no Always On tab, and `fermix
+always-on` and `fermix home status` refuse in one sentence, unless the home's
+settings file carries the unsupported test switch `[fermix_core.always_on]
+enabled = true`. `Mix.env/0` decides at compile time (`:dev` and `:test`
+always serve it) and within `:prod` the switch: the engine reads it from
+application environment, which the boot hydrates from the file, and the
+tree-less verbs read the same section from the home's file
+(`ConfigStore.always_on_config/1`). The switch travels with the home (no
+device-class section holds it), a candidate's settings are written with it
+on, and the gate is removed by deleting that module, its section and its
+callers.
+
+`Management.AlwaysOn` (Always On setup §3.4, §4) runs every Always On
+step: `home.act {action, key, input}`, one function per action with its
+placement decided inside it. One named process per engine (a child of the
+daemon-socket tree, after the job family) serializes the acts; each reads the
+summary first (`Home.summary_facts/1`, `HomeSummary.find_action/3`) and
+answers `changed`, in a sentence alone, when the action is not offered under
+that key (the surface reads `home.status` again), so a confirm accepted on an older screen or two surfaces
+pressing at once do nothing twice. A step that starts a job names it in the
+ledger first (`Provision.put_action/2`) and clears it again when the start is
+refused; Cancel during a create stops the job and waits for its run to end
+(`Provision.stop_step/1`, `Jobs.cancel/2`) before the delete job starts.
+Move now reviews at the press (a kept ready review under 15 minutes old, else
+a fresh one, kept), refuses on a block, answers `changed` on a warning the
+confirm did not name, then reaches `HomeMove.move_start/3`. On a linked
+desktop it sends the server's own steps over the link as rail-only methods
+(`Placement.rail_only?/1`: served only with actor `{:desktop, _}`, refused on
+`daemon.sock` by name). `input` is `AlwaysOn.Input`, decoded at the
+boundary, whose `Inspect` withholds the token and the recovery passphrase.
+
+Replace the server (`home.act`'s `replace_server`, a create with `replace`)
+runs on the linked desktop whose ledger holds the server the home lives on. The job sets
+that server aside in the ledger (`Ledger.begin_replace/3`: the old set and
+the primary epoch it held, from `desktop.json`), then creates the new server
+as any create does, under another ref (`Provision.fresh_ref/2`), with a
+provisioned window the old server opens for a request the desktop forwards
+(`home.enroll.open {kind: provisioned}`, served only to a desktop's forward;
+`home.enroll.withdraw` releases it when the new server will not exist). The
+move is the existing one, sent by the desktop's `home.act` (Move now) as
+`home.move.start` with `keep_as_desktop` false; once the server answered,
+`home.act` records that the move started (`Provision.move_forwarded/3`),
+because the old server serves nothing while it runs. The desktop relay
+reports every primary epoch a session reaches (`Provision.primary_reached/2`,
+in a task): one above the old server's is the move to the new one done, the
+desktop's link names the new server from then on (`Home.Link`'s
+`rename_primary/1`, the relay writing it with `DesktopLink.record_name/3`, so
+the relay stays the one writer of `desktop.json`), and the old server is
+deleted, once, as a `home_provision` job
+(`Provision.delete_replaced/2`, the same order as any delete, refused unless
+the move is done); a failed delete stays in the ledger with its sentence for
+Delete your old server (`home.act`'s `delete_server`) to try again, and the
+old server answering at its own
+epoch after the move started is a move it undid. `Ledger.state/1`'s `replace`
+says where it stands: creating, waiting, moving, deleting, done, failed (with
+which server holds the home) or cancelling.
+
+Move back (`home.act`'s `move_back`, Always On's move back) runs on a linked
+desktop: it asks the server for a manual window (`home.enroll.open`, which
+records the desktop that asked, so the candidate enrolled through it carries
+`returning` in `Home.Candidates` and the server's review knows the move goes
+back by that fact, never by an OS), writes the desktop's own candidate
+(`Candidate.prepare_return/3`, kind `return`) and `Home.Return`'s record
+(`device/return.json`: the server's name, the ledger's server, the epoch the
+link reached), and starts the candidate subtree (`Home.Link`'s
+`start_return/1`). Move now on it writes the start into `return.json` before
+it sends `home.move.start` to the desktop's own candidate (the server restarts
+into the move as it answers), never into the ledger's `replace`, and takes it
+back only when the server refused or the request never left; Cancel (offered
+only where the server has no move under way) stops the subtree, closes the window
+(`home.enroll.withdraw {kind: manual}`) and removes both, the record first (a
+stop between them leaves a candidate, which Cancel clears). Restore here
+(`restore_here`) chooses the newest copy under `snapshots/` the passphrase
+opens (`Home.LocalReturn.choose/2`, a wrong one refused before anything is
+deleted), writes `fence_requested`, and runs one `home_provision` job
+(`Provision.start_return_restore/2`): the fence, `delete_target`'s
+`:return_fence` (asked for, the server silent past the summary's limit or out
+of any link, no candidate here, no move under way), is `Driver.delete/3` of
+the server the home lives on and nothing else, recorded as `fenced_at`; a
+delete the provider refused ends the job as the delete's failure and
+restores nothing, and a server that answers again by then is no failure:
+nothing is deleted or restored, and `fence_requested` is dropped;
+then `Home.LocalReturn.restore/3` (a `local` candidate, the copy staged as a
+return's, activated in place, the engine restarted). The job is never
+resumed: jobs live in memory, so a stop part-way leaves the step interrupted
+and a `local` candidate the device's next start discards, and Restore here is
+offered again, keyed on `fence_requested` with the ledger's server gone, so a
+stop between the delete and `fenced_at` still offers it (a ledger that holds
+nothing deletes nothing twice). The primary's
+summary reads `return.json`'s `moved_at` with the ledger's server standing as
+`server_retired` first; its delete removes the record with the server. While
+a move back's `candidate/` is here, in any phase, or `return.json` says its
+move started and this computer has not booted as the primary, `delete_target`
+refuses every delete but the fence (between the activation's marker removal and its
+settings this home has neither link nor marker).
+
+Architecture Invariant: one role gate, one epoch writer, one marker, one
+device-local list, one placement table; a linked device's request takes one
+path, here or the primary, never both. A device-role engine makes no provider call, refreshes
+no token and opens no database. One restore path (`Archive.install/5`) for an archive and a
+snapshot, and one writer of the snapshot status. A candidate never activates
+without `move_commit`, and a source sends `move_commit` only after its moved
+marker is written: at every crash and lost message at most one engine serves
+as the primary (`tla/specs/home_move`). A move is aborted only while the
+marker is absent; after it, it is only ever resumed. A candidate takes only an
+offer later than the move it holds (move ids ordered by start, then the
+attempt), so a late offer never un-stages a home its source retired for. The
+move's ending (`done`, `aborted`) is written only by the engine that came
+back after the restart. A move's keychain values exist only in memory and
+inside the stream encrypted to the candidate's one-time key. The
+provisioner's tokens never leave the computer that pasted them, and a
+provider's root password for a created server (Hetzner's) is read for nothing. A replace deletes the
+old server only once a primary of a higher epoch answered this desktop, never
+the server that holds the home.
+
 ### `FermixCore.Trace` and Telemetry
 
 `Trace` writes one `<type>.jsonl` file per UTC day under
@@ -417,9 +860,26 @@ capture, which is on unless `FERMIX_TRACE_CONTENT=0`. Tools emit through
 The local Doctor reads the `llm_call` rows back: `Setup.ProviderHealth` judges
 the primary provider from its recent calls, and finds them through
 `FermixCore.Application.trace_dir/0`, the resolver the `Trace` child starts with.
+`Trace.Retention` keeps the store bounded on every machine (M75 L14): when `Trace`
+starts and every hour, after closing the files of earlier days, it removes whole
+day folders older than 14 days, then the oldest until the rest fit in 1 GiB, at
+most 32 a pass, never today's or a later day's, and nothing but a folder named as
+a date that holds only `.jsonl` files (and hidden ones).
+The bounds are constants, not settings. On an Always On server (M75 L20;
+`Home.AlwaysOn`: the primary of a home that moved or was restored onto a host
+running the Linux package with no Fermix app, decided at boot) `Trace` starts
+with `separate_bodies: true` and writes a record that carries a body
+(`Trace.body_keys/0`) twice: without its bodies to `<type>.jsonl` and whole to
+`<type>.bodies.jsonl`. Each pass first removes the bodies files of every day
+before yesterday (`Retention.prune_bodies/3`), so a server keeps bodies about a
+day (through the previous UTC day) and the records 14. Readers of trace rows (`Setup.ProviderHealth`, the Doctor's
+sandbox check, `FermixOpik.TraceFile`) read `<type>.jsonl` and need no body.
 
-Architecture Invariant: trace writes are best-effort. Failure to write a trace is
-logged and should not take down the runtime.
+Architecture Invariant: trace writes are best-effort. `Trace` is an early child of
+core's `:rest_for_one` supervisor, so it never raises on its I/O: an entry it
+cannot encode, open or write (a full disk's `:enospc`) is dropped, a failure to
+open or write is logged once when it starts and once when a later entry is written
+again, with the count dropped, and each new entry tries again.
 
 ### `FermixCore.Jobs`, `Temporal`, and `Delivery`
 
@@ -469,7 +929,9 @@ keys are read at each call. The path of one item:
    each hop pinned to the address `Net.Guard` checked (`Net.PinnedUrl`) and
    feeds the body to a `Cues.FeedParser` reader as it inflates, XML read one
    item at a time by `Cues.FeedXml`, so a feed's length bounds its work but not
-   its memory. A stream takes the path below instead. `Cues.SourceManager`
+   its memory. An X accounts feed (`Cues.XAccounts`) builds its search address
+   from its handles, signs in with the X plugin's token and reads X's answer as
+   one JSON document. A stream takes the path below instead. `Cues.SourceManager`
    starts and stops the workers to match the config. A JSON API feed, a webhook
    and the general stream read messages by the same dot paths
    (`Cues.JsonPath`).
@@ -578,6 +1040,45 @@ proposal's idempotency key, over the mandate, tool, arguments and cue, is
 unique), so a denied, expired or unreachable proposal is final for that cue. A cue run whose `job_runs.tools_started_at`
 is set (an allowed mandate call or a proposal) is never retried.
 
+### `FermixCore.Checklists`: the owner's lists
+
+A list (M85) is the owner's own record of things to tick off: a list per
+project in a folder such as Projects, sections inside, items with an optional
+note. Its rows live in `memory.db` (`checklists` and `checklist_items`,
+migration 56, `Memory.Repo.ChecklistsSql`), and `Checklists.Registry` is
+their one writer, a module over the Repo, never a process. The model sees a
+list only as markdown: `checklist_read` renders it (`Checklists.Render`, each
+row with its `[n]`), and `checklist_edit` takes a call of changes, a list
+each with its ops, which the Registry checks in the caller, `Checklists.Parse`
+reading a `replace`'s markdown back into rows, and hands to the Repo whole,
+where `Checklists.Ops`, pure, applies it to the rows the transaction loaded.
+`Checklists.Note` is the per-turn rules line and the line naming the lists,
+which `TurnRunner` appends beside the date note, and `ReplyBlocks` keeps the
+lists a turn touched for its reply's `checklists` block.
+
+The Mac reads and changes the lists over its chat socket (companion version
+6, M85 §07): `Registry.device_index/2`, `device_list/4` and `device_edit/3`,
+a device's op by row id through the same transaction, deduplicated by its
+`client_msg_id` (`checklist_edits`, migration 57). After every commit, the
+model's, a job's or a device's, the Registry calls the notifier the channels
+app registers in core's app env (`:checklists_notifier`,
+`Companion.ChecklistNotifier`), which only sends each connection the lists
+that changed; each `Companion.Connection` keeps what it holds
+(`Companion.Checklists`, at most 16 lists) and pushes them whole at the end
+of its own 100 ms window, so lists add no process, timer service or poll.
+
+Architecture Invariant: one `checklist_edit` call is one transaction: every
+change lands or none does, each list it changed moves its `rev` once, and a
+row's `n` is never reused within its list.
+
+Architecture Invariant: the lists are the owner's. `Checklists.Access` admits
+only the owner's private turn or voice call, and a scheduled job whose allowed
+tools name the tool; the tools are left out of the cached capability catalog,
+which an owner's group chat shares, so a shared turn sees no list tool, line
+or name. After a turn read outside content it may only add and check, the
+rows it adds stamped and framed when read back; every other change, a new
+list included, is refused.
+
 ### Sandbox and Command Execution
 
 `FermixCore.Sandbox` is an in-process policy gate over paths, working
@@ -586,15 +1087,30 @@ sets, command profiles (`bare`, `assistant`, `extended`) pick the allowed
 commands, and `Hardline` refuses catastrophic commands. `Sandbox.Env` resolves
 `[sandbox.env] allow` one name at a time, and `EnvHealth` records misses for
 readiness. The owner-gated `request_directory_access` tool plus `/confirm
-<token>` can grant a denied directory. On macOS, `Sandbox.OsSandbox` also
-wraps every command a turn runs (the shell tool, the command tool, the git
-tools) in `sandbox-exec` with a Seatbelt profile built from the same roots, so
-the kernel holds the command to the mode and keeps Fermix's home and secrets
-out of its reach; `Sandbox.confine/3` is the one entry point. Linux has no
-kernel enforcement yet, so until it does, a built-in marked `host_command?`
+<token>` can grant a denied directory. `Sandbox.OsSandbox` also wraps every
+command a turn runs (the shell tool, the command tool, the git tools) so the
+kernel holds it to the mode and keeps Fermix's home, secrets and keys out of
+its reach; `Sandbox.confine/4` is the one entry point and `OsSandbox.unreadable/1`
+the one read-deny list (every entry write-protected too; nothing on it sits in a
+temp folder, which Landlock could not close without closing it whole, so the
+Secret Service writer stages a key being saved in `secrets/.staging-N/`). On macOS that is
+`sandbox-exec` with a Seatbelt profile built from the same roots. On Linux it is
+the `fermix_landlock` exec shim (`apps/fermix_nif/c_src`, built like `disclaim`:
+strict flags in lockstep with `ci.yml`, zig per release target through the
+Burrito target's `LANDLOCK_TARGET`), which checks the Landlock ABI (below 3
+refuses, since ABI 2 cannot refuse a truncate), starts a session of its own
+(an Erlang port's child already leads one), sets `no_new_privs`, adds one rule
+per argument and execs the command. ABI 5's device ioctls (granted to the
+terminals only) and ABI 6's signal and abstract-socket scopes are asked only
+of a kernel that has them. `Sandbox.Landlock` carves the rules folder by folder around the
+protected paths, since Landlock only grants, and the shim refuses every command
+by name on a kernel that cannot hold them. Doctor's `os sandbox` row checks
+either kernel. Everywhere but macOS (`OsSandbox.seatbelt?/1` false: Linux, whose
+Landlock cannot refuse a command's connect to the account's service manager or
+session bus, and any other system), a built-in marked `host_command?`
 (`shell`, `git_write`, a declared command) in a turn that read outside content
-goes through `Capabilities.AccessGate` like an access-sensitive plugin command,
-keyed on `OsSandbox.enforced?/1`. One that runs unconfined everywhere
+goes through `Capabilities.AccessGate` like an access-sensitive plugin command.
+One that runs unconfined everywhere
 (`host_command_confined?` false: the `codex`/`claude_code` presets and the
 coding runs `codex_run`/`claude_code_run`) goes through it on every platform;
 the next run a finished coding run's follow-up turn starts with the same coding
@@ -699,12 +1215,17 @@ flow, and `MainAgent` snapshots it per turn.
 
 `Browser` runs the `browser` tool: managed Chrome over the DevTools protocol,
 without compux. `Browser.Supervisor` holds a `ProfileManager`, which caps live
-Chrome instances, and one `ProfileServer` per owner and profile. The server is
+Chrome instances, and one `ProfileServer` per owner key and profile, where
+`Browser.Scope` keys every operator-trust conversation, scheduled run and
+worker to the one `owner` key and each guest conversation to its own; a
+context without a trust fact is refused. The server is
 the backend-neutral half (lazy lifetime, idle reaping, one request at a time,
 the mode's capability refusals); everything that talks to a browser sits behind
 the `Browser.Backend` behaviour, whose CDP implementation (`CDP.Backend`)
 launches Chrome lazily and shuts it down on every exit path. On macOS, Chrome
-launches only through the `disclaim` shim from `fermix_nif`.
+launches only through the `disclaim` shim from `fermix_nif`; on Linux, through
+`/bin/sh`, which raises its own `oom_score_adj` to 1000 and execs Chrome, so out
+of memory the kernel stops a Chrome process before the engine.
 
 Architecture Invariant: the computer-use tool is registered only when `ready?/0`
 holds, as a GUI-control capability that guests never get. Computer history
@@ -806,8 +1327,12 @@ auth (`setup`, `auth`), talking to the agent over the daemon socket (`ask`,
 `chat`), lifecycle (`run`, `service`, `start`, `stop`, `restart`, `status`,
 `health`, `upgrade`, `uninstall`, `migrate-to-app`), diagnostics (`doctor`,
 `diagnostics`, `logs`), administration (`agents`, `capabilities`, `skills`,
-`plugins`, `memory`, `sandbox`, `grant`, `revoke`), and companion surfaces
-(`voice`, `acp`, `pair`, `devices`). Mix tasks: `fermix.dev`, `fermix.setup`,
+`plugins`, `memory`, `sandbox`, `grant`, `revoke`, `home`, `always-on`), and companion surfaces
+(`voice`, `acp`, `pair`, `devices`). `always-on` (`Fermix.CLI.AlwaysOnCommand`) is a
+renderer of the Always On summary like the apps and the setup page: it collects what a
+step needs (masked secrets or flags, never argv), sends one `home.act`, and follows the
+step with `home.status {after, wait_ms}`, bounded at 45 minutes and reconnecting for 90 s
+across a move's restart; it never sequences calls itself. Mix tasks: `fermix.dev`, `fermix.setup`,
 `fermix.resource.*`, and the eval tasks in core; `fermix.bench*` in channels;
 `opik.ping` and `opik.replay` in opik. `Release.AppEngineManifest` records the
 version, source commit, tree digest, and protocol ranges that the macOS app
@@ -823,6 +1348,64 @@ Architecture Invariant: only `run` and `service run` start the daemon tree
 (`setup` and `memory` start it only when needed); every other verb halts before
 the sibling applications start. An app engine is recognized from its
 compiled-in build identity, never from runtime detection.
+
+### `packaging/cloud`: Always On servers
+
+`packaging/cloud/first-boot.sh` is the root half of a server that becomes the
+owner's primary (M75 step 6). It runs once as root, from cloud-init user data
+(the code in `FERMIX_ENROLL_CODE`, the release in `--version`) or as
+`curl -fsSL https://fermix.ai/always-on | sudo sh -s -- --version X` (the
+code read from the terminal without echo). It refuses, before it installs anything, any host but
+Debian 12, Debian 13 or Ubuntu 24.04 and, deciding, any kernel below Landlock
+ABI 3 (asked through `perl`'s `syscall`; a stock Debian 12 is one), where the
+engine would refuse every command; then in order: writes the enrollment code
+to
+`/run/fermix/enroll.code` (tmpfs, 0600); installs an nftables table that drops
+every packet to the metadata addresses (`169.254.169.254`,
+`100.100.100.200`, `fd00:ec2::254`, `fd20:ce::254`) from every uid but 0,
+except DNS and time (udp and tcp 53, udp 123), accepted first because some
+clouds serve them from the same address (the `output` hook: the
+host's own processes, which is why the server runs no containers), with a root
+unit that loads it before the network at every boot and a `user@<uid>` drop-in
+that will not start the engine account's service manager without it; gives a
+host with no swap a 2 GB `/swapfile`; installs the Linux package through
+`https://fermix.ai/install --no-setup --version X`, the release the computer
+that sets it up runs; turns on Debian's daily
+unattended-upgrades and installs `fermix-update.timer`, a root timer that at
+04:00 UTC installs `fermix home status --json`'s `update_ceiling` (the
+oldest engine among the desktops the server served in the last 30 days,
+`FermixCore.Home.EngineCeiling`, which the server records from each
+desktop's `hello`) when it is newer than the installed release in
+`dpkg --compare-versions`' order, never back down and nothing when there is
+none, then `fermix restart` as the engine account
+when `fermix service status` says the running engine is behind the installed
+one (not while `fermix home status` shows a pending move phase, nor when
+either read fails), and `systemctl reboot` when `/run/reboot-required`
+exists, which a move may defer at most two nights in a row (a root-owned
+count under `/var/lib/fermix-update`), stopping before both when the
+installer ran and failed (one that could not be downloaded changed nothing,
+so both are still decided); creates
+the engine account `fermix` (home `/home/fermix`, no login, lingering); runs
+`fermix home enroll` and `fermix service install` as `fermix`; installs the
+distribution's Chromium on Debian (Ubuntu's is a snap: it says to install a
+browser by hand); and waits up to 5 minutes for the primary to accept the
+candidate, ending with one sentence on
+stderr and a non-zero exit at any step that fails. `--restore` takes no code
+and enrolls nothing: the same server, then the exact steps that import a
+snapshot and start the service. Everything networked after that (dialling the
+primary, the move) is the engine's own candidate role.
+`packaging/cloud/test/first_boot_test.sh` runs the script in throwaway Debian
+containers against stand-ins for systemd, curl, apt and `fermix`, and once
+with the real apt and Chromium.
+
+Architecture Invariant: a server's Fermix is never newer than the oldest of
+the desktops it serves, so the home can always move back to one of them
+(the move's review refuses a server newer than the computer moving to it).
+No engine process reaches the instance metadata
+service. The enrollment code reaches the engine only as a file, never in an
+argument, an environment the engine inherits, or the console output. A failed
+nightly update leaves the running engine as it was, and nothing the engine
+account answers holds a security reboot off for more than two nights.
 
 ### `apps/fermix_channels`
 
@@ -859,9 +1442,27 @@ Current channels:
 
 - `Telegram` uses long polling through `Telegram.Poller`, with albums coalesced
   by `Gateway.AlbumBuffer`; webhook transport is intentionally unsupported.
+  The first poll takes everything Telegram still holds (it keeps an update 24
+  hours until a later call confirms it), so a message sent while Fermix was
+  stopped is answered (M75). Each update's id (`<bot id>:<update_id>`) is
+  recorded in `Gateway.Idempotency` before hand-off, so the batch Telegram
+  sends again after a stop is not answered twice; an update the store cannot
+  record halts the batch there, unconfirmed, for the next poll.
 - `WhatsApp` uses Cloud API webhook ingress and Graph API replies, with audio,
   image, and document download.
-- `Slack` uses signed Events API webhook ingress and Web API replies.
+- `Slack` uses Web API replies and takes events one of two ways
+  (`[fermix_channels.slack] mode`): signed Events API webhooks (`webhook`, the
+  default), or Socket Mode (`socket`, M75), where `Slack.SocketMode` opens a
+  WebSocket with the app-level token so a host with no inbound port runs Slack.
+  It asks `apps.connections.open` for a fresh address on every connection,
+  dials it through `Cues.Source.Stream.Socket` (the engine's client WebSocket),
+  acknowledges an event's envelope by its id once `Gateway.WebhookIngress` has
+  taken it (a failed hand-off is left unacknowledged for Slack to resend, as a
+  webhook answers 503), reconnects on `disconnect` and on a dropped or silent
+  connection (1 s doubling to 60 s after a failure), and publishes its posture
+  for `FermixCore.Health` and Doctor in Slack's own words, only while its
+  process runs. It is a primary-only child (`Home.Role`), started by the registry
+  only in Socket Mode.
 - `Discord` uses a supervised Gateway connection and REST replies.
 - `Signal` polls `signal-cli receive` once a second and sends through
   subprocesses.
@@ -898,7 +1499,8 @@ Current channels:
   the device store and registry, `PairManager`, the APNs
   dispatcher when push is configured (it connects on the first push, never at
   boot, and a push waits for that connect only until its deadline), the
-  transport's `RequestCoordinator`, `Mobile.Discovery` (a cached list of the
+  transport's `RequestCoordinator`, `Desktop.Supervisor` (the connected
+  desktops' peers), `Mobile.Discovery` (a cached list of the
   addresses a phone can reach), the `Listener` and the mDNS advertiser. The
   `Listener` binds through `Mobile.TlsTransport`, ThousandIsland's TLS
   transport with a bounded handshake and with every read before the WebSocket
@@ -911,6 +1513,188 @@ Current channels:
   (the supervisor's name is registered): the management verbs and a delivered
   row's push read it, so a job delivered while the channel is off is only a
   row of the shared timeline.
+- The phone wire's sessions have kinds (M75 §3, §5). A paired device's row in
+  `devices.toml` (`Mobile.DeviceStore`) names `kind`: a `phone` (a row that
+  names none, as every row before desktops) or a `desktop` engine with no
+  push or attestation field, which `Mobile.Management`'s one revoke path
+  refuses to forget (`:desktop_device`: this version cannot link it again);
+  `DeviceRegistry`
+  carries the kind and keeps the phones' audience (`broadcast/3`,
+  `connected/2`) to phones. `Mobile.Peers` is the one table of kind × event
+  (`phone`, `desktop`, and the enrollment and move sessions wave two serves):
+  the session answers a known event its kind may not send
+  `error{code:"unsupported_event"}` and stays open, and drops a server event
+  its kind may not be sent. The fields of the M75 events are
+  `Mobile.PeerEvents`' declarative table, which `Mobile.Protocol` consults
+  for them alone. `Mobile.Chunks` is pure: it cuts a payload into `index` and
+  `last` frames of at most 60 KiB and reassembles one in order within its
+  event's bound, refusing a gap, a repeat or a payload past it; both sides of
+  a desktop's session use it. When a `desktop` session completes `hello` it
+  starts its `Desktop.Peer` under `Desktop.Supervisor`'s `PeerSupervisor`
+  and hands it every desktop-family event; the peer reassembles chunked
+  payloads and dispatches each complete one to the module its family names in
+  the peer's one `@families` map (a `Desktop.Family` behaviour: `init`,
+  `handle_event`, `handle_info`, `terminate`), registers in the
+  `Desktop.Peers` registry by device id with when it connected
+  (`Desktop.Peer.connected/1`), and sends through the session with
+  `Desktop.Peer.send/4`, which chunks and checks every frame in the caller.
+  The session and its peer end together (`1011` when the peer fails first or
+  does not start). A desktop's session has no one-hour lifetime on either side
+  (the 2^20-frame rekey still bounds its keys); an `IK` key with no row is
+  closed `4003 device unknown` at the handshake. The peer holds at most 32
+  open payloads and 64 MiB across them.
+- Remote reach is the iroh rail (M62), `Mobile.Iroh`, the last child of
+  `Mobile.Supervisor` (`:rest_for_one`: the bridge's connections, `Iroh.Bridge`
+  on `mobile/bridge.sock`, then `Iroh.Helper`). `Iroh.Helper` owns the
+  `fermix-iroh` port and holds it to `Iroh.HelperProtocol` (helper protocol 3,
+  `priv/iroh_helper/PROTOCOL.md`, which the helper repository vendors): it
+  refuses any other `protocol_version`, and a helper that fails is reported
+  and retried, never allowed to stop the daemon. The helper copies each
+  accepted iroh stream to one bridge connection, where
+  `Iroh.BridgeConnection` runs a `Session` as for a WebSocket. The helper runs
+  in one of two modes: `:listen` (the home's `mobile/iroh_key` and the bridge,
+  a phone's route) or `:dial` (M75: no key and no bridge, a key the helper
+  holds in memory, every incoming connection refused). Either mode dials:
+  `Iroh.Helper.dial/3` listens on a fresh `mobile/dial-<id>.sock` (0600,
+  device-local like every socket), sends `dial`, accepts the helper's
+  connection once `dialed` arrives and hands the caller that socket, with the
+  listening socket and its file gone on every path; at most 8 dials at once,
+  the helper's answer within its 20 s deadline. `Mobile.Rail` is the one
+  initiator-side session client every engine-to-engine path uses (the desktop
+  relay, the move worker, a candidate's enrollment): `Rail.open/3` dials a
+  route through the helper, writes the prelude and runs the Noise handshake
+  for `:ik`, `:ikpsk2_enroll` or `:ik_move` as initiator, then carries the
+  mobile wire as a phone does (carrier frames, Noise transport with its
+  2^20-frame rekey, `Mobile.Protocol`'s codec from the initiator's side,
+  `seq`, `event_part` reassembly, pings inside the 150 s idle bound, the
+  one-hour session), handing its owner each server event; consumers
+  reassemble `Mobile.Chunks` payloads themselves.
+- After a move (M75 §6, B1, B12) the desktop's device-role engine reaches its
+  primary through `Desktop.DeviceSupervisor`, the one device-only child
+  (`Role`'s device-only list), `:one_for_one` over two subtrees: the dial
+  subtree (`:rest_for_one`, one list with each start condition: the
+  dial-only `Iroh.Helper`, then `Desktop.Relay`, both when
+  `device/desktop.json` exists), and, while the home receives a move back,
+  the candidate subtree (`Home.CandidateSupervisor`, `:temporary`, started
+  with the tree when `candidate/` exists and on a running one through
+  `Home.Link`'s `start_return/1`, stopped by `stop_return/0`; one that
+  cannot start or gives up is logged and never takes the relay down). The relay reads
+  `FermixCore.Home.DesktopLink` (`device/desktop.json` and the 0600
+  `device/desktop_key`, refused by name otherwise), opens one `IK` session
+  through `Mobile.Rail` from a linked connector process (the rail's owner, so
+  the relay keeps answering during a 40 s open), sends `hello` with the
+  highest primary epoch seen and its relay revision, treats a lower epoch
+  (or none) as a stale primary, records a higher one and a newer route, and
+  reconnects from 1 s doubling to 60 s on injected timers; a session the
+  primary ends normally (`1000`) is renewed quietly after the first step,
+  once in a row (a renewed session ended normally again within a minute is
+  an outage, `renewed_again`, on the ordinary backoff), and a revoked desktop
+  (`4003`) stops dialing until the engine restarts. Its posture is
+  `emit_transport(:desktop_relay, …)` and `home.status`'s `primary`, whose
+  `status` word (`connected`, `renewing`, `unreachable`, `revoked`, `stale`;
+  set at each transition, so a redial during an outage keeps `unreachable`)
+  lets an app draw a quiet renewal apart from an outage; a revoked desktop's
+  companion channels are refused `desktop_revoked`, not `primary_unreachable`.
+  A forwarded call is answered within its method's deadline
+  (`Placement.forward_deadline_ms/1`, or its caller's shorter one), and a move
+  start the primary had and never answered is `unconfirmed`. It clamps
+  the primary's `caps.max_media_bytes` to 64 MiB and holds at most 32 open
+  payloads. It is
+  the session's one writer, and `@inbound` is its one map of who serves each
+  event the primary sends: the companion channels, the forwarded calls'
+  `manage_result`, and the media fetches. In tunnel mode (the application
+  decides at boot, `DesktopLink.linked?/2`) `Companion.Endpoint` hands each accepted
+  `companion.sock` connection to a `Desktop.Tunnel` instead of a
+  `Connection`: it places the client with `SocketPeer` and carries only the
+  owner's app (`unattended_client` otherwise), sends each line as one
+  `companion_line` of its channel (at most 4), answers `media_fetch` locally
+  (the relay stages the blob, `Desktop.Relay.Media`, and the same
+  `Companion.MediaGrants` grants it), answers Always On locally on a version 6
+  connection (it subscribes to this engine's `Home.StatusWatch` when the
+  primary's `server_hello` comes back and writes its notices; the primary's
+  own `home_status_changed` is dropped and tells the watch `:server`), and
+  ends with `primary_unreachable`, naming the primary, when the session is
+  down. On the primary,
+  `Desktop.Companion` (the `companion` family) runs one
+  `Desktop.CompanionPump` per channel under `Desktop.TunnelSupervisor`: a
+  private Unix socket under `<home>/mobile` whose accepted end must name the
+  engine itself as its peer, an ordinary `Companion.Connection` started with
+  `Companion.Endpoint.connection_opts/1` on it (its `SocketPeer` places the
+  engine itself as independent, the trust the desktop already checked), and
+  the lines moved both ways. `Desktop.Manage` (the `manage` family) answers
+  each forwarded call in a task, at most 8 per desktop, through
+  `Fermix.CLI.Daemon.serve_forwarded/3` (the daemon's own router options,
+  actor `{:desktop, device_id}`), as `manage_result`.
+  `Desktop.LoopbackForward` (the `loopback` family, M75 D17) subscribes its
+  peer to `FermixCore.Auth.LoopbackRegistry`, sends the desktop
+  `loopback_open` for each listener a sign-in it started holds open (again on
+  reconnect) and `loopback_close` when it closes, replays each
+  `loopback_request` against the primary's own `127.0.0.1` port in a task
+  (`Desktop.LoopbackHttp`, bounded HTTP/1.1) and answers `loopback_response`,
+  at most 8 per loopback, and turns `loopback_failed` into the sign-in's
+  failure. `Desktop.SnapshotCopies` (the `snapshots` family) hands
+  `snapshot_stored` and `snapshot_refused` to the run waiting on them;
+  `Desktop.SnapshotTarget` (a `Snapshot.Target`) streams the encrypted file to
+  each connected desktop in 60 KiB `snapshot_chunk`s, waiting every 16 for the
+  session to have written them (`{:mobile_sync, from, ref}`), and counts the
+  copy verified when the desktop answers the same SHA-256.
+  On the desktop, `Desktop.DeviceServices` (a line of
+  `Desktop.DeviceSupervisor`, before the relay) runs the two the relay's
+  `@inbound` hands the primary's events to: `Desktop.Loopback` (listens on
+  `127.0.0.1` on each port for as long as the primary says, only a port
+  nothing else listens on (no `SO_REUSEADDR` but for a port only closed
+  connections hold), never below 1024 or one of the engine's own, at most 8
+  loopbacks, forwards each browser request, reports a port it cannot open),
+  and `Desktop.SnapshotStore`
+  (`snapshots/<name>.partial` at 0600, verified and renamed, the newest 3
+  kept, refused under a 2 GiB free-space floor). Each answers the primary from its own process or a
+  task, never from inside the relay's call.
+- Enrollment and the move (M75 §7, B4, B5): `FermixChannels.Home`. The phone
+  session's prelude parse is the one branch to M75's own preludes
+  (`Session.begin_handshake/2`): a mode a `Home.Responder` serves right now
+  (`responders`, default the enrollment prelude) hands the whole stream to it
+  on the same carrier, every other stream is a phone's or a desktop's in
+  `phone_modes`. On the primary, `Home.Enrollment` (primary only) holds the one
+  window and its secret (thirty minutes, kept in `mobile/enrollment.json`
+  across a restart; the file drops the secret once a candidate is recorded or
+  the window expired), `Home.EnrollmentResponder` runs `IKpsk2` with it and
+  burns the window at the first frame that decrypts (the PSK proves itself
+  only there; the candidate that burned it is answered again with the same
+  id when its acceptance was lost, while the window lasts), and records the candidate
+  (`FermixCore.Home.Candidates`). A
+  candidate engine runs `Home.CandidateSupervisor` alone: its own
+  `Iroh.Bridge` (move prelude only) and `Iroh.Helper` in listen mode rooted at
+  `<home>/candidate`, then `Home.Candidate`, the one writer of its phase file,
+  which enrolls through `Mobile.Rail` and answers `Home.MoveResponder`'s
+  steps (offer, refused without room for the stream and the restored home;
+  stage in a task; commit, an activation that fails part-way retried on a
+  timer while a resume is refused; resume). A desktop receiving the home back
+  (Always On's move back) runs the same subtree under its device tree: its
+  candidate of kind `return` stages the server's capture as a return
+  (`Candidate.Activation.stage/6`: this computer's device settings, secret
+  store and keychain, without its own desktop row) and on `move_commit`
+  records the staged entries once and activates in place
+  (`Activation.activate/2`, `moved.json` removed before `config.toml` is the
+  primary's), then restarts; it holds `MoveAwake` from `receiving` until
+  that restart, and a stop part-way is finished by the device's next start
+  (before the settings) or the primary's boot (after), which also records
+  the return (`Home.Return.done/2`). A candidate of kind `local` waits for
+  no commit: only an activation in progress is finished. On the source,
+  `Home.MoveWorker` (a line of `Desktop.DeviceSupervisor`, started while
+  `Home.Move.pending?/1`) holds the computer awake for its whole run
+  (`FermixCore.Home.MoveAwake`: `caffeinate -i -w <BEAM pid>` through the
+  disclaim shim on macOS, `systemd-inhibit … tail --pid=<BEAM pid>` on
+  Linux, each ending with the engine; a holder under the core task
+  supervisor that monitors the worker ends the inhibitor's process group on
+  release, on the worker's death or after 26 hours), adds the desktop's key
+  and row, captures once to
+  `.move/<id>.fxsnap` for the candidate's one-time recipient (every attempt
+  sends that capture; a move session, `:ik_move`, has no lifetime), streams
+  it, and commits only after `moved.json`; after the marker it only resumes:
+  `move_resume` on the candidate, and once the candidate no longer answers
+  (it activated and restarted), the moved identity's own `hello_ack` at the
+  ready epoch or later. The responders hold the wire's frame rules with
+  `Home.ResponderWire`, the initiators with `Mobile.Rail`.
 - The timeline's media and its link previews belong to both companion
   transports, so the channels application starts them on every real boot,
   whether or not the phone channel runs: `Mobile.MediaStore` (a phone's
@@ -1010,6 +1794,18 @@ Current channels:
 `outbound/` holds pure long-form text helpers, and `harness/` re-ingests
 coding-harness completion notices.
 
+`Gateway.WebhookIngress` is the one path a verified webhook payload takes: the
+adapter parses it, `Gateway.Idempotency` drops the ids it has seen, and the rest
+go to `Gateway.ingest/2` in a task under `FermixCore.TaskSupervisor` (WhatsApp's
+through its album buffer). The web routes call it after their signature check,
+and Slack's Socket Mode calls it with each `events_api` payload, so both Slack
+transports share idempotency, authorization and the turn. A hand-off that
+fails forgets the ids it recorded, so the provider's retry is fresh.
+`Gateway.Idempotency` answers a known id from ETS and records an unknown one in
+`memory.db` once (`Memory.Repo`, pruned at most 1,000 expired rows a sweep);
+with memory turned off the ids live in the process only. Outbound media claims
+stay in memory.
+
 Architecture Invariant: channel adapters own platform quirks and webhook
 authenticity; sender authorization and trust are central (`Gateway.Authorizer`,
 `Gateway.ChannelRegistry`). After ingest the agent sees only normalized message
@@ -1031,13 +1827,28 @@ The router exposes:
 - `/health` and `/health/ready` for the readiness status alone, and
   `/health/live` for a static liveness payload; the full report stays with
   `fermix health --json`
-- `GET`/`POST /webhook/whatsapp` and `POST /webhook/slack`
+- `GET`/`POST /webhook/whatsapp` and `POST /webhook/slack`; Slack over Socket
+  Mode needs none of them
 
-`WebhookController` verifies the request and parses it with the channel adapter,
-drops duplicates, and hands the message to `Gateway.ingest/2` asynchronously
-under `FermixCore.TaskSupervisor`; a failed handoff returns 503 and rolls back
-the duplicate record. `HealthController` reports `FermixCore.Health`'s status.
-`SetupLive` drives `Setup.Wizard` and the core setup modules. Not all ingress is
+`WebhookController` verifies the request and hands the payload to
+`Gateway.WebhookIngress`, which parses it, drops duplicates and dispatches it
+asynchronously; a failed handoff returns 503 with the duplicate record rolled
+back, and a device-role engine answers every webhook route 503. `HealthController` reports `FermixCore.Health`'s status.
+`SetupLive` drives `Setup.Wizard` and the core setup modules. Its Always On tab
+(`SetupLive.AlwaysOn` for the state and events, `SetupLive.AlwaysOnPane`
+for the drawing, Always On setup §8.1) is a renderer of the summary
+(`home.status.summary`): it collects what the pressed action `needs`, asks
+its `confirm` and sends one `Management.AlwaysOn.act/2` in the page's own
+process with `actor: :setup_page`, then draws the answer. Reads
+(`Management.Home.status/1`) and acts run in `start_async`, with the
+engine's way to its server (`Home.Link.forwarding/2`) on a linked desktop;
+the page subscribes to `Home.StatusWatch` and reads again at each
+`:home_status_changed`. No token or passphrase sits in an assign, and the
+one-time code is held in a struct whose inspection withholds it. Embedded
+in the Mac app (`?embed=1`) the page lists no Always On tab. On a
+device-role engine the page leads with a notice that Fermix-wide settings
+live on the server and draws every tab whose request
+`Management.Placement` places on the primary as unavailable. Not all ingress is
 Phoenix: the mobile listener, the OAuth loopback listener, and the Unix sockets
 (`daemon.sock`, `realtime.sock`, `acp.sock`, `companion.sock`) live in core and
 channels.

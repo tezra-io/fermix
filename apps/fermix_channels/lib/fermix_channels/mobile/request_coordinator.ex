@@ -5,21 +5,43 @@ defmodule FermixChannels.Mobile.RequestCoordinator do
   for `companion.sock`, sharing the boot's epoch. Each recovers only the
   requests its transport claimed (`store_opts[:transport]`).
 
-  The random boot epoch is persisted by `FermixCore.Companion.Timeline` when work is
-  started. On restart, accepted work and work owned by an older epoch is
-  recovered from its stored authenticated request envelope. Requests already
-  running in this epoch are never started twice.
+  The random boot epoch is recorded by `FermixCore.Companion.Timeline` on each
+  request this boot claims, and again when it starts one: it names the boot
+  that holds the request. Recovery starts every request still accepted, and
+  every one running under another epoch, from its stored authenticated request
+  envelope, and the start decides (M75): a request that never started a turn
+  runs, whichever boot of this engine claimed it; a turn another boot started
+  may have run, so its request is settled once, `uncertain` (or `cancelled`
+  when it carried a cancel), and never run again. Requests already running in
+  this epoch are never started twice.
+
+  Before any request starts, this coordinator records the home's primary
+  epoch for its transport (`Timeline.record_boot_primary_epoch/2`). One that
+  differs from the last boot's means another engine: the home moved to
+  another host or was restored from a snapshot, so every request still
+  accepted or running is released from its boot and settled as recovery or a
+  resend reaches it. A home with no primary epoch yet counts as the same
+  engine. An epoch that cannot be read or recorded refuses every start, by
+  that reason, and recovers nothing.
+
+  An engine in the device role (`FermixCore.Home.Role`, `:engine_role` a
+  test's stand-in) runs a copy of a home that moved: it records no primary
+  epoch and recovers nothing, so no request of that retired timeline is run or
+  written again. A request sent to it is refused before it is claimed
+  (`Companion.Requests.request/3`).
 
   A started attempt is also fenced on the liveness of whichever process owns its
   settlement: the acquiring socket process until `Gateway.ingest` returns, then
   `Companion.Turns`, which settles every turn from its outcome (`handoff/5`). If
-  that owner dies without settling, the attempt is abandoned so a resend — or
-  the next boot's recovery scan — runs a new attempt, instead of a `running` row
-  nobody will ever settle answering every resend as an already-running
-  duplicate.
+  that owner dies without settling, the attempt is abandoned so a resend (or
+  this boot's recovery scan, after this coordinator restarts) runs a new
+  attempt, instead of a `running` row nobody will ever settle answering every
+  resend as an already-running duplicate. Its turn began, so a later boot
+  settles it instead.
 
   A phone's request is recovered only while its device is still paired: one
-  whose device was revoked is failed (`device_revoked`), never run again.
+  whose device was revoked is never run again, failed (`device_revoked`) when
+  this boot holds it and settled `uncertain` when another boot did.
   """
 
   use GenServer
@@ -28,7 +50,9 @@ defmodule FermixChannels.Mobile.RequestCoordinator do
 
   alias FermixChannels.Mobile.DeviceStore
   alias FermixChannels.Mobile.EventRouter
+  alias FermixChannels.Mobile.Identity
   alias FermixCore.Companion.Timeline
+  alias FermixCore.Home.Role
 
   @default_recovery_limit 200
   @default_max_recovery_batches 100
@@ -39,7 +63,14 @@ defmodule FermixChannels.Mobile.RequestCoordinator do
   @default_fence_ttl_ms 24 * 60 * 60 * 1_000
   @fence_sweep_ms 15 * 60 * 1_000
 
-  @type acquire_state :: :started | :active | :completed | :failed
+  @type acquire_state ::
+          :started
+          | :active
+          | :completed
+          | :failed
+          | :uncertain
+          | :settled_uncertain
+          | :settled_cancelled
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) when is_list(opts) do
@@ -85,6 +116,9 @@ defmodule FermixChannels.Mobile.RequestCoordinator do
       recover?: Keyword.get(opts, :recover?, true),
       device_store: Keyword.get(opts, :device_store, DeviceStore),
       authorize_device: Keyword.get(opts, :authorize_device, &DeviceStore.fetch/2),
+      primary_epoch: Keyword.get(opts, :primary_epoch, &Identity.primary_epoch/0),
+      engine_role: Keyword.get_lazy(opts, :engine_role, &Role.recorded/0),
+      refusal: nil,
       fence_ttl_ms: fence_ttl_ms(opts),
       fences: %{},
       fence_refs: %{},
@@ -99,28 +133,35 @@ defmodule FermixChannels.Mobile.RequestCoordinator do
   @impl true
   def handle_continue(:recover, %{recover?: false} = state), do: {:noreply, state}
 
+  def handle_continue(:recover, %{engine_role: %{role: :device}} = state) do
+    Logger.info("request recovery skipped: this engine runs in the device role")
+    {:noreply, state}
+  end
+
   def handle_continue(:recover, state) do
-    task = fn -> recover(state) end
-
-    case state.recovery_launcher.(task) do
+    case record_primary_epoch(state) do
       :ok ->
-        :ok
-
-      {:ok, _pid} ->
-        :ok
+        launch_recovery_task(state)
+        {:noreply, state}
 
       {:error, reason} ->
-        Logger.error("request recovery launch failed: #{inspect(reason)}")
+        Logger.error(
+          "request recovery refused: #{inspect(reason)}; no request starts until it is recorded"
+        )
 
-      other ->
-        Logger.error("request recovery launcher returned: #{inspect(other)}")
+        {:noreply, %{state | refusal: reason}}
     end
-
-    {:noreply, state}
   end
 
   @impl true
   def handle_call(:epoch, _from, state), do: {:reply, state.epoch, state}
+
+  def handle_call(
+        {:acquire, _profile_id, _client_msg_id, _opts},
+        _from,
+        %{refusal: {_, _}} = state
+      ),
+      do: {:reply, {:error, state.refusal}, state}
 
   def handle_call({:acquire, profile_id, client_msg_id, opts}, {caller, _tag}, state) do
     store_opts = Keyword.merge(state.store_opts, opts)
@@ -231,6 +272,53 @@ defmodule FermixChannels.Mobile.RequestCoordinator do
           "request attempt could not be released for " <>
             "#{inspect({profile_id, client_msg_id})}: #{inspect(abandon_reason)}"
         )
+    end
+  end
+
+  # Runs in `handle_continue`, so no start is served before it: a boot at
+  # another primary epoch than the last releases every unfinished request
+  # first, and recovery and a resend alike then settle it.
+  defp record_primary_epoch(state) do
+    case state.primary_epoch.() do
+      {:ok, epoch} ->
+        recorded(state.store.record_boot_primary_epoch(epoch, state.store_opts), epoch)
+
+      :absent ->
+        :ok
+
+      {:error, reason} ->
+        {:error, {:primary_epoch_unavailable, reason}}
+    end
+  end
+
+  defp recorded({:ok, outcome}, _epoch) when outcome in [:recorded, :unchanged], do: :ok
+
+  defp recorded({:ok, {:moved, previous, released}}, epoch) do
+    Logger.warning(
+      "the home is at primary epoch #{epoch}, its last boot at #{previous}: another engine, " <>
+        "so #{released} unfinished request(s) settle without running again"
+    )
+
+    :ok
+  end
+
+  defp recorded({:error, reason}, _epoch), do: {:error, {:primary_epoch_unrecorded, reason}}
+
+  defp launch_recovery_task(state) do
+    task = fn -> recover(state) end
+
+    case state.recovery_launcher.(task) do
+      :ok ->
+        :ok
+
+      {:ok, _pid} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error("request recovery launch failed: #{inspect(reason)}")
+
+      other ->
+        Logger.error("request recovery launcher returned: #{inspect(other)}")
     end
   end
 

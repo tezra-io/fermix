@@ -4,6 +4,828 @@ All notable changes to Fermix are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Behind a feature flag
+
+Always On is built but switched off in release builds: there `fermix
+always-on` and `fermix home status` say "Always On is not in this release of
+Fermix yet.", and the setup page and the Fermix app show no Always On. It
+will be part of a future release; nothing in this group is in a release yet.
+
+- **Always On: Fermix can move to a server you control.** Your home (its
+  settings, memory, secrets, skills and workspace) can now move from your
+  computer to a Linux server, so Fermix keeps working with your Mac closed.
+  With Reach from anywhere on, Always On on your primary gives an enrollment
+  code, good once for thirty minutes; a server enrolled with it waits for the
+  move, and you review the move (the secrets that travel, the server's Fermix,
+  which must be this computer's own, since a newer one could never move the
+  home back, free disk, the plugins with no build for the server, and what stops: those
+  of iMessage, voice calls and meetings you use, WhatsApp, and Slack unless it
+  uses Socket Mode; coding agents ask for your approval again on the server;
+  a Fermix you started from a terminal stops when the move starts and needs
+  starting again) and start it from the app with a recovery passphrase: the
+  first move sets it if you have not, and every move after checks that it is
+  the one you set ("That is not the recovery passphrase you set."), so a typo
+  never becomes the key your server's snapshots are encrypted to, and a move
+  never makes a second key. Your Mac (or Linux
+  computer) stays awake while the move runs, and only then. The computer the
+  home left stays a desktop of the server: the app's chat and Fermix-wide
+  settings go to the server through it, and paired phones see a reconnect. It
+  records no computer history from then on and opens no copy of your memory:
+  what it still holds of them is a retired copy. The
+  server will not remove that desktop from its devices, since this version
+  cannot link it again and it keeps copies of the server's backups. Right
+  after the move the server installs your plugins again for itself, checked as
+  any install is; one it could not install says so in Plugins, with Install….
+  A server always runs the Fermix of the computer it serves: a server Fermix
+  creates installs that release, Use my own Linux server's command names it,
+  and each night the server installs the oldest release among the computers
+  that reached it in the last 30 days (`update_ceiling` in `fermix home
+  status --json`), never past it and never back down, so a fix reaches the
+  server the night after your computer has it.
+  Once a recovery passphrase is set, a primary keeps encrypted snapshots of
+  itself in an S3 bucket, every six hours by default, and after a move on your
+  desktop too, and a lost server is restored from the newest one. A move or
+  restore onto a Linux server keeps your secrets in its keyring only when the
+  keyring answers, and otherwise in Fermix's own secret files. The app,
+  the setup page's Always On tab and `fermix home status` all lead with the
+  same one sentence for where Always On stands and, when something is wrong,
+  the one action that fixes it: a server turned off in Hetzner (Turn it on),
+  one silent for ten minutes while your Mac is awake (Restart server), one
+  that never finished setting up or waited past its day (Start again), no
+  capacity (Create in the next location in stock), a token that stopped
+  working (Paste a new token), the server's disk 85% full, or a last backup
+  over three days old (Back up now). Details says what lives on the server
+  (conversations and memories, secrets, the browser, traces) and that Hetzner
+  can technically read its disk, and the server tells your phones once when
+  its newest backup is a week old. Fermix tells the app when that sentence
+  changes and when the last backup turns a week old, so the app need not
+  check Always On on a timer and says so on time, and while Always On is off
+  nothing runs for it. `fermix home status` prints the same screen at a
+  terminal, and `export`, `import` and `mark-moved` move a home by hand.
+  Fermix can also create the server
+  for you on Hetzner: paste a Read & Write API token from a Hetzner project
+  made for Fermix (checked at once and kept only on this computer, never in
+  your settings or keychain, so it never moves to the server), take the
+  recommended size and location (the cheapest x86 server with 4 GB in stock,
+  in Falkenstein, Nuremberg or Helsinki, with its monthly price, VAT and the
+  IPv4 address included, read live from Hetzner) or change them, and Fermix
+  creates a firewall with no inbound rule and a Debian 13 server with its
+  enrollment code inside, good for 24 hours so a slow install or a sleeping
+  Mac does not fail it. A token that can only read is refused before
+  anything costs money, a location with no capacity names the next one in
+  stock, and an account Hetzner limits is said in one sentence. Always On
+  turns the server on or restarts it, starts it again, and deletes what it
+  created, but never the server your home moved to. While a created server waits for its code or its move, a new
+  enrollment code is not opened, and while it stands a token from another
+  Hetzner project does not replace the one that reaches it. Once your home
+  lives on that server, Replace the server (in Always On's details on the
+  computer it left) creates a new one, named apart from the old, with a
+  24-hour code the old server gives it; you review and start the same move
+  to it, and once the move is done your computer names the new server and
+  Fermix deletes the old one by itself.
+  If that delete fails, the old server stays listed with why, and Delete
+  tries again. The same one sentence follows the replace: creating and
+  setting up the new server (Cancel), ready for the move (Move now), moving,
+  removing the old server, and what went wrong with its one action.
+  And you can move back whenever you want: Move back to this Mac (in Always
+  On's details on the computer your home left, or `fermix always-on
+  move-back`) gets this computer ready in seconds, and Move now with your
+  recovery passphrase brings Fermix back in place. Your Mac's own files
+  (logs, browser profiles, iMessage, the helper apps, models, coding runs)
+  stay where they were, your secrets go back into its keychain, iMessage,
+  voice calls and meetings run there again as they did before, and your
+  phones follow. Cancel stops it until the server starts the move. Once
+  your Mac runs Fermix again, Delete your server is a separate step, since
+  the server still costs money. When a server Fermix created is gone or
+  cannot be reached, Restore on this Mac takes Fermix back from the copy of
+  its backups your Mac keeps: it deletes the server first, and restores
+  nothing if the server cannot be deleted. A server of your own is never
+  deleted by Fermix: stop it, then import a copy by hand.
+  Hetzner is the first cloud provider Fermix creates a server with: every
+  surface draws the token and choose screens from the providers Fermix's
+  screen lists, each with its own How to get one and console, so a provider
+  added to Fermix appears there without an app update, and every sentence
+  about the server names its provider.
+  The server's hosting provider can technically read its disk, so Fermix
+  keeps less there: the prompts, replies, tool input and output and shell
+  commands in its traces are kept about a day (through the previous UTC
+  day), and the rest of each trace 14 days; snapshots and every link stay
+  encrypted end to end.
+- **Set up Always On from the setup page, with no app.** On a Homebrew or
+  Linux install, `fermix setup` opens the setup page, and its Always On tab
+  now takes every step the Fermix app's pane takes: paste a Hetzner token
+  (each provider's How to get one beside the field), take the recommended
+  server with its monthly price or change its size and place, create it and
+  follow each step as it runs; turn the server on, restart it, start it again or
+  delete it; open a code for a Linux server of your own, shown once with its
+  command, Copy and until when; back up now; and Move now with your recovery
+  passphrase, typed twice the first time. Each button is one step Fermix
+  runs, after the sentence you accept for anything that costs money,
+  deletes, restarts a server or moves, and if Always On changed meanwhile
+  nothing runs and the tab says so and shows it again. The tab follows
+  Always On as it changes with no Refresh, and after Move now the page waits
+  for Fermix to start again and opens on Always On. On a computer your home
+  left, the setup page sets up this computer and Always On and no longer
+  points to the Fermix app for Fermix-wide settings, which live on your
+  server. Inside the Mac app the page has no Always On tab: the app's own
+  pane is there.
+- **A server gets ready for Always On from one command.** On a Debian 12,
+  Debian 13 or Ubuntu 24.04 server (arm64 or x86_64) running Linux 6.2 or
+  later with Landlock enabled (Debian 13 and Ubuntu 24.04 do by default),
+  `curl -fsSL https://fermix.ai/always-on | sudo sh` asks for the enrollment
+  code without showing it, or cloud-init user data passes it in
+  `FERMIX_ENROLL_CODE`. It blocks the cloud's instance metadata addresses
+  for every account but root, except DNS and time, which some clouds serve
+  from the same address, gives a server with no swap 2 GB of it,
+  installs Fermix and a `fermix` account to run it, enrolls the server with
+  your primary, starts its service, installs Chromium on Debian (on Ubuntu,
+  install a browser yourself) and waits for your primary to accept the
+  server. The server then keeps itself up to date: Debian's security updates
+  install every day, and every night at 04:00 UTC Fermix's installer runs
+  again, restarts Fermix only when there is a new release and no move is under
+  way, and reboots when an update asks for it (a move holds that off two
+  nights at most); a night that fails leaves Fermix running and says why in
+  the journal. A server whose kernel cannot sandbox commands is refused before
+  anything is installed. `--snapshot-bucket` and `--snapshot-region` name
+  where the server will keep its snapshots, and `--restore` prepares a server
+  to restore your home from a snapshot instead.
+- **Always On from a terminal: `fermix always-on`.** On a Homebrew or Linux
+  install without the Fermix app you can now set up Always On, the server
+  Fermix creates on Hetzner or one of your own, from the terminal. `fermix
+  always-on` shows where Always On stands and walks you through each step: it
+  shows how to get a Hetzner token and asks for it without showing it, lists
+  the sizes and places Hetzner has in stock with the recommendation first,
+  asks before anything costs money, deletes or moves (No unless you say yes),
+  asks for your recovery passphrase without showing it (twice the first
+  time), and waits until each step is done before offering the next. `fermix
+  always-on STEP` takes one step (`paste-token`, `create-server`,
+  `own-server`, `move-now`, and the rest), and scripts can run it with no
+  terminal: `--stdin` for the token, `--recovery-passphrase-file`, `--type` and
+  `--location`, `--yes` to accept what a step asks first, `--wait` to wait,
+  and `--json` for one machine-readable answer. A token or passphrase typed as
+  an argument is refused, so it never lands in your shell history. On a Mac
+  whose Fermix the app manages, it points you to the app's Always On pane, and
+  `fermix home status` now says where the next step is taken.
+- **Always On's screen comes whole from Fermix, so every surface draws the
+  same one.** Each action now says what it needs you to give (a token, your
+  recovery passphrase, or a size and place), the sentence you accept before
+  Fermix spends money, deletes, restarts a server or moves, and the page it
+  opens, and Move now asks once, naming what stops or waits after the move
+  from your settings. The moment a step starts the screen says so (creating,
+  deleting, turning on or restarting your server, and the step in hand), and
+  every way a step ends stays on screen afterwards: a power action or a delete
+  that stopped is a problem of its own with the one action that tries again,
+  a refused create keeps its size and place for Create in and Start again,
+  and a step a restart of Fermix cut short offers Start again. Details are
+  finished for you: the server, its size, place and address, until when it
+  waits, each backup, the server's disk, when Hetzner was last checked and
+  what the server costs a month, from the offer it was created from, with
+  dates and times in your own time zone. The apps get the occurrence to raise
+  as a notification (the server ready, the move done, the server out of
+  reach, a server to set up again, the last backup a week old), once each.
+  Fermix checks with Hetzner at most once a minute while the screen shows a
+  problem, a step or a ready server, never beside a step, and `home.status`
+  can wait for the screen to change instead of being asked again and again.
+- **Fermix runs every Always On step itself, so each surface only draws the
+  screen and sends the button you pressed.** Setting up a token, creating,
+  turning on, restarting, starting again or deleting the server, a code for
+  a server of your own, a backup now, checking the move again and Move now
+  are each one request with the screen it was pressed on; if Always On
+  changed meanwhile (another window pressed first, the server moved on), Fermix
+  does nothing and says so, and the screen is read again, so a confirm you
+  accepted on an older screen never runs. Cancel during a create stops the
+  create and waits until it has really stopped before deleting what it made;
+  Cancel the code closes a code for a server of your own; Start again deletes
+  what stands and creates the server again as one step, with its size and
+  place. Move now looks the move over again as you press it, refuses with
+  every reason it cannot start, and shows you any warning you have not seen
+  before going ahead; it asks for your recovery passphrase twice when none is
+  set yet and once when one is, and checks it. On a computer your home left,
+  its own Always On sends the server's steps over the link itself, and keeps
+  the move to a new server once the server answered. The command for a
+  server of your own now carries no code: the server asks for it without
+  showing it, so it never lands in a shell history.
+- **Always On never leaves you without a next step, and a server waiting
+  for its move can always be deleted.** A server Fermix created that is
+  ready for the move, whose review blocks it, or whose move was undone,
+  offers Delete your server
+  beside Move now (during a replace, Delete your new server, never the one
+  your home lives on), so a move you no longer want stops costing money
+  from Always On itself; a server of your own is never offered for
+  deletion, and nothing is while a move runs. After a token that could only
+  read, the token that writes brings back Create server; after Hetzner's
+  account limit (once you lifted it) or no stock anywhere, Start again tries
+  once more with the size and place you chose. On a computer your home
+  left, a replace that stopped before Hetzner made anything shows as its own
+  problem, saying your server still runs Fermix, with Replace the server
+  again. A step that stopped inside Fermix, or was stopped, is kept on
+  screen however it ended, with Start again, and its reason in Fermix's log.
+  The size and place you were shown is the one Fermix creates: every create
+  names it, the recommendation included, and Fermix never picks one again
+  behind your back (`fermix always-on create-server` with no `--type` and
+  `--location` sends the recommended one it read). A `fermix always-on`
+  step that waits now exits 1 when it ends on a problem (`step_failed`) or
+  is still running after 45 minutes (`step_unfinished`), each with the
+  screen where it stands, instead of reporting success; reading the screen
+  alone still succeeds whatever it shows. Every surface reads whether
+  Always On is still at it from the screen itself (its `outcome`).
+- **A command Fermix started cannot take an Always On step, and no local
+  caller can take the server's own.** Every Always On step is the
+  owner's decision, refused to a command Fermix runs in words that name the
+  Fermix app, the setup page or your own terminal. The steps a server takes
+  for the computer its home left (opening a code, reviewing or starting a
+  move, a backup now) answer only that computer's request over their
+  encrypted link, and are refused by name on the local socket. Your API token
+  and recovery passphrase never reach a log line, a crash report or a trace
+  on the way, and the setup page's request logs hide any field named for a
+  passphrase.
+
+## [0.18.0] - 2026-11-03
+
+### Added
+
+- **The Linux installer installs a release you name.** `curl -fsSL
+  https://fermix.ai/install | sh -s -- --version X.Y.Z` installs that
+  release instead of the latest, from that release's own files, under the
+  same checksum and signature checks, and, installing a package, does nothing
+  when that release is installed already. A version that is not a release is refused before anything is
+  downloaded.
+
+- **Computer use does more with an app's controls, and waits on them.**
+  Beyond pressing a button and filling in a field, Fermix can now focus,
+  select, tick or untick, expand, collapse and scroll to a control by its
+  name, and type into a field where the app takes text that way, all without
+  moving your pointer or aiming at a spot on the screen. It finds controls by
+  kind and name, reads a large window in outline before opening the part it
+  needs, and can read just the focused control, the open menu or the open
+  dialog. It can wait, up to 25 seconds, for a control to appear, go away,
+  become enabled or hold a value, in the same step as the action meant to
+  cause it, and after each action it is told which dialogs, alerts, menus or
+  popups that action left open. When it could look at only part of a window,
+  it says it could not prove something is gone rather than assuming it is.
+  Every change is read back before Fermix reports it, a control already in
+  the state asked for is left alone, and a password field's contents are
+  never shown. Screenshots and clicks remain for whatever an app does not list
+  as a control. This works on macOS and Linux alike.
+
+- **Computer use on Linux reaches more desktops.** On Linux x86_64 Fermix now
+  reads and acts on an app's controls through the accessibility bus on any
+  desktop, X11 or Wayland. Screenshots, mouse and keyboard work on X11 and on
+  GNOME Wayland through the desktop portal: GNOME asks you once, the first
+  time Fermix takes a screenshot, and there Fermix cannot paste or list
+  windows. A "no" is remembered by the desktop until it is reset, and
+  `fermix doctor` shows the command that resets it. On KDE and other Wayland
+  desktops Fermix works by control alone, and knows to. Work inside one window
+  (experimental, off by default) now works under X11 too, with a small badge
+  above the window Fermix is in; it is never offered on Wayland, and a GTK 4
+  window it is bound to is worked in by screenshot and click. Some apps list
+  no controls until switched on (Qt apps need their accessibility switch,
+  Chromium-based apps an assistive client), and Fermix says which.
+  `fermix doctor` adds rows for the display server, the accessibility bus,
+  the ATK bridge, the pixel route (and why a session has none), X11 input,
+  the desktop portal and a stored screenshot refusal. Linux arm64 still has
+  no helper.
+
+- **Lists: a list per project, a shopping list, anything to tick off, kept as
+  lists and never in memory.** Ask in your own chat ("start a list for the
+  garden in my Projects folder", "add lemons to groceries", "tick off the
+  keychain logins") and Fermix keeps each list as a record of its own, with
+  sections, notes on items, and 30 days to bring back anything removed from
+  the Mac app's lists. One
+  message can file items into several lists, and they land together or not
+  at all; an item that could belong to two lists is asked about, never
+  guessed. Fermix reads and changes your lists only in your own private chats
+  and voice calls, never in a group or for a guest, and a scheduled job only
+  when it was set up there with the list tools allowed. After a request reads
+  a page or other outside content, Fermix still adds and ticks, marked as
+  such, but changes nothing else until you ask again. Memory's review leaves
+  list items to the list. In a Mac app that draws lists, a list your message
+  reads or changes is shown under the reply and stays current whoever
+  changes it, and you can tick, add, edit, move, clear done items and bring
+  removed ones back there, so Fermix says in a sentence what changed instead
+  of repeating the list. Everywhere else, your phone included, ask to see a
+  list and it comes as a short checklist.
+
+- **A watcher can set off a follow-up: your own job, run whenever it passes
+  an item.** Ask in chat ("watch x-feed, and whenever a post says the limits
+  reset, launch Codex in ~/projects/app to review yesterday's commits") and
+  the watcher gets a follow-up that runs like a scheduled job, with the
+  instructions you gave and the tools you allow: a Codex or Claude Code run, a
+  shell command, a browser task, a plugin action, a message to a channel or an
+  image. Fermix hands it nothing from the item, so a stranger's post decides
+  when it runs, never what it does; work on the post itself stays the
+  watcher's task or a mandate. Each run asks first on a short card made for a
+  phone (the post quoted, why it passed, what will run, with Details behind a
+  tap, and Run, Skip and Always allow on Telegram). Always allow runs that one
+  and lets every later item run it with no card, until you change what it
+  runs or what sets it off, when it asks again; "make it ask first again" in
+  chat, Ask first again on the setup page's Cues tab, or the Fermix app takes
+  it back. There is no limit to set: the
+  watcher's own daily cap counts its runs only if you gave it one. Fermix
+  checks at setup that everything it needs is ready, gives it a tool for
+  every step its instructions name, and says in one sentence what is missing
+  and where to fix it. A tool this computer does not have (a coding
+  agent not installed, a plugin not added) leaves the follow-up out, while a
+  watcher with a task is still made, so you ask again once it is installed;
+  one that is here but not ready (signed out, a plugin not connected, the
+  channel it reports to not set up) is set up waiting, and starts by itself
+  once the gap is fixed. The same goes for the folders your instructions
+  name: a follow-up runs with nobody there to approve a folder, so one that
+  names a folder Fermix can't open yet is set up waiting, says which folder
+  and how to grant it (`/grant path` in chat), and starts once you do, while
+  a protected folder such as `~/.ssh` is refused at setup, since no grant
+  opens it. A run you confirmed that cannot start when its turn
+  comes (it is still running, paused, or held) tells you why where it
+  reports. Items
+  older than 15 minutes set nothing off, it runs one at a time, and "stop the
+  follow-up" or "run the follow-up now" works in chat. A
+  bare /confirm or /deny answers the one thing waiting in that chat, and lists
+  the choices when several wait; /always answers a follow-up's card the way
+  its Always allow button does.
+- **The agent signs in to websites with logins you save in the Mac app.**
+  Save a site, a username and a password in Settings > Browser > Website
+  logins in the Fermix app, and the agent can sign in there from the app's own
+  browser: it asks Fermix to fill the sign-in form, and Fermix asks you first
+  whenever a password is about to be typed, naming the site and the account,
+  in the chat you asked from (a channel, the Mac app or your phone), and waits
+  up to a minute; there is no Always allow, and a no, no answer or /stop
+  types nothing. Sign-in works on https pages only. Filling only the username on a
+  two-step sign-in page does not ask, so such a site takes one tap. A login
+  fills its own site (`www.` aside) and, when a site signs in on a host of its
+  own with no login saved for that host, its subdomains too: a login for
+  walmart.com signs in on identity.walmart.com, and the question names both.
+  Never a look-alike such as evilwalmart.com. The
+  password stays in the Mac app and the page: it never reaches the engine,
+  the model, a trace or a log. Only your own chat or the app can ask for a
+  sign-in, never a delegated worker, a cue, a scheduled job, a shared channel
+  or a voice call. The logins are kept in the Mac keychain, where only the
+  released Fermix app can open them. Mac only, in the app's browser; the
+  managed Chrome and Linux come later.
+- **A link in the chat shows its site's icon.** A link preview now carries
+  the site's icon beside the page's picture, read from the page's own head
+  (its PNG icon nearest 64 px, else its Apple touch icon, else another icon
+  that is not SVG, else `/favicon.ico`), at most 64 KiB and never SVG,
+  fetched under the same guard as the page and once a site for a message.
+  The phone's live preview also names the link as the message wrote it, so
+  a link that redirects still pairs with its preview. A message's previews
+  are now sent one by one as each resolves, so a slow site no longer costs
+  the message the previews that already finished.
+- **Watchers can check items by meaning, not only by their keywords.** A new
+  **Screen** setting in Settings → Cues and the setup page's Cues tab picks
+  how items are checked before the filter model reads them: **Keyword
+  match**, as before, or **Decision model**. A **Decision model** setting
+  under it picks which one: **Automatic**, your main provider's decision
+  model when it has one, otherwise the first you set up of OpenRouter,
+  Venice (both TypeSafe's Jev) and OpenAI (its Decisions API with
+  gpt-6-luna), named by the one it resolves to; or one of those three that you
+  choose. Each runs on that provider's key with nothing new to enter, and a
+  provider whose key did not load is never offered or called. A decision
+  model checks each item against the watcher's purpose and instructions, with
+  its keywords and the examples you marked ("that one wasn't useful", "you
+  should have sent me that") as hints, so a post worded differently or in
+  another language is no longer missed and a correction reaches the check
+  too, in about a third of a second per item, roughly ten times faster than a
+  chat model. The filter model still makes every pass.
+  Fermix writes a watcher's keywords the same way either way, and if the
+  decision model's provider fails, none is set up any more, or the one you
+  chose is not set up, the watcher waits and retries instead of falling back
+  to keyword match or to another provider; when one is missing, its notice,
+  its row in the Cues lists and the Screen setting say what to set up. A watcher's words to listen for are now called keywords
+  everywhere Fermix names them.
+- **Watch X accounts with the X sign-in you already have.** A new X accounts
+  preset for feed sources takes up to 20 handles, typed with or without `@`,
+  and brings each new post from those accounts in as a cue, replies and
+  quotes included and reposts left out. It reads X's recent search with the
+  X plugin's sign-in, so there is no token to paste, no webhook to register
+  and no tunnel to keep up: connect X under Plugins, add a source and pick
+  X accounts in Settings → Cues or the setup page's Cues tab, and
+  ask for a watcher in chat. Watching starts when it first reads with your X
+  sign-in, each post carries its whole text, its author and its link on
+  x.com, and a source stopped for more than a week picks up from X's last
+  seven days. Without the X sign-in
+  the source says "Needs your X sign-in: connect X under Plugins.", tells
+  you once, and starts by itself as soon as X is connected. X bills your X
+  app for each post it returns; a check that finds nothing costs nothing.
+- **Open loops follow what you're waiting on or going through, not only what
+  you plan to do by a date.** With open loops on, when you mention an
+  interview, a result you're expecting or a hard conversation, Fermix may ask
+  afterwards how it went, without assuming the outcome or offering advice it
+  wasn't asked for. Each loop has a reach: it comes up only in a conversation
+  you start, or Fermix may also send one short check-in message; say "only
+  bring that up if I mention it" or "message me about it" to change it. How
+  you answered earlier follow-ups, in your own words and how soon, shapes the
+  next ones, and "What are you keeping an eye on?" shows each loop with its
+  follow-ups and your replies, which "drop that" deletes. When you're
+  preparing a submission with no known closing date, Fermix may end its reply
+  by asking once when it closes, and keeps it only once you give a date. A
+  raise during a voice call is not counted as unanswered, since your spoken
+  reply can't be recorded, and what Fermix said after reading someone else's
+  content comes back marked as such. What it said in a reply that drew on your
+  computer history is shown again only where your computer history may go.
+- **Follow-ups read the moment before they ask.** When what you've said shows
+  you're going through something hard, Fermix leaves anything unrelated that
+  can wait, in a conversation and in a check-in message. A check-in now reads
+  what you wrote in that chat over the last few days, your own words only, and
+  can decide to wait until the next day instead of asking now or dropping the
+  question; asking about the hard thing itself is never held back.
+- **Slack works on a host with no public address.** Slack can now reach
+  Fermix over Socket Mode instead of a webhook: Fermix opens the connection
+  itself with an app-level token, so there is no public URL, tunnel or open
+  port to set up, which is how Slack runs on a server. Choose Socket Mode in
+  the Channels settings or the setup page's Slack card, save the bot token and
+  the app-level token, and restart. `fermix health` and Doctor say whether it
+  is connected, Fermix reconnects on its own when Slack refreshes or drops the
+  connection, and an event it could not take in is left for Slack to send
+  again. The webhook stays the default.
+- **The browser fills a form and sends it in one step.** When the agent fills
+  in a form, or signs you in with a login saved in the Mac app, it can send
+  the form in the same step instead of a second one, and it sees the page the
+  form leads to right away. Signing in still asks you first, exactly as
+  before. If sending fails once the fields are filled, the agent is told they
+  are filled, so it does not type them again.
+- **The agent leaves a page open for you when it needs you to finish a
+  step.** In the Mac app's browser, a tab used to close as soon as the
+  agent's reply ended. When a task stops because it needs you (a code sent
+  to your phone or email, a passkey, a payment to confirm, a delivery slot or
+  another choice only you can make), the agent now leaves that tab open and
+  in front, and when you answer in the same chat it carries on in that tab
+  instead of starting over. The tab closes when you close it, when the app's
+  browser closes, or after the browser's idle time. A finished task's tabs
+  still close with the reply, a cancelled turn closes its tab at once, and
+  nothing is kept open for a turn you are not there for, such as a
+  scheduled job or a cue.
+- **The Mac app's chat says what Fermix is doing while it works.** Each step
+  of a long answer comes with a short line in plain words, such as "Searching
+  the web", "Running a command" or "Using Notion", instead of the name of the
+  tool behind it, and when you sign in with ChatGPT the model's own summary of
+  each step of its thinking arrives as it finishes. The app shows them under
+  its thinking line once it reads them; nothing of either is kept after the
+  answer.
+- **Files you attach in the Mac app's chat reach Fermix.** A picture, a
+  recording or a document you attach in the chat is handed to Fermix on the
+  same computer and read exactly as one sent from a phone, with the same size
+  limit (20 MB unless you changed it). A file Fermix cannot take, because it
+  is too large or changed before Fermix read it, is not sent, and the chat
+  says why in a sentence. The app shows the files in your message, and so do
+  your phones. The app also learns from Fermix which slash commands to offer.
+  Attaching takes an app that speaks the new chat protocol.
+- **A message Fermix sends on its own says where it came from.** In the Mac
+  app's chat and on your phones, a message from a scheduled job carries the
+  job's name, and one a watcher set off (its task's report, its follow-up's
+  result, or a notice about it) carries the watcher's name, so the app can
+  show it above the message and open that watcher from there. A picture or
+  file the job sends carries it too. Replies to you, reminders and voice call
+  rows carry none. Messages already in your chat from before say where they
+  came from too: when Fermix starts, each one a job sent is given the job's
+  name, and each one a watcher set off in about the last 30 days the
+  watcher's name. A watcher's notice from before, and a message from a job or
+  watcher you have since removed, stay as they were.
+- **A reply says when it was written as soon as it arrives.** A reply that
+  finishes while the Mac app or your phone is watching now carries the time
+  Fermix stored it at, the same time the chat shows for it later, so the app
+  can show it beside the reply at once instead of only after it reads the
+  chat's history again. A reply in several parts carries each part's own
+  time.
+
+### Changed
+
+- **A mandate's proposal is a short card too.** It names the tool and the
+  watcher, quotes the item, says why it passed, and shows each argument on its
+  own line, with every argument whole and the whole item behind Details, in
+  place of the JSON block; Telegram answers it with Run and Skip.
+- **Reminders read naturally.** A reminder now leads with the moment in plain
+  words, then what it's about: "Tonight at 7:00 PM EDT, in 3 hours: Dinner with
+  Sam." or "Sarah's birthday is this Monday, September 14." Every fact stays:
+  the date with its weekday, the time and time zone, and how far away it is.
+  The "Reminder:" label is gone, and reminders still arrive on time with no
+  model involved.
+- **One browser sign-in now serves all your conversations.** In the Chrome
+  Fermix runs for the agent, every conversation you run on a Fermix (a chat
+  on any channel, a scheduled job's runs, a cue run) shares one browser
+  profile, so a site you sign in to once stays signed in for all of them and
+  a scheduled job no longer starts signed out on every run. Each
+  conversation still works in its own tab. The Mac app's browser pane keeps
+  a profile per conversation, as a guest's conversation does, and signing in
+  on one Fermix does not sign another in. Profiles were kept per conversation before and are not
+  carried over, so sign in to each site once more.
+- **On Linux the kernel now holds every command Fermix runs for you to the
+  sandbox, as it does on a Mac.** The shell, git and operator commands run
+  under Landlock (Linux 6.2 or later): outside `open` they write only the
+  workspace, your grants and the temp folders, and in no mode can they write
+  Fermix's home outside its workspace and skills, its systemd unit or the
+  protected paths (nor empty one with a truncate), or read its secrets,
+  tokens, the phone keys, or (outside `open`) your SSH and cloud credentials.
+  A command running under it gets no answer from any Fermix socket, since
+  Landlock cannot refuse a connection to a socket file: every Fermix socket on
+  Linux closes, unanswered, a connection from a process running sandboxed
+  (the kernel's no_new_privs flag, which the command and everything it starts
+  keep), as a Mac already refused it, so a command cannot change a setting,
+  add an MCP server that would run outside the sandbox, or speak as you on
+  the voice socket. Your terminal and the Fermix app are answered as before;
+  a Fermix client you run inside another sandbox, such as a Flatpak app, is
+  refused too. From Linux 6.10 a command can use no device's
+  ioctls but a terminal's (GPU compute such as CUDA does not run from a
+  command), and from Linux 6.12 it cannot signal a process outside the command
+  or connect to an abstract unix socket made outside it. Every command runs in
+  a session of its own, so it cannot type into the terminal of a `fermix` you
+  started by hand. A command in a turn that read outside content still waits
+  for your confirmation there, since Landlock cannot stop a command reaching
+  your account's service manager (`systemd-run --user`), which would start a
+  program outside the sandbox. A Linux kernel without Landlock, or older
+  than 6.2 (a stock Debian 12's 6.1 included; Debian 12 on a 6.2 or later
+  kernel runs commands), runs no command and says why, `fermix doctor` gains
+  an `os sandbox` row on both systems, and tool caches move into the
+  workspace's `.cache` on Linux too.
+- **Adding a cue source starts from what you want watched.** The add form
+  now opens on a list: Website or blog, X accounts, GitHub and Your scripts,
+  then Any feed address, Live stream and Any webhook, in one list.
+  Each asks only for what it needs (a feed address, the X accounts, or
+  nothing at all for GitHub and scripts) and keeps the rest under More
+  options. The name is optional: left empty, Fermix names the source from
+  what it reads, such as `ycombinator` for a Hacker News feed, `x-nasa` for
+  X accounts or `github`, adding `-2` when that name is taken. Fermix also
+  makes a GitHub source's secret and shows it once, as it does a script's
+  token, so there is no secret to invent and paste in two places. The X
+  accounts form says whether you are signed in to X, and the fields read in
+  plain words: Feed address, Accounts, Check every, Daily limit,
+  Verification and Secret.
+- **The setup page's Cues tab shows what applies.** With nothing set up
+  it shows one card with the three steps and Add a source. Watchers appear
+  once there is a source or a watcher, and mandates once there is a watcher
+  or a mandate. Run cues, Let watchers act, the door's port, the Screen and
+  the filter model are one form, saved with Save cues or Save & next at the
+  bottom of the tab, the Screen and the filter model together under How
+  watchers judge items. A value it refuses is said under its field, and
+  nothing in that save is written.
+- **On Linux, when memory runs out, the kernel stops the browser Fermix
+  started rather than Fermix.** Out of memory the kernel stops one process,
+  and Fermix, which runs every channel, was the likeliest. Chrome and every
+  process it starts now begin with the kernel's highest score, so the kernel
+  stops one of them instead and Fermix keeps running; a browser task that
+  finds Chrome gone starts it again.
+- **The browser reads a page once it has stopped changing.** After a click,
+  a submit or an Enter, and after opening a page, Chrome's page is now read
+  once it has held still for a moment (the same address, title, number of
+  elements and amount of text), not as soon as its address stops moving, so
+  results still filling in after a click are no longer read half-built and
+  need no second look. A snapshot taken while a page is still loading now
+  waits for it, up to a second and a half, then reads what is there and says
+  whether it had finished loading.
+- **Long browser tasks stay quick.** In a long browser task, the agent's later
+  steps stop re-reading its older reads of a page it has since read again, so
+  each step is quicker and costs less. Each screen of a site that changes only
+  the part of its address after `#`, such as a mail inbox and each message
+  opened from it, counts as a page of its own, so reading several messages
+  keeps every one, and the agent can still look up an older read it set aside.
+
+- **Let mandates act is now Let watchers act.** The Cues switch that stops
+  every mandate now stops every watcher follow-up too, at once and with no
+  restart, even in a run already going, so Settings → Cues and the setup
+  page's Cues tab call it Let watchers act.
+- **A message that needs you to fix something names the setting, not a
+  command.** When a sign-in stops working, a plugin is off or signed out,
+  voice notes or images have nothing set up, or a plugin needs a newer
+  Fermix, the message now says where to fix it in Fermix's settings
+  (Providers, Plugins, Voice notes, Images or Personality) or to update
+  Fermix, wherever you read it: in a chat, the Mac app or the setup page. It
+  no longer gives a `fermix auth login`, `fermix plugins` or `fermix setup`
+  command.
+- **A skill runs with the tools you meant it to have.** A skill Fermix writes
+  for you now runs with the tools of the chat or job that starts it, where it
+  used to run with none. A skill that lists its tools under a key Fermix does
+  not read (the Agent Skills `allowed-tools`, or Claude Code's `tools` or
+  `allowedTools`) used to run with every tool; it now runs with none, and
+  Fermix says so. A tool a skill names that Fermix does not have is left out,
+  and running the skill, or setting a scheduled job to run it, names it, so
+  you can fix the skill's `allowed_tools`.
+- **A plugin can no longer be named `checklist`.** A plugin named
+  `checklist`, or with a name starting `checklist_`, is refused when it is
+  installed or loaded, with a sentence saying to rename it, because lists use
+  those tool names. No plugin in Fermix's catalog is affected.
+
+### Removed
+
+- **The check-in message after a reminder.** A reminder is now always just the
+  reminder: fixed text, sent on time, with nothing model-written after it.
+  Asking later how something went is left to open loops, which remember your
+  reply and count toward their one message a day.
+
+### Fixed
+
+- **Fermix sees the Linux desktop app installed as a package.** Fermix
+  looked for the desktop app only where the earlier Flatpak put it, so on a
+  computer with the app's .deb or .rpm package it took the app for missing.
+  Where you have no chat with Fermix (Telegram, Signal or WhatsApp), a
+  mandate in approve mode stayed inactive. Fermix now counts
+  the app wherever its package or the Flatpak installs it, as it starts, so
+  with no chat a mandate in approve mode is active and its proposal waits
+  for you in the app's Chat. A watcher's follow-up card is not shown in the
+  Linux app yet: with no chat it waits until it expires.
+- **A Codex run's failure says what Codex said.** A Codex run that failed used
+  to report only `reason: exit_1` and Codex's "Reading additional input from
+  stdin..." line, because Codex gives its reason on an event Fermix did not
+  read. The message now shows Codex's own words (such as "The 'daybreak blue'
+  model is not supported when using Codex with a ChatGPT account.") and the
+  resume command, as a failed Claude Code run's does.
+- **A Codex model is checked before anything starts.** A model Codex does not
+  list for your account, such as the name Codex shows ("Daybreak Blue") in
+  place of its id, used to start a run that failed seconds later. It is now
+  refused before launch, saying nothing was started and listing each model's
+  id beside its name, so the agent launches again with the id, a follow-up's
+  run included. Until Codex has listed your account's models once, a run
+  that names a model is refused the same way, with a sentence telling the
+  agent to launch again on Codex's default model.
+- **Cancelling a long step answers once it has really stopped.** Cancel on a
+  plugin install, a sign-in or a download now answers when
+  the work has stopped (it is given five seconds to finish cleanly, then
+  stopped), where it used to answer at once while the work could still run,
+  so a step started right after a cancel never runs beside the one you
+  cancelled. Until then the work still shows as running.
+- **Apply & restart on the setup page restarts Fermix under the Mac app.**
+  The button used to say there was nothing to restart unless Fermix ran as a
+  `fermix service` install. It now restarts whenever something brings Fermix
+  back: the Mac app, Fermix's own systemd service, or `fermix service`. Under
+  `fermix run` in a terminal it says it cannot. On a Linux package install, a
+  `fermix run` in a terminal could pass for Fermix's own service, and the
+  button then stopped Fermix with nothing to start it again; only Fermix's
+  own systemd unit counts now.
+- **A marked example teaches the filter the item's own words.** An item
+  with no title whose data has a `text` field, such as many webhook and
+  stream items, was kept as the start of its raw JSON, so a marked example
+  showed the filter mostly braces; it now keeps that text, up to 280
+  characters. Cues already stored keep what they had.
+- **A busy computer no longer quietly costs you a watcher's notices.** When
+  the computer was so busy that Fermix's memory database fell behind, every
+  request waiting on it gave up after a few seconds, yet each one still ran
+  when its turn came: the backlog only grew, and work could be picked up
+  after the part of Fermix that asked for it had moved on, so a follow-up card
+  was never sent, a proposal expired without a word to you, or a reminder sat
+  claimed with nothing sending it. Fermix now drops such a request instead of
+  running it late when it only picks up new work (a due reminder or scheduled
+  run, a card to offer, an expiry to announce) or does upkeep the next round
+  repeats, so the database catches up as soon as the load eases and that work
+  is picked up again on the next round. A record of something that already
+  happened, such as a reminder sent or a run finished, is still saved however
+  late, as before. The cue cleanup that runs every minute also stops at its
+  first request that times out instead of queueing one for each of its steps.
+  A request already running when its asker gives up still finishes, so a
+  missed notice can still happen, but only in that brief window.
+- **Fermix installed with Homebrew on a Mac runs with an app's priority.**
+  `fermix service install` wrote its launch agent as a Standard job, which
+  macOS still throttles, so a busy computer could slow every reply. It now
+  writes an Interactive one, as the Mac app's own agent does, and `fermix
+  setup` rewrites an agent installed before.
+- **A long task on Claude no longer stops after Fermix shortens its
+  context.** Claude Opus 5.5, Sonnet 5.5, Haiku 5.5 and Fable 5.1 tie their
+  reasoning to the exact conversation that produced it, and Anthropic enforces
+  that for accounts created from August 31, 2026. When a task grew past its
+  context budget and Fermix condensed an earlier tool result, or dropped an old
+  screenshot, the next request was refused with "Invalid `signature` in
+  `thinking` block … bound to a different conversation", and the turn or
+  scheduled job ended in an error. Fermix now leaves out the reasoning recorded
+  after the point it changed, keeps the reasoning before it, and the task
+  carries on.
+- **The Mac app lists Anthropic's models when you pick it for the Cues
+  filter.** Choosing Anthropic, OpenAI, SpaceXAI or Mistral as the filter
+  model's provider in Settings → Cues opened an empty list that said "The
+  requested management capability is unavailable": the app asks for a
+  provider's current models, and Fermix answered that only for the providers
+  that publish a list of their own. Those four now answer with the models
+  Fermix ships for them, the same list their own settings offer, and typing in
+  their Model field narrows it.
+- **Searching memory for a hyphenated word works.** A memory or history search
+  for a word like "follow-up" or "check-in" failed outright ("no such column:
+  up"), because the search text was read as search syntax, where a hyphen
+  means something else. Search text is now always plain words, so a hyphen,
+  "OR", a colon or a stray quote is simply part of what is looked for.
+- **The agent uses the browser for what the X plugin can't do.** A pay-per-use
+  X app may no longer like, follow or quote, and the plugin has no tool to
+  block, report, mute or read bookmarks, yet its instructions forbade the
+  browser for anything on X, so the agent refused or told you to reconnect X.
+  It now uses the X tools for what they cover and the browser, signed in to X,
+  for the rest, and says why; a call X turns down for good (a feature the
+  app's plan leaves out, credits used up) moves to the browser too. Fermix's
+  own rule for connected plugins now says the same, though never past a Fermix
+  confirmation or your no, and a plugin that is not connected is offered for
+  connection, with the browser in its place only when you ask. The catalog
+  offers X 1.0.2 with the new instructions: a new install gets it, an
+  installed copy moves with `fermix plugins upgrade x`, and the Mac app has no
+  plugin update yet.
+- **A message is answered once even when its retry comes after a restart.**
+  Fermix kept the ids of incoming Slack, WhatsApp and iMessage events in
+  memory only, so a provider's retry that arrived after a restart could start
+  a second reply. It now keeps each id for 24 hours in its memory database, so
+  the retry is recognised as a duplicate after a restart. With memory turned off the ids are kept until the
+  next restart, as before, and an event whose id Fermix cannot record is
+  refused, so Slack or WhatsApp sends it again.
+- **Telegram messages sent while Fermix is stopped are answered when it
+  starts.** Each time Fermix started it skipped whatever Telegram was holding
+  for the bot, so a message sent during a restart, an update or a crash was
+  never answered. Fermix now answers everything
+  Telegram still holds, which is up to 24 hours of messages, and each one
+  once: it keeps the ids of the Telegram updates it took for 24 hours in its
+  memory database, so the last messages before a stop, which Telegram sends
+  again, are not answered twice after a restart. With memory turned off a restart can answer those last ones
+  again. A message that waited is answered as if it had just been sent.
+- **Fermix's Linux service no longer stays down after its fifth start.** The
+  systemd service allowed five starts with no time window, so restarts added
+  up over the life of the service until one more stop left Fermix down. It
+  now allows five starts in any ten minutes: a daemon that keeps crashing
+  still stops, and its journal says why, while restarts spread over time,
+  such as applying a setting, never use the budget up.
+- **Settings → Cues opens quickly again on a busy store.** To count the last
+  day's deliveries for each watcher, Fermix read every delivery the watcher
+  had ever had, which it keeps for 30 days. After a busy stream day that took
+  half a second or more per list, several times each time the pane opened or
+  the menu bar showed what was waiting. A new index finds just the day's
+  deliveries, so that count takes under a millisecond however many are kept.
+- **A full disk no longer stops Fermix.** When the disk filled, the first
+  trace Fermix could not write crashed the process that writes traces, and
+  the restarts that followed stopped the engine's core: messages went
+  unanswered until Fermix was restarted with space freed. A trace entry that
+  cannot be written is now dropped and the engine keeps running; the log says
+  so once, and once more when space returns, with how many entries were
+  dropped. Traces hold full request bodies and were never removed; Fermix now
+  keeps 14 days of them and at most 1 GiB beyond the current day's, removing
+  the oldest days first
+  when it starts and every hour.
+- **Submitting a form in Chrome sends that form.** When the field the agent
+  submitted from sat outside any form, as on many single-page sign-ins and
+  checkouts, Chrome sent the page's first form instead, often a search box or
+  a newsletter sign-up. Nothing is sent now, and the agent is told to click the
+  page's own submit button.
+
+### Security
+
+- **Fermix's Chrome keeps Chrome's own phishing protection.** The Chrome
+  Fermix starts for the agent used to start with Chrome's phishing check,
+  its Safe Browsing service and its component updates (which carry the list
+  of revoked certificates) turned off. All three are on now, so a deceptive
+  page the agent opens is flagged as it would be in your own Chrome.
+- **A command Fermix started can no longer open the setup page.** A setup
+  page session can make every decision the page offers, so asking Fermix for
+  one is now the owner's decision, as pairing a phone or moving Fermix is: a
+  command the agent ran is refused, with "Only the owner can open the setup
+  page: use the Fermix app or your own terminal." The Mac app and `fermix
+  setup` open it as before.
+- **Commands the agent runs can no longer read the Mac app's browser
+  data.** The cookies, storage and caches of the browser in the Fermix app
+  (under `~/Library/WebKit`, `HTTPStorages`, `Caches` and `Cookies` for the
+  app) are now refused to the agent's commands in every sandbox mode and to
+  its file tools, as the managed Chrome's profile already was, so a site you
+  are signed in to there cannot be read from disk.
+- **Denying an approval drops it.** `/deny`, a Deny button or the app's card
+  now also discards the approval Fermix was holding, where before it only
+  cleared the chat's token and the held approval lived out its minute.
+- **Pausing a watcher, or taking a source off it, no longer lets an item
+  through.** A stream item whose filter call was still running when you paused
+  a watcher, or took the stream off its sources, could still pass and wake the
+  watcher's task, where a mandate in auto mode could act on it. It is no
+  longer delivered, though the call still counts toward the watcher's filter
+  budget. When you take a feed, webhook or local-push source off a watcher,
+  what was waiting for its filter from that source, an item it was judging at
+  that moment included, is now discarded even if the same change turns the
+  filter off, and Fermix tells you how many; adding the source back does not
+  bring it back. A paused watcher's waiting items still wait for the resume,
+  and items a watcher passed before either change still go to its task.
+- **A command Fermix started can no longer change cues through the general
+  settings and secret writes.** Storing or clearing a cue source's key or
+  secret, or changing the Cues settings (such as turning mandates back on
+  after you stopped them), is refused unless it comes from you through the
+  Fermix app or your own terminal, as every other cue change already was.
+  Every other secret and setting is unchanged.
+- **Refused cue actions no longer quote your data in traces.** When a cue
+  task's call is refused, traces and Opik now say why without what the reason
+  quotes: a pinned argument the call got wrong is named, not the value it must
+  have; a mandate that fails its checks is "inactive", without the validator's
+  path; and an approval that cannot be read is reported without the database
+  error. The full reason still reaches the agent, the call's record and you.
+- **Open loops stay in your private chats.** Loops are recorded, listed,
+  settled and raised only in a direct message, the phone or Mac app, or a
+  voice call. A group chat or a Slack channel mention never sees them, and a
+  due loop waits for your next private message. Slack mentions now count as a
+  shared channel unless Slack marks them a direct message.
+- **A loop noted while reading someone else's content is marked, not
+  trusted.** The loop is still kept. Its words come back framed as data that
+  may not be yours: in the due note, the list, and the check-in, which asks
+  whether you meant it instead of saying you said it. When a due note carries
+  such a loop, that request counts as having read outside content, so commands
+  wait for you as after a web page. Every due note quotes a loop's words as
+  data, and loops kept before this change are not marked.
+- **Only your own words settle a loop after outside content.** In a request
+  that read something someone else wrote, a loop is closed, stopped, moved or
+  dropped only with words you typed in that message; a forwarded message or an
+  attachment never counts. In a voice call, once any task has read such
+  content, the loop waits for you to settle it in your chat.
+- **A voice call remembers what its tasks read.** On a GPT-Live or Grok call,
+  once one task reads a web page, an attachment or a plugin result, every
+  later task in that call counts as having read it: an access-sensitive
+  command then waits for your spoken yes, and a command on Linux or a coding
+  agent is refused, as in a call that read it itself. A call whose tasks read
+  nothing is unchanged.
+
 ## [0.17.0] - 2026-10-26
 
 ### Added

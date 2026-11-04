@@ -202,7 +202,7 @@ defmodule FermixCore.Prompt.SetupSeeder do
         resource_path: spec.path
       )
 
-    case Registry.commit(agent_id, spec.resource_type, "global", content, commit_opts) do
+    case commit_where_open(agent_id, spec, content, commit_opts, opts) do
       {:ok, :unchanged} ->
         finish_commit(spec, agent_id, byte_size(content), nil, started_at)
 
@@ -225,6 +225,20 @@ defmodule FermixCore.Prompt.SetupSeeder do
 
         {:ok, %{name: spec.name, path: spec.path, outcome: :seeded_uncommitted, revision_id: nil}}
     end
+  end
+
+  defp commit_where_open(agent_id, spec, content, commit_opts, opts) do
+    with :running <- repo_running(opts),
+         do: Registry.commit(agent_id, spec.resource_type, "global", content, commit_opts)
+  end
+
+  # A device opens no database (`FermixCore.Home.Role`), so no Repo runs there:
+  # a settings save on it writes the files and skips what only the database
+  # holds, as memory switched off does, and says why.
+  defp repo_running(opts) do
+    if GenServer.whereis(Config.repo_server(opts)),
+      do: :running,
+      else: {:error, :repo_not_running}
   end
 
   defp finish_commit(spec, agent_id, bytes, revision_id, started_at) do
@@ -250,7 +264,7 @@ defmodule FermixCore.Prompt.SetupSeeder do
     started_at = System.monotonic_time(:millisecond)
     rows = user_memory_rows(agent_id, owner_id, personalization)
 
-    case upsert_rows(rows, opts) do
+    case with(:running <- repo_running(opts), do: upsert_rows(rows, opts)) do
       :ok ->
         :telemetry.execute(
           [:fermix, :prompt, :seed_user_memories],
@@ -265,6 +279,14 @@ defmodule FermixCore.Prompt.SetupSeeder do
       {:error, :disabled} ->
         Logger.warning(
           "prompt setup seed: memory is disabled, so no user memory rows were seeded"
+        )
+
+        :ok
+
+      {:error, :repo_not_running} ->
+        Logger.warning(
+          "prompt setup seed: no database is open in this engine (a device opens none), so " <>
+            "no user memory rows were seeded"
         )
 
         :ok

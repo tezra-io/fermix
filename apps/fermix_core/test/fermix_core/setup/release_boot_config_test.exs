@@ -102,10 +102,12 @@ defmodule FermixCore.Setup.ReleaseBootConfigTest do
     [
       :context_window_limit,
       :harness_continuation_dispatcher,
+      :home_link,
       :iteration_limits,
       :log,
       :max_conversation_history,
       :prompt_bootstrap,
+      :snapshot_targets,
       :subagents,
       :trace,
       :ultra

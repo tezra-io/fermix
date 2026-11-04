@@ -1,0 +1,11 @@
+{"open_loops": [{"key": "pathology",
+                 "intention": "Hear Ilse's pathology results after her surgery",
+                 "why_it_matters": "the owner's sister had emergency surgery and the results decide what comes next",
+                 "anchor_kind": "ask_after",
+                 "horizon_class": "after",
+                 "reach": "message",
+                 "said_days_ago": 4,
+                 "touches": 0,
+                 "due_hours_ago": 4}],
+ "owner_messages": [{"hours_ago": 30,
+                     "text": "Ilse is out of surgery and resting. Now we wait for the pathology results, they said within a day."}]}

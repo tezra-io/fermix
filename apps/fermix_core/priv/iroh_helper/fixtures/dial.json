@@ -1,0 +1,1 @@
+{"op":"dial","dial_id":"5f1c9a2e","endpoint_id":"79b5562e8fe654f94078b112e8a98ba7901f853ae695bed7e0e3910bad049664","relays":[{"url":"https://us1.relay.fermix.ai/","quic_port":7842},{"url":"https://eu1.relay.fermix.ai/","quic_port":7842}],"socket":"/Users/owner/.fermix/mobile/dial-5f1c9a2e.sock"}

@@ -136,7 +136,8 @@ defmodule FermixCore.Cues.Mandates do
   @doc """
   Whether this engine has an app to ask the owner in (the reach rule): the Mac
   app's own engine, or the Linux desktop app when it was installed as Fermix
-  started. The Linux app is a Flatpak beside the host's package, so a package
+  started. The Linux app's package carries the same engine a headless
+  server's package does, and the earlier Flatpak sat beside it, so a package
   build alone says nothing about it (a headless server would hold every
   proposal unseen); `FermixCore.HostFacts` reads its entry at boot, and an app
   installed later counts at the next restart. A paired phone is not one until
@@ -385,21 +386,37 @@ defmodule FermixCore.Cues.Mandates do
   @doc """
   Why a call of `tool` with `args` is outside `mandate` as it reads now (the
   tool is not one of its `tools`, or a `pin_args` entry does not have its
-  value), as the sentence a refusal gives; nil when it is inside. One rule for
-  the gate's call and a proposal's confirm.
+  value), as `{sentence, traced}`; nil when it is inside. One rule for the
+  gate's call and a proposal's confirm.
+
+  `sentence` is what a refusal gives the model and the owner, with the value a
+  pinned argument must have, so the model can correct its call. `traced` is
+  the same reason without that value, for telemetry, which is exported outside
+  the content-capture gate: what a mandate pins may be the owner's own
+  content, such as an address.
   """
-  @spec outside_grant(t(), String.t(), map()) :: String.t() | nil
+  @spec outside_grant(t(), String.t(), map()) :: {String.t(), String.t()} | nil
   def outside_grant(%__MODULE__{tools: tools, pin_args: pins}, tool, args)
       when is_binary(tool) and is_map(args) do
     if tool in tools,
       do: unpinned_arg(pins, args),
-      else: "#{tool} is no longer one of the mandate's tools"
+      else: not_a_tool(tool)
+  end
+
+  # The tool's name is the one the model called, which its event names already.
+  defp not_a_tool(tool) do
+    sentence = "#{tool} is no longer one of the mandate's tools"
+    {sentence, sentence}
   end
 
   defp unpinned_arg(pins, args) do
     case Enum.find(pins, fn {key, value} -> Map.fetch(args, key) != {:ok, value} end) do
-      nil -> nil
-      {key, value} -> "the argument #{key} must be #{inspect(value)}, as the mandate pins it"
+      nil ->
+        nil
+
+      {key, value} ->
+        {"the argument #{key} must be #{inspect(value)}, as the mandate pins it",
+         "the argument #{key} differs from what the mandate pins"}
     end
   end
 
@@ -746,8 +763,17 @@ defmodule FermixCore.Cues.Mandates do
   defp get_job(job_id, opts) do
     case Keyword.get(opts, :get_job) do
       fun when is_function(fun, 1) -> fun.(job_id)
-      nil -> JobsRegistry.get_job(job_id, repo: Keyword.get(opts, :repo, Repo))
+      nil -> stored_job(job_id, Keyword.get(opts, :repo, Repo))
     end
+  end
+
+  # A device opens no database (`FermixCore.Home.Role`), yet its settings file
+  # is the primary's retired copy, mandates included: a Repo that is not
+  # running is named, not called.
+  defp stored_job(job_id, repo) do
+    if GenServer.whereis(repo),
+      do: JobsRegistry.get_job(job_id, repo: repo),
+      else: {:error, :repo_not_running}
   end
 
   defp owner_inbox(opts),

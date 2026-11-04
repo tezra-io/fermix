@@ -3,10 +3,10 @@
   "$id": "https://fermix.sh/browser_host/protocol.schema.json",
   "title": "Fermix browser host protocol",
   "description": "Newline-delimited JSON wire contract between the Fermix daemon and the Fermix app's browser host on browser_host.sock. The app opens it with the handshake and attached; then the daemon sends requests with an id, the app answers each (response), and sends events. Source of truth: FermixCore.BrowserHost.Protocol. See PROTOCOL.md.",
-  "x-protocol-version": 1,
+  "x-protocol-version": 2,
   "x-supported-version-range": {
     "min": 1,
-    "max": 1
+    "max": 2
   },
   "x-max-line-bytes": 4194304,
   "x-max-message-chars": 500,
@@ -223,7 +223,9 @@
             "cookies.get",
             "cookies.clear",
             "host.status",
-            "host.stop_ack"
+            "host.stop_ack",
+            "page.login_for",
+            "page.sign_in"
           ]
         }
       },
@@ -496,6 +498,36 @@
           },
           "then": {
             "$ref": "#/$defs/host.stop_ack"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "page.login_for"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/page.login_for"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "page.sign_in"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/page.sign_in"
           }
         }
       ]
@@ -1206,6 +1238,120 @@
       },
       "additionalProperties": false
     },
+    "page.login_for": {
+      "type": "object",
+      "description": "Protocol 2. Which saved login fits the tab's page, by its attributes only: the tab's top URL must be https and key(site) must equal key(its host). No secret is read.",
+      "x-since": 2,
+      "required": [
+        "id",
+        "type",
+        "tab_id",
+        "site"
+      ],
+      "properties": {
+        "id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "type": {
+          "const": "page.login_for"
+        },
+        "tab_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "site": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 253,
+          "pattern": "^[a-z0-9._-]+$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "page.sign_in": {
+      "type": "object",
+      "description": "Protocol 2. Type the saved login into the tab's login form after the owner approved: the same page checks as page.login_for, the login must still be login_site's, then one fill of the refs given (username first). Only with password_ref is the keychain's secret read. With observe, carry the page back as `page` once the fill settled.",
+      "x-since": 2,
+      "required": [
+        "id",
+        "type",
+        "tab_id",
+        "site",
+        "login_site",
+        "observe"
+      ],
+      "properties": {
+        "id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "type": {
+          "const": "page.sign_in"
+        },
+        "tab_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "site": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 253,
+          "pattern": "^[a-z0-9._-]+$"
+        },
+        "login_site": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 253,
+          "pattern": "^[a-z0-9._-]+$"
+        },
+        "observe": {
+          "type": "boolean"
+        },
+        "snapshot": {
+          "$ref": "#/$defs/snapshotOptions"
+        },
+        "username_ref": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "password_ref": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        }
+      },
+      "additionalProperties": false,
+      "anyOf": [
+        {
+          "required": [
+            "username_ref"
+          ]
+        },
+        {
+          "required": [
+            "password_ref"
+          ]
+        }
+      ],
+      "if": {
+        "properties": {
+          "observe": {
+            "const": true
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "snapshot"
+        ]
+      }
+    },
     "tab.open.result": {
       "type": "object",
       "description": "The tab, and its page when observed.",
@@ -1561,6 +1707,67 @@
       "required": [],
       "properties": {}
     },
+    "page.login_for.result": {
+      "type": "object",
+      "description": "The saved login that fits the page: the site it is saved for (key form) and its username. Never a password.",
+      "required": [
+        "login_site",
+        "username"
+      ],
+      "properties": {
+        "login_site": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 253,
+          "pattern": "^[a-z0-9._-]+$"
+        },
+        "username": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        }
+      },
+      "additionalProperties": false
+    },
+    "page.sign_in.result": {
+      "type": "object",
+      "description": "The page after the fill: its address, its title, which fields were filled, in fill order, and the page itself when observed. No value, no username.",
+      "required": [
+        "url",
+        "title",
+        "filled"
+      ],
+      "properties": {
+        "url": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 65536
+        },
+        "filled": {
+          "type": "array",
+          "enum": [
+            [
+              "username"
+            ],
+            [
+              "password"
+            ],
+            [
+              "username",
+              "password"
+            ]
+          ]
+        },
+        "page": {
+          "$ref": "#/$defs/page"
+        }
+      },
+      "additionalProperties": false
+    },
     "client_hello": {
       "type": "object",
       "description": "First frame. Opens the handshake.",
@@ -1858,7 +2065,7 @@
           "const": 1
         },
         "max_version": {
-          "const": 1
+          "const": 2
         }
       },
       "additionalProperties": false
@@ -1993,6 +2200,12 @@
             },
             {
               "$ref": "#/$defs/host.stop_ack.result"
+            },
+            {
+              "$ref": "#/$defs/page.login_for.result"
+            },
+            {
+              "$ref": "#/$defs/page.sign_in.result"
             }
           ]
         },
@@ -2044,7 +2257,14 @@
             "write_failed",
             "upload_failed",
             "invalid_request",
-            "host_unavailable"
+            "host_unavailable",
+            "sign_in_insecure_page",
+            "sign_in_wrong_site",
+            "sign_in_no_login",
+            "sign_in_field",
+            "sign_in_page_moved",
+            "sign_in_store_unavailable",
+            "secret_on_screen"
           ]
         },
         "message": {

@@ -25,10 +25,19 @@ defmodule FermixCore.ComputerHistory.RecentActivity do
   """
   @spec note(map()) :: String.t() | nil
   def note(context) when is_map(context) do
-    snapshot = Map.get(context, :computer_history_gate) || Gate.snapshot(context)
+    if permitted?(context), do: Recall.recent_digest(repo: Map.get(context, :memory_repo, Repo))
+  end
 
-    if Gate.allow?(snapshot, {:prompt_section, context}) do
-      Recall.recent_digest(repo: Map.get(context, :memory_repo, Repo))
-    end
+  @doc """
+  Whether this turn may carry content derived from the owner's activity: the
+  section's own Gate decision, on the turn's frozen snapshot when the context
+  has one. `Taint.tainted_turn?/2` stamps the turn's reply on the same
+  decision, so a surface that shows activity-derived words only when this
+  holds keeps the reply that may repeat them stamped (`OpenLoops.Reactions`).
+  """
+  @spec permitted?(map()) :: boolean()
+  def permitted?(context) when is_map(context) do
+    snapshot = Map.get(context, :computer_history_gate) || Gate.snapshot(context)
+    Gate.allow?(snapshot, {:prompt_section, context})
   end
 end

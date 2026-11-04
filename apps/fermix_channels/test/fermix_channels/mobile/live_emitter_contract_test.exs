@@ -19,12 +19,14 @@ defmodule FermixChannels.Mobile.LiveEmitterContractTest do
   alias FermixChannels.Channels.Mobile
   alias FermixChannels.Companion.Approvals
   alias FermixChannels.Companion.Output
+  alias FermixChannels.Gateway.Commands.Registry, as: CommandRegistry
   alias FermixChannels.LinkPreviews
   alias FermixChannels.Mobile.EventRouter
   alias FermixChannels.Mobile.MediaStore
   alias FermixChannels.Mobile.PairManager
   alias FermixChannels.Mobile.Protocol
   alias FermixChannels.Mobile.SocketHandler
+  alias FermixCore.Home.Epoch
   alias FermixCore.Memory.Repo
   alias FermixTestSupport.SafeRm
   alias FermixTestSupport.WireSchema
@@ -61,6 +63,7 @@ defmodule FermixChannels.Mobile.LiveEmitterContractTest do
   end
 
   defmodule SettledCoordinator do
+    def epoch(_server), do: "boot-contract"
     def acquire(_server, _profile, _client_id, _opts), do: {:ok, {:completed, %{}}}
   end
 
@@ -96,7 +99,7 @@ defmodule FermixChannels.Mobile.LiveEmitterContractTest do
     events = [
       Output.turn_started("main", "turn-client-1", "client-1"),
       Output.text_delta("turn-client-1", "Hel"),
-      Output.text_done("turn-client-1", 14, "Hello"),
+      Output.text_done("turn-client-1", reply_row(14), "Hello"),
       Output.tool_event("turn-client-1", {:tool_start, "web_search"}),
       Output.tool_event("turn-client-1", {:tool_finish, "web_search", huge}),
       Output.tool_event("turn-client-1", {:something, :else}),
@@ -114,8 +117,13 @@ defmodule FermixChannels.Mobile.LiveEmitterContractTest do
     rows = seed_rows!()
     photo = hd(rows)
 
-    LinkPreviews.schedule("main", photo.server_seq, ["https://example.com"],
-      resolver: fn _links, _thumbnail -> {:ok, unfurled_previews(), []} end,
+    links = Enum.map(unfurled_previews(), & &1.link)
+
+    LinkPreviews.schedule("main", photo.server_seq, links,
+      resolver: fn _links, _thumbnail, on_preview ->
+        Enum.each(unfurled_previews(), on_preview)
+        {:ok, []}
+      end,
       launcher: fn task -> task.() && :ok end,
       event_sink: ctx.sink,
       store: RepoTimeline
@@ -124,6 +132,7 @@ defmodule FermixChannels.Mobile.LiveEmitterContractTest do
     previews = received_sink_events("link_preview")
     assert length(previews) == 2
     for preview <- previews, do: assert_on_the_wire!(preview, schema)
+    assert Enum.any?(previews, &match?(%{"link" => _, "image_ref" => _, "icon_ref" => _}, &1))
 
     # Each stored preview also tells the Mac its row changed, an event this
     # wire does not carry (`Companion.Fanout` sends it to the Mac alone).
@@ -339,14 +348,14 @@ defmodule FermixChannels.Mobile.LiveEmitterContractTest do
        %{schema: schema, dir: dir} do
     {store, digest} = stored_blob!(dir, 10)
     state = ready_state(store, digest)
-    long = Output.text_done("turn-client-1", 20, String.duplicate("é", 40_000))
+    long = Output.text_done("turn-client-1", reply_row(20), String.duplicate("é", 40_000))
 
     {frames, state} = pushed(SocketHandler.handle_info({:mobile_event, long}, state))
     assert length(frames) >= 2
     assert [%{"text" => text}] = assert_frames!(frames, schema)
     assert text == long["text"]
 
-    giant = Output.text_done("turn-client-1", 21, String.duplicate("\"", 700_000))
+    giant = Output.text_done("turn-client-1", reply_row(21), String.duplicate("\"", 700_000))
     {frames, _state} = pushed(SocketHandler.handle_info({:mobile_event, giant}, state))
     assert [%{"truncated" => true}] = assert_frames!(frames, schema)
   end
@@ -389,7 +398,7 @@ defmodule FermixChannels.Mobile.LiveEmitterContractTest do
 
       assert byte_size(frame) - 4 <= Protocol.max_header_bytes()
       assert [%{"caps" => %{"commands" => commands}}] = assert_frames!([frame], schema)
-      assert length(commands) == length(Mobile.command_catalog())
+      assert length(commands) == length(CommandRegistry.catalog())
     end
 
     test "the largest one arrives whole as an event_part run", %{schema: schema} do
@@ -403,6 +412,9 @@ defmodule FermixChannels.Mobile.LiveEmitterContractTest do
   end
 
   # -- encoding, reassembly and validation, as a phone does them --
+
+  # The row a reply is stored at, as the timeline hands it back.
+  defp reply_row(seq), do: %{server_seq: seq, created_at: ~U[2026-09-27 09:00:04.000000Z]}
 
   defp assert_on_the_wire!(event, schema) do
     assert {:ok, frames} = encode(event)
@@ -536,6 +548,9 @@ defmodule FermixChannels.Mobile.LiveEmitterContractTest do
       identity_noise()
       |> Map.merge(%{
         phase: :await_hello,
+        # The widest epoch the daemon holds, so the hello_ack size cases below
+        # measure the largest hello_ack.
+        primary_epoch: Epoch.max_epoch(),
         authenticated_device: %{device_id: @device},
         device_registry: :registry,
         update_device: fn _store, @device, %{last_seen: %DateTime{}} ->
@@ -579,6 +594,7 @@ defmodule FermixChannels.Mobile.LiveEmitterContractTest do
       identity_noise()
       |> Map.merge(%{
         phase: :await_pair_decision,
+        primary_epoch: 1,
         pairing_session_id: "pair-session",
         client_seq: 1,
         negotiated_version: 2,
@@ -689,7 +705,8 @@ defmodule FermixChannels.Mobile.LiveEmitterContractTest do
         url: "https://example.org/post",
         site: "Example Org",
         title: "A post",
-        image: %{ref: String.duplicate("d", 64), mime: "image/png", size_bytes: 1_024}
+        image: %{ref: String.duplicate("d", 64), mime: "image/png", size_bytes: 1_024},
+        icon: %{ref: String.duplicate("e", 64), mime: "image/x-icon", size_bytes: 318}
       },
       %{
         link: "https://example.net/long",

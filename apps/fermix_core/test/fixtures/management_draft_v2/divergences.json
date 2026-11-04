@@ -1255,6 +1255,18 @@
       "why": "M51 gives the phone channel its own settings section, channels.mobile: the enable switch, applied the moment it is written, and three boot-bound rows: the port, the address it listens on and the local-network announcement. The draft predates it and draws no such section; the rows are the ordinary row shape."
     },
     {
+      "method": "settings.get:channels.slack",
+      "field": "rows:slack_mode",
+      "kind": "engine_only",
+      "why": "M75: Slack takes events by webhook (the default) or over Socket Mode, which needs no public address, so a server with no open port can run Slack. The way is a boot-bound choice row with two options; the draft predates it, and the row is the ordinary choice shape, drawn through the descriptor form with no Swift work."
+    },
+    {
+      "method": "settings.get:channels.slack",
+      "field": "rows:slack_app_token",
+      "kind": "engine_only",
+      "why": "M75: Socket Mode connects with Slack's app-level token, a secret row stored and removed through secret.set and secret.clear with the key slack_app_token, like the bot token beside it. The draft predates it; the row is the ordinary secret shape, drawn with no Swift work."
+    },
+    {
       "method": "(schema)",
       "field": "job_kinds:browser_install",
       "kind": "engine_only",
@@ -1928,6 +1940,12 @@
     },
     {
       "method": "(schema)",
+      "field": "methods:cues.watchers.always_allow.revoke",
+      "kind": "engine_only",
+      "why": "The 2026-10-31 revision of M60_WATCHER_CODING_RUNS.md: a follow-up's Always allow, which the owner grants on a card, is taken back from the app. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls it; the app finds it in hello's methods."
+    },
+    {
+      "method": "(schema)",
       "field": "methods:cues.watchers.get",
       "kind": "engine_only",
       "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build, and every build has cues. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
@@ -2069,6 +2087,12 @@
       "field": "minimum_versions:cues.status=2",
       "kind": "engine_only",
       "why": "The cue methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:cues.watchers.always_allow.revoke=2",
+      "kind": "engine_only",
+      "why": "Always allow's revoke is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates it, so its table has no entry; the addition is additive and needs no protocol bump."
     },
     {
       "method": "(schema)",
@@ -2233,6 +2257,12 @@
       "why": "M60 app surface: the cue methods postdate the draft. A source is named by its ref and a mandate or a watcher by its name; an add or an update carries the form's values by row key, and a source's add its kind or preset; a proposal is answered by its id and a decision, with no token."
     },
     {
+      "method": "cues.watchers.always_allow.revoke",
+      "field": "params:name",
+      "kind": "engine_only",
+      "why": "The 2026-10-31 revision of M60_WATCHER_CODING_RUNS.md postdates the draft: a watcher is named by its name, as cues.watchers.get names it."
+    },
+    {
       "method": "cues.watchers.get",
       "field": "params:name",
       "kind": "engine_only",
@@ -2372,6 +2402,12 @@
     },
     {
       "method": "hello",
+      "field": "capabilities.minimum_versions.cues.watchers.always_allow.revoke",
+      "kind": "engine_only",
+      "why": "Always allow's revoke is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates it, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
       "field": "capabilities.minimum_versions.cues.watchers.get",
       "kind": "engine_only",
       "why": "The cue methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
@@ -2381,6 +2417,18 @@
       "field": "capabilities.minimum_versions.cues.watchers.list",
       "kind": "engine_only",
       "why": "The cue methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "settings.get:cues",
+      "field": "rows:cues_decision_provider",
+      "kind": "engine_only",
+      "why": "The screen's decision model postdates the draft, as the rest of the cues section does: one live choice in the ordinary row shape, published whatever the screen is and read at every filter call: Automatic, the decision model the daemon picks from the providers set up, or one provider that serves a decision model, a provider not set up disabled with its hint."
+    },
+    {
+      "method": "settings.get:cues",
+      "field": "rows:cues_screen",
+      "kind": "engine_only",
+      "why": "The screen postdates the draft, as the rest of the cues section does: one live choice in the ordinary row shape, read at every accept and filter call, with two options: keyword match on the watcher's keywords, or the decision model the daemon picks from the providers set up, checking each item by meaning before the filter model reads it."
     },
     {
       "method": "settings.get:cues",
@@ -2411,6 +2459,432 @@
       "field": "rows:filter_provider",
       "kind": "engine_only",
       "why": "M60 app surface gives cues their own settings section, cues, published on every build: the cue switch and the door's port, both boot-bound, the mandates switch, and the default filter model's provider and model, applied together and read at every filter call. The draft predates it; the rows are the ordinary row shape."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:home.status",
+      "kind": "engine_only",
+      "why": "M75 adds the home family after the draft was written, so the draft publishes no home.* method. The four methods are minimum version 2 and additive: a client built against the draft never calls them, and the app re-vendors this export before it draws the Always On pane."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:home.snapshots.status",
+      "kind": "engine_only",
+      "why": "M75 adds the home family after the draft was written, so the draft publishes no home.* method. The four methods are minimum version 2 and additive: a client built against the draft never calls them, and the app re-vendors this export before it draws the Always On pane."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:home.snapshots.run",
+      "kind": "engine_only",
+      "why": "M75 adds the home family after the draft was written, so the draft publishes no home.* method. The four methods are minimum version 2 and additive: a client built against the draft never calls them, and the app re-vendors this export before it draws the Always On pane."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:home.snapshots.passphrase",
+      "kind": "engine_only",
+      "why": "M75 adds the home family after the draft was written, so the draft publishes no home.* method. The four methods are minimum version 2 and additive: a client built against the draft never calls them, and the app re-vendors this export before it draws the Always On pane."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:home.status=2",
+      "kind": "engine_only",
+      "why": "M75: every home.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the home family, so its table has no entry for it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:home.snapshots.status=2",
+      "kind": "engine_only",
+      "why": "M75: every home.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the home family, so its table has no entry for it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:home.snapshots.run=2",
+      "kind": "engine_only",
+      "why": "M75: every home.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the home family, so its table has no entry for it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:home.snapshots.passphrase=2",
+      "kind": "engine_only",
+      "why": "M75: every home.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the home family, so its table has no entry for it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.home.status",
+      "kind": "engine_only",
+      "why": "M75: hello publishes every method this daemon serves with its minimum version, the home family included. The draft predates it; a client ignores a method it does not know."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.home.snapshots.status",
+      "kind": "engine_only",
+      "why": "M75: hello publishes every method this daemon serves with its minimum version, the home family included. The draft predates it; a client ignores a method it does not know."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.home.snapshots.run",
+      "kind": "engine_only",
+      "why": "M75: hello publishes every method this daemon serves with its minimum version, the home family included. The draft predates it; a client ignores a method it does not know."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.home.snapshots.passphrase",
+      "kind": "engine_only",
+      "why": "M75: hello publishes every method this daemon serves with its minimum version, the home family included. The draft predates it; a client ignores a method it does not know."
+    },
+    {
+      "method": "home.snapshots.passphrase",
+      "field": "params:recovery_passphrase",
+      "kind": "engine_only",
+      "why": "M75: home.snapshots.passphrase takes the recovery passphrase it derives the recovery key from, and keeps only that key's public half. The draft predates the home family."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:home.enroll.open",
+      "kind": "engine_only",
+      "why": "M75 adds enrollment and the move to the home family after the draft was written, so the draft publishes no home.* method. The three methods are minimum version 2 and additive: a client built against the draft never calls them, and the app re-vendors this export before it draws the move."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:home.enroll.withdraw",
+      "kind": "engine_only",
+      "why": "M75 lean v1: a desktop replacing the Always On server Fermix created asks that server to release the 24-hour code it opened for the new one when the new server will not exist or is deleted, so a copied code can open again. The draft predates the home family; the method is minimum version 2 and additive, and a client never calls it: the desktop's own engine forwards it."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:home.candidates.list",
+      "kind": "engine_only",
+      "why": "M75 adds enrollment and the move to the home family after the draft was written, so the draft publishes no home.* method. The three methods are minimum version 2 and additive: a client built against the draft never calls them, and the app re-vendors this export before it draws the move."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:home.move.start",
+      "kind": "engine_only",
+      "why": "M75 adds enrollment and the move to the home family after the draft was written, so the draft publishes no home.* method. The three methods are minimum version 2 and additive: a client built against the draft never calls them, and the app re-vendors this export before it draws the move."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:home.enroll.open=2",
+      "kind": "engine_only",
+      "why": "M75: every home.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the home family, so its table has no entry for it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:home.enroll.withdraw=2",
+      "kind": "engine_only",
+      "why": "M75 lean v1: home.enroll.withdraw is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the home family; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:home.candidates.list=2",
+      "kind": "engine_only",
+      "why": "M75: every home.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the home family, so its table has no entry for it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:home.move.start=2",
+      "kind": "engine_only",
+      "why": "M75: every home.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the home family, so its table has no entry for it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.home.enroll.open",
+      "kind": "engine_only",
+      "why": "M75: hello publishes every method this daemon serves with its minimum version, the home family included. The draft predates it; a client ignores a method it does not know."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.home.enroll.withdraw",
+      "kind": "engine_only",
+      "why": "M75 lean v1: hello publishes every method this daemon serves with its minimum version, home.enroll.withdraw included. The draft predates it; a client ignores a method it does not know."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.home.candidates.list",
+      "kind": "engine_only",
+      "why": "M75: hello publishes every method this daemon serves with its minimum version, the home family included. The draft predates it; a client ignores a method it does not know."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.home.move.start",
+      "kind": "engine_only",
+      "why": "M75: hello publishes every method this daemon serves with its minimum version, the home family included. The draft predates it; a client ignores a method it does not know."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:home.move.readiness",
+      "kind": "engine_only",
+      "why": "M75 adds the move's readiness report after the draft was written: what blocks or warns before a move, which home.move.start then enforces. Minimum version 2 and additive: a client built against the draft never calls it."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:home.move.readiness=2",
+      "kind": "engine_only",
+      "why": "M75: every home.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the home family, so its table has no entry for it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.home.move.readiness",
+      "kind": "engine_only",
+      "why": "M75: hello publishes every method this daemon serves with its minimum version, the home family included. The draft predates it; a client ignores a method it does not know."
+    },
+    {
+      "method": "home.move.readiness",
+      "field": "params:candidate_id",
+      "kind": "engine_only",
+      "why": "M75: home.move.readiness names the held candidate whose move it reviews, by the id home.candidates.list answers. The draft predates the home family."
+    },
+    {
+      "method": "home.move.start",
+      "field": "params:candidate_id",
+      "kind": "engine_only",
+      "why": "M75: home.move.start names the held candidate it moves the home to, by the id home.candidates.list answers. The draft predates the home family."
+    },
+    {
+      "method": "home.move.start",
+      "field": "params:recovery_passphrase",
+      "kind": "engine_only",
+      "why": "M75: home.move.start takes the recovery passphrase it derives the recovery key from, and keeps only that key's public half. The draft predates the home family."
+    },
+    {
+      "method": "settings.get:snapshots",
+      "field": "rows:snapshot_s3_access_key_id",
+      "kind": "engine_only",
+      "why": "M75: the snapshots section (pane always_on) publishes where and how often the primary keeps its encrypted snapshots, and the two S3 access-key secrets. The draft predates it; the rows are the ordinary row shape."
+    },
+    {
+      "method": "settings.get:snapshots",
+      "field": "rows:snapshot_s3_secret_access_key",
+      "kind": "engine_only",
+      "why": "M75: the snapshots section (pane always_on) publishes where and how often the primary keeps its encrypted snapshots, and the two S3 access-key secrets. The draft predates it; the rows are the ordinary row shape."
+    },
+    {
+      "method": "settings.get:snapshots",
+      "field": "rows:snapshots_interval_hours",
+      "kind": "engine_only",
+      "why": "M75: the snapshots section (pane always_on) publishes where and how often the primary keeps its encrypted snapshots, and the two S3 access-key secrets. The draft predates it; the rows are the ordinary row shape."
+    },
+    {
+      "method": "settings.get:snapshots",
+      "field": "rows:snapshots_recipient",
+      "kind": "engine_only",
+      "why": "M75: the snapshots section (pane always_on) publishes where and how often the primary keeps its encrypted snapshots, and the two S3 access-key secrets. The draft predates it; the rows are the ordinary row shape."
+    },
+    {
+      "method": "settings.get:snapshots",
+      "field": "rows:snapshots_s3_bucket",
+      "kind": "engine_only",
+      "why": "M75: the snapshots section (pane always_on) publishes where and how often the primary keeps its encrypted snapshots, and the two S3 access-key secrets. The draft predates it; the rows are the ordinary row shape."
+    },
+    {
+      "method": "settings.get:snapshots",
+      "field": "rows:snapshots_s3_endpoint",
+      "kind": "engine_only",
+      "why": "M75: the snapshots section (pane always_on) publishes where and how often the primary keeps its encrypted snapshots, and the two S3 access-key secrets. The draft predates it; the rows are the ordinary row shape."
+    },
+    {
+      "method": "settings.get:snapshots",
+      "field": "rows:snapshots_s3_prefix",
+      "kind": "engine_only",
+      "why": "M75: the snapshots section (pane always_on) publishes where and how often the primary keeps its encrypted snapshots, and the two S3 access-key secrets. The draft predates it; the rows are the ordinary row shape."
+    },
+    {
+      "method": "settings.get:snapshots",
+      "field": "rows:snapshots_s3_region",
+      "kind": "engine_only",
+      "why": "M75: the snapshots section (pane always_on) publishes where and how often the primary keeps its encrypted snapshots, and the two S3 access-key secrets. The draft predates it; the rows are the ordinary row shape."
+    },
+    {
+      "method": "(errors)",
+      "field": "primary_unreachable:primary,sentence",
+      "kind": "engine_only",
+      "why": "M75: after a move, a desktop's engine forwards every primary-class request to the primary, and answers one it cannot deliver with the error code primary_unreachable, details {primary, sentence}, primary omitted while its name is unknown. The draft predates the move, so its error catalog has no such code; the app re-vendors this export before it draws the Always On pane."
+    },
+    {
+      "method": "(errors)",
+      "field": "device_class_method:method,sentence",
+      "kind": "engine_only",
+      "why": "M75: the primary refuses a device-class request a desktop forwarded (one that configures the desktop itself) with the error code device_class_method, details {method, sentence}. Only a desktop's engine ever receives it. The draft predates the move, so its error catalog has no such code."
+    },
+    {
+      "method": "(schema)",
+      "field": "error_codes:primary_unreachable",
+      "kind": "engine_only",
+      "why": "M75: after a move, a desktop's engine forwards every primary-class request to the primary, and answers one it cannot deliver with the error code primary_unreachable, details {primary, sentence}, primary omitted while its name is unknown. The draft predates the move, so its error catalog has no such code; the app re-vendors this export before it draws the Always On pane."
+    },
+    {
+      "method": "(schema)",
+      "field": "error_codes:device_class_method",
+      "kind": "engine_only",
+      "why": "M75: the primary refuses a device-class request a desktop forwarded (one that configures the desktop itself) with the error code device_class_method, details {method, sentence}. Only a desktop's engine ever receives it. The draft predates the move, so its error catalog has no such code."
+    },
+    {
+      "method": "home.move.start",
+      "field": "params:keep_as_desktop",
+      "kind": "engine_only",
+      "why": "M75: replacing the server runs through the same move; false keeps the replaced server as nothing rather than a desktop of the new primary. Optional, true unless said, so a client built against the draft moves as before."
+    },
+    {
+      "method": "settings.sections",
+      "field": "primary_missing",
+      "kind": "engine_only",
+      "why": "M75: on a linked desktop the section list composes this computer's own sections with the primary's, and this sentence says why the primary's part is missing while it cannot be reached; null on every other engine, so a client built against the draft reads the same list."
+    },
+    {
+      "method": "(errors)",
+      "field": "unconfirmed:method,primary,sentence",
+      "kind": "engine_only",
+      "why": "M75: a desktop that forwarded home.move.start and lost the primary's answer (its 60 s deadline passed, or the session ended as the primary restarted into the move) answers the error code unconfirmed, details {method, primary, sentence}, primary omitted while its name is unknown: the move may have started, so it is no failure and the client reads home.status. The draft predates the move, so its error catalog has no such code."
+    },
+    {
+      "method": "(schema)",
+      "field": "error_codes:unconfirmed",
+      "kind": "engine_only",
+      "why": "M75: the error code a desktop answers for a forwarded move start whose answer was lost, so it is never reported as a failure. The draft predates the move."
+    },
+    {
+      "method": "(schema)",
+      "field": "job_kinds:home_provision",
+      "kind": "engine_only",
+      "why": "M75 lean v1: creating, powering and deleting the Always On server on Hetzner wait on Hetzner's actions, so each is a job of the kind home_provision, with the phases checking, firewall, server, starting, power and deleting. The draft predates it; a closed decoder that has never heard the kind refuses the job view rather than ignoring it, so the app adds it when it re-vendors."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:home.provision.options",
+      "kind": "engine_only",
+      "why": "M75 lean v1 adds the Always On provisioner (Fermix creates the owner's server on Hetzner) after the draft was written, so the draft publishes no home.provision.* method. The one left on the wire, home.provision.options (no params), is minimum version 2 and additive: a client built against the draft never calls it, and the app re-vendors this export before it draws the Always On pane."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:home.provision.options=2",
+      "kind": "engine_only",
+      "why": "M75 lean v1: every home.provision.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the provisioner, so its table has no entry for it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.home.provision.options",
+      "kind": "engine_only",
+      "why": "M75 lean v1: hello publishes every method this daemon serves with its minimum version, the provisioner included. The draft predates it; a client ignores a method it does not know."
+    },
+    {
+      "method": "home.status",
+      "field": "params:after",
+      "kind": "engine_only",
+      "why": "Always On setup 3.3: home.status takes after, a summary.key, with wait_ms, and is answered once the summary's key is not after, held by the Always On watch, so a surface follows a step without polling. The draft predates the summary; a request with no params is answered at once as before."
+    },
+    {
+      "method": "home.status",
+      "field": "params:wait_ms",
+      "kind": "engine_only",
+      "why": "Always On setup 3.3: home.status takes wait_ms, at most 25000, with after: how long the daemon holds the request for the summary's key to move. The draft predates the summary; a request with no params is answered at once as before."
+    },
+    {
+      "method": "job.get",
+      "field": "result.location",
+      "kind": "engine_only",
+      "why": "M75 lean v1: the export illustrates a finished home_provision job, whose flat result names the server Fermix created, its type and its location. The draft illustrates no such job; the result stays the published flat object of public scalars."
+    },
+    {
+      "method": "job.get",
+      "field": "result.server",
+      "kind": "engine_only",
+      "why": "M75 lean v1: the export illustrates a finished home_provision job, whose flat result names the server Fermix created, its type and its location. The draft illustrates no such job; the result stays the published flat object of public scalars."
+    },
+    {
+      "method": "job.get",
+      "field": "result.type",
+      "kind": "engine_only",
+      "why": "M75 lean v1: the export illustrates a finished home_provision job, whose flat result names the server Fermix created, its type and its location. The draft illustrates no such job; the result stays the published flat object of public scalars."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:home.act",
+      "kind": "engine_only",
+      "why": "Always On setup §3.4: every Always On step is one method, home.act, which names the action the summary offers, the key it was drawn with and its input, and the engine runs the step. The draft predates the home family; the method is minimum version 2 and additive, and the app re-vendors this export before it draws the Always On pane."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:home.act=2",
+      "kind": "engine_only",
+      "why": "Always On setup §3.4: home.act is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the home family; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.home.act",
+      "kind": "engine_only",
+      "why": "Always On setup §3.4: hello publishes every method this daemon serves with its minimum version, home.act included. The draft predates it; a client ignores a method it does not know."
+    },
+    {
+      "method": "home.act",
+      "field": "params:action",
+      "kind": "engine_only",
+      "why": "Always On setup §3.4: home.act names the action the summary offers, by its id. The draft predates the home family."
+    },
+    {
+      "method": "home.act",
+      "field": "params:key",
+      "kind": "engine_only",
+      "why": "Always On setup §3.2: home.act carries the key the action was drawn with, which the engine checks against the summary as it is now, so a confirm accepted on an older screen does nothing. The draft predates the home family."
+    },
+    {
+      "method": "home.act",
+      "field": "params:input",
+      "kind": "engine_only",
+      "why": "Always On setup §3.4: home.act carries what the action's needs asked for (a token, a recovery passphrase, a size and a place), never logged or answered. The draft predates the home family."
+    },
+    {
+      "method": "(schema)",
+      "field": "error_codes:changed",
+      "kind": "engine_only",
+      "why": "Always On setup §3.4: home.act answers the error code changed, with the summary as it is now, when the summary it was drawn from no longer offers the action under its key, and nothing is done. The draft predates the home family, so its error catalog has no such code."
+    },
+    {
+      "method": "(errors)",
+      "field": "changed:sentence",
+      "kind": "engine_only",
+      "why": "Always On setup §3.4: changed carries details {sentence} alone, the sentence that says the screen moved on; the surface then reads home.status again, as after any act. The draft predates the code."
+    },
+    {
+      "method": "(errors)",
+      "field": "unavailable:capability,method,sentence",
+      "kind": "engine_only",
+      "why": "Always On setup §3.5: the server's Always On steps (home.move.readiness, home.move.start, home.enroll.open, home.enroll.withdraw, home.snapshots.run) answer only a desktop's forward, and daemon.sock refuses each by name: unavailable with details {capability, method, sentence}. The draft predates the home family and drew only the {capability} and {capability, sentence} cases."
+    },
+    {
+      "method": "computer_use.permissions.get",
+      "field": "display_server",
+      "kind": "engine_only",
+      "why": "A Linux answer carries the display server the helper found (x11, wayland, none, or another word), which names the session's display and not its pixel route: the route is what the pixel route row says, and where there is none computer use works by controls alone. Optional within protocol 2; the draft predates the Linux helper."
+    },
+    {
+      "method": "computer_use.permissions.get",
+      "field": "platform",
+      "kind": "engine_only",
+      "why": "A probed answer names the helper's platform (macos, linux), because on Linux nothing is granted and the two booleans say what the session's pixel route serves. Optional within protocol 2: a state that probed nothing carries none, and a client that finds none renders the two booleans as before."
+    },
+    {
+      "method": "computer_use.permissions.get",
+      "field": "rows",
+      "kind": "engine_only",
+      "why": "A Linux answer carries the rows fermix doctor prints after its computer use row, from the same producers, so the pane and doctor read one source. Optional within protocol 2; the draft predates the Linux helper, and a Mac answer never carries them."
+    },
+    {
+      "method": "computer_use.permissions.get",
+      "field": "rows[].detail",
+      "kind": "engine_only",
+      "why": "Each Linux row's detail is the daemon's sentence, rendered verbatim, a backticked span in it a literal the person types. A Linux answer carries the rows fermix doctor prints after its computer use row, from the same producers, so the pane and doctor read one source. Optional within protocol 2; the draft predates the Linux helper, and a Mac answer never carries them."
+    },
+    {
+      "method": "computer_use.permissions.get",
+      "field": "rows[].name",
+      "kind": "engine_only",
+      "why": "Each Linux row's name is the doctor's own (display server, accessibility bus, atk bridge, toolkit <name>, x11 pixels, desktop portal, portal screenshot). A Linux answer carries the rows fermix doctor prints after its computer use row, from the same producers, so the pane and doctor read one source. Optional within protocol 2; the draft predates the Linux helper, and a Mac answer never carries them."
+    },
+    {
+      "method": "computer_use.permissions.get",
+      "field": "rows[].status",
+      "kind": "engine_only",
+      "why": "Each Linux row's status is the doctor's: ok, warn, fail or not_applicable. A Linux answer carries the rows fermix doctor prints after its computer use row, from the same producers, so the pane and doctor read one source. Optional within protocol 2; the draft predates the Linux helper, and a Mac answer never carries them."
     }
   ]
 }

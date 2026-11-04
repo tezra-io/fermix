@@ -13,6 +13,7 @@ defmodule Fermix.CLI.PluginsCommand do
   alias FermixCore.Auth.ClientRejection
   alias FermixCore.Auth.Redaction
   alias FermixCore.Auth.Store
+  alias FermixCore.Home.Role
   alias FermixCore.Plugins.Auth
   alias FermixCore.Plugins.Config
   alias FermixCore.Plugins.Dist.Installer, as: DistInstaller
@@ -212,14 +213,29 @@ defmodule Fermix.CLI.PluginsCommand do
     end
   end
 
-  defp auth(["login", name | rest]), do: auth_login(name, rest)
-  defp auth(["reauthorize", name | rest]), do: auth_login(name, rest)
-  defp auth(["refresh", name | rest]), do: auth_refresh(name, rest)
-  defp auth(["logout", name | rest]), do: auth_logout(name, rest)
+  # Signing in, refreshing and signing out reach the provider's session, which a
+  # home configured as a device or carrying the moved marker holds only a retired
+  # copy of (`Role.admit_configured/1`, M75 D5): refused there by name.
+  defp auth(["login", name | rest]), do: admitted(fn -> auth_login(name, rest) end)
+  defp auth(["reauthorize", name | rest]), do: admitted(fn -> auth_login(name, rest) end)
+  defp auth(["refresh", name | rest]), do: admitted(fn -> auth_refresh(name, rest) end)
+  defp auth(["logout", name | rest]), do: admitted(fn -> auth_logout(name, rest) end)
   defp auth(["set", name | rest]), do: auth_set(name, rest)
   defp auth(["clear", name | rest]), do: auth_clear(name, rest)
   defp auth(["status" | rest]), do: auth_status(rest)
   defp auth(_argv), do: usage()
+
+  defp admitted(verb) do
+    case Role.admit_configured(ConfigStore.fermix_home()) do
+      :ok -> verb.()
+      {:error, reason} -> refused(reason)
+    end
+  end
+
+  defp refused(reason) do
+    IO.puts(:stderr, "fermix plugins: " <> Role.refusal_sentence(reason))
+    1
+  end
 
   defp auth_login(name, argv) do
     with {:ok, opts} <- parse_opts(argv, @login_switches),

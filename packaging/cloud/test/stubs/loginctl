@@ -1,0 +1,4 @@
+#!/bin/sh
+# Test stand-in for loginctl: logs the call.
+set -eu
+printf 'loginctl %s\n' "$*" >>/var/log/fermix-test/calls.log

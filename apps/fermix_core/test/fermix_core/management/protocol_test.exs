@@ -138,6 +138,7 @@ defmodule FermixCore.Management.ProtocolTest do
              "cues.sources.url.get",
              "cues.watchers.list",
              "cues.watchers.get",
+             "cues.watchers.always_allow.revoke",
              "cues.mandates.list",
              "cues.mandates.choices",
              "cues.mandates.add",
@@ -148,7 +149,18 @@ defmodule FermixCore.Management.ProtocolTest do
              "cues.mandates.approve",
              "cues.proposals.list",
              "cues.proposals.get",
-             "cues.proposals.decide"
+             "cues.proposals.decide",
+             "home.status",
+             "home.snapshots.status",
+             "home.snapshots.run",
+             "home.snapshots.passphrase",
+             "home.enroll.open",
+             "home.enroll.withdraw",
+             "home.candidates.list",
+             "home.move.readiness",
+             "home.move.start",
+             "home.provision.options",
+             "home.act"
            ]
 
     assert Protocol.error_codes() == [
@@ -168,7 +180,11 @@ defmodule FermixCore.Management.ProtocolTest do
              "unknown_job",
              "external_change",
              "config_unreadable",
-             "unknown_pairing_session"
+             "unknown_pairing_session",
+             "primary_unreachable",
+             "device_class_method",
+             "unconfirmed",
+             "changed"
            ]
   end
 

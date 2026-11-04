@@ -178,6 +178,62 @@ defmodule FermixCore.SocketPeerTest do
     end
   end
 
+  describe "no_new_privs/1" do
+    test "reads the flag the kernel prints for the process" do
+      assert SocketPeer.no_new_privs(status("1")) == {:ok, true}
+      assert SocketPeer.no_new_privs(status("0")) == {:ok, false}
+    end
+
+    test "a status without the flag, or with a value it never prints, is unreadable" do
+      assert SocketPeer.no_new_privs("Name:\tsh\nSeccomp:\t0\n") == :error
+      assert SocketPeer.no_new_privs(status("2")) == :error
+      assert SocketPeer.no_new_privs("Name:\tNoNewPrivs:\t1\n") == :error
+    end
+
+    # The lines around the flag as Linux prints them in `/proc/<pid>/status`.
+    defp status(flag) do
+      "Name:\tsh\nUmask:\t0022\nState:\tS (sleeping)\nTgid:\t4242\n" <>
+        "CapBnd:\t000001ffffffffff\nCapAmb:\t0000000000000000\n" <>
+        "NoNewPrivs:\t#{flag}\nSeccomp:\t0\nSeccomp_filters:\t0\n"
+    end
+  end
+
+  describe "admit/2" do
+    # This VM runs without no_new_privs, as a person's terminal does, so the
+    # live check answers it on Linux; on macOS Seatbelt refuses a confined
+    # command's connect itself and every peer that connects is answered.
+    test "a client that is not sandboxed is answered on this platform" do
+      with_connected_socket(fn accepted ->
+        assert SocketPeer.admit(accepted) == :ok
+      end)
+    end
+
+    test "a platform where the kernel refuses the connect, or Fermix confines nothing, answers" do
+      with_connected_socket(fn accepted ->
+        assert SocketPeer.admit(accepted, {:unix, :darwin}) == :ok
+        assert SocketPeer.admit(accepted, {:win32, :nt}) == :ok
+      end)
+    end
+  end
+
+  describe "refuse/3" do
+    test "closes the connection unanswered and says once which socket refused whom" do
+      with_listener(fn listener, path ->
+        {:ok, client} = :gen_tcp.connect({:local, to_charlist(path)}, 0, [:binary, active: false])
+        {:ok, accepted} = :gen_tcp.accept(listener, 1_000)
+
+        log =
+          ExUnit.CaptureLog.capture_log(fn ->
+            assert SocketPeer.refuse(accepted, path, {:sandboxed, 4242}) == :ok
+          end)
+
+        assert :gen_tcp.recv(client, 0, 2_000) == {:error, :closed}
+        assert log =~ "#{path} refused a connection: process 4242 runs sandboxed"
+        :gen_tcp.close(client)
+      end)
+    end
+  end
+
   # A real `sh -c` port child, as the shell tool runs one. Its subshell
   # backgrounds a fresh VM of this OTP install, which connects to `path` and
   # exits once the connection closes; the shell waits on its stdin, so closing

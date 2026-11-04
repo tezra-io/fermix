@@ -10,22 +10,31 @@ defmodule FermixCore.Management.CuesTest do
 
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
+  alias FermixCore.Capabilities.Capability
+  alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Cues.Config, as: CuesConfig
+  alias FermixCore.Cues.Settings, as: CueSettings
   alias FermixCore.Jobs.Registry, as: JobsRegistry
   alias FermixCore.Management.Cues
+  alias FermixCore.Management.Cues.SourceForm
   alias FermixCore.Management.Cues.WatcherRow
   alias FermixCore.Management.Router
   alias FermixCore.Management.Secrets
   alias FermixCore.Management.Settings
+  alias FermixCore.Management.Settings.Cues, as: SettingsCues
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Repo.CuesSql
   alias FermixCore.Providers.Descriptor
+  alias FermixCore.Sandbox.PathPolicy
   alias FermixCore.Setup.RestartState
   alias FermixTestSupport.CueDeliveryFixtures, as: Rows
   alias FermixTestSupport.CueFixtures
   alias FermixTestSupport.MandateFixtures
   alias FermixTestSupport.SafeRm
   alias FermixTestSupport.SecretWriterStub
+  alias FermixTestSupport.TelemetryCapture
 
   @now ~U[2026-10-17 12:00:00.000000Z]
   @memory_off "Cues keep their records in memory, which is off."
@@ -201,7 +210,9 @@ defmodule FermixCore.Management.CuesTest do
       conn: conn
     } do
       add_feed(opts)
-      {:ok, _} = Cues.sources_add("gh-hooks", nil, "github", %{}, opts)
+      # A webhook waiting for its secret needs the owner's attention.
+      standard = %{"verify" => "standard_webhooks"}
+      {:ok, _} = Cues.sources_add("shop-hooks", "webhook", nil, standard, opts)
 
       for name <- ["release-watch", "quiet-watch"] do
         id = CueFixtures.insert_watcher(conn, %{name: name, filter: "llm", sources: ["x"]})
@@ -334,11 +345,135 @@ defmodule FermixCore.Management.CuesTest do
       refute inspect(list) =~ token
     end
 
+    # M60 simpler setup D2: the name is optional, and the answer's row carries
+    # the one in force, which a client stores typed secrets under.
+    test "a source left unnamed is named from what it reads, and a typed name is kept", %{
+      opts: opts,
+      home: home
+    } do
+      hn = %{"url" => "https://news.ycombinator.com/rss"}
+
+      assert {:ok, %{"source" => %{"ref" => "ycombinator"}, "token" => nil, "secret" => nil}} =
+               Cues.sources_add(nil, nil, "rss", hn, opts)
+
+      assert {:ok, %{"source" => %{"ref" => "ycombinator-2"}}} =
+               Cues.sources_add("", nil, "rss", hn, opts)
+
+      # Adding X accounts never waits on the X sign-in.
+      unasked = Keyword.put(opts, :x_sign_in, fn -> flunk("an add asks for no sign-in") end)
+
+      assert {:ok, %{"source" => %{"ref" => "x-nasa"}}} =
+               Cues.sources_add(nil, nil, "x_accounts", %{"handles" => ["@NASA"]}, unasked)
+
+      assert {:ok, %{"source" => %{"ref" => "scripts"}, "token" => token}} =
+               Cues.sources_add(nil, "local_push", nil, %{}, opts)
+
+      assert SecretWriterStub.get({:cue_source, "scripts", :token}, store: :keyring) ==
+               {:ok, token}
+
+      assert {:ok, %{"source" => %{"ref" => "hn-front"}}} =
+               Cues.sources_add("hn-front", nil, "rss", hn, opts)
+
+      # The socket takes an add with no name at all.
+      standard = %{"verify" => "standard_webhooks"}
+
+      assert {:ok, %{"source" => %{"ref" => "webhook"}, "secret" => nil}} =
+               route("cues.sources.add", %{"kind" => "webhook", "values" => standard}, opts)
+
+      text = config_text(home)
+
+      for ref <- ~w(ycombinator ycombinator-2 x-nasa scripts hn-front webhook),
+          do: assert(text =~ "[fermix_core.cues.sources.#{ref}]", ref)
+    end
+
+    # M60 simpler setup D3: GitHub's secret is Fermix's to make, as a local
+    # push token is, and is handed out once, beside the token.
+    test "a GitHub source gets a secret Fermix makes, handed out once and stored as a typed one",
+         %{opts: opts, home: home} do
+      log =
+        capture_log(fn ->
+          send(self(), {:added, Cues.sources_add(nil, nil, "github", %{}, opts)})
+        end)
+
+      assert_received {:added, {:ok, %{"source" => row, "token" => nil, "secret" => secret}}}
+      assert is_binary(secret) and byte_size(secret) >= 40
+
+      # Its next step is the address to paste into GitHub beside the secret.
+      assert %{
+               "ref" => "github",
+               "missing_secret" => nil,
+               "primary_action" => "get_url",
+               "secrets" => [
+                 %{"field" => "secret", "present" => true},
+                 %{"field" => "path_secret", "present" => false}
+               ]
+             } = row
+
+      # Where a typed GitHub secret is stored: the keychain item the sentinel names.
+      assert SecretWriterStub.get({:cue_source, "github", :secret}, store: :keyring) ==
+               {:ok, secret}
+
+      assert config_text(home) =~ ~s(secret = "@keyring")
+      refute config_text(home) =~ secret
+      refute log =~ secret
+
+      # No later read repeats it.
+      {:ok, list} = Cues.sources_list(opts)
+      {:ok, got} = Cues.sources_get("github", opts)
+      {:ok, form} = Cues.sources_form(nil, "github", nil)
+      for answer <- [list, got, form], do: refute(inspect(answer) =~ secret)
+
+      assert {:ok, %{"source" => %{"ref" => "github-2"}, "secret" => other}} =
+               Cues.sources_add(nil, nil, "github", %{}, opts)
+
+      assert is_binary(other) and other != secret
+
+      # Every other add answers a null secret.
+      assert {:ok, %{"secret" => nil, "token" => token}} =
+               Cues.sources_add(nil, "local_push", nil, %{}, opts)
+
+      assert is_binary(token)
+    end
+
+    test "a GitHub secret that cannot be stored leaves no source behind", %{
+      opts: opts,
+      home: home
+    } do
+      SecretWriterStub.set_verdict(%{store: :keyring, state: :locked, sentence: "locked"})
+      on_exit(fn -> SecretWriterStub.clear_verdict(:keyring) end)
+
+      log =
+        capture_log(fn ->
+          send(self(), {:added, Cues.sources_add(nil, nil, "github", %{}, opts)})
+        end)
+
+      assert_received {:added,
+                       {:error, {:secret_store_failed, "cue_source:github:secret", "unavailable"}}}
+
+      config = Path.join(home, "config.toml")
+      refute File.exists?(config) and File.read!(config) =~ "[fermix_core.cues.sources.github]"
+      assert CuesConfig.source("github") == :error
+      assert log =~ "cue source github"
+    end
+
+    # The setup page's door: a secret the owner typed is kept, not replaced.
+    test "a GitHub source given its secret keeps it" do
+      assert CueSettings.add_source("repo-events", [preset: "github"], %{
+               secret: "whsec-invented-4410"
+             }) == {:ok, %{ref: "repo-events", token: nil, secret: nil}}
+
+      assert SecretWriterStub.get({:cue_source, "repo-events", :secret}, store: :keyring) ==
+               {:ok, "whsec-invented-4410"}
+    end
+
     test "a webhook added before its secret waits for it, and storing it starts it", %{
       opts: opts,
       home: home
     } do
-      assert {:ok, %{"source" => row}} = Cues.sources_add("gh-hooks", nil, "github", %{}, opts)
+      standard = %{"verify" => "standard_webhooks"}
+
+      assert {:ok, %{"source" => row, "secret" => nil}} =
+               Cues.sources_add("shop-hooks", "webhook", nil, standard, opts)
 
       assert %{
                "state" => "needs_secret",
@@ -353,17 +488,17 @@ defmodule FermixCore.Management.CuesTest do
                ]
              } = row
 
-      assert {:ok, %{"id" => "cue_source:gh-hooks:secret", "present" => true}} =
-               Secrets.set("cue_source:gh-hooks:secret", "whsec-invented-7781")
+      assert {:ok, %{"id" => "cue_source:shop-hooks:secret", "present" => true}} =
+               Secrets.set("cue_source:shop-hooks:secret", "whsec-invented-7781")
 
-      assert {:ok, %{"source" => stored}} = Cues.sources_get("gh-hooks", opts)
+      assert {:ok, %{"source" => stored}} = Cues.sources_get("shop-hooks", opts)
       assert %{"state" => "not_running", "missing_secret" => nil} = stored
-      assert {:ok, %{missing_secret: nil}} = CuesConfig.source("gh-hooks")
+      assert {:ok, %{missing_secret: nil}} = CuesConfig.source("shop-hooks")
       refute config_text(home) =~ "whsec-invented-7781"
       assert config_text(home) =~ ~s(secret = "@keyring")
 
-      assert {:ok, %{"present" => false}} = Secrets.clear("cue_source:gh-hooks:secret")
-      assert {:ok, %{missing_secret: :secret}} = CuesConfig.source("gh-hooks")
+      assert {:ok, %{"present" => false}} = Secrets.clear("cue_source:shop-hooks:secret")
+      assert {:ok, %{missing_secret: :secret}} = CuesConfig.source("shop-hooks")
     end
 
     # The general WebSocket source signs in with a key and a secret, each its
@@ -521,8 +656,11 @@ defmodule FermixCore.Management.CuesTest do
       assert Cues.sources_get("nowhere", opts) ==
                {:error, {:invalid_params, "ref", "There is no source named nowhere."}}
 
-      assert {:error, {:invalid_params, "ref", _name_rule}} =
+      # The name's rule is said where a name breaks it, not on the row.
+      assert {:error, {:invalid_params, "ref", name_rule}} =
                Cues.sources_add("Bad Name", "local_push", nil, %{}, opts)
+
+      assert name_rule =~ "lowercase letters, digits and hyphens"
     end
 
     test "at most 64 sources are added", %{opts: opts} do
@@ -578,6 +716,61 @@ defmodule FermixCore.Management.CuesTest do
                {:error, {:invalid_params, "url", "Needed when no preset fills it."}}
 
       assert config_text(home) =~ "https://example.org/releases.atom"
+    end
+
+    test "an X accounts source is added and updated with its handles, and takes no URL", %{
+      opts: opts,
+      home: home
+    } do
+      assert Cues.sources_add("space-posts", nil, "x_accounts", %{}, opts) ==
+               {:error, {:invalid_params, "handles", "Needed when no preset fills it."}}
+
+      assert Cues.sources_add(
+               "space-posts",
+               nil,
+               "x_accounts",
+               %{"handles" => ["nasa"], "url" => "https://api.x.com/2/tweets/search/recent"},
+               opts
+             ) ==
+               {:error,
+                {:invalid_params, "url", "This setting does not apply to this kind of source."}}
+
+      assert {:error, {:invalid_params, "handles", sentence}} =
+               Cues.sources_add(
+                 "space-posts",
+                 nil,
+                 "x_accounts",
+                 %{"handles" => ["no-dashes"]},
+                 opts
+               )
+
+      assert sentence =~ "no-dashes"
+
+      assert {:ok, %{"source" => row}} =
+               Cues.sources_add(
+                 "space-posts",
+                 nil,
+                 "x_accounts",
+                 %{"handles" => ["@NASA", " esa "]},
+                 opts
+               )
+
+      assert %{"preset" => "x_accounts", "label" => "X accounts", "url" => nil} = row
+      assert row["location"] == "@nasa, @esa"
+      # Kept as X spells them in a search: no @, lowercased.
+      assert config_text(home) =~ ~s(preset = "x_accounts")
+      assert config_text(home) =~ ~s(handles = ["nasa", "esa"])
+      refute config_text(home) =~ ~r/^url = /m
+
+      assert {:ok, %{"values" => values}} = Cues.sources_get("space-posts", opts)
+      assert %{"value" => ["nasa", "esa"]} = Enum.find(values, &(&1["key"] == "handles"))
+
+      assert {:ok, %{"source" => %{"location" => "@spacex"}}} =
+               Cues.sources_update("space-posts", %{"handles" => ["spacex"]}, opts)
+
+      assert {:ok, persisted} = RestartState.load_persisted()
+      sources = persisted.fermix_core |> Keyword.fetch!(:cues) |> Keyword.fetch!(:sources)
+      assert Keyword.get(sources["space-posts"], :handles) == ["spacex"]
     end
 
     test "an update changes the fields it names and keeps the rest", %{opts: opts, home: home} do
@@ -779,14 +972,86 @@ defmodule FermixCore.Management.CuesTest do
   end
 
   describe "the source form" do
+    @choices [
+      %{
+        "id" => "rss",
+        "label" => "Website or blog",
+        "sentence" => "New posts from a site's RSS, Atom or JSON feed.",
+        "kind" => "feed",
+        "preset" => "rss",
+        "featured" => true
+      },
+      %{
+        "id" => "x_accounts",
+        "label" => "X accounts",
+        "sentence" => "New posts from accounts you choose. Uses your X sign-in.",
+        "kind" => "feed",
+        "preset" => "x_accounts",
+        "featured" => true
+      },
+      %{
+        "id" => "github",
+        "label" => "GitHub",
+        "sentence" => "Pushes, issues and pull requests. Needs a tunnel to this computer.",
+        "kind" => "webhook",
+        "preset" => "github",
+        "featured" => true
+      },
+      %{
+        "id" => "local_push",
+        "label" => "Your scripts",
+        "sentence" => "Programs on this computer send items with a token.",
+        "kind" => "local_push",
+        "preset" => nil,
+        "featured" => true
+      },
+      %{
+        "id" => "feed",
+        "label" => "Any feed address",
+        "sentence" => "Fermix checks an address on a schedule.",
+        "kind" => "feed",
+        "preset" => nil,
+        "featured" => false
+      },
+      %{
+        "id" => "stream",
+        "label" => "Live stream",
+        "sentence" => "Fermix keeps a WebSocket connection open and takes items as they arrive.",
+        "kind" => "stream",
+        "preset" => nil,
+        "featured" => false
+      },
+      %{
+        "id" => "webhook",
+        "label" => "Any webhook",
+        "sentence" => "A service sends items to an address Fermix makes.",
+        "kind" => "webhook",
+        "preset" => nil,
+        "featured" => false
+      }
+    ]
+
+    defp form!(kind, preset, verify \\ nil) do
+      {:ok, form} = Cues.sources_form(kind, preset, verify, signed_in())
+      form
+    end
+
+    # Every form test that reaches X accounts answers its sign-in from here,
+    # never from the plugin store or a token server.
+    defp signed_in, do: [x_sign_in: fn -> :ready end]
+
+    defp open_keys(form), do: for(row <- form["rows"], not row["advanced"], do: row["key"])
+    defp labels(form), do: Map.new(form["rows"], &{&1["key"], &1["label"]})
+
     test "with nothing chosen it is a feed's" do
       assert {:ok, form} = Cues.sources_form(nil, nil, nil)
 
       assert Enum.map(form["kinds"], & &1["id"]) == ~w(feed stream webhook local_push)
-      assert Enum.map(form["presets"], & &1["id"]) == ~w(github rss)
+      assert Enum.map(form["presets"], & &1["id"]) == ~w(github rss x_accounts)
       assert Enum.map(form["rows"], & &1["key"]) == ~w(ref url interval_minutes daily_budget)
       assert form["consent_sentence"] =~ "new items"
       assert form["notes"] == []
+      assert form["requirement"] == nil
     end
 
     # A webhook has no URL to type and a local push no token to paste: the
@@ -799,34 +1064,229 @@ defmodule FermixCore.Management.CuesTest do
       assert sentences["local_push"] =~ "token made when you add this source"
     end
 
+    # M60 simpler setup D1: the first question is what to watch, in the
+    # daemon's words, and every answer carries the same list.
+    test "every answer carries the same seven choices, featured first" do
+      assert SourceForm.choices() == @choices
+
+      for choice <- @choices do
+        assert {:ok, %{"choices" => @choices}} =
+                 Cues.sources_form(choice["kind"], choice["preset"], nil, signed_in()),
+               choice["id"]
+      end
+
+      # The kinds and presets an older app draws are as they were.
+      form = form!(nil, "rss")
+      assert Enum.map(form["kinds"], & &1["label"]) == ["Feed", "Stream", "Webhook", "Local push"]
+
+      assert Enum.map(form["presets"], & &1["label"]) ==
+               ["GitHub", "RSS, Atom or JSON Feed", "X accounts"]
+    end
+
+    test "X accounts says whether the X sign-in is there; no other choice needs one" do
+      requirement = fn sign_in ->
+        {:ok, form} = Cues.sources_form(nil, "x_accounts", nil, x_sign_in: sign_in)
+        form["requirement"]
+      end
+
+      assert requirement.(fn -> :ready end) ==
+               %{"state" => "ready", "sentence" => "Signed in to X.", "plugin" => "x"}
+
+      for reason <- [:x_plugin_not_installed, :x_plugin_off, :no_token, :sign_in_refused] do
+        assert requirement.(fn -> {:error, reason} end) == %{
+                 "state" => "needs_sign_in",
+                 "sentence" => "Connect X to read these accounts.",
+                 "plugin" => "x"
+               }
+      end
+
+      unasked = [x_sign_in: fn -> flunk("only X accounts asks for the X sign-in") end]
+
+      for choice <- @choices, choice["id"] != "x_accounts" do
+        assert {:ok, %{"requirement" => nil}} =
+                 Cues.sources_form(choice["kind"], choice["preset"], nil, unasked)
+      end
+    end
+
+    # M60 simpler setup D2: the name comes last in importance, so it is folded,
+    # empty, with what Fermix would call that choice as its example.
+    test "the name is folded under More options, empty, with an example per choice" do
+      examples = %{
+        "rss" => "ycombinator",
+        "x_accounts" => "x-nasa",
+        "github" => "github",
+        "local_push" => "scripts",
+        "feed" => "weatherdesk",
+        "stream" => "marketwire",
+        "webhook" => "webhook"
+      }
+
+      for choice <- @choices do
+        [name | _rest] = form!(choice["kind"], choice["preset"])["rows"]
+        example = Map.fetch!(examples, choice["id"])
+
+        assert %{
+                 "key" => "ref",
+                 "kind" => "text",
+                 "label" => "Name",
+                 "value" => "",
+                 "advanced" => true,
+                 "example" => ^example,
+                 "info" =>
+                   "How you and Fermix refer to it in chat. Left empty, Fermix names it " <>
+                     "from what you enter."
+               } = name
+
+        assert SourceForm.name_row(choice["id"]) ==
+                 %{label: name["label"], info: name["info"], example: example}
+      end
+    end
+
+    # M60 simpler setup §3: each choice opens only what it needs; everything
+    # else waits under More options with its current default.
+    test "each choice opens only what it needs" do
+      assert open_keys(form!(nil, "rss")) == ~w(url)
+      assert open_keys(form!(nil, "x_accounts")) == ~w(handles)
+      assert open_keys(form!(nil, "github")) == []
+      assert open_keys(form!("local_push", nil)) == []
+      assert open_keys(form!("feed", nil)) == ~w(url interval_minutes)
+      assert open_keys(form!("stream", nil)) == ~w(url key secret subscribe_message id_path)
+      assert open_keys(form!("webhook", nil)) == ~w(verify secret)
+      assert open_keys(form!("webhook", nil, "standard_webhooks")) == ~w(verify secret)
+
+      # A signed or shared-secret webhook names its header and how one delivery
+      # is told from another, so those stay open too.
+      for method <- ~w(hmac shared_secret) do
+        assert open_keys(form!("webhook", nil, method)) ==
+                 ~w(verify header id_header content_hash secret)
+      end
+
+      # The rule is published for the setup page, which draws its own fields.
+      for {kind, preset, verify} <- [
+            {"stream", nil, nil},
+            {"webhook", nil, "hmac"},
+            {nil, "rss", nil}
+          ] do
+        form = form!(kind, preset, verify)
+        resolved = kind || "feed"
+        method = verify || (preset == "github" && "hmac") || nil
+
+        assert Enum.sort(SourceForm.add_open_keys(resolved, preset, method)) ==
+                 Enum.sort(open_keys(form))
+      end
+    end
+
+    # M60 simpler setup D5: the labels say what a field is in plain words.
+    test "the labels are plain words, on the add form and the edit form alike", %{opts: opts} do
+      rss = labels(form!(nil, "rss"))
+      assert rss["url"] == "Feed address"
+      assert rss["interval_minutes"] == "Check every"
+      assert rss["daily_budget"] == "Daily limit"
+      assert labels(form!("feed", nil))["url"] == "Address"
+      assert labels(form!("stream", nil))["url"] == "Address"
+      assert labels(form!(nil, "x_accounts"))["handles"] == "Accounts"
+
+      hmac = labels(form!("webhook", nil, "hmac"))
+      assert hmac["verify"] == "Verification"
+      assert hmac["secret"] == "Secret"
+      assert labels(form!("webhook", nil, "shared_secret"))["secret"] == "Shared secret"
+
+      budget = Enum.find(form!("local_push", nil)["rows"], &(&1["key"] == "daily_budget"))
+      assert budget["info"] == "The most items a day. 0 means no limit."
+
+      assert {:ok, _added} = Cues.sources_add(nil, nil, "github", %{}, opts)
+      {:ok, %{"values" => values}} = Cues.sources_get("github", opts)
+      edit = Map.new(values, &{&1["key"], &1["label"]})
+      assert edit["verify"] == "Verification"
+      assert edit["daily_budget"] == "Daily limit"
+      assert edit["secret"] == "Secret"
+    end
+
     test "a preset decides the kind and fills its fields under More options" do
       assert {:ok, form} = Cues.sources_form(nil, "github", nil)
 
+      # Fermix makes GitHub's secret, so its add form has no secret row.
       keys = Enum.map(form["rows"], & &1["key"])
       assert keys == ~w(ref verify header algorithm prefix id_header content_hash type_header
-                        daily_budget secret)
+                        daily_budget)
+
+      assert Enum.all?(form["rows"], & &1["advanced"])
 
       assert %{"value" => "hmac", "advanced" => true} =
                Enum.find(form["rows"], &(&1["key"] == "verify"))
 
-      assert %{"kind" => "secret", "present" => false, "label" => "Signing secret"} =
-               List.last(form["rows"])
+      # GitHub's delivery id settles the identity, so the content toggle is
+      # under More options too.
+      assert %{"value" => false, "advanced" => true} =
+               Enum.find(form["rows"], &(&1["key"] == "content_hash"))
 
-      assert "In GitHub's webhook form, choose `application/json` as the content type." in form[
-               "notes"
+      # The tunnel, then GitHub's three steps, in plain text a client shows as is.
+      assert [tunnel | steps] = form["notes"]
+      assert tunnel =~ "tunnel you run"
+      assert steps == SourceForm.github_steps()
+
+      assert steps == [
+               "In your repository, open Settings → Webhooks → Add webhook.",
+               "As the Payload URL, paste your tunnel's address followed by this source's " <>
+                 "path. Paste the secret Fermix made as the webhook's secret.",
+               "Choose application/json as the content type."
+             ]
+
+      refute Enum.any?(form["notes"], &String.contains?(&1, "`"))
+    end
+
+    # Replacing GitHub's secret later is the edit form's secret row, as before.
+    test "a GitHub source's edit form keeps its secret row", %{opts: opts} do
+      assert {:ok, _added} = Cues.sources_add("gh-hooks", nil, "github", %{}, opts)
+      {:ok, %{"values" => values}} = Cues.sources_get("gh-hooks", opts)
+
+      assert %{"key" => "secret", "kind" => "secret", "present" => true} = List.last(values)
+    end
+
+    # M60_X_ACCOUNTS_SOURCE.md §4: the handles are the only field to type; the
+    # X plugin's sign-in reads, so there is no URL and no secret.
+    test "the X accounts preset asks only for the handles, signed in through the X plugin" do
+      form = form!(nil, "x_accounts")
+      rows = Map.new(form["rows"], &{&1["key"], &1})
+
+      assert Enum.find(form["presets"], &(&1["id"] == "x_accounts")) ==
+               %{"id" => "x_accounts", "label" => "X accounts", "kind" => "feed"}
+
+      assert Enum.map(form["rows"], & &1["key"]) == ~w(ref handles interval_minutes daily_budget)
+
+      assert %{
+               "kind" => "list",
+               "label" => "Accounts",
+               "value" => [],
+               "example" => "nasa",
+               "info" => "X usernames, with or without @. Up to 20."
+             } = rows["handles"]
+
+      assert %{"label" => "Check every", "value" => 5} = rows["interval_minutes"]
+
+      # It asks X, not an address the owner gave.
+      assert form["consent_sentence"] ==
+               "Fermix asks X for these accounts' new posts on the schedule you set."
+
+      assert form["notes"] == [
+               "Reads with your X sign-in from the X plugin. Connect X under Plugins first. X " <>
+                 "bills your X app for each post it returns."
              ]
     end
 
     test "every row keeps its explanation behind info, with no footer" do
       rows =
-        for {kind, preset} <- [{"feed", nil}, {"stream", nil}, {nil, "github"}],
-            {:ok, form} = Cues.sources_form(kind, preset, nil),
-            row <- form["rows"],
+        for {kind, preset, verify} <- [
+              {"feed", nil, nil},
+              {"stream", nil, nil},
+              {"webhook", nil, "hmac"}
+            ],
+            row <- form!(kind, preset, verify)["rows"],
             do: row
 
       assert Enum.all?(rows, &is_nil(&1["footer"]))
 
-      assert %{"info" => "Lowercase letters, digits and hyphens."} =
+      assert %{"info" => "How you and Fermix refer to it in chat." <> _rest} =
                Enum.find(rows, &(&1["key"] == "ref"))
 
       assert %{"info" => "Stored in your keychain and never shown again."} =
@@ -855,7 +1315,10 @@ defmodule FermixCore.Management.CuesTest do
       assert %{"label" => "Header name for the API key", "example" => "X-Api-Key"} =
                rows["key_header"]
 
-      for key <- ~w(items_path revision_path time_path subject_path daily_budget),
+      # How it signs in by header or message, and the message's shape, wait
+      # under More options with the rest.
+      for key <- ~w(key_header secret_header auth_message type_path item_types error_types
+                    items_path revision_path time_path subject_path daily_budget),
           do: assert(rows[key]["advanced"], key)
 
       fields =
@@ -956,6 +1419,217 @@ defmodule FermixCore.Management.CuesTest do
                {:error, {:invalid_params, "name", "There is no watcher named nowhere."}}
     end
 
+    # M60_WATCHER_CODING_RUNS.md §3.5: the Cues pane shows a watcher's follow-up
+    # with whether it is always allowed and its readiness; a watcher with only a
+    # follow-up has no task.
+    test "carry the follow-up, whether it is always allowed and its readiness, and a null task",
+         %{opts: opts, conn: conn, repo: repo} do
+      id =
+        CueFixtures.insert_watcher(conn, %{name: "deploy-watch", filter: "none", sources: ["s"]})
+
+      {:ok, job} =
+        JobsRegistry.create_follow_up_job(
+          %{
+            name: "Deploy check",
+            task_prompt: "Run the deploy check.",
+            allowed_tools: ["deploy_check"],
+            delivery_mode: "channel",
+            delivery_target: %{"platform" => "slack", "channel_id" => "C1"},
+            created_by_trust: "operator"
+          },
+          repo: repo,
+          scheduler: nil
+        )
+
+      CueFixtures.exec!(
+        conn,
+        "UPDATE cue_watchers SET task_job_id = NULL, follow_up_job_id = ?, daily_cap = 5 " <>
+          "WHERE id = ?",
+        [job.id, id]
+      )
+
+      CueFixtures.always_allow!(conn, id)
+
+      held = Keyword.put(opts, :follow_up_opts, plugins: fn -> {:ok, []} end)
+
+      assert {:ok, %{"watchers" => [row]}} = Cues.watchers_list(held)
+      # Never null: an app that predates follow-ups requires a task on every row.
+      assert row["task"] == %{"job_id" => job.id, "name" => "Deploy check", "paused" => false}
+      assert row["status_sentence"] == "Passes every item to its follow-up."
+
+      assert row["follow_up"] == %{
+               "job_id" => job.id,
+               "name" => "Deploy check",
+               "always_allowed" => true,
+               "state" => "held",
+               "status_sentence" =>
+                 "deploy_check is not set up on this computer (its program was not found or " <>
+                   "its plugin is not installed). Slack, where the follow-up reports, is not " <>
+                   "set up: set it up under Channels in settings."
+             }
+
+      registry = :"cues_test_caps_#{System.unique_integer([:positive])}"
+      start_supervised!({CapabilityRegistry, name: registry})
+
+      :ok =
+        CapabilityRegistry.register(
+          registry,
+          Capability.new(%{
+            name: "deploy_check",
+            description: "a test tool",
+            parameters: %{"type" => "object", "properties" => %{}},
+            kind: :builtin,
+            executor: {__MODULE__, :never, []},
+            policy_class: :exec
+          })
+        )
+
+      ready =
+        Keyword.put(opts, :follow_up_opts,
+          capability_registry: registry,
+          channel_ready?: fn :slack -> true end
+        )
+
+      assert {:ok, %{"watcher" => detail}} = Cues.watchers_get("deploy-watch", ready)
+
+      assert %{
+               "state" => "ready",
+               "always_allowed" => true,
+               "status_sentence" => "Always allowed: it runs on each passing item with no card."
+             } = detail["follow_up"]
+    end
+
+    # A follow-up held for a folder its instructions name says which folder and
+    # the grant that opens it, on the row an app draws; granted, it is ready.
+    test "a follow-up held for a folder names it and the grant that opens it",
+         %{opts: opts, conn: conn, repo: repo} do
+      root = SafeRm.make_tmp_dir!("cues-follow-up-folder")
+      on_exit(fn -> SafeRm.rm_rf!(root) end)
+      project = Path.join(root, "src/quarry")
+
+      id =
+        CueFixtures.insert_watcher(conn, %{name: "deploy-watch", filter: "none", sources: ["s"]})
+
+      {:ok, job} =
+        JobsRegistry.create_follow_up_job(
+          %{
+            name: "Deploy check",
+            task_prompt: "Run the deploy check in #{project}.",
+            allowed_tools: ["deploy_check"],
+            delivery_mode: "channel",
+            delivery_target: %{"platform" => "slack", "channel_id" => "C1"},
+            created_by_trust: "operator"
+          },
+          repo: repo,
+          scheduler: nil
+        )
+
+      CueFixtures.exec!(conn, "UPDATE cue_watchers SET follow_up_job_id = ? WHERE id = ?", [
+        job.id,
+        id
+      ])
+
+      registry = :"cues_test_folder_caps_#{System.unique_integer([:positive])}"
+      start_supervised!({CapabilityRegistry, name: registry})
+
+      :ok =
+        CapabilityRegistry.register(
+          registry,
+          Capability.new(%{
+            name: "deploy_check",
+            description: "a test tool",
+            parameters: %{"type" => "object", "properties" => %{}},
+            kind: :builtin,
+            executor: {__MODULE__, :never, []},
+            policy_class: :exec
+          })
+        )
+
+      seams = fn grants ->
+        Keyword.put(opts, :follow_up_opts,
+          capability_registry: registry,
+          channel_ready?: fn :slack -> true end,
+          sandbox_config: %{
+            mode: :strict,
+            home: Path.join(root, "fermix"),
+            os_home: Path.join(root, "home"),
+            workspace_root: Path.join(root, "workspace"),
+            allowed_roots: grants
+          }
+        )
+      end
+
+      folder = PathPolicy.canonical_path(project)
+
+      assert {:ok, %{"watchers" => [%{"follow_up" => held}]}} = Cues.watchers_list(seams.([]))
+      assert held["state"] == "held"
+
+      assert held["status_sentence"] ==
+               "Fermix can't open `#{folder}` yet: grant it with `/grant path #{folder}` in " <>
+                 "chat, or `fermix grant path #{folder}` in a terminal on Linux."
+
+      assert {:ok, %{"watcher" => %{"follow_up" => ready}}} =
+               Cues.watchers_get("deploy-watch", seams.([project]))
+
+      assert ready["state"] == "ready"
+    end
+
+    # The 2026-10-31 revision of M60_WATCHER_CODING_RUNS.md: the app takes a
+    # follow-up's Always allow back, and only ever back.
+    test "a follow-up's Always allow is taken back from the app, and its row asks first",
+         %{opts: opts, conn: conn, repo: repo} do
+      id =
+        CueFixtures.insert_watcher(conn, %{name: "deploy-watch", filter: "none", sources: ["s"]})
+
+      {:ok, job} =
+        JobsRegistry.create_follow_up_job(
+          %{
+            name: "Deploy check",
+            task_prompt: "Run the deploy check.",
+            allowed_tools: ["deploy_check"],
+            delivery_mode: "channel",
+            delivery_target: %{"platform" => "slack", "channel_id" => "C1"},
+            created_by_trust: "operator"
+          },
+          repo: repo,
+          scheduler: nil
+        )
+
+      CueFixtures.exec!(conn, "UPDATE cue_watchers SET follow_up_job_id = ? WHERE id = ?", [
+        job.id,
+        id
+      ])
+
+      CueFixtures.always_allow!(conn, id)
+      TelemetryCapture.attach([[:fermix, :cue, :lifecycle]], watcher_id: id)
+      ready = Keyword.put(opts, :follow_up_opts, plugins: fn -> {:ok, []} end)
+
+      assert {:ok, %{"watcher" => row}} =
+               route("cues.watchers.always_allow.revoke", %{"name" => "deploy-watch"}, ready)
+
+      assert %{"always_allowed" => false} = row["follow_up"]
+
+      assert_receive {:telemetry, _event, _measurements,
+                      %{phase: :follow_up_always_allow_revoked, kind: "management"} = meta}
+
+      assert meta.job_id == job.id
+
+      # Again: it already asks first, and nothing more is traced.
+      assert {:ok, %{"watcher" => %{"follow_up" => %{"always_allowed" => false}}}} =
+               Cues.watchers_always_allow_revoke("deploy-watch", ready)
+
+      refute_received {:telemetry, _event, _measurements,
+                       %{phase: :follow_up_always_allow_revoked}}
+
+      CueFixtures.insert_watcher(conn, %{name: "task-only", filter: "none", sources: ["s"]})
+
+      assert Cues.watchers_always_allow_revoke("task-only", ready) ==
+               {:error, {:invalid_params, "name", "Watcher task-only has no follow-up."}}
+
+      assert Cues.watchers_always_allow_revoke("nowhere", ready) ==
+               {:error, {:invalid_params, "name", "There is no watcher named nowhere."}}
+    end
+
     test "an llm watcher with no model while no default is set is on: the main model filters",
          %{opts: opts, conn: conn} do
       id = CueFixtures.insert_watcher(conn, %{name: "news", filter: "llm", sources: ["s"]})
@@ -997,7 +1671,7 @@ defmodule FermixCore.Management.CuesTest do
       states = Map.new(rows, &{&1["name"], {&1["state"], &1["status_sentence"]}})
 
       assert states["old-news"] ==
-               {"needs_update", "Needs words to listen for: update it in chat."}
+               {"needs_update", "Needs keywords to listen for: update it in chat."}
 
       assert states["all-posts"] ==
                {"needs_update",
@@ -1006,6 +1680,34 @@ defmodule FermixCore.Management.CuesTest do
       assert {"paused", _sentence} = states["paused-news"]
       assert {"held", _sentence} = states["held-news"]
       assert "needs_update" in WatcherRow.states()
+    end
+
+    test "one held because the screen's decision model cannot run says why; other holds as before",
+         %{opts: opts, conn: conn} do
+      Application.put_env(:fermix_core, :providers,
+        anthropic: [api_key: "sk-ant-invented", primary: true],
+        openai: [api_key: "sk-invented"]
+      )
+
+      held = CueFixtures.insert_watcher(conn, %{name: "held-news", filter: "llm", sources: ["s"]})
+      listen_for!(conn, held, ["outage"])
+      CueFixtures.exec!(conn, "UPDATE cue_watchers SET filter_failures = 3 WHERE id = ?", [held])
+
+      screen =
+        CuesConfig.normalize(%{"screen" => "decision_model", "decision_provider" => "openrouter"})
+
+      assert {:ok, %{"watchers" => [row]}} =
+               Cues.watchers_list(Keyword.put(opts, :config, screen))
+
+      assert {row["state"], row["status_sentence"]} ==
+               {"held",
+                "Held: The screen's decision model is OpenRouter's, which is not set up: set it " <>
+                  "up or pick another in the Cues settings. 0 items are waiting."}
+
+      assert {:ok, %{"watchers" => [row]}} = Cues.watchers_list(Keyword.put(opts, :config, []))
+
+      assert row["status_sentence"] ==
+               "Held: it cannot reach its filter model. 0 items are waiting."
     end
 
     # M60_CUE_INTAKE_AT_SCALE.md §3.4: a stream keeps only what passes, so
@@ -1339,6 +2041,8 @@ defmodule FermixCore.Management.CuesTest do
       assert Enum.map(rows, &{&1["key"], &1["kind"], &1["restart"]}) == [
                {"cues_enabled", "toggle", true},
                {"cues_mandates_enabled", "toggle", false},
+               {"cues_screen", "choice", false},
+               {"cues_decision_provider", "choice", false},
                {"filter_provider", "choice", false},
                {"filter_model", "choice", false},
                {"cues_door_port", "number", true}
@@ -1415,6 +2119,294 @@ defmodule FermixCore.Management.CuesTest do
       refute config_text(home) =~ "filter_model"
     end
 
+    test "the screen offers keyword match and the decision model Fermix picks" do
+      Application.put_env(:fermix_core, :providers,
+        anthropic: [api_key: "sk-ant-invented", primary: true],
+        venice: [api_key: "vn-invented"],
+        openai: [api_key: "sk-invented"]
+      )
+
+      assert {:ok, %{"rows" => rows}} = Settings.get("cues")
+      screen = Enum.find(rows, &(&1["key"] == "cues_screen"))
+
+      assert %{"label" => "Screen", "value" => "keyword"} = screen
+
+      assert screen["info"] ==
+               "How items are checked before the filter model reads them. Keyword match: an " <>
+                 "item must contain one of the watcher's keywords. Decision model: each item " <>
+                 "is checked by its meaning, with the watcher's purpose, instructions and " <>
+                 "keywords as hints, in about a third of a second, roughly ten times faster " <>
+                 "than a chat model."
+
+      assert Enum.map(screen["options"], &Map.take(&1, ["value", "label", "hint", "disabled"])) ==
+               [
+                 %{
+                   "value" => "keyword",
+                   "label" => "Keyword match",
+                   "hint" => nil,
+                   "disabled" => false
+                 },
+                 %{
+                   "value" => "decision_model",
+                   "label" => "Decision model",
+                   "hint" => "Uses Venice · Jev",
+                   "disabled" => false
+                 }
+               ]
+    end
+
+    test "a primary that serves a decision model is the one the screen uses" do
+      Application.put_env(:fermix_core, :providers,
+        openai: [api_key: "sk-invented"],
+        venice: [api_key: "vn-invented", primary: true]
+      )
+
+      assert {:ok, %{"rows" => rows}} = Settings.get("cues")
+      screen = Enum.find(rows, &(&1["key"] == "cues_screen"))
+
+      assert %{"hint" => "Uses Venice · Jev", "disabled" => false} =
+               Enum.find(screen["options"], &(&1["value"] == "decision_model"))
+    end
+
+    test "the decision model is refused while none is set up, then applies live and clears " <>
+           "back to keyword match",
+         %{home: home} do
+      Application.put_env(:fermix_core, :providers,
+        anthropic: [api_key: "sk-ant-invented", primary: true]
+      )
+
+      assert {:error, {:invalid_params, "cues_screen", sentence}} =
+               Settings.apply("cues", %{"cues_screen" => "decision_model"})
+
+      # The disabled option's hint is the refusal.
+      assert sentence == "Set up OpenRouter, Venice or OpenAI first."
+      refute File.exists?(Path.join(home, "config.toml"))
+
+      Application.put_env(:fermix_core, :providers,
+        anthropic: [api_key: "sk-ant-invented", primary: true],
+        openrouter: [api_key: "sk-or-invented"]
+      )
+
+      assert {:ok, %{"applied" => ["cues_screen"]}} =
+               Settings.apply("cues", %{"cues_screen" => "decision_model"})
+
+      assert config_text(home) =~ ~s(screen = "decision_model")
+      assert CuesConfig.screen() == :decision_model
+
+      assert {:ok, _keyword} = Settings.apply("cues", %{"cues_screen" => "keyword"})
+      refute config_text(home) =~ "screen ="
+      assert CuesConfig.screen() == :keyword
+    end
+
+    test "the setup page's save checks the screen first and refuses what it cannot run",
+         %{home: home} do
+      Application.put_env(:fermix_core, :providers,
+        anthropic: [api_key: "sk-ant-invented", primary: true]
+      )
+
+      refusal =
+        {:error,
+         {:invalid,
+          "Set up OpenRouter, Venice or OpenAI first: a decision model runs on one of them."}}
+
+      assert CueSettings.check_screen("decision_model") == refusal
+      assert CueSettings.save_screen("decision_model") == refusal
+
+      assert {:error, {:invalid, unknown}} = CueSettings.check_screen("regex")
+      assert unknown =~ ~s(invalid cues.screen "regex")
+
+      for keyword <- ["keyword", "", nil], do: assert(CueSettings.check_screen(keyword) == :ok)
+      refute File.exists?(Path.join(home, "config.toml"))
+
+      assert CueSettings.save_screen(nil) == {:ok, %{screen: :keyword}}
+      refute config_text(home) =~ "screen ="
+    end
+
+    test "a saved decision model with none set up keeps its value, its option disabled" do
+      Application.put_env(:fermix_core, :providers,
+        anthropic: [api_key: "sk-ant-invented", primary: true]
+      )
+
+      Application.put_env(:fermix_core, :cues, screen: :decision_model)
+
+      assert {:ok, %{"rows" => rows}} = Settings.get("cues")
+      screen = Enum.find(rows, &(&1["key"] == "cues_screen"))
+
+      assert screen["value"] == "decision_model"
+      assert Enum.map(screen["options"], & &1["value"]) == ["keyword", "decision_model"]
+
+      assert %{"disabled" => true, "hint" => "Set up OpenRouter, Venice or OpenAI first."} =
+               Enum.find(screen["options"], &(&1["value"] == "decision_model"))
+    end
+
+    test "the screen's decision model is Automatic, named by what it resolves to, then each " <>
+           "provider, published whatever the screen is" do
+      Application.put_env(:fermix_core, :providers,
+        anthropic: [api_key: "sk-ant-invented", primary: true],
+        openai: [api_key: "sk-invented"],
+        venice: [api_key: "@keyring"]
+      )
+
+      assert {:ok, %{"rows" => rows}} = Settings.get("cues")
+      assert CuesConfig.screen() == :keyword
+      row = Enum.find(rows, &(&1["key"] == "cues_decision_provider"))
+
+      assert %{"label" => "Decision model", "kind" => "choice", "value" => ""} = row
+
+      assert row["info"] ==
+               "Which decision model checks items while the screen uses one, on that " <>
+                 "provider's own key. Automatic: your main provider's when it serves one, " <>
+                 "otherwise the first set up of OpenRouter, Venice and OpenAI."
+
+      assert Enum.map(row["options"], &Map.take(&1, ["value", "label", "hint", "disabled"])) == [
+               %{
+                 "value" => "",
+                 "label" => "Automatic (Uses OpenAI · gpt-6-luna)",
+                 "hint" => nil,
+                 "disabled" => false
+               },
+               %{
+                 "value" => "openrouter",
+                 "label" => "OpenRouter · Jev",
+                 "hint" => "Set up this provider first.",
+                 "disabled" => true
+               },
+               %{
+                 "value" => "venice",
+                 "label" => "Venice · Jev",
+                 "hint" => "Set up this provider first.",
+                 "disabled" => true
+               },
+               %{
+                 "value" => "openai",
+                 "label" => "OpenAI · gpt-6-luna",
+                 "hint" => nil,
+                 "disabled" => false
+               }
+             ]
+    end
+
+    test "with none set up, Automatic is disabled with what to set up" do
+      Application.put_env(:fermix_core, :providers,
+        anthropic: [api_key: "sk-ant-invented", primary: true]
+      )
+
+      assert {:ok, %{"rows" => rows}} = Settings.get("cues")
+      row = Enum.find(rows, &(&1["key"] == "cues_decision_provider"))
+
+      assert %{
+               "value" => "",
+               "label" => "Automatic",
+               "hint" => "Set up OpenRouter, Venice or OpenAI first.",
+               "disabled" => true
+             } = hd(row["options"])
+    end
+
+    test "a saved decision model that is no longer set up keeps its value, disabled with its hint" do
+      Application.put_env(:fermix_core, :providers,
+        anthropic: [api_key: "sk-ant-invented", primary: true],
+        openai: [api_key: "sk-invented"]
+      )
+
+      Application.put_env(:fermix_core, :cues,
+        screen: :decision_model,
+        decision_provider: :venice
+      )
+
+      assert {:ok, %{"rows" => rows}} = Settings.get("cues")
+      row = Enum.find(rows, &(&1["key"] == "cues_decision_provider"))
+
+      assert row["value"] == "venice"
+
+      assert %{"disabled" => true, "hint" => "Set up this provider first."} =
+               Enum.find(row["options"], &(&1["value"] == "venice"))
+
+      screen = Enum.find(rows, &(&1["key"] == "cues_screen"))
+
+      assert %{
+               "disabled" => true,
+               "hint" => "Set up Venice first: the screen's decision model runs on its key."
+             } = Enum.find(screen["options"], &(&1["value"] == "decision_model"))
+    end
+
+    test "the decision model and the screen are one write, applied live, and back to Automatic",
+         %{home: home} do
+      Application.put_env(:fermix_core, :providers,
+        anthropic: [api_key: "sk-ant-invented", primary: true],
+        openai: [api_key: "sk-invented"],
+        openrouter: [api_key: "sk-or-invented"]
+      )
+
+      assert {:ok, %{"applied" => applied}} =
+               Settings.apply("cues", %{
+                 "cues_screen" => "decision_model",
+                 "cues_decision_provider" => "openrouter"
+               })
+
+      assert Enum.sort(applied) == ["cues_decision_provider", "cues_screen"]
+      assert config_text(home) =~ ~s(screen = "decision_model")
+      assert config_text(home) =~ ~s(decision_provider = "openrouter")
+      assert CuesConfig.decision_provider() == :openrouter
+
+      # Automatic is saved as no key.
+      assert {:ok, _automatic} = Settings.apply("cues", %{"cues_decision_provider" => ""})
+      refute config_text(home) =~ "decision_provider"
+      assert CuesConfig.decision_provider() == nil
+
+      # Picked while the screen is keyword match, it is kept for later.
+      assert {:ok, _keyword} =
+               Settings.apply("cues", %{
+                 "cues_screen" => "keyword",
+                 "cues_decision_provider" => "openai"
+               })
+
+      assert CuesConfig.screen() == :keyword
+      assert CuesConfig.decision_provider() == :openai
+    end
+
+    test "a decision model that is not set up is refused under its row, and neither is written",
+         %{home: home} do
+      Application.put_env(:fermix_core, :providers,
+        anthropic: [api_key: "sk-ant-invented", primary: true],
+        openai: [api_key: "sk-invented"],
+        openrouter: [api_key: "@keyring"]
+      )
+
+      # The disabled option's hint is the socket's refusal.
+      assert Settings.apply("cues", %{
+               "cues_screen" => "decision_model",
+               "cues_decision_provider" => "openrouter"
+             }) ==
+               {:error,
+                {:invalid_params, "cues_decision_provider", "Set up this provider first."}}
+
+      refute File.exists?(Path.join(home, "config.toml"))
+
+      # The setup page's save checks both before writing either.
+      sentence = "Set up OpenRouter first: the screen's decision model runs on its key."
+
+      assert SettingsCues.save(screen: "decision_model", decision_provider: "openrouter") ==
+               {:error, {:invalid_value, "cues_decision_provider", sentence}}
+
+      refute File.exists?(Path.join(home, "config.toml"))
+
+      assert CueSettings.check_decision_provider("openrouter") == {:error, {:invalid, sentence}}
+      assert CueSettings.save_decision_provider("openrouter") == {:error, {:invalid, sentence}}
+
+      assert {:error, {:invalid, unknown}} = CueSettings.check_decision_provider("anthropic")
+      assert unknown =~ ~s(invalid cues.decision_provider "anthropic")
+
+      for automatic <- ["", nil],
+          do: assert(CueSettings.check_decision_provider(automatic) == :ok)
+
+      refute File.exists?(Path.join(home, "config.toml"))
+
+      assert CueSettings.save_decision_provider("openai") == {:ok, %{decision_provider: :openai}}
+      assert config_text(home) =~ ~s(decision_provider = "openai")
+      assert CueSettings.save_decision_provider(nil) == {:ok, %{decision_provider: nil}}
+      refute config_text(home) =~ "decision_provider"
+    end
+
     test "the switches write through the setup page's own path", %{home: home} do
       assert {:ok, %{"applied" => ["cues_enabled"]}} =
                Settings.apply("cues", %{"cues_enabled" => true})
@@ -1426,6 +2418,41 @@ defmodule FermixCore.Management.CuesTest do
                Settings.apply("cues", %{"cues_door_port" => 80})
 
       assert sentence =~ "1024"
+    end
+
+    test "every step is checked before any is written, and a refusal names its row", %{
+      home: home
+    } do
+      Application.put_env(:fermix_core, :providers, anthropic: [api_key: "sk-ant-invented"])
+
+      # The filter pair and Run cues are fine, the door's port is not: nothing lands.
+      assert {:error, {:invalid_params, "cues_door_port", sentence}} =
+               Settings.apply("cues", %{
+                 "filter_provider" => "anthropic",
+                 "filter_model" => "claude-haiku-4-5",
+                 "cues_enabled" => true,
+                 "cues_door_port" => 80
+               })
+
+      assert sentence =~ "1024"
+      refute File.exists?(Path.join(home, "config.toml"))
+
+      # A decision model while none is set up, refused before the filter pair is written.
+      assert SettingsCues.save(
+               filter_provider: "anthropic",
+               filter_model: "claude-haiku-4-5",
+               screen: "decision_model"
+             ) ==
+               {:error,
+                {:invalid_value, "cues_screen",
+                 "Set up OpenRouter, Venice or OpenAI first: a decision model runs on one of them."}}
+
+      refute File.exists?(Path.join(home, "config.toml"))
+
+      # A lone half of the filter pair names the half that was sent.
+      assert SettingsCues.save(filter_model: "claude-haiku-4-5") ==
+               {:error,
+                {:invalid_value, "filter_model", "Pick a provider and a model, or clear both."}}
     end
   end
 
@@ -1483,7 +2510,8 @@ defmodule FermixCore.Management.CuesTest do
         {"cues.sources.add", %{"ref" => "a", "values" => %{}}, %{"field" => "kind"}},
         {"cues.sources.add", %{"ref" => "a", "kind" => "feed", "values" => []},
          %{"field" => "values"}},
-        {"cues.sources.add", %{"kind" => "feed", "values" => %{}}, %{"field" => "ref"}},
+        {"cues.sources.add", %{"ref" => 7, "kind" => "feed", "values" => %{}},
+         %{"field" => "ref"}},
         {"cues.sources.update", %{"ref" => "a"}, %{"field" => "values"}},
         {"cues.watchers.get", %{"name" => ""}, %{"field" => "name"}},
         {"cues.mandates.add", %{"name" => "m"}, %{"field" => "values"}},
@@ -1541,8 +2569,8 @@ defmodule FermixCore.Management.CuesTest do
         {"cues_sources_add_local_push", "cues.sources.add",
          %{"ref" => "home-alerts", "kind" => "local_push", "values" => %{"daily_budget" => 500}}},
         {"cues_sources_add_webhook", "cues.sources.add",
-         %{"ref" => "gh-hooks", "preset" => "github", "values" => %{}}},
-        {"cues_sources_url_get", "cues.sources.url.get", %{"ref" => "gh-hooks"}},
+         %{"preset" => "github", "values" => %{}}},
+        {"cues_sources_url_get", "cues.sources.url.get", %{"ref" => "github"}},
         {"cues_sources_update", "cues.sources.update",
          %{"ref" => "eng-blogs", "values" => %{"daily_budget" => 200}}},
         {"cues_sources_disable", "cues.sources.disable", %{"ref" => "home-alerts"}},
@@ -1570,14 +2598,19 @@ defmodule FermixCore.Management.CuesTest do
       end
     end
 
-    # The two forms are the daemon's words, so their goldens are held to the
-    # very rows and sentences the form answers, not only their shape.
+    # The forms are the daemon's words, so their goldens are held to the very
+    # rows and sentences the form answers, not only their shape.
     test "the golden forms are the ones the daemon answers" do
       assert Cues.sources_form(nil, "github", nil) ==
                {:ok, named_result("cues_sources_form")}
 
       assert Cues.sources_form("stream", nil, nil) ==
                {:ok, named_result("cues_sources_form_stream")}
+
+      signed_out = [x_sign_in: fn -> {:error, :x_plugin_not_installed} end]
+
+      assert Cues.sources_form(nil, "x_accounts", nil, signed_out) ==
+               {:ok, named_result("cues_sources_form_x_accounts")}
     end
 
     test "the cue refusals are the golden ones", %{opts: opts} do

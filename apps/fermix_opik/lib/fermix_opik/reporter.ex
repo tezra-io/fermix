@@ -43,15 +43,13 @@ defmodule FermixOpik.Reporter do
     [:fermix, :plugin, :auth],
     [:fermix, :mcp_client, :lifecycle],
     [:fermix, :reminder, :lifecycle],
-    [:fermix, :reminder, :followup_start],
-    [:fermix, :reminder, :followup_complete],
-    [:fermix, :reminder, :followup_error],
     [:fermix, :open_loop, :checkin, :start],
     [:fermix, :open_loop, :checkin, :complete],
     [:fermix, :open_loop, :checkin, :error],
     [:fermix, :open_loop, :skipped],
     [:fermix, :open_loop, :settled],
     [:fermix, :open_loop, :fault],
+    [:fermix, :open_loop, :reaction],
     [:fermix, :realtime, :call_start],
     [:fermix, :realtime, :session_created],
     [:fermix, :realtime, :session_updated],
@@ -88,7 +86,9 @@ defmodule FermixOpik.Reporter do
     [:fermix, :computer_use, :session_pause],
     [:fermix, :computer_use, :session_resume],
     [:fermix, :timeout, :expired],
-    [:fermix, :attachment, :save]
+    [:fermix, :attachment, :save],
+    [:fermix, :checklist, :read],
+    [:fermix, :checklist, :edit]
   ]
 
   @handler_id "fermix-opik-reporter"

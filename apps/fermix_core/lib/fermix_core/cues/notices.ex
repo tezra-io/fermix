@@ -11,20 +11,25 @@ defmodule FermixCore.Cues.Notices do
   | `:filter_held` | hold, until `:filter_recovered` (`cue_watchers.held_notified_at`) |
   | `:filter_recovered` | hold that was notified |
   | `:filter_failed` | watcher per UTC day |
+  | `:follow_up_held` | hold of the watcher's follow-up, until `:follow_up_recovered` (`cue_watchers.notices`) |
+  | `:follow_up_recovered` | follow-up hold that was notified |
   | `:needs_update` | watcher: once, whatever rule it breaks (`Cues.Watchers.needs_update_notices/1`) |
   | `:cap_reached`, `:filter_budget_reached`, `:task_provider_down` | 24 hours, the rolling window: by then every run or call counted when it was sent has left the window |
   | `:gap` | open gap, which the notice marks reported |
   | source `:auth_failed`, `:refused`, `:down`, `:unreachable`, `:too_large` | episode, ended by the source's next good moment (`last_good_at` after the notice) |
   | source `:budget_reached` | source per UTC day |
   | mandate `:unpinned` | call: its caller sends it from the change that disabled the mandate, once per approval |
+  | a confirmed follow-up that did not start | trigger: `Cues.FollowUps.refused/3` sends it from the refusal that ended it |
 
   The watcher and source stamps live in `cue_watchers.notices` and
   `cue_sources.notices`. A send that fails releases its claim, so a later
   trigger tries again, and returns the error.
 
-  A watcher notice goes to its task's delivery target through
+  A watcher notice goes to its task's delivery target, or, for a watcher with
+  no task, its follow-up's (M60_WATCHER_CODING_RUNS.md §4.6), through
   `Jobs.CueRun.deliver/3`, the one send path of everything a cue causes (only
-  to a channel a cue run may reach), prefixed "Watcher <name>"; a source or
+  to a channel a cue run may reach), prefixed "Watcher <name>" and naming the
+  watcher as where it came from (`Jobs.Delivery.put_origin/3`); a source or
   mandate notice goes to the owner inbox (`Delivery.OwnerInbox`), as
   skill-curation proposals do. Every send asks the channel for no link
   previews.
@@ -41,6 +46,7 @@ defmodule FermixCore.Cues.Notices do
   alias FermixCore.Delivery.ChannelSend
   alias FermixCore.Delivery.OwnerInbox
   alias FermixCore.Jobs.CueRun
+  alias FermixCore.Jobs.Delivery
   alias FermixCore.Jobs.Registry, as: JobsRegistry
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Repo.CuesSql
@@ -57,7 +63,9 @@ defmodule FermixCore.Cues.Notices do
     needs_update: :once,
     filter_budget_reached: {:window, @day_s},
     cap_reached: {:window, @day_s},
-    task_provider_down: {:window, @day_s}
+    task_provider_down: {:window, @day_s},
+    follow_up_held: :opens,
+    follow_up_recovered: {:closes, "follow_up_held"}
   }
   @watcher_kinds Map.keys(@watcher_rules) ++ [:gap]
 
@@ -79,10 +87,14 @@ defmodule FermixCore.Cues.Notices do
 
   @doc """
   Sends watcher notice `kind` once per episode to the watcher's task's
-  delivery target. `data` may hold `:waiting` (items waiting), `:cap`,
-  `:budget`; a `:needs_update` notice needs `:needed` (`:words` or `:filter`,
-  `Cues.Watchers.update_needed/2`); a `:gap` notice needs `:gap_id`,
-  `:source_ref`, `:count`, `:reason` and `:first_at`.
+  delivery target (its follow-up's when it has no task). `data` may hold
+  `:waiting` (items waiting), `:cap`, `:budget`, and `follow_up: true` on a
+  `:cap_reached` notice for a watcher with no task, whose items the cap skips
+  rather than holds; a `:needs_update` notice
+  needs `:needed` (`:words` or `:filter`, `Cues.Watchers.update_needed/2`); a
+  `:follow_up_held` notice needs `:reason` (Fermix's sentence of why); a
+  `:gap` notice needs `:gap_id`, `:source_ref`, `:count`, `:reason` and
+  `:first_at`.
   """
   @spec watcher(String.t(), atom(), map(), keyword()) :: result()
   def watcher(watcher_id, kind, data, opts \\ [])
@@ -90,7 +102,8 @@ defmodule FermixCore.Cues.Notices do
   def watcher(watcher_id, :gap, %{gap_id: gap_id} = data, opts)
       when is_binary(watcher_id) and is_binary(gap_id) and is_list(opts) do
     with {:ok, watcher} <- watcher_target(watcher_id, opts) do
-      gap_notice(Map.merge(data, %{name: watcher.name, task_job_id: watcher.task_job_id}), opts)
+      job_id = watcher.task_job_id || watcher.follow_up_job_id
+      gap_notice(Map.merge(data, %{name: watcher.name, notice_job_id: job_id}), opts)
     end
   end
 
@@ -104,8 +117,8 @@ defmodule FermixCore.Cues.Notices do
       {:ok, {:claimed, target}} ->
         text = watcher_text(kind, target.name, data)
 
-        target.task_job_id
-        |> send_to_task(text, opts)
+        target.notice_job_id
+        |> send_to_task(target.name, text, opts)
         |> settle(
           {:release_watcher_notice, watcher_id, Atom.to_string(kind), rule, target.previous},
           opts
@@ -120,8 +133,28 @@ defmodule FermixCore.Cues.Notices do
   end
 
   @doc """
+  Tells the owner that a follow-up run they confirmed did not start
+  (M60_WATCHER_CODING_RUNS.md §4.2, §4.6): `text`, Fermix's line naming the
+  card and why (`Cues.Card.not_started/1`), through the delivery of follow-up
+  job `job_id`, from watcher `watcher_name` (nil once the watcher is gone).
+  Once per trigger, with no claim: only the refusal that ended the trigger
+  sends it.
+  """
+  @spec follow_up_not_started(String.t(), String.t() | nil, String.t(), keyword()) ::
+          :sent | {:error, term()}
+  def follow_up_not_started(job_id, watcher_name, text, opts)
+      when is_binary(job_id) and (is_binary(watcher_name) or is_nil(watcher_name)) and
+             is_binary(text) and is_list(opts) do
+    case send_to_task(job_id, watcher_name, text, opts) do
+      :ok -> :sent
+      {:error, reason} -> failed("follow-up #{job_id} not started", reason)
+    end
+  end
+
+  @doc """
   Sends source notice `kind` once per episode to the owner inbox. `data` may
-  hold `:budget`.
+  hold `:budget`, and an `:auth_failed` one `reason: "x_sign_in"` (an X
+  accounts source waiting for the X sign-in, which is not stopped).
   """
   @spec source(String.t(), atom(), map(), keyword()) :: result()
   def source(source_ref, kind, data, opts \\ [])
@@ -169,7 +202,8 @@ defmodule FermixCore.Cues.Notices do
     opts = repo_opts ++ [repo: Keyword.get(repo_opts, :server, Repo), now: now]
     bound = min(limit, @gap_notices_per_sweep)
 
-    case call({:due_gap_notices, now, bound}, opts) do
+    # A read the next pass makes again, so one the Repo reaches late is skipped.
+    case call({:due_gap_notices, now, bound}, [skip_when_late: true] ++ opts) do
       {:ok, gaps} ->
         Enum.each(gaps, &gap_notice(&1, opts))
         {:ok, length(gaps)}
@@ -184,10 +218,12 @@ defmodule FermixCore.Cues.Notices do
   defp gap_notice(gap, opts) do
     stamp = CuesSql.stamp(now(opts))
 
-    case call({:claim_gap_notice, gap.gap_id, now(opts)}, opts) do
+    # A claim the next pass makes again: one the Repo reaches after this call
+    # gave up is skipped, so no notice is claimed that nobody sends.
+    case call({:claim_gap_notice, gap.gap_id, now(opts)}, [skip_when_late: true] ++ opts) do
       {:ok, :claimed} ->
-        gap.task_job_id
-        |> send_to_task(gap_text(gap), opts)
+        gap.notice_job_id
+        |> send_to_task(gap.name, gap_text(gap), opts)
         |> settle({:release_gap_notice, gap.gap_id, stamp}, opts)
 
       {:ok, :already_sent} ->
@@ -207,15 +243,19 @@ defmodule FermixCore.Cues.Notices do
 
   # --- sending -----------------------------------------------------------------------
 
-  defp send_to_task(job_id, text, opts) do
+  # Sent through the task, the notice names its watcher as where it came from.
+  defp send_to_task(job_id, watcher_name, text, opts) do
     lookup = [repo: Keyword.get(opts, :repo, Repo)] ++ Keyword.take(opts, [:timeout, :on_timeout])
 
     with {:ok, job} <- JobsRegistry.get_job(job_id, lookup) do
+      send_opts =
+        opts |> Keyword.get(:delivery_opts, []) |> Delivery.put_origin(:cue, watcher_name)
+
       delivery_opts =
         opts
         |> Keyword.take([:adapter, :channels])
         |> Keyword.merge(
-          delivery_opts: Keyword.get(opts, :delivery_opts, []),
+          delivery_opts: send_opts,
           timeout_ms: Keyword.get(opts, :timeout_ms, @send_timeout_ms)
         )
 
@@ -266,6 +306,13 @@ defmodule FermixCore.Cues.Notices do
 
   # --- Fermix's words ------------------------------------------------------------------
 
+  # A hold whose cause is Fermix's own sentence (`:sentence`, what to set up)
+  # says it; a provider's words never reach a notice.
+  defp watcher_text(:filter_held, name, %{sentence: sentence} = data) when is_binary(sentence),
+    do:
+      "Watcher #{name}: its filter is held, and #{waiting(data)} #{sentence} Fermix tries " <>
+        "again every 10 minutes."
+
   defp watcher_text(:filter_held, name, data),
     do:
       "Watcher #{name}: its filter model cannot be reached; #{waiting(data)} Fermix tries " <>
@@ -284,6 +331,11 @@ defmodule FermixCore.Cues.Notices do
       "Watcher #{name}: it reached its filter budget#{of(data, :budget, "calls")} in 24 " <>
         "hours; new items wait until there is room."
 
+  defp watcher_text(:cap_reached, name, %{follow_up: true} = data),
+    do:
+      "Watcher #{name}: it reached its daily cap#{of(data, :cap, "runs")}; until there is " <>
+        "room, the items it passes start no follow-up."
+
   defp watcher_text(:cap_reached, name, data),
     do:
       "Watcher #{name}: it reached its daily cap#{of(data, :cap, "runs")}; #{waiting(data)} " <>
@@ -291,7 +343,7 @@ defmodule FermixCore.Cues.Notices do
 
   defp watcher_text(:needs_update, name, %{needed: :words}),
     do:
-      "Watcher #{name}: it has no words to listen for, so no item reaches it. Ask Fermix in " <>
+      "Watcher #{name}: it has no keywords to listen for, so no item reaches it. Ask Fermix in " <>
         "chat to give it some."
 
   defp watcher_text(:needs_update, name, %{needed: :filter}),
@@ -299,12 +351,25 @@ defmodule FermixCore.Cues.Notices do
       "Watcher #{name}: it passes every item, so it cannot listen to a stream and gets nothing " <>
         "from one. Ask Fermix in chat to give it a filter."
 
+  defp watcher_text(:follow_up_held, name, %{reason: reason}) when is_binary(reason),
+    do:
+      "Watcher #{name}: its follow-up is held and starts nothing. #{reason} It works again " <>
+        "on its own once that is fixed."
+
+  defp watcher_text(:follow_up_recovered, name, _data),
+    do: "Watcher #{name}: its follow-up works again."
+
   defp watcher_text(:task_provider_down, name, _data),
     do:
       "Watcher #{name}: its task's model provider cannot be reached; passed items wait and " <>
         "are tried again."
 
   defp gap_text(gap), do: "Watcher #{gap.name}: " <> Gaps.sentence(gap)
+
+  defp source_text(:auth_failed, ref, %{reason: "x_sign_in"}),
+    do:
+      "Cue source #{ref} needs your X sign-in: connect X under Plugins. It starts by itself " <>
+        "once X is connected."
 
   defp source_text(:auth_failed, ref, _data),
     do: "Cue source #{ref} stopped: its credential was refused. Update it in settings."
@@ -354,7 +419,8 @@ defmodule FermixCore.Cues.Notices do
 
   defp call(request, opts) do
     repo_opts =
-      [server: Keyword.get(opts, :repo, Repo)] ++ Keyword.take(opts, [:timeout, :on_timeout])
+      [server: Keyword.get(opts, :repo, Repo)] ++
+        Keyword.take(opts, [:timeout, :on_timeout, :skip_when_late])
 
     Repo.cues_call(CuesWatchersSql, request, repo_opts)
   end

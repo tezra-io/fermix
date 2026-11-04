@@ -6,7 +6,20 @@ defmodule FermixChannels.Mobile.Identity do
   only when all three artifacts are absent. Any partial or invalid identity is
   refused rather than silently rotated. Tests inject `:root`; production uses
   `FERMIX_HOME` (or `~/.fermix`).
+
+  The bundle also carries the primary epoch (`FermixCore.Home.Epoch`, M75
+  D14): how many times this home has become the primary engine, which both
+  handshakes announce. This module never writes it. The engine writes 1 at the
+  home's first boot as the primary, before the phone subtree starts, and a move
+  or a restore raises it, so a phone subtree always runs on a home that has
+  one. `ensure/1`, `load/1` and `admissible/1` each require it present and
+  valid, keys or no keys: an absent epoch is refused as
+  `{:epoch, {:absent, path}}`, and a file that is not one in-range integer,
+  mode `0600`, a regular file, as `{:epoch, reason}` like any other invalid
+  artifact. Creating the keys leaves the epoch as it is.
   """
+
+  alias FermixCore.Home.Epoch
 
   @enforce_keys [
     :gateway_private_key,
@@ -15,7 +28,8 @@ defmodule FermixChannels.Mobile.Identity do
     :tls_certificate,
     :tls_fingerprint,
     :tls_key_path,
-    :tls_cert_path
+    :tls_cert_path,
+    :primary_epoch
   ]
   defstruct @enforce_keys
 
@@ -26,7 +40,8 @@ defmodule FermixChannels.Mobile.Identity do
           tls_certificate: X509.Certificate.t(),
           tls_fingerprint: <<_::256>>,
           tls_key_path: Path.t(),
-          tls_cert_path: Path.t()
+          tls_cert_path: Path.t(),
+          primary_epoch: Epoch.epoch()
         }
 
   @type error :: {:error, term()}
@@ -68,14 +83,26 @@ defmodule FermixChannels.Mobile.Identity do
   @spec paths(keyword()) ::
           {:ok,
            %{
+             root: Path.t(),
              dir: Path.t(),
              gateway_key: Path.t(),
              tls_key: Path.t(),
              tls_cert: Path.t(),
-             transaction: Path.t()
+             transaction: Path.t(),
+             epoch: Path.t()
            }}
           | error()
   def paths(opts \\ []) when is_list(opts), do: resolve_paths(opts)
+
+  @doc """
+  The primary epoch alone, validated as `load/1` validates it: `:absent` for a
+  home that has never booted as the primary, `{:error, {:epoch, reason}}` for
+  an invalid one. For a reader that has no use for the keys.
+  """
+  @spec primary_epoch(keyword()) :: {:ok, Epoch.epoch()} | :absent | error()
+  def primary_epoch(opts \\ []) when is_list(opts) do
+    with {:ok, paths} <- resolve_paths(opts), do: read_epoch(paths)
+  end
 
   @doc """
   Boot-admission classification of the on-disk identity.
@@ -95,7 +122,8 @@ defmodule FermixChannels.Mobile.Identity do
   @spec admissible(keyword()) :: :ok | error()
   def admissible(opts \\ []) when is_list(opts) do
     with {:ok, paths} <- resolve_paths(opts),
-         {:ok, transaction} <- transaction_state(paths) do
+         {:ok, transaction} <- transaction_state(paths),
+         {:ok, _epoch} <- required_epoch(paths) do
       admissible_state(transaction, paths)
     end
   end
@@ -119,8 +147,8 @@ defmodule FermixChannels.Mobile.Identity do
   # the whole daemon down. Admission runs the same read-only load the activation
   # path runs, so it reaches the same verdict.
   defp present_admissible(paths) do
-    case load_paths(paths) do
-      {:ok, _identity} -> :ok
+    case load_artifacts(paths) do
+      {:ok, _artifacts} -> :ok
       {:error, _reason} = error -> error
     end
   end
@@ -131,8 +159,11 @@ defmodule FermixChannels.Mobile.Identity do
   defp ensure_state({:partial, missing}, _paths, _opts),
     do: {:error, {:identity_incomplete, missing}}
 
+  # The home's epoch is checked before anything is written, and the keys are
+  # created around it: a rollback never touches it.
   defp generate(paths, opts) do
-    with :ok <- create_identity_dir(paths.dir) do
+    with {:ok, _epoch} <- required_epoch(paths),
+         :ok <- create_identity_dir(paths.dir) do
       generate_transaction(paths, opts)
     end
   end
@@ -302,6 +333,7 @@ defmodule FermixChannels.Mobile.Identity do
     end)
   end
 
+  # The epoch is never the generation's to remove.
   defp cleanup_paths(paths) do
     temporary =
       [@gateway_filename, @tls_key_filename, @tls_cert_filename, @transaction_filename]
@@ -314,7 +346,15 @@ defmodule FermixChannels.Mobile.Identity do
     end
   end
 
+  # Strict: the three artifacts and the epoch, all present and valid.
   defp load_paths(paths) do
+    with {:ok, artifacts} <- load_artifacts(paths),
+         {:ok, epoch} <- required_epoch(paths) do
+      build_identity(artifacts, epoch, paths)
+    end
+  end
+
+  defp load_artifacts(paths) do
     with :ok <- validate_entry(paths.dir, :directory, @dir_mode),
          :ok <- validate_entry(paths.gateway_key, :regular, @file_mode),
          :ok <- validate_entry(paths.tls_key, :regular, @file_mode),
@@ -323,9 +363,30 @@ defmodule FermixChannels.Mobile.Identity do
          {:ok, tls_private} <- read_tls_key(paths.tls_key),
          {:ok, tls_certificate} <- read_tls_cert(paths.tls_cert),
          :ok <- validate_tls_pair(tls_private, tls_certificate, paths) do
-      build_identity(gateway_private, tls_private, tls_certificate, paths)
+      {:ok, %{gateway_private: gateway_private, tls_private: tls_private, tls: tls_certificate}}
     end
   end
+
+  defp required_epoch(paths) do
+    case read_epoch(paths) do
+      :absent -> {:error, {:epoch, {:absent, paths.epoch}}}
+      present_or_error -> present_or_error
+    end
+  end
+
+  # The epoch file is held to the artifacts' own rules (a regular file, mode
+  # 0600) before `Epoch` reads its contents.
+  defp read_epoch(paths) do
+    case validate_entry(paths.epoch, :regular, @file_mode) do
+      :ok -> paths.root |> Epoch.read() |> epoch_reply()
+      {:error, {:identity_artifact_missing, _path}} -> :absent
+      {:error, reason} -> {:error, {:epoch, reason}}
+    end
+  end
+
+  defp epoch_reply({:ok, epoch}), do: {:ok, epoch}
+  defp epoch_reply(:absent), do: :absent
+  defp epoch_reply({:error, reason}), do: {:error, {:epoch, reason}}
 
   defp read_gateway_key(path) do
     with {:ok, key} <- read_file(path),
@@ -391,7 +452,10 @@ defmodule FermixChannels.Mobile.Identity do
     end
   end
 
-  defp build_identity(gateway_private, tls_private, tls_certificate, paths) do
+  defp build_identity(artifacts, epoch, paths) do
+    %{gateway_private: gateway_private, tls_private: tls_private, tls: tls_certificate} =
+      artifacts
+
     {gateway_public, ^gateway_private} =
       :crypto.generate_key(:ecdh, :x25519, gateway_private)
 
@@ -405,7 +469,8 @@ defmodule FermixChannels.Mobile.Identity do
        tls_certificate: tls_certificate,
        tls_fingerprint: fingerprint,
        tls_key_path: paths.tls_key,
-       tls_cert_path: paths.tls_cert
+       tls_cert_path: paths.tls_cert,
+       primary_epoch: epoch
      }}
   end
 
@@ -487,11 +552,13 @@ defmodule FermixChannels.Mobile.Identity do
 
       {:ok,
        %{
+         root: root,
          dir: dir,
          gateway_key: Path.join(dir, @gateway_filename),
          tls_key: Path.join(dir, @tls_key_filename),
          tls_cert: Path.join(dir, @tls_cert_filename),
-         transaction: Path.join(dir, @transaction_filename)
+         transaction: Path.join(dir, @transaction_filename),
+         epoch: Epoch.path(root)
        }}
     end
   end

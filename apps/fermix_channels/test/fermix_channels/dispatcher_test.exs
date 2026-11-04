@@ -774,7 +774,7 @@ defmodule FermixChannels.DispatcherTest do
 
       assert_receive {:reply_sent, "123", reply, []}
       assert reply =~ "no transcription backend is configured"
-      assert reply =~ "fermix setup"
+      assert reply =~ "Choose one in Fermix's Voice notes settings."
       refute_received {:agent_message, _agent_message}
       assert log =~ "Dispatcher ingress failed"
 
@@ -917,7 +917,7 @@ defmodule FermixChannels.DispatcherTest do
 
       assert_receive {:ingress_reply, reply}
       assert reply =~ "sidecar is not installed"
-      assert reply =~ "fermix setup"
+      assert reply =~ "Install it in Fermix's Voice notes settings."
       # A retry can never install anything — the generic remedy must not appear.
       refute reply =~ "try again"
       refute_received {:agent_message, _agent_message}
@@ -939,7 +939,7 @@ defmodule FermixChannels.DispatcherTest do
 
       assert_receive {:ingress_reply, reply}
       assert reply =~ "speech model is not installed"
-      assert reply =~ "fermix setup"
+      assert reply =~ "Install it in Fermix's Voice notes settings."
       refute reply =~ "try again"
       refute_received {:agent_message, _agent_message}
     end

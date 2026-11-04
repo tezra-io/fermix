@@ -33,6 +33,10 @@ defmodule FermixCore.Management.Lifecycle do
 
   use GenServer
 
+  alias Fermix.CLI.Service
+  alias Fermix.CLI.Service.Systemd
+  alias FermixCore.BuildInfo
+
   require Logger
 
   @default_lease_ttl_ms 30_000
@@ -140,6 +144,79 @@ defmodule FermixCore.Management.Lifecycle do
     end)
 
     :ok
+  end
+
+  @doc """
+  The daemon's deliberate self-restart (M75: a move's start and end, a
+  candidate's activation): the one stop path, which the service manager brings
+  back. Under a systemd user unit, the unit's failed state and its start budget
+  are reset first (`systemctl --user reset-failed <unit>`, the unit read from
+  this process's cgroup), so a restart Fermix chose never spends the starts a
+  crash loop is held to; a headless server that moved twice must still be able
+  to come back from a crash. Under launchd, a system unit, or no systemd at all
+  there is no budget to reset. A reset systemd refuses is logged with its words,
+  and the restart goes on: it is the move's next step.
+
+  `opts` (tests): `:cgroup` (a 0-arity reader of `/proc/self/cgroup`), `:cmd`
+  (the `systemctl` runner `Fermix.CLI.Service.Systemd` takes), `:stop` (in
+  place of `stop_daemon/0`).
+  """
+  @spec restart_self(keyword()) :: :ok
+  def restart_self(opts \\ []) when is_list(opts) do
+    case user_unit(Keyword.get(opts, :cgroup, fn -> File.read("/proc/self/cgroup") end).()) do
+      {:ok, unit} -> reset_budget(unit, Keyword.take(opts, [:cmd]))
+      :none -> :ok
+    end
+
+    Keyword.get(opts, :stop, &stop_daemon/0).()
+  end
+
+  defp reset_budget(unit, opts) do
+    case Systemd.reset_failed(unit, opts) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "The restart did not reset #{unit}'s start budget: #{inspect(reason)}; restarting anyway"
+        )
+    end
+  end
+
+  # A cgroup v2 path under a user manager (`user@<uid>.service`) that ends in a
+  # service unit of its own is a systemd user unit.
+  defp user_unit({:ok, text}) do
+    with "0::" <> path <- text |> String.split("\n", trim: true) |> List.last(""),
+         segments = String.split(path, "/", trim: true),
+         true <- Enum.any?(segments, &String.starts_with?(&1, "user@")),
+         unit when is_binary(unit) <- List.last(segments),
+         true <- String.ends_with?(unit, ".service") and not String.starts_with?(unit, "user@") do
+      {:ok, unit}
+    else
+      _other -> :none
+    end
+  end
+
+  defp user_unit({:error, _no_cgroup}), do: :none
+
+  @doc """
+  Whether something brings this engine back once it stops itself (Always On
+  setup §9): the Mac app's engine (launchd's `KeepAlive`,
+  `BuildInfo.app_engine?/0`), a process inside Fermix's own systemd unit (its
+  `Restart=`, `Service.systemd_invocation?/1`, read from the cgroup), or a
+  `fermix service` install (`Service.supervised?/1`). False for `fermix run`
+  at a terminal, a shell another unit opened included: the stop is the end
+  there, so a move warns (`MoveReadiness`'s `service` item), and the setup
+  page's Apply & restart says it cannot restart from there.
+
+  `opts` (tests): `:app_engine?`, `:cgroup` (`Service.systemd_invocation?/1`'s)
+  and `:supervised?`.
+  """
+  @spec restarts_itself?(keyword()) :: boolean()
+  def restarts_itself?(opts \\ []) when is_list(opts) do
+    Keyword.get_lazy(opts, :app_engine?, &BuildInfo.app_engine?/0) or
+      Service.systemd_invocation?(Keyword.take(opts, [:cgroup])) or
+      Keyword.get_lazy(opts, :supervised?, fn -> Service.supervised?() end)
   end
 
   @doc "The shared default stopper, so every stop call site can name one function."

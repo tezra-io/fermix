@@ -170,8 +170,9 @@ defmodule FermixOpik.Mapper do
             # A cue run's mandate call (M60 §14): whether a validator decided
             # (`program | none`), its `cue_mandate_calls` row, and Fermix's own
             # sentence for a refusal (a validator's words stay in the row, and no
-            # argument the model sent is in it). No outside text, so all three
-            # ride outside the capture_content gate like the label above.
+            # argument the model sent, value the mandate pins, operator path or
+            # database error is in it). No outside text, so all three ride
+            # outside the capture_content gate like the label above.
             :validator,
             :mandate_call_id,
             :mandate_reason,
@@ -246,6 +247,15 @@ defmodule FermixOpik.Mapper do
             # application name, which are content and stay off the row.
             :target_kind,
             :cu_mode,
+            # Protocol 12 (M86 P2): the verb an action sent to a control by name,
+            # how many dialogs or menus it left open, why an `elements` walk
+            # stopped short, and what the walk cost in accessibility messages.
+            # A word from the closed verb list, a closed reason and two counts —
+            # never a label, a value or a surface's name.
+            :cu_verb,
+            :cu_surfaces_count,
+            :cu_truncated,
+            :cu_ax_messages,
             # A voice call's task function (M70 §09): one span per call the
             # model made, refused and cancelled ones included, so the terminal
             # word and the Fermix-minted task id are what tell them apart. A
@@ -553,6 +563,51 @@ defmodule FermixOpik.Mapper do
       })
 
   defp maybe_save_failure(span, _metadata), do: span
+
+  @doc """
+  Build a point span from a `[:fermix, :checklist, :read | :edit]` event — one
+  read or one edit of the owner's lists (M85), lasting the store's
+  transaction. Counts and Fermix's own words only: an item's words and a
+  list's title never ride. A refused or failed call is flagged errored with
+  its tag. `session_id` places the span and is not repeated in its metadata.
+  """
+  @spec checklist_span(:read | :edit, map(), map(), keyword()) :: map()
+  def checklist_span(kind, metadata, measurements, opts) when kind in [:read, :edit] do
+    ended = Keyword.fetch!(opts, :ended)
+    started = start_of(ended, div(Map.get(measurements, :duration_us, 0), 1000))
+
+    %{
+      id: new_id(started),
+      trace_id: Keyword.fetch!(opts, :trace_id),
+      parent_span_id: Keyword.get(opts, :parent_span_id),
+      project_name: Keyword.fetch!(opts, :project_name),
+      name: "checklist_#{kind}",
+      type: "general",
+      start_time: iso(started),
+      end_time: iso(ended),
+      metadata:
+        measurements
+        |> Map.take([:lists, :ops, :duration_us])
+        |> Map.merge(%{
+          scope: stringify(Map.get(metadata, :scope)),
+          made_via: stringify(Map.get(metadata, :made_via)),
+          outcome: stringify(Map.get(metadata, :outcome))
+        })
+        |> drop_nil()
+    }
+    |> maybe_checklist_failure(metadata)
+    |> drop_nil()
+  end
+
+  defp maybe_checklist_failure(span, %{outcome: outcome} = metadata)
+       when outcome in [:refused, :failed],
+       do:
+         Map.put(span, :error_info, %{
+           exception_type: "Checklist" <> String.capitalize(Atom.to_string(outcome)),
+           message: to_string(Map.get(metadata, :error_code) || outcome)
+         })
+
+  defp maybe_checklist_failure(span, _metadata), do: span
 
   @doc """
   Build a point span from a `[:fermix, :agent_loop, :context_compaction]` event

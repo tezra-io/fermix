@@ -25,6 +25,19 @@ defmodule FermixCore.Browser.HostServer do
     included, the task ends and the profile stops, so the next browser use is
     decided afresh.
 
+  ## Handing the tabs to the person
+
+  One exception keeps a task past its caller: a turn that handed its tabs to
+  the person (`handover/3`: a verification code, a payment confirmation, a
+  choice only they can make) and then finished. The task stays, with its tabs open in the pane
+  and no caller, until the conversation's next browser call takes it over
+  (`take_over/2`); from there it is bound to that turn and ends with it as any
+  task does, unless that turn hands it over again. A waiting task also ends
+  when the person closes its tab (`task.cancel`), when the pane goes away, and
+  when the profile has been idle for `idle_profile_ttl_ms` (`ProfileServer`),
+  so a tab nobody comes back to is closed. A turn that was cancelled or
+  crashed after a handover ends its task at once.
+
   A task ends by telling the connection so (`Link.release/2`), which writes the
   task's `task.release` behind every request the task sent: both leave this
   one process in order, so a release can never overtake a queued `tab.open`,
@@ -47,6 +60,19 @@ defmodule FermixCore.Browser.HostServer do
   releases its tabs the same way `task.release` does; the task ends exactly as
   a lost pane ends it, except the sentence is its own (`cancelled`, not
   `host_lost`), because nothing about the pane was actually lost.
+
+  ## Signing in
+
+  On host protocol 2 the task answers the two halves of a sign-in
+  (`Browser.SignIn` asks the owner between them, in the tool call's process):
+  `login_for/3` sends `page.login_for` and answers the saved login's site and
+  username, and `sign_in/3` sends `page.sign_in` with the snapshot's refs
+  turned into the app's and answers which fields were filled, with a look at
+  the page as an observed act has, unless the same call submits the form
+  next. The task records the version its connection declared when it binds;
+  on an app that declared 1 both answer `sign_in_app_too_old` and nothing is
+  sent. No password crosses this wire: the app reads it from its keychain and
+  types it itself.
   """
 
   @behaviour FermixCore.Browser.Backend
@@ -61,6 +87,7 @@ defmodule FermixCore.Browser.HostServer do
   alias FermixCore.Browser.TurnMarker
   alias FermixCore.Browser.Upload
   alias FermixCore.BrowserHost.Link
+  alias FermixCore.BrowserHost.Protocol
   alias FermixCore.Net.Guard
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Trace
@@ -73,6 +100,10 @@ defmodule FermixCore.Browser.HostServer do
   @reason_chars 200
 
   @cancelled_sentence "The person cancelled the browser task in the Fermix app."
+
+  # The app bounds its one keychain read at five seconds (browser_host protocol
+  # 2), and `page.sign_in` waits for it on top of the fill.
+  @keychain_bound_ms 5_000
 
   @stale_ref "Element ref is stale or unknown. Refs belong to the snapshot they came from, and " <>
                "the page has changed since. Take a fresh `snapshot` and use a ref from it."
@@ -118,7 +149,7 @@ defmodule FermixCore.Browser.HostServer do
   def stop(%{task: task} = state) do
     :ok = Link.release(task.connection, task.id)
     Process.demonitor(task.connection_ref, [:flush])
-    Process.demonitor(task.caller_ref, [:flush])
+    demonitor_caller(task.caller_ref)
 
     trace(task.agent, "browser_host_task_end", state, %{
       "task_id" => task.id,
@@ -139,11 +170,16 @@ defmodule FermixCore.Browser.HostServer do
   defp lost?(%{lost: nil}), do: false
   defp lost?(_state), do: true
 
-  # The caller ended (its turn finished or was cancelled): the task ends with
-  # it, and so does the profile.
+  # A task waiting for its next turn has no caller to let go of.
+  defp demonitor_caller(nil), do: true
+  defp demonitor_caller(ref), do: Process.demonitor(ref, [:flush])
+
+  # The caller ended (its turn finished, was cancelled or crashed): the task
+  # ends with it, and so does the profile, unless the turn finished after
+  # handing the tabs to the person (`caller_ended/2`).
   @impl true
-  def handle_message({:DOWN, ref, :process, _pid, _reason}, %{task: %{caller_ref: ref}} = state),
-    do: {:stop, stop(state)}
+  def handle_message({:DOWN, ref, :process, _pid, reason}, %{task: %{caller_ref: ref}} = state),
+    do: caller_ended(reason, state)
 
   def handle_message(
         {:DOWN, ref, :process, _pid, _reason},
@@ -173,6 +209,15 @@ defmodule FermixCore.Browser.HostServer do
   # A server traps exits, and a late answer to a request that timed out lands
   # here: both are dropped.
   def handle_message(_message, state), do: state
+
+  # Only a turn that finished normally keeps a task it handed over: one that
+  # was cancelled or crashed ends it, as a turn with no handover always does.
+  defp caller_ended(:normal, %{task: %{held: true} = task} = state) do
+    trace(task.agent, "browser_host_task_handed_over", state, %{"task_id" => task.id})
+    %{state | task: %{task | caller: nil, caller_ref: nil, held: false}}
+  end
+
+  defp caller_ended(_reason, state), do: {:stop, stop(state)}
 
   defp lost_between_requests(state, reason) do
     {:reap, _error, state} = lose(state, reason)
@@ -261,15 +306,31 @@ defmodule FermixCore.Browser.HostServer do
 
   @impl true
   def focus(args, context, state) do
+    operate(context, state, &focus_tab(args["target"], &1))
+  end
+
+  # The person is to finish something in the tab (`target`, else the one last
+  # used): it comes to the front, and the task is kept past this turn when the
+  # turn finishes (`caller_ended/2`).
+  @impl true
+  def handover(args, context, state) do
     operate(context, state, fn state ->
-      with {:ok, tab} <- resolve_tab(args["target"], state),
-           {:ok, result, state} <-
-             request(state, "tab.focus", %{"tab_id" => tab.wire}, action_timeout(state)) do
-        state = %{put_page(state, tab.id, result) | active: tab.id}
-        {row, state} = tab_row(state.tabs[tab.id], state)
-        {:ok, row, state}
+      with {:ok, row, state} <- focus_tab(args["target"], state) do
+        trace(state.task.agent, "browser_host_task_handover", state, %{"task_id" => state.task.id})
+
+        {:ok, Map.put(row, "handed_over", true), %{state | task: %{state.task | held: true}}}
       end
     end)
+  end
+
+  defp focus_tab(target, state) do
+    with {:ok, tab} <- resolve_tab(target, state),
+         {:ok, result, state} <-
+           request(state, "tab.focus", %{"tab_id" => tab.wire}, action_timeout(state)) do
+      state = %{put_page(state, tab.id, result) | active: tab.id}
+      {row, state} = tab_row(state.tabs[tab.id], state)
+      {:ok, row, state}
+    end
   end
 
   @impl true
@@ -385,6 +446,43 @@ defmodule FermixCore.Browser.HostServer do
   def act(_args, _context, state),
     do: {:error, Error.new("missing_arg", "act requires kind"), state}
 
+  @impl true
+  def login_for(args, context, state) do
+    operate(context, state, fn state ->
+      with :ok <- signs_in(state),
+           {:ok, tab} <- resolve_tab(args["target"], state),
+           :ok <- undialogged(tab, state),
+           payload = %{"tab_id" => tab.wire, "site" => args["site"]},
+           {:ok, login, state} <-
+             state
+             |> request("page.login_for", payload, action_timeout(state))
+             |> no_login_names(args["site"]) do
+        {:ok, Map.put(login, "target", tab.id), state}
+      end
+    end)
+  end
+
+  @impl true
+  def sign_in(args, context, state) do
+    operate(context, state, fn state ->
+      with :ok <- signs_in(state),
+           {:ok, tab} <- resolve_tab(args["target"], state),
+           :ok <- undialogged(tab, state),
+           {:ok, refs} <- sign_in_refs(args, tab, state) do
+        mark = sign_in_observation(args, tab, state)
+
+        payload =
+          %{"tab_id" => tab.wire, "site" => args["site"], "login_site" => args["login_site"]}
+          |> Map.merge(refs)
+          |> observe_fields(not is_nil(mark), mark && mark.opts)
+
+        state
+        |> request("page.sign_in", payload, sign_in_timeout(mark, state.config))
+        |> signed_in(tab, mark)
+      end
+    end)
+  end
+
   # ── the task ───────────────────────────────────────────────────────────────
 
   # Every check and request answers with the state it was made with, so a
@@ -398,6 +496,7 @@ defmodule FermixCore.Browser.HostServer do
 
   defp ensure_task(_context, %{lost: %Error{} = error} = state), do: {:reap, error, state}
   defp ensure_task(context, %{task: nil} = state), do: bind(context, state)
+  defp ensure_task(context, %{task: %{caller: nil}} = state), do: take_over(context, state)
   defp ensure_task(_context, state), do: check_host(state)
 
   defp bind(context, state) do
@@ -410,9 +509,11 @@ defmodule FermixCore.Browser.HostServer do
         agent: Map.get(context, :agent_name, "browser"),
         connection: host.connection,
         connection_id: host.connection_id,
+        protocol_version: host.protocol_version,
         connection_ref: Process.monitor(host.connection),
         caller: caller,
-        caller_ref: Process.monitor(caller)
+        caller_ref: Process.monitor(caller),
+        held: false
       }
 
       trace(task.agent, "browser_host_task_start", state, %{
@@ -426,6 +527,16 @@ defmodule FermixCore.Browser.HostServer do
       :ok = TurnMarker.mark(state.turn_marker, state.owner_key, caller, error)
       {:reap, error, %{state | lost: error}}
     end
+  end
+
+  # The conversation's next turn takes over the task its last turn handed to
+  # the person: the same tabs and refs, bound now to this turn, which ends it
+  # as any turn does.
+  defp take_over(context, %{task: task} = state) do
+    caller = Map.fetch!(context, :caller)
+    task = %{task | caller: caller, caller_ref: Process.monitor(caller)}
+    trace(task.agent, "browser_host_task_taken_over", state, %{"task_id" => task.id})
+    check_host(%{state | task: task})
   end
 
   # The task runs on the connection it was bound to, while that host's last
@@ -449,9 +560,15 @@ defmodule FermixCore.Browser.HostServer do
   # tabs on a connection that is up; one that is gone took them with it.
   defp lose(state, reason) do
     error = lost_error(reason)
-    :ok = TurnMarker.mark(state.turn_marker, state.owner_key, state.task.caller, error)
+    :ok = mark_turn(state, error)
     {:reap, error, %{state | lost: error}}
   end
+
+  # A task waiting for its next turn has no turn to mark.
+  defp mark_turn(%{task: %{caller: nil}}, _error), do: :ok
+
+  defp mark_turn(state, error),
+    do: TurnMarker.mark(state.turn_marker, state.owner_key, state.task.caller, error)
 
   defp lost_error(reason) do
     reason = reason |> String.slice(0, @reason_chars) |> String.trim_trailing(".")
@@ -462,7 +579,7 @@ defmodule FermixCore.Browser.HostServer do
   # sentence is the daemon's own, not the app's reason.
   defp lose_cancelled(state) do
     error = Error.new("cancelled", @cancelled_sentence)
-    :ok = TurnMarker.mark(state.turn_marker, state.owner_key, state.task.caller, error)
+    :ok = mark_turn(state, error)
     {:reap, error, %{state | lost: error}}
   end
 
@@ -516,6 +633,38 @@ defmodule FermixCore.Browser.HostServer do
     "That tab belongs to the person, not to this task, so it is not mine to drive."
   end
 
+  defp host_sentence("sign_in_insecure_page", _message) do
+    "This page is not served over https, so Fermix does not sign in to it, and nothing " <>
+      "was typed."
+  end
+
+  defp host_sentence("sign_in_wrong_site", _message) do
+    "The page in the tab is not on the site this sign-in named, so nothing was typed. Take " <>
+      "a snapshot, read the page's address, and call `sign_in` again with that host as `site`."
+  end
+
+  defp host_sentence("sign_in_field", message) do
+    "The Fermix app would not type into those fields (#{message}), so nothing was typed. " <>
+      "`password_ref` must be the form's password input and `username_ref` its text, email " <>
+      "or phone input, both from the latest snapshot of the page."
+  end
+
+  defp host_sentence("sign_in_page_moved", _message) do
+    "The page changed between finding the login and typing it (another address, or another " <>
+      "saved login), so nothing was typed. Take a snapshot and call `sign_in` again."
+  end
+
+  defp host_sentence("sign_in_store_unavailable", message) do
+    "The Fermix app could not read the saved login from the Mac's keychain (#{message}), so " <>
+      "nothing was typed. Website logins need the released Fermix app open on the Mac; tell " <>
+      "the owner what the keychain said."
+  end
+
+  defp host_sentence("secret_on_screen", _message) do
+    "A password Fermix filled shows as text on this page, so the capture was not taken. Do " <>
+      "not reveal a password field; capture the page once the password no longer shows."
+  end
+
   defp host_sentence(_reason, message),
     do: "The Fermix app's browser could not do that: #{message}"
 
@@ -531,6 +680,13 @@ defmodule FermixCore.Browser.HostServer do
 
   defp navigation_timeout(config),
     do: config.navigation_timeout_ms + Config.act_limits().navigation_budget_ms
+
+  # The fill waits on the app's keychain read, and an observed one on the look
+  # after it, as an observed act does.
+  defp sign_in_timeout(nil, config), do: config.action_timeout_ms + @keychain_bound_ms
+
+  defp sign_in_timeout(_mark, config),
+    do: config.action_timeout_ms + @keychain_bound_ms + Config.act_limits().settle_budget_ms
 
   defp act_timeout(%{"timeout_ms" => wait_ms}, _mark, config),
     do: wait_ms + config.action_timeout_ms
@@ -966,6 +1122,70 @@ defmodule FermixCore.Browser.HostServer do
 
   defp act_receipt(_kind, _result, receipt, _tab, _mark, state),
     do: {:ok, Map.put(receipt, "page", "unobserved"), state}
+
+  # ── signing in ─────────────────────────────────────────────────────────────
+
+  # Both requests are protocol 2's; an app that declared less is never sent
+  # either, and the model is told why in the owner's terms.
+  defp signs_in(%{task: %{protocol_version: version}} = state) do
+    if version >= Protocol.request_since("page.sign_in") do
+      :ok
+    else
+      {:error,
+       Error.new(
+         "sign_in_app_too_old",
+         "The Fermix app on this Mac is too old to sign in to websites, so nothing was " <>
+           "typed. Tell the owner to update the Fermix app, then ask again."
+       ), state}
+    end
+  end
+
+  # The one sentence that names the page's host, which the app's answer does
+  # not carry and the call's own `site` does.
+  defp no_login_names({:error, %Error{code: "sign_in_no_login"} = error, state}, site) do
+    message =
+      "No login is saved in the Fermix app for #{site} or a site it is part of, so nothing " <>
+        "was typed. Tell the owner they can add one for #{site}, or for the site it is part " <>
+        "of, in Settings > Browser > Website logins in the Fermix app on their Mac, then ask " <>
+        "again. Never ask the owner for the password in the chat."
+
+    {:error, %{error | message: message}, state}
+  end
+
+  defp no_login_names(answer, _site), do: answer
+
+  # A sign-in is looked at afterwards on a tab the model has looked at, as an
+  # observed act is, unless a submit follows it in the same call
+  # (`Browser.SignIn.run/5`): the submit's look is the one the model reads.
+  defp sign_in_observation(%{"observe" => false}, _tab, _state), do: nil
+  defp sign_in_observation(_args, tab, state), do: Map.get(state.observations, tab.id)
+
+  # The snapshot's refs the call names, as the app's own element refs.
+  defp sign_in_refs(args, tab, state) do
+    ~w(username_ref password_ref)
+    |> Enum.filter(&is_binary(args[&1]))
+    |> Enum.reduce_while({:ok, %{}}, fn field, {:ok, refs} ->
+      case element_ref(tab, args[field], state) do
+        {:ok, host_ref} -> {:cont, {:ok, Map.put(refs, field, host_ref)}}
+        failure -> {:halt, failure}
+      end
+    end)
+  end
+
+  defp signed_in({:ok, result, state}, tab, mark) do
+    state = put_page(state, tab.id, result)
+
+    receipt = %{
+      "ok" => true,
+      "target" => tab.id,
+      "action" => "sign_in",
+      "filled" => result["filled"]
+    }
+
+    act_receipt("sign_in", result, receipt, tab, mark, state)
+  end
+
+  defp signed_in(failure, _tab, _mark), do: failure
 
   # ── artifacts and downloads ────────────────────────────────────────────────
 

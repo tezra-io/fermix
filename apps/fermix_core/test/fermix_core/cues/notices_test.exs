@@ -44,11 +44,33 @@ defmodule FermixCore.Cues.NoticesTest do
                  "Fermix tries again every 10 minutes."
 
       assert Keyword.get(send_opts, :link_previews) == false
+      # Its row names the watcher, never the task it is sent through.
+      assert Keyword.get(send_opts, :origin) == %{"kind" => "cue", "name" => "market-news"}
 
       assert :already_sent =
                Notices.watcher(ctx.watcher.id, :filter_held, %{waiting: 15}, opts(ctx, 0))
 
       refute_received {:sent, _destination, _text, _opts}
+    end
+
+    test "a hold for a reason in Fermix's own words says it", ctx do
+      sentence =
+        "The screen's decision model is OpenRouter's, which is not set up: set it up or pick " <>
+          "another in the Cues settings."
+
+      assert :sent =
+               Notices.watcher(
+                 ctx.watcher.id,
+                 :filter_held,
+                 %{waiting: 2, sentence: sentence},
+                 opts(ctx, 0)
+               )
+
+      assert_receive {:sent, "chat-9", text, _send_opts}
+
+      assert text ==
+               "Watcher market-news: its filter is held, and 2 items are waiting. " <>
+                 sentence <> " Fermix tries again every 10 minutes."
     end
 
     test "recovery is told once, and only after a hold was told", ctx do
@@ -148,7 +170,7 @@ defmodule FermixCore.Cues.NoticesTest do
       assert {:ok, 2} = Watchers.needs_update_notices(opts(ctx, 0) ++ cues)
 
       assert_receive {:sent, "chat-9",
-                      "Watcher market-news: it has no words to listen for, so no item reaches " <>
+                      "Watcher market-news: it has no keywords to listen for, so no item reaches " <>
                         "it. Ask Fermix in chat to give it some.", _opts}
 
       assert_receive {:sent, "chat-9",
@@ -170,7 +192,7 @@ defmodule FermixCore.Cues.NoticesTest do
 
       assert log =~ "notice was not sent"
       assert {:ok, 1} = Watchers.needs_update_notices(opts(ctx, 1))
-      assert_receive {:sent, "chat-9", "Watcher market-news: it has no words" <> _, _opts}
+      assert_receive {:sent, "chat-9", "Watcher market-news: it has no keywords" <> _, _opts}
     end
   end
 
@@ -180,7 +202,8 @@ defmodule FermixCore.Cues.NoticesTest do
       old = gap!(ctx, "alpaca-news", "expired", 3, ~U[2026-10-05 07:14:00.000000Z])
 
       assert {:ok, 1} = Notices.sweep_gaps([server: ctx.repo] ++ seams(), @t0, 1_000)
-      assert_receive {:sent, "chat-9", text, _opts}
+      assert_receive {:sent, "chat-9", text, send_opts}
+      assert Keyword.get(send_opts, :origin) == %{"kind" => "cue", "name" => "market-news"}
 
       assert text ==
                "Watcher market-news: 3 items from alpaca-news were not delivered since " <>
@@ -207,6 +230,8 @@ defmodule FermixCore.Cues.NoticesTest do
                       "Cue source eng-blogs stopped: its credential was refused." <> _, send_opts}
 
       assert Keyword.get(send_opts, :link_previews) == false
+      # A notice about the cue system itself comes from no watcher.
+      refute Keyword.has_key?(send_opts, :origin)
 
       assert :already_sent = Notices.source("eng-blogs", :auth_failed, %{}, opts(ctx, 0))
 
@@ -217,6 +242,20 @@ defmodule FermixCore.Cues.NoticesTest do
       )
 
       assert :sent = Notices.source("eng-blogs", :auth_failed, %{}, opts(ctx, 2))
+    end
+
+    # An X accounts source without the X sign-in is not stopped: it starts by
+    # itself once X is connected (M60_X_ACCOUNTS_SOURCE.md §3).
+    test "a source waiting for the X sign-in says where to connect X, not that it stopped", ctx do
+      data = %{reason: "x_sign_in"}
+      assert :sent = Notices.source("space-posts", :auth_failed, data, opts(ctx, 0))
+      assert_receive {:sent, "owner-1", text, _opts}
+
+      assert text ==
+               "Cue source space-posts needs your X sign-in: connect X under Plugins. It " <>
+                 "starts by itself once X is connected."
+
+      assert :already_sent = Notices.source("space-posts", :auth_failed, data, opts(ctx, 1))
     end
 
     test "a stream the service kept refusing is told once per episode, in Fermix's words", ctx do
@@ -261,7 +300,8 @@ defmodule FermixCore.Cues.NoticesTest do
 
     test "a mandate notice goes to the owner inbox", ctx do
       assert :sent = Notices.mandate("release-issues", :unpinned, %{}, opts(ctx, 0))
-      assert_receive {:sent, "owner-1", "Mandate release-issues is disabled" <> _, _opts}
+      assert_receive {:sent, "owner-1", "Mandate release-issues is disabled" <> _, send_opts}
+      refute Keyword.has_key?(send_opts, :origin)
     end
 
     test "with no owner inbox a source notice fails loud and stays unsent", ctx do

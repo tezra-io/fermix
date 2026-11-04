@@ -27,6 +27,11 @@ defmodule FermixCore.Management.Auth do
   remote one whose `auth` is `auto`, through `MCP.OAuth.SignIn`, and the
   sign-in that completes starts that server. Its sign-out forgets the grant
   locally, revokes nothing upstream, and starts the server again without it.
+
+  A sign-in a desktop forwarded over the rail (`:actor` `{:desktop, id}`,
+  M75 D17) reaches its flow as `:loopback_owner`, so its loopback listener is
+  forwarded to that desktop, whose browser the authorize url opens in; a port
+  the desktop cannot open is the job's failure sentence, naming the desktop.
   """
 
   alias FermixCore.Auth.AnthropicLogin
@@ -246,7 +251,7 @@ defmodule FermixCore.Management.Auth do
     fn _job_id, report ->
       report.({:phase, "binding"})
 
-      login.(opener: opener(report), puts: &silent/1)
+      login.([opener: opener(report), puts: &silent/1] ++ loopback_owner(opts))
       |> then(&finish_chatgpt(&1, report, opts))
     end
   end
@@ -258,7 +263,7 @@ defmodule FermixCore.Management.Auth do
       report.({:phase, "binding"})
 
       name
-      |> login.(opener: opener(report), puts: &silent/1)
+      |> login.([opener: opener(report), puts: &silent/1] ++ loopback_owner(opts))
       |> then(&finish_plugin(&1, report))
     end
   end
@@ -266,7 +271,7 @@ defmodule FermixCore.Management.Auth do
   defp sign_in_run(@mcp_prefix <> _name, opts) do
     login = Keyword.get(opts, :mcp_login, &McpSignIn.login/2)
     server = Keyword.fetch!(opts, :mcp_server)
-    login_opts = Keyword.take(opts, [:mcp_supervisor])
+    login_opts = Keyword.take(opts, [:mcp_supervisor]) ++ loopback_owner(opts)
 
     fn _job_id, report ->
       server
@@ -281,8 +286,18 @@ defmodule FermixCore.Management.Auth do
     fn _job_id, report ->
       report.({:phase, "binding"})
 
-      login.(opener: opener(report), puts: &silent/1)
+      login.([opener: opener(report), puts: &silent/1] ++ loopback_owner(opts))
       |> then(&finish_xai(&1, report, opts))
+    end
+  end
+
+  # A sign-in a desktop started over the rail (M75 D17) is opened in that
+  # desktop's browser, so its loopback listener is recorded as the desktop's
+  # and forwarded there. A local caller's sign-in is nobody else's.
+  defp loopback_owner(opts) do
+    case Keyword.get(opts, :actor) do
+      {:desktop, device_id} = owner when is_binary(device_id) -> [loopback_owner: owner]
+      _local -> []
     end
   end
 
@@ -607,6 +622,12 @@ defmodule FermixCore.Management.Auth do
   defp sign_in_sentence({:listen_failed, port, _reason}),
     do: "Port #{port} could not be opened to receive the sign-in reply."
 
+  # The desktop the sign-in was started from could not listen for its reply.
+  defp sign_in_sentence({:loopback_forward_failed, %{desktop: name, port: port, reason: reason}}),
+    do:
+      "Your #{name} could not open port #{port} to receive the sign-in reply: " <>
+        "#{forward_reason(reason)}. Free the port and sign in again."
+
   defp sign_in_sentence(:timeout), do: "The sign-in was not completed in time."
 
   # Refused before the code was spent, so signing in again is the whole fix.
@@ -641,6 +662,10 @@ defmodule FermixCore.Management.Auth do
     log("the sign-in could not be completed", reason)
     "The sign-in could not be completed. See the daemon log."
   end
+
+  defp forward_reason(:port_in_use), do: "another program is using it"
+  defp forward_reason(:not_permitted), do: "the system did not allow it"
+  defp forward_reason(:failed), do: "it could not listen there"
 
   # An MCP server's sign-in (M74 E5): where its discovery, registration or
   # exchange stopped, in the owner's words. The loopback listener's and the

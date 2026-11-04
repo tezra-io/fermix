@@ -38,8 +38,6 @@ defmodule FermixCore.Temporal.Delivery do
   # shape; the bound is belt and braces against a term-carrying variant.
   @error_text_max 500
 
-  @type delivery_kind :: :reminder | :followup
-
   @doc """
   Makes one bounded send attempt for `row` with the already-rendered `text`.
 
@@ -50,30 +48,15 @@ defmodule FermixCore.Temporal.Delivery do
   def attempt(row, text, timeout_ms, opts \\ [])
       when is_map(row) and is_binary(text) and is_integer(timeout_ms) and timeout_ms > 0 and
              is_list(opts) do
-    attempt(row, text, timeout_ms, opts, :reminder)
-  end
-
-  @doc """
-  Makes one bounded send for a specific logical delivery from `row`.
-
-  A reminder and its optional post-delivery follow-up are distinct proactive
-  messages. Their keys stay stable across durable retries without causing the
-  follow-up to collide with the already-delivered reminder.
-  """
-  @spec attempt(map(), String.t(), non_neg_integer(), keyword(), delivery_kind()) ::
-          :ok | {:error, Error.t()}
-  def attempt(row, text, timeout_ms, opts, delivery_kind)
-      when is_map(row) and is_binary(text) and is_integer(timeout_ms) and timeout_ms > 0 and
-             is_list(opts) and delivery_kind in [:reminder, :followup] do
     with {:ok, thread} <- thread_opts(row),
          {:ok, title} <- event_title(row) do
       send_opts = thread ++ [title: title, reminder_id: row.id]
-      send_once(row, text, send_opts, timeout_ms, opts, delivery_kind)
+      send_once(row, text, send_opts, timeout_ms, opts)
     end
   end
 
-  defp send_once(row, text, send_opts, timeout_ms, opts, delivery_kind) do
-    send_opts = Keyword.put(send_opts, :proactive_key, proactive_key(row, delivery_kind))
+  defp send_once(row, text, send_opts, timeout_ms, opts) do
+    send_opts = Keyword.put(send_opts, :proactive_key, proactive_key(row))
 
     timeout_ms
     |> ChannelSend.with_timeout(fn ->
@@ -88,12 +71,9 @@ defmodule FermixCore.Temporal.Delivery do
     |> Error.normalize()
   end
 
-  defp proactive_key(%{id: id}, :reminder) when is_binary(id) and id != "" do
+  # One key per reminder row, stable across its durable retries.
+  defp proactive_key(%{id: id}) when is_binary(id) and id != "" do
     "temporal:#{id}"
-  end
-
-  defp proactive_key(%{id: id}, :followup) when is_binary(id) and id != "" do
-    "temporal:#{id}:followup"
   end
 
   # The title comes from the row's own payload snapshot, never the event. The

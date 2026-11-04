@@ -34,6 +34,7 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias FermixCore.Harness.Identity
   alias FermixCore.Harness.Ledger, as: HarnessLedger
   alias FermixCore.Harness.Vendors, as: HarnessVendors
+  alias FermixCore.Home.Epoch
   alias FermixCore.IMessage
   alias FermixCore.IMessage.Control, as: IMessageControl
   alias FermixCore.IMessage.HelperInstaller, as: IMessageHelper
@@ -52,6 +53,7 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias FermixCore.Providers.Selection
   alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Sandbox.Config, as: SandboxConfig
+  alias FermixCore.Sandbox.Landlock
   alias FermixCore.Sandbox.Mode, as: SandboxMode
   alias FermixCore.Setup.Coexistence
   alias FermixCore.Setup.ConfigStore
@@ -1157,7 +1159,7 @@ defmodule Fermix.CLI.Doctor.Checks do
 
     cond do
       length(missing) == length(reports) ->
-        :never_paired
+        with :ok <- mobile_epoch(mobile_dir), do: :never_paired
 
       missing != [] ->
         {:error,
@@ -1171,7 +1173,37 @@ defmodule Fermix.CLI.Doctor.Checks do
         {:error, "could not inspect mobile identity files: #{Enum.join(errors, ", ")}"}
 
       true ->
+        mobile_epoch(mobile_dir)
+    end
+  end
+
+  # M75 D14: the primary epoch sits beside the identity files in a home's
+  # `mobile/`, and `Home.Epoch`, the one owner of its format, reads it from the
+  # home. Absent passes: a home before its first primary boot has none, and the
+  # daemon writes 1 at start for an identity from before the epoch. Present, it
+  # is held to the identity files' rules, keys or no keys, because Fermix
+  # refuses an invalid epoch rather than reset it.
+  defp mobile_epoch(mobile_dir) do
+    case mobile_identity_file(mobile_dir, "primary_epoch") do
+      :ok -> mobile_epoch_contents(Path.dirname(mobile_dir))
+      {:missing, _name} -> :ok
+      {:insecure, name, mode} -> {:error, "mobile identity files must be 0600: #{name}=#{mode}"}
+      {:error, name, reason} -> {:error, "could not inspect #{name}: #{inspect(reason)}"}
+    end
+  end
+
+  defp mobile_epoch_contents(home) do
+    case Epoch.read(home) do
+      {:ok, _epoch} ->
         :ok
+
+      :absent ->
+        :ok
+
+      {:error, reason} ->
+        {:error,
+         "the mobile primary epoch is invalid (#{inspect(reason)}); Fermix refuses it " <>
+           "rather than reset it"}
     end
   end
 
@@ -1833,6 +1865,296 @@ defmodule Fermix.CLI.Doctor.Checks do
   defp imessage_config, do: Application.get_env(:fermix_channels, :imessage, [])
 
   @doc """
+  The computer-use rows from ONE probe: the `computer use` row
+  (`computer_use_permissions/2`), then, on a Linux helper, a row per fact its probe
+  reports — the display server, the accessibility bus, the ATK bridge, each toolkit
+  note, the pixel route the helper took (where it names one), the X11 pixel route,
+  the desktop portal and its stored Screenshot answer.
+
+  Read-only on every path: the probe raises no prompt and starts no service, and
+  these rows only format what it read. macOS, and every state that probed nothing,
+  add no row.
+  """
+  @spec computer_use({:ok, map()} | {:error, term()}, keyword()) :: [result()]
+  def computer_use(result \\ ProviderProbe.computer_use_permissions(), opts \\ [])
+      when is_list(opts) do
+    [computer_use_permissions(result, opts) | linux_computer_use_rows(result)]
+  end
+
+  @doc """
+  The rows `computer_use/2` prints after its `computer use` row: on a Linux
+  helper, one per fact its probe reports, in that order; none for macOS or for a
+  state that probed nothing.
+
+  `computer_use.permissions.get` answers these rows as they are, and the Linux
+  app renders their details verbatim, so they are held to the management copy
+  rules (`FermixCore.Management.Copy`) and doctor and the app's pane read one
+  producer. The `computer use` row is not one of them.
+  """
+  @spec linux_computer_use_rows({:ok, map()} | {:error, term()}) :: [result()]
+  def linux_computer_use_rows({:ok, %{state: :probed, platform: "linux"} = probe}) do
+    [
+      display_server_row(probe),
+      accessibility_bus_row(probe.accessibility_bus),
+      atk_bridge_row(probe.accessibility_packages)
+    ] ++
+      toolkit_rows(probe.toolkit_notes) ++
+      pixel_route_rows(probe.pixel_route) ++
+      [x11_pixels_row(probe), desktop_portal_row(probe), portal_screenshot_row(probe)]
+  end
+
+  def linux_computer_use_rows({:ok, %{state: _state}}), do: []
+  def linux_computer_use_rows({:error, _reason}), do: []
+
+  defp display_server_row(%{display_server: server, display_adopted: adopted})
+       when server in ["x11", "wayland"],
+       do: ok("display server", server <> adoption(adopted))
+
+  defp display_server_row(%{display_server: "none"}),
+    do: warn("display server", "none: no display answers, so computer use reaches no screen")
+
+  defp display_server_row(%{display_server: server}),
+    do: warn("display server", "#{server}: the helper named no display server this build knows")
+
+  defp adoption(true) do
+    ", adopted from the user manager: the helper had no display of its own and reaches the " <>
+      "session's as its own"
+  end
+
+  defp adoption(false), do: ", the helper's own"
+  defp adoption(nil), do: "; whether it was adopted from the user manager is unknown"
+
+  defp accessibility_bus_row(%{state: "answering", applications: count})
+       when is_integer(count) and count > 0 do
+    noun = if count == 1, do: "application", else: "applications"
+    ok("accessibility bus", "answering, with #{count} #{noun}")
+  end
+
+  defp accessibility_bus_row(%{state: "answering", applications: nil}) do
+    ok("accessibility bus", "answering; the helper did not say how many applications are on it")
+  end
+
+  defp accessibility_bus_row(%{state: state, applications: count})
+       when state == "empty" or (state == "answering" and count == 0) do
+    warn(
+      "accessibility bus",
+      "answering, but no application is on it, so there is no control to list yet"
+    )
+  end
+
+  defp accessibility_bus_row(%{state: "unavailable", cause: cause, detail: detail}),
+    do: warn("accessibility bus", "unavailable" <> bus_reason(cause, detail))
+
+  defp accessibility_bus_row(_unknown) do
+    warn("accessibility bus", "unknown: the helper did not say whether its registry answers")
+  end
+
+  # The cause is one of compux's closed words (`no_session_bus`, `not_installed`
+  # and the rest), so it is backticked as the literal it is; the detail is the
+  # helper's own sentence.
+  defp bus_reason(nil, nil), do: ": the helper gave no reason"
+  defp bus_reason(cause, nil), do: " (`#{cause}`)"
+  defp bus_reason(nil, detail), do: ": #{detail}"
+  defp bus_reason(cause, detail), do: " (`#{cause}`): #{detail}"
+
+  # Information, never a warning: an ATK bridge older than 2.52 aborts a GTK 3
+  # application asked for its action list, and the helper never asks it. The
+  # sentence names the person's own version and no version of ours, which the
+  # next release would make stale.
+  defp atk_bridge_row(%{source: source, atk_bridge: version})
+       when is_binary(source) and is_binary(version),
+       do: ok("atk bridge", atk_bridge_text(version))
+
+  defp atk_bridge_row(%{source: source, atk_bridge: nil}) when is_binary(source),
+    do: ok("atk bridge", "not installed")
+
+  defp atk_bridge_row(_unread), do: ok("atk bridge", "unknown: no package database was read")
+
+  defp atk_bridge_text(version) do
+    case bridge_release(version) do
+      {:ok, release} when release < {2, 52} ->
+        "#{version}, old enough that a GTK 3 application asked for its action list aborts " <>
+          "on that call, and computer use never asks it"
+
+      {:ok, _release} ->
+        version
+
+      :error ->
+        "#{version}, which does not say whether it is old enough to abort a GTK 3 " <>
+          "application asked for its action list"
+    end
+  end
+
+  # A Debian version: an optional epoch, then the upstream major and minor.
+  defp bridge_release(version) do
+    case Regex.run(~r/^(?:\d+:)?(\d+)\.(\d+)/, version) do
+      [_match, major, minor] -> {:ok, {String.to_integer(major), String.to_integer(minor)}}
+      nil -> :error
+    end
+  end
+
+  defp toolkit_rows(notes) when is_list(notes),
+    do: Enum.map(notes, &ok("toolkit #{&1.toolkit}", &1.note))
+
+  defp toolkit_rows(nil), do: []
+
+  # The route the helper took for pixels. A helper from before the pixel route
+  # names none, and then there is no row. No route warns, as an unavailable
+  # route does everywhere in these rows and in the `computer use` row: Fermix
+  # still works by control, so nothing has failed.
+  defp pixel_route_rows(nil), do: []
+  defp pixel_route_rows(route), do: [pixel_route_row(route)]
+
+  defp pixel_route_row(%{route: "x11"}),
+    do: ok("pixel route", "X11, through this session's X server")
+
+  # Whether the desktop asks is the portal screenshot row's to say: a stored answer
+  # means it never asks again.
+  defp pixel_route_row(%{route: "portal"}), do: ok("pixel route", "GNOME's desktop portal")
+
+  defp pixel_route_row(%{route: "none"} = route) do
+    warn(
+      "pixel route",
+      "none: #{no_route_reason(route)}; Fermix works by controls alone, wherever the " <>
+        "accessibility bus answers"
+    )
+  end
+
+  defp pixel_route_row(_unknown),
+    do: warn("pixel route", "unknown: the helper named a pixel route this build does not know")
+
+  # One sentence per closed cause. The portal interface is the helper's closed
+  # word, backticked as the literal it is.
+  defp no_route_reason(%{cause: "no_display"}),
+    do: "no display answers this session, neither Wayland nor X11"
+
+  defp no_route_reason(%{cause: "no_session_bus"}),
+    do: "this Wayland session has no session bus to reach the desktop portal on"
+
+  defp no_route_reason(%{cause: "unsupported_desktop", desktop: "kde"}),
+    do: "on Wayland only GNOME's desktop portal gives Fermix pixels, and this desktop is KDE"
+
+  defp no_route_reason(%{cause: "unsupported_desktop"}) do
+    "on Wayland only GNOME's desktop portal gives Fermix pixels, and this desktop is not GNOME"
+  end
+
+  defp no_route_reason(%{cause: "portal_not_running"}),
+    do: "the desktop portal is not running on this session and did not start"
+
+  defp no_route_reason(%{cause: "portal_unanswered"}),
+    do: "the desktop portal answered with an error that does not say whether it runs"
+
+  defp no_route_reason(%{cause: "portal_no_registry"}) do
+    "the desktop portal has no host registry, which only a newer portal has, so Fermix " <>
+      "cannot ask it for pixels under its own app id"
+  end
+
+  defp no_route_reason(%{cause: "portal_missing", interface: nil}),
+    do: "the desktop portal on this session lacks an interface the pixel route needs"
+
+  defp no_route_reason(%{cause: "portal_missing", interface: interface}),
+    do: "the desktop portal on this session has no `#{interface}` interface"
+
+  defp no_route_reason(%{cause: nil}), do: "the helper gave no reason this build knows"
+
+  # XTEST and the keyboard map are the X11 route's two needs. On Wayland the
+  # route is the portal, so they are information there.
+  defp x11_pixels_row(%{x11_pixels: pixels, display_server: server}) do
+    detail = x11_pixels_text(pixels)
+
+    if server == "x11" and pixels != %{xtest: true, keymap: true},
+      do: warn("x11 pixels", detail <> x11_pixels_need(pixels)),
+      else: ok("x11 pixels", detail)
+  end
+
+  defp x11_pixels_need(nil), do: "; the X11 pixel route needs one"
+  defp x11_pixels_need(_pixels), do: "; the X11 pixel route needs both"
+
+  defp x11_pixels_text(nil), do: "no X endpoint answers"
+
+  defp x11_pixels_text(%{xtest: xtest, keymap: keymap}),
+    do: "XTEST #{presence(xtest)}, keyboard map #{presence(keymap)}"
+
+  defp presence(true), do: "present"
+  defp presence(false), do: "missing"
+  defp presence(nil), do: "unknown"
+
+  # Without the host Registry (xdg-desktop-portal 1.18 and later) the helper would
+  # share the empty app id with every host process, so it refuses pixels on
+  # Wayland, as it does when no portal runs or none was read. On X11 the pixel
+  # route never asks the portal.
+  defp desktop_portal_row(%{portal: nil, display_server: server}),
+    do: portal_status(server, false).("desktop portal", "not read: no session bus answered")
+
+  defp desktop_portal_row(%{portal: portal, display_server: server}) do
+    detail =
+      Enum.join(
+        [
+          portal_version(portal.version),
+          portal_running(portal.running),
+          portal_registry(portal.registry)
+        ],
+        "; "
+      )
+
+    serves? = portal.running == true and portal.registry == true
+    portal_status(server, serves?).("desktop portal", detail)
+  end
+
+  # The portal is the pixel route on Wayland alone: what keeps it from serving
+  # warns there, and is information on X11.
+  defp portal_status("wayland", false), do: &warn/2
+  defp portal_status(_server, _serves?), do: &ok/2
+
+  defp portal_version(nil), do: "xdg-desktop-portal version unknown"
+  defp portal_version(version), do: "xdg-desktop-portal #{version}"
+
+  # `false` is the bus saying nobody runs it; `nil` is an error that said neither.
+  defp portal_running(true), do: "running"
+  defp portal_running(false), do: "not running"
+  defp portal_running(nil), do: "unknown whether it runs"
+
+  defp portal_registry(true), do: "has the host registry"
+
+  defp portal_registry(false),
+    do: "no host registry, which only a newer portal has, so pixels on Wayland are refused"
+
+  defp portal_registry(nil), do: "whether it has the host registry is unknown until it answers"
+
+  # The helper never writes the permission store, so a stored no is the person's
+  # to reset, and this is the one command that does it. It is backticked in the
+  # sentence: a literal the person types, which the Linux app shows as code.
+  @screenshot_reset "gdbus call --session --dest org.freedesktop.impl.portal.PermissionStore " <>
+                      "--object-path /org/freedesktop/impl/portal/PermissionStore --method " <>
+                      "org.freedesktop.impl.portal.PermissionStore.DeletePermission screenshot " <>
+                      "screenshot io.tezra.fermix.ComputerUse"
+
+  defp portal_screenshot_row(%{portal: nil}),
+    do: ok("portal screenshot", "not read: no session bus answered")
+
+  # A stored no keeps the portal from serving any screenshot, which refuses pixels
+  # on Wayland and nothing yet on X11; the reset is there for either.
+  defp portal_screenshot_row(%{portal: %{screenshot_permission: "no"}, display_server: server}) do
+    portal_status(server, false).(
+      "portal screenshot",
+      "a stored no refuses every screenshot on Wayland until it is reset: `#{@screenshot_reset}`"
+    )
+  end
+
+  defp portal_screenshot_row(%{portal: %{screenshot_permission: answer}}),
+    do: ok("portal screenshot", stored_answer(answer))
+
+  defp stored_answer("yes"), do: "allowed, by an answer the desktop keeps"
+
+  defp stored_answer("unset"),
+    do: "no answer stored; the desktop asks on the first screenshot on Wayland"
+
+  defp stored_answer("not_running"),
+    do: "the permission store is not running, so nothing was read"
+
+  defp stored_answer(nil), do: "unknown: the permission store did not answer"
+
+  @doc """
   Computer-use OS-permission state (docs/design/COMPUTER_USE_V2.md, Phase A). The
   load-bearing case is macOS: a GRANTED screen capture but DENIED input control is
   the silent-dropped-click symptom — `CGEventPost` is discarded without Accessibility,
@@ -1902,10 +2224,16 @@ defmodule Fermix.CLI.Doctor.Checks do
   tests inject every state. Read-only by construction: the deepest it goes is the
   `hello` the helper answers from its handshake identity, which captures nothing,
   clicks nothing and opens no consent dialog, and it only goes there when the flag
-  is on.
+  is on. `:sidecar_target` is the platform seam `computer_use_permissions/2` takes:
+  a Linux helper binds a window only under X11, so its reason for binding none is
+  not an old build alone.
   """
-  @spec computer_use_background({:ok, map()} | {:error, term()}) :: result()
-  def computer_use_background(result \\ ProviderProbe.computer_use_background()) do
+  @spec computer_use_background({:ok, map()} | {:error, term()}, keyword()) :: result()
+  def computer_use_background(
+        result \\ ProviderProbe.computer_use_background(),
+        opts \\ []
+      )
+      when is_list(opts) do
     case result do
       {:ok, %{state: :disabled}} ->
         ok("window binding", "computer use is off, so there is nothing to bind")
@@ -1917,7 +2245,7 @@ defmodule Fermix.CLI.Doctor.Checks do
         warn("window binding", "on, but the computer-use helper isn't installed")
 
       {:ok, %{state: :read, capabilities: capabilities}} ->
-        background_capability_result(capabilities)
+        background_capability_result(capabilities, sidecar_target(opts))
 
       {:error, reason} ->
         fail("window binding", "could not read what the helper supports: #{inspect(reason)}")
@@ -1927,7 +2255,7 @@ defmodule Fermix.CLI.Doctor.Checks do
   # The flag is on; whether the surface RUNS is the helper's answer. Both halves
   # are named, because "nothing happens" with one of them missing is exactly the
   # silence this row exists to break.
-  defp background_capability_result(capabilities) do
+  defp background_capability_result(capabilities, target) do
     case Background.unavailable_reason(capabilities) do
       nil ->
         ok(
@@ -1937,21 +2265,39 @@ defmodule Fermix.CLI.Doctor.Checks do
         )
 
       reason ->
-        warn("window binding", background_unavailable_hint(reason) <> sidecar_version_suffix())
+        warn(
+          "window binding",
+          background_unavailable_hint(reason, target) <> sidecar_version_suffix()
+        )
     end
   end
 
-  defp background_unavailable_hint(:no_targets) do
+  # A Linux helper binds a window under X11 alone, so on Wayland no update makes
+  # it bind one; the display server row says which session this is.
+  defp background_unavailable_hint(:no_targets, {:ok, "linux-" <> _arch}) do
+    "on, but this computer-use helper cannot bind a window in this session, so select_target " <>
+      "is not offered: on Linux a window binds only under X11, never on Wayland (the display " <>
+      "server row says which this is). Under X11, update the helper from setup."
+  end
+
+  defp background_unavailable_hint(:no_targets, _target) do
     "on, but this computer-use helper cannot bind a window — it publishes no target support, " <>
       "so every select_target is refused. Update the helper from setup."
   end
 
-  defp background_unavailable_hint(:indicator_missing) do
+  # A Linux helper's badge is a program installed beside it; a macOS helper's is
+  # part of its bundle.
+  defp background_unavailable_hint(:indicator_missing, {:ok, "linux-" <> _arch}) do
+    "on, but this computer-use helper has no on-screen indicator installed beside it, and " <>
+      "Fermix will not work inside a window without one visible. Reinstall the helper from setup."
+  end
+
+  defp background_unavailable_hint(:indicator_missing, _target) do
     "on, but this computer-use helper's bundle has no on-screen indicator, and Fermix will " <>
       "not work inside a window without one visible. Reinstall the helper from setup."
   end
 
-  defp background_unavailable_hint(:indicator_unknown) do
+  defp background_unavailable_hint(:indicator_unknown, _target) do
     "on, but this computer-use helper does not report an on-screen indicator, and Fermix will " <>
       "not work inside a window without one visible. Update the helper from setup."
   end
@@ -1968,6 +2314,34 @@ defmodule Fermix.CLI.Doctor.Checks do
 
   defp sidecar_target(opts) do
     Keyword.get_lazy(opts, :sidecar_target, &Compux.Binary.target/0)
+  end
+
+  # On GNOME Wayland the route is the desktop portal, which asks the person on the
+  # first pixel action and keeps the answer, so the route being there is no grant.
+  defp format_computer_use_probe(%{
+         screen_capture: true,
+         input_control: true,
+         display_server: "wayland"
+       }) do
+    ok(
+      "computer use",
+      "screen capture and input control go through the desktop portal, which asks the " <>
+        "person on first use (wayland)#{sidecar_version_suffix()}"
+    )
+  end
+
+  # On X11 nothing is granted either: the route is the session's own X server.
+  defp format_computer_use_probe(%{
+         screen_capture: true,
+         input_control: true,
+         platform: "linux",
+         display_server: "x11"
+       }) do
+    ok(
+      "computer use",
+      "screen capture and input control go through this session's X server " <>
+        "(x11)#{sidecar_version_suffix()}"
+    )
   end
 
   defp format_computer_use_probe(%{screen_capture: true, input_control: true} = probe) do
@@ -2005,21 +2379,18 @@ defmodule Fermix.CLI.Doctor.Checks do
 
   defp compux_version, do: to_string(Application.spec(:compux, :vsn))
 
-  # Platform-specific remediation: name the exact pane (macOS) or the X11 requirement
-  # (Linux/Wayland) so the fix is one step, not a hunt.
+  # Platform-specific remediation: name the exact pane (macOS) so the fix is one
+  # step, not a hunt. On X11 input alone has a cause of its own, XTEST or the
+  # keyboard map, which the x11 pixels row names; on Wayland one route serves both
+  # halves, so input alone has none to name.
   defp computer_use_input_hint(%{platform: "macos"}) do
     "screen capture OK but input control is NOT granted — clicks and keystrokes are " <>
       "silently dropped. Grant Accessibility: System Settings → Privacy & Security → Accessibility."
   end
 
-  # M38 §8.2: the old string told every Wayland user to "use an X11 session" on
-  # desktops that no longer offer one, which is worse than naming no remedy.
-  # Each replacement says what is refused, why, and what remains true.
-  defp computer_use_input_hint(%{display_server: "wayland"}) do
-    "input control unavailable on this Wayland session. The computer-use sidecar " <>
-      "injects input through XTEST only; Wayland input needs the RemoteDesktop portal " <>
-      "and libei, which it does not implement yet. An X11 session still works on " <>
-      "desktops that offer one, and GNOME 50 and later do not."
+  defp computer_use_input_hint(%{display_server: "x11"} = probe) do
+    "input control is not available (#{probe.platform}/x11): the X11 pixel route needs XTEST " <>
+      "and the keyboard map, and the x11 pixels row says what this session has."
   end
 
   defp computer_use_input_hint(probe) do
@@ -2459,16 +2830,60 @@ defmodule Fermix.CLI.Doctor.Checks do
       "Recording: System Settings → Privacy & Security → Screen Recording."
   end
 
-  defp computer_use_capture_hint(%{display_server: "wayland"}) do
-    "screen capture unavailable on this Wayland session. The computer-use sidecar " <>
-      "captures through X11 only; Wayland capture needs the ScreenCast portal, which it " <>
-      "does not implement yet. An X11 session still works on desktops that offer one, " <>
-      "and GNOME 50 and later do not."
+  # With no pixel route the helper serves neither half, and the pixel route row
+  # names the cause; this row never guesses it.
+  defp computer_use_capture_hint(%{pixel_route: %{route: "none"}} = probe) do
+    "#{unavailable_halves(probe)} (#{probe.platform}/#{probe.display_server}): this session " <>
+      "has no pixel route, and the pixel route row says why. Controls still work wherever " <>
+      "the accessibility bus answers."
+  end
+
+  # On the portal route a stored Screenshot no refuses screenshots, and on
+  # Wayland a point comes only from a screenshot, so the helper refuses every
+  # pointer verb until the no is reset; keys and the verbs on a control still act.
+  # The helper never resets it, and the portal screenshot row carries the command.
+  defp computer_use_capture_hint(
+         %{pixel_route: %{route: "portal"}, portal: %{screenshot_permission: "no"}} = probe
+       ) do
+    "#{unavailable_halves(probe)} (#{probe.platform}/#{probe.display_server}): the desktop " <>
+      "keeps a \"no\" for Fermix's screenshots, so nothing can be aimed by point until it is " <>
+      "reset, and the portal screenshot row has the command that resets it." <>
+      keys_still_work(probe)
+  end
+
+  # A helper from before the pixel route names no cause. One route serves both
+  # halves on Wayland: GNOME's desktop portal under the helper's own app id. Where
+  # that cannot be had (another compositor, a portal without its Registry, one
+  # that does not run) the helper refuses it, and the portal rows say which.
+  # Never "use an X11 session": GNOME 50 and later offer none. The row names only
+  # the halves the probe says are missing.
+  defp computer_use_capture_hint(%{display_server: "wayland"} = probe) do
+    "#{unavailable_halves(probe)} on this Wayland session. Computer use reaches a Wayland " <>
+      "screen only through GNOME's desktop portal, under its own app id, which needs " <>
+      "xdg-desktop-portal 1.18 or later; the desktop portal row says what this one has. " <>
+      "Controls still work wherever the accessibility bus answers."
+  end
+
+  # On X11 the x11 pixels row says what the X server answered: no endpoint at
+  # all, or which of XTEST and the keyboard map it lacks.
+  defp computer_use_capture_hint(%{display_server: "x11"} = probe) do
+    "#{unavailable_halves(probe)} (#{probe.platform}/x11): the x11 pixels row says why."
   end
 
   defp computer_use_capture_hint(probe) do
     "screen capture is not available (#{probe.platform}/#{probe.display_server})."
   end
+
+  # The halves a probe whose screen capture is false says are missing.
+  defp unavailable_halves(%{input_control: false}),
+    do: "screen capture and input control are not available"
+
+  defp unavailable_halves(%{input_control: true}), do: "screen capture is not available"
+
+  defp keys_still_work(%{input_control: true}),
+    do: " Keys and typing still work, and controls wherever the accessibility bus answers."
+
+  defp keys_still_work(%{input_control: false}), do: ""
 
   defp format_channel_health([]), do: ok("channel health", "no enabled channels configured")
 
@@ -2792,6 +3207,61 @@ defmodule Fermix.CLI.Doctor.Checks do
     )
   rescue
     error in ArgumentError -> fail("sandbox", Exception.message(error))
+  end
+
+  @doc """
+  Whether the kernel holds the commands Fermix runs for the agent
+  (OS_SANDBOX_ENFORCEMENT): on macOS `sandbox-exec` must apply a profile; on
+  Linux the Landlock shim must report ABI 3 or later (Linux 6.2), asked of
+  the shim the commands run through. Where it cannot, every confined command
+  refuses, so the row fails with the sentence those commands get.
+  `:seatbelt` and `:landlock` inject the probe's answer.
+  """
+  @spec os_sandbox({atom(), atom()}, keyword()) :: result()
+  def os_sandbox(os_type \\ :os.type(), opts \\ [])
+
+  def os_sandbox({:unix, :darwin}, opts) do
+    case Keyword.get_lazy(opts, :seatbelt, &seatbelt_probe/0) do
+      :ok ->
+        ok("os sandbox", "commands are held by the kernel (Seatbelt)")
+
+      {:error, detail} ->
+        fail(
+          "os sandbox",
+          "sandbox-exec cannot apply a profile here (#{detail}); every command the agent " <>
+            "runs fails until it can"
+        )
+    end
+  end
+
+  def os_sandbox({:unix, :linux}, opts) do
+    case Keyword.get_lazy(opts, :landlock, fn -> Landlock.probe(Landlock.shim_path()) end) do
+      {:ok, abi} ->
+        ok("os sandbox", "commands are held by the kernel (Landlock ABI #{abi})")
+
+      {:error, reason} ->
+        fail(
+          "os sandbox",
+          Landlock.describe(reason) <>
+            " Fermix needs Linux 6.2 or later with Landlock enabled (in the kernel's lsm= list)."
+        )
+    end
+  end
+
+  def os_sandbox(_os_type, _opts),
+    do: not_applicable("os sandbox", "the kernel holds commands only on macOS and Linux")
+
+  # The smallest profile, applied to a program that does nothing: what fails
+  # here (a sandbox already around this process) fails every command.
+  defp seatbelt_probe do
+    probe = ["-p", "(version 1)(allow default)", "/usr/bin/true"]
+
+    case System.cmd("/usr/bin/sandbox-exec", probe, stderr_to_stdout: true) do
+      {_output, 0} -> :ok
+      {output, status} -> {:error, "exit #{status}: #{brief(output)}"}
+    end
+  rescue
+    error in ErlangError -> {:error, "could not run sandbox-exec: #{inspect(error.original)}"}
   end
 
   @spec sandbox_trace_suggestions() :: result()

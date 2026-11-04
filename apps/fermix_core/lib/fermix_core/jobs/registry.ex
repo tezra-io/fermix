@@ -9,6 +9,13 @@ defmodule FermixCore.Jobs.Registry do
   changes, it never runs now by hand, and its runs start from cues
   (`Jobs.Scheduler`'s cue admission), never from the due scan, which never
   sees a job with neither a next run nor an expiry.
+
+  A watcher's follow-up (M60_WATCHER_CODING_RUNS.md §4.1) has `schedule_kind`
+  and `schedule_expr` `"watcher"`, made only by `create_follow_up_job/2`. It
+  inherits every refusal of the `"cue"` kind but one: the owner may run it now
+  by hand, since a run of it is not the run of one item. Its `allowed_tools`
+  is its grant, so it names at least one tool, and its runs start from its
+  watcher's triggers (`Jobs.Scheduler`'s admission, `trigger: "watcher"`).
   """
 
   alias FermixCore.Agents.IterationLimits
@@ -20,7 +27,11 @@ defmodule FermixCore.Jobs.Registry do
   @default_agent_id "main"
 
   @cue_kind "cue"
+  @follow_up_kind "watcher"
+  # Both kinds run when a watcher passes an item, never on a schedule.
+  @watcher_kinds [@cue_kind, @follow_up_kind]
   @cue_summary "runs on cues"
+  @follow_up_summary "runs when its watcher passes an item"
   @cue_default_timeout_seconds 600
   @cue_max_timeout_seconds 1_800
   @reaching_delivery_modes ["origin", "channel"]
@@ -32,6 +43,10 @@ defmodule FermixCore.Jobs.Registry do
   @cue_schedule_fixed "This job runs on cues; its schedule cannot change."
   @cue_no_run_now "This job runs on cues."
   @cue_no_policy "A job that runs on cues uses the cue surface; it takes no capability policy."
+  @follow_up_no_policy "A watcher's follow-up runs with the tools it names; it takes no " <>
+                         "capability policy."
+  @follow_up_must_report "A watcher's follow-up must reach you: pick where it reports."
+  @follow_up_names_tools "A watcher's follow-up names the tools it may use."
 
   @spec create_job(map(), keyword()) :: {:ok, Repo.scheduled_job_row()} | {:error, term()}
   def create_job(attrs, opts \\ []) when is_map(attrs) and is_list(opts) do
@@ -59,14 +74,34 @@ defmodule FermixCore.Jobs.Registry do
     end
   end
 
+  @doc """
+  Create a watcher's follow-up (M60_WATCHER_CODING_RUNS.md §4.1), for
+  `Cues.Watchers`. It takes what `create_cue_job/2` takes and refuses what it
+  refuses, in a follow-up's words, and `allowed_tools`, its grant, must name
+  at least one tool.
+  """
+  @spec create_follow_up_job(map(), keyword()) ::
+          {:ok, Repo.scheduled_job_row()} | {:error, term()}
+  def create_follow_up_job(attrs, opts \\ []) when is_map(attrs) and is_list(opts) do
+    with {:ok, normalized} <- normalize_follow_up_attrs(attrs) do
+      insert_job(normalized, opts)
+    end
+  end
+
   @doc "Whether `job` runs on cues rather than on a schedule of its own."
   @spec cue_job?(map()) :: boolean()
   def cue_job?(%{schedule_kind: @cue_kind}), do: true
   def cue_job?(job) when is_map(job), do: false
 
+  @doc "Whether `job` is a watcher's follow-up."
+  @spec follow_up_job?(map()) :: boolean()
+  def follow_up_job?(%{schedule_kind: @follow_up_kind}), do: true
+  def follow_up_job?(job) when is_map(job), do: false
+
   @doc """
   For `run_job_now`: a job that runs on cues never runs now by hand, because a
-  run of it is the run of one cue. `{:error, :not_found}` for an unknown id.
+  run of it is the run of one cue; a watcher's follow-up does, on the owner's
+  turn. `{:error, :not_found}` for an unknown id.
   """
   @spec check_run_now(String.t(), keyword()) :: :ok | {:error, term()}
   def check_run_now(id, opts \\ []) when is_binary(id) and is_list(opts) do
@@ -117,6 +152,27 @@ defmodule FermixCore.Jobs.Registry do
     end
   end
 
+  @doc """
+  Changes a watcher's follow-up in place (M60_WATCHER_CODING_RUNS.md §3.5),
+  for `Cues.Watchers`: its `task_prompt`, `allowed_tools` (never emptied),
+  `skill_name`, `model`, `provider`, `timeout_seconds` (at most 30 minutes)
+  and its delivery (`delivery_mode` with `delivery_target`, which must reach
+  the owner). The one path that changes a job's tools. Refused for any other
+  job.
+  """
+  @spec update_follow_up_job(String.t(), map(), keyword()) ::
+          {:ok, Repo.scheduled_job_row()} | {:error, term()}
+  def update_follow_up_job(id, attrs, opts \\ [])
+      when is_binary(id) and is_map(attrs) and is_list(opts) do
+    now = Keyword.get(opts, :now, DateTime.utc_now())
+
+    with {:ok, job} <- Repo.get_scheduled_job(id, repo_opts(opts)),
+         :ok <- follow_up_only(job),
+         {:ok, patch} <- follow_up_patch(attrs) do
+      apply_job_update(job, patch, %{}, now, opts)
+    end
+  end
+
   @spec remove_job(String.t(), keyword()) :: :ok | {:error, term()}
   def remove_job(id, opts \\ []) when is_binary(id) and is_list(opts) do
     with {:ok, job} <- Repo.get_scheduled_job(id, repo_opts(opts)),
@@ -150,19 +206,19 @@ defmodule FermixCore.Jobs.Registry do
     end
   end
 
-  # A job that runs on cues keeps no schedule of its own, keeps reaching the
-  # owner and keeps the cue surface (M60 §8.8, §9.1, §9.3, §9.5). Every other
-  # job passes untouched here.
-  defp check_cue_update(%{schedule_kind: @cue_kind}, attrs) do
+  # A job a watcher runs keeps no schedule of its own, keeps reaching the owner
+  # and keeps its surface (M60 §8.8, §9.1, §9.3, §9.5): the cue surface for a
+  # task, its named tools for a follow-up. Every other job passes untouched.
+  defp check_cue_update(%{schedule_kind: kind}, attrs) when kind in @watcher_kinds do
     cond do
       Enum.any?([:schedule, :timezone, :expires_at], &given?(attrs, &1)) ->
         {:error, @cue_schedule_fixed}
 
       policy_given?(attrs) ->
-        {:error, @cue_no_policy}
+        {:error, kind_sentence(kind, @cue_no_policy, @follow_up_no_policy)}
 
       given?(attrs, :delivery_mode) and not reaches_owner?(attrs) ->
-        {:error, @cue_must_report}
+        {:error, kind_sentence(kind, @cue_must_report, @follow_up_must_report)}
 
       true ->
         :ok
@@ -170,6 +226,9 @@ defmodule FermixCore.Jobs.Registry do
   end
 
   defp check_cue_update(_job, _attrs), do: :ok
+
+  defp kind_sentence(@cue_kind, cue, _follow_up), do: cue
+  defp kind_sentence(@follow_up_kind, _cue, follow_up), do: follow_up
 
   defp given?(attrs, key), do: fetch_field(attrs, key) not in [nil, ""]
 
@@ -262,7 +321,8 @@ defmodule FermixCore.Jobs.Registry do
   end
 
   # Its runs start from cues, never from a time, so a resume arms no next run.
-  defp next_run_at_for_resume(%{schedule_kind: @cue_kind}, _now), do: {:ok, nil}
+  defp next_run_at_for_resume(%{schedule_kind: kind}, _now) when kind in @watcher_kinds,
+    do: {:ok, nil}
 
   defp next_run_at_for_resume(%{schedule_kind: "once"} = job, now) do
     with :ok <- ensure_not_expired(job, now),
@@ -365,6 +425,114 @@ defmodule FermixCore.Jobs.Registry do
   rescue
     _error in KeyError -> {:error, :missing_required_job_field}
     error in ArgumentError -> {:error, Exception.message(error)}
+  end
+
+  # A follow-up takes what a task takes, its tools named, and reaches the owner
+  # (M60_WATCHER_CODING_RUNS.md §4.1).
+  defp normalize_follow_up_attrs(attrs) do
+    name = required_string(attrs, :name)
+    task_prompt = required_string(attrs, :task_prompt, fallback: :task)
+
+    with :ok <- refuse_given(attrs, [:schedule, :timezone], @cue_no_schedule),
+         :ok <- refuse_given(attrs, [:expires_at], @cue_no_expiry),
+         :ok <- refuse_follow_up_policy(attrs),
+         :ok <- names_tools(attrs),
+         {:ok, timeout_seconds} <- cue_timeout_seconds(attrs),
+         {:ok, delivery_mode} <- follow_up_delivery_mode(attrs) do
+      {:ok,
+       attrs
+       |> normalized_job(name, task_prompt)
+       |> Map.merge(%{
+         schedule: follow_up_schedule(),
+         timezone: "UTC",
+         timeout_seconds: timeout_seconds,
+         delivery_mode: delivery_mode,
+         expires_at: nil
+       })}
+    end
+  rescue
+    _error in KeyError -> {:error, :missing_required_job_field}
+    error in ArgumentError -> {:error, Exception.message(error)}
+  end
+
+  defp follow_up_only(%{schedule_kind: @follow_up_kind}), do: :ok
+  defp follow_up_only(job), do: {:error, "Job #{job.id} is not a watcher's follow-up."}
+
+  defp follow_up_patch(attrs) do
+    with :ok <- refuse_given(attrs, [:schedule, :timezone, :expires_at], @cue_schedule_fixed),
+         :ok <- refuse_follow_up_policy(attrs),
+         {:ok, tools} <- follow_up_tools_patch(attrs),
+         {:ok, timeout} <- follow_up_timeout_patch(attrs),
+         {:ok, delivery} <- follow_up_delivery_patch(attrs) do
+      patch =
+        %{}
+        |> put_present(:task_prompt, optional_update_string(attrs, :task_prompt, fallback: :task))
+        |> put_present(:skill_name, optional_update_string(attrs, :skill_name))
+        |> put_present(:model, optional_update_string(attrs, :model))
+        |> put_present(:provider, optional_update_string(attrs, :provider))
+        |> Map.merge(tools)
+        |> Map.merge(timeout)
+        |> Map.merge(delivery)
+
+      if map_size(patch) == 0, do: {:error, :empty_update}, else: {:ok, patch}
+    end
+  rescue
+    error in ArgumentError -> {:error, Exception.message(error)}
+  end
+
+  defp follow_up_tools_patch(attrs) do
+    case fetch_field(attrs, :allowed_tools) do
+      nil ->
+        {:ok, %{}}
+
+      _given ->
+        with :ok <- names_tools(attrs),
+             do: {:ok, %{allowed_tools: list_of_strings(attrs, :allowed_tools, [])}}
+    end
+  end
+
+  defp follow_up_timeout_patch(attrs) do
+    case fetch_field(attrs, :timeout_seconds) do
+      nil ->
+        {:ok, %{}}
+
+      _given ->
+        with {:ok, seconds} <- cue_timeout_seconds(attrs), do: {:ok, %{timeout_seconds: seconds}}
+    end
+  end
+
+  defp follow_up_delivery_patch(attrs) do
+    cond do
+      not given?(attrs, :delivery_mode) -> {:ok, %{}}
+      reaches_owner?(attrs) -> {:ok, delivery_patch(attrs)}
+      true -> {:error, @follow_up_must_report}
+    end
+  end
+
+  defp refuse_follow_up_policy(attrs),
+    do: if(policy_given?(attrs), do: {:error, @follow_up_no_policy}, else: :ok)
+
+  defp names_tools(attrs) do
+    case list_of_strings(attrs, :allowed_tools, []) do
+      [] -> {:error, @follow_up_names_tools}
+      _tools -> :ok
+    end
+  end
+
+  defp follow_up_delivery_mode(attrs) do
+    if reaches_owner?(attrs),
+      do: {:ok, fetch_field(attrs, :delivery_mode)},
+      else: {:error, @follow_up_must_report}
+  end
+
+  defp follow_up_schedule do
+    %{
+      kind: @follow_up_kind,
+      expr: @follow_up_kind,
+      timezone: "UTC",
+      next_run_at: nil,
+      summary: @follow_up_summary
+    }
   end
 
   # The fields every kind of job takes the same way; the schedule, timezone,

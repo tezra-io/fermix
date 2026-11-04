@@ -15,6 +15,7 @@ defmodule FermixCore.Capabilities.Skill do
   alias FermixCore.Capabilities.Builtin.Tool
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Cues.FollowUpReadiness
   alias FermixCore.SkillCuration.Usage
 
   require Logger
@@ -207,7 +208,7 @@ defmodule FermixCore.Capabilities.Skill do
            Map.get(context, :journal_base_dir)
          ) do
       {:ok, _path} ->
-        {:ok, build_tool_result(definition.name, terminal)}
+        {:ok, build_tool_result(definition.name, terminal, tool_warning(definition, context))}
 
       {:error, {:journal_write_failed, status, reason}} ->
         {:ok,
@@ -231,12 +232,65 @@ defmodule FermixCore.Capabilities.Skill do
     end
   end
 
-  defp build_tool_result(skill_name, %{success?: true, output: output}) do
-    Tool.success("Skill '#{skill_name}' completed:\n#{output}")
+  defp build_tool_result(skill_name, %{success?: true, output: output}, warning) do
+    Tool.success(with_warning("Skill '#{skill_name}' completed:\n#{output}", warning))
   end
 
-  defp build_tool_result(skill_name, %{message: message}) do
-    Tool.error("Skill '#{skill_name}' failed: #{message}")
+  defp build_tool_result(skill_name, %{message: message}, warning) do
+    Tool.error(with_warning("Skill '#{skill_name}' failed: #{message}", warning))
+  end
+
+  defp with_warning(text, nil), do: text
+  defp with_warning(text, warning), do: text <> "\n\n" <> warning
+
+  @doc """
+  Fermix's words for the tools `skill`'s list asks for that its runs do not
+  get, or nil when they get them all: a list under a key Fermix does not read
+  (the skill runs with no tools), and names no capability carries now (each
+  left out, in `Cues.FollowUpReadiness.unoffered/2`'s words, which name a
+  plugin that is off). `skill_run`'s result and a job bound to the skill carry
+  it, so the owner can have the skill's list fixed. `skill` is a loaded
+  definition or any map with its `:name`, `:allowed_tools` and
+  `:misspelled_tool_keys`; `context` may name the `:capability_registry`.
+  """
+  @spec tool_warning(map(), map()) :: String.t() | nil
+  def tool_warning(skill, context) when is_map(skill) and is_map(context) do
+    name = Map.get(skill, :name)
+
+    sentences =
+      misspelled_words(name, Map.get(skill, :misspelled_tool_keys, [])) ++
+        unoffered_words(name, Map.get(skill, :allowed_tools), context)
+
+    if sentences == [], do: nil, else: Enum.join(sentences, " ")
+  end
+
+  defp misspelled_words(_name, []), do: []
+
+  defp misspelled_words(name, keys) do
+    [
+      "Skill '#{name}' lists tools under #{Enum.map_join(keys, ", ", &"`#{&1}`")}, which " <>
+        "Fermix does not read: only `allowed_tools`, a JSON list in its SKILL.md, grants " <>
+        "a skill tools, and without one the skill runs with none."
+    ]
+  end
+
+  defp unoffered_words(_name, nil, _context), do: []
+  defp unoffered_words(_name, [], _context), do: []
+
+  defp unoffered_words(name, tools, context) when is_list(tools) do
+    registry = Map.get(context, :capability_registry, CapabilityRegistry)
+
+    case FollowUpReadiness.unoffered(tools, capability_registry: registry) do
+      nil ->
+        []
+
+      sentence ->
+        [
+          "Skill '#{name}' names tools Fermix does not have, so its runs go without " <>
+            "them. #{sentence} If a name is a typo or another app's tool, its SKILL.md's " <>
+            "`allowed_tools` needs updating."
+        ]
+    end
   end
 
   defp write_journal(

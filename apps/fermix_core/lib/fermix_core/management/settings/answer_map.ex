@@ -42,8 +42,9 @@ defmodule FermixCore.Management.Settings.AnswerMap do
   @prose_keys ~w(meetings_announce_message communication_style)
 
   @cues_prefix "cues_"
+  @snapshots_prefix "snapshots_"
 
-  @type writer :: :wizard | :sandbox | :meetings | :browser | :cues
+  @type writer :: :wizard | :sandbox | :meetings | :browser | :cues | :snapshots
   @type answer :: {atom(), term()}
 
   @doc """
@@ -58,6 +59,7 @@ defmodule FermixCore.Management.Settings.AnswerMap do
   def writer("meetings"), do: :meetings
   def writer("browser"), do: :browser
   def writer("cues"), do: :cues
+  def writer("snapshots"), do: :snapshots
   def writer(section) when is_binary(section), do: :wizard
 
   @doc """
@@ -179,6 +181,7 @@ defmodule FermixCore.Management.Settings.AnswerMap do
   defp answer_key("meetings", @meetings_prefix <> key), do: String.to_existing_atom(key)
   defp answer_key("browser", @browser_prefix <> key), do: String.to_existing_atom(key)
   defp answer_key("cues", @cues_prefix <> key), do: String.to_existing_atom(key)
+  defp answer_key("snapshots", @snapshots_prefix <> key), do: String.to_existing_atom(key)
   defp answer_key("sandbox", key), do: Map.fetch!(@sandbox_answers, key)
   defp answer_key(_section, key), do: String.to_existing_atom(key)
 end

@@ -225,13 +225,13 @@ defmodule FermixCore.Plugins.Http.InterpreterTest do
       assert {:ok, %{error: e1}} =
                Interpreter.run(t, %{}, http: resp, auth_type: :oauth2, plugin: "github")
 
-      assert e1 =~ "github needs reconnection"
-      assert e1 =~ "fermix plugins auth reauthorize github"
+      assert e1 ==
+               "github needs reconnection. Sign in to github again in Fermix's Plugins settings."
 
       assert {:ok, %{error: e2}} =
                Interpreter.run(t, %{}, http: resp, auth_type: :api_key, plugin: "github")
 
-      assert e2 =~ "fermix plugins auth set github"
+      assert e2 == "API key rejected — replace the token for github in Fermix's Plugins settings."
     end
 
     test "403 names the required scopes" do

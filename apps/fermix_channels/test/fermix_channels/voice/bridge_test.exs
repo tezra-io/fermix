@@ -171,6 +171,10 @@ defmodule FermixChannels.Voice.BridgeTest do
     }
   end
 
+  # A hand-off's turn starts through the queue and a task: process work, so its
+  # arrival gets a bound that holds on a busy runner.
+  @turn_start_wait_ms 10_000
+
   defp request(overrides \\ %{}) do
     Map.merge(
       %{
@@ -179,7 +183,8 @@ defmodule FermixChannels.Voice.BridgeTest do
         revision: 1,
         turn_session_id: "voice_delegation_1",
         text: "user: what is on my calendar",
-        screen_frame: nil
+        screen_frame: nil,
+        outside_sources: MapSet.new()
       },
       overrides
     )
@@ -397,6 +402,30 @@ defmodule FermixChannels.Voice.BridgeTest do
                  status: :ready
                }
              ] = msg.inbound_attachments
+
+      Bridge.close_call(handle)
+    end
+
+    # What the call's earlier hand-offs read rides the turn as its starting
+    # outside sources, the way a request re-run after `/confirm` carries what its
+    # parked turn read; a call that read nothing hands off clean.
+    test "a hand-off starts with what the call has read", ctx do
+      handle = open(ctx)
+      read = MapSet.new([{:tool, "web_fetch"}])
+
+      {:ok, _ref} = Bridge.submit(handle, request(%{outside_sources: read}), callbacks())
+      assert_receive {:turn_started, msg, _pid}, @turn_start_wait_ms
+      assert msg.resumed_sources == read
+
+      Bridge.close_call(handle)
+    end
+
+    test "a hand-off from a call that read nothing starts clean", ctx do
+      handle = open(ctx)
+
+      {:ok, _ref} = Bridge.submit(handle, request(), callbacks())
+      assert_receive {:turn_started, msg, _pid}, @turn_start_wait_ms
+      assert msg.resumed_sources == MapSet.new()
 
       Bridge.close_call(handle)
     end

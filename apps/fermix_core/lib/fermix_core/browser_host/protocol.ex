@@ -21,11 +21,14 @@ defmodule FermixCore.BrowserHost.Protocol do
 
   ## Versioning
 
-  One integer, `protocol_version`, on an N/N-1 window derived from it: the
-  first version, so the window is 1 to 1.
+  One integer, `protocol_version`, on an N/N-1 window derived from it: version
+  2, so the daemon accepts an app on 1 or 2. Protocol 1 is unchanged inside 2.
+  Version 2 adds the two sign-in requests (`page.login_for`, `page.sign_in`)
+  and their error reasons; `request_since/1` names the version each request
+  needs, and the connection never writes one to an app that declared less.
   """
 
-  @protocol_version 1
+  @protocol_version 2
   @min_supported_version max(1, @protocol_version - 1)
 
   # A snapshot's node list is the largest frame the app sends. The app bounds it
@@ -40,11 +43,25 @@ defmodule FermixCore.BrowserHost.Protocol do
   @max_nodes 50_000
   @max_form_fields 12
   @max_u64 18_446_744_073_709_551_615
+  # A site is a DNS name in the engine's host alphabet, lower-cased: what
+  # `Browser.Policy.canonical_host/1` leaves of the model's `site`, and the key
+  # form the app stores a login under.
+  @max_site_chars 253
+  @site_pattern ~r/\A[a-z0-9._-]+\z/
+  @max_username_chars 1_024
 
   @requests ~w(
     tab.open tab.navigate tab.list tab.focus tab.close task.release page.snapshot page.screenshot
     page.pdf page.act page.upload dialog.resolve cookies.get cookies.clear host.status host.stop_ack
+    page.login_for page.sign_in
   )
+
+  # The requests an app on protocol 1 never receives. Every other request is
+  # protocol 1's.
+  @version_2_requests ~w(page.login_for page.sign_in)
+
+  # What a sign-in may report it filled, in the order it fills them.
+  @filled [["username"], ["password"], ["username", "password"]]
   @events ~w(
     attached availability tab.closed dialog.opened download.began download.progress
     download.finished task.cancel host_stopping
@@ -52,9 +69,13 @@ defmodule FermixCore.BrowserHost.Protocol do
 
   # The reasons the app may answer a request with. `host_unavailable` is the one
   # that ends a task: the app sends `availability` false before answering it.
+  # The `sign_in_*` reasons and `secret_on_screen` are protocol 2's; none of
+  # their messages carries a password or a username.
   @host_errors ~w(
     tab_not_found cap_reached not_owner navigation_refused act_failed stale_ref dialog_blocked
     no_dialog wait_timeout write_failed upload_failed invalid_request host_unavailable
+    sign_in_insecure_page sign_in_wrong_site sign_in_no_login sign_in_field sign_in_page_moved
+    sign_in_store_unavailable secret_on_screen
   )
 
   # The reasons of the daemon's own `error` frame, each followed by the close.
@@ -91,14 +112,17 @@ defmodule FermixCore.BrowserHost.Protocol do
     "cookies.get" => ~w(tab_id),
     "cookies.clear" => ~w(tab_id),
     "host.status" => [],
-    "host.stop_ack" => []
+    "host.stop_ack" => [],
+    "page.login_for" => ~w(tab_id site),
+    "page.sign_in" => ~w(tab_id site login_site observe)
   }
 
   @request_optional %{
     "tab.open" => ~w(snapshot visible),
     "tab.navigate" => ~w(snapshot),
     "page.act" => ~w(ref x y text key fields field selector wait_until timeout_ms snapshot),
-    "dialog.resolve" => ~w(text)
+    "dialog.resolve" => ~w(text),
+    "page.sign_in" => ~w(username_ref password_ref snapshot)
   }
 
   @result_required %{
@@ -117,7 +141,16 @@ defmodule FermixCore.BrowserHost.Protocol do
     "cookies.get" => ~w(url cookies),
     "cookies.clear" => ~w(cleared),
     "host.status" => ~w(host_version profile_id available task_tabs person_tabs),
-    "host.stop_ack" => []
+    "host.stop_ack" => [],
+    "page.login_for" => ~w(login_site username),
+    "page.sign_in" => ~w(url title filled)
+  }
+
+  # The two sign-in answers are closed: a key outside these is refused, so
+  # nothing else of a login can ride one into the engine.
+  @result_closed %{
+    "page.login_for" => ~w(login_site username),
+    "page.sign_in" => ~w(url title filled page)
   }
 
   @event_required %{
@@ -150,6 +183,14 @@ defmodule FermixCore.BrowserHost.Protocol do
   @spec requests() :: [String.t()]
   def requests, do: @requests
 
+  @doc """
+  The protocol version an app must have declared to receive a request: 2 for
+  the sign-in requests, 1 for every other one.
+  """
+  @spec request_since(String.t()) :: pos_integer()
+  def request_since(type) when type in @requests,
+    do: if(type in @version_2_requests, do: 2, else: 1)
+
   @doc "Ordered event catalog (app to daemon)."
   @spec events() :: [String.t()]
   def events, do: @events
@@ -181,6 +222,14 @@ defmodule FermixCore.BrowserHost.Protocol do
   @doc "Most nodes one page's `nodes` list may carry."
   @spec max_nodes() :: pos_integer()
   def max_nodes, do: @max_nodes
+
+  @doc "Longest `site` or `login_site`, in characters."
+  @spec max_site_chars() :: pos_integer()
+  def max_site_chars, do: @max_site_chars
+
+  @doc "Longest `username` a `page.login_for` answer may carry, in Unicode scalar values."
+  @spec max_username_chars() :: pos_integer()
+  def max_username_chars, do: @max_username_chars
 
   @doc """
   Negotiate the app's `protocol_version` against the daemon's supported range.
@@ -254,7 +303,8 @@ defmodule FermixCore.BrowserHost.Protocol do
   @spec validate_result(String.t(), map()) :: :ok | {:error, term()}
   def validate_result(type, result) when is_binary(type) and is_map(result) do
     with {:ok, required} <- fetch(@result_required, type, :unknown_request),
-         :ok <- require_fields(required, result) do
+         :ok <- require_fields(required, result),
+         :ok <- closed_result(type, result) do
       result_fields(type, result)
     end
   end
@@ -386,6 +436,31 @@ defmodule FermixCore.BrowserHost.Protocol do
 
   defp request_fields(type, _payload) when type in ["host.status", "host.stop_ack"], do: :ok
 
+  defp request_fields("page.login_for", payload) do
+    with :ok <- id_string(payload, "tab_id") do
+      site_field(payload, "site")
+    end
+  end
+
+  defp request_fields("page.sign_in", payload) do
+    with :ok <- id_string(payload, "tab_id"),
+         :ok <- site_field(payload, "site"),
+         :ok <- site_field(payload, "login_site"),
+         :ok <- optional(payload, "username_ref", &positive_u64/2),
+         :ok <- optional(payload, "password_ref", &positive_u64/2),
+         :ok <- some_ref(payload) do
+      observed(payload)
+    end
+  end
+
+  # A sign-in fills the username, the password, or both, so it names at least
+  # one of the two fields.
+  defp some_ref(payload) do
+    if Map.has_key?(payload, "username_ref") or Map.has_key?(payload, "password_ref"),
+      do: :ok,
+      else: {:error, {:missing_field, "password_ref"}}
+  end
+
   # `snapshot` rides a request exactly when it asks for the page back.
   defp observed(%{"observe" => true, "snapshot" => options}) when is_map(options) do
     with :ok <- only_fields(~w(mode max_chars depth), options) do
@@ -471,6 +546,11 @@ defmodule FermixCore.BrowserHost.Protocol do
 
   # ── results ────────────────────────────────────────────────────────────────
 
+  defp closed_result(type, result) when is_map_key(@result_closed, type),
+    do: only_fields(Map.fetch!(@result_closed, type), result)
+
+  defp closed_result(_type, _result), do: :ok
+
   defp result_fields(type, result) when type in ["tab.open", "tab.navigate"] do
     with :ok <- tab_fields(result) do
       optional(result, "page", fn result, field -> page(Map.fetch!(result, field)) end)
@@ -531,6 +611,20 @@ defmodule FermixCore.BrowserHost.Protocol do
   end
 
   defp result_fields("host.stop_ack", _result), do: :ok
+
+  defp result_fields("page.login_for", result) do
+    with :ok <- site_field(result, "login_site") do
+      bounded_nonempty(result, "username", @max_username_chars)
+    end
+  end
+
+  defp result_fields("page.sign_in", result) do
+    with :ok <- url_field(result, "url"),
+         :ok <- bounded_binary(result, "title", @max_text_chars),
+         :ok <- filled(result) do
+      optional(result, "page", fn result, field -> page(Map.fetch!(result, field)) end)
+    end
+  end
 
   defp tab_fields(result) do
     with :ok <- id_string(result, "tab_id"),
@@ -780,6 +874,17 @@ defmodule FermixCore.BrowserHost.Protocol do
     do: is_binary(value) and value != "" and String.length(value) <= @max_id_chars
 
   defp url_field(payload, field), do: bounded_nonempty(payload, field, @max_url_chars)
+
+  defp site_field(payload, field) do
+    with :ok <- bounded_nonempty(payload, field, @max_site_chars) do
+      if Regex.match?(@site_pattern, payload[field]),
+        do: :ok,
+        else: {:error, {:invalid_field, field}}
+    end
+  end
+
+  defp filled(%{"filled" => filled}) when filled in @filled, do: :ok
+  defp filled(_result), do: {:error, {:invalid_field, "filled"}}
 
   defp absolute_path(payload, field) do
     with :ok <- bounded_nonempty(payload, field, 4_096) do

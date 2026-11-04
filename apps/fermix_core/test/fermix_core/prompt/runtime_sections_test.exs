@@ -119,6 +119,19 @@ defmodule FermixCore.Prompt.RuntimeSectionsTest do
     assert content =~ "say the lookup was unsourced"
   end
 
+  # A connected plugin owns only what its tools do: an action it has no tool for,
+  # or a call its service rejects for good, moves to the browser. A hold or a
+  # refusal from Fermix or the user must never read as that reason, or the
+  # browser would become a way around the access gate.
+  test "build/1 sends what a connected plugin cannot do to the browser, never past a refusal" do
+    content = RuntimeSections.build([])
+
+    assert content =~ "do NOT open the browser or `web_search` for what they cover"
+    assert content =~ "is a new reason to switch to `browser`"
+    assert content =~ "a hold or refusal from Fermix or the user never is"
+    refute content =~ "for that surface"
+  end
+
   # M31 §14.1 + §18 row "Advertisement": a credential-gated built-in is filtered
   # off the wire while its credential is missing, so the catalog has to drop it
   # too — a name in the prompt that the model cannot call is the dead end the
@@ -343,6 +356,11 @@ defmodule FermixCore.Prompt.RuntimeSectionsTest do
     # (load it for workflow/args), NOT mandated before every tool call.
     assert content =~ "Open a plugin's skill with `skill_view` when you need"
     refute content =~ "skill_view` first, then call its tools"
+
+    # A plugin that is not connected is offered for connection; the browser
+    # stands in for it only on the user's ask.
+    assert content =~ "use the browser in its place only if the user asks"
+    refute content =~ "rather than scraping"
   end
 
   test "build/2 omits the plugin index when no plugins are supplied" do

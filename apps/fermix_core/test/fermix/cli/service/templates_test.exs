@@ -16,10 +16,12 @@ defmodule Fermix.CLI.Service.TemplatesTest do
       assert plist =~ "<key>Label</key><string>io.tezra.fermix</string>"
       assert plist =~ "<key>RunAtLoad</key><true/>"
       assert plist =~ "<key>KeepAlive</key><true/>"
-      # Standard (not Background): Background puts the daemon in macOS's darwinbg
-      # QoS band — CPU/IO/timer throttled under load, which starved the
-      # user-facing HTTP daemon while the foreground dev process stayed fast.
-      assert plist =~ "<key>ProcessType</key><string>Standard</string>"
+      # Interactive: the daemon serves chat, voice and channel replies, so it
+      # runs with an app's priority (31). Standard is still throttled (20), and
+      # Background or an unboosted Adaptive job sits in the darwinbg band (4),
+      # where CPU load starved every Repo call while a terminal-started daemon
+      # at 31 had none.
+      assert plist =~ "<key>ProcessType</key><string>Interactive</string>"
 
       # ExitTimeOut > launchd's 20s default so a graceful shutdown (Phoenix
       # connection drain) on SIGTERM/bootout is not escalated to SIGKILL.
@@ -48,8 +50,10 @@ defmodule Fermix.CLI.Service.TemplatesTest do
 
       assert unit =~ "Description=Fermix multi-agent platform daemon (user-scope)"
       assert unit =~ "After=network-online.target"
-      assert unit =~ "StartLimitIntervalSec=infinity"
-      assert unit =~ "StartLimitBurst=5"
+      # Five starts in ten minutes: a crash loop still stops, and the budget
+      # comes back, so a host's deliberate restarts never use it up for good.
+      assert unit =~ "\nStartLimitIntervalSec=600\n"
+      assert unit =~ "\nStartLimitBurst=5\n"
       assert unit =~ "Type=simple"
       assert unit =~ ~s(Environment="FERMIX_HOME=/home/dev/.fermix")
       assert unit =~ "ExecStart=/usr/local/bin/fermix run"
@@ -248,8 +252,8 @@ defmodule Fermix.CLI.Service.TemplatesTest do
       unit = Templates.render_vendor_unit()
 
       assert unit =~ "Description=Fermix multi-agent platform daemon (user-scope)"
-      assert unit =~ "StartLimitIntervalSec=infinity"
-      assert unit =~ "StartLimitBurst=5"
+      assert unit =~ "\nStartLimitIntervalSec=600\n"
+      assert unit =~ "\nStartLimitBurst=5\n"
       assert unit =~ "ExecStart=/usr/bin/fermix service run"
       # The payload directory is a systemd specifier, never an interpolated home:
       # the package installs one unit for every account on the machine.

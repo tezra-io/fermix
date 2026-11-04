@@ -36,6 +36,8 @@ defmodule FermixChannels.Mobile.MediaStore do
   @attachment_ttl_s 48 * 3_600
   @max_attach_ids_per_blob 8
   @default_max_attachments 4_096
+  # The bytes `import_file/3` reads and writes at a time.
+  @import_chunk_bytes 256 * 1_024
 
   @type server :: GenServer.server()
   @type upload_spec :: %{
@@ -138,6 +140,35 @@ defmodule FermixChannels.Mobile.MediaStore do
     GenServer.call(server, {:cancel_upload, attach_id})
   end
 
+  @doc """
+  Store the regular file at `path` under `spec` (companion protocol 7's
+  `attach_file`), through the same upload a phone's `attach_begin`,
+  `attach_chunk` and `attach_end` make: the same limits, and the same size and
+  digest verification before the blob is committed. The file is read in
+  chunks, never whole, by the calling process, which owns the upload while it
+  runs, as a phone's session does. A symlink, or a path that stops naming the
+  file it opened, is refused. A blob already stored under the digest is
+  `:present` without a read, as a phone's is.
+  """
+  @spec import_file(server(), Path.t(), upload_spec()) :: {:ok, :present} | {:error, term()}
+  def import_file(server \\ __MODULE__, path, spec) when is_binary(path) and is_map(spec) do
+    with {:ok, io} <- open_regular(path) do
+      try do
+        import_open(server, io, spec)
+      after
+        close_import(io, path)
+      end
+    end
+  end
+
+  @doc """
+  The largest blob this store takes, in bytes (`max_media_bytes`, from the
+  same `[fermix_channels.mobile]` setting a phone's `caps.max_media_bytes`
+  is): what the Mac's `server_hello.attachments.max_bytes` says.
+  """
+  @spec max_media_bytes(server()) :: pos_integer()
+  def max_media_bytes(server \\ __MODULE__), do: GenServer.call(server, :max_media_bytes)
+
   @spec put_bytes(server(), binary(), map()) :: {:ok, String.t()} | {:error, term()}
   def put_bytes(server \\ __MODULE__, bytes, metadata \\ %{})
       when is_binary(bytes) and is_map(metadata) do
@@ -231,6 +262,8 @@ defmodule FermixChannels.Mobile.MediaStore do
     put_complete_bytes(bytes, metadata, state)
   end
 
+  def handle_call(:max_media_bytes, _from, state), do: {:reply, state.max_media_bytes, state}
+
   def handle_call({:fetch, ref}, _from, state) do
     case existing_blob(state, ref) do
       {:ok, blob} ->
@@ -277,6 +310,112 @@ defmodule FermixChannels.Mobile.MediaStore do
     end)
 
     :ok
+  end
+
+  # -- importing a file (runs in the caller, `import_file/3`) --------------------
+
+  # The path must name a regular file when it is opened, and still name that
+  # same file once it is open, so a symlink swapped in at either end is
+  # refused rather than followed.
+  defp open_regular(path) do
+    with {:ok, linked} <- regular_link_info(path),
+         {:ok, io} <- open_import(path) do
+      same_file(io, linked)
+    end
+  end
+
+  defp regular_link_info(path) do
+    case File.lstat(path) do
+      {:ok, %{type: :regular} = info} -> {:ok, info}
+      {:ok, %{type: type}} -> {:error, {:not_regular_file, type}}
+      {:error, :enoent} -> {:error, :file_missing}
+      {:error, reason} -> {:error, {:file_unreadable, reason}}
+    end
+  end
+
+  defp open_import(path) do
+    case File.open(path, [:read, :binary, :raw]) do
+      {:ok, io} -> {:ok, io}
+      {:error, :enoent} -> {:error, :file_missing}
+      {:error, reason} -> {:error, {:file_unreadable, reason}}
+    end
+  end
+
+  defp same_file(io, linked) do
+    with {:ok, record} <- :file.read_file_info(io),
+         %File.Stat{type: :regular, inode: inode, major_device: device}
+         when inode == linked.inode and device == linked.major_device <-
+           File.Stat.from_record(record) do
+      {:ok, io}
+    else
+      _replaced_or_unreadable ->
+        _closed = File.close(io)
+        {:error, {:not_regular_file, :replaced}}
+    end
+  end
+
+  defp import_open(server, io, spec) do
+    case begin_upload(server, spec) do
+      {:ok, :present} ->
+        {:ok, :present}
+
+      {:ok, :upload} ->
+        io |> stream_chunks(server, field(spec, :attach_id), 0) |> finish_import(server, spec)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  # Chunks go in order. The store refuses one that would pass the announced
+  # size and ends the upload, so a file longer than announced ends the loop
+  # within `size_bytes / @import_chunk_bytes + 1` reads.
+  defp stream_chunks(io, server, attach_id, index) do
+    case :file.read(io, @import_chunk_bytes) do
+      :eof -> :eof
+      {:ok, bytes} -> write_import_chunk(io, server, attach_id, index, bytes)
+      {:error, reason} -> {:read_failed, reason}
+    end
+  end
+
+  defp write_import_chunk(io, server, attach_id, index, bytes) do
+    case write_chunk(server, attach_id, index, bytes) do
+      :ok -> stream_chunks(io, server, attach_id, index + 1)
+      {:error, reason} -> {:refused, reason}
+    end
+  end
+
+  defp finish_import(:eof, server, spec) do
+    case finish_upload(server, field(spec, :attach_id), field(spec, :sha256)) do
+      {:ok, _ref} -> {:ok, :present}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp finish_import({:refused, reason}, server, spec),
+    do: abandon_import(server, field(spec, :attach_id), reason)
+
+  defp finish_import({:read_failed, reason}, server, spec),
+    do: abandon_import(server, field(spec, :attach_id), {:read_failed, reason})
+
+  # A chunk past the announced size or a failed write has already ended the
+  # upload in the store; any other end is the caller's to cancel.
+  defp abandon_import(server, attach_id, reason) do
+    case cancel_upload(server, attach_id) do
+      :ok -> {:error, reason}
+      {:error, :unknown_upload} -> {:error, reason}
+      {:error, cleanup} -> {:error, {:cleanup_failed, reason, cleanup}}
+    end
+  end
+
+  # Closed however the import ended, a store call's exit included. The bytes
+  # were read and the outcome decided; a read-only handle that will not close
+  # changes neither, so it is logged and the outcome stands.
+  defp close_import(io, path) do
+    case File.close(io) do
+      :ok -> :ok
+      {:error, reason} -> Logger.error("media store could not close #{path}: #{inspect(reason)}")
+    end
   end
 
   defp begin_valid_upload(upload, owner, state) do

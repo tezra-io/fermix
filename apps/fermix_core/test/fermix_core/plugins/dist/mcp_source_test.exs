@@ -137,6 +137,7 @@ defmodule FermixCore.Plugins.Dist.McpSourceTest do
     assert spec.cwd == dir
     assert spec.capability_metadata.plugin_owned? == true
     assert spec.capability_metadata.plugin == "obsidian"
+    assert spec.capability_metadata.plugin_display_name == "obsidian"
     assert spec.capability_metadata.category == :plugin
   end
 
@@ -460,6 +461,7 @@ defmodule FermixCore.Plugins.Dist.McpSourceTest do
       assert spec.capability_metadata == %{
                plugin_owned?: true,
                plugin: "acme",
+               plugin_display_name: "Acme",
                category: :plugin
              }
     end

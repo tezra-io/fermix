@@ -152,23 +152,51 @@ defmodule FermixCore.Providers.Anthropic.Messages do
     invariant =
       Map.get(provider_state, :invariant_metrics) || invariant_metrics(tools, capabilities)
 
+    round = [
+      %{role: "assistant", content: assistant_content},
+      %{role: "user", content: tool_result_blocks(tool_results)}
+    ]
+
     history =
       substitute_tool_results(messages, Keyword.get(opts, :tool_result_substitutions, %{}))
 
-    next_messages =
-      (history ++
-         [
-           %{role: "assistant", content: assistant_content},
-           %{role: "user", content: tool_result_blocks(tool_results)}
-         ])
+    edited =
+      (history ++ round)
       |> ScreenshotRetention.keep_last(
         Keyword.get(opts, :max_retained_screenshots),
         &screenshot_message?/1,
         &elide_screenshot_message/1
       )
 
+    next_messages = strip_thinking_after_edit(messages ++ round, edited)
     request(next_messages, system, tools, capabilities, invariant, opts)
   end
+
+  # Preserved thinking: a thinking block's signature binds every message before
+  # it, and the API rejects a replayed block once that prefix changed (400 "bound
+  # to a different conversation"). Substitution and screenshot elision rewrite
+  # replayed history, so every thinking block after the first rewritten message
+  # is stripped (its turn's text and tool_use blocks stay); blocks before it keep
+  # their prefix and ride on. The stripped list becomes provider_state, so the
+  # strip holds on every later round and blocks minted after it replay intact.
+  defp strip_thinking_after_edit(replayed, edited) do
+    case Enum.find_index(Enum.zip(replayed, edited), fn {before, now} -> before != now end) do
+      nil ->
+        edited
+
+      first_edit ->
+        {kept, rest} = Enum.split(edited, first_edit + 1)
+        kept ++ Enum.map(rest, &strip_thinking/1)
+    end
+  end
+
+  defp strip_thinking(%{role: "assistant", content: blocks} = message) when is_list(blocks),
+    do: %{message | content: Enum.reject(blocks, &thinking_block?/1)}
+
+  defp strip_thinking(message), do: message
+
+  defp thinking_block?(%{"type" => type}), do: type in ["thinking", "redacted_thinking"]
+  defp thinking_block?(_block), do: false
 
   # In-loop compaction (IN_LOOP_CONTEXT_OVERFLOW.md §3.3): a replayed
   # `tool_result` block whose `tool_use_id` has an entry carries that text
@@ -513,7 +541,8 @@ defmodule FermixCore.Providers.Anthropic.Messages do
   # Adaptive thinking rides every request on supported models (the model itself
   # decides when and how much to deliberate; reasoning_effort calibrates it).
   # Response `thinking` blocks are replayed verbatim through provider_state's
-  # assistant_content in continue/3, so tool loops keep their signatures intact.
+  # assistant_content in continue/3, so tool loops keep their signatures intact
+  # until a history edit invalidates them (strip_thinking_after_edit/2).
   # A caller that caps its output tightly (the cue filter) passes
   # `thinking: :off`, because thinking counts against `max_tokens`.
   defp thinking_config(model, opts) do

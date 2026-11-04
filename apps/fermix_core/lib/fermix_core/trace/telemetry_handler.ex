@@ -13,6 +13,7 @@ defmodule FermixCore.Trace.TelemetryHandler do
   alias FermixCore.Agents.LifecycleTelemetry
   alias FermixCore.Attachments.Telemetry, as: AttachmentTelemetry
   alias FermixCore.Capabilities.MCP.Telemetry, as: MCPClientTelemetry
+  alias FermixCore.Checklists.Telemetry, as: ChecklistTelemetry
   alias FermixCore.ComputerUse.Telemetry, as: ComputerUseTelemetry
   alias FermixCore.Cues.Filter.Telemetry, as: CueFilterTelemetry
   alias FermixCore.Cues.Telemetry, as: CueTelemetry
@@ -26,7 +27,6 @@ defmodule FermixCore.Trace.TelemetryHandler do
   alias FermixCore.Realtime.LiveTelemetry
   alias FermixCore.SkillCuration.Telemetry, as: SkillCurationTelemetry
   alias FermixCore.SoulCuration.Telemetry, as: SoulTelemetry
-  alias FermixCore.Temporal.FollowupTelemetry, as: TemporalFollowupTelemetry
   alias FermixCore.Temporal.Telemetry, as: TemporalTelemetry
   alias FermixCore.Trace
 
@@ -114,6 +114,22 @@ defmodule FermixCore.Trace.TelemetryHandler do
       trace_type: :agent_event,
       agent_field: :op,
       trace_event: "plugin_dist"
+    },
+    # A home snapshot run's outcome per target (M75 §8): sessionless, like a
+    # plugin distribution op, so the target is the row's agent.
+    %{
+      event: [:fermix, :home, :snapshot],
+      trace_type: :agent_event,
+      agent_field: :target,
+      trace_event: "home_snapshot"
+    },
+    # A move's lifecycle bookends on each side (M75 §7.2): sessionless, so the
+    # side (source or candidate) is the row's agent; the move id correlates.
+    %{
+      event: [:fermix, :home, :move],
+      trace_type: :agent_event,
+      agent_field: :side,
+      trace_event: "home_move"
     },
     # Tool-search bridge queries (M10): the search-miss rate (match_count == 0)
     # is the primary soak-health metric for tool-schema deferral.
@@ -272,12 +288,12 @@ defmodule FermixCore.Trace.TelemetryHandler do
       PluginAuthTelemetry.trace_event_definitions() ++
       ManagementTelemetry.trace_event_definitions() ++
       TemporalTelemetry.trace_event_definitions() ++
-      TemporalFollowupTelemetry.trace_event_definitions() ++
       OpenLoopTelemetry.trace_event_definitions() ++
       LiveTelemetry.trace_event_definitions() ++
       GistTelemetry.trace_event_definitions() ++
       ComputerUseTelemetry.trace_event_definitions() ++
       AttachmentTelemetry.trace_event_definitions() ++
+      ChecklistTelemetry.trace_event_definitions() ++
       CueTelemetry.trace_event_definitions() ++
       CueFilterTelemetry.trace_event_definitions()
   end

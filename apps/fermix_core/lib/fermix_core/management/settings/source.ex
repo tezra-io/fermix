@@ -10,6 +10,7 @@ defmodule FermixCore.Management.Settings.Source do
 
   alias FermixCore.Setup.SecretPaths
   alias FermixCore.Setup.SecretStore
+  alias FermixCore.Setup.SecretWriter
 
   @type snapshot :: map()
 
@@ -38,16 +39,20 @@ defmodule FermixCore.Management.Settings.Source do
   end
 
   @doc """
-  Whether a secret sits at its own `SecretPaths` path.
+  Whether a secret sits at its own `SecretPaths` path, resolved.
 
-  "Present" is a sentinel or a plaintext value at the path, never "the keychain
-  holds an item": a key stored without its sentinel is never read back, so
-  reporting it present would describe a credential the runtime cannot use.
+  "Present" is a value the runtime can use: the boot and every save resolve a
+  sentinel into the live settings, so a sentinel still there is one this host
+  could not resolve (a keychain reference in a home moved off its Mac, a
+  locked keychain, a missing file), and is not present: the row says it needs
+  entering again. Never "the keychain holds an item" either: a key stored
+  without its sentinel is never read back, so reporting it present would
+  describe a credential the runtime cannot use.
   """
   @spec secret_present?(snapshot(), atom()) :: boolean()
   def secret_present?(snapshot, key) when is_map(snapshot) and is_atom(key) do
     value = SecretStore.get_snapshot_value(snapshot, SecretPaths.fetch!(key).path)
-    is_binary(value) and value != ""
+    is_binary(value) and value != "" and not SecretWriter.sentinel?(value)
   end
 
   @doc "A keyword value, or an empty list where the block is absent or malformed."

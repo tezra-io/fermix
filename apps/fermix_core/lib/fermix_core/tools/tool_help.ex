@@ -5,6 +5,8 @@ defmodule FermixCore.Tools.ToolHelp do
 
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
+  alias FermixCore.Capabilities.Advertisement
+  alias FermixCore.Capabilities.Builtin
   alias FermixCore.Capabilities.Builtin.Tool
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry
@@ -75,9 +77,25 @@ defmodule FermixCore.Tools.ToolHelp do
           {:ok, String.t()} | {:error, String.t()}
   def render(registry, cap_name, context \\ %{}) when is_binary(cap_name) and is_map(context) do
     with {:ok, capability} <- find_capability(registry, cap_name, context) do
-      {:ok, format_capability(capability)}
+      {:ok, format_capability(current(capability), context)}
     end
   end
+
+  # A built-in is documented from its module as it answers NOW rather than from
+  # the copy mirrored at boot. Computer use builds its schema, examples and
+  # failure modes from what the installed helper offers, which is only known once
+  # a helper has answered (M86 P2); every other built-in answers its callbacks
+  # exactly as it did at boot, so its docs read as before. The static
+  # `parameters/0` is the one read, never a per-turn `dynamic_parameters/1`: these
+  # docs describe the tool, not one turn's view of it.
+  defp current(%Capability{kind: :builtin, metadata: %{tool_module: mod}} = capability)
+       when is_atom(mod) do
+    fresh = Builtin.from_tool_module(mod)
+    docs = Map.take(fresh.metadata, [:examples, :failure_modes])
+    %{capability | parameters: fresh.parameters, metadata: Map.merge(capability.metadata, docs)}
+  end
+
+  defp current(capability), do: capability
 
   defp find_capability(registry, cap_name, context) do
     case Registry.find(registry, cap_name) do
@@ -113,11 +131,14 @@ defmodule FermixCore.Tools.ToolHelp do
   defp class_visible?(%Capability{policy_class: class}, classes) when is_list(classes),
     do: class in classes
 
-  defp format_capability(capability) do
+  # The description is the one a turn reads (`Advertisement.description/2`), so a
+  # tool whose words are only known at runtime is not documented by the copy it
+  # registered at boot.
+  defp format_capability(capability, context) do
     [
       "# #{capability.name}",
       "",
-      capability.description,
+      Advertisement.description(capability, context),
       builtin_note(capability),
       "",
       "## Parameters",

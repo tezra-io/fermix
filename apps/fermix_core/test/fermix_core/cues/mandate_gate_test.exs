@@ -337,6 +337,38 @@ defmodule FermixCore.Cues.MandateGateTest do
       {error, _} = refused!(call(context), "mandate_disabled")
       assert error =~ "switched off"
     end
+
+    # A failed load check names what failed, and a validator under the home
+    # names the account in its path. `mandate_reason` is exported outside the
+    # content-capture gate, so the event says only that the mandate is
+    # inactive, for a mandate call and a reader alike; the model and the row
+    # keep the sentence.
+    test "a load check's paths reach the model and the row, never the event" do
+      dir = "/Users/someone/Wombat-Cellar-27"
+      {fixture, context} = run!("gate_inactive_path", %{"validator" => dir <> "/validate.sh"})
+      refute FermixCore.Telemetry.capture_content?()
+
+      for refused <- [&call/1, &read/1] do
+        {error, metadata} = refused!(refused.(context), "mandate_disabled")
+        assert error =~ "the mandate is inactive: The validator #{dir}/validate.sh"
+        assert metadata.mandate_reason == "the mandate is inactive"
+        refute inspect(metadata) =~ "Wombat-Cellar-27"
+      end
+
+      assert [%{decision: "refuse", reason: reason}] = F.call_rows(fixture.conn, fixture.run.id)
+      assert reason =~ dir
+    end
+
+    # The Repo's own error is for the model and the log, never the event.
+    test "an approval that cannot be read is named, without the Repo's error, in the event" do
+      {fixture, context} = run!("gate_approval_unreadable")
+      approve!(context)
+      exec!(fixture.conn, "DROP TABLE cue_mandate_approvals", [])
+
+      {error, metadata} = refused!(call(context), "mandate_disabled")
+      assert error =~ "the mandate's approval could not be read ("
+      assert metadata.mandate_reason == "the mandate's approval could not be read"
+    end
   end
 
   describe "the pin check (C35, C45)" do
@@ -536,6 +568,27 @@ defmodule FermixCore.Cues.MandateGateTest do
 
       {error, _} = refused!(call(context, %{@args | "owner" => "other-org"}), "mandate_refused")
       assert error =~ ~s(the argument owner must be "example-org")
+    end
+
+    # What a mandate pins may be the owner's own content (an address, an
+    # account), and `mandate_reason` is exported outside the content-capture
+    # gate. The model still needs the value to correct its call, and the owner
+    # reads it in the row, so only the event leaves it out.
+    test "a pinned argument's value reaches the model and the row, never the event" do
+      pinned = "quill-harbor-5308@example.invalid"
+      {fixture, context} = run!("gate_pin_value", %{"pin_args" => %{"owner" => pinned}})
+      approve!(context)
+      refute FermixCore.Telemetry.capture_content?()
+
+      {error, metadata} =
+        refused!(call(context, %{@args | "owner" => "other-org"}), "mandate_refused")
+
+      assert error =~ ~s(the argument owner must be "#{pinned}")
+      assert metadata.mandate_reason == "the argument owner differs from what the mandate pins"
+      refute inspect(metadata) =~ pinned
+
+      assert [%{decision: "refuse", reason: reason}] = F.call_rows(fixture.conn, fixture.run.id)
+      assert reason =~ pinned
     end
   end
 

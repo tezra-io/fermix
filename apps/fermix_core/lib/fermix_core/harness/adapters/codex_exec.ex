@@ -11,7 +11,9 @@ defmodule FermixCore.Harness.Adapters.CodexExec do
   `sandbox` (`-s`, or `-c sandbox_mode=<v>` on a resume), `add_dirs`,
   `ephemeral`, `profile`, `images`, `output_schema`, `resume`. `ephemeral`
   writes no session files, so it forces `resumable: false` and is rejected with
-  `resume`.
+  `resume`. A `model` must be an id the signed-in account's Codex lists
+  (`Vendors.codex_models/1`): Codex refuses any other only once it has started, so
+  the caller would learn it from a failed run instead of the tool's answer.
 
   The `resume` subcommand accepts none of `-C`/`-s`/`--add-dir`/`-p` (verified —
   clap answers `-s` with "unexpected argument"), but a missing *flag* is not a
@@ -37,6 +39,7 @@ defmodule FermixCore.Harness.Adapters.CodexExec do
   @behaviour FermixCore.Harness.Adapter
 
   alias FermixCore.Harness.Adapter
+  alias FermixCore.Harness.Vendors
 
   @cli "codex"
 
@@ -105,7 +108,21 @@ defmodule FermixCore.Harness.Adapters.CodexExec do
       when is_binary(item_type),
       do: %{phase: item_type}
 
+  # Codex says why a turn failed only here, and writes no `-o` result for it.
+  # Older Codex nests the API's error as JSON inside the message; the sentence
+  # inside is what the owner reads.
+  def extract(%{"type" => "turn.failed", "error" => %{"message" => message}})
+      when is_binary(message) and message != "",
+      do: %{failure_text: failure_sentence(message)}
+
   def extract(_event), do: %{}
+
+  defp failure_sentence(message) do
+    case Jason.decode(message) do
+      {:ok, %{"error" => %{"message" => inner}}} when is_binary(inner) and inner != "" -> inner
+      _plain_text -> message
+    end
+  end
 
   @impl true
   @spec resume_hint(map()) :: String.t() | nil
@@ -162,7 +179,7 @@ defmodule FermixCore.Harness.Adapters.CodexExec do
   # here as an option (it is consumed by head_argv); the resume-incompatible
   # params were already rejected above, so they are simply absent under resume.
   defp option_args(params, ctx) do
-    with {:ok, model} <- model_args(params),
+    with {:ok, model} <- model_args(params, ctx),
          {:ok, effort} <- effort_args(params),
          {:ok, sandbox} <- sandbox_args(params),
          {:ok, profile} <- profile_args(params),
@@ -176,9 +193,25 @@ defmodule FermixCore.Harness.Adapters.CodexExec do
     end
   end
 
-  defp model_args(%{model: model}) when is_binary(model) and model != "", do: {:ok, ["-m", model]}
-  defp model_args(%{model: bad}), do: {:error, {:invalid_param, :model, bad}}
-  defp model_args(_params), do: {:ok, []}
+  defp model_args(%{model: model}, ctx) when is_binary(model) and model != "" do
+    with {:ok, models} <- Vendors.codex_models(codex_home: Map.get(ctx, :codex_home)),
+         :ok <- listed_model(model, models),
+         do: {:ok, ["-m", model]}
+  end
+
+  defp model_args(%{model: bad}, _ctx), do: {:error, {:invalid_param, :model, bad}}
+  defp model_args(_params, _ctx), do: {:ok, []}
+
+  # The refusal names the ids Codex lists with the names it shows, so a caller
+  # holding a display name ("Daybreak Blue") can find its id.
+  defp listed_model(model, models) do
+    if Enum.any?(models, &(&1.id == model)) do
+      :ok
+    else
+      listed = for %{listed?: true} = listed <- models, do: {listed.id, listed.name}
+      {:error, {:unknown_codex_model, model, listed}}
+    end
+  end
 
   defp effort_args(%{effort: effort}) when is_binary(effort) and effort != "",
     do: {:ok, ["-c", "model_reasoning_effort=" <> effort]}

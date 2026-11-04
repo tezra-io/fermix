@@ -6,6 +6,13 @@ defmodule Fermix.CLI.ServiceTest do
   alias Fermix.CLI.Service.Templates
 
   @vendor_unit "/usr/lib/systemd/user/fermix.service"
+  @own_user_unit "0::/user.slice/user-1000.slice/user@1000.service/app.slice/fermix.service\n"
+  @own_system_unit "0::/system.slice/fermix.service\n"
+  @terminal_server_unit "0::/user.slice/user-1000.slice/user@1000.service/app.slice/" <>
+                          "gnome-terminal-server.service\n"
+  @terminal_tab_scope "0::/user.slice/user-1000.slice/user@1000.service/app.slice/" <>
+                        "app-org.gnome.Terminal.slice/vte-spawn-5f0c.scope\n"
+  @ssh_session_scope "0::/user.slice/user-1000.slice/session-3.scope\n"
 
   defmodule AppBuildInfo do
     def app_engine?, do: true
@@ -575,21 +582,21 @@ defmodule Fermix.CLI.ServiceTest do
     end
 
     # The vendor unit is installed on every packaged host, so its presence says
-    # nothing about THIS process. `INVOCATION_ID` is what systemd sets in the
-    # service it started, and a binary run from a shell carries none.
-    test "supervised? reads the service invocation, not the unit file" do
+    # nothing about THIS process: the cgroup it runs in does. A binary run from
+    # a shell sits in that shell's scope or unit, never in Fermix's.
+    test "supervised? reads the unit this process runs in, not the unit file" do
       tmp = mkdir!()
       config_root = Path.join(tmp, "config")
       :ok = Binding.write(tmp, root: config_root)
       base = packaged_opts(config_root, @vendor_unit) ++ [standalone?: fn -> true end]
 
-      assert Service.supervised?(base ++ [invocation_id: "4b1e9d1a"])
-      refute Service.supervised?(base ++ [invocation_id: nil])
-      refute Service.supervised?(base ++ [invocation_id: ""])
+      assert Service.supervised?(base ++ [cgroup: cgroup(@own_user_unit)])
+      refute Service.supervised?(base ++ [cgroup: cgroup(@terminal_server_unit)])
+      refute Service.supervised?(base ++ [cgroup: fn -> {:error, :enoent} end])
 
       refute Service.supervised?(
                packaged_opts(config_root, @vendor_unit) ++
-                 [standalone?: fn -> false end, invocation_id: "4b1e9d1a"]
+                 [standalone?: fn -> false end, cgroup: cgroup(@own_user_unit)]
              )
     end
 
@@ -598,13 +605,45 @@ defmodule Fermix.CLI.ServiceTest do
       unit_path = Path.join(tmp, "fermix.service")
       opts = fixture_opts(:linux, tmp) ++ [unit_path: unit_path, standalone?: fn -> true end]
 
-      refute Service.supervised?(opts ++ [invocation_id: "4b1e9d1a"])
+      refute Service.supervised?(opts ++ [cgroup: cgroup(@own_user_unit)])
 
       File.write!(unit_path, "stub\n")
 
       assert Service.supervised?(opts)
     end
   end
+
+  # Always On setup §9: whether this process runs inside the unit Service
+  # installs, in either scope, read from its cgroup (v2), never from
+  # `INVOCATION_ID`, which every process a terminal server's own unit opens
+  # inherits too.
+  describe "systemd_invocation?/1" do
+    test "Fermix's own unit, in either scope, is" do
+      for scope <- [:user, :system] do
+        {:ok, %{linux_unit: unit}} = Service.spec(scope, fixture_opts(:linux, mkdir!()))
+        assert unit == "fermix.service"
+      end
+
+      assert Service.systemd_invocation?(cgroup: cgroup(@own_user_unit))
+      assert Service.systemd_invocation?(cgroup: cgroup(@own_system_unit))
+    end
+
+    test "a shell inside another unit or a scope is not" do
+      for path <- [@terminal_server_unit, @terminal_tab_scope, @ssh_session_scope] do
+        refute Service.systemd_invocation?(cgroup: cgroup(path)), path
+      end
+
+      # A unit whose name only ends like Fermix's is someone else's.
+      refute Service.systemd_invocation?(cgroup: cgroup("0::/system.slice/notfermix.service\n"))
+    end
+
+    test "a host with no cgroup file, a Mac, is not" do
+      refute Service.systemd_invocation?(cgroup: fn -> {:error, :enoent} end)
+      refute Service.systemd_invocation?(cgroup: fn -> {:ok, ""} end)
+    end
+  end
+
+  defp cgroup(text), do: fn -> {:ok, text} end
 
   defp packaged_opts(config_root, fragment_path) do
     [

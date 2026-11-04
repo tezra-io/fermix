@@ -39,9 +39,11 @@ defmodule FermixChannels.Mobile.Iroh.Bridge do
   a stream open, which takes a stranger about 200 new connections a second.
   That does not protect a pairing phone's stream here: a stranger who opens
   streams fast enough can still close it, since it stays in its handshake
-  through the round trip to its `pair_request` and the attestation that may
-  take seconds; a phone that prepares its attestation before it dials keeps
-  that window short.
+  through the round trip to its `pair_request`; a phone that makes its
+  attestation only after the daemon's reply stretches that to seconds. Once
+  the request arrives, its connection checks it before it reads any request
+  to make room, so the daemon's own check adds nothing to that window; a
+  phone that prepares its attestation before it dials keeps it short.
 
   The places are counted from the connections this process admitted and
   monitors. A bridge restarted while its old connections live starts with none

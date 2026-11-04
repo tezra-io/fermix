@@ -1,7 +1,7 @@
 defmodule FermixChannels.Gateway.Commands.RegistryTest do
   use ExUnit.Case, async: false
 
-  alias FermixChannels.Gateway.Commands.Registry
+  alias FermixChannels.Gateway.Commands.{New, Registry, Stop}
 
   # Minimal command stub whose name collides with the built-in `/new`.
   defmodule DupName do
@@ -28,6 +28,28 @@ defmodule FermixChannels.Gateway.Commands.RegistryTest do
   test "resolves /stop to the Stop command" do
     Application.delete_env(:fermix_channels, :commands)
     assert {:ok, FermixChannels.Gateway.Commands.Stop} = Registry.lookup("stop")
+  end
+
+  # One catalog for both companion wires: the phone's `caps.commands` and
+  # the Mac's `server_hello.commands`, each command as it describes itself.
+  test "the catalog is the live registry, each command's name, aliases and description" do
+    Application.put_env(:fermix_channels, :commands, [
+      FermixChannels.Gateway.Commands.New,
+      FermixChannels.Gateway.Commands.Stop
+    ])
+
+    assert Registry.catalog() == [
+             %{
+               "name" => "new",
+               "aliases" => ["clear"],
+               "description" => New.description()
+             },
+             %{
+               "name" => "stop",
+               "aliases" => [],
+               "description" => Stop.description()
+             }
+           ]
   end
 
   test "raises on a duplicate name or alias" do

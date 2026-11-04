@@ -2,7 +2,7 @@
 
 The primary job of this harness is **change-by-change behavioral regression**:
 does Fermix still behave like a grounded chief of staff through its real agent,
-tool, memory, and trace path? The recommended 21-case core covers realistic
+tool, memory, and trace path? The recommended 23-case core covers realistic
 multi-turn work, prioritization, tool-grounded synthesis, sycophancy
 counterfactuals, evidence-sensitive recommendations, and calibrated confidence.
 It is not a benchmark.
@@ -96,7 +96,7 @@ make dry
 make regression
 ```
 
-`make dry` validates and prints the exact 21-case plan (32 real turns) without
+`make dry` validates and prints the exact 23-case plan (34 real turns) without
 contacting the daemon or judge. `make regression` runs that host-read-only core
 through the real assistant and independent judge. For targeted investigation, select
 `chief_of_staff`, `chief_of_staff_tools`, or `epistemic_integrity` directly with
@@ -435,7 +435,9 @@ re-renders it too). Open that page rather than reading the markdown. It has thre
 
 Time and cost sit in a column block labelled "beside the score, never ranked". Each run
 writes `run.json` (its identity, score and any invalidity reasons) and per-task tokens
-and rate-card cost into `results.json`. Runs from before that recorded neither their
+and rate-card cost into `results.json`, beside every trial's record (`trial_records`:
+its success, whether it was a valid measurement, its status and the checker's own
+detail, which `bin/judgment_agreement.py` reads). Runs from before that recorded neither their
 commit nor per-task cost or time: the page places them on the `origin/dev` commit that
 was current when they started, marked "inferred", and shows "—" for what was never
 recorded.
@@ -596,7 +598,7 @@ Notes:
 
 | Goal | Command | Notes |
 |---|---|---|
-| Behavioral regression (did a change break anything) | `make regression` | 21-case `host-safe-core`, independent external Claude judge, development daemon |
+| Behavioral regression (did a change break anything) | `make regression` | 23-case `host-safe-core`, independent external Claude judge, development daemon |
 | Overfitting check (public vs held-out) | put your held-out suites in a dir OUTSIDE the repo, set `private_suites.dir` in config.yaml, run `… --private`, compare the `provider/model` vs `…:private` rows | golds stay out of the repo and no held-out dataset/experiment is written; candidate prompts/replies still enter the configured Opik trace project, so choose project separation appropriate to the data; see `suites/capability/private/holdout.example.yaml` |
 | **Uplift** (Fermix vs raw model) | `make baseline` then `bin/run_uplift.py --fermix <results.json> --baseline <results.json>` | needs `EVAL_BASELINE_API_KEY` + `EVAL_BASELINE_MODEL` (same model the Fermix arm served). The claim is **the whole Fermix system vs a raw single call**, not the contribution of tools — the arms also differ in scaffold, memory and execution policy |
 | **Configuration arms** (Fermix against another Fermix) | `make arms ARMS=arms/<name>.yaml` | one task selection against several daemon CONFIGURATIONS — §5e |
@@ -874,8 +876,57 @@ FERMIX_CAP_SEED_ARGS="--cues --cue-mandates" bin/capability-daemon.sh up
 uv run bin/run_capability.py --candidates --suite cap_cues --trials 3 \
   --confirm-daemon-isolated --confirm-isolated-env
 FERMIX_EVAL_HOME=~/.fermix-capability-eval uv run bin/run_eval.py --suite cues \
-  --profile isolated_mutation --judge --confirm-daemon-isolated --confirm-isolated-env
+  --profile isolated_mutation --judge --confirm-daemon-isolated --confirm-isolated-env \
+  --reset-home
 bin/capability-daemon.sh down
+```
+
+`--reset-home` starts every attempt of the suite from the seeded world. Without
+it, what one case's model did stays in the home for the next: a watcher it made on
+eng-blogs is the next case's "already exists", and a memory directive it stored
+steers every later turn. `capability-daemon.sh up` snapshots the seeded state into
+`<home>/eval-snapshot` once seeding ends, with the daemon still down: what
+`reset_state` clears (memory.db with its -wal and -shm, `memory/`, `skills/`, job
+runs, journals, grants, bootstrap, browser, harness, eval-mcp) and `config.toml`,
+never `auth.json`, whose OAuth refresh token the daemon may rotate. With the flag,
+`run_eval.py` runs `capability-daemon.sh reset` before each attempt of an
+`isolated_mutation` `drive: companion` case, `--fail-retries` re-drives included:
+stop the daemon, restore the snapshot, start it and wait until it answers on its
+control socket. The runner then waits, up to 30 s, until the companion socket
+answers the drive's own hello: the daemon serves that socket after the control
+socket, and a drive that connected in between was refused. It is
+off by default, needs `--profile isolated_mutation`, and refuses to start a run on
+a home with no snapshot. `reset` (like `snapshot`) refuses any home whose leaf
+names neither `eval` nor `e2e` before it stops or touches anything, with the
+seeder's own guard (`bin/eval_home_state.py`). Each attempt pays one daemon
+restart, a few seconds, and the run prints each reset's time. A reset that fails,
+a companion socket that never answers included, stops the run: the case is
+reported INCOMPLETE, the rest are left unrun, as an exhausted account does, and the
+banner names the harness. Reports redact every `drive_error` by default;
+`--include-content` keeps the text.
+
+### The Cues screen (`make capability-screen`)
+
+While `[fermix_core.cues] screen` is `decision_model`, a decision model judges each
+item before the filter model reads it, and an item under its bar never reaches the
+filter. `bin/run_screen_eval.py` measures that screen on a labelled set
+(`suites/capability/fixtures/cues/screen_set.yaml`: invented watchers with stacked
+conditions and items labelled `should_screen_through` or `irrelevant`; its
+`labelling` key says how the labels were decided). For each pair it takes the
+screen's own request from `Cues.Filter.Decision.request/1` (form A, today's
+question) and the same request without the numbered instructions (form B, built in
+the harness only), asks both through `Providers.DecisionModel.yes_no/4` on every
+decision model whose key is in the environment, and reports recall and the share of
+irrelevant items dropped at bars 0.1 to 0.4, split by kind, with the pairs only one
+form gets right. It needs no daemon: the engine half (`bin/screen_eval.exs`) runs in
+a temporary `FERMIX_HOME` that is removed afterwards, and the keys come only from
+`OPENAI_API_KEY`, `OPENROUTER_API_KEY` and `VENICE_API_KEY`, as the explicit seed
+mode reads them; a provider without one is reported skipped. `risk: host_readonly`.
+
+```sh
+make capability-screen-dry                    # validate, render, plan; spends nothing
+uv run bin/run_screen_eval.py                 # every provider with a key (make capability-screen)
+uv run bin/run_screen_eval.py --provider openai
 ```
 
 ---
@@ -1017,6 +1068,116 @@ The fixture audio is regenerated, and checked for reproducibility, with
 `uv run bin/make_voice_fixtures.py [--check]` (macOS only: `say` +
 `afconvert -f WAVE -d LEI16@24000 -c 1`); the clips' texts live in that script and
 `suites/fixtures/voice/manifest.json` records each WAV's text and sha256.
+
+---
+
+## 5h. The desktop corpus and the computer-use baseline (`run_desktop.py`, `cu_baseline.py`)
+
+`suites/desktop/corpus.yaml` (contract: `suites/SCHEMA.md`, *Desktop corpus*)
+holds 35 real-user requests against the compux fixture applications: GTK3, GTK4
+and Qt on Linux (`compux/fixtures/linux/`), the AppKit half of `FixtureApp` on
+macOS. Two of them are marked `platforms: [linux]` (a refusal only the Linux
+fixtures can produce) and are planned on those fixtures alone. Each attempt is
+decided by what the application recorded about itself and counted from the
+daemon's own traces.
+
+One attempt: launch the fixture on a fresh state file in the run's directory and
+wait for it to write that file empty and settle its window; send the query as one
+`fermix ask` turn (`evallib.driver`, with the usage-limit retry the other runners
+use); wait for the fixture's events to stop changing; stop the fixture; read the
+turn's trace rows. The rows are the run window's (from the send until their count
+stops moving), bucketed into `(agent, session_id)` turns; anything but exactly
+one main-agent turn makes the attempt invalid. Every task runs `--repeat` times
+(default 20, what P3 needs per cell), with the task order interleaved on each
+repeat. An attempt that cannot be measured is `invalid` with its reason and is
+never scored as a failure: the fixture could not be started or never became
+ready, the state file was unreadable, the turn timed out or errored, no turn or
+several turns ran in its window, the turn made no computer-use call
+(`no_computer_use`: a turn that touched nothing would pass every `absent`
+clause), or a computer-use row carries no `output` (`content_capture_off`: the
+daemon runs with `FERMIX_TRACE_CONTENT=0`, which only its own environment shows,
+so images and refusals cannot be counted). A task with `expect_refusal: <code>`
+passes only when its clauses pass AND a failed computer-use row in the turn
+carries that typed code (`element_disabled` for the disabled button); a paused,
+busy or user-active refusal does not count. After a turn
+the CLI gave up on, the next attempt waits until the daemon has been quiet for
+20 s, and the run stops after 5 minutes of activity. "Quiet" is judged on the
+rows' end times, so a model call still in flight after 20 s can land in the next
+attempt's window and make it `several_turns`: invalid, never mis-scored.
+
+**Risk.** Every task is `desktop_input`: the model moves the real pointer, types
+real keys, and the helper captures the screen. A live run is refused (exit 2)
+without `--disposable-desktop`, which attests that the desktop and the daemon home
+(`FERMIX_EVAL_HOME`) are disposable (a VM, a container session, a throwaway
+account that nobody uses), and without `--fixture` naming the one fixture it
+measures. The preconditions, in order (exit 3): `FERMIX_EVAL_HOME` is set (left
+unset, the harness would fall back to `~/.fermix-dev`, on the owner's Mac the
+live development daemon the phone pairs with) and is not `~/.fermix`, both
+checked before any daemon is contacted; the fixture's platform is
+this host's; its script or binary exists; the daemon answers; its `config.toml`
+has `[fermix_core.computer_use] enabled = true` and no strict sandbox (strict
+derives look-only computer use, which refuses every action); and the fixture's
+`--self-test` records every control the corpus asserts on.
+
+That last preflight proves less than it reads. The Linux self-tests drive each
+control through its toolkit widget (signals fire as they would for a user, but
+no pointer or key event is involved). `FixtureApp --self-test` on macOS calls the
+recording handlers directly, never the widgets, so there it proves only that the
+corpus and the fixture agree on control names. Read a failure on the first Mac
+run as a fixture gap before reading it as the model's.
+
+```sh
+# from benchmark/, on any host: validate and plan; launches, sends, spends nothing
+uv run bin/run_desktop.py --dry-run
+uv run bin/run_desktop.py --dry-run --fixture qt --task press_button --repeat 3
+
+# live, ONLY on a disposable desktop whose daemon runs on a disposable eval home
+# with computer use on (one fixture per run; all 29 tasks x 20 by default)
+FERMIX_EVAL_HOME=~/.fermix-desktop-eval uv run bin/run_desktop.py --fixture gtk4 \
+  --disposable-desktop
+# macOS: build the fixture first (compux scripts/build_fixture_app.sh, /tmp/FixtureApp)
+FERMIX_EVAL_HOME=~/.fermix-desktop-eval uv run bin/run_desktop.py --fixture macos \
+  --fixture-app /tmp/FixtureApp --disposable-desktop
+```
+
+`--fixture-dir` defaults to `fixtures/` of the compux checkout beside this one.
+Results land in `reports/desktop/<run_id>/`: `results.json` (every attempt with
+its clauses and counts, a per-task summary, failure classes), `report.md`, and
+per attempt the fixture's `state/` file and `logs/`. Exit: 0 complete · 2 usage,
+corpus or attestation · 3 preconditions · 4 incomplete (a partial report is
+still written). Per attempt the counts are: model calls (`llm_call` rows),
+computer-use calls and failures by class, missed aims, `Aim NOT confirmed`
+replies, images and their estimated tokens (width x height / 750 for each image
+a tool returned), and *image tokens sent* (each image again for every later
+model call that carried it while it was among the home's last
+`max_retained_screenshots`).
+
+The Linux fixtures run headless in compux's fixture container
+(`compux/fixtures/linux/Dockerfile`; build and run lines in its header):
+`private-session.sh --self-test` drives every control of every fixture, and
+`a11y_roots.py` lists them on the container's own accessibility bus. That image
+carries no Fermix daemon and no compux helper, and its command mode starts every
+fixture itself, so it proves the fixtures; it is not a host for a live corpus run.
+
+**The baseline** (`bin/cu_baseline.py`) reads a machine's existing trace files,
+read-only, and drives nothing. Every failed computer-use `tool_exec` row is put
+in one class (`refusal` by its typed code, `timeout`, `permission`,
+`stale_observation`, or `other`); a missed aim (an aimed action that went through,
+followed by the same action at other coordinates) is counted beside them. For
+every turn that used computer use the baseline reports its model calls, images
+and image tokens.
+
+```sh
+uv run bin/cu_baseline.py                        # ~/.fermix-dev/traces and ~/.fermix/traces
+uv run bin/cu_baseline.py --traces DIR --since 2026-10-01 --until 2026-10-31
+```
+
+It writes `reports/cu_baseline/<UTC>/baseline.json` and `baseline.md` (or
+`--out DIR`), and says so when there is nothing to count. A row written without
+content capture has no `output`: its images cannot be counted and its class
+comes from the row's closed fields, and the report says how many such rows there
+were. Run it on the machine where computer use actually ran: on 2026-10-31 this
+Linux laptop's homes and backups held no computer-use rows.
 
 ---
 

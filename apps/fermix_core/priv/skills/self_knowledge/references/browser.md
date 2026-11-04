@@ -11,6 +11,31 @@ is the default and the right answer for almost everything: it opens and closes
 tabs, it redirects downloads into the workspace, it reads and clears cookies,
 and nobody else is using it.
 
+Whose profile a call uses follows who is asking. Every conversation of the
+owner's on this Fermix shares one set of managed profiles: a chat on any
+channel, a scheduled job's runs, a cue run and a delegated worker all use the
+same browser, so a site signed in once stays signed in for all of them, and a
+scheduled job no longer starts signed out on every run. A guest's conversation
+keeps its own profiles, shared with neither the owner nor another
+conversation, and so does a plugin skill, which runs at guest trust, in the
+conversation it runs in. A call whose run carries no trust is refused with
+`missing_trust`. Profiles belong to the device: a sign-in on one Fermix (the
+Mac) does not sign another (a VM) in. Profiles used to be kept per
+conversation and are not carried over: the owner signs in once more, a guest
+conversation starts signed out once, and the old per-conversation folders
+under the home's `browser/profiles/` stay on disk unused until deleted.
+
+The owner's conversations share one browser but not its current tab. A call
+that names no `target` acts on its own conversation's tab: the last one it
+opened or focused that is still open. Each chat, each scheduled job run and
+each cue run is a conversation of its own; a delegated worker works in its
+parent's tab. A conversation with no tab of its own is never handed another's:
+its `navigate` opens a new tab, and anything else answers `no_tab`, so `open`
+the page first. `target` names any tab in the shared browser, `tabs` lists
+them all and marks the caller's own (`this_conversation`), and the tab cap
+counts every conversation's tabs. The owner's browser is not closed when a
+one-shot `fermix ask` finishes; it closes after a period with no use.
+
 Which of the first three a call without `profile` uses is `[fermix_core.browser]
 default_profile`, the person's "how tasks run" choice: `fermix` (the shipped
 default) runs in a window wherever there is a display and in the background on
@@ -54,10 +79,15 @@ driven over CDP, or the Fermix app's own browser pane, which the app hosts
 and the engine drives over a local wire (`browser_host.sock`) and shows in its
 own window for a `fermix_visible` task, and for a `fermix` task too unless an
 explicit headless override says otherwise, the same as the managed Chrome
-above. Which one is decided once,
-when a conversation starts using the browser: the pane when the app's
+above. The pane is decided per conversation and Chrome per profile: a
+conversation's browser use runs in its own pane task while one is live, else
+in the owner's shared Chrome while that is live, and only with neither is it
+decided afresh, for that conversation alone: the pane when the app's
 browser host is connected and its last report says the pane is ready, the
-managed Chrome otherwise. When
+managed Chrome otherwise. A pane task belongs to the conversation that
+started it and ends with that conversation's turn, so one conversation's pane
+task never ends, moves or fails another's, while every owner conversation that
+lands on Chrome shares the one Chrome and its sign-ins. When
 the app is not connected and `[fermix_core.browser] launch_app` allows it (on
 by default for the engine inside the app), the engine opens the app in the
 background once and waits a few seconds for its browser to connect and report
@@ -73,8 +103,9 @@ cancel a pane task directly, from its own tab in the app ("Cancel task"):
 that answers `cancelled` — the pane itself is fine, so say it was cancelled,
 not that the browser went away. Every later browser call in the same turn
 answers that same sentence too, rather than quietly starting a fresh task on
-Chrome — the turn that saw the loss or the cancel stays that way. The next
-browser use, in a fresh turn, is decided afresh. `fermix_headless`,
+Chrome — the turn that saw the loss or the cancel stays that way, and no
+other conversation is touched. The next browser use, in a fresh turn, is
+routed afresh by the rule above. `fermix_headless`,
 `fermix_chrome` and `selected_tab` are never routed to the pane.
 
 The pane runs no WebMCP tools and saves no downloads: `webmcp` and `download`
@@ -91,8 +122,9 @@ pane task keeps its browser, and a pane lost mid-task still ends that task with
 `host_lost`.
 
 Limits of the managed browser:
-- Live tabs are capped: each `open` past the cap closes the oldest non-active
-  tab, so a long-idle tab may be gone.
+- Live tabs are capped: each `open` past the cap closes the oldest tab other
+  than the one it just opened, whichever conversation opened it, so a
+  long-idle tab may be gone.
 - Reads allow only `http`/`https`, `about:blank` and an allowed-origin `blob:`.
 - A download is vetted at its source URL too: a refused one is cancelled, any
   partial file deleted, and the tool answers `download_blocked`.
@@ -103,6 +135,47 @@ Limits of the managed browser:
 - Operating rules (snapshots, `act`, the `page` field, `webmcp`): the `browser`
   tool description and the `browser-guidance` skill.
 
+## Signing in to websites (the Fermix app's pane)
+
+On a Mac the owner keeps the website logins the agent may use in the Fermix
+app, under Settings > Browser > Website logins: one login per site, a site and
+a username with a password the app keeps in the Mac's keychain, in a part only
+the signed Fermix app can open. Fermix never shows a saved password, and
+neither the engine nor the agent ever holds one: the app types it into the
+page itself.
+
+To sign in, the agent snapshots the login form and calls `act` with
+`kind: "sign_in"`, the page's `site` and the form's `username_ref` and
+`password_ref`. The engine asks the app which saved login fits the page, then,
+before a password is typed, asks the owner in their chat to approve signing in
+to that site as that username, and waits up to a minute for **Approve** or
+`/confirm` while nothing else of the turn runs; `/deny`, no answer or a stopped
+turn types nothing. A call that fills only the username (a site that asks for
+it first) is not asked about. The result names the site, the username and the
+fields filled. With `submit: true`, which `act` `kind: "fill_form"` takes too,
+Fermix then submits the form in the same call, so the result is the page the
+form led to, with the sign-in's receipt beside it as `fill`; the owner's
+approval is the same either way, and a sign-in that fails submits nothing.
+A submit sends only the form its field is in: from a field in no form it
+sends nothing and fails, and the agent clicks the page's own submit button
+instead.
+
+It works only in the Fermix app's own browser pane on a Mac with the app open,
+on an `https` page whose host is the saved site (a leading `www.` aside) or,
+when no login is saved for that host itself, a subdomain of it: a login saved
+for `example.com` also signs in on `accounts.example.com`, and the approval
+names both. Never a look-alike such as `evilexample.com`. And only on the
+owner's own attended turn from their chat or the app: never by voice, from a
+shared channel, a delegated worker, a cue or a scheduled run, and never in
+Chrome (`fermix_chrome` included), the person's own tab or on Linux
+(`sign_in_pane_only`). When no login fits the page's host (`sign_in_no_login`),
+the agent tells the owner to add one in Settings > Browser > Website logins in
+the Fermix app on their Mac, and never asks for the password in the chat. A
+build of the app that cannot open its keychain group has no login store
+(`sign_in_store_unavailable`), and an app too old to sign in
+answers `sign_in_app_too_old`. After a sign-in the pane stays signed in, as
+after the owner signs in there by hand.
+
 ## Launching Chrome on macOS
 
 Chrome starts through a small `disclaim` exec shim, so it is its own macOS
@@ -112,6 +185,15 @@ leftover, safe to ignore or turn off (`sudo tccutil reset SystemPolicyAppBundles
 would reset every app's grant, so it is rarely worth running). A launch that
 cannot disclaim refuses (`shim_missing`, `disclaim_failed`) rather than start
 Chrome undisclaimed; `fermix doctor`'s `browser` row reports the shim.
+
+## Launching Chrome on Linux
+
+Chrome starts through `/bin/sh`, which raises its own `oom_score_adj` to 1000
+(the kernel's highest score) and then becomes Chrome, so every Chrome process
+starts with it. When the machine runs out of memory the kernel stops a Chrome
+process rather than the engine, which runs every channel; a task that finds
+Chrome gone starts it again. A shell that cannot raise the score stops the
+launch, and the launch error carries its sentence.
 
 ## Where a name points
 
@@ -202,14 +284,11 @@ tab, even when the owner is the one asking there: other people can post in a
 Buzz channel, so its turn is not proof the owner is present, and the refusal
 names where to ask instead (the Fermix app, their own chat, or voice). The
 managed profile still works from Buzz, and an editor client like Zed, with no
-Buzz relay, is unaffected. The first
-attended conversation to use the profile holds the grant until it releases it —
-a second conversation gets `attached_tab_not_granted` rather than sharing the
-tab.
+Buzz relay, is unaffected. The grant is the owner's, not one conversation's: any attended owner
+conversation can use the handed-over tab.
 
-The grant is released when the profile stops, when the idle sweep reclaims it,
-and when the conversation ends; the extension detaches the debugger and clears
-the badge.
+The grant is released when the profile stops or when the idle sweep reclaims
+it; the extension detaches the debugger and clears the badge.
 
 ## Installing the extension and the bridge
 

@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Brackenmoor Library — signed in (fixture)</title>
+<link rel="icon" href="data:,">
+<style>
+  body { font: 16px/1.5 system-ui, sans-serif; margin: 2rem auto; max-width: 30rem; }
+</style>
+</head>
+<body>
+<h1>Brackenmoor Library</h1>
+<p id="outcome">Checking your sign-in…</p>
+<p id="fixture-status"></p>
+<script src="fixture.js"></script>
+<script>
+  // Whether this browser is signed in is the server's answer to the cookie it
+  // sent, never something the page decides.
+  fetch('session')
+    .then(function (response) { return response.json(); })
+    .then(function (answer) {
+      const outcome = document.getElementById('outcome');
+      outcome.textContent = answer.signed_in
+        ? "You're signed in to the members' area."
+        : "Sign-in didn't complete. Go back and try again.";
+      fixtureReport('sign_in.completed', answer.signed_in === true);
+    });
+</script>
+</body>
+</html>

@@ -212,6 +212,34 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     refute File.exists?(Path.dirname(path))
   end
 
+  # A command Fermix confines gets no answer here (`SocketPeer.admit/2`; the real
+  # kernel check runs in `SocketReachTest`): no handler, so no session and no bill.
+  test "a peer the socket does not answer is closed before any handler exists", %{
+    socket: socket
+  } do
+    path = Path.join(System.tmp_dir!(), "fermix-rt-gate-#{System.unique_integer([:positive])}")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm(path) end)
+
+    gated =
+      start_supervised!(
+        {LocalVoiceSocket,
+         socket_path: path,
+         task_supervisor: :sys.get_state(socket).task_supervisor,
+         peer_gate: fn _conn -> {:error, {:sandboxed, 4242}} end,
+         name: :"rt_gated_#{System.unique_integer([:positive])}"}
+      )
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        {:ok, conn} = connect(path)
+        _ = :gen_tcp.send(conn, ~s({"type":"client_hello","protocol_version":1}\n))
+        assert :gen_tcp.recv(conn, 0, 2_000) == {:error, :closed}
+      end)
+
+    assert log =~ "#{path} refused a connection: process 4242 runs sandboxed"
+    assert LocalVoiceSocket.active_clients(gated) == {:ok, 0}
+  end
+
   test "binds the Unix socket with 0600 permissions", %{socket_path: socket_path} do
     stat = File.stat!(socket_path)
     assert Bitwise.band(stat.mode, 0o777) == 0o600

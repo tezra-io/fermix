@@ -3,6 +3,7 @@ defmodule FermixCore.HealthTest do
 
   alias FermixCore.BuildInfo
   alias FermixCore.Health
+  alias FermixCore.Home.Role
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.Wizard
 
@@ -158,6 +159,45 @@ defmodule FermixCore.HealthTest do
     assert %{status: :setup_required} = Enum.find(report.providers, &(&1.name == "openai"))
     assert %{status: :setup_required} = channel(report, "telegram")
     assert report.memory == %{conversation_store: :ready, store: :ready}
+  end
+
+  # M75 D13: the role this engine runs in, as boot recorded it, so `fermix
+  # health` and `/health` say whether this is the primary or a device.
+  test "reports the engine role this boot recorded, and a device's when handed one" do
+    assert Health.report(boot_report: Wizard.report()).role == Role.current()
+
+    assert Health.report(boot_report: Wizard.report(), engine_role: :device).role == :device
+  end
+
+  # A device-role engine starts no channel transport and no realtime subtree
+  # (M75 D13, D5), so their absence is expected there: reported as not started,
+  # never as degraded. The same world on the primary is degraded.
+  test "a device reports configured transports and voice as not started, not degraded" do
+    Application.put_env(:fermix_channels, :telegram, enabled: true, owner_user_id: "111")
+    Application.put_env(:fermix_core, :realtime, enabled: true, provider: "openai")
+
+    stores = [FermixCore.Memory.ConversationStore, FermixCore.Memory.Store]
+
+    report = fn role ->
+      Health.report(
+        boot_report: %{status: :ready, failures: [], config_path: ConfigStore.path()},
+        process_resolver: fn name -> if name in stores, do: self() end,
+        transport_health: fn _key -> nil end,
+        restart: %{required: false, reasons: []},
+        engine_role: role
+      )
+    end
+
+    device = report.(:device)
+    assert device.role == :device
+    assert channel(device, "telegram").status == :not_started
+    assert device.realtime.status == :not_started
+    assert device.status == :ready
+
+    primary = report.(:primary)
+    assert channel(primary, "telegram").status == :degraded
+    assert primary.realtime.status == :degraded
+    assert primary.status == :degraded
   end
 
   test "reports realtime degraded when enabled and expected socket process is absent" do
@@ -344,6 +384,34 @@ defmodule FermixCore.HealthTest do
 
       assert %{name: "slack", status: :ready, process_alive: nil, transport: nil} =
                channel(report, "slack")
+    end
+
+    # M75: Slack over Socket Mode runs a connection, and its posture is the
+    # channel's health: a refused app-level token is degraded, in Slack's words.
+    test "slack over Socket Mode reports its connection's posture" do
+      Application.put_env(:fermix_channels, :slack, enabled: true, mode: :socket)
+      on_exit(fn -> Application.delete_env(:fermix_channels, :slack) end)
+
+      degraded = %{
+        status: :degraded,
+        detail: "Slack refused apps.connections.open: invalid_auth",
+        since: DateTime.utc_now(),
+        consecutive_failures: 1
+      }
+
+      transport_health = fn
+        :slack_socket_health_provider -> degraded
+        _other -> nil
+      end
+
+      report = health_report(fn _name -> nil end, transport_health: transport_health)
+
+      assert %{name: "slack", status: :degraded, mode: :socket, transport: ^degraded} =
+               channel(report, "slack")
+
+      connected = %{degraded | status: :connected, detail: nil, consecutive_failures: 0}
+      report = health_report(fn _name -> nil end, transport_health: fn _key -> connected end)
+      assert %{name: "slack", status: :ready, transport: ^connected} = channel(report, "slack")
     end
 
     test "probes the acp transport through its endpoint, not its supervisor" do

@@ -8,11 +8,17 @@
 # operator's live ~/.fermix or ~/.fermix-dev daemon (different home => different
 # control socket; --no-web => no shared port).
 #
-#   capability-daemon.sh up     seed (config; with --cues the cue watchers too) + start + wait ready
-#   capability-daemon.sh down    stop + clean the control socket
-#   capability-daemon.sh run     up, run the capability tier, down; preserve its exit code
+#   capability-daemon.sh up        seed (config; with --cues the cue watchers too) + snapshot
+#                                  the seeded state + start + wait ready
+#   capability-daemon.sh down      stop + clean the control socket
+#   capability-daemon.sh snapshot  take the seeded-state snapshot again (daemon down)
+#   capability-daemon.sh reset     stop + restore the snapshot + start + wait ready, so the
+#                                  next attempt starts from the seeded world
+#                                  (run_eval.py --reset-home calls it before each one)
+#   capability-daemon.sh run       up, run the capability tier, down; preserve its exit code
 #
-# Override the home with FERMIX_CAP_HOME (leaf must contain 'eval' or 'e2e').
+# Override the home with FERMIX_CAP_HOME (leaf must contain 'eval' or 'e2e'; snapshot
+# and reset refuse any other home before they stop or touch anything: eval_home_state.py).
 # CI knobs: FERMIX_CAP_PROJECT overrides the Opik project; FERMIX_CAP_SEED_ARGS
 # passes extra flags to seed_capability_home.py (e.g. the explicit --provider/
 # --model CI mode, or --cues for the cue suites); FERMIX_CAP_OPIK=0 starts the daemon without the Opik
@@ -59,13 +65,25 @@ up() {
     ( cd "$REPO_ROOT" && FERMIX_HOME="$HOME_DIR" \
         mix run --no-start --no-compile benchmark/bin/seed_cues.exs )
   fi
+  # The world every `reset` puts back, taken while the daemon is still down.
+  log "snapshotting the seeded state"
+  "$BIN_DIR/eval_home_state.py" snapshot "$HOME_DIR"
+  start_daemon
+}
+
+start_daemon() {
   # Keep channels running (--no-web/--no-realtime only): the CLI-ask turn queue
   # is FermixChannels.Gateway.Queue, so --no-channels would break every turn. No
   # channel is configured in the seeded home, so no bot adapters actually poll.
   log "starting disposable daemon (no web/realtime); log: $LOGFILE"
   local -a opik_env=(FERMIX_OPIK_ENABLED=1 FERMIX_OPIK_PROJECT="$PROJECT")
   if [ "${FERMIX_CAP_OPIK:-1}" = "0" ]; then opik_env=(); fi
+  # With --cues the seeder leaves a stub `codex` in eval-bin for the follow-up
+  # cases; first on the daemon's PATH, it is the Codex the daemon finds at boot.
+  local daemon_path="$PATH"
+  if [ -x "$HOME_DIR/eval-bin/codex" ]; then daemon_path="$HOME_DIR/eval-bin:$PATH"; fi
   ( cd "$REPO_ROOT" && exec env \
+      PATH="$daemon_path" \
       FERMIX_HOME="$HOME_DIR" \
       ${opik_env[@]+"${opik_env[@]}"} \
       FERMIX_BROWSER_HEADLESS=1 \
@@ -111,6 +129,20 @@ down() {
   fi
   rm -f "$HOME_DIR/daemon.sock"
   log "stopped"
+}
+
+snapshot() {
+  "$BIN_DIR/eval_home_state.py" snapshot "$HOME_DIR"
+}
+
+reset() {
+  # The disposable-home guard and the snapshot's presence first: a home that is not
+  # an eval home, or holds no snapshot, is refused before its daemon is stopped.
+  "$BIN_DIR/eval_home_state.py" check "$HOME_DIR"
+  down
+  log "restoring the seeded state"
+  "$BIN_DIR/eval_home_state.py" restore "$HOME_DIR"
+  start_daemon
 }
 
 run() {
@@ -163,8 +195,10 @@ run() {
 }
 
 case "${1:-run}" in
-  up)   up ;;
-  down) trap - EXIT; down ;;
-  run)  run ;;
-  *)    echo "usage: $(basename "$0") [up|down|run]" >&2; exit 2 ;;
+  up)       up ;;
+  down)     trap - EXIT; down ;;
+  snapshot) snapshot ;;
+  reset)    reset ;;
+  run)      run ;;
+  *)        echo "usage: $(basename "$0") [up|down|snapshot|reset|run]" >&2; exit 2 ;;
 esac

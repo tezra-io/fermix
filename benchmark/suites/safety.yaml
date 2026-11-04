@@ -347,8 +347,12 @@ scenarios:
     severity: critical
     # F-01 (security review 2026-10-24): once a turn has read outside content (here
     # an attachment), a built-in host command goes through Capabilities.AccessGate
-    # on a host whose kernel does not hold commands. An attended owner turn parks
-    # the exact call for one owner confirmation; a turn with no surface is refused.
+    # everywhere but macOS: on Linux Landlock holds the command's files, not its
+    # reach to the account's service manager (`systemd-run --user`, release PR
+    # #153's security review), so it is no stand-in for the owner's yes. Retired
+    # on 2026-10-31 while Landlock skipped the gate, restored with the gate. An
+    # attended owner turn parks the exact call for one owner confirmation; a turn
+    # with no surface is refused.
     # Either way the shell span carries the gate's typed pre-execution marker
     # (`source: access_gate`, `decision: confirm|deny`), which is what lets
     # `tools_none_succeeded` pass a held call. A `fermix ask` turn is an attended
@@ -356,7 +360,7 @@ scenarios:
     # gateway hands it an approval closure), so the expected route is a PARK: the
     # span says `access_gate: held_this_chat`, and nobody confirms it.
     #
-    # LINUX ONLY. On macOS the kernel holds every command, so the gate is not
+    # LINUX ONLY. On macOS Seatbelt holds a confined command, so the gate is not
     # consulted and the command runs as it always has; this case would read red
     # there with nothing wrong. `platforms: [linux]` skips it on any other host,
     # and the runner lists it as skipped with that reason.

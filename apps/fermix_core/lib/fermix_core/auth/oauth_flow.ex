@@ -20,12 +20,19 @@ defmodule FermixCore.Auth.OAuthFlow do
   and path, and a request whose `state` is wrong is answered 400 without
   ending the attempt. `await_authorization/2` stops there and returns the
   callback; `start_loopback/2` goes on to the exchange.
+
+  Each listener is recorded in `Auth.LoopbackRegistry` while it is open, with
+  `:loopback_owner`, the management caller that started the sign-in. A desktop
+  that started it over the rail listens on the same port and forwards what its
+  browser sends to this listener (M75 D17); when it cannot, the registry tells
+  this process, and the attempt ends with `{:loopback_forward_failed, failure}`.
   """
 
   alias FermixCore.Auth.Browser
   alias FermixCore.Auth.CallbackPage
   alias FermixCore.Auth.ClientRejection
   alias FermixCore.Auth.JwtClaims
+  alias FermixCore.Auth.LoopbackRegistry
   alias FermixCore.Auth.OAuthProvider
   alias FermixCore.Auth.Redaction
   alias FermixCore.Auth.RefreshClient
@@ -75,7 +82,9 @@ defmodule FermixCore.Auth.OAuthFlow do
           req_options: keyword(),
           puts: (String.t() -> any()),
           redeem: redeem(),
-          paste_message: atom()
+          paste_message: atom(),
+          loopback_owner: LoopbackRegistry.owner(),
+          loopback_registry: GenServer.server()
         ]
 
   @typedoc """
@@ -127,11 +136,28 @@ defmodule FermixCore.Auth.OAuthFlow do
     port = Keyword.get(opts, :port, provider.redirect_port)
 
     with {:ok, listener} <- listen_for(provider, port, opts) do
-      result = authorize_on(listener, provider, opts)
-      :ok = :gen_tcp.close(listener)
-      result
+      {:ok, loopback} = record_listener(listener, opts)
+
+      try do
+        authorize_on(listener, provider, Keyword.put(opts, :loopback, loopback))
+      after
+        :ok = LoopbackRegistry.close(loopback, registry(opts))
+        :ok = :gen_tcp.close(listener)
+      end
     end
   end
+
+  # The listener's port, its deadline and who started the sign-in, for as long
+  # as it is open (`Auth.LoopbackRegistry`).
+  defp record_listener(listener, opts) do
+    {:ok, port} = :inet.port(listener)
+    timeout_ms = Keyword.get(opts, :timeout_ms, @default_timeout_ms)
+    expires_at = DateTime.add(DateTime.utc_now(), timeout_ms, :millisecond)
+    LoopbackRegistry.open(port, Keyword.get(opts, :loopback_owner), expires_at, registry(opts))
+  end
+
+  # `:loopback_registry` names another registry (a test's own).
+  defp registry(opts), do: Keyword.get(opts, :loopback_registry, LoopbackRegistry)
 
   defp authorize_on(listener, provider, opts) do
     timeout_ms = Keyword.get(opts, :timeout_ms, @default_timeout_ms)
@@ -482,6 +508,7 @@ defmodule FermixCore.Auth.OAuthFlow do
       spec: spec,
       deadline: deadline,
       paste: Keyword.get(opts, :paste_message),
+      loopback: Keyword.get(opts, :loopback),
       puts: Keyword.get(opts, :puts, &IO.puts/1)
     }
 
@@ -497,6 +524,7 @@ defmodule FermixCore.Auth.OAuthFlow do
 
   defp wait_for_callback(%{ref: ref, monitor: monitor, paste: paste} = wait) do
     remaining = max(wait.deadline - System.monotonic_time(:millisecond), 0)
+    loopback = wait.loopback
 
     receive do
       {^ref, result} ->
@@ -507,6 +535,10 @@ defmodule FermixCore.Auth.OAuthFlow do
 
       {^paste, url} when not is_nil(paste) and is_binary(url) ->
         pasted_callback(url, wait)
+
+      # The desktop the sign-in was started from cannot take its reply.
+      {:loopback_forward_failed, ^loopback, failure} when is_binary(loopback) ->
+        {:error, {:loopback_forward_failed, failure}}
     after
       remaining -> {:error, :callback_timeout}
     end

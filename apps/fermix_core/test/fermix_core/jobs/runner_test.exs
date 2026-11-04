@@ -1340,12 +1340,56 @@ defmodule FermixCore.Jobs.RunnerTest do
 
     assert_receive {:delivery_send, "123", "Digest ready.", opts}
     assert Keyword.fetch!(opts, :proactive_key) == "job:#{run.id}"
+    assert Keyword.fetch!(opts, :origin) == %{"kind" => "job", "name" => "Delivery Check"}
 
     assert {:ok, delivered_run} = Repo.get_job_run(run.id, server: repo)
     assert delivered_run.status == "ok"
     assert delivered_run.delivery_status == "sent"
     assert delivered_run.delivery_error == nil
     assert delivered_run.output_ref == "job_runs/#{run.id}/output.md"
+  end
+
+  # M85 §07: a job's message carries the lists its run's list tools touched,
+  # kept in the one holder under the run's own conversation key, which no other
+  # test shares, as a turn's reply does.
+  test "delivers the lists the run touched as the message's checklists block", %{
+    repo: repo,
+    capability_registry: capability_registry,
+    output_base_dir: output_base_dir
+  } do
+    assert {:ok, {job, run}} =
+             create_claimed_job(repo,
+               name: "Evening Check-in",
+               schedule: "every 15 minutes",
+               task_prompt: "Read the Projects folder.",
+               delivery_mode: "channel",
+               delivery_target: %{"platform" => "telegram", "chat_id" => "123"}
+             )
+
+    touch = %{list_id: "ck_3m9q2x7d1a", title: "Fermix", rows: []}
+    :ok = FermixCore.ReplyBlocks.put_checklists({:scheduled_job, job.id, run.id}, [touch])
+
+    assert_runner_exits_normally(
+      job,
+      run,
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir,
+      delivery_adapter: RecordingDelivery,
+      delivery_opts: [test_pid: self()],
+      script: [%{content: "Two projects open."}]
+    )
+
+    assert_receive {:delivery_send, "123", "Two projects open.", opts}
+
+    assert Keyword.fetch!(opts, :blocks) == [
+             %{
+               "type" => "checklists",
+               "lists" => [%{"list_id" => "ck_3m9q2x7d1a", "title" => "Fermix", "rows" => []}]
+             }
+           ]
+
+    assert FermixCore.ReplyBlocks.take({:scheduled_job, job.id, run.id}) == []
   end
 
   test "skips delivery when the final response is the silent marker", %{
@@ -2888,6 +2932,7 @@ defmodule FermixCore.Jobs.RunnerTest do
       assert part.caption == "Outfit preview"
       assert Keyword.fetch!(media_opts, :proactive_key) == "job:#{run.id}"
       assert Keyword.fetch!(media_opts, :proactive_part_id) == "media-1"
+      assert Keyword.fetch!(media_opts, :origin) == %{"kind" => "job", "name" => "Outfit Preview"}
 
       assert_receive {:adapter_continue, [%{output: tool_output}]}
       assert tool_output =~ "Sent attachment"

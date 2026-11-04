@@ -62,6 +62,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
 
     state = %{
       phase: :await_hello,
+      primary_epoch: 1,
       authenticated_device: %{device_id: "paired-device"},
       device_registry: :registry,
       noise: :noise,
@@ -96,6 +97,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     {:ok, state} =
       init_socket(%{
         phase: :await_hello,
+        primary_epoch: 1,
         authenticated_device: %{device_id: "paired-device"},
         device_registry: :registry,
         profile_id: "main",
@@ -141,6 +143,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     {:ok, state} =
       init_socket(%{
         phase: :await_hello,
+        primary_epoch: 1,
         authenticated_device: %{device_id: "paired-device"},
         device_registry: :registry,
         noise: :noise,
@@ -182,6 +185,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     {:ok, state} =
       init_socket(%{
         phase: :await_hello,
+        primary_epoch: 1,
         authenticated_device: %{device_id: "paired-device", last_seen: nil},
         device_registry: :registry,
         device_store: :store,
@@ -230,6 +234,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     {:ok, state} =
       init_socket(%{
         phase: :await_hello,
+        primary_epoch: 1,
         authenticated_device: %{device_id: "paired-device"},
         device_registry: :registry,
         noise: :noise,
@@ -1339,6 +1344,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     {:ok, state} =
       init_socket(%{
         phase: :await_pair_decision,
+        primary_epoch: 1,
         pair_manager: :pair,
         pairing_session_id: "pair-session",
         noise: :noise,
@@ -1369,6 +1375,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     {:ok, state} =
       init_socket(%{
         phase: :await_pair_decision,
+        primary_epoch: 1,
         pair_manager: :pair,
         pairing_session_id: "pair-session",
         noise: :noise,
@@ -1398,6 +1405,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     {:ok, state} =
       init_socket(%{
         phase: :await_pair_decision,
+        primary_epoch: 1,
         pair_manager: :pair,
         pairing_session_id: "pair-session",
         record_pair_failure: fn :pair, "pair-session", _peer ->
@@ -1714,6 +1722,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
       init_socket(%{
         pair_manager: :pair,
         noise: :noise,
+        primary_epoch: 1,
         schedule_handshake_deadline: fn message, 10_000 ->
           timer = make_ref()
           send(test_pid, {:deadline_armed, message, timer})
@@ -2069,6 +2078,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     {:ok, state} =
       init_socket(%{
         phase: :await_hello,
+        primary_epoch: 1,
         authenticated_device: %{device_id: "paired-device"},
         device_registry: :registry,
         noise: :noise,
@@ -2313,6 +2323,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     {:ok, state} =
       init_socket(%{
         phase: :await_pair_decision,
+        primary_epoch: 1,
         pairing_session_id: "pair-session",
         noise: :noise,
         negotiated_version: 2,
@@ -2354,6 +2365,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     Map.merge(
       %{
         phase: :await_hello,
+        primary_epoch: 1,
         authenticated_device: %{device_id: "paired-device"},
         device_registry: :registry,
         noise: :noise,

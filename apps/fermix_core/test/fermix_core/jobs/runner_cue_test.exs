@@ -298,6 +298,8 @@ defmodule FermixCore.Jobs.RunnerCueTest do
              "Watcher release-watch · from eng-blogs\n\nPhoenix 1.8.2 is out; upgrade next week."
 
     assert Keyword.fetch!(opts, :link_previews) == false
+    # Its row names the watcher, never the task the watcher runs.
+    assert Keyword.fetch!(opts, :origin) == %{"kind" => "cue", "name" => "release-watch"}
     assert delivery_state(ctx.conn, claim.delivery.id) == {"acked", "acted"}
 
     assert [] ==
@@ -418,6 +420,7 @@ defmodule FermixCore.Jobs.RunnerCueTest do
     assert String.starts_with?(text, "Watcher release-watch · from eng-blogs\n\n")
     assert text =~ "finished with error"
     assert Keyword.fetch!(opts, :link_previews) == false
+    assert Keyword.fetch!(opts, :origin) == %{"kind" => "cue", "name" => "release-watch"}
     refute_receive {:delivery_send, _target, _text, _opts}, 0
     assert delivery_state(ctx.conn, claim.delivery.id) == {"exhausted", "task_failed"}
     assert memory_source_status(ctx.conn, claim.job) == "error"
@@ -446,6 +449,7 @@ defmodule FermixCore.Jobs.RunnerCueTest do
 
     assert_receive {:delivery_send, "4242", @provider_down, opts}
     assert Keyword.fetch!(opts, :link_previews) == false
+    assert Keyword.fetch!(opts, :origin) == %{"kind" => "cue", "name" => "release-watch"}
     refute_received {:delivery_send, _target, _text, _opts}
     assert [[0, "passed"]] == attempts_and_state(ctx.conn, claim.delivery.id)
 

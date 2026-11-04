@@ -1,0 +1,37 @@
+{
+  "images": [
+    {
+      "id": 161547269,
+      "type": "system",
+      "status": "available",
+      "name": "debian-13",
+      "description": "Debian 13",
+      "image_size": null,
+      "disk_size": 5,
+      "created": "2031-04-02T08:00:00Z",
+      "created_from": null,
+      "bound_to": null,
+      "os_flavor": "debian",
+      "os_version": "13",
+      "rapid_deploy": true,
+      "protection": {
+        "delete": false
+      },
+      "deprecated": null,
+      "deprecation": null,
+      "deleted": null,
+      "labels": {},
+      "architecture": "x86"
+    }
+  ],
+  "meta": {
+    "pagination": {
+      "page": 1,
+      "per_page": 50,
+      "previous_page": null,
+      "next_page": null,
+      "last_page": 1,
+      "total_entries": 1
+    }
+  }
+}

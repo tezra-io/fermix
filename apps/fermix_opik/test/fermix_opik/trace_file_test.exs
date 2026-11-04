@@ -236,6 +236,36 @@ defmodule FermixOpik.TraceFileTest do
     assert Enum.any?(spans, &(&1[:type] == "llm"))
   end
 
+  # An Always On server writes a record with bodies twice (M75 L20): without
+  # them to `<type>.jsonl` and whole to `<type>.bodies.jsonl`, kept about a day.
+  # A replay of its traces reads each record once, from its own file.
+  @tag :tmp_dir
+  test "read_events replays a server's day once, without its bodies file", %{tmp_dir: dir} do
+    day = Path.join(dir, "2026-10-28")
+    File.mkdir_p!(day)
+
+    record = %{
+      ts: "2026-10-28T09:00:00.100Z",
+      type: "llm_call",
+      agent: "main",
+      duration_ms: 80,
+      provider: "anthropic",
+      model: "claude-opus-4-1",
+      status: "ok",
+      session_id: "main-3",
+      tokens: %{prompt: 40, completion: 9}
+    }
+
+    write(day, "llm_call.jsonl", [record])
+    write(day, "llm_call.bodies.jsonl", [Map.put(record, :output, "Three days in Porto.")])
+
+    assert [{[:fermix, :provider, :call], %{duration_ms: 80}, meta, _at}] =
+             TraceFile.read_events(dir)
+
+    assert meta.session_id == "main-3"
+    refute Map.has_key?(meta, :output)
+  end
+
   test "normalizes realtime agent_event rows into realtime events" do
     base = %{"ts" => "2026-06-02T12:00:00.000Z", "type" => "agent_event"}
 
@@ -669,6 +699,11 @@ defmodule FermixOpik.TraceFileTest do
       # reached the screen.
       "target_kind" => "window",
       "cu_mode" => "background",
+      # Protocol 12 (M86 P2): the verb, the open surfaces, the walk's cut and cost.
+      "cu_verb" => "toggle",
+      "cu_surfaces_count" => 1,
+      "cu_truncated" => "time",
+      "cu_ax_messages" => 57,
       "title" => "Inbox (3) — work@example.com",
       "value" => "hunter2",
       "screen_text" => "Transfer $4,000 to account 12345"
@@ -691,6 +726,10 @@ defmodule FermixOpik.TraceFileTest do
     assert meta.cu_encode_ms == 9
     assert meta.target_kind == "window"
     assert meta.cu_mode == "background"
+    assert meta.cu_verb == "toggle"
+    assert meta.cu_surfaces_count == 1
+    assert meta.cu_truncated == "time"
+    assert meta.cu_ax_messages == 57
     assert meta.courtesy == "deferred"
     refute Map.has_key?(meta, :title), "a window title is content, not a row field"
     refute Map.has_key?(meta, :value), "the value a set_value carried is content, not a row field"

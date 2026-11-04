@@ -553,6 +553,67 @@ def test_cross_session_runs_the_store_turns_in_one_session_and_recalls_in_a_fres
     assert trial.effective_success == 1.0
 
 
+_XSESSION_PAGE = """
+suite: cap_browser
+title: cross session page
+scenarios:
+  - id: s
+    title: st
+    tags: [capability, browser]
+    cases:
+      - id: still_signed_in
+        cross_session: true
+        turns:
+          - query: "sign me in at __EVAL_FIXTURE_URL__/sign_in.html"
+          - query: "what does __EVAL_FIXTURE_URL__/account.html say?"
+        expect:
+          fixture_state:
+            - { path: account.signed_in, equals: true }
+"""
+
+
+def test_cross_session_may_be_scored_by_the_page_instead_of_the_reply(tmp_path):
+    c = suites.load_all(_write(tmp_path, _XSESSION_PAGE))[0].scenarios[0].cases[0]
+    assert c.cross_session is True and c.score_spec is None
+    assert rc.fixture_clauses(c) == [{"path": "account.signed_in", "equals": True}]
+
+
+def test_cross_session_still_needs_a_scorer(tmp_path):
+    bare = _XSESSION_PAGE.replace(
+        "        expect:\n          fixture_state:\n"
+        "            - { path: account.signed_in, equals: true }\n", "")
+    with pytest.raises(suites.SuiteError) as ei:
+        suites.load_all(_write(tmp_path, bare))
+    assert any("cross_session" in p and "fixture_state" in p for p in ei.value.problems)
+
+
+def test_a_page_scored_cross_session_trial_reads_the_state_after_the_recall(monkeypatch):
+    clauses = [{"path": "account.signed_in", "equals": True}]
+    case = _xsession_case(score_spec=None, expect={"fixture_state": clauses},
+                          turns=[SimpleNamespace(query="sign in", expect={}),
+                                 SimpleNamespace(query="check the account", expect={})])
+    sessions = []
+
+    def capture(_cfg, _opik, session, _query, *_rest):
+        sessions.append(session)
+        return _captured(reply="whatever the reply says")
+
+    recorded = iter([{"page": {"ready": "account.html"}, "account": {"signed_in": True}},
+                     {"page": {"ready": "account.html"}, "account": {"signed_in": False}}])
+    monkeypatch.setattr(rc, "_capture_turn", capture)
+    monkeypatch.setattr(rc, "_page_state", lambda _binding: next(recorded))
+    monkeypatch.setattr(rc.scoring, "score_answer",
+                        lambda *_args: pytest.fail("a page-scored case never grades the reply"))
+
+    signed_in, _trace, _models = rc._cross_session_trial(
+        SimpleNamespace(), None, SimpleNamespace(name="cap_browser"), case, "run", 0)
+    signed_out, _trace, _models = rc._cross_session_trial(
+        SimpleNamespace(), None, SimpleNamespace(name="cap_browser"), case, "run", 1)
+
+    assert sessions[0] != sessions[1]
+    assert signed_in.effective_success == 1.0 and signed_out.effective_success == 0.0
+
+
 def _xsession_case(**overrides):
     case = dict(
         id="durable_codeword",
@@ -996,15 +1057,18 @@ def test_backoff_minutes_default_env_and_disable(monkeypatch):
 # Fermix's actual auth-failure replies (`auth_reply/1` in agents/turn_runner.ex):
 # OAuth, api-key, and the generic fallback.
 _AUTH_REPLIES = [
-    "OpenAI Codex authentication failed — reconnect with `fermix auth login "
-    "--provider openai_codex` and retry.",
+    "Claude subscription authentication failed — sign in with the Claude "
+    "subscription again in Fermix's Providers settings and retry.",
     "OpenAI Codex authentication failed — check the OpenAI Codex API key in "
-    "`fermix setup` and retry.",
-    "Authentication failed — run `fermix auth login` from the host and try again.",
+    "Fermix's Providers settings and retry.",
+    "OpenAI Codex authentication failed with the API key from OPENAI_API_KEY in "
+    "the daemon's environment, which Fermix uses instead of a stored key.",
+    "Authentication failed — sign in with ChatGPT again in Fermix's Providers "
+    "settings and try again.",
     # Worded as an ACCESS denial, not an authentication failure: re-login cannot
     # buy a plan tier. Permanent for the run all the same.
     "SpaceXAI subscription access denied — the Grok plan may not include API "
-    "access. Switch to an API key in `fermix setup`, or check the plan tier.",
+    "access. Switch to an API key in Fermix's Providers settings, or check the plan tier.",
 ]
 
 
@@ -1389,6 +1453,14 @@ def test_a_checker_that_looked_and_found_nothing_counts_as_evaluated(tmp_path, m
     result = rc.checker.CheckerResult(1.0, "done", safety_ok=True)
     trial, _trace_id, _models = _run_checker_trial(tmp_path, monkeypatch, result)
     assert trial.safety_ok is True and trial.safety_evaluated is True
+
+
+def test_a_checker_trial_keeps_the_checkers_own_detail(tmp_path, monkeypatch):
+    # judgment_agreement.py names what each trial did from this detail; a passing
+    # trial's detail was printed nowhere and kept nowhere.
+    result = rc.checker.CheckerResult(1.0, "pred=let_go want=let_go new=0 | ")
+    trial, _trace_id, _models = _run_checker_trial(tmp_path, monkeypatch, result)
+    assert trial.grader_detail == "pred=let_go want=let_go new=0 | "
 
 
 def test_an_evidence_less_capture_is_no_trace_whatever_the_cli_called_it(monkeypatch):
@@ -2053,6 +2125,23 @@ def test_a_run_records_per_task_cost_and_its_identity_for_the_html_board(tmp_pat
     assert record["score"]["mean_task_success"] == 1.0
     assert record["problems"] == []
     assert os.path.exists(os.path.join(cfg.report_dir, "capability", "leaderboard.html"))
+
+
+def test_results_json_carries_every_trials_record(tmp_path):
+    cfg = _report_cfg(tmp_path)
+    lb_path = os.path.join(cfg.report_dir, "capability", "leaderboard.json")
+    run = _report_run(["ok", "constraint_fail"])
+    trials = run.outcomes[0][2].trials
+    trials[0] = rc.aggregate.score_trial(
+        "c1", task_success=1.0, safety_ok=None, cost=0.01, duration_ms=10.0, tokens=5,
+        tool_calls=1, status="ok", trace_id="tr-0", grader_detail="pred=keep want=check_in")
+    rc._report(cfg, _report_args(), lb_path, run)
+    out_dir = os.path.join(cfg.report_dir, "capability", run.run_id)
+    with open(os.path.join(out_dir, "results.json")) as fh:
+        records = json.load(fh)["tasks"]["cap_x/c1"]["trial_records"]
+    assert records == [
+        {"success": 1.0, "valid": True, "status": "ok", "detail": "pred=keep want=check_in"},
+        {"success": 1.0, "valid": True, "status": "constraint_fail", "detail": ""}]
 
 
 def test_a_valid_run_that_misses_the_bar_is_recorded_and_exits_5(tmp_path, capsys):

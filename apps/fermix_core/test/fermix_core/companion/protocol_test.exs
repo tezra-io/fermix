@@ -4,23 +4,27 @@ defmodule FermixCore.Companion.ProtocolTest do
   alias FermixCore.Companion.Protocol
 
   test "publishes the version window, the line cap and the ordered catalogs" do
-    assert Protocol.protocol_version() == 4
-    assert Protocol.supported_version_range() == {3, 4}
+    assert Protocol.protocol_version() == 7
+    assert Protocol.supported_version_range() == {6, 7}
     assert Protocol.max_line_bytes() == 65_536
 
     assert Protocol.client_events() ==
              ~w(client_hello msg command cancel history_pull history_search read_state
-                media_fetch media_release proposal_answer)
+                media_fetch media_release proposal_answer checklists_pull checklist_pull
+                checklist_edit attach_file)
 
     assert Protocol.server_events() ==
-             ~w(server_hello accepted turn_started text_delta tool_event text_done turn_error
-                turn_done row row_updated approval approval_resolved read_state history_page
-                search_results media_path media_missing proposal proposal_resolved error)
+             ~w(server_hello accepted turn_started text_delta tool_event reasoning text_done
+                turn_error turn_done row row_updated approval approval_resolved read_state
+                history_page search_results media_path media_missing proposal proposal_resolved
+                home_status_changed checklists checklist attach_status error)
   end
 
   # M56 §6: a turn that ends with no reply needs a frame an older client would
   # not survive, so it goes only to a connection that declared version 2; the
-  # media grant and the changed row (M66) only to one that declared 3.
+  # media grant and the changed row (M66) only to one that declared 3; what a
+  # turn is reasoning and the owner's lists (M85) only to one that declared 6;
+  # a file's answer only to one that declared 7.
   test "every server event names the version that brought it" do
     later = %{
       "turn_done" => 2,
@@ -28,7 +32,12 @@ defmodule FermixCore.Companion.ProtocolTest do
       "media_path" => 3,
       "media_missing" => 3,
       "proposal" => 4,
-      "proposal_resolved" => 4
+      "proposal_resolved" => 4,
+      "reasoning" => 6,
+      "home_status_changed" => 6,
+      "checklists" => 6,
+      "checklist" => 6,
+      "attach_status" => 7
     }
 
     for type <- Protocol.server_events() do
@@ -40,7 +49,15 @@ defmodule FermixCore.Companion.ProtocolTest do
   end
 
   test "every client event names the version that brought it: the media grant 3, the answer 4" do
-    later = %{"media_fetch" => 3, "media_release" => 3, "proposal_answer" => 4}
+    later = %{
+      "media_fetch" => 3,
+      "media_release" => 3,
+      "proposal_answer" => 4,
+      "checklists_pull" => 6,
+      "checklist_pull" => 6,
+      "checklist_edit" => 6,
+      "attach_file" => 7
+    }
 
     for type <- Protocol.client_events() do
       assert Protocol.client_event_version(type) == Map.get(later, type, 1),
@@ -49,7 +66,127 @@ defmodule FermixCore.Companion.ProtocolTest do
 
     refute "media_fetch" in Protocol.shared_client_events()
     refute "proposal_answer" in Protocol.shared_client_events()
+    refute "checklist_edit" in Protocol.shared_client_events()
+    refute "attach_file" in Protocol.shared_client_events()
     assert_raise ArgumentError, fn -> Protocol.client_event_version("ping") end
+  end
+
+  # Version 6: Always On's state changed, and the client reads `home.status`
+  # over management for what it is now, so the notice carries nothing.
+  test "home_status_changed carries nothing, and refuses any field" do
+    assert {:ok, line} = Protocol.encode_server_event("home_status_changed", %{})
+    assert Jason.decode!(line) == %{"type" => "home_status_changed"}
+
+    assert {:error, {:invalid_field, "state"}} =
+             Protocol.encode_server_event("home_status_changed", %{"state" => "on"})
+
+    refute "home_status_changed" in Protocol.shared_server_events()
+  end
+
+  # M85 §07: the wire holds what a list event is carried in, by the engine's
+  # ids; the op itself is the Registry's to judge, with its sentence.
+  describe "the owner's lists (version 6)" do
+    @list_id "ck_4q8m2x7v1d"
+    @row_id "ci_8f3k2m9q1x"
+
+    test "a pull names a list by its id, and removed is a boolean" do
+      pull = %{"profile_id" => "main", "list_id" => @list_id}
+
+      assert :ok = Protocol.validate_client_payload("checklist_pull", pull)
+
+      assert :ok =
+               Protocol.validate_client_payload("checklist_pull", Map.put(pull, "removed", true))
+
+      for bad <- [
+            %{pull | "list_id" => "Groceries"},
+            %{pull | "list_id" => @row_id},
+            Map.put(pull, "removed", "yes")
+          ] do
+        assert {:error, {:invalid_field, _field}} =
+                 Protocol.validate_client_payload("checklist_pull", bad)
+      end
+    end
+
+    test "an edit carries one op object, its id bounded as the store keeps it" do
+      edit = %{
+        "client_msg_id" => "mac-1",
+        "profile_id" => "main",
+        "list_id" => @list_id,
+        "op" => %{"op" => "check", "row_id" => @row_id}
+      }
+
+      assert :ok = Protocol.validate_client_payload("checklist_edit", edit)
+      assert :ok = Protocol.validate_client_payload("checklist_edit", Map.delete(edit, "list_id"))
+
+      long = String.duplicate("a", Protocol.max_checklist_msg_id() + 1)
+
+      for {field, bad} <- [
+            {"op", %{edit | "op" => "check"}},
+            {"op", %{edit | "op" => %{"row_id" => @row_id}}},
+            {"op", %{edit | "op" => %{"op" => ""}}},
+            {"list_id", %{edit | "list_id" => "Groceries"}},
+            {"client_msg_id", %{edit | "client_msg_id" => long}}
+          ] do
+        assert {:error, {:invalid_field, ^field}} =
+                 Protocol.validate_client_payload("checklist_edit", bad)
+      end
+    end
+
+    test "a pushed list is whole, without a null, and a removed row says when" do
+      item = %{"row_id" => @row_id, "kind" => "item", "text" => "Bread", "done" => false}
+      list = %{"list_id" => @list_id, "title" => "Groceries", "rev" => 3, "rows" => [item]}
+      event = %{"profile_id" => "main", "list" => list}
+
+      assert {:ok, _line} = Protocol.encode_server_event("checklist", event)
+
+      removed = Map.put(item, "removed_at", "2031-06-02T14:05:00.000000Z")
+
+      assert {:ok, _line} =
+               Protocol.encode_server_event(
+                 "checklist",
+                 put_in(event, ["list", "removed"], [removed])
+               )
+
+      for bad <- [
+            put_in(event, ["list", "removed"], [item]),
+            put_in(event, ["list", "rows"], [Map.put(item, "note", nil)]),
+            put_in(event, ["list", "rows"], [%{item | "kind" => "task"}]),
+            put_in(event, ["list", "list_id"], "Groceries")
+          ] do
+        assert {:error, {:invalid_field, "list"}} = Protocol.encode_server_event("checklist", bad)
+      end
+
+      assert {:error, {:invalid_field, "made"}} =
+               Protocol.encode_server_event("checklist", Map.put(event, "made", %{}))
+    end
+
+    test "the index lists each list by id with its counts" do
+      entry = %{
+        "list_id" => @list_id,
+        "title" => "Groceries",
+        "open" => 2,
+        "done" => 1,
+        "rev" => 7
+      }
+
+      assert {:ok, _line} =
+               Protocol.encode_server_event("checklists", %{
+                 "profile_id" => "main",
+                 "lists" => [entry]
+               })
+
+      for bad <- [
+            Map.delete(entry, "rev"),
+            %{entry | "open" => -1},
+            Map.put(entry, "folder", nil)
+          ] do
+        assert {:error, {:invalid_field, "lists"}} =
+                 Protocol.encode_server_event("checklists", %{
+                   "profile_id" => "main",
+                   "lists" => [bad]
+                 })
+      end
+    end
   end
 
   test "turn_done names the turn it ends and nothing else" do
@@ -63,6 +200,51 @@ defmodule FermixCore.Companion.ProtocolTest do
              Protocol.encode_server_event("turn_done", %{"turn_id" => ""})
   end
 
+  # Version 6: a tool's start says what the step is, in at most 120 bytes of
+  # text, and a stop or a start from an older daemon says nothing.
+  test "a tool_event carries an optional activity of at most 120 bytes" do
+    start = %{"turn_id" => "t", "tool" => "web_search", "phase" => "start"}
+    words = String.duplicate("é", 60)
+
+    assert Protocol.max_activity_bytes() == 120
+    assert {:ok, _line} = Protocol.encode_server_event("tool_event", start)
+
+    assert {:ok, line} =
+             Protocol.encode_server_event("tool_event", Map.put(start, "activity", words))
+
+    assert %{"activity" => ^words} = Jason.decode!(line)
+
+    for bad <- ["", words <> "a", 1, <<0xFF>>] do
+      assert {:error, {:invalid_field, "activity"}} =
+               Protocol.encode_server_event("tool_event", Map.put(start, "activity", bad)),
+             inspect(bad)
+    end
+  end
+
+  # Version 6: a step's reasoning summary, nonempty text of at most 4,096 bytes.
+  test "reasoning names its turn and carries nonempty text of at most 4,096 bytes" do
+    text = String.duplicate("ab", 2_048)
+
+    assert Protocol.max_reasoning_bytes() == 4_096
+
+    assert {:ok, line} =
+             Protocol.encode_server_event("reasoning", %{"turn_id" => "t", "text" => text})
+
+    assert Jason.decode!(line) == %{"type" => "reasoning", "turn_id" => "t", "text" => text}
+
+    assert {:error, {:missing_field, "text"}} =
+             Protocol.encode_server_event("reasoning", %{"turn_id" => "t"})
+
+    assert {:error, {:missing_field, "turn_id"}} =
+             Protocol.encode_server_event("reasoning", %{"text" => "x"})
+
+    for bad <- ["", text <> "a", 1] do
+      assert {:error, {:invalid_field, "text"}} =
+               Protocol.encode_server_event("reasoning", %{"turn_id" => "t", "text" => bad}),
+             inspect(bad)
+    end
+  end
+
   test "the shared chat events are a subset of both catalogs" do
     assert Protocol.shared_client_events() -- Protocol.client_events() == []
     assert Protocol.shared_server_events() -- Protocol.server_events() == []
@@ -72,11 +254,11 @@ defmodule FermixCore.Companion.ProtocolTest do
     assert "row" in Protocol.shared_server_events()
   end
 
-  test "negotiates directionally, version 3 and version 4 both accepted, version 2 too old" do
-    assert :ok = Protocol.negotiate(3)
-    assert :ok = Protocol.negotiate(4)
-    assert {:error, :client_too_old} = Protocol.negotiate(2)
-    assert {:error, :client_too_new} = Protocol.negotiate(5)
+  test "negotiates directionally, version 6 and version 7 both accepted, version 5 too old" do
+    assert :ok = Protocol.negotiate(6)
+    assert :ok = Protocol.negotiate(7)
+    assert {:error, :client_too_old} = Protocol.negotiate(5)
+    assert {:error, :client_too_new} = Protocol.negotiate(8)
   end
 
   test "client_hello refuses a missing or malformed version with the Realtime reasons" do
@@ -89,7 +271,40 @@ defmodule FermixCore.Companion.ProtocolTest do
              decode(%{"type" => "client_hello", "protocol_version" => "1"})
   end
 
-  test "a message keeps the mobile shape and carries no attachments on this wire" do
+  # M75 D14: the hellos carry the primary epoch, each optional: a client that
+  # has seen none sends none, and a home that has none announces none.
+  test "the hellos carry an optional positive primary epoch" do
+    assert {:ok, %{payload: %{"primary_epoch" => 3}}} =
+             decode(%{"type" => "client_hello", "protocol_version" => 4, "primary_epoch" => 3})
+
+    for bad <- [0, -1, "3", 3.5] do
+      assert {:error, {:invalid_field, "primary_epoch"}} =
+               decode(%{
+                 "type" => "client_hello",
+                 "protocol_version" => 4,
+                 "primary_epoch" => bad
+               }),
+             inspect(bad)
+    end
+
+    hello = %{"min_version" => 6, "max_version" => 7, "role" => "primary"}
+
+    assert {:ok, line} =
+             Protocol.encode_server_event("server_hello", Map.put(hello, "primary_epoch", 2))
+
+    assert %{"primary_epoch" => 2} = Jason.decode!(line)
+    assert {:ok, _line} = Protocol.encode_server_event("server_hello", hello)
+
+    for bad <- [0, "2", 2.5] do
+      assert {:error, {:invalid_field, "primary_epoch"}} =
+               Protocol.encode_server_event("server_hello", Map.put(hello, "primary_epoch", bad)),
+             inspect(bad)
+    end
+  end
+
+  # Version 7: a message may name files. The codec decodes it on every
+  # version; the connection judges whether this connection may send one.
+  test "a message keeps the mobile shape, and one naming files decodes for the connection" do
     msg = %{
       "type" => "msg",
       "client_msg_id" => "c-1",
@@ -104,8 +319,10 @@ defmodule FermixCore.Companion.ProtocolTest do
     assert {:error, {:missing_field, "attach_ids"}} = decode(Map.delete(msg, "attach_ids"))
     assert {:error, {:missing_field, "content"}} = decode(%{msg | "text" => "  "})
 
-    assert {:error, :attachments_unsupported} =
-             decode(%{msg | "attach_ids" => ["attach-1"]})
+    assert {:ok, %{payload: %{"attach_ids" => ["attach-1"], "text" => ""}}} =
+             decode(%{msg | "attach_ids" => ["attach-1"], "text" => ""})
+
+    assert {:error, {:invalid_field, "attach_ids"}} = decode(%{msg | "attach_ids" => [""]})
   end
 
   test "history_pull takes exactly one cursor" do
@@ -188,18 +405,49 @@ defmodule FermixCore.Companion.ProtocolTest do
 
   test "the encoder writes one newline-terminated object with its type" do
     assert {:ok, line} =
-             Protocol.encode_server_event("server_hello", %{min_version: 3, max_version: 4})
+             Protocol.encode_server_event("server_hello", %{
+               min_version: 6,
+               max_version: 7,
+               role: "primary"
+             })
 
     assert String.ends_with?(line, "\n")
 
     assert Jason.decode!(line) == %{
              "type" => "server_hello",
-             "min_version" => 3,
-             "max_version" => 4
+             "min_version" => 6,
+             "max_version" => 7,
+             "role" => "primary"
            }
 
     assert {:error, {:invalid_field, "version_range"}} =
-             Protocol.encode_server_event("server_hello", %{min_version: 2, max_version: 4})
+             Protocol.encode_server_event("server_hello", %{
+               min_version: 5,
+               max_version: 7,
+               role: "primary"
+             })
+  end
+
+  # M75: the engine names its role on every hello, so a desktop app never
+  # compares a device-role engine's epoch against the primary's.
+  test "server_hello names the engine's role, primary or device" do
+    hello = %{"min_version" => 6, "max_version" => 7}
+
+    for role <- ~w(primary device) do
+      assert {:ok, line} =
+               Protocol.encode_server_event("server_hello", Map.put(hello, "role", role))
+
+      assert %{"role" => ^role} = Jason.decode!(line)
+    end
+
+    assert {:error, {:missing_field, "role"}} =
+             Protocol.encode_server_event("server_hello", hello)
+
+    for bad <- ["owner", "", :primary, 1] do
+      assert {:error, {:invalid_field, "role"}} =
+               Protocol.encode_server_event("server_hello", Map.put(hello, "role", bad)),
+             inspect(bad)
+    end
   end
 
   test "the encoder refuses explicit nulls, a written type and unknown events" do
@@ -402,9 +650,120 @@ defmodule FermixCore.Companion.ProtocolTest do
              Protocol.encode_server_event("error", %{failed | "ref" => ""})
   end
 
+  # Version 7: the owner's files, handed over by path in the inbox the hello
+  # names, and the slash commands every hello carries.
+  describe "files and the command palette (version 7)" do
+    test "attach_file names the file by an id that is a file name, never a path" do
+      assert {:ok, %{type: "attach_file", payload: payload}} = decode(attach_file())
+      assert payload == Map.delete(attach_file(), "type")
+
+      assert {:ok, _event} = decode(Map.delete(attach_file(), "name"))
+      assert {:ok, _event} = decode(%{attach_file() | "attach_id" => String.duplicate("a", 64)})
+
+      for field <- ~w(attach_id kind mime size_bytes sha256) do
+        assert {:error, {:missing_field, ^field}} = decode(Map.delete(attach_file(), field))
+      end
+
+      for {field, bad} <- [
+            {"attach_id", "../photo"},
+            {"attach_id", "inbox/photo"},
+            {"attach_id", String.duplicate("a", 65)},
+            {"attach_id", ""},
+            {"attach_id", "photo.jpg"},
+            {"kind", "picture"},
+            {"kind", ""},
+            {"mime", ""},
+            {"mime", String.duplicate("m", 256)},
+            {"size_bytes", -1},
+            {"size_bytes", "12"},
+            {"sha256", String.upcase(ref())},
+            {"sha256", "abc"},
+            {"name", ""},
+            {"name", String.duplicate("é", 128)}
+          ] do
+        assert {:error, {:invalid_field, ^field}} = decode(Map.put(attach_file(), field, bad)),
+               "#{field} #{inspect(bad)}"
+      end
+
+      for kind <- Protocol.attach_kinds() do
+        assert {:ok, _event} = decode(%{attach_file() | "kind" => kind})
+      end
+
+      assert Protocol.attach_kinds() == ~w(image animation video audio voice document file)
+      assert Protocol.max_attach_field_bytes() == 255
+    end
+
+    test "attach_status says the file is present, and an error may name the attach id" do
+      status = %{"attach_id" => "mac-att-1", "status" => "present"}
+      assert {:ok, line} = Protocol.encode_server_event("attach_status", status)
+      assert Jason.decode!(line) == Map.put(status, "type", "attach_status")
+
+      for bad <- [%{status | "status" => "upload"}, %{status | "attach_id" => "a/b"}] do
+        assert {:error, {:invalid_field, _field}} =
+                 Protocol.encode_server_event("attach_status", bad)
+      end
+
+      refused = %{
+        "reason" => "request_failed",
+        "message" => "This file is too large: Fermix takes files of up to 20 MB.",
+        "attach_id" => "mac-att-1"
+      }
+
+      assert {:ok, _line} = Protocol.encode_server_event("error", refused)
+
+      assert {:error, {:invalid_field, "attach_id"}} =
+               Protocol.encode_server_event("error", %{refused | "attach_id" => "../x"})
+    end
+
+    test "server_hello may carry the command palette and the inbox, each in its own shape" do
+      hello = %{"min_version" => 6, "max_version" => 7, "role" => "primary"}
+      command = %{"name" => "new", "aliases" => ["clear"], "description" => "Start afresh."}
+      offer = %{"dir" => "/Users/me/.fermix/companion/inbox", "max_bytes" => 20_971_520}
+      full = Map.merge(hello, %{"commands" => [command], "attachments" => offer})
+
+      assert {:ok, line} = Protocol.encode_server_event("server_hello", full)
+      assert Jason.decode!(line) == Map.put(full, "type", "server_hello")
+      assert {:ok, _line} = Protocol.encode_server_event("server_hello", hello)
+
+      assert {:ok, _line} =
+               Protocol.encode_server_event("server_hello", %{full | "commands" => []})
+
+      for bad <- [
+            %{},
+            [%{command | "aliases" => [""]}],
+            [Map.delete(command, "description")],
+            [%{command | "name" => ""}],
+            [Map.put(command, "usage", "/new")]
+          ] do
+        assert {:error, {:invalid_field, "commands"}} =
+                 Protocol.encode_server_event("server_hello", %{full | "commands" => bad}),
+               inspect(bad)
+      end
+
+      for bad <- [
+            %{offer | "dir" => "companion/inbox"},
+            %{offer | "max_bytes" => 0},
+            Map.delete(offer, "max_bytes"),
+            Map.put(offer, "kinds", ["image"]),
+            "/Users/me/.fermix/companion/inbox"
+          ] do
+        assert {:error, {:invalid_field, "attachments"}} =
+                 Protocol.encode_server_event("server_hello", %{full | "attachments" => bad}),
+               inspect(bad)
+      end
+    end
+
+    test "only an attach id the wire takes is one" do
+      assert Protocol.attach_id?("mac-att_7F3a9c")
+      refute Protocol.attach_id?("mac att")
+      refute Protocol.attach_id?(".")
+      refute Protocol.attach_id?(nil)
+    end
+  end
+
   # M60 app surface §3.7 (D28): a proposal's card, its end, and the owner's answer.
   describe "proposals (version 4)" do
-    test "proposal_answer names the proposal and a decision, confirm or deny" do
+    test "proposal_answer names the proposal and a decision, confirm, deny or always_allow" do
       answer = %{
         "type" => "proposal_answer",
         "client_msg_id" => "mac-9",
@@ -415,6 +774,7 @@ defmodule FermixCore.Companion.ProtocolTest do
 
       assert {:ok, %{type: "proposal_answer"}} = decode(answer)
       assert {:ok, _event} = decode(%{answer | "decision" => "deny"})
+      assert {:ok, _event} = decode(%{answer | "decision" => "always_allow"})
       assert {:error, {:invalid_field, "decision"}} = decode(%{answer | "decision" => "maybe"})
       assert {:error, {:invalid_field, "proposal_id"}} = decode(%{answer | "proposal_id" => ""})
       assert {:error, {:missing_field, "decision"}} = decode(Map.delete(answer, "decision"))
@@ -444,6 +804,53 @@ defmodule FermixCore.Companion.ProtocolTest do
                    "profile_id" => "main",
                    "proposal" => drift
                  }),
+               "accepted #{inspect(drift)}"
+      end
+    end
+
+    # M60_WATCHER_CODING_RUNS.md §6.3: the compact card's lines, additive.
+    test "a mandate's card may carry each argument and the filter's reason" do
+      compact =
+        proposal_card()
+        |> put_in(["outside", "args"], [%{"name" => "title", "value" => "Phoenix 2.0"}])
+        |> put_in(["outside", "reason"], "a release")
+
+      assert :ok = validate_card(compact)
+      assert Protocol.server_payload_version("proposal", %{"proposal" => compact}) == 4
+
+      for drift <- [
+            put_in(compact, ["outside", "args"], [%{"name" => "", "value" => "x"}]),
+            put_in(compact, ["outside", "args"], [%{"name" => "title", "value" => 2}]),
+            put_in(compact, ["outside", "reason"], "")
+          ] do
+        assert {:error, {:invalid_field, "proposal"}} = validate_card(drift)
+      end
+    end
+
+    # M60_WATCHER_CODING_RUNS.md §6.2: version 5's follow-up card names the
+    # follow-up in place of a mandate's call, and never carries arguments.
+    test "a follow-up's card is version 5's, names the follow-up and carries no call" do
+      assert :ok = validate_card(follow_up_card())
+
+      assert :ok =
+               validate_card(put_in(follow_up_card(), ["follow_up", "offers_always_allow"], true))
+
+      assert Protocol.server_payload_version("proposal", %{"proposal" => follow_up_card()}) == 5
+      assert Protocol.server_payload_version("proposal_resolved", %{}) == 4
+
+      for drift <- [
+            Map.put(follow_up_card(), "mandate", "release-issues"),
+            Map.put(follow_up_card(), "tool", "shell"),
+            put_in(follow_up_card(), ["outside", "args_text"], "{}"),
+            put_in(follow_up_card(), ["follow_up", "asks"], "maybe"),
+            put_in(follow_up_card(), ["follow_up", "tools"], [""]),
+            put_in(follow_up_card(), ["follow_up", "asks"], "automatic"),
+            put_in(follow_up_card(), ["follow_up", "daily_cap"], 5),
+            put_in(follow_up_card(), ["follow_up", "set_off_by"], "x-feed"),
+            put_in(follow_up_card(), ["follow_up", "offers_always_allow"], "yes"),
+            Map.update!(follow_up_card(), "follow_up", &Map.delete(&1, "instructions"))
+          ] do
+        assert {:error, {:invalid_field, "proposal"}} = validate_card(drift),
                "accepted #{inspect(drift)}"
       end
     end
@@ -558,6 +965,38 @@ defmodule FermixCore.Companion.ProtocolTest do
     end
   end
 
+  # PROTOCOL.md, *Where a message came from*: a scheduled job's or a cue's
+  # message names its source by kind and name, and nothing else.
+  describe "validate_origin_metadata/1" do
+    test "a job's message names the job and a cue's the watcher" do
+      assert :ok =
+               Protocol.validate_origin_metadata(%{"kind" => "job", "name" => "Morning briefing"})
+
+      assert :ok = Protocol.validate_origin_metadata(%{"kind" => "cue", "name" => "codex-limits"})
+    end
+
+    test "both keys are required, the kind is one of two and the name is never empty" do
+      origin = %{"kind" => "cue", "name" => "codex-limits"}
+
+      for key <- ~w(kind name) do
+        assert {:error, {:missing_field, "origin." <> ^key}} =
+                 Protocol.validate_origin_metadata(Map.delete(origin, key))
+      end
+
+      for {key, value} <- [{"kind", "reminder"}, {"kind", :cue}, {"name", ""}, {"name", 7}] do
+        assert {:error, {:invalid_field, "origin." <> ^key}} =
+                 Protocol.validate_origin_metadata(Map.put(origin, key, value))
+      end
+    end
+
+    test "a key the origin does not have is refused, and so is anything not a map" do
+      assert {:error, {:unknown_field, "origin.id"}} =
+               Protocol.validate_origin_metadata(%{"kind" => "job", "name" => "a", "id" => "j1"})
+
+      assert {:error, {:invalid_field, "origin"}} = Protocol.validate_origin_metadata(nil)
+    end
+  end
+
   defp ended_call do
     %{
       "uuid" => "3f2b8c1e-5a4d-4e6f-9b8a-7c6d5e4f3a2b",
@@ -614,7 +1053,48 @@ defmodule FermixCore.Companion.ProtocolTest do
     }
   end
 
+  defp follow_up_card do
+    %{
+      "proposal_id" => "cft_1",
+      "state" => "waiting",
+      "task" => %{"job_id" => "codex_review", "name" => "Codex review"},
+      "watcher" => "codex-limits",
+      "source_ref" => "x-feed",
+      "created_at" => "2026-10-30T12:00:00Z",
+      "expires_at" => "2026-10-30T12:30:00Z",
+      "status_sentence" => "Waiting for your answer; it runs only if you confirm.",
+      "summary" => "Watcher codex-limits wants to run its follow-up \"Codex review\".",
+      "outside" => %{
+        "reason" => "the post says usage limits reset",
+        "cue" => %{"subject" => "@limits", "text" => "Usage limits have been reset."}
+      },
+      "follow_up" => %{
+        "asks" => "run",
+        "name" => "Codex review",
+        "instructions" => "Review the last day's commits on dev.",
+        "tools" => ["codex_run"],
+        "reports_to" => "Telegram (owner-1)"
+      }
+    }
+  end
+
+  defp validate_card(card),
+    do:
+      Protocol.validate_server_payload("proposal", %{"profile_id" => "main", "proposal" => card})
+
   defp decode(map), do: map |> Jason.encode!() |> Protocol.decode_client_event()
+
+  defp attach_file do
+    %{
+      "type" => "attach_file",
+      "attach_id" => "mac-att-7f3a9c",
+      "kind" => "image",
+      "mime" => "image/jpeg",
+      "size_bytes" => 183_204,
+      "sha256" => ref(),
+      "name" => "IMG_0412.jpg"
+    }
+  end
 
   defp ref, do: "9879f6d3c9efefe8c4f4aabe9d3269762264be52794e96f62ab8ffa53b7fadec"
 end

@@ -12,12 +12,25 @@ defmodule FermixCore.Management.Cues.WatcherRow do
   the owner's own words and travel on `cues.watchers.get` alone, and examples
   are counted, never shown. Decision reasons and filter hints never cross: a
   model wrote them from outside text.
+
+  A watcher has a task, a follow-up or both (M60_WATCHER_CODING_RUNS.md §3.5).
+  `task` is the job a passing item starts: its task, or for a watcher with only
+  a follow-up, that follow-up's job, so `task` is never null and an app that
+  predates follow-ups still reads every row. `follow_up` is null for one with no
+  follow-up, else its job, name, `always_allowed` (whether the owner's Always
+  allow on one of its cards lets it run with no card for what it runs and what
+  sets it off now; false while it asks first), `state` (`ready`, or `held`
+  while it cannot run: the owner's switch is off, or a tool or the channel it
+  needs is not set up) and Fermix's sentence, which says what is missing and
+  where to fix it while it is held. Only `cues.watchers.always_allow.revoke`
+  changes it here, and only ever to asking first.
   """
 
   alias FermixCore.Cues.Filter.Llm
   alias FermixCore.Cues.Overview
 
   @states ~w(on paused needs_update held)
+  @follow_up_states ~w(ready held)
 
   @type facts :: %{window_s: pos_integer()}
 
@@ -25,12 +38,16 @@ defmodule FermixCore.Management.Cues.WatcherRow do
   @spec states() :: [String.t()]
   def states, do: @states
 
+  @doc "Every state a watcher's follow-up can carry."
+  @spec follow_up_states() :: [String.t()]
+  def follow_up_states, do: @follow_up_states
+
   @doc """
   What a watcher that needs an update (`Cues.Watchers.update_needed/2`) needs,
   in the owner's words: the row's sentence, and the setup page's.
   """
   @spec needs_update_sentence(:words | :filter) :: String.t()
-  def needs_update_sentence(:words), do: "Needs words to listen for: update it in chat."
+  def needs_update_sentence(:words), do: "Needs keywords to listen for: update it in chat."
 
   def needs_update_sentence(:filter),
     do: "Passes everything, so it can't listen to a stream: give it a filter in chat."
@@ -49,11 +66,8 @@ defmodule FermixCore.Management.Cues.WatcherRow do
       "state" => state,
       "status_sentence" => sentence(state, watcher),
       "sources" => watcher.sources,
-      "task" => %{
-        "job_id" => watcher.task_job_id,
-        "name" => watcher.task_name,
-        "paused" => watcher.task_paused?
-      },
+      "task" => task(watcher),
+      "follow_up" => follow_up(watcher.follow_up),
       "task_notes" => watcher.task_notes?,
       "daily_cap" => watcher.daily_cap,
       "filter_budget" => watcher.filter_budget,
@@ -98,6 +112,24 @@ defmodule FermixCore.Management.Cues.WatcherRow do
     })
   end
 
+  @doc """
+  The row's `follow_up` from a `Cues.Overview` watcher's follow-up: its job,
+  name, `always_allowed`, `state` and Fermix's sentence; nil with no
+  follow-up. The setup page's Cues tab says a follow-up from it, in these words.
+  """
+  @spec follow_up(Overview.follow_up() | nil) :: map() | nil
+  def follow_up(nil), do: nil
+
+  def follow_up(follow_up) when is_map(follow_up) do
+    %{
+      "job_id" => follow_up.job_id,
+      "name" => follow_up.name,
+      "always_allowed" => follow_up.always_allowed?,
+      "state" => if(follow_up.held, do: "held", else: "ready"),
+      "status_sentence" => follow_up_sentence(follow_up)
+    }
+  end
+
   defp state(%{enabled?: false}, _facts), do: "paused"
   defp state(%{needs_update: needed}, _facts) when not is_nil(needed), do: "needs_update"
   defp state(%{held?: true}, _facts), do: "held"
@@ -107,14 +139,43 @@ defmodule FermixCore.Management.Cues.WatcherRow do
 
   defp sentence("needs_update", watcher), do: needs_update_sentence(watcher.needs_update)
 
+  # A hold whose cause is the screen's decision model says so, in the words its
+  # notice used; any other hold is a provider's, named as before.
+  defp sentence("held", %{held_sentence: cause} = watcher) when is_binary(cause),
+    do: "Held: #{cause} #{waiting_words(watcher.waiting)}"
+
   defp sentence("held", %{waiting: 1}),
     do: "Held: it cannot reach its filter model. One item is waiting."
 
   defp sentence("held", watcher),
     do: "Held: it cannot reach its filter model. #{watcher.waiting} items are waiting."
 
+  defp sentence("on", %{filter: "none", task_job_id: nil}),
+    do: "Passes every item to its follow-up."
+
   defp sentence("on", %{filter: "none"}), do: "Passes every item to its task."
   defp sentence("on", _watcher), do: "Filtering normally."
+
+  defp waiting_words(1), do: "One item is waiting."
+  defp waiting_words(waiting), do: "#{waiting} items are waiting."
+
+  defp task(%{task_job_id: nil, follow_up: follow_up}),
+    do: %{"job_id" => follow_up.job_id, "name" => follow_up.name, "paused" => follow_up.paused?}
+
+  defp task(watcher),
+    do: %{
+      "job_id" => watcher.task_job_id,
+      "name" => watcher.task_name,
+      "paused" => watcher.task_paused?
+    }
+
+  defp follow_up_sentence(%{held: held}) when is_binary(held), do: held
+
+  defp follow_up_sentence(%{always_allowed?: true}),
+    do: "Always allowed: it runs on each passing item with no card."
+
+  defp follow_up_sentence(_asks_first),
+    do: "Asks first: you confirm each run on a short card, where you can also always allow it."
 
   # The one Cues filter model every `llm` watcher uses; null when that is the
   # main model, and for a watcher with no filter.

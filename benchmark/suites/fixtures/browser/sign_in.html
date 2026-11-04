@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Brackenmoor Library — members' sign-in (fixture)</title>
+<link rel="icon" href="data:,">
+<style>
+  body { font: 16px/1.5 system-ui, sans-serif; margin: 2rem auto; max-width: 30rem; }
+  label { display: block; margin-top: 1rem; font-weight: 700; }
+  input { font: inherit; width: 100%; padding: 0.3rem; }
+  button { font: inherit; margin-top: 1.5rem; padding: 0.4rem 1.2rem; }
+</style>
+</head>
+<body>
+<h1>Brackenmoor Library</h1>
+<h2>Members' sign-in</h2>
+
+<!-- The server keeps nothing the form sends: signing in starts a session for
+     this browser and lands on signed_in.html (bin/evallib/fixture_server.py). -->
+<form method="post" action="sign-in">
+  <label for="card">Library card number</label>
+  <input id="card" name="card" autocomplete="off">
+  <label for="pin">PIN</label>
+  <input id="pin" name="pin" type="password" autocomplete="off">
+  <button type="submit">Sign in</button>
+</form>
+
+<p id="fixture-status"></p>
+<script src="fixture.js"></script>
+</body>
+</html>

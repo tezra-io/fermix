@@ -13,11 +13,27 @@ defmodule FermixCore.Harness.Adapters.CodexExecTest do
     workspace = FermixTestSupport.SafeRm.make_tmp_dir!("harness-codex-adapter")
     on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(workspace) end)
 
+    # The account's model list as Codex caches it in its own config dir, so a
+    # `model` is checked against this list and never the host's `~/.codex`.
+    codex_home = Path.join(workspace, "codex-home")
+    File.mkdir_p!(codex_home)
+
+    write_model_list!(codex_home, [
+      %{"slug" => "gpt-5-codex", "display_name" => "GPT-5-Codex", "visibility" => "list"},
+      %{
+        "slug" => "gpt-lantern-gray-latest",
+        "display_name" => "Lantern Gray",
+        "visibility" => "list"
+      },
+      %{"slug" => "gpt-quiet-reserve", "display_name" => "Quiet Reserve", "visibility" => "hide"}
+    ])
+
     ctx = %{
       cwd: workspace,
       agent_name: "test_agent",
       conversation_key: :test,
       sandbox_config: %{mode: :strict, workspace_root: workspace, allowed_roots: []},
+      codex_home: codex_home,
       find_executable: fn
         "codex" -> "/opt/fake/bin/codex"
         _other -> nil
@@ -250,6 +266,47 @@ defmodule FermixCore.Harness.Adapters.CodexExecTest do
     end
   end
 
+  # 2026-11-03: a follow-up passed "daybreak blue", the model's display name, and
+  # Codex refused it only after it had started, so the run died in 4 s as `exit_1`
+  # and the follow-up had already ended. The account's own list (Codex's
+  # `models_cache.json`) is read first, so an unknown name is refused before
+  # anything starts, and the caller can read the ids and launch again.
+  describe "plan/2 — the model is one this account's Codex lists" do
+    test "a name the list does not hold is refused, naming the listed ids", %{ctx: ctx} do
+      assert {:error, {:unknown_codex_model, "lantern gray", listed}} =
+               CodexExec.plan(%{model: "lantern gray"}, ctx)
+
+      assert listed == [
+               {"gpt-5-codex", "GPT-5-Codex"},
+               {"gpt-lantern-gray-latest", "Lantern Gray"}
+             ]
+    end
+
+    test "a model Codex hides from its picker is still taken by its id", %{ctx: ctx} do
+      assert {:ok, plan} = CodexExec.plan(%{model: "gpt-quiet-reserve"}, ctx)
+      assert codex_opts(plan.argv) == ["-m", "gpt-quiet-reserve"]
+    end
+
+    test "with no list on disk a model is refused, and a plan without one never reads it", %{
+      ctx: ctx,
+      workspace: workspace
+    } do
+      empty = Path.join(workspace, "codex-home-empty")
+      File.mkdir_p!(empty)
+      ctx = %{ctx | codex_home: empty}
+
+      assert {:error, :no_codex_model_list} = CodexExec.plan(%{model: "gpt-5-codex"}, ctx)
+      assert {:ok, _plan} = CodexExec.plan(%{}, ctx)
+    end
+
+    test "a list that cannot be decoded is its own refusal", %{ctx: ctx} do
+      File.write!(Path.join(ctx.codex_home, "models_cache.json"), "not json")
+
+      assert {:error, {:codex_model_list_unreadable, _reason}} =
+               CodexExec.plan(%{model: "gpt-5-codex"}, ctx)
+    end
+  end
+
   describe "terminal?/1" do
     test "turn.completed and turn.failed are terminal" do
       assert CodexExec.terminal?(%{"type" => "turn.completed"})
@@ -285,6 +342,32 @@ defmodule FermixCore.Harness.Adapters.CodexExecTest do
       events = read_events("codex_exec_failure.jsonl")
       assert Enum.any?(events, fn e -> e["type"] == "turn.failed" and CodexExec.terminal?(e) end)
     end
+
+    # Codex says why a turn failed only on `turn.failed` and writes no `-o` result,
+    # so the owner read `exit_1` and Codex's stdin banner instead (2026-11-03).
+    test "turn.failed carries Codex's own words, unwrapped from a nested JSON error" do
+      events = read_events("codex_exec_failure.jsonl")
+
+      assert extract_value(events, :failure_text) ==
+               "The 'nonexistent-model-xyz' model is not supported when using Codex " <>
+                 "with a ChatGPT account."
+    end
+
+    test "a plain turn.failed message is taken as written" do
+      message =
+        "The 'lantern gray' model is not supported when using Codex with a ChatGPT account."
+
+      event = %{"type" => "turn.failed", "error" => %{"message" => message}}
+
+      assert CodexExec.extract(event) == %{failure_text: message}
+    end
+
+    test "a stream error Codex retries past is not the run's failure" do
+      refute Map.has_key?(
+               CodexExec.extract(%{"type" => "error", "message" => "Reconnecting... 2/5"}),
+               :failure_text
+             )
+    end
   end
 
   describe "resume_hint/1" do
@@ -310,6 +393,11 @@ defmodule FermixCore.Harness.Adapters.CodexExecTest do
     |> File.read!()
     |> String.split("\n", trim: true)
     |> Enum.map(&Jason.decode!/1)
+  end
+
+  defp write_model_list!(codex_home, models) do
+    body = Jason.encode!(%{"fetched_at" => "2026-11-03T04:12:42Z", "models" => models})
+    File.write!(Path.join(codex_home, "models_cache.json"), body)
   end
 
   defp write_fixture_file(dir, name) do

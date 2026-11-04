@@ -81,7 +81,104 @@ written after the approval cards in the step that joined the registry
 (`send_waiting_proposals`). A proposal has no seq, request or turn, and a
 `proposal_answer` is served in the Connection's own step, so `server_hello`,
 the approval cards behind it and every rule here are as before; the header
-leaves proposals out.
+leaves proposals out. The re-read after watcher follow-ups (2026-10-30) found
+companion protocol 5: the window moves to {4, 5}; a follow-up's card, a
+`proposal` that carries `follow_up` in place of `mandate`, `tool` and
+`outside.args_text`, reaches only the owner's version 5 connections, the
+waiting cards written after `server_hello` now chosen card by card
+(`send_waiting_proposals`, `owner_reads?` reading
+`Protocol.server_payload_version`), and its `proposal_resolved` reaches every
+owner connection; a mandate's card gains `outside.args` and `outside.reason`,
+additive and sent on every version. These are proposal events, with no seq,
+request or turn, written in the same steps as before, so `server_hello`, the
+approval cards behind it and every rule here are as before; the header names
+them among what it leaves out. The line references into `sandbox.ex`, which
+had drifted, now point at the pinned functions. The re-read after M85 found a
+second block type in `PROTOCOL.md`, `checklists`: the lists a turn's list tools
+read or changed, by id, which `Turns` takes with the place records in the same
+call, and which rides the same row, `text_done` and history message. No client
+rule reads it, and every row, seq, ending and settlement is as before, so
+nothing the spec models changed. The re-read after M85 §07 found the owner's
+lists on companion protocol 6: `checklists_pull`, `checklist_pull` and
+`checklist_edit` are served in the Connection's own step against the lists'
+tables, an edit answered `accepted` (or `request_failed`) by its own
+`client_msg_id`, deduplicated in the lists' own table and never in the
+request store; `checklists` and `checklist` reach only the owner's version 6
+connections that pulled the index or hold the list, written from two new
+`handle_info` clauses, `{:checklists_changed, _}`, which only marks what is
+pending and arms the window's timer, and `:checklists_flush`, which writes
+them whole and, on a failed write, ends the connection as a drop does; and
+`message` stamps a turn with whether its connection draws lists, which the
+turn's prompt reads. None of them has a seq, request or turn, none moves a
+cursor or the outbox, and every row, seq, ending and settlement is as
+before, so nothing the spec models changed; the header names them among
+what it leaves out. The re-read after Always allow (2026-10-31) found a
+follow-up's card carrying `follow_up.offers_always_allow` and `proposal_answer`
+taking the decision `always_allow`, both additive with no version, and the
+approval prompt's card (`cfa_…`) gone: proposal events and a client request
+served in the Connection's own step, as before, so nothing the spec models
+changed. The re-read after Always On's notice
+(2026-10-31) found `home_status_changed` in the same companion protocol 6,
+whose window stays {5, 6}: a version 6 connection subscribes to
+`Home.StatusWatch` in the step that joins the registry, before it writes
+`server_hello` (`watch_home`, a cast that writes nothing), and writes the
+notice from its own mailbox whenever the watch tells it. The notice carries no
+row, seq, request or turn, and the app answers it by reading management's
+`home.status`, so `server_hello`, the approval cards behind it and every rule
+here are as before; the header names it among what it leaves out. The line
+references into `connection.ex` moved with the code.
+
+The re-read after companion protocol 7 (2026-11-01) found the owner's files:
+the window moves to {6, 7}; every `server_hello` carries `commands`, and one
+to a connection placed as the owner's carries `attachments` while the media
+store runs, both built in the `join` step before the hello is written
+(`offer_attachments`, one call to `Companion.Inbox`); an `attach_file` is
+served in the Connection's own step through `Companion.Inbox`, which reads
+the file into the media store and removes it, answered `attach_status` or
+`request_failed` by its `attach_id`, with no seq, request or turn; `dispatch`
+refuses a `msg` that names attachments with `attachments_unsupported` before
+anything is claimed unless a version 7 owner's connection sent it, as the
+codec refused every such `msg` before; and such a `msg` takes the same
+claim, `accepted`, attempt and user row, its attachments resolved in
+`ingest_span` before the row is written (`resolve_attachments`, unchanged,
+and `Channels.Companion.message` now carries what it declared), the row
+carrying their `media_refs`. One naming a file the store no longer holds
+fails in `ingest_span` before its row, as a request error there always did.
+None of it moves a seq, a cursor or the outbox, and every row, ending and
+settlement is as before, so nothing the spec models changed; the header
+names the files among what it leaves out. The line references into
+`connection.ex` moved with the code, and those into `channels/companion.ex`,
+which had drifted before, now point at the functions they name.
+
+The re-read after a message's origin (2026-11-02) found `PROTOCOL.md`'s new
+*Where a message came from*: a scheduled job's or a cue's message carries
+`metadata.origin` (`kind` and `name`) on its row, additive and on every
+version, which no client rule reads. `Output.persist_output` now checks a
+given origin before it writes and, for one outside its shape, writes nothing
+and answers an error, as a refused store write does; the job's row the spec
+models is written by engine code that builds only well-formed origins, so
+its write and announcement are as before. Every row, seq, ending and
+settlement is unchanged, so nothing the spec models changed. The line
+references into `channels/companion.ex` moved with the code.
+
+The re-read for earlier messages' origin (2026-11-02) found `PROTOCOL.md`
+saying that a row a job's or a cue's run wrote before `origin` existed is
+given it when the daemon starts (`Companion.OriginBackfill`). That pass
+rewrites only the stored `metadata_json` of rows already written, and only
+while it is still what the pass read: it appends no row, takes no
+`server_seq`, settles no request and sends no event, so every row, seq,
+ending and settlement the spec models is unchanged. Its read and write sit
+above most of the `mobile_sql.ex` functions the spec cites, and the line
+references below them moved with the code.
+
+The re-read for a reply's time (2026-11-02) found `text_done` carrying `ts`,
+the time its row stores, in `PROTOCOL.md`, in `Output.text_done`, and in the
+one line of `turns.ex` that builds it: `Output.text_done` now takes the row
+the write just returned, where it took that row's `server_seq`, and reads
+the row's time from it, as `timeline_message` does. No read, write, seq or
+announcement is added or moved, and the event reaches the same connections
+at the same point, so nothing the spec models changed. No line the spec
+cites moved.
 
 **The Queue is one abstract process.** The runner takes one `.tla` per spec,
 and `turn_queue` proves the Queue's rules against `queue.ex`, so this spec takes
@@ -201,9 +298,9 @@ answers however busy it is, so the model folds the Queue's stop into that
   lets it end with no reply may answer exactly `[SILENT]`. With it off the
   silence decision is never taken and the state space is the one before.
   `V1Clients` names the clients on companion protocol 1. Since protocol 3 the
-  daemon refuses a version 1 hello (since protocol 4 a version 2 one too, its
-  window being {3, 4}), so only checks 34 and 35, which prove the silence gate
-  the code keeps, name one.
+  daemon refuses a version 1 hello (since protocol 4 a version 2 one too, and
+  since protocol 5 a version 3 one, its window being {4, 5}), so only checks
+  34 and 35, which prove the silence gate the code keeps, name one.
 
 **Mechanism switches** (`TRUE` is the real code; each is switched off only by
 the checks that show a rule needs it):
@@ -212,35 +309,35 @@ the checks that show a rule needs it):
 - `AcceptedDedupe`: a known `client_msg_id` is claimed as a duplicate
   (`claim_request_in_tx`, `classify_claim`). The coordinator starts no second
   attempt of a request running, completed or failed
-  (`request_coordinator.ex:125-132`).
+  (`request_coordinator.ex:166-173`).
 - `SeqCursor`: the client's cursor rules (`PROTOCOL.md`).
 - `SubscribeBeforePull`: the Connection joins the registry before
-  `server_hello` (`join`, `connection.ex:258-268`).
+  `server_hello` (`join`, `connection.ex:528-546`).
 - `PageWrittenInReadStep`: the Connection writes `history_page` to the socket
-  in the step that read it (`read_opts`, `connection.ex:534-538`). `FALSE`
+  in the step that read it (`read_opts`, `connection.ex:1186-1190`). `FALSE`
   sends it through its own mailbox, where a live row sent after the read can
   overtake it.
 - `AnnouncesEveryRow`: every row written outside a turn's completion is
   announced as a `row` as it is written: the user's row (`announce_user_row`,
-  `connection.ex:522-523`) and a delivery (`announce_written`,
-  `channels/companion.ex:338-339`), both built by `Companion.Output.row` and
+  `connection.ex:1174-1175`) and a delivery (`announce_written`,
+  `channels/companion.ex:409-410`), both built by `Companion.Output.row` and
   sent through `Companion.Fanout.announce`. `FALSE` announces no user row.
 - `SingleAnswer`: `Confirmations.take` is an `:ets.take`, the sole consumer of
   a token (`confirmations.ex:21-31`).
 - `ResendsPendingApprovals`: the Connection writes every card still waiting
   right after `server_hello`, in the step that joined the registry
-  (`send_pending_approvals`, `connection.ex:274-283`, from
+  (`send_pending_approvals`, `connection.ex:597-606`, from
   `Approvals.pending`). `FALSE`: a card goes out once, live.
 - `DropsCardsAtHello`: when `server_hello` arrives the client drops every card
   it shows and keeps only those sent after it (`PROTOCOL.md` "Approvals").
   `FALSE` keeps a card across a drop until an `approval_resolved` reaches it.
 - `OneTurnAtATime`: `maybe_start_next_request` (`queue.ex:317-325`).
 - `StopTurnNamesTurn`: a stop ends the named message's turn only
-  (`Queue.stop_turn`, `stop_named_in`, `queue.ex:185`, `:1035-1072`). `FALSE`
+  (`Queue.stop_turn`, `stop_named_in`, `queue.ex:185`, `:1048-1085`). `FALSE`
   is the conversation stop.
 - `CancelMarksRequest`: a cancel is recorded on its request first
-  (`Requests.cancel`, `requests.ex:157-173`; `cancel_request`,
-  `mobile_sql.ex:567-586`). `Turns` reads the mark and enqueues in one step
+  (`Requests.cancel`, `requests.ex:192-208`; `cancel_request`,
+  `mobile_sql.ex:821-840`). `Turns` reads the mark and enqueues in one step
   (`hand_off`, `turns.ex:335-350`), and sends every stop of a turn it handed
   off itself, after the enqueue (`turns.ex:249-253`, `stop_in_queue`,
   `:449-460`). `FALSE` is the code before 431d5663: the Connection called
@@ -249,7 +346,7 @@ the checks that show a rule needs it):
   `Turns`; the cancel writes nothing.
 - `SettleAfterIngest`: once ingest returned, the request worker casts the
   request's settlement to `Turns` (`settle_after_ingest`,
-  `requests.ex:303-307`). `FALSE` is the code before: a message the gateway
+  `requests.ex:346-350`). `FALSE` is the code before: a message the gateway
   answered without a turn stayed `running`, and the next boot ran it again.
 - `SettleUnlessHandedOff`: `Turns` settles that request only if no turn was
   handed off for it (`handle_cast({:settle_unless_handed_off, ...})`,
@@ -259,13 +356,13 @@ the checks that show a rule needs it):
 - `FailsUnsettled`: a settlement that fails is followed by one failure write
   for the attempt and by `error{request_failed, client_msg_id}` to the client
   that sent the request (`settle_inline`, `run_settle`, `turns.ex:368-403`;
-  `fail_attempt`, `report_failure`, `requests.ex:340-360`), through the
+  `fail_attempt`, `report_failure`, `requests.ex:383-403`), through the
   transport's `report_failure`, which the connection writes as a failed
-  worker's error (`connection.ex:510-517`, `:159-160`). `FALSE` only logs the
+  worker's error (`connection.ex:1162-1169`, `:308-309`). `FALSE` only logs the
   failure: the request stays `running`, and the next boot runs the command
   again.
 - `SeqAssignedOnInsert`: the seq comes from the counter inside the inserting
-  transaction (`append_in_tx`, `mobile_sql.ex:758-765`). `FALSE`: a writer
+  transaction (`append_in_tx`, `mobile_sql.ex:1056-1063`). `FALSE`: a writer
   reads the counter, then inserts in a second call.
 - `SilenceGate`: a turn may end with no reply only if every client joined
   when it started declared version 2 (`MainAgent.live_call`,
@@ -421,6 +518,9 @@ of an entity its rules are about. All still hold:
   in the timeline, and no rule reads them. `read_state` is a frontier the
   daemon caps at the newest row and announces to every watcher, the phones
   included.
+- A voice call's hand-off turn reporting what it read (`{:outside_sources,
+  set}` on its stream before its reply, 2026-10-27): only a turn with a voice
+  call id sends it, to the voice channel, and no companion client reads it.
 - `history_search` and scroll-back through `history_pull{before_seq}`: reads
   below the cursor that never move it. `search_results` is written in the
   reading step like a page (453c24fc).
@@ -498,8 +598,15 @@ of an entity its rules are about. All still hold:
   `cue_proposals`, which no step here reads, and its `accepted` answers no
   `msg` or `command`, so no outbox rule reads it. That a confirmed proposal
   runs at most once is `cue_inbox`'s.
+- Companion protocol 5's follow-up cards (watcher follow-ups). A card that
+  carries `follow_up` in place of `mandate`, `tool` and `outside.args_text`
+  reaches only the owner's version 5 connections (`owner_reads?`, from
+  `Protocol.server_payload_version`), a waiting one after `server_hello`
+  included, and its `proposal_resolved` every owner connection. A mandate
+  card's `outside.args` and `outside.reason` are additive and ride every
+  version. They are proposal events, left out as above.
 - The peer check at the hand-over (`handle_info(:socket_handover)`,
-  `connection.ex:126-133`). A client the daemon cannot place is sent
+  `connection.ex:264-271`). A client the daemon cannot place is sent
   `error: unidentified_client` and closed before a line is read, which the
   client sees as a drop before `server_hello`. The caller it places rides on
   each turn (`metadata.caller`) and decides only what the turn's tools may do.
@@ -549,7 +656,7 @@ off; open `tla/out/companion_session/<check>.txt` after a run to see the path.
 
 ### COMPANION-2: a connection must join the fan-out before its history is read
 - **Status:** holds in the code (b9248004): `join` registers the Connection
-  before it writes `server_hello` (`connection.ex:258-268`).
+  before it writes `server_hello` (`connection.ex:528-546`).
 - **Checks:** 01 holds; 03 breaks `TimelineConverges` with the join after the
   first page.
 

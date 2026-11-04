@@ -306,7 +306,13 @@ defmodule FermixCore.Tools.CodexRunTest do
         {:ephemeral_not_resumable, ["ephemeral", "resum"]},
         {{:invalid_sandbox, "nope"}, ["nope", "read-only"]},
         {{:invalid_param, :effort, "turbo"}, ["effort", "turbo"]},
-        {:missing_cwd, ["working directory"]}
+        {:missing_cwd, ["working directory"]},
+        # The refusals the model reads before trying again: each says nothing
+        # started and how to launch the second time.
+        {{:unknown_codex_model, "lantern gray", [{"gpt-lantern-gray-latest", "Lantern Gray"}]},
+         ["lantern gray", "nothing was started", "gpt-lantern-gray-latest (Lantern Gray)", "omit"]},
+        {:no_codex_model_list, ["nothing was started", "omit"]},
+        {{:codex_model_list_unreadable, :eacces}, ["nothing was started", "omit"]}
       ]
 
       for {{reason, expected}, index} <- Enum.with_index(cases) do

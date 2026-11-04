@@ -1,0 +1,71 @@
+#!/bin/sh
+# Test stand-in for the packaged fermix, installed by the fake installer.
+# Records its arguments, its account and the names (never the values) of its
+# environment; `home enroll` records the SHA-256 of the code file it can read
+# and writes a candidate home the way the real verb does. `home status --json`
+# answers the candidate's phases from /etc/fermix-test/phases, one line per
+# call ("phase|sentence"), the last repeated (enrolled without the file), and
+# its update_ceiling from /etc/fermix-test/ceiling (1.2.3 without it, null
+# when it says none).
+# The release the service runs is kept in $state/running-version: `service
+# install` and `restart` start the installed one (the fake installer records
+# it in $state/installed-version), and `service status --json` answers
+# `aligned`, `pending_restart` when they differ, or `not_running` while the
+# home is missing. `restart` fails, as a new engine that does not answer does,
+# while /etc/fermix-test/restart-fails exists, and `service status` and `home
+# status` fail while service-status-fails and home-status-fails do.
+set -eu
+log=/var/log/fermix-test
+fixtures=/etc/fermix-test
+state=/var/lib/fermix-test
+printf 'fermix %s [as %s]\n' "$*" "$(id -un)" >>"$log/calls.log"
+verb="$1${2+ $2}"
+env | cut -d= -f1 | sort >"$log/env-$(printf '%s' "$verb" | tr ' ' -)"
+case "$verb" in
+  "home enroll")
+    code_file=$4
+    sha256sum <"$code_file" | cut -d' ' -f1 >"$log/code-file.sha256"
+    mkdir -p "$FERMIX_HOME"
+    printf '[fermix_core.engine]\nrole = "candidate"\n\n[fermix_core.always_on]\nenabled = true\n' \
+      >"$FERMIX_HOME/config.toml"
+    ;;
+  "service install")
+    printf '%s\n' "$XDG_RUNTIME_DIR" >"$log/service-runtime-dir"
+    cp "$state/installed-version" "$state/running-version"
+    ;;
+  "service status")
+    if [ -f "$fixtures/service-status-fails" ]; then
+      echo "fermix service status: (test) the user manager did not answer" >&2
+      exit 1
+    fi
+    alignment=not_running
+    if [ -e "$FERMIX_HOME" ] && [ -f "$state/running-version" ]; then
+      alignment=aligned
+      cmp -s "$state/installed-version" "$state/running-version" || alignment=pending_restart
+    fi
+    printf '{\n  "ok": true,\n  "result": {\n    "active": true,\n    "alignment": "%s"\n  },\n  "schema_version": 1\n}\n' \
+      "$alignment"
+    ;;
+  restart)
+    if [ -f "$fixtures/restart-fails" ]; then
+      echo "fermix restart: (test) the new engine did not answer" >&2
+      exit 1
+    fi
+    cp "$state/installed-version" "$state/running-version"
+    ;;
+  "home status")
+    if [ -f "$fixtures/home-status-fails" ]; then
+      echo "fermix home status: (test) the home could not be read" >&2
+      exit 1
+    fi
+    calls=$(grep -c 'fermix home status' "$log/calls.log")
+    line="enrolled|Enrolled with Invented Mac; waiting for its move."
+    if [ -f "$fixtures/phases" ]; then line=$(sed -n "${calls}p" "$fixtures/phases"); fi
+    if [ -z "$line" ]; then line=$(tail -n 1 "$fixtures/phases"); fi
+    ceiling='"1.2.3"'
+    if [ -f "$fixtures/ceiling" ]; then ceiling="\"$(cat "$fixtures/ceiling")\""; fi
+    if [ "$ceiling" = '"none"' ]; then ceiling=null; fi
+    printf '{\n  "ok": true,\n  "result": {\n    "move": {\n      "candidate": null,\n      "phase": "%s",\n      "sentence": "%s"\n    },\n    "moved": null,\n    "role": "candidate",\n    "update_ceiling": %s\n  },\n  "schema_version": 1\n}\n' \
+      "${line%%|*}" "${line#*|}" "$ceiling"
+    ;;
+esac

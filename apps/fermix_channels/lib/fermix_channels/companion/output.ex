@@ -14,6 +14,7 @@ defmodule FermixChannels.Companion.Output do
   An absent optional field is an absent key, never an explicit null.
   """
 
+  alias FermixCore.Companion.Protocol
   alias FermixCore.Text
 
   @sandbox_ttl_s 60
@@ -66,12 +67,20 @@ defmodule FermixChannels.Companion.Output do
   def text_delta(turn_id, text), do: %{"t" => "text_delta", "turn_id" => turn_id, "text" => text}
 
   @doc """
-  A reply's canonical text, at its timeline row, with the row's `blocks`
-  (M72) when it has any.
+  A reply's canonical text, at the timeline row `row` that stores it: the
+  row's `server_seq`, its time as `ts` (`row_ts/1`, what its history message
+  carries), and the row's `blocks` (M72) when it has any.
   """
-  @spec text_done(String.t(), pos_integer(), String.t(), [map()]) :: event()
-  def text_done(turn_id, server_seq, text, blocks \\ []) when is_list(blocks) do
-    %{"t" => "text_done", "turn_id" => turn_id, "server_seq" => server_seq, "text" => text}
+  @spec text_done(String.t(), map(), String.t(), [map()]) :: event()
+  def text_done(turn_id, %{server_seq: seq, created_at: %DateTime{}} = row, text, blocks \\ [])
+      when is_integer(seq) and seq > 0 and is_list(blocks) do
+    %{
+      "t" => "text_done",
+      "turn_id" => turn_id,
+      "server_seq" => seq,
+      "text" => text,
+      "ts" => row_ts(row)
+    }
     |> maybe_put("blocks", present_list(blocks))
   end
 
@@ -97,6 +106,26 @@ defmodule FermixChannels.Companion.Output do
       "phase" => "stop",
       "detail" => event |> inspect() |> Text.truncate_utf8(@max_tool_detail_bytes)
     }
+
+  @doc """
+  A tool's start as the Mac's socket carries it (companion protocol 6): the
+  shared `tool_event` with `activity`, the engine's sentence for the step
+  (`FermixCore.Capabilities.Activity`), which the phone's wire does not carry.
+  """
+  @spec tool_start(String.t(), String.t(), String.t()) :: event()
+  def tool_start(turn_id, tool, activity) when is_binary(activity) and activity != "",
+    do: turn_id |> tool_event({:tool_start, tool}) |> Map.put("activity", activity)
+
+  @doc """
+  The model's summary of one step of a turn's reasoning (companion protocol
+  6), as the provider wrote it, trimmed and cut on a character to the wire's
+  bound. Live-only, like a delta: it is never stored.
+  """
+  @spec reasoning(String.t(), String.t()) :: event()
+  def reasoning(turn_id, summary) when is_binary(turn_id) and is_binary(summary) do
+    text = summary |> String.trim() |> Text.truncate_utf8(Protocol.max_reasoning_bytes())
+    %{"t" => "reasoning", "turn_id" => turn_id, "text" => text}
+  end
 
   @doc """
   A completed turn's ending, for the connections that streamed it: every
@@ -160,13 +189,13 @@ defmodule FermixChannels.Companion.Output do
   The exported shape of one timeline row, a history page's message. Internal
   columns never ship, so a column added later can never leak to a client, and
   `ts` is always there. A row's link previews ship as the cards `link_preview`
-  sent, the image as its ref, and its blocks (M72) as they were stored.
+  sent, the image and icon as their refs, and its blocks (M72) as they were
+  stored.
   Nothing ships as an explicit null.
   """
   @spec timeline_message(map()) :: {:ok, map()} | {:error, term()}
   def timeline_message(
-        %{server_seq: seq, role: role, content: content, created_at: %DateTime{} = created_at} =
-          row
+        %{server_seq: seq, role: role, content: content, created_at: %DateTime{}} = row
       )
       when is_integer(seq) and seq > 0 and is_binary(role) and is_binary(content) do
     message =
@@ -174,7 +203,7 @@ defmodule FermixChannels.Companion.Output do
         "server_seq" => seq,
         "role" => role,
         "content" => content,
-        "ts" => DateTime.to_iso8601(created_at),
+        "ts" => row_ts(row),
         "media_refs" => Map.get(row, :media_refs) || []
       }
       |> maybe_put("kind", Map.get(row, :kind))
@@ -188,6 +217,10 @@ defmodule FermixChannels.Companion.Output do
   end
 
   def timeline_message(row), do: {:error, {:invalid_timeline_row, Map.get(row, :server_seq)}}
+
+  # A row's time on the wire, RFC 3339 in UTC, from the time the timeline
+  # stored with it: one form for a history message, a `row` and a `text_done`.
+  defp row_ts(%{created_at: %DateTime{} = created_at}), do: DateTime.to_iso8601(created_at)
 
   @doc """
   An owner-approval card with its exact approve and deny command routes. The
@@ -227,10 +260,11 @@ defmodule FermixChannels.Companion.Output do
   `:in_reply_to` and `:attempt` make it that attempt's output, keyed by the
   text's digest; a `:proactive_key` (with an optional `:proactive_part_id`)
   makes it a deduplicated proactive delivery; neither makes it a plain row.
-  The row's metadata carries the `:turn_id` that wrote it and a Live call's
-  `:call` map (M56 §6), already validated by its writer, each when given; a
-  non-empty `:blocks` (M72, `FermixCore.ReplyBlocks.build/2`) is stored with
-  the row in the same write.
+  The row's metadata carries the `:turn_id` that wrote it, a Live call's
+  `:call` map (M56 §6), already validated by its writer, and the `:origin` of
+  a scheduled job's or a cue's message (`persist_output/5`), each when given;
+  a non-empty `:blocks` (M72, `FermixCore.ReplyBlocks.build/2`) is stored
+  with the row in the same write.
   """
   @spec persist_text(store(), String.t(), String.t(), map()) :: persisted()
   def persist_text(store, profile_id, text, attrs) when is_binary(text) and is_map(attrs) do
@@ -239,10 +273,35 @@ defmodule FermixChannels.Companion.Output do
 
   @doc """
   Persist one reply part under an explicit output key; the router behind
-  `persist_text/4`, also used for media parts.
+  `persist_text/4`, also used for media parts. An `:origin` in `attrs` (where
+  a scheduled job's or a cue's message came from, its row's
+  `metadata.origin`) is checked first against
+  `Protocol.validate_origin_metadata/1`: one outside that shape writes
+  nothing.
   """
   @spec persist_output(store(), String.t(), map(), map(), String.t()) :: persisted()
   def persist_output(store, profile_id, timeline_attrs, attrs, output_key) do
+    with :ok <- validate_origin(value(attrs, :origin)) do
+      route_output(store, profile_id, timeline_attrs, attrs, output_key)
+    end
+  end
+
+  @doc """
+  The metadata a picture or file a delivery sends stores with its row: the
+  `origin` of a scheduled job's or a cue's message, or none.
+  """
+  @spec media_metadata(map()) :: map() | nil
+  def media_metadata(attrs) when is_map(attrs) do
+    case value(attrs, :origin) do
+      nil -> nil
+      origin -> %{"origin" => origin}
+    end
+  end
+
+  defp validate_origin(nil), do: :ok
+  defp validate_origin(origin), do: Protocol.validate_origin_metadata(origin)
+
+  defp route_output(store, profile_id, timeline_attrs, attrs, output_key) do
     cond do
       client_output?(attrs) ->
         store.append_client_output(
@@ -317,15 +376,19 @@ defmodule FermixChannels.Companion.Output do
       content: text,
       kind: "text",
       in_reply_to: value(attrs, :in_reply_to),
-      metadata: text_metadata(value(attrs, :turn_id), value(attrs, :call))
+      metadata: text_metadata(attrs)
     }
     |> maybe_put(:blocks, present_list(value(attrs, :blocks)))
   end
 
-  # A reply outside any turn (a delivery) has no turn to name, and only a Live
-  # call's row has a call. A row with neither stores no metadata.
-  defp text_metadata(turn_id, call) do
-    case Enum.reject([{"turn_id", turn_id}, {"call", call}], &is_nil(elem(&1, 1))) do
+  # A reply outside any turn (a delivery) has no turn to name, only a Live
+  # call's row has a call, and only a scheduled job's or a cue's message has an
+  # origin. A row with none stores no metadata.
+  defp text_metadata(attrs) do
+    [{"turn_id", :turn_id}, {"call", :call}, {"origin", :origin}]
+    |> Enum.map(fn {name, key} -> {name, value(attrs, key)} end)
+    |> Enum.reject(&is_nil(elem(&1, 1)))
+    |> case do
       [] -> nil
       present -> Map.new(present)
     end
@@ -376,6 +439,7 @@ defmodule FermixChannels.Companion.Output do
       preview
       |> Map.take(~w(link url site title description))
       |> maybe_put("image_ref", get_in(preview, ["image", "ref"]))
+      |> maybe_put("icon_ref", get_in(preview, ["icon", "ref"]))
     end)
   end
 

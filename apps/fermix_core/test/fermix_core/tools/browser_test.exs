@@ -1,6 +1,7 @@
 defmodule FermixCore.Tools.BrowserTest do
   use ExUnit.Case, async: false
 
+  alias FermixCore.Browser.Error
   alias FermixCore.Browser.Scope
   alias FermixCore.Tools.Browser
 
@@ -23,18 +24,57 @@ defmodule FermixCore.Tools.BrowserTest do
       )
     end
 
+    # `scope` names the stub in every answer, so a test can tell which profile
+    # served a call.
     @impl true
-    def init(_opts), do: {:ok, %{}}
+    def init(opts), do: {:ok, %{scope: Keyword.get(opts, :scope)}}
 
     @impl true
-    def handle_call({:request, %{args: args}}, _from, state),
-      do: {:reply, {:ok, %{"ok" => true, "served" => Map.get(args, "name")}}, state}
+    def handle_call({:request, %{args: args, context: context}}, _from, state) do
+      served = %{
+        "ok" => true,
+        "served" => Map.get(args, "name"),
+        "scope" => state.scope,
+        "affinity" => inspect(Map.get(context, :tab_affinity))
+      }
+
+      {:reply, {:ok, served}, state}
+    end
   end
 
-  # Unique chat id so the owner_key digest cannot collide with another test's
-  # registration in the shared FermixCore.Browser.Registry.
+  # A profile stand-in that reports every request it is sent, in order, and
+  # answers each with the test's own function: what the facade composes from
+  # one tool call is read off what reaches the profile.
+  defmodule RecordingProfileServer do
+    use GenServer
+
+    def start_link(opts) do
+      key = Keyword.fetch!(opts, :key)
+      now = System.monotonic_time(:millisecond)
+      name = {:via, Registry, {FermixCore.Browser.Registry, key, {now, :cdp}}}
+      GenServer.start_link(__MODULE__, opts, name: name)
+    end
+
+    @impl true
+    def init(opts),
+      do: {:ok, %{test: Keyword.fetch!(opts, :test), answer: Keyword.fetch!(opts, :answer)}}
+
+    @impl true
+    def handle_call({:request, request}, _from, state) do
+      send(state.test, {:requested, request})
+      {:reply, state.answer.(request), state}
+    end
+  end
+
+  # A guest's call on a unique chat id, so its profile key is this module's
+  # alone: every owner call shares the one "owner" key, and a profile another
+  # test left registered under it would answer for this one.
   @chat_id "chat-#{System.unique_integer([:positive])}"
-  @context %{agent_name: "test_agent", conversation_key: {"cli", @chat_id, :root}}
+  @context %{
+    agent_name: "test_agent",
+    conversation_key: {"cli", @chat_id, :root},
+    source_trust: :guest
+  }
 
   describe "name/0" do
     test "returns browser" do
@@ -191,6 +231,76 @@ defmodule FermixCore.Tools.BrowserTest do
                     webmcp_timeout navigation_failed) do
         assert tag in tags, "`#{tag}` is returnable but undocumented"
       end
+    end
+
+    # Every code a sign-in can answer the model with (M84 SPEC §4, less the
+    # stop, which leaves no model to tell, plus the undelivered question).
+    test "names every sign-in refusal" do
+      tags = Enum.map(Browser.failure_modes(), & &1.tag)
+
+      for tag <- ~w(sign_in_not_allowed sign_in_not_on_voice sign_in_denied sign_in_unanswered
+                    sign_in_not_delivered sign_in_pane_only sign_in_app_too_old
+                    sign_in_insecure_page sign_in_wrong_site sign_in_no_login sign_in_field
+                    sign_in_page_moved sign_in_store_unavailable secret_on_screen) do
+        assert tag in tags, "`#{tag}` is returnable but undocumented"
+      end
+
+      refute "sign_in_stopped" in tags
+
+      %{description: no_login} =
+        Enum.find(Browser.failure_modes(), &(&1.tag == "sign_in_no_login"))
+
+      assert no_login =~ "Settings > Browser > Website logins"
+    end
+  end
+
+  # A sign-in the model cannot see is a password it asks the owner for: the
+  # kind, its three arguments and the one sentence travel together.
+  describe "the sign-in surface" do
+    test "the description teaches sign_in and never asking for a password" do
+      description = Browser.description()
+
+      assert description =~ "`kind=sign_in`"
+      assert description =~ "after the owner approves"
+      assert description =~ "never ask the owner for a password, never type one"
+      assert description =~ "never reveal a password field"
+    end
+
+    test "the schema carries the kind, the site and both refs" do
+      params = Browser.parameters()
+
+      assert params.properties.kind.description =~ "sign_in"
+
+      for field <- [:site, :username_ref, :password_ref] do
+        assert params.properties[field].type == "string", "`#{field}` is not in the schema"
+      end
+    end
+  end
+
+  # A form costs one model turn only if the model knows `submit: true` exists
+  # and that a fill's receipt needs no `get` or `wait` after it; a sentence left
+  # saying a fill never submits would teach the second turn back.
+  describe "the submit surface" do
+    test "both halves of the prompt teach submit and that a fill's receipt is its check" do
+      for surface <- [Browser.description(), Browser.when_to_use()] do
+        assert surface =~ "`submit: true`"
+        assert surface =~ "receipt is its own check"
+        # The pane's receipt carries no `value`, so a sentence sending the model
+        # to `get` a field without one would cost a turn per field there.
+        refute surface =~ "`get` that"
+      end
+
+      # In Chrome the receipt's `value` is what the field holds after typing.
+      assert Browser.when_to_use() =~ "holds after typing"
+    end
+
+    test "the schema carries submit, names the kinds that take it, and no kind says it cannot" do
+      params = Browser.parameters()
+
+      assert params.properties.submit.type == "boolean"
+      assert params.properties.submit.description =~ "`kind=fill_form`"
+      assert params.properties.submit.description =~ "`kind=sign_in`"
+      refute params.properties.kind.description =~ "does not submit"
     end
   end
 
@@ -432,7 +542,7 @@ defmodule FermixCore.Tools.BrowserTest do
     test "download with only timeout_ms passes validation and is dispatched" do
       conversation = {"cli", "chat-download-#{System.unique_integer([:positive])}", :root}
       stub_profile!(conversation)
-      context = %{agent_name: "test_agent", conversation_key: conversation}
+      context = %{agent_name: "test_agent", conversation_key: conversation, source_trust: :guest}
 
       assert {:ok, %{success: true, output: output}} =
                Browser.execute(%{"action" => "download", "timeout_ms" => 500}, context)
@@ -451,8 +561,23 @@ defmodule FermixCore.Tools.BrowserTest do
       assert result.error =~ "file"
     end
 
-    test "requires conversation_key from built-in tool context" do
-      assert {:ok, result} = Browser.execute(%{"action" => "status"}, %{agent_name: "main"})
+    test "refuses a context that carries no trust, by name, before any profile" do
+      context = %{agent_name: "main", conversation_key: {"cli", @chat_id, :root}}
+      assert {:ok, result} = Browser.execute(%{"action" => "status"}, context)
+      assert result.success == false
+      assert result.error =~ "(missing_trust)"
+    end
+
+    test "requires conversation_key from an owner's tool context too: it names the call's tabs" do
+      context = %{agent_name: "main", source_trust: :operator}
+      assert {:ok, result} = Browser.execute(%{"action" => "status"}, context)
+      assert result.success == false
+      assert result.error =~ "(missing_conversation_key)"
+    end
+
+    test "requires conversation_key from a guest's tool context" do
+      context = %{agent_name: "main", source_trust: :guest}
+      assert {:ok, result} = Browser.execute(%{"action" => "status"}, context)
       assert result.success == false
       assert result.error =~ "conversation_key"
     end
@@ -467,6 +592,210 @@ defmodule FermixCore.Tools.BrowserTest do
       assert body["running"] == false
       refute Map.has_key?(body, "owner")
       refute output =~ @chat_id
+    end
+  end
+
+  # `submit: true` on `fill_form` and `sign_in` is the fill and then `act
+  # kind=submit` on a ref of that form, composed by the facade over the same
+  # route as any other request, so no backend and no wire learns a new verb.
+  describe "a form that submits in the same call" do
+    @fields [
+      %{"ref" => "textbox_1", "text" => "Rome"},
+      %{"ref" => "textbox_2", "text" => "Paris"}
+    ]
+    @fill_form %{"action" => "act", "kind" => "fill_form", "fields" => @fields}
+    @filled %{
+      "ok" => true,
+      "target" => "tab_7",
+      "action" => "fill_form",
+      "filled" => [%{"ref" => "textbox_1", "value" => "Rome"}],
+      "tabs" => [%{"id" => "tab_7"}]
+    }
+    @submitted %{
+      "ok" => true,
+      "target" => "tab_7",
+      "action" => "submit",
+      "submitted" => "Search",
+      "url" => "https://example.com/results",
+      "page" => "changed",
+      "snapshot" => "@link_1 [link] \"Rome to Paris\"",
+      "truncated" => false,
+      "ready_state" => "complete",
+      "tabs" => [%{"id" => "tab_7"}]
+    }
+
+    test "fill_form fills, then submits from the form's first field on the tab it filled" do
+      context = recording_profile!(&answer(&1, {:ok, @filled}, {:ok, @submitted}))
+
+      assert {:ok, %{success: true, output: output}} =
+               Browser.execute(Map.put(@fill_form, "submit", true), context)
+
+      assert [fill, submit] = requested()
+      assert fill.args == @fill_form
+      assert fill.mutating
+
+      assert submit.args == %{
+               "action" => "act",
+               "kind" => "submit",
+               "ref" => "textbox_1",
+               "target" => "tab_7"
+             }
+
+      assert submit.mutating
+
+      # The call answers in the vocabulary every act answers in, the submit's
+      # look at the top, and the fill's receipt beside it under its own key.
+      result = Jason.decode!(output)
+      assert Map.delete(result, "fill") == @submitted
+      assert result["fill"] == Map.delete(@filled, "tabs")
+    end
+
+    test "a fill that fails submits nothing" do
+      stale =
+        Error.new("stale_ref", "fill_form filled nothing. Stale or unknown refs: textbox_1.")
+
+      context = recording_profile!(&answer(&1, {:error, stale}, {:ok, @submitted}))
+
+      assert {:ok, %{success: false, error: error}} =
+               Browser.execute(Map.put(@fill_form, "submit", true), context)
+
+      assert error =~ "(stale_ref)"
+      assert [%{args: %{"kind" => "fill_form"}}] = requested()
+    end
+
+    # The fields hold what was typed, so the model is told so and given the
+    # fill's receipt, rather than filling the form again blindly; the code is
+    # the submit's own, so its recovery still applies.
+    test "a submit that fails after the fill keeps its code and says the form was filled" do
+      failed = Error.new("act_failed", "The submit control is disabled")
+      context = recording_profile!(&answer(&1, {:ok, @filled}, {:error, failed}))
+
+      assert {:ok, %{success: false, error: error}} =
+               Browser.execute(Map.put(@fill_form, "submit", true), context)
+
+      assert error =~ "(act_failed)"
+      assert error =~ "The submit control is disabled"
+      assert error =~ "was filled"
+      assert error =~ ~s("fill":)
+      assert error =~ ~s("value":"Rome")
+      assert [_fill, _submit] = requested()
+    end
+
+    # A first field in no form sends nothing and leaves the page as the fill
+    # left it, so the refs the model holds still name it: the way on is the
+    # page's own submit button, not a snapshot or a second fill.
+    test "a fill whose field is in no form says the form was filled and to click its button" do
+      no_form =
+        Error.new(
+          "no_form",
+          "`textbox_1` is in no form, so nothing was submitted: click the page's own submit " <>
+            "button."
+        )
+
+      context = recording_profile!(&answer(&1, {:ok, @filled}, {:error, no_form}))
+
+      assert {:ok, %{success: false, error: error}} =
+               Browser.execute(Map.put(@fill_form, "submit", true), context)
+
+      assert error =~ "(no_form)"
+      assert error =~ "The form was filled"
+      assert error =~ "`textbox_1` is in no form, so nothing was submitted"
+      assert error =~ "click the page's own submit button"
+      refute error =~ "snapshot"
+      assert error =~ ~s("value":"Rome")
+    end
+
+    test "submit false fills and submits nothing" do
+      context = recording_profile!(&answer(&1, {:ok, @filled}, {:ok, @submitted}))
+
+      assert {:ok, %{success: true, output: output}} =
+               Browser.execute(Map.put(@fill_form, "submit", false), context)
+
+      assert [%{args: %{"kind" => "fill_form"}}] = requested()
+      assert Jason.decode!(output) == @filled
+    end
+
+    # A browser that cannot sign in refuses before the owner is asked, so
+    # nothing is typed and nothing is submitted.
+    test "a sign-in that submits on a browser that cannot sign in reaches no profile" do
+      context = recording_profile!(&answer(&1, {:ok, @filled}, {:ok, @submitted}))
+
+      sign_in = %{
+        "action" => "act",
+        "kind" => "sign_in",
+        "site" => "example.com",
+        "password_ref" => "textbox_2",
+        "submit" => true
+      }
+
+      assert {:ok, %{success: false, error: error}} = Browser.execute(sign_in, context)
+      assert error =~ "(sign_in_pane_only)"
+      assert requested() == []
+    end
+
+    test "submit is true or false, and is taken by fill_form and sign_in alone" do
+      context = recording_profile!(&answer(&1, {:ok, @filled}, {:ok, @submitted}))
+
+      assert {:ok, %{success: false, error: shape}} =
+               Browser.execute(Map.put(@fill_form, "submit", "yes"), context)
+
+      assert shape =~ "(invalid_arg)"
+      assert shape =~ "`submit` must be true or false"
+
+      for value <- [true, false] do
+        click = %{"action" => "act", "kind" => "click", "ref" => "button_1", "submit" => value}
+        assert {:ok, %{success: false, error: kind}} = Browser.execute(click, context)
+
+        assert kind =~ "(invalid_arg)"
+        assert kind =~ "`fill_form` and `sign_in`"
+        assert kind =~ "`kind=submit`"
+      end
+
+      assert requested() == []
+    end
+  end
+
+  # One browser profile per device for the owner, one per conversation for a
+  # guest (M75): every owner call, from any conversation or a scheduled run,
+  # is served by the one profile keyed "owner", and a guest's by its own
+  # conversation's. Stubs stand in for both, so no Chrome starts.
+  describe "which profile serves a call" do
+    test "the owner's conversations and scheduled runs share one profile; a guest keeps its own" do
+      guest_conversation = {"telegram", "guest-#{System.unique_integer([:positive])}", :root}
+      guest_key = Scope.guest_key(guest_conversation)
+
+      start_supervised!({StubProfileServer, key: {"owner", "fermix"}, scope: "owner"},
+        id: :owner_profile
+      )
+
+      start_supervised!({StubProfileServer, key: {guest_key, "fermix"}, scope: "guest"},
+        id: :guest_profile
+      )
+
+      for conversation_key <- [
+            {"telegram", "owner-chat", :root},
+            {"cli", "owner-ask", :root},
+            {:scheduled_job, "job-1", "run-1"},
+            {:scheduled_job, "job-1", "run-2"}
+          ] do
+        context = %{
+          agent_name: "test_agent",
+          conversation_key: conversation_key,
+          source_trust: :operator
+        }
+
+        assert served_by(context) == "owner", "#{inspect(conversation_key)} left the owner's"
+        # One profile, and each conversation still names its own tabs.
+        assert affinity_of(context) == inspect(conversation_key)
+      end
+
+      guest = %{
+        agent_name: "test_agent",
+        conversation_key: guest_conversation,
+        source_trust: :guest
+      }
+
+      assert served_by(guest) == "guest"
     end
   end
 
@@ -496,7 +825,13 @@ defmodule FermixCore.Tools.BrowserTest do
         stub_profile!(conversation, backend)
         handler_id = attach_telemetry(session)
 
-        context = %{agent_name: "test_agent", conversation_key: conversation, session_id: session}
+        context = %{
+          agent_name: "test_agent",
+          conversation_key: conversation,
+          session_id: session,
+          source_trust: :guest
+        }
+
         assert {:ok, %{success: true}} = Browser.execute(%{"action" => "tabs"}, context)
 
         assert_receive {:telemetry, [:fermix, :tool, :exec], _measurements, metadata}
@@ -546,7 +881,12 @@ defmodule FermixCore.Tools.BrowserTest do
       stub_profile!(conversation)
       handler_id = attach_telemetry(session)
 
-      context = %{agent_name: "test_agent", conversation_key: conversation, session_id: session}
+      context = %{
+        agent_name: "test_agent",
+        conversation_key: conversation,
+        session_id: session,
+        source_trust: :guest
+      }
 
       assert {:ok, %{success: true, output: output}} =
                Browser.execute(
@@ -726,14 +1066,54 @@ defmodule FermixCore.Tools.BrowserTest do
     on_exit(fn -> Application.put_env(:fermix_core, :telemetry, prev) end)
   end
 
-  # Its own conversation, so the registration cannot be the `status` test's
-  # profile — or any other module's — seen as running.
+  # A guest's profile in its own conversation, so the registration cannot be
+  # the `status` test's profile — or any other module's — seen as running.
+  # A guest conversation of its own, served by a recording profile that answers
+  # a fill_form and a submit as the test says.
+  defp recording_profile!(answer) do
+    conversation = {"cli", "chat-submit-#{System.unique_integer([:positive])}", :root}
+    {:ok, owner} = Scope.owner_key(%{conversation_key: conversation, source_trust: :guest})
+
+    start_supervised!(
+      {RecordingProfileServer, key: {owner, "fermix"}, test: self(), answer: answer},
+      id: {:recording_profile, owner}
+    )
+
+    %{agent_name: "test_agent", conversation_key: conversation, source_trust: :guest}
+  end
+
+  defp answer(%{args: %{"kind" => "fill_form"}}, fill, _submit), do: fill
+  defp answer(%{args: %{"kind" => "submit"}}, _fill, submit), do: submit
+
+  # Every request the recording profile was sent, oldest first.
+  defp requested(acc \\ []) do
+    receive do
+      {:requested, request} -> requested([request | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
+  end
+
   defp stub_profile!(conversation_key, backend \\ :cdp) do
-    {:ok, owner} = Scope.owner_key(%{conversation_key: conversation_key})
+    {:ok, owner} = Scope.owner_key(%{conversation_key: conversation_key, source_trust: :guest})
 
     start_supervised!({StubProfileServer, key: {owner, "fermix"}, backend: backend},
       id: {:stub_profile, owner}
     )
+  end
+
+  defp affinity_of(context) do
+    assert {:ok, %{success: true, output: output}} =
+             Browser.execute(%{"action" => "tabs"}, context)
+
+    Jason.decode!(output)["affinity"]
+  end
+
+  defp served_by(context) do
+    assert {:ok, %{success: true, output: output}} =
+             Browser.execute(%{"action" => "tabs"}, context)
+
+    Jason.decode!(output)["scope"]
   end
 
   defp attach_telemetry, do: attach_telemetry(nil)

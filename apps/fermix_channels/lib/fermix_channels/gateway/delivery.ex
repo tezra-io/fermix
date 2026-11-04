@@ -20,6 +20,11 @@ defmodule FermixChannels.Gateway.Delivery do
   alias FermixCore.Reply
   alias FermixCore.Telemetry
 
+  # The approval kinds a structured spec may carry: a sandbox change, a SOUL.md
+  # change, and a watcher's card (a follow-up, its approval prompt, or a
+  # mandate's proposal; M60_WATCHER_CODING_RUNS.md §6).
+  @approval_kinds [:sandbox, :soul, :follow_up, :mandate]
+
   @doc "Build the delivery closure for a destination."
   @spec build_deliver(ReplyContext.t()) :: Reply.reply_fn()
   def build_deliver(%ReplyContext{channel: channel, message: message}) do
@@ -40,8 +45,11 @@ defmodule FermixChannels.Gateway.Delivery do
         deliver_approval(channel, message, text_reply, text, token)
 
       {:approval_prompt, %{kind: kind, text: text, token: token} = spec}
-      when kind in [:sandbox, :soul] and is_binary(text) and is_binary(token) ->
+      when kind in @approval_kinds and is_binary(text) and is_binary(token) ->
         deliver_structured_approval(channel, message, text_reply, spec)
+
+      {:approval_answer, message_id, text} when is_binary(message_id) and is_binary(text) ->
+        deliver_approval_answer(channel, message, text_reply, message_id, text)
 
       other ->
         {:error, {:invalid_reply_part, other}}
@@ -63,6 +71,22 @@ defmodule FermixChannels.Gateway.Delivery do
 
       true ->
         observe_reply(fn -> text_reply.(text) end, :text, nil, message)
+    end
+  end
+
+  # Answering on the tapped card is a per-channel capability, as the buttons
+  # are: a channel whose taps carry the card's id edits it (`edit_approval/3`);
+  # every other one delivers the same line as a reply.
+  defp deliver_approval_answer(channel, message, text_reply, message_id, text) do
+    if function_exported?(channel, :edit_approval, 3) do
+      observe_reply(
+        fn -> channel.edit_approval(message, message_id, text) end,
+        :text,
+        nil,
+        message
+      )
+    else
+      observe_reply(fn -> text_reply.(text) end, :text, nil, message)
     end
   end
 
@@ -103,12 +127,17 @@ defmodule FermixChannels.Gateway.Delivery do
   # runner), so the one-tap affordance a structured spec carries has nothing to
   # render it. This is the single seam every override goes through, so the spec
   # is flattened here: exactly one approval shape ever reaches an override,
-  # instead of each override growing its own second clause. An unknown `kind`
-  # passes through untouched and the override rejects it as an invalid part.
+  # instead of each override growing its own second clause, and an answer on a
+  # tapped card is its line as text. An unknown `kind` passes through
+  # untouched and the override rejects it as an invalid part.
   defp for_override({:approval_prompt, %{kind: kind, text: text, token: token}})
-       when kind in [:sandbox, :soul] and is_binary(text) and is_binary(token) do
+       when kind in @approval_kinds and is_binary(text) and is_binary(token) do
     {:approval_prompt, text, token}
   end
+
+  defp for_override({:approval_answer, message_id, text})
+       when is_binary(message_id) and is_binary(text),
+       do: {:text, text}
 
   defp for_override(part), do: part
 

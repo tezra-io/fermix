@@ -10,6 +10,7 @@ Unix socket in a temp dir, no daemon, no Opik, no spend.
 Run: `uv run bin/test_companion.py`."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -42,11 +43,21 @@ class FakeDaemon:
     `stray`, a job's delivery row goes out while a message waits. With
     `offline_row`, that row is written once the first connection closes. A
     message containing PICTURE sends a picture before its reply, as a media row
-    with no client id, as a turn's `send_attachment` does."""
+    with no client id, as a turn's `send_attachment` does. The hello names an
+    inbox (unless `inbox` is False); an `attach_file` is checked against the
+    file there, recorded with the file's mode, and the file removed, or refused
+    by name with `refuse_attach`; a message's user row carries the files its
+    `attach_ids` name."""
 
-    def __init__(self, stray: bool = False, offline_row: str | None = None):
+    def __init__(self, stray: bool = False, offline_row: str | None = None,
+                 inbox: bool = True, refuse_attach: bool = False):
         self.home = tempfile.mkdtemp(prefix="cmp")
         self.path = companion.socket_path(self.home)
+        self.inbox = os.path.join(self.home, "companion", "inbox") if inbox else None
+        if self.inbox:
+            os.makedirs(self.inbox, mode=0o700)
+        self.refuse_attach = refuse_attach
+        self.attached: dict[str, dict] = {}
         self.rows: list[dict] = []
         self.running: str | None = None
         self.waiting: list[str] = []
@@ -107,10 +118,15 @@ class FakeDaemon:
     def _on(self, event, send):
         kind = event["type"]
         if kind == "client_hello":
-            if event["protocol_version"] not in (2, 3):
+            if event["protocol_version"] not in (6, 7):
                 send({"type": "error", "reason": "unsupported_protocol_version"})
                 return
-            send({"type": "server_hello", "min_version": 2, "max_version": 3})
+            hello = {"type": "server_hello", "min_version": 6, "max_version": 7}
+            if self.inbox:
+                hello["attachments"] = {"dir": self.inbox, "max_bytes": 1_048_576}
+            send(hello)
+        elif kind == "attach_file":
+            send(self._attach(event))
         elif kind == "command":
             send({"type": "accepted", "client_msg_id": event["client_msg_id"],
                   "duplicate": False})
@@ -127,10 +143,28 @@ class FakeDaemon:
         elif kind == "msg":
             send({"type": "accepted", "client_msg_id": event["client_msg_id"],
                   "duplicate": False})
-            send(self._row(self._append("user", event["text"]), event["client_msg_id"]))
+            refs = [self.attached[i]["ref"] for i in event["attach_ids"]]
+            user = self._row(self._append("user", event["text"]), event["client_msg_id"])
+            send({**user, "media_refs": refs, "kind": "media"} if refs else user)
             self._msg(event, send)
         elif kind == "cancel":
             self._cancel(event["client_msg_id"], send)
+
+    def _attach(self, event):
+        aid = event["attach_id"]
+        path = os.path.join(self.inbox, aid)
+        with open(path, "rb") as fh:
+            data = fh.read()
+        mode = os.stat(path).st_mode & 0o777
+        os.remove(path)
+        if self.refuse_attach or hashlib.sha256(data).hexdigest() != event["sha256"]:
+            return {"type": "error", "reason": "request_failed",
+                    "message": "This file is too large: Fermix takes files of up to 1 MB.",
+                    "attach_id": aid}
+        ref = {"ref": event["sha256"], "kind": event["kind"], "mime": event["mime"],
+               "size_bytes": event["size_bytes"], "filename": event["name"]}
+        self.attached[aid] = {"ref": ref, "mode": mode, "bytes": data}
+        return {"type": "attach_status", "attach_id": aid, "status": "present"}
 
     def _page(self, event):
         head = len(self.rows)
@@ -250,6 +284,45 @@ def test_a_picture_the_turn_sends_is_kept_with_its_request(daemon):
     assert evidence.ok, evidence.error
     assert evidence.target.media_rows() == 1
     assert evidence.target.reply() == "answer to e2e-mark-run1-abc123-msg"
+
+
+# Companion protocol 7: a case's picture rides its message as a file the owner
+# attached, handed over through the inbox the hello named, as the app does.
+def test_a_cases_picture_is_handed_over_through_the_inbox_and_named_in_its_message(daemon):
+    fake = daemon()
+    picture = os.path.join(os.path.dirname(HERE), "suites", "fixtures", "red_square.png")
+
+    evidence = companion.drive(fake.home, {}, "What colour?", "e2e-mark-run1-abc123",
+                               timeout_s=5, attachments=[picture])
+
+    assert evidence.ok, evidence.error
+    [(aid, held)] = fake.attached.items()
+    assert aid.startswith("eval-")
+    assert held["mode"] == 0o600
+    with open(picture, "rb") as fh:
+        assert held["bytes"] == fh.read()
+    assert held["ref"]["kind"] == "image" and held["ref"]["mime"] == "image/png"
+    assert held["ref"]["filename"] == "red_square.png"
+    assert os.listdir(fake.inbox) == []
+    [user] = [e for e in evidence.target.events if e["type"] == "row"]
+    assert user["media_refs"] == [held["ref"]]
+    # The owner's own row is not a picture the turn sent.
+    assert evidence.target.media_rows() == 0
+    assert evidence.target.reply() == "answer to e2e-mark-run1-abc123-msg"
+
+
+def test_a_refused_file_or_a_hello_with_no_inbox_leaves_the_attempt_ungradable(daemon):
+    picture = os.path.join(os.path.dirname(HERE), "suites", "fixtures", "red_square.png")
+
+    refused = companion.drive(daemon(refuse_attach=True).home, {}, "What colour?",
+                              "e2e-mark-run1-abc123", timeout_s=5, attachments=[picture])
+    assert not refused.ok
+    assert "attach_file refused" in refused.error and "1 MB" in refused.error
+
+    no_inbox = companion.drive(daemon(inbox=False).home, {}, "What colour?",
+                               "e2e-mark-run1-abc123", timeout_s=5, attachments=[picture])
+    assert not no_inbox.ok
+    assert "offered no attachment inbox" in no_inbox.error
 
 
 def test_a_picture_with_two_requests_open_belongs_to_neither(daemon):
@@ -462,6 +535,17 @@ def test_a_malformed_companion_spec_is_named(tmp_path, spec, fragment):
 def test_a_malformed_wire_map_is_named(tmp_path, wire, fragment):
     cases = [_case("a", expect={"wire": wire}), _case("b")]
     assert any(fragment in p for p in _problems(tmp_path, cases))
+
+
+def test_a_companion_case_may_attach_a_fixture(tmp_path):
+    fixtures = tmp_path / "fixtures"
+    fixtures.mkdir()
+    (fixtures / "pic.png").write_bytes(b"png")
+    cases = [_case("a", image="fixtures/pic.png"), _case("b")]
+
+    case = _load(tmp_path, cases)[0].scenarios[0].cases[0]
+
+    assert case.images == [os.path.realpath(str(fixtures / "pic.png"))]
 
 
 def test_the_shipped_companion_suite_loads():

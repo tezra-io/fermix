@@ -164,7 +164,7 @@ defmodule FermixCore.Cues.Deliveries do
       received_at: iso(delivery.received_at),
       occurred_at: iso(delivery.occurred_at),
       state: delivery.state,
-      outcome: delivery.outcome,
+      outcome: shown_outcome(delivery.outcome, delivery.watcher_name),
       settled_at: iso(delivery.settled_at),
       filter_attempts: delivery.filter_attempts,
       task_attempts: delivery.task_attempts,
@@ -387,9 +387,23 @@ defmodule FermixCore.Cues.Deliveries do
       enabled: watcher.enabled?,
       deliveries: watcher.deliveries,
       by_state: watcher.by_state,
-      by_outcome: watcher.by_outcome
+      by_outcome:
+        Map.new(watcher.by_outcome, fn {outcome, n} ->
+          {shown_outcome(outcome, watcher.name), n}
+        end)
     }
   end
+
+  # Taking a source off a watcher expires that source's waiting items with the
+  # outcome a removed watcher's items get, `watcher_removed`: the column's
+  # CHECK fixes the set, and widening it means rebuilding the whole deliveries
+  # table. A removed watcher's row is gone, so its items show no watcher name;
+  # one that still has its name lost a source, and reads `source_removed`, so
+  # the owner is not told the watcher was removed.
+  defp shown_outcome("watcher_removed", watcher_name) when is_binary(watcher_name),
+    do: "source_removed"
+
+  defp shown_outcome(outcome, _watcher_name), do: outcome
 
   defp plural(1, one, _many), do: one
   defp plural(_count, _one, many), do: many

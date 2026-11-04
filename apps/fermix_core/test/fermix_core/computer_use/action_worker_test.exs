@@ -71,6 +71,21 @@ defmodule FermixCore.ComputerUse.ActionWorkerTest do
     refute ActionWorker.input_control?(worker)
   end
 
+  test "a macOS probe's input_control false is the denied state" do
+    {:ok, worker} = start_worker(probe: {:ok, %{"platform" => "macos", "input_control" => false}})
+
+    refute ActionWorker.input_control?(worker)
+  end
+
+  # Only macOS drops synthetic input without a word. A Linux helper says `false`
+  # when its pixel route does not serve the pointer; it refuses a pixel action
+  # itself, with its own sentence, and its controls still act.
+  test "a Linux probe's input_control false is not the denied state" do
+    {:ok, worker} = start_worker(probe: {:ok, %{"platform" => "linux", "input_control" => false}})
+
+    assert ActionWorker.input_control?(worker)
+  end
+
   # Absent or failed probe reads as granted — only the explicit denied state is
   # refused, so a broken probe cannot brick looking.
   test "a probe that fails is treated as granted" do

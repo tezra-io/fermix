@@ -8,10 +8,16 @@
 # sudo) depending on what's writable. Either way the download is
 # sha256-verified against releases.json and cosign-verified when cosign is
 # installed, and `fermix setup` runs at the end unless told not to.
+# --version X installs release X instead, from that release's own
+# releases.json, under the same checks and the signing identity of its tag:
+# an Always On server runs exactly its desktop's release (its first boot and
+# its nightly update ask for it), and a package of X already installed is
+# left as it is.
 #
 #   curl -fsSL https://fermix.ai/install | sh
 #   curl -fsSL https://fermix.ai/install | sh -s -- --no-setup
 #   curl -fsSL https://fermix.ai/install | sh -s -- --standalone --prefix /opt/fermix/bin
+#   curl -fsSL https://fermix.ai/install | sh -s -- --version 0.17.0
 #
 # Hard-fails on any unsupported (os, arch) pair, missing tooling, or
 # sha256 mismatch. There is no "best effort" path that drops a
@@ -22,6 +28,8 @@ set -eu
 
 REPO="tezra-io/fermix"
 MANIFEST_URL="https://github.com/${REPO}/releases/latest/download/releases.json"
+VERSION=""
+VERSION_GIVEN=0
 RUN_SETUP=1
 PREFIX=""
 STANDALONE=0
@@ -55,7 +63,7 @@ COSIGN_IDENTITY_PREFIX="https://github.com/${REPO}/.github/workflows/release.yml
 
 usage() {
   cat <<USAGE
-Usage: install.sh [--standalone] [--prefix DIR] [--no-setup]
+Usage: install.sh [--standalone] [--prefix DIR] [--version X] [--no-setup]
 
 On Linux with apt, dnf or zypper this installs the fermix .deb or .rpm package.
 Everywhere else, and with --standalone, it installs the standalone binary.
@@ -64,6 +72,7 @@ Options:
   --standalone   Install the standalone binary even where a package would be used
   --prefix DIR   Install location for the standalone binary
                  (default: /usr/local/bin if writable or sudo, else ~/.local/bin)
+  --version X    Install release X (such as 0.17.0) instead of the latest
   --no-setup     Skip 'fermix setup' at the end
   --help, -h     Show this message
 USAGE
@@ -74,6 +83,7 @@ while [ $# -gt 0 ]; do
     --prefix) PREFIX="${2:?--prefix requires a value}"; shift 2 ;;
     --no-setup) RUN_SETUP=0; shift ;;
     --standalone) STANDALONE=1; shift ;;
+    --version) VERSION_GIVEN=1; VERSION="${2-}"; shift; [ $# -eq 0 ] || shift ;;
     --help|-h) usage; exit 0 ;;
     *) echo "install.sh: unknown argument: $1" >&2; usage; exit 2 ;;
   esac
@@ -83,6 +93,28 @@ abort() {
   printf 'install.sh: %s\n' "$*" >&2
   exit 1
 }
+
+# Whether $1 is a release as every release's packages are versioned: a plain
+# MAJOR.MINOR.PATCH, digits and exactly two dots.
+release_version() {
+  case "$1" in
+    "" | *[!0-9.]* | .* | *. | *..*) return 1 ;;
+  esac
+  minor_patch=${1#*.}
+  patch=${minor_patch#*.}
+  case "$patch" in *.*) return 1 ;; esac
+  [ "$minor_patch" != "$1" ] && [ "$patch" != "$minor_patch" ]
+}
+
+# A named release is read from the manifest its own tag published.
+if [ "$VERSION_GIVEN" -eq 1 ]; then
+  if ! release_version "$VERSION"; then
+    printf 'install.sh: --version takes a release, such as 0.17.0\n' >&2
+    usage >&2
+    exit 2
+  fi
+  MANIFEST_URL="https://github.com/${REPO}/releases/download/v${VERSION}/releases.json"
+fi
 
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || abort "missing required command: $1"
@@ -371,6 +403,12 @@ LATEST_VERSION="$(awk '
   /"latest":/ { gsub(/[",]/,""); print $2; exit }
 ' "$TMPDIR/releases.json")"
 
+# A named release's manifest must be that release's: its artifacts are what
+# the signature check pins to the tag.
+if [ "$VERSION_GIVEN" -eq 1 ] && [ "$LATEST_VERSION" != "$VERSION" ]; then
+  abort "the manifest at $MANIFEST_URL is release ${LATEST_VERSION:-unknown}, not $VERSION — refusing to install it"
+fi
+
 if [ -n "$PACKAGE_MANAGER" ]; then
   ARTIFACT_URL="$(package_field url)"
   ARTIFACT_SHA="$(package_field sha256)"
@@ -414,7 +452,10 @@ if [ -n "$PACKAGE_MANAGER" ]; then
   [ -n "$LATEST_VERSION" ] || abort "no 'latest' version in $MANIFEST_URL"
   PREVIOUS_VERSION="$(installed_package_version)"
 
-  if [ "$PREVIOUS_VERSION" = "$LATEST_VERSION" ]; then
+  if [ "$PREVIOUS_VERSION" = "$LATEST_VERSION" ] && [ "$VERSION_GIVEN" -eq 1 ]; then
+    printf '\nfermix %s is already installed.\n' "$LATEST_VERSION"
+    exit 0
+  elif [ "$PREVIOUS_VERSION" = "$LATEST_VERSION" ]; then
     printf '\nfermix %s is already installed, and it is the latest release. If this account has not set it up yet, run: fermix setup\n' "$LATEST_VERSION"
     exit 0
   fi

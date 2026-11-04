@@ -49,13 +49,13 @@ def _abort_text(aborted: dict) -> str:
 
     Without it a truncated run reads as a complete one with fewer cases, which
     is the reading that turns an external account condition into a hunt for a
-    product defect.
+    product defect. `why` is the runner's own sentence for what stopped it (an
+    exhausted account, an eval home that could not be reset).
     """
     return (f"RUN STOPPED EARLY at {aborted['suite']}/{aborted['case']} — "
             f"`{aborted['tool']}` reported `{aborted['fragment']}`. "
             f"{aborted['unrun']} case(s) were not run: their status is UNKNOWN, "
-            "not failed. This is an external account condition, not a product "
-            "failure.")
+            f"not failed. {aborted['why']}")
 
 
 def _abort_markdown(aborted: dict | None) -> list[str]:

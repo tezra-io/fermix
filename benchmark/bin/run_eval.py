@@ -36,6 +36,7 @@ SKILL_DIR = os.path.dirname(HERE)
 REPO_ROOT = os.path.dirname(SKILL_DIR)
 sys.path.insert(0, HERE)
 
+import eval_home_state
 from evallib import companion, cue_drive, voice
 from evallib import config as cfgmod
 from evallib import driver, grade, judge, report
@@ -55,7 +56,12 @@ _ISOLATED_PROFILES = {"isolated_mutation", "external_write", "desktop_input", "d
 FIXTURE_PAGES_DIR = os.path.join(SKILL_DIR, "suites", "fixtures", "browser")
 SUITE_FIXTURES_DIR = os.path.join(SKILL_DIR, "suites", "fixtures")
 _EVIDENCE_TOOL_LIMIT = 12
-_EVIDENCE_TOOL_MAX_BYTES = 2_000
+# One tool span's evidence, cut from its tail. The largest list_cues and manage_watcher
+# spans in the first full live cues run measured 2,908 and 3,375 bytes, and a 2,000 cap
+# hid the last sources a reply listed and a follow-up's held line from the judge. 5,000
+# keeps about 1.5x the largest whole; a turn of several larger spans fills the record
+# budget sooner and lists the rest in omitted_tool_spans.
+_EVIDENCE_TOOL_MAX_BYTES = 5_000
 _EVIDENCE_RECORD_MAX_BYTES = 30_000
 # The gates that assert something did NOT happen. A failed one is proved by what
 # IS in the trace — the forbidden tool span, the forbidden text — so it stays
@@ -65,6 +71,21 @@ NEGATIVE_GATES = STICKY_GATE_KEYS
 # an executed action stays executed. A scenario adds `sticky_gates` on top for a
 # disclosure prohibition, which is equally irreversible.
 STICKY_GATES = ALWAYS_STICKY_GATES
+# --reset-home: the lifecycle script whose `reset` restores the eval home's seeded
+# state and restarts its daemon, bounded by its own waits (15 s for the old daemon to
+# stop, READY_TIMEOUT's 90 s for the new one to answer) with room to spare.
+DAEMON_SCRIPT = os.path.join(HERE, "capability-daemon.sh")
+_RESET_TIMEOUT_S = 180
+# The script's readiness is the control socket's `status`; the companion socket the
+# drive uses comes up after it. In the first --reset-home cues run it followed by 85 to
+# 941 ms in the 45 boots where it came up, and five drives that connected before it did
+# were INCOMPLETE. 30 s is about 30 times the slowest gap.
+_COMPANION_READY_S = 30
+# Why a run stopped early, said in its console banner and its report.
+_ACCOUNT_ABORT_WHY = "This is an external account condition, not a product failure."
+_RESET_ABORT_WHY = ("The eval home could not be put back to its seeded state, so no later "
+                    "case could start from it either: this is the harness, not a product "
+                    "failure.")
 
 
 def now_utc() -> datetime:
@@ -563,6 +584,59 @@ def voice_precondition_error(fermix_home: str) -> str | None:
     finally:
         probe.close()
     return None
+
+
+def resets_home(scenario, case) -> bool:
+    """Whether --reset-home restores the seeded state before an attempt of this case:
+    an isolated_mutation case driven over the companion socket, where the owner's
+    words change the home (a watcher made, a memory stored) for every later case."""
+    return case.drive == "companion" and scenario.risk == "isolated_mutation"
+
+
+def reset_home_error(args, profiles: set[str]) -> str | None:
+    if getattr(args, "reset_home", False) and "isolated_mutation" not in profiles:
+        return ("--reset-home needs --profile isolated_mutation: it restores a disposable "
+                "eval home before each isolated companion attempt")
+    return None
+
+
+def reset_home_precondition_error(fermix_home: str) -> str | None:
+    home = os.path.expanduser(fermix_home)
+    if os.path.isfile(os.path.join(home, eval_home_state.SNAPSHOT_DIR, "config.toml")):
+        return None
+    return (f"--reset-home: no seeded-state snapshot in {home}: start the eval daemon with "
+            "`capability-daemon.sh up`, which takes one once seeding ends")
+
+
+def home_resetter(cfg):
+    """The reset --reset-home runs before an attempt: `capability-daemon.sh reset` on
+    this run's eval home, its daemon exporting to this run's Opik project, then the
+    wait until the companion socket answers the drive's hello, since the script is
+    ready once the control socket answers and the companion socket comes up after it.
+    The callable returns None, or why the home could not be reset."""
+    home = os.path.expanduser(cfg.daemon.fermix_home)
+    env = {**os.environ, "FERMIX_CAP_HOME": home, "FERMIX_CAP_PROJECT": cfg.opik.project}
+
+    def reset() -> str | None:
+        started = time.monotonic()
+        try:
+            # Its own session, so the daemon it starts outlives an interrupted run as
+            # the one `up` started does, rather than taking this run's Ctrl-C.
+            done = subprocess.run([DAEMON_SCRIPT, "reset"], env=env, capture_output=True,
+                                  text=True, timeout=_RESET_TIMEOUT_S, start_new_session=True)
+        except subprocess.TimeoutExpired:
+            return f"capability-daemon.sh reset did not finish within {_RESET_TIMEOUT_S}s"
+        if done.returncode != 0:
+            tail = "\n".join(done.stderr.strip().splitlines()[-5:])
+            return f"capability-daemon.sh reset exited {done.returncode}: {tail}"
+        not_ready = companion.await_hello(home, _COMPANION_READY_S)
+        if not_ready:
+            return f"the daemon answered its control socket after the reset, but {not_ready}"
+        print(f"    eval home reset to its seeded state "
+              f"({time.monotonic() - started:.1f}s)", flush=True)
+        return None
+
+    return reset
 
 
 def eval_home_error(fermix_home: str, require_isolated: bool = False) -> str | None:
@@ -1128,7 +1202,7 @@ def run_companion_case(cfg, client, suite, scn, case, run_id, trial, judge_on):
                 "incomplete": True, "gate_passed": False, "turns": [rec], "rubric": None}
 
     evidence = companion.drive(cfg.daemon.fermix_home, case.companion, query, marker,
-                               timeout_s)
+                               timeout_s, attachments=case.images)
     rec["duration_ms"] = evidence.elapsed_ms
     rec["reply"] = evidence.target.reply()
     if not evidence.ok:
@@ -1849,6 +1923,11 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="re-drive a failed case up to N times (0–2); the case fails "
                          "only if the failure reproduces, otherwise it passes and is "
                          "reported as flaky")
+    ap.add_argument("--reset-home", action="store_true",
+                    help="before every attempt of an isolated_mutation drive: companion "
+                         "case, retries included, restore the disposable eval home to the "
+                         "snapshot `capability-daemon.sh up` took and restart its daemon "
+                         "(capability-daemon.sh reset); needs --profile isolated_mutation")
     ap.add_argument("--operator", action="store_true",
                     help="include operator-assisted cases (you send a Telegram message when prompted); "
                          "without this flag such cases are skipped with a notice")
@@ -1960,6 +2039,13 @@ def _print_dry_run(chosen, profiles, judge_on: bool, args,
         # Validated, not started: a dry run binds nothing and serves nothing.
         print(f"  fixture server: {fixture_jobs} case trial(s) address "
               f"{FIXTURE_URL_PLACEHOLDER}; the run would start one on 127.0.0.1")
+    reset_jobs = sum(1 for _suite, scenario, case, _trial in jobs
+                     if getattr(args, "reset_home", False) and resets_home(scenario, case))
+    if reset_jobs:
+        # Validated, not started: a dry run reads no snapshot and restarts nothing.
+        print(f"  home reset: {reset_jobs} case trial(s) would each start from the seeded "
+              "state (capability-daemon.sh reset: one daemon restart per attempt, "
+              "--fail-retries re-drives included)")
     for suite, scenario, case, trial in jobs:
         action = _skip_reason(case, args) or "run"
         print(f"  - {suite.name}/{scenario.id}/{case.id}#{trial} "
@@ -2015,13 +2101,20 @@ def _suite_result(entry: dict) -> dict:
 
 def _opik_incomplete_result(suite, scenario, case, run_id: str, trial: int,
                             exc: OpikError, fixture=None) -> dict:
+    return _ungraded_result(suite, scenario, case, run_id, trial,
+                            f"Opik evidence unavailable after preflight: {exc}",
+                            "turn cannot be graded without trace evidence", fixture)
+
+
+def _ungraded_result(suite, scenario, case, run_id: str, trial: int,
+                     drive_error: str, note: str, fixture=None) -> dict:
+    """An INCOMPLETE attempt: one error turn saying why nothing could be graded."""
     query = _render_query(case.turns[0].query, run_id, trial,
                           fixture.url if fixture else None)
     session = sess("e2e", run_id, suite.name, scenario.id, case.id, str(trial))
     rec = {
         "index": 0, "query": query, "session": session, "status": "error",
-        "drive_error": f"Opik evidence unavailable after preflight: {exc}",
-        "note": "turn cannot be graded without trace evidence", "correlation": "error",
+        "drive_error": drive_error, "note": note, "correlation": "error",
         "gates": [], "tools": [], "reply": "", "cost_usd": 0.0,
         "duration_ms": 0.0, "tokens": 0, "iterations": None,
         "subagent_spawns": 0, "trace_id": None, "trace_url": "",
@@ -2050,6 +2143,27 @@ def _drive_case(cfg, client, suite, scenario, case, run_id: str, trial: int,
     except OpikError as exc:
         return _opik_incomplete_result(
             suite, scenario, case, run_id, trial, exc, fixture)
+
+
+def _drive_attempt(cfg, client, suite, scenario, case, run_id: str, trial: int,
+                   judge_on: bool, fixtures, reset_home) -> tuple[dict, dict | None]:
+    """One attempt and the abort it raises, if any.
+
+    With --reset-home an isolated companion attempt starts from the seeded world.
+    A reset that fails leaves the attempt undriven and ends the run: the home is in
+    no known state, so no later case could start from the seed either."""
+    if reset_home is not None and resets_home(scenario, case):
+        error = reset_home()
+        if error:
+            result = _ungraded_result(suite, scenario, case, run_id, trial,
+                                      f"eval home reset failed: {error}",
+                                      "the attempt was not driven")
+            return result, {"suite": suite.name, "case": case.id,
+                            "tool": "capability-daemon.sh reset", "fragment": "reset failed",
+                            "message": error, "why": _RESET_ABORT_WHY}
+    result = _drive_case(cfg, client, suite, scenario, case, run_id, trial, judge_on,
+                         fixtures)
+    return result, _abort_signal(suite, result) if suite.abort_on_tool_error else None
 
 
 def _sticky_gates(scenario) -> frozenset[str]:
@@ -2128,7 +2242,7 @@ def _abort_signal(suite, result: dict) -> dict | None:
             if fragment:
                 return {"suite": suite.name, "case": result["id"],
                         "tool": failure.get("name"), "fragment": fragment,
-                        "message": message}
+                        "message": message, "why": _ACCOUNT_ABORT_WHY}
     return None
 
 
@@ -2148,17 +2262,20 @@ def _voided(result: dict) -> dict:
 
 
 def _drive_with_retries(cfg, client, suite, scenario, case, run_id, trial,
-                        judge_on, fail_retries: int, repeat: int, fixtures=None):
+                        judge_on, fail_retries: int, repeat: int, fixtures=None,
+                        reset_home=None):
     """Drive one case, re-driving an unconfirmed fail. Stops early on abort or on a
     sticky-gate failure.
 
     A retry after the abort condition would spend more of the exhausted resource
-    to reproduce a failure already explained, so the signal short-circuits it.
+    to reproduce a failure already explained, so the signal short-circuits it. With
+    --reset-home a re-drive starts from the seeded world like the first attempt, so
+    a reproduced fail is the same case failing twice, not a changed home.
     """
     sticky = _sticky_gates(scenario)
-    attempts = [_drive_case(cfg, client, suite, scenario, case, run_id, trial,
-                            judge_on, fixtures)]
-    abort = _abort_signal(suite, attempts[-1]) if suite.abort_on_tool_error else None
+    first, abort = _drive_attempt(cfg, client, suite, scenario, case, run_id, trial,
+                                  judge_on, fixtures, reset_home)
+    attempts = [first]
     for retry in range(1, fail_retries + 1):
         outcomes = [attempt["outcome"] for attempt in attempts]
         if _sticky_failures(attempts, sticky):
@@ -2171,15 +2288,15 @@ def _drive_with_retries(cfg, client, suite, scenario, case, run_id, trial,
             break
         retry_trial = trial + repeat * retry
         print(f"    fail unconfirmed — retrying as #{retry_trial} …", flush=True)
-        attempts.append(_drive_case(cfg, client, suite, scenario, case,
-                                    run_id, retry_trial, judge_on, fixtures))
-        abort = _abort_signal(suite, attempts[-1]) if suite.abort_on_tool_error else None
+        attempt, abort = _drive_attempt(cfg, client, suite, scenario, case, run_id,
+                                        retry_trial, judge_on, fixtures, reset_home)
+        attempts.append(attempt)
     return attempts, abort
 
 
 def _execute_jobs(cfg, client, jobs, run_id: str, judge_on: bool, operator: bool,
                   fail_retries: int = 0, repeat: int = 1, fixtures=None,
-                  voice_on: bool = False):
+                  voice_on: bool = False, reset_home=None):
     tree: dict = {}
     skipped_required = 0
     aborted = None
@@ -2198,7 +2315,7 @@ def _execute_jobs(cfg, client, jobs, run_id: str, judge_on: bool, operator: bool
         print(f"  · {label} …", flush=True)
         attempts, abort = _drive_with_retries(
             cfg, client, suite, scenario, case, run_id, trial, judge_on,
-            fail_retries, repeat, fixtures)
+            fail_retries, repeat, fixtures, reset_home)
         result = _case_verdict(attempts, _sticky_gates(scenario))
         result = _voided(result) if abort else result
         if _bans_a_held_call(case):
@@ -2236,10 +2353,9 @@ def _print_abort(aborted: dict) -> None:
     print(f"\n  RUN ABORTED — {aborted['suite']}/{aborted['case']} hit a terminal "
           f"condition on `{aborted['tool']}`:")
     print(f"    {aborted['message']}")
-    print(f"  {aborted['unrun']} remaining case(s) were NOT run. This is an external "
-          "account condition,\n  not a product failure: results already banked in this "
-          "run stand, and the case that\n  hit it is reported INCOMPLETE rather than "
-          "failed.", flush=True)
+    print(f"  {aborted['unrun']} remaining case(s) were NOT run. {aborted['why']}\n"
+          "  Results already banked in this run stand, and the case that hit it is "
+          "reported\n  INCOMPLETE rather than failed.", flush=True)
 
 
 def _write_run_reports(cfg, args, chosen, profiles, run_id: str, started,
@@ -2256,6 +2372,7 @@ def _write_run_reports(cfg, args, chosen, profiles, run_id: str, started,
     results["reproducibility"] = reproducibility_metadata(cfg, chosen, profiles)
     results["reproducibility"].update({"repeat": args.repeat,
                                         "fail_retries": getattr(args, "fail_retries", 0),
+                                        "reset_home": getattr(args, "reset_home", False),
                                         "max_cases": args.max_cases or None})
     results["reliability"] = reliability_summary(suite_results)
     out_dir = args.out or os.path.join(cfg.report_dir, run_id)
@@ -2287,6 +2404,19 @@ def _write_run_reports(cfg, args, chosen, profiles, run_id: str, started,
     return {"pass": 0, "fail": 1, "incomplete": 4}[results["outcome"]]
 
 
+def _reset_home_for(cfg, args):
+    """(reset, None) once the home holds a snapshot, (None, why not), or (None, None)
+    without --reset-home."""
+    if not getattr(args, "reset_home", False):
+        return None, None
+    error = reset_home_precondition_error(cfg.daemon.fermix_home)
+    if error:
+        return None, error
+    print(f"  [ok] seeded-state snapshot in {cfg.daemon.fermix_home}: each isolated "
+          "companion attempt starts from it, one daemon restart each")
+    return home_resetter(cfg), None
+
+
 def _run_selected(cfg, args, chosen, profiles, judge_on: bool,
                   platform_skips: list[dict] | None = None) -> int:
     print("preconditions:")
@@ -2304,6 +2434,10 @@ def _run_selected(cfg, args, chosen, profiles, judge_on: bool,
             print(f"  [FAIL] {voice_error}")
             return 3
         print(f"  [ok] voice socket answers at {voice.socket_path(cfg.daemon.fermix_home)}")
+    reset_home, reset_error = _reset_home_for(cfg, args)
+    if reset_error:
+        print(f"  [FAIL] {reset_error}")
+        return 3
     if require_isolated:
         print("  [operator-attested] disposable daemon isolation and launch flags")
     else:
@@ -2339,7 +2473,7 @@ def _run_selected(cfg, args, chosen, profiles, judge_on: bool,
         suite_results, skipped_required, aborted = _execute_jobs(
             cfg, client, jobs, run_id, judge_on, args.operator,
             fail_retries=args.fail_retries, repeat=args.repeat, fixtures=fixtures,
-            voice_on=voice_on)
+            voice_on=voice_on, reset_home=reset_home)
     finally:
         if fixtures is not None:
             fixtures.stop()
@@ -2383,6 +2517,10 @@ def main(argv=None, host: str | None = None) -> int:
         return 2
 
     profiles = selected_profiles(args)
+    reset_error = reset_home_error(args, profiles)
+    if reset_error:
+        print(reset_error, file=sys.stderr)
+        return 2
     if args.purge_run:
         return purge(cfg, args.purge_run, args.confirm_purge)
     if args.check:

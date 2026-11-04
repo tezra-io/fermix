@@ -48,11 +48,11 @@ _RESET_HINT_RE = re.compile(r"try again in ~\s*(\d+)\s*min", re.IGNORECASE)
 # live source — it ASSEMBLES each clause's reply out of turn_runner.ex and
 # requires a match, so a reworded clause fails there rather than silently here.
 _AUTH_INVALIDATED_RE = re.compile(
-    r"(?:authentication failed — (?:reconnect with `fermix auth login"
-    r"|check the .{0,80}API key in `fermix setup`"
-    r"|run `fermix auth login`)"
+    r"(?:authentication failed — (?:sign in\b.{0,80}?\bagain in Fermix's Providers settings"
+    r"|check the .{0,80}API key in Fermix's Providers settings)"
+    r"|authentication failed with the API key from .{0,80} in the daemon's environment"
     r"|subscription access denied — the .{0,40}plan may not include API access\."
-    r" Switch to an API key in `fermix setup`)",
+    r" Switch to an API key in Fermix's Providers settings)",
     re.IGNORECASE | re.DOTALL,
 )
 

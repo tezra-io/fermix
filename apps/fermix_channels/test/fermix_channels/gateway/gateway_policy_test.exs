@@ -221,6 +221,48 @@ defmodule FermixChannels.Gateway.PolicyTest do
     end
   end
 
+  # A device-role engine runs a retired copy of a moved home and opens no
+  # database, so it runs no command: every one reaches the agent as an ordinary
+  # message, and the turn checkout refuses it by name with the device role's
+  # sentence, as it refuses any message there (`QueueDeviceRoleTest`).
+  describe "a device-role engine" do
+    test "runs no command: every trigger reaches the agent untouched" do
+      register([])
+      device = %{role: :device, primary: "aws i-0f3b1c"}
+
+      for trigger <- command_triggers() do
+        content = "/#{trigger} arg"
+
+        assert :ok =
+                 Gateway.ingest([message(content, [])],
+                   channel: PlainChannel,
+                   agent: CapturingAgent,
+                   agent_server: self(),
+                   engine_role: device
+                 )
+
+        assert_receive {:agent_message, %{content: ^content}}
+
+        refute_received {:command_telemetry, _event, _metadata},
+                        "/#{trigger} ran on a device"
+      end
+    end
+
+    test "the primary still runs them" do
+      register([])
+
+      assert :ok =
+               Gateway.ingest([message("/notacommand arg", [])],
+                 channel: PlainChannel,
+                 agent: CapturingAgent,
+                 agent_server: self(),
+                 engine_role: %{role: :primary, primary: nil}
+               )
+
+      assert_received {:command_telemetry, [:fermix, :command, :dispatch], _metadata}
+    end
+  end
+
   describe "optional per-turn callbacks" do
     test "a :raw channel gets a plain-map stream spec and both optional callbacks" do
       register(commands?: false)

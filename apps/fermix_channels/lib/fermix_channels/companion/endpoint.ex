@@ -15,6 +15,12 @@ defmodule FermixChannels.Companion.Endpoint do
   connection over it is answered with one `error` (`max_clients_reached`) and
   closed.
 
+  After a move (M75 §6), a desktop's device-role engine hands each accepted
+  socket to a `Desktop.Tunnel` (`:connection_module`) instead, which carries
+  it to the primary; the cap is the same. A primary's own desktop tunnels run
+  ordinary connections with the options this endpoint gives its own
+  (`connection_opts/1`).
+
   The socket runs whenever the daemon runs; it depends on no feature flag. A
   socket it cannot bind costs this surface and nothing else: `init/1` logs one
   actionable error naming the path and the reason and returns `:ignore`, and
@@ -30,6 +36,7 @@ defmodule FermixChannels.Companion.Endpoint do
   alias FermixCore.Companion.Protocol
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.SocketPath
+  alias FermixCore.SocketPeer
 
   @max_clients 4
   @accept_idle_ms 50
@@ -48,6 +55,20 @@ defmodule FermixChannels.Companion.Endpoint do
   @doc "The most clients served at once, the Realtime socket's cap."
   @spec max_clients() :: pos_integer()
   def max_clients, do: @max_clients
+
+  @doc """
+  The options this endpoint starts each connection with, the socket aside:
+  what a desktop's tunnel on the primary starts its ordinary connection with
+  (M75 §6). `{:error, :not_running}` when no endpoint runs.
+  """
+  @spec connection_opts(GenServer.server()) :: {:ok, keyword()} | {:error, :not_running}
+  def connection_opts(server \\ __MODULE__) do
+    if GenServer.whereis(server),
+      do: {:ok, GenServer.call(server, :connection_opts)},
+      else: {:error, :not_running}
+  catch
+    :exit, {reason, _call} when reason in [:noproc, :normal, :shutdown] -> {:error, :not_running}
+  end
 
   @doc "How many client connections are being served right now."
   @spec connection_count(GenServer.server()) :: non_neg_integer()
@@ -75,12 +96,13 @@ defmodule FermixChannels.Companion.Endpoint do
 
   @impl true
   def handle_call(:connection_count, _from, state), do: {:reply, connections(state), state}
+  def handle_call(:connection_opts, _from, state), do: {:reply, state.connection_opts, state}
 
   @impl true
   def handle_info(:accept, state) do
     case :gen_tcp.accept(state.listen_socket, @accept_idle_ms) do
       {:ok, socket} ->
-        accept_connection(socket, state)
+        serve_admitted(socket, state)
         send(self(), :accept)
         {:noreply, state}
 
@@ -110,8 +132,11 @@ defmodule FermixChannels.Companion.Endpoint do
       listen_socket: listen_socket,
       socket_path: path,
       connection_supervisor: Keyword.fetch!(opts, :connection_supervisor),
+      connection_module: Keyword.get(opts, :connection_module, Connection),
       connection_opts: Keyword.get(opts, :connection_opts, []),
-      max_clients: Keyword.get(opts, :max_clients, @max_clients)
+      max_clients: Keyword.get(opts, :max_clients, @max_clients),
+      # Whether this socket answers a peer at all (`SocketPeer.admit/2`).
+      peer_gate: Keyword.get(opts, :peer_gate, &SocketPeer.admit/1)
     }
   end
 
@@ -215,6 +240,15 @@ defmodule FermixChannels.Companion.Endpoint do
     active
   end
 
+  # A command Fermix confines gets no answer here: no history, no turn, no
+  # approval card answered.
+  defp serve_admitted(socket, state) do
+    case state.peer_gate.(socket) do
+      :ok -> accept_connection(socket, state)
+      {:error, reason} -> SocketPeer.refuse(socket, state.socket_path, reason)
+    end
+  end
+
   defp accept_connection(socket, state) do
     if connections(state) >= state.max_clients do
       refuse(socket, state)
@@ -240,7 +274,10 @@ defmodule FermixChannels.Companion.Endpoint do
   defp start_connection(socket, state) do
     opts = Keyword.put(state.connection_opts, :socket, socket)
 
-    case DynamicSupervisor.start_child(state.connection_supervisor, {Connection, opts}) do
+    case DynamicSupervisor.start_child(
+           state.connection_supervisor,
+           {state.connection_module, opts}
+         ) do
       {:ok, pid} ->
         hand_over(socket, pid, state)
 

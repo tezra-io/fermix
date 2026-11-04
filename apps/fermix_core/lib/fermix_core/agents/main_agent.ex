@@ -14,6 +14,10 @@ defmodule FermixCore.Agents.MainAgent do
   lifecycle events — skill reload (`reload_skills/1`) and memory-review writes
   (`invalidate_runtime_context/2`, called by the reviewer).
 
+  Every turn crosses `checkout_turn_state/2`, whichever channel or background
+  run asks, so it is where a device-role engine (`FermixCore.Home.Role`) refuses
+  one by name, `{:device_role, sentence}`, before any runtime context is built.
+
   Started by Application supervisor with :permanent restart.
   """
 
@@ -29,6 +33,7 @@ defmodule FermixCore.Agents.MainAgent do
   alias FermixCore.Agents.VoiceCall
   alias FermixCore.ComputerHistory
   alias FermixCore.ComputerHistory.Gate.Snapshot
+  alias FermixCore.Home.Role
   alias FermixCore.Memory.Config
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Reviewer
@@ -137,6 +142,8 @@ defmodule FermixCore.Agents.MainAgent do
     adapter_overrides = resolved_adapter_overrides(opts)
 
     state = %{
+      # The role this boot recorded, read once; a test hands in another.
+      engine_role: Keyword.get_lazy(opts, :engine_role, &Role.recorded/0),
       provider: Keyword.get(opts, :provider, FermixCore.Providers.OpenAI),
       capability_registry:
         Keyword.get(opts, :capability_registry, FermixCore.Capabilities.Registry),
@@ -285,12 +292,11 @@ defmodule FermixCore.Agents.MainAgent do
 
   @impl true
   def handle_call({:checkout_turn_state, msg}, _from, state) do
-    case ensure_runtime_context(state) do
-      {:ok, state, cache_status} ->
-        {:reply, {:ok, turn_state(state, msg), cache_status}, state}
-
-      {:error, reason} ->
-        {:reply, {:error, reason}, state}
+    with :ok <- Role.admit(state.engine_role),
+         {:ok, state, cache_status} <- ensure_runtime_context(state) do
+      {:reply, {:ok, turn_state(state, msg), cache_status}, state}
+    else
+      {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end
 

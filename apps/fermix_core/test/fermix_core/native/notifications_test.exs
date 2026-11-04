@@ -412,7 +412,7 @@ defmodule FermixCore.Native.NotificationsTest do
       assert refused == {:error, {:transport, :connection_refused}}
     end
 
-    # `Temporal.Delivery.attempt/5`'s shape: one send under the watchdog, its
+    # `Temporal.Delivery.attempt/4`'s shape: one send under the watchdog, its
     # whole result normalized.
     defp rail_send(send_opts) do
       30_000

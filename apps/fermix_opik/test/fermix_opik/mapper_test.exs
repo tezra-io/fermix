@@ -524,6 +524,40 @@ defmodule FermixOpik.MapperTest do
            }
   end
 
+  # Protocol 12 (M86 P2): the semantic verb, the open surfaces, why a walk was
+  # cut and its accessibility cost ride the span; what any control or surface
+  # was called does not.
+  test "tool_span keeps the protocol 12 computer-use facts and drops their content" do
+    metadata = %{
+      tool: "computer_use",
+      success: true,
+      cu_session: "cua_ab12",
+      outcome: :already,
+      cu_verb: "toggle",
+      cu_surfaces_count: 1,
+      cu_truncated: "time",
+      cu_ax_messages: 57,
+      surface_label: "Clear all items?",
+      label: "Bold"
+    }
+
+    span =
+      Mapper.tool_span(metadata, %{duration_ms: 20},
+        trace_id: "t",
+        project_name: "fermix",
+        ended: @ended
+      )
+
+    assert span.metadata == %{
+             cu_session: "cua_ab12",
+             outcome: :already,
+             cu_verb: "toggle",
+             cu_surfaces_count: 1,
+             cu_truncated: "time",
+             cu_ax_messages: 57
+           }
+  end
+
   # Coexistence (V3 R0): what the courtesy arbiter did about a person at the
   # machine. A closed enum and nothing else — without it a trace cannot say
   # whether the agent proceeded, waited, or stepped aside, which is the whole

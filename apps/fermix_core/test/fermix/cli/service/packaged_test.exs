@@ -307,6 +307,29 @@ defmodule Fermix.CLI.Service.PackagedTest do
       assert_received {:probed, "http://127.0.0.1:4030"}
     end
 
+    # M75 §2: a candidate primary serves no web address, so the socket's answer,
+    # read with the role its home's settings record, is the whole proof.
+    test "a candidate's socket answer is its proof; it serves no web address", context do
+      home = role_home(context, "candidate")
+      test = self()
+
+      probe = fn origin ->
+        send(test, {:probed, origin})
+        {:error, :econnrefused}
+      end
+
+      assert {:ok, _status} = Packaged.install(opts(context, home: home, health_probe: probe))
+      refute_received {:probed, _origin}
+    end
+
+    test "any other role still needs its web address to answer", context do
+      home = role_home(context, "device")
+      probe = fn _origin -> {:error, :econnrefused} end
+
+      assert Packaged.install(opts(context, home: home, health_probe: probe)) ==
+               {:error, :health_unavailable}
+    end
+
     test "a daemon that never answers times out rather than claiming success", context do
       opts =
         opts(context,
@@ -508,6 +531,17 @@ defmodule Fermix.CLI.Service.PackagedTest do
   # A service home is recorded in the binding and never created by any of these
   # transactions, so it only has to be an absolute path that fits the OS socket
   # address. A deep temporary directory does not.
+  # A short home (its daemon.sock must fit a socket address) whose settings
+  # record `role`, removed when the test ends.
+  defp role_home(_context, role) do
+    home = Path.join(System.tmp_dir!(), "fx-pk-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(home)
+    SafeRm.mark!(home)
+    on_exit(fn -> SafeRm.rm_rf!(home) end)
+    File.write!(Path.join(home, "config.toml"), ~s([fermix_core.engine]\nrole = "#{role}"\n))
+    home
+  end
+
   defp synthetic_home(name) do
     "/tmp/fermix-test-#{System.unique_integer([:positive])}-#{name}"
   end

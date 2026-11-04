@@ -26,8 +26,8 @@ description: >
   it runs or waits (and never the turn ahead of it), history pages forward and
   backward and full-text search finds the message, and a job scheduled from
   this chat with origin delivery lands in the companion timeline while no
-  client is connected, and a picture Fermix makes is sent into the chat as a
-  media row.
+  client is connected, a picture Fermix makes is sent into the chat as a
+  media row, and a file the owner attaches reaches the model.
 defaults:
   timeout_ms: 180000
   judge: false
@@ -227,3 +227,38 @@ scenarios:
             events_all: [accepted, turn_started, text_done]
             events_none: [turn_error]
             media_row: true
+
+  # Companion protocol 7: a file the owner attaches in the Mac chat crosses by
+  # path (the runner writes the fixture into the inbox the hello named and
+  # hands it over with attach_file, as the app does) and reaches the turn as a
+  # phone's attachment would. Each answer is something only the file holds;
+  # the negatives catch the old failure, an attachment the model never saw.
+  - id: attached_file_read
+    title: "A file the owner attaches in the Mac chat reaches the model"
+    severity: critical
+    tags: [companion, attachments, vision]
+    cases:
+      - id: attached_picture_colour
+        drive: companion
+        image: fixtures/red_square.png
+        query: "What is the dominant colour of the picture I attached? Answer with the colour name."
+        expect:
+          status: ok
+          no_tool_errors: true
+          reply_matches: "(?i)\\bred\\b"
+          reply_not_matches: "(?i)(can't|cannot|don't|do not|unable to) (see|view|access|open)|no (image|picture|file|attachment)"
+          wire:
+            events_all: [accepted, row, turn_started, text_done]
+            events_none: [turn_error]
+      - id: attached_picture_text
+        drive: companion
+        image: fixtures/text_alpha.png
+        query: "Read the text in the picture I attached and quote it exactly."
+        expect:
+          status: ok
+          no_tool_errors: true
+          reply_matches: "(?i)alpha"
+          reply_not_matches: "(?i)(can't|cannot|don't|do not|unable to) (see|view|read|open)|no (image|picture|file|attachment)"
+          wire:
+            events_all: [accepted, row, turn_started, text_done]
+            events_none: [turn_error]

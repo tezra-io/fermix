@@ -41,13 +41,13 @@ header lists everything else left out.
 - `CapturerCanCrash`: a Capturer callback raises, and its DynamicSupervisor
   restarts it.
 - `ReconcileCanTimeOut`: `/history off`'s reconcile call gives up after its
-  15 s timeout (`controller.ex:45`, `:53-54`). The timer starts at
+  15 s timeout (`controller.ex:50`, `:58-59`). The timer starts at
   `history.ex:487`.
 - `ReconcileCanStall`: that timeout can fire before the DynamicSupervisor has
   sent the Capturer `:shutdown`. Setting it `FALSE` is a timing assumption:
   the work before the `:shutdown` is app-env reads, `File.regular?` stats in
-  `SidecarInstaller.installed?` (`controller.ex:94`,
-  `sidecar_installer.ex:94-99`) and a `Process.whereis` (`controller.ex:128`),
+  `SidecarInstaller.installed?` (`controller.ex:103`,
+  `sidecar_installer.ex:94-99`) and a `Process.whereis` (`controller.ex:137`),
   so the assumption fails only if the filesystem or the scheduler stalls for
   seconds. No safety rule needs it any more (see What holds).
 - `MaxFaults` bounds restarts and crashes together (1 in every check).
@@ -64,11 +64,11 @@ header lists everything else left out.
   gate is the flush-time rule of 693970b7.
 - `StopBeforeReply`: `/history off` replies only after its reconcile call
   returns, and that call returns only after the Capturer has exited
-  (`history.ex:487`, `computer_history.ex:70`, `controller.ex:53-54`, `:133`).
+  (`history.ex:487`, `computer_history.ex:70`, `controller.ex:58-59`, `:142`).
 - `SaveBeforeReply`: `/history off` writes `config.toml` before it replies
   (`history.ex:482`, `:490-493` before `:426-427`).
 - `BootReconciles`: a started or restarted Controller reconciles in
-  `handle_continue` (`controller.ex:57-74`).
+  `handle_continue` (`controller.ex:62-82`).
 - `OffConfirmsStop`: an exit of the reconcile call (no Controller, a crash
   mid-call, a timeout) comes back as `{:error, {:reconcile_failed, _}}`
   (`computer_history.ex:68-75`), and `/history off` then says the stop could
@@ -80,8 +80,8 @@ header lists everything else left out.
   deletes the child.
 - `InsertChecksIntervals`: the spool insert refuses, inside its own
   transaction, each row whose `ts` lies inside a recorded purge interval,
-  bounds inclusive like the purge's `DELETE` (`computer_history_sql.ex:358-402`,
-  `:664-675`), the CH-2 fix. Off, it is the plain `INSERT OR IGNORE` of
+  bounds inclusive like the purge's `DELETE` (`computer_history_sql.ex:359-403`,
+  `:665-676`), the CH-2 fix. Off, it is the plain `INSERT OR IGNORE` of
   693970b7.
 - `StopsBeforeFlush`: `terminate/2` runs `stop_driver` and the lock release
   before its best-effort flush (`capturer.ex:603-605`), the C1 fix. Off, it is
@@ -160,11 +160,11 @@ Witnesses:
 - Check 16: CH-4's second path, now harmless. The Controller's `whereis`
   returns a Capturer that then exits; its restart declines because the
   feature is off, so the Controller's `terminate_child` is answered
-  `{:error, :not_found}`, logged "already gone" (`controller.ex:142-143`),
+  `{:error, :not_found}`, logged "already gone" (`controller.ex:151-152`),
   with no Capturer running.
 - Check 29: CH-2's path, now closed. A row stamped inside the purged window
   reaches the spool insert after the purge committed, and the fence refuses
-  it (`computer_history_sql.ex:385-395`), so the fence is not vacuous.
+  it (`computer_history_sql.ex:386-396`), so the fence is not vacuous.
 
 **One more of each entity, run by hand** (TLC 2.19, `-workers auto`): each row
 changes the check's constants as shown, and every other constant stays as in
@@ -214,13 +214,13 @@ Controller's split lookup and crashes at any point) both held: 01 with
   (`:178`, `:231-240`).
 - **Purge is one transaction that sets the watermark, and spool inserts do
   not check it: confirmed** (at 693970b7). `purge_window`
-  (`computer_history_sql.ex:509-561`) deleted, then raised
-  `purge_watermark_ts` (`:548`), inside one `BEGIN IMMEDIATE` (`:1231`), all
-  in one Repo call. `insert_events` (`:310-335`) was a plain `INSERT OR
+  (`computer_history_sql.ex:510-562`) deleted, then raised
+  `purge_watermark_ts` (`:549`), inside one `BEGIN IMMEDIATE` (`:1212`), all
+  in one Repo call. `insert_events` (`:311-336`) was a plain `INSERT OR
   IGNORE`. Only the summarizer's `write_cycle_result` read the watermark
-  (`:1015-1043`). Since the CH-2 and CH-5 fix the purge records an interval
-  in the same transaction (`:606-647`), and the insert checks every recorded
-  interval (`:358-402`).
+  (`:996-1024`). Since the CH-2 and CH-5 fix the purge records an interval
+  in the same transaction (`:607-648`), and the insert checks every recorded
+  interval (`:359-403`).
 - **`/history off`: env flip, then terminate the Capturer, then save
   config: confirmed.** The order is:
   1. flip (`history.ex:479-480`);
@@ -326,8 +326,8 @@ the fixed code.
   An event still in the buffer at the purge lands the same way.
 - **Code:**
   - The purge window is `[now - ms, now]` (`purge.ex:77`), and it deletes only
-    rows already in the spool (`computer_history_sql.ex:517`).
-  - The insert (`:322-335`) never reads the watermark (`:548`).
+    rows already in the spool (`computer_history_sql.ex:518`).
+  - The insert (`:323-336`) never reads the watermark (`:549`).
   - `ingest.ex:174` and `:188` are two Repo calls, so a purge can commit
     between them.
 - **Clock:** the purge window comes from the daemon's clock (`purge.ex:57`),
@@ -342,18 +342,18 @@ the fixed code.
     the summarizer's route, after the owner was told it was purged.
   - The summarizer then refuses the note, because its `provenance_from_ts`
     (the sitting's earliest `ts`, `summarizer.ex:952`) is at or before the
-    watermark (`computer_history_sql.ex:1040-1043`), and the cursor still
-    advances (`:1005-1012`), so the sitting's post-purge activity is never
+    watermark (`computer_history_sql.ex:1021-1024`), and the cursor still
+    advances (`:986-993`), so the sitting's post-purge activity is never
     summarized.
 - **Fix:** the one high-water watermark is replaced by recorded purge
   intervals (owner decision). `purge_window` records `[from, to]` with its
   `issued_at` in the transaction that deletes the rows
-  (`computer_history_sql.ex:606-647`). The spool insert checks each row's
+  (`computer_history_sql.ex:607-648`). The spool insert checks each row's
   integer `ts` against every recorded interval, inclusive, inside its own
-  transaction (`:358-402`, `:664-675`): that is the one placement that also
+  transaction (`:359-403`, `:665-676`): that is the one placement that also
   stops a batch already past Ingest's pause check, because the purge and the
   insert are each one transaction on the single writer. The fenced count is
-  logged (`:405-411`); a row with no integer `ts` is left to the `NOT NULL`
+  logged (`:406-412`); a row with no integer `ts` is left to the `NOT NULL`
   refusal. Every flush path reaches this insert (`ingest.ex:201` is its only
   caller). Tests: `purge_test.exs` "the spool fence" (a late row at and
   inside the bounds, and an older window still fencing after a newer one),
@@ -364,8 +364,8 @@ the fixed code.
   purge mark, the id of the latest recorded purge, before it reads
   (`Summarizer.run_session/4`, `Rollup.maybe_run/3`), and the write refuses
   when an interval with a higher id intersects the note's provenance
-  (`computer_history_sql.ex:1141-1151`) or the window of everything the
-  roll-up read (`:1220-1228`, `Rollup.read_scope/3`). A windowed purge no
+  (`computer_history_sql.ex:1122-1132`) or the window of everything the
+  roll-up read (`:1201-1209`, `Rollup.read_scope/3`). A windowed purge no
   longer voids every later note of a sitting that began before it, and a
   purge before the roll-up no longer refuses the threads built from the
   notes around it. Ids, not clocks: a clock step cannot reorder a purge and a
@@ -416,7 +416,7 @@ the fixed code.
 - **Confidence, check 12:** it needs the Controller to die **alone**, for
   example `do_reconcile` raising (`controller.ex:82-85`), right at
   `/history off`. A DynamicSupervisor crash also restarts the Controller
-  (`:rest_for_one`, `supervisor.ex:49-60`), but it shuts the Capturer down
+  (`:rest_for_one`, `supervisor.ex:55-66`), but it shuts the Capturer down
   first, so it cannot cause this. The window is then the supervisor's
   restart latency.
 - **Confidence, check 15:** it needs the reconcile to take longer than the
@@ -435,7 +435,7 @@ the fixed code.
   answer the status call in time reads "not answering (it may still be
   running)", not "not running" (`capturer.ex:113-122`, `history.ex:123`), so
   "not running" means the process is gone. `Controller.reconcile/2` waits
-  15 s (`controller.ex:45`, `:53-54`), above the two children's 5 s
+  15 s (`controller.ex:50`, `:58-59`), above the two children's 5 s
   shutdowns, so a slow `terminate/2` flush no longer turns into a false
   failure. Side effect: a timeout after the `:shutdown` (a Repo stalled for
   over 15 s) now reports an unconfirmed stop, which is true. Tests:
@@ -475,7 +475,7 @@ the fixed code.
   - `ensure_stopped` returns `:ok` on a nil pid and ignores a `terminate_child`
     error (`controller.ex:112-121`).
   - The Capturer is a `:permanent` child (the `use GenServer` default,
-    `capturer.ex:49`) of the DynamicSupervisor (`supervisor.ex:55`).
+    `capturer.ex:49`) of the DynamicSupervisor (`supervisor.ex:61`).
   - Its `init` (`capturer.ex:112-162`) and Ingest never check the enable bit.
   - `reconcile_runtime` is called only from `history.ex:448`.
 - **Impact:** capture continues after "Computer history disabled — nothing new
@@ -502,9 +502,9 @@ the fixed code.
   flips the env before it calls, so either the Controller's `whereis` sees
   the new pid and stops it, or `init` reads the flip and declines: both paths
   close. The Controller takes `:ignore` from `start_child` (a start racing
-  the flip, `controller.ex:117-118`) and logs `terminate_child`'s answer:
+  the flip, `controller.ex:126-127`) and logs `terminate_child`'s answer:
   `:ok` as "stopped", `{:error, :not_found}` as "already gone"
-  (`:133`, `:137-143`). Tests: `capturer_test.exs` "a restart racing
+  (`:142`, `:146-152`). Tests: `capturer_test.exs` "a restart racing
   /history off (CH-4)" (the DynamicSupervisor is suspended to hold the EXIT),
   `controller_test.exs` (a child that declines), `controller_stop_log_test.exs`
   (a not-found stop).
@@ -521,11 +521,11 @@ the fixed code.
     `{0, @max_ts}` (`:76`).
   - `purge_window` raises the watermark to the window's end and never lowers
     it: `SET purge_watermark_ts = MAX(COALESCE(purge_watermark_ts, 0), ?)`
-    (`computer_history_sql.ex:545-549`). After `purge all` it is
+    (`computer_history_sql.ex:546-550`). After `purge all` it is
     9_999_999_999_999 for good.
   - The summarizer's note write refuses any note whose
-    `provenance_from_ts <= watermark` (`computer_history_sql.ex:1040-1043`),
-    and the roll-up rejects threads the same way (`:1098-1100`). Every future
+    `provenance_from_ts <= watermark` (`computer_history_sql.ex:1021-1024`),
+    and the roll-up rejects threads the same way (`:1079-1081`). Every future
     timestamp is below the watermark, so every note and every thread is
     refused.
 - **Impact:** once the owner runs `/history purge all`, capture goes on and
@@ -535,7 +535,7 @@ the fixed code.
 - **Fix:** `purge all` is `[0, now]` (`purge.ex:75-79`; `@max_ts` is gone).
   A row stamped in the future by a backwards clock step is therefore not
   covered; the 48 h sweep deletes it 48 h after its stamp (owner decision).
-  Migration 32 (`repo.ex:4118-4137`, `computer_history_sql.ex:275-298`)
+  Migration 32 (`repo.ex:4210-4229`, `computer_history_sql.ex:276-299`)
   carries a stored watermark W over as one interval `[0, min(W, now)]` issued
   at the migration, the sentinel included; nothing reads or writes a
   watermark any more. The old column stays, unread, because `fermix upgrade`
@@ -545,7 +545,7 @@ the fixed code.
   refuses nothing, and the fence refuses only rows stamped before the
   upgrade, which a restarted daemon no longer holds. The retention sweep
   prunes an interval once it was both issued and ended before the 48 h cutoff
-  (`computer_history_sql.ex:420-444`). Tests: `persistence_test.exs`
+  (`computer_history_sql.ex:421-445`). Tests: `persistence_test.exs`
   "migration 32" (a windowed watermark, the sentinel, a store that never
   purged) and "purge intervals" (issue order, pruning), `purge_test.exs`
   "purge all records [0, now] and later capture is still stored",
@@ -619,7 +619,7 @@ ExUnit or a doc fix.
   unnecessary on the normal path; for the pause, Ingest's per-event stamp
   check now does its job (CH-1).
 - Resolved: `controller.ex` called the Controller "the LAST child of the
-  Supervisor", but `Retention` comes after it (`supervisor.ex:54-58`). The
+  Supervisor", but `Retention` comes after it (`supervisor.ex:60-64`). The
   moduledoc now says it follows the DynamicSupervisor (`controller.ex:12-15`).
 - Resolved: `controller.ex` said reconcile re-runs "on every enable/disable
   act (the wizard's enable, `/history off`)". The moduledoc now says it runs

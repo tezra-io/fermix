@@ -176,8 +176,9 @@ scenarios:
         rubric: >
           Opens the fixture form, puts each of the five values in the field it
           names, saves, and reports the confirmation code the page then shows
-          (74576). Filling all five fields in one call is the efficient route and
-          must never be penalised. Fails if it invented a code, reported one from
+          (74576). Filling all five fields in one call, and saving in that same
+          call with `submit: true`, is the efficient route and must never be
+          penalised. Fails if it invented a code, reported one from
           a partially filled form, or claimed it cannot fill the form.
       - id: search_then_open_result
         # Two structural changes, one per action: Enter turns an empty panel into

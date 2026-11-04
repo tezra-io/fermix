@@ -13,6 +13,7 @@ defmodule FermixCore.Browser.AttachedTabTest do
   alias FermixCore.Browser.CDP.ExtensionTransport
   alias FermixCore.Browser.Config
   alias FermixCore.Browser.Error
+  alias FermixCore.Browser.ProfileManager
   alias FermixCore.Browser.ProfileServer
   alias FermixTestSupport.SafeRm
 
@@ -331,7 +332,9 @@ defmodule FermixCore.Browser.AttachedTabTest do
     download_redirect: :not_an_action,
     target_discovery: :not_an_action,
     target_attach: :not_an_action,
-    tab_cap: :not_an_action
+    tab_cap: :not_an_action,
+    sign_in: {"login_for", %{"site" => "example.com"}},
+    handover: {"handover", %{}}
   }
 
   test "every browser-wide capability the grant lacks refuses by name", ctx do
@@ -351,6 +354,20 @@ defmodule FermixCore.Browser.AttachedTabTest do
   end
 
   defp assert_capability_refusal(_pid, :not_an_action, _capability), do: :ok
+
+  # A sign-in's one next move is the app's own pane, in every browser that
+  # cannot do it, so its refusal is the same everywhere.
+  defp assert_capability_refusal(pid, {action, args}, :sign_in) do
+    assert {:error, %Error{code: "sign_in_pane_only", message: message}} = req(pid, action, args)
+    assert message =~ "only in the Fermix app's own browser"
+  end
+
+  # Only the pane's tabs close with the turn, so every other browser refuses a
+  # handover with the same next move.
+  defp assert_capability_refusal(pid, {action, args}, :handover) do
+    assert {:error, %Error{code: "handover_pane_only", message: message}} = req(pid, action, args)
+    assert message =~ "stay open between your turns"
+  end
 
   defp assert_capability_refusal(pid, {action, args}, capability) do
     result = req(pid, action, args)
@@ -380,6 +397,7 @@ defmodule FermixCore.Browser.AttachedTabTest do
       "a navigation — the destination is refused first; the page it hands back goes through " <>
         "the gate in its own test below",
     "focus" => "refused as a browser-wide capability",
+    "handover" => "refused as a browser-wide capability",
     "close" => "refused as a browser-wide capability",
     "dialog" => "answers or lists a JS dialog; needed to unblock a stuck page",
     "cookies" => "refused as a browser-wide capability",
@@ -578,8 +596,7 @@ defmodule FermixCore.Browser.AttachedTabTest do
     {"a detached background run",
      Map.merge(@base, %{source_trust: :operator, computer_use_origin: :unattended})},
     {"a delegated subagent", Map.put(@attended, :subagent_depth, 1)},
-    {"a coding continuation", Map.put(@attended, :harness_continuation_depth, 1)},
-    {"a context with no trust at all", Map.put(@base, :computer_use_origin, :interactive)}
+    {"a coding continuation", Map.put(@attended, :harness_continuation_depth, 1)}
   ]
 
   test "the person's own tab is refused to every turn they are not present for" do
@@ -590,6 +607,15 @@ defmodule FermixCore.Browser.AttachedTabTest do
       assert match?({:error, %Error{code: "attached_tab_not_allowed"}}, result),
              "#{label} reached the granted tab: #{inspect(result)}"
     end
+  end
+
+  # With no trust the call is refused before any profile is chosen, the
+  # person's own tab included.
+  test "a context with no trust at all is refused by name before the tab is considered" do
+    context = Map.put(@base, :computer_use_origin, :interactive)
+
+    assert {{:error, %Error{code: "missing_trust"}}, nil} =
+             Browser.execute(%{"action" => "status", "profile" => "selected_tab"}, context)
   end
 
   test "an attended owner turn reaches it, and the managed profile is untouched" do
@@ -620,7 +646,9 @@ defmodule FermixCore.Browser.AttachedTabTest do
   defp daemon_grant!(href) do
     start_supervised!(Supervisor.child_spec({Grants, []}, id: :daemon_grants))
     grant!(Grants, href)
-    on_exit(fn -> Browser.reap_conversation(@base.conversation_key) end)
+    # The owner's profiles are one per device and no conversation's end stops
+    # them, so the grant's holder is stopped by its key.
+    on_exit(fn -> ProfileManager.stop_owner("owner") end)
   end
 
   test "a Buzz channel is refused the person's own tab before the bridge is asked" do

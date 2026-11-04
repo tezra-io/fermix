@@ -11,8 +11,14 @@ defmodule FermixCore.Management.ComputerUse do
   `installed` is read from the installer rather than inferred from the probe:
   the feature being switched off says nothing about whether the helper is on
   disk, and the pane's install button keys off exactly that.
+
+  A probed answer names the helper's `platform`. On Linux it adds the
+  `display_server` and the rows `fermix doctor` prints after its `computer use`
+  row (`Fermix.CLI.Doctor.Checks.linux_computer_use_rows/1`), because there the
+  two booleans say what this session's pixel route serves and grant nothing.
   """
 
+  alias Fermix.CLI.Doctor.Checks
   alias FermixCore.Auth.Redaction
   alias FermixCore.ComputerUse.Grant
   alias FermixCore.ComputerUse.SidecarInstaller
@@ -71,8 +77,12 @@ defmodule FermixCore.Management.ComputerUse do
     end
   end
 
+  # Only an answer that probed the helper names its platform, so a state that
+  # probed nothing answers exactly as it always has.
   defp project(%{state: :probed} = state, _installed?) do
     view(true, Map.fetch!(state, :screen_capture), Map.fetch!(state, :input_control), now())
+    |> Map.put("platform", Map.fetch!(state, :platform))
+    |> Map.merge(linux_view(state))
   end
 
   defp project(%{state: :not_installed}, _installed?), do: view(false, false, false, nil)
@@ -89,6 +99,22 @@ defmodule FermixCore.Management.ComputerUse do
       "probed_at" => probed_at
     }
   end
+
+  # On Linux nothing is granted, so the two booleans say what this session's
+  # pixel route serves. The display server names the session's display, not its
+  # route, and the rows (the pixel route among them) are the doctor's own, from
+  # its producer, so the pane and `fermix doctor` cannot disagree.
+  defp linux_view(%{platform: "linux"} = state) do
+    %{
+      "display_server" => Map.fetch!(state, :display_server),
+      "rows" => Enum.map(Checks.linux_computer_use_rows({:ok, state}), &wire_row/1)
+    }
+  end
+
+  defp linux_view(_state), do: %{}
+
+  defp wire_row(%{name: name, status: status, detail: detail}),
+    do: %{"name" => name, "status" => Atom.to_string(status), "detail" => detail}
 
   defp now, do: DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
 

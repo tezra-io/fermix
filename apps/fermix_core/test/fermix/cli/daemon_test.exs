@@ -7,6 +7,7 @@ defmodule Fermix.CLI.DaemonTest do
   alias FermixCore.Auth.TokenSupervisor
   alias FermixCore.Capabilities.MCP.RuntimeStatus
   alias FermixCore.Management.Lifecycle
+  alias FermixCore.Management.Router
   alias FermixCore.Plugins.Dist.Store, as: DistStore
   alias FermixCore.SocketPath
   alias FermixTestSupport.ParentProcess
@@ -999,6 +1000,97 @@ defmodule Fermix.CLI.DaemonTest do
                )
     end
 
+    # A cue source's secret and the `cues` section's switches are cue writes
+    # too, though they ride the generic `secret.set`, `secret.clear` and
+    # `settings.apply`: switching `cues_mandates_enabled` back on undoes the
+    # owner's stop of every mandate. So the target decides, not the method, and
+    # every other secret and section stays as open as it was.
+    @cue_writes [
+      {"secret.set", %{"id" => "cue_source:x:secret", "value" => "Tern-Quarry-41"}, :secret_set},
+      {"secret.clear", %{"id" => "cue_source:x:secret"}, :secret_clear},
+      {"settings.apply", %{"section" => "cues", "values" => %{"cues_mandates_enabled" => true}},
+       :settings_apply}
+    ]
+    @other_writes [
+      {"secret.set", %{"id" => "openai_api_key", "value" => "sk-Larch-0412"}, :secret_set},
+      {"secret.set", %{"id" => "env:HERON_TOKEN", "value" => "Heron-9081"}, :secret_set},
+      {"settings.apply", %{"section" => "assistant", "values" => %{"agent_name" => "Wren"}},
+       :settings_apply}
+    ]
+
+    test "a cue source's secret and the cues section are refused to a process the daemon " <>
+           "started, and to one it cannot place" do
+      golden = golden_error_details("unavailable_cues_owner_decision")
+
+      for peer <- [[daemon_os_pid: ParentProcess.os_pid()], [os: {:win32, :nt}]] do
+        socket_path = start_peer_daemon([management_opts: recording_writers()] ++ peer)
+
+        log =
+          ExUnit.CaptureLog.capture_log(fn ->
+            for {method, params, _write} <- @cue_writes do
+              assert {:error, {:management_error, "unavailable", _message, ^golden}} =
+                       Client.request_v1(method, params,
+                         socket_path: socket_path,
+                         timeout: @reply_ms
+                       ),
+                     method
+            end
+          end)
+
+        assert log =~ "only the owner may"
+        refute_received {:written, _write, _target}
+      end
+    end
+
+    test "a cue source's secret and the cues section reach their writers from a process " <>
+           "the daemon did not start" do
+      socket_path = start_peer_daemon(management_opts: recording_writers())
+      assert_writes_reached(socket_path, @cue_writes)
+    end
+
+    test "every other secret and section stays open to a process the daemon started" do
+      socket_path =
+        start_peer_daemon(
+          management_opts: recording_writers(),
+          daemon_os_pid: ParentProcess.os_pid()
+        )
+
+      assert_writes_reached(socket_path, @other_writes)
+    end
+
+    defp assert_writes_reached(socket_path, writes) do
+      for {method, params, write} <- writes do
+        assert {:ok, _result} =
+                 Client.request_v1(method, params, socket_path: socket_path, timeout: @reply_ms),
+               method
+
+        target = params["id"] || params["section"]
+        assert_received {:written, ^write, ^target}
+      end
+    end
+
+    # The router's own seams for the three generic writes, so a call that got
+    # past the check is seen arriving and stores nothing.
+    defp recording_writers do
+      test_pid = self()
+
+      management_opts() ++
+        [
+          secret_writer: fn id, _value ->
+            send(test_pid, {:written, :secret_set, id})
+            {:ok, %{"id" => id}}
+          end,
+          secret_clearer: fn id ->
+            send(test_pid, {:written, :secret_clear, id})
+            {:ok, %{"id" => id}}
+          end,
+          settings_writer: fn section, _values, _opts ->
+            send(test_pid, {:written, :settings_apply, section})
+            {:ok, %{"section" => section}}
+          end
+        ]
+    end
+
     defp cue_management_opts,
       do: management_opts() ++ [operation_opts: [cues: [memory?: false, running?: false]]]
 
@@ -1027,6 +1119,233 @@ defmodule Fermix.CLI.DaemonTest do
         end)
 
       assert log =~ "only the owner may"
+    end
+  end
+
+  # A command Fermix confines gets no answer from this socket, whatever it asks
+  # (`SocketPeer.admit/2`; the real kernel check runs in `SocketReachTest`).
+  describe "a peer the socket does not answer" do
+    test "its request is closed unanswered, reaches no writer, and is logged once" do
+      socket_path =
+        start_peer_daemon(
+          management_opts: recording_writers(),
+          peer_gate: fn _conn -> {:error, {:sandboxed, 4242}} end
+        )
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          for {method, params, _write} <- @other_writes do
+            assert Client.request_v1(method, params,
+                     socket_path: socket_path,
+                     timeout: @reply_ms
+                   ) == {:error, :closed},
+                   method
+          end
+        end)
+
+      assert log =~ "#{socket_path} refused a connection: process 4242 runs sandboxed"
+      refute_received {:written, _write, _target}
+    end
+  end
+
+  # M75, Always On setup §6: every Always On step (`home.act`: a token, a
+  # server Fermix creates, powers or deletes, a code that lets a server take
+  # this home, the move) and the recovery key are the owner's decisions; a
+  # command the agent ran is refused.
+  describe "owner decisions on the home" do
+    @home_decisions ~w(home.act home.snapshots.passphrase)
+
+    test "a process the daemon started is refused, and so is one it cannot place" do
+      golden = home_owner_golden()
+
+      for peer <- [[daemon_os_pid: ParentProcess.os_pid()], [os: {:win32, :nt}]] do
+        socket_path = start_peer_daemon(peer)
+
+        log =
+          ExUnit.CaptureLog.capture_log(fn ->
+            for method <- @home_decisions do
+              assert {:error, {:management_error, "unavailable", _message, ^golden}} =
+                       Client.request_v1(method, %{}, socket_path: socket_path, timeout: 5_000),
+                     method
+            end
+          end)
+
+        assert log =~ "only the owner may"
+      end
+    end
+
+    test "a process the daemon did not start is not refused as an owner decision", %{
+      socket_path: socket_path
+    } do
+      golden = home_owner_golden()
+
+      for method <- @home_decisions do
+        result = Client.request_v1(method, %{}, socket_path: socket_path, timeout: 5_000)
+        refute match?({:error, {:management_error, "unavailable", _message, ^golden}}, result)
+      end
+    end
+
+    defp home_owner_golden do
+      golden =
+        :fermix_core
+        |> Application.app_dir("priv/management/fixtures/errors.jsonl")
+        |> File.stream!()
+        |> Enum.map(&Jason.decode!/1)
+        |> Enum.find(&(&1["name"] == "unavailable_home_owner_decision"))
+        |> get_in(["response", "error", "details"])
+
+      assert golden == %{
+               "capability" => "home",
+               "sentence" =>
+                 "Only the owner can set up Always On, move Fermix or set its recovery " <>
+                   "passphrase: use the Fermix app, the setup page or your own terminal."
+             }
+
+      golden
+    end
+  end
+
+  # Always On setup §6: a setup page session drives every decision the page
+  # offers, the owner's included, so a command the agent ran cannot mint one;
+  # the Mac app (a launchd process) still opens the page.
+  describe "owner decisions on the setup page" do
+    test "a process the daemon started is refused a setup session, and so is one it cannot place" do
+      golden = setup_owner_golden()
+
+      for peer <- [[daemon_os_pid: ParentProcess.os_pid()], [os: {:win32, :nt}]] do
+        socket_path = start_peer_daemon(peer)
+
+        log =
+          ExUnit.CaptureLog.capture_log(fn ->
+            assert {:error, {:management_error, "unavailable", _message, ^golden}} =
+                     Client.request_v1("setup.session.create", %{},
+                       socket_path: socket_path,
+                       timeout: 5_000
+                     )
+          end)
+
+        assert log =~ "Refused setup.session.create: only the owner may"
+      end
+    end
+
+    test "a process the daemon did not start is given the page's one-use URL", %{
+      socket_path: socket_path
+    } do
+      assert {:ok, %{"url" => "http://127.0.0.1:4041/setup?t=daemon-launch-token"}} =
+               Client.request_v1("setup.session.create", %{},
+                 socket_path: socket_path,
+                 timeout: 5_000
+               )
+    end
+
+    defp setup_owner_golden do
+      golden =
+        :fermix_core
+        |> Application.app_dir("priv/management/fixtures/errors.jsonl")
+        |> File.stream!()
+        |> Enum.map(&Jason.decode!/1)
+        |> Enum.find(&(&1["name"] == "unavailable_setup_owner_decision"))
+        |> get_in(["response", "error", "details"])
+
+      assert golden == %{
+               "capability" => "setup_session",
+               "sentence" =>
+                 "Only the owner can open the setup page: use the Fermix app or your own " <>
+                   "terminal."
+             }
+
+      golden
+    end
+  end
+
+  # Always On setup §3.5: the server's steps a linked desktop's `home.act`
+  # sends over the link are served only to a desktop's forward, so this
+  # socket refuses each by name whoever asks, before any owner placement; the
+  # provisioner's writes left the wire, `home.act` runs them.
+  describe "the rail-only steps and the provisioner's writes" do
+    @rail_only ~w(home.move.readiness home.move.start home.enroll.open home.enroll.withdraw
+                  home.snapshots.run)
+    @gone ~w(home.provision.providers home.provision.connect home.provision.create
+             home.provision.power home.provision.resources home.provision.delete)
+
+    test "a rail-only step is refused on the socket by name, the owner's peer included", %{
+      socket_path: socket_path
+    } do
+      golden = rail_only_golden()
+      started_here = start_peer_daemon(daemon_os_pid: ParentProcess.os_pid())
+
+      for socket <- [socket_path, started_here], method <- @rail_only do
+        assert {:error, {:management_error, "unavailable", _message, details}} =
+                 Client.request_v1(method, %{}, socket_path: socket, timeout: 5_000),
+               method
+
+        assert details == %{golden | "method" => method}
+      end
+    end
+
+    test "the provisioner's writes are no method, and its choice of offers is no decision" do
+      socket_path = start_peer_daemon(daemon_os_pid: ParentProcess.os_pid())
+
+      for method <- @gone do
+        assert {:error, {:management_error, "method_not_found", _message, %{"method" => ^method}}} =
+                 Client.request_v1(method, %{}, socket_path: socket_path, timeout: 5_000)
+      end
+
+      # A read for the provider in use, answered to a caller Fermix started:
+      # here, with no token, the provisioner's own sentence, never the owner's.
+      assert {:error,
+              {:management_error, "unavailable", _message,
+               %{"capability" => "home", "sentence" => "Paste a Hetzner API token first."}}} =
+               Client.request_v1("home.provision.options", %{},
+                 socket_path: socket_path,
+                 timeout: 5_000
+               )
+    end
+
+    defp rail_only_golden do
+      golden =
+        :fermix_core
+        |> Application.app_dir("priv/management/fixtures/errors.jsonl")
+        |> File.stream!()
+        |> Enum.map(&Jason.decode!/1)
+        |> Enum.find(&(&1["name"] == "unavailable_rail_only"))
+        |> get_in(["response", "error", "details"])
+
+      assert %{"capability" => "home", "method" => "home.move.start", "sentence" => sentence} =
+               golden
+
+      assert sentence =~ "home.act"
+      golden
+    end
+  end
+
+  # M75 §2: a candidate primary runs no agent, phone channel or plugins until
+  # its move, so of the unversioned methods it answers `shutdown` alone and
+  # refuses the rest with the router's own sentence.
+  describe "a candidate primary's unversioned methods" do
+    @candidate %{role: :candidate, primary: nil}
+
+    test "every method but shutdown is refused by name, and the connection stays usable" do
+      socket_path =
+        start_peer_daemon(management_opts: management_opts() ++ [engine_role: @candidate])
+
+      sentence = Router.candidate_sentence()
+
+      for method <- ~w(health agents skills_list mobile_status mobile_pair_begin agent_message) do
+        assert {:ok, %{"status" => "error", "reason" => "candidate", "error" => ^sentence}} =
+                 Client.request(method, socket_path: socket_path, timeout: @reply_ms),
+               method
+      end
+    end
+
+    test "a primary is served as before" do
+      socket_path =
+        start_peer_daemon(
+          management_opts: management_opts() ++ [engine_role: %{role: :primary, primary: nil}]
+        )
+
+      assert {:ok, %{"status" => "ok"}} =
+               Client.request("health", socket_path: socket_path, timeout: @reply_ms)
     end
   end
 

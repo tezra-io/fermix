@@ -26,8 +26,8 @@ defmodule FermixCore.Management.Settings.Secrets do
   @info "Fingerprint or automatic login leaves your login keyring locked, so saving a " <>
           "key asks for its password. A private file needs no password: each secret is " <>
           "kept in its own file in your Fermix home, readable only by your account and " <>
-          "not encrypted. Secrets you already saved stay where they are, and " <>
-          "`fermix setup --migrate-secrets` moves them."
+          "not encrypted. Secrets you already saved stay where they are until you enter " <>
+          "each one again."
 
   @doc "The one section this module owns."
   @spec sections() :: [%{id: String.t(), pane: String.t(), title: String.t()}]

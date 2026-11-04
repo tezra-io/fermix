@@ -225,6 +225,21 @@ defmodule FermixCore.Cues.Source.StreamTest do
                        %{phase: :rejected, source_ref: ^ref}}
     end
 
+    test "with a decision model as the screen, every item goes to every llm watcher with words",
+         ctx do
+      ref = ctx.ref
+      _silent = insert_watcher(ctx.conn, %{filter: "llm", sources: [ref], listen_for: []})
+      {pid, first} = start_stream(ctx, %{}, words?: fn -> false end)
+      {_url, socket, _opts} = connect(pid, first)
+
+      frame(pid, socket, [tick("t-1"), tick("t-2", "QZRX")])
+
+      assert offered(ctx) == [{"t-1", [ctx.watcher]}, {"t-2", [ctx.watcher]}]
+      assert_received {:admit, ^ref, 2}
+      flush(pid)
+      refute Map.has_key?(counts(ctx), "unmatched")
+    end
+
     test "the rate buckets apply to matched items, and the rest are counted rate_limited", ctx do
       ref = ctx.ref
       test = self()

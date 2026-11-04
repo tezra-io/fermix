@@ -247,6 +247,39 @@ defmodule FermixCore.Cues.DeliveriesTest do
     end
   end
 
+  # Taking a source off a watcher stores the outcome a removed watcher's items
+  # get (the column's CHECK fixes the set); list_cues shows what happened.
+  describe "an item whose source was taken off its watcher" do
+    test "reads source_removed while its watcher exists; a removed watcher's reads " <>
+           "watcher_removed",
+         ctx do
+      watcher = Rows.watcher(ctx.conn, %{sources: ["gh-releases"]})
+
+      for {watcher_id, seconds_ago} <- [{watcher.id, 600}, {"cwt_removed", 300}] do
+        cue = Rows.cue(ctx.conn, %{source_ref: "gh-old", received_at: at(ctx.now, seconds_ago)})
+
+        Rows.delivery(ctx.conn, cue, %{
+          watcher_id: watcher_id,
+          source_ref: "gh-old",
+          received_at: at(ctx.now, seconds_ago),
+          state: "expired",
+          outcome: "watcher_removed"
+        })
+      end
+
+      {:ok, %{deliveries: deliveries}} = Deliveries.list(%{limit: 10}, repo: ctx.repo)
+
+      assert deliveries |> Enum.map(&Deliveries.present/1) |> Enum.map(&{&1.watcher, &1.outcome}) ==
+               [{"cwt_removed", "watcher_removed"}, {watcher.name, "source_removed"}]
+
+      since = at(ctx.now, 7 * @day)
+      assert {:ok, summary} = Deliveries.summary(%{since: since}, repo: ctx.repo)
+
+      assert [%{by_outcome: %{"source_removed" => 1}}] =
+               Deliveries.present_summary(summary, since).watchers
+    end
+  end
+
   describe "summary/2" do
     test "says from receipts that a source sent cues and nothing is listening", ctx do
       watcher = Rows.watcher(ctx.conn, %{sources: ["heard"]})
@@ -308,6 +341,44 @@ defmodule FermixCore.Cues.DeliveriesTest do
       # `sqlite_autoindex_cues_1` is the (source_ref, item_id) key: reading cues
       # through it takes every row a source kept.
       refute Enum.any?(plan, &(&1 =~ "sqlite_autoindex_cues_1")), inspect(plan)
+    end
+
+    # The same summary counts each watcher's deliveries in the window, and a
+    # watcher keeps its deliveries for weeks: searching by watcher alone reads
+    # every delivery it ever had to test `received_at`.
+    test "reads a watcher's window through its received_at index, never its whole history", ctx do
+      {:ok, statement} =
+        Exqlite.Sqlite3.prepare(
+          ctx.conn,
+          "EXPLAIN QUERY PLAN " <> CuesDeliveriesSql.summary_groups_sql() <> " LIMIT ?"
+        )
+
+      # A plan needs no values: every `?` is NULL here.
+      {:ok, rows} = Exqlite.Sqlite3.fetch_all(ctx.conn, statement)
+      :ok = Exqlite.Sqlite3.release(ctx.conn, statement)
+      plan = Enum.map(rows, &List.last/1)
+
+      refute Enum.any?(
+               plan,
+               &(&1 =~ ~r/^SEARCH d USING (COVERING )?INDEX \w+ \(watcher_id=\?\)/)
+             ),
+             inspect(plan)
+
+      assert Enum.any?(
+               plan,
+               &(&1 =~
+                   "d USING INDEX cue_deliveries_watcher_received (watcher_id=? AND received_at>?)")
+             ),
+             inspect(plan)
+    end
+
+    # The summary names that index, so a store without it answers an error
+    # rather than quietly reading every delivery again.
+    test "a store without the window index answers an error, never a whole-history read", ctx do
+      :ok = Exqlite.Sqlite3.execute(ctx.conn, "DROP INDEX cue_deliveries_watcher_received")
+
+      assert {:error, reason} = Deliveries.summary(%{since: ctx.now}, repo: ctx.repo)
+      assert inspect(reason) =~ "no such index: cue_deliveries_watcher_received"
     end
   end
 

@@ -41,6 +41,41 @@ defmodule FermixCore.Agents.BrowserGuidanceSkillTest do
     assert definition.system_prompt =~ "`download` starts nothing"
     assert definition.system_prompt =~ "click the file's link with `act` and then call `download`"
 
+    # A sign-in types the owner's saved login after their yes: the two-step
+    # move and the refusals' next moves are named, and a password never is asked for.
+    assert definition.system_prompt =~ ~s(`kind: "sign_in"`)
+    assert definition.system_prompt =~ "`username_ref` alone"
+    assert definition.system_prompt =~ "Never ask the owner for a password"
+    assert definition.system_prompt =~ "Settings > Browser > Website logins"
+
+    # A form and a sign-in submit in the same call, and a fill's receipt is
+    # its own check: nothing left says a fill never submits or must be verified.
+    assert definition.system_prompt =~ "`submit: true`"
+    assert definition.system_prompt =~ "receipt is its own check"
+    # Backend-neutral: Chrome's receipt carries what each field holds after
+    # typing, the pane's carries no `value` and a fill that cannot type fails,
+    # so nothing sends the model to `get` a field the receipt left bare.
+    assert definition.system_prompt =~ "holds after typing"
+    assert definition.system_prompt =~ "fails the fill with an error"
+    refute definition.system_prompt =~ "check that one with `get`"
+    refute definition.system_prompt =~ "the `value` each field now holds"
+    refute definition.system_prompt =~ "After anything else, verify"
+    refute definition.system_prompt =~ "fills and does not submit"
+    refute definition.system_prompt =~ "no click, no submit"
+
+    for code <- ~w(sign_in_pane_only sign_in_no_login sign_in_denied sign_in_unanswered
+                   sign_in_not_delivered sign_in_wrong_site secret_on_screen) do
+      assert definition.system_prompt =~ "`#{code}`", "browser-guidance never names #{code}"
+    end
+
+    # A pane tab closes with the turn, so a stop the person answers keeps it.
+    for code <- ~w(handover handover_pane_only handover_not_allowed) do
+      assert definition.system_prompt =~ "`#{code}`", "browser-guidance never names #{code}"
+    end
+
+    assert definition.system_prompt =~ "a payment confirmation"
+    assert definition.system_prompt =~ "Do not call `handover` when the task is finished"
+
     # A CAPTCHA is the model's own call, not a Fermix stop; the human gates stay.
     refute definition.system_prompt =~ ~r/captcha/i
     assert definition.system_prompt =~ "Stop and report for 2FA, payment confirmation"

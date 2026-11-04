@@ -47,37 +47,6 @@ defmodule FermixCore.Temporal.DeliveryWorkerTest do
     end
   end
 
-  # A stand-in for `Temporal.FollowupSupervisor`. `DynamicSupervisor.start_child/2`
-  # is a plain `GenServer.call({:start_child, validated_spec})`, so a GenServer
-  # that answers it records exactly what the worker asked for — the child spec,
-  # with the follow-up args inside it — without ever running a model turn.
-  defmodule RecordingFollowupSupervisor do
-    @moduledoc false
-
-    use GenServer
-
-    def start_link(opts) do
-      GenServer.start_link(__MODULE__, Keyword.get(opts, :reply, :started),
-        name: Keyword.fetch!(opts, :name)
-      )
-    end
-
-    def requests(server), do: GenServer.call(server, :requests)
-
-    @impl true
-    def init(reply), do: {:ok, %{reply: reply, requests: []}}
-
-    @impl true
-    def handle_call({:start_child, spec}, _from, state) do
-      {:reply, reply(state.reply), %{state | requests: state.requests ++ [spec]}}
-    end
-
-    def handle_call(:requests, _from, state), do: {:reply, state.requests, state}
-
-    defp reply(:started), do: {:ok, self()}
-    defp reply(other), do: other
-  end
-
   setup do
     unique = System.unique_integer([:positive])
     db_path = Path.join(System.tmp_dir!(), "fermix-temporal-worker-#{unique}.db")
@@ -109,7 +78,7 @@ defmodule FermixCore.Temporal.DeliveryWorkerTest do
 
   defp uid(prefix), do: "#{prefix}_#{System.unique_integer([:positive])}"
 
-  defp birthday_spec(rules, followup \\ false) do
+  defp birthday_spec(rules) do
     %{
       title: "Sarah's birthday",
       description: nil,
@@ -123,8 +92,7 @@ defmodule FermixCore.Temporal.DeliveryWorkerTest do
       recurrence_month: 9,
       recurrence_day: 14,
       leap_day_policy: nil,
-      reminder_plan: rules,
-      followup: followup
+      reminder_plan: rules
     }
   end
 
@@ -144,15 +112,19 @@ defmodule FermixCore.Temporal.DeliveryWorkerTest do
       recurrence_month: nil,
       recurrence_day: nil,
       leap_day_policy: nil,
-      reminder_plan: [%{rule_id: "at_time", kind: :at_occurrence}],
-      followup: false
+      reminder_plan: [%{rule_id: "at_time", kind: :at_occurrence}]
     }
   end
 
-  defp create!(ctx, spec, target \\ %{}, now \\ @created_at) do
+  defp create!(ctx, spec, target \\ %{}, now \\ @created_at, payload \\ %{}) do
     {:ok, plan} = Planner.materialize(spec, now)
 
-    occurrences = Enum.map(plan.occurrences, &Map.put(&1, :id, uid("rem")))
+    occurrences =
+      Enum.map(plan.occurrences, fn occurrence ->
+        occurrence
+        |> Map.put(:id, uid("rem"))
+        |> Map.update!(:payload, &Map.merge(&1, payload))
+      end)
 
     attrs =
       spec
@@ -185,19 +157,14 @@ defmodule FermixCore.Temporal.DeliveryWorkerTest do
     row
   end
 
-  defp deliver!(ctx, row, now, extra_args \\ %{}) do
-    args =
-      Map.merge(
-        %{
-          reminder: row,
-          repo: ctx.repo,
-          now_fn: fn -> now end,
-          delivery_opts: [adapter: ScriptedAdapter]
-        },
-        extra_args
-      )
-
-    {:ok, pid} = DeliverySupervisor.start_delivery(ctx.supervisor, DeliveryWorker, args)
+  defp deliver!(ctx, row, now) do
+    {:ok, pid} =
+      DeliverySupervisor.start_delivery(ctx.supervisor, DeliveryWorker, %{
+        reminder: row,
+        repo: ctx.repo,
+        now_fn: fn -> now end,
+        delivery_opts: [adapter: ScriptedAdapter]
+      })
 
     ref = Process.monitor(pid)
     assert_receive {:DOWN, ^ref, :process, ^pid, reason}, 2_000
@@ -212,45 +179,6 @@ defmodule FermixCore.Temporal.DeliveryWorkerTest do
 
   defp day_of_rules, do: [%{rule_id: "day_of", kind: :days_before, days: 0, at: ~T[09:00:00]}]
 
-  # A skip nobody can see is a skip nobody can diagnose: the worker's two
-  # spawn-failure paths are pinned on the lifecycle event, not just in a log.
-  defp watch_skips(ctx) do
-    handler = "temporal-worker-skip-#{ctx.unique}"
-    test_pid = self()
-
-    :telemetry.attach(
-      handler,
-      [:fermix, :reminder, :lifecycle],
-      fn _event, _measurements, metadata, _config ->
-        send(test_pid, {:lifecycle, metadata})
-      end,
-      nil
-    )
-
-    on_exit(fn -> :telemetry.detach(handler) end)
-  end
-
-  defp assert_skipped(reminder_id, error_class) do
-    assert_receive {:lifecycle,
-                    %{phase: :followup_skipped, reminder_id: ^reminder_id} = metadata},
-                   1_000
-
-    assert metadata.error_class == error_class
-    assert metadata.result == :error
-  end
-
-  defp start_followup_supervisor(ctx, opts \\ []) do
-    name = :"temporal_followup_sup_#{ctx.unique}"
-
-    start_supervised!(%{
-      id: {:followup_supervisor, name},
-      start: {RecordingFollowupSupervisor, :start_link, [Keyword.put(opts, :name, name)]},
-      restart: :temporary
-    })
-
-    name
-  end
-
   describe "a successful send" do
     test "marks the reminder delivered and sends the rendered message once", ctx do
       start_channel(ctx, [:ok])
@@ -264,7 +192,7 @@ defmodule FermixCore.Temporal.DeliveryWorkerTest do
       assert row.attempt_count == 1
       assert DateTime.compare(row.sent_at, @day_of_due) == :eq
       assert [%{text: text, opts: opts}] = calls(ctx)
-      assert text == "Today: Sarah's birthday — September 14."
+      assert text == "Sarah's birthday is today, Monday, September 14."
       assert Keyword.fetch!(opts, :proactive_key) == "temporal:#{claimed.id}"
     end
   end
@@ -546,117 +474,21 @@ defmodule FermixCore.Temporal.DeliveryWorkerTest do
     end
   end
 
-  # M30 §22.4. Every assertion here pins the same asymmetry: the promise
-  # (settlement) is untouchable, the flourish (the follow-up) is best-effort.
-  describe "the post-delivery follow-up trigger" do
-    test "a delivered flagged reminder asks for exactly one run, with the delivered text", ctx do
+  # A reminder materialized while events carried a follow-up flag still holds
+  # `"followup"` in its payload snapshot. Delivery reads none of it: the
+  # reminder goes out alone and nothing trails it.
+  describe "a payload snapshotted with the retired follow-up flag" do
+    test "delivers exactly the one reminder", ctx do
       start_channel(ctx, [:ok])
-      create!(ctx, birthday_spec(day_of_rules(), true))
-      followups = start_followup_supervisor(ctx)
+      create!(ctx, birthday_spec(day_of_rules()), %{}, @created_at, %{"followup" => true})
       row = claim!(ctx, @day_of_due)
+      assert row.payload["followup"] == true
 
-      {exit_reason, settled} =
-        deliver!(ctx, row, @day_of_due, %{followup_supervisor: followups})
+      {exit_reason, settled} = deliver!(ctx, row, @day_of_due)
 
       assert exit_reason == :normal
       assert settled.status == "delivered"
-
-      assert [
-               {{FermixCore.Temporal.Followup, :start_link, [args]}, :temporary, _shut, _type,
-                _mods}
-             ] = RecordingFollowupSupervisor.requests(followups)
-
-      assert args.reminder.id == row.id
-      assert args.delivered_text == "Today: Sarah's birthday — September 14."
-      assert args.repo == ctx.repo
-      assert args.delivery_opts == [adapter: ScriptedAdapter]
-    end
-
-    test "an unflagged reminder is delivered and never asks", ctx do
-      start_channel(ctx, [:ok])
-      create!(ctx, birthday_spec(day_of_rules()))
-      followups = start_followup_supervisor(ctx)
-
-      {_reason, settled} =
-        deliver!(ctx, claim!(ctx, @day_of_due), @day_of_due, %{followup_supervisor: followups})
-
-      assert settled.status == "delivered"
-      assert RecordingFollowupSupervisor.requests(followups) == []
-    end
-
-    test "a retryable failure settles pending without asking", ctx do
-      start_channel(ctx, [{:error, %Req.TransportError{reason: :closed}}])
-      create!(ctx, birthday_spec(day_of_rules(), true))
-      followups = start_followup_supervisor(ctx)
-
-      {_reason, settled} =
-        deliver!(ctx, claim!(ctx, @day_of_due), @day_of_due, %{followup_supervisor: followups})
-
-      assert settled.status == "pending"
-      assert RecordingFollowupSupervisor.requests(followups) == []
-    end
-
-    test "a terminal failure settles failed without asking", ctx do
-      start_channel(ctx, [{:error, {:permanent, :authentication}}])
-      create!(ctx, birthday_spec(day_of_rules(), true))
-      followups = start_followup_supervisor(ctx)
-
-      {_reason, settled} =
-        deliver!(ctx, claim!(ctx, @day_of_due), @day_of_due, %{followup_supervisor: followups})
-
-      assert settled.status == "failed"
-      assert RecordingFollowupSupervisor.requests(followups) == []
-    end
-
-    test "an expired claim never reaches the trigger at all", ctx do
-      start_channel(ctx, [:ok])
-      create!(ctx, birthday_spec(day_of_rules(), true))
-      followups = start_followup_supervisor(ctx)
-      row = claim!(ctx, @day_of_due)
-      past = DateTime.add(row.valid_until, 5, :second)
-
-      {{_reason, settled}, _log} =
-        with_log(fn -> deliver!(ctx, row, past, %{followup_supervisor: followups}) end)
-
-      assert settled.status == "expired"
-      assert RecordingFollowupSupervisor.requests(followups) == []
-    end
-
-    # `DynamicSupervisor.start_child/2` EXITS the caller against a dead
-    # supervisor, and app shutdown kills the follow-up supervisor before this
-    # worker's own. An uncaught exit here would abandon a settled claim.
-    test "a spawn that exits leaves the settlement untouched", ctx do
-      start_channel(ctx, [:ok])
-      create!(ctx, birthday_spec(day_of_rules(), true))
-      dead = start_supervised!({Agent, fn -> :ok end}, id: :dead_followup_supervisor)
-      :ok = Agent.stop(dead)
-      refute Process.alive?(dead)
-      watch_skips(ctx)
-      row = claim!(ctx, @day_of_due)
-
-      {{exit_reason, settled}, log} =
-        with_log(fn -> deliver!(ctx, row, @day_of_due, %{followup_supervisor: dead}) end)
-
-      assert exit_reason == :normal
-      assert settled.status == "delivered"
-      assert log =~ "follow-up"
-      assert_skipped(row.id, "supervisor_unavailable")
-    end
-
-    test "a supervisor at capacity skips the follow-up and still delivers", ctx do
-      start_channel(ctx, [:ok])
-      create!(ctx, birthday_spec(day_of_rules(), true))
-      followups = start_followup_supervisor(ctx, reply: {:error, :max_children})
-      watch_skips(ctx)
-      row = claim!(ctx, @day_of_due)
-
-      {{exit_reason, settled}, log} =
-        with_log(fn -> deliver!(ctx, row, @day_of_due, %{followup_supervisor: followups}) end)
-
-      assert exit_reason == :normal
-      assert settled.status == "delivered"
-      assert log =~ "max_children"
-      assert_skipped(row.id, "max_children")
+      assert [%{text: "Sarah's birthday is today, Monday, September 14."}] = calls(ctx)
     end
   end
 end

@@ -24,6 +24,23 @@ defmodule Fermix.CLI.Daemon do
   channels-side provider so this core application never compile-depends on
   `fermix_channels`.
 
+  After a move (M75 §6, B12) a desktop's engine runs in the device role and
+  its app keeps speaking this socket. When the boot found the desktop link
+  (`FermixCore.Home.Link.forwarding/0`, decided once), a request that
+  passed this socket's own owner placement is answered here when it is
+  device-class (`FermixCore.Management.Placement`) and sent to the primary
+  through `FermixCore.Home.Link` when it is primary-class; no request takes
+  both paths. A device with no link refuses a method whose state is the
+  primary's database (`Placement.database_family?/1`) as retired. The server's
+  Always On steps (`Placement.rail_only?/1`) are
+  refused here by name in every role: a linked desktop's own `home.act`
+  sends them over the link, and keeps a replace's move in its ledger itself.
+  A composed request (`home.status`, `settings.sections`) is
+  answered here, and the router asks the primary for its part through the
+  same link (`:primary_forward`). On the primary, `serve_forwarded/3` answers a
+  request a desktop forwarded exactly as this socket would, with the router's
+  options and the actor `{:desktop, device_id}`, refusing a device-class one.
+
   Started only inside `fermix run` (the supervision tree branches on
   `:fermix_core, :daemon_socket_enabled`). Stale sockets from prior
   crashes are removed on boot; double-binding fails fast on
@@ -38,14 +55,20 @@ defmodule Fermix.CLI.Daemon do
   alias FermixCore.BuildInfo
   alias FermixCore.Capabilities.MCP.RuntimeStatus, as: McpRuntimeStatus
   alias FermixCore.Health
+  alias FermixCore.Home.Link, as: HomeLink
+  alias FermixCore.Home.Role
   alias FermixCore.Introspection.Agents
   alias FermixCore.Introspection.Capabilities
   alias FermixCore.Introspection.Wire
   alias FermixCore.Management.Cues, as: ManagementCues
+  alias FermixCore.Management.HomeMove, as: ManagementHomeMove
   alias FermixCore.Management.Lifecycle
   alias FermixCore.Management.Mobile, as: ManagementMobile
+  alias FermixCore.Management.Placement
   alias FermixCore.Management.Protocol, as: ManagementProtocol
   alias FermixCore.Management.Router, as: ManagementRouter
+  alias FermixCore.Management.Secrets, as: ManagementSecrets
+  alias FermixCore.Management.Settings.Cues, as: SettingsCues
   alias FermixCore.Management.Text
   alias FermixCore.Observability
   alias FermixCore.Plugins.Runtime, as: PluginsRuntime
@@ -74,18 +97,40 @@ defmodule Fermix.CLI.Daemon do
   @max_profile_bytes 256
   # The owner's decisions on the phone channel, in both protocol versions:
   # opening a pairing window (its link carries the pairing secret), deciding
-  # on the phone that asked, closing the window, and forgetting a phone. And
-  # the cue writes that widen what reaches a task or what a task may do, the
-  # two values handed out (a source's token and a webhook's address), and the
-  # answer to a proposal (M60 app surface §3.6). Reads stay open.
-  @owner_decisions_v1 ~w(mobile.pair.start mobile.pair.decide mobile.pair.cancel
-                         mobile.devices.revoke cues.sources.add cues.sources.update
-                         cues.sources.remove cues.sources.enable cues.sources.disable
-                         cues.sources.token.new cues.sources.url.get cues.mandates.add
-                         cues.mandates.update cues.mandates.remove cues.mandates.enable
-                         cues.mandates.disable cues.mandates.approve cues.proposals.decide)
+  # on the phone that asked, closing the window, and forgetting a device.
+  @mobile_decisions_v1 ~w(mobile.pair.start mobile.pair.decide mobile.pair.cancel
+                          mobile.devices.revoke)
+  # Every Always On step (Always On setup §6): giving Fermix a cloud
+  # provider's token (it decides which account Fermix acts in), creating,
+  # powering and deleting the server (each spends the owner's money or can
+  # take the home away), opening a code that lets a server take this home,
+  # reviewing a move (the review reads every keychain secret it would carry)
+  # and starting it; and replacing the recovery key (M75). The reads stay open.
+  @home_decisions_v1 ~w(home.act home.snapshots.passphrase)
+  # Opening the setup page: its session drives every decision the page offers,
+  # the owner's included (Always On setup §6). `fermix setup` mints its own
+  # launch token in-process and never asks here; the Mac app's agent is an
+  # independent peer.
+  @setup_decisions_v1 ~w(setup.session.create)
+  @setup_capability "setup_session"
+  @setup_owner_sentence "Only the owner can open the setup page: use the Fermix app or your " <>
+                          "own terminal."
   @owner_decisions_v0 ~w(mobile_pair_begin mobile_pair_decide mobile_pair_cancel
                          mobile_device_revoke)
+  # The cue writes that widen what reaches a task or what a task may do, the
+  # two values handed out (a source's token and a webhook's address), the
+  # answer to a proposal (M60 app surface §3.6) and taking back a follow-up's
+  # Always allow, which is the owner's as the rest are. Reads stay open.
+  @cue_decisions_v1 ~w(cues.sources.add cues.sources.update cues.sources.remove
+                       cues.sources.enable cues.sources.disable cues.sources.token.new
+                       cues.sources.url.get cues.mandates.add cues.mandates.update
+                       cues.mandates.remove cues.mandates.enable cues.mandates.disable
+                       cues.mandates.approve cues.proposals.decide
+                       cues.watchers.always_allow.revoke)
+  # A cue source's secret rides the generic secret writes, so its id, spelled
+  # by the module that stores it, is what makes one of them a cue write.
+  @secret_writes ~w(secret.set secret.clear)
+  @cue_secret_prefix ManagementSecrets.cue_prefix()
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
@@ -101,6 +146,41 @@ defmodule Fermix.CLI.Daemon do
   """
   @spec default_stopper() :: (-> :ok)
   def default_stopper, do: Lifecycle.default_stopper()
+
+  @doc """
+  Answers one management request a desktop forwarded over the rail (M75 §6),
+  on the primary: `frame` is the request as this socket would read it, and the
+  answer is the response this socket would send. It runs in the caller with
+  the options this daemon passes its router, and the actor
+  `{:desktop, device_id}`. The desktop's engine placed its own caller before
+  forwarding, so an owner decision is served; a device-class request is
+  refused with `device_class_method`.
+  """
+  @spec serve_forwarded(binary(), String.t(), GenServer.server()) :: map()
+  def serve_forwarded(frame, device_id, server \\ __MODULE__)
+      when is_binary(frame) and is_binary(device_id) and device_id != "" do
+    opts = GenServer.call(server, :management_opts)
+
+    case ManagementProtocol.decode_request(frame) do
+      {:ok, {:v1, request}} ->
+        management_response(request.request_id, forwarded_result(request, device_id, opts))
+
+      {:error, {:v1, response}} ->
+        response
+
+      {:ok, {:v0, _request}} ->
+        management_response(nil, {:error, :invalid_request, %{"field" => "protocol_version"}})
+
+      {:error, :invalid_v0_request} ->
+        management_response(nil, {:error, :invalid_request, %{"field" => "request"}})
+    end
+  end
+
+  defp forwarded_result(request, device_id, opts) do
+    if Placement.served_forwarded?(request.method, request.params),
+      do: route_management_request(request, Keyword.put(opts, :actor, {:desktop, device_id})),
+      else: Placement.device_class_refusal(request.method)
+  end
 
   @impl true
   def init(opts) do
@@ -171,8 +251,15 @@ defmodule Fermix.CLI.Daemon do
            # a different one in.
            daemon_os_pid: Keyword.get(opts, :daemon_os_pid, String.to_integer(System.pid())),
            os: Keyword.get(opts, :os, :os.type()),
+           # Whether this socket answers a peer at all (`SocketPeer.admit/2`).
+           peer_gate: Keyword.get(opts, :peer_gate, &SocketPeer.admit/1),
            stopper: Keyword.get(opts, :stopper, default_stopper()),
-           started_at_ms: System.monotonic_time(:millisecond)
+           started_at_ms: System.monotonic_time(:millisecond),
+           # M75 §6: decided once, at boot (`Home.Link.forwarding/0`). A
+           # device-role engine holding its desktop link forwards primary-class
+           # requests (`:primary_forward`, the rail's, given the request and its
+           # options); any other engine answers every one here.
+           forwarding: Keyword.get_lazy(opts, :forwarding, &HomeLink.forwarding/0)
          }}
 
       {:error, reason} ->
@@ -216,11 +303,16 @@ defmodule Fermix.CLI.Daemon do
     end
   end
 
+  # The options this daemon passes its router, for a request a desktop
+  # forwarded (`serve_forwarded/3`).
+  @impl true
+  def handle_call(:management_opts, _from, state), do: {:reply, management_opts(state), state}
+
   @impl true
   def handle_info(:accept, state) do
     case :gen_tcp.accept(state.listen_socket, @accept_idle_ms) do
       {:ok, conn} ->
-        spawn_handler(state, conn)
+        serve_admitted(state, conn)
         send(self(), :accept)
         {:noreply, state}
 
@@ -262,6 +354,14 @@ defmodule Fermix.CLI.Daemon do
     )
 
     :ok
+  end
+
+  # A command Fermix confines gets no answer here, whatever it asks.
+  defp serve_admitted(state, conn) do
+    case state.peer_gate.(conn) do
+      :ok -> spawn_handler(state, conn)
+      {:error, reason} -> SocketPeer.refuse(conn, state.socket_path, reason)
+    end
   end
 
   defp spawn_handler(%{task_supervisor: sup} = state, conn) do
@@ -328,34 +428,74 @@ defmodule Fermix.CLI.Daemon do
     maybe_finalize(response, state)
   end
 
+  # The server's Always On steps answer a desktop's forward alone (Always On
+  # setup §3.5), so this socket refuses each by name before anything else.
   defp handle_v1_request(conn, request, state) do
     result =
-      case owner_caller(request.method, @owner_decisions_v1, conn, state) do
-        :ok -> route_management_request(request, state)
-        {:error, _verdict} -> owner_decision_refusal(request.method)
-      end
+      if Placement.rail_only?(request.method),
+        do: Placement.rail_only_refusal(request.method),
+        else: placed_request(request, conn, state)
 
     response = management_response(request.request_id, result)
     send_response(conn, response)
   end
+
+  defp placed_request(request, conn, state) do
+    family = owner_family(request.method, request.params)
+
+    case owner_caller(family, request.method, conn, state) do
+      :ok -> dispatch_management_request(request, state)
+      {:error, _verdict} -> owner_decision_refusal(family)
+    end
+  end
+
+  # Whose decision a v1 request is, or nil when it is nobody's. The generic
+  # writes are judged by what they write, not by their method: a cue source's
+  # secret and the `cues` section are cue writes, since switching
+  # `cues_mandates_enabled` back on undoes the owner's stop of every mandate.
+  # Every other secret and section stays open, as it was.
+  defp owner_family(method, _params) when method in @mobile_decisions_v1, do: :mobile
+  defp owner_family(method, _params) when method in @home_decisions_v1, do: :home
+  defp owner_family(method, _params) when method in @cue_decisions_v1, do: :cues
+  defp owner_family(method, _params) when method in @setup_decisions_v1, do: :setup
+
+  defp owner_family(method, %{"id" => @cue_secret_prefix <> _ref}) when method in @secret_writes,
+    do: :cues
+
+  defp owner_family("settings.apply", %{"section" => section}) when is_binary(section),
+    do: if(SettingsCues.owns?(section), do: :cues)
+
+  defp owner_family(_method, _params), do: nil
+
+  # v0 carries the phone's decisions alone.
+  defp owner_family_v0(method) when method in @owner_decisions_v0, do: :mobile
+  defp owner_family_v0(_method), do: nil
 
   # M19 §6.2: pairing is the owner's interactive decision, never the agent's.
   # The socket's trust boundary is its 0600 file, which every process of the
   # owner's account can open, so the kernel's peer is placed (SIDE-V1): a
   # process the daemon started is the agent or a harness, and nobody watches a
   # detached one. Either is refused, as is a peer that cannot be placed.
-  defp owner_caller(method, decisions, conn, state) do
-    if method in decisions,
-      do: placed_owner(method, SocketPeer.classify(conn, state.daemon_os_pid, state.os)),
-      else: :ok
-  end
+  defp owner_caller(nil, _method, _conn, _state), do: :ok
+
+  defp owner_caller(_family, method, conn, state),
+    do: placed_owner(method, SocketPeer.classify(conn, state.daemon_os_pid, state.os))
 
   # The same code as a channel that cannot answer, with its own sentence: the
   # channel is fine and doctor says so, so "not running" would send the
   # operator after the wrong fault. The capability and the sentence are the
-  # method's family's: the phone's own pair for `mobile.*`, the cues' for
-  # `cues.*`.
-  defp owner_decision_refusal("cues." <> _rest) do
+  # request's family's: the phone's own pair for its pairing methods, the
+  # cues' for theirs and for a cue write that rides a generic method, and for
+  # Always On's and the recovery key the home's.
+  defp owner_decision_refusal(:home) do
+    {:error, :unavailable,
+     %{
+       "capability" => ManagementHomeMove.capability(),
+       "sentence" => ManagementHomeMove.owner_only_sentence()
+     }}
+  end
+
+  defp owner_decision_refusal(:cues) do
     {:error, :unavailable,
      %{
        "capability" => ManagementCues.capability(),
@@ -363,7 +503,12 @@ defmodule Fermix.CLI.Daemon do
      }}
   end
 
-  defp owner_decision_refusal(_mobile_method) do
+  defp owner_decision_refusal(:setup) do
+    {:error, :unavailable,
+     %{"capability" => @setup_capability, "sentence" => @setup_owner_sentence}}
+  end
+
+  defp owner_decision_refusal(:mobile) do
     {:error, :unavailable,
      %{"capability" => "mobile", "sentence" => ManagementMobile.owner_only_sentence()}}
   end
@@ -379,15 +524,41 @@ defmodule Fermix.CLI.Daemon do
     {:error, verdict}
   end
 
-  defp route_management_request(request, state) do
-    ManagementRouter.route(request, management_opts(state))
+  # M75 §6, B12: a linked device answers a device-class request here and sends
+  # a primary-class one to the primary, never both; any other engine routes
+  # every request here. A composed request is answered here, and the router
+  # asks the primary for its part through the same link.
+  defp dispatch_management_request(request, %{forwarding: [primary_forward: forward]} = state) do
+    case Placement.place(request.method, request.params) do
+      :device ->
+        opts = Keyword.put(management_opts(state), :primary_forward, forward)
+        route_management_request(request, opts)
+
+      :primary ->
+        guarded(request.method, fn -> forward.(request, []) end)
+    end
+  end
+
+  # A device with no link opens no database: a method whose state is the
+  # primary's memory.db is refused as retired, before anything reads it.
+  defp dispatch_management_request(request, state) do
+    if device?(state) and Placement.database_family?(request.method),
+      do: Placement.retired(state.os),
+      else: route_management_request(request, management_opts(state))
+  end
+
+  defp route_management_request(request, opts),
+    do: guarded(request.method, fn -> ManagementRouter.route(request, opts) end)
+
+  defp guarded(method, answer) do
+    answer.()
   rescue
     exception ->
-      log_management_route_failure(request.method, :exception, exception, __STACKTRACE__)
+      log_management_route_failure(method, :exception, exception, __STACKTRACE__)
       {:error, :internal_error, %{}}
   catch
     kind, reason ->
-      log_management_route_failure(request.method, kind, reason, __STACKTRACE__)
+      log_management_route_failure(method, kind, reason, __STACKTRACE__)
       {:error, :internal_error, %{}}
   end
 
@@ -441,18 +612,44 @@ defmodule Fermix.CLI.Daemon do
     Keyword.put(state.management_opts, :overview_opts, overview_opts)
   end
 
+  # A candidate primary (M75 §2) runs no agent, no phone channel and no
+  # plugins until its move: of the unversioned methods it answers `shutdown`
+  # alone and refuses the rest by name, as the router refuses its v1 methods,
+  # rather than calling a process it never started.
+  defp dispatch_initial_request(%{"method" => method} = request, conn, state) do
+    if method != "shutdown" and candidate?(state),
+      do: %{status: "error", reason: "candidate", error: ManagementRouter.candidate_sentence()},
+      else: dispatch_served_request(request, conn, state)
+  end
+
+  defp device?(state) do
+    match?(
+      %{role: :device},
+      Keyword.get_lazy(state.management_opts, :engine_role, &Role.booted/0)
+    )
+  end
+
+  # `:engine_role` stands in for the role this boot recorded (tests), as the
+  # router's own seam; an engine that recorded none is served as before.
+  defp candidate?(state) do
+    case Keyword.get_lazy(state.management_opts, :engine_role, &Role.booted/0) do
+      %{role: :candidate} -> true
+      _primary_device_or_unrecorded -> false
+    end
+  end
+
   # `agent_message` is the one method whose answer depends on the connection: a
   # prompt is attended only when a person sent it, and the kernel, not the
   # request, says which process did (SIDE-V1).
-  defp dispatch_initial_request(%{"method" => "agent_message"} = request, conn, state) do
+  defp dispatch_served_request(%{"method" => "agent_message"} = request, conn, state) do
     case SocketPeer.classify(conn, state.daemon_os_pid, state.os) do
       {:ok, caller} -> agent_message_reply(request, caller)
       {:error, reason} -> unidentified_caller_reply(request, reason)
     end
   end
 
-  defp dispatch_initial_request(%{"method" => method} = request, conn, state) do
-    case owner_caller(method, @owner_decisions_v0, conn, state) do
+  defp dispatch_served_request(%{"method" => method} = request, conn, state) do
+    case owner_caller(owner_family_v0(method), method, conn, state) do
       :ok -> dispatch_request(request, state)
       {:error, _verdict} -> error_reply(:owner_decision_refused)
     end

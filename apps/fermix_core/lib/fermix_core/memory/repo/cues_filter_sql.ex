@@ -26,7 +26,9 @@ defmodule FermixCore.Memory.Repo.CuesFilterSql do
     `state = 'filtering' AND filter_call_id = call_id`. A stale fence is
     `{:error, :stale}`: the result is refused and the delivery left as it is,
     but a call still open is closed `aborted` (error `stale: …`) in the same
-    commit, so no row stays open for retention to skip. See
+    commit, so no row stays open for retention to skip. A pass whose watcher
+    was paused while the call ran is withheld: the delivery goes back to
+    `pending`, attempts unchanged, and the call is recorded as its pass. See
     `settle_outcome/0`.
   - `{:reset, now}`: the boot sweep. Every `filtering` delivery back to
     `pending` with its attempts unchanged and its fence cleared; every open
@@ -73,6 +75,7 @@ defmodule FermixCore.Memory.Repo.CuesFilterSql do
 
   alias FermixCore.Cues
   alias FermixCore.Cues.Filter.Telemetry, as: FilterTelemetry
+  alias FermixCore.Memory.Repo.CuesFollowUpSql
   alias FermixCore.Memory.Repo.CuesSql
 
   @provider_backoff_s %{1 => 30, 2 => 120}
@@ -110,20 +113,21 @@ defmodule FermixCore.Memory.Repo.CuesFilterSql do
           | {:content_failure, failure()}
 
   @doc """
-  The keys of a settle's `{:ok, outcome}`: `result` (`:passed | :dropped |
-  :retry | :held | :exhausted | :aborted`), `passed?`, `exhausted?`,
+  The keys of a settle's `{:ok, outcome}`: `result` (`:passed | :withheld |
+  :dropped | :retry | :held | :exhausted | :aborted`), `passed?`, `exhausted?`,
   `held_now?` (this failure made the watcher held), `held?`, `recovered?` (a
   held watcher's call succeeded), `watcher_id`, `watcher_name`, `task_job_id`,
   `delivery_id`, `cue_id`, `source_ref`, `attempt` (the delivery's filter
   attempts after this settle), `filter_failures` (the watcher's, after),
-  `retry_at` (the watcher's or the delivery's next try, when one is set) and
-  `waiting` (the watcher's `pending` deliveries).
+  `retry_at` (the watcher's or the delivery's next try, when one is set),
+  `waiting` (the watcher's `pending` deliveries) and `follow_up` (the trigger a
+  pass wrote for the watcher's follow-up, `CuesFollowUpSql.on_pass/3`, or nil).
   """
   @spec settle_outcome() :: [atom()]
   def settle_outcome do
     [:result, :passed?, :exhausted?, :held_now?, :held?, :recovered?, :watcher_id] ++
       [:watcher_name, :task_job_id, :delivery_id, :cue_id, :source_ref, :attempt] ++
-      [:filter_failures, :retry_at, :waiting]
+      [:filter_failures, :retry_at, :waiting, :follow_up]
   end
 
   @doc "Serves one request on `conn`; an unknown request is an error, never a raise."
@@ -295,27 +299,43 @@ defmodule FermixCore.Memory.Repo.CuesFilterSql do
 
   defp fetch_watcher(conn, watcher_id) do
     sql = """
-    SELECT id, name, purpose, task_job_id, filter_failures, filter_budget
+    SELECT id, name, purpose, listen_for, task_job_id, filter_failures, filter_budget
     FROM cue_watchers WHERE id = ?
     """
 
     case CuesSql.query_all(conn, sql, [watcher_id]) do
-      {:ok, [[id, name, purpose, job_id, failures, budget]]} ->
-        {:ok,
-         %{
-           id: id,
-           name: name,
-           purpose: purpose,
-           task_job_id: job_id,
-           filter_failures: failures,
-           filter_budget: budget
-         }}
+      {:ok, [[id, name, purpose, words, job_id, failures, budget]]} ->
+        with {:ok, listen_for} <- words(words) do
+          {:ok,
+           %{
+             id: id,
+             name: name,
+             purpose: purpose,
+             listen_for: listen_for,
+             task_job_id: job_id,
+             filter_failures: failures,
+             filter_budget: budget
+           }}
+        end
 
       {:ok, []} ->
         {:error, {:not_found, :watcher}}
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  # A watcher's words, which a decision model's screen reads as hints.
+  defp words(text) do
+    case Jason.decode(text) do
+      {:ok, list} when is_list(list) ->
+        if Enum.all?(list, &is_binary/1),
+          do: {:ok, list},
+          else: {:error, {:corrupt, "cue_watchers", {:json_list, :listen_for}}}
+
+      _not_a_list ->
+        {:error, {:corrupt, "cue_watchers", {:json_list, :listen_for}}}
     end
   end
 
@@ -500,15 +520,18 @@ defmodule FermixCore.Memory.Repo.CuesFilterSql do
   end
 
   # The watcher may be gone (a removed watcher's deliveries outlive it): its
-  # fields default and the watcher updates below change no row.
+  # fields default and the watcher updates below change no row. Whether it is
+  # enabled is read here, in the settle's transaction on the single writer, so
+  # no pause lands between this read and the move.
   defp settle_context(conn, %{watcher_id: watcher_id, delivery_id: delivery_id}) do
     sql = """
-    SELECT d.filter_attempts, d.cue_id, d.source_ref, w.name, w.task_job_id, w.filter_failures
+    SELECT d.filter_attempts, d.cue_id, d.source_ref, w.name, w.task_job_id, w.filter_failures,
+      coalesce(w.enabled, 0)
     FROM cue_deliveries d LEFT JOIN cue_watchers w ON w.id = d.watcher_id WHERE d.id = ?
     """
 
     case CuesSql.query_all(conn, sql, [delivery_id]) do
-      {:ok, [[attempts, cue_id, ref, name, job_id, failures]]} ->
+      {:ok, [[attempts, cue_id, ref, name, job_id, failures, enabled]]} ->
         {:ok,
          %{
            watcher_id: watcher_id,
@@ -518,7 +541,8 @@ defmodule FermixCore.Memory.Repo.CuesFilterSql do
            attempts: attempts,
            watcher_name: name,
            task_job_id: job_id,
-           failures: failures || 0
+           failures: failures || 0,
+           enabled?: enabled == 1
          }}
 
       {:ok, []} ->
@@ -529,12 +553,16 @@ defmodule FermixCore.Memory.Repo.CuesFilterSql do
     end
   end
 
+  # A watcher paused while its call ran filters nothing (design §8.8): its pass
+  # is withheld and the delivery waits `pending` with the ones the pause found
+  # waiting, its attempts unchanged, to be judged again on resume. The call
+  # stays recorded as the pass it was, for the budget and its cost. A source
+  # taken off the watcher needs no check here: the change expires the row
+  # under the call, so its settle is refused as stale (`CuesWatchersSql`).
   defp apply_result(conn, call_id, target, {:pass, reason, hint}, now) do
-    patch = %{decision_reason: reason, hint: hint, ready_at: now}
-
-    with :ok <- move(conn, target, call_id, "passed", patch) do
-      watcher_succeeded(conn, target, :passed, %{passed?: true})
-    end
+    if target.enabled?,
+      do: pass_delivery(conn, call_id, target, {reason, hint}, now),
+      else: withhold(conn, call_id, target)
   end
 
   defp apply_result(conn, call_id, target, {:drop, reason}, now) do
@@ -573,6 +601,24 @@ defmodule FermixCore.Memory.Repo.CuesFilterSql do
   defp apply_result(conn, call_id, target, {:aborted, _failure}, _now) do
     with :ok <- move(conn, target, call_id, "pending", %{filter_call_id: nil}) do
       {:ok, outcome(target, :aborted, %{})}
+    end
+  end
+
+  # The follow-up's trigger is written in the pass's transaction (M60
+  # follow-ups §4.3), so a passed item and its trigger commit together.
+  defp pass_delivery(conn, call_id, target, {reason, hint}, now) do
+    patch = %{decision_reason: reason, hint: hint, ready_at: now}
+
+    with :ok <- move(conn, target, call_id, "passed", patch),
+         {:ok, follow_up} <- CuesFollowUpSql.on_pass(conn, target.delivery_id, now) do
+      watcher_succeeded(conn, target, :passed, %{passed?: true, follow_up: follow_up})
+    end
+  end
+
+  # The model answered, so the watcher's failures clear as for any pass.
+  defp withhold(conn, call_id, target) do
+    with :ok <- move(conn, target, call_id, "pending", %{filter_call_id: nil}) do
+      watcher_succeeded(conn, target, :withheld, %{})
     end
   end
 
@@ -640,7 +686,8 @@ defmodule FermixCore.Memory.Repo.CuesFilterSql do
         source_ref: target.source_ref,
         attempt: target.attempts,
         filter_failures: target.failures,
-        retry_at: nil
+        retry_at: nil,
+        follow_up: nil
       },
       extra
     )
@@ -710,13 +757,38 @@ defmodule FermixCore.Memory.Repo.CuesFilterSql do
           {:ok, map()} | {:error, term()}
   def record_live(conn, watcher_id, call, result, %DateTime{} = now)
       when is_binary(watcher_id) and is_map(call) do
-    with {:ok, target} <- live_target(conn, watcher_id, call),
-         :ok <- insert_live_call(conn, watcher_id, call, result, now),
-         {:ok, inserted} <- CuesSql.changes(conn) do
-      if inserted == 1,
+    with {:ok, target, first?} <- write_live_call(conn, watcher_id, call, result, now) do
+      if first?,
         do: live_outcome(conn, target, result, now),
         else: {:ok, recorded_outcome(target, result)}
     end
+  end
+
+  @doc """
+  Writes a live pass the store withheld (its watcher paused, or no longer
+  listening to the source, when the pass was written) inside the caller's
+  transaction: the ledger row as `record_live/5` writes a pass, the watcher's
+  failures cleared on the first write since the model answered, and the
+  outcome `:withheld`, with nothing passed.
+  """
+  @spec record_withheld(conn(), String.t(), map(), live_result(), DateTime.t()) ::
+          {:ok, map()} | {:error, term()}
+  def record_withheld(conn, watcher_id, call, {:pass, _reason, _hint} = result, %DateTime{} = now)
+      when is_binary(watcher_id) and is_map(call) do
+    with {:ok, target, first?} <- write_live_call(conn, watcher_id, call, result, now) do
+      if first?,
+        do: watcher_succeeded(conn, target, :withheld, %{}),
+        else: {:ok, outcome(target, :withheld, %{})}
+    end
+  end
+
+  # The call's ledger row, written once: `first?` is false when a write sent
+  # again after a timeout finds the first one's row.
+  defp write_live_call(conn, watcher_id, call, result, now) do
+    with {:ok, target} <- live_target(conn, watcher_id, call),
+         :ok <- insert_live_call(conn, watcher_id, call, result, now),
+         {:ok, inserted} <- CuesSql.changes(conn),
+         do: {:ok, target, inserted == 1}
   end
 
   defp live_outcome(conn, target, {:pass, _reason, _hint}, _now),

@@ -27,7 +27,11 @@ defmodule FermixCore.Browser.Backend do
   Arguments arrive validated for shape by `FermixCore.Browser`; a backend
   keeps its own floor under a direct call. The context carries `:caller`, the
   process that made the call (`ProfileServer` stamps it), which a backend may
-  bind its runtime's life to.
+  bind its runtime's life to, and `:tab_affinity`, the conversation the call
+  is made in (`FermixCore.Browser.execute/2` stamps it from
+  `Scope.tab_affinity/1`), whose own current tab a call without `target` acts
+  on. A caller that names none, such as a test driving a server directly, is
+  one conversation of its own.
   """
 
   alias FermixCore.Browser.CDP
@@ -127,6 +131,32 @@ defmodule FermixCore.Browser.Backend do
 
   @doc ~s(List the tools the page offers over WebMCP \(`op: "list"`\), or call one \(`op: "call"`\).)
   @callback webmcp(args(), context(), state()) :: result()
+
+  @doc """
+  The saved login that fits a tab's page (`target`, `site`), by its attributes
+  alone: `login_site` and `username`, and the tab it was asked on as `target`.
+  The first half of a sign-in (`Browser.SignIn`).
+  """
+  @callback login_for(args(), context(), state()) :: result()
+
+  @doc """
+  Type that login into the tab's form (`target`, `site`, `login_site`, and
+  `username_ref`, `password_ref` or both), after the owner approved. The second
+  half of a sign-in.
+  """
+  @callback sign_in(args(), context(), state()) :: result()
+
+  @doc """
+  Bring a tab (`target`, else the one last used) to the front for the person
+  and keep the task's tabs open past the end of this turn, for the
+  conversation's next turn to carry on in.
+  """
+  @callback handover(args(), context(), state()) :: result()
+
+  # Only a backend whose mode signs in (`Capabilities`, `:sign_in`) answers
+  # the first two, and only one whose tabs close with the turn (`:handover`)
+  # the third; `ProfileServer` refuses each for every other mode before it asks.
+  @optional_callbacks login_for: 3, sign_in: 3, handover: 3
 
   @doc "The backend that implements a profile mode."
   @spec for_mode(atom()) :: module()

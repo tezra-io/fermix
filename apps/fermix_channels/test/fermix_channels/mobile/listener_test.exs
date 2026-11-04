@@ -204,6 +204,7 @@ defmodule FermixChannels.Mobile.ListenerTest do
       )
 
     on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(root) end)
+    FermixTestSupport.PrimaryHome.booted!(root)
     assert {:ok, _identity} = Identity.ensure(root: root)
 
     listener =
@@ -211,6 +212,28 @@ defmodule FermixChannels.Mobile.ListenerTest do
 
     assert {:ok, {{127, 0, 0, 1}, port}} = Listener.listener_info(listener)
     assert port > 0
+  end
+
+  # M75 D14: the primary boot writes a home's first epoch before the phone
+  # subtree starts, so a listener that finds keys and no epoch is looking at a
+  # real fault. It refuses the identity by name and writes no epoch of its own.
+  test "an identity on a home with no primary epoch is refused, never minted one" do
+    root = FermixTestSupport.SafeRm.make_tmp_dir!("mobile-listener-no-epoch")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(root) end)
+    FermixTestSupport.PrimaryHome.booted!(root)
+    assert {:ok, _identity} = Identity.ensure(root: root)
+    {:ok, paths} = Identity.paths(root: root)
+    FermixTestSupport.SafeRm.rm!(paths.epoch)
+    epoch_path = paths.epoch
+
+    # The designed stop is an init refusal, so the linked starter traps the
+    # exit to read it.
+    Process.flag(:trap_exit, true)
+
+    assert {:error, {:mobile_identity_unavailable, {:epoch, {:absent, ^epoch_path}}}} =
+             Listener.start_link(name: nil, root: root)
+
+    refute File.exists?(epoch_path)
   end
 
   test "a dangling identity symlink fails closed instead of looking like a fresh install" do
@@ -234,7 +257,10 @@ defmodule FermixChannels.Mobile.ListenerTest do
 
   describe "an address it cannot bind" do
     setup do
-      root = FermixTestSupport.SafeRm.make_tmp_dir!("mobile-listener-unavailable")
+      root =
+        FermixTestSupport.SafeRm.make_tmp_dir!("mobile-listener-unavailable")
+        |> FermixTestSupport.PrimaryHome.booted!()
+
       on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(root) end)
       assert {:ok, _identity} = Identity.ensure(root: root)
 
@@ -331,7 +357,10 @@ defmodule FermixChannels.Mobile.ListenerTest do
   # the 64 slots for as long as it liked.
   describe "the HTTP phase before the upgrade" do
     setup do
-      root = FermixTestSupport.SafeRm.make_tmp_dir!("mobile-listener-http-phase")
+      root =
+        FermixTestSupport.SafeRm.make_tmp_dir!("mobile-listener-http-phase")
+        |> FermixTestSupport.PrimaryHome.booted!()
+
       on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(root) end)
       assert {:ok, identity} = Identity.ensure(root: root)
       %{root: root, identity: identity}
@@ -430,7 +459,8 @@ defmodule FermixChannels.Mobile.ListenerTest do
       tls_certificate: :unused,
       tls_fingerprint: <<3::256>>,
       tls_key_path: keyfile,
-      tls_cert_path: certfile
+      tls_cert_path: certfile,
+      primary_epoch: 1
     }
   end
 

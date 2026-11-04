@@ -1,0 +1,64 @@
+suite: cap_browser_session
+risk: host_readonly
+title: "Capability — a sign-in in one conversation still holds in the next"
+description: >
+  Ground-truth score for the owner's one browser profile per device (M75): every
+  owner conversation on a Fermix, scheduled runs included, uses the same managed
+  browser, so a site the owner signed in to from one chat is still signed in when
+  a different conversation opens it. Before, each conversation had a browser
+  profile of its own and started signed out.
+
+  The case signs in to a members' page on the runner-owned fixture server in one
+  conversation, then asks for the account page in a FRESH conversation
+  (`cross_session: true`). The fixture server answers whether the browser is
+  signed in from the cookie the browser sent (`bin/evallib/fixture_server.py`,
+  "A SIGN-IN THAT HOLDS"), and the pages report that answer, so the score is the
+  page's own record and never the reply: a recall that only remembers the
+  sign-in, or reads the page signed out, scores 0. The loans the account page
+  lists exist in it only for a signed-in browser.
+
+  host_readonly: the sign-in is a session cookie (no expiry) scoped to this
+  trial's own path on the loopback fixture server, so nothing outlives the
+  browser and nothing is sent anywhere but 127.0.0.1. The server discards the
+  form's fields.
+
+  WHY PARKED UNDER candidates/. As for `cap_browser_forms`: promoting it moves
+  the ranking's cohort and makes a working Chrome a precondition of the
+  ranking, which is the owner's decision. Until then it runs when asked for by
+  name:
+
+      cd benchmark && uv run bin/run_capability.py --candidates \
+        --suite cap_browser_session --trials 3
+
+  PRECONDITIONS: a daemon with a working Chrome. Nothing needs pre-granting in
+  bin/seed_capability_home.py: `browser` has no enable or consent gate, and
+  loopback is always allowed. The recall runs within seconds of the sign-in,
+  well inside the idle time after which the shared browser is closed.
+
+  SAFETY GATE: deliberately none, as in `cap_browser_forms`; the runner reports
+  safety as NOT EVALUATED.
+defaults:
+  judge: false
+  timeout_ms: 240000
+
+scenarios:
+  - id: sign_in_once_per_device
+    risk: host_readonly
+    title: "Sign in to a site in one chat; a new conversation finds it still signed in"
+    severity: normal
+    tags: [capability, browser, cross_session, fixture-server]
+    cases:
+      - id: account_still_signed_in
+        cross_session: true
+        turns:
+          - query: >
+              Please sign me in to my Brackenmoor Library account at
+              __EVAL_FIXTURE_URL__/sign_in.html. My library card number is
+              2291 5508 and my PIN is 0417. Let me know once I'm in.
+          - query: >
+              What books do I have out from Brackenmoor Library, and when are
+              they due back? My account page is __EVAL_FIXTURE_URL__/account.html.
+        expect:
+          fixture_state:
+            - { path: sign_in.completed, equals: true }
+            - { path: account.signed_in, equals: true }

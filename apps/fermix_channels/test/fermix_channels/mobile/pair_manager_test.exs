@@ -490,7 +490,10 @@ defmodule FermixChannels.Mobile.PairManagerTest do
   end
 
   test "missing identity is generated only while the durable device store is pristine" do
-    root = FermixTestSupport.SafeRm.make_tmp_dir!("pair-pristine-identity")
+    root =
+      FermixTestSupport.SafeRm.make_tmp_dir!("pair-pristine-identity")
+      |> FermixTestSupport.PrimaryHome.booted!()
+
     on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(root) end)
 
     manager =

@@ -116,7 +116,8 @@ defmodule FermixCore.Transcription.Registry do
 
       nil ->
         {:error,
-         "transcription has no configured backend. Run `fermix setup` to choose one (#{supported()})."}
+         "transcription has no configured backend. Choose one in Fermix's Voice notes " <>
+           "settings (#{supported()})."}
     end
   end
 

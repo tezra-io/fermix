@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "action_refused",
+    "sentence": "Fermix did not take that step. It said: Hetzner does not accept this token, so paste a Read & Write API token from the Hetzner project you made for Fermix."
+  },
+  "ok": false,
+  "schema_version": 1
+}

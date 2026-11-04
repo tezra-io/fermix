@@ -123,6 +123,58 @@ service bound to another home, name it:
 .B fermix memory
 Review and restore what the assistant remembers.
 .TP
+.B fermix home
+.RI "export " FILE " [--passphrase-file " PATH "] [--mark-moved --to " TEXT "] | import " FILE " --into " ROOT " [--passphrase-file " PATH "] | mark-moved --to " TEXT " [--json] | status [--json] | snapshots status [--json] | snapshots passphrase --passphrase-file " PATH " [--json] | enroll --code-file " PATH " [--snapshot-bucket " BUCKET " --snapshot-region " REGION "] | candidates [--json]"
+Carry this home to another host. \fBexport\fR seals everything that makes
+the home the primary engine into one file under a passphrase you hold, and
+refuses while the engine that owns the home is running. \fBimport\fR
+restores an archive into an empty directory as the next primary, one epoch
+above the archived home. The passphrase is read from the file or asked for
+without echo; whoever holds it can stand up the primary. The old home must be
+marked moved before it runs again: \fBmark-moved\fR records where it went, and
+from then on it refuses to start as the primary. \fBexport --mark-moved\fR
+writes that marker right after the archive is sealed, so a service that
+relaunches the engine between two commands cannot start the old home as the
+primary. \fBstatus\fR shows the home's role, primary epoch, moved marker and
+snapshots, from the running engine or, when it is stopped, from the home's own
+files; a release build has no Always On yet, whose screen it is, so there it
+says "Always On is not in this release of Fermix yet." and exits 1. A primary writes encrypted snapshots of itself to S3 on a cadence once
+a recovery passphrase is set with \fBsnapshots passphrase\fR; Fermix keeps
+only the key derived from it, never the passphrase. \fBsnapshots status\fR
+shows the last stored one. \fBimport\fR
+restores a snapshot downloaded from the bucket with the recovery passphrase,
+as it restores an archive.
+To move the primary to a new server instead, Always On on the primary opens
+a code, valid once for thirty minutes, and \fBenroll\fR
+\fB\-\-code\-file\fR \fIPATH\fR makes a fresh home on the new server a
+candidate, with no engine running, and removes the code file.
+\fB\-\-snapshot\-bucket\fR and \fB\-\-snapshot\-region\fR name the bucket
+the new server keeps its snapshots in. The primary holds the candidate for
+24 hours: \fBcandidates\fR lists it, Always On's Move now moves this home to
+it under the recovery passphrase, the engine then restarts in the device role
+and carries the move out, and \fBstatus\fR shows where it stands.
+.TP
+.B fermix always-on
+.RI "[--json] | " ACTION " [--provider " ID "] [--type " TYPE " --location " PLACE "] [--stdin] [--recovery-passphrase-file " PATH "] [--yes] [--wait] [--json]"
+Set up Always On from a terminal, the same steps the setup page and the
+Fermix app offer: Fermix moves to a server you own, one it creates on Hetzner from a token you
+paste, or a Linux server of your own. With no \fIACTION\fR it prints where
+Always On stands and the steps it offers; on a terminal it then asks which to
+take, asks what that step needs (the token and the recovery passphrase
+without echo, the size and place as a numbered list with the recommendation
+first), asks before anything costs money, deletes or moves, waits until the
+step is done and offers the next one. \fIACTION\fR takes one step by its
+name, such as \fBpaste\-token\fR, \fBcreate\-server\fR, \fBown\-server\fR or
+\fBmove\-now\fR. With no terminal, or with \fB\-\-json\fR, nothing is
+asked: \fB\-\-stdin\fR reads the token from a pipe,
+\fB\-\-recovery\-passphrase\-file\fR reads the passphrase, \fB\-\-type\fR
+and \fB\-\-location\fR choose the size and place (else the one Fermix
+recommends), \fB\-\-yes\fR accepts what the step asks first, and
+\fB\-\-wait\fR waits for the step to settle, exiting 1 when it ends on a
+problem or is still at it after 45 minutes. A token or passphrase is never
+taken as an argument. It needs Fermix running. A release build has no Always
+On yet: there it says "Always On is not in this release of Fermix yet."
+.TP
 .B fermix logs
 Show the daemon's own log file.
 .TP

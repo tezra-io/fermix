@@ -8,7 +8,10 @@ defmodule FermixCore.Management.Router do
 
   alias FermixCore.BuildInfo
   alias FermixCore.Health
+  alias FermixCore.Home.AlwaysOnRelease
+  alias FermixCore.Home.Role
   alias FermixCore.Introspection.Overview
+  alias FermixCore.Management.AlwaysOn
   alias FermixCore.Management.Auth
   alias FermixCore.Management.Capabilities
   alias FermixCore.Management.ComputerUse
@@ -16,6 +19,8 @@ defmodule FermixCore.Management.Router do
   alias FermixCore.Management.Detect
   alias FermixCore.Management.Diagnostics
   alias FermixCore.Management.Doctor
+  alias FermixCore.Management.Home
+  alias FermixCore.Management.HomeMove
   alias FermixCore.Management.IMessage
   alias FermixCore.Management.Jobs
   alias FermixCore.Management.Lifecycle
@@ -23,9 +28,11 @@ defmodule FermixCore.Management.Router do
   alias FermixCore.Management.McpServers
   alias FermixCore.Management.Meetings
   alias FermixCore.Management.Mobile
+  alias FermixCore.Management.Placement
   alias FermixCore.Management.Plugins
   alias FermixCore.Management.Protocol
   alias FermixCore.Management.Providers
+  alias FermixCore.Management.Provision
   alias FermixCore.Management.Secrets
   alias FermixCore.Management.Settings
   alias FermixCore.Management.SetupState
@@ -40,7 +47,8 @@ defmodule FermixCore.Management.Router do
     computer_use.grant.start computer_use.permissions.get mobile.status mobile.pair.start
     mobile.devices.list browser.install.start imessage.permissions.get imessage.policy.confirm
     mcp.servers.list mcp.servers.import.scan cues.status cues.sources.list cues.watchers.list
-    cues.mandates.list cues.mandates.choices
+    cues.mandates.list cues.mandates.choices home.snapshots.status home.snapshots.run
+    home.candidates.list home.provision.options
   )
   @lease_params ~w(lease_id)
   @doctor_session_params ~w(session_id)
@@ -72,6 +80,19 @@ defmodule FermixCore.Management.Router do
   @mcp_draft_params ~w(text)
   @mcp_import_params ~w(servers)
   @mcp_tool_params ~w(name tool enabled)
+  @home_status_params ~w(after wait_ms)
+  # A summary's key is a short digest; the bound only refuses junk.
+  @max_status_key_bytes 64
+  @home_passphrase_params ~w(recovery_passphrase)
+  @home_enroll_params ~w(kind)
+  @home_readiness_params ~w(candidate_id)
+  @home_move_params ~w(candidate_id recovery_passphrase keep_as_desktop)
+  @home_act_params ~w(action key input)
+  # A candidate (M75 §2) answers the protocol's hello and home.status, and
+  # refuses every other method by name.
+  @candidate_methods ~w(hello home.status)
+  @candidate_sentence "This engine is a candidate primary waiting for its move; it answers " <>
+                        "home.status and nothing else until the move makes it the primary."
   @cue_ref_params ~w(ref)
   @cue_form_params ~w(kind preset verify)
   @cue_add_params ~w(ref kind preset values)
@@ -83,9 +104,27 @@ defmodule FermixCore.Management.Router do
   @cue_decide_params ~w(proposal_id decision)
   @cue_proposal_states %{"waiting" => :waiting, "recent" => :recent}
   @cue_decisions %{"confirm" => :confirm, "deny" => :deny}
+  @primary_sections_unread "The server listed its settings in a form this computer does " <>
+                             "not read."
   # A published name, an opaque workspace id and a display label are all bounded
   # strings; the widest of them is the workspace id's own 256-byte bound.
   @max_text_bytes 256
+  # The methods that call a provider or touch a provider session (a sign-in, an
+  # import, a sign-out's revocation, a probe, a live listing, the network
+  # doctor, the notetaker's sign-in), each with the capability its refusal
+  # names. A device-role engine
+  # refuses them by name: the token file on its host is a retired copy and a
+  # rotating refresh token has one live owner, the primary (M75 D5).
+  @provider_methods %{
+    "providers.probe.start" => "providers",
+    "providers.models.list" => "providers",
+    "auth.start" => "auth",
+    "auth.import.start" => "auth",
+    "auth.logout" => "auth",
+    "plugins.disconnect" => "plugins",
+    "meetings.signin.start" => "meetings",
+    "doctor.start" => "doctor"
+  }
   # The detection catalog is closed and small, so the ceiling is the catalog
   # rather than a round number: a longer list can only repeat targets.
   @max_detect_targets 6
@@ -106,9 +145,15 @@ defmodule FermixCore.Management.Router do
   @spec route(Protocol.request(), keyword()) :: route_result()
   def route(%{method: method, protocol_version: version, params: params}, opts \\ [])
       when is_integer(version) and version > 0 and is_map(params) and is_list(opts) do
+    if method in AlwaysOnRelease.methods() and not always_on?(opts),
+      do: AlwaysOnRelease.refusal(method),
+      else: route_published(method, version, params, opts)
+  end
+
+  defp route_published(method, version, params, opts) do
     case Protocol.minimum_version(method) do
       {:ok, minimum} when minimum <= version ->
-        route_known(method, params, opts)
+        with :ok <- admit(method, params, opts), do: route_known(method, params, opts)
 
       {:ok, minimum} ->
         {:error, :method_not_found, %{"method" => method, "requires" => minimum}}
@@ -246,6 +291,125 @@ defmodule FermixCore.Management.Router do
     do: mcp_by_name(&McpServers.check_start/2, params, opts)
 
   defp route_known("cues." <> _rest = method, params, opts), do: route_cues(method, params, opts)
+  # The server's Always On steps answer only a desktop's forward (Always On
+  # setup §3.5); everything else of the family is routed as it comes.
+  defp route_known("home." <> _rest = method, params, opts) do
+    if Placement.rail_only?(method) and not match?({:desktop, _id}, Keyword.get(opts, :actor)),
+      do: Placement.rail_only_refusal(method),
+      else: route_home(method, params, opts)
+  end
+
+  # Answered locally in every role (M75 §14): a device reads its own home.
+  # With `after` and `wait_ms` it waits for the summary's key to move
+  # (Always On setup §3.3), held in this request's own process.
+  defp route_home("home.status", params, opts) do
+    with :ok <- reject_unknown_params(params, @home_status_params),
+         {:ok, wait} <- status_wait(params) do
+      case wait do
+        :now -> operation_result(Home.status(home_opts(opts)))
+        {key, ms} -> operation_result(Home.status_after(key, ms, home_opts(opts)))
+      end
+    end
+  end
+
+  defp route_home("home.snapshots.status", %{}, opts),
+    do: operation_result(Home.snapshots_status(home_opts(opts)))
+
+  defp route_home("home.snapshots.run", %{}, opts),
+    do: operation_result(Home.snapshots_run(home_opts(opts)))
+
+  defp route_home("home.snapshots.passphrase", params, opts) do
+    with :ok <- reject_unknown_params(params, @home_passphrase_params) do
+      operation_result(
+        Home.snapshots_passphrase(Map.get(params, "recovery_passphrase"), home_opts(opts))
+      )
+    end
+  end
+
+  # `kind` `provisioned`, from the desktop replacing this server: the 24-hour
+  # code it puts inside the new one.
+  defp route_home("home.enroll.open", params, opts) do
+    with :ok <- reject_unknown_params(params, @home_enroll_params) do
+      operation_result(HomeMove.enroll_open(Map.get(params, "kind"), home_opts(opts)))
+    end
+  end
+
+  # `kind` `manual`, from a desktop cancelling its move back: the copied code
+  # it opened; `provisioned` otherwise.
+  defp route_home("home.enroll.withdraw", params, opts) do
+    with :ok <- reject_unknown_params(params, @home_enroll_params) do
+      operation_result(HomeMove.enroll_withdraw(Map.get(params, "kind"), home_opts(opts)))
+    end
+  end
+
+  defp route_home("home.candidates.list", %{}, opts),
+    do: operation_result(HomeMove.candidates_list(home_opts(opts)))
+
+  defp route_home("home.move.readiness", params, opts) do
+    with :ok <- reject_unknown_params(params, @home_readiness_params) do
+      operation_result(HomeMove.move_readiness(Map.get(params, "candidate_id"), home_opts(opts)))
+    end
+  end
+
+  # `keep_as_desktop` (default true): false when the source is a server being
+  # replaced, which then becomes no desktop of the new primary (M75).
+  defp route_home("home.move.start", params, opts) do
+    with :ok <- reject_unknown_params(params, @home_move_params),
+         {:ok, keep?} <- keep_as_desktop(params) do
+      operation_result(
+        HomeMove.move_start(
+          Map.get(params, "candidate_id"),
+          Map.get(params, "recovery_passphrase"),
+          Keyword.put(home_opts(opts), :keep_as_desktop, keep?)
+        )
+      )
+    end
+  end
+
+  # The Always On provisioner's offers (M75 lean v1 §4.3): device-class,
+  # answered on the computer that creates the server, for the provider in
+  # use, which the call need not name.
+  defp route_home("home.provision.options", %{}, opts),
+    do: operation_result(Provision.options(provision_opts(opts)))
+
+  # Every Always On step (Always On setup §3.4): `input` is decoded here into
+  # `AlwaysOn.Input`, which withholds its token and recovery passphrase from
+  # any log, and the raw map goes no further.
+  defp route_home("home.act", params, opts) do
+    with :ok <- reject_unknown_params(params, @home_act_params) do
+      case AlwaysOn.decode(params) do
+        {:ok, request} -> AlwaysOn.act(request, always_on_opts(opts))
+        {:error, _invalid} = refused -> operation_result(refused)
+      end
+    end
+  end
+
+  defp status_wait(params) when map_size(params) == 0, do: {:ok, :now}
+
+  defp status_wait(params) do
+    with {:ok, key} <- status_key(Map.get(params, "after")),
+         {:ok, ms} <- wait_ms(Map.get(params, "wait_ms")),
+         do: {:ok, {key, ms}}
+  end
+
+  defp status_key(key)
+       when is_binary(key) and byte_size(key) > 0 and byte_size(key) <= @max_status_key_bytes,
+       do: {:ok, key}
+
+  defp status_key(_key), do: invalid_params("after")
+
+  defp wait_ms(ms) when is_integer(ms) and ms >= 0 do
+    if ms <= Home.max_wait_ms(), do: {:ok, ms}, else: invalid_params("wait_ms")
+  end
+
+  defp wait_ms(_ms), do: invalid_params("wait_ms")
+
+  defp keep_as_desktop(params) do
+    case Map.get(params, "keep_as_desktop", true) do
+      keep? when is_boolean(keep?) -> {:ok, keep?}
+      _other -> invalid_params("keep_as_desktop")
+    end
+  end
 
   defp route_cues("cues.status", %{}, opts), do: operation_result(Cues.status(cues_opts(opts)))
 
@@ -279,6 +443,9 @@ defmodule FermixCore.Management.Router do
 
   defp route_cues("cues.watchers.get", params, opts),
     do: cue_by_name(&Cues.watchers_get/2, params, opts)
+
+  defp route_cues("cues.watchers.always_allow.revoke", params, opts),
+    do: cue_by_name(&Cues.watchers_always_allow_revoke/2, params, opts)
 
   defp route_cues("cues.mandates.list", %{}, opts),
     do: operation_result(Cues.mandates_list(cues_opts(opts)))
@@ -364,9 +531,18 @@ defmodule FermixCore.Management.Router do
     {:ok, %{"jobs" => jobs}}
   end
 
+  # A sign-in started by a desktop over the rail (`:actor`, M75 D17) is
+  # recorded as that desktop's, so its loopback reply is forwarded there.
   defp auth_start(params, opts) do
     with {:ok, provider} <- fetch_string(params, "provider", @provider_params) do
-      operation_result(Auth.start(provider, operation_opts(opts)))
+      operation_result(Auth.start(provider, with_actor(operation_opts(opts), opts)))
+    end
+  end
+
+  defp with_actor(operation_opts, opts) do
+    case Keyword.fetch(opts, :actor) do
+      {:ok, actor} -> Keyword.put(operation_opts, :actor, actor)
+      :error -> operation_opts
     end
   end
 
@@ -595,10 +771,11 @@ defmodule FermixCore.Management.Router do
   end
 
   # A value's type is the form's to refuse, under the field it names; this
-  # closes the set and checks only that `values` is an object.
+  # closes the set and checks only that `values` is an object. The name is
+  # optional: absent or empty, Fermix makes one.
   defp cue_add(params, opts) do
     with :ok <- reject_unknown_params(params, @cue_add_params),
-         {:ok, ref} <- fetch_text(params, "ref", 1),
+         {:ok, ref} <- fetch_optional_name(params, "ref"),
          {:ok, kind} <- fetch_optional_text(params, "kind"),
          {:ok, preset} <- fetch_optional_text(params, "preset"),
          :ok <- kind_or_preset(kind, preset),
@@ -648,6 +825,13 @@ defmodule FermixCore.Management.Router do
     end
   end
 
+  defp fetch_optional_name(params, field) do
+    case Map.get(params, field) do
+      nil -> {:ok, nil}
+      _present -> fetch_text(params, field, 0)
+    end
+  end
+
   # A closed word, or its default where the field is absent and one exists.
   defp fetch_choice(params, field, choices, default) do
     case Map.get(params, field, default) do
@@ -682,16 +866,89 @@ defmodule FermixCore.Management.Router do
   defp mobile_opts(opts), do: opts |> operation_opts() |> Keyword.get(:mobile, [])
   defp cues_opts(opts), do: opts |> operation_opts() |> Keyword.get(:cues, [])
 
+  # The router's own `:engine_role` (tests) reaches the provisioner as its
+  # seam.
+  defp provision_opts(opts) do
+    provision = opts |> operation_opts() |> Keyword.get(:provision, [])
+
+    case Keyword.fetch(opts, :engine_role) do
+      {:ok, role} -> Keyword.put_new(provision, :engine_role, role)
+      :error -> provision
+    end
+  end
+
+  # An act reaches every family it steps through with one set of seams, the
+  # router's own `:engine_role` (tests), a linked desktop's way to its server
+  # (`:primary_forward`, from the daemon) and who asked (`:actor`).
+  defp always_on_opts(opts) do
+    always_on =
+      opts
+      |> operation_opts()
+      |> Keyword.get(:always_on, [])
+      |> Keyword.merge(Keyword.take(opts, [:actor, :primary_forward]))
+
+    case Keyword.fetch(opts, :engine_role) do
+      {:ok, role} -> Keyword.put_new(always_on, :engine_role, role)
+      :error -> always_on
+    end
+  end
+
+  # The router's own `:engine_role` (tests) reaches the family as its seam, a
+  # linked device's way to its primary (`:primary_forward`, from the daemon)
+  # lets `home.status` add the primary's own, and the actor says whether a
+  # desktop forwarded the request.
+  defp home_opts(opts) do
+    home =
+      opts
+      |> operation_opts()
+      |> Keyword.get(:home, [])
+      |> Keyword.merge(Keyword.take(opts, [:actor]))
+
+    home =
+      case Keyword.fetch(opts, :engine_role) do
+        {:ok, role} -> Keyword.put_new(home, :engine_role, role)
+        :error -> home
+      end
+
+    case Keyword.fetch(opts, :primary_forward) do
+      {:ok, forward} -> Keyword.put(home, :primary_forward, forward)
+      :error -> home
+    end
+  end
+
+  # Composed on a linked device (M75): this machine's own sections, which
+  # configure it alone, and the primary's others, asked within the composed
+  # deadline; while the primary's part is missing, `primary_missing` says why.
+  # Every other engine lists its own and nothing is missing.
   defp settings_sections(opts) do
     inventory =
       Keyword.get(opts, :settings_sections, fn -> Settings.sections(settings_opts(opts)) end)
 
-    sections =
-      Enum.map(inventory.(), fn section ->
-        %{"id" => section.id, "pane" => section.pane, "title" => section.title}
-      end)
+    sections = Enum.map(inventory.(), &section_row/1)
 
-    {:ok, %{"sections" => sections}}
+    case Keyword.fetch(opts, :primary_forward) do
+      {:ok, forward} -> composed_sections(sections, forward)
+      :error -> {:ok, %{"sections" => sections, "primary_missing" => nil}}
+    end
+  end
+
+  defp section_row(section),
+    do: %{"id" => section.id, "pane" => section.pane, "title" => section.title}
+
+  defp composed_sections(sections, forward) do
+    own = Enum.filter(sections, &(&1["id"] in Placement.device_sections()))
+
+    case Placement.primary_part(forward, "settings.sections") do
+      {:ok, %{"sections" => primary}} when is_list(primary) ->
+        theirs = Enum.reject(primary, &(&1["id"] in Placement.device_sections()))
+        {:ok, %{"sections" => theirs ++ own, "primary_missing" => nil}}
+
+      {:ok, _malformed} ->
+        {:ok, %{"sections" => own, "primary_missing" => @primary_sections_unread}}
+
+      {missing, sentence} when missing in [:missing, :too_old] ->
+        {:ok, %{"sections" => own, "primary_missing" => sentence}}
+    end
   end
 
   defp settings_get(params, opts) do
@@ -822,10 +1079,7 @@ defmodule FermixCore.Management.Router do
            "minimum_version" => minimum,
            "maximum_version" => maximum
          },
-         "capabilities" => %{
-           "methods" => Protocol.methods(),
-           "minimum_versions" => Protocol.method_minimum_versions()
-         },
+         "capabilities" => capabilities(always_on?(opts)),
          "engine" => identity,
          "setup" => setup
        }}
@@ -834,6 +1088,28 @@ defmodule FermixCore.Management.Router do
       {:error, _reason} -> unavailable("engine_identity")
     end
   end
+
+  # Always On's methods, where this engine serves them (`Home.AlwaysOnRelease`),
+  # and every other.
+  defp capabilities(true),
+    do: %{
+      "methods" => Protocol.methods(),
+      "minimum_versions" => Protocol.method_minimum_versions()
+    }
+
+  defp capabilities(false) do
+    gated = AlwaysOnRelease.methods()
+
+    %{
+      "methods" => Protocol.methods() -- gated,
+      "minimum_versions" => Map.drop(Protocol.method_minimum_versions(), gated)
+    }
+  end
+
+  # The `:always_on` seam stands for the resolver's answer: the build's
+  # environment, and in a release build the home's switch, read from
+  # application environment at every call.
+  defp always_on?(opts), do: Keyword.get_lazy(opts, :always_on, &AlwaysOnRelease.available?/0)
 
   defp setup_state(opts) do
     reporter = Keyword.get(opts, :setup_state_reporter, &SetupState.report/1)
@@ -1219,4 +1495,46 @@ defmodule FermixCore.Management.Router do
   defp public_method(method) when is_binary(method), do: method
   defp public_method(_method), do: "invalid"
   defp unavailable(capability), do: {:error, :unavailable, %{"capability" => capability}}
+
+  # `:engine_role` stands in for the role this boot recorded (tests).
+  defp admit(method, params, opts) do
+    record = Keyword.get_lazy(opts, :engine_role, &Role.recorded/0)
+
+    with :ok <- candidate_answers(method, record),
+         {:ok, capability} <- provider_call(method, params),
+         {:error, {:device_role, sentence}} <- Role.admit(record) do
+      {:error, :unavailable, %{"capability" => capability, "sentence" => sentence}}
+    else
+      :no_provider_call -> :ok
+      :ok -> :ok
+      {:error, :unavailable, _details} = refusal -> refusal
+    end
+  end
+
+  defp candidate_answers(method, %{role: :candidate}) when method not in @candidate_methods,
+    do: {:error, :unavailable, %{"capability" => "candidate", "sentence" => @candidate_sentence}}
+
+  defp candidate_answers(_method, _record), do: :ok
+
+  @doc "The sentence a candidate primary (M75 §2) refuses everything else with."
+  @spec candidate_sentence() :: String.t()
+  def candidate_sentence, do: @candidate_sentence
+
+  # A catalog listing and the local doctor read only this host. The Anthropic
+  # setup token is a sign-in: storing it starts the token, and clearing it
+  # signs out (`Management.Secrets`), so it is refused before either.
+  defp provider_call("providers.models.list", %{"live" => false}), do: :no_provider_call
+
+  defp provider_call(method, %{"id" => "anthropic_setup_token"})
+       when method in ["secret.set", "secret.clear"],
+       do: {:ok, "secrets"}
+
+  defp provider_call("doctor.start", %{"scope" => "local"}), do: :no_provider_call
+
+  defp provider_call(method, _params) do
+    case Map.fetch(@provider_methods, method) do
+      {:ok, capability} -> {:ok, capability}
+      :error -> :no_provider_call
+    end
+  end
 end

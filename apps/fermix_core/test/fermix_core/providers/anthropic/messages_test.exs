@@ -1005,6 +1005,161 @@ defmodule FermixCore.Providers.Anthropic.MessagesTest do
     end
   end
 
+  # Preserved thinking: a thinking block's signature binds every message before
+  # it, and the API rejects a replayed block once that prefix changed (400 "bound
+  # to a different conversation"). Substitution and screenshot elision rewrite
+  # replayed history, so the blocks after the first rewritten message must go.
+  describe "continue/3 — thinking after an edited history" do
+    defp thinking(signature),
+      do: %{"type" => "thinking", "thinking" => "", "signature" => signature}
+
+    defp use_block(id),
+      do: %{"type" => "tool_use", "id" => id, "name" => "shell", "input" => %{"command" => "ls"}}
+
+    defp result_message(id, content),
+      do: %{role: "user", content: [%{type: "tool_result", tool_use_id: id, content: content}]}
+
+    # Three replayed rounds, each assistant turn opening with its thinking block.
+    defp thinking_history do
+      [
+        %{role: "user", content: [%{type: "text", text: "Hi"}]},
+        %{role: "assistant", content: [thinking("sig-1"), use_block("t1")]},
+        result_message("t1", "raw one"),
+        %{role: "assistant", content: [thinking("sig-2"), use_block("t2")]},
+        result_message("t2", "raw two"),
+        %{
+          role: "assistant",
+          content: [%{"type" => "redacted_thinking", "data" => "r"}, use_block("t3")]
+        },
+        result_message("t3", "raw three")
+      ]
+    end
+
+    defp thinking_state(history) do
+      %{
+        system: nil,
+        messages: history,
+        assistant_content: [thinking("sig-4"), use_block("t4")],
+        tools: [],
+        capabilities: []
+      }
+    end
+
+    defp continue_capturing(provider_state, tool_results, opts, response) do
+      test_pid = self()
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:body, Jason.decode!(body)})
+        Req.Test.json(conn, response)
+      end)
+
+      assert {:ok, turn} = Messages.continue(provider_state, tool_results, opts)
+      assert_receive {:body, decoded}
+      {decoded["messages"], turn}
+    end
+
+    defp signatures(messages) do
+      Enum.map(messages, fn message ->
+        message["content"]
+        |> List.wrap()
+        |> Enum.filter(&(is_map(&1) and &1["type"] in ["thinking", "redacted_thinking"]))
+        |> Enum.map(&(&1["signature"] || &1["data"]))
+      end)
+    end
+
+    defp tool_use_ids(messages) do
+      messages
+      |> Enum.flat_map(fn message -> List.wrap(message["content"]) end)
+      |> Enum.filter(&match?(%{"type" => "tool_use"}, &1))
+      |> Enum.map(& &1["id"])
+    end
+
+    test "an untouched history replays every thinking block verbatim" do
+      {messages, _turn} =
+        continue_capturing(
+          thinking_state(thinking_history()),
+          [%{call_id: "t4", output: "fresh"}],
+          chat_opts(),
+          text_response_body()
+        )
+
+      assert signatures(messages) == [[], ["sig-1"], [], ["sig-2"], [], ["r"], [], ["sig-4"], []]
+    end
+
+    test "a substituted result strips the thinking after it and keeps the thinking before it" do
+      {messages, _turn} =
+        continue_capturing(
+          thinking_state(thinking_history()),
+          [%{call_id: "t4", output: "fresh"}],
+          chat_opts(tool_result_substitutions: %{"t2" => "digest two"}),
+          text_response_body()
+        )
+
+      assert signatures(messages) == [[], ["sig-1"], [], ["sig-2"], [], [], [], [], []]
+      # Only thinking goes: every tool call and result still pairs up.
+      assert tool_use_ids(messages) == ["t1", "t2", "t3", "t4"]
+    end
+
+    test "an elided screenshot strips the thinking after it" do
+      image = %{
+        type: "image",
+        source: %{type: "base64", media_type: "image/png", data: Base.encode64(<<137, 80>>)}
+      }
+
+      history =
+        List.replace_at(
+          thinking_history(),
+          2,
+          result_message("t1", [%{type: "text", text: "a look"}, image])
+        )
+
+      tool_results = [
+        %{
+          call_id: "t4",
+          output: "another look",
+          images: [%{type: :image, mime_type: "image/png", data: <<137, 80>>}]
+        }
+      ]
+
+      {messages, _turn} =
+        continue_capturing(
+          thinking_state(history),
+          tool_results,
+          chat_opts(max_retained_screenshots: 1),
+          text_response_body()
+        )
+
+      assert signatures(messages) == [[], ["sig-1"], [], [], [], [], [], [], []]
+    end
+
+    test "the strip is carried forward, and thinking minted after the edit replays" do
+      response =
+        Map.put(tool_use_response_body(), "content", [thinking("sig-5"), use_block("t5")])
+
+      opts = chat_opts(tool_result_substitutions: %{"t2" => "digest two"})
+
+      {_messages, turn} =
+        continue_capturing(
+          thinking_state(thinking_history()),
+          [%{call_id: "t4", output: "fresh"}],
+          opts,
+          response
+        )
+
+      {messages, _turn} =
+        continue_capturing(
+          turn.provider_state,
+          [%{call_id: "t5", output: "fresh"}],
+          opts,
+          text_response_body()
+        )
+
+      assert signatures(messages) ==
+               [[], ["sig-1"], [], ["sig-2"], [], [], [], [], [], ["sig-5"], []]
+    end
+  end
+
   describe "chat/3 — error handling" do
     test "401 becomes a structured auth error" do
       assert {:error, {:provider_error, error}} =

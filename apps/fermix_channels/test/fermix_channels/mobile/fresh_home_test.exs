@@ -10,6 +10,7 @@ defmodule FermixChannels.Mobile.FreshHomeTest do
   alias FermixChannels.Mobile.Management
   alias FermixChannels.Mobile.Supervisor, as: MobileSupervisor
   alias FermixCore.Setup.ConfigStore
+  alias FermixTestSupport.PrimaryHome
   alias FermixTestSupport.SafeRm
 
   setup do
@@ -38,6 +39,8 @@ defmodule FermixChannels.Mobile.FreshHomeTest do
     File.chmod!(mobile, 0o755)
 
     assert :ok = ConfigStore.ensure_workspace()
+    # A primary boot writes the home's first epoch right after the workspace.
+    PrimaryHome.booted!(home)
     refute MobileSupervisor.running?()
     assert {:ok, []} = Management.devices_list([])
 

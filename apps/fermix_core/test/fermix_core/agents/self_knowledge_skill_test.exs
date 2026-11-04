@@ -2,9 +2,13 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
   use ExUnit.Case, async: true
 
   alias FermixCore.Agents.SkillRegistry
+  alias FermixCore.Checklists.Access, as: ChecklistAccess
+  alias FermixCore.Checklists.Registry, as: ChecklistRegistry
   alias FermixCore.Delivery.OwnerInbox
   alias FermixCore.NativeHost.Server, as: NativeHostServer
+  alias FermixCore.Plugins.Registry, as: PluginRegistry
   alias FermixCore.Temporal.Registry, as: TemporalRegistry
+  alias FermixCore.Trace
 
   test "bundled self-knowledge skill loads as a core skill with no tools" do
     local =
@@ -233,9 +237,19 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
           "backward",
           "Full-text search",
           "whether or not the app is connected",
-          "Attachments do not travel",
           "companion:main"
         ] do
+      assert reference =~ required, "companion self-knowledge does not mention #{required}"
+    end
+
+    # Companion protocol 7: the owner attaches files in the Mac chat, so the
+    # skill no longer says they cannot, and says how they travel and where.
+    for text <- [paragraph, reference] do
+      assert text =~ "companion/inbox/"
+      refute text =~ ~r/(?i)no attachments from the Mac|attachments do not travel/
+    end
+
+    for required <- ["## Files the owner attaches", "max_media_bytes", "Attach it again."] do
       assert reference =~ required, "companion self-knowledge does not mention #{required}"
     end
   end
@@ -264,17 +278,23 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
 
   # M76 §4.10: the Linux desktop app's own labels, read from tezra-io/fermix-linux
   # (`desktop/core/src/settings.rs` PANES, `desktop/app/src/shell.rs` PAGES, Home's
-  # switches, the tray, `desktop/io.tezra.Fermix.yml`). A Linux app owner is
-  # answered with them for anything the app has a control for.
+  # switches, the tray, Chat's cards in `desktop/app/src/chat/`, its updater's words
+  # in `desktop/core/src/update/view.rs`). A Linux app owner is answered with them
+  # for anything the app has a control for. The reference names the app by its id
+  # and labels, never by a package or binary name. Its chat is the companion chat
+  # the phone shares, so `/new` works and no New conversation button exists.
   test "the linux_app reference names the Linux app's pages, panes and controls" do
     reference = "linux_app" |> reference_path() |> File.read!() |> String.replace(~r/\s+/, " ")
 
     panes =
-      ~w(Providers Personality Memory Channels Integrations Voice Meetings Computer) ++
-        ["Coding agents"] ++ ~w(Search Images Secrets Sandbox Permissions)
+      ~w(Providers Personality Memory Channels Integrations Cues Voice Meetings Computer) ++
+        ["Coding agents"] ++ ~w(Search Images Secrets Sandbox Permissions Updates)
 
     assert reference =~ Enum.join(panes, ", "),
-           "linux_app reference does not list the fourteen panes in order"
+           "linux_app reference does not list the app's panes in order"
+
+    refute reference =~ ~r/\b(Fourteen|fourteen|Fifteen|fifteen|Sixteen|sixteen) panes\b/,
+           "linux_app reference counts panes, which Cues shows only where cues are served"
 
     for label <- [
           "**Chat**",
@@ -286,7 +306,6 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
           "**Run in the background**",
           "**Open at login**",
           "**Begin voice call**",
-          "**New conversation**",
           "**Restart Fermix…**",
           "**Run Doctor**"
         ] do
@@ -296,23 +315,68 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     for fact <- [
           "io.tezra.Fermix",
           "daemon.sock",
-          "acp.sock",
+          "companion.sock",
           "realtime.sock",
           "fermix.service",
           "**Phone** row",
           "**Pair a phone…**",
-          "read-only"
+          "read-only",
+          "carries the engine and replaces the engine-only package",
+          "**Check for Updates…**",
+          "**Check Now** in Settings > Updates",
+          "signed update feed",
+          "(PackageKit)",
+          "The earlier Flatpak app had no bundled engine and no updater of its own",
+          "Installing the package does not remove the Flatpak",
+          "`/new` starts the conversation afresh",
+          "a card with **Approve** and **Deny**",
+          "a card with **Deny** and **Confirm**",
+          "**Something needs your answer**: the owner answers it in their own chat",
+          "never from a paired phone",
+          "**A task is waiting for your decision**",
+          "**Continue Setup…**"
         ] do
       assert reference =~ fact, "linux_app reference does not say #{fact}"
     end
 
-    refute reference =~ "fermix-desktop"
+    for stale <- ["fermix-desktop", "acp.sock", "**New conversation**", "no slash commands"] do
+      refute reference =~ stale, "linux_app reference still says #{stale}"
+    end
+
+    # A Linux daemon never runs iMessage (it reads the Mac's Messages), so no
+    # owner chat on this host is one.
+    refute reference =~ "iMessage", "linux_app reference names iMessage as a Linux owner chat"
   end
 
   # The reference drifted from the code twice over (M76 §8): it named five
   # reminder platforms and a three-channel derived order while the registry
   # had six and `OwnerInbox` four. Both are read from the code here, so the
   # next platform fails this test until the reference names it.
+  # M85: the lists reference quotes the engine's own refusals, so a reworded
+  # sentence fails here until the reference follows.
+  test "documents the owner's lists, their tools and the sentences their refusals say" do
+    body = File.read!(self_knowledge_path())
+    reference = "lists" |> reference_path() |> File.read!() |> String.replace(~r/\s+/, " ")
+
+    for tool <- ["checklist_read", "checklist_edit"] do
+      assert body =~ "`#{tool}`"
+      assert reference =~ "`#{tool}`"
+    end
+
+    # The owner's Mac app draws lists (companion protocol 6), so the skill's
+    # summary must say so, as the reference and the turn's own prompt do.
+    assert body =~ "under the reply, live"
+
+    for sentence <- [
+          ChecklistAccess.outside_refusal(),
+          ChecklistRegistry.describe_error({:list_full, "Fermix"}),
+          ChecklistRegistry.describe_error({:stale, 112, 113}),
+          PluginRegistry.reserved_name_sentence()
+        ] do
+      assert reference =~ sentence
+    end
+  end
+
   test "the events_reminders reference names every reminder platform and the derived order" do
     reference =
       "events_reminders" |> reference_path() |> File.read!() |> String.replace(~r/\s+/, " ")
@@ -429,7 +493,9 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
   # Production Fermix on a Mac is the app, which ships no `fermix` command, so
   # an owner asking "how do I set up / update you?" must get the app's own
   # labels. Each label below is a control a correct answer cannot do without.
-  # The refutation names a withdrawn artifact: no desktop package ships.
+  # The refutation keeps the skill naming an app by its labels and id, never by a
+  # package or binary name: the name first belonged to a withdrawn companion
+  # package, and the Linux app's own package is called the desktop app's package.
   test "answers a Mac app owner with the app's own controls" do
     body = File.read!(self_knowledge_path())
     reference = File.read!(macos_app_reference_path())
@@ -479,6 +545,49 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     end
   end
 
+  # The Linux helper reads controls through the accessibility bus on X11 and
+  # Wayland, and drives GNOME Wayland's pixels through the desktop portal. The
+  # self-reference says so, and never again that Linux is pixels only or that
+  # Wayland input does not work.
+  test "says what computer use offers on Linux" do
+    body = File.read!(self_knowledge_path())
+    reference = File.read!(reference_path("computer_use"))
+
+    for text <- [body, reference] do
+      refute text =~ "pixels only"
+      refute text =~ "XTEST only"
+      assert text =~ "desktop portal"
+    end
+
+    for required <- ["accessibility bus", "asks the person on first use", "controls only"] do
+      assert reference =~ required, "the computer_use reference does not say #{required}"
+    end
+  end
+
+  # A window binds on macOS and on Linux under X11, where the helper's own badge
+  # stands in for the Mac panel; never on Wayland. The refusal for a window that
+  # cannot be proven the one bound is real again, and the doctor bullet is not
+  # filed under macOS.
+  test "says where a window can be bound" do
+    body = File.read!(self_knowledge_path())
+    reference = File.read!(reference_path("computer_use"))
+    [_before, window] = String.split(reference, "## Work inside one window", parts: 2)
+    [window | _rest] = String.split(window, "\n## ", parts: 2)
+    [_before, mac] = String.split(reference, "## Permissions and identity (macOS)", parts: 2)
+    [mac | _rest] = String.split(mac, "\n## ", parts: 2)
+
+    assert body =~ "Linux under X11, never Wayland"
+
+    for required <- ["Linux under X11", "never on Wayland", "badge"] do
+      assert window =~ required, "the window binding section does not say #{required}"
+    end
+
+    refute window =~ ~r/\A \(experimental, off by default, macOS\)/
+    assert reference =~ "a window that cannot be proven to be the one bound"
+    refute mac =~ "`fermix doctor`"
+    assert reference =~ "`fermix doctor`'s `computer use` row"
+  end
+
   # GPT-Live has no noise or echo settings, so "why does it hear my keyboard or
   # its own voice?" is answered by the Mac's voice processing and the daemon's
   # echo window, and a Linux client has to bring its own.
@@ -511,7 +620,9 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
 
   # No repository serves the packages, so the family commands `fermix upgrade`
   # prints find nothing. An agent asked "how do I update you?" on a packaged
-  # host must not stop at `apt upgrade`.
+  # host must not stop at `apt upgrade`. The desktop app's own package carries
+  # the engine and replaces the engine-only one, so on its host the app updates
+  # both and the installer is not the answer.
   test "documents the Linux package installer, and that running it again is the update" do
     paragraph = service_paragraph()
     reference = File.read!(service_unit_reference_path())
@@ -519,6 +630,7 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     assert paragraph =~ "curl -fsSL https://fermix.ai/install | sh"
     assert paragraph =~ "fermix restart"
     assert paragraph =~ "until a repository is published"
+    assert paragraph =~ "the desktop app's own package is updated by the app instead"
 
     for required <- [
           "curl -fsSL https://fermix.ai/install | sh",
@@ -528,7 +640,9 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
           "--standalone",
           "not a repository",
           "Until a repository is published, those lines find nothing",
-          "fermix restart"
+          "fermix restart",
+          "the desktop app's own package: the app's **Check for Updates…**",
+          "A host with the Fermix desktop app's own package is the exception"
         ] do
       assert reference =~ required, "service_unit reference does not mention #{required}"
     end
@@ -631,6 +745,84 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     assert presentation =~ "iMessage"
   end
 
+  # Website sign-in (M84) is Mac-only and pane-only, and "can you log in for
+  # me?" is answered only if the agent knows where the owner adds a login and
+  # that it never asks for a password. Each string is a pane, a code, an
+  # argument or a boundary word, not a phrasing.
+  test "documents website sign-in: where logins are added, where it works, and no passwords" do
+    body = File.read!(self_knowledge_path())
+    reference = "browser" |> reference_path() |> File.read!() |> String.replace(~r/\s+/, " ")
+
+    for required <- ["Settings > Browser > Website logins", "after the owner approves"] do
+      assert body =~ required, "the Web line does not mention #{required}"
+    end
+
+    for required <- [
+          "## Signing in to websites",
+          "Settings > Browser > Website logins",
+          ~s(`kind: "sign_in"`),
+          "`username_ref`",
+          "`password_ref`",
+          "keychain",
+          "only in the Fermix app's own browser pane",
+          "`sign_in_pane_only`",
+          "`sign_in_no_login`",
+          "a subdomain of it",
+          "the approval names both",
+          "never asks for the password in the chat",
+          "`sign_in_store_unavailable`",
+          "Linux",
+          "`submit: true`"
+        ] do
+      assert reference =~ required, "browser reference does not mention #{required}"
+    end
+
+    refute reference =~ "it does not submit the form"
+  end
+
+  # M75 L20: an Always On server keeps the bodies of its traces about a day,
+  # said in one wording (`window/0`) wherever the docs give it, and the owner is
+  # told plainly what lives on the server, for how long, and that its hosting
+  # provider can read the disk. The body fields come from `Trace.body_keys/0`,
+  # so a body added there and not named here fails. Each string is a file, a
+  # field, a bound or a boundary word, not a phrasing.
+  test "documents what an Always On server keeps, for how long, and who can read it" do
+    body = File.read!(self_knowledge_path())
+    observability = "observability" |> reference_path() |> File.read!() |> squash()
+    home = "home" |> reference_path() |> File.read!() |> squash()
+
+    assert body =~ "on an Always On server the prompts, replies and tool bodies #{window()}"
+
+    fields = Enum.map(Trace.body_keys(), &"`#{&1}`")
+
+    for required <-
+          ["`<type>.bodies.jsonl`", window(), "14 days", "no Fermix app"] ++
+            fields do
+      assert observability =~ required, "observability reference does not mention #{required}"
+    end
+
+    for required <- [
+          "What lives on the server, and for how long",
+          "`memory.db`",
+          "the secret files",
+          "browser profile",
+          "kept #{window()} on a server",
+          "14 days and at most 1 GiB",
+          "no disk encryption",
+          "can technically read the server's disk",
+          "two-factor sign-in",
+          "snapshots to the recovery key"
+        ] do
+      assert home =~ required, "home reference does not mention #{required}"
+    end
+
+    refute home =~ "the owner encrypts the disk"
+  end
+
+  defp squash(text), do: String.replace(text, ~r/\s+/, " ")
+
+  defp window, do: "about a day (through the previous UTC day)"
+
   # Every build has cues, off until the owner turns them on, so the owner must
   # be told the switch and sent to the surfaces that really configure it:
   # settings for sources and mandates (the setup page's Cues tab, its Approve
@@ -652,10 +844,17 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
           "off by default",
           "Signal",
           "Cues pane",
-          "words to listen for"
+          "keywords to listen for",
+          "Screen",
+          "Keyword match",
+          "Decision model"
         ] do
       assert paragraph =~ required, "the Cues paragraph does not mention #{required}"
     end
+
+    # Under Decision model every item is checked by meaning, so the keywords are
+    # not what an item must contain to be judged.
+    refute paragraph =~ "must contain to be judged"
 
     for required <- [
           "[fermix_core.cues] enabled = true",
@@ -678,6 +877,9 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
           "list_cues",
           "cue_history",
           "filter_model",
+          "[fermix_core.cues] screen",
+          "Keyword match",
+          "Decision model",
           "listen_for",
           "needs_update",
           "drop_key",
@@ -701,12 +903,48 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
           "Copy URL",
           "Confirm",
           "Linux app",
-          "Only the owner can change cues"
+          "Only the owner can change cues",
+          # Follow-ups (M60_WATCHER_CODING_RUNS.md): the field, its verbs, the
+          # boundary with the task, readiness, asking first and Always allow
+          # with how it is taken back, the switch and cards.
+          "follow_up",
+          "stop_follow_up",
+          "run_follow_up",
+          "coding_agent",
+          "Fermix hands the follow-up nothing from the item",
+          "held",
+          "Ask first",
+          "Always allow",
+          "always_allow: false",
+          "Ask first again",
+          "/always",
+          "Let watchers act",
+          "runs when watcher <name> passes an item",
+          "Run \"<name>\"?",
+          "Run <tool> for <watcher>?"
         ] do
       assert reference =~ required, "cues self-knowledge does not mention #{required}"
     end
 
-    for gone <- ["Development builds only", "development daemon", "no published release"] do
+    jobs = "jobs" |> reference_path() |> File.read!() |> String.replace(~r/\s+/, " ")
+
+    for required <- [
+          "kind `watcher`",
+          "runs when watcher <name> passes an item",
+          "file: \"cues\""
+        ] do
+      assert jobs =~ required, "jobs self-knowledge does not mention #{required}"
+    end
+
+    # The Linux app's Chat draws a task's proposal as a card answered in place.
+    assert reference =~ "The Linux app's Chat shows it as a card with **Deny** and **Confirm**"
+
+    for gone <- [
+          "Development builds only",
+          "development daemon",
+          "no published release",
+          "The Linux app shows no proposal card"
+        ] do
       refute paragraph =~ gone, "the Cues paragraph still says #{gone}"
       refute reference =~ gone, "cues self-knowledge still says #{gone}"
     end

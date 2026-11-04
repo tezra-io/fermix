@@ -96,6 +96,22 @@ defmodule FermixCore.Browser.BridgeTest do
 
   # ── the handshake ──────────────────────────────────────────────────────────
 
+  # A command Fermix confines gets no answer here (`SocketPeer.admit/2`; the real
+  # kernel check runs in `SocketReachTest`): no grant, no tab.
+  test "a peer the socket does not answer is closed before any peer starts", ctx do
+    start_bridge(ctx, peer_gate: fn _socket -> {:error, {:sandboxed, 4242}} end)
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        socket = connect!(ctx)
+        _ = :gen_tcp.send(socket, Jason.encode!(%{type: "hello", protocol: 2, browser: "chrome"}))
+        assert :gen_tcp.recv(socket, 0, 2_000) == {:error, :closed}
+      end)
+
+    assert log =~ "#{ctx.socket_path} refused a connection: process 4242 runs sandboxed"
+    assert %{active: 0} = DynamicSupervisor.count_children(BridgeSupervisor.peer_supervisor())
+  end
+
   test "an unknown protocol is refused, never guessed at", ctx do
     start_bridge(ctx)
     socket = connect!(ctx)

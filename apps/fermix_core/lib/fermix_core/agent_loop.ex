@@ -70,6 +70,12 @@ defmodule FermixCore.AgentLoop do
   # ride whole in every summarizer prompt.
   @task_excerpt_bytes 4_000
 
+  # Only the newest look at a page stays (`replace_superseded_looks/2`). Looks a
+  # later one superseded are replaced once those still raw add up to this many
+  # bytes, all at once: a replacement rewrites the history the provider
+  # replays, so it breaks the prompt cache, and a batch breaks it rarely.
+  @superseded_look_bytes 32_000
+
   @typedoc """
   Channel-streaming events emitted through `stream_callback` (see
   docs/design/CHANNEL_STREAMING.md §5.1). The loop emits `:session_started`
@@ -144,14 +150,17 @@ defmodule FermixCore.AgentLoop do
   A finished loop. `tool_failures` counts the tool calls that came back as an
   error result (a tool that refused, exploded, was unknown, or received
   arguments it could not parse); the loop went on and the model answered, so
-  the run's status alone would never show it.
+  the run's status alone would never show it. `outside_sources` is what the
+  run read that someone else could have written, as it ended
+  (`record_outside_sources/4`).
   """
   @type loop_result :: %{
           response: String.t(),
           iterations: pos_integer(),
           total_tokens: non_neg_integer(),
           context_tokens: non_neg_integer(),
-          tool_failures: non_neg_integer()
+          tool_failures: non_neg_integer(),
+          outside_sources: MapSet.t()
         }
 
   @spec run(loop_opts()) :: {:ok, loop_result()} | {:error, term()}
@@ -185,7 +194,7 @@ defmodule FermixCore.AgentLoop do
     {first_route_key, _first_opts} = hd(routes)
 
     # `:outside_sources` is this turn's record of content someone else could have
-    # written (`record_outside_sources/3`). `put_new` so a nested run keeps what
+    # written (`record_outside_sources/4`). `put_new` so a nested run keeps what
     # its parent already read.
     context =
       opts
@@ -241,6 +250,7 @@ defmodule FermixCore.AgentLoop do
       store: store,
       substitutions: %{},
       not_compressible: MapSet.new(),
+      looks: [],
       context_window: Keyword.get(opts, :context_window),
       compaction_ceiling: nil,
       last_usage: %{prompt: 0, completion: 0},
@@ -601,7 +611,7 @@ defmodule FermixCore.AgentLoop do
       state = %{
         state
         | tool_failures: state.tool_failures + failures,
-          context: record_outside_sources(context, turn.tool_calls, state),
+          context: record_outside_sources(context, turn.tool_calls, tool_results, state),
           loop_detector: record_tool_runs(state, turn.tool_calls, tool_results)
       }
 
@@ -622,22 +632,28 @@ defmodule FermixCore.AgentLoop do
   # before that content existed, so only later steps count it. The calls are
   # already bridge-unwrapped, so a `tool_call` records the tool it ran. Read by
   # `Capabilities.AccessGate` through the context the next dispatch receives.
-  defp record_outside_sources(context, tool_calls, state) do
+  # The results are the batch's, one per call in its calls' order
+  # (`execute_tool_calls/2` maps over the calls), so the guard holds unless that
+  # invariant broke; a mismatch fails loud rather than letting the pairing drop
+  # a call, and its taint, silently.
+  defp record_outside_sources(context, tool_calls, tool_results, state)
+       when length(tool_calls) == length(tool_results) do
     sources =
       tool_calls
-      |> Enum.map(&outside_source(&1, state))
+      |> Enum.zip_with(tool_results, &outside_source(&1, &2, state))
       |> Enum.reject(&is_nil/1)
 
     Map.update!(context, :outside_sources, &Enum.into(sources, &1))
   end
 
-  # A call's arguments say what it read (`list_cues`' view). Arguments that would
-  # not parse, or are not a JSON object, classify as none given, the tool's
-  # default view, so they can never clear a read.
-  defp outside_source(call, state) do
+  # A call's arguments say what it read (`list_cues`' view), and for some tools
+  # its result does (`open_loop_list`, what it framed). Arguments that would not
+  # parse, or are not a JSON object, classify as none given, the tool's default
+  # view, so they can never clear a read.
+  defp outside_source(call, %{output: output}, state) do
     case Map.get(state.capabilities_by_name, call.name) do
       nil -> nil
-      capability -> UntrustedContent.outside_source(capability, outside_arguments(call))
+      capability -> UntrustedContent.outside_source(capability, outside_arguments(call), output)
     end
   end
 
@@ -649,7 +665,9 @@ defmodule FermixCore.AgentLoop do
   end
 
   defp continue_turn(turn, tool_results, warning, state) do
-    with {:ok, state} <- keep_within_budget(tool_results, state),
+    {state, saved_bytes} = replace_superseded_looks(tool_results, state)
+
+    with {:ok, state} <- keep_within_budget(tool_results, saved_bytes, state),
          {:ok, next_turn, state} <-
            continuation_call(turn.provider_state, tool_results, warning, state) do
       continue_until_terminal(next_turn, state)
@@ -662,7 +680,8 @@ defmodule FermixCore.AgentLoop do
       iterations: state.iteration,
       total_tokens: state.total_tokens,
       context_tokens: state.context_tokens,
-      tool_failures: state.tool_failures
+      tool_failures: state.tool_failures,
+      outside_sources: state.context.outside_sources
     }
   end
 
@@ -797,8 +816,10 @@ defmodule FermixCore.AgentLoop do
   # `threshold × context_window`, never above the model's compaction ceiling
   # (`ModelCatalog.compact_at_tokens/3`), by digesting older results, oldest
   # step first. Images are not estimated; screenshot retention bounds them.
-  defp keep_within_budget(tool_results, state) do
-    estimate = context_estimate(tool_results, state)
+  # `saved_bytes` is what replacing superseded looks took out of the history
+  # the provider last measured, before this check.
+  defp keep_within_budget(tool_results, saved_bytes, state) do
+    estimate = context_estimate(tool_results, state) - div(saved_bytes, @bytes_per_token)
     budget = context_budget(state)
 
     if estimate <= budget, do: {:ok, state}, else: reduce_to_budget(state, estimate, budget)
@@ -1112,6 +1133,103 @@ defmodule FermixCore.AgentLoop do
       agent: to_string(context_agent(state.context) || "unknown"),
       iteration: state.iteration
     })
+  end
+
+  # --- Only the newest look at a page stays in the run's history ---
+
+  # Runs after a step's tools ran and before the provider reads the step:
+  # deterministic, no model call. A result its tool names as a look at a page
+  # (`{target, address}`) supersedes every earlier look at that page; once the
+  # superseded looks still raw reach @superseded_look_bytes, each is replaced in
+  # the replayed history by the tool's own marked copy of it, behind a line
+  # naming its call id (`superseded_text/3`). The step being answered can
+  # supersede a look but is never replaced: adapters substitute only the history
+  # they replay. Returns the bytes the replacement saved.
+  defp replace_superseded_looks(tool_results, state) do
+    state = %{state | looks: state.looks ++ Enum.flat_map(tool_results, &look(&1, state))}
+    superseded = superseded_looks(state)
+
+    if Enum.sum_by(superseded, & &1.bytes) >= @superseded_look_bytes,
+      do: replace_looks(superseded, state),
+      else: {state, 0}
+  end
+
+  # Asked of the tool's module via `function_exported?`, the convention of
+  # `progress_by_result?/1`, about the tool's own text: a framed result is read
+  # back out of its frame, and the marked copy is framed again. A result that
+  # is not one whole frame (an `Error:` line) or not a look is no look.
+  defp look(%{call_id: call_id}, state) do
+    {:ok, entry} = ToolResultStore.fetch(state.store, call_id)
+
+    with {:ok, module} <- look_module(entry.tool_name, state),
+         {:ok, result} <- tool_text(entry),
+         {_target, _address} = page <- module.page_look(result) do
+      marked = superseded_text(entry, module.superseded_look(result), state)
+      [%{call_id: call_id, step: entry.step, page: page, bytes: entry.bytes, marked: marked}]
+    else
+      :no_hooks -> []
+      :error -> []
+      nil -> []
+    end
+  end
+
+  # The way back is the digest's, in its words (`recall_advice/2`): the call id,
+  # and `tool_result_recall` on a run that can call it. The tool's marked copy
+  # says what replaced the page text and is framed as the original was; this
+  # line is the loop's own, outside the frame. Built when the look is recorded
+  # and stored as it is, so a replaced result reads the same on every replay.
+  defp superseded_text(entry, marked, state) do
+    "[page text left out of a #{entry.bytes}-byte result from #{entry.tool_name} (call_id " <>
+      "#{entry.call_id}), to keep the context small. Every other field was kept; " <>
+      recall_advice(entry, state) <> "]\n" <> ToolResultStore.frame(entry, marked)
+  end
+
+  defp look_module(tool_name, state) do
+    case Map.fetch(state.capabilities_by_name, tool_name) do
+      {:ok, %Capability{executor: {mod, _fun, _extra}}} when is_atom(mod) ->
+        if function_exported?(mod, :page_look, 1) and function_exported?(mod, :superseded_look, 1),
+          do: {:ok, mod},
+          else: :no_hooks
+
+      _unknown_or_not_a_module ->
+        :no_hooks
+    end
+  end
+
+  defp tool_text(%{external?: true, tool_name: name, output: output}),
+    do: UntrustedContent.unframe(name, output)
+
+  defp tool_text(%{external?: false, output: output}), do: {:ok, output}
+
+  # Every look a later look at the same page superseded that the replayed
+  # history still carries raw: older than the step being answered, neither
+  # replaced nor digested yet, and longer than its marked copy, so a near-empty
+  # page is never swapped for a longer note. `looks` is in recording order, so
+  # the last look at a page is its newest.
+  defp superseded_looks(state) do
+    newest = Map.new(state.looks, &{&1.page, &1.call_id})
+
+    Enum.filter(state.looks, fn look ->
+      newest[look.page] != look.call_id and look.step < state.iteration and
+        not Map.has_key?(state.substitutions, look.call_id) and
+        byte_size(look.marked) < look.bytes
+    end)
+  end
+
+  defp replace_looks(looks, state) do
+    state = %{
+      state
+      | substitutions: Map.merge(state.substitutions, Map.new(looks, &{&1.call_id, &1.marked}))
+    }
+
+    tally = %{
+      results: length(looks),
+      before: Enum.sum_by(looks, & &1.bytes),
+      after: Enum.sum_by(looks, &byte_size(&1.marked))
+    }
+
+    emit_compaction(state, :superseded_look, tally)
+    {state, tally.before - tally.after}
   end
 
   # At most ONE `:channel`-category call executes per iteration: the first one.

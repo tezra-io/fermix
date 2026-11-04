@@ -290,7 +290,10 @@ defmodule FermixCore.Companion.TimelineSearchTest do
   end
 
   defp opts(repo, extra \\ []) do
-    Keyword.merge([repo: repo, agent_id: "agent-a", owner_id: "owner-a"], extra)
+    Keyword.merge(
+      [repo: repo, agent_id: "agent-a", owner_id: "owner-a", runner_epoch: "boot-a"],
+      extra
+    )
   end
 
   defp with_raw_conn(db_path, operation) do

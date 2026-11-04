@@ -11,7 +11,7 @@ defmodule FermixCore.ComputerUse.Notice do
 
   **Where the conversation is, is not configured.** A session's registry key IS
   the conversation's delivery triple (`{platform, destination, thread_scope}`),
-  the same shape `Temporal.Followup` builds a reminder's context from, so the
+  the same shape a reminder row snapshots as its delivery target, so the
   answer is derived from the work that is being stopped rather than from an
   operator value nobody set (the "where is the owner's inbox" lesson). The thread
   option comes from `Temporal.Delivery.thread_opts/1`, which owns the one table

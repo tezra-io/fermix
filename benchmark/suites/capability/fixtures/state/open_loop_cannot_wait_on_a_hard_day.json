@@ -1,0 +1,12 @@
+{"open_loops": [{"key": "nursery",
+                 "intention": "Pay the Ardmore nursery deposit to hold Pip's place",
+                 "why_it_matters": "the nursery offers the place to the next family on the waiting list if the deposit has not arrived by the end of today",
+                 "horizon_class": "short",
+                 "said_days_ago": 3,
+                 "matters_in_days": 0,
+                 "touches": 0,
+                 "due_hours_ago": 4}],
+ "owner_messages": [{"hours_ago": 5,
+                     "text": "Mum collapsed this morning and they've taken her to St Brannoc's. Sitting in A&E now."},
+                    {"hours_ago": 2,
+                     "text": "They're running more tests. Nobody is telling me anything."}]}

@@ -39,13 +39,29 @@ defmodule FermixCore.Management.Settings.Channels.Inventory do
         {:discord_owner_user_id, :owner_user_id, :text, "Your Discord user ID"}
       ]
     },
+    # Slack takes events by webhook (the default) or over Socket Mode (M75),
+    # and each way needs its own credential beside the bot token: the webhook
+    # checks Slack's signature, and Socket Mode opens its connection with the
+    # app-level token.
     slack: %{
       title: "Slack",
       rows: [
+        {:slack_mode, :mode, :choice, "Receive events through"},
         {:slack_bot_token, :bot_token, :secret, "Bot token"},
         {:slack_signing_secret, :signing_secret, :secret, "Signing secret"},
+        {:slack_app_token, :app_token, :secret, "App-level token"},
         {:slack_owner_user_id, :owner_user_id, :text, "Your Slack user ID"}
-      ]
+      ],
+      choices: %{
+        slack_mode: %{
+          default: "webhook",
+          options: [
+            {"webhook", "A webhook at a public address"},
+            {"socket", "Socket Mode, with no public address"}
+          ]
+        }
+      },
+      modes: [webhook: [:signing_secret], socket: [:app_token]]
     },
     signal: %{
       title: "Signal",
@@ -72,7 +88,10 @@ defmodule FermixCore.Management.Settings.Channels.Inventory do
   @people_keys [:owner_user_id, :allowed_sender_ids]
 
   @typedoc "One row: the answer key, the channel-block key it reads, its kind and its label."
-  @type row_spec :: {atom(), atom(), :secret | :text | :list, String.t()}
+  @type row_spec :: {atom(), atom(), :secret | :text | :list | :choice, String.t()}
+
+  @typedoc "A choice row's default value and its options, each `{value, label}`."
+  @type choice :: %{default: String.t(), options: [{String.t(), String.t()}]}
 
   @doc "Every channel, in publication order."
   @spec channels() :: [atom()]
@@ -86,14 +105,35 @@ defmodule FermixCore.Management.Settings.Channels.Inventory do
   @spec title(atom()) :: String.t()
   def title(channel) when is_atom(channel), do: Keyword.fetch!(@channels, channel).title
 
-  @doc "The channel-block keys one channel needs before it can run, in row order."
-  @spec credential_keys(atom()) :: [atom()]
-  def credential_keys(channel) when is_atom(channel) do
-    channel
-    |> rows()
-    |> Enum.reject(&(elem(&1, 1) in @people_keys))
+  @doc "One choice row's default and options."
+  @spec choice(atom(), atom()) :: choice()
+  def choice(channel, key) when is_atom(channel) and is_atom(key),
+    do: @channels |> Keyword.fetch!(channel) |> Map.fetch!(:choices) |> Map.fetch!(key)
+
+  @doc """
+  The channel-block keys one channel needs before it can run, in row order,
+  under its block's `mode` where its credentials depend on it (Slack): a choice
+  is a setting rather than a credential, and a credential only another mode
+  uses is not needed. With no block, the channel's first mode.
+  """
+  @spec credential_keys(atom(), keyword()) :: [atom()]
+  def credential_keys(channel, block \\ []) when is_atom(channel) and is_list(block) do
+    entry = Keyword.fetch!(@channels, channel)
+    unused = other_modes_keys(entry, block)
+
+    entry.rows
+    |> Enum.reject(fn {_key, config_key, kind, _label} ->
+      kind == :choice or config_key in @people_keys or config_key in unused
+    end)
     |> Enum.map(&elem(&1, 1))
   end
+
+  defp other_modes_keys(%{modes: [{first, _keys} | _rest] = modes}, block) do
+    mode = Keyword.get(block, :mode, first)
+    modes |> Keyword.delete(mode) |> Keyword.values() |> List.flatten()
+  end
+
+  defp other_modes_keys(_entry, _block), do: []
 
   @doc "The enable row's key for one channel."
   @spec enabled_key(atom()) :: atom()

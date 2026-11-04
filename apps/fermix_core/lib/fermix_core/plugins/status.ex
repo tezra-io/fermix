@@ -2,7 +2,11 @@ defmodule FermixCore.Plugins.Status do
   @moduledoc """
   Local readiness checks for configured plugins.
 
-  The ladder (M8 §8, checked in order): `:not_configured` (not enabled) →
+  The ladder (M8 §8, checked in order): what a move left of an installed
+  plugin it could not install again for this computer
+  (`Dist.Reinstall.outcome/2`: `:reinstall_failed`, or `:incompatible` when
+  the catalog has no build for it here), enabled or not → `:not_configured`
+  (not enabled) →
   install/runtime states for `mcp`-rail plugins (`:missing_host_runtime`,
   `:needs_config`) → the remote-plugin ladder (§7.8, below) → the auth ladder
   (`:ready` for `auth: none`, else `:needs_client_config` / `:needs_auth` /
@@ -40,6 +44,7 @@ defmodule FermixCore.Plugins.Status do
   alias FermixCore.Auth.Store
   alias FermixCore.Plugins.Config
   alias FermixCore.Plugins.Dist.McpSource
+  alias FermixCore.Plugins.Dist.Reinstall
   alias FermixCore.Plugins.Dist.RuntimeProbe
   alias FermixCore.Plugins.Dist.Store, as: DistStore
   alias FermixCore.Plugins.Plugin
@@ -58,6 +63,7 @@ defmodule FermixCore.Plugins.Status do
   # added to a clause here fails that test rather than reaching a surface with
   # no words for it.
   @statuses [
+    :reinstall_failed,
     :not_configured,
     :missing_host_runtime,
     :needs_config,
@@ -112,6 +118,15 @@ defmodule FermixCore.Plugins.Status do
   """
   @spec explain(Plugin.t(), keyword()) :: {atom(), RuntimeProbe.refusal() | nil}
   def explain(%Plugin{} = plugin, opts) when is_list(opts) do
+    case Reinstall.outcome(store_root(opts), plugin.name) do
+      nil -> configured_rung(plugin, opts)
+      :failed -> {:reinstall_failed, nil}
+      :no_build -> {:incompatible, nil}
+      :error -> {:error, nil}
+    end
+  end
+
+  defp configured_rung(plugin, opts) do
     if plugin.name in Config.enabled_plugins(),
       do: from_runtime_rung(plugin, host_runtime(plugin, opts)),
       else: {:not_configured, nil}
@@ -285,12 +300,14 @@ defmodule FermixCore.Plugins.Status do
   end
 
   defp store_incompatible?(name, opts) do
-    root = Keyword.get(opts, :installed_root) || ConfigStore.workspace_paths().plugins
-
-    root
+    opts
+    |> store_root()
     |> DistStore.list()
     |> Enum.any?(&(&1.name == name and &1.status == :incompatible))
   end
+
+  defp store_root(opts),
+    do: Keyword.get(opts, :installed_root) || ConfigStore.workspace_paths().plugins
 
   defp host_runtime(%Plugin{runtime: runtime} = plugin, opts) when is_map(runtime) do
     RuntimeProbe.probe(runtime, Path.dirname(plugin.path), Keyword.get(opts, :probe, []))

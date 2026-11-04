@@ -23,6 +23,7 @@ defmodule FermixCore.Browser.MutatingActionsTest do
     "navigate" => {true, %{"url" => "https://example.com"}},
     "close" => {true, %{}},
     "focus" => {true, %{}},
+    "handover" => {true, %{}},
     "dialog" => {true, %{"decision" => "accept"}},
     "upload" => {true, %{"ref" => "file_1", "path" => "/w/a.csv"}},
     "download" => {true, %{}}
@@ -46,7 +47,7 @@ defmodule FermixCore.Browser.MutatingActionsTest do
   # `act` is nine kinds under one action: the two that only read are the two
   # that may be re-sent.
   test "act is split by kind — get and wait read, the rest change the page" do
-    for kind <- ~w(click fill type submit press hover click_coords fill_form) do
+    for kind <- ~w(click fill type submit press hover click_coords fill_form sign_in) do
       assert Browser.mutating?("act", %{"kind" => kind}), "act #{kind} was classified a read"
     end
 

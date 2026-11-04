@@ -4,9 +4,12 @@ defmodule FermixCore.Capabilities.Advertisement do
 
   Dispatchability is owned by the caller. This module only applies optional
   executor hooks to the provider-visible copies: `advertise?/1` filters first,
-  then `dynamic_parameters/1` refreshes the surviving schemas.
+  then `dynamic_parameters/1` refreshes the surviving schemas and
+  `dynamic_description/1` their descriptions. A registered description is read
+  once, at boot; the hook is for a tool whose words depend on something only
+  known once the daemon runs (computer use reads what its helper offers, M86 F1).
 
-  Both hooks are looked up through `gate_exported?/2`, which **loads the module
+  Every hook is looked up through `gate_exported?/2`, which **loads the module
   first**. BEAM code loading is lazy, so on a running daemon a tool module that
   no turn has touched yet exports nothing as far as `function_exported?/3` is
   concerned — and a gate that reads it directly skips itself exactly when it
@@ -25,6 +28,7 @@ defmodule FermixCore.Capabilities.Advertisement do
     capabilities
     |> Enum.filter(&advertised?(&1, context))
     |> Enum.map(&refresh_schema(&1, context))
+    |> Enum.map(&refresh_description(&1, context))
     |> Enum.map(&Mandates.hide_set_arguments(&1, context))
   end
 
@@ -42,6 +46,26 @@ defmodule FermixCore.Capabilities.Advertisement do
   end
 
   defp refresh_schema(%Capability{} = capability, _context), do: capability
+
+  defp refresh_description(%Capability{} = capability, context),
+    do: %{capability | description: description(capability, context)}
+
+  @doc """
+  The description a turn reads for `capability`: its executor's
+  `dynamic_description/1` where it exports one, else the copy registered at boot.
+  One reading for every surface that shows it — this module's per-turn refresh
+  and `tool_help`'s docs — so the two never describe the same tool differently.
+  """
+  @spec description(Capability.t(), map()) :: String.t()
+  def description(%Capability{executor: {mod, _fun, _args}} = capability, context)
+      when is_atom(mod) and is_map(context) do
+    if gate_exported?(mod, :dynamic_description),
+      do: mod.dynamic_description(context),
+      else: capability.description
+  end
+
+  def description(%Capability{} = capability, context) when is_map(context),
+    do: capability.description
 
   # An unloadable module (a stale registration) exports nothing and is left
   # ungated here — dispatch fails loudly at execute rather than silently here.

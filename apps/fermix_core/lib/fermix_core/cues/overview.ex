@@ -8,7 +8,8 @@ defmodule FermixCore.Cues.Overview do
 
   Nothing here carries cue text: a watcher is its ids, switches and counts, and
   a source is Fermix's own status columns. Watchers are made in chat (design
-  §8.1), so the page lists them and changes nothing.
+  §8.1), so the page lists them and changes nothing but a follow-up's Always
+  allow, which it only takes back (`Cues.Watchers.ask_first/3`).
 
   A stream keeps only what passes (M60_CUE_INTAKE_AT_SCALE.md §3.4), so what it
   received and what its watchers were offered or judged without keeping are
@@ -18,12 +19,15 @@ defmodule FermixCore.Cues.Overview do
   Every read takes `:repo` (default `Memory.Repo`) or a door server, so a test
   names its own; `:cues_config` (the `[fermix_core.cues]` keyword, default the
   application's) names the stream sources a watcher's state reads;
-  `:mandate_opts` carries the `Cues.Mandates` and `Cues.Pins` seams. Memory
-  switched off answers `{:error, :memory_off}`.
+  `:mandate_opts` carries the `Cues.Mandates` and `Cues.Pins` seams, and
+  `:follow_up_opts` the `Cues.FollowUpReadiness` seams a watcher's follow-up
+  reads. Memory switched off answers `{:error, :memory_off}`.
   """
 
   alias FermixCore.Cues.Deliveries
   alias FermixCore.Cues.Door
+  alias FermixCore.Cues.Filter.Decision
+  alias FermixCore.Cues.FollowUps
   alias FermixCore.Cues.Mandates
   alias FermixCore.Cues.Pins
   alias FermixCore.Cues.Watchers
@@ -56,10 +60,12 @@ defmodule FermixCore.Cues.Overview do
           name: String.t(),
           filter: String.t(),
           sources: [String.t()],
-          task_job_id: String.t(),
+          task_job_id: String.t() | nil,
           task_name: String.t() | nil,
+          follow_up: follow_up() | nil,
           enabled?: boolean(),
           held?: boolean(),
+          held_sentence: String.t() | nil,
           needs_update: Watchers.update_needed(),
           offered: non_neg_integer(),
           waiting: non_neg_integer(),
@@ -73,6 +79,20 @@ defmodule FermixCore.Cues.Overview do
           task_paused?: boolean(),
           instruction_count: non_neg_integer(),
           created_at: DateTime.t() | nil
+        }
+
+  @typedoc """
+  A watcher's follow-up (M60_WATCHER_CODING_RUNS.md §3.5): its job and name,
+  whether the owner's Always allow lets it run with no card for what it runs
+  and what sets it off now (else it asks first), and Fermix's sentence while
+  it is held (`Cues.FollowUps.held/2`), else nil.
+  """
+  @type follow_up :: %{
+          job_id: String.t(),
+          name: String.t() | nil,
+          always_allowed?: boolean(),
+          held: String.t() | nil,
+          paused?: boolean()
         }
 
   @type mandate_counts :: %{
@@ -184,7 +204,9 @@ defmodule FermixCore.Cues.Overview do
 
   @doc """
   Every watcher, by name, with its task's name and whether the task is paused,
-  whether its filter is held by provider failures, the update it needs to keep
+  its follow-up (`t:follow_up/0`), whether its filter is held by provider
+  failures and, for a hold whose cause is the screen's decision model, Fermix's
+  sentence naming it (`held_sentence`, `filter_hold/2`), the update it needs to keep
   the rules (`Cues.Watchers.update_needed/2`), its budgets and instruction
   count, and what it received in the day before `now`: `offered` (every item
   its words let through, kept or not), `waiting` (pending or being filtered),
@@ -201,12 +223,15 @@ defmodule FermixCore.Cues.Overview do
            {:ok, held} <- call(CuesFilterSql, {:held_watchers}, opts),
            {:ok, summary} <- Deliveries.summary(%{since: since}, repo: repo(opts)),
            {:ok, counted} <- counted("watcher", now, opts),
-           {:ok, jobs} <- cue_jobs(opts, & &1) do
+           {:ok, jobs} <- all_jobs(opts),
+           {:ok, follow_ups} <- follow_ups(watchers, jobs, opts) do
         facts = %{
           held_ids: MapSet.new(held, & &1.watcher_id),
+          screen_hold: Decision.no_route_sentence(cues_config(opts)),
           stored: Map.new(summary.watchers, &{&1.watcher_id, &1}),
           counted: counted,
-          jobs: Map.new(jobs, &{&1.id, &1}),
+          jobs: Map.new(jobs, &{&1.id, job_view(&1)}),
+          follow_ups: follow_ups,
           streams: Watchers.stream_refs(opts)
         }
 
@@ -225,14 +250,46 @@ defmodule FermixCore.Cues.Overview do
   def cue_jobs(opts) when is_list(opts), do: cue_jobs(opts, &JobRegistry.cue_job?/1)
 
   defp cue_jobs(opts, keep?) do
-    result =
-      with :ok <- running(opts),
-           {:ok, jobs} <- JobRegistry.list_jobs(repo: repo(opts)) do
-        {:ok, jobs |> Enum.filter(keep?) |> Enum.map(&job_view/1)}
-      end
+    with {:ok, jobs} <- all_jobs(opts),
+         do: {:ok, jobs |> Enum.filter(keep?) |> Enum.map(&job_view/1)}
+  end
 
+  defp all_jobs(opts) do
+    result = with :ok <- running(opts), do: JobRegistry.list_jobs(repo: repo(opts))
     memory_off(result)
   end
+
+  # Each follow-up, by watcher id: its job's name, how it runs, and whether it is
+  # held now. A follow-up whose job is gone has no row.
+  defp follow_ups(watchers, jobs, opts) do
+    by_id = Map.new(jobs, &{&1.id, &1})
+    held_opts = Keyword.take(opts, [:cues_config]) ++ Keyword.get(opts, :follow_up_opts, [])
+
+    watchers
+    |> Enum.filter(&Map.has_key?(by_id, &1.follow_up_job_id))
+    |> Enum.reduce_while({:ok, %{}}, fn watcher, {:ok, acc} ->
+      case follow_up_view(watcher, Map.fetch!(by_id, watcher.follow_up_job_id), held_opts, opts) do
+        {:ok, view} -> {:cont, {:ok, Map.put(acc, watcher.id, view)}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp follow_up_view(watcher, job, held_opts, opts) do
+    with {:ok, allowed?} <- Watchers.always_allowed(watcher, repo: repo(opts)) do
+      {:ok,
+       %{
+         job_id: job.id,
+         name: job.name,
+         always_allowed?: allowed?,
+         held: held_sentence(FollowUps.held(job, held_opts)),
+         paused?: Map.get(job, :enabled?) == false
+       }}
+    end
+  end
+
+  defp held_sentence(nil), do: nil
+  defp held_sentence({_label, sentence}), do: sentence
 
   defp job_view(job), do: %{id: job.id, name: job.name, paused?: Map.get(job, :enabled?) == false}
 
@@ -280,8 +337,10 @@ defmodule FermixCore.Cues.Overview do
       sources: watcher.sources,
       task_job_id: watcher.task_job_id,
       task_name: Map.get(job, :name),
+      follow_up: Map.get(facts.follow_ups, watcher.id),
       enabled?: watcher.enabled?,
       held?: MapSet.member?(facts.held_ids, watcher.id),
+      held_sentence: held_sentence(MapSet.member?(facts.held_ids, watcher.id), facts.screen_hold),
       needs_update: Watchers.update_needed(watcher, facts.streams),
       offered: Enum.sum(Map.values(not_streamed)) + count(live, ["offered"]),
       waiting: count(by_state, @waiting_states),
@@ -297,6 +356,31 @@ defmodule FermixCore.Cues.Overview do
       created_at: watcher.created_at
     }
   end
+
+  # A held filter's every call meets the screen first, so while the screen's
+  # decision model cannot run, that is what holds it. Any other hold is a
+  # provider's failure, whose words reach no surface.
+  defp held_sentence(true, screen_hold), do: screen_hold
+  defp held_sentence(false, _screen_hold), do: nil
+
+  @doc """
+  Watcher `id`'s filter hold in Fermix's own words: the screen's sentence
+  (`Cues.Filter.Decision.no_route_sentence/1`) while its filter is held and the
+  screen's decision model cannot run, else nil. Takes `:repo` and
+  `:cues_config`.
+  """
+  @spec filter_hold(String.t(), keyword()) ::
+          {:ok, String.t() | nil} | {:error, :memory_off | term()}
+  def filter_hold(id, opts) when is_binary(id) and is_list(opts) do
+    with {:ok, held} <- call(CuesFilterSql, {:held_watchers}, opts) do
+      held? = Enum.any?(held, &(&1.watcher_id == id))
+      {:ok, held_sentence(held?, Decision.no_route_sentence(cues_config(opts)))}
+    end
+  end
+
+  defp cues_config(opts),
+    do:
+      Keyword.get_lazy(opts, :cues_config, fn -> Application.get_env(:fermix_core, :cues, []) end)
 
   defp count(counts, keys), do: keys |> Enum.map(&Map.get(counts, &1, 0)) |> Enum.sum()
 

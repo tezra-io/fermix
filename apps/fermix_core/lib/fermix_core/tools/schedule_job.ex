@@ -9,6 +9,7 @@ defmodule FermixCore.Tools.ScheduleJob do
   alias FermixCore.Capabilities.AccessGate
   alias FermixCore.Capabilities.Builtin.Tool
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Checklists.Access, as: ChecklistAccess
   alias FermixCore.Jobs.DeliveryDefaults
   alias FermixCore.Jobs.Registry
   alias FermixCore.Tools.JobRegistrySupport, as: Support
@@ -159,14 +160,15 @@ defmodule FermixCore.Tools.ScheduleJob do
          {:ok, requested_tools} <- caller_scoped_allowed_tools(args, context),
          {:ok, allowed_tools} <- Support.within_run_tools(requested_tools, context),
          :ok <- AccessGate.check_job_tools(allowed_tools, context),
-         {:ok, skill_name} <- validate_skill_name(args, context),
+         :ok <- ChecklistAccess.check_job_tools(allowed_tools, context),
+         {:ok, skill} <- validate_skill_name(args, context),
          {:ok, created_by_trust} <- creator_trust(context),
          {:ok, {provider, model}} <- Support.validate_route_pin(args) do
       attrs = %{
         name: name,
         schedule: schedule,
         task_prompt: task,
-        skill_name: skill_name,
+        skill_name: skill && Map.get(skill, :name),
         provider: provider,
         model: model,
         description: Support.optional_string(args, "description"),
@@ -189,6 +191,7 @@ defmodule FermixCore.Tools.ScheduleJob do
           job
           |> Support.job_payload(Support.repo(context))
           |> put_run_tools_note(requested_tools, allowed_tools, context)
+          |> Support.put_skill_tools_note(skill, context)
           |> Support.success_json()
 
         {:error, reason} ->
@@ -239,7 +242,8 @@ defmodule FermixCore.Tools.ScheduleJob do
 
   # A job may name a skill so the future run executes inside the skill's
   # tool/policy confinement (enforced in Jobs.Runner). Reject unknown skills at
-  # create time so the binding can never reference a skill that does not exist.
+  # create time so the binding can never reference a skill that does not exist;
+  # the loaded skill comes back so the result can say what its list lacks.
   defp validate_skill_name(args, context) do
     case Support.optional_string(args, "skill_name") do
       nil ->
@@ -249,7 +253,7 @@ defmodule FermixCore.Tools.ScheduleJob do
         registry = Map.get(context, :skill_registry, SkillRegistry)
 
         case SkillRegistry.load(registry, name) do
-          {:ok, _definition} -> {:ok, name}
+          {:ok, definition} -> {:ok, definition}
           {:error, {:unknown_skill, _}} -> {:error, "unknown_skill: #{name}"}
         end
     end

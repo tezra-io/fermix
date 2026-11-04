@@ -935,8 +935,26 @@ def test_judge_tool_evidence_is_deterministically_bounded():
     evidence = run_eval._tool_evidence(view, 0)
     encoded = json.dumps(evidence, sort_keys=True).encode("utf-8")
     assert len(encoded) <= run_eval._EVIDENCE_RECORD_MAX_BYTES
-    assert evidence["omitted_tool_spans"] == 18
+    # Five spans cut at the per-tool cap fill the record budget; the rest are counted.
+    assert evidence["omitted_tool_spans"] == 25
     assert "[truncated]" in encoded.decode("utf-8")
+
+
+def test_judge_tool_evidence_keeps_a_cue_tool_result_whole():
+    # The largest list_cues (2,908 bytes) and manage_watcher (3,375 bytes) evidence in the
+    # first full live cues run: the old 2,000-byte cap cut the last sources a reply
+    # listed and a follow-up's held line, so the judge failed replies that were right.
+    held = "Held until it is ready: grant it with /grant path /Users/vela/src/brindle."
+    span = {
+        "name": "manage_watcher",
+        "input": {"action": "create", "name": "brindle-watch"},
+        "output": {"content": "s" * 3_200 + held},
+        "error_info": None,
+    }
+    evidence = run_eval._tool_evidence(SimpleNamespace(tool_spans=[span]), 0)
+    text = evidence["tools"][0]["evidence"]
+    assert held in text
+    assert "[truncated]" not in text
 
 
 def test_judge_usage_is_recorded_when_the_api_reports_it():
@@ -2728,12 +2746,14 @@ def test_linux_app_gates_accept_the_app_answer():
             "fermix.service running after you close the window or log out.",
         "open_app_at_login":
             "Yes: switch on Open at login on Home and the app opens in the tray "
-            "when you log in.",
-        "fresh_conversation_new_did_nothing":
-            "Slash commands do not run in the app's chat; New conversation at the "
-            "top of the Chat page starts a fresh one.",
+            "when you log in. It writes its own entry to ~/.config/autostart, so "
+            "you never make one by hand.",
+        "fresh_conversation_no_button":
+            "Type /new in the chat: it starts the conversation afresh. There is no "
+            "button for it, and it clears neither the app nor your phone.",
         "clear_chat_like_telegram":
-            "Use New conversation at the top of Chat: /new is not run there.",
+            "Yes: /new works in the app's chat too and starts the conversation "
+            "afresh; what is already shown stays.",
         "stopped_answering":
             "Check Home for what needs attention, then open Doctor and Run checks; "
             "Logs follows the daemon log. `journalctl --user -u fermix` says why a "
@@ -2741,6 +2761,13 @@ def test_linux_app_gates_accept_the_app_answer():
         "restart_after_change":
             "Click Restart Fermix… in the window's header; `fermix restart` in a "
             "terminal does the same.",
+        "update_the_app":
+            "Open Settings > Updates in the app; it updates Fermix too, since "
+            "Fermix comes in the same package.",
+        "updates_on_its_own":
+            "It checks by itself when Fermix starts and once a day (Check for "
+            "updates automatically, in Settings > Updates), and installs one only "
+            "when you ask.",
         "timer_pops_up_on_the_desktop":
             "Yes: it shows as a desktop notification while you are logged in to "
             "the desktop. There is nothing to grant in Permissions.",
@@ -2756,7 +2783,9 @@ def test_linux_app_gates_accept_the_app_answer():
 def test_linux_app_gates_reject_the_wrong_surface():
     cases = _suite_cases("linux_app")
     # Each wrong answer still names its case's floor where it has a wrong-surface
-    # gate, which isolates the refusal to that gate.
+    # gate, which isolates the refusal to that gate. The chat cases have no such
+    # gate: their wrong answer is the old no-slash-commands one, which misses the
+    # `/new` floor.
     wrong = {
         "switch_provider_sanity":
             "Run `fermix setup --provider anthropic`, then look at Settings > Providers.",
@@ -2765,15 +2794,19 @@ def test_linux_app_gates_reject_the_wrong_surface():
         "keep_running_after_logout":
             "Turn on Run in the background, then `launchctl load` the agent.",
         "open_app_at_login":
-            "Open at login is flaky, so write ~/.config/autostart/fermix.desktop.",
-        "fresh_conversation_new_did_nothing":
-            "Type /new again, it works there too.",
+            "Open at login is flaky; add Fermix to Login Items instead.",
+        "fresh_conversation_no_button":
+            "Use New conversation at the top of Chat.",
         "clear_chat_like_telegram":
-            "Yes, /new works the same in the app.",
+            "Slash commands do not run in the app; use New conversation instead.",
         "stopped_answering":
             "Open Doctor, then run `brew services restart fermix`.",
         "restart_after_change":
             "Restart Fermix with `launchctl kickstart -k gui/$UID/io.tezra.fermix`.",
+        "update_the_app":
+            "Check for Updates… is broken; run `brew upgrade fermix`.",
+        "updates_on_its_own":
+            "Check for Updates… never runs on its own; use `brew upgrade fermix`.",
         "timer_pops_up_on_the_desktop":
             "It pops up as a notification once Fermix is allowed in Login Items.",
         "reminders_on_this_screen":
@@ -3019,7 +3052,8 @@ def test_report_states_an_aborted_run_stopped_early(tmp_path):
             "judge_calls", "judge_usage_reported_calls", "judge_tokens_reported")},
         "suites": [], "reliability": [],
         "aborted": {"suite": "acme", "case": "one", "tool": "acme_read_board",
-                    "fragment": "out_of_credits", "unrun": 9},
+                    "fragment": "out_of_credits", "unrun": 9,
+                    "why": run_eval._ACCOUNT_ABORT_WHY},
     }
     paths = report.write(results, str(tmp_path / "out"))
     md = pathlib.Path(paths["md"]).read_text()
@@ -3028,6 +3062,7 @@ def test_report_states_an_aborted_run_stopped_early(tmp_path):
         assert "RUN STOPPED EARLY" in text
         assert "9 case(s) were not run" in text
         assert "UNKNOWN, not failed" in text
+        assert "external account condition, not a product failure" in text
 
 
 def test_vendor_error_text_is_redacted_but_the_tool_name_survives():

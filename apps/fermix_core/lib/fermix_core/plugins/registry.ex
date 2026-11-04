@@ -81,6 +81,11 @@ defmodule FermixCore.Plugins.Registry do
   @runtime_kinds ~w(node python binary escript)
   @runtime_floor_regex ~r/^\d+(\.\d+){0,2}$/
   @name_regex ~r/^[a-z][a-z0-9_]{0,63}$/
+  # M85 §04: Fermix keeps the name of its own list tools. A plugin's tools are
+  # `<plugin>_<tool>`, so a plugin named `checklist`, or starting with
+  # `checklist_`, could declare `checklist_read` and lose it without a word to
+  # the built-in that registers first.
+  @reserved_name "checklist"
   @tool_name_regex ~r/^[A-Za-z0-9_-]{1,64}$/
   @max_tool_description_bytes 100
 
@@ -1505,8 +1510,27 @@ defmodule FermixCore.Plugins.Registry do
   end
 
   defp validate_name(name) when is_binary(name) do
-    if Regex.match?(@name_regex, name), do: :ok, else: {:error, {:invalid_name, name}}
+    cond do
+      not Regex.match?(@name_regex, name) -> {:error, {:invalid_name, name}}
+      reserved_name?(name) -> {:error, {:reserved_name, name}}
+      true -> :ok
+    end
   end
+
+  @doc """
+  Whether a plugin may not be named `name`: `checklist`, or a name starting
+  with `checklist_`, the names Fermix keeps for its own list tools (M85 §04).
+  Refused when a plugin is installed and when one is read from disk.
+  """
+  @spec reserved_name?(String.t()) :: boolean()
+  def reserved_name?(name) when is_binary(name),
+    do: name == @reserved_name or String.starts_with?(name, @reserved_name <> "_")
+
+  @doc "The sentence a plugin with a reserved name is refused with."
+  @spec reserved_name_sentence() :: String.t()
+  def reserved_name_sentence,
+    do:
+      "checklist is a name Fermix keeps for its own list tools. Rename the plugin to install it."
 
   defp continue_or_halt(:ok), do: {:cont, :ok}
   defp continue_or_halt({:error, reason}), do: {:halt, {:error, reason}}

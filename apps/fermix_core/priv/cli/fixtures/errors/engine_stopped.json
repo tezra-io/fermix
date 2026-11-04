@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "engine_stopped",
+    "sentence": "Fermix is not running from this home, and this needs it. Start it, then try again."
+  },
+  "ok": false,
+  "schema_version": 1
+}

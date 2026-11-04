@@ -2,7 +2,9 @@ defmodule FermixCore.Cues.Source.Stream.Socket do
   @moduledoc """
   The WebSocket transport of `Cues.Source.Stream` (M60 §3.6), on Mint.WebSocket:
   deliberately dumb. It carries frames and pongs to its owner and reads no
-  message.
+  message. Slack's Socket Mode client (`FermixChannels.Channels.Slack.SocketMode`)
+  is its second owner, and the one that writes text frames once connected
+  (`send_text/2`, its envelope acknowledgements).
 
   `start/3` refuses a URL with no host, and a route the outbound proxy would
   have to carry (`Net.Egress.ensure_direct/2`: this socket cannot tunnel, so it
@@ -116,6 +118,15 @@ defmodule FermixCore.Cues.Source.Stream.Socket do
 
   @impl FermixCore.Cues.Source.Stream.Transport
   def close(socket) when is_pid(socket), do: tell(socket, :close)
+
+  @doc """
+  Writes one text frame to the peer, in order with every other write. Not part
+  of the stream contract: a cue stream sends nothing once connected. Dropped
+  once the socket is closing; a write that fails ends the connection.
+  """
+  @spec send_text(pid(), String.t()) :: :ok
+  def send_text(socket, text) when is_pid(socket) and is_binary(text),
+    do: tell(socket, {:text, text})
 
   defp tell(socket, request) do
     send(socket, {__MODULE__, request})
@@ -398,6 +409,7 @@ defmodule FermixCore.Cues.Source.Stream.Socket do
   defp handle({__MODULE__, :close}, state), do: begin_close(state)
   defp handle({__MODULE__, _request}, %{phase: :closing} = state), do: {:cont, state}
   defp handle({__MODULE__, :ping}, state), do: send_frame(state, {:ping, ""})
+  defp handle({__MODULE__, {:text, text}}, state), do: send_frame(state, {:text, text})
   defp handle(:close_wait_over, %{phase: :closing} = state), do: {:stop, :normal, state}
   defp handle(_other, state), do: {:cont, state}
 

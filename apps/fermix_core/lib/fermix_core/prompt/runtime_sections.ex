@@ -10,6 +10,7 @@ defmodule FermixCore.Prompt.RuntimeSections do
   alias FermixCore.Capabilities.Deferral
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.ComputerUse.Config, as: ComputerUseConfig
+  alias FermixCore.ComputerUse.HelperActions
   alias FermixCore.Harness.Config, as: HarnessConfig
   alias FermixCore.HostFacts
   alias FermixCore.OpenLoops.Config, as: OpenLoopsConfig
@@ -77,7 +78,7 @@ defmodule FermixCore.Prompt.RuntimeSections do
 
     [
       this_fermix(trust),
-      runtime_contract(),
+      runtime_contract(trust),
       sub_agent_orchestration(opts),
       capability_summary_from_opts(opts),
       plugin_index_from_opts(opts),
@@ -118,21 +119,19 @@ defmodule FermixCore.Prompt.RuntimeSections do
   defp format_capability_summary_or_empty(capabilities),
     do: format_capability_summary(capabilities)
 
-  defp runtime_contract do
+  defp runtime_contract(trust) do
+    offered = HelperActions.offered()
+
     """
     ## Runtime Contract
     #{deferred_tools_contract()}- Prefer direct Fermix built-ins over shell, curl, grep, computer-use, or external automation when a built-in owns the verb — but `computer_use` is the ONLY tool that acts on the user's OWN live screen; use it when the task is about a page/app/session they already have open (`browser`/`shell` run in their own context and won't touch their screen).
-    - Even on the user's own screen, an intent the OS can NAME is a script, not a pixel hunt: launch apps from `shell` (`open -a` on macOS), drive app menus/settings/Finder through the OS scripting surface where it names the object (AppleScript via `osascript` on macOS), and spend `computer_use` clicks only on state that exists solely as pixels.
-    - When you do spend pixels: coordinates are pixels in the image you name. Every `computer_use` reply that hands back coordinates carries an `observation_id`, and every click, move, drag, scroll and inspect must carry the id of the image its x,y were read in — read and aim in the same image, and never re-send coordinates from an image that has been refused as unknown, expired or stale.
-    - Better still, don't aim at all — NAME the control. `computer_use`'s `elements` lists each control with a reference and says what that control itself supports: one that lists `press` is pressed by name (`press` with its `element_ref` and that listing's `observation_id`), which moves no pointer and cannot miss, and a `settable` field is filled with `set_value` instead of clicking it and typing. Spend pixels on what the accessibility tree does not expose.
-    - Every mutating `computer_use` action comes back with its own check: the view it acted in, captured once that view stopped changing, or — for a `press` or `set_value` — the control read again. A check that says nothing visible changed is a fact about the view, not a miss, and never a reason to send the same action again; when a run of actions leaves the view unchanged, take a fresh full `screenshot`, take `elements` and act on a control by name, or tell the user what is not working.
-    #{background_computer_use_rule()}- Web routing — pick ONE and commit; switch only on a new reason, never rotate through tools for the same goal:
-      - If a connected plugin owns the surface (e.g. `github_*` for GitHub, `notion_*` for Notion, `obsidian_*` for the vault, `x_*` for X/Twitter, the Google tools for mail/calendar/drive) use its tools — they hit the real API directly; do NOT open the browser or `web_search` for that surface. Any such plugin is listed under Plugins below.
+    #{computer_use_rules(offered)}#{background_computer_use_rule()}- Web routing — pick ONE and commit; switch only on a new reason, never rotate through tools for the same goal:
+      - If a connected plugin owns the surface (e.g. `github_*` for GitHub, `notion_*` for Notion, `obsidian_*` for the vault, `x_*` for X/Twitter, the Google tools for mail/calendar/drive) use its tools — they hit the real API directly; do NOT open the browser or `web_search` for what they cover. What no listed tool does, or what the service rejects for a reason a retry or a reconnect won't change, is a new reason to switch to `browser` (say why); a hold or refusal from Fermix or the user never is. Any such plugin is listed under Plugins below.
       - `web_search` for a fact with no known URL — anything current, changing, or possibly moved since training (prices, rates, versions, who holds a role, schedules, hours, addresses, news) as well as plain lookups; a confident memory of a mutable fact is still a reason to search.
       - `web_fetch` for the readable text of ONE known URL whose content is in the server HTML.
     #{place_routing_rule()}  - `browser` for JavaScript/dynamic/interactive pages or data only a rendered or driven page exposes (booking flows, seat maps, dashboards, login, forms) — in its OWN browser instance, not the page/app the user has open on screen (for that, `computer_use`).
       - Never shell-scrape a JS-rendered site (`curl`/`urllib`/`requests` return empty or partial markup — a dead end, not a retry). An empty `web_search`/`web_fetch` result on dynamic content is the signal to switch to `browser`, not to rerun the same tool.
-    - Drive ONE surface per task: don't restart the same work in the other tool's separate session — wait for a change with the session you're already in (the browser's `act` wait for a page you drive, `computer_use`'s `wait_for_change` for the host screen). On a single shared page, structure goes through `browser` and pixels through `computer_use`: that split is one context, not a switch.
+    - Drive ONE surface per task: don't restart the same work in the other tool's separate session — wait for a change with the session you're already in (the browser's `act` wait for a page you drive, `computer_use`'s #{screen_wait(offered)} for the host screen). On a single shared page, structure goes through `browser` and #{screen_share(offered)} through `computer_use`: that split is one context, not a switch.
     - Research evidence — when a tool result (`web_search`, `web_fetch`, or any other tool that returns URLs) supplies a fact you state, keep that tool's exact URL in the answer:
       - Put the link right after the claim it supports; a compact `Sources` list at the end is fine when inline links would make the answer unreadable.
       - Link a place you recommend to the page the tool returned for it, and link a discovered image to the image AND its source page — the source page is the attribution, not optional metadata.
@@ -149,7 +148,7 @@ defmodule FermixCore.Prompt.RuntimeSections do
     - Ask before storing ambiguous, tentative, hypothetical, quoted, or third-party informational dates.
     - For channel-originated jobs that should report back to the same chat, set `delivery_mode` to `origin`; use `none` only for silent/local jobs.
     - Use `expires_at` for temporary scheduled jobs like "for 2 hours" or "until tomorrow"; keep lifecycle timing out of the job task text.
-    #{open_loop_rules()}- Use the Skill Catalog only to decide whether a skill is relevant.
+    #{open_loop_rules(trust)}- Use the Skill Catalog only to decide whether a skill is relevant.
     - Before following a skill, call `skill_view` with the skill name.
     - Do not infer detailed behavior from the description alone.
     - Use supporting files only if the loaded `SKILL.md` asks for them.
@@ -194,42 +193,149 @@ defmodule FermixCore.Prompt.RuntimeSections do
     end
   end
 
-  # M78 §07, §10: the open-loop routing follows the wire. The tools it names are
-  # advertised only while `[fermix_core.open_loops] enabled`, so the four lines
-  # render only then. Read at build time like the harness lines, so a flip shows
-  # here once the per-epoch cache is rebuilt (a restart at the latest).
-  defp open_loop_rules do
+  # M78 §07, §10; M83 §10: the open-loop routing follows the wire. The tools it
+  # names are advertised only while `[fermix_core.open_loops] enabled`, and only
+  # to the owner, so the five lines render only then and never for a guest. Read
+  # at build time like the harness lines, so a flip shows here once the
+  # per-epoch cache is rebuilt (a restart at the latest).
+  defp open_loop_rules(:guest), do: ""
+
+  defp open_loop_rules(:operator) do
     if OpenLoopsConfig.enabled?() do
-      "- When the owner states an intention with a date by which it matters, I record it " <>
-        "with `open_loop_note` and say nothing about it; raising it later is Fermix's to do. " <>
-        "A date the owner merely asks about is not an intention, nor is an occasion that " <>
-        "arrives whether or not they act, nor a date that reached me through a tool result " <>
-        "rather than their own words.\n" <>
+      "- When the owner tells me about something in their own life that is still unfolding, " <>
+        "I judge it the way a friend who was listening would: let it go, ask about it when " <>
+        "they are next around, or check in on them later. For the last two I record it with " <>
+        "`open_loop_note`, in their words, and say nothing about it; raising it later is " <>
+        "Fermix's to do. What they mean to get done by a date is raised before that date; " <>
+        "what they are waiting on or going through is asked about afterwards. Asking about a " <>
+        "date is not meaning to act by it, and a date that reached me through a tool result " <>
+        "is not theirs until they confirm it.\n" <>
+        "- When the owner, in their own private chat, is preparing something to submit and I " <>
+        "don't know when it closes, I check `open_loop_list`, and if nothing holds it I may " <>
+        "end my reply with one short question asking when, once, never when they are rushed. " <>
+        "A date I looked up for them or found in what they pasted is theirs once they confirm " <>
+        "it, and I look nothing up unless they ask. I record it only with its date; no date, " <>
+        "or no answer, ends it. Asking or considering is not preparing.\n" <>
         "- When the owner states something they have to do by a date and has not asked to " <>
         "be reminded, the open loop is the only record: I do not also store it as an event. " <>
-        "The exception is a loop `open_loop_note` reports as imminent: that loop is never " <>
-        "raised by message, so I also store the reminder, and when the owner settles that task " <>
-        "I settle both.\n" <>
+        "The exception is a loop a tool reports as imminent: that loop is never raised by " <>
+        "message, so I also store the reminder, and when the owner settles or moves that task " <>
+        "I do the same to both. A loop kept for conversation takes no reminder; quiet was the " <>
+        "point.\n" <>
         "- When the owner answers a check-in: done closes the loop for good, with one " <>
         "specific acknowledgement and no further ask; a plan closes it until the plan's " <>
         "date; not yet gets one offer of a concrete time, and the choice stays theirs; a " <>
         "request to stop ends the loop and I keep the boundary. I settle it with " <>
         "`open_loop_update`, from the owner's words only, and I name where a loop came from " <>
         "when I raise it.\n" <>
-        "- A due loop arrives as a system note. I raise it only at a natural stopping point, " <>
-        "never while the owner is under pressure, in one or two sentences at the end of my " <>
-        "reply, and record it as asked; otherwise I leave it.\n"
+        "- A due loop arrives as a system note. I raise at most one, only at a natural " <>
+        "stopping point, never while the owner is under pressure, in one or two sentences at " <>
+        "the end of my reply, and record it as asked; otherwise I leave it. When what they " <>
+        "have told me says this is a hard time for them, anything unrelated that can wait " <>
+        "does. For something they were waiting on or going through, I ask how it went in a " <>
+        "way that matches how they seemed, without assuming the outcome or offering advice " <>
+        "they did not ask for.\n"
     else
       ""
     end
   end
+
+  # The computer-use lines, from the helper's latest reading (`HelperActions`, the
+  # same reading the tool's schema is built from), so the prompt changes only when
+  # it does. A Linux session whose pixel route was refused lists the controls and
+  # nothing else (no `screenshot`), and is steered only toward them.
+  defp computer_use_rules(offered) do
+    if "screenshot" in offered,
+      do:
+        "- Even on the user's own screen, an intent the OS can NAME is a script, not a pixel " <>
+          "hunt: launch apps from `shell` (`open -a` on macOS), drive app menus/settings/Finder " <>
+          "through the OS scripting surface where it names the object (AppleScript via " <>
+          "`osascript` on macOS), and spend `computer_use` clicks only on state that exists " <>
+          "solely as pixels.\n" <> computer_use_controls_rule(offered) <> pixel_rules(),
+      else: controls_only_rules(offered)
+  end
+
+  defp pixel_rules do
+    "- When you do spend pixels: coordinates are pixels in the image you name. Every " <>
+      "`computer_use` reply that hands back coordinates carries an `observation_id`, and every " <>
+      "click, move, drag and scroll must carry the id of the image its x,y were read in — read " <>
+      "and aim in the same image, and never re-send coordinates from an image that has been " <>
+      "refused as unknown, expired or stale.\n" <>
+      "- Every mutating `computer_use` action comes back with its own check: the view it acted " <>
+      "in, captured once that view stopped changing, or — for a verb on a control — the " <>
+      "control read again. A check that says nothing visible changed is a fact about the view, " <>
+      "not a miss, and never a reason to send the same action again; when a run of actions " <>
+      "leaves the view unchanged, take a fresh full `screenshot` or tell the user what is not " <>
+      "working.\n"
+  end
+
+  # Only a Linux session reads this way, so it names no macOS launcher or scripting.
+  defp controls_only_rules(offered) do
+    "- Even on the user's own screen, an intent the OS can NAME is a script: launch apps and " <>
+      "change settings from `shell`, and act through `computer_use` only on what no script " <>
+      "names.\n" <>
+      "- This desktop's `computer_use` works by control alone: its `elements` lists each one " <>
+      "with a reference and the verbs it takes; send one of those verbs with its " <>
+      "`element_ref` and that listing's `observation_id`. List an app plainly the first time " <>
+      "(no `scope` or `query`): only that wakes an app that builds its controls late. What " <>
+      "`elements` does not list cannot be reached; tell the user." <>
+      wait_rule(offered) <>
+      "\n- Every `computer_use` verb on a control comes back with the control read again: " <>
+      "its state, never proof the action had its effect, so repeat a verb only when that " <>
+      "state shows the effect is missing.\n"
+  end
+
+  # M86 P2: controls before pixels, rendered only where the installed helper lists
+  # controls at all — a helper without `elements` would be steered toward verbs it
+  # does not have.
+  defp computer_use_controls_rule(offered) do
+    if "elements" in offered do
+      "- Where the screen exposes controls, don't aim at all — work by control: " <>
+        "`computer_use`'s `elements` lists each one with a reference and the verbs it takes; " <>
+        "send one of those verbs with its `element_ref` and that listing's `observation_id`, " <>
+        "which moves no pointer and cannot miss. List an app plainly the first time (no " <>
+        "`scope` or `query`): only that wakes an app that builds its controls late. Spend " <>
+        "pixels on canvases, games, remote desktops and anything `elements` does not list." <>
+        wait_rule(offered) <> "\n"
+    else
+      ""
+    end
+  end
+
+  defp wait_rule(offered) do
+    cond do
+      "wait_for" not in offered ->
+        ""
+
+      "screenshot" in offered ->
+        " To wait, name the condition (`until` on the action, or `wait_for`) instead of " <>
+          "polling with screenshots."
+
+      true ->
+        " To wait, name the condition (`until` on the action, or `wait_for`) instead of " <>
+          "polling."
+    end
+  end
+
+  # How `computer_use` waits on the host screen, and what it carries there, on
+  # this reading.
+  defp screen_wait(offered) do
+    cond do
+      "wait_for_change" in offered -> "`wait_for_change`"
+      "wait_for" in offered -> "`wait_for`"
+      true -> "`wait`"
+    end
+  end
+
+  defp screen_share(offered),
+    do: if("screenshot" in offered, do: "pixels", else: "the screen's controls")
 
   # M42 slice 5 §1: rendered only where the operator switched the experimental
   # bound-window surface on, exactly like the tool schema that offers it — the
   # off-path prompt stays byte-identical to what shipped before it, so a daemon
   # without the flag is never steered toward actions it does not advertise.
   defp background_computer_use_rule do
-    if ComputerUseConfig.background?() do
+    if ComputerUseConfig.background?() and "select_target" in HelperActions.offered() do
       "- `computer_use` can work INSIDE ONE WINDOW: `windows` to find it, `select_target` " <>
         "with its `window_id` to bind it, and from then on every look and every action is " <>
         "answered from that window's own picture, even when something covers it. Prefer it " <>
@@ -299,6 +405,7 @@ defmodule FermixCore.Prompt.RuntimeSections do
       |> Enum.reject(&credential_gated_when_unready?/1)
       |> Enum.reject(&call_scoped?/1)
       |> Enum.reject(&open_loop_unlisted?/1)
+      |> Enum.reject(&checklist_unlisted?/1)
       |> Enum.group_by(&(&1.metadata[:category] || :system))
       |> Enum.sort_by(fn {category, _caps} -> category_index(category) end)
       |> Enum.map_join("\n\n", &format_category/1)
@@ -337,6 +444,13 @@ defmodule FermixCore.Prompt.RuntimeSections do
   end
 
   defp credential_gated_when_unready?(_capability), do: false
+
+  # The list tools (M85 §11) are offered only on the owner's private turn or
+  # voice call, and the catalog is cached per profile, which an owner's group
+  # chat shares, so it never names them; the per-turn rules
+  # (`Checklists.Note.rules/2`) name them where the wire carries their schemas.
+  defp checklist_unlisted?(%{kind: :builtin, name: "checklist_" <> _rest}), do: true
+  defp checklist_unlisted?(_capability), do: false
 
   # A built-in offered only while a Live call in the chat is up (M56 §4.4). The
   # catalog is cached per profile and cannot follow a call that starts and ends
@@ -456,7 +570,7 @@ defmodule FermixCore.Prompt.RuntimeSections do
       |> Enum.map_join("\n", &format_plugin/1)
 
     "## Plugins\n" <>
-      "These connected integrations own their surface — prefer their tools (listed by name below) over the browser, web, or shell. Open a plugin's skill with `skill_view` when you need its workflow or argument conventions — not as a step before every tool call. A plugin showing a status instead of tools is not connected; offer to connect it on the setup page rather than scraping.\n" <>
+      "These connected integrations own their surface — prefer their tools (listed by name below) over the browser, web, or shell. Open a plugin's skill with `skill_view` when you need its workflow or argument conventions — not as a step before every tool call. A plugin showing a status instead of tools is not connected: offer to connect it on the setup page, and use the browser in its place only if the user asks.\n" <>
       "<plugins>\n#{body}\n</plugins>"
   end
 

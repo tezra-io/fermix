@@ -14,6 +14,9 @@ defmodule FermixCore.HostFactsTest do
 
   @plist "/System/Library/CoreServices/SystemVersion.plist"
   @entry "io.tezra.Fermix.desktop"
+  @package_entries "/usr/share/applications"
+  @system_exports "/var/lib/flatpak/exports/share/applications"
+  @user_exports "/home/me/.local/share/flatpak/exports/share/applications"
 
   # A plutil that answers SystemVersion.plist's two keys and fails on anything else.
   defp plutil(name, version) do
@@ -32,6 +35,23 @@ defmodule FermixCore.HostFactsTest do
     SafeRm.make_tmp_dir!("host-facts-#{context}-#{System.unique_integer([:positive])}")
   end
 
+  # Reads a Linux package host for /home/me whose real entry directories sit
+  # under a scratch root, with the app's entry written in each of `installed`.
+  defp read_with_entries(installed) do
+    root = exports_dir("root")
+    on_exit(fn -> SafeRm.rm_rf!(root) end)
+
+    for dir <- installed do
+      File.mkdir_p!(Path.join(root, dir))
+      File.write!(Path.join([root, dir, @entry]), "[Desktop Entry]\n")
+    end
+
+    HostFacts.read(%{profile: :linux_package_cli, os: :linux}, "x86_64",
+      os_release: os_release("PRETTY_NAME=\"Ubuntu 24.04 LTS\"\n"),
+      app_entry_dirs: Enum.map(HostFacts.app_entry_dirs(nil, "/home/me"), &Path.join(root, &1))
+    )
+  end
+
   # A Mac reads macOS 26.1 on arm64, a Linux machine Ubuntu 24.04 LTS on x86_64
   # with no desktop app, unless `overrides` says otherwise.
   defp facts(install, os, overrides \\ []) do
@@ -48,12 +68,12 @@ defmodule FermixCore.HostFactsTest do
   end
 
   describe "read/3" do
-    test "a Mac reads its name and version from SystemVersion.plist and asks no Flatpak question" do
+    test "a Mac reads its name and version from SystemVersion.plist and asks no desktop app question" do
       facts =
         HostFacts.read(%{profile: :app_engine, os: :darwin}, "arm64",
           plutil: plutil("macOS", "26.1"),
           os_release: fn -> flunk("a Mac has no os-release") end,
-          flatpak_exports: ["/nonexistent-must-not-be-read"]
+          app_entry_dirs: ["/nonexistent-must-not-be-read"]
         )
 
       assert facts == %{
@@ -77,29 +97,30 @@ defmodule FermixCore.HostFactsTest do
           HostFacts.read(%{profile: :linux_package_cli, os: :linux}, "x86_64",
             plutil: never(:plutil),
             os_release: os_release(text),
-            flatpak_exports: []
+            app_entry_dirs: []
           )
 
         assert facts.os_version == expected
       end
     end
 
-    test "the Linux desktop app is seen in the system or the user Flatpak exports" do
-      empty = exports_dir("empty")
-      exported = exports_dir("exported")
-      on_exit(fn -> Enum.each([empty, exported], &SafeRm.rm_rf!/1) end)
-      File.write!(Path.join(exported, @entry), "[Desktop Entry]\n")
-
-      read = fn system, user ->
-        HostFacts.read(%{profile: :linux_package_cli, os: :linux}, "x86_64",
-          os_release: os_release("PRETTY_NAME=\"Ubuntu 24.04 LTS\"\n"),
-          flatpak_exports: [system, user]
-        )
+    # The app's .deb or .rpm package installs its entry in /usr/share/applications,
+    # the earlier Flatpak exported it; an entry anywhere else is no install of it.
+    test "the Linux desktop app is seen where its package or its Flatpak installs its entry" do
+      for {installed, expected} <- [
+            {[], false},
+            {[@package_entries], true},
+            {[@system_exports], true},
+            {[@user_exports], true},
+            {[@package_entries, @system_exports], true},
+            {[@package_entries, @user_exports], true},
+            {["/usr/local/share/applications"], false},
+            {["/home/me/.local/share/applications"], false},
+            {["/home/me/.config/autostart"], false}
+          ] do
+        assert read_with_entries(installed).linux_app == expected,
+               "the entry in #{inspect(installed)} read #{!expected}"
       end
-
-      assert read.(empty, empty).linux_app == false
-      assert read.(empty, exported).linux_app == true
-      assert read.(exported, empty).linux_app == true
     end
 
     test "a version that cannot be read is :unknown and says why, never a placeholder" do
@@ -119,7 +140,7 @@ defmodule FermixCore.HostFactsTest do
       for {host, seams, reason} <- cases do
         log =
           capture_log(fn ->
-            facts = HostFacts.read(host, "arm64", [flatpak_exports: []] ++ seams)
+            facts = HostFacts.read(host, "arm64", [app_entry_dirs: []] ++ seams)
             assert facts.os_version == :unknown
           end)
 
@@ -139,17 +160,15 @@ defmodule FermixCore.HostFactsTest do
     end
   end
 
-  describe "flatpak_export_dirs/2" do
-    test "the system exports, then the user's under XDG_DATA_HOME or ~/.local/share" do
-      system = "/var/lib/flatpak/exports/share/applications"
-
-      assert HostFacts.flatpak_export_dirs("/data/me", "/home/me") ==
-               [system, "/data/me/flatpak/exports/share/applications"]
+  describe "app_entry_dirs/2" do
+    test "the package's entries, the system Flatpak exports, then the user's under XDG_DATA_HOME or ~/.local/share" do
+      assert HostFacts.app_entry_dirs("/data/me", "/home/me") ==
+               [@package_entries, @system_exports, "/data/me/flatpak/exports/share/applications"]
 
       # The XDG base directory rule: unset, empty or relative means the default.
       for unset <- [nil, "", "relative/share"] do
-        assert HostFacts.flatpak_export_dirs(unset, "/home/me") ==
-                 [system, "/home/me/.local/share/flatpak/exports/share/applications"]
+        assert HostFacts.app_entry_dirs(unset, "/home/me") ==
+                 [@package_entries, @system_exports, @user_exports]
       end
     end
   end
@@ -176,7 +195,7 @@ defmodule FermixCore.HostFactsTest do
         {facts(:linux_package_cli, :linux, linux_app: true),
          """
          ## This Fermix
-         - Install: the Fermix Linux package (.deb or .rpm), run as the systemd user unit fermix.service and managed with the `fermix` command, browser setup and config.toml. The Fermix desktop app (Flatpak io.tezra.Fermix) was installed when Fermix started: it shows settings, chat, voice and logs, so answer "how do I" with its own labels for anything it has a control for.
+         - Install: the Fermix Linux package (.deb or .rpm), run as the systemd user unit fermix.service and managed with the `fermix` command, browser setup and config.toml. The Fermix desktop app (io.tezra.Fermix) was installed when Fermix started: it shows settings, chat, voice and logs, so answer "how do I" with its own labels for anything it has a control for.
          - Machine: Ubuntu 24.04 LTS on x86_64.
          - This computer: a reminder or timer can ring here as a desktop notification while a desktop session is running (`event_store` with `delivery: "computer"`); a headless host or a system-wide service has none.
          """},
@@ -190,7 +209,7 @@ defmodule FermixCore.HostFactsTest do
         {facts(:standalone_cli, :linux, linux_app: true, architecture: "arm64"),
          """
          ## This Fermix
-         - Install: the standalone Fermix binary on this Linux machine, run by its own systemd service and managed with the `fermix` command, browser setup and config.toml. The Fermix desktop app (Flatpak io.tezra.Fermix) was installed when Fermix started: it shows settings, chat, voice and logs, so answer "how do I" with its own labels for anything it has a control for.
+         - Install: the standalone Fermix binary on this Linux machine, run by its own systemd service and managed with the `fermix` command, browser setup and config.toml. The Fermix desktop app (io.tezra.Fermix) was installed when Fermix started: it shows settings, chat, voice and logs, so answer "how do I" with its own labels for anything it has a control for.
          - Machine: Ubuntu 24.04 LTS on arm64.
          - This computer: a reminder or timer can ring here as a desktop notification while a desktop session is running (`event_store` with `delivery: "computer"`); a headless host or a system-wide service has none.
          """},
@@ -268,7 +287,7 @@ defmodule FermixCore.HostFactsTest do
   describe "the facts boot recorded" do
     # The application's own start read them through the stub `config/test.exs`
     # pins, on this run's real host profile and architecture: no test reads the
-    # machine's plist, os-release or Flatpak exports.
+    # machine's plist, os-release or desktop entry directories.
     test "boot read them through the pinned stub, and the section renders from them" do
       expected = HostFactsStub.read(BootProfile.host(), BuildInfo.identity().architecture)
 

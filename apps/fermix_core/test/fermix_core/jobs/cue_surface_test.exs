@@ -48,6 +48,25 @@ defmodule FermixCore.Jobs.CueSurfaceTest do
                ["glob_search", "git_read", "cue_history"]
     end
 
+    # The runner's reading (`Jobs.Runner.skill_allowed_tools/1`): a skill's
+    # `[]` names no tools, so the base readers go; a job's `[]` narrows nothing.
+    # What the cue itself brings (history, notes) stays.
+    test "a skill naming no tools takes the base readers away; a job naming none does not" do
+      assert CueSurface.tools(%{allowed_tools: []}, %{allowed_tools: []}, @notes_off, nil) ==
+               ["cue_history"]
+
+      assert CueSurface.tools(
+               %{allowed_tools: ["file_read"]},
+               %{allowed_tools: []},
+               @notes_on,
+               nil
+             ) ==
+               ["cue_history"] ++ @notes
+
+      assert CueSurface.tools(%{allowed_tools: []}, %{allowed_tools: nil}, @notes_off, nil) ==
+               @base ++ ["cue_history"]
+    end
+
     test "the note tools come only with the watcher's task notes on" do
       assert CueSurface.tools(%{allowed_tools: nil}, nil, @notes_on, nil) ==
                @base ++ ["cue_history"] ++ @notes

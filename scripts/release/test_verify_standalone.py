@@ -8,6 +8,7 @@
 import hashlib
 import json
 import os
+import struct
 import subprocess
 import tempfile
 import unittest
@@ -388,6 +389,234 @@ class VerifyStandaloneTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("must exit 3, got 1", result.stderr)
 
+    # ── the fermix always-on no-daemon stage ──────────────────────────────
+
+    # A release build offers Always On only in a home whose settings turn it
+    # on (`Home.AlwaysOnRelease`): elsewhere the verb refuses in one sentence
+    # before it reads anything, and in such a home it reaches for the engine.
+    def test_always_on_in_a_release_refuses_unreleased_and_writes_nothing(self):
+        self._write_artifact(create_disclaim=True)
+
+        result = self._run("macos_aarch64")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("fermix always-on: Always On is not in this release of Fermix yet.", result.stdout)
+        self.assertIn("fermix always-on: Fermix is not running from this home", result.stdout)
+
+    # The class the switch's half exists for: a release that does not read
+    # the switch from the home's own settings file.
+    def test_rejects_an_always_on_that_ignores_the_home_switch(self):
+        self._write_artifact(create_disclaim=True, always_on="ignores_switch")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "whose settings turn Always On on must print exactly the engine_stopped envelope",
+            result.stderr,
+        )
+
+    def test_rejects_an_always_on_that_rewrites_the_switched_settings(self):
+        self._write_artifact(create_disclaim=True, always_on="rewrites_settings")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("fermix always-on changed the settings of", result.stderr)
+
+    # The class the release gate exists for: a release whose build carries
+    # Always On, which reaches for the engine.
+    def test_rejects_a_release_whose_always_on_is_compiled_in(self):
+        self._write_artifact(create_disclaim=True, always_on="compiled_in")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must print exactly the always_on_unavailable envelope", result.stderr)
+
+    # The release that lacks the verb: the dispatcher's unknown-command exit.
+    def test_rejects_an_artifact_without_the_always_on_verb(self):
+        self._write_artifact(create_disclaim=True, always_on="unknown_verb")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("fermix always-on create-server with no daemon must exit 1, got 2", result.stderr)
+
+    # The class this stage exists for: a step that answers as done with no
+    # engine to take it.
+    def test_rejects_an_always_on_step_that_succeeds_with_no_daemon(self):
+        self._write_artifact(create_disclaim=True, always_on="acts")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must exit 1, got 0", result.stderr)
+
+    def test_rejects_always_on_json_with_a_log_line_on_stdout(self):
+        self._write_artifact(create_disclaim=True, always_on="noisy_stdout")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must print exactly the always_on_unavailable envelope", result.stderr)
+
+    def test_rejects_always_on_that_does_not_say_why_on_stderr(self):
+        self._write_artifact(create_disclaim=True, always_on="silent")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("did not say on stderr why it took no step", result.stderr)
+
+    def test_rejects_always_on_that_writes_a_home_with_no_daemon(self):
+        self._write_artifact(create_disclaim=True, always_on="writes_home")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "fermix always-on wrote more than the boot's secret_key_base into", result.stderr
+        )
+
+    # The stage runs before migrate-to-app, which ends the script on Linux.
+    def test_linux_artifact_runs_the_always_on_stage_too(self):
+        self.artifact = self.base / "fermix_linux_x86_64"
+        self._write_artifact(create_disclaim=False, migrate="refused:not_macos", always_on="acts")
+
+        result = self._run("linux_x86_64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must exit 1, got 0", result.stderr)
+
+    # ── the fermix home stage ─────────────────────────────────────────────
+
+    def test_home_exports_imports_and_marks_moved_once(self):
+        self._write_artifact(create_disclaim=True)
+
+        result = self._run("macos_aarch64")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("primary epoch: 5", result.stdout)
+        self.assertIn("at primary epoch 6.", result.stdout)
+
+    # The release that lacks the verb: the dispatcher's unknown-command exit.
+    def test_rejects_an_artifact_without_the_home_verb(self):
+        self._write_artifact(create_disclaim=True, home="unknown_verb")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("fermix home export must exit 0 in the throwaway world, got 2", result.stderr)
+
+    def test_rejects_a_mark_moved_that_marks_a_moved_home_again(self):
+        self._write_artifact(create_disclaim=True, home="marks_twice")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("a second fermix home mark-moved must exit 1, got 0", result.stderr)
+
+    def test_rejects_a_mark_moved_that_writes_no_marker(self):
+        self._write_artifact(create_disclaim=True, home="not_moved")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("fermix home mark-moved wrote no marker", result.stderr)
+
+    # A release build has no Always On yet, and home status is its screen:
+    # the verb refuses as fermix always-on does. One that answers the home's
+    # facts instead has Always On compiled in.
+    def test_rejects_a_release_whose_home_status_answers(self):
+        self._write_artifact(create_disclaim=True, home="status_answers")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("fermix home status in a release must exit 1, got 0", result.stderr)
+
+    # With the switch in the home's settings the verb answers from the home's
+    # own files, as an Always On server's first boot and nightly update read it.
+    def test_rejects_a_home_status_that_ignores_the_switch(self):
+        self._write_artifact(create_disclaim=True, home="status_ignores_switch")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "fermix home status in a home whose settings turn Always On on must exit 0, got 1",
+            result.stderr,
+        )
+
+    def test_rejects_a_home_status_that_answers_no_update_ceiling(self):
+        self._write_artifact(create_disclaim=True, home="status_without_ceiling")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must answer the home's role and update ceiling", result.stderr)
+
+    def test_rejects_a_home_status_that_refuses_with_another_code(self):
+        self._write_artifact(create_disclaim=True, home="status_other_refusal")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "fermix home status --json in a release must print exactly the always_on_unavailable envelope",
+            result.stderr,
+        )
+
+    # The class the enroll stage exists for: the packaged binary taking a code
+    # file that holds no enrollment code and making the home a candidate anyway.
+    def test_rejects_an_enroll_that_accepts_an_invalid_code(self):
+        self._write_artifact(create_disclaim=True, home="enroll_accepts")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("fermix home enroll with an invalid code must exit 1, got 0", result.stderr)
+
+    def test_rejects_an_enroll_refusal_that_leaves_a_home_behind(self):
+        self._write_artifact(create_disclaim=True, home="enroll_leaves_home")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "fermix home enroll left more than the boot's secret_key_base at", result.stderr
+        )
+
+    # The state a refusal must never leave: a role in the home's settings.
+    def test_rejects_an_enroll_refusal_that_writes_a_role(self):
+        self._write_artifact(create_disclaim=True, home="enroll_writes_role")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "fermix home enroll left more than the boot's secret_key_base at", result.stderr
+        )
+
+    def test_rejects_an_enroll_refusal_that_removes_the_code_file(self):
+        self._write_artifact(create_disclaim=True, home="enroll_consumes")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("fermix home enroll removed the code file it refused", result.stderr)
+
+    # The stage runs before migrate-to-app, which ends the script on Linux.
+    def test_linux_artifact_runs_the_home_stage_too(self):
+        self.artifact = self.base / "fermix_linux_x86_64"
+        self._write_artifact(create_disclaim=False, migrate="refused:not_macos", home="unknown_verb")
+
+        result = self._run("linux_x86_64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("fermix home export must exit 0 in the throwaway world, got 2", result.stderr)
+
     # Every run passes its own pin, written for the target it verifies, and puts
     # a stand-in `codesign` first on PATH: the macOS rows must not depend on the
     # host's signing tools, and a Linux host has none.
@@ -444,6 +673,88 @@ class VerifyStandaloneTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(f"({IROH_VERSION_LINE})", result.stdout)
         self.assertFalse(self.codesign_log.exists())
+
+    # ── the bundled Landlock shim stage (Linux) ───────────────────────────
+
+    def test_linux_artifact_checks_the_landlock_shim(self):
+        self.artifact = self.base / "fermix_linux_x86_64"
+        self._write_artifact(create_disclaim=False, migrate="refused:not_macos")
+
+        result = self._run("linux_x86_64")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertRegex(
+            result.stdout,
+            r"Landlock shim: .+/lib/fermix_nif-0\.9\.0/priv/fermix_landlock \(fermix_landlock: abi 6\)\n",
+        )
+
+    # A release runner whose kernel has no Landlock still proves the shim runs.
+    def test_accepts_a_shim_that_says_landlock_is_unavailable_here(self):
+        self.artifact = self.base / "fermix_linux_aarch64"
+        self._write_artifact(create_disclaim=False, migrate="refused:not_macos", landlock_shim="unavailable")
+
+        result = self._run("linux_aarch64")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("(fermix_landlock: Landlock is unavailable on this kernel", result.stdout)
+
+    def test_rejects_a_linux_release_without_the_landlock_shim(self):
+        self.artifact = self.base / "fermix_linux_x86_64"
+        self._write_artifact(create_disclaim=False, migrate="refused:not_macos", landlock_shim="missing")
+
+        result = self._run("linux_x86_64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must carry exactly one Landlock shim", result.stderr)
+        self.assertIn("found 0", result.stderr)
+
+    def test_rejects_a_linux_release_with_two_landlock_shims(self):
+        self.artifact = self.base / "fermix_linux_x86_64"
+        self._write_artifact(create_disclaim=False, migrate="refused:not_macos", landlock_shim="two")
+
+        result = self._run("linux_x86_64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("found 2", result.stderr)
+
+    def test_rejects_a_landlock_shim_that_is_not_an_executable_file(self):
+        for behaviour in ("not_executable", "symlink"):
+            with self.subTest(behaviour=behaviour):
+                self.artifact = self.base / "fermix_linux_x86_64"
+                self._write_artifact(create_disclaim=False, migrate="refused:not_macos", landlock_shim=behaviour)
+
+                result = self._run("linux_x86_64")
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("Landlock shim is not an executable regular file", result.stderr)
+
+    def test_rejects_a_dynamically_linked_landlock_shim_before_running_it(self):
+        self.artifact = self.base / "fermix_linux_x86_64"
+        self._write_artifact(create_disclaim=False, migrate="refused:not_macos", landlock_shim="dynamic")
+
+        result = self._run("linux_x86_64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Landlock shim is dynamically linked", result.stderr)
+
+    def test_rejects_a_landlock_shim_that_does_not_answer_its_abi(self):
+        for behaviour in ("wrong_answer", "silent_success"):
+            with self.subTest(behaviour=behaviour):
+                self.artifact = self.base / "fermix_linux_x86_64"
+                self._write_artifact(create_disclaim=False, migrate="refused:not_macos", landlock_shim=behaviour)
+
+                result = self._run("linux_x86_64")
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("Landlock shim --abi must print its ABI", result.stderr)
+
+    def test_a_macos_release_needs_no_landlock_shim(self):
+        self._write_artifact(create_disclaim=True)
+
+        result = self._run("macos_aarch64")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("Landlock shim", result.stdout)
 
     def test_rejects_a_release_without_the_helper(self):
         self._write_artifact(create_disclaim=True, iroh_helper="missing")
@@ -772,18 +1083,23 @@ class VerifyStandaloneTest(unittest.TestCase):
         auth_logout="removes",
         browser_bridge="works",
         settings="refuses",
+        always_on="refuses",
+        home="carries",
         iroh_helper="pinned",
         iroh_notices="pinned",
         maintenance="answers",
+        landlock_shim="answers",
     ):
         setup = self._disclaim_setup(create_disclaim, disclaim_executable, disclaim_exit, version)
         helper_setup = self._iroh_helper_setup(iroh_helper, iroh_notices, version)
+        helper_setup += self._landlock_shim_setup(landlock_shim, version)
         marker_line = "" if marker is None else f"touch '{marker}'\n"
         self.empty_payload.mkdir(exist_ok=True)
         self.artifact.write_text(
             "#!/bin/sh\n"
             "set -eu\n"
             f"{marker_line}"
+            f"{self._BOOT_KEY}"
             f"{self._payload_line(version)}"
             'if [ "${1:-}" = "maintenance" ]; then\n'
             f"{self._maintenance_behaviour(maintenance)}"
@@ -807,6 +1123,12 @@ class VerifyStandaloneTest(unittest.TestCase):
             "fi\n"
             'if [ "${1:-}" = "settings" ]; then\n'
             f"{self._settings_behaviour(settings)}"
+            "fi\n"
+            'if [ "${1:-}" = "always-on" ]; then\n'
+            f"{self._always_on_behaviour(always_on)}"
+            "fi\n"
+            'if [ "${1:-}" = "home" ]; then\n'
+            f"{self._home_behaviour(home)}"
             "fi\n"
             f"printf 'fermix {version}\\n'\n",
             encoding="utf-8",
@@ -905,6 +1227,202 @@ class VerifyStandaloneTest(unittest.TestCase):
         if settings == "silent":
             return argv + json + "  exit 3\n"
         raise ValueError(f"unknown settings behaviour: {settings}")
+
+    # The real verb's shape in a release with no daemon: in a home whose
+    # settings carry Always On's switch, the engine_stopped envelope alone on
+    # stdout and the sentence on stderr; in any other, the
+    # always_on_unavailable envelope; exit 1 and nothing written either way.
+    # The argv is pinned so a stage that stops asking for `--json` cannot pass
+    # against it.
+    def _always_on_behaviour(self, always_on):
+        if always_on == "unknown_verb":
+            return "  printf 'fermix: unknown command: always-on\\n' >&2\n  exit 2\n"
+        argv = '  [ "$*" = "always-on create-server --json" ] || exit 64\n'
+        envelope, said = self._always_on_refusal(
+            "always_on_unavailable", "Always On is not in this release of Fermix yet."
+        )
+        stopped, stopped_said = self._always_on_refusal(
+            "engine_stopped",
+            "Fermix is not running from this home, and this needs it. Start it, then try again.",
+        )
+        stops = stopped + stopped_said + "  exit 1\n"
+        switched = {
+            "ignores_switch": envelope + said + "  exit 1\n",
+            "rewrites_settings": '  printf \'enabled = false\\n\' > "$FERMIX_HOME/config.toml"\n' + stops,
+        }.get(always_on, stops)
+        shapes = {
+            "refuses": envelope + said + "  exit 1\n",
+            "compiled_in": stops,
+            "acts": '  printf \'{"ok":true,"result":{}}\\n\'\n' + said + "  exit 0\n",
+            "noisy_stdout": "  printf 'boot notice nobody asked for\\n'\n" + envelope + said + "  exit 1\n",
+            "silent": envelope + "  exit 1\n",
+            "writes_home": '  printf \'[fermix_core.engine]\\n\' > "$FERMIX_HOME/config.toml"\n'
+            + envelope
+            + said
+            + "  exit 1\n",
+            "ignores_switch": envelope + said + "  exit 1\n",
+            "rewrites_settings": envelope + said + "  exit 1\n",
+        }
+        if always_on not in shapes:
+            raise ValueError(f"unknown always-on behaviour: {always_on}")
+        return argv + self._SWITCHED + "  then\n" + switched + "  fi\n" + shapes[always_on]
+
+    # What every boot of the real release writes before any verb runs
+    # (`config/runtime.exs`, `SecretKeyBase.read_or_create!/1`): the home the
+    # environment names, created if it is missing, and its `secret_key_base`.
+    _BOOT_KEY = (
+        'if [ -n "${FERMIX_HOME:-}" ] && [ ! -e "$FERMIX_HOME/secret_key_base" ]; then\n'
+        '  mkdir -p "$FERMIX_HOME"\n'
+        "  printf 'invented-boot-key\\n' > \"$FERMIX_HOME/secret_key_base\"\n"
+        "fi\n"
+    )
+
+    # Whether the home the environment names turns Always On on, read from its
+    # settings file as the real verbs read it.
+    _SWITCHED = (
+        '  if grep -Fqx \'[fermix_core.always_on]\' "$FERMIX_HOME/config.toml" 2>/dev/null &&\n'
+        '    grep -Fqx \'enabled = true\' "$FERMIX_HOME/config.toml"\n'
+    )
+
+    # One refusal's envelope on stdout and its sentence on stderr, as the
+    # verb prints them.
+    def _always_on_refusal(self, code, sentence):
+        envelope = (
+            '  printf \'{"error":{"code":"' + code + '","sentence":"'
+            + sentence
+            + '"},"ok":false,"schema_version":1}\\n\'\n'
+        )
+        return envelope, f"  printf 'fermix always-on: {sentence}\\n' >&2\n"
+
+    # The real verbs' shapes in the throwaway world: export seals the home the
+    # environment names, import makes the next primary with the home's own path
+    # moved, and mark-moved writes the marker once and refuses the second time.
+    def _home_behaviour(self, home):
+        if home == "unknown_verb":
+            return "  printf 'fermix: unknown command: home\\n' >&2\n  exit 2\n"
+        export = (
+            '  if [ "$2" = "export" ]; then\n'
+            '    [ "$4" = "--passphrase-file" ] || exit 64\n'
+            '    epoch="$(cat "$FERMIX_HOME/mobile/primary_epoch")"\n'
+            '    printf \'sealed\\n\' > "$3"\n'
+            "    printf 'Exported %s to %s\\n  primary epoch: %s\\n' \"$FERMIX_HOME\" \"$3\" \"$epoch\"\n"
+            "    exit 0\n"
+            "  fi\n"
+        )
+        moved_path = "" if home == "not_moved" else (
+            '    printf \'{"ok":true}\\n\' > "$FERMIX_HOME/moved.json"\n'
+        )
+        restored = (
+            '  if [ "$2" = "import" ]; then\n'
+            '    [ "$4" = "--into" ] && [ "$6" = "--passphrase-file" ] || exit 64\n'
+            '    mkdir -p "$5/mobile"\n'
+            "    printf '6\\n' > \"$5/mobile/primary_epoch\"\n"
+            "    printf '[sandbox]\\nworkspace_root = \"%s/workspace\"\\n' \"$5\" > \"$5/config.toml\"\n"
+            "    printf 'Restored 2 files into %s at primary epoch 6.\\n' \"$5\"\n"
+            "    exit 0\n"
+            "  fi\n"
+        )
+        marked = (
+            '  [ "$*" = "home mark-moved --to verify-host --json" ] || exit 64\n'
+            '  if [ -e "$FERMIX_HOME/moved.json" ]; then\n'
+            '    printf \'{"error":{"code":"already_moved","sentence":"moved"},"ok":false}\\n\'\n'
+            "    exit 1\n"
+            "  fi\n"
+            f"{moved_path}"
+            '  printf \'{"ok":true,"result":{"epoch":5}}\\n\'\n'
+            "  exit 0\n"
+        )
+        refusal = (
+            '    printf \'{"error":{"code":"always_on_unavailable","sentence":"Always On is not in '
+            'this release of Fermix yet."},"ok":false,"schema_version":1}\\n\'\n'
+        )
+        answers = (
+            '    epoch="$(cat "$FERMIX_HOME/mobile/primary_epoch")"\n'
+            '    printf \'{"ok":true,"result":{"epoch":%s,"role":"primary","update_ceiling":null}}\\n\' "$epoch"\n'
+            "    exit 0\n"
+        )
+        no_ceiling = (
+            '    epoch="$(cat "$FERMIX_HOME/mobile/primary_epoch")"\n'
+            '    printf \'{"ok":true,"result":{"epoch":%s,"role":"primary"}}\\n\' "$epoch"\n'
+            "    exit 0\n"
+        )
+        other = (
+            '    printf \'{"error":{"code":"home_status_unavailable","sentence":"Fermix could not '
+            'read this home\'"\'"\'s status."},"ok":false,"schema_version":1}\\n\'\n'
+        )
+        switched_body = {
+            "status_ignores_switch": refusal + "    exit 1\n",
+            "status_without_ceiling": no_ceiling,
+        }.get(home, answers)
+        if home == "status_answers":
+            status_body = answers
+        elif home == "status_other_refusal":
+            status_body = other + "    exit 1\n"
+        else:
+            status_body = refusal + "    exit 1\n"
+        status = (
+            '  if [ "$2" = "status" ]; then\n'
+            '    [ "$3" = "--json" ] || exit 64\n'
+            + self._SWITCHED
+            + "  then\n"
+            + switched_body
+            + "  fi\n"
+            + status_body
+            + "  fi\n"
+        )
+        if home == "marks_twice":
+            marked = (
+                '  : > "$FERMIX_HOME/moved.json"\n'
+                '  printf \'{"ok":true,"result":{"epoch":5}}\\n\'\n'
+                "  exit 0\n"
+            )
+        enroll = self._enroll_behaviour(home)
+        if home in (
+            "carries",
+            "marks_twice",
+            "not_moved",
+            "status_answers",
+            "status_other_refusal",
+            "status_ignores_switch",
+            "status_without_ceiling",
+            "enroll_accepts",
+            "enroll_leaves_home",
+            "enroll_writes_role",
+            "enroll_consumes",
+        ):
+            return export + restored + status + enroll + marked
+        raise ValueError(f"unknown home behaviour: {home}")
+
+    # The real verb refuses a code file that holds no enrollment code: one
+    # sentence on stderr, exit 1, and the home and the code file as it found
+    # them. Each other shape is one way a release could get that wrong.
+    @staticmethod
+    def _enroll_behaviour(home):
+        refusal = (
+            "    printf 'fermix home enroll: That is not an enrollment code Fermix opened (json). "
+            "Copy the code again.\\n' >&2\n"
+            "    exit 1\n"
+        )
+        effect = {
+            "enroll_accepts": (
+                '    mkdir -p "$FERMIX_HOME/candidate"\n'
+                '    rm -f "$4"\n'
+                "    printf 'This home is now a candidate of studio-mac.\\n'\n"
+                "    exit 0\n"
+            ),
+            "enroll_leaves_home": '    mkdir -p "$FERMIX_HOME/logs"\n' + refusal,
+            "enroll_writes_role": (
+                '    printf \'[fermix_core.engine]\\nrole = "candidate"\\n\' > "$FERMIX_HOME/config.toml"\n'
+                + refusal
+            ),
+            "enroll_consumes": '    rm -f "$4"\n' + refusal,
+        }.get(home, refusal)
+        return (
+            '  if [ "$2" = "enroll" ]; then\n'
+            '    [ "$3" = "--code-file" ] && [ -f "$4" ] || exit 64\n'
+            f"{effect}"
+            "  fi\n"
+        )
 
     def _plugins_clear_behaviour(self, plugins_clear):
         forget = (
@@ -1129,6 +1647,50 @@ SHIM
             return [f"ln -sf '{self.notices_source}' {target}"]
         mode = "0755" if notices == "executable" else "0644"
         return [f"cp '{self.notices_source}' {target}", f"chmod {mode} {target}"]
+
+    # ── the Landlock shim stub (Linux targets) ────────────────────────────
+    # Where the NIF build puts it in the unpacked payload. The stub answers
+    # `--abi` the way the shim does; `dynamic` is an ELF header naming a
+    # program interpreter, which the stage must refuse before running it. A
+    # macOS tree carries no shim.
+    def _landlock_shim_setup(self, behaviour, version):
+        if not self._artifact_target().startswith("linux_") or behaviour == "missing":
+            return ""
+
+        answers = {
+            "answers": "printf 'fermix_landlock: abi 6\\n'\nexit 0",
+            "unavailable": "printf 'fermix_landlock: Landlock is unavailable on this kernel (Function not implemented)\\n' >&2\nexit 69",
+            "wrong_answer": "printf 'Segmentation fault\\n' >&2\nexit 139",
+            "silent_success": "exit 0",
+        }
+        source = self.base / "landlock-payload" / "fermix_landlock"
+        source.parent.mkdir(exist_ok=True)
+        if behaviour == "dynamic":
+            source.write_bytes(self._elf_naming_an_interpreter())
+        else:
+            answer = answers.get(behaviour, answers["answers"])
+            source.write_text(f'#!/bin/sh\n[ "$*" = "--abi" ] || exit 64\n{answer}\n', encoding="utf-8")
+
+        app_versions = [version, "0.8.0"] if behaviour == "two" else [version]
+        lines = []
+        for app_version in app_versions:
+            target = f'"$payload/lib/fermix_nif-{app_version}/priv/fermix_landlock"'
+            lines.append(f'mkdir -p "$payload/lib/fermix_nif-{app_version}/priv"')
+            if behaviour == "symlink":
+                lines.append(f"ln -sf '{source}' {target}")
+            else:
+                lines.append(f"cp '{source}' {target}")
+                lines.append(f"chmod {'-x' if behaviour == 'not_executable' else '+x'} {target}")
+        return "\n".join(lines) + "\n"
+
+    # A 64-bit little-endian ELF header and one program header of type
+    # PT_INTERP (3): what a shim linked against a C library carries.
+    @staticmethod
+    def _elf_naming_an_interpreter():
+        ident = b"\x7fELF" + bytes([2, 1, 1]) + bytes(9)
+        header = ident + struct.pack("<HHIQQQIHHHHHH", 2, 62, 1, 0, 64, 0, 0, 64, 56, 1, 64, 0, 0)
+        program_header = struct.pack("<IIQQQQQQ", 3, 4, 120, 0, 0, 28, 28, 1)
+        return header + program_header + b"/lib/ld-linux-x86-64.so.2\0\0\0"
 
 
 if __name__ == "__main__":

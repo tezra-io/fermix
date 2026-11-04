@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "daemon_running",
+    "sentence": "Fermix is running from this home. Stop it, then try again."
+  },
+  "ok": false,
+  "schema_version": 1
+}

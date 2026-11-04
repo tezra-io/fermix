@@ -33,6 +33,8 @@ defmodule FermixCore.Cues.ConfigTest do
     %{
       "enabled" => true,
       "mandates_enabled" => false,
+      "screen" => "decision_model",
+      "decision_provider" => "openrouter",
       "door_port" => 4555,
       "sources" => %{
         "eng-blogs" => %{
@@ -100,6 +102,8 @@ defmodule FermixCore.Cues.ConfigTest do
 
       assert config[:enabled] == true
       assert config[:mandates_enabled] == false
+      assert config[:screen] == :decision_model
+      assert config[:decision_provider] == :openrouter
       assert config[:door_port] == 4555
 
       assert config[:sources]["home-alerts"] ==
@@ -130,6 +134,8 @@ defmodule FermixCore.Cues.ConfigTest do
       assert persisted[:sources]["home-alerts"][:kind] == "local_push"
       assert persisted[:sources]["gh-hooks"][:verify] == "hmac"
       assert persisted[:mandates]["release-issues"][:mode] == "approve"
+      assert persisted[:screen] == "decision_model"
+      assert persisted[:decision_provider] == "openrouter"
     end
 
     test "an unknown top-level key is refused by name" do
@@ -156,10 +162,33 @@ defmodule FermixCore.Cues.ConfigTest do
                    end
     end
 
+    test "the screen is keyword match or a decision model, keyword match with no key" do
+      assert Config.normalize(%{"screen" => "keyword"}) == [screen: :keyword]
+      assert Config.screen(Config.normalize(%{"screen" => "decision_model"})) == :decision_model
+      assert Config.screen(screen: :keyword) == :keyword
+      assert Config.screen([]) == :keyword
+    end
+
+    test "the screen's decision model is a provider that serves one, or Fermix's own pick with no key" do
+      for provider <- [:openai, :openrouter, :venice] do
+        config = Config.normalize(%{"decision_provider" => Atom.to_string(provider)})
+        assert config == [decision_provider: provider]
+        assert Config.decision_provider(config) == provider
+        assert Config.to_keyword(config) == [decision_provider: Atom.to_string(provider)]
+      end
+
+      assert Config.decision_provider([]) == nil
+    end
+
     test "value errors name the key" do
       cases = [
         {%{"enabled" => "yes"}, ~r/cues\.enabled/},
         {%{"mandates_enabled" => 1}, ~r/cues\.mandates_enabled/},
+        {%{"screen" => "openai"}, ~r/cues\.screen "openai".*keyword, decision_model/},
+        {%{"screen" => true}, ~r/cues\.screen/},
+        {%{"decision_provider" => "anthropic"},
+         ~r/cues\.decision_provider "anthropic".*openrouter, venice, openai/},
+        {%{"decision_provider" => ""}, ~r/cues\.decision_provider/},
         {%{"door_port" => 80}, ~r/cues\.door_port.*1024/},
         {%{"door_port" => 70_000}, ~r/cues\.door_port/},
         {source(%{"kind" => "carrier_pigeon"}), ~r/sources\.s1\.kind/},
@@ -268,7 +297,7 @@ defmodule FermixCore.Cues.ConfigTest do
     test "a section written for the removed Bluesky preset is refused, naming the problem" do
       assert_raise ArgumentError,
                    ~s(cues.sources.s1: unknown preset "bluesky_jetstream"; known presets: ) <>
-                     "github, rss",
+                     "github, rss, x_accounts",
                    fn -> Config.normalize(source(%{"preset" => "bluesky_jetstream"})) end
 
       for {section, unknown} <- [
@@ -459,6 +488,73 @@ defmodule FermixCore.Cues.ConfigTest do
     end
   end
 
+  # M60_X_ACCOUNTS_SOURCE.md §3, §4: the handles are the source's whole
+  # address; X accounts builds the rest.
+  describe "an X accounts source" do
+    test "its handles load lowercased, without @ and once each, and it polls every 5 minutes" do
+      cues =
+        Config.normalize(
+          source(%{"preset" => "x_accounts", "handles" => ["@NASA", "nasa", "ESA"]})
+        )
+
+      assert cues[:sources]["s1"][:handles] == ["nasa", "esa"]
+      assert Config.normalize(Config.to_keyword(cues)) == cues
+
+      assert [x] = Config.sources(cues)
+      assert %{kind: :feed, preset: "x_accounts", handles: ["nasa", "esa"], url: nil} = x
+      assert x.interval == 300
+    end
+
+    test "it needs only its handles" do
+      assert Config.required_fields(:feed, "x_accounts", nil) == [:handles]
+
+      for empty <- [%{"preset" => "x_accounts"}, %{"preset" => "x_accounts", "handles" => []}] do
+        assert_raise ArgumentError, ~r/sources\.s1 is a feed source and needs handles/, fn ->
+          Config.normalize(source(empty))
+        end
+      end
+    end
+
+    test "a handle X would not take, or more than 20, is refused naming the field" do
+      assert_raise ArgumentError, ~r/sources\.s1\.handles.*"no-dashes"/, fn ->
+        Config.normalize(source(%{"preset" => "x_accounts", "handles" => ["nasa", "no-dashes"]}))
+      end
+
+      many = for n <- 1..21, do: "account_#{n}"
+
+      assert_raise ArgumentError, ~r/sources\.s1\.handles.*20/, fn ->
+        Config.normalize(source(%{"preset" => "x_accounts", "handles" => many}))
+      end
+    end
+
+    test "a URL with the preset, or handles without it, is refused" do
+      assert_raise ArgumentError, ~r/sources\.s1\.url.*x_accounts builds its own address/, fn ->
+        Config.normalize(
+          source(%{
+            "preset" => "x_accounts",
+            "handles" => ["nasa"],
+            "url" => "https://api.x.com/2/tweets/search/recent"
+          })
+        )
+      end
+
+      for other <- [
+            %{"preset" => "rss", "url" => "https://example.org/feed.xml"},
+            %{"kind" => "feed", "url" => "https://example.org/feed.xml", "interval" => 300}
+          ] do
+        assert_raise ArgumentError, ~r/sources\.s1\.handles.*x_accounts/, fn ->
+          Config.normalize(source(Map.put(other, "handles", ["nasa"])))
+        end
+      end
+
+      assert_raise ArgumentError, ~r/sources\.s1\.handles applies only to feed/, fn ->
+        Config.normalize(
+          source(%{"kind" => "local_push", "token" => "@keyring", "handles" => ["nasa"]})
+        )
+      end
+    end
+  end
+
   describe "accessors" do
     test "the fields a source must name itself: its kind's, its method's and its preset's, less what the preset fills" do
       assert Config.required_fields(:feed, nil, nil) == [:url, :interval]
@@ -510,6 +606,7 @@ defmodule FermixCore.Cues.ConfigTest do
 
       refute Config.enabled?()
       assert Config.mandates_enabled?()
+      assert Config.screen() == :keyword
       assert Config.door_port() == 4032
       assert Config.sources() == []
       assert Config.source("eng-blogs") == :error
@@ -521,6 +618,7 @@ defmodule FermixCore.Cues.ConfigTest do
 
       assert Config.enabled?()
       refute Config.mandates_enabled?()
+      assert Config.screen() == :decision_model
       assert Config.door_port() == 4555
 
       assert Enum.map(Config.sources(), & &1.ref) == ["eng-blogs", "gh-hooks", "home-alerts"]

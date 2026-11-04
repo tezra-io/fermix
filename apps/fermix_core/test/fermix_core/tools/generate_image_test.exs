@@ -27,8 +27,9 @@ defmodule FermixCore.Tools.GenerateImageTest do
       assert {:ok, %{success: false, error: error}} =
                GenerateImage.execute(%{"prompt" => "a fox"}, base_context(System.tmp_dir!()))
 
-      assert error =~ "not configured"
-      assert error =~ "fermix setup"
+      assert error ==
+               "Image generation is not configured. Choose an image backend in Fermix's " <>
+                 "Images settings."
     end
   end
 

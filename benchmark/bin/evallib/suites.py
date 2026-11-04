@@ -600,8 +600,6 @@ def _companion_spec(cs: dict, drive: str, case_expect: dict, turn_expects: list[
         if cs.get("rubric") is not None:
             problems.append(f"{cloc}: a cancelled companion message has no reply to judge; "
                             "drop `rubric`")
-    if cs.get("image") is not None or cs.get("images") is not None:
-        problems.append(f"{cloc}: attachments do not travel on the companion socket")
     return spec
 
 
@@ -913,14 +911,17 @@ def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None
             requires_tools = _validate_tool_list(cs, "requires_tools", cloc, problems)
             requires_all = _validate_tool_list(cs, "requires_tools_all", cloc, problems)
             # cross_session: every turn but the last runs in one session, the last
-            # (the recall) in a fresh one — needs 2+ turns + a `score` block on the recall.
+            # (the recall) in a fresh one — needs 2+ turns and a scorer for the
+            # recall: a `score` block on its reply, or a case-level `fixture_state`
+            # on what the page recorded once it ran.
             cross_session = _boolean(
                 cs.get("cross_session", False), f"{cloc}.cross_session", problems, False)
             if cross_session and len(turns) < 2:
                 problems.append(f"{cloc}: `cross_session` requires at least 2 turns "
                                 f"(store turns, then the recall)")
-            if cross_session and score_spec is None:
-                problems.append(f"{cloc}: `cross_session` requires a `score` block (grades the recall reply)")
+            if cross_session and score_spec is None and not case_expect.get("fixture_state"):
+                problems.append(f"{cloc}: `cross_session` requires a `score` block (grades the "
+                                "recall reply) or a case-level `fixture_state` (grades the page)")
             judge = _boolean(cs.get("judge", default_judge), f"{cloc}.judge", problems,
                              default_judge)
             ctimeout = _timeout(cs["timeout_ms"], cloc) if "timeout_ms" in cs else default_timeout
@@ -940,7 +941,9 @@ def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None
             # album) names known local fixtures. `drive: ask` passes each one to
             # `fermix ask --attach` (on a multi-turn case, with the first turn
             # only, so a later turn can ask about it again); `telegram_operator`
-            # prints the paths so the operator can attach those exact files.
+            # prints the paths so the operator can attach those exact files;
+            # `companion` hands each over through the daemon's inbox, as the
+            # Mac app attaches a file (evallib/companion.py).
             # Paths are relative to the suite file and existence-checked so
             # validation fails loud.
             if "image" in cs and "images" in cs:

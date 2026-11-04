@@ -35,7 +35,7 @@ behind it:
 - It rejects a `response.create` while a response is running
   (`conversation_already_has_active_response`).
 - A response reads only the outputs and status items appended before it
-  started. The comment at `session_server.ex:1482-1492` records this
+  started. The comment at `session_server.ex:1488-1498` records this
   ("snapshotted context").
 
 The call starts connected on socket 1, configured, with the operator's first
@@ -49,7 +49,7 @@ attempts (`session_server.ex:60`).
   speech (`create_response: true`, `openai_client.ex:432`).
 - `Yeses` (0 or 1): the owner says yes to the command a tool call parked, and
   the session starts its confirmed run (`answer_access` ->
-  `start_access_dispatch`, `session_server.ex:1317-1345`). The yes is one
+  `start_access_dispatch`, `session_server.ex:1323-1351`). The yes is one
   step, `Yes`, on the current socket, allowed once a tool call has run. Its
   own server-VAD response is `VadTurns`'s.
 - `OpensCanFail`: a reconnect's handshake fails. No socket process is left
@@ -71,13 +71,13 @@ attempts (`session_server.ex:60`).
 **Mechanism switches** (`TRUE` is the real code; each is switched off only by
 the checks that show a rule needs it):
 - `DefersWhileCallsPending`: `finish_tool_turn` holds the trigger while other
-  calls of the batch are in flight (`session_server.ex:1493`).
+  calls of the batch are in flight (`session_server.ex:1499`).
 - `DefersWhileResponseActive`: it also holds the trigger while OpenAI's
-  response is active, and `response.done` sends it (`:1497`,
-  `flush_deferred_response` `:1506`).
+  response is active, and `response.done` sends it (`:1503`,
+  `flush_deferred_response` `:1512`).
 - `RearmsOnRejection`: a trigger OpenAI rejected for an active response is owed
   again, and that response's `response.done` sends it
-  (`handle_active_response_race`, `:1532`).
+  (`handle_active_response_race`, `:1538`).
 - `CancelsToolsOnReconnect`: `schedule_reconnect` kills in-flight tool tasks,
   and `Task.shutdown` flushes their replies (`:669`, `:776-777`). A
   confirmed run is not a tool task: a reconnect leaves it running, and its
@@ -98,8 +98,8 @@ the checks that show a rule needs it):
   the `EXIT` clause matches only `openai_pid` (`:504`).
 - `HoldsOutcome`: a confirmed run's outcome that lands while the call is not
   live is held, and told once OpenAI confirms the next socket
-  (`speak_outcome` `:1358-1373`, `hold_outcome` `:1375`,
-  `speak_held_outcomes` `:927`, `:1379-1380`). Not live means
+  (`speak_outcome` `:1364-1379`, `hold_outcome` `:1381`,
+  `speak_held_outcomes` `:927`, `:1385-1386`). Not live means
   `provider_ready?` is false (the reconnect window, before the next socket's
   `session.updated`), or the status item's send fails (`openai_pid` died and
   its `EXIT` is still queued behind the reply). Off, the status item and the
@@ -172,7 +172,7 @@ fails. That is why a failed send holds too. The rule claims no more than
 that: a status item still on the wire, or not yet answered, when its socket
 drops dies with that conversation, as a tool output does. An outcome still
 held when the call ends is never told; `terminate/2` logs one warning naming
-the intent and the tool (`warn_unspoken_outcomes`, `:569`, `:1385-1392`),
+the intent and the tool (`warn_unspoken_outcomes`, `:569`, `:1391-1398`),
 which the spec does not model.
 
 **Check 05** holds with a drop, failed handshakes, failed `session.update`s and
@@ -280,9 +280,9 @@ as well. All still hold:
   reply, with the outcome-unknown text (`:458-462`).
 - The access gate's own state (`Capabilities.AccessGate`): what the call has
   read from outside (`outside_sources`), the waiting stamp
-  `tool_call_context` gives each tool task (`:1282-1288`), and the binding of
+  `tool_call_context` gives each tool task (`:1288-1294`), and the binding of
   the owner's answer to the first input item committed after the park, by
-  item id (`bind_access_answer` and `answer_access`, `:1298-1327`, with the
+  item id (`bind_access_answer` and `answer_access`, `:1304-1333`, with the
   item id `decode_server_event` passes on, `openai_client.ex:372-380`).
   They decide whether a yes starts a run, not when its reply lands. A spoken
   no only adds a passive status item (no `response.create`) and starts
@@ -355,23 +355,23 @@ the finding's rule breaking again with the fix's mechanism switched off; open
   1. The first response calls `c1` and ends.
   2. `c1` returns. With no call pending and `response_active?` false,
      `finish_tool_turn` sends the output and `response.create`, and clears
-     `needs_response?` (`:1275-1278`).
+     `needs_response?` (`:1278-1284`).
   3. Before OpenAI reads them, server VAD commits the operator's speech and
      starts its own response. That response began before the output joined,
      so it does not read it.
   4. OpenAI appends the output, then rejects the trigger with
      `conversation_already_has_active_response`.
-  5. `handle_active_response_race` only logs the rejection (`:908`, `:1293`),
+  5. `handle_active_response_race` only logs the rejection (`:908`, `:1299`),
      and nothing sets `needs_response?` again.
   6. The VAD response ends, and `flush_deferred_response` finds nothing owed.
 - **Code:**
   - `response_active?` mirrors OpenAI's lifecycle only from the events it
     receives (`:889`, `:897`). A VAD response that OpenAI started, but whose
     `response.created` is still on the wire, looks like no response at all.
-  - The deferral at `:1271` covers only a response the session already knows
+  - The deferral at `:1274` covers only a response the session already knows
     about. Both send sites lost the answer: the immediate send in
-    `finish_tool_turn` (`:1275-1278`) and the deferred one in
-    `flush_deferred_response` (`:1283`).
+    `finish_tool_turn` (`:1278-1284`) and the deferred one in
+    `flush_deferred_response` (`:1289`).
 - **Impact:**
   - This is the silent stall that `finish_tool_turn`'s comment describes
     fixing for two calls in one batch. It still happened when the operator

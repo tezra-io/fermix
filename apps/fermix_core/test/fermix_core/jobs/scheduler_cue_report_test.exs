@@ -107,6 +107,7 @@ defmodule FermixCore.Jobs.SchedulerCueReportTest do
     assert text =~ "github_create_issue under mandate release-issues: allowed"
     assert Keyword.fetch!(opts, :link_previews) == false
     assert Keyword.fetch!(opts, :proactive_key) == "job:#{run.id}"
+    assert Keyword.fetch!(opts, :origin) == %{"kind" => "cue", "name" => "release-watch"}
 
     assert eventually(fn ->
              {:ok, settled} = Repo.get_job_run(run.id, server: ctx.repo)

@@ -3,9 +3,9 @@ defmodule FermixCore.Browser.ChromeLauncher do
 
   alias FermixCore.Browser.Config
   alias FermixCore.Browser.Error
+  alias FermixCore.Browser.Scope
   alias FermixCore.Meetings.BrowserInstall
   alias FermixCore.Net.Egress
-  alias FermixCore.Setup.ConfigStore
 
   # Every candidate carries the name a person knows it by, which is what a
   # settings row and a Doctor row show: a path never crosses the management
@@ -34,7 +34,7 @@ defmodule FermixCore.Browser.ChromeLauncher do
     with {:ok, %{path: executable}} <- resolve(config, profile),
          {:ok, headless} <- headless(profile),
          {:ok, requested_port} <- requested_port(profile),
-         {:ok, profile_dir} <- profile_dir(owner_key, profile_name),
+         profile_dir = Scope.profile_dir(owner_key, profile_name),
          :ok <- File.mkdir_p(profile_dir),
          :ok <- clear_devtools_port(profile_dir),
          {:ok, port_ref, os_pid} <- launch(executable, profile_dir, requested_port, headless) do
@@ -72,7 +72,7 @@ defmodule FermixCore.Browser.ChromeLauncher do
   """
   @spec attach(Config.t(), map(), String.t(), String.t()) :: {:ok, map()} | :none
   def attach(%Config{} = config, %{mode: :managed}, owner_key, profile_name) do
-    {:ok, profile_dir} = profile_dir(owner_key, profile_name)
+    profile_dir = Scope.profile_dir(owner_key, profile_name)
 
     with {:ok, pid} <- running_pid_for_dir(profile_dir),
          {:ok, port} <- read_devtools_port(profile_dir),
@@ -311,18 +311,6 @@ defmodule FermixCore.Browser.ChromeLauncher do
     end
   end
 
-  defp profile_dir(owner_key, profile_name) do
-    dir =
-      Path.join([
-        Map.fetch!(ConfigStore.workspace_paths(), :browser),
-        "profiles",
-        owner_key,
-        profile_name
-      ])
-
-    {:ok, dir}
-  end
-
   # Find a managed Chrome already running for exactly this user-data-dir and
   # return its os pid. Unix-only (release targets are macOS/Linux); on other
   # platforms there is no reuse and we always spawn. The actual CDP port is read
@@ -398,6 +386,13 @@ defmodule FermixCore.Browser.ChromeLauncher do
     error -> {:error, Error.new("launch_failed", Exception.message(error))}
   end
 
+  # The score every Chrome process starts with on Linux: the highest, so out of
+  # memory the kernel stops Chrome before the engine, which runs every channel
+  # (M75's memory guard). A constant until a measurement on the smallest server
+  # Always On creates sets it.
+  @linux_oom_score_adj 1000
+  @linux_oom_guard "echo #{@linux_oom_score_adj} >/proc/self/oom_score_adj && exec \"$@\""
+
   @doc """
   Compute the spawn target and argv for launching Chrome.
 
@@ -407,7 +402,13 @@ defmodule FermixCore.Browser.ChromeLauncher do
   Management prompt keyed to the versioned install path — a new one every
   release. The shim SETEXECs Chrome in place, so the pid the Port observes IS
   Chrome's. A missing shim refuses loud: an undisclaimed fallback spawn would
-  silently resurrect the prompt churn. Exposed for tests.
+  silently resurrect the prompt churn.
+
+  On Linux Chrome is spawned through `/bin/sh`, which raises its own
+  `oom_score_adj` to the highest score and then execs Chrome in place, so the
+  pid is again Chrome's and every process Chrome starts inherits the score.
+  Any process may raise its own score; one the shell cannot write stops the
+  launch, and its sentence reaches the launch error. Exposed for tests.
   """
   @spec spawn_plan(String.t(), [String.t()], {atom(), atom()}, String.t() | nil) ::
           {:ok, {String.t(), [String.t()]}} | {:error, Error.t()}
@@ -421,6 +422,10 @@ defmodule FermixCore.Browser.ChromeLauncher do
 
   def spawn_plan(executable, args, {:unix, :darwin}, shim) when is_binary(shim) do
     {:ok, {shim, [executable | args]}}
+  end
+
+  def spawn_plan(executable, args, {:unix, :linux}, _shim) do
+    {:ok, {"/bin/sh", ["-c", @linux_oom_guard, "sh", executable | args]}}
   end
 
   def spawn_plan(executable, args, _os_type, _shim), do: {:ok, {executable, args}}
@@ -441,10 +446,7 @@ defmodule FermixCore.Browser.ChromeLauncher do
       "--user-data-dir=#{profile_dir}",
       "--no-first-run",
       "--no-default-browser-check",
-      "--disable-background-networking",
       "--disable-background-timer-throttling",
-      "--disable-client-side-phishing-detection",
-      "--disable-component-update",
       "--disable-default-apps",
       "--disable-features=Translate,MediaRouter",
       # A site that registers its WebMCP tools only when the native API exists

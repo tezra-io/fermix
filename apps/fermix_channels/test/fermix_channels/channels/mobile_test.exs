@@ -8,7 +8,6 @@ defmodule FermixChannels.Channels.MobileTest do
   alias FermixChannels.Companion.Approvals
   alias FermixChannels.Companion.Output
   alias FermixChannels.Companion.Turns
-  alias FermixChannels.Gateway.Commands.Registry, as: CommandRegistry
   alias FermixChannels.Gateway.Message
   alias FermixChannels.Gateway.Queue
   alias FermixChannels.Mobile.DeviceRegistry
@@ -210,20 +209,19 @@ defmodule FermixChannels.Channels.MobileTest do
       :ok
     end)
 
-    Application.put_env(:fermix_channels, :link_preview_resolver, fn links, _store_thumbnail ->
+    Application.put_env(:fermix_channels, :link_preview_resolver, fn links, _store, on_preview ->
       send(test_pid, {:previews_resolve, links})
 
-      {:ok,
-       [
-         %{
-           link: "https://example.com",
-           url: "https://example.com",
-           site: "Example",
-           title: "Example title",
-           description: "Description",
-           image: nil
-         }
-       ], []}
+      on_preview.(%{
+        link: "https://example.com",
+        url: "https://example.com",
+        site: "Example",
+        title: "Example title",
+        description: "Description",
+        image: nil
+      })
+
+      {:ok, []}
     end)
 
     Application.put_env(:fermix_channels, :link_preview_launcher, fn task ->
@@ -356,17 +354,6 @@ defmodule FermixChannels.Channels.MobileTest do
              min_draft_chars: 1,
              max_edits: :infinity
            }
-  end
-
-  test "command catalog is generated from the live command registry" do
-    assert Mobile.command_catalog() ==
-             Enum.map(CommandRegistry.list(), fn command ->
-               %{
-                 "name" => command.name(),
-                 "aliases" => command.aliases(),
-                 "description" => command.description()
-               }
-             end)
   end
 
   test "draft, activity, terminal, reaction, approval, text, and media callbacks fan out by profile" do
@@ -796,8 +783,8 @@ defmodule FermixChannels.Channels.MobileTest do
       {:error, :apns_down}
     end)
 
-    Application.put_env(:fermix_channels, :link_preview_resolver, fn _links, _store ->
-      {:ok, [], []}
+    Application.put_env(:fermix_channels, :link_preview_resolver, fn _links, _store, _on ->
+      {:ok, []}
     end)
 
     log =
@@ -909,6 +896,7 @@ defmodule FermixChannels.Channels.MobileTest do
     Map.merge(
       %{
         phase: :await_hello,
+        primary_epoch: 1,
         authenticated_device: %{device_id: "paired-device"},
         device_registry: :registry,
         noise: :noise,

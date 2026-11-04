@@ -6,11 +6,25 @@ defmodule FermixCore.Jobs.CueAdmission do
 
   ## Slots
 
-  Cue runs hold at most three of the scheduler's run slots, counted from the
-  `trigger` each `run_monitors` entry carries, so a cron run always keeps one:
-  `free = min(max_active − active, 3 − active_cue)`. Manual runs still bypass
-  the ceiling. The scheduler admits only after a due scan, so a cron run that
-  is due, or that the ceiling held back, takes a freed slot first.
+  Cue runs and watcher follow-up runs (`trigger` `"cue"` and `"watcher"`,
+  M60_WATCHER_CODING_RUNS.md §4.2) share at most three of the scheduler's run
+  slots, counted from the `trigger` each `run_monitors` entry carries, so a
+  cron run always keeps one: `free = min(max_active − active, 3 − active_cue)`.
+  Manual runs still bypass the ceiling; a follow-up never takes that path. The
+  scheduler admits only after a due scan, so a cron run that is due, or that
+  the ceiling held back, takes a freed slot first.
+
+  ## Follow-ups
+
+  Each pass first hands every new waiting card to `offer` (`offer_follow_ups/2`,
+  at most 10 a pass, each sent outside the scheduler's loop), then admits the
+  oldest `starting` triggers into the free slots (`claim_follow_ups/4`): each
+  is checked against the hold (`Cues.FollowUps.check/3`) and claimed with its
+  job (`Repo.claim_follow_up_run/4`), which refuses it when the job still runs
+  or is paused or gone. A trigger refused either way spends no slot and goes
+  to `refused` (`Cues.FollowUps.refused/3`, outside the scheduler's loop), so
+  an owner who confirmed it hears why it did not start. Cue runs take the
+  slots left.
 
   ## Lifecycle telemetry
 
@@ -24,29 +38,41 @@ defmodule FermixCore.Jobs.CueAdmission do
 
   Each admission pass also reads the watchers whose oldest waiting delivery
   only the daily cap (or a source's half of it) holds, and sends each the
-  `:cap_reached` watcher notice with the cap and how many items wait (C25).
-  `Cues.Notices` sends it once per 24-hour window.
+  `:cap_reached` watcher notice with the cap and how many items wait (C25),
+  and the watchers with no task whose follow-up the cap skipped an item of,
+  which get it with the cap and `follow_up: true` through their follow-up's
+  delivery (M60_WATCHER_CODING_RUNS.md §4.4, §4.6). `Cues.Notices` sends it
+  once per 24-hour window.
   """
 
   require Logger
 
+  alias FermixCore.Cues.FollowUpReadiness
+  alias FermixCore.Cues.FollowUps
   alias FermixCore.Cues.Telemetry, as: CueTelemetry
+  alias FermixCore.Jobs.Registry, as: JobsRegistry
   alias FermixCore.Memory.Repo
+  alias FermixCore.Memory.Repo.CuesFollowUpSql
   alias FermixCore.Memory.Repo.CuesRunsSql
 
   @max_cue_runs 3
+  @cue_share_triggers ["cue", "watcher"]
+  # Cards offered, and starting triggers read, per admission pass.
+  @offers_per_pass 10
+  @follow_up_scan 10
 
   @type claim :: %{job: map(), run: map(), delivery: map()}
+  @type follow_up_claim :: %{job: map(), run: map(), trigger: map()}
   @type settled :: {map(), map(), CuesRunsSql.settlement()}
 
   @doc "The most run slots cue runs may hold at once."
   @spec max_cue_runs() :: pos_integer()
   def max_cue_runs, do: @max_cue_runs
 
-  @doc "How many of the scheduler's monitored runs are cue runs."
+  @doc "How many of the scheduler's monitored runs hold the cue share: cue and follow-up runs."
   @spec active_cue_runs(map()) :: non_neg_integer()
   def active_cue_runs(run_monitors) when is_map(run_monitors) do
-    Enum.count(run_monitors, fn {_ref, info} -> Map.get(info, :trigger) == "cue" end)
+    Enum.count(run_monitors, fn {_ref, info} -> Map.get(info, :trigger) in @cue_share_triggers end)
   end
 
   @doc """
@@ -72,7 +98,8 @@ defmodule FermixCore.Jobs.CueAdmission do
   `opts`: `:repo_opts` (the `Memory.Repo` call options) and `:cue_notice`, a
   function `(watcher_id, kind, data) -> term()` that sends one watcher notice,
   called with `:cap_reached` and `%{cap: n, waiting: n}` for each watcher only
-  its cap holds.
+  its cap holds, or `%{cap: n, follow_up: true}` for a watcher with no task
+  whose follow-up the cap skipped.
   """
   @spec claim(non_neg_integer(), DateTime.t(), (String.t() -> map()), keyword()) :: [claim()]
   def claim(0, %DateTime{}, run_attrs_fun, opts)
@@ -124,13 +151,154 @@ defmodule FermixCore.Jobs.CueAdmission do
     end
   end
 
+  @doc """
+  Claims the waiting follow-up cards not yet offered (at most
+  #{@offers_per_pass}, each stamped so it is offered once) and hands each to
+  `offer`, a function `(trigger) -> term()` that sends it outside the caller's
+  loop. `opts`: `:repo_opts` and `:offer`. A failed claim is traced and
+  logged; the next pass reads them again.
+  """
+  @spec offer_follow_ups(DateTime.t(), keyword()) :: :ok
+  def offer_follow_ups(%DateTime{} = now, opts) when is_list(opts) do
+    repo_opts = Keyword.fetch!(opts, :repo_opts)
+    offer = Keyword.fetch!(opts, :offer)
+    true = is_function(offer, 1)
+
+    # A claim the next pass makes again: one the Repo reaches after this call
+    # gave up is skipped, so no card is stamped offered that nobody sends.
+    claim_opts = Keyword.put(repo_opts, :skip_when_late, true)
+
+    case Repo.cues_call(CuesFollowUpSql, {:claim_offers, now, @offers_per_pass}, claim_opts) do
+      {:ok, triggers} ->
+        Enum.each(triggers, offer)
+
+      {:error, reason} ->
+        trace_error(:follow_up_offer, %{}, reason)
+        Logger.error("Follow-up card claim failed: #{inspect(reason)}")
+    end
+  end
+
+  @doc """
+  Admits follow-up runs into `free` cue-share slots at `now`: the oldest
+  `starting` triggers (at most #{@follow_up_scan} read), each checked against
+  the hold and claimed with its job until the slots are spent. `run_attrs_fun`
+  builds a run's attributes from its job id. Returns the claims the caller
+  must start. `opts`: `:repo_opts`, `:notice` (`(watcher_id, kind, data) ->
+  term()`, the hold's notices), `:refused` (`(trigger, label) -> term()`, which
+  ends each refused trigger for the owner, `Cues.FollowUps.refused/3`),
+  `:capability_registry` and the hold's seams.
+  """
+  @spec claim_follow_ups(non_neg_integer(), DateTime.t(), (String.t() -> map()), keyword()) ::
+          [follow_up_claim()]
+  def claim_follow_ups(0, %DateTime{}, run_attrs_fun, opts)
+      when is_function(run_attrs_fun, 1) and is_list(opts),
+      do: []
+
+  def claim_follow_ups(free, %DateTime{} = now, run_attrs_fun, opts)
+      when is_integer(free) and free > 0 and is_function(run_attrs_fun, 1) and is_list(opts) do
+    repo_opts = Keyword.fetch!(opts, :repo_opts)
+
+    case Repo.cues_call(CuesFollowUpSql, {:starting_triggers, @follow_up_scan}, repo_opts) do
+      {:ok, triggers} ->
+        Enum.reduce_while(
+          triggers,
+          [],
+          &admit_until_full(&1, &2, free, {now, run_attrs_fun, opts})
+        )
+
+      {:error, reason} ->
+        trace_error(:follow_up_claim, %{}, reason)
+        Logger.error("Follow-up admission scan failed: #{inspect(reason)}")
+        []
+    end
+  end
+
   # --- private ------------------------------------------------------------------
+
+  # A refused trigger spends no slot, so the scan goes on until `free` started.
+  defp admit_until_full(_trigger, claims, free, _admission) when length(claims) >= free,
+    do: {:halt, claims}
+
+  defp admit_until_full(trigger, claims, _free, {now, run_attrs_fun, opts}),
+    do: {:cont, claims ++ admit_trigger(trigger, now, run_attrs_fun, opts)}
+
+  # A job gone since its trigger was written is refused by the claim itself.
+  defp admit_trigger(trigger, now, run_attrs_fun, opts) do
+    repo_opts = Keyword.fetch!(opts, :repo_opts)
+
+    case JobsRegistry.get_job(trigger.job_id, repo_opts) do
+      {:ok, job} ->
+        case held_check(trigger, job, opts) do
+          :ready -> claim_trigger(trigger, now, run_attrs_fun, opts)
+          {:refused, refused, label} -> refused(refused, label, opts)
+          {:error, _stale_or_logged} -> []
+        end
+
+      {:error, :not_found} ->
+        claim_trigger(trigger, now, run_attrs_fun, opts)
+
+      {:error, reason} ->
+        trace_error(:follow_up_claim, %{job_id: trigger.job_id}, reason)
+        Logger.error("Follow-up #{trigger.id}: its job could not be read: #{inspect(reason)}")
+        []
+    end
+  end
+
+  defp held_check(trigger, job, opts) do
+    repo_opts = Keyword.fetch!(opts, :repo_opts)
+
+    check_opts =
+      [repo: Keyword.fetch!(repo_opts, :server)] ++
+        Keyword.take(repo_opts, [:timeout, :on_timeout]) ++
+        Keyword.take(
+          opts,
+          [:notice, :capability_registry, :cues_config] ++ FollowUpReadiness.seams()
+        )
+
+    FollowUps.check(trigger, job, check_opts)
+  end
+
+  defp claim_trigger(trigger, now, run_attrs_fun, opts) do
+    # A claim a later pass makes again: one the Repo reaches after this call
+    # gave up is skipped, so no run is claimed that no runner starts.
+    claim_opts = opts |> Keyword.fetch!(:repo_opts) |> Keyword.put(:skip_when_late, true)
+
+    case Repo.claim_follow_up_run(trigger.id, run_attrs_fun.(trigger.job_id), now, claim_opts) do
+      {:ok, {:started, claim}} ->
+        FollowUps.emit_started(claim.trigger, claim.run)
+        [claim]
+
+      {:ok, {:refused, refused}} ->
+        refused(refused, "not_runnable", opts)
+
+      {:error, :nothing_due} ->
+        []
+
+      {:error, reason} ->
+        trace_error(:follow_up_claim, %{job_id: trigger.job_id}, reason)
+        Logger.error("Follow-up claim of trigger #{trigger.id} failed: #{inspect(reason)}")
+        []
+    end
+  end
+
+  # Refused before it started: ended for the owner outside the caller's loop.
+  defp refused(trigger, label, opts) do
+    Keyword.fetch!(opts, :refused).(trigger, label)
+    []
+  end
+
+  defp cap_notice(%{watcher_id: watcher_id, daily_cap: cap, follow_up: true}, cue_notice),
+    do: cue_notice.(watcher_id, :cap_reached, %{cap: cap, follow_up: true})
 
   defp cap_notice(%{watcher_id: watcher_id, daily_cap: cap, waiting: waiting}, cue_notice),
     do: cue_notice.(watcher_id, :cap_reached, %{cap: cap, waiting: waiting})
 
+  # A claim a later pass makes again: one the Repo reaches after this call
+  # gave up is skipped, so no run is claimed that no runner starts.
   defp claim_candidate(%{job_id: job_id}, now, run_attrs_fun, repo_opts) do
-    case Repo.claim_cue_run(job_id, run_attrs_fun.(job_id), now, repo_opts) do
+    claim_opts = Keyword.put(repo_opts, :skip_when_late, true)
+
+    case Repo.claim_cue_run(job_id, run_attrs_fun.(job_id), now, claim_opts) do
       {:ok, claim} ->
         emit_claimed(claim, now)
         [claim]

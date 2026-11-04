@@ -9,24 +9,28 @@ defmodule FermixCore.Browser do
   alias FermixCore.Browser.ProfileManager
   alias FermixCore.Browser.Routing
   alias FermixCore.Browser.Scope
+  alias FermixCore.Browser.SignIn
   alias FermixCore.Browser.TurnMarker
   alias FermixCore.Temporal.Access
 
   @actions ~w(doctor status start stop open navigate snapshot tabs focus close screenshot act pdf
-              console dialog cookies storage upload download webmcp)
+              console dialog cookies storage upload download webmcp handover)
   @profile_actions @actions -- ["doctor", "status"]
   # The `act` kinds — page interactions, reachable only as `act`'s `kind`. Listed
   # here so an unknown action that IS one can say so (see `action/1`); the kinds
   # themselves are validated in `validate_act_args/2`.
-  @act_kinds ~w(click fill type submit press hover get wait click_coords fill_form)
+  @act_kinds ~w(click fill type submit press hover get wait click_coords fill_form sign_in)
   # Requests that CHANGE something — the page, the browser, or a server on the
   # far side of it. `ProfileManager` re-sends a request whose server died, which
   # for these is a second click, a second upload, a second tool call; the list
   # lives here, beside `@actions`, because this is where the action vocabulary
   # is. `cookies`, `storage` and `webmcp` each read by default and write in one
   # form, so they are decided from their arguments in `mutating?/2`.
-  @mutating_actions ~w(open navigate act close upload download dialog focus)
+  @mutating_actions ~w(open navigate act close upload download dialog focus handover)
   @mutating_act_kinds @act_kinds -- ["get", "wait"]
+  # The `act` kinds that fill a form and can send it in the same call
+  # (`submit: true`, composed in `run/5`).
+  @submitting_kinds ~w(fill_form sign_in)
 
   @spec actions() :: [String.t()]
   def actions, do: @actions
@@ -51,19 +55,21 @@ defmodule FermixCore.Browser do
   end
 
   @doc """
-  Tear down the managed browser for a finished conversation (its owner scope),
-  so a one-shot turn does not leave a Chrome window alive until the idle TTL.
+  Tear down the browser a finished conversation kept for itself, so a one-shot
+  turn does not leave a Chrome window alive until the idle TTL.
 
-  The gateway calls this at turn end for one-shot (loopback) channels; remote
-  interactive channels keep their browser warm for the next message. A no-op
-  when the conversation never started a browser.
+  A conversation keeps a browser of its own only for its guest-trust calls
+  (`Scope.guest_key/1`). The owner's profile is one per device, in use by every
+  owner conversation and scheduled job at once, so no conversation's end stops
+  it; the idle sweep does. The gateway calls this at turn end for one-shot
+  (loopback) channels; remote interactive channels keep their browser warm for
+  the next message. A no-op when the conversation never started a browser.
   """
   @spec reap_conversation(FermixCore.Agents.ConversationKey.t(), keyword()) :: :ok
-  def reap_conversation(conversation_key, opts \\ []) do
-    case Scope.owner_key(%{conversation_key: conversation_key}) do
-      {:ok, owner} -> ProfileManager.stop_owner(owner, opts)
-      {:error, _error} -> :ok
-    end
+  def reap_conversation(conversation_key, opts \\ []) when is_list(opts) do
+    conversation_key
+    |> Scope.guest_key()
+    |> ProfileManager.stop_owner(opts)
   end
 
   @doc """
@@ -78,10 +84,17 @@ defmodule FermixCore.Browser do
     with {:ok, action} <- action(args),
          {:ok, config} <- Config.current(),
          {:ok, owner_key} <- Scope.owner_key(context),
+         {:ok, affinity} <- Scope.tab_affinity(context),
          {:ok, profile, profile_name} <- Config.profile(config, Map.get(args, "profile")),
          :ok <- allowed_turn(profile, context),
+         :ok <- allowed_handover(action, context),
          :ok <- validate_args(action, args) do
-      dispatch(action, args, context, owner_key, profile_name, profile, config)
+      # The profile is shared; the tab a call without `target` acts on is its
+      # conversation's own (`Scope.tab_affinity/1`, read by the backend), and
+      # so is its pane profile (`Scope.pane_key/2`, read by `Routing`).
+      context = Map.put(context, :tab_affinity, affinity)
+      keys = %{owner: owner_key, pane: Scope.pane_key(owner_key, affinity)}
+      dispatch(action, args, context, keys, profile_name, profile, config)
     else
       {:error, %Error{} = error} -> {{:error, error}, nil}
     end
@@ -121,38 +134,151 @@ defmodule FermixCore.Browser do
 
   defp allowed_turn(_profile, _context), do: :ok
 
-  defp dispatch("doctor", _args, _context, _owner, _profile_name, _profile, config) do
+  # A tab is kept open for the person only when they are there to finish in it:
+  # on any other turn nobody would, and the tab would wait out the profile's
+  # idle period for nothing.
+  defp allowed_handover("handover", context) do
+    if Access.attended_operator_turn?(context),
+      do: :ok,
+      else:
+        {:error,
+         Error.new(
+           "handover_not_allowed",
+           "A tab is handed to the person only on a turn they are present for. Guest, " <>
+             "scheduled, background, delegated and coding-continuation runs end their tabs " <>
+             "with the turn: say in your reply what the person needs to do."
+         )}
+  end
+
+  defp allowed_handover(_action, _context), do: :ok
+
+  defp dispatch("doctor", _args, _context, _keys, _profile_name, _profile, config) do
     {{:ok, encode(%{"ok" => true, "chrome" => chrome_diagnostics(config)})}, nil}
   end
 
-  defp dispatch("status", _args, _context, owner, profile_name, _profile, _config) do
-    {{:ok, encode(ProfileManager.status(owner, profile_name))}, nil}
+  # The profile this conversation is pinned to (its own pane, else the scope's
+  # shared one), read without deciding anything.
+  defp dispatch("status", _args, _context, keys, profile_name, _profile, _config) do
+    key =
+      case Routing.live(keys, profile_name) do
+        {live_key, _backend} -> live_key
+        nil -> keys.owner
+      end
+
+    {{:ok, encode(ProfileManager.status(key, profile_name))}, nil}
   end
 
   # A turn whose pane task lost the Fermix app's browser answers every later
   # browser call with that same sentence (`TurnMarker`), before anything is
   # routed: the task is never redone in Chrome, and the next turn decides fresh.
-  defp dispatch(action, args, context, owner, profile_name, profile, config)
+  # Only a pane task marks, and a pane task runs under its conversation's own
+  # pane key.
+  defp dispatch(action, args, context, keys, profile_name, profile, config)
        when action in @profile_actions do
-    case TurnMarker.lookup(owner, self()) do
+    case TurnMarker.lookup(keys.pane, self()) do
       %Error{} = lost -> {{:error, lost}, :fermix_app}
-      nil -> dispatch_profile(action, args, context, owner, profile_name, profile, config)
+      nil -> dispatch_profile(action, args, context, keys, profile_name, profile, config)
     end
   end
 
-  defp dispatch_profile(action, args, context, owner, profile_name, profile, config) do
-    request = %{
-      action: action,
-      args: args,
-      context: context,
-      mutating: mutating?(action, args)
-    }
+  defp dispatch_profile(action, args, context, keys, profile_name, profile, config) do
+    {profile, backend, key} = Routing.for_request(keys, profile_name, profile, config, context)
+    route = &routed(keys.pane, key, profile_name, profile, config, &1)
 
-    {profile, backend} = Routing.for_request(owner, profile_name, profile, config, context)
-
-    case ProfileManager.dispatch(owner, profile_name, profile, config, request) do
+    case run(action, args, context, profile.mode, route) do
       {:ok, result} -> {{:ok, encode(result)}, backend}
       {:error, %Error{} = error} -> {{:error, error}, backend}
+    end
+  end
+
+  # A fill that submits is the fill and then `act kind=submit` on a ref of the
+  # same form, on the tab the fill reports, over the same route as any other
+  # request: every backend already answers both. A fill that fails submits
+  # nothing.
+  defp run("act", %{"submit" => true} = args, context, mode, route) do
+    with {:ok, receipt} <- fill(Map.delete(args, "submit"), context, mode, route) do
+      submit = request("act", submit_args(args, receipt), context)
+      submitted(route.(submit), receipt)
+    end
+  end
+
+  # A sign-in is two requests with the owner's answer between them
+  # (`SignIn`); every other call is one request.
+  defp run("act", %{"kind" => "sign_in"} = args, context, mode, route),
+    do: SignIn.run(args, context, mode, route)
+
+  defp run(action, args, context, _mode, route), do: route.(request(action, args, context))
+
+  defp request(action, args, context),
+    do: %{action: action, args: args, context: context, mutating: mutating?(action, args)}
+
+  # The fill a submit follows is not looked at: the submit's look is the one the
+  # model reads, and a look between them would replace the refs the submit is
+  # sent with. `fill_form` never looks; the pane's sign-in is told not to.
+  defp fill(%{"kind" => "sign_in"} = args, context, mode, route),
+    do: SignIn.run(args, context, mode, route, false)
+
+  defp fill(args, context, _mode, route), do: route.(request("act", args, context))
+
+  # The submit goes to the tab the fill reports, with a ref of the form it
+  # filled.
+  defp submit_args(args, receipt) do
+    %{
+      "action" => "act",
+      "kind" => "submit",
+      "ref" => form_ref(args),
+      "target" => receipt["target"]
+    }
+  end
+
+  # `fill_form`'s first field, a sign-in's password field, else its username
+  # field.
+  defp form_ref(%{"kind" => "fill_form", "fields" => [%{"ref" => ref} | _rest]}), do: ref
+  defp form_ref(%{"kind" => "sign_in"} = args), do: args["password_ref"] || args["username_ref"]
+
+  # The call answers in the vocabulary every act answers in, the submit's
+  # result at the top (`page`, `snapshot`, `url`, `ready_state`), and the
+  # fill's receipt beside it as `fill`. The receipt's tab list is left out: the
+  # submit's, taken after both, is the one that is current.
+  defp submitted({:ok, result}, receipt), do: {:ok, Map.put(result, "fill", filled(receipt))}
+
+  # The fields hold what was typed, so the failure keeps the submit's own code
+  # and recovery and says so, with the fill's receipt, rather than leaving the
+  # model to fill the form again blindly. A field in no form sent nothing and
+  # left the page as the fill did, so its sentence is the whole way on: no
+  # snapshot first.
+  defp submitted({:error, %Error{code: "no_form"} = error}, receipt) do
+    filled_error(error, "The form was filled (`fill` below is the fill's receipt), but ", receipt)
+  end
+
+  defp submitted({:error, %Error{} = error}, receipt) do
+    lead =
+      "The form was filled (`fill` below is the fill's receipt), and then submitting it failed. " <>
+        "Take a snapshot to see the form as it stands before acting on it again. The " <>
+        "submit's error: "
+
+    filled_error(error, lead, receipt)
+  end
+
+  defp filled_error(error, lead, receipt) do
+    {:error,
+     %{
+       error
+       | message: lead <> error.message,
+         details: Map.put(error.details, "fill", filled(receipt))
+     }}
+  end
+
+  defp filled(receipt), do: Map.delete(receipt, "tabs")
+
+  # The turn's lost pane answers here too, since a sign-in's second request
+  # comes after the owner's answer, and the pane may have gone meanwhile. A
+  # pane task marks under its conversation's pane key; the request goes to the
+  # profile `Routing` pinned it to.
+  defp routed(pane, key, profile_name, profile, config, request) do
+    case TurnMarker.lookup(pane, self()) do
+      %Error{} = lost -> {:error, lost}
+      nil -> ProfileManager.dispatch(key, profile_name, profile, config, request)
     end
   end
 
@@ -179,7 +305,7 @@ defmodule FermixCore.Browser do
        "invalid_action",
        "Invalid action: #{action}. Valid actions: #{Enum.join(@actions, ", ")}. " <>
          "Page interactions (click, fill, fill_form, type, submit, press, hover, wait, get, " <>
-         "click_coords) go through `act` as its `kind`."
+         "click_coords, sign_in) go through `act` as its `kind`."
      )}
   end
 
@@ -193,7 +319,9 @@ defmodule FermixCore.Browser do
   end
 
   defp validate_args("act", %{"kind" => kind} = args) when is_binary(kind) do
-    validate_act_args(kind, args)
+    with :ok <- validate_act_args(kind, args) do
+      validate_submit(kind, Map.get(args, "submit"))
+    end
   end
 
   defp validate_args("act", _args), do: {:error, Error.new("missing_arg", "act requires kind")}
@@ -357,8 +485,38 @@ defmodule FermixCore.Browser do
 
   defp validate_act_args("get", _args), do: :ok
 
+  # The site and the refs are checked here, before anything is asked of a
+  # browser or the owner (`SignIn.validate/1`).
+  defp validate_act_args("sign_in", args), do: SignIn.validate(args)
+
   defp validate_act_args(kind, _args),
     do: {:error, Error.new("invalid_action", "Invalid act kind: #{kind}")}
+
+  # `submit` sends the form a fill has just filled, so only the two kinds that
+  # fill a form take it, and only as a boolean: anything else is refused here,
+  # before anything is typed, with the call that does what it was reaching for.
+  defp validate_submit(_kind, nil), do: :ok
+
+  defp validate_submit(kind, submit) when kind in @submitting_kinds and is_boolean(submit),
+    do: :ok
+
+  defp validate_submit(kind, _submit) when kind in @submitting_kinds do
+    {:error,
+     Error.new(
+       "invalid_arg",
+       "#{kind} `submit` must be true or false. Pass true to send the form once it is " <>
+         "filled, in the same call; leave it out to fill only."
+     )}
+  end
+
+  defp validate_submit(kind, _submit) do
+    {:error,
+     Error.new(
+       "invalid_arg",
+       "#{kind} takes no `submit`: only `fill_form` and `sign_in` fill a form and can send " <>
+         "it in the same call. To send a form, call `act` `kind=submit` with a ref from it."
+     )}
+  end
 
   defp validate_form_fields([]), do: {:error, Error.new("missing_arg", fill_form_shape())}
 

@@ -2,6 +2,7 @@ defmodule FermixChannels.Companion.OutputTest do
   use ExUnit.Case, async: true
 
   alias FermixChannels.Companion.Output
+  alias FermixCore.Companion.Protocol
 
   # An event header is capped, so the text a failure or a tool's result
   # becomes is cut to a bound, and never inside a code point.
@@ -21,6 +22,57 @@ defmodule FermixChannels.Companion.OutputTest do
 
     other = Output.tool_event("turn-1", {:tool_progress, String.duplicate("x", 5_000)})
     assert byte_size(other["detail"]) <= 512
+  end
+
+  # Companion protocol 6: a tool's start on the Mac's wire says what the step
+  # is; the phone's start, the shared event, does not.
+  test "a tool's start for the Mac carries its activity, the shared start none" do
+    assert Output.tool_start("turn-1", "web_search", "Searching the web") == %{
+             "t" => "tool_event",
+             "turn_id" => "turn-1",
+             "tool" => "web_search",
+             "phase" => "start",
+             "activity" => "Searching the web"
+           }
+
+    refute Map.has_key?(Output.tool_event("turn-1", {:tool_start, "web_search"}), "activity")
+    assert_raise FunctionClauseError, fn -> Output.tool_start("turn-1", "web_search", "") end
+  end
+
+  # A reply's text_done says when its row was written: the row's own time, in
+  # the form its history message gives it, never a clock read here.
+  test "a reply's text_done carries its row's time, as its history message does" do
+    row = %{
+      server_seq: 14,
+      role: "assistant",
+      content: "Hello",
+      created_at: ~U[2026-11-02 07:00:00.123456Z]
+    }
+
+    assert Output.text_done("turn-1", row, "Hello") == %{
+             "t" => "text_done",
+             "turn_id" => "turn-1",
+             "server_seq" => 14,
+             "text" => "Hello",
+             "ts" => "2026-11-02T07:00:00.123456Z"
+           }
+
+    assert {:ok, %{"ts" => ts}} = Output.timeline_message(row)
+    assert Output.text_done("turn-1", row, "Hello")["ts"] == ts
+    assert :ok = Protocol.validate_server_payload("text_done", text_done_payload(row))
+    assert_raise FunctionClauseError, fn -> Output.text_done("turn-1", 14, "Hello") end
+  end
+
+  test "a reasoning summary is trimmed and bounded in bytes on a UTF-8 boundary" do
+    summary = "\n  **Weighing it**\n\n" <> String.duplicate("日本", 1_000)
+    event = Output.reasoning("turn-1", summary)
+
+    assert %{"t" => "reasoning", "turn_id" => "turn-1", "text" => text} = event
+    assert String.starts_with?(text, "**Weighing it**")
+    assert byte_size(text) <= Protocol.max_reasoning_bytes()
+    assert byte_size(text) > Protocol.max_reasoning_bytes() - 4
+    assert String.valid?(text)
+    assert :ok = Protocol.validate_server_payload("reasoning", Map.delete(event, "t"))
   end
 
   # One message for a failure reason on every error path, the Mac's and the
@@ -67,6 +119,42 @@ defmodule FermixChannels.Companion.OutputTest do
            }
   end
 
+  # Links in the sentence (note 01): a stored card's image and icon ship as
+  # their refs, which `media_fetch` serves through the row.
+  test "a row's link previews ship as cards carrying their image and icon refs" do
+    image_ref = String.duplicate("a", 64)
+    icon_ref = String.duplicate("b", 64)
+
+    row = %{
+      server_seq: 9,
+      role: "assistant",
+      content: "see https://example.test",
+      media_refs: [],
+      link_previews: [
+        %{
+          "link" => "https://example.test",
+          "url" => "https://example.test/",
+          "site" => "Example",
+          "title" => "A page",
+          "image" => %{"ref" => image_ref, "kind" => "image", "mime" => "image/png"},
+          "icon" => %{"ref" => icon_ref, "kind" => "image", "mime" => "image/x-icon"}
+        }
+      ],
+      created_at: ~U[2026-10-27 09:00:00Z]
+    }
+
+    assert {:ok, %{"link_previews" => [card]}} = Output.timeline_message(row)
+
+    assert card == %{
+             "link" => "https://example.test",
+             "url" => "https://example.test/",
+             "site" => "Example",
+             "title" => "A page",
+             "image_ref" => image_ref,
+             "icon_ref" => icon_ref
+           }
+  end
+
   defmodule AppendStore do
     def append(profile_id, attrs, _opts) do
       send(self(), {:append, profile_id, attrs})
@@ -86,4 +174,33 @@ defmodule FermixChannels.Companion.OutputTest do
 
     assert_received {:append, "main", %{metadata: %{"turn_id" => "turn-1"}}}
   end
+
+  # PROTOCOL.md, *Where a message came from*: a scheduled job's or a cue's
+  # message stores its origin with its row, its text and its media alike.
+  test "a job's or a cue's message stores where it came from with its row" do
+    origin = %{"kind" => "cue", "name" => "codex-limits"}
+
+    assert {:ok, {:created, row}} =
+             Output.persist_text(AppendStore, "main", "Codex limits", %{origin: origin})
+
+    assert row.metadata == %{"origin" => origin}
+    assert {:ok, %{"metadata" => %{"origin" => ^origin}}} = Output.timeline_message(row_at(row))
+
+    assert Output.media_metadata(%{origin: origin}) == %{"origin" => origin}
+    assert Output.media_metadata(%{proactive_key: "reminder:r1"}) == nil
+  end
+
+  test "an origin outside its shape writes nothing" do
+    for origin <- [%{"kind" => "reminder", "name" => "x"}, %{"kind" => "job", "name" => ""}] do
+      assert {:error, {:invalid_field, _field}} =
+               Output.persist_text(AppendStore, "main", "hi", %{origin: origin})
+    end
+
+    refute_received {:append, "main", _attrs}
+  end
+
+  defp row_at(row), do: Map.merge(row, %{role: "assistant", created_at: ~U[2026-11-02 07:00:00Z]})
+
+  defp text_done_payload(row),
+    do: "turn-1" |> Output.text_done(row, "Hello") |> Map.delete("t")
 end

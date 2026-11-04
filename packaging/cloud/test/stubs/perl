@@ -1,0 +1,10 @@
+#!/bin/sh
+# Test stand-in for perl, which first boot runs only to ask the kernel for its
+# Landlock ABI: prints the ABI in /etc/fermix-test/landlock-abi, or 6 (Debian
+# 13's kernel) without the file, so a scenario does not depend on the kernel
+# Docker runs on. Logs nothing, as a read. The chromium scenario asks the
+# kernel for real.
+set -eu
+abi=6
+if [ -f /etc/fermix-test/landlock-abi ]; then abi=$(cat /etc/fermix-test/landlock-abi); fi
+printf '%s\n' "$abi"

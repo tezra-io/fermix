@@ -137,6 +137,22 @@ defmodule FermixCore.Cues.IngestTest do
     end
   end
 
+  describe "a decision model as the screen" do
+    test "every llm watcher with words gets every item for its filter call to screen; " <>
+           "one with none still waits for its update",
+         ctx do
+      disks = llm_watcher(ctx)
+      silent = llm_watcher(ctx, %{listen_for: []})
+      opts = Keyword.put(ctx.opts, :words?, false)
+
+      assert {:ok, [:accepted]} = Ingest.accept(source(ctx.ref), [item("q")], opts)
+
+      assert ctx.conn |> deliveries(disks) |> Enum.map(&List.last/1) == ["q"]
+      assert deliveries(ctx.conn, silent) == []
+      assert_received :woke_filters
+    end
+  end
+
   describe "C02: identity" do
     test "the same item twice is a duplicate that refreshes last_seen_at", ctx do
       llm_watcher(ctx)

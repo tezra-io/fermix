@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "always_on_unavailable",
+    "sentence": "Always On is not in this release of Fermix yet."
+  },
+  "ok": false,
+  "schema_version": 1
+}

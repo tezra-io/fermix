@@ -169,6 +169,22 @@ defmodule FermixChannels.Channels.Acp.EndpointTest do
       :gen_tcp.close(second)
     end
 
+    # A command Fermix confines gets no answer here (`SocketPeer.admit/2`; the
+    # real kernel check runs in `SocketReachTest`): no session at operator trust.
+    test "a peer the socket does not answer is closed before any peer starts", ctx do
+      start_endpoint(ctx, peer_gate: fn _socket -> {:error, {:sandboxed, 4242}} end)
+
+      log =
+        capture_log(fn ->
+          {:ok, client} = connect(ctx.socket_path)
+          _ = send_json(client, %{"fermix_bridge" => 1, "app_version" => "t", "env" => %{}})
+          assert :gen_tcp.recv(client, 0, 2_000) == {:error, :closed}
+        end)
+
+      assert log =~ "#{ctx.socket_path} refused a connection: process 4242 runs sandboxed"
+      assert Endpoint.connection_count(endpoint_name()) == 0
+    end
+
     test "a closed connection frees its slot", ctx do
       start_endpoint(ctx, max_connections: 1)
 

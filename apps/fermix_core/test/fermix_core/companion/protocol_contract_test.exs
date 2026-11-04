@@ -10,6 +10,8 @@ defmodule FermixCore.Companion.ProtocolContractTest do
 
   use ExUnit.Case, async: true
 
+  alias FermixCore.Checklists.Ops
+  alias FermixCore.Checklists.Registry, as: ChecklistRegistry
   alias FermixCore.Companion.Protocol
   alias FermixCore.Cues.ProposalView
   alias FermixCore.ReplyBlocks
@@ -24,12 +26,23 @@ defmodule FermixCore.Companion.ProtocolContractTest do
   # The fields the phone's wire requires of a shared event beyond this wire's.
   # None since version 3, when this wire's `row` came to require `media_refs`.
   @phone_only_required %{}
+  # The optional fields a shared event carries on this wire alone: what a
+  # tool's start is doing, in the engine's words (version 6).
+  @companion_only_fields %{"tool_event" => ["activity"]}
   # The events version 3 brought (M66): the media grant and the changed row.
   @version_3_client_events ~w(media_fetch media_release)
   @version_3_server_events ~w(row_updated media_path media_missing)
   # The events version 4 brought (M60 app surface §3.7): a mandate's proposals.
   @version_4_client_events ~w(proposal_answer)
   @version_4_server_events ~w(proposal proposal_resolved)
+  # The events version 6 brought for the owner's lists (M85 §07).
+  @version_6_list_client_events ~w(checklists_pull checklist_pull checklist_edit)
+  @version_6_list_server_events ~w(checklists checklist)
+  # The events version 7 brought: the owner's files, by path.
+  @version_7_client_events ~w(attach_file)
+  @version_7_server_events ~w(attach_status)
+  # The follow-up's fields of a card version 5 brought (M60_WATCHER_CODING_RUNS.md §6.2).
+  @follow_up_fields ~w(asks offers_always_allow name instructions tools reports_to)
 
   setup_all do
     %{
@@ -102,9 +115,6 @@ defmodule FermixCore.Companion.ProtocolContractTest do
     schema: schema,
     protocol: protocol
   } do
-    assert Protocol.protocol_version() == 4
-    assert Protocol.supported_version_range() == {3, 4}
-
     for type <- @version_4_client_events do
       assert Protocol.client_event_version(type) == 4, "#{type} is not a version 4 event"
       assert schema["$defs"][type]["x-since-version"] == 4
@@ -117,12 +127,225 @@ defmodule FermixCore.Companion.ProtocolContractTest do
       refute type in Protocol.shared_server_events()
     end
 
-    assert Protocol.owner_server_events() == @version_4_server_events
+    assert Protocol.owner_server_events() ==
+             @version_4_server_events ++ @version_6_list_server_events
+
     assert protocol =~ "### Version 4: proposals on the owner's devices"
     assert protocol =~ "## Proposals"
 
     assert String.replace(protocol, ~r/\s+/, " ") =~
              "Only the owner can answer a proposal, from the Fermix app or a paired phone."
+  end
+
+  # M60_WATCHER_CODING_RUNS.md §6.2: a watcher's follow-up card needs version
+  # 5, since a version 4 client requires a mandate's call on every card; it is
+  # answered and ended as a proposal is.
+  test "a follow-up's card is version 5's, and only such a card needs it", %{
+    schema: schema,
+    protocol: protocol
+  } do
+    assert schema["$defs"]["followUpCard"]["x-since-version"] == 5
+
+    assert schema["$defs"]["followUpCard"]["properties"] |> Map.keys() |> Enum.sort() ==
+             Enum.sort(@follow_up_fields)
+
+    goldens = @server_fixtures |> jsonl() |> Enum.filter(&(&1["type"] == "proposal"))
+    {follow_ups, mandates} = Enum.split_with(goldens, &Map.has_key?(&1["proposal"], "follow_up"))
+
+    assert Enum.map(follow_ups, & &1["proposal"]["follow_up"]["asks"]) == ["run"]
+    assert Enum.map(follow_ups, & &1["proposal"]["follow_up"]["offers_always_allow"]) == [true]
+    assert Enum.all?(follow_ups, &(Protocol.server_payload_version("proposal", &1) == 5))
+    assert Enum.all?(mandates, &(Protocol.server_payload_version("proposal", &1) == 4))
+    assert protocol =~ "### Version 5: a watcher's follow-ups on the owner's devices"
+    assert protocol =~ "Every version 4 event, field and rule holds unchanged on version 5."
+  end
+
+  # Version 6 says what a turn is doing: the reasoning summary is a version 6
+  # event this wire alone carries, and a tool's start carries its step's words,
+  # additive, on every version, with goldens of both at the bounds the codec holds.
+  test "what a turn is doing is version 6's, with goldens of both", %{
+    schema: schema,
+    protocol: protocol
+  } do
+    assert Protocol.server_event_version("reasoning") == 6
+    assert schema["$defs"]["reasoning"]["x-since-version"] == 6
+    refute "reasoning" in Protocol.shared_server_events()
+    assert Protocol.server_event_version("tool_event") == 1
+
+    text = schema["$defs"]["reasoning"]["properties"]["text"]
+    activity = schema["$defs"]["tool_event"]["properties"]["activity"]
+    assert text["x-max-bytes"] == Protocol.max_reasoning_bytes()
+    assert activity["x-max-bytes"] == Protocol.max_activity_bytes()
+
+    goldens = jsonl(@server_fixtures)
+    assert Enum.any?(goldens, &(&1["type"] == "reasoning"))
+
+    assert Enum.any?(
+             goldens,
+             &(&1["type"] == "tool_event" and &1["phase"] == "start" and
+                 is_binary(&1["activity"]))
+           )
+
+    assert protocol =~ "### Version 6: what a turn is doing"
+    assert protocol =~ "Every version 5 event, field and rule holds unchanged on version 6."
+  end
+
+  # Version 6 (M75 lean v1 §7) also says Always On's state changed. The notice
+  # carries nothing, since the client reads `home.status` for what it is now,
+  # and it is the same version 6, in the same window: no client below 6 is
+  # ever sent it.
+  test "home_status_changed is version 6's too and carries nothing", %{
+    schema: schema,
+    protocol: protocol
+  } do
+    assert Protocol.server_event_version("home_status_changed") == 6
+
+    definition = schema["$defs"]["home_status_changed"]
+    assert definition["x-since-version"] == 6
+    assert definition["required"] == ["type"]
+    assert Map.keys(definition["properties"]) == ["type"]
+
+    goldens =
+      @server_fixtures |> jsonl() |> Enum.filter(&(&1["type"] == "home_status_changed"))
+
+    assert goldens == [%{"type" => "home_status_changed"}]
+
+    assert protocol =~
+             "### Version 6: what a turn is doing, the owner's lists, and Always On without polling"
+
+    assert protocol =~ "Version 6 also lets an app stop asking for Always On's state on a timer."
+    assert protocol =~ "## When Always On changes"
+  end
+
+  # M85 §07: the owner's lists are version 6 events this wire alone carries,
+  # sent only to the owner's connection; the ops and bounds the schema
+  # publishes are the engine's, and the goldens carry every op and shape.
+  test "the owner's lists are version 6 events this wire does not share, with goldens", %{
+    schema: schema,
+    protocol: protocol
+  } do
+    defs = schema["$defs"]
+
+    for type <- @version_6_list_client_events do
+      assert Protocol.client_event_version(type) == 6, "#{type} is not a version 6 event"
+      assert defs[type]["x-since-version"] == 6
+      refute type in Protocol.shared_client_events()
+    end
+
+    for type <- @version_6_list_server_events do
+      assert Protocol.server_event_version(type) == 6, "#{type} is not a version 6 event"
+      assert defs[type]["x-since-version"] == 6
+      refute type in Protocol.shared_server_events()
+      assert type in Protocol.owner_server_events()
+    end
+
+    assert defs["checklistOp"]["properties"]["op"]["enum"] == ChecklistRegistry.device_ops()
+
+    assert defs["checklist_edit"]["properties"]["client_msg_id"]["maxLength"] ==
+             Protocol.max_checklist_msg_id()
+
+    assert defs["checklists"]["properties"]["lists"]["maxItems"] == Ops.max_lists()
+    assert defs["checklistList"]["properties"]["rows"]["maxItems"] == Ops.max_rows()
+
+    edits = @client_fixtures |> jsonl() |> Enum.filter(&(&1["type"] == "checklist_edit"))
+
+    assert edits |> Enum.map(& &1["op"]["op"]) |> MapSet.new() ==
+             MapSet.new(ChecklistRegistry.device_ops())
+
+    lists = @server_fixtures |> jsonl() |> Enum.filter(&(&1["type"] == "checklist"))
+    assert Enum.any?(lists, &Map.has_key?(&1, "made"))
+    assert Enum.any?(lists, &Map.has_key?(&1["list"], "removed"))
+    assert Enum.any?(lists, &Map.has_key?(&1["list"], "removed_at"))
+
+    assert Enum.any?(
+             jsonl(@server_fixtures),
+             &(&1["reason"] == "request_failed" and
+                 &1["message"] == "That row is not in this list any more; pull the list again.")
+           )
+
+    flat = String.replace(protocol, ~r/\s+/, " ")
+    assert protocol =~ "## Lists"
+    assert flat =~ "Version 6 also brings the owner's lists"
+    assert flat =~ "The phone's wire does not carry lists in this version."
+    assert flat =~ "at most once per 100 ms"
+
+    for op <- ChecklistRegistry.device_ops() do
+      assert protocol =~ ~r/^\| `#{op}`|, `#{op}` \|/m, "PROTOCOL.md has no row for the #{op} op"
+    end
+  end
+
+  # Version 7: the owner's files cross by path, on this wire alone (the
+  # phone's uploads stream their bytes), taken from and sent to the owner's
+  # connection; the hello carries the inbox and the command palette, both
+  # additive, with goldens of every shape the Mac app builds against.
+  test "the owner's files are version 7 events this wire does not share, with goldens", %{
+    schema: schema,
+    protocol: protocol
+  } do
+    defs = schema["$defs"]
+    assert Protocol.protocol_version() == 7
+    assert Protocol.supported_version_range() == {6, 7}
+
+    for type <- @version_7_client_events do
+      assert Protocol.client_event_version(type) == 7, "#{type} is not a version 7 event"
+      assert defs[type]["x-since-version"] == 7
+      refute type in Protocol.shared_client_events()
+    end
+
+    for type <- @version_7_server_events do
+      assert Protocol.server_event_version(type) == 7, "#{type} is not a version 7 event"
+      assert defs[type]["x-since-version"] == 7
+      refute type in Protocol.shared_server_events()
+    end
+
+    attach = defs["attach_file"]["properties"]
+    assert attach["kind"]["enum"] == Protocol.attach_kinds()
+    assert attach["mime"]["x-max-bytes"] == Protocol.max_attach_field_bytes()
+    assert attach["name"]["x-max-bytes"] == Protocol.max_attach_field_bytes()
+    refute Map.has_key?(attach, "path")
+    assert defs["attach_status"]["properties"]["status"]["enum"] == ["present"]
+    assert defs["error"]["properties"]["attach_id"] == attach["attach_id"]
+
+    hello = defs["server_hello"]
+    refute "commands" in hello["required"]
+    refute "attachments" in hello["required"]
+    assert hello["properties"]["commands"]["items"] == %{"$ref" => "#/$defs/commandDescriptor"}
+    assert Enum.sort(hello["properties"]["attachments"]["required"]) == ~w(dir max_bytes)
+
+    client = jsonl(@client_fixtures)
+    server = jsonl(@server_fixtures)
+
+    assert Enum.any?(server, &(&1["type"] == "server_hello" and is_map(&1["attachments"])))
+    assert Enum.all?(server, &(&1["type"] != "server_hello" or &1["commands"] != []))
+    assert Enum.any?(client, &(&1["type"] == "attach_file" and Map.has_key?(&1, "name")))
+    assert Enum.any?(client, &(&1["type"] == "attach_file" and not Map.has_key?(&1, "name")))
+    assert Enum.any?(client, &(&1["type"] == "msg" and &1["attach_ids"] != []))
+
+    assert Enum.any?(
+             client,
+             &(&1["type"] == "msg" and &1["attach_ids"] != [] and &1["text"] == "")
+           )
+
+    assert Enum.any?(server, &(&1["type"] == "attach_status"))
+
+    assert Enum.any?(
+             server,
+             &(&1["reason"] == "request_failed" and is_binary(&1["attach_id"]) and
+                 &1["message"] =~ "Fermix takes files of up to")
+           )
+
+    assert Enum.any?(
+             server,
+             &(&1["type"] == "row" and &1["role"] == "user" and &1["kind"] == "media" and
+                 &1["media_refs"] != [])
+           )
+
+    flat = String.replace(protocol, ~r/\s+/, " ")
+    assert protocol =~ "### Version 7: files the owner attaches"
+    assert protocol =~ "Every version 6 event, field and rule holds unchanged on version 7."
+    assert protocol =~ "## Attachments"
+    assert flat =~ "removes `<dir>/<attach_id>` before it answers"
+    assert flat =~ "There is no path field."
   end
 
   # The schema names every field of the card the engine builds, and bounds the
@@ -131,7 +354,7 @@ defmodule FermixCore.Companion.ProtocolContractTest do
     card_def = schema["$defs"]["proposalCard"]
 
     built =
-      ProposalView.card(%{
+      ProposalView.compact_card(%{
         id: "cpr_1",
         state: "confirmed",
         mandate: "release-issues",
@@ -148,11 +371,17 @@ defmodule FermixCore.Companion.ProtocolContractTest do
         args_json: ~s({"title":"Phoenix 2.0"}),
         received_at: ~U[2026-10-10 11:59:00Z],
         occurred_at: ~U[2026-10-10 11:58:30Z],
-        snapshot: ~s({"type":"release","subject":"phoenix","text":"Phoenix 2.0 is out."})
+        snapshot: ~s({"type":"release","subject":"phoenix","text":"Phoenix 2.0 is out."}),
+        decision_reason: "a Phoenix release"
       })
 
     assert built |> Map.keys() |> Enum.map(&Atom.to_string/1) |> Enum.sort() ==
              card_def["properties"] |> Map.keys() |> Enum.sort()
+
+    assert built.outside |> Map.keys() |> Enum.map(&Atom.to_string/1) |> Enum.sort() ==
+             card_def["properties"]["outside"]["properties"] |> Map.keys() |> Enum.sort()
+
+    assert [%{name: "title", value: "Phoenix 2.0"}] = built.outside.args
 
     assert built.task |> Map.keys() |> Enum.map(&Atom.to_string/1) |> Enum.sort() ==
              card_def["properties"]["task"]["properties"] |> Map.keys() |> Enum.sort()
@@ -207,7 +436,11 @@ defmodule FermixCore.Companion.ProtocolContractTest do
     assert defs["history_search"]["properties"]["query"]["maxLength"] ==
              Protocol.max_query_length()
 
-    assert defs["msg"]["properties"]["attach_ids"]["maxItems"] == 0
+    # Since version 7 a message may name files, as the phone's does.
+    assert defs["msg"]["properties"]["attach_ids"] == %{
+             "type" => "array",
+             "items" => %{"type" => "string", "minLength" => 1}
+           }
   end
 
   test "each event def requires what the codec requires", %{schema: schema} do
@@ -242,17 +475,26 @@ defmodule FermixCore.Companion.ProtocolContractTest do
     end
 
     for type <- Protocol.shared_server_events() do
-      companion = Map.delete(schema["$defs"][type]["properties"], "type")
+      companion =
+        Map.drop(schema["$defs"][type]["properties"], ["type" | companion_only(type)])
+
       phone = Map.take(mobile["$defs"][type]["properties"], Map.keys(companion))
 
       assert phone == companion, "#{type} bounds a shared field differently on the two wires"
+
+      for field <- companion_only(type) do
+        refute Map.has_key?(mobile["$defs"][type]["properties"], field),
+               "#{type}.#{field} is this wire's alone, yet the phone's wire publishes it"
+      end
     end
   end
 
   test "a timeline row has one exported shape on both wires", %{schema: schema} do
     mobile = @mobile_schema_path |> File.read!() |> Jason.decode!()
 
-    for def <- ~w(mediaRef linkPreviewCard replyBlock placesBlock place) do
+    for def <-
+          ~w(mediaRef linkPreviewCard replyBlock placesBlock place checklistsBlock checklistRef
+             commandDescriptor) do
       assert schema["$defs"][def] == mobile["$defs"][def], "#{def} differs between the wires"
     end
 
@@ -303,6 +545,42 @@ defmodule FermixCore.Companion.ProtocolContractTest do
     refute protocol =~ "This wire's `row` is unchanged"
   end
 
+  # A message a scheduled job's or a cue's run sent names where it came from in
+  # its row's metadata, additive and on every version, with a golden of each
+  # kind as a `row` and as a history page carries it.
+  test "a job's or a cue's message names where it came from, with goldens of both kinds", %{
+    schema: schema,
+    protocol: protocol
+  } do
+    goldens = jsonl(@server_fixtures)
+    rows = Enum.filter(goldens, &(&1["type"] == "row"))
+
+    paged =
+      goldens
+      |> Enum.filter(&(&1["type"] == "history_page"))
+      |> Enum.flat_map(& &1["messages"])
+
+    origins = for row <- rows ++ paged, origin = get_in(row, ["metadata", "origin"]), do: origin
+
+    for origin <- origins, do: assert(:ok = Protocol.validate_origin_metadata(origin))
+
+    for kind <- ~w(job cue) do
+      assert Enum.any?(rows, &(get_in(&1, ["metadata", "origin", "kind"]) == kind)),
+             "no golden row carries a #{kind} origin"
+    end
+
+    assert Enum.any?(paged, &get_in(&1, ["metadata", "origin"])),
+           "no golden history page carries an origin"
+
+    [_before, section] = String.split(protocol, "### Where a message came from", parts: 2)
+    [section | _rest] = String.split(section, "\n## ", parts: 2)
+
+    for key <- ~w(kind name), do: assert(section =~ "| `#{key}` |")
+    assert section =~ "`cues.status`"
+    assert protocol =~ "carries `metadata.origin` (see *Where a message came from*)"
+    assert schema["$defs"]["row"]["description"] =~ "metadata.origin"
+  end
+
   # M66: a row carries the history message's media refs, always, and its link
   # previews when it has one, on every version, so a new row needs no read.
   test "every golden row carries its media refs, one a voice note, one a picture and a preview",
@@ -329,6 +607,40 @@ defmodule FermixCore.Companion.ProtocolContractTest do
 
     assert "media_refs" in row["required"]
     refute "link_previews" in row["required"]
+  end
+
+  # A reply that finishes while a client watches says when its row was written:
+  # `text_done.ts` is that row's time in the form its `row` and its history
+  # message carry, so the client needs no history read for it. This daemon
+  # always sends it; an older one in the same window does not, so the schema
+  # leaves it optional and the codec takes a text_done without it.
+  test "a reply's text_done carries its row's time, as its row and history do", %{
+    schema: schema,
+    protocol: protocol
+  } do
+    done_def = schema["$defs"]["text_done"]
+    assert done_def["properties"]["ts"] == schema["$defs"]["row"]["properties"]["ts"]
+    refute "ts" in done_def["required"]
+
+    server = jsonl(@server_fixtures)
+    stored = stored_times(server)
+    dones = Enum.filter(server, &(&1["type"] == "text_done"))
+    assert dones != []
+
+    for done <- dones, payload = Map.delete(done, "type") do
+      assert is_binary(done["ts"]), "golden text_done #{done["server_seq"]} carries no ts"
+      assert Map.get(stored, done["server_seq"], done["ts"]) == done["ts"]
+      assert :ok = Protocol.validate_server_payload("text_done", payload)
+      assert :ok = Protocol.validate_server_payload("text_done", Map.delete(payload, "ts"))
+
+      assert {:error, _reason} =
+               Protocol.validate_server_payload("text_done", Map.put(payload, "ts", ""))
+    end
+
+    assert Enum.any?(dones, &Map.has_key?(stored, &1["server_seq"])),
+           "no golden text_done shares its seq with a golden row or history message"
+
+    assert protocol =~ "| `text_done` | `turn_id`, `server_seq`, `text`; `ts?`, `blocks[]?` |"
   end
 
   # M72 §8.3: a reply's blocks have one shape wherever the reply is carried, the
@@ -399,6 +711,28 @@ defmodule FermixCore.Companion.ProtocolContractTest do
 
     [_before, section] = String.split(protocol, "## Blocks under a reply", parts: 2)
     assert section =~ "`apple_place_id`"
+  end
+
+  # M85 §07: a reply's lists ride beside its places, by id, on every version.
+  test "the codec takes a checklists block beside places, and refuses one the export rules out" do
+    done = %{"turn_id" => "t-1", "server_seq" => 7, "text" => "Filed both."}
+    list = %{"list_id" => "ck_3m9q2x7d1a", "title" => "Fermix", "rows" => ["ci_7k2m9d0q4a"]}
+    checklists = %{"type" => "checklists", "lists" => [list]}
+
+    assert :ok =
+             Protocol.validate_server_payload("text_done", Map.put(done, "blocks", [checklists]))
+
+    for blocks <- [
+          [checklists, checklists],
+          [%{checklists | "lists" => []}],
+          [%{checklists | "lists" => List.duplicate(list, ReplyBlocks.max_checklists() + 1)}],
+          [%{checklists | "lists" => [%{list | "rows" => ["Lemons"]}]}],
+          [%{checklists | "lists" => [Map.delete(list, "title")]}]
+        ] do
+      assert {:error, {:invalid_field, "blocks"}} =
+               Protocol.validate_server_payload("text_done", Map.put(done, "blocks", blocks)),
+             "text_done accepted blocks #{inspect(blocks)}"
+    end
   end
 
   test "the codec refuses blocks the export rules out" do
@@ -518,8 +852,67 @@ defmodule FermixCore.Companion.ProtocolContractTest do
 
   test "the golden server_hello advertises the module's live window" do
     {min, max} = Protocol.supported_version_range()
+    hellos = @server_fixtures |> jsonl() |> Enum.filter(&(&1["type"] == "server_hello"))
+
+    for hello <- hellos do
+      assert Map.drop(hello, ~w(primary_epoch role commands attachments)) ==
+               %{"type" => "server_hello", "min_version" => min, "max_version" => max}
+    end
+  end
+
+  # M75 D14: both hellos carry the primary epoch, optional on each, with a
+  # golden of each and of the refusal of a client that has seen a higher one.
+  test "the schema and the goldens carry the primary epoch on both hellos", %{
+    schema: schema,
+    protocol: protocol
+  } do
+    defs = schema["$defs"]
+    epoch = %{"type" => "integer", "minimum" => 1, "maximum" => 18_446_744_073_709_551_615}
+
+    for def <- ~w(client_hello server_hello) do
+      assert Map.take(defs[def]["properties"]["primary_epoch"], ~w(type minimum maximum)) ==
+               epoch,
+             def
+
+      refute "primary_epoch" in defs[def]["required"], def
+    end
+
+    client = jsonl(@client_fixtures)
+    server = jsonl(@server_fixtures)
+    assert Enum.any?(client, &(&1["type"] == "client_hello" and &1["primary_epoch"] > 0))
+    assert Enum.any?(server, &(&1["type"] == "server_hello" and &1["primary_epoch"] > 0))
+
+    stale = Enum.find(server, &(&1["reason"] == "stale_primary"))
+    assert stale["message"] =~ ~r/^This engine is at epoch \d+; you have seen epoch \d+: /
+
+    [_before, versioning] = String.split(protocol, "## Handshake state machine", parts: 2)
+    [handshake, _after] = String.split(versioning, "## Rollout", parts: 2)
+    assert handshake =~ "### Primary epoch"
+    assert handshake =~ "keeps the highest"
+    assert handshake =~ "`error: stale_primary`"
+  end
+
+  # M75: `server_hello.role` tells a desktop app whether the engine is the
+  # primary, whose epoch it compares, or a device-role engine, whose it never
+  # does; optional in the schema, since an older daemon sends none.
+  test "server_hello names the engine's role, and the documentation the client rule", %{
+    schema: schema,
+    protocol: protocol
+  } do
+    server_hello = schema["$defs"]["server_hello"]
+    assert server_hello["properties"]["role"]["enum"] == ~w(primary device)
+    refute "role" in server_hello["required"]
+
     hello = @server_fixtures |> jsonl() |> Enum.find(&(&1["type"] == "server_hello"))
-    assert hello == %{"type" => "server_hello", "min_version" => min, "max_version" => max}
+    assert hello["role"] in ~w(primary device)
+    assert schema_errors(Map.delete(hello, "role"), ref("serverEvent"), schema) == []
+    refute schema_errors(Map.put(hello, "role", "owner"), ref("serverEvent"), schema) == []
+
+    [_before, epoch] = String.split(protocol, "### Primary epoch", parts: 2)
+    [epoch, _after] = String.split(epoch, "## Rollout", parts: 2)
+    assert epoch =~ "`role`"
+    assert epoch =~ "from a `primary` only"
+    assert epoch =~ "treated as `primary`"
   end
 
   test "every golden client frame decodes against the live protocol" do
@@ -577,14 +970,30 @@ defmodule FermixCore.Companion.ProtocolContractTest do
     refute schema_errors(both, ref("clientEvent"), schema) == []
 
     attached = %{
-      "type" => "msg",
-      "client_msg_id" => "c",
-      "profile_id" => "main",
-      "text" => "look",
-      "attach_ids" => ["photo"]
+      "type" => "attach_file",
+      "attach_id" => "../photo",
+      "kind" => "image",
+      "mime" => "image/jpeg",
+      "size_bytes" => 12,
+      "sha256" => String.duplicate("a", 64)
     }
 
     refute schema_errors(attached, ref("clientEvent"), schema) == []
+
+    refute schema_errors(
+             %{attached | "attach_id" => "photo", "kind" => "picture"},
+             ref("clientEvent"),
+             schema
+           ) == []
+
+    offered = %{
+      "type" => "server_hello",
+      "min_version" => 6,
+      "max_version" => 7,
+      "attachments" => %{"dir" => "companion/inbox", "max_bytes" => 1}
+    }
+
+    refute schema_errors(offered, ref("serverEvent"), schema) == []
     refute schema_errors(%{"type" => "ping"}, ref("clientEvent"), schema) == []
   end
 
@@ -616,6 +1025,8 @@ defmodule FermixCore.Companion.ProtocolContractTest do
     assert approvals =~ "When `server_hello` arrives, a client drops every card it shows"
   end
 
+  defp companion_only(type), do: Map.get(@companion_only_fields, type, [])
+
   defp minimal_client_payloads do
     %{
       "msg" => %{
@@ -636,6 +1047,20 @@ defmodule FermixCore.Companion.ProtocolContractTest do
         "profile_id" => "main",
         "proposal_id" => "cpr_1",
         "decision" => "confirm"
+      },
+      "checklists_pull" => %{"profile_id" => "main"},
+      "checklist_pull" => %{"profile_id" => "main", "list_id" => "ck_0123456789"},
+      "checklist_edit" => %{
+        "client_msg_id" => "c",
+        "profile_id" => "main",
+        "op" => %{"op" => "clear_done"}
+      },
+      "attach_file" => %{
+        "attach_id" => "a",
+        "kind" => "file",
+        "mime" => "application/pdf",
+        "size_bytes" => 0,
+        "sha256" => String.duplicate("a", 64)
       }
     }
   end
@@ -670,6 +1095,18 @@ defmodule FermixCore.Companion.ProtocolContractTest do
 
   defp jsonl(path), do: path |> fixture_lines() |> Enum.map(&Jason.decode!/1)
 
+  # The time each golden row and history message gives its seq.
+  defp stored_times(server) do
+    rows = for %{"type" => "row"} = row <- server, do: row
+
+    messages =
+      for %{"type" => "history_page", "messages" => messages} <- server,
+          message <- messages,
+          do: message
+
+    Map.new(rows ++ messages, &{&1["server_seq"], &1["ts"]})
+  end
+
   defp ref(name), do: %{"$ref" => "#/$defs/#{name}"}
 
   defp null_typed_paths(schema, path) when is_map(schema) do
@@ -696,6 +1133,11 @@ defmodule FermixCore.Companion.ProtocolContractTest do
   # Anything outside it fails loudly rather than passing unchecked, so extending
   # the schema with an unsupported keyword breaks this test instead of quietly
   # weakening the gate. Returns a list of problems; empty means valid.
+  # `additionalProperties` is held only for a map with no named keys (a
+  # checklist's `made`), so beside `properties` it fails loudly.
+  defp schema_errors(_value, %{"additionalProperties" => _, "properties" => _}, _root),
+    do: ["additionalProperties beside properties is outside this validator"]
+
   defp schema_errors(value, schema, root) when is_map(schema) do
     conditional_errors(schema, value, root) ++
       Enum.flat_map(Map.drop(schema, ["if", "then"]), &keyword_errors(&1, value, root))
@@ -747,6 +1189,20 @@ defmodule FermixCore.Companion.ProtocolContractTest do
     end)
   end
 
+  defp keyword_errors({"additionalProperties", subschema}, value, root) when is_map(value) do
+    Enum.flat_map(value, fn {key, sub} ->
+      Enum.map(schema_errors(sub, subschema, root), &"#{key}: #{&1}")
+    end)
+  end
+
+  defp keyword_errors({"minProperties", min}, value, _root) when is_map(value) do
+    if map_size(value) >= min, do: [], else: ["fewer than #{min} properties"]
+  end
+
+  defp keyword_errors({"maxProperties", max}, value, _root) when is_map(value) do
+    if map_size(value) <= max, do: [], else: ["more than #{max} properties"]
+  end
+
   defp keyword_errors({"items", subschema}, value, root) when is_list(value) do
     Enum.flat_map(value, &schema_errors(&1, subschema, root))
   end
@@ -788,8 +1244,8 @@ defmodule FermixCore.Companion.ProtocolContractTest do
   end
 
   defp keyword_errors({keyword, _constraint}, _value, _root)
-       when keyword in ~w(required properties items minItems maxItems minLength maxLength pattern
-                          minimum maximum) do
+       when keyword in ~w(required properties additionalProperties minProperties maxProperties
+                          items minItems maxItems minLength maxLength pattern minimum maximum) do
     []
   end
 

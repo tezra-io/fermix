@@ -15,6 +15,9 @@ defmodule FermixCore.Cues.Presets do
   # github: a repository or organisation webhook (§6.10): GitHub's HMAC over
   # the raw body, its delivery id as identity and its event name as type; the
   # owner gives the signing secret (`Cues.Webhook` projects a body over 64 KiB).
+  # x_accounts: a feed of X's recent search for the handles the owner gives,
+  # every 5 minutes, signed in with the X plugin (`Cues.XAccounts`), which
+  # builds its address.
   @presets %{
     "rss" => %{kind: :feed, interval: 900},
     "github" => %{
@@ -25,7 +28,8 @@ defmodule FermixCore.Cues.Presets do
       prefix: "sha256=",
       id_header: "X-GitHub-Delivery",
       type_header: "X-GitHub-Event"
-    }
+    },
+    "x_accounts" => %{kind: :feed, interval: 300}
   }
 
   @doc "Every preset name, sorted."

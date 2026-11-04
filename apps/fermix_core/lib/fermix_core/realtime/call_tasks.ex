@@ -150,6 +150,7 @@ defmodule FermixCore.Realtime.CallTasks do
           turn_sessions: %{String.t() => String.t()},
           history_tainted: MapSet.t(String.t()),
           tainted?: boolean(),
+          outside_sources: MapSet.t(),
           last_activity_ms: %{String.t() => integer()},
           context_timers: %{String.t() => {reference(), pos_integer()}},
           exchange_since_ms: non_neg_integer() | nil,
@@ -193,6 +194,10 @@ defmodule FermixCore.Realtime.CallTasks do
     # started with, a mirrored answer, a task's reply (M56 §9). Never
     # forgotten: the call's gist inherits it.
     tainted?: false,
+    # What the call's hand-offs read that someone else could have written, as
+    # each turn told it. The voice model heard their replies, so every later
+    # hand-off starts with it; never forgotten while the call lasts.
+    outside_sources: MapSet.new(),
     last_activity_ms: %{},
     context_timers: %{},
     # Where the next hand-off's exchange starts (M56 §4.1): the end of the
@@ -764,7 +769,8 @@ defmodule FermixCore.Realtime.CallTasks do
       revision: record.revision,
       turn_session_id: turn_session_id,
       text: text,
-      screen_frame: nil
+      screen_frame: nil,
+      outside_sources: tasks.outside_sources
     }
   end
 
@@ -843,6 +849,7 @@ defmodule FermixCore.Realtime.CallTasks do
       progress: fn text -> forward.({:progress, text}) end,
       activity: fn event -> forward.({:activity, event}) end,
       history_tainted: fn -> forward.(:history_tainted) end,
+      outside_sources: fn sources -> forward.({:outside_sources, sources}) end,
       result: fn result -> forward.({:result, result}) end
     }
   end
@@ -869,6 +876,14 @@ defmodule FermixCore.Realtime.CallTasks do
     tainted = MapSet.put(tasks.history_tainted, record.id)
     {%{tasks | history_tainted: tainted, tainted?: true}, []}
   end
+
+  # Sent by the turn's own process before its reply, as the mark above is. The
+  # call keeps it for every later hand-off. A revision the task moved past has
+  # its event dropped with the rest (`delegation_event/5`), which holds only
+  # while nothing of a replaced revision reaches the voice model: relaying its
+  # progress text would have to carry what it read too.
+  defp event({:outside_sources, %MapSet{} = sources}, _record, tasks, _transcript),
+    do: {%{tasks | outside_sources: MapSet.union(tasks.outside_sources, sources)}, []}
 
   defp event({:result, {:ok, text}}, record, tasks, transcript) when is_binary(text) do
     answer = answer(tasks, record, text)

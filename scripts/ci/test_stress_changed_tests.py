@@ -55,6 +55,24 @@ CI_RUN_SECONDS = {"fermix_channels": 56, "fermix_core": 145, "fermix_opik": 2, "
 # of them under load. One run of all 152 fermix_core files outlasted the step.
 RELEASE_FILES = {"fermix_channels": 39, "fermix_core": 152, "fermix_nif": 1, "fermix_opik": 3, "fermix_web": 1}
 RELEASE_RUN_SECONDS = {"fermix_channels": 125, "fermix_core": 150, "fermix_nif": 5, "fermix_opik": 5, "fermix_web": 219}
+# 0.18.0's release PR (run 41747692734): a 30-file fermix_channels chunk took
+# 270 s under load and fermix_web's 6 files 420 s, so the first runs alone
+# outlasted a 15-minute step.
+RELEASE_0_18_FILES = {"fermix_channels": 93, "fermix_core": 297, "fermix_opik": 3, "fermix_web": 6}
+RELEASE_0_18_RUN_SECONDS = {"fermix_channels": 270, "fermix_core": 237, "fermix_opik": 9, "fermix_web": 420}
+CI_YML = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "ci.yml"
+
+
+def stress_step_timeout_s() -> int:
+    """The stress step's own `timeout-minutes` in ci.yml, in seconds."""
+    lines = CI_YML.read_text(encoding="utf-8").splitlines()
+    start = lines.index("      - name: Stress the change's test files under load")
+    for line in lines[start + 1 :]:
+        if line.startswith("      - name:"):
+            break
+        if line.strip().startswith("timeout-minutes:"):
+            return int(line.split(":", 1)[1]) * 60
+    raise AssertionError("the stress step in ci.yml has no timeout-minutes")
 
 
 def git(cwd, *args):
@@ -257,13 +275,26 @@ class RoundRobinTest(unittest.TestCase):
         )
 
         # Every app ran; a run that starts inside the budget is never cut short,
-        # so the step ends by the budget plus one run, inside its 15 minutes.
+        # so the step ends by the budget plus one run, inside its timeout.
         self.assertTrue(all(s.runs > 0 for s in states.values()))
         self.assertLessEqual(used, 720 + max(RELEASE_RUN_SECONDS.values()))
-        self.assertLessEqual(used, 15 * 60 - 60)
+        self.assertLessEqual(used, stress_step_timeout_s() - 60)
         self.assertEqual(stress.exit_status(list(states.values())), 0)
         self.assertEqual(states["fermix_core"].stopped, stress.BUDGET)
         self.assertTrue(stress.unstressed_files(states["fermix_core"]))
+
+    def test_a_release_whose_slowest_run_takes_seven_minutes_ends_inside_the_step(self):
+        states, _, used = simulate(
+            RELEASE_0_18_RUN_SECONDS, stress.REPEATS_WHEN_MANY, 720, files=RELEASE_0_18_FILES
+        )
+
+        # The last first run (fermix_web's) starts inside the budget and runs
+        # whole, so the step needs the budget plus that run, plus a minute for
+        # uv's start and the burners' stop.
+        self.assertTrue(all(s.runs > 0 for s in states.values()))
+        self.assertLessEqual(used, 720 + max(RELEASE_0_18_RUN_SECONDS.values()))
+        self.assertLessEqual(used, stress_step_timeout_s() - 60)
+        self.assertEqual(stress.exit_status(list(states.values())), 0)
 
 
 def app_state(runs, stopped, last_s=145.0, file_count=1):

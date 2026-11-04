@@ -37,31 +37,31 @@ messages covers the interleavings that matter.
 **Mechanism switches** (`TRUE` is the real code; each is switched off only by
 the checks that show a property needs it):
 - `OneClaimant`: the Queue hands the callback to the claimant and clears its
-  own copy (`queue.ex:250-259`, `:1127-1131`).
+  own copy (`queue.ex:250-259`, `:1133-1137`).
 - `StartsWhenIdle`: a message starts only when no turn is active
   (`queue.ex:317-325`).
 - `CrashFiresOutcome`: a crashed turn's callback, if the Queue still holds it,
-  fires `{:failed, _}` (`queue.ex:914-922`).
+  fires `{:failed, _}` (`queue.ex:920-928`).
 - `TurnsShareQueueFate`: turn tasks run under a `Task.Supervisor` that
   `QueueSupervisor` (`:one_for_all`) terminates before it restarts the Queue
-  (`queue_supervisor.ex:46-51`, `application.ex:95`).
+  (`queue_supervisor.ex:46-51`, `application.ex:160`).
 - `CrashClosesUserMessage`: a crashed turn's `:DOWN` writes the stopped marker
-  before the next message starts (`queue.ex:873`, `:887-893`).
+  before the next message starts (`queue.ex:879`, `:893-899`).
 - `StopSparesClaimedTurn`: a stop leaves a turn that has claimed its outcome
-  running (`queue.ex:1085-1087`).
+  running (`queue.ex:1091-1093`).
 - `StopCancelsPending`: a stop fires `{:cancelled}` for every waiting message
-  it drops (`queue.ex:1105-1111`).
+  it drops (`queue.ex:1111-1117`).
 - `StopTurnSparesClaimedTurn`: a named stop leaves the named turn running once
-  it has claimed its outcome (`queue.ex:1042-1048`).
+  it has claimed its outcome (`queue.ex:1048-1054`).
 - `StopTurnNamesTurn`: a named stop ends the named message's turn only: it
   kills that turn if it is active, or drops that message if it is waiting,
-  and the next waiting message starts (`stop_named_in`, `queue.ex:1042-1079`).
+  and the next waiting message starts (`stop_named_in`, `queue.ex:1048-1085`).
   `FALSE` is the conversation stop, the only stop the Queue had before, which
   kills whichever turn is running.
 - `ConsumerFencesQueue`: the consumer monitors the Queue process it handed the
   message to and answers the message as a failed turn on that Queue's `:DOWN`
   (`Acp.Peer`: `hand_off`, `peer.ex:597-605`; `settle_queue_down`, `:205-207`,
-  `:954-959`).
+  `:955-960`).
 
 **Timing idealisation:** `CrashInClaimGap`. `TRUE` is the real code. A turn
 finishes in two steps (`finish_turn`, `queue.ex:587-593`):
@@ -69,7 +69,7 @@ finishes in two steps (`finish_turn`, `queue.ex:587-593`):
 2. The turn invokes that callback, inside its own task.
 
 `invoke_turn_result` catches whatever the callback raises, exits or throws
-(`queue.ex:933-948`), and a stop no longer kills a claimed turn, so only a
+(`queue.ex:939-954`), and a stop no longer kills a claimed turn, so only a
 linked helper's exit can land between the two steps. `FALSE` forbids that. A
 check that sets it `FALSE` proves a property only for a Queue without the gap.
 
@@ -149,7 +149,7 @@ no stop while the Queue is restarting, and check 17 does not cover that
 window. There the Peer's cancel goes to the dead Queue it handed the prompt
 to (`stop_turn`, `peer.ex:726-734`) and exits `:noproc`: a `session/cancel`
 is answered `cancelled` and closing the turn flushes the `:DOWN`
-(`cancel_turn`, `:700-705`), and the connection lives on (QUEUE-8, What
+(`cancel_turn`, `:701-706`), and the connection lives on (QUEUE-8, What
 remains). ExUnit pins it: "a cancel that finds its prompt's Queue gone
 answers cancelled, once", "a cancel by request id that finds its prompt's
 Queue gone answers once" and "a bridge disconnect after the Queue died ends
@@ -164,13 +164,13 @@ watch was added to the model).
 
 - The LLM and tools (one "loop" step), streaming drafts, and typing.
 - The access gate's parked confirmation. `run_message_loop` hands AgentLoop
-  the owner-inbox closure and the Live call id (`turn_runner.ex:597`,
-  `:600`). A parked call is a held tool result inside the one loop step, and
+  the owner-inbox closure and the Live call id (`turn_runner.ex:606`,
+  `:608`). A parked call is a held tool result inside the one loop step, and
   the owner's confirm later runs it on a task outside the Queue, not as a
   new turn.
 - The `terminal_error_owner?` branch, which only changes who sends the error
   text.
-- The empty-completion path (`queue.ex:541-544`, `:723-732`). It delivers a
+- The empty-completion path (`queue.ex:541-544`, `:724-733`). It delivers a
   canned retry, commits nothing and claims `{:completed}`. It leaves the user
   message unanswered by design, so that the owner can retry.
 - A daemon stop: the Queue dies and nothing restarts it. Turns in flight leave
@@ -189,7 +189,7 @@ watch was added to the model).
 - What a turn does with its attachments before its loop (M67).
   `run_message_loop` composes their manifest into the user text that
   `persist_user_message` stores and, on the owner's chat turn, first saves
-  them to the workspace (`with_attachments`, `turn_runner.ex:474`). These are
+  them to the workspace (`with_attachments`, `turn_runner.ex:479`). These are
   file writes inside the turn's own steps, before its user message is
   persisted, and move no Queue state: a stop or crash during them is one at
   the turn's start, with nothing of the turn in history yet.
@@ -203,6 +203,12 @@ watch was added to the model).
   which `application.ex` starts on every real boot after the Voice supervisor
   and before the companion socket; they store files and preview written rows
   and never reach the Queue.
+- The lists' notifier (M85 §07): `application.ex` registers
+  `Companion.ChecklistNotifier` in core's app env before it starts any child;
+  it only sends the companion connections a message after a list commits and
+  never reaches the Queue. A turn the Mac's connection carries after it pulled
+  the lists' index is stamped `draws_lists`, which `run_message_loop` reads
+  for the list line it appends at the turn's start, with no Queue state.
 - Consumers other than `Acp.Peer`. `Companion.Turns`, the settlement owner of
   the companion socket's turns and the phone's alike, watches the Queue it
   handed each turn to and answers the turn the Peer's way, with one
@@ -235,7 +241,7 @@ counterexample, run `make -C tla check SPECS=turn_queue` and open
     while the new Queue's turn ran, and nobody could stop it.
 - **Fix:** `FermixChannels.Gateway.QueueSupervisor` (`queue_supervisor.ex`)
   runs `{Task.Supervisor, name: FermixChannels.Gateway.TurnTasks}` and the
-  Queue, in that order, `:one_for_all`; `application.ex:95` starts it in the
+  Queue, in that order, `:one_for_all`; `application.ex:160` starts it in the
   Queue's slot. `:task_supervisor` is a required Queue option
   (`queue.ex:199`), so no Queue runs turns under a supervisor that outlives
   it. When the Queue dies, the supervisor terminates the task supervisor, and
@@ -251,10 +257,10 @@ counterexample, run `make -C tla check SPECS=turn_queue` and open
 - **Check:** 10 (6 states).
 - **Counterexample:** the reply is delivered (`deliver_final`, `queue.ex:547`).
   `/stop` then arrives before `runner.commit` persists it (`:551` →
-  `turn_runner.ex:158`).
+  `turn_runner.ex:159`).
 - **Code:**
   - `stop_active_turn` kills the task and writes the stopped marker
-    (`queue.ex:1095-1100`, `:1145-1158`).
+    (`queue.ex:1101-1106`, `:1151-1164`).
   - The marker is written because the last stored message is still the
     user's (`conversation_store.ex:173`).
 - **Impact:** the user saw a full answer, but history says "stopped before I
@@ -276,7 +282,7 @@ counterexample, run `make -C tla check SPECS=turn_queue` and open
 - **Counterexample:** the reply is delivered, then `/stop` arrives before the
   task claims its result.
 - **Code:** `commit/4` runs auto-compaction synchronously (`queue.ex:551` →
-  `turn_runner.ex:190`). The claim happens only after that returns
+  `turn_runner.ex:196`). The claim happens only after that returns
   (`finish_turn`, `queue.ex:519`), so the window also covers post-delivery
   auto-compaction: seconds to tens of seconds when it runs. The kill aborts
   that compaction (safely: `replace_history` is one atomic call) and skips
@@ -302,7 +308,7 @@ counterexample, run `make -C tla check SPECS=turn_queue` and open
   failed the turn result, but wrote no stopped marker, while the stop and
   error paths both wrote one.
 - **Fix:** `clear_active_request` calls `maybe_close_crashed_turn`
-  (`queue.ex:873`, `:887-893`), which writes the marker through
+  (`queue.ex:879`, `:893-899`), which writes the marker through
   `mark_stopped_turn` synchronously, inside the `:DOWN` handler, before the
   next message starts. Written later it could close the next turn's user
   message. `mark_stopped_turn` now logs a store exit instead of skipping it
@@ -317,7 +323,7 @@ counterexample, run `make -C tla check SPECS=turn_queue` and open
   Fixed (f1712e1e): a turn's calls to its Queue, and the
   stop calls, wait with no timeout, because every Queue callback is bounded
   (the client API note, `queue.ex:80-91`); each catch now means only a dead
-  Queue, and logs it (`queue.ex:597-603`, `:678-701`). The model's
+  Queue, and logs it (`queue.ex:597-603`, `:679-702`). The model's
   `Fresh(m)` never allowed the timeout, so no check changed. ExUnit pins it
   in "a Queue busy in a slow store call" (`gateway/queue_test.exs`): each
   test holds the Queue in a gated store call, traces the calls waiting on it
@@ -333,7 +339,7 @@ counterexample, run `make -C tla check SPECS=turn_queue` and open
 - **Check:** 13 (6 states).
 - **Counterexample:** `deliver_final` succeeds, then the task dies before
   `mark_final_reply_delivered` (`queue.ex:547-548`).
-- **Code:** `maybe_reply_on_crash` (`queue.ex:898`) checks the flag that the
+- **Code:** `maybe_reply_on_crash` (`queue.ex:904`) checks the flag that the
   second call would have set. Nothing in the task can raise between those two
   calls (`mark_final_reply_delivered` catches exits), so only a linked
   helper's exit (typing loop or DraftStream) can kill it there, within one
@@ -360,15 +366,15 @@ counterexample, run `make -C tla check SPECS=turn_queue` and open
   - `invoke_turn_result` rescued exceptions only, so a callback that exited
     or threw crashed the task; its `:DOWN` then found no callback.
 - **Fix:**
-  - The active entry records `claimed?` (`queue.ex:842`); the claim handler
+  - The active entry records `claimed?` (`queue.ex:848`); the claim handler
     replies the closure (or nil) and sets `claimed?: true` and
-    `turn_result_fn: nil` (`:250-259`, `:1127-1131`).
+    `turn_result_fn: nil` (`:250-259`, `:1133-1137`).
   - `stop_active_turn` leaves a claimed turn running with its slot and
-    monitor (`:1085-1087`); its `:DOWN` clears the slot through the normal
+    monitor (`:1091-1093`); its `:DOWN` clears the slot through the normal
     path, so single flight stays exact. It is not counted in
     `active_stopped`.
   - `invoke_turn_result` also catches `:exit` and `:throw`, and logs every
-    kind (`:933-948`).
+    kind (`:939-954`).
 - **Trade-off:** `/stop` can no longer cut a claimed turn whose closure hangs.
   Today's closures are bounded (ACP sends, voice dispatches, and the companion
   and phone channels' call into `Companion.Turns`, whose store calls time
@@ -388,9 +394,9 @@ counterexample, run `make -C tla check SPECS=turn_queue` and open
   and discarded pending messages with the conversation. That broke the rule
   at `queue.ex:380`: "a turn-result consumer must never be left waiting".
 - **Fix:** `stop_all` and `stop_conversation` share one per-conversation
-  path (`stop_conversation_runtime`, `queue.ex:1027-1031`), whose
+  path (`stop_conversation_runtime`, `queue.ex:1033-1037`), whose
   `cancel_pending` fires `{:cancelled}` for every dropped message through the
-  off-process, nil-safe `invoke_turn_result_async` (`:1105-1111`). A claimed
+  off-process, nil-safe `invoke_turn_result_async` (`:1111-1117`). A claimed
   turn's waiting messages are cancelled the same way. Pending messages were
   never persisted, so no marker is needed.
 - **Impact by channel (before the fix):**
@@ -473,7 +479,7 @@ counterexample, run `make -C tla check SPECS=turn_queue` and open
   turn keeps the Queue it was handed to beside its monitor
   (`Session.put_queue_ref`), `stop_turn` (`peer.ex:726-734`) stops that
   Queue and reads only `:noproc` as "gone", a `session/cancel` is then
-  answered `cancelled` (`cancel_turn`, `:700-705`), `$/cancel_request`
+  answered `cancelled` (`cancel_turn`, `:701-706`), `$/cancel_request`
   still answers -32800, and a disconnect moves on to the next session.
   Closing the turn flushes the dead Queue's `:DOWN`, so each prompt is
   answered once. The model allows no stop while restarting, so check 17

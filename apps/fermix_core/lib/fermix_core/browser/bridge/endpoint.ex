@@ -27,6 +27,7 @@ defmodule FermixCore.Browser.Bridge.Endpoint do
   alias FermixCore.Browser.Bridge.Peer
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.SocketPath
+  alias FermixCore.SocketPeer
 
   # One browser at a time is the shape of the feature; the headroom is for a
   # second profile (a dev Chrome beside the daily one) and for a connection
@@ -83,7 +84,7 @@ defmodule FermixCore.Browser.Bridge.Endpoint do
   def handle_info(:accept, state) do
     case :gen_tcp.accept(state.listen_socket, @accept_idle_ms) do
       {:ok, socket} ->
-        accept_connection(socket, state)
+        serve_admitted(socket, state)
         send(self(), :accept)
         {:noreply, state}
 
@@ -115,7 +116,9 @@ defmodule FermixCore.Browser.Bridge.Endpoint do
       grants: Keyword.get(opts, :grants, Grants),
       peer_supervisor:
         Keyword.get(opts, :peer_supervisor, FermixCore.Browser.Bridge.PeerSupervisor),
-      max_connections: Keyword.get(opts, :max_connections, @max_connections)
+      max_connections: Keyword.get(opts, :max_connections, @max_connections),
+      # Whether this socket answers a peer at all (`SocketPeer.admit/2`).
+      peer_gate: Keyword.get(opts, :peer_gate, &SocketPeer.admit/1)
     }
   end
 
@@ -231,6 +234,14 @@ defmodule FermixCore.Browser.Bridge.Endpoint do
   defp connections(state) do
     %{active: active} = DynamicSupervisor.count_children(state.peer_supervisor)
     active
+  end
+
+  # A command Fermix confines gets no answer here: no grant, no tab.
+  defp serve_admitted(socket, state) do
+    case state.peer_gate.(socket) do
+      :ok -> accept_connection(socket, state)
+      {:error, reason} -> SocketPeer.refuse(socket, state.socket_path, reason)
+    end
   end
 
   defp accept_connection(socket, state) do

@@ -1,7 +1,8 @@
 defmodule FermixCore.Management.Mobile do
   @moduledoc """
   The `mobile.*` methods: pairing a phone, the paired devices, and the phone
-  channel's status (M51 management pairing).
+  channel's status (M51 management pairing). A paired device is a phone or,
+  since M75, a desktop engine.
 
   A stateless adapter. The pairing state has one owner, the phone channel's
   pairing manager, and it lives in the channels app, which this app does not
@@ -32,6 +33,7 @@ defmodule FermixCore.Management.Mobile do
   @states ~w(awaiting_scan awaiting_decision approved denied expired cancelled failed)a
   @outcome_reasons ~w(denied timeout cancelled)a
   @build_roles ~w(release development)a
+  @kinds ~w(phone desktop)a
   @listener_states ~w(ready down unavailable)a
   @remote_states [:off, :dormant, :helper_missing, :starting, :ready, :failed]
   @listener_reasons ~w(address_unavailable address_in_use permission_denied listen_failed)a
@@ -82,6 +84,10 @@ defmodule FermixCore.Management.Mobile do
   @unavailable_attestation_sentence "Google's attestation service could not be reached."
   @no_request_sentence "No phone is waiting for a decision."
   @unknown_device_sentence "No paired phone has that id."
+  # The desktop a move linked to this primary (M75): this version cannot link
+  # a revoked desktop again, and it keeps copies of the primary's snapshots.
+  @desktop_sentence "This desktop cannot be removed: this version of Fermix cannot link it " <>
+                      "to the server again, and it keeps copies of the server's backups."
   @owner_only_sentence "Only the owner can pair or forget a phone; run this from your own terminal."
   # What a settings write says when the channel did not follow its switch.
   @switch_not_started_sentence "The phone channel is on but could not start. See the daemon log."
@@ -93,6 +99,7 @@ defmodule FermixCore.Management.Mobile do
   @type refusal ::
           {:busy, String.t()}
           | {:unavailable, String.t()}
+          | {:unavailable, String.t(), String.t()}
           | {:invalid_params, String.t(), String.t()}
           | {:unknown_pairing_session, String.t()}
   @type result :: {:ok, map()} | {:error, refusal()}
@@ -117,6 +124,7 @@ defmodule FermixCore.Management.Mobile do
         @unavailable_attestation_sentence,
         @no_request_sentence,
         @unknown_device_sentence,
+        @desktop_sentence,
         @owner_only_sentence,
         @switch_not_started_sentence,
         @switch_not_ready_sentence,
@@ -230,7 +238,7 @@ defmodule FermixCore.Management.Mobile do
     with {:ok, reply} <- call(opts, :devices_list, []), do: devices_reply(reply)
   end
 
-  @doc "Forgets one paired phone."
+  @doc "Forgets one paired phone. A desktop is refused: see `@desktop_sentence`."
   @spec devices_revoke(String.t(), keyword()) :: result()
   def devices_revoke(device_id, opts \\ []) when is_binary(device_id) and is_list(opts) do
     with {:ok, reply} <- call(opts, :devices_revoke, [device_id]), do: revoke_reply(reply)
@@ -331,6 +339,9 @@ defmodule FermixCore.Management.Mobile do
 
   defp revoke_reply({:error, :device_not_found}),
     do: {:error, {:invalid_params, "device_id", @unknown_device_sentence}}
+
+  defp revoke_reply({:error, :desktop_device}),
+    do: {:error, {:unavailable, @capability, @desktop_sentence}}
 
   defp revoke_reply({:error, reason}) when reason in @channel_down,
     do: {:error, {:unavailable, @capability}}
@@ -512,6 +523,7 @@ defmodule FermixCore.Management.Mobile do
       "device_id" => device.device_id,
       "name" => device.name,
       "model" => device.model,
+      "kind" => kind_word(device.kind),
       "platform" => optional_string(device.platform),
       "signer_role" => build_role(device.signer_role),
       "boot_state" => boot_state(device.boot_state),
@@ -520,6 +532,8 @@ defmodule FermixCore.Management.Mobile do
       "last_seen" => device.last_seen
     }
   end
+
+  defp kind_word(kind) when kind in @kinds, do: Atom.to_string(kind)
 
   defp optional_string(nil), do: nil
   defp optional_string(value) when is_binary(value), do: value

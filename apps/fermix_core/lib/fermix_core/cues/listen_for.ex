@@ -65,7 +65,7 @@ defmodule FermixCore.Cues.ListenFor do
     end
   end
 
-  def validate(_words), do: {:error, "Give the words to listen for as a list."}
+  def validate(_words), do: {:error, "Give the keywords to listen for as a list."}
 
   @doc "Compiles validated words into a matcher."
   @spec compile([String.t()]) :: matcher()
@@ -134,23 +134,23 @@ defmodule FermixCore.Cues.ListenFor do
 
     cond do
       word == "" ->
-        {:error, "A word to listen for cannot be empty."}
+        {:error, "A keyword to listen for cannot be empty."}
 
       String.length(word) > @max_word_chars ->
-        {:error, "Each word to listen for is at most #{@max_word_chars} characters: #{word}"}
+        {:error, "Each keyword to listen for is at most #{@max_word_chars} characters: #{word}"}
 
       Regex.match?(@control, word) ->
-        {:error, "Each word to listen for takes a single line."}
+        {:error, "Each keyword to listen for takes a single line."}
 
       not content?(word) ->
-        {:error, "A word to listen for needs a letter or a digit: #{word}"}
+        {:error, "A keyword to listen for needs a letter or a digit: #{word}"}
 
       true ->
         {:ok, word}
     end
   end
 
-  defp clean_word(_word), do: {:error, "Each word to listen for is text."}
+  defp clean_word(_word), do: {:error, "Each keyword to listen for is text."}
 
   defp content?(word) do
     normalized = normalize(word)
@@ -159,10 +159,10 @@ defmodule FermixCore.Cues.ListenFor do
 
   defp dedupe(words), do: Enum.uniq_by(words, &normalize/1)
 
-  defp count([]), do: {:error, "A watcher listens for at least one word."}
+  defp count([]), do: {:error, "A watcher listens for at least one keyword."}
 
   defp count(words) when length(words) > @max_words,
-    do: {:error, "A watcher listens for at most #{@max_words} words or short phrases."}
+    do: {:error, "A watcher listens for at most #{@max_words} keywords or short phrases."}
 
   defp count(words), do: {:ok, words}
 

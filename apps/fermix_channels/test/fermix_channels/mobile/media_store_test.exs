@@ -498,6 +498,95 @@ defmodule FermixChannels.Mobile.MediaStoreTest do
     assert File.stat!(manifest).size < 1_024
   end
 
+  # Companion protocol 7: the Mac hands over a file by path. It goes through
+  # the phone's own upload, chunk by chunk, so the same limits and checks
+  # hold, and the reader owns the upload while it runs.
+  describe "import_file/3" do
+    setup %{root: root} do
+      big_root = Path.join(root, "big")
+      files = Path.join(root, "files")
+      File.mkdir_p!(files)
+
+      store =
+        start_supervised!(
+          {MediaStore,
+           name: nil, root: big_root, max_media_bytes: 1_048_576, max_store_bytes: 4_194_304},
+          id: :big_store
+        )
+
+      %{big: store, files: files}
+    end
+
+    test "a file over several chunks is stored whole, verified, under its attach id", ctx do
+      bytes = :crypto.strong_rand_bytes(600 * 1_024)
+      path = write_file!(ctx.files, "big", bytes)
+      spec = upload("mac-1", bytes, sha256(bytes), name: "big.bin")
+
+      assert {:ok, :present} = MediaStore.import_file(ctx.big, path, spec)
+      assert {:ok, %{ref: ref, file_name: "big.bin"}} = MediaStore.attachment(ctx.big, "mac-1")
+      assert {:ok, %{path: stored}} = MediaStore.fetch(ctx.big, ref)
+      assert File.read!(stored) == bytes
+      assert File.read!(path) == bytes
+
+      again = upload("mac-2", bytes, sha256(bytes))
+      assert {:ok, :present} = MediaStore.import_file(ctx.big, path, again)
+    end
+
+    test "a file that is not what was announced keeps nothing and leaves no upload", ctx do
+      bytes = :crypto.strong_rand_bytes(300 * 1_024)
+      path = write_file!(ctx.files, "announced", bytes)
+
+      assert {:error, {:size_exceeded, _written, _announced}} =
+               MediaStore.import_file(ctx.big, path, %{
+                 upload("long", bytes, sha256(bytes))
+                 | size_bytes: 1_000
+               })
+
+      assert {:error, {:size_mismatch, _announced, _written}} =
+               MediaStore.import_file(ctx.big, path, %{
+                 upload("short", bytes, sha256(bytes))
+                 | size_bytes: byte_size(bytes) + 1
+               })
+
+      assert {:error, {:sha256_mismatch, _digests}} =
+               MediaStore.import_file(ctx.big, path, upload("other", bytes, sha256("other")))
+
+      for id <- ~w(long short other) do
+        assert {:error, :unknown_attachment} = MediaStore.attachment(ctx.big, id)
+        assert {:error, :unknown_upload} = MediaStore.cancel_upload(ctx.big, id)
+      end
+    end
+
+    test "a missing file, a symlink and the store's own limits are refused", ctx do
+      bytes = "plain"
+      path = write_file!(ctx.files, "plain", bytes)
+      link = Path.join(ctx.files, "link")
+      :ok = File.ln_s(path, link)
+
+      assert {:error, :file_missing} =
+               MediaStore.import_file(
+                 ctx.big,
+                 Path.join(ctx.files, "none"),
+                 upload("a", bytes, sha256(bytes))
+               )
+
+      assert {:error, {:not_regular_file, :symlink}} =
+               MediaStore.import_file(ctx.big, link, upload("b", bytes, sha256(bytes)))
+
+      assert {:error, {:not_regular_file, :directory}} =
+               MediaStore.import_file(ctx.big, ctx.files, upload("c", bytes, sha256(bytes)))
+
+      assert {:error, {:media_too_large, 65, 64}} =
+               MediaStore.import_file(ctx.store, path, %{
+                 upload("d", bytes, sha256(bytes))
+                 | size_bytes: 65
+               })
+
+      assert MediaStore.max_media_bytes(ctx.big) == 1_048_576
+      assert MediaStore.max_media_bytes(ctx.store) == 64
+    end
+  end
+
   test "validates identifiers, hashes, sizes, and root modes", %{root: root, store: store} do
     assert {:error, {:invalid_field, :attach_id}} =
              MediaStore.begin_upload(store, upload("", "x", sha256("x")))
@@ -560,6 +649,13 @@ defmodule FermixChannels.Mobile.MediaStoreTest do
   end
 
   defp sha256(bytes), do: :sha256 |> :crypto.hash(bytes) |> Base.encode16(case: :lower)
+
+  defp write_file!(dir, name, bytes) do
+    path = Path.join(dir, name)
+    File.write!(path, bytes)
+    path
+  end
+
   defp file_mode(path), do: File.stat!(path).mode |> Bitwise.band(0o777)
 
   defp restart_store(root, opts \\ []) do

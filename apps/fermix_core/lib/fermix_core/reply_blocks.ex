@@ -5,8 +5,9 @@ defmodule FermixCore.ReplyBlocks do
   text makes of them.
 
   The holder keeps, per conversation key, the places `place_search` handed the
-  model (`put_places/3`), until the companion turn writer takes them for the
-  reply it writes (`take/2`). It is bounded whichever channel ran the search:
+  model (`put_places/3`) and the lists `checklist_read` and `checklist_edit`
+  read or changed (`put_checklists/3`, M85 §07), until the companion turn
+  writer takes them for the reply it writes (`take/2`). It is bounded whichever channel ran the search:
   a record expires 30 minutes after it was put, a conversation keeps its newest
   50, and expired records of every conversation are dropped on each call, so a
   conversation that never takes holds nothing past the window.
@@ -24,12 +25,20 @@ defmodule FermixCore.ReplyBlocks do
 
   `links/2` is the same reading's other half: the links a reply names that no
   block draws, which are the ones its link previews are made from.
+
+  `checklists/1` is the other block (M85 §07): the lists the turn's list tools
+  read or changed, in the order the turn first touched them, at most eight,
+  each its id, its newest title and the ids of the rows the turn added or
+  changed, none for a list it only read. Ids, never words: a client draws a
+  list's rows as they stand now. `build/2` adds it after the places, and a
+  job's delivery takes it alone.
   """
 
   use GenServer
 
-  @types ["places"]
+  @types ["places", "checklists"]
   @max_places 10
+  @max_checklists 8
   @max_categories 5
   @max_records 50
   @ttl_ms 30 * 60 * 1_000
@@ -47,6 +56,15 @@ defmodule FermixCore.ReplyBlocks do
   @typedoc "One block under a reply, string keyed as the wire carries it."
   @type block :: %{required(String.t()) => term()}
 
+  @typedoc """
+  A list a tool read or changed: its id and title, and the ids of the rows the
+  call added or changed (none for a list it only read).
+  """
+  @type checklist_touch :: %{list_id: String.t(), title: String.t(), rows: [String.t()]}
+
+  @typedoc "What the holder keeps: a place a search returned, or a list a tool touched."
+  @type record :: map() | {:checklist, checklist_touch()}
+
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) when is_list(opts) do
     case Keyword.get(opts, :name, __MODULE__) do
@@ -62,6 +80,10 @@ defmodule FermixCore.ReplyBlocks do
   @doc "The most places one `places` block holds."
   @spec max_places() :: pos_integer()
   def max_places, do: @max_places
+
+  @doc "The most lists one `checklists` block names."
+  @spec max_checklists() :: pos_integer()
+  def max_checklists, do: @max_checklists
 
   @doc "The most categories one place carries."
   @spec max_categories() :: pos_integer()
@@ -86,23 +108,38 @@ defmodule FermixCore.ReplyBlocks do
   end
 
   @doc """
+  Keep `touches`, the lists a list tool read or changed, under the
+  conversation it ran in, after the records already kept.
+  """
+  @spec put_checklists(GenServer.server(), conversation_key(), [checklist_touch()]) :: :ok
+  def put_checklists(server \\ __MODULE__, conversation_key, touches)
+      when is_tuple(conversation_key) and tuple_size(conversation_key) == 3 and is_list(touches) do
+    GenServer.call(server, {:put, conversation_key, Enum.map(touches, &checklist_record/1)})
+  end
+
+  defp checklist_record(%{list_id: id, title: title, rows: rows})
+       when is_binary(id) and is_binary(title) and is_list(rows),
+       do: {:checklist, %{list_id: id, title: title, rows: rows}}
+
+  @doc """
   The conversation's live records, oldest first, which the holder then
   forgets.
   """
-  @spec take(GenServer.server(), conversation_key()) :: [map()]
+  @spec take(GenServer.server(), conversation_key()) :: [record()]
   def take(server \\ __MODULE__, conversation_key)
       when is_tuple(conversation_key) and tuple_size(conversation_key) == 3 do
     GenServer.call(server, {:take, conversation_key})
   end
 
   @doc """
-  The blocks a reply's `text` makes of `records`: `[]`, or one `places` block
-  with the places the text links. When two records name the same link, the
-  later one (the newer search) is the one drawn.
+  The blocks a reply's `text` makes of `records`: a `places` block with the
+  places the text links, when it links any, then a `checklists` block with the
+  lists the turn touched, when it touched any. When two records name the same
+  link, the later one (the newer search) is the one drawn.
   """
-  @spec build(String.t(), [map()]) :: [block()]
+  @spec build(String.t(), [record()]) :: [block()]
   def build(text, records) when is_binary(text) and is_list(records) do
-    index = url_index(records)
+    index = records |> places() |> url_index()
 
     text
     |> read_links()
@@ -111,6 +148,51 @@ defmodule FermixCore.ReplyBlocks do
     |> Enum.uniq_by(&{&1["name"], &1["location"]})
     |> Enum.take(@max_places)
     |> places_block()
+    |> Kernel.++(checklists(records))
+  end
+
+  @doc """
+  The `checklists` block `records` make: `[]`, or one block naming each list a
+  list tool touched, in first-touch order, at most #{@max_checklists}, with the
+  rows every touch of it added or changed, in the order they were first named.
+  """
+  @spec checklists([record()]) :: [block()]
+  def checklists(records) when is_list(records) do
+    records
+    |> Enum.flat_map(fn
+      {:checklist, touch} -> [touch]
+      _place -> []
+    end)
+    |> Enum.reduce([], &merge_touch/2)
+    |> Enum.reverse()
+    |> Enum.take(@max_checklists)
+    |> checklists_block()
+  end
+
+  # Newest first while folding: a list touched again keeps its first place,
+  # takes its newest title and adds the rows it had not named.
+  defp merge_touch(touch, merged) do
+    case Enum.find_index(merged, &(&1.list_id == touch.list_id)) do
+      nil ->
+        [touch | merged]
+
+      index ->
+        List.update_at(merged, index, fn kept ->
+          %{kept | title: touch.title, rows: kept.rows ++ (touch.rows -- kept.rows)}
+        end)
+    end
+  end
+
+  defp checklists_block([]), do: []
+
+  defp checklists_block(lists) do
+    [
+      %{
+        "type" => "checklists",
+        "lists" =>
+          Enum.map(lists, &%{"list_id" => &1.list_id, "title" => &1.title, "rows" => &1.rows})
+      }
+    ]
   end
 
   @doc """
@@ -164,6 +246,8 @@ defmodule FermixCore.ReplyBlocks do
   defp monotonic_ms, do: System.monotonic_time(:millisecond)
 
   # -- building --------------------------------------------------------------
+
+  defp places(records), do: Enum.reject(records, &match?({:checklist, _touch}, &1))
 
   defp drawn_urls(%{"type" => "places", "places" => places}),
     do: Enum.flat_map(places, &[&1["canonical_url"], &1["source_url"]])

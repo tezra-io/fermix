@@ -15,6 +15,11 @@ defmodule FermixChannels.Mobile.Iroh.HelperTest do
   @us1 %{url: "https://us1.relay.fermix.ai/", quic_port: 7842}
   @eu1 %{url: "https://eu1.relay.fermix.ai/", quic_port: 7842}
   @ap1 %{url: "https://ap1.relay.fermix.ai/", quic_port: 7842}
+  # What the fake says is a Perl process's work, which on a loaded runner takes
+  # longer than the suite's 2 s; the rail itself gives a helper 10 s to start.
+  # Every wait on the fake, its state or its telemetry, takes this bound.
+  @helper_ms 10_000
+  @poll_ms 20
 
   setup %{tmp_dir: root} do
     mobile = Path.join(root, "mobile")
@@ -99,13 +104,13 @@ defmodule FermixChannels.Mobile.Iroh.HelperTest do
 
   defp self_pid(opts), do: Keyword.get(opts, :test_pid, self())
 
-  defp await_state(pid, state, attempts \\ 100) do
+  defp await_state(pid, state, attempts \\ div(@helper_ms, @poll_ms)) do
     case Helper.status(pid) do
       %{state: ^state} = status ->
         status
 
       other when attempts > 0 ->
-        Process.sleep(20)
+        Process.sleep(@poll_ms)
 
         if attempts == 1,
           do: flunk("rail stayed #{inspect(other)}"),
@@ -179,7 +184,7 @@ defmodule FermixChannels.Mobile.Iroh.HelperTest do
 
     # The first failure's telemetry, not a poll: a poll can land after the
     # one-second retry has already failed again.
-    assert_receive {:emit, :degraded, 1, _class}, 3_000
+    assert_receive {:emit, :degraded, 1, _class}, @helper_ms
     assert %{rail: :failed, failure: failure, retry: %{delay_ms: 2_000}} = :sys.get_state(pid)
     # Dying right after `hello` can also surface as the daemon's `start` write
     # failing on the closed pipe, whichever the OS reports first.
@@ -224,11 +229,11 @@ defmodule FermixChannels.Mobile.Iroh.HelperTest do
   test "a helper that dies soon after ready keeps backing off", ctx do
     pid = start(ctx, binary_path: fake(ctx, exit_after_start: 101), test_pid: self())
 
-    assert_receive {:emit, :degraded, 1, :exited}, 3_000
+    assert_receive {:emit, :degraded, 1, :exited}, @helper_ms
     assert %{retry: %{delay_ms: 2_000}} = :sys.get_state(pid)
 
-    assert_receive {:emit, :recovered, 0, :none}, 3_000
-    assert_receive {:emit, :degraded, 1, :exited}, 3_000
+    assert_receive {:emit, :recovered, 0, :none}, @helper_ms
+    assert_receive {:emit, :degraded, 1, :exited}, @helper_ms
     assert %{retry: %{delay_ms: 4_000}} = :sys.get_state(pid)
   end
 
@@ -240,7 +245,7 @@ defmodule FermixChannels.Mobile.Iroh.HelperTest do
   test "a helper whose pipe closed under the daemon's write is a crash", ctx do
     pid = start(ctx, binary_path: fake(ctx, close_stdin_before_hello: true), test_pid: self())
 
-    assert_receive {:emit, :degraded, 1, :port_closed}, 3_000
+    assert_receive {:emit, :degraded, 1, :port_closed}, @helper_ms
 
     assert %{
              rail: :failed,

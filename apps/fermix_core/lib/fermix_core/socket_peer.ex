@@ -32,9 +32,15 @@ defmodule FermixCore.SocketPeer do
   started through launchd, systemd, `open`, or a terminal app driven by
   `osascript`. CommandHost's end-of-command group sweep does not help there: it
   kills a process, not a prompt the daemon has already accepted.
+
+  Whether a socket answers a peer at all is a separate, stronger question
+  (`admit/2`): a command Fermix confines gets no answer from any of its sockets,
+  and on Linux that is decided by a flag the kernel keeps, never by placement.
   """
 
   alias FermixCore.CommandRunner
+
+  require Logger
 
   @typedoc """
   Whether the peer runs beneath the daemon's own OS process, is detached (no
@@ -70,6 +76,83 @@ defmodule FermixCore.SocketPeer do
       classify_pid(peer, daemon_os_pid, table)
     end
   end
+
+  @doc """
+  Whether a Fermix socket answers the process on the other end of `socket` at
+  all. Fermix's sockets never answer a command it confines (OS sandbox
+  enforcement): on macOS the Seatbelt profile refuses the connect itself, so
+  every peer that reaches a socket is answered.
+
+  Landlock cannot refuse a connect to a pathname socket, so on Linux the peer is
+  judged here, by its no_new_privs flag: `fermix_landlock` sets it before it
+  confines a command, and the kernel keeps it for that command and everything
+  it starts, through a new session, a double fork or a parent that exits. A
+  peer that carries it is refused, and so is one whose flag cannot be read (it
+  has gone, or it is in another pid namespace). Every other sandbox sets the
+  flag as well (a Flatpak app, a no-new-privileges container), so a Fermix
+  client run inside one is refused too.
+
+  On any other system Fermix confines no command, and every peer is answered.
+  `os` is the platform-injection seam.
+  """
+  @spec admit(:inet.socket(), {atom(), atom()}) :: :ok | {:error, term()}
+  def admit(socket, os \\ :os.type())
+
+  def admit(socket, {:unix, :linux} = os) do
+    with {:ok, pid} <- peer_os_pid(socket, os),
+         {:ok, status} <- proc_status(pid) do
+      judge(pid, no_new_privs(status))
+    end
+  end
+
+  def admit(_socket, os) when is_tuple(os), do: :ok
+
+  @doc """
+  The no_new_privs flag in a Linux `/proc/<pid>/status` text, or `:error` when
+  the text holds no line the kernel would print for it.
+  """
+  @spec no_new_privs(String.t()) :: {:ok, boolean()} | :error
+  def no_new_privs(status) when is_binary(status) do
+    case Regex.run(~r/^NoNewPrivs:\t([01])$/m, status) do
+      [_line, "1"] -> {:ok, true}
+      [_line, "0"] -> {:ok, false}
+      nil -> :error
+    end
+  end
+
+  @doc """
+  Close a connection `admit/2` refused, and log once which socket refused whom
+  and why. Nothing is written to the peer: a confined command on macOS gets no
+  connection at all, and on Linux one that closes unanswered.
+  """
+  @spec refuse(:inet.socket(), String.t(), term()) :: :ok
+  def refuse(socket, socket_path, reason) when is_binary(socket_path) do
+    Logger.warning("#{socket_path} refused a connection: #{refusal(reason)}")
+    :gen_tcp.close(socket)
+  end
+
+  @doc """
+  The `/proc/<pid>/status` text of `pid`, read raw: never through the VM's file
+  server, which every file call in the node queues on, so a busy node cannot hold
+  up a socket's accept loop, where `admit/2` runs. `proc` is the proc root, a
+  test seam.
+  """
+  @spec proc_status(pos_integer(), String.t()) :: {:ok, binary()} | {:error, term()}
+  def proc_status(pid, proc \\ @proc) when is_integer(pid) and pid > 0 and is_binary(proc) do
+    case :file.read_file(Path.join([proc, Integer.to_string(pid), "status"]), [:raw]) do
+      {:ok, status} -> {:ok, status}
+      {:error, reason} -> {:error, {:proc_status_unreadable, pid, reason}}
+    end
+  end
+
+  defp judge(_pid, {:ok, false}), do: :ok
+  defp judge(pid, {:ok, true}), do: {:error, {:sandboxed, pid}}
+  defp judge(pid, :error), do: {:error, {:no_new_privs_unreadable, pid}}
+
+  defp refusal({:sandboxed, pid}),
+    do: "process #{pid} runs sandboxed (no_new_privs), and Fermix's sockets never answer one"
+
+  defp refusal(reason), do: "its process could not be judged (#{inspect(reason)})"
 
   @doc """
   The OS pid of the process on the other end of a connected local `socket`, as the
@@ -184,16 +267,30 @@ defmodule FermixCore.SocketPeer do
   defp ps_tdev("??"), do: {:ok, false}
   defp ps_tdev(tdev), do: if(tdev =~ ~r/\A\d+\/\d+\z/, do: {:ok, true}, else: :error)
 
-  defp proc_table do
-    case File.ls(@proc) do
-      {:ok, names} -> names |> Enum.filter(&(&1 =~ ~r/\A\d+\z/)) |> read_stats()
-      {:error, reason} -> {:error, {:proc_unreadable, reason}}
+  @doc """
+  The process table of the Linux proc root `proc`: each process's parent,
+  process group and whether it has a controlling terminal. Read raw, never
+  through the VM's file server, which every file call in the node queues on:
+  `classify/3` runs it, one read per process, as a connection is handed its
+  socket. `proc` is a test seam.
+  """
+  @spec proc_table(String.t()) :: {:ok, process_table()} | {:error, term()}
+  def proc_table(proc \\ @proc) when is_binary(proc) do
+    case :prim_file.list_dir(proc) do
+      {:ok, names} ->
+        names
+        |> Enum.map(&IO.chardata_to_string/1)
+        |> Enum.filter(&(&1 =~ ~r/\A\d+\z/))
+        |> read_stats(proc)
+
+      {:error, reason} ->
+        {:error, {:proc_unreadable, reason}}
     end
   end
 
-  defp read_stats(pid_names) do
+  defp read_stats(pid_names, proc) do
     Enum.reduce_while(pid_names, {:ok, %{}}, fn name, {:ok, table} ->
-      case File.read(Path.join([@proc, name, "stat"])) do
+      case :file.read_file(Path.join([proc, name, "stat"]), [:raw]) do
         {:ok, stat} -> stat |> stat_fields() |> parse_row(&proc_tty_nr/1) |> put_row(stat, table)
         # It exited after the listing, or belongs to another account under
         # hidepid: either way this account cannot place it, as ps would not list it.

@@ -48,8 +48,10 @@
 (*   log line: a stutter, and the fairness on WkrStep assumes a later      *)
 (*   tick's read is answered in time. A timed-out mark (:216-225) is not a *)
 (*   failed mark: the Repo serves requests in arrival order and still runs *)
-(*   one whose caller gave up (repo.ex:3931-3935), so the UPDATE lands     *)
-(*   where the wait would have put it, before the worker's next request.   *)
+(*   one whose caller gave up (repo.ex call/2; the worker marks none of    *)
+(*   its requests skip_when_late, which would let the Repo skip a late     *)
+(*   one), so the UPDATE lands where the wait would have put it, before    *)
+(*   the worker's next request.                                            *)
 (*   The worker reads the answer only to log it, so the mark is WkrResolve *)
 (*   or WkrDeadLetter, the worker's return to idle ordered after the write *)
 (* - the DeliveryWorker crashing on its own                                *)
@@ -64,13 +66,13 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/harness/delivery_worker.ex @ b6da6ecba368
 \* SOURCE: apps/fermix_core/lib/fermix_core/harness/continuation.ex @ 76e0fc721679
 \* SOURCE: apps/fermix_core/lib/fermix_core/harness/continuation_dispatcher.ex @ 92d85f69b270
-\* SOURCE: apps/fermix_core/lib/fermix_core/harness/delivery.ex @ 4e77f68cde3b
+\* SOURCE: apps/fermix_core/lib/fermix_core/harness/delivery.ex @ df0350566b9a
 \* SOURCE: apps/fermix_core/lib/fermix_core/harness/ledger.ex @ 453b4145825d
 \* SOURCE: apps/fermix_core/lib/fermix_core/harness/memory_writeback.ex @ d85eb40385ad
 \* SOURCE: apps/fermix_core/lib/fermix_core/harness/supervisor.ex @ f4967c985e88
 \* SOURCE: apps/fermix_core/lib/fermix_core/harness/run_supervisor.ex @ 434b12f3182b
-\* SOURCE: apps/fermix_core/lib/fermix_core/harness/run.ex @ 788c70041804
-\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo.ex#call,periodic_opts,call_or_timeout_error,request_name,admit_harness_run,admit_harness_run_tx,admit_harness_run_in_tx,ensure_harness_capacity,insert_harness_run_row,terminalize_harness_run,terminalize_harness_run_row,update_harness_run,update_harness_run_row,pending_harness_deliveries,fetch_pending_harness_deliveries,active_harness_runs,fetch_active_harness_runs,normalize_harness_run_attrs,upsert_memory,@harness_runs_schema_sql,@harness_active_status_sql @ 2a54769ee37b
+\* SOURCE: apps/fermix_core/lib/fermix_core/harness/run.ex @ 8b3cf84d5702
+\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo.ex#call,request_message,deadline_after,deadline_passed?,periodic_opts,call_or_timeout_error,request_name,admit_harness_run,admit_harness_run_tx,admit_harness_run_in_tx,ensure_harness_capacity,insert_harness_run_row,terminalize_harness_run,terminalize_harness_run_row,update_harness_run,update_harness_run_row,pending_harness_deliveries,fetch_pending_harness_deliveries,active_harness_runs,fetch_active_harness_runs,normalize_harness_run_attrs,upsert_memory,@harness_runs_schema_sql,@harness_active_status_sql @ c12b0f65b39e
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo.ex#interpret_harness_terminalize,harness_terminalize_rejection,harness_run_set_clause,harness_run_set_entry,@harness_run_timestamp_cols @ 58c7f52fc492
 \* SOURCE: apps/fermix_core/lib/fermix_core/delivery/channel_send.ex @ 9b06289e25ae
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/harness/continuation_dispatcher.ex @ 4a8408f063b0
@@ -143,7 +145,7 @@ VARIABLES
     origin,      \* SQLite row: origin_kind / client_origin, frozen at admission
     rpc,         \* the Harness.Run process: "running" or "gone"
     runStale,    \* Run state: its :manager pid belongs to a dead Manager
-    reported,    \* history: the Run sent its terminal report (run.ex:634)
+    reported,    \* history: the Run sent its terminal report (run.ex:659)
     mbox,        \* Manager mailbox: the Run's report and DOWN messages, in order
     mpc,         \* Manager: which callback it is in (see MgrStates)
     mgrCrashes,  \* environment bound: Manager crashes so far

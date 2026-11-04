@@ -84,6 +84,14 @@ defmodule Fermix.CLI.SecretInput do
   end
 
   @doc """
+  Whether stdin is a terminal, by the same terminal the reads use: a verb
+  that prompts only on a terminal asks this, so it never decides otherwise
+  than `read_masked/2` and `read_stdin/1` will.
+  """
+  @spec terminal?(keyword()) :: boolean()
+  def terminal?(opts \\ []) when is_list(opts), do: terminal(opts).stdin_terminal?()
+
+  @doc """
   Reads the secret from stdin, for `--stdin` and any non-interactive caller.
 
   Fails with `{:error, :stdin_is_a_terminal}` rather than hanging on a

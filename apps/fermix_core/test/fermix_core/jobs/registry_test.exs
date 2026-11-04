@@ -2,6 +2,7 @@ defmodule FermixCore.Jobs.RegistryTest do
   use ExUnit.Case, async: true
 
   alias FermixCore.Jobs.Registry
+  alias FermixCore.Jobs.Schedule
   alias FermixCore.Memory.Repo
 
   @released_at ~U[2026-05-02 14:20:00Z]
@@ -701,6 +702,134 @@ defmodule FermixCore.Jobs.RegistryTest do
       assert released.state == "scheduled"
       assert released.enabled? == true
       assert released.next_run_at == nil
+    end
+  end
+
+  # A watcher's follow-up (M60_WATCHER_CODING_RUNS.md §4.1): the `"watcher"`
+  # kind, made only by `create_follow_up_job/2`, inherits every refusal of the
+  # cue kind but one: the owner may run it now by hand.
+  describe "a watcher's follow-up" do
+    defp follow_up_attrs(extra) do
+      Map.merge(
+        %{
+          created_by_trust: "operator",
+          name: "Codex review",
+          task_prompt: "Review the last day's commits on dev and report the findings.",
+          allowed_tools: ["codex_run"],
+          delivery_mode: "origin",
+          delivery_target: %{"platform" => "telegram", "chat_id" => "4242"}
+        },
+        extra
+      )
+    end
+
+    defp create_follow_up!(repo, extra \\ %{}) do
+      {:ok, job} =
+        Registry.create_follow_up_job(follow_up_attrs(extra), repo: repo, scheduler: nil)
+
+      job
+    end
+
+    test "is made with no schedule, no next run and no expiry; no schedule names its kind", %{
+      repo: repo
+    } do
+      job = create_follow_up!(repo)
+
+      assert {job.schedule_kind, job.schedule_expr} == {"watcher", "watcher"}
+      assert {job.next_run_at, job.expires_at, job.timeout_seconds} == {nil, nil, 600}
+      assert job.allowed_tools == ["codex_run"]
+      assert Registry.follow_up_job?(job)
+      refute Registry.cue_job?(job)
+
+      assert {:error, {:invalid_schedule, "watcher"}} = Schedule.parse("watcher")
+
+      assert {:error, {:invalid_schedule, "watcher"}} =
+               Registry.create_job(Map.put(follow_up_attrs(%{}), :schedule, "watcher"),
+                 repo: repo,
+                 scheduler: nil
+               )
+    end
+
+    test "refuses a schedule, an expiry, a policy, no tools and a delivery that reaches no one",
+         %{repo: repo} do
+      for {extra, sentence} <- [
+            {%{schedule: "every 1 hour"}, "A job that runs on cues has no schedule of its own."},
+            {%{expires_at: ~U[2099-05-03 12:00:00Z]}, "A job that runs on cues cannot expire."},
+            {%{capability_policy: ["exec"]},
+             "A watcher's follow-up runs with the tools it names; it takes no capability policy."},
+            {%{allowed_tools: []}, "A watcher's follow-up names the tools it may use."},
+            {%{delivery_mode: "none", delivery_target: nil},
+             "A watcher's follow-up must reach you: pick where it reports."},
+            {%{timeout_seconds: 2_700}, "A job that runs on cues may run for at most 30 minutes."}
+          ] do
+        assert {:error, ^sentence} =
+                 Registry.create_follow_up_job(follow_up_attrs(extra), repo: repo, scheduler: nil)
+      end
+
+      assert {:ok, []} = Registry.list_jobs(repo: repo)
+    end
+
+    test "update_job keeps its schedule, its tools as its grant and its delivery to the owner",
+         %{repo: repo} do
+      job = create_follow_up!(repo)
+      opts = [repo: repo, scheduler: nil]
+
+      for attrs <- [%{schedule: "every 1 hour"}, %{timezone: "Europe/Paris"}] do
+        assert {:error, "This job runs on cues; its schedule cannot change."} =
+                 Registry.update_job(job.id, attrs, opts)
+      end
+
+      assert {:error,
+              "A watcher's follow-up runs with the tools it names; it takes no " <>
+                "capability policy."} =
+               Registry.update_job(job.id, %{capability_policy: ["exec"]}, opts)
+
+      assert {:error, "A watcher's follow-up must reach you: pick where it reports."} =
+               Registry.update_job(job.id, %{delivery_mode: "local"}, opts)
+
+      assert {:ok, %{task_prompt: "Run the deploy check."}} =
+               Registry.update_job(job.id, %{task_prompt: "Run the deploy check."}, opts)
+    end
+
+    test "resume arms no next run; the due scan never sees it; the owner may run it now", %{
+      repo: repo
+    } do
+      job = create_follow_up!(repo)
+      opts = [repo: repo, scheduler: nil]
+
+      assert {:ok, %{state: "paused"}} = Registry.pause_job(job.id, opts)
+      assert {:ok, %{state: "scheduled", next_run_at: nil}} = Registry.resume_job(job.id, opts)
+      assert {:ok, []} = Repo.due_scheduled_jobs(~U[2099-12-31 23:59:00Z], server: repo)
+      assert {:ok, nil} = Repo.next_scheduled_job(server: repo)
+      assert :ok = Registry.check_run_now(job.id, repo: repo)
+    end
+
+    test "update_follow_up_job is the one path that changes its tools, never to none", %{
+      repo: repo
+    } do
+      job = create_follow_up!(repo)
+      cron_job = create_frequent_job!(repo, "Cron Job")
+      opts = [repo: repo, scheduler: nil]
+
+      assert {:ok, changed} =
+               Registry.update_follow_up_job(
+                 job.id,
+                 %{allowed_tools: ["codex_run", "slack_post"], timeout_seconds: 900},
+                 opts
+               )
+
+      assert {changed.allowed_tools, changed.timeout_seconds} ==
+               {["codex_run", "slack_post"], 900}
+
+      assert {:error, "A watcher's follow-up names the tools it may use."} =
+               Registry.update_follow_up_job(job.id, %{allowed_tools: []}, opts)
+
+      assert {:error, "Job " <> _rest} =
+               Registry.update_follow_up_job(cron_job.id, %{allowed_tools: ["shell"]}, opts)
+
+      # The generic update path never touches a job's tools.
+      assert {:ok, %{allowed_tools: ["codex_run", "slack_post"]}} =
+               Registry.update_job(job.id, %{allowed_tools: ["shell"], task_prompt: "x"}, opts)
     end
   end
 

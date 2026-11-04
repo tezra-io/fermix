@@ -3,14 +3,25 @@ defmodule FermixChannels.Gateway.Commands.SandboxTest do
 
   alias FermixChannels.Gateway.Authorizer
   alias FermixChannels.Gateway.Commands
+  alias FermixChannels.Gateway.Commands.Sandbox
+  alias FermixChannels.Gateway.Commands.Sandbox.Confirmations
   alias FermixChannels.Gateway.Message
   alias FermixChannels.Gateway.Source
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Cues.FollowUps
+  alias FermixCore.Cues.Ingest
   alias FermixCore.Cues.Pins
+  alias FermixCore.Cues.Proposals
+  alias FermixCore.Cues.Watchers
+  alias FermixCore.Memory.Repo
+  alias FermixCore.Memory.Repo.CuesFollowUpSql
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Sandbox.PathPolicy
+  alias FermixTestSupport.CueFixtures
   alias FermixTestSupport.MandateFixtures
+
+  @bare_owner "owner-bare"
 
   setup do
     home = FermixTestSupport.SafeRm.make_tmp_dir!("channel-sandbox-command")
@@ -321,11 +332,215 @@ defmodule FermixChannels.Gateway.Commands.SandboxTest do
       assert_receive {:sandbox_reply, "That call was already denied."}
       refute_received {:executed, _tool, _args, _context}
     end
+
+    # M60_WATCHER_CODING_RUNS.md §6.2: a tap on a watcher's card is answered
+    # on the card, which becomes the answer's line.
+    test "a tap on the card is answered on the card", ctx do
+      tap = %{
+        dm("/deny #{ctx.token}")
+        | metadata: %{user_id: "owner-1", approval_message_id: "55"}
+      }
+
+      assert :ok = dispatch_proposal(tap, ctx)
+
+      assert_receive {:sandbox_reply,
+                      {:approval_answer, "55", "Denied. github_create_issue will not run."}}
+    end
+
+    # The 2026-10-31 revision: Always allow is a follow-up's card's alone.
+    test "/always on a mandate's proposal runs nothing, and the proposal still waits", ctx do
+      assert :ok = dispatch_proposal(dm("/always #{ctx.token}"), ctx)
+
+      assert_receive {:sandbox_reply, "Only a follow-up's card offers Always allow; nothing ran."}
+
+      refute_received {:executed, _tool, _args, _context}
+
+      assert :ok = dispatch_proposal(dm("/always"), ctx)
+
+      assert_receive {:sandbox_reply,
+                      "Nothing here offers Always allow: only a follow-up's card waiting in " <>
+                        "this chat does."}
+
+      assert :ok = dispatch_proposal(dm("/confirm #{ctx.token}"), ctx)
+      assert_receive {:sandbox_reply, "Confirmed. github_create_issue ran:\n" <> _framed}
+    end
+  end
+
+  # The 2026-10-31 revision of M60_WATCHER_CODING_RUNS.md: `/always`, by token
+  # or bare for the one card waiting, runs a follow-up and lets its later items
+  # run with no card, as the card's Always allow button does.
+  describe "/always on a follow-up's card" do
+    setup do
+      follow_up_setup()
+    end
+
+    test "by its token, it starts the run and allows the follow-up", ctx do
+      assert :ok = dispatch_proposal(dm("/always #{ctx.token}"), ctx)
+      assert_receive {:sandbox_reply, line}
+      assert line =~ ~s(Starting "Deploy check" for post-1's post · )
+      assert line =~ "Always allowed: from now on it runs with no card."
+      assert {:ok, true} = Watchers.always_allowed(ctx.watcher, repo: ctx.repo)
+    end
+
+    test "bare, it answers the one follow-up's card waiting, on the card a tap came from",
+         ctx do
+      tap = %{dm("/always") | metadata: %{user_id: "owner-1", approval_message_id: "57"}}
+      assert :ok = dispatch_proposal(tap, ctx)
+      assert_receive {:sandbox_reply, {:approval_answer, "57", "Starting " <> _line}}
+      assert {:ok, true} = Watchers.always_allowed(ctx.watcher, repo: ctx.repo)
+
+      assert :ok = dispatch_proposal(dm("/always"), ctx)
+
+      assert_receive {:sandbox_reply,
+                      "Nothing here offers Always allow: only a follow-up's card waiting in " <>
+                        "this chat does."}
+    end
+
+    test "a token this store holds is not a card, and takes no Always allow", ctx do
+      assert :ok = dispatch_proposal(dm("/always AB12CD34"), ctx)
+
+      assert_receive {:sandbox_reply,
+                      "Nothing here offers Always allow: only a follow-up's card waiting in " <>
+                        "this chat does."}
+
+      assert {:ok, false} = Watchers.always_allowed(ctx.watcher, repo: ctx.repo)
+    end
+  end
+
+  # A watcher whose follow-up's card waits in owner-1's DM, sent with a token
+  # the test holds.
+  defp follow_up_setup do
+    now = ~U[2026-10-31 09:00:00.000000Z]
+    %{repo: repo} = CueFixtures.start_repo("gateway_always")
+    registry = :"gateway_always_caps_#{System.unique_integer([:positive])}"
+    start_supervised!(Supervisor.child_spec({CapabilityRegistry, name: registry}, id: registry))
+    tool = "deploy_check"
+
+    :ok =
+      CapabilityRegistry.register(
+        registry,
+        Capability.new(%{
+          name: tool,
+          description: "a test tool",
+          parameters: %{"type" => "object", "properties" => %{}},
+          kind: :builtin,
+          executor: {__MODULE__, :never, []},
+          policy_class: :exec
+        })
+      )
+
+    token = Proposals.new_token()
+    owner = %{platform: "telegram", chat_id: "owner-1", user_id: "owner-1"}
+
+    opts = [
+      repo: repo,
+      now: now,
+      scheduler: nil,
+      cues_config: [],
+      capability_registry: registry,
+      channel_ready?: fn :telegram -> true end,
+      wake_scheduler: fn -> :ok end,
+      proposal_listener: fn _event -> :ok end,
+      notice: fn _watcher, _kind, _data -> :ok end,
+      follow_up_sender: fn _card ->
+        {:ok, Map.put(owner, :token_digest, Proposals.digest(token))}
+      end
+    ]
+
+    params = %{
+      name: "deploy-watch",
+      filter: "none",
+      daily_cap: 5,
+      sources: ["releases"],
+      follow_up: %{name: "Deploy check", prompt: "Run the deploy check.", allowed_tools: [tool]}
+    }
+
+    context = %{
+      agent_name: "main",
+      conversation_key: {"telegram", "owner-1", :root},
+      session_id: "telegram:owner-1:root",
+      source_trust: :operator,
+      memory_agent_id: "main"
+    }
+
+    {:ok, %{watcher: watcher}} = Watchers.create(params, context, opts)
+    item = CueFixtures.item!(%{item_id: "post-1", subject: "post-1", occurred_at: now}, now)
+
+    {:ok, _results} =
+      Ingest.accept(%{ref: "releases", daily_budget: 0}, [item],
+        now: now,
+        repo: repo,
+        wake_scheduler: fn -> :ok end,
+        wake_filters: fn -> :ok end
+      )
+
+    {:ok, [trigger]} = Repo.cues_call(CuesFollowUpSql, {:claim_offers, now, 10}, server: repo)
+    :offered = FollowUps.offer(trigger, opts)
+    %{token: token, watcher: watcher, repo: repo, opts: opts}
+  end
+
+  # M60_WATCHER_CODING_RUNS.md §6.2, §9: a bare `/confirm` or `/deny` answers
+  # the one thing waiting in that chat, counting the access gate's parked
+  # calls as well as cards; with more than one it lists them.
+  describe "a bare /confirm or /deny" do
+    # An owner no other test binds a confirmation to: a bare answer counts
+    # every live record of its chat, and the store is the application's.
+    setup do
+      Application.put_env(:fermix_channels, :telegram, owner_user_id: @bare_owner)
+      proposal_setup(@bare_owner)
+    end
+
+    test "answers the one card waiting in the owner's DM", ctx do
+      assert :ok = dispatch_proposal(dm("/confirm", @bare_owner), ctx)
+      assert_receive {:sandbox_reply, "Confirmed. github_create_issue ran:\n" <> _framed}
+      assert_receive {:executed, "github_create_issue", _args, %{access_gate: "confirmed"}}
+
+      assert :ok = dispatch_proposal(dm("/confirm", @bare_owner), ctx)
+      assert_receive {:sandbox_reply, "Nothing is waiting for your answer here."}
+    end
+
+    test "a bare /deny skips it, and runs nothing", ctx do
+      assert :ok = dispatch_proposal(dm("/deny", @bare_owner), ctx)
+      assert_receive {:sandbox_reply, "Denied. github_create_issue will not run."}
+      refute_received {:executed, _tool, _args, _context}
+    end
+
+    test "with a card and a parked call, it lists both with what answers each", ctx do
+      origin = %{channel: "telegram", chat_id: @bare_owner, thread_ts: nil, user_id: @bare_owner}
+
+      {:ok, parked, :new} =
+        Sandbox.store_pending_grant(
+          %{access_sensitive: "intent-bare-1"},
+          Map.put(origin, :resume, nil)
+        )
+
+      on_exit(fn -> Confirmations.take(parked) end)
+
+      assert :ok = dispatch_proposal(dm("/confirm", @bare_owner), ctx)
+      assert_receive {:sandbox_reply, listing}
+      assert listing =~ "Several things are waiting for your answer here:"
+      assert [_whole, card_id] = Regex.run(~r{for release-watch\? /confirm (cpr_\w+)}, listing)
+      assert listing =~ "A command waiting to be sent /confirm #{parked}"
+      refute_received {:executed, _tool, _args, _context}
+      assert {:ok, _record} = Confirmations.peek(parked)
+
+      assert :ok = dispatch_proposal(dm("/confirm #{card_id}", @bare_owner), ctx)
+      assert_receive {:sandbox_reply, "Confirmed. github_create_issue ran:\n" <> _framed}
+    end
+
+    test "a card's id answers only from the chat it went to", ctx do
+      assert :ok = dispatch_proposal(dm("/deny", @bare_owner), ctx)
+      assert_receive {:sandbox_reply, "Denied. " <> _rest}
+
+      group = message("/confirm cpr_0123456789abcdef01234567", user_id: @bare_owner)
+      assert :ok = dispatch_proposal(group, ctx)
+      assert_receive {:sandbox_reply, "That card is not waiting in this chat; nothing ran."}
+    end
   end
 
   # A claimed cue run under an approved approve-mode mandate whose owner is
   # Telegram user owner-1, proposing one call through the access gate.
-  defp proposal_setup do
+  defp proposal_setup(owner \\ "owner-1") do
     fixture = MandateFixtures.cue_run("gateway_proposal")
     registry = :"gateway_proposal_caps_#{System.unique_integer([:positive])}"
     start_supervised!(Supervisor.child_spec({CapabilityRegistry, name: registry}, id: registry))
@@ -334,9 +549,9 @@ defmodule FermixChannels.Gateway.Commands.SandboxTest do
 
     seams = [
       config: MandateFixtures.config("release-issues", fixture.job.id, %{"mode" => "approve"}),
-      configured_owners: %{"telegram" => "owner-1"},
+      configured_owners: %{"telegram" => owner},
       capability_registry: registry,
-      proposal_sender: fn _inbox, _text, token ->
+      proposal_sender: fn _inbox, %{token: token} ->
         send(test_pid, {:proposal_token, token})
         :ok
       end
@@ -355,8 +570,8 @@ defmodule FermixChannels.Gateway.Commands.SandboxTest do
 
   defp proposal_args, do: %{"owner" => "example-org", "repo" => "ops", "title" => "Phoenix 2.0"}
 
-  defp dm(content) do
-    %{message(content, user_id: "owner-1") | chat_id: "owner-1", reply_target: "owner-1"}
+  defp dm(content, owner \\ "owner-1") do
+    %{message(content, user_id: owner) | chat_id: owner, reply_target: owner}
   end
 
   defp dispatch_proposal(message, ctx),

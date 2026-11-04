@@ -41,6 +41,7 @@ defmodule FermixTestSupport.StalledRepo do
   defp stalls?(_request, %{forward_to: nil}), do: true
   defp stalls?(request, %{stall: names}), do: request_name(request) in names
 
+  defp request_name({:with_deadline, _deadline, request}), do: request_name(request)
   defp request_name({:cues, _module, request}) when is_tuple(request), do: elem(request, 0)
   defp request_name(request) when is_tuple(request), do: elem(request, 0)
   defp request_name(request) when is_atom(request), do: request

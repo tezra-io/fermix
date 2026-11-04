@@ -26,7 +26,8 @@ written against the uncommitted work (2026-10-17, the app's answer
 
 A `Topology` constant fixes the deliveries (their watcher, subject and order).
 The delivery id is the arrival order, so a delivery is accepted only after every
-lower id. Each watcher wakes its own task job, named by the watcher. Time is
+lower id. Each watcher wakes its own task job, named by the watcher, except in
+the `follow_up` topologies, whose watchers have a follow-up and no task. Time is
 booleans: a delivery's `due` (`ready_at` has passed), a watcher's `wblocked`
 (`filter_retry_at` has not passed), a delivery's `valid` (`valid_until` has not
 passed) and a proposal's `propLive`. Faults come from a budget (`MaxFaults`), and
@@ -38,7 +39,13 @@ One step is one GenServer callback, one `Memory.Repo` call (the single writer, s
 one call is atomic whatever SQL it runs) or one side effect. Calls from one
 process are served in the order sent, and a call whose caller timed out still
 runs, ahead of anything that caller sends next (`repo.ex` `call/2`,
-`call_or_timeout_error/3`). That ordering is why a filter task killed by a
+`call_or_timeout_error/3`), unless its caller marked it `skip_when_late`: the
+Repo turns such a request away unrun once the caller's deadline has passed
+(`handle_call/3`'s `{:with_deadline, ...}` clause). The filter dispatcher's
+claim and reclaim, the scheduler's cue claim and the sweeper's steps are
+marked, and one turned away writes nothing, a stutter; a call that "times out
+and still lands" below is one the Repo had started. No settle or reset is
+marked. That ordering is why a filter task killed by a
 dispatcher restart cannot write after the new dispatcher's boot reset: its settle,
 if it was sent, is already in the Repo's mailbox ahead of the reset.
 
@@ -74,28 +81,29 @@ if it was sent, is already in the Repo's mailbox ahead of the reset.
   down with its supervisor: the boot reset puts a row back the same way, and
   neither changes a property.
 - **R1 details that change no property.** The dispatcher claims nothing
-  before its first sweep timer (`ready?`, `filters.ex:111`, `:129`, `:135`):
+  before its first sweep timer (`ready?`, `filters.ex:112`, `:130`, `:136`):
   under weak fairness that timer fires, so the delay is not modelled. A stale
-  settle wakes the scheduler (`filters.ex:375-376`): admission is fair here
+  settle wakes the scheduler (`filters.ex:376-377`): admission is fair here
   anyway. Admission is gated on `cues_running?` (the cue tree alive,
-  `scheduler.ex:202`), always true here, and no longer reads
+  `scheduler.ex:213`), always true here, and no longer reads
   `cue_watchers.enabled` (a paused watcher's passed items still run); watchers
-  are always enabled. The daily budget read and spent inside the accept
-  transaction, the gap marking at a settle, the cap notices and the
-  `sweep_error` traces of a failed scan, claim or settle touch no delivery
-  state. `with_immediate_transaction/2` re-raising a raise, throw or exit
-  crashes the Repo process, which restarts everything after it in the core
-  tree: a daemon-level restart, outside this spec.
+  are always enabled and keep every source. The daily budget read and spent
+  inside the accept transaction, the gap marking at a settle, the cap notices
+  and the `sweep_error` traces of a failed scan, claim or settle touch no
+  delivery state. `with_immediate_transaction/2` re-raising a raise, throw or
+  exit crashes the Repo process, which restarts everything after it in the
+  core tree: a daemon-level restart, outside this spec.
 - **The reclaim's age cutoff and its failures (R3).** The sweep reclaims a
   `filtering` row only once its call started more than the 60 s call deadline
-  plus a 30 s margin ago (`filters.ex:70`, `:196`); that changes when, not
+  plus a 30 s margin ago (`filters.ex:71`, `:197`); that changes when, not
   whether: a younger orphan is reclaimed by a later sweep. A call the
   dispatcher still holds is never reclaimed, whatever its age, and that is
   modelled (`Orphan`). A reclaim that fails changes no row and is traced
-  (`sweep_error`, `filter_reclaim`) and tried by the next sweep; one that times
-  out still lands, as the step does.
+  (`sweep_error`, `filter_reclaim`) and tried by the next sweep, as is one the
+  Repo turns away unrun past its deadline; one that times out once started
+  still lands, as the step does.
 - **The first sweep's scheduler wake (R3).** The filtering group's first sweep
-  wakes the scheduler once (`first_sweep/1`, `filters.ex:179-184`), because the
+  wakes the scheduler once (`first_sweep/1`, `filters.ex:180-185`), because the
   scheduler's own admission request at init comes before the cue tree runs.
   Admission is fair here, so the wake changes no property.
 - **Proposals are modelled abstractly.** One proposal, created by the run's
@@ -152,6 +160,115 @@ if it was sent, is already in the Repo's mailbox ahead of the reset.
   rows they change. `delete_receipts` now searches receipts no watcher was
   offered from 8 days and routed ones from 30, and deletes the same rows. All
   three touch terminal rows only, which the model leaves out, so no step moved.
+- **Pause and source changes (2026-10-27).** A pass whose watcher was paused
+  while its call ran is withheld: `filtering → pending`, fence cleared,
+  attempts unchanged, the provider-failure branch's move; watchers are always
+  enabled here, so it is not taken. A change to a watcher's sources expires
+  its `pending` and `filtering` rows from a source it no longer has, in the
+  change's transaction: `pending → expired` is the lifetime sweep's move, and
+  `filtering → expired` leaves that call's settle the modelled stale branch
+  (`SettleFenced`). Sources are not modelled, so no step moved. A live pass
+  for a paused watcher, or one that lost the item's source, writes no row.
+- **A decision model as the screen (2026-10-29).** With
+  `[fermix_core.cues] screen_provider` set, the accept transaction writes a
+  delivery for every `llm` watcher that has words instead of only those whose
+  words matched: which deliveries exist is again what `Topology` fixes. The
+  filter call's task asks `Cues.Filter.decide/2`, which asks the decision model
+  first and the filter model only for an item it lets through; both model
+  calls are invisible here, and their outcomes are the pass, drop, provider
+  failure and content failure `TaskSettle` already takes. The claim also reads
+  the watcher's words for the screen; a list it cannot read fails the claim as
+  any other corrupt row does, which is not modelled. No step moved.
+- **Watcher follow-ups (M60_WATCHER_CODING_RUNS.md; 2026-10-30).** A watcher
+  may have a follow-up, a job of its own that a passing item sets off, as
+  well as or instead of a task. Re-read against the six commits on `dev`
+  `c3442c3a` that build it (`a190c404` to `90a1f0f1`):
+  - *Modelled: a watcher with no task settles at its pass.* The pass writes
+    the follow-up's trigger in its own transaction (`CuesFollowUpSql.on_pass`,
+    from the filter settle's `pass_delivery` and the accept's
+    `accepted_follow_up`), and for a watcher with no task it also moves the
+    delivery `passed → acked`, outcome `follow_up` (`settle_taskless`): no
+    task will claim it, and what the owner answers stays on the trigger row.
+    New: the `follow_up` topology (an `llm` and a `none` watcher with no
+    task), `HasTask`, `PassedRow` and `TaskLessSettlesAtPass`, checks 33 and
+    34, and the `SOURCE` line for those three functions. `Eligible` now names
+    the task the rule's join needs, and `AckedBySettledRun` is read for a
+    watcher with a task, since the code no longer claims it for one without.
+    A watcher with a task keeps its delivery `passed` for the task; its
+    trigger is not modelled. Every other topology gives each watcher a task,
+    so checks 01 to 32 explore the states they explored before (only the
+    liveness counterexamples of `needs` checks moved, with the order TLC
+    explores in).
+  - *The confirm's dispatch moves no modelled step.* `Proposals.confirm/3`
+    and `deny/3` first read which table holds the token (`{:token_kind, …}`)
+    and hand it there; a token is stored once, in one table, and never moves,
+    so that read decides nothing the fenced `UPDATE` does not, and a
+    mandate's proposal is still confirmed by `decide_waiting`. A chat's
+    answer by a card's id (a bare `/confirm`, or `cpr_…`) reads the cards
+    waiting in that chat and then runs `decide_by_id`, fenced on id, state
+    and expiry: the chat a proposal went to never changes, so this is
+    `OwnerConfirm` with the chat checked in the read, and the command runs
+    the call as a token's would. A follow-up's card (`waiting → starting`,
+    fenced on token, chat and expiry, or by id from a device) and an
+    automatic follow-up's approval prompt are answered the same way over
+    their own tables; the run a confirmed card starts is `job_runs`'.
+  - *Retention and expiry.* `prune_follow_up_triggers` and
+    `prune_follow_up_approvals` delete ended rows 30 days on, and the
+    sweeper's two expiry steps end unanswered cards and prompts: rows the
+    model leaves out.
+  - *Admission.* Each pass now offers new cards, admits follow-up runs and
+    then cue runs. Follow-up runs hold cue-share slots (trigger `"watcher"`
+    in `active_cue_runs`, read from the row for an adopted run) and wait for
+    a reconcile scan that succeeded exactly as cue runs do (`free_cue_slots`
+    is 0 for both), so `CueShare`'s bound on cue runners is the bound the
+    code keeps on both; no follow-up run is modelled here. The daily cap now
+    counts a watcher's follow-ups started or proposed beside its task runs;
+    caps are 0 here.
+  - The runner's settle telemetry carries a follow-up run's trigger, and the
+    filter and accept emit the trigger's lifecycle event: nothing modelled.
+- **The screen as a two-way choice (2026-10-30).** `screen_provider` is gone:
+  `[fermix_core.cues] screen` is `keyword` (the default) or `decision_model`,
+  and Fermix picks the decision model's provider. The accept still routes an
+  `llm` watcher by its keywords exactly when no decision model screens
+  (`words?` is `Cues.Config.screen/0 == :keyword`, as it was
+  `screen_provider/0` unset), so which deliveries exist is unchanged. A
+  decision model with none set up holds the watcher at its filter call, the
+  provider-failure branch `TaskSettle` already takes. No step moved.
+- **Claims the Repo may skip; a sweep pass stops at a Repo timeout
+  (2026-10-31).** A caller marks a request `skip_when_late` when skipping it is
+  safe, and the Repo turns it away unrun once the caller's deadline has passed
+  (see the top of this file). Marked here: the filter claim (`FClaimTimesOut`)
+  and reclaim (`FReclaim`), the cue claim (`AdmitTimesOut`), the sweeper's
+  steps (`SweepExpire`, `PropSweep`) and the follow-up offer claim, which no
+  step models. A request turned away writes nothing, so it is a stutter, and
+  a claim that times out once started still lands as before. No settle, reset
+  or proposal decision is marked. A sweeper pass now also stops at the first
+  step that ends in a Repo timeout, as it stops at a spent budget, and the
+  next tick starts again at the first step; the sweeper's steps are modelled
+  one at a time with no pass, so an early stop changes when a later step
+  runs, not whether. No step moved.
+- **Always allow replaces automatic mode (M60_WATCHER_CODING_RUNS.md §14;
+  2026-10-31).** A follow-up asks first until the owner's Always allow on one
+  of its cards, which lets later items run it with no card for exactly what
+  the card showed. Re-read against `2dd0e88c`, which builds it:
+  - `proposals.ex`: `always_allow/3` and `decide/4` with `:always_allow` hand
+    a follow-up's card to `Cues.FollowUps`, whose answer is the card's fenced
+    `waiting → starting` (token, chat and expiry, or id and expiry) with the
+    approval written in the same transaction over the watcher's row and the
+    trigger's: rows the model leaves out. A mandate's proposal refuses it
+    before any read or write, so `decide_waiting`, `OwnerConfirm` and the
+    proposal's states are as before. The approval prompt's dispatch (`cfa_`)
+    is gone.
+  - `sweeper.ex`: the prompt's prune and expiry steps are gone, with its
+    table; the steps the model has run as before.
+  - `cues_sql.ex`: the prompt's retention SQL is gone, and migration 58's
+    rebuild of `cue_watchers` (no `follow_up_mode`) is DDL the model does not
+    read. The pass hook (`on_pass`, `trigger_pass`, `settle_taskless`) is
+    unchanged: what decides a trigger's state now reads Always allow where it
+    read the mode, and a watcher with no task still settles its delivery at
+    its pass whatever state its trigger takes, which is all
+    `TaskLessSettlesAtPass` reads.
+  No step moved.
 
 ## Switches
 
@@ -170,25 +287,26 @@ reconcile scan errors), `LifetimesCanEnd`, `Proposals`, `OwnerCanMistap`,
 
 | Switch | Code |
 |---|---|
-| `SubjectRule` | the subject clause of `@open_sql` (`cues_runs_sql.ex:95-98`), shared by the candidates and the claim's re-read |
+| `SubjectRule` | the subject clause of `@open_sql` (`cues_runs_sql.ex:97-100`), shared by the candidates and the claim's re-read |
 | `SubjectRuleCoversUndecided` | that clause reads `pending` and `filtering` too (PLAN §1; draft 7 read `passed` and `claimed` only) |
-| `ExcludesBusyWatchers` | `Cues.Filters` passes the watchers whose call it still holds (`filters.ex:235`) |
-| `SettleFenced` | a filter settle needs its call open (`open_call/2`, `cues_filter_sql.ex:432`) and the row's `filter_call_id` (`move/5`, `:543`); a refused settle closes the open call `aborted` (R1, `abort_stale_call/3`, `:421`) |
+| `ExcludesBusyWatchers` | `Cues.Filters` passes the watchers whose call it still holds (`filters.ex:236`) |
+| `SettleFenced` | a filter settle needs its call open (`open_call/2`, `cues_filter_sql.ex:434`) and the row's `filter_call_id` (`move/5`, `:545`); a refused settle closes the open call `aborted` (R1, `abort_stale_call/3`, `:423`) |
 | `TasksDieWithDispatcher` | the filtering group (`FermixCore.Cues.FilteringSupervisor`, defined inline in `cues/supervisor.ex:44-51`, `:58-63`) is `rest_for_one`, `Cues.Filters` before `FilterSupervisor`; the cue supervisor above the groups is `one_for_one` (`:55`) |
-| `BootReset` | `Filters.init` resets `filtering` rows (`filters.ex:102`, `:159`; `cues_filter_sql.ex:635`) |
-| `NonePassesAtAccept` | a `none` watcher's delivery is inserted `passed` (`cues_sql.ex:620`) |
-| `ClaimNeedsIdleJob` | the cue claim needs the job `scheduled` with no active run (`@open_sql :91-94`; `repo.ex` `fetch_claimable_job`, `ensure_no_active_job_run`) |
-| `CueSlotCap` | `free = min(max_active − active, 3 − active_cue)` (`cue_admission.ex:57`) |
+| `BootReset` | `Filters.init` resets `filtering` rows (`filters.ex:103`, `:160`; `cues_filter_sql.ex:640`) |
+| `NonePassesAtAccept` | a `none` watcher's delivery is inserted `passed` (`cues_sql.ex:838`) |
+| `ClaimNeedsIdleJob` | the cue claim needs the job `scheduled` with no active run (`@open_sql :93-96`; `repo.ex` `fetch_claimable_job`, `ensure_no_active_job_run`) |
+| `CueSlotCap` | `free = min(max_active − active, 3 − active_cue)` (`cue_admission.ex:83`) |
 | `AtomicCueSettle` | the run row, the job's release and the delivery's move are one transaction (`repo.ex` `settle_cue_run_in_tx`) |
-| `RunSettleFenced` | a run settle needs the run active (`ensure_job_run_active`) and the delivery claimed by it (`settle_held/5`, `cues_runs_sql.ex:313`) |
-| `ReapsOnlyDeadRuns` | reconciliation reaps a run only when the runner supervisor no longer holds its runner (`scheduler.ex:386`, `:398`) |
-| `ReconcilesRuns` | init and the 60 s tick reconcile unsettled runs (`scheduler.ex:210`, `:250`, `:370`) |
-| `ExhaustsAfterAction` | a failure once `tools_started_at` is set ends the delivery `exhausted` (`cues_runs_sql.ex:335`) |
+| `RunSettleFenced` | a run settle needs the run active (`ensure_job_run_active`) and the delivery claimed by it (`settle_held/5`, `cues_runs_sql.ex:366`) |
+| `ReapsOnlyDeadRuns` | reconciliation reaps a run only when the runner supervisor no longer holds its runner (`scheduler.ex:504`, `:516`) |
+| `ReconcilesRuns` | init and the 60 s tick reconcile unsettled runs (`scheduler.ex:228`, `:268`, `:488`) |
+| `ExhaustsAfterAction` | a failure once `tools_started_at` is set ends the delivery `exhausted` (`cues_runs_sql.ex:388`) |
 | `ToolsMarkWriteOnce` | the run upsert never clears `tools_started_at` (`repo.ex` `upsert_job_run_row`, `coalesce`) |
 | `ConfirmFenced` | the confirm is one `UPDATE` fenced on state, token, chat and expiry (`cues_mandate_sql.ex` `decide_waiting`) |
 | `AppDecideFenced` | a device's answer is one `UPDATE` fenced on id, state and expiry (`cues_mandate_sql.ex` `decide_by_id`) |
-| `ReclaimsOrphans` | every sweep puts back a `filtering` row whose call the dispatcher does not hold, fence cleared, attempts unchanged, its call finished `aborted` (R3, CUE-1: `reclaim_orphans/1`, `filters.ex:192-215`; `{:reclaim_orphans, …}`, `cues_filter_sql.ex:130`, `reclaim_in_tx/4` `:670`) |
-| `AdmitsAfterScan` | no cue run is admitted while the last reconcile scan failed, since the monitors may then miss runners that survived a restart (R3, CUE-2: `free_cue_slots/1`, `scheduler.ex:312`; `runs_known?` set by `reconcile_active_runs/1`, `:374`, `:382`) |
+| `ReclaimsOrphans` | every sweep puts back a `filtering` row whose call the dispatcher does not hold, fence cleared, attempts unchanged, its call finished `aborted` (R3, CUE-1: `reclaim_orphans/1`, `filters.ex:193-216`; `{:reclaim_orphans, …}`, `cues_filter_sql.ex:132`, `reclaim_in_tx/4` `:675`) |
+| `AdmitsAfterScan` | no cue run is admitted while the last reconcile scan failed, since the monitors may then miss runners that survived a restart (R3, CUE-2: `free_cue_slots/1`, `scheduler.ex:363`; `runs_known?` set by `reconcile_active_runs/1`, `:492`, `:500`) |
+| `TaskLessSettlesAtPass` | a watcher with no task settles its delivery `acked`, outcome `follow_up`, in the transaction that passes it (`CuesFollowUpSql.on_pass` → `settle_taskless`, `cues_follow_up_sql.ex:349-356`, `:460-463`) |
 
 ## Checks
 
@@ -226,6 +344,8 @@ reconcile scan errors), `LifetimesCanEnd`, `Proposals`, `OwnerCanMistap`,
 | 30_boot_reset_alone | holds | Isolates the boot reset: check 19 with the reclaim off. |
 | 31_needs_app_decide_fenced_waiting | needs `AppDecideFenced` | Covers 24: a device's answer after the chat's confirm, or after expiry, counts without the device's fence. |
 | 32_needs_app_decide_fenced_once | needs `AppDecideFenced` | Covers 24: a second answer from a device runs the call again without the fence. |
+| 33_task_less_nothing_stranded | holds | Two watchers with a follow-up and no task, one `llm` and one `none`: every accepted delivery ends terminal, under every fault but a failed filter Repo call. |
+| 34_needs_task_less_settles_at_pass | needs `TaskLessSettlesAtPass` | Covers 33: without the settle at the pass, a task-less watcher's delivery waits `passed` with no task to claim it. |
 
 Checks 13, 15, 17 and 30 switch a mechanism off in a `holds` check on purpose
 (the `token_refresh` 16 precedent): with every mechanism on, no stale writer
@@ -261,6 +381,7 @@ for 10) and one more fault, on 2026-10-17:
 | 19, 30 | see below | |
 | 23 | `two_llm`, 3 faults | holds, 7,477 states, 3 s (R3 model) |
 | 24 | `two_none`, 2 faults | holds, 13,751 states, 2 s; again with `AppAnswers` on 2026-10-22: holds, 13,751 states, 1 s (with its fence on, a device's answer reaches no state a tap from the right chat does not; checks 31 and 32 show what it adds without the fence); again on 2026-10-23, with a confirm that dies after its call may have run: holds, 14,211 states, 1 s |
+| 33 | `follow_up3` (a second `llm` delivery of the same subject), 2 faults; `follow_up`, 3 faults | holds, 15,469 states, 6 s; holds, 2,374 states, 1 s (2026-10-30) |
 
 Check 19 (liveness) grows fast, so one entity at a time. On the R3 model:
 `mixed3` (a second `llm` delivery of the same subject) with 2 faults holds,
@@ -286,21 +407,21 @@ counterexample below.
 Proposed rule (design §17): no undecided delivery is stranded while its watcher
 is enabled; a held watcher retries until a call succeeds or the lifetime ends.
 
-`Cues.Filters.claim/2` (`filters.ex:233-247`) calls the Repo with periodic
-options (`repo_opts/1`, `:488`: `on_timeout: :error`). When the claim times out
-it traces `sweep_error` (`filter_claim`) and starts no task (`:243-245`), but the
-request still runs: `claim_one/3` (`cues_filter_sql.ex:211`) moves the delivery
+`Cues.Filters.claim/2` (`filters.ex:234-248`) calls the Repo with periodic
+options (`repo_opts/1`, `:490`: `on_timeout: :error`). When the claim times out
+it traces `sweep_error` (`filter_claim`) and starts no task (`:244-246`), but the
+request still runs: `claim_one/3` (`cues_filter_sql.ex:213`) moves the delivery
 `pending → filtering` with a new `filter_call_id` and an open call row. No task
 holds that call and the dispatcher's `in_flight` does not know it. A task's
 settle (or the dispatcher's own, after a crash or a deadline) that returns an
 error other than a timeout or `:stale` (its transaction rolled back) leaves the
 same thing: `filtering`, call open, the task reported, the slot freed
-(`finish/5`, `filters.ex:380`). A timeout is harmless there: the settle still
+(`finish/5`, `filters.ex:381`). A timeout is harmless there: the settle still
 runs, ahead of the dispatcher's next claim.
 
 Nothing then moves the row. The claim query skips a watcher that has a
-`filtering` delivery (`cues_filter_sql.ex:179`), so the watcher takes no more
-calls at all; the lifetime sweep never touches `filtering` (`cues_sql.ex:1091`,
+`filtering` delivery (`cues_filter_sql.ex:181`), so the watcher takes no more
+calls at all; the lifetime sweep never touches `filtering` (`cues_sql.ex:1316`,
 `sweeper.ex` moduledoc); the dispatcher's 60 s sweep only dispatches; the only
 reset is the boot reset in `Filters.init`. The delivery and every later delivery
 of that watcher wait until the daemon (or the filtering group) restarts. The
@@ -314,11 +435,11 @@ delivery 1.
 R1 re-walk (2026-10-17): still open, unchanged. None of the R1 changes gives
 the row a way out:
 - a stale settle now closes its open call `aborted` (`abort_stale_call/3`,
-  `cues_filter_sql.ex:421`), but only a call that receives a result; the
+  `cues_filter_sql.ex:423`), but only a call that receives a result; the
   stranded call has no task, so no result ever comes;
-- the first-timer rule (`filters.ex:111`, `:129`, `:135`) only delays the
+- the first-timer rule (`filters.ex:112`, `:130`, `:136`) only delays the
   dispatcher's first claim after a start;
-- `prune_filter_calls` now deletes unfinished calls too (`cues_sql.ex:1177`),
+- `prune_filter_calls` now deletes unfinished calls too (`cues_sql.ex:1402`),
   but only after 30 days, and it leaves the delivery `filtering`: the claim
   query still skips the watcher, and only the boot reset (which fences on the
   delivery's own `filter_call_id`, not the call row) moves it;
@@ -329,16 +450,16 @@ The `jobs` side recovers the same fault: a cue claim that times out leaves a run
 with no runner, and reconciliation reaps it on its next tick (check 19 holds with
 `SchedulerRepoCanFail` on).
 
-Fix (R3): every sweep (`handle_info(:sweep)`, `filters.ex:133`) first runs
-`reclaim_orphans/1` (`:192-215`), skipped while the boot reset is pending: one
-`{:reclaim_orphans, held, cutoff, now}` Repo call (`cues_filter_sql.ex:130`,
-`reclaim_in_tx/4` `:670`) with the call ids the dispatcher holds and a cutoff of
-the 60 s call deadline plus a 30 s margin (`@orphan_margin_ms`, `filters.ex:70`).
+Fix (R3): every sweep (`handle_info(:sweep)`, `filters.ex:134`) first runs
+`reclaim_orphans/1` (`:193-216`), skipped while the boot reset is pending: one
+`{:reclaim_orphans, held, cutoff, now}` Repo call (`cues_filter_sql.ex:132`,
+`reclaim_in_tx/4` `:675`) with the call ids the dispatcher holds and a cutoff of
+the 60 s call deadline plus a 30 s margin (`@orphan_margin_ms`, `filters.ex:71`).
 In one transaction, every `filtering` row whose `filter_call_id` is not held and
 whose call started before the cutoff (or whose call row is gone) goes back to
-`pending` through the boot reset's fenced move (`reset_each/2`, `:655`), attempts
+`pending` through the boot reset's fenced move (`reset_each/2`, `:657`), attempts
 unchanged, and its open call is finished `aborted` with "no task held this call
-past its deadline" (`abort_orphan_calls/3`, `:705`). A failure is traced as
+past its deadline" (`abort_orphan_calls/3`, `:707`). A failure is traced as
 `sweep_error` (`filter_reclaim`) and tried by the next sweep. ExUnit:
 `cues/filters_test.exs` "orphaned filter calls" (a claim that commits while the
 dispatcher sees `:repo_timeout` is left alone before the cutoff and freed after
@@ -359,13 +480,13 @@ run slots, counted from the `trigger` each `run_monitors` entry carries, so a cr
 run always keeps one"; design §17: "cue runs never take the last slot".
 
 `Jobs.Scheduler` restarts alone and its runners survive (`RunnerSupervisor`
-starts before it). `init/1` reconciles first (`scheduler.ex:210`): the scan
+starts before it). `init/1` reconciles first (`scheduler.ex:228`): the scan
 `Repo.unsettled_job_runs` runs with periodic options, and when it errors or times
-out it is logged and init goes on with no monitors (`:370-384`). Init then asks
-for an admission pass (`:213`). `admit_cue_runs/2` (`:293`) computes
+out it is logged and init goes on with no monitors (`:488-502`). Init then asks
+for an admission pass (`:231`). `admit_cue_runs/2` (`:311`) computes
 `free_slots(active, run_monitors, max)`: `active` is the runner supervisor's
 count, which includes the surviving cue runners, but `active_cue` counts monitors,
-which are empty, so the cue room is the whole share again (`cue_admission.ex:57`).
+which are empty, so the cue room is the whole share again (`cue_admission.ex:83`).
 With three cue runners alive and four slots, one more cue run starts and the four
 slots are all cue runs; the next reconcile tick adopts all four. A due cron run
 then finds the scheduler at capacity until a cue run ends (at most 30 minutes
@@ -377,18 +498,18 @@ accept both, `Admit(a)`, `SchedRestart`, `SchedBoot` with a failed scan,
 `Admit(b)`: two live cue runners.
 
 R1 re-walk (2026-10-17): still open, unchanged. The admission gate is now
-`cues_running?` (`scheduler.ex:202`, `:283`, `:294`), true while the cue tree
-lives, so it does not hold the pass back; `admit_cue_runs/2` (`:293-305`) still
-passes `state.run_monitors` to `free_slots/3` (`cue_admission.ex:57-63`);
-`reconcile_active_runs/1` (`:370-384`) still leaves the monitors empty on a
-failed scan; `claim/4` (`cue_admission.ex:82`) traces a failed scan as
+`cues_running?` (`scheduler.ex:213`, `:301`, `:312`), true while the cue tree
+lives, so it does not hold the pass back; `admit_cue_runs/2` (`:311-321`) still
+passes `state.run_monitors` to `free_slots/3` (`cue_admission.ex:83-89`);
+`reconcile_active_runs/1` (`:528-542`) still leaves the monitors empty on a
+failed scan; `claim/4` (`cue_admission.ex:109`) traces a failed scan as
 `sweep_error` but changes no count.
 
 Fix (R3, the lead's choice of the two): the scheduler keeps `runs_known?`
-(`scheduler.ex:200`), set by every reconcile scan, at init and on each tick:
-true when the scan succeeded (`:374`), false when it failed (`:382`, logged
-"no cue run starts until a scan succeeds"). `admit_cue_runs/2` (`:293`) takes
-its free slots from `free_cue_slots/1` (`:312`): none while the run set is
+(`scheduler.ex:211`), set by every reconcile scan, at init and on each tick:
+true when the scan succeeded (`:492`), false when it failed (`:500`, logged
+"no cue run starts until a scan succeeds"). `admit_cue_runs/2` (`:311`) takes
+its free slots from `free_cue_slots/1` (`:363`): none while the run set is
 unknown, else `CueAdmission.free_slots/3` as before. Cron runs keep their own
 rule (the ceiling on `active`). ExUnit: `jobs/scheduler_cues_test.exs` "after a
 restart whose adoption scan fails, no cue run starts until a reconcile
@@ -411,3 +532,15 @@ README calls the init request dead code, and check 37 pins the tick); and the
 reaper's final failure report marks the run row's delivery `pending` before
 its send (its witness 45 is no longer reachable in the code and is owed a
 `holds` check with a `needs` check).
+
+## Re-read for earlier messages' origin (2026-11-02)
+
+The core tree gained `Companion.OriginBackfill`, a `:temporary` task before
+the snapshot scheduler that fills in `metadata.origin` on timeline rows a
+job's or a cue's run wrote before it existed. It staled the `application.ex`
+pin. The task reads `job_runs`, `scheduled_jobs`, `cue_deliveries`,
+`cue_follow_up_triggers` and `cue_watchers`, and writes only
+`mobile_timeline.metadata_json`: it claims, settles and moves no delivery or
+run. The cue tree is still the tree's last child, a crash of anything before
+it restarts it as before, and the task's own exit restarts nothing, so
+nothing the spec models changed.

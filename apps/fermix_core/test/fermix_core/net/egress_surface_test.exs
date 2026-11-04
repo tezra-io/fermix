@@ -61,7 +61,14 @@ defmodule FermixCore.Net.EgressSurfaceTest do
     # `fermix service` asking this machine's own web listener whether it is up.
     "apps/fermix_core/lib/fermix/cli/service.ex" => :own_listener_health,
     # `fermix setup` waiting for its own setup listener on 127.0.0.1.
-    "apps/fermix_core/lib/fermix/cli/setup/web_launcher.ex" => :own_listener_health
+    "apps/fermix_core/lib/fermix/cli/setup/web_launcher.ex" => :own_listener_health,
+    # A desktop's forwarded sign-in callback replayed against this engine's own
+    # OAuth loopback listener on 127.0.0.1 (M75 D17); nothing leaves the host.
+    "apps/fermix_channels/lib/fermix_channels/desktop/loopback_http.ex" => :own_listener_replay,
+    # A desktop asking 127.0.0.1 whether anything already listens on a port
+    # before it binds a sign-in's loopback there, so it never takes over a local
+    # service's port (M75 D17); the probe never leaves the host.
+    "apps/fermix_channels/lib/fermix_channels/desktop/loopback.ex" => :local_port_in_use_probe
   }
 
   # Dependencies that open connections themselves. Each is handed a routed

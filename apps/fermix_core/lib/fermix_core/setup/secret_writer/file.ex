@@ -126,10 +126,15 @@ defmodule FermixCore.Setup.SecretWriter.File do
     end
   end
 
-  # `external_env:<NAME>` and `mcp:<server>/env/<NAME>` keep their family
-  # prefix; each colon and slash becomes a dot so the name is a plain file name
-  # on every filesystem a home can live on.
-  defp file_name(key), do: key |> SecretWriter.item_name() |> String.replace([":", "/"], ".")
+  @doc """
+  The name of the file `key` is kept in under `directory/1`. `external_env:<NAME>`
+  and `mcp:<server>/env/<NAME>` keep their family prefix; each colon and slash
+  becomes a dot so the name is a plain file name on every filesystem a home can
+  live on.
+  """
+  @spec file_name(SecretWriter.secret_key()) :: String.t()
+  def file_name(key) when is_secret_key(key),
+    do: key |> SecretWriter.item_name() |> String.replace([":", "/"], ".")
 
   defp home(opts), do: Keyword.get(opts, :home) || ConfigStore.fermix_home()
 

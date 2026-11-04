@@ -29,6 +29,7 @@ defmodule FermixCore.Browser.HostAvailability do
             attached: false,
             connection: nil,
             connection_id: nil,
+            protocol_version: nil,
             available: false,
             reason: nil,
             updated_at: nil,
@@ -39,7 +40,8 @@ defmodule FermixCore.Browser.HostAvailability do
   @typedoc """
   `listening`: an endpoint is serving the wire. `attached`: a host is connected
   to it, on `connection` (its process) numbered `connection_id` by the
-  endpoint. `available` and `reason`: the host's last report, and `updated_at`
+  endpoint, speaking the `protocol_version` it declared in its handshake
+  (`browser_host` 1 or 2; only 2 carries a sign-in). `available` and `reason`: the host's last report, and `updated_at`
   when it arrived — `nil` until the first report after an attach, so a host
   that has connected but not yet spoken is not mistaken for one that said no.
   `stopping`: the host said it is quitting. `quit`: the last host quit, so the
@@ -52,6 +54,7 @@ defmodule FermixCore.Browser.HostAvailability do
           attached: boolean(),
           connection: pid() | nil,
           connection_id: pos_integer() | nil,
+          protocol_version: pos_integer() | nil,
           available: boolean(),
           reason: String.t() | nil,
           updated_at: DateTime.t() | nil,
@@ -82,13 +85,15 @@ defmodule FermixCore.Browser.HostAvailability do
     do: GenServer.call(server, {:listening, endpoint})
 
   @doc """
-  A host attached on `connection`. Any report from an earlier connection is
-  void, and so are an earlier quit and launch: the app is running again.
+  A host attached on `connection`, speaking the `protocol_version` its
+  handshake negotiated. Any report from an earlier connection is void, and so
+  are an earlier quit and launch: the app is running again.
   """
-  @spec attached(GenServer.server(), pid(), pos_integer()) :: :ok
-  def attached(server \\ __MODULE__, connection, connection_id)
-      when is_pid(connection) and is_integer(connection_id) and connection_id > 0,
-      do: GenServer.call(server, {:attached, connection, connection_id})
+  @spec attached(GenServer.server(), pid(), pos_integer(), pos_integer()) :: :ok
+  def attached(server \\ __MODULE__, connection, connection_id, protocol_version)
+      when is_pid(connection) and is_integer(connection_id) and connection_id > 0 and
+             is_integer(protocol_version) and protocol_version > 0,
+      do: GenServer.call(server, {:attached, connection, connection_id, protocol_version})
 
   @doc """
   The attached host's report: whether its pane can take work, and why not.
@@ -156,8 +161,8 @@ defmodule FermixCore.Browser.HostAvailability do
     {:reply, :ok, watch(state, endpoint)}
   end
 
-  def handle_call({:attached, connection, connection_id}, _from, state) do
-    {:reply, :ok, attach(state, connection, connection_id)}
+  def handle_call({:attached, connection, connection_id, protocol_version}, _from, state) do
+    {:reply, :ok, attach(state, connection, connection_id, protocol_version)}
   end
 
   def handle_call({:report, _available, _reason}, _from, %{host: %{stopping: true}} = state),
@@ -203,14 +208,15 @@ defmodule FermixCore.Browser.HostAvailability do
     %{state | host: host, endpoint: {endpoint, Process.monitor(endpoint)}, connection_ref: nil}
   end
 
-  defp attach(state, connection, connection_id) do
+  defp attach(state, connection, connection_id, protocol_version) do
     forget(state.connection_ref)
 
     host = %__MODULE__{
       listening: state.host.listening,
       attached: true,
       connection: connection,
-      connection_id: connection_id
+      connection_id: connection_id,
+      protocol_version: protocol_version
     }
 
     %{state | host: host, connection_ref: Process.monitor(connection)}

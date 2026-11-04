@@ -5,23 +5,30 @@ defmodule FermixCore.Memory.Repo do
 
   use GenServer
 
+  require Logger
+
   alias Exqlite.Sqlite3
   alias FermixCore.Agents.IterationLimits
   alias FermixCore.Memory.Config
+  alias FermixCore.Memory.Repo.ChecklistsSql
   alias FermixCore.Memory.Repo.ComputerHistorySql
   alias FermixCore.Memory.Repo.CuesDeliveriesSql
   alias FermixCore.Memory.Repo.CuesFilterSql
+  alias FermixCore.Memory.Repo.CuesFollowUpAllowSql
+  alias FermixCore.Memory.Repo.CuesFollowUpSql
   alias FermixCore.Memory.Repo.CuesMandateSql
   alias FermixCore.Memory.Repo.CuesRunsSql
   alias FermixCore.Memory.Repo.CuesSql
   alias FermixCore.Memory.Repo.CuesWatchersSql
+  alias FermixCore.Memory.Repo.FtsMatch
+  alias FermixCore.Memory.Repo.InboundEventsSql
   alias FermixCore.Memory.Repo.MeetingsSql
   alias FermixCore.Memory.Repo.MobileSql
+  alias FermixCore.Memory.Repo.OpenLoopReactionsSql
   alias FermixCore.Memory.Repo.OpenLoopsSql
   alias FermixCore.Memory.Repo.TemporalSql
   alias FermixCore.Memory.Repo.VoiceCallsSql
   alias FermixCore.Memory.Scope
-  alias FermixCore.OpenLoops.Defaults, as: OpenLoopsDefaults
   alias FermixCore.Timeouts
 
   @base_migration_version 1
@@ -71,6 +78,16 @@ defmodule FermixCore.Memory.Repo do
   @harness_continued_from_migration_version 46
   @cue_live_intake_migration_version 47
   @cue_retention_index_migration_version 48
+  @open_loop_outside_content_migration_version 49
+  @mobile_icon_index_migration_version 50
+  @open_loop_curiosity_migration_version 51
+  @mobile_uncertain_request_migration_version 52
+  @channel_event_ids_migration_version 53
+  @watcher_follow_up_migration_version 54
+  @cue_delivery_window_index_migration_version 55
+  @checklists_migration_version 56
+  @checklist_edits_migration_version 57
+  @follow_up_always_allow_migration_version 58
   @sqlite_open_intent :readwritecreate
 
   # The cue SQL modules (M60), one per lane, all served by `cues_call/3`.
@@ -80,7 +97,9 @@ defmodule FermixCore.Memory.Repo do
     CuesFilterSql,
     CuesRunsSql,
     CuesDeliveriesSql,
-    CuesMandateSql
+    CuesMandateSql,
+    CuesFollowUpSql,
+    CuesFollowUpAllowSql
   ]
 
   @base_schema_sql """
@@ -848,6 +867,33 @@ defmodule FermixCore.Memory.Repo do
           media: map()
         }
 
+  @typedoc """
+  A timeline row a scheduled job's or a cue's run sent, with no origin yet,
+  beside what its run's record names; nil for what is not on record.
+  """
+  @type mobile_origin_candidate :: %{
+          rowid: pos_integer(),
+          agent_id: String.t(),
+          owner_id: String.t(),
+          profile_id: String.t(),
+          server_seq: pos_integer(),
+          metadata_json: String.t() | nil,
+          trigger: String.t() | nil,
+          recorded_job_name: term(),
+          job_name: String.t() | nil,
+          watcher_name: String.t() | nil
+        }
+
+  @typedoc "A row's metadata to write, `origin` added, and the metadata it was read with."
+  @type mobile_origin_fill :: %{
+          agent_id: String.t(),
+          owner_id: String.t(),
+          profile_id: String.t(),
+          server_seq: pos_integer(),
+          metadata_json: String.t() | nil,
+          metadata: %{required(String.t()) => term()}
+        }
+
   @type mobile_client_request_row :: %{
           agent_id: String.t(),
           owner_id: String.t(),
@@ -1078,11 +1124,15 @@ defmodule FermixCore.Memory.Repo do
           owner_id: String.t(),
           dedupe_key: String.t(),
           intention: String.t(),
+          noted_after_outside_content: boolean(),
           why_it_matters: String.t() | nil,
           matters_by_kind: String.t(),
           matters_by_date: Date.t(),
           matters_by_time: Time.t() | nil,
           matters_by_at: DateTime.t(),
+          anchor_kind: String.t(),
+          matters_by_source: String.t() | nil,
+          reach: String.t(),
           timezone: String.t(),
           horizon_class: String.t(),
           said_at: DateTime.t(),
@@ -1092,6 +1142,7 @@ defmodule FermixCore.Memory.Repo do
           state: String.t(),
           touches: 0..3,
           next_touch_at: DateTime.t() | nil,
+          rung1_until: DateTime.t() | nil,
           claimed_at: DateTime.t() | nil,
           last_touch_at: DateTime.t() | nil,
           last_touch_rung: 1 | 2 | nil,
@@ -1101,6 +1152,7 @@ defmodule FermixCore.Memory.Repo do
           last_outcome: String.t() | nil,
           last_outcome_at: DateTime.t() | nil,
           last_message: String.t() | nil,
+          last_message_after_outside_content: boolean(),
           delivery_platform: String.t(),
           delivery_destination: String.t(),
           delivery_thread_scope: String.t(),
@@ -1109,6 +1161,30 @@ defmodule FermixCore.Memory.Repo do
           revision: pos_integer(),
           created_at: DateTime.t(),
           updated_at: DateTime.t()
+        }
+
+  @type open_loop_reaction_row :: %{
+          required(:id) => String.t(),
+          required(:owner_id) => String.t(),
+          required(:agent_id) => String.t(),
+          required(:open_loop_id) => String.t(),
+          required(:rung) => 1 | 2,
+          required(:raised_at) => DateTime.t(),
+          required(:session_id) => String.t() | nil,
+          required(:source_channel) => String.t(),
+          required(:source_chat_id) => String.t(),
+          required(:source_thread_scope) => String.t(),
+          required(:raised_with) => String.t() | nil,
+          required(:reply_text) => String.t() | nil,
+          required(:reply_at) => DateTime.t() | nil,
+          required(:outcome) => String.t() | nil,
+          required(:answer) => String.t() | nil,
+          required(:created_at) => DateTime.t(),
+          required(:updated_at) => DateTime.t(),
+          required(:raised_after_outside_content) => boolean(),
+          required(:raised_history_tainted) => boolean(),
+          optional(:intention) => String.t(),
+          optional(:noted_after_outside_content) => boolean()
         }
 
   @type resource_selector :: %{
@@ -1279,6 +1355,12 @@ defmodule FermixCore.Memory.Repo do
   already logs an `{:error, reason}` and retries on its next tick; exiting
   instead restarted it and, for the jobs and reminder schedulers, every later
   child of the root supervisor, the daemon socket included.
+
+  A request that timed out still runs when the Repo reaches it, after the
+  worker has its error. A worker adds `skip_when_late: true` to a request that
+  is safe to skip, a claim of new work or a read its next tick redoes, and the
+  Repo then turns that one away unrun once `timeout_ms` has passed; one it
+  started before then still finishes, and can commit late.
   """
   @spec periodic_opts(GenServer.server(), pos_integer()) :: keyword()
   def periodic_opts(server, timeout_ms) when is_integer(timeout_ms) and timeout_ms > 0 do
@@ -1415,6 +1497,52 @@ defmodule FermixCore.Memory.Repo do
     call({:attach_mobile_link_preview, selector, server_seq, preview}, opts)
   end
 
+  @doc """
+  At most `limit` (1 to 1,000) timeline rows a scheduled job's or a cue's
+  run sent that carry no `metadata.origin` yet, after rowid `after_rowid`,
+  oldest first, each beside what its run's record names
+  (`MobileSql.origin_candidates/3`). Only `Companion.OriginBackfill` reads it.
+  """
+  @spec mobile_origin_candidates(non_neg_integer(), pos_integer(), keyword()) ::
+          {:ok, [mobile_origin_candidate()]} | {:error, term()}
+  def mobile_origin_candidates(after_rowid, limit, opts \\ [])
+      when is_sqlite_seq(after_rowid) and is_integer(limit) and limit > 0 and limit <= 1_000 do
+    call({:mobile_origin_candidates, after_rowid, limit}, opts)
+  end
+
+  @doc """
+  Writes each row's `metadata`, its own with `origin` added, in one
+  transaction, only where the row's stored metadata is still the
+  `metadata_json` it was read with (`MobileSql.fill_origins/2`); answers how
+  many rows it wrote. Each row is checked here, in the caller, so a bad one
+  fails there and never inside the Repo.
+  """
+  @spec fill_mobile_origins([mobile_origin_fill()], keyword()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def fill_mobile_origins(rows, opts \\ []) when is_list(rows) do
+    Enum.each(rows, &check_origin_fill!/1)
+    call({:fill_mobile_origins, rows}, opts)
+  end
+
+  defp check_origin_fill!(
+         %{
+           agent_id: agent_id,
+           owner_id: owner_id,
+           profile_id: profile_id,
+           server_seq: server_seq,
+           metadata_json: metadata_json,
+           metadata: %{"origin" => %{}}
+         } = row
+       )
+       when is_binary(agent_id) and is_binary(owner_id) and is_binary(profile_id) and
+              is_sqlite_seq(server_seq) and (is_binary(metadata_json) or is_nil(metadata_json)) do
+    {:ok, _json} = Jason.encode(row.metadata)
+    :ok
+  end
+
+  defp check_origin_fill!(row),
+    do: raise(ArgumentError, "not a timeline origin to write: #{inspect(row)}")
+
   @spec advance_mobile_read_frontier(
           mobile_profile_selector(),
           non_neg_integer(),
@@ -1482,7 +1610,14 @@ defmodule FermixCore.Memory.Repo do
           DateTime.t(),
           keyword()
         ) ::
-          {:ok, {:started | :active | :completed | :failed, mobile_client_request_row()}}
+          {:ok,
+           {:started
+            | :active
+            | :completed
+            | :failed
+            | :uncertain
+            | :settled_uncertain
+            | :settled_cancelled, mobile_client_request_row()}}
           | {:error, term()}
   def start_mobile_client_request(
         selector,
@@ -1512,6 +1647,24 @@ defmodule FermixCore.Memory.Repo do
       when is_map(selector) and is_binary(runner_epoch) and is_integer(limit) and limit > 0 and
              limit <= 200 do
     call({:get_recoverable_mobile_client_requests, selector, runner_epoch, limit, now}, opts)
+  end
+
+  @doc """
+  Record the primary epoch one transport's requests boot at
+  (`MobileSql.record_boot_primary_epoch/4`): `{:moved, previous, released}`
+  when it differs from the last boot's, every unfinished request released.
+  """
+  @spec record_mobile_boot_primary_epoch(
+          mobile_transport_selector(),
+          pos_integer(),
+          DateTime.t(),
+          keyword()
+        ) ::
+          {:ok, :recorded | :unchanged | {:moved, pos_integer(), non_neg_integer()}}
+          | {:error, term()}
+  def record_mobile_boot_primary_epoch(selector, primary_epoch, %DateTime{} = now, opts \\ [])
+      when is_map(selector) and is_integer(primary_epoch) and primary_epoch > 0 do
+    call({:record_mobile_boot_primary_epoch, selector, primary_epoch, now}, opts)
   end
 
   @spec settle_mobile_client_request(
@@ -1705,6 +1858,32 @@ defmodule FermixCore.Memory.Repo do
     )
   end
 
+  # What the memory review reads as the owner's own words, and the check-in as
+  # what they said lately: a user message that is not a guest's, asked aloud on
+  # a call, a coding run's notice or forwarded from someone else.
+  @owner_words_sql """
+  AND COALESCE(
+        CASE WHEN json_valid(metadata_json)
+             THEN json_extract(metadata_json, '$.guest') END,
+        0
+      ) != 1
+  AND COALESCE(
+        CASE WHEN json_valid(metadata_json)
+             THEN json_extract(metadata_json, '$.spoken') END,
+        0
+      ) != 1
+  AND COALESCE(
+        CASE WHEN json_valid(metadata_json)
+             THEN json_extract(metadata_json, '$.harness_continuation') END,
+        0
+      ) != 1
+  AND COALESCE(
+        CASE WHEN json_valid(metadata_json)
+             THEN json_extract(metadata_json, '$.forwarded') END,
+        0
+      ) != 1
+  """
+
   @spec get_user_messages_after(
           memory_review_selector(),
           non_neg_integer() | nil,
@@ -1716,6 +1895,18 @@ defmodule FermixCore.Memory.Repo do
       when is_map(selector) and (is_nil(last_id) or (is_integer(last_id) and last_id >= 0)) and
              is_integer(limit) and limit > 0 do
     call({:get_user_messages_after, selector, last_id || 0, limit}, opts)
+  end
+
+  @doc """
+  The owner's own newest messages in one conversation since `since`, oldest
+  first, at most `limit`: read with the memory review's filter, so no guest's,
+  forwarded, spoken or coding run's message is among them.
+  """
+  @spec recent_owner_messages(memory_review_selector(), DateTime.t(), pos_integer(), keyword()) ::
+          {:ok, [message_row()]} | {:error, term()}
+  def recent_owner_messages(selector, %DateTime{} = since, limit, opts \\ [])
+      when is_map(selector) and is_integer(limit) and limit > 0 do
+    call({:recent_owner_messages, selector, since, limit}, opts)
   end
 
   @spec list_review_conversations(map(), keyword()) ::
@@ -2440,6 +2631,25 @@ defmodule FermixCore.Memory.Repo do
     call({:claim_cue_run, job_id, run_attrs, now}, opts)
   end
 
+  @doc """
+  Claims the run of a watcher's follow-up for its `starting` trigger
+  `trigger_id` (M60_WATCHER_CODING_RUNS.md §4.2): in one `BEGIN IMMEDIATE`,
+  the trigger read while `starting`, its job taken with `state: "running"`,
+  the run inserted with `trigger: "watcher"`, and the trigger moved to
+  `started` with the run's id. A job that cannot take a run (one still
+  running, paused, or gone) refuses the trigger in that transaction with
+  Fermix's sentence, and the answer is `{:ok, {:refused, trigger}}`.
+  `{:error, :nothing_due}` when the trigger is not `starting`.
+  """
+  @spec claim_follow_up_run(String.t(), job_run_attrs(), DateTime.t(), keyword()) ::
+          {:ok, {:started, %{job: scheduled_job_row(), run: job_run_row(), trigger: map()}}}
+          | {:ok, {:refused, map()}}
+          | {:error, :nothing_due | :busy | term()}
+  def claim_follow_up_run(trigger_id, run_attrs, %DateTime{} = now, opts \\ [])
+      when is_binary(trigger_id) and is_map(run_attrs) do
+    call({:claim_follow_up_run, trigger_id, run_attrs, now}, opts)
+  end
+
   @spec upsert_scheduled_job(scheduled_job_attrs(), keyword()) ::
           {:ok, scheduled_job_row()} | {:error, term()}
   def upsert_scheduled_job(attrs, opts \\ []) when is_map(attrs) do
@@ -3059,13 +3269,16 @@ defmodule FermixCore.Memory.Repo do
 
   @doc """
   Creates an open loop (§18). A live loop of the same owner with the same
-  dedupe key is returned as stored, with no write (`{:existing, row}`);
-  otherwise the owner's live-loop cap (`OpenLoops.Defaults.max_live_loops/0`)
-  is checked and the row inserted (`{:created, row}`), atomically. Bounds and
-  shapes are validated here, in the caller.
+  dedupe key and anchor kind is returned as stored, with no write
+  (`{:existing, row}`); one of the other anchor kind is refused
+  `{:kind_conflict, id}` (M83 §11); otherwise the owner's live-loop cap
+  (`OpenLoops.Defaults.max_live_loops/0`) is checked and the row inserted
+  (`{:created, row}`), atomically. Bounds and shapes are validated here, in
+  the caller.
   """
   @spec create_open_loop(map(), keyword()) ::
-          {:ok, {:created | :existing, open_loop_row()}} | {:error, :too_many_loops | term()}
+          {:ok, {:created | :existing, open_loop_row()}}
+          | {:error, :too_many_loops | {:kind_conflict, String.t()} | term()}
   def create_open_loop(attrs, opts \\ []) when is_map(attrs) do
     with {:ok, row} <- OpenLoopsSql.normalize_create(attrs) do
       call({:create_open_loop, row}, opts)
@@ -3208,21 +3421,14 @@ defmodule FermixCore.Memory.Repo do
 
   @doc """
   Due, unclaimed loops of one owner and agent inside their rung 1 window:
-  `next_touch_at <= now < next_touch_at + window`, the window
-  `opts[:window_ms]` (default `OpenLoops.Defaults.rung1_window_ms/0`); an
-  imminent loop until its date has passed (rung 1 only, until the date).
+  `now < rung1_until`, the window close the due scan wrote when it marked each
+  due (`OpenLoops.Lifecycle.due_decision/2`), nearest anchor first.
   """
   @spec due_open_loops_for_note(String.t(), String.t(), DateTime.t(), keyword()) ::
           {:ok, [open_loop_row()]} | {:error, term()}
   def due_open_loops_for_note(owner_id, agent_id, %DateTime{} = now, opts \\ [])
       when is_binary(owner_id) and is_binary(agent_id) do
-    window_ms = Keyword.get(opts, :window_ms, OpenLoopsDefaults.rung1_window_ms())
-    opened_after = now |> DateTime.add(-window_ms, :millisecond) |> OpenLoopsSql.stamp!()
-
-    request =
-      {:due_open_loops_for_note, owner_id, agent_id, OpenLoopsSql.stamp!(now), opened_after}
-
-    call(request, opts)
+    call({:due_open_loops_for_note, owner_id, agent_id, OpenLoopsSql.stamp!(now)}, opts)
   end
 
   @doc """
@@ -3250,6 +3456,107 @@ defmodule FermixCore.Memory.Repo do
 
   defp write_stamp(opts) do
     opts |> Keyword.get_lazy(:now, &DateTime.utc_now/0) |> OpenLoopsSql.stamp!()
+  end
+
+  # --- open-loop follow-ups (MILESTONE_83 §07) -----------------------------
+
+  @doc """
+  Records one follow-up of a loop (rung 1, a raise in conversation; rung 2, a
+  check-in message) and prunes the owner's record to the newest
+  `OpenLoops.Defaults.reactions_kept/0`, in one transaction.
+  """
+  @spec record_open_loop_reaction(map(), keyword()) ::
+          {:ok, open_loop_reaction_row()} | {:error, term()}
+  def record_open_loop_reaction(attrs, opts \\ []) when is_map(attrs) do
+    with {:ok, row} <- OpenLoopReactionsSql.normalize_raise(attrs) do
+      call({:record_open_loop_reaction, row}, opts)
+    end
+  end
+
+  @doc """
+  Takes the owner's message as the reply to every follow-up still awaiting one
+  in its conversation, raised since `since` and before the message. Returns
+  the follow-ups it answered (`id`, `open_loop_id`, `rung`, `raised_at`,
+  `reply_at`).
+  """
+  @spec capture_open_loop_replies(map(), keyword()) :: {:ok, [map()]} | {:error, term()}
+  def capture_open_loop_replies(attrs, opts \\ []) when is_map(attrs) do
+    with {:ok, capture} <- OpenLoopReactionsSql.normalize_capture(attrs) do
+      call({:capture_open_loop_replies, capture}, opts)
+    end
+  end
+
+  @doc """
+  Stores what Fermix said on the rung 1 follow-ups still without it, raised in
+  a turn's conversation since that turn started, with whether the reply was
+  stamped with the owner's computer activity. Returns how many it wrote.
+  """
+  @spec record_open_loop_raised_with(map(), keyword()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def record_open_loop_raised_with(attrs, opts \\ []) when is_map(attrs) do
+    with {:ok, args} <- OpenLoopReactionsSql.normalize_raised_with(attrs) do
+      call({:record_open_loop_raised_with, args}, opts)
+    end
+  end
+
+  @doc """
+  Marks the rung 1 follow-ups raised in a turn's conversation since that turn
+  started as raised after outside content, once the turn is known to have read
+  some. Returns how many it marked.
+  """
+  @spec record_open_loop_raised_after_outside_content(map(), keyword()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def record_open_loop_raised_after_outside_content(attrs, opts \\ []) when is_map(attrs) do
+    with {:ok, args} <- OpenLoopReactionsSql.normalize_outside_content(attrs) do
+      call({:record_open_loop_raised_after_outside_content, args}, opts)
+    end
+  end
+
+  @doc """
+  Marks the owner's follow-ups still awaiting a reply and raised before
+  `cutoff` as `no_reply`. Returns the ones it marked (`id`, `open_loop_id`,
+  `rung`).
+  """
+  @spec stamp_open_loop_no_replies(String.t(), DateTime.t(), keyword()) ::
+          {:ok, [map()]} | {:error, term()}
+  def stamp_open_loop_no_replies(owner_id, %DateTime{} = cutoff, opts \\ [])
+      when is_binary(owner_id) and owner_id != "" do
+    call(
+      {:stamp_open_loop_no_replies, owner_id, OpenLoopsSql.stamp!(cutoff), write_stamp(opts)},
+      opts
+    )
+  end
+
+  @doc """
+  Stamps a settle's answer on a loop's latest follow-up, once. Returns 0 when
+  the loop has none, or its latest already carries an answer.
+  """
+  @spec answer_open_loop_reaction(String.t(), String.t(), String.t(), keyword()) ::
+          {:ok, 0 | 1} | {:error, term()}
+  def answer_open_loop_reaction(owner_id, open_loop_id, answer, opts \\ [])
+      when is_binary(owner_id) and owner_id != "" and is_binary(open_loop_id) do
+    with {:ok, answer} <- OpenLoopReactionsSql.normalize_answer(open_loop_id, answer) do
+      call({:answer_open_loop_reaction, owner_id, open_loop_id, answer, write_stamp(opts)}, opts)
+    end
+  end
+
+  @doc "Deletes every follow-up of one loop of the owner's. Returns how many."
+  @spec delete_open_loop_reactions(String.t(), String.t(), keyword()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def delete_open_loop_reactions(owner_id, open_loop_id, opts \\ [])
+      when is_binary(owner_id) and owner_id != "" and is_binary(open_loop_id) do
+    call({:delete_open_loop_reactions, owner_id, open_loop_id}, opts)
+  end
+
+  @doc """
+  The owner's whole follow-up record, newest first, each row with its loop's
+  `intention`.
+  """
+  @spec list_open_loop_reactions(String.t(), keyword()) ::
+          {:ok, [open_loop_reaction_row()]} | {:error, term()}
+  def list_open_loop_reactions(owner_id, opts \\ [])
+      when is_binary(owner_id) and owner_id != "" do
+    call({:list_open_loop_reactions, owner_id}, opts)
   end
 
   @doc """
@@ -3454,6 +3761,44 @@ defmodule FermixCore.Memory.Repo do
     end)
   end
 
+  @doc """
+  Records a channel's inbound event id until `now_ms + ttl_ms` (Unix
+  milliseconds) unless a live row holds it (M75 B15): `{:ok, :fresh}` when it
+  was absent or expired, `{:ok, {:duplicate, expires_at_ms}}` otherwise. Only
+  `FermixChannels.Gateway.Idempotency` calls it, behind its in-memory cache.
+  """
+  @spec claim_inbound_event(atom() | String.t(), String.t(), integer(), pos_integer(), keyword()) ::
+          {:ok, :fresh | {:duplicate, integer()}} | {:error, term()}
+  def claim_inbound_event(channel, event_id, now_ms, ttl_ms, opts \\ [])
+      when is_binary(event_id) and is_integer(now_ms) and is_integer(ttl_ms) and ttl_ms > 0 do
+    with {:ok, {channel, event_id}} <- InboundEventsSql.normalize_key(channel, event_id) do
+      call({:claim_inbound_event, channel, event_id, now_ms, now_ms + ttl_ms}, opts)
+    end
+  end
+
+  @doc "Deletes a channel's inbound event id, so its next arrival is fresh."
+  @spec forget_inbound_event(atom() | String.t(), String.t(), keyword()) :: :ok | {:error, term()}
+  def forget_inbound_event(channel, event_id, opts \\ []) when is_binary(event_id) do
+    with {:ok, {channel, event_id}} <- InboundEventsSql.normalize_key(channel, event_id) do
+      call({:forget_inbound_event, channel, event_id}, opts)
+    end
+  end
+
+  @doc """
+  Deletes at most `limit` inbound event ids that expired at or before `now_ms`,
+  and answers how many it deleted.
+  """
+  @spec prune_inbound_events(integer(), pos_integer(), keyword()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def prune_inbound_events(now_ms, limit, opts \\ [])
+      when is_integer(now_ms) and is_integer(limit) and limit > 0 do
+    if limit > InboundEventsSql.prune_limit_max(),
+      do:
+        raise(ArgumentError, "a prune deletes at most #{InboundEventsSql.prune_limit_max()} rows")
+
+    call({:prune_inbound_events, now_ms, limit}, opts)
+  end
+
   @spec migrate(keyword()) :: :ok | {:error, term()}
   def migrate(opts \\ []) do
     call(:migrate, opts)
@@ -3474,6 +3819,15 @@ defmodule FermixCore.Memory.Repo do
   def cues_call(module, request, opts \\ [])
       when module in @cue_sql_modules and is_tuple(request) and is_list(opts),
       do: call({:cues, module, request}, opts)
+
+  @doc """
+  Serves one request about the owner's lists (M85) with
+  `Memory.Repo.ChecklistsSql`, a `handle(conn, request)` with one head per
+  request tuple. Only `FermixCore.Checklists.Registry` calls it.
+  """
+  @spec checklists_call(tuple(), keyword()) :: term()
+  def checklists_call(request, opts \\ []) when is_tuple(request) and is_list(opts),
+    do: call({:checklists, request}, opts)
 
   @doc """
   The base schema as SQL, for a test that seeds a store an older release wrote.
@@ -3538,7 +3892,22 @@ defmodule FermixCore.Memory.Repo do
     end
   end
 
+  # A request `call/2` sends with `skip_when_late: true` carries its caller's
+  # deadline. One whose deadline has passed when the Repo reaches it is not
+  # run: its caller has stopped waiting and said skipping it is safe, so running
+  # it would only delay every request behind it and commit a claim nobody acts
+  # on. That caller's timeout is already traced (`Timeouts.expired/3`) or exits
+  # it, so this adds no trace of its own, which under load would only double
+  # each timeout's record.
   @impl true
+  def handle_call({:with_deadline, deadline, request}, from, state) do
+    if deadline_passed?(deadline) do
+      {:reply, {:error, :repo_timeout}, state}
+    else
+      handle_call(request, from, state)
+    end
+  end
+
   def handle_call(:enabled?, _from, state) do
     {:reply, state.enabled, state}
   end
@@ -3640,6 +4009,24 @@ defmodule FermixCore.Memory.Repo do
     {:reply, reply, state}
   end
 
+  def handle_call({:claim_inbound_event, channel, event_id, now_ms, expires_at_ms}, _from, state) do
+    reply =
+      with_connection(
+        state,
+        &InboundEventsSql.claim(&1, channel, event_id, now_ms, expires_at_ms)
+      )
+
+    {:reply, reply, state}
+  end
+
+  def handle_call({:forget_inbound_event, channel, event_id}, _from, state) do
+    {:reply, with_connection(state, &InboundEventsSql.forget(&1, channel, event_id)), state}
+  end
+
+  def handle_call({:prune_inbound_events, now_ms, limit}, _from, state) do
+    {:reply, with_connection(state, &InboundEventsSql.prune(&1, now_ms, limit)), state}
+  end
+
   def handle_call({:create_open_loop, row}, _from, state) do
     {:reply, with_connection(state, &OpenLoopsSql.create(&1, row)), state}
   end
@@ -3688,9 +4075,9 @@ defmodule FermixCore.Memory.Repo do
     {:reply, with_connection(state, &OpenLoopsSql.next_wake(&1, now)), state}
   end
 
-  def handle_call({:due_open_loops_for_note, owner_id, agent_id, now, opened}, _from, state) do
+  def handle_call({:due_open_loops_for_note, owner_id, agent_id, now}, _from, state) do
     reply =
-      with_connection(state, &OpenLoopsSql.due_for_note(&1, owner_id, agent_id, now, opened))
+      with_connection(state, &OpenLoopsSql.due_for_note(&1, owner_id, agent_id, now))
 
     {:reply, reply, state}
   end
@@ -3705,6 +4092,46 @@ defmodule FermixCore.Memory.Repo do
       with_connection(state, &OpenLoopsSql.owner_message_hours(&1, agent_id, owner_id, since))
 
     {:reply, reply, state}
+  end
+
+  def handle_call({:record_open_loop_reaction, row}, _from, state) do
+    {:reply, with_connection(state, &OpenLoopReactionsSql.insert(&1, row)), state}
+  end
+
+  def handle_call({:capture_open_loop_replies, capture}, _from, state) do
+    {:reply, with_connection(state, &OpenLoopReactionsSql.capture(&1, capture)), state}
+  end
+
+  def handle_call({:record_open_loop_raised_with, args}, _from, state) do
+    {:reply, with_connection(state, &OpenLoopReactionsSql.raised_with(&1, args)), state}
+  end
+
+  def handle_call({:record_open_loop_raised_after_outside_content, args}, _from, state) do
+    reply = with_connection(state, &OpenLoopReactionsSql.raised_after_outside_content(&1, args))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:stamp_open_loop_no_replies, owner_id, cutoff, now}, _from, state) do
+    reply =
+      with_connection(state, &OpenLoopReactionsSql.stamp_no_reply(&1, owner_id, cutoff, now))
+
+    {:reply, reply, state}
+  end
+
+  def handle_call({:answer_open_loop_reaction, owner_id, loop_id, answer, now}, _from, state) do
+    reply =
+      with_connection(state, &OpenLoopReactionsSql.answer(&1, owner_id, loop_id, answer, now))
+
+    {:reply, reply, state}
+  end
+
+  def handle_call({:delete_open_loop_reactions, owner_id, loop_id}, _from, state) do
+    reply = with_connection(state, &OpenLoopReactionsSql.delete_for_loop(&1, owner_id, loop_id))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:list_open_loop_reactions, owner_id}, _from, state) do
+    {:reply, with_connection(state, &OpenLoopReactionsSql.list(&1, owner_id)), state}
   end
 
   def handle_call(:migrate, _from, state) do
@@ -3789,6 +4216,16 @@ defmodule FermixCore.Memory.Repo do
     {:reply, reply, state}
   end
 
+  def handle_call({:mobile_origin_candidates, after_rowid, limit}, _from, state) do
+    reply = with_connection(state, &MobileSql.origin_candidates(&1, after_rowid, limit))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:fill_mobile_origins, rows}, _from, state) do
+    reply = with_connection(state, &MobileSql.fill_origins(&1, rows))
+    {:reply, reply, state}
+  end
+
   def handle_call({:advance_mobile_read_frontier, selector, reported_seq, now}, _from, state) do
     reply =
       with_connection(state, &MobileSql.advance_read_frontier(&1, selector, reported_seq, now))
@@ -3843,6 +4280,13 @@ defmodule FermixCore.Memory.Repo do
       ) do
     reply =
       with_connection(state, &MobileSql.recoverable_requests(&1, selector, epoch, limit, now))
+
+    {:reply, reply, state}
+  end
+
+  def handle_call({:record_mobile_boot_primary_epoch, selector, epoch, now}, _from, state) do
+    reply =
+      with_connection(state, &MobileSql.record_boot_primary_epoch(&1, selector, epoch, now))
 
     {:reply, reply, state}
   end
@@ -3988,6 +4432,11 @@ defmodule FermixCore.Memory.Repo do
 
   def handle_call({:get_user_messages_after, selector, last_id, limit}, _from, state) do
     reply = with_connection(state, &fetch_user_messages_after(&1, selector, last_id, limit))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:recent_owner_messages, selector, since, limit}, _from, state) do
+    reply = with_connection(state, &fetch_recent_owner_messages(&1, selector, since, limit))
     {:reply, reply, state}
   end
 
@@ -4405,6 +4854,11 @@ defmodule FermixCore.Memory.Repo do
     {:reply, reply, state}
   end
 
+  def handle_call({:claim_follow_up_run, trigger_id, run_attrs, now}, _from, state) do
+    reply = with_connection(state, &claim_follow_up_run_tx(&1, trigger_id, run_attrs, now))
+    {:reply, reply, state}
+  end
+
   def handle_call({:upsert_scheduled_job, attrs}, _from, state) do
     reply = with_connection(state, &upsert_scheduled_job_row(&1, attrs))
     {:reply, reply, state}
@@ -4619,20 +5073,56 @@ defmodule FermixCore.Memory.Repo do
     {:reply, with_connection(state, &module.handle(&1, request)), state}
   end
 
+  def handle_call({:checklists, request}, _from, state) do
+    {:reply, with_connection(state, &ChecklistsSql.handle(&1, request)), state}
+  end
+
   # Every request is served in order by this one process, so a call waits
   # behind every request ahead of it. A timed-out call exits its caller unless
-  # the caller passed `on_timeout: :error` (`periodic_opts/2`). The request
-  # itself still runs when the Repo reaches it, and still before anything that
-  # caller sends afterwards.
+  # the caller passed `on_timeout: :error` (`periodic_opts/2`).
+  #
+  # A request still runs when the Repo reaches it, however late, and before
+  # anything its caller sends afterwards: most record something that already
+  # happened (a send, a settle, a decision), and skipping one would repeat that
+  # or lose it. A caller whose request is safe to skip, a claim of new work or
+  # a read a later tick redoes, passes `skip_when_late: true`. That request goes
+  # out as `{:with_deadline, deadline, request}`, the deadline being the
+  # monotonic millisecond at which the caller gives up (`:infinity` never
+  # passes), and the Repo turns it away unrun once that has passed
+  # (`handle_call/3`). So a Repo that falls behind sheds the claims its callers
+  # gave up on, instead of committing them after the caller moved on, which
+  # never acts on what it claimed. One the Repo started before its deadline
+  # still runs to the end and can commit late.
+  #
+  # A caller held up between taking its deadline and sending starts its own
+  # timer that much later, so it can still be waiting when its request is
+  # turned away; it then gets `{:error, :repo_timeout}` back, whichever
+  # `on_timeout` it chose.
   defp call(request, opts) do
     server = Keyword.get(opts, :server, __MODULE__)
     timeout = Keyword.get(opts, :timeout, Timeouts.repo_call())
+    message = request_message(request, timeout, Keyword.get(opts, :skip_when_late, false))
 
     case Keyword.get(opts, :on_timeout, :exit) do
-      :exit -> GenServer.call(server, request, timeout)
-      :error -> call_or_timeout_error(server, request, timeout)
+      :exit -> GenServer.call(server, message, timeout)
+      :error -> call_or_timeout_error(server, message, timeout)
     end
   end
+
+  defp request_message(request, _timeout, false), do: request
+
+  defp request_message(request, timeout, true),
+    do: {:with_deadline, deadline_after(timeout), request}
+
+  defp deadline_after(:infinity), do: :infinity
+
+  defp deadline_after(timeout) when is_integer(timeout) and timeout >= 0,
+    do: System.monotonic_time(:millisecond) + timeout
+
+  defp deadline_passed?(:infinity), do: false
+
+  defp deadline_passed?(deadline) when is_integer(deadline),
+    do: System.monotonic_time(:millisecond) > deadline
 
   defp call_or_timeout_error(server, request, timeout) do
     GenServer.call(server, request, timeout)
@@ -4644,6 +5134,7 @@ defmodule FermixCore.Memory.Repo do
       {:error, :repo_timeout}
   end
 
+  defp request_name({:with_deadline, _deadline, request}), do: request_name(request)
   defp request_name(request) when is_tuple(request), do: elem(request, 0)
   defp request_name(request) when is_atom(request), do: request
 
@@ -4654,6 +5145,7 @@ defmodule FermixCore.Memory.Repo do
          {:ok, conn} <- Sqlite3.open(database_path, sqlite_open_opts(@sqlite_open_intent)),
          :ok <- configure_connection(conn),
          :ok <- run_migrations(conn) do
+      :ok = sweep_removed_checklists(conn)
       {:ok, conn}
     end
   end
@@ -4729,8 +5221,67 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_cue_stop_reason_migration(conn, versions),
          :ok <- apply_harness_continued_from_migration(conn, versions),
          :ok <- apply_cue_live_intake_migration(conn, versions),
-         :ok <- apply_cue_retention_index_migration(conn, versions) do
+         :ok <- apply_cue_retention_index_migration(conn, versions),
+         :ok <- apply_open_loop_outside_content_migration(conn, versions),
+         :ok <- apply_mobile_icon_index_migration(conn, versions),
+         :ok <- apply_open_loop_curiosity_migration(conn, versions),
+         :ok <- apply_mobile_uncertain_request_migration(conn, versions),
+         :ok <- apply_channel_event_ids_migration(conn, versions),
+         :ok <- apply_watcher_follow_up_migration(conn, versions),
+         :ok <- apply_cue_delivery_window_index_migration(conn, versions),
+         :ok <- apply_checklists_migration(conn, versions),
+         :ok <- apply_checklist_edits_migration(conn, versions),
+         :ok <- apply_follow_up_always_allow_migration(conn, versions) do
       :ok
+    end
+  end
+
+  # The edits the owner's devices sent (M85 §07), kept by `client_msg_id` so
+  # one sent again changes nothing, with its version in one transaction.
+  defp apply_checklist_edits_migration(conn, versions) do
+    if Enum.member?(versions, @checklist_edits_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{ChecklistsSql.edits_schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@checklist_edits_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  # The owner's lists (M85 §06), their two tables and version in one
+  # transaction. Nothing is rewritten: a store from before has no lists.
+  defp apply_checklists_migration(conn, versions) do
+    if Enum.member?(versions, @checklists_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{ChecklistsSql.schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@checklists_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  # The one sweep the owner's lists have (M85 §06): lists removed more than 30
+  # days ago go when the store opens, never on a timer. A sweep that fails is
+  # logged and the store opens: what it would have deleted waits for the next.
+  defp sweep_removed_checklists(conn) do
+    case ChecklistsSql.handle(conn, {:purge_removed_lists, DateTime.utc_now()}) do
+      {:ok, _deleted} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error("memory: removed lists could not be swept: #{inspect(reason)}")
     end
   end
 
@@ -4827,6 +5378,261 @@ defmodule FermixCore.Memory.Repo do
     end
   end
 
+  # Whether an open loop is known to have been noted after outside content (M78
+  # §08), a column beside the loop's words, with its version in one transaction.
+  # It runs after 43, which made the table. A row written before is not known to
+  # have been, so it reads as not stamped: only captures from 49 on are stamped.
+  defp apply_open_loop_outside_content_migration(conn, versions) do
+    if Enum.member?(versions, @open_loop_outside_content_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{OpenLoopsSql.outside_content_schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@open_loop_outside_content_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  # Open loop curiosity (M83 §11): open_loops rebuilt with its anchor's kind,
+  # its reach, its date's source and its rung 1 window, and the follow-up
+  # reactions table, with the version in one transaction. It runs after 49,
+  # whose stamp it copies, so a fresh install and an upgraded one end alike.
+  defp apply_open_loop_curiosity_migration(conn, versions) do
+    if Enum.member?(versions, @open_loop_curiosity_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{OpenLoopsSql.curiosity_schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@open_loop_curiosity_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  # Watcher follow-ups (M60_WATCHER_CODING_RUNS.md §4.1, §4.3): `cue_watchers`
+  # and `cue_deliveries` rebuilt (`CuesSql.follow_up_rebuilds/0`) and the
+  # trigger table, with the version, in one transaction. The table of
+  # automatic approval prompts this migration once made is gone since 58,
+  # which drops it where it exists. The rebuild drops the parent of three
+  # cascading foreign keys, so foreign keys are off around it, toggled outside
+  # the transaction as for migration 11. Each rebuilt table keeps every index
+  # it had, whichever migration made it: their DDL is read before the drop and
+  # replayed after. Reapplying it changes nothing: a table already in the new
+  # shape, or in a later migration's (`later`), is not rebuilt, and the new
+  # table is made only if missing. A table whose columns match neither shape is
+  # refused, never cut.
+  defp apply_watcher_follow_up_migration(conn, versions) do
+    if Enum.member?(versions, @watcher_follow_up_migration_version) do
+      :ok
+    else
+      with :ok <- Sqlite3.execute(conn, "PRAGMA foreign_keys=OFF;"),
+           :ok <- Sqlite3.execute(conn, "BEGIN;"),
+           :ok <- conn |> follow_up_migration_in_tx() |> commit_migration(conn) do
+        Sqlite3.execute(conn, "PRAGMA foreign_keys=ON;")
+      end
+    end
+  end
+
+  defp follow_up_migration_in_tx(conn) do
+    with {:ok, rebuilds} <- pending_rebuilds(conn, CuesSql.follow_up_rebuilds()),
+         {:ok, indexes} <- table_indexes(conn, Enum.map(rebuilds, & &1.table)),
+         :ok <- execute_each(conn, Enum.map(rebuilds, & &1.sql)),
+         :ok <- replay_indexes(conn, indexes),
+         :ok <- Sqlite3.execute(conn, CuesFollowUpSql.schema_sql()) do
+      Sqlite3.execute(
+        conn,
+        "INSERT INTO schema_migrations(version) VALUES (#{@watcher_follow_up_migration_version});"
+      )
+    end
+  end
+
+  # Always allow replaces automatic mode (the 2026-10-31 revision of
+  # M60_WATCHER_CODING_RUNS.md), with zero new config: `cue_watchers` rebuilt
+  # without `follow_up_mode` (`CuesSql.always_allow_rebuilds/0`), an automatic
+  # approval that no longer matches what its follow-up runs and what sets it
+  # off cleared first, so only a matching one stays allowed and every other
+  # follow-up asks first; the approval prompts' table dropped with its rows,
+  # since nothing answers a prompt any more; and the trigger table given the
+  # digest its card showed and what the owner's Always allow came to
+  # (`CuesFollowUpSql.always_allow_columns/0`). One transaction with the
+  # version, foreign keys off around it as for 54. Reapplying it changes
+  # nothing: the rebuild runs only while the marker is missing, the columns
+  # are added only while absent, and the drop is `IF EXISTS`. A table whose
+  # columns match neither shape is refused, never cut.
+  defp apply_follow_up_always_allow_migration(conn, versions) do
+    if Enum.member?(versions, @follow_up_always_allow_migration_version) do
+      :ok
+    else
+      with :ok <- Sqlite3.execute(conn, "PRAGMA foreign_keys=OFF;"),
+           :ok <- Sqlite3.execute(conn, "BEGIN;"),
+           :ok <- conn |> always_allow_migration_in_tx() |> commit_migration(conn) do
+        Sqlite3.execute(conn, "PRAGMA foreign_keys=ON;")
+      end
+    end
+  end
+
+  defp always_allow_migration_in_tx(conn) do
+    with {:ok, rebuilds} <- pending_rebuilds(conn, CuesSql.always_allow_rebuilds()),
+         :ok <- clear_stale_automatic_approvals(conn, rebuilds),
+         {:ok, indexes} <- table_indexes(conn, Enum.map(rebuilds, & &1.table)),
+         :ok <- execute_each(conn, Enum.map(rebuilds, & &1.sql)),
+         :ok <- replay_indexes(conn, indexes),
+         :ok <- Sqlite3.execute(conn, "DROP TABLE IF EXISTS cue_follow_up_approvals;"),
+         :ok <-
+           add_columns(conn, "cue_follow_up_triggers", CuesFollowUpSql.always_allow_columns()) do
+      Sqlite3.execute(
+        conn,
+        "INSERT INTO schema_migrations(version) VALUES " <>
+          "(#{@follow_up_always_allow_migration_version});"
+      )
+    end
+  end
+
+  # Before the copy keeps an automatic follow-up's approval, one that no longer
+  # matches what it runs and what sets it off is cleared, as the write that
+  # changed it would clear it now. Only while the rebuild is pending.
+  defp clear_stale_automatic_approvals(_conn, []), do: :ok
+
+  defp clear_stale_automatic_approvals(conn, [_watchers]) do
+    sql =
+      "SELECT id FROM cue_watchers WHERE follow_up_mode = 'auto' " <>
+        "AND follow_up_approval_digest IS NOT NULL"
+
+    with {:ok, rows} <- query_all(conn, sql, []) do
+      Enum.reduce_while(List.flatten(rows), :ok, &clear_stale_automatic_approval(conn, &1, &2))
+    end
+  end
+
+  defp clear_stale_automatic_approval(conn, watcher_id, :ok) do
+    case CuesFollowUpAllowSql.clear_stale_approval(conn, {:watcher, watcher_id}) do
+      :ok -> {:cont, :ok}
+      {:error, reason} -> {:halt, {:error, reason}}
+    end
+  end
+
+  # Columns a migration adds with ALTER: added while the table holds `before`,
+  # nothing while it holds `after`, refused for any other set.
+  defp add_columns(conn, table, %{before: before, after: added, sql: sql}) do
+    with {:ok, columns} <- table_columns(conn, table) do
+      cond do
+        MapSet.new(columns) == MapSet.new(added) -> :ok
+        MapSet.new(columns) == MapSet.new(before) -> Sqlite3.execute(conn, sql)
+        true -> {:error, {:unexpected_columns, table, columns}}
+      end
+    end
+  end
+
+  # The rebuilds a table's definition does not yet hold. Columns compare as
+  # sets: the copy names them, so their order does not matter.
+  defp pending_rebuilds(conn, rebuilds) do
+    Enum.reduce_while(rebuilds, {:ok, []}, fn rebuild, {:ok, pending} ->
+      case rebuild_state(conn, rebuild) do
+        :pending -> {:cont, {:ok, pending ++ [rebuild]}}
+        :done -> {:cont, {:ok, pending}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp rebuild_state(conn, %{table: table} = rebuild) do
+    with {:ok, ddl} <- table_ddl(conn, table),
+         {:ok, columns} <- table_columns(conn, table) do
+      rebuilt? = String.contains?(ddl, rebuild.marker)
+
+      expected =
+        if rebuilt?, do: [rebuild.after | Map.get(rebuild, :later, [])], else: [rebuild.before]
+
+      cond do
+        MapSet.new(columns) not in Enum.map(expected, &MapSet.new/1) ->
+          {:error, {:unexpected_columns, table, columns}}
+
+        rebuilt? ->
+          :done
+
+        true ->
+          :pending
+      end
+    end
+  end
+
+  defp table_ddl(conn, table) do
+    case query_all(conn, "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", [
+           table
+         ]) do
+      {:ok, [[ddl]]} -> {:ok, ddl}
+      {:ok, []} -> {:error, {:missing_table, table}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp table_columns(conn, table) do
+    with {:ok, rows} <- query_all(conn, "SELECT name FROM pragma_table_info(?)", [table]),
+         do: {:ok, List.flatten(rows)}
+  end
+
+  defp execute_each(conn, statements) do
+    Enum.reduce_while(statements, :ok, fn sql, :ok ->
+      case Sqlite3.execute(conn, sql) do
+        :ok -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  # An index a UNIQUE or PRIMARY KEY constraint made has no DDL: the rebuilt
+  # table's own constraint makes it again.
+  defp table_indexes(conn, tables) do
+    sql =
+      "SELECT sql FROM sqlite_master WHERE type = 'index' AND sql IS NOT NULL " <>
+        "AND tbl_name IN (#{Enum.map_join(tables, ", ", fn _table -> "?" end)}) ORDER BY name"
+
+    with {:ok, rows} <- query_all(conn, sql, tables), do: {:ok, List.flatten(rows)}
+  end
+
+  defp replay_indexes(conn, indexes) do
+    Enum.reduce_while(indexes, :ok, fn ddl, :ok ->
+      case Sqlite3.execute(conn, ddl <> ";") do
+        :ok -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp commit_migration(:ok, conn), do: Sqlite3.execute(conn, "COMMIT;")
+
+  defp commit_migration({:error, reason}, conn) do
+    _rolled_back = Sqlite3.execute(conn, "ROLLBACK;")
+    {:error, reason}
+  end
+
+  # The cue delivery window index: the Cues summary reads a watcher's deliveries
+  # in its window, never every delivery the watcher had, with its version in one
+  # transaction.
+  defp apply_cue_delivery_window_index_migration(conn, versions) do
+    if Enum.member?(versions, @cue_delivery_window_index_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{CuesSql.delivery_window_index_schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@cue_delivery_window_index_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
   # A reply's blocks beside the timeline (M72), their table and version in one
   # transaction. No row is rewritten: a row written before has none.
   defp apply_reply_blocks_migration(conn, versions) do
@@ -4900,6 +5706,25 @@ defmodule FermixCore.Memory.Repo do
     end
   end
 
+  # The icon index beside the link-preview table (Links in the sentence, note
+  # 01), its triggers and version in one transaction; no row before it names
+  # an icon, so nothing is backfilled.
+  defp apply_mobile_icon_index_migration(conn, versions) do
+    if Enum.member?(versions, @mobile_icon_index_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{MobileSql.icon_index_schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@mobile_icon_index_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
   # The media-ref index and link-preview tables beside the timeline, with the
   # backfill of every row already written, in one transaction with its version.
   defp apply_mobile_media_index_migration(conn, versions) do
@@ -4912,6 +5737,46 @@ defmodule FermixCore.Memory.Repo do
         BEGIN;
         #{MobileSql.media_index_schema_sql()}
         INSERT INTO schema_migrations(version) VALUES (#{@mobile_media_index_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  # A request that may have run before a restart is settled `uncertain`
+  # (M75): the request table is rebuilt with that status, its rows and indexes
+  # kept, beside the table of each transport's last primary epoch, with its
+  # version in one transaction. No foreign key names the request table.
+  defp apply_mobile_uncertain_request_migration(conn, versions) do
+    if Enum.member?(versions, @mobile_uncertain_request_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{MobileSql.uncertain_schema_sql()}
+        INSERT INTO schema_migrations(version)
+          VALUES (#{@mobile_uncertain_request_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  # The channel event ids `Gateway.Idempotency` keeps for their window (M75
+  # B15), so they move with the home: the table, its expiry index and the
+  # version in one transaction.
+  defp apply_channel_event_ids_migration(conn, versions) do
+    if Enum.member?(versions, @channel_event_ids_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{InboundEventsSql.schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@channel_event_ids_migration_version});
         COMMIT;
         """
       )
@@ -5470,10 +6335,10 @@ defmodule FermixCore.Memory.Repo do
     end
   end
 
-  # Post-delivery follow-ups (MILESTONE_30 §22.3). Schema-additive: `followup` is
-  # APPENDED by its own ALTER so a migrated database and a fresh one share column
-  # order, and existing rows take the default — no event stored before this
-  # migration is retroactively flagged.
+  # The `followup` column is retired and unread: the post-delivery follow-up it
+  # flagged is gone, and every row keeps the DEFAULT 0. The migration stays
+  # because existing homes have run it, so a fresh database and a migrated one
+  # still share column order.
   defp apply_event_followup_migration(conn, versions) do
     if Enum.member?(versions, @event_followup_migration_version) do
       :ok
@@ -5825,26 +6690,7 @@ defmodule FermixCore.Memory.Repo do
                AND thread_scope = ?
                AND role = 'user'
                AND id > ?
-               AND COALESCE(
-                     CASE WHEN json_valid(metadata_json)
-                          THEN json_extract(metadata_json, '$.guest') END,
-                     0
-                   ) != 1
-               AND COALESCE(
-                     CASE WHEN json_valid(metadata_json)
-                          THEN json_extract(metadata_json, '$.spoken') END,
-                     0
-                   ) != 1
-               AND COALESCE(
-                     CASE WHEN json_valid(metadata_json)
-                          THEN json_extract(metadata_json, '$.harness_continuation') END,
-                     0
-                   ) != 1
-               AND COALESCE(
-                     CASE WHEN json_valid(metadata_json)
-                          THEN json_extract(metadata_json, '$.forwarded') END,
-                     0
-                   ) != 1
+               #{@owner_words_sql}
              ORDER BY id ASC
              LIMIT ?
              """,
@@ -5859,6 +6705,40 @@ defmodule FermixCore.Memory.Repo do
              ]
            ) do
       {:ok, Enum.map(rows, &message_row/1)}
+    end
+  end
+
+  defp fetch_recent_owner_messages(conn, selector, since, limit) do
+    review_selector = normalize_memory_review_selector(selector)
+
+    with {:ok, rows} <-
+           query_all(
+             conn,
+             """
+             SELECT *
+             FROM messages
+             WHERE agent_id = ?
+               AND owner_id = ?
+               AND channel = ?
+               AND chat_id = ?
+               AND thread_scope = ?
+               AND role = 'user'
+               AND created_at >= ?
+               #{@owner_words_sql}
+             ORDER BY id DESC
+             LIMIT ?
+             """,
+             [
+               review_selector.agent_id,
+               review_selector.owner_id,
+               review_selector.channel,
+               review_selector.chat_id,
+               review_selector.thread_scope,
+               timestamp_string(since),
+               limit
+             ]
+           ) do
+      {:ok, rows |> Enum.map(&message_row/1) |> Enum.reverse()}
     end
   end
 
@@ -6532,7 +7412,8 @@ defmodule FermixCore.Memory.Repo do
   defp search_memory_rows(conn, query, selector, limit) do
     {where_sql, params} = search_memory_where_clause(selector)
 
-    with {:ok, rows} <-
+    with {:ok, match} <- FtsMatch.expression(query),
+         {:ok, rows} <-
            query_all(
              conn,
              """
@@ -6545,7 +7426,7 @@ defmodule FermixCore.Memory.Repo do
              ORDER BY bm25(memories_fts), memories.updated_at DESC, memories.id DESC
              LIMIT ?
              """,
-             [query | params] ++ [limit]
+             [match | params] ++ [limit]
            ) do
       {:ok, Enum.map(rows, &memory_search_row/1)}
     end
@@ -6554,7 +7435,8 @@ defmodule FermixCore.Memory.Repo do
   defp search_message_rows(conn, query, selector, limit) do
     {where_sql, params} = message_where_clause(selector)
 
-    with {:ok, rows} <-
+    with {:ok, match} <- FtsMatch.expression(query),
+         {:ok, rows} <-
            query_all(
              conn,
              """
@@ -6567,7 +7449,7 @@ defmodule FermixCore.Memory.Repo do
              ORDER BY bm25(messages_fts), messages.created_at DESC, messages.id DESC
              LIMIT ?
              """,
-             [query | params] ++ [limit]
+             [match | params] ++ [limit]
            ) do
       {:ok, Enum.map(rows, &message_search_row/1)}
     end
@@ -6939,6 +7821,58 @@ defmodule FermixCore.Memory.Repo do
 
   defp claim_delivery(conn, delivery_id, run_id) do
     CuesSql.transition(conn, delivery_id, "passed", :none, "claimed", %{claimed_run_id: run_id})
+  end
+
+  # A follow-up's claim (M60_WATCHER_CODING_RUNS.md §4.2): the trigger, the job
+  # and its run, and the trigger's move to `started`, in one BEGIN IMMEDIATE,
+  # through the claim every job run takes, so one job holds one run. A job that
+  # cannot take one refuses the trigger in the same commit.
+  defp claim_follow_up_run_tx(conn, trigger_id, run_attrs, now) do
+    CuesSql.with_immediate_transaction(conn, fn ->
+      with {:ok, trigger} <- CuesFollowUpSql.claimable(conn, trigger_id) do
+        claim_follow_up_job(conn, trigger, Map.put(run_attrs, :trigger, "watcher"), now)
+      end
+    end)
+  end
+
+  defp claim_follow_up_job(conn, trigger, run_attrs, now) do
+    job_attrs = %{state: "running", updated_at: now}
+    fetched = fetch_claimable_job(conn, trigger.job_id)
+
+    case claim_in_tx(conn, trigger.job_id, job_attrs, run_attrs, fetched) do
+      {:ok, {job, run}} ->
+        with {:ok, started} <- CuesFollowUpSql.mark_started(conn, trigger.id, run.id, now),
+             do: {:ok, {:started, %{job: job, run: run, trigger: started}}}
+
+      {:error, reason} when reason in [:not_runnable, :already_running] ->
+        refuse_follow_up(conn, trigger, reason)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp refuse_follow_up(conn, trigger, reason) do
+    with {:ok, sentence} <- follow_up_refusal(conn, trigger.job_id, reason),
+         {:ok, refused} <- CuesFollowUpSql.refuse_starting(conn, trigger.id, sentence) do
+      {:ok, {:refused, refused}}
+    end
+  end
+
+  @follow_up_running "Not started: it is already running."
+
+  # Fermix's sentence for a follow-up whose job could not take its run, read
+  # from the job row in the claim's transaction.
+  defp follow_up_refusal(_conn, _job_id, :already_running), do: {:ok, @follow_up_running}
+
+  defp follow_up_refusal(conn, job_id, :not_runnable) do
+    case fetch_scheduled_job(conn, job_id) do
+      {:ok, %{state: "running"}} -> {:ok, @follow_up_running}
+      {:ok, %{enabled?: false}} -> {:ok, "Not started: the follow-up is paused."}
+      {:ok, %{state: state}} -> {:ok, "Not started: the follow-up's job is #{state}."}
+      {:error, :not_found} -> {:ok, "Not started: the follow-up's job is gone."}
+      {:error, reason} -> {:error, reason}
+    end
   end
 
   defp transact_claim(conn, claim_fun) do
@@ -7313,13 +8247,20 @@ defmodule FermixCore.Memory.Repo do
     end
   end
 
+  # A watcher's follow-up is a job: an edit that changes what its Always allow
+  # is bound to clears that approval in the same transaction
+  # (M60_WATCHER_CODING_RUNS.md §5), whichever path changed the job.
   defp update_scheduled_job_fields_row(conn, id, assignments) do
     {columns, values} = Enum.unzip(assignments)
     set_sql = Enum.map_join(columns, ", ", &"#{&1} = ?")
+    update = "UPDATE scheduled_jobs SET #{set_sql} WHERE id = ?"
 
-    with :ok <- execute(conn, "UPDATE scheduled_jobs SET #{set_sql} WHERE id = ?", values ++ [id]) do
-      fetch_scheduled_job(conn, id)
-    end
+    CuesSql.with_immediate_transaction(conn, fn ->
+      with :ok <- execute(conn, update, values ++ [id]),
+           :ok <- CuesFollowUpAllowSql.clear_stale_approval(conn, {:follow_up_job, id}) do
+        fetch_scheduled_job(conn, id)
+      end
+    end)
   end
 
   defp fetch_scheduled_jobs(conn, selector) do
@@ -8306,6 +9247,15 @@ defmodule FermixCore.Memory.Repo do
   defp scheduled_job_field_assignment!({:delivery_target, value})
        when is_map(value) or is_nil(value),
        do: {"delivery_target_json", encode_metadata(value)}
+
+  # A watcher's follow-up changes its tools and its timeout in place
+  # (`Jobs.Registry.update_follow_up_job/3`); no other write sets them.
+  defp scheduled_job_field_assignment!({:allowed_tools, [_ | _] = value}),
+    do: {"allowed_tools_json", encode_metadata(value)}
+
+  defp scheduled_job_field_assignment!({:timeout_seconds, value})
+       when is_integer(value) and value > 0,
+       do: {"timeout_seconds", value}
 
   defp scheduled_job_field_assignment!({key, value})
        when key in @owner_text_fields and (is_binary(value) or is_nil(value)),

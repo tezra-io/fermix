@@ -8,9 +8,15 @@ defmodule FermixCore.Agents.AgentDefinition do
 
   `allowed_tools` is 3-state by design:
 
-    * `nil`   — field absent. Sub-agent uses the trust-level default policy.
+    * `nil`   — field absent. Sub-agent gets the tools of the run that calls it.
     * `[]`    — explicit empty. Sub-agent gets no capabilities.
     * `[..]`  — exact name allowlist (still subject to `policy`/trust).
+
+  A tool list under a key Fermix does not read (`allowed-tools`, the Agent
+  Skills pre-approval field; `tools` or `allowedTools`, Claude Code's) is never
+  taken as "absent": its author meant a limit, so with no `allowed_tools` the
+  skill gets no capabilities. The key is kept in `misspelled_tool_keys` so the
+  skill's run can say why (`Capabilities.Skill.tool_warning/2`).
   """
 
   alias FermixCore.Capabilities.Capability
@@ -30,6 +36,7 @@ defmodule FermixCore.Agents.AgentDefinition do
           temperature: float() | nil,
           capabilities: [String.t()],
           allowed_tools: [String.t()] | nil,
+          misspelled_tool_keys: [String.t()],
           policy: [Capability.policy_class()] | nil,
           trust: source() | nil,
           max_iterations: pos_integer(),
@@ -72,10 +79,14 @@ defmodule FermixCore.Agents.AgentDefinition do
     :timeout_seconds,
     :parent,
     :delegates_to,
-    :source_path
+    :source_path,
+    misspelled_tool_keys: []
   ]
 
   @absent_sentinel :__absent__
+  # Tool-list keys Fermix does not read: the Agent Skills `allowed-tools` and
+  # Claude Code's `tools`/`allowedTools`.
+  @misspelled_tool_keys ~w(allowed-tools tools allowedTools)
   # Deliberately excludes `gui_control` (a valid Capability policy class): computer
   # use is operator-only and never delegatable, so an agent/subagent definition may
   # not request it as a policy. Do not add it here to "match" Capability —
@@ -103,6 +114,7 @@ defmodule FermixCore.Agents.AgentDefinition do
          {:ok, temperature} <- parse_optional_float(get(attrs, "temperature")),
          {:ok, allowed_tools} <-
            parse_allowed_tools(get(attrs, "allowed_tools", @absent_sentinel)),
+         misspelled_tool_keys = Enum.filter(@misspelled_tool_keys, &Map.has_key?(attrs, &1)),
          {:ok, policy} <- parse_policy(get(attrs, "policy")),
          {:ok, trust} <- parse_trust(get(attrs, "trust")),
          {:ok, provider} <- parse_provider(get(attrs, "provider")) do
@@ -117,7 +129,8 @@ defmodule FermixCore.Agents.AgentDefinition do
          provider: provider,
          temperature: temperature,
          capabilities: normalize_string_list(get(attrs, "capabilities", [])),
-         allowed_tools: allowed_tools,
+         allowed_tools: confine_misspelled(allowed_tools, misspelled_tool_keys),
+         misspelled_tool_keys: misspelled_tool_keys,
          policy: policy,
          trust: trust,
          max_iterations: max_iterations,
@@ -229,6 +242,10 @@ defmodule FermixCore.Agents.AgentDefinition do
   defp parse_allowed_tools(nil), do: {:ok, nil}
   defp parse_allowed_tools(list) when is_list(list), do: {:ok, normalize_string_list(list)}
   defp parse_allowed_tools(other), do: {:error, {:invalid_allowed_tools, other}}
+
+  # Named tools under a key Fermix does not read never widen to "absent".
+  defp confine_misspelled(nil, [_ | _]), do: []
+  defp confine_misspelled(allowed_tools, _misspelled_tool_keys), do: allowed_tools
 
   defp parse_policy(nil), do: {:ok, nil}
 

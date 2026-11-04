@@ -421,7 +421,7 @@ defmodule FermixCore.ComputerUse.TargetTest do
     test "a build that publishes no window binding turns the surface off here" do
       session = start_session(capabilities: %{"targets" => false, "indicator" => "present"})
 
-      assert {:error, {:background_unavailable, :no_targets}} =
+      assert {:error, {:background_unavailable, :no_targets, _target}} =
                Session.classify(session, %{"action" => "select_target", "window_id" => 7})
     end
 

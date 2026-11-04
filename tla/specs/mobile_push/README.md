@@ -47,7 +47,7 @@ shows up as a broken `ChatAccounted` instead.
 
 | Switch | When `TRUE` |
 |---|---|
-| `SocketsCanFreeze` | The OS suspends an app with no clean close. The daemon keeps its socket registered until the 150 s idle timeout (`Session.idle_timeout_ms`, `session.ex:139`), which the WebSocket (`router.ex:53-60`) and the iroh bridge connection (`bridge_connection.ex:199-206`) both apply. |
+| `SocketsCanFreeze` | The OS suspends an app with no clean close. The daemon keeps its socket registered until the 150 s idle timeout (`Session.idle_timeout_ms`, `session.ex:159`), which the WebSocket (`router.ex:53-60`) and the iroh bridge connection (`bridge_connection.ex:199-206`) both apply. |
 | `DispatchCanFail` | A dispatcher call returns a transient error. |
 | `AnswerCanBeLost` | The platform accepted a push and the daemon saw a timeout instead. |
 | `DaemonCanCrash` | The daemon dies with push tasks in flight, and boots again. |
@@ -211,6 +211,13 @@ device is registered throughout, and its `platform` is the push service. The
 `ack` clause, `terminate` and `idle_timeout_ms` are unchanged, so nothing the
 spec models changed; the comments' `session.ex` numbers, which had drifted
 since `e6042f1f`, now point at the committed file.
+
+Re-read on 2026-11-02 for a reply's time, which staled the `mobile.ex` pin:
+`delivered_text` and `seal_draft` hand `Output.text_done` the row the write
+returned rather than its `server_seq`, so a phone's `text_done` carries the
+row's time as `ts`. The event, its row and the push decisions after it are
+as before, so nothing the spec models changed, and no line the spec cites
+moved.
 
 ## What the spec changed in the design
 

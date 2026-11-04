@@ -164,4 +164,129 @@ defmodule FermixCore.Capabilities.AccessGate.PendingTest do
     assert_raise FunctionClauseError, fn -> Pending.finish(untaken, "ran", server) end
     assert :ok = Pending.finish(record, "ran", server)
   end
+
+  # M84: a sign-in waits for the owner inside its own call. Its record names the
+  # waiting process instead of a call to run.
+  describe "in-call records" do
+    # A waiting call stand-in: it reports what the store sends it, and an exit
+    # signal ends it as `/stop` ends a turn.
+    defp waiter do
+      test_pid = self()
+
+      pid =
+        spawn(fn ->
+          receive do
+            message -> send(test_pid, {:waiter_got, message})
+          end
+        end)
+
+      on_exit(fn -> Process.exit(pid, :kill) end)
+      pid
+    end
+
+    defp server_pid(server), do: GenServer.whereis(server)
+
+    test "an answer reaches the waiter once and ends the record", %{server: server} do
+      waiting = waiter()
+      assert {:ok, id} = Pending.park_in_call(%{session_id: "s1"}, waiting, server)
+
+      assert :ok = Pending.answer_in_call(id, server)
+      assert_receive {:waiter_got, {:access_answer, ^id, :confirmed}}
+
+      assert {:error, :not_in_call} = Pending.answer_in_call(id, server)
+      assert {:error, :not_found} = Pending.deny(id, server)
+    end
+
+    test "deny answers a waiting call and drops a parked call that still waits, saying which", %{
+      server: server
+    } do
+      waiting = waiter()
+      assert {:ok, id} = Pending.park_in_call(%{session_id: "s1"}, waiting, server)
+      assert {:ok, :in_call} = Pending.deny(id, server)
+      assert_receive {:waiter_got, {:access_answer, ^id, :denied}}
+
+      assert {:ok, parked, :new} = Pending.park(attrs(), server)
+      assert {:ok, :parked} = Pending.deny(parked, server)
+      assert :error = Pending.take(parked, server)
+
+      assert {:ok, running, :new} = Pending.park(attrs(%{digest: "digest-b"}), server)
+      assert {:ok, _record} = Pending.take(running, server)
+      assert {:error, :not_found} = Pending.deny(running, server)
+      assert {:error, :not_found} = Pending.deny("missing", server)
+    end
+
+    test "a parked call is not in-call: answer_in_call leaves it for its run", %{server: server} do
+      assert {:ok, parked, :new} = Pending.park(attrs(), server)
+      assert {:error, :not_in_call} = Pending.answer_in_call(parked, server)
+      assert {:ok, %{id: ^parked}} = Pending.take(parked, server)
+    end
+
+    # Nothing may run an in-call record as a recorded call, and it does not hold
+    # a session the way a parked call does (the call itself holds the turn).
+    test "an in-call record is never taken, named or reported waiting", %{server: server} do
+      waiting = waiter()
+      assert {:ok, id} = Pending.park_in_call(%{session_id: "s1"}, waiting, server)
+
+      assert :error = Pending.take(id, server)
+      assert :error = Pending.tool(id, server)
+      assert :none = Pending.pending_from("s1", server)
+      assert {:ok, _parked, :new} = Pending.park(attrs(), server)
+      assert :ok = Pending.answer_in_call(id, server)
+    end
+
+    test "the waiter closing its own wait drops the record; after an answer it finds none", %{
+      server: server
+    } do
+      waiting = waiter()
+      assert {:ok, closed} = Pending.park_in_call(%{session_id: "s1"}, waiting, server)
+      assert :ok = Pending.close_in_call(closed, server)
+      assert {:error, :not_in_call} = Pending.answer_in_call(closed, server)
+
+      assert {:ok, answered} = Pending.park_in_call(%{session_id: "s1"}, waiting, server)
+      assert :ok = Pending.answer_in_call(answered, server)
+      assert {:error, :not_found} = Pending.close_in_call(answered, server)
+    end
+
+    # `/stop` kills the turn the waiting call runs in: nothing of the call runs
+    # again, so the store's monitor is what ends the record.
+    test "a waiter that dies leaves no record behind", %{server: server} do
+      waiting = waiter()
+      assert {:ok, id} = Pending.park_in_call(%{session_id: "s1"}, waiting, server)
+      store = server_pid(server)
+
+      :erlang.trace(store, true, [:receive])
+      Process.exit(waiting, :shutdown)
+      assert_receive {:trace, ^store, :receive, {:DOWN, _ref, :process, ^waiting, :shutdown}}
+      :erlang.trace(store, false, [:receive])
+
+      # Handled in order after the `:DOWN` the trace saw arrive.
+      assert %{records: records} = :sys.get_state(store)
+      assert records == %{}
+      assert {:error, :not_in_call} = Pending.answer_in_call(id, server)
+      assert {:error, :not_found} = Pending.deny(id, server)
+      refute_received {:waiter_got, _message}
+    end
+
+    test "an in-call record counts against the bound and expires with the window", %{
+      server: server,
+      clock: clock
+    } do
+      waiting = waiter()
+
+      for n <- 1..(Pending.max_live() - 1) do
+        assert {:ok, _id, :new} = Pending.park(attrs(%{digest: "d#{n}"}), server)
+      end
+
+      assert {:ok, id} = Pending.park_in_call(%{session_id: "s1"}, waiting, server)
+
+      assert {:error, :too_many_pending} =
+               Pending.park_in_call(%{session_id: "s1"}, waiting, server)
+
+      advance(clock, Pending.ttl_ms() + 1)
+      assert {:error, :not_in_call} = Pending.answer_in_call(id, server)
+      {:monitors, monitors} = Process.info(server_pid(server), :monitors)
+      refute {:process, waiting} in monitors
+      refute_received {:waiter_got, _message}
+    end
+  end
 end

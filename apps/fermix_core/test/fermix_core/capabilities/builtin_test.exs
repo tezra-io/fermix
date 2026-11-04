@@ -167,6 +167,9 @@ defmodule FermixCore.Capabilities.BuiltinTest do
       # the owner's watchers (M60 §8), what they received (`list_cues`) and a cue
       # run's own watcher's history (`cue_history`).
       assert flagged == [
+               # Every row of a list is the owner's own (MILESTONE_85 §11).
+               "checklist_edit",
+               "checklist_read",
                "content_search",
                "cue_history",
                "event_list",

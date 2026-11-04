@@ -396,6 +396,9 @@ defmodule FermixCore.Jobs.SchedulerTest do
     end
 
     @impl true
+    def handle_call({:with_deadline, _deadline, request}, from, state),
+      do: handle_call(request, from, state)
+
     def handle_call(request, _from, %{fail: fail, real: real} = state) do
       if request_tag(request) == fail do
         {:reply, {:error, :injected_fault}, state}

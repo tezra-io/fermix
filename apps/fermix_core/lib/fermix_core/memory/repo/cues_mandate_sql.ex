@@ -36,11 +36,12 @@ defmodule FermixCore.Memory.Repo.CuesMandateSql do
 
   # What an app surface shows of a proposal (Cues.Proposals' record and card):
   # Fermix's own columns, the names of its task and watcher, and, for the card,
-  # the recorded arguments and the cue's snapshot (outside text).
+  # the recorded arguments, the filter's reason and the cue's snapshot (outside
+  # text).
   @card_select """
   SELECT p.id, p.state, p.mandate, p.tool, p.job_id, j.name, w.name, d.source_ref, p.created_at,
          p.expires_at, p.decided_at, p.decided_from, p.result_status, p.args_json, d.received_at,
-         c.occurred_at, c.snapshot
+         c.occurred_at, c.snapshot, d.decision_reason
   FROM cue_proposals p
   LEFT JOIN scheduled_jobs j ON j.id = p.job_id
   LEFT JOIN cue_watchers w ON w.id = p.watcher_id
@@ -212,6 +213,24 @@ defmodule FermixCore.Memory.Repo.CuesMandateSql do
       when is_integer(limit) and limit > 0 do
     where = "WHERE p.created_at >= ? ORDER BY p.created_at DESC, p.id DESC LIMIT ?"
     list_cards(conn, where, [CuesSql.stamp(since), limit])
+  end
+
+  # The proposals still waiting at `now` that went to chat `origin`, oldest
+  # first: what a bare `/confirm` from it may answer.
+  def handle(conn, {:proposal_cards, {:chat, origin}, %DateTime{} = now})
+      when is_map(origin) do
+    where =
+      "WHERE p.state = 'waiting' AND p.expires_at > ? AND p.sent_platform = ? " <>
+        "AND p.sent_chat_id = ? AND p.sent_user_id = ? ORDER BY p.created_at, p.id"
+
+    case origin do
+      %{platform: platform, chat_id: chat_id, user_id: user_id}
+      when is_binary(platform) and is_binary(chat_id) and is_binary(user_id) ->
+        list_cards(conn, where, [CuesSql.stamp(now), platform, chat_id, user_id])
+
+      _incomplete ->
+        {:error, :wrong_origin}
+    end
   end
 
   # One proposal as an app surface shows it, or nil.
@@ -654,7 +673,8 @@ defmodule FermixCore.Memory.Repo.CuesMandateSql do
          args_json,
          received_at,
          occurred_at,
-         snapshot
+         snapshot,
+         decision_reason
        ]) do
     %{
       id: id,
@@ -673,7 +693,8 @@ defmodule FermixCore.Memory.Repo.CuesMandateSql do
       args_json: args_json,
       received_at: CuesSql.parse_stamp(received_at),
       occurred_at: CuesSql.parse_stamp(occurred_at),
-      snapshot: snapshot
+      snapshot: snapshot,
+      decision_reason: decision_reason
     }
   end
 

@@ -4,25 +4,48 @@ defmodule FermixCore.Tools.ManageWatcherTest do
   use ExUnit.Case, async: false
 
   alias FermixCore.Capabilities.Builtin
+  alias FermixCore.Capabilities.Capability
+  alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Capabilities.UntrustedContent
   alias FermixCore.Cues.Item
   alias FermixCore.Cues.RecentDrops
+  alias FermixCore.Cues.Watchers
   alias FermixCore.Jobs.Registry, as: JobsRegistry
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Repo.CuesWatchersSql
+  alias FermixCore.Sandbox.PathPolicy
   alias FermixCore.Tools.ListJobs
   alias FermixCore.Tools.ManageWatcher
   alias FermixCore.Tools.RemoveJob
   alias FermixCore.Tools.UpdateJob
   alias FermixTestSupport.CueFixtures
+  alias FermixTestSupport.SafeRm
   alias FermixTestSupport.TelemetryCapture
 
   @t0 ~U[2026-10-05 09:00:00.000000Z]
   @tainted "This turn has read outside text, so it cannot change a watcher; ask for the change " <>
              "again in a new message."
   @shared "Create the watcher from a private chat with Fermix."
-  @needs_words "A watcher that filters needs words to listen for: list the names, products, " <>
+  @needs_words "A watcher that filters needs keywords to listen for: list the names, products, " <>
                  "abbreviations and phrases an item it should see would contain, as listen_for."
+
+  # Stands in for `Jobs.Scheduler.run_now/2`: tells the test which job it was
+  # asked to run, and answers a queued run.
+  defmodule FakeScheduler do
+    @moduledoc false
+    use GenServer
+
+    def start_link(test), do: GenServer.start_link(__MODULE__, test)
+
+    @impl true
+    def init(test), do: {:ok, test}
+
+    @impl true
+    def handle_call({:run_now, job_id, _now}, _from, test) do
+      send(test, {:run_now, job_id})
+      {:reply, {:ok, %{id: "run_1", job_id: job_id}}, test}
+    end
+  end
 
   setup do
     %{repo: repo, conn: conn} = CueFixtures.start_repo("manage_watcher")
@@ -274,7 +297,7 @@ defmodule FermixCore.Tools.ManageWatcherTest do
                ManageWatcher.execute(create_args(), turn(ctx, []))
 
       assert echo =~
-               ~r/^Watcher market-news is set up: it listens to alpaca-news, filters with the Cues filter model \(the main model unless settings name another\), and wakes job \S+ \(watcher market-news\), which reports to Telegram chat-1\./
+               ~r/^Watcher market-news is set up: it listens to alpaca-news, filters with the Cues filter model \(the main model unless settings name another\), and wakes job \S+ \(watcher market-news\), which reports to Telegram \(chat-1\)\./
 
       assert echo =~ "Purpose: Market moves that need me"
       assert echo =~ "Listens for: earnings, guidance cut"
@@ -387,11 +410,24 @@ defmodule FermixCore.Tools.ManageWatcherTest do
       assert {:ok, %{success: false, error: @needs_words}} =
                ManageWatcher.execute(no_words, turn(ctx, []))
 
-      assert {:ok, %{success: false, error: "Give the words to listen for as a list."}} =
+      assert {:ok, %{success: false, error: "Give the keywords to listen for as a list."}} =
                ManageWatcher.execute(Map.put(no_words, "listen_for", "TSMC"), turn(ctx, []))
 
       assert {:ok, []} = JobsRegistry.list_jobs(repo: ctx.repo)
       assert ManageWatcher.description() =~ "never ask the owner for a pattern"
+    end
+
+    # The keywords gate items only under the Screen's Keyword match; under
+    # Decision model every item is checked by meaning. A description that says an
+    # unmatched item is never judged sends the owner away from that setting.
+    test "the description states both screens and that the owner sets the Screen" do
+      description = ManageWatcher.description()
+
+      for fact <- ["Settings → Cues → Screen", "Keyword match", "Decision model", "by meaning"] do
+        assert description =~ fact, "the description does not say #{fact}"
+      end
+
+      refute description =~ "an item no keyword matches is never judged"
     end
 
     test "a watcher with no filter cannot listen to a stream", ctx do
@@ -421,9 +457,9 @@ defmodule FermixCore.Tools.ManageWatcherTest do
                )
 
       assert shown =~
-               "It needs words to listen for, and no item reaches it until an update gives it some."
+               "It needs keywords to listen for, and no item reaches it until an update gives it some."
 
-      assert {:ok, %{success: true, output: "market-news: needs words to listen for" <> _}} =
+      assert {:ok, %{success: true, output: "market-news: needs keywords to listen for" <> _}} =
                ManageWatcher.execute(%{"action" => "list"}, turn(ctx, []))
 
       update = %{"action" => "update", "name" => "market-news", "listen_for" => ["NVDA", "AMD"]}
@@ -431,7 +467,7 @@ defmodule FermixCore.Tools.ManageWatcherTest do
       assert {:ok, %{success: true, output: echo}} = ManageWatcher.execute(update, turn(ctx, []))
 
       assert echo ==
-               "Watcher market-news changed: new words to listen for.\nListens for: NVDA, AMD"
+               "Watcher market-news changed: new keywords to listen for.\nListens for: NVDA, AMD"
 
       assert {:ok, %{success: true, output: shown}} =
                ManageWatcher.execute(
@@ -441,6 +477,36 @@ defmodule FermixCore.Tools.ManageWatcherTest do
 
       assert "Listens for: NVDA, AMD" in String.split(shown, "\n")
       refute shown =~ "It needs words"
+    end
+
+    test "show says why a filter is held when the screen's decision model cannot run, and only then",
+         ctx do
+      providers = Application.get_env(:fermix_core, :providers)
+      on_exit(fn -> Application.put_env(:fermix_core, :providers, providers) end)
+      Application.put_env(:fermix_core, :providers, openai: [api_key: "sk-invented"])
+
+      watcher = watcher!(ctx, "market-news", [])
+
+      CueFixtures.exec!(ctx.conn, "UPDATE cue_watchers SET filter_failures = 3 WHERE id = ?", [
+        watcher.id
+      ])
+
+      show = %{"action" => "show", "name" => "market-news"}
+      screen = [screen: :decision_model, decision_provider: :openrouter]
+
+      assert {:ok, %{success: true, output: shown}} =
+               ManageWatcher.execute(show, turn(ctx, cues_config: screen))
+
+      assert ("Its filter is held. The screen's decision model is OpenRouter's, which is not " <>
+                "set up: set it up or pick another in the Cues settings.") in String.split(
+               shown,
+               "\n"
+             )
+
+      assert {:ok, %{success: true, output: shown}} =
+               ManageWatcher.execute(show, turn(ctx, cues_config: []))
+
+      refute shown =~ "Its filter is held"
     end
 
     test "a stream watcher's recent drop is labelled by its key", ctx do
@@ -535,6 +601,349 @@ defmodule FermixCore.Tools.ManageWatcherTest do
     end
   end
 
+  # M60_WATCHER_CODING_RUNS.md §3: a follow-up set up, bounded, checked and
+  # summed up in the consent turn, and its Always allow taken back there.
+  describe "a follow-up" do
+    setup do
+      registry = :"manage_watcher_caps_#{System.unique_integer([:positive])}"
+      start_supervised!({CapabilityRegistry, name: registry})
+      Enum.each(["shell", "web_fetch", "codex_run"], &register!(registry, &1))
+      test = self()
+      root = SafeRm.make_tmp_dir!("manage-watcher-sandbox")
+      on_exit(fn -> SafeRm.rm_rf!(root) end)
+      home = Path.join(root, "home")
+
+      seams = [
+        # A strict sandbox whose home folder is temporary, granting the ~/ops the
+        # follow-ups name.
+        sandbox_config: sandbox(root, [Path.join(home, "ops")]),
+        capability_registry: registry,
+        cues_config: [],
+        # The follow-ups report to Telegram, which the test config leaves off.
+        channel_ready?: fn :telegram -> true end,
+        harness_config: [enabled: true, approved: true],
+        vendor_opts: [
+          find_executable: fn
+            "codex" -> "/stub/bin/codex"
+            _ -> nil
+          end
+        ],
+        follow_up_sender: fn card ->
+          send(test, {:prompt, card})
+          {:ok, %{token_digest: "digest-#{System.unique_integer([:positive])}"}}
+        end,
+        proposal_listener: fn event -> send(test, {:event, event}) end
+      ]
+
+      %{seams: seams, root: root, home: home}
+    end
+
+    test "is set up with the watcher, and its summary is Fermix's", ctx do
+      assert {:ok, %{success: true, output: echo}} =
+               ManageWatcher.execute(follow_up_args(), follow_up_turn(ctx))
+
+      lines = String.split(echo, "\n")
+      assert hd(lines) =~ "Watcher deploy-watch is set up: it listens to alpaca-news"
+      assert ~s(Follow-up "Deploy check", run when an item passes:) in lines
+      assert "  It will: Run the deploy check script in ~/ops and report what it says." in lines
+      assert "  Uses: shell" in lines
+      assert "  Reports to: this chat" in lines
+
+      assert ("  Asks first: each run waits for your tap on a short card, whose Always allow " <>
+                "lets it run with no card from then on.") in lines
+
+      assert "  Limits: items older than 15 minutes are ignored; one run at a time." in lines
+      assert "It is never handed the item: the item only decides when it runs." in lines
+      refute echo =~ "Held"
+      refute_received {:prompt, _card}
+
+      assert {:ok, %{task_job_id: nil, follow_up_job_id: job_id}} =
+               Watchers.show("deploy-watch", repo: ctx.repo)
+
+      assert {:ok, %{allowed_tools: ["shell"], schedule_kind: "watcher"}} =
+               JobsRegistry.get_job(job_id, repo: ctx.repo)
+    end
+
+    # §3.2: a tool this computer does not offer was never checked against the
+    # owner's turn, so it is never written; the watcher is still made.
+    test "naming a tool this computer does not offer is not written; the watcher is", ctx do
+      missing =
+        "deploy_check is not set up on this computer (its program was not found or its " <>
+          "plugin is not installed). Ask for it again once that is done."
+
+      args =
+        follow_up_args()
+        |> put_in(["follow_up", "tools"], ["shell", "deploy_check"])
+        |> Map.put("task", "Tell me about each release.")
+
+      assert {:ok, %{success: true, output: echo}} =
+               ManageWatcher.execute(args, follow_up_turn(ctx))
+
+      assert echo =~ "Watcher deploy-watch is set up"
+      assert echo =~ "No follow-up was set up: " <> missing
+      refute echo =~ ~s(Follow-up "Deploy check")
+
+      assert {:ok, %{follow_up_job_id: nil, task_job_id: task_job_id}} =
+               Watchers.show("deploy-watch", repo: ctx.repo)
+
+      assert {:ok, [%{id: ^task_job_id}]} = JobsRegistry.list_jobs(repo: ctx.repo)
+
+      # A change to it is not written either; the rest of the change is.
+      change = %{
+        "action" => "update",
+        "name" => "deploy-watch",
+        "daily_cap" => "3",
+        "follow_up" => %{"instructions" => "Run it.", "tools" => ["deploy_check"]}
+      }
+
+      assert {:ok, %{success: true, output: changed}} =
+               ManageWatcher.execute(change, follow_up_turn(ctx))
+
+      assert changed =~ "Watcher deploy-watch changed: daily cap 3 runs."
+      assert changed =~ "The follow-up did not change: " <> missing
+      assert {:ok, %{follow_up_job_id: nil}} = Watchers.show("deploy-watch", repo: ctx.repo)
+
+      # With no task the watcher would have nothing to do, so nothing is made.
+      alone =
+        follow_up_args()
+        |> put_in(["follow_up", "tools"], ["deploy_check"])
+        |> Map.put("name", "deploy-alone")
+
+      assert {:ok, %{success: false, error: error}} =
+               ManageWatcher.execute(alone, follow_up_turn(ctx))
+
+      assert error =~ "No follow-up was set up: " <> missing
+      assert error =~ "Nothing was set up"
+      assert {:error, _sentence} = Watchers.show("deploy-alone", repo: ctx.repo)
+    end
+
+    test "naming a tool that is here but not ready yet is written held, saying why", ctx do
+      codex_home = SafeRm.make_tmp_dir!("manage-watcher-signed-out")
+      on_exit(fn -> SafeRm.rm_rf!(codex_home) end)
+
+      vendors = [
+        find_executable: fn
+          "codex" -> "/stub/bin/codex"
+          _ -> nil
+        end,
+        codex_home: codex_home
+      ]
+
+      args = put_in(follow_up_args(), ["follow_up", "tools"], ["codex_run"])
+
+      assert {:ok, %{success: true, output: echo}} =
+               ManageWatcher.execute(args, follow_up_turn(ctx, vendor_opts: vendors))
+
+      assert echo =~
+               "Held until it is ready: Codex is not signed in on this computer: run " <>
+                 "`codex login` there. The watcher is set up"
+
+      assert {:ok, %{follow_up_job_id: job_id}} = Watchers.show("deploy-watch", repo: ctx.repo)
+      assert {:ok, %{allowed_tools: ["codex_run"]}} = JobsRegistry.get_job(job_id, repo: ctx.repo)
+    end
+
+    # A follow-up runs unattended, so nobody can be asked for a folder then: one
+    # its instructions name outside the sandbox's roots is written held, with the
+    # grant that opens it, and the grant releases it with no new request.
+    test "naming a folder Fermix can't open yet is written held; a grant releases it", ctx do
+      reports = PathPolicy.canonical_path(Path.join(ctx.home, "reports/deploys"))
+
+      args =
+        put_in(
+          follow_up_args(),
+          ["follow_up", "instructions"],
+          "Run the deploy check script in ~/ops and write its report into ~/reports/deploys."
+        )
+
+      assert {:ok, %{success: true, output: echo}} =
+               ManageWatcher.execute(args, follow_up_turn(ctx))
+
+      assert echo =~
+               "Held until it is ready: Fermix can't open `#{reports}` yet: grant it with " <>
+                 "`/grant path #{reports}` in chat, or `fermix grant path #{reports}` in a " <>
+                 "terminal on Linux. The watcher is set up"
+
+      assert {:ok, %{follow_up_job_id: job_id}} = Watchers.show("deploy-watch", repo: ctx.repo)
+      assert {:ok, %{allowed_tools: ["shell"]}} = JobsRegistry.get_job(job_id, repo: ctx.repo)
+
+      show = %{"action" => "show", "name" => "deploy-watch"}
+      assert {:ok, %{output: held}} = ManageWatcher.execute(show, follow_up_turn(ctx))
+      assert held =~ "asks first on a card; held: Fermix can't open `#{reports}` yet"
+
+      grants = [Path.join(ctx.home, "ops"), Path.join(ctx.home, "reports")]
+      granted = follow_up_turn(ctx, sandbox_config: sandbox(ctx.root, grants))
+      assert {:ok, %{output: ready}} = ManageWatcher.execute(show, granted)
+      assert ready =~ "asks first on a card; ready."
+    end
+
+    # No grant opens a protected path, and Fermix checks at most 10 paths, so
+    # either would hold the follow-up for good: it is refused, and nothing is set up.
+    test "naming a protected path, or more paths than Fermix checks, is refused", ctx do
+      keys = PathPolicy.canonical_path(Path.join(ctx.home, ".ssh/config"))
+
+      protected =
+        put_in(
+          follow_up_args(),
+          ["follow_up", "instructions"],
+          "Copy ~/.ssh/config to the deploy host, then run the check in ~/ops."
+        )
+
+      assert {:ok, %{success: false, error: error}} =
+               ManageWatcher.execute(protected, follow_up_turn(ctx))
+
+      assert error ==
+               "Fermix never opens `#{keys}`: the sandbox protects it in every mode, even " <>
+                 "with a grant, so leave it out of the follow-up's instructions."
+
+      paths = Enum.map_join(1..11, ", ", &"~/ops/service-#{&1}")
+      many = put_in(follow_up_args(), ["follow_up", "instructions"], "Check #{paths}.")
+
+      assert {:ok,
+              %{success: false, error: "The follow-up's instructions name more than 10 " <> _}} =
+               ManageWatcher.execute(many, follow_up_turn(ctx))
+
+      assert {:error, _sentence} = Watchers.show("deploy-watch", repo: ctx.repo)
+    end
+
+    test "gets at most the tools of the turn that sets it up, as a scheduled job does", ctx do
+      args = put_in(follow_up_args(), ["follow_up", "tools"], ["web_fetch"])
+      narrowed = follow_up_turn(ctx, effective_allowed_tools: ["shell"])
+
+      assert {:ok, %{success: false, error: error}} = ManageWatcher.execute(args, narrowed)
+      assert error =~ "web_fetch"
+      assert Watchers.show("deploy-watch", repo: ctx.repo) |> elem(0) == :error
+    end
+
+    test "with no coding agent named, takes the one that is ready, else asks which", ctx do
+      args = put_in(follow_up_args(), ["follow_up", "tools"], ["coding_agent"])
+      codex_home = SafeRm.make_tmp_dir!("manage-watcher-codex")
+      on_exit(fn -> SafeRm.rm_rf!(codex_home) end)
+      File.write!(Path.join(codex_home, "auth.json"), ~s({"tokens":{"refresh_token":"rt"}}))
+
+      vendors = [
+        find_executable: fn
+          "codex" -> "/stub/bin/codex"
+          _ -> nil
+        end,
+        codex_home: codex_home
+      ]
+
+      assert {:ok, %{success: true, output: echo}} =
+               ManageWatcher.execute(args, follow_up_turn(ctx, vendor_opts: vendors))
+
+      assert "  Uses: codex_run" in String.split(echo, "\n")
+      refute echo =~ "Held"
+
+      both = [find_executable: &"/stub/bin/#{&1}/", codex_home: codex_home]
+      again = Map.put(args, "name", "deploy-watch-2")
+
+      assert {:ok, %{success: false, error: "Codex and Claude Code are both ready" <> _}} =
+               ManageWatcher.execute(
+                 again,
+                 follow_up_turn(ctx,
+                   vendor_opts: both ++ [claude_config_dir: codex_home],
+                   capability_registry: claude_too()
+                 )
+               )
+    end
+
+    # A follow-up's run holds only the tools written for it: one saved with a step
+    # no tool of its own can do (a folder check beside a coding-agent launch) ends
+    # that run before it starts, so the model is asked for a tool for every step.
+    test "asks for every tool its instructions need, since its run has no others" do
+      tools = ManageWatcher.parameters().properties.follow_up.properties.tools.description
+      assert tools =~ "Every tool its instructions need"
+      assert tools =~ "its run has only these"
+    end
+
+    # The 2026-10-31 revision: a follow-up always asks first, and only the owner's
+    # Always allow on one of its cards lets it run with no card; no cap is asked for.
+    test "asks first, with no mode and no daily cap to give", ctx do
+      follow_up = ManageWatcher.parameters().properties.follow_up
+      refute Map.has_key?(follow_up.properties, :mode)
+      assert follow_up.properties.always_allow.enum == [false]
+      refute ManageWatcher.parameters().properties.daily_cap.description =~ "automatic"
+      refute inspect(ManageWatcher.parameters()) =~ "suggesting 5"
+
+      assert {:ok, %{success: true, output: echo}} =
+               ManageWatcher.execute(follow_up_args(), follow_up_turn(ctx))
+
+      refute echo =~ "daily cap"
+      refute_received {:prompt, _card}
+      assert {:ok, %{daily_cap: 0}} = Watchers.show("deploy-watch", repo: ctx.repo)
+    end
+
+    test "always_allow false takes its Always allow back; true is refused", ctx do
+      assert {:ok, %{success: true}} =
+               ManageWatcher.execute(follow_up_args(), follow_up_turn(ctx))
+
+      {:ok, watcher} = Watchers.show("deploy-watch", repo: ctx.repo)
+      CueFixtures.always_allow!(ctx.conn, watcher.id)
+
+      assert {:ok, %{success: true, output: shown}} =
+               ManageWatcher.execute(
+                 %{"action" => "show", "name" => "deploy-watch"},
+                 follow_up_turn(ctx)
+               )
+
+      assert shown =~ "always allowed, so it runs with no card"
+
+      grant = %{
+        "action" => "update",
+        "name" => "deploy-watch",
+        "follow_up" => %{"always_allow" => true}
+      }
+
+      assert {:ok, %{success: false, error: refused}} =
+               ManageWatcher.execute(grant, follow_up_turn(ctx))
+
+      assert refused == "Only your Always allow on one of its cards lets it run with no card."
+
+      revoke = put_in(grant, ["follow_up", "always_allow"], false)
+
+      assert {:ok, %{success: true, output: echo}} =
+               ManageWatcher.execute(revoke, follow_up_turn(ctx))
+
+      assert echo =~ "Watcher deploy-watch's follow-up asks first again"
+      assert {:ok, false} = Watchers.always_allowed(watcher, repo: ctx.repo)
+
+      tainted = follow_up_turn(ctx, outside_sources: MapSet.new([{:tool, "list_cues"}]))
+      assert {:ok, %{success: false, error: @tainted}} = ManageWatcher.execute(revoke, tainted)
+    end
+
+    test "is stopped, and run by hand, from the consent turn", ctx do
+      task = Map.put(follow_up_args(), "task", "Tell me about it.")
+      assert {:ok, %{success: true}} = ManageWatcher.execute(task, follow_up_turn(ctx))
+      scheduler = start_supervised!({FakeScheduler, self()})
+
+      assert {:ok, %{success: true, output: ran}} =
+               ManageWatcher.execute(
+                 %{"action" => "run_follow_up", "name" => "deploy-watch"},
+                 follow_up_turn(ctx, scheduler: scheduler)
+               )
+
+      assert ran =~ ~s|Watcher deploy-watch's follow-up "Deploy check" is running now (run run_1)|
+      assert_received {:run_now, job_id}
+
+      assert {:ok, %{success: true, output: shown}} =
+               ManageWatcher.execute(
+                 %{"action" => "show", "name" => "deploy-watch"},
+                 follow_up_turn(ctx)
+               )
+
+      assert shown =~ ~s(Follow-up "Deploy check": uses shell; asks first on a card; ready.)
+
+      tainted = follow_up_turn(ctx, outside_sources: MapSet.new([{:tool, "list_cues"}]))
+      stop = %{"action" => "stop_follow_up", "name" => "deploy-watch"}
+      assert {:ok, %{success: false, error: @tainted}} = ManageWatcher.execute(stop, tainted)
+
+      assert {:ok, %{success: true, output: "Watcher deploy-watch's follow-up is stopped" <> _}} =
+               ManageWatcher.execute(stop, follow_up_turn(ctx))
+
+      assert {:error, :not_found} = JobsRegistry.get_job(job_id, repo: ctx.repo)
+    end
+  end
+
   test "manage_watcher returns no outside text, so reading it does not taint the turn" do
     capability = Builtin.from_tool_module(ManageWatcher)
     assert UntrustedContent.outside_source(capability) == nil
@@ -562,6 +971,58 @@ defmodule FermixCore.Tools.ManageWatcherTest do
       },
       Map.new(overrides)
     )
+  end
+
+  defp follow_up_args do
+    %{
+      "action" => "create",
+      "name" => "deploy-watch",
+      "filter" => "llm",
+      "purpose" => "Releases that need a deploy check",
+      "listen_for" => ["release", "deploy"],
+      "sources" => ["alpaca-news"],
+      "follow_up" => %{
+        "name" => "Deploy check",
+        "instructions" => "Run the deploy check script in ~/ops and report what it says.",
+        "tools" => ["shell"]
+      }
+    }
+  end
+
+  defp follow_up_turn(ctx, overrides \\ []),
+    do: turn(ctx, ctx.seams |> Keyword.merge(overrides))
+
+  # A strict sandbox under the test's temporary `root`, granting `grants`.
+  defp sandbox(root, grants),
+    do: %{
+      mode: :strict,
+      home: Path.join(root, "fermix"),
+      os_home: Path.join(root, "home"),
+      workspace_root: Path.join(root, "workspace"),
+      allowed_roots: grants
+    }
+
+  # A registry with Claude Code's run tool too, so both coding agents are loaded.
+  defp claude_too do
+    registry = :"manage_watcher_both_#{System.unique_integer([:positive])}"
+    start_supervised!({CapabilityRegistry, name: registry}, id: registry)
+    Enum.each(["shell", "codex_run", "claude_code_run"], &register!(registry, &1))
+    registry
+  end
+
+  defp register!(registry, name) do
+    :ok =
+      CapabilityRegistry.register(
+        registry,
+        Capability.new(%{
+          name: name,
+          description: "a test tool",
+          parameters: %{"type" => "object", "properties" => %{}},
+          kind: :builtin,
+          executor: {__MODULE__, :never, []},
+          policy_class: :exec
+        })
+      )
   end
 
   defp create_args do

@@ -3,8 +3,8 @@
   "$id": "https://fermix.sh/companion/protocol.schema.json",
   "title": "Fermix companion chat socket protocol",
   "description": "Newline-delimited JSON wire contract between the Fermix daemon and a native companion's chat. Source of truth: FermixCore.Companion.Protocol. See PROTOCOL.md.",
-  "x-protocol-version": 4,
-  "x-supported-version-range": { "min": 3, "max": 4 },
+  "x-protocol-version": 7,
+  "x-supported-version-range": { "min": 6, "max": 7 },
   "x-max-line-bytes": 65536,
   "x-media-budget-bytes": 536870912,
   "x-media-release-grace-s": 60,
@@ -24,7 +24,11 @@
             "read_state",
             "media_fetch",
             "media_release",
-            "proposal_answer"
+            "proposal_answer",
+            "checklists_pull",
+            "checklist_pull",
+            "checklist_edit",
+            "attach_file"
           ]
         }
       },
@@ -68,6 +72,22 @@
         {
           "if": { "required": ["type"], "properties": { "type": { "const": "proposal_answer" } } },
           "then": { "$ref": "#/$defs/proposal_answer" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "checklists_pull" } } },
+          "then": { "$ref": "#/$defs/checklists_pull" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "checklist_pull" } } },
+          "then": { "$ref": "#/$defs/checklist_pull" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "checklist_edit" } } },
+          "then": { "$ref": "#/$defs/checklist_edit" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "attach_file" } } },
+          "then": { "$ref": "#/$defs/attach_file" }
         }
       ]
     },
@@ -82,6 +102,7 @@
             "turn_started",
             "text_delta",
             "tool_event",
+            "reasoning",
             "text_done",
             "turn_error",
             "turn_done",
@@ -96,6 +117,10 @@
             "media_missing",
             "proposal",
             "proposal_resolved",
+            "home_status_changed",
+            "checklists",
+            "checklist",
+            "attach_status",
             "error"
           ]
         }
@@ -120,6 +145,10 @@
         {
           "if": { "required": ["type"], "properties": { "type": { "const": "tool_event" } } },
           "then": { "$ref": "#/$defs/tool_event" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "reasoning" } } },
+          "then": { "$ref": "#/$defs/reasoning" }
         },
         {
           "if": { "required": ["type"], "properties": { "type": { "const": "text_done" } } },
@@ -184,6 +213,25 @@
           "then": { "$ref": "#/$defs/proposal_resolved" }
         },
         {
+          "if": {
+            "required": ["type"],
+            "properties": { "type": { "const": "home_status_changed" } }
+          },
+          "then": { "$ref": "#/$defs/home_status_changed" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "checklists" } } },
+          "then": { "$ref": "#/$defs/checklists" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "checklist" } } },
+          "then": { "$ref": "#/$defs/checklist" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "attach_status" } } },
+          "then": { "$ref": "#/$defs/attach_status" }
+        },
+        {
           "if": { "required": ["type"], "properties": { "type": { "const": "error" } } },
           "then": { "$ref": "#/$defs/error" }
         }
@@ -194,19 +242,25 @@
       "required": ["type", "protocol_version"],
       "properties": {
         "type": { "const": "client_hello" },
-        "protocol_version": { "type": "integer", "minimum": 1 }
+        "protocol_version": { "type": "integer", "minimum": 1 },
+        "primary_epoch": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615,
+          "description": "The highest primary epoch this client has seen (M75); absent when it has seen none. A daemon at a lower epoch refuses the hello with stale_primary."
+        }
       }
     },
     "msg": {
       "type": "object",
-      "description": "The mobile wire's msg shape. text must not be blank, and attach_ids is empty on this wire in version 1.",
+      "description": "The mobile wire's msg shape. text must not be blank unless attach_ids names at least one file. Since version 7, attach_ids names files whose attach_file was answered present, and only a version 7 connection placed as the owner's may send a non-empty one; any other is refused with error attachments_unsupported and the connection is closed. A file the daemon no longer holds fails the message after accepted with error request_failed, its sentence and client_msg_id.",
       "required": ["type", "client_msg_id", "profile_id", "text", "attach_ids"],
       "properties": {
         "type": { "const": "msg" },
         "client_msg_id": { "type": "string", "minLength": 1 },
         "profile_id": { "type": "string", "minLength": 1 },
         "text": { "type": "string" },
-        "attach_ids": { "type": "array", "maxItems": 0 }
+        "attach_ids": { "type": "array", "items": { "type": "string", "minLength": 1 } }
       }
     },
     "command": {
@@ -282,7 +336,7 @@
     },
     "media_fetch": {
       "type": "object",
-      "description": "Version 3. Asks for a managed local file holding the bytes of ref, a media ref a row of the profile names (in its media_refs, or as a link preview's image_ref). Answered by media_path, media_missing, or error request_failed naming the ref. Not the phone's media_fetch, which streams the bytes.",
+      "description": "Version 3. Asks for a managed local file holding the bytes of ref, a media ref a row of the profile names (in its media_refs, or as a link preview's image_ref or icon_ref). Answered by media_path, media_missing, or error request_failed naming the ref. Not the phone's media_fetch, which streams the bytes.",
       "x-since-version": 3,
       "required": ["type", "profile_id", "ref"],
       "properties": {
@@ -304,7 +358,7 @@
     },
     "proposal_answer": {
       "type": "object",
-      "description": "Version 4. The owner's answer to a proposal, by its id: confirm runs exactly the recorded call once, deny runs nothing. Answered accepted (duplicate false) once the decision is recorded, then proposal_resolved; refused with error request_failed carrying the daemon's sentence and client_msg_id. Taken only from a connection the daemon placed as the owner's.",
+      "description": "Version 4. The owner's answer to a proposal, by its id: confirm runs exactly the recorded call once, deny runs nothing. A follow-up's card whose follow_up.offers_always_allow is true also takes always_allow: it runs as confirm does and lets the follow-up's later items run with no card; a mandate's card refuses it. Answered accepted (duplicate false) once the decision is recorded, then proposal_resolved; refused with error request_failed carrying the daemon's sentence and client_msg_id. Taken only from a connection the daemon placed as the owner's.",
       "x-since-version": 4,
       "required": ["type", "client_msg_id", "profile_id", "proposal_id", "decision"],
       "properties": {
@@ -312,7 +366,57 @@
         "client_msg_id": { "type": "string", "minLength": 1 },
         "profile_id": { "type": "string", "minLength": 1 },
         "proposal_id": { "type": "string", "minLength": 1 },
-        "decision": { "enum": ["confirm", "deny"] }
+        "decision": { "enum": ["confirm", "deny", "always_allow"] }
+      }
+    },
+    "checklists_pull": {
+      "type": "object",
+      "description": "Version 6. Asks for the index of the owner's lists, answered checklists. From then on this connection is sent checklists again after every change to any list, and a turn it carries is told the app draws lists. Taken only from a connection the daemon placed as the owner's; any other is answered error request_failed with the engine's sentence.",
+      "x-since-version": 6,
+      "required": ["type", "profile_id"],
+      "properties": {
+        "type": { "const": "checklists_pull" },
+        "profile_id": { "type": "string", "minLength": 1 }
+      }
+    },
+    "checklist_pull": {
+      "type": "object",
+      "description": "Version 6. Asks for one whole list by its id, answered checklist. The connection then holds the list and is sent checklist after every committed change to it, whoever made it; it holds at most 16, and pulling another lets the one it pulled longest ago go. removed true adds the rows removed in the last 30 days, in that pull and in every push of the list after it. A removed list not yet swept still answers, with removed_at; a list that is gone is error request_failed. Taken only from a connection the daemon placed as the owner's.",
+      "x-since-version": 6,
+      "required": ["type", "profile_id", "list_id"],
+      "properties": {
+        "type": { "const": "checklist_pull" },
+        "profile_id": { "type": "string", "minLength": 1 },
+        "list_id": { "type": "string", "pattern": "^ck_[0-9a-z]{10}$" },
+        "removed": { "type": "boolean" }
+      }
+    },
+    "checklist_edit": {
+      "type": "object",
+      "description": "Version 6. One op on the owner's lists, by row id, through the same transaction as the model's edits; list_id names the list for every op but create. Answered accepted (duplicate false) once applied, then checklist to every connection holding the list; sent again with the same client_msg_id it is answered accepted with duplicate true and changes nothing. A refused op changes nothing and is answered error request_failed with the engine's sentence and client_msg_id. Taken only from a connection the daemon placed as the owner's.",
+      "x-since-version": 6,
+      "required": ["type", "client_msg_id", "profile_id", "op"],
+      "properties": {
+        "type": { "const": "checklist_edit" },
+        "client_msg_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "profile_id": { "type": "string", "minLength": 1 },
+        "list_id": { "type": "string", "pattern": "^ck_[0-9a-z]{10}$" },
+        "op": { "$ref": "#/$defs/checklistOp" }
+      }
+    },
+    "attach_file": {
+      "type": "object",
+      "description": "Version 7. Hands the daemon a file the client wrote at <attachments.dir>/<attach_id> (mode 0600) before sending this; there is no path field. The daemon reads it into the media store the phone's uploads use, checking size_bytes and sha256 under the store's limits, removes the file whatever came of it, and answers attach_status (present) or error request_failed with its sentence and attach_id. kind is a hint, as the phone's is. Taken only from a version 7 connection placed as the owner's; any other is refused with request_failed and its file removed unread.",
+      "x-since-version": 7,
+      "required": ["type", "attach_id", "kind", "mime", "size_bytes", "sha256"],
+      "properties": {
+        "type": { "const": "attach_file" },
+        "attach_id": { "type": "string", "pattern": "^[0-9A-Za-z_-]{1,64}$" },
+        "kind": { "enum": ["image", "animation", "video", "audio", "voice", "document", "file"] },
+        "mime": { "type": "string", "minLength": 1, "x-max-bytes": 255 },
+        "size_bytes": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "name": { "type": "string", "minLength": 1, "x-max-bytes": 255 }
       }
     },
     "server_hello": {
@@ -321,12 +425,36 @@
       "properties": {
         "type": { "const": "server_hello" },
         "min_version": { "type": "integer", "minimum": 1 },
-        "max_version": { "type": "integer", "minimum": 1 }
+        "max_version": { "type": "integer", "minimum": 1 },
+        "primary_epoch": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615,
+          "description": "The home's primary epoch (M75): how many times the home has become the primary engine, 1 from its first boot as the primary. Absent only from a home that has never booted as the primary and from a daemon older than the epoch."
+        },
+        "role": {
+          "enum": ["primary", "device"],
+          "description": "The engine's role (M75). A client keeps the highest primary_epoch seen from a primary only; a device engine's epoch is never compared and never raises it. Absent from a daemon older than the field, which a client treats as primary."
+        },
+        "commands": {
+          "type": "array",
+          "description": "The slash commands an app offers in its palette, the list the phone's caps.commands carries. This daemon sends it on every hello; absent from an older daemon.",
+          "items": { "$ref": "#/$defs/commandDescriptor" }
+        },
+        "attachments": {
+          "type": "object",
+          "description": "Where the owner's connection hands the daemon a file (version 7): dir, the inbox's absolute path, and max_bytes, the largest file the media store takes. Sent only to a connection placed as the owner's, and only while the media store runs; absent otherwise, and then the app offers no attachments.",
+          "required": ["dir", "max_bytes"],
+          "properties": {
+            "dir": { "type": "string", "pattern": "^/" },
+            "max_bytes": { "type": "integer", "minimum": 1, "maximum": 18446744073709551615 }
+          }
+        }
       }
     },
     "accepted": {
       "type": "object",
-      "description": "Durable receipt for a msg or command; clears the outbox item. server_seq is present only on a duplicate whose request already has a reply row: that reply's seq.",
+      "description": "Durable receipt for a msg, a command or (version 6) a checklist_edit; clears the outbox item. server_seq is present only on a duplicate whose request already has a reply row: that reply's seq.",
       "required": ["type", "client_msg_id", "duplicate"],
       "properties": {
         "type": { "const": "accepted" },
@@ -357,28 +485,42 @@
     },
     "tool_event": {
       "type": "object",
+      "description": "A tool's start or stop. tool is its id, for logs; activity, on a start, is the engine's sentence for the step, in a person's words and never the tool's name, which a client shows instead (PROTOCOL.md, Version 6). activity is this wire's alone.",
       "required": ["type", "turn_id", "tool", "phase"],
       "properties": {
         "type": { "const": "tool_event" },
         "turn_id": { "type": "string", "minLength": 1 },
         "tool": { "type": "string", "minLength": 1 },
         "phase": { "enum": ["start", "stop"] },
-        "detail": { "type": "string", "maxLength": 512, "x-max-bytes": 512 }
+        "detail": { "type": "string", "maxLength": 512, "x-max-bytes": 512 },
+        "activity": { "type": "string", "minLength": 1, "maxLength": 120, "x-max-bytes": 120 }
+      }
+    },
+    "reasoning": {
+      "type": "object",
+      "description": "Version 6. The model's summary of one step of its reasoning, as the provider wrote it (markdown, often opening with a bold line naming the step), trimmed and cut on a character. Live-only, like text_delta: no seq, never stored. Sent only to a connection on version 6.",
+      "x-since-version": 6,
+      "required": ["type", "turn_id", "text"],
+      "properties": {
+        "type": { "const": "reasoning" },
+        "turn_id": { "type": "string", "minLength": 1 },
+        "text": { "type": "string", "minLength": 1, "maxLength": 4096, "x-max-bytes": 4096 }
       }
     },
     "text_done": {
       "type": "object",
-      "description": "A reply's canonical text at its timeline row, sent once the turn has completed; it replaces the turn's draft. blocks, present only when the reply has one, are the row's, as a history page carries them (PROTOCOL.md, Blocks under a reply).",
+      "description": "A reply's canonical text at its timeline row, sent once the turn has completed; it replaces the turn's draft. ts is the time the row stores, RFC 3339 in UTC, exactly as the row's row event and history message carry it; this daemon always sends it and an older daemon leaves it out. blocks, present only when the reply has one, are the row's, as a history page carries them (PROTOCOL.md, Blocks under a reply).",
       "required": ["type", "turn_id", "server_seq", "text"],
       "properties": {
         "type": { "const": "text_done" },
         "turn_id": { "type": "string", "minLength": 1 },
         "server_seq": { "type": "integer", "minimum": 1 },
         "text": { "type": "string" },
+        "ts": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}" },
         "blocks": {
           "type": "array",
           "minItems": 1,
-          "maxItems": 1,
+          "maxItems": 2,
           "items": { "$ref": "#/$defs/replyBlock" }
         }
       }
@@ -406,7 +548,7 @@
     },
     "row": {
       "type": "object",
-      "description": "A timeline row this socket did not stream (the sender's own message, a slash command's answer, a scheduled delivery, a message from a phone, the reply to a phone's turn, a Live call's row), announced to every connection watching the profile as it is written. client_msg_id is on a user's row, for the sender to match its outbox. kind, metadata, media_refs, link_previews and blocks are the history message's, as a history_page carries them; a Live call's row carries metadata.call (PROTOCOL.md, A Live call's rows).",
+      "description": "A timeline row this socket did not stream (the sender's own message, a slash command's answer, a scheduled delivery, a message from a phone, the reply to a phone's turn, a Live call's row), announced to every connection watching the profile as it is written. client_msg_id is on a user's row, for the sender to match its outbox. kind, metadata, media_refs, link_previews and blocks are the history message's, as a history_page carries them; a Live call's row carries metadata.call (PROTOCOL.md, A Live call's rows), and a message a scheduled job's or a cue's run sent carries metadata.origin (PROTOCOL.md, Where a message came from).",
       "required": ["type", "profile_id", "server_seq", "role", "text", "ts", "media_refs"],
       "properties": {
         "type": { "const": "row" },
@@ -428,7 +570,7 @@
         "blocks": {
           "type": "array",
           "minItems": 1,
-          "maxItems": 1,
+          "maxItems": 2,
           "items": { "$ref": "#/$defs/replyBlock" }
         }
       }
@@ -555,9 +697,57 @@
         "result_text": { "type": "string", "maxLength": 2000 }
       }
     },
+    "home_status_changed": {
+      "type": "object",
+      "description": "Version 6. Always On's summary (management home.status.summary) changed: its state, its action, its problem kind, or the sentence of a step. Carries no content: the client reads home.status over management for what it is now. Sent once after server_hello unless Always On is off, then at each change, never while it stays off, only to a connection on version 6. After a move, the desktop's engine sends it for its own home.status, never the server's (PROTOCOL.md, When Always On changes).",
+      "x-since-version": 6,
+      "required": ["type"],
+      "properties": {
+        "type": { "const": "home_status_changed" }
+      }
+    },
+    "checklists": {
+      "type": "object",
+      "description": "Version 6. The index of the owner's lists, every live list in picker order: the answer to checklists_pull, and sent again, whole, to a connection that pulled it after any list changes, at most once per 100 ms. Sent only to a connection on version 6 that the daemon placed as the owner's and that pulled the index.",
+      "x-since-version": 6,
+      "required": ["type", "profile_id", "lists"],
+      "properties": {
+        "type": { "const": "checklists" },
+        "profile_id": { "type": "string", "minLength": 1 },
+        "lists": { "type": "array", "maxItems": 50, "items": { "$ref": "#/$defs/checklistEntry" } }
+      }
+    },
+    "checklist": {
+      "type": "object",
+      "description": "Version 6. One whole list: the answer to checklist_pull, and sent again, whole, to every connection holding it after each committed change to it, whoever made it, at most once per 100 ms per list and carrying the rev it ended on. A client drops one whose rev is below the one it shows. made maps the client_msg_id of each create or add a device sent since the list's last push to the id it made, a create's list_id or an add's row_id; a client matches the ids it sent and ignores the rest. Sent only to a connection on version 6 that the daemon placed as the owner's and that holds the list.",
+      "x-since-version": 6,
+      "required": ["type", "profile_id", "list"],
+      "properties": {
+        "type": { "const": "checklist" },
+        "profile_id": { "type": "string", "minLength": 1 },
+        "list": { "$ref": "#/$defs/checklistList" },
+        "made": {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 100,
+          "additionalProperties": { "type": "string", "pattern": "^c[ki]_[0-9a-z]{10}$" }
+        }
+      }
+    },
+    "attach_status": {
+      "type": "object",
+      "description": "Version 7. The answer to an attach_file the media store now holds: status is present, the only value this wire sends. A msg may name attach_id from then on. Sent only to the version 7 owner's connection that sent the attach_file.",
+      "x-since-version": 7,
+      "required": ["type", "attach_id", "status"],
+      "properties": {
+        "type": { "const": "attach_status" },
+        "attach_id": { "type": "string", "pattern": "^[0-9A-Za-z_-]{1,64}$" },
+        "status": { "enum": ["present"] }
+      }
+    },
     "error": {
       "type": "object",
-      "description": "A refusal. reason is the code; the other fields are context. Protocol violations close the connection; request failures do not. ref is set only on the request_failed answering a media_fetch the daemon could not serve.",
+      "description": "A refusal. reason is the code; the other fields are context. Protocol violations close the connection; request failures do not. ref is set only on the request_failed answering a media_fetch the daemon could not serve, and attach_id only on an error answering an attach_file (version 7), whose message is the engine's sentence. A request_failed answering a checklists_pull, checklist_pull or checklist_edit carries the engine's sentence in message, and client_msg_id when it answers an edit. A desktop whose home moved also sends primary_unreachable (its message names the primary; the app keeps its outbox), desktop_revoked (the primary no longer knows this computer, so nothing waiting can be sent) and unattended_client, each before it closes.",
       "required": ["type", "reason"],
       "properties": {
         "type": { "const": "error" },
@@ -567,6 +757,7 @@
         "event": { "type": "string" },
         "client_msg_id": { "type": "string", "minLength": 1 },
         "ref": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "attach_id": { "type": "string", "pattern": "^[0-9A-Za-z_-]{1,64}$" },
         "direction": { "enum": ["client_too_old", "client_too_new"] },
         "client_version": { "type": "integer" },
         "min_version": { "type": "integer" },
@@ -575,18 +766,23 @@
     },
     "proposalCard": {
       "type": "object",
-      "description": "A proposal as the owner decides it. Fermix's record (ids, the owner's own names, times, where an answer came from, status_sentence) and summary carry no outside text; outside holds everything a model or a stranger wrote, kept apart by structure. Times are RFC 3339 UTC. An optional field is absent when it does not apply, never null.",
+      "description": "A proposal as the owner decides it. Fermix's record (ids, the owner's own names, times, where an answer came from, status_sentence) and summary carry no outside text; outside holds everything a model or a stranger wrote, kept apart by structure. A mandate's card names its call (mandate, tool, outside.args_text); since version 5 a watcher's follow-up card names the follow-up instead (follow_up) and carries no call, and only a version 5 connection is sent one. Times are RFC 3339 UTC. An optional field is absent when it does not apply, never null.",
       "required": [
         "proposal_id",
         "state",
-        "mandate",
-        "tool",
         "task",
         "created_at",
         "expires_at",
         "status_sentence",
         "summary",
         "outside"
+      ],
+      "oneOf": [
+        {
+          "required": ["mandate", "tool"],
+          "properties": { "outside": { "required": ["args_text"] } }
+        },
+        { "required": ["follow_up"] }
       ],
       "properties": {
         "proposal_id": { "type": "string", "minLength": 1 },
@@ -623,13 +819,38 @@
         "summary": { "type": "string", "minLength": 1 },
         "outside": {
           "type": "object",
-          "description": "Outside text. args_text is the recorded call's arguments as pretty JSON; cue is absent when Fermix no longer keeps the cue's snapshot.",
-          "required": ["args_text"],
+          "description": "Outside text. args_text is the recorded call's arguments as pretty JSON, and args each of them as name and value, for the compact card's lines (a mandate's card only); reason is the filter's reason for passing the item; cue is absent when Fermix no longer keeps the cue's snapshot.",
           "properties": {
             "args_text": { "type": "string", "maxLength": 3500 },
+            "args": { "type": "array", "items": { "$ref": "#/$defs/proposalArg" } },
+            "reason": { "type": "string", "minLength": 1 },
             "cue": { "$ref": "#/$defs/proposalCue" }
           }
-        }
+        },
+        "follow_up": { "$ref": "#/$defs/followUpCard" }
+      }
+    },
+    "proposalArg": {
+      "type": "object",
+      "description": "One argument of a mandate's call, outside text: a string value as itself, any other as JSON.",
+      "required": ["name", "value"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "value": { "type": "string" }
+      }
+    },
+    "followUpCard": {
+      "type": "object",
+      "description": "Version 5. A watcher's follow-up, all Fermix's and the owner's words: asks run (once, now). offers_always_allow, when true, says the card also takes the decision always_allow, which runs it and lets the follow-up's later items run with no card until what it runs or what sets it off changes; a daemon that predates Always allow leaves it out. The follow-up is handed nothing of the item.",
+      "x-since-version": 5,
+      "required": ["asks", "name", "instructions", "tools", "reports_to"],
+      "properties": {
+        "asks": { "enum": ["run"] },
+        "offers_always_allow": { "type": "boolean" },
+        "name": { "type": "string", "minLength": 1 },
+        "instructions": { "type": "string", "minLength": 1 },
+        "tools": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "reports_to": { "type": "string", "minLength": 1 }
       }
     },
     "proposalCue": {
@@ -640,6 +861,15 @@
         "subject": { "type": "string" },
         "text": { "type": "string" },
         "occurred_at": { "type": "string" }
+      }
+    },
+    "commandDescriptor": {
+      "type": "object",
+      "required": ["name", "aliases", "description"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "aliases": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "description": { "type": "string", "minLength": 1 }
       }
     },
     "historyMessage": {
@@ -667,20 +897,24 @@
         "blocks": {
           "type": "array",
           "minItems": 1,
-          "maxItems": 1,
+          "maxItems": 2,
           "items": { "$ref": "#/$defs/replyBlock" }
         }
       }
     },
     "replyBlock": {
       "type": "object",
-      "description": "Records a reply's text links, drawn beside it (the companion PROTOCOL.md, Blocks under a reply). type says what the block holds, and a client skips a type it does not know; places is the only type so far.",
+      "description": "Records a reply carries beside its text, drawn under it (the companion PROTOCOL.md, Blocks under a reply). type says what the block holds, and a client skips a type it does not know; the types are places and checklists.",
       "required": ["type"],
-      "properties": { "type": { "enum": ["places"] } },
+      "properties": { "type": { "enum": ["places", "checklists"] } },
       "allOf": [
         {
           "if": { "required": ["type"], "properties": { "type": { "const": "places" } } },
           "then": { "$ref": "#/$defs/placesBlock" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "checklists" } } },
+          "then": { "$ref": "#/$defs/checklistsBlock" }
         }
       ]
     },
@@ -697,6 +931,135 @@
           "items": { "$ref": "#/$defs/place" }
         }
       }
+    },
+    "checklistsBlock": {
+      "type": "object",
+      "description": "The owner's lists checklist_read or checklist_edit read or changed in the reply's turn, in the order the turn first touched them, each with the ids of the rows the turn added or changed (none for a list it only read). Ids and the title only: a client draws each list's rows as they stand now.",
+      "required": ["type", "lists"],
+      "properties": {
+        "type": { "const": "checklists" },
+        "lists": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": { "$ref": "#/$defs/checklistRef" }
+        }
+      }
+    },
+    "checklistRef": {
+      "type": "object",
+      "description": "One list a turn touched: its id, its title when the turn ended, and the ids of the rows the turn added or changed.",
+      "required": ["list_id", "title", "rows"],
+      "properties": {
+        "list_id": { "type": "string", "pattern": "^ck_[0-9a-z]{10}$" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "rows": { "type": "array", "items": { "type": "string", "pattern": "^ci_[0-9a-z]{10}$" } }
+      }
+    },
+    "checklistEntry": {
+      "type": "object",
+      "description": "One list in the index: its id, title, folder when it is in one, its open and done items, and its rev, which moves with every change to the list.",
+      "required": ["list_id", "title", "open", "done", "rev"],
+      "properties": {
+        "list_id": { "type": "string", "pattern": "^ck_[0-9a-z]{10}$" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "folder": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "open": { "type": "integer", "minimum": 0 },
+        "done": { "type": "integer", "minimum": 0 },
+        "rev": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "checklistList": {
+      "type": "object",
+      "description": "A whole list, its rows in order. removed holds the rows removed in the last 30 days, newest first, only when the pull asked for them; removed_at is set only on a list that was itself removed and is not yet swept. Times are RFC 3339 UTC with microseconds.",
+      "required": ["list_id", "title", "rev", "rows"],
+      "properties": {
+        "list_id": { "type": "string", "pattern": "^ck_[0-9a-z]{10}$" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "rev": { "type": "integer", "minimum": 0 },
+        "rows": { "type": "array", "maxItems": 500, "items": { "$ref": "#/$defs/checklistRow" } },
+        "removed": { "type": "array", "items": { "$ref": "#/$defs/checklistRemovedRow" } },
+        "removed_at": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}Z$" }
+      }
+    },
+    "checklistRow": {
+      "type": "object",
+      "description": "One row: an item, with done and its note and done_at when it has them, or a section heading, which has neither. row_id is stable for the row's life, across moves and edits.",
+      "required": ["row_id", "kind", "text"],
+      "properties": {
+        "row_id": { "type": "string", "pattern": "^ci_[0-9a-z]{10}$" },
+        "kind": { "enum": ["item", "section"] },
+        "text": { "type": "string", "minLength": 1, "maxLength": 280 },
+        "note": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "done": { "type": "boolean" },
+        "done_at": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}Z$" }
+      },
+      "allOf": [
+        {
+          "if": { "required": ["kind"], "properties": { "kind": { "const": "item" } } },
+          "then": { "required": ["done"] }
+        }
+      ]
+    },
+    "checklistRemovedRow": {
+      "type": "object",
+      "description": "A row removed in the last 30 days, with when; restore brings it back.",
+      "required": ["removed_at"],
+      "properties": { "removed_at": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}Z$" } },
+      "allOf": [{ "$ref": "#/$defs/checklistRow" }]
+    },
+    "checklistOp": {
+      "type": "object",
+      "description": "One op of checklist_edit, the model's ops by row id without replace, with clear_done and restore. create {title, folder?} makes a list; add {text, note?, section_id? or after_id?}; check, uncheck and remove {row_id}; edit {row_id, text?, note?}, one of them at least, note \"\" clearing it; move {row_id, section_id? or after_id?, to_list_id?}, one of the three at least; section {text, after_id?} adds a heading; folder {folder}, \"\" taking the list out of its folder; rename {text}; remove_list; clear_done removes every done item; restore {row_id?, title?} brings back a removed row of the list at its place, or with no row_id the removed list itself, under title when given, and is refused while a live list holds the title it would come back under. section_id puts a row at the end of that section and after_id right after that row, never both; an add with neither goes to the end of the list's first group, and a move to another list with neither to the end of that list's first group. Every text is one line, trimmed, its maximum counted in characters.",
+      "required": ["op"],
+      "properties": {
+        "op": {
+          "enum": [
+            "create",
+            "add",
+            "check",
+            "uncheck",
+            "edit",
+            "move",
+            "section",
+            "remove",
+            "folder",
+            "rename",
+            "remove_list",
+            "clear_done",
+            "restore"
+          ]
+        },
+        "title": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "folder": { "type": "string", "maxLength": 40 },
+        "text": { "type": "string", "minLength": 1, "maxLength": 280 },
+        "note": { "type": "string", "maxLength": 1000 },
+        "row_id": { "type": "string", "pattern": "^ci_[0-9a-z]{10}$" },
+        "section_id": { "type": "string", "pattern": "^ci_[0-9a-z]{10}$" },
+        "after_id": { "type": "string", "pattern": "^ci_[0-9a-z]{10}$" },
+        "to_list_id": { "type": "string", "pattern": "^ck_[0-9a-z]{10}$" }
+      },
+      "allOf": [
+        {
+          "if": { "required": ["op"], "properties": { "op": { "const": "create" } } },
+          "then": { "required": ["title"] }
+        },
+        {
+          "if": { "required": ["op"], "properties": { "op": { "enum": ["add", "section", "rename"] } } },
+          "then": { "required": ["text"] }
+        },
+        {
+          "if": {
+            "required": ["op"],
+            "properties": { "op": { "enum": ["check", "uncheck", "edit", "move", "remove"] } }
+          },
+          "then": { "required": ["row_id"] }
+        },
+        {
+          "if": { "required": ["op"], "properties": { "op": { "const": "folder" } } },
+          "then": { "required": ["folder"] }
+        }
+      ]
     },
     "place": {
       "type": "object",
@@ -749,7 +1112,7 @@
     },
     "linkPreviewCard": {
       "type": "object",
-      "description": "A link preview stored on its row: link is the address the row's text wrote, which a client pairs the card with (absent on a preview stored before it was kept); url is where the page answered from after redirects. The bounds are bytes of UTF-8 (x-max-bytes).",
+      "description": "A link preview stored on its row: link is the address the row's text wrote, which a client pairs the card with (absent on a preview stored before it was kept); url is where the page answered from after redirects; image_ref is the page's picture and icon_ref the site's icon, each served by media_fetch through the row. The bounds are bytes of UTF-8 (x-max-bytes).",
       "required": ["url", "site", "title"],
       "properties": {
         "link": { "type": "string", "minLength": 1, "maxLength": 2048, "x-max-bytes": 2048 },
@@ -757,7 +1120,8 @@
         "site": { "type": "string", "minLength": 1, "maxLength": 120, "x-max-bytes": 120 },
         "title": { "type": "string", "minLength": 1, "maxLength": 300, "x-max-bytes": 300 },
         "description": { "type": "string", "maxLength": 600, "x-max-bytes": 600 },
-        "image_ref": { "type": "string", "minLength": 1 }
+        "image_ref": { "type": "string", "minLength": 1 },
+        "icon_ref": { "type": "string", "minLength": 1 }
       }
     },
     "mediaRef": {

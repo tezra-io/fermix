@@ -153,8 +153,14 @@ defmodule FermixCore.Tools.UpdateJob do
          :ok <- Mandates.check_update_consent(job_id, context),
          :ok <- disable_mandates(job_id, context) do
       case Registry.update_job(job_id, attrs, repo: Support.repo(context)) do
-        {:ok, job} -> Support.success_json(Support.job_payload(job, Support.repo(context)))
-        {:error, reason} -> Support.error(reason)
+        {:ok, job} ->
+          job
+          |> Support.job_payload(Support.repo(context))
+          |> Support.put_skill_tools_note(skill, context)
+          |> Support.success_json()
+
+        {:error, reason} ->
+          Support.error(reason)
       end
     else
       {:error, reason} when is_binary(reason) -> {:ok, Tool.error(reason)}

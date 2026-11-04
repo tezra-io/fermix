@@ -50,7 +50,10 @@ defmodule FermixChannels.Mobile.WssIntegrationTest do
   end
 
   test "WSS upgrade carries pinned TLS, Noise IK, hello, and application ping" do
-    root = FermixTestSupport.SafeRm.make_tmp_dir!("mobile-wss-integration")
+    root =
+      FermixTestSupport.SafeRm.make_tmp_dir!("mobile-wss-integration")
+      |> FermixTestSupport.PrimaryHome.booted!()
+
     on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(root) end)
 
     assert {:ok, identity} = Identity.ensure(root: root)
@@ -97,7 +100,10 @@ defmodule FermixChannels.Mobile.WssIntegrationTest do
   end
 
   test "a long reply reaches the phone as event_part frames and the session stays open" do
-    root = FermixTestSupport.SafeRm.make_tmp_dir!("mobile-wss-event-parts")
+    root =
+      FermixTestSupport.SafeRm.make_tmp_dir!("mobile-wss-event-parts")
+      |> FermixTestSupport.PrimaryHome.booted!()
+
     on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(root) end)
 
     assert {:ok, identity} = Identity.ensure(root: root)
@@ -144,7 +150,10 @@ defmodule FermixChannels.Mobile.WssIntegrationTest do
   # cap: a message past the small one reaches the handler, which refuses it as
   # too large rather than dying without a close code.
   test "an attached device's socket is held to the larger authenticated heap cap" do
-    root = FermixTestSupport.SafeRm.make_tmp_dir!("mobile-wss-heap")
+    root =
+      FermixTestSupport.SafeRm.make_tmp_dir!("mobile-wss-heap")
+      |> FermixTestSupport.PrimaryHome.booted!()
+
     on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(root) end)
 
     assert {:ok, identity} = Identity.ensure(root: root)

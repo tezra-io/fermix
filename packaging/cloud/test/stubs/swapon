@@ -1,0 +1,14 @@
+#!/bin/sh
+# Test stand-in for swapon: a container cannot turn swap on. --show answers
+# the swap areas listed in /etc/fermix-test/swaps (none without the file) and
+# logs nothing, as a read; turning a file on logs the call and lists it.
+set -eu
+swaps=/etc/fermix-test/swaps
+case "$1" in
+  --show=*)
+    if [ -f "$swaps" ]; then cat "$swaps"; fi
+    exit 0
+    ;;
+esac
+printf 'swapon %s\n' "$*" >>/var/log/fermix-test/calls.log
+printf '%s\n' "$1" >>"$swaps"

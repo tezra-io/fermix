@@ -85,6 +85,11 @@ class TrialResult:
     # (a no-trace capture keeps the CLI's "timeout"/"error" here; a checker error
     # keeps its message). Diagnosis only — never read as the status.
     status_detail: str = ""
+    # The grader's own words on a trial it graded: a json checker's `detail`. Kept per
+    # trial so a run's results.json can be read trial by trial (a checker that names
+    # WHAT the model did, not only whether it matched, e.g. open_loop_judgment.py for
+    # bin/judgment_agreement.py). Diagnosis only — never read as success.
+    grader_detail: str = ""
     # TRI-STATE, stored once and read through the two named properties below:
     # True = every declared gate passed · False = a graded gate failed · None = no gate
     # was graded (NOT EVALUATED). Keeping None rather than collapsing it to True is the
@@ -270,7 +275,8 @@ class RankedConfig:
 def score_trial(task_id: str, *, task_success: float, safety_ok: bool | None, cost: float,
                 duration_ms: float, tokens: int, tool_calls: int, status: str,
                 trace_id: str | None = None, cost_known: bool = True,
-                status_detail: str = "", main_llm_calls: int | None = None,
+                status_detail: str = "", grader_detail: str = "",
+                main_llm_calls: int | None = None,
                 total_input_tokens: int | None = None,
                 total_output_tokens: int | None = None,
                 total_cached_input_tokens: int | None = None,
@@ -311,6 +317,7 @@ def score_trial(task_id: str, *, task_success: float, safety_ok: bool | None, co
                        tool_calls=int(tool_calls), status=status, trace_id=trace_id,
                        safety_ok=safety_ok, cost_known=bool(cost_known),
                        status_detail=str(status_detail),
+                       grader_detail=str(grader_detail),
                        main_llm_calls=(None if main_llm_calls is None
                                        else int(main_llm_calls)),
                        total_input_tokens=total_input_tokens,

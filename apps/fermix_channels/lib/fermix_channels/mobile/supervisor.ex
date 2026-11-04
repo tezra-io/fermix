@@ -22,6 +22,7 @@ defmodule FermixChannels.Mobile.Supervisor do
 
   require Logger
 
+  alias FermixChannels.Desktop.Supervisor, as: DesktopSupervisor
   alias FermixChannels.Mobile.DeviceRegistry
   alias FermixChannels.Mobile.DeviceStore
   alias FermixChannels.Mobile.Discovery
@@ -323,6 +324,11 @@ defmodule FermixChannels.Mobile.Supervisor do
              device_store: names.device_store},
             id: names.request_coordinator
           ),
+          # Before the carriers: a desktop's session starts its peer here.
+          {DesktopSupervisor,
+           name: names.desktop,
+           registry: names.desktop_peers,
+           peer_supervisor: names.desktop_peer_supervisor},
           {Discovery, name: names.discovery, bind: listener_bind(opts)},
           {Listener, listener_opts(opts, root, names)},
           {MdnsAdvertiser, mdns_opts(opts, names)},
@@ -368,7 +374,10 @@ defmodule FermixChannels.Mobile.Supervisor do
       request_coordinator: RequestCoordinator,
       iroh_helper: Iroh.Helper,
       bridge: Iroh.Bridge,
-      bridge_connections: FermixChannels.Mobile.Iroh.Connections
+      bridge_connections: FermixChannels.Mobile.Iroh.Connections,
+      desktop: DesktopSupervisor,
+      desktop_peers: FermixChannels.Desktop.Peers,
+      desktop_peer_supervisor: FermixChannels.Desktop.PeerSupervisor
     }
 
     Map.merge(defaults, Keyword.get(opts, :names, %{}))
@@ -468,6 +477,8 @@ defmodule FermixChannels.Mobile.Supervisor do
       request_coordinator: names.request_coordinator,
       discovery: names.discovery,
       iroh_helper: names.iroh_helper,
+      desktop_peers: names.desktop_peers,
+      desktop_peer_supervisor: names.desktop_peer_supervisor,
       max_media_bytes: Keyword.get(config, :max_media_bytes, @default_max_media_bytes),
       push_environment: config |> Keyword.get(:push, []) |> Keyword.get(:environment),
       push_services: push_services

@@ -28,6 +28,7 @@ defmodule FermixCore.Transcription.RegistryTest do
     test "a missing backend fails loud, never a default-and-continue" do
       assert {:error, message} = Registry.active_backend([])
       assert message =~ "transcription has no configured backend"
+      assert message =~ "Choose one in Fermix's Voice notes settings"
       assert message =~ "deepgram | local | openai | xai"
     end
 

@@ -1791,10 +1791,10 @@ def _memory_db(home, jobs=(), events=()):
     conn.close()
 
 
-def _state_run(tmp_path, spec, expect, state, reply="done"):
+def _state_run(tmp_path, spec, expect, state, reply="done", spans=()):
     ws = tmp_path / "ws"
     ws.mkdir(exist_ok=True)
-    evidence = {**_ev(reply=reply), "expect": expect, "state": state}
+    evidence = {**_ev(reply=reply, spans=spans), "expect": expect, "state": state}
     return checker.run_checker(BENCH, spec, scoped_dir=str(ws), fermix_home=str(tmp_path),
                                reply=reply, evidence=evidence)
 
@@ -2026,7 +2026,8 @@ SPOKE_GOLD = {"wait_s": 0, "outcome": "spoke", "state": "asked", "touches": 1,
 SPOKE_ROW = {"id": LOOP_ID, "state": "asked", "touches": 1, "last_outcome": "spoke",
              "close_reason": None, "last_message": GOOD_CHECKIN,
              "next_touch_at": "2026-10-26T13:00:00.000000Z",
-             "last_touch_at": "2026-10-22T17:01:10.000000Z", "claimed_at": None}
+             "last_touch_at": "2026-10-22T17:01:10.000000Z", "last_touch_rung": 2,
+             "claimed_at": None}
 CHECKIN_META = json.dumps({"open_loop_checkin": LOOP_ID})
 
 
@@ -2034,9 +2035,9 @@ def _open_loops_db(home, row, history=()):
     import sqlite3
     conn = sqlite3.connect(str(home / "memory.db"))
     conn.execute("CREATE TABLE open_loops (id, state, touches, last_outcome, close_reason, "
-                 "last_message, next_touch_at, last_touch_at, claimed_at)")
+                 "last_message, next_touch_at, last_touch_at, last_touch_rung, claimed_at)")
     conn.execute("CREATE TABLE messages (role, kind, content, metadata_json)")
-    conn.execute("INSERT INTO open_loops VALUES (?,?,?,?,?,?,?,?,?)",
+    conn.execute("INSERT INTO open_loops VALUES (?,?,?,?,?,?,?,?,?,?)",
                  [row[k] for k in SPOKE_ROW])
     for message in history:
         conn.execute("INSERT INTO messages VALUES (?,?,?,?)", message)
@@ -2196,17 +2197,286 @@ def test_open_loop_checkin_suite_polls_inside_its_checker_timeout():
     cases = [case for scn in doc["scenarios"] for case in scn["cases"]]
     assert {case["id"] for case in cases} == {
         "speaks_when_due", "repeat_makes_smaller_ask", "closes_when_memory_holds_completion",
-        "hand_back_says_last"}
+        "hand_back_says_last", "waited_on_speaks", "general_stop_keeps_it_quiet",
+        "thread_stop_beside_asked_checkin", "raised_at_the_end", "left_alone_under_pressure",
+        "holds_on_a_hard_day", "asks_about_the_hard_thing", "minor_grumble_mutes_nothing",
+        "hard_time_has_passed", "cannot_wait_stays_small", "left_alone_on_a_hard_day"}
     for case in cases:
         spec = case["checker"]
+        with open(checker.resolve_state_spec(BENCH, spec["state"])) as fh:
+            seeded = json.load(fh)["open_loops"]
+        assert len(seeded) == 1, case["id"]
+        if spec["expect"].get("rung") == 1:
+            # The raise is in the trial's own turn: nothing to wait for, and the seed
+            # must leave the rung 1 window open so the turn carries the due note.
+            assert "wait_s" not in spec["expect"], case["id"]
+            assert seeded[0].get("rung1_window") == "open", case["id"]
+            continue
         # The runner kills a checker at timeout_ms; the poll must end first, with room
         # to grade, or a slow run reads as an evaluator timeout instead of its result.
         assert spec["expect"]["wait_s"] * 1000 + 10_000 <= spec["timeout_ms"], case["id"]
         assert spec["timeout_ms"] >= 150_000, case["id"]
-        with open(checker.resolve_state_spec(BENCH, spec["state"])) as fh:
-            seeded = json.load(fh)["open_loops"]
-        assert len(seeded) == 1, case["id"]
         assert seeded[0]["due_hours_ago"] > 3, case["id"]   # rung 1 window closed
+        assert seeded[0].get("rung1_window", "closed") == "closed", case["id"]
+
+
+# --- open_loop_checkin: M83 waited-on check-ins and the rung 1 raise ---------------
+
+QUIET_GOLD = {"wait_s": 0, "outcome_any": ["silent", "closed"], "history_row": False}
+
+
+@pytest.mark.parametrize("outcome, state, ok", [
+    ("silent", "open", True), ("closed", "closed", True), ("spoke", "asked", False)])
+def test_open_loop_checkin_outcome_any_takes_either_quiet_decision(tmp_path, outcome, state, ok):
+    row = {**SPOKE_ROW, "last_outcome": outcome, "state": state,
+           "last_message": GOOD_CHECKIN if outcome == "spoke" else None,
+           "close_reason": "reported_elsewhere" if state == "closed" else None}
+    r = _checkin_run(tmp_path, QUIET_GOLD, row)
+    assert r.error is None and r.score == (1.0 if ok else 0.0), r.detail
+
+
+HOLD_GOLD = {"wait_s": 0, "outcome_any": ["later", "silent"], "history_row": False}
+
+
+@pytest.mark.parametrize("outcome, ok", [("later", True), ("silent", True), ("spoke", False)])
+def test_open_loop_checkin_a_later_is_a_decision_the_hold_case_accepts(tmp_path, outcome, ok):
+    # A later leaves the row open with its next touch re-armed: decided, not still due.
+    row = {**SPOKE_ROW, "last_outcome": outcome, "state": "asked" if outcome == "spoke" else "open",
+           "last_message": GOOD_CHECKIN if outcome == "spoke" else None}
+    r = _checkin_run(tmp_path, HOLD_GOLD, row)
+    assert r.error is None and r.score == (1.0 if ok else 0.0), r.detail
+
+
+def test_open_loop_checkin_refuses_outcome_and_outcome_any_together(tmp_path):
+    r = _checkin_run(tmp_path, {**QUIET_GOLD, "outcome": "silent"}, SPOKE_ROW)
+    assert r.error is not None
+
+
+RAISE_FLOORS = {"window_sentences": 2, "include_any": ["Wrenfield", "Noor"],
+                "only_at_end": True, "questions": 1,
+                "exclude": ["you should", "make sure", "congratulations", "congrats"]}
+RAISE_GOLD = {"rung": 1, "state": "asked", "touches": 1, "last_touch_rung": 1,
+              "reply_include_any": ["36"], "raise_floors": RAISE_FLOORS}
+RAISED_ROW = {**SPOKE_ROW, "state": "asked", "touches": 1, "last_touch_rung": 1,
+              "last_outcome": None, "last_message": None}
+GOOD_RAISE = ("15% of 240 is 36. Separately, did you hear back from Wrenfield Primary "
+              "about Noor's place?")
+
+
+def _raise_run(tmp_path, gold, row, reply):
+    _open_loops_db(tmp_path, row)
+    return _state_run(tmp_path, OPEN_LOOP, gold, LOOP_STATE, reply)
+
+
+def test_open_loop_checkin_rung1_passes_a_raise_at_the_end(tmp_path):
+    r = _raise_run(tmp_path, RAISE_GOLD, RAISED_ROW, GOOD_RAISE)
+    assert r.error is None and r.score == 1.0, r.detail
+
+
+@pytest.mark.parametrize("reply, why", [
+    ("Did you hear back from Wrenfield about Noor? 15% of 240 is 36. Did Noor get the place?",
+     "before its last"),
+    ("15% of 240 is 36. Hope the week is going well.", "name none"),
+    ("15% of 240 is 36. Did Noor get the Wrenfield place? Was it your first choice?",
+     "question"),
+    ("15% of 240 is 36. Congratulations if Noor got the Wrenfield place, did she?", "uses"),
+    ("It's 34. Did you hear back from Wrenfield about Noor?", "reply names none"),
+])
+def test_open_loop_checkin_rung1_floors_the_raise_not_its_wording(tmp_path, reply, why):
+    r = _raise_run(tmp_path, RAISE_GOLD, RAISED_ROW, reply)
+    assert r.error is None and r.score == 0.0 and why in r.detail, r.detail
+
+
+def test_open_loop_checkin_rung1_wants_the_raise_recorded_as_asked(tmp_path):
+    row = {**RAISED_ROW, "state": "due", "touches": 0, "last_touch_rung": None}
+    r = _raise_run(tmp_path, RAISE_GOLD, row, GOOD_RAISE)
+    assert r.score == 0.0 and "state is 'due'" in r.detail, r.detail
+
+
+PRESSED_GOLD = {"rung": 1, "state": "due", "touches": 0, "reply_include_any": ["figures"],
+                "reply_exclude_any": ["Wrenfield", "Noor"]}
+DUE_ROW = {**RAISED_ROW, "state": "due", "touches": 0, "last_touch_rung": None}
+
+
+@pytest.mark.parametrize("reply, row, ok", [
+    ("They're going to review the proposal on Friday, and we need the figures by then.",
+     DUE_ROW, True),
+    ("They're going to review it Friday and we need the figures. Did Noor get Wrenfield?",
+     DUE_ROW, False),                                            # raised while rushed
+    ("They're going to review the proposal on Friday, and we need the figures by then.",
+     RAISED_ROW, False),                                         # recorded a raise anyway
+    ("They're reviewing the proposal on Friday, so we'll need the figures by then.",
+     DUE_ROW, True),                                             # a fix with other words
+    ("On it, sending a corrected version in a moment.", DUE_ROW, False),  # did no work
+])
+def test_open_loop_checkin_rung1_leaves_the_loop_when_the_owner_is_rushed(
+        tmp_path, reply, row, ok):
+    r = _raise_run(tmp_path, PRESSED_GOLD, row, reply)
+    assert r.error is None and r.score == (1.0 if ok else 0.0), r.detail
+
+
+def test_the_rushed_gold_here_is_the_suites_own():
+    import yaml
+    with open(os.path.join(BENCH, "suites", "capability", "candidates",
+                           "open_loop_checkin.yaml")) as fh:
+        doc = yaml.safe_load(fh)
+    case = next(case for scn in doc["scenarios"] for case in scn["cases"]
+                if case["id"] == "left_alone_under_pressure")
+    assert case["checker"]["expect"] == PRESSED_GOLD
+
+
+# --- open_loop_judgment: what Fermix kept of a labelled moment ----------------------
+
+JUDGMENT = {"script": "suites/capability/checkers/open_loop_judgment.py", "mode": "json"}
+JUDGMENT_STATE = {"now": SEEDED_AT, "zone": "America/New_York", "today": "2026-10-22",
+                  "jobs": {}, "reminders": [], "open_loops": []}
+BEFORE_SEED = "2026-10-22T16:10:00.000000Z"
+DURING_TRIAL = "2026-10-22T17:00:31.000000Z"
+
+
+def _judgment_db(home, rows, reach=True):
+    """An open_loops table as the eval home holds it: today's columns, plus M83's
+    `reach` and `anchor_kind` when `reach` (migration 51 has run)."""
+    import sqlite3
+    columns = ["id", "state", "horizon_class", "intention", "created_at"]
+    if reach:
+        columns += ["reach", "anchor_kind"]
+    conn = sqlite3.connect(str(home / "memory.db"))
+    conn.execute(f"CREATE TABLE open_loops ({', '.join(columns)})")
+    for row in rows:
+        conn.execute(f"INSERT INTO open_loops VALUES ({', '.join('?' * len(columns))})",
+                     [row.get(c) for c in columns])
+    conn.commit()
+    conn.close()
+
+
+def _loop_row(created_at=DURING_TRIAL, state="open", reach="message", kind="ask_after",
+              intention="Hear how the Brightwell final-round interview goes"):
+    return {"id": "loop_Jd8mQ2xVt4R", "state": state,
+            "horizon_class": "after" if kind == "ask_after" else "short",
+            "intention": intention, "created_at": created_at, "reach": reach,
+            "anchor_kind": kind}
+
+
+def _judgment_run(tmp_path, label, rows, reach=True, spans=()):
+    _judgment_db(tmp_path, rows, reach)
+    gold = {"label": label, "moment": "s08", "labelled_when": "Mon 21:15"}
+    return _state_run(tmp_path, JUDGMENT, gold, JUDGMENT_STATE, spans=spans)
+
+
+def _note_span(text, status="ok", error=None):
+    """An open_loop_note call as the runner's evidence records it: the tool's result
+    wrapped by Opik as {"text": ...} and handed over as text. The engine traces a
+    refusal with `error_code` and `error_summary`, which Opik records as the span's
+    `error_info` and the runner as status error with that object as `error` text;
+    evidence from before that change records a refusal as status ok."""
+    out = None if text is None else json.dumps({"text": text})
+    span = _span("open_loop_note", status=status, inp={"text": "%{...}"}, out=out)
+    return span if error is None else {**span, "error": error}
+
+
+def _error_info(tag, sentence):
+    """A refused call's `error` as `run_capability._evidence_spans` records it: Opik's
+    `error_info` object, the refusal's tag and the tool's sentence, as JSON text."""
+    return json.dumps({"exception_type": tag, "message": sentence})
+
+
+NOTE_STORED = json.dumps({"open_loop_id": "loop_Jd8mQ2xVt4R", "status": "created",
+                          "reach": "message", "ask_after": "Tuesday at 5:00 PM"})
+NOTE_REFUSED = ("That date is too close for Fermix to raise before it passes, so no loop "
+                "was recorded; as with an imminent loop, store the reminder instead.")
+
+
+@pytest.mark.parametrize("label, rows, ok, pred", [
+    ("let_go", [], True, "let_go"),
+    ("let_go", [_loop_row(created_at=BEFORE_SEED, state="closed")], True, "let_go"),  # leftover
+    ("let_go", [_loop_row()], False, "check_in"),
+    ("check_in", [_loop_row()], True, "check_in"),
+    ("check_in", [_loop_row(reach="conversation")], False, "when_around"),
+    ("when_around", [_loop_row(reach="conversation")], True, "when_around"),
+    ("when_around", [], False, "let_go"),
+    ("check_in", [_loop_row(), {**_loop_row(), "id": "loop_Second0000"}], False, "other"),
+    ("let_go", [_loop_row(state="closed")], True, "let_go"),       # noted, then dropped
+    ("check_in", [_loop_row(state="closed")], False, "let_go"),
+    ("check_in", [_loop_row(state="closed"), {**_loop_row(), "id": "loop_Second0000"}],
+     True, "check_in"),                                            # one live loop is left
+])
+def test_open_loop_judgment_names_what_fermix_kept(tmp_path, label, rows, ok, pred):
+    r = _judgment_run(tmp_path, label, rows)
+    assert r.error is None and r.score == (1.0 if ok else 0.0), r.detail
+    assert r.detail.startswith(f"pred={pred} want={label} "), r.detail
+    assert "stage=1" in r.detail and r.safety_ok is None
+
+
+def test_open_loop_judgment_detail_carries_the_row_for_the_agreement_script(tmp_path):
+    r = _judgment_run(tmp_path, "check_in", [_loop_row()])
+    head, intention = r.detail.split(" | ", 1)
+    assert head == ("pred=check_in want=check_in new=1 live=1 reach=message kind=ask_after "
+                    "class=after stage=1 refused=none noted=0")
+    assert intention == "Hear how the Brightwell final-round interview goes"
+
+
+@pytest.mark.parametrize("spans, rows, refused, noted", [
+    ([], [], "none", 0),                                           # the model let it go
+    ([_note_span(NOTE_REFUSED)], [],                               # code refused the note
+     "that_date_is_too_close_for_fermix_to", 1),
+    ([_note_span(NOTE_REFUSED, status="error")], [],               # once the span is errored
+     "that_date_is_too_close_for_fermix_to", 1),
+    ([_note_span(NOTE_STORED)], [_loop_row()], "none", 1),
+    ([_note_span(NOTE_REFUSED), _note_span(NOTE_STORED)], [_loop_row()],
+     "that_date_is_too_close_for_fermix_to", 2),                   # refused, then stored
+    ([_note_span(None)], [], "unread", 1),                         # content not captured
+    ([_note_span(None, status="error",                             # ...but the error was
+                 error=_error_info("imminent_without_window", NOTE_REFUSED))], [],
+     "that_date_is_too_close_for_fermix_to", 1),
+    ([_span("event_store", out=json.dumps({"text": NOTE_REFUSED}))], [], "none", 0),
+])
+def test_open_loop_judgment_tells_a_refused_note_from_a_let_go(
+        tmp_path, spans, rows, refused, noted):
+    r = _judgment_run(tmp_path, "check_in", rows, spans=spans)
+    tokens = dict(t.split("=", 1) for t in r.detail.split(" | ", 1)[0].split())
+    assert r.error is None, r.detail
+    assert (tokens["refused"], tokens["noted"]) == (refused, str(noted)), r.detail
+    assert tokens["pred"] == ("check_in" if rows else "let_go"), r.detail
+
+
+def test_open_loop_judgment_detail_head_fits_what_emit_keeps(tmp_path):
+    """Every token at its longest: one live loop beside ten closed ones, twelve calls,
+    a refusal of long words. The head must survive `lib.emit`'s 200-character cut."""
+    long_refusal = "Supercalifragilisticexpialidocious " * 12
+    closed = [{**_loop_row(state="closed"), "id": f"loop_Closed{i:04d}"} for i in range(10)]
+    rows = [{**_loop_row(reach="conversation", kind="matters_by"),
+             "horizon_class": "imminent"}, *closed]
+    r = _judgment_run(tmp_path, "when_around", rows,
+                      spans=[_note_span(long_refusal)] * 12)
+    head = r.detail.split(" | ", 1)[0]
+    assert " | " in r.detail and len(head) < 190, r.detail
+    assert head.startswith("pred=when_around want=when_around new=11 live=1 "), head
+    assert head.endswith(" noted=12"), head
+
+
+@pytest.mark.parametrize("label, rows, ok, pred", [
+    ("check_in", [_loop_row()], True, "keep"),
+    ("when_around", [_loop_row()], True, "keep"),       # reach cannot be told apart yet
+    ("let_go", [_loop_row()], False, "keep"),
+    ("check_in", [], False, "let_go"),
+])
+def test_open_loop_judgment_grades_keep_or_let_go_without_the_reach_column(
+        tmp_path, label, rows, ok, pred):
+    r = _judgment_run(tmp_path, label, rows, reach=False)
+    assert r.error is None and r.score == (1.0 if ok else 0.0), r.detail
+    assert r.detail.startswith(f"pred={pred} want={label} "), r.detail
+    assert "reach=n/a kind=n/a" in r.detail and "stage=0" in r.detail, r.detail
+
+
+def test_open_loop_judgment_detail_shows_a_loop_noted_then_dropped(tmp_path):
+    r = _judgment_run(tmp_path, "let_go", [_loop_row(state="closed")])
+    assert r.detail.startswith("pred=let_go want=let_go new=1 live=0 reach=message "), r.detail
+
+
+def test_open_loop_judgment_refuses_an_unknown_label(tmp_path):
+    r = _judgment_run(tmp_path, "maybe", [])
+    assert r.error is not None
 
 
 if __name__ == "__main__":

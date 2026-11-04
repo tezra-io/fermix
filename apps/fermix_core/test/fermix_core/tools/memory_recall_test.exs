@@ -312,16 +312,42 @@ defmodule FermixCore.Tools.MemoryRecallTest do
       refute history_only.output =~ "[memories"
     end
 
-    test "returns a graceful error for malformed FTS queries", %{
+    test "reads a hyphen or an FTS operator as part of the words searched", %{
       context: context,
-      conv_key: conv_key,
-      store: store
+      conv_key: {channel, chat_id},
+      repo: repo
     } do
-      Store.store(conv_key, "timezone", "UTC", server: store)
+      assert {:ok, _message} =
+               Repo.insert_message(
+                 %{
+                   agent_id: "main",
+                   owner_id: "default",
+                   channel: channel,
+                   chat_id: chat_id,
+                   thread_scope: "root",
+                   sender: "alice",
+                   role: "user",
+                   kind: "chat_message",
+                   content: "the follow-up check-in is booked for Thursday"
+                 },
+                 server: repo
+               )
 
-      assert {:ok, result} = MemoryRecall.execute(%{"search" => "AND OR"}, context)
+      assert {:ok, found} =
+               MemoryRecall.execute(%{"search" => "follow-up", "source" => "history"}, context)
+
+      assert found.success == true
+      assert found.output =~ "the follow-up check-in is booked"
+
+      assert {:ok, none} = MemoryRecall.execute(%{"search" => "AND OR"}, context)
+      assert none.success == true
+      assert none.output =~ "No lexical matches found for: AND OR"
+    end
+
+    test "returns a graceful error for a search with no word to look for", %{context: context} do
+      assert {:ok, result} = MemoryRecall.execute(%{"search" => "***"}, context)
       assert result.success == false
-      assert result.error != nil
+      assert result.error =~ "empty_query"
     end
 
     test "prefers lexical search when key and search are both present", %{

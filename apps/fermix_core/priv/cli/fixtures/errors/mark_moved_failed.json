@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "mark_moved_failed",
+    "sentence": "Fermix could not mark this home moved. It said: could not tell whether Fermix is running (timeout)"
+  },
+  "ok": false,
+  "schema_version": 1
+}

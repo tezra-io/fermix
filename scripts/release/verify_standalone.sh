@@ -103,6 +103,15 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Every boot of a release writes `secret_key_base` into its FERMIX_HOME before
+# any verb runs (`config/runtime.exs`, `SecretKeyBase.read_or_create!/1`), so a
+# verb that writes nothing leaves a home that does not exist, or one that
+# holds that file and nothing else.
+holds_only_boot_key() {
+  [ ! -e "$1" ] && return 0
+  [ -d "$1" ] && [ ! -L "$1" ] && [ "$(ls -A "$1")" = "secret_key_base" ]
+}
+
 chmod +x "$artifact"
 if ! version_output="$(HOME="$home" FERMIX_HOME="$fermix_home" "$artifact" --version 2>&1)"; then
   printf '%s\n' "$version_output" >&2
@@ -181,6 +190,70 @@ iroh_notices_actual="$(sha256_of "$iroh_notices")" || fail "cannot hash the ferm
 [ "$iroh_notices_actual" = "$iroh_notices_sha256" ] ||
   fail "the fermix-iroh notices are not the pinned ones: expected sha256 $iroh_notices_sha256 (from $iroh_pin), found $iroh_notices_actual"
 printf 'fermix-iroh notices: %s\n' "$iroh_notices"
+
+# ── the bundled Landlock shim (Linux) ───────────────────────────────────────
+# On Linux every command a turn runs goes through `fermix_landlock`, and a
+# release without it, or with one that cannot run, refuses every command on
+# every install ("Fermix's Landlock shim is missing"). The NIF build makes it
+# per target with zig, static, so the packaged-interpreter rewrite leaves it
+# alone: exactly one shim in the payload, a regular executable file, an ELF
+# that names no program interpreter (checked before it runs), and `--abi`
+# answering its contract: its ABI (exit 0) or why this runner's kernel cannot
+# hold commands (exit 69: no Landlock, or an ABI below the shim's floor). A
+# macOS release carries none. It runs before the
+# migrate-to-app stage because that stage ends the script on a Linux target.
+elf_interpreter() {
+  uv run --no-project python -c '
+import struct, sys
+with open(sys.argv[1], "rb") as stream:
+    head = stream.read(64)
+    if head[:4] != b"\x7fELF" or len(head) < 64:
+        print("none")
+        sys.exit(0)
+    order = "<" if head[5] == 1 else ">"
+    if head[4] == 2:
+        (offset,) = struct.unpack(order + "Q", head[32:40])
+        size, count = struct.unpack(order + "HH", head[54:58])
+    else:
+        (offset,) = struct.unpack(order + "I", head[28:32])
+        size, count = struct.unpack(order + "HH", head[42:46])
+    for index in range(count):
+        stream.seek(offset + index * size)
+        if struct.unpack(order + "I", stream.read(4))[0] == 3:
+            print("PT_INTERP")
+            sys.exit(0)
+print("none")
+' "$1"
+}
+
+case "$target" in
+  linux_x86_64|linux_aarch64)
+    landlock_shim=""
+    landlock_shim_count=0
+    for candidate in "$payload"/lib/fermix_nif-*/priv/fermix_landlock; do
+      [ -e "$candidate" ] || [ -L "$candidate" ] || continue
+      landlock_shim="$candidate"
+      landlock_shim_count=$((landlock_shim_count + 1))
+    done
+    [ "$landlock_shim_count" -eq 1 ] ||
+      fail "the unpacked Linux release must carry exactly one Landlock shim (lib/fermix_nif-*/priv/fermix_landlock under $payload), found $landlock_shim_count"
+    [ ! -L "$landlock_shim" ] && [ -f "$landlock_shim" ] && [ -x "$landlock_shim" ] ||
+      fail "the bundled Landlock shim is not an executable regular file: $landlock_shim"
+    landlock_interpreter="$(elf_interpreter "$landlock_shim")" ||
+      fail "cannot read the bundled Landlock shim's program headers: $landlock_shim"
+    [ "$landlock_interpreter" = none ] ||
+      fail "the bundled Landlock shim is dynamically linked (it names a program interpreter); the release builds it static with zig: $landlock_shim"
+    landlock_status=0
+    landlock_answer="$("$landlock_shim" --abi < /dev/null 2>&1)" || landlock_status=$?
+    case "$landlock_status:$landlock_answer" in
+      "0:fermix_landlock: abi "[0-9]*|"69:fermix_landlock: "*) ;;
+      *)
+        fail "the bundled Landlock shim --abi must print its ABI (exit 0) or why Landlock is unavailable (exit 69), got exit $landlock_status: $landlock_answer"
+        ;;
+    esac
+    printf 'Landlock shim: %s (%s)\n' "$landlock_shim" "$landlock_answer"
+    ;;
+esac
 
 # ── plugins auth clear, run tree-less from this artifact ────────────────────
 # Every `fermix plugins` verb runs without the supervision tree, so no command
@@ -414,6 +487,193 @@ settings_json="$(cat "$settings_out")"
   fail "fermix settings --json with no daemon must print exactly {\"error\":{\"code\":\"not_running\"}} on stdout, got: $settings_json"
 grep -Fq "daemon is not running" "$settings_err" ||
   fail "fermix settings did not say on stderr why it changed nothing: $(cat "$settings_err")"
+
+# ── fermix always-on in a release, run from this artifact ──────────────────
+# A release build offers Always On only in a home whose settings file turns
+# it on (`FermixCore.Home.AlwaysOnRelease`: `[fermix_core.always_on]
+# enabled = true`, an unsupported switch for testing), read from that file
+# with no engine and no tree. So in a home that does not exist yet a step
+# must refuse before it reads anything: exit 1, exactly one JSON envelope on
+# stdout naming `always_on_unavailable`, the sentence on stderr, and nothing
+# written but the `secret_key_base` every release boot writes
+# (`holds_only_boot_key`): no settings, no role, no Always On state. An
+# artifact that reaches for the engine instead (`engine_stopped`
+# with no daemon) offers Always On to every home and fails here. In a
+# throwaway home whose settings carry the switch, the same step must reach
+# for the engine instead, exactly `engine_stopped` with no daemon, and leave
+# the settings as they were: an artifact that still refuses there does not
+# read the switch from the home's own file. This stage runs the artifact the
+# release is about to publish. It runs before the migrate-to-app stage
+# because that stage ends the script on a Linux target. When Always On
+# ships, the gate goes and the first half expects `engine_stopped` too.
+always_on_home="$runtime_root/always-on-home"
+always_on_out="$runtime_root/always-on.out"
+always_on_err="$runtime_root/always-on.err"
+always_on_status=0
+env -u FERMIX_OPIK_ENABLED HOME="$home" FERMIX_HOME="$always_on_home" \
+  "$artifact" always-on create-server --json < /dev/null > "$always_on_out" 2> "$always_on_err" ||
+  always_on_status=$?
+printf '%s\n' "$(cat "$always_on_err")"
+[ "$always_on_status" -eq 1 ] ||
+  fail "fermix always-on create-server with no daemon must exit 1, got $always_on_status"
+always_on_json="$(cat "$always_on_out")"
+always_on_expected='{"error":{"code":"always_on_unavailable","sentence":"Always On is not in this release of Fermix yet."},"ok":false,"schema_version":1}'
+[ "$always_on_json" = "$always_on_expected" ] ||
+  fail "fermix always-on --json in a release must print exactly the always_on_unavailable envelope on stdout, got: $always_on_json"
+grep -Fq "Always On is not in this release of Fermix yet." "$always_on_err" ||
+  fail "fermix always-on did not say on stderr why it took no step: $(cat "$always_on_err")"
+holds_only_boot_key "$always_on_home" ||
+  fail "fermix always-on wrote more than the boot's secret_key_base into $always_on_home with no daemon: $(ls -A "$always_on_home")"
+
+switched_home="$runtime_root/always-on-switched-home"
+switched_settings='[fermix_core.always_on]
+enabled = true'
+mkdir -m 700 "$switched_home"
+printf '%s\n' "$switched_settings" > "$switched_home/config.toml"
+chmod 600 "$switched_home/config.toml"
+always_on_status=0
+env -u FERMIX_OPIK_ENABLED HOME="$home" FERMIX_HOME="$switched_home" \
+  "$artifact" always-on create-server --json < /dev/null > "$always_on_out" 2> "$always_on_err" ||
+  always_on_status=$?
+printf '%s\n' "$(cat "$always_on_err")"
+[ "$always_on_status" -eq 1 ] ||
+  fail "fermix always-on create-server with the switch and no daemon must exit 1, got $always_on_status"
+always_on_json="$(cat "$always_on_out")"
+always_on_expected='{"error":{"code":"engine_stopped","sentence":"Fermix is not running from this home, and this needs it. Start it, then try again."},"ok":false,"schema_version":1}'
+[ "$always_on_json" = "$always_on_expected" ] ||
+  fail "fermix always-on --json in a home whose settings turn Always On on must print exactly the engine_stopped envelope on stdout, got: $always_on_json"
+grep -Fq "Fermix is not running from this home" "$always_on_err" ||
+  fail "fermix always-on with the switch did not say on stderr why it took no step: $(cat "$always_on_err")"
+[ "$(cat "$switched_home/config.toml")" = "$switched_settings" ] ||
+  fail "fermix always-on changed the settings of $switched_home with no daemon: $(cat "$switched_home/config.toml")"
+
+# ── fermix home export, import and mark-moved, run from this artifact ──────
+# `fermix home` runs without the supervision tree and carries a whole home: it
+# probes the control socket, seals and opens the archive with the packaged
+# crypto, writes the restored tree and its epoch, and writes the moved marker.
+# ExUnit boots the tree, so only this stage proves the packaged binary does all
+# of that on its own. It runs before the migrate-to-app stage because that
+# stage ends the script on a Linux target.
+#
+# The source home is a fresh one holding a primary epoch and one setting that
+# names its own path, and no daemon. The passphrase comes from a file, so no
+# terminal is needed. The archive is restored into a second fresh root, which
+# must come back one epoch higher with the setting moved to the new path. The
+# source is then marked moved twice: the first must succeed and the second
+# refuse, because the first move is the one that counts.
+home_src="$runtime_root/home-src"
+home_dst="$runtime_root/home-dst"
+home_archive="$runtime_root/home.fxhome"
+home_passphrase="$runtime_root/home-passphrase"
+mkdir -m 700 "$home_src" "$home_src/mobile"
+printf '5\n' > "$home_src/mobile/primary_epoch"
+chmod 600 "$home_src/mobile/primary_epoch"
+printf '[sandbox]\nworkspace_root = "%s/workspace"\n' "$home_src" > "$home_src/config.toml"
+printf 'invented-verify-passphrase\n' > "$home_passphrase"
+chmod 600 "$home_passphrase"
+
+home_status=0
+home_output="$(
+  env -u FERMIX_OPIK_ENABLED HOME="$home" FERMIX_HOME="$home_src" \
+    "$artifact" home export "$home_archive" --passphrase-file "$home_passphrase" < /dev/null 2>&1
+)" || home_status=$?
+printf '%s\n' "$home_output"
+[ "$home_status" -eq 0 ] || fail "fermix home export must exit 0 in the throwaway world, got $home_status"
+[ -f "$home_archive" ] || fail "fermix home export wrote no archive at $home_archive"
+case "$home_output" in
+  *"primary epoch: 5"*) ;;
+  *) fail "fermix home export did not report the home's primary epoch" ;;
+esac
+
+home_status=0
+home_output="$(
+  env -u FERMIX_OPIK_ENABLED HOME="$home" FERMIX_HOME="$home_src" \
+    "$artifact" home import "$home_archive" --into "$home_dst" \
+    --passphrase-file "$home_passphrase" < /dev/null 2>&1
+)" || home_status=$?
+printf '%s\n' "$home_output"
+[ "$home_status" -eq 0 ] || fail "fermix home import must exit 0 into an empty root, got $home_status"
+[ "$(cat "$home_dst/mobile/primary_epoch" 2>/dev/null)" = 6 ] ||
+  fail "fermix home import must make the restored home the next primary, epoch 6"
+grep -Fq "\"$home_dst/workspace\"" "$home_dst/config.toml" 2>/dev/null ||
+  fail "fermix home import did not move the setting that named the old home to the new one"
+[ ! -e "$home_dst/moved.json" ] || fail "fermix home import marked the restored home moved"
+
+# `fermix home status` is Always On's screen, and a release build offers
+# Always On only in a home whose settings turn it on
+# (`FermixCore.Home.AlwaysOnRelease`), so in a home without the switch it
+# refuses as `fermix always-on` does, before reading anything: exit 1 and
+# exactly the `always_on_unavailable` envelope. An artifact that answers the
+# home's facts there offers Always On to every home. With the switch added
+# to the same home's settings it answers from the home's own files with no
+# daemon, as an Always On server's first boot and its nightly update read
+# it: exit 0, the role and the update ceiling. When Always On ships, the
+# gate goes and the first half reads the home's files too.
+status_out="$runtime_root/home-status.out"
+status_err="$runtime_root/home-status.err"
+home_status=0
+env -u FERMIX_OPIK_ENABLED HOME="$home" FERMIX_HOME="$home_src" \
+  "$artifact" home status --json < /dev/null > "$status_out" 2> "$status_err" || home_status=$?
+printf '%s\n' "$(cat "$status_err")"
+[ "$home_status" -eq 1 ] ||
+  fail "fermix home status in a release must exit 1, got $home_status: $(cat "$status_out")"
+status_expected='{"error":{"code":"always_on_unavailable","sentence":"Always On is not in this release of Fermix yet."},"ok":false,"schema_version":1}'
+[ "$(cat "$status_out")" = "$status_expected" ] ||
+  fail "fermix home status --json in a release must print exactly the always_on_unavailable envelope on stdout, got: $(cat "$status_out")"
+
+printf '\n[fermix_core.always_on]\nenabled = true\n' >> "$home_src/config.toml"
+home_status=0
+env -u FERMIX_OPIK_ENABLED HOME="$home" FERMIX_HOME="$home_src" \
+  "$artifact" home status --json < /dev/null > "$status_out" 2> "$status_err" || home_status=$?
+printf '%s\n' "$(cat "$status_err")"
+[ "$home_status" -eq 0 ] ||
+  fail "fermix home status in a home whose settings turn Always On on must exit 0, got $home_status: $(cat "$status_out")"
+for field in '"ok":true' '"role":"primary"' '"update_ceiling":'; do
+  grep -Fq "$field" "$status_out" ||
+    fail "fermix home status --json with the switch must answer the home's role and update ceiling ($field), got: $(cat "$status_out")"
+done
+
+moved_out="$runtime_root/home-moved.out"
+moved_err="$runtime_root/home-moved.err"
+home_status=0
+env -u FERMIX_OPIK_ENABLED HOME="$home" FERMIX_HOME="$home_src" \
+  "$artifact" home mark-moved --to verify-host --json < /dev/null > "$moved_out" 2> "$moved_err" || home_status=$?
+printf '%s\n' "$(cat "$moved_err")"
+[ "$home_status" -eq 0 ] || fail "fermix home mark-moved must exit 0 the first time, got $home_status: $(cat "$moved_out")"
+grep -Fq '"ok":true' "$moved_out" || fail "fermix home mark-moved --json did not print its result: $(cat "$moved_out")"
+[ -f "$home_src/moved.json" ] || fail "fermix home mark-moved wrote no marker"
+
+home_status=0
+env -u FERMIX_OPIK_ENABLED HOME="$home" FERMIX_HOME="$home_src" \
+  "$artifact" home mark-moved --to verify-host --json < /dev/null > "$moved_out" 2> "$moved_err" || home_status=$?
+[ "$home_status" -eq 1 ] || fail "a second fermix home mark-moved must exit 1, got $home_status"
+grep -Fq '"code":"already_moved"' "$moved_out" ||
+  fail "a second fermix home mark-moved must refuse with already_moved, got: $(cat "$moved_out")"
+
+# `fermix home enroll` makes a fresh home a candidate with no engine running:
+# it reads the code file and decodes the code through the packaged binary's
+# tree-less path, and a refusal must leave the home and the code file as it
+# found them. The home does not exist yet and the code file holds text that is
+# no enrollment code, so the verb must exit 1, say why on stderr, and leave
+# nothing in the home but the `secret_key_base` every release boot writes
+# (`holds_only_boot_key`): no candidate, no settings, no role, nothing else.
+# The code file stays.
+enroll_home="$runtime_root/enroll-home"
+enroll_code="$runtime_root/enroll-code"
+enroll_err="$runtime_root/enroll.err"
+printf 'fxenroll1.not-a-code\n' > "$enroll_code"
+home_status=0
+env -u FERMIX_OPIK_ENABLED HOME="$home" FERMIX_HOME="$enroll_home" \
+  "$artifact" home enroll --code-file "$enroll_code" < /dev/null > /dev/null 2> "$enroll_err" || home_status=$?
+printf '%s\n' "$(cat "$enroll_err")"
+[ "$home_status" -eq 1 ] ||
+  fail "fermix home enroll with an invalid code must exit 1, got $home_status: $(cat "$enroll_err")"
+grep -Fq "not an enrollment code" "$enroll_err" ||
+  fail "fermix home enroll did not say on stderr why it refused: $(cat "$enroll_err")"
+[ ! -e "$enroll_home/candidate" ] || fail "fermix home enroll wrote a candidate from an invalid code"
+holds_only_boot_key "$enroll_home" ||
+  fail "fermix home enroll left more than the boot's secret_key_base at $enroll_home: $(ls -A "$enroll_home")"
+[ -f "$enroll_code" ] || fail "fermix home enroll removed the code file it refused"
 
 # ── migrate-to-app preflight, run from this artifact ────────────────────────
 # `fermix migrate-to-app` with no `--yes` is a plan: it inspects the account

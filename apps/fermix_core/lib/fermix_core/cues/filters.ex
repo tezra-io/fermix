@@ -16,11 +16,13 @@ defmodule FermixCore.Cues.Filters do
 
   Each claim runs as one task under `FermixCore.Cues.FilterSupervisor`
   (`Task.Supervisor.async_nolink/2`, monitored). The task opens the call's
-  run (`Cues.Filter.Telemetry`), asks `Cues.Filter.Llm.decide/2`, writes the
+  run (`Cues.Filter.Telemetry`), asks `Cues.Filter.decide/2`, writes the
   result itself through the Repo (fenced on its `filter_call_id`), emits the
   filter-scoped lifecycle phase, sends any notice and closes the run. When it
   reports back, this process frees the slot, wakes the scheduler on a pass and
-  claims again.
+  claims again. A pass whose watcher was paused while the call ran is withheld
+  by the settle (its delivery waits `pending` for the resume): no phase, no
+  wake.
 
   A task that exits abnormally is a content failure for its cue; one shut down
   with its supervisor is `aborted` (the delivery goes back unchanged, as the
@@ -56,8 +58,10 @@ defmodule FermixCore.Cues.Filters do
   require Logger
 
   alias FermixCore.Cues
+  alias FermixCore.Cues.Filter
   alias FermixCore.Cues.Filter.Llm
   alias FermixCore.Cues.Filter.Telemetry, as: FilterTelemetry
+  alias FermixCore.Cues.FollowUps
   alias FermixCore.Cues.Notices
   alias FermixCore.Cues.Telemetry
   alias FermixCore.Memory.Repo
@@ -84,7 +88,7 @@ defmodule FermixCore.Cues.Filters do
   `Process.send_after/3` to this process), `:task_supervisor` (default
   `FermixCore.Cues.FilterSupervisor`), `:notices` (default `Cues.Notices`) and
   `:notice_opts` (appended to every notice call's opts), `:llm` (opts for
-  `Cues.Filter.Llm.decide/2`'s seams) and `:wake_scheduler` (default
+  `Cues.Filter.decide/2`'s seams) and `:wake_scheduler` (default
   `Cues.wake_scheduler/0`).
   """
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -200,7 +204,8 @@ defmodule FermixCore.Cues.Filters do
     held = state.in_flight |> Map.values() |> Enum.map(& &1.run.call_id)
     request = {:reclaim_orphans, held, cutoff, now}
 
-    case Repo.cues_call(CuesFilterSql, request, repo_opts(state)) do
+    # The next sweep reclaims again, so one the Repo reaches late is skipped.
+    case Repo.cues_call(CuesFilterSql, request, skip_when_late(repo_opts(state))) do
       {:ok, %{reclaimed: []}} ->
         state
 
@@ -237,7 +242,11 @@ defmodule FermixCore.Cues.Filters do
     now = state.clock.()
     busy = state.in_flight |> Map.values() |> Enum.map(& &1.run.watcher_id)
 
-    case Repo.cues_call(CuesFilterSql, {:claim, now, free, busy}, repo_opts(state)) do
+    # A claim the next dispatch makes again: one the Repo reaches after this
+    # call gave up is skipped, so no row is claimed that no task holds (CUE-1).
+    request = {:claim, now, free, busy}
+
+    case Repo.cues_call(CuesFilterSql, request, skip_when_late(repo_opts(state))) do
       {:ok, %{claims: claims, over_budget: over, next_at: next_at}} ->
         Enum.each(over, &notify(state, &1.watcher_id, :filter_budget_reached, budget_data(&1)))
         state = Enum.reduce(claims, state, &start_call/2)
@@ -276,7 +285,7 @@ defmodule FermixCore.Cues.Filters do
     started = monotonic_ms()
     FilterTelemetry.run_start(run)
 
-    result = Llm.decide(claim, Keyword.put(context.llm_opts, :session_id, claim.session_id))
+    result = Filter.decide(claim, Keyword.put(context.llm_opts, :session_id, claim.session_id))
     reply = settle(context, run, result)
     finish(context, run, result, reply, monotonic_ms() - started)
     {:settled, match?({:ok, %{passed?: true}}, reply)}
@@ -395,6 +404,10 @@ defmodule FermixCore.Cues.Filters do
 
   # --- lifecycle and notices ----------------------------------------------------------
 
+  # A pass withheld because its watcher was paused while the call ran passed
+  # nothing, so it has no phase; the call's run still closes as the pass it was.
+  defp emit_phase(_run, _result, %{result: :withheld}), do: :ok
+
   defp emit_phase(run, result, outcome) do
     {phase, extra} = phase(result, outcome)
 
@@ -414,6 +427,7 @@ defmodule FermixCore.Cues.Filters do
       )
 
     Telemetry.lifecycle(phase, %{}, Map.reject(metadata, fn {_key, value} -> is_nil(value) end))
+    FollowUps.emit_triggered(Map.get(outcome, :follow_up), run.source_ref)
   end
 
   defp phase({:pass, reason, _hint}, _outcome), do: {:passed, %{decision: :pass, content: reason}}
@@ -435,7 +449,7 @@ defmodule FermixCore.Cues.Filters do
     base = %{watcher_name: outcome.watcher_name, waiting: outcome.waiting}
 
     if outcome.held_now?,
-      do: notify(context, run.watcher_id, :filter_held, Map.put(base, :error, message))
+      do: notify(context, run.watcher_id, :filter_held, held_data(base, result, message))
 
     if outcome.recovered?, do: notify(context, run.watcher_id, :filter_recovered, base)
 
@@ -449,6 +463,14 @@ defmodule FermixCore.Cues.Filters do
 
   defp failure_message({_status, %{message: message}}), do: message
   defp failure_message(_decision), do: nil
+
+  # A missing route's sentence is Fermix's own and says what to set up, so the
+  # hold's notice carries it; a provider's message may echo the item, and a
+  # notice carries no cue text.
+  defp held_data(base, {:provider_failure, %{kind: :no_route}}, message),
+    do: Map.merge(base, %{error: message, sentence: message})
+
+  defp held_data(base, _result, message), do: Map.put(base, :error, message)
 
   defp budget_data(over) do
     %{watcher_name: over.watcher_name, waiting: over.waiting, budget: over.budget}
@@ -488,6 +510,8 @@ defmodule FermixCore.Cues.Filters do
   end
 
   defp repo_opts(%{repo: repo}), do: Repo.periodic_opts(repo, Timeouts.repo_call())
+
+  defp skip_when_late(repo_opts), do: Keyword.put(repo_opts, :skip_when_late, true)
 
   defp monotonic_ms, do: System.monotonic_time(:millisecond)
 

@@ -19,6 +19,7 @@ defmodule FermixCore.Management.Settings do
 
   alias FermixCore.Auth.Redaction
   alias FermixCore.Browser.Config, as: BrowserConfig
+  alias FermixCore.Home.Snapshot.Settings, as: SnapshotSettings
   alias FermixCore.Management.Mobile, as: PhoneChannel
   alias FermixCore.Management.Settings.AnswerMap
   alias FermixCore.Management.Settings.Assistant
@@ -29,6 +30,7 @@ defmodule FermixCore.Management.Settings do
   alias FermixCore.Management.Settings.Providers
   alias FermixCore.Management.Settings.Row
   alias FermixCore.Management.Settings.Secrets
+  alias FermixCore.Management.Settings.Snapshots
   alias FermixCore.Management.Settings.Source
   alias FermixCore.Management.Settings.Tools
   alias FermixCore.Management.Settings.Voice
@@ -41,7 +43,18 @@ defmodule FermixCore.Management.Settings do
 
   require Logger
 
-  @families [Providers, Assistant, Channels, Mobile, CuesSection, Voice, Tools, Browser, Secrets]
+  @families [
+    Providers,
+    Assistant,
+    Channels,
+    Mobile,
+    CuesSection,
+    Voice,
+    Tools,
+    Browser,
+    Secrets,
+    Snapshots
+  ]
 
   @type section :: %{id: String.t(), pane: String.t(), title: String.t()}
   @type write_error ::
@@ -77,6 +90,29 @@ defmodule FermixCore.Management.Settings do
       nil -> {:error, {:unknown_section, section}}
       module -> {:ok, view(section, module, opts)}
     end
+  end
+
+  @doc """
+  What an owner reads each secret as outside its row, by the id `secret.set`
+  takes: the label its row shows, with the section's title after it when the
+  label does not name it ("Anthropic key", "Bot token in Telegram"). The first
+  section that shows a secret names it; a secret no section shows has no name
+  here. `opts` as `get/2`'s.
+  """
+  @spec secret_names(keyword()) :: %{String.t() => String.t()}
+  def secret_names(opts \\ []) when is_list(opts) do
+    snapshot = snapshot(opts)
+
+    for %{id: id, title: title} <- sections(opts),
+        row <- family_rows(family(id, opts), id, snapshot, opts),
+        row["kind"] == "secret",
+        reduce: %{} do
+      names -> Map.put_new(names, row["key"], secret_name(row["label"], title))
+    end
+  end
+
+  defp secret_name(label, title) do
+    if String.contains?(label, title), do: label, else: "#{label} in #{title}"
   end
 
   @doc """
@@ -208,10 +244,12 @@ defmodule FermixCore.Management.Settings do
 
   # The browser writer checks the merged block before it writes and answers a
   # value it refuses in the browser's own sentence, which names the control the
-  # operator used exactly as a normalizer's raised message does.
+  # operator used exactly as a normalizer's raised message does. The cues
+  # writer names the row its refusal is about, which a multi-key write cannot.
   defp guarded_commit(writer, answers, field) do
     case commit(writer, answers) do
       {:error, {:invalid_value, sentence}} -> {:error, {:refused, field, sentence}}
+      {:error, {:invalid_value, row, sentence}} -> {:error, {:refused, row, sentence}}
       result -> result
     end
   rescue
@@ -233,6 +271,7 @@ defmodule FermixCore.Management.Settings do
   defp commit(:meetings, answers), do: MeetingsConfig.save(answers)
   defp commit(:cues, answers), do: CuesSection.save(answers)
   defp commit(:browser, answers), do: BrowserConfig.save(answers)
+  defp commit(:snapshots, answers), do: SnapshotSettings.save(answers)
 
   defp commit(:sandbox, answers) do
     Wizard.set_sandbox_overrides(

@@ -44,7 +44,8 @@ defmodule FermixChannels.Companion.Connection do
   A mandate's proposals reach only a connection on version 4 that was placed
   as the owner's (`:independent`): `proposal` and `proposal_resolved`
   (`Protocol.owner_server_events/0`) are written to no other, as an event a
-  later version brought is not, and the card of every proposal still waiting
+  later version brought is not (a watcher's follow-up card needs version 5,
+  `Protocol.server_payload_version/2`), and the card of every proposal still waiting
   follows the `server_hello` in the step that joined the registry, read from
   `cue_proposals` (`Companion.Proposals.waiting/1`), so it survives a restart.
   A `proposal_answer` is served in the step that read it (one or two Repo
@@ -53,6 +54,82 @@ defmodule FermixChannels.Companion.Connection do
   or `error: request_failed` with core's sentence. From a connection placed
   otherwise it is refused, and nothing runs. `:proposal_opts` are core's
   `Cues.Proposals` options (a test's repo and seams).
+
+  ## Always On (version 6, M75 lean v1 §7)
+
+  A connection whose hello declared version 6 subscribes to the Always On
+  watch (`FermixCore.Home.StatusWatch`, `:status_watch`, nil for none) in the
+  step that joins the registry, before its `server_hello` is written, and
+  writes `home_status_changed` each time the watch tells it: once after the
+  hello unless Always On is off, then at each change. The app reads
+  `home.status` itself. A connection on version 5 never subscribes.
+
+  ## Lists (version 6, M85 §07)
+
+  The owner's lists, for a connection on version 6 placed as the owner's
+  (`FermixCore.Checklists.Registry` refuses any other with its sentence):
+  `checklists_pull` is answered `checklists`, the index, and from then on
+  this connection hears every change as the index again; `checklist_pull` is
+  answered `checklist`, the whole list (with the rows removed in the last 30
+  days when it says `removed`), and the connection holds the list, at most 16
+  (`Companion.Checklists`). A `checklist_edit` runs in the step that read it,
+  through the same transaction as the model's, answered `accepted` (a
+  `client_msg_id` already applied is `duplicate: true` and changes nothing) or
+  `error: request_failed` with the engine's sentence; a `create` holds the
+  list it made. Pulls are answered in the step that read them, as pages are.
+
+  Every committed change, whoever made it, reaches this process as
+  `{:checklists_changed, lists}` (`Companion.ChecklistNotifier`); what it
+  holds is marked pending, and when its window ends (`:checklist_window_ms`,
+  100 ms) each pending list goes out once, whole, with `made`, then the index.
+  A connection that never pulled is sent nothing, and a version 5 one cannot
+  pull. A turn this connection carries says it draws lists
+  (`metadata.draws_lists`) once it has pulled the index. `:checklist_opts` are
+  the Registry's options (a test's repo and notifier).
+
+  ## Files (version 7)
+
+  The hello tells the owner's connection (`:independent`) where to hand the
+  daemon a file, `attachments: {dir, max_bytes}`, read from
+  `Companion.Inbox` (`:inbox`) while the media store runs; any other
+  connection, a connection with no inbox (`nil`, as a desktop's tunnel on the
+  primary is started, since the app is on another computer) and a hello
+  while the store is down get none. Every hello carries `commands`, the slash
+  commands of `Gateway.Commands.Registry.catalog/0`, the phone's list.
+
+  An `attach_file` from a version 7 owner's connection is served in the step
+  that read it, as a grant is: the inbox reads the file into the media store
+  and removes it, and the answer is `attach_status` (`present`) or
+  `error: request_failed` with the inbox's sentence and the `attach_id`. From
+  any other connection it is refused the same way and its file removed
+  unread, and with no inbox it is refused too (an engine in the device role
+  refuses it as every write, naming the `attach_id`). A `msg` that names an
+  attachment is taken only from a
+  version 7 owner's connection, and refused `attachments_unsupported` (and the
+  connection closed) from any other; one whose attachment the store no longer
+  holds fails after `accepted` with its sentence, the connection kept.
+
+  ## The primary epoch (M75 D14)
+
+  The hello carries the home's primary epoch, read through
+  `Mobile.Identity.primary_epoch/1` when the hello arrives (`:primary_epoch`, a
+  test's stand-in), since no process holds the identity for this socket. Only
+  a home that never booted as the primary has none, which a device-role
+  desktop can be, and announces none. The primary refuses a client that has
+  seen a higher one (`stale_primary`) and joins nothing. A device-role engine
+  (`FermixCore.Home.Role`, `:engine_role` in `:request_opts` its stand-in, as
+  for `Companion.Requests`) refuses no client for it: its home is a retired
+  copy, and refusing a lower primary is the client's rule. Every hello names
+  the engine's role (`server_hello.role`), so a client compares a primary's
+  epoch only.
+
+  While this home moves away (`FermixCore.Home.Move.moving_to/1`,
+  `:move_in_progress` a test's stand-in), a device-role refusal is
+  `primary_unreachable` with the sentence that the message is kept until the
+  move is done, and the connection is closed, as a desktop's is while its
+  server is unreachable: the app keeps the message and sends it again once
+  the engine is back. A device with no move under way keeps `request_failed`. An epoch that cannot be read refuses the hello
+  (`primary_epoch_unavailable`).
 
   ## Who is on the other end (SIDE-V1)
 
@@ -72,15 +149,25 @@ defmodule FermixChannels.Companion.Connection do
 
   alias FermixChannels.Channels.Companion
   alias FermixChannels.Companion.Approvals
+  alias FermixChannels.Companion.Checklists
   alias FermixChannels.Companion.Fanout
+  alias FermixChannels.Companion.Inbox
   alias FermixChannels.Companion.MediaGrants
   alias FermixChannels.Companion.Output
   alias FermixChannels.Companion.Proposals
   alias FermixChannels.Companion.Requests
   alias FermixChannels.Companion.Turns
+  alias FermixChannels.Gateway.Commands.Registry, as: CommandRegistry
+  alias FermixChannels.Mobile.Identity
+  alias FermixCore.Checklists.Registry, as: ChecklistRegistry
   alias FermixCore.Companion.Protocol
   alias FermixCore.Companion.Timeline
+  alias FermixCore.Home.Move
+  alias FermixCore.Home.Role
+  alias FermixCore.Home.StatusWatch
+  alias FermixCore.Setup.ConfigStore
   alias FermixCore.SocketPeer
+  alias FermixCore.Text
 
   @profile "main"
   @max_pending_requests 32
@@ -90,6 +177,9 @@ defmodule FermixChannels.Companion.Connection do
   @max_page_bytes 60 * 1_024
   @handover_timeout_ms 5_000
   @task_not_running_message "No task of that call is still running under that revision."
+  @checklist_window_ms 100
+  @max_error_message_bytes 512
+  @attachment_gone_message "Fermix no longer has a file this message names. Attach it again."
 
   # The closed vocabulary of `error.reason` this socket sends, besides
   # `unsupported_protocol_version`, `max_clients_reached` (the endpoint's),
@@ -98,7 +188,8 @@ defmodule FermixChannels.Companion.Connection do
   @named_reasons ~w(
     invalid_json invalid_event missing_type attachments_unsupported missing_protocol_version
     invalid_protocol_version line_too_large handshake_required unexpected_client_hello
-    client_message_conflict unsupported_profile request_backlog_full
+    client_message_conflict unsupported_profile request_backlog_full stale_primary
+    primary_epoch_unavailable primary_unreachable
   )a
 
   @type state :: map()
@@ -146,11 +237,23 @@ defmodule FermixChannels.Companion.Connection do
       # The grants server, and the module that speaks to it (a test's stand-in).
       media_grants: Keyword.get(opts, :media_grants, MediaGrants),
       media_grants_module: Keyword.get(opts, :media_grants_module, MediaGrants),
+      # The attachment inbox (version 7), nil for none.
+      inbox: Keyword.get(opts, :inbox),
       proposal_opts: Keyword.get(opts, :proposal_opts, []),
+      # The Always On watch a version 6 connection subscribes to.
+      status_watch: Keyword.get(opts, :status_watch, StatusWatch),
+      # The owner's lists (moduledoc): what this connection holds, the
+      # Registry's options, and how long a change waits to go out.
+      checklists: Checklists.new(),
+      checklist_opts: Keyword.get(opts, :checklist_opts, []),
+      checklist_window_ms: Keyword.get(opts, :checklist_window_ms, @checklist_window_ms),
       # Placed once at handover, before any line is read (moduledoc); the
       # daemon's process and platform are seams a test stands in for.
       daemon_os_pid: Keyword.get(opts, :daemon_os_pid, String.to_integer(System.pid())),
       os: Keyword.get(opts, :os, :os.type()),
+      primary_epoch: Keyword.get(opts, :primary_epoch, fn -> Identity.primary_epoch() end),
+      move_in_progress:
+        Keyword.get(opts, :move_in_progress, fn -> Move.moving_to(ConfigStore.fermix_home()) end),
       caller: nil
     }
 
@@ -191,8 +294,19 @@ defmodule FermixChannels.Companion.Connection do
   def handle_info({:companion_stream, turn_id, update}, state),
     do: write_stream(turn_id, update, state)
 
+  # Always On changed (version 6): the client reads `home.status` itself.
+  def handle_info(:home_status_changed, state),
+    do: write_event(%{"t" => "home_status_changed"}, state)
+
+  def handle_info({:checklists_changed, changes}, state) do
+    {lists, pending?} = Checklists.changed(state.checklists, changes)
+    {:noreply, arm_checklists(%{state | checklists: lists}, pending?)}
+  end
+
+  def handle_info(:checklists_flush, state), do: flush_checklists(state)
+
   def handle_info({:companion_request_failed, client_msg_id, reason}, state),
-    do: write_request_error(reason, client_msg_id, state)
+    do: write_request_error(while_moving(reason, state), client_msg_id, state)
 
   def handle_info({:DOWN, ref, :process, _pid, reason}, %{worker: {ref, client_msg_id}} = state) do
     state = %{state | worker: nil}
@@ -267,10 +381,84 @@ defmodule FermixChannels.Companion.Connection do
   # An event a later version brought is not in the vocabulary of a connection
   # whose hello declared an older one.
   defp dispatch(%{type: type} = event, state) do
-    if Protocol.client_event_version(type) <= state.version,
-      do: serve(event, state),
-      else: refuse({:unknown_event, type}, state)
+    cond do
+      Protocol.client_event_version(type) > state.version -> refuse({:unknown_event, type}, state)
+      not attachments_admitted?(event, state) -> refuse(:attachments_unsupported, state)
+      true -> serve_admitted(event, state)
+    end
   end
+
+  # A `msg` names an attachment only on the version that brought
+  # `attach_file`, from the owner's connection, the only one an `attach_file`
+  # is taken from (moduledoc).
+  defp attachments_admitted?(%{type: "msg", payload: %{"attach_ids" => [_ | _]}}, state) do
+    state.version >= Protocol.client_event_version("attach_file") and
+      state.caller == :independent
+  end
+
+  defp attachments_admitted?(_event, _state), do: true
+
+  # The events that read or write the home's store, besides a `msg` or
+  # `command`, which `Requests.request/3` refuses itself before it claims
+  # anything.
+  @store_events ~w(cancel read_state proposal_answer checklist_edit attach_file history_pull
+                   history_search checklists_pull checklist_pull)
+
+  # A device-role engine runs a retired copy of a moved home (M75) and opens
+  # no database: every event that would read or write the store is refused by
+  # name, before anything is read, with the sentence `Requests.request/3`
+  # gives a `msg`.
+  defp serve_admitted(%{type: type} = event, state) when type in @store_events do
+    role = Keyword.get_lazy(state.request_opts, :engine_role, &Role.recorded/0)
+
+    case Role.admit(role) do
+      :ok -> serve(event, state)
+      {:error, refusal} -> refuse_write(event, refusal, state)
+    end
+  end
+
+  defp serve_admitted(event, state), do: serve(event, state)
+
+  # A proposal answer and a list edit name themselves, so the refusal carries
+  # the id; a cancel's id names the request it would stop, which has not failed.
+  defp refuse_write(%{type: type, payload: payload}, refusal, state)
+       when type in ["proposal_answer", "checklist_edit"] do
+    refusal = while_moving(refusal, state)
+
+    case send_event("error", error_payload(refusal, payload["client_msg_id"]), state) do
+      :ok -> {:cont, state}
+      {:error, _reason} -> {:stop, state}
+    end
+  end
+
+  # A file's refusal names it, and the file goes unread.
+  defp refuse_write(%{type: "attach_file", payload: %{"attach_id" => id}}, refusal, state) do
+    :ok = discard_attachment(id, state)
+    error = refusal |> while_moving(state) |> error_payload(nil) |> Map.put("attach_id", id)
+    written(send_event("error", error, state), state)
+  end
+
+  defp refuse_write(_event, refusal, state) do
+    case while_moving(refusal, state) do
+      {:primary_unreachable, _sentence} = moving -> refuse(moving, state)
+      refusal -> answer({:error, refusal}, state)
+    end
+  end
+
+  # A device-role refusal while this home moves away: the message waits, as
+  # for an unreachable server.
+  defp while_moving({:device_role, _sentence} = refusal, state) do
+    case state.move_in_progress.() do
+      {:ok, name} ->
+        {:primary_unreachable,
+         "Fermix is moving this home to #{name}; your message is kept until it is done."}
+
+      :none ->
+        refusal
+    end
+  end
+
+  defp while_moving(reason, _state), do: reason
 
   defp serve(%{type: type} = event, state) when type in ["msg", "command"],
     do: queue_request(event, state)
@@ -293,22 +481,64 @@ defmodule FermixChannels.Companion.Connection do
   defp serve(%{type: "proposal_answer", payload: payload}, state),
     do: proposal_answer(payload, state)
 
+  defp serve(%{type: "checklists_pull", payload: payload}, state),
+    do: checklists_pull(payload, state)
+
+  defp serve(%{type: "checklist_pull", payload: payload}, state),
+    do: checklist_pull(payload, state)
+
+  defp serve(%{type: "checklist_edit", payload: payload}, state),
+    do: checklist_edit(payload, state)
+
+  defp serve(%{type: "attach_file", payload: payload}, state), do: attach_file(payload, state)
+
   # A repeat hello is a protocol violation: the handshake is one transition.
   defp hello(_payload, %{version: version} = state) when is_integer(version),
     do: refuse(:unexpected_client_hello, state)
 
-  defp hello(%{"protocol_version" => version}, state) do
+  defp hello(%{"protocol_version" => version} = payload, state) do
     case Protocol.negotiate(version) do
-      :ok -> join(version, state)
+      :ok -> primary_hello(version, payload["primary_epoch"], state)
       {:error, direction} -> refuse_version(direction, version, state)
     end
   end
 
-  defp join(version, state) do
+  # The client's highest-seen epoch against the home's (moduledoc). The hello
+  # names the engine's role, so a client compares a primary's epoch only.
+  defp primary_hello(version, theirs, state) do
+    role = engine_role(state)
+    named = %{"role" => Atom.to_string(role)}
+
+    case state.primary_epoch.() do
+      {:ok, mine} -> epoch_hello(version, {role, mine}, theirs, state)
+      :absent -> join(version, named, state)
+      {:error, reason} -> refuse_unread_epoch(reason, state)
+    end
+  end
+
+  # Only the primary refuses a client that has met a later primary.
+  defp epoch_hello(version, {role, mine}, theirs, state) do
+    if role == :primary and is_integer(theirs) and theirs > mine,
+      do: refuse_stale_primary(mine, theirs, state),
+      else: join(version, %{"primary_epoch" => mine, "role" => Atom.to_string(role)}, state)
+  end
+
+  defp engine_role(state) do
+    %{role: role} = Keyword.get_lazy(state.request_opts, :engine_role, &Role.recorded/0)
+    role
+  end
+
+  defp join(version, epoch, state) do
     {min, max} = Protocol.supported_version_range()
 
+    server_hello =
+      %{"min_version" => min, "max_version" => max, "commands" => CommandRegistry.catalog()}
+      |> Map.merge(epoch)
+      |> offer_attachments(state)
+
     with {:ok, _owner} <- Registry.register(state.registry, @profile, version),
-         :ok <- send_event("server_hello", %{"min_version" => min, "max_version" => max}, state),
+         :ok <- watch_home(version, state),
+         :ok <- send_event("server_hello", server_hello, state),
          :ok <- send_pending_approvals(state),
          state = %{state | version: version},
          :ok <- send_waiting_proposals(state) do
@@ -318,13 +548,32 @@ defmodule FermixChannels.Companion.Connection do
     end
   end
 
+  # The inbox and the largest file it takes, for the owner's connection alone
+  # and only while the store runs (moduledoc).
+  defp offer_attachments(hello, %{caller: :independent, inbox: inbox}) when inbox != nil do
+    case Inbox.offer(inbox) do
+      {:ok, offer} -> Map.put(hello, "attachments", offer)
+      {:error, :store_not_running} -> hello
+    end
+  end
+
+  defp offer_attachments(hello, _state), do: hello
+
+  # Before the hello is written, so the watch's first word follows it.
+  defp watch_home(version, %{status_watch: watch}) do
+    if watch != nil and Protocol.server_event_version("home_status_changed") <= version,
+      do: StatusWatch.subscribe(watch, self()),
+      else: :ok
+  end
+
   # Every proposal still waiting follows the server_hello, oldest first, for
   # the owner's connection on version 4 alone (moduledoc); one that arrives
   # meanwhile may come twice, and the client keys cards by `proposal_id`.
   defp send_waiting_proposals(state) do
-    if owner_reads?("proposal", state),
-      do: state.proposal_opts |> Proposals.waiting() |> write_all(state),
-      else: :ok
+    state.proposal_opts
+    |> Proposals.waiting()
+    |> Enum.filter(fn %{"t" => type} = event -> owner_reads?(type, event, state) end)
+    |> write_all(state)
   end
 
   defp write_all(events, state) do
@@ -336,10 +585,11 @@ defmodule FermixChannels.Companion.Connection do
     end)
   end
 
-  # A proposal event is written to a connection on its version, placed as the
-  # owner's; every other event only needs the version.
-  defp owner_reads?(type, state) do
-    Protocol.server_event_version(type) <= state.version and
+  # A proposal event is written to a connection on its version (a follow-up's
+  # card, on version 5), placed as the owner's; every other event only needs
+  # the version.
+  defp owner_reads?(type, event, state) do
+    Protocol.server_payload_version(type, event) <= state.version and
       (type not in Protocol.owner_server_events() or state.caller == :independent)
   end
 
@@ -369,6 +619,35 @@ defmodule FermixChannels.Companion.Connection do
         Logger.error("companion connection dropped a waiting approval: #{inspect(reason)}")
         :ok
     end
+  end
+
+  defp refuse_stale_primary(mine, theirs, state) do
+    Logger.warning(
+      "companion hello refused as a stale primary: this engine is at epoch #{mine}, " <>
+        "the client has seen epoch #{theirs}"
+    )
+
+    payload = %{
+      "reason" => "stale_primary",
+      "message" =>
+        "This engine is at epoch #{mine}; you have seen epoch #{theirs}: " <>
+          "the primary moved, reconnect to the current one"
+    }
+
+    _ = send_event("error", payload, state)
+    {:stop, state}
+  end
+
+  defp refuse_unread_epoch(reason, state) do
+    Logger.error("companion hello refused: the primary epoch cannot be read: #{inspect(reason)}")
+
+    payload = %{
+      "reason" => "primary_epoch_unavailable",
+      "message" => Output.error_message({:primary_epoch_unavailable, reason})
+    }
+
+    _ = send_event("error", payload, state)
+    {:stop, state}
   end
 
   defp refuse_version(direction, client_version, state) do
@@ -441,6 +720,200 @@ defmodule FermixChannels.Companion.Connection do
     end
   end
 
+  # --- files (moduledoc) ------------------------------------------------------------
+
+  # Answered in the step that read it, as a grant is: `attach_status` once the
+  # store holds the file, or the inbox's sentence naming the attach id.
+  defp attach_file(%{"attach_id" => id} = payload, state) do
+    {type, answer} = payload |> take_attachment(state) |> attachment_answer(id)
+    written(send_event(type, answer, state), state)
+  end
+
+  defp take_attachment(%{"attach_id" => id}, %{caller: caller} = state)
+       when caller != :independent do
+    :ok = discard_attachment(id, state)
+    {:error, :not_owner}
+  end
+
+  defp take_attachment(_payload, %{inbox: nil}), do: {:error, :no_inbox}
+  defp take_attachment(payload, state), do: Inbox.take(state.inbox, payload)
+
+  defp discard_attachment(_attach_id, %{inbox: nil}), do: :ok
+  defp discard_attachment(attach_id, state), do: Inbox.discard(state.inbox, attach_id)
+
+  defp attachment_answer({:ok, :present}, id),
+    do: {"attach_status", %{"attach_id" => id, "status" => "present"}}
+
+  defp attachment_answer({:error, reason}, id) do
+    Logger.warning("companion connection refused attachment #{id}: #{inspect(reason)}")
+
+    {"error",
+     %{"reason" => "request_failed", "message" => Inbox.describe_error(reason), "attach_id" => id}}
+  end
+
+  # --- lists (moduledoc) ----------------------------------------------------------
+
+  defp checklists_pull(%{"profile_id" => @profile}, state) do
+    case ChecklistRegistry.device_index(state.caller, state.checklist_opts) do
+      {:ok, lists} ->
+        state = %{state | checklists: Checklists.index_pulled(state.checklists)}
+        written(send_event("checklists", Checklists.index_payload(@profile, lists), state), state)
+
+      {:error, reason} ->
+        list_refusal(reason, nil, state)
+    end
+  end
+
+  defp checklists_pull(_payload, state), do: answer({:error, :unsupported_profile}, state)
+
+  defp checklist_pull(%{"profile_id" => @profile, "list_id" => list_id} = payload, state) do
+    removed? = payload["removed"] == true
+
+    case ChecklistRegistry.device_list(list_id, removed?, state.caller, state.checklist_opts) do
+      {:ok, snapshot} ->
+        state = %{state | checklists: Checklists.hold(state.checklists, list_id, removed?)}
+        event = Checklists.list_payload(@profile, snapshot, removed?, %{})
+        written(send_event("checklist", event, state), state)
+
+      {:error, reason} ->
+        list_refusal(reason, nil, state)
+    end
+  end
+
+  defp checklist_pull(_payload, state), do: answer({:error, :unsupported_profile}, state)
+
+  defp checklist_edit(%{"profile_id" => @profile, "client_msg_id" => id} = payload, state) do
+    case ChecklistRegistry.device_edit(payload, state.caller, state.checklist_opts) do
+      {:ok, %{duplicate: false} = done} ->
+        state = hold_made_list(payload, done, state)
+
+        written(
+          send_event("accepted", %{"client_msg_id" => id, "duplicate" => false}, state),
+          state
+        )
+
+      {:ok, %{duplicate: true} = done} ->
+        state = redeliver(done, id, state)
+
+        written(
+          send_event("accepted", %{"client_msg_id" => id, "duplicate" => true}, state),
+          state
+        )
+
+      {:error, reason} ->
+        list_refusal(reason, id, state)
+    end
+  end
+
+  defp checklist_edit(%{"client_msg_id" => id}, state) do
+    case send_event("error", error_payload(:unsupported_profile, id), state) do
+      :ok -> {:cont, state}
+      {:error, _reason} -> {:stop, state}
+    end
+  end
+
+  # A list a device made is one it is drawing.
+  defp hold_made_list(%{"op" => %{"op" => "create"}}, %{list_id: list_id}, state),
+    do: %{state | checklists: Checklists.hold(state.checklists, list_id, false)}
+
+  defp hold_made_list(_payload, _done, state), do: state
+
+  # A duplicate changed nothing, so nobody else hears of it; the device that
+  # sent it again gets the list once more, with what its add had made.
+  defp redeliver(%{list_id: list_id, made: made}, id, state) do
+    if list_id in state.checklists.held do
+      {lists, pending?} = Checklists.redeliver(state.checklists, list_id, id, made)
+      arm_checklists(%{state | checklists: lists}, pending?)
+    else
+      state
+    end
+  end
+
+  defp list_refusal(reason, client_msg_id, state) do
+    message =
+      reason |> ChecklistRegistry.describe_error() |> Text.truncate_utf8(@max_error_message_bytes)
+
+    payload =
+      maybe_put(
+        %{"reason" => "request_failed", "message" => message},
+        "client_msg_id",
+        client_msg_id
+      )
+
+    written(send_event("error", payload, state), state)
+  end
+
+  defp written(:ok, state), do: {:cont, state}
+  defp written({:error, _reason}, state), do: {:stop, state}
+
+  defp arm_checklists(%{checklists: %{timer: nil} = lists} = state, true) do
+    timer = Process.send_after(self(), :checklists_flush, state.checklist_window_ms)
+    %{state | checklists: %{lists | timer: timer}}
+  end
+
+  defp arm_checklists(state, _pending?), do: state
+
+  # The window ended: each pending list once, whole, then the index.
+  defp flush_checklists(state) do
+    if state.checklists.timer, do: Process.cancel_timer(state.checklists.timer)
+    {due, index?, lists} = Checklists.take_due(state.checklists)
+    state = %{state | checklists: lists}
+
+    with {:ok, state} <- push_lists(due, state),
+         {:ok, state} <- push_index(index?, state) do
+      {:noreply, state}
+    else
+      {:stop, state} -> {:stop, :normal, state}
+    end
+  end
+
+  defp push_lists(due, state) do
+    Enum.reduce_while(due, {:ok, state}, fn {list_id, removed?, made}, {:ok, state} ->
+      case push_list(list_id, removed?, made, state) do
+        {:ok, state} -> {:cont, {:ok, state}}
+        {:stop, state} -> {:halt, {:stop, state}}
+      end
+    end)
+  end
+
+  defp push_list(list_id, removed?, made, state) do
+    case ChecklistRegistry.device_list(list_id, removed?, state.caller, state.checklist_opts) do
+      {:ok, snapshot} ->
+        pushed(
+          send_event(
+            "checklist",
+            Checklists.list_payload(@profile, snapshot, removed?, made),
+            state
+          ),
+          state
+        )
+
+      # Swept away since it was pulled: nothing is left to hold.
+      {:error, {:no_such_list, _id}} ->
+        {:ok, %{state | checklists: Checklists.let_go(state.checklists, list_id)}}
+
+      {:error, reason} ->
+        Logger.warning("companion connection could not push list #{list_id}: #{inspect(reason)}")
+        {:ok, state}
+    end
+  end
+
+  defp push_index(false, state), do: {:ok, state}
+
+  defp push_index(true, state) do
+    case ChecklistRegistry.device_index(state.caller, state.checklist_opts) do
+      {:ok, lists} ->
+        pushed(send_event("checklists", Checklists.index_payload(@profile, lists), state), state)
+
+      {:error, reason} ->
+        Logger.warning("companion connection could not push the list index: #{inspect(reason)}")
+        {:ok, state}
+    end
+  end
+
+  defp pushed(:ok, state), do: {:ok, state}
+  defp pushed({:error, _reason}, state), do: {:stop, state}
+
   defp grant_media(ref, state) do
     with {:ok, descriptor} <- media_descriptor(ref, state),
          {:ok, media} <- Timeline.normalize_media_descriptor(descriptor, ref),
@@ -485,7 +958,10 @@ defmodule FermixChannels.Companion.Connection do
   # The caller rides with the request, outside the client's payload, for
   # `Channels.Companion` to stamp on the turn (moduledoc).
   defp queue_request(event, state) do
-    event = Map.put(event, :caller, state.caller)
+    event =
+      event
+      |> Map.put(:caller, state.caller)
+      |> Map.put(:draws_lists, Checklists.draws?(state.checklists))
 
     case start_next_request(%{state | pending: state.pending ++ [event]}) do
       {:noreply, state} -> {:cont, state}
@@ -528,15 +1004,16 @@ defmodule FermixChannels.Companion.Connection do
     do: write_request_error({:request_failed, reason}, client_msg_id, state)
 
   defp write_request_error(reason, client_msg_id, state) do
-    case send_event("error", error_payload(reason, client_msg_id), state) do
-      :ok -> {:noreply, state}
-      {:error, _reason} -> {:stop, :normal, state}
+    case {send_event("error", error_payload(reason, client_msg_id), state), reason} do
+      {:ok, {:primary_unreachable, _sentence}} -> {:stop, :normal, state}
+      {:ok, _reason} -> {:noreply, state}
+      {{:error, _reason}, _refusal} -> {:stop, :normal, state}
     end
   end
 
   defp write_event(%{"t" => type} = event, state) do
     case Protocol.encode_server_event(type, Map.delete(event, "t")) do
-      {:ok, line} -> write_in_version(type, line, state)
+      {:ok, line} -> write_in_version(type, event, line, state)
       {:error, reason} -> drop_event(type, reason, state)
     end
   end
@@ -544,8 +1021,8 @@ defmodule FermixChannels.Companion.Connection do
   # An event a later version brought is not this client's to read, nor a
   # proposal event a connection not placed as the owner's: it is not sent, and
   # is no error.
-  defp write_in_version(type, line, state) do
-    if owner_reads?(type, state),
+  defp write_in_version(type, event, line, state) do
+    if owner_reads?(type, event, state),
       do: write_line(line, state),
       else: {:noreply, state}
   end
@@ -640,6 +1117,19 @@ defmodule FermixChannels.Companion.Connection do
   defp error_fields(:task_not_running),
     do: %{"reason" => "request_failed", "message" => @task_not_running_message}
 
+  # A device-role engine's refusal (`FermixCore.Home.Role`) is a sentence for
+  # the person, written as it is.
+  defp error_fields({:device_role, sentence}) when is_binary(sentence),
+    do: %{"reason" => "request_failed", "message" => sentence}
+
+  defp error_fields({:primary_unreachable, sentence}) when is_binary(sentence),
+    do: %{"reason" => "primary_unreachable", "message" => sentence}
+
+  # A `msg` naming a file the store no longer holds (version 7): its id expired
+  # or was never taken.
+  defp error_fields({:attachment_unavailable, _attach_id, _reason}),
+    do: %{"reason" => "request_failed", "message" => @attachment_gone_message}
+
   # A failure reason can carry an exception and its stacktrace: the message is
   # bounded so the error that reports it can always be written.
   defp error_fields({:request_failed, cause}),
@@ -709,6 +1199,10 @@ defmodule FermixChannels.Companion.Connection do
 
   defp sink(registry, {:profile, profile_id}, event),
     do: Fanout.announce(profile_id, event, companion_registry: registry)
+
+  # A turn's ending, for every connection of this socket and no phone.
+  defp sink(registry, {:companion, profile_id}, event),
+    do: Fanout.announce(profile_id, event, audience: :companion, companion_registry: registry)
 
   defp sink(_registry, nil, _event), do: :ok
 

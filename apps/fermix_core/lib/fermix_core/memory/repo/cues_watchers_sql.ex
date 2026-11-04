@@ -19,16 +19,27 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
     active and removed instructions and its 20 most recent examples.
   - `{:list_watchers}`.
   - `{:update_watcher, id, expected_updated_at, patch, sources | nil, now}` →
-    `{:ok, %{watcher: watcher, passed: [passed]}}`: fenced on `updated_at`, so
-    two changes read from the same state cannot both land; a relinked task is
-    checked in the same transaction. A patch that switches the filter to
-    `none` also passes the watcher's `pending` deliveries in that transaction,
-    so nothing waits for a filter that no longer runs; `passed` lists each
-    one's `delivery_id`, `cue_id` and `source_ref`, in id order.
+    `{:ok, %{watcher: watcher, passed: [passed], expired: [expired]}}`: fenced
+    on `updated_at`, so two changes read from the same state cannot both land;
+    a relinked task is checked in the same transaction. New `sources` expire
+    the watcher's `pending` and `filtering` deliveries from every source it no
+    longer has (`watcher_removed`, no gap; a call on a `filtering` one then
+    settles stale); `expired` lists them. A patch that switches the filter to
+    `none` then passes the watcher's remaining `pending` and `filtering`
+    deliveries in that transaction, so nothing waits for a filter that no
+    longer runs; `passed` lists them. Each entry is a `delivery_id`, `cue_id`
+    and `source_ref`, in id order.
   - `{:remove_watcher, id, now}`: refused (`:busy`) while a delivery of it is
-    `filtering` or `claimed`; otherwise its `pending` and `passed` deliveries
-    expire (`watcher_removed`), one gap per source they came from, and the
-    watcher row goes (its sources, instructions and examples cascade).
+    `filtering` or `claimed` (`:busy`) or its follow-up's job holds a run
+    (`:follow_up_running`); otherwise its
+    `pending` and `passed` deliveries expire (`watcher_removed`), one gap per
+    source they came from, its follow-up's waiting and starting triggers are
+    refused, and the watcher row goes (its sources, instructions and examples
+    cascade). Its follow-up's job is the caller's to remove.
+  - `{:remove_follow_up, id, expected_updated_at, now}`: the watcher's
+    follow-up stopped, fenced as an update is, refused (`:follow_up_running`)
+    while its run holds the job; its open triggers are refused and its
+    columns cleared.
   - `{:change_instructions, id, %{add: texts, remove: numbers}, from, now, cap}`,
     `{:restore_instruction, id, number, from, now, cap}`,
     `{:merge_instructions, id, numbers, text, from, now}`: one transaction each,
@@ -39,8 +50,11 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
     `{:add_drop_example, id, cue_id, label, note, now}` (a stream watcher's
     recent drop, kept by `CuesSql`'s `{:store_item, …}` with no delivery; the
     cue's snapshot is copied) and `{:remove_example, id, example_id, now}`.
-  - `{:watcher_for_job, job_id}`.
-  - Notice claims: `{:claim_watcher_notice, id, kind, rule, now}`,
+  - `{:watcher_for_job, job_id}`: the watcher whose task or follow-up is
+    `job_id`, or nil.
+  - Notice claims: `{:claim_watcher_notice, id, kind, rule, now}` (a claimed
+    target names `notice_job_id`, the job whose delivery a watcher notice
+    takes: its task's, else its follow-up's),
     `{:release_watcher_notice, id, kind, rule, previous}`,
     `{:claim_source_notice, ref, kind, rule, now}`,
     `{:release_source_notice, ref, kind, previous}`,
@@ -49,15 +63,18 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
   """
 
   alias FermixCore.Cues
+  alias FermixCore.Memory.Repo.CuesFollowUpAllowSql
+  alias FermixCore.Memory.Repo.CuesFollowUpSql
   alias FermixCore.Memory.Repo.CuesSql
 
   @recent_examples 20
   @gap_notice_after_s 3_600
+  @watcher_removed "Not started: the watcher was removed."
 
   @watcher_select """
   SELECT id, name, purpose, filter, listen_for, task_job_id, task_notes,
     daily_cap, filter_budget, filter_failures, filter_retry_at, held_notified_at, notices,
-    enabled, created_from, created_at, updated_at
+    enabled, created_from, created_at, updated_at, follow_up_job_id, follow_up_approved_at
   FROM cue_watchers
   """
 
@@ -69,7 +86,10 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
     :task_notes,
     :daily_cap,
     :filter_budget,
-    :enabled
+    :enabled,
+    :follow_up_job_id,
+    :follow_up_approved_at,
+    :follow_up_approval_digest
   ]
 
   @type conn :: term()
@@ -105,6 +125,11 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
 
   def handle(conn, {:remove_watcher, id, %DateTime{} = now}) when is_binary(id) do
     CuesSql.with_immediate_transaction(conn, fn -> remove_watcher(conn, id, now) end)
+  end
+
+  def handle(conn, {:remove_follow_up, id, %DateTime{} = expected, %DateTime{} = now})
+      when is_binary(id) do
+    CuesSql.with_immediate_transaction(conn, fn -> remove_follow_up(conn, id, expected, now) end)
   end
 
   def handle(conn, {:change_instructions, id, %{add: adds, remove: removes}, from, now, cap})
@@ -148,7 +173,9 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
   end
 
   def handle(conn, {:watcher_for_job, job_id}) when is_binary(job_id) do
-    case CuesSql.query_all(conn, @watcher_select <> " WHERE task_job_id = ?", [job_id]) do
+    sql = @watcher_select <> " WHERE task_job_id = ? OR follow_up_job_id = ?"
+
+    case CuesSql.query_all(conn, sql, [job_id, job_id]) do
       {:ok, [row]} -> {:ok, watcher_row(row)}
       {:ok, []} -> {:ok, nil}
       {:error, reason} -> {:error, reason}
@@ -217,7 +244,8 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
     from = Map.get(attrs, :created_from)
 
     with :ok <- check_name_free(conn, attrs.name),
-         :ok <- check_task(conn, attrs.task_job_id, nil),
+         :ok <- check_task(conn, Map.get(attrs, :task_job_id), nil),
+         :ok <- check_follow_up(conn, Map.get(attrs, :follow_up_job_id), nil),
          :ok <- insert_watcher_row(conn, attrs, stamp),
          :ok <- insert_sources(conn, attrs.id, sources),
          {:ok, _added} <- insert_instructions(conn, attrs.id, 1, instructions, from, stamp) do
@@ -233,22 +261,45 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
     end
   end
 
-  # A task is a job that runs on cues and wakes no other watcher.
+  # A task is a job that runs on cues and wakes no other watcher. A watcher
+  # with only a follow-up has none.
+  defp check_task(_conn, nil, _watcher_id), do: :ok
+
   defp check_task(conn, job_id, watcher_id) do
     with {:ok, kind} <- job_kind(conn, job_id),
          :ok <- cue_kind(kind),
-         {:ok, rows} <-
-           CuesSql.query_all(
-             conn,
-             "SELECT id, name FROM cue_watchers WHERE task_job_id = ?",
-             [job_id]
-           ) do
+         {:ok, rows} <- watchers_of_job(conn, job_id) do
       case rows do
         [] -> :ok
         [[^watcher_id, _name]] -> :ok
         [[_other, name]] -> {:error, {:task_taken, name}}
       end
     end
+  end
+
+  # A follow-up is a job of its own kind, never shared between watchers
+  # (M60_WATCHER_CODING_RUNS.md §5).
+  defp check_follow_up(_conn, nil, _watcher_id), do: :ok
+
+  defp check_follow_up(conn, job_id, watcher_id) do
+    with {:ok, kind} <- job_kind(conn, job_id),
+         :ok <- follow_up_kind(kind),
+         {:ok, rows} <- watchers_of_job(conn, job_id) do
+      case rows do
+        [] -> :ok
+        [[^watcher_id, _name]] -> :ok
+        [[_other, name]] -> {:error, {:follow_up_taken, name}}
+      end
+    end
+  end
+
+  # Either role counts: a job is one watcher's task or follow-up, never both.
+  defp watchers_of_job(conn, job_id) do
+    CuesSql.query_all(
+      conn,
+      "SELECT id, name FROM cue_watchers WHERE task_job_id = ? OR follow_up_job_id = ?",
+      [job_id, job_id]
+    )
   end
 
   defp job_kind(conn, job_id) do
@@ -262,13 +313,17 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
   defp cue_kind("cue"), do: :ok
   defp cue_kind(_kind), do: {:error, :not_cue_job}
 
+  defp follow_up_kind("watcher"), do: :ok
+  defp follow_up_kind(_kind), do: {:error, :not_follow_up_job}
+
   defp insert_watcher_row(conn, attrs, stamp) do
     CuesSql.execute(
       conn,
       """
       INSERT INTO cue_watchers (id, name, purpose, filter, listen_for, task_job_id, task_notes,
-        daily_cap, filter_budget, enabled, created_from, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+        daily_cap, filter_budget, enabled, created_from, created_at, updated_at,
+        follow_up_job_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
       """,
       [
         attrs.id,
@@ -276,13 +331,14 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
         Map.get(attrs, :purpose),
         attrs.filter,
         Jason.encode!(Map.get(attrs, :listen_for, [])),
-        attrs.task_job_id,
+        Map.get(attrs, :task_job_id),
         flag(Map.get(attrs, :task_notes, false)),
         Map.get(attrs, :daily_cap, 0),
         Map.get(attrs, :filter_budget, 0),
         Map.get(attrs, :created_from),
         stamp,
-        stamp
+        stamp,
+        Map.get(attrs, :follow_up_job_id)
       ]
     )
   end
@@ -438,7 +494,9 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
          enabled,
          created_from,
          created_at,
-         updated_at
+         updated_at,
+         follow_up_job_id,
+         follow_up_approved_at
        ]) do
     %{
       id: id,
@@ -456,7 +514,9 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
       enabled?: enabled == 1,
       created_from: created_from,
       created_at: CuesSql.parse_stamp(created_at),
-      updated_at: CuesSql.parse_stamp(updated_at)
+      updated_at: CuesSql.parse_stamp(updated_at),
+      follow_up_job_id: follow_up_job_id,
+      follow_up_approved_at: CuesSql.parse_stamp(follow_up_approved_at)
     }
   end
 
@@ -486,14 +546,18 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
 
   # --- update --------------------------------------------------------------------
 
+  # A change to its sources or filter clears a follow-up's Always allow it no
+  # longer matches, in the same write (M60_WATCHER_CODING_RUNS.md §5), as does a
+  # change to its instructions below.
   defp update_watcher(conn, id, expected, patch, sources, now) do
     with :ok <- check_patch(patch),
          :ok <- check_relink(conn, id, patch),
          :ok <- write_patch(conn, id, expected, patch, now),
-         :ok <- replace_sources(conn, id, sources),
+         {:ok, expired} <- replace_sources(conn, id, sources, now),
          {:ok, passed} <- pass_pending(conn, id, patch, now),
+         :ok <- CuesFollowUpAllowSql.clear_stale_approval(conn, {:watcher, id}),
          {:ok, watcher} <- get_watcher(conn, "id", id) do
-      {:ok, %{watcher: watcher, passed: passed}}
+      {:ok, %{watcher: watcher, passed: passed, expired: expired}}
     end
   end
 
@@ -504,7 +568,8 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
   # filtering, a failed or aborted call would put it back to `pending`, where
   # no `llm` claim takes it again and it holds its subject's later items. The
   # inbox cap bounds the rows per source. Each passed row's ids come back for
-  # its `passed` lifecycle event.
+  # its `passed` lifecycle event, with its follow-up's trigger, written in the
+  # same transaction (`CuesFollowUpSql.on_pass/3`), or nil.
   defp pass_pending(conn, id, %{filter: "none"}, now) do
     patch = %{decision_reason: "no filter", ready_at: now, filter_call_id: nil}
 
@@ -513,20 +578,19 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
         "WHERE watcher_id = ? AND state IN ('pending', 'filtering') ORDER BY id"
 
     with {:ok, rows} <- CuesSql.query_all(conn, sql, [id]) do
-      Enum.reduce_while(rows, {:ok, []}, &pass_one(conn, &1, patch, &2))
+      Enum.reduce_while(rows, {:ok, []}, &pass_one(conn, &1, {patch, now}, &2))
     end
   end
 
   defp pass_pending(_conn, _id, _patch, _now), do: {:ok, []}
 
-  defp pass_one(conn, [delivery_id, cue_id, source_ref, from], patch, {:ok, passed}) do
-    case CuesSql.transition(conn, delivery_id, from, :none, "passed", patch) do
-      :ok ->
-        {:cont,
-         {:ok, passed ++ [%{delivery_id: delivery_id, cue_id: cue_id, source_ref: source_ref}]}}
-
-      {:error, reason} ->
-        {:halt, {:error, reason}}
+  defp pass_one(conn, [delivery_id, cue_id, source_ref, from], {patch, now}, {:ok, passed}) do
+    with :ok <- CuesSql.transition(conn, delivery_id, from, :none, "passed", patch),
+         {:ok, follow_up} <- CuesFollowUpSql.on_pass(conn, delivery_id, now) do
+      entry = %{delivery_id: delivery_id, cue_id: cue_id, source_ref: source_ref}
+      {:cont, {:ok, passed ++ [Map.put(entry, :follow_up, follow_up)]}}
+    else
+      {:error, reason} -> {:halt, {:error, reason}}
     end
   end
 
@@ -537,10 +601,19 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
     end
   end
 
-  defp check_relink(conn, id, %{task_job_id: job_id}) when is_binary(job_id),
+  defp check_relink(conn, id, patch) do
+    with :ok <- relink_task(conn, id, patch), do: relink_follow_up(conn, id, patch)
+  end
+
+  defp relink_task(conn, id, %{task_job_id: job_id}) when is_binary(job_id),
     do: check_task(conn, job_id, id)
 
-  defp check_relink(_conn, _id, _patch), do: :ok
+  defp relink_task(_conn, _id, _patch), do: :ok
+
+  defp relink_follow_up(conn, id, %{follow_up_job_id: job_id}) when is_binary(job_id),
+    do: check_follow_up(conn, job_id, id)
+
+  defp relink_follow_up(_conn, _id, _patch), do: :ok
 
   defp write_patch(conn, id, expected, patch, now) do
     columns = patch |> Map.keys() |> Enum.sort()
@@ -569,12 +642,50 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
     end
   end
 
-  defp replace_sources(_conn, _id, nil), do: :ok
+  defp replace_sources(_conn, _id, nil, _now), do: {:ok, []}
 
-  defp replace_sources(conn, id, sources) do
+  defp replace_sources(conn, id, sources, now) do
     with :ok <-
-           CuesSql.execute(conn, "DELETE FROM cue_watcher_sources WHERE watcher_id = ?", [id]) do
-      insert_sources(conn, id, sources)
+           CuesSql.execute(conn, "DELETE FROM cue_watcher_sources WHERE watcher_id = ?", [id]),
+         :ok <- insert_sources(conn, id, sources) do
+      expire_unlistened(conn, id, now)
+    end
+  end
+
+  # M60 §8.8 does not cover taking a source off a watcher, so it is treated as
+  # removing the watcher for that source: what waits from a source it no
+  # longer has expires here, in the change's transaction, ahead of a switch to
+  # no filter in the same change, so it is never claimed again, never holds a
+  # later item of its subject at the run claim, and is never passed. A row
+  # under a filter call expires too: that call's settle then finds its fence
+  # gone and is refused as stale, its call closed `aborted`, as for a switch
+  # to no filter. No gap, because the owner chose it, as with a pause;
+  # `passed` deliveries stay and still go to the task, as after a pause.
+  # Adding the source back brings none of them back.
+  defp expire_unlistened(conn, id, now) do
+    sql = """
+    SELECT d.id, d.cue_id, d.source_ref, d.state FROM cue_deliveries d
+    WHERE d.watcher_id = ? AND d.state IN ('pending', 'filtering')
+      AND NOT EXISTS (SELECT 1 FROM cue_watcher_sources s
+                      WHERE s.watcher_id = d.watcher_id AND s.source_ref = d.source_ref)
+    ORDER BY d.id
+    """
+
+    patch = %{outcome: "watcher_removed", settled_at: now}
+
+    with {:ok, rows} <- CuesSql.query_all(conn, sql, [id]) do
+      Enum.reduce_while(rows, {:ok, []}, &expire_one(conn, &1, patch, &2))
+    end
+  end
+
+  defp expire_one(conn, [delivery_id, cue_id, source_ref, from], patch, {:ok, expired}) do
+    case CuesSql.transition(conn, delivery_id, from, :none, "expired", patch) do
+      :ok ->
+        {:cont,
+         {:ok, expired ++ [%{delivery_id: delivery_id, cue_id: cue_id, source_ref: source_ref}]}}
+
+      {:error, reason} ->
+        {:halt, {:error, reason}}
     end
   end
 
@@ -608,6 +719,8 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
   defp remove_watcher(conn, id, now) do
     with :ok <- touch(conn, id, now),
          :ok <- check_not_held(conn, id),
+         :ok <- check_follow_up_idle(conn, id),
+         {:ok, refused} <- refuse_open_triggers(conn, id),
          {:ok, rows} <-
            CuesSql.query_all(
              conn,
@@ -623,8 +736,66 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
           %{delivery_id: delivery_id, cue_id: cue_id, source_ref: ref}
         end)
 
-      {:ok, %{expired: expired, gaps: gaps}}
+      {:ok, %{expired: expired, gaps: gaps, refused_triggers: refused}}
     end
+  end
+
+  # Stopping a follow-up (M60_WATCHER_CODING_RUNS.md §3.5): fenced on the
+  # watcher as read, refused while its run holds the job, its open triggers
+  # refused, and its columns cleared; the watcher keeps its task (the table's
+  # CHECK holds that). The job is the caller's to remove.
+  defp remove_follow_up(conn, id, expected, now) do
+    patch = %{follow_up_job_id: nil, follow_up_approved_at: nil, follow_up_approval_digest: nil}
+
+    with :ok <- check_follow_up_idle(conn, id),
+         {:ok, refused} <- refuse_open_triggers(conn, id),
+         :ok <- write_patch(conn, id, expected, patch, now) do
+      {:ok, %{refused_triggers: refused}}
+    end
+  end
+
+  # A follow-up that is running is let finish before its watcher and its job go.
+  defp check_follow_up_idle(conn, id) do
+    sql = """
+    SELECT count(*) FROM job_runs r JOIN cue_watchers w ON w.follow_up_job_id = r.job_id
+    WHERE w.id = ? AND r.status IN ('queued', 'running')
+    """
+
+    case CuesSql.query_all(conn, sql, [id]) do
+      {:ok, [[0]]} -> :ok
+      {:ok, [[_running]]} -> {:error, :follow_up_running}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # A card left waiting or a trigger left to start would act for a watcher
+  # that is gone: both end refused with the removal, and come back for their
+  # lifecycle events.
+  defp refuse_open_triggers(conn, id) do
+    select =
+      "SELECT id, delivery_id, cue_id, job_id, mode FROM cue_follow_up_triggers " <>
+        "WHERE watcher_id = ? AND state IN ('waiting', 'starting') ORDER BY created_at, rowid"
+
+    update =
+      "UPDATE cue_follow_up_triggers SET state = 'refused', reason = ? " <>
+        "WHERE watcher_id = ? AND state IN ('waiting', 'starting')"
+
+    with {:ok, rows} <- CuesSql.query_all(conn, select, [id]),
+         :ok <- CuesSql.execute(conn, update, [@watcher_removed, id]) do
+      {:ok, Enum.map(rows, &refused_trigger(id, &1))}
+    end
+  end
+
+  defp refused_trigger(watcher_id, [id, delivery_id, cue_id, job_id, mode]) do
+    %{
+      id: id,
+      watcher_id: watcher_id,
+      delivery_id: delivery_id,
+      cue_id: cue_id,
+      job_id: job_id,
+      mode: mode,
+      state: "refused"
+    }
   end
 
   defp check_not_held(conn, id) do
@@ -679,7 +850,8 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
          :ok <- within_cap(length(active) - length(removed) + length(adds), cap),
          :ok <- mark_removed(conn, removed, from, stamp, nil),
          {:ok, next} <- next_number(conn, id),
-         {:ok, added} <- insert_instructions(conn, id, next, adds, from, stamp) do
+         {:ok, added} <- insert_instructions(conn, id, next, adds, from, stamp),
+         :ok <- CuesFollowUpAllowSql.clear_stale_approval(conn, {:watcher, id}) do
       {:ok, %{added: added, removed: removed}}
     end
   end
@@ -695,7 +867,8 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
              "UPDATE cue_watcher_instructions SET removed_at = NULL, removed_from = NULL, " <>
                "replaced_by = NULL WHERE id = ?",
              [row.id]
-           ) do
+           ),
+         :ok <- CuesFollowUpAllowSql.clear_stale_approval(conn, {:watcher, id}) do
       {:ok, %{restored: row}}
     end
   end
@@ -708,7 +881,8 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
          {:ok, removed} <- pick_active(active, numbers),
          {:ok, next} <- next_number(conn, id),
          {:ok, [added]} <- insert_instructions(conn, id, next, [text], from, stamp),
-         :ok <- mark_removed(conn, removed, from, stamp, added.id) do
+         :ok <- mark_removed(conn, removed, from, stamp, added.id),
+         :ok <- CuesFollowUpAllowSql.clear_stale_approval(conn, {:watcher, id}) do
       {:ok, %{added: [added], removed: removed}}
     end
   end
@@ -849,12 +1023,13 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
     with {:ok, rows} <-
            CuesSql.query_all(
              conn,
-             "SELECT name, task_job_id, held_notified_at, notices FROM cue_watchers WHERE id = ?",
+             "SELECT name, coalesce(task_job_id, follow_up_job_id), held_notified_at, notices " <>
+               "FROM cue_watchers WHERE id = ?",
              [id]
            ),
          {:ok, [name, job_id, held, raw]} <- one_row(rows),
          {:ok, notices} <- decode_notices(raw) do
-      target = %{name: name, task_job_id: job_id}
+      target = %{name: name, notice_job_id: job_id}
 
       case watcher_claim(rule, kind, held, notices, now) do
         {:held, previous, value} -> stamp_held(conn, id, value, target, previous)
@@ -868,6 +1043,21 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
   defp watcher_claim(:held, _kind, _held, _notices, _now), do: :already_sent
   defp watcher_claim(:recovered, _kind, nil, _notices, _now), do: :already_sent
   defp watcher_claim(:recovered, _kind, held, _notices, _now), do: {:held, held, nil}
+
+  # An episode kept in the notices map under its own kind: claimed while the
+  # kind is absent, and closed by the notice that names it.
+  defp watcher_claim(:opens, kind, _held, notices, now) do
+    if Map.has_key?(notices, kind),
+      do: :already_sent,
+      else: {:notices, nil, Map.put(notices, kind, CuesSql.stamp(now))}
+  end
+
+  defp watcher_claim({:closes, opened}, _kind, _held, notices, _now) do
+    case Map.fetch(notices, opened) do
+      {:ok, previous} -> {:notices, previous, Map.delete(notices, opened)}
+      :error -> :already_sent
+    end
+  end
 
   defp watcher_claim(rule, kind, _held, notices, now) do
     previous = Map.get(notices, kind)
@@ -907,12 +1097,14 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
     end
   end
 
-  defp release_watcher_notice(conn, id, kind, _rule, previous) do
+  defp release_watcher_notice(conn, id, kind, rule, previous) do
+    key = released_key(kind, rule)
+
     with {:ok, rows} <-
            CuesSql.query_all(conn, "SELECT notices FROM cue_watchers WHERE id = ?", [id]),
          {:ok, [raw]} <- one_row(rows),
          {:ok, notices} <- decode_notices(raw) do
-      restored = put_or_drop(notices, kind, previous)
+      restored = put_or_drop(notices, key, previous)
 
       with :ok <-
              CuesSql.execute(conn, "UPDATE cue_watchers SET notices = ? WHERE id = ?", [
@@ -923,6 +1115,10 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
       end
     end
   end
+
+  # A closing notice that failed puts back the episode it closed.
+  defp released_key(_kind, {:closes, opened}), do: opened
+  defp released_key(kind, _rule), do: kind
 
   defp claim_source_notice(conn, ref, kind, rule, now) do
     stamp = CuesSql.stamp(now)
@@ -1001,7 +1197,7 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
              conn,
              """
              SELECT g.id, g.source_ref, g.watcher_id, g.reason, g.count, g.first_at, w.name,
-               w.task_job_id
+               coalesce(w.task_job_id, w.follow_up_job_id)
              FROM cue_gaps g JOIN cue_watchers w ON w.id = g.watcher_id
              WHERE g.reported_at IS NULL AND g.closed_at IS NULL AND g.first_at <= ?
              ORDER BY g.first_at, g.id LIMIT ?
@@ -1021,7 +1217,7 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
       count: count,
       first_at: CuesSql.parse_stamp(first_at),
       name: name,
-      task_job_id: job_id
+      notice_job_id: job_id
     }
   end
 

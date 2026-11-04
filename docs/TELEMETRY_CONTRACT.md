@@ -150,7 +150,13 @@ call is refused as `refused_mandate_files`. Every mandate call also carries
 owner's validator program decided), and an event the gate emitted itself adds
 `mandate_reason`, Fermix's own sentence for the decision (a validator's own
 words stay in the row as "validator refused"; no argument the model sent is in
-it). A proposal the owner confirms runs later, from `/confirm` or an answer
+it, and neither is a value the mandate pins, an operator path from its
+configuration or a Repo error: a pinned argument the call got wrong is named
+alone, as "the argument <key> differs from what the mandate pins", a mandate
+that fails its load checks is "the mandate is inactive", and an approval that
+cannot be read is "the mandate's approval could not be read", while the full
+sentence reaches only the model's result, the call's row and the owner). A
+proposal the owner confirms runs later, from `/confirm` or an answer
 from one of the owner's devices (the Mac app, the management socket), under the
 proposing run's `session_id`, and its executor's event carries
 `access_gate: "confirmed"` and the call's `mandate_call_id`. `Mapper.tool_span/3`
@@ -286,8 +292,11 @@ loop compresses older results into digests and retries the provider call. Each
 reduction applied emits `[:fermix, :agent_loop, :context_compaction]`
 (measurements `%{count: 1, results, bytes_before, bytes_after}`; metadata
 `session_id`, optional `parent_session`, `agent`, `iteration`, `level`,
-`trigger` in `:budget | :recovery`). Each recovery round after a provider
-refused a request as too large emits `[:fermix, :agent_loop, :context_recovery]`
+`trigger` in `:budget | :recovery | :superseded_look`). `:superseded_look` is
+the batch that swaps the page text of browser results a later look at the same
+page superseded for a one-line marker: it calls no model, and fires once those
+looks reach 32,000 bytes, whatever the window. Each recovery round after a
+provider refused a request as too large emits `[:fermix, :agent_loop, :context_recovery]`
 (measurements `%{count: 1}`; metadata `session_id`, optional `parent_session`,
 `agent`, `iteration`, `round` 1..3, `outcome` in `:recovered | :refused_again |
 :nothing_left | :digest_failed`). Both are point events. `FermixOpik` renders
@@ -438,16 +447,10 @@ session — so its lifecycle cannot ride any agent-run family. Every transition
 emits the single stable name `[:fermix, :reminder, :lifecycle]` through
 `FermixCore.Temporal.Telemetry` — never hand-rolled, and never a
 `[:fermix, :reminder, <phase>]` tail of its own (exact-name binding would drop
-it). A post-delivery **follow-up** is the other side of that line: it calls
-`AgentLoop.run/1`, so it is a run kind with its own `session_id` and its own
-per-phase names — `[:fermix, :reminder, :followup_start | :followup_complete |
-:followup_error]`, emitted through `FermixCore.Temporal.FollowupTelemetry` and
-bound individually in `FermixOpik.Reporter`. The split is "has a session or
-not": a follow-up that never reached a model has none and stays on the
-lifecycle event, as the `:followup_skipped` phase. The lifecycle emitter
-enforces a fixed metadata allowlist: `phase` (`materialized | claimed |
-delivered | retry_scheduled | failed | expired | superseded | cancelled |
-event_completed | scheduler_error | followup_skipped`),
+it). Nothing trails a delivered reminder, so the reminder family has no run
+kind. The lifecycle emitter enforces a fixed metadata allowlist: `phase`
+(`materialized | claimed | delivered | retry_scheduled | failed | expired |
+superseded | cancelled | event_completed | scheduler_error`),
 `component: "temporal_scheduler"` (the
 `agent_field`, so JSONL rows name their emitter instead of `"unknown"`),
 correlation ids (`event_id`, `reminder_id`, `occurrence_key`, `rule_id`),
@@ -467,8 +470,10 @@ rows. The event tools themselves (`event_store`, `event_list`, `event_update`,
 
 ## Open loop check-ins
 
-An open loop (M78) is an intention the owner stated with the date it matters
-by. The scheduler decides when one is due, and a **check-in** is the one
+An open loop (M78, M83) is something in the owner's own life they would want
+followed up: something to do by a date, or something they are waiting on or
+going through, asked about afterwards. The scheduler decides when one is due,
+and a **check-in** is the one
 isolated run that may speak about it. A check-in calls `AgentLoop.run/1`, so it
 is a **run kind**, and it is always a **root**:
 `FermixCore.OpenLoops.Telemetry.correlation/2` mints
@@ -477,19 +482,18 @@ make, the row's `touches + 1`) and `agent: "open_loop:<id>"`, and the run's loop
 context takes both from it, so its provider and tool spans correlate with the
 bookends by construction. There is no `parent_session`: the scheduler spawned
 the run, not another run, and the turn that captured the loop closed days
-before (the follow-up reason). A retry after a timeout or an error keeps its
-touch, and so its session id. The `followup_` prefix belongs to the reminder
-follow-up and stays there.
+before. A retry after a timeout or an error keeps its touch, and so its session
+id.
 
 Every emission goes through `FermixCore.OpenLoops.Telemetry` — never
 hand-rolled. The bookends are `[:fermix, :open_loop, :checkin, :start |
 :complete | :error]`, with shared metadata `agent`, `session_id`,
 `open_loop_id`, `touch` and `component: "open_loop_checkin"`. `start`
 (`count: 1`) adds `rung` (`1 | 2`), `horizon_class` (`long | medium | short |
-imminent`), `active_hours` (the `HH:MM-HH:MM` hours the run was admitted under,
+imminent | after`; `after` is something waited on or gone through), `active_hours` (the `HH:MM-HH:MM` hours the run was admitted under,
 snapshotted) and `max_duration_ms`, the run's watchdog and the exporter's sweep
-floor. `complete` (`duration_ms`) adds `outcome`: `spoke | silent | closed |
-empty | delivery_failed`, each a run that finished. `error` (`duration_ms`)
+floor. `complete` (`duration_ms`) adds `outcome`: `spoke | silent | later |
+closed | empty | delivery_failed`, each a run that finished. `error` (`duration_ms`)
 adds `status` (`timeout | error`) and `error`, a string (a binary as it is, any
 other term inspected). The message a `spoke` run sent rides as `output`, shaped
 by `Telemetry.preview/1`, only when `capture_content?/0` is on. The delivery
@@ -503,8 +507,9 @@ active_hours | no_target | max_children | closed_meanwhile`) and
 `component: "open_loop_scheduler"`, and never a `session_id`.
 `[:fermix, :open_loop, :settled]` (`count: 1`) is a loop's state moving:
 `open_loop_id`, `from` (the live state the write left: `open | due | asked`),
-`to`, `answer` (`done | plan | not_yet | stop | drop | asked`, absent when no
-answer caused the move), `by` (`main_agent | checkin | scheduler`; every expiry
+`to`, `answer` (`done | plan | not_yet | stop | drop | asked | moved | reach`,
+absent when no answer caused the move; `moved` is a dated loop's date moving
+and `reach` the owner changing how it may be raised, each re-arming the loop), `by` (`main_agent | checkin | scheduler`; every expiry
 is `scheduler`) and `component: "open_loops"`, plus the settling turn's
 `session_id` only when the caller has one. That is the whole allowlist. The
 emitter checks every word against its closed set and raises on anything else
@@ -530,7 +535,13 @@ metadata there, never a parent, because the settling turn may already have
 shipped. `TraceFile.normalize_agent_event/2` is deliberately not extended (the
 reminder precedent): `mix opik.replay` skips open-loop rows. The main agent's
 loop tools and the check-in's `open_loop_respond` are ordinary built-ins riding
-`[:fermix, :tool, :exec]` through `Tools.Telemetry.exec/5`.
+`[:fermix, :tool, :exec]` through `Tools.Telemetry.exec/5`. A refused
+`open_loop_note`, `open_loop_update`, `open_loop_list` or `open_loop_respond`
+call's event carries `error_code`, the refusal's tag
+(`OpenLoops.Registry.error_tag/1`: a failure-mode tag, or the gate's `disabled`,
+`not_attended`, `not_readable` or `not_checkin`), and `error_summary`, the
+sentence the model received, which holds no owner words, so it exports as an
+errored span.
 
 `[:fermix, :open_loop, :fault]` (`count: 1`) is the third sessionless point
 event, the open-loop counterpart of the reminder rail's `scheduler_error`
@@ -546,6 +557,26 @@ stays the `max_children` skip. It is the trace row `open_loop_fault`, keyed on
 `component`, and in `FermixOpik` a self-closing `open_loop:fault` trace tagged
 `open_loop` carrying `stage`, `open_loop_id` and `error_class`; both consumers
 bind it beside the five above.
+
+`[:fermix, :open_loop, :reaction]` is the fourth sessionless point event: a
+follow-up's outcome recorded (M83 §07). Code keeps one record per follow-up
+Fermix made (rung 1, a due loop raised in conversation and recorded as asked,
+never on a voice call, whose spoken reply cannot be captured; rung 2, a check-in
+message confirmed sent) and takes the owner's next message
+in that conversation within a day as the reply; a follow-up still unanswered a
+day on is marked when the record is next read. `OpenLoops.Reactions` emits
+each outcome once through `OpenLoops.Telemetry.reaction/5`. Its metadata is
+`open_loop_id`, `rung` (`1 | 2`), `outcome` (`replied | no_reply`),
+`component: "open_loops"`, and the observing turn's `session_id` only when the
+caller has one (the owner's turn that replied; the turn or check-in run whose
+read found the silence). Measurements are `count: 1`, plus `reply_after_ms`,
+the delay from the follow-up to the reply, on `replied` only. Neither what
+Fermix said nor what the owner replied reaches any field. It is the trace row
+`open_loop_reaction`, keyed on `component`, and in `FermixOpik` a self-closing
+`open_loop:reaction` trace tagged `open_loop` carrying `open_loop_id`, `rung`,
+`outcome`, `component`, `reply_after_ms` (from the measurements) and the
+`session_id` as metadata, never a parent; both consumers bind it beside the
+six above.
 
 ## Cues: lifecycle, sources, filter calls and cue runs
 
@@ -623,11 +654,16 @@ Who emits what:
   live queue was full), `over_budget` (its filter budget was spent),
   `dropped`, `filter_failed` (three content failures) and `write_failed` (a
   pass whose write kept failing). The `received`, `offered` and `passed` counts
-  are rows only; a pass keeps its own events (below).
+  are rows only; a pass keeps its own events (below). A withheld live pass
+  (below) is counted as `offered` and nothing else, so a watcher's `offered`
+  can exceed the sum of its other counts.
 - **Gaps and expiry**: `gap` (`gap_id`, `reason`, measurement `count`) when
   ingest, the sweeper or a watcher's removal opens or extends a gap; `expired`
-  with `reason: "lifetime"` from `Cues.Sweeper` and `"watcher_removed"` from
-  `Cues.Watchers`.
+  with `reason: "lifetime"` from `Cues.Sweeper`, `"watcher_removed"` from
+  `Cues.Watchers` when a watcher is removed, and `"source_removed"` from
+  `Cues.Watchers` when a change takes a source off a watcher: one per `pending`
+  or `filtering` delivery from that source (`cue_id`, `source_ref`), with no
+  `gap`, since the owner chose it.
 - **Errors**: `ingest_error` (an ingest transaction, a source worker's Repo
   call, or `Cues.SourceManager`'s write of a crashed-out source's `stopped`
   status, failed or did not answer in time; `result`) and `sweep_error`, whose
@@ -652,16 +688,23 @@ Who emits what:
   third provider failure in a row, and each after it); `filter_failed` (the
   third content failure: the delivery is exhausted). A failure adds `reason`
   (`provider_failure | content_failure | aborted`), `kind` (the failure's typed
-  kind) and `result: {:error, kind}`. A live call (`Cues.LiveFilters`, a
-  stream's item) emits only a pass per item: `passed` once its cue and
-  delivery are written, with the call's `session_id`, `filter_call_id`,
-  `watcher_id`, `delivery_id` (absent when the watcher already had this
-  item), `cue_id`, `source_ref`, `decision` and the reason in `content`, then
-  `expired` and `gap` for a delivery its write evicted from a full inbox. A
-  pass onto a stored item of other content writes no delivery and emits, as
-  accept does, `conflict` (`cue_id`, `source_ref`, `watcher_id`, no session)
-  and its `identity_conflict` `gap` instead. Its drops and failures are
-  counted (above).
+  kind) and `result: {:error, kind}`. A pass whose watcher was paused while
+  the call ran is withheld: the delivery goes back to `pending` and no phase
+  is emitted, though the closer still reads the pass. A call whose delivery a
+  source change expired (`source_removed`, above) is refused at its settle as
+  stale: no phase, and its closer is `run_error` with `status: "stale"`. A
+  live call (`Cues.LiveFilters`, a stream's item) emits only a pass per item:
+  `passed` once its cue and delivery are written, with the call's
+  `session_id`, `filter_call_id`, `watcher_id`, `delivery_id` (absent when the
+  watcher already had this item), `cue_id`, `source_ref`, `decision` and the
+  reason in `content`, then `expired` and `gap` for a delivery its write
+  evicted from a full inbox. A pass onto a stored item of other content writes
+  no delivery and emits, as accept does, `conflict` (`cue_id`, `source_ref`,
+  `watcher_id`, no session) and its `identity_conflict` `gap` instead. A live
+  pass whose watcher was paused, or no longer listens to the item's source,
+  when its write runs is withheld: no cue, no delivery, only the call's ledger
+  row, and no phase (the closer still reads the pass). Its drops and failures
+  are counted (above).
 - **Cue runs** (`Jobs.CueAdmission`, each with the run's `session_id`,
   `job_id`, `run_id`, `delivery_id`, `watcher_id`, `source_ref`, `state`,
   `attempt`): `claimed` when the scheduler's claim commits (`queue_ms`), then
@@ -1037,6 +1080,61 @@ bookends. The call's row written after the gist, and the boot pass that
 writes a row a dead daemon left owed (failing its pending gist), emit nothing
 of their own: the row is a companion write, logged on failure.
 
+## Home snapshots (a sessionless point per target)
+
+A snapshot run (M75 §8) is not a run kind: it calls no model and starts no
+agent session. Its outcome is one point event per target,
+`[:fermix, :home, :snapshot]`, through
+`FermixCore.Home.Snapshot.Telemetry.emit/4` — never hand-rolled.
+Measurements: `duration_ms` (the whole run, capture included) and `bytes`
+(the encrypted snapshot, 0 when the capture failed). Metadata, a fixed
+allowlist: `target` (`s3`, `desktop`), `result` (`verified`, `failed`, or
+`waiting` for a target that takes it at a later run, such as a sleeping
+desktop), `epoch` (nil when the capture failed) and a derived `error_class`
+(the reason's atom, or a tagged tuple's atom head, else `unclassified`; nil
+when verified). The reason
+never rides: a storage service's answer can carry anything, and the
+snapshot status file (`snapshots/status.json`) holds the sentence, with the
+service's own words, that the owner reads. `Trace.TelemetryHandler` records
+it as a `home_snapshot` `agent_event` row keyed on the target; the Opik
+exporter does not subscribe (no session to nest under), as for the channel
+points below.
+
+## Home moves (sessionless lifecycle bookends per side)
+
+A move of a home to a candidate primary (M75 §7.2) is not a run kind either:
+the owner starts it, no model is called and no agent session exists. Each
+side brackets its own part with `[:fermix, :home, :move]`, through
+`FermixCore.Home.MoveTelemetry.started/3` and `finished/5` — never
+hand-rolled. The source (`FermixChannels.Home.MoveWorker`) emits `:started`
+when its worker first runs a move (phase `requested`) and `:finished` when
+the move is `done` or aborted; the candidate (`FermixChannels.Home.Candidate`)
+emits `:started` at the move's offer and `:finished` when it activates, or
+when the stream it received could not be restored. Measurements:
+`duration_ms` (0 on `:started`; on `:finished`, since that side's own start in
+this boot). Metadata, a fixed allowlist: `phase` (`:started`, `:finished`),
+`side` (`:source`, `:candidate`), `move_id` (the id both sides share, which
+correlates them), `epoch` (the epoch the source left on `:started`, the epoch
+the move reached on a `:done` finish, else nil), `result` (`:done`,
+`:aborted`, `:failed` on `:finished`, nil on `:started`) and a derived
+`error_class` (the reason's atom or a tagged tuple's atom head, else
+`:unclassified`; nil unless aborted or failed). The reason never rides: the
+phase files (`.move/phase.json`, `candidate/state.json`) hold the sentence
+`home.status` shows. `Trace.TelemetryHandler` records each as a `home_move`
+`agent_event` row keyed on the side; the Opik exporter does not subscribe
+(no session to nest under), as for snapshots and the channel points below.
+A move back to the computer the home left is the same move, side
+`:candidate` on that computer with the server's move id. Restore here, which
+restores that computer's own copy with no server sending it
+(`FermixCore.Home.LocalReturn`), brackets the restore as side `:candidate`
+too, its move id `local-<unix time>`; the job it runs in keeps the
+`home_provision` job family's own bookends, and the delete of the server
+before it is that job's step.
+
+The sign-in loopback forward (M75 D17) adds no event: the sign-in it serves is
+the `auth` management job it always was, and a port the desktop could not open
+is that job's failure sentence.
+
 ## Sessionless channel points (pairing, push, render, transport posture)
 
 Pairing decisions and push deliveries are **point events with no agent
@@ -1112,6 +1210,30 @@ is ready again, never per retry. `error_class` is the failure's kind
 not a transition, and emits nothing; `mobile.status` and `fermix doctor` say
 it. A phone's session over the iroh carrier emits exactly the events a
 WebSocket session does.
+Slack over Socket Mode (M75) is another: `emit_transport(:slack, :degraded |
+:recovered, …)` fires when its connection first fails (Slack refused
+`apps.connections.open`, the WebSocket could not open, dropped or went silent,
+or Slack turned Socket Mode off) and when `hello` arrives after that, never
+per retry and never for Slack's routine refresh of a healthy connection.
+`error_class` is `auth` (Slack's own code, such as `invalid_auth`, is in the
+posture `/health` and Doctor show, never in the event), `http_status`,
+`network`, `socket`, `remote_closed`, `timeout` or `not_configured`.
+A moved desktop's link to its primary (M75 §6) is another:
+`emit_transport(:desktop_relay, :degraded | :recovered, …)` fires when the
+relay's session first fails (the dial, the handshake, a stale primary, or the
+session ending) and when a `hello_ack` arrives after that, never per retry;
+`consecutive_failures` counts the attempts since the last session. A session
+the primary ends normally (`1000`) is renewed without either event: it is no
+outage. Only once in a row: a renewed session the primary ends normally again
+within a minute of opening is `degraded` with `renewed_again`, redialed with
+the backoff, and `recovered` at the next `hello_ack`. A revocation (`4003`)
+is `degraded` with `revoked`, and no
+`recovered` follows until the engine restarts, since the relay stops dialing.
+`error_class` is `timeout`, `unreachable`, `refused`, `busy`, `helper`,
+`revoked`, `remote_closed`, `remote_ended`, `idle`, `lifetime`,
+`stale_primary`, `renewed_again`, `handshake`, `protocol` or `socket`. The calls and lines it
+carries emit nothing of their own on the desktop: the primary's management
+and companion paths emit as for a local request.
 
 ## Inbound attachments (a pre-turn point per attachment)
 
@@ -1162,6 +1284,31 @@ keyed on `channel`, and the Opik exporter places it under the turn's trace as an
 `channel` and `outcome`, flagged errored with `detail` when the outcome is
 `failed`). A failed save never fails the turn: the manifest names it as well.
 
+## The owner's lists (M85)
+
+`checklist_read` and `checklist_edit` are ordinary built-ins riding
+`[:fermix, :tool, :exec]` through `Tools.Telemetry.exec/5`; a refused call's
+event carries `error_code` (`Checklists.Registry.error_tag/1`) and
+`error_summary`, the sentence the model received. Beside them,
+`Checklists.Registry` emits **one point event per read and per edit**
+through `FermixCore.Checklists.Telemetry`, the event an edit the Mac sends
+over its chat socket emits too (`made_via: "mac"`, one op, no session; the
+phone's wire carries no list yet): `[:fermix, :checklist, :read]` with
+measurements `duration_us` (the store's read) and `lists` (how many it
+returned), and `[:fermix, :checklist, :edit]` with `duration_us` (the call's
+one transaction), `lists` (the lists it touched) and `ops`. Metadata on both:
+`component: "checklists"`, `made_via` (`chat | job | mac`), `outcome` (`ok |
+refused | failed`), `error_code` (the refusal's tag, else nil), `scope` on a
+read (`list | folder | index`), and the caller's `session_id` when it has one.
+Neither event ever carries an item's words or a list's title.
+`Trace.TelemetryHandler` records them as `checklist_read` and
+`checklist_edit` `agent_event` rows keyed on `component`, and the Opik
+exporter places each under its turn's or job run's trace as a point span
+(`FermixOpik.Mapper.checklist_span/4`: the counts, `scope`, `made_via` and
+`outcome`, flagged errored with the tag when the outcome is `refused` or
+`failed`). The edit's `duration_us` is the budget's measure (M85 §12: under
+5 ms at p95 for a call that changes three lists).
+
 ## Computer-history summarizer (a headless run with no bookends)
 
 The summarizer is **one bounded provider call per cycle**, not an agent loop:
@@ -1186,7 +1333,11 @@ through `FermixCore.Management.Telemetry` — never hand-rolled. Bookends are
 floor for the root). A Doctor session also carries `scope` and the
 `parent_session` that asked for it; a job carries its `kind`. Terminal metadata
 is the run's own diagnosis word (`completed | cancelled | timed_out`, plus
-`failed` for a job), never a bare "ok".
+`failed` for a job), never a bare "ok". A stopped job's `:complete` fires once
+its run is gone (it answered the stop, or was killed at the grace's end), so
+a provider call the run makes while stopping still nests under an open root;
+a job with an ending (an Always On step's) fires it once that ending is done
+too, which emits nothing of its own.
 
 What rides and what does not: check **counts** per status ride the Doctor
 bookend, a check `summary` and its `evidence` never do (both can carry operator
@@ -1208,6 +1359,15 @@ with no run identity, no cancellation and no budget of their own, so they mint n
 root span per settings read with nothing nested under it. If a new management
 method has to *wait* on a network, a download or a person, it is a job — start
 one and inherit the bookends rather than minting a sixth event.
+
+Always On's two methods are sessionless the same way. `home.status` (its
+held wait included) reads and answers; `home.act` (Always On setup §9) emits
+nothing of its own: a step that starts a job (a create, a power action, a
+delete, Start again) inherits that `home_provision` job's bookends, and the
+synchronous ones (a token check, a review, a code, a move's start) stay
+sessionless as their functions are. An act logs its action id and who asked,
+and its `input` (a token, a recovery passphrase) never enters any log line or
+any event's metadata.
 
 ## Computer-use sessions
 
@@ -1290,17 +1450,21 @@ defaulted whenever its fact was not established.
 |---|---|---|---|
 | `action` | the model's action name | every call | which verb was asked for |
 | `cu_session` | `cua_…` string | the session was registry-registered | which session drove it |
-| `outcome` | `refused \| performed \| performed_unverified \| unknown \| read` | every call | what happened to the INPUT |
+| `outcome` | `refused \| performed \| performed_unverified \| unknown \| read \| already` | every call | what happened to the INPUT; `already` is a verb on a control that sent nothing because the control already held the asked state (M86 P2) |
 | `courtesy` | `off \| na \| unavailable \| proceeded \| deferred \| yielded \| paused` | every call | what the coexistence arbiter did about a person at the machine: nothing to do, not applicable, no idle signal, went ahead, waited for them, stepped aside, or the seat was already handed back |
 | `observation_age_ms` | non-negative integer | the action named an image | how stale that image was when it was sent |
 | `geometry_refusal` | `observation_required \| addressing_conflict \| unknown_observation \| expired_observation \| stale_observation \| point_outside_observation \| capture_geometry_mismatch` | an addressing or geometry gate refused | which one, countable without parsing a sentence |
 | `input_method` | `ax \| foreground_hid` | the helper reported a receipt | by which mechanism the input went out |
-| `effect` | `verified \| not_observed \| unknown` | the helper observed the result | what it observed, never inferred |
+| `effect` | `verified \| changed \| not_observed \| unknown` | the helper observed the result | what it observed, never inferred; `changed` is a protocol-12 verb's read-back showing what was asked |
 | `check_kind` | `image \| semantic \| none` | the action came back with a check | which evidence it carried |
 | `check_changed` | boolean | an image check could compare two hashes | whether that view differs from the one acted on |
 | `cu_input_ms` / `cu_settle_ms` / `cu_capture_ms` / `cu_encode_ms` | non-negative integers, dropped above the outer call deadline | the helper timed that phase | what each phase of the action cost |
 | `target_kind` | `window \| desktop` | a target is bound, which needs `[fermix_core.computer_use] background` on; absent on every row otherwise | what the action was pointed at |
 | `cu_mode` | `background \| foreground` | the action produced a result rather than a refusal; reads `foreground` until a window is bound, so `background` is the value that needs the flag | how the input reached the screen: inside a bound window through accessibility, or in front of the person |
+| `cu_verb` | `press \| set_value \| focus \| select \| toggle \| expand \| collapse \| scroll_to \| type` | the call named a verb on a control (`type` only with an `element_ref` or a mark, on a helper whose `input_methods` include `ax`), refused ones included | which semantic verb was sent (M86 P2) |
+| `cu_surfaces_count` | non-negative integer | the helper looked for open surfaces after input it dispatched | how many dialogs, alerts, menus and popups the action left open; never their names |
+| `cu_truncated` | `nodes \| depth \| time` | an `elements` or `wait_for` listing stopped before the tree did | why the walk was cut short |
+| `cu_ax_messages` | non-negative integer | the helper counted the walk's accessibility messages | what the walk cost |
 
 `control_origin` is the one addition to the **lifecycle** rows: on
 `session_pause` and `session_resume` it is `:command` when a chat `/pause` or
@@ -1329,10 +1493,21 @@ console/JS-exception buffer to its error details.
 `FERMIX_TRACE_CONTENT=0`. Bodies never leave the machine: the JSONL lives under
 a `0700` `FERMIX_HOME` and the Opik instance is local, so the privacy argument
 for a lean default does not apply, and a trace missing the request and the
-response cannot answer the questions traces exist for. The cost is disk —
-`FermixCore.Trace` has no retention, and a busy day's `tool_exec.jsonl` runs to
-tens of MB with content on. The test env pins it off (`config/test.exs`) so
-every content assertion in the suite establishes its own precondition.
+response cannot answer the questions traces exist for. The cost is disk — a
+busy day's `tool_exec.jsonl` runs to tens of MB with content on, and
+`FermixCore.Trace.Retention` keeps 14 days and at most 1 GiB. The test env pins
+it off (`config/test.exs`) so every content assertion in the suite establishes
+its own precondition.
+
+**Name a body one of `FermixCore.Trace.body_keys/0`** (`input`, `output`,
+`task_summary`, `query`, `content`, `context`, and the shell tool's
+always-on `command`). An Always On server's disk is
+one its hosting provider can read, so there `Trace` writes those fields to the
+day's `<type>.bodies.jsonl`, kept about a day (through the previous UTC day),
+and the rest of the row to
+`<type>.jsonl`, kept 14 (M75 L20). A body under any other name stays with its
+row for 14 days on the server: add the name to `body_keys/0` (and the
+`observability` self-knowledge reference) rather than inventing one.
 
 A field carrying user content obeys this switch even when it is not shaped by
 `preview/1` — `agent_task_start` / `skill_invoke` `task_summary` is the one that

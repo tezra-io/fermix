@@ -43,6 +43,7 @@ defmodule FermixChannels.Companion.AttachmentKindTest do
   end
 
   defmodule CoordinatorStub do
+    def epoch(_server), do: "boot-attachment"
     def acquire(_server, _profile, _id, _opts), do: {:ok, {:started, %{attempt: 1}}}
     def handoff(_server, _profile, _id, _attempt, _owner), do: :ok
   end
@@ -108,7 +109,7 @@ defmodule FermixChannels.Companion.AttachmentKindTest do
         task.()
         :ok
       end,
-      link_preview_resolver: fn _links, _store_thumbnail -> {:ok, [], []} end
+      link_preview_resolver: fn _links, _store_thumbnail, _on_preview -> {:ok, []} end
     ]
 
     %{opts: opts, context: %{transport: :mobile, authenticated_device_id: "device-1"}}

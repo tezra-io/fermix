@@ -1,6 +1,15 @@
 defmodule FermixCore.Auth.TokenSupervisor do
   @moduledoc """
   Starts one token manager per OAuth auth profile.
+
+  A manager is started on demand, in `ensure_child/2` and nowhere else. A
+  device-role engine (`FermixCore.Home.Role`) starts none and refreshes
+  nothing: after a move the token file on its host is a retired copy, and a
+  rotating refresh token has one live owner, the primary (M75 D5). There a
+  token, a refresh, a reload and a token file are refused by name
+  (`{:device_role, sentence}`), and `status/2` reports what is stored. Each
+  public function takes `:engine_role` to stand in for the role this boot
+  recorded; a process that booted no engine (a tree-less CLI verb) has none.
   """
 
   use Supervisor
@@ -13,6 +22,7 @@ defmodule FermixCore.Auth.TokenSupervisor do
   alias FermixCore.Auth.Store
   alias FermixCore.Auth.TokenExpiry
   alias FermixCore.Auth.TokenManager
+  alias FermixCore.Home.Role
 
   require Logger
 
@@ -26,26 +36,27 @@ defmodule FermixCore.Auth.TokenSupervisor do
     Supervisor.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
   end
 
-  @spec get_token(String.t()) :: {:ok, String.t()} | {:error, term()}
-  def get_token(auth_profile) when is_binary(auth_profile) do
-    call_or_read(auth_profile, :get_token)
+  @spec get_token(String.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
+  def get_token(auth_profile, opts \\ []) when is_binary(auth_profile) and is_list(opts) do
+    call_or_read(auth_profile, :get_token, opts)
   end
 
-  @spec refresh(String.t()) :: {:ok, String.t()} | {:error, term()}
-  def refresh(auth_profile) when is_binary(auth_profile) do
-    call_or_read(auth_profile, :refresh)
+  @spec refresh(String.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
+  def refresh(auth_profile, opts \\ []) when is_binary(auth_profile) and is_list(opts) do
+    call_or_read(auth_profile, :refresh, opts)
   end
 
-  @spec reload(String.t()) :: {:ok, String.t()} | {:error, term()}
-  def reload(auth_profile) when is_binary(auth_profile) do
-    call_or_read(auth_profile, :reload)
+  @spec reload(String.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
+  def reload(auth_profile, opts \\ []) when is_binary(auth_profile) and is_list(opts) do
+    call_or_read(auth_profile, :reload, opts)
   end
 
-  @spec status(String.t()) :: {:ok, map()} | {:error, term()}
-  def status(auth_profile) when is_binary(auth_profile) do
-    case ensure_child(auth_profile) do
+  @spec status(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def status(auth_profile, opts \\ []) when is_binary(auth_profile) and is_list(opts) do
+    case ensure_child(auth_profile, opts) do
       {:ok, server} -> TokenManager.status(server)
       {:error, :not_started} -> direct_status(auth_profile)
+      {:error, {:device_role, _sentence}} -> direct_status(auth_profile)
       {:error, reason} -> {:error, reason}
     end
   end
@@ -61,9 +72,10 @@ defmodule FermixCore.Auth.TokenSupervisor do
   config and the plugin store on disk and ask the running daemon to re-apply,
   and plugin children are only ever materialized inside the daemon's MCP tree.
   """
-  @spec enable_token_file(String.t(), Path.t()) :: :ok | {:error, term()}
-  def enable_token_file(auth_profile, path) when is_binary(auth_profile) and is_binary(path) do
-    case ensure_child(auth_profile) do
+  @spec enable_token_file(String.t(), Path.t(), keyword()) :: :ok | {:error, term()}
+  def enable_token_file(auth_profile, path, opts \\ [])
+      when is_binary(auth_profile) and is_binary(path) and is_list(opts) do
+    case ensure_child(auth_profile, opts) do
       {:ok, server} -> TokenManager.enable_token_file(server, path)
       {:error, :not_started} -> {:error, :token_file_needs_daemon}
       {:error, reason} -> {:error, reason}
@@ -209,23 +221,35 @@ defmodule FermixCore.Auth.TokenSupervisor do
     Supervisor.init(children, strategy: :one_for_all)
   end
 
-  defp call_or_read(auth_profile, :refresh) do
-    case ensure_child(auth_profile) do
+  defp call_or_read(auth_profile, :refresh, opts) do
+    case ensure_child(auth_profile, opts) do
       {:ok, server} -> TokenManager.refresh(server)
       {:error, :not_started} -> direct_refresh(auth_profile)
       {:error, reason} -> {:error, reason}
     end
   end
 
-  defp call_or_read(auth_profile, call) do
-    case ensure_child(auth_profile) do
+  defp call_or_read(auth_profile, call, opts) do
+    case ensure_child(auth_profile, opts) do
       {:ok, server} -> apply(TokenManager, call, [server])
       {:error, :not_started} -> direct_read(auth_profile)
       {:error, reason} -> {:error, reason}
     end
   end
 
-  defp ensure_child(auth_profile) do
+  # The one place a manager is started on demand. A device-role engine refuses
+  # here, before a manager or the direct read and refresh can touch the token.
+  defp ensure_child(auth_profile, opts) do
+    case opts |> Keyword.get_lazy(:engine_role, &Role.booted/0) |> admit() do
+      :ok -> lookup_or_start(auth_profile)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp admit(nil), do: :ok
+  defp admit(record), do: Role.admit(record)
+
+  defp lookup_or_start(auth_profile) do
     if Process.whereis(__MODULE__) do
       server = via(auth_profile)
 

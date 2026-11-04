@@ -80,7 +80,7 @@ defmodule FermixCore.Browser.HostLauncherTest do
   defp attach(host, connection_id \\ 1) do
     connection = spawn(fn -> Process.sleep(:infinity) end)
     on_exit(fn -> Process.exit(connection, :kill) end)
-    :ok = HostAvailability.attached(host, connection, connection_id)
+    :ok = HostAvailability.attached(host, connection, connection_id, 2)
     connection
   end
 

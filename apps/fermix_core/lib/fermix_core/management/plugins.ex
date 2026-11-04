@@ -575,6 +575,8 @@ defmodule FermixCore.Management.Plugins do
        when manifest in [:manifest_not_object, :manifest_invalid_json, :manifest_missing],
        do: "The download has no readable plugin description."
 
+  defp install_sentence({:reserved_name, _name}), do: Registry.reserved_name_sentence()
+
   defp install_sentence(:lock_unavailable),
     do: "Another plugin operation is using the plugin store."
 

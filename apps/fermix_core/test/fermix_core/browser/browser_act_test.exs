@@ -5,6 +5,7 @@ defmodule FermixCore.Browser.BrowserActTest do
   use ExUnit.Case, async: false
 
   alias FermixCore.Browser.Config
+  alias FermixCore.Browser.Error
   alias FermixCore.Browser.ProfileServer
 
   # Records every dispatched CDP method to the registered collector and returns
@@ -52,7 +53,8 @@ defmodule FermixCore.Browser.BrowserActTest do
     defp run(_pid, "DOM.getBoxModel", _params),
       do: {:ok, %{"model" => %{"content" => [0, 0, 20, 0, 20, 20, 0, 20]}}}
 
-    defp run(_pid, "DOM.resolveNode", _params), do: {:ok, %{"object" => %{"objectId" => "OBJ1"}}}
+    defp run(_pid, "DOM.resolveNode", %{backendNodeId: id}),
+      do: {:ok, %{"object" => %{"objectId" => "OBJ#{id}"}}}
 
     # One text the page refuses, so a fill that fails PART WAY through a
     # `fill_form` is drivable.
@@ -66,9 +68,13 @@ defmodule FermixCore.Browser.BrowserActTest do
     end
 
     # submit JS uses querySelector; read-receipt JS has "return this.value"; clear JS
-    # sets value="" (matches neither).
-    defp run(pid, "Runtime.callFunctionOn", %{functionDeclaration: fd}) do
+    # sets value="" (matches neither). The second field ("When?", node 43) is in
+    # no form: the submit script answers null for it, as the page would.
+    defp run(pid, "Runtime.callFunctionOn", %{objectId: object_id, functionDeclaration: fd}) do
       cond do
+        String.contains?(fd, "querySelector") and object_id == "OBJ43" ->
+          {:ok, %{"result" => %{"type" => "object", "subtype" => "null", "value" => nil}}}
+
         String.contains?(fd, "querySelector") ->
           {:ok, %{"result" => %{"value" => "Search"}}}
 
@@ -371,6 +377,31 @@ defmodule FermixCore.Browser.BrowserActTest do
               "submitted" => "Search",
               "url" => "https://example.com/results"
             }} = req(pid, "act", %{"kind" => "submit", "ref" => "textbox_1"})
+  end
+
+  # The form sent is the one the ref is in, and no other: a field outside any
+  # form (a single-page login, a checkout of loose inputs) used to send the
+  # page's first form, often a header search or a newsletter box.
+  test "submit resolves the form from its ref alone", %{pid: pid} do
+    ready(pid)
+
+    assert {:ok, _} = req(pid, "act", %{"kind" => "submit", "ref" => "textbox_1"})
+
+    assert_received {:cdp, _, "Runtime.callFunctionOn", %{functionDeclaration: declaration}}
+    assert declaration =~ "querySelector"
+    refute declaration =~ "document.forms"
+  end
+
+  test "a submit from a field in no form sends nothing and says to click the page's button",
+       %{pid: pid} do
+    ready(pid)
+
+    assert {:error, %Error{code: "no_form", message: message}} =
+             req(pid, "act", %{"kind" => "submit", "ref" => "textbox_2"})
+
+    assert message =~ "`textbox_2` is in no form"
+    assert message =~ "nothing was submitted"
+    assert message =~ "click the page's own submit button"
   end
 
   # M47 §3.5: a five-field form used to be five model turns. One call, one

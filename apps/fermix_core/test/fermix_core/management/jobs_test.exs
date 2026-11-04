@@ -30,6 +30,24 @@ defmodule FermixCore.Management.JobsTest do
     end
   end
 
+  # A run that traps exits, so a stop reaches it as a message: it says it is
+  # stopping, then holds its cleanup until this test releases it.
+  defp stopping_run(owner) do
+    fn _job_id, _report ->
+      Process.flag(:trap_exit, true)
+      send(owner, {:running, self()})
+
+      receive do
+        {:EXIT, _from, :shutdown} ->
+          send(owner, {:stopping, self()})
+
+          receive do
+            :release -> {:ok, %{}}
+          end
+      end
+    end
+  end
+
   describe "the job view" do
     test "a started job carries every published field", %{server: server} do
       owner = self()
@@ -246,6 +264,61 @@ defmodule FermixCore.Management.JobsTest do
       assert_receive {:DOWN, ^ref, :process, ^pid, _reason}
     end
 
+    # Always On setup §5: a delete started right after a cancel must never run
+    # beside the cancelled create still inside its provider call, so a stopped
+    # run stays running until its task is gone, and the cancel answers then.
+    test "cancel answers once the run has stopped, and the run counts as running until then",
+         %{server: server} do
+      owner = self()
+      run = stopping_run(owner)
+
+      assert {:ok, started} = Jobs.start(:home_provision, opts(server, name: "hetzner", run: run))
+      assert_receive {:running, pid}
+
+      canceller = Task.async(fn -> Jobs.cancel(started["job_id"], opts(server)) end)
+      assert_receive {:stopping, ^pid}
+
+      # The run is still inside its own cleanup.
+      assert {:ok, %{"status" => "running"}} = Jobs.get(started["job_id"], opts(server))
+
+      assert {:error, :busy} =
+               Jobs.start(:home_provision, opts(server, name: "hetzner", run: run))
+
+      assert Task.yield(canceller, 0) == nil
+
+      send(pid, :release)
+      assert {:ok, %{"status" => "cancelled"} = view} = Task.await(canceller)
+      assert view["failure"] == nil
+      refute Process.alive?(pid)
+
+      assert {:ok, _next} =
+               Jobs.start(
+                 :home_provision,
+                 opts(server, name: "hetzner", run: blocking_run(owner))
+               )
+
+      assert_receive {:running, next_pid}
+      send(next_pid, {:finish, {:ok, %{}}})
+    end
+
+    test "a run past its budget counts as running until it has stopped", %{server: server} do
+      owner = self()
+      run = stopping_run(owner)
+
+      assert {:ok, started} =
+               Jobs.start(:provider_probe, opts(server, name: "slow", run: run, budget_ms: 30))
+
+      assert_receive {:running, pid}
+      assert_receive {:stopping, ^pid}, 10_000
+
+      assert {:ok, %{"status" => "running"}} = Jobs.get(started["job_id"], opts(server))
+      assert {:error, :busy} = Jobs.start(:provider_probe, opts(server, name: "slow", run: run))
+
+      send(pid, :release)
+      assert {:ok, view} = eventually_terminal(server, started["job_id"])
+      assert view["status"] == "timed_out"
+    end
+
     test "cancelling a finished job is a no-op, not an error", %{server: server} do
       assert {:ok, started} =
                Jobs.start(
@@ -318,6 +391,123 @@ defmodule FermixCore.Management.JobsTest do
                )
 
       refute File.exists?(lock)
+    end
+  end
+
+  # Always On review R5: a job's owner ends what the run began, however the
+  # run ended, before the job leaves running; an `after` inside a run that
+  # is killed never runs.
+  describe "the ending" do
+    test "is told what the run answered, before the job is reported done", %{server: server} do
+      owner = self()
+      run = fn _job_id, _report -> {:error, {:refused, "Invented refusal."}, %{kept: true}} end
+
+      assert {:ok, started} =
+               Jobs.start(
+                 :home_provision,
+                 opts(server, name: "n", run: run, ending: holding_ending(owner))
+               )
+
+      assert_receive {:ended, ending,
+                      {:answered, {:error, {:refused, "Invented refusal."}, note}}}
+
+      assert note == %{kept: true}
+      assert {:ok, %{"status" => "running"}} = Jobs.get(started["job_id"], opts(server))
+      assert {:error, :busy} = Jobs.start(:home_provision, opts(server, name: "n", run: run))
+
+      send(ending, :release)
+      assert {:ok, view} = eventually_terminal(server, started["job_id"])
+      assert view["status"] == "failed"
+      assert view["failure"] == %{"code" => "refused", "sentence" => "Invented refusal."}
+    end
+
+    test "is told a run that completed, with its result", %{server: server} do
+      owner = self()
+      run = fn _job_id, _report -> {:ok, %{"done" => true}} end
+      ending = fn ended -> send(owner, {:ended, ended}) end
+
+      assert {:ok, started} =
+               Jobs.start(:home_provision, opts(server, name: "n", run: run, ending: ending))
+
+      assert_receive {:ended, {:answered, {:ok, %{"done" => true}}}}
+      assert {:ok, %{"status" => "completed"}} = eventually_terminal(server, started["job_id"])
+    end
+
+    test "is told a run that raised, exited or was killed, which answered nothing",
+         %{server: server} do
+      owner = self()
+      ending = fn ended -> send(owner, {:ended, ended}) end
+
+      for {name, run} <- [
+            {"raised", fn _job_id, _report -> raise "invented" end},
+            {"exited", fn _job_id, _report -> exit(:invented) end},
+            {"killed", fn _job_id, _report -> Process.exit(self(), :kill) end}
+          ] do
+        assert {:ok, started} =
+                 Jobs.start(:home_provision, opts(server, name: name, run: run, ending: ending))
+
+        assert_receive {:ended, :crashed}
+        assert {:ok, %{"status" => "failed"}} = eventually_terminal(server, started["job_id"])
+      end
+    end
+
+    test "of a cancelled run comes before the cancel answers", %{server: server} do
+      owner = self()
+
+      assert {:ok, started} =
+               Jobs.start(
+                 :home_provision,
+                 opts(server, name: "n", run: blocking_run(owner), ending: holding_ending(owner))
+               )
+
+      assert_receive {:running, _pid}
+      canceller = Task.async(fn -> Jobs.cancel(started["job_id"], opts(server)) end)
+      assert_receive {:ended, ending, :cancelled}
+      assert Task.yield(canceller, 0) == nil
+
+      send(ending, :release)
+      assert {:ok, %{"status" => "cancelled"}} = Task.await(canceller)
+    end
+
+    test "of a run past its budget is told it timed out", %{server: server} do
+      owner = self()
+      ending = fn ended -> send(owner, {:ended, ended}) end
+
+      assert {:ok, started} =
+               Jobs.start(
+                 :home_provision,
+                 opts(server, name: "n", run: blocking_run(owner), ending: ending, budget_ms: 30)
+               )
+
+      assert_receive {:ended, :timed_out}, 10_000
+      assert {:ok, %{"status" => "timed_out"}} = eventually_terminal(server, started["job_id"])
+    end
+
+    test "that raises is logged, and the job still ends", %{server: server} do
+      run = fn _job_id, _report -> {:ok, %{}} end
+      ending = fn _ended -> raise "invented ending failure" end
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:ok, started} =
+                   Jobs.start(:home_provision, opts(server, name: "n", run: run, ending: ending))
+
+          assert {:ok, %{"status" => "completed"}} =
+                   eventually_terminal(server, started["job_id"])
+        end)
+
+      assert log =~ "ending"
+    end
+  end
+
+  # An ending that says it was called, then holds until this test releases it.
+  defp holding_ending(owner) do
+    fn ended ->
+      send(owner, {:ended, self(), ended})
+
+      receive do
+        :release -> :ok
+      end
     end
   end
 

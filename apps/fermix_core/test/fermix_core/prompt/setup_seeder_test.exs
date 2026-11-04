@@ -280,6 +280,24 @@ defmodule FermixCore.Prompt.SetupSeederTest do
       assert path =~ "IDENTITY.md"
     end
 
+    # A device opens no database (`FermixCore.Home.Role`): its Repo is not
+    # running, so a settings save there writes the files and nothing else.
+    test "where no repo runs it seeds the files uncommitted and skips the rows, saying why", %{
+      agent_id: agent_id
+    } do
+      absent = :"setup_seeder_absent_#{System.unique_integer([:positive])}"
+
+      log =
+        capture_log(fn ->
+          assert {:ok, files} = SetupSeeder.seed(%{user_name: "Aira"}, repo: absent)
+          assert Enum.all?(files, &(&1.outcome == :seeded_uncommitted))
+          assert File.exists?(BootstrapPaths.identity_path(agent_id))
+        end)
+
+      assert log =~ "commit failed: :repo_not_running"
+      assert log =~ "no database is open in this engine"
+    end
+
     # Memory switched off is a home with no rows to seed, not a failed seed:
     # the files are what the prompt reads, and they are on disk.
     test "a disabled memory repo seeds the files uncommitted, skips the rows and logs both", %{

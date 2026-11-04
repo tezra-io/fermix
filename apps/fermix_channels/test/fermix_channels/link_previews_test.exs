@@ -32,25 +32,26 @@ defmodule FermixChannels.LinkPreviewsTest do
     end)
   end
 
-  test "a link preview is stored on its row before it goes out, with its link, its image no attachment" do
+  test "a link preview is stored on its row before it goes out, with its link, its image and icon no attachment" do
     digest = String.duplicate("b", 64)
+    icon_digest = String.duplicate("c", 64)
     test_pid = self()
 
-    resolver = fn links, store_thumbnail ->
+    resolver = fn links, store_thumbnail, on_preview ->
       send(test_pid, {:thumbnail_resolve, links})
       assert {:ok, ^digest} = store_thumbnail.("png-bytes", "image/png")
 
-      {:ok,
-       [
-         %{
-           link: "https://example.com",
-           url: "https://www.example.com/",
-           site: "Example",
-           title: "Example title",
-           description: nil,
-           image: %{ref: digest, mime: "image/png", size_bytes: 9}
-         }
-       ], []}
+      on_preview.(%{
+        link: "https://example.com",
+        url: "https://www.example.com/",
+        site: "Example",
+        title: "Example title",
+        description: nil,
+        image: %{ref: digest, mime: "image/png", size_bytes: 9},
+        icon: %{ref: icon_digest, mime: "image/x-icon", size_bytes: 4}
+      })
+
+      {:ok, []}
     end
 
     assert :ok = schedule(resolver, fn _bytes, _mime -> {:ok, digest} end)
@@ -69,6 +70,13 @@ defmodule FermixChannels.LinkPreviewsTest do
                "kind" => "image",
                "mime" => "image/png",
                "size_bytes" => 9
+             },
+             "icon" => %{
+               "ref" => icon_digest,
+               "sha256" => icon_digest,
+               "kind" => "image",
+               "mime" => "image/x-icon",
+               "size_bytes" => 4
              }
            }
 
@@ -77,10 +85,12 @@ defmodule FermixChannels.LinkPreviewsTest do
     assert event == %{
              "t" => "link_preview",
              "in_reply_to" => 73,
+             "link" => "https://example.com",
              "url" => "https://www.example.com/",
              "site" => "Example",
              "title" => "Example title",
-             "image_ref" => digest
+             "image_ref" => digest,
+             "icon_ref" => icon_digest
            }
 
     assert {:ok, _frames} =
@@ -104,7 +114,10 @@ defmodule FermixChannels.LinkPreviewsTest do
 
     assert :ok =
              LinkPreviews.schedule("main", 73, ["https://example.com"],
-               resolver: fn links, _thumbnail -> {:ok, Enum.map(links, &page/1), []} end,
+               resolver: fn links, _thumbnail, on_preview ->
+                 Enum.each(links, &on_preview.(page(&1)))
+                 {:ok, []}
+               end,
                launcher: fn task -> task.() && :ok end,
                store: StoreStub
              )
@@ -122,7 +135,7 @@ defmodule FermixChannels.LinkPreviewsTest do
   test "a row that names no link asks for nothing" do
     assert :ok =
              LinkPreviews.schedule("main", 73, [],
-               resolver: fn _links, _thumbnail -> flunk("nothing to resolve") end,
+               resolver: fn _links, _thumbnail, _on_preview -> flunk("nothing to resolve") end,
                launcher: fn _task -> flunk("nothing to launch") end
              )
   end
@@ -133,39 +146,43 @@ defmodule FermixChannels.LinkPreviewsTest do
     long = fn bytes -> String.duplicate("é", div(bytes, 2)) <> "é" end
     too_long_url = "https://example.com/" <> String.duplicate("a", 2_048)
 
-    resolver = fn _links, _store_thumbnail ->
-      {:ok,
-       [
-         %{
-           link: "https://example.com/ok",
-           url: "https://example.com/ok",
-           site: long.(120),
-           title: long.(300),
-           description: long.(600),
-           image: nil
-         },
-         %{
-           link: "https://example.com/redirects",
-           url: too_long_url,
-           site: "Example",
-           title: "Too long",
-           description: nil,
-           image: nil
-         },
-         %{
-           link: too_long_url,
-           url: "https://example.com/short",
-           site: "Example",
-           title: "Written too long",
-           description: nil,
-           image: nil
-         }
-       ], []}
+    resolver = fn _links, _store_thumbnail, on_preview ->
+      on_preview.(%{
+        link: "https://example.com/ok",
+        url: "https://example.com/ok",
+        site: long.(120),
+        title: long.(300),
+        description: long.(600),
+        image: nil
+      })
+
+      on_preview.(%{
+        link: "https://example.com/redirects",
+        url: too_long_url,
+        site: "Example",
+        title: "Too long",
+        description: nil,
+        image: nil
+      })
+
+      on_preview.(%{
+        link: too_long_url,
+        url: "https://example.com/short",
+        site: "Example",
+        title: "Written too long",
+        description: nil,
+        image: nil
+      })
+
+      {:ok, []}
     end
+
+    links = ["https://example.com/ok", "https://example.com/redirects", too_long_url]
 
     log =
       capture_log(fn ->
-        assert :ok = schedule(resolver, fn _bytes, _mime -> flunk("no thumbnail") end)
+        assert :ok =
+                 schedule(resolver, fn _bytes, _mime -> flunk("no thumbnail") end, links: links)
       end)
 
     assert_received {:preview_attached, "main", 73, stored}
@@ -182,8 +199,9 @@ defmodule FermixChannels.LinkPreviewsTest do
   end
 
   test "a preview its resolver read for no link is not stored" do
-    resolver = fn _links, _store_thumbnail ->
-      {:ok, [%{url: "https://example.com", site: "Example", title: "No link", image: nil}], []}
+    resolver = fn _links, _store_thumbnail, on_preview ->
+      on_preview.(%{url: "https://example.com", site: "Example", title: "No link", image: nil})
+      {:ok, []}
     end
 
     log = capture_log(fn -> assert :ok = schedule(resolver, fn _, _ -> {:ok, "x"} end) end)
@@ -197,7 +215,7 @@ defmodule FermixChannels.LinkPreviewsTest do
   test "a resolution past its hard deadline is stopped and sends nothing" do
     test_pid = self()
 
-    resolver = fn _links, _store_thumbnail ->
+    resolver = fn _links, _store_thumbnail, _on_preview ->
       send(test_pid, {:resolver, self()})
       Process.sleep(:infinity)
     end
@@ -213,12 +231,70 @@ defmodule FermixChannels.LinkPreviewsTest do
     assert log =~ "resolution_deadline"
   end
 
+  # A preview is stored and announced as it resolves, outside the process the
+  # deadline kills, so a slow site costs the row nothing that already finished.
+  # The first hand-over is immediate; a second's deadline leaves a busy runner
+  # room to schedule it, and the overflow test below proves the same keeping
+  # without a clock.
+  test "a preview that resolved is kept although a later one hangs past the deadline" do
+    test_pid = self()
+
+    resolver = fn _links, _store_thumbnail, on_preview ->
+      on_preview.(page("https://fast.test/"))
+      send(test_pid, {:resolver, self()})
+      Process.sleep(:infinity)
+    end
+
+    log =
+      capture_log(fn ->
+        assert :ok =
+                 schedule(resolver, fn _, _ -> {:ok, "x"} end,
+                   deadline_ms: 1_000,
+                   links: ["https://fast.test/", "https://slow.test/"]
+                 )
+      end)
+
+    assert_received {:resolver, resolver_pid}
+    refute Process.alive?(resolver_pid)
+    assert_received {:preview_attached, "main", 73, %{"link" => "https://fast.test/"}}
+
+    assert_received {:preview_event, {:profile, "main"},
+                     %{"t" => "link_preview", "link" => "https://fast.test/"}}
+
+    assert_received {:preview_event, {:profile, "main"}, %{"t" => "row_updated"}}
+    assert log =~ "resolution_deadline"
+  end
+
+  # The publish loop is bounded by the row's links: a resolver handing over
+  # more previews than that is stopped where it stands.
+  test "a resolver handing over more previews than the row has links is stopped" do
+    test_pid = self()
+
+    resolver = fn _links, _store_thumbnail, on_preview ->
+      send(test_pid, {:resolver, self()})
+      on_preview.(page("https://a.test/"))
+      on_preview.(page("https://b.test/"))
+      Process.sleep(:infinity)
+    end
+
+    log =
+      capture_log(fn ->
+        assert :ok = schedule(resolver, fn _, _ -> {:ok, "x"} end, links: ["https://a.test/"])
+      end)
+
+    assert_received {:resolver, resolver_pid}
+    refute Process.alive?(resolver_pid)
+    assert_received {:preview_attached, "main", 73, %{"link" => "https://a.test/"}}
+    refute_received {:preview_attached, "main", 73, %{"link" => "https://b.test/"}}
+    assert log =~ "resolution_overflow"
+  end
+
   test "resolutions past the concurrency bound are refused, never queued without limit" do
     supervisor = :"link_preview_bound_#{System.unique_integer([:positive])}"
     start_supervised!(LinkPreviews.supervisor_spec(supervisor, 1))
     test_pid = self()
 
-    blocking = fn _links, _store_thumbnail ->
+    blocking = fn _links, _store_thumbnail, _on_preview ->
       send(test_pid, :resolution_running)
       Process.sleep(:infinity)
     end
@@ -241,14 +317,14 @@ defmodule FermixChannels.LinkPreviewsTest do
   test "a mis-shaped injected seam raises instead of selecting the real implementation" do
     assert_raise ArgumentError, ~r/link_preview_resolver override/, fn ->
       LinkPreviews.schedule("main", 73, ["https://example.com"],
-        resolver: fn _links -> {:ok, [], []} end,
+        resolver: fn _links, _thumbnail -> {:ok, [], []} end,
         launcher: fn task -> task.() end
       )
     end
 
     assert_raise ArgumentError, ~r/thumbnail_store override/, fn ->
       LinkPreviews.schedule("main", 73, ["https://example.com"],
-        resolver: fn _links, _thumbnail -> {:ok, [], []} end,
+        resolver: fn _links, _thumbnail, _on_preview -> {:ok, []} end,
         thumbnail_store: fn _bytes -> :ok end,
         launcher: fn task -> task.() end
       )
@@ -259,11 +335,12 @@ defmodule FermixChannels.LinkPreviewsTest do
 
   defp schedule(resolver, thumbnail_store, extra \\ []) do
     test_pid = self()
+    {links, extra} = Keyword.pop(extra, :links, ["https://example.com"])
 
     LinkPreviews.schedule(
       "main",
       73,
-      ["https://example.com"],
+      links,
       [
         resolver: resolver,
         launcher: fn task ->

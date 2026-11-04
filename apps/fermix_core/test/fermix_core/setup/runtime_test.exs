@@ -4,6 +4,7 @@ defmodule FermixCore.Setup.RuntimeTest do
   alias FermixCore.Auth.ChatGPT
   alias FermixCore.Auth.Store, as: AuthStore
   alias FermixCore.Auth.TokenSupervisor
+  alias FermixCore.Home.Moved
   alias FermixCore.Memory.Repo, as: MemoryRepo
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.Runtime
@@ -25,12 +26,14 @@ defmodule FermixCore.Setup.RuntimeTest do
     openai_api_key = System.get_env("OPENAI_API_KEY")
     apns_key = System.get_env("FERMIX_APNS_KEY")
     mobile = Application.fetch_env(:fermix_channels, :mobile)
+    engine = Application.fetch_env(:fermix_core, :engine)
 
     on_exit(fn ->
       restore(:fermix_core, :providers, providers)
       restore(:fermix_core, :sandbox, sandbox)
       restore(:fermix_channels, :telegram, telegram)
       restore(:fermix_channels, :mobile, mobile)
+      restore(:fermix_core, :engine, engine)
       Application.put_env(:fermix_core, :personalization, personalization)
       Application.put_env(:fermix_core, :agent, agent)
       Application.put_env(:fermix_core, :memory, memory)
@@ -583,6 +586,56 @@ defmodule FermixCore.Setup.RuntimeTest do
 
       refute "Signing in with ChatGPT for openai_codex." in puts_lines(collector)
     end
+  end
+
+  # M75 D5: a home configured as a device, or one that moved, holds only a
+  # retired copy of the primary's tokens, so setup saves its local answers and
+  # takes no step that reaches a provider: no sign-in, no model check, no probe.
+  describe "on a home that is not the primary" do
+    for {label, seed} <- [{"a device home", :device}, {"a moved home", :moved}] do
+      @seed seed
+
+      test "setup on #{label} saves locally and refuses the provider steps by name" do
+        home = tmp_home()
+        on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
+        prepare(home)
+        sentence = seed_not_primary(home, @seed)
+        {puts, collector} = puts_collector()
+
+        assert :ok =
+                 Runtime.run(
+                   codex_answers(home,
+                     chatgpt_login: fn _opts -> flunk("a refused sign-in must not start") end,
+                     live_model: fn _provider, _opts -> flunk("no model check") end,
+                     req_options: [plug: fn _conn -> flunk("no provider probe") end]
+                   ),
+                   puts: puts,
+                   prompt: fn _ -> "" end
+                 )
+
+        lines = puts_lines(collector)
+        assert Enum.any?(lines, &String.starts_with?(&1, "Saved setup snapshot to "))
+        assert "Not signing in or checking the provider: #{sentence}" in lines
+        refute "Signing in with ChatGPT for openai_codex." in lines
+        refute File.exists?(Path.join(home, "auth.json"))
+      end
+    end
+  end
+
+  # Saved as setup saves it, so the file is this VM's own write, not an outside one.
+  defp seed_not_primary(_home, :device) do
+    :ok =
+      baseline_snapshot()
+      |> Map.update!(:fermix_core, &Keyword.put(&1, :engine, role: :device))
+      |> ConfigStore.save_snapshot()
+
+    "This engine runs in the device role; the primary is elsewhere."
+  end
+
+  defp seed_not_primary(home, :moved) do
+    marker = %{epoch: 2, moved_at: ~U[2026-10-27 09:30:00Z], to: "hetzner cx22"}
+    :ok = Moved.write(home, marker)
+    "This engine runs in the device role; the primary is hetzner cx22."
   end
 
   describe "the file store, offered in the terminal when the keyring cannot be used" do

@@ -525,10 +525,10 @@ def test_a_default_seeded_home_holds_both_cue_suites_out_as_not_evaluated(
                   if s.name in ("cues", "memory")]
     kept, held = run_eval.hold_out_unseeded(_cfg(home), behavioral)
     assert [suite.name for suite, _scns in kept] == ["memory"]
-    assert {suite for suite, _case, _reason in held} == {"cues"} and len(held) == 18
+    assert {suite for suite, _case, _reason in held} == {"cues"} and len(held) == 37
     run_eval.print_not_evaluated(held)
     out = capsys.readouterr().out
-    assert "NOT EVALUATED — 18 case(s)" in out and "cues/releases_and_outages" in out
+    assert "NOT EVALUATED — 37 case(s)" in out and "cues/releases_and_outages" in out
 
 
 def test_a_home_seeded_with_cues_runs_them(tmp_path, monkeypatch):
@@ -637,10 +637,12 @@ CREDENTIAL_CLEAN = [
     "Key and Secret rows.",
     "Fermix can't catch up after a drop, so stories sent while disconnected are missed.",
     "The source signs in with the key and secret you store in its settings.",
+    "Connect X under Plugins, then type the handle into an X accounts source, never a token in chat.",
 ]
 
 
-@pytest.mark.parametrize("case_id", ["broker_news_websocket", "market_headlines_wss"])
+@pytest.mark.parametrize("case_id", ["broker_news_websocket", "market_headlines_wss",
+                                     "x_account_new_posts", "x_handle_through_webhooks"])
 def test_each_credential_floor_catches_an_ask_and_passes_a_correct_reply(case_id):
     loaded = suites.load_all(os.path.join(BENCH, "suites"))
     cues = next(s for s in loaded if s.name == "cues")

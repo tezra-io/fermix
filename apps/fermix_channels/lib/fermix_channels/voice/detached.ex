@@ -44,7 +44,8 @@ defmodule FermixChannels.Voice.Detached do
 
   **Provenance** (M56 §9): a reply drawn from Computer History is shown in the
   chat, which is local, and nothing is said, since there is no call; so the
-  `history_tainted` word a turn sends changes nothing here.
+  `history_tainted` word a turn sends changes nothing here, nor does what it
+  read: there is no later hand-off of the call to start with it.
 
   **Bounds.** At most `max_tasks/0` tasks at once (the work registry's
   precedent); a ninth is refused and the session cancels it as before. Each
@@ -252,6 +253,7 @@ defmodule FermixChannels.Voice.Detached do
       progress: fn text -> forward.({:progress, text}) end,
       activity: fn event -> forward.({:activity, event}) end,
       history_tainted: fn -> forward.(:history_tainted) end,
+      outside_sources: fn sources -> forward.({:outside_sources, sources}) end,
       result: fn result -> forward.({:result, result}) end
     }
   end

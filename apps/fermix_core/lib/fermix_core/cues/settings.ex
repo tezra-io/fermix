@@ -2,10 +2,11 @@ defmodule FermixCore.Cues.Settings do
   @moduledoc """
   The owner's changes to the cue settings (M60 §6.2, §8.2, §10.1, §15), made
   from the setup page and from the management socket (`cues.*`, M60 app
-  surface §3.1): the switches and the door's port, the default filter model,
-  sources with their secrets, and mandates. Both doors call these functions,
-  so every refusal and side effect is the same from either. At most
-  `Cues.Config.max_sources/0` sources and `max_mandates/0` mandates are added.
+  surface §3.1): the switches and the door's port, the screen and its
+  decision model, the default filter model, sources with their secrets, and
+  mandates. Both doors call these functions, so every refusal and side effect
+  is the same from either. At most `Cues.Config.max_sources/0` sources and
+  `max_mandates/0` mandates are added.
 
   Every change is one save through the wizard's shared write tail
   (`Setup.Wizard.commit_snapshot/2`), as `Meetings.Config.save/1` makes its
@@ -19,7 +20,12 @@ defmodule FermixCore.Cues.Settings do
   before the config that names it, so a refused save leaves the old config
   whole; a secret this call created is taken back out when its config is not
   saved. The config holds only the sentinel. No secret value is ever returned,
-  except a local-push token this call made, which the caller shows once.
+  except a local-push token or a GitHub source's secret this call made, which
+  the caller shows once.
+
+  A new source is added with `add_source/3` (M60 simpler setup §7): its name
+  is optional, and one left out is made by `Cues.SourceName.make/2` in the
+  same save, against the names the save sees.
 
   Sections arrive in the persisted shape (enumerations as strings, durations
   as written), the shape `ConfigStore.current_snapshot/0` holds.
@@ -28,8 +34,11 @@ defmodule FermixCore.Cues.Settings do
   require Logger
 
   alias FermixCore.Cues.Config, as: CuesConfig
+  alias FermixCore.Cues.FilterChoices
   alias FermixCore.Cues.Pins
   alias FermixCore.Cues.Presets
+  alias FermixCore.Cues.SourceName
+  alias FermixCore.Providers.DecisionModel
   alias FermixCore.Providers.RoutingOverrides
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.RestartState
@@ -41,6 +50,8 @@ defmodule FermixCore.Cues.Settings do
   # are made by Fermix (`new_token/1`, `Cues.Webhook.ensure_path_secret/2`).
   @typed_secret_fields [:key, :secret]
   @token_bytes 32
+  @no_decision_model "Set up OpenRouter, Venice or OpenAI first: a decision model runs on one " <>
+                       "of them."
 
   @type refusal :: {:invalid, String.t()}
   @type secret_failure :: {:secret_store_failed, String.t(), String.t()}
@@ -53,16 +64,117 @@ defmodule FermixCore.Cues.Settings do
   """
   @spec save_switches(keyword()) :: {:ok, %{restart?: boolean()}} | {:error, refusal() | term()}
   def save_switches(changes) when is_list(changes) do
+    with {:ok, plan} <- switches_plan(changes),
+         {:ok, _report} <- commit(plan) do
+      {:ok, %{restart?: restart?(plan.old, plan.new)}}
+    end
+  end
+
+  @doc "Checks a `save_switches/1` change as that save does, and writes nothing."
+  @spec check_switches(keyword()) :: :ok | {:error, refusal()}
+  def check_switches(changes) when is_list(changes) do
+    with {:ok, _plan} <- switches_plan(changes), do: :ok
+  end
+
+  defp switches_plan(changes) do
     unknown = Keyword.keys(changes) -- @switch_keys
 
     if unknown != [] do
       raise ArgumentError, "unknown cue switch(es): #{inspect(unknown)}"
     end
 
-    with {:ok, plan} <- plan(fn cues -> {:ok, put_switches(cues, changes), nil} end),
+    plan(fn cues -> {:ok, put_switches(cues, changes), nil} end)
+  end
+
+  @doc """
+  Saves how items are checked before the filter model reads them
+  (`[fermix_core.cues] screen`): `"keyword"` (also nil or `""`) or
+  `"decision_model"`, refused while no provider that serves a decision model
+  is set up (`FilterChoices.decision_model/1`). Keyword match is the default,
+  so it is saved as no key. Read at every accept and filter call, so it
+  applies at once.
+  """
+  @spec save_screen(String.t() | nil) ::
+          {:ok, %{screen: :keyword | :decision_model}} | {:error, refusal() | term()}
+  def save_screen(screen) when is_binary(screen) or is_nil(screen) do
+    with {:ok, plan} <- screen_plan(screen_value(screen)),
          {:ok, _report} <- commit(plan) do
-      {:ok, %{restart?: restart?(plan.old, plan.new)}}
+      {:ok, %{screen: plan.new |> CuesConfig.normalize() |> CuesConfig.screen()}}
     end
+  end
+
+  @doc """
+  Checks a `save_screen/1` value as that save does, and writes nothing; that
+  save stays the screen's one write.
+  """
+  @spec check_screen(String.t() | nil) :: :ok | {:error, refusal()}
+  def check_screen(screen) when is_binary(screen) or is_nil(screen) do
+    with {:ok, _plan} <- screen_plan(screen_value(screen)), do: :ok
+  end
+
+  defp screen_plan(value) do
+    with :ok <- screen_ready(value),
+         do: plan(&{:ok, put_or_delete(&1, :screen, value), nil})
+  end
+
+  defp screen_value(screen) do
+    case blank_to_nil(screen) do
+      "keyword" -> nil
+      value -> value
+    end
+  end
+
+  defp screen_ready("decision_model") do
+    if FilterChoices.decision_model(ConfigStore.current_snapshot()),
+      do: :ok,
+      else: {:error, {:invalid, @no_decision_model}}
+  end
+
+  defp screen_ready(_value), do: :ok
+
+  @doc """
+  Saves which decision model the screen uses
+  (`[fermix_core.cues] decision_provider`): `"openai"`, `"openrouter"` or
+  `"venice"`, refused while that provider is not set up with a key that loaded
+  (`FilterChoices.decision_model_set_up?/2`), or nil or `""` for Automatic,
+  the one Fermix picks, saved as no key. It is checked and saved whatever the
+  screen is, so one save can pick both. Read at every filter call, so it
+  applies at once.
+  """
+  @spec save_decision_provider(String.t() | nil) ::
+          {:ok, %{decision_provider: DecisionModel.provider() | nil}}
+          | {:error, refusal() | term()}
+  def save_decision_provider(provider) when is_binary(provider) or is_nil(provider) do
+    with {:ok, plan} <- decision_provider_plan(blank_to_nil(provider)),
+         {:ok, _report} <- commit(plan) do
+      {:ok,
+       %{decision_provider: plan.new |> CuesConfig.normalize() |> CuesConfig.decision_provider()}}
+    end
+  end
+
+  @doc """
+  Checks a `save_decision_provider/1` value as that save does, and writes
+  nothing; that save stays its one write.
+  """
+  @spec check_decision_provider(String.t() | nil) :: :ok | {:error, refusal()}
+  def check_decision_provider(provider) when is_binary(provider) or is_nil(provider) do
+    with {:ok, _plan} <- decision_provider_plan(blank_to_nil(provider)), do: :ok
+  end
+
+  # The section's normalizer refuses a provider that serves no decision model
+  # (`plan/1`), before the set-up check reads the plan's snapshot.
+  defp decision_provider_plan(value) do
+    with {:ok, plan} <- plan(&{:ok, put_or_delete(&1, :decision_provider, value), nil}),
+         :ok <- decision_provider_ready(plan),
+         do: {:ok, plan}
+  end
+
+  defp decision_provider_ready(plan) do
+    provider = plan.new |> CuesConfig.normalize() |> CuesConfig.decision_provider()
+
+    if is_nil(provider) or FilterChoices.decision_model_set_up?(plan.snapshot, provider),
+      do: :ok,
+      else: {:error, {:invalid, FilterChoices.decision_model_not_set_up(provider)}}
   end
 
   @doc """
@@ -74,6 +186,20 @@ defmodule FermixCore.Cues.Settings do
           {:ok, %{cleared?: boolean()}} | {:error, refusal() | term()}
   def save_filter_model(provider, model)
       when (is_binary(provider) or is_nil(provider)) and (is_binary(model) or is_nil(model)) do
+    with {:ok, snapshot} <- filter_snapshot(provider, model),
+         {:ok, _report} <- Wizard.commit_snapshot(snapshot) do
+      {:ok, %{cleared?: is_nil(blank_to_nil(provider))}}
+    end
+  end
+
+  @doc "Checks a `save_filter_model/2` pair as that save does, and writes nothing."
+  @spec check_filter_model(String.t() | nil, String.t() | nil) :: :ok | {:error, refusal()}
+  def check_filter_model(provider, model)
+      when (is_binary(provider) or is_nil(provider)) and (is_binary(model) or is_nil(model)) do
+    with {:ok, _snapshot} <- filter_snapshot(provider, model), do: :ok
+  end
+
+  defp filter_snapshot(provider, model) do
     provider = blank_to_nil(provider)
     model = blank_to_nil(model)
     snapshot = ConfigStore.current_snapshot()
@@ -86,35 +212,66 @@ defmodule FermixCore.Cues.Settings do
 
     with :ok <- both_or_neither(provider, model),
          :ok <- validate_routing(routing),
-         {:ok, _report} <- Wizard.commit_snapshot(put_core(snapshot, :routing, routing)) do
-      {:ok, %{cleared?: is_nil(provider)}}
-    end
+         do: {:ok, put_core(snapshot, :routing, routing)}
   end
 
   @doc """
-  Adds (`:create`) or replaces (`:update`) source `ref`'s section. `section`
-  holds no secret field; `secrets` holds the values the owner typed (`:key`,
-  `:secret`), and a field it leaves out keeps its stored value. A new
-  local-push source gets a token, returned once as `token`; an update never
-  makes one, so a hand-edited local push source with none keeps waiting for
-  `new_token/1`, the one call that shows it.
+  Replaces (`:update`, the one mode) source `ref`'s section; a new source is
+  added with `add_source/3`. `section` holds no secret field; `secrets` holds
+  the values the owner typed (`:key`, `:secret`), and a field it leaves out
+  keeps its stored value. An update makes no token, so a hand-edited local
+  push source with none keeps waiting for `new_token/1`, the one call that
+  shows it.
   """
-  @spec save_source(String.t(), keyword(), %{optional(atom()) => String.t()}, :create | :update) ::
-          {:ok, %{token: String.t() | nil}} | {:error, refusal() | secret_failure() | term()}
-  def save_source(ref, section, secrets, mode)
-      when is_binary(ref) and is_list(section) and is_map(secrets) and mode in [:create, :update] do
+  @spec save_source(String.t(), keyword(), %{optional(atom()) => String.t()}, :update) ::
+          {:ok, %{ref: String.t(), token: nil}}
+          | {:error, refusal() | secret_failure() | term()}
+  def save_source(ref, section, secrets, :update)
+      when is_binary(ref) and is_list(section) and is_map(secrets) do
     check_typed_secrets!(section, secrets)
-    store_source(ref, section, secrets, mode, mode == :create)
+    store_source(ref, section, secrets, :update, false)
+  end
+
+  @doc """
+  Adds a new source, the add both doors make. `section` holds no secret
+  field; `secrets` holds the values the owner typed (`:key`, `:secret`).
+  `ref` nil or empty is made from `section` (`Cues.SourceName.make/2`)
+  against the names taken in the same save. A new local push source gets its
+  first token. A GitHub source given no `:secret` gets one Fermix makes, as
+  strong as a local push token and stored where a typed one is. Answers the
+  name in force, the token and the made secret, each for the caller to show
+  once and keep nowhere.
+  """
+  @spec add_source(String.t() | nil, keyword(), %{optional(atom()) => String.t()}) ::
+          {:ok, %{ref: String.t(), token: String.t() | nil, secret: String.t() | nil}}
+          | {:error, refusal() | secret_failure() | term()}
+  def add_source(ref, section, secrets)
+      when (is_binary(ref) or is_nil(ref)) and is_list(section) and is_map(secrets) do
+    check_typed_secrets!(section, secrets)
+    made = made_secret(section, secrets)
+    typed = if made, do: Map.put(secrets, :secret, made), else: secrets
+
+    with {:ok, saved} <- store_source(blank_to_nil(ref), section, typed, :create, true) do
+      {:ok, Map.put(saved, :secret, made)}
+    end
+  end
+
+  # GitHub signs each delivery with the secret pasted into its webhook form,
+  # so Fermix makes one unless the owner typed their own.
+  defp made_secret(section, secrets) do
+    if Keyword.get(section, :preset) == "github" and not Map.has_key?(secrets, :secret),
+      do: generate_token()
   end
 
   # `mint?` makes a local push source's first token where it has none: a new
-  # source, or `new_token/1` on one that waits for it.
+  # source, or `new_token/1` on one that waits for it. A nil `ref` is made in
+  # the plan, so the name and the names it is checked against are one read.
   defp store_source(ref, section, secrets, mode, mint?) do
-    with :ok <- check_name(ref, "source"),
-         {:ok, plan} <- plan(&put_source(&1, ref, section, secrets, mode, mint?)),
+    with {:ok, plan} <- plan(&put_source(&1, ref, section, secrets, mode, mint?)),
+         ref = plan.extra.ref,
          {:ok, created} <- write_secrets(ref, plan.extra.writes),
          {:ok, _report} <- commit_or_take_back(plan, ref, created) do
-      {:ok, %{token: plan.extra.token}}
+      {:ok, %{ref: ref, token: plan.extra.token}}
     end
   end
 
@@ -345,7 +502,8 @@ defmodule FermixCore.Cues.Settings do
   defp put_source(cues, ref, section, secrets, mode, mint?) do
     sources = Keyword.get(cues, :sources, %{})
 
-    with {:ok, existing} <- fetch_for(sources, ref, mode, "source"),
+    with {:ok, ref} <- source_ref(ref, section, sources),
+         {:ok, existing} <- fetch_for(sources, ref, mode, "source"),
          :ok <- room(sources, mode, CuesConfig.max_sources(), "sources") do
       kept = Keyword.take(existing, SecretWriter.cue_secret_fields())
       typed = Enum.map(secrets, fn {field, value} -> {field, value, store_for(kept, field)} end)
@@ -359,8 +517,19 @@ defmodule FermixCore.Cues.Settings do
         end)
 
       {:ok, put_key(cues, :sources, Map.put(sources, ref, new_section)),
-       %{token: token, writes: writes}}
+       %{ref: ref, token: token, writes: writes}}
     end
+  end
+
+  defp source_ref(nil, section, sources) do
+    case SourceName.make(section, Map.keys(sources)) do
+      {:ok, ref} -> {:ok, ref}
+      {:error, sentence} -> {:error, {:invalid, sentence}}
+    end
+  end
+
+  defp source_ref(ref, _section, _sources) do
+    with :ok <- check_name(ref, "source"), do: {:ok, ref}
   end
 
   # A new local-push source gets its first token here, and so does one that

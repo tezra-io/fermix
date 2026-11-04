@@ -646,6 +646,9 @@ defmodule FermixChannels.Channels.Acp.PeerTest do
 
       assert response["error"]["code"] == -32_000
       assert String.starts_with?(response["error"]["message"], "Re-authenticate: ")
+      # Where to do it, never a command: the host may be app-managed.
+      assert response["error"]["message"] =~ "in Fermix's Providers settings"
+      refute response["error"]["message"] =~ ~r/\bfermix\s+[a-z]/
     end
 
     test "any other failure maps to -32603 without leaking the raw reason", ctx do

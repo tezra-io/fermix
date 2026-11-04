@@ -69,6 +69,7 @@ defmodule FermixCore.Plugins.Capabilities do
       metadata: %{
         plugin_owned?: true,
         plugin: plugin.name,
+        plugin_display_name: plugin.display_name,
         plugin_tool: name,
         auth_profile: auth_profile,
         read_only?: Map.get(tool, "read_only") == true,

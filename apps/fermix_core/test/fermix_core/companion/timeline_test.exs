@@ -11,10 +11,20 @@ defmodule FermixCore.Companion.TimelineTest do
   @max_u64 18_446_744_073_709_551_615
   @day_seconds 86_400
   @media_ref String.duplicate("b", 64)
+  @icon_ref String.duplicate("f", 64)
 
   # Takes a database back to the shape it had before migration 36: every object
-  # the migration adds, and its version row.
+  # the migration adds, and its version row. Migration 50's icon index hangs
+  # off 36's preview table, so it goes first (its triggers go with the table).
+  @rewind_icon_index_migration """
+  DROP TRIGGER mobile_timeline_icons_ai;
+  DROP TRIGGER mobile_timeline_icons_au;
+  DROP TABLE mobile_timeline_icons;
+  DELETE FROM schema_migrations WHERE version = 50;
+  """
+
   @rewind_media_index_migration """
+  #{@rewind_icon_index_migration}
   DROP TRIGGER mobile_timeline_media_ai;
   DROP TRIGGER mobile_timeline_media_au;
   DROP TABLE mobile_timeline_link_previews;
@@ -429,7 +439,7 @@ defmodule FermixCore.Companion.TimelineTest do
     assert claimed.payload == payload
     assert claimed.authenticated_device_id == "device-a"
     assert claimed.attempt == 0
-    assert is_nil(claimed.runner_epoch)
+    assert claimed.runner_epoch == "boot-a"
     assert DateTime.compare(claimed.expires_at, DateTime.add(@now, @day_seconds, :second)) == :eq
 
     assert {:ok, {:duplicate, duplicate}} =
@@ -498,10 +508,11 @@ defmodule FermixCore.Companion.TimelineTest do
                "client-resend",
                "msg",
                %{"content" => "same"},
-               store_opts(repo, now: expired_at)
+               store_opts(repo, now: expired_at, runner_epoch: "boot-b")
              )
 
     assert reclaimed.attempt == 1
+    assert reclaimed.runner_epoch == "boot-b"
 
     assert {:ok, {:started, %{attempt: 2}}} =
              Timeline.start_client_request(
@@ -552,7 +563,7 @@ defmodule FermixCore.Companion.TimelineTest do
 
     assert abandoned.status == "accepted"
     assert abandoned.attempt == 1
-    assert is_nil(abandoned.runner_epoch)
+    assert abandoned.runner_epoch == "boot-a"
 
     assert {:ok, {:started, restarted}} =
              Timeline.start_client_request(
@@ -713,7 +724,13 @@ defmodule FermixCore.Companion.TimelineTest do
     assert persisted.result_server_seq == 7
   end
 
-  test "a new boot epoch recovers running work and fences stale callbacks", %{repo: repo} do
+  # M75: a request another boot held may have run there, in part or in full
+  # (any restart, or a restore on a new host), so it is never run again: the
+  # first start under a new boot settles it uncertain, and its old attempt's
+  # late callbacks find it ended.
+  test "a new boot epoch settles running work uncertain and fences stale callbacks", %{
+    repo: repo
+  } do
     assert {:ok, {:claimed, _request}} = claim_request(repo, "client-recover")
 
     assert {:ok, {:started, first}} =
@@ -742,7 +759,7 @@ defmodule FermixCore.Companion.TimelineTest do
     assert recoverable.payload == %{"content" => "same"}
     assert recoverable.authenticated_device_id == "device-a"
 
-    assert {:ok, {:started, second}} =
+    assert {:ok, {:settled_uncertain, settled}} =
              Timeline.start_client_request(
                "main",
                "client-recover",
@@ -750,8 +767,10 @@ defmodule FermixCore.Companion.TimelineTest do
                store_opts(repo, now: at(3))
              )
 
-    assert second.attempt == 2
-    assert second.runner_epoch == "boot-b"
+    assert settled.status == "uncertain"
+    assert settled.attempt == 1
+    assert settled.runner_epoch == "boot-a"
+    assert settled.error == %{"reason" => "uncertain_after_restart"}
 
     assert {:error, :stale_attempt} =
              Timeline.append_client_output(
@@ -763,7 +782,7 @@ defmodule FermixCore.Companion.TimelineTest do
                store_opts(repo, now: at(4))
              )
 
-    assert {:error, :stale_attempt} =
+    assert {:error, :already_settled} =
              Timeline.fail_client_request(
                "main",
                "client-recover",
@@ -781,10 +800,313 @@ defmodule FermixCore.Companion.TimelineTest do
                store_opts(repo, now: at(4))
              )
 
+    assert {:error, :stale_attempt} =
+             Timeline.abandon_client_request(
+               "main",
+               "client-recover",
+               1,
+               store_opts(repo, now: at(4))
+             )
+
     assert {:ok, %{messages: []}} = Timeline.history_page("main", store_opts(repo))
 
-    assert {:ok, %{status: "running", attempt: 2}} =
+    assert {:ok, ^settled} =
              Timeline.get_client_request("main", "client-recover", store_opts(repo))
+
+    assert {:ok, []} =
+             Timeline.recoverable_client_requests(
+               "boot-b",
+               store_opts(repo, limit: 20, now: at(5))
+             )
+  end
+
+  # An accepted request never started a turn, so it has had no effect: this
+  # engine runs it whichever of its boots claimed it.
+  test "an accepted request another boot of this engine claimed, never started, runs", %{
+    repo: repo
+  } do
+    assert {:ok, {:claimed, %{attempt: 0, runner_epoch: "boot-a"}}} =
+             claim_request(repo, "client-waiting")
+
+    assert {:ok, {:started, %{attempt: 1, runner_epoch: "boot-b"}}} =
+             Timeline.start_client_request(
+               "main",
+               "client-waiting",
+               "boot-b",
+               store_opts(repo, now: at(1))
+             )
+  end
+
+  # A request another boot ran ends uncertain, once; one that carried a cancel
+  # ends as the cancel the owner asked for.
+  test "a request another boot ran is settled once: uncertain, or cancelled when it was", %{
+    repo: repo
+  } do
+    for client_msg_id <- ["client-ran", "client-stopped"] do
+      assert {:ok, {:claimed, _request}} = claim_request(repo, client_msg_id)
+      assert {:ok, {:started, %{attempt: 1}}} = start_request(repo, client_msg_id)
+    end
+
+    assert {:ok, {:marked, _request}} =
+             Timeline.cancel_client_request("main", "client-stopped", store_opts(repo))
+
+    later = store_opts(repo, now: at(1))
+
+    assert {:ok, {:settled_uncertain, uncertain}} =
+             Timeline.start_client_request("main", "client-ran", "boot-b", later)
+
+    assert %{status: "uncertain", attempt: 1, runner_epoch: "boot-a"} = uncertain
+
+    assert {:ok, {:settled_cancelled, cancelled}} =
+             Timeline.start_client_request("main", "client-stopped", "boot-b", later)
+
+    assert %{status: "failed", attempt: 1, cancelled_at: %DateTime{}} = cancelled
+    assert cancelled.error == %{"reason" => "cancelled"}
+
+    # Settled once: a later start, under either boot, finds each ended.
+    for epoch <- ["boot-b", "boot-a"] do
+      assert {:ok, {:uncertain, ^uncertain}} =
+               Timeline.start_client_request("main", "client-ran", epoch, later)
+
+      assert {:ok, {:failed, ^cancelled}} =
+               Timeline.start_client_request("main", "client-stopped", epoch, later)
+    end
+
+    assert {:ok, {:settled, ^uncertain}} =
+             Timeline.cancel_client_request("main", "client-ran", store_opts(repo))
+  end
+
+  # The primary epoch counts the engines a home has been (a move to another
+  # host, a restore from a snapshot). Every unfinished request of an earlier
+  # engine is released from its boot, so its next start settles it.
+  test "a moved primary epoch releases every unfinished request; the next boot is normal", %{
+    repo: repo
+  } do
+    mobile = store_opts(repo, now: at(1))
+    companion = store_opts(repo, now: at(1), transport: "companion")
+
+    assert {:ok, :recorded} = Timeline.record_boot_primary_epoch(2, mobile)
+    assert {:ok, :unchanged} = Timeline.record_boot_primary_epoch(2, mobile)
+
+    assert {:ok, {:claimed, _request}} = claim_request(repo, "client-waiting")
+    assert {:ok, {:claimed, _request}} = claim_request(repo, "client-running")
+    assert {:ok, {:started, %{attempt: 1}}} = start_request(repo, "client-running")
+    assert {:ok, {:claimed, _request}} = claim_request(repo, "client-done")
+    assert {:ok, {:started, %{attempt: 1}}} = start_request(repo, "client-done")
+
+    assert {:ok, %{status: "completed"}} =
+             Timeline.complete_client_request("main", "client-done", 1, %{}, store_opts(repo))
+
+    assert {:ok, {:moved, 2, 2}} = Timeline.record_boot_primary_epoch(3, mobile)
+
+    for client_msg_id <- ["client-waiting", "client-running"] do
+      assert {:ok, %{runner_epoch: nil}} =
+               Timeline.get_client_request("main", client_msg_id, store_opts(repo))
+
+      assert {:ok, {:settled_uncertain, %{status: "uncertain"}}} =
+               Timeline.start_client_request("main", client_msg_id, "boot-b", mobile)
+    end
+
+    assert {:ok, %{status: "completed", runner_epoch: "boot-a"}} =
+             Timeline.get_client_request("main", "client-done", store_opts(repo))
+
+    # Each transport keeps its own, and the next boot at 3 is back to normal.
+    assert {:ok, :recorded} = Timeline.record_boot_primary_epoch(3, companion)
+    assert {:ok, :unchanged} = Timeline.record_boot_primary_epoch(3, mobile)
+
+    assert {:ok, {:claimed, _request}} =
+             Timeline.claim_client_request(
+               "main",
+               "client-after",
+               "msg",
+               %{"content" => "same"},
+               store_opts(repo, now: at(2), runner_epoch: "boot-b")
+             )
+
+    assert {:ok, :unchanged} = Timeline.record_boot_primary_epoch(3, store_opts(repo, now: at(3)))
+
+    assert {:ok, {:started, %{attempt: 1, runner_epoch: "boot-c"}}} =
+             Timeline.start_client_request(
+               "main",
+               "client-after",
+               "boot-c",
+               store_opts(repo, now: at(4))
+             )
+
+    assert {:error, {:invalid_field, :primary_epoch, 0}} =
+             Timeline.record_boot_primary_epoch(0, mobile)
+  end
+
+  # A row written before a claim recorded its boot carries none, so no boot
+  # can say it holds it: it is another boot's.
+  test "a request that names no boot is another boot's", context do
+    %{db_path: db_path, repo: repo} = context
+    assert {:ok, {:claimed, _request}} = claim_request(repo, "client-legacy-claim")
+    assert {:ok, {:claimed, _request}} = claim_request(repo, "client-legacy-run")
+    assert {:ok, {:started, %{attempt: 1}}} = start_request(repo, "client-legacy-run")
+
+    with_raw_conn(db_path, fn conn ->
+      assert :ok = Sqlite3.execute(conn, "UPDATE mobile_client_requests SET runner_epoch = NULL;")
+    end)
+
+    for client_msg_id <- ["client-legacy-claim", "client-legacy-run"] do
+      assert {:ok, {:settled_uncertain, %{status: "uncertain", runner_epoch: nil}}} =
+               Timeline.start_client_request(
+                 "main",
+                 client_msg_id,
+                 "boot-a",
+                 store_opts(repo, now: at(1))
+               )
+    end
+  end
+
+  # The claim outlives the uncertain settlement, so a blind resend of the same
+  # id never runs it: running it again takes a new id.
+  test "a resend of an uncertain request is a duplicate that never runs; a new id runs", %{
+    repo: repo
+  } do
+    assert {:ok, {:claimed, _request}} = claim_request(repo, "client-again")
+    assert {:ok, {:started, %{attempt: 1}}} = start_request(repo, "client-again")
+
+    assert {:ok, {:settled_uncertain, _settled}} =
+             Timeline.start_client_request(
+               "main",
+               "client-again",
+               "boot-b",
+               store_opts(repo, now: at(1))
+             )
+
+    later = store_opts(repo, now: at(2), runner_epoch: "boot-b")
+
+    assert {:ok, {:duplicate, %{status: "uncertain", runner_epoch: "boot-a"}}} =
+             Timeline.claim_client_request(
+               "main",
+               "client-again",
+               "msg",
+               %{"content" => "same"},
+               later
+             )
+
+    assert {:ok, {:uncertain, _row}} =
+             Timeline.start_client_request("main", "client-again", "boot-b", later)
+
+    assert {:ok, {:claimed, %{runner_epoch: "boot-b"}}} =
+             Timeline.claim_client_request(
+               "main",
+               "client-again-2",
+               "msg",
+               %{"content" => "same"},
+               later
+             )
+
+    assert {:ok, {:started, %{attempt: 1, runner_epoch: "boot-b"}}} =
+             Timeline.start_client_request("main", "client-again-2", "boot-b", later)
+  end
+
+  test "a released attempt stays its boot's: that boot reruns it, another settles it", %{
+    repo: repo
+  } do
+    for client_msg_id <- ["client-mine", "client-theirs"] do
+      assert {:ok, {:claimed, _request}} = claim_request(repo, client_msg_id)
+      assert {:ok, {:started, %{attempt: 1}}} = start_request(repo, client_msg_id)
+
+      assert {:ok, %{status: "accepted", runner_epoch: "boot-a"}} =
+               Timeline.abandon_client_request(
+                 "main",
+                 client_msg_id,
+                 1,
+                 store_opts(repo, now: at(1))
+               )
+    end
+
+    assert {:ok, {:started, %{attempt: 2, runner_epoch: "boot-a"}}} =
+             Timeline.start_client_request(
+               "main",
+               "client-mine",
+               "boot-a",
+               store_opts(repo, now: at(2))
+             )
+
+    assert {:ok, {:settled_uncertain, %{status: "uncertain", attempt: 1}}} =
+             Timeline.start_client_request(
+               "main",
+               "client-theirs",
+               "boot-b",
+               store_opts(repo, now: at(2))
+             )
+  end
+
+  test "a claim requires the boot epoch that holds it", %{repo: repo} do
+    opts = repo |> store_opts() |> Keyword.delete(:runner_epoch)
+
+    assert {:error, {:missing_option, :runner_epoch}} =
+             Timeline.claim_client_request("main", "client-no-boot", "msg", %{}, opts)
+
+    assert {:error, {:invalid_field, :runner_epoch, ""}} =
+             Timeline.claim_client_request(
+               "main",
+               "client-no-boot",
+               "msg",
+               %{},
+               Keyword.put(opts, :runner_epoch, "")
+             )
+
+    assert {:error, :not_found} =
+             Timeline.get_client_request("main", "client-no-boot", store_opts(repo))
+  end
+
+  # Migration 52 grows the request status set by `uncertain`. SQLite cannot
+  # change a CHECK in place, so the table is rebuilt with the same columns, in
+  # the same order, its rows and indexes kept.
+  test "a store from before migration 52 keeps its requests and can settle one uncertain",
+       context do
+    %{db_path: db_path, repo: repo} = context
+    assert {:ok, {:claimed, _request}} = claim_request(repo, "client-before-52")
+    assert {:ok, {:started, %{attempt: 1}}} = start_request(repo, "client-before-52")
+
+    assert {:ok, before} =
+             Timeline.get_client_request("main", "client-before-52", store_opts(repo))
+
+    stop_supervised!(Repo)
+    with_raw_conn(db_path, &rewind_uncertain_migration/1)
+
+    with_raw_conn(db_path, fn conn ->
+      assert {:error, _check} =
+               Sqlite3.execute(conn, "UPDATE mobile_client_requests SET status = 'uncertain';")
+    end)
+
+    start_supervised!({Repo, name: repo, enabled: true, database_path: db_path})
+
+    assert {:ok, versions} = Repo.migration_versions(server: repo)
+    assert 50 in versions
+
+    assert {:ok, ^before} =
+             Timeline.get_client_request("main", "client-before-52", store_opts(repo))
+
+    assert {:ok, {:settled_uncertain, %{status: "uncertain"}}} =
+             Timeline.start_client_request(
+               "main",
+               "client-before-52",
+               "boot-b",
+               store_opts(repo, now: at(1))
+             )
+
+    with_raw_conn(db_path, fn conn ->
+      assert {:ok, indexes} =
+               fetch_all(
+                 conn,
+                 "SELECT name FROM sqlite_master WHERE type = 'index' " <>
+                   "AND tbl_name = 'mobile_client_requests' AND sql IS NOT NULL ORDER BY name"
+               )
+
+      assert indexes == [
+               ["idx_mobile_client_requests_expiry"],
+               ["idx_mobile_client_requests_recovery"]
+             ]
+
+      assert {:ok, columns} = fetch_all(conn, "PRAGMA table_info(mobile_client_requests)")
+      assert length(columns) == 19
+    end)
   end
 
   test "recoverable request scan is bounded and stably ordered across profiles", %{repo: repo} do
@@ -863,13 +1185,7 @@ defmodule FermixCore.Companion.TimelineTest do
 
     assert result_seq == media.server_seq
 
-    assert {:ok, {:started, retry}} =
-             Timeline.start_client_request(
-               "main",
-               "client-output",
-               "boot-b",
-               store_opts(repo, now: at(5))
-             )
+    assert {:ok, {:started, retry}} = rerun_request(repo, "client-output", 1, at(5))
 
     assert retry.attempt == 2
 
@@ -1163,6 +1479,140 @@ defmodule FermixCore.Companion.TimelineTest do
              attach.(Map.put(link_preview(), "link", ""))
   end
 
+  # Links in the sentence (note 01): a preview's icon is stored beside its
+  # image and served through its row the same way, from an index of its own
+  # that the media index never names, so an engine before migration 50
+  # answers an icon ref not_found instead of a wrong descriptor.
+  test "a link preview's icon is served through its row, and a ref no row names is refused", %{
+    db_path: db_path,
+    repo: repo
+  } do
+    assert {:ok, parent} =
+             Timeline.append("main", %{role: "assistant", content: "x"}, store_opts(repo))
+
+    preview = Map.put(link_preview(), "icon", icon_descriptor())
+    seq = parent.server_seq
+
+    assert {:ok, %{link_previews: [^preview]}} =
+             Timeline.attach_link_preview("main", seq, preview, store_opts(repo))
+
+    icon = icon_descriptor()
+    image = preview["image"]
+
+    assert {:ok, %{server_seq: ^seq, media: ^icon}} =
+             Timeline.media_descriptor("main", @icon_ref, store_opts(repo))
+
+    assert {:ok, %{server_seq: ^seq, media: ^image}} =
+             Timeline.media_descriptor("main", @media_ref, store_opts(repo))
+
+    unnamed = String.duplicate("e", 64)
+    assert {:error, :not_found} = Timeline.media_descriptor("main", unnamed, store_opts(repo))
+    assert {:error, :not_found} = Timeline.media_descriptor("work", @icon_ref, store_opts(repo))
+
+    with_raw_conn(db_path, fn conn ->
+      params = ["agent-a", "owner-a", "main", @icon_ref]
+      assert {:ok, []} = raw_query(conn, MobileSql.media_descriptor_sql(), params)
+    end)
+
+    for broken <- [
+          put_in(preview, ["icon", "ref"], "not-a-digest"),
+          Map.put(preview, "icon", %{"kind" => "image"})
+        ] do
+      assert {:error, {:invalid_link_preview, {:icon, _reason}}} =
+               Timeline.attach_link_preview("main", seq, broken, store_opts(repo))
+    end
+  end
+
+  # A second card on the row rewrites its previews; the icon index follows the
+  # rewrite as the media index does, so both icons stay served.
+  test "every icon a row's previews name stays served once another card is stored", %{
+    repo: repo
+  } do
+    assert {:ok, parent} =
+             Timeline.append("main", %{role: "assistant", content: "x"}, store_opts(repo))
+
+    other_ref = String.duplicate("e", 64)
+    first = Map.put(link_preview(), "icon", icon_descriptor())
+
+    second =
+      link_preview()
+      |> Map.merge(%{"url" => "https://example.test/other", "icon" => icon_descriptor(other_ref)})
+      |> Map.delete("image")
+
+    assert {:ok, _row} =
+             Timeline.attach_link_preview("main", parent.server_seq, first, store_opts(repo))
+
+    assert {:ok, %{link_previews: [^first, ^second]}} =
+             Timeline.attach_link_preview("main", parent.server_seq, second, store_opts(repo))
+
+    assert {:ok, %{media: served}} =
+             Timeline.media_descriptor("main", @icon_ref, store_opts(repo))
+
+    assert served == icon_descriptor()
+
+    assert {:ok, %{media: other}} = Timeline.media_descriptor("main", other_ref, store_opts(repo))
+    assert other == icon_descriptor(other_ref)
+  end
+
+  # PERF-4 for icons: an icon ref is one index lookup too.
+  test "an icon ref is authorized through the icon index, never a timeline scan", %{
+    db_path: db_path,
+    repo: repo
+  } do
+    assert {:ok, parent} =
+             Timeline.append("main", %{role: "assistant", content: "x"}, store_opts(repo))
+
+    preview = Map.put(link_preview(), "icon", icon_descriptor())
+
+    assert {:ok, _row} =
+             Timeline.attach_link_preview("main", parent.server_seq, preview, store_opts(repo))
+
+    plan =
+      with_raw_conn(db_path, fn conn ->
+        {:ok, stmt} =
+          Sqlite3.prepare(conn, "EXPLAIN QUERY PLAN " <> MobileSql.icon_descriptor_sql())
+
+        :ok = Sqlite3.bind(stmt, ["agent-a", "owner-a", "main", @icon_ref])
+        {:ok, rows} = Sqlite3.fetch_all(conn, stmt)
+        :ok = Sqlite3.release(conn, stmt)
+        Enum.map_join(rows, "\n", &List.last/1)
+      end)
+
+    assert plan =~ "USING COVERING INDEX idx_mobile_timeline_icons_ref"
+    refute plan =~ "TEMP B-TREE"
+    refute plan =~ "SCAN"
+  end
+
+  # Migration 50 adds the icon index beside migration 36's tables and no
+  # column: an engine before it reads the timeline as before, and the triggers
+  # index the icons any engine's preview writes name.
+  test "the icon index migration adds its table to a database written before it", context do
+    %{db_path: db_path, repo: repo} = context
+
+    assert {:ok, parent} =
+             Timeline.append("main", %{role: "assistant", content: "before"}, store_opts(repo))
+
+    stop_supervised!(Repo)
+
+    with_raw_conn(db_path, fn conn ->
+      assert :ok = Sqlite3.execute(conn, @rewind_icon_index_migration)
+    end)
+
+    start_supervised!({Repo, name: repo, enabled: true, database_path: db_path})
+
+    assert {:ok, versions} = Repo.migration_versions(server: repo)
+    assert 50 in versions
+
+    preview = Map.put(link_preview(), "icon", icon_descriptor())
+
+    assert {:ok, _row} =
+             Timeline.attach_link_preview("main", parent.server_seq, preview, store_opts(repo))
+
+    assert {:ok, %{media: icon}} = Timeline.media_descriptor("main", @icon_ref, store_opts(repo))
+    assert icon == icon_descriptor()
+    assert legacy_rows(db_path) == {[1], []}
+  end
+
   test "a link preview on a request output from an older attempt is refused", %{repo: repo} do
     assert {:ok, {:claimed, _request}} = claim_request(repo, "client-preview")
     assert {:ok, {:started, %{attempt: 1}}} = start_request(repo, "client-preview")
@@ -1177,13 +1627,7 @@ defmodule FermixCore.Companion.TimelineTest do
                store_opts(repo, now: at(1))
              )
 
-    assert {:ok, {:started, %{attempt: 2}}} =
-             Timeline.start_client_request(
-               "main",
-               "client-preview",
-               "boot-b",
-               store_opts(repo, now: at(2))
-             )
+    assert {:ok, {:started, %{attempt: 2}}} = rerun_request(repo, "client-preview", 1, at(2))
 
     assert {:error, :stale_attempt} =
              Timeline.attach_link_preview(
@@ -1529,7 +1973,8 @@ defmodule FermixCore.Companion.TimelineTest do
         agent_id: "agent-a",
         owner_id: "owner-a",
         transport: "mobile",
-        authenticated_device_id: "device-a"
+        authenticated_device_id: "device-a",
+        runner_epoch: "boot-a"
       ],
       extra
     )
@@ -1564,6 +2009,19 @@ defmodule FermixCore.Companion.TimelineTest do
     Timeline.start_client_request("main", client_msg_id, "boot-a", store_opts(repo, now: @now))
   end
 
+  # The runner of `attempt` died, and this boot runs the request again.
+  defp rerun_request(repo, client_msg_id, attempt, now) do
+    assert {:ok, %{status: "accepted"}} =
+             Timeline.abandon_client_request(
+               "main",
+               client_msg_id,
+               attempt,
+               store_opts(repo, now: now)
+             )
+
+    Timeline.start_client_request("main", client_msg_id, "boot-a", store_opts(repo, now: now))
+  end
+
   defp restart_repo(repo, db_path) do
     stop_supervised(Repo)
     start_supervised!({Repo, name: repo, enabled: true, database_path: db_path})
@@ -1588,6 +2046,16 @@ defmodule FermixCore.Companion.TimelineTest do
       "description" => "What it says",
       "image" => media_descriptor(%{"kind" => "image", "mime" => "image/webp", "size_bytes" => 9})
     }
+  end
+
+  defp icon_descriptor(ref \\ @icon_ref) do
+    media_descriptor(%{
+      "ref" => ref,
+      "sha256" => ref,
+      "kind" => "image",
+      "mime" => "image/png",
+      "size_bytes" => 5
+    })
   end
 
   defp reply_blocks do
@@ -1701,6 +2169,41 @@ defmodule FermixCore.Companion.TimelineTest do
     result = Sqlite3.fetch_all(conn, stmt)
     :ok = Sqlite3.release(conn, stmt)
     result
+  end
+
+  # Takes the request table back to its shape before migration 52: the status
+  # CHECK without `uncertain`, its rows and indexes as they were.
+  defp rewind_uncertain_migration(conn) do
+    assert {:ok, [[sql]]} =
+             fetch_all(
+               conn,
+               "SELECT sql FROM sqlite_master WHERE type = 'table' " <>
+                 "AND name = 'mobile_client_requests'"
+             )
+
+    old = String.replace(sql, ", 'uncertain'", "", global: false)
+    refute old == sql
+
+    old_table =
+      String.replace(old, "mobile_client_requests", "mobile_client_requests_old", global: false)
+
+    assert :ok =
+             Sqlite3.execute(conn, """
+             BEGIN;
+             #{old_table};
+             INSERT INTO mobile_client_requests_old SELECT * FROM mobile_client_requests;
+             DROP TABLE mobile_client_requests;
+             ALTER TABLE mobile_client_requests_old RENAME TO mobile_client_requests;
+             CREATE INDEX idx_mobile_client_requests_expiry
+               ON mobile_client_requests(expires_at);
+             CREATE INDEX idx_mobile_client_requests_recovery
+               ON mobile_client_requests(
+                 agent_id, owner_id, status, claimed_at, profile_id, client_msg_id
+               );
+             DROP TABLE mobile_request_primary_epochs;
+             DELETE FROM schema_migrations WHERE version = 52;
+             COMMIT;
+             """)
   end
 
   defp with_raw_conn(db_path, operation) do

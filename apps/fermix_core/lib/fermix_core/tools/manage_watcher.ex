@@ -25,6 +25,15 @@ defmodule FermixCore.Tools.ManageWatcher do
   `show` and then changing it in the same turn is consent (design §8.4: "before
   adding, the agent sees the active list"). Should `show` ever return outside
   text, it must frame it and join the relaying modules.
+
+  ## Follow-ups (M60_WATCHER_CODING_RUNS.md §3)
+
+  `create` and `update` take a `follow_up`: a job in the owner's words that a
+  passing item sets off and that is handed nothing from it. `stop_follow_up`
+  removes it and `run_follow_up` is the owner's run of it by hand. Its tools
+  are bounded by this turn as `schedule_job` bounds a job's, the readiness
+  check names what is missing, and `always_allow: false` takes back the
+  owner's Always allow, which only a card grants: `ManageWatcher.FollowUp`.
   """
 
   @behaviour FermixCore.Capabilities.Builtin.Tool
@@ -33,15 +42,20 @@ defmodule FermixCore.Tools.ManageWatcher do
   alias FermixCore.Capabilities.Builtin.Tool
   alias FermixCore.Clock
   alias FermixCore.Cues
+  alias FermixCore.Cues.FollowUpReadiness
+  alias FermixCore.Cues.FollowUps
+  alias FermixCore.Cues.Overview
   alias FermixCore.Cues.Watchers
+  alias FermixCore.Jobs.Registry, as: JobsRegistry
   alias FermixCore.Memory.Repo
   alias FermixCore.Temporal.Access
+  alias FermixCore.Tools.ManageWatcher.FollowUp
   alias FermixCore.Tools.Support
 
   @read_actions ~w(list show)
   @change_actions ~w(create pause resume remove add_instructions remove_instructions
                      restore_instruction merge_instructions set_purpose add_example
-                     remove_example update)
+                     remove_example update stop_follow_up run_follow_up)
   @actions @read_actions ++ @change_actions
 
   @update_keys ~w(sources filter listen_for purpose task_job_id task_notes daily_cap
@@ -63,18 +77,24 @@ defmodule FermixCore.Tools.ManageWatcher do
       "streams, webhooks), judges each item against its one-line purpose and numbered " <>
       "instructions with a filter model (or passes every item when its filter is none), and " <>
       "wakes its task, a job that runs on cues, for each item that passes. A watcher that " <>
-      "filters listens for words (listen_for): only an item containing one of them reaches " <>
-      "its filter, and the words never decide a pass. Draft them yourself, broadly, from the " <>
-      "owner's purpose and instructions: names, products, common abbreviations, and the " <>
-      "languages the source likely carries, since an item no word matches is never judged; " <>
-      "never ask the owner for a pattern. A watcher with no filter cannot listen to a stream " <>
+      "filters listens for keywords (listen_for), which never decide a pass. Under the " <>
+      "owner's Screen (Settings → Cues → Screen; not changed in chat), Keyword match " <>
+      "passes only items containing one to the filter; Decision model checks every item " <>
+      "by meaning, keywords as hints. Draft them yourself, broadly, from the owner's " <>
+      "purpose and instructions: names, products, common abbreviations, and the languages " <>
+      "the source likely carries; never ask the owner for a pattern. A watcher with no " <>
+      "filter cannot listen to a stream " <>
       "source. Instructions are a list of single criteria that Fermix never rewrites: read " <>
       "the list with show before adding, and remove one that a new instruction contradicts in " <>
       "the same change. A watcher holds at most 20 active instructions of at most 300 " <>
       "characters; past that, merge several into one. An example must be an item the watcher " <>
       "received, or one of a stream watcher's recent drops (find either with list_cues). " <>
       "Changes need the owner's own request in a private chat; Fermix answers every change " <>
-      "with its own summary, which you pass on to the owner as written."
+      "with its own summary, which you pass on to the owner as written. A watcher may also " <>
+      "have a follow-up (follow_up): the owner's own job that each passing item sets off, " <>
+      "with fixed instructions and tools, asking first on a card. Fermix hands it nothing " <>
+      "from the item, so work on the item's content is the task's or a mandate's; say so " <>
+      "when the owner asks for it."
   end
 
   @impl true
@@ -94,7 +114,7 @@ defmodule FermixCore.Tools.ManageWatcher do
           type: "array",
           items: %{type: "string"},
           description:
-            "Words and short phrases an item this watcher should see would contain (create, " <>
+            "Keywords and short phrases an item this watcher should see would contain (create, " <>
               "update, where it replaces the list): 1 to 200, each at most 64 characters, " <>
               "matched as whole words ignoring case and accents. Needed for filter llm."
         },
@@ -132,7 +152,8 @@ defmodule FermixCore.Tools.ManageWatcher do
         daily_cap: %{
           type: "string",
           description:
-            ~s(Most task runs a day, as a whole number, or "none". Required for filter none.)
+            ~s(Most runs a day of its task and follow-up together, as a whole number, or ) <>
+              ~s("none". Required for filter none.)
         },
         filter_budget: %{
           type: "string",
@@ -165,7 +186,8 @@ defmodule FermixCore.Tools.ManageWatcher do
           description: "pass: it should have reached the task; drop: it should not have."
         },
         note: %{type: "string", description: "Why, in a few words (at most 300 characters)."},
-        example_id: %{type: "string", description: "The example to remove."}
+        example_id: %{type: "string", description: "The example to remove."},
+        follow_up: FollowUp.schema()
       }
     }
   end
@@ -173,8 +195,8 @@ defmodule FermixCore.Tools.ManageWatcher do
   @impl true
   def when_to_use do
     "When the owner asks Fermix to watch sources for something, to change what a watcher " <>
-      "looks for or where it reports, to react to an item a watcher passed or missed, or asks " <>
-      "what a watcher is watching for."
+      "looks for or where it reports, to react to an item a watcher passed or missed, to have " <>
+      "something done whenever a watcher passes an item, or asks what a watcher is watching for."
   end
 
   @impl true
@@ -186,7 +208,7 @@ defmodule FermixCore.Tools.ManageWatcher do
         description: "a change from a shared chat or a turn that read outside text"
       },
       %{tag: "instruction_cap", description: "20 active instructions; merge first"},
-      %{tag: "needs_words", description: "a model filter with no words to listen for"},
+      %{tag: "needs_words", description: "a model filter with no keywords to listen for"},
       %{tag: "no_filter_on_stream", description: "a watcher with no filter on a stream source"}
     ]
   end
@@ -261,14 +283,54 @@ defmodule FermixCore.Tools.ManageWatcher do
   end
 
   defp dispatch("create", args, context) do
-    with {:ok, params} <- create_params(args) do
-      echo_of(Watchers.create(params, context, opts(context)))
+    opts = opts(context)
+
+    with {:ok, params} <- create_params(args),
+         {:ok, _name} <- watcher_name(args) do
+      case FollowUp.params(Map.get(args, "follow_up"), context, opts) do
+        {:ok, follow_up} ->
+          params
+          |> put_follow_up(follow_up)
+          |> Watchers.create(context, opts)
+          |> FollowUp.summarize(context, opts)
+
+        {:unoffered, sentence} ->
+          create_without_follow_up(params, sentence, context, opts)
+
+        {:error, sentence} ->
+          {:error, sentence}
+      end
+    end
+  end
+
+  defp dispatch("update", args, context) do
+    with {:ok, name} <- watcher_name(args) do
+      "update"
+      |> change(name, args, context)
+      |> FollowUp.summarize(context, opts(context))
     end
   end
 
   defp dispatch(action, args, context) do
     with {:ok, name} <- watcher_name(args) do
       echo_of(change(action, name, args, context))
+    end
+  end
+
+  defp put_follow_up(params, nil), do: params
+  defp put_follow_up(params, follow_up), do: Map.put(params, :follow_up, follow_up)
+
+  # A follow-up naming a tool this computer does not have is left out (§3.2);
+  # the watcher is still made with its task, so the owner hears from it
+  # meanwhile. With no task it would do nothing, so nothing is made.
+  defp create_without_follow_up(params, sentence, context, opts) do
+    if Enum.any?([:task, :task_job_id], &(Map.get(params, &1) not in [nil, ""])) do
+      with {:ok, %{echo: echo}} <- Watchers.create(params, context, opts),
+           do: {:ok, echo <> "\n" <> FollowUp.not_set_up(sentence)}
+    else
+      {:error,
+       FollowUp.not_set_up(sentence) <>
+         " Nothing was set up: without its follow-up the watcher would have no task."}
     end
   end
 
@@ -337,7 +399,46 @@ defmodule FermixCore.Tools.ManageWatcher do
     do: Watchers.remove_example(name, Map.get(args, "example_id"), opts(context))
 
   defp change("update", name, args, context) do
-    with {:ok, changes} <- update_changes(args), do: Watchers.update(name, changes, opts(context))
+    opts = opts(context)
+
+    with {:ok, changes} <- update_changes(args) do
+      case FollowUp.params(Map.get(args, "follow_up"), context, opts) do
+        {:ok, follow_up} -> update(name, changes, follow_up, context, opts)
+        {:unoffered, sentence} -> update_without_follow_up(name, changes, sentence, opts)
+        {:error, sentence} -> {:error, sentence}
+      end
+    end
+  end
+
+  defp change("stop_follow_up", name, _args, context),
+    do: Watchers.remove_follow_up(name, opts(context))
+
+  defp change("run_follow_up", name, _args, context),
+    do: FollowUp.run_now(name, context, opts(context))
+
+  # The watcher first, then its follow-up.
+  defp update(name, changes, nil, _context, opts), do: Watchers.update(name, changes, opts)
+
+  defp update(name, changes, follow_up, context, opts) when map_size(changes) == 0,
+    do: Watchers.set_follow_up(name, follow_up, context, opts)
+
+  defp update(name, changes, follow_up, context, opts) do
+    with {:ok, %{echo: changed}} <- Watchers.update(name, changes, opts) do
+      case Watchers.set_follow_up(name, follow_up, context, opts) do
+        {:ok, result} -> {:ok, %{result | echo: changed <> "\n" <> result.echo}}
+        {:error, sentence} -> {:error, changed <> "\nThe follow-up did not change: " <> sentence}
+      end
+    end
+  end
+
+  # A follow-up change naming a tool this computer does not have is left out
+  # (§3.2); the rest of the change is made.
+  defp update_without_follow_up(_name, changes, sentence, _opts) when map_size(changes) == 0,
+    do: {:error, FollowUp.not_changed(sentence)}
+
+  defp update_without_follow_up(name, changes, sentence, opts) do
+    with {:ok, %{echo: echo} = result} <- Watchers.update(name, changes, opts),
+         do: {:ok, %{result | echo: echo <> "\n" <> FollowUp.not_changed(sentence)}}
   end
 
   defp echo_of({:ok, %{echo: echo}}), do: {:ok, echo}
@@ -406,10 +507,25 @@ defmodule FermixCore.Tools.ManageWatcher do
     end
   end
 
+  # The seams a turn's context carries for the domain calls: the registries, the
+  # scheduler, and the follow-up's sender and readiness reads (tests).
+  @context_seams [
+                   :skill_registry,
+                   :scheduler,
+                   :capability_registry,
+                   :cues_config,
+                   :follow_up_sender,
+                   :proposal_listener
+                 ] ++ FollowUpReadiness.seams()
+
   defp opts(context) do
     [repo: Map.get(context, :memory_repo, Repo)] ++
-      Enum.flat_map([:skill_registry, :scheduler], fn key ->
-        if Map.has_key?(context, key), do: [{key, Map.fetch!(context, key)}], else: []
+      Enum.flat_map(@context_seams, fn key ->
+        case Map.fetch(context, key) do
+          {:ok, nil} when key != :scheduler -> []
+          {:ok, value} -> [{key, value}]
+          :error -> []
+        end
       end)
   end
 
@@ -423,7 +539,7 @@ defmodule FermixCore.Tools.ManageWatcher do
     Enum.map_join(watchers, "\n", fn watcher ->
       "#{watcher.name}: #{state_word(watcher, streams)}; #{filter_word(watcher)}; " <>
         "#{watcher.active_instructions} active instructions; sources " <>
-        "#{Enum.join(watcher.sources, ", ")}; task job #{watcher.task_job_id}"
+        "#{Enum.join(watcher.sources, ", ")}; #{jobs_words(watcher)}"
     end)
   end
 
@@ -432,8 +548,10 @@ defmodule FermixCore.Tools.ManageWatcher do
 
     [
       "Watcher #{watcher.name} (#{watcher.id}): #{state_word(watcher, streams)}; " <>
-        "#{filter_word(watcher)}; task job #{watcher.task_job_id}; task notes " <>
+        "#{filter_word(watcher)}; #{jobs_words(watcher)}; task notes " <>
         "#{if watcher.task_notes?, do: "on", else: "off"}.",
+      filter_hold_line(watcher, context),
+      follow_up_line(watcher, context),
       needs_line(Watchers.update_needed(watcher, streams)),
       "Sources: #{Enum.join(watcher.sources, ", ")}." <> missing(watcher, context),
       "Daily cap: #{count_word(watcher.daily_cap, "runs")}. Filter budget: " <>
@@ -448,6 +566,48 @@ defmodule FermixCore.Tools.ManageWatcher do
     |> Enum.join("\n")
   end
 
+  # A filter held because the screen's decision model cannot run, in the words
+  # of its notice (`Cues.Overview.filter_hold/2`); any other hold is not shown.
+  defp filter_hold_line(watcher, context) do
+    case Overview.filter_hold(watcher.id, opts(context)) do
+      {:ok, nil} -> nil
+      {:ok, sentence} -> "Its filter is held. #{sentence}"
+      {:error, reason} -> "Its filter's hold could not be read (#{inspect(reason)})."
+    end
+  end
+
+  defp jobs_words(%{task_job_id: nil} = watcher), do: "no task" <> follow_up_words(watcher)
+
+  defp jobs_words(watcher),
+    do: "task job #{watcher.task_job_id}" <> follow_up_words(watcher)
+
+  defp follow_up_words(%{follow_up_job_id: nil}), do: ""
+
+  defp follow_up_words(watcher),
+    do: "; follow-up job #{watcher.follow_up_job_id}"
+
+  # The follow-up as it stands: what it runs, how, and whether it is held now.
+  defp follow_up_line(%{follow_up_job_id: nil}, _context), do: nil
+
+  defp follow_up_line(watcher, context) do
+    opts = opts(context)
+
+    with {:ok, job} <- JobsRegistry.get_job(watcher.follow_up_job_id, repo: opts[:repo]),
+         {:ok, allowed?} <- Watchers.always_allowed(watcher, opts) do
+      ~s(Follow-up "#{job.name}": uses #{Enum.join(job.allowed_tools, ", ")}; ) <>
+        "#{allow_words(allowed?)}; #{held_words(FollowUps.held(job, opts))}"
+    else
+      {:error, sentence} when is_binary(sentence) -> "Follow-up: #{sentence}"
+      {:error, reason} -> "Follow-up: its job could not be read (#{inspect(reason)})."
+    end
+  end
+
+  defp allow_words(true), do: "always allowed, so it runs with no card"
+  defp allow_words(false), do: "asks first on a card"
+
+  defp held_words(nil), do: "ready."
+  defp held_words({_label, sentence}), do: "held: #{sentence}"
+
   defp missing(watcher, context) do
     case Watchers.missing_sources(watcher.sources, opts(context)) do
       [] -> ""
@@ -460,7 +620,7 @@ defmodule FermixCore.Tools.ManageWatcher do
   defp state_word(watcher, streams) do
     case Watchers.update_needed(watcher, streams) do
       nil -> "listening"
-      :words -> "needs words to listen for"
+      :words -> "needs keywords to listen for"
       :filter -> "needs a filter to listen to a stream"
     end
   end
@@ -468,7 +628,7 @@ defmodule FermixCore.Tools.ManageWatcher do
   defp needs_line(nil), do: nil
 
   defp needs_line(:words),
-    do: "It needs words to listen for, and no item reaches it until an update gives it some."
+    do: "It needs keywords to listen for, and no item reaches it until an update gives it some."
 
   defp needs_line(:filter),
     do:

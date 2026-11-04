@@ -4,11 +4,14 @@ defmodule FermixCore.TraceTest do
   alias FermixCore.Trace
 
   @valid_types [:llm_call, :tool_exec, :agent_event, :channel_msg, :error, :sandbox_event]
+  # The day Trace files under, handed in so a run across UTC midnight writes
+  # and reads the same folder.
+  @today ~D[2026-10-30]
 
   setup do
     tmp_dir = Path.join(System.tmp_dir!(), "fermix_trace_#{System.unique_integer([:positive])}")
     name = :"trace_test_#{System.unique_integer([:positive])}"
-    start_supervised!({Trace, base_dir: tmp_dir, name: name})
+    start_supervised!({Trace, base_dir: tmp_dir, name: name, today: fn -> @today end})
 
     on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_dir) end)
 
@@ -18,7 +21,7 @@ defmodule FermixCore.TraceTest do
   defp sync(server), do: :sys.get_state(server)
 
   defp today_dir(base_dir) do
-    Path.join(base_dir, Date.utc_today() |> Date.to_iso8601())
+    Path.join(base_dir, Date.to_iso8601(@today))
   end
 
   defp read_entries(base_dir, type) do

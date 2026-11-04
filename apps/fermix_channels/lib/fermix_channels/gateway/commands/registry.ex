@@ -26,6 +26,23 @@ defmodule FermixChannels.Gateway.Commands.Registry do
   end
 
   @doc """
+  The command palette both companion wires send their app, from the live
+  registry: each command's `name`, `aliases` and `description`, string keyed
+  as it travels (the phone's `hello_ack.caps.commands`, the Mac's
+  `server_hello.commands`).
+  """
+  @spec catalog() :: [%{required(String.t()) => String.t() | [String.t()]}]
+  def catalog do
+    Enum.map(list(), fn command ->
+      %{
+        "name" => command.name(),
+        "aliases" => command.aliases(),
+        "description" => command.description()
+      }
+    end)
+  end
+
+  @doc """
   Assert the configured commands have no duplicate name or alias. `lookup/1`
   returns the first match, so a duplicate trigger would silently shadow one
   command with another. Raises with the offending trigger; called at boot to

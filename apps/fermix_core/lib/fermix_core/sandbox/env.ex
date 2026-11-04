@@ -156,15 +156,21 @@ defmodule FermixCore.Sandbox.Env do
     end
   end
 
+  # Each sentence says what to change where every install can: the allowed
+  # names in the sandbox settings (an app pane and the setup page), and the
+  # helper and deny list in the settings file. `fermix sandbox` adds its own
+  # command for a terminal.
+  @helper_remedy "change the command the settings file sets for that variable."
+
   @spec format_error(term()) :: String.t()
   def format_error({:env_not_allowed, name}) when is_binary(name) do
-    "#{name} is not allowed for this command. Run `fermix sandbox env allow #{name}` " <>
-      "or configure it with `fermix sandbox env set #{name} -- <helper> [args...]`."
+    "#{name} is not allowed for this command. Add it to the allowed environment " <>
+      "variables in the sandbox settings."
   end
 
   def format_error({:env_denied, name}) when is_binary(name) do
-    "#{name} is denied by sandbox env config. Remove it from the deny list or run " <>
-      "`fermix sandbox env allow #{name}` before passing it through."
+    "#{name} is denied by sandbox env config. Remove it from the deny list in the settings " <>
+      "file, and allow it, before passing it through."
   end
 
   def format_error({:missing_env, name}) when is_binary(name) do
@@ -178,30 +184,30 @@ defmodule FermixCore.Sandbox.Env do
   end
 
   def format_error({:env_command_not_found, command}) when is_binary(command) do
-    "#{command} could not be found while resolving an env value. Install it or reconfigure " <>
-      "with `fermix sandbox env set NAME -- <helper> [args...]`."
+    "#{command} could not be found while resolving an env value. Install it, or " <>
+      @helper_remedy
   end
 
   def format_error({:env_command_failed, command, code, output}) do
     "#{command} failed while resolving an env value (exit #{code}): #{output}. " <>
-      "Run the helper manually to verify it, or reconfigure with `fermix sandbox env set NAME -- <helper> [args...]`."
+      "Run the helper by hand to verify it, or " <> @helper_remedy
   end
 
   def format_error({:env_command_timeout, command, timeout}) do
     "#{command} timed out after #{timeout}ms while resolving an env value. " <>
-      "Run the helper manually to verify it, or reconfigure with `fermix sandbox env set NAME -- <helper> [args...]`."
+      "Run the helper by hand to verify it, or " <> @helper_remedy
   end
 
   def format_error(:env_command_output_too_large) do
-    "Env helper output exceeded the size limit. Reconfigure it with `fermix sandbox env set NAME -- <helper> [args...]`."
+    "Env helper output exceeded the size limit. To fix it, " <> @helper_remedy
   end
 
   def format_error(:empty_env_command_output) do
-    "Env helper returned an empty value. Reconfigure it with `fermix sandbox env set NAME -- <helper> [args...]`."
+    "Env helper returned an empty value. To fix it, " <> @helper_remedy
   end
 
   def format_error(:env_command_output_not_single_value) do
-    "Env helper returned multiple lines. Reconfigure it with `fermix sandbox env set NAME -- <helper> [args...]`."
+    "Env helper returned multiple lines. To fix it, " <> @helper_remedy
   end
 
   def format_error(reason), do: inspect(reason)

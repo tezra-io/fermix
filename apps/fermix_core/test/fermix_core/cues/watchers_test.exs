@@ -15,11 +15,11 @@ defmodule FermixCore.Cues.WatchersTest do
 
   @t0 ~U[2026-10-05 09:00:00.000000Z]
   @cap_sentence "This watcher has 20 instructions; merge some first."
-  @needs_words "A watcher that filters needs words to listen for: list the names, products, " <>
+  @needs_words "A watcher that filters needs keywords to listen for: list the names, products, " <>
                  "abbreviations and phrases an item it should see would contain, as listen_for."
   @no_filter_on_stream "A watcher with no filter cannot listen to a stream (bsky), where it " <>
-                         "would pass every item: give it a model filter and words to listen " <>
-                         "for, or pick sources that are not streams."
+                         "would pass every item: give it a model filter and keywords to " <>
+                         "listen for, or pick sources that are not streams."
   @streams [
     cues_config: [
       sources: %{
@@ -212,12 +212,12 @@ defmodule FermixCore.Cues.WatchersTest do
 
       assert {:error, @needs_words} = Watchers.create(base, private_context(), opts(ctx, 0))
 
-      assert {:error, "A watcher listens for at least one word."} =
+      assert {:error, "A watcher listens for at least one keyword."} =
                Watchers.create(Map.put(base, :listen_for, []), private_context(), opts(ctx, 0))
 
       long = String.duplicate("a", 65)
 
-      assert {:error, "Each word to listen for is at most 64 characters: " <> ^long} =
+      assert {:error, "Each keyword to listen for is at most 64 characters: " <> ^long} =
                Watchers.create(
                  Map.put(base, :listen_for, [long]),
                  private_context(),
@@ -243,7 +243,7 @@ defmodule FermixCore.Cues.WatchersTest do
       with_words = %{params | sources: ["my-script"]} |> Map.put(:listen_for, ["post"])
 
       assert {:error,
-              "A watcher with no filter takes no purpose, instructions or words to listen for."} =
+              "A watcher with no filter takes no purpose, instructions or keywords to listen for."} =
                Watchers.create(with_words, private_context(), opts(ctx, 0) ++ @streams)
 
       assert {:ok, %{watcher: %{filter: "none", listen_for: []}}} =
@@ -263,12 +263,12 @@ defmodule FermixCore.Cues.WatchersTest do
       assert updated.listen_for == ["TSMC", "Nvidia"]
 
       assert echo ==
-               "Watcher chip-news changed: new words to listen for.\nListens for: TSMC, Nvidia"
+               "Watcher chip-news changed: new keywords to listen for.\nListens for: TSMC, Nvidia"
 
       assert {:ok, %{echo: echo}} = Watchers.update(watcher.name, %{daily_cap: 5}, opts(ctx, 2))
       assert echo == "Watcher chip-news changed: daily cap 5 runs.\nListens for: TSMC, Nvidia"
 
-      assert {:error, "A watcher listens for at least one word."} =
+      assert {:error, "A watcher listens for at least one keyword."} =
                Watchers.update(watcher.name, %{listen_for: []}, opts(ctx, 3))
     end
 
@@ -302,7 +302,7 @@ defmodule FermixCore.Cues.WatchersTest do
                Watchers.update(watcher.name, %{sources: ["bsky"]}, opts(ctx, 5) ++ @streams)
 
       assert {:error,
-              "A watcher with no filter takes no purpose, instructions or words to listen for."} =
+              "A watcher with no filter takes no purpose, instructions or keywords to listen for."} =
                Watchers.update(watcher.name, %{listen_for: ["x"]}, opts(ctx, 6) ++ @streams)
     end
 
@@ -336,7 +336,7 @@ defmodule FermixCore.Cues.WatchersTest do
       with_list = Map.merge(params, %{daily_cap: "none", instructions: ["Pass it all"]})
 
       assert {:error,
-              "A watcher with no filter takes no purpose, instructions or words to listen for."} =
+              "A watcher with no filter takes no purpose, instructions or keywords to listen for."} =
                Watchers.create(with_list, private_context(), opts(ctx, 0))
     end
 
@@ -561,6 +561,81 @@ defmodule FermixCore.Cues.WatchersTest do
       assert echo ==
                "Watcher market-news is paused. New items are not delivered to it and nothing " <>
                  "waiting is filtered; items it already passed still go to its task."
+    end
+  end
+
+  # Design §8.8 does not cover taking a source off a watcher; it is treated as
+  # removing the watcher for that source.
+  describe "taking a source off" do
+    test "discards what waited from it with no gap, says how many, and traces each", ctx do
+      watcher = watcher!(ctx, "market-news", ["Pass earnings"], ["alpaca-news", "sec-filings"])
+      TelemetryCapture.attach([[:fermix, :cue, :lifecycle]], watcher_id: watcher.id)
+      waiting = for _n <- 1..2, do: delivery!(ctx, watcher.id, "alpaca-news", "pending")
+      passed = delivery!(ctx, watcher.id, "alpaca-news", "passed")
+      kept = delivery!(ctx, watcher.id, "sec-filings", "pending")
+
+      assert {:ok, %{echo: echo}} =
+               Watchers.update(watcher.name, %{sources: ["sec-filings"]}, opts(ctx, 1))
+
+      assert echo =~ "2 items waiting from sources it no longer listens to were discarded."
+
+      for id <- waiting do
+        assert_received {:telemetry, [:fermix, :cue, :lifecycle], _m,
+                         %{phase: :expired, delivery_id: ^id, reason: "source_removed"}}
+      end
+
+      states =
+        CueFixtures.rows(
+          ctx.conn,
+          "SELECT id, state, outcome FROM cue_deliveries WHERE watcher_id = ? ORDER BY id",
+          [watcher.id]
+        )
+
+      assert states ==
+               Enum.map(waiting, &[&1, "expired", "watcher_removed"]) ++
+                 [[passed, "passed", nil], [kept, "pending", nil]]
+
+      assert [[0]] = CueFixtures.rows(ctx.conn, "SELECT count(*) FROM cue_gaps", [])
+    end
+
+    # One change that switches to no filter and takes a source off: that
+    # source's item under a call expires before the switch passes what is left.
+    test "with a switch to none, the taken source's item under a call expires, nothing " <>
+           "wakes, and the call's answer is refused as stale",
+         ctx do
+      watcher = watcher!(ctx, "market-news", ["Pass earnings"], ["alpaca-news", "sec-filings"])
+
+      filtering =
+        delivery!(ctx, watcher.id, "alpaca-news", "filtering", filter_call_id: "cfc_live")
+
+      CueFixtures.exec!(
+        ctx.conn,
+        "INSERT INTO cue_filter_calls (id, watcher_id, delivery_id, session_id, started_at) " <>
+          "VALUES ('cfc_live', ?, ?, 'cue_filter_live', ?)",
+        [watcher.id, filtering, CuesSql.stamp(at(0))]
+      )
+
+      test_pid = self()
+      opts = opts(ctx, 1) ++ [wake_scheduler: fn -> send(test_pid, :scheduler_woken) end]
+      changes = %{filter: "none", daily_cap: 30, sources: ["sec-filings"]}
+
+      assert {:ok, %{echo: echo}} = Watchers.update(watcher.name, changes, opts)
+      assert echo =~ "1 item waiting from a source it no longer listens to was discarded."
+      refute echo =~ "now go"
+      refute_received :scheduler_woken
+
+      assert {:error, :stale} =
+               Repo.cues_call(CuesFilterSql, {:settle, "cfc_live", {:pass, "Late.", nil}, at(1)},
+                 server: ctx.repo
+               )
+
+      assert [["expired", "watcher_removed", "aborted"]] =
+               CueFixtures.rows(
+                 ctx.conn,
+                 "SELECT d.state, d.outcome, c.result FROM cue_deliveries d " <>
+                   "JOIN cue_filter_calls c ON c.id = 'cfc_live' WHERE d.id = ?",
+                 [filtering]
+               )
     end
   end
 

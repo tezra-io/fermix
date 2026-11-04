@@ -21,6 +21,24 @@ defmodule FermixCore.Management.Jobs do
     * at most sixteen retained finished jobs, and none older than ten minutes;
     * five seconds for a stopped run to answer `:shutdown` before it is killed.
 
+  A run that is stopped (cancelled, past its budget, or never minting the value
+  its start waits for) stays `running` until its task is gone, and only then
+  finishes with the outcome its stop decided: a job is never reported gone
+  while its run lives, so the busy rule above holds until it is, and
+  `cancel/2` answers once the run has stopped (within the grace and the kill),
+  so a step started after it never runs beside the run it cancelled.
+
+  **The ending.** A run started with `:ending` is ended by its owner, this
+  server, once it is over however it ended: answered, raised, exited, was
+  killed, cancelled or past its budget. A run that is killed runs no `after`
+  of its own, so only its owner can say how it ended. The ending runs in a
+  task of its own, given how the run ended (`t:ended/0`), and the job stays
+  `running` until it is done (bounded, then killed), so the busy rule holds
+  across it and `cancel/2` answers after it. A run may answer `{:error,
+  {code, sentence}, note}`: the job fails with `code` and `sentence`, and
+  only its ending reads `note`. An ending that fails is logged, and the job
+  ends as its run did.
+
   `phase` is a closed per-kind vocabulary, published here and in the export. It
   is display copy the client turns into a sentence, never a state a client
   switches on — `status` is the state. A run that reports a phase outside its
@@ -63,7 +81,14 @@ defmodule FermixCore.Management.Jobs do
     # M74 §5: connecting a server the owner added, then one tool listing. A
     # first `npx -y` or `uvx` start downloads its package, and `MCP.Server`
     # gives that 60 s, so the connecting wait outlasts it.
-    mcp_check: %{budget_ms: 75_000, phases: ["connecting", "listing"]}
+    mcp_check: %{budget_ms: 75_000, phases: ["connecting", "listing"]},
+    # M75 lean v1 §4.3: creating, powering or deleting the Always On server on
+    # its provider. Each action is polled every 2 s at most 150 times, and a create
+    # waits on two (the create and the start), so 15 minutes holds the worst.
+    home_provision: %{
+      budget_ms: 900_000,
+      phases: ["checking", "firewall", "server", "starting", "power", "deleting"]
+    }
   ]
   @kind_names Keyword.keys(@kinds)
   # The closed failure vocabulary a run may answer with. `timed_out` and
@@ -82,6 +107,12 @@ defmodule FermixCore.Management.Jobs do
   # Overridable at `start_link` alongside the clock, so the kill leg of the
   # bound is provable in milliseconds rather than by waiting one out.
   @cancel_grace_ms 5_000
+  # A stop is answered once its run is gone, so a caller waits out the grace
+  # and the kill: this much past the grace bounds its call.
+  @stop_answer_margin_ms 5_000
+  # An ending writes what its run left (a provider's ledger, whose lock waits
+  # at most 30 s), so this much bounds it before it is killed.
+  @ending_ms 35_000
   @timed_out_sentence "The operation did not finish inside its time budget."
   @internal_sentence "The operation failed inside the daemon."
 
@@ -100,10 +131,20 @@ defmodule FermixCore.Management.Jobs do
           | :imessage_grant
           | :imessage_policy_confirm
           | :mcp_check
+          | :home_provision
   @type view :: %{String.t() => term()}
   @type report :: ({:phase, String.t()} | {:progress, map()} | {:ready, map()} -> any())
-  @type outcome :: {:ok, map()} | {:error, {:unavailable | :refused, String.t()}}
+  @type outcome ::
+          {:ok, map()}
+          | {:error, {:unavailable | :refused, String.t()}}
+          | {:error, {:unavailable | :refused, String.t()}, term()}
   @type run :: (String.t(), report() -> outcome())
+  @typedoc """
+  How a run ended, as its ending is told: what it answered, or that it
+  answered nothing (`:crashed`: it raised, exited, was killed, or answered
+  or reported what no run may), was cancelled or ran past its budget.
+  """
+  @type ended :: {:answered, outcome()} | :crashed | :cancelled | :timed_out
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) when is_list(opts) do
@@ -144,7 +185,8 @@ defmodule FermixCore.Management.Jobs do
   `session_id`, so a provider call made inside the run nests under it. `:await`
   holds the reply until the run reports `{:ready, extra}`, which is how
   `auth.start` hands back an authorize url the run mints and no later read
-  repeats.
+  repeats. `:ending` is the run's ending (the moduledoc), a 1-arity function
+  given `t:ended/0`.
   """
   @spec start(kind(), keyword()) :: {:ok, view()} | {:error, :busy | :await_timeout}
   def start(kind, opts) when kind in @kind_names and is_list(opts) do
@@ -159,9 +201,17 @@ defmodule FermixCore.Management.Jobs do
   @spec list(keyword()) :: {:ok, [view()]}
   def list(opts \\ []) when is_list(opts), do: GenServer.call(server(opts), :list)
 
+  @doc """
+  Stops a running job and answers its terminal view once its run has
+  stopped; a finished job answers as it is.
+  """
   @spec cancel(String.t(), keyword()) :: {:ok, view()} | {:error, :unknown_job}
   def cancel(job_id, opts \\ []) when is_binary(job_id) and is_list(opts) do
-    GenServer.call(server(opts), {:cancel, job_id})
+    GenServer.call(
+      server(opts),
+      {:cancel, job_id},
+      @cancel_grace_ms + @ending_ms + @stop_answer_margin_ms
+    )
   end
 
   @impl true
@@ -171,6 +221,7 @@ defmodule FermixCore.Management.Jobs do
        jobs: %{},
        order: [],
        task_refs: %{},
+       ending_refs: %{},
        shutting_down: %{},
        task_supervisor: Keyword.get(opts, :task_supervisor, FermixCore.TaskSupervisor),
        cancel_grace_ms: Keyword.get(opts, :cancel_grace_ms, @cancel_grace_ms),
@@ -202,9 +253,9 @@ defmodule FermixCore.Management.Jobs do
     {:reply, {:ok, Enum.map(state.order, &view(Map.fetch!(state.jobs, &1)))}, state}
   end
 
-  def handle_call({:cancel, job_id}, _from, state) do
+  def handle_call({:cancel, job_id}, from, state) do
     case Map.fetch(state.jobs, job_id) do
-      {:ok, %{status: :running}} -> cancel_job(state, job_id)
+      {:ok, %{status: :running}} -> {:noreply, cancel_job(state, job_id, from)}
       {:ok, job} -> {:reply, {:ok, view(job)}, state}
       :error -> {:reply, {:error, :unknown_job}, state}
     end
@@ -227,12 +278,20 @@ defmodule FermixCore.Management.Jobs do
     {:noreply, kill_task(state, ref)}
   end
 
-  def handle_info({ref, outcome}, state) when is_reference(ref) do
-    {:noreply, complete_task(state, ref, outcome)}
+  def handle_info({:kill_ending, ref}, state) when is_reference(ref) do
+    {:noreply, kill_ending(state, ref)}
+  end
+
+  def handle_info({ref, answer}, state) when is_reference(ref) do
+    if Map.has_key?(state.ending_refs, ref),
+      do: {:noreply, ending_done(state, ref)},
+      else: {:noreply, complete_task(state, ref, answer)}
   end
 
   def handle_info({:DOWN, ref, :process, _pid, reason}, state) when is_reference(ref) do
-    {:noreply, task_down(state, ref, reason)}
+    if Map.has_key?(state.ending_refs, ref),
+      do: {:noreply, ending_down(state, ref, reason)},
+      else: {:noreply, task_down(state, ref, reason)}
   end
 
   def handle_info(_message, state), do: {:noreply, state}
@@ -257,6 +316,10 @@ defmodule FermixCore.Management.Jobs do
       result: nil,
       failure: nil,
       extra: %{},
+      stopping: nil,
+      ending: Keyword.get(opts, :ending),
+      closing: nil,
+      waiters: [],
       task: task,
       deadline_timer: Process.send_after(self(), {:deadline, job_id}, budget_ms),
       awaiting: awaiting(opts, job_id, from)
@@ -279,19 +342,27 @@ defmodule FermixCore.Management.Jobs do
     if Keyword.get(opts, :await, false) do
       timeout = Keyword.get(opts, :await_timeout_ms, @await_timeout_ms)
 
-      %{from: from, timer: Process.send_after(self(), {:await_timeout, job_id}, timeout)}
+      %{
+        from: from,
+        timer: Process.send_after(self(), {:await_timeout, job_id}, timeout),
+        answer: :view
+      }
     end
   end
 
-  defp cancel_job(state, job_id) do
-    state = stop_job(state, job_id, %{status: :cancelled, result: nil, failure: nil})
-    {:reply, fetch_view(state, job_id), state}
+  # The caller is answered when the run has stopped (`close/3`), however many
+  # ask; the first stop's outcome is the one the job ends with.
+  defp cancel_job(state, job_id, from) do
+    state = stop_job(state, job_id, cancelled())
+    job = Map.fetch!(state.jobs, job_id)
+    put_job(state, %{job | waiters: [from | job.waiters]})
   end
 
+  # A run being stopped reports nothing more: its outcome is already decided.
   defp apply_event(state, job_id, event) do
     case running_job(state, job_id) do
-      {:ok, job} -> apply_running_event(state, job, event)
-      :error -> state
+      {:ok, %{stopping: nil} = job} -> apply_running_event(state, job, event)
+      _stopping_finished_or_unknown -> state
     end
   end
 
@@ -325,62 +396,58 @@ defmodule FermixCore.Management.Jobs do
     job = Map.fetch!(state.jobs, job_id)
 
     case job.awaiting do
-      nil ->
-        state
-
-      %{from: from, timer: timer} ->
+      %{from: from, timer: timer, answer: :view} ->
         _ = Process.cancel_timer(timer)
         GenServer.reply(from, {:ok, Map.merge(view(job), job.extra)})
         put_job(state, %{job | awaiting: nil})
+
+      _none_or_refused ->
+        state
     end
   end
 
-  # The run never minted the value the caller is waiting for. The caller is
-  # refused and the run stops: leaving it going would hold a loopback port open
-  # for a flow nothing is watching.
+  # The run never minted the value the caller is waiting for. The run stops,
+  # and the caller is refused once it has: leaving it going would hold a
+  # loopback port open for a flow nothing is watching.
   defp await_timeout(state, job_id) do
     case Map.fetch(state.jobs, job_id) do
-      {:ok, %{awaiting: %{from: from}} = job} ->
-        GenServer.reply(from, {:error, :await_timeout})
+      {:ok, %{awaiting: %{answer: :view} = awaiting} = job} ->
+        refused = %{awaiting | timer: nil, answer: :await_timeout}
 
         state
-        |> put_job(%{job | awaiting: nil})
-        |> stop_job(job_id, %{status: :cancelled, result: nil, failure: nil})
+        |> put_job(%{job | awaiting: refused})
+        |> stop_job(job_id, cancelled())
 
-      _absent_or_released ->
+      _absent_released_or_refused ->
         state
     end
   end
 
   defp stop_job(state, job_id, outcome) do
     case running_job(state, job_id) do
-      {:ok, job} -> terminate(state, job, outcome)
-      :error -> state
+      {:ok, %{stopping: nil, closing: nil} = job} -> terminate(state, job, outcome)
+      _stopping_ending_finished_or_unknown -> state
     end
   end
 
   # The run is asked to stop rather than killed outright, so a body holding a
-  # resource can release it; the monitor stays up so the kill can be disarmed
-  # when it answers. The job closes now either way — its terminal state is not
-  # waiting on the run's own death.
+  # resource can release it; the monitor stays up, and its `:DOWN` closes the
+  # job with `outcome` (`stopped/2`). Until then the job is still running.
   defp terminate(state, job, outcome) do
     Process.exit(job.task.pid, :shutdown)
 
     state
     |> forget_ref(job.task.ref)
-    |> arm_kill(job.task)
-    |> finish(job.job_id, outcome)
+    |> arm_kill(job.task, job.job_id)
+    |> put_job(%{job | stopping: outcome})
   end
 
   # Bounded by construction: one entry per running job, at most `@max_concurrent`
   # of them, each cleared by the `:DOWN` its monitor guarantees.
-  defp arm_kill(state, task) do
+  defp arm_kill(state, task, job_id) do
     timer = Process.send_after(self(), {:kill_task, task.ref}, state.cancel_grace_ms)
-
-    %{
-      state
-      | shutting_down: Map.put(state.shutting_down, task.ref, %{pid: task.pid, timer: timer})
-    }
+    entry = %{pid: task.pid, timer: timer, job_id: job_id}
+    %{state | shutting_down: Map.put(state.shutting_down, task.ref, entry)}
   end
 
   # The grace expired with the run still alive: it is killed unconditionally,
@@ -397,23 +464,32 @@ defmodule FermixCore.Management.Jobs do
     end
   end
 
-  # The run answered inside its grace, so the kill it was armed with is disarmed.
-  defp forget_kill(state, ref) do
+  # A stopped run is gone, inside its grace or by the kill: the kill is
+  # disarmed and its job closes with the outcome its stop decided.
+  defp stopped(state, ref) do
     case Map.pop(state.shutting_down, ref) do
       {nil, _shutting_down} ->
         state
 
-      {%{timer: timer}, remaining} ->
+      {%{timer: timer, job_id: job_id}, remaining} ->
         _ = Process.cancel_timer(timer)
-        %{state | shutting_down: remaining}
+        state = %{state | shutting_down: remaining}
+        stopping = Map.fetch!(state.jobs, job_id).stopping
+        finish(state, job_id, stopping, stopped_ended(stopping))
     end
   end
 
-  defp complete_task(state, ref, outcome) do
+  # What a stopped run's ending is told, by the outcome its stop decided.
+  defp stopped_ended(%{status: :cancelled}), do: :cancelled
+  defp stopped_ended(%{status: :timed_out}), do: :timed_out
+  defp stopped_ended(%{status: :failed}), do: :crashed
+
+  defp complete_task(state, ref, answer) do
     case Map.fetch(state.task_refs, ref) do
       {:ok, job_id} ->
         Process.demonitor(ref, [:flush])
-        state |> forget_ref(ref) |> finish(job_id, classify(job_id, outcome))
+        {outcome, ended} = classify(job_id, answer)
+        state |> forget_ref(ref) |> finish(job_id, outcome, ended)
 
       :error ->
         state
@@ -424,36 +500,83 @@ defmodule FermixCore.Management.Jobs do
     case Map.fetch(state.task_refs, ref) do
       {:ok, job_id} ->
         Logger.error("management job #{job_id} crashed: #{inspect(reason)}")
-        state |> forget_ref(ref) |> finish(job_id, internal_failure())
+        state |> forget_ref(ref) |> finish(job_id, internal_failure(), :crashed)
 
       :error ->
-        forget_kill(state, ref)
+        stopped(state, ref)
     end
   end
 
-  defp classify(_job_id, {:ok, result}) when is_map(result) do
-    if flat_scalars?(result) do
-      %{status: :completed, result: result, failure: nil}
-    else
-      %{status: :failed, result: nil, failure: failure("internal_error", @internal_sentence)}
-    end
+  # The job's outcome, and what its ending is told.
+  defp classify(_job_id, {:ok, result} = answer) when is_map(result) do
+    if flat_scalars?(result),
+      do: {%{status: :completed, result: result, failure: nil}, {:answered, answer}},
+      else: {internal_failure(), :crashed}
   end
 
-  defp classify(_job_id, {:error, {code, sentence}})
-       when code in @operation_failures and is_binary(sentence) do
-    %{status: :failed, result: nil, failure: failure(Atom.to_string(code), sentence)}
+  defp classify(_job_id, {:error, {code, sentence}} = answer)
+       when code in @operation_failures and is_binary(sentence),
+       do: {operation_failure(code, sentence), {:answered, answer}}
+
+  defp classify(_job_id, {:error, {code, sentence}, _note} = answer)
+       when code in @operation_failures and is_binary(sentence),
+       do: {operation_failure(code, sentence), {:answered, answer}}
+
+  defp classify(job_id, answer) do
+    Logger.error("management job #{job_id} answered an invalid outcome #{inspect(answer)}")
+    {internal_failure(), :crashed}
   end
 
-  defp classify(job_id, outcome) do
-    Logger.error("management job #{job_id} answered an invalid outcome #{inspect(outcome)}")
-    internal_failure()
-  end
+  defp operation_failure(code, sentence),
+    do: %{status: :failed, result: nil, failure: failure(Atom.to_string(code), sentence)}
 
-  defp finish(state, job_id, outcome) do
+  # A job with an ending stays running until its ending is done.
+  defp finish(state, job_id, outcome, ended) do
     case running_job(state, job_id) do
-      {:ok, job} -> close(state, job, outcome)
+      {:ok, %{ending: nil} = job} -> close(state, job, outcome)
+      {:ok, job} -> begin_ending(state, job, outcome, ended)
       :error -> state
     end
+  end
+
+  defp begin_ending(state, job, outcome, ended) do
+    ending = job.ending
+    task = Task.Supervisor.async_nolink(state.task_supervisor, fn -> ending.(ended) end)
+    timer = Process.send_after(self(), {:kill_ending, task.ref}, @ending_ms)
+    closing = %{outcome: outcome, pid: task.pid, timer: timer}
+    state = put_job(state, %{job | closing: closing, task: nil, stopping: nil})
+    %{state | ending_refs: Map.put(state.ending_refs, task.ref, job.job_id)}
+  end
+
+  defp ending_done(state, ref) do
+    Process.demonitor(ref, [:flush])
+    end_closing(state, ref)
+  end
+
+  defp ending_down(state, ref, reason) do
+    Logger.error("management job #{state.ending_refs[ref]}'s ending failed: #{inspect(reason)}")
+    end_closing(state, ref)
+  end
+
+  # The ending outlived its bound: it is killed, and its `:DOWN` ends the job.
+  defp kill_ending(state, ref) do
+    case Map.fetch(state.ending_refs, ref) do
+      {:ok, job_id} ->
+        Logger.error("management job #{job_id}'s ending outlived #{@ending_ms} ms; killed")
+        Process.exit(Map.fetch!(state.jobs, job_id).closing.pid, :kill)
+        state
+
+      :error ->
+        state
+    end
+  end
+
+  defp end_closing(state, ref) do
+    {job_id, remaining} = Map.pop(state.ending_refs, ref)
+    state = %{state | ending_refs: remaining}
+    job = Map.fetch!(state.jobs, job_id)
+    _ = Process.cancel_timer(job.closing.timer)
+    close(state, job, job.closing.outcome)
   end
 
   defp close(state, job, outcome) do
@@ -466,6 +589,9 @@ defmodule FermixCore.Management.Jobs do
         phase: retained_phase(job.phase, outcome.status),
         result: outcome.result,
         failure: outcome.failure,
+        stopping: nil,
+        closing: nil,
+        waiters: [],
         task: nil,
         finished_at: DateTime.utc_now(),
         finished_mono: finished_mono
@@ -478,12 +604,14 @@ defmodule FermixCore.Management.Jobs do
       outcome.failure
     )
 
+    Enum.each(job.waiters, &GenServer.reply(&1, {:ok, view(finished)}))
     state |> put_job(finished) |> release_terminal_await(finished.job_id) |> prune()
   end
 
   # A caller still waiting on a value the run was going to mint gets the job it
   # asked for, in the state it ended in, rather than a bare refusal that says
-  # nothing about why the flow stopped.
+  # nothing about why the flow stopped; one whose wait ran out is refused, now
+  # that the run it waited on has stopped.
   defp release_terminal_await(state, job_id) do
     job = Map.fetch!(state.jobs, job_id)
 
@@ -491,12 +619,15 @@ defmodule FermixCore.Management.Jobs do
       nil ->
         state
 
-      %{from: from, timer: timer} ->
-        _ = Process.cancel_timer(timer)
-        GenServer.reply(from, {:ok, view(job)})
+      %{from: from, timer: timer, answer: answer} ->
+        _ = timer && Process.cancel_timer(timer)
+        GenServer.reply(from, terminal_answer(answer, job))
         put_job(state, %{job | awaiting: nil})
     end
   end
+
+  defp terminal_answer(:view, job), do: {:ok, view(job)}
+  defp terminal_answer(:await_timeout, _job), do: {:error, :await_timeout}
 
   # The phase a run died in is part of the diagnosis; a clean finish has no
   # current step and says so rather than leaving the last one standing.
@@ -573,6 +704,8 @@ defmodule FermixCore.Management.Jobs do
 
   defp meta(job), do: %{job_id: job.job_id, kind: job.kind, budget_ms: job.budget_ms}
 
+  defp cancelled, do: %{status: :cancelled, result: nil, failure: nil}
+
   defp timed_out do
     %{status: :timed_out, result: nil, failure: failure("timed_out", @timed_out_sentence)}
   end
@@ -596,10 +729,11 @@ defmodule FermixCore.Management.Jobs do
   end
 
   # A job whose reply is deferred until the run mints a value still answers
-  # inside the await bound, so the call's own timeout tracks that bound rather
-  # than the GenServer default.
+  # inside the await bound, or once the run that never minted it has stopped,
+  # so the call's own timeout tracks both rather than the GenServer default.
   defp start_timeout(opts) do
-    Keyword.get(opts, :await_timeout_ms, @await_timeout_ms) + 5_000
+    Keyword.get(opts, :await_timeout_ms, @await_timeout_ms) + @cancel_grace_ms + @ending_ms +
+      @stop_answer_margin_ms
   end
 
   defp descriptor(kind), do: Keyword.fetch!(@kinds, kind)

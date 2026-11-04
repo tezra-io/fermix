@@ -72,8 +72,9 @@ session with no terminal follows the daemon log instead.
 - Only a setup that ended well is marked done, so a failed setup runs again on
   the next boot. The boot log is `~/.fermix-sandbox-boot.log`.
 - Every boot then hands over to `fermix-sandbox-loop`, which keeps
-  `fermix run` up with the rule of Fermix's own systemd unit: a restart five
-  seconds after every exit, and a stop after the fifth. A sandbox has no
+  `fermix run` up: a restart five seconds after every exit, and a stop after
+  the fifth. Fermix's own systemd unit counts only the last ten minutes; the
+  loop counts every start since the boot. A sandbox has no
   service manager to do this. A cloud stop is a pause, so a boot that finds
   Fermix already running leaves it to its loop.
 

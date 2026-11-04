@@ -220,6 +220,40 @@ defmodule FermixCore.Cues.SweeperTest do
     assert cue(ctx.conn, "a").snapshot == nil
   end
 
+  # A follow-up's trigger once it ended (M60_WATCHER_CODING_RUNS.md §4.3); one
+  # still open is kept.
+  test "follow-up triggers that ended age out after 30 days", ctx do
+    at = CuesSql.stamp(@t0)
+
+    for {state, n, column, value} <- [
+          {"started", 1, "run_id", "run_1"},
+          {"skipped", 2, "reason", "The item is older than 15 minutes."},
+          {"expired", 3, "expires_at", at},
+          {"refused", 4, "reason", "Not started: it is already running."},
+          {"waiting", 5, "expires_at", at},
+          {"starting", 6, "reason", nil}
+        ] do
+      exec!(
+        ctx.conn,
+        "INSERT INTO cue_follow_up_triggers (id, watcher_id, delivery_id, cue_id, job_id, " <>
+          "mode, state, #{column}, created_at) VALUES (?, 'w', ?, ?, 'job', 'approve', ?, ?, ?)",
+        ["cft_#{state}", n, n, state, value, at]
+      )
+    end
+
+    assert {:ok, 0} = step(ctx, :prune_follow_up_triggers, later(@t0, 29))
+    # Bounded as every step is: a chunk deletes at most its limit.
+    assert {:ok, 3} = step(ctx, :prune_follow_up_triggers, later(@t0, 30, 1), 3)
+    assert {:ok, 1} = step(ctx, :prune_follow_up_triggers, later(@t0, 30, 1))
+
+    assert [["cft_starting"], ["cft_waiting"]] =
+             rows(ctx.conn, "SELECT id FROM cue_follow_up_triggers ORDER BY id")
+
+    steps = Sweeper.step_names()
+    assert :prune_follow_up_triggers in steps
+    refute Enum.any?(steps, &(&1 in [:prune_follow_up_approvals, :follow_up_approval_expiry]))
+  end
+
   test "counts age out 48 hours after their hour, through the Sweeper's step", ctx do
     row = fn hour ->
       %{scope: "source", ref: ctx.ref, hour: hour, incarnation: "i1", counts: %{"received" => 1}}
@@ -346,6 +380,22 @@ defmodule FermixCore.Cues.SweeperTest do
 
       assert GenServer.whereis(server) == pid
       assert log =~ "notice was not sent: :repo_timeout"
+    end
+
+    # An overloaded Repo costs a pass the one call that timed out, not one per
+    # step, and the next pass starts again at the first step.
+    test "a step that ends in a Repo timeout ends the pass", ctx do
+      stalled = start_supervised!({FermixTestSupport.StalledRepo, notify: self()})
+      server = start_sweeper(ctx, repo: stalled, repo_timeout_ms: 50)
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        for _pass <- 1..2 do
+          assert Sweeper.sweep(server, @t0) == {:ok, %{expire_lifetime: {:error, :repo_timeout}}}
+          _ = :sys.get_state(stalled, @wait_ms)
+          assert_received {:stalled, :expire_lifetime}
+          refute_received {:stalled, _name}
+        end
+      end)
     end
 
     test "runs every step in chunks when driven by hand", ctx do

@@ -158,7 +158,20 @@ defmodule FermixCore.Cues.ProposalsAppTest do
                }
              }
 
-      assert {:ok, [^card]} = Proposals.waiting_cards(seams(context))
+      # The Mac's chat draws the compact card: the same card with each argument
+      # as a line and the filter's reason (M60_WATCHER_CODING_RUNS.md §6.3).
+      assert {:ok, [compact]} = Proposals.waiting_cards(seams(context))
+      assert Map.drop(compact, [:outside, :follow_up]) == Map.delete(card, :outside)
+      assert compact.follow_up == nil
+      assert Map.take(compact.outside, [:args_text, :cue]) == card.outside
+
+      # A value that is not a string is its JSON (the mandate's pinned labels).
+      assert compact.outside.args == [
+               %{name: "labels", value: ~s(["cue"])},
+               %{name: "owner", value: "example-org"},
+               %{name: "repo", value: "ops"},
+               %{name: "title", value: "Phoenix 2.0"}
+             ]
     end
 
     test "a card whose cue Fermix no longer keeps has no cue; an unknown id is not found" do
@@ -397,7 +410,8 @@ defmodule FermixCore.Cues.ProposalsAppTest do
       id = propose!(fixture, context)
 
       assert_received {:proposal_event, {:offered, card}}
-      assert {:ok, ^card} = Proposals.card(id, seams(context))
+      assert {:ok, [^card]} = Proposals.waiting_cards(seams(context))
+      assert card.proposal_id == id
     end
 
     test "an expired proposal is announced" do
@@ -447,7 +461,7 @@ defmodule FermixCore.Cues.ProposalsAppTest do
     end
 
     test "with the Fermix app, a chat send that fails leaves the proposal waiting" do
-      down = fn _inbox, _text, _token -> {:error, :channel_down} end
+      down = fn _inbox, _spec -> {:error, :channel_down} end
       {fixture, context} = proposing!("app_reach_down", proposal_sender: down, app_surface?: true)
       id = propose!(fixture, context)
 

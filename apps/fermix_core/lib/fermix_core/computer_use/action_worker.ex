@@ -60,8 +60,9 @@ defmodule FermixCore.ComputerUse.ActionWorker do
 
   @doc """
   Whether macOS is delivering this session's synthetic input, as answered by the
-  one-time start-up probe. Read once by the `Session` at init; the probe itself is
-  a driver call, so it runs where the driver is.
+  one-time start-up probe; always true for a Linux helper, which never drops
+  input silently. Read once by the `Session` at init; the probe itself is a driver
+  call, so it runs where the driver is.
   """
   @spec input_control?(GenServer.server()) :: boolean()
   def input_control?(worker), do: GenServer.call(worker, :input_control?)
@@ -84,13 +85,14 @@ defmodule FermixCore.ComputerUse.ActionWorker do
   What the helper this worker is talking to says it can do, from the `hello` it
   answered at the handshake.
 
-  Asked by the `Session` at start, and only where a surface that depends on the
-  answer is switched on: a capability the model is about to be offered has to be
-  a fact about THIS helper. The transport answers a second `hello` from its
-  cached identity, so this costs no round trip, and a helper that will not answer
-  is read as advertising nothing.
+  Asked by the `Session` at every start: a capability the model is about to be
+  offered has to be a fact about THIS helper, and the actions it lists are what
+  the tool's schema is built from (M86 F1). The transport answers a second
+  `hello` from its cached identity, so this costs no round trip. A helper that
+  will not answer is an `{:error, reason}`, and what that means is the session's
+  to decide.
   """
-  @spec capabilities(GenServer.server()) :: Capabilities.t()
+  @spec capabilities(GenServer.server()) :: {:ok, Capabilities.t()} | {:error, term()}
   def capabilities(worker), do: GenServer.call(worker, :capabilities)
 
   @doc """
@@ -153,7 +155,7 @@ defmodule FermixCore.ComputerUse.ActionWorker do
     do: {:reply, {state.driver_mod, state.driver_state}, state}
 
   def handle_call(:capabilities, _from, state),
-    do: {:reply, read_capabilities(state.driver_mod, state.driver_state), state}
+    do: {:reply, Capabilities.hello(state.driver_mod, state.driver_state), state}
 
   @impl true
   def handle_cast({:execute, request, exec_state}, state) do
@@ -226,8 +228,18 @@ defmodule FermixCore.ComputerUse.ActionWorker do
   # cannot brick looking. A probe that times out is no longer a hazard beyond that
   # — the wire correlates a reply to the request that asked for it, so its late
   # frame is dropped by id and can never answer the first action.
+  #
+  # The denied state is macOS's alone: `input_control: false` from a helper whose
+  # `platform` is `macos`, or that names none (the helpers that predate the field
+  # were macOS-only). A Linux helper's `false` says its pixel route does not serve
+  # the pointer; nothing is dropped silently there, because the helper refuses a
+  # pixel action itself with a sentence, and its controls still act.
   defp probe_input_control(driver_mod, driver_state) do
     case driver_mod.execute(driver_state, %{"action" => "probe"}) do
+      {:ok, %{"input_control" => false, "platform" => platform}}
+      when is_binary(platform) and platform != "macos" ->
+        true
+
       {:ok, %{"input_control" => false}} ->
         false
 
@@ -240,25 +252,6 @@ defmodule FermixCore.ComputerUse.ActionWorker do
         )
 
         true
-    end
-  end
-
-  # A helper that would not answer `hello` advertises nothing: the conservative
-  # reading is the same shape as a real one (`Capabilities.none/0`), so every
-  # consumer reads one map rather than remembering a `nil`. A driver double that
-  # predates the handshake lands here too, which is right — a double proves
-  # nothing about what the shipped helper can do.
-  defp read_capabilities(driver_mod, driver_state) do
-    case driver_mod.execute(driver_state, %{"action" => "hello"}) do
-      {:ok, identity} when is_map(identity) ->
-        Capabilities.from_identity(identity)
-
-      other ->
-        Logger.warning(
-          "computer-use helper did not report its capabilities (none assumed): " <> inspect(other)
-        )
-
-        Capabilities.none()
     end
   end
 

@@ -101,7 +101,7 @@ defmodule FermixCore.Tools.SkillCreate do
 
   # The description is interpolated into YAML frontmatter and may be
   # model-authored: collapse it to one bounded line so an embedded newline or
-  # `---` can never terminate the frontmatter early and drop `allowed_tools`.
+  # `---` can never end the frontmatter early or add a key of its own.
   defp frontmatter_line(description) do
     description
     |> String.replace(~r/\s+/, " ")
@@ -143,7 +143,6 @@ defmodule FermixCore.Tools.SkillCreate do
     ---
     name: #{name}
     description: #{description}
-    allowed_tools: []
     ---
 
     #{body || placeholder_body(name, description)}\

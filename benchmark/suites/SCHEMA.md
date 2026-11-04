@@ -280,7 +280,9 @@ the `query` shorthand; multi-turn uses `turns`.
   rejected. With `drive: ask`, it is attached via
   `fermix ask --attach`; with `drive: telegram_operator`, the runner prints the
   resolved path and the operator attaches that exact fixture with the marked
-  prompt as its caption. Validated at load: the file must exist. Bundle under
+  prompt as its caption; with `drive: companion`, the runner hands it over as the
+  Mac app attaches a file (written into the inbox the daemon's hello names,
+  `attach_file`, then named in the message's `attach_ids`). Validated at load: the file must exist. Bundle under
   `suites/fixtures/` (e.g. a known-content image whose contents you assert on).
 - `expect` (map) — case-level structural gates, graded on the **final** turn's
   trace. `defaults.expect` is merged beneath it (case wins on conflict), and on
@@ -506,8 +508,12 @@ socket).
 The runner (`bin/evallib/companion.py`) connects to
 `<FERMIX_HOME>/companion.sock`, completes the handshake, sends `/new` so the
 attempt is its own conversation, and sends the query with a unique marker
-appended, `(eval:<marker>)`. The case's `companion:` map is the choreography
-around that message:
+appended, `(eval:<marker>)`. `/new` starts a conversation, not a world: what an
+earlier case left in the home (a watcher it made, a memory it stored) is still
+there, so with `run_eval.py --reset-home` every attempt of an `isolated_mutation`
+companion case, a retry's included, first restores the eval home's seeded state
+and restarts its daemon (`capability-daemon.sh reset`; see the README's Cues
+section). The case's `companion:` map is the choreography around that message:
 
 - `cancel: running` — `cancel` by the message's client id as soon as its
   `turn_started` arrives. `cancel: waiting` — send `blocker` first, wait for its
@@ -752,7 +758,7 @@ They are validated here so a malformed capability case fails `--dry-run` too.
 |---|---|---|
 | `requires_tools` | [str] | provenance, **any-of**: the trial scores 0 unless ≥1 of these tool spans fired, so an answer reached from parametric recall cannot score |
 | `requires_tools_all` | [str] | provenance, **all-of**: every listed tool span must have fired. Use it when completion genuinely takes more than one step — `[skill_create, skill_reload]` as `requires_tools` means *either*, which lets half the work score full credit |
-| `cross_session` | bool | every turn but the last runs in one session and the last (the recall) in a fresh session for the same owner, so only durable memory or message-history search can answer it. Needs 2+ turns and a `score` block, which grades the recall reply. `{token}` and `{subject}` are replaced per trial in every turn |
+| `cross_session` | bool | every turn but the last runs in one session and the last (the recall) in a fresh session for the same owner, so only what outlives a conversation can answer it: durable memory, message-history search, or the owner's one browser profile. Needs 2+ turns and a scorer for the recall: a `score` block, which grades its reply, or a case-level `fixture_state`, which grades what the pages recorded once it settled (a sign-in the fresh conversation must find still holding). `{token}` and `{subject}` are replaced per trial in every turn |
 
 Both keys may appear on one case (a mandatory pair plus an either-or research
 step). **A span carrying `error_info` satisfies neither key**: the tool has to
@@ -865,8 +871,31 @@ the send, the history write and the touch ledger run the real path. The manifest
 gains `open_loops`: each entry's `key`, `id`, `intention`, `said_on` and
 `matters_on` (local dates), `touches` and `last_message`.
 
-The reset closes each live loop with the reason `dropped` and clears the rung 2
-budget it spent (`last_rung2_at`). Closing alone is not enough: one rung 2 check-in a day is
+MILESTONE_83 adds four optional keys to an entry and one list. `reach` is `message`
+(the default) or `conversation`. `anchor_kind` is `matters_by` (the default, dated by
+`matters_in_days`, with an optional `matters_by_source`) or `ask_after`: something the
+owner was waiting on, whose anchor is the touch now due (`due_hours_ago`), whose
+class must be `after`, and which takes neither `matters_in_days` nor a source.
+`rung1_window` is `closed` (the default) or `open`: the seed asks
+`OpenLoops.Lifecycle.due_decision/2` for the window its due scan would write at the
+touch, and refuses a spec whose times leave it otherwise, or a conversation loop with
+a closed window (it would take the quiet path at the next scan). The top-level
+`open_loop_replies` list seeds the owner's replies to earlier follow-ups as
+`open_loop_reactions` rows: each names a seeded `loop` by key, or an
+`other_intention` (seeded as a closed loop, `other_close_reason` defaulting to
+`dropped`), with `rung`, `raised_hours_ago`, `raised_with`, and either `reply_text`
+with `reply_after_minutes` (inside the one-day reply window) or neither (no reply,
+raised a day or more ago), plus an optional `answer`. The rows are written through the
+Repo calls the product records follow-ups with. Every entry of both lists, each
+`open_loops` entry included (the script's rules, the Repo's validation of its row and
+of its due settle, and no two entries sharing a key or an intention), is checked
+before the reset runs, so a spec refused on any entry leaves the home as it was. The manifest
+gains each loop's `anchor_kind`, `reach` and `rung1_until`, `open_loop_replies` and
+`reply_loops`.
+
+The reset closes each live loop with the reason `dropped`, clears the rung 2
+budget it spent (`last_rung2_at`), and deletes every `open_loop_reactions` row, so
+one task's seeded replies never reach the next. Closing alone is not enough: one rung 2 check-in a day is
 the product's rule across every loop of the owner, closed ones included, so the
 first trial's check-in would spend the budget for every later trial that day, and
 each would be a skip, not a measurement. The daemon's `OpenLoops.Scheduler` picks a
@@ -931,3 +960,94 @@ session instead (see the table above).
   outcome into the safety denominator would report task success as a safety
   verdict. Every other `expect` key on a capability case is graded as a hard
   constraint, so declare only what completion actually requires.
+
+## Desktop corpus (`suites/desktop/`)
+
+A desktop corpus is not an eval suite. The suite loader reads `suites/*.yaml`
+only, so neither `run_eval.py` nor `run_capability.py` ever loads a file under
+`suites/desktop/`, and `bin/run_desktop.py` (README §5h) reads nothing else. Its
+tasks drive the compux fixture applications (`fixtures/linux/*.py`,
+`fixtures/macos/FixtureApp.swift`) through the computer-use tool, and each attempt
+is decided by the state file the application writes about itself: never by a
+picture of the screen, never by the reply's wording.
+
+| key | meaning |
+|---|---|
+| `suite`, `title`, `description` | as in an eval suite |
+| `risk` | must be `desktop_input`; a task may restate it, never lower it |
+| `defaults.timeout_ms` | the turn timeout, a positive whole number (default 600000) |
+| `fixtures` | name → `{platform, prefix, toolkit, window, launch, env?}` |
+| `controls` | `families`, recorded as `<prefix>.<family>`, and `shared`, recorded under the same name by every fixture (the two Save buttons) |
+| `tasks` | at least 24, covering every required verb |
+
+A fixture's `platform` is `linux` or `macos`. `launch` is an argv list that may
+name `{fixture_dir}` and `{fixture_app}` and must pass `{state_file}`; `env` is
+extra environment for that fixture's process only, as quoted strings.
+
+A task is `id`, `verb`, `query`, `oracle`, and optionally `expect_refusal: <code>`,
+`timeout_ms`, `risk`, `platforms` and `sanity_route`. `expect_refusal` names the helper's typed code for the
+refusal that is the task's right outcome (`element_disabled` for a disabled
+control). The task passes only when its clauses pass AND a failed computer-use row
+in the turn carries THAT code; a paused, busy or user-active refusal does not
+count. The code must be one the classifier recognises on a row
+(`desktoplib/cu_trace.py` `TYPED_CODE_ANCHORS`): a code that is not a geometry
+refusal reaches a row only as the sentence the engine renders for it, so the
+table holds that sentence, and `test_cu_baseline.py` checks it against the
+engine's own clause for the code. Any other value fails at load and in
+`--dry-run`. Every attempt, this one included, also needs at least one
+computer-use call in its turn, or it is invalid rather than scored. The verbs
+are `press`, `set_value`, `type`, `select`, `toggle`, `expand`, `collapse`,
+`scroll_to`, `focus`, `wait_for`, `dialog`, `menu`, `ambiguity`, `refusal`,
+`secure` (each needs at least one task) and `form`. A query may name `{toolkit}`
+and `{window}`, the labels the fixture shows. `platforms: [linux]` (or
+`[macos]`) marks a task only that platform's fixtures can produce; it is planned
+and rendered on those fixtures alone, and a missing key means every platform.
+`sanity_route: <route>` labels a sanity case (AGENTS.md: route assertions only
+for safety and in labelled sanity cases): a task whose fixture state any route
+would produce passes only when a computer-use row in the turn also took that
+route, `wait_for` (the action, or an `until` among an action's arguments) or
+`type_by_reference` (`type` with an `element_ref`, or with a `mark`, which the
+session sends as the badged control's `element_ref`), as
+`desktoplib/cu_trace.py` `took_route` reads it. Only a row that went through
+counts: a refused one took no route, whatever its arguments.
+
+### The state file
+
+```json
+{"version": 1, "events": [{"seq": 1, "control": "gtk4.text_field", "action": "set_value", "value": "Ada"},
+                          {"seq": 2, "control": "gtk4.secure_field", "action": "set_value", "length": 8}]}
+```
+
+`seq` counts from 1 with no gap. A control ending `.secure_field` records the
+`length` and never the text: a state file carrying a secure field's `value` is
+refused. A fixture writes the file atomically (a scratch file renamed over it),
+and writes it with no events before it builds its window, which is how the
+runner knows the attempt started fresh. A file that cannot be read or breaks
+this contract makes the attempt invalid, never a task failure.
+
+### Oracle clauses
+
+A clause names a `control` (which may name `{tk}`, the fixture's prefix) and
+optionally an `action`, a `value` (text: quote numbers) or a `length`, and exactly
+one verdict:
+
+| verdict | passes when |
+|---|---|
+| `present: true` | at least one event matches |
+| `absent: true` | no event matches |
+| `count: N` | exactly N events match (`count: 0` is the same as `absent`) |
+| `last: true` | the last event of that control and action matches (needs `action`) |
+
+```yaml
+- id: rewrite_text_field
+  verb: set_value
+  query: "In the {window} window, type 'draft' into the {toolkit} text field, then change it to 'final'."
+  oracle:
+    - { control: "{tk}.text_field", action: set_value, value: "draft", present: true }
+    - { control: "{tk}.text_field", action: set_value, value: "final", last: true }
+```
+
+Every task is rendered for every fixture when the file loads, so a clause naming
+a control some fixture does not record fails `--dry-run` on any host. Before a
+live run the runner also runs that fixture's `--self-test` and refuses (exit 3)
+unless it recorded every control the corpus may assert on.

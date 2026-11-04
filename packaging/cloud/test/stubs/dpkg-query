@@ -1,0 +1,8 @@
+#!/bin/sh
+# Test stand-in for dpkg-query: the version of fermix the fake installer
+# installed last, as `-W -f='${Version}' fermix` prints it, or not installed
+# before it ran. Logs nothing, as a read.
+set -eu
+version=/var/lib/fermix-test/installed-version
+[ -f "$version" ] || exit 1
+tr -d '\n' <"$version"

@@ -2,12 +2,15 @@
 
 The wire contract between the Fermix daemon and the `fermix-iroh` helper, the
 Rust program that runs the daemon's one iroh endpoint so a paired phone can reach
-the daemon from any network (M62). The helper accepts iroh connections and
-bridges each accepted stream to a Unix socket the daemon listens on; it holds no
-trust of its own and decides nothing.
+the daemon from any network (M62), and so the daemon can reach another Fermix
+engine the same way (M75). The helper accepts iroh connections and bridges each
+accepted stream to a Unix socket the daemon listens on, and dials a peer when
+the daemon asks and copies that stream to a socket the daemon names; it holds
+no trust of its own and decides nothing.
 
 **Source of truth:** the daemon's codec, `FermixChannels.Mobile.Iroh.HelperProtocol`,
-and its bridge listener, `FermixChannels.Mobile.Iroh.Bridge`. This file and `fixtures/*`
+its bridge listener, `FermixChannels.Mobile.Iroh.Bridge`, and its dial,
+`FermixChannels.Mobile.Iroh.Helper.dial/3`. This file and `fixtures/*`
 are the machine-readable export of those modules, and the daemon's contract test
 asserts they never drift from it. The `tezra-io/fermix-iroh` repository **vendors
 this file and the fixtures** and tests its own codec against them. Fermix defines
@@ -16,19 +19,26 @@ the protocol; the helper implements it.
 ## Roles
 
 - **The daemon** creates and owns the iroh secret key, holds the relay list,
-  listens on the bridge socket, and makes every authorization decision through
-  the mobile protocol's Noise session (`../mobile/PROTOCOL.md`).
+  listens on the bridge socket and on each dial's socket, and makes every
+  authorization decision through the mobile protocol's Noise session
+  (`../mobile/PROTOCOL.md`), as the responder on an accepted stream and as the
+  initiator on a dialed one.
 - **The helper** binds one iroh endpoint with that key and the relays the daemon
   names, accepts connections on one ALPN, and copies each accepted bidirectional
-  stream to one connection on the bridge socket. It binds UDP sockets for QUIC,
-  asks the local router for a port mapping, and probes only the relays the
-  daemon named; it opens no listener and contacts no other host. It reads no
-  file but the key and the system's resolver configuration (to resolve the
-  relays' names), resolves through the system's nameservers only, never a
-  public resolver, and uses no address lookup service. Proxy variables in its
-  environment have no effect: it never calls iroh's `proxy_from_env`, and it
-  removes them from its own environment before anything reads them, since
-  iroh's relay probes would otherwise honour them.
+  stream to one connection on the bridge socket. Started without a key and a
+  bridge socket, it binds the endpoint with a fresh key it holds in memory and
+  accepts nothing: it only dials. Either way it dials the peers the daemon
+  names (`dial`) and copies each dialed stream to the socket the daemon named
+  for it. It binds UDP sockets for QUIC, asks the local router for a port
+  mapping, and contacts only the relays the daemon named in `start`,
+  `set_relays` and `dial`, and the peers it dials; it opens no listener and
+  contacts no other host. It reads no file but the key and the system's
+  resolver configuration (to resolve the relays' names), resolves through the
+  system's nameservers only, never a public resolver, and uses no address
+  lookup service. Proxy variables in its environment have no effect: it never
+  calls iroh's `proxy_from_env`, and it removes them from its own environment
+  before anything reads them, since iroh's relay probes would otherwise honour
+  them.
 
 ## Process
 
@@ -53,7 +63,7 @@ error, and the side that sees it ends the helper. Frames the helper sends carry
 
 ## Versioning
 
-A single integer, `protocol_version`, currently **2**. The helper declares it in
+A single integer, `protocol_version`, currently **3**. The helper declares it in
 `hello`; the daemon refuses any other value and ends the helper. There is no
 negotiation: the helper is bundled with, and pinned by, the engine release that
 speaks its version, and both halves move together. The daemon also compares
@@ -61,7 +71,9 @@ speaks its version, and both halves move together. The daemon also compares
 helper that differs, so a release that moved one without the other fails loudly
 (M62 §8).
 
-Version 2 adds the `close` op.
+Version 2 adds the `close` op. Version 3 makes `start`'s `secret_key_path` and
+`bridge_socket` optional together (an endpoint that only dials) and adds the
+`dial` op and the `dialed`, `dial_failed` and `dial_closed` events (M75).
 
 ## Sequence
 
@@ -76,6 +88,10 @@ helper                                   daemon
   refused ──────────────────────────────▶   (a connection or stream is refused)
         ◀──────────────────────────────── set_relays   (any time after ready)
         ◀──────────────────────────────── close        (a session ended before hello or a pair request)
+        ◀──────────────────────────────── dial         (any time after ready)
+  dialed ───────────────────────────────▶   (the dial's stream is open and its socket connected)
+  dial_failed ──────────────────────────▶   (the dial made no stream)
+  dial_closed ──────────────────────────▶   (a dialed stream ended)
   log   ────────────────────────────────▶   (any time after hello)
         ◀──────────────────────────────── shutdown
 ```
@@ -83,7 +99,7 @@ helper                                   daemon
 ## Events the helper sends
 
 ```json
-{"event":"hello","protocol_version":2,"helper_version":"0.2.0","iroh_version":"1.3.0"}
+{"event":"hello","protocol_version":3,"helper_version":"0.3.0","iroh_version":"1.3.0"}
 {"event":"ready","endpoint_id":"79b5562e8fe654f94078b112e8a98ba7901f853ae695bed7e0e3910bad049664"}
 {"event":"relay","home_relay":"https://us1.relay.fermix.ai/","connected":true}
 {"event":"path","endpoint_id":"79b5562e8fe654f94078b112e8a98ba7901f853ae695bed7e0e3910bad049664","kind":"relay","relay":"https://us1.relay.fermix.ai/"}
@@ -91,16 +107,22 @@ helper                                   daemon
 {"event":"refused","reason":"busy","endpoint_id":null}
 {"event":"log","level":"warn","message":"bridge socket refused the connection"}
 {"event":"error","code":"key_invalid","message":"key file mode is 0644, not 0600"}
+{"event":"dialed","dial_id":"5f1c9a2e","kind":"relay","relay":"https://us1.relay.fermix.ai/"}
+{"event":"dial_failed","dial_id":"5f1c9a2e","reason":"unreachable"}
+{"event":"dial_closed","dial_id":"5f1c9a2e"}
 ```
 
 | Event | Fields | Meaning |
 |---|---|---|
 | `hello` | `protocol_version`, `helper_version`, `iroh_version` | The first line, within **10 s** of spawn. |
-| `ready` | `endpoint_id` | The endpoint is bound with the key from `start`. `endpoint_id` is the lowercase hex of the key's Ed25519 public key (iroh's own display form); the daemon checks it against its own derivation from the same key and ends a helper that disagrees. Sent once. |
+| `ready` | `endpoint_id` | The endpoint is bound with the key from `start`, or with a fresh key for an endpoint that only dials. `endpoint_id` is the lowercase hex of the key's Ed25519 public key (iroh's own display form); the daemon checks it against its own derivation from the same key and ends a helper that disagrees (an endpoint that only dials has no key the daemon knows). Sent once. |
 | `relay` | `home_relay` (a URL, or `null` before one is chosen), `connected`; `error?` | The endpoint's home relay and whether it is connected, sent after `ready` and whenever either changes. iroh reports home relays as a list; `home_relay` is the connected entry, else the first. `error` is the first line of iroh's error text, at most 512 bytes, with any `user:password@` removed from URLs: relay-influenced text the daemon logs and never matches on. |
 | `path` | `endpoint_id`, `kind` (`relay` or `direct`), `relay` (a URL, or `null` for a direct path) | A connection's selected path, sent when the connection opens and whenever its selected path changes. `endpoint_id` is the peer's: per phone process, since a phone makes a new iroh key on each launch. For the Phone sheet's route line and the speed measurement (M62 §3.2, D5). |
 | `closed` | `endpoint_id` | A connection that had a `path` ended, however it ended. Sent once per connection, after its last `path`; the daemon forgets that peer's path. |
 | `refused` | `reason`, `endpoint_id` (hex, or `null` where it is not known) | A connection or stream the helper refused: `busy` (over `limits.max_connections` with no connection that can make way, refused before its handshake, so `endpoint_id` is `null`), `alpn` (no matching application protocol), `bridge_unreachable` (the bridge socket could not be reached for a stream). The daemon counts these toward its admission bound and per-peer accounting; it never parses `log` text. |
+| `dialed` | `dial_id`, `kind` (`relay` or `direct`), `relay` (a URL, or `null` for a direct path) | The dial's stream is open and connected to the dial's socket: the daemon accepts that connection and runs its session on it. `kind` and `relay` are the connection's selected path when the stream opened, as `path` names one; a dialed connection sends no `path` or `closed`. Sent once per dial, at most. |
+| `dial_failed` | `dial_id`, `reason` | The dial made no stream, and the helper has forgotten it. `reason` is one of `unreachable` (iroh could not start the connection: no usable address, the endpoint's own id, or a handshake iroh gave up on by itself), `timeout` (the stream was not open and connected to the socket within **20 s** of the op; a peer that never answers, or whose relays cannot be reached, ends here), `refused` (the peer ended the connection or failed its handshake: a full helper, a peer that only dials, a foreign key), `bridge_unreachable` (the dial's socket could not be reached; the stream is reset with application code `2`), `busy` (8 dials already in flight). A `log` warning with iroh's error text may come first. Sent once per dial, instead of `dialed`. |
+| `dial_closed` | `dial_id` | A dialed stream ended, however it ended (**Dialing.**), and the helper has forgotten the dial. Sent once per dial that was `dialed`. |
 | `log` | `level` (`info` or `warn`), `message` | A diagnostic for the daemon's log, at most 512 bytes. The daemon logs it and never matches on it. Never key material, never stream contents. |
 | `error` | `code`, `message` | Fatal: the helper exits `1` after sending it. `code` is one of `bad_request` (a malformed or out-of-order `op`, one with an unknown or missing field, or a `start` whose values the helper refuses), `key_unreadable`, `key_invalid`, `bind_failed`, `internal`. `message` is at most 512 bytes. The daemon restarts a helper that failed, except after `bad_request` or `key_invalid`, which the same `start` would get again. |
 
@@ -110,14 +132,17 @@ helper                                   daemon
 {"op":"start","secret_key_path":"/Users/owner/.fermix/mobile/iroh_key","bridge_socket":"/Users/owner/.fermix/mobile/bridge.sock","alpn":"fermix/mobile/1","relays":[{"url":"https://us1.relay.fermix.ai/","quic_port":7842},{"url":"https://eu1.relay.fermix.ai/","quic_port":7842}],"limits":{"max_connections":1024,"max_streams_per_connection":4,"stream_receive_window":262144,"connection_receive_window":1048576,"send_window":1048576}}
 {"op":"set_relays","relays":[{"url":"https://us1.relay.fermix.ai/","quic_port":7842},{"url":"https://eu1.relay.fermix.ai/","quic_port":7842}]}
 {"op":"close","endpoint_id":"79b5562e8fe654f94078b112e8a98ba7901f853ae695bed7e0e3910bad049664"}
+{"op":"start","alpn":"fermix/mobile/1","relays":[{"url":"https://us1.relay.fermix.ai/","quic_port":7842},{"url":"https://eu1.relay.fermix.ai/","quic_port":7842}],"limits":{"max_connections":1024,"max_streams_per_connection":4,"stream_receive_window":262144,"connection_receive_window":1048576,"send_window":1048576}}
+{"op":"dial","dial_id":"5f1c9a2e","endpoint_id":"79b5562e8fe654f94078b112e8a98ba7901f853ae695bed7e0e3910bad049664","relays":[{"url":"https://us1.relay.fermix.ai/","quic_port":7842},{"url":"https://eu1.relay.fermix.ai/","quic_port":7842}],"socket":"/Users/owner/.fermix/mobile/dial-5f1c9a2e.sock"}
 {"op":"shutdown"}
 ```
 
 | Op | Fields | Meaning |
 |---|---|---|
-| `start` | `secret_key_path`, `bridge_socket`, `alpn`, `relays`, `limits` | Exactly once, after `hello`. The helper reads the key, binds the endpoint and answers `ready`, or `error`. |
+| `start` | `secret_key_path?`, `bridge_socket?`, `alpn`, `relays`, `limits` | Exactly once, after `hello`. The helper reads the key, binds the endpoint and answers `ready`, or `error`. `secret_key_path` and `bridge_socket` come together or not at all: without them the endpoint uses a fresh key held in memory and accepts nothing, refusing every incoming connection before its handshake and reporting none of them; it only dials. One without the other is `bad_request`. An optional field is absent, never `null`. |
 | `set_relays` | `relays` | Replaces the endpoint's relay map at run time: relays not named are removed, new ones added. Valid only after `ready`. |
-| `close` | `endpoint_id` (lowercase hex) | A session on a stream from this peer ended, for any reason, before it was a paired phone's session or a pairing request: in the prelude, in the Noise handshake, or before `hello` or the pair request (`../mobile/PROTOCOL.md`), the phone's own ending of the stream included. The helper bridges no further stream from the peer's connections, resetting each new one with application code `0`, and closes each connection with code `0`, reason `refused`, once every stream it bridges on it has ended and the peer has acknowledged what the daemon wrote on it, so the daemon's close frame reaches the phone first. It gives the peer at most **5 s** after a stream ends to take and acknowledge those bytes, then resets the stream with application code `0` (**Ending.**). Valid only after `ready`; a peer with no connection is not an error. |
+| `close` | `endpoint_id` (lowercase hex) | A session on a stream from this peer ended, for any reason, before it was a paired phone's session or a pairing request: in the prelude, in the Noise handshake, or before `hello` or the pair request (`../mobile/PROTOCOL.md`), the phone's own ending of the stream included. The helper bridges no further stream from the peer's connections, resetting each new one with application code `0`, and closes each connection with code `0`, reason `refused`, once every stream it bridges on it has ended and the peer has acknowledged what the daemon wrote on it, so the daemon's close frame reaches the phone first. It gives the peer at most **5 s** after a stream ends to take and acknowledge those bytes, then resets the stream with application code `0` (**Ending.**). Valid only after `ready`; a peer with no connection is not an error, and an endpoint that only dials has none. It never touches a dialed connection. |
+| `dial` | `dial_id`, `endpoint_id` (lowercase hex), `relays`, `socket`, `addrs?` | Dial the peer, open one stream and copy it to `socket` (**Dialing.**). Valid only after `ready`, with either kind of `start`. Answered by exactly one `dialed` or `dial_failed`, and after `dialed` by one `dial_closed`. A `dial_id` still in flight (not yet answered by `dial_failed` or `dial_closed`) is `bad_request`. |
 | `shutdown` | — | Stop accepting; close every connection with application code `0`, reason `shutdown` (iroh's `Endpoint::close` alone sends an empty reason; a connection still in its handshake cannot carry a reason and is closed without one); close every bridge connection; wait for iroh's drain, bounded by its own timeout; exit `0` within **5 s**. The daemon kills the process group after that. This is also how the daemon turns remote reach off: after the exit nothing contacts a relay. |
 
 - **`secret_key_path`:** an absolute path to a file of exactly 32 bytes, the raw
@@ -170,7 +195,21 @@ helper                                   daemon
   `limits.send_window`:** bytes, each 65,536 to 16,777,216, applied through
   iroh's QUIC transport configuration. They are QUIC's own flow-control windows,
   so they bound what an unauthenticated peer can make the helper hold before any
-  byte reaches the daemon.
+  byte reaches the daemon. They apply to dialed connections too.
+- **`dial_id`:** the daemon's name for one dial, 1 to 64 characters from
+  `a`–`z`, `0`–`9`, `-` and `_`. The daemon uses 8 random lowercase hex digits.
+- **`socket`:** an absolute path to the Unix-domain stream socket the daemon
+  listens on for this dial, before it sends the op, under the same rule as
+  `bridge_socket`: one too long for a socket address is `bad_request`.
+- **`relays` of a `dial`:** one to eight entries shaped as `start`'s, the
+  peer's relays as its route names them (`../mobile/PROTOCOL.md`, *Remote
+  reach*). The endpoint reaches the peer through any of them, whether or not
+  they are among its own.
+- **`addrs`:** zero to eight direct UDP addresses, each `ip:port` (an IPv6
+  address in brackets), tried besides the relays. A route never carries one, so
+  the daemon sends `addrs` only when it knows where the peer listens: its
+  end-to-end test, dialing a helper on the same host with no relay. Absent
+  means none, never `null`.
 
 ## The bridge
 
@@ -238,14 +277,48 @@ daemon sends for a peer whose session ended before `hello` or a pair request. A
 connection with no stream also makes way for a new one when every place is
 taken (`room`, above).
 
+## Dialing
+
+The daemon reaches another engine as that engine's phones reach it: the
+peer's helper accepts the dialed connection and bridges its stream to the peer
+daemon's bridge socket, preamble and all, so on the peer's side a dialed stream
+is an accepted one. The dialing daemon is the Noise initiator on it
+(`../mobile/PROTOCOL.md`).
+
+**Order.** The daemon listens on a fresh socket, mode `0600`, sends `dial`, and
+waits for its answer. The helper connects to the peer with ALPN
+`fermix/mobile/1` through the dial's relays and addresses (and any direct path
+iroh finds from them), opens one bidirectional stream, waits for the
+connection's selected path, connects to `socket`, and sends `dialed`. So when
+`dialed` arrives the helper's connection is already in the socket's backlog:
+the daemon accepts it, stops listening and removes the socket. Nothing reaches
+the peer before the daemon writes its first bytes (the prelude). The whole
+dial, the socket's connection included, is bounded by **20 s** (`timeout`).
+
+**Copying.** The helper writes no preamble on a dial's socket: the daemon named
+the peer itself. It then copies bytes both ways exactly as for an accepted
+stream (*The bridge*: the same 64 KiB buffers and every **Ending.** rule, the
+daemon's dial socket in the bridge connection's place), and when both
+directions have ended it closes the dialed connection with code `0`, reason
+`done`, and sends `dial_closed`. A dial that fails once its connection is made
+closes it with code `0`, reason the failure's name. One dial is one connection
+and one stream.
+
+**Bounds.** At most **8** dials are in flight at once, from the op until its
+`dial_failed` or `dial_closed`; a ninth is answered `dial_failed` `busy` at
+once and holds nothing. The helper forgets a dial before it sends its last
+event, so the daemon may reuse the id as soon as it has read it. A dial cut
+short by `shutdown` gets no event; its connection is closed with code `0`,
+reason `shutdown`, like every other.
+
 ## Fixtures
 
 `fixtures/` holds the exact bytes of every frame above:
 
 | File | Contents |
 |---|---|
-| `hello.json`, `ready.json`, `relay.json`, `path.json`, `closed.json`, `refused.json`, `log.json`, `error.json` | events, one line each with its trailing `\n` |
-| `start.json`, `set_relays.json`, `close.json`, `shutdown.json` | ops, one line each with its trailing `\n` |
+| `hello.json`, `ready.json`, `relay.json`, `path.json`, `closed.json`, `refused.json`, `log.json`, `error.json`, `dialed.json`, `dial_failed.json`, `dial_closed.json` | events, one line each with its trailing `\n` |
+| `start.json`, `start_dial_only.json`, `set_relays.json`, `close.json`, `dial.json`, `dial_direct.json`, `shutdown.json` | ops, one line each with its trailing `\n` |
 | `bridge_preamble.bin` | the 37-byte preamble for a phone whose endpoint id is the one in `ready.json` |
 
 The fixtures' key is the Ed25519 secret key whose 32 bytes are `01 02 … 20`; its

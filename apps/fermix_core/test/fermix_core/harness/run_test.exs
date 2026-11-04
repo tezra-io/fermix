@@ -177,6 +177,36 @@ defmodule FermixCore.Harness.RunTest do
       assert File.read!(result_path(ctx.runs_root, run_id)) =~ "Not logged in"
     end
 
+    # 2026-11-03: Codex refused the model on `turn.failed` and wrote no `-o` result,
+    # so the row carried `exit_1` beside Codex's stdin banner and the owner never
+    # read why. Codex's own words become the failed run's result, as claude's do,
+    # and lead the row's diagnostics.
+    test "a codex turn.failed persists Codex's words as the failed run's result", ctx do
+      message =
+        "The 'lantern gray' model is not supported when using Codex with a ChatGPT account."
+
+      stub =
+        FakeVendorCli.write!(ctx.stub_dir,
+          lines: [
+            ~s({"type":"thread.started","thread_id":"t1"}),
+            "Reading additional input from stdin...",
+            ~s({"type":"turn.started"}),
+            Jason.encode!(%{"type" => "turn.failed", "error" => %{"message" => message}})
+          ],
+          exit_code: 1
+        )
+
+      {run_id, pid} = start_run(ctx, CodexExec, stub, %{})
+
+      assert_receive {:harness_report_terminal, ^run_id, "failed", fields}, 10_000
+      refute_run_alive(pid)
+
+      assert fields.reason == "exit_1"
+      assert fields.result_text == message
+      assert hd(fields.diagnostics_tail) == message
+      assert File.read!(result_path(ctx.runs_root, run_id)) == message
+    end
+
     test "a non-zero exit is failed/:exit_<code> regardless of events", ctx do
       stub =
         FakeVendorCli.write!(ctx.stub_dir,

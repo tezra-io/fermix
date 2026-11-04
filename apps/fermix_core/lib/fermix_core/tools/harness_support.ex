@@ -369,6 +369,28 @@ defmodule FermixCore.Tools.HarnessSupport do
       "`workspace-write`; omit the parameter to use the operator's configured posture."
   end
 
+  # Codex refuses an unknown model only once it has started, so the adapter checks
+  # the account's own list first (2026-11-03: "daybreak blue", a display name,
+  # failed a follow-up's run in 4 s). Each says nothing started, which is what lets
+  # a caller told never to retry an uncertain launch try this one again.
+  defp format_error({:unknown_codex_model, model, listed}) do
+    "Codex has no model #{inspect(model)} on this account, so nothing was started. " <>
+      "Launch again with one of its model ids: #{model_ids(listed)}; or omit `model` " <>
+      "to use Codex's default."
+  end
+
+  defp format_error(:no_codex_model_list) do
+    "Codex has not listed this account's models yet, so the model cannot be checked " <>
+      "and nothing was started. Launch again and omit `model` to use Codex's default; " <>
+      "Codex lists the models once it has run on this account."
+  end
+
+  defp format_error({:codex_model_list_unreadable, reason}) do
+    "Codex's list of this account's models could not be read (#{inspect(reason)}), so " <>
+      "the model cannot be checked and nothing was started. Launch again and omit " <>
+      "`model` to use Codex's default."
+  end
+
   # Claude Code's own three. `--resume` there is a flat option that coexists with
   # every other flag, so it has no "not supported with resume" class — but it does
   # mint its own enum and mutual-exclusion refusals, which leaked the same way.
@@ -503,6 +525,13 @@ defmodule FermixCore.Tools.HarnessSupport do
 
   defp cloud_task_pointer(url) when is_binary(url) and url != "", do: ": #{url}"
   defp cloud_task_pointer(_url), do: "."
+
+  # Each id beside the name Codex shows, so a display name ("Daybreak Blue") finds
+  # its id.
+  defp model_ids([]), do: "none listed"
+
+  defp model_ids(listed),
+    do: Enum.map_join(listed, ", ", fn {id, name} -> "#{id} (#{name})" end)
 
   # Byte counts here are only ever read by a human or the model, so render them
   # readably rather than as raw bytes.

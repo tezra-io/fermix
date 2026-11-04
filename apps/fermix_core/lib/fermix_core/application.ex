@@ -22,6 +22,7 @@ defmodule FermixCore.Application do
   alias FermixCore.Capabilities.MCP.Supervisor, as: McpSupervisor
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.CommandHost.Supervisor, as: CommandHostSupervisor
+  alias FermixCore.Companion.OriginBackfill
   alias FermixCore.ComputerHistory
   alias FermixCore.ComputerHistory.Supervisor, as: ComputerHistorySupervisor
   alias FermixCore.ComputerUse
@@ -29,15 +30,24 @@ defmodule FermixCore.Application do
   alias FermixCore.Cues
   alias FermixCore.Cues.Supervisor, as: CuesSupervisor
   alias FermixCore.Harness.Supervisor, as: HarnessSupervisor
+  alias FermixCore.Home.AlwaysOn
+  alias FermixCore.Home.Candidate
+  alias FermixCore.Home.Epoch
+  alias FermixCore.Home.Move
+  alias FermixCore.Home.Return
+  alias FermixCore.Home.Role
+  alias FermixCore.Home.Snapshot.Scheduler, as: SnapshotScheduler
   alias FermixCore.HostFacts
   alias FermixCore.Jobs.RunnerSupervisor, as: JobRunnerSupervisor
   alias FermixCore.Jobs.Scheduler, as: JobScheduler
   alias FermixCore.Log.RedactingFormatter
+  alias FermixCore.Management.AlwaysOn, as: ManagementAlwaysOn
   alias FermixCore.Management.Doctor, as: ManagementDoctor
   alias FermixCore.Management.Jobs, as: ManagementJobs
   alias FermixCore.Management.Lifecycle, as: ManagementLifecycle
   alias FermixCore.Management.McpServers.DraftValues, as: McpDraftValues
   alias FermixCore.Management.Plugins.Discovery, as: ManagementPluginDiscovery
+  alias FermixCore.Management.Provision, as: ManagementProvision
   alias FermixCore.Meetings.Supervisor, as: MeetingsSupervisor
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Repo
@@ -50,6 +60,7 @@ defmodule FermixCore.Application do
   alias FermixCore.OpenLoops.Scheduler, as: OpenLoopsScheduler
   alias FermixCore.Plugins.CapabilitySeeder, as: PluginCapabilitySeeder
   alias FermixCore.Plugins.Dist.Installer, as: PluginInstaller
+  alias FermixCore.Plugins.Dist.Reinstall, as: PluginReinstall
   alias FermixCore.Prompt.BootstrapRename
   alias FermixCore.Prompt.IdentityName
   alias FermixCore.Prompt.TemplateReconciler
@@ -67,7 +78,6 @@ defmodule FermixCore.Application do
   alias FermixCore.SkillCuration.Config, as: SkillCurationConfig
   alias FermixCore.SkillCuration.Scheduler, as: SkillCurationScheduler
   alias FermixCore.Temporal.DeliverySupervisor, as: TemporalDeliverySupervisor
-  alias FermixCore.Temporal.FollowupSupervisor, as: TemporalFollowupSupervisor
   alias FermixCore.Temporal.Scheduler, as: TemporalScheduler
   alias FermixCore.Trace
 
@@ -158,18 +168,121 @@ defmodule FermixCore.Application do
   end
 
   defp start_supervision_tree do
+    # First, before anything writes to the home or opens `memory.db`: a home
+    # that moved refuses to open as the primary here, by name, and the boot
+    # fails (M75 step 1). Every later child list is filtered by this role.
+    :ok =
+      Role.remember!(ConfigStore.fermix_home(), Application.get_env(:fermix_core, :engine, []))
+
     :ok = HostFacts.remember()
     remember_launch_cwd()
-    :ok = ConfigStore.ensure_workspace()
-    :ok = BootstrapRename.run()
-    :ok = IdentityName.reconcile()
-    :ok = AuthStore.validate_permissions!()
+    :ok = prepare_home(ConfigStore.fermix_home(), Role.current())
     setup_file_logger()
     redact_default_logger()
     Trace.TelemetryHandler.attach()
     DecisionTelemetry.attach()
-    maybe_ensure_sidecar()
+    maybe_ensure_sidecar(Role.current())
 
+    opts = [strategy: :rest_for_one, name: FermixCore.Supervisor]
+
+    Supervisor.start_link(supervision_children(Egress.activate(), Role.current()), opts)
+  end
+
+  # What a boot writes into its home before any child starts. A candidate
+  # (M75 §2) writes nothing there: its home is where a move will rename a
+  # restored one into place, so it gets no workspace, no epoch, no prompt
+  # files and no token-file check. A primary first finishes a candidate's
+  # activation that a crash cut short after the restored settings were in place
+  # (`Candidate.finish_activation/1`), before anything reads the home, and
+  # records that this computer took Fermix back when a move back made it the
+  # primary again (`Home.Return.done/2`). Then either role says the ending of
+  # a move the engine before this restart left half-said
+  # (`Move.finish_at_boot/2`): only the engine that came back publishes `done`
+  # or `aborted`.
+  defp prepare_home(_root, :candidate), do: :ok
+
+  defp prepare_home(root, role) do
+    :ok = finish_activation(root, role)
+    :ok = finish_return(root, role)
+    :ok = finish_move(root, role)
+    :ok = ConfigStore.ensure_workspace()
+    :ok = initialise_primary_epoch(root, role)
+    :ok = BootstrapRename.run()
+    :ok = IdentityName.reconcile()
+    AuthStore.validate_permissions!()
+  end
+
+  defp finish_activation(_root, :device), do: :ok
+
+  defp finish_activation(root, :primary) do
+    case Candidate.finish_activation(root) do
+      :ok -> :ok
+      {:error, reason} -> raise Candidate.error_sentence(reason)
+    end
+  end
+
+  # A failure here does not stop the boot, and is not dropped: the boot
+  # remembers it, and each `home.status` read tries the write again
+  # (`Management.Home`). The log says so now.
+  defp finish_return(_root, :device), do: :ok
+
+  defp finish_return(root, :primary) do
+    case Return.done(root, DateTime.utc_now()) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error(
+          "move back: that this computer took Fermix back could not be recorded at boot " <>
+            "(#{inspect(reason)}); home.status tries again at each read"
+        )
+
+        Return.remember_unrecorded()
+    end
+  end
+
+  # A failure here does not stop the boot, and is not dropped: the boot
+  # records that it left the ending unrecorded, and `home.status` tries the
+  # write again at each read and says the ending and why until it is written
+  # (`Move.view/3`); an unreadable phase file is named by the move worker
+  # (device) or the next `home.move.start` (primary). The log says so now.
+  defp finish_move(root, role) do
+    case Move.finish_at_boot(root, role) do
+      :ok -> :ok
+      {:error, reason} -> left_to_status(reason)
+    end
+  end
+
+  defp left_to_status(reason) do
+    Logger.error(
+      "move: the ending of a move could not be recorded at boot (#{inspect(reason)}); " <>
+        "home.status tries again at each read and says why until it is recorded"
+    )
+
+    Move.remember_unrecorded_ending()
+  end
+
+  # A primary home carries its epoch from its first boot (M75 D14): 1 when it
+  # has none, kept when it has one, refused by name when the file is invalid.
+  # It lands here, before the channels application starts the mobile subtree,
+  # so the phone identity's own epoch write never races it. A device-role boot
+  # mints nothing: its home is a retired copy or was never the primary.
+  defp initialise_primary_epoch(_root, :device), do: :ok
+
+  defp initialise_primary_epoch(root, :primary) do
+    case Epoch.initialise(root) do
+      {:ok, _state, _epoch} -> :ok
+      {:error, reason} -> raise Epoch.error_sentence(reason)
+    end
+  end
+
+  # The children this boot starts, in order, for the engine `role`:
+  # `Role.children/2` leaves a device's primary-only ones out. Public (@doc
+  # false) so tests read the real list for a role without booting a second tree.
+  @doc false
+  @spec supervision_children(Egress.t(), Role.role()) :: [Role.child()]
+  def supervision_children(%Egress{} = egress, role)
+      when role in [:primary, :device, :candidate] do
     children =
       [
         # First child (`:rest_for_one`): every process that can run an external
@@ -177,7 +290,18 @@ defmodule FermixCore.Application do
         # add no restart intensity to the tree.
         CommandHostSupervisor,
         {Task.Supervisor, name: FermixCore.TaskSupervisor},
-        finch_children(Egress.activate()),
+        # The Always On provisioner's ledger locks, before anything that can
+        # write the ledger (a management call, a job, the desktop relay). It
+        # runs no writer's code, so nothing it serves can bring it down.
+        FermixCore.Home.Provision.Ledger.Lock,
+        # Which files `home.status` reads cannot be read now, so each is
+        # logged once a stretch however often the apps poll; in every role,
+        # before anything that answers `home.status`.
+        FermixCore.Home.UnreadableFiles,
+        # The OAuth loopback listeners open now (M75 D17), before anything
+        # that runs a sign-in: a desktop's sign-in is forwarded from it.
+        FermixCore.Auth.LoopbackRegistry,
+        finch_children(egress),
         {Trace, trace_opts()},
         TokenSupervisor,
         # The browser bridge listens on a socket the browser extension's pump
@@ -188,6 +312,11 @@ defmodule FermixCore.Application do
         BuiltinSeeder,
         {CommandCapabilities, capability_registry: CapabilityRegistry},
         PluginInstaller,
+        # After a move from another system, installs its plugins again for
+        # this computer once the installer's boot sweep is done; `:temporary`,
+        # so it restarts nothing after it, and it ends at once when nothing
+        # waits.
+        PluginReinstall,
         {PluginCapabilitySeeder, capability_registry: CapabilityRegistry},
         {SkillRegistry, capability_registry: CapabilityRegistry},
         # Outside the MCP tree on purpose (M27 §7.8): a remote server's subtree
@@ -257,15 +386,8 @@ defmodule FermixCore.Application do
         # scheduler. That invariant is what replaces lease tokens and fenced
         # settlement. Timers are gated by an init-time flag (the jobs-scheduler
         # precedent), disabled in `config/test.exs`, never by omission.
-        #
-        # The follow-up supervisor (§22.4) is LAST of the three, which the same
-        # property serves twice: a scheduler crash tears down in-flight
-        # deliveries and in-flight follow-ups together, and shutdown — reverse
-        # order — kills follow-ups first, so a worker settling mid-shutdown can
-        # find it already gone. That exit is caught, never fatal to a settlement.
         {TemporalScheduler, temporal_scheduler_opts()},
         TemporalDeliverySupervisor,
-        TemporalFollowupSupervisor,
         # Open-loop check-ins (M78 §04 stage 3), the temporal shape: the
         # scheduler starts BEFORE its check-in supervisor, so under
         # `:rest_for_one` a scheduler crash tears down every in-flight check-in
@@ -285,6 +407,16 @@ defmodule FermixCore.Application do
         maybe_computer_use_supervisor(),
         maybe_computer_history_supervisor(),
         maybe_skill_curation_scheduler(),
+        # Says where a scheduled job's or a cue's message came from on the
+        # timeline rows written before `metadata.origin` existed, once most of
+        # the tree is up, in short batches the boot never waits for.
+        # `:temporary`, so a crash restarts nothing after it; dark under `mix
+        # test`, whose suites run their own pass on their own Repo.
+        {OriginBackfill, enabled: @compiled_env != :test},
+        # The primary's snapshots (M75 §8), before the cue tree so a crash of
+        # either restarts nothing but the cue tree. Its timers stay dark under
+        # `mix test`; tests start their own with an injected clock and timer.
+        {SnapshotScheduler, timer_enabled: @compiled_env != :test},
         # Cue tree (M60 §5.3) LAST, and that order is load-bearing, as it is
         # for the temporal rail above: under `:rest_for_one` a crash of
         # `JobScheduler` or anything before it restarts the cue subsystem,
@@ -294,9 +426,7 @@ defmodule FermixCore.Application do
       ]
       |> List.flatten()
 
-    opts = [strategy: :rest_for_one, name: FermixCore.Supervisor]
-
-    Supervisor.start_link(children, opts)
+    Role.children(children, role)
   end
 
   # Shared outbound HTTP pool for `FermixCore.Net.HttpClient`. Finch's
@@ -430,7 +560,19 @@ defmodule FermixCore.Application do
       [
         ManagementLifecycle,
         ManagementDoctor,
+        # Before the job family and the socket: an Always On step a restart
+        # left with no job is kept as interrupted, once, and nothing written
+        # after it is taken for one (it starts no process).
+        %{
+          id: :provision_left_steps,
+          start: {ManagementProvision, :interrupt_at_boot, []},
+          restart: :temporary
+        },
         ManagementJobs,
+        # Always On's steps (`home.act`), one at a time per engine, after the
+        # job family they start and before the socket and the setup page that
+        # ask for them.
+        ManagementAlwaysOn,
         # Beside the job family it serves: a workspace discovery is a job, and
         # what it found is republished on the plugin row rather than in the job.
         ManagementPluginDiscovery,
@@ -545,7 +687,10 @@ defmodule FermixCore.Application do
   # upgrade transparently keeps those features working. The one binary is shared,
   # so EITHER computer-use or computer-history wanting it triggers the download.
   # Fail-soft and bounded; see `ComputerUse.ensure_sidecar_installed/1`.
-  defp maybe_ensure_sidecar do
+  # A candidate installs nothing: it is a fresh host waiting for a move.
+  defp maybe_ensure_sidecar(:candidate), do: :ok
+
+  defp maybe_ensure_sidecar(_role) do
     if daemon_boot?() do
       ComputerUse.ensure_sidecar_installed(
         wanted?: ComputerUse.enabled?() or ComputerHistory.operative?()
@@ -573,7 +718,24 @@ defmodule FermixCore.Application do
     config.enabled? and RealtimeConfig.api_key_present?(config)
   end
 
-  defp trace_opts, do: [base_dir: trace_dir()]
+  # Trace's retention passes (M75 L14) stay dark under `mix test`, as the
+  # snapshot scheduler's timers do; tests start their own Trace with a clock.
+  # On an Always On server a trace keeps the bodies of its records about a day
+  # (through the previous UTC day; M75 L20), decided once from what this boot
+  # recorded.
+  defp trace_opts do
+    [
+      base_dir: trace_dir(),
+      timer_enabled: @compiled_env != :test,
+      separate_bodies: always_on_server?()
+    ]
+  end
+
+  defp always_on_server? do
+    ConfigStore.fermix_home()
+    |> AlwaysOn.facts(Role.recorded(), HostFacts.current())
+    |> AlwaysOn.server?()
+  end
 
   defp jobs_scheduler_opts do
     Application.get_env(:fermix_core, :jobs, [])

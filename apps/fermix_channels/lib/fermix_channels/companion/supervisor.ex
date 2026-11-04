@@ -26,8 +26,24 @@ defmodule FermixChannels.Companion.Supervisor do
      before the connections, so a restart that forgets every hold takes the
      connections that held them down with it, and its fresh directory never
      outlives the holds it forgot,
-  3. a `DynamicSupervisor` for the connections, one `temporary` child each,
-  4. the `Endpoint`, which binds `companion.sock` and accepts.
+  3. the Always On watch (`FermixCore.Home.StatusWatch`, companion protocol
+     6), which tells a version 6 connection when Always On changed: before the
+     connections, so a restart that forgets who it tells takes them down
+     with it, and they subscribe again,
+  4. `Companion.Inbox`, the directory the owner's app hands the daemon a file
+     in (companion protocol 7), emptied when it starts: before the
+     connections, so a restart that empties it takes down the connections
+     whose files it removed, and their apps send them again,
+  5. a `DynamicSupervisor` for the connections, one `temporary` child each,
+  6. the `Endpoint`, which binds `companion.sock` and accepts.
+
+  A desktop's device-role engine after a move (`:tunnel`, M75 §6) serves the
+  same socket for its app, but hands each connection to a `Desktop.Tunnel`
+  that carries it to the primary through the desktop relay, and its media
+  grants are made from the blobs the relay fetched (`Desktop.Relay.Media`)
+  rather than from a phone store. Its connections are the primary's, whose
+  inbox is on another computer, so it starts no inbox of its own.
+  `:tunnel` is `[relay: server, staging: dir]`, or `nil` (every other engine).
 
   `:rest_for_one`: a registry restart would leave every connection unregistered
   and deaf, so it takes the later children down with it and clients reconnect.
@@ -42,9 +58,13 @@ defmodule FermixChannels.Companion.Supervisor do
   alias FermixChannels.Companion.Connection
   alias FermixChannels.Companion.Endpoint
   alias FermixChannels.Companion.Fanout
+  alias FermixChannels.Companion.Inbox
   alias FermixChannels.Companion.MediaGrants
   alias FermixChannels.Companion.Turns
+  alias FermixChannels.Desktop.Relay.Media, as: RelayMedia
+  alias FermixChannels.Desktop.Tunnel
   alias FermixChannels.Mobile.RequestCoordinator
+  alias FermixCore.Home.StatusWatch
 
   @connection_supervisor FermixChannels.Companion.ConnectionSupervisor
   @request_coordinator FermixChannels.Companion.RequestCoordinator
@@ -99,16 +119,31 @@ defmodule FermixChannels.Companion.Supervisor do
   defp serving(false, _opts, _registry, _approvals), do: []
 
   # `:media_grants_opts` are `MediaGrants.start_link/1`'s: a test tree names
-  # its own server and a temporary root, never the home's.
+  # its own server and a temporary root, never the home's; `:status_watch_opts`
+  # are `StatusWatch.start_link/1`'s, a test tree's own name and read;
+  # `:inbox_opts` are `Inbox.start_link/1`'s, a test tree's own name, directory
+  # and store.
   defp socket_children(opts, registry, approvals) do
     coordinator = Keyword.get(opts, :request_coordinator, @request_coordinator)
     connection_supervisor = Keyword.get(opts, :connection_supervisor, @connection_supervisor)
     store_opts = Keyword.get(opts, :store_opts, [])
 
+    tunnel = Keyword.get(opts, :tunnel)
+
     media_grants_opts =
-      Keyword.put_new(Keyword.get(opts, :media_grants_opts, []), :name, MediaGrants)
+      opts
+      |> Keyword.get(:media_grants_opts, [])
+      |> Keyword.put_new(:name, MediaGrants)
+      |> tunnel_blobs(tunnel)
 
     media_grants = Keyword.fetch!(media_grants_opts, :name)
+
+    status_watch_opts =
+      opts |> Keyword.get(:status_watch_opts, []) |> Keyword.put_new(:name, StatusWatch)
+
+    status_watch = Keyword.fetch!(status_watch_opts, :name)
+
+    inbox_opts = opts |> Keyword.get(:inbox_opts, []) |> Keyword.put_new(:name, Inbox)
 
     request_opts = [
       request_coordinator: coordinator,
@@ -128,18 +163,50 @@ defmodule FermixChannels.Companion.Supervisor do
         id: coordinator
       ),
       Supervisor.child_spec({MediaGrants, media_grants_opts}, id: media_grants),
-      {DynamicSupervisor, name: connection_supervisor, strategy: :one_for_one},
-      {Endpoint,
-       Keyword.take(opts, [:socket_path, :max_clients]) ++
-         [
-           connection_supervisor: connection_supervisor,
-           connection_opts: [
+      Supervisor.child_spec({StatusWatch, status_watch_opts}, id: status_watch)
+    ] ++
+      inbox_child(tunnel, inbox_opts) ++
+      [
+        {DynamicSupervisor, name: connection_supervisor, strategy: :one_for_one},
+        {Endpoint,
+         Keyword.take(opts, [:socket_path, :max_clients]) ++
+           [connection_supervisor: connection_supervisor] ++
+           connections(
+             tunnel,
+             [media_grants: media_grants, status_watch: status_watch],
              registry: registry,
              request_opts: request_opts,
              approvals: approvals,
-             media_grants: media_grants
-           ]
-         ]}
+             inbox: Keyword.fetch!(inbox_opts, :name)
+           )}
+      ]
+  end
+
+  # Only an engine that runs its connections itself takes files in.
+  defp inbox_child(nil, inbox_opts),
+    do: [Supervisor.child_spec({Inbox, inbox_opts}, id: Keyword.fetch!(inbox_opts, :name))]
+
+  defp inbox_child(_tunnel, _inbox_opts), do: []
+
+  # `shared` (the media grants and the Always On watch) go to every
+  # connection of either kind, `ordinary` (the registry, the request path,
+  # the approvals and the inbox) to a `Companion.Connection` alone.
+  defp connections(nil, shared, ordinary), do: [connection_opts: ordinary ++ shared]
+
+  defp connections(tunnel, shared, _ordinary) do
+    [
+      connection_module: Tunnel,
+      connection_opts:
+        [relay: Keyword.fetch!(tunnel, :relay), staging: Keyword.fetch!(tunnel, :staging)] ++
+          shared
     ]
+  end
+
+  # A desktop's grants are made from what its relay staged.
+  defp tunnel_blobs(grants_opts, nil), do: grants_opts
+
+  defp tunnel_blobs(grants_opts, tunnel) do
+    staging = Keyword.fetch!(tunnel, :staging)
+    Keyword.put_new(grants_opts, :blob, &RelayMedia.staged_blob(staging, &1))
   end
 end

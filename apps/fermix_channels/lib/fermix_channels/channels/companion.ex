@@ -22,7 +22,16 @@ defmodule FermixChannels.Channels.Companion do
   verbatim. The loop's stream events are cumulative snapshots, so the callback
   relays each snapshot and every connection sends its own client the suffix it
   has not written yet; a client that connects mid-turn gets the text so far as
-  its first delta. `turn_started` goes out when the loop starts.
+  its first delta. `turn_started` goes out when the loop starts. The model's
+  summary of a step of its reasoning, where the provider writes one, goes out
+  as `reasoning` to the connections on version 6, and a tool's start carries
+  the engine's sentence for the step (`activity`).
+
+  A message may carry files the owner attached (companion protocol 7): the
+  connection took each into the media store the phone's uploads use, and the
+  request path declared them on the message as it declares a phone's
+  (`Companion.Requests`), so the gateway's attachment pipeline fetches each
+  through `download_attachment/2`, the phone's own, from that store.
 
   During a Live call in the chat a turn may end with no reply (M56 §4.4): a
   snapshot that could still become the sentinel is held back, so such a turn
@@ -52,6 +61,7 @@ defmodule FermixChannels.Channels.Companion do
   alias FermixChannels.Mobile.Supervisor, as: MobileSupervisor
   alias FermixChannels.Telemetry, as: ChannelTelemetry
   alias FermixCore.Agents.LiveCallTurn
+  alias FermixCore.Capabilities.Activity
   alias FermixCore.Companion.Protocol
   alias FermixCore.Companion.Timeline
   alias FermixCore.Reply
@@ -138,8 +148,7 @@ defmodule FermixChannels.Channels.Companion do
   defp do_parse_event(%{type: "msg", payload: payload} = event) when is_map(payload) do
     with {:ok, profile} <- profile(payload),
          {:ok, client_id} <- required(payload, "client_msg_id"),
-         {:ok, text} <- binary(payload, "text"),
-         :ok <- no_attachments(payload) do
+         {:ok, text} <- binary(payload, "text") do
       {:ok, [message(client_id, profile, text, "msg", event)]}
     end
   end
@@ -174,6 +183,12 @@ defmodule FermixChannels.Channels.Companion do
   @impl true
   def verify_webhook(_conn), do: {:error, :unsupported_transport}
 
+  # A file the owner attached sits in the phone's media store under its attach
+  # id, so it is fetched exactly as a phone's attachment is (moduledoc).
+  @impl true
+  def download_attachment(message, attachment),
+    do: Mobile.download_attachment(message, attachment)
+
   @impl true
   def stream_capability, do: :raw
 
@@ -198,9 +213,20 @@ defmodule FermixChannels.Channels.Companion do
       :silent_reply ->
         Turns.silent(message)
 
-      _reasoning_or_other ->
+      {:reasoning_done, summary} when is_binary(summary) ->
+        reason(profile_id, turn_id, summary)
+
+      _reasoning_delta_or_other ->
         :ok
     end
+  end
+
+  # A step's reasoning summary reaches the connections on version 6 as it
+  # completes (`reasoning`); a blank one says nothing.
+  defp reason(profile_id, turn_id, summary) do
+    if String.trim(summary) == "",
+      do: :ok,
+      else: broadcast(profile_id, Output.reasoning(turn_id, summary))
   end
 
   @impl true
@@ -216,15 +242,25 @@ defmodule FermixChannels.Channels.Companion do
 
   # A provider call is not a tool: `tool_event` is a tool's lifecycle, named,
   # never the model call that picks it. The turn's thinking state already
-  # reaches the client through `turn_started` and the first `text_delta`.
+  # reaches the client through `turn_started` and the first `text_delta`. A
+  # tool's start says what the step is in a person's words (`activity`,
+  # `Capabilities.Activity`), which the client shows instead of the tool's name.
   @impl true
   def build_activity_callback(%Message{} = message) do
     turn_id = turn_id(message)
 
     fn
-      :provider_start -> :ok
-      :provider_response -> :ok
-      event -> broadcast(message.chat_id, Output.tool_event(turn_id, event))
+      :provider_start ->
+        :ok
+
+      :provider_response ->
+        :ok
+
+      {:tool_start, tool} ->
+        broadcast(message.chat_id, Output.tool_start(turn_id, tool, Activity.sentence(tool)))
+
+      event ->
+        broadcast(message.chat_id, Output.tool_event(turn_id, event))
     end
   end
 
@@ -262,7 +298,9 @@ defmodule FermixChannels.Channels.Companion do
   answers no request, is pushed to the phones as well while their channel
   runs (M56 D9), as one through the phone's own channel is. A reply's
   `:blocks` (M72) are stored and announced with its row, and the links they
-  do not draw are previewed, as every row's are.
+  do not draw are previewed, as every row's are. A scheduled job's or a
+  cue's message names where it came from in its row's `metadata.origin`
+  (`:origin`, `Output.persist_output/5`).
   """
   @impl true
   @spec send_message(String.t(), String.t()) :: :ok | {:error, term()}
@@ -443,10 +481,14 @@ defmodule FermixChannels.Channels.Companion do
       channel: @channel,
       chat_id: profile,
       reply_target: profile,
-      metadata: put_caller(metadata, event),
-      attachments: []
+      metadata: metadata |> put_caller(event) |> put_draws_lists(event),
+      attachments: declared_attachments(event)
     })
   end
+
+  # What the request path declared for a `msg`'s `attach_ids`; a `command`
+  # and a message with none declare nothing.
+  defp declared_attachments(%{payload: payload}), do: Map.get(payload, "attachments", [])
 
   # Who connected, as the connection read it off the socket's peer
   # (`FermixCore.SocketPeer`), never from the client's payload: a process the
@@ -460,6 +502,11 @@ defmodule FermixChannels.Channels.Companion do
     do: raise(ArgumentError, "unknown companion caller #{inspect(other)}")
 
   defp put_caller(metadata, _event), do: metadata
+
+  # Whether the connection that carried the turn draws the owner's lists: it
+  # pulled their index (M85 §07), read off the connection, never the payload.
+  defp put_draws_lists(metadata, %{draws_lists: true}), do: Map.put(metadata, :draws_lists, true)
+  defp put_draws_lists(metadata, _event), do: metadata
 
   @doc "The send options a reply to `message` carries: its turn, request and attempt."
   @spec reply_opts(Message.t()) :: keyword()
@@ -486,9 +533,6 @@ defmodule FermixChannels.Channels.Companion do
 
   defp validate_profile(@profile), do: :ok
   defp validate_profile(_profile), do: {:error, :unsupported_profile}
-
-  defp no_attachments(%{"attach_ids" => []}), do: :ok
-  defp no_attachments(_payload), do: {:error, :attachments_unsupported}
 
   defp command_text(payload) do
     with {:ok, name} <- required(payload, "name"),

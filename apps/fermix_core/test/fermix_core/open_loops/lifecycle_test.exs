@@ -24,10 +24,14 @@ defmodule FermixCore.OpenLoops.LifecycleTest do
         matters_by_date: date,
         matters_by_time: nil,
         matters_by_at: date_passed_at(date),
+        anchor_kind: "matters_by",
+        matters_by_source: "owner",
+        reach: "message",
         timezone: @tz,
         state: "open",
         touches: 0,
         next_touch_at: @now,
+        rung1_until: nil,
         claimed_at: nil,
         last_touch_at: nil,
         last_touch_rung: nil,
@@ -47,6 +51,30 @@ defmodule FermixCore.OpenLoops.LifecycleTest do
   defp long(overrides \\ %{}), do: loop("long", ~D[2031-06-20], overrides)
   defp short(overrides \\ %{}), do: loop("short", ~D[2031-06-04], overrides)
   defp imminent(overrides \\ %{}), do: loop("imminent", ~D[2031-06-03], overrides)
+
+  # Something waited on: the owner's interview ends Tuesday June 3 at 17:00 EDT,
+  # and asking how it went first feels natural then (21:00 UTC).
+  @anchor ~U[2031-06-03 21:00:00Z]
+
+  defp waited(overrides \\ %{}) do
+    loop(
+      "after",
+      ~D[2031-06-03],
+      Map.merge(
+        %{
+          anchor_kind: "ask_after",
+          matters_by_source: nil,
+          matters_by_kind: "datetime",
+          matters_by_time: ~T[17:00:00],
+          matters_by_at: @anchor,
+          next_touch_at: @anchor
+        },
+        overrides
+      )
+    )
+  end
+
+  defp talked(fun, overrides \\ %{}), do: fun.(Map.put(overrides, :reach, "conversation"))
 
   describe "slot_time/4: the horizon-to-touch table" do
     test "long: 7 days before, the day before, the day after, each at the active-hours start" do
@@ -133,10 +161,14 @@ defmodule FermixCore.OpenLoops.LifecycleTest do
 
     test "an open or asked loop whose touch has arrived becomes due" do
       open = medium(%{next_touch_at: ~U[2031-06-07 13:00:00Z]})
-      assert Lifecycle.due_decision(open, ~U[2031-06-07 13:00:00Z]) == :due
+
+      assert Lifecycle.due_decision(open, ~U[2031-06-07 13:00:00Z]) ==
+               {:due, ~U[2031-06-07 16:00:00Z]}
 
       asked = medium(%{state: "asked", touches: 1, next_touch_at: ~U[2031-06-09 13:00:00Z]})
-      assert Lifecycle.due_decision(asked, ~U[2031-06-09 13:30:00Z]) == :due
+
+      assert Lifecycle.due_decision(asked, ~U[2031-06-09 13:30:00Z]) ==
+               {:due, ~U[2031-06-09 16:30:00Z]}
     end
 
     test "a row already due, or held by a check-in, stays as it is" do
@@ -173,7 +205,8 @@ defmodule FermixCore.OpenLoops.LifecycleTest do
       skipped =
         Map.merge(skipped, %{last_touch_at: ~U[2031-06-07 13:30:00Z], last_touch_rung: 1})
 
-      assert Lifecycle.due_decision(skipped, ~U[2031-06-11 13:00:00Z]) == :due
+      assert Lifecycle.due_decision(skipped, ~U[2031-06-11 13:00:00Z]) ==
+               {:due, ~U[2031-06-11 16:00:00Z]}
     end
 
     test "a hand-back not delivered within a day of its slot expires" do
@@ -205,7 +238,7 @@ defmodule FermixCore.OpenLoops.LifecycleTest do
     end
 
     test "under 48 hours: due once its touch arrives, and expired once the date passes" do
-      assert Lifecycle.due_decision(imminent(), @now) == :due
+      assert Lifecycle.due_decision(imminent(), @now) == {:due, ~U[2031-06-04 04:00:00Z]}
 
       due = imminent(%{state: "due"})
       assert Lifecycle.due_decision(due, ~U[2031-06-04 03:59:59Z]) == :not_yet
@@ -215,7 +248,14 @@ defmodule FermixCore.OpenLoops.LifecycleTest do
 
   describe "rung2_eligible?/4: the rung 2 claim rule" do
     setup do
-      %{due: medium(%{state: "due", next_touch_at: ~U[2031-06-07 13:00:00Z]})}
+      due =
+        medium(%{
+          state: "due",
+          next_touch_at: ~U[2031-06-07 13:00:00Z],
+          rung1_until: ~U[2031-06-07 16:00:00Z]
+        })
+
+      %{due: due}
     end
 
     test "an imminent loop never gets an unprompted check-in" do
@@ -308,7 +348,7 @@ defmodule FermixCore.OpenLoops.LifecycleTest do
 
     test "done, stop and drop close the loop for good", %{asked: asked, now: now} do
       for {answer, reason} <- [{"done", "done"}, {"stop", "stop"}, {"drop", "dropped"}] do
-        assert Lifecycle.after_answer(asked, answer, nil, now, @hours) ==
+        assert Lifecycle.after_answer(asked, answer, %{}, now, @hours) ==
                  {:ok,
                   %{
                     state: "closed",
@@ -323,14 +363,15 @@ defmodule FermixCore.OpenLoops.LifecycleTest do
     test "every answer is accepted on every live state", %{asked: asked, now: now} do
       for state <- ~w(open due asked) do
         assert {:ok, %{state: "closed"}} =
-                 Lifecycle.after_answer(%{asked | state: state}, "done", nil, now, @hours)
+                 Lifecycle.after_answer(%{asked | state: state}, "done", %{}, now, @hours)
       end
     end
 
     test "a plan re-arms at the plan's date and no earlier", %{asked: asked, now: now} do
       plan_at = ~U[2031-06-08 22:00:00Z]
 
-      assert {:ok, changes} = Lifecycle.after_answer(asked, "plan", plan_at, now, @hours)
+      assert {:ok, changes} =
+               Lifecycle.after_answer(asked, "plan", %{plan_at: plan_at}, now, @hours)
 
       assert changes == %{
                state: "open",
@@ -341,13 +382,13 @@ defmodule FermixCore.OpenLoops.LifecycleTest do
 
       planned = Map.merge(asked, changes)
       assert Lifecycle.due_decision(planned, ~U[2031-06-08 21:59:59Z]) == :not_yet
-      assert Lifecycle.due_decision(planned, plan_at) == :due
+      assert Lifecycle.due_decision(planned, plan_at) == {:due, ~U[2031-06-09 01:00:00Z]}
     end
 
     test "the plan stands in for the pending slot and leaves the later ones alone",
          %{asked: asked, now: now} do
       plan_at = ~U[2031-06-08 22:00:00Z]
-      {:ok, changes} = Lifecycle.after_answer(asked, "plan", plan_at, now, @hours)
+      {:ok, changes} = Lifecycle.after_answer(asked, "plan", %{plan_at: plan_at}, now, @hours)
       planned = Map.merge(asked, %{changes | state: "due"})
 
       # The plan replaced the day-before slot, so the next one is the hand-back.
@@ -356,26 +397,45 @@ defmodule FermixCore.OpenLoops.LifecycleTest do
     end
 
     test "a plan needs a date no later than the loop's own", %{asked: asked, now: now} do
-      assert Lifecycle.after_answer(asked, "plan", nil, now, @hours) ==
+      assert Lifecycle.after_answer(asked, "plan", %{}, now, @hours) ==
                {:error, :plan_requires_date}
 
-      assert Lifecycle.after_answer(asked, "plan", ~U[2031-06-11 04:00:01Z], now, @hours) ==
+      assert Lifecycle.after_answer(
+               asked,
+               "plan",
+               %{plan_at: ~U[2031-06-11 04:00:01Z]},
+               now,
+               @hours
+             ) ==
                {:error, :plan_after_date}
 
-      assert Lifecycle.after_answer(asked, "plan", now, now, @hours) == {:error, :plan_passed}
+      assert Lifecycle.after_answer(asked, "plan", %{plan_at: now}, now, @hours) ==
+               {:error, :plan_passed}
 
       assert {:ok, %{next_touch_at: ~U[2031-06-11 04:00:00Z]}} =
-               Lifecycle.after_answer(asked, "plan", ~U[2031-06-11 04:00:00Z], now, @hours)
+               Lifecycle.after_answer(
+                 asked,
+                 "plan",
+                 %{plan_at: ~U[2031-06-11 04:00:00Z]},
+                 now,
+                 @hours
+               )
     end
 
     test "only a plan carries a plan date", %{asked: asked, now: now} do
-      assert Lifecycle.after_answer(asked, "done", ~U[2031-06-08 22:00:00Z], now, @hours) ==
+      assert Lifecycle.after_answer(
+               asked,
+               "done",
+               %{plan_at: ~U[2031-06-08 22:00:00Z]},
+               now,
+               @hours
+             ) ==
                {:error, :plan_at_without_plan}
     end
 
     test "not yet keeps the loop open for one more touch nearer the date",
          %{asked: asked, now: now} do
-      assert Lifecycle.after_answer(asked, "not_yet", nil, now, @hours) ==
+      assert Lifecycle.after_answer(asked, "not_yet", %{}, now, @hours) ==
                {:ok,
                 %{state: "open", last_answer: "not_yet", next_touch_at: ~U[2031-06-09 13:00:00Z]}}
 
@@ -383,14 +443,14 @@ defmodule FermixCore.OpenLoops.LifecycleTest do
       due = medium(%{state: "due", next_touch_at: ~U[2031-06-07 13:00:00Z]})
 
       assert {:ok, %{next_touch_at: ~U[2031-06-09 13:00:00Z]}} =
-               Lifecycle.after_answer(due, "not_yet", nil, ~U[2031-06-07 15:00:00Z], @hours)
+               Lifecycle.after_answer(due, "not_yet", %{}, ~U[2031-06-07 15:00:00Z], @hours)
     end
 
     test "not yet after the hand-back keeps the expiry", %{asked: asked} do
       spent = %{asked | touches: 3, next_touch_at: ~U[2031-06-12 16:00:00Z]}
       spent = %{spent | last_touch_at: ~U[2031-06-11 16:00:00Z]}
 
-      assert Lifecycle.after_answer(spent, "not_yet", nil, ~U[2031-06-11 18:00:00Z], @hours) ==
+      assert Lifecycle.after_answer(spent, "not_yet", %{}, ~U[2031-06-11 18:00:00Z], @hours) ==
                {:ok,
                 %{state: "open", last_answer: "not_yet", next_touch_at: ~U[2031-06-12 16:00:00Z]}}
     end
@@ -399,39 +459,45 @@ defmodule FermixCore.OpenLoops.LifecycleTest do
       due = medium(%{state: "due", next_touch_at: ~U[2031-06-07 13:00:00Z]})
 
       assert {:ok, %{touches: 1, state: "asked", last_touch_rung: 1, last_touch_at: ^now}} =
-               Lifecycle.after_answer(due, "asked", nil, now, @hours)
+               Lifecycle.after_answer(due, "asked", %{}, now, @hours)
     end
 
     test "asked is refused on an asked row and once the touches are spent",
          %{asked: asked, now: now} do
-      assert Lifecycle.after_answer(asked, "asked", nil, now, @hours) == {:error, :already_asked}
+      assert Lifecycle.after_answer(asked, "asked", %{}, now, @hours) == {:error, :already_asked}
 
       spent =
         Map.merge(asked, %{
-          state: "open",
+          state: "due",
           touches: 3,
           last_touch_at: ~U[2031-06-11 16:00:00Z],
           next_touch_at: ~U[2031-06-12 16:00:00Z]
         })
 
-      assert Lifecycle.after_answer(spent, "asked", nil, ~U[2031-06-11 18:00:00Z], @hours) ==
+      assert Lifecycle.after_answer(spent, "asked", %{}, ~U[2031-06-11 18:00:00Z], @hours) ==
                {:error, :already_asked}
+    end
+
+    test "asked is refused unless the loop is due: a raise before its touch is an error" do
+      for loop <- [medium(), waited(), talked(&medium/1), medium(%{state: "open", touches: 1})] do
+        assert Lifecycle.after_answer(loop, "asked", %{}, @now, @hours) == {:error, :not_due}
+      end
     end
 
     test "touches advance only through a touch", %{asked: asked, now: now} do
       for answer <- ~w(done stop drop not_yet) do
-        {:ok, changes} = Lifecycle.after_answer(asked, answer, nil, now, @hours)
+        {:ok, changes} = Lifecycle.after_answer(asked, answer, %{}, now, @hours)
         refute Map.has_key?(changes, :touches), "#{answer} moved the touch count"
       end
 
       {:ok, changes} =
-        Lifecycle.after_answer(asked, "plan", ~U[2031-06-08 22:00:00Z], now, @hours)
+        Lifecycle.after_answer(asked, "plan", %{plan_at: ~U[2031-06-08 22:00:00Z]}, now, @hours)
 
       refute Map.has_key?(changes, :touches)
 
       due = %{asked | state: "due"}
 
-      for outcome <- ~w(silent empty delivery_failed timeout error closed) do
+      for outcome <- ~w(silent empty later delivery_failed timeout error closed) do
         changes = Lifecycle.after_outcome(due, outcome, now, @hours)
         refute Map.has_key?(changes, :touches), "#{outcome} moved the touch count"
       end
@@ -483,6 +549,30 @@ defmodule FermixCore.OpenLoops.LifecycleTest do
                  last_outcome_at: now
                }
       end
+    end
+
+    test "later waits for the next active-hours start, as a failed run's retry does",
+         %{due: due, now: now} do
+      assert Lifecycle.after_outcome(due, "later", now, @hours) == %{
+               state: "open",
+               next_touch_at: ~U[2031-06-08 13:00:00Z],
+               last_outcome: "later",
+               last_outcome_at: now
+             }
+    end
+
+    test "the hand-back waits once for later, then expires" do
+      handback = medium(%{state: "due", touches: 1, next_touch_at: ~U[2031-06-11 13:00:00Z]})
+      handback = %{handback | last_touch_at: ~U[2031-06-07 13:30:00Z]}
+
+      assert %{state: "open", next_touch_at: ~U[2031-06-12 13:00:00Z]} =
+               changes =
+               Lifecycle.after_outcome(handback, "later", ~U[2031-06-11 17:00:00Z], @hours)
+
+      held = Map.merge(handback, %{changes | state: "due"})
+
+      assert %{state: "expired", last_outcome: "later"} =
+               Lifecycle.after_outcome(held, "later", ~U[2031-06-12 17:00:00Z], @hours)
     end
 
     test "a retry is never armed sooner than the five-second floor", %{due: due} do
@@ -543,19 +633,30 @@ defmodule FermixCore.OpenLoops.LifecycleTest do
     end
 
     test "a due loop wakes when its rung 1 window closes, then when its date passes" do
-      due = medium(%{state: "due", next_touch_at: ~U[2031-06-09 13:00:00Z]})
+      due =
+        medium(%{
+          state: "due",
+          next_touch_at: ~U[2031-06-09 13:00:00Z],
+          rung1_until: ~U[2031-06-09 16:00:00Z]
+        })
 
       assert Lifecycle.next_wake(due, ~U[2031-06-09 14:00:00Z]) == ~U[2031-06-09 16:00:00Z]
       assert Lifecycle.next_wake(due, ~U[2031-06-09 17:00:00Z]) == ~U[2031-06-11 04:00:00Z]
     end
 
     test "an imminent due loop wakes when its date passes" do
-      assert Lifecycle.next_wake(imminent(%{state: "due"}), @now) == ~U[2031-06-04 04:00:00Z]
+      due = imminent(%{state: "due", rung1_until: ~U[2031-06-04 04:00:00Z]})
+      assert Lifecycle.next_wake(due, @now) == ~U[2031-06-04 04:00:00Z]
     end
 
     test "a due hand-back wakes when its day of grace ends" do
       handback = medium(%{state: "due", touches: 2, next_touch_at: ~U[2031-06-11 13:00:00Z]})
-      handback = %{handback | last_touch_at: ~U[2031-06-09 13:30:00Z]}
+
+      handback = %{
+        handback
+        | last_touch_at: ~U[2031-06-09 13:30:00Z],
+          rung1_until: ~U[2031-06-11 16:00:00Z]
+      }
 
       assert Lifecycle.next_wake(handback, ~U[2031-06-11 17:00:00Z]) == ~U[2031-06-12 13:00:00Z]
     end
@@ -588,6 +689,550 @@ defmodule FermixCore.OpenLoops.LifecycleTest do
              )
 
       assert Lifecycle.final_touch?(short(%{touches: 1, next_touch_at: ~U[2031-06-04 13:00:00Z]}))
+    end
+  end
+
+  describe "the after class: something waited on or gone through" do
+    test "its one slot is its anchor, and its first touch arms there" do
+      assert Lifecycle.slot_time(waited(), 0, @hours, @now) == {:ok, @anchor}
+      assert Lifecycle.slot_time(waited(), 1, @hours, @now) == :none
+      assert Lifecycle.slot_time(waited(), 0, @hours, @anchor) == :past
+      assert Lifecycle.first_touch_at(waited(), @hours, @now) == {:ok, @anchor}
+    end
+
+    test "it comes due at its anchor: three hours by message, fourteen days kept for conversation" do
+      assert Lifecycle.due_decision(waited(), ~U[2031-06-03 20:59:59Z]) == :not_yet
+      assert Lifecycle.due_decision(waited(), @anchor) == {:due, ~U[2031-06-04 00:00:00Z]}
+
+      assert Lifecycle.due_decision(talked(&waited/1), @anchor) ==
+               {:due, ~U[2031-06-17 21:00:00Z]}
+    end
+
+    test "an unraised touch lapses fourteen days on, whatever the reach" do
+      fortnight = ~U[2031-06-17 21:00:00Z]
+      by_message = waited(%{state: "due", rung1_until: ~U[2031-06-04 00:00:00Z]})
+      assert Lifecycle.due_decision(by_message, ~U[2031-06-17 20:59:59Z]) == :not_yet
+      assert Lifecycle.due_decision(by_message, fortnight) == :expire
+
+      kept = talked(&waited/1, %{state: "due", rung1_until: fortnight})
+      assert Lifecycle.due_decision(kept, ~U[2031-06-17 20:59:59Z]) == :not_yet
+      assert Lifecycle.due_decision(kept, fortnight) == :expire
+
+      # The daemon slept through the whole window.
+      assert Lifecycle.due_decision(waited(), fortnight) == :expire
+    end
+
+    test "a touch waits a day for the answer, and only an answer arms a second" do
+      due = waited(%{state: "due", rung1_until: ~U[2031-06-04 00:00:00Z]})
+      raised_at = ~U[2031-06-03 22:00:00Z]
+
+      assert %{touches: 1, state: "asked", next_touch_at: answer_day} =
+               touched = Lifecycle.after_touch(due, 1, raised_at, @hours)
+
+      assert answer_day == ~U[2031-06-04 22:00:00Z]
+      asked = Map.merge(due, touched)
+      assert Lifecycle.due_decision(asked, answer_day) == :expire
+      assert Lifecycle.next_wake(asked, raised_at) == answer_day
+    end
+
+    test "not yet needs a new ask_after, which arms the second and last touch" do
+      asked =
+        waited(%{
+          state: "asked",
+          touches: 1,
+          last_touch_at: ~U[2031-06-03 22:00:00Z],
+          next_touch_at: ~U[2031-06-04 22:00:00Z]
+        })
+
+      now = ~U[2031-06-04 01:00:00Z]
+      friday = ~U[2031-06-07 13:00:00Z]
+
+      assert Lifecycle.after_answer(asked, "not_yet", %{}, now, @hours) ==
+               {:error, :ask_after_required}
+
+      assert {:ok, changes} =
+               Lifecycle.after_answer(asked, "not_yet", %{ask_after: friday}, now, @hours)
+
+      assert changes == %{state: "open", last_answer: "not_yet", next_touch_at: friday}
+
+      armed = Map.merge(asked, changes)
+      refute Lifecycle.final_touch?(waited())
+      assert Lifecycle.final_touch?(armed)
+      assert Lifecycle.due_decision(armed, friday) == {:due, ~U[2031-06-07 16:00:00Z]}
+
+      second = Lifecycle.after_touch(%{armed | state: "due"}, 1, ~U[2031-06-07 14:00:00Z], @hours)
+      assert %{touches: 2, state: "asked"} = second
+      spent = Map.merge(armed, second)
+
+      assert Lifecycle.after_answer(spent, "asked", %{}, now, @hours) == {:error, :already_asked}
+      assert Lifecycle.due_decision(spent, spent.next_touch_at) == :expire
+    end
+
+    test "both touches used: a plan or a new ask_after is refused, never armed to expire" do
+      spent =
+        waited(%{
+          state: "asked",
+          touches: 2,
+          last_touch_at: ~U[2031-06-07 14:00:00Z],
+          next_touch_at: ~U[2031-06-08 14:00:00Z]
+        })
+
+      now = ~U[2031-06-07 18:00:00Z]
+      later = ~U[2031-06-12 13:00:00Z]
+
+      assert Lifecycle.after_answer(spent, "plan", %{plan_at: later}, now, @hours) ==
+               {:error, :touches_spent}
+
+      assert Lifecycle.after_answer(spent, "not_yet", %{ask_after: later}, now, @hours) ==
+               {:error, :touches_spent}
+    end
+
+    test "a plan arms the next touch, bounded by a year and not by the anchor" do
+      asked = waited(%{state: "asked", touches: 1, next_touch_at: ~U[2031-06-04 22:00:00Z]})
+      now = ~U[2031-06-04 01:00:00Z]
+
+      assert {:ok, %{next_touch_at: ~U[2031-07-20 13:00:00Z], state: "open"}} =
+               Lifecycle.after_answer(
+                 asked,
+                 "plan",
+                 %{plan_at: ~U[2031-07-20 13:00:00Z]},
+                 now,
+                 @hours
+               )
+
+      assert {:ok, %{next_touch_at: ~U[2032-06-03 01:00:00Z]}} =
+               Lifecycle.after_answer(
+                 asked,
+                 "plan",
+                 %{plan_at: ~U[2032-06-03 01:00:00Z]},
+                 now,
+                 @hours
+               )
+
+      assert Lifecycle.after_answer(
+               asked,
+               "plan",
+               %{plan_at: ~U[2032-06-03 01:00:01Z]},
+               now,
+               @hours
+             ) ==
+               {:error, :plan_too_far}
+
+      assert Lifecycle.after_answer(asked, "plan", %{plan_at: now}, now, @hours) ==
+               {:error, :plan_passed}
+    end
+
+    test "it has no date to move, and moved is refused" do
+      assert Lifecycle.after_answer(
+               waited(),
+               "moved",
+               %{anchor: %{matters_by_at: @anchor}},
+               @now,
+               @hours
+             ) ==
+               {:error, :moved_on_after_loop}
+    end
+
+    test "a check-in that does not speak ends it; a failed one retries once" do
+      due = waited(%{state: "due", rung1_until: ~U[2031-06-04 00:00:00Z]})
+      first = ~U[2031-06-04 13:30:00Z]
+
+      for outcome <- ~w(silent empty) do
+        assert %{state: "expired", last_outcome: ^outcome} =
+                 Lifecycle.after_outcome(due, outcome, first, @hours)
+      end
+
+      assert %{state: "open", next_touch_at: ~U[2031-06-05 13:00:00Z]} =
+               retry = Lifecycle.after_outcome(due, "delivery_failed", first, @hours)
+
+      retried = Map.merge(due, %{retry | state: "due"})
+
+      assert %{state: "expired", last_outcome: "timeout"} =
+               Lifecycle.after_outcome(retried, "timeout", ~U[2031-06-05 13:30:00Z], @hours)
+    end
+
+    test "later waits once for the next active-hours start; another later or a failure ends it" do
+      due = waited(%{state: "due", rung1_until: ~U[2031-06-04 00:00:00Z]})
+      first = ~U[2031-06-04 13:30:00Z]
+
+      assert %{state: "open", next_touch_at: ~U[2031-06-05 13:00:00Z], last_outcome: "later"} =
+               waiting = Lifecycle.after_outcome(due, "later", first, @hours)
+
+      again = Map.merge(due, %{waiting | state: "due"})
+
+      for outcome <- ~w(later delivery_failed) do
+        assert %{state: "expired", last_outcome: ^outcome} =
+                 Lifecycle.after_outcome(again, outcome, ~U[2031-06-05 13:30:00Z], @hours)
+      end
+    end
+
+    test "a touch re-armed before its anchor retries once, as a hand-back does" do
+      before_anchor = ~U[2031-06-03 14:00:00Z]
+
+      {:ok, planned} =
+        Lifecycle.after_answer(waited(), "plan", %{plan_at: before_anchor}, @now, @hours)
+
+      due = Map.merge(waited(), %{planned | state: "due"})
+
+      assert %{state: "open"} =
+               first = Lifecycle.after_outcome(due, "delivery_failed", before_anchor, @hours)
+
+      retried = Map.merge(due, %{first | state: "due"})
+
+      assert %{state: "expired"} =
+               Lifecycle.after_outcome(retried, "timeout", ~U[2031-06-04 13:30:00Z], @hours)
+    end
+
+    test "a not yet after a failed attempt gives the re-armed touch its own retry" do
+      due = waited(%{state: "due", rung1_until: ~U[2031-06-04 00:00:00Z]})
+      failed = Lifecycle.after_outcome(due, "delivery_failed", ~U[2031-06-04 13:30:00Z], @hours)
+      waiting = Map.merge(due, failed)
+      friday = ~U[2031-06-07 13:00:00Z]
+      answered_at = ~U[2031-06-04 15:00:00Z]
+
+      {:ok, rearmed} =
+        Lifecycle.after_answer(waiting, "not_yet", %{ask_after: friday}, answered_at, @hours)
+
+      armed = Map.merge(waiting, %{rearmed | state: "due"})
+
+      assert %{state: "open"} =
+               retry = Lifecycle.after_outcome(armed, "delivery_failed", friday, @hours)
+
+      again = Map.merge(armed, %{retry | state: "due"})
+
+      assert %{state: "expired"} =
+               Lifecycle.after_outcome(again, "error", ~U[2031-06-08 13:30:00Z], @hours)
+    end
+
+    test "a due loop waited on wakes when its window closes, then when its touch lapses" do
+      due = waited(%{state: "due", rung1_until: ~U[2031-06-04 00:00:00Z]})
+      assert Lifecycle.next_wake(due, ~U[2031-06-03 22:00:00Z]) == ~U[2031-06-04 00:00:00Z]
+      assert Lifecycle.next_wake(due, ~U[2031-06-04 01:00:00Z]) == ~U[2031-06-17 21:00:00Z]
+    end
+  end
+
+  describe "reach conversation: raised only in a conversation the owner starts" do
+    test "its windows run from slot to slot, then to the date" do
+      first = talked(&medium/1, %{next_touch_at: ~U[2031-06-07 13:00:00Z]})
+
+      assert Lifecycle.due_decision(first, ~U[2031-06-07 13:00:00Z]) ==
+               {:due, ~U[2031-06-09 13:00:00Z]}
+
+      last = talked(&medium/1, %{next_touch_at: ~U[2031-06-09 13:00:00Z]})
+
+      assert Lifecycle.due_decision(last, ~U[2031-06-09 13:00:00Z]) ==
+               {:due, date_passed_at(~D[2031-06-10])}
+
+      only = talked(&short/1, %{next_touch_at: ~U[2031-06-03 13:00:00Z]})
+
+      assert Lifecycle.due_decision(only, ~U[2031-06-03 13:00:00Z]) ==
+               {:due, date_passed_at(~D[2031-06-04])}
+
+      # A slot is read at the default start inside the writer; a touch armed at
+      # the owner's later start still closes at the next day's slot.
+      late = talked(&medium/1, %{next_touch_at: ~U[2031-06-07 15:00:00Z]})
+
+      assert Lifecycle.due_decision(late, ~U[2031-06-07 15:00:00Z]) ==
+               {:due, ~U[2031-06-09 13:00:00Z]}
+    end
+
+    test "a window that closes unraised opens the next, and the date ends the last" do
+      due =
+        talked(&medium/1, %{
+          state: "due",
+          next_touch_at: ~U[2031-06-07 13:00:00Z],
+          rung1_until: ~U[2031-06-09 13:00:00Z]
+        })
+
+      assert Lifecycle.due_decision(due, ~U[2031-06-09 12:59:59Z]) == :not_yet
+      m = date_passed_at(~D[2031-06-10])
+
+      assert Lifecycle.due_decision(due, ~U[2031-06-09 13:00:00Z]) ==
+               {:lapse, ~U[2031-06-09 13:00:00Z], m}
+
+      lapsed = %{due | next_touch_at: ~U[2031-06-09 13:00:00Z], rung1_until: m}
+      assert Lifecycle.next_wake(lapsed, ~U[2031-06-09 14:00:00Z]) == m
+      assert Lifecycle.due_decision(lapsed, m) == :expire
+
+      # Raised once and never again: still no hand-back.
+      assert Lifecycle.due_decision(%{lapsed | touches: 1}, m) == :expire
+    end
+
+    test "it never gets a rung 2 check-in" do
+      due = talked(&medium/1, %{state: "due", rung1_until: ~U[2031-06-09 13:00:00Z]})
+
+      assert Lifecycle.rung2_eligible?(due, ~U[2031-06-10 14:00:00Z], @hours, false) ==
+               {:skip, :conversation}
+
+      assert Lifecycle.rung2_eligible?(
+               talked(&waited/1, %{state: "due"}),
+               ~U[2031-06-10 14:00:00Z],
+               @hours,
+               false
+             ) ==
+               {:skip, :conversation}
+    end
+
+    test "after its last slot it rests until the date and its answer day have passed, then expires" do
+      # Slot 0's window closed unraised; the owner is asked in slot 1's.
+      due =
+        talked(&long/1, %{
+          state: "due",
+          next_touch_at: ~U[2031-06-19 13:00:00Z],
+          rung1_until: date_passed_at(~D[2031-06-20])
+        })
+
+      raised_at = ~U[2031-06-19 14:00:00Z]
+      touched = Lifecycle.after_touch(due, 1, raised_at, @hours)
+      assert %{touches: 1, next_touch_at: rest} = touched
+      assert rest == date_passed_at(~D[2031-06-20])
+
+      resting = Map.merge(due, touched)
+      assert Lifecycle.due_decision(resting, ~U[2031-06-21 03:59:59Z]) == :not_yet
+      assert Lifecycle.due_decision(resting, rest) == :expire
+
+      # Raised on the date's own evening: the day to answer outlasts the date.
+      late = Lifecycle.after_touch(due, 1, ~U[2031-06-20 22:00:00Z], @hours)
+      assert late.next_touch_at == ~U[2031-06-21 22:00:00Z]
+    end
+
+    test "a raise on the next slot's day, before that slot's time, never re-arms it (OL-3)" do
+      due =
+        talked(&medium/1, %{
+          state: "due",
+          next_touch_at: ~U[2031-06-07 13:00:00Z],
+          rung1_until: ~U[2031-06-09 13:00:00Z]
+        })
+
+      # 08:00 EDT on the 9th: still the first window, an hour before the 9th's slot.
+      touched = Lifecycle.after_touch(due, 1, ~U[2031-06-09 12:00:00Z], @hours)
+      assert touched.next_touch_at == date_passed_at(~D[2031-06-10])
+    end
+
+    test "after a lapse, a raise before the owner's own start never re-arms that slot (OL-3)" do
+      lapsed =
+        talked(&medium/1, %{
+          state: "due",
+          next_touch_at: ~U[2031-06-09 13:00:00Z],
+          rung1_until: date_passed_at(~D[2031-06-10])
+        })
+
+      # 10:00 EDT; the owner's hours start at 11:00, so the 9th's slot is still ahead.
+      touched = Lifecycle.after_touch(lapsed, 1, ~U[2031-06-09 14:00:00Z], @late_hours)
+      assert touched.next_touch_at == date_passed_at(~D[2031-06-10])
+    end
+
+    test "a not yet with no slot left rests the loop too" do
+      asked =
+        talked(&long/1, %{
+          state: "asked",
+          touches: 1,
+          next_touch_at: date_passed_at(~D[2031-06-20])
+        })
+
+      now = ~U[2031-06-19 18:00:00Z]
+
+      assert {:ok, %{next_touch_at: next}} =
+               Lifecycle.after_answer(asked, "not_yet", %{}, now, @hours)
+
+      assert next == date_passed_at(~D[2031-06-20])
+    end
+  end
+
+  describe "moved: a dated loop's new date" do
+    setup do
+      asked =
+        medium(%{
+          state: "asked",
+          touches: 1,
+          next_touch_at: ~U[2031-06-09 13:00:00Z],
+          last_touch_at: ~U[2031-06-07 13:30:00Z],
+          last_touch_rung: 1
+        })
+
+      %{asked: asked, now: ~U[2031-06-08 14:00:00Z]}
+    end
+
+    defp anchor(at, kind \\ "datetime", source \\ "owner") do
+      local = DateTime.shift_zone!(at, @tz)
+
+      %{
+        matters_by_kind: kind,
+        matters_by_date: DateTime.to_date(local),
+        matters_by_time: if(kind == "datetime", do: DateTime.to_time(local)),
+        matters_by_at: at,
+        matters_by_source: source
+      }
+    end
+
+    test "it re-derives the class, keeps the touches, and arms the next slot still ahead",
+         %{asked: asked, now: now} do
+      new = anchor(~U[2031-06-24 16:00:00Z], "datetime", "lookup")
+
+      assert {:ok, changes} = Lifecycle.after_answer(asked, "moved", %{anchor: new}, now, @hours)
+
+      assert changes ==
+               Map.merge(new, %{
+                 horizon_class: "long",
+                 state: "open",
+                 last_answer: "moved",
+                 next_touch_at: ~U[2031-06-23 13:00:00Z]
+               })
+
+      refute Map.has_key?(changes, :touches)
+      moved = Map.merge(asked, changes)
+
+      assert Lifecycle.due_decision(moved, ~U[2031-06-23 13:00:00Z]) ==
+               {:due, ~U[2031-06-23 16:00:00Z]}
+    end
+
+    test "a date under two days is imminent and raised three hours on", %{asked: asked, now: now} do
+      fresh = %{asked | touches: 0, state: "open"}
+
+      assert {:ok, changes} =
+               Lifecycle.after_answer(
+                 fresh,
+                 "moved",
+                 %{anchor: anchor(~U[2031-06-09 22:00:00Z])},
+                 now,
+                 @hours
+               )
+
+      assert %{horizon_class: "imminent", next_touch_at: ~U[2031-06-08 17:00:00Z]} = changes
+    end
+
+    # Touches that already fill the new table leave no slot: the loop rests
+    # until the new date's hand-back, or the date itself when its class and
+    # reach have none, and expires there, never before the date the owner gave.
+    test "with no slot of the new table left, it rests until the new date and expires there",
+         %{asked: asked, now: now} do
+      for {loop, new_date, rest} <- [
+            # short, two slots: the hand-back, the day after June 11
+            {%{asked | touches: 2}, ~U[2031-06-11 16:00:00Z], ~U[2031-06-12 13:00:00Z]},
+            # long, three slots: the hand-back, the day after June 24
+            {%{asked | touches: 3}, ~U[2031-06-24 16:00:00Z], ~U[2031-06-25 13:00:00Z]},
+            # imminent, one slot and no hand-back: the date
+            {asked, ~U[2031-06-09 20:00:00Z], ~U[2031-06-09 20:00:00Z]},
+            # medium kept for conversation, two slots and no hand-back: the date
+            {%{asked | touches: 2, reach: "conversation"}, ~U[2031-06-14 16:00:00Z],
+             ~U[2031-06-14 16:00:00Z]}
+          ] do
+        assert {:ok, changes} =
+                 Lifecycle.after_answer(loop, "moved", %{anchor: anchor(new_date)}, now, @hours)
+
+        assert changes.next_touch_at == rest, inspect(changes)
+        moved = Map.merge(loop, changes)
+
+        assert Lifecycle.due_decision(moved, DateTime.add(now, 24 * 3_600)) == :not_yet
+        assert Lifecycle.due_decision(moved, DateTime.add(new_date, -1)) == :not_yet
+        assert Lifecycle.due_decision(moved, rest) == :expire
+      end
+    end
+
+    test "a date passed, or under three hours away, is refused as capture refuses it",
+         %{asked: asked, now: now} do
+      assert Lifecycle.after_answer(asked, "moved", %{anchor: anchor(now)}, now, @hours) ==
+               {:error, :date_passed}
+
+      assert Lifecycle.after_answer(
+               asked,
+               "moved",
+               %{anchor: anchor(~U[2031-06-08 17:00:00Z])},
+               now,
+               @hours
+             ) ==
+               {:error, :imminent_without_window}
+
+      assert Lifecycle.after_answer(asked, "moved", %{}, now, @hours) ==
+               {:error, :moved_requires_date}
+    end
+  end
+
+  describe "reach: how it may be raised from now on" do
+    test "a loop not due changes its reach and nothing else" do
+      assert Lifecycle.after_answer(medium(), "reach", %{reach: "conversation"}, @now, @hours) ==
+               {:ok, %{reach: "conversation"}}
+
+      asked = waited(%{state: "asked", touches: 1, next_touch_at: ~U[2031-06-04 22:00:00Z]})
+
+      assert Lifecycle.after_answer(asked, "reach", %{reach: "conversation"}, @now, @hours) ==
+               {:ok, %{reach: "conversation"}}
+    end
+
+    test "a due loop's window is recomputed under the new reach" do
+      due =
+        medium(%{
+          state: "due",
+          next_touch_at: ~U[2031-06-07 13:00:00Z],
+          rung1_until: ~U[2031-06-07 16:00:00Z]
+        })
+
+      now = ~U[2031-06-07 18:00:00Z]
+
+      assert {:ok, %{reach: "conversation", rung1_until: ~U[2031-06-09 13:00:00Z]} = quiet} =
+               Lifecycle.after_answer(due, "reach", %{reach: "conversation"}, now, @hours)
+
+      kept = Map.merge(due, quiet)
+      assert Lifecycle.rung2_eligible?(kept, now, @hours, false) == {:skip, :conversation}
+
+      assert {:ok, %{reach: "message", rung1_until: ~U[2031-06-07 21:00:00Z]}} =
+               Lifecycle.after_answer(kept, "reach", %{reach: "message"}, now, @hours)
+    end
+
+    test "a pending hand-back under conversation expires when it arrives" do
+      handback =
+        medium(%{
+          touches: 1,
+          next_touch_at: ~U[2031-06-11 13:00:00Z],
+          last_touch_at: ~U[2031-06-07 13:30:00Z]
+        })
+
+      {:ok, changes} =
+        Lifecycle.after_answer(handback, "reach", %{reach: "conversation"}, @now, @hours)
+
+      assert Lifecycle.due_decision(Map.merge(handback, changes), ~U[2031-06-11 13:00:00Z]) ==
+               :expire
+    end
+
+    test "reach needs a reach the vocabulary knows" do
+      assert Lifecycle.after_answer(medium(), "reach", %{}, @now, @hours) ==
+               {:error, {:missing_parameters, [:reach]}}
+
+      assert Lifecycle.after_answer(medium(), "reach", %{reach: "email"}, @now, @hours) ==
+               {:error, {:invalid_param, :reach}}
+    end
+  end
+
+  describe "an answer's arguments" do
+    test "each goes only with its own answer" do
+      at = ~U[2031-06-08 22:00:00Z]
+
+      assert Lifecycle.after_answer(waited(), "plan", %{ask_after: at}, @now, @hours) ==
+               {:error, :ask_after_without_not_yet}
+
+      assert Lifecycle.after_answer(
+               medium(),
+               "done",
+               %{anchor: %{matters_by_at: at}},
+               @now,
+               @hours
+             ) ==
+               {:error, :matters_by_without_moved}
+
+      assert Lifecycle.after_answer(medium(), "not_yet", %{reach: "message"}, @now, @hours) ==
+               {:error, :reach_without_reach_answer}
+
+      assert Lifecycle.after_answer(medium(), "not_yet", %{ask_after: at}, @now, @hours) ==
+               {:error, :ask_after_on_dated_loop}
+
+      assert {:ok, %{state: "closed"}} =
+               Lifecycle.after_answer(
+                 medium(),
+                 "done",
+                 %{plan_at: nil, ask_after: nil, anchor: nil, reach: nil},
+                 @now,
+                 @hours
+               )
     end
   end
 

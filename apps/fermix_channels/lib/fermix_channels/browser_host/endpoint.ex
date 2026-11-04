@@ -32,6 +32,7 @@ defmodule FermixChannels.BrowserHost.Endpoint do
   alias FermixCore.BrowserHost.Protocol
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.SocketPath
+  alias FermixCore.SocketPeer
 
   @accept_idle_ms 50
   @accept_retry_ms 1_000
@@ -73,7 +74,7 @@ defmodule FermixChannels.BrowserHost.Endpoint do
     case :gen_tcp.accept(state.listen_socket, @accept_idle_ms) do
       {:ok, socket} ->
         send(self(), :accept)
-        {:noreply, accept_connection(socket, state)}
+        {:noreply, serve_admitted(socket, state)}
 
       {:error, :timeout} ->
         send(self(), :accept)
@@ -109,7 +110,9 @@ defmodule FermixChannels.BrowserHost.Endpoint do
       connection_opts: Keyword.get(opts, :connection_opts, []),
       host_availability: Keyword.get(opts, :host_availability, HostAvailability),
       connection: nil,
-      next_connection_id: 1
+      next_connection_id: 1,
+      # Whether this socket answers a peer at all (`SocketPeer.admit/2`).
+      peer_gate: Keyword.get(opts, :peer_gate, &SocketPeer.admit/1)
     }
   end
 
@@ -203,6 +206,19 @@ defmodule FermixChannels.BrowserHost.Endpoint do
       :ok -> :ok
       {:error, :enoent} -> :ok
       {:error, reason} -> {:error, {:stale_socket_unlink_failed, reason, path}}
+    end
+  end
+
+  # A command Fermix confines gets no answer here: it never attaches as the
+  # browser host.
+  defp serve_admitted(socket, state) do
+    case state.peer_gate.(socket) do
+      :ok ->
+        accept_connection(socket, state)
+
+      {:error, reason} ->
+        :ok = SocketPeer.refuse(socket, state.socket_path, reason)
+        state
     end
   end
 

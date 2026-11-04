@@ -15,6 +15,18 @@ defmodule FermixCore.Capabilities.AdvertisementTest do
   alias FermixTestSupport.LazyTool
   alias FermixTestSupport.LazyTool.Unloader
 
+  # A tool whose description is refreshed per turn, like its schema: what it can
+  # do is only known once the daemon is running (computer use reads it from the
+  # installed helper, M86 F1), while its registered description was read at boot.
+  defmodule DescribedTool do
+    @spec dynamic_description(map()) :: String.t()
+    def dynamic_description(context) when is_map(context),
+      do: "Refreshed for #{Map.get(context, :reader, "nobody")}."
+
+    @spec execute(map(), map()) :: {:ok, map()}
+    def execute(_args, _context), do: {:ok, %{success: true, output: "unused"}}
+  end
+
   setup do
     on_exit(&Unloader.reload!/0)
     :ok
@@ -62,5 +74,20 @@ defmodule FermixCore.Capabilities.AdvertisementTest do
     # `Kernel` stands in for any module without the optional callbacks: the gate
     # is opt-in, so a tool that declares neither hook is untouched.
     assert names([capability(Kernel)], %{}) == ["lazy_tool"]
+  end
+
+  test "a module's dynamic_description/1 replaces the registered description for the turn" do
+    assert [advertised] = Advertisement.prepare([capability(DescribedTool)], %{reader: "main"})
+
+    assert advertised.description == "Refreshed for main."
+    assert advertised.parameters == capability(DescribedTool).parameters
+  end
+
+  test "a module without dynamic_description/1 keeps the description it registered" do
+    assert [advertised] = Advertisement.prepare([capability(Kernel)], %{})
+    assert advertised.description == "A gated tool double."
+
+    assert [lazy] = Advertisement.prepare([capability(LazyTool)], %{lazy_tool_allowed?: true})
+    assert lazy.description == "A gated tool double."
   end
 end

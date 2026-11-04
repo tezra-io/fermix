@@ -316,7 +316,7 @@ defmodule FermixCore.ComputerUse.PortDriverTest do
     # `present` first, always: the control still answers, and here is its state.
     assert after_press == %{
              "present" => true,
-             "role" => "AXButton",
+             "role" => "button",
              "label" => "Save",
              "enabled" => true
            }
@@ -410,7 +410,10 @@ defmodule FermixCore.ComputerUse.PortDriverTest do
     assert reply["truncated"] == "nodes"
     assert first["element_ref"] == "e1"
     assert first["label"] == "Save"
-    assert first["actions"] == ["press"]
+    # Protocol 12: the verbs this control has a route for, under a normalised role.
+    assert first["verbs"] == ["press", "focus"]
+    assert first["role"] == "button"
+    assert first["native_role"] == "AXButton"
     assert Enum.any?(elements, &(&1["enabled"] == false)), "a disabled control is still listed"
 
     assert :ok = PortDriver.stop(state)

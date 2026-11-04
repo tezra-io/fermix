@@ -515,6 +515,10 @@ defmodule FermixChannels.Voice.Bridge do
           persist?: persist?
         }
       },
+      # What the call's earlier hand-offs read: the voice model heard their
+      # replies, so this one starts from them, as a request re-run after
+      # `/confirm` starts from what its parked turn read.
+      resumed_sources: Map.fetch!(request, :outside_sources),
       inbound_attachments: screen_frame(request)
     })
   end

@@ -28,6 +28,7 @@ defmodule FermixChannels.Mobile.SocketHandlerContractTest do
     assert {:ok, socket} =
              init_socket(
                gateway_keypair: gateway,
+               primary_epoch: 1,
                device_store: :device_store,
                device_registry: registry,
                find_device: fn :device_store, remote_static ->
@@ -111,6 +112,7 @@ defmodule FermixChannels.Mobile.SocketHandlerContractTest do
     assert {:ok, socket} =
              init_socket(
                gateway_keypair: gateway,
+               primary_epoch: 1,
                device_registry: registry,
                pair_manager: pair_manager,
                update_device: fn _store, @new_device_id, %{last_seen: %DateTime{}} ->
@@ -342,7 +344,8 @@ defmodule FermixChannels.Mobile.SocketHandlerContractTest do
       "candidates" => [],
       "history_head_seq" => 73,
       "read_up_to_seq" => 71,
-      "caps" => %{"commands" => [], "media" => true, "streaming" => true}
+      "caps" => %{"commands" => [], "media" => true, "streaming" => true},
+      "primary_epoch" => 1
     }
   end
 

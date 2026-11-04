@@ -1,4 +1,5 @@
-{"type":"client_hello","protocol_version":4}
+{"type":"client_hello","protocol_version":7}
+{"type":"client_hello","protocol_version":7,"primary_epoch":2}
 {"type":"msg","client_msg_id":"mac-1","profile_id":"main","text":"What is on my calendar today?","attach_ids":[]}
 {"type":"command","client_msg_id":"mac-2","profile_id":"main","name":"confirm","args":"opaque-token"}
 {"type":"cancel","profile_id":"main","client_msg_id":"mac-3"}
@@ -12,3 +13,29 @@
 {"type":"media_release","profile_id":"main","ref":"9879f6d3c9efefe8c4f4aabe9d3269762264be52794e96f62ab8ffa53b7fadec"}
 {"type":"proposal_answer","client_msg_id":"mac-10","profile_id":"main","proposal_id":"cpr_4f1c2a9b7e3d5a60c8b1f2e3","decision":"confirm"}
 {"type":"proposal_answer","client_msg_id":"mac-11","profile_id":"main","proposal_id":"cpr_9a0b1c2d3e4f5a6b7c8d9e0f","decision":"deny"}
+{"type":"checklists_pull","profile_id":"main"}
+{"type":"checklist_pull","profile_id":"main","list_id":"ck_4q8m2x7v1d"}
+{"type":"checklist_pull","profile_id":"main","list_id":"ck_4q8m2x7v1d","removed":true}
+{"type":"checklist_edit","client_msg_id":"mac-20","profile_id":"main","op":{"op":"create","title":"Packing","folder":"Trips"}}
+{"type":"checklist_edit","client_msg_id":"mac-21","profile_id":"main","list_id":"ck_4q8m2x7v1d","op":{"op":"add","text":"Lemons","note":"The unwaxed ones","section_id":"ci_5w7p0t4n6b"}}
+{"type":"checklist_edit","client_msg_id":"mac-22","profile_id":"main","list_id":"ck_4q8m2x7v1d","op":{"op":"add","text":"Bread","after_id":"ci_8f3k2m9q1x"}}
+{"type":"checklist_edit","client_msg_id":"mac-23","profile_id":"main","list_id":"ck_4q8m2x7v1d","op":{"op":"check","row_id":"ci_3h9d1v8r2k"}}
+{"type":"checklist_edit","client_msg_id":"mac-24","profile_id":"main","list_id":"ck_4q8m2x7v1d","op":{"op":"uncheck","row_id":"ci_3h9d1v8r2k"}}
+{"type":"checklist_edit","client_msg_id":"mac-25","profile_id":"main","list_id":"ck_4q8m2x7v1d","op":{"op":"edit","row_id":"ci_3h9d1v8r2k","text":"Basil, two bunches","note":""}}
+{"type":"checklist_edit","client_msg_id":"mac-26","profile_id":"main","list_id":"ck_4q8m2x7v1d","op":{"op":"move","row_id":"ci_6j4c7x0m5s","to_list_id":"ck_9t3k6w0p5h"}}
+{"type":"checklist_edit","client_msg_id":"mac-27","profile_id":"main","list_id":"ck_4q8m2x7v1d","op":{"op":"move","row_id":"ci_6j4c7x0m5s","section_id":"ci_5w7p0t4n6b"}}
+{"type":"checklist_edit","client_msg_id":"mac-28","profile_id":"main","list_id":"ck_4q8m2x7v1d","op":{"op":"section","text":"Dairy","after_id":"ci_6j4c7x0m5s"}}
+{"type":"checklist_edit","client_msg_id":"mac-29","profile_id":"main","list_id":"ck_4q8m2x7v1d","op":{"op":"remove","row_id":"ci_6j4c7x0m5s"}}
+{"type":"checklist_edit","client_msg_id":"mac-30","profile_id":"main","list_id":"ck_4q8m2x7v1d","op":{"op":"folder","folder":"Home"}}
+{"type":"checklist_edit","client_msg_id":"mac-31","profile_id":"main","list_id":"ck_4q8m2x7v1d","op":{"op":"folder","folder":""}}
+{"type":"checklist_edit","client_msg_id":"mac-32","profile_id":"main","list_id":"ck_4q8m2x7v1d","op":{"op":"rename","text":"Weekly groceries"}}
+{"type":"checklist_edit","client_msg_id":"mac-33","profile_id":"main","list_id":"ck_4q8m2x7v1d","op":{"op":"clear_done"}}
+{"type":"checklist_edit","client_msg_id":"mac-34","profile_id":"main","list_id":"ck_4q8m2x7v1d","op":{"op":"restore","row_id":"ci_6j4c7x0m5s"}}
+{"type":"checklist_edit","client_msg_id":"mac-35","profile_id":"main","list_id":"ck_2b7n5r8c3j","op":{"op":"restore"}}
+{"type":"checklist_edit","client_msg_id":"mac-36","profile_id":"main","list_id":"ck_2b7n5r8c3j","op":{"op":"restore","title":"Packing, spring"}}
+{"type":"checklist_edit","client_msg_id":"mac-37","profile_id":"main","list_id":"ck_2b7n5r8c3j","op":{"op":"remove_list"}}
+{"type":"proposal_answer","client_msg_id":"mac-12","profile_id":"main","proposal_id":"cft_5d2e8a1c9b4f7e3a6c0d1b2e","decision":"always_allow"}
+{"type":"attach_file","attach_id":"mac-att-7f3a9c","kind":"image","mime":"image/jpeg","size_bytes":183204,"sha256":"5f0d1c3a9e7b4c2d8a6f1e0b3c5d7a9e2f4b6d8c0a1e3f5b7d9c2e4a6f8b0d1c","name":"IMG_0412.jpg"}
+{"type":"attach_file","attach_id":"mac-att-2b81d0","kind":"voice","mime":"audio/mp4","size_bytes":40817,"sha256":"c4e1a7b9d3f5028e6a1c9b7d5f3e1a0c8b6d4f2e0a9c7b5d3f1e8a6c4b2d0f9e"}
+{"type":"msg","client_msg_id":"mac-40","profile_id":"main","text":"What is in this picture?","attach_ids":["mac-att-7f3a9c"]}
+{"type":"msg","client_msg_id":"mac-41","profile_id":"main","text":"","attach_ids":["mac-att-2b81d0"]}

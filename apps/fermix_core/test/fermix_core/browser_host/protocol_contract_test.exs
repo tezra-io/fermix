@@ -260,6 +260,79 @@ defmodule FermixCore.BrowserHost.ProtocolContractTest do
            ) == []
   end
 
+  # The app reads which version a request needs from the export, and the
+  # connection from the module: one table, so an app on 1 is never sent a
+  # request the export says is 2's.
+  test "each request def names the version it needs, as the module does", %{schema: schema} do
+    for type <- Protocol.requests() do
+      assert Map.get(schema["$defs"][type], "x-since", 1) == Protocol.request_since(type),
+             "#{type}'s x-since disagrees with Protocol.request_since/1"
+    end
+
+    assert Protocol.request_since("page.login_for") == 2
+    assert Protocol.request_since("page.sign_in") == 2
+    assert Protocol.request_since("page.act") == 1
+  end
+
+  # A sign-in's two answers are closed and its request names at least one
+  # field, so neither the app nor the engine can widen what a login carries.
+  test "the sign-in frames refuse what protocol 2 does not carry", %{schema: schema} do
+    signed = %{"url" => "https://example.com/", "title" => "Sign in", "filled" => ["password"]}
+    assert schema_errors(signed, ref("page.sign_in.result"), schema) == []
+    assert Protocol.validate_result("page.sign_in", signed) == :ok
+
+    for drift <- [
+          Map.put(signed, "value", "hunter2hunter2"),
+          Map.put(signed, "username", "person@example.com"),
+          %{signed | "filled" => ["password", "username"]},
+          %{signed | "filled" => []}
+        ] do
+      refute schema_errors(drift, ref("page.sign_in.result"), schema) == [], inspect(drift)
+      assert {:error, _} = Protocol.validate_result("page.sign_in", drift), inspect(drift)
+    end
+
+    login = %{"login_site" => "example.com", "username" => "person@example.com"}
+    assert Protocol.validate_result("page.login_for", login) == :ok
+
+    for drift <- [
+          Map.put(login, "password", "hunter2hunter2"),
+          %{login | "login_site" => "Example.com"},
+          %{login | "username" => ""}
+        ] do
+      refute schema_errors(drift, ref("page.login_for.result"), schema) == [], inspect(drift)
+      assert {:error, _} = Protocol.validate_result("page.login_for", drift), inspect(drift)
+    end
+
+    unref = %{
+      "tab_id" => "t1",
+      "site" => "example.com",
+      "login_site" => "example.com",
+      "observe" => false
+    }
+
+    refute schema_errors(
+             Map.merge(unref, %{"id" => 1, "type" => "page.sign_in"}),
+             ref("daemonFrame"),
+             schema
+           ) == []
+
+    assert {:error, {:missing_field, "password_ref"}} =
+             Protocol.encode_request(1, "page.sign_in", unref)
+
+    for site <- ["例え.jp", "Example.com", "example.com:443", String.duplicate("a", 254)] do
+      payload = %{"tab_id" => "t1", "site" => site}
+
+      assert {:error, {:invalid_field, "site"}} =
+               Protocol.encode_request(1, "page.login_for", payload)
+
+      refute schema_errors(
+               Map.merge(payload, %{"id" => 1, "type" => "page.login_for"}),
+               ref("daemonFrame"),
+               schema
+             ) == []
+    end
+  end
+
   test "no exported field accepts an explicit null", %{schema: schema, protocol: protocol} do
     assert null_typed_paths(schema, "#") == []
     assert protocol =~ "never an explicit `null`"
