@@ -810,11 +810,11 @@ EOF
   check "[ \"\$(cat $LOG/tailscale-key.sha256)\" = \"\$(printf '%s' \"\$TS_KEY\" | sha256sum | cut -d' ' -f1)\" ]" \
     "tailscale up read the key from its file"
   check "[ \"\$(cat $LOG/tailscale-key-mode)\" = '600 root:root' ]" "the key file was root's alone"
-  check "[ ! -e \"\$(cat $LOG/tailscale-key-path)\" ] && [ -z \"\$(find /run -maxdepth 1 -name 'fermix-always-on.*')\" ]" \
+  check "[ -s $LOG/tailscale-key-path ] && [ ! -e \"\$(cat $LOG/tailscale-key-path)\" ] && [ -z \"\$(find /run -maxdepth 1 -name 'fermix-always-on.*')\" ]" \
     "the key file and its work directory are gone"
   check "! grep -rqsF -- \"\$TS_KEY\" /run /etc /home /var/log/fermix-test /var/lib/fermix-test $OUT" \
     "the key is in no file, no output and no recorded call"
-  check "! grep -qx TS_AUTHKEY $LOG/env-home-enroll" "fermix home enroll does not have TS_AUTHKEY in its environment"
+  check "[ -f $LOG/env-home-enroll ] && ! grep -qx TS_AUTHKEY $LOG/env-home-enroll" "fermix home enroll does not have TS_AUTHKEY in its environment"
   keyring=/usr/share/keyrings/tailscale-archive-keyring.gpg
   check "[ \"\$(mode_owner $keyring)\" = '644 root:root' ]" "apt's keyring for Tailscale is root's and readable"
   check "[ \"\$(gpg --batch --quiet --show-keys --with-colons $keyring | sed -n '/^pub:/{n;s/^fpr:::::::::\([0-9A-F]*\):.*/\1/p;}')\" = $TAILSCALE_FPR ]" \
@@ -823,8 +823,19 @@ EOF
     "deb [signed-by=$keyring] https://pkgs.tailscale.com/stable/debian trixie main" >/tmp/source.expected
   check "cmp -s /etc/apt/sources.list.d/tailscale.list /tmp/source.expected && [ \"\$(mode_owner /etc/apt/sources.list.d/tailscale.list)\" = '644 root:root' ]" \
     "the apt source names Tailscale's repository and only that keyring"
-  check "/usr/bin/apt-get -qq -o Dir::Etc::SourceList=/etc/apt/sources.list.d/tailscale.list -o Dir::Etc::SourceParts=- -o APT::Get::List-Cleanup=0 --error-on=any update" \
+  # The real apt-get on that one source (an empty parts directory, so only it
+  # is read): it fetches Tailscale's InRelease and reports no warning or
+  # error, which a signature it could not check would be.
+  mkdir -p /tmp/apt-no-parts
+  set +e
+  /usr/bin/apt-get -o Dir::Etc::SourceList=/etc/apt/sources.list.d/tailscale.list \
+    -o Dir::Etc::SourceParts=/tmp/apt-no-parts -o APT::Get::List-Cleanup=0 --error-on=any update \
+    >/tmp/apt-update.out 2>&1
+  apt_status=$?
+  set -e
+  check "[ $apt_status -eq 0 ] && grep -qF 'https://pkgs.tailscale.com/stable/debian trixie InRelease' /tmp/apt-update.out && ! grep -q '^[WE]:' /tmp/apt-update.out" \
     "the real apt-get reads Tailscale's repository through that source, its signature checked with that key"
+  grep -q '^[WE]:' /tmp/apt-update.out && sed 's/^/    /' /tmp/apt-update.out
   check "apt-cache policy tailscale | grep -qF 'https://pkgs.tailscale.com/stable/debian trixie/main'" \
     "and offers Tailscale's own package from it"
   check "contains $OUT '==> This server is on your tailnet at 100.88.12.34'" "it says the server's tailnet address"
@@ -842,7 +853,7 @@ EOF
   check "[ $STATUS -eq 1 ] && [ \"\$(tail -n 1 $ERR)\" = \"fermix always-on: tailscale up did not join this server to your tailnet, so the first boot stops here; its message above says why. A key that is used up, expired or revoked is refused: create a new one and run this again.\" ]" \
     "a tailscale up that fails stops the first boot with one sentence"
   check "grep -q '^tailscale up ' $LOG/calls.log && ! grep -q 'fermix home enroll' $LOG/calls.log" "before enrolling"
-  check "[ ! -e \"\$(cat $LOG/tailscale-key-path)\" ] && ! grep -rqsF -- \"\$TS_KEY\" /run $OUT $ERR" \
+  check "[ -s $LOG/tailscale-key-path ] && [ ! -e \"\$(cat $LOG/tailscale-key-path)\" ] && ! grep -rqsF -- \"\$TS_KEY\" /run $OUT $ERR" \
     "and the key file is gone, the key in no output"
   rm -f "$FIXTURES/tailscale-up-fails"
 }
@@ -895,7 +906,7 @@ case "$SCENARIO" in
   failures) setup_tools; failures ;;
   ubuntu) setup_tools; ubuntu ;;
   updates) setup_tools; updates ;;
-  tailnet) setup_tools curl gpg; tailnet ;;
+  tailnet) setup_tools ca-certificates curl gpg; tailnet ;;
   chromium) chromium ;;
   *)
     echo "unknown scenario $SCENARIO" >&2

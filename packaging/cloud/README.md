@@ -257,7 +257,7 @@ key is in no file, output, command line or environment, and its file is gone.
 
 The containers need Docker with `debian:trixie-slim`, and network inside them
 (they install `nftables` and `shellcheck`, Chromium in its scenario, and
-`curl` and `gpg` in the tailnet scenario). `useradd`, `runuser`, `nft` and
+`ca-certificates`, `curl` and `gpg` in the tailnet scenario). `useradd`, `runuser`, `nft` and
 `apt-config` run for real (`--cap-add NET_ADMIN`, `/run` on a tmpfs);
 `systemctl` (which runs a unit's `ExecStart` for `start` and `restart`),
 `loginctl`, `curl` (the fake installer, which records the release it

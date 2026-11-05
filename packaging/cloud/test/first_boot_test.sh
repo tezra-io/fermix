@@ -15,7 +15,8 @@
 # enabled (the chromium scenario asks the kernel for its Landlock ABI for
 # real), the debian:trixie-slim image, and network inside the containers
 # (apt-get installs nftables and shellcheck, Chromium in its scenario, and
-# curl and gpg in the tailnet scenario, which reads pkgs.tailscale.com).
+# ca-certificates, curl and gpg in the tailnet scenario, which reads
+# pkgs.tailscale.com).
 # Not wired into CI; run it by hand, whole or the host part alone:
 #
 #   sh packaging/cloud/test/first_boot_test.sh

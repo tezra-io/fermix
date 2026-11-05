@@ -439,7 +439,7 @@ the_key_reached_tailscale_up() {
   check "[ \"\$(cat '$STATE/up-key-cksum')\" = \"\$(key_cksum)\" ]" "$1: tailscale up read the key from its file"
   check "[ \"\$(cat '$STATE/up-key-mode')\" = '-rw-------' ]" "$1: the key file is 0600"
   check "! grep -q 'the key file is still there' '$LOG'" "$1: the key file is removed before the next step"
-  check "[ ! -e \"\$(cat '$STATE/up-key-path')\" ]" "$1: the key file is gone once the run ends"
+  check "[ -s '$STATE/up-key-path' ] && [ ! -e \"\$(cat '$STATE/up-key-path')\" ]" "$1: the key file is gone once the run ends"
 }
 
 # -- cases ---------------------------------------------------------------------
@@ -554,7 +554,7 @@ up_fails() {
     "a tailscale up that fails stops the first boot with one sentence (exit $STATUS)"
   [ "$STATUS" -eq 1 ] || sed 's/^/    /' "$OUT" "$ERR"
   check "grep -q '^tailscale up ' '$LOG' && ! grep -q '^step enroll' '$LOG'" "before enrolling"
-  check "[ ! -e \"\$(cat '$STATE/up-key-path')\" ]" "the key file is gone after the failure"
+  check "[ -s '$STATE/up-key-path' ] && [ ! -e \"\$(cat '$STATE/up-key-path')\" ]" "the key file is gone after the failure"
   key_left_nowhere "a failed tailscale up"
 }
 
