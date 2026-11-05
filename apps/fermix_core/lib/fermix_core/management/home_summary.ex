@@ -84,6 +84,21 @@ defmodule FermixCore.Management.HomeSummary do
   are any, the Details `lines` (`Copy.summary_line/3`), and `progress` while
   a move back or a restore runs.
 
+  **Inbound webhooks** (Always On, "Inbound webhooks without a public IP"):
+  on a linked desktop's `on`, `detail.webhooks` holds the Tailscale Funnel
+  mounts the owner runs on the server, `{sentence, mounts, notes}`: the
+  sentence with the one-time policy step (the `funnel` node attribute), each
+  mount's `label` and `command` (`FermixCore.Funnel`'s), WhatsApp's first,
+  then each webhook source's, and the caveats (port 443 carries only these
+  paths, the traffic enters through Tailscale's ingress, Cloudflare Tunnel to
+  the same loopback ports without Tailscale). The values are the server's:
+  the `webhooks` of its own `home.status` (`primary_home`), never this
+  computer's settings. A webhook source's command shows its URL's secret as
+  `<random>`, since `home.status` is read without the owner's decision that
+  hands the URL out. No `webhooks` where the server serves none. The
+  server's own `primary` draws none: its summary rides inside its desktops'
+  `home.status`, where the mounts would pass the protocol's nesting bound.
+
   `notice` is the occurrence the apps raise as a system notification, or
   nil: the server ready (`ready:<candidate>`), the move done
   (`moved:<epoch>`, until the first backup after it), the server out of
@@ -105,6 +120,8 @@ defmodule FermixCore.Management.HomeSummary do
   """
 
   alias FermixCore.Clock
+  alias FermixCore.Cues.Webhook
+  alias FermixCore.Funnel
   alias FermixCore.Home.Candidate
   alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.Move
@@ -537,14 +554,21 @@ defmodule FermixCore.Management.HomeSummary do
   defp no_backup(_facts), do: nil
 
   defp on(facts) do
-    view("on", on_sentence(facts), nil, %{
+    detail = %{
       "server" => on_server(facts),
       "backups" => backups(get_in(facts, [:primary_home, "snapshots"])),
       "copies_bytes" => facts.copies_bytes,
       "disk_used" => get_in(facts, [:primary_home, "disk", "used"]),
       "data" => sentence(:data, facts),
       "actions" => [action(:back_up_now), action(:move_back, %{machine: machine(facts.host_os)})]
-    })
+    }
+
+    view(
+      "on",
+      on_sentence(facts),
+      nil,
+      webhooks(detail, get_in(facts, [:primary_home, "webhooks"]))
+    )
   end
 
   defp on_sentence(%{primary_home: %{"snapshots" => snapshots}} = facts) do
@@ -748,6 +772,47 @@ defmodule FermixCore.Management.HomeSummary do
       at -> old_backup(at, :server_backup_old, facts)
     end
   end
+
+  # -- the webhooks a server serves ------------------------------------------------
+
+  # The Funnel mounts of what the server serves (the `webhooks` of its
+  # `home.status`; absent from an older server's), with the policy step and
+  # the caveats; none when it serves nothing.
+  defp webhooks(detail, served) when served in [nil, []], do: detail
+
+  defp webhooks(detail, served) do
+    Map.put(detail, "webhooks", %{
+      "sentence" => Copy.summary_sentence(:webhooks, %{}),
+      "mounts" => Enum.map(served, &mount/1),
+      "notes" => webhook_notes(served)
+    })
+  end
+
+  defp mount(%{"kind" => "whatsapp", "port" => port}) do
+    command = Funnel.mount_command(Funnel.whatsapp_path(), port)
+    %{"label" => Copy.mount_label(:whatsapp), "command" => command}
+  end
+
+  defp mount(%{"kind" => "cue", "ref" => ref, "port" => port}) do
+    command = Funnel.mount_command(Webhook.placeholder_path(ref), port)
+    %{"label" => Copy.mount_label({:cue, ref}), "command" => command}
+  end
+
+  # Port 443's rule, Tailscale's ingress, the tunnel to the same ports
+  # without Tailscale, and where a webhook source's URL secret goes.
+  defp webhook_notes(served) do
+    ports = served |> Enum.map(&{port_of(&1["kind"]), &1["port"]}) |> Enum.uniq_by(&elem(&1, 0))
+    cues? = Keyword.has_key?(ports, :cues)
+
+    [
+      Copy.summary_sentence(:webhooks_port, %{}),
+      Copy.summary_sentence(:webhooks_ingress, %{}),
+      Copy.summary_sentence(:webhooks_tunnel, %{ports: ports})
+    ] ++ if(cues?, do: [Copy.summary_sentence(:webhooks_random, %{})], else: [])
+  end
+
+  defp port_of("whatsapp"), do: :whatsapp
+  defp port_of("cue"), do: :cues
 
   # -- the server before its move ------------------------------------------------
 

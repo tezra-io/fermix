@@ -206,6 +206,20 @@ will be part of a future release; nothing in this group is in a release yet.
   screen where it stands, instead of reporting success; reading the screen
   alone still succeeds whatever it shows. Every surface reads whether
   Always On is still at it from the screen itself (its `outcome`).
+- **WhatsApp and webhook sources reach Fermix on your Always On server.**
+  Once Fermix runs on your server, Always On on your computer shows the
+  Tailscale Funnel command for each to run on the server, each with Copy:
+  WhatsApp's while WhatsApp is on, and each webhook source's, on the
+  server's own ports. Beside them are the one-time step in your tailnet
+  policy (the funnel node attribute, for `tag:fermix-server`) and what to
+  know first: Funnel publishes everything on the server's port 443, so put
+  only these paths there; the traffic comes in through Tailscale's servers;
+  and without Tailscale, Cloudflare Tunnel to the same ports does the same.
+  A webhook source's command leaves the end of its URL for you to fill in
+  from Cues, since the URL is a secret. Use my own Linux server now also
+  shows the command that joins the server to your tailnet as it is set up
+  (`--tailscale`), which asks for a Tailscale auth key without showing it.
+  Slack, Telegram and Discord need none of this.
 - **A command Fermix started cannot take an Always On step, and no local
   caller can take the server's own.** Every Always On step is the
   owner's decision, refused to a command Fermix runs in words that name the

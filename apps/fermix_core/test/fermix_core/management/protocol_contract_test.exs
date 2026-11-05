@@ -1500,7 +1500,10 @@ defmodule FermixCore.Management.ProtocolContractTest do
           # restore carried here without its values shows it.
           settings_snapshot: fn ->
             %{fermix_core: [providers: [anthropic: [api_key: "@keyring"]]]}
-          end
+          end,
+          # The live channel and cue settings are global: this home serves
+          # no webhook.
+          webhook_settings: fn -> %{whatsapp: [], cues: [], web_port: 4030} end
         ]
       ]
     ]

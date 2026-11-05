@@ -178,12 +178,27 @@ defmodule FermixCore.Management.AlwaysOnTest do
       assert {:ok, %{"result" => result, "summary" => summary}} = press(ctx, "own_server")
       assert_received :enrollment_opened
 
+      version = FermixCore.BuildInfo.product_version()
+
+      # The Tailscale step is optional (design, "Connectivity: iroh only"):
+      # the server asks for its auth key at the terminal without echo, so the
+      # key is on no command line.
       assert result == %{
                "code" => @manual_code,
                "expires_at" => "2031-05-04T12:30:00Z",
                "command" =>
-                 "curl -fsSL https://fermix.ai/always-on | sudo sh -s -- --version " <>
-                   FermixCore.BuildInfo.product_version()
+                 "curl -fsSL https://fermix.ai/always-on | sudo sh -s -- --version " <> version,
+               "tailscale" => %{
+                 "sentence" =>
+                   "Optional: to also join the server to your tailnet, which WhatsApp and " <>
+                     "webhook sources need, run this instead. It asks for the enrollment " <>
+                     "code and then a Tailscale auth key, and shows neither: create the key " <>
+                     "in Tailscale's admin console, tagged tag:fermix-server, one-off and " <>
+                     "pre-approved.",
+                 "command" =>
+                   "curl -fsSL https://fermix.ai/always-on | sudo sh -s -- --version " <>
+                     "#{version} --tailscale"
+               }
              }
 
       refute summary |> Jason.encode!() |> String.contains?(@manual_code)

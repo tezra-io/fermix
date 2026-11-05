@@ -40,6 +40,17 @@ defmodule FermixCore.Management.Home do
   carried here without its value, a locked keychain, a file the store lacks.
   Empty in any other role.
 
+  `webhooks`: on the primary, what it serves on loopback that the internet
+  must reach (Always On, "Inbound webhooks without a public IP"), each
+  `{kind, ref, port}`: `whatsapp` (`ref` null) on the web listener's port
+  while the WhatsApp channel is on, then each enabled cue webhook source with
+  a URL (`cue`, `ref` its name) on the door's port, by name. Whether a source
+  has a URL is its sentinel in the settings, never a read of the secret
+  store, and the URL itself is never here: `cues.sources.url.get` alone
+  hands it out. Empty in any other role, so a linked desktop's summary prints
+  its server's, from `primary_home`, and from a verb with no engine tree
+  (`supervised: false`), since a stopped Fermix serves nothing.
+
   `summary` is where Always On stands in one sentence and at most one action
   (`FermixCore.Management.HomeSummary`, M75 lean v1 §7, Always On setup §3),
   gathered from the rest of this record and, on a desktop, whether Restore
@@ -84,6 +95,9 @@ defmodule FermixCore.Management.Home do
   `FermixCore.Home.Link.impl().status/0`), `:settings_snapshot` (a 0-arity
   reader of the live settings, `ConfigStore.current_snapshot/0`),
   `:disk_usage` (a 1-arity reader of a home's disk, `Home.Disk.usage/2`),
+  `:webhook_settings` (a 0-arity reader of what `webhooks` is read from:
+  `%{whatsapp, cues, web_port}`, the WhatsApp channel's and the cues'
+  applied settings and the web listener's port, `Setup.Endpoint.port/1`),
   `:version`, `:now`, `:host_os`, `:return_boot` (in place of
   `Home.Return.boot_done/0`) and `:stop_return` (in place of the rail's,
   which a desktop's move back the home went past is stopped with); `:jobs`
@@ -99,6 +113,7 @@ defmodule FermixCore.Management.Home do
   """
 
   alias FermixCore.BuildInfo
+  alias FermixCore.Cues.Config, as: CuesConfig
   alias FermixCore.Home.Candidate
   alias FermixCore.Home.Disk
   alias FermixCore.Home.EngineCeiling
@@ -119,6 +134,7 @@ defmodule FermixCore.Management.Home do
   alias FermixCore.Management.Jobs
   alias FermixCore.Management.Placement
   alias FermixCore.Setup.ConfigStore
+  alias FermixCore.Setup.Endpoint
 
   require Logger
 
@@ -246,7 +262,8 @@ defmodule FermixCore.Management.Home do
       secrets_missing: secrets_missing(role, opts),
       disk: disk(home, role, opts),
       version: Keyword.get_lazy(opts, :version, &BuildInfo.product_version/0),
-      update_ceiling: update_ceiling(home, opts)
+      update_ceiling: update_ceiling(home, opts),
+      webhooks: webhooks(role, opts)
     }
 
     summary_status =
@@ -339,6 +356,46 @@ defmodule FermixCore.Management.Home do
     end
   end
 
+  # What the primary serves on loopback that the internet must reach, from
+  # its applied settings; a source's URL is its sentinel, never a store read.
+  # A verb with no engine tree reads a stopped Fermix, which serves nothing.
+  defp webhooks(%{role: :primary}, opts) do
+    if Keyword.get(opts, :supervised, true) do
+      settings = Keyword.get(opts, :webhook_settings, &live_webhook_settings/0).()
+      whatsapp_hook(settings) ++ cue_hooks(settings.cues)
+    else
+      []
+    end
+  end
+
+  defp webhooks(_record, _opts), do: []
+
+  defp whatsapp_hook(%{whatsapp: whatsapp, web_port: port}) when port in 1..65_535 do
+    if Keyword.get(whatsapp, :enabled, false) == true,
+      do: [%{"kind" => "whatsapp", "ref" => nil, "port" => port}],
+      else: []
+  end
+
+  defp cue_hooks(cues) do
+    port = CuesConfig.door_port(cues)
+
+    for %{kind: :webhook, enabled?: true, secrets: %{path_secret: _store}, ref: ref} <-
+          CuesConfig.sources(cues),
+        do: %{"kind" => "cue", "ref" => ref, "port" => port}
+  end
+
+  # The daemon that answers bound the web listener on this port: the
+  # resolver refused its boot otherwise.
+  defp live_webhook_settings do
+    {:ok, web_port} = Endpoint.port()
+
+    %{
+      whatsapp: Application.get_env(:fermix_channels, :whatsapp, []),
+      cues: Application.get_env(:fermix_core, :cues, []),
+      web_port: web_port
+    }
+  end
+
   defp secrets_missing(%{role: :primary}, opts),
     do:
       MoveSecrets.missing(
@@ -369,9 +426,9 @@ defmodule FermixCore.Management.Home do
   the rail's `primary` (or nil) and `desktops` (none when absent),
   `HomeMove.facts/4`'s `enrollment`, `candidates` and `move` (null, none and
   null when absent), a linked desktop's `primary_home` and `primary_missing`
-  (null when absent), the primary's `disk` (null when absent) and the
-  `update_ceiling` (null when absent). Pure, so the CLI's goldens are built
-  from it.
+  (null when absent), the primary's `disk` (null when absent), the
+  `update_ceiling` (null when absent) and the primary's `webhooks` (none when
+  absent). Pure, so the CLI's goldens are built from it.
   """
   @spec picture(%{
           required(:role) => Role.role(),
@@ -389,7 +446,8 @@ defmodule FermixCore.Management.Home do
           optional(:primary_home) => map() | nil,
           optional(:primary_missing) => String.t() | nil,
           optional(:secrets_missing) => [String.t()],
-          optional(:update_ceiling) => String.t() | nil
+          optional(:update_ceiling) => String.t() | nil,
+          optional(:webhooks) => [map()]
         }) :: map()
   def picture(
         %{
@@ -418,7 +476,8 @@ defmodule FermixCore.Management.Home do
       "secrets_missing" => Map.get(facts, :secrets_missing, []),
       "disk" => Map.get(facts, :disk),
       "version" => version,
-      "update_ceiling" => Map.get(facts, :update_ceiling)
+      "update_ceiling" => Map.get(facts, :update_ceiling),
+      "webhooks" => Map.get(facts, :webhooks, [])
     }
   end
 

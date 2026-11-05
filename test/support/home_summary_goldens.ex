@@ -4,8 +4,9 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
   family of the summary's states (M75 lean v1 §7): the computer that sets
   Always On up while its server connects and once it is ready, the server
   before and after its move, and a linked desktop when all is well (Move back
-  among its actions) and when its server stopped answering (Restore here
-  beside it, from the copies the desktop keeps). Each is the record
+  among its actions, and the Tailscale Funnel mounts of what its server
+  serves) and when its server stopped answering (Restore here beside it, from
+  the copies the desktop keeps). Each is the record
   `Management.Home.picture/1`
   builds from invented facts, with the summary `HomeSummary.summary/1`
   answers for the same facts, so a golden can only say what the engine says.
@@ -94,10 +95,20 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
   defp server do
     desktop = %{device_id: "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e", name: "studio-mac"}
 
-    # The server installs the version its desktop runs, at most.
+    # The server installs the version its desktop runs, at most, and serves
+    # WhatsApp and one webhook source, whose Funnel mounts its desktop prints.
     record(
       :primary,
-      %{epoch: 5, snapshots: server_snapshots(), disk: disk(0.42), update_ceiling: "1.2.3"},
+      %{
+        epoch: 5,
+        snapshots: server_snapshots(),
+        disk: disk(0.42),
+        update_ceiling: "1.2.3",
+        webhooks: [
+          %{"kind" => "whatsapp", "ref" => nil, "port" => 4030},
+          %{"kind" => "cue", "ref" => "gh-hooks", "port" => 4032}
+        ]
+      },
       %{
         link:
           link(
@@ -144,7 +155,8 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
           primary_missing: Map.get(extra, :primary_missing),
           secrets_missing: [],
           disk: nil,
-          version: "1.2.3"
+          version: "1.2.3",
+          webhooks: []
         },
         own
       )

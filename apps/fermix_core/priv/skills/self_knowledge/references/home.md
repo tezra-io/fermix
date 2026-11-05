@@ -220,7 +220,12 @@ it, never a second writer.
   https://fermix.ai/always-on | sudo sh -s -- --version X` (X this
   computer's release, which the server installs), which carries no code: the
   server's first boot asks for it on the terminal without echo, so it never
-  lands in a shell history. **Cancel the code** closes it. The code
+  lands in a shell history. Beside it is the optional line that also joins
+  the server to the owner's tailnet, which WhatsApp and webhook sources need:
+  the same command with `--tailscale`, which then asks for a Tailscale auth
+  key the same way (create it in Tailscale's admin console tagged
+  `tag:fermix-server`, one-off and pre-approved). **Cancel the code** closes
+  it. The code
   is `fxenroll1.` and a long string that carries
   a one-time secret, the primary's gateway key, its iroh endpoint id and
   relays, its name and when the window closes. The window lasts thirty
@@ -632,6 +637,26 @@ it, never a second writer.
   computer's copies take and the server's disk. Times are stated in the
   owner's time zone as dates and times, never as ages. Learn more opens the
   Always On docs.
+- **Webhooks on the server.** Slack (Socket Mode), Telegram and Discord need
+  nothing inbound. WhatsApp (Meta's Cloud API) and cue webhook sources do,
+  and the server opens no public port: they reach it through Tailscale
+  Funnel. While Fermix runs on the server, the desktop's Always On screen
+  prints the exact command for each mount, to run on the server: WhatsApp's
+  (`tailscale funnel --bg --set-path=/webhook/whatsapp
+  http://127.0.0.1:<port>/webhook/whatsapp`, the server's web listener port,
+  one mount for Meta's GET check and its POSTs, while WhatsApp is on) and
+  each enabled webhook source's with a URL (`/cues/hooks/<ref>/<random>` on
+  the server's cue door port; `<random>` stands for the last part of the
+  source's URL, which Cues gives, since the screen is a read and the URL is
+  handed out only on the owner's ask). With them: allow Funnel for the
+  server once in the tailnet policy (the `funnel` node attribute, for
+  `tag:fermix-server`); Funnel publishes whatever `tailscale serve` has on
+  port 443, so mount only these paths there; the traffic enters through
+  Tailscale's ingress servers, which see only encrypted bytes; without
+  Tailscale, Cloudflare Tunnel to the same two loopback ports does the same.
+  The ports and the sources are the server's (its `home.status` `webhooks`),
+  never this computer's; a server serving none shows nothing, and the
+  server's own screen shows none (its desktops do). Fermix ships no tunnel.
 - The summary also names the latest occurrence the apps raise as a system
   notification (`notice`): the server ready, the move done, the server out of
   reach, the last backup a week old, and Fermix back on this computer after a
@@ -722,7 +747,8 @@ it, never a second writer.
 | On the primary: the secrets that did not resolve on this host (`secrets_missing`), by id | Secrets to enter again | `fermix home status` |
 | Where snapshots are kept (bucket, region, the S3-compatible address, how often) and the two access keys | Recovery: the `snapshots` section; the keys as hidden fields, never shown again | `fermix settings set snapshots …`, `fermix settings secret set snapshot_s3_access_key_id` |
 | Take a snapshot now (`home.act` `back_up_now`) | **Back up now**, offered once snapshots have somewhere to go | `fermix always-on back-up-now` |
-| An enrollment code for the server (`home.act` `own_server`) | **Use my own Linux server**: the code shown once with **Copy** and when it expires, beside the command for the server, which carries no code; **Cancel the code** closes it | `fermix always-on own-server`, the code printed once under the command; `cancel` closes it |
+| An enrollment code for the server (`home.act` `own_server`) | **Use my own Linux server**: the code shown once with **Copy** and when it expires, beside the command for the server, which carries no code, and the optional `--tailscale` one; **Cancel the code** closes it | `fermix always-on own-server`, the code printed once under both commands; `cancel` closes it |
+| On a linked desktop: the Tailscale Funnel mounts the server's webhooks need (`summary.detail.webhooks`, from the server's `webhooks`) | Each command with **Copy**, its policy step and caveats | `fermix always-on`, each command on a line of its own |
 | The servers waiting for the move | Servers waiting for the move | `fermix home candidates` |
 | Review the move: each item ready, a note or a block | Move now reviews at the press; **Check again** on a block | The same; `fermix always-on check-again` |
 | Start the move (`home.act` `move_now`, `try_again`) | **Move now**, the recovery passphrase asked first | `fermix always-on move-now`, `try-again`: the passphrase asked without echo, or `--recovery-passphrase-file` |

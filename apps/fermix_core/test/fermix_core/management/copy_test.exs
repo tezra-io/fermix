@@ -999,6 +999,25 @@ defmodule FermixCore.Management.CopyTest do
                  FermixCore.BuildInfo.product_version()
 
       refute Copy.own_server_command() =~ "FERMIX_ENROLL_CODE"
+
+      # The optional Tailscale step: the server asks for its auth key at the
+      # terminal without echo, so the key is on no command line.
+      assert Copy.own_server_tailscale_command() ==
+               "curl -fsSL https://fermix.ai/always-on | sudo sh -s -- --version " <>
+                 FermixCore.BuildInfo.product_version() <> " --tailscale"
+
+      refute Copy.own_server_tailscale_command() =~ "TS_AUTHKEY"
+      refute Copy.own_server_tailscale_command() =~ "--ts-authkey"
+    end
+
+    # The Funnel mounts' labels are names, and a webhook source's is its own.
+    test "each Funnel mount is labelled by what it carries" do
+      assert Copy.mount_label(:whatsapp) == "WhatsApp"
+      assert Copy.mount_label({:cue, "gh-hooks"}) == "Webhook source gh-hooks"
+
+      assert Copy.summary_sentence(:webhooks_tunnel, %{ports: [whatsapp: 4030]}) ==
+               "Without Tailscale, run Cloudflare Tunnel to the same loopback port instead: " <>
+                 "4030 for WhatsApp."
     end
 
     test "every key and every action answers its words" do
@@ -1014,7 +1033,8 @@ defmodule FermixCore.Management.CopyTest do
       days: 5,
       percent: 90,
       block: "This home is about 4 GiB; the move needs about 9 GiB free.",
-      stays_here: [:imessage, :voice, :meetings]
+      stays_here: [:imessage, :voice, :meetings],
+      ports: [whatsapp: 4030, cues: 4032]
     }
 
     sentences =
@@ -1037,7 +1057,11 @@ defmodule FermixCore.Management.CopyTest do
         "home.status"
       )
 
-    sentences ++ labels ++ [{"too old", too_old, :prose}]
+    mounts =
+      for mount <- [:whatsapp, {:cue, "gh-hooks"}],
+          do: {"mount #{inspect(mount)}", Copy.mount_label(mount), :name}
+
+    sentences ++ labels ++ mounts ++ [{"too old", too_old, :prose}]
   end
 
   # The older copy the apps and the setup page show (readiness actions and

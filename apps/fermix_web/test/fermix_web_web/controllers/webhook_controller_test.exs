@@ -143,6 +143,19 @@ defmodule FermixWebWeb.WebhookControllerTest do
     end
   end
 
+  # The Always On screen prints a Tailscale Funnel mount for WhatsApp's path
+  # (`FermixCore.Funnel`), and Meta checks it with GET and posts with POST:
+  # one mount carries both, so both must be served at exactly that path.
+  test "the WhatsApp path the Funnel mount names is the one served for GET and POST" do
+    path = FermixCore.Funnel.whatsapp_path()
+
+    assert %{plug: WebhookController, plug_opts: :whatsapp_verify} =
+             Phoenix.Router.route_info(FermixWebWeb.Router, "GET", path, "localhost")
+
+    assert %{plug: WebhookController, plug_opts: :whatsapp} =
+             Phoenix.Router.route_info(FermixWebWeb.Router, "POST", path, "localhost")
+  end
+
   describe "webhook_error_response/3" do
     test "maps unsupported transport errors to invalid webhook responses", %{conn: conn} do
       conn = WebhookController.webhook_error_response(conn, "Discord", :unsupported_transport)

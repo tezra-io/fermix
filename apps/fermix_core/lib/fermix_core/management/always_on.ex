@@ -5,9 +5,10 @@ defmodule FermixCore.Management.AlwaysOn do
   `needs`, asks its `confirm`, and sends the action's id, the key it was
   drawn with and the input (`AlwaysOn.Input`); `act/2` runs the step and
   answers `{summary, result}`: the summary after it, and the step's result
-  (`own_server`: `{code, expires_at, command}`, the code answered once and
-  the command carrying none; `move_now` and `try_again`: `{move_id}`;
-  otherwise null).
+  (`own_server`: `{code, expires_at, command, tailscale}`, the code answered
+  once, the command carrying none, and `tailscale` the optional step that
+  also joins the server to the owner's tailnet, `{sentence, command}`;
+  `move_now` and `try_again`: `{move_id}`; otherwise null).
 
   **One rule for "the owner saw this".** Acts run one at a time per engine,
   in this process, and each reads the summary first: one that does not offer
@@ -24,7 +25,9 @@ defmodule FermixCore.Management.AlwaysOn do
   link as the rail-only methods (`Management.Placement`).
 
     * `own_server`: a code (`HomeMove.enroll_open/1`) for the owner's
-      server, answered with the command that installs Fermix there.
+      server, answered with the command that installs Fermix there and the
+      one that also joins it to the owner's tailnet, with its sentence
+      (`Copy.own_server_tailscale_command/0`).
     * `cancel` on the code's screen: the code is withdrawn.
     * `back_up_now` and `check_again`: run here, or on a linked desktop sent
       as `home.snapshots.run` and `home.move.readiness`.
@@ -319,8 +322,18 @@ defmodule FermixCore.Management.AlwaysOn do
   end
 
   defp own_server(opts) do
-    with {:ok, %{"code" => code, "expires_at" => at}} <- HomeMove.enroll_open(opts),
-         do: {:ok, %{"code" => code, "expires_at" => at, "command" => Copy.own_server_command()}}
+    with {:ok, %{"code" => code, "expires_at" => at}} <- HomeMove.enroll_open(opts) do
+      {:ok,
+       %{
+         "code" => code,
+         "expires_at" => at,
+         "command" => Copy.own_server_command(),
+         "tailscale" => %{
+           "sentence" => Copy.summary_sentence(:own_server_tailscale, %{}),
+           "command" => Copy.own_server_tailscale_command()
+         }
+       }}
+    end
   end
 
   # A step the server takes: here, or over the link on a linked desktop.

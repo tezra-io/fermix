@@ -24,7 +24,8 @@ defmodule Fermix.CLI.AlwaysOnCommand.Render do
 
   @doc """
   The screen: the sentence, the step in hand and the other one-sentence
-  fields, each warning or block of the review, then Details.
+  fields, each warning or block of the review, Details, then the Tailscale
+  Funnel mounts the server needs, each command on a line of its own.
   """
   @spec screen(map()) :: [String.t()]
   def screen(%{"sentence" => sentence} = summary) do
@@ -32,7 +33,15 @@ defmodule Fermix.CLI.AlwaysOnCommand.Render do
 
     [sentence] ++
       Enum.flat_map(@text_fields, &List.wrap(detail[&1])) ++
-      readiness(detail["readiness"] || []) ++ details(detail["lines"] || [])
+      readiness(detail["readiness"] || []) ++
+      details(detail["lines"] || []) ++ webhooks(detail["webhooks"])
+  end
+
+  defp webhooks(nil), do: []
+
+  defp webhooks(%{"sentence" => sentence, "mounts" => mounts, "notes" => notes}) do
+    commands = Enum.flat_map(mounts, &["  #{&1["label"]}:", "    #{&1["command"]}"])
+    [sentence] ++ commands ++ notes
   end
 
   defp readiness(items) do
@@ -77,12 +86,19 @@ defmodule Fermix.CLI.AlwaysOnCommand.Render do
   def menu_prompt(%{"action" => %{"label" => label}}), do: "Step (Enter: #{label}, q: quit): "
   def menu_prompt(_summary), do: "Step (q: quit): "
 
-  @doc "What a step answered beyond its screen: the own-server code, shown this once."
+  @doc """
+  What a step answered beyond its screen: the own-server code, shown this
+  once, under the command and the optional Tailscale step's.
+  """
   @spec result(map() | nil) :: [String.t()]
-  def result(%{"code" => code, "expires_at" => until, "command" => command}) do
+  def result(%{"code" => code, "expires_at" => until, "command" => command} = result) do
+    %{"sentence" => tailscale, "command" => joins} = result["tailscale"]
+
     [
       "On your server, run:",
       "  " <> command,
+      tailscale,
+      "  " <> joins,
       "When it asks for the enrollment code, paste this one. It works once, until #{until}:",
       "  " <> code
     ]

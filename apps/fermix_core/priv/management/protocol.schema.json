@@ -5767,6 +5767,21 @@
           "description": "The Fermix version a server's nightly update installs, in every role: the oldest engine among the desktops this machine served as their primary in the last 30 days, so the home can always move back to one of them; null when none was, or when it cannot be read. Absent from an engine older than it.",
           "type": ["string", "null"],
           "minLength": 1
+        },
+        "webhooks": {
+          "description": "On the primary, what it serves on loopback that the internet must reach: whatsapp (ref null) on the web listener's port while the WhatsApp channel is on, then each enabled cue webhook source with a URL (cue, ref its name) on the cue door's port, by name; never a source's URL. Empty in any other role. Absent from an engine older than it.",
+          "type": "array",
+          "maxItems": 65,
+          "items": {
+            "type": "object",
+            "required": ["kind", "ref", "port"],
+            "additionalProperties": false,
+            "properties": {
+              "kind": { "enum": ["whatsapp", "cue"] },
+              "ref": { "type": ["string", "null"], "pattern": "^[a-z0-9][a-z0-9-]{0,63}$" },
+              "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+            }
+          }
         }
       }
     },
@@ -5818,7 +5833,7 @@
     },
     "homeSummaryDetail": {
       "type": "object",
-      "description": "What Details holds for the state: on connect alternatives; on ready server, readiness and waits_until; on on server, backups, copies_bytes, disk_used, data and actions; on problem kind, note, seen_at and alternatives (readiness where the problem has it); lines on ready, on and problem wherever there are any; progress while a move back or a restore runs.",
+      "description": "What Details holds for the state: on connect alternatives; on ready server, readiness and waits_until; on on server, backups, copies_bytes, disk_used, data and actions; on problem kind, note, seen_at and alternatives (readiness where the problem has it); lines on ready, on and problem wherever there are any; progress while a move back or a restore runs; webhooks on on and primary where the server serves any.",
       "additionalProperties": false,
       "properties": {
         "lines": {
@@ -5858,7 +5873,35 @@
         "data": { "type": "string", "minLength": 1 },
         "kind": { "enum": ["cannot_reach", "not_set_up", "waited_too_long", "update", "disk_full", "backup_old", "not_ready", "return_failed"] },
         "note": { "type": ["string", "null"] },
-        "seen_at": { "type": ["string", "null"] }
+        "seen_at": { "type": ["string", "null"] },
+        "webhooks": {
+          "description": "The Tailscale Funnel mounts the owner runs on the server for what it serves (home.status webhooks: the server's own, never this computer's): the sentence with the one-time policy step, each mount's label and command, WhatsApp's first, and the caveats. A webhook source's command shows its URL's secret as <random>.",
+          "type": "object",
+          "required": ["sentence", "mounts", "notes"],
+          "additionalProperties": false,
+          "properties": {
+            "sentence": { "type": "string", "minLength": 1 },
+            "mounts": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 65,
+              "items": {
+                "type": "object",
+                "required": ["label", "command"],
+                "additionalProperties": false,
+                "properties": {
+                  "label": { "type": "string", "minLength": 1 },
+                  "command": { "type": "string", "pattern": "^tailscale funnel --bg --set-path=/" }
+                }
+              }
+            },
+            "notes": {
+              "type": "array",
+              "maxItems": 4,
+              "items": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
       }
     },
     "homeSummaryServer": {
@@ -6114,7 +6157,7 @@
     },
     "home_act_result": {
       "type": "object",
-      "description": "The summary after the step, and the step's own result: own_server's code (answered once, never again) with the command for the server, which carries no code; move_now's and try_again's move id; null for every other step.",
+      "description": "The summary after the step, and the step's own result: own_server's code (answered once, never again) with the command for the server, which carries no code, and the optional step that also joins the server to the owner's tailnet (tailscale: its sentence and command, the same command with --tailscale, after which the server asks for the code and the Tailscale auth key at the terminal without echo, so the key is on no command line); move_now's and try_again's move id; null for every other step.",
       "required": ["summary", "result"],
       "additionalProperties": false,
       "properties": {
@@ -6123,12 +6166,21 @@
           "oneOf": [
             {
               "type": "object",
-              "required": ["code", "expires_at", "command"],
+              "required": ["code", "expires_at", "command", "tailscale"],
               "additionalProperties": false,
               "properties": {
                 "code": { "type": "string", "maxLength": 2048, "pattern": "^fxenroll1\\.[A-Za-z0-9_-]+$" },
                 "expires_at": { "type": "string" },
-                "command": { "type": "string", "minLength": 1 }
+                "command": { "type": "string", "minLength": 1 },
+                "tailscale": {
+                  "type": "object",
+                  "required": ["sentence", "command"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "sentence": { "type": "string", "minLength": 1 },
+                    "command": { "type": "string", "minLength": 1 }
+                  }
+                }
               }
             },
             {

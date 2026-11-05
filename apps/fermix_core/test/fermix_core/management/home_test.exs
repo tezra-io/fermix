@@ -1,6 +1,7 @@
 defmodule FermixCore.Management.HomeTest do
   use ExUnit.Case, async: true
 
+  alias FermixCore.Cues.Config, as: CuesConfig
   alias FermixCore.Home.Candidate
   alias FermixCore.Home.Candidates
   alias FermixCore.Home.DesktopLink
@@ -182,6 +183,81 @@ defmodule FermixCore.Management.HomeTest do
 
       assert {:ok, %{"update_ceiling" => "0.17.1"}} =
                route("home.status", %{}, opts(home, engine_role: @device))
+    end
+
+    # Always On's inbound webhooks (design, "Inbound webhooks without a public
+    # IP"): the primary names what it serves on loopback that the internet
+    # must reach, from its own settings: WhatsApp when its channel is on, on
+    # the web listener's port, and each enabled webhook source with a URL, on
+    # the door's port. Whether a source has a URL is its sentinel in the
+    # settings, never a read of the secret store.
+    test "the primary names the webhooks it serves, from its own settings", %{home: home} do
+      settings = webhook_settings(whatsapp: [enabled: true], web_port: 4130)
+
+      assert {:ok, status} =
+               route("home.status", %{}, opts(home, webhook_settings: fn -> settings end))
+
+      assert status["webhooks"] == [
+               %{"kind" => "whatsapp", "ref" => nil, "port" => 4130},
+               %{"kind" => "cue", "ref" => "github", "port" => 4532},
+               %{"kind" => "cue", "ref" => "stripe", "port" => 4532}
+             ]
+
+      quiet = webhook_settings(whatsapp: [enabled: false], sources: %{})
+
+      assert {:ok, %{"webhooks" => []}} =
+               route("home.status", %{}, opts(home, webhook_settings: fn -> quiet end))
+    end
+
+    # `fermix home status` with Fermix stopped reads the record with no engine
+    # tree (`supervised: false`): a stopped Fermix serves nothing, and the web
+    # listener's port, which only the running daemon bound, is never resolved.
+    test "a stopped primary serves no webhook, and nothing is read for it", %{home: home} do
+      unread = fn -> flunk("the webhook settings were read with no engine tree") end
+
+      assert {:ok, %{"webhooks" => []}} =
+               route("home.status", %{}, opts(home, supervised: false, webhook_settings: unread))
+    end
+
+    # The values are the server's: a desktop serves none of its own, and its
+    # screen prints the server's, as the server's own `home.status` names them.
+    test "a desktop names none of its own and prints its server's", %{home: home} do
+      :ok = DesktopLink.write(home, desktop_link())
+      :ok = Moved.write(home, %{epoch: 4, moved_at: @at, to: "invented-vm"})
+      mac = webhook_settings(whatsapp: [enabled: true], web_port: 4030)
+
+      server_part = %{
+        "role" => "primary",
+        "version" => "9.9.8",
+        "snapshots" => %{"targets" => []},
+        "webhooks" => [%{"kind" => "whatsapp", "ref" => nil, "port" => 4130}]
+      }
+
+      forward = fn _request, _opts -> {:ok, server_part} end
+
+      assert {:ok, status} =
+               route(
+                 "home.status",
+                 %{},
+                 opts(home,
+                   engine_role: @device,
+                   link_status: link(primary: primary(nil)),
+                   webhook_settings: fn -> mac end
+                 )
+                 |> Keyword.put(:primary_forward, forward)
+               )
+
+      assert status["webhooks"] == []
+      assert %{"state" => "on", "detail" => %{"webhooks" => webhooks}} = status["summary"]
+
+      assert webhooks["mounts"] == [
+               %{
+                 "label" => "WhatsApp",
+                 "command" =>
+                   "tailscale funnel --bg --set-path=/webhook/whatsapp " <>
+                     "http://127.0.0.1:4130/webhook/whatsapp"
+               }
+             ]
     end
 
     test "an update ceiling that cannot be read is null, and the log says why", %{home: home} do
@@ -727,6 +803,28 @@ defmodule FermixCore.Management.HomeTest do
     fn -> status end
   end
 
+  # What `home.status` reads the webhooks a primary serves from: the WhatsApp
+  # channel's settings, the cues section (two webhook sources with a URL, one
+  # without yet, one switched off, and a feed) and the web listener's port.
+  defp webhook_settings(overrides) do
+    hooks = %{"preset" => "github", "secret" => "@file", "path_secret" => "@file"}
+
+    sources =
+      Keyword.get(overrides, :sources, %{
+        "github" => hooks,
+        "stripe" => hooks,
+        "fresh-hooks" => Map.delete(hooks, "path_secret"),
+        "off-hooks" => Map.put(hooks, "enabled", false),
+        "eng-blogs" => %{"preset" => "rss", "url" => "https://example.org/releases.atom"}
+      })
+
+    %{
+      whatsapp: Keyword.fetch!(overrides, :whatsapp),
+      cues: CuesConfig.normalize(%{"door_port" => 4532, "sources" => sources}),
+      web_port: Keyword.get(overrides, :web_port, 4030)
+    }
+  end
+
   defp manual(state, candidate_id) do
     %{
       state: state,
@@ -833,7 +931,9 @@ defmodule FermixCore.Management.HomeTest do
           scheduler: nil,
           profile: "general",
           now: @at,
-          disk_usage: disk(0.42)
+          disk_usage: disk(0.42),
+          # The live channel and cue settings are global: a home here serves none.
+          webhook_settings: fn -> %{whatsapp: [], cues: [], web_port: 4030} end
         ],
         extra
       )

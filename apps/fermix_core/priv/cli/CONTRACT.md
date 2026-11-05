@@ -238,6 +238,7 @@ its enrollment stands).
 | `disk` | object, null | On the primary, how full its disk is: `used` (a fraction from 0 to 1) and `nearly_full` (from 0.85). Null in every other role and when it cannot be read. |
 | `version` | string | This engine's version. |
 | `update_ceiling` | string, null | The Fermix version a server's nightly update installs: the oldest engine among the desktops this machine served as their primary in the last 30 days, so the home can always move back to one of them. Null when none was, or when it cannot be read. |
+| `webhooks` | array | On a running primary, what it serves on loopback that the internet must reach, each `kind` (`whatsapp` while the WhatsApp channel is on, then `cue` for each enabled webhook source with a URL), `ref` (the source's name; null for WhatsApp) and `port` (the web listener's, or the cue door's). Never a source's URL. Empty in every other role, and while Fermix is stopped. A linked desktop's `summary` prints the Tailscale Funnel mounts of its server's. |
 
 ## The snapshots result
 

@@ -4,7 +4,9 @@ defmodule FermixWebWeb.SetupLive.AlwaysOnPane do
   card (the sentence, the step in hand, the one action, the error line and
   the alternatives), the step the pressed action opened (a dialog with the
   confirm sentence and the recovery passphrase), Details from
-  `detail.lines`, and the code of the owner's server.
+  `detail.lines`, the Tailscale Funnel mounts the server needs
+  (`detail.webhooks`, each command with its own Copy), and the code of the
+  owner's server with the optional Tailscale step's command.
 
   Every word is the engine's (the summary's, with `Management.Copy`'s action
   labels) but a field's label and the page's own Back, Copy, Done and
@@ -30,6 +32,10 @@ defmodule FermixWebWeb.SetupLive.AlwaysOnPane do
       <.card :if={@always_on.summary} always_on={@always_on} />
       <.own_code :if={@always_on.code} code={@always_on.code} />
       <.details :if={@always_on.summary} detail={@always_on.summary["detail"] || %{}} />
+      <.webhooks
+        :if={@always_on.summary && @always_on.summary["detail"]["webhooks"]}
+        webhooks={@always_on.summary["detail"]["webhooks"]}
+      />
     </div>
     """
   end
@@ -323,6 +329,40 @@ defmodule FermixWebWeb.SetupLive.AlwaysOnPane do
     """
   end
 
+  attr :webhooks, :map, required: true
+
+  # The Funnel mounts to run on the server, each with its Copy, under the
+  # engine's sentence and above its caveats.
+  defp webhooks(assigns) do
+    assigns =
+      assign(assigns, mounts: Enum.with_index(assigns.webhooks["mounts"]), card: @card)
+
+    ~H"""
+    <section id="always-on-webhooks" class={@card}>
+      <p class="text-sm">{@webhooks["sentence"]}</p>
+      <div :for={{mount, i} <- @mounts} class="mt-3">
+        <p class="text-sm font-medium">{mount["label"]}</p>
+        <div class="mt-1 flex items-start gap-2">
+          <pre
+            id={"always-on-mount-#{i}"}
+            class="min-w-0 flex-1 overflow-x-auto rounded-box bg-base-200 px-3 py-2 font-mono text-xs"
+          >{mount["command"]}</pre>
+          <button
+            id={"always-on-copy-mount-#{i}"}
+            type="button"
+            class="btn btn-xs"
+            phx-hook="CopyText"
+            data-copy-from={"always-on-mount-#{i}"}
+          >
+            Copy
+          </button>
+        </div>
+      </div>
+      <p :for={note <- @webhooks["notes"]} class="mt-3 text-sm text-base-content/70">{note}</p>
+    </section>
+    """
+  end
+
   attr :code, :map, required: true
 
   defp own_code(assigns) do
@@ -345,6 +385,24 @@ defmodule FermixWebWeb.SetupLive.AlwaysOnPane do
         >
           Copy
         </button>
+      </div>
+      <div id="always-on-tailscale" class="mt-3">
+        <p class="text-sm">{@code.tailscale["sentence"]}</p>
+        <div class="mt-2 flex items-start gap-2">
+          <pre
+            id="always-on-tailscale-command"
+            class="min-w-0 flex-1 overflow-x-auto rounded-box bg-base-200 px-3 py-2 font-mono text-xs"
+          >{@code.tailscale["command"]}</pre>
+          <button
+            id="always-on-copy-tailscale"
+            type="button"
+            class="btn btn-xs"
+            phx-hook="CopyText"
+            data-copy-from="always-on-tailscale-command"
+          >
+            Copy
+          </button>
+        </div>
       </div>
       <p class="mt-3 text-sm">When it asks for the code, paste this one:</p>
       <div class="mt-2 flex items-start gap-2">

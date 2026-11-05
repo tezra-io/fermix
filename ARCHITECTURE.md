@@ -574,7 +574,15 @@ owner's zone (`Clock.shown_zone/1`), and the pure `summary/1` answers `{key,
 state, sentence, action, detail, notice}` in `Management.Copy`'s words:
 every action one record (`needs`, `confirm`,
 `url`, `key`, `HomeSummary.action_key/5`; `find_action/3` finds one by its
-key), Details' `lines` and `progress`, the notice the apps raise,
+key), Details' `lines` and `progress`, a linked desktop's Tailscale Funnel
+mounts (`detail.webhooks`, from the `webhooks` the server's own
+`home.status` names: WhatsApp on its web port while the channel is on, each
+enabled webhook source with a URL on its door port, the URL's secret shown
+as `<random>` since a read never hands it out; written by `FermixCore.Funnel`,
+the one builder the cue setup page and `mix fermix.cues.funnel` print too;
+never on the server's own `primary`, whose summary rides inside its
+desktops' `home.status` under the protocol's 6-level nesting bound), the
+notice the apps raise,
 and `key/1`, the one digest, which leaves out the clock (an `off`, `on` or
 `problem` sentence, `seen_at`), which `CopyTest`
 holds to the copy rules and to `Copy.summary_violations/1` (no internal word,
@@ -638,7 +646,8 @@ that key (the surface reads `home.status` again), so a confirm accepted on an ol
 pressing at once do nothing twice. The computer that sets Always On up runs
 every step itself: Use my own Linux server opens a code
 (`HomeMove.enroll_open/1`) answered with the command that installs Fermix
-there, and Cancel withdraws it. Move now reviews at the press (a kept ready review under 15 minutes old, else
+there and its `--tailscale` form, which also joins the server to the
+owner's tailnet, and Cancel withdraws it. Move now reviews at the press (a kept ready review under 15 minutes old, else
 a fresh one, kept), refuses on a block, answers `changed` on a warning the
 confirm did not name, then reaches `HomeMove.move_start/3`. On a linked
 desktop it sends the server's own steps over the link as rail-only methods

@@ -177,6 +177,26 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
       end
 
       refute html =~ ~s(id="device-role-notice")
+      refute html =~ ~s(id="always-on-webhooks")
+    end
+
+    # Always On's inbound webhooks are drawn by the desktops of a server, from
+    # its `home.status`: the server's own tab draws none, whatever it serves.
+    test "on a server serving WhatsApp: the tab draws no Funnel mounts of its own", %{
+      conn: conn,
+      home: home,
+      link: link,
+      seams: seams
+    } do
+      :ok = Epoch.write(home, 3)
+      desktop = %{device_id: @desktop_id, name: "Studio Mac", connected: true, since: @at}
+      Agent.update(link, &%{&1 | desktops: [desktop]})
+      put_seams(seams, webhook_settings: fn -> serving(4130) end)
+
+      html = open!(conn)
+
+      assert text(html, "#always-on-sentence") == "Fermix runs here."
+      refute html =~ ~s(id="always-on-webhooks")
     end
 
     test "with nothing set up: the first screen, Use my own Linux server", %{conn: conn} do
@@ -250,6 +270,13 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
       assert text(html, "#always-on-code-text") == @manual_code
       assert html =~ ~s(data-copy-from="always-on-code-text")
       assert text(html, "#always-on-code") =~ "Sunday, May 4, 2031 at 12:30 PM UTC"
+
+      # The optional Tailscale step, in the engine's words, with its own Copy.
+      assert text(html, "#always-on-tailscale") =~
+               ~r/\AOptional: to also join the server to your tailnet/
+
+      assert text(html, "#always-on-tailscale-command") == Copy.own_server_tailscale_command()
+      assert html =~ ~s(data-copy-from="always-on-tailscale-command")
       refute view.pid |> :sys.get_state() |> inspect(limit: :infinity) =~ @manual_code
 
       # Cancel the code takes no confirm: it acts at once, and the card goes.
@@ -501,6 +528,51 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
       press(view, "back_up_now")
       settle!(view)
       assert_received {:forwarded, "home.snapshots.run", %{}}
+    end
+
+    # The values are the server's: the mounts come from what the server's own
+    # `home.status` names, on its ports, never from this computer's settings.
+    test "linked: the server's Funnel mounts, on the server's ports", %{conn: conn, seams: seams} do
+      :ok = DesktopLink.write(seams.home, desktop_link())
+      Agent.update(seams.link, &%{&1 | primary: primary(nil)})
+
+      served = [
+        %{"kind" => "whatsapp", "ref" => nil, "port" => 4130},
+        %{"kind" => "cue", "ref" => "gh-hooks", "port" => 4532}
+      ]
+
+      forward = fn %{method: "home.status"}, _opts ->
+        {:ok, status} = server_part("home.status")
+        {:ok, Map.put(status, "webhooks", served)}
+      end
+
+      put_seams(seams, [webhook_settings: fn -> serving(4030) end], fn ->
+        [primary_forward: forward]
+      end)
+
+      html = open!(conn, "/setup")
+
+      assert text(html, "#always-on-webhooks") =~
+               ~r/\AWhatsApp and your webhook sources reach Fermix on your server through Tailscale Funnel\./
+
+      assert text(html, "#always-on-mount-0") ==
+               "tailscale funnel --bg --set-path=/webhook/whatsapp " <>
+                 "http://127.0.0.1:4130/webhook/whatsapp"
+
+      assert html =~ ~s(data-copy-from="always-on-mount-0")
+      assert html =~ ~s(data-copy-from="always-on-mount-1")
+
+      assert text(html, "#always-on-mount-1") ==
+               "tailscale funnel --bg --set-path=/cues/hooks/gh-hooks/<random> " <>
+                 "http://127.0.0.1:4532/cues/hooks/gh-hooks/<random>"
+
+      assert text(html, "#always-on-webhooks") =~ "Webhook source gh-hooks"
+
+      assert text(html, "#always-on-webhooks") =~
+               "4130 for WhatsApp and 4532 for webhook sources."
+
+      refute text(html, "#always-on-webhooks") =~ "4030"
+      refute text(html, "#always-on-webhooks") =~ "primary"
     end
 
     # A move back moves the server's home here, and this computer restarts
@@ -952,9 +1024,15 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
         send(test, {:saved, recipient})
         {:ok, %{}}
       end,
-      serializer: seams.serializer
+      serializer: seams.serializer,
+      # The live channel settings are global: a home here serves no webhook.
+      webhook_settings: fn -> %{whatsapp: [], cues: [], web_port: 4030} end
     ]
   end
+
+  # What a primary reads the webhooks it serves from: WhatsApp on, no cue
+  # source, the web listener on `port`.
+  defp serving(port), do: %{whatsapp: [enabled: true], cues: [], web_port: port}
 
   # -- reading the page ----------------------------------------------------------
 

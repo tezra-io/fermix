@@ -3,8 +3,9 @@ defmodule Mix.Tasks.Fermix.Cues.Funnel do
 
   @moduledoc """
   Puts one webhook source on the internet through Tailscale Funnel (M60 §6.5)
-  from a source checkout; a release's setup page shows the same mount command
-  (`Cues.Webhook.funnel_args/2`) without this task's port check:
+  from a source checkout; a release's setup page and the Always On screen show
+  the same mount command (`FermixCore.Funnel`, its one builder) without this
+  task's port check:
 
       mix fermix.cues.funnel <source_ref> [--apply]
       mix fermix.cues.funnel <source_ref> --remove [--apply]
@@ -42,6 +43,7 @@ defmodule Mix.Tasks.Fermix.Cues.Funnel do
 
   alias FermixCore.Cues.Config, as: CuesConfig
   alias FermixCore.Cues.Webhook
+  alias FermixCore.Funnel
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.SecretWriter
 
@@ -97,7 +99,7 @@ defmodule Mix.Tasks.Fermix.Cues.Funnel do
   defp mount(ref, apply?, runner) do
     {port, random} = source_url!(ref)
     path = Webhook.path(ref, random)
-    [_funnel, _bg, _set_path, target] = args = Webhook.funnel_args(path, port)
+    [_funnel, _bg, _set_path, target] = args = Funnel.mount_args(path, port)
     url = "https://#{tailnet_host!(runner)}#{path}"
     mounts = funnel_mounts!(runner)
     check_port!(mounts)
@@ -120,7 +122,7 @@ defmodule Mix.Tasks.Fermix.Cues.Funnel do
   end
 
   defp add_mount(args, url, apply?, runner) do
-    Mix.shell().info("The Funnel mount for this source:\n  " <> command_line(args))
+    Mix.shell().info("The Funnel mount for this source:\n  " <> Funnel.command(args))
 
     if apply? do
       print_output(call!(runner, args))
@@ -194,7 +196,7 @@ defmodule Mix.Tasks.Fermix.Cues.Funnel do
 
   defp remove_mount(mount, apply?, runner) do
     args = ["funnel", "--https=#{mount.port}", "--set-path=" <> mount.path, "off"]
-    Mix.shell().info("Removing the Funnel mount at #{mount.path}:\n  " <> command_line(args))
+    Mix.shell().info("Removing the Funnel mount at #{mount.path}:\n  " <> Funnel.command(args))
 
     if apply? do
       print_output(call!(runner, args))
@@ -319,7 +321,7 @@ defmodule Mix.Tasks.Fermix.Cues.Funnel do
 
       _not_an_object ->
         Mix.raise(
-          "Fermix could not read `#{command_line(args)}`: it did not answer a JSON object."
+          "Fermix could not read `#{Funnel.command(args)}`: it did not answer a JSON object."
         )
     end
   end
@@ -333,7 +335,7 @@ defmodule Mix.Tasks.Fermix.Cues.Funnel do
         output
 
       {output, status} when is_binary(output) and is_integer(status) ->
-        Mix.raise("`#{command_line(args)}` failed (exit #{status}): #{String.trim(output)}")
+        Mix.raise("`#{Funnel.command(args)}` failed (exit #{status}): #{String.trim(output)}")
     end
   end
 
@@ -343,8 +345,6 @@ defmodule Mix.Tasks.Fermix.Cues.Funnel do
       text -> Mix.shell().info(text)
     end
   end
-
-  defp command_line(args), do: Enum.join(["tailscale" | args], " ")
 
   defp map_at(map, key) do
     case Map.get(map, key) do

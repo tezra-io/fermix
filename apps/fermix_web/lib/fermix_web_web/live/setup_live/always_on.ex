@@ -64,14 +64,20 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
   defmodule Code do
     @moduledoc """
     The one-time code of the owner's server, answered once by
-    `own_server`, with the command to run there and until when the code
-    works. LiveView's crash report prints every assign, so no print of it
-    spells the code.
+    `own_server`, with the command to run there, the optional step that also
+    joins it to the owner's tailnet (`tailscale`, its sentence and command)
+    and until when the code works. LiveView's crash report prints every
+    assign, so no print of it spells the code.
     """
-    @enforce_keys [:code, :command, :until]
-    defstruct [:code, :command, :until]
+    @enforce_keys [:code, :command, :tailscale, :until]
+    defstruct [:code, :command, :tailscale, :until]
 
-    @type t :: %__MODULE__{code: String.t(), command: String.t(), until: String.t()}
+    @type t :: %__MODULE__{
+            code: String.t(),
+            command: String.t(),
+            tailscale: %{String.t() => String.t()},
+            until: String.t()
+          }
 
     defimpl Inspect do
       def inspect(_code, _opts), do: "#AlwaysOnCode<withheld>"
@@ -423,10 +429,21 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
   defp sentence(_code, %{"sentence" => sentence}) when is_binary(sentence), do: sentence
   defp sentence(code, _details), do: Map.fetch!(Protocol.error_messages(), code)
 
-  defp code(%{"code" => code, "expires_at" => at, "command" => command})
+  defp code(%{
+         "code" => code,
+         "expires_at" => at,
+         "command" => command,
+         "tailscale" => %{"sentence" => said, "command" => joins}
+       })
        when is_binary(code) and is_binary(at) and is_binary(command) do
     {:ok, expires, _offset} = DateTime.from_iso8601(at)
-    %Code{code: code, command: command, until: Clock.stated_instant(expires)}
+
+    %Code{
+      code: code,
+      command: command,
+      tailscale: %{"sentence" => said, "command" => joins},
+      until: Clock.stated_instant(expires)
+    }
   end
 
   defp code(_result), do: nil

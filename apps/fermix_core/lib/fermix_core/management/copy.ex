@@ -54,8 +54,11 @@ defmodule FermixCore.Management.Copy do
   (`notice_*`); the Details lines (`summary_line/3`), each a label and a
   value finished here, times stated absolutely in the owner's zone
   (`FermixCore.Clock`); the Always On docs page (`always_on_docs_url/0`);
-  and the command for the owner's server (`own_server_command/0`), which
-  carries no code.
+  the command for the owner's server (`own_server_command/0`), which
+  carries no code, and the one that also joins it to the owner's tailnet
+  (`own_server_tailscale_command/0`, with `own_server_tailscale`'s
+  sentence); and the words around the Tailscale Funnel mounts a server
+  needs (`webhooks*`, `mount_label/1`).
   """
 
   alias FermixCore.BuildInfo
@@ -81,6 +84,8 @@ defmodule FermixCore.Management.Copy do
   @internal_words ~r/\b(?:epochs?|primar(?:y|ies)|candidates?|relays?|rails?|phases?|ledgers?|daemons?|(?<!access )key ids?)\b/i
   # What runs only on the computer a move leaves, in the order it is named.
   @stays_here [imessage: "iMessage", voice: "voice calls", meetings: "meetings"]
+  # What each loopback port a tunnel reaches carries, in the order named.
+  @carried [whatsapp: "WhatsApp", cues: "webhook sources"]
   @summary_keys ~w(off connect connecting ready moving waiting on on_backup on_no_backup undone
                    retired candidate_waiting candidate_receiving primary cannot_reach
                    server_not_set_up server_waited_too_long update disk_full server_disk_full
@@ -89,7 +94,9 @@ defmodule FermixCore.Management.Copy do
                    return_connecting return_ready return_moving return_undone return_failed
                    return_stopped restore_moving restore_failed notice_back
                    progress_return_receiving progress_return_staged progress_return_placing
-                   progress_restoring confirm_restore_here confirm_return_move)a
+                   progress_restoring confirm_restore_here confirm_return_move
+                   webhooks webhooks_port webhooks_ingress webhooks_tunnel webhooks_random
+                   own_server_tailscale)a
   # Each Details line's label, by its key.
   @line_labels [
     server: "Server",
@@ -149,7 +156,12 @@ defmodule FermixCore.Management.Copy do
     "Google Meet",
     "Zoom",
     "Personality",
+    # The Tailscale Funnel mounts of an Always On server's webhooks, and the
+    # tunnel an owner without Tailscale runs instead.
+    "Tailscale Funnel",
+    "Funnel",
     "Tailscale",
+    "Cloudflare Tunnel",
     "Google Chrome for Testing",
     "Google Chrome Canary",
     "Google Chrome",
@@ -440,6 +452,43 @@ defmodule FermixCore.Management.Copy do
         " Coding agents ask for your approval again. Messages sent to Telegram while it " <>
         "moves wait until it is done. Your server stays until you delete it."
 
+  def summary_sentence(:webhooks, _values),
+    do:
+      "WhatsApp and your webhook sources reach Fermix on your server through Tailscale " <>
+        "Funnel. Once, allow Funnel for the server in your tailnet policy: the funnel node " <>
+        "attribute, for tag:fermix-server. Then run each of these on the server."
+
+  def summary_sentence(:webhooks_port, _values),
+    do:
+      "Funnel publishes everything tailscale serve has on port 443, so put only these " <>
+        "paths there."
+
+  def summary_sentence(:webhooks_ingress, _values),
+    do:
+      "Funnel traffic comes in through Tailscale's ingress servers, which see only " <>
+        "encrypted bytes: it is the one way the internet reaches your server."
+
+  def summary_sentence(:webhooks_tunnel, %{ports: [_ | _] = ports}) do
+    noun = if length(ports) == 1, do: "port", else: "ports"
+    each = for {kind, port} <- ports, do: "#{port} for #{Keyword.fetch!(@carried, kind)}"
+
+    "Without Tailscale, run Cloudflare Tunnel to the same loopback #{noun} instead: " <>
+      join_names(each) <> "."
+  end
+
+  def summary_sentence(:webhooks_random, _values),
+    do:
+      "In a webhook source's command, put the last part of its URL where it says " <>
+        "<random>. Its URL is in Cues, and this screen leaves it out because the URL is " <>
+        "a secret."
+
+  def summary_sentence(:own_server_tailscale, _values),
+    do:
+      "Optional: to also join the server to your tailnet, which WhatsApp and webhook " <>
+        "sources need, run this instead. It asks for the enrollment code and then a " <>
+        "Tailscale auth key, and shows neither: create the key in Tailscale's admin " <>
+        "console, tagged tag:fermix-server, one-off and pre-approved."
+
   def summary_sentence(:data, _values),
     do:
       "Your conversations and memories, the secrets, the browser and traces live on your " <>
@@ -567,6 +616,25 @@ defmodule FermixCore.Management.Copy do
   """
   @spec own_server_command() :: String.t()
   def own_server_command, do: @own_server_command <> BuildInfo.product_version()
+
+  @doc """
+  `own_server_command/0` with the optional Tailscale step (`--tailscale`):
+  the server joins the owner's tailnet before it enrolls, with an auth key
+  the owner creates tagged `tag:fermix-server`. The server asks for the code
+  and then the key at the terminal, without echo, so neither is on a command
+  line or in a shell history (`TS_AUTHKEY` is cloud-init's, never printed
+  here).
+  """
+  @spec own_server_tailscale_command() :: String.t()
+  def own_server_tailscale_command, do: own_server_command() <> " --tailscale"
+
+  @doc """
+  The label of one Tailscale Funnel mount, by what it carries: WhatsApp's,
+  or a cue webhook source's (`{:cue, ref}`), which names the source.
+  """
+  @spec mount_label(:whatsapp | {:cue, String.t()}) :: String.t()
+  def mount_label(:whatsapp), do: "WhatsApp"
+  def mount_label({:cue, ref}) when is_binary(ref), do: "Webhook source #{ref}"
 
   @doc """
   The label of one summary action, by its id; `cancel` closes an open code

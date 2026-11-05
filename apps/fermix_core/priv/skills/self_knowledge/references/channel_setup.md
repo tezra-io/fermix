@@ -112,7 +112,7 @@ Meta's WhatsApp Cloud API. Needs a public HTTPS URL. All values come from the Me
 - **Your WhatsApp number**: the personal number you message from, digits only with country code, no `+`, spaces or `00` (`15551234567`). Mac **Your WhatsApp ID**; browser **Owner user ID**; `--whatsapp-owner-user-id`; `owner_user_id`.
 - The business number is Meta's free test number or a registered one; it cannot be the number you chat from. With the test number, add your own number under API Setup > To > Manage phone number list.
 
-Order: save the values, restart, start the tunnel; then WhatsApp > Configuration > Callback URL `https://<public-host>/webhook/whatsapp` + the Verify token > **Verify and save**, and subscribe the `messages` webhook field.
+Order: save the values, restart, start the tunnel; then WhatsApp > Configuration > Callback URL `https://<public-host>/webhook/whatsapp` + the Verify token > **Verify and save**, and subscribe the `messages` webhook field. On an Always On server the tunnel is Tailscale Funnel on that one path: the desktop's Always On screen prints the command to run on the server, and the public host is the server's ts.net name.
 
 - **First message**: from your personal WhatsApp, message the business number. `/whoami` answering with your number proves the webhook, the signature, the owner match and sending. Direct messages only; no groups.
 

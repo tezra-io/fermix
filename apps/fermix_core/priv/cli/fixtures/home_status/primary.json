@@ -62,7 +62,8 @@
       "state": "off"
     },
     "update_ceiling": null,
-    "version": "1.2.3"
+    "version": "1.2.3",
+    "webhooks": []
   },
   "schema_version": 1
 }

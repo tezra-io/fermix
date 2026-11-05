@@ -24,6 +24,8 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
   @passphrase "invented-lantern-orchard"
   @changed "Always On changed since this was shown, so look at it again."
   @command "curl -fsSL https://fermix.ai/always-on | sudo sh"
+  @tailscale_sentence "Optional: to also join the server to your tailnet, run this instead."
+  @tailscale_command "curl -fsSL https://fermix.ai/always-on | sudo sh -s -- --tailscale"
   @unconfirmed "The server fermix-general-a3f9 did not confirm in time whether the move " <>
                  "started. Its state shows once the server answers again, and starting it " <>
                  "again never starts a second move."
@@ -215,6 +217,26 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
       {0, out, ""} = run(["--json"], ctx, client)
       assert Jason.decode!(out) == %{"schema_version" => 1, "ok" => true, "result" => ready}
     end
+
+    # Always On's inbound webhooks: the Funnel mounts the server needs, each
+    # command on a line of its own to copy, as the engine words them.
+    test "the Funnel mounts print under their sentence, each command on its own line", ctx do
+      on = golden_summary("home_status_on")
+      %{"sentence" => said, "mounts" => mounts, "notes" => notes} = on["detail"]["webhooks"]
+      client = script([hello(), {"home.status", {:ok, status(on)}}])
+
+      {0, out, ""} = run([], ctx, client)
+
+      printed =
+        [said] ++
+          Enum.flat_map(mounts, &["  #{&1["label"]}:", "    #{&1["command"]}"]) ++ notes
+
+      assert out =~ Enum.join(printed, "\n") <> "\n"
+
+      assert out =~
+               "  WhatsApp:\n    tailscale funnel --bg --set-path=/webhook/whatsapp " <>
+                 "http://127.0.0.1:4030/webhook/whatsapp\n"
+    end
   end
 
   describe "one step without a terminal" do
@@ -362,18 +384,18 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
     end
 
     test "Use my own Linux server prints the command and the code once", ctx do
-      result = %{
-        "code" => "fxenroll1.invented",
-        "expires_at" => "2031-05-04T12:30:00Z",
-        "command" => @command
-      }
+      result = own_code()
 
       act = {:ok, %{"summary" => connect_with_code(), "result" => result}}
       client = script([hello(), {"home.status", {:ok, status(off())}}, {"home.act", act}])
 
       {0, out, _err} = run(["own-server"], ctx, client)
 
-      assert out =~ "On your server, run:\n  #{@command}\n"
+      # The optional Tailscale step under the plain command, in its words.
+      assert out =~
+               "On your server, run:\n  #{@command}\n#{@tailscale_sentence}\n  " <>
+                 "#{@tailscale_command}\nWhen it asks"
+
       assert out =~ "until 2031-05-04T12:30:00Z:\n  fxenroll1.invented\n"
       assert length(String.split(out, "fxenroll1.invented")) == 2
 
@@ -741,12 +763,14 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
     }
   end
 
-  # What Use my own Linux server answers once: the code and the command.
+  # What Use my own Linux server answers once: the code, the command and the
+  # optional Tailscale step.
   defp own_code do
     %{
       "code" => "fxenroll1.invented",
       "expires_at" => "2031-05-04T12:30:00Z",
-      "command" => @command
+      "command" => @command,
+      "tailscale" => %{"sentence" => @tailscale_sentence, "command" => @tailscale_command}
     }
   end
 

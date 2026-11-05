@@ -88,13 +88,17 @@ defmodule FermixCore.Cues.Webhook do
   end
 
   @doc """
-  The `tailscale` arguments that put one webhook path on Tailscale Funnel: the
-  same path on both sides, proxied to the door on `127.0.0.1:port`, because
-  Tailscale strips the mount point before proxying. Never `/`.
+  The door path of webhook source `ref` with its random part shown as
+  `<random>`: what a surface prints where the URL itself, a secret handed out
+  only by `cues.sources.url.get`, must not go (the Always On screen's Funnel
+  mount, read by anyone who reads `home.status`).
   """
-  @spec funnel_args(String.t(), :inet.port_number()) :: [String.t()]
-  def funnel_args(@path_prefix <> _rest = path, port) when port in 1..65_535,
-    do: ["funnel", "--bg", "--set-path=" <> path, "http://127.0.0.1:#{port}" <> path]
+  @spec placeholder_path(String.t()) :: String.t()
+  def placeholder_path(ref) when is_binary(ref) do
+    unless Config.valid_name?(ref), do: raise(ArgumentError, "a webhook path needs a source name")
+
+    @path_prefix <> ref <> "/<random>"
+  end
 
   @doc """
   The door path of webhook source `ref`, made on the first call: 16 random

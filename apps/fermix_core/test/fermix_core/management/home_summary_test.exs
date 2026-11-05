@@ -405,6 +405,137 @@ defmodule FermixCore.Management.HomeSummaryTest do
     end
   end
 
+  # Always On's inbound webhooks (design, "Inbound webhooks without a public
+  # IP"): once the home is on a server, a desktop's screen prints the
+  # Tailscale Funnel mount of each webhook the server serves, from the
+  # server's own `home.status`, with the one-time policy step and the
+  # caveats, and nothing when it serves none.
+  describe "the webhooks a server needs" do
+    @webhooks_sentence "WhatsApp and your webhook sources reach Fermix on your server through " <>
+                         "Tailscale Funnel. Once, allow Funnel for the server in your tailnet " <>
+                         "policy: the funnel node attribute, for tag:fermix-server. Then run " <>
+                         "each of these on the server."
+    @port_note "Funnel publishes everything tailscale serve has on port 443, so put only " <>
+                 "these paths there."
+    @ingress_note "Funnel traffic comes in through Tailscale's ingress servers, which see " <>
+                    "only encrypted bytes: it is the one way the internet reaches your server."
+    @random_note "In a webhook source's command, put the last part of its URL where it says " <>
+                   "<random>. Its URL is in Cues, and this screen leaves it out because the " <>
+                   "URL is a secret."
+
+    test "a server with WhatsApp alone: its one mount, the policy step and the caveats" do
+      %{"state" => "on", "detail" => detail} =
+        HomeSummary.summary(desktop(primary_home: server_home(webhooks: [whatsapp(4130)])))
+
+      assert detail["webhooks"] == %{
+               "sentence" => @webhooks_sentence,
+               "mounts" => [
+                 %{
+                   "label" => "WhatsApp",
+                   "command" =>
+                     "tailscale funnel --bg --set-path=/webhook/whatsapp " <>
+                       "http://127.0.0.1:4130/webhook/whatsapp"
+                 }
+               ],
+               "notes" => [
+                 @port_note,
+                 @ingress_note,
+                 "Without Tailscale, run Cloudflare Tunnel to the same loopback port " <>
+                   "instead: 4130 for WhatsApp."
+               ]
+             }
+    end
+
+    test "webhook sources alone: one mount each on the server's door, the URL's secret left out" do
+      served = [cue("github", 4532), cue("stripe", 4532)]
+
+      %{"detail" => detail} =
+        HomeSummary.summary(desktop(primary_home: server_home(webhooks: served)))
+
+      assert detail["webhooks"]["mounts"] == [
+               %{
+                 "label" => "Webhook source github",
+                 "command" =>
+                   "tailscale funnel --bg --set-path=/cues/hooks/github/<random> " <>
+                     "http://127.0.0.1:4532/cues/hooks/github/<random>"
+               },
+               %{
+                 "label" => "Webhook source stripe",
+                 "command" =>
+                   "tailscale funnel --bg --set-path=/cues/hooks/stripe/<random> " <>
+                     "http://127.0.0.1:4532/cues/hooks/stripe/<random>"
+               }
+             ]
+
+      assert detail["webhooks"]["notes"] == [
+               @port_note,
+               @ingress_note,
+               "Without Tailscale, run Cloudflare Tunnel to the same loopback port instead: " <>
+                 "4532 for webhook sources.",
+               @random_note
+             ]
+    end
+
+    test "both: WhatsApp first, then each source, and the tunnel names both ports" do
+      served = [whatsapp(4130), cue("github", 4532)]
+
+      %{"detail" => detail} =
+        HomeSummary.summary(desktop(primary_home: server_home(webhooks: served)))
+
+      assert Enum.map(detail["webhooks"]["mounts"], & &1["label"]) ==
+               ["WhatsApp", "Webhook source github"]
+
+      assert ("Without Tailscale, run Cloudflare Tunnel to the same loopback ports instead: " <>
+                "4130 for WhatsApp and 4532 for webhook sources.") in detail["webhooks"]["notes"]
+
+      assert @random_note in detail["webhooks"]["notes"]
+    end
+
+    test "neither: no webhooks at all, and none from a server whose part did not arrive" do
+      refute Map.has_key?(HomeSummary.summary(desktop([]))["detail"], "webhooks")
+      refute Map.has_key?(HomeSummary.summary(desktop(primary_home: nil))["detail"], "webhooks")
+    end
+
+    # The server's summary rides inside each desktop's `home.status`
+    # (`primary_home`), where the mounts would pass the protocol's nesting
+    # bound, so only the desktop's own screen draws them.
+    test "only a desktop's screen of a server it reaches shows them, never a problem's, a move's or the server's own" do
+      served = server_home(webhooks: [whatsapp(4130)])
+
+      for facts <- [
+            desktop(primary_home: %{served | "disk" => %{"used" => 0.9, "nearly_full" => true}}),
+            desktop(primary_home: served, link_primary: primary(:unreachable, 11 * @minute)),
+            device(move: move("streaming"), primary_home: served),
+            server([])
+          ] do
+        refute Map.has_key?(HomeSummary.summary(facts)["detail"], "webhooks")
+      end
+    end
+
+    test "every word is plain, and the key moves with what the server serves" do
+      served = [whatsapp(4130), cue("github", 4532)]
+
+      %{"detail" => %{"webhooks" => webhooks}} =
+        HomeSummary.summary(desktop(primary_home: server_home(webhooks: served)))
+
+      for text <-
+            [webhooks["sentence"] | webhooks["notes"]] ++
+              Enum.map(webhooks["mounts"], & &1["label"]),
+          do: assert(Copy.summary_violations(text) == [], text)
+
+      keys =
+        for served <- [
+              [],
+              [whatsapp(4130)],
+              [whatsapp(4131)],
+              [whatsapp(4130), cue("github", 4532)]
+            ],
+            do: HomeSummary.summary(desktop(primary_home: server_home(webhooks: served)))["key"]
+
+      assert length(Enum.uniq(keys)) == length(keys)
+    end
+  end
+
   # -- the summary is the screen (Always On setup §3.1) -------------------------
 
   # Review simplification 3: one reading of what a screen offers.
@@ -1302,9 +1433,14 @@ defmodule FermixCore.Management.HomeSummaryTest do
       "role" => "primary",
       "version" => "0.9.0",
       "snapshots" => snapshots(backups),
-      "disk" => %{"used" => used, "nearly_full" => used >= 0.85}
+      "disk" => %{"used" => used, "nearly_full" => used >= 0.85},
+      "webhooks" => Keyword.get(overrides, :webhooks, [])
     }
   end
+
+  # A webhook the server serves on loopback, as its `home.status` names it.
+  defp whatsapp(port), do: %{"kind" => "whatsapp", "ref" => nil, "port" => port}
+  defp cue(ref, port), do: %{"kind" => "cue", "ref" => ref, "port" => port}
 
   defp snapshots(backups) do
     targets =
