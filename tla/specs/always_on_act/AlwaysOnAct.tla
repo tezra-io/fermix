@@ -135,7 +135,7 @@ Running == {j \in Slots : jobs[j] # "none"}
 \* What the desktop's summary offers (device/1, :528): restoring/1 draws the
 \* restore running, with nothing to press, while the request stands beside
 \* a running job (restore_running?/1, :761-762; Home's restoring?/2,
-\* home.ex:218-227, reads the family); otherwise the silent server's screen
+\* home.ex:220-229, reads the family); otherwise the silent server's screen
 \* offers Restore here (restore_offer/1, :766-772).
 Offered == IF request /\ Running # {} THEN {} ELSE {"restore_here"}
 
