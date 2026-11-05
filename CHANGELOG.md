@@ -159,8 +159,8 @@ will be part of a future release; nothing in this group is in a release yet.
   installs Tailscale from Tailscale's own signed package repository, checking
   its signing key first, and joins your tailnet before the server enrolls.
   Create the key tagged `tag:fermix-server`, and let only your own devices
-  reach the server's UDP port 4033 in your tailnet policy; the server opens
-  no port itself. The key is never shown, logged or put on a command line,
+  reach the server in your tailnet policy; the server opens no port itself.
+  The key is never shown, logged or put on a command line,
   and is removed from the server as soon as Tailscale has read it. A key that
   is not one is refused before anything is installed, a server already on a
   tailnet is left as it is, and without `--tailscale` nothing of Tailscale is

@@ -186,8 +186,8 @@ it, never a second writer.
   release (`pkgs.tailscale.com`), its signing key checked by fingerprint
   before apt is given it, never from a script piped into a shell. Create the
   key tagged `tag:fermix-server` (the first boot passes no tags of its own),
-  and let only your own devices reach the server's iroh port, UDP 4033, in
-  the tailnet policy: the first boot opens no port. A host already on a
+  and let only your own devices reach the server in the tailnet policy: the
+  first boot opens no port. A host already on a
   tailnet (`tailscale status` says Running) is not asked for a key or logged
   in again; a `tailscale up` that fails stops the first boot before it
   enrolls. `--restore` takes `--tailscale` too.

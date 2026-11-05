@@ -201,9 +201,8 @@ run. With it:
   installed. Either way the first boot says the server's tailnet address
   (`tailscale ip -1`).
 - **The policy is the owner's.** The first boot opens no port and adds no
-  firewall rule for the tailnet. A server's engine takes UDP port 4033 for
-  iroh (M75 step 4), and the tailnet policy should let only the owner's own
-  devices reach `tag:fermix-server` on `udp:4033`.
+  firewall rule for the tailnet. The tailnet policy should let only the
+  owner's own devices reach `tag:fermix-server`.
 - **Restore mode** takes `--tailscale` too: the server joins the tailnet the
   same way, then prints the restore steps.
 
