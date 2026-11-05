@@ -24,7 +24,7 @@ jobs:
         shell: bash
     env:
       MIX_ENV: test
-      ELIXIR_VERSION: "1.19.5"
+      ELIXIR_VERSION: "1.19.7"
       OTP_VERSION: "28"
     steps:
       - uses: actions/checkout@v4

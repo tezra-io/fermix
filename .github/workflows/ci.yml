@@ -46,7 +46,7 @@ jobs:
           - { os: macos-15-intel, leg: macos-x64, timeout: 45, fetch_depth: 1 }
     env:
       MIX_ENV: test
-      ELIXIR_VERSION: "1.19.5"
+      ELIXIR_VERSION: "1.19.7"
       OTP_VERSION: "28"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -345,7 +345,7 @@ jobs:
       - name: Install Erlang/OTP headers
         uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
         with:
-          otp-version: "28.4.1"
+          otp-version: "28.5.0.6"
       - name: Compile the NIF for every release target
         run: |
           set -euo pipefail

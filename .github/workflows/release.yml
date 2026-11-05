@@ -82,10 +82,13 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       MIX_ENV: prod
-      ELIXIR_VERSION: "1.19.5"
+      ELIXIR_VERSION: "1.19.7"
       # Burrito downloads ERTS by this exact upstream release string. Confirm all
-      # beam-machine target artifacts exist before changing it.
-      OTP_VERSION: "28.4.1"
+      # beam-machine target artifacts exist before changing it. 28.5.0.6 is the
+      # newest OTP beam-machine has built: it lacks 28.5.0.7's fix for
+      # CVE-2026-89422 (a TLS 1.3 client accepts an unauthenticated server),
+      # which the app engine, built on the runner's own OTP, already has.
+      OTP_VERSION: "28.5.0.6"
       ZIG_VERSION: "0.15.2"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -141,8 +144,8 @@ jobs:
         target: [linux_x86_64, linux_aarch64]
     env:
       MIX_ENV: prod
-      ELIXIR_VERSION: "1.19.5"
-      OTP_VERSION: "28.4.1"
+      ELIXIR_VERSION: "1.19.7"
+      OTP_VERSION: "28.5.0.6"
       ZIG_VERSION: "0.15.2"
       # One build identity for both package targets, the way the app engine
       # already stamps one identity across its two slices.
@@ -201,8 +204,8 @@ jobs:
           - { os: macos-15, target: macos_aarch64 }
           - { os: macos-15-intel, target: macos_x86_64 }
     env:
-      ELIXIR_VERSION: "1.19.5"
-      OTP_VERSION: "28.4.1"
+      ELIXIR_VERSION: "1.19.7"
+      OTP_VERSION: "28.5.0.8"
       # One build identity per release run, shared by both targets: the app
       # ships a universal DMG with one engine build in two slices and verifies
       # the engine it boots after an update against the one build id the feed

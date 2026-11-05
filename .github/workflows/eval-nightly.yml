@@ -123,7 +123,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 45
     env:
-      ELIXIR_VERSION: "1.19.5"
+      ELIXIR_VERSION: "1.19.7"
       OTP_VERSION: "28"
     steps:
       - uses: actions/checkout@v4

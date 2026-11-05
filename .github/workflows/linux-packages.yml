@@ -47,8 +47,8 @@ jobs:
         target: ${{ fromJSON(github.event_name == 'workflow_dispatch' && github.event.inputs.target != 'both' && format('["{0}"]', github.event.inputs.target) || '["linux_x86_64","linux_aarch64"]') }}
     env:
       MIX_ENV: prod
-      ELIXIR_VERSION: "1.19.5"
-      OTP_VERSION: "28.4.1"
+      ELIXIR_VERSION: "1.19.7"
+      OTP_VERSION: "28.5.0.6"
       ZIG_VERSION: "0.15.2"
       # A branch build is stamped as one: nothing that carries this id is a
       # release, and the identity is still complete, so the engine inside the

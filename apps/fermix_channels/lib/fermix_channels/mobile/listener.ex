@@ -319,6 +319,7 @@ defmodule FermixChannels.Mobile.Listener do
         num_acceptors: @num_acceptors,
         num_connections: @num_connections,
         read_timeout: @read_timeout_ms,
+        handshake_timeout: TlsTransport.handshake_timeout_ms(),
         transport_module: TlsTransport
       ],
       http_1_options: @http_1_options,

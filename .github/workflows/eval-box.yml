@@ -90,7 +90,7 @@ jobs:
     # capability-sized wall-clock/tokens.
     timeout-minutes: ${{ inputs.tier == 'capability' && 180 || inputs.tier == 'regression' && 60 || 30 }}
     env:
-      ELIXIR_VERSION: "1.19.5"
+      ELIXIR_VERSION: "1.19.7"
       OTP_VERSION: "28"
       TIER: ${{ inputs.tier }}
       # The daemon under test: Anthropic's provider on the `model` input, at this
