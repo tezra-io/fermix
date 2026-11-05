@@ -283,8 +283,9 @@ it, never a second writer.
   home has turned on that runs only here stopping after the move, each named
   (iMessage on a Mac, voice calls, meetings; nothing to warn of when none is
   on); WhatsApp
-  turned on (warns: it needs an address on the internet the server does not
-  have, so it stops); Slack turned on without Socket Mode (warns: it stops
+  turned on (warns: it needs an address on the internet on the server, which
+  the Tailscale Funnel command Always On shows after the move gives it);
+  Slack turned on without Socket Mode (warns: it stops
   unless switched to Socket Mode in the Slack app's settings and Fermix's);
   coding agents approved here (warns: a move withdraws that approval, as
   every restore does, so they ask again on the server); the cutover gap
