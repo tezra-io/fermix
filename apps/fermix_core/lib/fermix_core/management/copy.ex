@@ -487,7 +487,8 @@ defmodule FermixCore.Management.Copy do
       "Optional: to also join the server to your tailnet, which WhatsApp and webhook " <>
         "sources need, run this instead. It asks for the enrollment code and then a " <>
         "Tailscale auth key, and shows neither: create the key in Tailscale's admin " <>
-        "console, tagged tag:fermix-server, one-off and pre-approved."
+        "console, tagged tag:fermix-server, one-off and pre-approved, and in your tailnet " <>
+        "policy let only your own devices reach the server."
 
   def summary_sentence(:data, _values),
     do:

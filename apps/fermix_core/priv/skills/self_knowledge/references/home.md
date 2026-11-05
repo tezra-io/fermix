@@ -224,8 +224,9 @@ it, never a second writer.
   the server to the owner's tailnet, which WhatsApp and webhook sources need:
   the same command with `--tailscale`, which then asks for a Tailscale auth
   key the same way (create it in Tailscale's admin console tagged
-  `tag:fermix-server`, one-off and pre-approved). **Cancel the code** closes
-  it. The code
+  `tag:fermix-server`, one-off and pre-approved, and let only your own
+  devices reach the server in the tailnet policy). **Cancel the code**
+  closes it. The code
   is `fxenroll1.` and a long string that carries
   a one-time secret, the primary's gateway key, its iroh endpoint id and
   relays, its name and when the window closes. The window lasts thirty
