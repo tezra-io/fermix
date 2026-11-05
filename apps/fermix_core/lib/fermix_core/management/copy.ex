@@ -107,7 +107,8 @@ defmodule FermixCore.Management.Copy do
     version: "Version",
     waits_until: "Waits until",
     disk: "Server disk",
-    runs_again: "Runs here again"
+    runs_again: "Runs here again",
+    connection: "Connection"
   ]
   @line_keys Keyword.keys(@line_labels) ++ [:backup, :copies, :backup_here]
   @docs_url "https://fermix.ai/docs/always-on/"
@@ -630,8 +631,10 @@ defmodule FermixCore.Management.Copy do
   `backup`'s `{place, at}`) stated in `ctx`'s `zone`; the space this
   computer's `copies` take, in bytes, on `ctx`'s `machine`; how full the
   server's `disk` is, a fraction; the copy on `ctx`'s `machine` a restore
-  takes (`backup_here`, when it was written); and what runs on this computer
-  again after a move back (`runs_again`, the features).
+  takes (`backup_here`, when it was written); what runs on this computer
+  again after a move back (`runs_again`, the features); and whether the link
+  to the server runs direct or through Fermix's relay (`connection`, `:direct`
+  or `:relay`).
   """
   @spec summary_line(atom(), term(), map()) :: %{String.t() => String.t()}
   def summary_line(:backup, {place, %DateTime{} = at}, %{zone: zone}),
@@ -651,6 +654,12 @@ defmodule FermixCore.Management.Copy do
 
   def summary_line(:waits_until, %DateTime{} = at, %{zone: zone}),
     do: line(summary_line_label(:waits_until), stated(at, zone))
+
+  def summary_line(:connection, :direct, _ctx),
+    do: line(summary_line_label(:connection), "Direct")
+
+  def summary_line(:connection, :relay, _ctx),
+    do: line(summary_line_label(:connection), "Through Fermix's network")
 
   def summary_line(key, value, _ctx)
       when key in [:server, :system, :version] and is_binary(value),

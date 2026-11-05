@@ -2174,6 +2174,8 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
         hello_state(%{
           discover: fn -> {:ok, candidates} end,
           iroh_candidate: fn -> {:ok, iroh} end,
+          # A phone is given no address hints: those are a desktop's.
+          iroh_hints: fn -> ["100.101.102.103:4033"] end,
           encode_server: fn "hello_ack", payload, 1 ->
             assert length(payload["candidates"]) == 16
             assert List.last(payload["candidates"]) == iroh

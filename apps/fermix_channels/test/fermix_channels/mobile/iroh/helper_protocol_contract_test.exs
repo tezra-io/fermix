@@ -3,6 +3,7 @@ defmodule FermixChannels.Mobile.Iroh.HelperProtocolContractTest do
   # from the codec: the fermix-iroh repository vendors it byte for byte.
   use ExUnit.Case, async: true
 
+  alias FermixChannels.Mobile.Iroh.Helper
   alias FermixChannels.Mobile.Iroh.HelperProtocol
 
   @dir Path.expand("../../../../../fermix_core/priv/iroh_helper", __DIR__)
@@ -18,7 +19,7 @@ defmodule FermixChannels.Mobile.Iroh.HelperProtocolContractTest do
   end
 
   test "every event fixture is one line, newline-terminated, and decodes" do
-    assert {:ok, %{event: :hello, protocol_version: 3, iroh_version: "1.3.0"}} =
+    assert {:ok, %{event: :hello, protocol_version: 4, iroh_version: "1.3.0"}} =
              HelperProtocol.decode_event(line("hello.json"))
 
     assert {:ok, %{event: :ready, endpoint_id: @endpoint_id}} =
@@ -48,6 +49,9 @@ defmodule FermixChannels.Mobile.Iroh.HelperProtocolContractTest do
               kind: :relay,
               relay: "https://us1.relay.fermix.ai/"
             }} = HelperProtocol.decode_event(line("dialed.json"))
+
+    assert {:ok, %{event: :dial_path, dial_id: "5f1c9a2e", kind: :direct, relay: nil}} =
+             HelperProtocol.decode_event(line("dial_path.json"))
 
     assert {:ok, %{event: :dial_failed, dial_id: "5f1c9a2e", reason: :unreachable}} =
              HelperProtocol.decode_event(line("dial_failed.json"))
@@ -84,6 +88,17 @@ defmodule FermixChannels.Mobile.Iroh.HelperProtocolContractTest do
       )
 
     assert decoded(start) == Jason.decode!(fixture("start.json"))
+
+    fixed =
+      HelperProtocol.start(
+        "/Users/owner/.fermix/mobile/iroh_key",
+        "/Users/owner/.fermix/mobile/bridge.sock",
+        relays,
+        limits,
+        4100
+      )
+
+    assert decoded(fixed) == Jason.decode!(fixture("start_bind_port.json"))
 
     assert decoded(HelperProtocol.start_dial_only(relays, limits)) ==
              Jason.decode!(fixture("start_dial_only.json"))
@@ -128,6 +143,22 @@ defmodule FermixChannels.Mobile.Iroh.HelperProtocolContractTest do
     assert %{"dial_id" => ^longest} = HelperProtocol.dial(longest, @endpoint_id, relays, socket)
   end
 
+  test "a start binds a fixed port only within 1 to 65535, or fails loud" do
+    relays = [%{"url" => "https://us1.relay.fermix.ai/", "quic_port" => 7842}]
+    limits = Helper.limits()
+
+    for port <- [0, 65_536, "4033", -1] do
+      assert_raise ArgumentError, fn ->
+        HelperProtocol.start("/k/iroh_key", "/k/bridge.sock", relays, limits, port)
+      end
+    end
+
+    refute Map.has_key?(
+             HelperProtocol.start("/k/iroh_key", "/k/b.sock", relays, limits),
+             "bind_port"
+           )
+  end
+
   test "a close names one peer by its lowercase hex endpoint id, or fails loud" do
     for id <- [String.upcase(@endpoint_id), "79b5", @endpoint_id <> "00"] do
       assert_raise ArgumentError, fn -> HelperProtocol.close(id) end
@@ -160,6 +191,9 @@ defmodule FermixChannels.Mobile.Iroh.HelperProtocolContractTest do
           ~s({"event":"dialed","dial_id":"d1","kind":"relay","relay":null}),
           ~s({"event":"dial_failed","dial_id":"d1","reason":"tired"}),
           ~s({"event":"dial_closed"}),
+          ~s({"event":"dial_path","dial_id":"d1","kind":"direct","relay":"https://x/"}),
+          ~s({"event":"dial_path","dial_id":"d1","kind":"relay","relay":null}),
+          ~s({"event":"dial_path","dial_id":"D1","kind":"direct","relay":null}),
           String.duplicate("x", HelperProtocol.max_line_bytes() + 1)
         ] do
       assert {:error, _reason} = HelperProtocol.decode_event(line), line

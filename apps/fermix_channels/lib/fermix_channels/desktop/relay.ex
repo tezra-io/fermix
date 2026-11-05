@@ -25,7 +25,18 @@ defmodule FermixChannels.Desktop.Relay do
   comes from a stale primary (a retired copy that kept the identity): the
   relay closes the session, says so, and keeps the epoch it holds. A higher
   one is recorded. A route with another relay revision is recorded too, so
-  the next `hello` acknowledges it and the primary may use it.
+  the next `hello` acknowledges it and the primary may use it, and so are
+  the route's address hints, an Always On server's tailnet addresses at its
+  fixed port (`FermixChannels.Mobile.Iroh.Hints`), none when it gives none.
+  Every dial names the hints the link holds.
+
+  ## The path
+
+  `status/1` names the session's path (`path`): `:direct` or `:relay`, as
+  the helper reported it when the dial opened (`dialed`) and at each change
+  after (`dial_path`); nil while no session is up, or while the helper has
+  said nothing of it. A change while the session is up tells the Always On
+  watch, like the session's own comings and goings.
 
   Every ending it did not ask for is retried after 1 s, doubling to 60 s, and
   the backoff starts over once a session is up. While the session is down,
@@ -101,7 +112,7 @@ defmodule FermixChannels.Desktop.Relay do
   session as a protocol error.
 
   Test seams: `:connect` (handed to `Rail.open/3` in place of dialing),
-  `:addrs` (a route's direct addresses, a test's), `:rail_opts`, `:schedule`
+  `:rail_opts`, `:schedule`
   and `:cancel_timer` (this process's timers, delivered by hand in a test),
   `:clock`, `:monotonic` (a 0-arity count of milliseconds), `:emit` and
   `:status_changed` (a 0-arity call in place of telling the Always On
@@ -179,7 +190,8 @@ defmodule FermixChannels.Desktop.Relay do
           epoch: pos_integer() | nil,
           sentence: String.t(),
           down_ms: non_neg_integer() | nil,
-          down_at: DateTime.t() | nil
+          down_at: DateTime.t() | nil,
+          path: :direct | :relay | nil
         }
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -208,7 +220,8 @@ defmodule FermixChannels.Desktop.Relay do
         epoch: nil,
         sentence: "The link to the server did not answer in time.",
         down_ms: nil,
-        down_at: nil
+        down_at: nil,
+        path: nil
       }
   end
 
@@ -347,7 +360,6 @@ defmodule FermixChannels.Desktop.Relay do
       staging: Keyword.get_lazy(opts, :staging, fn -> Media.staging_dir(root) end),
       helper: Keyword.get(opts, :helper),
       connect: Keyword.get(opts, :connect),
-      addrs: Keyword.get(opts, :addrs, []),
       rail_opts: Keyword.get(opts, :rail_opts, []),
       schedule: Keyword.get(opts, :schedule, &Process.send_after(self(), &1, &2)),
       cancel_timer: Keyword.get(opts, :cancel_timer, &Process.cancel_timer/1),
@@ -366,6 +378,7 @@ defmodule FermixChannels.Desktop.Relay do
       since: nil,
       connector: nil,
       rail: nil,
+      path: nil,
       failures: 0,
       degraded?: false,
       renewals: 0,
@@ -470,16 +483,18 @@ defmodule FermixChannels.Desktop.Relay do
     route = route(state)
     opts = rail_opts(state)
     {:ok, connector} = Task.start_link(fn -> run_connector(relay, route, opts) end)
-    %{state | connector: connector, rail: nil, phase: :connecting}
+    %{state | connector: connector, rail: nil, path: nil, phase: :connecting}
   end
 
-  defp route(%{link: %{primary: primary}, addrs: addrs}) do
-    route = %{node_id: primary.node_id, relays: primary.relays, relays_rev: primary.relays_rev}
-    if addrs == [], do: route, else: Map.put(route, :addrs, addrs)
-  end
+  defp route(%{link: %{primary: primary}}),
+    do: Map.take(primary, [:node_id, :relays, :relays_rev, :addrs])
 
   defp rail_opts(state) do
-    base = [static_keypair: state.keypair, remote_static: state.link.primary.gateway_pk]
+    base = [
+      static_keypair: state.keypair,
+      remote_static: state.link.primary.gateway_pk,
+      paths: true
+    ]
 
     reach =
       if is_function(state.connect, 0),
@@ -517,6 +532,10 @@ defmodule FermixChannels.Desktop.Relay do
         send(relay, {:relay_connector, self(), {:event, header, tail}})
         carry(relay, rail)
 
+      {:rail, ^rail, {:path, path}} ->
+        send(relay, {:relay_connector, self(), {:path, path}})
+        carry(relay, rail)
+
       :close ->
         close_rail(rail)
     end
@@ -552,6 +571,17 @@ defmodule FermixChannels.Desktop.Relay do
 
   defp connector_message({:closed, reason}, state),
     do: {:noreply, link_down(ending(reason, state), %{state | connector: nil, rail: nil})}
+
+  defp connector_message({:path, %{kind: kind}}, %{path: kind} = state), do: {:noreply, state}
+
+  defp connector_message({:path, %{kind: kind}}, state) do
+    if state.phase == :connected do
+      Logger.info("desktop relay: the session to #{name(state)} runs #{path_words(kind)}")
+      :ok = state.status_changed.()
+    end
+
+    {:noreply, %{state | path: kind}}
+  end
 
   defp connector_message({:event, %{"t" => type} = header, tail}, state) do
     fields = Map.drop(header, ["v", "t", "seq"])
@@ -664,8 +694,11 @@ defmodule FermixChannels.Desktop.Relay do
            fields["candidates"] || [],
            &match?(%{"kind" => "iroh", "node_id" => ^node_id}, &1)
          ) do
-      %{"relays" => relays, "relays_rev" => rev} -> record_route(link, {relays, rev}, root)
-      nil -> link
+      %{"relays" => relays, "relays_rev" => rev} = route ->
+        record_route(link, {relays, rev, Map.get(route, "addrs", [])}, root)
+
+      nil ->
+        link
     end
   end
 
@@ -675,10 +708,13 @@ defmodule FermixChannels.Desktop.Relay do
         link
 
       {:error, reason} ->
-        Logger.error("desktop relay: the primary's relay list was not kept: #{inspect(reason)}")
+        Logger.error("desktop relay: the primary's route was not kept: #{inspect(reason)}")
         link
     end
   end
+
+  defp path_words(:direct), do: "directly"
+  defp path_words(:relay), do: "through the relay"
 
   # An error that names a ref ends that fetch; any other the primary's own
   # refusal of something this desktop sent, which leaves the session open.
@@ -1131,6 +1167,8 @@ defmodule FermixChannels.Desktop.Relay do
         :outage -> outage(reason, state)
       end
 
+    state = %{state | path: nil}
+
     :ok = state.status_changed.()
     state
   end
@@ -1355,20 +1393,24 @@ defmodule FermixChannels.Desktop.Relay do
       epoch: nil,
       sentence: state.sentence,
       down_ms: down_ms(state),
-      down_at: state.down_at
+      down_at: state.down_at,
+      path: nil
     }
   end
 
   defp status_view(state) do
+    connected? = state.phase == :connected
+
     %{
       name: state.link.primary.name,
-      connected: state.phase == :connected,
+      connected: connected?,
       status: state.word,
       since: state.since,
       epoch: state.link.epoch,
       sentence: state.sentence,
       down_ms: down_ms(state),
-      down_at: state.down_at
+      down_at: state.down_at,
+      path: if(connected?, do: state.path)
     }
   end
 

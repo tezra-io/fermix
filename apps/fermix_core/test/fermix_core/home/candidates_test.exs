@@ -86,6 +86,31 @@ defmodule FermixCore.Home.CandidatesTest do
     assert {:ok, []} = Candidates.lapsed(home, later)
   end
 
+  # Always On: the server's tailnet addresses at its fixed port, which the
+  # move dials it with and the desktop link keeps. None is the normal case.
+  test "a candidate keeps the address hints it enrolled with, and none when it gave none",
+       %{home: home} do
+    hints = ["100.101.102.103:4033", "[fd7a:115c:a1e0::9]:4033"]
+    {:ok, hinted} = Candidates.add(home, Map.put(attrs("north-box"), :addrs, hints), @now)
+    {:ok, plain} = Candidates.add(home, attrs("south-box"), @now)
+
+    assert hinted.addrs == hints
+    assert plain.addrs == []
+    assert {:ok, [^hinted, ^plain]} = Candidates.list(home, @now)
+    assert {:ok, ^hinted} = hinted |> Candidates.encode() |> Candidates.decode()
+    refute Map.has_key?(Candidates.view(hinted), "addrs")
+
+    # A record from before hints were kept reads as none; a bad one is refused.
+    assert {:ok, %{addrs: []}} =
+             plain |> Candidates.encode() |> Map.delete("addrs") |> Candidates.decode()
+
+    assert {:error, :invalid_candidate} =
+             hinted
+             |> Candidates.encode()
+             |> Map.put("addrs", ["north-box:4033"])
+             |> Candidates.decode()
+  end
+
   test "a file Fermix did not write is refused, not read", %{home: home} do
     File.mkdir_p!(Path.dirname(Candidates.path(home)))
     File.write!(Candidates.path(home), ~s({"v":1,"candidates":[{"name":"x"}]}))

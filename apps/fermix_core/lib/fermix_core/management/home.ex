@@ -13,8 +13,10 @@ defmodule FermixCore.Management.Home do
       set, `@primary_statuses`: `connected`, `renewing` (a session opening
       with nothing known wrong, drawn quietly), `unreachable`, `revoked` or
       `stale`, as `FermixChannels.Desktop.Relay` says them), `since` (null
-      while not connected), `epoch` (the highest primary epoch seen) and
-      `sentence`; null otherwise.
+      while not connected), `epoch` (the highest primary epoch seen),
+      `sentence`, and `path` while a session is up and its helper has named
+      it: `direct` or `relay` (through Fermix's relay), absent otherwise;
+      null otherwise.
     * `desktops`: on the primary, its desktop peers: `device_id`, `name`,
       `connected` and `since` (null while not connected); empty otherwise.
     * `primary_home`: on a linked desktop, the primary's own `home.status`
@@ -501,7 +503,15 @@ defmodule FermixCore.Management.Home do
       "epoch" => Map.get(primary, :epoch),
       "sentence" => sentence
     }
+    |> put_path(connected, Map.get(primary, :path))
   end
+
+  # Added after `home.status`'s minimum: absent while no session is up, or
+  # while its helper has not named the path.
+  defp put_path(view, true, path) when path in [:direct, :relay],
+    do: Map.put(view, "path", Atom.to_string(path))
+
+  defp put_path(view, _connected, path) when path in [nil, :direct, :relay], do: view
 
   defp desktop_view(%{device_id: id, name: name, connected: connected} = desktop)
        when is_binary(id) and is_boolean(connected) do

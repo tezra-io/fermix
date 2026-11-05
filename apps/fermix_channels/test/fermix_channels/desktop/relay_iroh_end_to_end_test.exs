@@ -5,14 +5,24 @@ defmodule FermixChannels.Desktop.RelayIrohEndToEndTest do
   with the desktop's key against the primary's real `Session`, says `hello`,
   and forwards a management call the primary's `manage` family answers.
 
+  The primary is an Always On server (helper protocol 4): its endpoint binds
+  the fixed port it is given, its session tells the desktop its address
+  hints, and the relay dials the hint its link holds and names the path the
+  helper reports.
+
   Opt-in, because it needs the helper built from a `fermix-iroh` checkout
   (`cargo build --release --locked`):
 
       FERMIX_IROH_DIR=../fermix-iroh mix test --only iroh_end_to_end
 
   Run without `FERMIX_IROH_DIR` it fails, never passes empty. As in
-  `Mobile.Iroh.EndToEndTest`, the dial names the listener's UDP address,
-  because no relay can be trusted locally by the released helper.
+  `Mobile.Iroh.EndToEndTest`, the dial reaches the listener only at its UDP
+  address, here the server's hint, because no relay can be trusted locally
+  by the released helper: the relay never resolves, so this is also the
+  link with its relay unreachable and only the hint. The hint is the
+  loopback one, given through the session's own seam: a tailnet address
+  cannot reach a listener on this machine, and the interfaces stay the
+  test's.
   """
 
   use ExUnit.Case, async: false
@@ -72,7 +82,14 @@ defmodule FermixChannels.Desktop.RelayIrohEndToEndTest do
     end
 
     families = %{manage: {Manage, serve: serve}}
-    {endpoint_id, port} = start_listener(ctx, primary_root, names, registry, desktop, families)
+    port = free_udp_port()
+    hint = "127.0.0.1:#{port}"
+
+    {endpoint_id, bound} =
+      start_listener(ctx, primary_root, names, registry, desktop, families, port)
+
+    # The server's endpoint is on the port it was given, not one iroh picked.
+    assert bound == port
 
     desktop_root = root!("fx-re-d")
 
@@ -84,7 +101,8 @@ defmodule FermixChannels.Desktop.RelayIrohEndToEndTest do
           gateway_pk: identity.gateway_public_key,
           node_id: endpoint_id,
           relays: [@relay],
-          relays_rev: "0123456789abcdef"
+          relays_rev: "0123456789abcdef",
+          addrs: [hint]
         },
         epoch: 3
       })
@@ -97,7 +115,6 @@ defmodule FermixChannels.Desktop.RelayIrohEndToEndTest do
        name: names.relay,
        root: desktop_root,
        helper: dialer,
-       addrs: ["127.0.0.1:#{port}"],
        schedule: fn message, delay ->
          send(test, {:scheduled, message, delay})
          make_ref()
@@ -109,6 +126,10 @@ defmodule FermixChannels.Desktop.RelayIrohEndToEndTest do
     assert %{connected: true, epoch: 3, name: "fermix-vm"} = await_connected(names.relay, 300)
     assert [%{device_id: @device_id}] = Peer.connected(names.peers)
 
+    # The dial went straight to the hint, and the session said it again.
+    assert %{path: :direct} = Relay.status(names.relay)
+    assert {:ok, %{primary: %{addrs: [^hint]}}} = DesktopLink.read(desktop_root)
+
     request = %{request_id: "r-1", protocol_version: 2, method: "cues.status", params: %{}}
     assert {:ok, %{"answered_by" => "primary"}} = Relay.forward(names.relay, request)
     assert_receive {:served, "cues.status"}, @timeout_ms
@@ -117,7 +138,7 @@ defmodule FermixChannels.Desktop.RelayIrohEndToEndTest do
 
   # -- the primary's rail ------------------------------------------------------------
 
-  defp start_listener(ctx, root, names, registry, desktop, families) do
+  defp start_listener(ctx, root, names, registry, desktop, families, port) do
     revisions = Source.parse!(%{"revisions" => [%{"iroh" => "1.3.0", "relays" => [@relay]}]})
     desktop_public = desktop.public
     peer_supervisor = names.peer_supervisor
@@ -138,7 +159,8 @@ defmodule FermixChannels.Desktop.RelayIrohEndToEndTest do
       discover: fn -> {:ok, []} end,
       desktop_peers: names.peers,
       desktop_peer_supervisor: peer_supervisor,
-      start_desktop_peer: &Peer.start(peer_supervisor, Keyword.put(&1, :families, families))
+      start_desktop_peer: &Peer.start(peer_supervisor, Keyword.put(&1, :families, families)),
+      iroh_hints: fn -> ["127.0.0.1:#{port}"] end
     ]
 
     opts = [
@@ -149,7 +171,9 @@ defmodule FermixChannels.Desktop.RelayIrohEndToEndTest do
       helper_opts: [
         binary_path: ctx.helper,
         revisions: revisions,
-        list_devices: fn _store -> {:ok, []} end
+        list_devices: fn _store -> {:ok, []} end,
+        bind_port: port,
+        interfaces: fn -> {:ok, []} end
       ]
     ]
 
@@ -163,8 +187,17 @@ defmodule FermixChannels.Desktop.RelayIrohEndToEndTest do
       end)
 
     %{endpoint_id: endpoint_id} = Helper.status(names.iroh_helper)
-    [_all, port] = Regex.run(~r/bound UDP sockets: .*?(?:0\.0\.0\.0|127\.0\.0\.1):(\d+)/, log)
-    {endpoint_id, String.to_integer(port)}
+    [_all, bound] = Regex.run(~r/bound UDP sockets: .*?(?:0\.0\.0\.0|127\.0\.0\.1):(\d+)/, log)
+    {endpoint_id, String.to_integer(bound)}
+  end
+
+  # A UDP port nothing holds now, for the server's fixed one (never 4033,
+  # which a Fermix running on this machine may hold).
+  defp free_udp_port do
+    {:ok, socket} = :gen_udp.open(0, ip: {0, 0, 0, 0})
+    {:ok, port} = :inet.port(socket)
+    :ok = :gen_udp.close(socket)
+    port
   end
 
   defp start_registry(names) do

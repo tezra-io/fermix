@@ -31,6 +31,11 @@ defmodule FermixChannels.Mobile.Rail do
   It does not reassemble M75's chunked payloads (`index`/`last`): that is
   `Mobile.Chunks`, which consumers run on the events they get.
 
+  A route's `addrs` are its direct address hints (an Always On server's
+  tailnet addresses at its fixed port, `Iroh.Hints`), at most 8, named on the
+  dial beside its relays; a route with none dials through the relays alone,
+  and a hint that fails is iroh's to pass over.
+
   ## The owner
 
   The process that calls `open/3` owns the session and is linked to it. It
@@ -40,7 +45,10 @@ defmodule FermixChannels.Mobile.Rail do
   `{:rail, rail, {:closed, reason}}`. The session then exits `:normal`, so the
   link carries only a crash (an owner that traps exits also sees that
   `{:EXIT, rail, :normal}`). An owner that exits takes the session down with a
-  close `1000`.
+  close `1000`. An owner that opens with `paths: true` also gets
+  `{:rail, rail, {:path, %{kind: :direct | :relay, relay: url | nil}}}`: the
+  dialed connection's path once the session is open, then each change the
+  helper reports.
 
   ## Modes
 
@@ -50,8 +58,9 @@ defmodule FermixChannels.Mobile.Rail do
   | `:ikpsk2_enroll` | `FXM1 0x03` | `static_keypair` (the candidate's), `remote_static` (the code's `gateway_pk`), `psk` (the code's secret) |
   | `:ik_move` | `FXM1 0x04` | `static_keypair` (the source's gateway key), `remote_static` (the candidate's key) |
 
-  A test connects to a Unix socket of its own instead of dialing (`:connect`),
-  and injects the timers (`:schedule`, `:cancel_timer`).
+  A test connects to a Unix socket of its own instead of dialing (`:connect`,
+  answering `{:ok, socket}` or, with the path it stands for, `{:ok, socket,
+  path}`), and injects the timers (`:schedule`, `:cancel_timer`).
   """
 
   use GenServer, restart: :temporary
@@ -78,6 +87,7 @@ defmodule FermixChannels.Mobile.Rail do
   # waits for it, and no longer.
   @send_timeout_ms 30_000
   @send_call_timeout_ms @send_timeout_ms + 5_000
+  @max_addrs 8
   @max_event_parts div(
                      Protocol.max_event_bytes() + Protocol.max_raw_chunk_bytes() - 1,
                      Protocol.max_raw_chunk_bytes()
@@ -85,8 +95,8 @@ defmodule FermixChannels.Mobile.Rail do
 
   @typedoc """
   Where to dial: a route as `hello_ack`'s `iroh` candidate names one (relays as
-  the wire carries them). `addrs` (direct `ip:port` addresses) only in a test
-  that knows where the peer listens.
+  the wire carries them), with its direct `ip:port` address hints (`addrs`),
+  when it has any.
   """
   @type route :: %{
           required(:node_id) => String.t(),
@@ -112,6 +122,7 @@ defmodule FermixChannels.Mobile.Rail do
 
   Options: `:static_keypair` and `:remote_static` (always), `:psk` (only and
   always for `:ikpsk2_enroll`), `:helper` (the `Iroh.Helper` to dial through),
+  `:paths` (true: tell the owner the connection's path, see the moduledoc),
   or the test seams `:connect` (a function the session calls to get a
   connected, passive, binary socket instead of dialing), `:schedule` and
   `:cancel_timer`.
@@ -120,6 +131,7 @@ defmodule FermixChannels.Mobile.Rail do
   def open(%{node_id: node_id, relays: [_ | _], relays_rev: rev} = route, mode, opts)
       when is_binary(node_id) and is_binary(rev) and mode in @modes and is_list(opts) do
     with :ok <- valid_node_id(node_id),
+         :ok <- valid_addrs(Map.get(route, :addrs, [])),
          :ok <- valid_keys(mode, opts),
          :ok <- valid_connect(opts) do
       {:ok, rail} = GenServer.start_link(__MODULE__, {route, mode, opts, self()})
@@ -145,6 +157,12 @@ defmodule FermixChannels.Mobile.Rail do
   defp valid_node_id(node_id) do
     if Regex.match?(~r/\A[0-9a-f]{64}\z/, node_id), do: :ok, else: {:error, :invalid_node_id}
   end
+
+  defp valid_addrs(addrs) when is_list(addrs) and length(addrs) <= @max_addrs do
+    if Enum.all?(addrs, &is_binary/1), do: :ok, else: {:error, :invalid_addrs}
+  end
+
+  defp valid_addrs(_addrs), do: {:error, :invalid_addrs}
 
   defp valid_keys(mode, opts) do
     keypair = Keyword.get(opts, :static_keypair)
@@ -220,6 +238,8 @@ defmodule FermixChannels.Mobile.Rail do
       socket: nil,
       noise: nil,
       version: Protocol.protocol_version(),
+      paths?: Keyword.get(opts, :paths, false) == true,
+      path: nil,
       client_seq: 0,
       server_seq: 0,
       parts: nil,
@@ -236,6 +256,7 @@ defmodule FermixChannels.Mobile.Rail do
     case connect_and_handshake(state) do
       {:ok, state} ->
         send(state.owner, {:rail_opened, self(), :ok})
+        :ok = tell_path(state)
         {:noreply, state |> arm(:idle, @idle_timeout_ms) |> arm_lifetime()}
 
       {:error, reason} ->
@@ -286,6 +307,14 @@ defmodule FermixChannels.Mobile.Rail do
     end
   end
 
+  # The helper's word that the dialed connection moved (hole punching took it
+  # off the relay, or back): this session has one dial, whatever its id.
+  def handle_info({:iroh_dial, _dial_id, {:path, path}}, state) do
+    state = %{state | path: path}
+    :ok = tell_path(state)
+    {:noreply, state}
+  end
+
   # The socket is linked to its owner, and the helper's word that the dialed
   # stream ended arrives after the socket says so: neither adds anything.
   def handle_info(_message, state), do: {:noreply, state}
@@ -308,13 +337,21 @@ defmodule FermixChannels.Mobile.Rail do
 
   # -- opening -------------------------------------------------------------------
 
+  defp tell_path(%{paths?: true, path: %{kind: kind} = path} = state)
+       when kind in [:direct, :relay] do
+    send(state.owner, {:rail, self(), {:path, path}})
+    :ok
+  end
+
+  defp tell_path(_state), do: :ok
+
   # A socket whose handshake fails is closed here; only a session that opened
   # keeps it.
   defp connect_and_handshake(state) do
-    with {:ok, socket} <- connect(state) do
+    with {:ok, socket, path} <- connect(state) do
       case handshake(socket, state) do
         {:ok, noise} ->
-          {:ok, %{state | socket: socket, noise: noise}}
+          {:ok, %{state | socket: socket, noise: noise, path: path}}
 
         {:error, reason} ->
           _ = :gen_tcp.close(socket)
@@ -334,18 +371,23 @@ defmodule FermixChannels.Mobile.Rail do
     end
   end
 
+  # A test's socket stands for a path only when it names one.
   defp connect(%{opts: opts, route: route}) do
     case Keyword.fetch(opts, :connect) do
-      {:ok, connect} -> connect.()
+      {:ok, connect} -> connected(connect.())
       :error -> dial(Keyword.fetch!(opts, :helper), route)
     end
   end
+
+  defp connected({:ok, socket}), do: {:ok, socket, nil}
+  defp connected({:ok, socket, path}), do: {:ok, socket, path}
+  defp connected({:error, reason}), do: {:error, reason}
 
   defp dial(helper, route) do
     target = Map.take(route, [:node_id, :relays, :addrs])
 
     case Helper.dial(helper, target) do
-      {:ok, socket, _path} -> {:ok, socket}
+      {:ok, socket, path} -> {:ok, socket, path}
       {:error, reason} -> {:error, {:dial, reason}}
     end
   end

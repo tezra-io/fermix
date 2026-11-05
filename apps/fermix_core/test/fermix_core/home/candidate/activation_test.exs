@@ -234,6 +234,9 @@ defmodule FermixCore.Home.Candidate.ActivationTest do
     assert File.read!(Path.join([ctx.home, "journals", "day.md"])) == "an invented day\n"
     refute File.exists?(Path.join([ctx.home, "journals", "own.md"]))
     refute Candidate.present?(ctx.home)
+    # The moved settings replaced the candidate's; the machine is still the
+    # Always On server its enrollment made it.
+    assert Candidate.server?(ctx.home)
   end
 
   test "a crash in the middle is finished by the next boot of either role", ctx do

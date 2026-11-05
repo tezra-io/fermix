@@ -30,12 +30,14 @@ defmodule FermixChannels.Home.MoveTest do
 
   @destination %{"s3_bucket" => "invented-bucket-91", "s3_region" => "eu-north-1"}
   @primary_record %{role: :primary, primary: nil}
+  # The candidate is an Always On server on a tailnet.
+  @hints ["100.101.102.103:4033", "[fd7a:115c:a1e0::9]:4033"]
 
   setup do
     primary = HomeMove.primary!()
     {:ok, %{code: code}} = Enrollment.open(primary.enrollment)
     home = HomeMove.candidate_home!(code, destination: @destination)
-    candidate = HomeMove.start_candidate!(home, primary)
+    candidate = HomeMove.start_candidate!(home, primary, hints: fn -> @hints end)
     %{"candidate_id" => candidate_id} = HomeMove.await_phase(home, "enrolled")
 
     # The recovery key the primary keeps (`Snapshot.Recovery.verify_or_set/2`).
@@ -57,7 +59,18 @@ defmodule FermixChannels.Home.MoveTest do
 
   test "the home moves: the source is retired and linked, the candidate is the primary", ctx do
     source = ctx.primary.root
-    run_worker(source, ctx.candidate)
+    test = self()
+    bridge = DesktopRail.bridge_connect(ctx.candidate.bridge_socket)
+
+    run_worker(source, ctx.candidate,
+      connect: fn route ->
+        send(test, {:dialed, route})
+        bridge
+      end
+    )
+
+    # The move dials the server at the addresses it enrolled with.
+    assert_received {:dialed, %{addrs: @hints}}
 
     # The source: retired, linked, its desktop key its own; the ending is
     # the relaunched desktop's to say.
@@ -73,6 +86,8 @@ defmodule FermixChannels.Home.MoveTest do
     assert link.primary.name == "north-box"
     assert link.primary.gateway_pk == ctx.primary.gateway.public
     assert link.primary.node_id == ctx.primary.node_id
+    # The desktop dials its server there too, until the server says otherwise.
+    assert link.primary.addrs == @hints
     assert {:ok, desktop_key} = DesktopLink.read_key(source)
 
     # The candidate: activated at epoch + 1 with the destination facts.

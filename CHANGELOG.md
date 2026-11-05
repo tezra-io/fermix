@@ -271,6 +271,19 @@ will be part of a future release; nothing in this group is in a release yet.
   passphrase never reaches a log line, a crash report or a trace
   on the way, and the setup page's request logs hide any field named for a
   passphrase.
+- **Your computer reaches your Always On server directly on your tailnet,
+  and Always On says how it is connected.** The server's Fermix now listens
+  on one fixed UDP port, 4033, and tells your computer its Tailscale
+  addresses when it enrolls and each time your computer connects. Your
+  computer tries them beside Fermix's relay, so on the same tailnet it
+  reaches the server even while the relay is down. A server without
+  Tailscale gives none and connects through the relay as before. While the
+  link is up, Always On's Details end with Connection, Direct or Through
+  Fermix's network, `fermix doctor` has a server link line saying the same,
+  and `home.status` names the path (`primary.path`, `direct` or `relay`). If
+  something else on the server holds port 4033, Doctor's remote reach line
+  names the port, and Fermix tries again on its backoff, saying so once in
+  the log instead of at every try.
 
 ### Added
 

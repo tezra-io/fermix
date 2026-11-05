@@ -37,7 +37,10 @@ defmodule FermixChannels.Home.MoveWorker do
   **The commit.** On `move_ready` the worker records the ready epoch, writes
   `moved.json` (`to` the candidate's name) and `device/desktop.json` (the
   source's own gateway key and node id, since the identity bundle moves),
-  records `committing`, and only then sends `move_commit`. On `move_done` it
+  records `committing`, and only then sends `move_commit`. The link names the
+  candidate's address hints (an Always On server's tailnet addresses, which
+  the move dialed it with), so the desktop dials its new primary there too.
+  On `move_done` it
   records `committed` and restarts, and the engine boots as a desktop of the
   new primary, whose boot records `done`: an ending is published only by the
   engine that came back, never by one about to stop. Once `moved.json` exists the move is never aborted: a lost
@@ -478,7 +481,8 @@ defmodule FermixChannels.Home.MoveWorker do
           gateway_pk: identity.gateway_public_key,
           node_id: node_id,
           relays: Relays.to_wire(current.relays),
-          relays_rev: current.id
+          relays_rev: current.id,
+          addrs: ctx.request["candidate"].addrs
         },
         epoch: epoch
       })
@@ -565,7 +569,7 @@ defmodule FermixChannels.Home.MoveWorker do
   defp probe_primary(ctx, epoch) do
     with {:ok, link} <- DesktopLink.read(ctx.home),
          {:ok, keypair} <- DesktopLink.read_key(ctx.home),
-         route = Map.take(link.primary, [:node_id, :relays, :relays_rev]),
+         route = Map.take(link.primary, [:node_id, :relays, :relays_rev, :addrs]),
          {:ok, rail} <-
            rail_open(ctx, route, :ik,
              static_keypair: keypair,
@@ -715,7 +719,8 @@ defmodule FermixChannels.Home.MoveWorker do
       route = %{
         node_id: candidate.node_id,
         relays: candidate.relays,
-        relays_rev: Relays.current().id
+        relays_rev: Relays.current().id,
+        addrs: candidate.addrs
       }
 
       rail_open(ctx, route, :ik_move, static_keypair: keypair, remote_static: candidate.noise_pk)

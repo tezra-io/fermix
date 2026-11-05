@@ -586,7 +586,11 @@ routes for later reconnects, best first: `{host, interface, scope}`, where
 `host` is an address or a MagicDNS name of at most 253 bytes and `scope` is
 `lan` or `tailnet`. While remote reach is ready the last of them is the route
 `{kind: "iroh", node_id, relays[], relays_rev}`, each relay `{url,
-quic_port}`, and the host routes are cut to 15. A host route has no `kind`;
+quic_port}`, and the host routes are cut to 15. On a desktop's session the
+route also carries `addrs[]`, 1 to 8 direct UDP addresses (`ip:port`, an IPv6
+address in brackets) the desktop dials beside the relays: an Always On
+server's tailnet addresses at its fixed port, read when the `hello_ack` is
+sent, and absent when it has none; a phone's route never carries them. A host route has no `kind`;
 a phone skips a candidate whose `kind` it does not know. A daemon whose listener is bound to one address lists only
 that address, with its MagicDNS name when it is a tailnet address, here and in
 the pairing link. A daemon that cannot list its addresses sends an empty list,
@@ -1037,7 +1041,7 @@ first frame within 10 s of the handshake, or the stream closes `1008`.
 
 | `t` | Required payload | Rules |
 |---|---|---|
-| `enroll_request` | `host{name, os, arch, version}`, `candidate{node_id, relays[], recipient}`; `snapshots?{s3_bucket, s3_region}` | candidate to primary, the session's first event; `node_id` and `relays` (1 to 8) as a route's; `recipient` the one-time X25519 public key (32 bytes, standard base64) the move's stream will be encrypted to; each text at most 128 bytes |
+| `enroll_request` | `host{name, os, arch, version}`, `candidate{node_id, relays[], recipient, addrs[]?}`; `snapshots?{s3_bucket, s3_region}` | candidate to primary, the session's first event; `node_id` and `relays` (1 to 8) as a route's; `recipient` the one-time X25519 public key (32 bytes, standard base64) the move's stream will be encrypted to; `addrs` (1 to 8, absent when it has none) the direct addresses an Always On server listens on, as a desktop route's, which the move dials and the moved desktop's link keeps; each text at most 128 bytes |
 | `enroll_accepted` | `candidate_id`, `primary_name` | primary to candidate; the session then closes `1000` |
 
 A refused enrollment is an `error` with `code` `enrollment_expired`,

@@ -26,6 +26,33 @@ defmodule FermixChannels.Test.DesktopRail do
   alias FermixTestSupport.PrimaryHome
   alias FermixTestSupport.SafeRm
 
+  defmodule DialSpy do
+    @moduledoc """
+    An `Iroh.Helper` that takes each dial, tells the test the op it was asked
+    (`{:dial_op, op}`), and answers it unreachable: what `Helper.dial/3`
+    sends, seen whole. Started with the test's pid and the dial socket's path.
+    """
+    use GenServer
+
+    def start_link({test, socket}), do: GenServer.start_link(__MODULE__, {test, socket})
+
+    @impl true
+    def init({test, socket}), do: {:ok, %{test: test, socket: socket, owner: nil}}
+
+    @impl true
+    def handle_call({:reserve_dial, owner}, _from, state),
+      do: {:reply, {:ok, "d1", state.socket}, %{state | owner: owner}}
+
+    def handle_call({:dial, id, op}, _from, state) do
+      send(state.test, {:dial_op, op})
+      send(state.owner, {:iroh_dial, id, {:failed, :unreachable}})
+      {:reply, :ok, state}
+    end
+
+    @impl true
+    def handle_cast({:forget_dial, _id}, state), do: {:noreply, state}
+  end
+
   @device_id "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e"
   @node_id "79b5562e8fe654f94078b112e8a98ba7901f853ae695bed7e0e3910bad049664"
   @preamble "FXB1" <> <<1>> <> Base.decode16!(@node_id, case: :lower)
@@ -49,7 +76,8 @@ defmodule FermixChannels.Test.DesktopRail do
   `:families` (the desktop peer's families, or a function of the primary's
   names, `%{tunnels, socket_dir, peers}`, answering them), `:revoked` (an Agent of whether
   the desktop's row is gone), `:hello_ack_builder`, `:media_descriptor` and
-  `:media_store` (the session's media seams).
+  `:media_store` (the session's media seams), and `:iroh_candidate` and
+  `:iroh_hints` (its rail's route and address hints).
   """
   def primary!(opts \\ []) do
     root = root!("fx-dp")
@@ -168,13 +196,20 @@ defmodule FermixChannels.Test.DesktopRail do
       desktop_peers: primary.peers,
       desktop_peer_supervisor: peer_supervisor,
       start_desktop_peer: &Peer.start(peer_supervisor, Keyword.put(&1, :families, families))
-    ] ++ Keyword.take(opts, [:hello_ack_builder, :media_descriptor, :media_store])
+    ] ++
+      Keyword.take(opts, [
+        :hello_ack_builder,
+        :media_descriptor,
+        :media_store,
+        :iroh_candidate,
+        :iroh_hints
+      ])
   end
 
   @doc """
-  A desktop's home after the move: `device/desktop.json` naming the primary
-  and the epoch it last saw (`:epoch`, 3), and the desktop's key at
-  `:key_mode` (0600).
+  A desktop's home after the move: `device/desktop.json` naming the primary,
+  the epoch it last saw (`:epoch`, 3) and its address hints (`:addrs`, none),
+  and the desktop's key at `:key_mode` (0600).
   """
   def desktop_home!(primary, opts \\ []) do
     root = root!("fx-dd")
@@ -186,7 +221,8 @@ defmodule FermixChannels.Test.DesktopRail do
         gateway_pk: primary.gateway_public_key,
         node_id: @node_id,
         relays: @relays,
-        relays_rev: @relays_rev
+        relays_rev: @relays_rev,
+        addrs: Keyword.get(opts, :addrs, [])
       },
       epoch: Keyword.get(opts, :epoch, 3)
     }
@@ -231,6 +267,26 @@ defmodule FermixChannels.Test.DesktopRail do
 
     start_supervised!({Relay, relay_opts}, id: name)
     name
+  end
+
+  @doc "Waits until `device/desktop.json` under `root` satisfies `fun`, within 10 s."
+  def await_link(root, fun, attempts \\ 1_000) do
+    case DesktopLink.read(root) do
+      {:ok, link} = read when attempts == 0 ->
+        if fun.(link), do: link, else: raise("the link never changed: #{inspect(read)}")
+
+      {:ok, link} ->
+        if fun.(link), do: link, else: await_link_again(root, fun, attempts)
+
+      _unread ->
+        await_link_again(root, fun, attempts)
+    end
+  end
+
+  defp await_link_again(root, fun, attempts) do
+    # sleep: polls a file the relay writes and announces to nobody
+    Process.sleep(10)
+    await_link(root, fun, attempts - 1)
   end
 
   @doc """

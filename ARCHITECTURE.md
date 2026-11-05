@@ -1463,10 +1463,20 @@ Current channels:
 - Remote reach is the iroh rail (M62), `Mobile.Iroh`, the last child of
   `Mobile.Supervisor` (`:rest_for_one`: the bridge's connections, `Iroh.Bridge`
   on `mobile/bridge.sock`, then `Iroh.Helper`). `Iroh.Helper` owns the
-  `fermix-iroh` port and holds it to `Iroh.HelperProtocol` (helper protocol 3,
+  `fermix-iroh` port and holds it to `Iroh.HelperProtocol` (helper protocol 4,
   `priv/iroh_helper/PROTOCOL.md`, which the helper repository vendors): it
   refuses any other `protocol_version`, and a helper that fails is reported
-  and retried, never allowed to stop the daemon. The helper copies each
+  and retried on a backoff (a repeated failure logged once per run of it),
+  never allowed to stop the daemon. On an Always On server (the machine
+  `fermix home enroll` marked, `Home.Candidate.server?/1`, a device-local
+  mark) the listening helper binds the fixed UDP port 4033
+  (`Iroh.Hints.bind_port/1`), as a candidate and as the primary; every other
+  engine binds iroh's own. Its `Iroh.Helper.hints/1` are the machine's
+  Tailscale addresses at that port, read when asked: the candidate's
+  `enroll_request` and every desktop session's `hello_ack` carry them, the
+  candidate record, the move's dial and the desktop link keep them, and every
+  dial to the server names them beside its relays. There is no second
+  carrier. The helper copies each
   accepted iroh stream to one bridge connection, where
   `Iroh.BridgeConnection` runs a `Session` as for a WebSocket. The helper runs
   in one of two modes: `:listen` (the home's `mobile/iroh_key` and the bridge,
@@ -1484,8 +1494,9 @@ Current channels:
   mobile wire as a phone does (carrier frames, Noise transport with its
   2^20-frame rekey, `Mobile.Protocol`'s codec from the initiator's side,
   `seq`, `event_part` reassembly, pings inside the 150 s idle bound, the
-  one-hour session), handing its owner each server event; consumers
-  reassemble `Mobile.Chunks` payloads themselves.
+  one-hour session), handing its owner each server event and, when asked
+  (`paths: true`), the dialed connection's path (`dialed`, then each
+  `dial_path`); consumers reassemble `Mobile.Chunks` payloads themselves.
 - After a move (M75 §6, B1, B12) the desktop's device-role engine reaches its
   primary through `Desktop.DeviceSupervisor`, the one device-only child
   (`Role`'s device-only list), `:one_for_one` over two subtrees: the dial
@@ -1501,7 +1512,9 @@ Current channels:
   through `Mobile.Rail` from a linked connector process (the rail's owner, so
   the relay keeps answering during a 40 s open), sends `hello` with the
   highest primary epoch seen and its relay revision, treats a lower epoch
-  (or none) as a stale primary, records a higher one and a newer route, and
+  (or none) as a stale primary, records a higher one and a newer route (its
+  address hints included), names the session's path, direct or relay, in
+  its status (`home.status`'s `primary.path`), and
   reconnects from 1 s doubling to 60 s on injected timers; a session the
   primary ends normally (`1000`) is renewed quietly after the first step,
   once in a row (a renewed session ended normally again within a minute is

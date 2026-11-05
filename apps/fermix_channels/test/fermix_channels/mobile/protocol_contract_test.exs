@@ -469,13 +469,22 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
           Map.put(iroh, "relays", [Map.put(relay, "url", "http://us1.relay.fermix.ai/")]),
           Map.put(iroh, "relays", [Map.put(relay, "quic_port", 0)]),
           Map.delete(iroh, "relays_rev"),
-          Map.delete(iroh, "kind")
+          Map.delete(iroh, "kind"),
+          Map.put(iroh, "addrs", []),
+          Map.put(iroh, "addrs", ["fermix-vm.ts.net:4033"]),
+          Map.put(iroh, "addrs", ["100.64.0.9"]),
+          Map.put(iroh, "addrs", List.duplicate("100.64.0.9:4033", 9))
         ] do
       candidates = List.replace_at(ack["candidates"], -1, drifted)
 
       refute server_errors(Map.put(ack, "candidates", candidates), schema) == [],
              "an iroh candidate #{inspect(drifted)} was accepted"
     end
+
+    # A desktop's route names where it may dial the server directly.
+    hinted = Map.put(iroh, "addrs", ["100.101.102.103:4033", "[fd7a:115c:a1e0::9]:4033"])
+    candidates = List.replace_at(ack["candidates"], -1, hinted)
+    assert server_errors(Map.put(ack, "candidates", candidates), schema) == []
   end
 
   # M75 D14: the daemon announces its primary epoch on hello_ack and

@@ -590,6 +590,7 @@ defmodule FermixChannels.Home.Enrollment do
       version: host["version"],
       node_id: candidate["node_id"],
       relays: candidate["relays"],
+      addrs: Map.get(candidate, "addrs", []),
       noise_pk: noise_pk,
       recipient: Base.decode64!(candidate["recipient"]),
       snapshots: request["snapshots"]

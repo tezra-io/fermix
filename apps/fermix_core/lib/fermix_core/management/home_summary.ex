@@ -1096,7 +1096,8 @@ defmodule FermixCore.Management.HomeSummary do
   defp lines(view, facts) do
     ctx = %{zone: facts.zone, machine: machine(facts.host_os)}
 
-    state_lines(view, ctx) ++ restore_lines(view, ctx) ++ again_lines(view, facts, ctx)
+    state_lines(view, ctx) ++
+      restore_lines(view, ctx) ++ again_lines(view, facts, ctx) ++ link_lines(view, facts, ctx)
   end
 
   defp state_lines(%{"state" => state, "detail" => detail}, ctx)
@@ -1131,6 +1132,17 @@ defmodule FermixCore.Management.HomeSummary do
   end
 
   defp again_lines(_view, _facts, _ctx), do: []
+
+  # On: whether the link runs direct or through Fermix's relay, while its
+  # session is up and the helper has named its path (step 7).
+  defp link_lines(%{"state" => "on"}, %{link: %{primary: %{connected: true} = primary}}, ctx) do
+    case Map.get(primary, :path) do
+      path when path in [:direct, :relay] -> [Copy.summary_line(:connection, path, ctx)]
+      nil -> []
+    end
+  end
+
+  defp link_lines(_view, _facts, _ctx), do: []
 
   @server_lines [server: "name", system: "system", version: "version"]
 

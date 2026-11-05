@@ -3,6 +3,7 @@ defmodule FermixCore.Home.CandidateTest do
 
   alias FermixCore.Home.AlwaysOnRelease
   alias FermixCore.Home.Candidate
+  alias FermixCore.Home.DeviceLocal
   alias FermixCore.Home.EnrollmentCode
   alias FermixCore.Home.Epoch
   alias FermixCore.Home.Moved
@@ -79,6 +80,15 @@ defmodule FermixCore.Home.CandidateTest do
 
       for text <- [ctx.code | secret_texts(@facts.secret)],
           do: refute(state_text =~ text)
+
+      # The machine is an Always On server from now on, whatever the move
+      # does to the home's settings: the mark stays on it.
+      assert Candidate.server?(ctx.home)
+      assert Candidate.server_path(ctx.home) == Path.join([ctx.home, "device", "server.json"])
+      assert mode(Candidate.server_path(ctx.home)) == 0o600
+      assert mode(Path.join(ctx.home, "device")) == 0o700
+      assert DeviceLocal.excluded?("device/server.json")
+      assert DeviceLocal.kept_through_return?("device/server.json")
     end
 
     test "takes a home that holds only what stays on a machine", ctx do
@@ -133,7 +143,8 @@ defmodule FermixCore.Home.CandidateTest do
       {:ok, new_key} = Candidate.noise_keypair(ctx.home)
       refute new_key.public == old_key.public
       assert File.read!(Path.join(ctx.home, "config.toml")) =~ ~s(role = "candidate")
-      assert Enum.sort(File.ls!(ctx.home)) == ["candidate", "config.toml"]
+      assert Enum.sort(File.ls!(ctx.home)) == ["candidate", "config.toml", "device"]
+      assert Candidate.server?(ctx.home)
     end
 
     # Always On review M1: a server waiting for its move, or whose 24 hours
@@ -280,7 +291,7 @@ defmodule FermixCore.Home.CandidateTest do
 
       assert {:ok, %{secret: <<0x5A, _rest::binary>>}} = Candidate.read_code(ctx.home)
       assert {:ok, ^old_key} = Candidate.noise_keypair(ctx.home)
-      assert Enum.sort(File.ls!(ctx.home)) == ["candidate", "config.toml"]
+      assert Enum.sort(File.ls!(ctx.home)) == ["candidate", "config.toml", "device"]
     end
 
     test "refuses a code that ran out, or one Fermix did not open", ctx do
@@ -331,6 +342,8 @@ defmodule FermixCore.Home.CandidateTest do
 
       assert {:ok, %{"kind" => "return"}} = Candidate.read_state(ctx.mac)
       assert mode(Candidate.dir(ctx.mac)) == 0o700
+      # The computer a home moves back to is no server.
+      refute Candidate.server?(ctx.mac)
 
       for file <- ~w(code destination.json noise_key recipient_key state.json mobile/iroh_key) do
         assert mode(Candidate.path(ctx.mac, file)) == 0o600, file

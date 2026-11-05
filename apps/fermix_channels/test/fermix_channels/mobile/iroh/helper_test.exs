@@ -118,6 +118,30 @@ defmodule FermixChannels.Mobile.Iroh.HelperTest do
     end
   end
 
+  # The rail's retry timer, delivered by hand once it has failed `failures`
+  # times, rather than waited for.
+  defp retry_now(pid, failures) do
+    state = await_failures(pid, failures)
+    send(pid, {:retry, state.retry.token})
+  end
+
+  defp await_failures(pid, failures, attempts \\ div(@helper_ms, @poll_ms)) do
+    state = :sys.get_state(pid)
+
+    cond do
+      state.rail == :failed and state.failures >= failures and state.retry.token != nil ->
+        state
+
+      attempts == 0 ->
+        flunk("the rail did not fail #{failures} times: #{inspect(state.rail)}")
+
+      true ->
+        # sleep: polls a state the rail announces to no one
+        Process.sleep(@poll_ms)
+        await_failures(pid, failures, attempts - 1)
+    end
+  end
+
   defp ops(ctx) do
     ctx.log |> File.read!() |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
   end
@@ -161,6 +185,93 @@ defmodule FermixChannels.Mobile.Iroh.HelperTest do
              Helper.candidate(pid)
 
     assert rev =~ ~r/\A[0-9a-f]{16}\z/
+  end
+
+  # An Always On server's endpoint binds its fixed port; every other binds
+  # iroh's own, so its start names none.
+  test "a start names the fixed port only when the rail was given one", ctx do
+    pid = start(ctx, binary_path: fake(ctx), test_pid: self())
+    await_state(pid, :ready)
+    assert [%{"op" => "start"} = start] = ops(ctx)
+    refute Map.has_key?(start, "bind_port")
+    GenServer.stop(pid)
+
+    pid = start(ctx, binary_path: fake(ctx), test_pid: self(), bind_port: 4100)
+    await_state(pid, :ready)
+    # The second helper's start follows the first's in the same log.
+    assert %{"op" => "start", "bind_port" => 4100} =
+             ops(ctx) |> Enum.filter(&(&1["op"] == "start")) |> List.last()
+  end
+
+  test "the hints are this machine's tailnet addresses at the fixed port, read when asked",
+       ctx do
+    {:ok, reads} = Agent.start_link(fn -> 0 end)
+
+    interfaces = fn ->
+      Agent.update(reads, &(&1 + 1))
+
+      {:ok,
+       [
+         {~c"en0", [flags: [:up, :running], addr: {192, 168, 1, 9}]},
+         {~c"tailscale0",
+          [
+            flags: [:up, :running],
+            addr: {100, 90, 8, 7},
+            addr: {0xFD7A, 0x115C, 0xA1E0, 0, 0, 0, 0, 2}
+          ]}
+       ]}
+    end
+
+    pid = start(ctx, binary_path: fake(ctx), bind_port: 4100, interfaces: interfaces)
+    await_state(pid, :ready)
+
+    assert Helper.hints(pid) == ["100.90.8.7:4100", "[fd7a:115c:a1e0::2]:4100"]
+    assert Helper.hints(pid) == ["100.90.8.7:4100", "[fd7a:115c:a1e0::2]:4100"]
+    assert Agent.get(reads, & &1) == 2
+
+    # A rail that binds iroh's own port has no address worth recording.
+    GenServer.stop(pid)
+    pid = start(ctx, binary_path: fake(ctx), interfaces: interfaces)
+    await_state(pid, :ready)
+    assert Helper.hints(pid) == []
+    assert Agent.get(reads, & &1) == 2
+
+    # Nor has one that is not ready, or not running.
+    assert Helper.hints(:no_rail_here) == []
+  end
+
+  # An Always On server whose fixed port another process holds: the helper
+  # says `bind_failed` and exits, every time. The rail retries on its backoff,
+  # never a spin, says the failure once for the run of it, and its status
+  # names the port until the port is free.
+  test "a fixed port another process holds is retried on the backoff and said once", ctx do
+    taken =
+      Jason.encode!(%{
+        "event" => "error",
+        "code" => "bind_failed",
+        "message" =>
+          "UDP port 4033 could not be bound: Failed to bind sockets: Address already in use " <>
+            "[os error 48]"
+      })
+
+    binary = fake(ctx, after_start: [taken], exit_after_start: 1)
+
+    log =
+      capture_log(fn ->
+        pid = start(ctx, binary_path: binary, bind_port: 4033, test_pid: self())
+        assert_receive {:emit, :degraded, 1, :helper_error}, @helper_ms
+
+        for failures <- 1..5, do: retry_now(pid, failures)
+        state = await_failures(pid, 6)
+
+        assert state.retry.delay_ms == min(1_000 * Integer.pow(2, state.failures), 60_000)
+        assert %{state: :failed, failure: failure} = Helper.status(pid)
+        assert failure =~ "bind_failed: UDP port 4033 could not be bound"
+        refute_received {:emit, :degraded, 2, _class}
+        GenServer.stop(pid)
+      end)
+
+    assert length(String.split(log, "UDP port 4033 could not be bound")) == 2
   end
 
   test "a helper that disagrees with this build fails without retrying", ctx do

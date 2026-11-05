@@ -225,7 +225,8 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
           else: "The server #{@server_name} is unreachable: it did not answer."
         ),
       down_ms: down_ms,
-      down_at: if(status == :connected, do: nil, else: ~U[2031-05-04 11:49:00Z])
+      down_at: if(status == :connected, do: nil, else: ~U[2031-05-04 11:49:00Z]),
+      path: if(status == :connected, do: :direct)
     }
   end
 

@@ -127,6 +127,17 @@ defmodule FermixChannels.Mobile.PeerEventsTest do
 
       assert {:error, {:invalid_field, "candidate.relays"}} =
                decode("enroll_request", put_in(request, ["candidate", "relays"], []))
+
+      # An Always On server's address hints: one to eight `ip:port`, or none.
+      hinted =
+        put_in(request, ["candidate", "addrs"], ["100.64.0.9:4033", "[fd7a:115c:a1e0::9]:4033"])
+
+      assert {:ok, _event} = decode("enroll_request", hinted)
+
+      for addrs <- [[], ["fermix-vm:4033"], ["100.64.0.9"], List.duplicate("100.64.0.9:4033", 9)] do
+        assert {:error, {:invalid_field, "candidate.addrs"}} =
+                 decode("enroll_request", put_in(request, ["candidate", "addrs"], addrs))
+      end
     end
 
     test "a move offer, its chunks, and the candidate's one-time recipient" do

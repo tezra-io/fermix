@@ -14,6 +14,7 @@ defmodule FermixChannels.Home.CandidateReturnTest do
   alias FermixChannels.Home.Candidate, as: CandidateProcess
   alias FermixChannels.Mobile.DeviceStore
   alias FermixChannels.Mobile.Noise
+  alias FermixChannels.Test.DesktopRail
   alias FermixChannels.Test.HomeMove
   alias FermixCore.Home.Candidate
   alias FermixCore.Home.Candidate.Activation
@@ -159,6 +160,41 @@ defmodule FermixChannels.Home.CandidateReturnTest do
       assert {:ok, %{role: :primary}} = Role.configured(ctx.mac)
       refute Candidate.present?(ctx.mac)
     end
+  end
+
+  # Every dial to the server names the address hints the link holds, the
+  # move back's enrollment included.
+  test "a return's enrollment dials the server at the hints its link holds", ctx do
+    hint = "100.101.102.103:4033"
+    facts = code_facts()
+
+    :ok =
+      DesktopLink.write(ctx.mac, %{
+        device_id: "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e",
+        primary: %{
+          name: "north-box",
+          gateway_pk: facts.gateway_pk,
+          node_id: facts.node_id,
+          relays: facts.relays,
+          relays_rev: facts.relays_rev,
+          addrs: [hint]
+        },
+        epoch: 5
+      })
+
+    {:ok, code} = EnrollmentCode.encode(facts)
+    {:ok, %{"phase" => "enrolling"}} = prepare(ctx.mac, {:return, code})
+
+    sockets = Path.join(System.tmp_dir!(), "fx-cr-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(sockets)
+    SafeRm.mark!(sockets)
+    on_exit(fn -> SafeRm.rm_rf!(sockets) end)
+    spy = start_supervised!({DesktopRail.DialSpy, {self(), Path.join(sockets, "d1.sock")}})
+
+    _name = start_candidate!(ctx.mac, helper: spy, hints: fn -> [] end)
+
+    endpoint = facts.node_id
+    assert_receive {:dial_op, %{"endpoint_id" => ^endpoint, "addrs" => [^hint]}}, 10_000
   end
 
   describe "a restore from a copy this computer holds" do
@@ -367,7 +403,7 @@ defmodule FermixChannels.Home.CandidateReturnTest do
          free_bytes: Keyword.get(opts, :free_bytes, fn _dir -> {:ok, @plenty} end),
          host: @mac,
          awake: held_awake(test)
-       ] ++ Keyword.take(opts, [:secret_names])},
+       ] ++ Keyword.take(opts, [:secret_names, :helper, :hints])},
       id: name
     )
 

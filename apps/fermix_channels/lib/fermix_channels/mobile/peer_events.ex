@@ -13,6 +13,8 @@ defmodule FermixChannels.Mobile.PeerEvents do
   module about these events alone. Pure.
   """
 
+  alias FermixCore.Home.DesktopLink
+
   @max_u64 18_446_744_073_709_551_615
   @max_raw 60 * 1_024
   @id ~r/\A[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\z/
@@ -68,7 +70,12 @@ defmodule FermixChannels.Mobile.PeerEvents do
           {:object, [{"name", :name}, {"os", :name}, {"arch", :name}, {"version", :name}]}},
          {"candidate",
           {:object,
-           [{"node_id", :node_id}, {"relays", {:list, @relay, 1, 8}}, {"recipient", :x25519}]}},
+           [
+             {"node_id", :node_id},
+             {"relays", {:list, @relay, 1, 8}},
+             {"recipient", :x25519},
+             {"addrs", {:optional, {:list, :hint, 1, 8}}}
+           ]}},
          {"snapshots", {:optional, {:object, [{"s3_bucket", :name}, {"s3_region", :name}]}}}
        ], :none},
     "move_offer" =>
@@ -239,6 +246,7 @@ defmodule FermixChannels.Mobile.PeerEvents do
   defp valid?(:method, value), do: matches?(@method, value) and byte_size(value) <= 128
   defp valid?(:http_method, value), do: matches?(@http_method, value)
   defp valid?(:node_id, value), do: matches?(@node_id, value)
+  defp valid?(:hint, value), do: DesktopLink.hint?(value)
   defp valid?(:relay_url, value), do: matches?(@relay_url, value) and byte_size(value) <= 261
   defp valid?(:recipient, value), do: matches?(@recipient, value)
   defp valid?(:sha256, value), do: matches?(@sha256, value)

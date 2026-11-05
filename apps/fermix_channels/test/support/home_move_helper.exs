@@ -225,8 +225,9 @@ defmodule FermixChannels.Test.HomeMove do
   Starts the candidate process for `home`, reaching `primary` for its
   enrollment, and its own bridge serving the move. Timers and the restart
   come to the test as `{:scheduled, message, delay}` and `:candidate_restart`.
-  Options: `:now`, `:free_bytes`, and the candidate's own `:host` facts and
-  `:restore_opts` (a Linux server's unless said).
+  Options: `:now`, `:free_bytes`, and the candidate's own `:host` facts,
+  `:restore_opts` (a Linux server's unless said) and `:hints` (its endpoint's
+  address hints, a 0-arity function; none unless said).
   """
   def start_candidate!(home, primary, opts \\ []) do
     test = self()
@@ -247,6 +248,7 @@ defmodule FermixChannels.Test.HomeMove do
          :ok
        end,
        rail_opts: [connect: DesktopRail.bridge_connect(primary.bridge_socket)],
+       hints: Keyword.get(opts, :hints, fn -> [] end),
        restore_opts:
          Keyword.get(opts, :restore_opts, host: "linux-aarch64", keyring_usable?: fn -> false end),
        free_bytes: Keyword.get(opts, :free_bytes, fn _dir -> {:ok, @plenty} end),

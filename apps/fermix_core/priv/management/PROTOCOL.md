@@ -184,6 +184,12 @@ primary's, exactly as its own socket would give it.
   computer; not retried until the engine restarts) and `stale` (the primary
   answered as an older copy; retried). A redial during an outage keeps the
   outage's word until a session is up; `sentence` says the rest.
+- **The link's path.** While a session is up, `primary.path` says how it
+  runs: `direct` (a direct UDP path, a tailnet address included) or `relay`
+  (through Fermix's relay), as the iroh helper reported it when the session
+  opened and at each change after. It is absent while no session is up,
+  before the helper names it, and from an engine older than the field, which
+  a client draws as no path.
 - **Forward deadlines.** How long the computer waits for the primary's answer
   to a forwarded request:
 
@@ -380,7 +386,7 @@ Always On changes*).
 | `creating` | the same, and a linked desktop | The owner's server used its code and connects (`cancel` in `detail.alternatives`, `Cancel the code`, which closes it; once the code's 30 minutes are over with no server recorded, the window reads `expired` and the screen is `off`), or a linked desktop connects to its server to move back (`cancel`). |
 | `ready` | the same, and a linked desktop during a move back | The server is held and waits for Move now. `detail`: `server` (`{name, system, version}`), `readiness` (the last review's warnings and blocks, `home.move.readiness`'s items; empty when all is well or no review was made, and always during a move back), `waits_until` and, on the computer that sets Always On up, `alternatives` with `cancel` (`Forget this server`, with a confirm: the held server is dropped and the screen is `off`), except while a move to it runs. |
 | `moving` | the computer the move leaves, and a linked desktop during a move back or a restore | The move runs; once that computer waits on the server's confirmation the sentence says Fermix keeps trying. |
-| `on` | a linked desktop | Fermix runs on the server. `detail`: `server` (`{name, version}`), `backups` (`{place, at}` for each place's newest verified backup), `copies_bytes` (the space this computer's copies take), `disk_used`, `data` (what lives on the server, and that whoever hosts it can technically read its disk), `actions` (`back_up_now`, `move_back`) and, where the server serves any, `webhooks` (*Inbound webhooks*). |
+| `on` | a linked desktop | Fermix runs on the server. `detail`: `server` (`{name, version}`), `backups` (`{place, at}` for each place's newest verified backup), `copies_bytes` (the space this computer's copies take), `disk_used`, `data` (what lives on the server, and that whoever hosts it can technically read its disk), `actions` (`back_up_now`, `move_back`) and, where the server serves any, `webhooks` (*Inbound webhooks*); its `lines` end with `Connection` while the link's session is up and its path is known: `Direct`, or `Through Fermix's network` through Fermix's relay. |
 | `undone` | the computer the move left | The move was undone and its server is still held (`try_again`, and `cancel`, `Forget this server`, with `ready`'s confirm in `detail.alternatives`, once the undoing is over), or the engine is restarting as it was (no action). |
 | `retired` | a computer the move left | It has no link to the server, or the server no longer knows it. On a server's own copy that a move back left serving nothing, the sentence names where Fermix moved back to (the marker's `to`). `restore_here` in `detail.alternatives` where it applies (*Moving back*). |
 | `candidate` | the server, before its move | It waits for its move, or receives the home. |

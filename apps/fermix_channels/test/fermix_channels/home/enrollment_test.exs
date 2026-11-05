@@ -60,6 +60,7 @@ defmodule FermixChannels.Home.EnrollmentTest do
     assert record.name == "north-box"
     assert record.noise_pk == noise.public
     assert record.recipient == pair.public_key
+    assert record.addrs == []
     refute Map.has_key?(record, :instance)
     assert Bitwise.band(File.stat!(Candidates.path(ctx.primary.root)).mode, 0o777) == 0o600
 
@@ -71,6 +72,22 @@ defmodule FermixChannels.Home.EnrollmentTest do
     :ok = Rail.send_event(again, "enroll_request", request(other))
     assert_refused(again, "enrollment_used", "enrollment used")
     assert {:ok, [_one]} = Candidates.list(ctx.primary.root, HomeMove.now())
+  end
+
+  test "a server's address hints are kept with its candidate record", ctx do
+    home = HomeMove.candidate_home!(ctx.code)
+    {:ok, rail} = open_enrollment(ctx.primary, ctx.code, home)
+    hints = ["100.101.102.103:4033", "[fd7a:115c:a1e0::9]:4033"]
+
+    :ok =
+      Rail.send_event(
+        rail,
+        "enroll_request",
+        put_in(request(home), ["candidate", "addrs"], hints)
+      )
+
+    assert_receive {:rail, ^rail, {:event, %{"t" => "enroll_accepted"}, _bytes}}, 10_000
+    assert {:ok, [%{addrs: ^hints}]} = Candidates.list(ctx.primary.root, HomeMove.now())
   end
 
   test "a candidate whose enroll_accepted was lost hears it again, as the same candidate",
@@ -158,10 +175,13 @@ defmodule FermixChannels.Home.EnrollmentTest do
 
   test "the candidate process enrolls, drops the code and waits a day", ctx do
     home = HomeMove.candidate_home!(ctx.code)
-    _candidate = HomeMove.start_candidate!(home, ctx.primary)
+    hints = ["100.101.102.103:4033"]
+    _candidate = HomeMove.start_candidate!(home, ctx.primary, hints: fn -> hints end)
 
     state = HomeMove.await_phase(home, "enrolled")
     assert "cand-" <> _id = state["candidate_id"]
+    # Its own endpoint's hints, as it read them when it enrolled.
+    assert {:ok, [%{addrs: ^hints}]} = Candidates.list(ctx.primary.root, HomeMove.now())
     assert state["listen_until"] == "2031-05-05T10:00:00Z"
     refute File.exists?(Candidate.path(home, "code"))
     assert_receive {:scheduled, :listen_end, 86_400_000}, 10_000

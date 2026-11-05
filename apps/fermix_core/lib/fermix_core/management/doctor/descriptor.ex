@@ -197,7 +197,10 @@ defmodule FermixCore.Management.Doctor.Descriptor do
       spec("secret_acl_restricted", :security, :warning, :always, fn ->
         Checks.secret_acl_restricted()
       end),
-      spec("engine_path_baseline", :runtime, :warning, :always, &Checks.engine_path_baseline/0)
+      spec("engine_path_baseline", :runtime, :warning, :always, &Checks.engine_path_baseline/0),
+      # The engine's own word for its link to the server, read from its
+      # `home.status`; no row where there is no link.
+      spec("server_link", :connectivity, :warning, :configured, &Checks.server_link/0)
     ]
   end
 

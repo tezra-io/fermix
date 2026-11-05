@@ -26,6 +26,13 @@ defmodule FermixCore.Home.Candidate do
   can read `fermix home status` while it waits. Activation replaces that
   file with the home's own.
 
+  It also marks the machine an Always On server (`device/server.json`,
+  `server?/1`): device-local, so no archive carries it and activation, which
+  replaces the settings with the moved home's, leaves it. Nothing removes it.
+  A server's iroh endpoint binds a fixed UDP port on it, as a candidate and as
+  the primary (`FermixChannels.Mobile.Iroh.Hints`). A return's candidate
+  writes no mark: the computer a home moves back to is no server.
+
   **Phases** (`state.json`): `enrolling` (the code is held), `enrolled` (the
   primary accepted it; waiting for the move up to 24 hours), `receiving` (a
   move's stream is arriving), `staged` (restored into `staging/`, `move_ready`
@@ -95,6 +102,7 @@ defmodule FermixCore.Home.Candidate do
   @ended ~w(failed expired)
   # What `enroll/3` replaces: every candidate no move has reached.
   @replaceable ~w(enrolling enrolled failed expired)
+  @server_mark "device/server.json"
 
   @type phase :: String.t()
   @type state :: %{required(String.t()) => term()}
@@ -123,6 +131,18 @@ defmodule FermixCore.Home.Candidate do
   @doc "Whether `home` holds a candidate (its `candidate/` directory)."
   @spec present?(Path.t()) :: boolean()
   def present?(home), do: File.dir?(dir(home))
+
+  @doc "Where `enroll/3` marks the machine an Always On server, under `home`."
+  @spec server_path(Path.t()) :: Path.t()
+  def server_path(home) when is_binary(home) and home != "", do: Path.join(home, @server_mark)
+
+  @doc """
+  Whether this machine is an Always On server: `fermix home enroll` made its
+  home a candidate once (`device/server.json`), whatever the home has become
+  since.
+  """
+  @spec server?(Path.t()) :: boolean()
+  def server?(home) when is_binary(home) and home != "", do: File.regular?(server_path(home))
 
   @doc """
   Makes `home` a candidate from `code_text` (see the moduledoc). `opts`:
@@ -586,6 +606,7 @@ defmodule FermixCore.Home.Candidate do
          :ok <- write_files(building, code, code_text, destination, now),
          :ok <- rename(building, dir(home)),
          :ok <- create_config(home),
+         :ok <- mark_server(home),
          :ok <- consume.() do
       {:ok, code}
     else
@@ -602,6 +623,7 @@ defmodule FermixCore.Home.Candidate do
 
     with :ok <- make_dir(building),
          :ok <- write_files(building, code, code_text, destination, now),
+         :ok <- mark_server(home),
          :ok <- rename(dir(home), aside),
          :ok <- swap_in(building, home, aside),
          :ok <- consumed(consume.(), home, aside) do
@@ -694,8 +716,18 @@ defmodule FermixCore.Home.Candidate do
     _ = File.rm_rf(building)
     _ = File.rm_rf(dir(home))
     _ = File.rm(Path.join(home, "config.toml"))
+    _ = File.rm(server_path(home))
+    # Only a `device/` the mark alone needed is empty now.
+    _ = File.rmdir(Path.dirname(server_path(home)))
     if created_home?, do: File.rmdir(home)
     {:error, reason}
+  end
+
+  # The mark is written whole and kept; a candidate enrolled again writes it
+  # again, the same.
+  defp mark_server(home) do
+    with :ok <- make_dir(Path.dirname(server_path(home))),
+         do: write_private(server_path(home), Jason.encode!(%{"v" => @version}))
   end
 
   defp make_dir(dir) do

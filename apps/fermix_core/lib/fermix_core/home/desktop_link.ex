@@ -8,7 +8,7 @@ defmodule FermixCore.Home.DesktopLink do
   The move worker writes both on the source of a move (`write/2`,
   `write_key/2`); the desktop relay (`FermixChannels.Desktop.Relay`) reads
   them and raises what the file remembers as it learns more
-  (`record_epoch/2`, `record_route/3`). One engine boot decides whether the
+  (`record_epoch/3`, `record_route/3`). One engine boot decides whether the
   home is linked (`linked?/2`): the device role with `desktop.json` present.
 
   ## `device/desktop.json`
@@ -24,7 +24,8 @@ defmodule FermixCore.Home.DesktopLink do
           "gateway_pk": "<32 bytes, standard base64 with padding>",
           "node_id": "<64 lowercase hex digits>",
           "relays": [{"url": "https://relay.example/", "quic_port": 7842}],
-          "relays_rev": "<16 lowercase hex digits>"
+          "relays_rev": "<16 lowercase hex digits>",
+          "addrs": ["100.101.102.103:4033"]
         },
         "primary_epoch": 5
       }
@@ -35,7 +36,11 @@ defmodule FermixCore.Home.DesktopLink do
     (the Noise responder's static key) and `node_id` its iroh endpoint id; both
     are the source's own, because the identity bundle moves with the home.
     `relays` (1 to 8) and `relays_rev` are the route the primary last gave,
-    in the mobile wire's shape.
+    in the mobile wire's shape. `addrs` (0 to 8, `hint?/1`) are the direct
+    address hints it last gave (`FermixChannels.Mobile.Iroh.Hints`): an
+    Always On server's tailnet addresses at its fixed port, which every dial
+    to it names. A file without them holds none, and so does a link written
+    without them.
   - `primary_epoch` is the highest primary epoch this desktop has seen. It
     never goes down.
 
@@ -59,6 +64,7 @@ defmodule FermixCore.Home.DesktopLink do
   @uuid ~r/\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/
   @node_id ~r/\A[0-9a-f]{64}\z/
   @relays_rev ~r/\A[0-9a-f]{16}\z/
+  @max_hints 8
 
   @typedoc "A relay on the route, in the mobile wire's shape."
   @type relay :: %{required(String.t()) => String.t() | pos_integer()}
@@ -67,11 +73,12 @@ defmodule FermixCore.Home.DesktopLink do
   @type t :: %{
           device_id: String.t(),
           primary: %{
-            name: String.t(),
-            gateway_pk: <<_::256>>,
-            node_id: String.t(),
-            relays: [relay(), ...],
-            relays_rev: String.t()
+            required(:name) => String.t(),
+            required(:gateway_pk) => <<_::256>>,
+            required(:node_id) => String.t(),
+            required(:relays) => [relay(), ...],
+            required(:relays_rev) => String.t(),
+            optional(:addrs) => [String.t()]
           },
           epoch: pos_integer()
         }
@@ -139,14 +146,44 @@ defmodule FermixCore.Home.DesktopLink do
     if epoch > held, do: rewrite(home, %{link | epoch: epoch}), else: {:ok, link}
   end
 
-  @doc "Keeps the route the primary last gave (its relays and their revision)."
-  @spec record_route(Path.t(), t(), {[relay()], String.t()}) :: {:ok, t()} | {:error, error()}
-  def record_route(home, %{primary: primary} = link, {relays, rev})
-      when is_binary(home) and is_list(relays) and is_binary(rev) do
-    if relays == primary.relays and rev == primary.relays_rev,
+  @doc """
+  Keeps the route the primary last gave: its relays, their revision and its
+  address hints (none when it gave none).
+  """
+  @spec record_route(Path.t(), t(), {[relay()], String.t(), [String.t()]}) ::
+          {:ok, t()} | {:error, error()}
+  def record_route(home, %{primary: primary} = link, {relays, rev, addrs})
+      when is_binary(home) and is_list(relays) and is_binary(rev) and is_list(addrs) do
+    route = %{relays: relays, relays_rev: rev, addrs: addrs}
+
+    if Map.take(primary, [:relays, :relays_rev, :addrs]) == route,
       do: {:ok, link},
-      else: rewrite(home, %{link | primary: %{primary | relays: relays, relays_rev: rev}})
+      else: rewrite(home, %{link | primary: Map.merge(primary, route)})
   end
+
+  @doc """
+  Whether `value` is a direct address hint: `ip:port`, an IPv6 address in
+  brackets, the port 1 to 65535. A name is none: the helper dials addresses.
+  """
+  @spec hint?(term()) :: boolean()
+  def hint?(value) when is_binary(value) do
+    case Regex.run(~r/\A(?:\[([0-9a-fA-F:.]+)\]|([0-9.]+)):([0-9]{1,5})\z/, value) do
+      [_all, ipv6, "", port] -> address?(ipv6, 8) and port?(port)
+      [_all, "", ipv4, port] -> address?(ipv4, 4) and port?(port)
+      nil -> false
+    end
+  end
+
+  def hint?(_value), do: false
+
+  defp address?(text, size) do
+    case :inet.parse_strict_address(String.to_charlist(text)) do
+      {:ok, address} -> tuple_size(address) == size
+      {:error, _reason} -> false
+    end
+  end
+
+  defp port?(text), do: String.to_integer(text) in 1..65_535
 
   defp rewrite(home, link) do
     with :ok <- write(home, link), do: {:ok, link}
@@ -230,19 +267,33 @@ defmodule FermixCore.Home.DesktopLink do
          {:ok, key} <- field(primary, :gateway_pk, &base64_key?/1, file),
          {:ok, node_id} <- field(primary, :node_id, &matches?(@node_id, &1), file),
          {:ok, relays} <- field(primary, :relays, &relays?/1, file),
-         {:ok, rev} <- field(primary, :relays_rev, &matches?(@relays_rev, &1), file) do
+         {:ok, rev} <- field(primary, :relays_rev, &matches?(@relays_rev, &1), file),
+         {:ok, addrs} <- hints(primary, file) do
       {:ok,
        %{
          name: name,
          gateway_pk: Base.decode64!(key),
          node_id: node_id,
          relays: relays,
-         relays_rev: rev
+         relays_rev: rev,
+         addrs: addrs
        }}
     end
   end
 
   defp primary(_absent, file), do: {:error, {:invalid_link, file, :primary}}
+
+  # Absent is none: a link from before hints were kept, or a primary with none.
+  defp hints(primary, file) do
+    if Map.has_key?(primary, "addrs"),
+      do: field(primary, :addrs, &hints?/1, file),
+      else: {:ok, []}
+  end
+
+  defp hints?(addrs) when is_list(addrs) and length(addrs) <= @max_hints,
+    do: Enum.all?(addrs, &hint?/1)
+
+  defp hints?(_addrs), do: false
 
   defp field(map, key, valid?, file) when is_atom(key) do
     value = Map.get(map, Atom.to_string(key))
@@ -306,7 +357,8 @@ defmodule FermixCore.Home.DesktopLink do
         "gateway_pk" => Base.encode64(primary.gateway_pk),
         "node_id" => primary.node_id,
         "relays" => primary.relays,
-        "relays_rev" => primary.relays_rev
+        "relays_rev" => primary.relays_rev,
+        "addrs" => Map.get(primary, :addrs, [])
       },
       "primary_epoch" => epoch
     }

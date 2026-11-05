@@ -808,6 +808,31 @@ defmodule FermixCore.Management.HomeSummaryTest do
              ]
     end
 
+    # Step 7: whether the link runs direct or through Fermix's relay, in the
+    # summary's own words, while its session is up.
+    test "on: the link's path while it is connected, and none while it is not" do
+      for {path, value} <- [direct: "Direct", relay: "Through Fermix's network"] do
+        connected = Map.put(primary(:connected), :path, path)
+        %{"detail" => %{"lines" => lines}} = HomeSummary.summary(desktop(link_primary: connected))
+
+        assert List.last(lines) == %{"label" => "Connection", "value" => value}
+        assert Copy.summary_violations(value) == []
+      end
+
+      %{"detail" => %{"lines" => lines}} =
+        HomeSummary.summary(desktop(link_primary: Map.put(primary(:connected), :path, nil)))
+
+      refute Enum.any?(lines, &(&1["label"] == "Connection"))
+
+      direct =
+        HomeSummary.summary(desktop(link_primary: Map.put(primary(:connected), :path, :direct)))
+
+      relayed =
+        HomeSummary.summary(desktop(link_primary: Map.put(primary(:connected), :path, :relay)))
+
+      refute direct["key"] == relayed["key"]
+    end
+
     test "states that name no server have none" do
       for facts <- [
             facts([]),

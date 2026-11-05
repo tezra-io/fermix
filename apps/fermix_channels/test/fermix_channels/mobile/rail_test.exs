@@ -14,6 +14,7 @@ defmodule FermixChannels.Mobile.RailTest do
   alias FermixChannels.Mobile.Noise
   alias FermixChannels.Mobile.Protocol
   alias FermixChannels.Mobile.Rail
+  alias FermixChannels.Test.DesktopRail
   alias FermixTestSupport.PrimaryHome
   alias FermixTestSupport.SafeRm
 
@@ -122,7 +123,7 @@ defmodule FermixChannels.Mobile.RailTest do
       connect: bridge_connect(ctx.bridge_socket)
     ]
 
-    Rail.open(@route, :ik, keys ++ Keyword.drop(opts, [:static_keypair]))
+    Rail.open(@route, :ik, Keyword.merge(keys, Keyword.drop(opts, [:static_keypair])))
   end
 
   defp hello(rail) do
@@ -541,6 +542,57 @@ defmodule FermixChannels.Mobile.RailTest do
     assert {:error, :invalid_psk} = Rail.open(@route, :ikpsk2_enroll, keys)
     assert {:error, :no_helper} = Rail.open(@route, :ik, Keyword.delete(keys, :helper))
     assert_raise FunctionClauseError, fn -> Rail.open(@route, :ikpsk2, keys) end
+  end
+
+  test "a dial names the route's address hints, at most eight", ctx do
+    File.mkdir_p!(Path.join(ctx.root, "mobile"))
+    File.chmod!(Path.join(ctx.root, "mobile"), 0o700)
+    socket = Path.join([ctx.root, "mobile", "dial-d1.sock"])
+    spy = start_supervised!({DesktopRail.DialSpy, {self(), socket}})
+    keys = [static_keypair: ctx.device, remote_static: ctx.gateway_public_key, helper: spy]
+    hints = ["100.101.102.103:4033", "[fd7a:115c:a1e0::9]:4033"]
+
+    assert {:error, {:dial, :unreachable}} =
+             Rail.open(Map.put(@route, :addrs, hints), :ik, keys)
+
+    assert_receive {:dial_op, %{"op" => "dial", "endpoint_id" => @peer_id, "addrs" => ^hints}}
+
+    # A route with none dials without them.
+    assert {:error, {:dial, :unreachable}} = Rail.open(Map.put(@route, :addrs, []), :ik, keys)
+    assert_receive {:dial_op, op}
+    refute Map.has_key?(op, "addrs")
+
+    too_many = List.duplicate("100.64.0.1:4033", 9)
+    assert {:error, :invalid_addrs} = Rail.open(Map.put(@route, :addrs, too_many), :ik, keys)
+    refute_received {:dial_op, _op}
+  end
+
+  test "an owner that asks for paths hears the one the dial opened on, then each change", ctx do
+    ctx = start_responder(ctx)
+    test = self()
+    real = bridge_connect(ctx.bridge_socket)
+
+    connect = fn ->
+      send(test, {:session, self()})
+
+      with {:ok, socket} <- real.(),
+           do: {:ok, socket, %{kind: :relay, relay: "https://relay.invalid/"}}
+    end
+
+    assert {:ok, rail} = open(ctx, connect: connect, paths: true)
+    assert_receive {:rail, ^rail, {:path, %{kind: :relay, relay: "https://relay.invalid/"}}}
+
+    # The helper's word that hole punching moved the connection.
+    send(rail, {:iroh_dial, "d1", {:path, %{kind: :direct, relay: nil}}})
+    assert_receive {:rail, ^rail, {:path, %{kind: :direct, relay: nil}}}
+    hello(rail)
+
+    # An owner that did not ask hears nothing of paths.
+    assert {:ok, quiet} = open(ctx, connect: connect)
+    assert_receive {:session, ^quiet}
+    send(quiet, {:iroh_dial, "d2", {:path, %{kind: :direct, relay: nil}}})
+    hello(quiet)
+    refute_received {:rail, ^quiet, {:path, _path}}
   end
 
   test "a rail with no helper to dial through fails the open, not the opener", ctx do

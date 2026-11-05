@@ -141,6 +141,53 @@ defmodule FermixCore.Management.HomeTest do
       end
     end
 
+    # Step 7: whether the link runs direct or through Fermix's relay, as the
+    # helper reports it; absent while no session is up.
+    test "a desktop's primary names the link's path while it is connected", %{home: home} do
+      link = fn path, connected ->
+        fn ->
+          %{
+            primary: %{
+              name: "invented-vm",
+              connected: connected,
+              status: if(connected, do: :connected, else: :unreachable),
+              since: nil,
+              epoch: 5,
+              sentence: "Fermix is connected to the server invented-vm.",
+              path: path
+            },
+            desktops: [],
+            enrollment: nil
+          }
+        end
+      end
+
+      for {path, connected, word} <- [
+            {:direct, true, "direct"},
+            {:relay, true, "relay"}
+          ] do
+        assert {:ok, status} =
+                 route(
+                   "home.status",
+                   %{},
+                   opts(home, engine_role: @device, link_status: link.(path, connected))
+                 )
+
+        assert status["primary"]["path"] == word
+      end
+
+      for {path, connected} <- [{nil, true}, {nil, false}] do
+        assert {:ok, status} =
+                 route(
+                   "home.status",
+                   %{},
+                   opts(home, engine_role: @device, link_status: link.(path, connected))
+                 )
+
+        refute Map.has_key?(status["primary"], "path")
+      end
+    end
+
     test "a home that never booted as the primary has no epoch yet", %{home: home} do
       SafeRm.rm!(Epoch.path(home))
 

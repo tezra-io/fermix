@@ -7,8 +7,10 @@ defmodule FermixChannels.Home.Candidate do
 
   **Enrollment.** In phase `enrolling` it dials the primary the code names
   (`Mobile.Rail`, `:ikpsk2_enroll`: its Noise key, the code's gateway key and
-  secret) and sends `enroll_request` with its host, its own iroh route, the
-  one-time snapshot recipient, and the destination facts it was given. On
+  secret) and sends `enroll_request` with its host, its own iroh route (with
+  its endpoint's address hints, read as it sends them: an Always On server's
+  tailnet addresses at its fixed port, `Iroh.Helper.hints/1`), the one-time
+  snapshot recipient, and the destination facts it was given. On
   `enroll_accepted` it removes the code and waits for the move, up to 24
   hours (`enrolled`); after that it stops waiting (`expired`). A
   refusal (`enrollment_expired`, `used`, `limit`) ends it (`failed`), logged
@@ -65,12 +67,16 @@ defmodule FermixChannels.Home.Candidate do
   other phase, the restore that wrote it stopped, so it is removed, and the
   restore is offered again.
 
+  A return's enrollment dials the server at the address hints its desktop
+  link holds (`FermixCore.Home.DesktopLink`), as every dial to the server
+  does.
+
   Test seams: `:home`, `:helper`, `:name`, `:clock` (0-arity `DateTime`),
   `:schedule` (2-arity `Process.send_after/3` stand-in), `:restart`,
   `:rail_opts` (extra `Mobile.Rail.open/3` options, such as `:connect`),
   `:restore_opts` (for `Snapshot.restore/4`, and a return's settling seams),
-  `:task_supervisor`, `:host`, `:free_bytes` (a 1-arity reader of free
-  space), `:awake` (0-arity, as `MoveAwake.hold/1`; a test VM holds nothing
+  `:task_supervisor`, `:host`, `:hints` (0-arity, as `Iroh.Helper.hints/1`),
+  `:free_bytes` (a 1-arity reader of free space), `:awake` (0-arity, as `MoveAwake.hold/1`; a test VM holds nothing
   unless a case injects it), `:secret_names` (0-arity, as
   `Management.Settings.secret_names/0`).
   """
@@ -79,12 +85,14 @@ defmodule FermixChannels.Home.Candidate do
 
   require Logger
 
+  alias FermixChannels.Mobile.Iroh.Helper
   alias FermixChannels.Mobile.Iroh.Relays
   alias FermixChannels.Mobile.Rail
   alias FermixCore.BuildInfo
   alias FermixCore.Home.Candidate, as: Files
   alias FermixCore.Home.Candidate.Activation
   alias FermixCore.Home.Candidate.Return
+  alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.Disk
   alias FermixCore.Home.MoveAwake
   alias FermixCore.Home.MoveTelemetry
@@ -153,10 +161,12 @@ defmodule FermixChannels.Home.Candidate do
   @impl true
   def init(opts) do
     home = Keyword.get_lazy(opts, :home, &ConfigStore.fermix_home/0)
+    helper = Keyword.get(opts, :helper)
 
     state = %{
       home: home,
-      helper: Keyword.get(opts, :helper),
+      helper: helper,
+      hints: Keyword.get(opts, :hints, fn -> Helper.hints(helper) end),
       clock: Keyword.get(opts, :clock, &DateTime.utc_now/0),
       schedule: Keyword.get(opts, :schedule, &Process.send_after(self(), &1, &2)),
       restart: Keyword.get(opts, :restart, &Lifecycle.restart_self/0),
@@ -298,33 +308,55 @@ defmodule FermixChannels.Home.Candidate do
       {:ok,
        %{
          code: code,
-         route: %{node_id: code.node_id, relays: code.relays, relays_rev: code.relays_rev},
+         route: %{
+           node_id: code.node_id,
+           relays: code.relays,
+           relays_rev: code.relays_rev,
+           addrs: link_hints(state.home, code.node_id)
+         },
          rail_opts:
            [static_keypair: noise, remote_static: code.gateway_pk, psk: code.secret] ++
              helper_opts(state),
-         request: enroll_request(state.host, iroh, pair, destination)
+         request: enroll_request(state.host, iroh, pair, destination, state.hints.())
        }}
     end
+  end
+
+  # A return enrolls with the server its desktop link names: its hints are
+  # the link's. A server enrolling with a primary has no link, and so none.
+  defp link_hints(home, node_id) do
+    case DesktopLink.read(home) do
+      {:ok, %{primary: %{node_id: ^node_id, addrs: addrs}}} -> addrs
+      {:ok, _other_primary} -> []
+      {:error, {:file, _path, :enoent}} -> []
+      {:error, reason} -> log_unread_link(reason)
+    end
+  end
+
+  defp log_unread_link(reason) do
+    Logger.warning("candidate: no address hints: the desktop link: #{inspect(reason)}")
+    []
   end
 
   defp helper_opts(%{rail_opts: []} = state), do: [helper: state.helper]
   defp helper_opts(state), do: state.rail_opts
 
-  defp enroll_request(host, iroh_secret, pair, destination) do
+  defp enroll_request(host, iroh_secret, pair, destination, hints) do
     {iroh_public, _secret} = :crypto.generate_key(:eddsa, :ed25519, iroh_secret)
 
-    %{
-      "host" => host,
-      "candidate" => %{
+    candidate =
+      %{
         "node_id" => Base.encode16(iroh_public, case: :lower),
         "relays" => Relays.to_wire(Relays.acknowledged([])),
         "recipient" => Base.encode64(pair.public_key)
       }
-    }
+      |> put_unless_empty("addrs", hints)
+
+    %{"host" => host, "candidate" => candidate}
     |> put_unless_empty("snapshots", destination)
   end
 
-  defp put_unless_empty(map, _key, facts) when facts == %{}, do: map
+  defp put_unless_empty(map, _key, facts) when facts == %{} or facts == [], do: map
   defp put_unless_empty(map, key, facts), do: Map.put(map, key, facts)
 
   @doc false

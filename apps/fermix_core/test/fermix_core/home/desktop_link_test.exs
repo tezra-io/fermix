@@ -13,7 +13,8 @@ defmodule FermixCore.Home.DesktopLinkTest do
       gateway_pk: <<7::256>>,
       node_id: String.duplicate("ab", 32),
       relays: [%{"url" => "https://relay.invalid/", "quic_port" => 7842}],
-      relays_rev: "0123456789abcdef"
+      relays_rev: "0123456789abcdef",
+      addrs: ["100.101.102.103:4033", "[fd7a:115c:a1e0::9]:4033"]
     },
     epoch: 4
   }
@@ -51,7 +52,13 @@ defmodule FermixCore.Home.DesktopLinkTest do
           {:node_id, put_in(good, ["primary", "node_id"], "AB")},
           {:gateway_pk, put_in(good, ["primary", "gateway_pk"], "short")},
           {:relays, put_in(good, ["primary", "relays"], [%{"url" => "http://x/"}])},
-          {:name, put_in(good, ["primary", "name"], "two\nlines")}
+          {:name, put_in(good, ["primary", "name"], "two\nlines")},
+          {:addrs, put_in(good, ["primary", "addrs"], ["100.101.102.103"])},
+          {:addrs, put_in(good, ["primary", "addrs"], ["100.101.102.103:0"])},
+          {:addrs, put_in(good, ["primary", "addrs"], ["fd7a:115c:a1e0::9:4033"])},
+          {:addrs, put_in(good, ["primary", "addrs"], ["fermix-vm.ts.net:4033"])},
+          {:addrs, put_in(good, ["primary", "addrs"], List.duplicate("100.64.0.1:4033", 9))},
+          {:addrs, put_in(good, ["primary", "addrs"], nil)}
         ] do
       File.write!(path, Jason.encode!(broken))
       assert {:error, {:invalid_link, ^path, ^field}} = DesktopLink.read(home)
@@ -73,12 +80,53 @@ defmodule FermixCore.Home.DesktopLinkTest do
     assert {:ok, ^raised} = DesktopLink.read(home)
 
     relays = [%{"url" => "https://two.invalid/", "quic_port" => 7843}]
-    assert {:ok, routed} = DesktopLink.record_route(home, raised, {relays, "fedcba9876543210"})
+    addrs = ["100.64.7.8:4033"]
 
-    assert {:ok, %{primary: %{relays: ^relays, relays_rev: "fedcba9876543210"}}} =
+    assert {:ok, routed} =
+             DesktopLink.record_route(home, raised, {relays, "fedcba9876543210", addrs})
+
+    assert {:ok, %{primary: %{relays: ^relays, relays_rev: "fedcba9876543210", addrs: ^addrs}}} =
              DesktopLink.read(home)
 
-    assert {:ok, ^routed} = DesktopLink.record_route(home, routed, {relays, "fedcba9876543210"})
+    assert {:ok, ^routed} =
+             DesktopLink.record_route(home, routed, {relays, "fedcba9876543210", addrs})
+
+    # A server that has no hints now (its Tailscale went away) has none kept.
+    assert {:ok, %{primary: %{addrs: []}}} =
+             DesktopLink.record_route(home, routed, {relays, "fedcba9876543210", []})
+
+    assert {:ok, %{primary: %{addrs: []}}} = DesktopLink.read(home)
+  end
+
+  test "a link written without hints holds none", %{home: home} do
+    plain = %{@link | primary: Map.delete(@link.primary, :addrs)}
+    assert :ok = DesktopLink.write(home, plain)
+    assert {:ok, %{primary: %{addrs: []}}} = DesktopLink.read(home)
+
+    # One from before hints were kept reads as none.
+    path = DesktopLink.path(home)
+
+    older =
+      path |> File.read!() |> Jason.decode!() |> update_in(["primary"], &Map.delete(&1, "addrs"))
+
+    File.write!(path, Jason.encode!(older))
+    assert {:ok, %{primary: %{addrs: []}}} = DesktopLink.read(home)
+  end
+
+  test "a hint is an IPv4 address or a bracketed IPv6 one, with its port" do
+    for hint <- ["100.64.0.1:4033", "[fd7a:115c:a1e0::1]:4033", "127.0.0.1:1"],
+        do: assert(DesktopLink.hint?(hint), hint)
+
+    for hint <- [
+          "100.64.0.1",
+          "fd7a::1:4033",
+          "[fd7a::1]",
+          "[fd7a::1]:65536",
+          "a.ts.net:4033",
+          4033,
+          ""
+        ],
+        do: refute(DesktopLink.hint?(hint), inspect(hint))
   end
 
   test "the key is read only at 0600, and a looser mode is refused by name", %{home: home} do

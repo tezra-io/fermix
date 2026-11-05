@@ -446,6 +446,7 @@ defmodule FermixChannels.Mobile.Session do
     |> Map.put_new(:authorize_socket, &DeviceRegistry.authorized?/3)
     |> Map.put_new(:discover, fn -> Discovery.candidates(discovery) end)
     |> Map.put_new(:iroh_candidate, fn -> Helper.candidate(iroh_helper) end)
+    |> Map.put_new(:iroh_hints, fn -> Helper.hints(iroh_helper) end)
     |> Map.put_new(:relay_list_acknowledged, fn -> Helper.relays_acknowledged(iroh_helper) end)
     |> Map.put_new(:close_iroh_peer, &Helper.close(iroh_helper, &1))
     |> Map.put_new(:pending_approvals, &Approvals.pending(Approvals.server(), &1, :mobile))
@@ -1093,7 +1094,7 @@ defmodule FermixChannels.Mobile.Session do
          "min_version" => min_version,
          "max_version" => max_version,
          "profiles" => profiles(state),
-         "candidates" => current_candidates(state),
+         "candidates" => hello_candidates(state),
          "history_head_seq" => history_head,
          "read_up_to_seq" => read_up_to,
          "caps" => %{
@@ -1943,6 +1944,27 @@ defmodule FermixChannels.Mobile.Session do
       {:ok, iroh} -> host_candidates(state, @max_host_candidates_with_iroh) ++ [iroh]
       :none -> host_candidates(state, @max_candidates)
     end
+  end
+
+  # A desktop also hears where it may dial this engine directly (an Always
+  # On server's tailnet addresses at its fixed port, `Iroh.Hints`), on the
+  # rail's route; a phone's candidates are as they were.
+  defp hello_candidates(state) do
+    candidates = current_candidates(state)
+
+    case session_kind(state) do
+      :desktop -> with_hints(candidates, state.iroh_hints.())
+      :phone -> candidates
+    end
+  end
+
+  defp with_hints(candidates, []), do: candidates
+
+  defp with_hints(candidates, hints) do
+    Enum.map(candidates, fn
+      %{"kind" => "iroh"} = iroh -> Map.put(iroh, "addrs", hints)
+      host -> host
+    end)
   end
 
   defp host_candidates(state, limit) do

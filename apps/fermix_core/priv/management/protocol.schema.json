@@ -5928,7 +5928,7 @@
     },
     "homePrimary": {
       "type": "object",
-      "description": "The primary a desktop reaches: its name, whether the session is up, the link's state in one closed word, since when the session is up (null while not), the highest primary epoch this desktop has seen, and one sentence. status: connected (a session is up); renewing (a session opening with nothing known to be wrong: the first since the engine started, or a quiet renewal after the primary ended one normally; draw it quietly); unreachable (an outage, retried with a backoff, or a link this engine refused to use); revoked (the primary no longer knows this computer; never retried until the engine restarts); stale (the primary answered as an older copy; retried).",
+      "description": "The primary a desktop reaches: its name, whether the session is up, the link's state in one closed word, since when the session is up (null while not), the highest primary epoch this desktop has seen, one sentence, and the session's path while it is up. status: connected (a session is up); renewing (a session opening with nothing known to be wrong: the first since the engine started, or a quiet renewal after the primary ended one normally; draw it quietly); unreachable (an outage, retried with a backoff, or a link this engine refused to use); revoked (the primary no longer knows this computer; never retried until the engine restarts); stale (the primary answered as an older copy; retried). path: direct (a direct UDP path, a tailnet one included) or relay (through Fermix's relay); absent while no session is up, before the helper names it, and from an engine older than the field.",
       "required": ["name", "connected", "status", "since", "epoch", "sentence"],
       "additionalProperties": false,
       "properties": {
@@ -5937,7 +5937,8 @@
         "status": { "enum": ["connected", "renewing", "unreachable", "revoked", "stale"] },
         "since": { "type": ["string", "null"] },
         "epoch": { "type": ["integer", "null"], "minimum": 1 },
-        "sentence": { "type": "string", "minLength": 1 }
+        "sentence": { "type": "string", "minLength": 1 },
+        "path": { "enum": ["direct", "relay"] }
       }
     },
     "homeDesktop": {

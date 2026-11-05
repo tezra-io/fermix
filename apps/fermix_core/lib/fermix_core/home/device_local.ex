@@ -18,6 +18,8 @@ defmodule FermixCore.Home.DeviceLocal do
     {"moved.json", :drop,
      "the marker that retires this copy; a restored home is the new primary"},
     {"device", :keep, "this machine's own Always On record: a return's"},
+    {"device/server.json", :keep,
+     "marks this machine an Always On server, whose iroh endpoint binds a fixed port"},
     {"device/desktop.json", :drop, "a desktop's link to its primary"},
     {"device/desktop_key", :drop, "a desktop's own key"},
     {"snapshots", :keep,

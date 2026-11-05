@@ -340,6 +340,13 @@ it, never a second writer.
   primary will write to, its own iroh key, its Noise key and a one-time
   snapshot recipient, all 0600) and
   `[fermix_core.engine] role = "candidate"`, and removes the code file. It
+  also marks the machine an Always On server (`<home>/device/server.json`,
+  which stays on the machine through the move): a server's iroh endpoint
+  listens on the fixed UDP port 4033, as a candidate and as the primary, so
+  the address a desktop recorded holds after a restart. A Mac, a primary
+  that serves phones and a desktop keep the port iroh picks. A port another
+  process holds fails remote reach by name (Doctor's remote reach line names
+  the port), and Fermix tries again on its backoff. It
   refuses a home that ran as a primary, carries a moved marker, is a
   candidate already, or holds anything a fresh install does not write, and a
   failure leaves the home and the code file as they were. A candidate engine
@@ -587,8 +594,9 @@ it, never a second writer.
 
 - After an Always On move the computer the home left keeps Fermix running in
   the device role, linked to the new primary: `<home>/device/desktop.json`
-  names the primary (its name, gateway key, iroh node id and relays, and the
-  highest primary epoch this desktop has seen) and `<home>/device/desktop_key`
+  names the primary (its name, gateway key, iroh node id and relays, its
+  direct address hints, and the highest primary epoch this desktop has seen)
+  and `<home>/device/desktop_key`
   is the desktop's own key, used only at mode 0600 (a looser mode is refused
   by name and nothing is dialed). Both stay on this computer.
 - The Mac or Linux app changes nothing: it keeps talking to this computer's
@@ -675,10 +683,25 @@ it, never a second writer.
   copy of Fermix: this desktop does not use it, says so, and keeps its epoch.
   A higher epoch is kept; so is a newer relay list, which the next connection
   acknowledges.
+- **Address hints.** An Always On server tells its desktops where they may
+  dial it directly: its Tailscale addresses (IPv4 in `100.64.0.0/10`, IPv6
+  in `fd7a:115c:a1e0::/48`) at its fixed port 4033, read when it says them,
+  in its enrollment and at every desktop connection; never a public address,
+  which iroh's relay-assisted hole punching finds by itself. The desktop
+  keeps the latest in its link and names them on every dial beside the relay,
+  so a computer on the same tailnet reaches its server with Fermix's relay
+  down. A server without Tailscale gives none, which is normal; a hint that
+  fails costs nothing, the relay is tried as well. There is no second way to
+  connect: iroh is the only one.
 - The engine's `home.status` (what the apps draw, and `fermix home status
   --json`) shows the link: the primary's name, whether it is connected and
-  since when, the epoch, and the sentence. On the primary the same picture
-  lists its desktops, each with whether it is connected.
+  since when, the epoch, the sentence, and while it is connected its path,
+  `direct` (a direct path, a tailnet one included) or `relay` (through
+  Fermix's relay), as iroh reports it when the connection opens and each
+  time hole punching moves it. The Always On screen's Details end with
+  **Connection: Direct** or **Through Fermix's network**, and `fermix
+  doctor`'s **server link** line says the same. On the primary the same
+  picture lists its desktops, each with whether it is connected.
 
 ## Moving back to the computer the home left
 

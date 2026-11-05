@@ -2,7 +2,15 @@ defmodule FermixChannels.Home.MoveEndToEndTest do
   @moduledoc """
   M75 §7 with the real helper: a candidate enrolls with a primary, and the
   primary's home moves to it, each session carried by real `fermix-iroh`
-  processes (helper protocol 3).
+  processes (helper protocol 4).
+
+  The candidate is an Always On server: its endpoint binds the fixed port it
+  is given, it enrolls with its address hint, and the move worker dials it
+  the way a desktop's engine does, through its dial-only helper at the
+  address the candidate's record holds, never a test's own dial. The hint is
+  the loopback one, given through the candidate's own seam: a tailnet
+  address cannot reach a listener on this machine, and the interfaces stay
+  the test's.
 
   The primary listens with its home's key behind its bridge, which serves the
   enrollment prelude (`Home.EnrollmentResponder` through `Mobile.Session`). The
@@ -12,7 +20,8 @@ defmodule FermixChannels.Home.MoveEndToEndTest do
   helper. The move worker (`Home.MoveWorker`) dials the candidate through a
   dial-only helper, as a device-role engine does. Every dial is direct, at
   the listener's UDP address (no relay can be trusted locally by the released
-  helper); a route's relays never resolve.
+  helper); a route's relays never resolve, so the move runs with its relay
+  unreachable and the hint alone.
 
   Opt-in, because it needs the helper built from a `fermix-iroh` checkout
   (`cargo build --release --locked`):
@@ -39,6 +48,8 @@ defmodule FermixChannels.Home.MoveEndToEndTest do
   alias FermixChannels.Mobile.Iroh.Relays.Source
   alias FermixChannels.Test.HomeMove
   alias FermixCore.Home.Candidate
+  alias FermixCore.Home.Candidates
+  alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.Epoch
   alias FermixCore.Home.Move
   alias FermixCore.Home.Moved
@@ -76,16 +87,17 @@ defmodule FermixChannels.Home.MoveEndToEndTest do
         %{role: :primary, primary: nil},
         candidate_id,
         Recipient.public(Recipient.generate()),
-        now: HomeMove.now()
+        HomeMove.start_opts()
       )
 
     dialer = start_helper(ctx, :dial, short_root("fx-e2e-s"), [])
 
-    connect = fn _route ->
-      fn -> dial(dialer, candidate.node_id, candidate.port) end
-    end
+    # The server enrolled with its hint, at the port it was told to bind.
+    assert candidate.port == candidate.bind_port
+    hint = "127.0.0.1:#{candidate.bind_port}"
+    assert {:ok, [%{addrs: [^hint]}]} = Candidates.list(primary.root, HomeMove.now())
 
-    opts = HomeMove.worker_opts(primary.root, candidate, connect: connect)
+    opts = HomeMove.worker_opts(primary.root, candidate, connect: nil, helper: dialer)
     :ok = Task.await(Task.async(fn -> MoveWorker.run(opts) end), 120_000)
 
     # The worker records `committed`; the ending is the relaunched desktop's to
@@ -94,6 +106,8 @@ defmodule FermixChannels.Home.MoveEndToEndTest do
     assert :ok = Move.finish_at_boot(primary.root, :device)
     assert {:ok, %{"phase" => "done", "epoch" => 5}} = Move.read_phase(primary.root)
     assert {:ok, %{to: "north-box"}} = Moved.read(primary.root)
+    # The desktop the source became dials its server there too.
+    assert {:ok, %{primary: %{addrs: [^hint]}}} = DesktopLink.read(primary.root)
     assert {:ok, %{role: :primary}} = Role.configured(candidate.home)
     assert {:ok, 5} = Epoch.read(candidate.home)
     assert File.read!(Key.path(candidate.home)) == File.read!(Key.path(primary.root))
@@ -141,7 +155,14 @@ defmodule FermixChannels.Home.MoveEndToEndTest do
     name = :"e2e_move_candidate_#{System.unique_integer([:positive])}"
 
     session_opts = [phone_modes: [], responders: %{ik_move: {MoveResponder, [candidate: name]}}]
-    {helper, port} = start_listener(ctx, Candidate.dir(home), session_opts, :candidate)
+    bind_port = free_udp_port()
+
+    {helper, port} =
+      start_listener(ctx, Candidate.dir(home), session_opts, :candidate,
+        bind_port: bind_port,
+        interfaces: fn -> {:ok, []} end
+      )
+
     %{endpoint_id: node_id} = Helper.status(helper)
     %{endpoint_id: primary_node} = Helper.status(primary.helper)
     test = self()
@@ -158,19 +179,20 @@ defmodule FermixChannels.Home.MoveEndToEndTest do
        end,
        restart: fn -> :ok end,
        rail_opts: [connect: fn -> dial(helper, primary_node, primary.port) end],
+       hints: fn -> ["127.0.0.1:#{bind_port}"] end,
        restore_opts: [host: "linux-aarch64", keyring_usable?: fn -> false end],
        host: %{"name" => "north-box", "os" => "linux", "arch" => "aarch64", "version" => "9.9.9"}},
       id: :candidate
     )
 
-    %{home: home, node_id: node_id, port: port}
+    %{home: home, node_id: node_id, port: port, bind_port: bind_port}
   end
 
   # -- helpers ----------------------------------------------------------------
 
   # A listening helper rooted at `root` (its key at `root/mobile/iroh_key`)
   # behind a bridge with `session_opts`; answers it and its UDP port.
-  defp start_listener(ctx, root, session_opts, id) do
+  defp start_listener(ctx, root, session_opts, id, helper_opts \\ []) do
     socket = Bridge.socket_path(root)
 
     connections =
@@ -188,7 +210,12 @@ defmodule FermixChannels.Home.MoveEndToEndTest do
 
     {helper, log} =
       with_log([level: :info], fn ->
-        start_helper(ctx, :listen, root, bridge_socket: socket, bridge: bridge, id: {id, :helper})
+        start_helper(
+          ctx,
+          :listen,
+          root,
+          [bridge_socket: socket, bridge: bridge, id: {id, :helper}] ++ helper_opts
+        )
       end)
 
     [_all, port] = Regex.run(~r/bound UDP sockets: .*?(?:0\.0\.0\.0|127\.0\.0\.1):(\d+)/, log)
@@ -239,6 +266,15 @@ defmodule FermixChannels.Home.MoveEndToEndTest do
         Process.sleep(50)
         await_ready(helper, attempts - 1)
     end
+  end
+
+  # A UDP port nothing holds now, for the server's fixed one (never 4033,
+  # which a Fermix running on this machine may hold).
+  defp free_udp_port do
+    {:ok, socket} = :gen_udp.open(0, ip: {0, 0, 0, 0})
+    {:ok, port} = :inet.port(socket)
+    :ok = :gen_udp.close(socket)
+    port
   end
 
   defp short_root(prefix) do

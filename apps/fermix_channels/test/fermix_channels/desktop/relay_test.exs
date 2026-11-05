@@ -221,6 +221,49 @@ defmodule FermixChannels.Desktop.RelayTest do
     assert_receive :status_changed, 10_000
   end
 
+  # Step 7: the session's path, direct or through the relay, from the dial's
+  # `dialed` and each `dial_path` after it; none while no session is up.
+  test "the path is the dial's, then each change; none while the session is down" do
+    primary = DesktopRail.primary!()
+    root = DesktopRail.desktop_home!(primary)
+    test = self()
+    real = DesktopRail.bridge_connect(primary.bridge_socket)
+
+    connect = fn ->
+      send(test, {:session, self()})
+
+      with {:ok, socket} <- real.(),
+           do: {:ok, socket, %{kind: :relay, relay: "https://relay.invalid/"}}
+    end
+
+    relay =
+      DesktopRail.start_relay!(root, primary,
+        connect: connect,
+        status_changed: fn ->
+          send(test, :status_changed)
+          :ok
+        end
+      )
+
+    assert_receive {:session, session}, 10_000
+    assert %{connected: true, path: :relay} = await_path(relay, :relay)
+    assert_receive :status_changed, 10_000
+
+    # Hole punching moved it off the relay: the summary an app draws moves.
+    send(session, {:iroh_dial, "d1", {:path, %{kind: :direct, relay: nil}}})
+    assert %{path: :direct} = await_path(relay, :direct)
+    assert_receive :status_changed, 10_000
+
+    # The same path again changes nothing.
+    send(session, {:iroh_dial, "d1", {:path, %{kind: :direct, relay: nil}}})
+    assert %{path: :direct} = Relay.status(relay)
+    refute_received :status_changed
+
+    :ok = drop_sessions(primary)
+    assert_receive {:scheduled, {:relay_timer, :reconnect, _token}, 1_000}, 10_000
+    assert %{connected: false, path: nil} = Relay.status(relay)
+  end
+
   # The status word is what an app draws: the first dial is quiet, and a
   # redial during an outage is still the outage until a session is up.
   test "the first dial is renewing, and a redial during an outage stays unreachable" do
@@ -434,6 +477,53 @@ defmodule FermixChannels.Desktop.RelayTest do
     assert_receive {:hello_seen, %{relay_list_rev: "fedcba9876543210"}}, 10_000
   end
 
+  # Always On: the server's tailnet addresses at its fixed port, which its
+  # session tells each desktop, as `fermix-iroh` helpers dial them.
+  test "the hints each session gives are kept, and none kept when it gives none" do
+    hints = ["100.101.102.103:4033", "[fd7a:115c:a1e0::9]:4033"]
+    {:ok, given} = Agent.start_link(fn -> hints end)
+
+    route = %{
+      "kind" => "iroh",
+      "node_id" => DesktopRail.node_id(),
+      "relays" => [%{"url" => "https://relay.invalid/", "quic_port" => 7842}],
+      "relays_rev" => DesktopRail.relays_rev()
+    }
+
+    primary =
+      DesktopRail.primary!(
+        iroh_candidate: fn -> {:ok, route} end,
+        iroh_hints: fn -> Agent.get(given, & &1) end
+      )
+
+    root = DesktopRail.desktop_home!(primary)
+    relay = DesktopRail.start_relay!(root, primary)
+    DesktopRail.await_connected(relay)
+    assert {:ok, %{primary: %{addrs: ^hints}}} = DesktopLink.read(root)
+
+    # The server's Tailscale went away: the next session gives none.
+    Agent.update(given, fn _ -> [] end)
+    :ok = drop_sessions(primary)
+    assert_receive {:scheduled, {:relay_timer, :reconnect, _token} = timer, 1_000}, 10_000
+    send(GenServer.whereis(relay), timer)
+    DesktopRail.await_connected(relay)
+    DesktopRail.await_link(root, &(&1.primary.addrs == []))
+  end
+
+  test "every dial names the hints the link holds" do
+    primary = DesktopRail.primary!()
+    hints = ["100.101.102.103:4033"]
+    root = DesktopRail.desktop_home!(primary, addrs: hints)
+    File.mkdir_p!(Path.join(root, "mobile"))
+    File.chmod!(Path.join(root, "mobile"), 0o700)
+
+    spy =
+      start_supervised!({DesktopRail.DialSpy, {self(), Path.join([root, "mobile", "d1.sock"])}})
+
+    _relay = DesktopRail.start_relay!(root, primary, connect: nil, helper: spy)
+    assert_receive {:dial_op, %{"op" => "dial", "addrs" => ^hints}}, 10_000
+  end
+
   test "the primary's media bound is taken up to this desktop's own 64 MiB, never past it" do
     huge = %{"commands" => [], "max_media_bytes" => 1_152_921_504_606_846_976}
 
@@ -561,6 +651,23 @@ defmodule FermixChannels.Desktop.RelayTest do
 
   # The primary's side of every bridge connection stops, as a stopping daemon's
   # does: each session hears `1000` and ends.
+  # The relay announces no path; its status is read until it names `path`,
+  # within 10 s.
+  defp await_path(relay, path, attempts \\ 1_000) do
+    case Relay.status(relay) do
+      %{connected: true, path: ^path} = status ->
+        status
+
+      status when attempts == 0 ->
+        flunk("the relay never ran #{path}: #{inspect(status)}")
+
+      _other ->
+        # sleep: polls the relay's status, which announces no path
+        Process.sleep(10)
+        await_path(relay, path, attempts - 1)
+    end
+  end
+
   defp drop_sessions(primary) do
     for {_id, pid, _type, _modules} <- DynamicSupervisor.which_children(primary.connections),
         is_pid(pid),
