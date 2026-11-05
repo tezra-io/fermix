@@ -1,8 +1,9 @@
 #!/bin/sh
 # Test stand-in for curl. https://fermix.ai/install answers the fake
-# installer, unless /etc/fermix-test/install-unreachable exists; any other
-# address is refused, as one that does not resolve is. Logs every call as a
-# GET of its URL.
+# installer, unless /etc/fermix-test/install-unreachable exists;
+# https://pkgs.tailscale.com/ is fetched for real, with the curl the tailnet
+# scenario installs; any other address is refused, as one that does not
+# resolve is. Logs every call as a GET of its URL.
 set -eu
 log=/var/log/fermix-test
 url="" out=""
@@ -21,6 +22,7 @@ printf 'curl GET %s\n' "$url" >>"$log/calls.log"
 [ ! -f /etc/fermix-test/install-unreachable ] || exit 6
 case "$url" in
   https://fermix.ai/install) body=/cloud/test/fake-install.sh ;;
+  https://pkgs.tailscale.com/*) exec /usr/bin/curl -fsSL --proto '=https' "$url" -o "$out" ;;
   *) exit 6 ;;
 esac
 if [ -n "$out" ]; then cat "$body" >"$out"; else cat "$body"; fi

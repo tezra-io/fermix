@@ -17,9 +17,12 @@
 #
 # Options: --restore, --snapshot-bucket NAME --snapshot-region REGION
 # (together), --version X (the release to install: the one the computer that
-# sets the server up runs; the latest without it). It never prints the code,
-# never logs it and never puts it on a command line. Run again, it converges
-# on the same state; a host whose Fermix home exists is not enrolled again.
+# sets the server up runs; the latest without it), --tailscale (join the
+# owner's tailnet before enrolling, with the auth key in TS_AUTHKEY or asked
+# for on the terminal without echo). It never prints the code or the key,
+# never logs them and never puts them on a command line. Run again, it
+# converges on the same state; a host whose Fermix home exists is not
+# enrolled again, and one already on a tailnet is not logged in again.
 set -eu
 
 ENGINE_USER=fermix
@@ -58,6 +61,21 @@ UPDATE_SCRIPT=/usr/local/sbin/fermix-update
 # This, not the release, decides: Debian 12's own 6.1 gives ABI 2, and a
 # Debian 12 host on a 6.2 or later kernel qualifies.
 LANDLOCK_ABI_MIN=3
+# With --tailscale: Tailscale's own package from its signed repository for
+# this release, whose signing key (one key for every release's repository) is
+# checked by its fingerprint before apt is given it, at the paths Tailscale's
+# own instructions use, so a host set up by them converges. The owner's auth
+# key goes only to a file in the work directory, which tailscale up reads
+# (--auth-key=file:) and which is removed right after.
+TAILSCALE_PKGS=https://pkgs.tailscale.com/stable
+TAILSCALE_KEY_FPR=2596A99EAAB33821893C0A79458CA832957F5868
+TAILSCALE_KEYRING=/usr/share/keyrings/tailscale-archive-keyring.gpg
+TAILSCALE_SOURCE=/etc/apt/sources.list.d/tailscale.list
+# How long tailscale up waits for the server to reach the tailnet.
+TAILSCALE_UP_TIMEOUT=2m
+TS_KEY_PREFIX=tskey-
+TS_KEY_MIN=20
+TS_KEY_MAX=200
 
 CODE=""
 RELEASE=""
@@ -70,6 +88,12 @@ ENGINE_UID=""
 APT_UPDATED=0
 WORK=""
 TTY_STATE=""
+HIDDEN=""
+TAILSCALE=0
+TS_KEY=""
+TS_KEY_FILE=""
+TS_ON_TAILNET=0
+TS_REPO=""
 
 # One sentence and a non-zero exit.
 fail() {
@@ -99,6 +123,7 @@ parse_args() {
   while [ $# -gt 0 ]; do
     case "$1" in
       --restore) RESTORE=1; shift ;;
+      --tailscale) TAILSCALE=1; shift ;;
       --snapshot-bucket | --snapshot-region | --version)
         [ $# -ge 2 ] || fail "$1 needs a value."
         case "$1" in
@@ -108,7 +133,7 @@ parse_args() {
         esac
         shift 2
         ;;
-      *) fail "An option was not recognised. This script takes --restore, --snapshot-bucket, --snapshot-region and --version." ;;
+      *) fail "An option was not recognised. This script takes --restore, --snapshot-bucket, --snapshot-region, --version and --tailscale." ;;
     esac
   done
 
@@ -123,6 +148,12 @@ parse_args() {
       fail "--snapshot-bucket is not an S3 bucket name, or is missing beside --snapshot-region."
     matches "$SNAPSHOT_REGION" '^[a-z0-9][a-z0-9-]{0,31}$' ||
       fail "--snapshot-region is not a region name, or is missing beside --snapshot-bucket."
+  fi
+
+  # A key meant for the tailnet, without the step that uses it.
+  if [ "$TAILSCALE" -eq 0 ] && [ -n "$TS_KEY" ]; then
+    TS_KEY=""
+    fail "TS_AUTHKEY holds a Tailscale auth key, but --tailscale was not given: add --tailscale to join this server to your tailnet, or leave TS_AUTHKEY out."
   fi
 }
 
@@ -172,20 +203,77 @@ check_code() {
   fi
 }
 
+# One line typed at the terminal without echo, into HIDDEN, after the prompt
+# $1.
+read_hidden() {
+  TTY_STATE=$(stty -g </dev/tty)
+  stty -echo </dev/tty
+  printf '%s' "$1" >/dev/tty
+  read -r HIDDEN </dev/tty || HIDDEN=""
+  stty "$TTY_STATE" </dev/tty
+  TTY_STATE=""
+  printf '\n' >/dev/tty
+}
+
 read_code() {
   if [ -z "$CODE" ]; then
     (: </dev/tty) 2>/dev/null ||
       fail "No enrollment code: run this in a terminal, which asks for it, or pass it in FERMIX_ENROLL_CODE."
-    TTY_STATE=$(stty -g </dev/tty)
-    stty -echo </dev/tty
-    printf 'Enrollment code from Fermix (it is not shown as you type): ' >/dev/tty
-    read -r CODE </dev/tty || CODE=""
-    stty "$TTY_STATE" </dev/tty
-    TTY_STATE=""
-    printf '\n' >/dev/tty
+    read_hidden 'Enrollment code from Fermix (it is not shown as you type): '
+    CODE=$HIDDEN
+    HIDDEN=""
   fi
   [ -n "$CODE" ] || fail "No enrollment code was entered."
   check_code
+}
+
+check_tailscale_key() {
+  case "$TS_KEY" in
+    "$TS_KEY_PREFIX"*) ;;
+    *) fail "That is not a Tailscale auth key, which starts with $TS_KEY_PREFIX. Create one in Tailscale's admin console and run this again." ;;
+  esac
+  case "${TS_KEY#"$TS_KEY_PREFIX"}" in
+    *[!A-Za-z0-9_-]*) fail "The Tailscale auth key holds a character no auth key has. Copy it again from Tailscale's admin console." ;;
+  esac
+  if [ "${#TS_KEY}" -lt "$TS_KEY_MIN" ] || [ "${#TS_KEY}" -gt "$TS_KEY_MAX" ]; then
+    fail "The Tailscale auth key is not between $TS_KEY_MIN and $TS_KEY_MAX characters long. Copy it again from Tailscale's admin console."
+  fi
+}
+
+# Whether this host is on a tailnet already: Tailscale installed and its
+# daemon answering Running. A host without Tailscale, or whose daemon does
+# not answer (stopped, or never started), is not, so this run sets it up; the
+# daemon's complaint that it is not running is that answer, not an error.
+on_tailnet() {
+  command -v tailscale >/dev/null 2>&1 || return 1
+  ts_state=$(tailscale status --json 2>/dev/null </dev/null | tr -d '\n' |
+    sed -n 's/.*"BackendState": *"\([A-Za-z]*\)".*/\1/p')
+  [ "$ts_state" = Running ]
+}
+
+# With --tailscale, before anything is installed: no key on a host already on
+# a tailnet; else the key in TS_AUTHKEY, or asked for on the terminal without
+# echo, checked, then written only to TS_KEY_FILE in the work directory
+# (tmpfs, root's, 0600).
+read_tailscale_key() {
+  if on_tailnet; then
+    TS_ON_TAILNET=1
+    TS_KEY=""
+    return 0
+  fi
+  if [ -z "$TS_KEY" ]; then
+    (: </dev/tty) 2>/dev/null ||
+      fail "No Tailscale auth key: run this in a terminal, which asks for it, or pass it in TS_AUTHKEY."
+    read_hidden 'Tailscale auth key (it is not shown as you type): '
+    TS_KEY=$HIDDEN
+    HIDDEN=""
+  fi
+  [ -n "$TS_KEY" ] || fail "No Tailscale auth key was entered."
+  check_tailscale_key
+  TS_KEY_FILE=$WORK/tailscale.authkey
+  printf '%s' "$TS_KEY" >"$TS_KEY_FILE"
+  TS_KEY=""
+  chmod 0600 "$TS_KEY_FILE"
 }
 
 # Writes stdin to a root-owned file with MODE, replacing it whole.
@@ -756,6 +844,81 @@ install_browser() {
   esac
 }
 
+# Tailscale's repository for this host's release, as pkgs.tailscale.com
+# names it: DIST/SUITE.
+tailscale_repo() {
+  case "$(os_field ID) $(os_field VERSION_ID)" in
+    "debian 12") TS_REPO=debian/bookworm ;;
+    "debian 13") TS_REPO=debian/trixie ;;
+    "ubuntu 24.04") TS_REPO=ubuntu/noble ;;
+    *) fail "Fermix knows no Tailscale repository for $(os_field PRETTY_NAME)." ;;
+  esac
+}
+
+# The key the repository serves ($1, from the address $2) must be Tailscale's
+# package signing key alone: gpg lists each primary key's fingerprint on the
+# line after it, and only the pinned one may be there. Its subkeys are bound
+# to it by its own signatures, which apt's verifier checks.
+check_tailscale_signing_key() {
+  mkdir -p "$WORK/gnupg"
+  gpg --homedir "$WORK/gnupg" --batch --quiet --no-autostart --with-colons --show-keys "$1" \
+    </dev/null >"$WORK/tailscale-key.txt" ||
+    fail "gpg could not read the key $2 serves, so Tailscale is not installed."
+  primaries=$(sed -n '/^pub:/{n;s/^fpr:::::::::\([0-9A-F]*\):.*$/\1/p;}' "$WORK/tailscale-key.txt")
+  [ "$primaries" = "$TAILSCALE_KEY_FPR" ] ||
+    fail "The key $2 serves is not Tailscale's package signing key alone ($TAILSCALE_KEY_FPR), so Tailscale is not installed."
+}
+
+# Tailscale's own package from its repository, the way a careful installer
+# adds a source: the signing key checked first, then a source that trusts
+# that key alone for that repository. The package starts tailscaled; the
+# enable makes sure of it.
+install_tailscale() {
+  tailscale_repo
+  key_url=$TAILSCALE_PKGS/$TS_REPO.noarmor.gpg
+  say "Installing Tailscale from its signed repository, $TAILSCALE_PKGS/${TS_REPO%/*} ${TS_REPO#*/}"
+  apt_install ca-certificates curl gpg
+  curl -fsSL --proto '=https' "$key_url" -o "$WORK/tailscale-keyring.gpg" ||
+    fail "Could not download Tailscale's package signing key from $key_url."
+  check_tailscale_signing_key "$WORK/tailscale-keyring.gpg" "$key_url"
+  write_file "$TAILSCALE_KEYRING" 0644 <"$WORK/tailscale-keyring.gpg"
+  write_file "$TAILSCALE_SOURCE" 0644 <<EOF
+# Fermix Always On: Tailscale's packages for ${TS_REPO%/*} ${TS_REPO#*/}, signed by the key $TAILSCALE_KEY_FPR, which the first boot checked.
+deb [signed-by=$TAILSCALE_KEYRING] $TAILSCALE_PKGS/${TS_REPO%/*} ${TS_REPO#*/} main
+EOF
+  # The new source's package lists.
+  APT_UPDATED=0
+  apt_install tailscale
+  systemctl enable --now tailscaled.service
+}
+
+# tailscale up with the key file, which is removed whether it joined or not.
+tailscale_up() {
+  say "Joining this server to your tailnet"
+  up=0
+  tailscale up --auth-key="file:$TS_KEY_FILE" --timeout="$TAILSCALE_UP_TIMEOUT" </dev/null || up=$?
+  rm -f "$TS_KEY_FILE"
+  [ "$up" -eq 0 ] ||
+    fail "tailscale up did not join this server to your tailnet, so the first boot stops here; its message above says why. A key that is used up, expired or revoked is refused: create a new one and run this again."
+}
+
+# With --tailscale, after the engine account and before enrolling, so the
+# server's tailnet address exists when it enrolls: Tailscale's package, then
+# tailscale up with the owner's key, with no tags of its own (the key carries
+# them). A host already on a tailnet keeps it as it is. It opens no port:
+# the tailnet policy decides which devices reach the server.
+join_tailnet() {
+  if [ "$TS_ON_TAILNET" -eq 1 ]; then
+    say "This server is already on a tailnet, so Tailscale is not installed or logged in again"
+  else
+    install_tailscale
+    tailscale_up
+  fi
+  address=$(tailscale ip -1 </dev/null) ||
+    fail "Tailscale names no tailnet address for this server; tailscale ip's message above says why."
+  say "This server is on your tailnet at $address"
+}
+
 # One field of the candidate's `move` in `fermix home status --json`.
 move_field() {
   tr -d '\n' <"$1" | sed -n 's/.*"move": *{\([^}]*\)}.*/\1/p' |
@@ -826,7 +989,8 @@ finish_restore() {
 
 main() {
   CODE=${FERMIX_ENROLL_CODE-}
-  unset FERMIX_ENROLL_CODE
+  TS_KEY=${TS_AUTHKEY-}
+  unset FERMIX_ENROLL_CODE TS_AUTHKEY
   umask 077
   PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
   LC_ALL=C
@@ -857,13 +1021,17 @@ main() {
     CODE=""
   elif [ "$RESTORE" -eq 0 ]; then
     read_code
-    write_code_file
   fi
+  # Both secrets are read and checked before either is written, and before
+  # anything is installed. CODE holds one only on a host that enrolls.
+  if [ "$TAILSCALE" -eq 1 ]; then read_tailscale_key; fi
+  if [ -n "$CODE" ]; then write_code_file; fi
   block_metadata
   add_swap
   install_fermix
   schedule_updates
   create_engine_user
+  if [ "$TAILSCALE" -eq 1 ]; then join_tailnet; fi
   if [ "$RESTORE" -eq 1 ] && [ "$HOME_EXISTS" -eq 0 ]; then
     finish_restore
   else

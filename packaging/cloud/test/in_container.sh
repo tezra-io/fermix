@@ -4,9 +4,9 @@
 # package's systemd units at /linux-systemd, /run on a tmpfs and NET_ADMIN, so
 # nft loads the real ruleset. useradd, runuser, nft and apt-config are real;
 # systemctl, loginctl, curl, apt-get, dpkg-query, perl, swapon, fallocate,
-# mkswap and fermix are the stand-ins in stubs/ (in the chromium scenario
-# apt-get, dpkg-query and perl are the real ones, so first boot asks the
-# kernel Docker runs on for its Landlock ABI). One scenario per container:
+# mkswap, tailscale and fermix are the stand-ins in stubs/ (in the chromium
+# scenario apt-get, dpkg-query and perl are the real ones, so first boot asks
+# the kernel Docker runs on for its Landlock ABI). One scenario per container:
 #
 #   existing-host  refusals (a kernel below Landlock ABI 3 among them), then
 #                  the code typed at a terminal, the wait for
@@ -24,12 +24,19 @@
 #                  that cannot be downloaded, a failed status read, three
 #                  nights under a move, an ended move, a failed restart, an
 #                  older one never installed back down, none seen, no home
+#   tailnet        --tailscale: a key without the flag, a malformed one and
+#                  none refused before anything is installed; Tailscale's
+#                  live keyring (real curl and gpg) checked by its pinned
+#                  fingerprint and read by the real apt-get, tailscale up
+#                  with the key file before enrolling; a re-run on the
+#                  tailnet that logs in again nowhere; a tailscale up that
+#                  fails, before enrolling
 #   chromium       the distribution's Chromium installed for real and started
 #                  headless as the engine account, the way the engine's
 #                  launcher starts it, its own sandbox on
 set -eu
 
-SCENARIO=${1:?scenario: existing-host, restore, failures, ubuntu, updates or chromium}
+SCENARIO=${1:?scenario: existing-host, restore, failures, ubuntu, updates, tailnet or chromium}
 FIRST_BOOT=/cloud/first-boot.sh
 LOG=/var/log/fermix-test
 FIXTURES=/etc/fermix-test
@@ -87,11 +94,11 @@ install_stubs() {
   reset_log
 }
 
-# The real apt-get installs what the checks run for real, then the stand-ins
-# take over apt-get and dpkg-query.
+# The real apt-get installs what the checks run for real (and any packages
+# named), then the stand-ins take over apt-get and dpkg-query.
 setup_tools() {
   apt-get -qq update >/dev/null
-  apt-get -qq -y install --no-install-recommends nftables shellcheck >/dev/null 2>&1
+  apt-get -qq -y install --no-install-recommends nftables shellcheck "$@" >/dev/null 2>&1
   install_stubs
   install -m 0755 /cloud/test/stubs/apt-get /usr/local/sbin/apt-get
   for stub in dpkg-query perl; do install -m 0755 "/cloud/test/stubs/$stub" "/usr/local/bin/$stub"; done
@@ -113,7 +120,7 @@ refuses() {
   shift 2
   run_first_boot "$@"
   if [ "$STATUS" -ne 0 ] && contains "$OUT" "$sentence" && [ ! -e /run/fermix/enroll.code ] &&
-    [ ! -s "$LOG/calls.log" ] && ! grep -qF -- "$CODE_BODY" "$OUT" &&
+    [ ! -s "$LOG/calls.log" ] && ! grep -qF -- "$CODE_BODY" "$OUT" && ! grep -qF -- "$TS_KEY" "$OUT" &&
     [ -z "$(find /run -maxdepth 1 -name 'fermix-always-on.*')" ]; then
     pass "refuses $description"
   else
@@ -183,7 +190,7 @@ check_refusals() {
     env FERMIX_ENROLL_CODE="fxenroll1.abc" sh "$FIRST_BOOT"
   refuses "a code that is too long" "The enrollment code is not between 42 and 2048 characters long." \
     env FERMIX_ENROLL_CODE="${CODE}$(printf '%2048s' '' | tr ' ' A)" sh "$FIRST_BOOT"
-  refuses "an unknown option, without echoing it (here the code itself)" "An option was not recognised. This script takes --restore, --snapshot-bucket, --snapshot-region and --version." \
+  refuses "an unknown option, without echoing it (here the code itself)" "An option was not recognised. This script takes --restore, --snapshot-bucket, --snapshot-region, --version and --tailscale." \
     env FERMIX_ENROLL_CODE="$CODE" sh "$FIRST_BOOT" "$CODE"
   refuses "a release that is not one" "--version is not a Fermix release, such as 0.17.0." \
     env FERMIX_ENROLL_CODE="$CODE" sh "$FIRST_BOOT" --version 1.2
@@ -747,6 +754,99 @@ updates() {
   check "[ -z \"\$(find /run -maxdepth 1 -name 'fermix-update.*')\" ]" "no night leaves a work directory behind"
 }
 
+# A host joining the owner's tailnet with --tailscale. Its keyring is the one
+# pkgs.tailscale.com serves today (curl and gpg are real here), so the pinned
+# fingerprint is checked against Tailscale's own key, and the real apt-get
+# reads the source first boot writes; tailscale itself is the stand-in, which
+# the apt-get stand-in installs.
+tailnet() {
+  refuses "a Tailscale auth key without --tailscale, without echoing it" \
+    "TS_AUTHKEY holds a Tailscale auth key, but --tailscale was not given: add --tailscale to join this server to your tailnet, or leave TS_AUTHKEY out." \
+    env TS_AUTHKEY="$TS_KEY" FERMIX_ENROLL_CODE="$CODE" sh "$FIRST_BOOT"
+  refuses "a malformed Tailscale auth key, before anything is installed" \
+    "The Tailscale auth key is not between 20 and 200 characters long. Copy it again from Tailscale's admin console." \
+    env TS_AUTHKEY=tskey-auth-short FERMIX_ENROLL_CODE="$CODE" sh "$FIRST_BOOT" --tailscale
+  refuses "no Tailscale auth key and no terminal" \
+    "No Tailscale auth key: run this in a terminal, which asks for it, or pass it in TS_AUTHKEY." \
+    env FERMIX_ENROLL_CODE="$CODE" sh "$FIRST_BOOT" --tailscale
+
+  run_first_boot env TS_AUTHKEY="$TS_KEY" FERMIX_ENROLL_CODE="$CODE" sh "$FIRST_BOOT" --tailscale --version 1.2.3
+  check "[ $STATUS -eq 0 ]" "a host joins the tailnet with the key in TS_AUTHKEY, then enrolls (exit $STATUS)"
+  [ "$STATUS" -eq 0 ] || sed 's/^/    /' "$OUT"
+  ENGINE_UID=$(id -u fermix)
+  sed 's|/run/fermix-always-on\.[A-Za-z0-9]*/|WORK/|' "$LOG/calls.log" >/tmp/calls.seen
+  cat >/tmp/calls.expected <<EOF
+apt-get -qq update
+apt-get -qq -y install --no-install-recommends nftables
+systemctl daemon-reload
+systemctl enable fermix-metadata-block.service
+systemctl restart fermix-metadata-block.service
+fallocate -l 2G /swapfile.incoming
+mkswap /swapfile.incoming
+swapon /swapfile
+apt-get -qq -y install --no-install-recommends ca-certificates curl
+curl GET https://fermix.ai/install
+installer --no-setup --version 1.2.3
+apt-get -qq -y install --no-install-recommends unattended-upgrades
+systemctl daemon-reload
+systemctl enable --now fermix-update.timer
+systemctl daemon-reload
+loginctl enable-linger fermix
+systemctl start user@$ENGINE_UID.service
+apt-get -qq -y install --no-install-recommends ca-certificates curl gpg
+curl GET https://pkgs.tailscale.com/stable/debian/trixie.noarmor.gpg
+apt-get -qq update
+apt-get -qq -y install --no-install-recommends tailscale
+systemctl enable --now tailscaled.service
+tailscale up --auth-key=file:WORK/tailscale.authkey --timeout=2m
+fermix home enroll --code-file /run/fermix/enroll.code [as fermix]
+fermix service install --home /home/fermix/.fermix [as fermix]
+apt-get -qq -y install --no-install-recommends chromium
+fermix home status --json [as fermix]
+EOF
+  check "cmp -s /tmp/calls.seen /tmp/calls.expected" \
+    "Tailscale comes from its repository and tailscale up reads the key file, after the account and before enrolling"
+  cmp -s /tmp/calls.seen /tmp/calls.expected || diff /tmp/calls.expected /tmp/calls.seen | sed 's/^/    /' || true
+  check "[ \"\$(cat $LOG/tailscale-key.sha256)\" = \"\$(printf '%s' \"\$TS_KEY\" | sha256sum | cut -d' ' -f1)\" ]" \
+    "tailscale up read the key from its file"
+  check "[ \"\$(cat $LOG/tailscale-key-mode)\" = '600 root:root' ]" "the key file was root's alone"
+  check "[ ! -e \"\$(cat $LOG/tailscale-key-path)\" ] && [ -z \"\$(find /run -maxdepth 1 -name 'fermix-always-on.*')\" ]" \
+    "the key file and its work directory are gone"
+  check "! grep -rqsF -- \"\$TS_KEY\" /run /etc /home /var/log/fermix-test /var/lib/fermix-test $OUT" \
+    "the key is in no file, no output and no recorded call"
+  check "! grep -qx TS_AUTHKEY $LOG/env-home-enroll" "fermix home enroll does not have TS_AUTHKEY in its environment"
+  keyring=/usr/share/keyrings/tailscale-archive-keyring.gpg
+  check "[ \"\$(mode_owner $keyring)\" = '644 root:root' ]" "apt's keyring for Tailscale is root's and readable"
+  check "[ \"\$(gpg --batch --quiet --show-keys --with-colons $keyring | sed -n '/^pub:/{n;s/^fpr:::::::::\([0-9A-F]*\):.*/\1/p;}')\" = $TAILSCALE_FPR ]" \
+    "it holds Tailscale's package signing key alone, by its fingerprint"
+  printf '%s\n' "# Fermix Always On: Tailscale's packages for debian trixie, signed by the key $TAILSCALE_FPR, which the first boot checked." \
+    "deb [signed-by=$keyring] https://pkgs.tailscale.com/stable/debian trixie main" >/tmp/source.expected
+  check "cmp -s /etc/apt/sources.list.d/tailscale.list /tmp/source.expected && [ \"\$(mode_owner /etc/apt/sources.list.d/tailscale.list)\" = '644 root:root' ]" \
+    "the apt source names Tailscale's repository and only that keyring"
+  check "/usr/bin/apt-get -qq -o Dir::Etc::SourceList=/etc/apt/sources.list.d/tailscale.list -o Dir::Etc::SourceParts=- -o APT::Get::List-Cleanup=0 --error-on=any update" \
+    "the real apt-get reads Tailscale's repository through that source, its signature checked with that key"
+  check "apt-cache policy tailscale | grep -qF 'https://pkgs.tailscale.com/stable/debian trixie/main'" \
+    "and offers Tailscale's own package from it"
+  check "contains $OUT '==> This server is on your tailnet at 100.88.12.34'" "it says the server's tailnet address"
+
+  run_first_boot sh "$FIRST_BOOT" --tailscale
+  check "[ $STATUS -eq 0 ]" "a re-run on the tailnet needs no key and no terminal (exit $STATUS)"
+  check "contains $OUT '==> This server is already on a tailnet, so Tailscale is not installed or logged in again'" \
+    "it says the server is on a tailnet already"
+  check "! grep -q tailscale $LOG/calls.log" "and installs nothing of Tailscale and logs in again nowhere"
+
+  fresh_host
+  rm -f /var/lib/fermix-test/tailscale-state
+  : >"$FIXTURES/tailscale-up-fails"
+  run_apart env TS_AUTHKEY="$TS_KEY" FERMIX_ENROLL_CODE="$CODE" sh "$FIRST_BOOT" --tailscale
+  check "[ $STATUS -eq 1 ] && [ \"\$(tail -n 1 $ERR)\" = \"fermix always-on: tailscale up did not join this server to your tailnet, so the first boot stops here; its message above says why. A key that is used up, expired or revoked is refused: create a new one and run this again.\" ]" \
+    "a tailscale up that fails stops the first boot with one sentence"
+  check "grep -q '^tailscale up ' $LOG/calls.log && ! grep -q 'fermix home enroll' $LOG/calls.log" "before enrolling"
+  check "[ ! -e \"\$(cat $LOG/tailscale-key-path)\" ] && ! grep -rqsF -- \"\$TS_KEY\" /run $OUT $ERR" \
+    "and the key file is gone, the key in no output"
+  rm -f "$FIXTURES/tailscale-up-fails"
+}
+
 # The real package and the real browser: what the engine's launcher starts
 # (`chromium` on its PATH, headless, the launcher's Linux flags, through the
 # shell that first raises its oom_score_adj to 1000), as the engine account,
@@ -782,6 +882,10 @@ chromium() {
 
 CODE=$(make_code "invented-enrollment-secret-for-tests-only")
 CODE_BODY=${CODE#fxenroll1.}
+# An invented key in the real shape, and Tailscale's package signing key, as
+# first-boot.sh pins it.
+TS_KEY=tskey-auth-kInvented1CNTRL-InventedSecretForTheContainerTestOnly012345
+TAILSCALE_FPR=2596A99EAAB33821893C0A79458CA832957F5868
 dash -n "$FIRST_BOOT"
 pass "dash parses first-boot.sh"
 mkdir -p "$FIXTURES"
@@ -791,6 +895,7 @@ case "$SCENARIO" in
   failures) setup_tools; failures ;;
   ubuntu) setup_tools; ubuntu ;;
   updates) setup_tools; updates ;;
+  tailnet) setup_tools curl gpg; tailnet ;;
   chromium) chromium ;;
   *)
     echo "unknown scenario $SCENARIO" >&2

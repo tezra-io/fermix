@@ -1215,7 +1215,8 @@ compiled-in build identity, never from runtime detection.
 owner's primary (M75 step 6). It runs once as root, from cloud-init user data
 (the code in `FERMIX_ENROLL_CODE`, the release in `--version`) or as
 `curl -fsSL https://fermix.ai/always-on | sudo sh -s -- --version X` (the
-code read from the terminal without echo). It refuses, before it installs anything, any host but
+code read from the terminal without echo; `--tailscale` adds the owner's
+tailnet, its auth key from `TS_AUTHKEY` or the terminal the same way). It refuses, before it installs anything, any host but
 Debian 12, Debian 13 or Ubuntu 24.04 and, deciding, any kernel below Landlock
 ABI 3 (asked through `perl`'s `syscall`; a stock Debian 12 is one), where the
 engine would refuse every command; then in order: writes the enrollment code
@@ -1245,7 +1246,12 @@ exists, which a move may defer at most two nights in a row (a root-owned
 count under `/var/lib/fermix-update`), stopping before both when the
 installer ran and failed (one that could not be downloaded changed nothing,
 so both are still decided); creates
-the engine account `fermix` (home `/home/fermix`, no login, lingering); runs
+the engine account `fermix` (home `/home/fermix`, no login, lingering); with
+`--tailscale`, installs Tailscale from its signed package repository (the
+signing key checked by its pinned fingerprint before apt is given it) and
+runs `tailscale up --auth-key=file:` with the owner's key, so the tailnet
+address exists before enrolling (a host already on a tailnet is not logged
+in again, and it opens no port); runs
 `fermix home enroll` and `fermix service install` as `fermix`; installs the
 distribution's Chromium on Debian (Ubuntu's is a snap: it says to install a
 browser by hand); and waits up to 5 minutes for the primary to accept the
@@ -1254,16 +1260,20 @@ stderr and a non-zero exit at any step that fails. `--restore` takes no code
 and enrolls nothing: the same server, then the exact steps that import a
 snapshot and start the service. Everything networked after that (dialling the
 primary, the move) is the engine's own candidate role.
-`packaging/cloud/test/first_boot_test.sh` runs the script in throwaway Debian
-containers against stand-ins for systemd, curl, apt and `fermix`, and once
-with the real apt and Chromium.
+`packaging/cloud/test/first_boot_test.sh` runs the script's own main on the
+host with its root steps stood in for (`on_host.sh`, the Tailscale step and
+every command line it starts), then in throwaway Debian containers against
+stand-ins for systemd, curl, apt, `tailscale` and `fermix`, and once with the
+real apt and Chromium.
 
 Architecture Invariant: a server's Fermix is never newer than the oldest of
 the desktops it serves, so the home can always move back to one of them
 (the move's review refuses a server newer than the computer moving to it).
 No engine process reaches the instance metadata
 service. The enrollment code reaches the engine only as a file, never in an
-argument, an environment the engine inherits, or the console output. A failed
+argument, an environment the engine inherits, or the console output, and the
+Tailscale auth key reaches `tailscale up` the same way, as a 0600 file under
+`/run` removed right after it. A failed
 nightly update leaves the running engine as it was, and nothing the engine
 account answers holds a security reboot off for more than two nights.
 

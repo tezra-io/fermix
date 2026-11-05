@@ -13,7 +13,8 @@ script, two modes:
   user data can run it with the code in `FERMIX_ENROLL_CODE` instead.
   `--version X` names the release to install: the one the computer that sets
   the server up runs, which Always On's command for the server passes, so the
-  home can always move back there; without it, the latest.
+  home can always move back there; without it, the latest. `--tailscale`
+  joins the server to the owner's tailnet before it enrolls (below).
 - **Enroll** (the default) makes the server a candidate the primary moves
   to. **Restore** (`--restore`) takes no code and enrolls nothing: it prepares
   the same hardened server and prints the exact steps that restore the newest
@@ -22,7 +23,7 @@ script, two modes:
 | File | What it is |
 |---|---|
 | `first-boot.sh` | The root first boot. POSIX `sh`, run once, safe to run again. |
-| `test/first_boot_test.sh` | shellcheck, then the script in throwaway `debian:trixie-slim` containers, one per scenario. |
+| `test/first_boot_test.sh` | shellcheck, then the script's own main on this host (`test/on_host.sh`), then the script in throwaway `debian:trixie-slim` containers (`test/in_container.sh`), one per scenario. |
 
 ## What the first boot does
 
@@ -35,7 +36,11 @@ from ABI 3, and below it the engine installs and runs but refuses every
 command. The ABI is the kernel's own answer to `landlock_create_ruleset`'s
 version query (syscall 444 on both architectures), asked through `perl`
 (`perl-base` is essential on Debian and Ubuntu); a kernel built without
-Landlock, or booted without it in its `lsm=` list, answers none.
+Landlock, or booted without it in its `lsm=` list, answers none. It refuses
+just as early a Tailscale auth key in `TS_AUTHKEY` without `--tailscale`, and,
+with it, a key that is not one (below) or no key without a terminal. The
+enrollment code and the key are both read and checked before either is
+written.
 
 Then, in this order, failing with one sentence and a non-zero exit at any
 step:
@@ -132,27 +137,80 @@ step:
    metadata table is missing. Not `/var/lib/fermix`: it holds the root-owned
    loader every packaged engine executes, and no engine account may own a
    directory above it. A normal uid also keeps `journalctl --user` working.
-7. Enroll mode, as `fermix`, with a clean environment: `fermix home enroll
+7. With `--tailscale` (either mode), joins the owner's tailnet, so the
+   server's tailnet address exists when it enrolls (below).
+8. Enroll mode, as `fermix`, with a clean environment: `fermix home enroll
    --code-file /run/fermix/enroll.code [--snapshot-bucket B --snapshot-region
    R]`, then, with `XDG_RUNTIME_DIR=/run/user/<uid>` (systemctl reaches the user manager's
    private socket; no user D-Bus needed), `fermix service install --home
    /home/fermix/.fermix`. Enrolling is skipped, and said, when
    `/home/fermix/.fermix` exists; the service is bound and started again.
-8. A browser for the agent's tasks. Debian: the distribution's `chromium`,
+9. A browser for the agent's tasks. Debian: the distribution's `chromium`,
    which the engine's launcher finds on its `PATH` and starts headless as
    `fermix`, with Chromium's own sandbox. Ubuntu ships Chromium only as a
    snap, so nothing is installed and one sentence says to install a browser by
    hand (Google Chrome's own package, for example), or browser tasks answer
    that no Chrome or Chromium is installed.
-9. Enroll mode: waits, up to 5 minutes, for the primary to accept the server
-   (`fermix home status --json` shows the candidate `enrolled`), and fails
-   with the candidate's own sentence when the enrollment expired or failed.
-   Restore mode: prints the restore steps instead (below).
+10. Enroll mode: waits, up to 5 minutes, for the primary to accept the server
+    (`fermix home status --json` shows the candidate `enrolled`), and fails
+    with the candidate's own sentence when the enrollment expired or failed.
+    Restore mode: prints the restore steps instead (below).
 
 The code reaches the engine only as that file: never in an argument, never in
 an environment the engine inherits (`env -i`), never in the output. An option
 the script does not know is refused without being echoed, in case it is a code
 pasted in the wrong place.
+
+### Joining a tailnet (`--tailscale`)
+
+Opt-in: without `--tailscale` nothing of Tailscale is installed, written or
+run. With it:
+
+- **The key.** A Tailscale auth key from `TS_AUTHKEY` (cloud-init user data,
+  or any run with no terminal) or, when that is absent, asked for on the
+  terminal without echo, after the enrollment code. It must start with
+  `tskey-`, hold only letters, digits, `-` and `_`, and be 20 to 200
+  characters long; anything else is refused, without echoing it, before
+  anything is installed. It is never on a command line and never printed:
+  `TS_AUTHKEY` is unset before the script runs anything, and the key goes
+  only to `tailscale.authkey` (0600) in the script's work directory under
+  `/run` (tmpfs, 0700, root's), which `tailscale up --auth-key=file:PATH`
+  reads and which is removed right after it, whether it joined or not, and
+  with the work directory on every exit. Create the key in Tailscale's admin
+  console tagged `tag:fermix-server`, so the server joins as a tagged device;
+  the script passes no `--advertise-tags` of its own. A one-off,
+  pre-approved key suits a server; one that is used up, expired or revoked
+  is refused by `tailscale up`.
+- **The package.** Tailscale's own package from its signed repository for
+  the host's release (`https://pkgs.tailscale.com/stable/debian bookworm`,
+  `debian trixie` or `ubuntu noble`), never a script piped into a shell. The
+  repository's signing key (`<suite>.noarmor.gpg`) is downloaded over HTTPS
+  and must hold Tailscale's package signing key alone, by its fingerprint
+  `2596A99EAAB33821893C0A79458CA832957F5868` (`gpg --show-keys`, installed
+  for it); only then is it written to
+  `/usr/share/keyrings/tailscale-archive-keyring.gpg`, and
+  `/etc/apt/sources.list.d/tailscale.list` names the repository with
+  `signed-by` that keyring alone. Those are the paths Tailscale's own
+  instructions use, so a host set up by them converges. Then `apt-get
+  install tailscale` and `systemctl enable --now tailscaled.service`.
+- **`tailscale up`**, bounded by `--timeout=2m`, runs after the engine account
+  and before enrolling, so the server's tailnet address exists when it
+  enrolls; one that fails stops the first boot there with one sentence. A
+  host whose `tailscale status` already says `Running` is on a tailnet: it is
+  neither asked for a key nor logged in again, and nothing of Tailscale is
+  installed. Either way the first boot says the server's tailnet address
+  (`tailscale ip -1`).
+- **The policy is the owner's.** The first boot opens no port and adds no
+  firewall rule for the tailnet. A server's engine takes UDP port 4033 for
+  iroh (M75 step 4), and the tailnet policy should let only the owner's own
+  devices reach `tag:fermix-server` on `udp:4033`.
+- **Restore mode** takes `--tailscale` too: the server joins the tailnet the
+  same way, then prints the restore steps.
+
+For a run at a terminal, leave `TS_AUTHKEY` out and let the script ask: `sudo
+TS_AUTHKEY=… sh` puts the key in sudo's own command line, which every account
+on the server can read in `/proc` while the run lasts, and in the shell's
+history.
 
 ### The restore steps it prints
 
@@ -178,18 +236,36 @@ no steps.
 ## Testing
 
 ```bash
-sh packaging/cloud/test/first_boot_test.sh
+sh packaging/cloud/test/first_boot_test.sh        # shellcheck, host, containers
+sh packaging/cloud/test/first_boot_test.sh host   # shellcheck and the host part
 ```
 
-Needs shellcheck, Docker with `debian:trixie-slim`, and network inside the
-containers (they install `nftables` and `shellcheck`, and Chromium in its
-scenario). `useradd`, `runuser`, `nft` and `apt-config` run for real
-(`--cap-add NET_ADMIN`, `/run` on a tmpfs); `systemctl` (which runs a unit's
-`ExecStart` for `start` and `restart`), `loginctl`, `curl` (the fake
-installer, which records the release it installed), `apt-get`, `dpkg-query`,
-`perl` (the Landlock ABI from a fixture), `swapon`, `fallocate`, `mkswap` and
-`fermix` (which runs the release its last start installed, and whose status
-reads can fail) are the stand-ins in `test/stubs/`. The chromium scenario
+The host part (`test/on_host.sh`) needs shellcheck, dash, `script(1)` and
+`perl`, on macOS or Linux, as any account. It runs first-boot.sh's own main,
+less its nightly update's writer, with six fixed paths moved under a
+directory of its own (each line asserted present exactly once) and the steps
+that need a Debian server as root stood in for by functions that log their
+names. `tailscale`, `apt-get`, `curl`, `gpg` and `systemctl` are stand-ins,
+and every other command runs through a shim that logs its arguments and its
+environment, so every command line the run starts is seen. Its cases: no
+`--tailscale` (nothing of Tailscale runs), the key from `TS_AUTHKEY`, the code
+and the key typed at a terminal, a key without the flag, malformed keys and no
+key without a terminal (each refused before any step), a host already on a
+tailnet, a served key that is not Tailscale's alone, `tailscale up` failing
+before enrolling, each release's repository, and `--restore`; after each, the
+key is in no file, output, command line or environment, and its file is gone.
+
+The containers need Docker with `debian:trixie-slim`, and network inside them
+(they install `nftables` and `shellcheck`, Chromium in its scenario, and
+`curl` and `gpg` in the tailnet scenario). `useradd`, `runuser`, `nft` and
+`apt-config` run for real (`--cap-add NET_ADMIN`, `/run` on a tmpfs);
+`systemctl` (which runs a unit's `ExecStart` for `start` and `restart`),
+`loginctl`, `curl` (the fake installer, which records the release it
+installed; `pkgs.tailscale.com` fetched for real), `apt-get`, `dpkg-query`,
+`perl` (the Landlock ABI from a fixture), `swapon`, `fallocate`, `mkswap`,
+`tailscale` (which records the key file it read, never the key) and `fermix`
+(which runs the release its last start installed, and whose status reads can
+fail) are the stand-ins in `test/stubs/`. The chromium scenario
 keeps the real `perl`, so it asks the kernel Docker runs on for its Landlock
 ABI and needs Linux 6.2 or later with Landlock enabled. The scenarios: an
 existing host typing the code at a terminal, then enrolling again with the
@@ -204,7 +280,10 @@ a reboot is asked for, the reboot, an installer that cannot be downloaded
 status` (no restart, the reboot all the same), three nights under a move
 (the reboot waits two, then goes), a move in an ended phase, a failed
 restart (the reboot all the same), an older release never installed back
-down, no computer seen, no home yet); and the distribution's Chromium installed with
+down, no computer seen, no home yet); a host joining a tailnet with
+Tailscale's live signing key checked by its fingerprint and the source read
+by the real `apt-get`, a re-run on the tailnet, and a `tailscale up` that
+fails before enrolling; and the distribution's Chromium installed with
 the real `apt-get` and started headless as `fermix` through the engine's
 `oom_score_adj` shell, with its own sandbox (that container runs without
 Docker's seccomp profile, which refuses the user namespaces a server's kernel

@@ -153,6 +153,18 @@ will be part of a future release; nothing in this group is in a release yet.
   anything is installed. `--snapshot-bucket` and `--snapshot-region` name
   where the server will keep its snapshots, and `--restore` prepares a server
   to restore your home from a snapshot instead.
+- **Your server can join your tailnet as it is set up.** Add `--tailscale`
+  to the server's command and it asks for a Tailscale auth key without
+  showing it (cloud-init user data passes it in `TS_AUTHKEY` instead),
+  installs Tailscale from Tailscale's own signed package repository, checking
+  its signing key first, and joins your tailnet before the server enrolls.
+  Create the key tagged `tag:fermix-server`, and let only your own devices
+  reach the server's UDP port 4033 in your tailnet policy; the server opens
+  no port itself. The key is never shown, logged or put on a command line,
+  and is removed from the server as soon as Tailscale has read it. A key that
+  is not one is refused before anything is installed, a server already on a
+  tailnet is left as it is, and without `--tailscale` nothing of Tailscale is
+  installed.
 - **Always On from a terminal: `fermix always-on`.** On a Homebrew or Linux
   install without the Fermix app you can now set up Always On on your own
   Linux server from the terminal. `fermix always-on` shows where Always On

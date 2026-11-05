@@ -152,9 +152,9 @@ it, never a second writer.
   later kernel is not). Below it every command Fermix runs would be refused,
   so the first boot checks the kernel before it installs anything and names
   what is missing. After `sh -s --`:
-  `--snapshot-bucket NAME --snapshot-region REGION`, `--restore`, and
+  `--snapshot-bucket NAME --snapshot-region REGION`, `--restore`,
   `--version X`, the release to install (Always On's command names this
-  computer's; without it, the latest).
+  computer's; without it, the latest), and `--tailscale` (below).
 - The first boot, as root: writes the code to `/run/fermix/enroll.code`
   (memory only, the engine account's), blocks the instance metadata service
   for every account but root at every boot (every packet to
@@ -170,6 +170,27 @@ it, never a second writer.
   candidate role, enrolls with the primary and waits for the move. Running
   it again is safe: a host whose home exists is not enrolled again. It never
   prints the code; cloud-init's console log shows each step.
+- **The server on the owner's tailnet.** `--tailscale` joins the server to
+  the owner's tailnet before it enrolls, so its tailnet address exists when
+  it enrolls; without the flag nothing of Tailscale happens (a key in
+  `TS_AUTHKEY` without it is refused). The Tailscale auth key comes from
+  `TS_AUTHKEY` (cloud-init user data) or is asked for on the terminal without
+  echo, after the code: at a terminal, leave `TS_AUTHKEY` out, since `sudo
+  TS_AUTHKEY=… sh` puts the key in sudo's own command line. A key that does
+  not start with `tskey-`, holds other than letters, digits, `-` and `_`, or
+  is not 20 to 200 characters long is refused before anything is installed.
+  The key is never printed or on a command line: it lives only in a 0600 file
+  in the first boot's work directory under `/run`, which `tailscale up
+  --auth-key=file:` reads and which is removed right after, and on every
+  exit. Tailscale comes from its own signed package repository for the
+  release (`pkgs.tailscale.com`), its signing key checked by fingerprint
+  before apt is given it, never from a script piped into a shell. Create the
+  key tagged `tag:fermix-server` (the first boot passes no tags of its own),
+  and let only your own devices reach the server's iroh port, UDP 4033, in
+  the tailnet policy: the first boot opens no port. A host already on a
+  tailnet (`tailscale status` says Running) is not asked for a key or logged
+  in again; a `tailscale up` that fails stops the first boot before it
+  enrolls. `--restore` takes `--tailscale` too.
 - **Updates on the server.** Nobody logs in to it, so it updates itself.
   Debian's security updates: `unattended-upgrades` every day (the first boot
   installs it where the image lacks it and sets its two daily switches in

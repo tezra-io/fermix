@@ -1,0 +1,46 @@
+#!/bin/sh
+# Test stand-in for tailscale, which the apt-get stand-in installs where the
+# package puts the real one. Its daemon's state is the word in
+# /var/lib/fermix-test/tailscale-state (NeedsLogin without the file).
+# `status --json` and `ip -1` answer from it and log nothing, as reads.
+# `up` logs its arguments; with --auth-key=file:PATH it records that path,
+# the mode and owner of the file and the SHA-256 of what it holds (never the
+# key), then joins the invented tailnet, unless
+# /etc/fermix-test/tailscale-up-fails exists, when it fails as a refused key
+# does. Any other verb is logged.
+set -eu
+log=/var/log/fermix-test
+state=/var/lib/fermix-test/tailscale-state
+current=NeedsLogin
+if [ -f "$state" ]; then current=$(cat "$state"); fi
+case "${1-}" in
+  status)
+    printf '{\n  "Version": "1.90.0-invented",\n  "BackendState": "%s",\n  "Self": {\n    "HostName": "invented-server"\n  }\n}\n' \
+      "$current"
+    exit 0
+    ;;
+  ip)
+    if [ "$current" != Running ]; then
+      echo "no current Tailscale IPs; state: $current" >&2
+      exit 1
+    fi
+    echo 100.88.12.34
+    exit 0
+    ;;
+esac
+printf 'tailscale %s\n' "$*" >>"$log/calls.log"
+[ "${1-}" = up ] || exit 0
+key=""
+for arg in "$@"; do
+  case "$arg" in --auth-key=file:*) key=${arg#--auth-key=file:} ;; esac
+done
+[ -n "$key" ] || { echo "tailscale stand-in: up without --auth-key=file:" >&2; exit 2; }
+printf '%s\n' "$key" >"$log/tailscale-key-path"
+stat -c '%a %U:%G' "$key" >"$log/tailscale-key-mode"
+sha256sum <"$key" | cut -d' ' -f1 >"$log/tailscale-key.sha256"
+if [ -f /etc/fermix-test/tailscale-up-fails ]; then
+  echo "backend error: invalid key: API key does not exist" >&2
+  exit 1
+fi
+install -d -m 1777 "$(dirname "$state")"
+echo Running >"$state"
