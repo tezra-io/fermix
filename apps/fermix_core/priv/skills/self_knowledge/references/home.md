@@ -172,22 +172,25 @@ it, never a second writer.
 - **Running it again.** On a server whose home `/home/fermix/.fermix`
   exists, the first boot first reads `fermix home status --json` as
   `fermix` (the home's role and its candidate's phase), before it installs
-  anything. A candidate no move has reached (enrolling, failed, ran out
-  after 24 hours, or still waiting for a move its computer forgot) is
-  enrolled again with a new code: its service is stopped (`fermix service
-  uninstall` as `fermix`), `fermix home enroll` runs with the new code, and
-  the service is installed and started again. Without a code such a
-  candidate asks for one at a terminal, except one that waits for its move,
-  which, like a primary, is left running: "Done. Fermix runs from the home
-  it already had." Given a code, a candidate receiving its move or a
-  primary is refused, and a retired copy a move left (naming where Fermix
-  moved), a desktop of another primary, or a home `fermix home status`
-  cannot read is refused either way. Each refusal is one sentence naming
-  the home and the commands that remove it, should the owner want the
-  server set up again (`sudo -H -u fermix env
-  XDG_RUNTIME_DIR=/run/user/<uid> /usr/bin/fermix service uninstall`, then
-  `sudo rm -rf /home/fermix/.fermix`, then the command again); the first
-  boot never removes a home itself.
+  anything. A candidate that has not begun to receive its move (enrolling,
+  failed, ran out after 24 hours, or enrolled and still waiting for a move
+  its computer gave up on) is enrolled again with a new code, from
+  `FERMIX_ENROLL_CODE` or asked for at the terminal (refused with neither):
+  its service is stopped (`fermix service uninstall` as `fermix`), `fermix
+  home enroll` runs with the new code, and the service is installed and
+  started again. A home that runs (the primary, or a candidate receiving its
+  move) is left running with no code ("Done. Fermix runs from the home it
+  already had.") and refused when given one; a retired copy a move left
+  (naming where Fermix moved) and a desktop of another primary are refused
+  either way. Each of these refusals is one sentence naming the home and
+  the commands that remove it, should the owner want the server set up
+  again (`sudo -H -u fermix env XDG_RUNTIME_DIR=/run/user/<uid>
+  /usr/bin/fermix service uninstall`, then `sudo rm -rf
+  /home/fermix/.fermix`, then the command again). A home `fermix home
+  status` cannot read is refused with the engine's own sentence and no
+  commands that delete it: `sudo -H -u fermix /usr/bin/fermix home status`
+  shows why. `--restore` refuses a home that has not received its move. The
+  first boot never removes a home itself.
 - **The server on the owner's tailnet.** `--tailscale` joins the server to
   the owner's tailnet before it enrolls, so its tailnet address exists when
   it enrolls; without the flag nothing of Tailscale happens (a key in

@@ -154,10 +154,11 @@ will be part of a future release; nothing in this group is in a release yet.
   where the server will keep its snapshots, and `--restore` prepares a server
   to restore your home from a snapshot instead. A server whose setup did not
   finish, that waited 24 hours for its move, or that waits for a move your
-  computer forgot is set up again by running the same command with a new
-  code, and its own status says so; on a server that is set up, the command
-  says what the server is and the commands that remove its home, and
-  removes nothing.
+  computer gave up on is set up again by running the same command with a
+  new code, and its own status says so; on a server that is set up, the
+  command says what the server is and the commands that remove its home,
+  and on one whose home Fermix cannot read, the command that shows why. It
+  never removes a home itself.
 - **Your server can join your tailnet as it is set up.** Add `--tailscale`
   to the server's command and it asks for a Tailscale auth key without
   showing it (cloud-init user data passes it in `TS_AUTHKEY` instead),

@@ -1261,16 +1261,18 @@ browser by hand); and waits up to 5 minutes for the primary to accept the
 candidate, ending with one sentence on
 stderr and a non-zero exit at any step that fails. On a host whose home
 exists it reads the home's role and its candidate's phase from `fermix home
-status --json`, before it installs anything: given a code, a candidate no
-move has reached (`enrolling`, `enrolled`, `failed`, `expired`) is enrolled
-again with it (`fermix service uninstall` before `fermix home enroll` and
-`fermix service install` after, since `Home.Candidate.enroll/3` replaces
-only those four, and only with no engine running in the home); a home that
-runs (the primary, a candidate waiting for or receiving its move) is left
-as it is with no code and refused with one; any other home (a retired copy,
-a desktop of another primary, a home the status cannot read) is refused
-either way, in one sentence that names it and the commands that remove it;
-the script removes no home itself. `--restore` takes no code
+status --json`, before it installs anything: a candidate that has not
+begun to receive its move (`enrolling`, `enrolled`, `failed`, `expired`) is
+enrolled again with a new code, from `FERMIX_ENROLL_CODE` or the terminal
+(`fermix service uninstall` before `fermix home enroll` and `fermix service
+install` after, since `Home.Candidate.enroll/3` replaces only those four,
+and only with no engine running in the home), and `--restore` refuses it; a
+home that runs (the primary, a candidate receiving its move) is left as it
+is with no code and refused with one; a retired copy or a desktop of
+another primary is refused either way, each refusal one sentence that names
+the home and the commands that remove it; a home the status cannot read is
+refused with the engine's sentence and the command that shows why, and no
+commands that delete it. The script removes no home itself. `--restore` takes no code
 and enrolls nothing: the same server, then the exact steps that import a
 snapshot and start the service. Everything networked after that (dialling the
 primary, the move) is the engine's own candidate role.
