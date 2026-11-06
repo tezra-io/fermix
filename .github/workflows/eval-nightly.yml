@@ -126,17 +126,17 @@ jobs:
       ELIXIR_VERSION: "1.19.7"
       OTP_VERSION: "28"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ needs.changes.outputs.dev_sha }}
 
-      - uses: erlef/setup-beam@v1
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
         with:
           otp-version: ${{ env.OTP_VERSION }}
           elixir-version: ${{ env.ELIXIR_VERSION }}
 
       - name: Cache deps and _build (dev env)
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             deps
@@ -150,7 +150,7 @@ jobs:
 
       # seed_capability_home.py runs under a `uv run --script` shebang; the
       # macos-15 image does not preinstall uv.
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
 
       - name: Run the smoke
         env:
@@ -205,7 +205,7 @@ jobs:
       contents: read
       issues: write
     steps:
-      - uses: actions/github-script@v7
+      - uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         env:
           NEEDS: ${{ toJSON(needs) }}
           WORKFLOW: ${{ github.workflow }}

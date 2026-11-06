@@ -116,19 +116,19 @@ jobs:
         # env, hence a step writing GITHUB_ENV.
         run: echo "EVAL_HOME=$RUNNER_TEMP/fermix-eval-ci" >> "$GITHUB_ENV"
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ inputs.ref }}
 
-      - uses: erlef/setup-beam@v1
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
         with:
           otp-version: ${{ env.OTP_VERSION }}
           elixir-version: ${{ env.ELIXIR_VERSION }}
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
 
       - name: Cache deps and _build (dev env — distinct from the test-env CI cache)
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             deps
@@ -139,7 +139,7 @@ jobs:
 
       - name: Restore capability leaderboard
         if: inputs.tier == 'capability'
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: benchmark/reports/capability/leaderboard.json
           key: capability-leaderboard-${{ github.run_id }}
@@ -615,7 +615,7 @@ jobs:
         if: ${{ !cancelled() && inputs.tier == 'capability'
                 && (steps.capability_deterministic.outcome == 'success'
                     || steps.capability_deterministic.outputs.exit_code == '5') }}
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: benchmark/reports/capability/leaderboard.json
           key: capability-leaderboard-${{ github.run_id }}
@@ -656,7 +656,7 @@ jobs:
 
       - name: Upload reports and daemon log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: eval-${{ inputs.tier }}-${{ github.run_number }}
           path: |
