@@ -226,8 +226,10 @@ defmodule FermixChannels.Test.HomeMove do
   enrollment, and its own bridge serving the move. Timers and the restart
   come to the test as `{:scheduled, message, delay}` and `:candidate_restart`.
   Options: `:now`, `:free_bytes`, and the candidate's own `:host` facts,
-  `:restore_opts` (a Linux server's unless said) and `:hints` (its endpoint's
-  address hints, a 0-arity function; none unless said).
+  `:restore_opts` (a Linux server's unless said), `:hints` (its endpoint's
+  address hints, a 0-arity function; none unless said), `:connect` (its
+  dial, the primary's bridge unless said) and `:helper` (what answers its
+  rail's status; none unless said).
   """
   def start_candidate!(home, primary, opts \\ []) do
     test = self()
@@ -247,7 +249,10 @@ defmodule FermixChannels.Test.HomeMove do
          send(test, :candidate_restart)
          :ok
        end,
-       rail_opts: [connect: DesktopRail.bridge_connect(primary.bridge_socket)],
+       rail_opts: [
+         connect: Keyword.get(opts, :connect, DesktopRail.bridge_connect(primary.bridge_socket))
+       ],
+       helper: Keyword.get(opts, :helper),
        hints: Keyword.get(opts, :hints, fn -> [] end),
        restore_opts:
          Keyword.get(opts, :restore_opts, host: "linux-aarch64", keyring_usable?: fn -> false end),

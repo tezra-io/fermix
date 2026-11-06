@@ -142,6 +142,23 @@ defmodule FermixChannels.Mobile.Iroh.HelperTest do
     end
   end
 
+  defp await_given_up(pid, attempts \\ div(@helper_ms, @poll_ms)) do
+    state = :sys.get_state(pid)
+
+    cond do
+      state.rail == :failed and not state.retryable? ->
+        state
+
+      attempts == 0 ->
+        flunk("the rail did not give up: #{inspect(state.rail)}")
+
+      true ->
+        # sleep: polls a state the rail announces to no one
+        Process.sleep(@poll_ms)
+        await_given_up(pid, attempts - 1)
+    end
+  end
+
   defp ops(ctx) do
     ctx.log |> File.read!() |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
   end
@@ -272,6 +289,80 @@ defmodule FermixChannels.Mobile.Iroh.HelperTest do
       end)
 
     assert length(String.split(log, "UDP port 4033 could not be bound")) == 2
+  end
+
+  # The retry window stays the loop's bound. A server whose port was held for
+  # the whole of it has nobody to restart it, so the words it gives up with,
+  # in the log and in its status (Doctor's remote reach line), say what to do.
+  test "a fixed port held for a day gives up saying to free it and restart Fermix", ctx do
+    taken =
+      Jason.encode!(%{
+        "event" => "error",
+        "code" => "bind_failed",
+        "message" => "UDP port 4033 could not be bound: Address already in use [os error 98]"
+      })
+
+    binary = fake(ctx, after_start: [taken], exit_after_start: 1)
+    {:ok, clock} = Agent.start_link(fn -> 0 end)
+
+    log =
+      capture_log(fn ->
+        pid =
+          start(ctx,
+            binary_path: binary,
+            bind_port: 4033,
+            test_pid: self(),
+            clock: fn -> Agent.get(clock, & &1) end
+          )
+
+        assert_receive {:emit, :degraded, 1, :helper_error}, @helper_ms
+        Agent.update(clock, fn _ -> 24 * 3_600_000 end)
+        retry_now(pid, 1)
+        state = await_given_up(pid)
+
+        assert state.retry == nil
+
+        assert Helper.status(pid).failure ==
+                 "bind_failed: UDP port 4033 could not be bound: Address already in use " <>
+                   "[os error 98]; Fermix stopped trying a day after the helper last ran: " <>
+                   "free UDP port 4033, then restart Fermix (`fermix restart`, or its " <>
+                   "`fermix.service` unit on a server)"
+
+        GenServer.stop(pid)
+      end)
+
+    assert log =~
+             "fermix-iroh gave up a day after it last ran; remote reach stays off: " <>
+               "bind_failed: UDP port 4033 could not be bound: Address already in use " <>
+               "[os error 98]; free UDP port 4033, then restart Fermix (`fermix restart`, " <>
+               "or its `fermix.service` unit on a server)"
+  end
+
+  # Only a port it could not bind is the owner's to free: any other failure
+  # gives up in its own words.
+  test "a helper that fails for a day otherwise gives up naming no port", ctx do
+    {:ok, clock} = Agent.start_link(fn -> 0 end)
+
+    log =
+      capture_log([format: "$message\n"], fn ->
+        pid =
+          start(ctx,
+            binary_path: fake(ctx, exit_after_hello: 3),
+            bind_port: 4033,
+            test_pid: self(),
+            clock: fn -> Agent.get(clock, & &1) end
+          )
+
+        assert_receive {:emit, :degraded, 1, _class}, @helper_ms
+        Agent.update(clock, fn _ -> 24 * 3_600_000 end)
+        retry_now(pid, 1)
+        state = await_given_up(pid)
+
+        refute state.failure =~ "4033"
+        GenServer.stop(pid)
+      end)
+
+    assert log =~ "fermix-iroh gave up a day after it last ran; remote reach stays off\n"
   end
 
   test "a helper that disagrees with this build fails without retrying", ctx do

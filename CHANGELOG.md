@@ -283,7 +283,11 @@ will be part of a future release; nothing in this group is in a release yet.
   and `home.status` names the path (`primary.path`, `direct` or `relay`). If
   something else on the server holds port 4033, Doctor's remote reach line
   names the port, and Fermix tries again on its backoff, saying so once in
-  the log instead of at every try.
+  the log instead of at every try; still held a day later, it stops and its
+  log and Doctor say to free the port and restart Fermix, and a server still
+  enrolling names the port in `fermix home status` once its code expires.
+  Tailscale in userspace-networking mode gives the server no tailnet
+  address, so that link runs through the relay.
 
 ### Added
 

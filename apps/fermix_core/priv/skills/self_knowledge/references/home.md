@@ -346,7 +346,11 @@ it, never a second writer.
   the address a desktop recorded holds after a restart. A Mac, a primary
   that serves phones and a desktop keep the port iroh picks. A port another
   process holds fails remote reach by name (Doctor's remote reach line names
-  the port), and Fermix tries again on its backoff. It
+  the port), and Fermix tries again on its backoff for a day after the
+  endpoint last ran; then it stops, and its log and Doctor say to free UDP
+  4033 and restart Fermix (`fermix restart`, or its `fermix.service` unit).
+  A candidate whose endpoint cannot start says why in each retry's log line
+  and, once its code expires, in `fermix home status`. It
   refuses a home that ran as a primary, carries a moved marker, is a
   candidate already, or holds anything a fresh install does not write, and a
   failure leaves the home and the code file as they were. A candidate engine
@@ -691,8 +695,13 @@ it, never a second writer.
   keeps the latest in its link and names them on every dial beside the relay,
   so a computer on the same tailnet reaches its server with Fermix's relay
   down. A server without Tailscale gives none, which is normal; a hint that
-  fails costs nothing, the relay is tried as well. There is no second way to
-  connect: iroh is the only one.
+  fails costs nothing, the relay is tried as well. Tailscale in
+  userspace-networking mode (`--tun=userspace-networking`, common in
+  containers) adds no tailnet address to the server's interfaces, so it
+  gives no hint and the link runs through the relay. A server's Tailscale
+  address that changes reaches the computer only at its next session through
+  the relay, so while the relay is down it dials the old one. There is no
+  second way to connect: iroh is the only one.
 - The engine's `home.status` (what the apps draw, and `fermix home status
   --json`) shows the link: the primary's name, whether it is connected and
   since when, the epoch, the sentence, and while it is connected its path,

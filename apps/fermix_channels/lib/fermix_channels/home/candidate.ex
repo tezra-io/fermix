@@ -15,7 +15,10 @@ defmodule FermixChannels.Home.Candidate do
   hours (`enrolled`); after that it stops waiting (`expired`). A
   refusal (`enrollment_expired`, `used`, `limit`) ends it (`failed`), logged
   by its code; an unreachable primary is tried again, 1 s doubling to 60 s,
-  until the code expires. Every ending removes the code: a burnt or expired
+  until the code expires. A dial its own endpoint could not make (its
+  helper failed: on a server, a fixed port another process holds) is said
+  in the helper's words, in each retry's log line and in the expired
+  code's sentence. Every ending removes the code: a burnt or expired
   code is worth nothing, and it is not kept on the disk.
 
   **The move.** `FermixChannels.Home.MoveResponder`, on the candidate's own
@@ -421,14 +424,37 @@ defmodule FermixChannels.Home.Candidate do
   end
 
   defp retry_or_fail(code, reason, state) do
+    failed = endpoint_failure(reason, state.helper)
+
     if DateTime.compare(state.clock.(), code.expires_at) == :lt do
-      Logger.info("candidate: #{code.name} not reached yet (#{inspect(reason)}); trying again")
+      Logger.info(
+        "candidate: #{code.name} not reached yet (#{failed || inspect(reason)}); trying again"
+      )
+
       state.schedule.(:enroll, state.retry_ms)
       %{state | retry_ms: min(state.retry_ms * 2, @max_retry_ms)}
     else
-      fail(state, "The enrollment code expired before this host reached #{code.name}.")
+      fail(
+        state,
+        "The enrollment code expired before this host reached #{code.name}#{because(failed)}."
+      )
     end
   end
+
+  # A dial the rail could not make because this host's own endpoint failed
+  # (on a server, a fixed port another process holds) is said in the
+  # endpoint's words, which the helper said once in the log.
+  defp endpoint_failure({:rail, {:dial, :not_ready}}, helper) do
+    case Helper.status(helper) do
+      %{state: :failed, failure: words} -> "this host's iroh endpoint could not start: #{words}"
+      _not_failed -> nil
+    end
+  end
+
+  defp endpoint_failure(_reason, _helper), do: nil
+
+  defp because(nil), do: ""
+  defp because(failed), do: ": #{failed}"
 
   defp refused_sentence("enrollment_used", _message, state),
     do: "The enrollment code was already used at #{primary_name(state)}; open a new one there."

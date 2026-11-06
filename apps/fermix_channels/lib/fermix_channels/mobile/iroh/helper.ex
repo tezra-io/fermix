@@ -47,7 +47,9 @@ defmodule FermixChannels.Mobile.Iroh.Helper do
   A listening rail given `:bind_port` (an Always On server's,
   `Iroh.Hints.bind_port/1`) starts its endpoint on that UDP port, and a port
   it cannot bind is the helper's `bind_failed`, retried as any error is,
-  never another port. Its `hints/1` are then this machine's tailnet addresses
+  never another port; still held a day after the rail last ran, the rail
+  gives up as for any error, its log line and status saying to free the
+  port and restart Fermix. Its `hints/1` are then this machine's tailnet addresses
   at that port, read from the interfaces each time they are asked for; a rail
   on iroh's own port has none.
   """
@@ -832,7 +834,7 @@ defmodule FermixChannels.Mobile.Iroh.Helper do
         ready_at: nil
     }
 
-    if retryable?, do: schedule_retry(state), else: %{state | retry: nil}
+    if retryable?, do: schedule_retry(state, reason), else: %{state | retry: nil}
   end
 
   # Said when the rail starts failing and whenever its words change, then at
@@ -855,13 +857,12 @@ defmodule FermixChannels.Mobile.Iroh.Helper do
 
   defp forget_backoff_if_stable(state), do: state
 
-  defp schedule_retry(state) do
+  defp schedule_retry(state, reason) do
     now = state.clock.()
     retry = state.retry || %{deadline_ms: now + @retry_window_ms, delay_ms: @first_retry_ms}
 
     if now >= retry.deadline_ms do
-      Logger.warning("fermix-iroh gave up a day after it last ran; remote reach stays off")
-      %{state | retry: nil, retryable?: false}
+      give_up(%{state | retry: nil, retryable?: false}, remedy(state.bind_port, reason))
     else
       token = make_ref()
       Process.send_after(self(), {:retry, token}, retry.delay_ms)
@@ -869,6 +870,35 @@ defmodule FermixChannels.Mobile.Iroh.Helper do
       %{state | retry: %{retry | delay_ms: delay} |> Map.put(:token, token)}
     end
   end
+
+  # The window is the loop's bound, and nothing retries after it until the
+  # engine restarts. A fixed port it could not bind for that long is the
+  # owner's to free (an Always On server, which nobody restarts by itself),
+  # so those words say how; any other failure keeps its own.
+  defp give_up(state, nil) do
+    Logger.warning("fermix-iroh gave up a day after it last ran; remote reach stays off")
+    state
+  end
+
+  defp give_up(state, remedy) do
+    Logger.warning(
+      "fermix-iroh gave up a day after it last ran; remote reach stays off: " <>
+        "#{state.failure}; #{remedy}"
+    )
+
+    %{
+      state
+      | failure:
+          "#{state.failure}; Fermix stopped trying a day after the helper last ran: #{remedy}"
+    }
+  end
+
+  defp remedy(port, {:helper_error, "bind_failed", _message}) when is_integer(port),
+    do:
+      "free UDP port #{port}, then restart Fermix (`fermix restart`, or its " <>
+        "`fermix.service` unit on a server)"
+
+  defp remedy(_port, _reason), do: nil
 
   defp class({kind, _detail}) when is_atom(kind), do: kind
   defp class({kind, _a, _b}) when is_atom(kind), do: kind

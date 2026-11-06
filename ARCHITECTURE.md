@@ -1466,8 +1466,10 @@ Current channels:
   `fermix-iroh` port and holds it to `Iroh.HelperProtocol` (helper protocol 4,
   `priv/iroh_helper/PROTOCOL.md`, which the helper repository vendors): it
   refuses any other `protocol_version`, and a helper that fails is reported
-  and retried on a backoff (a repeated failure logged once per run of it),
-  never allowed to stop the daemon. On an Always On server (the machine
+  and retried on a backoff (a repeated failure logged once per run of it)
+  for a day after it last ran, a fixed port held that long giving up in
+  words that say to free it and restart Fermix, never allowed to stop the
+  daemon. On an Always On server (the machine
   `fermix home enroll` marked, `Home.Candidate.server?/1`, a device-local
   mark) the listening helper binds the fixed UDP port 4033
   (`Iroh.Hints.bind_port/1`), as a candidate and as the primary; every other
