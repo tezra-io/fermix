@@ -113,7 +113,7 @@ CONSTANTS
     MessagesCanBeLost,  \* a rail loses a request or an answer, an answer comes only after
                         \* the worker stopped waiting (await_any/3, move_worker.ex:742-756),
                         \* or the forwarded home.move.start is lost, before or after the
-                        \* server had it (both unconfirmed, placement.ex:196-211): at
+                        \* server had it (both unconfirmed, placement.ex:197-212): at
                         \* most MaxLosses times in all
     MaxLosses,
     ServerCanCrash,     \* the server's engine dies while its worker runs, and boots again
@@ -906,7 +906,7 @@ MbStart ==
 \* forwarded over the link. The server's HomeMove.move_start/3 runs
 \* Move.start/5 (request, phase requested, role device), removes its own
 \* record of a move back that ended there (none here) and restarts into the
-\* move. Its answer arrives, or is lost (unconfirmed: placement.ex:196-211),
+\* move. Its answer arrives, or is lost (unconfirmed: placement.ex:197-212),
 \* after the server had it or before; a link that is down never sent it.
 \* With StartKeptFirst (the code: return_start_ahead/2, :459-469) return.json
 \* gains move_started_at before the request leaves (MnMark), and the answer
