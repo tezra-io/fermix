@@ -34,16 +34,18 @@ INVENTED_FPR=0123456789ABCDEF0123456789ABCDEF01234567
 # Invented values in the real shapes; nothing here is a secret.
 CODE=fxenroll1.InventedEnrollmentCodeForTheHostTestOnly0123456789
 KEY=tskey-auth-kInvented1CNTRL-InventedSecretForTheHostTestOnly0123456789
-FAILURES=0
 
 die() {
   printf 'on_host: %s\n' "$1" >&2
   exit 1
 }
 
+# Each failure is a line in $FAILED, not a count in a variable: a check at
+# the end of a pipeline (calls_are) runs in a subshell, whose variables are
+# lost when it ends.
 fail() {
   printf 'FAIL: %s\n' "$1"
-  FAILURES=$((FAILURES + 1))
+  printf '%s\n' "$1" >>"$FAILED"
 }
 
 pass() {
@@ -69,6 +71,7 @@ BIN=$T/bin
 STATE=$T/state
 LOG=$T/calls.log
 ARGV=$T/argv.log
+FAILED=$T/failed
 OUT=$T/out
 ERR=$T/err
 COPY=$T/first-boot.sh
@@ -600,8 +603,8 @@ up_fails
 each_release
 restore_host
 
-if [ "$FAILURES" -ne 0 ]; then
-  printf 'on host: %s check(s) failed\n' "$FAILURES"
+if [ -s "$FAILED" ]; then
+  printf 'on host: %s check(s) failed\n' "$(wc -l <"$FAILED" | tr -d ' ')"
   exit 1
 fi
 echo "on host: every check passed"
