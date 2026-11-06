@@ -330,6 +330,33 @@ defmodule Mix.Tasks.Fermix.Cues.FunnelTest do
       refute_received {:tailscale, ["funnel", "--https=443", "--set-path=" <> ^other, "off"]}
     end
 
+    # Re-check note 7: the prefix mount Always On's screen gives a source is
+    # the source's own: --remove takes it, and another mount beside it waits
+    # until it is removed. Another source's prefix is not this one's.
+    test "--remove takes the source's prefix mount, and mounting beside it is refused first" do
+      prefix = "/cues/hooks/gh-hooks"
+      other = "/cues/hooks/gh-hooks-other"
+
+      funnel =
+        serve_config(%{
+          prefix => %{"Proxy" => "http://127.0.0.1:4555" <> prefix},
+          other => %{"Proxy" => "http://127.0.0.1:4555" <> other}
+        })
+
+      off = ["funnel", "--https=443", "--set-path=" <> prefix, "off"]
+      responses = Map.put(reads(funnel), off, {"", 0})
+
+      assert :ok = Funnel.execute(["gh-hooks", "--remove", "--apply"], runner: runner(responses))
+      assert_received {:tailscale, ^off}
+      refute_received {:tailscale, ["funnel", "--https=443", "--set-path=" <> ^other, "off"]}
+
+      assert_raise Mix.Error, ~r/already has a Funnel mount at #{prefix};.*--remove/s, fn ->
+        Funnel.execute(["gh-hooks", "--apply"], runner: runner(reads(funnel)))
+      end
+
+      refute_received {:tailscale, @mount}
+    end
+
     test "--remove works for a source no longer in the config, and says when there is nothing" do
       gone = "/cues/hooks/gone-hooks/Abc"
       funnel = serve_config(%{gone => %{"Proxy" => "http://127.0.0.1:4555" <> gone}})

@@ -28,12 +28,13 @@ defmodule Mix.Tasks.Fermix.Cues.Funnel do
   or WhatsApp's `/webhook/whatsapp`) proxied to the same path on
   `127.0.0.1`, or a raw TCP forward, in the background config or a foreground
   session. A source already mounted at its path is left alone; one mounted at
-  an older path must be removed first.
+  an older path, or at its prefix, must be removed first.
 
   `--remove` removes every mount of the source found in the Funnel status
-  (`tailscale funnel --https=<port> --set-path=<path> off`), so it works after
-  the URL changed or the source left the config. Disabling or removing a
-  source in settings does not remove its mount; this does.
+  (`tailscale funnel --https=<port> --set-path=<path> off`), its prefix
+  included, so it works after the URL changed or the source left the config.
+  Disabling or removing a source in settings does not remove its mount; this
+  does.
 
   It reads the current `FERMIX_HOME`'s config without resolving any other
   secret and starts no daemon tree. The source's URL is made
@@ -297,8 +298,12 @@ defmodule Mix.Tasks.Fermix.Cues.Funnel do
       Regex.match?(@hook_path, path) or Regex.match?(@hook_prefix, path) or
         path == Funnel.whatsapp_path()
 
+  # The source's hook paths, and its prefix, which the Always On screen mounts.
   defp own_mount?(mount, ref),
-    do: fermix_mount?(mount) and String.starts_with?(mount.path, "/cues/hooks/#{ref}/")
+    do:
+      fermix_mount?(mount) and
+        (String.starts_with?(mount.path, "/cues/hooks/#{ref}/") or
+           mount.path == Webhook.prefix_path(ref))
 
   defp check_port!(mounts) do
     case Enum.find(mounts, &(&1.port == @funnel_port and not fermix_mount?(&1))) do
