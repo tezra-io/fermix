@@ -686,7 +686,10 @@ defmodule FermixChannels.Desktop.Relay do
   end
 
   # The primary's route for its own node, when it names another relay list:
-  # kept, so the next hello acknowledges it.
+  # kept, so the next hello acknowledges it. One the link cannot hold is
+  # refused and the link keeps the route it has: relays that are not a list,
+  # or a revision that is not text, here; any other relays or revision the
+  # link refuses when it writes them (`record_route/3`).
   defp keep_route(link, fields, root) do
     node_id = link.primary.node_id
 
@@ -694,10 +697,19 @@ defmodule FermixChannels.Desktop.Relay do
            fields["candidates"] || [],
            &match?(%{"kind" => "iroh", "node_id" => ^node_id}, &1)
          ) do
-      %{"relays" => relays, "relays_rev" => rev} = route ->
+      %{"relays" => relays, "relays_rev" => rev} = route
+      when is_list(relays) and is_binary(rev) ->
         record_route(link, {relays, rev, route_hints(route)}, root)
 
       nil ->
+        link
+
+      _unusable ->
+        Logger.warning(
+          "desktop relay: the primary's route was not kept: " <>
+            "it names no list of relays and relay revision"
+        )
+
         link
     end
   end

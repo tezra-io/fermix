@@ -541,6 +541,60 @@ defmodule FermixChannels.Desktop.RelayTest do
     assert log =~ "desktop relay: the primary's address hints were dropped"
   end
 
+  # The same for the route itself: relays that are not a list, or a relay
+  # revision that is not text, refuse the route as the link refuses any
+  # relays or revision it cannot hold, keeping the route it has, said once.
+  test "a route whose relays are not a list is refused, the link and the relay kept" do
+    # A list of anything but relays is the link's own refusal, as before.
+    for relays <- ["https://relay-two.invalid/", :absent, ["https://relay-two.invalid/"]] do
+      assert refused_route(%{"relays" => relays}) =~
+               "desktop relay: the primary's route was not kept"
+    end
+  end
+
+  test "a route whose relay revision is not text is refused, the link and the relay kept" do
+    relays = [%{"url" => "https://relay-two.invalid/", "quic_port" => 7843}]
+
+    for rev <- [17, :absent, "not-a-revision"] do
+      assert refused_route(%{"relays" => relays, "relays_rev" => rev}) =~
+               "desktop relay: the primary's route was not kept"
+    end
+  end
+
+  # The primary's iroh route for this link's node with `fields` over it
+  # (`:absent` leaves a field out): the relay connects on the same pid and
+  # the link keeps the route it held. Answers the log.
+  defp refused_route(fields) do
+    route =
+      %{
+        "kind" => "iroh",
+        "node_id" => DesktopRail.node_id(),
+        "relays" => [%{"url" => "https://relay.invalid/", "quic_port" => 7842}],
+        "relays_rev" => "fedcba9876543210"
+      }
+      |> Map.merge(fields)
+      |> Map.reject(fn {_key, value} -> value == :absent end)
+
+    primary =
+      DesktopRail.primary!(
+        hello_ack_builder: fn _state -> {:ok, Map.put(ack(3), "candidates", [route])} end
+      )
+
+    root = DesktopRail.desktop_home!(primary)
+    {:ok, before} = DesktopLink.read(root)
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        relay = DesktopRail.start_relay!(root, primary)
+        pid = GenServer.whereis(relay)
+        DesktopRail.await_connected(relay)
+        assert GenServer.whereis(relay) == pid
+      end)
+
+    assert DesktopLink.read(root) == {:ok, before}
+    log
+  end
+
   test "every dial names the hints the link holds" do
     primary = DesktopRail.primary!()
     hints = ["100.101.102.103:4033"]
