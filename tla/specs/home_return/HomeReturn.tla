@@ -102,7 +102,7 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/management/home_move.ex#move_start @ 428bcf251b24
 \* SOURCE: apps/fermix_core/lib/fermix_core/management/placement.ex#unconfirmed_on_loss?,unconfirmed,@unconfirmed_methods @ 0881001a46d0
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/relay.ex#lost_answer @ dfb459724267
-\* SOURCE: apps/fermix_core/lib/fermix_core/management/always_on.ex @ e33faead6ec0
+\* SOURCE: apps/fermix_core/lib/fermix_core/management/always_on.ex @ f0d966d62565
 \* SOURCE: apps/fermix_core/lib/fermix_core/management/home.ex#restoring? @ 10524f88be3d
 \* SOURCE: apps/fermix_core/lib/fermix_core/management/home_summary.ex#screen,target,device,settled,retired,away,away_here,on,returning,return_view,return_ready,return_moving,return_undone,return_stopped,restore_view,return_cancel,restoring,restore_running?,restore_offer,restorable,started?,stale?,silent?,server_move,server_idle?,@before_move,@ended,@server_moves @ 0a771673668f
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/local_return.ex#restore,restored,staged,placed,failed,restart @ a9fe927a65e2
@@ -113,7 +113,7 @@ CONSTANTS
     MessagesCanBeLost,  \* a rail loses a request or an answer, an answer comes only after
                         \* the worker stopped waiting (await_any/3, move_worker.ex:742-756),
                         \* or the forwarded home.move.start is lost, before or after the
-                        \* server had it (both unconfirmed, placement.ex:195-210): at
+                        \* server had it (both unconfirmed, placement.ex:196-211): at
                         \* most MaxLosses times in all
     MaxLosses,
     ServerCanCrash,     \* the server's engine dies while its worker runs, and boots again
@@ -163,11 +163,11 @@ CONSTANTS
                          \* FALSE is neither (finding HR-2, fixed)
     UndoneInAnyPhase,    \* a candidate receiving or staged whose server answers as the
                          \* primary with no move under way draws undone, or Cancel with no
-                         \* record (return_view/2, home_summary.ex:701-707); FALSE draws
+                         \* record (return_view/2, home_summary.ex:712-718); FALSE draws
                          \* moving whatever the server says (finding HR-2, fixed)
     RequestBesideJob,    \* the summary draws Restore here running only while its request
                          \* in return.json stands beside its running job
-                         \* (restore_running?/1, home_summary.ex:761-762; Home's
+                         \* (restore_running?/1, home_summary.ex:772-773; Home's
                          \* restoring?/2); FALSE takes the request alone, which a stop of
                          \* the engine leaves behind
     EndingSettles        \* the job's ending settles a local candidate a stopped run left,
@@ -763,8 +763,8 @@ CandRestart ==
 -----------------------------------------------------------------------------
 (* The Mac's acts: home.act through Management.AlwaysOn, from the design   *)
 
-\* returning/1 (home_summary.ex:654-674), the first clause of the
-\* device's summary (device/1, :528): any candidate of this computer's, or,
+\* returning/1 (home_summary.ex:665-685), the first clause of the
+\* device's summary (device/1, :538): any candidate of this computer's, or,
 \* with none, return.json with move_started_at and no moved_at. (The stale
 \* check against a newer epoch the link reached needs a second desktop: not
 \* modelled.)
@@ -776,9 +776,9 @@ Returning == cPhase # "none" \/ rj = "started"
 ServerAborted == LinkUp /\ sPhase = "aborted"
 ServerIdle == LinkUp /\ sPhase \in {"none", "aborted"}
 
-\* Restore here (restore_offer/1, home_summary.ex:766-772): this computer
+\* Restore here (restore_offer/1, home_summary.ex:777-783): this computer
 \* holds a copy (always, here) and nothing answers from the server
-\* (silent?/1, :805-810: no link, or no session for ten minutes, which here is
+\* (silent?/1, :816-821: no link, or no session for ten minutes, which here is
 \* the network down or the server gone). A server that runs answers, as the
 \* primary or, moving or retired, as one that is not (`stale`, `revoked`):
 \* not silent.
@@ -786,7 +786,7 @@ ServerSilent == ~net \/ ~sAlive \/ ~mLink
 
 RestoreOffer == IF ServerSilent THEN {"restore_here"} ELSE {}
 
-\* restoring/1 (home_summary.ex:755-762), the second clause of the device's
+\* restoring/1 (home_summary.ex:766-773), the second clause of the device's
 \* summary: moving, with nothing to press, while Restore here's request
 \* stands beside its running job (Home's restoring?/2 reads the job family:
 \* the act's steps here). Without RequestBesideJob the request alone.
@@ -906,7 +906,7 @@ MbStart ==
 \* forwarded over the link. The server's HomeMove.move_start/3 runs
 \* Move.start/5 (request, phase requested, role device), removes its own
 \* record of a move back that ended there (none here) and restarts into the
-\* move. Its answer arrives, or is lost (unconfirmed: placement.ex:195-210),
+\* move. Its answer arrives, or is lost (unconfirmed: placement.ex:196-211),
 \* after the server had it or before; a link that is down never sent it.
 \* With StartKeptFirst (the code: return_start_ahead/2, :459-469) return.json
 \* gains move_started_at before the request leaves (MnMark), and the answer
