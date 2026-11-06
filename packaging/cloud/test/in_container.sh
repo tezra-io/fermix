@@ -750,7 +750,7 @@ updates() {
   run_apart "$update"
   check "[ $STATUS -eq 0 ] && night_calls '$home' '$install' 'installer --no-setup --version 1.2.7' '$status' '$home'" \
     "the first night this candidate receives a move, nothing restarts or reboots"
-  check "contains $OUT '==> A move is under way on this server (receiving), so the engine restarts on a night without one'" \
+  check "contains $OUT '==> A move is under way on this server (receiving), so the engine restarts at the first follow run after it ends'" \
     "and the restart says why in one line"
   check "contains $OUT '==> A move is under way on this server (receiving), so the reboot an update asks for waits: night 1 of at most 2'" \
     "and the reboot says how many nights it has waited"
@@ -847,7 +847,7 @@ follow_runs() {
   run_apart "$update" --follow
   check "[ $STATUS -eq 0 ] && night_calls '$home' '$install' 'installer --no-setup --version 1.2.10' '$status' '$home'" \
     "a follow run while a move is under way installs, and holds the restart"
-  check "contains $OUT '==> A move is under way on this server (receiving), so the engine restarts once it ends'" \
+  check "contains $OUT '==> A move is under way on this server (receiving), so the engine restarts at the first follow run after it ends'" \
     "and says the restart waits until the move ends"
   printf 'committed|Moved to the invented server.\n' >"$FIXTURES/phases"
   run_apart "$update" --follow

@@ -266,8 +266,8 @@ class NightlyUpdateTest(unittest.TestCase):
         self.assertIn("installer --no-setup --version 0.17.2", self._calls())
         self.assertNotIn("fermix restart", self._calls())
         self.assertIn(
-            "==> A move is under way on this server (receiving), so the engine restarts once "
-            "it ends",
+            "==> A move is under way on this server (receiving), so the engine restarts at the "
+            "first follow run after it ends",
             result.stdout,
         )
 

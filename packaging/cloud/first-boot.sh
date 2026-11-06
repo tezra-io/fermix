@@ -604,13 +604,11 @@ CEILING=""
 # A follow run (--follow, read_mode) installs and restarts but never
 # reboots, and says in its own words what the night says differently: when
 # (WHEN), what is still decided once the installer could not be downloaded
-# (STILL_DECIDED), what a failed read of the move leaves (AS_IF_NO_MOVE), and
-# when a restart a move held off happens (RESTARTS_AFTER).
+# (STILL_DECIDED), and what a failed read of the move leaves (AS_IF_NO_MOVE).
 FOLLOW=0
 WHEN=tonight
 STILL_DECIDED="the restart and the reboot are still decided"
 AS_IF_NO_MOVE=" and the reboot is decided as if no move were under way"
-RESTARTS_AFTER="on a night without one"
 
 # One sentence and a non-zero exit, ending the run there.
 fail() {
@@ -644,7 +642,6 @@ read_mode() {
   WHEN=now
   STILL_DECIDED="the restart is still decided"
   AS_IF_NO_MOVE=""
-  RESTARTS_AFTER="once it ends"
 }
 
 # flock(1) on the lock's descriptor, 9, with $@ (-n, or -w and a bound): 0
@@ -800,7 +797,7 @@ restart_engine() {
 restart_step() {
   [ "$ENGINE_FAILED" -eq 0 ] || return 0
   if [ "$1" -eq 1 ]; then
-    say "A move is under way on this server ($PHASE), so the engine restarts $RESTARTS_AFTER"
+    say "A move is under way on this server ($PHASE), so the engine restarts at the first follow run after it ends"
     return 0
   fi
   restart_engine
