@@ -428,6 +428,8 @@ EOF
   check "contains $LOG/calls.log 'fermix service install --home /home/fermix/.fermix [as fermix]'" \
     "a re-run binds and starts the service again"
   check "contains $OUT 'Done. Fermix runs from the home it already had.'" "a re-run says Fermix runs from that home"
+  check "[ \"\$(tail -n 1 $OUT)\" = '==> Fermix runs on this server as your primary: to set this server up again, which deletes that home, run sudo -H -u fermix env XDG_RUNTIME_DIR=/run/user/$ENGINE_UID /usr/bin/fermix service uninstall, then sudo rm -rf /home/fermix/.fermix, then this command again.' ]" \
+    "then what the home is and the commands that remove it"
   snapshot_files /tmp/state.second
   check "cmp -s /tmp/state.first /tmp/state.second" "a re-run leaves every file, mode and rule as it was"
   cmp -s /tmp/state.first /tmp/state.second || diff /tmp/state.first /tmp/state.second | sed 's/^/    /' || true

@@ -28,8 +28,9 @@
 # for the engine account's fermix calls that answers home status --json in
 # the engine's envelope: a candidate that has not begun to receive its move
 # enrolling again (code in the environment, typed, or missing), a home that
-# runs (no code, or one given), and every other home refused, with the
-# commands that remove it when the home could be read.
+# runs (no code, at a terminal too, ending with the commands that remove it,
+# or refused with them when given one), and every other home refused, with
+# the commands that remove it when the home could be read.
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -775,19 +776,43 @@ enrolls_again() {
   check "! grep -q '^step enroll' '$LOG'" "before it enrolls"
 }
 
+# Answers nothing, for a terminal run that asks for nothing.
+no_answers() {
+  :
+}
+
 # A home that runs (the primary, or a candidate receiving its move), run
-# again with no code, is started as it is; given a code, it is refused,
-# saying what it is and the commands that remove it.
+# again with no code, is started as it is, and the run ends saying what it is
+# and the commands that remove it, as the refusal does; given a code, it is
+# refused, saying the same.
 home_that_runs() {
-  for home in "candidate receiving" "candidate activating" "primary "; do
+  for case in "candidate receiving|This server is receiving its move" \
+    "candidate activating|This server is receiving its move" \
+    "primary |Fermix runs on this server as your primary"; do
+    home=${case%%|*}
     # shellcheck disable=SC2086 # the role and the phase
     home_is $home
     run dash "$COPY"
-    check "[ $STATUS -eq 0 ] && grep -qxF '==> Done. Fermix runs from the home it already had.' '$OUT'" \
-      "a $home home, run again with no code, runs as it is (exit $STATUS)"
+    printf '==> Done. Fermix runs from the home it already had.\n==> %s: %s\n' "${case#*|}" "$REMOVE" >"$T/end.expected"
+    check "[ $STATUS -eq 0 ] && tail -n 2 '$OUT' | cmp -s - '$T/end.expected'" \
+      "a $home home, run again with no code, runs as it is, then says what it is and the commands that remove it (exit $STATUS)"
+    [ "$STATUS" -eq 0 ] || sed 's/^/    /' "$OUT" "$ERR"
     printf 'step check_host\nfermix home status --json\nstep block_metadata\nstep add_swap\nstep install_fermix\nstep schedule_updates\nstep create_engine_user\nstep enroll\nstep start_service\nstep install_browser\n' |
       calls_are "$home: it reads the home, stops nothing and waits for nothing"
   done
+
+  # The owner who reuses the server after Restore here runs the command at
+  # a terminal: nothing asks for a code, and the run ends the same way. The
+  # pty echoes the end of the empty input as ^D and two backspaces, wherever
+  # it lands.
+  home_is primary
+  ANSWERS=no_answers
+  run_at_terminal dash "$COPY"
+  ANSWERS=type_answers
+  sed 's/\^D//g' "$OUT" | tr -d '\010' | tail -n 2 >"$T/end.seen"
+  check "[ $STATUS -eq 0 ] && ! grep -qF 'Enrollment code from Fermix' '$OUT' && cmp -s '$T/end.seen' '$T/end.expected'" \
+    "at a terminal, the primary asks for no code and ends saying what it is and the commands that remove it (exit $STATUS)"
+  if ! cmp -s "$T/end.seen" "$T/end.expected"; then sed 's/^/    /' "$OUT"; fi
 
   for case in "candidate receiving|This server is receiving its move" \
     "candidate staged|This server is receiving its move" \

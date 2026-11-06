@@ -89,8 +89,9 @@ SNAPSHOT_BUCKET=""
 SNAPSHOT_REGION=""
 HOME_EXISTS=0
 # What an existing home is (read_home): kept as it runs, or a candidate that
-# enrolls again with a new code.
+# enrolls again with a new code. KEPT_HOME_IS says what a kept home is.
 HOME_KEPT=0
+KEPT_HOME_IS=""
 REENROLL=0
 HOME_JSON=""
 ENGINE_UID=""
@@ -371,8 +372,8 @@ json_object() {
 # and waiting for it) enrolls again with a new code; a home that runs (the
 # primary, or a candidate receiving its move) is started as it is, and
 # refused when given a code; any other home is refused. The script never
-# removes a home: each refusal of a home it could read names the commands
-# that do.
+# removes a home: each refusal of a home it could read, and the end of a
+# run that kept one, names the commands that do.
 read_home() {
   ENGINE_UID=$(id -u "$ENGINE_USER") ||
     fail "The Fermix home $FERMIX_HOME_DIR exists, but the account $ENGINE_USER does not, so this script cannot read what it is."
@@ -405,10 +406,12 @@ home_unreadable() {
   fail "fermix home status could not read the Fermix home $FERMIX_HOME_DIR on this server (${said%.}): run sudo -H -u $ENGINE_USER $FERMIX_BIN home status to see why."
 }
 
-# A home that runs is started as it is, unless a code came with this run.
+# A home that runs is started as it is, unless a code came with this run;
+# the run then ends saying what it is ($1) and the commands that remove it.
 home_runs() {
   [ -z "$CODE" ] || refuse_home "$1"
   HOME_KEPT=1
+  KEPT_HOME_IS=$1
 }
 
 # A device's home on a server is the retired copy a move left (its marker
@@ -419,11 +422,16 @@ retired_home() {
   refuse_home "This server's Fermix runs as a desktop of another primary"
 }
 
-# Stops at a home this run does not set up: what it is ($1), then the
-# commands that remove it, which the owner runs.
+# Stops at a home this run does not set up: removal_sentence's.
 refuse_home() {
   CODE=""
-  fail "$1: to set this server up again, which deletes that home, run sudo -H -u $ENGINE_USER env XDG_RUNTIME_DIR=/run/user/$ENGINE_UID $FERMIX_BIN service uninstall, then sudo rm -rf $FERMIX_HOME_DIR, then this command again."
+  fail "$(removal_sentence "$1")"
+}
+
+# What a home is ($1), then the commands that remove it, which the owner
+# runs.
+removal_sentence() {
+  printf '%s\n' "$1: to set this server up again, which deletes that home, run sudo -H -u $ENGINE_USER env XDG_RUNTIME_DIR=/run/user/$ENGINE_UID $FERMIX_BIN service uninstall, then sudo rm -rf $FERMIX_HOME_DIR, then this command again."
 }
 
 # 1. The code goes to tmpfs, root's alone until the engine account exists.
@@ -1100,6 +1108,7 @@ finish_enrollment() {
   install_browser
   if [ "$HOME_KEPT" -eq 1 ]; then
     say "Done. Fermix runs from the home it already had."
+    say "$(removal_sentence "$KEPT_HOME_IS")"
     return 0
   fi
   await_enrollment

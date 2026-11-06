@@ -57,7 +57,11 @@ is read first, still before anything is installed: `fermix home status
   with the new code, started and waited for.
 - A home that runs (the primary, or a candidate receiving its move) is bound
   and started as it is, and the run ends with "Done. Fermix runs from the
-  home it already had." Given a code, it is refused.
+  home it already had.", then the sentence below, which says what the home
+  is and the commands that remove it: a run at a terminal asks no code of a
+  home that runs, so this is how an owner reusing the server (after Restore
+  here, say) learns the way to set it up again. Given a code, it is refused
+  with that sentence.
 - Any other home (a retired copy a move left, naming where Fermix moved; a
   desktop of another primary; a candidate whose move cannot be read) is
   refused, and so is a candidate that has not received its move under

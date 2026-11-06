@@ -180,7 +180,10 @@ it, never a second writer.
   home enroll` runs with the new code, and the service is installed and
   started again. A home that runs (the primary, or a candidate receiving its
   move) is left running with no code ("Done. Fermix runs from the home it
-  already had.") and refused when given one; a retired copy a move left
+  already had.", then the sentence naming it and the commands that remove
+  it, since a run at a terminal asks no code of it: how an owner reusing the
+  server after Restore here learns to set it up again) and refused with that
+  sentence when given one; a retired copy a move left
   (naming where Fermix moved) and a desktop of another primary are refused
   either way. Each of these refusals is one sentence naming the home and
   the commands that remove it, should the owner want the server set up

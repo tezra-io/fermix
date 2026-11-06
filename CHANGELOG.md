@@ -156,10 +156,10 @@ will be part of a future release; nothing in this group is in a release yet.
   finish, that waited 24 hours for its move, or that waits for a move your
   computer gave up on is set up again by running the same command with a
   new code, which the status of one that did not finish or ran out says; on
-  a server that is set up, the
-  command says what the server is and the commands that remove its home,
-  and on one whose home Fermix cannot read, the command that shows why. It
-  never removes a home itself.
+  a server that is set up, the command keeps it running (or, given a code,
+  refuses) and says what the server is and the commands that remove its
+  home, and on one whose home Fermix cannot read, the command that shows
+  why. It never removes a home itself.
 - **Your server can join your tailnet as it is set up.** Add `--tailscale`
   to the server's command and it asks for a Tailscale auth key without
   showing it (cloud-init user data passes it in `TS_AUTHKEY` instead),
