@@ -152,7 +152,8 @@ defmodule FermixCore.Management.Placement do
   too old (`client_too_old`), so the summary asks for an update, and
   `{:behind, sentence}` when it refused it as newer than its own
   (`daemon_too_old`: this computer updated first, and the server takes its
-  version in its nightly update), so the summary says so.
+  version in its nightly update once every computer linked to it runs it),
+  so the summary says so.
   """
   @spec primary_part((Protocol.request(), keyword() -> Protocol.route_result()), String.t()) ::
           {:ok, map()} | {:missing, String.t()} | {:too_old, String.t()} | {:behind, String.t()}

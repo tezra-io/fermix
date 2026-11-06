@@ -27,7 +27,8 @@ defmodule FermixCore.Management.HomeSummary do
       once the code's half hour is over with no server recorded, the screen
       is `off` again), `ready` (and a review that blocks), with Forget this
       server beside Move now, which drops the held server after a confirm,
-      `undone` (a move was undone and its server is still held);
+      `undone` (a move was undone and its server is still held: Try again,
+      and Forget this server beside it once the undoing is over);
     * the computer the move left: `moving` (its last word, once it waits on
       the server's confirmation, is that Fermix keeps trying), `undone` while
       it restarts as it was, `on`, `retired` (no link, or the server forgot
@@ -114,7 +115,9 @@ defmodule FermixCore.Management.HomeSummary do
   A linked desktop whose server refused its protocol as newer than its own
   (`daemon_too_old`: this computer updated first) is a `problem` of kind
   `server_older`, whose sentence says the server takes this computer's
-  version in its nightly update; never a bare `on`.
+  version in its nightly update once every computer linked to it runs it
+  (that update installs the oldest of theirs, `Home.EngineCeiling`); never a
+  bare `on`.
 
   `notice` is the occurrence the apps raise as a system notification, or
   nil: the server ready (`ready:<candidate>`), the move done
@@ -124,7 +127,8 @@ defmodule FermixCore.Management.HomeSummary do
   (`back:<epoch>`), Restore here finished, naming the day of the backup it
   restored (`restored:<epoch>`), and a held server whose 24 hours ran out,
   which must be set up again with a new code (`server_lapsed:<candidate>`,
-  on the screen it leaves, while the code that enrolled it still names it).
+  on the screen it leaves, while the code that enrolled it still names it;
+  never a desktop's candidate for a move back).
   An app posts when the id changes.
 
   `outcome` is what a surface that follows a step reads (review R6), so none
@@ -366,10 +370,11 @@ defmodule FermixCore.Management.HomeSummary do
   time and epoch their names carry. On the computer that sets Always On up,
   the held server whose 24 hours ran out (`Home.Candidates.lapsed/2`) that
   the window still names, unless it enrolled before the home last came back
-  here (a return's `moved_at`: the server it moved to and back from;
-  `lapsed`); on a desktop, whether its own move left it serving
-  nothing (`moved_back`: a server's copy after a move back, its move's
-  `keep_as_desktop`).
+  here (a return's `moved_at`: the server it moved to and back from) or is
+  a desktop's candidate for a move back (`returning`) (`lapsed`); on a
+  desktop, whether its own move left it serving nothing (`moved_back`: a
+  server's copy after a move back, its move's `keep_as_desktop`; a move's
+  record that cannot be read is logged once while it stays so).
   """
   @spec gather(Path.t(), map(), map(), map(), keyword()) :: facts()
   def gather(home, %{role: role} = record, link, status, opts)
@@ -402,7 +407,7 @@ defmodule FermixCore.Management.HomeSummary do
       restoring: Map.get(status, :restoring, false),
       copies: copies(home, role),
       lapsed: lapsed(home, role, {link, return}, now, reads),
-      moved_back: moved_back(home, role),
+      moved_back: moved_back(home, role, reads),
       primary_behind: Map.get(status, :primary_behind, false)
     }
   end
@@ -411,9 +416,14 @@ defmodule FermixCore.Management.HomeSummary do
 
   defp setup(facts), do: undone(facts) || own_server(facts) || off(facts)
 
-  # A move undone while its server is still held: Try again.
+  # A move undone while its server is still held: Try again, or Forget this
+  # server once the undoing is over.
   defp undone(%{move: %{"phase" => phase}} = facts) when phase in ["aborted", "undoing"] do
-    if target(facts), do: view("undone", sentence(:undone, facts), action(:try_again), %{})
+    if target(facts),
+      do:
+        view("undone", sentence(:undone, facts), action(:try_again), %{
+          "alternatives" => forget(facts)
+        })
   end
 
   defp undone(_facts), do: nil
@@ -577,7 +587,8 @@ defmodule FermixCore.Management.HomeSummary do
   defp too_old(_facts), do: nil
 
   # The server refused this computer's protocol as newer than its own: it
-  # takes this computer's version in its nightly update.
+  # takes this computer's version in its nightly update once every computer
+  # linked to it runs it.
   defp server_older(%{primary_behind: true} = facts),
     do: problem("server_older", sentence(:server_older, facts), :learn_more, %{})
 
@@ -1481,8 +1492,10 @@ defmodule FermixCore.Management.HomeSummary do
   # The held server whose 24 hours ran out that the window still names: the
   # code that enrolled it is the last one opened here. One that enrolled
   # before the home came back here (a return's `moved_at`) is the server the
-  # home moved to and back from, no held one that lapsed. The list that
-  # cannot be read is logged once while it stays so, and names none.
+  # home moved to and back from, and a desktop's candidate for a move back
+  # (`returning`) is no server to set up again: neither is a held one that
+  # lapsed. The list that cannot be read is logged once while it stays so,
+  # and names none.
   defp lapsed(home, :primary, {%{enrollment: %{candidate_id: id}}, return}, now, reads)
        when is_binary(id) do
     read = Candidates.lapsed(home, now)
@@ -1497,6 +1510,8 @@ defmodule FermixCore.Management.HomeSummary do
 
   defp lapsed(_home, _role, _link, _now, _reads), do: nil
 
+  defp lapsed_since?(%{returning: returning}, _id, _return) when is_binary(returning), do: false
+
   defp lapsed_since?(%{candidate_id: id, enrolled_at: enrolled_at}, id, %{moved_at: back}),
     do: DateTime.compare(enrolled_at, back) == :gt
 
@@ -1507,10 +1522,16 @@ defmodule FermixCore.Management.HomeSummary do
   defp lapsed_read(error), do: error
 
   # A server's own copy after a move back: its move kept it as no desktop.
-  defp moved_back(home, :device),
-    do: match?({:ok, %{"keep_as_desktop" => false}}, Move.read_phase(home))
+  # The move's record that cannot be read is logged once while it stays so,
+  # and says no.
+  defp moved_back(home, :device, reads) do
+    read = Move.read_phase(home)
+    file = Path.join(Move.dir(home), "phase.json")
+    :ok = UnreadableFiles.log_read(file, "home status", read_result(read), memory(reads))
+    match?({:ok, %{"keep_as_desktop" => false}}, read)
+  end
 
-  defp moved_back(_home, _role), do: false
+  defp moved_back(_home, _role, _reads), do: false
 
   defp copy(path) do
     name = Path.basename(path)

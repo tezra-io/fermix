@@ -381,7 +381,7 @@ Always On changes*).
 | `ready` | the same, and a linked desktop during a move back | The server is held and waits for Move now. `detail`: `server` (`{name, system, version}`), `readiness` (the last review's warnings and blocks, `home.move.readiness`'s items; empty when all is well or no review was made, and always during a move back), `waits_until` and, on the computer that sets Always On up, `alternatives` with `cancel` (`Forget this server`, with a confirm: the held server is dropped and the screen is `off`), except while a move to it runs. |
 | `moving` | the computer the move leaves, and a linked desktop during a move back or a restore | The move runs; once that computer waits on the server's confirmation the sentence says Fermix keeps trying. |
 | `on` | a linked desktop | Fermix runs on the server. `detail`: `server` (`{name, version}`), `backups` (`{place, at}` for each place's newest verified backup), `copies_bytes` (the space this computer's copies take), `disk_used`, `data` (what lives on the server, and that whoever hosts it can technically read its disk), `actions` (`back_up_now`, `move_back`) and, where the server serves any, `webhooks` (*Inbound webhooks*). |
-| `undone` | the computer the move left | The move was undone and its server is still held (`try_again`), or the engine is restarting as it was (no action). |
+| `undone` | the computer the move left | The move was undone and its server is still held (`try_again`, and `cancel`, `Forget this server`, with `ready`'s confirm in `detail.alternatives`, once the undoing is over), or the engine is restarting as it was (no action). |
 | `retired` | a computer the move left | It has no link to the server, or the server no longer knows it. On a server's own copy that a move back left serving nothing, the sentence names where Fermix moved back to (the marker's `to`). `restore_here` in `detail.alternatives` where it applies (*Moving back*). |
 | `candidate` | the server, before its move | It waits for its move, or receives the home. |
 | `primary` | the server, after its move | Fermix runs there. No `detail.webhooks`: its desktops' `on` draws them (*Inbound webhooks*). |
@@ -395,7 +395,9 @@ command there again), `update` (the server speaks a protocol this engine
 is too old for), `server_older` (the server refused this engine's protocol
 as newer than its own, `daemon_too_old`, because this computer updated
 first: its sentence says the server takes this computer's version in its
-nightly update; `learn_more`), `disk_full` (85% or more), `backup_old` (the
+nightly update once every computer linked to it runs that version, since
+the nightly update installs the oldest of theirs, `update_ceiling`;
+`learn_more`), `disk_full` (85% or more), `backup_old` (the
 newest backup is over 3 days old, or none since a move that long ago),
 `not_ready` (the last review blocks the move: `check_again`, every item in
 `detail.readiness`, and `cancel`, Forget this server, in
@@ -457,7 +459,7 @@ actions are opened by the surface itself and never sent: `learn_more` opens
 | `id` | What the engine does on `home.act` |
 |---|---|
 | `own_server` | opens a code for the owner's server; `result` is `{code, expires_at, command, tailscale}`, answered once: `command` installs Fermix, and `tailscale` (`{sentence, command}`) is the optional step that also joins the server to the owner's tailnet, which WhatsApp and webhook sources need: the same command with `--tailscale`, after which the server asks for the code and then a Tailscale auth key (created with `tag:fermix-server`, which the tailnet policy declares under `tagOwners` first) at the terminal without echo, so the key is on no command line |
-| `cancel` | on `connect` and on `creating`, closes the code for the owner's server; on a held server's `ready` or `not_ready` (Forget this server), drops the held server, after its confirm, and the screen is `off` |
+| `cancel` | on `connect` and on `creating`, closes the code for the owner's server; on a held server's `ready`, `not_ready` or `undone` (Forget this server), drops the held server, after its confirm, and the screen is `off` |
 | `back_up_now` | runs a backup now (on a linked desktop, on the server) |
 | `check_again` | runs the move's review again, and keeps it |
 | `move_now`, `try_again` | reviews at the press (a block refuses; a warning the confirm did not name answers `changed`), checks or sets the recovery passphrase, starts the move and restarts the engine; `result` is `{move_id}`. During a move back it sends the move to the server, which checks the passphrase against its own key and keeps no desktop of itself, to this desktop's own candidate, kept in the move back's own record |

@@ -569,11 +569,12 @@ the move's phase, the candidates, the rail's window and link, the snapshots,
 the primary's disk, `Home.Disk.usage/2`, and a linked desktop's composed
 `primary_home`, or `Placement.primary_part/2`'s `too_old` when the server
 refused this engine's protocol as too old and `behind` when it refused it as
-newer than its own, a `server_older` problem until its nightly update), on
+newer than its own, a `server_older` problem until its nightly update
+takes this version, once every computer linked to it runs it), on
 the computer that sets it up the held server whose 24 hours ran out that
 the window still names (`Home.Candidates.lapsed/2`, the list until its next
 write; not one that enrolled before the home last came back here, a
-return's `moved_at`), on
+return's `moved_at`, nor a desktop's candidate for a move back), on
 a desktop whether its own move kept it as no desktop (a server's copy after
 a move back, whose retired screen names where Fermix went), the review's
 items the home's settings
@@ -660,7 +661,8 @@ every step itself: Use my own Linux server opens a code
 there and its `--tailscale` form, which also joins the server to the
 owner's tailnet, and Cancel withdraws it, on Connecting your server too (a
 window no candidate was recorded through ends at once, and one past its 30
-minutes reads `expired`); Forget this server on a held server's screen drops
+minutes reads `expired`); Forget this server on a held server's screen
+(ready, a review that blocks, or a move undone) drops
 it (`Home.Link`'s `forget_candidate/1`, through the enrollment window, the
 one writer of `Home.Candidates`). Move now reviews at the press (a kept ready review under 15 minutes old, else
 a fresh one, kept), refuses on a block, answers `changed` on a warning the

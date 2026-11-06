@@ -227,20 +227,20 @@ will be part of a future release; nothing in this group is in a release yet.
   is still running after 45 minutes (`step_unfinished`), each with the
   screen where it stands, instead of reporting success; reading the screen
   alone still succeeds whatever it shows. Every surface reads whether
-  Always On is still at it from the screen itself (its `outcome`). A server
-  waiting for its move, or whose review blocks it, can be dropped with
-  Forget this server (after a confirm); Connecting your server can be
-  cancelled, and a code whose half hour ran out with no server recorded
-  leaves that screen; and a new code beside an open one says the current one
-  stops working. Waiting for your server names the systems the server's
-  first boot takes (Debian 12, Debian 13 or Ubuntu 24.04 on arm64 or x86_64,
-  with Linux 6.2 or later) and that the code works for 30 minutes. A server
-  your computer held for 24 hours with no move is told once, as one to set
-  up again; Restore here finished is told once, naming the day of the
-  backup it restored; a computer that updated first and finds its server on
-  an older Fermix says the server takes its version in its nightly update,
-  rather than look all well; and a server's own copy retired by a move back
-  says where Fermix moved back to.
+  Always On is still at it from the screen itself (its `outcome`).
+  A server waiting for its move, whose review blocks it, or whose move was
+  undone can be dropped with Forget this server (after a confirm); Connecting
+  your server can be cancelled, and a code whose half hour ran out with no
+  server recorded leaves that screen; and a new code beside an open one says
+  the current one stops working. Waiting for your server names the systems the
+  server's first boot takes (Debian 12, Debian 13 or Ubuntu 24.04 on arm64 or
+  x86_64, with Linux 6.2 or later) and that the code works for 30 minutes. A
+  server your computer held for 24 hours with no move is told once, as one to
+  set up again; Restore here finished is told once, naming the day of the
+  backup it restored; a computer that updated first and finds its server on an
+  older Fermix says the server takes its version in its nightly update once
+  every computer linked to it runs it, rather than look all well; and a
+  server's own copy retired by a move back says where Fermix moved back to.
 - **WhatsApp and webhook sources reach Fermix on your Always On server.**
   Once Fermix runs on your server, Always On on your computer shows the
   Tailscale Funnel command for each to run on the server with `sudo`, each

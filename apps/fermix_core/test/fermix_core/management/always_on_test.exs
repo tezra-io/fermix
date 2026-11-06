@@ -416,6 +416,21 @@ defmodule FermixCore.Management.AlwaysOnTest do
       assert {:ok, %{"phase" => "requested"}} = Move.read_phase(ctx.home)
     end
 
+    # Re-check finding 2: a move undone, with its server still held, offers
+    # Forget this server beside Try again, and it drops that server.
+    test "Forget this server after an undone move drops the held server", ctx do
+      File.mkdir_p!(Move.dir(ctx.home))
+      :ok = Move.put_phase(ctx.home, "aborted", %{"candidate" => "fermix-general-a3f9"}, @at)
+      assert %{"state" => "undone"} = summary(ctx.opts)
+
+      assert {:ok, %{"summary" => after_forget, "result" => nil}} = press(ctx, "cancel")
+      assert %{"state" => "off", "action" => %{"id" => "own_server"}} = after_forget
+      assert_received {:candidate_forgotten, id}
+      assert id == ctx.candidate_id
+      refute_received :enrollment_withdrawn
+      assert {:ok, []} = Candidates.list(ctx.home, @at)
+    end
+
     test "Check again runs the review again and keeps it", ctx do
       blocked = %{ready: false, items: [%{id: "disk", status: :block, sentence: "Too full."}]}
       :ok = Move.put_review(ctx.home, ctx.candidate_id, blocked, @at)

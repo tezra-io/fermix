@@ -5833,7 +5833,7 @@
     },
     "homeSummaryDetail": {
       "type": "object",
-      "description": "What Details holds for the state: on connect and creating alternatives; on ready server, readiness, waits_until and alternatives (Forget this server); on on server, backups, copies_bytes, disk_used, data and actions; on problem kind, note, seen_at and alternatives (readiness where the problem has it); lines on ready, on and problem wherever there are any; progress while a move back or a restore runs; webhooks on a linked desktop's on only, where its server serves any (never on the server's own primary, whose summary rides inside each desktop's home.status under max_json_depth).",
+      "description": "What Details holds for the state: on connect and creating alternatives; on ready server, readiness, waits_until and alternatives (Forget this server); on undone alternatives (Forget this server); on on server, backups, copies_bytes, disk_used, data and actions; on problem kind, note, seen_at and alternatives (readiness where the problem has it); lines on ready, on and problem wherever there are any; progress while a move back or a restore runs; webhooks on a linked desktop's on only, where its server serves any (never on the server's own primary, whose summary rides inside each desktop's home.status under max_json_depth).",
       "additionalProperties": false,
       "properties": {
         "lines": {

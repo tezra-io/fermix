@@ -29,8 +29,8 @@ defmodule FermixCore.Management.AlwaysOn do
       one that also joins it to the owner's tailnet, with its sentence
       (`Copy.own_server_tailscale_command/0`).
     * `cancel` on the code's screen, and on Connecting your server: the code
-      is withdrawn. On a held server's screen (ready, or a review that
-      blocks), Forget this server: the held server is dropped
+      is withdrawn. On a held server's screen (ready, a review that blocks,
+      or a move undone), Forget this server: the held server is dropped
       (`Home.Link`'s `forget_candidate/1`), after the owner's confirm, and
       the screen is off again.
     * `back_up_now` and `check_again`: run here, or on a linked desktop sent

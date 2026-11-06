@@ -501,8 +501,9 @@ defmodule FermixCore.Management.HomeTest do
     end
 
     # Review M4: a desktop that updated first meets a server on an older
-    # protocol until its nightly update, which the screen says.
-    test "a server older than this desktop says it updates tonight", %{home: home} do
+    # protocol until its nightly update takes this version, which the screen
+    # says.
+    test "a server older than this desktop says when it takes this version", %{home: home} do
       :ok = DesktopLink.write(home, desktop_link())
       older = fn _request, _opts -> {:error, :daemon_too_old, %{"maximum_version" => 2}} end
 
@@ -549,6 +550,37 @@ defmodule FermixCore.Management.HomeTest do
       :ok = Return.remove(home)
       :ok = Candidates.remove(home, held.candidate_id, @at)
       assert {:ok, %{"summary" => %{"notice" => nil}}} = route("home.status", %{}, status)
+    end
+
+    # Re-check note 5: a desktop's candidate for a move back (`returning`)
+    # is never a server to set up again, so its day running out is not told.
+    test "a move back's candidate whose day ran out is not told as lapsed", %{home: home} do
+      attrs = Map.put(candidate_attrs(), :returning, "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e")
+      {:ok, back} = Candidates.add(home, attrs, ~U[2031-05-03 11:00:00Z])
+      status = opts(home, link_status: link(enrollment: manual(:used, back.candidate_id)))
+
+      assert {:ok, %{"summary" => summary}} = route("home.status", %{}, status)
+      assert summary["state"] == "off"
+      assert summary["notice"] == nil
+    end
+
+    # Re-check note 6: a move's record that cannot be read is said in the
+    # log, never taken as "not moved back" without a word.
+    test "a retired copy whose move's record cannot be read says why in the log",
+         %{home: home} do
+      :ok = Moved.write(home, %{epoch: 5, moved_at: @at, to: "studio-mac"})
+      File.mkdir_p!(Move.dir(home))
+      File.write!(Path.join(Move.dir(home), "phase.json"), "{")
+      device = %{role: :device, primary: "studio-mac"}
+      seams = opts(home, engine_role: device, host_os: :linux, unreadable_files: nil)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:ok, %{"summary" => %{"state" => "retired"}}} =
+                   route("home.status", %{}, seams)
+        end)
+
+      assert log =~ "phase.json could not be read"
     end
 
     # Review m4: the server's own copy after a move back names where Fermix

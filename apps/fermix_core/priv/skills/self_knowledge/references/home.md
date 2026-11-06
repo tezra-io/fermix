@@ -706,7 +706,8 @@ it, never a second writer.
     move back to this Mac from Always On whenever the owner wants), and
     beside it, and beside a review that blocks, **Forget this server**,
     which asks first and drops the held server, back to nothing set up (not
-    while a move to it runs); the move undone (**Try again**);
+    while a move to it runs); the move undone (**Try again**, and **Forget
+    this server** beside it once the undoing is over);
   - on the computer the move leaves: moving ("Waiting for your server to
     confirm the move. Fermix keeps trying." once it waits on the server);
     "Fermix runs on your server. Last backup 2 hours ago." once linked; no
@@ -720,7 +721,9 @@ it, never a second writer.
     **Restore on this Mac** where it holds a copy), this computer too old for
     its server (**Update**), the server older than this computer, which
     updated first ("Your server runs an older Fermix than this Mac. It
-    updates to this Mac's version in its nightly update.", **Learn more**),
+    takes this Mac's version in its nightly update once every computer
+    linked to it runs it.", **Learn more**: the nightly update installs the
+    oldest version among them),
     the server's disk 85% full or more (**Learn
     more**), the last backup over 3 days old (**Back up now**), a review that blocks the move
     (**Check again**), a move back that stopped (*Moving back*), and on the
