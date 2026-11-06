@@ -365,8 +365,9 @@ defmodule FermixCore.Management.HomeSummary do
   (`Home.Candidate`'s state) and its stored copies, newest first, by the
   time and epoch their names carry. On the computer that sets Always On up,
   the held server whose 24 hours ran out (`Home.Candidates.lapsed/2`) that
-  the window still names, unless a return's record says the home came back
-  here since (`lapsed`); on a desktop, whether its own move left it serving
+  the window still names, unless it enrolled before the home last came back
+  here (a return's `moved_at`: the server it moved to and back from;
+  `lapsed`); on a desktop, whether its own move left it serving
   nothing (`moved_back`: a server's copy after a move back, its move's
   `keep_as_desktop`).
   """
@@ -1478,23 +1479,29 @@ defmodule FermixCore.Management.HomeSummary do
   defp copies(_home, _role), do: []
 
   # The held server whose 24 hours ran out that the window still names: the
-  # code that enrolled it is the last one opened here. A return's record
-  # says the home moved away and came back since, so the window's server is
-  # no held one that lapsed. The list that cannot be read is logged once
-  # while it stays so, and names none.
-  defp lapsed(home, :primary, {%{enrollment: %{candidate_id: id}}, nil}, now, reads)
+  # code that enrolled it is the last one opened here. One that enrolled
+  # before the home came back here (a return's `moved_at`) is the server the
+  # home moved to and back from, no held one that lapsed. The list that
+  # cannot be read is logged once while it stays so, and names none.
+  defp lapsed(home, :primary, {%{enrollment: %{candidate_id: id}}, return}, now, reads)
        when is_binary(id) do
     read = Candidates.lapsed(home, now)
     file = Candidates.path(home)
     :ok = UnreadableFiles.log_read(file, "home status", lapsed_read(read), memory(reads))
 
     case read do
-      {:ok, records} -> if Enum.any?(records, &(&1.candidate_id == id)), do: id
+      {:ok, records} -> if Enum.any?(records, &lapsed_since?(&1, id, return)), do: id
       {:error, _reason} -> nil
     end
   end
 
   defp lapsed(_home, _role, _link, _now, _reads), do: nil
+
+  defp lapsed_since?(%{candidate_id: id, enrolled_at: enrolled_at}, id, %{moved_at: back}),
+    do: DateTime.compare(enrolled_at, back) == :gt
+
+  defp lapsed_since?(%{candidate_id: id}, id, _return), do: true
+  defp lapsed_since?(_record, _id, _return), do: false
 
   defp lapsed_read({:ok, _records}), do: :ok
   defp lapsed_read(error), do: error

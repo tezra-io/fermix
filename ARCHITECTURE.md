@@ -572,7 +572,8 @@ refused this engine's protocol as too old and `behind` when it refused it as
 newer than its own, a `server_older` problem until its nightly update), on
 the computer that sets it up the held server whose 24 hours ran out that
 the window still names (`Home.Candidates.lapsed/2`, the list until its next
-write; none once a return's record says the home came back here since), on
+write; not one that enrolled before the home last came back here, a
+return's `moved_at`), on
 a desktop whether its own move kept it as no desktop (a server's copy after
 a move back, whose retired screen names where Fermix went), the review's
 items the home's settings

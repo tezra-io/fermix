@@ -523,7 +523,7 @@ defmodule FermixCore.Management.HomeTest do
 
     # Review M2: a held server whose 24 hours ran out, which the window
     # names and the list still holds, is told as lapsed; one forgotten, or
-    # one this home moved to and back from, is not.
+    # one this home moved to and back from since it enrolled, is not.
     test "a held server whose day ran out is told as lapsed until it is forgotten",
          %{home: home} do
       {:ok, held} = Candidates.add(home, candidate_attrs(), ~U[2031-05-03 11:00:00Z])
@@ -535,6 +535,16 @@ defmodule FermixCore.Management.HomeTest do
 
       :ok = Return.write(home, %{from: "studio-mac", started_at: @at, moved_at: @at, epoch: 6})
       assert {:ok, %{"summary" => %{"notice" => nil}}} = route("home.status", %{}, status)
+
+      # A move back that came home before this server enrolled is no reason
+      # to keep quiet: the owner set this one up after it.
+      earlier = ~U[2031-05-02 08:00:00Z]
+
+      :ok =
+        Return.write(home, %{from: "studio-mac", started_at: earlier, moved_at: earlier, epoch: 6})
+
+      assert {:ok, %{"summary" => %{"notice" => %{"id" => "server_lapsed:" <> _id}}}} =
+               route("home.status", %{}, status)
 
       :ok = Return.remove(home)
       :ok = Candidates.remove(home, held.candidate_id, @at)
