@@ -92,6 +92,7 @@ defmodule FermixCore.Management.AlwaysOn do
   Seams in `opts`, passed as they are to `Management.Home` and
   `Management.HomeMove`: `:home`, `:engine_role`, `:now`, `:jobs`,
   `:link_status`, `:config`, `:scheduler`, `:save_recipient`, `:restart`,
+  `:version` (the release `own_server`'s commands name, this engine's),
   `:open_enrollment`, `:withdraw_enrollment` (a 0-arity stand-in for the
   rail's), `:forget_candidate` (a 1-arity stand-in for the rail's, given the
   held server's id) and the review's; for a move back,
@@ -104,6 +105,7 @@ defmodule FermixCore.Management.AlwaysOn do
 
   use GenServer
 
+  alias FermixCore.BuildInfo
   alias FermixCore.Home.Candidate
   alias FermixCore.Home.Link
   alias FermixCore.Home.LocalReturn
@@ -341,16 +343,20 @@ defmodule FermixCore.Management.AlwaysOn do
     end
   end
 
+  # The commands name the release this engine runs (`:version`, as
+  # `home.status` reads it), which the server installs.
   defp own_server(opts) do
+    version = Keyword.get_lazy(opts, :version, &BuildInfo.product_version/0)
+
     with {:ok, %{"code" => code, "expires_at" => at}} <- HomeMove.enroll_open(opts) do
       {:ok,
        %{
          "code" => code,
          "expires_at" => at,
-         "command" => Copy.own_server_command(),
+         "command" => Copy.own_server_command(version),
          "tailscale" => %{
            "sentence" => Copy.summary_sentence(:own_server_tailscale, %{}),
-           "command" => Copy.own_server_tailscale_command()
+           "command" => Copy.own_server_tailscale_command(version)
          }
        }}
     end

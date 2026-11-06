@@ -182,7 +182,9 @@ defmodule FermixCore.Management.AlwaysOnTest do
       assert {:ok, %{"result" => result, "summary" => summary}} = press(ctx, "own_server")
       assert_received :enrollment_opened
 
-      version = FermixCore.BuildInfo.product_version()
+      # The release this engine runs: the `:version` seam, as `home.status`
+      # reads it.
+      version = "9.9.9"
 
       # The Tailscale step is optional (design, "Connectivity: iroh only"):
       # the server asks for its auth key at the terminal without echo, so the

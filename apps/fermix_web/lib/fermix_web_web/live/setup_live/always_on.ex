@@ -79,6 +79,48 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
             until: String.t()
           }
 
+    @doc """
+    The card a step's `result` makes: `own_server`'s, matched whole (the
+    code's three fields, then its Tailscale step on its own), or none for a
+    step that answers none (null, or a move's `{move_id}`). Any other shape
+    raises: the code is answered once, so it is never dropped in silence. A
+    refusal names the fields, never the code.
+    """
+    @spec from_result(map() | nil) :: t() | nil
+    def from_result(nil), do: nil
+
+    def from_result(%{"move_id" => id} = result) when is_binary(id) and map_size(result) == 1,
+      do: nil
+
+    def from_result(
+          %{"code" => code, "expires_at" => at, "command" => command, "tailscale" => step} =
+            result
+        )
+        when is_binary(code) and is_binary(at) and is_binary(command) and map_size(result) == 4 do
+      {:ok, expires, _offset} = DateTime.from_iso8601(at)
+
+      %__MODULE__{
+        code: code,
+        command: command,
+        tailscale: tailscale_step(step),
+        until: Clock.stated_instant(expires)
+      }
+    end
+
+    def from_result(result), do: raise(ArgumentError, "home.act answered #{shape(result)}")
+
+    defp tailscale_step(%{"sentence" => sentence, "command" => command} = step)
+         when is_binary(sentence) and is_binary(command) and map_size(step) == 2,
+         do: step
+
+    defp tailscale_step(step),
+      do: raise(ArgumentError, "home.act answered own_server's Tailscale step as #{shape(step)}")
+
+    defp shape(%{} = map),
+      do: "a result with the fields #{map |> Map.keys() |> Enum.sort() |> inspect()}"
+
+    defp shape(_other), do: "a result that is no object"
+
     defimpl Inspect do
       def inspect(_code, _opts), do: "#AlwaysOnCode<withheld>"
     end
@@ -394,7 +436,7 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
     put(socket,
       summary: summary,
       gen: socket.assigns.always_on.gen + 1,
-      code: code(result),
+      code: Code.from_result(result),
       open: nil,
       acting: nil
     )
@@ -428,25 +470,6 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
   # stands where one does not.
   defp sentence(_code, %{"sentence" => sentence}) when is_binary(sentence), do: sentence
   defp sentence(code, _details), do: Map.fetch!(Protocol.error_messages(), code)
-
-  defp code(%{
-         "code" => code,
-         "expires_at" => at,
-         "command" => command,
-         "tailscale" => %{"sentence" => said, "command" => joins}
-       })
-       when is_binary(code) and is_binary(at) and is_binary(command) do
-    {:ok, expires, _offset} = DateTime.from_iso8601(at)
-
-    %Code{
-      code: code,
-      command: command,
-      tailscale: %{"sentence" => said, "command" => joins},
-      until: Clock.stated_instant(expires)
-    }
-  end
-
-  defp code(_result), do: nil
 
   # -- seams ---------------------------------------------------------------------
 

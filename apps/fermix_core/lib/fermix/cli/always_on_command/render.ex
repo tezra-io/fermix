@@ -91,23 +91,43 @@ defmodule Fermix.CLI.AlwaysOnCommand.Render do
 
   @doc """
   What a step answered beyond its screen: the own-server code, shown this
-  once, under the command and the optional Tailscale step's.
+  once, under the command and the optional Tailscale step's; nothing for a
+  step that answers none (null, or a move's `{move_id}`). `own_server`'s is
+  matched whole, the code's three fields and then its Tailscale step on its
+  own, and any other shape raises: the code is answered once, so it is
+  never dropped in silence. A refusal names the fields, never the code.
   """
   @spec result(map() | nil) :: [String.t()]
-  def result(%{"code" => code, "expires_at" => until, "command" => command} = result) do
-    %{"sentence" => tailscale, "command" => joins} = result["tailscale"]
+  def result(nil), do: []
 
-    [
-      "On your server, run:",
-      "  " <> command,
-      tailscale,
-      "  " <> joins,
-      "When it asks for the enrollment code, paste this one. It works once, until #{until}:",
-      "  " <> code
-    ]
+  def result(%{"move_id" => id} = result) when is_binary(id) and map_size(result) == 1, do: []
+
+  def result(
+        %{"code" => code, "expires_at" => until, "command" => command, "tailscale" => step} =
+          result
+      )
+      when is_binary(code) and is_binary(until) and is_binary(command) and map_size(result) == 4 do
+    ["On your server, run:", "  " <> command] ++
+      tailscale_lines(step) ++
+      [
+        "When it asks for the enrollment code, paste this one. It works once, until #{until}:",
+        "  " <> code
+      ]
   end
 
-  def result(_result), do: []
+  def result(result), do: raise(ArgumentError, "home.act answered #{shape(result)}")
+
+  defp tailscale_lines(%{"sentence" => sentence, "command" => command} = step)
+       when is_binary(sentence) and is_binary(command) and map_size(step) == 2,
+       do: [sentence, "  " <> command]
+
+  defp tailscale_lines(step),
+    do: raise(ArgumentError, "home.act answered own_server's Tailscale step as #{shape(step)}")
+
+  defp shape(%{} = map),
+    do: "a result with the fields #{map |> Map.keys() |> Enum.sort() |> inspect()}"
+
+  defp shape(_other), do: "a result that is no object"
 
   @doc "The one line a wait prints when the screen moves: its sentence and the step in hand."
   @spec progress(map()) :: String.t()

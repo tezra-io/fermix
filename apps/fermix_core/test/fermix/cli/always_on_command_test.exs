@@ -16,6 +16,7 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
   import ExUnit.CaptureIO
 
   alias Fermix.CLI.AlwaysOnCommand
+  alias Fermix.CLI.AlwaysOnCommand.Render
   alias FermixTestSupport.HomeSummaryGoldens
   alias FermixTestSupport.PipedTerminal
   alias FermixTestSupport.SafeRm
@@ -240,6 +241,30 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
                "  WhatsApp:\n    sudo tailscale funnel --bg --set-path=/webhook/whatsapp " <>
                  "http://127.0.0.1:4030/webhook/whatsapp\n  Tailscale prints the address " <>
                  "this gives. In Meta's app dashboard"
+    end
+  end
+
+  # Review F9 (D17): the code is shown once, so a result of any other shape
+  # than own_server's fails loud rather than print nothing.
+  describe "a step's result" do
+    test "own_server's is matched whole, the code's fields and its Tailscale step apart" do
+      code = own_code()
+
+      assert ["On your server, run:" | _rest] = Render.result(code)
+      assert Render.result(nil) == []
+      assert Render.result(%{"move_id" => "mv-0001"}) == []
+
+      for bad <- [
+            Map.delete(code, "tailscale"),
+            Map.delete(code, "command"),
+            Map.put(code, "code", nil),
+            Map.put(code, "tailscale", %{"sentence" => @tailscale_sentence}),
+            Map.put(code, "tailscale", nil),
+            %{"move_id" => "mv-0001", "code" => "fxenroll1.invented"}
+          ] do
+        error = assert_raise ArgumentError, fn -> Render.result(bad) end
+        refute error.message =~ "fxenroll1.invented"
+      end
     end
   end
 

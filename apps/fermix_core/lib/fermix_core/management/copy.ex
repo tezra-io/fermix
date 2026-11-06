@@ -677,10 +677,12 @@ defmodule FermixCore.Management.Copy do
   there: it carries no code, which the server's first boot asks for on the
   terminal without echo, so the code never lands in its shell history, and
   it names the release this computer runs, which the server installs (a
-  server runs exactly its desktop's Fermix, so the home can move back).
+  server runs exactly its desktop's Fermix, so the home can move back):
+  `version`, this engine's own unless given.
   """
-  @spec own_server_command() :: String.t()
-  def own_server_command, do: @own_server_command <> BuildInfo.product_version()
+  @spec own_server_command(String.t()) :: String.t()
+  def own_server_command(version \\ BuildInfo.product_version()) when is_binary(version),
+    do: @own_server_command <> version
 
   @doc """
   `own_server_command/0` with the optional Tailscale step (`--tailscale`):
@@ -690,8 +692,10 @@ defmodule FermixCore.Management.Copy do
   line or in a shell history (`TS_AUTHKEY` is cloud-init's, never printed
   here).
   """
-  @spec own_server_tailscale_command() :: String.t()
-  def own_server_tailscale_command, do: own_server_command() <> " --tailscale"
+  @spec own_server_tailscale_command(String.t()) :: String.t()
+  def own_server_tailscale_command(version \\ BuildInfo.product_version())
+      when is_binary(version),
+      do: own_server_command(version) <> " --tailscale"
 
   @doc """
   The label of one Tailscale Funnel mount, by what it carries: WhatsApp's,

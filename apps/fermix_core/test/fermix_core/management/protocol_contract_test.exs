@@ -16,6 +16,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
   alias FermixCore.Capabilities.MCP.RuntimeStatus
   alias FermixCore.Cues.Config, as: CuesConfig
   alias FermixCore.Home.Candidates, as: HomeCandidates
+  alias FermixCore.Home.EnrollmentCode
   alias FermixCore.Home.Epoch
   alias FermixCore.Home.Move, as: HomeMove
   alias FermixCore.Home.Snapshot.Recipient, as: SnapshotRecipient
@@ -704,6 +705,17 @@ defmodule FermixCore.Management.ProtocolContractTest do
     assert golden_error_details("changed") == %{
              "sentence" => "Always On changed since this was shown, so look at it again."
            }
+  end
+
+  # Review F10 (D18): `own_server`'s answer, the code with both commands, is
+  # the router's own for its case: the apps decode it from this golden.
+  test "the golden own_server answer is the engine's own" do
+    {params, opts} = own_server_act_case()
+    request = %{request_id: "req-1", protocol_version: 2, method: "home.act", params: params}
+    {:ok, answer} = Router.route(request, opts)
+
+    assert %{"result" => %{"tailscale" => %{"command" => _joins}}} = answer
+    assert named_fixture_result("home_act_own_server") == json(answer)
   end
 
   test "the schema's row vocabulary matches the settings module", %{schema: schema} do
@@ -1569,6 +1581,69 @@ defmodule FermixCore.Management.ProtocolContractTest do
 
     %{"key" => key} = Enum.find(alternatives, &(&1["id"] == "cancel"))
     {"home.act", %{"action" => "cancel", "key" => key}, [operation_opts: [always_on: seams]]}
+  end
+
+  # Use my own Linux server pressed on the first screen: the window it opens
+  # names an invented code, the release this engine runs is the golden's own,
+  # and the screen after it waits for the server.
+  defp own_server_act_case do
+    home = SafeRm.make_tmp_dir!("contract_own_server")
+    on_exit(fn -> SafeRm.rm_rf!(home) end)
+    :ok = Epoch.write(home, 4)
+    unique = System.unique_integer([:positive])
+    serializer = :"contract_own_server_#{unique}"
+    start_supervised!({AlwaysOn, name: serializer}, id: serializer)
+    expires_at = ~U[2026-10-30 09:30:00Z]
+
+    link =
+      start_supervised!(
+        {Agent, fn -> %{primary: nil, desktops: [], enrollment: nil} end},
+        id: :"contract_own_server_link_#{unique}"
+      )
+
+    open = fn nil ->
+      window = %{state: :open, expires_at: expires_at, candidate_id: nil}
+      :ok = Agent.update(link, &%{&1 | enrollment: window})
+      {:ok, %{code: invented_code(expires_at), expires_at: expires_at}}
+    end
+
+    seams = [
+      home: home,
+      engine_role: %{role: :primary, primary: nil},
+      profile: "general",
+      now: ~U[2026-10-30 09:00:00Z],
+      host_os: :macos,
+      config: [],
+      scheduler: nil,
+      version: "1.2.3",
+      disk_usage: fn _home -> {:ok, %{used: 0.42, nearly_full: false}} end,
+      link_status: fn -> Agent.get(link, & &1) end,
+      open_enrollment: open,
+      settings_snapshot: fn -> %{} end,
+      jobs: jobs(),
+      serializer: serializer
+    ]
+
+    %{"action" => %{"id" => "own_server", "key" => key}} =
+      seams |> ManagementHome.summary_facts() |> HomeSummary.summary()
+
+    {%{"action" => "own_server", "key" => key}, [operation_opts: [always_on: seams]]}
+  end
+
+  # An enrollment code as the window encodes one, from invented facts.
+  defp invented_code(expires_at) do
+    {:ok, code} =
+      EnrollmentCode.encode(%{
+        secret: :binary.copy(<<0x5A>>, 32),
+        gateway_pk: :binary.copy(<<0x3C>>, 32),
+        node_id: String.duplicate("4f", 32),
+        relays: [%{"url" => "https://eu1.relay.invalid/", "quic_port" => 7842}],
+        relays_rev: "0123456789abcdef",
+        name: "studio-mac",
+        expires_at: expires_at
+      })
+
+    code
   end
 
   # Enrollment and the move as the `home.status` golden shows them: the

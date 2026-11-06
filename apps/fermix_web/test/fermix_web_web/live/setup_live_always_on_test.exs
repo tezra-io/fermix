@@ -32,6 +32,7 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
   alias FermixCore.Setup.RestartState
   alias FermixTestSupport.SecretWriterStub
   alias FermixTestSupport.TelemetryCapture
+  alias FermixWebWeb.SetupLive.AlwaysOn.Code
 
   @at ~U[2031-05-04 12:00:00Z]
   @primary %{role: :primary, primary: nil}
@@ -259,6 +260,37 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
   end
 
   describe "a server of the owner's own" do
+    # Review F9 (D17): the code is answered once, so a result of any other
+    # shape than own_server's fails loud rather than drop it.
+    test "own_server's result is matched whole, the code's fields and its Tailscale step apart" do
+      code = %{
+        "code" => @manual_code,
+        "expires_at" => "2031-05-04T12:30:00Z",
+        "command" => Copy.own_server_command(),
+        "tailscale" => %{
+          "sentence" => "Optional: invented.",
+          "command" => Copy.own_server_tailscale_command()
+        }
+      }
+
+      assert %Code{code: @manual_code, tailscale: %{"sentence" => "Optional: invented."}} =
+               Code.from_result(code)
+
+      assert Code.from_result(nil) == nil
+      assert Code.from_result(%{"move_id" => "mv-0001"}) == nil
+
+      for bad <- [
+            Map.delete(code, "tailscale"),
+            Map.delete(code, "command"),
+            Map.put(code, "code", nil),
+            Map.put(code, "tailscale", %{"sentence" => "Optional: invented."}),
+            Map.put(code, "tailscale", nil)
+          ] do
+        error = assert_raise ArgumentError, fn -> Code.from_result(bad) end
+        refute error.message =~ @manual_code
+      end
+    end
+
     test "the code shows once, with the command and until when, and no print spells it", %{
       conn: conn
     } do
@@ -275,7 +307,10 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
       assert text(html, "#always-on-tailscale") =~
                ~r/\AOptional: to also join the server to your tailnet/
 
-      assert text(html, "#always-on-tailscale-command") == Copy.own_server_tailscale_command()
+      # The release this engine runs: the `:version` seam the page passes on.
+      assert text(html, "#always-on-tailscale-command") ==
+               Copy.own_server_tailscale_command("9.9.9")
+
       assert html =~ ~s(data-copy-from="always-on-tailscale-command")
       refute view.pid |> :sys.get_state() |> inspect(limit: :infinity) =~ @manual_code
 

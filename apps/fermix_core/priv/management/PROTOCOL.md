@@ -1783,8 +1783,11 @@ own client tests against the same golden frames the daemon is tested against.
   `settings.get` one per section, because a section with no golden result is a
   pane whose row keys nothing on the far side is held to, for
   `mobile.pair.get` one per session state, for `job.get` a browser download
-  both completed and failed, and for `computer_use.permissions.get` a Mac
-  answer and a Linux one.
+  both completed and failed, for `computer_use.permissions.get` a Mac
+  answer and a Linux one, for `home.status` one per family of the Always On
+  summary's states, and for `home.act` a cancelled code and `own_server`'s
+  answer (`home_act_own_server`: the code, its command and the Tailscale
+  step).
 - `fixtures/errors.jsonl` — one full error envelope per published code,
   including the fixed `message` text. `method_not_found` appears twice: once
   for a method this daemon does not serve at all, and once as
