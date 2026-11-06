@@ -27,7 +27,9 @@
 # environment. Then a host whose Fermix home exists, read through a stand-in
 # for the engine account's fermix calls that answers home status --json in
 # the engine's envelope: a candidate that has not begun to receive its move
-# enrolling again (code in the environment, typed, or missing), a home that
+# enrolling again (code in the environment, typed, or missing), its refused
+# enrollment starting its service again once (a first one refused starting
+# none), a home that
 # runs (no code, at a terminal too, ending with the commands that remove it,
 # or refused with them when given one), and every other home refused, with
 # the commands that remove it when the home could be read.
@@ -110,7 +112,8 @@ drop_update_writer() {
 }
 
 # The steps that need a Debian server as root: each logs its name, and says
-# so when the key file tailscale up read is still there.
+# so when the key file tailscale up read is still there. enroll and
+# start_service are first-boot.sh's own, through the engine account's stand-in.
 stand_in_steps() {
   cat <<EOF
 
@@ -131,10 +134,10 @@ stand_in() {
 
 # A fermix verb as the engine account: logged; home status --json prints
 # state/home-status.json and exits with state/home-status-exit; a verb whose
-# arguments are the line in state/fermix-fails exits 1.
+# arguments are a line in state/fermix-fails exits 1.
 as_engine() {
   printf 'fermix %s\n' "\$*" >>'$LOG'
-  if [ -f '$STATE/fermix-fails' ] && [ "\$*" = "\$(/bin/cat '$STATE/fermix-fails')" ]; then
+  if fermix_fails "\$*"; then
     echo "fermix \$1: (test) it stopped" >&2
     return 1
   fi
@@ -142,9 +145,17 @@ as_engine() {
   /bin/cat '$STATE/home-status.json'
   return "\$(/bin/cat '$STATE/home-status-exit')"
 }
+
+fermix_fails() {
+  [ -f '$STATE/fermix-fails' ] || return 1
+  while IFS= read -r failing; do
+    if [ "\$1" = "\$failing" ]; then return 0; fi
+  done <'$STATE/fermix-fails'
+  return 1
+}
 EOF
   for step in check_host block_metadata add_swap install_fermix schedule_updates \
-    create_engine_user enroll start_service install_browser await_enrollment print_restore_steps; do
+    create_engine_user install_browser await_enrollment print_restore_steps; do
     printf '%s() { stand_in %s; }\n' "$step" "$step"
   done
 }
@@ -460,16 +471,20 @@ refused_before_any_step() {
   check "! grep -qv '^step check_host\$' '$LOG'" "$1: nothing runs after the host check"
 }
 
-NO_TAILSCALE_STEPS='step check_host
+# What enroll and start_service run as the engine account.
+ENROLLS="fermix home enroll --code-file $T/run/fermix/enroll.code"
+STARTS="fermix service install --home $T/home/fermix/.fermix"
+
+NO_TAILSCALE_STEPS="step check_host
 step block_metadata
 step add_swap
 step install_fermix
 step schedule_updates
 step create_engine_user
-step enroll
-step start_service
+$ENROLLS
+$STARTS
 step install_browser
-step await_enrollment'
+step await_enrollment"
 
 tailscale_calls() {
   cat <<EOF
@@ -486,7 +501,7 @@ EOF
 joined_calls() {
   printf 'step check_host\nstep block_metadata\nstep add_swap\nstep install_fermix\nstep schedule_updates\nstep create_engine_user\n'
   tailscale_calls debian/trixie
-  printf 'step enroll\nstep start_service\nstep install_browser\nstep await_enrollment\n'
+  printf '%s\n%s\nstep install_browser\nstep await_enrollment\n' "$ENROLLS" "$STARTS"
 }
 
 key_cksum() {
@@ -630,7 +645,7 @@ tailscaled_does_not_start() {
   check "[ $STATUS -eq 1 ] && [ \"\$(tail -n 1 '$ERR')\" = 'fermix always-on: systemctl could not start tailscaled.service, so this server cannot join your tailnet; its message above says why.' ]" \
     "a tailscaled that does not start stops the first boot with one sentence (exit $STATUS)"
   [ "$STATUS" -eq 1 ] || sed 's/^/    /' "$OUT" "$ERR"
-  check "! grep -q '^tailscale up \|^step enroll' '$LOG'" "before tailscale up and before enrolling"
+  check "! grep -q '^tailscale up \|^fermix home enroll' '$LOG'" "before tailscale up and before enrolling"
   key_left_nowhere "a tailscaled that does not start"
 }
 
@@ -642,7 +657,7 @@ $INVENTED_FPR"; do
     run TS_AUTHKEY="$KEY" FERMIX_ENROLL_CODE="$CODE" dash "$COPY" --tailscale
     stopped_with "The key https://pkgs.tailscale.com/stable/debian/trixie.noarmor.gpg serves is not Tailscale's package signing key alone ($PINNED), so Tailscale is not installed." \
       "a served key that is not Tailscale's alone is refused ($(printf '%s' "$keys" | tr '\n' ' '))"
-    check "! grep -q 'install --no-install-recommends tailscale\|^tailscale \|^step enroll' '$LOG'" \
+    check "! grep -q 'install --no-install-recommends tailscale\|^tailscale \|^fermix home enroll' '$LOG'" \
       "and nothing is installed from it, joined or enrolled"
     check "[ ! -e '$KEYRING' ] && [ ! -e '$SOURCE' ]" "and apt is given no keyring and no source"
     key_left_nowhere "a key that is not Tailscale's"
@@ -656,7 +671,7 @@ up_fails() {
   check "[ $STATUS -eq 1 ] && [ \"\$(tail -n 1 '$ERR')\" = \"fermix always-on: tailscale up did not join this server to your tailnet, so the first boot stops here; its message above says why. A key that is used up, expired or revoked is refused: create a new one and run this again. If it printed a link to approve this server, approve it there and run this again without a key.\" ]" \
     "a tailscale up that fails stops the first boot with one sentence (exit $STATUS)"
   [ "$STATUS" -eq 1 ] || sed 's/^/    /' "$OUT" "$ERR"
-  check "grep -q '^tailscale up ' '$LOG' && ! grep -q '^step enroll' '$LOG'" "before enrolling"
+  check "grep -q '^tailscale up ' '$LOG' && ! grep -q '^fermix home enroll' '$LOG'" "before enrolling"
   check "[ -s '$STATE/up-key-path' ] && [ ! -e \"\$(cat '$STATE/up-key-path')\" ]" "the key file is gone after the failure"
   key_left_nowhere "a failed tailscale up"
 }
@@ -720,7 +735,7 @@ refused_after_reading_the_home() {
   printf 'step check_host\nfermix home status --json\n' | calls_are "$1: nothing runs after the home is read"
 }
 
-REENROLLED_STEPS='step check_host
+REENROLLED_STEPS="step check_host
 fermix home status --json
 step block_metadata
 step add_swap
@@ -728,10 +743,10 @@ step install_fermix
 step schedule_updates
 step create_engine_user
 fermix service uninstall
-step enroll
-step start_service
+$ENROLLS
+$STARTS
 step install_browser
-step await_enrollment'
+step await_enrollment"
 
 # A candidate that has not begun to receive its move (enrolling, failed,
 # expired, or enrolled and waiting) enrolls again with a new code: the engine
@@ -773,7 +788,38 @@ enrolls_again() {
   run FERMIX_ENROLL_CODE="$CODE" dash "$COPY"
   check "[ $STATUS -eq 1 ] && [ \"\$(tail -n 1 '$ERR')\" = 'fermix always-on: fermix service uninstall stopped, so this server is not enrolled again; its message above says why.' ]" \
     "a Fermix that does not stop stops the first boot with one sentence (exit $STATUS)"
-  check "! grep -q '^step enroll' '$LOG'" "before it enrolls"
+  check "! grep -q '^fermix home enroll' '$LOG'" "before it enrolls"
+
+  # A refused enrollment (an old code past its thirty minutes, or the code
+  # the server enrolled with) leaves the home as it was, so a re-run starts
+  # the service stop_engine took down again, once, with the enrollment the
+  # server had, then fails saying so.
+  home_is candidate enrolled
+  printf '%s\n' "${ENROLLS#fermix }" >"$STATE/fermix-fails"
+  run FERMIX_ENROLL_CODE="$CODE" dash "$COPY"
+  check "[ $STATUS -eq 1 ] && [ \"\$(tail -n 1 '$ERR')\" = 'fermix always-on: fermix home enroll stopped, so this server keeps the enrollment it had and runs again; its message above says why.' ]" \
+    "a re-run whose enrollment is refused starts the server again and says so (exit $STATUS)"
+  [ "$STATUS" -eq 1 ] || sed 's/^/    /' "$OUT" "$ERR"
+  printf 'step check_host\nfermix home status --json\nstep block_metadata\nstep add_swap\nstep install_fermix\nstep schedule_updates\nstep create_engine_user\nfermix service uninstall\n%s\n%s\n' "$ENROLLS" "$STARTS" |
+    calls_are "after the refusal its service is installed and started again, then nothing else runs"
+
+  home_is candidate enrolled
+  printf '%s\n%s\n' "${ENROLLS#fermix }" "${STARTS#fermix }" >"$STATE/fermix-fails"
+  run FERMIX_ENROLL_CODE="$CODE" dash "$COPY"
+  check "[ $STATUS -eq 1 ] && [ \"\$(tail -n 1 '$ERR')\" = 'fermix always-on: fermix home enroll stopped, and fermix service install did not start this server again with the enrollment it had; their messages above say why.' ]" \
+    "a service that does not start again after the refusal stops the run with its own sentence (exit $STATUS)"
+  [ "$STATUS" -eq 1 ] || sed 's/^/    /' "$OUT" "$ERR"
+  check "[ \"\$(grep -c '^fermix service install' '$LOG')\" -eq 1 ] && [ \"\$(tail -n 1 '$LOG')\" = '$STARTS' ]" \
+    "and it tries the service once, last"
+
+  # A first enrollment stopped nothing, so a refusal fails as it always did.
+  fresh_host
+  printf '%s\n' "${ENROLLS#fermix }" >"$STATE/fermix-fails"
+  run FERMIX_ENROLL_CODE="$CODE" dash "$COPY"
+  check "[ $STATUS -eq 1 ] && [ \"\$(tail -n 1 '$ERR')\" = 'fermix always-on: fermix home enroll stopped; its message above says why.' ]" \
+    "a first enrollment that is refused stops the first boot with one sentence (exit $STATUS)"
+  printf 'step check_host\nstep block_metadata\nstep add_swap\nstep install_fermix\nstep schedule_updates\nstep create_engine_user\n%s\n' "$ENROLLS" |
+    calls_are "and starts no service after it"
 }
 
 # Answers nothing, for a terminal run that asks for nothing.
@@ -797,8 +843,8 @@ home_that_runs() {
     check "[ $STATUS -eq 0 ] && tail -n 2 '$OUT' | cmp -s - '$T/end.expected'" \
       "a $home home, run again with no code, runs as it is, then says what it is and the commands that remove it (exit $STATUS)"
     [ "$STATUS" -eq 0 ] || sed 's/^/    /' "$OUT" "$ERR"
-    printf 'step check_host\nfermix home status --json\nstep block_metadata\nstep add_swap\nstep install_fermix\nstep schedule_updates\nstep create_engine_user\nstep enroll\nstep start_service\nstep install_browser\n' |
-      calls_are "$home: it reads the home, stops nothing and waits for nothing"
+    printf 'step check_host\nfermix home status --json\nstep block_metadata\nstep add_swap\nstep install_fermix\nstep schedule_updates\nstep create_engine_user\n%s\nstep install_browser\n' "$STARTS" |
+      calls_are "$home: it reads the home, stops nothing, enrolls nothing and waits for nothing"
   done
 
   # The owner who reuses the server after Restore here runs the command at

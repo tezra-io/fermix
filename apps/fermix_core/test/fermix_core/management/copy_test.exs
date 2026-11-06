@@ -810,6 +810,8 @@ defmodule FermixCore.Management.CopyTest do
               {:code_expired, ~U[2026-10-27 12:30:00Z]},
               {:invalid_code, "a bad checksum"},
               :already_candidate,
+              {:same_window, :enrolled},
+              {:same_window, :enrolling},
               :moved
             ],
             do: {"candidate refusal", HomeCandidate.error_sentence(reason)}

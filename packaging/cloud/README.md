@@ -54,7 +54,15 @@ is read first, still before anything is installed: `fermix home status
   forgot this server) enrolls again with a new code, read like a first one:
   Fermix is stopped (`fermix service uninstall` as `fermix`, since the
   candidate is replaced only while no engine runs in the home), enrolled
-  with the new code, started and waited for.
+  with the new code, started and waited for. The code this server enrolled
+  with is refused while it enrolls or waits for its move ("This server
+  enrolled with this code already and waits for its move…"), since its
+  replacement would be refused as used. A refused enrollment (that code, or
+  one past its thirty minutes) changes nothing in the home, so the service
+  is started again with the enrollment the server had, once, and the run
+  fails with "fermix home enroll stopped, so this server keeps the
+  enrollment it had and runs again; its message above says why." (or, when
+  that start fails too, one sentence that says so).
 - A home that runs (the primary, or a candidate receiving its move) is bound
   and started as it is, and the run ends with "Done. Fermix runs from the
   home it already had.", then the sentence below, which says what the home
@@ -178,8 +186,9 @@ step:
    R]`, then, with `XDG_RUNTIME_DIR=/run/user/<uid>` (systemctl reaches the user manager's
    private socket; no user D-Bus needed), `fermix service install --home
    /home/fermix/.fermix`. A candidate enrolling again is stopped first
-   (`fermix service uninstall`); a home that runs is not enrolled again, which
-   is said, and its service is bound and started again.
+   (`fermix service uninstall`), and started again with the enrollment it had
+   when `fermix home enroll` refuses; a home that runs is not enrolled again,
+   which is said, and its service is bound and started again.
 9. A browser for the agent's tasks. Debian: the distribution's `chromium`,
    which the engine's launcher finds on its `PATH` and starts headless as
    `fermix`, with Chromium's own sandbox. Ubuntu ships Chromium only as a
@@ -345,9 +354,10 @@ The host part (`test/on_host.sh`) needs shellcheck, dash, `script(1)` and
 less its nightly update's writer, with six fixed paths moved under a
 directory of its own (each line asserted present exactly once) and the steps
 that need a Debian server as root stood in for by functions that log their
-names, and the engine account's `fermix` calls by one that logs them and
+names, and the engine account's `fermix` calls by one that logs them,
 answers `home status --json` from a fixture in the engine's own one-line
-envelope. `tailscale`, `apt-get`, `curl`, `gpg`, `id` and `systemctl` are
+envelope and fails the calls a fixture names (the script's own enroll and
+service steps run through it). `tailscale`, `apt-get`, `curl`, `gpg`, `id` and `systemctl` are
 stand-ins, and every other command runs through a shim that logs its
 arguments and its environment, so every command line the run starts is seen.
 Its cases: no `--tailscale` (nothing of Tailscale runs), the key from
@@ -361,7 +371,9 @@ a served key that is not Tailscale's alone, `tailscaled` that does not start,
 environment, and its file is gone. Then a host whose home exists: a
 candidate `enrolling`, `failed`, `expired` or `enrolled` enrolling again
 (the code in the environment, typed at a terminal, or missing), a Fermix
-that does not stop; a home that runs, with no code and with one; a retired
+that does not stop, an enrollment refused after the stop (the service
+started again, once, and a start that fails too) and a first enrollment
+refused (no service started); a home that runs, with no code and with one; a retired
 copy, a desktop, a candidate whose move cannot be read, a candidate under
 `--restore` and a home the engine cannot read (refused without the
 commands that remove it), each refused. A failure

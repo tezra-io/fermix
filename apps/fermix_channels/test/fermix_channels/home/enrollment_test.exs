@@ -167,6 +167,22 @@ defmodule FermixChannels.Home.EnrollmentTest do
     assert_receive {:scheduled, :listen_end, 86_400_000}, 10_000
   end
 
+  # The window the candidate enrolled into stays in its state once the code
+  # is gone, so the server's command run again with that code is refused
+  # while the server waits for its move.
+  test "the candidate keeps the window it enrolled into once it enrolled", ctx do
+    {:ok, facts} = EnrollmentCode.decode(ctx.code)
+    window = :crypto.hash(:sha256, facts.secret) |> Base.url_encode64(padding: false)
+    home = HomeMove.candidate_home!(ctx.code)
+    assert {:ok, %{"phase" => "enrolling", "window" => ^window}} = Candidate.read_state(home)
+
+    _candidate = HomeMove.start_candidate!(home, ctx.primary)
+
+    state = HomeMove.await_phase(home, "enrolled")
+    assert state["window"] == window
+    refute File.exists?(Candidate.path(home, "code"))
+  end
+
   test "the candidate process ends its enrollment on a refusal, by name, dropping the code",
        ctx do
     HomeMove.advance!(ctx.primary, 1_800)

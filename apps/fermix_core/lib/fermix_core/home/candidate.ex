@@ -15,7 +15,9 @@ defmodule FermixCore.Home.Candidate do
     * `mobile/iroh_key`: its own iroh secret key (`FermixChannels.Mobile.Iroh.Key`'s
       format), with which its helper listens for the move under this directory
       as its root;
-    * `state.json`: the phase and what it learned;
+    * `state.json`: the phase and what it learned, and `window`, the window
+      the code opens: a digest of its secret (SHA-256, base64url without
+      padding), which reveals nothing of it and stays once the code is gone;
 
   and `config.toml` with `[fermix_core.engine] role = "candidate"` and
   `[fermix_core.always_on] enabled = true`: a candidate exists only for an
@@ -41,7 +43,12 @@ defmodule FermixCore.Home.Candidate do
   (`FermixCore.Home.DaemonProbe`, `:daemon_running` otherwise): the new one
   is built beside it and swapped in, and a failure part-way puts the old one
   back. One receiving its move (`receiving`, `staged`, `activating`) is
-  never replaced. Activation is
+  never replaced, and neither is one enrolling or enrolled through the
+  given code's own window (`{:same_window, phase}`, whether its engine runs
+  or not): its primary would refuse the replacement as used, and one still
+  enrolling would lose the way back in after a lost answer. One that ended
+  takes its own code again, and a `state.json` that names no `window`
+  (written before it was kept) is replaced as any other. Activation is
   `FermixCore.Home.Candidate.Activation`.
 
   **A return** (Always On's move back to the computer the home left) writes
@@ -132,7 +139,7 @@ defmodule FermixCore.Home.Candidate do
     with {:ok, code} <- EnrollmentCode.decode(code_text),
          :ok <- not_expired(code, now),
          {:ok, destination} <- given_destination(Keyword.get(opts, :destination)),
-         {:ok, found} <- fresh(home, Keyword.take(opts, [:hello])) do
+         {:ok, found} <- fresh(home, window(code), Keyword.take(opts, [:hello])) do
       consume = Keyword.get(opts, :consume, fn -> :ok end)
       enroll_into(found, home, {code, code_text}, destination, now, consume)
     end
@@ -284,6 +291,14 @@ defmodule FermixCore.Home.Candidate do
   def error_sentence(:already_candidate),
     do: "This server is receiving its move, so it is not enrolled again until that move ends."
 
+  def error_sentence({:same_window, :enrolled}),
+    do:
+      "This server enrolled with this code already and waits for its move. To set it up " <>
+        "again, open a new code in Always On and run this command with that code."
+
+  def error_sentence({:same_window, :enrolling}),
+    do: "This server is enrolling with this code already."
+
   def error_sentence(:daemon_running),
     do:
       "Fermix is running in this home: stop it first (fermix stop), then enroll again " <>
@@ -358,19 +373,19 @@ defmodule FermixCore.Home.Candidate do
   # A fresh install writes nothing a move would carry: every top-level entry
   # must be device-local. The primary epoch, the marker and an existing
   # candidate are named on their own, before the general rule.
-  defp fresh(home, probe) do
+  defp fresh(home, window, probe) do
     case File.ls(home) do
-      {:ok, entries} -> fresh_entries(home, Enum.sort(entries), probe)
+      {:ok, entries} -> fresh_entries(home, Enum.sort(entries), window, probe)
       {:error, :enoent} -> {:ok, true}
       {:error, reason} -> {:error, {:file, home, reason}}
     end
   end
 
-  defp fresh_entries(home, entries, probe) do
+  defp fresh_entries(home, entries, window, probe) do
     cond do
       Epoch.read(home) != :absent -> {:error, :primary_epoch}
       Moved.read(home) != :absent -> {:error, :moved}
-      @dir in entries -> replaceable(home, entries, probe)
+      @dir in entries -> replaceable(home, entries, window, probe)
       true -> device_local_only(entries)
     end
   end
@@ -381,11 +396,14 @@ defmodule FermixCore.Home.Candidate do
   # primary forgot it (Always On's Forget this server) or dropped it at its
   # 24 hours (`Home.Candidates`' lifetime): a new code is opened only where
   # no server is held, so no move comes to the old one. One a move reached
-  # stays. Any is replaced only while no engine runs in the home, whose
-  # candidate process would otherwise go on writing the old one's state.
-  defp replaceable(home, entries, probe) do
-    with {:ok, %{"phase" => phase}} when phase in @replaceable <- read_state(home),
+  # stays, and so does one enrolling or enrolled through the code's own
+  # window, whose primary would refuse its replacement as used. Any is
+  # replaced only while no engine runs in the home, whose candidate process
+  # would otherwise go on writing the old one's state.
+  defp replaceable(home, entries, window, probe) do
+    with {:ok, %{"phase" => phase} = state} when phase in @replaceable <- read_state(home),
          {:ok, _found} <- device_local_only(entries -- [@dir, "config.toml"]),
+         :ok <- another_window(state, window),
          :ok <- DaemonProbe.stopped(home, probe) do
       {:ok, :replace}
     else
@@ -393,6 +411,21 @@ defmodule FermixCore.Home.Candidate do
       {:error, _reason} = error -> error
     end
   end
+
+  # A state written before the window was kept names none, and one that
+  # ended (`failed`, `expired`) takes its own code again.
+  defp another_window(%{"phase" => "enrolling", "window" => window}, window),
+    do: {:error, {:same_window, :enrolling}}
+
+  defp another_window(%{"phase" => "enrolled", "window" => window}, window),
+    do: {:error, {:same_window, :enrolled}}
+
+  defp another_window(_state, _window), do: :ok
+
+  # The window a code opens, as `state.json` keeps it: a digest of its
+  # secret, which reveals nothing of it.
+  defp window(%{secret: secret}),
+    do: :crypto.hash(:sha256, secret) |> Base.url_encode64(padding: false)
 
   defp device_local_only(entries) do
     case Enum.reject(entries, &DeviceLocal.excluded?/1) do
@@ -610,6 +643,7 @@ defmodule FermixCore.Home.Candidate do
       "v" => @version,
       "phase" => "enrolling",
       "primary" => primary_facts(code),
+      "window" => window(code),
       "updated_at" => iso(now)
     }
 

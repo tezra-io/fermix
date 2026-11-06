@@ -63,7 +63,7 @@ defmodule FermixCore.Home.CandidateTest do
       assert {:ok, %{secret_key: <<_::256>>, salt: <<_::128>>}} =
                Candidate.recipient_pair(ctx.home)
 
-      assert {:ok, %{"phase" => "enrolling", "primary" => primary}} =
+      assert {:ok, %{"phase" => "enrolling", "primary" => primary, "window" => window}} =
                Candidate.read_state(ctx.home)
 
       assert primary == %{
@@ -71,6 +71,14 @@ defmodule FermixCore.Home.CandidateTest do
                "gateway_pk" => Base.encode64(@facts.gateway_pk),
                "node_id" => @facts.node_id
              }
+
+      # The window it enrolls into is kept as a digest of its secret: the
+      # state holds neither the secret nor the code.
+      assert window == window(@facts.secret)
+      state_text = File.read!(Candidate.path(ctx.home, "state.json"))
+
+      for text <- [ctx.code | secret_texts(@facts.secret)],
+          do: refute(state_text =~ text)
     end
 
     test "takes a home that holds only what stays on a machine", ctx do
@@ -150,7 +158,10 @@ defmodule FermixCore.Home.CandidateTest do
         assert {:ok, %{secret: <<0x6B, _rest::binary>>}} =
                  Candidate.enroll(ctx.home, second, now: @now, hello: stopped())
 
-        assert {:ok, %{"phase" => "enrolling"}} = Candidate.read_state(ctx.home)
+        assert {:ok, %{"phase" => "enrolling", "window" => window}} =
+                 Candidate.read_state(ctx.home)
+
+        assert window == window(:binary.copy(<<0x6B>>, 32)), phase
         {:ok, new_key} = Candidate.noise_keypair(ctx.home)
         refute new_key.public == old_key.public, phase
         assert Enum.sort(File.ls!(ctx.home)) == ["candidate", "config.toml"]
@@ -159,6 +170,81 @@ defmodule FermixCore.Home.CandidateTest do
       assert Candidate.error_sentence(:daemon_running) ==
                "Fermix is running in this home: stop it first (fermix stop), then enroll " <>
                  "again with the new code."
+    end
+
+    # Always On re-check: the server's command run again with the code it
+    # enrolled with, inside its thirty minutes, would replace the held server
+    # under new keys, which its primary then refuses as used; one still
+    # enrolling would lose the take-back of a lost answer. The code's window
+    # is the one this candidate enrolls or enrolled into, so nothing changes,
+    # whether its engine runs or not.
+    test "refuses the code it enrolls or enrolled with, changing nothing, its engine running " <>
+           "or not",
+         ctx do
+      for {phase, reason} <- [{"enrolling", :enrolling}, {"enrolled", :enrolled}] do
+        home = Path.join(ctx.tmp, phase)
+        {:ok, _first} = Candidate.enroll(home, ctx.code, now: @now, hello: stopped())
+        {:ok, state} = Candidate.read_state(home)
+        :ok = Candidate.put_state(home, Map.put(state, "phase", phase), @now)
+        # An accepted enrollment drops its code, as the candidate process does.
+        if phase == "enrolled", do: :ok = Candidate.drop_code(home)
+        before = tree(home)
+
+        for hello <- [stopped(), fn -> {:ok, %{}} end] do
+          assert {:error, {:same_window, ^reason}} =
+                   Candidate.enroll(home, ctx.code, now: @now, hello: hello),
+                 phase
+        end
+
+        assert tree(home) == before, phase
+      end
+
+      assert Candidate.error_sentence({:same_window, :enrolled}) ==
+               "This server enrolled with this code already and waits for its move. To set it " <>
+                 "up again, open a new code in Always On and run this command with that code."
+
+      assert Candidate.error_sentence({:same_window, :enrolling}) ==
+               "This server is enrolling with this code already."
+    end
+
+    # A failed enrollment may be tried again with its own code while its
+    # window is open, an expired one's code is long past its thirty minutes,
+    # and a candidate written before the window was kept names none.
+    test "replaces a candidate that ended given its own code, and one whose state names no " <>
+           "window",
+         ctx do
+      for phase <- ~w(failed expired) do
+        home = Path.join(ctx.tmp, phase)
+        {:ok, _first} = Candidate.enroll(home, ctx.code, now: @now, hello: stopped())
+        {:ok, old_key} = Candidate.noise_keypair(home)
+        {:ok, state} = Candidate.read_state(home)
+        :ok = Candidate.put_state(home, Map.put(state, "phase", phase), @now)
+
+        assert {:ok, _code} = Candidate.enroll(home, ctx.code, now: @now, hello: stopped()),
+               phase
+
+        assert {:ok, %{"phase" => "enrolling", "window" => window}} = Candidate.read_state(home)
+        assert window == window(@facts.secret), phase
+        {:ok, new_key} = Candidate.noise_keypair(home)
+        refute new_key.public == old_key.public, phase
+      end
+
+      for phase <- ~w(enrolling enrolled) do
+        home = Path.join(ctx.tmp, "unwindowed-" <> phase)
+        {:ok, _first} = Candidate.enroll(home, ctx.code, now: @now, hello: stopped())
+        {:ok, old_key} = Candidate.noise_keypair(home)
+        {:ok, state} = Candidate.read_state(home)
+        unwindowed = state |> Map.put("phase", phase) |> Map.delete("window")
+        :ok = Candidate.put_state(home, unwindowed, @now)
+
+        assert {:ok, _code} = Candidate.enroll(home, ctx.code, now: @now, hello: stopped()),
+               phase
+
+        assert {:ok, %{"phase" => "enrolling", "window" => window}} = Candidate.read_state(home)
+        assert window == window(@facts.secret), phase
+        {:ok, new_key} = Candidate.noise_keypair(home)
+        refute new_key.public == old_key.public, phase
+      end
     end
 
     # One receiving its move is the one its primary is moving to: it stays.
@@ -372,6 +458,29 @@ defmodule FermixCore.Home.CandidateTest do
   end
 
   defp mode(path), do: Bitwise.band(File.stat!(path).mode, 0o777)
+
+  # The window a code opens, as the candidate keeps it: SHA-256 of its
+  # secret, base64url with no padding.
+  defp window(secret), do: :crypto.hash(:sha256, secret) |> Base.url_encode64(padding: false)
+
+  defp secret_texts(secret),
+    do: [
+      Base.encode64(secret),
+      Base.url_encode64(secret, padding: false),
+      Base.encode16(secret, case: :lower)
+    ]
+
+  # Every path under `home` with its mode and, for a file, its bytes.
+  defp tree(home) do
+    home
+    |> Path.join("**")
+    |> Path.wildcard(match_dot: true)
+    |> Enum.sort()
+    |> Enum.map(fn path ->
+      stat = File.lstat!(path)
+      {path, stat.type, stat.mode, if(stat.type == :regular, do: File.read!(path))}
+    end)
+  end
 
   defp return_opts, do: [role: :device, restarts_itself?: true, now: @now]
 

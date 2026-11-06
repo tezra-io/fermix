@@ -178,8 +178,12 @@ it, never a second writer.
   `FERMIX_ENROLL_CODE` or asked for at the terminal (refused with neither):
   its service is stopped (`fermix service uninstall` as `fermix`), `fermix
   home enroll` runs with the new code, and the service is installed and
-  started again. A home that runs (the primary, or a candidate receiving its
-  move) is left running with no code ("Done. Fermix runs from the home it
+  started again. The code it enrolled with is refused while it enrolls or
+  waits for its move, and an enrollment refused (that code, or one past its
+  thirty minutes) changes nothing: the service starts again with the
+  enrollment the server had, once, and the run fails saying so. A home that
+  runs (the primary, or a candidate receiving its move) is left running
+  with no code ("Done. Fermix runs from the home it
   already had.", then the sentence naming it and the commands that remove
   it, since a run at a terminal asks no code of it: how an owner reusing the
   server after Restore here learns to set it up again) and refused with that
@@ -340,7 +344,11 @@ it, never a second writer.
   `fermix home enroll` again (running the server's command again does
   this): a candidate no move has reached (one that never enrolled, one
   whose 24 hours ran out, or one that waits for its move, which a new code
-  means its computer forgot) is replaced; one receiving its move is not. A
+  means its computer forgot) is replaced; one receiving its move is not, nor
+  one enrolling or waiting for its move given the code it enrolled with
+  ("This server enrolled with this code already and waits for its move…"),
+  whose primary would refuse the replacement as used: `state.json` keeps a
+  digest of the window it enrolled into, never the code. A
   server that did not finish or ran out says, in its own status, to open a
   new code in Always On and run the command there again.
 - **Reviewing it.** `fermix home candidates` (or `home.candidates.list`)

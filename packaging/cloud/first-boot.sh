@@ -23,10 +23,12 @@
 # never logs them and never puts them on a command line. Run again, it
 # converges on the same state. A host whose Fermix home exists is read
 # first: a candidate that has not begun to receive its move enrolls again
-# with a new code, a home that runs is started as it is (and refused when
-# given a code), and any other home is refused, with the commands that remove
-# it when the home could be read, which the script never runs itself. One
-# already on a tailnet is not logged in again.
+# with a new code (one whose enrollment is refused, as the code it enrolled
+# with is, keeps the enrollment it had and runs again), a home that runs is
+# started as it is (and refused when given a code), and any other home is
+# refused, with the commands that remove it when the home could be read,
+# which the script never runs itself. One already on a tailnet is not
+# logged in again.
 set -eu
 
 ENGINE_USER=fermix
@@ -930,7 +932,8 @@ EOF
 
 # 7. A candidate that enrolls again: its engine stops first, since the
 # enrollment replaces the candidate only while no engine runs in the home;
-# the service starts again at step 8.
+# the service starts again at step 8, or right after a refused enrollment
+# (enroll_refused).
 stop_engine() {
   say "Stopping Fermix to enroll this server again with the new code"
   as_engine service uninstall ||
@@ -948,14 +951,25 @@ enroll() {
   if [ -n "$SNAPSHOT_BUCKET" ]; then
     set -- "$@" --snapshot-bucket "$SNAPSHOT_BUCKET" --snapshot-region "$SNAPSHOT_REGION"
   fi
-  as_engine "$@" || fail "fermix home enroll stopped; its message above says why."
+  as_engine "$@" || enroll_refused
 }
 
-# 8. The packaged user service, bound to that home and started.
+# fermix home enroll stopped, leaving the home as it was. A candidate
+# enrolling again had its engine stopped for it (stop_engine), so its service
+# starts again with the enrollment it had, once, before the run fails: the
+# one recovery step for that stop.
+enroll_refused() {
+  [ "$REENROLL" -eq 1 ] || fail "fermix home enroll stopped; its message above says why."
+  start_service "fermix home enroll stopped, and fermix service install did not start this server again with the enrollment it had; their messages above say why."
+  fail "fermix home enroll stopped, so this server keeps the enrollment it had and runs again; its message above says why."
+}
+
+# 8. The packaged user service, bound to that home and started; one that
+# does not start ends the run with $1, or with this step's own sentence.
 start_service() {
   say "Starting Fermix as the background service of $ENGINE_USER"
   as_engine service install --home "$FERMIX_HOME_DIR" ||
-    fail "fermix service install stopped; its message above says why."
+    fail "${1:-fermix service install stopped; its message above says why.}"
 }
 
 # 9. A browser for the agent's tasks. On Debian the distribution's Chromium,

@@ -1286,7 +1286,10 @@ begun to receive its move (`enrolling`, `enrolled`, `failed`, `expired`) is
 enrolled again with a new code, from `FERMIX_ENROLL_CODE` or the terminal
 (`fermix service uninstall` before `fermix home enroll` and `fermix service
 install` after, since `Home.Candidate.enroll/3` replaces only those four,
-and only with no engine running in the home), and `--restore` refuses it; a
+and only with no engine running in the home, and refuses the code whose
+window an `enrolling` or `enrolled` one went through, by the digest its
+`state.json` keeps; a refused enroll starts the service again once before the
+run fails), and `--restore` refuses it; a
 home that runs (the primary, a candidate receiving its move) is left as it
 is with no code and refused with one; a retired copy or a desktop of
 another primary is refused either way, each refusal one sentence that names
