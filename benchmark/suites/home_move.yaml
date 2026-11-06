@@ -116,9 +116,9 @@ scenarios:
           max_cost_usd: 1.2
           max_duration_ms: 160000
         rubric: |
-          1. Says WhatsApp needs an address on the internet that WhatsApp can
-             reach on the server, and that the owner gives it one by running
-             the Tailscale Funnel command Always On shows after the move.
+          1. Says WhatsApp stops after the move until the owner runs the
+             Tailscale Funnel command Always On shows for the server and
+             points Meta at the address it prints.
           2. Says Slack keeps working on the server only over Socket Mode:
              set up the other way (events sent to an address) it stops unless
              it is switched to Socket Mode first.

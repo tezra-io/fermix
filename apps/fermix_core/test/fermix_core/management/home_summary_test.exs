@@ -469,17 +469,25 @@ defmodule FermixCore.Management.HomeSummaryTest do
   # server's own `home.status`, with the one-time policy step and the
   # caveats, and nothing when it serves none.
   describe "the webhooks a server needs" do
+    # Review F6 (D12): the one-time tailnet steps Funnel needs first.
     @webhooks_sentence "WhatsApp and your webhook sources reach Fermix on your server through " <>
-                         "Tailscale Funnel. Once, allow Funnel for the server in your tailnet " <>
-                         "policy: the funnel node attribute, for tag:fermix-server. Then run " <>
-                         "each of these on the server."
+                         "Tailscale Funnel. Once, in your tailnet policy, give " <>
+                         "tag:fermix-server the funnel node attribute, and turn on MagicDNS " <>
+                         "and HTTPS certificates. Then run each of these on the server; a new " <>
+                         "address can take about ten minutes to resolve."
+    # Review F3 (D10): where Meta is pointed, and that nothing arrives until then.
+    @whatsapp_note "Tailscale prints the address this gives. In Meta's app dashboard, set it " <>
+                     "as the Callback URL with your verify token and press Verify and save; " <>
+                     "until then WhatsApp messages do not arrive."
+    # Review F4 (D11): the mount is the source's prefix, so no secret is on the
+    # screen; the sender keeps its path and takes Tailscale's host.
+    @cue_note "Tailscale prints the address this gives. In the sender (GitHub and the like), " <>
+                "change the host of the source's webhook address to the one it prints, and " <>
+                "keep the path."
     @port_note "Funnel publishes everything tailscale serve has on port 443, so put only " <>
                  "these paths there."
     @ingress_note "Funnel traffic comes in through Tailscale's ingress servers, which see " <>
                     "only encrypted bytes: it is the one way the internet reaches your server."
-    @random_note "In a webhook source's command, put the last part of its URL where it says " <>
-                   "<random>. Its URL is in Cues, and this screen leaves it out because the " <>
-                   "URL is a secret."
 
     test "a server with WhatsApp alone: its one mount, the policy step and the caveats" do
       %{"state" => "on", "detail" => detail} =
@@ -490,9 +498,11 @@ defmodule FermixCore.Management.HomeSummaryTest do
                "mounts" => [
                  %{
                    "label" => "WhatsApp",
+                   # Review F2 (D9): the installer sets no Tailscale operator.
                    "command" =>
-                     "tailscale funnel --bg --set-path=/webhook/whatsapp " <>
-                       "http://127.0.0.1:4130/webhook/whatsapp"
+                     "sudo tailscale funnel --bg --set-path=/webhook/whatsapp " <>
+                       "http://127.0.0.1:4130/webhook/whatsapp",
+                   "note" => @whatsapp_note
                  }
                ],
                "notes" => [
@@ -504,7 +514,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
              }
     end
 
-    test "webhook sources alone: one mount each on the server's door, the URL's secret left out" do
+    test "webhook sources alone: one mount each of the source's prefix on the server's door" do
       served = [cue("github", 4532), cue("stripe", 4532)]
 
       %{"detail" => detail} =
@@ -514,23 +524,26 @@ defmodule FermixCore.Management.HomeSummaryTest do
                %{
                  "label" => "Webhook source github",
                  "command" =>
-                   "tailscale funnel --bg --set-path=/cues/hooks/github/<random> " <>
-                     "http://127.0.0.1:4532/cues/hooks/github/<random>"
+                   "sudo tailscale funnel --bg --set-path=/cues/hooks/github " <>
+                     "http://127.0.0.1:4532/cues/hooks/github",
+                 "note" => @cue_note
                },
                %{
                  "label" => "Webhook source stripe",
                  "command" =>
-                   "tailscale funnel --bg --set-path=/cues/hooks/stripe/<random> " <>
-                     "http://127.0.0.1:4532/cues/hooks/stripe/<random>"
+                   "sudo tailscale funnel --bg --set-path=/cues/hooks/stripe " <>
+                     "http://127.0.0.1:4532/cues/hooks/stripe",
+                 "note" => @cue_note
                }
              ]
+
+      refute detail["webhooks"] |> Jason.encode!() |> String.contains?("<random>")
 
       assert detail["webhooks"]["notes"] == [
                @port_note,
                @ingress_note,
                "Without Tailscale, run Cloudflare Tunnel to the same loopback port instead: " <>
-                 "4532 for webhook sources.",
-               @random_note
+                 "4532 for webhook sources."
              ]
     end
 
@@ -545,8 +558,6 @@ defmodule FermixCore.Management.HomeSummaryTest do
 
       assert ("Without Tailscale, run Cloudflare Tunnel to the same loopback ports instead: " <>
                 "4130 for WhatsApp and 4532 for webhook sources.") in detail["webhooks"]["notes"]
-
-      assert @random_note in detail["webhooks"]["notes"]
     end
 
     test "neither: no webhooks at all, and none from a server whose part did not arrive" do
@@ -578,8 +589,10 @@ defmodule FermixCore.Management.HomeSummaryTest do
 
       for text <-
             [webhooks["sentence"] | webhooks["notes"]] ++
-              Enum.map(webhooks["mounts"], & &1["label"]),
-          do: assert(Copy.summary_violations(text) == [], text)
+              Enum.flat_map(webhooks["mounts"], &[&1["label"], &1["note"]]) do
+        assert Copy.summary_violations(text) == [], text
+        assert Copy.violations(text, :prose, ["github"]) == [], text
+      end
 
       keys =
         for served <- [

@@ -88,16 +88,17 @@ defmodule FermixCore.Cues.Webhook do
   end
 
   @doc """
-  The door path of webhook source `ref` with its random part shown as
-  `<random>`: what a surface prints where the URL itself, a secret handed out
-  only by `cues.sources.url.get`, must not go (the Always On screen's Funnel
-  mount, read by anyone who reads `home.status`).
+  The prefix of webhook source `ref`'s door paths, `/cues/hooks/<ref>`: what
+  the Always On screen mounts on Tailscale Funnel for it, so the command
+  carries none of its URL's secret (`home.status` is read by anyone), while
+  Tailscale passes the rest of each request's path to the door, which
+  answers only the source's own `path/2`.
   """
-  @spec placeholder_path(String.t()) :: String.t()
-  def placeholder_path(ref) when is_binary(ref) do
+  @spec prefix_path(String.t()) :: String.t()
+  def prefix_path(ref) when is_binary(ref) do
     unless Config.valid_name?(ref), do: raise(ArgumentError, "a webhook path needs a source name")
 
-    @path_prefix <> ref <> "/<random>"
+    @path_prefix <> ref
   end
 
   @doc """

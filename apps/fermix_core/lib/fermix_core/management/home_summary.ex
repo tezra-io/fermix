@@ -92,15 +92,22 @@ defmodule FermixCore.Management.HomeSummary do
   **Inbound webhooks** (Always On, "Inbound webhooks without a public IP"):
   on a linked desktop's `on`, `detail.webhooks` holds the Tailscale Funnel
   mounts the owner runs on the server, `{sentence, mounts, notes}`: the
-  sentence with the one-time policy step (the `funnel` node attribute), each
-  mount's `label` and `command` (`FermixCore.Funnel`'s), WhatsApp's first,
-  then each webhook source's, and the caveats (port 443 carries only these
-  paths, the traffic enters through Tailscale's ingress, Cloudflare Tunnel to
-  the same loopback ports without Tailscale). The values are the server's:
-  the `webhooks` of its own `home.status` (`primary_home`), never this
-  computer's settings. A webhook source's command shows its URL's secret as
-  `<random>`, since `home.status` is read without the owner's decision that
-  hands the URL out. No `webhooks` where the server serves none. The
+  sentence with the one-time tailnet steps (the `funnel` node attribute for
+  `tag:fermix-server`, MagicDNS and HTTPS certificates, and that a new
+  address takes minutes to resolve), each mount's `label`, `command`
+  (`FermixCore.Funnel`'s, after `sudo`: the server's first boot names no
+  Tailscale operator, so only root changes its serve config) and `note`
+  (where the sender is pointed: Meta's Callback URL for WhatsApp, the host
+  of a webhook source's address in its sender), WhatsApp's first, then each
+  webhook source's, and the caveats (port 443 carries only these paths, the
+  traffic enters through Tailscale's ingress, Cloudflare Tunnel to the same
+  loopback ports without Tailscale). The values are the server's: the
+  `webhooks` of its own `home.status` (`primary_home`), never this
+  computer's settings. A webhook source's mount is its prefix,
+  `/cues/hooks/<ref>` (`Cues.Webhook.prefix_path/1`), so the command carries
+  none of its URL's secret, which `home.status`, a read, never hands out:
+  Tailscale passes the rest of the path to the door, which answers only that
+  source's own paths. No `webhooks` where the server serves none. The
   server's own `primary` draws none: its summary rides inside its desktops'
   `home.status`, where the mounts would pass the protocol's nesting bound.
 
@@ -839,26 +846,35 @@ defmodule FermixCore.Management.HomeSummary do
   end
 
   defp mount(%{"kind" => "whatsapp", "port" => port}) do
-    command = Funnel.mount_command(Funnel.whatsapp_path(), port)
-    %{"label" => Copy.mount_label(:whatsapp), "command" => command}
+    %{
+      "label" => Copy.mount_label(:whatsapp),
+      "command" => as_root(Funnel.mount_command(Funnel.whatsapp_path(), port)),
+      "note" => Copy.summary_sentence(:webhooks_whatsapp, %{})
+    }
   end
 
   defp mount(%{"kind" => "cue", "ref" => ref, "port" => port}) do
-    command = Funnel.mount_command(Webhook.placeholder_path(ref), port)
-    %{"label" => Copy.mount_label({:cue, ref}), "command" => command}
+    %{
+      "label" => Copy.mount_label({:cue, ref}),
+      "command" => as_root(Funnel.mount_command(Webhook.prefix_path(ref), port)),
+      "note" => Copy.summary_sentence(:webhooks_cue, %{})
+    }
   end
 
-  # Port 443's rule, Tailscale's ingress, the tunnel to the same ports
-  # without Tailscale, and where a webhook source's URL secret goes.
+  # The server's first boot names no Tailscale operator, so its serve config
+  # is root's to change.
+  defp as_root(command), do: "sudo " <> command
+
+  # Port 443's rule, Tailscale's ingress, and the tunnel to the same ports
+  # without Tailscale.
   defp webhook_notes(served) do
     ports = served |> Enum.map(&{port_of(&1["kind"]), &1["port"]}) |> Enum.uniq_by(&elem(&1, 0))
-    cues? = Keyword.has_key?(ports, :cues)
 
     [
       Copy.summary_sentence(:webhooks_port, %{}),
       Copy.summary_sentence(:webhooks_ingress, %{}),
       Copy.summary_sentence(:webhooks_tunnel, %{ports: ports})
-    ] ++ if(cues?, do: [Copy.summary_sentence(:webhooks_random, %{})], else: [])
+    ]
   end
 
   defp port_of("whatsapp"), do: :whatsapp

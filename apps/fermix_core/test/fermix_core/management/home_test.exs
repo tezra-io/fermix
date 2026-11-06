@@ -250,14 +250,15 @@ defmodule FermixCore.Management.HomeTest do
       assert status["webhooks"] == []
       assert %{"state" => "on", "detail" => %{"webhooks" => webhooks}} = status["summary"]
 
-      assert webhooks["mounts"] == [
+      assert [
                %{
                  "label" => "WhatsApp",
                  "command" =>
-                   "tailscale funnel --bg --set-path=/webhook/whatsapp " <>
-                     "http://127.0.0.1:4130/webhook/whatsapp"
+                   "sudo tailscale funnel --bg --set-path=/webhook/whatsapp " <>
+                     "http://127.0.0.1:4130/webhook/whatsapp",
+                 "note" => "Tailscale prints the address this gives." <> _rest
                }
-             ]
+             ] = webhooks["mounts"]
     end
 
     test "an update ceiling that cannot be read is null, and the log says why", %{home: home} do

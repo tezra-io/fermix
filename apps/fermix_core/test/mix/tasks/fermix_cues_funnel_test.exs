@@ -2,6 +2,7 @@ defmodule Mix.Tasks.Fermix.Cues.FunnelTest do
   # async: false — FERMIX_HOME, the Mix shell and the stub writer are global.
   use ExUnit.Case, async: false
 
+  alias FermixCore.Funnel, as: Mounts
   alias FermixTestSupport.SafeRm
   alias FermixTestSupport.SecretWriterStub
   alias FermixTestSupport.TreeLessSecretWriter
@@ -154,6 +155,30 @@ defmodule Mix.Tasks.Fermix.Cues.FunnelTest do
 
       assert :ok = Funnel.execute(["gh-hooks", "--apply"], runner: runner(responses))
       assert_received {:tailscale, @mount}
+    end
+
+    # Review F7 (D16): the mounts `FermixCore.Funnel` makes for Always On,
+    # WhatsApp's and a source's prefix, are Fermix's too.
+    test "mounts beside WhatsApp's mount and a source's prefix mount, which Fermix makes too" do
+      whatsapp = Mounts.whatsapp_path()
+      prefix = "/cues/hooks/other-hooks"
+
+      funnel =
+        serve_config(%{
+          whatsapp => %{"Proxy" => "http://127.0.0.1:4030" <> whatsapp},
+          prefix => %{"Proxy" => "http://127.0.0.1:4555" <> prefix}
+        })
+
+      responses = Map.put(reads(funnel), @mount, {"", 0})
+
+      assert :ok = Funnel.execute(["gh-hooks", "--apply"], runner: runner(responses))
+      assert_received {:tailscale, @mount}
+
+      elsewhere = serve_config(%{whatsapp => %{"Proxy" => "http://192.0.2.7:4030" <> whatsapp}})
+
+      assert_raise Mix.Error, ~r/did not make/, fn ->
+        Funnel.execute(["gh-hooks", "--apply"], runner: runner(reads(elsewhere)))
+      end
     end
 
     test "refuses a port that carries a mount Fermix did not make" do

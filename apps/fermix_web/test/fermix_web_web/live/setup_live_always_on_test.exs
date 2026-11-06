@@ -556,15 +556,20 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
                ~r/\AWhatsApp and your webhook sources reach Fermix on your server through Tailscale Funnel\./
 
       assert text(html, "#always-on-mount-0") ==
-               "tailscale funnel --bg --set-path=/webhook/whatsapp " <>
+               "sudo tailscale funnel --bg --set-path=/webhook/whatsapp " <>
                  "http://127.0.0.1:4130/webhook/whatsapp"
+
+      assert text(html, "#always-on-mount-note-0") =~
+               "set it as the Callback URL with your verify token"
 
       assert html =~ ~s(data-copy-from="always-on-mount-0")
       assert html =~ ~s(data-copy-from="always-on-mount-1")
 
       assert text(html, "#always-on-mount-1") ==
-               "tailscale funnel --bg --set-path=/cues/hooks/gh-hooks/<random> " <>
-                 "http://127.0.0.1:4532/cues/hooks/gh-hooks/<random>"
+               "sudo tailscale funnel --bg --set-path=/cues/hooks/gh-hooks " <>
+                 "http://127.0.0.1:4532/cues/hooks/gh-hooks"
+
+      assert text(html, "#always-on-mount-note-1") =~ "keep the path"
 
       assert text(html, "#always-on-webhooks") =~ "Webhook source gh-hooks"
 

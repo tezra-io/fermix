@@ -109,10 +109,11 @@ defmodule FermixCore.Home.MoveReadinessTest do
                "runs them."
 
     # The server reaches the internet for WhatsApp only through a Funnel
-    # mount, whose command Always On shows once Fermix runs there.
+    # mount, whose command Always On shows once Fermix runs there, and Meta
+    # posts to the old address until it is pointed at the new one (review F8).
     assert sentence.("whatsapp") ==
-             "WhatsApp needs an address on the internet on north-box: after the move, " <>
-               "Always On shows the Tailscale Funnel command to run there."
+             "WhatsApp stops after the move until you run the Tailscale Funnel command " <>
+               "Always On shows for north-box and point Meta at the address it prints."
 
     assert sentence.("slack") ==
              "Slack stops after the move unless it uses Socket Mode, which you turn on in " <>

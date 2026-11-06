@@ -193,13 +193,15 @@ defmodule FermixCore.Management.AlwaysOnTest do
                "command" =>
                  "curl -fsSL https://fermix.ai/always-on | sudo sh -s -- --version " <> version,
                "tailscale" => %{
+                 # Review I2 (D12): the tag is declared before a key can carry it.
                  "sentence" =>
                    "Optional: to also join the server to your tailnet, which WhatsApp and " <>
                      "webhook sources need, run this instead. It asks for the enrollment " <>
-                     "code and then a Tailscale auth key, and shows neither: create the key " <>
-                     "in Tailscale's admin console, tagged tag:fermix-server, one-off and " <>
-                     "pre-approved, and in your tailnet policy let only your own devices " <>
-                     "reach the server.",
+                     "code and then a Tailscale auth key, and shows neither. First declare " <>
+                     "tag:fermix-server under tagOwners in your tailnet policy, then create " <>
+                     "the key in Tailscale's admin console with that tag, one-off and " <>
+                     "pre-approved, and in the policy let only your own devices reach the " <>
+                     "server.",
                  "command" =>
                    "curl -fsSL https://fermix.ai/always-on | sudo sh -s -- --version " <>
                      "#{version} --tailscale"

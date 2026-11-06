@@ -98,8 +98,8 @@ defmodule FermixCore.Management.Copy do
                    return_stopped restore_moving restore_failed notice_back
                    progress_return_receiving progress_return_staged progress_return_placing
                    progress_restoring confirm_restore_here confirm_return_move confirm_forget
-                   webhooks webhooks_port webhooks_ingress webhooks_tunnel webhooks_random
-                   own_server_tailscale)a
+                   webhooks webhooks_whatsapp webhooks_cue webhooks_port webhooks_ingress
+                   webhooks_tunnel own_server_tailscale)a
   # Each Details line's label, by its key.
   @line_labels [
     server: "Server",
@@ -172,6 +172,12 @@ defmodule FermixCore.Management.Copy do
     "Funnel",
     "Tailscale",
     "Cloudflare Tunnel",
+    "MagicDNS",
+    # Meta's app dashboard, as WhatsApp's webhook form labels it.
+    "Meta",
+    "Callback URL",
+    "Verify and save",
+    "GitHub",
     "Google Chrome for Testing",
     "Google Chrome Canary",
     "Google Chrome",
@@ -498,8 +504,20 @@ defmodule FermixCore.Management.Copy do
   def summary_sentence(:webhooks, _values),
     do:
       "WhatsApp and your webhook sources reach Fermix on your server through Tailscale " <>
-        "Funnel. Once, allow Funnel for the server in your tailnet policy: the funnel node " <>
-        "attribute, for tag:fermix-server. Then run each of these on the server."
+        "Funnel. Once, in your tailnet policy, give tag:fermix-server the funnel node " <>
+        "attribute, and turn on MagicDNS and HTTPS certificates. Then run each of these on " <>
+        "the server; a new address can take about ten minutes to resolve."
+
+  def summary_sentence(:webhooks_whatsapp, _values),
+    do:
+      "Tailscale prints the address this gives. In Meta's app dashboard, set it as the " <>
+        "Callback URL with your verify token and press Verify and save; until then " <>
+        "WhatsApp messages do not arrive."
+
+  def summary_sentence(:webhooks_cue, _values),
+    do:
+      "Tailscale prints the address this gives. In the sender (GitHub and the like), change " <>
+        "the host of the source's webhook address to the one it prints, and keep the path."
 
   def summary_sentence(:webhooks_port, _values),
     do:
@@ -519,19 +537,14 @@ defmodule FermixCore.Management.Copy do
       join_names(each) <> "."
   end
 
-  def summary_sentence(:webhooks_random, _values),
-    do:
-      "In a webhook source's command, put the last part of its URL where it says " <>
-        "<random>. Its URL is in Cues, and this screen leaves it out because the URL is " <>
-        "a secret."
-
   def summary_sentence(:own_server_tailscale, _values),
     do:
       "Optional: to also join the server to your tailnet, which WhatsApp and webhook " <>
         "sources need, run this instead. It asks for the enrollment code and then a " <>
-        "Tailscale auth key, and shows neither: create the key in Tailscale's admin " <>
-        "console, tagged tag:fermix-server, one-off and pre-approved, and in your tailnet " <>
-        "policy let only your own devices reach the server."
+        "Tailscale auth key, and shows neither. First declare tag:fermix-server under " <>
+        "tagOwners in your tailnet policy, then create the key in Tailscale's admin console " <>
+        "with that tag, one-off and pre-approved, and in the policy let only your own " <>
+        "devices reach the server."
 
   def summary_sentence(:data, _values),
     do:

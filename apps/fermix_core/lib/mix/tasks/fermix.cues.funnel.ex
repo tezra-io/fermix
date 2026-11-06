@@ -23,7 +23,9 @@ defmodule Mix.Tasks.Fermix.Cues.Funnel do
   running and Funnel allowed for this machine) and `tailscale funnel status
   --json`. Funnel is allowed per host and port, not per path, so it refuses to
   add a mount while port 443 carries one Fermix did not make: a handler that
-  is not a `/cues/hooks/<ref>/<random>` path proxied to the same path on
+  is not one `FermixCore.Funnel` builds (a `/cues/hooks/<ref>/<random>` path,
+  a source's `/cues/hooks/<ref>` prefix, which the Always On screen mounts,
+  or WhatsApp's `/webhook/whatsapp`) proxied to the same path on
   `127.0.0.1`, or a raw TCP forward, in the background config or a foreground
   session. A source already mounted at its path is left alone; one mounted at
   an older path must be removed first.
@@ -50,6 +52,7 @@ defmodule Mix.Tasks.Fermix.Cues.Funnel do
   @usage "usage: mix fermix.cues.funnel <source_ref> [--remove] [--apply]"
   @funnel_port "443"
   @hook_path ~r|\A/cues/hooks/[a-z0-9][a-z0-9-]{0,63}/[A-Za-z0-9_-]{1,128}\z|
+  @hook_prefix ~r|\A/cues/hooks/[a-z0-9][a-z0-9-]{0,63}\z|
   @loopback_target ~r|\Ahttp://127\.0\.0\.1:\d{1,5}(/.*)\z|
   @funnel_caps ["funnel", "https://tailscale.com/cap/funnel"]
   @funnel_cap_prefix "https://tailscale.com/cap/funnel"
@@ -280,11 +283,19 @@ defmodule Mix.Tasks.Fermix.Cues.Funnel do
   defp handler_target(%{"Text" => _text}), do: "a text reply"
   defp handler_target(_other), do: "another handler"
 
+  # A mount `FermixCore.Funnel` makes: a source's hook path, a source's
+  # prefix (Always On's), or WhatsApp's path, proxied to the same path on
+  # loopback.
   defp fermix_mount?(%{path: path, target: target}) when is_binary(path) do
-    Regex.match?(@hook_path, path) and match?([_url, ^path], Regex.run(@loopback_target, target))
+    fermix_path?(path) and match?([_url, ^path], Regex.run(@loopback_target, target))
   end
 
   defp fermix_mount?(_tcp_forward), do: false
+
+  defp fermix_path?(path),
+    do:
+      Regex.match?(@hook_path, path) or Regex.match?(@hook_prefix, path) or
+        path == Funnel.whatsapp_path()
 
   defp own_mount?(mount, ref),
     do: fermix_mount?(mount) and String.starts_with?(mount.path, "/cues/hooks/#{ref}/")

@@ -584,8 +584,11 @@ every action one record (`needs`, `confirm`,
 key), Details' `lines` and `progress`, a linked desktop's Tailscale Funnel
 mounts (`detail.webhooks`, from the `webhooks` the server's own
 `home.status` names: WhatsApp on its web port while the channel is on, each
-enabled webhook source with a URL on its door port, the URL's secret shown
-as `<random>` since a read never hands it out; written by `FermixCore.Funnel`,
+enabled webhook source with a URL on its door port, mounted at its
+`/cues/hooks/<ref>` prefix (`Cues.Webhook.prefix_path/1`) so no command
+carries the URL's secret, which a read never hands out, each command after
+`sudo` since the server's first boot names no Tailscale operator, and each
+with its note of where the sender is pointed; written by `FermixCore.Funnel`,
 the one builder the cue setup page and `mix fermix.cues.funnel` print too;
 never on the server's own `primary`, whose summary rides inside its
 desktops' `home.status` under the protocol's 6-level nesting bound), the

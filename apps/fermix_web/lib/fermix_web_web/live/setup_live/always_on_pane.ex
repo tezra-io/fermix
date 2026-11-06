@@ -5,7 +5,7 @@ defmodule FermixWebWeb.SetupLive.AlwaysOnPane do
   the alternatives), the step the pressed action opened (a dialog with the
   confirm sentence and the recovery passphrase), Details from
   `detail.lines`, the Tailscale Funnel mounts the server needs
-  (`detail.webhooks`, each command with its own Copy), and the code of the
+  (`detail.webhooks`, each command with its own Copy and its note), and the code of the
   owner's server with the optional Tailscale step's command.
 
   Every word is the engine's (the summary's, with `Management.Copy`'s action
@@ -357,6 +357,9 @@ defmodule FermixWebWeb.SetupLive.AlwaysOnPane do
             Copy
           </button>
         </div>
+        <p id={"always-on-mount-note-#{i}"} class="mt-1 text-sm text-base-content/70">
+          {mount["note"]}
+        </p>
       </div>
       <p :for={note <- @webhooks["notes"]} class="mt-3 text-sm text-base-content/70">{note}</p>
     </section>

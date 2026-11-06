@@ -25,7 +25,8 @@ defmodule Fermix.CLI.AlwaysOnCommand.Render do
   @doc """
   The screen: the sentence, the step in hand and the other one-sentence
   fields, each warning or block of the review, Details, then the Tailscale
-  Funnel mounts the server needs, each command on a line of its own.
+  Funnel mounts the server needs, each command on a line of its own under
+  its label, with its note under it.
   """
   @spec screen(map()) :: [String.t()]
   def screen(%{"sentence" => sentence} = summary) do
@@ -40,7 +41,9 @@ defmodule Fermix.CLI.AlwaysOnCommand.Render do
   defp webhooks(nil), do: []
 
   defp webhooks(%{"sentence" => sentence, "mounts" => mounts, "notes" => notes}) do
-    commands = Enum.flat_map(mounts, &["  #{&1["label"]}:", "    #{&1["command"]}"])
+    commands =
+      Enum.flat_map(mounts, &["  #{&1["label"]}:", "    #{&1["command"]}", "  #{&1["note"]}"])
+
     [sentence] ++ commands ++ notes
   end
 

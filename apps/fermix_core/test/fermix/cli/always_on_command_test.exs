@@ -229,13 +229,17 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
 
       printed =
         [said] ++
-          Enum.flat_map(mounts, &["  #{&1["label"]}:", "    #{&1["command"]}"]) ++ notes
+          Enum.flat_map(
+            mounts,
+            &["  #{&1["label"]}:", "    #{&1["command"]}", "  #{&1["note"]}"]
+          ) ++ notes
 
       assert out =~ Enum.join(printed, "\n") <> "\n"
 
       assert out =~
-               "  WhatsApp:\n    tailscale funnel --bg --set-path=/webhook/whatsapp " <>
-                 "http://127.0.0.1:4030/webhook/whatsapp\n"
+               "  WhatsApp:\n    sudo tailscale funnel --bg --set-path=/webhook/whatsapp " <>
+                 "http://127.0.0.1:4030/webhook/whatsapp\n  Tailscale prints the address " <>
+                 "this gives. In Meta's app dashboard"
     end
   end
 

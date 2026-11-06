@@ -39,9 +39,10 @@ defmodule FermixCore.Home.MoveReadiness do
       stops after the move, each named; with none of them on it is `ok`. On
       a move back, what the server's settings turn on of them runs there
       again, named, and is `ok`;
-    * `whatsapp`: WhatsApp turned on warns: it needs an inbound address Meta
-      can reach on the server, which a Tailscale Funnel mount gives it, and
-      Always On shows that command once Fermix runs there;
+    * `whatsapp`: WhatsApp turned on warns: it stops after the move until
+      the owner runs the Tailscale Funnel mount Always On shows once Fermix
+      runs there, which gives it an inbound address Meta can reach, and
+      points Meta at that address;
     * `slack`: Slack turned on in its Events (webhook) mode warns for the
       same reason, unless it is switched to Socket Mode first;
     * `coding_agents`: coding-harness consent given here warns: a move
@@ -475,15 +476,16 @@ defmodule FermixCore.Home.MoveReadiness do
 
   # WhatsApp's Cloud API reaches Fermix only at an inbound address, and the
   # server opens no port of its own: a Funnel mount, whose command Always On
-  # shows after the move, gives it one.
+  # shows after the move, gives it one, and Meta posts to the old address
+  # until it is pointed at that one.
   defp whatsapp({:ok, text}, name) do
     if on?(text, "fermix_channels.whatsapp", "enabled"),
       do:
         item(
           "whatsapp",
           :warn,
-          "WhatsApp needs an address on the internet on #{name}: after the move, " <>
-            "Always On shows the Tailscale Funnel command to run there."
+          "WhatsApp stops after the move until you run the Tailscale Funnel command " <>
+            "Always On shows for #{name} and point Meta at the address it prints."
         ),
       else: item("whatsapp", :ok, "WhatsApp is not turned on.")
   end

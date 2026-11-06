@@ -298,10 +298,10 @@ it, never a second writer.
   lands in a shell history. Beside it is the optional line that also joins
   the server to the owner's tailnet, which WhatsApp and webhook sources need:
   the same command with `--tailscale`, which then asks for a Tailscale auth
-  key the same way (create it in Tailscale's admin console tagged
-  `tag:fermix-server`, one-off and pre-approved, and let only your own
-  devices reach the server in the tailnet policy). **Cancel the code**
-  closes it. The code
+  key the same way (first declare `tag:fermix-server` under `tagOwners` in
+  the tailnet policy, then create the key in Tailscale's admin console with
+  that tag, one-off and pre-approved, and let only your own devices reach
+  the server: *The tailnet policy*, above). **Cancel the code** closes it. The code
   is `fxenroll1.` and a long string that carries
   a one-time secret, the primary's gateway key, its iroh endpoint id and
   relays, its name and when the window closes. The window lasts thirty
@@ -362,8 +362,9 @@ it, never a second writer.
   home has turned on that runs only here stopping after the move, each named
   (iMessage on a Mac, voice calls, meetings; nothing to warn of when none is
   on); WhatsApp
-  turned on (warns: it needs an address on the internet on the server, which
-  the Tailscale Funnel command Always On shows after the move gives it);
+  turned on (warns: it stops after the move until you run the Tailscale
+  Funnel command Always On shows for the server and point Meta at the
+  address it prints);
   Slack turned on without Socket Mode (warns: it stops
   unless switched to Socket Mode in the Slack app's settings and Fermix's);
   coding agents approved here (warns: a move withdraws that approval, as
@@ -736,22 +737,30 @@ it, never a second writer.
   nothing inbound. WhatsApp (Meta's Cloud API) and cue webhook sources do,
   and the server opens no public port: they reach it through Tailscale
   Funnel. While Fermix runs on the server, the desktop's Always On screen
-  prints the exact command for each mount, to run on the server: WhatsApp's
-  (`tailscale funnel --bg --set-path=/webhook/whatsapp
+  prints the exact command for each mount, to run on the server as root
+  (`sudo`: the first boot names no Tailscale operator): WhatsApp's (`sudo
+  tailscale funnel --bg --set-path=/webhook/whatsapp
   http://127.0.0.1:<port>/webhook/whatsapp`, the server's web listener port,
-  one mount for Meta's GET check and its POSTs, while WhatsApp is on) and
-  each enabled webhook source's with a URL (`/cues/hooks/<ref>/<random>` on
-  the server's cue door port; `<random>` stands for the last part of the
-  source's URL, which Cues gives, since the screen is a read and the URL is
-  handed out only on the owner's ask). With them: allow Funnel for the
-  server once in the tailnet policy (the `funnel` node attribute, for
-  `tag:fermix-server`); Funnel publishes whatever `tailscale serve` has on
+  one mount for Meta's GET check and its POSTs, while WhatsApp is on), with
+  its note: set the address Tailscale prints as Meta's Callback URL, with
+  the verify token, and press Verify and save, for until then WhatsApp
+  messages do not arrive; and each enabled webhook source's with a URL,
+  its prefix (`/cues/hooks/<ref>` on the server's cue door port, so the
+  command carries none of the URL's secret: Tailscale passes the rest of
+  the path to the door, which answers only that source's own path), with
+  its note: in the sender, change the host of the webhook's address to the
+  one Tailscale prints and keep its path. With them: once, in the tailnet
+  policy, the `funnel` node attribute for `tag:fermix-server`, and MagicDNS
+  and HTTPS certificates on; a new address can take about ten minutes to
+  resolve; Funnel publishes whatever `tailscale serve` has on
   port 443, so mount only these paths there; the traffic enters through
   Tailscale's ingress servers, which see only encrypted bytes; without
   Tailscale, Cloudflare Tunnel to the same two loopback ports does the same.
   The ports and the sources are the server's (its `home.status` `webhooks`),
   never this computer's; a server serving none shows nothing, and the
-  server's own screen shows none (its desktops do). Fermix ships no tunnel.
+  server's own screen shows none (its desktops do: the server's summary
+  rides inside each desktop's `home.status`, where the mounts would pass the
+  protocol's nesting bound). Fermix ships no tunnel.
 - The summary also names the latest occurrence the apps raise as a system
   notification (`notice`): the server ready, the move done, the server out of
   reach, the last backup a week old, Fermix back on this computer after a

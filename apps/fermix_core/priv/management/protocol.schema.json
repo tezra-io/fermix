@@ -5833,7 +5833,7 @@
     },
     "homeSummaryDetail": {
       "type": "object",
-      "description": "What Details holds for the state: on connect and creating alternatives; on ready server, readiness, waits_until and alternatives (Forget this server); on on server, backups, copies_bytes, disk_used, data and actions; on problem kind, note, seen_at and alternatives (readiness where the problem has it); lines on ready, on and problem wherever there are any; progress while a move back or a restore runs; webhooks on on and primary where the server serves any.",
+      "description": "What Details holds for the state: on connect and creating alternatives; on ready server, readiness, waits_until and alternatives (Forget this server); on on server, backups, copies_bytes, disk_used, data and actions; on problem kind, note, seen_at and alternatives (readiness where the problem has it); lines on ready, on and problem wherever there are any; progress while a move back or a restore runs; webhooks on a linked desktop's on only, where its server serves any (never on the server's own primary, whose summary rides inside each desktop's home.status under max_json_depth).",
       "additionalProperties": false,
       "properties": {
         "lines": {
@@ -5875,7 +5875,7 @@
         "note": { "type": ["string", "null"] },
         "seen_at": { "type": ["string", "null"] },
         "webhooks": {
-          "description": "The Tailscale Funnel mounts the owner runs on the server for what it serves (home.status webhooks: the server's own, never this computer's): the sentence with the one-time policy step, each mount's label and command, WhatsApp's first, and the caveats. A webhook source's command shows its URL's secret as <random>.",
+          "description": "On a linked desktop's on only: the Tailscale Funnel mounts the owner runs on the server for what it serves (home.status webhooks: the server's own, never this computer's): the sentence with the one-time tailnet steps, each mount's label, command (run as root, with sudo) and note (where its sender is pointed), WhatsApp's first, and the caveats. A webhook source's mount is its /cues/hooks/<ref> prefix, so no command carries its URL's secret. Never on the server's own primary: its summary rides inside each desktop's home.status as primary_home, where the mounts would pass max_json_depth.",
           "type": "object",
           "required": ["sentence", "mounts", "notes"],
           "additionalProperties": false,
@@ -5887,11 +5887,12 @@
               "maxItems": 65,
               "items": {
                 "type": "object",
-                "required": ["label", "command"],
+                "required": ["label", "command", "note"],
                 "additionalProperties": false,
                 "properties": {
                   "label": { "type": "string", "minLength": 1 },
-                  "command": { "type": "string", "pattern": "^tailscale funnel --bg --set-path=/" }
+                  "command": { "type": "string", "pattern": "^sudo tailscale funnel --bg --set-path=/" },
+                  "note": { "type": "string", "minLength": 1 }
                 }
               }
             },
