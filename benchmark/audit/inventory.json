@@ -1,0 +1,771 @@
+{
+  "schema": "fermix.audit.inventory.v1",
+  "builtins": {
+    "Shell": {
+      "name": "shell",
+      "family": "F02"
+    },
+    "FileRead": {
+      "name": "file_read",
+      "family": "F02"
+    },
+    "ViewImage": {
+      "name": "view_image",
+      "family": "F22"
+    },
+    "FileWrite": {
+      "name": "file_write",
+      "family": "F02"
+    },
+    "FileEdit": {
+      "name": "file_edit",
+      "family": "F02"
+    },
+    "GlobSearch": {
+      "name": "glob_search",
+      "family": "F02"
+    },
+    "ContentSearch": {
+      "name": "content_search",
+      "family": "F02"
+    },
+    "GitRead": {
+      "name": "git_read",
+      "family": "F02"
+    },
+    "GitWrite": {
+      "name": "git_write",
+      "family": "F02"
+    },
+    "WebFetch": {
+      "name": "web_fetch",
+      "family": "F04"
+    },
+    "WebSearch": {
+      "name": "web_search",
+      "family": "F04"
+    },
+    "PlaceSearch": {
+      "name": "place_search",
+      "family": "F04"
+    },
+    "SkillCreate": {
+      "name": "skill_create",
+      "family": "F07"
+    },
+    "SkillReload": {
+      "name": "skill_reload",
+      "family": "F07"
+    },
+    "SkillView": {
+      "name": "skill_view",
+      "family": "F07"
+    },
+    "SkillRun": {
+      "name": "skill_run",
+      "family": "F07"
+    },
+    "SkillList": {
+      "name": "skill_list",
+      "family": "F07"
+    },
+    "Subagents": {
+      "name": "subagents",
+      "family": "F08"
+    },
+    "ModelRoutingConfig": {
+      "name": "model_routing_config",
+      "family": "F09"
+    },
+    "ToolHelp": {
+      "name": "tool_help",
+      "family": "F05"
+    },
+    "MemoryStore": {
+      "name": "memory_store",
+      "family": "F10"
+    },
+    "MemoryForget": {
+      "name": "memory_forget",
+      "family": "F10"
+    },
+    "MemoryRecall": {
+      "name": "memory_recall",
+      "family": "F10"
+    },
+    "RecallActivity": {
+      "name": "recall_activity",
+      "family": "F25"
+    },
+    "VoiceCallContext": {
+      "name": "voice_call_context",
+      "family": "F23"
+    },
+    "ToolResultRecall": {
+      "name": "tool_result_recall",
+      "family": "F13"
+    },
+    "ScheduleJob": {
+      "name": "schedule_job",
+      "family": "F14"
+    },
+    "UpdateJob": {
+      "name": "update_job",
+      "family": "F14"
+    },
+    "ListJobs": {
+      "name": "list_jobs",
+      "family": "F14"
+    },
+    "PauseJob": {
+      "name": "pause_job",
+      "family": "F14"
+    },
+    "ResumeJob": {
+      "name": "resume_job",
+      "family": "F14"
+    },
+    "RemoveJob": {
+      "name": "remove_job",
+      "family": "F14"
+    },
+    "RunJobNow": {
+      "name": "run_job_now",
+      "family": "F14"
+    },
+    "ListJobRuns": {
+      "name": "list_job_runs",
+      "family": "F14"
+    },
+    "GetJobRun": {
+      "name": "get_job_run",
+      "family": "F14"
+    },
+    "MemorySourcesList": {
+      "name": "memory_sources_list",
+      "family": "F10"
+    },
+    "Browser": {
+      "name": "browser",
+      "family": "F03"
+    },
+    "SendAttachment": {
+      "name": "send_attachment",
+      "family": "F19"
+    },
+    "React": {
+      "name": "react",
+      "family": "F19"
+    },
+    "SendToChannel": {
+      "name": "send_to_channel",
+      "family": "F19"
+    },
+    "GenerateImage": {
+      "name": "generate_image",
+      "family": "F22"
+    },
+    "RequestDirectoryAccess": {
+      "name": "request_directory_access",
+      "family": "F20"
+    },
+    "EventStore": {
+      "name": "event_store",
+      "family": "F15"
+    },
+    "EventList": {
+      "name": "event_list",
+      "family": "F15"
+    },
+    "EventUpdate": {
+      "name": "event_update",
+      "family": "F15"
+    },
+    "EventRemove": {
+      "name": "event_remove",
+      "family": "F15"
+    },
+    "ReminderSnooze": {
+      "name": "reminder_snooze",
+      "family": "F15"
+    },
+    "OpenLoopNote": {
+      "name": "open_loop_note",
+      "family": "F16"
+    },
+    "OpenLoopUpdate": {
+      "name": "open_loop_update",
+      "family": "F16"
+    },
+    "OpenLoopList": {
+      "name": "open_loop_list",
+      "family": "F16"
+    },
+    "OpenLoopRespond": {
+      "name": "open_loop_respond",
+      "family": "F16"
+    },
+    "ChecklistRead": {
+      "name": "checklist_read",
+      "family": "F17"
+    },
+    "ChecklistEdit": {
+      "name": "checklist_edit",
+      "family": "F17"
+    },
+    "ToolSearch": {
+      "name": "tool_search",
+      "family": "F05"
+    },
+    "ToolDescribe": {
+      "name": "tool_describe",
+      "family": "F05"
+    },
+    "ToolCall": {
+      "name": "tool_call",
+      "family": "F05"
+    },
+    "ComputerUse": {
+      "name": "computer_use",
+      "family": "F26"
+    },
+    "CodexRun": {
+      "name": "codex_run",
+      "family": "F21"
+    },
+    "CodexCloudRun": {
+      "name": "codex_cloud_run",
+      "family": "F21"
+    },
+    "ClaudeCodeRun": {
+      "name": "claude_code_run",
+      "family": "F21"
+    },
+    "ListCodingRuns": {
+      "name": "list_coding_runs",
+      "family": "F21"
+    },
+    "GetCodingRun": {
+      "name": "get_coding_run",
+      "family": "F21"
+    },
+    "CancelCodingRun": {
+      "name": "cancel_coding_run",
+      "family": "F21"
+    },
+    "StopTrackingCodingRun": {
+      "name": "stop_tracking_coding_run",
+      "family": "F21"
+    },
+    "JoinMeeting": {
+      "name": "join_meeting",
+      "family": "F24"
+    },
+    "LeaveMeeting": {
+      "name": "leave_meeting",
+      "family": "F24"
+    },
+    "ListMeetings": {
+      "name": "list_meetings",
+      "family": "F24"
+    },
+    "ManageWatcher": {
+      "name": "manage_watcher",
+      "family": "F18"
+    },
+    "ListCues": {
+      "name": "list_cues",
+      "family": "F18"
+    },
+    "CueHistory": {
+      "name": "cue_history",
+      "family": "F18"
+    }
+  },
+  "dynamic_sources": {
+    "plugins": "F06",
+    "skills": "F07",
+    "command_tools": "F06",
+    "provider_adapters": "F09"
+  },
+  "mechanisms": {
+    "agent_loop": "F01",
+    "context_compaction": "F12",
+    "memory_review": "F11",
+    "tool_result_storage": "F13",
+    "scheduler": "F14",
+    "delivery": "F19",
+    "authorization": "F20",
+    "configuration": "F27",
+    "recovery": "F28",
+    "skill_curation": "F07",
+    "worker_lifecycle": "F08",
+    "events_reminders": "F15",
+    "open_loop_checkins": "F16",
+    "cues_intake": "F18",
+    "voice_bridge": "F23",
+    "meeting_transcription": "F24",
+    "activity_ingestion": "F25"
+  },
+  "unresolved": {
+    "operation_schemas": "Exact schemas and other multi-operation surfaces require runtime extraction.",
+    "profiles": "Readiness and actual advertisement depend on runtime context.",
+    "installed_catalogs": "Plugins, skills and commands depend on installed configuration."
+  },
+  "schema_enums": {
+    "open_loop_note": {
+      "/properties/matters_by_source": [
+        "owner",
+        "lookup"
+      ],
+      "/properties/reach": [
+        "conversation",
+        "message"
+      ]
+    },
+    "update_job": {
+      "/properties/delivery_mode": [
+        "none",
+        "origin",
+        "channel",
+        "local"
+      ]
+    },
+    "list_meetings": {
+      "/properties/scope": [
+        "active",
+        "recent"
+      ]
+    },
+    "event_store": {
+      "/properties/kind": [
+        "birthday",
+        "anniversary",
+        "appointment",
+        "deadline",
+        "event",
+        "follow_up",
+        "explicit_reminder"
+      ],
+      "/properties/leap_day_policy": [
+        "feb_28",
+        "mar_1"
+      ]
+    },
+    "checklist_edit": {
+      "/properties/changes/items/properties/ops/items/properties/op": [
+        "create",
+        "add",
+        "check",
+        "uncheck",
+        "edit",
+        "move",
+        "section",
+        "remove",
+        "folder",
+        "rename",
+        "remove_list",
+        "replace"
+      ]
+    },
+    "recall_activity": {
+      "/properties/window": [
+        "current",
+        "today",
+        "yesterday",
+        "this_morning",
+        "this_afternoon",
+        "this_week",
+        "recent"
+      ]
+    },
+    "schedule_job": {
+      "/properties/delivery_mode": [
+        "none",
+        "origin",
+        "channel",
+        "local"
+      ]
+    },
+    "event_list": {
+      "/properties/status": [
+        "active",
+        "completed",
+        "cancelled",
+        "any"
+      ],
+      "/properties/kind": [
+        "birthday",
+        "anniversary",
+        "appointment",
+        "deadline",
+        "event",
+        "follow_up",
+        "explicit_reminder"
+      ]
+    },
+    "event_update": {
+      "/properties/kind": [
+        "birthday",
+        "anniversary",
+        "appointment",
+        "deadline",
+        "event",
+        "follow_up",
+        "explicit_reminder"
+      ],
+      "/properties/leap_day_policy": [
+        "feb_28",
+        "mar_1"
+      ]
+    },
+    "subagents": {
+      "/properties/provider": [
+        "openai_codex",
+        "openai",
+        "anthropic",
+        "xai",
+        "openrouter",
+        "mistral",
+        "venice",
+        "ollama"
+      ],
+      "/properties/reasoning_effort": [
+        "none",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "/properties/result_format": [
+        "concise",
+        "detailed",
+        "structured"
+      ]
+    },
+    "list_cues": {
+      "/properties/view": [
+        "deliveries",
+        "summary",
+        "proposals",
+        "gaps",
+        "notes",
+        "sources",
+        "mandates"
+      ]
+    },
+    "memory_store": {
+      "/properties/category": [
+        "identity",
+        "preference",
+        "interest",
+        "goal",
+        "context",
+        "directive"
+      ]
+    },
+    "manage_watcher": {
+      "/properties/label": [
+        "pass",
+        "drop"
+      ],
+      "/properties/filter": [
+        "llm",
+        "none"
+      ],
+      "/properties/action": [
+        "list",
+        "show",
+        "create",
+        "pause",
+        "resume",
+        "remove",
+        "add_instructions",
+        "remove_instructions",
+        "restore_instruction",
+        "merge_instructions",
+        "set_purpose",
+        "add_example",
+        "remove_example",
+        "update",
+        "stop_follow_up",
+        "run_follow_up"
+      ],
+      "/properties/delivery_mode": [
+        "origin",
+        "channel",
+        "none"
+      ],
+      "/properties/follow_up/properties/delivery_mode": [
+        "origin",
+        "channel"
+      ],
+      "/properties/follow_up/properties/always_allow": [
+        false
+      ]
+    },
+    "open_loop_update": {
+      "/properties/reach": [
+        "conversation",
+        "message"
+      ],
+      "/properties/answer": [
+        "done",
+        "plan",
+        "not_yet",
+        "stop",
+        "drop",
+        "asked",
+        "moved",
+        "reach"
+      ]
+    },
+    "place_search": {
+      "/properties/units": [
+        "metric",
+        "imperial"
+      ]
+    },
+    "computer_use": {
+      "/properties/action": [
+        "screenshot",
+        "left_click",
+        "right_click",
+        "double_click",
+        "mouse_move",
+        "left_click_drag",
+        "scroll",
+        "type",
+        "key",
+        "wait",
+        "wait_for_change",
+        "paste",
+        "windows"
+      ],
+      "/properties/direction": [
+        "up",
+        "down",
+        "left",
+        "right"
+      ],
+      "/properties/modifiers/items": [
+        "cmd",
+        "ctrl",
+        "alt",
+        "shift"
+      ]
+    },
+    "browser": {
+      "/properties/format": [
+        "png",
+        "jpeg"
+      ],
+      "/properties/action": [
+        "doctor",
+        "status",
+        "start",
+        "stop",
+        "open",
+        "navigate",
+        "snapshot",
+        "tabs",
+        "focus",
+        "close",
+        "screenshot",
+        "act",
+        "pdf",
+        "console",
+        "dialog",
+        "cookies",
+        "storage",
+        "upload",
+        "download",
+        "webmcp",
+        "handover"
+      ],
+      "/properties/op": [
+        "list",
+        "call"
+      ],
+      "/properties/decision": [
+        "accept",
+        "dismiss"
+      ]
+    },
+    "open_loop_respond": {
+      "/properties/decision": [
+        "speak",
+        "silent",
+        "later",
+        "close"
+      ]
+    },
+    "generate_image": {
+      "/properties/delivery": [
+        "save",
+        "send"
+      ],
+      "/properties/operation": [
+        "generate",
+        "edit"
+      ]
+    },
+    "memory_recall": {
+      "/properties/scope": [
+        "current",
+        "owner",
+        "all"
+      ],
+      "/properties/source": [
+        "memories",
+        "history",
+        "all"
+      ]
+    },
+    "claude_code_run": {
+      "/properties/progress": [
+        "quiet",
+        "milestones"
+      ],
+      "/properties/effort": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "/properties/permission_mode": [
+        "acceptEdits",
+        "auto",
+        "manual",
+        "dontAsk",
+        "plan"
+      ]
+    },
+    "codex_run": {
+      "/properties/progress": [
+        "quiet",
+        "milestones"
+      ],
+      "/properties/sandbox": [
+        "read-only",
+        "workspace-write"
+      ]
+    },
+    "list_job_runs": {
+      "/properties/status": [
+        "queued",
+        "running",
+        "ok",
+        "error"
+      ]
+    },
+    "model_routing_config": {
+      "/properties/key": [
+        "subagent_provider",
+        "subagent_model",
+        "subagent_reasoning_effort"
+      ],
+      "/properties/action": [
+        "read",
+        "set",
+        "delete"
+      ]
+    },
+    "send_attachment": {
+      "/properties/kind": [
+        "image",
+        "document",
+        "audio",
+        "video",
+        "voice"
+      ]
+    },
+    "open_loop_list": {
+      "/properties/state": [
+        "live",
+        "closed",
+        "any"
+      ]
+    }
+  },
+  "context_profiles": {
+    "owner_core_world": {
+      "actor": "owner",
+      "sessions": [
+        "owner_a"
+      ],
+      "runtime_status": "unavailable",
+      "obligations": [
+        "actual_advertised_schemas",
+        "feature_readiness",
+        "owner_authorization",
+        "synthetic_network_containment"
+      ]
+    },
+    "guest": {
+      "runtime_status": "unavailable",
+      "obligations": [
+        "guest_identity",
+        "actual_advertised_schemas",
+        "permission_denials"
+      ]
+    },
+    "background_job": {
+      "runtime_status": "unavailable",
+      "obligations": [
+        "job_identity",
+        "tool_allowlist",
+        "delivery_receipt"
+      ]
+    },
+    "native_desktop": {
+      "runtime_status": "unavailable",
+      "obligations": [
+        "isolated_desktop",
+        "platform_permissions",
+        "actual_advertised_schemas"
+      ]
+    },
+    "group": {
+      "runtime_status": "unavailable",
+      "obligations": [
+        "group_trust",
+        "actual_advertised_schemas"
+      ]
+    },
+    "worker": {
+      "runtime_status": "unavailable",
+      "obligations": [
+        "child_identity",
+        "inherited_scope",
+        "actual_advertised_schemas"
+      ]
+    },
+    "voice": {
+      "runtime_status": "unavailable",
+      "obligations": [
+        "voice_identity",
+        "socket_events",
+        "actual_advertised_schemas"
+      ]
+    },
+    "cue": {
+      "runtime_status": "unavailable",
+      "obligations": [
+        "cue_intake",
+        "mandate",
+        "actual_advertised_schemas"
+      ]
+    },
+    "check_in": {
+      "runtime_status": "unavailable",
+      "obligations": [
+        "open_loop_state",
+        "delivery_receipt",
+        "actual_advertised_schemas"
+      ]
+    }
+  }
+}

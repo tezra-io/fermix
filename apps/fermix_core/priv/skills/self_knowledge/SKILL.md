@@ -177,3 +177,5 @@ Deeper detail loads on demand with `skill_view(name: "self-knowledge", file: "<n
 - `observability` — logs, trace files and session ids, finding failures, content capture, Opik per install type, the support bundle, and what a restart loses.
 - `move_back` — Always On's move back to the computer the home left: Move back and Move now, Cancel, what comes back and stays, the server afterwards, and Restore here from that computer's own copy when the server is gone.
 - `home` — the home as the primary: the primary epoch, the `primary`, `device` and `candidate` roles, `fermix home export`, `import` and `mark-moved`, enrollment and the Always On move (its phases and failures), the one summary every surface prints and each of its problems, `fermix always-on` and its steps, an Always On server's first boot, restoring a lost one onto a new server, what travels and what stays, the desktop's link to the primary after a move, and what a restart or a move does to a message in flight.
+
+The repository benchmark includes `make -C benchmark audit-plan`, an offline developer inventory and episode plan. It does not run Fermix or report behavioral coverage.

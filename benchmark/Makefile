@@ -8,14 +8,20 @@ AIM_DISPLAY_ATTEST := $(if $(filter 1 true yes,$(CONFIRM_AIM_LIVE_DISPLAY)),--co
 AIM_HANDS_ATTEST := $(if $(filter 1 true yes,$(CONFIRM_AIM_HANDS_OFF)),--confirm-hands-off,)
 AIM_ATTEST := $(AIM_DISPLAY_ATTEST) $(AIM_HANDS_ATTEST)
 
-.PHONY: help tests check dry regression behavioral-isolated capability capability-auto capability-judged capability-readonly capability-private capability-screen capability-screen-dry estimate rank baseline uplift arms gaia lmeval aim aim-calibrate
+.PHONY: audit-plan audit-inventory help tests check dry regression behavioral-isolated capability capability-auto capability-judged capability-readonly capability-private capability-screen capability-screen-dry estimate rank baseline uplift arms gaia lmeval aim aim-calibrate
 
 help:
-	@echo "targets: tests check dry regression behavioral-isolated capability capability-auto capability-judged capability-readonly capability-private capability-screen capability-screen-dry estimate rank baseline uplift arms gaia lmeval aim aim-calibrate"
+	@echo "targets: audit-plan audit-inventory tests check dry regression behavioral-isolated capability capability-auto capability-judged capability-readonly capability-private capability-screen capability-screen-dry estimate rank baseline uplift arms gaia lmeval aim aim-calibrate"
 
 tests:        ## developer tests for harness code; does not run behavioral/capability E2E
-	@for t in scoring pricing aggregate leaderboard leaderboard_html halden_ops untrusted_content private_suites release_gate experiments uplift baseline lmeval gaia capability_runner checker grade suites companion judge eval_safety seed_home home_reset opik_client tier tier_exit_code eval_box eval_nightly aim fixture_server browser_host_fixture arms voice cue_drive judgment screen_eval desktop cu_baseline; do \
+	@for t in scoring pricing aggregate leaderboard leaderboard_html halden_ops untrusted_content private_suites release_gate experiments uplift baseline lmeval gaia capability_runner checker grade suites companion judge eval_safety seed_home home_reset opik_client tier tier_exit_code eval_box eval_nightly aim fixture_server browser_host_fixture arms voice cue_drive judgment screen_eval desktop cu_baseline audit; do \
 	  echo "== $$t =="; $(UV) bin/test_$$t.py || exit 1; done
+
+audit-inventory: ## refresh schema snapshot from no-start callbacks (requires compiled test env)
+	python3 bin/audit_inventory.py --refresh
+
+audit-plan:   ## offline audit inventory and episode plan; no model calls
+	python3 bin/run_audit.py --dry-run
 
 check:        ## preconditions (Opik + daemon)
 	$(UV) bin/run_capability.py --check
