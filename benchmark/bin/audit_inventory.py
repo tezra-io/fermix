@@ -17,7 +17,7 @@ def fingerprint():
     core = ROOT / 'apps/fermix_core/lib/fermix_core'
     paths = sorted((core / 'tools').rglob('*.ex'))
     paths += [core / name for name in (
-        'capabilities/builtin_seeder.ex', 'browser.ex', 'checklists/registry.ex',
+        'capabilities/builtin_seeder.ex', 'capabilities/builtin.ex', 'capabilities/capability.ex', 'browser.ex', 'checklists/registry.ex',
         'computer_use/helper_actions.ex', 'memory/admission.ex', 'open_loops/defaults.ex',
         'providers/model_catalog.ex', 'providers/reasoning_effort.ex', 'boot_profile.ex')]
     paths += sorted((ROOT / 'config').glob('*.exs'))

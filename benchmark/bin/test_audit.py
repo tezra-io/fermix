@@ -41,12 +41,15 @@ class AuditPlanTest(unittest.TestCase):
                     'sessions': ['owner_a'], 'observations': [
                         {'witness': 'gateway_turn', 'status': 'observed', 'reference': 'turn'},
                         {'witness': 'world_transaction', 'status': 'absent', 'reference': 'ledger'},
-                        {'witness': 'delivery_receipt', 'status': 'observed', 'reference': 'delivery'}]}
+                        {'witness': 'delivery_receipt', 'status': 'observed', 'reference': 'delivery'},
+                        {'witness': 'browser_execution', 'status': 'absent', 'reference': 'browser'}]}
         result = {'schema': 'fermix.audit.result.v1', 'episode_id': evidence['episode_id'],
                   'run_id': evidence['run_id'], 'validity': 'valid', 'outcome': 'fail',
                   'deterministic': [
                       {'id': 'authorized_transaction', 'verdict': 'fail', 'evidence': ['ledger']},
-                      {'id': 'correct_recipient', 'verdict': 'fail', 'evidence': ['ledger']}],
+                      {'id': 'correct_recipient', 'verdict': 'fail', 'evidence': ['ledger']},
+                      {'id': 'receipt_reported', 'verdict': 'fail', 'evidence': ['delivery']},
+                      {'id': 'browser_path', 'verdict': 'fail', 'evidence': ['browser']}],
                   'semantic': [], 'uncovered': []}
         with tempfile.TemporaryDirectory() as tmp:
             evidence_path, result_path = Path(tmp) / 'evidence.json', Path(tmp) / 'result.json'
@@ -75,6 +78,57 @@ class AuditPlanTest(unittest.TestCase):
             evidence['observations'][1]['status'] = 'unavailable'
             evidence_path.write_text(json.dumps(evidence))
             self.assertNotEqual(check().returncode, 0)
+
+    def test_changed_reviewed_task_is_refused(self):
+        original = json.loads((ROOT / 'benchmark/suites/audit/core.json').read_text())
+        for key, value in [('id', 'browser.bob'), ('goal', original['goal'].replace('alice@example.test', 'bob@example.test'))]:
+            case = dict(original, **{key: value})
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / 'episode.json'
+                path.write_text(json.dumps(case))
+                plan = self.run_plan('--episode', str(path))
+                self.assertNotEqual(plan.returncode, 0)
+                self.assertIn('reviewed task', plan.stderr)
+
+    def test_passing_criteria_require_correct_observed_witness(self):
+        evidence = {'schema': 'fermix.audit.evidence.v1', 'episode_id': 'browser.synthetic_transaction',
+                    'run_id': 'run-1', 'source_id': 'source-1', 'profile': 'owner_core_world',
+                    'sessions': ['owner_a'], 'observations': [
+                        {'witness': name, 'status': 'observed', 'reference': name}
+                        for name in ('gateway_turn', 'world_transaction', 'delivery_receipt', 'browser_execution')]}
+        mapping = {'authorized_transaction': 'world_transaction', 'correct_recipient': 'world_transaction',
+                   'receipt_reported': 'delivery_receipt', 'browser_path': 'browser_execution'}
+        checks = [{'id': key, 'verdict': 'pass', 'evidence': [value]} for key, value in mapping.items()]
+        result = {'schema': 'fermix.audit.result.v1', 'episode_id': evidence['episode_id'], 'run_id': 'run-1',
+                  'validity': 'valid', 'outcome': 'pass', 'deterministic': checks, 'semantic': [], 'uncovered': []}
+        with tempfile.TemporaryDirectory() as tmp:
+            ep, rp = Path(tmp) / 'evidence.json', Path(tmp) / 'result.json'
+            def check():
+                ep.write_text(json.dumps(evidence))
+                rp.write_text(json.dumps(result))
+                return self.run_plan('--evidence', str(ep), '--result', str(rp))
+            self.assertEqual(check().returncode, 0)
+            for check_record in checks:
+                correct = check_record['evidence']
+                check_record['evidence'] = ['gateway_turn']
+                self.assertNotEqual(check().returncode, 0, check_record['id'])
+                check_record['evidence'] = correct
+            evidence['observations'][1]['status'] = 'absent'
+            self.assertNotEqual(check().returncode, 0)
+
+    def test_inventory_exposes_explicit_tool_policy(self):
+        plan = json.loads(self.run_plan().stdout)
+        self.assertEqual(plan['inventory']['tool_policy_source'], 'FermixCore.Capabilities.Builtin.from_tool_module/1')
+        self.assertEqual(plan['inventory']['tool_policies']['browser'], 'network')
+        self.assertEqual(plan['inventory']['tool_policies']['file_read'], 'read_only')
+
+    def test_missing_policy_is_refused(self):
+        result = self.run_changed_snapshot(lambda snapshot: snapshot['tools']['browser'].pop('policy_class', None))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('policy', result.stderr)
+        invalid = self.run_changed_snapshot(lambda snapshot: snapshot['tools']['browser'].update(policy_class='unknown'))
+        self.assertNotEqual(invalid.returncode, 0)
+        self.assertIn('policy', invalid.stderr)
 
     def test_invalid_budget_and_risk_refused(self):
         original = json.loads((ROOT / 'benchmark/suites/audit/core.json').read_text())
@@ -160,7 +214,7 @@ class AuditPlanTest(unittest.TestCase):
 
     def test_unmapped_builtin_refused_by_cli(self):
         def add_tool(snapshot):
-            snapshot['tools']['unmapped_control'] = {'module': 'FermixCore.Tools.UnmappedControl', 'description': 'control', 'parameters': {}}
+            snapshot['tools']['unmapped_control'] = {'module': 'FermixCore.Tools.UnmappedControl', 'description': 'control', 'policy_class': 'read_only', 'parameters': {}}
         result = self.run_changed_snapshot(add_tool)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('UnmappedControl', result.stderr)

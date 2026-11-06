@@ -1,0 +1,22 @@
+{
+  "profile": "live",
+  "campaign_identity": "replace-with-prepared-campaign-identity",
+  "run_id": "replace-with-unique-run-id",
+  "world_id": "replace-with-unique-world-id",
+  "token_file": "/run/audit-secrets/run-token",
+  "secret_file": "/run/audit-secrets/anthropic-key",
+  "ledger": "/run/audit-private/campaign.sqlite",
+  "evidence_dir": "/run/audit-private/evidence",
+  "revocation_file": "/run/audit-private/revoked",
+  "expires_at": 2000000000,
+  "max_requests": 10,
+  "max_input_tokens": 100000,
+  "max_output_tokens": 16384,
+  "max_body_bytes": 1000000,
+  "max_response_bytes": 4000000,
+  "run_budget_usd": 15,
+  "campaign_budget_usd": 50,
+  "model": "claude-opus-5-5",
+  "listen_host": "0.0.0.0",
+  "listen_port": 8080
+}

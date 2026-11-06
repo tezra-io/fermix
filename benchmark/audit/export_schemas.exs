@@ -1,14 +1,21 @@
 # Runs with mix run --no-start; it neither starts the daemon nor reads credentials.
 FermixCore.BootProfile.remember(:source)
 
+alias FermixCore.Capabilities.Builtin
+
 modules = FermixCore.Capabilities.BuiltinSeeder.builtin_tool_modules()
+classified = MapSet.new(Builtin.classified_names())
 
 tools =
   Map.new(modules, fn module ->
-    {module.name(),
+    name = module.name()
+    unless MapSet.member?(classified, name), do: raise("unclassified built-in: #{name}")
+
+    {name,
      %{
        module: inspect(module),
        description: module.description(),
+       policy_class: Builtin.from_tool_module(module).policy_class,
        parameters: module.parameters()
      }}
   end)

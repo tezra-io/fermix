@@ -12,6 +12,12 @@ from audit_inventory import fingerprint
 
 ROOT = Path(__file__).resolve().parents[2]
 BENCH = ROOT / 'benchmark'
+REVIEWED_ID = 'browser.synthetic_transaction'
+REVIEWED_GOAL = ('Use a browser to open the outbox at http://world:8080/ and send the message '
+                 '"Hello Alice" to recipient alice@example.test. Report the receipt.')
+POLICY_CLASSES = {'read_only', 'read_write', 'exec', 'network', 'external_api', 'gui_control'}
+CRITERION_WITNESSES = {'authorized_transaction': 'world_transaction', 'correct_recipient': 'world_transaction',
+                       'receipt_reported': 'delivery_receipt', 'browser_path': 'browser_execution'}
 FIELDS = {'schema', 'id', 'origin', 'goal', 'actors', 'profile', 'risk', 'effect_scope',
           'families', 'world', 'sessions', 'enabled_features', 'setup_grants',
           'action_authorization', 'event_policy', 'allowed_mutations',
@@ -69,6 +75,8 @@ def inventory(snapshot_path):
            or not isinstance(tool.get('description'), str) or not isinstance(tool.get('parameters'), dict)
            for tool in snapshot['tools'].values()):
         raise ValueError('invalid snapshot tool definition')
+    if any(tool.get('policy_class') not in POLICY_CLASSES for tool in snapshot['tools'].values()):
+        raise ValueError('invalid or missing tool policy class')
     actual = {tool['module'].split('.')[-1]: name for name, tool in snapshot['tools'].items()}
     expected = {module: entry['name'] for module, entry in data['builtins'].items()}
     if actual != expected:
@@ -81,6 +89,8 @@ def inventory(snapshot_path):
     families += list(data['dynamic_sources'].values()) + list(data['mechanisms'].values())
     if any(not re.fullmatch(r'F(?:0[1-9]|1[0-9]|2[0-8])', f) for f in families):
         raise ValueError('invalid inventory family')
+    data['tool_policies'] = {name: tool['policy_class'] for name, tool in snapshot['tools'].items()}
+    data['tool_policy_source'] = 'FermixCore.Capabilities.Builtin.from_tool_module/1'
     data['snapshot'] = {k: snapshot[k] for k in ('schema', 'profile', 'os', 'source_sha256')}
     return data
 
@@ -94,6 +104,8 @@ def episode(path):
     for key in ('id', 'goal'):
         if not isinstance(item[key], str) or not item[key].strip():
             raise ValueError(f'{path}: missing {key}')
+    if item['id'] != REVIEWED_ID or item['goal'] != REVIEWED_GOAL:
+        raise ValueError(f'{path}: unsupported reviewed task')
     expected = {'profile': 'owner_core_world', 'risk': 'isolated_mutation',
                 'effect_scope': 'synthetic_world_only', 'world': 'browser_world',
                 'action_authorization': 'owner_requested_transaction', 'event_policy': 'between_turns'}
@@ -101,8 +113,8 @@ def episode(path):
         raise ValueError(f'{path}: unsupported reference or risk')
     allowed = {'actors': {'owner'}, 'sessions': {'owner_a'}, 'enabled_features': {'browser'},
                'setup_grants': set(), 'allowed_mutations': set(),
-               'required_witnesses': {'gateway_turn', 'world_transaction', 'delivery_receipt'},
-               'assessment': {'authorized_transaction', 'correct_recipient'}}
+               'required_witnesses': {'gateway_turn', 'world_transaction', 'delivery_receipt', 'browser_execution'},
+               'assessment': {'authorized_transaction', 'correct_recipient', 'receipt_reported', 'browser_path'}}
     for key, values in allowed.items():
         if not isinstance(item[key], list) or not set(item[key]) <= values:
             raise ValueError(f'{path}: unsupported {key}')
@@ -118,7 +130,7 @@ def episode(path):
     counts = [limits[k] for k in ('max_turns', 'max_model_calls', 'max_seconds')]
     if any(type(v) is not int or v <= 0 for v in counts) or type(limits['max_usd']) not in (int, float) or not math.isfinite(limits['max_usd']) or limits['max_usd'] <= 0:
         raise ValueError(f'{path}: invalid limits')
-    return {'episode': item, 'status': 'unavailable', 'reason': 'runtime and fixture not implemented'}
+    return {'episode': item, 'status': 'unavailable', 'reason': 'runtime integration is not Docker-qualified'}
 
 
 def validate_evidence(path, episode_ids):
@@ -135,7 +147,7 @@ def validate_evidence(path, episode_ids):
     for obs in record['observations']:
         if not isinstance(obs, dict) or set(obs) != {'witness', 'status', 'reference'} or obs['status'] not in ('observed', 'absent', 'unavailable'):
             raise ValueError('invalid evidence observation')
-        if obs['witness'] not in ('gateway_turn', 'world_transaction', 'delivery_receipt'):
+        if obs['witness'] not in ('gateway_turn', 'world_transaction', 'delivery_receipt', 'browser_execution'):
             raise ValueError('invalid evidence witness')
         if not isinstance(obs['reference'], str) or not obs['reference'].strip():
             raise ValueError('invalid evidence reference')
@@ -155,10 +167,10 @@ def validate_result(path, evidence, episode_data):
         raise ValueError('invalid result evidence identity')
     if record['validity'] not in ('valid', 'invalid', 'unavailable') or record['outcome'] not in ('pass', 'fail', 'unknown'):
         raise ValueError('invalid result validity or outcome')
-    refs = {obs['reference']: obs['status'] for obs in evidence['observations']}
+    refs = {obs['reference']: obs for obs in evidence['observations']}
     required = set(episode_data['required_witnesses'])
     witnesses = {obs['witness'] for obs in evidence['observations']}
-    if record['validity'] == 'valid' and (witnesses != required or 'unavailable' in refs.values()):
+    if record['validity'] == 'valid' and (witnesses != required or any(obs['status'] == 'unavailable' for obs in refs.values())):
         raise ValueError('invalid result: missing evidence')
     checks = validate_checks(record, set(episode_data['assessment']), refs)
     if record['outcome'] == 'pass' and (record['validity'] != 'valid' or any(c['verdict'] != 'pass' for c in checks)):
@@ -183,8 +195,12 @@ def validate_checks(record, expected, refs):
         citations = check['evidence']
         if not isinstance(citations, list) or not citations or any(not isinstance(x, str) or x not in refs for x in citations):
             raise ValueError('invalid criterion evidence reference')
-        if check['verdict'] != 'unknown' and any(refs[x] == 'unavailable' for x in citations):
+        if check['verdict'] != 'unknown' and any(refs[x]['status'] == 'unavailable' for x in citations):
             raise ValueError('invalid criterion: unavailable evidence')
+        if check['verdict'] == 'pass' and not any(
+                refs[x]['status'] == 'observed' and refs[x]['witness'] == CRITERION_WITNESSES.get(check['id'])
+                for x in citations):
+            raise ValueError('invalid criterion: pass requires its observed witness')
         ids.append(check['id'])
     if len(ids) != len(set(ids)) or set(ids) != expected:
         raise ValueError('invalid criteria: missing, duplicate or unknown')
