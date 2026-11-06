@@ -397,8 +397,8 @@ defmodule FermixCore.Management.Copy do
 
   def summary_sentence(:server_older, %{machine: machine}),
     do:
-      "Your server runs an older Fermix than this #{machine}. It takes this #{machine}'s " <>
-        "version in its nightly update once every computer linked to it runs it."
+      "Your server runs an older Fermix than this #{machine}. It updates to this " <>
+        "#{machine}'s version within a few minutes once every computer linked to it runs it."
 
   def summary_sentence(:disk_full, %{percent: percent}),
     do: "Your server's disk is #{percent}% full."

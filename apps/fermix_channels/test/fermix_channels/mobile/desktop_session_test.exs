@@ -96,7 +96,7 @@ defmodule FermixChannels.Mobile.DesktopSessionTest do
 
   # Always On's move back, design §6: the server records each desktop's
   # engine version (a desktop's hello carries its engine's in `app_version`),
-  # the version its nightly update never goes past; a phone's names its app.
+  # the version its update never goes past; a phone's names its app.
   test "a desktop's hello records its engine's version; a phone's records nothing", ctx do
     test = self()
 

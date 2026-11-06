@@ -114,10 +114,10 @@ defmodule FermixCore.Management.HomeSummary do
 
   A linked desktop whose server refused its protocol as newer than its own
   (`daemon_too_old`: this computer updated first) is a `problem` of kind
-  `server_older`, whose sentence says the server takes this computer's
-  version in its nightly update once every computer linked to it runs it
-  (that update installs the oldest of theirs, `Home.EngineCeiling`); never a
-  bare `on`.
+  `server_older`, whose sentence says the server updates to this computer's
+  version within a few minutes once every computer linked to it runs it (its
+  update installs the oldest of theirs, `Home.EngineCeiling`); never a bare
+  `on`.
 
   `notice` is the occurrence the apps raise as a system notification, or
   nil: the server ready (`ready:<candidate>`), the move done
@@ -587,8 +587,8 @@ defmodule FermixCore.Management.HomeSummary do
   defp too_old(_facts), do: nil
 
   # The server refused this computer's protocol as newer than its own: it
-  # takes this computer's version in its nightly update once every computer
-  # linked to it runs it.
+  # updates to this computer's version within a few minutes once every
+  # computer linked to it runs it.
   defp server_older(%{primary_behind: true} = facts),
     do: problem("server_older", sentence(:server_older, facts), :learn_more, %{})
 

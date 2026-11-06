@@ -6,7 +6,8 @@
 # in_container.sh in throwaway debian:trixie-slim containers, one scenario
 # each: an existing host typing the code at a terminal and then enrolling with
 # a bucket, a restore host, the failures that stop the
-# first boot, an Ubuntu host with swap of its own, the nightly update's cases,
+# first boot, an Ubuntu host with swap of its own, the update's cases (the
+# night's, the follow run's and their lock),
 # a host joining a tailnet with Tailscale's live signing key, and the
 # distribution's Chromium installed for real and started headless as the
 # engine account.

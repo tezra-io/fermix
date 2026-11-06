@@ -121,11 +121,13 @@ defmodule FermixCore.Management.PlacementTest do
              Placement.primary_part(unworded, "home.status")
 
     # Review M4: a server on an older protocol than this computer's, until
-    # its nightly update, is said apart from one that is missing.
+    # its update takes this version, is said apart from one that is missing.
     older = fn _request, _opts -> {:error, :daemon_too_old, %{"maximum_version" => 2}} end
 
-    assert {:behind, "The server runs an older Fermix than this computer, until its " <> _rest} =
-             Placement.primary_part(older, "home.status")
+    assert {:behind,
+            "The server runs an older Fermix than this computer. It updates to this " <>
+              "computer's version within a few minutes once every computer linked to it " <>
+              "runs it."} = Placement.primary_part(older, "home.status")
   end
 
   # A section named here that no build serves would place nothing.

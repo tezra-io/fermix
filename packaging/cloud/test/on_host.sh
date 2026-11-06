@@ -5,7 +5,7 @@
 # by functions that log their names. Started by first_boot_test.sh.
 #
 # The copy it runs is first-boot.sh without its last line (`main "$@"`) and
-# without the nightly update's writer (write_update_script, whose script the
+# without the update script's writer (write_update_script, whose script the
 # container scenarios and scripts/release/test_fermix_update.py run), with six
 # fixed lines moved under this test's own directory, each asserted present
 # exactly once. Its PATH holds only this test's bin directory: tailscale,

@@ -2,9 +2,10 @@ defmodule FermixCore.Home.EngineCeiling do
   @moduledoc """
   The newest Fermix a server may run (Always On's move back, design §6): a
   server always runs exactly the engine version of the computers it serves
-  as primary for, from its first install and every night after, so the home
-  can always move back to one of them (a home a newer engine wrote is refused
-  by an older one's restore, `FermixCore.Home.Archive`).
+  as primary for, from its first install and within a few minutes of each
+  change after, so the home can always move back to one of them (a home a
+  newer engine wrote is refused by an older one's restore,
+  `FermixCore.Home.Archive`).
 
   The primary records each desktop's engine version from that desktop's
   `hello` (`app_version`, which a desktop engine fills with its own version;
@@ -23,8 +24,9 @@ defmodule FermixCore.Home.EngineCeiling do
   The ceiling (`ceiling/2`) is the oldest version among the desktops seen in
   the last #{30} days: a desktop unseen longer drops out, and its file goes
   at the next record. `nil` when none was seen. `home.status` answers it as
-  `update_ceiling`, and the server's nightly update installs exactly that
-  version (`packaging/cloud/first-boot.sh`'s `fermix-update`).
+  `update_ceiling`, and the server's update installs exactly that version
+  within five minutes, and restarts its engine unless a move is under way
+  (`packaging/cloud/first-boot.sh`'s `fermix-update --follow`).
   """
 
   @dir "engine_ceiling"

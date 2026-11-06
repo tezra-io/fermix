@@ -606,7 +606,7 @@ grep -Fq "\"$home_dst/workspace\"" "$home_dst/config.toml" 2>/dev/null ||
 # exactly the `always_on_unavailable` envelope. An artifact that answers the
 # home's facts there offers Always On to every home. With the switch added
 # to the same home's settings it answers from the home's own files with no
-# daemon, as an Always On server's first boot and its nightly update read
+# daemon, as an Always On server's first boot and its updates read
 # it: exit 0, the role and the update ceiling. When Always On ships, the
 # gate goes and the first half reads the home's files too.
 status_out="$runtime_root/home-status.out"

@@ -25,7 +25,12 @@
 #                  one, a failed installer, a reboot asked for, an installer
 #                  that cannot be downloaded, a failed status read, three
 #                  nights under a move, an ended move, a failed restart, an
-#                  older one never installed back down, none seen, no home
+#                  older one never installed back down, none seen, no home;
+#                  then the follow run: no home, a newer release and the
+#                  restart but never a reboot, a move holding the restart
+#                  until it ends, nothing due; and the lock, with the real
+#                  flock: a follow run leaving the update to the run that
+#                  holds it, and the night waiting for that run
 #   tailnet        --tailscale: a key without the flag, a malformed one and
 #                  none refused before anything is installed; Tailscale's
 #                  live keyring (real curl and gpg) checked by its pinned
@@ -323,7 +328,8 @@ periodic_on() {
   [ "$(apt-config shell VALUE "APT::Periodic::$1")" = "VALUE='1'" ]
 }
 
-# Debian's daily updates on, and the nightly update's timer, unit and script.
+# Debian's daily updates on, the nightly update's timer and unit, the follow
+# run's, and the script both run.
 check_updates() {
   conf=/etc/apt/apt.conf.d/21fermix-always-on
   check "[ \"\$(mode_owner $conf)\" = '644 root:root' ]" "Debian's daily updates are set in a file of root's"
@@ -338,6 +344,17 @@ check_updates() {
     check "grep -qxF '$line' $service" "the update's unit has $line"
   done
   check "contains $LOG/calls.log 'systemctl enable --now fermix-update.timer'" "the update timer is on"
+  timer=/etc/systemd/system/fermix-follow.timer
+  for line in 'OnBootSec=2min' 'OnUnitActiveSec=5min' 'WantedBy=timers.target'; do
+    check "grep -qxF '$line' $timer" "the follow timer has $line"
+  done
+  service=/etc/systemd/system/fermix-follow.service
+  for line in 'Type=oneshot' 'ExecStart=/usr/local/sbin/fermix-update --follow' 'TimeoutStartSec=30min'; do
+    check "grep -qxF '$line' $service" "the follow run's unit has $line"
+  done
+  check "[ \"\$(mode_owner $timer)\" = '644 root:root' ] && [ \"\$(mode_owner $service)\" = '644 root:root' ]" \
+    "the follow run's units are root's"
+  check "contains $LOG/calls.log 'systemctl enable --now fermix-follow.timer'" "the follow timer is on"
   update=/usr/local/sbin/fermix-update
   check "[ \"\$(mode_owner $update)\" = '755 root:root' ]" "the update script is root's"
   check "dash -n $update" "dash parses the update script"
@@ -378,6 +395,7 @@ installer --no-setup
 apt-get -qq -y install --no-install-recommends unattended-upgrades
 systemctl daemon-reload
 systemctl enable --now fermix-update.timer
+systemctl enable --now fermix-follow.timer
 systemctl daemon-reload
 loginctl enable-linger fermix
 systemctl start user@$ENGINE_UID.service
@@ -487,6 +505,7 @@ installer --no-setup --version 1.2.3
 apt-get -qq -y install --no-install-recommends unattended-upgrades
 systemctl daemon-reload
 systemctl enable --now fermix-update.timer
+systemctl enable --now fermix-follow.timer
 systemctl daemon-reload
 loginctl enable-linger fermix
 systemctl start user@$ENGINE_UID.service
@@ -798,7 +817,104 @@ updates() {
     "and says why"
   check "contains $OUT '==> No restart is due and no update asks for a reboot'" "and that nothing is due"
   check "[ \"\$(deferral_count)\" = none ]" "a night with no move clears the count"
-  check "[ -z \"\$(find /run -maxdepth 1 -name 'fermix-update.*')\" ]" "no night leaves a work directory behind"
+  check "[ -z \"\$(find /run -maxdepth 1 -name 'fermix-update.*' -type d)\" ]" "no night leaves a work directory behind"
+  follow_runs
+  update_lock
+}
+
+# The follow run fermix-follow.service starts every five minutes, run by hand
+# as it runs it, on the same host, which has no home yet: it installs and
+# restarts as the night does, never reboots, and says nothing when nothing is
+# due.
+follow_runs() {
+  run_apart "$update" --follow
+  check "[ $STATUS -eq 0 ] && [ ! -s $LOG/calls.log ] && [ ! -s $OUT ] && [ ! -s $ERR ]" \
+    "a follow run on a server with no home yet runs nothing and says nothing"
+
+  runuser -u fermix -- mkdir -p /home/fermix/.fermix
+  printf '1\n' >/var/lib/fermix-update/reboot-deferrals
+  count=$(deferral_count)
+  : >/run/reboot-required
+  run_apart "$update" --follow
+  check "[ $STATUS -eq 0 ] && night_calls '$home' '$install' 'installer --no-setup --version 1.2.9' '$status' '$home' '$restart'" \
+    "a follow run installs its computers' newer release, then restarts the engine as its own account"
+  check "contains $OUT '==> Fermix went from 1.2.8 to 1.2.9'" "and names both versions"
+  check "[ -e /run/reboot-required ] && [ \"\$(deferral_count)\" = '$count' ]" \
+    "it never reboots, though an update asks for it, and leaves the night's count as it was"
+
+  printf '1.2.10\n' >"$FIXTURES/ceiling"
+  printf 'receiving|Receiving the home from Invented Mac.\n' >"$FIXTURES/phases"
+  run_apart "$update" --follow
+  check "[ $STATUS -eq 0 ] && night_calls '$home' '$install' 'installer --no-setup --version 1.2.10' '$status' '$home'" \
+    "a follow run while a move is under way installs, and holds the restart"
+  check "contains $OUT '==> A move is under way on this server (receiving), so the engine restarts once it ends'" \
+    "and says the restart waits until the move ends"
+  printf 'committed|Moved to the invented server.\n' >"$FIXTURES/phases"
+  run_apart "$update" --follow
+  check "[ $STATUS -eq 0 ] && night_calls '$home' '$status' '$home' '$restart'" \
+    "the first follow run after the move ended restarts the engine"
+  rm -f "$FIXTURES/phases"
+
+  run_apart "$update" --follow
+  check "[ $STATUS -eq 0 ] && night_calls '$home' '$status' && [ ! -s $OUT ] && [ ! -s $ERR ]" \
+    "a follow run with nothing due asks only what it must and says nothing"
+  run_apart "$update" --now
+  check "[ $STATUS -eq 1 ] && [ ! -s $LOG/calls.log ] && [ \"\$(cat $ERR)\" = 'fermix update: An option was not recognised. fermix-update takes --follow, which fermix-follow.timer passes, or nothing for the nightly update.' ]" \
+    "an option other than --follow is refused, in one sentence, before anything runs"
+}
+
+# Waits, at most 60 s, until the command $2 succeeds; past that, $1 is a
+# failed check and the scenario goes on to its count.
+wait_until() {
+  tries=0
+  until eval "$2"; do
+    tries=$((tries + 1))
+    if [ "$tries" -gt 600 ]; then
+      fail "$1 within 60 s"
+      return 0
+    fi
+    sleep 0.1
+  done
+}
+
+# Another update's hold on the update lock, taken with the real flock until
+# release_lock (at most 60 s): it says it holds the lock once it does.
+hold_lock() {
+  rm -f /tmp/lock-held /tmp/lock-release
+  # shellcheck disable=SC2016 # the holder's own script, expanded as it runs
+  flock /run/fermix-update.lock sh -c ': >/tmp/lock-held; tries=0; until [ -e /tmp/lock-release ] || [ "$tries" -gt 600 ]; do tries=$((tries + 1)); sleep 0.1; done' &
+  HOLDER=$!
+  wait_until "the other update holds the lock" "[ -e /tmp/lock-held ]"
+}
+
+release_lock() {
+  : >/tmp/lock-release
+  wait "$HOLDER"
+}
+
+# One update at a time, with the real flock: a follow run leaves the update
+# to the run that holds the lock; the night waits for that run, then runs.
+update_lock() {
+  check "[ \"\$(mode_owner /run/fermix-update.lock)\" = '600 root:root' ]" "the update lock is a file of root's alone"
+  hold_lock
+  run_apart "$update" --follow
+  check "[ $STATUS -eq 0 ] && [ ! -s $LOG/calls.log ] && [ \"\$(cat $OUT)\" = '==> Another Fermix update is running, so this follow run leaves it to that one' ] && [ ! -s $ERR ]" \
+    "a follow run while another update holds the lock leaves it to that one, in one line"
+
+  reset_log
+  "$update" </dev/null >"$OUT" 2>"$ERR" &
+  night=$!
+  wait_until "the night says it waits" "contains $OUT '==> Another Fermix update is running, so the nightly update waits for it to finish'"
+  check "[ ! -s $LOG/calls.log ]" "the night, finding the lock held, says it waits and runs nothing meanwhile"
+  release_lock
+  set +e
+  wait "$night"
+  STATUS=$?
+  set -e
+  check "[ $STATUS -eq 0 ] && night_calls '$home' '$status' '$home' '$reboot'" \
+    "once the other update ends, the night runs: here the reboot the follow runs left to it"
+  rebooted
+  check "[ -z \"\$(find /run -maxdepth 1 -name 'fermix-update.*' -type d)\" ]" "no run leaves a work directory behind"
 }
 
 # A host joining the owner's tailnet with --tailscale. Its keyring is the one
@@ -837,6 +953,7 @@ installer --no-setup --version 1.2.3
 apt-get -qq -y install --no-install-recommends unattended-upgrades
 systemctl daemon-reload
 systemctl enable --now fermix-update.timer
+systemctl enable --now fermix-follow.timer
 systemctl daemon-reload
 loginctl enable-linger fermix
 systemctl start user@$ENGINE_UID.service

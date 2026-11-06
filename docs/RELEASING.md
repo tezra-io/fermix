@@ -110,7 +110,7 @@ those refusals, and runs the installer over the table `build_install_table.sh`
 really writes.
 
 A new release is therefore invisible to the installer, Linux packages, standalone
-installs and Always On first boots and nightly updates alike, until the site pins
+installs and Always On first boots and updates alike, until the site pins
 it (below). The installer downloads from the public release URLs, which a draft
 does not have, so `release.yml`'s `installer` job runs after `promote` against a
 table the rail builds itself: `scripts/release/build_install_table.sh` checks the

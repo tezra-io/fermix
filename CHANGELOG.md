@@ -72,11 +72,11 @@ will be part of a future release; nothing in this group is in a release yet.
   after the move the server installs your plugins again for itself, checked as
   any install is; one it could not install says so in Plugins, with Install….
   A server always runs the Fermix of the computer it serves: Use my own Linux
-  server's command names that release, and each night the server installs
-  the oldest release among the computers that reached it in the last 30 days
-  (`update_ceiling` in `fermix home status --json`), never past it and never
-  back down, so a fix reaches the server the night after your computer has
-  it.
+  server's command names that release, and every five minutes the server
+  installs the oldest release among the computers that reached it in the
+  last 30 days (`update_ceiling` in `fermix home status --json`), never past
+  it and never back down, so once every computer linked to it runs a new
+  release, the server takes it within a few minutes.
   Once a recovery passphrase is set, a primary keeps encrypted snapshots of
   itself in an S3 bucket, every six hours by default, and after a move on your
   desktop too, and a lost server is restored from the newest one. A move or
@@ -145,11 +145,12 @@ will be part of a future release; nothing in this group is in a release yet.
   your primary, starts its service, installs Chromium on Debian (on Ubuntu,
   install a browser yourself) and waits for your primary to accept the
   server. The server then keeps itself up to date: Debian's security updates
-  install every day, and every night at 04:00 UTC Fermix's installer runs
-  again, restarts Fermix only when there is a new release and no move is under
-  way, and reboots when an update asks for it (a move holds that off two
-  nights at most); a night that fails leaves Fermix running and says why in
-  the journal. A server whose kernel cannot sandbox commands is refused before
+  install every day, and every five minutes Fermix's installer runs again
+  when your computers run a newer release and restarts Fermix unless a move
+  is under way; reboots wait for 04:00 UTC, when the nightly run reboots if
+  an update asks for it (a move holds that off two nights at most). The two
+  never install at once, and a run that fails leaves Fermix running and says
+  why in the journal. A server whose kernel cannot sandbox commands is refused before
   anything is installed. `--snapshot-bucket` and `--snapshot-region` name
   where the server will keep its snapshots, and `--restore` prepares a server
   to restore your home from a snapshot instead. A server whose setup did not
@@ -240,8 +241,8 @@ will be part of a future release; nothing in this group is in a release yet.
   server your computer held for 24 hours with no move is told once, as one to
   set up again; Restore here finished is told once, naming the day of the
   backup it restored; a computer that updated first and finds its server on an
-  older Fermix says the server takes its version in its nightly update once
-  every computer linked to it runs it, rather than look all well; and a
+  older Fermix says the server updates to its version within a few minutes
+  once every computer linked to it runs it, rather than look all well; and a
   server's own copy retired by a move back says where Fermix moved back to.
 - **WhatsApp and webhook sources reach Fermix on your Always On server.**
   Once Fermix runs on your server, Always On on your computer shows the

@@ -130,26 +130,45 @@ step:
    `apt-config`; it installs security updates every day and never reboots on
    its own. Fermix's own: the package comes from release files, not an apt
    source, so unattended-upgrades never sees it, and the package's postinst
-   restarts nothing. `fermix-update.timer` (root, `OnCalendar=*-*-* 04:00:00
-   UTC`, `Persistent=true`) runs `fermix-update.service`, a oneshot bounded
-   by `TimeoutStartSec=30min` that runs `/usr/local/sbin/fermix-update`: the
-   release the computers this server serves run, read from `fermix home
-   status --json`'s `update_ceiling` (the oldest engine among the desktops
-   that reached it in the last 30 days), installed with the installer again
-   (`--no-setup --version X`, with its sha256 check and the cosign signature
-   check through the package's own cosign) when it is newer than the
-   installed one in `dpkg --compare-versions`' order; an installed release
-   newer than it is never installed back down, and no home, no computer seen
-   or a `home status` that fails installs nothing that night (the last fails
-   the night). So the home can always move back to its computer, the server's
-   Fermix follows that computer's: a fix reaches the server the night after
-   the computer has it. Then `fermix restart`
+   restarts nothing. Two root timers run `/usr/local/sbin/fermix-update`,
+   each through a oneshot bounded by `TimeoutStartSec=30min`:
+   `fermix-follow.timer` (`OnBootSec=2min`, `OnUnitActiveSec=5min`) runs
+   `fermix-follow.service`, `fermix-update --follow`, every five minutes, and
+   `fermix-update.timer` (`OnCalendar=*-*-* 04:00:00 UTC`,
+   `Persistent=true`) runs `fermix-update.service`, the nightly update. Both
+   install the release the computers this server serves run, read from
+   `fermix home status --json`'s `update_ceiling` (the oldest engine among
+   the desktops that reached it in the last 30 days), with the installer
+   again (`--no-setup --version X`, with its sha256 check and the cosign
+   signature check through the package's own cosign) when it is newer than
+   the installed one in `dpkg --compare-versions`' order; an installed
+   release newer than it is never installed back down, and no home, no
+   computer seen or a `home status` that fails installs nothing on that run
+   (the last fails the run). So the home can always move back to its
+   computer, the server's Fermix follows that computer's, and within a few
+   minutes, since the chat protocol does not always behave across versions:
+   once every computer linked to the server runs a release, the next follow
+   run installs it. Then `fermix restart`
    as `fermix` when `fermix service status --json` says `pending_restart`
-   (the running engine is older than the installed one, so a restart a night
-   skipped or failed is still due the next night, and an engine that is not
-   running, such as a restore host's before its import, is not started); then
-   `systemctl reboot` when `/run/reboot-required` exists (unattended-upgrades'
-   kernel hook writes it). A move under way is read from `fermix home status
+   (the running engine is older than the installed one, so a restart a run
+   skipped or failed is still due at the next, and an engine that is not
+   running, such as a restore host's before its import, is not started). The
+   reboot stays the night's: only the nightly update runs `systemctl reboot`,
+   when `/run/reboot-required` exists (unattended-upgrades' kernel hook
+   writes it), and only it reads or writes the deferral count below. A
+   follow run never reboots, does nothing on a server with no home yet, and
+   says nothing when nothing is due, so the journal holds a line only for
+   what one did or why it could not; a restart a move held off happens at
+   the first follow run after the move ends. The two never run at once: each
+   takes an exclusive `flock` on `/run/fermix-update.lock` (root's, 0600; a
+   file only root can make, as `/run` is root's) before anything else, with
+   the lock's descriptor closed for the installer and every `fermix` call, so
+   nothing they leave running holds it. A follow run that finds it held
+   leaves the update to the run that holds it and exits 0, in one line; the
+   night says it waits and waits at most 15 minutes, half its unit's
+   timeout, then fails in one sentence and the next night tries again. A
+   server set up before the follow timer existed gets it only when its
+   install line runs again. A move under way is read from `fermix home status
    --json`, in the phases the move code treats as pending: `requested`,
    `streaming`, `committing` or `aborting` on a server sending its home
    (`FermixCore.Home.Move`'s pending list), `enrolling`, `receiving`,
@@ -164,14 +183,15 @@ step:
    third night reboots all the same and says so; a failed read of the engine
    counts as no move. Each night says what it did in one line per step. An
    installer that cannot be downloaded from `fermix.ai` never ran, so
-   nothing changed and the restart and the reboot are still decided; one
-   that ran and failed stops the night before both and leaves the running
-   engine as it was, since its exit status (1 for a refusal before the
-   package manager runs and for a failure after it) cannot say whether the
-   package was touched. Any failure says why on stderr (the journal:
-   `journalctl -u fermix-update`) and the night exits non-zero; the next
-   night tries again. First boot writes the script again whenever it
-   runs.
+   nothing changed and the restart (and at night the reboot) is still
+   decided; one that ran and failed stops the run before both and leaves the
+   running engine as it was, since its exit status (1 for a refusal before
+   the package manager runs and for a failure after it) cannot say whether
+   the package was touched. Any failure says why on stderr (the journal:
+   `journalctl -u fermix-follow` and `journalctl -u fermix-update`) and the
+   run exits non-zero; the next one tries again. Any argument but `--follow`
+   is refused in one sentence before anything runs. First boot writes the
+   script and both timers' units again whenever it runs.
 6. Creates the account `fermix` (home `/home/fermix`, `/usr/sbin/nologin`, no
    password), lingering, with `/run/fermix` recreated for it at every boot
    (tmpfiles.d) and a `user@<uid>.service` drop-in whose `ExecStartPre` refuses
@@ -351,7 +371,7 @@ sh packaging/cloud/test/first_boot_test.sh host   # shellcheck and the host part
 
 The host part (`test/on_host.sh`) needs shellcheck, dash, `script(1)` and
 `perl`, on macOS or Linux, as any account. It runs first-boot.sh's own main,
-less its nightly update's writer, with six fixed paths moved under a
+less its update script's writer, with six fixed paths moved under a
 directory of its own (each line asserted present exactly once) and the steps
 that need a Debian server as root stood in for by functions that log their
 names, and the engine account's `fermix` calls by one that logs them,
@@ -408,7 +428,14 @@ a reboot is asked for, the reboot, an installer that cannot be downloaded
 status` (no restart, the reboot all the same), three nights under a move
 (the reboot waits two, then goes), a move in an ended phase, a failed
 restart (the reboot all the same), an older release never installed back
-down, no computer seen, no home yet); a host joining a tailnet with
+down, no computer seen, no home yet), then the follow run (no home yet:
+nothing run or said; a newer release installed and the engine restarted
+while a reboot is asked for, which it leaves to the night with its count
+untouched; a move holding the restart until the first run after it ends;
+nothing due, nothing said; any other option refused), and the lock with
+the real `flock` (a follow run leaving the update to the run that holds
+it, in one line; the night saying it waits, running nothing until that
+run ends, then running); a host joining a tailnet with
 Tailscale's live signing key checked by its fingerprint and the source read
 by the real `apt-get`, a re-run on the tailnet, and a `tailscale up` that
 fails before enrolling; and the distribution's Chromium installed with
@@ -416,7 +443,9 @@ the real `apt-get` and started headless as `fermix` through the engine's
 `oom_score_adj` shell, with its own sandbox (that container runs without
 Docker's seccomp profile, which refuses the user namespaces a server's kernel
 gives an unprivileged account). It is not wired into CI;
-`scripts/release/test_fermix_update.py` runs the nightly update's release
-choice and first boot's `--version` hermetically, in CI. What only a real
-server proves: the user manager starting behind the drop-in, the swap file
-turning on, the timer firing at 04:00 UTC and the reboot.
+`scripts/release/test_fermix_update.py` runs the update's release choice,
+the follow run, the lock (with a stand-in `flock` and the night's wait cut
+to a second) and first boot's `--version` hermetically, in CI. What only a
+real server proves: the user manager starting behind the drop-in, the swap
+file turning on, the timers firing (every five minutes, and at 04:00 UTC)
+and the reboot.

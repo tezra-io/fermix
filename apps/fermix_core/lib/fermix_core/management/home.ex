@@ -74,7 +74,7 @@ defmodule FermixCore.Management.Home do
   `used`, a fraction, and `nearly_full` from 85%), null in any other role and
   when it cannot be read, so a linked desktop reads its server's from
   `primary_home`. `version` is this engine's. `update_ceiling` is the version
-  a server's nightly update installs, in every role: the oldest engine among
+  a server's update installs, in every role: the oldest engine among
   the desktops this machine served in the last 30 days
   (`Home.EngineCeiling`), null when none was or it cannot be read.
 
@@ -346,7 +346,7 @@ defmodule FermixCore.Management.Home do
 
   defp disk(_home, _record, _opts), do: nil
 
-  # The version a server's nightly update installs (`Home.EngineCeiling`),
+  # The version a server's update installs (`Home.EngineCeiling`),
   # from this machine's own record in any role; one that cannot be read is
   # null, said in the log once while it stays so.
   defp update_ceiling(home, opts) do
@@ -411,7 +411,7 @@ defmodule FermixCore.Management.Home do
   # A linked desktop adds the primary's own picture, or why it is missing,
   # and whether the server speaks a protocol this engine is too old for
   # (`:too_old`) or one older than this engine's (`:behind`, until its
-  # nightly update).
+  # update takes this version).
   defp primary_home(opts) do
     case Keyword.fetch(opts, :primary_forward) do
       {:ok, forward} ->

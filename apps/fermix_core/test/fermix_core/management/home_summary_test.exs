@@ -108,12 +108,13 @@ defmodule FermixCore.Management.HomeSummaryTest do
        "Fermix cannot reach your server. Your messages wait until it is back.", "learn_more"},
       {"a server this Mac is too old for", desktop(primary_too_old: true, primary_home: nil),
        "problem", "Update Fermix on this Mac to keep using Always On.", "update"},
-      # Re-check finding 3: the nightly update installs the oldest version
-      # among the computers linked to the server (`Home.EngineCeiling`).
+      # Re-check finding 3: the server's update installs the oldest version
+      # among the computers linked to it (`Home.EngineCeiling`), within a few
+      # minutes of the last of them taking it.
       {"a server older than this Mac", desktop(primary_behind: true, primary_home: nil),
        "problem",
-       "Your server runs an older Fermix than this Mac. It takes this Mac's version in its " <>
-         "nightly update once every computer linked to it runs it.", "learn_more"},
+       "Your server runs an older Fermix than this Mac. It updates to this Mac's version " <>
+         "within a few minutes once every computer linked to it runs it.", "learn_more"},
       {"a server disk nearly full", desktop(primary_home: server_home(disk: 0.9)), "problem",
        "Your server's disk is 90% full.", "learn_more"},
       {"a last backup five days old",

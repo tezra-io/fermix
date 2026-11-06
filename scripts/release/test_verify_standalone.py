@@ -537,7 +537,7 @@ class VerifyStandaloneTest(unittest.TestCase):
         self.assertIn("fermix home status in a release must exit 1, got 0", result.stderr)
 
     # With the switch in the home's settings the verb answers from the home's
-    # own files, as an Always On server's first boot and nightly update read it.
+    # own files, as an Always On server's first boot and its updates read it.
     def test_rejects_a_home_status_that_ignores_the_switch(self):
         self._write_artifact(create_disclaim=True, home="status_ignores_switch")
 

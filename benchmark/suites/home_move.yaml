@@ -131,9 +131,9 @@ scenarios:
 
   # How an Always On server keeps itself current, from the skill's `home`
   # reference: Fermix's package comes from release files, so general knowledge
-  # ("apt upgrade", or `fermix upgrade`) is wrong there. The floor is the time
-  # the nightly update runs, or the reboot the owner asked about; the rubric
-  # owns the rest.
+  # ("apt upgrade", or `fermix upgrade`) is wrong there. The floor is how soon
+  # the server follows its computers (minutes), or the reboot the owner asked
+  # about; the rubric owns the rest.
   - id: always_on_server_keeps_itself_current
     title: "An Always On server updates Fermix and Debian by itself"
     severity: normal
@@ -146,14 +146,15 @@ scenarios:
           When a new Fermix release comes out, does the server pick it up on
           its own, or do I have to update it by hand?
         expect:
-          reply_matches: '(?i)\b0?4(:00|\s*a\.?m\b)'
+          reply_matches: '(?i)\bminutes?\b'
           max_cost_usd: 1.2
           max_duration_ms: 160000
         rubric: |
-          1. Says the server updates Fermix by itself every night at 04:00 UTC
-             (4 a.m. UTC) by running Fermix's installer again.
-          2. Says Fermix restarts only when a newer release was installed, so
-             the server can run a release a day or more behind the Mac.
+          1. Says the server updates Fermix by itself, within a few minutes (it
+             checks every five), by running Fermix's installer again.
+          2. Says the server takes a new release only once the computers linked
+             to it run it (the oldest release among them), not when the release
+             first comes out, and never runs ahead of the Mac.
           3. Does not tell the owner to log in and run `apt upgrade` or
              `fermix upgrade` on the server as the way to keep it current.
       - id: security_patches_and_reboots_on_the_server

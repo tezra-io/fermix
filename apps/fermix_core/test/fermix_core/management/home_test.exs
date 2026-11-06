@@ -171,7 +171,7 @@ defmodule FermixCore.Management.HomeTest do
       assert {:ok, %{moved_at: @at, epoch: 4}} = Return.read(home)
     end
 
-    # Design §6: the version a server's nightly update installs, the oldest
+    # Design §6: the version a server's update installs, the oldest
     # of its desktops' seen in the last 30 days, in every role.
     test "the update ceiling is the oldest desktop's engine, or null", %{home: home} do
       assert {:ok, %{"update_ceiling" => nil}} = route("home.status", %{}, opts(home))
@@ -501,7 +501,7 @@ defmodule FermixCore.Management.HomeTest do
     end
 
     # Review M4: a desktop that updated first meets a server on an older
-    # protocol until its nightly update takes this version, which the screen
+    # protocol until its update takes this version, which the screen
     # says.
     test "a server older than this desktop says when it takes this version", %{home: home} do
       :ok = DesktopLink.write(home, desktop_link())

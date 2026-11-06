@@ -564,7 +564,7 @@ class InstallerTest(unittest.TestCase):
     # -- a named release ---------------------------------------------------------
     #
     # Always On's servers run exactly their desktop's Fermix (move back, design
-    # §6): first boot and the nightly update install a named release, never
+    # §6): first boot and its updates install a named release, never
     # the latest.
 
     def test_a_named_release_is_installed_from_its_own_row(self):

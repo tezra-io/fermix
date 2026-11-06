@@ -256,28 +256,38 @@ it, never a second writer.
   Debian's security updates: `unattended-upgrades` every day (the first boot
   installs it where the image lacks it and sets its two daily switches in
   `/etc/apt/apt.conf.d/21fermix-always-on`). Fermix: the package comes from
-  release files, not an apt source, so `fermix-update.timer` (root) runs
-  `/usr/local/sbin/fermix-update` every night at 04:00 UTC: it installs the
+  release files, not an apt source, so two root timers run
+  `/usr/local/sbin/fermix-update`: `fermix-follow.timer` every five minutes
+  and `fermix-update.timer` every night at 04:00 UTC. Each installs the
   release the computers it serves run (`fermix home status --json`'s
   `update_ceiling`: the oldest Fermix among the desktops that reached it in
   the last 30 days, which the server records from each one's connection),
   only when that is newer than the installed one and never back down, and
-  nothing on a night no computer was seen; then `fermix restart` as `fermix`
+  nothing while no computer was seen; then `fermix restart` as `fermix`
   when `fermix service status` says the
-  running engine is behind the installed one (so a restart a night skipped is
-  done the next night), then a reboot when `/run/reboot-required` exists.
+  running engine is behind the installed one (so a restart a run skipped is
+  done at the next). So once every computer linked to the server runs a new
+  release, the server takes it within a few minutes: the chat protocol does
+  not always behave across versions, so the server and its computers
+  update as one. The reboot stays at night: only the 04:00 UTC run reboots,
+  when `/run/reboot-required` exists.
   While a move is under way on the server (sending its home, or as a
-  candidate enrolling or receiving one) the restart waits, and so it does
-  when the engine's status cannot be read; the reboot waits at most two
-  nights in a row for a move and then happens all the same. Each night says
-  what it did in `journalctl -u fermix-update`; an installer that ran and
-  failed stops the night and leaves the running engine as it was, while one
-  that could not be downloaded changed nothing, so the restart and the reboot
-  are still decided; the next night tries again.
+  candidate enrolling or receiving one) the restart waits until the first
+  run after it ends, and so it does when the engine's status cannot be
+  read; the reboot waits at most two nights in a row for a move and then
+  happens all the same. The two runs never install at once (one lock: a
+  five-minute run leaves the update to one already running, the night waits
+  for it). Each run says what it did in `journalctl -u fermix-follow` or
+  `journalctl -u fermix-update` (a five-minute run with nothing due says
+  nothing); an installer that ran and failed stops the run and leaves the
+  running engine as it was, while one that could not be downloaded changed
+  nothing, so the restart (and at night the reboot) is still decided; the
+  next run tries again. A server set up before the five-minute timer
+  existed gets it when its command runs again.
   So a server always runs the Fermix of the computer it serves, from its
   first install (Always On's command for the server names that release): a
-  fix reaches the server the night after that computer has it, and the home
-  can always move back there.
+  fix reaches the server within minutes of that computer having it, and the
+  home can always move back there.
 - **Memory.** Out of memory the kernel stops one process. The swap file makes
   that rarer, and on Linux the engine starts Chrome, and so every Chrome
   process, with `oom_score_adj` 1000, so the kernel stops Chrome before the
@@ -729,9 +739,9 @@ it, never a second writer.
     **Restore on this Mac** where it holds a copy), this computer too old for
     its server (**Update**), the server older than this computer, which
     updated first ("Your server runs an older Fermix than this Mac. It
-    takes this Mac's version in its nightly update once every computer
-    linked to it runs it.", **Learn more**: the nightly update installs the
-    oldest version among them),
+    updates to this Mac's version within a few minutes once every computer
+    linked to it runs it.", **Learn more**: the server's update installs
+    the oldest version among them),
     the server's disk 85% full or more (**Learn
     more**), the last backup over 3 days old (**Back up now**), a review that blocks the move
     (**Check again**), a move back that stopped (*Moving back*), and on the

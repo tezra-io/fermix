@@ -48,7 +48,7 @@ defmodule FermixChannels.Mobile.Session do
   A desktop's session starts its `Desktop.Peer` once `hello` is answered and
   hands it every desktop-family event; it gets no approval cards, and phone
   broadcasts never reach it. A desktop's `hello` names its engine's version
-  (`app_version`), which the session records for the server's nightly update
+  (`app_version`), which the session records for the server's update
   (`FermixCore.Home.EngineCeiling`, under the identity's home); a record that
   fails is logged and the desktop is served all the same.
   """

@@ -569,8 +569,9 @@ the move's phase, the candidates, the rail's window and link, the snapshots,
 the primary's disk, `Home.Disk.usage/2`, and a linked desktop's composed
 `primary_home`, or `Placement.primary_part/2`'s `too_old` when the server
 refused this engine's protocol as too old and `behind` when it refused it as
-newer than its own, a `server_older` problem until its nightly update
-takes this version, once every computer linked to it runs it), on
+newer than its own, a `server_older` problem until the server's update
+takes this version, within a few minutes once every computer linked to
+it runs it), on
 the computer that sets it up the held server whose 24 hours ran out that
 the window still names (`Home.Candidates.lapsed/2`, the list until its next
 write; not one that enrolled before the home last came back here, a
@@ -1252,20 +1253,26 @@ that will not start the engine account's service manager without it; gives a
 host with no swap a 2 GB `/swapfile`; installs the Linux package through
 `https://fermix.ai/install --no-setup --version X`, the release the computer
 that sets it up runs; turns on Debian's daily
-unattended-upgrades and installs `fermix-update.timer`, a root timer that at
-04:00 UTC installs `fermix home status --json`'s `update_ceiling` (the
-oldest engine among the desktops the server served in the last 30 days,
-`FermixCore.Home.EngineCeiling`, which the server records from each
-desktop's `hello`) when it is newer than the installed release in
-`dpkg --compare-versions`' order, never back down and nothing when there is
-none, then `fermix restart` as the engine account
-when `fermix service status` says the running engine is behind the installed
-one (not while `fermix home status` shows a pending move phase, nor when
-either read fails), and `systemctl reboot` when `/run/reboot-required`
-exists, which a move may defer at most two nights in a row (a root-owned
-count under `/var/lib/fermix-update`), stopping before both when the
-installer ran and failed (one that could not be downloaded changed nothing,
-so both are still decided); creates
+unattended-upgrades and installs two root timers over one script,
+`fermix-update`: `fermix-follow.timer` every five minutes (`--follow`) and
+`fermix-update.timer` at 04:00 UTC. Each installs `fermix home status
+--json`'s `update_ceiling` (the oldest engine among the desktops the
+server served in the last 30 days, `FermixCore.Home.EngineCeiling`, which
+the server records from each desktop's `hello`) when it is newer than the
+installed release in `dpkg --compare-versions`' order, never back down
+and nothing when there is none, then `fermix restart` as the engine
+account when `fermix service status` says the running engine is behind
+the installed one (not while `fermix home status` shows a pending move
+phase, nor when either read fails), so the server takes its computers'
+release within minutes. Only the night runs `systemctl reboot` when
+`/run/reboot-required` exists, which a move may defer at most two nights
+in a row (a root-owned count under `/var/lib/fermix-update`); a follow
+run never reboots. Each run stops before the restart and the reboot when
+the installer ran and failed (one that could not be downloaded changed
+nothing, so both are still decided), and both take an exclusive `flock`
+on `/run/fermix-update.lock` first: a follow run that finds it held
+leaves the update to that run, and the night waits for it at most 15
+minutes; creates
 the engine account `fermix` (home `/home/fermix`, no login, lingering); with
 `--tailscale`, installs Tailscale from its signed package repository (the
 signing key checked by its pinned fingerprint before apt is given it) and
@@ -1313,8 +1320,9 @@ service. The enrollment code reaches the engine only as a file, never in an
 argument, an environment the engine inherits, or the console output, and the
 Tailscale auth key reaches `tailscale up` the same way, as a 0600 file under
 `/run` removed right after it. A failed
-nightly update leaves the running engine as it was, and nothing the engine
-account answers holds a security reboot off for more than two nights.
+update leaves the running engine as it was, two updates never install at
+once, and nothing the engine account answers holds a security reboot off
+for more than two nights.
 
 ### `apps/fermix_channels`
 

@@ -90,8 +90,9 @@ defmodule FermixCore.Management.Placement do
                            "server does not answer it."
   @too_old_sentence "The server runs a newer Fermix than this computer can talk to, so " <>
                       "update Fermix on this computer."
-  @behind_sentence "The server runs an older Fermix than this computer, until its nightly " <>
-                     "update installs this computer's."
+  @behind_sentence "The server runs an older Fermix than this computer. It updates to this " <>
+                     "computer's version within a few minutes once every computer linked to " <>
+                     "it runs it."
 
   # How long a desktop waits for the primary's answer to a forwarded request:
   # well inside the apps' 10 s call timeout, except the two calls that walk the
@@ -151,9 +152,9 @@ defmodule FermixCore.Management.Placement do
   `{:too_old, sentence}` when the primary refused this engine's protocol as
   too old (`client_too_old`), so the summary asks for an update, and
   `{:behind, sentence}` when it refused it as newer than its own
-  (`daemon_too_old`: this computer updated first, and the server takes its
-  version in its nightly update once every computer linked to it runs it),
-  so the summary says so.
+  (`daemon_too_old`: this computer updated first, and the server's update
+  takes its version within a few minutes once every computer linked to it
+  runs it), so the summary says so.
   """
   @spec primary_part((Protocol.request(), keyword() -> Protocol.route_result()), String.t()) ::
           {:ok, map()} | {:missing, String.t()} | {:too_old, String.t()} | {:behind, String.t()}
