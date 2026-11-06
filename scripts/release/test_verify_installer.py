@@ -5,10 +5,8 @@
 # ///
 """Hermetic tests for the post-publication installer check."""
 
-import json
 import shutil
 import subprocess
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,23 +14,24 @@ from pathlib import Path
 SCRIPT = Path(__file__).with_name("verify_installer.sh")
 
 VERSION = "9.9.9"
-IDENTITY = f"https://github.com/tezra-io/fermix/.github/workflows/release.yml@refs/tags/v{VERSION}"
+TABLE_URL = "https://fermix.ai/install/releases"
+PACKAGE_URL = f"https://github.com/tezra-io/fermix/releases/download/v{VERSION}/fermix_{VERSION}_amd64.deb"
+TABLE = f"format 1\nlatest {VERSION}\n{VERSION} {'a' * 64} fermix_{VERSION}_amd64.deb\n"
 
-# The feed the stand-in curl serves, and a count of how often it was asked.
+# The real curl, as far as the check is concerned: it logs every call, so a
+# request for the table that reached it would show.
 FAKE_CURL = """#!/bin/sh
-printf 'curl\\n' >> "$FAKE_LOG"
-[ "${FAKE_CURL_EXIT:-0}" -eq 0 ] || exit "$FAKE_CURL_EXIT"
-printf '%s\\n' "$FAKE_FEED"
+printf 'curl %s\\n' "$*" >> "$FAKE_LOG"
 """
 
-FAKE_SLEEP = """#!/bin/sh
-printf 'sleep %s\\n' "$*" >> "$FAKE_LOG"
-"""
-
-FAKE_INSTALLER = """#!/bin/sh
+# Asks curl for the table and for a release file, the two things the real
+# installer fetches, then says what the test tells it to.
+FAKE_INSTALLER = f"""#!/bin/sh
 printf 'installer %s\\n' "$*" >> "$FAKE_LOG"
+curl -fsSL {TABLE_URL} -o "$FAKE_TABLE_COPY" || exit 90
+curl -fsSL {PACKAGE_URL} -o /dev/null || exit 91
 printf '%s\\n' "$FAKE_TRANSCRIPT"
-exit "${FAKE_INSTALLER_EXIT:-0}"
+exit "${{FAKE_INSTALLER_EXIT:-0}}"
 """
 
 FAKE_DPKG_QUERY = """#!/bin/sh
@@ -51,9 +50,10 @@ exit "${FAKE_DOCKER_EXIT:-0}"
 
 
 def transcript(kind="deb", manager="apt", verified=True):
+    name = f"fermix_{VERSION}_amd64.deb" if kind == "deb" else f"fermix-{VERSION}-1.x86_64.rpm"
     lines = [f"==> Detected target: linux-x86_64 ({kind} package, installed with {manager})"]
     if verified:
-        lines.append(f"==> Signature verified against {IDENTITY}")
+        lines.append(f"==> Verified sha256 {'a' * 64} against {TABLE_URL} ({name}, release {VERSION})")
     lines.append("Done. fermix is installed at /usr/bin/fermix.")
     return "\n".join(lines)
 
@@ -68,23 +68,16 @@ class VerifyInstallerTest(unittest.TestCase):
         self.bin.mkdir()
         self.log = self.base / "log"
         self.log.touch()
+        self.table = self.base / "releases"
+        self.table.write_text(TABLE, encoding="utf-8")
+        self.table_copy = self.base / "table-the-installer-saw"
 
-        # PATH holds nothing but this directory, so a cosign or a docker the
-        # host happens to have can never answer for the test.
-        for tool in ("dirname", "seq", "sh"):
+        # PATH holds nothing but this directory, so a curl or a docker the host
+        # happens to have can never answer for the test.
+        for tool in ("cat", "chmod", "cp", "dirname", "mkdir", "mktemp", "rm", "sh"):
             path = shutil.which(tool)
             self.assertIsNotNone(path, f"{tool} is required to run the check")
             (self.bin / tool).symlink_to(path)
-        # uv run [--options] python -c ...: drop uv's own words, keep Python's.
-        self._fake(
-            "uv",
-            "#!/bin/sh\n"
-            '[ "$1" = run ] || exit 64\n'
-            "shift\n"
-            'while [ "${1#--}" != "$1" ]; do shift; done\n'
-            '[ "$1" = python ] && shift\n'
-            f'exec "{sys.executable}" "$@"\n',
-        )
 
         # The script finds the installer beside itself, so it runs from a tree
         # whose installer is this test's.
@@ -94,8 +87,6 @@ class VerifyInstallerTest(unittest.TestCase):
         self._write(self.base / "tree/scripts/install.sh", FAKE_INSTALLER)
 
         self._fake("curl", FAKE_CURL)
-        self._fake("sleep", FAKE_SLEEP)
-        self._fake("cosign", "#!/bin/sh\nexit 0\n")
         self._fake("dpkg-query", FAKE_DPKG_QUERY)
         self._fake("fermix", FAKE_ENGINE)
         self._fake("docker", FAKE_DOCKER)
@@ -115,17 +106,27 @@ class VerifyInstallerTest(unittest.TestCase):
             ["installer --no-setup", "installer --no-setup"],
         )
 
+    def test_the_installer_reads_the_rails_table_and_the_release_from_the_real_curl(self):
+        result = self._run(
+            "deb", transcript=transcript() + f"\nfermix {VERSION} is already installed"
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.table_copy.read_text(encoding="utf-8"), TABLE)
+        curls = [call for call in self._calls() if call.startswith("curl")]
+        self.assertEqual(curls, [f"curl -fsSL {PACKAGE_URL} -o /dev/null"] * 2)
+
     def test_a_second_run_that_reinstalls_is_a_failure(self):
         result = self._run("deb", transcript=transcript())
 
         self.assertEqual(result.returncode, 1)
         self.assertIn(f"a second run did not recognise the installed {VERSION}", result.stderr)
 
-    def test_a_skipped_signature_check_is_a_failure(self):
+    def test_an_install_that_did_not_check_the_digest_is_a_failure(self):
         result = self._run("deb", transcript=transcript(verified=False))
 
         self.assertEqual(result.returncode, 1)
-        self.assertIn("did not verify the package signature", result.stderr)
+        self.assertIn(f"did not check the deb package against the digest {TABLE_URL} lists", result.stderr)
 
     def test_a_host_that_was_handed_the_standalone_binary_is_a_failure(self):
         result = self._run(
@@ -156,7 +157,7 @@ class VerifyInstallerTest(unittest.TestCase):
         self.assertIn("install.sh: sha256 mismatch", result.stdout)
         self.assertIn("the installer did not finish on this runner", result.stderr)
 
-    def test_an_rpm_row_runs_in_fedora_with_the_runners_cosign(self):
+    def test_an_rpm_row_runs_in_fedora_with_the_rails_table_in_front_of_its_curl(self):
         result = self._run(
             "rpm",
             transcript="\n".join(
@@ -172,8 +173,18 @@ class VerifyInstallerTest(unittest.TestCase):
         docker = [call for call in self._calls() if call.startswith("docker")]
         self.assertEqual(len(docker), 1)
         self.assertIn(f"-v {self.base}/tree/scripts/install.sh:/install.sh:ro", docker[0])
-        self.assertIn(f"-v {self.bin}/cosign:/usr/local/bin/cosign:ro", docker[0])
+        self.assertIn(f"-v {self.table}:/fermix-install-releases:ro", docker[0])
+        self.assertRegex(docker[0], r"-v /\S+/container-curl:/usr/local/bin/curl:ro")
         self.assertIn("fedora:41", docker[0])
+
+    def test_the_containers_stand_in_answers_the_table_and_passes_the_rest_to_its_curl(self):
+        stand_in = self._stand_in_for_the_container()
+
+        # The same generator as the deb row's, which the tests above run for
+        # real; here only its two addresses differ.
+        self.assertIn('exec cp "/fermix-install-releases" "$output"', stand_in)
+        self.assertIn('exec "/usr/bin/curl" "$@"', stand_in)
+        self.assertIn(f'[ "$argument" != "{TABLE_URL}" ] || asks_for_table=1', stand_in)
 
     def test_an_rpm_row_whose_database_names_another_version_is_a_failure(self):
         result = self._run(
@@ -186,45 +197,56 @@ class VerifyInstallerTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn(f"rpm does not report fermix {VERSION} installed", result.stderr)
 
-    def test_the_wait_for_the_feed_is_bounded_and_names_what_the_feed_said(self):
-        result = self._run("deb", transcript=transcript(), feed_latest="9.9.8")
+    def test_a_table_for_another_release_is_refused_before_installing(self):
+        for text in (f"format 1\nlatest 9.9.8\n", "latest 9.9.9\nformat 1\n", "format 1\n", ""):
+            with self.subTest(table=text):
+                self.log.write_text("", encoding="utf-8")
+                self.table.write_text(text, encoding="utf-8")
 
-        self.assertEqual(result.returncode, 1)
-        self.assertIn(f"still names '9.9.8' instead of {VERSION} after 12 checks", result.stderr)
-        calls = self._calls()
-        self.assertEqual(calls.count("curl"), 12)
-        self.assertEqual(calls.count("sleep 10"), 11)
-        self.assertEqual([call for call in calls if call.startswith("installer")], [])
+                result = self._run("deb", transcript=transcript())
 
-    def test_a_feed_that_never_answers_is_named_as_that(self):
-        result = self._run("deb", transcript=transcript(), extra_env={"FAKE_CURL_EXIT": "22"})
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(f"the digest table at {self.table}", result.stderr)
+                self.assertEqual(self._calls(), [])
 
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("could not be fetched", result.stderr)
-        self.assertEqual(self._calls().count("curl"), 12)
-
-    def test_cosign_is_required_so_the_check_cannot_be_skipped(self):
-        (self.bin / "cosign").unlink()
+    def test_a_missing_table_is_refused(self):
+        self.table.unlink()
 
         result = self._run("deb", transcript=transcript())
 
         self.assertEqual(result.returncode, 1)
-        self.assertIn("cosign is required", result.stderr)
+        self.assertIn(f"digest table not found: {self.table}", result.stderr)
+        self.assertEqual(self._calls(), [])
 
     def test_usage_and_unknown_kinds_are_refused(self):
         self.assertEqual(self._run_raw([]).returncode, 2)
-        result = self._run_raw(["pkg", VERSION])
+        self.assertEqual(self._run_raw(["deb", VERSION]).returncode, 2)
+        result = self._run_raw(["pkg", VERSION, str(self.table)])
         self.assertEqual(result.returncode, 1)
         self.assertIn("unsupported package kind: pkg", result.stderr)
 
-    def _run(self, kind, transcript, installed=VERSION, engine=VERSION, feed_latest=VERSION, extra_env=None):
+    def _stand_in_for_the_container(self):
+        """The stand-in the rpm row mounts, kept by a docker that copies it out."""
+        kept = self.base / "kept-container-curl"
+        self._fake(
+            "docker",
+            "#!/bin/sh\n"
+            'for argument in "$@"; do\n'
+            '  case "$argument" in *:/usr/local/bin/curl:ro) cp "${argument%%:*}" "$FAKE_KEPT" ;; esac\n'
+            "done\n"
+            "exit 1\n",
+        )
+        self._run("rpm", transcript="", extra_env={"FAKE_KEPT": str(kept)})
+        return kept.read_text(encoding="utf-8")
+
+    def _run(self, kind, transcript, installed=VERSION, engine=VERSION, extra_env=None):
         return self._run_raw(
-            [kind, VERSION],
+            [kind, VERSION, str(self.table)],
             {
                 "FAKE_TRANSCRIPT": transcript,
                 "FAKE_INSTALLED_VERSION": installed,
                 "FAKE_ENGINE_VERSION": engine,
-                "FAKE_FEED": json.dumps({"schema_version": 1, "latest": feed_latest}),
+                "FAKE_TABLE_COPY": str(self.table_copy),
                 **(extra_env or {}),
             },
         )

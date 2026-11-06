@@ -302,7 +302,8 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertIsNotNone(job, "release.yml has no installer job ahead of homebrew")
         body = job.group(1)
 
-        # The installer reads the public `latest` feed, which a draft is not.
+        # The installer downloads from the public release URLs, which a draft
+        # does not have.
         self.assertIn("needs: promote\n", body)
         self.assertIn("if: ${{ !contains(github.ref_name, '-') }}", body)
         for row in (
@@ -313,10 +314,16 @@ class ReleaseWorkflowTest(unittest.TestCase):
         ):
             with self.subTest(row=row):
                 self.assertIn(row, body)
-        # Without cosign the installer skips the signature check, loudly, and
-        # the verification requires that it ran.
+        # fermix.ai lists the release only once the site pins it, so the
+        # installer is handed the table built from the rail's own signed files,
+        # each checked with cosign first, and the table is what it runs against.
+        self.assertIn("name: signed-release-candidate\n", body)
         self.assertIn("sigstore/cosign-installer@", body)
+        build = 'scripts/release/build_install_table.sh . "${TAG_NAME#v}" > "$RUNNER_TEMP/install-releases"'
+        self.assertIn(build, body)
         self.assertIn("scripts/release/verify_installer.sh", body)
+        self.assertLess(body.index(build), body.index("scripts/release/verify_installer.sh"))
+        self.assertIn('"$RUNNER_TEMP/install-releases"\n', body.split("scripts/release/verify_installer.sh", 1)[1])
         # Nothing may wait on a job that can only run once the release is out.
         self.assertNotRegex(self.release, r"needs:[^\n]*\binstaller\b")
 

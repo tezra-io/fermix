@@ -1,17 +1,23 @@
 #!/usr/bin/env bash
-# Run the advertised installer against the release that was just published, and
+# Run the repository's installer against the release that was just published, and
 # prove that what it installed is that release.
 #
-# This is the one check that cannot run on a draft: scripts/install.sh reads
-# releases/latest/download/releases.json and downloads from the public release
-# URLs, and neither answers until the release is published. So it runs after
-# promotion, beside the Homebrew check, and a failure here means the command
-# the site advertises is broken for a release people can already see.
+# This is the one check that cannot run on a draft: scripts/install.sh downloads
+# from the release's public URLs, which answer only once the release is
+# published. So it runs after promotion, beside the Homebrew check.
+#
+# The installer trusts nothing but the digest table https://fermix.ai/install/releases
+# serves, and the site lists a release only once its own pin of that release has
+# deployed, which comes after the release. So the installer is handed the table
+# the rail built from its own cosign-verified files (build_install_table.sh): a
+# curl stand-in first on its PATH answers that one address from the rail's
+# table, and every other address, the release files included, goes to the real
+# curl. What the site then serves is checked by hand once it deploys
+# (docs/RELEASING.md).
 #
 # The deb row installs on the runner itself, through sudo, the way a person's
 # machine does. The rpm row installs inside a Fedora container as root, with
-# the runner's cosign mounted in so the signature check runs there too rather
-# than being skipped.
+# the same stand-in in front of the container's own curl.
 
 set -euo pipefail
 
@@ -21,50 +27,57 @@ fail() {
 }
 
 usage() {
-  printf 'usage: %s <deb|rpm> <version>\n' "$0" >&2
+  printf 'usage: %s <deb|rpm> <version> <digest-table>\n' "$0" >&2
   exit 2
 }
 
-[ "$#" -eq 2 ] || usage
+[ "$#" -eq 3 ] || usage
 
 kind="$1"
 version="$2"
+table="$3"
 
 case "$kind" in
   deb | rpm) ;;
   *) fail "unsupported package kind: $kind" ;;
 esac
 [ -n "$version" ] || fail "expected version must not be empty"
+[ -f "$table" ] || fail "digest table not found: $table"
+{ read -r format_line && read -r latest_line; } <"$table" || fail "the digest table at $table has fewer than two lines"
+[ "$format_line" = "format 1" ] && [ "$latest_line" = "latest $version" ] ||
+  fail "the digest table at $table does not open with 'format 1' and 'latest $version'"
 
 repo_root="$(cd "$(dirname "$0")/../.." && pwd -P)"
 installer="$repo_root/scripts/install.sh"
 [ -f "$installer" ] || fail "installer not found: $installer"
 
-feed_url="https://github.com/tezra-io/fermix/releases/latest/download/releases.json"
-identity="https://github.com/tezra-io/fermix/.github/workflows/release.yml@refs/tags/v${version}"
+table_url="https://fermix.ai/install/releases"
 
-cosign_path="$(command -v cosign)" ||
-  fail "cosign is required, so the installer checks the signature instead of skipping it"
+work="$(mktemp -d)"
+trap 'rm -rf -- "$work"' EXIT
 
-# Publication and the `latest` redirect are not one atomic step. The wait is
-# bounded, and running out of checks is a failure that names what the feed said.
-feed_latest=""
-for attempt in $(seq 1 12); do
-  feed="$(curl -fsSL "$feed_url")" || feed=""
-  feed_latest="$(uv run --no-project python -c '
-import json, sys
-try:
-    print(json.loads(sys.argv[1]).get("latest", ""))
-except ValueError:
-    print("")
-' "$feed")"
-  [ "$feed_latest" = "$version" ] && break
-  [ "$attempt" -eq 12 ] || sleep 10
+# write_curl_stand_in <path> <the table, as the stand-in sees it> <the real curl>
+write_curl_stand_in() {
+  cat >"$1" <<STAND_IN
+#!/bin/sh
+# The release rail's stand-in for curl: $table_url is answered from the
+# rail's own table, and every other address goes to $3.
+output=""
+previous=""
+asks_for_table=0
+for argument in "\$@"; do
+  [ "\$previous" != "-o" ] || output="\$argument"
+  [ "\$argument" != "$table_url" ] || asks_for_table=1
+  previous="\$argument"
 done
-if [ "$feed_latest" != "$version" ]; then
-  [ -n "$feed" ] || fail "the latest release feed could not be fetched from $feed_url in 12 checks"
-  fail "the latest release feed still names '${feed_latest}' instead of $version after 12 checks"
+if [ "\$asks_for_table" -eq 1 ]; then
+  [ -n "\$output" ] || { echo "curl stand-in: $table_url was asked for without -o" >&2; exit 2; }
+  exec cp "$2" "\$output"
 fi
+exec "$3" "\$@"
+STAND_IN
+  chmod 0755 "$1"
+}
 
 # What every row asserts about the installer's own words.
 check_transcript() {
@@ -75,18 +88,20 @@ check_transcript() {
     *) fail "the installer did not choose the $kind package on this host" ;;
   esac
   case "$transcript" in
-    *"Signature verified against $identity"*) ;;
-    *) fail "the installer did not verify the package signature against $identity" ;;
+    *"==> Verified sha256 "*" against $table_url ("*", release $version)"*) ;;
+    *) fail "the installer did not check the $kind package against the digest $table_url lists for $version" ;;
   esac
 }
 
 if [ "$kind" = rpm ]; then
   command -v docker >/dev/null 2>&1 || fail "docker is required to run the rpm row"
+  write_curl_stand_in "$work/container-curl" /fermix-install-releases /usr/bin/curl
 
   transcript="$(
     docker run --rm \
       -v "$installer":/install.sh:ro \
-      -v "$cosign_path":/usr/local/bin/cosign:ro \
+      -v "$table":/fermix-install-releases:ro \
+      -v "$work/container-curl":/usr/local/bin/curl:ro \
       fedora:41 sh -c '
         set -eu
         sh /install.sh --no-setup
@@ -112,7 +127,11 @@ if [ "$kind" = rpm ]; then
   exit 0
 fi
 
-transcript="$(sh "$installer" --no-setup 2>&1)" || {
+real_curl="$(command -v curl)" || fail "curl is required to run the installer"
+mkdir "$work/bin"
+write_curl_stand_in "$work/bin/curl" "$table" "$real_curl"
+
+transcript="$(PATH="$work/bin:$PATH" sh "$installer" --no-setup 2>&1)" || {
   printf '%s\n' "$transcript"
   fail "the installer did not finish on this runner"
 }
@@ -132,7 +151,7 @@ esac
 
 # Running it again is how a person updates, so a machine already on the latest
 # release must be left alone rather than reinstalled.
-again="$(sh "$installer" --no-setup 2>&1)" || {
+again="$(PATH="$work/bin:$PATH" sh "$installer" --no-setup 2>&1)" || {
   printf '%s\n' "$again"
   fail "the installer refused a machine that already has $version"
 }

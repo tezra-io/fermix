@@ -27,6 +27,17 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   headers of its own to a Gmail message, such as a hidden Bcc. Sending,
   replying and drafting now refuse such a value before Gmail is called, with
   "to must be one line", and the agent can try again with the address alone.
+- **The Linux installer installs only what fermix.ai vouches for.**
+  `curl -fsSL https://fermix.ai/install | sh` took each file's sha256 from the
+  same GitHub release it downloaded the file from, and checked a cosign
+  signature only when `cosign` happened to be installed, so whoever could
+  change the release could change the checksum with it. It now checks every
+  download against the sha256 fermix.ai lists at
+  https://fermix.ai/install/releases, which the site writes only after the
+  release's cosign signatures verify, and refuses a file the list doesn't name
+  or doesn't match before anything is installed or run with `sudo`. No local
+  `cosign` is needed. A new release reaches the installer once fermix.ai lists
+  it.
 
 ### Behind a feature flag
 

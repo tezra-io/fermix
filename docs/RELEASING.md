@@ -87,22 +87,43 @@ attaches the packages to the draft.
 **The installer, and the one job that runs after publishing.** `scripts/install.sh`
 is what `https://fermix.ai/install` serves. On Linux with apt, dnf or zypper it
 installs the package; everywhere else, and with `--standalone`, it installs the
-standalone binary. It reads a package as `packages -> <target> -> <deb|rpm>` in
-`releases.json`, where each entry carries `url`, `sha256`, `sig_url` and
-`cert_url`, with a line-scanning awk rather than jq, so the feed stays
-pretty-printed, one key per line; `test_install_sh.py` runs the installer over
-the feed `build_releases_json.sh` really writes, which is what holds the two
-together. The installer reads the public `latest` feed and the public download
-URLs, and a draft has neither, so `release.yml`'s `installer` job runs after
-`promote`: `scripts/release/verify_installer.sh` waits (twelve checks, ten
-seconds apart) for `latest` to name the tag, runs the installer with `cosign`
-present, and requires that it chose the package, verified the signature against
-the tag, left the package database and `fermix --version` naming the release,
-and changed nothing on a second run — the debs on the two Ubuntu runners through
-`sudo`, the rpms as root inside `fedora:41`. Nothing waits on that job. A red
-one means the advertised command is broken for a release that is already out:
-fix the installer and re-serve it, because the release itself cannot be
-replaced.
+standalone binary. It trusts one document: the digest table fermix.ai serves at
+`https://fermix.ai/install/releases`, which the site writes only after checking
+every file's cosign signature against the tag's release-workflow identity and
+hashing the file itself. The table is plain lines, read with awk:
+
+```
+format 1
+latest <version>
+<version> <sha256> <file>
+```
+
+with one row per installable file of every pinned release: the four standalone
+binaries (`fermix_<os>_<arch>`) and the four packages (`fermix_<version>_<amd64|arm64>.deb`,
+`fermix-<version>-1.<x86_64|aarch64>.rpm`). The installer builds the download
+address itself (`https://github.com/tezra-io/fermix/releases/download/v<version>/<file>`),
+never reads GitHub's `releases.json`, `.sig` or `.pem`, and refuses before any
+download, `sudo` or package manager when the table cannot be fetched, its first
+line is not `format 1`, it names no `latest`, the release or this machine's file
+has no single row, or the download does not match it. `test_install_sh.py` holds
+those refusals, and runs the installer over the table `build_install_table.sh`
+really writes.
+
+A new release is therefore invisible to the installer, Linux packages, standalone
+installs and Always On first boots and nightly updates alike, until the site pins
+it (below). The installer downloads from the public release URLs, which a draft
+does not have, so `release.yml`'s `installer` job runs after `promote` against a
+table the rail builds itself: `scripts/release/build_install_table.sh` checks the
+eight installable files of the signed candidate with cosign against the tag and
+hashes them, and `scripts/release/verify_installer.sh` runs the repository's
+installer with a `curl` stand-in that answers `https://fermix.ai/install/releases`
+from that table and passes every other address to the real curl. It requires
+that the installer chose the package, checked it against the table, left the
+package database and `fermix --version` naming the release, and changed nothing
+on a second run: the debs on the two Ubuntu runners through `sudo`, the rpms as
+root inside `fedora:41`. Nothing waits on that job. A red one means the
+installer is broken for a release that is already out: fix the installer and
+re-serve it, because the release itself cannot be replaced.
 
 **Serving it.** `fermix-site` vendors the script as `src/installer/install.sh`,
 byte for byte, and `src/config/installer.ts` there pins its sha256 and the
@@ -110,6 +131,14 @@ engine commit it came from (a test holds the two together); the served copy is
 never edited in the site repository. The site's `/install` route answers by
 what asks: `curl`, `wget` and `sh` receive the script, and a browser is sent to
 the install page, so check the copy with `curl` and never by opening the address.
+Each release also needs its digests pinned: in the site checkout, with `cosign`
+on `PATH`, `node scripts/pin-engine-release.mjs vX.Y.Z` downloads the eight
+installable files with their `.sig` and `.pem` from the published release,
+verifies each against the tag's release-workflow identity, hashes it, and adds
+the rows to `src/config/engine-releases.txt`, moving `latest` only forward; any
+failure leaves the file unchanged. That file is what `/install/releases` serves.
+It is cumulative, so an Always On server can still install the release its
+desktop runs; pinning an older release adds its rows without moving `latest`.
 Before the site deploys:
 
 ```sh
@@ -120,14 +149,19 @@ and once it has:
 
 ```sh
 curl -fsSL https://fermix.ai/install | cmp - scripts/install.sh
+curl -fsSL https://fermix.ai/install/releases | awk -v v=X.Y.Z '$0 == "latest " v || $1 == v'
 ```
 
-**The order matters the first time a release changes what the installer needs.**
-An installer that installs packages, served against a `latest` release that
-carries none, refuses every apt, dnf and zypper machine with `lists no deb
-package`. So the site deploys the new script only after the release that
-publishes packages is out, which is where the site already sits in the release
-order.
+The second command must print `latest X.Y.Z` and eight rows; then walk the
+Linux package row of the install paths above against the served installer.
+
+**The order matters.** The installer refuses a release the table does not list,
+so until the site's pin of a release deploys, `curl -fsSL https://fermix.ai/install | sh`
+keeps installing the previous `latest`, and `--version X.Y.Z` for the new one
+(an Always On server whose desktop already runs it) stops with `lists no release
+X.Y.Z`. Pin each release in the site pull request that follows it. A change to
+what the installer reads deploys only together with, or after, the table it
+reads: an installer ahead of its table refuses every machine.
 
 **The version rule, and what it costs.** Neither package may carry a Debian
 revision or an rpm epoch, because `fermix-desktop` pins `Depends: fermix (= <v>)`

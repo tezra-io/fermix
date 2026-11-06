@@ -412,7 +412,7 @@ fetch_installer() {
   fi
 }
 
-# The installer, with its sha256 and cosign checks: it installs the release
+# The installer, checking fermix.ai's digests: it installs the release
 # tonight's ceiling names. The package restarts nothing, so the running engine
 # is untouched until the restart. Its exit status does not say whether it
 # failed before or after the package manager ran, so any failure stops the
