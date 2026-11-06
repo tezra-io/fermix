@@ -22,6 +22,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the same with its reply, and Elixir's bound how much work a URL's port
   takes to read. The phone listener keeps its ten-second limit on a TLS
   handshake under the new web server.
+- **An email Fermix sends has only the recipients you were shown.** A
+  recipient, subject or reply reference with a line break in it could add
+  headers of its own to a Gmail message, such as a hidden Bcc. Sending,
+  replying and drafting now refuse such a value before Gmail is called, with
+  "to must be one line", and the agent can try again with the address alone.
 
 ### Behind a feature flag
 

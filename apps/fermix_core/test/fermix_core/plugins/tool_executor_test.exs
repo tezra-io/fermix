@@ -615,6 +615,74 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
     assert raw =~ "Sounds good"
   end
 
+  # A header value that spans lines adds headers of its own, such as a Bcc the
+  # visible arguments never named, so it is refused before Gmail is called.
+  for tool <- ~w(gmail_send_message gmail_reply_to_thread gmail_create_draft) do
+    test "#{tool} refuses a recipient with a line break before calling Gmail" do
+      plug = gmail_write_plug(self(), %{"id" => "m11"})
+
+      args = %{
+        "thread_id" => "t1",
+        "to" => "a@b.test\r\nBcc: c@d.test",
+        "subject" => "Hi",
+        "body" => "Hello"
+      }
+
+      assert {:ok, result} =
+               ToolExecutor.execute(args, gmail_context(plug), "gmail", %{
+                 "name" => unquote(tool),
+                 "read_only" => false
+               })
+
+      assert result.success == false
+      assert result.error =~ "to must be one line"
+      refute_received {:gmail_write, _path, _body}
+    end
+  end
+
+  test "a reply refuses a line break, a carriage return or a NUL in any header value" do
+    plug = gmail_write_plug(self(), %{"id" => "m12"})
+
+    base = %{
+      "thread_id" => "t1",
+      "to" => "a@b.test",
+      "subject" => "Re: Hi",
+      "body" => "Sounds good"
+    }
+
+    for field <- ~w(to cc bcc subject in_reply_to references),
+        bad <- ["x\nBcc: c@d.test", "x\rBcc: c@d.test", "x" <> <<0>>] do
+      assert {:ok, result} =
+               ToolExecutor.execute(
+                 Map.put(base, field, bad),
+                 gmail_context(plug),
+                 "gmail",
+                 %{"name" => "gmail_reply_to_thread", "read_only" => false}
+               )
+
+      assert result.success == false
+      assert result.error =~ "#{field} must be one line"
+    end
+
+    refute_received {:gmail_write, _path, _body}
+  end
+
+  test "a draft refuses a header value that is not a string" do
+    plug = gmail_write_plug(self(), %{"id" => "draft-2"})
+
+    assert {:ok, result} =
+             ToolExecutor.execute(
+               %{"to" => ["a@b.test", "c@d.test"], "subject" => "Hi", "body" => "Hello"},
+               gmail_context(plug),
+               "gmail",
+               %{"name" => "gmail_create_draft", "read_only" => false}
+             )
+
+    assert result.success == false
+    assert result.error =~ "to must be a string"
+    refute_received {:gmail_write, _path, _body}
+  end
+
   test "modifies message labels (mark read = remove UNREAD)" do
     plug = gmail_write_plug(self(), %{"id" => "m1", "labelIds" => ["INBOX"]})
 
