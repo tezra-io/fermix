@@ -489,12 +489,18 @@ defmodule FermixCore.Management.Home do
     }
   end
 
-  defp primary_view(nil), do: nil
+  @doc """
+  A desktop's link to its primary as `home.status` answers it in `primary`
+  (nil where there is none), from `FermixCore.Home.Link.status/0`'s
+  `primary`.
+  """
+  @spec primary_view(map() | nil) :: map() | nil
+  def primary_view(nil), do: nil
 
-  defp primary_view(
-         %{name: name, connected: connected, status: status, sentence: sentence} = primary
-       )
-       when is_boolean(connected) and status in @primary_statuses and is_binary(sentence) do
+  def primary_view(
+        %{name: name, connected: connected, status: status, sentence: sentence} = primary
+      )
+      when is_boolean(connected) and status in @primary_statuses and is_binary(sentence) do
     %{
       "name" => name,
       "connected" => connected,

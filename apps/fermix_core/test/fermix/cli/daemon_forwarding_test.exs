@@ -217,6 +217,27 @@ defmodule Fermix.CLI.DaemonForwardingTest do
              Client.request_v1("cues.status", %{}, socket_path: failing, timeout: @reply_ms)
   end
 
+  # Doctor's `server link` row: the link as this computer's own engine holds
+  # it, its path included, read with no round trip to the server.
+  test "the link Doctor reads is this machine's own, and asks the server nothing", ctx do
+    socket = start_daemon!(ctx, engine_role: @device, desktop_link?: true)
+
+    assert {:ok, %{"status" => "ok", "result" => %{"primary" => primary}}} =
+             Client.request("home_link", socket_path: socket, timeout: @reply_ms)
+
+    assert primary["name"] == "fermix-vm"
+    assert primary["connected"] == true
+    assert primary["path"] == "direct"
+    refute_received {:forwarded, _request, _opts}
+  end
+
+  test "an engine with no link answers no primary", ctx do
+    socket = start_daemon!(ctx, engine_role: :primary, link_status: &unlinked/0)
+
+    assert {:ok, %{"status" => "ok", "result" => %{"primary" => nil}}} =
+             Client.request("home_link", socket_path: socket, timeout: @reply_ms)
+  end
+
   describe "composed requests on a linked device" do
     test "home.status answers this machine's facts and the primary's picture, asked within 5 s",
          ctx do
@@ -448,6 +469,7 @@ defmodule Fermix.CLI.DaemonForwardingTest do
     end
 
     {forward, opts} = Keyword.pop(opts, :forward, recorded)
+    {link, opts} = Keyword.pop(opts, :link_status, &link_status/0)
     # As `Home.Link.forwarding/0` answers it for a linked desktop, or any other engine.
     forwarding = if linked?, do: [primary_forward: forward], else: []
 
@@ -468,7 +490,7 @@ defmodule Fermix.CLI.DaemonForwardingTest do
            endpoint_opts: [port: 4041],
            operation_opts: [
              mobile: [provider: PairProvider, test: test],
-             home: [home: root, scheduler: nil, link_status: &link_status/0]
+             home: [home: root, scheduler: nil, link_status: link]
            ]
          ]
        ]
@@ -506,12 +528,15 @@ defmodule Fermix.CLI.DaemonForwardingTest do
         name: "fermix-vm",
         connected: true,
         status: :connected,
-        sentence: "Fermix is connected."
+        sentence: "Fermix is connected.",
+        path: :direct
       },
       desktops: [],
       enrollment: nil
     }
   end
+
+  defp unlinked, do: %{primary: nil, desktops: [], enrollment: nil}
 
   defp identity do
     %{

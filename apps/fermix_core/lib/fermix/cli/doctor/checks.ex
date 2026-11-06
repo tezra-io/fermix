@@ -1453,38 +1453,40 @@ defmodule Fermix.CLI.Doctor.Checks do
 
   @doc """
   How this computer reaches its Always On server (M75 step 7), as the
-  running engine's `home.status` names its link: connected directly, through
-  Fermix's relay, or why not in the link's own sentence (a server that no
-  longer knows this computer fails). A computer with no desktop link
-  (`device/desktop.json`) has no row. `:home` and `:client` (0-arity, the
-  `home.status` call) are the tests' seams.
+  running engine holds its link (`home_link` on the control socket, which
+  asks the server nothing): connected directly, through Fermix's relay, or
+  why not in the link's own sentence (a server that no longer knows this
+  computer fails). A computer with no desktop link (`device/desktop.json`)
+  has no row. `:home` and `:client` (0-arity, the `home_link` request) are
+  the tests' seams.
   """
   @spec server_link(keyword()) :: result() | nil
   def server_link(opts \\ []) when is_list(opts) do
     home = Keyword.get_lazy(opts, :home, &ConfigStore.fermix_home/0)
 
     client =
-      Keyword.get(opts, :client, fn ->
-        Client.request_v1("home.status", %{}, timeout: @server_link_ms)
-      end)
+      Keyword.get(opts, :client, fn -> Client.request("home_link", timeout: @server_link_ms) end)
 
     if File.regular?(DesktopLink.path(home)), do: server_link_result(client.())
   end
 
-  defp server_link_result({:ok, %{"primary" => %{"connected" => true} = primary}}),
-    do: ok("server link", "connected to #{primary["name"]}#{path_words(primary["path"])}")
+  defp server_link_result({:ok, %{"status" => "ok", "result" => %{"primary" => primary}}}),
+    do: link_row(primary)
 
-  defp server_link_result({:ok, %{"primary" => %{"status" => "revoked", "sentence" => said}}}),
-    do: fail("server link", said)
-
-  defp server_link_result({:ok, %{"primary" => %{"sentence" => said}}}),
-    do: warn("server link", said)
-
-  defp server_link_result({:ok, _no_link}),
-    do: warn("server link", "not read: the running engine reports no link to a server")
+  defp server_link_result({:ok, %{"status" => "error", "reason" => reason}}),
+    do: warn("server link", "not read: the running engine answered #{reason}")
 
   defp server_link_result({:error, reason}),
     do: warn("server link", "not read: #{Client.describe_error(reason)}")
+
+  defp link_row(%{"connected" => true} = primary),
+    do: ok("server link", "connected to #{primary["name"]}#{path_words(primary["path"])}")
+
+  defp link_row(%{"status" => "revoked", "sentence" => said}), do: fail("server link", said)
+  defp link_row(%{"sentence" => said}), do: warn("server link", said)
+
+  defp link_row(nil),
+    do: warn("server link", "not read: the running engine reports no link to a server")
 
   defp path_words("direct"), do: " directly"
   defp path_words("relay"), do: " through Fermix's relay"

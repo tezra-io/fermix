@@ -84,6 +84,18 @@ defmodule FermixChannels.Mobile.Iroh.HintsTest do
       assert Hints.tailnet(found, 4033) == ["100.70.1.4:4033"]
     end
 
+    # A server whose kernel has no IPv6 binds IPv4 alone: its tailnet
+    # interface has no fd7a:: address, and it gives no IPv6 hint.
+    test "an IPv4-only tailnet interface gives its IPv4 hint alone" do
+      found =
+        interfaces([
+          {~c"eth0", [flags: @up, addr: {10, 0, 0, 5}, addr: {0x2001, 0xDB8, 0, 0, 0, 0, 0, 5}]},
+          {~c"tailscale0", [flags: [:up, :pointtopoint, :running], addr: {100, 101, 102, 103}]}
+        ])
+
+      assert Hints.tailnet(found, 4033) == ["100.101.102.103:4033"]
+    end
+
     test "no tailnet is the normal case: no hints" do
       found = interfaces([{~c"eth0", [flags: @up, addr: {10, 0, 0, 5}, addr: {198, 51, 100, 7}]}])
       assert Hints.tailnet(found, 4033) == []

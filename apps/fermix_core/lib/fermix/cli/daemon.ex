@@ -14,7 +14,11 @@ defmodule Fermix.CLI.Daemon do
 
   and the two a sibling CLI VM sends after changing state on disk:
   `plugins_apply` (re-read the config) and `auth_forget` (let go of the tokens
-  of a profile the CLI just signed out of).
+  of a profile the CLI just signed out of). `home_link` answers this engine's
+  own view of its link to an Always On server (`home.status`'s `primary`, its
+  path included) for Doctor's `server link` row: unlike `home.status`, which a
+  linked desktop composes with the server's own part, it asks the server
+  nothing.
 
   `status` and `overview` were unversioned methods until `fermix status` moved
   onto `hello` plus `overview.get`; they were deleted rather than kept, so one
@@ -61,6 +65,7 @@ defmodule Fermix.CLI.Daemon do
   alias FermixCore.Introspection.Capabilities
   alias FermixCore.Introspection.Wire
   alias FermixCore.Management.Cues, as: ManagementCues
+  alias FermixCore.Management.Home, as: ManagementHome
   alias FermixCore.Management.HomeMove, as: ManagementHomeMove
   alias FermixCore.Management.Lifecycle
   alias FermixCore.Management.Mobile, as: ManagementMobile
@@ -856,6 +861,7 @@ defmodule Fermix.CLI.Daemon do
     do: mobile_revoke_reply(request, state)
 
   defp handle_method("mobile_status", _request, state), do: mobile_status_reply(state)
+  defp handle_method("home_link", _request, state), do: home_link_reply(state)
 
   defp handle_method("shutdown", _request, _state) do
     Trace.record(:agent_event, "daemon", %{event: "shutdown_requested"})
@@ -912,6 +918,24 @@ defmodule Fermix.CLI.Daemon do
   end
 
   defp mobile_status_reply(state), do: mobile_call(state, :status, [])
+
+  # The relay's own view of the link (`Home.Link`'s `status/0`, the seam
+  # `home.status` reads too), never the server's part.
+  defp home_link_reply(state) do
+    link_status =
+      state.management_opts
+      |> Keyword.get(:operation_opts, [])
+      |> Keyword.get(:home, [])
+      |> Keyword.get(:link_status, fn -> HomeLink.impl().status() end)
+
+    case safe_daemon_call(link_status) do
+      {:ok, %{primary: primary}} ->
+        %{status: "ok", result: %{"primary" => ManagementHome.primary_view(primary)}}
+
+      {:error, reason} ->
+        error_reply(reason)
+    end
+  end
 
   defp mobile_call(state, function, args) do
     provider = state.mobile_provider || runtime_mobile_provider()

@@ -32,7 +32,8 @@ defmodule Fermix.CLI.Doctor.ServerLinkCheckTest do
     home
   end
 
-  defp answering(primary), do: fn -> {:ok, %{"role" => "device", "primary" => primary}} end
+  defp answering(primary),
+    do: fn -> {:ok, %{"status" => "ok", "result" => %{"primary" => primary}}} end
 
   defp primary(fields) do
     Map.merge(
@@ -94,6 +95,12 @@ defmodule Fermix.CLI.Doctor.ServerLinkCheckTest do
              Checks.server_link(home: home, client: fn -> {:error, :not_running} end)
 
     assert detail =~ "not read"
+
+    # An engine older than the row's request.
+    older = fn -> {:ok, %{"status" => "error", "reason" => "unknown method"}} end
+
+    assert %{status: :warn, detail: "not read: the running engine answered unknown method"} =
+             Checks.server_link(home: home, client: older)
   end
 
   test "a computer with no link to a server has no row", %{home: home} do
