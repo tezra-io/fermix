@@ -206,13 +206,16 @@ helper                                   daemon
 - **`bind_port`:** the UDP port the endpoint binds, 1 to 65,535, on every
   interface for IPv4 and for IPv6 both, so a peer that recorded the address
   can dial it there again after the helper restarts (an Always On server,
-  M75). Either kind of `start` may name one. A port that either family cannot
-  have, because another socket holds it, the system refuses it, or the host
-  has no IPv6, is `bind_failed`, whose `message` names the port; the helper
-  never binds another port instead. Without it, the endpoint binds IPv4 and,
-  where the host has it, IPv6 on ports the system picks, which change with
-  every start. Absent, never `null`. The `bound UDP sockets` `log` after
-  `ready` names what was bound.
+  M75). Either kind of `start` may name one. On a host whose kernel has no
+  IPv6 at all (it cannot create an IPv6 socket: "address family not
+  supported"), the endpoint binds the port for IPv4 alone and says so in an
+  `info` `log` after `ready`. A port either family cannot otherwise have,
+  because another socket holds it, the system refuses it, or an address cannot
+  be assigned, is `bind_failed`, whose `message` names the port: the helper
+  never binds another port, and never leaves IPv6 out for any other reason.
+  Without it, the endpoint binds IPv4 and, where the host has it, IPv6 on
+  ports the system picks, which change with every start. Absent, never
+  `null`. The `bound UDP sockets` `log` after `ready` names what was bound.
 - **`dial_id`:** the daemon's name for one dial, 1 to 64 characters from
   `a`–`z`, `0`–`9`, `-` and `_`. The daemon uses 8 random lowercase hex digits.
 - **`socket`:** an absolute path to the Unix-domain stream socket the daemon
