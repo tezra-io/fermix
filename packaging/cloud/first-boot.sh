@@ -22,10 +22,11 @@
 # for on the terminal without echo). It never prints the code or the key,
 # never logs them and never puts them on a command line. Run again, it
 # converges on the same state. A host whose Fermix home exists is read
-# first: a candidate whose enrollment did not finish enrolls again with a new
-# code, a home that runs is started as it is (and refused when given a code),
-# and any other home is refused with the commands that remove it, which the
-# script never runs itself. One already on a tailnet is not logged in again.
+# first: a candidate that has not begun to receive its move enrolls again
+# with a new code, a home that runs is started as it is (and refused when
+# given a code), and any other home is refused, with the commands that remove
+# it when the home could be read, which the script never runs itself. One
+# already on a tailnet is not logged in again.
 set -eu
 
 ENGINE_USER=fermix
@@ -365,12 +366,13 @@ json_object() {
 
 # 0. A host whose Fermix home exists already: what the home is, from `fermix
 # home status --json` as the engine account (it answers with Fermix running
-# or not), decides the run before anything is installed. A candidate whose
-# enrollment did not finish (enrolling, failed, expired) enrolls again with a
-# new code; a home that runs (the primary, or a candidate waiting for or
-# receiving its move) is started as it is, and refused when given a code;
-# any other home is refused. The script never removes a home: each refusal
-# names the commands that do.
+# or not), decides the run before anything is installed. A candidate that
+# has not begun to receive its move (enrolling, failed, expired, or enrolled
+# and waiting for it) enrolls again with a new code; a home that runs (the
+# primary, or a candidate receiving its move) is started as it is, and
+# refused when given a code; any other home is refused. The script never
+# removes a home: each refusal of a home it could read names the commands
+# that do.
 read_home() {
   ENGINE_UID=$(id -u "$ENGINE_USER") ||
     fail "The Fermix home $FERMIX_HOME_DIR exists, but the account $ENGINE_USER does not, so this script cannot read what it is."
@@ -381,11 +383,10 @@ read_home() {
   role=$(json_string "$HOME_JSON" role)
   phase=$(json_string "$(json_object "$HOME_JSON" move)" phase)
   case "$role $phase" in
-    "candidate enrolling" | "candidate failed" | "candidate expired")
-      [ "$RESTORE" -eq 0 ] || refuse_home "This server holds a Fermix home that did not finish enrolling"
+    "candidate enrolling" | "candidate failed" | "candidate expired" | "candidate enrolled")
+      [ "$RESTORE" -eq 0 ] || refuse_home "This server holds a Fermix home that has not received its move"
       REENROLL=1
       ;;
-    "candidate enrolled") home_runs "This server is enrolled already and waits for its move" ;;
     "candidate receiving" | "candidate staged" | "candidate activating") home_runs "This server is receiving its move" ;;
     "primary "*) home_runs "Fermix runs on this server as your primary" ;;
     "device "*) retired_home ;;
@@ -395,11 +396,13 @@ read_home() {
 }
 
 # fermix home status refused (its envelope says why) or stopped (its stderr
-# does).
+# does). What the home holds is not known, so no command that removes it is
+# named.
 home_unreadable() {
   said=$(json_string "$(json_object "$HOME_JSON" error)" sentence)
   [ -n "$said" ] || fail "fermix home status stopped, so this script cannot read what the Fermix home $FERMIX_HOME_DIR is; its message above says why."
-  refuse_home "fermix home status could not read this server's Fermix home (${said%.})"
+  CODE=""
+  fail "fermix home status could not read the Fermix home $FERMIX_HOME_DIR on this server (${said%.}): run sudo -H -u $ENGINE_USER $FERMIX_BIN home status to see why."
 }
 
 # A home that runs is started as it is, unless a code came with this run.
@@ -921,7 +924,7 @@ EOF
 # enrollment replaces the candidate only while no engine runs in the home;
 # the service starts again at step 8.
 stop_engine() {
-  say "Stopping Fermix, whose enrollment did not finish, to enroll this server again with the new code"
+  say "Stopping Fermix to enroll this server again with the new code"
   as_engine service uninstall ||
     fail "fermix service uninstall stopped, so this server is not enrolled again; its message above says why."
 }

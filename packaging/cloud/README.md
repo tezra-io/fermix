@@ -47,26 +47,30 @@ is read first, still before anything is installed: `fermix home status
 --json` as `fermix` (it answers with Fermix running or not) gives the home's
 `role` and, on a candidate, its move's `phase`.
 
-- A candidate whose enrollment did not finish (`enrolling`, `failed` or
-  `expired`: the code ran out before the computer was reached, it was used
-  elsewhere or cancelled, or no move came within 24 hours) enrolls again
-  with a new code, read like a first one: Fermix is stopped (`fermix service
-  uninstall` as `fermix`, since the candidate is replaced only while no
-  engine runs in the home), enrolled with the new code, started and waited
-  for.
-- A home that runs (the primary, or a candidate waiting for its move or
-  receiving it) is bound and started as it is, and the run ends with "Done.
-  Fermix runs from the home it already had." Given a code, it is refused.
+- A candidate that has not begun to receive its move (`enrolling`,
+  `failed` or `expired`: the code ran out before the computer was reached,
+  it was used elsewhere or cancelled, or no move came within 24 hours; or
+  `enrolled`, waiting for a move the owner gave up on, as when the computer
+  forgot this server) enrolls again with a new code, read like a first one:
+  Fermix is stopped (`fermix service uninstall` as `fermix`, since the
+  candidate is replaced only while no engine runs in the home), enrolled
+  with the new code, started and waited for.
+- A home that runs (the primary, or a candidate receiving its move) is bound
+  and started as it is, and the run ends with "Done. Fermix runs from the
+  home it already had." Given a code, it is refused.
 - Any other home (a retired copy a move left, naming where Fermix moved; a
-  desktop of another primary; a candidate whose move cannot be read; a home
-  `fermix home status` refuses to read, with its sentence) is refused, and so
-  is a candidate that did not finish under `--restore`.
+  desktop of another primary; a candidate whose move cannot be read) is
+  refused, and so is a candidate that has not received its move under
+  `--restore`.
 
 Each refusal is one sentence that says what the home is and the commands
 that remove it, should the owner want the server set up again (`sudo -H -u
 fermix env XDG_RUNTIME_DIR=/run/user/<uid> /usr/bin/fermix service
 uninstall`, then `sudo rm -rf /home/fermix/.fermix`, then the command
-again). The script itself never removes a home.
+again). A home `fermix home status` cannot read is refused with its
+sentence and no such commands, since what it holds is not known: `sudo -H
+-u fermix /usr/bin/fermix home status` shows why. The script itself never
+removes a home.
 
 Then, in this order, failing with one sentence and a non-zero exit at any
 step:
@@ -351,11 +355,12 @@ a served key that is not Tailscale's alone, `tailscaled` that does not start,
 `tailscale up` failing before enrolling, each release's repository, and
 `--restore`; after each, the key is in no file, output, command line or
 environment, and its file is gone. Then a host whose home exists: a
-candidate `enrolling`, `failed` or `expired` enrolling again (the code in
-the environment, typed at a terminal, or missing), a Fermix that does not
-stop; a home that runs, with no code and with one; a retired copy, a
-desktop, a candidate whose move cannot be read, a candidate under
-`--restore` and a home the engine refuses to read, each refused. A failure
+candidate `enrolling`, `failed`, `expired` or `enrolled` enrolling again
+(the code in the environment, typed at a terminal, or missing), a Fermix
+that does not stop; a home that runs, with no code and with one; a retired
+copy, a desktop, a candidate whose move cannot be read, a candidate under
+`--restore` and a home the engine cannot read (refused without the
+commands that remove it), each refused. A failure
 is counted in a file, so a check that ends a pipeline counts too.
 
 The containers need Docker with `debian:trixie-slim`, and network inside them
@@ -371,8 +376,9 @@ installed; `pkgs.tailscale.com` fetched for real), `apt-get`, `dpkg-query`,
 fail) are the stand-ins in `test/stubs/`. The chromium scenario
 keeps the real `perl`, so it asks the kernel Docker runs on for its Landlock
 ABI and needs Linux 6.2 or later with Landlock enabled. The scenarios: an
-existing host typing the code at a terminal, run again with no code, then
-given a code (refused), then enrolling again once its enrollment failed,
+existing host typing the code at a terminal, run again with no code once
+it is the primary, then given a code (refused), then enrolling again once
+its enrollment failed,
 then enrolling afresh with the code in the environment and a bucket, after
 the refusals (a stock Debian 12 host and kernels with Landlock ABI 2 or none,
 by the ABI sentence, among them); a restore host and its printed steps, run

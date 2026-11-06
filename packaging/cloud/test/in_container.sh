@@ -10,10 +10,10 @@
 #
 #   existing-host  refusals (a kernel below Landlock ABI 3 among them), then
 #                  the code typed at a terminal, the wait for
-#                  the primary, then a re-run, the same home given a code
-#                  (refused) and a candidate whose enrollment failed
-#                  enrolling again; then the code in the environment with a
-#                  bucket and the release to install
+#                  the primary, then a re-run once it is the primary, the
+#                  same home given a code (refused) and a candidate whose
+#                  enrollment failed enrolling again; then the code in the
+#                  environment with a bucket and the release to install
 #   restore        --restore: no code, no enrollment, the steps printed, a
 #                  re-run once a home exists, a retired copy refused
 #   failures       each failure that stops the first boot: its exit status
@@ -415,9 +415,9 @@ EOF
   check_updates
   check_package_unit
 
-  # The candidate now waits for its move (enrolled, the stand-in's answer
-  # without phases), a home that runs.
+  # Once the move made this server the primary, a home that runs.
   rm -f "$FIXTURES/phases"
+  printf 'primary\n' >"$FIXTURES/role"
   snapshot_files /tmp/state.first
   run_first_boot sh "$FIRST_BOOT"
   check "[ $STATUS -eq 0 ]" "a re-run with no code succeeds (exit $STATUS)"
@@ -436,10 +436,11 @@ EOF
 
   # Given a code, that home is refused, saying what it is and how to remove it.
   run_apart env FERMIX_ENROLL_CODE="$CODE" sh "$FIRST_BOOT"
-  stopped_with "This server is enrolled already and waits for its move: to set this server up again, which deletes that home, run sudo -H -u fermix env XDG_RUNTIME_DIR=/run/user/$ENGINE_UID /usr/bin/fermix service uninstall, then sudo rm -rf /home/fermix/.fermix, then this command again." \
-    "a home waiting for its move, given a code, is refused with the commands that remove it"
+  stopped_with "Fermix runs on this server as your primary: to set this server up again, which deletes that home, run sudo -H -u fermix env XDG_RUNTIME_DIR=/run/user/$ENGINE_UID /usr/bin/fermix service uninstall, then sudo rm -rf /home/fermix/.fermix, then this command again." \
+    "the primary, given a code, is refused with the commands that remove it"
   check "[ \"\$(cat $LOG/calls.log)\" = 'fermix home status --json [as fermix]' ] && [ -d /home/fermix/.fermix ]" \
     "after reading the home, with nothing installed and the home left as it is"
+  rm -f "$FIXTURES/role"
 
   # A candidate whose enrollment failed enrolls again with the new code:
   # Fermix stopped, enrolled, started and waited for.
@@ -884,7 +885,10 @@ EOF
     "and offers Tailscale's own package from it"
   check "contains $OUT '==> This server is on your tailnet at 100.88.12.34'" "it says the server's tailnet address"
 
+  # Run again once the move made it the primary, a home that runs.
+  printf 'primary\n' >"$FIXTURES/role"
   run_first_boot sh "$FIRST_BOOT" --tailscale
+  rm -f "$FIXTURES/role"
   check "[ $STATUS -eq 0 ]" "a re-run on the tailnet needs no key and no terminal (exit $STATUS)"
   check "contains $OUT '==> This server is already on the tailnet invented.example, so Tailscale is not installed or logged in again'" \
     "it says the server is on a tailnet already, naming it"

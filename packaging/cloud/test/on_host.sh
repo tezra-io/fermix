@@ -26,10 +26,10 @@
 # this test's directory, in no logged command line and in no command's
 # environment. Then a host whose Fermix home exists, read through a stand-in
 # for the engine account's fermix calls that answers home status --json in
-# the engine's envelope: a candidate whose enrollment did not finish enrolling
-# again (code in the environment, typed, or missing), a home that runs (no
-# code, or one given), and every other home refused with the commands that
-# remove it.
+# the engine's envelope: a candidate that has not begun to receive its move
+# enrolling again (code in the environment, typed, or missing), a home that
+# runs (no code, or one given), and every other home refused, with the
+# commands that remove it when the home could be read.
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -732,11 +732,11 @@ step start_service
 step install_browser
 step await_enrollment'
 
-# A candidate whose enrollment did not finish enrolls again with a new code:
-# the engine stopped first, then enrolled, started and waited for as on a
-# fresh host.
+# A candidate that has not begun to receive its move (enrolling, failed,
+# expired, or enrolled and waiting) enrolls again with a new code: the engine
+# stopped first, then enrolled, started and waited for as on a fresh host.
 enrolls_again() {
-  for phase in enrolling failed expired; do
+  for phase in enrolling failed expired enrolled; do
     home_is candidate "$phase"
     run FERMIX_ENROLL_CODE="$CODE" dash "$COPY"
     check "[ $STATUS -eq 0 ]" "a candidate $phase enrolls again with the new code (exit $STATUS)"
@@ -747,21 +747,25 @@ enrolls_again() {
       "$phase: it ends as a first enrollment does"
   done
 
-  home_is candidate failed
-  ANSWERS=type_code
-  run_at_terminal dash "$COPY"
-  ANSWERS=type_answers
-  check "[ $STATUS -eq 0 ] && grep -qF 'Enrollment code from Fermix' '$OUT'" \
-    "at a terminal, a candidate that failed asks for the new code (exit $STATUS)"
-  [ "$STATUS" -eq 0 ] || sed 's/^/    /' "$OUT"
-  printf '%s\n' "$REENROLLED_STEPS" | calls_are "and takes the same steps"
-  check "! grep -qF -- '$CODE' '$OUT' '$LOG' '$ARGV'" "the typed code is in no output and no command line"
+  for phase in failed enrolled; do
+    home_is candidate "$phase"
+    ANSWERS=type_code
+    run_at_terminal dash "$COPY"
+    ANSWERS=type_answers
+    check "[ $STATUS -eq 0 ] && grep -qF 'Enrollment code from Fermix' '$OUT'" \
+      "at a terminal, a candidate $phase asks for the new code (exit $STATUS)"
+    [ "$STATUS" -eq 0 ] || sed 's/^/    /' "$OUT"
+    printf '%s\n' "$REENROLLED_STEPS" | calls_are "$phase at a terminal: the same steps"
+    check "! grep -qF -- '$CODE' '$OUT' '$LOG' '$ARGV'" "$phase at a terminal: the typed code is in no output and no command line"
+  done
 
-  home_is candidate expired
-  run dash "$COPY"
-  stopped_with "No enrollment code: run this in a terminal, which asks for it, or pass it in FERMIX_ENROLL_CODE." \
-    "a candidate that expired, with no code and no terminal, is refused"
-  refused_after_reading_the_home "no code for an expired candidate"
+  for phase in expired enrolled; do
+    home_is candidate "$phase"
+    run dash "$COPY"
+    stopped_with "No enrollment code: run this in a terminal, which asks for it, or pass it in FERMIX_ENROLL_CODE." \
+      "a candidate $phase, with no code and no terminal, is refused"
+    refused_after_reading_the_home "no code for a candidate $phase"
+  done
 
   home_is candidate failed
   printf 'service uninstall\n' >"$STATE/fermix-fails"
@@ -771,10 +775,11 @@ enrolls_again() {
   check "! grep -q '^step enroll' '$LOG'" "before it enrolls"
 }
 
-# A home that runs, run again with no code, is started as it is; given a
-# code, it is refused, saying what it is and the commands that remove it.
+# A home that runs (the primary, or a candidate receiving its move), run
+# again with no code, is started as it is; given a code, it is refused,
+# saying what it is and the commands that remove it.
 home_that_runs() {
-  for home in "candidate enrolled" "candidate receiving" "primary "; do
+  for home in "candidate receiving" "candidate activating" "primary "; do
     # shellcheck disable=SC2086 # the role and the phase
     home_is $home
     run dash "$COPY"
@@ -784,7 +789,7 @@ home_that_runs() {
       calls_are "$home: it reads the home, stops nothing and waits for nothing"
   done
 
-  for case in "candidate enrolled|This server is enrolled already and waits for its move" \
+  for case in "candidate receiving|This server is receiving its move" \
     "candidate staged|This server is receiving its move" \
     "primary |Fermix runs on this server as your primary"; do
     # shellcheck disable=SC2086 # the role and the phase
@@ -813,15 +818,17 @@ other_homes() {
   stopped_with "This server's Fermix home is a candidate whose move cannot be read: $REMOVE" \
     "a candidate whose move cannot be read is refused"
 
-  home_is candidate failed
-  run dash "$COPY" --restore
-  stopped_with "This server holds a Fermix home that did not finish enrolling: $REMOVE" \
-    "--restore on a candidate that did not finish is refused"
+  for phase in failed enrolled; do
+    home_is candidate "$phase"
+    run dash "$COPY" --restore
+    stopped_with "This server holds a Fermix home that has not received its move: $REMOVE" \
+      "--restore on a candidate $phase is refused"
+  done
 
   home_refuses always_on_unavailable "Always On is not in this release of Fermix yet."
   run FERMIX_ENROLL_CODE="$CODE" dash "$COPY"
-  stopped_with "fermix home status could not read this server's Fermix home (Always On is not in this release of Fermix yet): $REMOVE" \
-    "a home fermix home status refuses is refused, with the engine's own sentence"
+  stopped_with "fermix home status could not read the Fermix home $HOME_DIR_MOVED on this server (Always On is not in this release of Fermix yet): run sudo -H -u fermix /usr/bin/fermix home status to see why." \
+    "a home fermix home status cannot read is refused, naming it, with the engine's own sentence and no command that removes it"
   refused_after_reading_the_home "a home the engine refuses to read"
 }
 
