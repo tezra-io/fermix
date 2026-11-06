@@ -35,11 +35,13 @@ defmodule FermixCore.Home.Candidate do
   candidate that enrolled already, or anything a fresh install does not write
   (any path outside `FermixCore.Home.DeviceLocal`), and leaves nothing behind
   when it fails part-way: it removes exactly what it wrote. A candidate that
-  never enrolled (`enrolling`, `failed`), or whose 24 hours of waiting for
-  its move ran out (`expired`), is replaced, while the engine of this home
-  is stopped (`FermixCore.Home.DaemonProbe`, `:daemon_running` otherwise):
-  the new one is built beside it and swapped in, and a failure part-way
-  puts the old one back. Activation is
+  never enrolled (`enrolling`, `failed`), that waits for its move
+  (`enrolled`) or whose 24 hours of waiting ran out (`expired`) is
+  replaced, while the engine of this home is stopped
+  (`FermixCore.Home.DaemonProbe`, `:daemon_running` otherwise): the new one
+  is built beside it and swapped in, and a failure part-way puts the old one
+  back. One receiving its move (`receiving`, `staged`, `activating`) is
+  never replaced. Activation is
   `FermixCore.Home.Candidate.Activation`.
 
   **A return** (Always On's move back to the computer the home left) writes
@@ -84,8 +86,8 @@ defmodule FermixCore.Home.Candidate do
   """
   @builder_prefix ".candidate-"
   @ended ~w(failed expired)
-  # What `enroll/3` replaces: a candidate no primary waits on.
-  @replaceable ~w(enrolling failed expired)
+  # What `enroll/3` replaces: every candidate no move has reached.
+  @replaceable ~w(enrolling enrolled failed expired)
 
   @type phase :: String.t()
   @type state :: %{required(String.t()) => term()}
@@ -280,14 +282,12 @@ defmodule FermixCore.Home.Candidate do
     do: "This home carries a moved marker, so it cannot become a candidate."
 
   def error_sentence(:already_candidate),
-    do:
-      "This server enrolled already and waits for its move, or is receiving it. Enrolling " <>
-        "again replaces a server only once its enrollment failed or its 24 hours ran out."
+    do: "This server is receiving its move, so it is not enrolled again until that move ends."
 
   def error_sentence(:daemon_running),
     do:
-      "Fermix is running in this home: stop it first (fermix service stop), then enroll " <>
-        "again with the new code."
+      "Fermix is running in this home: stop it first (fermix stop), then enroll again " <>
+        "with the new code."
 
   def error_sentence({:daemon_probe_failed, reason}),
     do:
@@ -376,10 +376,12 @@ defmodule FermixCore.Home.Candidate do
   end
 
   # A candidate that never enrolled holds nothing a primary knows of: no
-  # primary lists it, and its code is spent or was refused. One whose 24
-  # hours ran out (`expired`) did enroll, but its primary dropped it at the
-  # same hour (`Home.Candidates`' lifetime), so no move comes to it any more.
-  # Either is replaced only while no engine runs in the home, whose
+  # primary lists it, and its code is spent or was refused. One that
+  # enrolled (`enrolled`, `expired`) is given a new code only once its
+  # primary forgot it (Always On's Forget this server) or dropped it at its
+  # 24 hours (`Home.Candidates`' lifetime): a new code is opened only where
+  # no server is held, so no move comes to the old one. One a move reached
+  # stays. Any is replaced only while no engine runs in the home, whose
   # candidate process would otherwise go on writing the old one's state.
   defp replaceable(home, entries, probe) do
     with {:ok, %{"phase" => phase}} when phase in @replaceable <- read_state(home),

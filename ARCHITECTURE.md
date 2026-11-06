@@ -1250,19 +1250,27 @@ the engine account `fermix` (home `/home/fermix`, no login, lingering); with
 `--tailscale`, installs Tailscale from its signed package repository (the
 signing key checked by its pinned fingerprint before apt is given it) and
 runs `tailscale up --auth-key=file:` with the owner's key, so the tailnet
-address exists before enrolling (a host already on a tailnet is not logged
-in again, and it opens no port); runs
+address exists before enrolling (a host already `Running` on a tailnet is
+not logged in again and its tailnet, `tailscale status --json`'s
+`CurrentTailnet.Name`, is named, and refused when a key was given, which it
+would otherwise drop; one logged in but `Stopped` is refused, as is an OAuth
+client secret; it opens no port); runs
 `fermix home enroll` and `fermix service install` as `fermix`; installs the
 distribution's Chromium on Debian (Ubuntu's is a snap: it says to install a
 browser by hand); and waits up to 5 minutes for the primary to accept the
 candidate, ending with one sentence on
 stderr and a non-zero exit at any step that fails. On a host whose home
 exists it reads the home's role and its candidate's phase from `fermix home
-status --json`: a candidate `enrolling`, `failed` or `expired` is enrolled
-again with the new code (the service stopped around `fermix home enroll`,
-since `Home.Candidate.enroll/3` replaces only those three, and only with no
-engine running in the home), and any other home is refused with what it is
-and the commands that remove it; the script removes no home itself. `--restore` takes no code
+status --json`, before it installs anything: given a code, a candidate no
+move has reached (`enrolling`, `enrolled`, `failed`, `expired`) is enrolled
+again with it (`fermix service uninstall` before `fermix home enroll` and
+`fermix service install` after, since `Home.Candidate.enroll/3` replaces
+only those four, and only with no engine running in the home); a home that
+runs (the primary, a candidate waiting for or receiving its move) is left
+as it is with no code and refused with one; any other home (a retired copy,
+a desktop of another primary, a home the status cannot read) is refused
+either way, in one sentence that names it and the commands that remove it;
+the script removes no home itself. `--restore` takes no code
 and enrolls nothing: the same server, then the exact steps that import a
 snapshot and start the service. Everything networked after that (dialling the
 primary, the move) is the engine's own candidate role.

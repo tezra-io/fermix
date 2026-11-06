@@ -99,7 +99,7 @@ defmodule FermixCore.Home.CandidateTest do
 
       assert {:ok, _code} = Candidate.enroll(ctx.home, ctx.code, now: @now, hello: stopped())
       {:ok, state} = Candidate.read_state(ctx.home)
-      :ok = Candidate.put_state(ctx.home, Map.put(state, "phase", "enrolled"), @now)
+      :ok = Candidate.put_state(ctx.home, Map.put(state, "phase", "receiving"), @now)
 
       assert {:error, :already_candidate} =
                Candidate.enroll(ctx.home, ctx.code, now: @now, hello: stopped())
@@ -128,38 +128,46 @@ defmodule FermixCore.Home.CandidateTest do
       assert Enum.sort(File.ls!(ctx.home)) == ["candidate", "config.toml"]
     end
 
-    # Always On review M1: a server whose 24 hours ran out is set up again by
-    # running its command with a new code; its primary dropped it at the same
-    # hour, so nothing waits on it.
-    test "replaces a candidate whose wait for its move ran out, while its engine is stopped",
+    # Always On review M1: a server waiting for its move, or whose 24 hours
+    # ran out, is set up again by running its command with a new code. A new
+    # code exists only once its primary forgot it (Forget this server) or
+    # dropped it at the same 24 hours, so nothing waits on it.
+    test "replaces a candidate that waits for its move or whose wait ran out, while its " <>
+           "engine is stopped",
          ctx do
-      {:ok, _first} = Candidate.enroll(ctx.home, ctx.code, now: @now, hello: stopped())
-      {:ok, old_key} = Candidate.noise_keypair(ctx.home)
-      {:ok, state} = Candidate.read_state(ctx.home)
-      :ok = Candidate.put_state(ctx.home, Map.put(state, "phase", "expired"), @now)
-
       {:ok, second} = EnrollmentCode.encode(%{@facts | secret: :binary.copy(<<0x6B>>, 32)})
 
-      assert {:error, :daemon_running} =
-               Candidate.enroll(ctx.home, second, now: @now, hello: fn -> {:ok, %{}} end)
+      for phase <- ~w(enrolled expired) do
+        {:ok, _first} = Candidate.enroll(ctx.home, ctx.code, now: @now, hello: stopped())
+        {:ok, old_key} = Candidate.noise_keypair(ctx.home)
+        {:ok, state} = Candidate.read_state(ctx.home)
+        :ok = Candidate.put_state(ctx.home, Map.put(state, "phase", phase), @now)
 
-      assert {:ok, %{secret: <<0x6B, _rest::binary>>}} =
-               Candidate.enroll(ctx.home, second, now: @now, hello: stopped())
+        assert {:error, :daemon_running} =
+                 Candidate.enroll(ctx.home, second, now: @now, hello: fn -> {:ok, %{}} end),
+               phase
 
-      assert {:ok, %{"phase" => "enrolling"}} = Candidate.read_state(ctx.home)
-      {:ok, new_key} = Candidate.noise_keypair(ctx.home)
-      refute new_key.public == old_key.public
-      assert Enum.sort(File.ls!(ctx.home)) == ["candidate", "config.toml"]
+        assert {:ok, %{secret: <<0x6B, _rest::binary>>}} =
+                 Candidate.enroll(ctx.home, second, now: @now, hello: stopped())
+
+        assert {:ok, %{"phase" => "enrolling"}} = Candidate.read_state(ctx.home)
+        {:ok, new_key} = Candidate.noise_keypair(ctx.home)
+        refute new_key.public == old_key.public, phase
+        assert Enum.sort(File.ls!(ctx.home)) == ["candidate", "config.toml"]
+      end
+
+      assert Candidate.error_sentence(:daemon_running) ==
+               "Fermix is running in this home: stop it first (fermix stop), then enroll " <>
+                 "again with the new code."
     end
 
-    # One that enrolled and still waits for its move, or is receiving it, is
-    # the one its primary may move to: it stays.
-    test "keeps a candidate that waits for its move or receives it", ctx do
+    # One receiving its move is the one its primary is moving to: it stays.
+    test "keeps a candidate that receives its move", ctx do
       {:ok, _first} = Candidate.enroll(ctx.home, ctx.code, now: @now, hello: stopped())
       {:ok, state} = Candidate.read_state(ctx.home)
       {:ok, second} = EnrollmentCode.encode(%{@facts | secret: :binary.copy(<<0x6B>>, 32)})
 
-      for phase <- ~w(enrolled receiving staged activating) do
+      for phase <- ~w(receiving staged activating) do
         :ok = Candidate.put_state(ctx.home, Map.put(state, "phase", phase), @now)
 
         assert {:error, :already_candidate} =
@@ -170,9 +178,8 @@ defmodule FermixCore.Home.CandidateTest do
       end
 
       assert Candidate.error_sentence(:already_candidate) ==
-               "This server enrolled already and waits for its move, or is receiving it. " <>
-                 "Enrolling again replaces a server only once its enrollment failed or its " <>
-                 "24 hours ran out."
+               "This server is receiving its move, so it is not enrolled again until that " <>
+                 "move ends."
     end
 
     test "a replacement that fails at its last step keeps the candidate it found", ctx do

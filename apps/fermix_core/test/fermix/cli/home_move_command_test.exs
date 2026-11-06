@@ -92,15 +92,16 @@ defmodule Fermix.CLI.HomeMoveCommandTest do
     end
 
     # Always On review M1 (D1): the installer runs this again on a server
-    # whose enrollment failed or ran out, with the new code, and reads the
-    # exit status; the sentence is a fresh enrollment's.
-    test "enrolls again a server whose enrollment failed or ran out", ctx do
+    # whose enrollment failed, ran out or waits for a move its computer
+    # forgot, with the new code, and reads the exit status; the sentence is a
+    # fresh enrollment's.
+    test "enrolls again a server whose enrollment failed, ran out or waits for its move", ctx do
       {0, _out, ""} =
         run(["enroll", "--code-file", ctx.code_file], home: ctx.home, now: fn -> @now end)
 
       {:ok, state} = Candidate.read_state(ctx.home)
 
-      for phase <- ~w(failed expired) do
+      for phase <- ~w(failed expired enrolled) do
         :ok = Candidate.put_state(ctx.home, Map.put(state, "phase", phase), @now)
         File.write!(ctx.code_file, ctx.code <> "\n")
 

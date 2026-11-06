@@ -153,22 +153,26 @@ will be part of a future release; nothing in this group is in a release yet.
   anything is installed. `--snapshot-bucket` and `--snapshot-region` name
   where the server will keep its snapshots, and `--restore` prepares a server
   to restore your home from a snapshot instead. A server whose setup did not
-  finish, or that waited 24 hours for its move, is set up again by running
-  the same command with a new code, and its own status says so; on a server
-  that is set up, the command says what the server is and how to remove its
-  home, and removes nothing.
+  finish, that waited 24 hours for its move, or that waits for a move your
+  computer forgot is set up again by running the same command with a new
+  code, and its own status says so; on a server that is set up, the command
+  says what the server is and the commands that remove its home, and
+  removes nothing.
 - **Your server can join your tailnet as it is set up.** Add `--tailscale`
   to the server's command and it asks for a Tailscale auth key without
   showing it (cloud-init user data passes it in `TS_AUTHKEY` instead),
   installs Tailscale from Tailscale's own signed package repository, checking
   its signing key first, and joins your tailnet before the server enrolls.
-  Create the key tagged `tag:fermix-server`, and let only your own devices
-  reach the server in your tailnet policy; the server opens no port itself.
-  The key is never shown, logged or put on a command line,
-  and is removed from the server as soon as Tailscale has read it. A key that
-  is not one is refused before anything is installed, a server already on a
-  tailnet is left as it is, and without `--tailscale` nothing of Tailscale is
-  installed.
+  Declare `tag:fermix-server` in your tailnet policy, create the key with
+  that tag, and let only your own devices reach the server there; the server
+  opens no port itself. The key is never shown, logged or put on a command
+  line, and is removed from the server as soon as Tailscale has read it;
+  never pass it on sudo's command line, which sudo logs. A key that is not
+  one, an OAuth client secret among them, is refused before anything is
+  installed. A server already on a tailnet is left on it and the command
+  names the tailnet; given a key there, or on a server whose Tailscale is
+  logged in but down, it stops and says what to run. Without `--tailscale`
+  nothing of Tailscale is installed.
 - **Always On from a terminal: `fermix always-on`.** On a Homebrew or Linux
   install without the Fermix app you can now set up Always On on your own
   Linux server from the terminal. `fermix always-on` shows where Always On

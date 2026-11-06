@@ -167,36 +167,81 @@ it, never a second writer.
   lingering), runs `fermix home enroll` and `fermix service install` as
   `fermix`, installs Chromium on Debian for browser tasks, and waits up to 5
   minutes for the primary to accept the server. The engine starts in the
-  candidate role, enrolls with the primary and waits for the move. Running
-  it again with a new code enrolls the server again where its enrollment
-  never finished, failed or ran out after 24 hours (it reads `fermix home
-  status --json` as `fermix`, stops the service, runs `fermix home enroll`
-  and starts it again); any other home (one that waits for or receives its
-  move, a primary, a retired copy after a move back) it refuses, saying what
-  the home is and the commands that remove it, and it never removes a home
-  itself. Run again with no code, it leaves a running home as it is. It
-  never prints the code; cloud-init's console log shows each step.
+  candidate role, enrolls with the primary and waits for the move. It never
+  prints the code; cloud-init's console log shows each step.
+- **Running it again.** On a server whose home `/home/fermix/.fermix`
+  exists, the first boot first reads `fermix home status --json` as
+  `fermix` (the home's role and its candidate's phase), before it installs
+  anything. A candidate no move has reached (enrolling, failed, ran out
+  after 24 hours, or still waiting for a move its computer forgot) is
+  enrolled again with a new code: its service is stopped (`fermix service
+  uninstall` as `fermix`), `fermix home enroll` runs with the new code, and
+  the service is installed and started again. Without a code such a
+  candidate asks for one at a terminal, except one that waits for its move,
+  which, like a primary, is left running: "Done. Fermix runs from the home
+  it already had." Given a code, a candidate receiving its move or a
+  primary is refused, and a retired copy a move left (naming where Fermix
+  moved), a desktop of another primary, or a home `fermix home status`
+  cannot read is refused either way. Each refusal is one sentence naming
+  the home and the commands that remove it, should the owner want the
+  server set up again (`sudo -H -u fermix env
+  XDG_RUNTIME_DIR=/run/user/<uid> /usr/bin/fermix service uninstall`, then
+  `sudo rm -rf /home/fermix/.fermix`, then the command again); the first
+  boot never removes a home itself.
 - **The server on the owner's tailnet.** `--tailscale` joins the server to
   the owner's tailnet before it enrolls, so its tailnet address exists when
   it enrolls; without the flag nothing of Tailscale happens (a key in
   `TS_AUTHKEY` without it is refused). The Tailscale auth key comes from
   `TS_AUTHKEY` (cloud-init user data) or is asked for on the terminal without
-  echo, after the code: at a terminal, leave `TS_AUTHKEY` out, since `sudo
-  TS_AUTHKEY=… sh` puts the key in sudo's own command line. A key that does
-  not start with `tskey-`, holds other than letters, digits, `-` and `_`, or
-  is not 20 to 200 characters long is refused before anything is installed.
-  The key is never printed or on a command line: it lives only in a 0600 file
+  echo, after the code. Never pass it on sudo's command line (`sudo
+  TS_AUTHKEY=… sh`): sudo writes the assignment to the system journal, every
+  account can read it in `/proc` while the run lasts, and the shell keeps it
+  in its history; at a terminal, leave it out and let the first boot ask.
+  Cloud-init runs as root and needs no sudo: give the code and the key as
+  assignments in front of `sh` in a `runcmd` item written as one string
+  (one written as a list is run as a command line, key included), and use
+  a one-off key, since cloud-init keeps the user data on the server's disk
+  (`packaging/cloud/README.md` has the example). A key that does not start
+  with `tskey-`, holds other than letters, digits, `-` and `_`, or is not 20
+  to 200 characters long is refused before anything is installed, and so is
+  an OAuth client secret (`tskey-client-`), which is not an auth key. The
+  key is never printed or on a command line: it lives only in a 0600 file
   in the first boot's work directory under `/run`, which `tailscale up
   --auth-key=file:` reads and which is removed right after, and on every
-  exit. Tailscale comes from its own signed package repository for the
+  exit (a `kill -9` or a power loss leaves it in `/run` until the next
+  reboot). Tailscale comes from its own signed package repository for the
   release (`pkgs.tailscale.com`), its signing key checked by fingerprint
-  before apt is given it, never from a script piped into a shell. Create the
-  key tagged `tag:fermix-server` (the first boot passes no tags of its own),
-  and let only your own devices reach the server in the tailnet policy: the
-  first boot opens no port. A host already on a
-  tailnet (`tailscale status` says Running) is not asked for a key or logged
-  in again; a `tailscale up` that fails stops the first boot before it
-  enrolls. `--restore` takes `--tailscale` too.
+  before apt is given it, never from a script piped into a shell. A host
+  already on a tailnet (`tailscale status` says Running) is not logged in
+  again and the first boot names its tailnet; given a key there, it stops,
+  naming the tailnet, rather than drop the key (leave `TS_AUTHKEY` out to
+  keep it, or `sudo tailscale logout` first). A host logged in with
+  Tailscale down (`Stopped`) stops too: run `sudo tailscale up`, then the
+  first boot again. A `tailscale up` that fails stops the first boot before
+  it enrolls: a used-up, expired or revoked key needs a new one, and a
+  server waiting for approval (it printed a link) is approved there and the
+  first boot run again without a key. `--restore` takes `--tailscale` too.
+- **The tailnet policy** is the owner's: the first boot opens no port and
+  adds no rule. In the policy file (HuJSON, the admin console's Access
+  controls), declare the tag before creating the key, since the key form
+  offers only declared tags, and let only your own devices reach the
+  server:
+
+  ```jsonc
+  "tagOwners": {"tag:fermix-server": ["autogroup:admin"]},
+  "grants": [{"src": ["autogroup:member"], "dst": ["tag:fermix-server"], "ip": ["*"]}],
+  // Only with webhooks (WhatsApp, cue webhook sources): Tailscale Funnel.
+  "nodeAttrs": [{"target": ["tag:fermix-server"], "attr": ["funnel"]}]
+  ```
+
+  Then create the key tagged `tag:fermix-server`, one-off and pre-approved
+  (the first boot passes no tags of its own). The grant holds only once the
+  policy stops allowing everything: a new tailnet's file starts with a rule
+  from `*` to `*:*`, and a file with no rule reads as that allow-all, so
+  removing it or adding any rule turns allow-all off for every device, and
+  the file then needs a rule for whatever your other devices reach today.
+  Funnel also needs MagicDNS and HTTPS certificates on (the DNS page), and a
+  new server name can take about ten minutes to resolve.
 - **Updates on the server.** Nobody logs in to it, so it updates itself.
   Debian's security updates: `unattended-upgrades` every day (the first boot
   installs it where the image lacks it and sets its two daily switches in
@@ -287,11 +332,11 @@ it, never a second writer.
   log and in `fermix home status`, and removes the code from the disk (every
   ending does). To enroll again with a new code, stop its service and run
   `fermix home enroll` again (running the server's command again does
-  this): a candidate that never enrolled, or whose 24 hours ran out, is
-  replaced, since its primary no longer holds it; one that enrolled and
-  still waits for its move, or receives it, is not. The server's own status
-  then says to open a new code in Always On and run the command there
-  again.
+  this): a candidate no move has reached (one that never enrolled, one
+  whose 24 hours ran out, or one that waits for its move, which a new code
+  means its computer forgot) is replaced; one receiving its move is not. A
+  server that did not finish or ran out says, in its own status, to open a
+  new code in Always On and run the command there again.
 - **Reviewing it.** `fermix home candidates` (or `home.candidates.list`)
   lists the candidates the primary holds (at most four, each for 24 hours):
   id, name, system, version, and the snapshot bucket it was told.
