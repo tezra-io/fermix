@@ -10,15 +10,18 @@ defmodule FermixCore.Home.Candidates do
   enrollment handshake's initiator key, the move's responder key), the
   one-time snapshot recipient it gave, and the snapshot bucket it was told
   to keep snapshots in. At most #{4} are held, each for
-  24 hours after it enrolled; an expired one is dropped at the next read or
-  write.
+  24 hours after it enrolled; an expired one is no longer held, and leaves
+  the file at its next write, until when `lapsed/2` still names it (Always
+  On tells the owner that a held server lapsed). `remove/3` drops one the
+  owner forgot (Always On's Forget this server).
 
   `returning` is the device id of the linked desktop whose window the
   candidate enrolled through to take the home back (Always On's move back),
   nil for any other: the one fact that says a move goes back to the computer
   the home left. The move's request carries it; `view/1` does not show it.
 
-  One writer: the primary's enrollment window (`FermixChannels.Home.Enrollment`).
+  One writer: the primary's enrollment window (`FermixChannels.Home.Enrollment`),
+  which also forgets one.
   Readers: `home.candidates.list`, `home.status` and `home.move.start`.
   Written whole to a temporary file and renamed.
   """
@@ -62,6 +65,27 @@ defmodule FermixCore.Home.Candidates do
   @spec list(Path.t(), DateTime.t()) :: {:ok, [record()]} | {:error, term()}
   def list(home, %DateTime{} = now) when is_binary(home) and home != "" do
     with {:ok, records} <- read(home), do: {:ok, live(records, now)}
+  end
+
+  @doc """
+  The candidates whose 24 hours ran out by `now` and that the file still
+  names: until its next write (`add/3`, `remove/3`), which keeps only the
+  ones still held.
+  """
+  @spec lapsed(Path.t(), DateTime.t()) :: {:ok, [record()]} | {:error, term()}
+  def lapsed(home, %DateTime{} = now) when is_binary(home) and home != "" do
+    with {:ok, records} <- read(home), do: {:ok, records -- live(records, now)}
+  end
+
+  @doc """
+  Drops the candidate `candidate_id` (the owner forgot it), keeping the
+  others still held at `now`; one that is not held is gone already.
+  """
+  @spec remove(Path.t(), String.t(), DateTime.t()) :: :ok | {:error, term()}
+  def remove(home, candidate_id, %DateTime{} = now)
+      when is_binary(home) and home != "" and is_binary(candidate_id) do
+    with {:ok, held} <- list(home, now),
+         do: write(home, Enum.reject(held, &(&1.candidate_id == candidate_id)))
   end
 
   @doc "The candidate `candidate_id` held at `now`, or `{:error, {:unknown_candidate, id}}`."

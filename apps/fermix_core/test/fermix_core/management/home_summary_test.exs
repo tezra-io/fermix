@@ -13,6 +13,11 @@ defmodule FermixCore.Management.HomeSummaryTest do
   @cand "cand-5e2a9c1f7b3d4086"
   @back_cand "cand-7a3e1c9b5d2f4086"
   @copy "20310504T093000Z-e5.fxsnap"
+  @connect_sentence "Waiting for your server: run the command on it and paste the code when " <>
+                      "it asks. It takes Debian 12, Debian 13 or Ubuntu 24.04 on arm64 or " <>
+                      "x86_64 with Linux 6.2 or later, which Debian 12 has only with a newer " <>
+                      "kernel than its own. The code works for 30 minutes, and installing " <>
+                      "takes a few of them."
 
   # -- the table ----------------------------------------------------------------
 
@@ -41,7 +46,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
        "Keep Fermix running when this computer sleeps. It moves to a server you own. Voice " <>
          "calls stop after the move.", "own_server"},
       {"a code for the owner's server", facts(link: link(enrollment: manual(:open))), "connect",
-       "Waiting for your server: run the command on it and paste the code when it asks.", nil},
+       @connect_sentence, nil},
       {"a server waiting for its move", ready_facts([]), "ready",
        "Your server is ready for the move. You can move Fermix back to this Mac from Always " <>
          "On whenever you want.", "move_now"},
@@ -54,6 +59,9 @@ defmodule FermixCore.Management.HomeSummaryTest do
        "check_again"},
       {"a server presenting its code", facts(link: link(enrollment: manual(:used))), "creating",
        "Connecting your server…", nil},
+      {"a code a server used, past its half hour with no server recorded",
+       facts(link: link(enrollment: manual(:expired))), "off",
+       "Keep Fermix running when this Mac sleeps. It moves to a server you own.", "own_server"},
       {"a move undone, the server still held", ready_facts(move: move("aborted")), "undone",
        "The move was undone. Fermix still runs on this Mac.", "try_again"},
       {"a move undone long ago, nothing held", facts(move: move("aborted")), "off",
@@ -77,6 +85,9 @@ defmodule FermixCore.Management.HomeSummaryTest do
        "Fermix moved to your server, and this Mac is no longer connected to it.", "learn_more"},
       {"a desktop the server forgot", desktop(link_primary: primary(:revoked)), "retired",
        "Fermix moved to your server, and this Mac is no longer connected to it.", "learn_more"},
+      {"a server's copy retired by a move back",
+       device(linked: false, moved: moved_to("studio-mac"), moved_back: true, host_os: :linux),
+       "retired", "This copy is retired: Fermix moved back to studio-mac.", "learn_more"},
       {"a desktop with a fresh backup", desktop([]), "on",
        "Fermix runs on your server. Last backup 2 hours ago.", nil},
       {"a desktop whose server's part did not arrive", desktop(primary_home: nil), "on",
@@ -97,6 +108,10 @@ defmodule FermixCore.Management.HomeSummaryTest do
        "Fermix cannot reach your server. Your messages wait until it is back.", "learn_more"},
       {"a server this Mac is too old for", desktop(primary_too_old: true, primary_home: nil),
        "problem", "Update Fermix on this Mac to keep using Always On.", "update"},
+      {"a server older than this Mac", desktop(primary_behind: true, primary_home: nil),
+       "problem",
+       "Your server runs an older Fermix than this Mac. It updates to this Mac's version in " <>
+         "its nightly update.", "learn_more"},
       {"a server disk nearly full", desktop(primary_home: server_home(disk: 0.9)), "problem",
        "Your server's disk is 90% full.", "learn_more"},
       {"a last backup five days old",
@@ -283,12 +298,15 @@ defmodule FermixCore.Management.HomeSummaryTest do
   end
 
   # Every word a surface prints: no dash, no command, no backticked code, and
-  # none of the engine's own words for the move.
+  # none of the engine's own words for the move. The systems the server's
+  # first boot takes are names the copy interpolates (`Copy.own_server_names/0`).
   test "every sentence, label and detail line obeys the copy rules and names nothing internal" do
+    names = Copy.own_server_names()
+
     for {name, facts, _state, _sentence, _action} <- cases(),
         text <- printed(HomeSummary.summary(facts)) do
-      assert Copy.violations(text, :prose) == [],
-             "#{name}: #{inspect(text)} breaks #{inspect(Copy.violations(text, :prose))}"
+      assert Copy.violations(text, :prose, names) == [],
+             "#{name}: #{inspect(text)} breaks #{inspect(Copy.violations(text, :prose, names))}"
 
       assert Copy.summary_violations(text) == [],
              "#{name}: #{inspect(text)} breaks #{inspect(Copy.summary_violations(text))}"
@@ -332,10 +350,48 @@ defmodule FermixCore.Management.HomeSummaryTest do
 
       assert summary["action"] == nil
 
-      assert [%{"id" => "own_server"}, %{"id" => "cancel", "label" => "Cancel the code"} = cancel] =
+      assert [
+               %{"id" => "own_server"} = renew,
+               %{"id" => "cancel", "label" => "Cancel the code"} = cancel
+             ] =
                summary["detail"]["alternatives"]
 
       assert cancel["confirm"] == nil
+
+      # Review m2: a new code ends the one the server may be using already.
+      assert renew["label"] == "Open a new code (the current one stops working)"
+      assert renew["confirm"] == nil
+    end
+
+    # Review m1: a server that used its code and stalls leaves a way out.
+    test "connecting offers Cancel, which closes the code the server used" do
+      summary = HomeSummary.summary(facts(link: link(enrollment: manual(:used))))
+
+      assert summary["action"] == nil
+
+      assert [%{"id" => "cancel", "label" => "Cancel the code", "confirm" => nil}] =
+               summary["detail"]["alternatives"]
+    end
+
+    # Review M2: a held server, ready or blocked by its review, can be
+    # forgotten, after a confirm, and never while a move to it runs.
+    test "a held server offers Forget this server, which asks first" do
+      for facts <- [ready_facts([]), ready_facts(review: review([warn(), block()]))] do
+        summary = HomeSummary.summary(facts)
+
+        assert [%{"id" => "cancel", "label" => "Forget this server"} = forget] =
+                 summary["detail"]["alternatives"]
+
+        assert forget["needs"] == []
+
+        assert forget["confirm"] ==
+                 "Forget this server? Fermix stops holding it for the move. To move later, " <>
+                   "set up a server with a new code."
+      end
+
+      moving = HomeSummary.summary(ready_facts(move: move("requested")))
+      assert moving["state"] == "ready"
+      assert moving["detail"]["alternatives"] in [nil, []]
     end
 
     test "ready holds the server's facts, the readiness warnings and blocks, and until when" do
@@ -765,6 +821,53 @@ defmodule FermixCore.Management.HomeSummaryTest do
       # The same outage later is the same notice.
       assert HomeSummary.summary(later(desktop(link_primary: down), 30 * @minute))["notice"] ==
                summary["notice"]
+    end
+
+    # Review M2: a held server whose 24 hours ran out is told once, by its id,
+    # on the screen it leaves.
+    test "a held server whose day ran out, until a new code" do
+      lapsed = facts(link: link(enrollment: manual(:used, @cand)), lapsed: @cand)
+      summary = HomeSummary.summary(lapsed)
+
+      assert summary["state"] == "off"
+
+      assert summary["notice"] == %{
+               "id" => "server_lapsed:" <> @cand,
+               "sentence" =>
+                 "Your server waited 24 hours for the move and must be set up again. Open a " <>
+                   "new code in Always On and run the command on it again."
+             }
+
+      assert %{off: false} = HomeSummary.watch(lapsed)
+    end
+
+    # Review m3: Restore here finished is told once, by the epoch it came
+    # back at, naming the backup it restored.
+    test "a restore finished here, naming its backup's day" do
+      restored =
+        Map.merge(return_record(), %{
+          restored: "20310503T093000Z-e5.fxsnap",
+          moved_at: ~U[2031-05-04 11:50:00Z],
+          epoch: 6
+        })
+
+      summary = HomeSummary.summary(facts(return: restored, zone: "Europe/Berlin"))
+
+      assert summary["state"] == "off"
+
+      assert summary["notice"] == %{
+               "id" => "restored:6",
+               "sentence" =>
+                 "Fermix runs on this Mac again, from its backup of Saturday, May 3, 2031."
+             }
+
+      assert Copy.violations(summary["notice"]["sentence"], :prose, ["Saturday, May 3, 2031"]) ==
+               []
+
+      # A restore merged into a move back's record that had started is still a
+      # restore.
+      both = Map.merge(started_record(), restored)
+      assert %{"id" => "restored:6"} = HomeSummary.summary(facts(return: both))["notice"]
     end
 
     test "the newest backup a week old, once for that backup" do
@@ -1252,7 +1355,10 @@ defmodule FermixCore.Management.HomeSummaryTest do
         return: nil,
         returning: nil,
         restoring: false,
-        copies: []
+        copies: [],
+        lapsed: nil,
+        moved_back: false,
+        primary_behind: false
       },
       Map.new(overrides)
     )
@@ -1421,6 +1527,8 @@ defmodule FermixCore.Management.HomeSummaryTest do
 
   defp moved(at \\ ~U[2031-04-20 09:00:00Z]),
     do: %{to: "fermix-general-a3f9", moved_at: at, epoch: 5}
+
+  defp moved_to(to), do: %{moved() | to: to}
 
   defp server_home(overrides) do
     backups =

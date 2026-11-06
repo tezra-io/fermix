@@ -499,6 +499,93 @@ defmodule FermixCore.Management.HomeTest do
       assert status["primary_missing"] =~ "newer Fermix"
     end
 
+    # Review M4: a desktop that updated first meets a server on an older
+    # protocol until its nightly update, which the screen says.
+    test "a server older than this desktop says it updates tonight", %{home: home} do
+      :ok = DesktopLink.write(home, desktop_link())
+      older = fn _request, _opts -> {:error, :daemon_too_old, %{"maximum_version" => 2}} end
+
+      assert {:ok, status} =
+               route(
+                 "home.status",
+                 %{},
+                 opts(home, engine_role: @device, link_status: link(primary: primary(nil)))
+                 |> Keyword.put(:primary_forward, older)
+               )
+
+      assert status["summary"]["state"] == "problem"
+      assert status["summary"]["detail"]["kind"] == "server_older"
+      assert status["summary"]["action"]["id"] == "learn_more"
+      assert status["primary_home"] == nil
+      assert is_binary(status["primary_missing"])
+    end
+
+    # Review M2: a held server whose 24 hours ran out, which the window
+    # names and the list still holds, is told as lapsed; one forgotten, or
+    # one this home moved to and back from, is not.
+    test "a held server whose day ran out is told as lapsed until it is forgotten",
+         %{home: home} do
+      {:ok, held} = Candidates.add(home, candidate_attrs(), ~U[2031-05-03 11:00:00Z])
+      status = opts(home, link_status: link(enrollment: manual(:used, held.candidate_id)))
+
+      assert {:ok, %{"summary" => summary}} = route("home.status", %{}, status)
+      assert summary["state"] == "off"
+      assert summary["notice"]["id"] == "server_lapsed:" <> held.candidate_id
+
+      :ok = Return.write(home, %{from: "studio-mac", started_at: @at, moved_at: @at, epoch: 6})
+      assert {:ok, %{"summary" => %{"notice" => nil}}} = route("home.status", %{}, status)
+
+      :ok = Return.remove(home)
+      :ok = Candidates.remove(home, held.candidate_id, @at)
+      assert {:ok, %{"summary" => %{"notice" => nil}}} = route("home.status", %{}, status)
+    end
+
+    # Review m4: the server's own copy after a move back names where Fermix
+    # went, from its move's own record.
+    test "a server's copy retired by a move back says where Fermix moved back to",
+         %{home: home} do
+      :ok = Moved.write(home, %{epoch: 5, moved_at: @at, to: "studio-mac"})
+      File.mkdir_p!(Move.dir(home))
+
+      :ok =
+        Move.put_phase(
+          home,
+          "done",
+          %{"candidate" => "studio-mac", "keep_as_desktop" => false},
+          @at
+        )
+
+      device = %{role: :device, primary: "studio-mac"}
+
+      assert {:ok, %{"summary" => summary}} =
+               route("home.status", %{}, opts(home, engine_role: device, host_os: :linux))
+
+      assert summary["state"] == "retired"
+      assert summary["sentence"] == "This copy is retired: Fermix moved back to studio-mac."
+    end
+
+    # Review m3: Restore here finished is told once on the primary it made,
+    # naming the backup's day.
+    test "a restore finished here is told by its epoch and its backup's day", %{home: home} do
+      :ok =
+        Return.write(home, %{
+          from: "invented-vm",
+          started_at: @at,
+          restored: "20310503T093000Z-e5.fxsnap",
+          moved_at: @at,
+          epoch: 6
+        })
+
+      assert {:ok, %{"summary" => %{"notice" => notice}}} =
+               route("home.status", %{}, opts(home, host_os: :macos))
+
+      assert notice == %{
+               "id" => "restored:6",
+               "sentence" =>
+                 "Fermix runs on this Mac again, from its backup of Saturday, May 3, 2031."
+             }
+    end
+
     test "a disk that cannot be read publishes none and says why in the log", %{home: home} do
       log =
         ExUnit.CaptureLog.capture_log(fn ->

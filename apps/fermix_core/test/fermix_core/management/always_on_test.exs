@@ -71,6 +71,10 @@ defmodule FermixCore.Management.AlwaysOnTest do
         Agent.update(link, &%{&1 | enrollment: nil})
         :ok
       end,
+      forget_candidate: fn id ->
+        send(test, {:candidate_forgotten, id})
+        Candidates.remove(home, id, @at)
+      end,
       free_bytes: fn _dir -> {:ok, 1_099_511_627_776} end,
       version: "9.9.9",
       host: "linux-x86_64",
@@ -211,6 +215,44 @@ defmodule FermixCore.Management.AlwaysOnTest do
 
       assert {:ok, %{"summary" => %{"state" => "off"}}} = press(ctx, "cancel")
       assert_received :enrollment_withdrawn
+    end
+
+    # Review m1: a server that used its code and stalls is not a screen with
+    # no way out.
+    test "Cancel on Connecting your server closes the code the server used", ctx do
+      Agent.update(ctx.link, &%{&1 | enrollment: window(:used, nil)})
+      assert %{"state" => "creating"} = summary(ctx.opts)
+
+      assert {:ok, %{"summary" => %{"state" => "off"}, "result" => nil}} = press(ctx, "cancel")
+      assert_received :enrollment_withdrawn
+    end
+
+    # Review m2: the new code an open one's screen offers is answered like the
+    # first, once.
+    test "an open code's screen opens a new code that replaces it", ctx do
+      Agent.update(ctx.link, &%{&1 | enrollment: window(:open, nil)})
+
+      assert %{"label" => "Open a new code (the current one stops working)"} =
+               offered!(summary(ctx.opts), "own_server")
+
+      assert {:ok, %{"result" => %{"code" => @manual_code}}} = press(ctx, "own_server")
+      assert_received :enrollment_opened
+    end
+
+    # Review M2: a held server is forgotten from ready or from a blocked
+    # review, and the screen is off again with Use my own Linux server.
+    test "Forget this server drops the held server and leaves the code as it was", ctx do
+      {:ok, held} = Candidates.add(ctx.home, candidate_attrs(), @at)
+      Agent.update(ctx.link, &%{&1 | enrollment: window(:used, held.candidate_id)})
+      assert %{"state" => "ready"} = summary(ctx.opts)
+
+      assert {:ok, %{"summary" => after_forget, "result" => nil}} = press(ctx, "cancel")
+      assert %{"state" => "off", "action" => %{"id" => "own_server"}} = after_forget
+      assert after_forget["notice"] == nil
+      assert_received {:candidate_forgotten, id}
+      assert id == held.candidate_id
+      refute_received :enrollment_withdrawn
+      assert {:ok, []} = Candidates.list(ctx.home, @at)
     end
   end
 

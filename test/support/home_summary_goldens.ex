@@ -183,7 +183,10 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
         return: nil,
         returning: nil,
         restoring: false,
-        copies: Map.get(extra, :copies, [])
+        copies: Map.get(extra, :copies, []),
+        lapsed: nil,
+        moved_back: false,
+        primary_behind: false
       })
 
     Home.picture(Map.put(facts, :summary, summary))

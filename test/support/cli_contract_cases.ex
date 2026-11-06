@@ -290,7 +290,10 @@ defmodule FermixTestSupport.CliContractCases do
       return: nil,
       returning: nil,
       restoring: false,
-      copies: []
+      copies: [],
+      lapsed: nil,
+      moved_back: false,
+      primary_behind: false
     }
   end
 

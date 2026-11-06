@@ -14,6 +14,16 @@
         "url": null
       },
       "detail": {
+        "alternatives": [
+          {
+            "confirm": "Forget this server? Fermix stops holding it for the move. To move later, set up a server with a new code.",
+            "id": "cancel",
+            "key": "gicz2KqdpuM44W53W9hNdA",
+            "label": "Forget this server",
+            "needs": [],
+            "url": null
+          }
+        ],
         "lines": [
           {
             "label": "Server",
@@ -46,7 +56,7 @@
         },
         "waits_until": "2031-05-05T11:00:00Z"
       },
-      "key": "lqfOINTYmG1DdG-u0eo4sg",
+      "key": "ApB-OXxjSV9dMkxB-H828w",
       "notice": {
         "id": "ready:cand-5e2a9c1f7b3d4086",
         "sentence": "Your server is ready for the move."

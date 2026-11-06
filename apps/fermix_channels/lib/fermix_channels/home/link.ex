@@ -7,8 +7,8 @@ defmodule FermixChannels.Home.Link do
   `forward/1` and `status/0`'s `primary` by the desktop relay (device role),
   `status/0`'s `desktops` by the primary's desktop peers
   (`FermixChannels.Desktop.Peer`), and `open_enrollment/1`,
-  `withdraw_enrollment/0` and `status/0`'s `enrollment` by the enrollment
-  window, `drop_desktop_row/2` by the device store of the staged home it
+  `withdraw_enrollment/0`, `forget_candidate/1` and `status/0`'s
+  `enrollment` by the enrollment window, `drop_desktop_row/2` by the device store of the staged home it
   names, and `start_return/1` and `stop_return/0` by the device tree
   (`FermixChannels.Desktop.DeviceSupervisor`), whose candidate subtree
   receives a move back beside the relay.
@@ -52,6 +52,14 @@ defmodule FermixChannels.Home.Link do
   @impl true
   def withdraw_enrollment do
     if Process.whereis(Enrollment), do: Enrollment.withdraw(Enrollment), else: :ok
+  end
+
+  # The held candidates are the primary's window's to write.
+  @impl true
+  def forget_candidate(candidate_id) when is_binary(candidate_id) do
+    if Process.whereis(Enrollment),
+      do: Enrollment.forget(Enrollment, candidate_id),
+      else: {:error, {:unavailable, "Fermix cannot forget a server here right now."}}
   end
 
   # A staged home's list, by its root: never the running store's.

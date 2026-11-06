@@ -277,12 +277,14 @@ it with their "update Fermix" screen, so they raise their own minimum for
   `serves_nothing`, in their own words) and any other warning the last review
   of the same server gave; during a move back, what runs on this computer
   again and what the move back costs. Restore here's asks the owner's word
-  that the server is deleted, or stopped for good.
+  that the server is deleted, or stopped for good. Forget this server's
+  (`cancel` on a held server) asks before the server is dropped.
 - `url` is the Always On docs page (`https://fermix.ai/docs/always-on/`) for
   `learn_more`; null otherwise.
 - `key` is the digest of the action's `id`, `label`, `confirm`, `needs` and
   the one thing it acts on: the server a move goes to (`move_now`,
-  `try_again`, `check_again`), the copy a restore takes (`restore_here`), or
+  `try_again`, `check_again`), the server Forget this server drops
+  (`cancel` on a held server), the copy a restore takes (`restore_here`), or
   nothing; during a move back, the server a move goes to is this computer's
   own candidate.
 
@@ -340,9 +342,13 @@ failure.
 null: the server ready (`ready:<candidate>`), the move done
 (`moved:<epoch>`, until the first backup after it), the server out of reach
 (`cannot_reach:<since>`, since the link went down), the newest backup a week
-old (`backup_week:<at>`) and Fermix back on this computer after a move back,
+old (`backup_week:<at>`), Fermix back on this computer after a move back,
 whose server still runs its retired copy (`back:<epoch>`, the epoch it came
-back at). Its `id` stays the same while the occurrence stands, so an app
+back at), Restore here finished, naming the day of the backup it restored
+(`restored:<epoch>`), and a held server whose 24 hours ran out, which must
+be set up again by running its command with a new code
+(`server_lapsed:<candidate>`, on the `off` it leaves, until a new code is
+opened). Its `id` stays the same while the occurrence stands, so an app
 posts when the id changes and keeps the last one; the page and the CLI
 ignore it.
 
@@ -361,13 +367,13 @@ Always On changes*).
 | `state` | Where it is answered | What it means |
 |---|---|---|
 | `off` | the computer that sets Always On up | Nothing is set up. The sentence's second line names what this home has turned on that stops after the move (iMessage on a Mac, voice calls, meetings), only when there is something. Its action is `own_server`, labelled `Use my own Linux server`, which opens a code for the owner's server; its `result` holds the code, the command that installs Fermix there and the optional one that also joins the server to the owner's tailnet. |
-| `connect` | the same | A code for the owner's server is open, waiting for it. No action; `detail.alternatives` holds `own_server` (a new code in place of the open one) and `cancel` (`Cancel the code`). |
-| `creating` | the same, and a linked desktop | The owner's server used its code and connects, or a linked desktop connects to its server to move back (`cancel`). |
-| `ready` | the same, and a linked desktop during a move back | The server is held and waits for Move now. `detail`: `server` (`{name, system, version}`), `readiness` (the last review's warnings and blocks, `home.move.readiness`'s items; empty when all is well or no review was made, and always during a move back) and `waits_until`. |
+| `connect` | the same | A code for the owner's server is open, waiting for it. The sentence names the systems the server's first boot takes and that the code works for 30 minutes. No action; `detail.alternatives` holds `own_server` (`Open a new code (the current one stops working)`: a new code in place of the open one, which a server may be using already) and `cancel` (`Cancel the code`). |
+| `creating` | the same, and a linked desktop | The owner's server used its code and connects (`cancel` in `detail.alternatives`, `Cancel the code`, which closes it; once the code's 30 minutes are over with no server recorded, the window reads `expired` and the screen is `off`), or a linked desktop connects to its server to move back (`cancel`). |
+| `ready` | the same, and a linked desktop during a move back | The server is held and waits for Move now. `detail`: `server` (`{name, system, version}`), `readiness` (the last review's warnings and blocks, `home.move.readiness`'s items; empty when all is well or no review was made, and always during a move back), `waits_until` and, on the computer that sets Always On up, `alternatives` with `cancel` (`Forget this server`, with a confirm: the held server is dropped and the screen is `off`), except while a move to it runs. |
 | `moving` | the computer the move leaves, and a linked desktop during a move back or a restore | The move runs; once that computer waits on the server's confirmation the sentence says Fermix keeps trying. |
 | `on` | a linked desktop | Fermix runs on the server. `detail`: `server` (`{name, version}`), `backups` (`{place, at}` for each place's newest verified backup), `copies_bytes` (the space this computer's copies take), `disk_used`, `data` (what lives on the server, and that whoever hosts it can technically read its disk), `actions` (`back_up_now`, `move_back`) and, where the server serves any, `webhooks` (*Inbound webhooks*). |
 | `undone` | the computer the move left | The move was undone and its server is still held (`try_again`), or the engine is restarting as it was (no action). |
-| `retired` | a computer the move left | It has no link to the server, or the server no longer knows it. `restore_here` in `detail.alternatives` where it applies (*Moving back*). |
+| `retired` | a computer the move left | It has no link to the server, or the server no longer knows it. On a server's own copy that a move back left serving nothing, the sentence names where Fermix moved back to (the marker's `to`). `restore_here` in `detail.alternatives` where it applies (*Moving back*). |
 | `candidate` | the server, before its move | It waits for its move, or receives the home. |
 | `primary` | the server, after its move | Fermix runs there. `detail.webhooks` where it serves any (*Inbound webhooks*). |
 | `problem` | anywhere | `detail.kind` names it, `detail.note` adds one sentence where the design gives one, `detail.seen_at` is when Fermix last saw what it rests on, and `detail.alternatives` lists the other actions. |
@@ -375,11 +381,16 @@ Always On changes*).
 Problems (`detail.kind`): `cannot_reach` (no session with the server for 10
 minutes while this computer is awake: `learn_more`), `not_set_up` (on the
 server, its enrollment failed), `waited_too_long` (on the server, it waited
-past its 24 hours for its move), `update` (the server speaks a protocol this
-engine is too old for), `disk_full` (85% or more), `backup_old` (the newest
-backup is over 3 days old, or none since a move that long ago), `not_ready`
-(the last review blocks the move: `check_again`, every item in
-`detail.readiness`) and `return_failed` (a move back to this computer that
+past its 24 hours for its move; both say to open a new code and run the
+command there again), `update` (the server speaks a protocol this engine
+is too old for), `server_older` (the server refused this engine's protocol
+as newer than its own, `daemon_too_old`, because this computer updated
+first: its sentence says the server takes this computer's version in its
+nightly update; `learn_more`), `disk_full` (85% or more), `backup_old` (the
+newest backup is over 3 days old, or none since a move that long ago),
+`not_ready` (the last review blocks the move: `check_again`, every item in
+`detail.readiness`, and `cancel`, Forget this server, in
+`detail.alternatives`) and `return_failed` (a move back to this computer that
 ended or stopped part-way: `move_back` again, `cancel` where it stopped with
 no record of it, or `restore_here` again for a restore).
 
@@ -417,7 +428,8 @@ in `lines`. Fermix deletes no server for it: one job of its own
 press until this computer restarts as the primary. A restore that stopped
 before its copy was in place offers `restore_here` again. Back on this
 computer as the primary after a move back, the server's retired copy is
-told once (`back:<epoch>`).
+told once (`back:<epoch>`), and after Restore here the restore is
+(`restored:<epoch>`, naming the day of the backup).
 
 **Acting on it: `home.act`.** A surface sequences nothing. For the action the
 owner pressed it collects what `needs` lists, asks `confirm` (when it is not
@@ -436,7 +448,7 @@ actions are opened by the surface itself and never sent: `learn_more` opens
 | `id` | What the engine does on `home.act` |
 |---|---|
 | `own_server` | opens a code for the owner's server; `result` is `{code, expires_at, command, tailscale}`, answered once: `command` installs Fermix, and `tailscale` (`{sentence, command}`) is the optional step that also joins the server to the owner's tailnet, which WhatsApp and webhook sources need: the same command with `--tailscale`, after which the server asks for the code and then a Tailscale auth key (created tagged `tag:fermix-server`) at the terminal without echo, so the key is on no command line |
-| `cancel` | on `connect`, closes the code for the owner's server |
+| `cancel` | on `connect` and on `creating`, closes the code for the owner's server; on a held server's `ready` or `not_ready` (Forget this server), drops the held server, after its confirm, and the screen is `off` |
 | `back_up_now` | runs a backup now (on a linked desktop, on the server) |
 | `check_again` | runs the move's review again, and keeps it |
 | `move_now`, `try_again` | reviews at the press (a block refuses; a warning the confirm did not name answers `changed`), checks or sets the recovery passphrase, starts the move and restarts the engine; `result` is `{move_id}`. During a move back it sends the move to the server, which checks the passphrase against its own key and keeps no desktop of itself, to this desktop's own candidate, kept in the move back's own record |

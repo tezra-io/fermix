@@ -60,6 +60,32 @@ defmodule FermixCore.Home.CandidatesTest do
     refute Map.has_key?(Candidates.view(back), "returning")
   end
 
+  # Forget this server (Always On review M2): the owner drops one held
+  # server; one no longer held is gone already.
+  test "removes one held candidate, and an absent one is removed already", %{home: home} do
+    {:ok, first} = Candidates.add(home, attrs("north-box"), @now)
+    {:ok, second} = Candidates.add(home, attrs("south-box"), @now)
+
+    assert :ok = Candidates.remove(home, first.candidate_id, @now)
+    assert {:ok, [^second]} = Candidates.list(home, @now)
+    assert :ok = Candidates.remove(home, first.candidate_id, @now)
+    assert {:ok, [^second]} = Candidates.list(home, @now)
+  end
+
+  # A held server's 24 hours ran out (review M2): the list still names it
+  # until the next write, which is how Always On tells the owner it lapsed.
+  test "names a candidate whose 24 hours ran out until the list is written again",
+       %{home: home} do
+    {:ok, record} = Candidates.add(home, attrs("north-box"), @now)
+    later = DateTime.add(@now, 24 * 3_600, :second)
+
+    assert {:ok, []} = Candidates.lapsed(home, @now)
+    assert {:ok, [^record]} = Candidates.lapsed(home, later)
+
+    {:ok, _other} = Candidates.add(home, attrs("south-box"), later)
+    assert {:ok, []} = Candidates.lapsed(home, later)
+  end
+
   test "a file Fermix did not write is refused, not read", %{home: home} do
     File.mkdir_p!(Path.dirname(Candidates.path(home)))
     File.write!(Candidates.path(home), ~s({"v":1,"candidates":[{"name":"x"}]}))

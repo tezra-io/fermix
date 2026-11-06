@@ -10,8 +10,11 @@ defmodule FermixChannels.Home.Enrollment do
   relays its endpoint listens on (the ones every paired device acknowledged),
   the host's name and the expiry. The window lives thirty minutes: the code
   a person copies onto a server of their own (Always On's `own_server`,
-  `home.act`). `withdraw/1` releases it when the owner cancels its code (an
-  open one ends now). A window a linked desktop opens to take the home back
+  `home.act`). `withdraw/1` releases it when the owner cancels its code (one
+  that recorded no candidate yet ends now: an open one, or one a server used
+  but did not finish enrolling through). `forget/2` drops a held candidate
+  the owner forgot (Always On's Forget this server). A window a linked
+  desktop opens to take the home back
   (Always On's move back) names that desktop (`returning`, its device id),
   and the candidate that enrolls through it carries it
   (`FermixCore.Home.Candidates`): the server knows a move goes back by that
@@ -29,7 +32,9 @@ defmodule FermixChannels.Home.Enrollment do
   (the same Noise key), whose `enroll_accepted` was lost: while the window
   lasts it is answered again with the candidate id it was given, and after
   that `enrollment_expired` like anyone. One after the thirty minutes is
-  answered `enrollment_expired`. The window is remembered until another
+  answered `enrollment_expired`, and a window used by a server that was never
+  recorded through it reads `expired` once they are over, as an unused one
+  does. The window is remembered until another
   replaces it, so a late candidate hears why. `enroll/3` records the
   candidate, at most #{4} held (`enrollment_limit` past them).
 
@@ -43,7 +48,7 @@ defmodule FermixChannels.Home.Enrollment do
   handshake completes against its window.
 
   Every change it keeps (a window opened, used, given its candidate or
-  withdrawn) and its expiry tell the Always On watch
+  withdrawn, a candidate forgotten) and its expiry tell the Always On watch
   (`FermixCore.Home.StatusWatch`, `:enrollment`): the summary an app draws
   reads the window (companion protocol 6).
 
@@ -98,13 +103,25 @@ defmodule FermixChannels.Home.Enrollment do
       do: GenServer.call(server, {:open, returning}, 15_000)
 
   @doc """
-  Releases the window when the owner cancels its code: one still open ends
-  now (its secret leaves the disk), a used one stays as the record of who
-  used it; one already released, or none, is left as it is. Answers `:ok`,
-  or `{:error, {:unavailable, sentence}}` when the window could not be kept.
+  Releases the window when the owner cancels its code: one that recorded no
+  candidate yet (open, or used by a server that did not finish enrolling)
+  ends now (its secret leaves the disk), one whose candidate is recorded
+  stays as the record of who used it; one already released, or none, is left
+  as it is. Answers `:ok`, or `{:error, {:unavailable, sentence}}` when the
+  window could not be kept.
   """
   @spec withdraw(GenServer.server()) :: :ok | {:error, {:unavailable, String.t()}}
   def withdraw(server \\ __MODULE__), do: GenServer.call(server, :withdraw)
+
+  @doc """
+  Drops the held candidate `candidate_id` the owner forgot, in the one
+  writer of the list, and tells the Always On watch; the window keeps who
+  used it. One no longer held is forgotten already. Answers `:ok`, or
+  `{:error, {:unavailable, sentence}}` when the list could not be written.
+  """
+  @spec forget(GenServer.server(), String.t()) :: :ok | {:error, {:unavailable, String.t()}}
+  def forget(server \\ __MODULE__, candidate_id) when is_binary(candidate_id),
+    do: GenServer.call(server, {:forget, candidate_id})
 
   @doc "Whether a window is held (open, used or expired); false when no window process runs."
   @spec window?(GenServer.server()) :: boolean()
@@ -181,6 +198,19 @@ defmodule FermixChannels.Home.Enrollment do
     do: withdraw_window(state)
 
   def handle_call(:withdraw, _from, state), do: {:reply, :ok, state}
+
+  def handle_call({:forget, candidate_id}, _from, state) do
+    case Candidates.remove(state.home, candidate_id, state.clock.()) do
+      :ok ->
+        Logger.info("enrollment: candidate #{candidate_id} forgotten")
+        :ok = state.status_changed.()
+        {:reply, :ok, state}
+
+      {:error, reason} ->
+        Logger.error("enrollment: the candidate could not be forgotten: #{inspect(reason)}")
+        {:reply, {:error, {:unavailable, "Fermix could not forget the server."}}, state}
+    end
+  end
 
   def handle_call(:window?, _from, state), do: {:reply, state.window != nil, state}
   def handle_call(:secret, _from, %{window: nil} = state), do: {:reply, :none, state}
@@ -282,14 +312,17 @@ defmodule FermixChannels.Home.Enrollment do
     end
   end
 
-  # Released: an open window ends now and the write takes its secret off the
-  # disk; a used one keeps its expiry and who used it.
+  # Released: a window that recorded no candidate ends now (open, or used by
+  # a server that never finished enrolling) and the write takes its secret off
+  # the disk; one whose candidate is recorded keeps its expiry and who used it.
   defp withdraw_window(%{window: window} = state) do
     now = DateTime.truncate(state.clock.(), :second)
     Logger.info("enrollment: the window was withdrawn")
 
     expires_at =
-      if window_state(window, now) == :open, do: now, else: window.expires_at
+      if window.candidate_id == nil and window_state(window, now) != :expired,
+        do: now,
+        else: window.expires_at
 
     case keep(state, %{window | expires_at: expires_at, withdrawn?: true}, :ok) do
       {:reply, :ok, kept} -> {:reply, :ok, %{kept | window: %{kept.window | secret: nil}}}
@@ -534,10 +567,17 @@ defmodule FermixChannels.Home.Enrollment do
 
   defp optional_key(_other), do: :error
 
-  defp window_state(%{used?: true}, _now), do: :used
+  # A used window stands as the record of its candidate; one whose server was
+  # never recorded through it ends with its half hour, like an unused one.
+  defp window_state(%{used?: true, candidate_id: id}, _now) when is_binary(id), do: :used
 
-  defp window_state(%{expires_at: at}, now),
-    do: if(DateTime.compare(now, at) == :lt, do: :open, else: :expired)
+  defp window_state(%{used?: used?, expires_at: at}, now) do
+    cond do
+      DateTime.compare(now, at) != :lt -> :expired
+      used? -> :used
+      true -> :open
+    end
+  end
 
   defp attrs(request, noise_pk) do
     host = request["host"]

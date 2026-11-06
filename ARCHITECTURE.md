@@ -568,7 +568,14 @@ copies beside the record `Management.Home.status/1` already holds (the role,
 the move's phase, the candidates, the rail's window and link, the snapshots,
 the primary's disk, `Home.Disk.usage/2`, and a linked desktop's composed
 `primary_home`, or `Placement.primary_part/2`'s `too_old` when the server
-refused this engine's protocol), the review's items the home's settings
+refused this engine's protocol as too old and `behind` when it refused it as
+newer than its own, a `server_older` problem until its nightly update), on
+the computer that sets it up the held server whose 24 hours ran out that
+the window still names (`Home.Candidates.lapsed/2`, the list until its next
+write; none once a return's record says the home came back here since), on
+a desktop whether its own move kept it as no desktop (a server's copy after
+a move back, whose retired screen names where Fermix went), the review's
+items the home's settings
 decide (`MoveReadiness.summary_items/4`, which `report/3` ends with) and the
 owner's zone (`Clock.shown_zone/1`), and the pure `summary/1` answers `{key,
 state, sentence, action, detail, notice}` in `Management.Copy`'s words:
@@ -647,7 +654,11 @@ pressing at once do nothing twice. The computer that sets Always On up runs
 every step itself: Use my own Linux server opens a code
 (`HomeMove.enroll_open/1`) answered with the command that installs Fermix
 there and its `--tailscale` form, which also joins the server to the
-owner's tailnet, and Cancel withdraws it. Move now reviews at the press (a kept ready review under 15 minutes old, else
+owner's tailnet, and Cancel withdraws it, on Connecting your server too (a
+window no candidate was recorded through ends at once, and one past its 30
+minutes reads `expired`); Forget this server on a held server's screen drops
+it (`Home.Link`'s `forget_candidate/1`, through the enrollment window, the
+one writer of `Home.Candidates`). Move now reviews at the press (a kept ready review under 15 minutes old, else
 a fresh one, kept), refuses on a block, answers `changed` on a warning the
 confirm did not name, then reaches `HomeMove.move_start/3`. On a linked
 desktop it sends the server's own steps over the link as rail-only methods
@@ -685,10 +696,13 @@ a `local` candidate not yet being put in place is discarded
 put in place is finished by restarting the engine. The job is never
 resumed: jobs live in memory, so an engine stop part-way leaves a request
 beside no job and a `local` candidate the device's next start discards, and
-Restore here is offered again. Back on this computer as the primary after a move back
+Restore here is offered again. `LocalReturn` writes the copy's name into
+`return.json` (`restored`) once its staging held and before the activation.
+Back on this computer as the primary after a move back
 (`return.json`'s `moved_at` beside its `move_started_at`), the summary tells
 once that the owner's server still runs its retired copy (`back:<epoch>`); a
-restore here, whose server the owner deleted or stopped, tells nothing. The
+restore here (`moved_at` beside `restored`) tells once that it finished,
+naming the backup's day (`restored:<epoch>`). The
 record stays until a move away from this home starts
 (`HomeMove.move_start/3` removes it), so no later move's progress, move
 back or notice is drawn from it.

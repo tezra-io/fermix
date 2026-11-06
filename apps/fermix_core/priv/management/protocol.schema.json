@@ -5804,7 +5804,7 @@
               "required": ["id", "sentence"],
               "additionalProperties": false,
               "properties": {
-                "id": { "type": "string", "pattern": "^(ready|moved|cannot_reach|backup_week|back):.+$" },
+                "id": { "type": "string", "pattern": "^(ready|moved|cannot_reach|backup_week|back|restored|server_lapsed):.+$" },
                 "sentence": { "type": "string", "minLength": 1 }
               }
             },
@@ -5833,7 +5833,7 @@
     },
     "homeSummaryDetail": {
       "type": "object",
-      "description": "What Details holds for the state: on connect alternatives; on ready server, readiness and waits_until; on on server, backups, copies_bytes, disk_used, data and actions; on problem kind, note, seen_at and alternatives (readiness where the problem has it); lines on ready, on and problem wherever there are any; progress while a move back or a restore runs; webhooks on on and primary where the server serves any.",
+      "description": "What Details holds for the state: on connect and creating alternatives; on ready server, readiness, waits_until and alternatives (Forget this server); on on server, backups, copies_bytes, disk_used, data and actions; on problem kind, note, seen_at and alternatives (readiness where the problem has it); lines on ready, on and problem wherever there are any; progress while a move back or a restore runs; webhooks on on and primary where the server serves any.",
       "additionalProperties": false,
       "properties": {
         "lines": {
@@ -5871,7 +5871,7 @@
         "copies_bytes": { "type": ["integer", "null"], "minimum": 0 },
         "disk_used": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
         "data": { "type": "string", "minLength": 1 },
-        "kind": { "enum": ["cannot_reach", "not_set_up", "waited_too_long", "update", "disk_full", "backup_old", "not_ready", "return_failed"] },
+        "kind": { "enum": ["cannot_reach", "not_set_up", "waited_too_long", "update", "server_older", "disk_full", "backup_old", "not_ready", "return_failed"] },
         "note": { "type": ["string", "null"] },
         "seen_at": { "type": ["string", "null"] },
         "webhooks": {

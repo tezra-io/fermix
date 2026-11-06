@@ -28,7 +28,11 @@ defmodule FermixCore.Management.AlwaysOn do
       server, answered with the command that installs Fermix there and the
       one that also joins it to the owner's tailnet, with its sentence
       (`Copy.own_server_tailscale_command/0`).
-    * `cancel` on the code's screen: the code is withdrawn.
+    * `cancel` on the code's screen, and on Connecting your server: the code
+      is withdrawn. On a held server's screen (ready, or a review that
+      blocks), Forget this server: the held server is dropped
+      (`Home.Link`'s `forget_candidate/1`), after the owner's confirm, and
+      the screen is off again.
     * `back_up_now` and `check_again`: run here, or on a linked desktop sent
       as `home.snapshots.run` and `home.move.readiness`.
     * `move_now`, `try_again`: the server a move goes to is the engine's
@@ -89,7 +93,8 @@ defmodule FermixCore.Management.AlwaysOn do
   `Management.HomeMove`: `:home`, `:engine_role`, `:now`, `:jobs`,
   `:link_status`, `:config`, `:scheduler`, `:save_recipient`, `:restart`,
   `:open_enrollment`, `:withdraw_enrollment` (a 0-arity stand-in for the
-  rail's) and the review's; for a move back,
+  rail's), `:forget_candidate` (a 1-arity stand-in for the rail's, given the
+  held server's id) and the review's; for a move back,
   `Home.Candidate.prepare_return/3`'s `:role` and `:restarts_itself?`,
   `:start_return` and `:stop_return` (in place of the rail's), and
   `:local_return` (a 2-arity stand-in for `Home.LocalReturn.restore/3`,
@@ -298,9 +303,24 @@ defmodule FermixCore.Management.AlwaysOn do
     end
   end
 
-  # A move back's, else the code of the owner's server.
+  # A move back's; on the computer that sets Always On up, the held server
+  # its screen offers to forget; else the code of the owner's server.
   defp cancel(%{facts: facts}, opts) do
-    if returning?(facts), do: cancel_return(opts), else: withdraw_code(opts)
+    cond do
+      returning?(facts) -> cancel_return(opts)
+      facts.role == :primary and HomeSummary.target(facts) != nil -> forget_server(facts, opts)
+      true -> withdraw_code(opts)
+    end
+  end
+
+  defp forget_server(facts, opts) do
+    %{"candidate_id" => id} = HomeSummary.target(facts)
+    forget = Keyword.get(opts, :forget_candidate, fn id -> Link.impl().forget_candidate(id) end)
+
+    case forget.(id) do
+      :ok -> {:ok, nil}
+      {:error, {:unavailable, sentence}} when is_binary(sentence) -> unavailable(sentence)
+    end
   end
 
   # A move back's screen: its candidate, or its started record alone.

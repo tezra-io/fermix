@@ -15,6 +15,7 @@ defmodule FermixCore.Home.LocalReturnTest do
   alias FermixCore.Home.LocalReturn
   alias FermixCore.Home.Moved
   alias FermixCore.Home.MoveTelemetry
+  alias FermixCore.Home.Return
   alias FermixCore.Home.Role
   alias FermixCore.Home.Snapshot
   alias FermixCore.Home.Snapshot.Capture
@@ -91,6 +92,11 @@ defmodule FermixCore.Home.LocalReturnTest do
     # The copy itself stays, as every copy this computer keeps does.
     assert File.exists?(chosen.path)
 
+    # Review m3: the return's record names the copy put in place, which the
+    # primary it made tells once.
+    assert {:ok, %{restored: restored, from: "north-box"}} = Return.read(ctx.mac)
+    assert restored == chosen.name
+
     assert_received {:telemetry, _event, _measurements,
                      %{phase: :started, side: :candidate, move_id: "local-" <> stamp}}
 
@@ -121,6 +127,7 @@ defmodule FermixCore.Home.LocalReturnTest do
 
     assert {:ok, %{role: :device}} = Role.configured(ctx.mac)
     assert {:ok, _marker} = Moved.read(ctx.mac)
+    assert Return.read(ctx.mac) == :absent
   end
 
   test "an engine that would not start again on its own is refused before anything", ctx do

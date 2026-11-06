@@ -90,6 +90,8 @@ defmodule FermixCore.Management.Placement do
                            "server does not answer it."
   @too_old_sentence "The server runs a newer Fermix than this computer can talk to, so " <>
                       "update Fermix on this computer."
+  @behind_sentence "The server runs an older Fermix than this computer, until its nightly " <>
+                     "update installs this computer's."
 
   # How long a desktop waits for the primary's answer to a forwarded request:
   # well inside the apps' 10 s call timeout, except the two calls that walk the
@@ -147,10 +149,13 @@ defmodule FermixCore.Management.Placement do
   through `forward`, the daemon's link to it, within `composed_deadline_ms/0`:
   its answer, or the sentence a person is shown for why it is missing;
   `{:too_old, sentence}` when the primary refused this engine's protocol as
-  too old (`client_too_old`), so the summary asks for an update.
+  too old (`client_too_old`), so the summary asks for an update, and
+  `{:behind, sentence}` when it refused it as newer than its own
+  (`daemon_too_old`: this computer updated first, and the server takes its
+  version in its nightly update), so the summary says so.
   """
   @spec primary_part((Protocol.request(), keyword() -> Protocol.route_result()), String.t()) ::
-          {:ok, map()} | {:missing, String.t()} | {:too_old, String.t()}
+          {:ok, map()} | {:missing, String.t()} | {:too_old, String.t()} | {:behind, String.t()}
   def primary_part(forward, method)
       when is_function(forward, 2) and method in @composed_methods do
     request = %{
@@ -163,6 +168,7 @@ defmodule FermixCore.Management.Placement do
     case forward.(request, deadline_ms: @composed_deadline_ms) do
       {:ok, %{} = answer} -> {:ok, answer}
       {:error, :client_too_old, _details} -> {:too_old, @too_old_sentence}
+      {:error, :daemon_too_old, _details} -> {:behind, @behind_sentence}
       {:error, _code, %{"sentence" => sentence}} when is_binary(sentence) -> {:missing, sentence}
       {:error, code, _details} -> {:missing, "The server did not answer this (#{code})."}
     end

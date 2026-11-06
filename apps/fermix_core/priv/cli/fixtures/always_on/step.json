@@ -4,8 +4,19 @@
     "result": null,
     "summary": {
       "action": null,
-      "detail": {},
-      "key": "A_S4DotDEeo8_E_syGkw8g",
+      "detail": {
+        "alternatives": [
+          {
+            "confirm": null,
+            "id": "cancel",
+            "key": "PGFKmgUa3i48MJgwQSKf-g",
+            "label": "Cancel the code",
+            "needs": [],
+            "url": null
+          }
+        ]
+      },
+      "key": "R9nJeBmx5PeiJJdvfG9Hcg",
       "notice": null,
       "outcome": "running",
       "sentence": "Connecting your server…",

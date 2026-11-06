@@ -18,6 +18,7 @@ defmodule FermixCore.Home.Return do
         "candidate_id": "c-91",
         "move_id": "m-12",
         "restore_requested": "20310601T080000Z-e6.fxsnap",
+        "restored": "20310601T080000Z-e6.fxsnap",
         "moved_at": "2031-06-01T09:20:00Z",
         "epoch": 7
       }
@@ -34,6 +35,9 @@ defmodule FermixCore.Home.Return do
     taken back when the job ends, however it ended (`Management.AlwaysOn`);
     one left by a restart that ended the job stands beside no job, which the
     summary reads as no restore.
+  - `restored`: the copy Restore here put in place, written once its
+    staging held and before the activation (`Home.LocalReturn`), so the
+    primary it made tells the owner once which backup it came back from.
   - `moved_at`, `epoch`: once this computer booted as the primary again
     (`done/2`, which the primary's boot runs before anything reads the home;
     one it could not write is remembered, `remember_unrecorded/0`, and each
@@ -55,7 +59,7 @@ defmodule FermixCore.Home.Return do
   @file_mode 0o600
   @max_text_bytes 128
   @times [:started_at, :move_started_at, :moved_at]
-  @texts [:from, :candidate_id, :move_id, :restore_requested]
+  @texts [:from, :candidate_id, :move_id, :restore_requested, :restored]
   @epochs [:primary_epoch, :epoch]
   @keys @times ++ @texts ++ @epochs
   @required [:from, :started_at]
@@ -69,6 +73,7 @@ defmodule FermixCore.Home.Return do
           optional(:candidate_id) => String.t(),
           optional(:move_id) => String.t(),
           optional(:restore_requested) => String.t(),
+          optional(:restored) => String.t(),
           optional(:moved_at) => DateTime.t(),
           optional(:epoch) => pos_integer()
         }

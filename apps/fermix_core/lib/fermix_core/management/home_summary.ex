@@ -21,13 +21,18 @@ defmodule FermixCore.Management.HomeSummary do
   `state` is one of `states/0`:
 
     * the computer that sets Always On up, before the move: `off`, `connect`
-      (a code for the owner's server is open, waiting for it), `creating`
-      (the server used its code and connects), `ready`, `undone` (a move was
-      undone and its server is still held);
+      (a code for the owner's server is open, waiting for it; a new code
+      beside it ends this one, and its label says so), `creating` (the server
+      used its code and connects, Cancel beside it, which closes the code;
+      once the code's half hour is over with no server recorded, the screen
+      is `off` again), `ready` (and a review that blocks), with Forget this
+      server beside Move now, which drops the held server after a confirm,
+      `undone` (a move was undone and its server is still held);
     * the computer the move left: `moving` (its last word, once it waits on
       the server's confirmation, is that Fermix keeps trying), `undone` while
       it restarts as it was, `on`, `retired` (no link, or the server forgot
-      this computer);
+      this computer; a server's own copy that a move back left serving
+      nothing names where Fermix moved back to, the marker's `to`);
     * the server: `candidate` while it waits for its move, `primary` after;
     * `problem`, with its `kind` (`problems/0`) in `detail` and the one action
       that fixes it, or Learn more where none does.
@@ -99,12 +104,21 @@ defmodule FermixCore.Management.HomeSummary do
   server's own `primary` draws none: its summary rides inside its desktops'
   `home.status`, where the mounts would pass the protocol's nesting bound.
 
+  A linked desktop whose server refused its protocol as newer than its own
+  (`daemon_too_old`: this computer updated first) is a `problem` of kind
+  `server_older`, whose sentence says the server takes this computer's
+  version in its nightly update; never a bare `on`.
+
   `notice` is the occurrence the apps raise as a system notification, or
   nil: the server ready (`ready:<candidate>`), the move done
   (`moved:<epoch>`, until the first backup after it), the server out of
   reach (`cannot_reach:<since>`), the newest backup a week old
-  (`backup_week:<at>`) and Fermix back on this computer after a move back
-  (`back:<epoch>`). An app posts when the id changes.
+  (`backup_week:<at>`), Fermix back on this computer after a move back
+  (`back:<epoch>`), Restore here finished, naming the day of the backup it
+  restored (`restored:<epoch>`), and a held server whose 24 hours ran out,
+  which must be set up again with a new code (`server_lapsed:<candidate>`,
+  on the screen it leaves, while the code that enrolled it still names it).
+  An app posts when the id changes.
 
   `outcome` is what a surface that follows a step reads (review R6), so none
   keeps its own table of states: `running` while Always On is at something
@@ -123,6 +137,7 @@ defmodule FermixCore.Management.HomeSummary do
   alias FermixCore.Cues.Webhook
   alias FermixCore.Funnel
   alias FermixCore.Home.Candidate
+  alias FermixCore.Home.Candidates
   alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.Move
   alias FermixCore.Home.MoveReadiness
@@ -133,8 +148,8 @@ defmodule FermixCore.Management.HomeSummary do
 
   @states ~w(off connect creating ready moving on undone retired candidate primary problem)
   @outcomes ~w(running waiting done failed)
-  @problems ~w(cannot_reach not_set_up waited_too_long update disk_full backup_old not_ready
-               return_failed)
+  @problems ~w(cannot_reach not_set_up waited_too_long update server_older disk_full backup_old
+               not_ready return_failed)
   @actions ~w(cancel move_now try_again learn_more update back_up_now check_again own_server
               move_back restore_here)
   @needs ~w(recovery_passphrase new_recovery_passphrase)
@@ -187,7 +202,10 @@ defmodule FermixCore.Management.HomeSummary do
           required(:return) => map() | nil,
           required(:returning) => map() | :unreadable | nil,
           required(:restoring) => boolean(),
-          required(:copies) => [%{name: String.t(), at: DateTime.t()}]
+          required(:copies) => [%{name: String.t(), at: DateTime.t()}],
+          required(:lapsed) => String.t() | nil,
+          required(:moved_back) => boolean(),
+          required(:primary_behind) => boolean()
         }
   @type summary :: %{String.t() => term()}
 
@@ -243,7 +261,8 @@ defmodule FermixCore.Management.HomeSummary do
   @doc """
   An action's `key`: the digest of its `id`, `label`, `confirm`, `needs` and
   `target`, the one thing it acts on: the server a move goes to
-  (`move_now`, `try_again`, `check_again`), the copy a restore takes
+  (`move_now`, `try_again`, `check_again`), the server Forget this server
+  drops (`cancel` on a held server), the copy a restore takes
   (`restore_here`), or nil.
   """
   @spec action_key(String.t(), String.t(), String.t() | nil, [String.t()], String.t() | nil) ::
@@ -325,7 +344,8 @@ defmodule FermixCore.Management.HomeSummary do
   @doc """
   The facts of `home`'s summary: `status` is the `home.status` record's own
   facts (`Management.Home.status/1` has gathered them, with
-  `primary_too_old` and `restoring`), `link` the rail's status, and `opts`
+  `primary_too_old`, `primary_behind` and `restoring`), `link` the rail's
+  status, and `opts`
   the seams `:now`, `:host_os`, `:personalization` (the owner's time zone,
   `FermixCore.Clock`'s seam) and `:unreadable_files`
   (`Home.UnreadableFiles`, or nil for a verb with no engine tree);
@@ -336,7 +356,12 @@ defmodule FermixCore.Management.HomeSummary do
   on the primary the review's items they decide, the record of a move back
   (`Home.Return`), and, on a desktop, its candidate for a move back
   (`Home.Candidate`'s state) and its stored copies, newest first, by the
-  time and epoch their names carry.
+  time and epoch their names carry. On the computer that sets Always On up,
+  the held server whose 24 hours ran out (`Home.Candidates.lapsed/2`) that
+  the window still names, unless a return's record says the home came back
+  here since (`lapsed`); on a desktop, whether its own move left it serving
+  nothing (`moved_back`: a server's copy after a move back, its move's
+  `keep_as_desktop`).
   """
   @spec gather(Path.t(), map(), map(), map(), keyword()) :: facts()
   def gather(home, %{role: role} = record, link, status, opts)
@@ -344,6 +369,7 @@ defmodule FermixCore.Management.HomeSummary do
     host_os = Keyword.get_lazy(opts, :host_os, &host_os/0)
     reads = Keyword.take(opts, [:unreadable_files])
     now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
+    return = return_record(home, reads)
 
     %{
       role: role,
@@ -363,10 +389,13 @@ defmodule FermixCore.Management.HomeSummary do
       copies_bytes: copies_bytes(home, role, reads),
       stays_here: stays_here(home, role, host_os, reads),
       zone: Clock.shown_zone(Keyword.take(opts, [:personalization])),
-      return: return_record(home, reads),
+      return: return,
       returning: returning_state(home, role, reads),
       restoring: Map.get(status, :restoring, false),
-      copies: copies(home, role)
+      copies: copies(home, role),
+      lapsed: lapsed(home, role, {link, return}, now, reads),
+      moved_back: moved_back(home, role),
+      primary_behind: Map.get(status, :primary_behind, false)
     }
   end
 
@@ -392,7 +421,9 @@ defmodule FermixCore.Management.HomeSummary do
         connect(facts)
 
       {nil, %{state: :used, candidate_id: nil}} ->
-        view("creating", Copy.summary_sentence(:connecting, %{}), nil, %{})
+        view("creating", Copy.summary_sentence(:connecting, %{}), nil, %{
+          "alternatives" => [action(:cancel, %{code: true})]
+        })
 
       _nothing ->
         nil
@@ -403,32 +434,37 @@ defmodule FermixCore.Management.HomeSummary do
     view("off", sentence(:off, facts, %{stays_here: facts.stays_here}), action(:own_server), %{})
   end
 
-  # While the code for the owner's server is open: a new code, or Cancel,
-  # which closes it.
+  # While the code for the owner's server is open: a new code, which ends
+  # this one (its label says so), or Cancel, which closes it.
   defp connect(facts) do
     view("connect", sentence(:connect, facts), nil, %{
-      "alternatives" => [action(:own_server), action(:cancel, %{code: true})]
+      "alternatives" => [action(:own_server, %{renew: true}), action(:cancel, %{code: true})]
     })
   end
 
-  # The server is held and waits for Move now, unless the last review blocks.
+  # The server is held and waits for Move now, unless the last review blocks;
+  # either way it can be forgotten, except while a move to it runs.
   defp ready(candidate, facts) do
     items = review_items(facts.review, candidate["candidate_id"])
 
     case for(%{"status" => "block", "sentence" => block} <- items, do: block) do
       [block | _more] ->
         problem("not_ready", Copy.summary_sentence(:not_ready, %{block: block}), :check_again, %{
-          "readiness" => items
+          "readiness" => items,
+          "alternatives" => forget(facts)
         })
 
       [] ->
         view("ready", sentence(:ready, facts), action(:move_now), %{
           "server" => server_facts(candidate),
           "readiness" => items,
-          "waits_until" => candidate["expires_at"]
+          "waits_until" => candidate["expires_at"],
+          "alternatives" => forget(facts)
         })
     end
   end
+
+  defp forget(facts), do: if(moving?(facts), do: [], else: [action(:cancel, %{forget: true})])
 
   # The warnings and blocks of the last review of this server; nothing when
   # all is well or none was made.
@@ -499,11 +535,18 @@ defmodule FermixCore.Management.HomeSummary do
 
   defp retired(facts),
     do:
-      view("retired", sentence(:retired, facts), action(:learn_more), %{})
+      view("retired", retired_sentence(facts), action(:learn_more), %{})
       |> restorable(facts)
 
+  # A server's own copy that a move back left serving nothing names where
+  # Fermix moved back to; any other retired computer, its server.
+  defp retired_sentence(%{moved_back: true, moved: %{to: to}} = facts),
+    do: sentence(:retired_back, facts, %{to: to})
+
+  defp retired_sentence(facts), do: sentence(:retired, facts)
+
   defp desktop(facts) do
-    checks = [&away_here/1, &too_old/1, &server_disk/1, &desktop_backup/1]
+    checks = [&away_here/1, &too_old/1, &server_older/1, &server_disk/1, &desktop_backup/1]
     Enum.find_value(checks, & &1.(facts)) || on(facts)
   end
 
@@ -524,6 +567,13 @@ defmodule FermixCore.Management.HomeSummary do
     do: problem("update", sentence(:update, facts), :update, %{})
 
   defp too_old(_facts), do: nil
+
+  # The server refused this computer's protocol as newer than its own: it
+  # takes this computer's version in its nightly update.
+  defp server_older(%{primary_behind: true} = facts),
+    do: problem("server_older", sentence(:server_older, facts), :learn_more, %{})
+
+  defp server_older(_facts), do: nil
 
   defp server_disk(%{primary_home: %{"disk" => disk}}), do: disk_problem(disk, :disk_full)
   defp server_disk(_facts), do: nil
@@ -970,7 +1020,8 @@ defmodule FermixCore.Management.HomeSummary do
   defp passphrase_need(%{snapshots: %{"recipient_set" => true}}), do: "recovery_passphrase"
   defp passphrase_need(_facts), do: "new_recovery_passphrase"
 
-  # What the owner accepts first: a move or a restore.
+  # What the owner accepts first: a move, a restore, or forgetting a server.
+  defp confirm(:cancel, %{forget: true}, facts), do: sentence(:confirm_forget, facts)
   defp confirm(:restore_here, _values, facts), do: sentence(:confirm_restore_here, facts)
   defp confirm(act, _values, facts) when act in [:move_now, :try_again], do: move_confirm(facts)
   defp confirm(_act, _values, _facts), do: nil
@@ -1001,6 +1052,8 @@ defmodule FermixCore.Management.HomeSummary do
 
   defp target_of(act, _values, facts) when act in [:move_now, :try_again, :check_again],
     do: candidate_id(target(facts))
+
+  defp target_of(:cancel, %{forget: true}, facts), do: candidate_id(target(facts))
 
   defp target_of(:restore_here, %{copy: name}, _facts), do: name
   defp target_of(_act, _values, _facts), do: nil
@@ -1123,7 +1176,9 @@ defmodule FermixCore.Management.HomeSummary do
         &ready_occurrence/2,
         fn _view, facts -> week_occurrence(facts, :notice_backup_week) end,
         &moved_occurrence/2,
-        &back_occurrence/2
+        &restored_occurrence/2,
+        &back_occurrence/2,
+        &lapsed_occurrence/2
       ],
       & &1.(view, facts)
     )
@@ -1148,9 +1203,37 @@ defmodule FermixCore.Management.HomeSummary do
   defp ready_notice(%{role: :device}), do: :return_ready
   defp ready_notice(_facts), do: :notice_ready
 
+  # Restore here finished: told once, by the epoch it came back at, naming
+  # the day of the backup it restored (`Home.Return`'s `restored`). A record
+  # it shares with a move back that had started is still a restore's.
+  defp restored_occurrence(
+         _view,
+         %{role: :primary, return: %{moved_at: %DateTime{}, restored: name} = record} = facts
+       ) do
+    case copy(name) do
+      [%{at: at}] ->
+        day = Clock.stated_day(at, personalization: [timezone: facts.zone])
+        {"restored:#{record.epoch}", sentence(:notice_restored, facts, %{day: day})}
+
+      [] ->
+        nil
+    end
+  end
+
+  defp restored_occurrence(_view, _facts), do: nil
+
+  # A held server whose 24 hours ran out, on the screen it leaves: told once,
+  # by its id, as one to set up again.
+  defp lapsed_occurrence(%{"state" => "off"}, %{role: :primary, lapsed: id} = facts)
+       when is_binary(id),
+       do: {"server_lapsed:" <> id, sentence(:notice_server_lapsed, facts)}
+
+  defp lapsed_occurrence(_view, _facts), do: nil
+
   # Back on this computer after a move back, whose server still runs its
   # retired copy: told once, by the epoch this computer came back at. A
-  # restore here, whose server the owner deleted or stopped, tells nothing.
+  # restore here, whose server the owner deleted or stopped, tells only that
+  # it finished (`restored_occurrence/2`).
   defp back_occurrence(
          _view,
          %{
@@ -1377,6 +1460,34 @@ defmodule FermixCore.Management.HomeSummary do
   end
 
   defp copies(_home, _role), do: []
+
+  # The held server whose 24 hours ran out that the window still names: the
+  # code that enrolled it is the last one opened here. A return's record
+  # says the home moved away and came back since, so the window's server is
+  # no held one that lapsed. The list that cannot be read is logged once
+  # while it stays so, and names none.
+  defp lapsed(home, :primary, {%{enrollment: %{candidate_id: id}}, nil}, now, reads)
+       when is_binary(id) do
+    read = Candidates.lapsed(home, now)
+    file = Candidates.path(home)
+    :ok = UnreadableFiles.log_read(file, "home status", lapsed_read(read), memory(reads))
+
+    case read do
+      {:ok, records} -> if Enum.any?(records, &(&1.candidate_id == id)), do: id
+      {:error, _reason} -> nil
+    end
+  end
+
+  defp lapsed(_home, _role, _link, _now, _reads), do: nil
+
+  defp lapsed_read({:ok, _records}), do: :ok
+  defp lapsed_read(error), do: error
+
+  # A server's own copy after a move back: its move kept it as no desktop.
+  defp moved_back(home, :device),
+    do: match?({:ok, %{"keep_as_desktop" => false}}, Move.read_phase(home))
+
+  defp moved_back(_home, _role), do: false
 
   defp copy(path) do
     name = Path.basename(path)

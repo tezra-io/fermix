@@ -84,6 +84,13 @@ defmodule FermixCore.Home.Link do
               :ok | {:error, {:unavailable, String.t()}}
 
   @doc """
+  Primary role: drops the held candidate `candidate_id` the owner forgot
+  (Always On's Forget this server). One no longer held is forgotten already.
+  A refusal carries the sentence a person is shown.
+  """
+  @callback forget_candidate(String.t()) :: :ok | {:error, {:unavailable, String.t()}}
+
+  @doc """
   Any role: removes the desktop row whose Noise key is `noise_pk` from the
   device list of the home at `root` (a staged home, never the running one's):
   a return stages the server's home on the computer it left, whose own row

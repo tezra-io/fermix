@@ -78,6 +78,70 @@ defmodule FermixChannels.Home.EnrollmentWindowTest do
              {:error, :expired}
   end
 
+  # Always On review m1: a server that proved the code but was never recorded
+  # leaves the window used with no candidate; once its half hour is over it
+  # reads expired, so the screen leaves "Connecting your server…".
+  test "a window a server used but was not recorded through reads expired past its half hour",
+       ctx do
+    {:ok, _code} = Enrollment.open(ctx.primary.enrollment)
+    :ok = Enrollment.take(ctx.primary.enrollment, :binary.copy(<<7>>, 32))
+    assert %{state: :used, candidate_id: nil} = Enrollment.status(ctx.primary.enrollment)
+
+    HomeMove.advance!(ctx.primary, 1_800)
+    assert %{state: :expired, candidate_id: nil} = Enrollment.status(ctx.primary.enrollment)
+  end
+
+  # Cancel on "Connecting your server…" (review m1): the window a server used
+  # but did not finish enrolling through ends now and admits nobody again;
+  # one whose server is recorded keeps who used it.
+  test "withdrawing a window ends it until a server is recorded through it", ctx do
+    remote = :binary.copy(<<7>>, 32)
+    {:ok, _code} = Enrollment.open(ctx.primary.enrollment)
+    :ok = Enrollment.take(ctx.primary.enrollment, remote)
+
+    assert :ok = Enrollment.withdraw(ctx.primary.enrollment)
+    assert %{state: :expired} = Enrollment.status(ctx.primary.enrollment)
+    assert Enrollment.take(ctx.primary.enrollment, remote) == {:error, :expired}
+
+    {:ok, _code} = Enrollment.open(ctx.primary.enrollment)
+    :ok = Enrollment.take(ctx.primary.enrollment, remote)
+    {:ok, %{candidate_id: id}} = Enrollment.enroll(ctx.primary.enrollment, request(), remote)
+
+    assert :ok = Enrollment.withdraw(ctx.primary.enrollment)
+    assert %{state: :used, candidate_id: ^id} = Enrollment.status(ctx.primary.enrollment)
+  end
+
+  # Forget this server (Always On review M2): the held server leaves the
+  # list, which tells the watch; the window keeps who used it. One no longer
+  # held is forgotten already.
+  test "forgetting a held server drops it and tells the Always On watch" do
+    test = self()
+
+    primary =
+      HomeMove.primary!(
+        schedule: fn _message, _delay -> make_ref() end,
+        status_changed: fn ->
+          send(test, :status_changed)
+          :ok
+        end
+      )
+
+    remote = :binary.copy(<<7>>, 32)
+    {:ok, _code} = Enrollment.open(primary.enrollment)
+    :ok = Enrollment.take(primary.enrollment, remote)
+    {:ok, %{candidate_id: id}} = Enrollment.enroll(primary.enrollment, request(), remote)
+    {:ok, other} = Candidates.add(primary.root, candidate_attrs(), HomeMove.now())
+    flush_status_changed()
+
+    assert :ok = Enrollment.forget(primary.enrollment, id)
+    assert_received :status_changed
+    assert {:ok, [^other]} = Candidates.list(primary.root, HomeMove.now())
+    assert %{state: :used, candidate_id: ^id} = Enrollment.status(primary.enrollment)
+
+    assert :ok = Enrollment.forget(primary.enrollment, id)
+    assert {:ok, [^other]} = Candidates.list(primary.root, HomeMove.now())
+  end
+
   # Always On's move back: a linked desktop opens a copied-code window on its
   # server to take the home back, and the server keeps which desktop asked, so
   # the candidate that enrolls through it is that desktop's return: a fact the
@@ -159,6 +223,28 @@ defmodule FermixChannels.Home.EnrollmentWindowTest do
         "recipient" => Base.encode64(:binary.copy(<<3>>, 32))
       }
     }
+  end
+
+  defp candidate_attrs do
+    %{
+      name: "south-box",
+      os: "linux",
+      arch: "aarch64",
+      version: "9.9.9",
+      node_id: String.duplicate("ef", 32),
+      relays: [%{"url" => "https://eu1.relay.invalid/", "quic_port" => 7842}],
+      noise_pk: :binary.copy(<<4>>, 32),
+      recipient: :binary.copy(<<5>>, 32),
+      snapshots: nil
+    }
+  end
+
+  defp flush_status_changed do
+    receive do
+      :status_changed -> flush_status_changed()
+    after
+      0 -> :ok
+    end
   end
 
   defp decoded_secret(code) do

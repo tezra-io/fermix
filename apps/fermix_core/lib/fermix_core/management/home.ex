@@ -245,7 +245,7 @@ defmodule FermixCore.Management.Home do
     link = Keyword.get(opts, :link_status, fn -> Link.impl().status() end).()
     :ok = passed_return(home, role, link, opts)
     move = HomeMove.facts(home, role, link, opts)
-    {primary_home, primary_missing, too_old?} = primary_home(opts)
+    {primary_home, primary_missing, gap} = primary_home(opts)
 
     facts = %{
       role: role.role,
@@ -267,7 +267,11 @@ defmodule FermixCore.Management.Home do
     }
 
     summary_status =
-      Map.merge(facts, %{primary_too_old: too_old?, restoring: restoring?(role, opts)})
+      Map.merge(facts, %{
+        primary_too_old: gap == :too_old,
+        primary_behind: gap == :behind,
+        restoring: restoring?(role, opts)
+      })
 
     gathered = HomeSummary.gather(home, role, link, summary_status, opts)
 
@@ -405,18 +409,20 @@ defmodule FermixCore.Management.Home do
   defp secrets_missing(_record, _opts), do: []
 
   # A linked desktop adds the primary's own picture, or why it is missing,
-  # and whether the server speaks a protocol this engine is too old for.
+  # and whether the server speaks a protocol this engine is too old for
+  # (`:too_old`) or one older than this engine's (`:behind`, until its
+  # nightly update).
   defp primary_home(opts) do
     case Keyword.fetch(opts, :primary_forward) do
       {:ok, forward} ->
         case Placement.primary_part(forward, "home.status") do
-          {:ok, status} -> {status, nil, false}
-          {:too_old, sentence} -> {nil, sentence, true}
-          {:missing, sentence} -> {nil, sentence, false}
+          {:ok, status} -> {status, nil, nil}
+          {gap, sentence} when gap in [:too_old, :behind] -> {nil, sentence, gap}
+          {:missing, sentence} -> {nil, sentence, nil}
         end
 
       :error ->
-        {nil, nil, false}
+        {nil, nil, nil}
     end
   end
 

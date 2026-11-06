@@ -58,6 +58,7 @@ defmodule FermixCore.Management.CopyTest do
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.RestartState
   alias FermixCore.Setup.SecretWriter
+  alias FermixTestSupport.TestSourceScan
 
   # What the two renderers really answer for a reason the plugin installer
   # produces: a tuple, a map, and the operator's own home directory.
@@ -906,10 +907,12 @@ defmodule FermixCore.Management.CopyTest do
   # the refusal that asks a desktop to update. The apps and
   # the setup page print them as they are, so beside the rules they carry
   # none of the engine's own words for the move and no fermix command.
+  @restored_day "Saturday, May 3, 2031"
+
   describe "the Always On summary copy" do
     test "every sentence, label and step obeys the rules and names nothing internal" do
       for {where, text, kind} <- summary_copy() do
-        assert_clean(text, kind, [], where)
+        assert_clean(text, kind, summary_names(), where)
 
         assert Copy.summary_violations(text) == [],
                "#{where}: #{inspect(text)} breaks #{inspect(Copy.summary_violations(text))}"
@@ -991,6 +994,27 @@ defmodule FermixCore.Management.CopyTest do
       assert Copy.move_confirm([]) == "Move Fermix to your server now?"
     end
 
+    # The systems the own-server copy names are the ones the server's first
+    # boot takes: read from the script it runs, so the two cannot drift.
+    test "the systems the own-server copy names are the ones the first boot takes" do
+      script =
+        File.read!(Path.join(TestSourceScan.umbrella_root(), "packaging/cloud/first-boot.sh"))
+
+      [_all, systems] = Regex.run(~r/\n\s*("debian [^\n]*)\) ;;/, script)
+      [_all, arches] = Regex.run(~r/\n\s*(aarch64 \| x86_64)\) ;;/, script)
+
+      taken =
+        ~r/"(\w+) ([\d.]+)"/
+        |> Regex.scan(systems)
+        |> Enum.map(fn [_all, id, version] -> "#{String.capitalize(id)} #{version}" end)
+
+      names = Copy.own_server_names()
+      assert taken == ["Debian 12", "Debian 13", "Ubuntu 24.04"]
+      assert Enum.all?(taken, &(&1 in names))
+      assert arches == "aarch64 | x86_64" and "arm64" in names and "x86_64" in names
+      assert script =~ "LANDLOCK_ABI_MIN=3" and "Linux 6.2" in names
+    end
+
     test "the docs and the own-server command are the engine's to word" do
       assert Copy.always_on_docs_url() == "https://fermix.ai/docs/always-on/"
       # The server installs the release this computer runs (design §6).
@@ -1027,6 +1051,11 @@ defmodule FermixCore.Management.CopyTest do
     end
   end
 
+  # What the summary's words interpolate rather than write: the systems the
+  # server's first boot takes, and the day a restored backup was taken, as
+  # `FermixCore.Clock` states it.
+  defp summary_names, do: [@restored_day | Copy.own_server_names()]
+
   defp summary_copy do
     values = %{
       age: 7_200,
@@ -1034,7 +1063,9 @@ defmodule FermixCore.Management.CopyTest do
       percent: 90,
       block: "This home is about 4 GiB; the move needs about 9 GiB free.",
       stays_here: [:imessage, :voice, :meetings],
-      ports: [whatsapp: 4030, cues: 4032]
+      ports: [whatsapp: 4030, cues: 4032],
+      to: "studio-mac",
+      day: @restored_day
     }
 
     sentences =
@@ -1046,7 +1077,7 @@ defmodule FermixCore.Management.CopyTest do
 
     labels =
       for id <- HomeSummary.actions(),
-          extra <- [%{}, %{code: true}],
+          extra <- [%{}, %{code: true}, %{forget: true}, %{renew: true}],
           machine <- ["Mac", "computer"],
           values = Map.put(extra, :machine, machine),
           do: {"action #{id}", Copy.summary_label(String.to_existing_atom(id), values), :name}

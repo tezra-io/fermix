@@ -691,24 +691,38 @@ it, never a second writer.
     move, naming only that: iMessage on a Mac, voice calls, meetings; and
     **Use my own Linux server**); a code open for the server ("Waiting for
     your server: run the command on it and paste the code when it asks.",
-    with **Use my own Linux server** for a new code and **Cancel the code**);
-    the server connecting; ready (**Move now**, with the review's warnings,
-    and that Fermix can move back to this Mac from Always On whenever the
-    owner wants); the move undone (**Try again**);
+    then the systems the server's first boot takes, Debian 12, Debian 13 or
+    Ubuntu 24.04 on arm64 or x86_64 with Linux 6.2 or later, and that the
+    code works for 30 minutes of which installing takes a few; with **Open a
+    new code (the current one stops working)**, since a server may be using
+    the open one already, and **Cancel the code**); the server connecting
+    (**Cancel the code**, which closes it; once the code's 30 minutes are
+    over with no server recorded, the screen is back to nothing set up);
+    ready (**Move now**, with the review's warnings, and that Fermix can
+    move back to this Mac from Always On whenever the owner wants), and
+    beside it, and beside a review that blocks, **Forget this server**,
+    which asks first and drops the held server, back to nothing set up (not
+    while a move to it runs); the move undone (**Try again**);
   - on the computer the move leaves: moving ("Waiting for your server to
     confirm the move. Fermix keeps trying." once it waits on the server);
     "Fermix runs on your server. Last backup 2 hours ago." once linked; no
     longer connected to it (**Learn more**, and **Restore on this Mac** where
     it holds a copy); moving back (*Moving back*, below);
-  - on the server: waiting for its move, then "Fermix runs here.";
+  - on the server: waiting for its move, then "Fermix runs here."; after a
+    move back, its retired copy says "This copy is retired: Fermix moved
+    back to <the computer>.";
   - a problem, in one sentence with the one action that fixes it: no answer
     for 10 minutes of this computer being awake (**Learn more**, and
     **Restore on this Mac** where it holds a copy), this computer too old for
-    its server (**Update**), the server's disk 85% full or more (**Learn
+    its server (**Update**), the server older than this computer, which
+    updated first ("Your server runs an older Fermix than this Mac. It
+    updates to this Mac's version in its nightly update.", **Learn more**),
+    the server's disk 85% full or more (**Learn
     more**), the last backup over 3 days old (**Back up now**), a review that blocks the move
     (**Check again**), a move back that stopped (*Moving back*), and on the
     server, a server that waited past its 24 hours or whose enrollment
-    failed (**Learn more**).
+    failed, each saying to open a new code in Always On and run the command
+    there again (**Learn more**).
 - Details holds the rest: the server's facts and the review's items, Back up
   now and Move back, what lives on the server (conversations and memories,
   the secrets, the browser, traces) with the plain fact that whoever hosts it
@@ -740,8 +754,12 @@ it, never a second writer.
   server's own screen shows none (its desktops do). Fermix ships no tunnel.
 - The summary also names the latest occurrence the apps raise as a system
   notification (`notice`): the server ready, the move done, the server out of
-  reach, the last backup a week old, and Fermix back on this computer after a
-  move back. Each keeps one id while it stands, so an app posts it once.
+  reach, the last backup a week old, Fermix back on this computer after a
+  move back, Restore here finished ("Fermix runs on this Mac again, from its
+  backup of <the backup's day>."), and a held server whose 24 hours ran out
+  ("Your server waited 24 hours for the move and must be set up again. Open
+  a new code in Always On and run the command on it again."). Each keeps one
+  id while it stands, so an app posts it once.
 - When the server's newest backup passes 7 days it tells the paired phones,
   once per occurrence, as a message in the owner's phone chat: open Fermix on
   the Mac to back up now.
