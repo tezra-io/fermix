@@ -91,10 +91,11 @@ defmodule Fermix.CLI.Doctor.ServerLinkCheckTest do
   test "an engine that does not answer is said, never taken for a link", %{home: home} do
     home = linked!(home)
 
-    assert %{status: :warn, detail: detail} =
-             Checks.server_link(home: home, client: fn -> {:error, :not_running} end)
-
-    assert detail =~ "not read"
+    # A stopped engine in the daemon socket row's words, never a bare atom.
+    assert %{
+             status: :warn,
+             detail: "not read: the engine is not running (start with `fermix start`)"
+           } = Checks.server_link(home: home, client: fn -> {:error, :not_running} end)
 
     # An engine older than the row's request.
     older = fn -> {:ok, %{"status" => "error", "reason" => "unknown method"}} end

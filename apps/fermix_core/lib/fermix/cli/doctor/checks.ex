@@ -1476,6 +1476,9 @@ defmodule Fermix.CLI.Doctor.Checks do
   defp server_link_result({:ok, %{"status" => "error", "reason" => reason}}),
     do: warn("server link", "not read: the running engine answered #{reason}")
 
+  defp server_link_result({:error, :not_running}),
+    do: warn("server link", "not read: the engine is not running (start with `fermix start`)")
+
   defp server_link_result({:error, reason}),
     do: warn("server link", "not read: #{Client.describe_error(reason)}")
 
