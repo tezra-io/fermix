@@ -1,7 +1,8 @@
 #!/bin/sh
 # Test stand-in for tailscale, which the apt-get stand-in installs where the
 # package puts the real one. Its daemon's state is the word in
-# /var/lib/fermix-test/tailscale-state (NeedsLogin without the file).
+# /var/lib/fermix-test/tailscale-state (NeedsLogin without the file), logged
+# in to the invented tailnet invented.example while Running.
 # `status --json` and `ip -1` answer from it and log nothing, as reads.
 # `up` logs its arguments; with --auth-key=file:PATH it records that path,
 # the mode and owner of the file and the SHA-256 of what it holds (never the
@@ -15,8 +16,12 @@ current=NeedsLogin
 if [ -f "$state" ]; then current=$(cat "$state"); fi
 case "${1-}" in
   status)
-    printf '{\n  "Version": "1.90.0-invented",\n  "BackendState": "%s",\n  "Self": {\n    "HostName": "invented-server"\n  }\n}\n' \
-      "$current"
+    tailnet=null
+    if [ "$current" = Running ]; then
+      tailnet='{"Name": "invented.example", "MagicDNSSuffix": "tail0invented.ts.net", "MagicDNSEnabled": true}'
+    fi
+    printf '{\n  "Version": "1.90.0-invented",\n  "BackendState": "%s",\n  "Self": {\n    "HostName": "invented-server"\n  },\n  "CurrentTailnet": %s\n}\n' \
+      "$current" "$tailnet"
     exit 0
     ;;
   ip)

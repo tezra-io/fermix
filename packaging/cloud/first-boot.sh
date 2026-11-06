@@ -21,8 +21,11 @@
 # owner's tailnet before enrolling, with the auth key in TS_AUTHKEY or asked
 # for on the terminal without echo). It never prints the code or the key,
 # never logs them and never puts them on a command line. Run again, it
-# converges on the same state; a host whose Fermix home exists is not
-# enrolled again, and one already on a tailnet is not logged in again.
+# converges on the same state. A host whose Fermix home exists is read
+# first: a candidate whose enrollment did not finish enrolls again with a new
+# code, a home that runs is started as it is (and refused when given a code),
+# and any other home is refused with the commands that remove it, which the
+# script never runs itself. One already on a tailnet is not logged in again.
 set -eu
 
 ENGINE_USER=fermix
@@ -84,6 +87,11 @@ RESTORE=0
 SNAPSHOT_BUCKET=""
 SNAPSHOT_REGION=""
 HOME_EXISTS=0
+# What an existing home is (read_home): kept as it runs, or a candidate that
+# enrolls again with a new code.
+HOME_KEPT=0
+REENROLL=0
+HOME_JSON=""
 ENGINE_UID=""
 APT_UPDATED=0
 WORK=""
@@ -93,6 +101,8 @@ TAILSCALE=0
 TS_KEY=""
 TS_KEY_FILE=""
 TS_ON_TAILNET=0
+TS_STATE=""
+TS_TAILNET=""
 TS_REPO=""
 
 # One sentence and a non-zero exit.
@@ -227,8 +237,11 @@ read_code() {
   check_code
 }
 
+# An OAuth client secret (tskey-client-) also starts tskey-, but tailscale up
+# takes one only with tags of the script's own, which it never passes.
 check_tailscale_key() {
   case "$TS_KEY" in
+    "${TS_KEY_PREFIX}client-"*) fail "That is a Tailscale OAuth client secret, not an auth key: create an auth key in Tailscale's admin console (Settings, Keys) and run this again." ;;
     "$TS_KEY_PREFIX"*) ;;
     *) fail "That is not a Tailscale auth key, which starts with $TS_KEY_PREFIX. Create one in Tailscale's admin console and run this again." ;;
   esac
@@ -240,15 +253,42 @@ check_tailscale_key() {
   fi
 }
 
-# Whether this host is on a tailnet already: Tailscale installed and its
-# daemon answering Running. A host without Tailscale, or whose daemon does
-# not answer (stopped, or never started), is not, so this run sets it up; the
-# daemon's complaint that it is not running is that answer, not an error.
-on_tailnet() {
-  command -v tailscale >/dev/null 2>&1 || return 1
-  ts_state=$(tailscale status --json 2>/dev/null </dev/null | tr -d '\n' |
-    sed -n 's/.*"BackendState": *"\([A-Za-z]*\)".*/\1/p')
-  [ "$ts_state" = Running ]
+# Where this host's Tailscale stands, from tailscale status --json: its
+# daemon's BackendState in TS_STATE and the tailnet it is logged in to
+# (CurrentTailnet.Name, an object of plain fields) in TS_TAILNET. Both are
+# empty on a host without Tailscale or whose daemon does not answer (never
+# started), which this run sets up; the daemon's complaint that it is not
+# running is that answer, not an error.
+tailscale_status() {
+  TS_STATE=""
+  TS_TAILNET=""
+  command -v tailscale >/dev/null 2>&1 || return 0
+  ts_json=$(tailscale status --json 2>/dev/null </dev/null | tr -d '\n')
+  TS_STATE=$(printf '%s\n' "$ts_json" | sed -n 's/.*"BackendState": *"\([A-Za-z]*\)".*/\1/p')
+  TS_TAILNET=$(printf '%s\n' "$ts_json" | sed -n 's/.*"CurrentTailnet": *{\([^}]*\)}.*/\1/p' |
+    sed -n 's/.*"Name": *"\([^"]*\)".*/\1/p')
+}
+
+# A host on a tailnet already (Running) keeps it, named, and is neither asked
+# for a key nor logged in again: a key given for it would be dropped without
+# a word, so it stops instead. One that is logged in but down (Stopped) stops
+# too: tailscale up with a key would log it in again.
+check_tailnet() {
+  case "$TS_STATE" in
+    Running)
+      [ -n "$TS_TAILNET" ] ||
+        fail "Tailscale says this server is on a tailnet, but its status names no tailnet: update Tailscale and run this again."
+      if [ -n "$TS_KEY" ]; then
+        TS_KEY=""
+        fail "This server is already on the tailnet $TS_TAILNET: leave TS_AUTHKEY out to keep it, or, if that tailnet is not yours, run sudo tailscale logout and run this again."
+      fi
+      TS_ON_TAILNET=1
+      ;;
+    Stopped)
+      TS_KEY=""
+      fail "This server is logged in to a tailnet but Tailscale is down: run sudo tailscale up and run this again."
+      ;;
+  esac
 }
 
 # With --tailscale, before anything is installed: no key on a host already on
@@ -256,11 +296,9 @@ on_tailnet() {
 # echo, checked, then written only to TS_KEY_FILE in the work directory
 # (tmpfs, root's, 0600).
 read_tailscale_key() {
-  if on_tailnet; then
-    TS_ON_TAILNET=1
-    TS_KEY=""
-    return 0
-  fi
+  tailscale_status
+  check_tailnet
+  [ "$TS_ON_TAILNET" -eq 0 ] || return 0
   if [ -z "$TS_KEY" ]; then
     (: </dev/tty) 2>/dev/null ||
       fail "No Tailscale auth key: run this in a terminal, which asks for it, or pass it in TS_AUTHKEY."
@@ -311,6 +349,78 @@ as_engine() {
 prepare_run_dir() {
   mkdir -p "$RUN_DIR"
   chmod 0700 "$RUN_DIR"
+}
+
+# The string at the key $2 in the one-line JSON $1, its escapes undone: the
+# last such key in the text.
+json_string() {
+  printf '%s\n' "$1" | sed -En 's/.*"'"$2"'": *"(([^"\\]|\\.)*)".*/\1/p' | sed 's/\\"/"/g; s/\\\\/\\/g'
+}
+
+# The object of plain fields at the key $2 in the one-line JSON $1, without
+# its braces; nothing when it is null.
+json_object() {
+  printf '%s\n' "$1" | sed -En 's/.*"'"$2"'": *\{([^}]*)\}.*/\1/p'
+}
+
+# 0. A host whose Fermix home exists already: what the home is, from `fermix
+# home status --json` as the engine account (it answers with Fermix running
+# or not), decides the run before anything is installed. A candidate whose
+# enrollment did not finish (enrolling, failed, expired) enrolls again with a
+# new code; a home that runs (the primary, or a candidate waiting for or
+# receiving its move) is started as it is, and refused when given a code;
+# any other home is refused. The script never removes a home: each refusal
+# names the commands that do.
+read_home() {
+  ENGINE_UID=$(id -u "$ENGINE_USER") ||
+    fail "The Fermix home $FERMIX_HOME_DIR exists, but the account $ENGINE_USER does not, so this script cannot read what it is."
+  read_status=0
+  as_engine home status --json >"$WORK/home.json" || read_status=$?
+  HOME_JSON=$(tr -d '\n' <"$WORK/home.json")
+  [ "$read_status" -eq 0 ] || home_unreadable
+  role=$(json_string "$HOME_JSON" role)
+  phase=$(json_string "$(json_object "$HOME_JSON" move)" phase)
+  case "$role $phase" in
+    "candidate enrolling" | "candidate failed" | "candidate expired")
+      [ "$RESTORE" -eq 0 ] || refuse_home "This server holds a Fermix home that did not finish enrolling"
+      REENROLL=1
+      ;;
+    "candidate enrolled") home_runs "This server is enrolled already and waits for its move" ;;
+    "candidate receiving" | "candidate staged" | "candidate activating") home_runs "This server is receiving its move" ;;
+    "primary "*) home_runs "Fermix runs on this server as your primary" ;;
+    "device "*) retired_home ;;
+    "candidate "*) refuse_home "This server's Fermix home is a candidate whose move cannot be read" ;;
+    *) fail "fermix home status names no role this script knows for the Fermix home $FERMIX_HOME_DIR." ;;
+  esac
+}
+
+# fermix home status refused (its envelope says why) or stopped (its stderr
+# does).
+home_unreadable() {
+  said=$(json_string "$(json_object "$HOME_JSON" error)" sentence)
+  [ -n "$said" ] || fail "fermix home status stopped, so this script cannot read what the Fermix home $FERMIX_HOME_DIR is; its message above says why."
+  refuse_home "fermix home status could not read this server's Fermix home (${said%.})"
+}
+
+# A home that runs is started as it is, unless a code came with this run.
+home_runs() {
+  [ -z "$CODE" ] || refuse_home "$1"
+  HOME_KEPT=1
+}
+
+# A device's home on a server is the retired copy a move left (its marker
+# names where Fermix went), or a desktop of another primary.
+retired_home() {
+  to=$(json_string "$(json_object "$HOME_JSON" moved)" to)
+  [ -z "$to" ] || refuse_home "This server's Fermix home is a retired copy, left when Fermix moved to $to"
+  refuse_home "This server's Fermix runs as a desktop of another primary"
+}
+
+# Stops at a home this run does not set up: what it is ($1), then the
+# commands that remove it, which the owner runs.
+refuse_home() {
+  CODE=""
+  fail "$1: to set this server up again, which deletes that home, run sudo -H -u $ENGINE_USER env XDG_RUNTIME_DIR=/run/user/$ENGINE_UID $FERMIX_BIN service uninstall, then sudo rm -rf $FERMIX_HOME_DIR, then this command again."
 }
 
 # 1. The code goes to tmpfs, root's alone until the engine account exists.
@@ -807,9 +917,18 @@ EOF
   systemctl start "user@$ENGINE_UID.service"
 }
 
-# 7. The engine account writes its candidate home from the code file.
+# 7. A candidate that enrolls again: its engine stops first, since the
+# enrollment replaces the candidate only while no engine runs in the home;
+# the service starts again at step 8.
+stop_engine() {
+  say "Stopping Fermix, whose enrollment did not finish, to enroll this server again with the new code"
+  as_engine service uninstall ||
+    fail "fermix service uninstall stopped, so this server is not enrolled again; its message above says why."
+}
+
+# The engine account writes its candidate home from the code file.
 enroll() {
-  if [ "$HOME_EXISTS" -eq 1 ]; then
+  if [ "$HOME_KEPT" -eq 1 ]; then
     say "The Fermix home $FERMIX_HOME_DIR already exists, so this host is not enrolled again"
     return 0
   fi
@@ -889,7 +1008,8 @@ EOF
   # The new source's package lists.
   APT_UPDATED=0
   apt_install tailscale
-  systemctl enable --now tailscaled.service
+  systemctl enable --now tailscaled.service ||
+    fail "systemctl could not start tailscaled.service, so this server cannot join your tailnet; its message above says why."
 }
 
 # tailscale up with the key file, which is removed whether it joined or not.
@@ -899,7 +1019,7 @@ tailscale_up() {
   tailscale up --auth-key="file:$TS_KEY_FILE" --timeout="$TAILSCALE_UP_TIMEOUT" </dev/null || up=$?
   rm -f "$TS_KEY_FILE"
   [ "$up" -eq 0 ] ||
-    fail "tailscale up did not join this server to your tailnet, so the first boot stops here; its message above says why. A key that is used up, expired or revoked is refused: create a new one and run this again."
+    fail "tailscale up did not join this server to your tailnet, so the first boot stops here; its message above says why. A key that is used up, expired or revoked is refused: create a new one and run this again. If it printed a link to approve this server, approve it there and run this again without a key."
 }
 
 # With --tailscale, after the engine account and before enrolling, so the
@@ -909,7 +1029,7 @@ tailscale_up() {
 # the tailnet policy decides which devices reach the server.
 join_tailnet() {
   if [ "$TS_ON_TAILNET" -eq 1 ]; then
-    say "This server is already on a tailnet, so Tailscale is not installed or logged in again"
+    say "This server is already on the tailnet $TS_TAILNET, so Tailscale is not installed or logged in again"
   else
     install_tailscale
     tailscale_up
@@ -971,10 +1091,11 @@ EOF
 }
 
 finish_enrollment() {
+  if [ "$REENROLL" -eq 1 ]; then stop_engine; fi
   enroll
   start_service
   install_browser
-  if [ "$HOME_EXISTS" -eq 1 ]; then
+  if [ "$HOME_KEPT" -eq 1 ]; then
     say "Done. Fermix runs from the home it already had."
     return 0
   fi
@@ -1018,10 +1139,9 @@ main() {
   fi
   if [ -e "$FERMIX_HOME_DIR" ]; then
     HOME_EXISTS=1
-    CODE=""
-  elif [ "$RESTORE" -eq 0 ]; then
-    read_code
+    read_home
   fi
+  if [ "$RESTORE" -eq 0 ] && [ "$HOME_KEPT" -eq 0 ]; then read_code; fi
   # Both secrets are read and checked before either is written, and before
   # anything is installed. CODE holds one only on a host that enrolls.
   if [ "$TAILSCALE" -eq 1 ]; then read_tailscale_key; fi

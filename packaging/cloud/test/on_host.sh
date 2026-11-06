@@ -16,12 +16,20 @@
 #
 # Cases: the flag absent (nothing of Tailscale runs); the key from
 # TS_AUTHKEY; the code and the key typed at a terminal (script(1) gives the
-# run a pty); a key without --tailscale, malformed keys and no key without a
-# terminal, each refused before any step; a host already on a tailnet; a
-# signing key that is not Tailscale's; tailscale up failing before enrolling;
-# each supported release's repository; --restore. After every run the key is
-# nowhere under this test's directory, in no logged command line and in no
-# command's environment.
+# run a pty); a key without --tailscale, malformed keys, an OAuth client
+# secret and no key without a terminal, each refused before any step; a host
+# already on a tailnet, which goes on naming it without a key and is refused
+# with one, or when its status names no tailnet; a host logged in with
+# Tailscale down, refused; a signing key that is not Tailscale's; tailscaled
+# that does not start; tailscale up failing before enrolling; each supported
+# release's repository; --restore. After every run the key is nowhere under
+# this test's directory, in no logged command line and in no command's
+# environment. Then a host whose Fermix home exists, read through a stand-in
+# for the engine account's fermix calls that answers home status --json in
+# the engine's envelope: a candidate whose enrollment did not finish enrolling
+# again (code in the environment, typed, or missing), a home that runs (no
+# code, or one given), and every other home refused with the commands that
+# remove it.
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -34,6 +42,7 @@ INVENTED_FPR=0123456789ABCDEF0123456789ABCDEF01234567
 # Invented values in the real shapes; nothing here is a secret.
 CODE=fxenroll1.InventedEnrollmentCodeForTheHostTestOnly0123456789
 KEY=tskey-auth-kInvented1CNTRL-InventedSecretForTheHostTestOnly0123456789
+ANSWERS=type_answers
 
 die() {
   printf 'on_host: %s\n' "$1" >&2
@@ -118,6 +127,20 @@ stand_in() {
     printf 'the key file is still there at step %s\n' "\$1" >>'$LOG'
   fi
 }
+
+# A fermix verb as the engine account: logged; home status --json prints
+# state/home-status.json and exits with state/home-status-exit; a verb whose
+# arguments are the line in state/fermix-fails exits 1.
+as_engine() {
+  printf 'fermix %s\n' "\$*" >>'$LOG'
+  if [ -f '$STATE/fermix-fails' ] && [ "\$*" = "\$(/bin/cat '$STATE/fermix-fails')" ]; then
+    echo "fermix \$1: (test) it stopped" >&2
+    return 1
+  fi
+  [ "\$*" = 'home status --json' ] || return 0
+  /bin/cat '$STATE/home-status.json'
+  return "\$(/bin/cat '$STATE/home-status-exit')"
+}
 EOF
   for step in check_host block_metadata add_swap install_fermix schedule_updates \
     create_engine_user enroll start_service install_browser await_enrollment print_restore_steps; do
@@ -173,6 +196,8 @@ make_shims() {
   done
 }
 
+# apt-get and systemctl log their arguments; a call whose arguments are the
+# line in state/<tool>-fails exits 1, as a unit that does not start does.
 make_stand_ins() {
   printf 'Invented bytes standing in for a signing key; gpg here is a stand-in.\n' >"$T/served-key.gpg"
   for tool in apt-get systemctl; do
@@ -181,10 +206,15 @@ make_stand_ins() {
       record_lines
       cat <<EOF
 printf '$tool %s\n' "\$*" >>'$LOG'
+if [ -f '$STATE/$tool-fails' ] && [ "\$*" = "\$(/bin/cat '$STATE/$tool-fails')" ]; then
+  echo "$tool stand-in: (test) \$* failed" >&2
+  exit 1
+fi
 EOF
     } | write_exe "$BIN/$tool"
   done
   { echo '#!/bin/sh'; record_lines; stand_in_curl; } | write_exe "$BIN/curl"
+  { echo '#!/bin/sh'; record_lines; stand_in_id; } | write_exe "$BIN/id"
   { echo '#!/bin/sh'; record_lines; stand_in_gpg; } | write_exe "$BIN/gpg"
   { echo '#!/bin/sh'; record_lines; stand_in_tailscale; } | write_exe "$BIN/tailscale"
 }
@@ -215,6 +245,15 @@ esac
 EOF
 }
 
+# id: the engine account is uid 1001; there is no other account.
+stand_in_id() {
+  cat <<'EOF'
+if [ "$*" = '-u fermix' ]; then echo 1001; exit 0; fi
+echo "id: '$*': no such user" >&2
+exit 1
+EOF
+}
+
 # gpg --show-keys --with-colons FILE: one primary key, with a subkey, for each
 # fingerprint in state/gpg-primary-keys, in gpg's colon format.
 stand_in_gpg() {
@@ -240,10 +279,12 @@ EOF
 }
 
 # tailscale: its daemon's state is the word in state/tailscale-state, and a
-# daemon that does not answer without it. status and ip answer from it and
-# log nothing, as reads; up records the key file it was named (its path, its
-# mode, a checksum of what it holds) and joins the invented tailnet, unless
-# state/up-fails exists.
+# daemon that does not answer without it; the tailnet it is logged in to is
+# the name in state/tailnet-name (CurrentTailnet null without it). status and
+# ip answer from them and log nothing, as reads; status --json keeps the real
+# one's shape around them (nested objects, and names under other keys). up
+# records the key file it was named (its path, its mode, a checksum of what
+# it holds) and joins the invented tailnet, unless state/up-fails exists.
 stand_in_tailscale() {
   cat <<EOF
 state='$STATE'
@@ -253,7 +294,12 @@ case "\${1-}" in
       echo "failed to connect to local tailscaled; it doesn't appear to be running" >&2
       exit 1
     fi
-    printf '{\n  "BackendState": "%s",\n  "Self": {\n    "HostName": "invented-server"\n  }\n}\n' "\$(/bin/cat "\$state/tailscale-state")"
+    tailnet=null
+    if [ -f "\$state/tailnet-name" ]; then
+      tailnet=\$(printf '{\n    "Name": "%s",\n    "MagicDNSSuffix": "tail0invented.ts.net",\n    "MagicDNSEnabled": true\n  }' "\$(/bin/cat "\$state/tailnet-name")")
+    fi
+    printf '{\n  "Version": "1.90.0-invented",\n  "BackendState": "%s",\n  "Self": {\n    "HostName": "invented-server",\n    "Location": {\n      "Country": "Invented"\n    }\n  },\n  "MagicDNSSuffix": "tail0invented.ts.net",\n  "CurrentTailnet": %s,\n  "User": {\n    "1": {\n      "LoginName": "owner@invented.example",\n      "DisplayName": "Invented Owner"\n    }\n  }\n}\n' \
+      "\$(/bin/cat "\$state/tailscale-state")" "\$tailnet"
     exit 0
     ;;
   ip)
@@ -277,6 +323,7 @@ if [ -f "\$state/up-fails" ]; then
   exit 1
 fi
 echo Running >"\$state/tailscale-state"
+echo invented.example >"\$state/tailnet-name"
 EOF
 }
 
@@ -331,6 +378,12 @@ type_answers() {
   wait_for "a line after the key's prompt" "sed -n '/$key_prompt/,\$p' '$OUT' | sed -n 2p | grep -q ."
 }
 
+# Types the code $1 alone, for a run that asks for no key.
+type_code() {
+  answer 'Enrollment code from Fermix (it is not shown as you type): ' "$1"
+  wait_for "a line after the code's prompt" "sed -n '/Enrollment code from Fermix/,\$p' '$OUT' | sed -n 2p | grep -q ."
+}
+
 answer() {
   wait_for "the prompt '$1'" "grep -qF -- '$1' '$OUT'"
   printf '%s\n' "$2"
@@ -350,7 +403,8 @@ wait_for() {
 }
 
 # Runs the copy at a terminal: script(1) gives it a pty and reads what is
-# typed from a pipe. Output and stderr both land in $OUT, without the pty's
+# typed from a pipe, by the function in ANSWERS (the code and then the key
+# unless it says otherwise). Output and stderr both land in $OUT, without the pty's
 # carriage returns.
 run_at_terminal() {
   reset_logs
@@ -359,9 +413,9 @@ run_at_terminal() {
   done
   set +e
   if [ "$(uname -s)" = Darwin ]; then
-    type_answers "$CODE" "$KEY" | script -q /dev/null env -i PATH=/usr/bin:/bin "$@" >"$OUT" 2>&1
+    "$ANSWERS" "$CODE" "$KEY" | script -q /dev/null env -i PATH=/usr/bin:/bin "$@" >"$OUT" 2>&1
   else
-    type_answers "$CODE" "$KEY" | script -qefc "env -i PATH=/usr/bin:/bin $*" /dev/null >"$OUT" 2>&1
+    "$ANSWERS" "$CODE" "$KEY" | script -qefc "env -i PATH=/usr/bin:/bin $*" /dev/null >"$OUT" 2>&1
   fi
   STATUS=$?
   set -e
@@ -493,7 +547,10 @@ refusals() {
   check "[ ! -s '$LOG' ]" "and before even the host check"
   key_left_nowhere "a key without --tailscale"
 
+  oauth="That is a Tailscale OAuth client secret, not an auth key: create an auth key in Tailscale's admin console (Settings, Keys) and run this again."
   for bad in "tskex-auth-kInvented1CNTRL-InventedSecret0123456789|That is not a Tailscale auth key, which starts with tskey-. Create one in Tailscale's admin console and run this again." \
+    "tskey-client-kInvented1CNTRL-InventedClientSecret0123456789|$oauth" \
+    "tskey-client-kInvented1CNTRL-InventedClientSecret0123456789?ephemeral=false&preauthorized=true|$oauth" \
     "${KEY}?ephemeral=false|The Tailscale auth key holds a character no auth key has. Copy it again from Tailscale's admin console." \
     "tskey-auth-short|The Tailscale auth key is not between 20 and 200 characters long. Copy it again from Tailscale's admin console." \
     "${KEY}$(printf '%140s' '' | tr ' ' A)|The Tailscale auth key is not between 20 and 200 characters long. Copy it again from Tailscale's admin console."; do
@@ -516,22 +573,64 @@ refusals() {
     "an unknown option names --tailscale among the options"
 }
 
-already_on_a_tailnet() {
+# A host whose tailscaled answers the state $1, logged in to the tailnet $2
+# when one is named.
+tailscale_host() {
   fresh_host
-  echo Running >"$STATE/tailscale-state"
-  run TS_AUTHKEY="$KEY" FERMIX_ENROLL_CODE="$CODE" dash "$COPY" --tailscale
-  check "[ $STATUS -eq 0 ]" "a server already on a tailnet goes on (exit $STATUS)"
+  printf '%s\n' "$1" >"$STATE/tailscale-state"
+  if [ -n "${2-}" ]; then printf '%s\n' "$2" >"$STATE/tailnet-name"; fi
+}
+
+already_on_a_tailnet() {
+  tailscale_host Running invented.example
+  run FERMIX_ENROLL_CODE="$CODE" dash "$COPY" --tailscale
+  check "[ $STATUS -eq 0 ]" "a server already on a tailnet goes on with no key and no terminal (exit $STATUS)"
   [ "$STATUS" -eq 0 ] || sed 's/^/    /' "$OUT" "$ERR"
   printf '%s\n' "$NO_TAILSCALE_STEPS" | calls_are "it installs nothing of Tailscale and logs in again nowhere"
-  check "grep -qxF '==> This server is already on a tailnet, so Tailscale is not installed or logged in again' '$OUT'" \
-    "it says so"
+  check "grep -qxF '==> This server is already on the tailnet invented.example, so Tailscale is not installed or logged in again' '$OUT'" \
+    "it says so, naming the tailnet"
   check "grep -qxF '==> This server is on your tailnet at 100.88.12.34' '$OUT'" "and names its tailnet address"
-  key_left_nowhere "already on a tailnet"
 
-  fresh_host
-  echo Running >"$STATE/tailscale-state"
+  # A key given for a host on a tailnet would be dropped without a word, and
+  # the server would stay on a tailnet that may not be the owner's.
+  tailscale_host Running invented.example
+  run TS_AUTHKEY="$KEY" FERMIX_ENROLL_CODE="$CODE" dash "$COPY" --tailscale
+  stopped_with "This server is already on the tailnet invented.example: leave TS_AUTHKEY out to keep it, or, if that tailnet is not yours, run sudo tailscale logout and run this again." \
+    "a key given for a server already on a tailnet is refused, naming that tailnet"
+  refused_before_any_step "a key for a server on a tailnet"
+  key_left_nowhere "a key for a server on a tailnet"
+
+  tailscale_host Running
   run FERMIX_ENROLL_CODE="$CODE" dash "$COPY" --tailscale
-  check "[ $STATUS -eq 0 ]" "a server already on a tailnet needs no key and no terminal (exit $STATUS)"
+  stopped_with "Tailscale says this server is on a tailnet, but its status names no tailnet: update Tailscale and run this again." \
+    "a server on a tailnet its status does not name is refused"
+  refused_before_any_step "a tailnet with no name"
+}
+
+# Logged in, but tailscale down: a key would log the server in again (and
+# spend a one-off key), so it stops with or without one.
+tailscale_down() {
+  for given in with without; do
+    key=""
+    if [ "$given" = with ]; then key=$KEY; fi
+    tailscale_host Stopped invented.example
+    run TS_AUTHKEY="$key" FERMIX_ENROLL_CODE="$CODE" dash "$COPY" --tailscale
+    stopped_with "This server is logged in to a tailnet but Tailscale is down: run sudo tailscale up and run this again." \
+      "a server whose Tailscale is down is refused ($given a key)"
+    refused_before_any_step "Tailscale down"
+    key_left_nowhere "Tailscale down"
+  done
+}
+
+tailscaled_does_not_start() {
+  fresh_host
+  printf 'enable --now tailscaled.service\n' >"$STATE/systemctl-fails"
+  run TS_AUTHKEY="$KEY" FERMIX_ENROLL_CODE="$CODE" dash "$COPY" --tailscale
+  check "[ $STATUS -eq 1 ] && [ \"\$(tail -n 1 '$ERR')\" = 'fermix always-on: systemctl could not start tailscaled.service, so this server cannot join your tailnet; its message above says why.' ]" \
+    "a tailscaled that does not start stops the first boot with one sentence (exit $STATUS)"
+  [ "$STATUS" -eq 1 ] || sed 's/^/    /' "$OUT" "$ERR"
+  check "! grep -q '^tailscale up \|^step enroll' '$LOG'" "before tailscale up and before enrolling"
+  key_left_nowhere "a tailscaled that does not start"
 }
 
 not_tailscales_key() {
@@ -553,7 +652,7 @@ up_fails() {
   fresh_host
   : >"$STATE/up-fails"
   run TS_AUTHKEY="$KEY" FERMIX_ENROLL_CODE="$CODE" dash "$COPY" --tailscale
-  check "[ $STATUS -eq 1 ] && [ \"\$(tail -n 1 '$ERR')\" = \"fermix always-on: tailscale up did not join this server to your tailnet, so the first boot stops here; its message above says why. A key that is used up, expired or revoked is refused: create a new one and run this again.\" ]" \
+  check "[ $STATUS -eq 1 ] && [ \"\$(tail -n 1 '$ERR')\" = \"fermix always-on: tailscale up did not join this server to your tailnet, so the first boot stops here; its message above says why. A key that is used up, expired or revoked is refused: create a new one and run this again. If it printed a link to approve this server, approve it there and run this again without a key.\" ]" \
     "a tailscale up that fails stops the first boot with one sentence (exit $STATUS)"
   [ "$STATUS" -eq 1 ] || sed 's/^/    /' "$OUT" "$ERR"
   check "grep -q '^tailscale up ' '$LOG' && ! grep -q '^step enroll' '$LOG'" "before enrolling"
@@ -587,6 +686,145 @@ restore_host() {
   key_left_nowhere "a restore host"
 }
 
+# -- a host whose Fermix home exists -------------------------------------------
+
+HOME_DIR_MOVED=$T/home/fermix/.fermix
+REMOVE="to set this server up again, which deletes that home, run sudo -H -u fermix env XDG_RUNTIME_DIR=/run/user/1001 /usr/bin/fermix service uninstall, then sudo rm -rf $HOME_DIR_MOVED, then this command again."
+
+# A host with a Fermix home, whose fermix home status --json answers the role
+# $1, the candidate's phase $2 (no move when empty) and the moved marker's
+# $3 (none when empty), in the engine's own one-line envelope.
+home_is() {
+  fresh_host
+  /bin/mkdir -p "$HOME_DIR_MOVED"
+  move=null
+  moved=null
+  if [ -n "${2-}" ]; then move="{\"candidate\":null,\"phase\":\"$2\",\"sentence\":\"An invented sentence with \\\"quotes\\\" in it.\"}"; fi
+  if [ -n "${3-}" ]; then moved="{\"epoch\":4,\"moved_at\":\"2026-11-05T20:00:00Z\",\"to\":\"$3\"}"; fi
+  printf '{"ok":true,"result":{"candidates":[],"desktops":[],"disk":null,"enrollment":null,"epoch":null,"move":%s,"moved":%s,"primary":null,"primary_home":null,"primary_missing":null,"role":"%s","secrets_missing":[],"snapshots":{"configured":false,"interval_hours":6,"next_run_at":null,"recipient_set":false,"running":false,"sentence":"An invented snapshots sentence.","targets":[]},"summary":{"action":null,"detail":{},"key":"InventedKey","notice":null,"outcome":"done","sentence":"An invented summary sentence.","state":"candidate"},"update_ceiling":null,"version":"1.2.3","webhooks":[]},"schema_version":1}\n' \
+    "$move" "$moved" "$1" >"$STATE/home-status.json"
+  echo 0 >"$STATE/home-status-exit"
+}
+
+# A host whose fermix home status --json refuses with the code $1 and the
+# sentence $2.
+home_refuses() {
+  fresh_host
+  /bin/mkdir -p "$HOME_DIR_MOVED"
+  printf '{"error":{"code":"%s","sentence":"%s"},"ok":false,"schema_version":1}\n' "$1" "$2" >"$STATE/home-status.json"
+  echo 1 >"$STATE/home-status-exit"
+}
+
+refused_after_reading_the_home() {
+  printf 'step check_host\nfermix home status --json\n' | calls_are "$1: nothing runs after the home is read"
+}
+
+REENROLLED_STEPS='step check_host
+fermix home status --json
+step block_metadata
+step add_swap
+step install_fermix
+step schedule_updates
+step create_engine_user
+fermix service uninstall
+step enroll
+step start_service
+step install_browser
+step await_enrollment'
+
+# A candidate whose enrollment did not finish enrolls again with a new code:
+# the engine stopped first, then enrolled, started and waited for as on a
+# fresh host.
+enrolls_again() {
+  for phase in enrolling failed expired; do
+    home_is candidate "$phase"
+    run FERMIX_ENROLL_CODE="$CODE" dash "$COPY"
+    check "[ $STATUS -eq 0 ]" "a candidate $phase enrolls again with the new code (exit $STATUS)"
+    [ "$STATUS" -eq 0 ] || sed 's/^/    /' "$OUT" "$ERR"
+    printf '%s\n' "$REENROLLED_STEPS" | calls_are "$phase: the home is read before anything is installed, and Fermix stopped before it enrolls"
+    check "[ \"\$(cat '$T/run/fermix/enroll.code')\" = '$CODE' ]" "$phase: the new code is written for the enrollment"
+    check "grep -qxF '==> Done. Open Always On in Fermix to review this server, then move to it.' '$OUT'" \
+      "$phase: it ends as a first enrollment does"
+  done
+
+  home_is candidate failed
+  ANSWERS=type_code
+  run_at_terminal dash "$COPY"
+  ANSWERS=type_answers
+  check "[ $STATUS -eq 0 ] && grep -qF 'Enrollment code from Fermix' '$OUT'" \
+    "at a terminal, a candidate that failed asks for the new code (exit $STATUS)"
+  [ "$STATUS" -eq 0 ] || sed 's/^/    /' "$OUT"
+  printf '%s\n' "$REENROLLED_STEPS" | calls_are "and takes the same steps"
+  check "! grep -qF -- '$CODE' '$OUT' '$LOG' '$ARGV'" "the typed code is in no output and no command line"
+
+  home_is candidate expired
+  run dash "$COPY"
+  stopped_with "No enrollment code: run this in a terminal, which asks for it, or pass it in FERMIX_ENROLL_CODE." \
+    "a candidate that expired, with no code and no terminal, is refused"
+  refused_after_reading_the_home "no code for an expired candidate"
+
+  home_is candidate failed
+  printf 'service uninstall\n' >"$STATE/fermix-fails"
+  run FERMIX_ENROLL_CODE="$CODE" dash "$COPY"
+  check "[ $STATUS -eq 1 ] && [ \"\$(tail -n 1 '$ERR')\" = 'fermix always-on: fermix service uninstall stopped, so this server is not enrolled again; its message above says why.' ]" \
+    "a Fermix that does not stop stops the first boot with one sentence (exit $STATUS)"
+  check "! grep -q '^step enroll' '$LOG'" "before it enrolls"
+}
+
+# A home that runs, run again with no code, is started as it is; given a
+# code, it is refused, saying what it is and the commands that remove it.
+home_that_runs() {
+  for home in "candidate enrolled" "candidate receiving" "primary "; do
+    # shellcheck disable=SC2086 # the role and the phase
+    home_is $home
+    run dash "$COPY"
+    check "[ $STATUS -eq 0 ] && grep -qxF '==> Done. Fermix runs from the home it already had.' '$OUT'" \
+      "a $home home, run again with no code, runs as it is (exit $STATUS)"
+    printf 'step check_host\nfermix home status --json\nstep block_metadata\nstep add_swap\nstep install_fermix\nstep schedule_updates\nstep create_engine_user\nstep enroll\nstep start_service\nstep install_browser\n' |
+      calls_are "$home: it reads the home, stops nothing and waits for nothing"
+  done
+
+  for case in "candidate enrolled|This server is enrolled already and waits for its move" \
+    "candidate staged|This server is receiving its move" \
+    "primary |Fermix runs on this server as your primary"; do
+    # shellcheck disable=SC2086 # the role and the phase
+    home_is ${case%%|*}
+    run FERMIX_ENROLL_CODE="$CODE" dash "$COPY"
+    stopped_with "${case#*|}: $REMOVE" "a ${case%%|*} home given a code is refused, saying what it is and how to remove it"
+    refused_after_reading_the_home "a ${case%%|*} home given a code"
+    check "! grep -rqF -- '$CODE' '$T/run' '$OUT' '$ERR' '$LOG' '$ARGV'" "and the code is written nowhere"
+  done
+}
+
+# Any other home is refused, code or not.
+other_homes() {
+  home_is device "" "Invented's Mac"
+  run dash "$COPY"
+  stopped_with "This server's Fermix home is a retired copy, left when Fermix moved to Invented's Mac: $REMOVE" \
+    "a retired copy is refused, naming where Fermix moved"
+  refused_after_reading_the_home "a retired copy"
+
+  home_is device ""
+  run FERMIX_ENROLL_CODE="$CODE" dash "$COPY"
+  stopped_with "This server's Fermix runs as a desktop of another primary: $REMOVE" "a desktop's home is refused"
+
+  home_is candidate ""
+  run FERMIX_ENROLL_CODE="$CODE" dash "$COPY"
+  stopped_with "This server's Fermix home is a candidate whose move cannot be read: $REMOVE" \
+    "a candidate whose move cannot be read is refused"
+
+  home_is candidate failed
+  run dash "$COPY" --restore
+  stopped_with "This server holds a Fermix home that did not finish enrolling: $REMOVE" \
+    "--restore on a candidate that did not finish is refused"
+
+  home_refuses always_on_unavailable "Always On is not in this release of Fermix yet."
+  run FERMIX_ENROLL_CODE="$CODE" dash "$COPY"
+  stopped_with "fermix home status could not read this server's Fermix home (Always On is not in this release of Fermix yet): $REMOVE" \
+    "a home fermix home status refuses is refused, with the engine's own sentence"
+  refused_after_reading_the_home "a home the engine refuses to read"
+}
+
 /bin/mkdir -p "$BIN"
 build_copy
 make_shims
@@ -598,10 +836,15 @@ key_from_the_environment
 key_at_the_terminal
 refusals
 already_on_a_tailnet
+tailscale_down
 not_tailscales_key
+tailscaled_does_not_start
 up_fails
 each_release
 restore_host
+enrolls_again
+home_that_runs
+other_homes
 
 if [ -s "$FAILED" ]; then
   printf 'on host: %s check(s) failed\n' "$(wc -l <"$FAILED" | tr -d ' ')"

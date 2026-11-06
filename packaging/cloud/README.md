@@ -42,6 +42,32 @@ with it, a key that is not one (below) or no key without a terminal. The
 enrollment code and the key are both read and checked before either is
 written.
 
+A host whose Fermix home `/home/fermix/.fermix` exists already, a run again,
+is read first, still before anything is installed: `fermix home status
+--json` as `fermix` (it answers with Fermix running or not) gives the home's
+`role` and, on a candidate, its move's `phase`.
+
+- A candidate whose enrollment did not finish (`enrolling`, `failed` or
+  `expired`: the code ran out before the computer was reached, it was used
+  elsewhere or cancelled, or no move came within 24 hours) enrolls again
+  with a new code, read like a first one: Fermix is stopped (`fermix service
+  uninstall` as `fermix`, since the candidate is replaced only while no
+  engine runs in the home), enrolled with the new code, started and waited
+  for.
+- A home that runs (the primary, or a candidate waiting for its move or
+  receiving it) is bound and started as it is, and the run ends with "Done.
+  Fermix runs from the home it already had." Given a code, it is refused.
+- Any other home (a retired copy a move left, naming where Fermix moved; a
+  desktop of another primary; a candidate whose move cannot be read; a home
+  `fermix home status` refuses to read, with its sentence) is refused, and so
+  is a candidate that did not finish under `--restore`.
+
+Each refusal is one sentence that says what the home is and the commands
+that remove it, should the owner want the server set up again (`sudo -H -u
+fermix env XDG_RUNTIME_DIR=/run/user/<uid> /usr/bin/fermix service
+uninstall`, then `sudo rm -rf /home/fermix/.fermix`, then the command
+again). The script itself never removes a home.
+
 Then, in this order, failing with one sentence and a non-zero exit at any
 step:
 
@@ -143,8 +169,9 @@ step:
    --code-file /run/fermix/enroll.code [--snapshot-bucket B --snapshot-region
    R]`, then, with `XDG_RUNTIME_DIR=/run/user/<uid>` (systemctl reaches the user manager's
    private socket; no user D-Bus needed), `fermix service install --home
-   /home/fermix/.fermix`. Enrolling is skipped, and said, when
-   `/home/fermix/.fermix` exists; the service is bound and started again.
+   /home/fermix/.fermix`. A candidate enrolling again is stopped first
+   (`fermix service uninstall`); a home that runs is not enrolled again, which
+   is said, and its service is bound and started again.
 9. A browser for the agent's tasks. Debian: the distribution's `chromium`,
    which the engine's launcher finds on its `PATH` and starts headless as
    `fermix`, with Chromium's own sandbox. Ubuntu ships Chromium only as a
@@ -171,16 +198,20 @@ run. With it:
   terminal without echo, after the enrollment code. It must start with
   `tskey-`, hold only letters, digits, `-` and `_`, and be 20 to 200
   characters long; anything else is refused, without echoing it, before
-  anything is installed. It is never on a command line and never printed:
+  anything is installed. An OAuth client secret (`tskey-client-`) is refused
+  as not an auth key: `tailscale up` takes one only with tags the script
+  never passes. The key is never on a command line and never printed:
   `TS_AUTHKEY` is unset before the script runs anything, and the key goes
   only to `tailscale.authkey` (0600) in the script's work directory under
   `/run` (tmpfs, 0700, root's), which `tailscale up --auth-key=file:PATH`
   reads and which is removed right after it, whether it joined or not, and
-  with the work directory on every exit. Create the key in Tailscale's admin
-  console tagged `tag:fermix-server`, so the server joins as a tagged device;
-  the script passes no `--advertise-tags` of its own. A one-off,
-  pre-approved key suits a server; one that is used up, expired or revoked
-  is refused by `tailscale up`.
+  with the work directory on every exit; a `kill -9` or a power loss
+  mid-run skips that, and the file stays in `/run` until the next reboot
+  empties it. Create the key in Tailscale's admin console tagged
+  `tag:fermix-server`, after declaring that tag in the tailnet policy
+  (below), so the server joins as a tagged device; the script passes no
+  `--advertise-tags` of its own. A one-off, pre-approved key suits a server;
+  one that is used up, expired or revoked is refused by `tailscale up`.
 - **The package.** Tailscale's own package from its signed repository for
   the host's release (`https://pkgs.tailscale.com/stable/debian bookworm`,
   `debian trixie` or `ubuntu noble`), never a script piped into a shell. The
@@ -192,24 +223,86 @@ run. With it:
   `/etc/apt/sources.list.d/tailscale.list` names the repository with
   `signed-by` that keyring alone. Those are the paths Tailscale's own
   instructions use, so a host set up by them converges. Then `apt-get
-  install tailscale` and `systemctl enable --now tailscaled.service`.
+  install tailscale` and `systemctl enable --now tailscaled.service`, each
+  failing with one sentence.
+- **A host with Tailscale already**, read from `tailscale status --json`
+  before anything is installed. One whose daemon says `Running` is on a
+  tailnet: without a key it keeps it, and the first boot names it
+  (`CurrentTailnet.Name`), installs nothing of Tailscale and logs in again
+  nowhere; with a key in `TS_AUTHKEY` it stops, naming that tailnet, rather
+  than drop the key while the server stays on a tailnet that may not be the
+  owner's (leave the key out to keep it, or `sudo tailscale logout` first).
+  One that is logged in with Tailscale down (`Stopped`) stops too, with or
+  without a key, since `tailscale up` with a key would log it in again: run
+  `sudo tailscale up`, then the script again.
 - **`tailscale up`**, bounded by `--timeout=2m`, runs after the engine account
   and before enrolling, so the server's tailnet address exists when it
-  enrolls; one that fails stops the first boot there with one sentence. A
-  host whose `tailscale status` already says `Running` is on a tailnet: it is
-  neither asked for a key nor logged in again, and nothing of Tailscale is
-  installed. Either way the first boot says the server's tailnet address
-  (`tailscale ip -1`).
-- **The policy is the owner's.** The first boot opens no port and adds no
-  firewall rule for the tailnet. The tailnet policy should let only the
-  owner's own devices reach `tag:fermix-server`.
+  enrolls; one that fails stops the first boot there with one sentence: a
+  key that is used up, expired or revoked needs a new one, and a server
+  waiting for approval (a tailnet with device approval on and a key that is
+  not pre-approved, for which `tailscale up` prints a link) is approved there
+  and the script run again without a key. Either way the first boot says the
+  server's tailnet address (`tailscale ip -1`).
 - **Restore mode** takes `--tailscale` too: the server joins the tailnet the
   same way, then prints the restore steps.
 
-For a run at a terminal, leave `TS_AUTHKEY` out and let the script ask: `sudo
-TS_AUTHKEY=… sh` puts the key in sudo's own command line, which every account
-on the server can read in `/proc` while the run lasts, and in the shell's
-history.
+Never pass `TS_AUTHKEY` on sudo's command line (`sudo TS_AUTHKEY=… sh`):
+sudo logs it, as `ENV=TS_AUTHKEY=…` in the line it writes to the system
+journal for every command it runs; every account on the server can read it in
+sudo's own command line in `/proc` while the run lasts; and the shell keeps
+it in its history. At a terminal, leave it out and let the script ask.
+Cloud-init runs the user data as root, so it needs no sudo: give the code and
+the key as assignments in front of `sh`, in a `runcmd` item written as one
+string, which cloud-init hands to a shell, so neither is in any process's
+command line (an item written as a list is run as one command line, key
+included):
+
+```yaml
+#cloud-config
+runcmd:
+  - curl -fsSL https://fermix.ai/always-on | FERMIX_ENROLL_CODE='<the code>' TS_AUTHKEY='<a one-off auth key>' sh -s -- --version X --tailscale
+```
+
+with `X` the release Always On's command names. Cloud-init keeps the user
+data, the code and the key with it, on the server's disk (under
+`/var/lib/cloud`, root's), so use a one-off key, which joins nothing once it
+has been used.
+
+### The tailnet policy
+
+The policy is the owner's: the first boot opens no port and adds no firewall
+rule for the tailnet. Three parts of the tailnet policy file (HuJSON, on the
+admin console's Access controls page) concern the server:
+
+```jsonc
+{
+  // Declared before the key is created: the key form offers only the tags
+  // listed here.
+  "tagOwners": {
+    "tag:fermix-server": ["autogroup:admin"]
+  },
+  // Only the owner's own devices reach the server.
+  "grants": [
+    {"src": ["autogroup:member"], "dst": ["tag:fermix-server"], "ip": ["*"]}
+  ],
+  // Only with webhooks (WhatsApp, cue webhook sources): Tailscale Funnel.
+  "nodeAttrs": [
+    {"target": ["tag:fermix-server"], "attr": ["funnel"]}
+  ]
+}
+```
+
+The grant holds only once the policy stops allowing everything: a new
+tailnet's file starts with a rule from `*` to `*:*`, and a file with no rule
+at all is read as that same allow-all. Removing that rule, or adding any rule
+to a file that has none, turns allow-all off for every device, so the file
+then needs a rule for whatever the owner's other devices reach today.
+
+Webhooks reach the server through Tailscale Funnel, with the mount commands
+Always On shows once Fermix runs there. Funnel also needs MagicDNS and HTTPS
+certificates on (the admin console's DNS page), and a new server name can
+take up to ten minutes to resolve, so a sender's first check right after the
+mount may fail.
 
 ### The restore steps it prints
 
@@ -229,8 +322,8 @@ In a shell on the server, as an account that may use `sudo`:
    install --home /home/fermix/.fermix`.
 4. `sudo rm -rf /home/fermix/restore.fxsnap /home/fermix/.fermix-restore`.
 
-Run again once the home exists, the first boot binds and starts it and prints
-no steps.
+Run again once the import made the home, a primary, the first boot binds and
+starts it and prints no steps.
 
 ## Testing
 
@@ -244,15 +337,26 @@ The host part (`test/on_host.sh`) needs shellcheck, dash, `script(1)` and
 less its nightly update's writer, with six fixed paths moved under a
 directory of its own (each line asserted present exactly once) and the steps
 that need a Debian server as root stood in for by functions that log their
-names. `tailscale`, `apt-get`, `curl`, `gpg` and `systemctl` are stand-ins,
-and every other command runs through a shim that logs its arguments and its
-environment, so every command line the run starts is seen. Its cases: no
-`--tailscale` (nothing of Tailscale runs), the key from `TS_AUTHKEY`, the code
-and the key typed at a terminal, a key without the flag, malformed keys and no
-key without a terminal (each refused before any step), a host already on a
-tailnet, a served key that is not Tailscale's alone, `tailscale up` failing
-before enrolling, each release's repository, and `--restore`; after each, the
-key is in no file, output, command line or environment, and its file is gone.
+names, and the engine account's `fermix` calls by one that logs them and
+answers `home status --json` from a fixture in the engine's own one-line
+envelope. `tailscale`, `apt-get`, `curl`, `gpg`, `id` and `systemctl` are
+stand-ins, and every other command runs through a shim that logs its
+arguments and its environment, so every command line the run starts is seen.
+Its cases: no `--tailscale` (nothing of Tailscale runs), the key from
+`TS_AUTHKEY`, the code and the key typed at a terminal, a key without the
+flag, malformed keys, an OAuth client secret and no key without a terminal
+(each refused before any step), a host already on a tailnet (named, refused
+with a key, refused when its status names none), a host with Tailscale down,
+a served key that is not Tailscale's alone, `tailscaled` that does not start,
+`tailscale up` failing before enrolling, each release's repository, and
+`--restore`; after each, the key is in no file, output, command line or
+environment, and its file is gone. Then a host whose home exists: a
+candidate `enrolling`, `failed` or `expired` enrolling again (the code in
+the environment, typed at a terminal, or missing), a Fermix that does not
+stop; a home that runs, with no code and with one; a retired copy, a
+desktop, a candidate whose move cannot be read, a candidate under
+`--restore` and a home the engine refuses to read, each refused. A failure
+is counted in a file, so a check that ends a pipeline counts too.
 
 The containers need Docker with `debian:trixie-slim`, and network inside them
 (they install `nftables` and `shellcheck`, Chromium in its scenario, and
@@ -267,10 +371,13 @@ installed; `pkgs.tailscale.com` fetched for real), `apt-get`, `dpkg-query`,
 fail) are the stand-ins in `test/stubs/`. The chromium scenario
 keeps the real `perl`, so it asks the kernel Docker runs on for its Landlock
 ABI and needs Linux 6.2 or later with Landlock enabled. The scenarios: an
-existing host typing the code at a terminal, then enrolling again with the
-code in the environment and a bucket, after the refusals (a stock Debian 12
-host and kernels with Landlock ABI 2 or none, by the ABI sentence, among
-them); a restore host and its printed steps; the failures that stop the
+existing host typing the code at a terminal, run again with no code, then
+given a code (refused), then enrolling again once its enrollment failed,
+then enrolling afresh with the code in the environment and a bucket, after
+the refusals (a stock Debian 12 host and kernels with Landlock ABI 2 or none,
+by the ABI sentence, among them); a restore host and its printed steps, run
+again once its home is a primary, and refused as a retired copy; the
+failures that stop the
 first boot, each by its exit status and its one sentence on stderr; an
 Ubuntu host with swap of its own; the nightly update, one night per case (the
 computers' release already installed, a newer one, a failed installer while

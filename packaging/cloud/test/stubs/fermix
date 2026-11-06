@@ -4,9 +4,11 @@
 # environment; `home enroll` records the SHA-256 of the code file it can read
 # and writes a candidate home the way the real verb does. `home status --json`
 # answers the candidate's phases from /etc/fermix-test/phases, one line per
-# call ("phase|sentence"), the last repeated (enrolled without the file), and
-# its update_ceiling from /etc/fermix-test/ceiling (1.2.3 without it, null
-# when it says none).
+# call ("phase|sentence"), the last repeated (enrolled without the file), its
+# role from /etc/fermix-test/role (candidate without it), its moved marker's
+# `to` from /etc/fermix-test/moved-to (no marker without it), and its
+# update_ceiling from /etc/fermix-test/ceiling (1.2.3 without it, null when it
+# says none).
 # The release the service runs is kept in $state/running-version: `service
 # install` and `restart` start the installed one (the fake installer records
 # it in $state/installed-version), and `service status --json` answers
@@ -65,7 +67,13 @@ case "$verb" in
     ceiling='"1.2.3"'
     if [ -f "$fixtures/ceiling" ]; then ceiling="\"$(cat "$fixtures/ceiling")\""; fi
     if [ "$ceiling" = '"none"' ]; then ceiling=null; fi
-    printf '{\n  "ok": true,\n  "result": {\n    "move": {\n      "candidate": null,\n      "phase": "%s",\n      "sentence": "%s"\n    },\n    "moved": null,\n    "role": "candidate",\n    "update_ceiling": %s\n  },\n  "schema_version": 1\n}\n' \
-      "${line%%|*}" "${line#*|}" "$ceiling"
+    role=candidate
+    if [ -f "$fixtures/role" ]; then role=$(cat "$fixtures/role"); fi
+    moved=null
+    if [ -f "$fixtures/moved-to" ]; then
+      moved="{\"epoch\": 4, \"moved_at\": \"2026-11-05T20:00:00Z\", \"to\": \"$(cat "$fixtures/moved-to")\"}"
+    fi
+    printf '{\n  "ok": true,\n  "result": {\n    "move": {\n      "candidate": null,\n      "phase": "%s",\n      "sentence": "%s"\n    },\n    "moved": %s,\n    "role": "%s",\n    "update_ceiling": %s\n  },\n  "schema_version": 1\n}\n' \
+      "${line%%|*}" "${line#*|}" "$moved" "$role" "$ceiling"
     ;;
 esac

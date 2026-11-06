@@ -10,10 +10,12 @@
 #
 #   existing-host  refusals (a kernel below Landlock ABI 3 among them), then
 #                  the code typed at a terminal, the wait for
-#                  the primary, then a re-run; then the code in the
-#                  environment with a bucket and the release to install
+#                  the primary, then a re-run, the same home given a code
+#                  (refused) and a candidate whose enrollment failed
+#                  enrolling again; then the code in the environment with a
+#                  bucket and the release to install
 #   restore        --restore: no code, no enrollment, the steps printed, a
-#                  re-run once a home exists
+#                  re-run once a home exists, a retired copy refused
 #   failures       each failure that stops the first boot: its exit status
 #                  and its one sentence on stderr
 #   ubuntu         no Chromium package, and the sentence that says to install
@@ -413,13 +415,16 @@ EOF
   check_updates
   check_package_unit
 
+  # The candidate now waits for its move (enrolled, the stand-in's answer
+  # without phases), a home that runs.
+  rm -f "$FIXTURES/phases"
   snapshot_files /tmp/state.first
   run_first_boot sh "$FIRST_BOOT"
   check "[ $STATUS -eq 0 ]" "a re-run with no code succeeds (exit $STATUS)"
   check "contains $OUT 'The Fermix home /home/fermix/.fermix already exists, so this host is not enrolled again'" \
     "a re-run says the home exists and does not enroll again"
-  check "! grep -q 'home enroll' $LOG/calls.log && ! grep -q 'home status' $LOG/calls.log" \
-    "a re-run neither enrolls nor waits for the primary"
+  check "[ \"\$(grep -c 'fermix ' $LOG/calls.log)\" -eq 2 ] && [ \"\$(grep 'fermix ' $LOG/calls.log | head -n 1)\" = 'fermix home status --json [as fermix]' ]" \
+    "a re-run reads what the home is first, then neither enrolls nor waits for the primary"
   check "contains $LOG/calls.log 'fermix service install --home /home/fermix/.fermix [as fermix]'" \
     "a re-run binds and starts the service again"
   check "contains $OUT 'Done. Fermix runs from the home it already had.'" "a re-run says Fermix runs from that home"
@@ -428,6 +433,35 @@ EOF
   cmp -s /tmp/state.first /tmp/state.second || diff /tmp/state.first /tmp/state.second | sed 's/^/    /' || true
   check "[ \"\$(getent passwd | grep -c '^fermix:')\" -eq 1 ]" "a re-run creates no second account"
   check "! grep -q 'fallocate\|mkswap\|swapon' $LOG/calls.log" "a re-run makes no second swap file and turns nothing on again"
+
+  # Given a code, that home is refused, saying what it is and how to remove it.
+  run_apart env FERMIX_ENROLL_CODE="$CODE" sh "$FIRST_BOOT"
+  stopped_with "This server is enrolled already and waits for its move: to set this server up again, which deletes that home, run sudo -H -u fermix env XDG_RUNTIME_DIR=/run/user/$ENGINE_UID /usr/bin/fermix service uninstall, then sudo rm -rf /home/fermix/.fermix, then this command again." \
+    "a home waiting for its move, given a code, is refused with the commands that remove it"
+  check "[ \"\$(cat $LOG/calls.log)\" = 'fermix home status --json [as fermix]' ] && [ -d /home/fermix/.fermix ]" \
+    "after reading the home, with nothing installed and the home left as it is"
+
+  # A candidate whose enrollment failed enrolls again with the new code:
+  # Fermix stopped, enrolled, started and waited for.
+  printf 'failed|The enrollment with Invented Mac failed.\nenrolling|Enrolling with Invented Mac.\nenrolled|Enrolled with Invented Mac; waiting for its move.\n' \
+    >"$FIXTURES/phases"
+  run_first_boot env FERMIX_ENROLL_CODE="$CODE" sh "$FIRST_BOOT"
+  check "[ $STATUS -eq 0 ]" "a candidate whose enrollment failed enrolls again with the new code (exit $STATUS)"
+  [ "$STATUS" -eq 0 ] || sed 's/^/    /' "$OUT"
+  cat >/tmp/calls.expected <<EOF
+fermix home status --json [as fermix]
+fermix service uninstall [as fermix]
+fermix home enroll --code-file /run/fermix/enroll.code [as fermix]
+fermix service install --home /home/fermix/.fermix [as fermix]
+fermix home status --json [as fermix]
+fermix home status --json [as fermix]
+EOF
+  grep '^fermix ' "$LOG/calls.log" >/tmp/calls.seen || true
+  check "cmp -s /tmp/calls.seen /tmp/calls.expected" \
+    "it reads the home first, then stops Fermix before enrolling, starts it and waits for the primary"
+  cmp -s /tmp/calls.seen /tmp/calls.expected || diff /tmp/calls.expected /tmp/calls.seen | sed 's/^/    /' || true
+  code_absent_everywhere
+  rm -f "$FIXTURES/phases"
 
   # The same host enrolled again, the code in the environment and the release
   # on the command line as cloud-init passes them, with a bucket. Its swap
@@ -513,18 +547,28 @@ restore() {
   check "[ $STATUS -eq 0 ] && contains $OUT 'Copy your newest snapshot (a .fxsnap file) onto this server as'" \
     "with no bucket named it says to copy the snapshot onto the server"
 
-  # Once the import made a home, a re-run starts Fermix from it and prints no
-  # steps.
+  # Once the import made a home, the primary's, a re-run reads what it is,
+  # starts Fermix from it and prints no steps.
   runuser -u fermix -- mkdir -p /home/fermix/.fermix
+  printf 'primary\n' >"$FIXTURES/role"
   run_first_boot sh "$FIRST_BOOT" --restore
   check "[ $STATUS -eq 0 ]" "a restore re-run after the import succeeds (exit $STATUS)"
-  check "contains $LOG/calls.log 'fermix service install --home /home/fermix/.fermix [as fermix]' && ! contains $OUT 'Ready to restore'" \
-    "a re-run binds and starts the restored home and prints no steps"
+  check "contains $LOG/calls.log 'fermix home status --json [as fermix]' && contains $LOG/calls.log 'fermix service install --home /home/fermix/.fermix [as fermix]' && ! contains $OUT 'Ready to restore'" \
+    "a re-run reads the home, binds and starts the restored home and prints no steps"
+
+  # A retired copy (the marker names where Fermix moved) is refused.
+  printf 'device\n' >"$FIXTURES/role"
+  printf 'Invented Mac\n' >"$FIXTURES/moved-to"
+  run_apart sh "$FIRST_BOOT" --restore
+  stopped_with "This server's Fermix home is a retired copy, left when Fermix moved to Invented Mac: to set this server up again, which deletes that home, run sudo -H -u fermix env XDG_RUNTIME_DIR=/run/user/$ENGINE_UID /usr/bin/fermix service uninstall, then sudo rm -rf /home/fermix/.fermix, then this command again." \
+    "a retired copy is refused, naming where Fermix moved and the commands that remove it"
+  rm -f "$FIXTURES/role" "$FIXTURES/moved-to"
 }
 
 # A fresh host in the same container: no home, no code, no fixtures left.
 fresh_host() {
-  rm -rf /home/fermix/.fermix /run/fermix/* "$FIXTURES/phases" "$FIXTURES/systemctl-fails"
+  rm -rf /home/fermix/.fermix /run/fermix/* "$FIXTURES/phases" "$FIXTURES/systemctl-fails" \
+    "$FIXTURES/role" "$FIXTURES/moved-to"
 }
 
 # Each failure that stops the first boot: a non-zero exit, and the one
@@ -842,15 +886,15 @@ EOF
 
   run_first_boot sh "$FIRST_BOOT" --tailscale
   check "[ $STATUS -eq 0 ]" "a re-run on the tailnet needs no key and no terminal (exit $STATUS)"
-  check "contains $OUT '==> This server is already on a tailnet, so Tailscale is not installed or logged in again'" \
-    "it says the server is on a tailnet already"
+  check "contains $OUT '==> This server is already on the tailnet invented.example, so Tailscale is not installed or logged in again'" \
+    "it says the server is on a tailnet already, naming it"
   check "! grep -q tailscale $LOG/calls.log" "and installs nothing of Tailscale and logs in again nowhere"
 
   fresh_host
   rm -f /var/lib/fermix-test/tailscale-state
   : >"$FIXTURES/tailscale-up-fails"
   run_apart env TS_AUTHKEY="$TS_KEY" FERMIX_ENROLL_CODE="$CODE" sh "$FIRST_BOOT" --tailscale
-  check "[ $STATUS -eq 1 ] && [ \"\$(tail -n 1 $ERR)\" = \"fermix always-on: tailscale up did not join this server to your tailnet, so the first boot stops here; its message above says why. A key that is used up, expired or revoked is refused: create a new one and run this again.\" ]" \
+  check "[ $STATUS -eq 1 ] && [ \"\$(tail -n 1 $ERR)\" = \"fermix always-on: tailscale up did not join this server to your tailnet, so the first boot stops here; its message above says why. A key that is used up, expired or revoked is refused: create a new one and run this again. If it printed a link to approve this server, approve it there and run this again without a key.\" ]" \
     "a tailscale up that fails stops the first boot with one sentence"
   check "grep -q '^tailscale up ' $LOG/calls.log && ! grep -q 'fermix home enroll' $LOG/calls.log" "before enrolling"
   check "[ -s $LOG/tailscale-key-path ] && [ ! -e \"\$(cat $LOG/tailscale-key-path)\" ] && ! grep -rqsF -- \"\$TS_KEY\" /run $OUT $ERR" \
