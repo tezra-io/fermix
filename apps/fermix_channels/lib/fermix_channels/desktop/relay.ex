@@ -695,12 +695,30 @@ defmodule FermixChannels.Desktop.Relay do
            &match?(%{"kind" => "iroh", "node_id" => ^node_id}, &1)
          ) do
       %{"relays" => relays, "relays_rev" => rev} = route ->
-        record_route(link, {relays, rev, Map.get(route, "addrs", [])}, root)
+        record_route(link, {relays, rev, route_hints(route)}, root)
 
       nil ->
         link
     end
   end
+
+  # The codec checks only that `candidates` is a list: hints that are not a
+  # list of at most 8 `ip:port` hints are dropped here, so a server of
+  # another build costs this link its hints, never the relay.
+  defp route_hints(%{"addrs" => addrs}) do
+    if DesktopLink.hints?(addrs) do
+      addrs
+    else
+      Logger.warning(
+        "desktop relay: the primary's address hints were dropped: " <>
+          "not a list of at most 8 ip:port hints"
+      )
+
+      []
+    end
+  end
+
+  defp route_hints(_route), do: []
 
   defp record_route(link, route, root) do
     case DesktopLink.record_route(root, link, route) do

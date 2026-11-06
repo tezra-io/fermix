@@ -510,6 +510,37 @@ defmodule FermixChannels.Desktop.RelayTest do
     DesktopRail.await_link(root, &(&1.primary.addrs == []))
   end
 
+  # A server of another build, or a broken one, must not crash the relay at
+  # every connection: a route whose `addrs` is not a list of hints keeps its
+  # relays and drops its hints, said once.
+  test "hints that are not a list of hints are dropped with a warning, and the relay stays up" do
+    route = %{
+      "kind" => "iroh",
+      "node_id" => DesktopRail.node_id(),
+      "relays" => [%{"url" => "https://relay.invalid/", "quic_port" => 7842}],
+      "relays_rev" => DesktopRail.relays_rev(),
+      "addrs" => "100.64.0.1:4033"
+    }
+
+    primary =
+      DesktopRail.primary!(
+        hello_ack_builder: fn _state -> {:ok, Map.put(ack(3), "candidates", [route])} end
+      )
+
+    root = DesktopRail.desktop_home!(primary, addrs: ["100.101.102.103:4033"])
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        relay = DesktopRail.start_relay!(root, primary)
+        pid = GenServer.whereis(relay)
+        DesktopRail.await_connected(relay)
+        DesktopRail.await_link(root, &(&1.primary.addrs == []))
+        assert GenServer.whereis(relay) == pid
+      end)
+
+    assert log =~ "desktop relay: the primary's address hints were dropped"
+  end
+
   test "every dial names the hints the link holds" do
     primary = DesktopRail.primary!()
     hints = ["100.101.102.103:4033"]

@@ -290,10 +290,12 @@ defmodule FermixCore.Home.DesktopLink do
       else: {:ok, []}
   end
 
-  defp hints?(addrs) when is_list(addrs) and length(addrs) <= @max_hints,
+  @doc "Whether `value` is a link's `addrs`: a list of at most 8 hints (`hint?/1`)."
+  @spec hints?(term()) :: boolean()
+  def hints?(addrs) when is_list(addrs) and length(addrs) <= @max_hints,
     do: Enum.all?(addrs, &hint?/1)
 
-  defp hints?(_addrs), do: false
+  def hints?(_addrs), do: false
 
   defp field(map, key, valid?, file) when is_atom(key) do
     value = Map.get(map, Atom.to_string(key))
