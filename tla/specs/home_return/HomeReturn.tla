@@ -860,7 +860,7 @@ Press(a) ==
 
 AGoto(s) == act' = s
 
-\* Candidate.prepare_return/3 (candidate.ex:160-171, :406-450) writes a
+\* Candidate.prepare_return/3 (candidate.ex:167-178, :439-483) writes a
 \* return's candidate only on a device engine (supervised: assumed here),
 \* beside a home that carries the moved marker, linked for a return of the
 \* rail's kind, with no move of its own pending, replacing only a candidate
