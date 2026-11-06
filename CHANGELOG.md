@@ -152,7 +152,11 @@ will be part of a future release; nothing in this group is in a release yet.
   the journal. A server whose kernel cannot sandbox commands is refused before
   anything is installed. `--snapshot-bucket` and `--snapshot-region` name
   where the server will keep its snapshots, and `--restore` prepares a server
-  to restore your home from a snapshot instead.
+  to restore your home from a snapshot instead. A server whose setup did not
+  finish, or that waited 24 hours for its move, is set up again by running
+  the same command with a new code, and its own status says so; on a server
+  that is set up, the command says what the server is and how to remove its
+  home, and removes nothing.
 - **Your server can join your tailnet as it is set up.** Add `--tailscale`
   to the server's command and it asks for a Tailscale auth key without
   showing it (cloud-init user data passes it in `TS_AUTHKEY` instead),

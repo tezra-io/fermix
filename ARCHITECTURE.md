@@ -1256,7 +1256,13 @@ in again, and it opens no port); runs
 distribution's Chromium on Debian (Ubuntu's is a snap: it says to install a
 browser by hand); and waits up to 5 minutes for the primary to accept the
 candidate, ending with one sentence on
-stderr and a non-zero exit at any step that fails. `--restore` takes no code
+stderr and a non-zero exit at any step that fails. On a host whose home
+exists it reads the home's role and its candidate's phase from `fermix home
+status --json`: a candidate `enrolling`, `failed` or `expired` is enrolled
+again with the new code (the service stopped around `fermix home enroll`,
+since `Home.Candidate.enroll/3` replaces only those three, and only with no
+engine running in the home), and any other home is refused with what it is
+and the commands that remove it; the script removes no home itself. `--restore` takes no code
 and enrolls nothing: the same server, then the exact steps that import a
 snapshot and start the service. Everything networked after that (dialling the
 primary, the move) is the engine's own candidate role.

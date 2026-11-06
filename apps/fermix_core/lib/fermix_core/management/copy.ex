@@ -356,10 +356,15 @@ defmodule FermixCore.Management.Copy do
   def summary_sentence(:cannot_reach, _values),
     do: "Fermix cannot reach your server. Your messages wait until it is back."
 
-  def summary_sentence(:server_not_set_up, _values), do: "This server did not finish setting up."
+  def summary_sentence(:server_not_set_up, _values),
+    do:
+      "This server did not finish setting up. Open a new code in Always On and run the " <>
+        "command here again."
 
   def summary_sentence(:server_waited_too_long, _values),
-    do: "This server waited too long for its move and must be set up again."
+    do:
+      "This server waited too long for its move. Open a new code in Always On and run the " <>
+        "command here again."
 
   def summary_sentence(:update, %{machine: machine}),
     do: "Update Fermix on this #{machine} to keep using Always On."

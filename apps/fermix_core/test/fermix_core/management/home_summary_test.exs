@@ -131,9 +131,11 @@ defmodule FermixCore.Management.HomeSummaryTest do
       {"a server receiving its home", candidate_role("receiving"), "candidate",
        "Your home is moving to this server.", nil},
       {"a server waited past its day", candidate_role("expired"), "problem",
-       "This server waited too long for its move and must be set up again.", "learn_more"},
+       "This server waited too long for its move. Open a new code in Always On and run the " <>
+         "command here again.", "learn_more"},
       {"a server whose enrollment failed", candidate_role("failed"), "problem",
-       "This server did not finish setting up.", "learn_more"},
+       "This server did not finish setting up. Open a new code in Always On and run the " <>
+         "command here again.", "learn_more"},
       {"a candidate whose state is unreadable", facts(role: :candidate), "candidate",
        "This server is waiting for its move.", nil}
     ]

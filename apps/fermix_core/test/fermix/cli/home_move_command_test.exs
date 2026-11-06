@@ -91,6 +91,33 @@ defmodule Fermix.CLI.HomeMoveCommandTest do
       assert File.exists?(ctx.code_file)
     end
 
+    # Always On review M1 (D1): the installer runs this again on a server
+    # whose enrollment failed or ran out, with the new code, and reads the
+    # exit status; the sentence is a fresh enrollment's.
+    test "enrolls again a server whose enrollment failed or ran out", ctx do
+      {0, _out, ""} =
+        run(["enroll", "--code-file", ctx.code_file], home: ctx.home, now: fn -> @now end)
+
+      {:ok, state} = Candidate.read_state(ctx.home)
+
+      for phase <- ~w(failed expired) do
+        :ok = Candidate.put_state(ctx.home, Map.put(state, "phase", phase), @now)
+        File.write!(ctx.code_file, ctx.code <> "\n")
+
+        {status, out, err} =
+          run(["enroll", "--code-file", ctx.code_file], home: ctx.home, now: fn -> @now end)
+
+        assert {status, err} == {0, ""}, phase
+
+        assert out ==
+                 "This home is now a candidate of orchard-mini. Start Fermix: it enrolls with " <>
+                   "orchard-mini, then waits up to 24 hours for the move.\n"
+
+        assert {:ok, %{"phase" => "enrolling"}} = Candidate.read_state(ctx.home)
+        refute File.exists?(ctx.code_file)
+      end
+    end
+
     test "a missing file is a refusal and half an option pair is a usage error", ctx do
       {status, _out, err} =
         run(["enroll", "--code-file", Path.join(ctx.tmp, "absent")],

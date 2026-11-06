@@ -168,8 +168,14 @@ it, never a second writer.
   `fermix`, installs Chromium on Debian for browser tasks, and waits up to 5
   minutes for the primary to accept the server. The engine starts in the
   candidate role, enrolls with the primary and waits for the move. Running
-  it again is safe: a host whose home exists is not enrolled again. It never
-  prints the code; cloud-init's console log shows each step.
+  it again with a new code enrolls the server again where its enrollment
+  never finished, failed or ran out after 24 hours (it reads `fermix home
+  status --json` as `fermix`, stops the service, runs `fermix home enroll`
+  and starts it again); any other home (one that waits for or receives its
+  move, a primary, a retired copy after a move back) it refuses, saying what
+  the home is and the commands that remove it, and it never removes a home
+  itself. Run again with no code, it leaves a running home as it is. It
+  never prints the code; cloud-init's console log shows each step.
 - **The server on the owner's tailnet.** `--tailscale` joins the server to
   the owner's tailnet before it enrolls, so its tailnet address exists when
   it enrolls; without the flag nothing of Tailscale happens (a key in
@@ -280,8 +286,12 @@ it, never a second writer.
   "expired", the primary "already holds four candidates") ends it, in its
   log and in `fermix home status`, and removes the code from the disk (every
   ending does). To enroll again with a new code, stop its service and run
-  `fermix home enroll` again: a candidate that never enrolled is replaced
-  (one that enrolled and waits for its move is not).
+  `fermix home enroll` again (running the server's command again does
+  this): a candidate that never enrolled, or whose 24 hours ran out, is
+  replaced, since its primary no longer holds it; one that enrolled and
+  still waits for its move, or receives it, is not. The server's own status
+  then says to open a new code in Always On and run the command there
+  again.
 - **Reviewing it.** `fermix home candidates` (or `home.candidates.list`)
   lists the candidates the primary holds (at most four, each for 24 hours):
   id, name, system, version, and the snapshot bucket it was told.

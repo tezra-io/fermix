@@ -35,10 +35,11 @@ defmodule FermixCore.Home.Candidate do
   candidate that enrolled already, or anything a fresh install does not write
   (any path outside `FermixCore.Home.DeviceLocal`), and leaves nothing behind
   when it fails part-way: it removes exactly what it wrote. A candidate that
-  never enrolled (`enrolling`, `failed`) is replaced, while the engine of
-  this home is stopped (`FermixCore.Home.DaemonProbe`, `:daemon_running`
-  otherwise): the new one is built beside it and swapped in, and a failure
-  part-way puts the old one back. Activation is
+  never enrolled (`enrolling`, `failed`), or whose 24 hours of waiting for
+  its move ran out (`expired`), is replaced, while the engine of this home
+  is stopped (`FermixCore.Home.DaemonProbe`, `:daemon_running` otherwise):
+  the new one is built beside it and swapped in, and a failure part-way
+  puts the old one back. Activation is
   `FermixCore.Home.Candidate.Activation`.
 
   **A return** (Always On's move back to the computer the home left) writes
@@ -83,6 +84,8 @@ defmodule FermixCore.Home.Candidate do
   """
   @builder_prefix ".candidate-"
   @ended ~w(failed expired)
+  # What `enroll/3` replaces: a candidate no primary waits on.
+  @replaceable ~w(enrolling failed expired)
 
   @type phase :: String.t()
   @type state :: %{required(String.t()) => term()}
@@ -278,8 +281,8 @@ defmodule FermixCore.Home.Candidate do
 
   def error_sentence(:already_candidate),
     do:
-      "This home is a candidate that enrolled already and waits for its move. A candidate " <>
-        "that never enrolled is replaced by enrolling again; this one is not."
+      "This server enrolled already and waits for its move, or is receiving it. Enrolling " <>
+        "again replaces a server only once its enrollment failed or its 24 hours ran out."
 
   def error_sentence(:daemon_running),
     do:
@@ -373,11 +376,13 @@ defmodule FermixCore.Home.Candidate do
   end
 
   # A candidate that never enrolled holds nothing a primary knows of: no
-  # primary lists it, and its code is spent or was refused. It is replaced
-  # only while no engine runs in the home, whose candidate process would
-  # otherwise go on writing the old one's state.
+  # primary lists it, and its code is spent or was refused. One whose 24
+  # hours ran out (`expired`) did enroll, but its primary dropped it at the
+  # same hour (`Home.Candidates`' lifetime), so no move comes to it any more.
+  # Either is replaced only while no engine runs in the home, whose
+  # candidate process would otherwise go on writing the old one's state.
   defp replaceable(home, entries, probe) do
-    with {:ok, %{"phase" => phase}} when phase in ~w(enrolling failed) <- read_state(home),
+    with {:ok, %{"phase" => phase}} when phase in @replaceable <- read_state(home),
          {:ok, _found} <- device_local_only(entries -- [@dir, "config.toml"]),
          :ok <- DaemonProbe.stopped(home, probe) do
       {:ok, :replace}
