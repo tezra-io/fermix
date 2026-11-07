@@ -47,6 +47,30 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `read_blocked` for a page already there, and `allowed_hosts` does not lift
   it. Other local ports, such as a development server, open as before.
 
+### Changed
+
+- **One voice call at a time, on every voice model.** A second call now
+  waits for the first whichever model runs it: OpenAI Realtime too, not
+  only GPT-Live and Grok, so two calls can no longer bill side by side.
+  The refusal says where the call in progress is. A call that has just
+  ended holds its place for the second or so it takes to close.
+
+### Fixed
+
+- **A job bound to a plugin's skill can use that plugin again.** Since a job
+  bound to a plugin skill started running at guest trust, it got none of the
+  plugin's own tools, so a GitHub issue monitor ran with no GitHub tool at
+  all, said the tools weren't connected, and later replied with made-up tool
+  calls. A plugin skill now reaches its own plugin's tools, and still no
+  other plugin's and none of your files, within what the job or the turn
+  that starts it grants; `skill_run` of a plugin skill gets the same.
+- **A scheduled job that can't use a tool it names fails and says why.** A
+  run whose job names a tool its trust or skill leaves out, or one Fermix
+  doesn't have right now (a plugin that is off), used to run without it and
+  report `ok`. It now fails before the model is asked, naming the tools and
+  what to change, and `schedule_job` and `update_job` refuse to bind a skill
+  that would leave one of the job's own tools out.
+
 ### Behind a feature flag
 
 Always On is built but switched off in release builds: there `fermix
@@ -300,6 +324,8 @@ will be part of a future release; nothing in this group is in a release yet.
   Tailscale in userspace-networking mode gives the server no tailnet
   address, so that link runs through the relay.
 
+## [0.18.0] - 2026-11-03
+
 ### Added
 
 - **The Linux installer installs a release you name.** `curl -fsSL
@@ -547,11 +573,6 @@ will be part of a future release; nothing in this group is in a release yet.
 
 ### Changed
 
-- **One voice call at a time, on every voice model.** A second call now
-  waits for the first whichever model runs it: OpenAI Realtime too, not
-  only GPT-Live and Grok, so two calls can no longer bill side by side.
-  The refusal says where the call in progress is. A call that has just
-  ended holds its place for the second or so it takes to close.
 - **A mandate's proposal is a short card too.** It names the tool and the
   watcher, quotes the item, says why it passed, and shows each argument on its
   own line, with every argument whole and the whole item behind Details, in
@@ -675,19 +696,6 @@ will be part of a future release; nothing in this group is in a release yet.
 
 ### Fixed
 
-- **A job bound to a plugin's skill can use that plugin again.** Since a job
-  bound to a plugin skill started running at guest trust, it got none of the
-  plugin's own tools, so a GitHub issue monitor ran with no GitHub tool at
-  all, said the tools weren't connected, and later replied with made-up tool
-  calls. A plugin skill now reaches its own plugin's tools, and still no
-  other plugin's and none of your files, within what the job or the turn
-  that starts it grants; `skill_run` of a plugin skill gets the same.
-- **A scheduled job that can't use a tool it names fails and says why.** A
-  run whose job names a tool its trust or skill leaves out, or one Fermix
-  doesn't have right now (a plugin that is off), used to run without it and
-  report `ok`. It now fails before the model is asked, naming the tools and
-  what to change, and `schedule_job` and `update_job` refuse to bind a skill
-  that would leave one of the job's own tools out.
 - **Fermix sees the Linux desktop app installed as a package.** Fermix
   looked for the desktop app only where the earlier Flatpak put it, so on a
   computer with the app's .deb or .rpm package it took the app for missing.
