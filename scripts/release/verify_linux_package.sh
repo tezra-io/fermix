@@ -216,6 +216,10 @@ if [ "$kind" = rpm ]; then
       # really does own /usr/bin/fermix.
       fermix upgrade 2>&1 | grep -F "dnf upgrade fermix" >/dev/null ||
         { echo "the packaged upgrade refusal did not name dnf" >&2; exit 1; }
+      # An HTTPS connection decodes the server certificate through the asn1
+      # native library the build placed (see the deb path below).
+      fermix upgrade --check >&2 ||
+        { echo "fermix upgrade --check could not reach the release manifest over HTTPS" >&2; exit 1; }
       fermix service status --json || true
     '
   )" || fail "the rpm did not install and run inside fedora:41"
@@ -329,4 +333,19 @@ printf '%s\n' "$upgrade_output"
 case "$upgrade_output" in
   *"apt upgrade fermix"*) ;;
   *) fail "the packaged upgrade refusal did not name the package manager: $upgrade_output" ;;
+esac
+
+# Every certificate Fermix checks is decoded through OTP's asn1 native
+# library, which the package build puts where the release loads it
+# (`FermixCore.Release.NativeLibraries`). A library built for the build
+# machine there fails every HTTPS connection. The manifest check fetches from
+# GitHub over HTTPS, checking the server's certificate, and changes nothing.
+check_output="$(fermix upgrade --check 2>&1)" || {
+  printf '%s\n' "$check_output" >&2
+  fail "fermix upgrade --check could not reach the release manifest over HTTPS"
+}
+printf '%s\n' "$check_output"
+case "$check_output" in
+  *"fermix upgrade: "*) ;;
+  *) fail "fermix upgrade --check did not report a version: $check_output" ;;
 esac

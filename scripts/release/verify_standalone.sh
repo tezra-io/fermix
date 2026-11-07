@@ -488,6 +488,28 @@ settings_json="$(cat "$settings_out")"
 grep -Fq "daemon is not running" "$settings_err" ||
   fail "fermix settings did not say on stderr why it changed nothing: $(cat "$settings_err")"
 
+# ── an HTTPS connection, run from this artifact ─────────────────────────────
+# Every certificate Fermix checks is decoded through OTP's asn1 native
+# library, which the Burrito build puts where the release loads it
+# (`FermixCore.Release.NativeLibraries`). A library built for the build
+# machine there loads on that machine alone, and on every other one each HTTPS
+# connection fails. `fermix upgrade --check` fetches the release manifest from
+# GitHub over HTTPS, checking the server's certificate, and changes nothing,
+# so it must exit 0 and name a version. It runs before the migrate-to-app
+# stage because that stage ends the script on a Linux target.
+tls_home="$runtime_root/tls-home"
+mkdir -m 700 "$tls_home"
+if ! tls_output="$(env -u FERMIX_OPIK_ENABLED HOME="$home" FERMIX_HOME="$tls_home" \
+  "$artifact" upgrade --check 2>&1)"; then
+  printf '%s\n' "$tls_output" >&2
+  fail "fermix upgrade --check could not reach the release manifest over HTTPS"
+fi
+printf '%s\n' "$tls_output"
+case "$tls_output" in
+  *"fermix upgrade: "*) ;;
+  *) fail "fermix upgrade --check did not report a version: $tls_output" ;;
+esac
+
 # ── fermix always-on in a release, run from this artifact ──────────────────
 # A release build offers Always On only in a home whose settings file turns
 # it on (`FermixCore.Home.AlwaysOnRelease`: `[fermix_core.always_on]

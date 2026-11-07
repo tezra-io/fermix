@@ -83,12 +83,11 @@ jobs:
     env:
       MIX_ENV: prod
       ELIXIR_VERSION: "1.19.7"
-      # Burrito downloads ERTS by this exact upstream release string. Confirm all
-      # beam-machine target artifacts exist before changing it. 28.5.0.6 is the
-      # newest OTP beam-machine has built: it lacks 28.5.0.7's fix for
-      # CVE-2026-89422 (a TLS 1.3 client accepts an unauthenticated server),
-      # which the app engine, built on the runner's own OTP, already has.
-      OTP_VERSION: "28.5.0.6"
+      # The Erlang code every Burrito target ships, ssl and public_key included.
+      # Its native runtime is beam-machine's OTP 28.5.0.6, the newest it has
+      # built, named by FermixCore.Release.NativeRuntime, which refuses a build
+      # on any OTP but this one: change the two together.
+      OTP_VERSION: "28.5.0.8"
       ZIG_VERSION: "0.15.2"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -145,7 +144,8 @@ jobs:
     env:
       MIX_ENV: prod
       ELIXIR_VERSION: "1.19.7"
-      OTP_VERSION: "28.5.0.6"
+      # The standalone job's OTP, for the same reason (FermixCore.Release.NativeRuntime).
+      OTP_VERSION: "28.5.0.8"
       ZIG_VERSION: "0.15.2"
       # One build identity for both package targets, the way the app engine
       # already stamps one identity across its two slices.

@@ -78,9 +78,15 @@ defmodule Fermix.MixProject do
               nif_env: [{"LANDLOCK_TARGET", "x86_64-linux-musl"}]
             ]
           ],
-          # Each target places its pinned fermix-iroh helper in its own
+          # Each target packs beam-machine's newest native runtime under the
+          # build machine's newer Erlang code (FermixCore.Release.NativeRuntime)
+          # and puts that runtime's native libraries where the release loads
+          # them. Each then places its pinned fermix-iroh helper in its own
           # work_dir, after the NIF recompile and before packing (M62 stage 5).
-          extra_steps: [patch: [post: [FermixCore.Release.IrohHelper]]]
+          extra_steps: [
+            fetch: [pre: [FermixCore.Release.NativeRuntime]],
+            patch: [post: [FermixCore.Release.NativeLibraries, FermixCore.Release.IrohHelper]]
+          ]
         ]
       ],
       fermix_app_engine: [
@@ -121,9 +127,16 @@ defmodule Fermix.MixProject do
             ]
           ],
           extra_steps: [
-            fetch: [post: [FermixCore.Release.PackagedMuslRuntime]],
+            fetch: [
+              pre: [FermixCore.Release.NativeRuntime],
+              post: [FermixCore.Release.PackagedMuslRuntime]
+            ],
             patch: [
-              post: [FermixCore.Release.IrohHelper, FermixCore.Release.PackagedInterpreter]
+              post: [
+                FermixCore.Release.NativeLibraries,
+                FermixCore.Release.IrohHelper,
+                FermixCore.Release.PackagedInterpreter
+              ]
             ]
           ]
         ]

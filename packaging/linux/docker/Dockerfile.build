@@ -10,7 +10,7 @@
 # is what lets an arm64 package be produced on an arm64 Mac.
 FROM ubuntu:24.04
 
-ARG OTP_VERSION=28.5.0.6
+ARG OTP_VERSION=28.5.0.8
 ARG ELIXIR_VERSION=1.19.7
 ARG ZIG_VERSION=0.15.2
 

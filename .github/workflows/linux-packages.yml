@@ -48,7 +48,8 @@ jobs:
     env:
       MIX_ENV: prod
       ELIXIR_VERSION: "1.19.7"
-      OTP_VERSION: "28.5.0.6"
+      # release.yml's, which FermixCore.Release.NativeRuntime pairs with its runtime.
+      OTP_VERSION: "28.5.0.8"
       ZIG_VERSION: "0.15.2"
       # A branch build is stamped as one: nothing that carries this id is a
       # release, and the identity is still complete, so the engine inside the

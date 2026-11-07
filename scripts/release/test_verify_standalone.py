@@ -320,6 +320,36 @@ class VerifyStandaloneTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("wrote to stdout, which is the native-messaging wire", result.stderr)
 
+    # ── the TLS stage ────────────────────────────────────────────────────
+    # Every certificate is decoded by OTP's asn1 native library, so a release
+    # holding the build machine's copy fails every HTTPS connection; the stage
+    # makes one, the manifest check, from the artifact the release publishes.
+
+    def test_a_manifest_check_over_https_passes(self):
+        self._write_artifact(create_disclaim=True)
+
+        result = self._run("macos_aarch64")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("fermix upgrade: already on the latest version", result.stdout)
+
+    def test_rejects_an_artifact_that_cannot_reach_the_manifest_over_https(self):
+        self._write_artifact(create_disclaim=True, upgrade="tls_fails")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("could not reach the release manifest over HTTPS", result.stderr)
+        self.assertIn("tls_alert", result.stderr)
+
+    def test_rejects_a_manifest_check_that_reports_no_version(self):
+        self._write_artifact(create_disclaim=True, upgrade="silent")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("did not report a version", result.stderr)
+
     # ── the settings no-daemon stage ──────────────────────────────────────
 
     def test_settings_with_no_daemon_refuses_with_exit_3_and_one_json_object(self):
@@ -1083,6 +1113,7 @@ class VerifyStandaloneTest(unittest.TestCase):
         auth_logout="removes",
         browser_bridge="works",
         settings="refuses",
+        upgrade="checks",
         always_on="refuses",
         home="carries",
         iroh_helper="pinned",
@@ -1123,6 +1154,9 @@ class VerifyStandaloneTest(unittest.TestCase):
             "fi\n"
             'if [ "${1:-}" = "settings" ]; then\n'
             f"{self._settings_behaviour(settings)}"
+            "fi\n"
+            'if [ "${1:-}" = "upgrade" ]; then\n'
+            f"{self._upgrade_behaviour(upgrade)}"
             "fi\n"
             'if [ "${1:-}" = "always-on" ]; then\n'
             f"{self._always_on_behaviour(always_on)}"
@@ -1227,6 +1261,23 @@ class VerifyStandaloneTest(unittest.TestCase):
         if settings == "silent":
             return argv + json + "  exit 3\n"
         raise ValueError(f"unknown settings behaviour: {settings}")
+
+    # The real verb's shape: the manifest fetched over HTTPS and the version
+    # named on stdout, or the transport's refusal on stderr and exit 1. The
+    # argv is pinned so a stage that stops asking for `--check` cannot pass.
+    def _upgrade_behaviour(self, upgrade):
+        argv = '  [ "$*" = "upgrade --check" ] || exit 64\n'
+        if upgrade == "checks":
+            return argv + "  printf 'fermix upgrade: already on the latest version (0.0.1).\\n'\n  exit 0\n"
+        if upgrade == "tls_fails":
+            return (
+                argv
+                + "  printf 'fermix upgrade: check failed: {:tls_alert, {:bad_certificate, ~c\"TLS client\"}}\\n' >&2\n"
+                + "  exit 1\n"
+            )
+        if upgrade == "silent":
+            return argv + "  exit 0\n"
+        raise ValueError(f"unknown upgrade behaviour: {upgrade}")
 
     # The real verb's shape in a release with no daemon: in a home whose
     # settings carry Always On's switch, the engine_stopped envelope alone on

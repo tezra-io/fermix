@@ -12,10 +12,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   to.** The Erlang runtime under Fermix could finish a TLS connection without
   checking the server's certificate (CVE-2026-55953 over TLS 1.2,
   CVE-2026-89422 over TLS 1.3), so an attacker on the same network could have
-  read a provider key and forged the model's replies. The Fermix inside the
-  Mac app now runs on a runtime fixed for both. The Homebrew and Linux builds
-  are fixed for TLS 1.2; their TLS 1.3 fix comes with the next runtime build
-  they are packaged from, which is not published yet.
+  read a provider key and forged the model's replies. Every build now runs
+  TLS code fixed for both: the Mac app, Homebrew, the standalone binaries and
+  the Linux packages. The same update stops a server's crafted certificate
+  from tying up the CPU while Fermix checks it (CVE-2026-65634).
 - **Fermix's web server and HTTP client are patched.** Fixes in Bandit, Plug
   and Phoenix stop a request to the setup page or a webhook from using up
   memory or CPU, fixes in Mint stop a page or server Fermix fetches from doing

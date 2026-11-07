@@ -32,21 +32,37 @@ defmodule FermixCore.ReleaseProfileTest do
            end)
   end
 
-  # M62 stage 5: every Burrito target places its pinned fermix-iroh helper after
-  # the patch phase, in its own work_dir. The Linux package places it before the
-  # interpreter rewrite, which then scans a tree that already holds it.
-  test "every Burrito release places the pinned fermix-iroh helper after the patch phase" do
+  # Every Burrito target names beam-machine's native runtime before anything is
+  # fetched (its newest is older than the build machine's OTP), and puts that
+  # runtime's native libraries where the release loads them first thing after
+  # the patch phase. M62 stage 5: each then places its pinned fermix-iroh helper
+  # in its own work_dir. The Linux package places it before the interpreter
+  # rewrite, which then scans a tree that already holds it.
+  test "every Burrito release names its native runtime and places its libraries and helper" do
     releases = Fermix.MixProject.project() |> Keyword.fetch!(:releases)
 
     standalone = releases |> Keyword.fetch!(:fermix) |> Keyword.fetch!(:burrito)
-    assert standalone[:extra_steps] == [patch: [post: [FermixCore.Release.IrohHelper]]]
+
+    assert standalone[:extra_steps] == [
+             fetch: [pre: [FermixCore.Release.NativeRuntime]],
+             patch: [
+               post: [FermixCore.Release.NativeLibraries, FermixCore.Release.IrohHelper]
+             ]
+           ]
 
     package = releases |> Keyword.fetch!(:fermix_linux_package) |> Keyword.fetch!(:burrito)
 
     assert package[:extra_steps] == [
-             fetch: [post: [FermixCore.Release.PackagedMuslRuntime]],
+             fetch: [
+               pre: [FermixCore.Release.NativeRuntime],
+               post: [FermixCore.Release.PackagedMuslRuntime]
+             ],
              patch: [
-               post: [FermixCore.Release.IrohHelper, FermixCore.Release.PackagedInterpreter]
+               post: [
+                 FermixCore.Release.NativeLibraries,
+                 FermixCore.Release.IrohHelper,
+                 FermixCore.Release.PackagedInterpreter
+               ]
              ]
            ]
   end
