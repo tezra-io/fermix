@@ -358,6 +358,37 @@ class ProxyTest(unittest.TestCase):
         for thread in threads: thread.join(10)
         self.assertEqual(sorted(results), [200, 429, 429, 429])
 
+    def test_remote_content_sources_are_refused_and_recorded(self):
+        image = {'type': 'image', 'source': {'type': 'url', 'url': 'https://example.test/x.png'}}
+        document = {'type': 'document', 'source': {'type': 'file', 'file_id': 'file_123'}}
+        nested = {'type': 'tool_result', 'tool_use_id': 't', 'content': [image]}
+        for block in (image, document, nested):
+            with self.subTest(block=block['type']):
+                body = {'model': 'claude-opus-5-5', 'max_tokens': 10,
+                        'messages': [{'role': 'user', 'content': [block]}]}
+                self.assertEqual(self.request(body)[0], 400)
+        system = {'model': 'claude-opus-5-5', 'max_tokens': 10, 'messages': [], 'system': [image]}
+        self.assertEqual(self.request(system)[0], 400)
+        self.assertEqual(Upstream.requests, [])
+        records = [json.loads(path.read_text()) for path in Path(self.tmp.name).glob('*.json')]
+        self.assertEqual(len(records), 4)
+        self.assertTrue(all(r['terminal'] == 'rejected_request' and r['status'] == 400
+                            and r['reservation_id'] is None and r['run_id'] == 'run' for r in records))
+        self.assertNotIn('example.test', json.dumps(records))
+
+    def test_inline_base64_content_is_accepted(self):
+        image = {'type': 'image', 'source': {'type': 'base64', 'media_type': 'image/png', 'data': 'aGk='}}
+        body = {'model': 'claude-opus-5-5', 'max_tokens': 10,
+                'messages': [{'role': 'user', 'content': [image, {'type': 'text', 'text': 'look'}]}]}
+        self.assertEqual(self.request(body)[0], 200)
+
+    def test_rejection_records_are_bounded(self):
+        bad = {'model': 'wrong', 'messages': [], 'max_tokens': 1}
+        statuses = [self.request(bad)[0] for _ in range(audit_proxy.MAX_REJECTION_RECORDS + 3)]
+        self.assertEqual(statuses[:audit_proxy.MAX_REJECTION_RECORDS], [400] * audit_proxy.MAX_REJECTION_RECORDS)
+        self.assertEqual(set(statuses[audit_proxy.MAX_REJECTION_RECORDS + 1:]), {503})
+        self.assertEqual(len(list(Path(self.tmp.name).glob('rejection-*.json'))), audit_proxy.MAX_REJECTION_RECORDS)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -347,7 +347,7 @@ class Services:
             if remaining <= 0:
                 break
             try:
-                run(['docker', 'exec', self.runtime.target if target else self.proxy, 'python3', '-c', program],
+                run(['docker', 'exec', self.runtime.target if target else self.proxy, 'python3', '-I', '-c', program],
                     timeout=min(5, remaining))
                 return
             except (subprocess.CalledProcessError, subprocess.TimeoutExpired):

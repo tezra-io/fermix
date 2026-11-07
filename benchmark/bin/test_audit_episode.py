@@ -672,6 +672,14 @@ class LifecycleTest(unittest.TestCase):
         runtime.stop.assert_called_once()
         services.collect.assert_called_once()
 
+    def test_target_readiness_probe_runs_python_isolated(self):
+        services = Mock(spec=Services)
+        services.runtime = Mock(target='target-container')
+        services.proxy = 'proxy-container'
+        with patch('audit_episode.run') as call:
+            Services.ready(services, timeout=5, target=True)
+        self.assertEqual(call.call_args.args[0][:5], ['docker', 'exec', 'target-container', 'python3', '-I'])
+
     def test_post_turn_review_settles_before_checkpoint(self):
         runtime, services = Mock(), Mock()
         events = Mock()

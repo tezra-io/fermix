@@ -308,9 +308,10 @@ class IsolatedGatewayTest(unittest.TestCase):
         self.assertIn('com.docker.network.bridge.gateway_mode_ipv4=isolated', network)
 
 
-def review_logs(*rows):
+def review_logs(*rows, run_id='a' * 32):
     import json
-    return ''.join('FERMIX_AUDIT_TRACE ' + json.dumps(row) + '\n' for row in rows) + 'daemon log line\n'
+    numbered = [{'run_id': run_id, **row, 'seq': index} for index, row in enumerate(rows, 1)]
+    return ''.join('FERMIX_AUDIT_TRACE ' + json.dumps(row) + '\n' for row in numbered) + 'daemon log line\n'
 
 
 def review_row(chat_id, event='memory_review', channel='cli'):
@@ -321,8 +322,9 @@ def review_row(chat_id, event='memory_review', channel='cli'):
 class MemoryReviewSettleTest(unittest.TestCase):
     def test_returns_once_this_conversation_review_closes(self):
         runtime = AuditRuntime('a' * 32, 'image')
-        pending = review_logs(review_row('other-chat'), review_row('audit-chat', event='turn_complete'))
-        closed = pending + review_logs(review_row('audit-chat'))
+        rows = (review_row('other-chat'), review_row('audit-chat', event='turn_complete'))
+        pending = review_logs(*rows)
+        closed = review_logs(*rows, review_row('audit-chat'))
         with patch('audit_runtime.run', side_effect=[pending, closed]) as call, \
              patch('audit_runtime.time.sleep'):
             runtime.wait_for_memory_review('audit-chat', 120)
@@ -337,6 +339,24 @@ class MemoryReviewSettleTest(unittest.TestCase):
              patch('audit_runtime.time.sleep'), \
              self.assertRaisesRegex(TimeoutError, 'memory review'):
             runtime.wait_for_memory_review('audit-chat', 120)
+
+    def test_foreign_or_discontinuous_trace_lines_fail_closed(self):
+        runtime = AuditRuntime('a' * 32, 'image')
+        import json
+        forged = review_logs(review_row('audit-chat'), run_id='b' * 32)
+        gap = 'FERMIX_AUDIT_TRACE ' + json.dumps(dict(review_row('audit-chat'), run_id=runtime.run_id, seq=3)) + '\n'
+        for name, logs in (('foreign run', forged), ('sequence gap', gap)):
+            with self.subTest(name), patch('audit_runtime.run', return_value=logs), \
+                 patch('audit_runtime.time.sleep'), self.assertRaises(ValueError):
+                runtime.wait_for_memory_review('audit-chat', 120)
+
+    def test_in_target_helpers_run_python_isolated(self):
+        import json
+        from tempfile import TemporaryDirectory
+        runtime = AuditRuntime('a' * 32, 'image')
+        with TemporaryDirectory() as folder, patch('audit_runtime.run', return_value=json.dumps({})) as call:
+            runtime.collect_traces(folder, redact_values=['dummy'])
+        self.assertEqual(call.call_args.args[0][-3:], ['python3', '-I', '-'])
 
     def test_rejects_invalid_arguments(self):
         runtime = AuditRuntime('a' * 32, 'image')

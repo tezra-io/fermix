@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Trusted, budgeted Anthropic Messages relay for synthetic audit runs."""
 import argparse
+import hashlib
 import hmac
 import http.client
 import json
@@ -23,6 +24,10 @@ ALLOWED_FIELDS = {'model', 'messages', 'max_tokens', 'system', 'tools', 'tool_ch
                   'thinking', 'cache_control', 'output_config'}
 COUNT_FIELDS = {'model', 'messages', 'system', 'tools', 'tool_choice', 'thinking',
                 'output_config', 'cache_control'}
+# Rejected requests leave compact evidence, capped so a looping caller cannot
+# fill the controller's disk; past the cap the proxy degrades and refuses all.
+MAX_REJECTION_RECORDS = 16
+MAX_CONTENT_NODES = 200_000
 
 
 def validate_config(config):
@@ -120,7 +125,32 @@ def validate_request(data, config):
     tools = data.get('tools', [])
     if not isinstance(tools, list):
         return False
-    return all(isinstance(tool, dict) and tool.get('type', 'custom') == 'custom' for tool in tools)
+    if not all(isinstance(tool, dict) and tool.get('type', 'custom') == 'custom' for tool in tools):
+        return False
+    return inline_content_only([data.get('messages'), data.get('system')])
+
+
+def inline_content_only(roots):
+    """Refuse content the provider would fetch on the target's behalf.
+
+    A `url` or `file` source makes the provider read the internet or the
+    account's stored files, a route around the isolated network. Fermix sends
+    only inline base64 sources.
+    """
+    pending = list(roots)
+    for _ in range(MAX_CONTENT_NODES):
+        if not pending:
+            return True
+        node = pending.pop()
+        if isinstance(node, list):
+            pending.extend(node)
+        elif isinstance(node, dict):
+            if 'file_id' in node:
+                return False
+            if 'source' in node and not (isinstance(node['source'], dict) and node['source'].get('type') == 'base64'):
+                return False
+            pending.extend(node.values())
+    return False
 
 
 def upstream(config, path, data):
@@ -189,18 +219,21 @@ class Handler(BaseHTTPRequestHandler):
         length = self.headers.get('Content-Length', '')
         if not length.isascii() or not length.isdigit() or not 0 < int(length) <= config['max_body_bytes']:
             return self.reject(400, 'invalid body length')
-        data = json.loads(self.rfile.read(int(length)))
-        if not validate_request(data, config):
-            return self.reject(400, 'invalid request')
+        raw = self.rfile.read(int(length))
+        data = json.loads(raw)
         self.secrets = self.credentials()
         if any(not secret or '\n' in secret or '\r' in secret for secret in self.secrets):
             return self.reject(502, 'invalid credential')
+        if not validate_request(data, config):
+            summary = {'rejected': 'invalid_request', 'body_sha256': hashlib.sha256(raw).hexdigest(), 'bytes': len(raw)}
+            self.record_rejection(summary, 400, 'rejected_request')
+            return self.reject(400, 'invalid request')
         with self.server.admission_lock:
             if self.server.degraded.is_set():
                 return self.reject(503, 'evidence unavailable')
             reservation_id = reserve(config, data['max_tokens'])
         if not reservation_id:
-            self.record_failure(data, None, 429, 'budget_exhausted')
+            self.record_rejection(data, 429, 'budget_exhausted')
             return self.reject(429, 'budget exhausted')
         self.write_evidence(data, None, b'', 'in_flight', self.secrets, reservation_id)
         self.reserved_request(data, reservation_id)
@@ -214,6 +247,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def record_failure(self, data, reservation_id, status, terminal):
         self.write_evidence(data, status, b'', terminal, self.secrets, reservation_id)
+
+    def record_rejection(self, data, status, terminal):
+        with self.server.admission_lock:
+            self.server.rejections += 1
+            if self.server.rejections > MAX_REJECTION_RECORDS:
+                self.server.degraded.set()
+                return
+        self.record_failure(data, None, status, terminal)
 
     def count_and_forward(self, data, reservation_id):
         config = self.server.config
@@ -411,6 +452,7 @@ class BoundedServer(ThreadingHTTPServer):
         self.slots = threading.BoundedSemaphore(16)
         self.degraded = threading.Event()
         self.admission_lock = threading.Lock()
+        self.rejections = 0
         super().__init__(address, handler)
 
     def process_request(self, request, address):

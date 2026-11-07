@@ -131,12 +131,16 @@ def _redact_json_line(line, redact_values):
     return normalized
 
 
-def _memory_review_closed(logs, chat_id):
+def _memory_review_closed(logs, chat_id, run_id):
+    seq = 0
     for line in logs.splitlines():
         if not line.startswith("FERMIX_AUDIT_TRACE "):
             continue
         record = json.loads(line.removeprefix("FERMIX_AUDIT_TRACE "))
-        data = record.get("data") if isinstance(record, dict) else None
+        if not isinstance(record, dict) or record.get("run_id") != run_id or record.get("seq") != seq + 1:
+            raise ValueError("invalid or discontinuous observer record while waiting for memory review")
+        seq += 1
+        data = record.get("data")
         if (record.get("kind") == "event" and record.get("type") == "agent_event" and isinstance(data, dict)
                 and data.get("event") == "memory_review" and data.get("channel") == "cli"
                 and data.get("chat_id") == chat_id):
@@ -292,7 +296,7 @@ class AuditRuntime:
                 break
             logs = run(["docker", "logs", self.target], timeout=min(10, max(1, remaining)),
                        max_output=48 * 1024 * 1024)
-            if _memory_review_closed(logs, chat_id):
+            if _memory_review_closed(logs, chat_id, self.run_id):
                 return
             time.sleep(min(0.25, max(0, deadline - time.monotonic())))
         raise TimeoutError(f"post-turn memory review did not complete within {timeout} seconds")
@@ -301,7 +305,8 @@ class AuditRuntime:
         if not redact_values or any(not isinstance(value, str) or not value for value in redact_values):
             raise ValueError("nonempty trace redaction values are required")
         script = Path(__file__).resolve().parents[1] / "audit/docker/collect_traces.py"
-        output = run(["docker", "exec", "-i", self.target, "python3", "-"],
+        # -I keeps the target-writable working directory (/src) off sys.path.
+        output = run(["docker", "exec", "-i", self.target, "python3", "-I", "-"],
                      input=script.read_text(), timeout=30, max_output=48 * 1024 * 1024)
         traces = json.loads(output)
         if not isinstance(traces, dict):

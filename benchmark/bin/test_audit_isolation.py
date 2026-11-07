@@ -87,6 +87,11 @@ class InspectionTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 audit_isolation.probe_result(output, False)
 
+    def test_probe_runs_python_isolated_in_the_container(self):
+        with patch.object(audit_isolation, 'run', return_value='{"ok": false}') as call:
+            audit_isolation.probe('target', '10.0.0.2', 8080, '', False)
+        self.assertEqual(call.call_args.args[0][:5], ['docker', 'exec', 'target', 'python3', '-I'])
+
 
 if __name__ == '__main__':
     unittest.main()

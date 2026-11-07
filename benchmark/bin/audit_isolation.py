@@ -74,7 +74,7 @@ if ok and sys.argv[3]:
     ok=sys.argv[3].encode() in data
 s.close()
 print(json.dumps({'ok':ok}))"""
-    output = run(['docker', 'exec', container, 'python3', '-c', program, ip, str(port), nonce], timeout=8)
+    output = run(['docker', 'exec', container, 'python3', '-I', '-c', program, ip, str(port), nonce], timeout=8)
     return probe_result(output, expected)
 
 
