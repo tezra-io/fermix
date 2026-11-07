@@ -235,11 +235,11 @@ it, never a second writer.
   adds no rule. In the policy file (HuJSON, the admin console's Access
   controls), declare the tag before creating the key, since the key form
   offers only declared tags, and let only your own devices reach the
-  server:
+  server's iroh port, UDP 4033:
 
   ```jsonc
   "tagOwners": {"tag:fermix-server": ["autogroup:admin"]},
-  "grants": [{"src": ["autogroup:member"], "dst": ["tag:fermix-server"], "ip": ["*"]}],
+  "grants": [{"src": ["autogroup:member"], "dst": ["tag:fermix-server"], "ip": ["udp:4033"]}],
   // Only with webhooks (WhatsApp, cue webhook sources): Tailscale Funnel.
   "nodeAttrs": [{"target": ["tag:fermix-server"], "attr": ["funnel"]}]
   ```

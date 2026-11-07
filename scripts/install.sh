@@ -9,8 +9,8 @@
 # sha256 that fermix.ai lists for it, and `fermix setup` runs at the end unless
 # told not to. --version X installs release X instead, under the same check:
 # an Always On server runs exactly its desktop's release (its first boot and
-# its nightly update ask for it), and a package of X already installed is
-# left as it is.
+# its updates, every five minutes and nightly, ask for it), and a package of
+# X already installed is left as it is.
 #
 # Where the trust comes from. The files are downloaded from the project's
 # GitHub release, but their digests are not: they are read from the table at

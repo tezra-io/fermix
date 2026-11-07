@@ -308,8 +308,10 @@ has been used.
 ### The tailnet policy
 
 The policy is the owner's: the first boot opens no port and adds no firewall
-rule for the tailnet. Three parts of the tailnet policy file (HuJSON, on the
-admin console's Access controls page) concern the server:
+rule for the tailnet. A server's engine takes UDP port 4033 for iroh, and the
+tailnet policy should let only the owner's own devices reach
+`tag:fermix-server` on `udp:4033`. Three parts of the tailnet policy file
+(HuJSON, on the admin console's Access controls page) concern the server:
 
 ```jsonc
 {
@@ -318,9 +320,9 @@ admin console's Access controls page) concern the server:
   "tagOwners": {
     "tag:fermix-server": ["autogroup:admin"]
   },
-  // Only the owner's own devices reach the server.
+  // Only the owner's own devices reach the server, on its iroh port.
   "grants": [
-    {"src": ["autogroup:member"], "dst": ["tag:fermix-server"], "ip": ["*"]}
+    {"src": ["autogroup:member"], "dst": ["tag:fermix-server"], "ip": ["udp:4033"]}
   ],
   // Only with webhooks (WhatsApp, cue webhook sources): Tailscale Funnel.
   "nodeAttrs": [

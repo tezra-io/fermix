@@ -169,9 +169,10 @@ will be part of a future release; nothing in this group is in a release yet.
   installs Tailscale from Tailscale's own signed package repository, checking
   its signing key first, and joins your tailnet before the server enrolls.
   Declare `tag:fermix-server` in your tailnet policy, create the key with
-  that tag, and let only your own devices reach the server there; the server
-  opens no port itself. The key is never shown, logged or put on a command
-  line, and is removed from the server as soon as Tailscale has read it;
+  that tag, and let only your own devices reach the server's UDP port 4033
+  there; the server opens no port itself. The key is never shown, logged or
+  put on a command line, and is removed from the server as soon as Tailscale
+  has read it;
   never pass it on sudo's command line, which sudo logs. A key that is not
   one, an OAuth client secret among them, is refused before anything is
   installed. A server already on a tailnet is left on it and the command
