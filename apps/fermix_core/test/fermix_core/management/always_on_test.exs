@@ -495,6 +495,28 @@ defmodule FermixCore.Management.AlwaysOnTest do
       assert {:ok, %{"result" => nil}} = press(ctx, "back_up_now")
       assert_received {:forwarded, "home.snapshots.run", %{}}
     end
+
+    # The backup runs on the server after the act answers: the screen it
+    # answers runs until the backup ends, so a surface following the step
+    # (`fermix always-on back-up-now --wait`) waits for that end.
+    test "Back up now answers a screen that runs while the server backs up", ctx do
+      script = ctx.script
+
+      Agent.update(script, fn on ->
+        fn
+          "home.snapshots.run", params ->
+            Agent.update(script, fn _on -> backing_up(on) end)
+            on.("home.snapshots.run", params)
+
+          method, params ->
+            on.(method, params)
+        end
+      end)
+
+      assert {:ok, %{"summary" => summary}} = press(ctx, "back_up_now")
+      assert {summary["state"], summary["outcome"]} == {"on", "running"}
+      assert summary["detail"]["progress"] == "Backing up now…"
+    end
   end
 
   describe "moving back, on a linked desktop" do
@@ -1180,6 +1202,18 @@ defmodule FermixCore.Management.AlwaysOnTest do
 
       "home.enroll.withdraw", _params ->
         {:ok, %{"withdrawn" => true}}
+    end
+  end
+
+  # The server's part while its backup runs.
+  defp backing_up(script) do
+    fn
+      "home.status", params ->
+        {:ok, part} = script.("home.status", params)
+        {:ok, put_in(part, ["snapshots", "running"], true)}
+
+      method, params ->
+        script.(method, params)
     end
   end
 

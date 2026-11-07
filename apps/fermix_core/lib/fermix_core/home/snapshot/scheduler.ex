@@ -45,9 +45,10 @@ defmodule FermixCore.Home.Snapshot.Scheduler do
   injected (`:now`, `:timer`), so tests deliver a tick by hand, and so is the
   push (`:notify`).
 
-  **The Always On watch.** A finished run moved the newest backup the Always
-  On summary reads, so once the status file holds it the scheduler tells
-  `Home.StatusWatch` (`:status_changed`, its 0-arity stand-in).
+  **The Always On watch.** The Always On summary reads whether a run is
+  going (its outcome runs while one does) and what the last one left, so the
+  scheduler tells `Home.StatusWatch` (`:status_changed`, its 0-arity
+  stand-in) as a run starts, and again once the status file holds its end.
   """
 
   use GenServer
@@ -215,6 +216,7 @@ defmodule FermixCore.Home.Snapshot.Scheduler do
         run.(home, config, targets, opts)
       end)
 
+    :ok = state.status_changed.()
     %{state | task: task.ref, next_run_at: nil}
   end
 

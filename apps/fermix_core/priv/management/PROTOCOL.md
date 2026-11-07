@@ -307,10 +307,12 @@ something: `lines` (the Details, `{label, value}` each, finished by the
 engine: the server, its system and version, until when it waits, each
 place's newest backup, the space this computer's copies take and the
 server's disk; times stated absolutely in the owner's zone; on `ready`, `on`
-and `problem`; beside `restore_here`, the date of the copy it restores, on
+and `problem`; where `back_up_now` is offered, each place whose last try
+failed, `Backup to <place> failed`, in that try's own words, until one there
+is stored; beside `restore_here`, the date of the copy it restores, on
 any state; on a move back's `ready`, what runs on this computer again);
-`progress` (the sentence of the step in hand while a move back or a restore
-runs); and `webhooks` (see *Inbound webhooks*).
+`progress` (the sentence of the step in hand while a move back, a restore or
+a backup runs); and `webhooks` (see *Inbound webhooks*).
 
 **Inbound webhooks.** On a linked desktop's `on` only, where its server
 serves a webhook the internet must reach, `detail.webhooks` is `{sentence,
@@ -346,7 +348,9 @@ command with a way to copy it and its note, and the notes, as they are. No
 own table of states: `running` while Always On is at something that moves
 the screen on by itself (the server connecting; the move, from its request
 here, whose screen reads `ready` until the restart shows, to its end or
-undoing; a server receiving its home; a restore), `waiting` while it waits
+undoing; a server receiving its home; a restore; a backup, on a screen that
+offers `back_up_now`, while it runs, so `back_up_now`'s screen runs until its
+backup ends), `waiting` while it waits
 on the owner's server to use its code, `failed` on a `problem`, and `done`
 when the next step is the owner's. A surface that waits for a step it sent
 follows the screen while the outcome is `running` (or `waiting`, right after
@@ -467,7 +471,7 @@ actions are opened by the surface itself and never sent: `learn_more` opens
 |---|---|
 | `own_server` | opens a code for the owner's server; `result` is `{code, expires_at, command, tailscale}`, answered once: `command` installs Fermix, and `tailscale` (`{sentence, command}`) is the optional step that also joins the server to the owner's tailnet, which WhatsApp and webhook sources need: the same command with `--tailscale`, after which the server asks for the code and then a Tailscale auth key (created with `tag:fermix-server`, which the tailnet policy declares under `tagOwners` first) at the terminal without echo, so the key is on no command line |
 | `cancel` | on `connect` and on `creating`, closes the code for the owner's server; on a held server's `ready`, `not_ready` or `undone` (Forget this server), drops the held server, after its confirm, and the screen is `off` |
-| `back_up_now` | runs a backup now (on a linked desktop, on the server) |
+| `back_up_now` | runs a backup now (on a linked desktop, on the server); the screen it answers runs (`outcome` `running`, `progress` "Backing up now…") until the backup ends, when the backup's line says it was stored or a `Backup to <place> failed` line says why not |
 | `check_again` | runs the move's review again, and keeps it |
 | `move_now`, `try_again` | reviews at the press (a block refuses; a warning the confirm did not name answers `changed`), checks or sets the recovery passphrase, starts the move and restarts the engine; `result` is `{move_id}`. During a move back it sends the move to the server, which checks the passphrase against its own key and keeps no desktop of itself, to this desktop's own candidate, kept in the move back's own record |
 | `move_back` | on a linked desktop: makes this computer's own checks first, so a refused one asks the server for nothing, then asks the server for a copied code (`home.enroll.open`, which names this desktop), writes this desktop's candidate for the home beside it and the move back's record, and starts receiving beside the link; a step after the code that does not go through withdraws it (`home.enroll.withdraw`), and the refusal's sentence says so when the server could not be asked. Refused, `unavailable` with a sentence, while the server reports a move of its own, and where Fermix would not start again by itself (run from a terminal) |

@@ -935,6 +935,59 @@ defmodule FermixCore.Management.HomeSummaryTest do
     end
   end
 
+  # Back up now's backup runs on the server: the screen that offers it runs
+  # until the backup ends, and its end says whether the backup was stored,
+  # so a surface following the step (`--wait`) stops at the end and says so.
+  describe "a backup now" do
+    test "on runs while the server backs up, saying so, and is done once it ends" do
+      home = server_home([])
+      running = put_in(home, ["snapshots", "running"], true)
+
+      summary = HomeSummary.summary(desktop(primary_home: running))
+      assert {summary["state"], summary["outcome"]} == {"on", "running"}
+      assert summary["detail"]["progress"] == "Backing up now…"
+
+      ended = HomeSummary.summary(desktop(primary_home: home))
+      assert {ended["outcome"], ended["detail"]["progress"]} == {"done", nil}
+      refute ended["key"] == summary["key"]
+    end
+
+    test "a try that failed is said in its own words where Back up now is offered" do
+      said = "Your Studio Mac did not confirm the snapshot in time."
+      home = Map.update!(server_home([]), "snapshots", &backed_up(&1, "desktop", said))
+
+      summary = HomeSummary.summary(desktop(primary_home: home))
+      assert summary["outcome"] == "done"
+
+      assert %{"label" => "Backup to your desktop failed", "value" => ^said} =
+               Enum.find(summary["detail"]["lines"], &(&1["label"] =~ "failed"))
+
+      refute summary["key"] == HomeSummary.summary(desktop([]))["key"]
+
+      refute Enum.any?(
+               HomeSummary.summary(desktop([]))["detail"]["lines"],
+               &(&1["label"] =~ "failed")
+             )
+    end
+
+    test "a backup over 3 days old runs while its Back up now runs, and fails once it ends" do
+      old = server_home(backups: [{"desktop", ~U[2031-04-30 10:00:00Z]}])
+      running = put_in(old, ["snapshots", "running"], true)
+
+      assert %{"state" => "problem", "outcome" => "running"} =
+               HomeSummary.summary(desktop(primary_home: running))
+
+      assert %{"state" => "problem", "outcome" => "failed"} =
+               HomeSummary.summary(desktop(primary_home: old))
+
+      # The server's own screen offers no Back up now: its runs move nothing.
+      running_here = Map.put(snapshots([{"desktop", ~U[2031-05-04 10:00:00Z]}]), "running", true)
+
+      assert %{"state" => "primary", "outcome" => "done"} =
+               HomeSummary.summary(server(snapshots: running_here))
+    end
+  end
+
   describe "moving back" do
     test "on offers Move back beside Back up now, asking nothing" do
       %{"detail" => %{"actions" => actions}} = HomeSummary.summary(desktop([]))
@@ -1320,6 +1373,17 @@ defmodule FermixCore.Management.HomeSummaryTest do
                HomeSummary.watch(desktop(primary_home: server_home(disk: 0.96))).key
     end
 
+    # A desktop's screen runs while its server backs up, and says a try that
+    # failed, so the server's key moves with both too.
+    test "a server's key moves with a backup running and a try that failed" do
+      base = HomeSummary.watch(server([])).key
+      running = Map.put(snapshots([{"desktop", ~U[2031-05-04 10:00:00Z]}]), "running", true)
+      failed = backed_up(snapshots([{"desktop", ~U[2031-05-04 10:00:00Z]}]), "desktop", "x.")
+
+      assert HomeSummary.watch(server(snapshots: running)).key != base
+      assert HomeSummary.watch(server(snapshots: failed)).key != base
+    end
+
     # A desktop draws its own summary from what its server's `home.status`
     # holds, so the server's key moves with that too.
     test "a server's key moves with the backups its desktops draw" do
@@ -1642,6 +1706,14 @@ defmodule FermixCore.Management.HomeSummaryTest do
       end
 
     %{"configured" => targets != [], "targets" => targets}
+  end
+
+  # The snapshots with the place `id`'s last try failed in `said`.
+  defp backed_up(snapshots, id, said) do
+    Map.update!(snapshots, "targets", fn targets ->
+      for target <- targets,
+          do: if(target["id"] == id, do: Map.put(target, "last_error", said), else: target)
+    end)
   end
 
   # The review's items this home's settings give, as `MoveReadiness` words

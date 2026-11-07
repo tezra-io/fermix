@@ -138,8 +138,12 @@ defmodule FermixCore.Management.HomeSummary do
   keeps its own table of states: `running` while Always On is at something
   that moves this screen on by itself (the server connecting; the move, from
   its request here until the restart shows; a server receiving its home; a
-  restore), `waiting` while it waits on the owner's server to use its code,
-  `failed` on a problem, `done` when the next step is the owner's.
+  restore; a backup, where Back up now is offered, while it runs there, with
+  `progress` saying so), `waiting` while it waits on the owner's server to
+  use its code, `failed` on a problem, `done` when the next step is the
+  owner's. Where Back up now is offered, Details also say each place whose
+  last try failed, in that try's own words (`backup_failed`), until one
+  there is stored, so the end of a backup says whether it was.
 
   `key/1` is the one digest of the summary (`summary.key`, and what
   `FermixCore.Home.StatusWatch` tells by, `watch/1`): every change a surface
@@ -520,7 +524,9 @@ defmodule FermixCore.Management.HomeSummary do
     end
   end
 
-  defp progress(_view, _facts), do: nil
+  defp progress(view, facts) do
+    if backing_up?(view, facts), do: sentence(:progress_backing_up, facts)
+  end
 
   defp return_progress(%{returning: %{"kind" => kind, "phase" => phase}})
        when phase in @receiving,
@@ -964,6 +970,20 @@ defmodule FermixCore.Management.HomeSummary do
 
   defp newest_backup(_snapshots), do: nil
 
+  # The backup Back up now takes: the server's, which a desktop reads from
+  # its server's own `home.status`.
+  defp backup_snapshots(%{role: :device} = facts), do: get_in(facts, [:primary_home, "snapshots"])
+  defp backup_snapshots(facts), do: facts.snapshots
+
+  defp offers_backup?(view), do: Enum.any?(offered(view), &(&1["id"] == "back_up_now"))
+
+  # A backup runs where the screen offers Back up now.
+  defp backing_up?(view, facts),
+    do: offers_backup?(view) and match?(%{"running" => true}, backup_snapshots(facts))
+
+  defp targets(%{"targets" => targets}) when is_list(targets), do: targets
+  defp targets(_snapshots), do: []
+
   defp backups(%{"targets" => targets}) do
     for %{"label" => label, "last_verified" => %{"at" => at}} <- targets,
         do: %{"place" => label, "at" => at}
@@ -1118,6 +1138,7 @@ defmodule FermixCore.Management.HomeSummary do
 
     Enum.concat([
       state_lines(view, ctx),
+      backup_failed_lines(view, facts, ctx),
       restore_lines(view, ctx),
       again_lines(view, facts, ctx),
       move_back_lines(view, facts, ctx),
@@ -1137,6 +1158,20 @@ defmodule FermixCore.Management.HomeSummary do
   end
 
   defp state_lines(_view, _ctx), do: []
+
+  # Where Back up now is offered: each place whose last try failed, in its
+  # own words, until one there is stored.
+  defp backup_failed_lines(view, facts, ctx) do
+    if offers_backup?(view),
+      do:
+        for(
+          %{"configured" => true, "label" => place, "last_error" => error} <-
+            targets(backup_snapshots(facts)),
+          is_binary(error),
+          do: Copy.summary_line(:backup_failed, {place, error}, ctx)
+        ),
+      else: []
+  end
 
   # Where Restore here is offered: the date of the copy it restores (design
   # §8).
@@ -1208,13 +1243,15 @@ defmodule FermixCore.Management.HomeSummary do
   # A move under way runs whatever the screen still shows (one asked for
   # here reads `ready` until the restart); a code for the owner's server
   # waits for that server.
-  defp outcome(%{"state" => "problem"}, _facts), do: "failed"
+  defp outcome(%{"state" => "problem"} = view, facts),
+    do: if(backing_up?(view, facts), do: "running", else: "failed")
+
   defp outcome(%{"state" => state}, _facts) when state in ["creating", "moving"], do: "running"
   defp outcome(%{"state" => "candidate"}, facts), do: receiving(facts)
 
   defp outcome(view, facts) do
     cond do
-      moving?(facts) ->
+      moving?(facts) or backing_up?(view, facts) ->
         "running"
 
       view["state"] == "connect" and match?(%{state: :open}, window(facts)) ->
@@ -1343,9 +1380,18 @@ defmodule FermixCore.Management.HomeSummary do
   end
 
   # What a desktop's own summary reads from its server's `home.status`
-  # (`primary_home`); only a server with desktops has anyone to tell.
-  defp drawn(%{role: :primary, link: %{desktops: [_ | _]}} = facts),
-    do: newest_backup(facts.snapshots)
+  # (`primary_home`): its newest backup, whether one runs, and each place
+  # whose last try failed; only a server with desktops has anyone to tell.
+  defp drawn(%{role: :primary, link: %{desktops: [_ | _]}} = facts) do
+    snapshots = facts.snapshots
+
+    failed =
+      for %{"configured" => true, "last_error" => error} = target <- targets(snapshots),
+          is_binary(error),
+          do: {target["label"], error}
+
+    {newest_backup(snapshots), match?(%{"running" => true}, snapshots), failed}
+  end
 
   defp drawn(_facts), do: nil
 

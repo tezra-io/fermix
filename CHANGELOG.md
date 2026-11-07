@@ -121,7 +121,10 @@ will be part of a future release; nothing in this group is in a release yet.
   Mac is awake (Learn more, and Restore on this Mac where your Mac keeps a
   copy), a Mac too old for its server (Update), a review that blocks the move
   (Check again), the server's disk 85% full (Learn more), or a last backup
-  over three days old (Back up now). Details says what lives on the server
+  over three days old (Back up now). Back up now's screen shows the backup
+  running until it ends, and Details then say why any place's last try
+  failed, so `fermix always-on back-up-now --wait` returns once the backup is
+  stored or failed. Details says what lives on the server
   (conversations and memories, secrets, the browser, traces) and that
   whoever hosts it can technically read its disk, and the server tells your
   phones once when its newest backup is a week old. Fermix tells the app

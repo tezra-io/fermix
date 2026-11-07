@@ -50,7 +50,7 @@ defmodule FermixCore.Management.Copy do
   setup §3.1): the sentence each action's confirm asks (`summary_sentence/2`'s
   `confirm_*` keys, and `move_confirm/1` for Move now, built from the
   review's own warnings), never with a time in it; the sentence of the step
-  a move back or a restore is in (`progress_*`); a notice's sentence
+  a move back, a restore or a backup is in (`progress_*`); a notice's sentence
   (`notice_*`); the Details lines (`summary_line/3`), each a label and a
   value finished here, times stated absolutely in the owner's zone
   (`FermixCore.Clock`); the Always On docs page (`always_on_docs_url/0`);
@@ -97,7 +97,7 @@ defmodule FermixCore.Management.Copy do
                    return_connecting return_ready return_moving return_undone return_failed
                    return_stopped restore_moving restore_failed notice_back
                    progress_return_receiving progress_return_staged progress_return_placing
-                   progress_restoring confirm_restore_here confirm_return_move confirm_forget
+                   progress_restoring progress_backing_up confirm_restore_here confirm_return_move confirm_forget
                    webhooks webhooks_whatsapp webhooks_cue webhooks_port webhooks_ingress
                    webhooks_tunnel own_server_tailscale)a
   # Each Details line's label, by its key.
@@ -111,7 +111,7 @@ defmodule FermixCore.Management.Copy do
     move_back: "Move back",
     connection: "Connection"
   ]
-  @line_keys Keyword.keys(@line_labels) ++ [:backup, :copies, :backup_here]
+  @line_keys Keyword.keys(@line_labels) ++ [:backup, :backup_failed, :copies, :backup_here]
   @docs_url "https://fermix.ai/docs/always-on/"
   @own_server_command "curl -fsSL https://fermix.ai/install | sudo sh -s -- --always-on --version "
   # What the server's first boot takes (`packaging/cloud/first-boot.sh`'s
@@ -484,6 +484,8 @@ defmodule FermixCore.Management.Copy do
   def summary_sentence(:progress_restoring, %{machine: machine}),
     do: "Restoring Fermix from the backup on this #{machine}…"
 
+  def summary_sentence(:progress_backing_up, _values), do: "Backing up now…"
+
   def summary_sentence(:confirm_restore_here, %{machine: machine}),
     do:
       "Restore Fermix on this #{machine} from its backup? Confirm only once you deleted " <>
@@ -622,6 +624,7 @@ defmodule FermixCore.Management.Copy do
   @doc "The label of the Details line `key` (`summary_line_keys/0`)."
   @spec summary_line_label(atom()) :: String.t()
   def summary_line_label(:backup), do: "Last backup to your desktop"
+  def summary_line_label(:backup_failed), do: "Backup to your desktop failed"
   def summary_line_label(:copies), do: "Backups on this Mac"
   def summary_line_label(:backup_here), do: "Backup on this Mac"
   def summary_line_label(key), do: Keyword.fetch!(@line_labels, key)
@@ -629,7 +632,9 @@ defmodule FermixCore.Management.Copy do
   @doc """
   One Details line, `%{"label", "value"}`, its value finished here from
   `value`: a name, a system or a version as it is; a time (`waits_until`, a
-  `backup`'s `{place, at}`) stated in `ctx`'s `zone`; the space this
+  `backup`'s `{place, at}`) stated in `ctx`'s `zone`; a place whose last
+  backup try failed, with that try's own words (`backup_failed`, `{place,
+  error}`); the space this
   computer's `copies` take, in bytes, on `ctx`'s `machine`; how full the
   server's `disk` is, a fraction; the copy on `ctx`'s `machine` a restore
   takes (`backup_here`, when it was written); what runs on this computer
@@ -641,6 +646,9 @@ defmodule FermixCore.Management.Copy do
   @spec summary_line(atom(), term(), map()) :: %{String.t() => String.t()}
   def summary_line(:backup, {place, %DateTime{} = at}, %{zone: zone}),
     do: line("Last backup to #{place}", stated(at, zone))
+
+  def summary_line(:backup_failed, {place, error}, _ctx) when is_binary(error),
+    do: line("Backup to #{place} failed", error)
 
   def summary_line(:copies, bytes, %{machine: machine}) when is_integer(bytes),
     do: line("Backups on this #{machine}", Disk.gib(bytes))
