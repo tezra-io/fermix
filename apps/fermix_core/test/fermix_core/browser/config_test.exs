@@ -2,6 +2,7 @@ defmodule FermixCore.Browser.ConfigTest do
   use ExUnit.Case, async: false
 
   alias FermixCore.Browser.Config
+  alias FermixCore.Setup.Endpoint
 
   setup do
     original = Application.get_env(:fermix_core, :browser)
@@ -89,6 +90,8 @@ defmodule FermixCore.Browser.ConfigTest do
       defaults
       |> Map.from_struct()
       |> Enum.filter(fn {_field, value} -> is_integer(value) end)
+      # The listener's port is not a tunable: `current/2` resolves it.
+      |> Enum.reject(fn {field, _value} -> field == :engine_web_port end)
       |> Enum.map(fn {field, _value} -> field end)
 
     # Floor so a broken enumeration cannot pass vacuously.
@@ -223,6 +226,21 @@ defmodule FermixCore.Browser.ConfigTest do
              [launch_app: false]
 
     assert {:ok, %{host_launch_timeout_ms: 3_000}} = Config.current(%{})
+  end
+
+  # The policy refuses Fermix's own web interface, so the browser must know the
+  # port it listens on: the one resolver the listener itself and every setup
+  # surface share, never a value of the browser's own that could disagree.
+  test "the engine's own web port is the listener's, and the browser settings cannot move it" do
+    {:ok, port} = Endpoint.port()
+    Application.put_env(:fermix_core, :browser, engine_web_port: 1)
+
+    assert {:ok, %{engine_web_port: ^port}} = Config.current()
+    assert {:ok, %{engine_web_port: 4040}} = Config.current([], engine_web_port: 4040)
+
+    assert {:error, error} = Config.current([], engine_web_port: 0)
+    assert error.code == "invalid_config"
+    assert error.message =~ "engine_web_port"
   end
 
   defp restore(nil), do: Application.delete_env(:fermix_core, :browser)

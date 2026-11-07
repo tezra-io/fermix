@@ -129,6 +129,9 @@ Limits of the managed browser:
 - A download is vetted at its source URL too: a refused one is cancelled, any
   partial file deleted, and the tool answers `download_blocked`.
 - A URL host must be canonical ASCII (an IDN in its `xn--` form).
+- Fermix's own web interface (the web listener's port on any loopback
+  spelling, or a page served from there under any name) is never opened or
+  read, in any profile, whatever `allowed_hosts` lists (`engine_origin`).
 - `default_profile`, `max_tabs` (above), `allowed_hosts` and `launch_app` are
   `[fermix_core.browser]`'s four settable keys; `allowed_hosts` is the escape
   hatch for a refused host; timeouts and caps are internal.

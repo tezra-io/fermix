@@ -38,6 +38,14 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   or doesn't match before anything is installed or run with `sudo`. No local
   `cosign` is needed. A new release reaches the installer once fermix.ai lists
   it.
+- **The agent's browser can no longer open Fermix's own setup page.** A tab of
+  your own browser that you hand over can hold the setup page's sign-in, and
+  with it the agent could have changed every setting the setup page does. The
+  browser now refuses Fermix's own web interface in every profile: its port on
+  `localhost`, `127.0.0.1`, `::1` or any other loopback spelling, and a page
+  served from there under any name. The refusal is `navigation_blocked`, or
+  `read_blocked` for a page already there, and `allowed_hosts` does not lift
+  it. Other local ports, such as a development server, open as before.
 
 ### Behind a feature flag
 

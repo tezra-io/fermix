@@ -50,7 +50,8 @@ defmodule FermixCore.Browser.Policy do
 
     with :ok <- validate_scheme(uri),
          :ok <- validate_authority(uri),
-         :ok <- validate_host(uri, config) do
+         :ok <- validate_host(uri, config),
+         :ok <- engine_origin_verdict(uri, config) do
       {:ok, uri}
     end
   rescue
@@ -123,8 +124,8 @@ defmodule FermixCore.Browser.Policy do
 
   defp scheme_verdict(url, %Config{} = config) do
     case URI.parse(url) do
-      %URI{scheme: scheme, host: host} when scheme in ["http", "https"] ->
-        read_host(host, config)
+      %URI{scheme: scheme, host: host} = uri when scheme in ["http", "https"] ->
+        with :ok <- read_host(host, config), do: read_engine_origin(uri, config)
 
       %URI{scheme: "about", path: "blank"} ->
         :ok
@@ -173,12 +174,89 @@ defmodule FermixCore.Browser.Policy do
           :ok | {:error, Error.t()}
   def read_answers_verdict(url, answers, %Config{} = config)
       when is_binary(url) and is_list(answers) do
-    host = URI.parse(url).host || ""
+    uri = URI.parse(url)
+    host = uri.host || ""
 
-    case answers_verdict(host, answers, config) do
-      :ok -> :ok
+    with :ok <- engine_answers_verdict(uri, answers, config),
+         :ok <- answers_verdict(host, answers, config) do
+      :ok
+    else
       {:error, %Error{} = error} -> read_blocked(host, error)
     end
+  end
+
+  # Fermix's own web interface: the setup pages, health and the webhooks, on the
+  # listener's port. A tab of the owner's own browser (`selected_tab`) can hold
+  # the setup cookie, and with it every setup power (channels, owner ids,
+  # secrets) would be the model's to drive. The listener binds loopback, so its
+  # origin is every loopback spelling on that port, and it is refused in every
+  # profile whatever `allowed_hosts` lists: those entries, the default
+  # `localhost`, `127.0.0.1` and `::1` included, name hosts, and this is one
+  # port on them. A name pointing at loopback is caught where the page was
+  # served from (`engine_answers_verdict/3`); it carries no setup cookie, which
+  # is set for the loopback host the owner opened setup on.
+  defp engine_origin_verdict(%URI{host: host, port: port} = uri, %Config{engine_web_port: port})
+       when is_binary(host) and is_integer(port) do
+    if loopback_host?(host), do: engine_origin_blocked(uri), else: :ok
+  end
+
+  defp engine_origin_verdict(%URI{}, %Config{}), do: :ok
+
+  defp read_engine_origin(uri, config) do
+    case engine_origin_verdict(uri, config) do
+      :ok -> :ok
+      {:error, %Error{} = error} -> read_blocked(uri.host, error)
+    end
+  end
+
+  defp engine_answers_verdict(%URI{port: port} = uri, answers, %Config{engine_web_port: port})
+       when is_integer(port) do
+    if Enum.any?(answers, &(&1 |> fold_embedded_ipv4() |> loopback_address?())),
+      do: engine_origin_blocked(uri),
+      else: :ok
+  end
+
+  defp engine_answers_verdict(%URI{}, _answers, %Config{}), do: :ok
+
+  defp loopback_host?(host) do
+    case canonical_host(host) do
+      {:ok, "localhost"} ->
+        true
+
+      {:ok, canonical} ->
+        String.ends_with?(canonical, ".localhost") or loopback_literal?(canonical)
+
+      :error ->
+        false
+    end
+  end
+
+  defp loopback_literal?(host) do
+    case parse_ip(host) do
+      {:ok, ip} -> ip |> fold_embedded_ipv4() |> loopback_address?()
+      :error -> false
+    end
+  end
+
+  # Every address a loopback listener answers on: 127.0.0.0/8, `::1`, and the
+  # unspecified address, which every stack that accepts it treats as this machine.
+  defp loopback_address?({127, _, _, _}), do: true
+  defp loopback_address?({0, 0, 0, 0}), do: true
+  defp loopback_address?({0, 0, 0, 0, 0, 0, 0, 1}), do: true
+  defp loopback_address?({0, 0, 0, 0, 0, 0, 0, 0}), do: true
+  defp loopback_address?(_ip), do: false
+
+  # No recovery is offered because there is none: the setup pages are the
+  # owner's to open, and the model's next step is to say so, not to retry.
+  defp engine_origin_blocked(%URI{host: host, port: port}) do
+    {:error,
+     Error.new(
+       "navigation_blocked",
+       "Blocked #{host} port #{port}: it is Fermix's own web interface (its setup pages), " <>
+         "which the browser tool never opens or reads. Settings are the owner's to change " <>
+         "in the Fermix app or on the setup page themselves.",
+       %{"value" => host, "reason" => "engine_origin"}
+     )}
   end
 
   defp resolvable_name(host, config) do

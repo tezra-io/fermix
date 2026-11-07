@@ -102,6 +102,13 @@ defmodule FermixCore.Browser.Config do
 
   `address_limits/0`, likewise: the DNS budget of the address checks and the
   sizes of what they remember.
+
+  ## Fermix's own web interface
+
+    * `engine_web_port` — the port the engine's web listener serves its setup
+      pages on, which the policy refuses on every loopback spelling. It is not
+      a setting: `current/2` takes it from `Setup.Endpoint.port/1`, the resolver
+      the listener itself binds by, so the two cannot disagree.
   """
 
   alias FermixCore.AppLauncher
@@ -109,6 +116,7 @@ defmodule FermixCore.Browser.Config do
   alias FermixCore.Browser.Policy
   alias FermixCore.BuildInfo
   alias FermixCore.Setup.ConfigStore
+  alias FermixCore.Setup.Endpoint
   alias FermixCore.Setup.Wizard
 
   @default_allowed_hosts ["localhost", "127.0.0.1", "::1"]
@@ -164,6 +172,7 @@ defmodule FermixCore.Browser.Config do
           allow_private_network: boolean(),
           allowed_hosts: [String.t()],
           launch_app: boolean(),
+          engine_web_port: 1..65_535 | nil,
           max_live_profiles: pos_integer(),
           max_tabs: pos_integer(),
           idle_profile_ttl_ms: pos_integer(),
@@ -206,6 +215,8 @@ defmodule FermixCore.Browser.Config do
             allowed_hosts: @default_allowed_hosts,
             # Resolved by `current/2`; `nil` only until then.
             launch_app: nil,
+            # The web listener's, resolved by `current/2`; `nil` only until then.
+            engine_web_port: nil,
             max_live_profiles: 6,
             max_tabs: 10,
             idle_profile_ttl_ms: 900_000,
@@ -447,10 +458,37 @@ defmodule FermixCore.Browser.Config do
     raw_map = to_map(raw)
     app_engine? = Keyword.get_lazy(opts, :app_engine?, &BuildInfo.app_engine?/0)
 
-    %__MODULE__{}
-    |> merge(raw_map)
-    |> resolve_launch_app(app_engine?)
-    |> validate()
+    with {:ok, engine_web_port} <- engine_web_port(opts) do
+      %__MODULE__{}
+      |> merge(raw_map)
+      |> resolve_launch_app(app_engine?)
+      |> Map.put(:engine_web_port, engine_web_port)
+      |> validate()
+    end
+  end
+
+  # `opts` may name the port (tests, and a caller that already holds it);
+  # otherwise it is the listener's own answer. A port the resolver refuses is a
+  # listener that never bound either, so the refusal is returned, not guessed past.
+  defp engine_web_port(opts) do
+    case Keyword.fetch(opts, :engine_web_port) do
+      {:ok, port} -> {:ok, port}
+      :error -> listener_port()
+    end
+  end
+
+  defp listener_port do
+    case Endpoint.port() do
+      {:ok, port} ->
+        {:ok, port}
+
+      {:error, reason} ->
+        {:error,
+         Error.new(
+           "invalid_config",
+           "engine_web_port: the web listener's port does not resolve (#{inspect(reason)})"
+         )}
+    end
   end
 
   @doc """
@@ -499,7 +537,13 @@ defmodule FermixCore.Browser.Config do
     |> Map.put(:profiles, profiles(Map.get(raw, :profiles, config.profiles)))
   end
 
-  defp known_keys, do: __MODULE__.__struct__() |> Map.keys() |> List.delete(:__struct__)
+  # `engine_web_port` is the listener's answer, never the browser settings'.
+  defp known_keys,
+    do:
+      __MODULE__.__struct__()
+      |> Map.keys()
+      |> List.delete(:__struct__)
+      |> List.delete(:engine_web_port)
 
   defp profiles(raw) when is_map(raw) do
     Map.new(raw, fn {name, profile} -> {to_string(name), normalize_profile(profile)} end)
@@ -521,6 +565,7 @@ defmodule FermixCore.Browser.Config do
     with :ok <- validate_positive_fields(config),
          :ok <- validate_depth_bounds(config),
          :ok <- boolean(:launch_app, config.launch_app),
+         :ok <- port(:engine_web_port, config.engine_web_port),
          :ok <- validate_allowed_hosts(config.allowed_hosts),
          :ok <- validate_profiles(config.profiles),
          :ok <- validate_default_profile(config) do
@@ -655,6 +700,12 @@ defmodule FermixCore.Browser.Config do
 
   defp positive(key, _value) do
     {:error, Error.new("invalid_config", "#{key} must be a positive integer")}
+  end
+
+  defp port(_key, value) when is_integer(value) and value in 1..65_535, do: :ok
+
+  defp port(key, _value) do
+    {:error, Error.new("invalid_config", "#{key} must be a port number from 1 to 65535")}
   end
 
   defp boolean(_key, value) when is_boolean(value), do: :ok
