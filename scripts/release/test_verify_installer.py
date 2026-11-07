@@ -60,13 +60,16 @@ exit "${FAKE_DOCKER_EXIT:-0}"
 """
 
 
-def always_on_transcript(verified=True, refused=True):
+def always_on_transcript(verified=True, refused=True, release_named=True):
     """The installer's --always-on on an account that is not root."""
     lines = [f"==> Fetching release digests from {TABLE_URL}..."]
     if verified:
         lines.append(f"==> Verified sha256 {'b' * 64} against {TABLE_URL} (fermix_always_on.sh, release {VERSION})")
     if refused:
-        lines.append("fermix always-on: Run this as root: curl -fsSL https://fermix.ai/install | sudo sh -s -- --always-on")
+        lines.append(
+            "fermix always-on: Run this as root: curl -fsSL https://fermix.ai/install | sudo sh -s -- "
+            "--always-on" + (f" --version {VERSION}" if release_named else "")
+        )
     return "\n".join(lines)
 
 
@@ -165,6 +168,9 @@ class VerifyInstallerTest(unittest.TestCase):
     def test_an_always_on_run_that_did_not_stop_at_the_root_refusal_is_a_failure(self):
         for case, extra_env in (
             ("another refusal", {"FAKE_ALWAYS_ON_TRANSCRIPT": always_on_transcript(refused=False)}),
+            # The installer hands the script its release, which the refusal's
+            # command then names.
+            ("a refusal without the release", {"FAKE_ALWAYS_ON_TRANSCRIPT": always_on_transcript(release_named=False)}),
             ("no refusal", {"FAKE_ALWAYS_ON_EXIT": "0"}),
         ):
             with self.subTest(case=case):

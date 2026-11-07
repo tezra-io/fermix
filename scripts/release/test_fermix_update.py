@@ -435,6 +435,21 @@ class NightlyUpdateTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 1)
                 self.assertEqual(result.stderr, f"fermix always-on: {sentence}\n")
 
+    # Run without sudo, the first boot says the command to run instead, with
+    # the release it was given (the installer always passes one), so the
+    # copied line installs the desktop's release and not the latest.
+    def test_first_boot_run_without_root_names_the_command_with_its_release(self):
+        suffix = " | sudo sh -s -- --always-on"
+        for release, expected in (("0.17.2", f"{suffix} --version 0.17.2"), ("", suffix)):
+            with self.subTest(release=release):
+                result = self._check_host(release)
+
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(
+                    result.stderr,
+                    f"fermix always-on: Run this as root: curl -fsSL https://fermix.ai/install{expected}\n",
+                )
+
     def test_first_boot_installs_the_release_it_is_given(self):
         for release, expected in (("0.17.2", "installer --no-setup --version 0.17.2"),
                                   ("", "installer --no-setup")):
@@ -444,6 +459,31 @@ class NightlyUpdateTest(unittest.TestCase):
 
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(self._calls(), [f"curl {INSTALL_URL}", expected])
+
+    # The first boot's host check alone, as first-boot.sh holds it with its own
+    # `fail`, on an account that is not root (`id` stood in for).
+    def _check_host(self, release):
+        script = self.base / "check-host.sh"
+        script.write_text(
+            "set -eu\n"
+            f"RELEASE='{release}'\n"
+            'id() { printf "1000\\n"; }\n'
+            f"{self._first_boot_function('fail')}{self._first_boot_function('check_host')}check_host\n",
+            encoding="utf-8",
+        )
+        return subprocess.run(
+            ["/bin/sh", str(script)],
+            env={"PATH": "/usr/bin:/bin"},
+            stdin=subprocess.DEVNULL,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    def _first_boot_function(self, name):
+        source = FIRST_BOOT.read_text(encoding="utf-8")
+        body = source[source.index(f"\n{name}() {{\n") + 1 :]
+        return body[: body.index("\n}\n") + 3]
 
     # The first boot's install step alone: its function as first-boot.sh holds
     # it, with what it calls before the installer stood in for.

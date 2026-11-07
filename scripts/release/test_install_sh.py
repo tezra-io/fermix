@@ -646,6 +646,31 @@ class InstallerTest(unittest.TestCase):
         self.assertIn("Usage: install.sh", result.stdout)
         self.assertEqual(self._calls(), [])
 
+    def test_without_always_on_an_unknown_argument_is_refused_where_it_stands(self):
+        self._host("apt")
+        for arguments in (("--bogus", "--help"), ("--bogus", "--prefix"), ("--bogus", "--version", "0.17")):
+            with self.subTest(arguments=arguments):
+                result = self._run(*arguments)
+
+                self.assertEqual(result.returncode, 2)
+                self.assertEqual(result.stderr, "install.sh: unknown argument: --bogus\n")
+                self.assertEqual(self._calls(), [])
+
+        result = self._run("--help", "--bogus")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Usage: install.sh", result.stdout)
+
+    def test_prefix_without_a_value_is_refused_in_the_installers_own_words(self):
+        self._host(None)
+        for arguments in (("--prefix",), ("--prefix", ""), ("--standalone", "--prefix")):
+            with self.subTest(arguments=arguments):
+                result = self._run(*arguments)
+
+                self.assertEqual(result.returncode, 2)
+                self.assertEqual(result.stderr, "install.sh: --prefix requires a value\n")
+                self.assertEqual(self._calls(), [])
+
     # -- an Always On server (--always-on) ---------------------------------------
     #
     # Each release publishes its Always On server script, a byte copy of

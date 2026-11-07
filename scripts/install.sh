@@ -89,14 +89,25 @@ Options:
 USAGE
 }
 
-# Each argument is shifted off as it is read, and one this installer does not
-# own goes back on the end, so "$@" holds only those once the loop is done.
-# They are the Always On server script's to read: they are never echoed with
-# --always-on, since one may be an enrollment code pasted in the wrong place.
+prefix_needs_a_value() {
+  printf 'install.sh: --prefix requires a value\n' >&2
+  exit 2
+}
+
+# The mode comes first, so that without --always-on an argument this installer
+# does not own is refused where it stands, as it always was.
+for argument do
+  [ "$argument" != --always-on ] || ALWAYS_ON=1
+done
+
+# Each argument is shifted off as it is read. With --always-on, one this
+# installer does not own goes back on the end, so "$@" holds only those once
+# the loop is done. They are the Always On server script's to read and are
+# never echoed, since one may be an enrollment code pasted in the wrong place.
 for argument do
   shift
   case "$VALUE_FOR" in
-    --prefix) PREFIX="${argument:?--prefix requires a value}"; VALUE_FOR=""; continue ;;
+    --prefix) [ -n "$argument" ] || prefix_needs_a_value; PREFIX="$argument"; VALUE_FOR=""; continue ;;
     --version) VERSION="$argument"; VALUE_FOR=""; continue ;;
   esac
   case "$argument" in
@@ -104,22 +115,16 @@ for argument do
     --no-setup) RUN_SETUP=0 ;;
     --standalone) STANDALONE=1 ;;
     --version) VERSION_GIVEN=1; VALUE_FOR=--version ;;
-    --always-on) ALWAYS_ON=1 ;;
+    --always-on) ;;
     --help|-h) usage; exit 0 ;;
-    *) set -- "$@" "$argument" ;;
+    *)
+      [ "$ALWAYS_ON" -eq 1 ] || { echo "install.sh: unknown argument: $argument" >&2; usage; exit 2; }
+      set -- "$@" "$argument"
+      ;;
   esac
 done
 
-if [ "$VALUE_FOR" = --prefix ]; then
-  printf 'install.sh: --prefix requires a value\n' >&2
-  exit 2
-fi
-
-if [ "$ALWAYS_ON" -eq 0 ] && [ $# -gt 0 ]; then
-  echo "install.sh: unknown argument: $1" >&2
-  usage
-  exit 2
-fi
+[ "$VALUE_FOR" != --prefix ] || prefix_needs_a_value
 
 abort() {
   printf 'install.sh: %s\n' "$*" >&2

@@ -196,6 +196,9 @@ check_refusals() {
   rm -f /usr/local/bin/uname
   refuses "an account other than root" "Run this as root" \
     runuser -u nobody -- env FERMIX_ENROLL_CODE="$CODE" sh "$FIRST_BOOT"
+  refuses "an account other than root, naming the command with the release it was given" \
+    "Run this as root: curl -fsSL https://fermix.ai/install | sudo sh -s -- --always-on --version 1.2.3" \
+    runuser -u nobody -- env FERMIX_ENROLL_CODE="$CODE" sh "$FIRST_BOOT" --version 1.2.3
   refuses "a run with no code and no terminal" \
     "No enrollment code: run this in a terminal, which asks for it, or pass it in FERMIX_ENROLL_CODE." \
     sh "$FIRST_BOOT"

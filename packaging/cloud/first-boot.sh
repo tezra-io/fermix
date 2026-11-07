@@ -191,7 +191,10 @@ landlock_abi() {
 }
 
 check_host() {
-  [ "$(id -u)" -eq 0 ] || fail "Run this as root: curl -fsSL https://fermix.ai/install | sudo sh -s -- --always-on"
+  # The release it was given, as the installer always gives one, stays in the
+  # command, so the copied line installs the desktop's release.
+  [ "$(id -u)" -eq 0 ] ||
+    fail "Run this as root: curl -fsSL https://fermix.ai/install | sudo sh -s -- --always-on${RELEASE:+ --version $RELEASE}"
   [ -r /etc/os-release ] ||
     fail "This host has no /etc/os-release. Fermix Always On supports Debian 12, Debian 13 and Ubuntu 24.04."
   case "$(os_field ID) $(os_field VERSION_ID)" in

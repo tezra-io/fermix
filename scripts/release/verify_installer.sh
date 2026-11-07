@@ -177,6 +177,6 @@ case "$always_on" in
   *) fail "the installer did not check the Always On server script against the digest $table_url lists for $version" ;;
 esac
 case "$always_on" in
-  *"fermix always-on: Run this as root"*) ;;
-  *) fail "the Always On server script did not stop at its first refusal, that the account is not root" ;;
+  *"fermix always-on: Run this as root: curl -fsSL https://fermix.ai/install | sudo sh -s -- --always-on --version $version"*) ;;
+  *) fail "the Always On server script did not stop at its first refusal, that the account is not root, naming the command with release $version" ;;
 esac
