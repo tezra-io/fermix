@@ -175,7 +175,9 @@ defmodule FermixCore.Home.CandidateTest do
         assert window == window(:binary.copy(<<0x6B>>, 32)), phase
         {:ok, new_key} = Candidate.noise_keypair(ctx.home)
         refute new_key.public == old_key.public, phase
-        assert Enum.sort(File.ls!(ctx.home)) == ["candidate", "config.toml"]
+        # Nothing of the old one is left beside it; the server mark stays.
+        assert Enum.sort(File.ls!(ctx.home)) == ["candidate", "config.toml", "device"]
+        assert Candidate.server?(ctx.home), phase
       end
 
       assert Candidate.error_sentence(:daemon_running) ==
