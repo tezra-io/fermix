@@ -20,8 +20,13 @@ defmodule FermixCore.Home.Snapshot.Scheduler do
   recorded with its sentence and the next one comes one interval after it
   started, as a verified one does. Nothing runs while the section names no
   recipient or no target; `config_changed/1` (called by the writers of the
-  section) plans again at once. `run_now/1` starts one at once unless one is
-  running (`{:error, :busy}`).
+  section) and `targets_changed/1` (a target that can take a snapshot now:
+  a desktop connected, `FermixChannels.Desktop.SnapshotCopies`) plan again
+  at once, at once again while `run_at_boot` still asks. A primary whose
+  only target is its desktops has none it can name when this process starts,
+  before the channels' device store, so it plans its first run once a
+  desktop connects. `run_now/1` starts one at once unless one is running
+  (`{:error, :busy}`).
 
   **A backup a week old.** After each run, once the newest verified point of
   any target is seven days old, the phones are told, once per occurrence (M75
@@ -120,8 +125,17 @@ defmodule FermixCore.Home.Snapshot.Scheduler do
 
   @doc "Plans the next run again after the section changed. A no-op when no scheduler runs."
   @spec config_changed(GenServer.server()) :: :ok
-  def config_changed(server \\ __MODULE__) do
-    if GenServer.whereis(server), do: GenServer.cast(server, :config_changed)
+  def config_changed(server \\ __MODULE__), do: replan(server)
+
+  @doc """
+  Plans the next run again once a target can take a snapshot it could not
+  (a desktop connected). A no-op when no scheduler runs.
+  """
+  @spec targets_changed(GenServer.server()) :: :ok
+  def targets_changed(server \\ __MODULE__), do: replan(server)
+
+  defp replan(server) do
+    if GenServer.whereis(server), do: GenServer.cast(server, :replan)
     :ok
   end
 
@@ -148,7 +162,7 @@ defmodule FermixCore.Home.Snapshot.Scheduler do
       next_run_at: nil
     }
 
-    {:ok, first_plan(state)}
+    {:ok, plan_due(state)}
   end
 
   @impl true
@@ -166,10 +180,8 @@ defmodule FermixCore.Home.Snapshot.Scheduler do
     do: {:reply, %{running: state.task != nil, next_run_at: state.next_run_at}, state}
 
   @impl true
-  def handle_cast(:config_changed, %{task: nil} = state),
-    do: {:noreply, plan(state, last_attempt_at(state))}
-
-  def handle_cast(:config_changed, state), do: {:noreply, state}
+  def handle_cast(:replan, %{task: nil} = state), do: {:noreply, plan_due(state)}
+  def handle_cast(:replan, state), do: {:noreply, state}
 
   @impl true
   def handle_info({:tick, token}, %{token: token, task: nil} = state) do
@@ -343,9 +355,10 @@ defmodule FermixCore.Home.Snapshot.Scheduler do
     schedule(%{state | next_run_at: next})
   end
 
-  # The first plan of this start: at once when a move's activation asked for
-  # it (`run_at_boot`), otherwise from the last attempt.
-  defp first_plan(state) do
+  # The plan of this start, and again at each change: at once while a move's
+  # activation asks for it (`run_at_boot`, until that run starts), otherwise
+  # from the last attempt.
+  defp plan_due(state) do
     case Status.read(state.home) do
       {:ok, %{run_at_boot: true}} -> plan_now(state)
       _other -> plan(state, last_attempt_at(state))

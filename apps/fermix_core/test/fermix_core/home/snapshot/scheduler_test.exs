@@ -211,6 +211,39 @@ defmodule FermixCore.Home.Snapshot.SchedulerTest do
     assert {:ok, %{run_at_boot: false}} = Status.read(home)
   end
 
+  # The desktops are a target the scheduler cannot name when it starts (the
+  # channels' device store comes up after it): the first boot after a move
+  # still runs at once, as soon as a target can take it.
+  test "the first boot after a move with no target yet runs at once when one comes",
+       %{home: home, config: config, pair: pair} = context do
+    :ok = Status.write(home, %{Status.empty() | run_at_boot: true})
+    Agent.update(config, fn _ -> [recipient: Recipient.encode(pair), interval_hours: 6] end)
+    scheduler = start!(context)
+
+    assert %{next_run_at: nil} = Scheduler.info(scheduler)
+    refute_received {:planned, _tick, _delay}
+
+    Agent.update(config, fn _ -> configured(pair, "kept") end)
+    :ok = Scheduler.targets_changed(scheduler)
+
+    assert_receive {:planned, {:tick, token}, 0}
+    send(scheduler, {:tick, token})
+    assert_receive {:stored, _snapshot, _bytes}, @wait
+    assert {:ok, %{run_at_boot: false}} = Status.read(home)
+  end
+
+  test "a target that comes later plans from the last attempt, never sooner than the delay",
+       %{config: config, pair: pair} = context do
+    Agent.update(config, fn _ -> [recipient: Recipient.encode(pair), interval_hours: 6] end)
+    scheduler = start!(context)
+    refute_received {:planned, _tick, _delay}
+
+    Agent.update(config, fn _ -> configured(pair, "kept") end)
+    :ok = Scheduler.targets_changed(scheduler)
+
+    assert_receive {:planned, {:tick, _token}, 300_000}
+  end
+
   test "a restart plans from the last attempt, never sooner than the boot delay",
        %{home: home} = context do
     last = %{

@@ -1583,8 +1583,10 @@ Current channels:
   `loopback_request` against the primary's own `127.0.0.1` port in a task
   (`Desktop.LoopbackHttp`, bounded HTTP/1.1) and answers `loopback_response`,
   at most 8 per loopback, and turns `loopback_failed` into the sign-in's
-  failure. `Desktop.SnapshotCopies` (the `snapshots` family) hands
-  `snapshot_stored` and `snapshot_refused` to the run waiting on them;
+  failure. `Desktop.SnapshotCopies` (the `snapshots` family) tells the
+  scheduler a desktop connected (`Scheduler.targets_changed/1`, which plans
+  a desktops-only primary's runs, and the first after a move at once) and
+  hands `snapshot_stored` and `snapshot_refused` to the run waiting on them;
   `Desktop.SnapshotTarget` (a `Snapshot.Target`) streams the encrypted file to
   each connected desktop in 60 KiB `snapshot_chunk`s, waiting every 16 for the
   session to have written them (`{:mobile_sync, from, ref}`), and counts the

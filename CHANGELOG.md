@@ -111,7 +111,8 @@ will be part of a future release; nothing in this group is in a release yet.
   release, the server takes it within a few minutes.
   Once a recovery passphrase is set, a primary keeps encrypted snapshots of
   itself in an S3 bucket, every six hours by default, and after a move on your
-  desktop too, and a lost server is restored from the newest one. A move or
+  desktop too (the server's first as soon as your desktop connects), and a
+  lost server is restored from the newest one. A move or
   restore onto a Linux server keeps your secrets in its keyring only when the
   keyring answers, and otherwise in Fermix's own secret files. The app,
   the setup page's Always On tab and `fermix home status` all lead with the

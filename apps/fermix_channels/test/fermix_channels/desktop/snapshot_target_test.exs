@@ -272,6 +272,20 @@ defmodule FermixChannels.Desktop.SnapshotTargetTest do
     end
   end
 
+  # A desktop connecting is when the desktop target can take a snapshot: the
+  # scheduler plans then (the first after a move at once).
+  test "a desktop's family, as it connects, tells the snapshot scheduler" do
+    me = self()
+
+    told = fn ->
+      send(me, :targets_changed)
+      :ok
+    end
+
+    {:ok, _state} = SnapshotCopies.init(%{device_id: @desktop, options: [targets_changed: told]})
+    assert_received :targets_changed
+  end
+
   # The family on its own: an answer reaches the run that waits for it, once.
   test "an answer reaches the waiting run, and one nobody waits for is dropped" do
     {:ok, state} = SnapshotCopies.init(%{device_id: @desktop})
