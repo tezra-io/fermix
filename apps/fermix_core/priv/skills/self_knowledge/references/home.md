@@ -145,13 +145,14 @@ it, never a second writer.
   keeps working with the Mac closed. The server enrolls with an enrollment
   code the primary opens (one use, 30 minutes), on an existing Debian 12,
   Debian 13 or Ubuntu 24.04 host (arm64 or x86_64) whose kernel gives
-  Landlock ABI 3: `curl -fsSL https://fermix.ai/always-on | sudo sh`, which
-  asks for the code without echoing it. ABI 3 means Linux 6.2 or later with
+  Landlock ABI 3: `curl -fsSL https://fermix.ai/install | sudo sh -s --
+  --always-on`, which runs the release's server script and asks for the code
+  without echoing it. ABI 3 means Linux 6.2 or later with
   Landlock enabled, as Debian 13 and Ubuntu 24.04 have by default; Debian
   12's own 6.1 does not, so a stock Debian 12 is refused (one on a 6.2 or
   later kernel is not). Below it every command Fermix runs would be refused,
   so the first boot checks the kernel before it installs anything and names
-  what is missing. After `sh -s --`:
+  what is missing. After `--always-on`:
   `--snapshot-bucket NAME --snapshot-region REGION`, `--restore`,
   `--version X`, the release to install (Always On's command names this
   computer's; without it, the latest), and `--tailscale` (below).
@@ -309,7 +310,7 @@ it, never a second writer.
 - **The code.** On the primary, Always On's **Use my own Linux server**
   (`home.act`'s `own_server`) opens an enrollment window and shows its code
   once, with the command to run on the server, `curl -fsSL
-  https://fermix.ai/always-on | sudo sh -s -- --version X` (X this
+  https://fermix.ai/install | sudo sh -s -- --always-on --version X` (X this
   computer's release, which the server installs), which carries no code: the
   server's first boot asks for it on the terminal without echo, so it never
   lands in a shell history. Beside it is the optional line that also joins

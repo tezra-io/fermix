@@ -32,6 +32,8 @@ FILES = (
     f"linux_packages/fermix_{VERSION}_arm64.deb",
     f"linux_packages/fermix-{VERSION}-1.x86_64.rpm",
     f"linux_packages/fermix-{VERSION}-1.aarch64.rpm",
+    # Not installed by the installer's package path: --always-on runs it.
+    "always_on/fermix_always_on.sh",
 )
 
 # Fails the check for the one file named in $FAKE_COSIGN_REJECT.
@@ -100,7 +102,11 @@ class BuildInstallTableTest(unittest.TestCase):
         self.assertIn(f"cosign could not verify linux_packages/fermix_{VERSION}_arm64.deb", result.stderr)
 
     def test_a_missing_file_or_signature_prints_no_table(self):
-        for missing in ("burrito_out/fermix_macos_x86_64", f"linux_packages/fermix-{VERSION}-1.aarch64.rpm.sig"):
+        for missing in (
+            "burrito_out/fermix_macos_x86_64",
+            f"linux_packages/fermix-{VERSION}-1.aarch64.rpm.sig",
+            "always_on/fermix_always_on.sh.pem",
+        ):
             with self.subTest(missing=missing):
                 path = self.root / missing
                 kept = path.read_bytes()

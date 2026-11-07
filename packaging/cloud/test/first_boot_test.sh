@@ -10,7 +10,9 @@
 # night's, the follow run's and their lock),
 # a host joining a tailnet with Tailscale's live signing key, and the
 # distribution's Chromium installed for real and started headless as the
-# engine account.
+# engine account. The existing host also reaches its first boot through the
+# regular installer (scripts/install.sh --always-on), which checks this
+# script against a stand-in digest table before running it.
 # The host part needs shellcheck, dash, script(1) and perl, on macOS or
 # Linux; the containers need Docker on Linux 6.2 or later with Landlock
 # enabled (the chromium scenario asks the kernel for its Landlock ABI for
@@ -27,6 +29,7 @@ set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 cloud=$(dirname "$here")
 systemd_units=$(cd "$cloud/../linux/systemd" && pwd)
+installer=$(cd "$cloud/../../scripts" && pwd)/install.sh
 image=debian:trixie-slim
 mode=${1:-all}
 
@@ -61,7 +64,7 @@ for scenario in existing-host restore failures ubuntu updates tailnet chromium; 
   if [ "$scenario" = chromium ]; then seccomp="--security-opt seccomp=unconfined"; fi
   # shellcheck disable=SC2086
   docker run --rm --cap-add NET_ADMIN $seccomp --tmpfs /run:rw,mode=0755 \
-    -v "$cloud:/cloud:ro" -v "$systemd_units:/linux-systemd:ro" "$image" \
+    -v "$cloud:/cloud:ro" -v "$systemd_units:/linux-systemd:ro" -v "$installer:/install.sh:ro" "$image" \
     sh /cloud/test/in_container.sh "$scenario" || status=1
 done
 [ "$status" -eq 0 ] || fail "a scenario failed; its FAIL lines above say which checks."

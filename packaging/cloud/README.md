@@ -8,9 +8,14 @@ script, two modes:
   enabled, as Debian 13 and Ubuntu 24.04 have by default. Debian 12's own 6.1
   gives ABI 2, so a stock Debian 12 is refused, and one on a 6.2 or later
   kernel is not:
-  `curl -fsSL https://fermix.ai/always-on | sudo sh`, which serves
-  `first-boot.sh` byte for byte and asks for the code without echo. Cloud-init
-  user data can run it with the code in `FERMIX_ENROLL_CODE` instead.
+  `curl -fsSL https://fermix.ai/install | sudo sh -s -- --always-on`. The
+  regular installer's `--always-on` downloads the release's copy of
+  `first-boot.sh` (every release publishes it byte for byte, signed, as
+  `fermix_always_on.sh`), refuses it unless its sha256 is the one
+  `https://fermix.ai/install/releases` lists, as it does a package, and runs
+  it with `--version` naming that release and every other option passed on
+  unread; it asks for the code without echo. Cloud-init user data can run it
+  with the code in `FERMIX_ENROLL_CODE` instead.
   `--version X` names the release to install: the one the computer that sets
   the server up runs, which Always On's command for the server passes, so the
   home can always move back there; without it, the latest. `--tailscale`
@@ -297,7 +302,7 @@ included):
 ```yaml
 #cloud-config
 runcmd:
-  - curl -fsSL https://fermix.ai/always-on | FERMIX_ENROLL_CODE='<the code>' TS_AUTHKEY='<a one-off auth key>' sh -s -- --version X --tailscale
+  - curl -fsSL https://fermix.ai/install | FERMIX_ENROLL_CODE='<the code>' TS_AUTHKEY='<a one-off auth key>' sh -s -- --always-on --version X --tailscale
 ```
 
 with `X` the release Always On's command names. Cloud-init keeps the user
@@ -407,7 +412,8 @@ The containers need Docker with `debian:trixie-slim`, and network inside them
 `apt-config` run for real (`--cap-add NET_ADMIN`, `/run` on a tmpfs);
 `systemctl` (which runs a unit's `ExecStart` for `start` and `restart`),
 `loginctl`, `curl` (the fake installer, which records the release it
-installed; `pkgs.tailscale.com` fetched for real), `apt-get`, `dpkg-query`,
+installed; a stand-in digest table and release script for the regular
+installer's `--always-on`; `pkgs.tailscale.com` fetched for real), `apt-get`, `dpkg-query`,
 `perl` (the Landlock ABI from a fixture), `swapon`, `fallocate`, `mkswap`,
 `tailscale` (which records the key file it read, never the key) and `fermix`
 (which runs the release its last start installed, and whose status reads can
@@ -419,7 +425,10 @@ it is the primary, then given a code (refused), then enrolling again once
 its enrollment failed,
 then enrolling afresh with the code in the environment and a bucket, after
 the refusals (a stock Debian 12 host and kernels with Landlock ABI 2 or none,
-by the ABI sentence, among them); a restore host and its printed steps, run
+by the ABI sentence, among them), then the same through the regular
+installer (`scripts/install.sh`, mounted at `/install.sh`) with `--always-on`,
+the release from the table, after a table that disagrees with the script and
+a code passed as an argument (refused, unechoed); a restore host and its printed steps, run
 again once its home is a primary, and refused as a retired copy; the
 failures that stop the
 first boot, each by its exit status and its one sentence on stderr; an

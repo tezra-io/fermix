@@ -298,7 +298,9 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
       press(view, "own_server")
       html = render_async(view)
 
-      assert text(html, "#always-on-code") =~ "curl -fsSL https://fermix.ai/always-on | sudo sh"
+      assert text(html, "#always-on-code") =~
+               "curl -fsSL https://fermix.ai/install | sudo sh -s -- --always-on --version"
+
       assert text(html, "#always-on-code-text") == @manual_code
       assert html =~ ~s(data-copy-from="always-on-code-text")
       assert text(html, "#always-on-code") =~ "Sunday, May 4, 2031 at 12:30 PM UTC"

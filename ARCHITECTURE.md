@@ -1235,9 +1235,14 @@ compiled-in build identity, never from runtime detection.
 `packaging/cloud/first-boot.sh` is the root half of a server that becomes the
 owner's primary (M75 step 6). It runs once as root, from cloud-init user data
 (the code in `FERMIX_ENROLL_CODE`, the release in `--version`) or as
-`curl -fsSL https://fermix.ai/always-on | sudo sh -s -- --version X` (the
+`curl -fsSL https://fermix.ai/install | sudo sh -s -- --always-on --version X` (the
 code read from the terminal without echo; `--tailscale` adds the owner's
-tailnet, its auth key from `TS_AUTHKEY` or the terminal the same way). It refuses, before it installs anything, any host but
+tailnet, its auth key from `TS_AUTHKEY` or the terminal the same way). Either
+way the regular installer (`scripts/install.sh`) runs it: every release
+publishes and signs a byte copy as `fermix_always_on.sh`, and `--always-on`
+runs that copy, with `--version` naming its release and every other option
+passed on unread, once its sha256 matches the row
+`https://fermix.ai/install/releases` lists for it. It refuses, before it installs anything, any host but
 Debian 12, Debian 13 or Ubuntu 24.04 and, deciding, any kernel below Landlock
 ABI 3 (asked through `perl`'s `syscall`; a stock Debian 12 is one), where the
 engine would refuse every command; then in order: writes the enrollment code

@@ -1021,7 +1021,7 @@ defmodule FermixCore.Management.CopyTest do
       assert Copy.always_on_docs_url() == "https://fermix.ai/docs/always-on/"
       # The server installs the release this computer runs (design §6).
       assert Copy.own_server_command() ==
-               "curl -fsSL https://fermix.ai/always-on | sudo sh -s -- --version " <>
+               "curl -fsSL https://fermix.ai/install | sudo sh -s -- --always-on --version " <>
                  FermixCore.BuildInfo.product_version()
 
       refute Copy.own_server_command() =~ "FERMIX_ENROLL_CODE"
@@ -1029,7 +1029,7 @@ defmodule FermixCore.Management.CopyTest do
       # The optional Tailscale step: the server asks for its auth key at the
       # terminal without echo, so the key is on no command line.
       assert Copy.own_server_tailscale_command() ==
-               "curl -fsSL https://fermix.ai/always-on | sudo sh -s -- --version " <>
+               "curl -fsSL https://fermix.ai/install | sudo sh -s -- --always-on --version " <>
                  FermixCore.BuildInfo.product_version() <> " --tailscale"
 
       refute Copy.own_server_tailscale_command() =~ "TS_AUTHKEY"

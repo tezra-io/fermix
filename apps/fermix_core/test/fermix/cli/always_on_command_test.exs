@@ -24,9 +24,9 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
 
   @passphrase "invented-lantern-orchard"
   @changed "Always On changed since this was shown, so look at it again."
-  @command "curl -fsSL https://fermix.ai/always-on | sudo sh"
+  @command "curl -fsSL https://fermix.ai/install | sudo sh -s -- --always-on --version 1.2.3"
   @tailscale_sentence "Optional: to also join the server to your tailnet, run this instead."
-  @tailscale_command "curl -fsSL https://fermix.ai/always-on | sudo sh -s -- --tailscale"
+  @tailscale_command "curl -fsSL https://fermix.ai/install | sudo sh -s -- --always-on --version 1.2.3 --tailscale"
   @unconfirmed "The server fermix-general-a3f9 did not confirm in time whether the move " <>
                  "started. Its state shows once the server answers again, and starting it " <>
                  "again never starts a second move."

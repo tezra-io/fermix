@@ -36,8 +36,9 @@ TABLE_URL = "https://fermix.ai/install/releases"
 
 # The real tools the installer may call. Everything else on PATH is a stand-in,
 # so a host's own apt-get, rpm or cosign can never answer for the test. `install`
-# is real too, behind a stand-in that writes each call to the log first.
-REAL_TOOLS = ("awk", "basename", "cat", "chmod", "cp", "dirname", "mkdir", "mktemp", "rm")
+# is real too, behind a stand-in that writes each call to the log first, and so
+# is `sh`, which runs the Always On server script.
+REAL_TOOLS = ("awk", "basename", "cat", "chmod", "cp", "dirname", "mkdir", "mktemp", "rm", "sh")
 
 STANDALONE_TARGETS = ("linux-x86_64", "linux-aarch64", "macos-aarch64", "macos-x86_64")
 PACKAGE_TARGETS = ("linux-x86_64", "linux-aarch64")
@@ -125,6 +126,28 @@ printf 'fermix %s stdin_is_terminal=%s\\n' "$*" "$terminal" >> "$FAKE_LOG"
 exit "${FAKE_SETUP_EXIT:-0}"
 """
 
+# What the fake release serves as its Always On server script: it logs each
+# argument in brackets, the two secrets it inherited and its first line of
+# input, signals the installer when told to, then exits as the test says. It
+# writes nothing to its own output, so whatever the run prints is the
+# installer's.
+FAKE_SERVER_SCRIPT = """#!/bin/sh
+printf 'server' >> "$FAKE_LOG"
+for argument in "$@"; do printf ' [%s]' "$argument" >> "$FAKE_LOG"; done
+printf '\\n' >> "$FAKE_LOG"
+printf 'server code=%s key=%s\\n' "${FERMIX_ENROLL_CODE-unset}" "${TS_AUTHKEY-unset}" >> "$FAKE_LOG"
+if IFS= read -r line; then input="$line"; else input=none; fi
+printf 'server input=%s\\n' "$input" >> "$FAKE_LOG"
+[ -z "${FAKE_SERVER_SIGNAL:-}" ] || kill -s "$FAKE_SERVER_SIGNAL" "$PPID"
+exit "${FAKE_SERVER_EXIT:-0}"
+"""
+
+ALWAYS_ON = "always_on"
+ALWAYS_ON_FILE = "fermix_always_on.sh"
+
+# An invented enrollment code in the real shape; nothing in it is a secret.
+INVENTED_CODE = "fxenroll1.eyJ2IjoxLCJuYW1lIjoiSW52ZW50ZWQgTWFjIiwic2VjcmV0IjoiaW52ZW50ZWQifQ"
+
 
 def sha256_of(data):
     return hashlib.sha256(data).hexdigest()
@@ -143,11 +166,12 @@ def package_name(version, target, kind):
 
 
 def release_files(version):
-    """Every file the installer can install from one release, keyed by what it is."""
+    """Every file the installer can fetch from one release, keyed by what it is."""
     files = {target: standalone_name(target) for target in STANDALONE_TARGETS}
     for target in PACKAGE_TARGETS:
         for kind in ("deb", "rpm"):
             files[(target, kind)] = package_name(version, target, kind)
+    files[ALWAYS_ON] = ALWAYS_ON_FILE
     return files
 
 
@@ -160,7 +184,8 @@ class InstallerTest(unittest.TestCase):
         self.root = self.base / "root"
         self.home = self.base / "home"
         self.log = self.base / "log"
-        for directory in (self.bin, self.remote, self.root, self.home):
+        self.scratch = self.base / "tmp"
+        for directory in (self.bin, self.remote, self.root, self.home, self.scratch):
             directory.mkdir()
         self.log.touch()
 
@@ -611,6 +636,186 @@ class InstallerTest(unittest.TestCase):
                 self.assertIn("--version takes a release, such as 0.17.0", result.stderr)
                 self.assertEqual(self._calls(), [])
 
+    def test_an_unknown_argument_without_always_on_is_refused_as_before(self):
+        self._host("apt")
+
+        result = self._run("--tailscale")
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("install.sh: unknown argument: --tailscale", result.stderr)
+        self.assertIn("Usage: install.sh", result.stdout)
+        self.assertEqual(self._calls(), [])
+
+    # -- an Always On server (--always-on) ---------------------------------------
+    #
+    # Each release publishes its Always On server script, a byte copy of
+    # packaging/cloud/first-boot.sh. The installer checks it against the table
+    # exactly as it checks a package, then runs it with the release named; the
+    # host checks are the script's own.
+
+    def test_always_on_runs_the_verified_server_script_with_the_release_and_the_rest_unchanged(self):
+        self._host("apt", uid=0)
+
+        result = self._run(
+            "--always-on",
+            "--tailscale",
+            "--version",
+            VERSION,
+            "--snapshot-bucket",
+            "two words",
+            "--snapshot-region",
+            "it's",
+            extra_env={"FERMIX_ENROLL_CODE": INVENTED_CODE, "TS_AUTHKEY": "tskey-auth-invented"},
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            self._server_calls(),
+            [
+                f"server [--version] [{VERSION}] [--tailscale] [--snapshot-bucket] [two words] "
+                "[--snapshot-region] [it's]",
+                f"server code={INVENTED_CODE} key=tskey-auth-invented",
+                "server input=none",
+            ],
+        )
+        fetched = [call for call in self._calls() if call.startswith("curl ")]
+        self.assertEqual(fetched, [f"curl {TABLE_URL}", f"curl {ORIGIN}/v{VERSION}/{ALWAYS_ON_FILE}"])
+        self.assertIn(
+            f"==> Verified sha256 {self.digests[(VERSION, ALWAYS_ON)]} against {TABLE_URL} "
+            f"({ALWAYS_ON_FILE}, release {VERSION})",
+            result.stdout,
+        )
+        self._assert_nothing_installed()
+        self._assert_no_download_left()
+
+    def test_always_on_hands_the_script_the_latest_release_unless_one_is_named(self):
+        self._release(OLDER)
+        self._publish_table(self._table(releases=(VERSION, OLDER)))
+        for arguments, release in ((("--always-on",), VERSION), (("--version", OLDER, "--always-on"), OLDER)):
+            with self.subTest(arguments=arguments):
+                self.log.write_text("", encoding="utf-8")
+                self._host("apt", uid=0)
+
+                result = self._run(*arguments)
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self._server_calls()[0], f"server [--version] [{release}]")
+                self.assertIn(f"curl {ORIGIN}/v{release}/{ALWAYS_ON_FILE}", self._calls())
+
+    def test_always_on_exits_with_the_server_scripts_own_status(self):
+        for status in (0, 1, 7):
+            with self.subTest(status=status):
+                self.log.write_text("", encoding="utf-8")
+                self._host("apt", uid=0)
+
+                result = self._run("--always-on", extra_env={"FAKE_SERVER_EXIT": str(status)})
+
+                self.assertEqual(result.returncode, status, result.stderr)
+                self._assert_no_download_left()
+
+    def test_always_on_leaves_every_host_check_to_the_server_script(self):
+        # Neither the system, the architecture, the account nor the package
+        # manager is the installer's to refuse here.
+        self._host(None, system="Darwin", machine="riscv64", uid=1000)
+
+        result = self._run("--always-on")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self._server_calls()[0], f"server [--version] [{VERSION}]")
+        self.assertNotIn("Detected target", result.stdout)
+
+    def test_always_on_passes_what_it_does_not_own_on_unread_and_never_echoes_it(self):
+        self._host("apt", uid=0)
+
+        result = self._run("--always-on", INVENTED_CODE, extra_env={"FAKE_SERVER_EXIT": "1"})
+
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(self._server_calls()[0], f"server [--version] [{VERSION}] [{INVENTED_CODE}]")
+        self.assertNotIn(INVENTED_CODE, result.stdout + result.stderr)
+
+    def test_the_server_script_never_reads_the_installers_own_input(self):
+        # Under `curl | sh` the installer's input is the rest of the installer.
+        self._host("apt", uid=0)
+
+        result = self._run("--always-on", input_text="the rest of the installer\n")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("server input=none", self._server_calls())
+
+    def test_always_on_with_an_option_for_another_install_is_refused_before_anything_is_fetched(self):
+        self._host("apt", uid=0)
+        for option, arguments in (
+            ("--standalone", ("--always-on", "--standalone", INVENTED_CODE)),
+            ("--prefix", ("--prefix", str(self.base), "--always-on", INVENTED_CODE)),
+            ("--no-setup", (INVENTED_CODE, "--always-on", "--no-setup")),
+        ):
+            with self.subTest(option=option):
+                self.log.write_text("", encoding="utf-8")
+
+                result = self._run(*arguments)
+
+                self.assertEqual(result.returncode, 2)
+                self.assertEqual(
+                    result.stderr,
+                    "install.sh: --always-on runs the release's Always On server script, which "
+                    "installs Fermix itself, so it takes none of --standalone, --prefix and "
+                    "--no-setup.\n",
+                )
+                self.assertNotIn(INVENTED_CODE, result.stdout)
+                self.assertEqual(self._calls(), [])
+
+    def test_always_on_refuses_a_release_that_lists_no_server_script_before_downloading(self):
+        for case, table in (
+            ("no row", self._table(drop={(VERSION, ALWAYS_ON)})),
+            ("two rows", self._table() + f"{VERSION} {'0' * 64} {ALWAYS_ON_FILE}\n"),
+            ("not a sha256", self._table(digests={(VERSION, ALWAYS_ON): "ABC123"})),
+        ):
+            with self.subTest(case=case):
+                self.log.write_text("", encoding="utf-8")
+                self._host("apt", uid=0)
+                self._publish_table(table)
+
+                result = self._run("--always-on")
+
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(
+                    f"install.sh: {TABLE_URL} lists no Always On server script for release {VERSION}",
+                    result.stderr,
+                )
+                self.assertEqual(self._calls(), [f"curl {TABLE_URL}"])
+                self._assert_no_download_left()
+
+    def test_always_on_refuses_a_named_release_the_table_does_not_list(self):
+        self._host("apt", uid=0)
+
+        result = self._run("--always-on", "--version", "9.9.7")
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(f"{TABLE_URL} lists no release 9.9.7", result.stderr)
+        self.assertEqual(self._calls(), [f"curl {TABLE_URL}"])
+
+    def test_always_on_refuses_a_script_that_does_not_match_its_row_before_running_it(self):
+        self._host("apt", uid=0)
+        self._publish_table(self._table(digests={(VERSION, ALWAYS_ON): "0" * 64}))
+
+        result = self._run("--always-on")
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(f"sha256 mismatch: expected {'0' * 64}", result.stderr)
+        self.assertIn(f"is not the file {TABLE_URL} lists for release {VERSION}", result.stderr)
+        self.assertEqual(self._server_calls(), [])
+        self._assert_no_download_left()
+
+    def test_always_on_leaves_no_download_behind_when_it_is_stopped(self):
+        for signal, status in (("TERM", 143), ("INT", 130)):
+            with self.subTest(signal=signal):
+                self._host("apt", uid=0)
+
+                result = self._run("--always-on", extra_env={"FAKE_SERVER_SIGNAL": signal})
+
+                self.assertEqual(result.returncode, status, result.stderr)
+                self._assert_no_download_left()
+
     # -- the contract with the release rail -----------------------------------
     #
     # The rail builds the same table from its own cosign-verified files and runs
@@ -632,6 +837,15 @@ class InstallerTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(f"curl {ORIGIN}/v{VERSION}/fermix-{VERSION}-1.aarch64.rpm", self._calls())
 
+    def test_the_server_script_runs_from_the_table_the_release_rail_builds(self):
+        self._publish_table(self._rail_table())
+        self._host("apt", uid=0)
+
+        result = self._run("--always-on")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self._server_calls()[0], f"server [--version] [{VERSION}]")
+
     # -- fixtures --------------------------------------------------------------
 
     def _host(self, manager, system="Linux", machine="x86_64", uid=1000):
@@ -647,10 +861,13 @@ class InstallerTest(unittest.TestCase):
             self._fake("rpm", FAKE_RPM)
             self._fake(manager, FAKE_PACKAGE_MANAGER)
 
-    def _run(self, *arguments, extra_env=None, terminal=False):
+    def _run(self, *arguments, extra_env=None, terminal=False, input_text=None):
         environment = {
             "PATH": str(self.bin),
             "HOME": str(self.home),
+            # Where the installer's mktemp makes its directory, so a test can
+            # see that nothing is left behind.
+            "TMPDIR": str(self.scratch),
             "FAKE_LOG": str(self.log),
             "FAKE_REMOTE": str(self.remote),
             "FAKE_ROOT": str(self.root),
@@ -662,11 +879,13 @@ class InstallerTest(unittest.TestCase):
         if terminal:
             return self._run_on_a_terminal(command, environment)
         # A session of its own has no controlling terminal, whoever runs the
-        # suite, so /dev/tty cannot be opened: the state a CI job is in.
+        # suite, so /dev/tty cannot be opened: the state a CI job is in. Input
+        # given as text stands for what `curl | sh` leaves on standard input.
+        stdin = {"stdin": subprocess.DEVNULL} if input_text is None else {"input": input_text}
         return subprocess.run(
             command,
             env=environment,
-            stdin=subprocess.DEVNULL,
+            **stdin,
             text=True,
             capture_output=True,
             check=False,
@@ -701,6 +920,14 @@ class InstallerTest(unittest.TestCase):
     def _calls(self):
         return self.log.read_text(encoding="utf-8").splitlines()
 
+    def _server_calls(self):
+        """What the Always On server script was run with, if it ran."""
+        return [call for call in self._calls() if call.startswith("server ")]
+
+    def _assert_no_download_left(self):
+        """The installer's own directory is gone, the downloaded script with it."""
+        self.assertEqual(list(self.scratch.iterdir()), [])
+
     def _one(self, calls, prefix):
         matching = [call for call in calls if call.startswith(prefix)]
         self.assertEqual(len(matching), 1, f"expected one {prefix!r} call in {calls}")
@@ -720,7 +947,7 @@ class InstallerTest(unittest.TestCase):
     def _release(self, version):
         """Publish one release's files on the fake GitHub, each with its own payload."""
         for key, name in release_files(version).items():
-            payload = f"{version} {key}\n".encode()
+            payload = FAKE_SERVER_SCRIPT.encode() if key == ALWAYS_ON else f"{version} {key}\n".encode()
             self.payloads[(version, key)] = payload
             self.digests[(version, key)] = sha256_of(payload)
             self._serve(f"{ORIGIN}/v{version}/{name}", payload)
@@ -752,7 +979,10 @@ class InstallerTest(unittest.TestCase):
         self.assertIsNotNone(shutil.which("bash"), "bash is required to build the table")
         tree = self.base / "candidate"
         for key, name in release_files(VERSION).items():
-            directory = tree / ("burrito_out" if isinstance(key, str) else "linux_packages")
+            if key == ALWAYS_ON:
+                directory = tree / "always_on"
+            else:
+                directory = tree / ("burrito_out" if isinstance(key, str) else "linux_packages")
             directory.mkdir(parents=True, exist_ok=True)
             (directory / name).write_bytes(self.payloads[(VERSION, key)])
             (directory / f"{name}.sig").write_bytes(b"signature\n")

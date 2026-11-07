@@ -780,6 +780,24 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     refute reference =~ "it does not submit the form"
   end
 
+  # An Always On server is set up with the regular installer's --always-on,
+  # which runs the release's own server script; no other address serves it.
+  test "documents the Always On server command as the regular installer's --always-on" do
+    home = "home" |> reference_path() |> File.read!() |> squash()
+    service = service_unit_reference_path() |> File.read!() |> squash()
+
+    assert home =~ "`curl -fsSL https://fermix.ai/install | sudo sh -s -- --always-on`"
+
+    assert home =~
+             "`curl -fsSL https://fermix.ai/install | sudo sh -s -- --always-on --version X`"
+
+    assert service =~ "`--always-on`"
+
+    for text <- [home, service] do
+      refute text =~ ~r{fermix\.ai/always-on}
+    end
+  end
+
   # M75 L20: an Always On server keeps the bodies of its traces about a day,
   # said in one wording (`window/0`) wherever the docs give it, and the owner is
   # told plainly what lives on the server, for how long, and that its hosting

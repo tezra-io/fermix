@@ -136,9 +136,11 @@ will be part of a future release; nothing in this group is in a release yet.
 - **A server gets ready for Always On from one command.** On a Debian 12,
   Debian 13 or Ubuntu 24.04 server (arm64 or x86_64) running Linux 6.2 or
   later with Landlock enabled (Debian 13 and Ubuntu 24.04 do by default),
-  `curl -fsSL https://fermix.ai/always-on | sudo sh` asks for the enrollment
-  code without showing it, or cloud-init user data passes it in
-  `FERMIX_ENROLL_CODE`. It blocks the cloud's instance metadata addresses
+  the Linux installer's `curl -fsSL https://fermix.ai/install | sudo sh -s --
+  --always-on` checks the release's Always On server script against the
+  sha256 fermix.ai lists for it, as it checks a package, and runs it; the
+  script asks for the enrollment code without showing it, or cloud-init user
+  data passes it in `FERMIX_ENROLL_CODE`. It blocks the cloud's instance metadata addresses
   for every account but root, except DNS and time, which some clouds serve
   from the same address, gives a server with no swap 2 GB of it,
   installs Fermix and a `fermix` account to run it, enrolls the server with

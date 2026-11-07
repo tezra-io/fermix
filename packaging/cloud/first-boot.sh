@@ -6,7 +6,12 @@
 # whose kernel gives Landlock ABI 3 it asks for the code on the terminal,
 # without echo:
 #
-#   curl -fsSL https://fermix.ai/always-on | sudo sh
+#   curl -fsSL https://fermix.ai/install | sudo sh -s -- --always-on
+#
+# Every release publishes this script, byte for byte, as fermix_always_on.sh;
+# the regular installer's --always-on runs that copy once its sha256 matches
+# the one fermix.ai lists, with --version naming its release, and passes on
+# every other option.
 #
 # With --restore it takes no code and enrolls nothing: it prepares the same
 # server and prints the steps that restore a snapshot onto it. Either way the
@@ -186,7 +191,7 @@ landlock_abi() {
 }
 
 check_host() {
-  [ "$(id -u)" -eq 0 ] || fail "Run this as root: curl -fsSL https://fermix.ai/always-on | sudo sh"
+  [ "$(id -u)" -eq 0 ] || fail "Run this as root: curl -fsSL https://fermix.ai/install | sudo sh -s -- --always-on"
   [ -r /etc/os-release ] ||
     fail "This host has no /etc/os-release. Fermix Always On supports Debian 12, Debian 13 and Ubuntu 24.04."
   case "$(os_field ID) $(os_field VERSION_ID)" in

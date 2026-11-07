@@ -193,7 +193,8 @@ defmodule FermixCore.Management.AlwaysOnTest do
                "code" => @manual_code,
                "expires_at" => "2031-05-04T12:30:00Z",
                "command" =>
-                 "curl -fsSL https://fermix.ai/always-on | sudo sh -s -- --version " <> version,
+                 "curl -fsSL https://fermix.ai/install | sudo sh -s -- --always-on --version " <>
+                   version,
                "tailscale" => %{
                  # Review I2 (D12): the tag is declared before a key can carry it.
                  "sentence" =>
@@ -205,7 +206,7 @@ defmodule FermixCore.Management.AlwaysOnTest do
                      "pre-approved, and in the policy let only your own devices reach the " <>
                      "server.",
                  "command" =>
-                   "curl -fsSL https://fermix.ai/always-on | sudo sh -s -- --version " <>
+                   "curl -fsSL https://fermix.ai/install | sudo sh -s -- --always-on --version " <>
                      "#{version} --tailscale"
                }
              }

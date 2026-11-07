@@ -87,7 +87,11 @@ attaches the packages to the draft.
 **The installer, and the one job that runs after publishing.** `scripts/install.sh`
 is what `https://fermix.ai/install` serves. On Linux with apt, dnf or zypper it
 installs the package; everywhere else, and with `--standalone`, it installs the
-standalone binary. It trusts one document: the digest table fermix.ai serves at
+standalone binary. With `--always-on` it runs the release's Always On server
+script instead (`fermix_always_on.sh`, which every release from 0.19.0 on
+publishes and signs as a byte copy of `packaging/cloud/first-boot.sh`), with
+`--version` naming that release and every other argument passed on unread.
+It trusts one document: the digest table fermix.ai serves at
 `https://fermix.ai/install/releases`, which the site writes only after checking
 every file's cosign signature against the tag's release-workflow identity and
 hashing the file itself. The table is plain lines, read with awk:
@@ -98,14 +102,16 @@ latest <version>
 <version> <sha256> <file>
 ```
 
-with one row per installable file of every pinned release: the four standalone
-binaries (`fermix_<os>_<arch>`) and the four packages (`fermix_<version>_<amd64|arm64>.deb`,
-`fermix-<version>-1.<x86_64|aarch64>.rpm`). The installer builds the download
+with one row per file the installer fetches, of every pinned release: the four
+standalone binaries (`fermix_<os>_<arch>`), the four packages (`fermix_<version>_<amd64|arm64>.deb`,
+`fermix-<version>-1.<x86_64|aarch64>.rpm`) and the Always On server script
+(`fermix_always_on.sh`). The installer builds the download
 address itself (`https://github.com/tezra-io/fermix/releases/download/v<version>/<file>`),
 never reads GitHub's `releases.json`, `.sig` or `.pem`, and refuses before any
 download, `sudo` or package manager when the table cannot be fetched, its first
 line is not `format 1`, it names no `latest`, the release or this machine's file
-has no single row, or the download does not match it. `test_install_sh.py` holds
+(with `--always-on`, the server script) has no single row, or the download does
+not match it. `test_install_sh.py` holds
 those refusals, and runs the installer over the table `build_install_table.sh`
 really writes.
 
@@ -114,14 +120,16 @@ installs and Always On first boots and updates alike, until the site pins
 it (below). The installer downloads from the public release URLs, which a draft
 does not have, so `release.yml`'s `installer` job runs after `promote` against a
 table the rail builds itself: `scripts/release/build_install_table.sh` checks the
-eight installable files of the signed candidate with cosign against the tag and
-hashes them, and `scripts/release/verify_installer.sh` runs the repository's
+nine files the installer fetches from the signed candidate with cosign against
+the tag and hashes them, and `scripts/release/verify_installer.sh` runs the repository's
 installer with a `curl` stand-in that answers `https://fermix.ai/install/releases`
 from that table and passes every other address to the real curl. It requires
 that the installer chose the package, checked it against the table, left the
 package database and `fermix --version` naming the release, and changed nothing
 on a second run: the debs on the two Ubuntu runners through `sudo`, the rpms as
-root inside `fedora:41`. Nothing waits on that job. A red one means the
+root inside `fedora:41`. On the deb rows it then runs `--always-on` without
+`sudo`, which must check the published server script against the table and
+stop at the script's first refusal, that the account is not root. Nothing waits on that job. A red one means the
 installer is broken for a release that is already out: fix the installer and
 re-serve it, because the release itself cannot be replaced.
 
@@ -132,8 +140,8 @@ never edited in the site repository. The site's `/install` route answers by
 what asks: `curl`, `wget` and `sh` receive the script, and a browser is sent to
 the install page, so check the copy with `curl` and never by opening the address.
 Each release also needs its digests pinned: in the site checkout, with `cosign`
-on `PATH`, `node scripts/pin-engine-release.mjs vX.Y.Z` downloads the eight
-installable files with their `.sig` and `.pem` from the published release,
+on `PATH`, `node scripts/pin-engine-release.mjs vX.Y.Z` downloads the nine
+files the installer fetches with their `.sig` and `.pem` from the published release,
 verifies each against the tag's release-workflow identity, hashes it, and adds
 the rows to `src/config/engine-releases.txt`, moving `latest` only forward; any
 failure leaves the file unchanged. That file is what `/install/releases` serves.
@@ -152,7 +160,7 @@ curl -fsSL https://fermix.ai/install | cmp - scripts/install.sh
 curl -fsSL https://fermix.ai/install/releases | awk -v v=X.Y.Z '$0 == "latest " v || $1 == v'
 ```
 
-The second command must print `latest X.Y.Z` and eight rows; then walk the
+The second command must print `latest X.Y.Z` and nine rows; then walk the
 Linux package row of the install paths above against the served installer.
 
 **The order matters.** The installer refuses a release the table does not list,

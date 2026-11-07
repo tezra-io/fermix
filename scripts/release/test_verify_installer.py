@@ -16,7 +16,11 @@ SCRIPT = Path(__file__).with_name("verify_installer.sh")
 VERSION = "9.9.9"
 TABLE_URL = "https://fermix.ai/install/releases"
 PACKAGE_URL = f"https://github.com/tezra-io/fermix/releases/download/v{VERSION}/fermix_{VERSION}_amd64.deb"
-TABLE = f"format 1\nlatest {VERSION}\n{VERSION} {'a' * 64} fermix_{VERSION}_amd64.deb\n"
+SCRIPT_URL = f"https://github.com/tezra-io/fermix/releases/download/v{VERSION}/fermix_always_on.sh"
+TABLE = (
+    f"format 1\nlatest {VERSION}\n{VERSION} {'a' * 64} fermix_{VERSION}_amd64.deb\n"
+    f"{VERSION} {'b' * 64} fermix_always_on.sh\n"
+)
 
 # The real curl, as far as the check is concerned: it logs every call, so a
 # request for the table that reached it would show.
@@ -25,10 +29,17 @@ printf 'curl %s\\n' "$*" >> "$FAKE_LOG"
 """
 
 # Asks curl for the table and for a release file, the two things the real
-# installer fetches, then says what the test tells it to.
+# installer fetches, then says what the test tells it to: with --always-on the
+# file is the Always On server script, and the words and the exit are the
+# server script's run as far as the test says.
 FAKE_INSTALLER = f"""#!/bin/sh
 printf 'installer %s\\n' "$*" >> "$FAKE_LOG"
 curl -fsSL {TABLE_URL} -o "$FAKE_TABLE_COPY" || exit 90
+if [ "$1" = --always-on ]; then
+  curl -fsSL {SCRIPT_URL} -o /dev/null || exit 91
+  printf '%s\\n' "$FAKE_ALWAYS_ON_TRANSCRIPT"
+  exit "${{FAKE_ALWAYS_ON_EXIT:-1}}"
+fi
 curl -fsSL {PACKAGE_URL} -o /dev/null || exit 91
 printf '%s\\n' "$FAKE_TRANSCRIPT"
 exit "${{FAKE_INSTALLER_EXIT:-0}}"
@@ -47,6 +58,16 @@ printf 'docker %s\\n' "$*" >> "$FAKE_LOG"
 printf '%s\\n' "$FAKE_TRANSCRIPT"
 exit "${FAKE_DOCKER_EXIT:-0}"
 """
+
+
+def always_on_transcript(verified=True, refused=True):
+    """The installer's --always-on on an account that is not root."""
+    lines = [f"==> Fetching release digests from {TABLE_URL}..."]
+    if verified:
+        lines.append(f"==> Verified sha256 {'b' * 64} against {TABLE_URL} (fermix_always_on.sh, release {VERSION})")
+    if refused:
+        lines.append("fermix always-on: Run this as root: curl -fsSL https://fermix.ai/install | sudo sh -s -- --always-on")
+    return "\n".join(lines)
 
 
 def transcript(kind="deb", manager="apt", verified=True):
@@ -103,7 +124,7 @@ class VerifyInstallerTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             [call for call in self._calls() if call.startswith("installer")],
-            ["installer --no-setup", "installer --no-setup"],
+            ["installer --no-setup", "installer --no-setup", "installer --always-on"],
         )
 
     def test_the_installer_reads_the_rails_table_and_the_release_from_the_real_curl(self):
@@ -114,7 +135,45 @@ class VerifyInstallerTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.table_copy.read_text(encoding="utf-8"), TABLE)
         curls = [call for call in self._calls() if call.startswith("curl")]
-        self.assertEqual(curls, [f"curl -fsSL {PACKAGE_URL} -o /dev/null"] * 2)
+        self.assertEqual(
+            curls, [f"curl -fsSL {PACKAGE_URL} -o /dev/null"] * 2 + [f"curl -fsSL {SCRIPT_URL} -o /dev/null"]
+        )
+
+    # The release's Always On server script, run through --always-on as far
+    # as its first refusal: the runner's account is not root.
+    def test_a_deb_row_runs_always_on_as_far_as_the_server_scripts_first_refusal(self):
+        result = self._run(
+            "deb", transcript=transcript() + f"\nfermix {VERSION} is already installed"
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("fermix always-on: Run this as root", result.stdout)
+
+    def test_an_always_on_run_that_did_not_check_the_script_is_a_failure(self):
+        result = self._run(
+            "deb",
+            transcript=transcript() + f"\nfermix {VERSION} is already installed",
+            extra_env={"FAKE_ALWAYS_ON_TRANSCRIPT": always_on_transcript(verified=False)},
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(
+            f"did not check the Always On server script against the digest {TABLE_URL} lists for {VERSION}",
+            result.stderr,
+        )
+
+    def test_an_always_on_run_that_did_not_stop_at_the_root_refusal_is_a_failure(self):
+        for case, extra_env in (
+            ("another refusal", {"FAKE_ALWAYS_ON_TRANSCRIPT": always_on_transcript(refused=False)}),
+            ("no refusal", {"FAKE_ALWAYS_ON_EXIT": "0"}),
+        ):
+            with self.subTest(case=case):
+                result = self._run(
+                    "deb", transcript=transcript() + f"\nfermix {VERSION} is already installed", extra_env=extra_env
+                )
+
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("first refusal", result.stderr)
 
     def test_a_second_run_that_reinstalls_is_a_failure(self):
         result = self._run("deb", transcript=transcript())
@@ -244,6 +303,7 @@ class VerifyInstallerTest(unittest.TestCase):
             [kind, VERSION, str(self.table)],
             {
                 "FAKE_TRANSCRIPT": transcript,
+                "FAKE_ALWAYS_ON_TRANSCRIPT": always_on_transcript(),
                 "FAKE_INSTALLED_VERSION": installed,
                 "FAKE_ENGINE_VERSION": engine,
                 "FAKE_TABLE_COPY": str(self.table_copy),

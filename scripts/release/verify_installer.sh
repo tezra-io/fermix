@@ -16,8 +16,11 @@
 # (docs/RELEASING.md).
 #
 # The deb row installs on the runner itself, through sudo, the way a person's
-# machine does. The rpm row installs inside a Fedora container as root, with
-# the same stand-in in front of the container's own curl.
+# machine does, then runs the installer's --always-on as the runner's own
+# account: the release's Always On server script, checked against the table,
+# runs as far as its first refusal, that the account is not root. The rpm row
+# installs inside a Fedora container as root, with the same stand-in in front
+# of the container's own curl.
 
 set -euo pipefail
 
@@ -159,4 +162,21 @@ printf '%s\n' "$again"
 case "$again" in
   *"fermix $version is already installed"*) ;;
   *) fail "a second run did not recognise the installed $version" ;;
+esac
+
+# An Always On server's command, without the sudo it takes: the published
+# server script must be the one the table lists, and must stop at its first
+# refusal before it changes anything on the runner.
+if always_on="$(PATH="$work/bin:$PATH" sh "$installer" --always-on 2>&1)"; then
+  printf '%s\n' "$always_on"
+  fail "the Always On server script ran to its end on an account that is not root, instead of stopping at its first refusal"
+fi
+printf '%s\n' "$always_on"
+case "$always_on" in
+  *"==> Verified sha256 "*" against $table_url (fermix_always_on.sh, release $version)"*) ;;
+  *) fail "the installer did not check the Always On server script against the digest $table_url lists for $version" ;;
+esac
+case "$always_on" in
+  *"fermix always-on: Run this as root"*) ;;
+  *) fail "the Always On server script did not stop at its first refusal, that the account is not root" ;;
 esac

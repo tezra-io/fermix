@@ -5,8 +5,9 @@
 #   build_install_table.sh <candidate-root> <version>
 #
 # <candidate-root> is the signed release candidate as the rail downloads it:
-# burrito_out/ holds the four standalone binaries and linux_packages/ the four
-# packages, each with its .sig and .pem beside it. Every file is checked with
+# burrito_out/ holds the four standalone binaries, linux_packages/ the four
+# packages and always_on/ the Always On server script that the installer's
+# --always-on runs, each with its .sig and .pem beside it. Every file is checked with
 # cosign against the release workflow's identity for v<version> and then hashed
 # here, so a row is never copied from a sidecar or a manifest. The table is the
 # one the site's pin script writes (scripts/pin-engine-release.mjs in
@@ -42,7 +43,7 @@ command -v cosign >/dev/null 2>&1 || fail "cosign is required to verify the file
 identity="https://github.com/tezra-io/fermix/.github/workflows/release.yml@refs/tags/v${version}"
 issuer="https://token.actions.githubusercontent.com"
 
-# Every file scripts/install.sh can install, as the release workflow names it.
+# Every file scripts/install.sh can fetch, as the release workflow names it.
 files=(
   "burrito_out/fermix_linux_x86_64"
   "burrito_out/fermix_linux_aarch64"
@@ -52,6 +53,7 @@ files=(
   "linux_packages/fermix_${version}_arm64.deb"
   "linux_packages/fermix-${version}-1.x86_64.rpm"
   "linux_packages/fermix-${version}-1.aarch64.rpm"
+  "always_on/fermix_always_on.sh"
 )
 
 sha256() {

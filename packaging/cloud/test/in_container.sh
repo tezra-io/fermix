@@ -1,7 +1,8 @@
 #!/bin/sh
 # Runs inside a throwaway debian:trixie-slim container started by
 # first_boot_test.sh, with packaging/cloud mounted read-only at /cloud, the
-# package's systemd units at /linux-systemd, /run on a tmpfs and NET_ADMIN, so
+# package's systemd units at /linux-systemd, the regular installer
+# (scripts/install.sh) at /install.sh, /run on a tmpfs and NET_ADMIN, so
 # nft loads the real ruleset. useradd, runuser, nft and apt-config are real;
 # systemctl, loginctl, curl, apt-get, dpkg-query, perl, swapon, fallocate,
 # mkswap, tailscale and fermix are the stand-ins in stubs/ (in the chromium
@@ -13,7 +14,12 @@
 #                  the primary, then a re-run once it is the primary, the
 #                  same home given a code (refused) and a candidate whose
 #                  enrollment failed enrolling again; then the code in the
-#                  environment with a bucket and the release to install
+#                  environment with a bucket and the release to install; then
+#                  the same through the regular installer's --always-on, which
+#                  checks the release's server script (this first-boot.sh)
+#                  against a stand-in fermix.ai table first: a table that
+#                  disagrees and a code passed as an argument refused, then
+#                  the whole first boot with the table's latest release
 #   restore        --restore: no code, no enrollment, the steps printed, a
 #                  re-run once a home exists, a retired copy refused
 #   failures       each failure that stops the first boot: its exit status
@@ -45,6 +51,10 @@ set -eu
 
 SCENARIO=${1:?scenario: existing-host, restore, failures, ubuntu, updates, tailnet or chromium}
 FIRST_BOOT=/cloud/first-boot.sh
+INSTALLER=/install.sh
+# Where the installer's mktemp makes its directory, so a run can be seen to
+# leave nothing behind.
+INSTALLER_TMP=/tmp/installer-tmp
 LOG=/var/log/fermix-test
 FIXTURES=/etc/fermix-test
 OUT=/tmp/first-boot.out
@@ -519,6 +529,78 @@ EOF
   check "contains $OUT '==> Installing Fermix 1.2.3, the release your computer runs, with https://fermix.ai/install'" \
     "and it names the release it installs"
   cmp -s "$LOG/calls.log" /tmp/calls.expected || diff /tmp/calls.expected "$LOG/calls.log" | sed 's/^/    /' || true
+  # What through_the_installer expects the same run to do after its downloads.
+  cp "$LOG/calls.log" /tmp/calls.direct
+}
+
+# Serves release $1 as fermix.ai and GitHub would for the curl stand-in: a
+# table whose latest is $1 and whose one row lists the sha256 of $3 (of $2
+# unless given) as its Always On server script, and $2 as that script.
+serve_release() {
+  listed=${3:-$2}
+  printf 'format 1\nlatest %s\n%s %s fermix_always_on.sh\n' "$1" "$1" "$(sha256sum "$listed" | cut -d' ' -f1)" \
+    >"$FIXTURES/releases"
+  install -D -m 0644 "$2" "$FIXTURES/release/v$1/fermix_always_on.sh"
+}
+
+# Runs the regular installer with --always-on as run_apart runs first-boot.sh.
+run_installer() {
+  rm -rf "$INSTALLER_TMP"
+  mkdir -p "$INSTALLER_TMP"
+  run_apart env TMPDIR="$INSTALLER_TMP" "$@"
+}
+
+# The installer refused, or the script it ran refused, with $2 on stderr,
+# before anything was installed: only the table and the script were
+# fetched, no code was written and none was echoed, and no download or work
+# directory is left.
+installer_refused() {
+  printf 'curl GET https://fermix.ai/install/releases\ncurl GET %s\n' \
+    "https://github.com/tezra-io/fermix/releases/download/v1.2.3/fermix_always_on.sh" >/tmp/calls.expected
+  if [ "$STATUS" -ne 0 ] && contains "$ERR" "$2" && cmp -s "$LOG/calls.log" /tmp/calls.expected &&
+    [ ! -e /run/fermix/enroll.code ] && ! grep -qF -- "$CODE_BODY" "$OUT" "$ERR" &&
+    [ -z "$(find "$INSTALLER_TMP" -mindepth 1)" ] && [ -z "$(find /run -maxdepth 1 -name 'fermix-always-on.*')" ]; then
+    pass "$1"
+  else
+    fail "$1 (exit $STATUS)"
+    sed 's/^/    /' "$OUT" "$ERR" "$LOG/calls.log"
+  fi
+}
+
+# Always On's command for the server: the regular installer with
+# --always-on, which runs this first-boot.sh as the release's server script
+# once its sha256 matches the table, handing it the table's latest release.
+through_the_installer() {
+  fresh_host
+  serve_release 1.2.3 "$FIRST_BOOT" /cloud/README.md
+  run_installer env FERMIX_ENROLL_CODE="$CODE" sh "$INSTALLER" --always-on
+  installer_refused "the installer refuses a server script the table does not list, before running it" \
+    "sha256 mismatch: expected"
+
+  serve_release 1.2.3 "$FIRST_BOOT"
+  run_installer env FERMIX_ENROLL_CODE="$CODE" sh "$INSTALLER" --always-on "$CODE"
+  installer_refused "a code passed to the installer as an argument reaches the server script, which refuses it unechoed" \
+    "An option was not recognised. This script takes --restore, --snapshot-bucket, --snapshot-region, --version and --tailscale."
+
+  # The last run of existing_host, the code in the environment and the
+  # bucket on the command line, through the installer: the same steps after
+  # the two downloads, the release coming from the table.
+  run_installer env FERMIX_ENROLL_CODE="$CODE" sh "$INSTALLER" --always-on \
+    --snapshot-bucket fermix-snapshots-invented --snapshot-region eu-west-1
+  check "[ $STATUS -eq 0 ]" "a host enrolls through the installer's --always-on (exit $STATUS)"
+  [ "$STATUS" -eq 0 ] || sed 's/^/    /' "$OUT" "$ERR"
+  code_absent_everywhere
+  check "! grep -qF -- \"\$CODE_BODY\" $ERR" "and the code appears in nothing it wrote to stderr"
+  sha=$(sha256sum "$FIRST_BOOT" | cut -d' ' -f1)
+  check "contains $OUT '==> Verified sha256 $sha against https://fermix.ai/install/releases (fermix_always_on.sh, release 1.2.3)'" \
+    "it checks the server script against the table before running it"
+  check "[ \"\$(sed -n 1p $LOG/calls.log)\" = 'curl GET https://fermix.ai/install/releases' ] && [ \"\$(sed -n 2p $LOG/calls.log)\" = 'curl GET https://github.com/tezra-io/fermix/releases/download/v1.2.3/fermix_always_on.sh' ]" \
+    "it fetches the table, then the release's server script"
+  tail -n +3 "$LOG/calls.log" >/tmp/calls.seen
+  check "cmp -s /tmp/calls.seen /tmp/calls.direct" \
+    "then the first boot runs the same steps, installing the table's latest release, 1.2.3"
+  cmp -s /tmp/calls.seen /tmp/calls.direct || diff /tmp/calls.direct /tmp/calls.seen | sed 's/^/    /' || true
+  check "[ -z \"\$(find $INSTALLER_TMP -mindepth 1)\" ]" "and the installer leaves no download behind"
 }
 
 expected_restore_steps() {
@@ -1068,7 +1150,7 @@ dash -n "$FIRST_BOOT"
 pass "dash parses first-boot.sh"
 mkdir -p "$FIXTURES"
 case "$SCENARIO" in
-  existing-host) setup_tools; existing_host ;;
+  existing-host) setup_tools; existing_host; through_the_installer ;;
   restore) setup_tools; restore ;;
   failures) setup_tools; failures ;;
   ubuntu) setup_tools; ubuntu ;;

@@ -7,10 +7,16 @@
 # standalone binary instead, in /usr/local/bin (with sudo) or ~/.local/bin (no
 # sudo) depending on what's writable. Either way the download must match the
 # sha256 that fermix.ai lists for it, and `fermix setup` runs at the end unless
-# told not to. --version X installs release X instead, under the same check:
-# an Always On server runs exactly its desktop's release (its first boot and
-# its updates, every five minutes and nightly, ask for it), and a package of
-# X already installed is left as it is.
+# told not to. --version X installs release X instead, under the same check,
+# and a package of X already installed is left as it is.
+#
+# --always-on sets a Linux server up as an owner's Always On server instead:
+# it fetches the release's Always On server script (the copy of
+# packaging/cloud/first-boot.sh every release publishes as
+# fermix_always_on.sh), checks it as it checks a package, and runs it with
+# --version naming that release, every other argument passed on unread. The
+# server then runs exactly its desktop's release: its first boot and its
+# updates, every five minutes and nightly, ask this installer for it.
 #
 # Where the trust comes from. The files are downloaded from the project's
 # GitHub release, but their digests are not: they are read from the table at
@@ -20,12 +26,14 @@
 # channel can replace a file, its signature and GitHub's own manifest
 # together; it cannot change the digest this script compares with. So there
 # is no cosign to find and no check to skip: a file the table does not list,
-# or one that does not match it, is refused before anything runs as root.
+# or one that does not match it, the Always On server script included, is
+# refused before anything runs as root.
 #
 #   curl -fsSL https://fermix.ai/install | sh
 #   curl -fsSL https://fermix.ai/install | sh -s -- --no-setup
 #   curl -fsSL https://fermix.ai/install | sh -s -- --standalone --prefix /opt/fermix/bin
 #   curl -fsSL https://fermix.ai/install | sh -s -- --version 0.17.0
+#   curl -fsSL https://fermix.ai/install | sudo sh -s -- --always-on --version 0.19.0
 #
 # Hard-fails on any unsupported (os, arch) pair, missing tooling, a digest
 # table it cannot read or that lists no row for this machine's file, or a
@@ -42,11 +50,17 @@ VERSION_GIVEN=0
 RUN_SETUP=1
 PREFIX=""
 STANDALONE=0
+ALWAYS_ON=0
+# The option still waiting for its value while the arguments are read.
+VALUE_FOR=""
 
 # Where the package puts the engine.
 PACKAGE_BINARY="/usr/bin/fermix"
 MIGRATE_URL="https://fermix.ai/docs/linux-packages#move-from-a-standalone-install"
 VERIFY_URL="https://fermix.ai/docs/linux-packages#download-and-verify"
+# The release's Always On server script, a byte copy of
+# packaging/cloud/first-boot.sh that every release publishes and signs.
+ALWAYS_ON_FILE="fermix_always_on.sh"
 
 # Every artifact is downloaded from ${ARTIFACT_ORIGIN}v<version>/<file>, the
 # base that @artifact_origin in apps/fermix_core/lib/fermix/cli/upgrade/manifest.ex
@@ -58,6 +72,7 @@ ARTIFACT_ORIGIN="https://github.com/${REPO}/releases/download/"
 usage() {
   cat <<USAGE
 Usage: install.sh [--standalone] [--prefix DIR] [--version X] [--no-setup]
+       install.sh --always-on [--version X] [SERVER OPTIONS]
 
 On Linux with apt, dnf or zypper this installs the fermix .deb or .rpm package.
 Everywhere else, and with --standalone, it installs the standalone binary.
@@ -68,20 +83,43 @@ Options:
                  (default: /usr/local/bin if writable or sudo, else ~/.local/bin)
   --version X    Install release X (such as 0.17.0) instead of the latest
   --no-setup     Skip 'fermix setup' at the end
+  --always-on    Set this server up for Always On with release X's own server
+                 script, run as root; SERVER OPTIONS are that script's
   --help, -h     Show this message
 USAGE
 }
 
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --prefix) PREFIX="${2:?--prefix requires a value}"; shift 2 ;;
-    --no-setup) RUN_SETUP=0; shift ;;
-    --standalone) STANDALONE=1; shift ;;
-    --version) VERSION_GIVEN=1; VERSION="${2-}"; shift; [ $# -eq 0 ] || shift ;;
+# Each argument is shifted off as it is read, and one this installer does not
+# own goes back on the end, so "$@" holds only those once the loop is done.
+# They are the Always On server script's to read: they are never echoed with
+# --always-on, since one may be an enrollment code pasted in the wrong place.
+for argument do
+  shift
+  case "$VALUE_FOR" in
+    --prefix) PREFIX="${argument:?--prefix requires a value}"; VALUE_FOR=""; continue ;;
+    --version) VERSION="$argument"; VALUE_FOR=""; continue ;;
+  esac
+  case "$argument" in
+    --prefix) VALUE_FOR=--prefix ;;
+    --no-setup) RUN_SETUP=0 ;;
+    --standalone) STANDALONE=1 ;;
+    --version) VERSION_GIVEN=1; VALUE_FOR=--version ;;
+    --always-on) ALWAYS_ON=1 ;;
     --help|-h) usage; exit 0 ;;
-    *) echo "install.sh: unknown argument: $1" >&2; usage; exit 2 ;;
+    *) set -- "$@" "$argument" ;;
   esac
 done
+
+if [ "$VALUE_FOR" = --prefix ]; then
+  printf 'install.sh: --prefix requires a value\n' >&2
+  exit 2
+fi
+
+if [ "$ALWAYS_ON" -eq 0 ] && [ $# -gt 0 ]; then
+  echo "install.sh: unknown argument: $1" >&2
+  usage
+  exit 2
+fi
 
 abort() {
   printf 'install.sh: %s\n' "$*" >&2
@@ -103,6 +141,11 @@ release_version() {
 if [ "$VERSION_GIVEN" -eq 1 ] && ! release_version "$VERSION"; then
   printf 'install.sh: --version takes a release, such as 0.17.0\n' >&2
   usage >&2
+  exit 2
+fi
+
+if [ "$ALWAYS_ON" -eq 1 ] && { [ "$STANDALONE" -eq 1 ] || [ -n "$PREFIX" ] || [ "$RUN_SETUP" -eq 0 ]; }; then
+  printf "install.sh: --always-on runs the release's Always On server script, which installs Fermix itself, so it takes none of --standalone, --prefix and --no-setup.\n" >&2
   exit 2
 fi
 
@@ -317,6 +360,71 @@ setup_did_not_finish() {
   abort "fermix is installed, but 'fermix setup' did not finish. Run it again when you are ready: fermix setup"
 }
 
+# Fetches the digest table into a directory of this run's own, removed on
+# exit, and settles VERSION: the release --version named, or the table's
+# latest, which the table must list.
+read_table() {
+  TMPDIR="$(mktemp -d)"
+  trap 'rm -rf "$TMPDIR"' EXIT
+
+  printf '==> Fetching release digests from %s...\n' "$DIGESTS_URL"
+  curl -fsSL "$DIGESTS_URL" -o "$TMPDIR/releases" ||
+    abort "could not fetch the release digests from $DIGESTS_URL, so nothing was installed. Check this machine's connection to fermix.ai and run the installer again."
+
+  [ "$(table_format)" = "format 1" ] ||
+    abort "$DIGESTS_URL is not in a format this installer reads (its first line is '$(table_format)'), so nothing was installed. Fetch the installer again from https://fermix.ai/install."
+
+  LATEST_VERSION="$(table_latest)"
+  release_version "$LATEST_VERSION" ||
+    abort "$DIGESTS_URL names no latest release, so nothing was installed."
+
+  [ "$VERSION_GIVEN" -eq 1 ] || VERSION="$LATEST_VERSION"
+
+  table_lists_release "$VERSION" ||
+    abort "$DIGESTS_URL lists no release $VERSION, so nothing was installed. A release is listed once its signatures have been verified; to check one by hand, see $VERIFY_URL"
+}
+
+# Downloads file $1 of the release into $2 and refuses it unless its sha256 is
+# $3, the digest the table lists for it.
+download_checked() {
+  printf '==> Downloading %s...\n' "$1"
+  curl -fsSL "${ARTIFACT_ORIGIN}v${VERSION}/$1" -o "$2"
+
+  actual_sha="$(sha256 "$2")"
+  if [ "$actual_sha" != "$3" ]; then
+    abort "sha256 mismatch: expected $3, got $actual_sha. The download is not the file $DIGESTS_URL lists for release $VERSION, so nothing was installed."
+  fi
+  printf '==> Verified sha256 %s against %s (%s, release %s)\n' "$actual_sha" "$DIGESTS_URL" "$1" "$VERSION"
+}
+
+# --always-on: the release's Always On server script, checked as a package is,
+# runs with that release named first and then every argument this installer
+# does not own, unchanged, and the installer ends with its exit status. The
+# host checks (root, the system, the architecture, Landlock) are the script's
+# alone. Its input is /dev/null, as a package manager's is, because under
+# `curl | sh` standard input is the rest of this script; it asks for the
+# enrollment code and the Tailscale auth key on the terminal itself, and
+# inherits them from the environment (FERMIX_ENROLL_CODE, TS_AUTHKEY) under
+# cloud-init. An interrupt waits for the script to stop, then removes the
+# download with the rest of this run's directory.
+run_always_on() {
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  read_table
+
+  script_sha="$(table_digest "$VERSION" "$ALWAYS_ON_FILE")"
+  sha256_hex "$script_sha" ||
+    abort "$DIGESTS_URL lists no Always On server script for release $VERSION, so nothing was run."
+  download_checked "$ALWAYS_ON_FILE" "$TMPDIR/$ALWAYS_ON_FILE" "$script_sha"
+
+  printf '==> Running the Always On server script of release %s\n' "$VERSION"
+  status=0
+  sh "$TMPDIR/$ALWAYS_ON_FILE" --version "$VERSION" "$@" </dev/null || status=$?
+  exit "$status"
+}
+
+[ "$ALWAYS_ON" -eq 0 ] || run_always_on "$@"
+
 OS="$(detect_os)"
 ARCH="$(detect_arch)"
 TARGET="${OS}-${ARCH}"
@@ -342,27 +450,9 @@ else
   fi
 fi
 
-TMPDIR="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR"' EXIT
-
-printf '==> Fetching release digests from %s...\n' "$DIGESTS_URL"
-curl -fsSL "$DIGESTS_URL" -o "$TMPDIR/releases" ||
-  abort "could not fetch the release digests from $DIGESTS_URL, so nothing was installed. Check this machine's connection to fermix.ai and run the installer again."
-
-[ "$(table_format)" = "format 1" ] ||
-  abort "$DIGESTS_URL is not in a format this installer reads (its first line is '$(table_format)'), so nothing was installed. Fetch the installer again from https://fermix.ai/install."
-
-LATEST_VERSION="$(table_latest)"
-release_version "$LATEST_VERSION" ||
-  abort "$DIGESTS_URL names no latest release, so nothing was installed."
-
-[ "$VERSION_GIVEN" -eq 1 ] || VERSION="$LATEST_VERSION"
-
-table_lists_release "$VERSION" ||
-  abort "$DIGESTS_URL lists no release $VERSION, so nothing was installed. A release is listed once its signatures have been verified; to check one by hand, see $VERIFY_URL"
+read_table
 
 ARTIFACT_FILE="$(artifact_file)"
-ARTIFACT_URL="${ARTIFACT_ORIGIN}v${VERSION}/${ARTIFACT_FILE}"
 ARTIFACT_SHA="$(table_digest "$VERSION" "$ARTIFACT_FILE")"
 
 if ! sha256_hex "$ARTIFACT_SHA"; then
@@ -384,14 +474,7 @@ if [ -n "$PACKAGE_MANAGER" ]; then
   fi
 fi
 
-printf '==> Downloading %s...\n' "$ARTIFACT_FILE"
-curl -fsSL "$ARTIFACT_URL" -o "$TMPDIR/$ARTIFACT_NAME"
-
-ACTUAL_SHA="$(sha256 "$TMPDIR/$ARTIFACT_NAME")"
-if [ "$ACTUAL_SHA" != "$ARTIFACT_SHA" ]; then
-  abort "sha256 mismatch: expected $ARTIFACT_SHA, got $ACTUAL_SHA. The download is not the file $DIGESTS_URL lists for release $VERSION, so nothing was installed."
-fi
-printf '==> Verified sha256 %s against %s (%s, release %s)\n' "$ACTUAL_SHA" "$DIGESTS_URL" "$ARTIFACT_FILE" "$VERSION"
+download_checked "$ARTIFACT_FILE" "$TMPDIR/$ARTIFACT_NAME" "$ARTIFACT_SHA"
 
 if [ -n "$PACKAGE_MANAGER" ]; then
   # apt reads a local package as its own unprivileged user, which cannot enter

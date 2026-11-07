@@ -112,7 +112,7 @@ defmodule FermixCore.Management.Copy do
   ]
   @line_keys Keyword.keys(@line_labels) ++ [:backup, :copies, :backup_here]
   @docs_url "https://fermix.ai/docs/always-on/"
-  @own_server_command "curl -fsSL https://fermix.ai/always-on | sudo sh -s -- --version "
+  @own_server_command "curl -fsSL https://fermix.ai/install | sudo sh -s -- --always-on --version "
   # What the server's first boot takes (`packaging/cloud/first-boot.sh`'s
   # `check_host`): its systems, its architectures as an owner picks them in a
   # provider's console, and the kernel its Landlock ABI 3 needs. Names the
@@ -683,11 +683,13 @@ defmodule FermixCore.Management.Copy do
 
   @doc """
   The command an owner runs on a Linux server of their own to install Fermix
-  there: it carries no code, which the server's first boot asks for on the
-  terminal without echo, so the code never lands in its shell history, and
-  it names the release this computer runs, which the server installs (a
-  server runs exactly its desktop's Fermix, so the home can move back):
-  `version`, this engine's own unless given.
+  there: the regular installer with `--always-on`, which runs that
+  release's own server script (`packaging/cloud/first-boot.sh`) once its
+  digest matches fermix.ai's. It carries no code, which the server's first
+  boot asks for on the terminal without echo, so the code never lands in its
+  shell history, and it names the release this computer runs, which the
+  server installs (a server runs exactly its desktop's Fermix, so the home
+  can move back): `version`, this engine's own unless given.
   """
   @spec own_server_command(String.t()) :: String.t()
   def own_server_command(version \\ BuildInfo.product_version()) when is_binary(version),
