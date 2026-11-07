@@ -6,6 +6,7 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Memory.Repo
   alias FermixCore.Prompt.CurrentDate
+  alias FermixCore.Realtime.CallLease
   alias FermixCore.Realtime.CallRegistry
   alias FermixCore.Realtime.CallSpeech
   alias FermixCore.Realtime.CallSweep
@@ -16,6 +17,7 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
   alias FermixCore.Realtime.LiveTranscript
   alias FermixCore.Realtime.OpenAILiveClient
   alias FermixCore.Realtime.SessionControl
+  alias FermixCore.Realtime.SessionServer
 
   @moduletag :capture_log
 
@@ -25,6 +27,7 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
   # This module's own registry, started fresh for every test: the daemon's is
   # under the realtime supervisor, which the suite never starts.
   @call_registry Module.concat(__MODULE__, CallRegistry)
+  @call_lease Module.concat(__MODULE__, CallLease)
 
   defmodule FakeLiveClient do
     @moduledoc """
@@ -296,6 +299,7 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
     {:ok, _bridge} = FakeBridge.start(self())
     on_exit(&FakeBridge.stop/0)
     start_supervised!(%{id: :fake_live_client, start: {FakeLiveClient, :start_agent, [self()]}})
+    start_supervised!({CallLease, name: @call_lease})
     start_supervised!({CallRegistry, name: @call_registry})
     clock = start_supervised!({Agent, fn -> 0 end}, id: :live_clock)
     %{clock: clock}
@@ -811,7 +815,7 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
       :ok = SessionControl.call_start(first)
       start_provider_session(first)
 
-      assert {:error, :call_in_progress} =
+      assert {:error, {:call_in_progress, "desktop"}} =
                LiveSessionServer.start_link(session_opts(clock: clock))
 
       # The refused start touched nothing of the call that is up.
@@ -832,7 +836,7 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
       # `session.closed`, which the provider has not sent.
       assert_receive {:realtime, %{type: "state", state: "idle"}}
 
-      assert {:error, :call_in_progress} =
+      assert {:error, {:call_in_progress, "desktop"}} =
                LiveSessionServer.start_link(session_opts(clock: clock))
 
       send(first, {:openai_live_event, {:session_closed, "close_requested", 10.0}})
@@ -841,6 +845,42 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
 
       second = start_session(clock: clock)
       assert {:ok, %{session: ^second}} = CallRegistry.active(@call_registry)
+    end
+
+    # The lease covers every engine: an OpenAI Realtime call from another
+    # endpoint is refused while this Live call settles, before its session
+    # exists, and the refusal says where the call is.
+    test "a Realtime session is refused while a Live call settles, naming its endpoint", %{
+      clock: clock
+    } do
+      Process.flag(:trap_exit, true)
+
+      first =
+        start_session(
+          clock: clock,
+          close_deadline_ms: 5_000,
+          endpoint: {:accessory, "desk-robot"}
+        )
+
+      :ok = SessionControl.call_start(first)
+      start_provider_session(first)
+      FakeLiveClient.silence_close()
+      stopper = Task.async(fn -> SessionControl.call_stop(first) end)
+      assert_receive {:realtime, %{type: "state", state: "idle"}}
+
+      assert {:error, {:call_in_progress, "accessory:desk-robot"}} =
+               SessionServer.start_link(realtime_session_opts())
+
+      send(first, {:openai_live_event, {:session_closed, "close_requested", 10.0}})
+      assert :ok = Task.await(stopper)
+      assert_receive {:EXIT, ^first, {:shutdown, :call_stop}}
+
+      assert {:ok, realtime} = SessionServer.start_link(realtime_session_opts())
+
+      assert {:ok, %{endpoint: "desktop", engine: "openai_realtime"}} =
+               CallLease.holder(@call_lease)
+
+      GenServer.stop(realtime)
     end
   end
 
@@ -2878,11 +2918,26 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
     assert_receive {:EXIT, ^session, {:shutdown, :call_stop}}
   end
 
+  # An OpenAI Realtime session on this suite's lease, for the one-call rule
+  # across engines.
+  defp realtime_session_opts do
+    [
+      companion: self(),
+      endpoint: :desktop,
+      call_lease: @call_lease,
+      config: Config.normalize(enabled: true),
+      capabilities: [],
+      prompt_loader: fn _opts -> {:ok, %{messages: [], parts: [], accounting: []}} end
+    ]
+  end
+
   defp session_opts(opts) do
     config = Keyword.get(opts, :config) || live_config()
 
     defaults = [
       companion: self(),
+      endpoint: :desktop,
+      call_lease: @call_lease,
       config: config,
       api_key: "sk-test",
       device_id: "device-1",

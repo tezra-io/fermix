@@ -11,6 +11,7 @@ defmodule FermixCore.Realtime.ProtocolContractTest do
   use ExUnit.Case, async: true
 
   alias FermixCore.Realtime.Config
+  alias FermixCore.Realtime.Endpoint
   alias FermixCore.Realtime.LiveFrames
   alias FermixCore.Realtime.Protocol
 
@@ -171,7 +172,14 @@ defmodule FermixCore.Realtime.ProtocolContractTest do
       |> fixture_lines()
       |> Enum.map(&Jason.decode!/1)
 
-    assert %{"type" => "error", "reason" => reason} in golden
+    # The refusal names the endpoint holding the call, in the form the lease
+    # and the daemon's `Endpoint` speak.
+    assert %{"held_by" => held_by} =
+             Enum.find(golden, &(&1["type"] == "error" and &1["reason"] == reason))
+
+    assert {:ok, _endpoint} = Endpoint.parse(held_by)
+    refute "held_by" in schema["$defs"]["error"]["required"]
+    assert schema["$defs"]["error"]["properties"]["held_by"]["type"] == "string"
   end
 
   test "the golden Live frames carry the call UUID" do

@@ -547,6 +547,11 @@ will be part of a future release; nothing in this group is in a release yet.
 
 ### Changed
 
+- **One voice call at a time, on every voice model.** A second call now
+  waits for the first whichever model runs it: OpenAI Realtime too, not
+  only GPT-Live and Grok, so two calls can no longer bill side by side.
+  The refusal says where the call in progress is. A call that has just
+  ended holds its place for the second or so it takes to close.
 - **A mandate's proposal is a short card too.** It names the tool and the
   watcher, quotes the item, says why it passed, and shows each argument on its
   own line, with every argument whole and the whole item behind Details, in

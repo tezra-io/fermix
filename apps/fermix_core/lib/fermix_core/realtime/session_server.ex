@@ -16,9 +16,11 @@ defmodule FermixCore.Realtime.SessionServer do
   alias FermixCore.ComputerUse.SessionManager, as: ComputerUseSessionManager
   alias FermixCore.Memory.Config, as: MemoryConfig
   alias FermixCore.Providers.Telemetry, as: ProviderTelemetry
+  alias FermixCore.Realtime.CallLease
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.ConversationRecorder
   alias FermixCore.Realtime.CostTracker
+  alias FermixCore.Realtime.Endpoint
   alias FermixCore.Realtime.OpenAIClient
   alias FermixCore.Realtime.ScreenFeed
   alias FermixCore.Realtime.ScreenShare
@@ -117,6 +119,19 @@ defmodule FermixCore.Realtime.SessionServer do
     Process.flag(:trap_exit, true)
 
     config = Keyword.get_lazy(opts, :config, &Config.current/0)
+    endpoint = Keyword.fetch!(opts, :endpoint)
+
+    # The home's one owner-voice call (`CallLease`), taken before this session
+    # exists to its caller: a second `call_start` from any endpoint is refused
+    # before it can open a billed provider socket. Held until this process
+    # exits.
+    case CallLease.acquire(Keyword.get(opts, :call_lease, CallLease), endpoint, config.engine) do
+      :ok -> init_call(opts, config, endpoint)
+      {:error, reason} -> {:stop, reason}
+    end
+  end
+
+  defp init_call(opts, config, endpoint) do
     capability_registry = Keyword.get(opts, :capability_registry, CapabilityRegistry)
     skill_registry = Keyword.get(opts, :skill_registry, SkillRegistry)
     device_id = Keyword.get(opts, :device_id, "unknown")
@@ -156,6 +171,9 @@ defmodule FermixCore.Realtime.SessionServer do
            # teardown/reconnect can shut in-flight tools down. Concurrent-safe.
            pending_tool_calls: %{},
            config: config,
+           # Who the call is for: decides, with the owner's setting, whether
+           # `screen_share` is offered (`Endpoint.screen_share?/1`).
+           endpoint: endpoint,
            device_id: device_id,
            session_scope: session_scope,
            openai_client: Keyword.get(opts, :openai_client, OpenAIClient),
@@ -598,9 +616,16 @@ defmodule FermixCore.Realtime.SessionServer do
       # anything while this provider session is live, so the session advertises it
       # (and executes it) itself, leaving `ToolBridge` a pure capability bridge.
       advertised = Advertisement.prepare(state.capabilities, state.tool_context)
-      tools = ToolBridge.to_openai_tools(advertised) ++ ScreenShare.tools(state.config)
+      tools = ToolBridge.to_openai_tools(advertised) ++ screen_share_tools(state)
       {:ok, OpenAIClient.session_update_event(state.config, instructions, tools)}
     end
+  end
+
+  # Offered only where the endpoint's policy and the owner's setting both allow
+  # it: the shared screen is the Mac's, so an accessory's call never sees the
+  # verb, and the setting itself is left as the owner saved it.
+  defp screen_share_tools(state) do
+    if Endpoint.screen_share?(state.endpoint), do: ScreenShare.tools(state.config), else: []
   end
 
   defp refresh_runtime(state) do
@@ -1084,7 +1109,8 @@ defmodule FermixCore.Realtime.SessionServer do
   end
 
   defp start_screen_share(call, display, state) do
-    with :ok <-
+    with :ok <- screen_share_endpoint(state.endpoint),
+         :ok <-
            ScreenShare.gate(state.config, screen_share_origin(state), probe: state.screen_probe),
          {:ok, state} <- open_screen_feed(state, display) do
       answer_tool_ok(
@@ -1095,6 +1121,12 @@ defmodule FermixCore.Realtime.SessionServer do
     else
       {:error, reason} -> {answer_tool_error(call, reason, state), {:error, reason}}
     end
+  end
+
+  # The verb is never advertised off the desktop; a call for it anyway is
+  # refused here, before the setting or the sidecar are asked.
+  defp screen_share_endpoint(endpoint) do
+    if Endpoint.screen_share?(endpoint), do: :ok, else: {:error, :screen_share_desktop_only}
   end
 
   defp stop_screen_share(call, %{screen_feed: pid} = state) when is_pid(pid) do

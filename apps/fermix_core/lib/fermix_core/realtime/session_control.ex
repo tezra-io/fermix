@@ -6,17 +6,17 @@ defmodule FermixCore.Realtime.SessionControl do
   (Grok) are different processes with different provider wires, but the
   listener, the session supervisor and the chat drive them all through exactly
   the messages below. Keeping the client side in one module is what lets
-  `LocalVoiceSocket` stay engine-agnostic: it holds `session_module:
-  SessionControl` and never branches on the engine except where the WIRE differs
-  (each engine's minimum protocol version, `task_cancel` and
-  `playback_progress`).
+  `CallClient` stay engine-agnostic: it holds `session_module: SessionControl`
+  and never branches on the engine except where the WIRE differs (each engine's
+  minimum protocol version, `task_cancel` and `playback_progress`).
 
   Every engine handles the call verbs (`call_start` through `reload_runtime`).
   The task engines, Live and Grok, which hand every task to the Fermix agent,
   also handle `cancel_task` and the chat's verbs (`chat_typed`, `chat_answered`,
   `call_context`); only Grok handles `playback_progress`. A caller that could
-  reach the wrong engine is refused before it sends: the listener by engine,
-  the chat through `CallRegistry`, which only a task-engine call claims.
+  reach the wrong engine is refused before it sends: a connection by engine
+  (`CallClient`), the chat through `CallRegistry`, which only a task-engine
+  call claims.
   `SessionServer`'s own public functions already send exactly these, so it
   needs no change; a new engine is written against this list.
 
@@ -87,9 +87,9 @@ defmodule FermixCore.Realtime.SessionControl do
   @doc """
   Cancels one backend delegation.
 
-  Only the task engines have delegations; the LISTENER refuses `task_cancel` on
-  a Realtime connection before any session call, so `SessionServer` never sees
-  it.
+  Only the task engines have delegations; `CallClient` refuses `task_cancel`
+  on a Realtime connection before any session call, so `SessionServer` never
+  sees it.
   """
   @spec cancel_task(GenServer.server(), String.t()) :: :ok | {:error, term()}
   def cancel_task(server, delegation_id)
@@ -98,11 +98,11 @@ defmodule FermixCore.Realtime.SessionControl do
 
   @doc """
   What the companion has played of one stretch of assistant audio (v3, Grok
-  only; the listener refuses it under the other engines). `played_ms` is that
+  only; `CallClient` refuses it under the other engines). `played_ms` is that
   playback's rendered milliseconds so far, `drained?` whether all of it sent so
   far has played. The session answers `{:error, reason}` for an id it never
   sent, an offset that went backwards or one beyond the audio sent, and the
-  listener closes the connection on it.
+  connection closes on it.
   """
   @spec playback_progress(GenServer.server(), String.t(), non_neg_integer(), boolean()) ::
           :ok | {:error, term()}

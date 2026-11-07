@@ -207,7 +207,7 @@ words heard during a reply, or for 2 s after it, as the operator's turn.
 | `assistant_text_done` | `text` | Realtime only. The reply's whole text, once its words are done. It follows the reply's deltas and is never itself a delta. |
 | `tool_event` | `status`, `reason?` | A tool call's lifecycle. |
 | `usage` | token/cost fields | Per-turn usage. The task engines add `call_uuid`, `status: "live"`, `voice_seconds`, `voice_cost_cents` (3 decimals), `backend_turns`, `backend_cost: "unknown"` and `accounting` (`complete` \| `incomplete` \| `running`). Grok adds `voice_text_items`, the text items the call sent the voice provider, each billed as a text event; SpaceXAI reports no settled usage, so a Grok call's final `accounting` is always `incomplete`. Unknown is not zero: a backend on a subscription allowance reports `unknown`, never `0`. |
-| `error` | `reason`, plus context fields | A failure; the daemon closes the connection after most errors. `reason: "call_in_progress"` refuses a `call_start` while another task-engine call is up (see *One call at a time*). On a Grok call, `unknown_playback`, `playback_regressed` and `playback_beyond_sent` refuse a `playback_progress`, and `playback_stalled`, `playback_overflow` and `call_ids_exhausted` end one (see *Playback feedback*). Optional `kind` (`update_required` \| `provider_refused` \| `cost_limit` \| `session_expired` \| `close_timeout` \| `bridge_unavailable` \| `max_session_duration` \| `provider_disconnected`) is the typed failure, and optional `detail` carries the vendor's own bounded sentence. |
+| `error` | `reason`, plus context fields | A failure; the daemon closes the connection after most errors. `reason: "call_in_progress"` refuses a `call_start` while another call is up, on any engine and from any endpoint, and optional `held_by` names the endpoint holding it (see *One call at a time*). On a Grok call, `unknown_playback`, `playback_regressed` and `playback_beyond_sent` refuse a `playback_progress`, and `playback_stalled`, `playback_overflow` and `call_ids_exhausted` end one (see *Playback feedback*). Optional `kind` (`update_required` \| `provider_refused` \| `cost_limit` \| `session_expired` \| `close_timeout` \| `bridge_unavailable` \| `max_session_duration` \| `provider_disconnected`) is the typed failure, and optional `detail` carries the vendor's own bounded sentence. |
 | `playback_stop` | — | The assistant's audio playback has stopped. |
 | `call_ready` | `engine`, `call_id`, `call_uuid?`, `conversation?`, `tasks_outlive_call?`, `provider_session_id?`, `expires_at?`, `captions` | **v2.** The provider session is established. Under `openai_live` the call carries audio from the `listening` before it (see *Live call sequence*). `call_uuid` is the call's durable identity and the key of its record, the same on every `task` and `usage` of the call; `call_id` stays the trace session id and restarts with the daemon. `conversation` (`chat` \| `private`, task engines only) says where the call's tasks run: `chat`, the chat's own conversation, where a task reads what was typed and the chat later reads what was asked aloud; `private`, a conversation of the call's own, kept apart from the chat. `tasks_outlive_call` (task engines only) is `true` for a call in the chat: a task still running when the call ends is not cancelled but finishes into the chat (see *A task that outlives its call*); `false` for a private call, whose tasks end with it. `expires_at` is unix seconds and is absent when the provider did not say; `captions` is true when `caption` frames will follow. |
 | `caption` | `speaker` (`user` \| `assistant`), `delta`, `start_ms`, `end_ms` | **v2.** One verbatim transcript fragment. Concatenate `delta` bytes as received — never trim them or insert spaces — and allow user and assistant captions to overlap in time. A missing fragment is not proof of silence. |
@@ -352,13 +352,20 @@ A private call's tasks are cancelled when it ends, as before.
 
 ## One call at a time
 
-The daemon holds one task-engine call (`openai_live` or `xai_realtime`). A
-`call_start` on another connection while a call is up, or still settling (its provider session closing and its bill being
-settled), is refused before any session starts with
+A Fermix home holds one owner-voice call, whichever engine runs it
+(`openai_realtime`, `openai_live` or `xai_realtime`) and whichever endpoint it
+is for: this socket's calls are the `desktop` endpoint's, and a paired Fermix
+accessory's are `accessory:<accessory_id>`. A `call_start` while a call is up,
+or still settling (its provider session closing and its bill being settled),
+is refused before any session starts with
 
 ```json
-{"type":"error","reason":"call_in_progress"}
+{"type":"error","reason":"call_in_progress","held_by":"desktop"}
 ```
 
-and the connection closes. The call that was up is untouched. A repeated
-`call_start` on the connection that holds the call is not a second call.
+and the connection closes. `held_by` names the endpoint holding the call
+(`desktop` or `accessory:<accessory_id>`), so the companion can say where the
+call is; it is an additive optional field, absent only when the call that held
+it ended while the daemon was reading it. The call that was up is untouched. A
+repeated `call_start` on the connection that holds the call is not a second
+call.

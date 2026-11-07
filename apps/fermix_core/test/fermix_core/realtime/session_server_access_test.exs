@@ -18,6 +18,7 @@ defmodule FermixCore.Realtime.SessionServerAccessTest do
   alias FermixCore.Tools.ListCues
   alias FermixCore.Tools.OpenLoopList
   alias FermixCore.Tools.OpenLoopUpdate
+  alias FermixTestSupport.CallLeases
 
   # The test registers under this name to be told about each provider event as it
   # is sent, so a confirmed run's status item is awaited rather than polled for.
@@ -99,6 +100,8 @@ defmodule FermixCore.Realtime.SessionServerAccessTest do
     {:ok, server} =
       SessionServer.start_link(
         companion: self(),
+        endpoint: :desktop,
+        call_lease: CallLeases.own!(),
         config: Config.normalize(enabled: true),
         session_scope: scope,
         openai_client: FakeOpenAIClient,

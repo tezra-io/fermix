@@ -45,6 +45,7 @@ defmodule FermixCore.Realtime.GrokSessionServer do
   alias FermixCore.Memory.Repo
   alias FermixCore.Prompt.BootstrapLoader
   alias FermixCore.Providers.Telemetry, as: ProviderTelemetry
+  alias FermixCore.Realtime.CallLease
   alias FermixCore.Realtime.CallRecord
   alias FermixCore.Realtime.CallRegistry
   alias FermixCore.Realtime.CallSpeech
@@ -133,17 +134,28 @@ defmodule FermixCore.Realtime.GrokSessionServer do
   def init(opts) do
     Process.flag(:trap_exit, true)
     config = Keyword.get_lazy(opts, :config, &Config.current/0)
+    endpoint = Keyword.fetch!(opts, :endpoint)
 
     if config.engine == "xai_realtime" do
-      claim_call(initial_state(opts, config))
+      admit_call(opts, config, endpoint)
     else
       {:stop, {:invalid_engine, config.engine}}
     end
   end
 
-  # One call per daemon (M56 §4.8), whichever task engine holds it: the claim
-  # is taken before this session exists to its caller, so a second
-  # `call_start` is refused before it can open a session billed by the minute.
+  # The home's one owner-voice call (`CallLease`), whichever engine and
+  # endpoint hold it: taken before this session exists to its caller, so a
+  # second `call_start` is refused before it can open a session billed by the
+  # minute.
+  defp admit_call(opts, config, endpoint) do
+    case CallLease.acquire(Keyword.get(opts, :call_lease, CallLease), endpoint, config.engine) do
+      :ok -> {:ok, claim_call(initial_state(opts, config))}
+      {:error, reason} -> {:stop, reason}
+    end
+  end
+
+  # Where Channels finds the call in progress (M56 §4.2). The lease already
+  # admits one call, so a claim it refuses is a defect.
   defp claim_call(state) do
     call = %{
       call_uuid: state.call_uuid,
@@ -151,14 +163,8 @@ defmodule FermixCore.Realtime.GrokSessionServer do
       started_at: state.started_at
     }
 
-    case CallRegistry.claim(state.call_registry, call) do
-      :ok ->
-        {:ok, state}
-
-      {:error, :call_in_progress} ->
-        Logger.info("voice_grok: refused a second call while one is in progress")
-        {:stop, :call_in_progress}
-    end
+    :ok = CallRegistry.claim(state.call_registry, call)
+    state
   end
 
   defp initial_state(opts, config) do

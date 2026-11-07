@@ -1,24 +1,23 @@
 defmodule FermixCore.Realtime.LocalVoiceSocket do
   @moduledoc """
-  Local Unix-domain socket listener for the native voice companion.
+  The Unix adapter for the Mac app's voice calls: the `realtime.sock`
+  listener.
 
-  Engine-agnostic by construction: a connection's session is driven through
-  `SessionControl`, so the same listener serves the Realtime, Live and Grok
-  engines. It branches on the engine in exactly the three places where the WIRE
-  differs — each engine's minimum protocol version, refused at `call_start`;
-  `task_cancel`, which only the task engines have delegations for; and
-  `playback_progress`, which only Grok has playback ids for.
+  It owns what is the Unix wire's: the listener and its peer gate, the client
+  cap, newline-delimited JSON framing, and the `client_hello`/`server_hello`
+  handshake. Every call of a connection is the `desktop` endpoint's, and once
+  the handshake lands the connection's call half is a `CallClient`, which owns
+  the call itself (the engine's minimum version, the session, the command
+  verbs, the flush before a refusal, teardown): decode, `CallClient`, encode.
+  A connection's session is started by `SessionGuard` for the connection's
+  handler, which tears it down on any exit of that handler, even mid-start.
   """
 
   use GenServer
 
-  alias FermixCore.Memory.Config, as: MemoryConfig
+  alias FermixCore.Realtime.CallClient
   alias FermixCore.Realtime.Config
-  alias FermixCore.Realtime.DeviceIdentity
   alias FermixCore.Realtime.Protocol
-  alias FermixCore.Realtime.SessionControl
-  alias FermixCore.Realtime.SessionSupervisor
-  alias FermixCore.Setup.ConfigStore
   alias FermixCore.SocketPath
   alias FermixCore.SocketPeer
 
@@ -27,14 +26,9 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
   @accept_idle_ms 50
   @max_wire_line_bytes 65_536
   @default_max_clients 4
-  # The wire version each engine's CALL requires. The handshake window still
-  # admits an older companion (it may run an engine it can render); this is the
-  # floor for a call, and the number the refusal reports as `min_version`.
-  @engine_min_protocol_version %{"openai_realtime" => 1, "openai_live" => 2, "xai_realtime" => 3}
-  # How many queued companion frames the handler writes ahead of its own last
-  # word on a call (a refusal, a session-down error, a hang-up's `idle`) before
-  # it gives up and writes that word. A session queues a handful.
-  @max_flushed_frames 64
+  # What a connection's `CallClient` is built from besides the handshake. The
+  # socket's own `session_opts` become the client's `starter_opts`.
+  @client_opts [:session_module, :session_starter, :session_supervisor, :session_guard]
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
@@ -50,35 +44,6 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
     :exit, reason -> {:error, reason}
   end
 
-  @doc """
-  The options the default starter hands `SessionSupervisor.start_session/2`.
-
-  This is the listener's half of the session contract: which engine module runs
-  the call, under which scope, with which credentials. Both engine-derived
-  values come from `SessionControl`, so the scope prefix a trace reader searches
-  for (`session:` vs `voice_live:`) and the module that gets started can never
-  disagree about which engine is in force.
-  """
-  @spec session_opts(keyword()) :: {:ok, keyword()} | {:error, term()}
-  def session_opts(opts) when is_list(opts) do
-    config = Config.current()
-
-    with {:ok, api_key} <- Config.api_key(config),
-         {:ok, device_id} <-
-           DeviceIdentity.ensure_device_id(ConfigStore.workspace_paths().realtime) do
-      owner_id = MemoryConfig.owner_id()
-
-      {:ok,
-       opts
-       |> Keyword.put(:config, config)
-       |> Keyword.put(:engine_module, SessionControl.engine_module(config))
-       |> Keyword.put(:api_key, api_key)
-       |> Keyword.put(:device_id, device_id)
-       |> Keyword.put_new(:session_scope, SessionControl.session_scope(config))
-       |> Keyword.put(:safety_identifier, DeviceIdentity.safety_identifier(owner_id, device_id))}
-    end
-  end
-
   @impl true
   def init(opts) do
     Process.flag(:trap_exit, true)
@@ -90,24 +55,23 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
          {:ok, listen_socket} <- listen(socket_path) do
       File.chmod!(socket_path, 0o600)
       Process.send_after(self(), :accept, 0)
+      task_supervisor = Keyword.get(opts, :task_supervisor, FermixCore.TaskSupervisor)
 
       {:ok,
        %{
          listen_socket: listen_socket,
          socket_path: socket_path,
-         task_supervisor: Keyword.get(opts, :task_supervisor, FermixCore.TaskSupervisor),
-         session_supervisor: Keyword.get(opts, :session_supervisor, SessionSupervisor),
-         session_starter: Keyword.get(opts, :session_starter, &default_session_starter/1),
-         session_module: Keyword.get(opts, :session_module, SessionControl),
-         session_opts: Keyword.get(opts, :session_opts, []),
+         task_supervisor: task_supervisor,
+         client_opts:
+           [task_supervisor: task_supervisor, starter_opts: Keyword.get(opts, :session_opts, [])] ++
+             Keyword.take(opts, @client_opts),
          # Whether this socket answers a peer at all (`SocketPeer.admit/2`).
          peer_gate: Keyword.get(opts, :peer_gate, &SocketPeer.admit/1),
          max_clients: positive_int_opt(opts, :max_clients, @default_max_clients),
-         # handler pid -> bound session pid (or nil before `call_start`). This map
-         # IS both the client count (its size) and the crash-safe teardown ledger:
-         # on a handler's monitored :DOWN we drop the entry (the decrement) and
-         # tear its session down. The accepted socket is handed to the handler via
-         # `controlling_process`, so the fd closes with the handler on every exit.
+         # handler pid -> its monitor. The map's size is the client count: a
+         # handler's :DOWN drops its entry. The accepted socket is handed to the
+         # handler via `controlling_process`, so the fd closes with the handler on
+         # every exit, and its session is `SessionGuard`'s to tear down.
          clients: %{}
        }}
     else
@@ -143,33 +107,10 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
   end
 
   # A handler exited (clean stop, crash, or kill). Its owned socket is already
-  # closed by the runtime; here we drop it from `clients` (the count decrement)
-  # and tear down whatever session it still had bound. This is the single,
-  # crash-safe teardown path — it fires on EVERY handler exit, which the
-  # handler's own immutable loop state could not guarantee on a crash.
+  # closed by the runtime and its session is the guard's; here it only stops
+  # counting.
   def handle_info({:DOWN, _ref, :process, pid, _reason}, state) do
-    case Map.has_key?(state.clients, pid) do
-      false ->
-        {:noreply, state}
-
-      true ->
-        {session, clients} = Map.pop(state.clients, pid)
-        schedule_session_teardown(session, state)
-        {:noreply, %{state | clients: clients}}
-    end
-  end
-
-  @impl true
-  def handle_cast({:bind_session, pid, session}, state) do
-    {:noreply, %{state | clients: rebind(state.clients, pid, session)}}
-  end
-
-  def handle_cast({:unbind_session, pid}, state) do
-    {:noreply, %{state | clients: rebind(state.clients, pid, nil)}}
-  end
-
-  defp rebind(clients, pid, value) do
-    if Map.has_key?(clients, pid), do: Map.put(clients, pid, value), else: clients
+    {:noreply, %{state | clients: Map.delete(state.clients, pid)}}
   end
 
   @impl true
@@ -288,29 +229,20 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
 
   defp spawn_client_handler(conn, state) do
     handler_state = %{
-      parent: self(),
       conn: conn,
       config: Config.current(),
-      session: nil,
-      session_ref: nil,
-      task_supervisor: state.task_supervisor,
-      session_module: state.session_module,
-      session_starter: state.session_starter,
-      session_opts: state.session_opts,
-      session_supervisor: state.session_supervisor,
+      client_opts: state.client_opts,
       buffer: "",
-      hello_received: false,
-      # The version negotiated in `client_hello`. Nil until the handshake lands;
-      # every event that reads it is gated behind `hello_received`.
-      client_version: nil
+      # The connection's `CallClient`, built when the handshake lands; every
+      # event but `client_hello` is gated on it.
+      client: nil
     }
 
     case Task.Supervisor.start_child(state.task_supervisor, fn ->
            await_handover(handler_state)
          end) do
       {:ok, pid} ->
-        _ref = Process.monitor(pid)
-        hand_over_socket(conn, pid, state)
+        hand_over_socket(conn, pid, Process.monitor(pid), state)
 
       {:error, reason} ->
         Logger.warning("Realtime voice socket client handler failed to start: #{inspect(reason)}")
@@ -324,11 +256,11 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
   # listener kept the fd open behind a dead reader task and the peer never saw
   # EOF (the root-cause leak). The socket is passive here, so nothing is lost in
   # the handoff; the handler arms active mode only after it receives the signal.
-  defp hand_over_socket(conn, pid, state) do
+  defp hand_over_socket(conn, pid, ref, state) do
     case :gen_tcp.controlling_process(conn, pid) do
       :ok ->
         send(pid, :socket_handover)
-        %{state | clients: Map.put(state.clients, pid, nil)}
+        %{state | clients: Map.put(state.clients, pid, ref)}
 
       {:error, reason} ->
         Logger.warning("Realtime voice socket controlling_process failed: #{inspect(reason)}")
@@ -381,10 +313,11 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
   # pushes all land here — no recv-poll latency and no companion-drain kludge.
   # A normal terminal branch funnels through `stop_and_exit/1` (own-session
   # teardown) before the handler exits, closing the owned socket (peer EOF) and
-  # firing the listener's monitor, which decrements the count and reaps any
-  # session the handler could not (only a handler CRASH leaves that to the
-  # listener).
+  # firing the listener's monitor, which decrements the count. Only a handler
+  # CRASH leaves the session to `SessionGuard`.
   defp client_loop(state) do
+    session_ref = session_ref(state.client)
+
     receive do
       {:tcp, conn, bytes} when conn == state.conn ->
         handle_tcp_bytes(bytes, state)
@@ -400,10 +333,14 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
         _ = send_event(state.conn, event)
         client_loop(state)
 
-      {:DOWN, ref, :process, _pid, reason} when ref == state.session_ref ->
+      {:DOWN, ^session_ref, :process, _pid, reason} ->
         handle_session_down(reason, state)
     end
   end
+
+  # Nil before a session is bound: no `:DOWN` carries it.
+  defp session_ref(nil), do: nil
+  defp session_ref(%CallClient{session_ref: ref}), do: ref
 
   defp handle_tcp_bytes(bytes, state) do
     case handle_bytes(bytes, state) do
@@ -424,22 +361,21 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
   end
 
   # A normal terminal return funnels here so the handler tears down its OWN bound
-  # session before exiting: a live (billed) OpenAI WebSocket must never outlive
-  # the connection, even when the listener — whose monitor is the crash-path
-  # teardown — has itself crashed and can no longer react to this handler's
-  # :DOWN. A handler CRASH cannot run this; that path stays the listener's.
-  defp stop_and_exit(state) do
-    _ = reset_session(state)
+  # session before exiting: a live (billed) provider socket must never outlive
+  # the connection, even when the guard could no longer react to this
+  # handler's exit. A handler CRASH cannot run this; that path is the guard's.
+  defp stop_and_exit(%{client: nil}), do: :ok
+
+  defp stop_and_exit(%{client: client}) do
+    _client = CallClient.teardown(client)
     :ok
   end
 
-  # The session died mid-call. Tell the peer (best effort), then return so the
-  # handler exits and the socket closes. Without this, the audio_chunk cast would
-  # keep "succeeding" into a dead session while the peer waited on silence.
+  # The session died mid-call. The peer is told, then the handler exits and the
+  # socket closes. Without this, the audio_chunk cast would keep "succeeding"
+  # into a dead session while the peer waited on silence.
   defp handle_session_down(reason, state) do
-    _ =
-      send_event(state.conn, %{type: "error", reason: reason_to_string({:session_down, reason})})
-
+    {:stop, _client} = CallClient.session_down(state.client, reason)
     :ok
   end
 
@@ -484,227 +420,42 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
   end
 
   # Every other event is gated behind a completed handshake. Placed after the
-  # `client_hello` clause and before the per-event clauses, this catches any
-  # premature event while `hello_received` is false; once the handshake lands,
-  # it no longer matches and the specific handlers below run.
-  defp dispatch_event(_event, %{hello_received: false} = state) do
+  # `client_hello` clause and before the call's, this catches any premature
+  # event while the connection has no `CallClient` yet.
+  defp dispatch_event(_event, %{client: nil} = state) do
     send_error_and_stop(:handshake_required, state)
   end
 
-  # `call_start` is the first moment both the negotiated version and the
-  # configured engine are known, so the per-engine minimum lands here — and
-  # BEFORE a session exists, because a task-engine session bills by the minute
-  # from the moment it opens and an older companion could not render the call
-  # anyway.
-  defp dispatch_event(%{type: "call_start"}, state) do
-    if call_needs_upgrade?(state) do
-      send_update_required_and_stop(state)
-    else
-      start_call(state)
-    end
+  defp dispatch_event(event, state) do
+    {verdict, client} = call_event(event, state.client)
+    {verdict, %{state | client: client}}
   end
 
-  # Only the task engines have delegations to cancel. A Realtime connection is
-  # refused here rather than forwarded to a session with no clause for it.
-  defp dispatch_event(%{type: "task_cancel", payload: payload}, state) do
-    if Config.hands_off_tasks?(state.config) do
-      cancel_task(Map.fetch!(payload, "delegation_id"), state)
-    else
-      send_error_and_stop(:unsupported_by_engine, state)
-    end
+  # The wire's events, decoded, as the call's verbs.
+  defp call_event(%{type: "call_start"}, client), do: CallClient.call_start(client)
+
+  defp call_event(%{type: "audio_chunk", payload: %{"audio" => audio}}, client),
+    do: CallClient.audio(client, audio)
+
+  defp call_event(%{type: "interrupt", payload: payload}, client),
+    do: CallClient.interrupt(client, Map.get(payload, "audio_end_ms"))
+
+  defp call_event(%{type: "mute", payload: payload}, client),
+    do: CallClient.mute(client, Map.get(payload, "enabled", true) == true)
+
+  defp call_event(%{type: "task_cancel", payload: payload}, client),
+    do: CallClient.task_cancel(client, Map.fetch!(payload, "delegation_id"))
+
+  defp call_event(%{type: "playback_progress", payload: payload}, client) do
+    %{"playback_id" => playback_id, "played_ms" => played_ms, "drained" => drained?} = payload
+    CallClient.playback_progress(client, playback_id, played_ms, drained?)
   end
 
-  # Only Grok sends audio under playback ids, so only a Grok session has a
-  # clause for the report. A refused report (an id never sent, an offset that
-  # went backwards or past the audio sent) ends the connection with its reason.
-  defp dispatch_event(%{type: "playback_progress", payload: payload}, state) do
-    if state.config.engine == "xai_realtime" do
-      playback_progress(payload, state)
-    else
-      send_error_and_stop(:unsupported_by_engine, state)
-    end
-  end
-
-  defp dispatch_event(%{type: "audio_chunk", payload: %{"audio" => audio}}, state) do
-    case require_session(state) do
-      {:ok, session, state} ->
-        with :ok <- state.session_module.audio_chunk(session, audio) do
-          {:cont, state}
-        else
-          {:error, reason} -> send_error_and_stop(reason, state)
-        end
-
-      {:error, reason} ->
-        send_error_and_stop(reason, state)
-    end
-  end
-
-  defp dispatch_event(%{type: "interrupt", payload: payload}, state) do
-    audio_end_ms = Map.get(payload, "audio_end_ms")
-
-    case require_session(state) do
-      {:ok, session, state} ->
-        with :ok <- state.session_module.interrupt(session, audio_end_ms) do
-          {:cont, state}
-        else
-          {:error, reason} -> send_error_and_stop(reason, state)
-        end
-
-      {:error, reason} ->
-        send_error_and_stop(reason, state)
-    end
-  end
-
-  defp dispatch_event(%{type: "mute", payload: payload}, state) do
-    enabled? = Map.get(payload, "enabled", true) == true
-
-    case require_session(state) do
-      {:ok, session, state} ->
-        with :ok <- state.session_module.mute(session, enabled?) do
-          {:cont, state}
-        else
-          {:error, reason} -> send_error_and_stop(reason, state)
-        end
-
-      {:error, reason} ->
-        send_error_and_stop(reason, state)
-    end
-  end
-
-  # `call_stop` ends the CALL but keeps the CONNECTION open for a fresh one, so
-  # the handler tears the session down itself and unbinds it from the listener
-  # (distinct from connection loss, which the listener's monitor handles). The
-  # session's last frames were sent before it answered, so they are already
-  # queued here: write them first, so `idle` is the call's last frame and a
-  # fresh `call_start` never races the old call's `task` and `usage`.
-  defp dispatch_event(%{type: "call_stop"}, state) do
-    state = reset_session(state)
-    _error_sent? = flush_queued_frames(state, false, @max_flushed_frames)
-    _ = send_event(state.conn, %{type: "state", state: "idle"})
-    {:cont, state}
-  end
-
-  defp playback_progress(
-         %{"playback_id" => playback_id, "played_ms" => played_ms, "drained" => drained?},
-         state
-       ) do
-    case require_session(state) do
-      {:ok, session, state} ->
-        with :ok <-
-               state.session_module.playback_progress(session, playback_id, played_ms, drained?) do
-          {:cont, state}
-        else
-          {:error, reason} -> send_error_and_stop(reason, state)
-        end
-
-      {:error, reason} ->
-        send_error_and_stop(reason, state)
-    end
-  end
-
-  defp start_call(state) do
-    case ensure_session(state) do
-      {:ok, session, state} ->
-        with :ok <- state.session_module.call_start(session) do
-          {:cont, state}
-        else
-          {:error, reason} -> flush_then_stop(reason, state)
-        end
-
-      # No session was ever started, so nothing can be queued: render the
-      # refusal directly.
-      {:error, reason} ->
-        send_error_and_stop(reason, state)
-    end
-  end
-
-  # The session pushes its frames to this handler's MAILBOX, and the handler is
-  # blocked inside `call_start` while it does — so the session's own rich `error`
-  # (its published `kind`, and the vendor's words in `detail`) is sitting there
-  # unwritten by the time the refusal comes back. Write what is queued first, in
-  # order. If one of those frames was itself an `error`, stop on it and send no
-  # second one: the companion treats the FIRST `error` as terminal, so a bare
-  # `reason`-only frame would be the one it read and the diagnosis would be lost.
-  defp flush_then_stop(reason, state) do
-    if flush_queued_frames(state, false, @max_flushed_frames) do
-      {:stop, state}
-    else
-      send_error_and_stop(reason, state)
-    end
-  end
-
-  # Bounded twice over: `after 0` takes only what the session has ALREADY
-  # delivered, never waiting on one that is still producing, and the counter caps
-  # a flood. At the cap the drain stops and the caller writes its own frame as
-  # usual; on a hang-up the loop writes whatever is left after it.
-  defp flush_queued_frames(_state, error_sent?, 0), do: error_sent?
-
-  defp flush_queued_frames(state, error_sent?, remaining) do
-    receive do
-      {:realtime, event} ->
-        _ = send_event(state.conn, event)
-        flush_queued_frames(state, error_sent? or error_frame?(event), remaining - 1)
-    after
-      0 -> error_sent?
-    end
-  end
-
-  defp error_frame?(%{type: "error"}), do: true
-  defp error_frame?(_event), do: false
-
-  # The cancel waits with no timeout (`SessionControl`), so its call exits only
-  # when the session stopped instead of answering: a settle it was queued
-  # behind, or a crash. That is the session's death, told the way
-  # `handle_session_down/2` tells it, after what the session queued first.
-  defp cancel_task(delegation_id, state) do
-    case require_session(state) do
-      {:ok, session, state} ->
-        with :ok <- state.session_module.cancel_task(session, delegation_id) do
-          {:cont, state}
-        else
-          {:error, reason} -> send_error_and_stop(reason, state)
-        end
-
-      {:error, reason} ->
-        send_error_and_stop(reason, state)
-    end
-  catch
-    :exit, {reason, {GenServer, :call, _args}} -> flush_then_stop({:session_down, reason}, state)
-  end
-
-  # A non-integer client_version cannot reach this: every event but
-  # `client_hello` is gated behind a completed handshake. Match on the integer
-  # so a future path that broke that gate fails loud instead of reading an atom
-  # as "new enough". An engine missing from the table fails loud too.
-  defp call_needs_upgrade?(%{client_version: version, config: config})
-       when is_integer(version) do
-    version < engine_min_protocol_version(config)
-  end
-
-  defp engine_min_protocol_version(%Config{engine: engine}),
-    do: Map.fetch!(@engine_min_protocol_version, engine)
-
-  # `min_version` here is the version the ENGINE requires, not the handshake
-  # floor in `server_hello` — `required_for` names which engine raised it.
-  defp send_update_required_and_stop(state) do
-    _ =
-      send_event(state.conn, %{
-        type: "error",
-        reason: "unsupported_protocol_version",
-        kind: "update_required",
-        direction: "client_too_old",
-        client_version: state.client_version,
-        min_version: engine_min_protocol_version(state.config),
-        max_version: Protocol.protocol_version(),
-        required_for: state.config.engine
-      })
-
-    {:stop, state}
-  end
+  defp call_event(%{type: "call_stop"}, client), do: CallClient.call_stop(client)
 
   # A repeat hello is a protocol violation — the handshake is a one-shot
   # transition. Fail loud rather than silently re-negotiating.
-  defp handle_client_hello(_payload, %{hello_received: true} = state) do
+  defp handle_client_hello(_payload, %{client: %CallClient{}} = state) do
     send_error_and_stop(:unexpected_client_hello, state)
   end
 
@@ -719,7 +470,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
         # instead of letting a hard `:ok =` match-fail turn a normal disconnect
         # into a handler crash.
         case send_event(state.conn, reply) do
-          :ok -> {:cont, %{state | hello_received: true, client_version: version}}
+          :ok -> {:cont, %{state | client: new_client(state, version)}}
           {:error, _reason} -> {:stop, state}
         end
 
@@ -744,84 +495,24 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
     {:stop, state}
   end
 
-  defp ensure_session(%{session: session} = state) when is_pid(session), do: {:ok, session, state}
+  # Every call on this socket is the Mac app's: the `desktop` endpoint, at the
+  # version the handshake negotiated.
+  defp new_client(state, version) do
+    conn = state.conn
 
-  defp ensure_session(state) do
-    opts =
-      state.session_opts
-      |> Keyword.put(:companion, self())
-      |> Keyword.put(:session_supervisor, state.session_supervisor)
-      |> Keyword.put_new(:task_supervisor, state.task_supervisor)
-
-    case state.session_starter.(opts) do
-      {:ok, session} -> {:ok, session, bind_session(state, session)}
-      {:error, reason} -> {:error, reason}
-    end
+    state.client_opts
+    |> Keyword.merge(
+      endpoint: :desktop,
+      protocol_version: version,
+      config: state.config,
+      emit: fn event -> send_event(conn, event) end
+    )
+    |> CallClient.new()
   end
-
-  # Monitor the session so its death reaches the loop (`handle_session_down`),
-  # and register it with the listener so the listener's handler-:DOWN tears it
-  # down on ANY handler exit — the crash-safe path the immutable loop state
-  # cannot provide. The bind is guaranteed to reach the listener before the
-  # handler's :DOWN (monitor ordering), so there is no teardown gap on a crash.
-  defp bind_session(state, session) do
-    ref = Process.monitor(session)
-    GenServer.cast(state.parent, {:bind_session, self(), session})
-    %{state | session: session, session_ref: ref}
-  end
-
-  defp reset_session(%{session: session} = state) when is_pid(session) do
-    if is_reference(state.session_ref), do: Process.demonitor(state.session_ref, [:flush])
-    stop_session(session, state.session_module)
-    GenServer.cast(state.parent, {:unbind_session, self()})
-    %{state | session: nil, session_ref: nil}
-  end
-
-  defp reset_session(state), do: state
-
-  defp require_session(%{session: session} = state) when is_pid(session),
-    do: {:ok, session, state}
-
-  defp require_session(_state), do: {:error, :not_connected}
 
   defp send_error_and_stop(reason, state) do
-    _ = send_event(state.conn, %{type: "error", reason: reason_to_string(reason)})
+    _ = send_event(state.conn, CallClient.error_frame(reason))
     {:stop, state}
-  end
-
-  # Run session teardown OFF the listener's :DOWN handler in a throwaway task so
-  # a slow `GenServer.stop` never blocks the listener from accepting new clients.
-  defp schedule_session_teardown(nil, _state), do: :ok
-
-  defp schedule_session_teardown(session, state) when is_pid(session) do
-    module = state.session_module
-
-    _ =
-      Task.Supervisor.start_child(state.task_supervisor, fn -> stop_session(session, module) end)
-
-    :ok
-  end
-
-  # Best-effort graceful teardown shared by the listener's crash path and the
-  # handler's own terminal exits. Exit-safe: it may race a session already dying
-  # on its own, so a call_stop/stop that exits must not take down the caller
-  # (listener or handler). Only a real engine session — reached through
-  # `SessionControl` — is GenServer.stop-ed; a test session double just gets
-  # call_stop.
-  defp stop_session(session, session_module) when is_pid(session) do
-    if Process.alive?(session) do
-      session_module.call_stop(session)
-
-      if session_module == SessionControl and Process.alive?(session) do
-        GenServer.stop(session, :normal, 1_000)
-      end
-    end
-
-    :ok
-  catch
-    :exit, reason ->
-      Logger.debug("Realtime voice socket session teardown exited: #{inspect(reason)}")
-      :ok
   end
 
   defp send_event(conn, event) do
@@ -829,20 +520,4 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
       :gen_tcp.send(conn, line)
     end
   end
-
-  defp default_session_starter(opts) do
-    session_supervisor = Keyword.fetch!(opts, :session_supervisor)
-    opts = Keyword.drop(opts, [:session_supervisor])
-
-    with {:ok, started_opts} <- session_opts(opts) do
-      SessionSupervisor.start_session(session_supervisor, started_opts)
-    end
-  end
-
-  # A voice key that is not saved keeps the word the wire always carried for
-  # it; which provider's key is missing is readiness's to say, by name.
-  defp reason_to_string({:missing_api_key, _provider}), do: "not_configured"
-  defp reason_to_string(reason) when is_atom(reason), do: Atom.to_string(reason)
-  defp reason_to_string(reason) when is_binary(reason), do: reason
-  defp reason_to_string(reason), do: inspect(reason)
 end

@@ -24,8 +24,8 @@ defmodule FermixCore.Realtime.Protocol do
   (`playback_id` on `audio_delta`, `playback_progress`). An older companion is
   still served for the engines it can render; a call whose engine needs a newer
   version refuses it at `call_start` with `update_required` (the rule lives in
-  `LocalVoiceSocket`, which is the only place that knows both the negotiated
-  version and the configured engine).
+  `CallClient`, the one place that knows both the peer's version and the
+  configured engine).
   """
 
   alias FermixCore.Realtime.Config
@@ -40,8 +40,9 @@ defmodule FermixCore.Realtime.Protocol do
   @client_events ~w(client_hello call_start audio_chunk interrupt mute call_stop task_cancel playback_progress)
   @server_events ~w(server_hello state audio_delta transcript_delta assistant_text_delta assistant_text_done tool_event usage error playback_stop call_ready caption task)
 
-  # One call per daemon: a `call_start` while another task-engine call is up or
-  # still settling is refused with this `error.reason`.
+  # One call per home (`CallLease`): a `call_start` while another call is up or
+  # still settling, on any engine and from any endpoint, is refused with this
+  # `error.reason`.
   @call_in_progress "call_in_progress"
 
   # The wire's bound on a `playback_id`. The daemon mints the id and the
@@ -55,8 +56,9 @@ defmodule FermixCore.Realtime.Protocol do
   def protocol_version, do: @protocol_version
 
   @doc """
-  The `error.reason` that refuses a `call_start` while another task-engine call
-  is up or still settling. Terminal: the connection closes after it.
+  The `error.reason` that refuses a `call_start` while another call is up or
+  still settling, on any engine and from any endpoint; the frame's `held_by`
+  names the endpoint holding it. Terminal: the connection closes after it.
   """
   @spec call_in_progress() :: String.t()
   def call_in_progress, do: @call_in_progress

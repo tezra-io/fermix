@@ -1158,7 +1158,21 @@ fixtures).
 `Realtime` serves local full-duplex voice on `FERMIX_HOME/realtime.sock`
 (newline-delimited JSON defined by `Realtime.Protocol`, exported in
 `priv/realtime/`). The configured model picks the engine, and
-`SessionControl` the session that owns the call. `SessionServer` runs OpenAI
+`SessionControl` the session that owns the call. `LocalVoiceSocket` is the
+Unix adapter for the Mac app's calls: it owns the listener, framing and
+handshake, and hands each connection's call to a `CallClient`, the
+transport-independent half every voice adapter shares (the engine's version
+floor, starting the session, the command verbs, teardown). `Endpoint` is the
+policy that differs by who a call is for (`desktop` or
+`accessory:<accessory_id>`): screen sharing is the desktop's alone, and the
+safety identifier an OpenAI Realtime call sends comes from the endpoint (the
+task engines send none). Every engine session takes the
+home's one `CallLease` from its `init/1`, so one owner-voice call runs at a
+time across engines and endpoints, and `SessionGuard` starts each session
+for the adapter that owns it and tears it down when that adapter exits, even
+mid-start. The guard heads a `:rest_for_one` tree with the task and session
+supervisors after it, so a guard restart ends every session it guarded.
+`SessionServer` runs OpenAI
 Realtime with tools through `ToolBridge` and optional screen perception. The
 two task engines execute no tools and hand every task to an agent turn through
 the `VoiceBridge` behaviour, implemented in channels by `Voice.Bridge`:

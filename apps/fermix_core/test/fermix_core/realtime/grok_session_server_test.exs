@@ -1,6 +1,7 @@
 defmodule FermixCore.Realtime.GrokSessionServerTest do
   use ExUnit.Case, async: false
 
+  alias FermixCore.Realtime.CallLease
   alias FermixCore.Realtime.CallRegistry
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.GrokSessionServer
@@ -10,6 +11,7 @@ defmodule FermixCore.Realtime.GrokSessionServerTest do
   @moduletag :capture_log
 
   @call_registry Module.concat(__MODULE__, CallRegistry)
+  @call_lease Module.concat(__MODULE__, CallLease)
   # One 100 ms chunk of 24 kHz PCM16 silence, as the vendor sends it.
   @chunk Base.encode64(:binary.copy(<<0, 0>>, 2_400))
 
@@ -144,6 +146,7 @@ defmodule FermixCore.Realtime.GrokSessionServerTest do
     {:ok, _bridge} = FakeBridge.start(self())
     on_exit(&FakeBridge.stop/0)
     start_supervised!(%{id: :fake_xai, start: {FakeXAI, :start_agent, [self()]}})
+    start_supervised!({CallLease, name: @call_lease})
     start_supervised!({CallRegistry, name: @call_registry})
     clock = start_supervised!({Agent, fn -> 0 end}, id: :grok_clock)
     %{clock: clock}
@@ -875,7 +878,8 @@ defmodule FermixCore.Realtime.GrokSessionServerTest do
     Process.flag(:trap_exit, true)
     _session = start_session(clock: clock)
 
-    assert {:error, :call_in_progress} = GrokSessionServer.start_link(session_opts(clock: clock))
+    assert {:error, {:call_in_progress, "desktop"}} =
+             GrokSessionServer.start_link(session_opts(clock: clock))
   end
 
   ## Helpers
@@ -889,6 +893,8 @@ defmodule FermixCore.Realtime.GrokSessionServerTest do
   defp session_opts(opts) do
     [
       companion: self(),
+      endpoint: :desktop,
+      call_lease: @call_lease,
       config: grok_config(),
       api_key: "xai-test",
       device_id: "device-1",

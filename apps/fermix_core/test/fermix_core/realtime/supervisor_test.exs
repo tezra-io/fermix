@@ -3,12 +3,16 @@ defmodule FermixCore.Realtime.SupervisorTest do
 
   alias FermixCore.Memory.Repo
   alias FermixCore.Realtime
+  alias FermixCore.Realtime.CallLease
   alias FermixCore.Realtime.CallRecord
   alias FermixCore.Realtime.CallRegistry
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.LocalVoiceSocket
+  alias FermixCore.Realtime.SessionControl
+  alias FermixCore.Realtime.SessionGuard
   alias FermixCore.Realtime.SessionServer
   alias FermixCore.Realtime.SessionSupervisor
+  alias FermixTestSupport.CallLeases
 
   # Stands in for whichever engine module the caller names, so the supervisor's
   # engine dispatch is testable without a provider socket. It answers the
@@ -38,7 +42,7 @@ defmodule FermixCore.Realtime.SupervisorTest do
     def handle_call(:opts, _from, opts), do: {:reply, opts, opts}
   end
 
-  test "starts the call registry, session supervisor and local voice socket" do
+  test "starts the call lease, call registry, session supervisor, guard and voice socket" do
     socket_path =
       Path.join(
         System.tmp_dir!(),
@@ -49,6 +53,8 @@ defmodule FermixCore.Realtime.SupervisorTest do
     socket_name = :"rt_socket_#{System.unique_integer([:positive])}"
     session_name = :"rt_sessions_#{System.unique_integer([:positive])}"
     registry_name = :"rt_calls_#{System.unique_integer([:positive])}"
+    lease_name = :"rt_lease_#{System.unique_integer([:positive])}"
+    guard_name = :"rt_guard_#{System.unique_integer([:positive])}"
 
     {:ok, pid} =
       Realtime.Supervisor.start_link(
@@ -56,7 +62,9 @@ defmodule FermixCore.Realtime.SupervisorTest do
         socket_path: socket_path,
         socket_name: socket_name,
         session_supervisor_name: session_name,
-        call_registry_name: registry_name
+        call_registry_name: registry_name,
+        call_lease_name: lease_name,
+        session_guard_name: guard_name
       )
 
     on_exit(fn ->
@@ -69,6 +77,75 @@ defmodule FermixCore.Realtime.SupervisorTest do
     assert LocalVoiceSocket.active_clients(socket_name) == {:ok, 0}
     assert SessionSupervisor.active_sessions(session_name) == 0
     assert CallRegistry.active(registry_name) == :none
+    assert CallLease.holder(lease_name) == :none
+    assert Process.whereis(guard_name)
+
+    # The lease starts before the sessions that take it, and the guarded
+    # sessions before the socket whose calls they are. Inside, the guard comes
+    # first, so a guard restart ends its start tasks and every session too.
+    ids = child_ids(pid)
+    assert index_of(ids, lease_name) < index_of(ids, :guarded_sessions)
+    assert index_of(ids, :guarded_sessions) < index_of(ids, LocalVoiceSocket)
+
+    assert child_ids(guarded_sessions(pid)) ==
+             [SessionGuard, FermixCore.Realtime.TaskSupervisor, SessionSupervisor]
+  end
+
+  # A guard restart would forget what it guards; instead it ends every
+  # session it guarded, so none is left billing with the home's call held.
+  test "a guard that dies ends every session it guarded, freeing the call" do
+    tree = start_tree!("guard_down")
+    owner = start_from_adapter(tree, &start_realtime(tree, &1))
+    assert_receive {:started, ^owner, {:ok, session}}
+    assert {:ok, %{endpoint: "desktop"}} = CallLease.holder(tree.lease)
+    session_ref = Process.monitor(session)
+
+    Process.exit(Process.whereis(tree.guard), :kill)
+
+    assert_receive {:DOWN, ^session_ref, :process, ^session, _reason}
+    assert CallLease.holder(tree.lease) == :none
+    # Answered once the guarded sessions have restarted.
+    assert child_ids(guarded_sessions(tree.supervisor)) == [
+             SessionGuard,
+             tree.tasks,
+             SessionSupervisor
+           ]
+
+    assert %{bindings: bindings, starts: starts} = :sys.get_state(tree.guard)
+    assert bindings == %{}
+    assert starts == %{}
+  end
+
+  # A start still running when its guard dies would finish onto the restarted
+  # session supervisor and report to a guard that is gone: it dies with the
+  # guard instead, and no session is made.
+  @tag :capture_log
+  test "a start in flight when its guard dies never makes a session" do
+    tree = start_tree!("start_down")
+    test_pid = self()
+
+    held_start = fn opts ->
+      send(test_pid, {:start_held, self()})
+
+      receive do
+        :finish_start -> start_realtime(tree, opts)
+      after
+        10_000 -> {:error, :start_never_finished}
+      end
+    end
+
+    owner = start_from_adapter(tree, held_start)
+    assert_receive {:start_held, start}
+    start_ref = Process.monitor(start)
+
+    Process.exit(Process.whereis(tree.guard), :kill)
+
+    assert_receive {:DOWN, ^start_ref, :process, ^start, _reason}
+    assert_receive {:started, ^owner, {:error, :session_guard_unavailable}}
+    send(start, :finish_start)
+    _restarted = child_ids(guarded_sessions(tree.supervisor))
+    assert SessionSupervisor.active_sessions(tree.sessions) == 0
+    assert CallLease.holder(tree.lease) == :none
   end
 
   test "supervisor shutdown removes the realtime socket path" do
@@ -83,6 +160,8 @@ defmodule FermixCore.Realtime.SupervisorTest do
     session_name = :"rt_shutdown_sessions_#{System.unique_integer([:positive])}"
     task_name = :"rt_shutdown_tasks_#{System.unique_integer([:positive])}"
     registry_name = :"rt_shutdown_calls_#{System.unique_integer([:positive])}"
+    lease_name = :"rt_shutdown_lease_#{System.unique_integer([:positive])}"
+    guard_name = :"rt_shutdown_guard_#{System.unique_integer([:positive])}"
 
     previous_trap_exit = Process.flag(:trap_exit, true)
 
@@ -98,7 +177,9 @@ defmodule FermixCore.Realtime.SupervisorTest do
         socket_name: socket_name,
         session_supervisor_name: session_name,
         task_supervisor_name: task_name,
-        call_registry_name: registry_name
+        call_registry_name: registry_name,
+        call_lease_name: lease_name,
+        session_guard_name: guard_name
       )
 
     assert File.exists?(socket_path)
@@ -135,6 +216,8 @@ defmodule FermixCore.Realtime.SupervisorTest do
        session_supervisor_name: :"rt_sweep_sessions_#{unique}",
        task_supervisor_name: :"rt_sweep_tasks_#{unique}",
        call_registry_name: :"rt_sweep_calls_#{unique}",
+       call_lease_name: :"rt_sweep_lease_#{unique}",
+       session_guard_name: :"rt_sweep_guard_#{unique}",
        record_repo: repo}
     )
 
@@ -156,6 +239,8 @@ defmodule FermixCore.Realtime.SupervisorTest do
       SessionSupervisor.start_session(session_name,
         engine_module: SessionServer,
         companion: self(),
+        endpoint: :desktop,
+        call_lease: CallLeases.own!(),
         config: Config.normalize(enabled: true),
         capabilities: [],
         prompt_loader: fn _opts -> {:ok, %{messages: [], parts: [], accounting: []}} end
@@ -219,6 +304,93 @@ defmodule FermixCore.Realtime.SupervisorTest do
 
     assert {:ok, %{active: 2, reloaded: 2, failed: []}} =
              SessionSupervisor.reload_sessions(session_name)
+  end
+
+  defp index_of(ids, id), do: Enum.find_index(ids, &(&1 == id))
+
+  # A supervisor's children in start order.
+  defp child_ids(supervisor),
+    do: supervisor |> Supervisor.which_children() |> Enum.map(&elem(&1, 0)) |> Enum.reverse()
+
+  defp guarded_sessions(supervisor) do
+    {:guarded_sessions, pid, :supervisor, _modules} =
+      supervisor
+      |> Supervisor.which_children()
+      |> List.keyfind(:guarded_sessions, 0)
+
+    pid
+  end
+
+  # A whole realtime tree under names of its own, stopped when the test ends.
+  defp start_tree!(label) do
+    unique = "#{label}_#{System.unique_integer([:positive])}"
+    socket_path = Path.join(System.tmp_dir!(), "fermix-realtime-#{unique}.sock")
+
+    tree = %{
+      supervisor: :"rt_supervisor_#{unique}",
+      sessions: :"rt_sessions_#{unique}",
+      tasks: :"rt_tasks_#{unique}",
+      lease: :"rt_lease_#{unique}",
+      guard: :"rt_guard_#{unique}"
+    }
+
+    {:ok, pid} =
+      Realtime.Supervisor.start_link(
+        name: tree.supervisor,
+        socket_path: socket_path,
+        socket_name: :"rt_socket_#{unique}",
+        session_supervisor_name: tree.sessions,
+        task_supervisor_name: tree.tasks,
+        call_registry_name: :"rt_calls_#{unique}",
+        call_lease_name: tree.lease,
+        session_guard_name: tree.guard
+      )
+
+    # Linked to the test, its parent, so it shuts down as the test exits;
+    # waited for before its socket path goes.
+    on_exit(fn ->
+      ref = Process.monitor(pid)
+      assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 10_000
+      FermixTestSupport.SafeRm.rm(socket_path)
+    end)
+
+    tree
+  end
+
+  # An adapter stand-in: has the tree's guard start a session for it, tells
+  # the test what came back, then holds until its test ends.
+  defp start_from_adapter(tree, starter) do
+    test_pid = self()
+
+    spawn(fn ->
+      test_ref = Process.monitor(test_pid)
+
+      result =
+        SessionGuard.start_session(tree.guard, starter, [companion: self()], SessionControl)
+
+      send(test_pid, {:started, self(), result})
+
+      receive do
+        {:DOWN, ^test_ref, :process, ^test_pid, _reason} -> :ok
+      after
+        10_000 -> :ok
+      end
+    end)
+  end
+
+  # An OpenAI Realtime session under the tree's own supervisor and lease.
+  defp start_realtime(tree, opts) do
+    SessionSupervisor.start_session(
+      tree.sessions,
+      [
+        engine_module: SessionServer,
+        endpoint: :desktop,
+        call_lease: tree.lease,
+        config: Config.normalize(enabled: true),
+        capabilities: [],
+        prompt_loader: fn _opts -> {:ok, %{messages: [], parts: [], accounting: []}} end
+      ] ++ opts
+    )
   end
 
   defp wait_until(fun, attempts \\ 20)

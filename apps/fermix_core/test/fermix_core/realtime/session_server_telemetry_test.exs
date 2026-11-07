@@ -4,6 +4,7 @@ defmodule FermixCore.Realtime.SessionServerTelemetryTest do
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.SessionServer
+  alias FermixTestSupport.CallLeases
   alias FermixTestSupport.RealtimeSocket
 
   @session_scope "session:test-#{System.unique_integer([:positive])}"
@@ -53,6 +54,8 @@ defmodule FermixCore.Realtime.SessionServerTelemetryTest do
     {:ok, server} =
       SessionServer.start_link(
         companion: self(),
+        endpoint: :desktop,
+        call_lease: CallLeases.own!(),
         config: Config.normalize(enabled: true),
         session_scope: @session_scope,
         device_id: "device-1",

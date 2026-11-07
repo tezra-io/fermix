@@ -61,6 +61,7 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   alias FermixCore.ComputerHistory.Taint
   alias FermixCore.Memory.Config, as: MemoryConfig
   alias FermixCore.Memory.Repo
+  alias FermixCore.Realtime.CallLease
   alias FermixCore.Realtime.CallRecord
   alias FermixCore.Realtime.CallRegistry
   alias FermixCore.Realtime.CallSpeech
@@ -142,21 +143,31 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   def init(opts) do
     Process.flag(:trap_exit, true)
     config = Keyword.get_lazy(opts, :config, &Config.current/0)
+    endpoint = Keyword.fetch!(opts, :endpoint)
 
     if Config.live?(config) do
-      claim_call(initial_state(opts, config))
+      admit_call(opts, config, endpoint)
     else
       {:stop, {:invalid_engine, config.engine}}
     end
   end
 
-  # One call per daemon (M56 §4.8). The claim is taken before this session exists
-  # to its caller, so a second `call_start` is refused before it can open a
-  # provider session that bills by the minute; the socket answers it
-  # `call_in_progress` and closes the connection. Held until this process exits,
-  # so a call still settling counts. It names the call's conversation and start,
-  # so a typed chat turn can tell a call in the chat from a private one without
-  # asking this process (M56 §4.4).
+  # The home's one owner-voice call (`CallLease`), taken before this session
+  # exists to its caller, so a second `call_start` from any endpoint is refused
+  # before it can open a provider session that bills by the minute; the socket
+  # answers it `call_in_progress` and closes the connection. Held until this
+  # process exits, so a call still settling counts.
+  defp admit_call(opts, config, endpoint) do
+    case CallLease.acquire(Keyword.get(opts, :call_lease, CallLease), endpoint, config.engine) do
+      :ok -> {:ok, claim_call(initial_state(opts, config))}
+      {:error, reason} -> {:stop, reason}
+    end
+  end
+
+  # Where Channels finds the call in progress (M56 §4.2). The claim names the
+  # call's conversation and start, so a typed chat turn can tell a call in the
+  # chat from a private one without asking this process (M56 §4.4). The lease
+  # already admits one call, so a claim it refuses is a defect.
   defp claim_call(state) do
     call = %{
       call_uuid: state.call_uuid,
@@ -164,14 +175,8 @@ defmodule FermixCore.Realtime.LiveSessionServer do
       started_at: state.started_at
     }
 
-    case CallRegistry.claim(state.call_registry, call) do
-      :ok ->
-        {:ok, state}
-
-      {:error, :call_in_progress} ->
-        Logger.info("voice_live: refused a second call while one is in progress")
-        {:stop, :call_in_progress}
-    end
+    :ok = CallRegistry.claim(state.call_registry, call)
+    state
   end
 
   defp initial_state(opts, config) do

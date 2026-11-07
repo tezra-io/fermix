@@ -42,32 +42,14 @@ defmodule FermixCore.Realtime.CallRegistryTest do
     assert CallRegistry.active(:"call_registry_not_started_#{System.unique_integer()}") == :none
   end
 
-  test "a second claim is refused while the first holder lives", %{registry: registry} do
+  # Admission is `CallLease`'s: only the session holding the home's one call
+  # claims here, so a second claim is a defect, and it fails loud.
+  test "a second claim while the first holder lives fails loud", %{registry: registry} do
     holder = claim_in_process(registry, @first_uuid)
 
-    assert {:error, :call_in_progress} = CallRegistry.claim(registry, call(@second_uuid))
+    assert_raise MatchError, fn -> CallRegistry.claim(registry, call(@second_uuid)) end
     assert CallRegistry.lookup(registry, @second_uuid) == :none
     assert {:ok, %{session: ^holder}} = CallRegistry.active(registry)
-  end
-
-  # Two connections starting a call at once: the claim is one `insert_new`, so
-  # exactly one of them wins however their starts interleave.
-  test "of many claims racing, exactly one wins", %{registry: registry} do
-    test_pid = self()
-
-    for index <- 1..20 do
-      spawn(fn ->
-        uuid = "00000000-0000-4000-8000-#{String.pad_leading(Integer.to_string(index), 12, "0")}"
-        send(test_pid, {:claimed, CallRegistry.claim(registry, call(uuid))})
-
-        hold_claim()
-      end)
-    end
-
-    results = for _index <- 1..20, do: receive_claim()
-
-    assert Enum.count(results, &(&1 == :ok)) == 1
-    assert Enum.count(results, &(&1 == {:error, :call_in_progress})) == 19
   end
 
   test "the claim and the UUID go with the holder, however it ends", %{registry: registry} do
