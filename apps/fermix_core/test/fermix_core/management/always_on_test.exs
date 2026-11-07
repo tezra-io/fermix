@@ -586,9 +586,59 @@ defmodule FermixCore.Management.AlwaysOnTest do
                press(%{ctx | opts: terminal}, "move_back")
 
       assert sentence =~ "Install it as a service first."
+      # This computer's own check came first: the server opened nothing.
+      refute_received {:forwarded, "home.enroll.open", _params}
       refute Candidate.present?(ctx.home)
       assert Return.read(ctx.home) == :absent
       refute_received {:return_started, _home}
+    end
+
+    # A refused step leaves nothing open on the server: the code it opened
+    # for a step that then did not go through is withdrawn.
+    test "a step after the server's code that does not go through withdraws the code", ctx do
+      expired = return_code("invented", ~U[2031-05-04 11:00:00Z])
+
+      Agent.update(ctx.script, fn script ->
+        fn
+          "home.enroll.open", %{} -> {:ok, %{"code" => expired, "expires_at" => "x"}}
+          method, params -> script.(method, params)
+        end
+      end)
+
+      assert {:error, :unavailable, %{"sentence" => sentence}} = press(ctx, "move_back")
+      assert sentence =~ "expired"
+      assert_received {:forwarded, "home.enroll.open", %{}}
+      assert_received {:forwarded, "home.enroll.withdraw", %{}}
+
+      Agent.update(ctx.script, fn _script -> server_part(:on) end)
+      down = Keyword.put(ctx.opts, :start_return, fn _home -> {:error, :no_tree} end)
+
+      assert {:error, :unavailable, %{"sentence" => sentence}} =
+               press(%{ctx | opts: down}, "move_back")
+
+      assert sentence =~ "Fermix could not start receiving the move back here"
+      assert_received {:forwarded, "home.enroll.withdraw", %{}}
+      refute Candidate.present?(ctx.home)
+      assert Return.read(ctx.home) == :absent
+    end
+
+    test "a code the server does not withdraw is said after the refusal", ctx do
+      Agent.update(ctx.script, fn script ->
+        fn
+          "home.enroll.withdraw", _params -> {:error, :primary_unreachable, %{"sentence" => "."}}
+          method, params -> script.(method, params)
+        end
+      end)
+
+      down = Keyword.put(ctx.opts, :start_return, fn _home -> {:error, :no_tree} end)
+
+      assert {:error, :unavailable, %{"sentence" => sentence}} =
+               press(%{ctx | opts: down}, "move_back")
+
+      assert sentence ==
+               "Fermix could not start receiving the move back here, so nothing was kept; " <>
+                 "Fermix's log says why. The code your server opened for it could not be " <>
+                 "closed, so it stops working by itself within half an hour."
     end
 
     test "two presses of Move back at once: the first runs, the second sees what it changed",
@@ -1148,7 +1198,7 @@ defmodule FermixCore.Management.AlwaysOnTest do
   end
 
   # The copied code the server opens for a desktop moving back.
-  defp return_code(name \\ "invented") do
+  defp return_code(name \\ "invented", expires_at \\ ~U[2031-05-04 12:30:00Z]) do
     {:ok, code} =
       EnrollmentCode.encode(%{
         secret: :binary.copy(<<9>>, 32),
@@ -1157,7 +1207,7 @@ defmodule FermixCore.Management.AlwaysOnTest do
         relays: [%{"url" => "https://eu1.relay.invalid/", "quic_port" => 7842}],
         relays_rev: String.duplicate("a1", 8),
         name: name,
-        expires_at: ~U[2031-05-04 12:30:00Z]
+        expires_at: expires_at
       })
 
     code

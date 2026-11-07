@@ -946,6 +946,31 @@ defmodule FermixCore.Management.HomeSummaryTest do
       assert Enum.find(linux, &(&1["id"] == "move_back"))["label"] == "Move back to this computer"
     end
 
+    # The move back's own check refuses an engine run from a terminal at the
+    # press, so the screen says it where Move back would be, before any press.
+    test "an engine run from a terminal is not offered Move back, and Details say why" do
+      summary = HomeSummary.summary(desktop(restarts_itself: false))
+
+      assert summary["state"] == "on"
+      assert ids(summary["detail"]["actions"]) == ["back_up_now"]
+      refute "move_back" in ids(HomeSummary.offered(summary))
+
+      assert %{"label" => "Move back", "value" => said} =
+               Enum.find(summary["detail"]["lines"], &(&1["label"] == "Move back"))
+
+      assert said ==
+               "Fermix runs from a terminal here, so it could not start again on its own " <>
+                 "after the move back. Install it as a service first."
+
+      assert Copy.summary_violations(said) == []
+      refute summary["key"] == HomeSummary.summary(desktop([]))["key"]
+
+      refute Enum.any?(
+               HomeSummary.summary(desktop([]))["detail"]["lines"],
+               &(&1["label"] == "Move back")
+             )
+    end
+
     test "ready names the server, what runs here again and until when it waits, and Move " <>
            "now asks the server's passphrase with a confirm built here, Cancel beside it" do
       summary = HomeSummary.summary(returning(back("enrolled")))
@@ -1410,7 +1435,8 @@ defmodule FermixCore.Management.HomeSummaryTest do
         copies: [],
         lapsed: nil,
         moved_back: false,
-        primary_behind: false
+        primary_behind: false,
+        restarts_itself: true
       },
       Map.new(overrides)
     )

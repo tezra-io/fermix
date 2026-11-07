@@ -397,6 +397,24 @@ defmodule FermixCore.Home.CandidateTest do
       for home <- [never_moved], do: refute(Candidate.present?(home))
     end
 
+    # A move back makes these before it asks the server for a code, so a
+    # refusal here leaves nothing open there.
+    test "returnable/3 makes every check of this computer with no code, writing nothing",
+         ctx do
+      assert Candidate.returnable(ctx.mac, :return, return_opts()) == :ok
+      terminal = Keyword.put(return_opts(), :restarts_itself?, false)
+      assert {:error, :not_supervised} = Candidate.returnable(ctx.mac, :return, terminal)
+      server = Keyword.put(return_opts(), :role, :primary)
+      assert {:error, :not_device} = Candidate.returnable(ctx.mac, :local, server)
+      refute Candidate.present?(ctx.mac)
+
+      {:ok, _state} = Candidate.prepare_return(ctx.mac, {:return, ctx.code}, return_opts())
+      assert {:error, :candidate_present} = Candidate.returnable(ctx.mac, :return, return_opts())
+
+      SafeRm.rm!(Path.join(ctx.mac, "device/desktop.json"))
+      assert {:error, :not_linked} = Candidate.returnable(ctx.mac, :return, return_opts())
+    end
+
     test "refuses while a move is under way here", ctx do
       write!(ctx.mac, ".move/phase.json", ~s({"v":1,"phase":"streaming","candidate":"x"}))
 

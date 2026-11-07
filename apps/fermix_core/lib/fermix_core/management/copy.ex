@@ -108,6 +108,7 @@ defmodule FermixCore.Management.Copy do
     waits_until: "Waits until",
     disk: "Server disk",
     runs_again: "Runs here again",
+    move_back: "Move back",
     connection: "Connection"
   ]
   @line_keys Keyword.keys(@line_labels) ++ [:backup, :copies, :backup_here]
@@ -632,7 +633,8 @@ defmodule FermixCore.Management.Copy do
   computer's `copies` take, in bytes, on `ctx`'s `machine`; how full the
   server's `disk` is, a fraction; the copy on `ctx`'s `machine` a restore
   takes (`backup_here`, when it was written); what runs on this computer
-  again after a move back (`runs_again`, the features); and whether the link
+  again after a move back (`runs_again`, the features); why Move back is not
+  offered (`move_back`, the move back's own refusal); and whether the link
   to the server runs direct or through Fermix's relay (`connection`, `:direct`
   or `:relay`).
   """
@@ -662,7 +664,7 @@ defmodule FermixCore.Management.Copy do
     do: line(summary_line_label(:connection), "Through Fermix's network")
 
   def summary_line(key, value, _ctx)
-      when key in [:server, :system, :version] and is_binary(value),
+      when key in [:server, :system, :version, :move_back] and is_binary(value),
       do: line(summary_line_label(key), value)
 
   defp line(label, value), do: %{"label" => label, "value" => value}

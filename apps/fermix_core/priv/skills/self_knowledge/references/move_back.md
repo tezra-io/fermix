@@ -7,17 +7,24 @@ The move to a server, the roles and the epoch: skill_view(name:
 "self-knowledge", file: "home").
 
 - **Move back.** On the computer the home left, Always On's Details offer
-  **Move back to this Mac** ("this computer" off a Mac), beside Back up now.
+  **Move back to this Mac** ("this computer" off a Mac), beside Back up now,
+  where Fermix starts again by itself: one run from a terminal is not
+  offered it, and its Details line Move back says why ("Fermix runs from a
+  terminal here, so it could not start again on its own after the move
+  back. Install it as a service first.").
   It is two presses, each one `home.act`.
-  Move back asks the server for a code (it names this desktop, which is how
+  Move back makes this computer's own checks first, so a refused one asks
+  the server for nothing, then asks the server for a code (it names this
+  desktop, which is how
   the server knows the move goes back and not to another server) and writes
   this computer's candidate for the home beside the moved home
   (`candidate/`, kind `return`) and the move back's record
   (`device/return.json`); this computer's own Fermix then receives beside its
-  link ("Connecting this Mac to your server…"). It is refused while the
-  server reports a move of its own, and where Fermix runs from a terminal
-  ("Fermix runs from a terminal here, so it could not start again on its own
-  after the move back. Install it as a service first."). Once the server
+  link ("Connecting this Mac to your server…"). A step after the code that
+  does not go through closes the code on the server again, and its refusal
+  says so when the server could not be asked. It is refused while the
+  server reports a move of its own, and with the sentence above where
+  Fermix runs from a terminal. Once the server
   holds it: "This Mac is ready to take Fermix back.", with **Move now**,
   which asks for the server's recovery passphrase, and a confirm built here:
   what runs on this computer again (iMessage, voice calls and meetings, as

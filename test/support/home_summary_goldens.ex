@@ -73,7 +73,8 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
       link: link(enrollment: window(:used, @cand, ~U[2031-05-04 11:15:00Z])),
       candidates: [candidate_view()],
       review: review,
-      move_items: MoveReadiness.summary_items({:ok, ""}, true, @server_name, restarts_itself: true),
+      move_items:
+        MoveReadiness.summary_items({:ok, ""}, true, @server_name, restarts_itself: true),
       enrollment: %{
         "state" => "used",
         "expires_at" => "2031-05-04T11:15:00Z",
@@ -186,7 +187,9 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
         copies: Map.get(extra, :copies, []),
         lapsed: nil,
         moved_back: false,
-        primary_behind: false
+        primary_behind: false,
+        # The app engine, which starts again by itself after a move back.
+        restarts_itself: true
       })
 
     Home.picture(Map.put(facts, :summary, summary))

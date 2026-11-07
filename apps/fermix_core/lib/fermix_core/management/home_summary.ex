@@ -43,7 +43,10 @@ defmodule FermixCore.Management.HomeSummary do
   link's `down_ms`, a monotonic count). The last backup is old past 3 days.
 
   **Moving back** (Always On's move back, its design §7 to §9). A linked
-  desktop's `on` offers Move back beside Back up now. Once pressed, the
+  desktop's `on` offers Move back beside Back up now, where this engine
+  starts again by itself (`restarts_itself`); one run from a terminal says
+  in a Details line, in the move back's own refusal, why it is not offered
+  (`Home.Candidate.error_sentence/1`'s `:not_supervised`). Once pressed, the
   desktop's own candidate for the home (`candidate/state.json`, `returning`)
   and the return's record (`device/return.json`, `return`) lead, ahead of
   everything else the desktop shows, its link gone included: `creating`
@@ -156,6 +159,7 @@ defmodule FermixCore.Management.HomeSummary do
   alias FermixCore.Home.Snapshot.Capture
   alias FermixCore.Home.UnreadableFiles
   alias FermixCore.Management.Copy
+  alias FermixCore.Management.Lifecycle
 
   @states ~w(off connect creating ready moving on undone retired candidate primary problem)
   @outcomes ~w(running waiting done failed)
@@ -216,7 +220,8 @@ defmodule FermixCore.Management.HomeSummary do
           required(:copies) => [%{name: String.t(), at: DateTime.t()}],
           required(:lapsed) => String.t() | nil,
           required(:moved_back) => boolean(),
-          required(:primary_behind) => boolean()
+          required(:primary_behind) => boolean(),
+          required(:restarts_itself) => boolean() | nil
         }
   @type summary :: %{String.t() => term()}
 
@@ -374,7 +379,10 @@ defmodule FermixCore.Management.HomeSummary do
   a desktop's candidate for a move back (`returning`) (`lapsed`); on a
   desktop, whether its own move left it serving nothing (`moved_back`: a
   server's copy after a move back, its move's `keep_as_desktop`; a move's
-  record that cannot be read is logged once while it stays so).
+  record that cannot be read is logged once while it stays so), and whether
+  this engine starts again by itself (`restarts_itself`, a move back's need;
+  on a desktop only, `opts`' `:restarts_itself` in place of
+  `Lifecycle.restarts_itself?/0`).
   """
   @spec gather(Path.t(), map(), map(), map(), keyword()) :: facts()
   def gather(home, %{role: role} = record, link, status, opts)
@@ -408,7 +416,8 @@ defmodule FermixCore.Management.HomeSummary do
       copies: copies(home, role),
       lapsed: lapsed(home, role, {link, return}, now, reads),
       moved_back: moved_back(home, role, reads),
-      primary_behind: Map.get(status, :primary_behind, false)
+      primary_behind: Map.get(status, :primary_behind, false),
+      restarts_itself: restarts_itself(role, opts)
     }
   end
 
@@ -629,7 +638,7 @@ defmodule FermixCore.Management.HomeSummary do
       "copies_bytes" => facts.copies_bytes,
       "disk_used" => get_in(facts, [:primary_home, "disk", "used"]),
       "data" => sentence(:data, facts),
-      "actions" => [action(:back_up_now), action(:move_back, %{machine: machine(facts.host_os)})]
+      "actions" => [action(:back_up_now)] ++ List.wrap(move_back(facts))
     }
 
     view(
@@ -689,7 +698,7 @@ defmodule FermixCore.Management.HomeSummary do
     do: view("creating", sentence(:return_connecting, facts), return_cancel(), %{})
 
   defp return_view(%{"phase" => phase}, facts) when phase in @ended do
-    problem("return_failed", sentence(:return_failed, facts), move_back(facts), %{
+    problem("return_failed", sentence(:return_failed, facts), move_back_again(facts), %{
       "alternatives" => [action(:learn_more)]
     })
   end
@@ -762,7 +771,18 @@ defmodule FermixCore.Management.HomeSummary do
     do: view("moving", sentence(:restore_moving, facts), nil, %{})
 
   defp return_cancel, do: action(:cancel, %{return: true})
-  defp move_back(facts), do: action(:move_back, %{machine: machine(facts.host_os)})
+
+  # Move back, where this engine would start again by itself after it; an
+  # engine run from a terminal is refused it at the press, so it is not
+  # offered (`move_back_lines/3` says why).
+  defp move_back(%{restarts_itself: true} = facts),
+    do: action(:move_back, %{machine: machine(facts.host_os)})
+
+  defp move_back(_facts), do: nil
+
+  # A move back that ended is offered again as it was asked: its engine
+  # started again by itself then, and the press checks it once more.
+  defp move_back_again(facts), do: action(:move_back, %{machine: machine(facts.host_os)})
 
   defp restoring(facts) do
     if restore_running?(facts), do: view("moving", sentence(:restore_moving, facts), nil, %{})
@@ -1096,8 +1116,13 @@ defmodule FermixCore.Management.HomeSummary do
   defp lines(view, facts) do
     ctx = %{zone: facts.zone, machine: machine(facts.host_os)}
 
-    state_lines(view, ctx) ++
-      restore_lines(view, ctx) ++ again_lines(view, facts, ctx) ++ link_lines(view, facts, ctx)
+    Enum.concat([
+      state_lines(view, ctx),
+      restore_lines(view, ctx),
+      again_lines(view, facts, ctx),
+      move_back_lines(view, facts, ctx),
+      link_lines(view, facts, ctx)
+    ])
   end
 
   defp state_lines(%{"state" => state, "detail" => detail}, ctx)
@@ -1132,6 +1157,13 @@ defmodule FermixCore.Management.HomeSummary do
   end
 
   defp again_lines(_view, _facts, _ctx), do: []
+
+  # On, where Move back is not offered to an engine run from a terminal: the
+  # move back's own refusal, so the owner reads it before any press.
+  defp move_back_lines(%{"state" => "on"}, %{restarts_itself: false}, ctx),
+    do: [Copy.summary_line(:move_back, Candidate.error_sentence(:not_supervised), ctx)]
+
+  defp move_back_lines(_view, _facts, _ctx), do: []
 
   # On: whether the link runs direct or through Fermix's relay, while its
   # session is up and the helper has named its path (step 7).
@@ -1413,6 +1445,13 @@ defmodule FermixCore.Management.HomeSummary do
   defp read_result(read), do: read
 
   defp memory(reads), do: Keyword.get(reads, :unreadable_files, UnreadableFiles)
+
+  # A move back's need (`Home.Candidate.returnable/3`), read where Move back
+  # is offered.
+  defp restarts_itself(:device, opts),
+    do: Keyword.get_lazy(opts, :restarts_itself, &Lifecycle.restarts_itself?/0)
+
+  defp restarts_itself(_role, _opts), do: nil
 
   # What runs only on this computer: what stops after a move, which the
   # computer that sets it up says, and what runs here again after a move

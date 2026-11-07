@@ -46,15 +46,19 @@ defmodule FermixCore.Management.AlwaysOn do
       `keep_as_desktop` false, refused only by the server's own blocks, and
       the start is recorded in the return's record (`Home.Return`).
     * `move_back` (Always On's move back, its design §9): on a linked
-      desktop, the server opens a copied code for it (`home.enroll.open`,
-      which names this desktop), this desktop's candidate for the home is
-      written beside the moved home (`Home.Candidate.prepare_return/3`,
-      refused as it refuses: an engine that would not start again by itself
-      among them), the return's record with the server's name and the epoch
-      the link reached, and the candidate's subtree
-      starts beside the link (`Home.Link`'s `start_return/1`; one that does
-      not start leaves neither file). Refused while the server reports a
-      move of its own.
+      desktop, every check of this computer first
+      (`Home.Candidate.returnable/3`, refused as it refuses: an engine that
+      would not start again by itself among them), so a refused one asks the
+      server for nothing; then the server opens a copied code for it
+      (`home.enroll.open`, which names this desktop), this desktop's
+      candidate for the home is written beside the moved home
+      (`Home.Candidate.prepare_return/3`), the return's record with the
+      server's name and the epoch the link reached, and the candidate's
+      subtree starts beside the link (`Home.Link`'s `start_return/1`; one
+      that does not start leaves neither file). A step after the code that
+      does not go through withdraws it (`home.enroll.withdraw`), and a
+      withdraw the server does not take is said after the refusal. Refused
+      while the server reports a move of its own.
     * `cancel` during a move back (offered until the server started the
       move, and again once it undid it): the candidate's subtree stops, the
       server's copied code is closed (`home.enroll.withdraw`;
@@ -150,6 +154,8 @@ defmodule FermixCore.Management.AlwaysOn do
   @not_receiving_sentence "Fermix could not start receiving the move back here, so nothing " <>
                             "was kept; Fermix's log says why."
   @no_copy_sentence "There is no backup on this computer to restore."
+  @code_left_sentence "The code your server opened for it could not be closed, so it stops " <>
+                        "working by itself within half an hour."
   # Restore here's job.
   @restore_kind :home_restore
   # A move the server reports, from its request to its undoing.
@@ -188,7 +194,8 @@ defmodule FermixCore.Management.AlwaysOn do
       @external_sentence,
       @server_moving_sentence,
       @not_receiving_sentence,
-      @no_copy_sentence
+      @no_copy_sentence,
+      @code_left_sentence
     ]
   end
 
@@ -492,15 +499,47 @@ defmodule FermixCore.Management.AlwaysOn do
 
   # -- moving back -------------------------------------------------------------
 
-  # Move back (design §9, M0): the server opens a copied code that names this
-  # desktop, the candidate and the return's record are written beside the
-  # moved home, and the candidate's subtree starts beside the link.
+  # Move back (design §9, M0): this computer's checks first, so a refused one
+  # leaves nothing open on the server; then the server opens a copied code
+  # that names this desktop, the candidate and the return's record are
+  # written beside the moved home, and the candidate's subtree starts beside
+  # the link. A step after the code that does not go through withdraws it.
   defp move_back(%{facts: facts}, opts) do
+    forward = Keyword.fetch!(opts, :primary_forward)
+
     with :ok <- server_still(facts),
-         {:ok, code} <- return_code(Keyword.fetch!(opts, :primary_forward)),
-         {:ok, state} <- prepared(code, opts),
+         :ok <- returnable(opts),
+         {:ok, code} <- return_code(forward) do
+      code |> receive_back(facts, opts) |> withdrawn_unless_taken(forward)
+    end
+  end
+
+  defp returnable(opts) do
+    case Candidate.returnable(home(opts), :return, prepare_opts(opts)) do
+      :ok -> :ok
+      {:error, reason} -> unavailable(Candidate.error_sentence(reason))
+    end
+  end
+
+  defp receive_back(code, facts, opts) do
+    with {:ok, state} <- prepared(code, opts),
          :ok <- keep_record(home(opts), return_record(facts, state, opts)),
          do: receiving(opts)
+  end
+
+  # The code would stay open on the server for half an hour; one the server
+  # does not withdraw is said after the refusal.
+  defp withdrawn_unless_taken({:ok, _result} = taken, _forward), do: taken
+
+  defp withdrawn_unless_taken({:error, kind, %{"sentence" => sentence} = details}, forward) do
+    case forward.(server_request("home.enroll.withdraw", %{}), []) do
+      {:ok, _withdrawn} ->
+        {:error, kind, details}
+
+      {:error, refused, _said} ->
+        Logger.warning("always on: the server did not withdraw the move back's code (#{refused})")
+        {:error, kind, %{details | "sentence" => sentence <> " " <> @code_left_sentence}}
+    end
   end
 
   defp server_still(facts) do
@@ -517,13 +556,13 @@ defmodule FermixCore.Management.AlwaysOn do
   end
 
   defp prepared(code, opts) do
-    prepare = [now: now(opts)] ++ Keyword.take(opts, [:role, :restarts_itself?])
-
-    case Candidate.prepare_return(home(opts), {:return, code}, prepare) do
+    case Candidate.prepare_return(home(opts), {:return, code}, prepare_opts(opts)) do
       {:ok, state} -> {:ok, state}
       {:error, reason} -> unavailable(Candidate.error_sentence(reason))
     end
   end
+
+  defp prepare_opts(opts), do: [now: now(opts)] ++ Keyword.take(opts, [:role, :restarts_itself?])
 
   # The server's name as its code gave it and the epoch the link reached.
   defp return_record(facts, state, opts) do

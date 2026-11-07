@@ -178,23 +178,35 @@ defmodule FermixCore.Home.Candidate do
   moduledoc): `{:return, code_text}` for one the server's move fills, from the
   manual enrollment code the server opened, or `{:local, from}` for one
   restored from a copy this computer holds of the server named `from`.
-  Answers the state written. `opts`: `:now`, and the seams `:role` (this
-  engine's, `Role.current/0`) and `:restarts_itself?`
-  (`Lifecycle.restarts_itself?/0`).
+  Answers the state written, after `returnable/3`'s checks. `opts`: `:now`,
+  and the seams `:role` (this engine's, `Role.current/0`) and
+  `:restarts_itself?` (`Lifecycle.restarts_itself?/0`).
   """
   @spec prepare_return(Path.t(), {:return, String.t()} | {:local, String.t()}, keyword()) ::
           {:ok, state()} | {:error, term()}
-  def prepare_return(home, source, opts \\ [])
-      when is_binary(home) and home != "" and is_tuple(source) and is_list(opts) do
+  def prepare_return(home, {kind, _text} = source, opts \\ [])
+      when is_binary(home) and home != "" and kind in [:return, :local] and is_list(opts) do
     now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
 
-    with :ok <- returnable_engine(opts),
-         :ok <- returnable_home(home, source),
-         {:ok, found} <- replaceable_return(home),
+    with {:ok, found} <- return_checks(home, kind, opts),
          {:ok, state} <- return_state(source, now),
          :ok <- remove_builders(home) do
       build_return(home, source, state, found)
     end
+  end
+
+  @doc """
+  Whether a return's candidate of `kind` (`:return` or `:local`) could be
+  written beside the moved home at `home` now: every check of this computer
+  `prepare_return/3` makes before it reads its source, refused as it refuses
+  (`:not_device`, `:not_supervised`, `:not_moved`, `:not_linked`,
+  `:move_pending`, `:candidate_present`). A move back runs it before it asks
+  the server for anything. `opts`: `prepare_return/3`'s seams.
+  """
+  @spec returnable(Path.t(), :return | :local, keyword()) :: :ok | {:error, term()}
+  def returnable(home, kind, opts \\ [])
+      when is_binary(home) and home != "" and kind in [:return, :local] and is_list(opts) do
+    with {:ok, _found} <- return_checks(home, kind, opts), do: :ok
   end
 
   @doc "Reads `state.json`."
@@ -456,6 +468,14 @@ defmodule FermixCore.Home.Candidate do
 
   # -- prepare_return ---------------------------------------------------------
 
+  # The engine, then the home, then any candidate already here: `{:ok,
+  # :new | :replace}`.
+  defp return_checks(home, kind, opts) do
+    with :ok <- returnable_engine(opts),
+         :ok <- returnable_home(home, kind),
+         do: replaceable_return(home)
+  end
+
   defp returnable_engine(opts) do
     cond do
       Keyword.get_lazy(opts, :role, &Role.current/0) != :device ->
@@ -469,21 +489,21 @@ defmodule FermixCore.Home.Candidate do
     end
   end
 
-  defp returnable_home(home, source) do
+  defp returnable_home(home, kind) do
     case Moved.read(home) do
-      {:ok, _marker} -> linked_and_still(home, source)
+      {:ok, _marker} -> linked_and_still(home, kind)
       :absent -> {:error, :not_moved}
       {:error, _reason} = error -> error
     end
   end
 
-  defp linked_and_still(home, {:return, _code}) do
+  defp linked_and_still(home, :return) do
     if File.regular?(DesktopLink.path(home)),
       do: no_move_here(home),
       else: {:error, :not_linked}
   end
 
-  defp linked_and_still(home, {:local, _from}), do: no_move_here(home)
+  defp linked_and_still(home, :local), do: no_move_here(home)
 
   defp no_move_here(home) do
     case Move.moving_to(home) do

@@ -132,7 +132,10 @@ will be part of a future release; nothing in this group is in a release yet.
   And you can move back whenever you want: Move back to this Mac (in Always
   On's details on the computer your home left, or `fermix always-on
   move-back`) gets this computer ready in seconds, and Move now with your
-  recovery passphrase brings Fermix back in place. Your Mac's own files
+  recovery passphrase brings Fermix back in place. Where Fermix runs from a
+  terminal, which could not start it again afterwards, Details say so in
+  place of the button, and a move back this computer refuses leaves nothing
+  open on your server. Your Mac's own files
   (logs, browser profiles, iMessage, the helper apps, models, coding runs)
   stay where they were, your secrets go back into its keychain, iMessage,
   voice calls and meetings run there again as they did before, and your
