@@ -25,11 +25,18 @@ defmodule FermixCore.Capabilities.Registry do
 
   @type trust :: nil | :operator | :guest
 
+  @typedoc """
+  The one plugin whose tools a run reaches beyond its policy: a plugin skill's
+  own, within `classes`, the classes the run that started it grants.
+  """
+  @type own_plugin :: %{name: String.t(), classes: [Capability.policy_class()]}
+
   @type filter ::
           [
             allowed_tools: [String.t()] | nil,
             policy: policy_spec(),
             policy_classes: [Capability.policy_class()] | nil,
+            own_plugin: own_plugin() | nil,
             trust: trust(),
             kind: Capability.kind() | :all,
             excluded_categories: [atom()] | nil,
@@ -229,7 +236,7 @@ defmodule FermixCore.Capabilities.Registry do
 
     capabilities
     |> apply_kind(Keyword.get(opts, :kind, :all))
-    |> apply_policy(policy)
+    |> apply_policy(policy, Keyword.get(opts, :own_plugin))
     |> apply_owner_only(Keyword.get(opts, :trust))
     |> apply_allowlist(Keyword.get(opts, :allowed_tools))
     |> apply_name_exclusion(Keyword.get(opts, :excluded_names))
@@ -335,17 +342,48 @@ defmodule FermixCore.Capabilities.Registry do
     Enum.filter(capabilities, &(&1.kind == kind))
   end
 
-  defp apply_policy(capabilities, nil), do: capabilities
+  defp apply_policy(capabilities, nil, _own_plugin), do: capabilities
 
-  defp apply_policy(capabilities, policy) when is_list(policy) do
+  defp apply_policy(capabilities, policy, own_plugin) when is_list(policy) do
     {allow, deny} = normalize_policy(policy)
 
     validate_policy_classes!(allow, :allow)
     validate_policy_classes!(deny, :deny)
+    validate_own_plugin!(own_plugin)
 
-    Enum.filter(capabilities, fn %Capability{policy_class: class} ->
-      class in allow and class not in deny
+    Enum.filter(capabilities, fn %Capability{policy_class: class} = capability ->
+      (class in allow and class not in deny) or own_plugin_tool?(capability, own_plugin)
     end)
+  end
+
+  @doc """
+  Whether `capability` is a tool of `own_plugin` within its classes: the one
+  thing beyond its policy a plugin skill's run reaches. Guest trust grants no
+  plugin's tools (each is `:external_api`), so without this a plugin skill
+  would run without the plugin it ships with. Every other filter (owner-only,
+  allowlist) still applies after it.
+  """
+  @spec own_plugin_tool?(Capability.t(), own_plugin() | nil) :: boolean()
+  def own_plugin_tool?(%Capability{}, nil), do: false
+
+  def own_plugin_tool?(
+        %Capability{policy_class: class, metadata: %{plugin_owned?: true, plugin: plugin}},
+        %{name: plugin, classes: classes}
+      ),
+      do: class in classes
+
+  def own_plugin_tool?(%Capability{}, %{name: _name, classes: _classes}), do: false
+
+  defp validate_own_plugin!(nil), do: :ok
+
+  defp validate_own_plugin!(%{name: name, classes: classes})
+       when is_binary(name) and name != "" and is_list(classes),
+       do: validate_policy_classes!(classes, :own_plugin)
+
+  defp validate_own_plugin!(other) do
+    raise ArgumentError,
+          "Capabilities.Registry.list/2 own_plugin must be nil or %{name: binary, classes: list}, " <>
+            "got: #{inspect(other)}"
   end
 
   defp normalize_policy(policy) do

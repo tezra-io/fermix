@@ -178,10 +178,14 @@ defmodule FermixCore.Plugins.Registry do
     end
   end
 
-  @spec enabled_skill_dirs() :: [Path.t()]
+  @doc """
+  Each enabled plugin's skill root, paired with the plugin's name, so a skill
+  loaded from it knows the plugin it ships with (`SkillRegistry`).
+  """
+  @spec enabled_skill_dirs() :: [{String.t(), Path.t()}]
   def enabled_skill_dirs, do: enabled_skill_dirs([])
 
-  @spec enabled_skill_dirs(keyword()) :: [Path.t()]
+  @spec enabled_skill_dirs(keyword()) :: [{String.t(), Path.t()}]
   def enabled_skill_dirs(opts) when is_list(opts) do
     enabled = enabled_plugin_names()
 
@@ -189,7 +193,7 @@ defmodule FermixCore.Plugins.Registry do
       {:ok, plugins} ->
         plugins
         |> Enum.filter(&(&1.name in enabled))
-        |> Enum.flat_map(&plugin_skill_dirs/1)
+        |> Enum.flat_map(fn plugin -> Enum.map(plugin_skill_dirs(plugin), &{plugin.name, &1}) end)
         |> Enum.uniq()
         |> Enum.sort()
 

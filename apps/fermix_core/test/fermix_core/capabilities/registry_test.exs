@@ -220,6 +220,31 @@ defmodule FermixCore.Capabilities.RegistryTest do
       names = reg |> Registry.list(trust: nil) |> Enum.map(& &1.name)
       assert names == ["ro"]
     end
+
+    # A plugin skill's run reaches its own plugin's tools beyond its policy,
+    # within the classes `own_plugin` carries (what the run that starts it
+    # grants). Another plugin's tools and every other filter are unchanged.
+    test "own_plugin admits that plugin's tools within its classes and nothing else", %{
+      registry: reg
+    } do
+      for {name, plugin} <- [{"acme_api", "acme"}, {"bolt_api", "bolt"}] do
+        metadata = %{plugin_owned?: true, plugin: plugin}
+        :ok = Registry.register(reg, cap(name, policy_class: :external_api, metadata: metadata))
+      end
+
+      names = fn opts -> reg |> Registry.list([trust: :guest] ++ opts) |> Enum.map(& &1.name) end
+
+      for {opts, listed} <- [
+            {[own_plugin: nil], ["ro"]},
+            {[own_plugin: %{name: "acme", classes: [:read_only, :external_api]}],
+             ["acme_api", "ro"]},
+            {[own_plugin: %{name: "acme", classes: [:read_only]}], ["ro"]},
+            {[own_plugin: %{name: "acme", classes: [:external_api]}, allowed_tools: ["ro"]],
+             ["ro"]}
+          ] do
+        assert {opts, names.(opts)} == {opts, listed}
+      end
+    end
   end
 
   describe "default_policy_classes/1" do

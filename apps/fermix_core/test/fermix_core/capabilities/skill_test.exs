@@ -478,6 +478,45 @@ defmodule FermixCore.Capabilities.SkillTest do
       # its run trust is its `source_trust` (`CapabilityRegistry.run_trust/1`).
       assert worker_tools(definition, Map.put(context, :source_trust, :guest)) == ["notes_read"]
     end
+
+    # A plugin skill's worker runs at guest, which reaches no plugin's tools,
+    # so its own plugin's are the one thing beyond guest it gets, within what
+    # its parent grants: the owner's turn grants `:external_api`, a guest's
+    # does not. Another plugin's tools stay out either way.
+    test "a plugin skill's worker reaches its own plugin's tools within its parent's grant", %{
+      context: context
+    } do
+      for {name, plugin} <- [{"acme_search", "acme"}, {"bolt_search", "bolt"}] do
+        :ok =
+          CapabilityRegistry.register(context.capability_registry, %{
+            stand_in(name, :external_api)
+            | metadata: %{plugin_owned?: true, plugin: plugin}
+          })
+      end
+
+      definition =
+        "acme-plugin"
+        |> build_definition("Acme skill body.", %{
+          "allowed_tools" => ["acme_search", "bolt_search"]
+        })
+        |> AgentDefinition.with_trust(:guest)
+        |> AgentDefinition.with_plugin("acme")
+
+      owner_turn = %{
+        source_trust: :operator,
+        effective_trust: :operator,
+        effective_policy: CapabilityRegistry.default_policy_classes(:operator)
+      }
+
+      guest_turn = %{
+        source_trust: :guest,
+        effective_trust: :guest,
+        effective_policy: [:read_only]
+      }
+
+      assert worker_tools(definition, Map.merge(context, owner_turn)) == ["acme_search"]
+      assert worker_tools(definition, Map.merge(context, guest_turn)) == []
+    end
   end
 
   # A plugin skill loads at guest trust whoever calls it, so its worker runs at

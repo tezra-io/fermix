@@ -110,12 +110,14 @@ defmodule FermixCore.Tools.ToolSearch do
   # primitive let discovery run ahead of execution — a guest could enumerate
   # tools it can never call. The run's own ceiling is already stamped on every
   # tool context by `AgentLoop`; both keys absent means an internal caller and
-  # keeps the unfiltered behaviour.
+  # keeps the unfiltered behaviour. A plugin skill's run also finds its own
+  # plugin's tools (`effective_own_plugin`), which its loop can dispatch.
   defp deferred_catalog(registry, context) do
     registry
     |> Registry.list_for(
       trust: Registry.run_trust(context),
-      policy_classes: Map.get(context, :effective_policy)
+      policy_classes: Map.get(context, :effective_policy),
+      own_plugin: Map.get(context, :effective_own_plugin)
     )
     |> Enum.filter(&Deferral.deferred?/1)
   end

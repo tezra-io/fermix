@@ -22,6 +22,7 @@ defmodule FermixCore.Jobs.Runner do
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Capabilities.Skill
   alias FermixCore.Clock
+  alias FermixCore.Cues.FollowUpReadiness
   alias FermixCore.Cues.FollowUps
   alias FermixCore.Cues.Mandates
   alias FermixCore.Cues.Notices
@@ -576,6 +577,7 @@ defmodule FermixCore.Jobs.Runner do
   defp persisted_error("error", {:no_route, message}), do: inspect(message)
   defp persisted_error("error", {:skill_grants_nothing, sentence}), do: inspect(sentence)
   defp persisted_error("error", {:cue_history_lost, sentence}), do: inspect(sentence)
+  defp persisted_error("error", {:tools_unavailable, sentence}), do: inspect(sentence)
   defp persisted_error("error", reason), do: inspect(reason)
 
   defp finalize_delivery(state, text) do
@@ -869,10 +871,12 @@ defmodule FermixCore.Jobs.Runner do
     job_trust = effective_trust(state.job)
     trust = loop_trust(job_trust, skill)
     allowed_tools = run_allowed_tools(state, skill)
+    own_plugin = run_own_plugin(state.job, job_trust, skill)
 
     with {:ok, policy} <- run_policy(state.job, job_trust, skill),
-         surface = surface(state.capability_registry, trust, policy, allowed_tools),
+         surface = surface(state.capability_registry, trust, policy, allowed_tools, own_plugin),
          :ok <- check_cue_history(state, surface, skill),
+         :ok <- check_job_tools(state, surface, skill, job_trust),
          media = media_on_surface(media, surface),
          {:ok, {routing_opts, worker_routing}} <- run_routing(state) do
       base = [
@@ -881,6 +885,7 @@ defmodule FermixCore.Jobs.Runner do
         allowed_tools: allowed_tools,
         policy: policy,
         trust: trust,
+        own_plugin: own_plugin,
         max_iterations: state.job.max_iterations
       ]
 
@@ -891,13 +896,133 @@ defmodule FermixCore.Jobs.Runner do
   end
 
   # The registry list the run's loop resolves from the same options (`AgentLoop`).
-  defp surface(registry, trust, policy, allowed_tools) do
+  defp surface(registry, trust, policy, allowed_tools, own_plugin) do
     CapabilityRegistry.list_for(registry,
       allowed_tools: allowed_tools,
       policy: policy,
-      trust: trust
+      trust: trust,
+      own_plugin: own_plugin
     )
   end
+
+  # A job bound to a plugin skill reaches that plugin's tools within the job's
+  # own grant (`Skill.own_plugin/2`, the rule `skill_run` of the skill uses).
+  defp run_own_plugin(job, job_trust, skill),
+    do: Skill.own_plugin(skill, job_grant(job, job_trust))
+
+  @doc """
+  Fermix's sentence for the tools `job`'s own list names that its runs, bound
+  to `skill`, cannot use although Fermix has them (the job's trust, or its
+  skill's trust or classes, leave them off the run's surface), or nil when
+  there are none. The one check behind `schedule_job`'s and `update_job`'s
+  refusal to bind such a skill; a run fails on the same names, and on a name
+  no capability carries now (`check_job_tools/4`).
+  """
+  @spec unusable_tools_sentence(map(), AgentDefinition.t() | nil, GenServer.server()) ::
+          String.t() | nil
+  def unusable_tools_sentence(job, skill, registry) when is_map(job) do
+    job_trust = effective_trust(job)
+
+    case run_policy(job, job_trust, skill) do
+      {:ok, policy} ->
+        registry
+        |> surface(
+          loop_trust(job_trust, skill),
+          policy,
+          effective_allowed_tools(job, skill),
+          run_own_plugin(job, job_trust, skill)
+        )
+        |> then(&off_surface(required_tools(job, skill), &1))
+        |> Enum.filter(&registered?(registry, &1))
+        |> then(&unusable_sentence(job_trust, skill, &1))
+
+      # A skill granting no class fails the run with its own sentence.
+      {:error, {:skill_grants_nothing, _sentence}} ->
+        nil
+    end
+  end
+
+  # A tool the job's own list names is one it needs, so a run whose surface
+  # leaves one out fails before the model is asked, saying which and why,
+  # rather than run without it and let the model improvise. A cue run's surface
+  # is narrower than its job's list by design (`CueSurface.lacking/4`).
+  defp check_job_tools(%{cue: {:ok, _cue}}, _surface, _skill, _job_trust), do: :ok
+
+  defp check_job_tools(state, surface, skill, job_trust) do
+    case off_surface(required_tools(state.job, skill), surface) do
+      [] ->
+        :ok
+
+      missing ->
+        {:error, {:tools_unavailable, missing_sentence(missing, job_trust, skill, state)}}
+    end
+  end
+
+  # A tool Fermix has that the run's surface leaves out, and one no capability
+  # carries now (a plugin turned off), are different fixes, so each is told.
+  defp missing_sentence(missing, job_trust, skill, state) do
+    registry = state.capability_registry
+    unusable = Enum.filter(missing, &registered?(registry, &1))
+
+    [
+      unusable_sentence(job_trust, skill, unusable),
+      FollowUpReadiness.unoffered(missing, capability_registry: registry)
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join(" ")
+  end
+
+  # The names of the job's own list, kept to its skill's as the run keeps them
+  # (`effective_allowed_tools/2`). A list only its skill names is not required:
+  # the run goes without a name Fermix lacks and says so (`Skill.tool_warning/2`).
+  defp required_tools(job, skill) do
+    case narrow_allowed_tools(job.allowed_tools) do
+      nil -> []
+      _job_list -> effective_allowed_tools(job, skill)
+    end
+  end
+
+  defp off_surface(names, surface) do
+    on_surface = MapSet.new(surface, & &1.name)
+    Enum.reject(names, &MapSet.member?(on_surface, &1))
+  end
+
+  defp registered?(registry, name),
+    do: match?({:ok, _capability}, CapabilityRegistry.find(registry, name))
+
+  defp unusable_sentence(_job_trust, _skill, []), do: nil
+
+  defp unusable_sentence(job_trust, skill, names) do
+    "This job can't use #{Enum.join(names, ", ")}: " <>
+      unusable_reason(job_trust, skill, if(length(names) == 1, do: "it", else: "them"))
+  end
+
+  defp unusable_reason(:guest, _skill, pronoun),
+    do:
+      "it was set up at guest trust, which leaves #{pronoun} out. Set it up again from the " <>
+        "owner's own turn, or take #{pronoun} off its tools."
+
+  defp unusable_reason(:operator, %AgentDefinition{plugin: plugin, name: name}, pronoun)
+       when is_binary(plugin),
+       do:
+         "its skill #{name} comes from a plugin, so its runs are at guest trust, which " <>
+           "reaches that plugin's own tools and read-only tools that hold none of the " <>
+           "owner's data. Bind another skill, drop skill_name, or take #{pronoun} off its tools."
+
+  defp unusable_reason(:operator, %AgentDefinition{trust: :guest, name: name}, pronoun),
+    do:
+      "its skill #{name} loads at guest trust, which leaves #{pronoun} out. Bind another " <>
+        "skill, drop skill_name, or take #{pronoun} off its tools."
+
+  defp unusable_reason(:operator, %AgentDefinition{name: name}, pronoun),
+    do:
+      "its skill #{name} asks for capability classes that leave #{pronoun} out. Bind another " <>
+        "skill, drop skill_name, or take #{pronoun} off its tools."
+
+  # An operator job with no skill gets every class; only a tool hidden from
+  # agents is left off its surface.
+  defp unusable_reason(:operator, nil, pronoun),
+    do: "Fermix doesn't offer #{pronoun} to agents. Take #{pronoun} off its tools."
 
   @cue_history "cue_history"
 
@@ -918,7 +1043,12 @@ defmodule FermixCore.Jobs.Runner do
     case run_policy(job, job_trust, skill) do
       {:ok, policy} ->
         registry
-        |> surface(loop_trust(job_trust, skill), policy, [@cue_history])
+        |> surface(
+          loop_trust(job_trust, skill),
+          policy,
+          [@cue_history],
+          run_own_plugin(job, job_trust, skill)
+        )
         |> cue_history?()
 
       {:error, _no_classes} ->
@@ -992,7 +1122,7 @@ defmodule FermixCore.Jobs.Runner do
     do: {:ok, scheduled_policy(job.capability_policy, job_trust)}
 
   defp run_policy(job, job_trust, skill) do
-    granted = job_policy_classes(scheduled_policy(job.capability_policy, job_trust), job_trust)
+    granted = job_grant(job, job_trust)
 
     case Skill.classes_within(skill, granted) do
       [] -> {:error, {:skill_grants_nothing, no_classes_sentence(skill, granted)}}
@@ -1011,6 +1141,10 @@ defmodule FermixCore.Jobs.Runner do
     do: Enum.map_join(classes, ", ", &Atom.to_string/1)
 
   defp class_words(skill), do: skill |> Skill.declared_classes() |> class_words()
+
+  # The classes the job grants a skill bound to it, read at the job's trust.
+  defp job_grant(job, job_trust),
+    do: job_policy_classes(scheduled_policy(job.capability_policy, job_trust), job_trust)
 
   # The concrete class set the job runs with absent a skill: the explicit
   # scheduled-job policy when set, else the trust's registry default.
@@ -1679,6 +1813,7 @@ defmodule FermixCore.Jobs.Runner do
 
   defp job_error_sentence({:skill_grants_nothing, sentence}), do: sentence
   defp job_error_sentence({:cue_history_lost, sentence}), do: sentence
+  defp job_error_sentence({:tools_unavailable, sentence}), do: sentence
   defp job_error_sentence(reason), do: TurnRunner.error_reply(reason, surface: :job)
 
   defp job_config_snapshot(job, loop_input) do

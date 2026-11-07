@@ -130,6 +130,26 @@ defmodule FermixCore.Capabilities.Skill do
   def declared_classes(%AgentDefinition{trust: trust, policy: policy}),
     do: CapabilityRegistry.resolved_policy_classes(trust, policy)
 
+  @doc """
+  The plugin tools a run of `skill` reaches beyond its classes: a plugin
+  skill's own plugin's, within `granted`, the classes the run that starts it
+  grants (a job's own grant, or the parent run's). Nil for any other skill.
+  Guest trust grants no plugin's tools (each is `:external_api`), so without
+  this a plugin skill runs without the plugin it ships with. It reaches no
+  other plugin's tools, and stays the skill's own: a job or worker its run
+  starts gets the run's classes, never this. The one rule for `skill_run`'s
+  worker and a job bound to the skill (`Jobs.Runner`).
+  """
+  @spec own_plugin(AgentDefinition.t() | nil, [Capability.policy_class()]) ::
+          CapabilityRegistry.own_plugin() | nil
+  def own_plugin(%AgentDefinition{plugin: plugin}, granted)
+      when is_binary(plugin) and is_list(granted),
+      do: %{name: plugin, classes: granted}
+
+  def own_plugin(skill, granted)
+      when (is_nil(skill) or is_struct(skill, AgentDefinition)) and is_list(granted),
+      do: nil
+
   # A skill's worker gets at most what its parent run is authorized for (§11.2,
   # as a `subagents` worker does): the skill's trust meets the parent's run
   # trust (`CapabilityRegistry.run_trust/1`), its allowlist the parent's
@@ -138,7 +158,8 @@ defmodule FermixCore.Capabilities.Skill do
   # that side, so an un-narrowed parent starts the skill exactly as declared;
   # what the parent's surface leaves out only to fit its channel does not carry.
   # An empty class meet rides the allowlist as deny-all, because the registry
-  # reads `policy: []` as the trust default.
+  # reads `policy: []` as the trust default. A plugin skill also reaches its own
+  # plugin's tools within the parent's grant (`own_plugin/2`).
   defp within_parent(%AgentDefinition{} = definition, context) do
     allowed =
       meet_allowlist(definition.allowed_tools, Map.get(context, :effective_allowed_tools))
@@ -146,6 +167,16 @@ defmodule FermixCore.Capabilities.Skill do
     definition
     |> within_parent_classes(Map.get(context, :effective_policy), allowed)
     |> Map.put(:trust, meet_trust(definition.trust, context))
+    |> Map.put(:own_plugin, own_plugin(definition, parent_grant(context)))
+  end
+
+  # The classes the parent run grants: those its loop stamped, or, for a
+  # context no loop stamped (a voice call's bridge), its trust's default.
+  defp parent_grant(context) do
+    case Map.get(context, :effective_policy) do
+      nil -> CapabilityRegistry.default_policy_classes(CapabilityRegistry.run_trust(context))
+      classes when is_list(classes) -> classes
+    end
   end
 
   defp within_parent_classes(definition, nil, allowed), do: %{definition | allowed_tools: allowed}

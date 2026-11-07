@@ -122,6 +122,11 @@ defmodule FermixCore.Tools.UpdateJob do
         tag: "skill_drops_cue_history",
         description:
           "skill_name binds a watcher's task job to a skill whose trust or classes drop cue_history"
+      },
+      %{
+        tag: "skill_drops_job_tools",
+        description:
+          "skill_name binds a skill whose trust or classes leave a tool the job's own list names off its runs"
       }
     ]
   end
@@ -148,6 +153,7 @@ defmodule FermixCore.Tools.UpdateJob do
          {:ok, job} <- Support.check_job_access(job_id, context),
          :ok <- Support.check_change_trust(job, context),
          :ok <- Support.check_cue_skill(job, skill, context),
+         :ok <- Support.check_skill_tools(job, skill, context),
          :ok <- Support.check_within_run_tools(job, skill, context),
          :ok <- Support.check_watcher_consent(job_id, context),
          :ok <- Mandates.check_update_consent(job_id, context),

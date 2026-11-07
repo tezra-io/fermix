@@ -130,6 +130,7 @@ defmodule FermixCore.AgentLoop do
           allowed_tools: [String.t()] | nil,
           policy: CapabilityRegistry.policy_spec(),
           trust: CapabilityRegistry.trust(),
+          own_plugin: CapabilityRegistry.own_plugin() | nil,
           excluded_categories: [atom()] | nil,
           routes: [route()],
           model: String.t(),
@@ -189,6 +190,7 @@ defmodule FermixCore.AgentLoop do
     allowed_tools = Keyword.get(opts, :allowed_tools)
     policy = Keyword.get(opts, :policy)
     trust = Keyword.get(opts, :trust)
+    own_plugin = Keyword.get(opts, :own_plugin)
     excluded_categories = Keyword.get(opts, :excluded_categories)
     routes = resolve_routes(opts)
     {first_route_key, _first_opts} = hd(routes)
@@ -200,6 +202,7 @@ defmodule FermixCore.AgentLoop do
       opts
       |> Keyword.get(:context, %{})
       |> stamp_effective_surface(trust, policy, allowed_tools)
+      |> Map.put(:effective_own_plugin, own_plugin)
       |> Map.put(:tool_result_store, store)
       |> Map.put_new(:outside_sources, MapSet.new())
 
@@ -210,6 +213,7 @@ defmodule FermixCore.AgentLoop do
             allowed_tools: allowed_tools,
             policy: policy,
             trust: trust,
+            own_plugin: own_plugin,
             excluded_categories: excluded_categories
           )
 
@@ -273,6 +277,10 @@ defmodule FermixCore.AgentLoop do
   # run is unrestricted. `effective_trust` is the trust the loop resolved its
   # surface at, which a skill's worker can hold below its person's
   # `source_trust` (a plugin skill runs at guest under the owner's turn).
+  # `effective_own_plugin` (stamped beside these) is that plugin skill's reach
+  # into its own plugin's tools, which `tool_search` and `tool_help` honour;
+  # `subagents`, `skill_run` and the job tools read only the three here, so a
+  # worker or job the run starts never inherits it.
   defp stamp_effective_surface(context, trust, policy, allowed_tools) do
     context
     |> Map.put(:effective_policy, CapabilityRegistry.resolved_policy_classes(trust, policy))

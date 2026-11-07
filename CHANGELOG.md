@@ -642,6 +642,19 @@ will be part of a future release; nothing in this group is in a release yet.
 
 ### Fixed
 
+- **A job bound to a plugin's skill can use that plugin again.** Since a job
+  bound to a plugin skill started running at guest trust, it got none of the
+  plugin's own tools, so a GitHub issue monitor ran with no GitHub tool at
+  all, said the tools weren't connected, and later replied with made-up tool
+  calls. A plugin skill now reaches its own plugin's tools, and still no
+  other plugin's and none of your files, within what the job or the turn
+  that starts it grants; `skill_run` of a plugin skill gets the same.
+- **A scheduled job that can't use a tool it names fails and says why.** A
+  run whose job names a tool its trust or skill leaves out, or one Fermix
+  doesn't have right now (a plugin that is off), used to run without it and
+  report `ok`. It now fails before the model is asked, naming the tools and
+  what to change, and `schedule_job` and `update_job` refuse to bind a skill
+  that would leave one of the job's own tools out.
 - **Fermix sees the Linux desktop app installed as a package.** Fermix
   looked for the desktop app only where the earlier Flatpak put it, so on a
   computer with the app's .deb or .rpm package it took the app for missing.

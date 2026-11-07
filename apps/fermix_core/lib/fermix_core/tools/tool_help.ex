@@ -117,10 +117,12 @@ defmodule FermixCore.Tools.ToolHelp do
   # (`Registry.run_trust/1`, so a plugin skill's guest worker under the owner
   # counts as guest), and `policy_class` bounds what it does. An absent trust or
   # policy is an internal caller (a unit test, a non-loop entry point) and stays
-  # unfiltered, matching the registry's storage-primitive semantics.
+  # unfiltered, matching the registry's storage-primitive semantics. A plugin
+  # skill's run also sees its own plugin's tools (`effective_own_plugin`).
   defp visible?(%Capability{} = capability, context) do
     owner_visible?(capability, Registry.run_trust(context)) and
-      class_visible?(capability, Map.get(context, :effective_policy))
+      (class_visible?(capability, Map.get(context, :effective_policy)) or
+         Registry.own_plugin_tool?(capability, Map.get(context, :effective_own_plugin)))
   end
 
   defp owner_visible?(%Capability{owner_only?: true}, :guest), do: false
