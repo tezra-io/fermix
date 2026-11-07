@@ -340,7 +340,12 @@ The grant holds only once the policy stops allowing everything: a new
 tailnet's file starts with a rule from `*` to `*:*`, and a file with no rule
 at all is read as that same allow-all. Removing that rule, or adding any rule
 to a file that has none, turns allow-all off for every device, so the file
-then needs a rule for whatever the owner's other devices reach today.
+then needs a rule for whatever the owner's other devices reach today. The
+grant above lets the owner's devices reach the server on `udp:4033` alone, so
+once allow-all is off, SSH or anything else to the server's tailnet address
+needs a rule of the owner's own, such as `tcp:22` from their own devices or a
+Tailscale SSH rule. SSH to the server's public address is not the tailnet
+policy's to allow or refuse.
 
 Webhooks reach the server through Tailscale Funnel, with the mount commands
 Always On shows once Fermix runs there. Funnel also needs MagicDNS and HTTPS

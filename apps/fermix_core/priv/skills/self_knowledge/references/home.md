@@ -251,6 +251,9 @@ it, never a second writer.
   from `*` to `*:*`, and a file with no rule reads as that allow-all, so
   removing it or adding any rule turns allow-all off for every device, and
   the file then needs a rule for whatever your other devices reach today.
+  The grant opens only `udp:4033`, so SSH or anything else to the server's
+  tailnet address then needs your own rule (`tcp:22` from your devices, or a
+  Tailscale SSH rule); SSH to its public address is unaffected.
   Funnel also needs MagicDNS and HTTPS certificates on (the DNS page), and a
   new server name can take about ten minutes to resolve.
 - **Updates on the server.** Nobody logs in to it, so it updates itself.
