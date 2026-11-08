@@ -260,6 +260,40 @@ defmodule FermixChannels.Accessories.LinkTest do
     end
   end
 
+  # M91 F3: the robot's own counters, as it last reported them this attach.
+  describe "the robot's diag counters" do
+    test "are the link's view of what the robot last reported, and a new HELLO clears them",
+         ctx do
+      ctx = ctx |> enrolled() |> start()
+      attached!(ctx)
+      assert Link.status(ctx.link).diag == nil
+
+      counters = %{
+        uptime_s: 12,
+        frames_rx: 40,
+        frames_tx: 52,
+        crc_errors: 1,
+        resync_bytes: 7,
+        pcm_seq_gaps: 0,
+        mic_overflows: 0,
+        spk_underflows: 0
+      }
+
+      AccessorySim.send_message(ctx.sim, %{type: "diag.counters", counters: counters})
+      assert AccessoryCase.await_state(&(&1.diag != nil)).diag == counters
+
+      AccessorySim.send_raw(
+        ctx.sim,
+        "FX" <> <<1, 1, 3, 0, 0::16, 99::32, 2::32-little, "{}", 0::32>>
+      )
+
+      AccessoryCase.advance(ctx.clock, 1_000)
+      send(ctx.link, :tick)
+      assert %{gen: 2} = AccessoryCase.await_received(ctx.sim, "hello")
+      assert AccessoryCase.await_state(&(&1.gen == 2)).diag == nil
+    end
+  end
+
   describe "heartbeat and liveness" do
     test "outside a call the host pings every five seconds, and a peer that answers stays",
          ctx do

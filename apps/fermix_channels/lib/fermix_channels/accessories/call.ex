@@ -64,6 +64,18 @@ defmodule FermixChannels.Accessories.Call do
     "segment_limit" => :segment_limit,
     "segment_sequence" => :segment_sequence
   }
+  # The robot's `diag.counters`, each under its own name in the call's link
+  # event (`FermixCore.Accessories.Telemetry`).
+  @robot_counters %{
+    uptime_s: :robot_uptime_s,
+    frames_rx: :robot_frames_rx,
+    frames_tx: :robot_frames_tx,
+    crc_errors: :robot_crc_errors,
+    resync_bytes: :robot_resync_bytes,
+    pcm_seq_gaps: :robot_pcm_seq_gaps,
+    mic_overflows: :robot_mic_overflows,
+    spk_underflows: :robot_spk_underflows
+  }
   @client_opts [:session_module, :session_starter, :session_supervisor, :session_guard]
   @token ~r/\A[a-z][a-z0-9_]{0,47}\z/
 
@@ -94,9 +106,20 @@ defmodule FermixChannels.Accessories.Call do
       tasks: Tasks.new(),
       mic: <<>>,
       mic_seq: nil,
+      mic_live?: false,
+      robot_diag: Keyword.get(opts, :robot_diag),
       engine_muted?: false,
       sent_state: nil,
-      counters: %{mic_frames: 0, mic_chunks: 0, pcm_seq_gaps: 0, task_events: 0, task_faults: 0}
+      counters: %{
+        mic_frames: 0,
+        mic_chunks: 0,
+        pcm_seq_gaps: 0,
+        task_events: 0,
+        task_faults: 0,
+        mic_frames_before_live: 0,
+        interrupts: 0,
+        interrupt_played_ms_total: 0
+      }
     }
 
     publish(state)
@@ -191,6 +214,7 @@ defmodule FermixChannels.Accessories.Call do
 
   def handle_info({:robot, message}, state), do: on_robot(state, message)
   def handle_info({:mic, seq, pcm}, state), do: {:noreply, on_mic(state, seq, pcm)}
+  def handle_info({:robot_diag, counters}, state), do: {:noreply, %{state | robot_diag: counters}}
 
   def handle_info({:robot_error, code}, state),
     do: finish(state, Map.fetch!(@robot_errors, code))
@@ -361,8 +385,13 @@ defmodule FermixChannels.Accessories.Call do
   defp on_robot(state, %{type: "spk.drained", segment: segment}),
     do: {:noreply, pump(%{state | speaker: Speaker.drained(state.speaker, segment)})}
 
-  defp on_robot(state, %{type: "spk.flushed", played_ms: played_ms}),
-    do: verb(state, &CallClient.interrupt(&1, played_ms))
+  defp on_robot(state, %{type: "spk.flushed", played_ms: played_ms}) do
+    state
+    |> count(:interrupts, 1)
+    |> count(:interrupt_played_ms_total, played_ms)
+    |> put_in([:counters, :interrupt_played_ms_last], played_ms)
+    |> verb(&CallClient.interrupt(&1, played_ms))
+  end
 
   defp on_robot(state, %{type: "playback.progress"} = progress) do
     verb(
@@ -380,6 +409,7 @@ defmodule FermixChannels.Accessories.Call do
     do: finish(state, :mic_backlog)
 
   defp on_robot(state, %{type: "mic.state", state: mic}) do
+    state = if mic == "live", do: %{state | mic_live?: true}, else: state
     muted? = mic != "live"
     state = viewed(state, &View.muted(&1, if(muted?, do: :accessory)))
     if muted? == state.engine_muted?, do: {:noreply, state}, else: engine_mute(state, muted?)
@@ -422,8 +452,26 @@ defmodule FermixChannels.Accessories.Call do
     state
     |> mic_seq(seq)
     |> count(:mic_frames, 1)
-    |> Map.update!(:mic, &(&1 <> pcm))
-    |> forward_mic()
+    |> take_mic(pcm)
+  end
+
+  # PROTOCOL.md (accessory), *Calls*: capture starts at the host's
+  # `listening`, and the robot says `mic.state live` before its audio. A frame
+  # before that is a contract fault (HW-08's host-side proof): counted, said
+  # once as a fault, and never forwarded, since no mic-live mark was shown.
+  defp take_mic(%{mic_live?: true} = state, pcm),
+    do: state |> Map.update!(:mic, &(&1 <> pcm)) |> forward_mic()
+
+  defp take_mic(state, _pcm) do
+    if state.counters.mic_frames_before_live == 0 do
+      Logger.warning(
+        "accessory call #{state.stream}: microphone audio before the robot said it is live"
+      )
+
+      Telemetry.emit_fault(:mic_before_live, :call, 1)
+    end
+
+    count(state, :mic_frames_before_live, 1)
   end
 
   # The first frame is the base; a gap is counted and the audio still used.
@@ -465,6 +513,7 @@ defmodule FermixChannels.Accessories.Call do
     counters =
       state.counters
       |> Map.merge(Speaker.counters(state.speaker))
+      |> Map.merge(robot_counters(state.robot_diag))
       |> Map.put(:duration_ms, max(state.clock.() - state.started_ms, 0))
 
     Telemetry.emit_call_link(state.session_id, counters, %{
@@ -473,6 +522,17 @@ defmodule FermixChannels.Accessories.Call do
       source: state.source,
       reason: reason
     })
+  end
+
+  # The robot's own counters, since its boot, as it last reported them; none
+  # when it reported none this attach.
+  defp robot_counters(nil), do: %{}
+
+  defp robot_counters(%{} = diag) do
+    for {name, key} <- @robot_counters,
+        Map.has_key?(diag, name),
+        into: %{},
+        do: {key, Map.fetch!(diag, name)}
   end
 
   defp error_reason(%{kind: kind}) when is_binary(kind), do: token(kind, "session_error")

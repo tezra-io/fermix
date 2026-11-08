@@ -516,6 +516,16 @@ host       -> accessory:  call.end { gen, stream, reason? }
 - The microphone is off between calls. Capture starts at the host's
   `listening` and streams continuously, silence included, while an unmuted call
   is active. Attached or connected never means the microphone is ready.
+- The accessory sends `mic.state {state: "live"}` before the first microphone
+  frame of a call, once its mic-live mark shows. A microphone frame before it
+  is a contract fault: the host counts it (`mic_frames_before_live` in the
+  call's telemetry, which stays 0), reports it once, and never forwards its
+  audio.
+- Once the accessory has ended a call itself (its `call.end_request`, or its
+  own bounds: a microphone backlog, three seconds with no host frame), it
+  plays nothing more and sends no `credit`, `playback.progress` or
+  `spk.flushed` for that call until the host's `call.end`. The host ends the
+  call at once and waits on none of them.
 - `request` is the accessory's own counter, `1 … 4,294,967,295`.
   `call.result.code`, when refused, uses the Realtime error vocabulary
   (`call_in_progress`, `voice_not_ready`, `update_required` and the like).
@@ -556,11 +566,14 @@ The host never sends speaker PCM beyond the accessory's credit.
   with the same code), since each is a host bug: `segment_limit` for a ninth
   open segment's `spk.begin`; `segment_sequence` for speaker PCM while no
   segment takes audio, a `spk.begin` while one still does or with the wrong
-  number, and a `spk.end` for a segment that is not taking audio.
+  number, and a `spk.end` for a segment that is not taking audio. Speaker PCM
+  is no control message, so its `error {code: "segment_sequence"}` carries no
+  `message_type`.
 - **Flush.** An interrupt is `spk.flush {stream}` (`URGENT`): the accessory
-  drops all queued audio and answers `spk.flushed {stream, segment?,
-  played_ms}` with the segment that was playing and what of it played; the
-  host passes that on as the engine's interrupt. A flush closes every open
+  drops all queued audio and, once its playback has applied the flush (the
+  last sample is out), answers `spk.flushed {stream, segment?, played_ms}`
+  with the segment that was playing and what of it played; the host passes
+  that on as the engine's interrupt. A flush closes every open
   segment: none counts toward the 8 afterwards, and no `spk.drained` follows
   for any of them. Outstanding credit is unchanged by a flush.
 - **Progress.** `playback_id` is the Grok engine's id

@@ -582,13 +582,30 @@ defmodule FermixOpik.TraceFileTest do
       "reason" => "end_request",
       "mic_frames" => 120,
       "speaker_bytes" => 48_000,
-      "duration_ms" => 3_000
+      "duration_ms" => 3_000,
+      "mic_frames_before_live" => 0,
+      "interrupts" => 1,
+      "interrupt_played_ms_last" => 340,
+      "interrupt_played_ms_total" => 340,
+      "robot_crc_errors" => 0,
+      "robot_spk_underflows" => 2
     }
 
     assert {[:fermix, :accessory, :call_link], measurements, meta} =
              TraceFile.normalize("agent_event", row)
 
-    assert measurements == %{mic_frames: 120, speaker_bytes: 48_000, duration_ms: 3_000}
+    assert measurements == %{
+             mic_frames: 120,
+             speaker_bytes: 48_000,
+             duration_ms: 3_000,
+             mic_frames_before_live: 0,
+             interrupts: 1,
+             interrupt_played_ms_last: 340,
+             interrupt_played_ms_total: 340,
+             robot_crc_errors: 0,
+             robot_spk_underflows: 2
+           }
+
     assert meta.session_id == "voice_live:3"
     assert meta.endpoint == "accessory:abc"
     assert meta.reason == "end_request"

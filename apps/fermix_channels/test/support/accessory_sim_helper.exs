@@ -126,6 +126,9 @@ defmodule FermixTestSupport.AccessorySim do
        bad_sig?: Keyword.get(opts, :bad_sig?, false),
        auto_tap?: Keyword.get(opts, :auto_tap?, true),
        auto_credit: Keyword.get(opts, :auto_credit, @max_credit),
+       # Reports `mic.state live` on the host's `listening`, as the firmware
+       # does once its mic-live mark is drawn; off, a test sends it itself.
+       auto_live?: Keyword.get(opts, :auto_live?, true),
        owner: nil,
        ref: nil,
        parser: Parser.new(:host),
@@ -272,7 +275,7 @@ defmodule FermixTestSupport.AccessorySim do
   defp handle(%{type: "spk.end"} = segment_end, state), do: spk_end(state, segment_end)
   defp handle(%{type: "spk.flush"}, state), do: spk_flush(state)
 
-  defp handle(%{type: "call.state", state: "listening"}, %{call: %{}} = state),
+  defp handle(%{type: "call.state", state: "listening"}, %{call: %{}, auto_live?: true} = state),
     do: send_msg(state, %{type: "mic.state", stream: state.call.stream, state: "live"})
 
   defp handle(_message, state), do: state

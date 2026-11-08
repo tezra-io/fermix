@@ -398,7 +398,11 @@ defmodule FermixOpik.TraceFile do
 
   @accessory_counters ~w(duration_ms mic_frames mic_chunks pcm_seq_gaps speaker_frames
                          speaker_bytes segments flushes credit_waits backlog_peak_bytes
-                         speaker_bytes_dropped task_events task_faults)a
+                         speaker_bytes_dropped task_events task_faults mic_frames_before_live
+                         interrupts interrupt_played_ms_last interrupt_played_ms_total
+                         robot_uptime_s robot_frames_rx robot_frames_tx robot_crc_errors
+                         robot_resync_bytes robot_pcm_seq_gaps robot_mic_overflows
+                         robot_spk_underflows)a
 
   defp accessory_counters(row) do
     Enum.reduce(@accessory_counters, %{}, fn key, acc ->

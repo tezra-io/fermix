@@ -1262,8 +1262,9 @@ paired accessory such as StackChan) emits three events, all through
   verified).
 - `[:fermix, :accessory, :fault]`: a link fault, sessionless. `count`, the
   `reason` (a receive or reassembly fault of `priv/accessory/PROTOCOL.md`,
-  a control refusal such as `unknown_message`, `link_lost`, or
-  `accessory_fault` for the accessory's own `diag.fault`) and the `stage`
+  a control refusal such as `unknown_message`, `link_lost`,
+  `accessory_fault` for the accessory's own `diag.fault`, or `mic_before_live`,
+  once per call, for microphone audio before the robot said it is live) and the `stage`
   that found it (`receive`, `reassembly`, `control`, `peer`, `liveness`,
   `call`). A receive fault is reported once per loss of sync, so bytes after
   a fault are not a flood.
@@ -1276,7 +1277,16 @@ paired accessory such as StackChan) emits three events, all through
   `pcm_seq_gaps`, `speaker_frames`, `speaker_bytes`, `segments`, `flushes`,
   `credit_waits`, `backlog_peak_bytes`, `speaker_bytes_dropped` (an odd byte
   of the engine's audio that no later audio of its playback id completed),
-  `task_events`, `task_faults`. The
+  `task_events`, `task_faults`; `mic_frames_before_live` (microphone frames
+  that came before the robot said `mic.state live`: a contract fault, never
+  forwarded, so it stays 0, HW-08's host-side proof); `interrupts`,
+  `interrupt_played_ms_total` and, after the first, `interrupt_played_ms_last`
+  (each interrupt's played position, as the robot's `spk.flushed` gave it);
+  and, once the robot reported its `diag.counters` on this attach, its own
+  counters since its boot, as last reported: `robot_uptime_s`,
+  `robot_frames_rx`, `robot_frames_tx`, `robot_crc_errors`,
+  `robot_resync_bytes`, `robot_pcm_seq_gaps`, `robot_mic_overflows`,
+  `robot_spk_underflows`. The
   metadata: `endpoint`, `engine`, `source` (`screen_tap`, `head_swipe`,
   `mac`) and `reason` (why it ended: `end_request`, `mac_end`,
   `session_error`, `credit_overgrant`, `link_gone`, …).

@@ -378,6 +378,97 @@ defmodule FermixChannels.Accessories.CallTest do
     end
   end
 
+  # M91 F3, HW-08's host-side proof: the robot sends no microphone audio
+  # before it says its microphone is live. A frame that comes earlier is a
+  # counted contract fault, and its audio never reaches the voice provider.
+  describe "microphone audio before the robot says it is live" do
+    test "is counted and kept from the engine, and audio after live goes on", ctx do
+      ctx = ctx |> attached(sim: [auto_live?: false]) |> call_up()
+      session = ctx.session
+      TelemetryCapture.attach([[:fermix, :accessory, :call_link]], session_id: ctx.call_id)
+      TelemetryCapture.attach([[:fermix, :accessory, :fault]], reason: :mic_before_live)
+
+      AccessorySim.send_mic(ctx.sim, 5)
+      AccessorySim.mic_state(ctx.sim, "live")
+      AccessorySim.send_mic(ctx.sim, 5)
+
+      assert_receive {:engine, ^session, {:audio, chunk}}
+      assert chunk == :binary.list_to_bin(for i <- 1..5, do: :binary.copy(<<rem(i, 251)>>, 960))
+      refute_received {:engine, ^session, {:audio, _second}}
+
+      assert_receive {:telemetry, [:fermix, :accessory, :fault], %{count: 1},
+                      %{reason: :mic_before_live, stage: :call}}
+
+      AccessorySim.end_request(ctx.sim)
+
+      assert_receive {:telemetry, [:fermix, :accessory, :call_link], counters, _meta}
+      assert %{mic_frames_before_live: 5, mic_frames: 10, mic_chunks: 1} = counters
+    end
+
+    test "is zero on a call whose audio came after live", ctx do
+      ctx = ctx |> attached() |> call_up()
+      TelemetryCapture.attach([[:fermix, :accessory, :call_link]], session_id: ctx.call_id)
+      _ = AccessorySim.peek(ctx.sim)
+      _ = Link.status(ctx.link)
+      AccessorySim.send_mic(ctx.sim, 5)
+      AccessorySim.end_request(ctx.sim)
+
+      assert_receive {:telemetry, [:fermix, :accessory, :call_link], %{mic_frames_before_live: 0},
+                      _meta}
+    end
+  end
+
+  # M91 F3: the robot's own counters and the interrupts' positions ride the
+  # call's link event.
+  describe "the call's link event" do
+    test "carries the robot's diag counters and each interrupt's played position", ctx do
+      ctx = ctx |> attached() |> call_up()
+      session = ctx.session
+      TelemetryCapture.attach([[:fermix, :accessory, :call_link]], session_id: ctx.call_id)
+
+      AccessorySim.send_message(ctx.sim, %{type: "diag.counters", counters: robot_counters()})
+      :ok = AccessoryEngine.emit(ctx.session, audio(8_000))
+      pcm_received(ctx.sim, 8_000)
+      AccessorySim.play(ctx.sim, 4_800)
+      :ok = AccessoryEngine.emit(ctx.session, %{type: "playback_stop"})
+      assert_receive {:engine, ^session, {:interrupt, 100}}
+
+      :ok = AccessoryEngine.emit(ctx.session, audio(2_000))
+      pcm_received(ctx.sim, 2_000)
+      AccessorySim.play(ctx.sim, 960)
+      :ok = AccessoryEngine.emit(ctx.session, %{type: "playback_stop"})
+      assert_receive {:engine, ^session, {:interrupt, 20}}
+
+      AccessorySim.end_request(ctx.sim)
+
+      assert_receive {:telemetry, [:fermix, :accessory, :call_link], counters, _meta}
+
+      assert %{
+               interrupts: 2,
+               interrupt_played_ms_last: 20,
+               interrupt_played_ms_total: 120,
+               robot_uptime_s: 61,
+               robot_frames_rx: 812,
+               robot_frames_tx: 940,
+               robot_crc_errors: 0,
+               robot_resync_bytes: 0,
+               robot_pcm_seq_gaps: 0,
+               robot_mic_overflows: 0,
+               robot_spk_underflows: 3
+             } = counters
+    end
+
+    test "names no robot counter the robot never reported", ctx do
+      ctx = ctx |> attached() |> call_up()
+      TelemetryCapture.attach([[:fermix, :accessory, :call_link]], session_id: ctx.call_id)
+      AccessorySim.end_request(ctx.sim)
+
+      assert_receive {:telemetry, [:fermix, :accessory, :call_link], counters, _meta}
+      refute Map.has_key?(counters, :robot_crc_errors)
+      assert %{interrupts: 0, interrupt_played_ms_total: 0} = counters
+    end
+  end
+
   describe "the speaker" do
     test "audio goes out within credit, and the rest as the accessory plays", ctx do
       ctx = ctx |> attached() |> call_up()
@@ -500,6 +591,28 @@ defmodule FermixChannels.Accessories.CallTest do
   end
 
   describe "the end of a call" do
+    # PROTOCOL.md (accessory), *Calls*: an accessory that ended its call plays
+    # nothing more and sends no credit, progress or `spk.flushed` until the
+    # host's `call.end`. A flush still waiting and audio still held do not
+    # hold the call up.
+    test "a robot that ends the call with a flush and audio outstanding is ended at once", ctx do
+      ctx = ctx |> attached(sim: [auto_credit: 0]) |> call_up()
+      session = ctx.session
+      :ok = AccessoryEngine.emit(ctx.session, audio(9_600))
+      AccessorySim.grant(ctx.sim, 2_000)
+      pcm_received(ctx.sim, 2_000)
+      AccessorySim.set(ctx.sim, :silent?, true)
+      :ok = AccessoryEngine.emit(ctx.session, %{type: "playback_stop"})
+      AccessoryCase.await_received(ctx.sim, "spk.flush")
+
+      AccessorySim.end_request(ctx.sim)
+
+      assert %{reason: "end_request"} = AccessoryCase.await_received(ctx.sim, "call.end")
+      assert_receive {:engine, ^session, :call_stop}
+      refute_received {:engine, ^session, {:interrupt, _played_ms}}
+      session_gone(session, ctx.lease)
+    end
+
     test "a swipe back ends the call: the session is torn down and the lease freed", ctx do
       ctx = ctx |> attached() |> call_up("head_swipe")
       session = ctx.session
@@ -665,6 +778,19 @@ defmodule FermixChannels.Accessories.CallTest do
       _ = Link.status(ctx.link)
       refute_received {:sim, _sim, {:received, %{type: "task.event", task: "d5"}}}
     end
+  end
+
+  defp robot_counters do
+    %{
+      uptime_s: 61,
+      frames_rx: 812,
+      frames_tx: 940,
+      crc_errors: 0,
+      resync_bytes: 0,
+      pcm_seq_gaps: 0,
+      mic_overflows: 0,
+      spk_underflows: 3
+    }
   end
 
   defp duplicate_ack do

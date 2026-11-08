@@ -316,6 +316,41 @@ defmodule FermixCore.Management.AccessoriesTest do
       assert row["gen"] == 4
     end
 
+    # M91 F3: the robot's own counters, since its boot, as it last reported
+    # them this attach; null before a report, and on any robot not attached.
+    test "an attached robot's diag counters are its row's diag, and null before a report" do
+      robot = Goldens.record()
+
+      counters = %{
+        uptime_s: 61,
+        frames_rx: 812,
+        frames_tx: 940,
+        crc_errors: 0,
+        resync_bytes: 0,
+        pcm_seq_gaps: 2,
+        mic_overflows: 0,
+        spk_underflows: 3
+      }
+
+      reported = Goldens.running([Goldens.entry(:linked, attached_link(%{diag: counters}))])
+      [row] = status!(with_status(reported, records: {:ok, [robot]}))["accessories"]
+
+      assert row["diag"] == %{
+               "uptime_s" => 61,
+               "frames_rx" => 812,
+               "frames_tx" => 940,
+               "crc_errors" => 0,
+               "resync_bytes" => 0,
+               "pcm_seq_gaps" => 2,
+               "mic_overflows" => 0,
+               "spk_underflows" => 3
+             }
+
+      silent = Goldens.running([Goldens.entry(:linked, attached_link())])
+      [row] = status!(with_status(silent, records: {:ok, [robot]}))["accessories"]
+      assert row["diag"] == nil
+    end
+
     test "voice not ready keeps the robot attached and offers no call" do
       robot = Goldens.record()
       facts = Goldens.running([Goldens.entry(:linked, attached_link())])

@@ -229,7 +229,8 @@ defmodule FermixTestSupport.AccessoryGoldens do
         enrollment: nil,
         call: nil,
         check: nil,
-        fault: nil
+        fault: nil,
+        diag: nil
       },
       fields
     )
@@ -404,7 +405,18 @@ defmodule FermixTestSupport.AccessoryGoldens do
           calibration: "valid"
         },
         voice: :ready,
-        call: %{call() | phase: phase}
+        call: %{call() | phase: phase},
+        # The robot's own counters (M91 F3), as it reports them every 10 s.
+        diag: %{
+          uptime_s: 1_843,
+          frames_rx: 41_206,
+          frames_tx: 52_118,
+          crc_errors: 0,
+          resync_bytes: 0,
+          pcm_seq_gaps: 0,
+          mic_overflows: 0,
+          spk_underflows: 2
+        }
       })
 
     base(

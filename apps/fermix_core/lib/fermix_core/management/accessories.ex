@@ -1112,6 +1112,7 @@ defmodule FermixCore.Management.Accessories do
       "state" => state_view(link),
       "calibration_sentence" => calibration_sentence(link),
       "fault" => link && link[:fault],
+      "diag" => diag_view(link),
       "check" => check_view(link),
       "selected" => selected?,
       "sentence" => accessory_sentence(connection, entry, link, state),
@@ -1119,6 +1120,17 @@ defmodule FermixCore.Management.Accessories do
       "last_call" => last_call_view(Map.get(facts.provider.last_calls, record.accessory_id))
     }
   end
+
+  # The robot's own `diag.counters` (PROTOCOL.md (accessory), *Diagnostics*),
+  # since its boot, as it last reported them this attach: the closed set of
+  # counters, each a u32, or null before a report and off an attached link.
+  @diag_counters ~w(uptime_s frames_rx frames_tx crc_errors resync_bytes pcm_seq_gaps
+                    mic_overflows spk_underflows)a
+
+  defp diag_view(%{diag: %{} = diag}),
+    do: Map.new(@diag_counters, fn name -> {Atom.to_string(name), Map.fetch!(diag, name)} end)
+
+  defp diag_view(_link), do: nil
 
   # The port its link attached it on, else the port its serial names.
   defp entry_for(record, facts) do

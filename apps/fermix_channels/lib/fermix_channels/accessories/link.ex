@@ -500,6 +500,7 @@ defmodule FermixChannels.Accessories.Link do
         refused_range: nil,
         check: nil,
         fault: nil,
+        diag_counters: nil,
         readiness_sent: nil,
         parser: Parser.reset(state.parser),
         reassembler: Reassembler.new()
@@ -695,7 +696,7 @@ defmodule FermixChannels.Accessories.Link do
     do: %{state | accessory_state: Map.drop(message, [:type, :gen])}
 
   defp dispatch(state, %{type: "diag.counters", counters: counters}),
-    do: %{state | diag_counters: counters}
+    do: %{state | diag_counters: counters} |> diag_to_call(counters)
 
   # The accessory's own fault is kept until the next HELLO, so the Mac says
   # it (M91 E3: "StackChan reports a problem").
@@ -715,6 +716,14 @@ defmodule FermixChannels.Accessories.Link do
     do: to_call(state, message)
 
   defp dispatch(state, %{type: "diag.chunk"}), do: state
+
+  # The robot's own counters ride its call's link event too (M91 F3).
+  defp diag_to_call(%{call: %{pid: pid, ending?: false}} = state, counters) do
+    send(pid, {:robot_diag, counters})
+    state
+  end
+
+  defp diag_to_call(state, _counters), do: state
 
   defp peer_error(state, %{code: code} = error) do
     Logger.warning("accessory #{state.path} refused a host message: #{inspect(error)}")
@@ -1090,7 +1099,8 @@ defmodule FermixChannels.Accessories.Link do
         request: request,
         source: source,
         endpoint: {:accessory, accessory.accessory_id},
-        caps: state.verified.caps
+        caps: state.verified.caps,
+        robot_diag: state.diag_counters
       ] ++ state.call_opts
 
     case state.call_module.start_link(opts) do
@@ -1306,6 +1316,7 @@ defmodule FermixChannels.Accessories.Link do
       call: call_summary(state.call),
       check: state.check,
       fault: state.fault,
+      diag: state.diag_counters,
       last_call: state.last_call,
       counters: state.counters
     }

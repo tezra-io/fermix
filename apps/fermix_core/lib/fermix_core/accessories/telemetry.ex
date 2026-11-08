@@ -81,7 +81,23 @@ defmodule FermixCore.Accessories.Telemetry do
     :backlog_peak_bytes,
     :speaker_bytes_dropped,
     :task_events,
-    :task_faults
+    :task_faults,
+    # Microphone frames that came before the robot said its microphone is
+    # live: a contract fault, never forwarded, so it stays 0 (HW-08).
+    :mic_frames_before_live,
+    # Each interrupt's played position, as the robot's `spk.flushed` said it.
+    :interrupts,
+    :interrupt_played_ms_last,
+    :interrupt_played_ms_total,
+    # The robot's own `diag.counters`, since its boot, as it last reported them.
+    :robot_uptime_s,
+    :robot_frames_rx,
+    :robot_frames_tx,
+    :robot_crc_errors,
+    :robot_resync_bytes,
+    :robot_pcm_seq_gaps,
+    :robot_mic_overflows,
+    :robot_spk_underflows
   ]
 
   @type attach_status ::

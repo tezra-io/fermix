@@ -6785,6 +6785,7 @@
         "state",
         "calibration_sentence",
         "fault",
+        "diag",
         "check",
         "selected",
         "sentence",
@@ -6821,11 +6822,36 @@
         "state": { "oneOf": [{ "$ref": "#/$defs/accessoryState" }, { "type": "null" }] },
         "calibration_sentence": { "type": ["string", "null"] },
         "fault": { "type": ["string", "null"] },
+        "diag": { "oneOf": [{ "$ref": "#/$defs/accessoryDiag" }, { "type": "null" }] },
         "check": { "oneOf": [{ "$ref": "#/$defs/accessoryCheck" }, { "type": "null" }] },
         "selected": { "type": "boolean" },
         "sentence": { "type": "string", "minLength": 1 },
         "actions": { "type": "array", "items": { "$ref": "#/$defs/accessoryAction" } },
         "last_call": { "oneOf": [{ "$ref": "#/$defs/accessoryLastCall" }, { "type": "null" }] }
+      }
+    },
+    "accessoryDiag": {
+      "type": "object",
+      "required": [
+        "uptime_s",
+        "frames_rx",
+        "frames_tx",
+        "crc_errors",
+        "resync_bytes",
+        "pcm_seq_gaps",
+        "mic_overflows",
+        "spk_underflows"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "uptime_s": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "frames_rx": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "frames_tx": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "crc_errors": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "resync_bytes": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "pcm_seq_gaps": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "mic_overflows": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "spk_underflows": { "type": "integer", "minimum": 0, "maximum": 4294967295 }
       }
     },
     "accessoryState": {

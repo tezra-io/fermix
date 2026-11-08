@@ -120,6 +120,38 @@ defmodule FermixCore.Accessories.TelemetryTest do
            }
   end
 
+  # M91 F3: the robot's own counters, the early-microphone fault and the
+  # interrupts' positions are named counters of the call's link event.
+  test "the robot's counters, early microphone frames and interrupts are call counters" do
+    session_id = "session:#{System.unique_integer([:positive])}"
+    TelemetryCapture.attach([[:fermix, :accessory, :call_link]], session_id: session_id)
+
+    counters = %{
+      mic_frames_before_live: 0,
+      interrupts: 2,
+      interrupt_played_ms_last: 20,
+      interrupt_played_ms_total: 120,
+      robot_uptime_s: 61,
+      robot_frames_rx: 812,
+      robot_frames_tx: 940,
+      robot_crc_errors: 0,
+      robot_resync_bytes: 0,
+      robot_pcm_seq_gaps: 0,
+      robot_mic_overflows: 0,
+      robot_spk_underflows: 3
+    }
+
+    :ok =
+      Telemetry.emit_call_link(session_id, counters, %{
+        endpoint: "accessory:" <> @accessory,
+        engine: "openai_realtime",
+        source: :mac,
+        reason: :end_request
+      })
+
+    assert_receive {:telemetry, [:fermix, :accessory, :call_link], ^counters, _meta}
+  end
+
   test "a counter the contract does not name is refused, so nothing else reaches the event" do
     assert_raise ArgumentError, fn ->
       Telemetry.emit_call_link("session:1", %{mic_frames: 1, transcript: 0}, %{

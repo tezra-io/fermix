@@ -1768,7 +1768,7 @@ follow says so in `side_effects`. It never needs a restart.
 | `voice_device` | `{device, accessory_id, changeable, sentence}`: `device` is `desktop`, `accessory:<accessory_id>`, or `unreadable` when the choice cannot be read (`accessory_id` null; every call, the Mac's own and a robot's tap, is refused until the owner chooses again with `accessories.voice_device.set`, which stays allowed). A client routes a call on `device` and opens this Mac's microphone only for `desktop`: an app that does not know `unreadable`, or any later value, decodes it as unrecognized and routes no call to this Mac for it. `changeable` is false while a call runs or settles anywhere in this home. `sentence` says why the device needs the owner: the call that keeps it ("The voice device can change once the call has finished."), a choice that cannot be read ("The voice device could not be read. Choose one in Pet."), or a robot still chosen while accessories are off ("StackChan is off but is still your voice device. Choose This Mac in Pet to talk here.", also the status's `sentence`); null otherwise. The choice never changes by itself. |
 | `ports` | Every Espressif USB serial port the daemon sees, by `path` (at most 16 that went away are kept): `{path, serial, status, selected, accessory_id, kind, firmware, update, install_guide, retrying, sentence, actions}`. |
 | `ports_sentence` | While accessories are on and no port is seen: "Plug your StackChan into this Mac with its USB-C cable."; null otherwise. |
-| `accessories` | Every paired robot, oldest first, at most 8: `{accessory_id, short_id, name, kind, enrolled_at, connection, path, gen, firmware, capabilities, state, calibration_sentence, fault, check, selected, sentence, actions, last_call}`. |
+| `accessories` | Every paired robot, oldest first, at most 8: `{accessory_id, short_id, name, kind, enrolled_at, connection, path, gen, firmware, capabilities, state, calibration_sentence, fault, diag, check, selected, sentence, actions, last_call}`. |
 | `pairing` | The attempt on the selected port, or null: `{path, attempt, round, max_rounds, phase, code, accessory_confirmed, owner_confirmed, closed_reason, accessory_id, expires_at, sentence}`. |
 | `call` | The robot call that runs, or null (a desktop or phone call is not here): `{accessory_id, call_id, source, phase, phase_sentence, state, muted, muted_by, engine, engine_label, model, voice, call_uuid, conversation, started_at, transcript, tasks, usage}`. |
 
@@ -1838,7 +1838,12 @@ factory placeholder), `motion` `absent`, `off`, `homing`, `ready`, `paused` or
 calibrated.", `valid` "The head is calibrated.", `calibrating` "Calibrating the
 head: nudge each axis to its center, then set zero.", `failed` "The head
 calibration did not finish, so head movement stays off until a calibration
-succeeds." `check` is
+succeeds." `diag` is the robot's own counters, since its boot, as it last
+reported them (`diag.counters`, every 10 s and at a call's end) on this attach,
+or null before a report and on a robot not attached: `{uptime_s, frames_rx,
+frames_tx, crc_errors, resync_bytes, pcm_seq_gaps, mic_overflows,
+spk_underflows}`, each an integer from 0 to 4,294,967,295; read-only, for
+diagnosis. `check` is
 the newest setup check, or null: `{check, status, code, level}`, `status`
 `running`, `ok` or `fault`, `level` the microphone's newest RMS level (0 to
 32,767) during `mic`. `selected` is whether it is the voice device.
