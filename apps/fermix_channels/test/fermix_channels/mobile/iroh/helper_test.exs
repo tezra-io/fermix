@@ -53,6 +53,7 @@ defmodule FermixChannels.Mobile.Iroh.HelperTest do
     exit_after_hello = Keyword.get(opts, :exit_after_hello)
     exit_after_start = Keyword.get(opts, :exit_after_start)
     close_stdin_before_hello = Keyword.get(opts, :close_stdin_before_hello, false)
+    close_stdin_at_start = Keyword.get(opts, :close_stdin_at_start, false)
 
     script = """
     #!/usr/bin/perl
@@ -70,8 +71,10 @@ defmodule FermixChannels.Mobile.Iroh.HelperTest do
     while (my $line = <STDIN>) {
       print $log $line;
       if ($line =~ /"op":"start"/) {
+        #{if close_stdin_at_start, do: "close(STDIN);", else: ""}
         #{Enum.map_join(after_start, "\n", &"print '#{&1}' . \"\\n\";")}
         #{if exit_after_start, do: "exit #{exit_after_start};", else: ""}
+        #{if close_stdin_at_start, do: "sleep 60; exit 0;", else: ""}
       }
       exit 0 if $line =~ /"op":"shutdown"/;
     }
@@ -501,6 +504,22 @@ defmodule FermixChannels.Mobile.Iroh.HelperTest do
              failure: "the helper's pipe closed: broken pipe",
              retry: %{delay_ms: 2_000}
            } = :sys.get_state(pid)
+  end
+
+  # A helper whose input is closed when the daemon writes `shutdown` (it has
+  # exited, or stopped reading) closes the port with an EXIT and no exit
+  # status. The stop takes that as the helper's end, as it takes an exit
+  # status, and kills its group, instead of waiting out the grace. The fake
+  # closes its input at `start`, refuses it and stays up, so only the closed
+  # pipe can end the wait; the grace is an hour, so a stop that waited for it
+  # would hold the rail, and the emit it sends after the stop, past every bound.
+  test "a stop whose shutdown meets a closed pipe returns at once", ctx do
+    refusal = ~s({"event":"error","code":"bad_request","message":"refused"})
+    binary = fake(ctx, after_start: [refusal], close_stdin_at_start: true)
+    pid = start(ctx, binary_path: binary, test_pid: self(), shutdown_grace_ms: 3_600_000)
+
+    assert_receive {:emit, :degraded, 1, :helper_error}, @helper_ms
+    assert %{state: :failed, failure: "bad_request: refused"} = Helper.status(pid)
   end
 
   # `bad_request` is the helper refusing the daemon's own `start`: the same

@@ -408,7 +408,8 @@ defmodule FermixChannels.Mobile.Iroh.Helper do
       failures: 0,
       timeouts: %{
         hello: Keyword.get(opts, :hello_timeout_ms, @hello_timeout_ms),
-        ready: Keyword.get(opts, :ready_timeout_ms, @ready_timeout_ms)
+        ready: Keyword.get(opts, :ready_timeout_ms, @ready_timeout_ms),
+        shutdown: Keyword.get(opts, :shutdown_grace_ms, @shutdown_grace_ms)
       },
       rail: :dormant,
       failure: nil,
@@ -1179,15 +1180,15 @@ defmodule FermixChannels.Mobile.Iroh.Helper do
     ArgumentError -> :ok
   end
 
-  # A shutdown op first, then the process group if the helper is still there
-  # after the grace: Port.close alone would only close the pipe.
+  # A shutdown op first, then the process group unless the helper reports its
+  # exit within the grace: Port.close alone would only close the pipe.
   defp stop_port(%{port: nil} = state), do: state
 
   defp stop_port(%{port: port, os_pid: os_pid} = state) do
     if Port.info(port) do
       :ok = command(state, HelperProtocol.shutdown())
 
-      unless await_exit(port, @shutdown_grace_ms) do
+      unless await_exit(port, state.timeouts.shutdown) do
         close(port)
         ProcessGroup.signal(os_pid, :sigkill)
       end
@@ -1205,9 +1206,15 @@ defmodule FermixChannels.Mobile.Iroh.Helper do
     ArgumentError -> :ok
   end
 
+  # True once the helper's exit status arrives. A port that closes first ends
+  # the wait too, as false: a shutdown written to a helper that has exited or
+  # stopped reading fails with EPIPE, the port then exits with no status, and
+  # a closed pipe does not prove the helper is gone, so its group is killed as
+  # after the grace.
   defp await_exit(port, grace_ms) do
     receive do
       {^port, {:exit_status, _status}} -> true
+      {:EXIT, ^port, _reason} -> false
     after
       grace_ms -> false
     end
