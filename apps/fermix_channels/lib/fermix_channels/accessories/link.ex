@@ -20,7 +20,9 @@ defmodule FermixChannels.Accessories.Link do
       host's proof, and `attached` completes the link. Without both
       signatures verified within ten seconds of its HELLO, a port an enrolled
       accessory's hint named is greeted again, and the port the owner
-      selected for pairing ends the step (`{:shutdown, :no_answer}`). A
+      selected for pairing ends the step (`{:shutdown, :no_answer}`) until
+      its accessory enrolls: from `enroll.done` on, the link is in attach
+      mode, and its attach is greeted again like any other. A
       refusal either way (a host refusal, or the accessory's own) holds the
       port idle and is not retried until the owner acts.
     * **Liveness.** The host pings every 5 s outside a call and every second
@@ -820,6 +822,7 @@ defmodule FermixChannels.Accessories.Link do
 
     Telemetry.emit_attach(status, max(now(state) - opened, 0) * 1_000, %{
       mode: state.mode,
+      phase: state.phase,
       kind: state.peer && state.peer.kind,
       accessory_id: state.verified && state.verified.accessory.accessory_id,
       accessory_refusal: accessory_refusal
@@ -905,7 +908,10 @@ defmodule FermixChannels.Accessories.Link do
 
   defp effect({:send, message}, state), do: transmit(state, message)
   defp effect({:ignored, reason}, state), do: count(state, :dropped, reason)
-  defp effect({:enrolled, enrolled}, state), do: state |> write_record(enrolled) |> greet()
+  # The accessory committed: from here the port is an enrolled accessory's,
+  # so its attach times out into a new HELLO, never into `no_answer`.
+  defp effect({:enrolled, enrolled}, state),
+    do: %{write_record(state, enrolled) | mode: :attach} |> greet()
 
   defp write_record(state, %{accessory_id: id, accessory_pk: pk}) do
     {:ok, meta} = Attach.kind_metadata(state.peer.kind)

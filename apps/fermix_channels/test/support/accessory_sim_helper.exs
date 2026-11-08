@@ -124,6 +124,9 @@ defmodule FermixTestSupport.AccessorySim do
        wire: Keyword.get(opts, :wire, 1),
        silent?: Keyword.get(opts, :silent?, false),
        bad_sig?: Keyword.get(opts, :bad_sig?, false),
+       # Answers the HELLO and loses the host's proof, as a robot whose receive
+       # reset lands in the middle of the proof's frame does.
+       drop_proof?: Keyword.get(opts, :drop_proof?, false),
        auto_tap?: Keyword.get(opts, :auto_tap?, true),
        auto_credit: Keyword.get(opts, :auto_credit, @max_credit),
        # Reports `mic.state live` on the host's `listening`, as the firmware
@@ -262,6 +265,7 @@ defmodule FermixTestSupport.AccessorySim do
 
   defp handle(_message, %{silent?: true} = state), do: state
   defp handle(%{gen: gen}, %{gen: current} = state) when gen != current, do: state
+  defp handle(%{type: "host_proof"}, %{drop_proof?: true} = state), do: state
   defp handle(%{type: "host_proof"} = proof, state), do: host_proof(state, proof)
   defp handle(%{type: "ping"}, state), do: send_msg(state, %{type: "pong", uptime_ms: 1_000})
   defp handle(%{type: "enroll.begin"} = begin, state), do: enroll_begin(state, begin)

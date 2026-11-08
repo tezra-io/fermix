@@ -85,7 +85,7 @@ defmodule FermixChannels.Accessories.LinkTest do
       assert %{ready: true} = AccessoryCase.await_received(ctx.sim, "voice.readiness")
 
       assert_receive {:telemetry, [:fermix, :accessory, :attach], %{count: 1},
-                      %{status: :attached, mode: :attach, kind: :stackchan}}
+                      %{status: :attached, mode: :attach, kind: :stackchan, phase: :proving}}
     end
 
     test "voice that is not ready is said with its code, and the link stays attached", ctx do
@@ -151,6 +151,36 @@ defmodule FermixChannels.Accessories.LinkTest do
 
       AccessoryCase.advance(ctx.clock, 10_000)
       send(ctx.link, :tick)
+
+      assert %{gen: 2} = AccessoryCase.await_received(ctx.sim, "hello")
+    end
+
+    # The two timeouts read alike but for their phase: no hello_ack, or the
+    # host's proof sent and no `attached` back.
+    test "an attach with no hello_ack in ten seconds times out in the hello phase", ctx do
+      TelemetryCapture.attach([[:fermix, :accessory, :attach]], status: :auth_timeout)
+      ctx = ctx |> enrolled(silent?: true) |> start()
+      AccessoryCase.await_received(ctx.sim, "hello")
+
+      AccessoryCase.advance(ctx.clock, 10_000)
+      send(ctx.link, :tick)
+
+      assert_receive {:telemetry, [:fermix, :accessory, :attach], _measurements,
+                      %{status: :auth_timeout, accessory_refusal: nil, phase: :hello}}
+    end
+
+    test "an attach whose proof brings no attached in ten seconds times out proving", ctx do
+      TelemetryCapture.attach([[:fermix, :accessory, :attach]], status: :auth_timeout)
+      ctx = ctx |> enrolled(drop_proof?: true) |> start()
+      assert %{gen: 1} = AccessoryCase.await_received(ctx.sim, "hello")
+      AccessoryCase.await_received(ctx.sim, "host_proof")
+      AccessoryCase.await_state(&(&1.phase == :proving))
+
+      AccessoryCase.advance(ctx.clock, 10_000)
+      send(ctx.link, :tick)
+
+      assert_receive {:telemetry, [:fermix, :accessory, :attach], _measurements,
+                      %{status: :auth_timeout, accessory_refusal: nil, phase: :proving}}
 
       assert %{gen: 2} = AccessoryCase.await_received(ctx.sim, "hello")
     end
@@ -363,6 +393,44 @@ defmodule FermixChannels.Accessories.LinkTest do
       assert record.accessory_id == id
       assert record.port_hint == AccessoryCase.serial()
       assert record.name == "StackChan"
+    end
+
+    # The selected port's no-answer rule is for a port that never spoke
+    # Fermix; once the accessory enrolled, its attach is any enrolled
+    # accessory's, greeted again when it times out (a robot that loses the
+    # first proof after pairing must not be parked until a Retry).
+    test "once enrolled the link attaches in attach mode, greeted again on a timeout", ctx do
+      TelemetryCapture.attach([[:fermix, :accessory, :attach]], status: :auth_timeout)
+      ctx = start(ctx, mode: :pairing)
+      sim = ctx.sim
+      assert %{gen: 1} = AccessoryCase.await_received(sim, "hello")
+      AccessoryCase.await_state(&(&1.phase == :unenrolled))
+
+      :ok = Link.enroll_begin(ctx.link)
+      AccessoryCase.await_received(sim, "enroll.reveal")
+      :ok = Link.enroll_confirm(ctx.link)
+      AccessorySim.confirm_match(sim)
+      AccessoryCase.await_received(sim, "enroll.commit")
+      id = AccessorySim.accessory_id(sim)
+      assert AccessoryCase.await_state(&(&1.enrollment.phase == :done)).mode == :attach
+
+      # The robot loses the first attach's proof.
+      AccessorySim.set(sim, :drop_proof?, true)
+      AccessoryCase.advance(ctx.clock, 1_000)
+      send(ctx.link, :tick)
+      %{gen: first} = AccessoryCase.await_received(sim, "hello")
+      AccessoryCase.await_received(sim, "host_proof")
+
+      AccessorySim.set(sim, :drop_proof?, false)
+      AccessoryCase.advance(ctx.clock, 10_000)
+      send(ctx.link, :tick)
+
+      assert_receive {:telemetry, [:fermix, :accessory, :attach], _measurements,
+                      %{status: :auth_timeout, mode: :attach, phase: :proving}}
+
+      assert %{gen: again} = AccessoryCase.await_received(sim, "hello")
+      assert again == first + 1
+      AccessoryCase.await_state(&(&1.phase == :attached and &1.accessory_id == id))
     end
 
     test "three mismatched rounds close the attempt with mismatch_limit and write nothing",

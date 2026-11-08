@@ -1257,7 +1257,12 @@ paired accessory such as StackChan) emits three events, all through
   (`attached`, `unenrolled`, a host refusal by its `refuse.code`, or
   `accessory_refused` with the accessory's own code in `accessory_refusal`),
   `mode` (`attach` for a port an enrolled accessory's hint named, `pairing`
-  for the port the owner selected), `kind` (only a kind the host knows, else
+  for the port the owner selected until its accessory enrolls; the attach
+  after `enroll.done` is `attach`), `phase` (the link's phase the verdict
+  came in: `hello`, `proving`, `attached`, `unenrolled` or `refused`; an
+  `auth_timeout` in `hello` had no `hello_ack` in time, or one past the
+  bound, and one in `proving` sent the host's proof and heard no
+  `attached`), `kind` (only a kind the host knows, else
   `nil`) and `endpoint` (`accessory:<accessory_id>`, only once the proof
   verified).
 - `[:fermix, :accessory, :fault]`: a link fault, sessionless. `count`, the

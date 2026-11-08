@@ -439,6 +439,7 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
 
     AccessoryTelemetry.emit_attach(:attached, 900, %{
       mode: :attach,
+      phase: :proving,
       kind: "stackchan",
       accessory_id: id,
       accessory_refusal: nil
@@ -465,6 +466,7 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
 
     [attach, fault, call] = rows
     assert attach["agent"] == "attached" and attach["endpoint"] == "accessory:" <> id
+    assert attach["phase"] == "proving"
     assert fault["agent"] == "crc_mismatch" and fault["stage"] == "receive"
     assert call["session_id"] == "voice_live:9" and call["mic_frames"] == 50
   end

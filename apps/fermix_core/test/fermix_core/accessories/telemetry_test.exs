@@ -13,12 +13,13 @@ defmodule FermixCore.Accessories.TelemetryTest do
 
   @accessory String.duplicate("ab", 32)
 
-  test "an attach's outcome is a point with its status, mode and the endpoint it verified" do
+  test "an attach's outcome is a point with its status, mode, phase and the endpoint it verified" do
     TelemetryCapture.attach([[:fermix, :accessory, :attach]], :emitter)
 
     :ok =
       Telemetry.emit_attach(:attached, 1_250, %{
         mode: :attach,
+        phase: :proving,
         kind: "stackchan",
         accessory_id: @accessory,
         accessory_refusal: nil
@@ -30,6 +31,7 @@ defmodule FermixCore.Accessories.TelemetryTest do
     assert meta == %{
              status: :attached,
              mode: :attach,
+             phase: :proving,
              kind: :stackchan,
              endpoint: "accessory:" <> @accessory,
              accessory_refusal: nil
@@ -42,6 +44,7 @@ defmodule FermixCore.Accessories.TelemetryTest do
     :ok =
       Telemetry.emit_attach(:unsupported_kind, 10, %{
         mode: :pairing,
+        phase: :hello,
         kind: "toaster",
         accessory_id: nil,
         accessory_refusal: nil
@@ -53,6 +56,7 @@ defmodule FermixCore.Accessories.TelemetryTest do
     :ok =
       Telemetry.emit_attach(:accessory_refused, 10, %{
         mode: :attach,
+        phase: :hello,
         kind: nil,
         accessory_id: nil,
         accessory_refusal: :unknown_host
@@ -66,11 +70,42 @@ defmodule FermixCore.Accessories.TelemetryTest do
     assert_raise FunctionClauseError, fn ->
       Telemetry.emit_attach(:mystery, 1, %{
         mode: :attach,
+        phase: :hello,
         kind: nil,
         accessory_id: nil,
         accessory_refusal: nil
       })
     end
+  end
+
+  # The two auth_timeouts differ only by phase: no hello_ack (`hello`), or
+  # the host's proof sent and no `attached` back (`proving`).
+  test "an attach timeout names the phase it ran out in" do
+    TelemetryCapture.attach([[:fermix, :accessory, :attach]], :emitter)
+
+    for phase <- [:hello, :proving] do
+      :ok =
+        Telemetry.emit_attach(:auth_timeout, 10_040_000, %{
+          mode: :attach,
+          phase: phase,
+          kind: "stackchan",
+          accessory_id: nil,
+          accessory_refusal: nil
+        })
+
+      assert_receive {:telemetry, [:fermix, :accessory, :attach], _measurements,
+                      %{status: :auth_timeout, phase: ^phase}}
+    end
+  end
+
+  test "an attach phase outside the link's phases, or none, fails loud" do
+    facts = %{mode: :attach, kind: nil, accessory_id: nil, accessory_refusal: nil}
+
+    assert_raise FunctionClauseError, fn ->
+      Telemetry.emit_attach(:auth_timeout, 1, Map.put(facts, :phase, :waiting))
+    end
+
+    assert_raise FunctionClauseError, fn -> Telemetry.emit_attach(:auth_timeout, 1, facts) end
   end
 
   test "a link fault is a point with its reason, where it was found, and its count" do

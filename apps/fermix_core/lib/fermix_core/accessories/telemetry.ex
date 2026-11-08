@@ -9,8 +9,11 @@ defmodule FermixCore.Accessories.Telemetry do
       host refusal by its `refuse.code`, or `accessory_refused` with the
       accessory's own code in `accessory_refusal`), the link's `mode`
       (`attach` for a port an enrolled accessory's hint named, `pairing` for
-      the port the owner selected), the `kind` only when the host knows it,
-      and the `endpoint` only once the proof verified.
+      the port the owner selected), the link's `phase` the verdict came in
+      (an `auth_timeout` in `hello` had no hello_ack in time, one in
+      `proving` sent the host's proof and heard no `attached`), the `kind`
+      only when the host knows it, and the `endpoint` only once the proof
+      verified.
     * `[:fermix, :accessory, :fault]`: a link fault, sessionless. `count`
       and the `reason` with the `stage` that found it (`receive`,
       `reassembly`, `control`, `peer`, `liveness`, `call`).
@@ -65,6 +68,7 @@ defmodule FermixCore.Accessories.Telemetry do
     :accessory_refused
   ]
   @modes [:attach, :pairing]
+  @phases [:hello, :proving, :attached, :unenrolled, :refused]
   @known_kinds %{"stackchan" => :stackchan}
   @fault_stages [:receive, :reassembly, :control, :peer, :liveness, :call]
   @call_sources [:screen_tap, :head_swipe, :mac]
@@ -115,6 +119,7 @@ defmodule FermixCore.Accessories.Telemetry do
   @typedoc "What an attach event says besides its status."
   @type attach_facts :: %{
           mode: :attach | :pairing,
+          phase: :hello | :proving | :attached | :unenrolled | :refused,
           kind: String.t() | nil,
           accessory_id: String.t() | nil,
           accessory_refusal: atom() | nil
@@ -141,11 +146,12 @@ defmodule FermixCore.Accessories.Telemetry do
   @spec emit_attach(attach_status(), non_neg_integer(), attach_facts()) :: :ok
   def emit_attach(status, duration_us, %{mode: mode} = facts)
       when status in @attach_statuses and is_integer(duration_us) and duration_us >= 0 and
-             mode in @modes and
+             mode in @modes and is_map_key(facts, :phase) and facts.phase in @phases and
              (is_nil(facts.accessory_refusal) or is_atom(facts.accessory_refusal)) do
     :telemetry.execute(@attach_event, %{count: 1, duration_us: duration_us}, %{
       status: status,
       mode: mode,
+      phase: facts.phase,
       kind: Map.get(@known_kinds, facts.kind),
       endpoint: endpoint(status, facts.accessory_id),
       accessory_refusal: facts.accessory_refusal
