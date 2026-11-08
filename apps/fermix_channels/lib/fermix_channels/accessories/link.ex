@@ -582,14 +582,21 @@ defmodule FermixChannels.Accessories.Link do
   end
 
   defp tick_liveness(%{phase: phase} = state) when phase in [:proving, :attached, :unenrolled] do
-    bound = if state.call, do: @lost_call_ms, else: @lost_idle_ms
+    {bound, since_ms} = liveness_window(state)
 
-    if now(state) - state.last_rx_ms >= bound,
+    if now(state) - since_ms >= bound,
       do: fault(state, :link_lost, :liveness),
       else: state
   end
 
   defp tick_liveness(state), do: state
+
+  # A call's shorter bound counts from the call's start as well: outside a
+  # call the peer's last frame can be a whole idle ping old.
+  defp liveness_window(%{call: nil} = state), do: {@lost_idle_ms, state.last_rx_ms}
+
+  defp liveness_window(%{call: call} = state),
+    do: {@lost_call_ms, max(state.last_rx_ms, call.since_ms)}
 
   defp tick_heartbeat(%{phase: phase} = state) when phase in [:attached, :unenrolled] do
     interval = if state.call, do: @ping_call_ms, else: @ping_idle_ms
@@ -1112,7 +1119,9 @@ defmodule FermixChannels.Accessories.Link do
     case state.call_module.start_link(opts) do
       {:ok, pid} ->
         call =
-          Map.put(new_call(pid, stream, request, source), :accessory_id, accessory.accessory_id)
+          pid
+          |> new_call(stream, request, source, now(state))
+          |> Map.put(:accessory_id, accessory.accessory_id)
 
         %{state | call: call, next_stream: stream + 1}
 
@@ -1121,12 +1130,13 @@ defmodule FermixChannels.Accessories.Link do
     end
   end
 
-  defp new_call(pid, stream, request, source),
+  defp new_call(pid, stream, request, source, since_ms),
     do: %{
       pid: pid,
       stream: stream,
       request: request,
       source: source,
+      since_ms: since_ms,
       call_id: nil,
       view: nil,
       end_reason: nil,

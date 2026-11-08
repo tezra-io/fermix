@@ -648,6 +648,29 @@ defmodule FermixChannels.Accessories.CallTest do
       session_gone(session, ctx.lease)
     end
 
+    # Outside a call the host pings every 5 s, so the robot's last frame can be
+    # several seconds old when a call starts; the call's 3 s bound counts from
+    # the call's start as well, never from before it.
+    test "a call started 4 s after the robot's last frame is not lost on its first tick",
+         ctx do
+      ctx = attached(ctx)
+      TelemetryCapture.attach([[:fermix, :accessory, :fault]], reason: :link_lost)
+      AccessoryCase.advance(ctx.clock, 4_000)
+      AccessorySim.set(ctx.sim, :silent?, true)
+
+      assert {:ok, %{stream: 1}} = Link.start_call(ctx.link)
+      send(ctx.link, :tick)
+
+      assert %{phase: :attached, call: %{stream: 1, ending?: false}} = Link.status(ctx.link)
+      refute_received {:telemetry, [:fermix, :accessory, :fault], _count, _metadata}
+
+      AccessoryCase.advance(ctx.clock, 3_000)
+      send(ctx.link, :tick)
+
+      assert_receive {:telemetry, [:fermix, :accessory, :fault], _count,
+                      %{reason: :link_lost, stage: :liveness}}
+    end
+
     test "a swipe back ends the call: the session is torn down and the lease freed", ctx do
       ctx = ctx |> attached() |> call_up("head_swipe")
       session = ctx.session
