@@ -166,6 +166,19 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `fermix` stopped with a crash dump before printing anything. They now say
   in one sentence to run the command from a directory that account can
   open, before they unpack or start anything.
+- **An X accounts source no longer asks you to sign in to X while X is
+  connected.** About every two hours, while Fermix renewed the X sign-in, the
+  source sent "needs your X sign-in: connect X under Plugins" and waited.
+  Renewing could stall on a connection that had died while idle, and the
+  source read the wait as a missing sign-in. A renewal now starts on a fresh
+  connection. A source that finds the sign-in busy retries on its usual
+  backoff and tells you nothing. A sign-in that is really gone still tells
+  you once.
+- **A plugin tool call no longer stalls after a quiet spell.** The first X,
+  GitHub or Google call after a few idle minutes could reuse a connection
+  the service had already closed. It then waited out the 15-second timeout:
+  a lookup took about 20 seconds, and a post failed. Plugin calls now drop a
+  connection that has sat idle for 15 seconds and open a fresh one.
 
 ### Behind a feature flag
 

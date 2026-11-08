@@ -5,6 +5,7 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
   use ExUnit.Case, async: false
 
   alias FermixCore.Auth.ClientRejection
+  alias FermixCore.Net.Egress
   alias FermixCore.Plugins.Http.Interpreter
   alias FermixCore.Plugins.ToolExecutor
 
@@ -1616,6 +1617,71 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
       # Exactly one request reached the transport: the hop was never taken.
       assert_received {:hop, "/items/42"}
       refute_received {:hop, _path}
+    end
+  end
+
+  # A pool of the call's own (one its connect options start) keeps an idle
+  # connection forever, and the next call after a quiet spell writes into a
+  # socket the server closed long ago, then waits out the receive timeout. The
+  # shared pool drops a connection idle past 15 s (`FermixCore.Application`).
+  describe "connection pool" do
+    test "a single-call tool's request goes over the shared pool" do
+      context = %{
+        plugin_url_guard: fn _ -> :ok end,
+        plugin_req_options: [adapter: pool_recording_adapter(self())],
+        plugin_token_getter: fn "google_drive:primary" -> {:ok, "drive-token"} end
+      }
+
+      assert {:ok, %{success: true}} =
+               ToolExecutor.execute(
+                 %{"query" => "Q2 Plan"},
+                 context,
+                 "google_drive",
+                 %{"name" => "google_drive_search_files", "read_only" => true}
+               )
+
+      assert_received {:hop_options, options}
+      assert options[:finch] == Egress.direct_pool()
+      refute Map.has_key?(options, :connect_options)
+    end
+
+    test "a declarative tool's request goes over the shared pool" do
+      context = %{
+        plugin_url_guard: fn _ -> :ok end,
+        plugin_req_options: [adapter: pool_recording_adapter(self())],
+        plugin_token_getter: fn "google_calendar:primary" -> {:ok, "tok"} end,
+        plugin_granted_scopes_getter: fn _ ->
+          ["https://www.googleapis.com/auth/calendar.readonly"]
+        end
+      }
+
+      assert {:ok, %{success: true}} =
+               ToolExecutor.execute(
+                 %{"query" => "standup"},
+                 context,
+                 "google_calendar",
+                 declarative_tool()
+               )
+
+      assert_received {:hop_options, options}
+      assert options[:finch] == Egress.direct_pool()
+      refute Map.has_key?(options, :connect_options)
+    end
+  end
+
+  # Stands in for the transport and reports the options the hop reached it with.
+  defp pool_recording_adapter(parent) do
+    fn request ->
+      send(parent, {:hop_options, request.options})
+
+      response =
+        Req.Response.new(
+          status: 200,
+          headers: [{"content-type", "application/json"}],
+          body: ~s({"items":[]})
+        )
+
+      {request, response}
     end
   end
 

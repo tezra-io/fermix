@@ -292,6 +292,11 @@ defmodule FermixCore.Plugins.ToolExecutor do
   # a hop would carry the plugin's `Authorization` header to a host nothing
   # screened. The 3xx flows to the interpreter, which names the status and the
   # Location so the refusal is diagnosable.
+  #
+  # The call goes over the shared pool, which drops a connection idle past 15 s.
+  # A pool of the call's own keeps one forever, and the first call after a quiet
+  # spell writes into a socket the server has closed, then waits out the receive
+  # timeout. `http_request/4` does the same.
   defp issue_declarative(request, cred, attempt, context, plugin_name, auth_profile, tool) do
     req_options = Map.get(context, :plugin_req_options, [])
 
@@ -307,7 +312,7 @@ defmodule FermixCore.Plugins.ToolExecutor do
       )
       |> maybe_merge(:json, request.body)
       |> Req.merge(req_options)
-      |> Egress.attach(:direct)
+      |> Egress.attach(:pooled)
 
     case Req.request(req) do
       {:ok, %{status: 401}} when attempt == 0 ->
@@ -627,7 +632,7 @@ defmodule FermixCore.Plugins.ToolExecutor do
       |> maybe_merge(:json, Keyword.get(opts, :json))
       |> maybe_put_body(Keyword.get(opts, :body), Keyword.get(opts, :content_type))
 
-    case request |> Req.merge(req_options) |> Egress.attach(:direct) |> Req.request() do
+    case request |> Req.merge(req_options) |> Egress.attach(:pooled) |> Req.request() do
       {:ok, %{status: status, body: body}} when status in 200..299 ->
         {:ok, body}
 
