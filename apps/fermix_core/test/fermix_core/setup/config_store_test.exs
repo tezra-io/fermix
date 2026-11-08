@@ -586,6 +586,15 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert contents =~
              "# Skills are separate SKILL.md directories in the skills folder beside this " <>
                "file and in plugin roots."
+
+    # A release has no mix: the header names what writes the file now.
+    refute contents =~ "mix fermix.setup"
+
+    assert String.starts_with?(
+             contents,
+             "# Managed by Fermix: the app, the setup page, fermix setup and fermix " <>
+               "settings rewrite this file.\n"
+           )
   end
 
   defp restore_providers({:ok, value}), do: Application.put_env(:fermix_core, :providers, value)

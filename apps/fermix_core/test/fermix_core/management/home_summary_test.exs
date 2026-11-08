@@ -1312,6 +1312,21 @@ defmodule FermixCore.Management.HomeSummaryTest do
                "Restore Fermix on this Mac from its backup? Confirm only once you deleted " <>
                  "your server, or stopped it for good: if it runs again, two copies of Fermix " <>
                  "answer the same channels. Messages, memory and jobs since that backup are " <>
+                 "gone."
+
+      # Telegram's 24 hours are named only where this computer's settings have
+      # it set up (the EC2 test's F7 rule).
+      telegram = %{facts | return_costs: [:telegram]}
+
+      assert Enum.find(
+               HomeSummary.offered(HomeSummary.summary(telegram)),
+               &(&1["id"] == "restore_here")
+             )[
+               "confirm"
+             ] ==
+               "Restore Fermix on this Mac from its backup? Confirm only once you deleted " <>
+                 "your server, or stopped it for good: if it runs again, two copies of Fermix " <>
+                 "answer the same channels. Messages, memory and jobs since that backup are " <>
                  "gone, and Telegram keeps nothing older than 24 hours."
 
       assert summary["detail"]["lines"] == [

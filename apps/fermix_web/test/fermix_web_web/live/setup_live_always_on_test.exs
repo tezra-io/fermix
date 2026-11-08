@@ -674,7 +674,10 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
       html = press(view, "restore_here")
 
       assert text(html, "#always-on-step") =~
-               Copy.summary_sentence(:confirm_restore_here, %{machine: "computer"})
+               Copy.summary_sentence(:confirm_restore_here, %{
+                 machine: "computer",
+                 telegram: false
+               })
 
       html = view |> element(~s|#always-on-step [phx-click="always_on_back"]|) |> render_click()
       refute html =~ ~s(id="always-on-step")

@@ -1511,7 +1511,8 @@ defmodule FermixCore.Setup.ConfigStore do
     web = snapshot |> Map.get(:fermix_web, []) |> normalize_web() |> web_to_keyword()
 
     [
-      "# Managed by mix fermix.setup",
+      "# Managed by Fermix: the app, the setup page, fermix setup and fermix settings " <>
+        "rewrite this file.",
       "# Built-in tools ship inside Fermix and are always available when registered.",
       "# Skills are separate SKILL.md directories in the skills folder beside this file " <>
         "and in plugin roots.",

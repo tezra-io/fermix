@@ -284,7 +284,8 @@ it with their "update Fermix" screen, so they raise their own minimum for
   of the same server gave; during a move back, what runs on this computer
   again and what the move back costs, each only where this computer's
   settings have it (coding agents approved, Telegram set up). Restore here's asks the owner's word
-  that the server is deleted, or stopped for good. Forget this server's
+  that the server is deleted, or stopped for good, and names Telegram's
+  24 hours only where this computer's settings have it set up. Forget this server's
   (`cancel` on a held server) asks before the server is dropped.
 - `url` is the Always On docs page (`https://fermix.ai/docs/always-on/`) for
   `learn_more`; null otherwise.

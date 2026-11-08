@@ -84,11 +84,14 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   save wrote `[fermix_core.providers.openai]` with `default_model =
   "gpt-5.4-mini"` into `config.toml`, a value Fermix itself shipped, even on
   a home that never used OpenAI, and the file's header named
-  `~/.fermix/skills` whatever home it belonged to. A save now writes only
-  the provider sections you set, the header names the skills folder beside
-  the file, and an OpenAI key with no model chosen runs on the catalog's
-  default, GPT-6 Astra, as a fresh install was meant to. A file that already
-  carries that line keeps its model until you choose another.
+  `~/.fermix/skills` whatever home it belonged to and `mix fermix.setup`,
+  which no release has, as what manages it. A save now writes only the
+  provider sections you set, and the header names the skills folder beside
+  the file and what rewrites it (the app, the setup page, `fermix setup` and
+  `fermix settings`). A home with an OpenAI key that never picked a model now
+  runs on the catalog's default, GPT-6 Astra, as a fresh install was meant
+  to: the model catalog is the one place that default comes from. A file
+  that already carries that line keeps its model until you choose another.
 - **`fermix service status` says what it covers on a Mac or a standalone
   install.** There it said "This Fermix was not installed from a Linux
   package, so there is no packaged background service for it to manage."

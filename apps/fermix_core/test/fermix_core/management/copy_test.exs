@@ -1086,6 +1086,7 @@ defmodule FermixCore.Management.CopyTest do
       ports: [whatsapp: 4030, cues: 4032],
       carried: [:whatsapp, :cues],
       costs: [:coding_agents, :telegram],
+      telegram: true,
       to: "studio-mac",
       day: @restored_day,
       place: "your desktop",

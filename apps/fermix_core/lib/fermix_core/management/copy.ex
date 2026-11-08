@@ -503,12 +503,13 @@ defmodule FermixCore.Management.Copy do
 
   def summary_sentence(:progress_backing_up, _values), do: "Backing up now…"
 
-  def summary_sentence(:confirm_restore_here, %{machine: machine}),
-    do:
-      "Restore Fermix on this #{machine} from its backup? Confirm only once you deleted " <>
-        "your server, or stopped it for good: if it runs again, two copies of Fermix answer " <>
-        "the same channels. Messages, memory and jobs since that backup are gone, and " <>
-        "Telegram keeps nothing older than 24 hours."
+  def summary_sentence(:confirm_restore_here, %{machine: machine, telegram: telegram?})
+      when is_boolean(telegram?) do
+    "Restore Fermix on this #{machine} from its backup? Confirm only once you deleted " <>
+      "your server, or stopped it for good: if it runs again, two copies of Fermix answer " <>
+      "the same channels. Messages, memory and jobs since that backup are gone" <>
+      if(telegram?, do: ", and Telegram keeps nothing older than 24 hours.", else: ".")
+  end
 
   def summary_sentence(:confirm_forget, _values),
     do:

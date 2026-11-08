@@ -1139,7 +1139,10 @@ defmodule FermixCore.Management.HomeSummary do
 
   # What the owner accepts first: a move, a restore, or forgetting a server.
   defp confirm(:cancel, %{forget: true}, facts), do: sentence(:confirm_forget, facts)
-  defp confirm(:restore_here, _values, facts), do: sentence(:confirm_restore_here, facts)
+
+  defp confirm(:restore_here, _values, facts),
+    do: sentence(:confirm_restore_here, facts, %{telegram: :telegram in facts.return_costs})
+
   defp confirm(act, _values, facts) when act in [:move_now, :try_again], do: move_confirm(facts)
   defp confirm(_act, _values, _facts), do: nil
 
