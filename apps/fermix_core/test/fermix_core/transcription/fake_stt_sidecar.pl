@@ -5,7 +5,7 @@
 #
 # Env knobs:
 #   FAKE_STT_PROTO   hello protocol_version (default 1; set 2 for the mismatch refusal)
-#   FAKE_STT_MODE    ok | error | hang | hang_hello | die | long
+#   FAKE_STT_MODE    ok | error | hang | hang_hello | die | long | deaf
 #
 # Modes:
 #   ok          batch replies "fake transcript"; stream replies one segment
@@ -15,9 +15,11 @@
 #   die         exits 3 on the first transcribe or audio frame
 #   long        batch replies a transcript far longer than the port's line
 #               window, so {:noeol, _} reassembly is exercised end to end
+#   deaf        closes stdin before its hello, then sleeps 60s: every later
+#               write meets a closed pipe while no exit status can arrive
 #
-# Every mode exits on stdin EOF: the read loop is the only blocking point
-# outside the deliberate sleeps.
+# Every other mode exits on stdin EOF: the read loop is the only blocking
+# point outside the deliberate sleeps.
 use strict;
 use warnings;
 use MIME::Base64 qw(decode_base64);
@@ -34,7 +36,14 @@ if ($mode eq 'hang_hello') {
     exit 0;
 }
 
+close(STDIN) if $mode eq 'deaf';
+
 print qq({"event":"hello","protocol_version":$proto,"engine":"sherpa-onnx","stt_version":"0.0.0-fake"}\n);
+
+if ($mode eq 'deaf') {
+    sleep 60;
+    exit 0;
+}
 
 sub id_of {
     my ($json) = @_;

@@ -45,14 +45,15 @@ defmodule FermixCore.Transcription.Local.Sidecar do
 
   @typedoc """
   An open sidecar: its port, the child's OS pid (its own process-group id — the
-  kill target for a wedged teardown), the partial line being reassembled, and
-  the correlation id.
+  kill target for a wedged teardown), the partial line being reassembled, the
+  correlation id, and how long `close/1` waits for the sidecar to exit.
   """
   @type state :: %{
           port: port() | nil,
           os_pid: pos_integer(),
           acc: binary(),
-          session_id: String.t() | nil
+          session_id: String.t() | nil,
+          shutdown_grace_ms: pos_integer()
         }
 
   # How long close/1 waits for the sidecar to honor the `shutdown` op before
@@ -101,8 +102,9 @@ defmodule FermixCore.Transcription.Local.Sidecar do
   Spawns the sidecar and completes the `hello` handshake, returning an open
   state ready for ops.
 
-  `opts` carries the DI seams `binary_path:`, `env:`, `args:` and
-  `hello_timeout_ms:`; production callers pass none of them.
+  `opts` carries the DI seams `binary_path:`, `env:`, `args:`,
+  `hello_timeout_ms:` and `shutdown_grace_ms:`; production callers pass none
+  of them.
   """
   @spec open(keyword()) :: {:ok, state()} | {:error, term()}
   def open(opts) when is_list(opts) do
@@ -210,16 +212,21 @@ defmodule FermixCore.Transcription.Local.Sidecar do
 
   defp shut_down(%{port: port, os_pid: os_pid} = state) do
     _ = send_op(state, %{"op" => "shutdown"})
-    graceful? = await_exit(port, @shutdown_grace_ms)
+    graceful? = await_exit(port, state.shutdown_grace_ms)
     port_close(port)
     unless graceful?, do: ProcessGroup.signal(os_pid, :sigkill)
     flush(port)
     :ok
   end
 
+  # A `shutdown` written to a sidecar whose input is closed fails with EPIPE,
+  # and the port exits with that reason and no exit status. To an owner that
+  # traps exits, that EXIT ends the wait too, as not graceful: a closed input
+  # does not prove the sidecar gone, so its group is still killed.
   defp await_exit(port, grace_ms) do
     receive do
       {^port, {:exit_status, _status}} -> true
+      {:EXIT, ^port, _reason} -> false
     after
       grace_ms -> false
     end
@@ -361,7 +368,15 @@ defmodule FermixCore.Transcription.Local.Sidecar do
       ])
 
     {:os_pid, os_pid} = Port.info(port, :os_pid)
-    {:ok, %{port: port, os_pid: os_pid, acc: "", session_id: Keyword.get(opts, :session_id)}}
+
+    {:ok,
+     %{
+       port: port,
+       os_pid: os_pid,
+       acc: "",
+       session_id: Keyword.get(opts, :session_id),
+       shutdown_grace_ms: Keyword.get(opts, :shutdown_grace_ms, @shutdown_grace_ms)
+     }}
   rescue
     # A present but non-executable file: Port.open refuses with ArgumentError.
     ArgumentError -> {:error, {:spawn_failed, binary}}
