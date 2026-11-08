@@ -5,10 +5,16 @@ defmodule FermixCore.Management.HomeSummaryTest do
   # and written here, so each row names exactly what makes its state.
   use ExUnit.Case, async: true
 
+  alias FermixCore.Home.Snapshot.S3
+  alias FermixCore.Home.Snapshot.Status
   alias FermixCore.Management.Copy
   alias FermixCore.Management.HomeSummary
 
   @now ~U[2031-05-04 12:00:00Z]
+  # A failed backup's try, and how its sentence states it.
+  @failed_at ~U[2031-05-04 10:00:00Z]
+  @failed_said "Sunday, May 4, 2031 at 10:00 AM UTC"
+  @recipient "fxsnap1.AAECAwQFBgcICQoLDA0ODw.B3l5ExMinEfPofapoLSG57ZGCBl_fiIqFbtB5nPDNqA"
   @minute 60_000
   @cand "cand-5e2a9c1f7b3d4086"
   @back_cand "cand-7a3e1c9b5d2f4086"
@@ -125,6 +131,11 @@ defmodule FermixCore.Management.HomeSummaryTest do
        desktop(primary_home: server_home(backups: []), moved: moved(~U[2031-04-30 10:00:00Z])),
        "problem",
        "No backup has finished since the move 4 days ago. It runs when this Mac is online.",
+       "back_up_now"},
+      {"a backup that failed",
+       desktop(
+         primary_home: status_home(tried(Status.empty(), @failed_at, "S3 refused the snapshot."))
+       ), "problem", "Backing up to S3 failed on #{@failed_said}: S3 refused the snapshot.",
        "back_up_now"}
     ]
   end
@@ -304,7 +315,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
   # none of the engine's own words for the move. The systems the server's
   # first boot takes are names the copy interpolates (`Copy.own_server_names/0`).
   test "every sentence, label and detail line obeys the copy rules and names nothing internal" do
-    names = Copy.own_server_names()
+    names = [@failed_said | Copy.own_server_names()]
 
     for {name, facts, _state, _sentence, _action} <- cases(),
         text <- printed(HomeSummary.summary(facts)) do
@@ -952,25 +963,72 @@ defmodule FermixCore.Management.HomeSummaryTest do
       refute ended["key"] == summary["key"]
     end
 
-    test "a try that failed is said in its own words where Back up now is offered" do
-      said = "Your Studio Mac did not confirm the snapshot in time."
-      home = Map.update!(server_home([]), "snapshots", &backed_up(&1, "desktop", said))
+    test "a backup that ends failed leaves its screen on the failure, not done" do
+      tried = tried(Status.empty(), ~U[2031-05-04 11:00:00Z], "S3 refused the snapshot.")
+      running = put_in(status_home(tried), ["snapshots", "running"], true)
 
-      summary = HomeSummary.summary(desktop(primary_home: home))
-      assert summary["outcome"] == "done"
+      assert %{"state" => "problem", "outcome" => "running"} =
+               HomeSummary.summary(desktop(primary_home: running))
 
-      assert %{"label" => "Backup to your desktop failed", "value" => ^said} =
-               Enum.find(summary["detail"]["lines"], &(&1["label"] =~ "failed"))
+      assert %{"state" => "problem", "outcome" => "failed"} =
+               HomeSummary.summary(desktop(primary_home: status_home(tried)))
+    end
+  end
 
-      refute summary["key"] == HomeSummary.summary(desktop([]))["key"]
+  # The owner's rule: a backup that failed is a problem until one is stored
+  # there (`Snapshot.Status` keeps the place's error until then), and a later
+  # try that fails raises it again in that try's own words. Built through
+  # `Snapshot.Status` itself, so the rule rests on what the scheduler writes.
+  describe "a backup that failed" do
+    test "is a problem in the try's own words, where it went and when, with Back up now" do
+      tried = tried(Status.empty(), ~U[2031-05-04 10:00:00Z], "S3 refused the snapshot")
+      summary = HomeSummary.summary(desktop(primary_home: status_home(tried)))
 
-      refute Enum.any?(
-               HomeSummary.summary(desktop([]))["detail"]["lines"],
-               &(&1["label"] =~ "failed")
-             )
+      assert %{"state" => "problem", "detail" => %{"kind" => "backup_failed"} = detail} = summary
+
+      assert summary["sentence"] ==
+               "Backing up to S3 failed on Sunday, May 4, 2031 at 10:00 AM UTC: S3 refused " <>
+                 "the snapshot."
+
+      assert {summary["action"]["id"], summary["outcome"]} == {"back_up_now", "failed"}
+      assert detail["seen_at"] == "2031-05-04T10:00:00Z"
+      assert Copy.summary_violations(summary["sentence"]) == []
     end
 
-    test "a backup over 3 days old runs while its Back up now runs, and fails once it ends" do
+    test "a stored backup clears it, and the next try's failure raises it in that try's words" do
+      first = tried(Status.empty(), ~U[2031-05-04 10:00:00Z], "S3 refused the snapshot.")
+      cleared = stored(first, ~U[2031-05-04 11:00:00Z])
+      again = tried(cleared, ~U[2031-05-04 11:30:00Z], "S3 did not answer in time.")
+
+      [failed, on, raised] =
+        for status <- [first, cleared, again],
+            do: HomeSummary.summary(desktop(primary_home: status_home(status)))
+
+      assert {failed["detail"]["kind"], on["state"]} == {"backup_failed", "on"}
+      assert raised["detail"]["kind"] == "backup_failed"
+
+      assert raised["sentence"] ==
+               "Backing up to S3 failed on Sunday, May 4, 2031 at 11:30 AM UTC: S3 did not " <>
+                 "answer in time."
+
+      refute raised["key"] == failed["key"]
+
+      # A try that fails again with no backup stored between moves the key too.
+      twice = tried(first, ~U[2031-05-04 10:30:00Z], "S3 did not answer in time.")
+
+      refute HomeSummary.summary(desktop(primary_home: status_home(twice)))["key"] ==
+               failed["key"]
+    end
+
+    test "a server with desktops says it on its own screen" do
+      tried = tried(Status.empty(), ~U[2031-05-04 10:00:00Z], "S3 refused the snapshot.")
+      own = server(snapshots: snapshots_view(tried))
+
+      assert %{"state" => "problem", "detail" => %{"kind" => "backup_failed"}} =
+               HomeSummary.summary(own)
+    end
+
+    test "a backup over 3 days old runs while its Back up now runs, and is a problem once it ends" do
       old = server_home(backups: [{"desktop", ~U[2031-04-30 10:00:00Z]}])
       running = put_in(old, ["snapshots", "running"], true)
 
@@ -1708,11 +1766,43 @@ defmodule FermixCore.Management.HomeSummaryTest do
     %{"configured" => targets != [], "targets" => targets}
   end
 
+  # The server's own `home.status` whose snapshots `Snapshot.Status` gives,
+  # an S3 target its only place.
+  defp status_home(status), do: Map.put(server_home([]), "snapshots", snapshots_view(status))
+
+  defp snapshots_view(status) do
+    Status.view(status, %{
+      config: [recipient: @recipient, s3_bucket: "invented-fermix-snapshots"],
+      targets: [S3],
+      running: false,
+      profile: "general"
+    })
+  end
+
+  # A try at `at`, as the scheduler records it: failed in `said`, or stored.
+  defp tried(status, at, said), do: Status.record(status, "s3", attempt(at, :failed, said))
+  defp stored(status, at), do: Status.record(status, "s3", attempt(at, :verified, nil))
+
+  defp attempt(at, result, error) do
+    %{
+      at: at,
+      result: result,
+      name: "20310504T100000Z-e4.fxsnap",
+      epoch: 4,
+      size: 48_211,
+      sha256: String.duplicate("9c", 32),
+      location: if(result == :verified, do: "s3://invented-fermix-snapshots/n.fxsnap"),
+      error: error
+    }
+  end
+
   # The snapshots with the place `id`'s last try failed in `said`.
   defp backed_up(snapshots, id, said),
     do: Map.update!(snapshots, "targets", &Enum.map(&1, fn t -> failed(t, id, said) end))
 
-  defp failed(%{"id" => id} = target, id, said), do: Map.put(target, "last_error", said)
+  defp failed(%{"id" => id} = target, id, said),
+    do: Map.merge(target, %{"last_error" => said, "last_attempt_at" => "2031-05-04T11:00:00Z"})
+
   defp failed(target, _id, _said), do: target
 
   # The review's items this home's settings give, as `MoveReadiness` words

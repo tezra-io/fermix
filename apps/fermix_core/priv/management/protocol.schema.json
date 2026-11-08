@@ -5871,7 +5871,7 @@
         "copies_bytes": { "type": ["integer", "null"], "minimum": 0 },
         "disk_used": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
         "data": { "type": "string", "minLength": 1 },
-        "kind": { "enum": ["cannot_reach", "not_set_up", "waited_too_long", "update", "server_older", "disk_full", "backup_old", "not_ready", "return_failed"] },
+        "kind": { "enum": ["cannot_reach", "not_set_up", "waited_too_long", "update", "server_older", "disk_full", "backup_old", "backup_failed", "not_ready", "return_failed"] },
         "note": { "type": ["string", "null"] },
         "seen_at": { "type": ["string", "null"] },
         "webhooks": {

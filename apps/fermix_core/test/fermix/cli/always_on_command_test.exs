@@ -184,6 +184,37 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
       assert sentence =~ "Fermix could not restore its backup on this Mac."
     end
 
+    # The owner's rule for Back up now: its screen runs until the backup
+    # ends, on the failed backup's problem (exit 1) or back on `on` (exit 0).
+    test "back-up-now --wait exits 1 when the backup it waited for failed, 0 once stored",
+         ctx do
+      on = golden_summary("home_status_on")
+      failed = golden_summary("home_status_backup_failed")
+
+      for {ending, expected} <- [{failed, 1}, {on, 0}] do
+        client =
+          script([
+            hello(),
+            {"home.status", {:ok, status(on)}},
+            {"home.act", {:ok, %{"summary" => backing_up(on), "result" => nil}}},
+            {"home.status", wait_for("k-backing-up", {:ok, status(ending)}, ctx)}
+          ])
+
+        {exit_status, out, _err} = run(["back-up-now", "--wait", "--json"], ctx, client)
+        assert exit_status == expected, "#{ending["state"]} exited #{exit_status}: #{out}"
+
+        if expected == 1 do
+          assert %{"error" => %{"code" => "step_failed", "sentence" => sentence}} =
+                   Jason.decode!(out)
+
+          assert sentence =~ "Backing up to S3 failed on"
+          assert sentence =~ "S3 could not be reached: the connection timed out."
+        else
+          assert %{"ok" => true, "result" => %{"summary" => ^on}} = Jason.decode!(out)
+        end
+      end
+    end
+
     test "reading a problem screen with no step is a success", ctx do
       problem = golden_summary("home_status_problem")
       client = script([hello(), {"home.status", {:ok, status(problem)}}])
@@ -860,6 +891,12 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
       "notice" => nil,
       "outcome" => "done"
     }
+  end
+
+  # The screen Back up now answers: `on`, its backup running on the server.
+  defp backing_up(on) do
+    %{on | "key" => "k-backing-up", "outcome" => "running"}
+    |> put_in(["detail", "progress"], "Backing up now…")
   end
 
   # The screen Move now answers here: `ready` until the restart shows, the

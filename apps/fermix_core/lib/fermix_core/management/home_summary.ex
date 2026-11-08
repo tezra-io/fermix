@@ -141,9 +141,10 @@ defmodule FermixCore.Management.HomeSummary do
   restore; a backup, where Back up now is offered, while it runs there, with
   `progress` saying so), `waiting` while it waits on the owner's server to
   use its code, `failed` on a problem, `done` when the next step is the
-  owner's. Where Back up now is offered, Details also say each place whose
-  last try failed, in that try's own words (`backup_failed`), until one
-  there is stored, so the end of a backup says whether it was.
+  owner's. A backup that failed is the problem `backup_failed` (on a linked
+  desktop, and on a server with desktops), in the newest failed try's own
+  words, where it went and when, with Back up now, until a backup there is
+  stored; so the end of a backup says whether it was.
 
   `key/1` is the one digest of the summary (`summary.key`, and what
   `FermixCore.Home.StatusWatch` tells by, `watch/1`): every change a surface
@@ -168,7 +169,7 @@ defmodule FermixCore.Management.HomeSummary do
   @states ~w(off connect creating ready moving on undone retired candidate primary problem)
   @outcomes ~w(running waiting done failed)
   @problems ~w(cannot_reach not_set_up waited_too_long update server_older disk_full backup_old
-               not_ready return_failed)
+               backup_failed not_ready return_failed)
   @actions ~w(cancel move_now try_again learn_more update back_up_now check_again own_server
               move_back restore_here)
   @needs ~w(recovery_passphrase new_recovery_passphrase)
@@ -184,6 +185,10 @@ defmodule FermixCore.Management.HomeSummary do
   # change of note; on `off` an app forgets Always On (the owner's rule), so
   # the line naming what stops is read when its pane opens, never told.
   @untold_sentences ~w(off on problem)
+  # The problems whose sentence `key/1` tells: a failed backup's names its
+  # try's own time and words, which no clock moves, and a later try that
+  # fails in other words is a change to draw.
+  @told_problems ~w(backup_failed)
   @moving ~w(requested streaming committed)
   @undoing ~w(aborting undoing)
   # A move under way, from its request to its undoing: the screen runs.
@@ -269,7 +274,7 @@ defmodule FermixCore.Management.HomeSummary do
   """
   @spec key(summary()) :: String.t()
   def key(%{"state" => state, "detail" => detail} = summary) when is_map(detail) do
-    sentence = if state in @untold_sentences, do: nil, else: summary["sentence"]
+    sentence = if untold?(state, detail), do: nil, else: summary["sentence"]
 
     summary
     |> Map.drop(["key", "sentence"])
@@ -277,6 +282,9 @@ defmodule FermixCore.Management.HomeSummary do
     |> Map.put("told", sentence)
     |> digest()
   end
+
+  defp untold?("problem", %{"kind" => kind}) when kind in @told_problems, do: false
+  defp untold?(state, _detail), do: state in @untold_sentences
 
   @doc """
   An action's `key`: the digest of its `id`, `label`, `confirm`, `needs` and
@@ -579,7 +587,15 @@ defmodule FermixCore.Management.HomeSummary do
   defp retired_sentence(facts), do: sentence(:retired, facts)
 
   defp desktop(facts) do
-    checks = [&away_here/1, &too_old/1, &server_older/1, &server_disk/1, &desktop_backup/1]
+    checks = [
+      &away_here/1,
+      &too_old/1,
+      &server_older/1,
+      &server_disk/1,
+      &backup_failed/1,
+      &desktop_backup/1
+    ]
+
     Enum.find_value(checks, & &1.(facts)) || on(facts)
   end
 
@@ -858,7 +874,9 @@ defmodule FermixCore.Management.HomeSummary do
 
   defp server(facts) do
     disk = disk_problem(facts.disk, :server_disk_full)
-    disk || server_backup(facts) || view("primary", sentence(:primary, facts), nil, %{})
+
+    disk || backup_failed(facts) || server_backup(facts) ||
+      view("primary", sentence(:primary, facts), nil, %{})
   end
 
   defp server_backup(facts) do
@@ -943,6 +961,31 @@ defmodule FermixCore.Management.HomeSummary do
       )
 
   defp disk_problem(_disk, _key), do: nil
+
+  # The newest try that failed of a place whose backup has not been stored
+  # since (`Snapshot.Status` keeps its error until one is), in its own words,
+  # where it went and when: Back up now tries again.
+  defp backup_failed(facts) do
+    case failed_tries(backup_snapshots(facts)) do
+      [] ->
+        nil
+
+      tries ->
+        {place, at, error} = Enum.max_by(tries, &elem(&1, 1), DateTime)
+        values = %{place: place, at: at, zone: facts.zone, error: error}
+
+        problem("backup_failed", sentence(:backup_failed, facts, values), :back_up_now, %{
+          "seen_at" => iso(at)
+        })
+    end
+  end
+
+  defp failed_tries(snapshots) do
+    for %{"configured" => true, "label" => place, "last_error" => error} = target <-
+          targets(snapshots),
+        is_binary(error) and is_binary(target["last_attempt_at"]),
+        do: {place, time(target["last_attempt_at"]), error}
+  end
 
   defp old_backup(at, key, facts) do
     age = DateTime.diff(facts.now, at, :second)
@@ -1138,7 +1181,6 @@ defmodule FermixCore.Management.HomeSummary do
 
     Enum.concat([
       state_lines(view, ctx),
-      backup_failed_lines(view, facts, ctx),
       restore_lines(view, ctx),
       again_lines(view, facts, ctx),
       move_back_lines(view, facts, ctx),
@@ -1158,20 +1200,6 @@ defmodule FermixCore.Management.HomeSummary do
   end
 
   defp state_lines(_view, _ctx), do: []
-
-  # Where Back up now is offered: each place whose last try failed, in its
-  # own words, until one there is stored.
-  defp backup_failed_lines(view, facts, ctx) do
-    if offers_backup?(view),
-      do:
-        for(
-          %{"configured" => true, "label" => place, "last_error" => error} <-
-            targets(backup_snapshots(facts)),
-          is_binary(error),
-          do: Copy.summary_line(:backup_failed, {place, error}, ctx)
-        ),
-      else: []
-  end
 
   # Where Restore here is offered: the date of the copy it restores (design
   # §8).
@@ -1380,17 +1408,12 @@ defmodule FermixCore.Management.HomeSummary do
   end
 
   # What a desktop's own summary reads from its server's `home.status`
-  # (`primary_home`): its newest backup, whether one runs, and each place
-  # whose last try failed; only a server with desktops has anyone to tell.
+  # (`primary_home`): its newest backup, whether one runs, and each place's
+  # failed try; only a server with desktops has anyone to tell.
   defp drawn(%{role: :primary, link: %{desktops: [_ | _]}} = facts) do
     snapshots = facts.snapshots
 
-    failed =
-      for %{"configured" => true, "last_error" => error} = target <- targets(snapshots),
-          is_binary(error),
-          do: {target["label"], error}
-
-    {newest_backup(snapshots), match?(%{"running" => true}, snapshots), failed}
+    {newest_backup(snapshots), match?(%{"running" => true}, snapshots), failed_tries(snapshots)}
   end
 
   defp drawn(_facts), do: nil

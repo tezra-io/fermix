@@ -92,6 +92,7 @@ defmodule FermixCore.Management.Copy do
                    retired retired_back candidate_waiting candidate_receiving primary
                    cannot_reach server_not_set_up server_waited_too_long update server_older
                    disk_full server_disk_full backup_old backup_none server_backup_old
+                   backup_failed
                    backup_push not_ready data notice_ready notice_moved notice_backup_week
                    notice_server_backup_week notice_server_lapsed notice_restored
                    return_connecting return_ready return_moving return_undone return_failed
@@ -111,7 +112,7 @@ defmodule FermixCore.Management.Copy do
     move_back: "Move back",
     connection: "Connection"
   ]
-  @line_keys Keyword.keys(@line_labels) ++ [:backup, :backup_failed, :copies, :backup_here]
+  @line_keys Keyword.keys(@line_labels) ++ [:backup, :copies, :backup_here]
   @docs_url "https://fermix.ai/docs/always-on/"
   @own_server_command "curl -fsSL https://fermix.ai/install | sudo sh -s -- --always-on --version "
   # What the server's first boot takes (`packaging/cloud/first-boot.sh`'s
@@ -411,6 +412,13 @@ defmodule FermixCore.Management.Copy do
   def summary_sentence(:backup_old, %{days: days, machine: machine}),
     do: "Your last backup is #{days} days old. It runs when this #{machine} is online."
 
+  # The try's own words, where the backup went and when it was tried.
+  def summary_sentence(
+        :backup_failed,
+        %{place: place, at: %DateTime{} = at, zone: zone} = values
+      ),
+      do: "Backing up to #{place} failed on #{stated(at, zone)}: #{terminated(values.error)}"
+
   def summary_sentence(:backup_none, %{days: days, machine: machine}),
     do:
       "No backup has finished since the move #{days} days ago. It runs when this " <>
@@ -624,7 +632,6 @@ defmodule FermixCore.Management.Copy do
   @doc "The label of the Details line `key` (`summary_line_keys/0`)."
   @spec summary_line_label(atom()) :: String.t()
   def summary_line_label(:backup), do: "Last backup to your desktop"
-  def summary_line_label(:backup_failed), do: "Backup to your desktop failed"
   def summary_line_label(:copies), do: "Backups on this Mac"
   def summary_line_label(:backup_here), do: "Backup on this Mac"
   def summary_line_label(key), do: Keyword.fetch!(@line_labels, key)
@@ -632,9 +639,7 @@ defmodule FermixCore.Management.Copy do
   @doc """
   One Details line, `%{"label", "value"}`, its value finished here from
   `value`: a name, a system or a version as it is; a time (`waits_until`, a
-  `backup`'s `{place, at}`) stated in `ctx`'s `zone`; a place whose last
-  backup try failed, with that try's own words (`backup_failed`, `{place,
-  error}`); the space this
+  `backup`'s `{place, at}`) stated in `ctx`'s `zone`; the space this
   computer's `copies` take, in bytes, on `ctx`'s `machine`; how full the
   server's `disk` is, a fraction; the copy on `ctx`'s `machine` a restore
   takes (`backup_here`, when it was written); what runs on this computer
@@ -646,9 +651,6 @@ defmodule FermixCore.Management.Copy do
   @spec summary_line(atom(), term(), map()) :: %{String.t() => String.t()}
   def summary_line(:backup, {place, %DateTime{} = at}, %{zone: zone}),
     do: line("Last backup to #{place}", stated(at, zone))
-
-  def summary_line(:backup_failed, {place, error}, _ctx) when is_binary(error),
-    do: line("Backup to #{place} failed", error)
 
   def summary_line(:copies, bytes, %{machine: machine}) when is_integer(bytes),
     do: line("Backups on this #{machine}", Disk.gib(bytes))
@@ -678,6 +680,10 @@ defmodule FermixCore.Management.Copy do
   defp line(label, value), do: %{"label" => label, "value" => value}
 
   defp stated(at, zone), do: Clock.stated_instant(at, personalization: [timezone: zone])
+
+  defp terminated(text) when is_binary(text) do
+    if String.ends_with?(text, [".", "?", "!"]), do: text, else: text <> "."
+  end
 
   @doc """
   The names the own-server copy interpolates rather than writes: the systems,

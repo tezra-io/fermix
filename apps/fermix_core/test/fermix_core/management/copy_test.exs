@@ -910,6 +910,8 @@ defmodule FermixCore.Management.CopyTest do
   # the setup page print them as they are, so beside the rules they carry
   # none of the engine's own words for the move and no fermix command.
   @restored_day "Saturday, May 3, 2031"
+  # When a failed backup was tried, as `FermixCore.Clock` states it.
+  @failed_at "Sunday, May 4, 2031 at 10:00 AM UTC"
 
   describe "the Always On summary copy" do
     test "every sentence, label and step obeys the rules and names nothing internal" do
@@ -1037,6 +1039,22 @@ defmodule FermixCore.Management.CopyTest do
     end
 
     # The Funnel mounts' labels are names, and a webhook source's is its own.
+    test "a failed backup says the try's own words, where it went and when, as one sentence" do
+      values = %{
+        place: "S3",
+        at: ~U[2031-05-04 10:00:00Z],
+        zone: "Etc/UTC",
+        error: "S3 refused the snapshot",
+        machine: "Mac"
+      }
+
+      assert Copy.summary_sentence(:backup_failed, values) ==
+               "Backing up to S3 failed on #{@failed_at}: S3 refused the snapshot."
+
+      done = %{values | error: "Your desk did not confirm the snapshot in time."}
+      assert Copy.summary_sentence(:backup_failed, done) =~ ~r/in time\.\z/
+    end
+
     test "each Funnel mount is labelled by what it carries" do
       assert Copy.mount_label(:whatsapp) == "WhatsApp"
       assert Copy.mount_label({:cue, "gh-hooks"}) == "Webhook source gh-hooks"
@@ -1056,7 +1074,7 @@ defmodule FermixCore.Management.CopyTest do
   # What the summary's words interpolate rather than write: the systems the
   # server's first boot takes, and the day a restored backup was taken, as
   # `FermixCore.Clock` states it.
-  defp summary_names, do: [@restored_day | Copy.own_server_names()]
+  defp summary_names, do: [@restored_day, @failed_at | Copy.own_server_names()]
 
   defp summary_copy do
     values = %{
@@ -1067,7 +1085,11 @@ defmodule FermixCore.Management.CopyTest do
       stays_here: [:imessage, :voice, :meetings],
       ports: [whatsapp: 4030, cues: 4032],
       to: "studio-mac",
-      day: @restored_day
+      day: @restored_day,
+      place: "your desktop",
+      at: ~U[2031-05-04 10:00:00Z],
+      zone: "Etc/UTC",
+      error: "the snapshot could not be read to send it"
     }
 
     sentences =

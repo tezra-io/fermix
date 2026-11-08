@@ -5,8 +5,9 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
   Always On up while its server connects and once it is ready, the server
   before and after its move, and a linked desktop when all is well (Move back
   among its actions, and the Tailscale Funnel mounts of what its server
-  serves) and when its server stopped answering (Restore here beside it, from
-  the copies the desktop keeps). Each is the record
+  serves), when its server's last backup failed (the `backup_failed` problem,
+  in the try's own words), and when its server stopped answering (Restore
+  here beside it, from the copies the desktop keeps). Each is the record
   `Management.Home.picture/1`
   builds from invented facts, with the summary `HomeSummary.summary/1`
   answers for the same facts, so a golden can only say what the engine says.
@@ -33,6 +34,7 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
       {"home_status_candidate", candidate()},
       {"home_status_server", server()},
       {"home_status_on", on()},
+      {"home_status_backup_failed", backup_failed()},
       {"home_status_problem", problem()}
     ]
   end
@@ -93,7 +95,7 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
     record(:candidate, %{epoch: nil, snapshots: retired_snapshots(:candidate)}, %{move: move})
   end
 
-  defp server do
+  defp server(snapshots \\ server_snapshots()) do
     desktop = %{device_id: "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e", name: "studio-mac"}
 
     # The server installs the version its desktop runs, at most, and serves
@@ -102,7 +104,7 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
       :primary,
       %{
         epoch: 5,
-        snapshots: server_snapshots(),
+        snapshots: snapshots,
         disk: disk(0.42),
         update_ceiling: "1.2.3",
         webhooks: [
@@ -120,6 +122,9 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
   end
 
   defp on, do: desktop(primary(:connected, nil), server())
+
+  # The server's backup at 11:00 failed after the one stored at 10:00.
+  defp backup_failed, do: desktop(primary(:connected, nil), server(failed_snapshots()))
 
   defp problem, do: desktop(primary(:unreachable, 11 * 60_000), nil)
 
@@ -254,6 +259,27 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
   defp s3_snapshots, do: snapshots_view(~U[2031-05-04 09:30:00Z])
   defp server_snapshots, do: snapshots_view(~U[2031-05-04 10:00:00Z])
 
+  defp failed_snapshots do
+    stored = snapshots_status(~U[2031-05-04 10:00:00Z])
+
+    failed = %{
+      at: ~U[2031-05-04 11:00:00Z],
+      result: :failed,
+      name: "20310504T110000Z-e4.fxsnap",
+      epoch: 4,
+      size: 48_302,
+      sha256: String.duplicate("4e", 32),
+      location: nil,
+      key_id: "08c15ca36dd935c4",
+      error: "S3 could not be reached: the connection timed out."
+    }
+
+    stored
+    |> SnapshotStatus.record("s3", failed)
+    |> Map.put(:next_run_at, ~U[2031-05-04 17:00:00Z])
+    |> snapshots_of()
+  end
+
   # No recovery passphrase set yet: no key, so no snapshot either.
   defp unkeyed_snapshots do
     SnapshotStatus.view(SnapshotStatus.empty(), %{
@@ -264,7 +290,9 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
     })
   end
 
-  defp snapshots_view(at) do
+  defp snapshots_view(at), do: at |> snapshots_status() |> snapshots_of()
+
+  defp snapshots_status(at) do
     attempt = %{
       at: at,
       result: :verified,
@@ -277,11 +305,13 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
       error: nil
     }
 
-    status = %{
+    %{
       SnapshotStatus.record(SnapshotStatus.empty(), "s3", attempt)
       | next_run_at: DateTime.add(at, 6 * 3_600, :second)
     }
+  end
 
+  defp snapshots_of(status) do
     SnapshotStatus.view(status, %{
       config: [recipient: @recipient, s3_bucket: "invented-fermix-snapshots"],
       targets: [SnapshotS3],

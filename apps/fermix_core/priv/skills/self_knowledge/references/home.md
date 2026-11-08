@@ -757,7 +757,7 @@ it, never a second writer.
     linked to it runs it.", **Learn more**: the server's update installs
     the oldest version among them),
     the server's disk 85% full or more (**Learn
-    more**), the last backup over 3 days old (**Back up now**), a review that blocks the move
+    more**), the last backup over 3 days old or failed (**Back up now**), a review that blocks the move
     (**Check again**), a move back that stopped (*Moving back*), and on the
     server, a server that waited past its 24 hours or whose enrollment
     failed, each saying to open a new code in Always On and run the command
@@ -767,8 +767,8 @@ it, never a second writer.
   the secrets, the browser, traces) with the plain fact that whoever hosts it
   can technically read its disk (snapshots are encrypted to the recovery
   passphrase), and lines the engine finishes: the server, its system and
-  version, until when it waits, each place's last backup or failure, the
-  space this computer's copies take and the server's disk. Times are stated in the
+  version, until when it waits, each place's last backup, the space this
+  computer's copies take and the server's disk. Times are stated in the
   owner's time zone as dates and times, never as ages. Learn more opens the
   Always On docs.
 - **Webhooks on the server.** Slack (Socket Mode), Telegram and Discord need
