@@ -16,9 +16,12 @@ defmodule FermixChannels.Channels.IMessage.Port do
   process running: the exit status is classified, `64` (usage) and `70`–`72`
   (the disclaim contract) and a mismatch are never retried, anything else is
   re-spawned with backoff from 5 s doubling to a 60 s cap, retried
-  indefinitely. The transport telemetry fires on transitions only: one
-  `:degraded` at the first failure, one `:recovered` when a spawn answers
-  `initialize` again. A raise in this module's own code still crashes it.
+  indefinitely. A port that exits with no status during the handshake,
+  because the `initialize` write met the helper's closed input, is retried as
+  `:helper_exited_in_handshake`. The transport telemetry fires on transitions
+  only: one `:degraded` at the first failure, one `:recovered` when a spawn
+  answers `initialize` again. A raise in this module's own code still crashes
+  it.
   """
 
   use GenServer
@@ -61,6 +64,7 @@ defmodule FermixChannels.Channels.IMessage.Port do
           | :helper_missing
           | {:helper_spawn_failed, atom()}
           | :helper_timeout
+          | :helper_exited_in_handshake
           | :helper_protocol_mismatch
           | :helper_initialize_failed
           | :protocol_error
@@ -275,9 +279,10 @@ defmodule FermixChannels.Channels.IMessage.Port do
     deadline = System.monotonic_time(:millisecond) + state.init_timeout_ms
     state = %{state | next_id: id + 1}
 
-    # The write fails only when the helper already exited. Its exit status, the
-    # real reason, is then the next message from the port, so both outcomes
-    # wait for the answer.
+    # A write to a helper that has exited fails in the port, which then exits
+    # with the helper's exit status or, when the write met its closed input
+    # (EPIPE), with an EXIT and none. The wait reads either, so both results
+    # of the write go to it.
     case command(state.port, line) do
       written when written in [:ok, {:error, :closed}] -> await_handshake(state, id, deadline)
     end
@@ -290,6 +295,7 @@ defmodule FermixChannels.Channels.IMessage.Port do
     receive do
       {^port, {:data, data}} -> handshake_data(state, id, deadline, take_line(state, data))
       {^port, {:exit_status, code}} -> {:error, {:helper_exit, code}, %{state | port: nil}}
+      {:EXIT, ^port, _reason} -> {:error, :helper_exited_in_handshake, %{state | port: nil}}
     after
       remaining -> {:error, :helper_timeout, close_helper(state)}
     end

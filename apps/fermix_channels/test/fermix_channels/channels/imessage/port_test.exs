@@ -9,7 +9,8 @@ defmodule FermixChannels.Channels.IMessage.PortTest do
   method, records each spawn in `<home>/spawns`, exits with `<home>/exit_code`
   when that file exists and answers `initialize` with `<home>/protocol_version`.
   With `<home>/close_stdin` it closes its input before that answer and stays up
-  (`/bin/sleep`). It uses shell builtins and absolute paths only, so nothing on
+  (`/bin/sleep`); with `<home>/mute` it never answers, writes `<home>/muted`
+  and stays up. It uses shell builtins and absolute paths only, so nothing on
   PATH is involved.
   """
   use ExUnit.Case, async: false
@@ -36,6 +37,7 @@ defmodule FermixChannels.Channels.IMessage.PortTest do
     method=${method%%\\"*}
     case "$method" in
       initialize)
+        if [ -f "$home/mute" ]; then : > "$home/muted"; /bin/sleep 30; exit 0; fi
         if [ -f "$home/close_stdin" ]; then exec 0<&-; fi
         printf '{"id":%s,"result":{"protocol_version":%s,"helper_version":"0.0.0-test","macos_version":"27.0","bundle_id":"io.tezra.fermix.messages","db_generation":{"inode":7,"birth_time":"2026-09-01T00:00:00Z"}}}\\n' "$id" "$version"
         if [ -f "$home/close_stdin" ]; then /bin/sleep 30; exit 0; fi ;;
@@ -294,6 +296,60 @@ defmodule FermixChannels.Channels.IMessage.PortTest do
     {:ok, port} = start_port(ctx, shutdown_wait_ms: 3_600_000)
 
     assert :ok = GenServer.stop(port, :normal, @arrival_ms)
+  end
+
+  # A helper that exits as it starts can close its input before the Port
+  # writes `initialize`: the write fails with EPIPE, and the port exits with
+  # that reason and no exit status. The write follows the spawn by
+  # microseconds, so no fake can order that race; the test delivers the same
+  # EXIT by hand, once the fake has read `initialize` and gone quiet (a port
+  # killed while it is still being spawned never reports its exit). The
+  # handshake's deadline and the backoff are an hour, so only the EXIT can end
+  # the start, and nothing respawns while the test reads the status.
+  test "a port that exits during the handshake fails it at once, in a class of its own", ctx do
+    attach_transport_events()
+    File.write!(Path.join(ctx.home, "mute"), "")
+    exit_port_once_muted(ctx, :epipe)
+
+    opts = [
+      executable: ctx.executable,
+      home: ctx.home,
+      init_timeout_ms: 3_600_000,
+      backoff_initial_ms: 3_600_000,
+      backoff_max_ms: 3_600_000
+    ]
+
+    assert {:ok, port} = GenServer.start_link(HelperPort, opts, timeout: @arrival_ms)
+
+    assert_receive {:transport, ^port, :degraded, %{consecutive_failures: 1},
+                    %{error_class: :helper_exited_in_handshake}}
+
+    assert %{status: :backoff, class: :helper_exited_in_handshake} = HelperPort.status(port)
+  end
+
+  # Sends `reason` as an exit signal to the helper's port once the fake has
+  # written `<home>/muted`. The port is found by its executable's path, which
+  # is this test's own.
+  defp exit_port_once_muted(ctx, reason) do
+    muted = Path.join(ctx.home, "muted")
+    name = String.to_charlist(ctx.executable)
+    deadline = System.monotonic_time(:millisecond) + @arrival_ms
+    spawn_link(fn -> exit_port(muted, name, reason, deadline) end)
+  end
+
+  defp exit_port(muted, name, reason, deadline) do
+    cond do
+      File.exists?(muted) ->
+        port = Enum.find(Port.list(), &(Port.info(&1, :name) == {:name, name}))
+        Process.exit(port, reason)
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        flunk("the fake helper never read initialize")
+
+      true ->
+        Process.sleep(5)
+        exit_port(muted, name, reason, deadline)
+    end
   end
 
   defp assert_eventually(fun, deadline) do
