@@ -611,7 +611,9 @@ reached `cancelled` or `failed`.
 
 Only on an attached accessory with no call. `check.tone` plays a tone;
 `check.mic {seconds}` (1–10) reports `check.level {rms}` while it runs, with
-levels only (no audio leaves the accessory, and the mic-live mark stays off);
+levels only (no audio leaves the accessory: its microphones open under the
+held mark, which says the microphones are on and nothing leaves, and the mark
+never shows live);
 `check.face {pose}` shows a named pose; `check.motion {gesture}` runs a named
 gesture; `check.stop` ends any check. Each ends with `check.result {check,
 result, code?}`. `accessory.calibrate {op}` is the Calibrate head step:
