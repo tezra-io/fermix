@@ -42,6 +42,16 @@ DISCLAIM_SRC = c_src/fermix_disclaim.c
 DISCLAIM_BIN = $(PREFIX)/disclaim
 DISCLAIM_CFLAGS = -std=c99 -O2 -Wall -Wextra -Werror
 
+# The accessory link's serial port helper (macOS only, M91 stage E2), built the
+# same way and for the same reason: a port EXECUTABLE that cross-builds take
+# through DISCLAIM_TARGET with zig, and local macOS builds with cc. It loads
+# IOKit and CoreFoundation with dlopen and links no framework, since zig has no
+# Apple frameworks when the release cross-builds macOS on Linux. Keep
+# SERIAL_CFLAGS in lockstep with the ci.yml disclaim-shim job's serial step.
+SERIAL_SRC = c_src/fermix_serial.c
+SERIAL_BIN = $(PREFIX)/fermix_serial
+SERIAL_CFLAGS = -std=c99 -O2 -Wall -Wextra -Werror
+
 # The Apple Maps helper (macOS only), one place search per process for
 # place_search's apple_maps backend (M72 section 14): a Swift EXECUTABLE built
 # with swiftc from the Command Line Tools, so only a native Darwin build makes
@@ -70,11 +80,15 @@ LANDLOCK_BIN = $(PREFIX)/fermix_landlock
 LANDLOCK_CFLAGS = -std=c99 -O2 -Wall -Wextra -Werror
 
 ifdef DISCLAIM_TARGET
-all: $(DISCLAIM_BIN)
+all: $(DISCLAIM_BIN) $(SERIAL_BIN)
 
 $(DISCLAIM_BIN): $(DISCLAIM_SRC)
 	mkdir -p $(PREFIX)
 	zig cc -target $(DISCLAIM_TARGET) $(DISCLAIM_CFLAGS) $(DISCLAIM_SRC) -o $(DISCLAIM_BIN)
+
+$(SERIAL_BIN): $(SERIAL_SRC)
+	mkdir -p $(PREFIX)
+	zig cc -target $(DISCLAIM_TARGET) $(SERIAL_CFLAGS) $(SERIAL_SRC) -o $(SERIAL_BIN)
 else ifdef LANDLOCK_TARGET
 all: $(LANDLOCK_BIN)
 
@@ -82,11 +96,15 @@ $(LANDLOCK_BIN): $(LANDLOCK_SRC)
 	mkdir -p $(PREFIX)
 	zig cc -target $(LANDLOCK_TARGET) $(LANDLOCK_CFLAGS) $(LANDLOCK_SRC) -o $(LANDLOCK_BIN)
 else ifeq ($(KERNEL_NAME), Darwin)
-all: $(DISCLAIM_BIN) $(MAPS_BIN)
+all: $(DISCLAIM_BIN) $(SERIAL_BIN) $(MAPS_BIN)
 
 $(DISCLAIM_BIN): $(DISCLAIM_SRC)
 	mkdir -p $(PREFIX)
 	cc $(DISCLAIM_CFLAGS) $(DISCLAIM_SRC) -o $(DISCLAIM_BIN)
+
+$(SERIAL_BIN): $(SERIAL_SRC)
+	mkdir -p $(PREFIX)
+	cc $(SERIAL_CFLAGS) $(SERIAL_SRC) -o $(SERIAL_BIN)
 
 $(MAPS_BIN): $(MAPS_SRC)
 	mkdir -p $(PREFIX)
@@ -100,6 +118,6 @@ $(LANDLOCK_BIN): $(LANDLOCK_SRC)
 endif
 
 clean:
-	$(RM) $(LIB_NAME) $(DISCLAIM_BIN) $(MAPS_BIN) $(LANDLOCK_BIN)
+	$(RM) $(LIB_NAME) $(DISCLAIM_BIN) $(SERIAL_BIN) $(MAPS_BIN) $(LANDLOCK_BIN)
 
 .PHONY: all clean

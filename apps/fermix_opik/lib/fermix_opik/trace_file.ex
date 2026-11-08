@@ -322,6 +322,13 @@ defmodule FermixOpik.TraceFile do
      voice_live_meta(row)}
   end
 
+  # An accessory call's link counters (M91), under the call's session id. The
+  # emitter's closed counter list is carried as the numbers the row holds.
+  defp normalize_agent_event("accessory_call_link", row) do
+    {[:fermix, :accessory, :call_link], accessory_counters(row),
+     meta(row, [:session_id, :endpoint, :engine, :source, :reason])}
+  end
+
   # A management Doctor run (M34 §5). Counts only — a check summary can name an
   # operator path, so no summary or evidence text is replayed.
   defp normalize_agent_event("doctor_session_start", row) do
@@ -388,6 +395,19 @@ defmodule FermixOpik.TraceFile do
   end
 
   defp normalize_agent_event(_other, _row), do: :skip
+
+  @accessory_counters ~w(duration_ms mic_frames mic_chunks pcm_seq_gaps speaker_frames
+                         speaker_bytes segments flushes credit_waits backlog_peak_bytes
+                         speaker_bytes_dropped task_events task_faults)a
+
+  defp accessory_counters(row) do
+    Enum.reduce(@accessory_counters, %{}, fn key, acc ->
+      case Map.fetch(row, Atom.to_string(key)) do
+        {:ok, value} when is_integer(value) -> Map.put(acc, key, value)
+        _other -> acc
+      end
+    end)
+  end
 
   defp computer_use_meta(row) do
     meta(row, [:session_id, :parent_session, :agent, :mode, :origin])

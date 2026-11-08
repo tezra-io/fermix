@@ -633,6 +633,15 @@ defmodule FermixOpik.Aggregation do
     })
   end
 
+  # An accessory call's link counters (M91), one span under the call's own
+  # trace, on either run kind (`realtime` or `voice_live`): the session id is
+  # the call's. Emitted as the call ends, so attached only while its run is
+  # open, never opening one. The two sessionless accessory points (attach,
+  # fault) are not subscribed, as pairing's are not.
+  def apply_event(state, [:fermix, :accessory, :call_link], meas, meta, at) do
+    attach_if_open(state, meta, at, &Mapper.accessory_call_link_span(meta, meas, &1))
+  end
+
   # A voice call on a task engine, GPT Live (M41 §7) or Grok (M70 §09), is its
   # own run kind, and always a ROOT: the provider session owns the microphone
   # while every tool, memory lookup and model answer runs in a SEPARATE Fermix

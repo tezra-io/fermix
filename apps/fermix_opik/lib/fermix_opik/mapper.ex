@@ -335,6 +335,44 @@ defmodule FermixOpik.Mapper do
   end
 
   @doc """
+  Build the span of one accessory call's link counters from
+  `[:fermix, :accessory, :call_link]` (M91): the call's endpoint, engine,
+  source and why it ended, and the link's counters
+  (`FermixCore.Accessories.Telemetry.call_counters/0`). Counts and closed
+  words only; the event carries no audio, transcript or tool name. The
+  emitter refuses any measurement outside its closed counter list, so every
+  measurement here is one of those counters: they are carried as they came,
+  integers only. Its extent is the call's, from `duration_ms`.
+  """
+  @spec accessory_call_link_span(map(), map(), keyword()) :: map()
+  def accessory_call_link_span(metadata, measurements, opts) do
+    ended = Keyword.fetch!(opts, :ended)
+    started = start_of(ended, Map.get(measurements, :duration_ms, 0))
+
+    %{
+      id: new_id(started),
+      trace_id: Keyword.fetch!(opts, :trace_id),
+      parent_span_id: Keyword.get(opts, :parent_span_id),
+      project_name: Keyword.fetch!(opts, :project_name),
+      name: "accessory:call_link",
+      type: "general",
+      start_time: iso(started),
+      end_time: iso(ended),
+      metadata:
+        Map.merge(
+          drop_nil(%{
+            endpoint: Map.get(metadata, :endpoint),
+            engine: Map.get(metadata, :engine),
+            source: stringify(Map.get(metadata, :source)),
+            reason: stringify(Map.get(metadata, :reason))
+          }),
+          Map.filter(measurements, fn {_name, count} -> is_integer(count) and count >= 0 end)
+        )
+    }
+    |> drop_nil()
+  end
+
+  @doc """
   Build a Live-voice phase span from a `[:fermix, :voice_live, <phase>]` event.
 
   The backend turn a delegation triggers is an ordinary `llm`/`tool` span under

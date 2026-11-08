@@ -851,3 +851,28 @@ if ! check_output="$("$disclaim" --check 2>&1)"; then
   fail "packaged disclaim shim self-check failed"
 fi
 printf '%s\n' "$check_output"
+
+# ── the packaged accessory serial helper (M91) ──────────────────────────────
+# It ships beside the shim in every macOS payload. Its self-check is its own
+# usage refusal (exit 64): run with no command it opens no device and lists
+# no port, so the gate touches no serial hardware on the build machine.
+serial_helper=""
+while IFS= read -r -d '' candidate; do
+  serial_helper="$candidate"
+  break
+done < <(find "$home" -type f -path '*/fermix_nif-*/priv/fermix_serial' -print0)
+
+[ -n "$serial_helper" ] || fail "packaged accessory serial helper not found in the isolated smoke home"
+[ -x "$serial_helper" ] || fail "packaged accessory serial helper is not executable"
+
+set +e
+serial_output="$("$serial_helper" --help 2>&1)"
+serial_status=$?
+set -e
+case "$serial_status:$serial_output" in
+  "64:fermix_serial: usage:"*) printf '%s\n' "$serial_output" ;;
+  *)
+    printf '%s\n' "$serial_output" >&2
+    fail "packaged accessory serial helper self-check failed (exit $serial_status; expected its usage and exit 64)"
+    ;;
+esac

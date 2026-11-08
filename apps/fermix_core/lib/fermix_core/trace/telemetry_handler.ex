@@ -10,6 +10,7 @@ defmodule FermixCore.Trace.TelemetryHandler do
   - M2 lifecycle events → `:agent_event`
   """
 
+  alias FermixCore.Accessories.Telemetry, as: AccessoryTelemetry
   alias FermixCore.Agents.LifecycleTelemetry
   alias FermixCore.Attachments.Telemetry, as: AttachmentTelemetry
   alias FermixCore.Capabilities.MCP.Telemetry, as: MCPClientTelemetry
@@ -295,7 +296,8 @@ defmodule FermixCore.Trace.TelemetryHandler do
       AttachmentTelemetry.trace_event_definitions() ++
       ChecklistTelemetry.trace_event_definitions() ++
       CueTelemetry.trace_event_definitions() ++
-      CueFilterTelemetry.trace_event_definitions()
+      CueFilterTelemetry.trace_event_definitions() ++
+      AccessoryTelemetry.trace_event_definitions()
   end
 
   defp build_trace_payload(%{agent_field: agent_field} = config, measurements, metadata) do

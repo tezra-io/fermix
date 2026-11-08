@@ -567,6 +567,33 @@ defmodule FermixOpik.TraceFileTest do
              )
   end
 
+  # M91: an accessory call's link row replays its counters and the closed words
+  # that say whose call it was and why it ended; nothing else rides it.
+  test "an accessory_call_link row replays its counters under the call's session" do
+    row = %{
+      "ts" => "2026-11-07T12:00:00.000Z",
+      "type" => "agent_event",
+      "event" => "accessory_call_link",
+      "agent" => "accessory:abc",
+      "session_id" => "voice_live:3",
+      "endpoint" => "accessory:abc",
+      "engine" => "openai_live",
+      "source" => "head_swipe",
+      "reason" => "end_request",
+      "mic_frames" => 120,
+      "speaker_bytes" => 48_000,
+      "duration_ms" => 3_000
+    }
+
+    assert {[:fermix, :accessory, :call_link], measurements, meta} =
+             TraceFile.normalize("agent_event", row)
+
+    assert measurements == %{mic_frames: 120, speaker_bytes: 48_000, duration_ms: 3_000}
+    assert meta.session_id == "voice_live:3"
+    assert meta.endpoint == "accessory:abc"
+    assert meta.reason == "end_request"
+  end
+
   test "a voice_live_delegation_stop row replays its duration measurement" do
     base = %{"ts" => "2026-09-12T12:00:00.000Z", "type" => "agent_event"}
 

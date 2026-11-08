@@ -13,6 +13,11 @@ Code.require_file("support/session_driver_helper.exs", __DIR__)
 Code.require_file("support/desktop_rail_helper.exs", __DIR__)
 Code.require_file("support/home_move_helper.exs", __DIR__)
 Code.require_file("support/desktop_family_host_helper.exs", __DIR__)
+Code.require_file("support/accessory_transport_helper.exs", __DIR__)
+Code.require_file("support/accessory_sim_helper.exs", __DIR__)
+Code.require_file("support/accessory_case_helper.exs", __DIR__)
+Code.require_file("support/accessory_engine_helper.exs", __DIR__)
+Code.require_file("support/accessory_pty_helper.exs", __DIR__)
 
 # `iroh_end_to_end` runs the real fermix-iroh helper and needs it built: opt in
 # with `--only iroh_end_to_end` (see `Mobile.Iroh.EndToEndTest`).

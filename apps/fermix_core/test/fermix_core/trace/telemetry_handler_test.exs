@@ -429,6 +429,46 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
     refute Map.has_key?(entry, "content")
   end
 
+  # M91: the accessory link's three events, sessionless points and the call's
+  # counters, each a row of its own; an event missing from
+  # `event_definitions/0` would be invisible with no error.
+  test "every accessory link event reaches the JSONL trace stream", %{dir: dir, server: server} do
+    alias FermixCore.Accessories.Telemetry, as: AccessoryTelemetry
+
+    id = String.duplicate("cd", 32)
+
+    AccessoryTelemetry.emit_attach(:attached, 900, %{
+      mode: :attach,
+      kind: "stackchan",
+      accessory_id: id,
+      accessory_refusal: nil
+    })
+
+    AccessoryTelemetry.emit_fault(:crc_mismatch, :receive, 1)
+
+    AccessoryTelemetry.emit_call_link("voice_live:9", %{mic_frames: 50, duration_ms: 1_000}, %{
+      endpoint: "accessory:" <> id,
+      engine: "openai_live",
+      source: :head_swipe,
+      reason: :end_request
+    })
+
+    sync(server)
+
+    rows =
+      dir
+      |> read_entries(:agent_event)
+      |> Enum.filter(&String.starts_with?(&1["event"] || "", "accessory_"))
+
+    assert Enum.map(rows, & &1["event"]) ==
+             Enum.map(AccessoryTelemetry.trace_event_definitions(), & &1.trace_event)
+
+    [attach, fault, call] = rows
+    assert attach["agent"] == "attached" and attach["endpoint"] == "accessory:" <> id
+    assert fault["agent"] == "crc_mismatch" and fault["stage"] == "receive"
+    assert call["session_id"] == "voice_live:9" and call["mic_frames"] == 50
+  end
+
   test "an attachment ingest becomes an attachment_ingest agent_event row, never its bytes", %{
     dir: dir,
     server: server

@@ -161,7 +161,7 @@ Deeper detail loads on demand with `skill_view(name: "self-knowledge", file: "<n
 - `channel_presentation` — inbound media coalescing and empty messages, then how replies land on chat surfaces: dialect rendering, the boundary-ladder splitter, message hygiene, draft-rotation and block streaming, the ephemeral 💭 stream, and the approval-prompt buttons.
 - `mobile` — the phone channel: availability, the management surface, pairing, device revocation, desktops paired by a move, reachability, remote reach, APNs push, and troubleshooting.
 - `companion` — the Mac app's chat socket: trust, the shared timeline, delivery and cancel by client message id, history and search, scheduled delivery, and what it does not carry.
-- `voice` — the voice companion: turning it on, both engines, key and cost limits, which conversation a call's tasks run in, the app connection, access-sensitive commands on a call, noise and echo, and screen sharing.
+- `voice` — the voice companion: turning it on, both engines, key and cost limits, which conversation a call's tasks run in, the app connection, access-sensitive commands on a call, noise and echo, screen sharing, and a USB accessory.
 - `transcription` — speech to text: choosing a backend, keys and models, the on-device `local` backend, live streams, and failure replies.
 - `meetings` — the notetaker: turning on each lane, consent, artifacts, delivery, the summary route, and each refusal.
 - `jobs` — scheduled agent runs: every `schedule_job` field with its default and its refusal, the schedule grammar, delivery resolution and `[SILENT]`, attachments, run confinement, lifecycle, each management verb, and a watcher's two kinds of job (its task and its follow-up) with their labels.

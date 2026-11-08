@@ -45,6 +45,12 @@ enabled = true
 # section 14); fermix_nif's Makefile builds it on the native macOS runners.
 MAPS_HELPER_GLOB = "lib/fermix_nif-*/priv/fermix-maps"
 MAPS_HELPER_CHECK = "fermix-maps: ok"
+# The accessory link's serial helper (M91), built beside the disclaim shim. Its
+# self-check is its usage refusal: with no command it opens no device and lists
+# no port, so verification touches no serial hardware.
+SERIAL_HELPER_GLOB = "lib/fermix_nif-*/priv/fermix_serial"
+SERIAL_HELPER_USAGE = "fermix_serial: usage:"
+SERIAL_HELPER_USAGE_EXIT = 64
 # Reach from anywhere runs this helper (M62); the release step puts the pinned
 # build into the engine tree before the manifest inventories it, and its
 # third-party notices beside its bin/.
@@ -163,6 +169,7 @@ def _verify_in_directories(
         release_root, target, version, expected_source_commit
     )
     maps_helper = _verify_maps_helper(release_root, manifest, command_prefix, timeouts)
+    serial_helper = _verify_serial_helper(release_root, manifest, command_prefix, timeouts)
     iroh_helper = _verify_iroh_helper(
         release_root, manifest, command_prefix, pinned_iroh, timeouts
     )
@@ -187,6 +194,7 @@ def _verify_in_directories(
         return {
             **result,
             "maps_helper": maps_helper,
+            "serial_helper": serial_helper,
             "iroh_helper": iroh_helper,
             "iroh_notices": iroh_notices,
         }
@@ -229,6 +237,40 @@ def _verify_maps_helper(release_root, manifest, command_prefix, timeouts):
         words = completed.stderr.strip() or completed.stdout.strip() or "no output"
         raise VerificationError(
             f"the Apple Maps helper self-check failed (exit {completed.returncode}): {words}"
+        )
+    return relative
+
+
+def _verify_serial_helper(release_root, manifest, command_prefix, timeouts):
+    """The packaged engine carries one inventoried accessory serial helper that runs here."""
+    helpers = sorted(release_root.glob(SERIAL_HELPER_GLOB))
+    if len(helpers) != 1:
+        raise VerificationError(
+            f"the app engine must carry exactly one accessory serial helper "
+            f"({SERIAL_HELPER_GLOB}), found {len(helpers)}"
+        )
+
+    relative = helpers[0].relative_to(release_root).as_posix()
+    listed = {entry["path"] for entry in manifest["inventory"]["entries"]}
+    if relative not in listed:
+        raise VerificationError(f"the engine manifest does not inventory {relative}")
+
+    try:
+        completed = subprocess.run(
+            [*command_prefix, str(helpers[0]), "--help"],
+            capture_output=True,
+            text=True,
+            timeout=timeouts.helper_check_timeout_seconds,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise VerificationError(f"the accessory serial helper could not run: {error}") from error
+
+    usage = completed.stderr.strip()
+    if completed.returncode != SERIAL_HELPER_USAGE_EXIT or not usage.startswith(SERIAL_HELPER_USAGE):
+        words = usage or completed.stdout.strip() or "no output"
+        raise VerificationError(
+            f"the accessory serial helper self-check failed (exit {completed.returncode}): {words}"
         )
     return relative
 

@@ -97,6 +97,9 @@ defmodule FermixCore.Home.Role do
     {FermixChannels.Channels.Acp.Supervisor, "runs an ACP client's prompts as turns"},
     {FermixChannels.Mobile.Supervisor,
      "admits phone turns through the identity bundle, which moved with the primary"},
+    {FermixChannels.Accessories.Supervisor,
+     "watches this computer's accessory ports and runs their calls; an accessory needs a " <>
+       "local Mac primary, and a device runs no realtime session"},
     {FermixChannels.Voice.CallRowSweep,
      "settles the rows and detached tasks the primary's calls owe"},
     {FermixCore.Auth.TokenSupervisor,

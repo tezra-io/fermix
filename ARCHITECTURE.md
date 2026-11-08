@@ -1360,6 +1360,22 @@ update leaves the running engine as it was, two updates never install at
 once, and nothing the engine account answers holds a security reboot off
 for more than two nights.
 
+`Accessories` (M91) is the endpoint for a paired physical accessory (the
+StackChan robot first) on the Mac's USB cable. Core holds the wire and its
+checks (`FermixCore.Accessories`: framing, the bounded parser, control
+messages, both attach proofs, enrollment, the pairing store under
+`<home>/accessories/`, the D21 task mapping, the link's telemetry; exported in
+`priv/accessory/`); channels holds the endpoint (`FermixChannels.Accessories`),
+a primary-only, macOS-only subtree that starts only with
+`[fermix_channels.accessories] enabled`: a store writer, a `Watcher` that
+polls the USB-Serial-JTAG ports and opens only the port the owner selected for
+pairing or one an enrolled accessory's serial-string hint names, one `Link`
+per open port (attach, heartbeats, faults, pairing), and one `Call` per call
+under its link, which owns the call's `CallClient` as the
+`accessory:<accessory_id>` endpoint and translates the engine's frames to the
+accessory's within its speaker credit. The port itself is `Serial`, over the
+`fermix_serial` helper in `fermix_nif` (spawned through `disclaim`).
+
 ### `apps/fermix_channels`
 
 This app owns messaging-platform and companion transports and depends on

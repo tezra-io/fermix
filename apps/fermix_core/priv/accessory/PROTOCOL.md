@@ -235,8 +235,10 @@ Every message from the host carries the generation of the HELLO that opened
 the link; a message from the accessory echoes it. Each end drops a message of
 another generation. A call-scoped message carries the call's stream, and each
 end drops one for a stream that is not the call's. Task events also carry the
-task and its revision, and the accessory drops a revision no newer than the
-last it saw for that task.
+task and its revision. The accessory drops an event whose revision is older
+than the newest it saw for that task and, within one revision, an event that
+does not move the status forward: `running` comes first, and a settled status
+(`completed`, `failed` or `cancelled`) ends that revision.
 
 `fixtures/host_messages.jsonl` and `fixtures/accessory_messages.jsonl` hold
 valid messages of each sender, one per line; `fixtures/invalid_messages.jsonl`

@@ -7,6 +7,7 @@ defmodule FermixCore.Setup.ConfigStore do
   health reporting, traces, and logs.
   """
 
+  alias FermixCore.Accessories.Config, as: AccessoriesConfig
   alias FermixCore.Browser.Config, as: BrowserConfig
   alias FermixCore.Capabilities.MCP.Config, as: McpConfig
   alias FermixCore.Capabilities.MCP.OAuth.Grant, as: McpGrant
@@ -171,7 +172,8 @@ defmodule FermixCore.Setup.ConfigStore do
         signal: Application.get_env(:fermix_channels, :signal, []),
         acp: Application.get_env(:fermix_channels, :acp, []),
         mobile: Application.get_env(:fermix_channels, :mobile, []),
-        imessage: Application.get_env(:fermix_channels, :imessage, [])
+        imessage: Application.get_env(:fermix_channels, :imessage, []),
+        accessories: Application.get_env(:fermix_channels, :accessories, [])
       ],
       fermix_web: Application.get_env(:fermix_web, :listener, [])
     }
@@ -381,6 +383,7 @@ defmodule FermixCore.Setup.ConfigStore do
     apply_channel_config(:acp, Keyword.get(persisted.fermix_channels, :acp, []))
     apply_channel_config(:mobile, Keyword.get(persisted.fermix_channels, :mobile, []))
     apply_channel_config(:imessage, Keyword.get(persisted.fermix_channels, :imessage, []))
+    apply_accessories_config(Keyword.get(persisted.fermix_channels, :accessories, []))
     apply_web_config(Map.get(persisted, :fermix_web, []))
   end
 
@@ -837,7 +840,12 @@ defmodule FermixCore.Setup.ConfigStore do
           snapshot
           |> Map.get(:fermix_channels, [])
           |> Keyword.get(:imessage, [])
-          |> normalize_imessage()
+          |> normalize_imessage(),
+        accessories:
+          snapshot
+          |> Map.get(:fermix_channels, [])
+          |> Keyword.get(:accessories, [])
+          |> normalize_accessories()
       ],
       fermix_web: snapshot |> Map.get(:fermix_web, []) |> normalize_web() |> web_to_keyword()
     }
@@ -958,7 +966,8 @@ defmodule FermixCore.Setup.ConfigStore do
         signal: [],
         acp: [],
         mobile: [],
-        imessage: []
+        imessage: [],
+        accessories: []
       ],
       fermix_web: []
     }
@@ -1459,6 +1468,15 @@ defmodule FermixCore.Setup.ConfigStore do
     :ok
   end
 
+  # Replace (not merge), re-normalized on the way in: the section has no
+  # compile-time baseline, and the off default is omitted from the keyword, so
+  # a merge would keep an earlier `enabled: true` running after a save that
+  # turned the link off.
+  defp apply_accessories_config(accessories_config) do
+    Application.put_env(:fermix_channels, :accessories, normalize_accessories(accessories_config))
+    :ok
+  end
+
   defp dump_snapshot(snapshot) do
     fermix_core = Map.get(snapshot, :fermix_core, [])
     providers = Keyword.get(fermix_core, :providers, [])
@@ -1555,6 +1573,10 @@ defmodule FermixCore.Setup.ConfigStore do
       render_section(["fermix_channels", "acp"], Keyword.get(channels, :acp, [])),
       render_mobile(Keyword.get(channels, :mobile, [])),
       render_section(["fermix_channels", "imessage"], Keyword.get(channels, :imessage, [])),
+      render_section(
+        ["fermix_channels", "accessories"],
+        Keyword.get(channels, :accessories, [])
+      ),
       render_section(["fermix_web"], web),
       render_mcp(Map.fetch!(snapshot, :mcp))
     ]
@@ -1903,7 +1925,8 @@ defmodule FermixCore.Setup.ConfigStore do
         signal: normalize_signal(get_in(document, ["fermix_channels", "signal"])),
         acp: normalize_acp(get_in(document, ["fermix_channels", "acp"])),
         mobile: normalize_mobile(get_in(document, ["fermix_channels", "mobile"])),
-        imessage: normalize_imessage(get_in(document, ["fermix_channels", "imessage"]))
+        imessage: normalize_imessage(get_in(document, ["fermix_channels", "imessage"])),
+        accessories: normalize_accessories(get_in(document, ["fermix_channels", "accessories"]))
       ],
       fermix_web: normalize_web(get_in(document, ["fermix_web"]))
     }
@@ -3193,6 +3216,17 @@ defmodule FermixCore.Setup.ConfigStore do
 
   defp normalize_acp(config) do
     put_if_present([], :enabled, lookup(config, "enabled", :enabled))
+  end
+
+  # The accessory link (M91). `AccessoriesConfig.normalize/1` refuses a
+  # non-boolean `enabled` by name and ignores keys it does not know (a later
+  # phase's keys must not stop a rolled-back daemon's boot); `to_keyword/1` is
+  # its inverse and omits the off default. The file and application
+  # environment hold the same keyword: `[]` or `[enabled: true]`.
+  defp normalize_accessories(config) do
+    config
+    |> AccessoriesConfig.normalize()
+    |> AccessoriesConfig.to_keyword()
   end
 
   # The iMessage channel (M54 §11). Every value that would otherwise be dropped

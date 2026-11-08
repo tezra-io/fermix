@@ -1,0 +1,471 @@
+defmodule FermixChannels.Accessories.Call do
+  @moduledoc """
+  One accessory call (M91 §04-§06): the per-call process that owns the call's
+  `FermixCore.Realtime.CallClient`, with endpoint `accessory:<accessory_id>`
+  and the realtime protocol level this adapter translates (the current one,
+  so every engine's frames are rendered). Started and linked by the
+  accessory's link, so it can block on its session's start while the link
+  keeps reading; it traps exits, so the link's end, however it ends, tears
+  its session down, and `SessionGuard` does the same should this process
+  itself die.
+
+  Engine to accessory:
+
+    * `state` → `call.state`, once per change; a reply ending (the state
+      leaving `speaking`) closes the reply's speaker segment.
+    * `audio_delta` → `spk.begin`, speaker PCM and `spk.end`, within credit
+      (`Call.Speaker`); `playback_stop` → `spk.flush` (URGENT), when there is
+      anything to flush.
+    * a GPT-Live or Grok `task`, and OpenAI Realtime's `tool_event`s and its
+      reconnects → `task.event` (`FermixCore.Accessories.Tasks`, M91 D21).
+    * `error`, or the session ending → the call ends.
+
+  Accessory to engine:
+
+    * five 960-byte microphone frames → one 4,800-byte chunk (`audio`), with
+      the gaps in their sequence numbers counted and the audio used;
+    * `spk.flushed` → `interrupt(played_ms)`; `playback.progress` → Grok's
+      `playback_progress`; `mic.state` → `mute`; `call.end_request` → the end.
+
+  A refused start becomes `call.result refused` with the refusal's code (the
+  lease's `call_in_progress` among them) before any `call.start`. A
+  call-ending fault (`credit_overgrant`, `segment_limit` and the rest, or
+  two minutes of audio held for want of credit) ends the call cleanly. As it
+  ends, its link counters are reported under the call's session id
+  (`[:fermix, :accessory, :call_link]`), then the session is torn down; the
+  link tells the accessory `call.end`.
+  """
+
+  use GenServer, restart: :temporary
+
+  alias FermixChannels.Accessories.Call.Speaker
+  alias FermixCore.Accessories.Tasks
+  alias FermixCore.Accessories.Telemetry
+  alias FermixCore.Realtime.CallClient
+  alias FermixCore.Realtime.Config
+  alias FermixCore.Realtime.Endpoint
+  alias FermixCore.Realtime.Protocol
+  alias FermixCore.Realtime.SessionControl
+
+  require Logger
+
+  @mic_chunk_bytes 4_800
+  @seq_modulus 4_294_967_296
+  @call_states ~w(connecting listening thinking speaking muted reconnecting)
+  @robot_errors %{
+    "credit_overgrant" => :credit_overgrant,
+    "credit_exceeded" => :credit_exceeded,
+    "segment_limit" => :segment_limit,
+    "segment_sequence" => :segment_sequence
+  }
+  @client_opts [:session_module, :session_starter, :session_supervisor, :session_guard]
+  @token ~r/\A[a-z][a-z0-9_]{0,47}\z/
+
+  @spec start_link(keyword()) :: GenServer.on_start()
+  def start_link(opts) when is_list(opts), do: GenServer.start_link(__MODULE__, opts)
+
+  @impl true
+  def init(opts) do
+    Process.flag(:trap_exit, true)
+    clock = Keyword.get(opts, :clock, fn -> System.monotonic_time(:millisecond) end)
+
+    state = %{
+      link: Keyword.fetch!(opts, :link),
+      stream: Keyword.fetch!(opts, :stream),
+      request: Keyword.get(opts, :request),
+      source: Keyword.fetch!(opts, :source),
+      endpoint: Keyword.fetch!(opts, :endpoint),
+      config: Keyword.get_lazy(opts, :config, &Config.current/0),
+      opts: opts,
+      clock: clock,
+      started_ms: clock.(),
+      client: nil,
+      session_id: nil,
+      speaker: Speaker.new(),
+      tasks: Tasks.new(),
+      mic: <<>>,
+      mic_seq: nil,
+      engine_muted?: false,
+      sent_state: nil,
+      counters: %{mic_frames: 0, mic_chunks: 0, pcm_seq_gaps: 0, task_events: 0, task_faults: 0}
+    }
+
+    {:ok, state, {:continue, :start}}
+  end
+
+  # -- the start ------------------------------------------------------------------------
+
+  @impl true
+  def handle_continue(:start, state) do
+    session_id = SessionControl.session_scope(state.config)
+    client = new_client(state, session_id)
+    state = %{state | session_id: session_id}
+
+    case CallClient.call_start(client) do
+      {:cont, client} -> {:noreply, accepted(%{state | client: client})}
+      {:stop, client} -> refused(state, client)
+    end
+  end
+
+  defp new_client(state, session_id) do
+    me = self()
+
+    state.opts
+    |> Keyword.take(@client_opts)
+    |> Keyword.merge(
+      endpoint: state.endpoint,
+      protocol_version: Protocol.protocol_version(),
+      config: state.config,
+      emit: fn event ->
+        send(me, {:emitted, event})
+        :ok
+      end,
+      task_supervisor:
+        Keyword.get(state.opts, :task_supervisor, FermixCore.Realtime.TaskSupervisor),
+      starter_opts: [session_scope: session_id]
+    )
+    |> CallClient.new()
+  end
+
+  # Admitted: the accessory hears the result (for its own request), the call's
+  # stream, and that it is connecting; the session's own frames follow.
+  defp accepted(state) do
+    if state.request,
+      do: to_link(state, %{type: "call.result", request: state.request, result: "accepted"})
+
+    to_link(state, %{type: "call.start", stream: state.stream, call: state.session_id})
+    send_state(state, "connecting")
+  end
+
+  # A session that started and then refused the call is torn down here, the
+  # prompt path; the guard would on this process's exit anyway.
+  defp refused(state, client) do
+    _client = CallClient.teardown(client)
+    error = first_error()
+    code = refusal_code(error)
+    held_by = if held = Map.get(error, :held_by), do: " (the call is at #{held})", else: ""
+    Logger.info("accessory call #{state.stream} was refused: #{code}#{held_by}")
+
+    if state.request,
+      do:
+        to_link(state, %{
+          type: "call.result",
+          request: state.request,
+          result: "refused",
+          code: code
+        })
+
+    {:stop, {:shutdown, {:refused, code}}, state}
+  end
+
+  # What the refusal said, as the call client wrote it. The client wrote
+  # everything the session had queued first, so only the error is wanted.
+  defp first_error do
+    receive do
+      {:emitted, %{type: "error"} = error} -> error
+    after
+      0 -> %{}
+    end
+  end
+
+  defp refusal_code(%{kind: kind}) when is_binary(kind), do: token(kind, "call_refused")
+  defp refusal_code(%{reason: reason}) when is_binary(reason), do: token(reason, "call_refused")
+  defp refusal_code(_error), do: "call_refused"
+
+  # -- the call -------------------------------------------------------------------------
+
+  @impl true
+  def handle_info({:realtime, event}, state), do: on_engine(state, event)
+  def handle_info({:emitted, event}, state), do: on_engine(state, event)
+  def handle_info({:robot, message}, state), do: on_robot(state, message)
+  def handle_info({:mic, seq, pcm}, state), do: {:noreply, on_mic(state, seq, pcm)}
+
+  def handle_info({:robot_error, code}, state),
+    do: finish(state, Map.fetch!(@robot_errors, code))
+
+  def handle_info({:end, reason}, state) when is_atom(reason), do: finish(state, reason)
+  def handle_info({:mute, muted?}, state), do: mac_mute(state, muted?)
+  def handle_info(:interrupt, state), do: {:noreply, flush(state)}
+
+  def handle_info({:cancel_task, delegation_id}, state),
+    do: verb(state, &CallClient.task_cancel(&1, delegation_id))
+
+  def handle_info(
+        {:DOWN, ref, :process, _session, reason},
+        %{client: %{session_ref: ref}} = state
+      ) do
+    {:stop, client} = CallClient.session_down(state.client, reason)
+    finish(%{state | client: client}, :session_ended)
+  end
+
+  # The link went, however it went: the session goes with it.
+  def handle_info({:EXIT, link, _reason}, %{link: link} = state), do: finish(state, :link_gone)
+  def handle_info({:EXIT, _other, _reason}, state), do: {:noreply, state}
+
+  def handle_info(message, state) do
+    Logger.debug("accessory call ignored an unexpected message: #{inspect(message, limit: 8)}")
+    {:noreply, state}
+  end
+
+  # -- engine to accessory ----------------------------------------------------------------
+
+  defp on_engine(state, %{type: "state", state: value}),
+    do: {:noreply, engine_state(state, value)}
+
+  defp on_engine(state, %{type: "audio_delta", audio: audio} = delta) do
+    case Base.decode64(audio) do
+      {:ok, pcm} -> speak(state, pcm, Map.get(delta, :playback_id))
+      :error -> bad_audio(state)
+    end
+  end
+
+  defp on_engine(state, %{type: "playback_stop"}), do: {:noreply, flush(state)}
+  defp on_engine(state, %{type: "task"} = frame), do: {:noreply, task_frame(state, frame)}
+  defp on_engine(state, %{type: "tool_event"} = event), do: {:noreply, tool_event(state, event)}
+
+  defp on_engine(state, %{type: "error"} = error),
+    do: finish(state, :session_error, error_reason(error))
+
+  defp on_engine(state, _event), do: {:noreply, state}
+
+  defp bad_audio(state) do
+    Logger.error("accessory call #{state.stream}: the engine sent audio that is not base64")
+    {:noreply, state}
+  end
+
+  # `idle` is the session ending; its end arrives as its exit.
+  defp engine_state(state, "idle"), do: state
+
+  defp engine_state(state, value) when value in @call_states do
+    state =
+      if state.sent_state == "speaking" and value != "speaking",
+        do: reply_ended(state),
+        else: state
+
+    state = if value == "reconnecting", do: reconnected(state), else: state
+    send_state(state, value)
+  end
+
+  defp engine_state(state, value) do
+    Logger.debug("accessory call: no call.state for the engine's #{inspect(value)}")
+    state
+  end
+
+  defp send_state(%{sent_state: value} = state, value), do: state
+
+  defp send_state(state, value) do
+    to_link(state, %{type: "call.state", stream: state.stream, state: value})
+    %{state | sent_state: value}
+  end
+
+  defp reply_ended(state), do: pump(%{state | speaker: Speaker.reply_ended(state.speaker)})
+
+  defp speak(state, pcm, playback_id) do
+    case Speaker.audio(state.speaker, pcm, playback_id) do
+      {:ok, speaker} -> {:noreply, pump(%{state | speaker: speaker})}
+      {:error, :speaker_backlog} -> finish(state, :speaker_backlog)
+    end
+  end
+
+  defp pump(state) do
+    {out, speaker} = Speaker.pump(state.speaker)
+    Enum.each(out, &speaker_out(state, &1))
+    %{state | speaker: speaker}
+  end
+
+  defp speaker_out(state, {:begin, segment, playback_id}),
+    do:
+      to_link(state, %{
+        type: "spk.begin",
+        stream: state.stream,
+        segment: segment,
+        playback_id: playback_id
+      })
+
+  defp speaker_out(state, {:pcm, pcm}), do: send(state.link, {:call_pcm, state.stream, pcm})
+
+  defp speaker_out(state, {:end, segment}),
+    do: to_link(state, %{type: "spk.end", stream: state.stream, segment: segment})
+
+  defp flush(state) do
+    case Speaker.flush(state.speaker) do
+      {true, speaker} ->
+        to_link(state, %{type: "spk.flush", stream: state.stream}, true)
+        %{state | speaker: speaker}
+
+      {false, speaker} ->
+        %{state | speaker: speaker}
+    end
+  end
+
+  defp task_frame(state, frame) do
+    case Tasks.from_task_frame(frame) do
+      {:ok, event} -> task_events(state, [event])
+      :skip -> state
+      {:error, field} -> task_fault(state, {:task_frame, field})
+    end
+  end
+
+  defp tool_event(state, event) do
+    case Tasks.tool_event(state.tasks, event) do
+      {:ok, events, tasks} -> task_events(%{state | tasks: tasks}, events)
+      {:fault, reason, tasks} -> task_fault(%{state | tasks: tasks}, reason)
+    end
+  end
+
+  defp reconnected(state) do
+    {events, tasks} = Tasks.reconnect(state.tasks)
+    task_events(%{state | tasks: tasks}, events)
+  end
+
+  defp task_events(state, events) do
+    Enum.each(events, &to_link(state, Map.merge(&1, %{type: "task.event", stream: state.stream})))
+    count(state, :task_events, length(events))
+  end
+
+  defp task_fault(state, reason) do
+    Logger.warning(
+      "accessory call #{state.stream}: a task frame the accessory cannot carry: #{inspect(reason)}"
+    )
+
+    count(state, :task_faults, 1)
+  end
+
+  # -- accessory to engine ----------------------------------------------------------------
+
+  defp on_robot(state, %{type: "credit", bytes: bytes}) do
+    case Speaker.credit(state.speaker, bytes) do
+      {:ok, speaker} -> {:noreply, pump(%{state | speaker: speaker})}
+      {:error, :credit_overgrant} -> overgrant(state)
+    end
+  end
+
+  defp on_robot(state, %{type: "spk.drained", segment: segment}),
+    do: {:noreply, pump(%{state | speaker: Speaker.drained(state.speaker, segment)})}
+
+  defp on_robot(state, %{type: "spk.flushed", played_ms: played_ms}),
+    do: verb(state, &CallClient.interrupt(&1, played_ms))
+
+  defp on_robot(state, %{type: "playback.progress"} = progress) do
+    verb(
+      state,
+      &CallClient.playback_progress(
+        &1,
+        progress.playback_id,
+        progress.played_ms,
+        progress.drained
+      )
+    )
+  end
+
+  defp on_robot(state, %{type: "mic.state", state: "off", reason: "mic_backlog"}),
+    do: finish(state, :mic_backlog)
+
+  defp on_robot(state, %{type: "mic.state", state: mic}) do
+    muted? = mic != "live"
+    if muted? == state.engine_muted?, do: {:noreply, state}, else: engine_mute(state, muted?)
+  end
+
+  defp on_robot(state, %{type: "call.end_request"}), do: finish(state, :end_request)
+
+  # The accessory granted past its own bound: a host-side refusal, then the end.
+  defp overgrant(state) do
+    to_link(state, %{type: "error", code: "credit_overgrant", message_type: "credit"})
+    finish(state, :credit_overgrant)
+  end
+
+  defp mac_mute(state, muted?) do
+    to_link(state, %{type: "mute.set", stream: state.stream, muted: muted?}, true)
+    engine_mute(state, muted?)
+  end
+
+  defp engine_mute(state, muted?) do
+    case CallClient.mute(state.client, muted?) do
+      {:cont, client} ->
+        {:noreply, %{state | client: client, engine_muted?: muted?}}
+
+      {:stop, client} ->
+        finish(%{state | client: client}, :session_error, error_reason(first_error()))
+    end
+  end
+
+  defp verb(state, fun) do
+    case fun.(state.client) do
+      {:cont, client} ->
+        {:noreply, %{state | client: client}}
+
+      {:stop, client} ->
+        finish(%{state | client: client}, :session_error, error_reason(first_error()))
+    end
+  end
+
+  defp on_mic(state, seq, pcm) do
+    state
+    |> mic_seq(seq)
+    |> count(:mic_frames, 1)
+    |> Map.update!(:mic, &(&1 <> pcm))
+    |> forward_mic()
+  end
+
+  # The first frame is the base; a gap is counted and the audio still used.
+  defp mic_seq(%{mic_seq: nil} = state, seq), do: %{state | mic_seq: seq}
+
+  defp mic_seq(state, seq) do
+    state =
+      if seq == rem(state.mic_seq + 1, @seq_modulus),
+        do: state,
+        else: count(state, :pcm_seq_gaps, 1)
+
+    %{state | mic_seq: seq}
+  end
+
+  defp forward_mic(%{mic: <<chunk::binary-size(@mic_chunk_bytes), rest::binary>>} = state) do
+    case CallClient.audio(state.client, chunk) do
+      {:cont, client} -> %{state | client: client, mic: rest} |> count(:mic_chunks, 1)
+      {:stop, client} -> send_end(%{state | client: client, mic: rest}, :session_error)
+    end
+  end
+
+  defp forward_mic(state), do: state
+
+  # A refused chunk ends the call from the loop, not from inside the reduce.
+  defp send_end(state, reason) do
+    send(self(), {:end, reason})
+    state
+  end
+
+  # -- the end --------------------------------------------------------------------------
+
+  defp finish(state, reason, wire_reason \\ nil) do
+    report(state, reason)
+    if state.client, do: CallClient.teardown(state.client)
+    {:stop, {:shutdown, {:call_ended, wire_reason || Atom.to_string(reason)}}, state}
+  end
+
+  defp report(state, reason) do
+    counters =
+      state.counters
+      |> Map.merge(Speaker.counters(state.speaker))
+      |> Map.put(:duration_ms, max(state.clock.() - state.started_ms, 0))
+
+    Telemetry.emit_call_link(state.session_id, counters, %{
+      endpoint: Endpoint.format(state.endpoint),
+      engine: state.config.engine,
+      source: state.source,
+      reason: reason
+    })
+  end
+
+  defp error_reason(%{kind: kind}) when is_binary(kind), do: token(kind, "session_error")
+  defp error_reason(%{reason: reason}) when is_binary(reason), do: token(reason, "session_error")
+  defp error_reason(_error), do: "session_error"
+
+  # A wire reason is a token of at most 48 characters: anything else is the
+  # fallback word, never a peer- or vendor-supplied string verbatim.
+  defp token(value, fallback), do: if(Regex.match?(@token, value), do: value, else: fallback)
+
+  defp to_link(state, message, urgent? \\ false),
+    do: send(state.link, {:call_send, state.stream, message, urgent?})
+
+  defp count(state, key, n), do: update_in(state.counters[key], &(&1 + n))
+end

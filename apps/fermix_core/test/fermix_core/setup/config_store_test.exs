@@ -1074,6 +1074,9 @@ defmodule FermixCore.Setup.ConfigStoreTest do
   [fermix_core.plugins]
   dev_local = "/tmp/fermix-dev-local"
 
+  [fermix_channels.accessories]
+  enabled = true
+
   [fermix_web]
   port = 4555
   """
@@ -1115,6 +1118,9 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     # reach it; name it here rather than leave the one section the gate walks
     # past unasserted.
     assert second.fermix_web == [port: 4555]
+    # Nor does it walk `fermix_channels`; the accessories switch is named here
+    # for the same reason.
+    assert Keyword.fetch!(second.fermix_channels, :accessories) == [enabled: true]
   end
 
   # MGMT-1. The parser reads the file one line at a time and a later assignment
@@ -3813,6 +3819,103 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     end
 
     defp write_config!(home, contents), do: File.write!(Path.join(home, "config.toml"), contents)
+  end
+
+  # `[fermix_channels.accessories]` (M91 Phase A): one switch, off when the
+  # file says nothing. Seeded with the app-env shapes a save starts from, never
+  # the file's spelling (the config round-trip pitfall). A load applies the
+  # whole snapshot, so every key of the three apps it writes is restored.
+  describe "[fermix_channels.accessories] (M91)" do
+    setup do
+      envs =
+        Map.new([:fermix_core, :fermix_channels, :fermix_web], &{&1, Application.get_all_env(&1)})
+
+      tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("config-store-accessories")
+      System.put_env("FERMIX_HOME", tmp_home)
+
+      on_exit(fn ->
+        Enum.each(envs, fn {app, env} -> restore_app_env(app, env) end)
+        FermixTestSupport.SafeRm.rm_rf!(tmp_home)
+      end)
+
+      %{config: Path.join(tmp_home, "config.toml")}
+    end
+
+    test "save/load round-trips the switch, applies it, and clears it when turned off", ctx do
+      unset = %{fermix_core: [agent: [name: "aira"]], fermix_channels: [], fermix_web: []}
+      assert :ok = ConfigStore.save_snapshot(unset)
+      refute File.read!(ctx.config) =~ "fermix_channels.accessories"
+      assert {:ok, loaded} = ConfigStore.load_runtime_config()
+      assert Keyword.fetch!(loaded.fermix_channels, :accessories) == []
+
+      on = %{fermix_core: [], fermix_channels: [accessories: [enabled: true]], fermix_web: []}
+      assert :ok = ConfigStore.save_snapshot(on)
+      contents = File.read!(ctx.config)
+      assert contents =~ "[fermix_channels.accessories]\nenabled = true\n"
+      assert {:ok, loaded} = ConfigStore.load_runtime_config()
+      assert Keyword.fetch!(loaded.fermix_channels, :accessories) == [enabled: true]
+      assert :ok = ConfigStore.apply_snapshot(loaded)
+      assert Application.get_env(:fermix_channels, :accessories) == [enabled: true]
+
+      # A second save from the live snapshot, as setup makes it, is a fixed point.
+      assert :ok = ConfigStore.save_snapshot(ConfigStore.current_snapshot())
+      assert File.read!(ctx.config) =~ "[fermix_channels.accessories]\nenabled = true\n"
+      assert {:ok, reloaded} = ConfigStore.load_runtime_config()
+      assert Keyword.fetch!(reloaded.fermix_channels, :accessories) == [enabled: true]
+
+      # Off is the default, so the file loses the section, and the apply
+      # replaces application environment rather than merging into it: a merge
+      # would leave the earlier `enabled: true` running.
+      off = %{fermix_core: [], fermix_channels: [accessories: [enabled: false]], fermix_web: []}
+      assert :ok = ConfigStore.save_snapshot(off)
+      refute File.read!(ctx.config) =~ "fermix_channels.accessories"
+      assert {:ok, loaded} = ConfigStore.load_runtime_config()
+      assert Keyword.fetch!(loaded.fermix_channels, :accessories) == []
+      assert :ok = ConfigStore.apply_snapshot(loaded)
+      assert Application.get_env(:fermix_channels, :accessories) == []
+    end
+
+    test "a switch that is not true or false refuses the load by name", ctx do
+      for value <- [~s("yes"), ~s("true"), "1"] do
+        File.write!(ctx.config, "[fermix_channels.accessories]\nenabled = #{value}\n")
+
+        assert_raise ArgumentError,
+                     ~r/fermix_channels\.accessories\.enabled must be true or false/,
+                     fn -> ConfigStore.load_runtime_config() end
+      end
+    end
+
+    # A key a later phase adds must not refuse an older daemon's boot after a
+    # rollback.
+    test "a key this build does not know is ignored", ctx do
+      File.write!(ctx.config, "[fermix_channels.accessories]\nenabled = true\nport = 4100\n")
+
+      assert {:ok, loaded} = ConfigStore.load_runtime_config()
+      assert Keyword.fetch!(loaded.fermix_channels, :accessories) == [enabled: true]
+    end
+
+    # The default lives in `Accessories.Config`, never in a compiled config: a
+    # base pin would be what every environment and every save sees (the
+    # env-gate pitfall).
+    test "no compiled environment pins the section" do
+      for env <- [:dev, :prod] do
+        compiled =
+          "../../../../../config/config.exs"
+          |> Path.expand(__DIR__)
+          |> Config.Reader.read!(env: env, target: :host)
+
+        refute Keyword.has_key?(Keyword.get(compiled, :fermix_channels, []), :accessories),
+               inspect(env)
+      end
+    end
+
+    defp restore_app_env(app, env) do
+      for {key, _value} <- Application.get_all_env(app),
+          not Keyword.has_key?(env, key),
+          do: Application.delete_env(app, key)
+
+      Enum.each(env, fn {key, value} -> Application.put_env(app, key, value) end)
+    end
   end
 
   test "channel streaming survives the load normalizers for every channel" do

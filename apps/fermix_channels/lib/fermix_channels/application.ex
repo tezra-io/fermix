@@ -189,7 +189,19 @@ defmodule FermixChannels.Application do
         FermixChannels.Gateway.Idempotency
       ] ++
       album_buffers() ++
+      accessories() ++
       transport_children(readiness, request_boot_epoch) ++ call_row_sweep(settles?())
+  end
+
+  # The accessories subtree (M91): registered for the whole boot, on or off,
+  # so its setting is live, and needing no finished setup, since an attached
+  # accessory is told voice is not ready rather than held. A primary's alone
+  # (`Role`), and it starts only on a Mac. A test tree never registers it: a
+  # suite run against a home with accessories on must open no port.
+  defp accessories do
+    if @compiled_env == :test,
+      do: [],
+      else: [FermixChannels.Accessories.Supervisor.boot_child()]
   end
 
   # The timeline's media store and the bounded supervisor its rows' link

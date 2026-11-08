@@ -1245,6 +1245,50 @@ is `degraded` with `revoked`, and no
 carries emit nothing of their own on the desktop: the primary's management
 and companion paths emit as for a local request.
 
+## Accessory link (M91)
+
+The accessory link (`FermixChannels.Accessories`, the USB serial link to a
+paired accessory such as StackChan) emits three events, all through
+`FermixCore.Accessories.Telemetry`; never hand-roll them.
+
+- `[:fermix, :accessory, :attach]`: one attach's outcome, a **sessionless
+  point** like a pairing decision. `count: 1` and `duration_us` (from the
+  host's `hello` to the verdict). Metadata, closed words only: `status`
+  (`attached`, `unenrolled`, a host refusal by its `refuse.code`, or
+  `accessory_refused` with the accessory's own code in `accessory_refusal`),
+  `mode` (`attach` for a port an enrolled accessory's hint named, `pairing`
+  for the port the owner selected), `kind` (only a kind the host knows, else
+  `nil`) and `endpoint` (`accessory:<accessory_id>`, only once the proof
+  verified).
+- `[:fermix, :accessory, :fault]`: a link fault, sessionless. `count`, the
+  `reason` (a receive or reassembly fault of `priv/accessory/PROTOCOL.md`,
+  a control refusal such as `unknown_message`, `link_lost`, or
+  `accessory_fault` for the accessory's own `diag.fault`) and the `stage`
+  that found it (`receive`, `reassembly`, `control`, `peer`, `liveness`,
+  `call`). A receive fault is reported once per loss of sync, so bytes after
+  a fault are not a flood.
+- `[:fermix, :accessory, :call_link]`: once per accessory call, as it ends
+  and before its session is torn down, under the **call's own `session_id`**
+  (the engine session's scope, `session:<n>` or `voice_live:<n>`, which the
+  adapter mints and hands the session, so the two always agree). The
+  measurements are the link's counters for the call and nothing else (the
+  emitter refuses any other): `duration_ms`, `mic_frames`, `mic_chunks`,
+  `pcm_seq_gaps`, `speaker_frames`, `speaker_bytes`, `segments`, `flushes`,
+  `credit_waits`, `backlog_peak_bytes`, `speaker_bytes_dropped` (an odd byte
+  of the engine's audio that no later audio of its playback id completed),
+  `task_events`, `task_faults`. The
+  metadata: `endpoint`, `engine`, `source` (`screen_tap`, `head_swipe`,
+  `mac`) and `reason` (why it ended: `end_request`, `mac_end`,
+  `session_error`, `credit_overgrant`, `link_gone`, …).
+
+No audio, transcript, key, signature, nonce or tool name reaches any field.
+All three are `agent_event` rows in the JSONL trace (`accessory_attach`,
+`accessory_fault`, `accessory_call_link`). The Opik exporter nests
+`call_link` as an `accessory:call_link` span under the call's trace on
+either voice run kind, attached only while the call's run is open (never a
+root of its own), and replays it from the JSONL; it does **not** subscribe
+to the two sessionless points, for the pairing events' reason.
+
 ## Inbound attachments (a pre-turn point per attachment)
 
 The gateway's attachment pipeline (`FermixChannels.Gateway.Attachments`, M67)

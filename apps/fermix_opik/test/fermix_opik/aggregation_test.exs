@@ -2842,6 +2842,54 @@ defmodule FermixOpik.AggregationTest do
     end
   end
 
+  # M91: an accessory call's link counters ride under the call's own session
+  # id, as one span of the call's trace. Emitted as the call ends and before
+  # its session closes, so it nests; one that lands after the call's root
+  # shipped is dropped, never a root of its own.
+  describe "an accessory call's link counters" do
+    @call_link [:fermix, :accessory, :call_link]
+
+    defp call_link_event do
+      {@call_link,
+       %{
+         duration_ms: 4_200,
+         mic_frames: 210,
+         mic_chunks: 42,
+         speaker_bytes: 96_000,
+         credit_waits: 3
+       },
+       %{
+         session_id: @voice_live_call,
+         endpoint: "accessory:" <> String.duplicate("ab", 32),
+         engine: "openai_live",
+         source: :screen_tap,
+         reason: :end_request
+       }}
+    end
+
+    test "nest under the call's trace with their counters and why the call ended" do
+      {state, []} =
+        run([
+          {@voice_live_start, %{}, voice_live_meta(%{max_duration_ms: 900_000})},
+          call_link_event()
+        ])
+
+      [%{spans: spans}] = Map.values(state.traces)
+      span = span_named(spans, "accessory:call_link")
+      assert span.metadata.endpoint == "accessory:" <> String.duplicate("ab", 32)
+      assert span.metadata.reason == "end_request"
+      assert span.metadata.source == "screen_tap"
+      assert span.metadata.mic_frames == 210
+      assert span.metadata.credit_waits == 3
+    end
+
+    test "never open a root of their own" do
+      {state, closed} = run([call_link_event()])
+      assert closed == []
+      assert state.traces == %{}
+    end
+  end
+
   @voice_gist_start [:fermix, :voice_gist, :run_start]
   @voice_gist_complete [:fermix, :voice_gist, :run_complete]
   @voice_gist_error [:fermix, :voice_gist, :run_error]

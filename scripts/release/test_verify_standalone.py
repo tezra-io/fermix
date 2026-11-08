@@ -72,6 +72,41 @@ class VerifyStandaloneTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("disclaim shim self-check failed", result.stderr)
 
+    # M91: the accessory serial helper ships beside the shim in every macOS
+    # payload; its self-check is its usage refusal, which opens no device and
+    # lists nothing.
+    def test_runs_the_packaged_serial_helpers_usage_check_for_macos(self):
+        self._write_artifact(create_disclaim=True)
+
+        result = self._run("macos_aarch64")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("fermix_serial: usage:", result.stdout)
+
+    def test_rejects_macos_artifact_without_packaged_serial_helper(self):
+        self._write_artifact(create_disclaim=True, serial_helper="missing")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("accessory serial helper not found", result.stderr)
+
+    def test_rejects_non_executable_packaged_serial_helper(self):
+        self._write_artifact(create_disclaim=True, serial_helper="not_executable")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("accessory serial helper is not executable", result.stderr)
+
+    def test_rejects_a_serial_helper_that_does_not_refuse_bad_arguments(self):
+        self._write_artifact(create_disclaim=True, serial_helper="accepts_anything")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("accessory serial helper self-check failed", result.stderr)
+
     def test_linux_artifact_refuses_not_macos_and_needs_no_disclaim(self):
         self.artifact = self.base / "fermix_linux_x86_64"
         self._write_artifact(create_disclaim=False, migrate="refused:not_macos")
@@ -1148,8 +1183,10 @@ class VerifyStandaloneTest(unittest.TestCase):
         maintenance="answers",
         landlock_shim="answers",
         closed_cwd="refuses",
+        serial_helper="answers",
     ):
         setup = self._disclaim_setup(create_disclaim, disclaim_executable, disclaim_exit, version)
+        setup += self._serial_helper_setup(create_disclaim, serial_helper, version)
         helper_setup = self._iroh_helper_setup(iroh_helper, iroh_notices, version)
         helper_setup += self._landlock_shim_setup(landlock_shim, version)
         marker_line = "" if marker is None else f"touch '{marker}'\n"
@@ -1672,6 +1709,28 @@ printf 'disclaim: ok\\n'
 exit {exit_code}
 SHIM
 {mode}'''
+
+    # The accessory serial helper beside the shim (macOS payloads only): it
+    # answers bad arguments with its usage and exit 64, as `fermix_serial`
+    # does, unless the test breaks it.
+    def _serial_helper_setup(self, create_disclaim, behaviour, version):
+        if not create_disclaim or behaviour == "missing":
+            return ""
+
+        answer = (
+            "exit 0"
+            if behaviour == "accepts_anything"
+            else "printf 'fermix_serial: usage: fermix_serial list | fermix_serial open <path>\\n' >&2\nexit 64"
+        )
+        mode = "chmod -x" if behaviour == "not_executable" else "chmod +x"
+        return f'''
+cache="$HOME/Library/Application Support/.burrito/release/lib/fermix_nif-{version}/priv"
+mkdir -p "$cache"
+cat > "$cache/fermix_serial" <<'SERIAL'
+#!/bin/sh
+{answer}
+SERIAL
+{mode} "$cache/fermix_serial"'''
 
     # ── the Burrito wrapper's payload directory ───────────────────────────
     # Where the wrapper unpacks its payload, resolved as Burrito 1.5's

@@ -24,10 +24,20 @@ defmodule FermixCore.Accessories.Attach do
   # The accessory honours at most one `hello` per 500 ms; the host sends at
   # most one a second, so a busy link is never a signing oracle.
   @min_hello_interval_ms 1_000
-  # The kinds this host knows, with the capabilities each must report. The
-  # kind's display name, firmware range and install guide join this table
-  # with the link (M91 §04, D23).
-  @kinds %{"stackchan" => [:mic, :speaker]}
+  # The kinds this host knows: the capabilities each must report, and the
+  # metadata the daemon pins for it (M91 §04, D23), which the app renders and
+  # keeps no table of its own for. A pin the kind's first firmware release has
+  # not fixed yet is `:undecided`, never an invented value: the firmware range
+  # its releases declare compatible, and the install guide's address on
+  # fermix.ai.
+  @kinds %{
+    "stackchan" => %{
+      required_capabilities: [:mic, :speaker],
+      display_name: "StackChan",
+      firmware_range: :undecided,
+      install_guide: :undecided
+    }
+  }
 
   defmodule Challenge do
     @moduledoc "One `hello`'s single-use challenge."
@@ -102,6 +112,18 @@ defmodule FermixCore.Accessories.Attach do
   @doc "The kinds this host attaches."
   @spec kinds() :: [String.t()]
   def kinds, do: Map.keys(@kinds)
+
+  @typedoc "What the daemon pins for a kind; `:undecided` where no release has fixed it yet."
+  @type kind_metadata :: %{
+          required_capabilities: [Capabilities.name()],
+          display_name: String.t(),
+          firmware_range: {String.t(), String.t()} | :undecided,
+          install_guide: String.t() | :undecided
+        }
+
+  @doc "A kind's pinned metadata, or `:error` for a kind this host does not know."
+  @spec kind_metadata(String.t()) :: {:ok, kind_metadata()} | :error
+  def kind_metadata(kind) when is_binary(kind), do: Map.fetch(@kinds, kind)
 
   @doc "A new challenge for generation `gen`, opened at `now_ms`."
   @spec challenge(HostKey.t(), pos_integer(), integer(), <<_::256>>) :: Challenge.t()
@@ -180,7 +202,7 @@ defmodule FermixCore.Accessories.Attach do
 
   defp kind(kind) do
     case Map.fetch(@kinds, kind) do
-      {:ok, required} -> {:ok, required}
+      {:ok, %{required_capabilities: required}} -> {:ok, required}
       :error -> {:error, :unsupported_kind}
     end
   end

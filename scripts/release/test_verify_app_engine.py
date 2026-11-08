@@ -31,6 +31,12 @@ ARCHITECTURE = "arm64"
 VERSION = "0.9.0"
 SOURCE_COMMIT = "a" * 40
 MAPS_HELPER = "lib/fermix_nif-0.9.0/priv/fermix-maps"
+SERIAL_HELPER = "lib/fermix_nif-0.9.0/priv/fermix_serial"
+SERIAL_USAGE = (
+    "#!/bin/sh\n"
+    "echo 'fermix_serial: usage: fermix_serial list | fermix_serial open <path>' >&2\n"
+    "exit 64\n"
+)
 IROH_HELPER = "lib/fermix_core-0.9.0/priv/iroh_helper/bin/fermix-iroh"
 IROH_NOTICES = "lib/fermix_core-0.9.0/priv/iroh_helper/THIRD-PARTY-NOTICES.txt"
 IROH_VERSION_LINE = "fermix-iroh 0.1.0 (iroh 1.3.0)"
@@ -116,6 +122,62 @@ class VerifyAppEngineTest(unittest.TestCase):
 
         with self._darwin_host("arm64"), mock.patch.object(verify, "_start_engine") as start:
             with self.assertRaisesRegex(verify.VerificationError, "exactly one Apple Maps helper"):
+                verify.verify_app_engine(
+                    archive,
+                    TARGET,
+                    VERSION,
+                    "native",
+                    iroh_pin=self.pin,
+                    temp_parent=self.base,
+                    timeouts=self.timeouts,
+                )
+
+        start.assert_not_called()
+
+    # M91: the accessory serial helper beside the shim. Its self-check is its
+    # usage refusal, which opens no device and lists no port.
+    def test_reports_the_accessory_serial_helper_it_checked(self):
+        with self._darwin_host("arm64"):
+            result = verify.verify_app_engine(
+                self.archive,
+                TARGET,
+                VERSION,
+                "native",
+                iroh_pin=self.pin,
+                temp_parent=self.base,
+                timeouts=self.timeouts,
+            )
+
+        self.assertEqual(result["serial_helper"], SERIAL_HELPER)
+
+    def test_rejects_an_engine_without_the_serial_helper_before_launching(self):
+        (self.release / SERIAL_HELPER).unlink()
+        self._write_manifest(with_serial=False)
+        archive = package.package_release(self.release, TARGET, self.base / "out-no-serial", VERSION)
+
+        with self._darwin_host("arm64"), mock.patch.object(verify, "_start_engine") as start:
+            with self.assertRaisesRegex(verify.VerificationError, "exactly one accessory serial helper"):
+                verify.verify_app_engine(
+                    archive,
+                    TARGET,
+                    VERSION,
+                    "native",
+                    iroh_pin=self.pin,
+                    temp_parent=self.base,
+                    timeouts=self.timeouts,
+                )
+
+        start.assert_not_called()
+
+    def test_rejects_a_serial_helper_that_does_not_refuse_bad_arguments(self):
+        self._write_serial_helper("#!/bin/sh\nexit 0\n")
+        self._write_manifest()
+        archive = package.package_release(self.release, TARGET, self.base / "out-serial", VERSION)
+
+        with self._darwin_host("arm64"), mock.patch.object(verify, "_start_engine") as start:
+            with self.assertRaisesRegex(
+                verify.VerificationError, r"accessory serial helper self-check failed \(exit 0\)"
+            ):
                 verify.verify_app_engine(
                     archive,
                     TARGET,
@@ -779,6 +841,7 @@ class VerifyAppEngineTest(unittest.TestCase):
         shutil.copyfile(fixture, script)
         script.chmod(0o755)
         self._write_helper("#!/bin/sh\necho 'fermix-maps: ok'\n")
+        self._write_serial_helper(SERIAL_USAGE)
         self._write_iroh_helper(IROH_VERSION_LINE)
         notices = self.release / IROH_NOTICES
         notices.write_text("MIT License\n\nCopyright (c) 2026 Tezra.io\n", encoding="utf-8")
@@ -787,6 +850,13 @@ class VerifyAppEngineTest(unittest.TestCase):
     # A script standing in for the Mach-O helper the native build makes.
     def _write_helper(self, contents):
         helper = self.release / MAPS_HELPER
+        helper.parent.mkdir(parents=True, exist_ok=True)
+        helper.write_text(contents, encoding="utf-8")
+        helper.chmod(0o755)
+
+    # A script standing in for the Mach-O accessory serial helper.
+    def _write_serial_helper(self, contents):
+        helper = self.release / SERIAL_HELPER
         helper.parent.mkdir(parents=True, exist_ok=True)
         helper.write_text(contents, encoding="utf-8")
         helper.chmod(0o755)
@@ -915,11 +985,13 @@ class VerifyAppEngineTest(unittest.TestCase):
             "sha256": self._sha256(path),
         }
 
-    def _write_manifest(self, with_helper=True):
+    def _write_manifest(self, with_helper=True, with_serial=True):
         script = self.release / "bin/fermix_app_engine"
         helper_entries = []
         if with_helper:
             helper_entries.append(self._script_entry(MAPS_HELPER))
+        if with_serial:
+            helper_entries.append(self._script_entry(SERIAL_HELPER))
         # Every executable helper under fermix_core's priv, and a Mach-O one
         # whatever its mode, as the release manifest inventories them; a
         # non-executable script is not inventoried.

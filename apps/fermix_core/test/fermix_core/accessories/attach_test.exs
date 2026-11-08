@@ -222,4 +222,18 @@ defmodule FermixCore.Accessories.AttachTest do
              host.public
            )
   end
+
+  # M91 §04, D23: the kind's pinned metadata beside its attach requirements.
+  # A value not decided yet says so; none is invented.
+  test "each kind carries its display name, and undecided pins say so" do
+    assert Attach.kinds() == ["stackchan"]
+
+    assert {:ok, meta} = Attach.kind_metadata("stackchan")
+    assert meta.display_name == "StackChan"
+    assert meta.required_capabilities == [:mic, :speaker]
+    assert meta.firmware_range == :undecided
+    assert meta.install_guide == :undecided
+
+    assert Attach.kind_metadata("toaster") == :error
+  end
 end
