@@ -182,7 +182,11 @@ will be part of a future release; nothing in this group is in a release yet.
   up: no move or restore carries them, so a server never looks for a Mac's
   checkouts, the review warns once that they stay, and a move back keeps
   them. Your Mac (or Linux
-  computer) stays awake while the move runs, and only then. The computer the
+  computer) stays awake while the move runs, and only then. Each side logs one
+  line per phase of the move (capture, send, staging and commit on your
+  computer; receive, staging and activation on the server) with when it
+  started and ended, how long it took and the bytes it captured, sent or
+  received, so the log tells the transfer from the archiving. The computer the
   home left stays a desktop of the server: the app's chat and Fermix-wide
   settings go to the server through it, a settings call costing one round
   trip to the server, and paired phones see a reconnect. It

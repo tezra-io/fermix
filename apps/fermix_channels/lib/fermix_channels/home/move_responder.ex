@@ -33,6 +33,7 @@ defmodule FermixChannels.Home.MoveResponder do
 
   alias FermixChannels.Home.Candidate
   alias FermixChannels.Home.ResponderWire
+  alias FermixCore.Home.MoveTelemetry
 
   @impl true
   def serving?(opts), do: opts |> server() |> Candidate.serving?()
@@ -76,10 +77,19 @@ defmodule FermixChannels.Home.MoveResponder do
 
   def handle_info(_message, state), do: {:ok, state}
 
+  # A stream the carrier closes before its end was checked logs its receive
+  # phase as failed, with the bytes that came.
   @impl true
   def terminate(_reason, state) do
     close_io(state)
-    :ok
+
+    case state do
+      %{move: %{phase: phase, received: received}} ->
+        MoveTelemetry.phase_ended(phase, :failed, {"received", received})
+
+      _no_stream ->
+        :ok
+    end
   end
 
   @impl true
@@ -157,7 +167,8 @@ defmodule FermixChannels.Home.MoveResponder do
           next: 0,
           received: 0,
           hash: :crypto.hash_init(:sha256),
-          io: io
+          io: io,
+          phase: MoveTelemetry.phase(:candidate, "receive", offer["move_id"], &DateTime.utc_now/0)
         }
 
         send_event("move_accept", %{"move_id" => move.move_id, "recipient" => recipient}, %{
@@ -206,7 +217,8 @@ defmodule FermixChannels.Home.MoveResponder do
         refuse("move_mismatch", "The stream's SHA-256 is not the one the offer named.", state)
 
       true ->
-        stage(move, state)
+        :ok = MoveTelemetry.phase_ended(move.phase, :done, {"received", move.received})
+        stage(move, %{state | move: %{move_id: move.move_id}})
     end
   end
 

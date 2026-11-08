@@ -295,6 +295,7 @@ defmodule FermixChannels.Home.MoveWorker do
 
     case {phase["capture"], File.stat(path)} do
       {%{"size" => size, "sha256" => sha256}, {:ok, %File.Stat{type: :regular, size: size}}} ->
+        :ok = ctx |> phase("capture") |> MoveTelemetry.phase_ended(:reused, {"captured", size})
         {:ok, %{path: path, size: size, sha256: sha256}}
 
       _none ->
@@ -319,10 +320,16 @@ defmodule FermixChannels.Home.MoveWorker do
 
   defp write_capture(ctx, recipient, path, extra) do
     opts = Keyword.put(ctx.snapshot_opts, :extra_files, extra)
+    phase = phase(ctx, "capture")
 
     case Snapshot.write(ctx.home, recipient, path, opts) do
-      {:ok, written} -> {:ok, %{"size" => written.size, "sha256" => written.sha256}}
-      {:error, reason} -> {:error, {:capture, reason}}
+      {:ok, written} ->
+        :ok = MoveTelemetry.phase_ended(phase, :done, {"captured", written.size})
+        {:ok, %{"size" => written.size, "sha256" => written.sha256}}
+
+      {:error, reason} ->
+        :ok = MoveTelemetry.phase_ended(phase, :failed, nil)
+        {:error, {:capture, reason}}
     end
   end
 
@@ -363,6 +370,14 @@ defmodule FermixChannels.Home.MoveWorker do
   end
 
   defp stream(ctx, rail, snapshot) do
+    with :ok <- timed(ctx, "send", fn -> send_snapshot(ctx, rail, snapshot) end, snapshot.size),
+         {:ok, %{"epoch" => epoch}} <-
+           timed(ctx, "staging", fn -> await(rail, "move_ready", @ready_ms) end, nil) do
+      {:ok, epoch}
+    end
+  end
+
+  defp send_snapshot(ctx, rail, snapshot) do
     move_id = ctx.request["move_id"]
 
     offer = %{
@@ -377,12 +392,29 @@ defmodule FermixChannels.Home.MoveWorker do
     with :ok <- Rail.send_event(rail, "move_offer", offer),
          {:ok, accept} <- await(rail, "move_accept", @accept_ms),
          :ok <- same_recipient(accept, ctx),
-         :ok <- send_file(rail, move_id, snapshot.path),
-         :ok <- Rail.send_event(rail, "move_end", %{"move_id" => move_id}),
-         {:ok, %{"epoch" => epoch}} <- await(rail, "move_ready", @ready_ms) do
-      {:ok, epoch}
+         :ok <- send_file(rail, move_id, snapshot.path) do
+      Rail.send_event(rail, "move_end", %{"move_id" => move_id})
     end
   end
+
+  # Runs one phase's step and logs its line once it answered: the bytes
+  # `sent` only when it did what it was for.
+  defp timed(ctx, name, step, sent) do
+    phase = phase(ctx, name)
+    result = step.()
+
+    case result do
+      {:error, _reason} ->
+        :ok = MoveTelemetry.phase_ended(phase, :failed, nil)
+
+      _done ->
+        :ok = MoveTelemetry.phase_ended(phase, :done, sent && {"sent", sent})
+    end
+
+    result
+  end
+
+  defp phase(ctx, name), do: MoveTelemetry.phase(:source, name, ctx.request["move_id"], ctx.clock)
 
   defp same_recipient(%{"recipient" => recipient}, ctx) do
     if Base.decode64(recipient) == {:ok, ctx.request["candidate"].recipient},
@@ -435,14 +467,19 @@ defmodule FermixChannels.Home.MoveWorker do
   defp retired(ctx, rail, desktop, epoch) do
     with :ok <- link(ctx, desktop.device_id, epoch),
          :ok <- record(ctx, "committing", %{"sentence" => nil}),
-         :ok <- Rail.send_event(rail, "move_commit", %{"move_id" => ctx.request["move_id"]}),
-         {:ok, %{"epoch" => done_epoch}} <- await(rail, "move_done", @done_ms) do
+         {:ok, %{"epoch" => done_epoch}} <-
+           timed(ctx, "commit", fn -> send_commit(ctx, rail) end, nil) do
       done(ctx, done_epoch)
     else
       {:error, reason} ->
         close_rail(rail)
         resume_after(ctx, reason)
     end
+  end
+
+  defp send_commit(ctx, rail) do
+    with :ok <- Rail.send_event(rail, "move_commit", %{"move_id" => ctx.request["move_id"]}),
+         do: await(rail, "move_done", @done_ms)
   end
 
   defp resume_after(ctx, reason) do

@@ -584,9 +584,11 @@ defmodule FermixChannels.Home.Candidate do
     facts = %{"destination" => destination, "recovery_recipient" => move["recovery_recipient"]}
     incoming = Files.incoming_path(state.home)
     staging = stage_fun(state, incoming, pair, facts)
+    phase = MoveTelemetry.phase(:candidate, "staging", move_id, state.clock)
     task = Task.Supervisor.async_nolink(state.tasks, staging)
+    restore = %{ref: task.ref, move_id: move_id, reply_to: reply_to, phase: phase}
 
-    {:reply, :ok, %{state | restore: %{ref: task.ref, move_id: move_id, reply_to: reply_to}}}
+    {:reply, :ok, %{state | restore: restore}}
   end
 
   defp stage_move(_move_id, _reply_to, state),
@@ -604,6 +606,7 @@ defmodule FermixChannels.Home.Candidate do
     do: fn -> Activation.stage(home, incoming, pair, facts, opts) end
 
   defp restored({:ok, epoch}, %{restore: %{move_id: move_id, reply_to: reply_to}} = state) do
+    :ok = MoveTelemetry.phase_ended(state.restore.phase, :done, nil)
     _ = discard(Files.incoming_path(state.home))
     move = Map.put(state.phase["move"], "epoch", epoch)
     state = put(%{state | restore: nil}, "staged", %{"move" => move})
@@ -612,6 +615,7 @@ defmodule FermixChannels.Home.Candidate do
   end
 
   defp restored({:error, reason}, %{restore: %{move_id: move_id, reply_to: reply_to}} = state) do
+    :ok = MoveTelemetry.phase_ended(state.restore.phase, :failed, nil)
     Logger.error("candidate: the move #{move_id} could not be restored: #{inspect(reason)}")
     sentence = restore_sentence(reason, state)
     finished(move_id, nil, {:failed, reason}, state)
@@ -649,7 +653,7 @@ defmodule FermixChannels.Home.Candidate do
        when phase in ["staged", "activating"] do
     state = put(state, "activating", %{"move" => move})
 
-    case activate(state) do
+    case timed_activation(state) do
       :ok ->
         finished(move_id, move["epoch"], :done, state)
         Logger.info("candidate: the move #{move_id} committed; restarting as the primary")
@@ -670,7 +674,7 @@ defmodule FermixChannels.Home.Candidate do
        state}
 
   defp finish_activation(state) do
-    case activate(state) do
+    case timed_activation(state) do
       :ok ->
         Logger.info("candidate: finished putting the moved home in place; restarting")
         state.schedule.(:restart, @restart_after_ms)
@@ -680,6 +684,17 @@ defmodule FermixChannels.Home.Candidate do
         activation_failed(state, reason)
     end
   end
+
+  # A move's activation logs its phase's line; a restore from this
+  # computer's own copy is no move.
+  defp timed_activation(%{phase: %{"move" => %{"move_id" => move_id}}} = state) do
+    phase = MoveTelemetry.phase(:candidate, "activation", move_id, state.clock)
+    result = activate(state)
+    :ok = MoveTelemetry.phase_ended(phase, if(result == :ok, do: :done, else: :failed), nil)
+    result
+  end
+
+  defp timed_activation(state), do: activate(state)
 
   # A return's entries are recorded once, before its first rename, and every
   # run after reads them back.
