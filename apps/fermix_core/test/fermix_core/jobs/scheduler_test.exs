@@ -9,13 +9,17 @@ defmodule FermixCore.Jobs.SchedulerTest do
   alias FermixCore.Memory.Repo
   alias FermixCore.Tools.RunJobNow
 
-  # How long to wait for a real run to write its output file, or for anything
-  # it reports after that (its final write, its delivery, its finish): claim,
-  # spawn, the agent loop, the output file and the settle. It is about 3 ms
-  # idle, but the output file's mkdir goes through the VM's one file server,
-  # which every concurrent test's file calls queue on, and a loaded macos-x64
-  # runner held a run past the 2 s default. An arrival bound: a run that never
-  # gets there still fails, and one that does returns at once.
+  # How long to wait for anything a real run (FermixCore.Jobs.Runner) reports.
+  # Its `:started` follows route resolution, whose `Selection.configured?/2`
+  # reads the home's auth.json twice; its final write, its delivery and its
+  # finish follow the agent loop, the output file and the settle. Those reads
+  # and the output file's mkdir go through the VM's one file server, which
+  # every concurrent test's file calls queue on: idle a run starts in about
+  # 20 ms and writes its output 3 ms later, and under load either has taken
+  # past the 2 s default (a loaded macos-x64 runner held a run's finish). An
+  # arrival bound: a run that never gets there still fails, and one that does
+  # returns at once. The fake runners below report without the file server and
+  # keep the default.
   @run_completes_ms 10_000
 
   defmodule TerminalAdapter do
@@ -493,7 +497,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
 
     assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:15:00Z])
 
-    assert_receive {:job_runner, :started, run_id, ^job_id}
+    assert_receive {:job_runner, :started, run_id, ^job_id}, @run_completes_ms
     assert_receive {:job_runner, :completed, ^run_id, ^job_id}, @run_completes_ms
     assert {:ok, [run]} = Repo.list_job_runs(%{job_id: job.id}, server: repo)
     assert run.id == run_id
@@ -543,7 +547,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
     # from a `tick` that blocks.
     refute_received {:job_runner, :completed, _run_id, _job_id}
 
-    assert_receive {:job_runner, :started, run_id, ^job_id}
+    assert_receive {:job_runner, :started, run_id, ^job_id}, @run_completes_ms
 
     assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:15:00Z])
     assert {:ok, [run]} = Repo.list_job_runs(%{job_id: job.id}, server: repo)
@@ -575,7 +579,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
 
     scheduler = start_scheduler(repo, runner_supervisor, runner_delay_ms: 200)
     assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:15:00Z])
-    assert_receive {:job_runner, :started, run_id, job_id}
+    assert_receive {:job_runner, :started, run_id, job_id}, @run_completes_ms
     assert job_id == job.id
 
     assert {:ok, paused} = Registry.pause_job(job.id, repo: repo)
@@ -811,7 +815,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
 
     # Five minutes late is inside the 1h window, so the missed occurrence runs.
     assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:20:00Z])
-    assert_receive {:job_runner, :started, run_id, ^job_id}
+    assert_receive {:job_runner, :started, run_id, ^job_id}, @run_completes_ms
     assert_receive {:job_runner, :completed, ^run_id, ^job_id}, @run_completes_ms
   end
 
@@ -880,7 +884,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
     # Three hours past the window — but a one-off has no next occurrence, so it
     # runs late instead of being silently dropped.
     assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 17:00:00Z])
-    assert_receive {:job_runner, :started, run_id, ^job_id}
+    assert_receive {:job_runner, :started, run_id, ^job_id}, @run_completes_ms
     assert_receive {:job_runner, :completed, ^run_id, ^job_id}, @run_completes_ms
   end
 
@@ -908,7 +912,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
     assert {:ok, run} = Scheduler.run_now(scheduler, job_id, now: ~U[2026-05-02 14:03:00Z])
     assert run.trigger == "manual"
 
-    assert_receive {:job_runner, :started, run_id, ^job_id}
+    assert_receive {:job_runner, :started, run_id, ^job_id}, @run_completes_ms
     assert run_id == run.id
     assert_receive {:job_runner, :completed, ^run_id, ^job_id}, @run_completes_ms
     assert {:ok, [stored]} = Repo.list_job_runs(%{job_id: job_id}, server: repo)
@@ -960,7 +964,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
     job_id = job.id
 
     assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:15:00Z])
-    assert_receive {:job_runner, :started, run_id, ^job_id}
+    assert_receive {:job_runner, :started, run_id, ^job_id}, @run_completes_ms
     assert {:error, :already_running} = Scheduler.run_now(scheduler, job_id)
 
     assert_receive {:job_runner, :completed, ^run_id, ^job_id}, @run_completes_ms
@@ -1049,7 +1053,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
     assert payload["job_id"] == job_id
     assert payload["trigger"] == "manual"
 
-    assert_receive {:job_runner, :started, run_id, ^job_id}
+    assert_receive {:job_runner, :started, run_id, ^job_id}, @run_completes_ms
     assert_receive {:job_runner, :completed, ^run_id, ^job_id}, @run_completes_ms
   end
 
@@ -1259,13 +1263,8 @@ defmodule FermixCore.Jobs.SchedulerTest do
 
       # Both are due, but the cap is 1: exactly one claims, the other is deferred
       # and stays scheduled (no run row).
-      # 5_000, not the 1_000 these waits used to carry: each one is a scheduler
-      # tick, a claim, a runner spawn and a real job run, and the last of them
-      # failed on the macos-x64 CI leg where the same suite runs about 2.8x
-      # slower. 5_000 is this repo's most common bound for waiting on spawned
-      # work (317 uses); the assertions are unchanged.
       assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:15:00Z])
-      assert_receive {:job_runner, :started, run_id1, _job1}, 5_000
+      assert_receive {:job_runner, :started, run_id1, _job1}, @run_completes_ms
       refute_receive {:job_runner, :started, _run_id, _job2}, 150
       assert total_runs(repo, [job_a.id, job_b.id]) == 1
 
@@ -1277,7 +1276,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
       assert_receive {:job_runner, :completed, ^run_id1, _job1}, @run_completes_ms
       assert eventually(fn -> DynamicSupervisor.count_children(runner_supervisor).active == 0 end)
       assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:15:00Z])
-      assert_receive {:job_runner, :started, run_id2, _job2}, 5_000
+      assert_receive {:job_runner, :started, run_id2, _job2}, @run_completes_ms
       assert run_id2 != run_id1
       assert_receive {:job_runner, :completed, ^run_id2, _job2}, @run_completes_ms
       assert total_runs(repo, [job_a.id, job_b.id]) == 2
@@ -1329,7 +1328,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
 
       job_id = job.id
       assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:15:00Z])
-      assert_receive {:job_runner, :started, run_id, ^job_id}
+      assert_receive {:job_runner, :started, run_id, ^job_id}, @run_completes_ms
       assert run_id != stuck.id
       assert_receive {:job_runner, :completed, ^run_id, ^job_id}, @run_completes_ms
     end
@@ -1451,7 +1450,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
       scheduler = start_scheduler(proxy, runner_supervisor, runner_delay_ms: 1)
 
       assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:15:00Z])
-      assert_receive {:job_runner, :started, run_id, ^job_id}
+      assert_receive {:job_runner, :started, run_id, ^job_id}, @run_completes_ms
       assert_receive {:killed_after_final_write, runner}, @run_completes_ms
       await_reaped(runner, scheduler)
 
@@ -1465,7 +1464,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
       assert released.last_status == "ok"
 
       assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:30:00Z])
-      assert_receive {:job_runner, :started, next_run_id, ^job_id}
+      assert_receive {:job_runner, :started, next_run_id, ^job_id}, @run_completes_ms
       assert next_run_id != run_id
       assert_receive {:job_runner, :completed, ^next_run_id, ^job_id}, @run_completes_ms
     end
@@ -1517,7 +1516,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
       scheduler = start_scheduler(proxy, runner_supervisor, adapter: FailingAdapter)
 
       assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:15:00Z])
-      assert_receive {:job_runner, :started, run_id, ^job_id}
+      assert_receive {:job_runner, :started, run_id, ^job_id}, @run_completes_ms
       assert_receive {:killed_after_final_write, runner}, @run_completes_ms
       await_reaped(runner, scheduler)
 
@@ -1541,7 +1540,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
       scheduler = start_scheduler(proxy, runner_supervisor, adapter: HeldAdapter)
 
       assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:15:00Z])
-      assert_receive {:job_runner, :started, run_id, ^job_id}
+      assert_receive {:job_runner, :started, run_id, ^job_id}, @run_completes_ms
       assert_receive {:adapter_held, loop}
 
       :ok =
@@ -1569,7 +1568,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
       scheduler = start_scheduler(proxy, runner_supervisor, adapter: HeldAdapter)
 
       assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:15:00Z])
-      assert_receive {:job_runner, :started, run_id, ^job_id}
+      assert_receive {:job_runner, :started, run_id, ^job_id}, @run_completes_ms
       assert_receive {:adapter_held, loop}
 
       # Paused while the run is inside its loop, then resumed inside the
@@ -1606,7 +1605,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
       scheduler = start_scheduler(repo, runner_supervisor, adapter: HeldAdapter)
 
       assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:15:00Z])
-      assert_receive {:job_runner, :started, run_id, ^job_id}
+      assert_receive {:job_runner, :started, run_id, ^job_id}, @run_completes_ms
       assert_receive {:adapter_held, loop}
 
       assert {:ok, %{schedule_kind: "once"}} =
@@ -1683,7 +1682,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
       scheduler = start_scheduler(proxy, runner_supervisor, [])
 
       assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:15:00Z])
-      assert_receive {:job_runner, :started, run_id, ^job_id}
+      assert_receive {:job_runner, :started, run_id, ^job_id}, @run_completes_ms
       assert_receive {:delivery_write_refused, runner}, @run_completes_ms
       await_reaped(runner, scheduler)
 
@@ -1723,7 +1722,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
       scheduler = start_scheduler(proxy, runner_supervisor, delivery_adapter: RefusedDelivery)
 
       assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:15:00Z])
-      assert_receive {:job_runner, :started, run_id, ^job_id}
+      assert_receive {:job_runner, :started, run_id, ^job_id}, @run_completes_ms
       assert_receive {:delivery_write_refused, runner}, @run_completes_ms
       await_reaped(runner, scheduler)
 
@@ -1747,7 +1746,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
       log =
         capture_log(fn ->
           assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:15:00Z])
-          assert_receive {:job_runner, :started, run_id, ^job_id}
+          assert_receive {:job_runner, :started, run_id, ^job_id}, @run_completes_ms
           assert_receive {:job_runner, :completed, ^run_id, ^job_id}, @run_completes_ms
         end)
 
@@ -1769,7 +1768,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
       log =
         capture_log(fn ->
           assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:15:00Z])
-          assert_receive {:job_runner, :started, run_id, ^job_id}
+          assert_receive {:job_runner, :started, run_id, ^job_id}, @run_completes_ms
           assert_receive {:job_runner, :completed, ^run_id, ^job_id}, @run_completes_ms
         end)
 
