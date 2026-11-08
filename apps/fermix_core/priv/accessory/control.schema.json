@@ -1,0 +1,2581 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fermix.sh/accessory/control.schema.json",
+  "title": "Fermix accessory link control messages",
+  "description": "The JSON control messages of the Fermix accessory link (frame type 1), by sender. Source of truth: FermixCore.Accessories.Control. PROTOCOL.md holds the framing, the transcripts and the rules a schema cannot state: a message with a stream field travels on that frame stream and every other on stream 0, a receiver ignores fields it does not know, keys never repeat, and a message is at most 8,192 bytes and nested at most 8 containers deep (the message object is the first).",
+  "x-framing-version": 1,
+  "x-wire-version": 1,
+  "x-supported-wire-range": {
+    "min": 1,
+    "max": 1
+  },
+  "$defs": {
+    "hostMessage": {
+      "type": "object",
+      "required": [
+        "type",
+        "gen"
+      ],
+      "properties": {
+        "type": {
+          "enum": [
+            "check.tone",
+            "check.mic",
+            "spk.end",
+            "diag.fetch",
+            "enroll.cancel",
+            "refuse",
+            "accessory.set",
+            "spk.begin",
+            "host_proof",
+            "ping",
+            "error",
+            "call.state",
+            "call.end",
+            "spk.flush",
+            "task.event",
+            "check.stop",
+            "call.result",
+            "enroll.commit",
+            "accessory.calibrate",
+            "enroll.reveal",
+            "enroll.begin",
+            "accessory.forget",
+            "voice.readiness",
+            "check.face",
+            "hello",
+            "call.start",
+            "check.motion",
+            "mute.set"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "check.tone"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/check.tone"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "check.mic"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/check.mic"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "spk.end"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/spk.end"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "diag.fetch"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/diag.fetch"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "enroll.cancel"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/enroll.cancel"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "refuse"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/refuse"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "accessory.set"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/accessory.set"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "spk.begin"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/spk.begin"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "host_proof"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/host_proof"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "ping"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/ping"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "error"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/error"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "call.state"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/call.state"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "call.end"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/call.end"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "spk.flush"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/spk.flush"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "task.event"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/task.event"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "check.stop"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/check.stop"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "call.result"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/call.result"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "enroll.commit"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/enroll.commit"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "accessory.calibrate"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/accessory.calibrate"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "enroll.reveal"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/enroll.reveal"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "enroll.begin"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/enroll.begin"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "accessory.forget"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/accessory.forget"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "voice.readiness"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/voice.readiness"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "check.face"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/check.face"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "hello"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/hello"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "call.start"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/call.start"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "check.motion"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/check.motion"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "mute.set"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/mute.set"
+          }
+        }
+      ]
+    },
+    "accessoryMessage": {
+      "type": "object",
+      "required": [
+        "type",
+        "gen"
+      ],
+      "properties": {
+        "type": {
+          "enum": [
+            "enroll.offer",
+            "pong",
+            "enroll.cancel",
+            "accessory.state",
+            "diag.fault",
+            "refuse",
+            "call.request",
+            "check.level",
+            "diag.counters",
+            "diag.chunk",
+            "error",
+            "attached",
+            "call.end_request",
+            "spk.flushed",
+            "playback.progress",
+            "credit",
+            "enroll.done",
+            "spk.drained",
+            "enroll.confirmed",
+            "mic.state",
+            "hello_ack",
+            "check.result"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "enroll.offer"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/enroll.offer"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "pong"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/pong"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "enroll.cancel"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/enroll.cancel"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "accessory.state"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/accessory.state"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "diag.fault"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/diag.fault"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "refuse"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/refuse"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "call.request"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/call.request"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "check.level"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/check.level"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "diag.counters"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/diag.counters"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "diag.chunk"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/diag.chunk"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "error"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/error"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "attached"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/attached"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "call.end_request"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/call.end_request"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "spk.flushed"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/spk.flushed"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "playback.progress"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/playback.progress"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "credit"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/credit"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "enroll.done"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/enroll.done"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "spk.drained"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/spk.drained"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "enroll.confirmed"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/enroll.confirmed"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "mic.state"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/mic.state"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "hello_ack"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/hello_ack"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "check.result"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/check.result"
+          }
+        }
+      ]
+    },
+    "accessory.calibrate": {
+      "description": "axis and a non-zero steps exactly when op is nudge.",
+      "type": "object",
+      "required": [
+        "type",
+        "gen",
+        "op"
+      ],
+      "properties": {
+        "type": {
+          "const": "accessory.calibrate"
+        },
+        "gen": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "op": {
+          "enum": [
+            "begin",
+            "nudge",
+            "set_zero",
+            "cancel"
+          ]
+        },
+        "axis": {
+          "enum": [
+            "pan",
+            "tilt"
+          ]
+        },
+        "steps": {
+          "type": "integer",
+          "minimum": -64,
+          "maximum": 64
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "op"
+            ],
+            "properties": {
+              "op": {
+                "const": "nudge"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "axis",
+              "steps"
+            ],
+            "properties": {
+              "steps": {
+                "not": {
+                  "const": 0
+                }
+              }
+            }
+          },
+          "else": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "axis"
+                  ]
+                },
+                {
+                  "required": [
+                    "steps"
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "accessory.forget": {
+      "type": "object",
+      "required": [
+        "type",
+        "gen"
+      ],
+      "properties": {
+        "type": {
+          "const": "accessory.forget"
+        },
+        "gen": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        }
+      }
+    },
+    "accessory.set": {
+      "description": "At least one setting.",
+      "type": "object",
+      "required": [
+        "type",
+        "gen"
+      ],
+      "properties": {
+        "type": {
+          "const": "accessory.set"
+        },
+        "gen": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "volume": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "motion": {
+          "type": "boolean"
+        },
+        "brightness": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        }
+      },
+      "allOf": [
+        {
+          "anyOf": [
+            {
+              "required": [
+                "volume"
+              ]
+            },
+            {
+              "required": [
+                "motion"
+              ]
+            },
+            {
+              "required": [
+                "brightness"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "accessory.state": {
+      "type": "object",
+      "required": [
+        "type",
+        "gen",
+        "battery",
+        "power",
+        "brownout",
+        "volume",
+        "brightness",
+        "motion",
+        "calibration"
+      ],
+      "properties": {
+        "type": {
+          "const": "accessory.state"
+        },
+        "gen": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "battery": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "power": {
+          "enum": [
+            "usb",
+            "battery",
+            "low",
+            "critical"
+          ]
+        },
+        "brownout": {
+          "type": "boolean"
+        },
+        "volume": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "brightness": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "motion": {
+          "enum": [
+            "absent",
+            "off",
+            "homing",
+            "ready",
+            "paused",
+            "fault"
+          ]
+        },
+        "calibration": {
+          "enum": [
+            "absent",
+            "missing",
+            "valid",
+            "calibrating",
+            "failed"
+          ]
+        }
+      }
+    },
+    "attached": {
+      "type": "object",
+      "required": [
+        "type",
+        "gen",
+        "state"
+      ],
+      "properties": {
+        "type": {
+          "const": "attached"
+        },
+        "gen": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "state": {
+          "type": "object",
+          "required": [
+            "battery",
+            "power",
+            "brownout",
+            "volume",
+            "brightness",
+            "motion",
+            "calibration"
+          ],
+          "properties": {
+            "battery": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 100
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "power": {
+              "enum": [
+                "usb",
+                "battery",
+                "low",
+                "critical"
+              ]
+            },
+            "brownout": {
+              "type": "boolean"
+            },
+            "volume": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100
+            },
+            "brightness": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100
+            },
+            "motion": {
+              "enum": [
+                "absent",
+                "off",
+                "homing",
+                "ready",
+                "paused",
+                "fault"
+              ]
+            },
+            "calibration": {
+              "enum": [
+                "absent",
+                "missing",
+                "valid",
+                "calibrating",
+                "failed"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "call.end": {
+      "type": "object",
+      "required": [
+        "type",
+        "gen",
+        "stream"
+      ],
+      "properties": {
+        "type": {
+          "const": "call.end"
+        },
+        "gen": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "stream": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "reason": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,47}$"
+        }
+      }
+    },
+    "call.end_request": {
+      "type": "object",
+      "required": [
+        "type",
+        "gen",
+        "stream"
+      ],
+      "properties": {
+        "type": {
+          "const": "call.end_request"
+        },
+        "gen": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "stream": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        }
+      }
+    },
+    "call.request": {
+      "type": "object",
+      "required": [
+        "type",
+        "gen",
+        "request",
+        "source"
+      ],
+      "properties": {
+        "type": {
+          "const": "call.request"
+        },
+        "gen": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "request": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "source": {
+          "enum": [
+            "screen_tap",
+            "head_swipe"
+          ]
+        }
+      }
+    },
+    "call.result": {
+      "description": "A refused request names its code.",
+      "type": "object",
+      "required": [
+        "type",
+        "gen",
+        "request",
+        "result"
+      ],
+      "properties": {
+        "type": {
+          "const": "call.result"
+        },
+        "gen": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "request": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "result": {
+          "enum": [
+            "accepted",
+            "refused"
+          ]
+        },
+        "code": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,47}$"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "result"
+            ],
+            "properties": {
+              "result": {
+                "const": "refused"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "code"
+            ]
+          }
+        }
+      ]
+    },
+    "call.start": {
+      "type": "object",
+      "required": [
+        "type",
+        "gen",
+        "stream",
+        "call"
+      ],
+      "properties": {
+        "type": {
+          "const": "call.start"
+        },
+        "gen": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "stream": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "call": {
+          "type": "string",
+          "pattern": "^[\\x21-\\x7e]{1,64}$"
+        }
+      }
+    },
+    "call.state": {
+      "type": "object",
+      "required": [
+        "type",
+        "gen",
+        "stream",
+        "state"
+      ],
+      "properties": {
+        "type": {
+          "const": "call.state"
+        },
+        "gen": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "stream": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "state": {
+          "enum": [
+            "connecting",
+            "listening",
+            "thinking",
+            "speaking",
+            "muted",
+            "reconnecting"
+          ]
+        }
+      }
+    },
+    "check.face": {
+      "type": "object",
+      "required": [
+        "type",
+        "gen",
+        "pose"
+      ],
+      "properties": {
+        "type": {
+          "const": "check.face"
+        },
+        "gen": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "pose": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,31}$"
+        }
+      }
+    },
+    "check.level": {
+      "type": "object",
+      "required": [
+        "type",
+        "gen",
+        "rms"
+      ],
+      "properties": {
+        "type": {
+          "const": "check.level"
+        },
+        "gen": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "rms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 32767
+        }
+      }
+    },
+    "check.mic": {
+      "type": "object",
+      "required": [
+        "type",
+        "gen",
+        "seconds"
+      ],
+      "properties": {
+        "type": {
+          "const": "check.mic"
+        },
+        "gen": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10
+        }
+      }
+    },
+    "check.motion": {
+      "type": "object",
+      "required": [
+        "type",
+        "gen",
+        "gesture"
+      ],
+      "properties": {
+        "type": {
+          "const": "check.motion"
+        },
+        "gen": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "gesture": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,31}$"
+        }
+      }
+    },
+    "check.result": {
+      "type": "object",
+      "required": [
+        "type",
+        "gen",
+        "check",
+        "result"
+      ],
+      "properties": {
+        "type": {
+          "const": "check.result"
+        },
+        "gen": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "check": {
+          "enum": [
+            "tone",
+            "mic",
+            "face",
+            "motion"
+          ]
+        },
+        "result": {
+          "enum": [
+            "ok",
+            "fault"
+          ]
+        },
+        "code": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,47}$"
+        }
+      }
+    },
+    "check.stop": {
+      "type": "object",
+      "required": [
+        "type",
+        "gen"
+      ],
+      "properties": {
+        "type": {
+          "const": "check.stop"
+        },
+        "gen": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        }
+      }
+    },
+    "check.tone": {
+      "type": "object",
+      "required": [
+        "type",
+        "gen"
+      ],
+      "properties": {
+        "type": {
+          "const": "check.tone"
+        },
+        "gen": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        }
+      }
+    },
+    "credit": {
+      "type": "object",
+      "required": [
+        "type",
+        "gen",
+        "stream",
+        "bytes"
+      ],
+      "properties": {
+        "type": {
+          "const": "credit"
+        },
+        "gen": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "stream": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8192
+        }
+      }
+    },
+    "diag.chunk": {
+      "type": "object",
+      "required": [
+        "type",
+        "gen",
+        "source",
+        "chunk",
+        "last",
+        "data"
+      ],
+      "properties": {
+        "type": {
+          "const": "diag.chunk"
+        },
+        "gen": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "source": {
+          "enum": [
+            "log",
+            "coredump"
+          ]
+        },
+        "chunk": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "last": {
+          "type": "boolean"
+        },
+        "data": {
+          "type": "string",
+          "pattern": "^([0-9a-f]{2}){1,1536}$"
+        }
+      }
+    },
+    "diag.counters": {
+      "type": "object",
+      "required": [
+        "type",
+        "gen",
+        "counters"
+      ],
+      "properties": {
+        "type": {
+          "const": "diag.counters"
+        },
+        "gen": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "counters": {
+          "type": "object",
+          "required": [
+            "uptime_s",
+            "frames_rx",
+            "frames_tx",
+            "crc_errors",
+            "resync_bytes",
+            "pcm_seq_gaps",
+            "mic_overflows",
+            "spk_underflows"
+          ],
+          "properties": {
+            "uptime_s": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            "frames_rx": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            "frames_tx": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            "crc_errors": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            "resync_bytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            "pcm_seq_gaps": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            "mic_overflows": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            "spk_underflows": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            }
+          }
+        }
+      }
+    },
+    "diag.fault": {
+      "type": "object",
+      "required": [
+        "type",
+        "gen",
+        "code"
+      ],
+      "properties": {
+        "type": {
+          "const": "diag.fault"
+        },
+        "gen": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "code": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,47}$"
+        }
+      }
+    },
+    "diag.fetch": {
+      "type": "object",
+      "required": [
+        "type",
+        "gen",
+        "source",
+        "chunk"
+      ],
+      "properties": {
+        "type": {
+          "const": "diag.fetch"
+        },
+        "gen": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "source": {
+          "enum": [
+            "log",
+            "coredump"
+          ]
+        },
+        "chunk": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        }
+      }
+    },
+    "enroll.begin": {
+      "type": "object",
+      "required": [
+        "type",
+        "gen",
+        "attempt",
+        "round",
+        "host_pk",
+        "host_id",
+        "host_commit"
+      ],
+      "properties": {
+        "type": {
+          "const": "enroll.begin"
+        },
+        "gen": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "attempt": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "round": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3
+        },
+        "host_pk": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{130}$"
+        },
+        "host_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "host_commit": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "enroll.cancel": {
+      "type": "object",
+      "required": [
+        "type",
+        "gen",
+        "attempt",
+        "reason"
+      ],
+      "properties": {
+        "type": {
+          "const": "enroll.cancel"
+        },
+        "gen": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "attempt": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "reason": {
+          "enum": [
+            "owner",
+            "expired",
+            "mismatch_limit",
+            "invalid_offer",
+            "invalid_reveal",
+            "link_reset"
+          ]
+        }
+      }
+    },
+    "enroll.commit": {
+      "type": "object",
+      "required": [
+        "type",
+        "gen",
+        "attempt",
+        "round",
+        "host_sig"
+      ],
+      "properties": {
+        "type": {
+          "const": "enroll.commit"
+        },
+        "gen": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "attempt": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "round": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3
+        },
+        "host_sig": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{128}$"
+        }
+      }
+    },
+    "enroll.confirmed": {
+      "type": "object",
+      "required": [
+        "type",
+        "gen",
+        "attempt",
+        "round",
+        "sig"
+      ],
+      "properties": {
+        "type": {
+          "const": "enroll.confirmed"
+        },
+        "gen": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "attempt": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "round": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3
+        },
+        "sig": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{128}$"
+        }
+      }
+    },
+    "enroll.done": {
+      "type": "object",
+      "required": [
+        "type",
+        "gen",
+        "attempt",
+        "accessory_id"
+      ],
+      "properties": {
+        "type": {
+          "const": "enroll.done"
+        },
+        "gen": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "attempt": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "accessory_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "enroll.offer": {
+      "type": "object",
+      "required": [
+        "type",
+        "gen",
+        "attempt",
+        "round",
+        "accessory_pk",
+        "accessory_nonce"
+      ],
+      "properties": {
+        "type": {
+          "const": "enroll.offer"
+        },
+        "gen": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "attempt": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "round": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3
+        },
+        "accessory_pk": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{130}$"
+        },
+        "accessory_nonce": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "enroll.reveal": {
+      "type": "object",
+      "required": [
+        "type",
+        "gen",
+        "attempt",
+        "round",
+        "host_nonce"
+      ],
+      "properties": {
+        "type": {
+          "const": "enroll.reveal"
+        },
+        "gen": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "attempt": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "round": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3
+        },
+        "host_nonce": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "error": {
+      "type": "object",
+      "required": [
+        "type",
+        "gen",
+        "code"
+      ],
+      "properties": {
+        "type": {
+          "const": "error"
+        },
+        "gen": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "code": {
+          "enum": [
+            "unknown_message",
+            "invalid_message",
+            "not_now",
+            "capability_missing",
+            "credit_overgrant",
+            "credit_exceeded",
+            "segment_limit",
+            "segment_sequence"
+          ]
+        },
+        "message_type": {
+          "type": "string",
+          "pattern": "^[\\x21-\\x7e]{1,32}$"
+        }
+      }
+    },
+    "hello": {
+      "description": "wire_min is at most wire_max (PROTOCOL.md, Versioning).",
+      "type": "object",
+      "required": [
+        "type",
+        "gen",
+        "wire_min",
+        "wire_max",
+        "host_id",
+        "host_nonce",
+        "caps"
+      ],
+      "properties": {
+        "type": {
+          "const": "hello"
+        },
+        "gen": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "wire_min": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "wire_max": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "host_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "host_nonce": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "caps": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        }
+      }
+    },
+    "hello_ack": {
+      "description": "An enrolled accessory signs; an unenrolled one sends accessory_id and sig both null.",
+      "type": "object",
+      "required": [
+        "type",
+        "gen",
+        "wire",
+        "kind",
+        "accessory_id",
+        "firmware",
+        "pack",
+        "caps",
+        "accessory_nonce",
+        "sig"
+      ],
+      "properties": {
+        "type": {
+          "const": "hello_ack"
+        },
+        "gen": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "wire": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "kind": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,15}$"
+        },
+        "accessory_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "firmware": {
+          "type": "string",
+          "pattern": "^[\\x21-\\x7e]{1,32}$"
+        },
+        "pack": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "caps": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "accessory_nonce": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "sig": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{128}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "accessory_id": {
+                "type": "null"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "sig": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "sig": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "host_proof": {
+      "type": "object",
+      "required": [
+        "type",
+        "gen",
+        "sig"
+      ],
+      "properties": {
+        "type": {
+          "const": "host_proof"
+        },
+        "gen": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "sig": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{128}$"
+        }
+      }
+    },
+    "mic.state": {
+      "type": "object",
+      "required": [
+        "type",
+        "gen",
+        "stream",
+        "state"
+      ],
+      "properties": {
+        "type": {
+          "const": "mic.state"
+        },
+        "gen": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "stream": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "state": {
+          "enum": [
+            "live",
+            "muted",
+            "off"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,47}$"
+        }
+      }
+    },
+    "mute.set": {
+      "type": "object",
+      "required": [
+        "type",
+        "gen",
+        "stream",
+        "muted"
+      ],
+      "properties": {
+        "type": {
+          "const": "mute.set"
+        },
+        "gen": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "stream": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "muted": {
+          "type": "boolean"
+        }
+      }
+    },
+    "ping": {
+      "type": "object",
+      "required": [
+        "type",
+        "gen"
+      ],
+      "properties": {
+        "type": {
+          "const": "ping"
+        },
+        "gen": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        }
+      }
+    },
+    "playback.progress": {
+      "type": "object",
+      "required": [
+        "type",
+        "gen",
+        "stream",
+        "playback_id",
+        "played_ms",
+        "drained"
+      ],
+      "properties": {
+        "type": {
+          "const": "playback.progress"
+        },
+        "gen": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "stream": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "playback_id": {
+          "type": "string",
+          "pattern": "^[\\x21-\\x7e]{1,64}$"
+        },
+        "played_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "drained": {
+          "type": "boolean"
+        }
+      }
+    },
+    "pong": {
+      "type": "object",
+      "required": [
+        "type",
+        "gen",
+        "uptime_ms"
+      ],
+      "properties": {
+        "type": {
+          "const": "pong"
+        },
+        "gen": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "uptime_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "refuse": {
+      "description": "A wire_version refusal names the sender's own wire range.",
+      "type": "object",
+      "required": [
+        "type",
+        "gen",
+        "code"
+      ],
+      "properties": {
+        "type": {
+          "const": "refuse"
+        },
+        "gen": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "code": {
+          "enum": [
+            "wire_version",
+            "unknown_accessory",
+            "unknown_host",
+            "bad_proof",
+            "capability_missing",
+            "unsupported_kind",
+            "auth_timeout",
+            "stale_generation"
+          ]
+        },
+        "wire_min": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "wire_max": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "code"
+            ],
+            "properties": {
+              "code": {
+                "const": "wire_version"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "wire_min",
+              "wire_max"
+            ]
+          }
+        }
+      ]
+    },
+    "spk.begin": {
+      "type": "object",
+      "required": [
+        "type",
+        "gen",
+        "stream",
+        "segment",
+        "playback_id"
+      ],
+      "properties": {
+        "type": {
+          "const": "spk.begin"
+        },
+        "gen": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "stream": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "segment": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "playback_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[\\x21-\\x7e]{1,64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "spk.drained": {
+      "type": "object",
+      "required": [
+        "type",
+        "gen",
+        "stream",
+        "segment"
+      ],
+      "properties": {
+        "type": {
+          "const": "spk.drained"
+        },
+        "gen": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "stream": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "segment": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        }
+      }
+    },
+    "spk.end": {
+      "type": "object",
+      "required": [
+        "type",
+        "gen",
+        "stream",
+        "segment"
+      ],
+      "properties": {
+        "type": {
+          "const": "spk.end"
+        },
+        "gen": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "stream": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "segment": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        }
+      }
+    },
+    "spk.flush": {
+      "type": "object",
+      "required": [
+        "type",
+        "gen",
+        "stream"
+      ],
+      "properties": {
+        "type": {
+          "const": "spk.flush"
+        },
+        "gen": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "stream": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        }
+      }
+    },
+    "spk.flushed": {
+      "type": "object",
+      "required": [
+        "type",
+        "gen",
+        "stream",
+        "played_ms"
+      ],
+      "properties": {
+        "type": {
+          "const": "spk.flushed"
+        },
+        "gen": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "stream": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "played_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "segment": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        }
+      }
+    },
+    "task.event": {
+      "type": "object",
+      "required": [
+        "type",
+        "gen",
+        "stream",
+        "task",
+        "revision",
+        "status",
+        "in_chat"
+      ],
+      "properties": {
+        "type": {
+          "const": "task.event"
+        },
+        "gen": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "stream": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "task": {
+          "type": "string",
+          "pattern": "^[\\x21-\\x7e]{1,64}$"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "status": {
+          "enum": [
+            "running",
+            "completed",
+            "failed",
+            "cancelled"
+          ]
+        },
+        "in_chat": {
+          "type": "boolean"
+        }
+      }
+    },
+    "voice.readiness": {
+      "type": "object",
+      "required": [
+        "type",
+        "gen",
+        "ready"
+      ],
+      "properties": {
+        "type": {
+          "const": "voice.readiness"
+        },
+        "gen": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "ready": {
+          "type": "boolean"
+        },
+        "code": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,47}$"
+        }
+      }
+    }
+  }
+}

@@ -63,6 +63,7 @@ defmodule FermixCore.Home.DeviceLocal do
     {"acp_identities/*.tmp.*", :drop, "an interrupted write of an ACP identity"},
     {"acp_identities/*.broken.*", :keep,
      "an ACP identity this machine quarantined as unreadable"},
+    {"accessories/*.tmp.*", :drop, "an interrupted write of the accessory host key or records"},
     {"bootstrap/*/*.tmp-*", :drop, "an interrupted write of a prompt file"},
     {"plugins/.staging", :drop, "plugin install scratch"},
     {"plugins/reinstall.json", :drop,
@@ -105,8 +106,9 @@ defmodule FermixCore.Home.DeviceLocal do
   Everything else in the home travels: `config.toml`, `memory.db` with its
   `-wal` and `-shm` files, `auth.json` and `chatgpt_host.json`, the file secret
   store under `secrets/`, the identity bundle, device list, media and
-  `primary_epoch` under `mobile/`, `memory/`, `bootstrap/`, `skills/`,
-  `journals/`, `workspace/`, `job_runs/`, `acp_identities/`,
+  `primary_epoch` under `mobile/`, the accessory host key and the enrolled
+  accessories' records under `accessories/` (M91 D7), `memory/`, `bootstrap/`,
+  `skills/`, `journals/`, `workspace/`, `job_runs/`, `acp_identities/`,
   `realtime/device_id` (it keys the local voice conversation), the plugin
   lockfile, installed trees, provenance and skills under `plugins/`, and the
   browser's artifacts and downloads. Cues and open loops live in `memory.db`.

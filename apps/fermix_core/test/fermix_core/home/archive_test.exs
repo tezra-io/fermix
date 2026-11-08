@@ -2,6 +2,9 @@ defmodule FermixCore.Home.ArchiveTest do
   use ExUnit.Case, async: true
 
   alias Exqlite.Sqlite3
+  alias FermixCore.Accessories.P256
+  alias FermixCore.Accessories.Record, as: AccessoryRecord
+  alias FermixCore.Accessories.Store, as: AccessoryStore
   alias FermixCore.Home.Archive
   alias FermixCore.Home.Archive.Manifest
   alias FermixCore.Home.Archive.Seal
@@ -132,6 +135,34 @@ defmodule FermixCore.Home.ArchiveTest do
       assert mode(into) == 0o700
       assert mode(Path.join(into, "mobile")) == 0o700
       refute File.exists?(Path.join(into, "moved.json"))
+    end
+
+    # M91 D7: the accessory pairing store travels with the home, and the modes
+    # its strict reads require survive the trip, so a restored or moved home
+    # keeps its accessories paired; an interrupted write stays behind.
+    test "carries the accessory store with the modes its reads require",
+         %{home: home, archive: archive, into: into} do
+      {:ok, key} = AccessoryStore.ensure_host_key(home)
+      {pk, _private} = P256.generate()
+
+      record = %AccessoryRecord{
+        accessory_id: P256.id(pk),
+        accessory_pk: pk,
+        kind: "stackchan",
+        name: "StackChan",
+        enrolled_at: ~U[2026-11-07 22:04:22Z]
+      }
+
+      :ok = AccessoryStore.put(home, record)
+      File.write!(AccessoryStore.records_path(home) <> ".tmp.9", "partial")
+
+      assert {:ok, _created} = create(home, archive)
+      assert {:ok, _restored} = restore(archive, into)
+
+      assert {:ok, ^key} = AccessoryStore.load_host_key(into)
+      assert {:ok, [^record]} = AccessoryStore.list(into)
+      assert mode(AccessoryStore.dir(into)) == 0o700
+      refute File.exists?(AccessoryStore.records_path(into) <> ".tmp.9")
     end
 
     test "into the path the home was archived from rewrites nothing",

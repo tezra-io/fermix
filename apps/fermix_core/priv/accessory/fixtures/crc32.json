@@ -1,0 +1,65 @@
+{
+  "algorithm": "CRC-32/ISO-HDLC (IEEE 802.3, zlib): poly 0x04C11DB7 reflected (0xEDB88320), init 0xFFFFFFFF, refin and refout, xorout 0xFFFFFFFF",
+  "vectors": [
+    {
+      "name": "ascii ''",
+      "input": "",
+      "value": "00000000",
+      "wire": "00000000"
+    },
+    {
+      "name": "ascii 'a'",
+      "input": "61",
+      "value": "e8b7be43",
+      "wire": "43beb7e8"
+    },
+    {
+      "name": "ascii 'abc'",
+      "input": "616263",
+      "value": "352441c2",
+      "wire": "c2412435"
+    },
+    {
+      "name": "ascii '123456789'",
+      "input": "313233343536373839",
+      "value": "cbf43926",
+      "wire": "2639f4cb"
+    },
+    {
+      "name": "ascii 'message digest'",
+      "input": "6d65737361676520646967657374",
+      "value": "20159d7f",
+      "wire": "7f9d1520"
+    },
+    {
+      "name": "ascii 'abcdefghijklmnopqrstuvwxyz'",
+      "input": "6162636465666768696a6b6c6d6e6f707172737475767778797a",
+      "value": "4c2750bd",
+      "wire": "bd50274c"
+    },
+    {
+      "name": "ascii 'The quick brown fox jumps over the lazy dog'",
+      "input": "54686520717569636b2062726f776e20666f78206a756d7073206f76657220746865206c617a7920646f67",
+      "value": "414fa339",
+      "wire": "39a34f41"
+    },
+    {
+      "name": "32 zero bytes",
+      "input": "0000000000000000000000000000000000000000000000000000000000000000",
+      "value": "190a55ad",
+      "wire": "ad550a19"
+    },
+    {
+      "name": "32 0xff bytes",
+      "input": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "value": "ff6cab0b",
+      "wire": "0bab6cff"
+    },
+    {
+      "name": "a hello header",
+      "input": "465801010300000000000000020000007b7d",
+      "value": "bba8d3aa",
+      "wire": "aad3a8bb"
+    }
+  ]
+}
