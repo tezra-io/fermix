@@ -69,7 +69,7 @@ rotating provider the Fermix side is the same: a consumed token draws a 4xx,
 which Fermix treats as permanent, and it quarantines the grant until a new
 sign-in (`token_manager.ex:348-360`, `:370-375`). A 408 or a 429 is not a
 verdict on the grant: `RefreshClient` retries it like a 5xx and never
-quarantines on it (`refresh_client.ex:43-49`).
+quarantines on it (`refresh_client.ex:52-58`).
 
 Most checks use two profiles:
 - `p1` is a profile that both its manager and a tree-less CLI VM refresh
@@ -372,7 +372,7 @@ describes, and the **Fix** bullets cite the code as it is now.
   state and token file change after the lock is released. A busy lock is a
   transient, logged error, never a refresh from memory. `RefreshClient` states
   its per-attempt bounds (pool 5 s, connect 10 s, receive 15 s;
-  `refresh_client.ex:39-41`, `:51-60`, `:158-173`), so a live refresh (about
+  `refresh_client.ex:46-48`, `:60-69`, `:174-191`), so a live refresh (about
   107 s with two store-lock waits) ends before its lockfile looks stale,
   unless the wall clock jumps mid-refresh (a system sleep or a clock step; see
   "Lock staleness"); a test holds that bound.
@@ -401,8 +401,8 @@ describes, and the **Fix** bullets cite the code as it is now.
   session, and the manager refuses from then on.
 - **Code:**
   - `RefreshClient` retries a transport error, a 5xx, a 408 or a 429 with the
-    same refresh token, up to three attempts (`refresh_client.ex:36`,
-    `:43-49`, `:140-143`, `:148-151`).
+    same refresh token, up to three attempts (`refresh_client.ex:43`,
+    `:52-58`, `:149-155`, `:160-167`).
   - Req does not retry the POST itself: its default `retry: :safe_transient`
     covers GET and HEAD only.
 - **Impact:** the session is revoked on the retry, about 350 ms later, instead
