@@ -187,7 +187,9 @@ will be part of a future release; nothing in this group is in a release yet.
   settings go to the server through it, a settings call costing one round
   trip to the server, and paired phones see a reconnect. It
   records no computer history from then on and opens no copy of your memory:
-  what it still holds of them is a retired copy. The
+  what it still holds of them is a retired copy. Doctor there checks that
+  computer, its scope named or not; only its network checks, which would call
+  a provider with the retired credentials, are refused. The
   server will not remove that desktop from its devices, since this version
   cannot link it again and it keeps copies of the server's backups. Right
   after the move the server installs your plugins again for itself, checked as

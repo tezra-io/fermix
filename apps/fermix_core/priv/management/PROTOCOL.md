@@ -556,7 +556,7 @@ daemon onto anything else.
 | `hello` | none | Supported range, method catalog, immutable engine identity, PID, and the loopback Setup endpoint. |
 | `overview.get` | none | Typed projection of readiness, health, daemon, provider, channels, memory, jobs, agents, realtime, and capability counts. |
 | `setup.session.create` | none | A one-use Setup URL and its absolute expiry. The durable token is never returned. An owner decision. |
-| `doctor.start` | `scope` (`local` \| `network`, default `local`) | A session view; the run continues in the background. |
+| `doctor.start` | `scope` (`local` \| `network`, default `local`) | A session view; the run continues in the background. In the device role the local scope, named or by default, runs on this computer, and the network scope is `unavailable` {`capability`: `doctor`, `sentence`}: its probes would call a provider with this computer's retired credentials. |
 | `doctor.get` | `session_id` | The session view with the checks that have landed so far. |
 | `doctor.cancel` | `session_id` | The terminal session view. Cancelling a finished session is a no-op, not an error. |
 | `logs.query` | `limit`, `level`, `subsystem`, `search`, `direction`, `cursor` | A bounded page of redacted entries plus the opaque cursor for the next page in the same direction. |

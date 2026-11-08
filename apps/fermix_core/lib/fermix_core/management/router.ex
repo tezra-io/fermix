@@ -1526,7 +1526,15 @@ defmodule FermixCore.Management.Router do
        when method in ["secret.set", "secret.clear"],
        do: {:ok, "secrets"}
 
-  defp provider_call("doctor.start", %{"scope" => "local"}), do: :no_provider_call
+  # Doctor diagnoses this host: by the scope `doctor.start` runs, its default
+  # included, so only the network scope's provider probes are refused. A
+  # scope it does not take is left for it to refuse as invalid.
+  defp provider_call("doctor.start", params) do
+    case fetch_scope(params) do
+      {:ok, :network} -> {:ok, Map.fetch!(@provider_methods, "doctor.start")}
+      _local_or_invalid -> :no_provider_call
+    end
+  end
 
   defp provider_call(method, _params) do
     case Map.fetch(@provider_methods, method) do

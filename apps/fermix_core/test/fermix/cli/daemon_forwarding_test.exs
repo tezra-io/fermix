@@ -17,6 +17,8 @@ defmodule Fermix.CLI.DaemonForwardingTest do
 
   alias Fermix.CLI.Daemon
   alias Fermix.CLI.Daemon.Client
+  alias FermixCore.Management.Doctor
+  alias FermixCore.Management.Doctor.Descriptor
   alias FermixTestSupport.ParentProcess
   alias FermixTestSupport.SafeRm
 
@@ -229,6 +231,66 @@ defmodule Fermix.CLI.DaemonForwardingTest do
     assert primary["connected"] == true
     assert primary["path"] == "direct"
     refute_received {:forwarded, _request, _opts}
+  end
+
+  # EC2 test 2026-11-08: Doctor diagnoses this machine, so a device answers
+  # the Doctor pane's own calls itself, linked or not, and forwards none:
+  # `doctor.start` with the local scope named, as the Mac app sends it, or
+  # left to its default, which is the same run and was refused, then
+  # `doctor.get` and `doctor.cancel` of that session. The network scope
+  # probes a provider with this machine's retired credentials, so it stays
+  # refused by name (M75 D5).
+  test "a device runs Doctor's local checks itself, through the pane's own calls", ctx do
+    doctor = start_doctor!(ctx)
+
+    for linked? <- [true, false], params <- [%{"scope" => "local"}, %{}] do
+      socket =
+        start_daemon!(ctx,
+          engine_role: @device,
+          desktop_link?: linked?,
+          management: [doctor_server: doctor, descriptors: [server_link_row()]]
+        )
+
+      # The case rides beside the answer, so a failure names it.
+      assert {^linked?, ^params, {:ok, %{"session_id" => id, "scope" => "local", "total" => 1}}} =
+               {linked?, params,
+                Client.request_v1("doctor.start", params, socket_path: socket, timeout: @reply_ms)}
+
+      assert {:ok, %{"session_id" => ^id}} =
+               Client.request_v1("doctor.get", %{"session_id" => id},
+                 socket_path: socket,
+                 timeout: @reply_ms
+               )
+
+      assert {:ok, %{"session_id" => ^id, "status" => status}} =
+               Client.request_v1("doctor.cancel", %{"session_id" => id},
+                 socket_path: socket,
+                 timeout: @reply_ms
+               )
+
+      assert status in ~w(completed cancelled)
+
+      assert {:error, {:management_error, "unavailable", _message, details}} =
+               Client.request_v1("doctor.start", %{"scope" => "network"},
+                 socket_path: socket,
+                 timeout: @reply_ms
+               )
+
+      assert details == %{
+               "capability" => "doctor",
+               "sentence" => "This engine runs in the device role; the primary is fermix-vm."
+             }
+    end
+
+    refute_received {:forwarded, _request, _opts}
+  end
+
+  # What the pane draws on a device: the local catalog holds the rows that
+  # read the device role (`acp`) and the link to the server (`server_link`).
+  test "the local catalog a device runs holds the rows that read its role and its link" do
+    ids = Enum.map(Descriptor.catalog(:local), & &1.id)
+    assert "acp" in ids
+    assert "server_link" in ids
   end
 
   test "an engine with no link answers no primary", ctx do
@@ -470,6 +532,7 @@ defmodule Fermix.CLI.DaemonForwardingTest do
 
     {forward, opts} = Keyword.pop(opts, :forward, recorded)
     {link, opts} = Keyword.pop(opts, :link_status, &link_status/0)
+    {management, opts} = Keyword.pop(opts, :management, [])
     # As `Home.Link.forwarding/0` answers it for a linked desktop, or any other engine.
     forwarding = if linked?, do: [primary_forward: forward], else: []
 
@@ -480,19 +543,20 @@ defmodule Fermix.CLI.DaemonForwardingTest do
          socket_path: socket_path,
          task_supervisor: ctx.tasks,
          forwarding: forwarding,
-         management_opts: [
-           engine_role: role,
-           settings_reader: fn section, _opts ->
-             {:ok, %{"section" => section, "engine" => "this machine"}}
-           end,
-           identity_provider: fn -> {:ok, identity()} end,
-           settings_sections: fn -> @this_machines_sections end,
-           endpoint_opts: [port: 4041],
-           operation_opts: [
-             mobile: [provider: PairProvider, test: test],
-             home: [home: root, scheduler: nil, link_status: link]
-           ]
-         ]
+         management_opts:
+           [
+             engine_role: role,
+             settings_reader: fn section, _opts ->
+               {:ok, %{"section" => section, "engine" => "this machine"}}
+             end,
+             identity_provider: fn -> {:ok, identity()} end,
+             settings_sections: fn -> @this_machines_sections end,
+             endpoint_opts: [port: 4041],
+             operation_opts: [
+               mobile: [provider: PairProvider, test: test],
+               home: [home: root, scheduler: nil, link_status: link]
+             ]
+           ] ++ management
        ]
        |> Keyword.merge(opts)},
       id: name
@@ -521,6 +585,28 @@ defmodule Fermix.CLI.DaemonForwardingTest do
   end
 
   defp primary_answer(_request), do: {:ok, %{"answered_by" => "primary"}}
+
+  # A Doctor of the test's own, with its own task supervisor, so no session of
+  # the application's Doctor is touched.
+  defp start_doctor!(ctx) do
+    name = :"daemon_forwarding_doctor_#{System.unique_integer([:positive])}"
+
+    start_supervised!(
+      {Doctor, name: name, task_supervisor: ctx.tasks},
+      id: name
+    )
+  end
+
+  defp server_link_row do
+    %{
+      id: "server_link",
+      category: :connectivity,
+      severity: :warning,
+      applicability: :configured,
+      origin: :engine,
+      run: fn -> %{name: "server link", status: :ok, detail: "connected to fermix-vm"} end
+    }
+  end
 
   defp link_status do
     %{
