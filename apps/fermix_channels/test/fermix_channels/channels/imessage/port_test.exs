@@ -8,7 +8,9 @@ defmodule FermixChannels.Channels.IMessage.PortTest do
   The fake is a POSIX `sh` script written into a per-test home: it answers by
   method, records each spawn in `<home>/spawns`, exits with `<home>/exit_code`
   when that file exists and answers `initialize` with `<home>/protocol_version`.
-  It uses only shell builtins, so nothing on PATH is involved.
+  With `<home>/close_stdin` it closes its input before that answer and stays up
+  (`/bin/sleep`). It uses shell builtins and absolute paths only, so nothing on
+  PATH is involved.
   """
   use ExUnit.Case, async: false
 
@@ -34,7 +36,9 @@ defmodule FermixChannels.Channels.IMessage.PortTest do
     method=${method%%\\"*}
     case "$method" in
       initialize)
-        printf '{"id":%s,"result":{"protocol_version":%s,"helper_version":"0.0.0-test","macos_version":"27.0","bundle_id":"io.tezra.fermix.messages","db_generation":{"inode":7,"birth_time":"2026-09-01T00:00:00Z"}}}\\n' "$id" "$version" ;;
+        if [ -f "$home/close_stdin" ]; then exec 0<&-; fi
+        printf '{"id":%s,"result":{"protocol_version":%s,"helper_version":"0.0.0-test","macos_version":"27.0","bundle_id":"io.tezra.fermix.messages","db_generation":{"inode":7,"birth_time":"2026-09-01T00:00:00Z"}}}\\n' "$id" "$version"
+        if [ -f "$home/close_stdin" ]; then /bin/sleep 30; exit 0; fi ;;
       probe)
         printf '{"id":%s,"result":{"db":"readable","echo":"%s"}}\\n' "$id" "$home" ;;
       watch.subscribe)
@@ -277,6 +281,19 @@ defmodule FermixChannels.Channels.IMessage.PortTest do
 
   defp assert_eventually(fun) do
     assert_eventually(fun, System.monotonic_time(:millisecond) + @arrival_ms)
+  end
+
+  # A helper whose input is closed when the port writes `shutdown` (it has
+  # exited, or stopped reading) closes the port with an EXIT and no exit
+  # status, which ends the stop's wait as an exit status does. The fake closes
+  # its input before it answers `initialize` and stays up, so only the closed
+  # pipe can end the wait; the wait is an hour, so a stop that sat it out
+  # would outlast the bound.
+  test "a stop whose shutdown meets a closed pipe returns at once", ctx do
+    File.write!(Path.join(ctx.home, "close_stdin"), "")
+    {:ok, port} = start_port(ctx, shutdown_wait_ms: 3_600_000)
+
+    assert :ok = GenServer.stop(port, :normal, @arrival_ms)
   end
 
   defp assert_eventually(fun, deadline) do

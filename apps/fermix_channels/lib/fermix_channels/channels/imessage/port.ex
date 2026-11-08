@@ -209,7 +209,7 @@ defmodule FermixChannels.Channels.IMessage.Port do
     {:ok, line} = Protocol.encode_request(state.next_id, "shutdown", %{})
 
     case command(port, line) do
-      :ok -> await_exit(port, @shutdown_wait_ms)
+      :ok -> await_exit(port, state.shutdown_wait_ms)
       {:error, :closed} -> :ok
     end
 
@@ -225,6 +225,7 @@ defmodule FermixChannels.Channels.IMessage.Port do
       backoff_initial_ms: Keyword.get(opts, :backoff_initial_ms, @backoff_initial_ms),
       backoff_max_ms: Keyword.get(opts, :backoff_max_ms, @backoff_max_ms),
       init_timeout_ms: Keyword.get(opts, :init_timeout_ms, @init_timeout_ms),
+      shutdown_wait_ms: Keyword.get(opts, :shutdown_wait_ms, @shutdown_wait_ms),
       max_outstanding: Keyword.get(opts, :max_outstanding, @max_outstanding),
       port: nil,
       status: :backoff,
@@ -582,9 +583,12 @@ defmodule FermixChannels.Channels.IMessage.Port do
     ArgumentError -> :ok
   end
 
+  # A shutdown written to a helper that has exited or stopped reading fails
+  # with EPIPE and the port exits with no status: its EXIT ends the wait too.
   defp await_exit(port, wait_ms) do
     receive do
       {^port, {:exit_status, _code}} -> :ok
+      {:EXIT, ^port, _reason} -> :ok
       {^port, {:data, _discarded}} -> await_exit(port, wait_ms)
     after
       wait_ms -> :ok
