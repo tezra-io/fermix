@@ -254,9 +254,16 @@ defmodule FermixChannels.Home.EnrollmentWindowTest do
 
   defp kept(primary), do: primary.root |> Enrollment.path() |> File.read!() |> Jason.decode!()
 
+  # The test's supervisor starts the window again. A GenServer's name is
+  # registered before its `init/1` runs, so the new pid is known while init
+  # may still be reading the window file and logging what it could not read;
+  # a call is answered only once init has returned, so the restart is over,
+  # and its log written, when this returns.
   defp restart!(enrollment) do
     old = Process.whereis(enrollment)
     :ok = GenServer.stop(enrollment)
-    HomeMove.await(fn -> (pid = Process.whereis(enrollment)) && pid != old && pid end)
+    pid = HomeMove.await(fn -> (pid = Process.whereis(enrollment)) && pid != old && pid end)
+    _initialised = :sys.get_state(pid)
+    pid
   end
 end
