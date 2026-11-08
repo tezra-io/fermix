@@ -52,8 +52,9 @@
 (*    the ending a boot could not write;                                   *)
 (*  - the enrolment window and its withdrawal: the candidate enrols while  *)
 (*    the server answers as the primary; its failures (an expired code, a  *)
-(*    refused enrolment) end it failed, which no rule reads, and Cancel's  *)
-(*    withdraw writes nothing a rule reads;                                *)
+(*    refused enrolment) end it failed, which no rule reads, and the       *)
+(*    withdraw by Cancel, or by a Move back that stopped after the code,   *)
+(*    writes nothing a rule reads;                                         *)
 (*  - Try again after the server undid the move: a second move, which the  *)
 (*    fence orders by move id (home_move); here a server that moved once   *)
 (*    refuses another home.move.start; the 24-hour listen window;          *)
@@ -91,7 +92,7 @@
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/home/candidate.ex @ c83aa4ee6a69
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/home/move_responder.ex @ 31d80078d517
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/candidate/activation.ex @ 41d05d90bb47
-\* SOURCE: apps/fermix_core/lib/fermix_core/home/candidate.ex#prepare_return,returnable_engine,returnable_home,linked_and_still,no_move_here,replaceable_return,present?,remove @ 649c6a74f681
+\* SOURCE: apps/fermix_core/lib/fermix_core/home/candidate.ex#prepare_return,returnable,return_checks,returnable_engine,returnable_home,linked_and_still,no_move_here,replaceable_return,present?,remove @ 1c0fff782879
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/device_supervisor.ex#children,dial_children,start_candidate,stop_candidate,start_candidate_subtree,candidate_spec @ a9ce5e14d9a3
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/home/link.ex#start_return,stop_return @ c80b94d3aa36
 \* SOURCE: apps/fermix_core/lib/fermix_core/application.ex#prepare_home,finish_activation,finish_return @ e3ec83bb1ff3
@@ -102,9 +103,9 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/management/home_move.ex#move_start @ 428bcf251b24
 \* SOURCE: apps/fermix_core/lib/fermix_core/management/placement.ex#unconfirmed_on_loss?,unconfirmed,@unconfirmed_methods @ 0881001a46d0
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/relay.ex#lost_answer @ dfb459724267
-\* SOURCE: apps/fermix_core/lib/fermix_core/management/always_on.ex @ f0d966d62565
+\* SOURCE: apps/fermix_core/lib/fermix_core/management/always_on.ex @ 35f7d2a17fa2
 \* SOURCE: apps/fermix_core/lib/fermix_core/management/home.ex#restoring? @ 10524f88be3d
-\* SOURCE: apps/fermix_core/lib/fermix_core/management/home_summary.ex#screen,target,device,settled,retired,away,away_here,on,returning,return_view,return_ready,return_moving,return_undone,return_stopped,restore_view,return_cancel,restoring,restore_running?,restore_offer,restorable,started?,stale?,silent?,server_move,server_idle?,@before_move,@ended,@server_moves @ 0a771673668f
+\* SOURCE: apps/fermix_core/lib/fermix_core/management/home_summary.ex#screen,target,device,settled,retired,away,away_here,on,returning,return_view,return_ready,return_moving,return_undone,return_stopped,restore_view,return_cancel,restoring,restore_running?,restore_offer,restorable,started?,stale?,silent?,server_move,server_idle?,@before_move,@ended,@server_moves @ 741cbccec86e
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/local_return.ex#restore,restored,staged,placed,failed,restart @ a9fe927a65e2
 EXTENDS Naturals
 
@@ -149,10 +150,10 @@ CONSTANTS
                          \* channels"); FALSE confirms with the server still running
     UnconfirmedKept,     \* Move now on a return keeps move_started_at when the forwarded
                          \* home.move.start is answered unconfirmed too
-                         \* (return_answered/3, always_on.ex:474-480); FALSE keeps it
+                         \* (return_answered/3, always_on.ex:481-487); FALSE keeps it
                          \* only on {ok, move_id}
     StartKeptFirst,      \* Move now writes move_started_at before it forwards
-                         \* home.move.start (return_start_ahead/2, always_on.ex:459-472),
+                         \* home.move.start (return_start_ahead/2, always_on.ex:466-479),
                          \* and the answer settles it; FALSE is the design's draft 2, which
                          \* writes it after the answer (finding HR-1, fixed)
     StoppedReturnClears, \* a move back a stop left part-way clears: Cancel removes
@@ -163,16 +164,16 @@ CONSTANTS
                          \* FALSE is neither (finding HR-2, fixed)
     UndoneInAnyPhase,    \* a candidate receiving or staged whose server answers as the
                          \* primary with no move under way draws undone, or Cancel with no
-                         \* record (return_view/2, home_summary.ex:712-718); FALSE draws
+                         \* record (return_view/2, home_summary.ex:727-733); FALSE draws
                          \* moving whatever the server says (finding HR-2, fixed)
     RequestBesideJob,    \* the summary draws Restore here running only while its request
                          \* in return.json stands beside its running job
-                         \* (restore_running?/1, home_summary.ex:772-773; Home's
+                         \* (restore_running?/1, home_summary.ex:798-799; Home's
                          \* restoring?/2); FALSE takes the request alone, which a stop of
                          \* the engine leaves behind
     EndingSettles        \* the job's ending settles a local candidate a stopped run left,
                          \* as the next start would (restore_ended/3, always_on.ex:
-                         \* 632-656): one receiving discarded (Home.Candidate.remove/1),
+                         \* 710-734): one receiving discarded (Home.Candidate.remove/1),
                          \* one activating finished by a restart; FALSE takes back only
                          \* the request
 
@@ -763,7 +764,7 @@ CandRestart ==
 -----------------------------------------------------------------------------
 (* The Mac's acts: home.act through Management.AlwaysOn, from the design   *)
 
-\* returning/1 (home_summary.ex:665-685), the first clause of the
+\* returning/1 (home_summary.ex:680-700), the first clause of the
 \* device's summary (device/1, :538): any candidate of this computer's, or,
 \* with none, return.json with move_started_at and no moved_at. (The stale
 \* check against a newer epoch the link reached needs a second desktop: not
@@ -776,7 +777,7 @@ Returning == cPhase # "none" \/ rj = "started"
 ServerAborted == LinkUp /\ sPhase = "aborted"
 ServerIdle == LinkUp /\ sPhase \in {"none", "aborted"}
 
-\* Restore here (restore_offer/1, home_summary.ex:777-783): this computer
+\* Restore here (restore_offer/1, home_summary.ex:803-809): this computer
 \* holds a copy (always, here) and nothing answers from the server
 \* (silent?/1, :816-821: no link, or no session for ten minutes, which here is
 \* the network down or the server gone). A server that runs answers, as the
@@ -786,7 +787,7 @@ ServerSilent == ~net \/ ~sAlive \/ ~mLink
 
 RestoreOffer == IF ServerSilent THEN {"restore_here"} ELSE {}
 
-\* restoring/1 (home_summary.ex:766-773), the second clause of the device's
+\* restoring/1 (home_summary.ex:792-799), the second clause of the device's
 \* summary: moving, with nothing to press, while Restore here's request
 \* stands beside its running job (Home's restoring?/2 reads the job family:
 \* the act's steps here). Without RequestBesideJob the request alone.
@@ -860,8 +861,9 @@ Press(a) ==
 
 AGoto(s) == act' = s
 
-\* Candidate.prepare_return/3 (candidate.ex:187-198, :459-503) writes a
-\* return's candidate only on a device engine (supervised: assumed here),
+\* Candidate.prepare_return/3 (candidate.ex:187-210, :471-523, its checks
+\* the ones returnable/3 makes) writes a return's candidate only on a
+\* device engine (supervised: assumed here),
 \* beside a home that carries the moved marker, linked for a return of the
 \* rail's kind, with no move of its own pending, replacing only a candidate
 \* that ended (here a local one that failed); it refuses otherwise.
@@ -870,13 +872,17 @@ Preparable(kind) ==
     /\ (kind = "return" => mLink)
     /\ cPhase \in {"none", "failed"}
 
-\* Move back (move_back/2, always_on.ex:498-561): the server's move is
-\* checked (server_still/1, a press while it reports one refused) and
-\* home.enroll.open forwarded and answered, both folded into the press (a link
-\* down refuses it there, as Offered does); then Candidate.prepare_return/3
-\* renames the built candidate/ into place (enrolling, kind return),
-\* return.json is written, and Link.start_return/1 starts the candidate
-\* subtree on the running device tree (a start that fails removes both).
+\* Move back (move_back/2, always_on.ex:507-600): the server's move is
+\* checked (server_still/1, a press while it reports one refused), this
+\* computer's own checks are made (returnable/3, Preparable: one refused
+\* asks the server for nothing) and home.enroll.open forwarded and
+\* answered, all folded into the press (a link down refuses it there, as
+\* Offered does); then Candidate.prepare_return/3 renames the built
+\* candidate/ into place (enrolling, kind return), return.json is written,
+\* and Link.start_return/1 starts the candidate subtree on the running
+\* device tree (a start that fails removes both). A step after the code
+\* that does not go through withdraws it (home.enroll.withdraw, which
+\* writes nothing a rule reads).
 MbPrepare ==
     /\ act = "mb_prepare"
     /\ IF Preparable("return")
@@ -901,7 +907,7 @@ MbStart ==
     /\ UNCHANGED <<srvFiles, srvRun, rail, macFiles, mBoot, restore, apc, aOwner, aTo,
                    activated, budgets, hist>>
 
-\* Move now on a return (forwarded_move/4, always_on.ex:437-453):
+\* Move now on a return (forwarded_move/4, always_on.ex:444-460):
 \* home.move.start {candidate_id, passphrase, keep_as_desktop: false}
 \* forwarded over the link. The server's HomeMove.move_start/3 runs
 \* Move.start/5 (request, phase requested, role device), removes its own
@@ -961,7 +967,7 @@ MnUnmark ==
                    activated, budgets, hist>>
 
 \* Cancel on a return (cancel/2 when returning?/1, cancel_return/1,
-\* always_on.ex:310-334, :563-595): Link.stop_return/0 stops the candidate
+\* always_on.ex:317-341, :602-634): Link.stop_return/0 stops the candidate
 \* subtree (DeviceSupervisor.stop_candidate/1: its process is stopped where
 \* it is, an activation part-way included, and its rails end);
 \* home.enroll.withdraw is forwarded (nothing here reads the
@@ -991,7 +997,7 @@ CxForget ==
                    cRec, stDb, stCfg, mBoot, cUp, restore, apc, aOwner, aTo,
                    activated, budgets, hist>>
 
-\* Restore here (restore_here/3, always_on.ex:606-615): the copy is chosen
+\* Restore here (restore_here/3, always_on.ex:645-654): the copy is chosen
 \* first (a wrong passphrase writes nothing, not modelled), then return.json
 \* gains restore_requested (restore_record/3, :626-632: the record of a move
 \* back not yet done, or a new one naming the server, which reads as asked;

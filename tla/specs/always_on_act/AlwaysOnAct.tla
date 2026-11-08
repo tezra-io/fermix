@@ -54,7 +54,7 @@
 (* or one step of a job's ending.                                          *)
 (***************************************************************************)
 
-\* SOURCE: apps/fermix_core/lib/fermix_core/management/always_on.ex @ f0d966d62565
+\* SOURCE: apps/fermix_core/lib/fermix_core/management/always_on.ex @ 35f7d2a17fa2
 \* SOURCE: apps/fermix_core/lib/fermix_core/management/jobs.ex#start,handle_call,start_job,running?,running_count,complete_task,task_down,finish,begin_ending,ending_done,ending_down,end_closing @ 5095f2e28157
 \* SOURCE: apps/fermix_core/lib/fermix_core/management/home_summary.ex#offered,find_action,device,restoring,restore_running?,restore_offer @ 9afc8810cd4f
 \* SOURCE: apps/fermix_core/lib/fermix_core/management/home.ex#restoring? @ 10524f88be3d
@@ -165,7 +165,7 @@ Press(c) ==
     /\ Goto(c, "queued")
     /\ UNCHANGED <<job_vars, drawn, acts, holder, hist_vars>>
 
-\* The serializer takes the act (act/2, always_on.ex:222-230, handle_call,
+\* The serializer takes the act (act/2, always_on.ex:229-237, handle_call,
 \* :236-237): one at a time.
 Take(c) ==
     /\ pc[c] = "queued"
@@ -240,7 +240,7 @@ RunCrashes(j) ==
     /\ crashed' = TRUE
     /\ UNCHANGED <<request, caller_vars, changedSeen, busySeen>>
 
-\* The ending (restore_ended/3, always_on.ex:671-695) takes the request back
+\* The ending (restore_ended/3, always_on.ex:710-734) takes the request back
 \* (request_done/1, :697-705), which tells the watch, then settles a local
 \* candidate a run stopped from outside left (home_return's RhSettle: no
 \* request here); the job still runs until the family hears the ending is
