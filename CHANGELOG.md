@@ -52,7 +52,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Call Fermix from your phone.** Fermix now takes a voice call from a
   paired phone over the phone's own encrypted connection, on GPT-Live or
   Grok, wherever Fermix runs, an Always On server included. A dropped
-  connection is not a hang-up: the call waits 20 seconds for the phone to
+  connection is not a hang-up, even one that dies without closing, such as
+  Wi-Fi turned off mid-call: the call waits 20 seconds for the phone to
   come back and picks up where it was. The phone and the Mac share the one
   call at a time, removing a phone ends its call at once along with the tasks
   it started, and a move ends a call in progress, after its review says so.

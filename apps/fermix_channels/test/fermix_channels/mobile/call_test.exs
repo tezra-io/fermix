@@ -514,6 +514,23 @@ defmodule FermixChannels.Mobile.CallTest do
       assert {after_stop["t"], after_stop["playback_id"]} == {"call_audio", "m2"}
     end
 
+    # The call found the session silent mid-stream and let it go: the session
+    # closes, so a phone whose link is in fact alive reconnects and resumes.
+    test "a session its call found silent closes 1000; another call's word is ignored", ctx do
+      {driver, client} = ready_phone!(ctx)
+      {client, _voice} = call_up!(driver, client, 2)
+      call = call_pid!(ctx)
+
+      stranger = spawn(fn -> Process.sleep(:infinity) end)
+      send(driver, {:mobile_call_silent, stranger})
+      client = Driver.client_send(driver, client, "ping", %{}, 5)
+      assert {[{%{"t" => "pong"}, <<>>}], _client} = Driver.client_receive(driver, client)
+      Process.exit(stranger, :kill)
+
+      send(driver, {:mobile_call_silent, call})
+      assert_receive {:driver_closed, ^driver, :call_link_silent, {1000, "call link silent"}, _}
+    end
+
     # A crash writes nothing of its own: the session closes the call for it.
     test "a call that exits without its close is closed ended, its media after", ctx do
       {driver, client} = ready_phone!(ctx)
@@ -540,16 +557,25 @@ defmodule FermixChannels.Mobile.CallTest do
   # The call driven alone: the test plays the phone's session (a relay that
   # hands the test whatever the call sends it) and holds the call's clock.
   describe "the media path" do
-    test "a link that stays behind 5 s ends the call link_too_slow, the session staying",
-         ctx do
-      %{call: call, voice: voice, clock: clock} = call_alone!(ctx, "openai_live")
+    # Reports keep coming, so the link is up; they free nothing, so the phone
+    # is not playing: 5 s of that ends the call, and the session stays.
+    test "a phone that keeps reporting but plays nothing for 5 s ends link_too_slow", ctx do
+      %{call: call, voice: voice, relay: relay, clock: clock} =
+        call_alone!(ctx, "openai_live", quiet_ms: 200)
 
       push_audio(voice, 6)
       assert length(audio_frames(5)) == 5
-
-      Agent.update(clock, &(&1 + 5_000))
-      push_audio(voice, 1)
       call_ref = Process.monitor(call)
+      stuck = %{type: "playback_progress", playback_id: "m1", played_ms: 0, drained: false}
+
+      # 100 ms at a time, a report and more audio each step: 4.9 s behind, and
+      # the call goes on.
+      for _step <- 1..49, do: stuck_step(call, voice, relay, clock, stuck)
+      assert :sys.get_state(call).attached != nil
+
+      # The 5 s.
+      Agent.update(clock, &(&1 + 100))
+      send(call, line_frame(relay, stuck, nil, 0))
 
       assert_receive {:voice, ^voice, :call_stop}
       assert_receive {:from_call, :control, %{"t" => "call_line", "bytes" => why}}
@@ -561,6 +587,79 @@ defmodule FermixChannels.Mobile.CallTest do
                       %{"t" => "call_close", "call_id" => @call, "reason" => "link_too_slow"}}
 
       assert_receive {:DOWN, ^call_ref, :process, ^call, :normal}
+      refute_received {:call_silent, _call}
+    end
+
+    # A link that dies without closing (Wi-Fi off under a relay stream) leaves
+    # the session open and silent: nothing reports the audio the phone holds.
+    test "a session that goes quiet mid-stream on Live detaches; a resume carries on", ctx do
+      %{call: call, voice: voice, clock: clock} = call_alone!(ctx, "openai_live", quiet_ms: 200)
+      trace = "voice_live:#{System.unique_integer([:positive])}"
+      TelemetryCapture.attach([[:fermix, :voice_live, :phone_detached]], session_id: trace)
+      ready = %{type: "call_ready", engine: "openai_live", call_id: trace, call_uuid: "u-2"}
+      send(voice, {:push, Map.put(ready, :conversation, "chat")})
+      assert_receive {:from_call, :control, %{"t" => "call_line"}}
+
+      push_audio(voice, 5)
+      assert length(audio_frames(5)) == 5
+
+      # Quiet for less than the bound: still attached.
+      Agent.update(clock, &(&1 + 199))
+      push_audio(voice, 1)
+      _ = :sys.get_state(call)
+      refute_received {:call_silent, _call}
+      assert :sys.get_state(call).attached != nil
+
+      Agent.update(clock, &(&1 + 1))
+      assert_receive {:call_silent, ^call}
+      assert_receive {:telemetry, [:fermix, :voice_live, :phone_detached], %{}, detached}
+      assert detached.endpoint == "phone:#{@phone_id}"
+      await(call, &(&1.attached == nil and &1.window != nil))
+
+      # The silent session is no longer the call's: nothing more is written to it.
+      push_audio(voice, 1)
+      _ = :sys.get_state(call)
+      refute_received {:from_call, :audio, _frame}
+
+      test = self()
+      relay = spawn_link(fn -> relay(test) end)
+      :ok = Call.open(@phone_id, relay, @call, true, calls: ctx.calls)
+      assert_receive {:from_call, :control, %{"t" => "call_attached", "resumed" => true}}
+
+      push_audio(voice, 3)
+      assert [%{"playback_id" => "m1"}, _second, _third] = audio_frames(3)
+    end
+
+    # Under Grok's 2 s unreported-audio stall, so the reply is cut where it was
+    # heard and the call waits for the phone, rather than Grok ending it.
+    test "a Grok session gone quiet mid-reply detaches, its reply interrupted", ctx do
+      %{call: call, voice: voice, clock: clock} = call_alone!(ctx, "xai_realtime", quiet_ms: 200)
+      send(voice, {:push, %{type: "audio_delta", audio: grok_audio(2), playback_id: "p1"}})
+      assert length(audio_frames(2)) == 2
+
+      Agent.update(clock, &(&1 + 200))
+      assert_receive {:call_silent, ^call}
+      assert_receive {:voice, ^voice, {:interrupt, nil}}
+      assert Process.alive?(call)
+    end
+
+    # Listening, or muted, a phone has nothing to report: no watch, however long.
+    test "a quiet session with no audio outstanding is not watched", ctx do
+      %{call: call, voice: voice, relay: relay, clock: clock} =
+        call_alone!(ctx, "openai_live", quiet_ms: 200)
+
+      assert :sys.get_state(call).link_watch == nil
+      push_audio(voice, 1)
+      assert [_frame] = audio_frames(1)
+      assert :sys.get_state(call).link_watch != nil
+
+      drained = %{type: "playback_progress", playback_id: "m1", played_ms: 100, drained: true}
+      send(call, line_frame(relay, drained, nil, 0))
+      assert :sys.get_state(call).link_watch == nil
+
+      Agent.update(clock, &(&1 + 10_000))
+      assert :sys.get_state(call).attached != nil
+      refute_received {:call_silent, _call}
     end
 
     test "revocation says why ahead of every frame its ending makes", ctx do
@@ -794,16 +893,19 @@ defmodule FermixChannels.Mobile.CallTest do
   # -- helpers ------------------------------------------------------------------
 
   # A call up with the test as its phone's session, behind a relay process.
-  defp call_alone!(ctx, engine) do
+  defp call_alone!(ctx, engine, overrides \\ []) do
     test = self()
     {:ok, clock} = Agent.start_link(fn -> 1_000_000 end)
     relay = spawn_link(fn -> relay(test) end)
     model = if engine == "xai_realtime", do: "grok-voice-3.0", else: "gpt-live-1"
 
     opts =
-      call_options(%{ctx | engine: engine},
-        clock: fn -> Agent.get(clock, & &1) end,
-        config: fn -> Config.normalize(enabled: true, engine: engine, model: model) end
+      call_options(
+        %{ctx | engine: engine},
+        [
+          clock: fn -> Agent.get(clock, & &1) end,
+          config: fn -> Config.normalize(enabled: true, engine: engine, model: model) end
+        ] ++ overrides
       )
 
     call_opts = [calls: ctx.calls, call_supervisor: ctx.call_supervisor, call_options: opts]
@@ -822,6 +924,7 @@ defmodule FermixChannels.Mobile.CallTest do
   defp relay(test) do
     receive do
       {:mobile_call, _call, class, event} -> send(test, {:from_call, class, event})
+      {:mobile_call_silent, call} -> send(test, {:call_silent, call})
     end
 
     relay(test)
@@ -841,6 +944,17 @@ defmodule FermixChannels.Mobile.CallTest do
   end
 
   defp grok_audio(frames), do: Base.encode64(:binary.copy(@pcm, frames))
+
+  # 100 ms later, the same report again and 100 ms more audio, both applied
+  # (the voice session has passed the audio on, and the call has taken it): the
+  # newest frame waiting is this step's.
+  defp stuck_step(call, voice, relay, clock, stuck) do
+    now = Agent.get_and_update(clock, &{&1 + 100, &1 + 100})
+    send(call, line_frame(relay, stuck, nil, 0))
+    push_audio(voice, 1)
+    _ = :sys.get_state(voice)
+    assert {:value, {^now, _id, _pcm}} = :queue.peek_r(:sys.get_state(call).audio.queue)
+  end
 
   defp call_audio(playback_id),
     do: %{"t" => "call_audio", "call_id" => @call, "playback_id" => playback_id, "bytes" => @pcm}

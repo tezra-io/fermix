@@ -65,7 +65,9 @@ defmodule FermixChannels.Mobile.Session do
   attached to this session (from its `call_attached` until its `call_close`, or
   the call's end), the media this primary pushes to the phone waits, bounded,
   and goes after the call; text still flows. A call that ends without its
-  `call_close` (it crashed) is closed `ended` here. A phone's `hello_ack` says
+  `call_close` (it crashed) is closed `ended` here. A session its call found
+  silent mid-stream (`{:mobile_call_silent, call}`) closes `1000`, so a phone
+  whose link is alive reconnects and resumes. A phone's `hello_ack` says
   whether this primary serves calls (`caps.call`).
   """
 
@@ -150,9 +152,10 @@ defmodule FermixChannels.Mobile.Session do
 
   @typedoc """
   How the carrier closes: a close code and its reason text, the same pair a
-  WebSocket close frame carries. `1000` the session's lifetime ran out, `1002` a
-  protocol error or a stale primary, `1008` the handshake deadline, `1009` a
-  message over 65,535 bytes, `1011` a desktop's peer failed or did not start,
+  WebSocket close frame carries. `1000` the session's lifetime ran out, or its
+  call found it silent, `1002` a protocol error or a stale primary, `1008` the
+  handshake deadline, `1009` a message over 65,535 bytes, `1011` a desktop's
+  peer failed or did not start,
   `4001` replaced by a newer connection, `4003` revoked (live, or a key with
   no row at the handshake), refused pairing or a mismatched device.
   """
@@ -401,6 +404,15 @@ defmodule FermixChannels.Mobile.Session do
 
   def handle_info({:DOWN, ref, :process, _call, _reason}, %{call_hold: %{ref: ref}} = state),
     do: call_gone(state)
+
+  # The call this session carries heard nothing from it mid-stream and let it
+  # go (`Mobile.Call`): the link died without closing, or a phone that is in
+  # fact there reconnects and resumes. Another call's word is not this one's.
+  def handle_info({:mobile_call_silent, call}, %{call_hold: %{call: call}} = state)
+      when is_pid(call),
+      do: {:stop, :call_link_silent, {1000, "call link silent"}, state}
+
+  def handle_info({:mobile_call_silent, call}, state) when is_pid(call), do: {:ok, state}
 
   def handle_info(
         {:mobile_handshake_deadline, token},

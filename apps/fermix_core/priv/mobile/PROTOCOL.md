@@ -999,7 +999,12 @@ while this phone's call runs is answered the same way, `held_by` naming
 `phone:<device_id>`.
 
 **Reconnects.** A session that closes, for any reason (its one-hour lifetime
-and `4001` included), leaves the call held for 20 s. The phone's next session
+and `4001` included), leaves the call held for 20 s. So does one that goes
+silent mid-call: while the phone holds audio it reports on, no call frame
+from its session for 1.5 s is a link that died without closing, and the
+primary lets that session go as if it had closed, then closes it
+(`1000`, `call link silent`, not a protocol error), so a phone whose link
+is in fact alive reconnects at once and resumes. The phone's next session
 sends `call_open{resume: true}` with the same `call_id`, and is answered
 `call_attached{resumed: true}`, then the lines that came while it was away
 (at most 512, the oldest dropped past that), then the call's audio. Past the
@@ -1324,7 +1329,7 @@ the device has since replaced.
 
 | Code | Why | Client |
 |---|---|---|
-| `1000` | a phone's one-hour session lifetime ran out (`Noise session lifetime reached`; a desktop's session has none), the daemon is shutting down, or an enrollment was accepted | reconnect with a new handshake (a desktop at once, showing no outage, once in a row: then with the backoff); a candidate does not |
+| `1000` | a phone's one-hour session lifetime ran out (`Noise session lifetime reached`; a desktop's session has none), the daemon is shutting down, an enrollment was accepted, or a phone's session went silent mid-call: no call frame for 1.5 s while the phone holds the call's audio (`call link silent`) | reconnect with a new handshake (a desktop at once, showing no outage, once in a row: then with the backoff); a candidate does not |
 | `1002` | a protocol error (`mobile protocol error`, `invalid mobile prelude`, `unsupported mobile protocol version`, `stale primary`), no inbound frame for 150 s, or a malformed WebSocket frame | reconnect; after `unsupported_protocol_version`, update first; after `stale_primary`, tell the owner and keep the highest epoch it has seen |
 | `1003` | a text message | send binary messages |
 | `1008` | the handshake deadline (`mobile handshake deadline`); on the remote route, also a stream still in its handshake closed to make room for a newer one | reconnect |

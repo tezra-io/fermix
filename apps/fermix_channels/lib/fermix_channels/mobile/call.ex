@@ -17,8 +17,12 @@ defmodule FermixChannels.Mobile.Call do
   ## The call belongs to the device, not to a session
 
   One mobile session is attached at a time, and frames from any other are
-  dropped. A closed session, whatever its close code, detaches the call: the
-  primary keeps it for a 20 s window from the detach, and the phone's next
+  dropped. A closed session, whatever its close code, detaches the call, and
+  so does one gone silent: while the phone holds audio it reports on (every
+  100 ms), 1.5 s with no call frame from its session is a link that died
+  without closing, which the call lets go as a `:DOWN` would and tells to
+  close (`{:mobile_call_silent, call}`). The primary keeps the call for a
+  20 s window from the detach, and the phone's next
   session re-attaches it with `call_open{resume: true}`. `call_attached` tells
   it the call's state as held here (muted, the last control applied), lines
   that came while it was away follow, and the phone re-sends any control after
@@ -90,6 +94,12 @@ defmodule FermixChannels.Mobile.Call do
   @calls FermixChannels.Mobile.Calls
   @call_supervisor FermixChannels.Mobile.CallSupervisor
   @window_ms 20_000
+  # A phone that holds unplayed audio reports on it every 100 ms, and its
+  # microphone streams too: 1.5 s with no call frame at all is a link that
+  # died without closing. Under Grok's 2 s unreported-audio stall, so a Grok
+  # call is detached (and its unheard reply interrupted) before the session
+  # gives up on it, and far under the 5 s that ends a link too slow.
+  @quiet_ms 1_500
   @deadline_ms 20_000
   @max_held_lines 512
   @max_emitted 256
@@ -283,10 +293,13 @@ defmodule FermixChannels.Mobile.Call do
        delegations: %{},
        trace: nil,
        detached_at: nil,
+       heard_at: nil,
+       link_watch: nil,
        clock: Keyword.get(opts, :clock, &monotonic_ms/0),
        config_source: Keyword.get(opts, :config, &Config.current/0),
        ready: Keyword.get(opts, :ready, &readiness(&1, voice_running?(SessionGuard))),
        window_ms: Keyword.get(opts, :window_ms, @window_ms),
+       quiet_ms: Keyword.get(opts, :quiet_ms, @quiet_ms),
        deadline_ms: Keyword.get(opts, :deadline_ms, @deadline_ms),
        task_supervisor: Keyword.get(opts, :task_supervisor, FermixCore.Realtime.TaskSupervisor),
        client_opts: Keyword.take(opts, @client_opts)
@@ -302,7 +315,7 @@ defmodule FermixChannels.Mobile.Call do
 
   def handle_info({:call_frame, session, type, %{"call_id" => id} = header, bytes, at}, state) do
     if attached_session?(state, session) and id == state.call_id,
-      do: phone_frame(type, header, bytes, at, state),
+      do: phone_frame(type, header, bytes, at, %{state | heard_at: state.clock.()}),
       else: {:noreply, state}
   end
 
@@ -312,6 +325,11 @@ defmodule FermixChannels.Mobile.Call do
 
   def handle_info({:window_expired, token}, %{window: %{token: token}} = state),
     do: finish(state, "lost")
+
+  def handle_info({:link_quiet, token}, %{link_watch: %{token: token}} = state),
+    do: {:noreply, link_quiet(%{state | link_watch: nil})}
+
+  def handle_info({:link_quiet, _stale}, state), do: {:noreply, state}
 
   def handle_info({:mobile_revoked, _device_id}, state), do: revoke(state)
 
@@ -367,7 +385,7 @@ defmodule FermixChannels.Mobile.Call do
 
   defp attach(state, session, resumed?) do
     :ok = report_resume(state)
-    state = state |> release_attached() |> cancel_window()
+    state = state |> release_attached() |> cancel_window() |> cancel_link_watch()
     ref = Process.monitor(session)
 
     # What was in flight when the link went is never reported played.
@@ -412,7 +430,7 @@ defmodule FermixChannels.Mobile.Call do
     :ok = trace_gap(state, &LiveTelemetry.phone_detached/1)
 
     state = %{
-      state
+      cancel_link_watch(state)
       | attached: nil,
         window: %{token: token, timer: timer},
         detached_at: state.clock.()
@@ -420,6 +438,58 @@ defmodule FermixChannels.Mobile.Call do
 
     if CallAudio.unheard?(state.audio), do: interrupt_unheard(state), else: state
   end
+
+  # A session that went quiet while the phone held audio to report on is a
+  # link that died without closing (a relay stream left half open): the call
+  # lets it go as a `:DOWN` would, and tells it to close, so a phone whose
+  # link is in fact alive reconnects and resumes rather than talking on to a
+  # call that no longer hears it.
+  defp quiet_detach(%{attached: %{session: session}} = state, quiet_ms) do
+    Logger.info(
+      "voice: phone #{state.device_id}'s session was silent #{quiet_ms} ms mid-call; " <>
+        "its call waits to resume"
+    )
+
+    send(session, {:mobile_call_silent, self()})
+    state |> release_attached() |> detach()
+  end
+
+  # Watched only while the phone holds audio it reports on: listening or
+  # muted, it has nothing to say.
+  defp watch_link(%{attached: %{}, link_watch: nil} = state) do
+    if CallAudio.outstanding_ms(state.audio) > 0,
+      do: arm_link_watch(%{state | heard_at: state.clock.()}, state.quiet_ms),
+      else: state
+  end
+
+  defp watch_link(%{link_watch: %{}} = state) do
+    if CallAudio.outstanding_ms(state.audio) > 0, do: state, else: cancel_link_watch(state)
+  end
+
+  defp watch_link(state), do: state
+
+  defp link_quiet(state) do
+    quiet = state.clock.() - state.heard_at
+
+    cond do
+      CallAudio.outstanding_ms(state.audio) == 0 -> state
+      quiet >= state.quiet_ms -> quiet_detach(state, quiet)
+      true -> arm_link_watch(state, state.quiet_ms - quiet)
+    end
+  end
+
+  defp arm_link_watch(state, after_ms) do
+    token = make_ref()
+    timer = Process.send_after(self(), {:link_quiet, token}, after_ms)
+    %{state | link_watch: %{token: token, timer: timer}}
+  end
+
+  defp cancel_link_watch(%{link_watch: %{timer: timer}} = state) do
+    _left = Process.cancel_timer(timer)
+    %{state | link_watch: nil}
+  end
+
+  defp cancel_link_watch(state), do: state
 
   defp report_resume(%{detached_at: at} = state) when is_integer(at) do
     gap_ms = max(state.clock.() - at, 0)
@@ -689,7 +759,7 @@ defmodule FermixChannels.Mobile.Call do
   defp pump(state) do
     now = state.clock.()
     {audio, frames, dropped} = CallAudio.take(state.audio, now, state.attached != nil)
-    state = %{state | audio: audio}
+    state = watch_link(%{state | audio: audio})
     Enum.each(frames, &send_audio(state, &1))
 
     cond do
