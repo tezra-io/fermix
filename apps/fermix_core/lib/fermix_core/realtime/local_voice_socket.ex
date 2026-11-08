@@ -23,7 +23,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
 
   require Logger
 
-  @accept_idle_ms 50
+  @accept_retry_ms 1_000
   @max_wire_line_bytes 65_536
   @default_max_clients 4
   # What a connection's `CallClient` is built from besides the handshake. The
@@ -54,7 +54,6 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
          :ok <- clear_stale_socket(socket_path),
          {:ok, listen_socket} <- listen(socket_path) do
       File.chmod!(socket_path, 0o600)
-      Process.send_after(self(), :accept, 0)
       task_supervisor = Keyword.get(opts, :task_supervisor, FermixCore.TaskSupervisor)
 
       {:ok,
@@ -73,7 +72,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
          # handler via `controlling_process`, so the fd closes with the handler on
          # every exit, and its session is `SessionGuard`'s to tear down.
          clients: %{}
-       }}
+       }, {:continue, :accept}}
     else
       {:error, reason} -> {:stop, reason}
     end
@@ -84,27 +83,24 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
     {:reply, map_size(state.clients), state}
   end
 
+  # Connections are accepted by a linked process of the socket's own, so the
+  # socket answers a call (`active_clients/1`, which Health reads) the moment it
+  # comes, never once an accept's wait ends. The clients and their cap are this
+  # server's state, so the acceptor hands each connection here to be admitted.
   @impl true
-  def handle_info(:accept, state) do
-    case :gen_tcp.accept(state.listen_socket, @accept_idle_ms) do
-      {:ok, conn} ->
-        state = serve_admitted(conn, state)
-        send(self(), :accept)
-        {:noreply, state}
-
-      {:error, :timeout} ->
-        send(self(), :accept)
-        {:noreply, state}
-
-      {:error, :closed} ->
-        {:stop, :normal, state}
-
-      {:error, reason} ->
-        Logger.warning("Realtime voice socket accept error: #{inspect(reason)}")
-        Process.send_after(self(), :accept, 1_000)
-        {:noreply, state}
-    end
+  def handle_continue(:accept, state) do
+    server = self()
+    acceptor = spawn_link(fn -> accept_loop(state.listen_socket, server) end)
+    {:noreply, Map.put(state, :acceptor, acceptor)}
   end
+
+  @impl true
+  def handle_info({:accepted, conn}, state), do: {:noreply, serve_admitted(conn, state)}
+
+  # The acceptor ends once the listening socket closed, or by a crash; the
+  # socket ends with it.
+  def handle_info({:EXIT, acceptor, reason}, %{acceptor: acceptor} = state),
+    do: {:stop, reason, state}
 
   # A handler exited (clean stop, crash, or kill). Its owned socket is already
   # closed by the runtime and its session is the guard's; here it only stops
@@ -200,6 +196,37 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
       :ok -> :ok
       {:error, :enoent} -> :ok
       {:error, reason} -> {:error, {:stale_socket_unlink_failed, reason, socket_path}}
+    end
+  end
+
+  defp accept_loop(listen_socket, server) do
+    case :gen_tcp.accept(listen_socket) do
+      {:ok, conn} ->
+        :ok = hand_to_server(conn, server)
+        accept_loop(listen_socket, server)
+
+      {:error, :closed} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Realtime voice socket accept error: #{inspect(reason)}")
+        Process.sleep(@accept_retry_ms)
+        accept_loop(listen_socket, server)
+    end
+  end
+
+  # The accepted socket is passive, so nothing is lost in the handover; a
+  # server that is gone takes the acceptor with it through the link.
+  defp hand_to_server(conn, server) do
+    case :gen_tcp.controlling_process(conn, server) do
+      :ok ->
+        send(server, {:accepted, conn})
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Realtime voice socket could not take a connection: #{inspect(reason)}")
+        _ = :gen_tcp.close(conn)
+        :ok
     end
   end
 

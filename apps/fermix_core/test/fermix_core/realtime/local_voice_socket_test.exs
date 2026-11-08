@@ -11,6 +11,12 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
   alias FermixCore.SocketPath
   alias FermixTestSupport.CallLeases
 
+  # Once it has taken a connection, a server that waits in a 50 ms accept takes
+  # each call only when that accept times out, so these calls in a row would
+  # need over 5 s; answered at once they take a few milliseconds.
+  @calls_in_a_row 101
+  @calls_bound_ms 2_500
+
   # A provider socket that takes `session.start` and never answers: enough for a
   # real Live session to hold its call open, and to claim it.
   defmodule QuietLiveClient do
@@ -187,6 +193,24 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     end)
 
     %{socket: socket, socket_path: socket_path}
+  end
+
+  # The `server_hello` is the socket's accept loop at work.
+  test "answers a call at once while it waits for a connection", %{
+    socket: socket,
+    socket_path: socket_path
+  } do
+    {:ok, conn} = connect(socket_path)
+    :ok = :gen_tcp.send(conn, ~s({"type":"client_hello","protocol_version":1}\n))
+    assert {:ok, line} = recv_line(conn)
+    assert %{"type" => "server_hello"} = Jason.decode!(String.trim(line))
+    started = System.monotonic_time(:millisecond)
+
+    for _call <- 1..@calls_in_a_row,
+        do: assert(LocalVoiceSocket.active_clients(socket) == {:ok, 1})
+
+    took_ms = System.monotonic_time(:millisecond) - started
+    assert took_ms < @calls_bound_ms, "#{@calls_in_a_row} calls took #{took_ms} ms"
   end
 
   # M38 §4.4.6, the same pre-flight the control socket runs: an over-long address

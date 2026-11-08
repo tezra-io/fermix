@@ -296,7 +296,7 @@ as well. All still hold:
 - `call_start` and its failure path. It builds the `session.update` before it
   opens a socket, so a failed build opens none. A failed `call_start` stops
   the voice connection and the session with it (`call_client.ex:275-281`,
-  then `local_voice_socket.ex:367-372`), and a socket it closed after a
+  then `local_voice_socket.ex:394-399`), and a socket it closed after a
   failed send never became `openai_pid`. OpenAI refusing the first socket's
   `session.update` takes the clause a reconnect's refusal takes
   (`session_server.ex:438`, modelled); `session_server_test.exs` covers it.
