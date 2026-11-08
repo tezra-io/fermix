@@ -209,7 +209,9 @@ make_shims() {
 }
 
 # apt-get and systemctl log their arguments; a call whose arguments are the
-# line in state/<tool>-fails exits 1, as a unit that does not start does.
+# line in state/<tool>-fails exits 1, as a unit that does not start does. An
+# apt-get install says what dpkg says for each package it names, which -qq
+# does not quiet.
 make_stand_ins() {
   printf 'Invented bytes standing in for a signing key; gpg here is a stand-in.\n' >"$T/served-key.gpg"
   for tool in apt-get systemctl; do
@@ -223,12 +225,25 @@ if [ -f '$STATE/$tool-fails' ] && [ "\$*" = "\$(/bin/cat '$STATE/$tool-fails')" 
   exit 1
 fi
 EOF
+      if [ "$tool" = apt-get ]; then stand_in_dpkg_progress; fi
     } | write_exe "$BIN/$tool"
   done
   { echo '#!/bin/sh'; record_lines; stand_in_curl; } | write_exe "$BIN/curl"
   { echo '#!/bin/sh'; record_lines; stand_in_id; } | write_exe "$BIN/id"
   { echo '#!/bin/sh'; record_lines; stand_in_gpg; } | write_exe "$BIN/gpg"
   { echo '#!/bin/sh'; record_lines; stand_in_tailscale; } | write_exe "$BIN/tailscale"
+}
+
+stand_in_dpkg_progress() {
+  cat <<'EOF'
+case " $* " in *" install "*) ;; *) exit 0 ;; esac
+for package in "$@"; do
+  case "$package" in -* | install) continue ;; esac
+  printf 'Selecting previously unselected package %s.\n' "$package"
+  printf 'Unpacking %s (1.0) ...\n' "$package"
+  printf 'Setting up %s (1.0) ...\n' "$package"
+done
+EOF
 }
 
 # curl: pkgs.tailscale.com's keyring for each supported release answers the
@@ -493,7 +508,7 @@ apt-get -qq -y install --no-install-recommends ca-certificates curl gpg
 curl GET https://pkgs.tailscale.com/stable/$1.noarmor.gpg
 apt-get -qq update
 apt-get -qq -y install --no-install-recommends tailscale
-systemctl enable --now tailscaled.service
+systemctl --quiet enable --now tailscaled.service
 tailscale up --auth-key=file:WORK/tailscale.authkey --timeout=2m
 EOF
 }
@@ -540,6 +555,24 @@ key_from_the_environment() {
     >"$T/source.expected"
   check "cmp -s '$SOURCE' '$T/source.expected'" "the apt source names Tailscale's repository and only that keyring"
   check "grep -qxF '==> This server is on your tailnet at 100.88.12.34' '$OUT'" "it says the server's tailnet address"
+  check "! grep -q '^Selecting previously unselected package \|^Unpacking \|^Setting up ' '$OUT' '$ERR'" \
+    "apt-get's and dpkg's progress for Tailscale's packages stays out of its output"
+}
+
+# apt-get's own words are kept for the install that fails, and only for it.
+apt_get_fails() {
+  fresh_host
+  printf -- '-qq -y install --no-install-recommends tailscale\n' >"$STATE/apt-get-fails"
+  run TS_AUTHKEY="$KEY" FERMIX_ENROLL_CODE="$CODE" dash "$COPY" --tailscale
+  printf '%s\n' 'apt-get stand-in: (test) -qq -y install --no-install-recommends tailscale failed' \
+    'fermix always-on: apt-get could not install tailscale.' >"$T/stderr.expected"
+  check "[ $STATUS -eq 1 ] && cmp -s '$ERR' '$T/stderr.expected'" \
+    "a package apt-get cannot install ends the first boot with apt-get's own message, then its sentence (exit $STATUS)"
+  cmp -s "$ERR" "$T/stderr.expected" || sed 's/^/    stderr: /' "$ERR"
+  check "! grep -q '^Selecting previously unselected package \|^Unpacking \|^Setting up ' '$OUT' '$ERR'" \
+    "and the progress of the packages before it stays out"
+  check "! grep -q '^tailscale up \|^fermix home enroll' '$LOG'" "before tailscale up and before enrolling"
+  key_left_nowhere "an apt-get that fails"
 }
 
 key_at_the_terminal() {
@@ -640,7 +673,7 @@ tailscale_down() {
 
 tailscaled_does_not_start() {
   fresh_host
-  printf 'enable --now tailscaled.service\n' >"$STATE/systemctl-fails"
+  printf -- '--quiet enable --now tailscaled.service\n' >"$STATE/systemctl-fails"
   run TS_AUTHKEY="$KEY" FERMIX_ENROLL_CODE="$CODE" dash "$COPY" --tailscale
   check "[ $STATUS -eq 1 ] && [ \"\$(tail -n 1 '$ERR')\" = 'fermix always-on: systemctl could not start tailscaled.service, so this server cannot join your tailnet; its message above says why.' ]" \
     "a tailscaled that does not start stops the first boot with one sentence (exit $STATUS)"
@@ -705,7 +738,7 @@ restore_host() {
 # -- a host whose Fermix home exists -------------------------------------------
 
 HOME_DIR_MOVED=$T/home/fermix/.fermix
-REMOVE="to set this server up again, which deletes that home, run sudo -H -u fermix env XDG_RUNTIME_DIR=/run/user/1001 /usr/bin/fermix service uninstall, then sudo rm -rf $HOME_DIR_MOVED, then this command again."
+REMOVE="to set this server up again, which deletes that home, run sudo -H -u fermix env -C / XDG_RUNTIME_DIR=/run/user/1001 /usr/bin/fermix service uninstall, then sudo rm -rf $HOME_DIR_MOVED, then this command again."
 
 # A host with a Fermix home, whose fermix home status --json answers the role
 # $1, the candidate's phase $2 (no move when empty) and the moved marker's
@@ -898,7 +931,7 @@ other_homes() {
 
   home_refuses always_on_unavailable "Always On is not in this release of Fermix yet."
   run FERMIX_ENROLL_CODE="$CODE" dash "$COPY"
-  stopped_with "fermix home status could not read the Fermix home $HOME_DIR_MOVED on this server (Always On is not in this release of Fermix yet): run sudo -H -u fermix /usr/bin/fermix home status to see why." \
+  stopped_with "fermix home status could not read the Fermix home $HOME_DIR_MOVED on this server (Always On is not in this release of Fermix yet): run sudo -H -u fermix env -C / /usr/bin/fermix home status to see why." \
     "a home fermix home status cannot read is refused, naming it, with the engine's own sentence and no command that removes it"
   refused_after_reading_the_home "a home the engine refuses to read"
 }
@@ -917,6 +950,7 @@ already_on_a_tailnet
 tailscale_down
 not_tailscales_key
 tailscaled_does_not_start
+apt_get_fails
 up_fails
 each_release
 restore_host

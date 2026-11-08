@@ -598,8 +598,13 @@ cat '{state}/installed-version'
         self._fake("dpkg", FAKE_DPKG)
         self._fake("id", "#!/bin/sh\necho 0\n")
         self._fake("systemctl", f"#!/bin/sh\nprintf 'systemctl %s\\n' \"$*\" >>'{log}'\n")
-        # runuser -u ACCOUNT -- COMMAND...: the command, as that account.
-        self._fake("runuser", '#!/bin/sh\nshift 3\nexec "$@"\n')
+        # setpriv --reuid=ACCOUNT --regid=ACCOUNT --init-groups -- COMMAND...:
+        # the command, as that account, with its groups and no PAM session.
+        # Any other shape is refused, so a call that drops the account's
+        # groups or opens a session cannot pass unseen.
+        self._fake("setpriv", '#!/bin/sh\n'
+                   '[ "$1 $2 $3 $4" = "--reuid=fermix --regid=fermix --init-groups --" ] || exit 2\n'
+                   'shift 4\nexec "$@"\n')
         self.fermix = self.base / "fermix"
         self._write(self.fermix, f"""#!/bin/sh
 printf 'fermix %s\\n' "$*" >>'{log}'

@@ -345,16 +345,28 @@ publish() {
 
 apt_install() {
   if [ "$APT_UPDATED" -eq 0 ]; then
-    apt-get -qq update </dev/null || fail "apt-get update failed. Check this host's package sources and network."
+    apt_get update || fail "apt-get update failed. Check this host's package sources and network."
     APT_UPDATED=1
   fi
-  apt-get -qq -y install --no-install-recommends "$@" </dev/null ||
-    fail "apt-get could not install $*."
+  apt_get -y install --no-install-recommends "$@" || fail "apt-get could not install $*."
 }
 
+# apt-get -qq with its output in the work directory: dpkg's lines for each
+# package (which -qq does not quiet; Chromium alone brings about 150) stay
+# out of the run's own, and a call that fails puts all it said on stderr, so
+# the sentence after it still has its reason above it.
+apt_get() {
+  if apt-get -qq "$@" </dev/null >"$WORK/apt-get.out" 2>&1; then return 0; fi
+  cat "$WORK/apt-get.out" >&2
+  return 1
+}
+
+# A fermix verb as the engine account: its uid, gid and groups through
+# setpriv, which opens no PAM session (the one runuser opens logs two lines
+# for every call), and a clean environment of exactly these names.
 as_engine() {
-  runuser -u "$ENGINE_USER" -- env -i HOME="$ACCOUNT_HOME" USER="$ENGINE_USER" \
-    LOGNAME="$ENGINE_USER" SHELL=/usr/sbin/nologin PATH=/usr/bin:/bin LANG=C.UTF-8 \
+  setpriv --reuid="$ENGINE_USER" --regid="$ENGINE_USER" --init-groups -- env -i HOME="$ACCOUNT_HOME" \
+    USER="$ENGINE_USER" LOGNAME="$ENGINE_USER" SHELL=/usr/sbin/nologin PATH=/usr/bin:/bin LANG=C.UTF-8 \
     XDG_RUNTIME_DIR="/run/user/$ENGINE_UID" FERMIX_HOME="$FERMIX_HOME_DIR" \
     "$FERMIX_BIN" "$@" </dev/null
 }
@@ -414,7 +426,7 @@ home_unreadable() {
   said=$(json_string "$(json_object "$HOME_JSON" error)" sentence)
   [ -n "$said" ] || fail "fermix home status stopped, so this script cannot read what the Fermix home $FERMIX_HOME_DIR is; its message above says why."
   CODE=""
-  fail "fermix home status could not read the Fermix home $FERMIX_HOME_DIR on this server (${said%.}): run sudo -H -u $ENGINE_USER $FERMIX_BIN home status to see why."
+  fail "fermix home status could not read the Fermix home $FERMIX_HOME_DIR on this server (${said%.}): run sudo -H -u $ENGINE_USER env -C / $FERMIX_BIN home status to see why."
 }
 
 # A home that runs is started as it is, unless a code came with this run;
@@ -440,9 +452,11 @@ refuse_home() {
 }
 
 # What a home is ($1), then the commands that remove it, which the owner
-# runs.
+# runs. Each command the owner is given runs fermix from / (env -C /): the
+# engine account cannot open the directory an owner logs in to (0700 on
+# Debian 13), and fermix refuses to start in one it cannot open.
 removal_sentence() {
-  printf '%s\n' "$1: to set this server up again, which deletes that home, run sudo -H -u $ENGINE_USER env XDG_RUNTIME_DIR=/run/user/$ENGINE_UID $FERMIX_BIN service uninstall, then sudo rm -rf $FERMIX_HOME_DIR, then this command again."
+  printf '%s\n' "$1: to set this server up again, which deletes that home, run sudo -H -u $ENGINE_USER env -C / XDG_RUNTIME_DIR=/run/user/$ENGINE_UID $FERMIX_BIN service uninstall, then sudo rm -rf $FERMIX_HOME_DIR, then this command again."
 }
 
 # 1. The code goes to tmpfs, root's alone until the engine account exists.
@@ -513,7 +527,7 @@ ExecReload=/usr/sbin/nft -f /etc/fermix/metadata-block.nft
 WantedBy=sysinit.target
 EOF
   systemctl daemon-reload
-  systemctl enable fermix-metadata-block.service
+  systemctl --quiet enable fermix-metadata-block.service
   systemctl restart fermix-metadata-block.service
   nft list table inet fermix_metadata >/dev/null 2>&1 ||
     fail "The metadata block did not load: nft lists no table inet fermix_metadata."
@@ -706,12 +720,14 @@ update_fermix() {
     fail "The Fermix installer stopped, so the engine keeps running; its message above says why."
 }
 
-# A fermix verb as the engine account, with the clean environment first boot
-# gives it.
+# A fermix verb as the engine account, as first boot runs one: its uid, gid
+# and groups through setpriv, which opens no PAM session (the one runuser
+# opens would log two lines for every call, every five minutes), and the
+# clean environment first boot gives it.
 as_engine() {
   uid=$(id -u "$ENGINE_USER")
-  runuser -u "$ENGINE_USER" -- env -i HOME="$ACCOUNT_HOME" USER="$ENGINE_USER" \
-    LOGNAME="$ENGINE_USER" SHELL=/usr/sbin/nologin PATH=/usr/bin:/bin LANG=C.UTF-8 \
+  setpriv --reuid="$ENGINE_USER" --regid="$ENGINE_USER" --init-groups -- env -i HOME="$ACCOUNT_HOME" \
+    USER="$ENGINE_USER" LOGNAME="$ENGINE_USER" SHELL=/usr/sbin/nologin PATH=/usr/bin:/bin LANG=C.UTF-8 \
     XDG_RUNTIME_DIR="/run/user/$uid" FERMIX_HOME="$FERMIX_HOME_DIR" \
     "$FERMIX_BIN" "$@" </dev/null 9>&-
 }
@@ -982,6 +998,9 @@ Persistent=true
 [Install]
 WantedBy=timers.target
 EOF
+  # The follow run's own lines reach the journal at notice, and nothing below
+  # notice does: systemd's own start and finish lines for each run, at info,
+  # stay out, and a run that fails keeps systemd's lines that say so.
   write_file "$UNIT_DIR/fermix-follow.service" 0644 <<EOF
 [Unit]
 Description=Fermix: install the release this server's computers run, and restart Fermix when it is behind
@@ -992,6 +1011,8 @@ After=network-online.target
 Type=oneshot
 ExecStart=$UPDATE_SCRIPT --follow
 TimeoutStartSec=30min
+SyslogLevel=notice
+LogLevelMax=notice
 EOF
   write_file "$UNIT_DIR/fermix-follow.timer" 0644 <<'EOF'
 [Unit]
@@ -1005,8 +1026,8 @@ OnUnitActiveSec=5min
 WantedBy=timers.target
 EOF
   systemctl daemon-reload
-  systemctl enable --now fermix-update.timer
-  systemctl enable --now fermix-follow.timer
+  systemctl --quiet enable --now fermix-update.timer
+  systemctl --quiet enable --now fermix-follow.timer
 }
 
 # 6. The engine account: no login, its own lingering service manager, and a
@@ -1148,7 +1169,7 @@ EOF
   # The new source's package lists.
   APT_UPDATED=0
   apt_install tailscale
-  systemctl enable --now tailscaled.service ||
+  systemctl --quiet enable --now tailscaled.service ||
     fail "systemctl could not start tailscaled.service, so this server cannot join your tailnet; its message above says why."
 }
 
@@ -1222,9 +1243,9 @@ EOF
   fi
   cat <<EOF
   2. Restore it; Fermix asks for your recovery passphrase without showing it:
-       sudo -H -u $ENGINE_USER env FERMIX_HOME=$RESTORE_CLI_HOME $FERMIX_BIN home import $RESTORE_FILE --into $FERMIX_HOME_DIR
+       sudo -H -u $ENGINE_USER env -C / FERMIX_HOME=$RESTORE_CLI_HOME $FERMIX_BIN home import $RESTORE_FILE --into $FERMIX_HOME_DIR
   3. Start Fermix from the restored home:
-       sudo -H -u $ENGINE_USER env XDG_RUNTIME_DIR=/run/user/$ENGINE_UID $FERMIX_BIN service install --home $FERMIX_HOME_DIR
+       sudo -H -u $ENGINE_USER env -C / XDG_RUNTIME_DIR=/run/user/$ENGINE_UID $FERMIX_BIN service install --home $FERMIX_HOME_DIR
   4. Remove the downloaded snapshot and the import's own scratch home:
        sudo rm -rf $RESTORE_FILE $RESTORE_CLI_HOME
 EOF

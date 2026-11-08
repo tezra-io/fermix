@@ -250,6 +250,12 @@ run_with_terminal() {
   mv "$OUT.clean" "$OUT"
 }
 
+# Whether a file holds a line apt-get, dpkg or systemctl says as they work,
+# which a first boot keeps out of its output.
+has_noise() {
+  grep -q '^Selecting previously unselected package \|^Preparing to unpack \|^Unpacking \|^Setting up \|^Processing triggers \|^Created symlink ' "$@"
+}
+
 expected_ruleset() {
   cat <<'EOF'
 table inet fermix_metadata {
@@ -317,6 +323,21 @@ check_code_file() {
   done
   check "[ \"\$(cat $LOG/service-runtime-dir)\" = /run/user/$ENGINE_UID ]" \
     "fermix service install reaches the engine account's own service manager"
+  engine_call_is_clean home-enroll "fermix home enroll"
+}
+
+# A fermix call, $1 its verb as the stand-in names its records, ran as the
+# engine account with no PAM session (runuser, which opens one and logs it,
+# did not start it), with the account's uid, gid and groups, and with the
+# clean environment and nothing else (the stand-in's shell adds PWD).
+engine_call_is_clean() {
+  check "[ \"\$(cat $LOG/parent-$1)\" != runuser ]" "$2 runs with no PAM session: runuser does not start it"
+  check "[ \"\$(cat $LOG/ids-$1)\" = \"\$(id -u fermix) \$(id -g fermix) \$(id -G fermix)\" ]" \
+    "$2 runs with the engine account's uid, gid and groups"
+  grep -vx PWD "$LOG/env-$1" >/tmp/env.seen || true
+  printf '%s\n' FERMIX_HOME HOME LANG LOGNAME PATH SHELL USER XDG_RUNTIME_DIR >/tmp/env.expected
+  check "cmp -s /tmp/env.seen /tmp/env.expected" "$2 has the clean environment and nothing else"
+  cmp -s /tmp/env.seen /tmp/env.expected || diff /tmp/env.expected /tmp/env.seen | sed 's/^/    /' || true
 }
 
 # The unit the package installs is what runs the engine on the server: five
@@ -356,18 +377,21 @@ check_updates() {
   for line in 'Type=oneshot' 'ExecStart=/usr/local/sbin/fermix-update' 'TimeoutStartSec=30min'; do
     check "grep -qxF '$line' $service" "the update's unit has $line"
   done
-  check "contains $LOG/calls.log 'systemctl enable --now fermix-update.timer'" "the update timer is on"
+  check "contains $LOG/calls.log 'systemctl --quiet enable --now fermix-update.timer'" "the update timer is on"
   timer=/etc/systemd/system/fermix-follow.timer
   for line in 'OnBootSec=2min' 'OnUnitActiveSec=5min' 'WantedBy=timers.target'; do
     check "grep -qxF '$line' $timer" "the follow timer has $line"
   done
   service=/etc/systemd/system/fermix-follow.service
-  for line in 'Type=oneshot' 'ExecStart=/usr/local/sbin/fermix-update --follow' 'TimeoutStartSec=30min'; do
+  # The journal holds a line only for what a follow run did: its own lines go
+  # in at notice, and systemd's start and finish lines, at info, stay out.
+  for line in 'Type=oneshot' 'ExecStart=/usr/local/sbin/fermix-update --follow' 'TimeoutStartSec=30min' \
+    'SyslogLevel=notice' 'LogLevelMax=notice'; do
     check "grep -qxF '$line' $service" "the follow run's unit has $line"
   done
   check "[ \"\$(mode_owner $timer)\" = '644 root:root' ] && [ \"\$(mode_owner $service)\" = '644 root:root' ]" \
     "the follow run's units are root's"
-  check "contains $LOG/calls.log 'systemctl enable --now fermix-follow.timer'" "the follow timer is on"
+  check "contains $LOG/calls.log 'systemctl --quiet enable --now fermix-follow.timer'" "the follow timer is on"
   update=/usr/local/sbin/fermix-update
   check "[ \"\$(mode_owner $update)\" = '755 root:root' ]" "the update script is root's"
   check "dash -n $update" "dash parses the update script"
@@ -397,7 +421,7 @@ existing_host() {
 apt-get -qq update
 apt-get -qq -y install --no-install-recommends nftables
 systemctl daemon-reload
-systemctl enable fermix-metadata-block.service
+systemctl --quiet enable fermix-metadata-block.service
 systemctl restart fermix-metadata-block.service
 fallocate -l 2G /swapfile.incoming
 mkswap /swapfile.incoming
@@ -407,8 +431,8 @@ curl GET https://fermix.ai/install
 installer --no-setup
 apt-get -qq -y install --no-install-recommends unattended-upgrades
 systemctl daemon-reload
-systemctl enable --now fermix-update.timer
-systemctl enable --now fermix-follow.timer
+systemctl --quiet enable --now fermix-update.timer
+systemctl --quiet enable --now fermix-follow.timer
 systemctl daemon-reload
 loginctl enable-linger fermix
 systemctl start user@$ENGINE_UID.service
@@ -437,6 +461,10 @@ Waiting for your
 Done. Open Always
 EOF
   check "cmp -s /tmp/steps /tmp/steps.expected" "it says each step, in order"
+  check "! has_noise $OUT" "apt-get's, dpkg's and systemctl's progress stays out of its output"
+  check "[ -z \"\$(grep -v '^==> ' $OUT | grep -v '^Enrollment code from Fermix')\" ]" \
+    "it says its own steps and nothing else"
+  grep -v '^==> ' "$OUT" | grep -v '^Enrollment code from Fermix' | sed 's/^/    /' || true
   check "[ -x /usr/bin/chromium ]" "Debian gets the distribution's Chromium"
   check "[ -z \"\$(find /run -maxdepth 1 -name 'fermix-always-on.*')\" ]" "it leaves no work directory behind"
   check_account
@@ -459,7 +487,7 @@ EOF
   check "contains $LOG/calls.log 'fermix service install --home /home/fermix/.fermix [as fermix]'" \
     "a re-run binds and starts the service again"
   check "contains $OUT 'Done. Fermix runs from the home it already had.'" "a re-run says Fermix runs from that home"
-  check "[ \"\$(tail -n 1 $OUT)\" = '==> Fermix runs on this server as your primary: to set this server up again, which deletes that home, run sudo -H -u fermix env XDG_RUNTIME_DIR=/run/user/$ENGINE_UID /usr/bin/fermix service uninstall, then sudo rm -rf /home/fermix/.fermix, then this command again.' ]" \
+  check "[ \"\$(tail -n 1 $OUT)\" = '==> Fermix runs on this server as your primary: to set this server up again, which deletes that home, run sudo -H -u fermix env -C / XDG_RUNTIME_DIR=/run/user/$ENGINE_UID /usr/bin/fermix service uninstall, then sudo rm -rf /home/fermix/.fermix, then this command again.' ]" \
     "then what the home is and the commands that remove it"
   snapshot_files /tmp/state.second
   check "cmp -s /tmp/state.first /tmp/state.second" "a re-run leaves every file, mode and rule as it was"
@@ -469,7 +497,7 @@ EOF
 
   # Given a code, that home is refused, saying what it is and how to remove it.
   run_apart env FERMIX_ENROLL_CODE="$CODE" sh "$FIRST_BOOT"
-  stopped_with "Fermix runs on this server as your primary: to set this server up again, which deletes that home, run sudo -H -u fermix env XDG_RUNTIME_DIR=/run/user/$ENGINE_UID /usr/bin/fermix service uninstall, then sudo rm -rf /home/fermix/.fermix, then this command again." \
+  stopped_with "Fermix runs on this server as your primary: to set this server up again, which deletes that home, run sudo -H -u fermix env -C / XDG_RUNTIME_DIR=/run/user/$ENGINE_UID /usr/bin/fermix service uninstall, then sudo rm -rf /home/fermix/.fermix, then this command again." \
     "the primary, given a code, is refused with the commands that remove it"
   check "[ \"\$(cat $LOG/calls.log)\" = 'fermix home status --json [as fermix]' ] && [ -d /home/fermix/.fermix ]" \
     "after reading the home, with nothing installed and the home left as it is"
@@ -510,15 +538,15 @@ EOF
 apt-get -qq update
 apt-get -qq -y install --no-install-recommends nftables
 systemctl daemon-reload
-systemctl enable fermix-metadata-block.service
+systemctl --quiet enable fermix-metadata-block.service
 systemctl restart fermix-metadata-block.service
 apt-get -qq -y install --no-install-recommends ca-certificates curl
 curl GET https://fermix.ai/install
 installer --no-setup --version 1.2.3
 apt-get -qq -y install --no-install-recommends unattended-upgrades
 systemctl daemon-reload
-systemctl enable --now fermix-update.timer
-systemctl enable --now fermix-follow.timer
+systemctl --quiet enable --now fermix-update.timer
+systemctl --quiet enable --now fermix-follow.timer
 systemctl daemon-reload
 loginctl enable-linger fermix
 systemctl start user@$ENGINE_UID.service
@@ -614,9 +642,9 @@ expected_restore_steps() {
      /home/fermix/restore.fxsnap, owned by fermix:
        sudo install -o fermix -g fermix -m 0600 <the file> /home/fermix/restore.fxsnap
   2. Restore it; Fermix asks for your recovery passphrase without showing it:
-       sudo -H -u fermix env FERMIX_HOME=/home/fermix/.fermix-restore /usr/bin/fermix home import /home/fermix/restore.fxsnap --into /home/fermix/.fermix
+       sudo -H -u fermix env -C / FERMIX_HOME=/home/fermix/.fermix-restore /usr/bin/fermix home import /home/fermix/restore.fxsnap --into /home/fermix/.fermix
   3. Start Fermix from the restored home:
-       sudo -H -u fermix env XDG_RUNTIME_DIR=/run/user/$ENGINE_UID /usr/bin/fermix service install --home /home/fermix/.fermix
+       sudo -H -u fermix env -C / XDG_RUNTIME_DIR=/run/user/$ENGINE_UID /usr/bin/fermix service install --home /home/fermix/.fermix
   4. Remove the downloaded snapshot and the import's own scratch home:
        sudo rm -rf /home/fermix/restore.fxsnap /home/fermix/.fermix-restore
 EOF
@@ -667,7 +695,7 @@ restore() {
   printf 'device\n' >"$FIXTURES/role"
   printf 'Invented Mac\n' >"$FIXTURES/moved-to"
   run_apart sh "$FIRST_BOOT" --restore
-  stopped_with "This server's Fermix home is a retired copy, left when Fermix moved to Invented Mac: to set this server up again, which deletes that home, run sudo -H -u fermix env XDG_RUNTIME_DIR=/run/user/$ENGINE_UID /usr/bin/fermix service uninstall, then sudo rm -rf /home/fermix/.fermix, then this command again." \
+  stopped_with "This server's Fermix home is a retired copy, left when Fermix moved to Invented Mac: to set this server up again, which deletes that home, run sudo -H -u fermix env -C / XDG_RUNTIME_DIR=/run/user/$ENGINE_UID /usr/bin/fermix service uninstall, then sudo rm -rf /home/fermix/.fermix, then this command again." \
     "a retired copy is refused, naming where Fermix moved and the commands that remove it"
   rm -f "$FIXTURES/role" "$FIXTURES/moved-to"
 }
@@ -693,6 +721,18 @@ failures() {
   printf 'restart fermix-metadata-block.service\n' >"$FIXTURES/systemctl-fails"
   run_apart env FERMIX_ENROLL_CODE="$CODE" sh "$FIRST_BOOT"
   check "[ $STATUS -eq 1 ] && ! grep -q 'fermix home enroll' $LOG/calls.log" "a step that stops unexpectedly ends the first boot there"
+
+  # apt-get's own words are kept for the install that fails, and only for it.
+  fresh_host
+  printf 'unattended-upgrades\n' >"$FIXTURES/apt-fails"
+  run_apart env FERMIX_ENROLL_CODE="$CODE" sh "$FIRST_BOOT"
+  printf '%s\n' 'E: Unable to locate package unattended-upgrades' \
+    'fermix always-on: apt-get could not install unattended-upgrades.' >/tmp/stderr.expected
+  check "[ $STATUS -eq 1 ] && cmp -s $ERR /tmp/stderr.expected" \
+    "a package apt-get cannot install ends the first boot with apt-get's own message, then its sentence"
+  cmp -s "$ERR" /tmp/stderr.expected || sed 's/^/    stderr: /' "$ERR"
+  check "! has_noise $OUT $ERR" "and the progress of the packages before it stays out"
+  rm -f "$FIXTURES/apt-fails"
 }
 
 # An Ubuntu server the owner already had, with a swap partition of its own.
@@ -781,6 +821,8 @@ updates() {
   for name in HOME XDG_RUNTIME_DIR FERMIX_HOME; do
     check "grep -qx $name $LOG/env-restart" "fermix restart has $name"
   done
+  engine_call_is_clean service-status "the update's fermix service status"
+  engine_call_is_clean restart "the update's fermix restart"
 
   printf '1.2.5\n' >"$FIXTURES/ceiling"
   : >"$FIXTURES/installer-fails"
@@ -1027,7 +1069,7 @@ tailnet() {
 apt-get -qq update
 apt-get -qq -y install --no-install-recommends nftables
 systemctl daemon-reload
-systemctl enable fermix-metadata-block.service
+systemctl --quiet enable fermix-metadata-block.service
 systemctl restart fermix-metadata-block.service
 fallocate -l 2G /swapfile.incoming
 mkswap /swapfile.incoming
@@ -1037,8 +1079,8 @@ curl GET https://fermix.ai/install
 installer --no-setup --version 1.2.3
 apt-get -qq -y install --no-install-recommends unattended-upgrades
 systemctl daemon-reload
-systemctl enable --now fermix-update.timer
-systemctl enable --now fermix-follow.timer
+systemctl --quiet enable --now fermix-update.timer
+systemctl --quiet enable --now fermix-follow.timer
 systemctl daemon-reload
 loginctl enable-linger fermix
 systemctl start user@$ENGINE_UID.service
@@ -1046,7 +1088,7 @@ apt-get -qq -y install --no-install-recommends ca-certificates curl gpg
 curl GET https://pkgs.tailscale.com/stable/debian/trixie.noarmor.gpg
 apt-get -qq update
 apt-get -qq -y install --no-install-recommends tailscale
-systemctl enable --now tailscaled.service
+systemctl --quiet enable --now tailscaled.service
 tailscale up --auth-key=file:WORK/tailscale.authkey --timeout=2m
 fermix home enroll --code-file /run/fermix/enroll.code [as fermix]
 fermix service install --home /home/fermix/.fermix [as fermix]
@@ -1122,6 +1164,8 @@ chromium() {
   check "[ $STATUS -eq 0 ]" "a Debian host installs the distribution's Chromium with the real apt-get (exit $STATUS)"
   [ "$STATUS" -eq 0 ] || tail -n 20 "$OUT" | sed 's/^/    /'
   check "dpkg-query -W -f='\${Status}' chromium | grep -q 'install ok installed'" "the chromium package is installed"
+  check "! has_noise $OUT" "the real apt-get's and dpkg's progress for Chromium's packages stays out of its output"
+  printf '    %s lines of output, %s of them its own steps\n' "$(wc -l <"$OUT")" "$(grep -c '^==> ' "$OUT")"
   check "[ \"\$(runuser -u fermix -- env -i PATH=/usr/bin:/bin sh -c 'command -v chromium')\" = /usr/bin/chromium ]" \
     "the engine account finds chromium on its PATH, where the launcher looks"
   guard='echo 1000 >/proc/self/oom_score_adj && exec "$@"'

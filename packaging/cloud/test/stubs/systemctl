@@ -1,12 +1,19 @@
 #!/bin/sh
 # Test stand-in for systemctl: logs the call and, for start, restart and
 # enable --now of a unit under /etc/systemd/system, runs its ExecStart lines
-# the way a oneshot service would. A call whose arguments are the line in
-# /etc/fermix-test/systemctl-fails exits 1, as a unit that fails to load does.
+# the way a oneshot service would. An enable says the link it made, as the
+# real one does, unless --quiet comes first. A call whose arguments are the
+# line in /etc/fermix-test/systemctl-fails exits 1, as a unit that fails to
+# load does.
 set -eu
 printf 'systemctl %s\n' "$*" >>/var/log/fermix-test/calls.log
 if [ -f /etc/fermix-test/systemctl-fails ] && [ "$*" = "$(cat /etc/fermix-test/systemctl-fails)" ]; then
   exit 1
+fi
+quiet=0
+if [ "$1" = --quiet ]; then
+  quiet=1
+  shift
 fi
 
 run_unit() {
@@ -18,6 +25,11 @@ run_unit() {
   done </var/log/fermix-test/exec-start
 }
 
+if [ "$1" = enable ] && [ "$quiet" -eq 0 ]; then
+  for unit in "$@"; do :; done
+  printf "Created symlink '/etc/systemd/system/multi-user.target.wants/%s' -> '/etc/systemd/system/%s'.\n" \
+    "$unit" "$unit" >&2
+fi
 case "$1" in
   start | restart) run_unit "$2" ;;
   enable) if [ "$2" = --now ]; then run_unit "$3"; fi ;;

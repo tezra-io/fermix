@@ -1,8 +1,10 @@
 #!/bin/sh
 # Test stand-in for the packaged fermix, installed by the fake installer.
 # Records its arguments, its account and the names (never the values) of its
-# environment; `home enroll` records the SHA-256 of the code file it can read
-# and writes a candidate home the way the real verb does. `home status --json`
+# environment, the process that started it (runuser, when a PAM session holds
+# the call) and the uid, gid and groups it runs with; `home enroll` records
+# the SHA-256 of the code file it can read and writes a candidate home the way
+# the real verb does. `home status --json`
 # answers the candidate's phases from /etc/fermix-test/phases, one line per
 # call ("phase|sentence"), the last repeated (enrolled without the file), its
 # role from /etc/fermix-test/role (candidate without it), its moved marker's
@@ -22,7 +24,10 @@ fixtures=/etc/fermix-test
 state=/var/lib/fermix-test
 printf 'fermix %s [as %s]\n' "$*" "$(id -un)" >>"$log/calls.log"
 verb="$1${2+ $2}"
-env | cut -d= -f1 | sort >"$log/env-$(printf '%s' "$verb" | tr ' ' -)"
+name=$(printf '%s' "$verb" | tr ' ' -)
+env | cut -d= -f1 | sort >"$log/env-$name"
+cat "/proc/$PPID/comm" >"$log/parent-$name"
+printf '%s %s %s\n' "$(id -u)" "$(id -g)" "$(id -G)" >"$log/ids-$name"
 case "$verb" in
   "home enroll")
     code_file=$4

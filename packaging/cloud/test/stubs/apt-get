@@ -2,10 +2,28 @@
 # Test stand-in for apt-get: logs the call and installs nothing, except that
 # installing chromium leaves an executable /usr/bin/chromium, as the package
 # does, for the first boot's check, and installing tailscale puts the
-# tailscale stand-in where the package puts the real one.
+# tailscale stand-in where the package puts the real one. An install prints
+# the lines dpkg prints for each package, which -qq does not quiet, and fails
+# as apt-get does, with its own message, when it names the package in
+# /etc/fermix-test/apt-fails.
 set -eu
 printf 'apt-get %s\n' "$*" >>/var/log/fermix-test/calls.log
 case " $* " in
-  *" install "*" chromium "*) printf '#!/bin/sh\nexit 0\n' >/usr/bin/chromium && chmod 0755 /usr/bin/chromium ;;
-  *" install "*" tailscale "*) install -m 0755 /cloud/test/stubs/tailscale /usr/bin/tailscale ;;
+  *" install "*) ;;
+  *) exit 0 ;;
+esac
+for package in "$@"; do
+  case "$package" in -* | install) continue ;; esac
+  if [ -f /etc/fermix-test/apt-fails ] && [ "$package" = "$(cat /etc/fermix-test/apt-fails)" ]; then
+    echo "E: Unable to locate package $package" >&2
+    exit 100
+  fi
+  printf 'Selecting previously unselected package %s.\n' "$package"
+  printf 'Preparing to unpack .../%s_1.0_arm64.deb ...\n' "$package"
+  printf 'Unpacking %s (1.0) ...\n' "$package"
+  printf 'Setting up %s (1.0) ...\n' "$package"
+done
+case " $* " in
+  *" chromium "*) printf '#!/bin/sh\nexit 0\n' >/usr/bin/chromium && chmod 0755 /usr/bin/chromium ;;
+  *" tailscale "*) install -m 0755 /cloud/test/stubs/tailscale /usr/bin/tailscale ;;
 esac

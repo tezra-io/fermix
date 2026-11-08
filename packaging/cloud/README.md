@@ -82,15 +82,23 @@ is read first, still before anything is installed: `fermix home status
 
 Each refusal is one sentence that says what the home is and the commands
 that remove it, should the owner want the server set up again (`sudo -H -u
-fermix env XDG_RUNTIME_DIR=/run/user/<uid> /usr/bin/fermix service
+fermix env -C / XDG_RUNTIME_DIR=/run/user/<uid> /usr/bin/fermix service
 uninstall`, then `sudo rm -rf /home/fermix/.fermix`, then the command
 again). A home `fermix home status` cannot read is refused with its
 sentence and no such commands, since what it holds is not known: `sudo -H
--u fermix /usr/bin/fermix home status` shows why. The script itself never
-removes a home.
+-u fermix env -C / /usr/bin/fermix home status` shows why. The script itself
+never removes a home. Every `fermix` command it gives the owner runs from
+`/` (`env -C /`): the account `fermix` cannot open the directory an owner
+logs in to (`/home/admin` is 0700 on Debian 13), and `fermix` refuses to
+start in a directory the account running it cannot open, in one sentence,
+before it unpacks or starts anything.
 
 Then, in this order, failing with one sentence and a non-zero exit at any
-step:
+step. Each `apt-get` keeps what it and dpkg say (a few lines per package,
+which `-qq` does not quiet, and Chromium brings about 150 packages) in a file
+in the work directory, so the output holds the run's own lines; one that
+fails prints all of it on stderr, above its sentence. `systemctl enable`
+runs `--quiet`.
 
 1. Enroll mode only: writes the code to `/run/fermix/enroll.code` (tmpfs; the
    directory 0700 and the file 0600, root's until the engine account exists,
@@ -163,8 +171,12 @@ step:
    writes it), and only it reads or writes the deferral count below. A
    follow run never reboots, does nothing on a server with no home yet, and
    says nothing when nothing is due, so the journal holds a line only for
-   what one did or why it could not; a restart a move held off happens at
-   the first follow run after the move ends. The two never run at once: each
+   what one did or why it could not: its unit logs the script's lines at
+   `notice` (`SyslogLevel=notice`) and keeps everything below `notice` out
+   (`LogLevelMax=notice`), which drops systemd's own start and finish lines
+   for each run (at `info`) and keeps systemd's lines for a run that fails,
+   and its `fermix` calls open no PAM session (below). A restart a move held
+   off happens at the first follow run after the move ends. The two never run at once: each
    takes an exclusive `flock` on `/run/fermix-update.lock` (root's, 0600; a
    file only root can make, as `/run` is root's) before anything else, with
    the lock's descriptor closed for the installer and every `fermix` call, so
@@ -213,7 +225,13 @@ step:
    /home/fermix/.fermix`. A candidate enrolling again is stopped first
    (`fermix service uninstall`), and started again with the enrollment it had
    when `fermix home enroll` refuses; a home that runs is not enrolled again,
-   which is said, and its service is bound and started again.
+   which is said, and its service is bound and started again. Every `fermix`
+   call the first boot and the update make runs through `setpriv
+   --reuid=fermix --regid=fermix --init-groups` (util-linux, essential on
+   Debian and Ubuntu): the account's uid, gid and groups and no PAM session,
+   so no `pam_unix` session lines in the journal, then `env -i` with exactly
+   `HOME`, `USER`, `LOGNAME`, `SHELL`, `PATH`, `LANG`, `XDG_RUNTIME_DIR` and
+   `FERMIX_HOME`.
 9. A browser for the agent's tasks. Debian: the distribution's `chromium`,
    which the engine's launcher finds on its `PATH` and starts headless as
    `fermix`, with Chromium's own sandbox. Ubuntu ships Chromium only as a
@@ -362,13 +380,13 @@ In a shell on the server, as an account that may use `sudo`:
    -g fermix -m 0600 FILE /home/fermix/restore.fxsnap`). With a bucket named,
    the step names it: download the snapshot whose name sorts last from it
    first.
-2. `sudo -H -u fermix env FERMIX_HOME=/home/fermix/.fermix-restore fermix home
-   import /home/fermix/restore.fxsnap --into /home/fermix/.fermix`, which asks
+2. `sudo -H -u fermix env -C / FERMIX_HOME=/home/fermix/.fermix-restore fermix
+   home import /home/fermix/restore.fxsnap --into /home/fermix/.fermix`, which asks
    for the recovery passphrase without echo. The import runs from a scratch
    home of its own so that nothing it writes as it starts lands in the empty
    home it restores into.
-3. `sudo -H -u fermix env XDG_RUNTIME_DIR=/run/user/<uid> fermix service
-   install --home /home/fermix/.fermix`.
+3. `sudo -H -u fermix env -C / XDG_RUNTIME_DIR=/run/user/<uid> fermix
+   service install --home /home/fermix/.fermix`.
 4. `sudo rm -rf /home/fermix/restore.fxsnap /home/fermix/.fermix-restore`.
 
 Run again once the import made the home, a primary, the first boot binds and
@@ -408,21 +426,33 @@ started again, once, and a start that fails too) and a first enrollment
 refused (no service started); a home that runs, with no code and with one; a retired
 copy, a desktop, a candidate whose move cannot be read, a candidate under
 `--restore` and a home the engine cannot read (refused without the
-commands that remove it), each refused. A failure
+commands that remove it), each refused. Its `apt-get` stand-in says dpkg's
+lines for each package: none reaches the output of a run that joins a
+tailnet, and a run whose `apt-get` fails shows only that call's message
+above its sentence. A failure
 is counted in a file, so a check that ends a pipeline counts too.
 
 The containers need Docker with `debian:trixie-slim`, and network inside them
 (they install `nftables` and `shellcheck`, Chromium in its scenario, and
-`ca-certificates`, `curl` and `gpg` in the tailnet scenario). `useradd`, `runuser`, `nft` and
+`ca-certificates`, `curl` and `gpg` in the tailnet scenario). `useradd`, `setpriv`, `nft` and
 `apt-config` run for real (`--cap-add NET_ADMIN`, `/run` on a tmpfs);
-`systemctl` (which runs a unit's `ExecStart` for `start` and `restart`),
+`systemctl` (which runs a unit's `ExecStart` for `start` and `restart`, and
+says the link an `enable` makes unless `--quiet`),
 `loginctl`, `curl` (the fake installer, which records the release it
 installed; a stand-in digest table and release script for the regular
 installer's `--always-on`; `pkgs.tailscale.com` fetched for real), `apt-get`, `dpkg-query`,
 `perl` (the Landlock ABI from a fixture), `swapon`, `fallocate`, `mkswap`,
 `tailscale` (which records the key file it read, never the key) and `fermix`
-(which runs the release its last start installed, and whose status reads can
-fail) are the stand-ins in `test/stubs/`. The chromium scenario
+(which runs the release its last start installed, whose status reads can
+fail, and which records the process that started it, its ids and its
+environment's names) are the stand-ins in `test/stubs/`; `apt-get` says
+dpkg's lines for each package and fails a fixture's package with apt-get's
+own message. The existing host's output holds only its own steps, a failed
+install shows only that call's message above its sentence, the chromium
+scenario's real `apt-get` and dpkg say nothing in it, and the first boot's
+and the update's `fermix` calls run with no PAM session (runuser does not
+start them), the account's uid, gid and groups, and exactly the clean
+environment. The chromium scenario
 keeps the real `perl`, so it asks the kernel Docker runs on for its Landlock
 ABI and needs Linux 6.2 or later with Landlock enabled. The scenarios: an
 existing host typing the code at a terminal, run again with no code once

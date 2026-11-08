@@ -225,6 +225,13 @@ will be part of a future release; nothing in this group is in a release yet.
   given a code, refuses) and says what the server is and the commands that
   remove its home, and on one whose home Fermix cannot read, the command
   that shows why. It never removes a home itself.
+- **An Always On server says only what it did.** Its setup prints its own
+  steps, not the progress of every package Debian installs (Chromium alone
+  brings about 150), and an install that fails still shows apt-get's own
+  message. The five-minute update writes nothing to the journal when nothing
+  is due: no session lines for the `fermix` account and no start and finish
+  lines from systemd. Each command the setup gives you to run on the server
+  works from the directory you log in to.
 - **Your server can join your tailnet as it is set up.** Add `--tailscale`
   to the server's command and it asks for a Tailscale auth key without
   showing it (cloud-init user data passes it in `TS_AUTHKEY` instead),

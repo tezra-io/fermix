@@ -190,14 +190,14 @@ it, never a second writer.
   server after Restore here learns to set it up again) and refused with that
   sentence when given one; a retired copy a move left
   (naming where Fermix moved) and a desktop of another primary are refused
-  either way. Each of these refusals is one sentence naming the home and
-  the commands that remove it, should the owner want the server set up
-  again (`sudo -H -u fermix env XDG_RUNTIME_DIR=/run/user/<uid>
+  either way. Each refusal is one sentence naming the home and the
+  commands that remove it, should the owner want the server set up again
+  (`sudo -H -u fermix env -C / XDG_RUNTIME_DIR=/run/user/<uid>
   /usr/bin/fermix service uninstall`, then `sudo rm -rf
   /home/fermix/.fermix`, then the command again). A home `fermix home
-  status` cannot read is refused with the engine's own sentence and no
-  commands that delete it: `sudo -H -u fermix /usr/bin/fermix home status`
-  shows why. `--restore` refuses a home that has not received its move. The
+  status` cannot read is refused with the engine's sentence and no command
+  that deletes it: `sudo -H -u fermix env -C / /usr/bin/fermix home
+  status` shows why. `--restore` refuses a home that has not received its move. The
   first boot never removes a home itself.
 - **The server on the owner's tailnet.** `--tailscale` joins the server to
   the owner's tailnet before it enrolls, so its tailnet address exists when
