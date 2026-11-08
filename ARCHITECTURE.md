@@ -496,7 +496,9 @@ in flight after the epoch changed, as `uncertain` rather than re-running it.
 The Always On move (M75 §7) adds a third role, `candidate`: a fresh server
 that `fermix home enroll` (`Home.Candidate.enroll/3`, tree-less) made one from
 an enrollment code (`Home.EnrollmentCode`, `fxenroll1.`), with its own keys,
-facts and phase under `<home>/candidate/`. `Role.children/2` keeps only
+facts and phase under `<home>/candidate/`. Each side names itself through
+`Home.ComputerName` (a Mac's computer name from `scutil`, else the hostname):
+the primary in its code, a candidate in its facts, a desktop in its row. `Role.children/2` keeps only
 `Role.candidate_keeps/0` for it (the command host, which the offer's `df` and
 the restore's keyring probe run under, task supervisor, trace, the daemon socket
 and its stop path, `FermixChannels.Home.CandidateSupervisor`, and the web app's
@@ -518,7 +520,8 @@ review says this computer's voice stops and a phone's calls carry on at the
 server), a voice call in progress, which the move's restart ends,
 WhatsApp, and Slack without Socket Mode;
 coding agents asking for approval again, read from `config.toml`; the
-cutover gap; an engine nothing starts again, `Lifecycle.restarts_itself?/1`,
+cutover gap, naming Telegram only where it is set up (`MoveReadiness.costs/1`
+gives a move back's confirm the same two facts); an engine nothing starts again, `Lifecycle.restarts_itself?/1`,
 which the setup page's Apply & restart reads too; the settings-only items
 alone are `MoveReadiness.summary_items/4`) and
 `Home.Move.start/5`, given the recipient `Snapshot.Recovery` answered,

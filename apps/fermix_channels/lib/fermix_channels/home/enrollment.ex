@@ -76,6 +76,7 @@ defmodule FermixChannels.Home.Enrollment do
   alias FermixChannels.Mobile.Iroh.Helper
   alias FermixChannels.Mobile.Iroh.Relays
   alias FermixCore.Home.Candidates
+  alias FermixCore.Home.ComputerName
   alias FermixCore.Home.EnrollmentCode
   alias FermixCore.Home.StatusWatch
   alias FermixCore.Setup.ConfigStore
@@ -412,13 +413,14 @@ defmodule FermixChannels.Home.Enrollment do
     end
   end
 
+  # On a Mac its computer name, elsewhere its hostname (`Home.ComputerName`).
   defp host_name do
-    case :inet.gethostname() do
+    case ComputerName.read() do
       {:ok, name} ->
-        {:ok, String.slice(to_string(name), 0, 64)}
+        {:ok, name}
 
       {:error, reason} ->
-        Logger.error("enrollment: this host's name could not be read: #{inspect(reason)}")
+        Logger.error("enrollment: this host's name could not be read: #{reason}")
         {:error, "Fermix could not read this computer's name, so it opened no code."}
     end
   end

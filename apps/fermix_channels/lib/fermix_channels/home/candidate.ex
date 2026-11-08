@@ -95,6 +95,7 @@ defmodule FermixChannels.Home.Candidate do
   alias FermixCore.Home.Candidate, as: Files
   alias FermixCore.Home.Candidate.Activation
   alias FermixCore.Home.Candidate.Return
+  alias FermixCore.Home.ComputerName
   alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.Disk
   alias FermixCore.Home.MoveAwake
@@ -836,12 +837,12 @@ defmodule FermixChannels.Home.Candidate do
   end
 
   defp host_facts do
-    {:ok, name} = :inet.gethostname()
+    {:ok, name} = ComputerName.read()
     {_family, os} = :os.type()
     arch = :erlang.system_info(:system_architecture) |> to_string() |> String.split("-") |> hd()
 
     %{
-      "name" => name |> to_string() |> String.slice(0, 64),
+      "name" => name,
       "os" => Atom.to_string(os),
       "arch" => arch,
       "version" => BuildInfo.product_version()

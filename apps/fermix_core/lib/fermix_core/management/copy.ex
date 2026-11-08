@@ -88,6 +88,13 @@ defmodule FermixCore.Management.Copy do
   @stays_here [imessage: "iMessage", voice: "voice calls", meetings: "meetings"]
   # What each loopback port a tunnel reaches carries, in the order named.
   @carried [whatsapp: "WhatsApp", cues: "webhook sources"]
+  # What reaches the server through Funnel, as the webhooks' sentence starts.
+  @reached [whatsapp: "WhatsApp", cues: "your webhook sources"]
+  # What a move back costs, each where the home has it.
+  @return_costs [
+    coding_agents: " Coding agents ask for your approval again.",
+    telegram: " Messages sent to Telegram while it moves wait until it is done."
+  ]
   @summary_keys ~w(off connect connecting ready moving waiting on on_backup on_no_backup undone
                    retired retired_back candidate_waiting candidate_receiving primary
                    cannot_reach server_not_set_up server_waited_too_long update server_older
@@ -508,19 +515,27 @@ defmodule FermixCore.Management.Copy do
       "Forget this server? Fermix stops holding it for the move. To move later, set up a " <>
         "server with a new code."
 
-  def summary_sentence(:confirm_return_move, %{machine: machine, stays_here: features}),
-    do:
-      "Move Fermix back to this #{machine} now?" <>
-        runs_here_line(features) <>
-        " Coding agents ask for your approval again. Messages sent to Telegram while it " <>
-        "moves wait until it is done. Your server stays until you delete it."
+  def summary_sentence(:confirm_return_move, %{
+        machine: machine,
+        stays_here: features,
+        costs: costs
+      }),
+      do:
+        "Move Fermix back to this #{machine} now?" <>
+          runs_here_line(features) <>
+          Enum.map_join(costs, &Keyword.fetch!(@return_costs, &1)) <>
+          " Your server stays until you delete it."
 
-  def summary_sentence(:webhooks, _values),
-    do:
-      "WhatsApp and your webhook sources reach Fermix on your server through Tailscale " <>
-        "Funnel. Once, in your tailnet policy, give tag:fermix-server the funnel node " <>
-        "attribute, and turn on MagicDNS and HTTPS certificates. Then run each of these on " <>
-        "the server; a new address can take about ten minutes to resolve."
+  def summary_sentence(:webhooks, %{carried: [_ | _] = carried}) do
+    names = for {kind, name} <- @reached, kind in carried, do: name
+    true = length(names) == length(Enum.uniq(carried))
+    verb = if carried == [:whatsapp], do: "reaches", else: "reach"
+
+    "#{names |> join_names() |> capitalised()} #{verb} Fermix on your server through " <>
+      "Tailscale Funnel. Once, in your tailnet policy, give tag:fermix-server the funnel " <>
+      "node attribute, and turn on MagicDNS and HTTPS certificates. Then run each of these " <>
+      "on the server; a new address can take about ten minutes to resolve."
+  end
 
   def summary_sentence(:webhooks_whatsapp, _values),
     do:
@@ -541,7 +556,7 @@ defmodule FermixCore.Management.Copy do
   def summary_sentence(:webhooks_ingress, _values),
     do:
       "Funnel traffic comes in through Tailscale's ingress servers, which see only " <>
-        "encrypted bytes: it is the one way the internet reaches your server."
+        "encrypted bytes: with Funnel, they are the one way a webhook reaches your server."
 
   def summary_sentence(:webhooks_tunnel, %{ports: [_ | _] = ports}) do
     noun = if length(ports) == 1, do: "port", else: "ports"

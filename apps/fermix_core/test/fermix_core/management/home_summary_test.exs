@@ -500,12 +500,14 @@ defmodule FermixCore.Management.HomeSummaryTest do
   # server's own `home.status`, with the one-time policy step and the
   # caveats, and nothing when it serves none.
   describe "the webhooks a server needs" do
-    # Review F6 (D12): the one-time tailnet steps Funnel needs first.
+    # Review F6 (D12): the one-time tailnet steps Funnel needs first, after
+    # what the server serves, and only that (EC2 test finding 7).
+    @webhooks_steps "Tailscale Funnel. Once, in your tailnet policy, give tag:fermix-server " <>
+                      "the funnel node attribute, and turn on MagicDNS and HTTPS " <>
+                      "certificates. Then run each of these on the server; a new address can " <>
+                      "take about ten minutes to resolve."
     @webhooks_sentence "WhatsApp and your webhook sources reach Fermix on your server through " <>
-                         "Tailscale Funnel. Once, in your tailnet policy, give " <>
-                         "tag:fermix-server the funnel node attribute, and turn on MagicDNS " <>
-                         "and HTTPS certificates. Then run each of these on the server; a new " <>
-                         "address can take about ten minutes to resolve."
+                         @webhooks_steps
     # Review F3 (D10): where Meta is pointed, and that nothing arrives until then.
     @whatsapp_note "Tailscale prints the address this gives. In Meta's app dashboard, set it " <>
                      "as the Callback URL with your verify token and press Verify and save; " <>
@@ -517,15 +519,18 @@ defmodule FermixCore.Management.HomeSummaryTest do
                 "keep the path."
     @port_note "Funnel publishes everything tailscale serve has on port 443, so put only " <>
                  "these paths there."
+    # With Funnel, its ingress is the one way in; without Tailscale, the tunnel
+    # the next note names is (EC2 test finding 8).
     @ingress_note "Funnel traffic comes in through Tailscale's ingress servers, which see " <>
-                    "only encrypted bytes: it is the one way the internet reaches your server."
+                    "only encrypted bytes: with Funnel, they are the one way a webhook " <>
+                    "reaches your server."
 
     test "a server with WhatsApp alone: its one mount, the policy step and the caveats" do
       %{"state" => "on", "detail" => detail} =
         HomeSummary.summary(desktop(primary_home: server_home(webhooks: [whatsapp(4130)])))
 
       assert detail["webhooks"] == %{
-               "sentence" => @webhooks_sentence,
+               "sentence" => "WhatsApp reaches Fermix on your server through " <> @webhooks_steps,
                "mounts" => [
                  %{
                    "label" => "WhatsApp",
@@ -570,6 +575,9 @@ defmodule FermixCore.Management.HomeSummaryTest do
 
       refute detail["webhooks"] |> Jason.encode!() |> String.contains?("<random>")
 
+      assert detail["webhooks"]["sentence"] ==
+               "Your webhook sources reach Fermix on your server through " <> @webhooks_steps
+
       assert detail["webhooks"]["notes"] == [
                @port_note,
                @ingress_note,
@@ -586,6 +594,8 @@ defmodule FermixCore.Management.HomeSummaryTest do
 
       assert Enum.map(detail["webhooks"]["mounts"], & &1["label"]) ==
                ["WhatsApp", "Webhook source github"]
+
+      assert detail["webhooks"]["sentence"] == @webhooks_sentence
 
       assert ("Without Tailscale, run Cloudflare Tunnel to the same loopback ports instead: " <>
                 "4130 for WhatsApp and 4532 for webhook sources.") in detail["webhooks"]["notes"]
@@ -1096,9 +1106,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
 
       assert summary["action"]["confirm"] ==
                "Move Fermix back to this Mac now? iMessage, voice calls and meetings run " <>
-                 "here again. Coding agents ask for your approval again. Messages sent to " <>
-                 "Telegram while it moves wait until it is done. Your server stays until you " <>
-                 "delete it."
+                 "here again. Your server stays until you delete it."
 
       assert [%{"id" => "cancel", "confirm" => nil, "label" => "Cancel"}] =
                summary["detail"]["alternatives"]
@@ -1116,9 +1124,26 @@ defmodule FermixCore.Management.HomeSummaryTest do
       quiet = HomeSummary.summary(returning(back("enrolled"), stays_here: []))
 
       assert quiet["action"]["confirm"] ==
+               "Move Fermix back to this Mac now? Your server stays until you delete it."
+
+      # The costs are named only where the home's settings have them (EC2
+      # test finding 15).
+      costly =
+        HomeSummary.summary(
+          returning(back("enrolled"), stays_here: [], return_costs: [:coding_agents, :telegram])
+        )
+
+      assert costly["action"]["confirm"] ==
                "Move Fermix back to this Mac now? Coding agents ask for your approval again. " <>
                  "Messages sent to Telegram while it moves wait until it is done. Your server " <>
                  "stays until you delete it."
+
+      telegram = HomeSummary.summary(returning(back("enrolled"), return_costs: [:telegram]))
+
+      assert telegram["action"]["confirm"] ==
+               "Move Fermix back to this Mac now? iMessage, voice calls and meetings run " <>
+                 "here again. Messages sent to Telegram while it moves wait until it is done. " <>
+                 "Your server stays until you delete it."
 
       assert summary["notice"] == %{
                "id" => "ready:" <> @back_cand,
@@ -1556,6 +1581,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
         primary_too_old: false,
         copies_bytes: nil,
         stays_here: [],
+        return_costs: [],
         zone: "Etc/UTC",
         return: nil,
         returning: nil,

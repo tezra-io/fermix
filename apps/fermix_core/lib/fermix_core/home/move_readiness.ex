@@ -55,9 +55,10 @@ defmodule FermixCore.Home.MoveReadiness do
     * `coding_agents`: coding-harness consent given here warns: a move
       withdraws it, as every restore does (`Archive.RestoredConfig`), so
       coding agents ask for the owner's approval again on the server;
-    * `cutover_gap`: Telegram messages sent during the move wait until it
-      is done (Telegram keeps them, `Channels.Telegram.Poller`), and a
-      recurring job more than an hour late is skipped;
+    * `cutover_gap`: a recurring job more than an hour late is skipped, and
+      while Telegram is set up (a bot token, and not turned off), its
+      messages sent during the move wait until it is done (Telegram keeps
+      them, `Channels.Telegram.Poller`);
     * `serves_nothing`: this computer serves nothing during the move;
     * `service`: Fermix run from a terminal (`fermix run`) warns, since the
       move stops it and nothing starts it again
@@ -152,7 +153,7 @@ defmodule FermixCore.Home.MoveReadiness do
       whatsapp(config, name),
       slack(config, name),
       coding_agents(config, name),
-      item("cutover_gap", :warn, cutover_sentence()),
+      item("cutover_gap", :warn, cutover_sentence(config)),
       item(
         "serves_nothing",
         :warn,
@@ -199,6 +200,21 @@ defmodule FermixCore.Home.MoveReadiness do
       when is_binary(home) and is_boolean(macos?) and is_list(opts) do
     with {:ok, text} <- settings(home, opts), do: {:ok, features(text, macos?)}
   end
+
+  @doc """
+  What a move costs that this home's settings (`settings/2`'s answer) turn
+  on, in this order: `:coding_agents` (coding-harness consent given, which a
+  restore withdraws) and `:telegram` (set up, so its messages wait while the
+  move runs). None when the settings could not be read.
+  """
+  @spec costs({:ok, String.t()} | {:error, String.t()}) :: [:coding_agents | :telegram]
+  def costs({:ok, text}) do
+    [coding_agents: on?(text, "fermix_core.harness", "approved"), telegram: telegram?(text)]
+    |> Enum.filter(fn {_cost, on} -> on end)
+    |> Enum.map(fn {cost, _on} -> cost end)
+  end
+
+  def costs({:error, _sentence}), do: []
 
   @doc "The block sentences of `report`, in order; none when it is ready."
   @spec blocks(report()) :: [String.t()]
@@ -576,6 +592,19 @@ defmodule FermixCore.Home.MoveReadiness do
 
   defp on?(text, section, key), do: ConfigText.value(text, section, key) == {:ok, "true"}
 
+  # Telegram runs once it has a bot token, unless turned off: it ships on.
+  defp telegram?(text) do
+    ConfigText.value(text, "fermix_channels.telegram", "enabled") != {:ok, "false"} and
+      telegram_token(text) not in [:absent, :error, {:ok, ""}]
+  end
+
+  defp telegram_token(text) do
+    case ConfigText.value(text, "fermix_channels.telegram", "bot_token") do
+      {:ok, raw} -> ConfigText.string(raw)
+      :absent -> :absent
+    end
+  end
+
   defp slack_mode(text) do
     case ConfigText.value(text, "fermix_channels.slack", "mode") do
       {:ok, raw} -> ConfigText.string(raw)
@@ -597,10 +626,19 @@ defmodule FermixCore.Home.MoveReadiness do
           "to finish."
       )
 
-  defp cutover_sentence,
-    do:
-      "Messages sent to Telegram while the move runs wait until it is done, and a recurring " <>
-        "job more than an hour late is skipped."
+  # Telegram keeps what it holds until the poller asks again, so its messages
+  # wait out the move: named only where this home has it set up.
+  defp cutover_sentence({:ok, text}) do
+    if telegram?(text),
+      do:
+        "Messages sent to Telegram while the move runs wait until it is done, and a " <>
+          "recurring job more than an hour late is skipped.",
+      else: jobs_gap()
+  end
+
+  defp cutover_sentence({:error, _sentence}), do: jobs_gap()
+
+  defp jobs_gap, do: "A recurring job more than an hour late while the move runs is skipped."
 
   # -- facts ------------------------------------------------------------------
 

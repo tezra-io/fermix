@@ -81,10 +81,12 @@ defmodule Fermix.CLI.HomeMoveCommand do
     end
   end
 
+  # What happens next, not what to do: a person starts Fermix, and a server's
+  # first boot starts it on its next line.
   defp enrolled(code) do
     IO.puts(
-      "This home is now a candidate of #{code.name}. Start Fermix: it enrolls with " <>
-        "#{code.name}, then waits up to 24 hours for the move."
+      "This home is now a candidate of #{code.name}. When Fermix starts here, it enrolls " <>
+        "with #{code.name}, then waits up to 24 hours for the move."
     )
 
     0

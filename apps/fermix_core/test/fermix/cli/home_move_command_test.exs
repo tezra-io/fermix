@@ -112,9 +112,11 @@ defmodule Fermix.CLI.HomeMoveCommandTest do
 
         assert {status, err} == {0, ""}, phase
 
+        # What happens next, true for a person who starts Fermix and for a
+        # first boot that starts it on its next line (EC2 test finding 9).
         assert out ==
-                 "This home is now a candidate of orchard-mini. Start Fermix: it enrolls with " <>
-                   "orchard-mini, then waits up to 24 hours for the move.\n"
+                 "This home is now a candidate of orchard-mini. When Fermix starts here, it " <>
+                   "enrolls with orchard-mini, then waits up to 24 hours for the move.\n"
 
         assert {:ok, %{"phase" => "enrolling"}} = Candidate.read_state(ctx.home)
         refute File.exists?(ctx.code_file)

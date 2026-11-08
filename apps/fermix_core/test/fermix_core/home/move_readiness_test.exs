@@ -122,9 +122,11 @@ defmodule FermixCore.Home.MoveReadinessTest do
     assert sentence.("coding_agents") ==
              "Coding agents ask for your approval again on north-box."
 
-    # Telegram keeps what it holds until the poller asks again.
-    assert sentence.("cutover_gap") =~ "Telegram while the move runs wait until it is done"
-    refute sentence.("cutover_gap") =~ "lost"
+    # This home sets up no Telegram, so the gap names only the jobs (EC2 test
+    # finding 7).
+    assert sentence.("cutover_gap") ==
+             "A recurring job more than an hour late while the move runs is skipped."
+
     assert sentence.("serves_nothing") =~ "north-box"
     refute Enum.any?(items, &(&1.sentence =~ "sk-ant-invented"))
   end
@@ -157,6 +159,47 @@ defmodule FermixCore.Home.MoveReadinessTest do
     File.write!(Path.join(ctx.home, "config.toml"), "")
     assert %{items: items} = MoveReadiness.report(ctx.home, ctx.candidate, opts(ctx))
     assert %{status: :ok, sentence: "Slack is not turned on."} = item_in(items, "slack")
+  end
+
+  # Telegram keeps what it holds until the poller asks again, so its messages
+  # wait out the move; the gap names Telegram only while it is set up: turned
+  # on (its shipped default) with a bot token (EC2 test finding 7).
+  test "the cutover gap names Telegram only while this home has it set up", ctx do
+    telegram =
+      "Messages sent to Telegram while the move runs wait until it is done, and a " <>
+        "recurring job more than an hour late is skipped."
+
+    jobs = "A recurring job more than an hour late while the move runs is skipped."
+
+    for {settings, said} <- [
+          {~s([fermix_channels.telegram]\nenabled = true\nbot_token = "@keyring"\n), telegram},
+          {~s([fermix_channels.telegram]\nbot_token = "123456:invented"\n), telegram},
+          {~s([fermix_channels.telegram]\nenabled = false\nbot_token = "@keyring"\n), jobs},
+          {"[fermix_channels.telegram]\nenabled = true\n", jobs},
+          {~s([fermix_channels.telegram]\nenabled = true\nbot_token = ""\n), jobs},
+          {"", jobs}
+        ] do
+      items = MoveReadiness.summary_items({:ok, settings}, true, "north-box", opts(ctx))
+      assert %{status: :warn, sentence: ^said} = item_in(items, "cutover_gap")
+    end
+  end
+
+  # What a move back costs that its confirm names: only what the settings
+  # turn on (EC2 test finding 15).
+  test "the costs a confirm names are what the settings turn on, and none unread" do
+    assert MoveReadiness.costs({:ok, ""}) == []
+    assert MoveReadiness.costs({:error, "The settings file could not be read."}) == []
+
+    assert MoveReadiness.costs(
+             {:ok,
+              "[fermix_core.harness]\napproved = true\n\n" <>
+                ~s([fermix_channels.telegram]\nbot_token = "@keyring"\n)}
+           ) == [:coding_agents, :telegram]
+
+    assert MoveReadiness.costs(
+             {:ok,
+              ~s([fermix_core.harness]\napproved = false\n\n[fermix_channels.telegram]\nenabled = false\nbot_token = "@keyring"\n)}
+           ) == []
   end
 
   test "plugins with a build for the server are installed again there, and say so", ctx do

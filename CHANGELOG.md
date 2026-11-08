@@ -128,14 +128,17 @@ will be part of a future release; nothing in this group is in a release yet.
   computer to a Linux server, so Fermix keeps working with your Mac closed.
   With Reach from anywhere on, Always On on your primary gives an enrollment
   code, good once for thirty minutes (the first after a start waits a moment
-  for Reach from anywhere to start, rather than asking you to try again); a server enrolled with it waits for the
-  move, and you review the move (the secrets that travel, the server's Fermix,
+  for Reach from anywhere to start, rather than asking you to try again); a
+  server enrolled with it waits for the move (each side names the other by
+  its hostname, or a Mac by the computer name in its Sharing settings), and
+  you review the move (the secrets that travel, the server's Fermix,
   which must be this computer's own, since a newer one could never move the
   home back, free disk, the plugins with no build for the server, and what stops: those
   of iMessage, this computer's own voice calls and meetings you use, WhatsApp,
   and Slack unless it uses Socket Mode; calls from your phone carry on at the
   server when Talk to Fermix is on there and its key is in the server's
-  secret store; coding agents ask for your approval again on the server;
+  secret store; coding agents ask for your approval again on the server,
+  and Telegram's messages wait out the move, each only where you use it;
   a Fermix you started from a terminal stops when the move starts and needs
   starting again) and start it from the app with a recovery passphrase: the
   first move sets it if you have not, and every move after checks that it is

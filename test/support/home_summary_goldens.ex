@@ -187,6 +187,7 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
         primary_too_old: false,
         copies_bytes: Map.get(extra, :copies_bytes),
         stays_here: [],
+        return_costs: [],
         zone: "Europe/Berlin",
         return: nil,
         returning: nil,

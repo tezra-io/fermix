@@ -325,7 +325,8 @@ it, never a second writer.
   the server: *The tailnet policy*, above). **Cancel the code** closes it. The code
   is `fxenroll1.` and a long string that carries
   a one-time secret, the primary's gateway key, its iroh endpoint id and
-  relays, its name and when the window closes. The window lasts thirty
+  relays, its name (on a Mac its computer name) and when the window
+  closes. The window lasts thirty
   minutes (time for a cloud server to boot), takes one server, and opening
   another replaces it. The code is shown once and never logged, and the
   window is kept on this machine (`mobile/enrollment.json`, 0600, never in a
@@ -374,9 +375,9 @@ it, never a second writer.
 - **Reviewing it.** `fermix home candidates` (or `home.candidates.list`)
   lists the candidates the primary holds (at most four, each for 24 hours):
   id, name, system, version, and the snapshot bucket it was told.
-- **The readiness report.** Before the move, `home.move.readiness
-  {candidate_id}` (the apps' review step) answers each fact as `ok`, `warn` or
-  `block`: the secrets this computer keeps in its keychain, which move with
+- **The readiness report.** Before the move, the review (`home.act`'s Move
+  now and Check again; `home.move.readiness` is rail-only) answers each fact
+  as `ok`, `warn` or `block`: the secrets this computer keeps in its keychain, which move with
   the home (one the keychain will not give blocks, named as its settings row
   labels it, "your Anthropic key", one no row shows counted, never by its id
   or its value); the server's Fermix (an older one blocks, and so does a
@@ -400,16 +401,16 @@ it, never a second writer.
   unless switched to Socket Mode in the Slack app's settings and Fermix's);
   coding agents approved here (warns: a move withdraws that approval, as
   every restore does, so they ask again on the server); the cutover gap
-  (Telegram messages sent during the move wait until it is done, and a
-  recurring job more than an hour late is skipped); this computer
+  (a recurring job more than an hour late is skipped; while Telegram is set
+  up, its messages wait until the move is done); this computer
   serving nothing while the move runs; and Fermix run from a terminal
   (`fermix run`, warns: "Fermix runs from a terminal here, so it stops when
   the move starts. Start it again to finish."; the Mac app's engine,
   Fermix's own systemd unit (`fermix.service`, as the Linux package and
   `fermix service install` run it) and a `fermix service` install start again
   by themselves, while a shell inside any other unit, such as a terminal's,
-  does not). **Move now** runs it at the press (a ready review under 15
-  minutes old is taken as it was shown), and **Check again** runs it again.
+  does not). At Move now a ready review under 15 minutes old is taken as it
+  was shown.
   The move does not start while anything blocks, and Move now says each
   block; a warning the screen did not name yet comes back as the screen with
   that warning in Move now's confirm, so the owner accepts it first. Checking

@@ -222,6 +222,7 @@ defmodule FermixCore.Management.HomeSummary do
           required(:primary_too_old) => boolean(),
           required(:copies_bytes) => non_neg_integer() | nil,
           required(:stays_here) => [:imessage | :voice | :meetings],
+          required(:return_costs) => [:coding_agents | :telegram],
           required(:zone) => String.t(),
           required(:return) => map() | nil,
           required(:returning) => map() | :unreadable | nil,
@@ -380,7 +381,8 @@ defmodule FermixCore.Management.HomeSummary do
   `MoveReadiness.summary_items/4` is given `opts` as they are. Reads the
   last readiness review, what this home's
   settings turn on that runs only on this computer (on the primary, what
-  stops after a move; on a desktop, what runs here again after a move back),
+  stops after a move; on a desktop, what runs here again after a move back,
+  and what of a move back's costs they turn on, `MoveReadiness.costs/1`),
   on the primary the review's items they decide, the record of a move back
   (`Home.Return`), and, on a desktop, its candidate for a move back
   (`Home.Candidate`'s state) and its stored copies, newest first, by the
@@ -421,6 +423,7 @@ defmodule FermixCore.Management.HomeSummary do
       primary_too_old: Map.get(status, :primary_too_old, false),
       copies_bytes: copies_bytes(home, role, reads),
       stays_here: stays_here(home, role, host_os, reads),
+      return_costs: return_costs(home, role, reads),
       zone: Clock.shown_zone(Keyword.take(opts, [:personalization])),
       return: return,
       returning: returning_state(home, role, reads),
@@ -895,7 +898,7 @@ defmodule FermixCore.Management.HomeSummary do
 
   defp webhooks(detail, served) do
     Map.put(detail, "webhooks", %{
-      "sentence" => Copy.summary_sentence(:webhooks, %{}),
+      "sentence" => Copy.summary_sentence(:webhooks, %{carried: carried(served)}),
       "mounts" => Enum.map(served, &mount/1),
       "notes" => webhook_notes(served)
     })
@@ -932,6 +935,9 @@ defmodule FermixCore.Management.HomeSummary do
       Copy.summary_sentence(:webhooks_tunnel, %{ports: ports})
     ]
   end
+
+  # What the server serves, each kind once.
+  defp carried(served), do: served |> Enum.map(&port_of(&1["kind"])) |> Enum.uniq()
 
   defp port_of("whatsapp"), do: :whatsapp
   defp port_of("cue"), do: :cues
@@ -1141,7 +1147,11 @@ defmodule FermixCore.Management.HomeSummary do
   # this home's settings give, after any other the last review of the same
   # server gave.
   defp move_confirm(%{role: :device} = facts),
-    do: sentence(:confirm_return_move, facts, %{stays_here: facts.stays_here})
+    do:
+      sentence(:confirm_return_move, facts, %{
+        stays_here: facts.stays_here,
+        costs: facts.return_costs
+      })
 
   defp move_confirm(facts) do
     own = Enum.map(facts.move_items, & &1.id)
@@ -1533,6 +1543,13 @@ defmodule FermixCore.Management.HomeSummary do
   end
 
   defp stays_here(_home, _role, _host_os, _reads), do: []
+
+  # What a move back costs that this desktop's settings turn on, which its
+  # confirm names: the settings of the home it left, the facts it holds.
+  defp return_costs(home, :device, reads),
+    do: home |> MoveReadiness.settings(reads) |> MoveReadiness.costs()
+
+  defp return_costs(_home, _role, _reads), do: []
 
   # The review's items this home's settings decide, for the server a move
   # would go to, which Move now's confirm names: only the computer that sets

@@ -89,6 +89,7 @@ defmodule FermixChannels.Home.MoveWorker do
   alias FermixChannels.Mobile.Protocol
   alias FermixChannels.Mobile.Rail
   alias FermixCore.BuildInfo
+  alias FermixCore.Home.ComputerName
   alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.Move
   alias FermixCore.Home.MoveAwake
@@ -780,8 +781,8 @@ defmodule FermixChannels.Home.MoveWorker do
   end
 
   defp host_name do
-    {:ok, name} = :inet.gethostname()
-    name |> to_string() |> String.slice(0, 64)
+    {:ok, name} = ComputerName.read()
+    name
   end
 
   defp os do
