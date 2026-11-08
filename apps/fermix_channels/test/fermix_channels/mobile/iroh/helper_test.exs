@@ -125,6 +125,12 @@ defmodule FermixChannels.Mobile.Iroh.HelperTest do
     send(pid, {:retry, state.retry.token})
   end
 
+  # The day a failing rail retries for starts on its clock at its first
+  # failure. The rail emits `:degraded` before it reads that clock, so a test
+  # that moves the clock waits for the window to open first; moved on the emit
+  # alone, it can open the window a day late and the rail never gives up.
+  defp await_retry_window(pid), do: await_failures(pid, 1).retry.deadline_ms
+
   defp await_failures(pid, failures, attempts \\ div(@helper_ms, @poll_ms)) do
     state = :sys.get_state(pid)
 
@@ -352,6 +358,7 @@ defmodule FermixChannels.Mobile.Iroh.HelperTest do
           )
 
         assert_receive {:emit, :degraded, 1, :helper_error}, @helper_ms
+        assert await_retry_window(pid) == 24 * 3_600_000
         Agent.update(clock, fn _ -> 24 * 3_600_000 end)
         retry_now(pid, 1)
         state = await_given_up(pid)
@@ -393,6 +400,7 @@ defmodule FermixChannels.Mobile.Iroh.HelperTest do
           )
 
         assert_receive {:emit, :degraded, 1, _class}, @helper_ms
+        assert await_retry_window(pid) == 24 * 3_600_000
         Agent.update(clock, fn _ -> 24 * 3_600_000 end)
         retry_now(pid, 1)
         state = await_given_up(pid)
