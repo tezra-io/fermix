@@ -16,7 +16,7 @@
 
 ## Config keys
 
-Each provider is `[fermix_core.providers.<name>]` with `primary`, `default_model`, and:
+Each provider is `[fermix_core.providers.<name>]` with `primary`, `default_model` (unset: the catalog's default), and:
 
 | Provider | Wire | Auth and extra keys |
 |---|---|---|

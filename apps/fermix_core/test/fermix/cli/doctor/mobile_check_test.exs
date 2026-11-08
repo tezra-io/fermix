@@ -509,7 +509,7 @@ defmodule Fermix.CLI.Doctor.MobileCheckTest do
     write_identity_files(mobile_dir)
     Application.put_env(:fermix_channels, :mobile, enabled: true, advertise_mdns: true)
 
-    client = live_client(idle_report(%{"refused" => false}))
+    client = idle_report(%{"refused" => false}) |> live_client() |> with_role("primary")
 
     result = Checks.mobile(mobile_dir: mobile_dir, client: client)
 
@@ -518,6 +518,47 @@ defmodule Fermix.CLI.Doctor.MobileCheckTest do
     refute result.detail =~ "listener down"
     refute result.detail =~ "mDNS down"
     refute result.detail =~ "no paired devices"
+  end
+
+  # The device role starts no phone channel by design (`Home.Role`): the phones
+  # reach the primary, so a channel it did not start is the role at work, and
+  # nobody is sent to restart anything (EC2 test finding 1).
+  test "a channel the device role does not start passes and says why", %{mobile_dir: mobile_dir} do
+    write_identity_files(mobile_dir)
+    Application.put_env(:fermix_channels, :mobile, enabled: true)
+
+    client = idle_report(%{"refused" => false}) |> live_client() |> with_role("device")
+
+    result = Checks.mobile(mobile_dir: mobile_dir, client: client)
+
+    assert result == %{
+             name: "mobile companion",
+             status: :ok,
+             detail:
+               "identity files 0600; this engine runs in the device role, which starts no " <>
+                 "phone channel: phones reach the primary"
+           }
+  end
+
+  # Which role the engine runs in is the daemon's word; one it cannot give is
+  # said, never read as either role.
+  test "a role the daemon cannot give fails the row and says why", %{mobile_dir: mobile_dir} do
+    write_identity_files(mobile_dir)
+    Application.put_env(:fermix_channels, :mobile, enabled: true)
+
+    report = idle_report(%{"refused" => false})
+    status = live_client(report)
+
+    client = fn
+      "mobile_status" -> status.("mobile_status")
+      "health" -> {:error, :timeout}
+    end
+
+    result = Checks.mobile(mobile_dir: mobile_dir, client: client)
+
+    assert result.status == :fail
+    assert result.detail =~ "mobile channel not started, and the engine's role could not be read"
+    refute result.detail =~ "restart the daemon"
   end
 
   # The announcement ships off, so a block that never turns it on reads it
@@ -663,6 +704,14 @@ defmodule Fermix.CLI.Doctor.MobileCheckTest do
       )
 
     fn "mobile_status" -> {:ok, %{"status" => "ok", "result" => report}} end
+  end
+
+  # The client also answers `health` with the role the engine booted in.
+  defp with_role(client, role) do
+    fn
+      "health" -> {:ok, %{"status" => "ok", "health" => %{"role" => role, "channels" => []}}}
+      method -> client.(method)
+    end
   end
 
   # A channel that is not running reports idle facts beside the reason.

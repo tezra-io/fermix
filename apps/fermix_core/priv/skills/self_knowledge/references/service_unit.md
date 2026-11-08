@@ -29,7 +29,7 @@ After any update the daemon keeps running the old engine until it restarts: "upg
 | Verb | Does |
 |---|---|
 | `fermix service install [--home PATH] [--port N] [--json]` | records the home, turns on linger (with no `loginctl` it refuses: run the daemon in the foreground with `fermix run`), enables and starts the unit, verifies it answers within 90 s; moving an active service's home is refused until it is stopped |
-| `fermix service status [--json]` | works with no daemon: binding, unit state, linger, listener, installed vs running engine (`aligned`, `pending_restart`, `not_running`, `unknown`, `ownership_conflict`) |
+| `fermix service status [--json]` | works with no daemon: binding, unit state, linger, listener, installed vs running engine (`aligned`, `pending_restart`, `not_running`, `unknown`, `ownership_conflict`); on any other install it refuses (`foreign_distribution`) and points to doctor's `service unit` row, which reports that install's own unit |
 | `fermix service uninstall [--json]` | disables and stops; binding and home stay |
 | `fermix restart [--json]` | one `systemctl --user restart`, waits up to 90 s for a new pid; `--when-idle` is refused for now, so a restart interrupts work in progress |
 | `fermix diagnostics export --offline [--json]` | a redacted support bundle with no daemon needed; reads no secret and never unlocks a keyring (≤ 1 MB, ≤ 10 s) |

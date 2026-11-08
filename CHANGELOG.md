@@ -73,6 +73,29 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`fermix doctor` no longer fails a computer in the device role for what
+  that role never starts.** A computer whose home moved to another host runs
+  no phone channel and no ACP listener, yet its `mobile companion` and `acp
+  surface` rows failed, sent you to restart the daemon or read its logs, and
+  made doctor exit 1. In the device role both rows now pass and say the role
+  starts neither, and phones reach the primary; a real fault, such as
+  identity files with the wrong permissions, still fails.
+- **Saving settings no longer writes an OpenAI section you never set.** Every
+  save wrote `[fermix_core.providers.openai]` with `default_model =
+  "gpt-5.4-mini"` into `config.toml`, a value Fermix itself shipped, even on
+  a home that never used OpenAI, and the file's header named
+  `~/.fermix/skills` whatever home it belonged to. A save now writes only
+  the provider sections you set, the header names the skills folder beside
+  the file, and an OpenAI key with no model chosen runs on the catalog's
+  default, GPT-6 Astra, as a fresh install was meant to. A file that already
+  carries that line keeps its model until you choose another.
+- **`fermix service status` says what it covers on a Mac or a standalone
+  install.** There it said "This Fermix was not installed from a Linux
+  package, so there is no packaged background service for it to manage."
+  even with the launch agent `fermix service install` set up running. It now
+  says it reports only a Linux package's service and points to the `service
+  unit` row of `fermix doctor`, which reports that install's own unit. A
+  Linux package's status is unchanged.
 - **A job bound to a plugin's skill can use that plugin again.** Since a job
   bound to a plugin skill started running at guest trust, it got none of the
   plugin's own tools, so a GitHub issue monitor ran with no GitHub tool at

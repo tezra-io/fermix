@@ -1513,7 +1513,8 @@ defmodule FermixCore.Setup.ConfigStore do
     [
       "# Managed by mix fermix.setup",
       "# Built-in tools ship inside Fermix and are always available when registered.",
-      "# Skills are separate SKILL.md directories under ~/.fermix/skills and plugin roots.",
+      "# Skills are separate SKILL.md directories in the skills folder beside this file " <>
+        "and in plugin roots.",
       render_section(
         ["fermix_core"],
         profile_render(profile) ++ secret_store_render(secret_store)

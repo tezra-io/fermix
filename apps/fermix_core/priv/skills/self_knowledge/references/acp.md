@@ -23,4 +23,5 @@ Check it: `fermix doctor`'s `acp surface` row shows the socket path, whether the
 ## Failure
 
 - No provider was connected when the daemon started → the ACP listener never starts, and doctor's `acp surface` row fails with "enabled but its listener is not running". Connect a provider, then restart.
+- The device role (a computer whose home moved to an Always On server) starts no ACP listener; doctor's row passes and says so.
 - Socket cannot be bound at boot (usually a `FERMIX_HOME` path long enough to push the socket past the OS limit) → ACP is off for that boot only, the rest of the daemon runs, and the daemon log has one line naming the path and the fix.

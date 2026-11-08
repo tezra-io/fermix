@@ -384,7 +384,7 @@ sentence interpolates a fact, the example below is the golden's.
 - `foreign_unit` — Fermix did not write the service file at /home/operator/.config/systemd/user/fermix.service, so it was left alone. Remove or rename it if you want Fermix to manage this service.
 - `activation_timeout` — The background service was started but did not answer in time. Read what it said with journalctl --user -u fermix, then try again.
 - `health_unavailable` — The background service is running, but its web address did not answer, so the setup page is not reachable yet. Read what it said with journalctl --user -u fermix.
-- `foreign_distribution` — This Fermix was not installed from a Linux package, so there is no packaged background service for it to manage.
+- `foreign_distribution` — fermix service status reports only a Linux package's background service, and this Fermix was not installed from one. For the service fermix service install sets up here, see the service unit row of fermix doctor.
 - `service_unbound` — No home is bound to the background service yet. Run fermix service install to choose one.
 - `diagnostics_unavailable` — Fermix could not collect the diagnostic bundle. It said: collecting it took too long
 - `idle_restart_unavailable` — This engine cannot restart when idle yet. Restarting now interrupts any work in progress.

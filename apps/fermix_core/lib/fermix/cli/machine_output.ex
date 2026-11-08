@@ -147,9 +147,12 @@ defmodule Fermix.CLI.MachineOutput do
       "setup page is not reachable yet. Read what it said with journalctl --user -u fermix."
   end
 
+  # A Mac or a standalone binary runs the service `fermix service install`
+  # writes, which Doctor's service unit row reports.
   def sentence(:foreign_distribution, _details) do
-    "This Fermix was not installed from a Linux package, so there is no packaged " <>
-      "background service for it to manage."
+    "fermix service status reports only a Linux package's background service, and this " <>
+      "Fermix was not installed from one. For the service fermix service install sets up " <>
+      "here, see the service unit row of fermix doctor."
   end
 
   def sentence(:service_unbound, _details) do

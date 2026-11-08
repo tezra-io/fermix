@@ -2659,6 +2659,42 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.detail =~ "listener"
     end
 
+    # The device role starts no ACP listener by design (`Home.Role`), so its
+    # absence there is the role at work: nobody is sent to the daemon's logs
+    # (EC2 test finding 1).
+    test "passes in the device role, which starts no listener, and says so" do
+      Application.put_env(:fermix_channels, :acp, enabled: true)
+      channel = %{"name" => "acp", "enabled" => true, "process_alive" => false}
+
+      client = fn "health" ->
+        {:ok, %{"status" => "ok", "health" => %{"role" => "device", "channels" => [channel]}}}
+      end
+
+      result = Checks.acp(client: client)
+
+      assert result == %{
+               name: "acp surface",
+               status: :ok,
+               detail: "this engine runs in the device role, which starts no ACP listener"
+             }
+    end
+
+    test "a record the store refuses still fails the row in the device role", %{home: home} do
+      Application.put_env(:fermix_channels, :acp, enabled: true)
+      path = connect_identity(home)
+      File.chmod!(path, 0o644)
+
+      client = fn "health" ->
+        {:ok, %{"status" => "ok", "health" => %{"role" => "device", "channels" => []}}}
+      end
+
+      result = Checks.acp(client: client)
+
+      assert result.status == :fail
+      assert result.detail =~ "device role"
+      assert result.detail =~ "chmod 600"
+    end
+
     test "warns with the socket path when the daemon is not running" do
       Application.put_env(:fermix_channels, :acp, enabled: true)
       client = fn "health" -> {:error, :not_running} end

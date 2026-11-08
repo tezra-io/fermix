@@ -539,6 +539,58 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert Keyword.get(providers[:openai], :primary) == false
   end
 
+  # A save renders the app env, so a value the shipped config sets in a
+  # provider block would be written as the owner's (EC2 test finding 13): a
+  # home whose only provider is a keyless Ollama gained an OpenAI section it
+  # never set. Seeded with the providers a release boots with
+  # (`config/config.exs` for prod, read as `Config.Reader` reads it, plus the
+  # empty key `config/runtime.exs` puts in) and the Ollama block its file set.
+  test "a save writes no provider section the owner never set, and names no other home" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    providers = Application.fetch_env(:fermix_core, :providers)
+
+    on_exit(fn ->
+      restore_providers(providers)
+      FermixTestSupport.SafeRm.rm_rf!(tmp_home)
+    end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    shipped =
+      Path.expand("../../../../../config/config.exs", __DIR__)
+      |> Config.Reader.read!(env: :prod, target: :host)
+      |> Keyword.fetch!(:fermix_core)
+      |> Keyword.get(:providers, [])
+
+    openai = shipped |> Keyword.get(:openai, []) |> Keyword.put_new(:api_key, "")
+    ollama = [base_url: "http://127.0.0.1:11434", primary: true]
+
+    Application.put_env(
+      :fermix_core,
+      :providers,
+      shipped |> Keyword.put(:openai, openai) |> Keyword.put(:ollama, ollama)
+    )
+
+    assert :ok = ConfigStore.save_snapshot(ConfigStore.current_snapshot())
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ "[fermix_core.providers.ollama]"
+    refute contents =~ "[fermix_core.providers.openai]"
+
+    # The header names the skills folder of the home the file is in, wherever
+    # that home lives or moves, never one at a fixed path.
+    refute contents =~ "~/.fermix"
+
+    assert contents =~
+             "# Skills are separate SKILL.md directories in the skills folder beside this " <>
+               "file and in plugin roots."
+  end
+
+  defp restore_providers({:ok, value}), do: Application.put_env(:fermix_core, :providers, value)
+  defp restore_providers(:error), do: Application.delete_env(:fermix_core, :providers)
+
   # M57 §5: `[fermix_core.providers.openai_codex]` carries `primary`,
   # `default_model` and `reasoning_effort` and nothing else (the config
   # round-trip pitfall: seeded with the normalized app-env shapes).

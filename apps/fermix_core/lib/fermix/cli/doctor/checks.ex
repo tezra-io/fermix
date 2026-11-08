@@ -79,6 +79,11 @@ defmodule Fermix.CLI.Doctor.Checks do
   @mobile_health_candidate_limit 8
   @mobile_health_timeout_ms 750
 
+  # What the device role does instead of the surfaces it never starts.
+  @device_mobile "this engine runs in the device role, which starts no phone channel: " <>
+                   "phones reach the primary"
+  @device_acp "this engine runs in the device role, which starts no ACP listener"
+
   # {vendor, run-tool name} pairs — the boot-registry vs current-PATH mismatch
   # (§7.3) compares each run tool's registration against its vendor's detection.
   @harness_run_tools [{"codex", "codex_run"}, {"claude", "claude_code_run"}]
@@ -1258,11 +1263,26 @@ defmodule Fermix.CLI.Doctor.Checks do
     )
   end
 
-  defp mobile_daemon_result(_config, %{status: :reported, report: %{"started" => false}}, _opts) do
-    fail(
-      "mobile companion",
-      "identity files 0600; mobile channel not started; restart the daemon"
-    )
+  # A device-role engine starts no phone channel (`FermixCore.Home.Role`): the
+  # phones reach the primary, so a channel it did not start is the role at work.
+  defp mobile_daemon_result(_config, %{status: :reported, report: %{"started" => false}}, opts) do
+    case opts |> Keyword.get(:client, &Client.request/1) |> engine_role() do
+      {:ok, "device"} ->
+        ok("mobile companion", "identity files 0600; " <> @device_mobile)
+
+      {:ok, _role} ->
+        fail(
+          "mobile companion",
+          "identity files 0600; mobile channel not started; restart the daemon"
+        )
+
+      {:error, detail} ->
+        fail(
+          "mobile companion",
+          "identity files 0600; mobile channel not started, and the engine's role could " <>
+            "not be read: #{detail}"
+        )
+    end
   end
 
   defp mobile_daemon_result(config, %{status: :reported, report: report}, opts) do
@@ -1308,6 +1328,20 @@ defmodule Fermix.CLI.Doctor.Checks do
        do: {:fail, "listener unavailable (#{reason}); it keeps retrying"}
 
   defp mobile_listener(_report, _opts), do: {:fail, "listener down"}
+
+  # The role the running engine booted in, as its health report names it.
+  defp engine_role(client) do
+    case client.("health") do
+      {:ok, %{"status" => "ok", "health" => %{"role" => role}}} when is_binary(role) ->
+        {:ok, role}
+
+      {:ok, other} ->
+        {:error, "unexpected reply: #{inspect(other)}"}
+
+      {:error, reason} ->
+        {:error, Client.describe_error(reason)}
+    end
+  end
 
   defp refusal_class(%{"refusal" => class}) when is_binary(class), do: " (#{class})"
   defp refusal_class(_report), do: ""
@@ -1619,6 +1653,10 @@ defmodule Fermix.CLI.Doctor.Checks do
     path = AcpCommand.socket_path()
 
     case client.("health") do
+      # A device-role engine starts no ACP listener (`FermixCore.Home.Role`).
+      {:ok, %{"status" => "ok", "health" => %{"role" => "device"}}} ->
+        ok("acp surface", @device_acp)
+
       {:ok, %{"status" => "ok", "health" => health}} ->
         acp_listener_result(acp_channel(health), path)
 
