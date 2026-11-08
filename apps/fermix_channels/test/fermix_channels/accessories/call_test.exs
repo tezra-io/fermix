@@ -368,6 +368,28 @@ defmodule FermixChannels.Accessories.CallTest do
       assert_receive {:engine, ^session, {:mute, false}}
     end
 
+    # The accessory confirms the Mac's mute.set with its own mic.state; that
+    # confirmation does not make the mute the accessory's.
+    test "a mute from the Mac stays the Mac's when the accessory confirms it", ctx do
+      ctx = ctx |> attached() |> call_up()
+      session = ctx.session
+
+      assert :ok = Link.mute(ctx.link, ctx.call_id, true)
+      assert %{muted: true} = AccessoryCase.await_received(ctx.sim, "mute.set")
+      AccessorySim.mic_state(ctx.sim, "muted")
+      # Audio behind the confirmation, on the same path: once the engine has
+      # it, the call has taken the confirmation and published its view.
+      AccessorySim.send_mic(ctx.sim, 5)
+      assert_receive {:engine, ^session, {:audio, _chunk}}
+
+      assert %{call: %{view: %{muted_by: :mac}}} = Link.status(ctx.link)
+
+      AccessorySim.mic_state(ctx.sim, "live")
+      AccessoryCase.await_state(&match?(%{call: %{view: %{muted_by: nil}}}, &1))
+      AccessorySim.mic_state(ctx.sim, "muted")
+      AccessoryCase.await_state(&match?(%{call: %{view: %{muted_by: :accessory}}}, &1))
+    end
+
     test "a microphone backlog on the accessory ends the call", ctx do
       ctx = ctx |> attached() |> call_up()
 

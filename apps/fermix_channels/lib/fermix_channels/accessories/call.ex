@@ -418,7 +418,8 @@ defmodule FermixChannels.Accessories.Call do
   defp on_robot(state, %{type: "mic.state", state: mic}) do
     state = if mic == "live", do: %{state | mic_live?: true}, else: state
     muted? = mic != "live"
-    state = viewed(state, &View.muted(&1, if(muted?, do: :accessory)))
+    # A mute already in force keeps its owner: the accessory confirms the Mac's.
+    state = viewed(state, &View.muted(&1, if(muted?, do: &1.muted_by || :accessory)))
     if muted? == state.engine_muted?, do: {:noreply, state}, else: engine_mute(state, muted?)
   end
 
