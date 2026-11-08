@@ -17,6 +17,11 @@ defmodule FermixCore.Browser.BridgeTest do
 
   @tab_id 77
   @connect_timeout 1_000
+  # Once it has taken a connection, a server that waits in a 50 ms accept takes
+  # each call only when that accept times out, so these calls in a row would
+  # need over 5 s; answered at once they take a few milliseconds.
+  @calls_in_a_row 101
+  @calls_bound_ms 2_500
 
   setup do
     # Short on purpose: a Unix socket address is capped around 104 bytes, which a
@@ -61,6 +66,16 @@ defmodule FermixCore.Browser.BridgeTest do
   end
 
   # ── the socket itself ──────────────────────────────────────────────────────
+
+  # The handshake's ack is the endpoint's accept loop at work.
+  test "answers a call at once while it waits for a connection", ctx do
+    start_bridge(ctx)
+    _socket = hello!(ctx)
+    started = System.monotonic_time(:millisecond)
+    for _call <- 1..@calls_in_a_row, do: assert(Endpoint.connection_count() == 1)
+    took_ms = System.monotonic_time(:millisecond) - started
+    assert took_ms < @calls_bound_ms, "#{@calls_in_a_row} calls took #{took_ms} ms"
+  end
 
   test "binds the socket at 0600 and removes it on shutdown", ctx do
     start_bridge(ctx)
