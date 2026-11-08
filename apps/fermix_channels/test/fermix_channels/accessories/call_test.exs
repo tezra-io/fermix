@@ -373,6 +373,10 @@ defmodule FermixChannels.Accessories.CallTest do
     test "a mute from the Mac stays the Mac's when the accessory confirms it", ctx do
       ctx = ctx |> attached() |> call_up()
       session = ctx.session
+      # The sim's own `mic.state live` follows its notice of `listening`;
+      # audio reaches the engine only once the call has taken that live.
+      AccessorySim.send_mic(ctx.sim, 5)
+      assert_receive {:engine, ^session, {:audio, _live}}
 
       assert :ok = Link.mute(ctx.link, ctx.call_id, true)
       assert %{muted: true} = AccessoryCase.await_received(ctx.sim, "mute.set")
