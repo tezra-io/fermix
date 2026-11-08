@@ -4,6 +4,11 @@ defmodule FermixCore.Home.Archive.RestoredConfig do
   change made through `FermixCore.Home.Archive.ConfigText` so every other byte
   of the file stays as it was:
 
+    * the settings that name the archived machine's own paths
+      (`FermixCore.Home.DeviceLocal.settings/0`, such as the dev plugin
+      folder) are left out, on any host: they stay on the machine that set
+      them, and a return puts that machine's own back
+      (`FermixCore.Home.Candidate.Return`);
     * values that named the old home's path name the new one;
     * `[fermix_core.harness] approved` becomes `false`: coding-harness consent
       was given for one machine and is never copied as consent for another
@@ -25,6 +30,7 @@ defmodule FermixCore.Home.Archive.RestoredConfig do
   """
 
   alias FermixCore.Home.Archive.ConfigText
+  alias FermixCore.Home.DeviceLocal
   alias FermixCore.Setup.SecretWriter
 
   @type facts :: %{
@@ -39,6 +45,7 @@ defmodule FermixCore.Home.Archive.RestoredConfig do
           harness_consent_reset: boolean(),
           secret_store_switched: boolean(),
           imessage_disabled: boolean(),
+          device_settings_dropped: [String.t()],
           keyring_secrets: non_neg_integer()
         }
 
@@ -51,6 +58,7 @@ defmodule FermixCore.Home.Archive.RestoredConfig do
       harness_consent_reset: false,
       secret_store_switched: false,
       imessage_disabled: false,
+      device_settings_dropped: [],
       keyring_secrets: 0
     }
   end
@@ -61,9 +69,14 @@ defmodule FermixCore.Home.Archive.RestoredConfig do
   def settle(text, %{old_root: old_root, new_root: new_root, macos?: macos?} = facts)
       when is_binary(text) and is_binary(old_root) and is_binary(new_root) and
              is_boolean(macos?) and is_function(facts.keyring_usable?, 0) do
-    case ConfigText.rebase(text, old_root, new_root) do
-      {:ok, rebased, rewritten} -> {:ok, settle_rebased(text, rebased, rewritten, facts)}
-      {:error, reason} -> {:error, {:config_not_rewritable, reason}}
+    {here, dropped} = drop_device_settings(text)
+
+    case ConfigText.rebase(here, old_root, new_root) do
+      {:ok, rebased, rewritten} ->
+        {:ok, settle_rebased(here, {rebased, rewritten, dropped}, facts)}
+
+      {:error, reason} ->
+        {:error, {:config_not_rewritable, reason}}
     end
     |> flatten()
   end
@@ -71,7 +84,19 @@ defmodule FermixCore.Home.Archive.RestoredConfig do
   defp flatten({:ok, {text, settled}}), do: {:ok, text, settled}
   defp flatten({:error, _reason} = error), do: error
 
-  defp settle_rebased(original, rebased, rewritten, facts) do
+  # The archived machine's own settings, each as its dotted key, in the order
+  # `DeviceLocal` lists them.
+  defp drop_device_settings(text),
+    do: Enum.reduce(DeviceLocal.settings(), {text, []}, &drop_setting/2)
+
+  defp drop_setting(%{table: table, key: key}, {text, dropped}) do
+    case ConfigText.drop(text, table, key) do
+      {text, true} -> {text, dropped ++ ["#{table}.#{key}"]}
+      {text, false} -> {text, dropped}
+    end
+  end
+
+  defp settle_rebased(original, {rebased, rewritten, dropped}, facts) do
     {consent_text, consent_reset?} = reset_harness_consent(rebased)
     {store_text, switched?} = file_store_without_keyring(consent_text, facts)
     {imessage_text, imessage_off?} = imessage_off_away_from_macos(store_text, facts)
@@ -83,6 +108,7 @@ defmodule FermixCore.Home.Archive.RestoredConfig do
        harness_consent_reset: consent_reset?,
        secret_store_switched: switched?,
        imessage_disabled: imessage_off?,
+       device_settings_dropped: dropped,
        keyring_secrets: ConfigText.keyring_references(original)
      }}
   end

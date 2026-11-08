@@ -93,6 +93,7 @@ defmodule FermixCore.Home.ArchiveTest do
                   harness_consent_reset: true,
                   secret_store_switched: false,
                   imessage_disabled: false,
+                  device_settings_dropped: [],
                   keyring_secrets: 2,
                   screen_history_removed: 3,
                   source_host: @host,
@@ -276,6 +277,18 @@ defmodule FermixCore.Home.ArchiveTest do
       assert config.bytes == byte_size(content)
       assert config.sha256 == Base.encode16(:crypto.hash(:sha256, content), case: :lower)
       assert config.mode == 0o600
+    end
+
+    # EC2 test 2026-11-08: a dev plugin folder is links to checkouts on this
+    # machine, outside the home. It stays here (`DeviceLocal`), so the walk
+    # neither carries nor refuses it.
+    test "no dev plugin folder, its links out of the home included", %{home: home} do
+      File.mkdir_p!(Path.join(home, "dev-plugins"))
+      File.ln_s!("/etc", Path.join(home, "dev-plugins/tesla"))
+
+      assert {:ok, found, links} = Archive.collect(home, :infinity)
+      paths = Enum.map(found, &elem(&1, 0)) ++ Enum.map(links, & &1.path)
+      refute Enum.any?(paths, &String.starts_with?(&1, "dev-plugins"))
     end
   end
 

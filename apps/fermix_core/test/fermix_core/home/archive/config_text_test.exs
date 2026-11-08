@@ -88,6 +88,16 @@ defmodule FermixCore.Home.Archive.ConfigTextTest do
     assert ConfigText.value(appended, "fermix_core.harness", "approved") == {:ok, "false"}
   end
 
+  test "drops a key's line from its section, and says whether there was one" do
+    {dropped, true} = ConfigText.drop(@config, "sandbox", "workspace_root")
+
+    assert ConfigText.value(dropped, "sandbox", "workspace_root") == :absent
+    assert dropped == String.replace(@config, ~r/^workspace_root = .*\n/m, "")
+
+    assert ConfigText.drop(@config, "sandbox", "approved") == {@config, false}
+    assert ConfigText.drop(@config, "fermix_core.harness", "approved") == {@config, false}
+  end
+
   test "decodes a raw string value and refuses anything else" do
     assert ConfigText.string(~s("keyring")) == {:ok, "keyring"}
     assert ConfigText.string("'file'") == {:ok, "file"}

@@ -83,7 +83,7 @@ it, never a second writer.
   token file, the file secret store, the phone identity bundle and device
   list, prompt files, skills, journals, the workspace and installed plugins)
   and leaves out what belongs to the machine: logs, traces, sockets, locks,
-  sandbox grants, browser profiles, the iMessage cursor, coding-harness
+  sandbox grants, the dev plugin folder and its setting, browser profiles, the iMessage cursor, coding-harness
   spools, downloaded models and helper binaries, and the moved marker.
   Secrets kept in the OS keyring are not in the home and do not travel in an
   archive; export and import both say how many must be entered again on the
@@ -382,25 +382,24 @@ it, never a second writer.
   labels it, "your Anthropic key", one no row shows counted, never by its id
   or its value); the server's Fermix (an older one blocks, and so does a
   newer one, which could never move the home back here: update Fermix on
-  this computer first; a move back, to the desktop the home left, blocks only
-  a desktop older than the server: the server knows it is one because that
-  desktop's candidate enrolled through the code it opened for it, never by
-  its system); free disk here (the
+  this computer first; a move back, to the desktop the home left, known by
+  the code that desktop opened for its candidate, blocks only a desktop
+  older than the server); free disk here (the
   capture needs about twice the home; short of it blocks, with the numbers);
   a home over one S3 upload (5 GiB) when the server keeps snapshots in S3
   (warns: it would never back up there); on a server of another system, the
   plugins the catalog has no build of for it (warns, named: they stop
-  working; the server installs every other one again itself); what this
+  working; the server installs every other one again itself); a dev plugin
+  folder (warns: it stays here); what this
   home has turned on that runs only here stopping after the move, each named
   (iMessage on a Mac, voice calls, meetings; nothing to warn of when none is
   on); WhatsApp
-  turned on (warns: it stops after the move until you run the Tailscale
-  Funnel command Always On shows for the server and point Meta at the
-  address it prints);
+  turned on (warns: it stops until you run the Tailscale Funnel command
+  Always On shows for the server and point Meta at its address);
   Slack turned on without Socket Mode (warns: it stops
   unless switched to Socket Mode in the Slack app's settings and Fermix's);
-  coding agents approved here (warns: a move withdraws that approval, as
-  every restore does, so they ask again on the server); the cutover gap
+  coding agents approved here (warns: they ask again on the server, as
+  after any restore); the cutover gap
   (a recurring job more than an hour late is skipped; while Telegram is set
   up, its messages wait until the move is done); this computer
   serving nothing while the move runs; and Fermix run from a terminal

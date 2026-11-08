@@ -40,6 +40,10 @@ defmodule FermixCore.Home.MoveReadiness do
       named: they stop working after the move. The server installs every
       other one again for itself right after the move
       (`FermixCore.Plugins.Dist.Reinstall`), through the plugin installer;
+    * `dev_plugins`, only while this home's settings name a dev plugin
+      folder (`[fermix_core.plugins] dev_local`), warns: the folder and its
+      links to checkouts stay on this computer (`FermixCore.Home.DeviceLocal`),
+      so the server runs none of them, and the walk never blocks on them;
     * `stays_here`: what the home has turned on that runs only on this
       computer (iMessage on a Mac, voice calls, meetings, StackChan on a Mac;
   `stays_here/2`)
@@ -119,6 +123,8 @@ defmodule FermixCore.Home.MoveReadiness do
         :error -> home_bytes(home)
       end
 
+    macos? = String.starts_with?(host, "macos-")
+
     items =
       call_in_progress(Keyword.get(opts, :call_holder, &call_holder/0)) ++
         [
@@ -128,12 +134,8 @@ defmodule FermixCore.Home.MoveReadiness do
           s3_size(candidate, home_bytes),
           plugins(home, host, candidate, opts)
         ] ++
-        summary_items(
-          config,
-          String.starts_with?(host, "macos-"),
-          name,
-          Keyword.put(opts, :returning, returning?(candidate))
-        )
+        dev_plugins(config, macos?, name) ++
+        summary_items(config, macos?, name, Keyword.put(opts, :returning, returning?(candidate)))
 
     %{ready: not Enum.any?(items, &(&1.status == :block)), items: items}
   end
@@ -472,6 +474,31 @@ defmodule FermixCore.Home.MoveReadiness do
         "These plugins have no build for #{name}, so they stop working after the move: " <>
           "#{Enum.join(names, ", ")}."
       )
+
+  # The dev plugin folder is this computer's (`DeviceLocal.settings/0`): no
+  # restore carries it, so the server runs none of its plugins.
+  defp dev_plugins({:ok, text}, macos?, name) do
+    machine = if macos?, do: "Mac", else: "computer"
+
+    if dev_folder?(text),
+      do: [
+        item(
+          "dev_plugins",
+          :warn,
+          "Dev plugins stay on this #{machine}: #{name} runs none of them."
+        )
+      ],
+      else: []
+  end
+
+  defp dev_plugins({:error, _sentence}, _macos?, _name), do: []
+
+  defp dev_folder?(text) do
+    case ConfigText.value(text, "fermix_core.plugins", "dev_local") do
+      {:ok, raw} -> ConfigText.string(raw) != {:ok, ""}
+      :absent -> false
+    end
+  end
 
   # M87: a move restarts this engine, and the restart ends a voice call in
   # progress before the move's capture starts; the review names it first.

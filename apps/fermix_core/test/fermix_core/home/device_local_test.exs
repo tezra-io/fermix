@@ -13,6 +13,16 @@ defmodule FermixCore.Home.DeviceLocalTest do
     assert patterns == Enum.uniq(patterns)
   end
 
+  # EC2 test 2026-11-08: a Mac's dev plugin folder is a setting naming this
+  # machine's own checkouts. A restore leaves it out of the settings it
+  # writes, and a return keeps this machine's own.
+  test "the settings that stay on this machine name their table, key and reason" do
+    assert [%{table: "fermix_core.plugins", key: "dev_local", reason: reason}] =
+             DeviceLocal.settings()
+
+    assert is_binary(reason) and reason != "" and not String.contains?(reason, "\n")
+  end
+
   test "every entry says whether a return keeps it, and there is no third answer" do
     for %{pattern: pattern, return: return} <- DeviceLocal.excluded() do
       assert return in [:keep, :drop], pattern
@@ -53,7 +63,9 @@ defmodule FermixCore.Home.DeviceLocalTest do
           "plugins/compux/1.2.0/macos/Fermix.app/Contents/Info.plist",
           "plugins/stt/bin/macos/fermix-stt",
           "plugins/meetbot/profile/Cookies",
-          "plugins/imessage_helper/1.0.0/macos-universal/x"
+          "plugins/imessage_helper/1.0.0/macos-universal/x",
+          "dev-plugins",
+          "dev-plugins/tesla"
         ] do
       assert DeviceLocal.kept_through_return?(path), path
     end
@@ -190,7 +202,9 @@ defmodule FermixCore.Home.DeviceLocalTest do
           "plugins/installed/notes/current.tmp",
           "plugins/installed/notes/.1.0.0.replacing",
           "plugins/evidence/notes/.1.0.0.staging/sig",
-          "workspace/project/run.sock"
+          "workspace/project/run.sock",
+          "dev-plugins/tesla",
+          "dev-plugins/tesla/plugin.json"
         ] do
       assert DeviceLocal.excluded?(path), path
     end

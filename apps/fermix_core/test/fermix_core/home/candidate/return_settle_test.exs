@@ -199,6 +199,43 @@ defmodule FermixCore.Home.Candidate.ReturnSettleTest do
       assert value(text, "fermix_core.memory", "enabled") == "true"
       assert value(text, "fermix_core", "profile") == ~s("general")
     end
+
+    # EC2 test 2026-11-08: the dev plugin folder is this computer's
+    # (`DeviceLocal.settings/0`). Every restore leaves it out, so a move back
+    # puts this computer's own into the server's table, beside the rest of it.
+    test "this computer's own settings come back from the retired file" do
+      staged = """
+      [fermix_core.plugins]
+      enabled = ["invented-notes"]
+      """
+
+      retired = """
+      [fermix_core.plugins]
+      enabled = ["invented-old"]
+      dev_local = "/Users/invented/.fermix/dev-plugins"
+      """
+
+      text = Return.device_sections(staged, retired)
+
+      assert value(text, "fermix_core.plugins", "dev_local") ==
+               ~s("/Users/invented/.fermix/dev-plugins")
+
+      assert value(text, "fermix_core.plugins", "enabled") == ~s(["invented-notes"])
+    end
+
+    test "a setting this computer never set stays unset" do
+      staged = "[fermix_core.plugins]\nenabled = []\n"
+      assert Return.device_sections(staged, ~s([fermix_core]\nprofile = "general"\n)) == staged
+    end
+  end
+
+  test "a move back keeps this computer's dev plugin folder", ctx do
+    put_retired(ctx.mac, "fermix_core.plugins", "dev_local", ~s("#{ctx.mac}/dev-plugins"))
+
+    assert {:ok, 7} = stage(ctx)
+
+    config = File.read!(Path.join(Candidate.staging_path(ctx.mac), "config.toml"))
+    assert value(config, "fermix_core.plugins", "dev_local") == ~s("#{ctx.mac}/dev-plugins")
   end
 
   # The row drop is the rail's (`FermixCore.Home.Link`), which this app does

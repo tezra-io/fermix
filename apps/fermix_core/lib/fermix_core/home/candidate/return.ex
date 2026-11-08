@@ -15,6 +15,10 @@ defmodule FermixCore.Home.Candidate.Return do
       The server's tables of those sections are dropped, so iMessage is on
       again when it was on before the move, and nothing the server set for
       itself configures this computer;
+    * puts back this computer's **own settings**, the ones that name its own
+      paths (`FermixCore.Home.DeviceLocal.settings/0`, such as the dev plugin
+      folder), from the retired `config.toml`: every restore leaves them out,
+      the server's included;
     * names the **secret store** this computer used
       (`[fermix_core] secret_store`, read by `SecretWriter.parse_store/1`),
       and where that is the keychain, puts every secret back into it
@@ -32,6 +36,7 @@ defmodule FermixCore.Home.Candidate.Return do
 
   alias FermixCore.Home.Archive.ConfigText
   alias FermixCore.Home.DesktopLink
+  alias FermixCore.Home.DeviceLocal
   alias FermixCore.Home.Link
   alias FermixCore.Home.MoveSecrets
   alias FermixCore.Setup.SecretWriter
@@ -67,7 +72,9 @@ defmodule FermixCore.Home.Candidate.Return do
 
   @doc """
   `staged` with every table of the device-class sections taken from
-  `retired` instead, comments and all; every other line of `staged` kept.
+  `retired` instead, comments and all, and each of this computer's own
+  settings that `retired` sets (`DeviceLocal.settings/0`) put back; every
+  other line of `staged` kept.
   """
   @spec device_sections(String.t(), String.t()) :: String.t()
   def device_sections(staged, retired) when is_binary(staged) and is_binary(retired) do
@@ -78,6 +85,16 @@ defmodule FermixCore.Home.Candidate.Return do
       [] -> kept
       blocks -> String.trim_trailing(kept) <> "\n\n" <> Enum.join(blocks, "\n") <> "\n"
     end
+    |> own_settings(retired)
+  end
+
+  defp own_settings(text, retired) do
+    Enum.reduce(DeviceLocal.settings(), text, fn %{table: table, key: key}, acc ->
+      case ConfigText.value(retired, table, key) do
+        {:ok, raw} -> ConfigText.put(acc, table, key, raw)
+        :absent -> acc
+      end
+    end)
   end
 
   @doc """

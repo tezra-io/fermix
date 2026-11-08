@@ -210,9 +210,19 @@ defmodule Fermix.CLI.HomeCommand do
     if restored.imessage_disabled,
       do: IO.puts("iMessage needs a Mac, so it is turned off here.")
 
+    print_left_out(restored.device_settings_dropped)
+
     print_keyring(restored.keyring_secrets, "The archived home kept", "on this host")
     print_screen_history(restored.screen_history_removed)
     print_reinstall(restored)
+  end
+
+  defp print_left_out([]), do: :ok
+
+  defp print_left_out(keys) do
+    IO.puts(
+      "Settings of the computer the home came from stay there: " <> Enum.join(keys, ", ") <> "."
+    )
   end
 
   defp print_kept_paths([]), do: :ok

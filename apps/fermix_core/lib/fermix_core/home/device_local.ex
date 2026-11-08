@@ -75,10 +75,19 @@ defmodule FermixCore.Home.DeviceLocal do
     {"plugins/meetbot", :keep,
      "the meeting bot's binary and the browser profile it signed in with here"},
     {"plugins/imessage_helper", :keep, "the Messages helper app for this Mac"},
+    {"dev-plugins", :keep,
+     "links to plugin checkouts on this machine, for the dev plugin folder setting"},
     {"plugins/installed/*/current.tmp", :drop,
      "an interrupted switch of a plugin's current version"},
     {"plugins/installed/*/.*.replacing", :drop, "a plugin version being replaced"},
     {"plugins/evidence/*/.*.staging", :drop, "plugin provenance being staged"}
+  ]
+
+  # Each setting that names this machine's own paths, as its `config.toml`
+  # table and key, with the one-line reason it stays.
+  @settings [
+    {"fermix_core.plugins", "dev_local",
+     "the dev plugin folder, plugin checkouts on this machine that no other machine has"}
   ]
 
   for {pattern, return, _reason} <- @entries, return not in [:keep, :drop] do
@@ -136,6 +145,16 @@ defmodule FermixCore.Home.DeviceLocal do
   | Pattern | Through a return | Why it stays |
   |---|---|---|
   #{Enum.map_join(@entries, "\n", fn {pattern, return, reason} -> "| `#{pattern}` | #{return} | #{reason} |" end)}
+
+  **Settings.** A setting that names this machine's own paths stays here too
+  (`settings/0`): every restore leaves it out of the settings it writes
+  (`FermixCore.Home.Archive.RestoredConfig`), so another machine never reads
+  a path it does not have, and a return keeps this machine's own
+  (`FermixCore.Home.Candidate.Return`).
+
+  | Setting | Why it stays |
+  |---|---|
+  #{Enum.map_join(@settings, "\n", fn {table, key, reason} -> "| `[#{table}] #{key}` | #{reason} |" end)}
   """
 
   @matchers for {pattern, return, _reason} <- @entries,
@@ -148,6 +167,7 @@ defmodule FermixCore.Home.DeviceLocal do
 
   @type return :: :keep | :drop
   @type entry :: %{pattern: String.t(), return: return(), reason: String.t()}
+  @type setting :: %{table: String.t(), key: String.t(), reason: String.t()}
 
   @doc "The device-local list: each pattern, what a return does with it, and its reason."
   @spec excluded() :: [entry()]
@@ -156,6 +176,12 @@ defmodule FermixCore.Home.DeviceLocal do
       Enum.map(@entries, fn {pattern, return, reason} ->
         %{pattern: pattern, return: return, reason: reason}
       end)
+
+  @doc "The settings that stay on this machine: each `config.toml` table, key and reason."
+  @spec settings() :: [setting()]
+  def settings,
+    do:
+      Enum.map(@settings, fn {table, key, reason} -> %{table: table, key: key, reason: reason} end)
 
   @doc "Whether `path`, relative to the home, stays on this machine."
   @spec excluded?(String.t()) :: boolean()

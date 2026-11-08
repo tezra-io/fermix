@@ -29,6 +29,7 @@ defmodule FermixCore.Home.Archive.RestoredConfigTest do
              harness_consent_reset: true,
              secret_store_switched: true,
              imessage_disabled: false,
+             device_settings_dropped: [],
              keyring_secrets: 1
            }
 
@@ -109,6 +110,31 @@ defmodule FermixCore.Home.Archive.RestoredConfigTest do
 
     {:ok, text, _settled} = RestoredConfig.settle(config, facts(macos?: false, keyring: true))
     assert ConfigText.value(text, "fermix_channels.accessories", "enabled") == {:ok, "true"}
+  end
+
+  # EC2 test 2026-11-08: a Mac's dev plugin folder moved to the server in
+  # its settings, and the plugin registry could not load there. The setting
+  # is the computer's that set it up (`DeviceLocal.settings/0`): a restore
+  # leaves it out, on any host, and says so; the rest of its table is kept.
+  test "this machine's own settings are left out, the rest of their table kept" do
+    config = """
+    [fermix_core.plugins]
+    enabled = ["invented-notes"]
+    dev_local = "/Users/invented/.fermix/dev-plugins" # the plugin checkouts here
+    """
+
+    for macos? <- [true, false] do
+      {:ok, text, settled} = RestoredConfig.settle(config, facts(macos?: macos?, keyring: true))
+
+      assert text == """
+             [fermix_core.plugins]
+             enabled = ["invented-notes"]
+             """
+
+      assert settled.device_settings_dropped == ["fermix_core.plugins.dev_local"]
+      assert settled.rewritten == []
+      assert settled.kept_paths == []
+    end
   end
 
   defp facts(macos?: macos?, keyring: usable?) do

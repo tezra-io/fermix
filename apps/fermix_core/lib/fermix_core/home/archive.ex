@@ -54,7 +54,9 @@ defmodule FermixCore.Home.Archive do
   screen history from the restored database
   (`FermixCore.Home.Archive.ScreenHistory`), and names the installed plugins
   built for another OS or architecture (the manifest's `host`). Sandbox grants
-  are device-local and never in the archive.
+  are device-local and never in the archive, and the settings that name the
+  archived machine's own paths, such as the dev plugin folder, are left out of
+  the restored ones (`DeviceLocal.settings/0`).
   """
 
   alias Fermix.CLI.Upgrade.Manifest, as: HostTarget
@@ -105,6 +107,7 @@ defmodule FermixCore.Home.Archive do
           harness_consent_reset: boolean(),
           secret_store_switched: boolean(),
           imessage_disabled: boolean(),
+          device_settings_dropped: [String.t()],
           keyring_secrets: non_neg_integer(),
           screen_history_removed: non_neg_integer(),
           source_host: String.t(),

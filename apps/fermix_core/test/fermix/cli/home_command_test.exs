@@ -241,6 +241,9 @@ defmodule Fermix.CLI.HomeCommandTest do
     [sandbox]
     workspace_root = "#{ctx.home}/workspace"
     extra = "/Users/invented/Projects"
+
+    [fermix_core.plugins]
+    dev_local = "/Users/invented/Projects/plugins"
     """)
 
     seed_database!(Path.join(ctx.home, "memory.db"))
@@ -266,6 +269,10 @@ defmodule Fermix.CLI.HomeCommandTest do
              "Kept as they were; review them, they hold paths outside the old home: sandbox.extra."
 
     assert out =~ "Coding-harness consent does not travel; approve it again here."
+
+    assert out =~
+             "Settings of the computer the home came from stay there: " <>
+               "fermix_core.plugins.dev_local."
 
     assert out =~
              ~s(This host has no usable keyring, so secrets are kept in files here: secret_store = "file".)

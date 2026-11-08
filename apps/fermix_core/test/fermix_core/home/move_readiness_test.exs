@@ -400,6 +400,40 @@ defmodule FermixCore.Home.MoveReadinessTest do
     assert sentence =~ "5 GiB"
   end
 
+  # EC2 test 2026-11-08: a dev plugin folder whose links name checkouts outside
+  # the home blocked the move. The folder and the setting that names it stay
+  # on this computer (`DeviceLocal`), so the review does not block on them and
+  # says so in one warning, after the plugins.
+  test "dev plugins stay on this computer: one warning, and nothing blocks", ctx do
+    :ok =
+      SecretWriter.put(:anthropic_api_key, "sk-ant-invented",
+        profile: ctx.profile,
+        store: :keyring
+      )
+
+    dev = Path.join(ctx.home, "dev-plugins")
+    File.mkdir_p!(dev)
+    File.ln_s!("/etc", Path.join(dev, "tesla"))
+    config = Path.join(ctx.home, "config.toml")
+    File.write!(config, File.read!(config) <> ~s(\n[fermix_core.plugins]\ndev_local = "#{dev}"\n))
+
+    for {host, machine} <- [{"macos-aarch64", "Mac"}, {"linux-x86_64", "computer"}] do
+      seams = Keyword.put(opts(ctx), :host, host)
+      assert %{ready: true, items: items} = MoveReadiness.report(ctx.home, ctx.candidate, seams)
+
+      ids = Enum.map(items, & &1.id)
+
+      assert Enum.take(Enum.drop_while(ids, &(&1 != "plugins")), 3) ==
+               ~w(plugins dev_plugins stays_here)
+
+      assert item_in(items, "dev_plugins") == %{
+               id: "dev_plugins",
+               status: :warn,
+               sentence: "Dev plugins stay on this #{machine}: north-box runs none of them."
+             }
+    end
+  end
+
   # EC2 test 2026-11-08: a home the move cannot carry blocked with "Fermix's
   # log says why". The review names the path and what to do, in the words
   # `fermix home export` uses for the same home (`Archive.collect_sentence/1`).
