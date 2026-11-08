@@ -61,8 +61,8 @@
 (* callback (the responder's frame and the call it makes), one dial, or   *)
 (* one wait the worker ends.                                               *)
 (***************************************************************************)
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/home/move_worker.ex @ 618ee8e6ab72
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/home/candidate.ex @ c83aa4ee6a69
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/home/move_worker.ex @ ab9641a54c1e
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/home/candidate.ex @ b31d133ca364
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/home/move_responder.ex @ 31d80078d517
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/candidate/activation.ex @ 41d05d90bb47
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/move.ex#start,move_id,write_request,put_phase,pending?,not_pending,max_attempts,@max_attempts,@pending,@running,@phases,finish_at_boot,finish_due,ending,finish,view,remember_unrecorded_ending,boot_ending,@boot_key @ be988598314f
@@ -79,7 +79,7 @@ CONSTANTS
     \* Environment switches: what may happen around the move.
     MessagesCanBeLost,  \* the rail loses a request or an answer, or an answer comes only
                         \* after the worker stopped waiting (await_any/3's timeout,
-                        \* move_worker.ex:747-760): at most MaxLosses times in all
+                        \* move_worker.ex:748-761): at most MaxLosses times in all
     MaxLosses,
     SourceCanCrash,     \* the source engine dies and its service manager boots it again
     CandidateCanCrash,  \* the candidate engine dies and boots again
@@ -93,30 +93,30 @@ CONSTANTS
     OldRequestsArrive,  \* a request the worker sent on a rail it has since given up on
                         \* still reaches the candidate. Two rails are two streams, so
                         \* nothing orders one's frames against another's; closing the
-                        \* rail it gives up on (close_rail/1, move_worker.ex:211, :429,
+                        \* rail it gives up on (close_rail/1, move_worker.ex:212, :430,
                         \* :442) puts a close frame behind the request (Rail.close/1,
                         \* rail.ex), and whether the iroh helper still delivers what it
                         \* holds once the socket closes is the helper's (outside this repo)
     \* Mechanism switches: what the code does about it. TRUE is the real code.
     CandidateWaitsForCommit, \* the candidate activates only on move_commit for the move
-                             \* it staged (commit_move/2, candidate.ex:636-669)
+                             \* it staged (commit_move/2, candidate.ex:637-670)
     MarkerBeforeCommit,      \* the worker writes moved.json and records committing before
                              \* it sends move_commit (commit/4 then retired/4,
-                             \* move_worker.ex:423-445)
+                             \* move_worker.ex:424-446)
     OffersFenced,            \* the candidate takes an offer only when it is later than the
                              \* move it holds: a later move id, or a later attempt of the
                              \* same move (fenced_offer/2 and later?/2,
-                             \* candidate.ex:505-517). move_offer carries the attempt
-                             \* (stream/3, move_worker.ex:373), which only grows across
+                             \* candidate.ex:506-518). move_offer carries the attempt
+                             \* (stream/3, move_worker.ex:374), which only grows across
                              \* restarts; move ids are ordered by when the move started
                              \* (move_id/1, move.ex:505-514)
     ReadyAfterStaged,        \* move_ready goes out only once staged is written: restored/2
                              \* records staged, then tells the responder
-                             \* (candidate.ex:605-611), which answers move_ready only then
+                             \* (candidate.ex:606-612), which answers move_ready only then
                              \* (move_responder.ex:65-69)
     AwaitPinsRail,           \* the worker takes an answer only from the rail it waits on
                              \* (await_any/3 matches {:rail, ^rail, _},
-                             \* move_worker.ex:747-760)
+                             \* move_worker.ex:748-761)
     EndingsAfterRestart,     \* the worker records committed or undoing before its restart,
                              \* and the engine that boots after it records done or aborted
                              \* (done/2, undo/3, Move.finish_at_boot/2): an ending is never
@@ -253,7 +253,7 @@ SourceBoots(r, m, p) ==
 \* The worker closes the rail it holds, if any (close_rail/1: Rail.close/1
 \* sends its close frame behind whatever the rail already sent), then opens a
 \* new one and sends newReq (Rail.open/3 through open_candidate/1,
-\* move_worker.ex:713-728), or opens none (newReq = "none", up = FALSE). A
+\* move_worker.ex:714-729), or opens none (newReq = "none", up = FALSE). A
 \* request on the closed rail may still arrive; an answer already in the
 \* mailbox stays there, where only a worker that does not pin its rail would
 \* read it; any later answer is lost.
@@ -301,7 +301,7 @@ NothingComing ==
     /\ ~(OldReadyUsable /\ wpc \in {"await_ready", "await_resume"})
 
 \* Where a failed wait goes: another attempt before move_ready
-\* (attempt_failed/2, move_worker.ex:231-238), the resume after the commit
+\* (attempt_failed/2, move_worker.ex:232-239), the resume after the commit
 \* (retired/4, :441-443), the next round of the resume loop (resume_loop/4,
 \* :523-540).
 AfterAwait(w) == CASE w \in {"await_accept", "await_ready"} -> "transfer"
@@ -336,14 +336,14 @@ Start ==
     /\ wpc' = "run"
     /\ UNCHANGED <<moved, attempts, CandAll, Net, Budgets, Hist>>
 
-\* run/1 (move_worker.ex:118-132) reads the request and the phase, and
+\* run/1 (move_worker.ex:119-133) reads the request and the phase, and
 \* carry_on/3 (:150-159) the marker first, then the phase. (An unreadable
 \* marker, :157, is not modelled: the marker is whole or absent.)
 Run ==
     /\ wpc = "run"
     /\ Goto(IF moved THEN "resume" ELSE IF phase = "aborting" THEN "abort" ELSE "transfer")
 
-\* transfer/1 (move_worker.ex:189-199): counts the attempt in phase.json, or
+\* transfer/1 (move_worker.ex:190-200): counts the attempt in phase.json, or
 \* aborts once MaxAttempts were made, across restarts. A failed attempt closed
 \* its rail first (close_rail/1, :211, before attempt_failed/2): the close is
 \* folded in here, the worker's next step, so an answer can still reach the
@@ -356,7 +356,7 @@ Transfer ==
     /\ CloseRail
     /\ UNCHANGED <<role, moved, boot, unsaid, cand, candUp, held, Budgets, Hist>>
 
-\* attempt_transfer/1 (move_worker.ex:201-217): the desktop key and row and
+\* attempt_transfer/1 (move_worker.ex:202-218): the desktop key and row and
 \* the capture (writes no rule reads), open_candidate/1 (:713-728) and
 \* move_offer (stream/3, :376). The dial reaches the candidate's own key only
 \* while it runs in the candidate role.
@@ -367,7 +367,7 @@ SendOffer ==
     /\ UNCHANGED <<SrcFiles, boot, unsaid, cand, candUp, held, Budgets, Hist>>
 
 \* No candidate answers the dial: it rebooted as the primary, and its key is
-\* gone. attempt_failed/2 sleeps and tries again (move_worker.ex:215, :231-238).
+\* gone. attempt_failed/2 sleeps and tries again (move_worker.ex:216, :232-239).
 DialFails ==
     /\ wpc = "offer" /\ candUp = "primary"
     /\ wpc' = "transfer"
@@ -375,7 +375,7 @@ DialFails ==
     /\ UNCHANGED <<SrcFiles, boot, unsaid, cand, candUp, held, Budgets, Hist>>
 
 \* await(rail, "move_accept"), same_recipient/2, send_file/3 and move_end
-\* (stream/3, move_worker.ex:377-380): one "stream" request stands for every
+\* (stream/3, move_worker.ex:378-381): one "stream" request stands for every
 \* move_chunk and the move_end.
 TakeAccept ==
     /\ wpc = "await_accept" /\ rep = "accept"
@@ -384,7 +384,7 @@ TakeAccept ==
     /\ wpc' = "await_ready"
     /\ UNCHANGED <<SrcFiles, boot, unsaid, CandAll, railUp, oldReq, oldOffers, oldReady, Budgets, Hist>>
 
-\* await(rail, "move_ready") (stream/3, move_worker.ex:381). Without
+\* await(rail, "move_ready") (stream/3, move_worker.ex:382). Without
 \* AwaitPinsRail the worker would also take one from a rail it left.
 TakeReady ==
     /\ wpc = "await_ready"
@@ -394,7 +394,7 @@ TakeReady ==
     /\ UNCHANGED <<SrcFiles, boot, unsaid, CandAll, railUp, req, oldReq, oldOffers, Budgets, Hist>>
 
 \* An error event is a refusal ({:refused, _, _}, await_any/3,
-\* move_worker.ex:749-750): before move_ready it aborts the move
+\* move_worker.ex:750-751): before move_ready it aborts the move
 \* (attempt_failed/2, :219-220); after it, retired/4 resumes (:441-443) and
 \* the resume loop goes round again (:528-538).
 TakeRefusal ==
@@ -404,13 +404,13 @@ TakeRefusal ==
     /\ UNCHANGED <<SrcFiles, boot, unsaid, CandAll, railUp, req, oldReq, oldOffers, oldReady, Budgets, Hist>>
 
 \* The wait's own timeout, or the rail's {:closed, _} (await_any/3,
-\* move_worker.ex:755-758), when nothing can arrive any more: the worker's own
+\* move_worker.ex:756-759), when nothing can arrive any more: the worker's own
 \* timer.
 GiveUp ==
     /\ wpc \in Awaiting /\ NothingComing
     /\ Goto(AfterAwait(wpc))
 
-\* commit/4 (move_worker.ex:423-432), one file write per step: record the ready
+\* commit/4 (move_worker.ex:424-433), one file write per step: record the ready
 \* epoch (:424); retire/1 writes moved.json (:425, :455-467). Then retired/4
 \* (:434-445): link/3 and record committing (:435-436); move_commit on the
 \* same rail (:437) and await move_done (:438). A failure recording the ready
@@ -497,7 +497,7 @@ StatusRetry ==
     /\ phase' = Ending
     /\ UNCHANGED <<role, moved, attempts, boot, unsaid, wpc, CandAll, Net, Budgets, Hist>>
 
-\* resume/1 (move_worker.ex:502-515): ensure_link/3, then record committing.
+\* resume/1 (move_worker.ex:503-516): ensure_link/3, then record committing.
 \* A failed commit closed its rail first (retired/4, :442): folded in here.
 Resume ==
     /\ wpc = "resume"
@@ -506,7 +506,7 @@ Resume ==
     /\ CloseRail
     /\ UNCHANGED <<role, moved, attempts, boot, unsaid, cand, candUp, held, Budgets, Hist>>
 
-\* resume_once/2 (move_worker.ex:542-547): open_candidate/1, then move_resume
+\* resume_once/2 (move_worker.ex:543-548): open_candidate/1, then move_resume
 \* (resume_on/2, :549-556). with_rail/2 closed the previous round's rail
 \* (:590-594): folded in here. A candidate that no longer answers on its own
 \* key sends the worker to probe_primary/2.
@@ -523,7 +523,7 @@ ResumeDialFails ==
     /\ UNCHANGED <<SrcFiles, boot, unsaid, cand, candUp, held, Budgets, Hist>>
 
 \* move_ready answers move_resume: still staged, so commit now (resumed/3,
-\* move_worker.ex:561-565).
+\* move_worker.ex:562-566).
 TakeResumeReady ==
     /\ wpc = "await_resume"
     /\ \/ rep = "ready" /\ rep' = "none" /\ UNCHANGED oldReady
@@ -532,14 +532,14 @@ TakeResumeReady ==
     /\ wpc' = "await_done_r"
     /\ UNCHANGED <<SrcFiles, boot, unsaid, CandAll, railUp, oldReq, oldOffers, Budgets, Hist>>
 
-\* probe_primary/2 (move_worker.ex:569-587): dial the moved identity as the
+\* probe_primary/2 (move_worker.ex:570-588): dial the moved identity as the
 \* desktop; a hello_ack at the ready epoch or later is the new primary, which
 \* only the activated candidate, booted as the primary, can give.
 Probe ==
     /\ wpc = "probe"
     /\ Goto(IF candUp = "primary" THEN "finish" ELSE "resume_dial")
 
-\* abort/3 (move_worker.ex:662-668): reads the marker again; with it, resume.
+\* abort/3 (move_worker.ex:663-669): reads the marker again; with it, resume.
 \* A refused attempt or a failed commit closed its rail first (:211, :429):
 \* folded in here.
 Abort ==
@@ -548,7 +548,7 @@ Abort ==
     /\ CloseRail
     /\ UNCHANGED <<SrcFiles, boot, unsaid, cand, candUp, held, Budgets, Hist>>
 
-\* undo/3 (move_worker.ex:670-689), one file write per step: record aborting
+\* undo/3 (move_worker.ex:671-690), one file write per step: record aborting
 \* (:672); the desktop row, key and snapshot go (nothing a rule reads); role =
 \* "primary" (:675); remove the request and record aborted (:676-677); restart
 \* (:688).
@@ -577,7 +577,7 @@ UndoEnd ==
 \* role: the responder runs under CandidateSupervisor (candidate_supervisor.ex).
 CandIdle == candUp = "candidate" /\ cpc = "idle"
 
-\* move_offer -> Candidate.offer/2 -> offer_move/2 (candidate.ex:490-498): an
+\* move_offer -> Candidate.offer/2 -> offer_move/2 (candidate.ex:491-499): an
 \* enrolled, receiving or staged candidate takes the offer through
 \* fenced_offer/2 (:458-465); any other phase refuses it (move_failed). With
 \* OffersFenced it takes only an offer later than the move it holds
@@ -596,7 +596,7 @@ OnOffer(tag, a) ==
          /\ lateOfferFenced' = (lateOfferFenced \/ (moved /\ cand = "staged"))
 
 \* move_end -> end_stream/1 -> Candidate.stage/3 -> stage_move/3
-\* (move_responder.ex:196-218, candidate.ex:576-603): a receiving candidate
+\* (move_responder.ex:196-218, candidate.ex:577-604): a receiving candidate
 \* starts the restore task in place of any earlier one; the answer waits for
 \* it. Without ReadyAfterStaged the responder answers move_ready at once.
 OnStream(tag) ==
@@ -605,7 +605,7 @@ OnStream(tag) ==
          /\ IF ReadyAfterStaged THEN NoAnswer ELSE Answer(tag, "ready")
     ELSE /\ Answer(tag, "error") /\ UNCHANGED CandAll
 
-\* move_commit -> Candidate.commit/2 -> commit_move/2 (candidate.ex:636-669).
+\* move_commit -> Candidate.commit/2 -> commit_move/2 (candidate.ex:637-670).
 \* Once the home is in place (the activated? flag, set where activate/1
 \* succeeded, :581, :601), a second move_commit for the move, from a rail its
 \* source gave up on, is answered as the first was (:563-567). Staged or
@@ -640,7 +640,7 @@ OnRequest(r, tag) ==
     /\ UNCHANGED lateOfferFenced
 
 \* The responder of the worker's rail handles its request. An offer on it
-\* carries the worker's attempt (stream/3, move_worker.ex:373; transfer/1 puts
+\* carries the worker's attempt (stream/3, move_worker.ex:374; transfer/1 puts
 \* it in ctx, :197): the worker closes the rail before it counts another.
 Handle ==
     /\ CandIdle /\ req /= "none"
@@ -663,7 +663,7 @@ HandleOldOffer(a) ==
     /\ OnOffer("gone", a)
     /\ UNCHANGED <<railUp, req, oldReq, SrcFiles, boot, unsaid, wpc, Budgets, doneLost>>
 
-\* The restore task's result -> restored/2 (candidate.ex:267-270, :605-611):
+\* The restore task's result -> restored/2 (candidate.ex:268-271, :606-612):
 \* record staged, then tell the responder of the rail that staged it, which
 \* answers move_ready (move_responder.ex:65-69).
 Restored ==
@@ -683,7 +683,7 @@ SelfActivate ==
 \* Activation.activate/1 (activation.ex:129-138): the staged entries, then
 \* config.toml last (place_config/2, :364-369), the commit point: the next boot
 \* reads role = "primary". Then candidate/ goes, the restart is scheduled
-\* (candidate.ex:655, :675), and commit_move/2 answers, so the responder sends
+\* (candidate.ex:656, :676), and commit_move/2 answers, so the responder sends
 \* move_done and closes (move_responder.ex:119-124). A crash between the
 \* rename and the answer is a crash after this step, which loses the answer.
 Activate ==
@@ -693,7 +693,7 @@ Activate ==
     /\ IF cpc = "activate_cur" THEN Answer("cur", "done") ELSE NoAnswer
     /\ UNCHANGED <<candUp, restore, held, railUp, req, oldReq, oldOffers, SrcFiles, boot, unsaid, wpc, Budgets, Hist>>
 
-\* handle_info(:restart) (candidate.ex:284-288) -> Lifecycle.restart_self/0. The
+\* handle_info(:restart) (candidate.ex:285-289) -> Lifecycle.restart_self/0. The
 \* boot reads role = "primary" and finishes the activation
 \* (FermixCore.Application, application.ex:201-221).
 Restart ==
@@ -734,7 +734,7 @@ Late ==
 
 \* Before its offer is out, an attempt fails at the source: the desktop key or
 \* row, or the capture (attempt_transfer/1 -> attempt_failed/2,
-\* move_worker.ex:215, :231-238).
+\* move_worker.ex:216, :232-239).
 AttemptFails ==
     /\ TransferCanFail /\ wpc = "offer"
     /\ wpc' = "transfer"
@@ -742,7 +742,7 @@ AttemptFails ==
     /\ UNCHANGED <<SrcFiles, boot, unsaid, cand, candUp, held, Budgets, Hist>>
 
 \* Moved.write/2 fails before the file exists (moved.ex:45-59): retire/1's
-\* error -> commit/4 closes the rail and aborts (move_worker.ex:428-430).
+\* error -> commit/4 closes the rail and aborts (move_worker.ex:429-431).
 RetireFails == TransferCanFail /\ wpc = "retire" /\ Goto("abort")
 
 \* The candidate refuses an offer it has no room for (room_for/2: twice the
@@ -754,7 +754,7 @@ OfferRefusedForRoom ==
     /\ Answer("cur", "error")
     /\ UNCHANGED <<CandAll, railUp, oldReq, oldOffers, SrcFiles, boot, unsaid, wpc, Budgets, Hist>>
 
-\* restored/2's error clause (candidate.ex:613-627): back to enrolled, holding
+\* restored/2's error clause (candidate.ex:614-628): back to enrolled, holding
 \* no move (put/3 drops the nil "move"), and the
 \* responder refuses (move_failed, move_responder.ex:71-75).
 RestoreFails ==
@@ -774,7 +774,7 @@ SourceCrash ==
 
 \* The candidate engine dies and boots again: as the primary once config.toml
 \* is in place; otherwise as the candidate, whose handle_continue/2 runs
-\* carry_on/1 first (candidate.ex:197-214), and activating finishes the
+\* carry_on/1 first (candidate.ex:198-215), and activating finishes the
 \* activation (finish_activation/1, :671-681). Its restore task dies with it.
 CandidateCrash ==
     /\ CandidateCanCrash /\ candCrashes < MaxCrashes /\ candUp = "candidate"
@@ -873,7 +873,7 @@ AtMostOnePrimary == ~(SourceServesPrimary /\ CandidateServesPrimary)
 
 \* The source never retires without a candidate that can activate: once
 \* moved.json exists, the candidate holds the staged home, or is activating it
-\* or has (commit/4's comment, move_worker.ex:418-422: "the marker comes before
+\* or has (commit/4's comment, move_worker.ex:419-423: "the marker comes before
 \* move_commit"; MoveWorker's moduledoc: "Once moved.json exists the move is
 \* never aborted"). A later move_commit, which the resume loop keeps sending,
 \* activates a staged candidate.

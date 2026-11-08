@@ -49,7 +49,7 @@ Models one move of M75 §7.2 (B5). Three parts take part:
 - `OldRequestsArrive`: a request the worker sent on a rail it has since given
   up on still reaches the candidate. Two rails are two streams, so nothing
   orders one rail's frames against another's. The worker closes a rail it
-  gives up on (`close_rail/1`, `move_worker.ex:211`, `:426`, `:439`), but
+  gives up on (`close_rail/1`, `move_worker.ex:212`, `:426`, `:439`), but
   `Rail.close/1` sends its close frame behind whatever the rail already sent
   (`rail.ex`). Whether the iroh helper still delivers what it holds once the
   socket closes ("the helper ends its stream on its own", `helper.ex`) is
@@ -57,24 +57,24 @@ Models one move of M75 §7.2 (B5). Three parts take part:
 
 **Mechanism switches** (`TRUE` is the real code):
 - `CandidateWaitsForCommit`: the candidate activates only on `move_commit`
-  for the move it staged (`commit_move/2`, `candidate.ex:636-669`).
+  for the move it staged (`commit_move/2`, `candidate.ex:637-670`).
 - `MarkerBeforeCommit`: the worker writes `moved.json` and records
   `committing` before it sends `move_commit` (`commit/4`, then `retired/4`,
-  `move_worker.ex:423-445`).
+  `move_worker.ex:424-446`).
 - `OffersFenced`: the candidate takes an offer only when it is later than the
   move it holds, a later move id or a later attempt of the same move, and
   refuses an earlier or equal one (`move_mismatch`), leaving what it holds
-  untouched (`fenced_offer/2`, `later?/2`, `candidate.ex:505-517`).
-  `move_offer` carries the attempt (`stream/3`, `move_worker.ex:373`), which
+  untouched (`fenced_offer/2`, `later?/2`, `candidate.ex:506-518`).
+  `move_offer` carries the attempt (`stream/3`, `move_worker.ex:374`), which
   only grows across restarts. Move ids are ordered by when the move started
   (`move_id/1`, `move.ex:505-514`); with one move id, the fence orders by
   attempt.
 - `ReadyAfterStaged`: `move_ready` goes out only after `staged` is written.
   `restored/2` records `staged`, then tells the responder
-  (`candidate.ex:605-611`), which answers `move_ready` only then
+  (`candidate.ex:606-612`), which answers `move_ready` only then
   (`move_responder.ex:65-69`).
 - `AwaitPinsRail`: the worker takes an answer only from the rail it waits on
-  (`await_any/3` matches `{:rail, ^rail, _}`, `move_worker.ex:747-760`).
+  (`await_any/3` matches `{:rail, ^rail, _}`, `move_worker.ex:748-761`).
 - `EndingsAfterRestart`: the worker records `committed` (after `move_done`)
   or `undoing` (after an undo) and then restarts itself (`SelfRestart`,
   `Lifecycle.restart_self/0`); the engine that boots after it records `done`
@@ -93,7 +93,7 @@ in `abort/3` never finds a marker. Every road to `abort/3` starts before
 - a refusal or the attempt cap, in `transfer/1` and `attempt_failed/2`,
   which run only while the marker is absent;
 - `commit/4`'s error clause, after the ready epoch or the marker could not
-  be written (`move_worker.ex:428-430`);
+  be written (`move_worker.ex:429-431`);
 - a recorded `aborting`, which `carry_on/3` reaches only when the marker is
   absent.
 
@@ -226,7 +226,7 @@ Nothing in Fermix's own code fenced it.
   home untouched.
 
 The same change answers a second `move_commit` after activation from the
-`activated?` flag (`candidate.ex:638-642`). Before, it crashed in `put/3`,
+`activated?` flag (`candidate.ex:639-643`). Before, it crashed in `put/3`,
 because `activate/1` had removed `candidate/`. The model's `OnCommit` now
 answers it `move_done`.
 
@@ -313,7 +313,7 @@ This was noticed while reading the code. TLC does not show it.
   exclusively, then writes it (`moved.ex:45-59`). If the write or the close
   fails (a full disk), the file may be left unreadable. `commit/4` then
   aborts, and `abort/3` raises on the unreadable marker
-  (`move_worker.ex:662-668`). The worker's restart reaches `carry_on/3`'s
+  (`move_worker.ex:663-669`). The worker's restart reaches `carry_on/3`'s
   clause for an unreadable marker (`:154`), which records a sentence asking for the
   marker to be fixed and does nothing else. The source stays a device and
   the candidate stays staged: safe, never two primaries, and stopped until a
