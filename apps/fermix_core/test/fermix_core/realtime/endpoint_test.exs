@@ -83,7 +83,7 @@ defmodule FermixCore.Realtime.EndpointTest do
       end
     end
 
-    # A phone's call holds 500 ms of audio unplayed on the phone; a Grok window
+    # A phone's call holds 1 s of audio unplayed on the phone; a Grok window
     # of seconds would pile a fast reply up behind it until it aged out.
     test "a phone's Grok audio is paced in a short window; the others keep the default" do
       assert Endpoint.grok_playback_opts({:phone, @phone}) == [window_ms: 300]
