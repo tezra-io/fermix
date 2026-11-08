@@ -1036,6 +1036,23 @@ defmodule FermixCore.Management.HomeSummaryTest do
                failed["key"]
     end
 
+    # A try that only waited (a desktop away) stored nothing: the failure
+    # stands, in its own words and at its own time, until a backup is stored.
+    test "a try that only waited leaves it standing, and a stored backup then clears it" do
+      first = tried(Status.empty(), ~U[2031-05-04 10:00:00Z], "S3 refused the snapshot.")
+      waited = Status.record(first, "s3", waited(~U[2031-05-04 11:00:00Z]))
+
+      summary = HomeSummary.summary(desktop(primary_home: status_home(waited)))
+      assert %{"state" => "problem", "detail" => %{"kind" => "backup_failed"}} = summary
+
+      assert summary["sentence"] ==
+               "Backing up to S3 failed on Sunday, May 4, 2031 at 10:00 AM UTC: S3 refused " <>
+                 "the snapshot."
+
+      cleared = stored(waited, ~U[2031-05-04 11:30:00Z])
+      assert HomeSummary.summary(desktop(primary_home: status_home(cleared)))["state"] == "on"
+    end
+
     test "a server with desktops says it on its own screen" do
       tried = tried(Status.empty(), ~U[2031-05-04 10:00:00Z], "S3 refused the snapshot.")
       own = server(snapshots: snapshots_view(tried))
@@ -1829,6 +1846,9 @@ defmodule FermixCore.Management.HomeSummaryTest do
   # A try at `at`, as the scheduler records it: failed in `said`, or stored.
   defp tried(status, at, said), do: Status.record(status, "s3", attempt(at, :failed, said))
   defp stored(status, at), do: Status.record(status, "s3", attempt(at, :verified, nil))
+
+  defp waited(at),
+    do: Map.put(attempt(at, :waiting, nil), :note, "The place waits for the next run.")
 
   defp attempt(at, result, error) do
     %{

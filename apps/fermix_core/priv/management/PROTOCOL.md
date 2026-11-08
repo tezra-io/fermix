@@ -1686,11 +1686,13 @@ Notes that the shapes alone do not carry:
   `last_verified` is the newest snapshot the target proved it holds (S3
   accepted its SHA-256 checksum; a desktop answered the same SHA-256) and
   outlives later failures; `last_error` is the newest failure's sentence,
-  carrying the storage service's own words, and clears at the next verified
-  or waiting run. A desktop asleep or offline is no failure: `last_result` is
+  carrying the storage service's own words, and clears only at the next
+  verified run. A desktop asleep or offline is no failure: `last_result` is
   `waiting` and `waiting` holds the sentence
   (`Your <name> is not connected; the snapshot waits for the next run.`),
-  null otherwise. Each point names the recovery key it was written for
+  null otherwise; such a run stored nothing, so while a failure stands it is
+  not recorded over it, and `last_attempt_at`, `last_result` and
+  `last_error` stay the failed try's (Always On's `backup_failed` says them). Each point names the recovery key it was written for
   (`key_id`, as `home.snapshots.passphrase` answers it). The first boot of a
   primary a move activated runs its first snapshot at once. `destination` is where the target puts
   snapshots (`s3://<bucket>/<prefix>/<profile>/`, or `snapshots/ on <names>`

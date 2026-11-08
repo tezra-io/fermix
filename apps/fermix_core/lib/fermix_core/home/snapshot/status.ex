@@ -21,15 +21,18 @@ defmodule FermixCore.Home.Snapshot.Status do
 
   Per target: the last attempt, the last verified point (kept through later
   failures, so the owner always knows the newest snapshot that is safe) and the
-  last error sentence (cleared by the next verified or waiting attempt). Each
+  last error sentence, which only the next verified attempt clears: a target
+  that failed stays failed until a snapshot there is stored. Each
   attempt names the recovery key it was written for (`key_id`, the first 8
   bytes of the recipient's SHA-256, as `home.snapshots.passphrase` answers it),
   so an owner who changed the passphrase knows which one opens which point.
 
   An attempt is `verified`, `failed`, or `waiting`: a target that could not take
   the snapshot now and will at a later run (a desktop asleep or offline). A
-  waiting attempt is no failure: its sentence is its `note`, the last error is
-  cleared and the last verified point kept.
+  waiting attempt is no failure: its sentence is its `note` and the last
+  verified point is kept. It stored nothing, so where a failure stands it is
+  not recorded over it: the failed attempt, its time and its words stay the
+  target's last, as Always On's `backup_failed` says them.
 
   `stale_notice` is the newest verified point the phones were told had grown
   a week old (the scheduler's notice, M75 lean v1 §7), so they are told once
@@ -121,10 +124,19 @@ defmodule FermixCore.Home.Snapshot.Status do
     attempt = Map.merge(%{key_id: nil, note: nil}, attempt)
 
     current =
-      case result do
-        :verified -> %{previous | last_attempt: attempt, last_verified: attempt, last_error: nil}
-        :failed -> %{previous | last_attempt: attempt, last_error: attempt.error}
-        :waiting -> %{previous | last_attempt: attempt, last_error: nil}
+      case {result, previous.last_error} do
+        {:verified, _error} ->
+          %{previous | last_attempt: attempt, last_verified: attempt, last_error: nil}
+
+        {:failed, _error} ->
+          %{previous | last_attempt: attempt, last_error: attempt.error}
+
+        # Nothing was stored: the failure that stands stays the last word.
+        {:waiting, error} when is_binary(error) ->
+          previous
+
+        {:waiting, nil} ->
+          %{previous | last_attempt: attempt}
       end
 
     %{status | targets: Map.put(targets, target, current)}

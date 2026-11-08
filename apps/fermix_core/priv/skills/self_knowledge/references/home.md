@@ -336,8 +336,8 @@ it, never a second writer.
   file keeps the secret only while it can still admit a server: once one is
   recorded, or the window is over, the secret leaves it, and the
   state and expiry stay for the status. It needs Reach from
-  anywhere on, waking it for 10 s: otherwise it is refused by name
-  ("Remote reach is off…", "…did not start…").
+  anywhere on, waking it for 10 s, or refuses by name ("Remote reach is
+  off…", "…did not start…").
 - **The candidate.** `fermix home enroll --code-file PATH
   [--snapshot-bucket B --snapshot-region R]` (what the server's first boot
   runs) makes a fresh home a candidate primary: it writes
@@ -758,7 +758,7 @@ it, never a second writer.
     linked to it runs it.", **Learn more**: the server's update installs
     the oldest version among them),
     the server's disk 85% full or more (**Learn
-    more**), the last backup over 3 days old or failed (**Back up now**), a review that blocks the move
+    more**), the last backup over 3 days old or failed until stored (**Back up now**), a review that blocks the move
     (**Check again**), a move back that stopped (*Moving back*), and on the
     server, a server that waited past its 24 hours or whose enrollment
     failed, each saying to open a new code in Always On and run the command
