@@ -588,6 +588,36 @@ defmodule Fermix.CLI.Doctor.MobileCheckTest do
     refute result.detail =~ "mDNS down"
   end
 
+  # EC2 test 2026-11-08: an Always On server announces nothing, though the
+  # settings it took from a Mac turn the announcement on. The engine reports
+  # it disabled, and Doctor reads the engine's word, not the file's.
+  test "an announcement the engine holds off reads disabled, whatever the config says", %{
+    mobile_dir: mobile_dir
+  } do
+    write_identity_files(mobile_dir)
+    Application.put_env(:fermix_channels, :mobile, enabled: true, advertise_mdns: true)
+
+    client =
+      live_client(%{
+        "listener" => %{"status" => "ready", "candidates" => ["wss://lan:4031/ws"]},
+        "mdns" => "disabled",
+        "tailnet" => %{"detected" => false, "candidates" => []},
+        "apns" => %{"enabled" => false, "credentials" => "missing"},
+        "paired_devices" => 1
+      })
+
+    result =
+      Checks.mobile(
+        mobile_dir: mobile_dir,
+        client: client,
+        health_probe: fn "https://lan:4031/healthz", 750 -> :ok end
+      )
+
+    assert result.status == :ok
+    assert result.detail =~ "mDNS disabled"
+    refute result.detail =~ "mDNS down"
+  end
+
   test "listener, mDNS, APNs, and empty-pairing problems are not hidden", %{
     mobile_dir: mobile_dir
   } do

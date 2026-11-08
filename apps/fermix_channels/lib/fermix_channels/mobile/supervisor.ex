@@ -37,6 +37,7 @@ defmodule FermixChannels.Mobile.Supervisor do
   alias FermixChannels.Mobile.Push.PigeonDispatcher
   alias FermixChannels.Mobile.RequestCoordinator
   alias FermixChannels.Mobile.Session
+  alias FermixCore.Home.Candidate
   alias FermixCore.Memory.Config, as: MemoryConfig
   alias FermixCore.Memory.Repo, as: MemoryRepo
 
@@ -340,7 +341,7 @@ defmodule FermixChannels.Mobile.Supervisor do
            peer_supervisor: names.desktop_peer_supervisor},
           {Discovery, name: names.discovery, bind: listener_bind(opts)},
           {Listener, listener_opts(opts, root, names)},
-          {MdnsAdvertiser, mdns_opts(opts, names)},
+          {MdnsAdvertiser, mdns_opts(opts, root, names)},
           # Last, so its restart, and its live switch, touch nothing else.
           {Iroh, iroh_opts(opts, root, names)}
         ]
@@ -525,13 +526,28 @@ defmodule FermixChannels.Mobile.Supervisor do
     Keyword.get(explicit, :bind, Keyword.get(config, :bind, "0.0.0.0"))
   end
 
-  defp mdns_opts(opts, names) do
+  defp mdns_opts(opts, root, names) do
     config = Keyword.get(opts, :config, [])
 
     [
       name: names.mdns_advertiser,
-      enabled: Keyword.get(config, :advertise_mdns, false),
+      enabled: announces?(Keyword.get(config, :advertise_mdns, false), root),
       port: Keyword.get(config, :port, 4_031)
     ]
+  end
+
+  # An Always On server is no LAN host, so it announces nothing whatever the
+  # settings it took from the home say. It knows it is one by the mark its
+  # enrollment left, which stays on the machine through the move, as the
+  # fixed port reads it (`Iroh.Hints.bind_port/1`).
+  defp announces?(false, _root), do: false
+
+  defp announces?(true, root) do
+    if Candidate.server?(root) do
+      Logger.info("mobile mDNS: an Always On server announces nothing on its network")
+      false
+    else
+      true
+    end
   end
 end

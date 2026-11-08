@@ -1473,10 +1473,13 @@ defmodule Fermix.CLI.Doctor.Checks do
 
   defp mobile_mdns(_report, config) when not is_list(config), do: {:fail, "invalid mDNS config"}
 
+  # The engine's own word wins over the file's: an Always On server
+  # announces nothing whatever its settings say, and reports it disabled.
   defp mobile_mdns(report, config) do
     cond do
       Keyword.get(config, :advertise_mdns, false) == false -> {:ok, "mDNS disabled"}
       Map.get(report, "mdns") == "advertising" -> {:ok, "mDNS advertising"}
+      Map.get(report, "mdns") == "disabled" -> {:ok, "mDNS disabled"}
       true -> {:fail, "mDNS down"}
     end
   end

@@ -341,14 +341,13 @@ it, never a second writer.
 - **The candidate.** `fermix home enroll --code-file PATH
   [--snapshot-bucket B --snapshot-region R]` (what the server's first boot
   runs) makes a fresh home a candidate primary: it writes
-  `<home>/candidate/` (the code, the snapshot bucket and region the new
-  primary will write to, its own iroh key, its Noise key and a one-time
-  snapshot recipient, all 0600) and
+  `<home>/candidate/` (the code, the snapshot bucket and region, its own
+  iroh key, its Noise key and a one-time snapshot recipient, all 0600) and
   `[fermix_core.engine] role = "candidate"`, and removes the code file. It
   also marks the machine an Always On server (`<home>/device/server.json`,
   which stays on the machine through the move), whose iroh endpoint listens
   on the fixed UDP port 4033 as a candidate and as the primary (*Desktops
-  (Always On)* in the `mobile` reference). A candidate whose endpoint cannot
+  (Always On)* in the `mobile` reference) and which announces no mDNS. A candidate whose endpoint cannot
   start says why in each retry's log line and, once its code expires, in
   `fermix home status`. It
   refuses a home that ran as a primary, carries a moved marker, is a

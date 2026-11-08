@@ -198,6 +198,8 @@ will be part of a future release; nothing in this group is in a release yet.
   cannot link it again and it keeps copies of the server's backups. Right
   after the move the server installs your plugins again for itself, checked as
   any install is; one it could not install says so in Plugins, with Install….
+  A server announces nothing over mDNS, whatever the settings it took from
+  your computer say: it is no host on your local network.
   A server always runs the Fermix of the computer it serves: Use my own Linux
   server's command names that release, and every five minutes the server
   installs the oldest release among the computers that reached it in the

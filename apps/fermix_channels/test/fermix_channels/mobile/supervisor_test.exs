@@ -12,6 +12,7 @@ defmodule FermixChannels.Mobile.SupervisorTest do
   alias FermixChannels.Mobile.Management
   alias FermixChannels.Mobile.RequestCoordinator
   alias FermixChannels.Mobile.Supervisor, as: MobileSupervisor
+  alias FermixCore.Home.Candidate
   alias FermixCore.Setup.SecretWriter
   alias FermixTestSupport.SafeRm
 
@@ -89,6 +90,24 @@ defmodule FermixChannels.Mobile.SupervisorTest do
         ] do
       children = init_children(config: config)
       assert child_opts(children, FermixChannels.Mobile.MdnsAdvertiser)[:enabled] == enabled?
+    end
+  end
+
+  # EC2 test 2026-11-08: a server that took a Mac's home announced Fermix on
+  # its VPC interface, since the Mac's settings turned the announcement on.
+  # An Always On server is no LAN host. It knows it is one by the mark its
+  # enrollment left, which stays on the machine through the move
+  # (`Home.Candidate.server?/1`, as the fixed port 4033 reads it), so it
+  # announces nothing whatever the settings say.
+  test "an Always On server announces nothing, whatever its settings say" do
+    root = SafeRm.make_tmp_dir!("mobile-server-mdns")
+    on_exit(fn -> SafeRm.rm_rf!(root) end)
+    File.mkdir_p!(Path.join(root, "device"))
+    File.write!(Candidate.server_path(root), "{}")
+
+    for config <- [[advertise_mdns: true], [advertise_mdns: false], []] do
+      children = init_children(root: root, config: config)
+      assert child_opts(children, FermixChannels.Mobile.MdnsAdvertiser)[:enabled] == false
     end
   end
 
