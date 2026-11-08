@@ -252,6 +252,7 @@ defmodule FermixWebWeb.SetupLive do
       |> assign(:phone, Phone.initial())
       |> assign(:accessories, Accessories.initial())
       |> Accessories.load()
+      |> Accessories.watch()
       |> assign_report(report)
       |> AlwaysOn.watch()
       |> AlwaysOn.on_tab(active_tab)
@@ -481,8 +482,10 @@ defmodule FermixWebWeb.SetupLive do
     {:noreply, if(channel == :mobile, do: Phone.load(socket), else: socket)}
   end
 
-  # The StackChan section's switch (M91 E3): its own setter, never part of the
-  # voice form's draft. A write refreshes the report and the restart notice.
+  # The StackChan section's events (M91 E3): the switch, its own setter, never
+  # part of the voice form's draft, and pairing and the paired robots, through
+  # the `accessories.*` methods. A switch write refreshes the report and the
+  # restart notice.
   def handle_event("accessories_" <> _rest = event, params, socket) do
     case Accessories.handle_event(event, params, socket) do
       {socket, nil} -> {:noreply, socket}
@@ -1054,6 +1057,17 @@ defmodule FermixWebWeb.SetupLive do
   def handle_info({phone_read, _gen} = message, socket)
       when phone_read in [:phone_poll, :phone_reach],
       do: {:noreply, Phone.handle_info(message, socket)}
+
+  # The StackChan section follows the accessory watcher: a change notice, the
+  # watcher ending, or the time to look for it again.
+  def handle_info({:accessories_changed, _version} = message, socket),
+    do: {:noreply, Accessories.handle_info(message, socket)}
+
+  def handle_info({:accessories_watch, _ref, :process, _pid, _reason} = message, socket),
+    do: {:noreply, Accessories.handle_info(message, socket)}
+
+  def handle_info({:accessories_watch, :retry} = message, socket),
+    do: {:noreply, Accessories.handle_info(message, socket)}
 
   # Always On changed (`Home.StatusWatch`): the tab, when it is open, reads
   # it again.

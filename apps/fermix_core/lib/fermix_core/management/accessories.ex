@@ -127,6 +127,11 @@ defmodule FermixCore.Management.Accessories do
   @power_sentence "StackChan needs more power. Plug it into one of this Mac's USB-C ports, " <>
                     "not a hub."
 
+  # D15: the robot's own Matches burns one eFuse key block, once and for good,
+  # and the Fermix image uses no flash encryption or Secure Boot, so the stock
+  # image still installs. Shown before the owner's Matches, off the wire.
+  @efuse_sentence "Tapping Matches on the robot burns one key on its chip for good; returning to stock still works."
+
   @pairing_sentences %{
     begun: "Tap Pair with this Mac on your robot.",
     offered: "Check the code on your robot. It should match the code shown here.",
@@ -194,6 +199,14 @@ defmodule FermixCore.Management.Accessories do
   @spec owner_only_sentence() :: String.t()
   def owner_only_sentence, do: @owner_only_sentence
 
+  @doc """
+  The note a pairing shows before the owner's Matches (M91 D15): confirming on
+  the robot burns one of its eFuse key blocks. The browser setup page draws
+  it beside the code; the robot says it on its own screen.
+  """
+  @spec efuse_sentence() :: String.t()
+  def efuse_sentence, do: @efuse_sentence
+
   @doc "Every operator-facing sentence this module can put on the wire."
   @spec sentences() :: [String.t()]
   def sentences do
@@ -227,6 +240,7 @@ defmodule FermixCore.Management.Accessories do
       @switch_not_started_sentence,
       @switch_not_ready_sentence,
       @switch_failed_sentence,
+      @efuse_sentence,
       fault_sentence("storage_fault"),
       @set_nothing_sentence
     ] ++
@@ -275,6 +289,24 @@ defmodule FermixCore.Management.Accessories do
     if record["key"] == after_key and wait_ms > 0,
       do: hold(after_key, wait_ms, opts),
       else: {:ok, record}
+  end
+
+  @doc """
+  Tells `pid` `{:accessories_changed, version}` now and at every change of what
+  the accessory subtree owns (its ports, links and calls): what wakes a status
+  wait, and what the browser setup page follows a pairing by. Answers the
+  watcher, for `pid` to monitor, since its end (the switch turned off) ends the
+  notices. A subtree that does not run has no watcher (`:not_running`), one
+  that holds all its subscribers says so (`:too_many`), and an engine without
+  the provider has neither (`:unavailable`).
+  """
+  @spec watch(pid(), keyword()) :: {:ok, pid()} | {:error, atom()}
+  def watch(pid, opts \\ []) when is_pid(pid) and is_list(opts) do
+    case provider_call(opts, :subscribe, [pid]) do
+      {:ok, {:ok, watcher}} when is_pid(watcher) -> {:ok, watcher}
+      {:ok, {:error, reason}} when is_atom(reason) -> {:error, reason}
+      {:error, {:unavailable, @capability}} -> {:error, :unavailable}
+    end
   end
 
   @doc """
@@ -344,11 +376,10 @@ defmodule FermixCore.Management.Accessories do
   # when the wait runs out. One that runs is monitored, so its end (the switch
   # turned off) answers at once.
   defp subscribe(opts) do
-    case provider_call(opts, :subscribe, [self()]) do
-      {:ok, {:ok, pid}} when is_pid(pid) -> Process.monitor(pid)
-      {:ok, {:error, :not_running}} -> nil
-      {:ok, {:error, reason}} -> unsubscribed(reason)
-      {:error, _refusal} -> nil
+    case watch(self(), opts) do
+      {:ok, pid} -> Process.monitor(pid)
+      {:error, reason} when reason in [:not_running, :unavailable] -> nil
+      {:error, reason} -> unsubscribed(reason)
     end
   end
 

@@ -79,6 +79,15 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   own microphone, and the call carries on with the app closed. StackChan
   needs Fermix running on the Mac itself, not on an Always On server. Pairing
   and the robot's controls in the Mac app's Pet come with an app update.
+- **StackChan pairs from the setup page too.** With StackChan on, the
+  Realtime tab's StackChan section lists the USB devices, pairs a robot you
+  name with the code to compare and Matches or Doesn't match, and shows each
+  paired robot's connection, battery, power and diagnostics, with a test call,
+  Release for firmware update, Reconnect, Forget, Revoke and the choice of
+  voice device. Before you confirm the code it says that confirming on the
+  robot burns one key on its chip for good, and that returning to stock still
+  works. The robot's checks, Calibrate head and its own settings stay in the
+  Mac app.
 
 ### Changed
 

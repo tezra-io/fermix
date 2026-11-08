@@ -51,8 +51,9 @@ scenarios:
           does not install: the owner (or their assistant) follows the firmware's
           install guide. Says to plug it into one of the Mac's own USB-C ports,
           turn on the StackChan setting, and pair it in the Mac app's Pet >
-          StackChan, where the robot asks to pair on its screen and both screens
-          show the same six-digit code that the owner confirms. Says the robot is
+          StackChan or in the setup page's StackChan section, where the robot
+          asks to pair on its screen and both screens show the same six-digit
+          code that the owner confirms. Says the robot is
           then chosen as the voice device to replace the Mac's own voice. Does not
           say Fermix downloads or flashes the firmware, and does not ask for Wi-Fi
           or Bluetooth pairing.
@@ -66,12 +67,14 @@ scenarios:
           max_cost_usd: 1.2
           max_duration_ms: 160000
         rubric: >
-          Says the setup page only turns the connection on: pairing happens in
-          the Mac app's Pet > StackChan (the page's Set up in Fermix opens it),
-          with a code shown on both the robot and the Mac to confirm. Mentions
-          that a robot that gives no Fermix answer needs the Fermix firmware from
-          its install guide first. Does not claim the browser pairs the robot,
-          and does not say Fermix installs the firmware.
+          Says the next step is pairing, which the same setup page's StackChan
+          section offers once the robot is listed there as a USB device (the Mac
+          app's Pet > StackChan pairs it too): the owner taps to pair on the
+          robot's screen and confirms the same code shown on the robot and on
+          the page. Mentions that a robot that gives no Fermix answer needs the
+          Fermix firmware from its install guide first. Does not say the setup
+          page cannot pair the robot, and does not say Fermix installs the
+          firmware.
 
   - id: robot_refuses_or_loses_the_mac
     title: "Why the robot refuses a call or loses the Mac"
@@ -107,7 +110,8 @@ scenarios:
         rubric: >
           Says the Mac is still the chosen voice device: a newly paired robot
           does not replace the Mac's voice until the owner chooses it in the Mac
-          app's Pet, and the choice can change only while no call is running.
+          app's Pet or the setup page's StackChan section, and the choice can
+          change only while no call is running.
           Says a tap on a robot that is not the voice device is refused on
           purpose. Does not suggest re-pairing or re-flashing the robot to fix it.
       - id: firmware_incompatible

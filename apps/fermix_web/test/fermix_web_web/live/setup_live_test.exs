@@ -7615,6 +7615,526 @@ defmodule FermixWebWeb.SetupLiveTest do
     end
   end
 
+  # The owner's 8 November change to M91 D23: on a local Mac primary with
+  # StackChan on, the section pairs and manages a robot as the Mac app's Pet
+  # does, through `Management.Accessories.route/3`. The facts are invented and
+  # answered by `AccessoryGoldens.Provider`, the provider's stand-in, from an
+  # Agent the case moves; the page follows them by the watcher's change
+  # notices, which the case sends itself.
+  describe "the StackChan section's pairing and management" do
+    alias FermixCore.Management.Accessories, as: ManagementAccessories
+    alias FermixTestSupport.AccessoryGoldens, as: Goldens
+
+    @path "/dev/cu.usbmodem1101"
+    @attempt "5d1f0c2b9a8e47d6b3c1a0f9e8d7c6b5"
+    @code "382614"
+    @caps [:mic, :speaker, :screen, :touch, :pet, :motion, :battery]
+
+    setup do
+      web = Application.get_env(:fermix_web, :accessories)
+      on_exit(fn -> restore_env(:fermix_web, :accessories, web) end)
+
+      {:ok, facts} = Agent.start_link(fn -> Goldens.running([]) end)
+      watcher = spawn(fn -> receive do: (:stop -> :ok) end)
+      on_exit(fn -> send(watcher, :stop) end)
+
+      %{facts: facts, watcher: watcher, robot: Goldens.record()}
+    end
+
+    # The section's seams: the provider reads `facts`, the watcher answers
+    # every subscribe, and each call is told to this case.
+    defp put_management(ctx, overrides) do
+      test = self()
+
+      replies =
+        Map.merge(%{subscribe: fn [_pid] -> {:ok, ctx.watcher} end}, overrides[:replies] || %{})
+
+      provider_opts = [
+        status: fn -> Agent.get(ctx.facts, & &1) end,
+        replies: replies,
+        test: test
+      ]
+
+      management =
+        Goldens.base([provider_opts: provider_opts] ++ Keyword.delete(overrides, :replies))
+
+      Application.put_env(:fermix_web, :accessories,
+        management: management,
+        schedule: fn message, ms -> send(test, {:scheduled, message, ms}) end
+      )
+    end
+
+    defp manage_page(conn, ctx, facts, overrides \\ []) do
+      Agent.update(ctx.facts, fn _ -> facts end)
+      put_management(ctx, overrides)
+      {:ok, view, _html} = live(conn, "/setup?tab=realtime")
+      view
+    end
+
+    defp move(view, ctx, facts) do
+      Agent.update(ctx.facts, fn _ -> facts end)
+      send(view.pid, {:accessories_changed, System.unique_integer([:positive])})
+      render(view)
+    end
+
+    defp port(view), do: element(view, ~s([data-path="#{@path}"]))
+    defp robot(view, ctx), do: element(view, ~s([data-accessory="#{ctx.robot.accessory_id}"]))
+
+    defp enrollment(phase, fields \\ %{}) do
+      Map.merge(
+        %{
+          attempt: @attempt,
+          round: 1,
+          phase: phase,
+          code: if(phase in [:offered, :revealed], do: @code),
+          accessory_confirmed?: false,
+          owner_confirmed?: false,
+          closed_reason: nil,
+          accessory_id: nil,
+          expires_at: ~U[2026-11-08 15:02:00Z]
+        },
+        fields
+      )
+    end
+
+    # A robot answering on the port the owner selected, before it is paired.
+    defp pairing_facts(enrollment) do
+      link =
+        Goldens.link(%{
+          mode: :pairing,
+          phase: :unenrolled,
+          kind: "stackchan",
+          firmware: "0.1.0",
+          wire: 1,
+          caps: @caps,
+          enrollment: enrollment
+        })
+
+      Goldens.running([Goldens.entry(:linked, link)], selected: @path)
+    end
+
+    defp attached_facts(robot, fields \\ %{}, opts \\ []) do
+      link =
+        Goldens.link(
+          Map.merge(
+            %{
+              phase: :attached,
+              accessory_id: robot.accessory_id,
+              name: robot.name,
+              kind: "stackchan",
+              firmware: "0.1.0",
+              wire: 1,
+              caps: @caps,
+              accessory_state: %{
+                battery: 82,
+                power: "usb",
+                brownout: false,
+                volume: 60,
+                brightness: 70,
+                motion: "ready",
+                calibration: "valid"
+              },
+              voice: :ready,
+              diag: %{
+                uptime_s: 1_843,
+                frames_rx: 41_206,
+                frames_tx: 52_118,
+                crc_errors: 0,
+                resync_bytes: 0,
+                pcm_seq_gaps: 0,
+                mic_overflows: 0,
+                spk_underflows: 2
+              }
+            },
+            fields
+          )
+        )
+
+      Goldens.running([Goldens.entry(:linked, link)], opts)
+    end
+
+    defp in_call(robot, phase \\ :active) do
+      call = %{
+        call_id: "voice-7c2e41d9",
+        stream: 1,
+        source: :mac,
+        phase: phase,
+        view: %{
+          state: "listening",
+          muted_by: nil,
+          engine: "xai_realtime",
+          model: "grok-voice-3.0",
+          voice: "eve",
+          call_uuid: "0b9e7f6a-4c3d-4e2f-9a1b-8c7d6e5f4a3b",
+          conversation: "chat",
+          started_at: ~U[2026-11-08 15:00:36Z],
+          transcript: [],
+          tasks: [],
+          usage: nil
+        }
+      }
+
+      attached_facts(robot, %{call: call})
+    end
+
+    test "off, it shows only the switch and the daemon's sentences", %{conn: conn} = ctx do
+      view =
+        manage_page(conn, ctx, Goldens.running([]), enabled?: false, records: {:ok, [ctx.robot]})
+
+      assert view |> element("#accessories-sentence") |> render() =~ "StackChan is off."
+      assert has_element?(view, "#accessories-switch")
+      refute has_element?(view, "#accessories-manage")
+      refute has_element?(view, "#accessories-robots")
+      refute_received {:accessories_called, :subscribe, _args}
+    end
+
+    test "off a local Mac primary it offers nothing to pair or manage", %{conn: conn} = ctx do
+      facts = attached_facts(ctx.robot)
+
+      overrides = [
+        engine_role: %{role: :device, primary: "studio-mac"},
+        records: {:ok, [ctx.robot]}
+      ]
+
+      view = manage_page(conn, ctx, facts, overrides)
+
+      assert view |> element("#accessories-sentence") |> render() =~
+               "StackChan setup needs a local Mac primary."
+
+      refute has_element?(view, "#accessories-manage")
+      refute has_element?(view, "#accessories-robots")
+      refute has_element?(view, "#accessories-voice-device")
+    end
+
+    test "on with nothing plugged in, it says how to plug the robot in", %{conn: conn} = ctx do
+      view = manage_page(conn, ctx, Goldens.running([]))
+
+      assert view |> element("#accessories-ports") |> render() =~
+               "Plug your StackChan into this Mac with its USB-C cable."
+    end
+
+    test "an unpaired port offers Pair, which opens it for pairing", %{conn: conn} = ctx do
+      view = manage_page(conn, ctx, Goldens.running([Goldens.entry(:unrelated)]))
+
+      assert port(view) |> render() =~ "A USB serial device is plugged in."
+      view |> element(~s([data-path="#{@path}"] button), "Pair") |> render_click()
+
+      assert_receive {:accessories_called, :pair_start, [@path]}
+    end
+
+    test "a robot found on the port is named and paired", %{conn: conn} = ctx do
+      view = manage_page(conn, ctx, pairing_facts(nil))
+
+      assert port(view) |> render() =~ "StackChan found. Fermix firmware is compatible."
+      assert view |> element("#accessories-robot-name") |> render() =~ ~s(value="StackChan")
+
+      view
+      |> element("#accessories-pair-form")
+      |> render_submit(%{"path" => @path, "name" => "Desk robot"})
+
+      assert_receive {:accessories_called, :pair_begin, [@path, "Desk robot"]}
+
+      view
+      |> element("#accessories-pair-form")
+      |> render_submit(%{"path" => @path, "name" => " "})
+
+      assert_receive {:accessories_called, :pair_begin, [@path, nil]}
+    end
+
+    test "the code is shown beside the daemon's sentence, with the eFuse note before Matches",
+         %{conn: conn} = ctx do
+      view = manage_page(conn, ctx, pairing_facts(enrollment(:revealed)))
+      card = port(view) |> render()
+
+      assert card =~ "Check the code on your robot. It should match the code shown here."
+      assert view |> element("#accessories-code") |> render() =~ "382 614"
+
+      assert view |> element("#accessories-efuse-note") |> render() =~
+               ManagementAccessories.efuse_sentence()
+
+      assert has_element?(view, "#accessories-pairing button", "Doesn't match")
+      assert has_element?(view, "#accessories-pairing button", "Matches")
+    end
+
+    test "Matches and Doesn't match answer the attempt the page shows", %{conn: conn} = ctx do
+      view = manage_page(conn, ctx, pairing_facts(enrollment(:revealed)))
+
+      view |> element("#accessories-pairing button", "Doesn't match") |> render_click()
+      assert_receive {:accessories_called, :pair_decide, [@path, @attempt, false]}
+
+      view |> element("#accessories-pairing button", ~r/^\s*Matches\s*$/) |> render_click()
+      assert_receive {:accessories_called, :pair_decide, [@path, @attempt, true]}
+    end
+
+    test "once Matches is pressed, it waits for the robot's own confirm", %{conn: conn} = ctx do
+      facts = pairing_facts(enrollment(:revealed, %{owner_confirmed?: true, round: 2}))
+      view = manage_page(conn, ctx, facts)
+
+      assert view |> element("#accessories-pairing") |> render() =~
+               "Confirm the code on your robot too."
+
+      assert view |> element("#accessories-pairing") |> render() =~ "New code, try 2 of 3"
+      refute has_element?(view, "#accessories-pairing button", "Matches")
+    end
+
+    test "Cancel stops the attempt it shows", %{conn: conn} = ctx do
+      view = manage_page(conn, ctx, pairing_facts(enrollment(:revealed)))
+
+      view |> element(~s([data-path="#{@path}"] button), "Cancel pairing") |> render_click()
+
+      assert_receive {:accessories_called, :pair_cancel, [@path, @attempt]}
+    end
+
+    test "pairing follows the watcher's change notices, from the robot's prompt to paired",
+         %{conn: conn} = ctx do
+      view = manage_page(conn, ctx, pairing_facts(enrollment(:begun)))
+      page = view.pid
+      assert_receive {:accessories_called, :subscribe, [^page]}
+
+      assert port(view) |> render() =~ "Tap Pair with this Mac on your robot."
+      refute has_element?(view, "#accessories-code")
+
+      assert move(view, ctx, pairing_facts(enrollment(:revealed))) =~ "382 614"
+
+      # The robot confirmed too: the record is written and the link greets it
+      # again, now as the paired robot.
+      done = enrollment(:done, %{accessory_confirmed?: true, owner_confirmed?: true})
+      link = Goldens.link(%{mode: :pairing, phase: :hello, kind: "stackchan", enrollment: done})
+      put_management(ctx, records: {:ok, [ctx.robot]})
+      html = move(view, ctx, Goldens.running([Goldens.entry(:linked, link)], selected: @path))
+
+      assert html =~ "Your robot is paired."
+      assert robot(view, ctx) |> render() =~ "Desk StackChan"
+    end
+
+    test "codes that never match end the attempt in the daemon's words, and pairing can start again",
+         %{conn: conn} = ctx do
+      closed = enrollment(:closed, %{closed_reason: :mismatch_limit, round: 3})
+      view = manage_page(conn, ctx, pairing_facts(closed))
+
+      assert view |> element("#accessories-pairing") |> render() =~
+               "The codes did not match three times. Start pairing again."
+
+      assert has_element?(view, "#accessories-pair-form")
+    end
+
+    test "a paired robot shows its connection, battery, power and diagnostics",
+         %{conn: conn} = ctx do
+      view = manage_page(conn, ctx, attached_facts(ctx.robot), records: {:ok, [ctx.robot]})
+      row = robot(view, ctx) |> render()
+
+      assert row =~ "Desk StackChan"
+      assert row =~ "Connected by USB. Firmware compatible."
+      assert row =~ "Battery 82%"
+      assert row =~ "Powered by USB"
+      assert row =~ "Diagnostics"
+      assert row =~ "Speaker underflows"
+      assert row =~ "52118"
+      # Its port is the robot's row, not a second card.
+      refute has_element?(view, ~s(#accessories-ports [data-path="#{@path}"]))
+    end
+
+    test "the voice device is This Mac or the robot, chosen through the daemon",
+         %{conn: conn} = ctx do
+      test = self()
+      put = fn _home, device -> send(test, {:put_voice_device, device}) && :ok end
+      id = ctx.robot.accessory_id
+
+      view =
+        manage_page(conn, ctx, attached_facts(ctx.robot),
+          records: {:ok, [ctx.robot]},
+          put_voice_device: put
+        )
+
+      view |> element("#accessories-voice-device button", "Desk StackChan") |> render_click()
+      assert_receive {:put_voice_device, {:accessory, ^id}}
+
+      view |> element("#accessories-voice-device button", "This Mac") |> render_click()
+      assert_receive {:put_voice_device, :desktop}
+    end
+
+    test "a voice device that cannot be read is said where This Mac can be chosen again",
+         %{conn: conn} = ctx do
+      unreadable = {:error, {:invalid_voice_device, "/invented/accessories/voice_device.json"}}
+      view = manage_page(conn, ctx, Goldens.running([]), voice_device: unreadable)
+
+      assert view |> element("#accessories-voice-device") |> render() =~
+               "The voice device could not be read. Choose one in Pet."
+
+      assert has_element?(view, "#accessories-voice-device button", "This Mac")
+      refute has_element?(view, "#accessories-voice-device-sentence")
+    end
+
+    test "while this Mac holds the call, the voice device is held and a call start is refused",
+         %{conn: conn} = ctx do
+      test = self()
+      put = fn _home, device -> send(test, {:put_voice_device, device}) && :ok end
+      id = ctx.robot.accessory_id
+
+      # The link starts the call and the home's one call refuses it, which the
+      # robot's newest call then says.
+      refused = %{
+        id => %{
+          call_id: "voice-1b2c",
+          reason: "call_in_progress",
+          ended_at: ~U[2026-11-08 15:04:00Z]
+        }
+      }
+
+      start = fn [^id] ->
+        Agent.update(ctx.facts, fn _ -> attached_facts(ctx.robot, %{}, last_calls: refused) end)
+        {:ok, %{stream: 2}}
+      end
+
+      view =
+        manage_page(conn, ctx, attached_facts(ctx.robot),
+          records: {:ok, [ctx.robot]},
+          call_holder: {:ok, %{endpoint: "desktop"}},
+          put_voice_device: put,
+          replies: %{call_start: start}
+        )
+
+      assert view |> element("#accessories-voice-device") |> render() =~
+               "The voice device can change once the call has finished."
+
+      assert has_element?(view, "#accessories-voice-device button[disabled]", "Desk StackChan")
+      refute has_element?(view, ~s([data-accessory="#{id}"] button), "Start test call")
+
+      # A press from a page drawn before the call began is the daemon's to refuse.
+      render_click(view, "accessories_voice_device", %{"device" => "accessory:" <> id})
+      refute_received {:put_voice_device, _device}
+
+      assert view |> element("#accessories-voice-device [data-refusal]") |> render() =~
+               "The voice device can change once the call has finished."
+
+      render_click(view, "accessories_robot", %{"action" => "start_call", "id" => id})
+      assert_receive {:accessories_called, :call_start, [^id]}
+      assert robot(view, ctx) |> render() =~ "Another voice call is in progress."
+    end
+
+    test "a test call starts from the robot's row and ends from it", %{conn: conn} = ctx do
+      id = ctx.robot.accessory_id
+      view = manage_page(conn, ctx, attached_facts(ctx.robot), records: {:ok, [ctx.robot]})
+
+      robot_button = ~s([data-accessory="#{id}"] button)
+      view |> element(robot_button, "Start test call") |> render_click()
+      assert_receive {:accessories_called, :call_start, [^id]}
+
+      move(view, ctx, in_call(ctx.robot))
+      assert robot(view, ctx) |> render() =~ "In a call"
+
+      view |> element(robot_button, "End call") |> render_click()
+      assert_receive {:accessories_called, :call_end, [^id, "voice-7c2e41d9"]}
+    end
+
+    test "Release, Forget and Revoke ask in place before they act", %{conn: conn} = ctx do
+      id = ctx.robot.accessory_id
+      view = manage_page(conn, ctx, attached_facts(ctx.robot), records: {:ok, [ctx.robot]})
+      robot_button = ~s([data-accessory="#{id}"] button)
+
+      view |> element(robot_button, "Release for firmware update") |> render_click()
+      assert robot(view, ctx) |> render() =~ "Release Desk StackChan for a firmware update?"
+      refute_received {:accessories_called, :release, _args}
+      view |> element(robot_button, "Cancel") |> render_click()
+      refute robot(view, ctx) |> render() =~ "for a firmware update?"
+
+      view |> element(robot_button, "Release for firmware update") |> render_click()
+      view |> element(robot_button, ~r/^\s*Release\s*$/) |> render_click()
+      assert_receive {:accessories_called, :release, [@path]}
+
+      view |> element(robot_button, "Forget") |> render_click()
+      assert robot(view, ctx) |> render() =~ "Forget Desk StackChan?"
+      refute_received {:accessories_called, :forget, _args}
+      view |> element(robot_button, ~r/^\s*Forget\s*$/) |> render_click()
+      assert_receive {:accessories_called, :forget, [^id]}
+
+      view |> element(robot_button, "Revoke") |> render_click()
+      assert robot(view, ctx) |> render() =~ "Revoke Desk StackChan?"
+      view |> element(robot_button, ~r/^\s*Revoke\s*$/) |> render_click()
+      assert_receive {:accessories_called, :revoke, [^id]}
+    end
+
+    test "a refused action is said in the daemon's words beside what it was about",
+         %{conn: conn} = ctx do
+      view =
+        manage_page(conn, ctx, Goldens.running([Goldens.entry(:unrelated)]),
+          replies: %{pair_start: {:error, :not_present}}
+        )
+
+      view |> element(~s([data-path="#{@path}"] button), "Pair") |> render_click()
+
+      assert view |> element(~s([data-path="#{@path}"] [data-refusal])) |> render() =~
+               "No USB device is plugged in at that port."
+    end
+
+    test "a port without Fermix firmware links the install guide and tries again",
+         %{conn: conn} = ctx do
+      facts = Goldens.running([Goldens.entry(:no_answer)], selected: @path)
+      view = manage_page(conn, ctx, facts)
+
+      guide =
+        hd(Goldens.status(Goldens.base(provider_opts: [status: facts]))["ports"])["install_guide"]
+
+      assert port(view) |> render() =~ escaped("This USB device isn't running Fermix firmware.")
+      link = view |> element(~s([data-path="#{@path}"] a), "Open install guide") |> render()
+      assert link =~ ~s(href="#{guide}")
+      assert link =~ ~s(rel="noopener noreferrer")
+
+      view |> element(~s([data-path="#{@path}"] button), "Try again") |> render_click()
+      assert_receive {:accessories_called, :retry, [@path]}
+    end
+
+    test "a released port is reconnected", %{conn: conn} = ctx do
+      view = manage_page(conn, ctx, Goldens.running([Goldens.entry(:released)]))
+
+      assert port(view) |> render() =~ "Install the firmware update now, then choose Reconnect."
+      view |> element(~s([data-path="#{@path}"] button), "Reconnect") |> render_click()
+
+      assert_receive {:accessories_called, :reconnect, [@path]}
+    end
+
+    test "a watcher that ends is looked for again", %{conn: conn} = ctx do
+      view = manage_page(conn, ctx, Goldens.running([]))
+      page = view.pid
+      assert_receive {:accessories_called, :subscribe, [^page]}
+
+      send(ctx.watcher, :stop)
+      assert_receive {:scheduled, {:accessories_watch, :retry} = retry, 1_000}
+
+      send(page, retry)
+      assert_receive {:accessories_called, :subscribe, [^page]}
+    end
+
+    # No credential, pairing attempt or code ever rides a link, and the page
+    # never asks the browser for its serial ports: the daemon holds the port.
+    test "no secret or pairing token in any URL, and no browser serial API",
+         %{conn: conn} = ctx do
+      view = manage_page(conn, ctx, pairing_facts(enrollment(:revealed)))
+      html = render(view)
+
+      hrefs =
+        ~r/(?:href|action|src)="([^"]*)"/
+        |> Regex.scan(html, capture: :all_but_first)
+        |> List.flatten()
+
+      assert hrefs != []
+
+      for url <- hrefs do
+        refute url =~ @attempt
+        refute url =~ @code
+        refute url =~ "token"
+      end
+
+      refute html =~ @attempt
+      refute html =~ "navigator.serial"
+      refute html =~ "requestPort"
+
+      app_js = File.read!(Path.expand("../../../assets/js/app.js", __DIR__))
+      refute app_js =~ "navigator.serial"
+      refute app_js =~ "requestPort"
+    end
+  end
+
   defp restore_env(app, key, :error), do: Application.delete_env(app, key)
   defp restore_env(app, key, {:ok, value}), do: Application.put_env(app, key, value)
   defp restore_env(app, key, nil), do: Application.delete_env(app, key)

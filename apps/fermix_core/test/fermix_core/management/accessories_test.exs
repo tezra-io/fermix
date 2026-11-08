@@ -891,6 +891,47 @@ defmodule FermixCore.Management.AccessoriesTest do
     end
   end
 
+  # The setup page follows a pairing by the watcher's own change notices, as
+  # a status wait is woken by them.
+  describe "following the watcher" do
+    test "watch answers the watcher to monitor, and the subtree's word when there is none" do
+      watcher = spawn(fn -> receive do: (:stop -> :ok) end)
+      on_exit(fn -> send(watcher, :stop) end)
+
+      opts =
+        Goldens.base(
+          provider_opts: [
+            status: Goldens.running([]),
+            replies: %{subscribe: fn [_pid] -> {:ok, watcher} end},
+            test: self()
+          ]
+        )
+
+      page = self()
+      assert {:ok, ^watcher} = Accessories.watch(page, opts)
+      assert_receive {:accessories_called, :subscribe, [^page]}
+
+      assert {:error, :not_running} = Accessories.watch(page, Goldens.base())
+
+      full =
+        Goldens.base(provider_opts: [status: %{}, replies: %{subscribe: {:error, :too_many}}])
+
+      assert {:error, :too_many} = Accessories.watch(page, full)
+
+      assert {:error, :unavailable} = Accessories.watch(page, Goldens.base(provider: nil))
+    end
+  end
+
+  # D15: the robot burns one eFuse key block when the owner confirms on it,
+  # so a page that offers Matches says so first, in the daemon's words.
+  test "the eFuse note is one of the daemon's sentences" do
+    assert Accessories.efuse_sentence() ==
+             "Tapping Matches on the robot burns one key on its chip for good; returning to " <>
+               "stock still works."
+
+    assert Accessories.efuse_sentence() in Accessories.sentences()
+  end
+
   describe "the switch" do
     test "a link that followed is quiet, and one that did not says so" do
       assert :ok = Accessories.apply_enabled(true, Goldens.base())
