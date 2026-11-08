@@ -105,6 +105,10 @@ defmodule FermixCore.Home.MoveReadiness do
 
   @plugin_lockfile "plugins/installed.json"
   @unreadable_settings "The settings file could not be read; Fermix's log says why."
+  # Every id a review can say, in its order: no item is made with another.
+  # The management schema and PROTOCOL.md name exactly these.
+  @ids ~w(call_in_progress keychain_secrets engine_version disk s3_size plugins dev_plugins
+          stays_here whatsapp slack coding_agents cutover_gap serves_nothing service)
 
   @type status :: :ok | :warn | :block
   @type item :: %{id: String.t(), status: status(), sentence: String.t()}
@@ -222,6 +226,10 @@ defmodule FermixCore.Home.MoveReadiness do
 
   def costs({:error, _sentence}), do: []
 
+  @doc "Every id a review's item can carry, in the review's order."
+  @spec ids() :: [String.t()]
+  def ids, do: @ids
+
   @doc "The block sentences of `report`, in order; none when it is ready."
   @spec blocks(report()) :: [String.t()]
   def blocks(%{items: items}), do: for(%{status: :block} = item <- items, do: item.sentence)
@@ -251,9 +259,10 @@ defmodule FermixCore.Home.MoveReadiness do
 
   def from_view(_other), do: :error
 
+  # A kept review is read back as it was written, whichever engine wrote it.
   defp item_from_view(%{"id" => id, "status" => status, "sentence" => sentence})
        when is_binary(id) and status in ~w(ok warn block) and is_binary(sentence),
-       do: item(id, String.to_existing_atom(status), sentence)
+       do: %{id: id, status: String.to_existing_atom(status), sentence: sentence}
 
   defp item_from_view(_other), do: nil
 
@@ -676,7 +685,8 @@ defmodule FermixCore.Home.MoveReadiness do
 
   # -- facts ------------------------------------------------------------------
 
-  defp item(id, status, sentence), do: %{id: id, status: status, sentence: sentence}
+  defp item(id, status, sentence) when id in @ids,
+    do: %{id: id, status: status, sentence: sentence}
 
   # A review is asked for, not polled, so each unreadable read is logged.
   defp read_config(home) do

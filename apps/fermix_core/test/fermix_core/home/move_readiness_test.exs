@@ -400,6 +400,31 @@ defmodule FermixCore.Home.MoveReadinessTest do
     assert sentence =~ "5 GiB"
   end
 
+  # The apps check their vocabulary against the schema exactly, and the
+  # schema's list missed `call_in_progress` once the review began to say it.
+  # The ids the review can say are `MoveReadiness.ids/0` (no item is made with
+  # any other), and the schema and PROTOCOL.md name exactly those.
+  test "the schema and PROTOCOL.md name exactly the ids the review can say" do
+    priv = Application.app_dir(:fermix_core, "priv/management")
+
+    %{"$defs" => %{"homeReadinessItem" => %{"description" => description}}} =
+      priv |> Path.join("protocol.schema.json") |> File.read!() |> Jason.decode!()
+
+    [_match, listed] = Regex.run(~r/id is (.+?); a client/, description)
+    schema_ids = String.split(listed, ~r/, | or /)
+
+    assert Enum.sort(schema_ids) == Enum.sort(MoveReadiness.ids())
+
+    [row] =
+      priv
+      |> Path.join("PROTOCOL.md")
+      |> File.read!()
+      |> String.split("\n")
+      |> Enum.filter(&String.starts_with?(&1, "| `home.move.readiness` |"))
+
+    for id <- MoveReadiness.ids(), do: assert(row =~ "`#{id}` (", id)
+  end
+
   # EC2 test 2026-11-08: a dev plugin folder whose links name checkouts outside
   # the home blocked the move. The folder and the setting that names it stay
   # on this computer (`DeviceLocal`), so the review does not block on them and
