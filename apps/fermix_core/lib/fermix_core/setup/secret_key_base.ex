@@ -7,12 +7,28 @@ defmodule FermixCore.Setup.SecretKeyBase do
   would invalidate the in-flight setup session cookie mid-flow and lock the
   browser out with a 403. We persist a generated key under `FERMIX_HOME`
   (mode `0600`) so it survives restarts.
+
+  Only a boot that serves the web listener resolves it
+  (`FermixCore.BootProfile.prepare/2`), so a verb that serves nothing,
+  `fermix --version` among them, writes no home.
   """
 
   # 48 random bytes Base64-encode to 64 characters, satisfying Phoenix's
   # minimum 64-byte `secret_key_base` requirement.
   @random_bytes 48
   @min_length 64
+
+  @doc """
+  The key the web listener signs with: `SECRET_KEY_BASE` where the operator
+  set it, else the one persisted under `home` (`read_or_create!/1`).
+  """
+  @spec resolve!(Path.t()) :: String.t()
+  def resolve!(home) when is_binary(home) do
+    case System.get_env("SECRET_KEY_BASE") do
+      nil -> read_or_create!(home)
+      key -> key
+    end
+  end
 
   @doc """
   Returns the persisted secret key base under `home`, generating and

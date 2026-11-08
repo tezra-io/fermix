@@ -97,7 +97,7 @@ defmodule FermixCore.Application do
   end
 
   defp start_profile(:app_engine) do
-    :ok = BootProfile.prepare(:app_engine)
+    :ok = BootProfile.prepare(:app_engine, ConfigStore.fermix_home())
     start_supervision_tree()
   end
 
@@ -158,7 +158,7 @@ defmodule FermixCore.Application do
   end
 
   defp run_daemon(profile, argv) do
-    :ok = BootProfile.prepare(profile)
+    :ok = BootProfile.prepare(profile, ConfigStore.fermix_home())
 
     with {:ok, pid} <- start_supervision_tree() do
       spawn(fn -> run_cli(argv) end)

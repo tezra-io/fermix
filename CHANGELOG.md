@@ -101,6 +101,15 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`fermix --version` no longer creates a Fermix home.** Every command wrote
+  the web listener's signing key, `secret_key_base`, into the account's home
+  as it started, making `~/.fermix` where there was none, so `fermix
+  --version` run as root left `/root/.fermix` behind. Only the boot that
+  serves the web listener (the daemon, the Mac app's engine) makes that key
+  now, and `fermix --version`, `fermix version` and the other commands that
+  start no daemon write none. The standalone and Linux package binaries still
+  unpack their runtime under `~/.local` before Fermix starts, as their
+  wrapper always has.
 - **`fermix doctor` no longer fails a computer in the device role for what
   that role never starts.** A computer whose home moved to another host runs
   no phone channel and no ACP listener, yet its `mobile companion` and `acp

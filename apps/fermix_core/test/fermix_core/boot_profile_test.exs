@@ -2,6 +2,22 @@ defmodule FermixCore.BootProfileTest do
   use ExUnit.Case, async: false
 
   alias FermixCore.BootProfile
+  alias FermixTestSupport.SafeRm
+
+  # A home of the test's own, and no operator key in the environment: the
+  # key a packaged boot signs its cookies with is the one this home keeps.
+  setup do
+    home = SafeRm.make_tmp_dir!("boot-profile-home")
+    previous = System.get_env("SECRET_KEY_BASE")
+    System.delete_env("SECRET_KEY_BASE")
+
+    on_exit(fn ->
+      if previous, do: System.put_env("SECRET_KEY_BASE", previous)
+      SafeRm.rm_rf!(home)
+    end)
+
+    %{home: home}
+  end
 
   test "app-engine identity wins without consulting Burrito detection" do
     detector = fn -> flunk("Burrito detection must not run for an app engine") end
@@ -41,7 +57,7 @@ defmodule FermixCore.BootProfileTest do
     assert_raise ArgumentError, ~r/boot_profile/, fn -> BootProfile.current() end
   end
 
-  test "preparing the packaged Linux CLI opens the same daemon surfaces" do
+  test "preparing the packaged Linux CLI opens the same daemon surfaces", %{home: home} do
     endpoint_before = Application.get_env(:fermix_web, FermixWebWeb.Endpoint)
     daemon_before = Application.get_env(:fermix_core, :daemon_socket_enabled)
     realtime_before = Application.get_env(:fermix_core, :realtime_socket_enabled)
@@ -56,17 +72,20 @@ defmodule FermixCore.BootProfileTest do
     Application.put_env(:fermix_core, :daemon_socket_enabled, false)
     Application.put_env(:fermix_core, :realtime_socket_enabled, false)
 
-    assert BootProfile.prepare(:linux_package_cli) == :ok
+    assert BootProfile.prepare(:linux_package_cli, home) == :ok
 
     endpoint = Application.get_env(:fermix_web, FermixWebWeb.Endpoint)
     assert endpoint[:custom] == :preserved
     assert endpoint[:server] == true
+    assert endpoint[:secret_key_base] == File.read!(Path.join(home, "secret_key_base"))
 
     assert Application.get_env(:fermix_core, :daemon_socket_enabled) == true
     assert Application.get_env(:fermix_core, :realtime_socket_enabled) == true
   end
 
-  test "preparing app-engine boot enables every daemon surface" do
+  # The endpoint serves only after this, so its signing key is made only
+  # here: a verb that serves nothing writes no home (EC2 test 2026-11-08).
+  test "preparing app-engine boot enables every daemon surface", %{home: home} do
     endpoint_before = Application.get_env(:fermix_web, FermixWebWeb.Endpoint)
     daemon_before = Application.get_env(:fermix_core, :daemon_socket_enabled)
     realtime_before = Application.get_env(:fermix_core, :realtime_socket_enabled)
@@ -81,22 +100,29 @@ defmodule FermixCore.BootProfileTest do
     Application.put_env(:fermix_core, :daemon_socket_enabled, false)
     Application.put_env(:fermix_core, :realtime_socket_enabled, false)
 
-    assert BootProfile.prepare(:app_engine) == :ok
+    assert BootProfile.prepare(:app_engine, home) == :ok
 
     endpoint = Application.get_env(:fermix_web, FermixWebWeb.Endpoint)
     assert endpoint[:custom] == :preserved
     assert endpoint[:server] == true
+    key = endpoint[:secret_key_base]
+    assert key == File.read!(Path.join(home, "secret_key_base"))
+
+    # The next boot signs with the same key, so a session survives a restart.
+    assert BootProfile.prepare(:app_engine, home) == :ok
+    assert Application.get_env(:fermix_web, FermixWebWeb.Endpoint)[:secret_key_base] == key
 
     assert Application.get_env(:fermix_core, :daemon_socket_enabled) == true
     assert Application.get_env(:fermix_core, :realtime_socket_enabled) == true
   end
 
-  test "source preparation does not change daemon surface gates" do
+  test "source preparation does not change daemon surface gates", %{home: home} do
     endpoint_before = Application.get_env(:fermix_web, FermixWebWeb.Endpoint)
     daemon_before = Application.get_env(:fermix_core, :daemon_socket_enabled)
     realtime_before = Application.get_env(:fermix_core, :realtime_socket_enabled)
 
-    assert BootProfile.prepare(:source) == :ok
+    assert BootProfile.prepare(:source, home) == :ok
+    refute File.exists?(Path.join(home, "secret_key_base"))
 
     assert Application.get_env(:fermix_web, FermixWebWeb.Endpoint) == endpoint_before
     assert Application.get_env(:fermix_core, :daemon_socket_enabled) == daemon_before

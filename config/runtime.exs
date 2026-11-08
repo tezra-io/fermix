@@ -628,27 +628,10 @@ mobile_push = existing_mobile_push |> put_env_overlay.(:key, "FERMIX_APNS_KEY")
 config :fermix_channels, mobile: Keyword.put(existing_mobile, :push, mobile_push)
 
 if config_env() == :prod do
-  # The secret key base signs Phoenix session cookies. The daemon restarts
-  # itself (service KeepAlive, and the setup UI's restart button), so the key
-  # MUST stay stable across restarts — a per-boot key invalidates the in-flight
-  # setup session cookie and locks the browser out with a 403. Persist it under
-  # FERMIX_HOME (this ships in the release, so brew installs get it too);
-  # operators may override with SECRET_KEY_BASE.
-  secret_key_base =
-    cond do
-      env = System.get_env("SECRET_KEY_BASE") ->
-        env
-
-      Code.ensure_loaded?(FermixCore.Setup.SecretKeyBase) ->
-        secret_home = System.get_env("FERMIX_HOME") || Path.join(System.user_home!(), ".fermix")
-        FermixCore.Setup.SecretKeyBase.read_or_create!(secret_home)
-
-      true ->
-        # Build-time tooling evaluates runtime.exs without the app loaded; this
-        # ephemeral key is never used to sign a served session.
-        Base.encode64(:crypto.strong_rand_bytes(48))
-    end
-
+  # The secret key base that signs Phoenix session cookies is not set here:
+  # this file runs for every verb, and a verb that serves nothing must write
+  # no home (`fermix --version` once made `secret_key_base`). The boot that
+  # serves the web listener resolves it (`FermixCore.BootProfile.prepare/2`).
   host = System.get_env("PHX_HOST") || "localhost"
 
   config :fermix_web, :dns_cluster_query, System.get_env("DNS_CLUSTER_QUERY")
@@ -674,8 +657,7 @@ if config_env() == :prod do
     # The daemon serves its web UI on loopback; allow both loopback origins
     # (and the configured PHX_HOST) so the LiveView socket isn't rejected when
     # the browser uses 127.0.0.1 instead of localhost.
-    check_origin: ["//localhost", "//127.0.0.1", "//#{host}"],
-    secret_key_base: secret_key_base
+    check_origin: ["//localhost", "//127.0.0.1", "//#{host}"]
 
   # ## SSL Support
   #
