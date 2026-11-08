@@ -251,6 +251,28 @@ case "$version_output" in
   *) fail "fermix --version does not contain $version" ;;
 esac
 
+# A working directory this account cannot open, entered and then closed
+# (mode 000), as an owner's 0700 home is to the account an Always On server
+# runs Fermix as: the wrapper refuses before the VM starts, in its one
+# sentence (rel/burrito_plugin.zig), where an interactive-mode boot would
+# stop with a crash dump. The runner's account is not root, which opens any
+# directory.
+closed_dir="$RUNNER_TEMP/fermix-closed-cwd"
+mkdir -m 700 "$closed_dir"
+closed_status=0
+closed_output="$(cd "$closed_dir" && chmod 000 . && fermix --version 2>&1)" || closed_status=$?
+chmod 700 "$closed_dir"
+case "$closed_output" in
+  *"Crash dump"* | *"Kernel pid terminated"*) closed_refused=0 ;;
+  *"fermix: Fermix cannot start in "*"Run the command from one it can open, such as /."*) closed_refused=1 ;;
+  *) closed_refused=0 ;;
+esac
+if [ "$closed_status" -ne 1 ] || [ "$closed_refused" -ne 1 ]; then
+  printf '%s\n' "$closed_output" >&2
+  fail "run from a directory this account cannot open, fermix must refuse in its one sentence and exit 1 (it exited $closed_status)"
+fi
+printf 'closed working directory: %s\n' "$closed_output"
+
 # The run above unpacked the payload; the pinned helper must be in it, with its
 # notices beside it and installed as the package's own document.
 sh -c "$iroh_helper_check" iroh-helper-check "$iroh_sha256" "$iroh_version_line" "$iroh_notices_sha256" ||

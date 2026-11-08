@@ -123,6 +123,31 @@ case "$version_output" in
   *) fail "--version output does not contain $version" ;;
 esac
 
+# ── a working directory this account cannot open ────────────────────────────
+# Burrito's launcher boots the VM in interactive mode (it passes "-mode
+# embedded" as one argument), whose code path starts with the working
+# directory, and a directory the account cannot search stops that VM with a
+# crash dump before any Fermix code runs. The wrapper's plugin
+# (rel/burrito_plugin.zig) refuses first, in one sentence. The directory is
+# entered and then closed (mode 000), so no second account is needed; an
+# account that is root opens it all the same, so this runs as an ordinary one.
+closed_dir="$runtime_root/closed"
+mkdir -m 700 "$closed_dir"
+closed_status=0
+closed_output="$(cd "$closed_dir" && chmod 000 . && HOME="$home" FERMIX_HOME="$fermix_home" "$artifact" --version 2>&1)" ||
+  closed_status=$?
+chmod 700 "$closed_dir"
+case "$closed_output" in
+  *"Crash dump"* | *"Kernel pid terminated"*) closed_refused=0 ;;
+  *"fermix: Fermix cannot start in "*"Run the command from one it can open, such as /."*) closed_refused=1 ;;
+  *) closed_refused=0 ;;
+esac
+if [ "$closed_status" -ne 1 ] || [ "$closed_refused" -ne 1 ]; then
+  printf '%s\n' "$closed_output" >&2
+  fail "run from a directory this account cannot open, the artifact must refuse in its one sentence and exit 1 (it exited $closed_status)"
+fi
+printf 'closed working directory: %s\n' "$closed_output"
+
 # ── the bundled fermix-iroh helper ──────────────────────────────────────────
 # Reach from anywhere runs this helper, and a release without it reports the
 # switch as unavailable on every install. The Burrito step puts the pinned

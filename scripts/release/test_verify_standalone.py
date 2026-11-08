@@ -90,6 +90,33 @@ class VerifyStandaloneTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("--version output does not contain 0.9.0", result.stderr)
 
+    # The class this stage exists for: an Always On owner's documented command,
+    # run from the home they log in to, which the engine account cannot open.
+    def test_rejects_an_artifact_that_crashes_in_a_directory_it_cannot_open(self):
+        self._write_artifact(create_disclaim=True, closed_cwd="crashes")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("run from a directory this account cannot open, the artifact must refuse", result.stderr)
+        self.assertIn("Crash dump is being written", result.stderr)
+
+    def test_rejects_an_artifact_that_starts_in_a_directory_it_cannot_open(self):
+        self._write_artifact(create_disclaim=True, closed_cwd="starts")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("(it exited 0)", result.stderr)
+
+    def test_a_refusal_in_a_directory_it_cannot_open_passes(self):
+        self._write_artifact(create_disclaim=True)
+
+        result = self._run("macos_aarch64")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("closed working directory: fermix: Fermix cannot start in ", result.stdout)
+
     def test_rejects_unknown_target_before_running_artifact(self):
         marker = self.base / "ran"
         self._write_artifact(create_disclaim=False, marker=marker)
@@ -1120,6 +1147,7 @@ class VerifyStandaloneTest(unittest.TestCase):
         iroh_notices="pinned",
         maintenance="answers",
         landlock_shim="answers",
+        closed_cwd="refuses",
     ):
         setup = self._disclaim_setup(create_disclaim, disclaim_executable, disclaim_exit, version)
         helper_setup = self._iroh_helper_setup(iroh_helper, iroh_notices, version)
@@ -1130,6 +1158,7 @@ class VerifyStandaloneTest(unittest.TestCase):
             "#!/bin/sh\n"
             "set -eu\n"
             f"{marker_line}"
+            f"{self._closed_cwd_behaviour(closed_cwd)}"
             f"{self._BOOT_KEY}"
             f"{self._payload_line(version)}"
             'if [ "${1:-}" = "maintenance" ]; then\n'
@@ -1168,6 +1197,26 @@ class VerifyStandaloneTest(unittest.TestCase):
             encoding="utf-8",
         )
         self.artifact.chmod(0o755)
+
+    # Run from a directory this account cannot search: the wrapper's plugin
+    # refuses in its one sentence before anything starts, or, without it, the
+    # interactive-mode VM stops with a crash dump.
+    @staticmethod
+    def _closed_cwd_behaviour(closed_cwd):
+        answer = {
+            "refuses": (
+                "  printf 'fermix: Fermix cannot start in %s, because the account running it cannot open that "
+                "directory. Run the command from one it can open, such as /.\\n' \"$PWD\" >&2\n"
+                "  exit 1\n"
+            ),
+            "crashes": (
+                "  echo 'Kernel pid terminated (logger) ({badarg,[{persistent_term,get,[code_server]}]})' >&2\n"
+                "  echo 'Crash dump is being written to: erl_crash.dump...' >&2\n"
+                "  exit 1\n"
+            ),
+            "starts": "  :\n",
+        }[closed_cwd]
+        return f"if [ ! -x . ]; then\n{answer}fi\n"
 
     # The real verb's shape: the one keychain delete, named by the throwaway
     # home's own profile, answered "not found" by the stand-in on PATH.

@@ -35,6 +35,7 @@ After any update the daemon keeps running the old engine until it restarts: "upg
 | `fermix diagnostics export --offline [--json]` | a redacted support bundle with no daemon needed; reads no secret and never unlocks a keyring (≤ 1 MB, ≤ 10 s) |
 
 - **Logs.** Product logs: `logs/fermix.log` (`fermix logs`). Early boot, crashes and anything outside the logger: `journalctl --user -u fermix`. A service that will not start explains why in the journal.
+- **Working directory.** `fermix`, standalone or packaged, refuses to start in a directory the account running it cannot open, in one sentence, before it unpacks or starts anything: run it from one it can (`cd /`; on an Always On server, `sudo -H -u fermix env -C / /usr/bin/fermix …`).
 - **Old standalone unit.** A `~/.config/systemd/user/fermix.service` left by a standalone install shadows the package's unit; `fermix service install` recognises that one shape, adopts its home, carries its observability values into a drop-in and removes it. Anything else there is named as a conflict and left alone.
 - **cosign** is bundled at `/usr/lib/fermix/cosign`, appended last to `PATH`, so a distribution `cosign` wins.
 - **Removal** leaves `/var/lib/fermix/runtimes/` (a few hundred KB per engine version) in place, even on purge.

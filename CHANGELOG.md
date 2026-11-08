@@ -83,6 +83,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   report `ok`. It now fails before the model is asked, naming the tools and
   what to change, and `schedule_job` and `update_job` refuse to bind a skill
   that would leave one of the job's own tools out.
+- **`fermix` says why it won't start in a directory it can't open.** Run
+  from a directory the account running it cannot open (another account's
+  home, under `sudo -u`), the standalone binary and the Linux package's
+  `fermix` stopped with a crash dump before printing anything. They now say
+  in one sentence to run the command from a directory that account can
+  open, before they unpack or start anything.
 
 ### Behind a feature flag
 

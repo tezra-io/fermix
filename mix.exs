@@ -49,6 +49,10 @@ defmodule Fermix.MixProject do
         include_executables_for: [:unix],
         steps: [:assemble, &Burrito.wrap/1],
         burrito: [
+          # Built into the wrapper, relative to the umbrella root a release
+          # builds from: a working directory the account cannot open is
+          # refused in one sentence before the VM starts (rel/burrito_plugin.zig).
+          plugin: "rel/burrito_plugin.zig",
           targets: [
             # DISCLAIM_TARGET reaches fermix_nif's Makefile through Burrito's
             # NIF recompile step so the macOS-only disclaim exec shim is
@@ -114,6 +118,7 @@ defmodule Fermix.MixProject do
         include_executables_for: [:unix],
         steps: [&__MODULE__.validate_linux_package/1, :assemble, &Burrito.wrap/1],
         burrito: [
+          plugin: "rel/burrito_plugin.zig",
           targets: [
             linux_aarch64: [
               os: :linux,
