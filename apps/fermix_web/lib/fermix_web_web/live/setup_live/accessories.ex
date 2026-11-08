@@ -88,10 +88,14 @@ defmodule FermixWebWeb.SetupLive.Accessories do
         local?: status["state"] != "needs_local_primary",
         on?: status["enabled"],
         ready?: status["state"] == "on",
-        # A robot left chosen when StackChan was turned off: the Mac's own
-        # voice does not work until This Mac is chosen again, which the
-        # status's sentence says.
-        robot_chosen?: String.starts_with?(status["voice_device"]["device"], "accessory:"),
+        # A robot left chosen when StackChan was turned off, or a choice that
+        # cannot be read: the Mac's own voice does not work until the owner
+        # chooses again, which the daemon's sentences say.
+        mac_voice?: status["voice_device"]["device"] == "desktop",
+        unreadable_sentence:
+          if(status["voice_device"]["device"] == "unreadable",
+            do: status["voice_device"]["sentence"]
+          ),
         pet_url: @pet_url
       )
 
@@ -115,6 +119,13 @@ defmodule FermixWebWeb.SetupLive.Accessories do
       </div>
 
       <p id="accessories-sentence" class="text-sm">{@status["sentence"]}</p>
+      <p
+        :if={@unreadable_sentence}
+        id="accessories-voice-device-sentence"
+        class="text-sm text-warning"
+      >
+        {@unreadable_sentence}
+      </p>
       <p :if={@accessories.notice} id="accessories-notice" class="text-sm text-warning">
         {@accessories.notice}
       </p>
@@ -140,7 +151,7 @@ defmodule FermixWebWeb.SetupLive.Accessories do
         >
           Set up in Fermix
         </a>
-        <span :if={@on? or not @robot_chosen?} class="text-sm text-base-content/70">
+        <span :if={@on? or @mac_voice?} class="text-sm text-base-content/70">
           {if @on?,
             do: "Connect and pair your robot from Pet in the Mac app.",
             else: "StackChan is off by default. Your Mac voice still works."}

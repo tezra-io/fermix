@@ -1765,7 +1765,7 @@ follow says so in `side_effects`. It never needs a restart.
 | `enabled` | The switch. |
 | `kinds` | `[{kind, name, wire_min, wire_max, install_guide}]`: each kind this engine pairs and its pinned metadata. `stackchan`: name `StackChan`, wire `1`–`1`, the guide `https://github.com/tezra-io/fermix-stackchan/blob/main/INSTALL.md`. Compatible firmware is firmware that speaks a wire version in the range. |
 | `voice` | `{ready, code, sentence, engine, engine_label, model, voice}`: whether a call can start now (`code` null, `voice_disabled`, `missing_key` or `restart_required`), and the configured voice a next call takes. |
-| `voice_device` | `{device, accessory_id, changeable, sentence}`: `desktop` or `accessory:<accessory_id>`; `changeable` false while a call runs or settles anywhere in this home. `sentence` says why the device needs the owner: the call that keeps it ("The voice device can change once the call has finished."), a choice that cannot be read ("The voice device could not be read. Choose one in Pet."; `device` then reads `desktop` only because it must name one, and every call is refused until the owner chooses again), or a robot still chosen while accessories are off ("StackChan is off but is still your voice device. Choose This Mac in Pet to talk here.", also the status's `sentence`); null otherwise. The choice never changes by itself. |
+| `voice_device` | `{device, accessory_id, changeable, sentence}`: `device` is `desktop`, `accessory:<accessory_id>`, or `unreadable` when the choice cannot be read (`accessory_id` null; every call, the Mac's own and a robot's tap, is refused until the owner chooses again with `accessories.voice_device.set`, which stays allowed). A client routes a call on `device` and opens this Mac's microphone only for `desktop`: an app that does not know `unreadable`, or any later value, decodes it as unrecognized and routes no call to this Mac for it. `changeable` is false while a call runs or settles anywhere in this home. `sentence` says why the device needs the owner: the call that keeps it ("The voice device can change once the call has finished."), a choice that cannot be read ("The voice device could not be read. Choose one in Pet."), or a robot still chosen while accessories are off ("StackChan is off but is still your voice device. Choose This Mac in Pet to talk here.", also the status's `sentence`); null otherwise. The choice never changes by itself. |
 | `ports` | Every Espressif USB serial port the daemon sees, by `path` (at most 16 that went away are kept): `{path, serial, status, selected, accessory_id, kind, firmware, update, install_guide, retrying, sentence, actions}`. |
 | `ports_sentence` | While accessories are on and no port is seen: "Plug your StackChan into this Mac with its USB-C cable."; null otherwise. |
 | `accessories` | Every paired robot, oldest first, at most 8: `{accessory_id, short_id, name, kind, enrolled_at, connection, path, gen, firmware, capabilities, state, calibration_sentence, fault, check, selected, sentence, actions, last_call}`. |
@@ -2043,8 +2043,8 @@ own client tests against the same golden frames the daemon is tested against.
   summary's states, for `accessories.status` one per family of the setup and
   call states (off, needs a local Mac primary, a port with no Fermix answer,
   incompatible firmware, pairing with its code, a pairing just done, a paired
-  robot in a call, that call settling, and StackChan off with the robot still
-  chosen), and for `home.act` a cancelled code and `own_server`'s
+  robot in a call, that call settling, StackChan off with the robot still
+  chosen, and a voice device choice that cannot be read), and for `home.act` a cancelled code and `own_server`'s
   answer (`home_act_own_server`: the code, its command and the Tailscale
   step).
 - `fixtures/errors.jsonl` — one full error envelope per published code,

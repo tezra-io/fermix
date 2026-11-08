@@ -944,9 +944,10 @@ defmodule FermixCore.Management.Accessories do
   defp voice_code(:ready), do: nil
   defp voice_code({:not_ready, code}) when is_map_key(@voice_sentences, code), do: code
 
-  # An unreadable choice is shown as `desktop` only because the wire's device
-  # names one; its sentence says it could not be read, and every call is
-  # refused for it until the owner chooses again (`VoiceDevice`).
+  # An unreadable choice is its own device, `unreadable`, never a guess at
+  # one: an app routes a call on it, and every call is refused for it until
+  # the owner chooses again (`VoiceDevice`), which stays open as any change of
+  # device does while no call runs.
   defp voice_device_view(facts) do
     active? = call_active?(facts)
 
@@ -954,7 +955,7 @@ defmodule FermixCore.Management.Accessories do
       case facts.voice_device do
         {:ok, :desktop} -> {"desktop", nil}
         {:ok, {:accessory, id}} -> {"accessory:" <> id, id}
-        {:error, _reason} -> {"desktop", nil}
+        {:error, _reason} -> {"unreadable", nil}
       end
 
     %{

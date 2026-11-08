@@ -7543,6 +7543,23 @@ defmodule FermixWebWeb.SetupLiveTest do
       refute render(view) =~ "Your Mac voice still works."
     end
 
+    # M1: an unreadable choice keeps the Mac's microphone off as a chosen
+    # robot does, so the page says so and never claims the Mac's voice works.
+    test "off with a voice device that cannot be read, it says so", %{conn: conn} do
+      opts =
+        AccessoryGoldens.base(
+          enabled?: false,
+          voice_device: {:error, {:invalid_voice_device, "/invented"}}
+        )
+
+      {:ok, view, _html} = accessories_page(conn, opts)
+
+      assert view |> element("#accessories-voice-device-sentence") |> render() =~
+               "The voice device could not be read. Choose one in Pet."
+
+      refute render(view) =~ "Your Mac voice still works."
+    end
+
     test "on and running, it links the Mac app's Pet and names the voice the next call takes",
          %{conn: conn} do
       {:ok, view, _html} = accessories_page(conn, AccessoryGoldens.base())

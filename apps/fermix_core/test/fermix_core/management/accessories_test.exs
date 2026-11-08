@@ -421,11 +421,18 @@ defmodule FermixCore.Management.AccessoriesTest do
   describe "the voice device" do
     # Fable review 3, 7: an unreadable choice and a robot chosen while
     # accessories are off are said, never read as this Mac.
-    test "a voice device that cannot be read says so and how to fix it" do
+    # M1: an app routes on the typed device, so an unreadable choice is its
+    # own value, never `desktop`, and choosing again stays open.
+    test "a voice device that cannot be read is typed unreadable, and can be chosen again" do
       opts = Goldens.base(voice_device: {:error, {:invalid_voice_device, "/invented"}})
       device = status!(opts)["voice_device"]
 
-      assert device["sentence"] == "The voice device could not be read. Choose one in Pet."
+      assert device == %{
+               "device" => "unreadable",
+               "accessory_id" => nil,
+               "changeable" => true,
+               "sentence" => "The voice device could not be read. Choose one in Pet."
+             }
     end
 
     test "a robot still chosen while accessories are off says so, and is not unchosen" do
@@ -469,6 +476,7 @@ defmodule FermixCore.Management.AccessoriesTest do
       File.write!(Store.voice_device_path(home), "not json")
       File.chmod!(Store.voice_device_path(home), 0o600)
       assert {:error, _unreadable} = Store.load_voice_device(home)
+      assert status!(device_opts(home))["voice_device"]["device"] == "unreadable"
 
       assert {:ok, status} =
                route("accessories.voice_device.set", %{"device" => "desktop"}, device_opts(home))

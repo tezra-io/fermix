@@ -6695,7 +6695,10 @@
       "required": ["device", "accessory_id", "changeable", "sentence"],
       "additionalProperties": false,
       "properties": {
-        "device": { "$ref": "#/$defs/accessoryVoiceDeviceName" },
+        "device": {
+          "description": "desktop, accessory:<accessory_id>, or unreadable when the choice cannot be read (every call is then refused until the owner chooses again; an app that does not know a value routes no call to this Mac for it).",
+          "oneOf": [{ "$ref": "#/$defs/accessoryVoiceDeviceName" }, { "const": "unreadable" }]
+        },
         "accessory_id": { "oneOf": [{ "$ref": "#/$defs/accessoryId" }, { "type": "null" }] },
         "changeable": { "type": "boolean" },
         "sentence": { "type": ["string", "null"] }

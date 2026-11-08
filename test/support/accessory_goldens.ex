@@ -6,7 +6,8 @@ defmodule FermixTestSupport.AccessoryGoldens do
   a robot whose firmware lacks what this Fermix needs, pairing with the code
   on both screens, a paired robot in a Grok call while the saved voice is
   Live, the same call settling, the moment a pairing is done, naming the
-  robot it paired, and StackChan turned off with the robot still chosen. Each is the status `Management.Accessories` builds from invented
+  robot it paired, StackChan turned off with the robot still chosen, and a
+  choice of voice device that cannot be read. Each is the status `Management.Accessories` builds from invented
   facts through `FermixTestSupport.AccessoryGoldens.Provider`, which answers
   as the channels app's provider does, so a golden can only say what the
   engine says.
@@ -89,7 +90,8 @@ defmodule FermixTestSupport.AccessoryGoldens do
       {"accessories_status_in_call", status(in_call())},
       {"accessories_status_paired_now", status(paired_now())},
       {"accessories_status_call_ending", status(in_call(:ending))},
-      {"accessories_status_off_robot_chosen", status(off_robot_chosen())}
+      {"accessories_status_off_robot_chosen", status(off_robot_chosen())},
+      {"accessories_status_voice_device_unreadable", status(voice_device_unreadable())}
     ]
   end
 
@@ -239,6 +241,15 @@ defmodule FermixTestSupport.AccessoryGoldens do
   defp off, do: base(enabled?: false, records: {:ok, [record()]}, provider_opts: [status: idle()])
 
   defp idle, do: %{running: false, watcher: nil, last_calls: %{}}
+
+  # The choice of voice device cannot be read: typed `unreadable`, with no
+  # robot named and the fix in its sentence.
+  defp voice_device_unreadable do
+    base(
+      records: {:ok, [record()]},
+      voice_device: {:error, {:invalid_voice_device, "/invented/accessories/voice_device.json"}}
+    )
+  end
 
   # StackChan turned off while the robot is still the voice device: the
   # choice stays, and the status says what it costs the Mac and the fix.
