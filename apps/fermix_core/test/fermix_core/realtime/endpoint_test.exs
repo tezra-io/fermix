@@ -83,6 +83,15 @@ defmodule FermixCore.Realtime.EndpointTest do
       end
     end
 
+    # A phone's call holds 500 ms of audio unplayed on the phone; a Grok window
+    # of seconds would pile a fast reply up behind it until it aged out.
+    test "a phone's Grok audio is paced in a short window; the others keep the default" do
+      assert Endpoint.grok_playback_opts({:phone, @phone}) == [window_ms: 300]
+      assert Endpoint.grok_playback_opts(:desktop) == []
+      assert Endpoint.grok_playback_opts({:accessory, "desk-robot"}) == []
+      assert_raise ArgumentError, fn -> Endpoint.grok_playback_opts({:phone, "a:b"}) end
+    end
+
     # The desktop keeps the identifier every call has carried, so OpenAI sees one
     # continuous sender; an accessory gets its own, whatever Mac it is plugged into.
     test "the safety identifier comes from the endpoint" do

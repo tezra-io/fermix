@@ -293,7 +293,7 @@ defmodule FermixChannels.Mobile.SessionTest do
     Process.exit(call, :kill)
   end
 
-  test "a call that ends without its close lets the media it held go" do
+  test "a call that ends without its close is closed ended, then the media it held goes" do
     {:push, _ack, ready} = Session.handle_frame(hello_frame(%{}), hello_state(primary_epoch: 3))
     call = spawn(fn -> Process.sleep(:infinity) end)
 
@@ -316,8 +316,11 @@ defmodule FermixChannels.Mobile.SessionTest do
     assert_receive {:DOWN, hold, :process, ^call, :killed}
     assert hold == ready.call_hold.ref
 
-    assert {:push, [frame], _ready} =
+    assert {:push, [close, frame], _ready} =
              Session.handle_info({:DOWN, hold, :process, call, :killed}, ready)
+
+    assert Map.take(header(close), ~w(t call_id reason)) ==
+             %{"t" => "call_close", "call_id" => "c1", "reason" => "ended"}
 
     assert header(frame)["t"] == "media_begin"
   end

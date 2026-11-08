@@ -263,8 +263,13 @@ defmodule FermixChannels.Mobile.PeerEventsTest do
 
       assert {:error, {:missing_field, "reason"}} = encode("call_close", %{"call_id" => @call})
 
-      assert {:error, {:invalid_field, "reason"}} =
-               encode("call_close", %{"call_id" => @call, "reason" => "hung_up"})
+      # A string, so a later primary's reason reads as an end, not a bad frame.
+      assert {:ok, _frame} = encode("call_close", %{"call_id" => @call, "reason" => "hung_up"})
+
+      for bad <- ["", 7] do
+        assert {:error, {:invalid_field, "reason"}} =
+                 encode("call_close", %{"call_id" => @call, "reason" => bad})
+      end
 
       assert {:ok, _event} = decode("call_close", %{"call_id" => @call})
 

@@ -51,8 +51,6 @@ defmodule FermixChannels.Mobile.Protocol do
   @max_attestation_chain_bytes 16 * 1_024
   @max_status_requests 32
   @request_states ~w(accepted running completed failed)
-  # Why a primary serves no call from the phone (`hello_ack.caps.call.reason`).
-  @call_refusals ~w(voice_off no_key engine_not_for_phones)
 
   # The events protocol 2 shipped with; M75's follow from `Mobile.PeerEvents`.
   @shipped_client_events ~w(
@@ -787,8 +785,10 @@ defmodule FermixChannels.Mobile.Protocol do
 
   defp call_caps?(_call), do: false
 
+  # A string, as `error.code` is: a later primary may refuse calls for a
+  # reason this one does not name, which a phone reads as needing an update.
   defp call_reason?(true, nil), do: true
-  defp call_reason?(false, reason), do: reason in @call_refusals
+  defp call_reason?(false, reason), do: is_binary(reason) and reason != ""
   defp call_reason?(_available?, _reason), do: false
 
   # Absent from a daemon older than the list, as every field protocol 2 gained

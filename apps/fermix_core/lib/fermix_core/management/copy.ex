@@ -141,6 +141,8 @@ defmodule FermixCore.Management.Copy do
     "Apple",
     "Full Disk Access",
     "Automation",
+    # The voice setting, named as the app labels it.
+    "Talk to Fermix",
     "Messages",
     "Claude Code",
     "New York",
@@ -334,7 +336,7 @@ defmodule FermixCore.Management.Copy do
   def summary_sentence(:off, %{machine: machine, stays_here: features}),
     do:
       "Keep Fermix running when this #{machine} sleeps. It moves to a server you own." <>
-        stops_line(features)
+        stops_line(features -- [:voice]) <> voice_line(features, machine)
 
   def summary_sentence(:connect, _values) do
     [debian12, debian13, ubuntu] = @server_systems
@@ -579,6 +581,17 @@ defmodule FermixCore.Management.Copy do
   end
 
   @doc """
+  What a move does to voice calls, as a sentence without its full stop: this
+  `machine`'s own calls stop, since they reach only its socket, and the
+  phone's carry on at `server`, where its session goes (M87 §07).
+  """
+  @spec voice_after_move(String.t(), String.t()) :: String.t()
+  def voice_after_move(machine, server) when is_binary(machine) and is_binary(server) do
+    "This #{machine}'s voice calls stop after the move; calls from your phone carry on at " <>
+      "#{server} when Talk to Fermix is on there and its key is in #{server}'s secret store"
+  end
+
+  @doc """
   What a move back brings back among `features` (`:imessage`, `:voice`,
   `:meetings`) on the computer `name` it returns to, as a sentence starts:
   "Voice calls and meetings run on studio-mac again after the move".
@@ -594,6 +607,10 @@ defmodule FermixCore.Management.Copy do
 
   defp stops_line([]), do: ""
   defp stops_line(features), do: " #{stops_after_move(features)}."
+
+  defp voice_line(features, machine) do
+    if :voice in features, do: " #{voice_after_move(machine, "your server")}.", else: ""
+  end
 
   defp runs_here_line([]), do: ""
 

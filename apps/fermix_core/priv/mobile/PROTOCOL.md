@@ -947,9 +947,12 @@ waiting for a restart), `no_key` (its provider key is missing) or
 serves the Mac alone). `min_version` and `max_version` are the Realtime
 protocol versions a call's lines may speak; `min_version` is the configured
 engine's floor, and an app whose own range does not reach it needs an update.
-`camera` is false: no call takes video yet. A primary older than calls, and a
-desktop's `hello_ack`, carry no `call`. The primary checks again at every
-new call's `call_open`, so an app that offers a call still handles a refusal.
+`camera` is false: no call takes video yet. `reason` is a string, as
+`error.code` is: these are the values this primary sends, and a later one may
+give another, which an app reads as needing an update. A primary older than
+calls, and a desktop's `hello_ack`, carry no `call`. The primary checks again
+at every new call's `call_open`, so an app that offers a call still handles a
+refusal.
 
 The phone sends:
 
@@ -967,7 +970,7 @@ The primary sends:
 | `call_attached` | `call_id`, `resumed`, `muted`, `camera`, `control_seq` | this session carries the call: `resumed` is true when the call was held across a reconnect, `muted` and `camera` are its state as the primary holds it, and `control_seq` is the last control line applied, 0 for none |
 | `call_line` | `call_id` + raw bytes | one Realtime server line, its JSON without the newline, in one frame |
 | `call_audio` | `call_id`, `playback_id` + raw bytes | the assistant's audio: PCM16 at 24 kHz mono, whole samples, at most 4,800 bytes a frame; `playback_id` is 1 to 64 letters, digits, `.`, `_`, `:` and `-` |
-| `call_close` | `call_id`, `reason` | the call ended: `ended` (hung up, refused or failed), `link_too_slow`, `revoked` (the phone was removed), `unknown_call` (this primary holds no such call) or `lost` (reserved: the window runs out only while no session carries the call, so a phone that comes back after it is answered `unknown_call`) |
+| `call_close` | `call_id`, `reason` | the call ended: `ended` (hung up, refused or failed), `link_too_slow`, `revoked` (the phone was removed), `unknown_call` (this primary holds no such call) or `lost` (reserved: the window runs out only while no session carries the call, so a phone that comes back after it is answered `unknown_call`); `reason` is a string, as `error.code` is, and a phone reads one it does not know as an ended call |
 
 **Lines.** A `call_line` carries one line of the Realtime wire as the Mac's
 socket would, without its newline. A call starts with the Realtime handshake
@@ -1002,7 +1005,10 @@ sends `call_open{resume: true}` with the same `call_id`, and is answered
 (at most 512, the oldest dropped past that), then the call's audio. Past the
 20 s the call ends, and a resume is answered `call_close{reason:"unknown_call"}`,
 as it is by a primary that restarted. While the phone is away, `call_close`
-from any of its sessions ends the call, no `call_open` needed.
+from any of its sessions ends the call, no `call_open` needed. On a Grok call,
+a reply the phone had not finished hearing when its session closed is
+interrupted then, cut at what it reported playing, since Grok ends a call
+whose audio goes unreported for 2 s.
 
 **Controls.** The phone numbers each control line it sends (`call_start`,
 `mute`, `interrupt`, `task_cancel`, `call_stop`) with
@@ -1027,26 +1033,36 @@ the audio it wrote to the phone under the id ends the call with the error
 line `unknown_playback`, `playback_regressed` or `playback_beyond_sent` and
 `call_close{reason:"ended"}`. The primary
 keeps at most 500 ms of audio sent and not yet reported played (a playback
-reported drained counts nothing), drops its audio that waited 300 ms before
-writing it, and ends a call whose link kept audio waiting 5 s with the error
-line `link_too_slow` and `call_close{reason:"link_too_slow"}`. It drops the
-phone's audio that waited 300 ms before reaching the call. The report goes on
-to the voice session only on a Grok call.
+reported drained counts nothing sent before the report). The phone never
+reports the audio it drops after a `playback_stop`, or what was in flight when
+its link went, so a `playback_stop` and a resume count everything sent so far
+as played; a later report is still checked against all of it. The primary
+drops its audio that waited 300 ms before writing it, and ends a call whose
+link kept audio waiting 5 s (a report that frees credit starts the 5 s again)
+with the error line `link_too_slow`, then the session's last lines, then
+`call_close{reason:"link_too_slow"}`. It drops the phone's audio that waited
+300 ms before reaching the call. The report goes on to the voice session only
+on a Grok call, whose audio the session paces to the phone in a 300 ms window,
+inside the credit.
 
 **Ordering.** A session writes a call's frames ahead of everything else it has
 queued, its control frames (`call_attached`, `call_line`, `call_close`) ahead
-of its audio. A `playback_stop` line can so overtake audio queued before it:
-after one, the phone drops every `call_audio` under a `playback_id` it saw
-before that line. From `call_attached` until the call's `call_close`, the
-primary holds this phone's media (`media_begin`, `media_chunk`, `media_end`,
-pushed or fetched) and sends it after; text still flows. It holds at most
-32 MiB: a download past that is dropped whole, and the phone fetches it again
-by its `ref`.
+of its audio. A `playback_stop` line would so overtake audio queued before it,
+so the session drops that call's audio queued behind it unwritten. Audio
+already written can still arrive after the stop, so after a `playback_stop`
+the phone drops every `call_audio` under a `playback_id` it saw before that
+line. From `call_attached` until the call's `call_close`, the primary holds
+this phone's media (`media_begin`, `media_chunk`, `media_end`, pushed or
+fetched) and sends it after; text still flows. It holds at most 32 MiB: a
+download past that is dropped whole, and the phone fetches it again by its
+`ref`. A call that ends on a fault, without its own `call_close`, is closed
+by the session with `call_close{reason:"ended"}`, and the held media follows.
 
-**Revocation.** A phone revoked mid-call is muted, the hand-offs its call
-started that have not settled are cancelled, and the call ends with the error
-line `revoked` and `call_close{reason:"revoked"}`, which its session's `4003`
-close may overtake.
+**Revocation.** A phone revoked mid-call is sent the error line `revoked`
+first; then it is muted, the hand-offs its call started that have not settled
+are cancelled, the session's last lines follow, and the call ends with
+`call_close{reason:"revoked"}`. The session's `4003` close may overtake any of
+these.
 
 ## Desktop sessions
 

@@ -57,12 +57,15 @@ defmodule FermixChannels.Mobile.Session do
   A phone's call channel (M87; `call_open`, `call_line`, `call_audio`,
   `call_close`) belongs to the device's `Mobile.Call`, which this session
   hands every call event to and never waits on. The call's frames come back
-  as `{:mobile_call, call, :control | :audio, event}` and are written ahead of
-  everything else queued here, control first, then audio, so a large media or
-  companion chunk never sits between the phone and its call. While a call is
+  as `{:mobile_call, call, :control | :stop | :audio, event}` and are written
+  ahead of everything else queued here, controls first, then audio, so a large
+  media or companion chunk never sits between the phone and its call. A
+  `:stop` (the call's `playback_stop` line) drops that call's audio queued
+  here before it, which the stop would otherwise overtake. While a call is
   attached to this session (from its `call_attached` until its `call_close`, or
   the call's end), the media this primary pushes to the phone waits, bounded,
-  and goes after the call; text still flows. A phone's `hello_ack` says
+  and goes after the call; text still flows. A call that ends without its
+  `call_close` (it crashed) is closed `ended` here. A phone's `hello_ack` says
   whether this primary serves calls (`caps.call`).
   """
 
@@ -126,7 +129,8 @@ defmodule FermixChannels.Mobile.Session do
   @media_pushes ~w(media_begin media_chunk media_end)
   # The call frames written ahead of everything else, per read: a bound on the
   # drain, past which the rest go at the next read.
-  @max_call_frames_per_read 64
+  @max_call_frames_per_read 128
+  @call_classes [:control, :stop, :audio]
   # The media a phone in a call is pushed waits here, up to this; a run past it
   # is dropped whole, and the phone fetches it by its ref once the call ends.
   @max_held_media_bytes 32 * 1_024 * 1_024
@@ -387,7 +391,7 @@ defmodule FermixChannels.Mobile.Session do
   end
 
   def handle_info({:mobile_call, call, class, event}, %{phase: :ready} = state)
-      when is_pid(call) and class in [:control, :audio] and is_map(event) do
+      when is_pid(call) and class in @call_classes and is_map(event) do
     if session_expired?(state) do
       session_expired(state)
     else
@@ -396,7 +400,7 @@ defmodule FermixChannels.Mobile.Session do
   end
 
   def handle_info({:DOWN, ref, :process, _call, _reason}, %{call_hold: %{ref: ref}} = state),
-    do: release_media(%{state | call_hold: nil}, [])
+    do: call_gone(state)
 
   def handle_info(
         {:mobile_handshake_deadline, token},
@@ -1716,25 +1720,45 @@ defmodule FermixChannels.Mobile.Session do
     end
   end
 
-  # Control first, then audio, each in the order it came; `first` is the one
-  # this read is for.
+  # Controls first, then audio, each in the order it came; `first` is the one
+  # this read is for, and came before everything drained.
   defp queued_call_frames(first) do
-    {controls, audio} = Enum.split_with(first, fn {_call, class, _event} -> class == :control end)
+    {audio, controls} =
+      (first ++ drain_call_frames(@max_call_frames_per_read))
+      |> drop_overtaken()
+      |> Enum.split_with(fn {_call, class, _event} -> class == :audio end)
 
-    controls ++
-      drain_call_frames(:control, @max_call_frames_per_read) ++
-      audio ++ drain_call_frames(:audio, @max_call_frames_per_read)
+    controls ++ audio
   end
 
-  defp drain_call_frames(_class, 0), do: []
+  defp drain_call_frames(0), do: []
 
-  defp drain_call_frames(class, remaining) do
+  defp drain_call_frames(remaining) do
     receive do
-      {:mobile_call, call, ^class, event} when is_pid(call) and is_map(event) ->
-        [{call, class, event} | drain_call_frames(class, remaining - 1)]
+      {:mobile_call, call, class, event}
+      when is_pid(call) and class in @call_classes and is_map(event) ->
+        [{call, class, event} | drain_call_frames(remaining - 1)]
     after
       0 -> []
     end
+  end
+
+  # Written controls first, a call's playback stop would overtake that call's
+  # audio queued before it, audio the stop made stale: it goes here. Walked
+  # from the newest, so a stop sees everything queued before it.
+  defp drop_overtaken(queued) do
+    {kept, _stopped} =
+      queued
+      |> Enum.reverse()
+      |> Enum.reduce({[], MapSet.new()}, fn {call, class, _event} = frame, {kept, stopped} ->
+        cond do
+          class == :stop -> {[frame | kept], MapSet.put(stopped, call)}
+          class == :audio and MapSet.member?(stopped, call) -> {kept, stopped}
+          true -> {[frame | kept], stopped}
+        end
+      end)
+
+    kept
   end
 
   defp write_call_frames(queued, state) do
@@ -1785,6 +1809,17 @@ defmodule FermixChannels.Mobile.Session do
   defp hold_for_call(state, call, id) do
     if state.call_hold, do: Process.demonitor(state.call_hold.ref, [:flush])
     %{state | call_hold: %{call: call, call_id: id, ref: Process.monitor(call)}}
+  end
+
+  # A call that exited without its `call_close` (a crash, a kill) is closed
+  # here, so the phone is not left in a call nobody holds; its media follows.
+  defp call_gone(%{call_hold: %{call_id: id}} = state) do
+    close = %{"t" => "call_close", "call_id" => id, "reason" => "ended"}
+
+    case encode_event_frames(close, %{state | call_hold: nil}) do
+      {:ok, frames, state} -> release_media(state, frames)
+      {:error, reason, state} -> protocol_error(reason, state)
+    end
   end
 
   defp release_media(state, frames) do

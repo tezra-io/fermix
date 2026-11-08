@@ -375,6 +375,43 @@ defmodule FermixChannels.Mobile.CallTest do
       assert %{"t" => "call_close", "reason" => "unknown_call"} = close
     end
 
+    # The registry forgets an exited call a moment later; until it does, the
+    # entry is held here by keeping its partition from reading the exit.
+    test "an exited call still registered is no call to resume or close; a new call starts",
+         ctx do
+      partition = Module.concat(ctx.calls, "PIDPartition0")
+      test = self()
+
+      gone =
+        spawn(fn ->
+          {:ok, _owner} = Registry.register(ctx.calls, @phone_id, nil)
+          send(test, :registered)
+          Process.sleep(:infinity)
+        end)
+
+      assert_receive :registered
+      :ok = :sys.suspend(partition)
+      gone_ref = Process.monitor(gone)
+      Process.exit(gone, :kill)
+      assert_receive {:DOWN, ^gone_ref, :process, ^gone, :killed}
+      assert Registry.lookup(ctx.calls, @phone_id) == [{gone, nil}]
+
+      relay = spawn_link(fn -> relay(test) end)
+
+      assert Call.open(@phone_id, relay, @call, true, calls: ctx.calls) ==
+               {:close, "unknown_call"}
+
+      assert Call.deliver(@phone_id, relay, "call_close", %{"call_id" => @call}, <<>>,
+               calls: ctx.calls
+             ) == {:close, "unknown_call"}
+
+      opts = call_options(ctx, [])
+      call_opts = [calls: ctx.calls, call_supervisor: ctx.call_supervisor, call_options: opts]
+      assert Call.open(@phone_id, relay, @call, false, call_opts) == :ok
+      assert_receive {:from_call, :control, %{"t" => "call_attached", "resumed" => false}}
+      :ok = :sys.resume(partition)
+    end
+
     test "End pressed while away: the next session's first call frame closes the call", ctx do
       {driver, client} = ready_phone!(ctx)
       {_client, voice} = call_up!(driver, client, 2)
@@ -457,6 +494,47 @@ defmodule FermixChannels.Mobile.CallTest do
       types = Enum.map(events, fn {header, _bytes} -> header["t"] end)
       assert Enum.take(types, -2) == ["call_close", "media_begin"]
     end
+
+    # Written first, the stop would overtake the audio queued before it.
+    test "a playback stop drops its call's audio queued before it", ctx do
+      {driver, client} = ready_phone!(ctx)
+      {client, _voice} = call_up!(driver, client, 2)
+      call = call_pid!(ctx)
+      stop = %{"t" => "call_line", "call_id" => @call, "bytes" => ~s({"type":"playback_stop"})}
+
+      hold = Driver.hold(driver)
+      send(driver, {:mobile_call, call, :audio, call_audio("m1")})
+      send(driver, {:mobile_call, call, :audio, call_audio("m1")})
+      send(driver, {:mobile_call, call, :stop, stop})
+      send(driver, {:mobile_call, call, :audio, call_audio("m2")})
+      Driver.release(driver, hold)
+
+      {[{line, line_bytes}, {after_stop, _pcm}], _client} = Driver.client_receive(driver, client)
+      assert {line["t"], line_bytes} == {"call_line", ~s({"type":"playback_stop"})}
+      assert {after_stop["t"], after_stop["playback_id"]} == {"call_audio", "m2"}
+    end
+
+    # A crash writes nothing of its own: the session closes the call for it.
+    test "a call that exits without its close is closed ended, its media after", ctx do
+      {driver, client} = ready_phone!(ctx)
+      {client, voice} = call_up!(driver, client, 2)
+      call = call_pid!(ctx)
+
+      hold = Driver.hold(driver)
+      send(driver, {:mobile_event, media_begin("r1")})
+      call_ref = Process.monitor(call)
+      Process.exit(call, :kill)
+      assert_receive {:DOWN, ^call_ref, :process, ^call, :killed}
+      Driver.release(driver, hold)
+
+      {events, _client} = Driver.client_receive(driver, client)
+
+      assert [{%{"t" => "call_close"} = close, <<>>}, {%{"t" => "media_begin"}, _bytes}] =
+               events
+
+      assert Map.take(close, ~w(call_id reason)) == %{"call_id" => @call, "reason" => "ended"}
+      assert_receive {:voice, ^voice, :call_stop}
+    end
   end
 
   # The call driven alone: the test plays the phone's session (a relay that
@@ -474,15 +552,32 @@ defmodule FermixChannels.Mobile.CallTest do
       call_ref = Process.monitor(call)
 
       assert_receive {:voice, ^voice, :call_stop}
-      assert_receive {:from_call, :control, %{"t" => "call_line", "bytes" => idle}}
-      assert Jason.decode!(idle) == %{"type" => "state", "state" => "idle"}
       assert_receive {:from_call, :control, %{"t" => "call_line", "bytes" => why}}
       assert Jason.decode!(why) == %{"type" => "error", "reason" => "link_too_slow"}
+      assert_receive {:from_call, :control, %{"t" => "call_line", "bytes" => idle}}
+      assert Jason.decode!(idle) == %{"type" => "state", "state" => "idle"}
 
       assert_receive {:from_call, :control,
                       %{"t" => "call_close", "call_id" => @call, "reason" => "link_too_slow"}}
 
       assert_receive {:DOWN, ^call_ref, :process, ^call, :normal}
+    end
+
+    test "revocation says why ahead of every frame its ending makes", ctx do
+      %{call: call, voice: voice} = call_alone!(ctx, "openai_live")
+      call_ref = Process.monitor(call)
+      send(call, {:mobile_revoked, @phone_id})
+      assert_receive {:voice, ^voice, :call_stop}
+      assert_receive {:DOWN, ^call_ref, :process, ^call, :normal}
+
+      [%{"bytes" => why} | rest] = controls_until_close()
+      assert Jason.decode!(why) == %{"type" => "error", "reason" => "revoked"}
+      assert %{"t" => "call_close", "reason" => "revoked"} = List.last(rest)
+
+      assert %{"type" => "state", "state" => "idle"} in for(
+               %{"t" => "call_line", "bytes" => line} <- rest,
+               do: Jason.decode!(line)
+             )
     end
 
     test "Grok's playback_progress is credit and the session's too", ctx do
@@ -515,6 +610,76 @@ defmodule FermixChannels.Mobile.CallTest do
       send(voice, {:push, %{type: "audio_delta", audio: Base.encode64(@pcm), playback_id: "p1"}})
       _ = :sys.get_state(call)
       refute_received {:voice, ^voice, {:interrupt, nil}}
+    end
+
+    # Paced in a 300 ms window, a Grok reply has little waiting here to age out
+    # while the phone is away: what it was sent and never reported is unheard
+    # already, so the session is not left awaiting reports for it (2 s ends
+    # the call), and the phone's resume finds the call up.
+    test "a Grok reply in flight when the phone goes is interrupted at once", ctx do
+      %{call: call, voice: voice, relay: relay} = call_alone!(ctx, "xai_realtime")
+      send(voice, {:push, %{type: "audio_delta", audio: grok_audio(2), playback_id: "p1"}})
+      assert length(audio_frames(2)) == 2
+
+      Process.unlink(relay)
+      Process.exit(relay, :kill)
+      assert_receive {:voice, ^voice, {:interrupt, nil}}
+      await(call, &(&1.attached == nil))
+    end
+
+    test "a Grok phone that goes with nothing unheard is not interrupted", ctx do
+      %{call: call, voice: voice, relay: relay} = call_alone!(ctx, "xai_realtime")
+      Process.unlink(relay)
+      Process.exit(relay, :kill)
+      await(call, &(&1.attached == nil))
+      refute_received {:voice, ^voice, {:interrupt, nil}}
+    end
+
+    test "a Live phone that goes mid-reply is not interrupted", ctx do
+      %{call: call, voice: voice, relay: relay} = call_alone!(ctx, "openai_live")
+      push_audio(voice, 2)
+      assert length(audio_frames(2)) == 2
+
+      Process.unlink(relay)
+      Process.exit(relay, :kill)
+      await(call, &(&1.attached == nil))
+      refute_received {:voice, ^voice, {:interrupt, nil}}
+    end
+
+    # What was in flight when the link went is never reported; the resume
+    # frees its credit, so the stream goes on.
+    test "a resume mid-stream on Live keeps the audio flowing", ctx do
+      %{call: call, voice: voice, relay: relay} = call_alone!(ctx, "openai_live")
+      push_audio(voice, 5)
+      assert length(audio_frames(5)) == 5
+
+      Process.unlink(relay)
+      Process.exit(relay, :kill)
+      await(call, &(&1.attached == nil))
+      test = self()
+      relay = spawn_link(fn -> relay(test) end)
+      :ok = Call.open(@phone_id, relay, @call, true, calls: ctx.calls)
+      assert_receive {:from_call, :control, %{"t" => "call_attached", "resumed" => true}}
+
+      push_audio(voice, 3)
+      assert [%{"playback_id" => "m1"}, _second, _third] = audio_frames(3)
+    end
+
+    # Each barge-in's stop leaves frames the phone drops unreported.
+    test "three barge-ins on Grok, each with a reply unheard, leave the call speaking", ctx do
+      %{call: call, voice: voice} = call_alone!(ctx, "xai_realtime")
+
+      for n <- 1..3 do
+        id = "p#{n}"
+        send(voice, {:push, %{type: "audio_delta", audio: grok_audio(5), playback_id: id}})
+        assert length(audio_frames(5)) == 5
+        send(voice, {:push, %{type: "playback_stop"}})
+        assert_receive {:from_call, :stop, %{"t" => "call_line"}}
+      end
+
+      send(voice, {:push, %{type: "audio_delta", audio: grok_audio(2), playback_id: "p4"}})
+      assert [%{"playback_id" => "p4"}, %{"playback_id" => "p4"}] = audio_frames(2)
+      assert Process.alive?(call)
     end
 
     # The phone reports per id on every engine; a report it could not have
@@ -673,6 +838,35 @@ defmodule FermixChannels.Mobile.CallTest do
 
   defp push_audio(voice, frames) do
     send(voice, {:push, %{type: "audio_delta", audio: Base.encode64(:binary.copy(@pcm, frames))}})
+  end
+
+  defp grok_audio(frames), do: Base.encode64(:binary.copy(@pcm, frames))
+
+  defp call_audio(playback_id),
+    do: %{"t" => "call_audio", "call_id" => @call, "playback_id" => playback_id, "bytes" => @pcm}
+
+  defp media_begin(ref) do
+    %{
+      "t" => "media_begin",
+      "ref" => ref,
+      "server_seq" => 3,
+      "kind" => "image",
+      "mime" => "image/png",
+      "size_bytes" => 1,
+      "sha256" => String.duplicate("a", 64)
+    }
+  end
+
+  # What the call sent its session, in order, up to its close.
+  defp controls_until_close(acc \\ [], left \\ 64)
+  defp controls_until_close(_acc, 0), do: flunk("the call never closed")
+
+  defp controls_until_close(acc, left) do
+    assert_receive {:from_call, :control, event}
+
+    if event["t"] == "call_close",
+      do: Enum.reverse([event | acc]),
+      else: controls_until_close([event | acc], left - 1)
   end
 
   defp audio_frames(count) do

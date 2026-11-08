@@ -15,10 +15,15 @@ defmodule FermixChannels.Mobile.CallAudio do
       not yet reported played (`progress/4`, from the phone's
       `playback_progress` against each `playback_id`, checked as the voice
       session checks it); a playback the phone reported drained counts
-      nothing;
+      nothing of what was sent before that report. Some audio is never
+      reported: what the phone drops after a playback stop, and what was in
+      flight when its link went. So a stop (`clear/1`) and a resume
+      (`settle/1`) count everything sent so far as drained, keeping what was
+      sent and played, so later reports are still checked against it;
     * **behind:** a link that keeps audio waiting here for 5 s without once
       catching up is too slow for a call (`too_slow?/2`), and the call ends
-      with `link_too_slow`.
+      with `link_too_slow`. A report that frees credit is the link catching
+      up, and starts the count again.
 
   Every duration is derived from byte counts: PCM16 at 24 kHz mono is 48 bytes
   per millisecond. Audio is cut into frames of at most 100 ms (4,800 bytes),
@@ -36,8 +41,16 @@ defmodule FermixChannels.Mobile.CallAudio do
   @max_queued 64
   @max_playbacks 64
 
-  @typedoc "What the phone holds of one playback: bytes sent, ms it played, whether it drained."
-  @type playback :: %{sent: non_neg_integer(), played_ms: non_neg_integer(), drained?: boolean()}
+  @typedoc """
+  One playback on the phone: bytes sent, the ms it reported played, and the
+  bytes counted played whatever the report says (all sent, as of the last
+  drain, stop or resume).
+  """
+  @type playback :: %{
+          sent: non_neg_integer(),
+          played_ms: non_neg_integer(),
+          acked: non_neg_integer()
+        }
 
   @type t :: %__MODULE__{
           queue: :queue.queue({integer(), String.t(), binary()}),
@@ -112,19 +125,44 @@ defmodule FermixChannels.Mobile.CallAudio do
              is_boolean(drained?) do
     with {:ok, playback} <- fetch_playback(t, playback_id),
          :ok <- check_played(playback, played_ms) do
-      played = %{playback | played_ms: played_ms, drained?: drained?}
-      {:ok, %{t | playbacks: Map.put(t.playbacks, playback_id, played)}}
+      acked = if drained?, do: playback.sent, else: playback.acked
+      played = %{playback | played_ms: played_ms, acked: acked}
+      t = %{t | playbacks: Map.put(t.playbacks, playback_id, played)}
+      t = if unplayed_ms(played) < unplayed_ms(playback), do: caught_up(t), else: t
+      {:ok, t}
     end
   end
 
-  @doc "The assistant's playback stopped: what still waits here is stale, and goes."
+  @doc """
+  The assistant's playback stopped: what still waits here is stale, and goes,
+  and what the phone was sent is settled (`settle/1`), since it drops the rest
+  of a stopped playback without reporting it.
+  """
   @spec clear(t()) :: t()
-  def clear(%__MODULE__{} = t), do: %{t | queue: :queue.new(), queued: 0, behind_since: nil}
+  def clear(%__MODULE__{} = t), do: settle(%{t | queue: :queue.new(), queued: 0})
+
+  @doc """
+  Counts everything sent so far as played: the phone will never report it.
+  For a stop, and for a resume, where the gap outlasted what the phone held.
+  Each playback keeps what was sent and played, so a later report is still
+  checked against all of it, and audio sent later counts from here.
+  """
+  @spec settle(t()) :: t()
+  def settle(%__MODULE__{} = t) do
+    settled =
+      Map.new(t.playbacks, fn {id, playback} -> {id, %{playback | acked: playback.sent}} end)
+
+    caught_up(%{t | playbacks: settled})
+  end
 
   @doc "Whether the link has stayed behind past the bound at `now`."
   @spec too_slow?(t(), integer()) :: boolean()
   def too_slow?(%__MODULE__{behind_since: nil}, _now), do: false
   def too_slow?(%__MODULE__{behind_since: since}, now), do: now - since >= @behind_limit_ms
+
+  @doc "Whether any audio waits here, or was sent and not yet reported played."
+  @spec unheard?(t()) :: boolean()
+  def unheard?(%__MODULE__{} = t), do: t.queued > 0 or outstanding_ms(t) > 0
 
   @doc "Milliseconds of audio sent to the phone and not yet reported played."
   @spec outstanding_ms(t()) :: non_neg_integer()
@@ -206,11 +244,11 @@ defmodule FermixChannels.Mobile.CallAudio do
   defp account(t, id, bytes) do
     case Map.fetch(t.playbacks, id) do
       {:ok, playback} ->
-        sent = %{playback | sent: playback.sent + bytes, drained?: false}
+        sent = %{playback | sent: playback.sent + bytes}
         %{t | playbacks: Map.put(t.playbacks, id, sent)}
 
       :error ->
-        playback = %{sent: bytes, played_ms: 0, drained?: false}
+        playback = %{sent: bytes, played_ms: 0, acked: 0}
 
         forget_oldest(%{
           t
@@ -225,10 +263,10 @@ defmodule FermixChannels.Mobile.CallAudio do
 
   defp forget_oldest(t), do: t
 
-  defp unplayed_ms(%{drained?: true}), do: 0
+  defp unplayed_ms(%{sent: sent, played_ms: played_ms, acked: acked}),
+    do: div(max(sent - max(acked, played_ms * @bytes_per_ms), 0), @bytes_per_ms)
 
-  defp unplayed_ms(%{sent: sent, played_ms: played}),
-    do: max(div(sent, @bytes_per_ms) - played, 0)
+  defp caught_up(t), do: %{t | behind_since: nil}
 
   defp mark_behind(%{queued: 0} = t, _now, _attached?), do: %{t | behind_since: nil}
   defp mark_behind(t, _now, false), do: %{t | behind_since: nil}

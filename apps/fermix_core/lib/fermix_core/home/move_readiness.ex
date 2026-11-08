@@ -508,11 +508,7 @@ defmodule FermixCore.Home.MoveReadiness do
   # M87 §07: this computer's own voice reaches only its socket, so it stops;
   # a phone's calls ride its session to wherever the home runs.
   defp voice_moves(features, machine, name) do
-    if :voice in features,
-      do:
-        "This #{machine}'s voice calls stop after the move; calls from your phone carry on " <>
-          "at #{name} when Talk to Fermix is on there and its key is in #{name}'s secret store.",
-      else: ""
+    if :voice in features, do: "#{Copy.voice_after_move(machine, name)}.", else: ""
   end
 
   defp none_on(true), do: "iMessage, voice calls and meetings are not turned on."

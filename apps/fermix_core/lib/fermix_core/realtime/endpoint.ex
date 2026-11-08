@@ -29,6 +29,9 @@ defmodule FermixCore.Realtime.Endpoint do
   # The engines a phone's call may run on: the task engines, which join the
   # chat and hand every task to the Fermix agent (M87 D2).
   @phone_engines ["openai_live", "xai_realtime"]
+  # A phone's Grok playback window: under the phone call's 500 ms credit by
+  # one vendor chunk (`grok_playback_opts/1`).
+  @phone_grok_window_ms 300
 
   @doc "Reads an endpoint's string form, refusing anything that is not one."
   @spec parse(String.t()) :: {:ok, t()} | {:error, {:invalid_endpoint, String.t()}}
@@ -82,6 +85,27 @@ defmodule FermixCore.Realtime.Endpoint do
   def admit_engine(endpoint, engine) when is_binary(engine) do
     _valid = format(endpoint)
     :ok
+  end
+
+  @doc """
+  How a Grok call paces its audio to this endpoint: the options its
+  `GrokPlayback` starts with. A phone's audio rides its mobile session, where
+  the call holds at most 500 ms unplayed on the phone and drops audio that
+  waited 300 ms to be written (`FermixChannels.Mobile.CallAudio`); a reply
+  Grok streams faster than it plays would pile up behind that credit and age
+  out. So a phone's window is 300 ms, which with one vendor chunk of up to
+  200 ms stays inside the credit, and the rest waits in `GrokPlayback`, paced
+  by the phone's reports. The desktop and an accessory keep the default.
+  """
+  @spec grok_playback_opts(t()) :: keyword()
+  def grok_playback_opts({:phone, _device_id} = endpoint) do
+    _valid = format(endpoint)
+    [window_ms: @phone_grok_window_ms]
+  end
+
+  def grok_playback_opts(endpoint) do
+    _valid = format(endpoint)
+    []
   end
 
   @doc """

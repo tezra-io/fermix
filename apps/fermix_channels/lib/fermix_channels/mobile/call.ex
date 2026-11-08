@@ -47,12 +47,17 @@ defmodule FermixChannels.Mobile.Call do
   one after each `playback_stop`) otherwise. A report is checked here on every
   engine as the session checks it (an unknown id, a regression, a value past
   what was sent end the call with that reason) and goes on to the session only
-  on Grok. A Grok call whose audio ages out while the phone is away is
-  interrupted once, cut at what was heard: Grok ends a call whose audio goes
-  unacknowledged for 2 s. Audio going up that waited here 300 ms is dropped.
-  Every frame goes to the session as `{:mobile_call, pid, :control | :audio,
-  event}`, which the session writes ahead of everything else it has queued,
-  control first (`Mobile.Session`).
+  on Grok. A stop and a resume settle the credit (`CallAudio`): the phone
+  never reports what it dropped at the stop, or what was in flight when its
+  link went. On a Grok call, audio the phone never heard (sent and unreported
+  when it went, or aged out while it was away) is interrupted once a detach,
+  cut at what was heard: Grok ends a call whose audio goes unacknowledged for
+  2 s, and paces a phone's audio so closely that little waits here to age
+  out. Audio going up that waited here 300 ms is dropped.
+  Every frame goes to the session as `{:mobile_call, pid, :control | :stop |
+  :audio, event}`, which the session writes ahead of everything else it has
+  queued, controls first (`Mobile.Session`); `:stop` is the `playback_stop`
+  line, which tells the session to drop this call's audio queued before it.
 
   A detach and a resume go on the call's trace, the one the voice session's
   `call_ready` names: `[:fermix, :voice_live, :phone_detached]`, and
@@ -144,8 +149,10 @@ defmodule FermixChannels.Mobile.Call do
   end
 
   @doc """
-  A phone's `call_open`: hands it to the device's call, starting one for a
-  new call. A resume of a call this primary does not hold (it restarted, or
+  A phone's `call_open`. A new call always goes to the supervisor, which
+  starts it, or hands the open to the device's call already running (which
+  refuses a second call, and re-attaches its own). A resume goes to the
+  device's call; one of a call this primary does not hold (it restarted, or
   the window ran out) is answered `{:close, "unknown_call"}` for the session
   to write. `opts`: `:calls` and `:call_supervisor` (the registry and the
   supervisor), and `:call_options` given each new call.
@@ -155,11 +162,9 @@ defmodule FermixChannels.Mobile.Call do
   def open(device_id, session, call_id, resume?, opts)
       when is_binary(device_id) and is_pid(session) and is_binary(call_id) and
              is_boolean(resume?) and is_list(opts) do
-    case lookup(calls(opts), device_id) do
-      {:ok, call} -> tell(call, {:call_open, session, call_id, resume?})
-      :none when resume? -> {:close, "unknown_call"}
-      :none -> start(device_id, session, call_id, opts)
-    end
+    if resume?,
+      do: resume(calls(opts), device_id, session, call_id),
+      else: start(device_id, session, call_id, opts)
   end
 
   @doc """
@@ -220,21 +225,31 @@ defmodule FermixChannels.Mobile.Call do
     end
   end
 
+  defp resume(calls, device_id, session, call_id) do
+    case lookup(calls, device_id) do
+      {:ok, call} -> tell(call, {:call_open, session, call_id, true})
+      :none -> {:close, "unknown_call"}
+    end
+  end
+
   defp refused_start(device_id, reason) do
     Logger.error("voice: a call from phone #{device_id} could not start: #{inspect(reason)}")
     {:close, "ended"}
   end
 
   defp lookup(calls, device_id) do
-    if GenServer.whereis(calls) do
-      case Registry.lookup(calls, device_id) do
-        [{call, _value}] -> {:ok, call}
-        [] -> :none
-      end
-    else
-      :none
-    end
+    if GenServer.whereis(calls),
+      do: live_call(Registry.lookup(calls, device_id)),
+      else: :none
   end
+
+  # The registry forgets a call a moment after it exits; until then, its entry
+  # is no call.
+  defp live_call([{call, _value}]) do
+    if Process.alive?(call), do: {:ok, call}, else: :none
+  end
+
+  defp live_call([]), do: :none
 
   defp tell(call, message) do
     send(call, message)
@@ -355,9 +370,11 @@ defmodule FermixChannels.Mobile.Call do
     state = state |> release_attached() |> cancel_window()
     ref = Process.monitor(session)
 
+    # What was in flight when the link went is never reported played.
     state = %{
       state
       | attached: %{session: session, ref: ref},
+        audio: CallAudio.settle(state.audio),
         detach_interrupted?: false,
         detached_at: nil
     }
@@ -386,17 +403,22 @@ defmodule FermixChannels.Mobile.Call do
     %{state | held_lines: :queue.new(), held_count: 0}
   end
 
+  # Audio the phone was sent and never reported, or that still waits here, is
+  # unheard: on Grok it is interrupted now, cut at what was heard, since the
+  # session ends a call whose audio stays unreported for 2 s.
   defp detach(state) do
     token = make_ref()
     timer = Process.send_after(self(), {:window_expired, token}, state.window_ms)
     :ok = trace_gap(state, &LiveTelemetry.phone_detached/1)
 
-    %{
+    state = %{
       state
       | attached: nil,
         window: %{token: token, timer: timer},
         detached_at: state.clock.()
     }
+
+    if CallAudio.unheard?(state.audio), do: interrupt_unheard(state), else: state
   end
 
   defp report_resume(%{detached_at: at} = state) when is_integer(at) do
@@ -610,8 +632,10 @@ defmodule FermixChannels.Mobile.Call do
     |> send_line(event)
   end
 
+  # The stop goes as `:stop`, so the session drops the audio queued before it.
   defp deliver_server_event(state, %{type: "playback_stop"} = event) do
-    %{state | audio: CallAudio.clear(state.audio), minted: state.minted + 1} |> send_line(event)
+    %{state | audio: CallAudio.clear(state.audio), minted: state.minted + 1}
+    |> send_line(event, :stop)
   end
 
   defp deliver_server_event(state, %{type: "task", delegation_id: id, status: status} = event) do
@@ -623,9 +647,9 @@ defmodule FermixChannels.Mobile.Call do
   defp playback_id(_state, %{playback_id: id}) when is_binary(id), do: id
   defp playback_id(state, _event), do: "m#{state.minted}"
 
-  defp send_line(state, event) do
+  defp send_line(state, event, class \\ :control) do
     case encode_line(event) do
-      {:ok, json} -> control(state, line_event(state.call_id, json))
+      {:ok, json} -> control(state, line_event(state.call_id, json), class)
       {:error, reason} -> unsent_line(state, event, reason)
     end
   end
@@ -645,12 +669,16 @@ defmodule FermixChannels.Mobile.Call do
     end
   end
 
-  defp control(%{attached: %{session: session}} = state, event) do
-    send_control(session, event)
+  # A line held while the phone is away goes as a control when it comes back:
+  # the session it comes back on has no audio of the call's queued before it.
+  defp control(state, event, class \\ :control)
+
+  defp control(%{attached: %{session: session}} = state, event, class) do
+    send(session, {:mobile_call, self(), class, event})
     state
   end
 
-  defp control(state, event) do
+  defp control(state, event, _class) do
     held = :queue.in(event, state.held_lines)
 
     if state.held_count < @max_held_lines,
@@ -685,8 +713,9 @@ defmodule FermixChannels.Mobile.Call do
   end
 
   # Grok paces its audio by the phone's reports and ends a call whose audio
-  # goes unacknowledged for 2 s; audio a detached phone never heard is
-  # interrupted, once a detach, cut at what was heard.
+  # goes unacknowledged for 2 s; audio a detached phone never heard (in flight
+  # when it went, or aged out while it was away) is interrupted, once a
+  # detach, cut at what was heard.
   defp interrupt_unheard(%{detach_interrupted?: false, config: %{engine: "xai_realtime"}} = state) do
     {_verdict, state} =
       run_client(%{state | detach_interrupted?: true}, &CallClient.interrupt(&1, nil))
@@ -721,8 +750,12 @@ defmodule FermixChannels.Mobile.Call do
 
   defp revoke(state) do
     Logger.info("voice: phone #{state.device_id} was removed; its call ends")
-    state = state |> mute_for_good() |> cancel_unsettled()
-    finish(state, "revoked")
+
+    state
+    |> send_line(CallClient.error_frame("revoked"))
+    |> mute_for_good()
+    |> cancel_unsettled()
+    |> stop_and_close("revoked")
   end
 
   defp mute_for_good(%{client: %CallClient{session: session}} = state) when is_pid(session) do
@@ -747,18 +780,16 @@ defmodule FermixChannels.Mobile.Call do
 
   defp cancel_unsettled(state), do: state
 
-  defp finish(state, ending) do
-    state = stop_session(state)
-
-    # Why it ended goes first, as the Realtime error, when the session's own
-    # frames cannot say it.
-    state =
-      if ending in ["link_too_slow", "revoked"],
-        do: send_line(state, CallClient.error_frame(ending)),
-        else: state
-
-    close(state, ending)
+  # Why a too-slow link ended the call goes first, as the Realtime error the
+  # session's own frames cannot say, ahead of the session's last frames
+  # (revocation does the same, `revoke/1`).
+  defp finish(state, "link_too_slow" = ending) do
+    state |> send_line(CallClient.error_frame(ending)) |> stop_and_close(ending)
   end
+
+  defp finish(state, ending), do: stop_and_close(state, ending)
+
+  defp stop_and_close(state, ending), do: state |> stop_session() |> close(ending)
 
   defp end_on_error(state) do
     state = %{state | client: state.client && CallClient.teardown(state.client)}

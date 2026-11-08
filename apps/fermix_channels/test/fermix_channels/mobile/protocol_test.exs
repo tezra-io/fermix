@@ -603,7 +603,8 @@ defmodule FermixChannels.Mobile.ProtocolTest do
     assert {:ok, _frame} =
              Protocol.encode_server_frame("hello_ack", put_in(ack, ["caps", "call"], served), 1)
 
-    for reason <- ~w(voice_off no_key engine_not_for_phones) do
+    # A string: a later primary's reason reads as one this app is too old for.
+    for reason <- ~w(voice_off no_key engine_not_for_phones busy) do
       refused = served |> Map.put("available", false) |> Map.put("reason", reason)
 
       assert {:ok, _frame} =
@@ -617,7 +618,8 @@ defmodule FermixChannels.Mobile.ProtocolTest do
     for bad <- [
           Map.put(served, "reason", "voice_off"),
           %{served | "available" => false},
-          served |> Map.put("available", false) |> Map.put("reason", "busy"),
+          served |> Map.put("available", false) |> Map.put("reason", ""),
+          served |> Map.put("available", false) |> Map.put("reason", 7),
           Map.delete(served, "min_version"),
           %{served | "max_version" => 0},
           %{served | "camera" => "no"},

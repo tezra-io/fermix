@@ -23,6 +23,10 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
   @pairing_links Path.join(@priv_dir, "fixtures/pairing_links.jsonl")
   @attestation_roots Path.join(@priv_dir, "attestation_roots.json")
   @android_signers Path.join(@priv_dir, "android_signers.json")
+  # The reasons this primary gives for a call's end and for serving none: the
+  # wire carries any string, and these are the ones documented.
+  @call_endings ~w(ended lost link_too_slow revoked unknown_call)
+  @call_refusals ~w(voice_off no_key engine_not_for_phones)
   # M51 §7: the trust inputs a phone's attestation is verified against are
   # exported, and a changed byte in either is a changed contract.
   @attestation_roots_sha256 "1c8f9da8b5a13da216198541d276e424c6a73c72af9fa3433f43e096100ae5ed"
@@ -584,27 +588,37 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
     assert "playback_id" in defs["call_audio_to_phone"]["required"]
     assert "control_seq" in defs["call_attached"]["required"]
 
-    endings = defs["call_close_to_phone"]["properties"]["reason"]["enum"]
-    assert endings != []
+    # Both reasons are strings, as error.code is: a later primary may give one
+    # this one does not, and a phone reads it rather than refusing the frame.
+    # The values this primary sends are named in the description.
+    close_rule = defs["call_close_to_phone"]
+    assert close_rule["properties"]["reason"] == %{"type" => "string", "minLength" => 1}
 
-    for reason <- endings ++ ["hung_up"] do
+    for reason <- @call_endings,
+        do: assert(close_rule["description"] =~ "#{reason}:", reason)
+
+    for reason <- @call_endings ++ ["quota", "", 7] do
       close = %{"call_id" => "c1", "reason" => reason}
       encoded? = match?({:ok, _frame}, Protocol.encode_server_frame("call_close", close, 1))
       assert encoded? == (server_errors(server_event("call_close", close), schema) == [])
-      assert encoded? == reason in endings, reason
+      assert encoded? == (is_binary(reason) and reason != ""), inspect(reason)
     end
 
-    refusals = defs["callCaps"]["properties"]["reason"]["enum"]
-    assert refusals != []
+    caps_rule = defs["callCaps"]
+    assert caps_rule["properties"]["reason"] == %{"type" => "string", "minLength" => 1}
+
+    for reason <- @call_refusals,
+        do: assert(caps_rule["description"] =~ "#{reason}:", reason)
 
     # This daemon always sends its epoch; the schema leaves it optional for older ones.
     ack = Map.put(hello_ack_payload(), "primary_epoch", 1)
+    cases = [{true, nil}, {false, nil}, {false, ""}, {false, "quota"}]
 
-    for {available?, reason} <- [{true, nil}, {false, "bogus"} | Enum.map(refusals, &{false, &1})] do
+    for {available?, reason} <- cases ++ Enum.map(@call_refusals, &{false, &1}) do
       payload = put_in(ack, ["caps", "call"], call_caps(available?, reason))
       encoded? = match?({:ok, _frame}, Protocol.encode_server_frame("hello_ack", payload, 1))
       assert encoded? == (server_errors(server_event("hello_ack", payload), schema) == [])
-      assert encoded? == (available? or reason in refusals), inspect(reason)
+      assert encoded? == (available? or (is_binary(reason) and reason != "")), inspect(reason)
     end
   end
 
@@ -612,9 +626,12 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
     [_before, section] = String.split(protocol, "## Calls from the phone", parts: 2)
     [section, _after] = String.split(section, "\n## ", parts: 2)
 
-    for word <- ~w(call_open call_attached control_seq playback_id playback_progress
-                   link_too_slow unknown_call engine_not_for_phones caps.call) do
+    for word <- ~w(call_open call_attached control_seq playback_id playback_progress caps.call) do
       assert section =~ word, "Calls from the phone does not name #{word}"
+    end
+
+    for reason <- @call_endings ++ @call_refusals do
+      assert section =~ "`#{reason}`", "Calls from the phone does not name #{reason}"
     end
 
     for bound <- ["20 s", "300 ms", "500 ms", "5 s"], do: assert(section =~ bound, bound)

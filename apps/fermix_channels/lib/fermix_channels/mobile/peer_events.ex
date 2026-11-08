@@ -35,7 +35,6 @@ defmodule FermixChannels.Mobile.PeerEvents do
   @call_audio_bytes 4_800
 
   @loopback_failures ~w(port_in_use not_permitted failed)
-  @call_endings ~w(ended lost link_too_slow revoked unknown_call)
   @snapshot_refusals ~w(disk_floor space_unknown mismatch out_of_order invalid_name write_failed)
 
   @relay {:object, [{"url", :relay_url}, {"quic_port", :port}]}
@@ -143,7 +142,9 @@ defmodule FermixChannels.Mobile.PeerEvents do
     "call_line" => {[{"call_id", :id}], :required},
     "call_audio" =>
       {[{"call_id", :id}, {"playback_id", :playback_id}], {:pcm16, @call_audio_bytes}},
-    "call_close" => {[{"call_id", :id}, {"reason", {:enum, @call_endings}}], :none}
+    # A string, as `error.code` is: a later primary may end a call for a reason
+    # this one does not name (`PROTOCOL.md`), and a phone reads it as an end.
+    "call_close" => {[{"call_id", :id}, {"reason", :nonempty}], :none}
   }
 
   @client_events ~w(
@@ -271,6 +272,7 @@ defmodule FermixChannels.Mobile.PeerEvents do
   defp valid?(:positive, value), do: valid?({:range, 1, @max_u64}, value)
   defp valid?(:port, value), do: valid?({:range, 1, 65_535}, value)
   defp valid?(:boolean, value), do: is_boolean(value)
+  defp valid?(:nonempty, value), do: is_binary(value) and value != ""
   defp valid?(:id, value), do: matches?(@id, value)
   defp valid?(:playback_id, value), do: matches?(@playback_id, value)
   defp valid?(:method, value), do: matches?(@method, value) and byte_size(value) <= 128

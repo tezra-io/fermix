@@ -38,9 +38,11 @@ defmodule FermixChannels.Mobile.CallAudioTest do
     {:ok, audio} = CallAudio.progress(audio, "m1", 120, true)
     assert CallAudio.outstanding_ms(audio) == 0
 
+    # Drained covers all sent before it, whatever the rounded played_ms said,
+    # as the session counts it (`GrokPlayback`).
     audio = put_frames(audio, "m1", 1, 10)
     {audio, [_frame], 0} = CallAudio.take(audio, 10, true)
-    assert CallAudio.outstanding_ms(audio) == 300 - 120 + 100
+    assert CallAudio.outstanding_ms(audio) == 100
   end
 
   # As the session refuses them (`GrokPlayback`): the phone can report only on
@@ -88,11 +90,62 @@ defmodule FermixChannels.Mobile.CallAudioTest do
     refute CallAudio.too_slow?(audio, 20_000)
   end
 
-  test "a playback stop drops what waits" do
+  test "a playback stop drops what waits, and frees what the phone will never report" do
     audio = put_frames(CallAudio.new(), "m1", 8, 0)
     {audio, _sent, 0} = CallAudio.take(audio, 0, true)
 
-    {_audio, [], 0} = audio |> CallAudio.clear() |> CallAudio.take(0, true)
+    audio = CallAudio.clear(audio)
+    {audio, [], 0} = CallAudio.take(audio, 0, true)
+    assert CallAudio.outstanding_ms(audio) == 0
+
+    # A report on the stopped playback is still checked, against all it was sent.
+    assert {:ok, _audio} = CallAudio.progress(audio, "m1", 300, true)
+    assert CallAudio.progress(audio, "m1", 501, true) == {:error, :playback_beyond_sent}
+  end
+
+  # A gap long enough to need a resume drains the phone's buffer, and what was
+  # in flight when the link went is never reported.
+  test "settling frees the credit, and audio sent after it counts from there" do
+    audio = put_frames(CallAudio.new(), "m1", 5, 0)
+    {audio, _sent, 0} = CallAudio.take(audio, 0, true)
+    {:ok, audio} = CallAudio.progress(audio, "m1", 200, false)
+
+    audio = CallAudio.settle(audio)
+    assert CallAudio.outstanding_ms(audio) == 0
+
+    audio = put_frames(audio, "m1", 2, 2_000)
+    {audio, [_one, _two], 0} = CallAudio.take(audio, 2_000, true)
+    assert CallAudio.outstanding_ms(audio) == 200
+    assert CallAudio.progress(audio, "m1", 150, false) == {:error, :playback_regressed}
+
+    # The phone played out all it held while away, then 100 ms of the new audio.
+    assert {:ok, audio} = CallAudio.progress(audio, "m1", 600, false)
+    assert CallAudio.outstanding_ms(audio) == 100
+  end
+
+  test "audio waiting, or sent and unreported, is unheard until the phone drains it" do
+    audio = put_frames(CallAudio.new(), "m1", 2, 0)
+    assert CallAudio.unheard?(audio)
+
+    {audio, [_one, _two], 0} = CallAudio.take(audio, 0, true)
+    assert CallAudio.unheard?(audio)
+
+    {:ok, audio} = CallAudio.progress(audio, "m1", 200, true)
+    refute CallAudio.unheard?(audio)
+    refute CallAudio.unheard?(CallAudio.new())
+  end
+
+  test "a report that frees credit means the link is moving, not behind" do
+    audio = put_frames(CallAudio.new(), "m1", 7, 0)
+    {audio, _sent, 0} = CallAudio.take(audio, 0, true)
+    {audio, [], 0} = CallAudio.take(audio, 10, true)
+    assert audio.behind_since == 0
+
+    {:ok, audio} = CallAudio.progress(audio, "m1", 100, false)
+    assert audio.behind_since == nil
+    {audio, [_frame], 0} = CallAudio.take(audio, 20, true)
+    assert audio.behind_since == 20
+    refute CallAudio.too_slow?(audio, 5_010)
   end
 
   test "at most 64 frames wait; the oldest go first" do

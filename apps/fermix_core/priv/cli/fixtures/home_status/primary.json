@@ -58,7 +58,7 @@
       "key": "dYcDTlQY19MPy0MvFW5Bng",
       "notice": null,
       "outcome": "done",
-      "sentence": "Keep Fermix running when this Mac sleeps. It moves to a server you own. iMessage, voice calls and meetings stop after the move.",
+      "sentence": "Keep Fermix running when this Mac sleeps. It moves to a server you own. iMessage and meetings stop after the move. This Mac's voice calls stop after the move; calls from your phone carry on at your server when Talk to Fermix is on there and its key is in your server's secret store.",
       "state": "off"
     },
     "update_ceiling": null,

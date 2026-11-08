@@ -235,7 +235,7 @@ defmodule FermixCore.Realtime.GrokSessionServer do
       speaking?: false,
       closing?: false,
       ledger: GrokLedger.new(config.max_estimated_cost_cents_per_session, clock.()),
-      playback: GrokPlayback.new(),
+      playback: GrokPlayback.new(Endpoint.grok_playback_opts(Keyword.fetch!(opts, :endpoint))),
       turn: GrokTurn.new(),
       transcript: LiveTranscript.new(),
       speech: CallSpeech.new(),

@@ -56,7 +56,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   come back and picks up where it was. The phone and the Mac share the one
   call at a time, removing a phone ends its call at once along with the tasks
   it started, and a move ends a call in progress, after its review says so.
-  No phone app with calls is released yet.
+  After a move, your phone calls Fermix on the server when Talk to Fermix is
+  on there and its key is in the server's secret store, while the Mac's own
+  voice calls stop. No phone app with calls is released yet.
 
 ### Changed
 
@@ -106,8 +108,10 @@ will be part of a future release; nothing in this group is in a release yet.
   move, and you review the move (the secrets that travel, the server's Fermix,
   which must be this computer's own, since a newer one could never move the
   home back, free disk, the plugins with no build for the server, and what stops: those
-  of iMessage, voice calls and meetings you use, WhatsApp, and Slack unless it
-  uses Socket Mode; coding agents ask for your approval again on the server;
+  of iMessage, this computer's own voice calls and meetings you use, WhatsApp,
+  and Slack unless it uses Socket Mode; calls from your phone carry on at the
+  server when Talk to Fermix is on there and its key is in the server's
+  secret store; coding agents ask for your approval again on the server;
   a Fermix you started from a terminal stops when the move starts and needs
   starting again) and start it from the app with a recovery passphrase: the
   first move sets it if you have not, and every move after checks that it is

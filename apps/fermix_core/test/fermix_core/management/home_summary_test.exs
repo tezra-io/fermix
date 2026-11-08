@@ -39,9 +39,13 @@ defmodule FermixCore.Management.HomeSummaryTest do
       {"a home that uses iMessage and meetings", facts(stays_here: [:imessage, :meetings]), "off",
        "Keep Fermix running when this Mac sleeps. It moves to a server you own. iMessage and " <>
          "meetings stop after the move.", "own_server"},
+      # M87 §07: the Mac's own voice stays with the Mac; a phone's calls ride its
+      # session to wherever the home runs.
       {"a home that uses all three", facts(stays_here: [:imessage, :voice, :meetings]), "off",
-       "Keep Fermix running when this Mac sleeps. It moves to a server you own. iMessage, " <>
-         "voice calls and meetings stop after the move.", "own_server"},
+       "Keep Fermix running when this Mac sleeps. It moves to a server you own. iMessage and " <>
+         "meetings stop after the move. This Mac's voice calls stop after the move; calls " <>
+         "from your phone carry on at your server when Talk to Fermix is on there and its " <>
+         "key is in your server's secret store.", "own_server"},
       {"a home that uses only iMessage", facts(stays_here: [:imessage]), "off",
        "Keep Fermix running when this Mac sleeps. It moves to a server you own. iMessage " <>
          "stops after the move.", "own_server"},
@@ -49,8 +53,10 @@ defmodule FermixCore.Management.HomeSummaryTest do
        "Keep Fermix running when this computer sleeps. It moves to a server you own.",
        "own_server"},
       {"a Linux home with voice calls on", facts(host_os: :linux, stays_here: [:voice]), "off",
-       "Keep Fermix running when this computer sleeps. It moves to a server you own. Voice " <>
-         "calls stop after the move.", "own_server"},
+       "Keep Fermix running when this computer sleeps. It moves to a server you own. This " <>
+         "computer's voice calls stop after the move; calls from your phone carry on at your " <>
+         "server when Talk to Fermix is on there and its key is in your server's secret " <>
+         "store.", "own_server"},
       {"a code for the owner's server", facts(link: link(enrollment: manual(:open))), "connect",
        @connect_sentence, nil},
       {"a server waiting for its move", ready_facts([]), "ready",

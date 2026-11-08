@@ -197,6 +197,12 @@ defmodule FermixCore.Realtime.GrokSessionServerTest do
                       %{endpoint: "phone:0d7f6a52"}}
     end
 
+    # 300 ms of PCM16 at 24 kHz mono (`Endpoint.grok_playback_opts/1`).
+    test "a phone's call paces Grok's audio in the phone's window", %{clock: clock} do
+      session = start_session(clock: clock, endpoint: {:phone, "0d7f6a52"})
+      assert :sys.get_state(session).playback.window_bytes == 300 * 48
+    end
+
     test "a refused handshake answers the companion in the vendor's words", %{clock: clock} do
       session = start_session(clock: clock, client: RefusingXAI)
 
