@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-10-30T15:39:02Z",
+  "generated_at": "2026-11-08T21:39:09Z",
   "plugins": [
     {
       "name": "agentmail",
@@ -286,9 +286,24 @@
       "rails": [
         "mcp"
       ],
-      "latest": "1.0.4",
+      "latest": "1.0.5",
       "yanked": [],
       "versions": [
+        {
+          "version": "1.0.5",
+          "published_at": "2026-11-08T02:17:18Z",
+          "min_core_version": "0.2.3",
+          "plugin_api": 2,
+          "artifacts": [
+            {
+              "target": "any",
+              "url": "https://github.com/tezra-io/fermix-plugins/releases/download/obsidian/v1.0.5/obsidian-1.0.5.tar.gz",
+              "sha256": "aa50d95061a84dbc9e54cb1695cc6c3decf575d15e495e256978414166406d48",
+              "sig_url": "https://github.com/tezra-io/fermix-plugins/releases/download/obsidian/v1.0.5/obsidian-1.0.5.tar.gz.sig",
+              "cert_url": "https://github.com/tezra-io/fermix-plugins/releases/download/obsidian/v1.0.5/obsidian-1.0.5.tar.gz.pem"
+            }
+          ]
+        },
         {
           "version": "1.0.4",
           "published_at": "2026-10-17T04:56:48Z",

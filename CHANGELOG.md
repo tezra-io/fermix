@@ -46,6 +46,17 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   served from there under any name. The refusal is `navigation_blocked`, or
   `read_blocked` for a page already there, and `allowed_hosts` does not lift
   it. Other local ports, such as a development server, open as before.
+- **The Obsidian plugin can no longer reach a file outside your vault.** It
+  checked a note's path only as written, so a symlink (a link to another file)
+  planted in the vault let it read any file you can, such as an SSH key, or add
+  to one, such as a shell profile, and creating a note at a broken link made a
+  file outside the vault. Every path must now resolve, links followed, inside
+  the vault's real folder, or the call fails with "path escapes the vault", and
+  notes in a folder linked in from elsewhere on disk can no longer be read,
+  listed or added to. Links that stay inside the vault keep working. The
+  catalog offers Obsidian 1.0.5 with the fix: a new install gets it, an
+  installed copy moves with `fermix plugins upgrade obsidian`, and the Mac app
+  has no plugin update yet.
 
 ### Added
 
