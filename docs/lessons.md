@@ -32,6 +32,15 @@ On 2026-10-03 the owner asked why the Mac app's OpenAI Codex picker lacked model
 
 Before a child goes early in a `rest_for_one` list, every call it makes on outside input or the filesystem returns a result it matches, and its tests inject the failure (an IO device answering `{:error, :enospc}`) under a `rest_for_one` parent with a child after it, asserting neither restarts.
 
+## A GenServer that blocks answers no call — 2026-11-08
+
+**A GenServer that serves calls must never wait inside a callback, in a timed `receive` or a timed `accept`.** Every call queues behind the wait, and a caller that calls again as soon as it is answered pays the whole wait each time. Taught three times:
+- *The iroh rail's stop* (ddbc8c7a3, 2026-11-08). `Helper.stop_port/1` waited for the helper's exit status after its shutdown write. A helper whose port had closed under that write never sent one, so the wait ran out its 5 s grace and the rail answered no `status`, `await_ready` or `:sys.get_state` meanwhile. The wait now also ends on the port's EXIT.
+- *The iMessage port's stop* (7db93b681, 2026-11-08). The same wait in `IMessage.Port.terminate/2` held every stop for its whole 2 s.
+- *The daemon's accept* (dcf8d9d0a, 2026-11-08). `Fermix.CLI.Daemon` lived inside `:gen_tcp.accept(listen, 200)`, and every management call a linked desktop forwards asks it for its router options first (`serve_forwarded/3`). Back-to-back calls lock to that window: each answer goes out as a window ends, and the next call arrives one round trip later to wait out the rest of the new one. Every call took 200 ms whatever the method, which on a Mac 60 ms from its Always On server was 140 ms of every Settings call. Four more listeners polled a 50 ms accept the same way while answering calls: `Companion.Endpoint` (`connection_opts/1`, asked for each channel a desktop opens), `LocalVoiceSocket` (`active_clients/1`, read by Health), and the ACP and browser-bridge endpoints (`connection_count/1`).
+
+A listener now accepts in a linked process of its own, which blocks in `:gen_tcp.accept/1` with no timeout and ends when the listening socket closes; the server traps exits and stops with it. Where admitting a connection reads only what `init/1` set, the acceptor admits it itself; where it reads state the server keeps (`LocalVoiceSocket`'s clients and their cap), the acceptor hands each socket to the server with `controlling_process/2` and a message. A wait like this needs no real clock to prove: run a hundred calls in a row with no connection arriving and bound their total well under a hundred of the waits. A timer never fires early, so the old code fails every run.
+
 ## Hermetic tests
 
 **Tests must never mutate or silently depend on host/global state.** Four incidents, one family:
