@@ -17,6 +17,12 @@ defmodule FermixChannels.Channels.Acp.EndpointTest do
   alias FermixCore.Setup.ConfigStore
   alias FermixTestSupport.SafeRm
 
+  # Once it has taken a connection, a server that waits in a 50 ms accept takes
+  # each call only when that accept times out, so these calls in a row would
+  # need over 5 s; answered at once they take a few milliseconds.
+  @calls_in_a_row 101
+  @calls_bound_ms 2_500
+
   # A short path on purpose: a Unix socket address is capped around 104 bytes,
   # which a nested tmp directory blows straight through (`:einval` on bind).
   setup do
@@ -145,6 +151,21 @@ defmodule FermixChannels.Channels.Acp.EndpointTest do
         Supervisor.stop(tree)
       end)
     end
+  end
+
+  # The handshake's ack is the endpoint's accept loop at work.
+  test "answers a call at once while it waits for a connection", ctx do
+    start_endpoint(ctx)
+    {:ok, client} = connect(ctx.socket_path)
+    assert :ok = send_json(client, %{"fermix_bridge" => 1, "app_version" => "t", "env" => %{}})
+    assert %{"fermix_bridge_ack" => %{"status" => "ok"}} = recv_json(client)
+    started = System.monotonic_time(:millisecond)
+
+    for _call <- 1..@calls_in_a_row,
+        do: assert(Endpoint.connection_count(endpoint_name()) == 1)
+
+    took_ms = System.monotonic_time(:millisecond) - started
+    assert took_ms < @calls_bound_ms, "#{@calls_in_a_row} calls took #{took_ms} ms"
   end
 
   describe "connection cap" do
