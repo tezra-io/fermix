@@ -81,7 +81,7 @@
 (* One step = one session callback, one task finishing, one timer firing, *)
 (* or one thing OpenAI, the network or the owner does.                    *)
 (***************************************************************************)
-\* SOURCE: apps/fermix_core/lib/fermix_core/realtime/session_server.ex @ 468e319a3790
+\* SOURCE: apps/fermix_core/lib/fermix_core/realtime/session_server.ex @ 9b1e2f99d307
 \* SOURCE: apps/fermix_core/lib/fermix_core/realtime/openai_client.ex#start_link,send_event,close,turn_detection,decode_server_event,handle_frame,handle_cast,notify_parent @ 68769ed69762
 EXTENDS Naturals, Sequences, FiniteSets
 
