@@ -11,6 +11,7 @@ defmodule FermixCore.Management.Router do
   alias FermixCore.Home.AlwaysOnRelease
   alias FermixCore.Home.Role
   alias FermixCore.Introspection.Overview
+  alias FermixCore.Management.Accessories
   alias FermixCore.Management.AlwaysOn
   alias FermixCore.Management.Auth
   alias FermixCore.Management.Capabilities
@@ -289,6 +290,11 @@ defmodule FermixCore.Management.Router do
     do: mcp_by_name(&McpServers.check_start/2, params, opts)
 
   defp route_known("cues." <> _rest = method, params, opts), do: route_cues(method, params, opts)
+
+  # The accessory family validates its own params (`Management.Accessories`).
+  defp route_known("accessories." <> _rest = method, params, opts),
+    do: Accessories.route(method, params, accessories_opts(opts))
+
   # The server's Always On steps answer only a desktop's forward (Always On
   # setup §3.5); everything else of the family is routed as it comes.
   defp route_known("home." <> _rest = method, params, opts) do
@@ -856,6 +862,17 @@ defmodule FermixCore.Management.Router do
   defp jobs_opts(opts), do: opts |> operation_opts() |> Keyword.get(:jobs, [])
   defp mobile_opts(opts), do: opts |> operation_opts() |> Keyword.get(:mobile, [])
   defp cues_opts(opts), do: opts |> operation_opts() |> Keyword.get(:cues, [])
+
+  # The router's own `:engine_role` (tests) is the family's: accessories run
+  # only on a local Mac primary.
+  defp accessories_opts(opts) do
+    accessories = opts |> operation_opts() |> Keyword.get(:accessories, [])
+
+    case Keyword.fetch(opts, :engine_role) do
+      {:ok, role} -> Keyword.put_new(accessories, :engine_role, role)
+      :error -> accessories
+    end
+  end
 
   # An act reaches every family it steps through with one set of seams, the
   # router's own `:engine_role` (tests), a linked desktop's way to its server

@@ -40,7 +40,11 @@ defmodule FermixTestSupport.AccessoryCase do
   @doc "Moves the test's clock on."
   def advance(clock, ms), do: Agent.update(clock, &(&1 + ms))
 
-  @doc "The home's host key and a record of `public` with the tests' port hint."
+  @doc """
+  The home's host key and a record of `public` with the tests' port hint,
+  chosen as the voice device unless `selected: false` (a tap on an accessory
+  that is not is refused).
+  """
   def enroll!(home, public, opts \\ []) do
     {:ok, host} = Store.ensure_host_key(home)
 
@@ -54,6 +58,10 @@ defmodule FermixTestSupport.AccessoryCase do
     }
 
     :ok = Store.put(home, record)
+
+    if Keyword.get(opts, :selected, true),
+      do: :ok = Store.put_voice_device(home, {:accessory, record.accessory_id})
+
     {host, record}
   end
 

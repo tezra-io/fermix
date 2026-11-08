@@ -115,6 +115,7 @@ defmodule FermixCore.Setup.Wizard do
           | {:mobile_port, pos_integer()}
           | {:mobile_bind, String.t()}
           | {:mobile_advertise_mdns, boolean() | String.t()}
+          | {:accessories_enabled, boolean() | String.t()}
           | {:user_name, String.t()}
           | {:timezone, String.t()}
           | {:communication_style, String.t()}
@@ -838,6 +839,7 @@ defmodule FermixCore.Setup.Wizard do
       |> put_acp_config(answers)
       |> put_network_config(answers)
       |> put_mobile_config(answers)
+      |> put_accessories_config(answers)
       |> put_channel_owner_user_ids(answers)
       |> put_personalization(answers)
       |> put_skill_curation_enabled(Keyword.get(answers, :skill_curation_enabled))
@@ -2731,6 +2733,15 @@ defmodule FermixCore.Setup.Wizard do
     ]
     |> Enum.reject(fn {_key, value} -> is_nil(value) end)
     |> Enum.reduce(snapshot, fn {key, value}, acc -> put_channel_key(acc, :mobile, key, value) end)
+  end
+
+  # The accessory link's one Phase A key (M91). An absent answer changes
+  # nothing; `ConfigStore` normalizes the block, so off is written as no key.
+  defp put_accessories_config(snapshot, answers) do
+    case normalize_realtime_bool(Keyword.get(answers, :accessories_enabled), :accessories_enabled) do
+      nil -> snapshot
+      enabled? -> put_channel_key(snapshot, :accessories, :enabled, enabled?)
+    end
   end
 
   defp normalize_mobile_port(nil), do: nil

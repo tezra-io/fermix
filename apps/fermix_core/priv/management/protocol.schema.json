@@ -237,7 +237,27 @@
     "home.candidates.list": 2,
     "home.move.readiness": 2,
     "home.move.start": 2,
-    "home.act": 2
+    "home.act": 2,
+    "accessories.status": 2,
+    "accessories.pair.start": 2,
+    "accessories.pair.begin": 2,
+    "accessories.pair.decide": 2,
+    "accessories.pair.cancel": 2,
+    "accessories.retry": 2,
+    "accessories.release": 2,
+    "accessories.reconnect": 2,
+    "accessories.forget": 2,
+    "accessories.revoke": 2,
+    "accessories.voice_device.set": 2,
+    "accessories.call.start": 2,
+    "accessories.call.end": 2,
+    "accessories.call.mute": 2,
+    "accessories.call.interrupt": 2,
+    "accessories.call.task.cancel": 2,
+    "accessories.check.start": 2,
+    "accessories.check.stop": 2,
+    "accessories.calibrate": 2,
+    "accessories.set": 2
   },
   "$defs": {
     "request": {
@@ -348,7 +368,27 @@
             "home.candidates.list",
             "home.move.readiness",
             "home.move.start",
-            "home.act"
+            "home.act",
+            "accessories.status",
+            "accessories.pair.start",
+            "accessories.pair.begin",
+            "accessories.pair.decide",
+            "accessories.pair.cancel",
+            "accessories.retry",
+            "accessories.release",
+            "accessories.reconnect",
+            "accessories.forget",
+            "accessories.revoke",
+            "accessories.voice_device.set",
+            "accessories.call.start",
+            "accessories.call.end",
+            "accessories.call.mute",
+            "accessories.call.interrupt",
+            "accessories.call.task.cancel",
+            "accessories.check.start",
+            "accessories.check.stop",
+            "accessories.calibrate",
+            "accessories.set"
           ]
         },
         "params": { "type": "object" }
@@ -1030,6 +1070,146 @@
             "properties": { "method": { "const": "home.act" } }
           },
           "then": { "properties": { "params": { "$ref": "#/$defs/home_act_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "accessories.status" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/accessories_status_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "accessories.pair.start" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/accessories_pair_start_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "accessories.pair.begin" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/accessories_pair_begin_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "accessories.pair.decide" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/accessories_pair_decide_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "accessories.pair.cancel" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/accessories_pair_cancel_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "accessories.retry" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/accessories_retry_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "accessories.release" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/accessories_release_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "accessories.reconnect" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/accessories_reconnect_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "accessories.forget" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/accessories_forget_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "accessories.revoke" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/accessories_revoke_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "accessories.voice_device.set" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/accessories_voice_device_set_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "accessories.call.start" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/accessories_call_start_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "accessories.call.end" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/accessories_call_end_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "accessories.call.mute" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/accessories_call_mute_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "accessories.call.interrupt" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/accessories_call_interrupt_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "accessories.call.task.cancel" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/accessories_call_task_cancel_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "accessories.check.start" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/accessories_check_start_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "accessories.check.stop" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/accessories_check_stop_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "accessories.calibrate" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/accessories_calibrate_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "accessories.set" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/accessories_set_params" } } }
         }
       ]
     },
@@ -1195,7 +1375,27 @@
         { "$ref": "#/$defs/home_candidates_list_result" },
         { "$ref": "#/$defs/home_move_readiness_result" },
         { "$ref": "#/$defs/home_move_start_result" },
-        { "$ref": "#/$defs/home_act_result" }
+        { "$ref": "#/$defs/home_act_result" },
+        { "$ref": "#/$defs/accessories_status_result" },
+        { "$ref": "#/$defs/accessories_pair_start_result" },
+        { "$ref": "#/$defs/accessories_pair_begin_result" },
+        { "$ref": "#/$defs/accessories_pair_decide_result" },
+        { "$ref": "#/$defs/accessories_pair_cancel_result" },
+        { "$ref": "#/$defs/accessories_retry_result" },
+        { "$ref": "#/$defs/accessories_release_result" },
+        { "$ref": "#/$defs/accessories_reconnect_result" },
+        { "$ref": "#/$defs/accessories_forget_result" },
+        { "$ref": "#/$defs/accessories_revoke_result" },
+        { "$ref": "#/$defs/accessories_voice_device_set_result" },
+        { "$ref": "#/$defs/accessories_call_start_result" },
+        { "$ref": "#/$defs/accessories_call_end_result" },
+        { "$ref": "#/$defs/accessories_call_mute_result" },
+        { "$ref": "#/$defs/accessories_call_interrupt_result" },
+        { "$ref": "#/$defs/accessories_call_task_cancel_result" },
+        { "$ref": "#/$defs/accessories_check_start_result" },
+        { "$ref": "#/$defs/accessories_check_stop_result" },
+        { "$ref": "#/$defs/accessories_calibrate_result" },
+        { "$ref": "#/$defs/accessories_set_result" }
       ]
     },
     "hello_params": { "type": "object", "maxProperties": 0, "additionalProperties": false },
@@ -2094,9 +2294,9 @@
       "additionalProperties": false,
       "properties": {
         "sections": {
-          "description": "On a linked desktop, the sections that configure this computer (sandbox, computer_use, computer_history, channels.imessage) and the primary's others; on any other engine, its own.",
+          "description": "On a linked desktop, the sections that configure this computer (sandbox, computer_use, computer_history, channels.imessage, accessories) and the primary's others; on any other engine, its own.",
           "type": "array",
-          "maxItems": 30,
+          "maxItems": 64,
           "items": { "$ref": "#/$defs/settingsSection" }
         },
         "primary_missing": {
@@ -6263,6 +6463,528 @@
         },
         "candidate": { "type": ["string", "null"] },
         "sentence": { "type": "string", "minLength": 1 }
+      }
+    },
+    "accessories_status_params": {
+      "type": "object",
+      "description": "None for the picture as it stands; or after (a key) and wait_ms (at most 25000) together, to be answered once the key is not after, or when wait_ms passed.",
+      "additionalProperties": false,
+      "dependentRequired": { "after": ["wait_ms"], "wait_ms": ["after"] },
+      "properties": {
+        "after": { "type": "string", "pattern": "^[0-9a-f]{16}$" },
+        "wait_ms": { "type": "integer", "minimum": 0, "maximum": 25000 }
+      }
+    },
+    "accessories_status_result": { "$ref": "#/$defs/accessoriesStatus" },
+    "accessories_pair_start_params": {
+      "type": "object",
+      "required": ["path"],
+      "additionalProperties": false,
+      "properties": { "path": { "$ref": "#/$defs/accessoryPortPath" } }
+    },
+    "accessories_pair_start_result": { "$ref": "#/$defs/accessoriesStatus" },
+    "accessories_pair_begin_params": {
+      "type": "object",
+      "required": ["path"],
+      "additionalProperties": false,
+      "properties": {
+        "path": { "$ref": "#/$defs/accessoryPortPath" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 64 }
+      }
+    },
+    "accessories_pair_begin_result": { "$ref": "#/$defs/accessoriesStatus" },
+    "accessories_pair_decide_params": {
+      "type": "object",
+      "required": ["path", "attempt", "matches"],
+      "additionalProperties": false,
+      "properties": {
+        "path": { "$ref": "#/$defs/accessoryPortPath" },
+        "attempt": { "$ref": "#/$defs/accessoryAttempt" },
+        "matches": { "type": "boolean" }
+      }
+    },
+    "accessories_pair_decide_result": { "$ref": "#/$defs/accessoriesStatus" },
+    "accessories_pair_cancel_params": {
+      "type": "object",
+      "required": ["path"],
+      "additionalProperties": false,
+      "properties": {
+        "path": { "$ref": "#/$defs/accessoryPortPath" },
+        "attempt": { "$ref": "#/$defs/accessoryAttempt" }
+      }
+    },
+    "accessories_pair_cancel_result": { "$ref": "#/$defs/accessoriesStatus" },
+    "accessories_retry_params": { "$ref": "#/$defs/accessoryPortParams" },
+    "accessories_retry_result": { "$ref": "#/$defs/accessoriesStatus" },
+    "accessories_release_params": { "$ref": "#/$defs/accessoryPortParams" },
+    "accessories_release_result": { "$ref": "#/$defs/accessoriesStatus" },
+    "accessories_reconnect_params": { "$ref": "#/$defs/accessoryPortParams" },
+    "accessories_reconnect_result": { "$ref": "#/$defs/accessoriesStatus" },
+    "accessories_forget_params": { "$ref": "#/$defs/accessoryIdParams" },
+    "accessories_forget_result": { "$ref": "#/$defs/accessoriesStatus" },
+    "accessories_revoke_params": { "$ref": "#/$defs/accessoryIdParams" },
+    "accessories_revoke_result": { "$ref": "#/$defs/accessoriesStatus" },
+    "accessories_voice_device_set_params": {
+      "type": "object",
+      "required": ["device"],
+      "additionalProperties": false,
+      "properties": { "device": { "$ref": "#/$defs/accessoryVoiceDeviceName" } }
+    },
+    "accessories_voice_device_set_result": { "$ref": "#/$defs/accessoriesStatus" },
+    "accessories_call_start_params": { "$ref": "#/$defs/accessoryIdParams" },
+    "accessories_call_start_result": { "$ref": "#/$defs/accessoriesStatus" },
+    "accessories_call_end_params": { "$ref": "#/$defs/accessoryCallParams" },
+    "accessories_call_end_result": { "$ref": "#/$defs/accessoriesStatus" },
+    "accessories_call_mute_params": {
+      "type": "object",
+      "required": ["accessory_id", "call_id", "muted"],
+      "additionalProperties": false,
+      "properties": {
+        "accessory_id": { "$ref": "#/$defs/accessoryId" },
+        "call_id": { "$ref": "#/$defs/accessoryCallId" },
+        "muted": { "type": "boolean" }
+      }
+    },
+    "accessories_call_mute_result": { "$ref": "#/$defs/accessoriesStatus" },
+    "accessories_call_interrupt_params": { "$ref": "#/$defs/accessoryCallParams" },
+    "accessories_call_interrupt_result": { "$ref": "#/$defs/accessoriesStatus" },
+    "accessories_call_task_cancel_params": {
+      "type": "object",
+      "required": ["accessory_id", "call_id", "task"],
+      "additionalProperties": false,
+      "properties": {
+        "accessory_id": { "$ref": "#/$defs/accessoryId" },
+        "call_id": { "$ref": "#/$defs/accessoryCallId" },
+        "task": { "type": "string", "minLength": 1, "maxLength": 64 }
+      }
+    },
+    "accessories_call_task_cancel_result": { "$ref": "#/$defs/accessoriesStatus" },
+    "accessories_check_start_params": {
+      "type": "object",
+      "required": ["accessory_id", "check"],
+      "additionalProperties": false,
+      "properties": {
+        "accessory_id": { "$ref": "#/$defs/accessoryId" },
+        "check": { "enum": ["tone", "mic", "face", "motion"] },
+        "seconds": { "type": "integer", "minimum": 1, "maximum": 10 }
+      }
+    },
+    "accessories_check_start_result": { "$ref": "#/$defs/accessoriesStatus" },
+    "accessories_check_stop_params": { "$ref": "#/$defs/accessoryIdParams" },
+    "accessories_check_stop_result": { "$ref": "#/$defs/accessoriesStatus" },
+    "accessories_calibrate_params": {
+      "type": "object",
+      "description": "One Calibrate head step: axis and steps exactly when op is nudge.",
+      "required": ["accessory_id", "op"],
+      "additionalProperties": false,
+      "properties": {
+        "accessory_id": { "$ref": "#/$defs/accessoryId" },
+        "op": { "enum": ["begin", "nudge", "set_zero", "cancel"] },
+        "axis": { "enum": ["pan", "tilt"] },
+        "steps": { "type": "integer", "minimum": -64, "maximum": 64, "not": { "const": 0 } }
+      }
+    },
+    "accessories_calibrate_result": { "$ref": "#/$defs/accessoriesStatus" },
+    "accessories_set_params": {
+      "type": "object",
+      "description": "At least one of volume, brightness and motion (motion only on a robot with head motion).",
+      "required": ["accessory_id"],
+      "minProperties": 2,
+      "additionalProperties": false,
+      "properties": {
+        "accessory_id": { "$ref": "#/$defs/accessoryId" },
+        "volume": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "brightness": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "motion": { "type": "boolean" }
+      }
+    },
+    "accessories_set_result": { "$ref": "#/$defs/accessoriesStatus" },
+    "accessoryPortPath": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "accessoryId": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "accessoryAttempt": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "accessoryCallId": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "accessoryVoiceDeviceName": { "type": "string", "pattern": "^(desktop|accessory:[0-9a-f]{64})$" },
+    "accessoryPortParams": {
+      "type": "object",
+      "required": ["path"],
+      "additionalProperties": false,
+      "properties": { "path": { "$ref": "#/$defs/accessoryPortPath" } }
+    },
+    "accessoryIdParams": {
+      "type": "object",
+      "required": ["accessory_id"],
+      "additionalProperties": false,
+      "properties": { "accessory_id": { "$ref": "#/$defs/accessoryId" } }
+    },
+    "accessoryCallParams": {
+      "type": "object",
+      "required": ["accessory_id", "call_id"],
+      "additionalProperties": false,
+      "properties": {
+        "accessory_id": { "$ref": "#/$defs/accessoryId" },
+        "call_id": { "$ref": "#/$defs/accessoryCallId" }
+      }
+    },
+    "accessoriesStatus": {
+      "type": "object",
+      "description": "The accessory picture this Mac draws (PROTOCOL.md, Accessories). Every sentence and every action a row offers is the daemon's.",
+      "required": [
+        "key",
+        "state",
+        "sentence",
+        "enabled",
+        "kinds",
+        "voice",
+        "voice_device",
+        "ports",
+        "ports_sentence",
+        "accessories",
+        "pairing",
+        "call"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "key": { "type": "string", "pattern": "^[0-9a-f]{16}$" },
+        "state": { "enum": ["off", "needs_local_primary", "not_running", "on"] },
+        "sentence": { "type": "string", "minLength": 1 },
+        "enabled": { "type": "boolean" },
+        "kinds": { "type": "array", "items": { "$ref": "#/$defs/accessoryKind" } },
+        "voice": { "$ref": "#/$defs/accessoryVoice" },
+        "voice_device": { "$ref": "#/$defs/accessoryVoiceDevice" },
+        "ports": { "type": "array", "items": { "$ref": "#/$defs/accessoryPort" } },
+        "ports_sentence": { "type": ["string", "null"] },
+        "accessories": {
+          "type": "array",
+          "maxItems": 8,
+          "items": { "$ref": "#/$defs/accessoryRow" }
+        },
+        "pairing": { "oneOf": [{ "$ref": "#/$defs/accessoryPairing" }, { "type": "null" }] },
+        "call": { "oneOf": [{ "$ref": "#/$defs/accessoryCall" }, { "type": "null" }] }
+      }
+    },
+    "accessoryKind": {
+      "type": "object",
+      "required": ["kind", "name", "wire_min", "wire_max", "install_guide"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,15}$" },
+        "name": { "type": "string", "minLength": 1 },
+        "wire_min": { "type": "integer", "minimum": 1 },
+        "wire_max": { "type": "integer", "minimum": 1 },
+        "install_guide": { "type": "string", "pattern": "^https://" }
+      }
+    },
+    "accessoryVoice": {
+      "type": "object",
+      "required": ["ready", "code", "sentence", "engine", "engine_label", "model", "voice"],
+      "additionalProperties": false,
+      "properties": {
+        "ready": { "type": "boolean" },
+        "code": {
+          "enum": ["voice_disabled", "missing_key", "restart_required", null]
+        },
+        "sentence": { "type": "string", "minLength": 1 },
+        "engine": { "type": "string" },
+        "engine_label": { "type": "string" },
+        "model": { "type": "string" },
+        "voice": { "type": "string" }
+      }
+    },
+    "accessoryVoiceDevice": {
+      "type": "object",
+      "required": ["device", "accessory_id", "changeable", "sentence"],
+      "additionalProperties": false,
+      "properties": {
+        "device": { "$ref": "#/$defs/accessoryVoiceDeviceName" },
+        "accessory_id": { "oneOf": [{ "$ref": "#/$defs/accessoryId" }, { "type": "null" }] },
+        "changeable": { "type": "boolean" },
+        "sentence": { "type": ["string", "null"] }
+      }
+    },
+    "accessoryAction": {
+      "enum": [
+        "pair",
+        "pair_begin",
+        "pair_cancel",
+        "retry",
+        "release",
+        "reconnect",
+        "open_install_guide",
+        "update_fermix",
+        "start_call",
+        "select",
+        "check",
+        "calibrate",
+        "forget",
+        "revoke"
+      ]
+    },
+    "accessoryPort": {
+      "type": "object",
+      "required": [
+        "path",
+        "serial",
+        "status",
+        "selected",
+        "accessory_id",
+        "kind",
+        "firmware",
+        "update",
+        "install_guide",
+        "retrying",
+        "sentence",
+        "actions"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "path": { "type": "string" },
+        "serial": { "type": ["string", "null"] },
+        "status": {
+          "enum": [
+            "unrelated",
+            "attaching",
+            "unpaired",
+            "pairing",
+            "attached",
+            "busy",
+            "needs_firmware",
+            "incompatible",
+            "not_paired",
+            "released",
+            "vanished",
+            "failed"
+          ]
+        },
+        "selected": { "type": "boolean" },
+        "accessory_id": { "oneOf": [{ "$ref": "#/$defs/accessoryId" }, { "type": "null" }] },
+        "kind": { "type": ["string", "null"] },
+        "firmware": { "type": ["string", "null"] },
+        "update": { "enum": ["firmware", "fermix", null] },
+        "install_guide": { "type": ["string", "null"] },
+        "retrying": { "type": "boolean" },
+        "sentence": { "type": "string", "minLength": 1 },
+        "actions": { "type": "array", "items": { "$ref": "#/$defs/accessoryAction" } }
+      }
+    },
+    "accessoryRow": {
+      "type": "object",
+      "required": [
+        "accessory_id",
+        "short_id",
+        "name",
+        "kind",
+        "enrolled_at",
+        "connection",
+        "path",
+        "gen",
+        "firmware",
+        "capabilities",
+        "state",
+        "calibration_sentence",
+        "fault",
+        "check",
+        "selected",
+        "sentence",
+        "actions",
+        "last_call"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "accessory_id": { "$ref": "#/$defs/accessoryId" },
+        "short_id": { "type": "string", "pattern": "^[0-9a-f]{4}( [0-9a-f]{4}){3}$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "kind": { "type": "string" },
+        "enrolled_at": { "type": "string" },
+        "connection": {
+          "enum": [
+            "attached",
+            "attaching",
+            "unplugged",
+            "released",
+            "busy",
+            "not_paired",
+            "incompatible",
+            "failed",
+            "off"
+          ]
+        },
+        "path": { "type": ["string", "null"] },
+        "gen": { "type": ["integer", "null"], "minimum": 1 },
+        "firmware": { "type": ["string", "null"] },
+        "capabilities": {
+          "type": "array",
+          "items": { "enum": ["mic", "speaker", "screen", "touch", "pet", "motion", "battery"] }
+        },
+        "state": { "oneOf": [{ "$ref": "#/$defs/accessoryState" }, { "type": "null" }] },
+        "calibration_sentence": { "type": ["string", "null"] },
+        "fault": { "type": ["string", "null"] },
+        "check": { "oneOf": [{ "$ref": "#/$defs/accessoryCheck" }, { "type": "null" }] },
+        "selected": { "type": "boolean" },
+        "sentence": { "type": "string", "minLength": 1 },
+        "actions": { "type": "array", "items": { "$ref": "#/$defs/accessoryAction" } },
+        "last_call": { "oneOf": [{ "$ref": "#/$defs/accessoryLastCall" }, { "type": "null" }] }
+      }
+    },
+    "accessoryState": {
+      "type": "object",
+      "required": ["battery", "power", "brownout", "volume", "brightness", "motion", "calibration"],
+      "additionalProperties": false,
+      "properties": {
+        "battery": { "type": ["integer", "null"], "minimum": 0, "maximum": 100 },
+        "power": { "enum": ["usb", "battery", "low", "critical"] },
+        "brownout": { "type": "boolean" },
+        "volume": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "brightness": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "motion": { "enum": ["absent", "off", "homing", "ready", "paused", "fault"] },
+        "calibration": { "enum": ["absent", "missing", "valid", "calibrating", "failed"] }
+      }
+    },
+    "accessoryCheck": {
+      "type": "object",
+      "required": ["check", "status", "code", "level"],
+      "additionalProperties": false,
+      "properties": {
+        "check": { "enum": ["tone", "mic", "face", "motion"] },
+        "status": { "enum": ["running", "ok", "fault"] },
+        "code": { "type": ["string", "null"] },
+        "level": { "type": ["integer", "null"], "minimum": 0, "maximum": 32767 }
+      }
+    },
+    "accessoryLastCall": {
+      "type": "object",
+      "required": ["call_id", "reason", "sentence", "ended_at"],
+      "additionalProperties": false,
+      "properties": {
+        "call_id": { "type": ["string", "null"] },
+        "reason": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,47}$" },
+        "sentence": { "type": "string", "minLength": 1 },
+        "ended_at": { "type": "string" }
+      }
+    },
+    "accessoryPairing": {
+      "type": "object",
+      "required": [
+        "path",
+        "attempt",
+        "round",
+        "max_rounds",
+        "phase",
+        "code",
+        "accessory_confirmed",
+        "owner_confirmed",
+        "closed_reason",
+        "accessory_id",
+        "expires_at",
+        "sentence"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "path": { "type": "string" },
+        "attempt": { "$ref": "#/$defs/accessoryAttempt" },
+        "round": { "type": "integer", "minimum": 1, "maximum": 3 },
+        "max_rounds": { "const": 3 },
+        "phase": { "enum": ["begun", "offered", "revealed", "committing", "done", "closed"] },
+        "code": { "type": ["string", "null"], "pattern": "^[0-9]{6}$" },
+        "accessory_confirmed": { "type": "boolean" },
+        "owner_confirmed": { "type": "boolean" },
+        "closed_reason": {
+          "enum": [
+            "owner",
+            "expired",
+            "mismatch_limit",
+            "invalid_offer",
+            "invalid_reveal",
+            "link_reset",
+            null
+          ]
+        },
+        "accessory_id": { "oneOf": [{ "$ref": "#/$defs/accessoryId" }, { "type": "null" }] },
+        "expires_at": { "type": ["string", "null"] },
+        "sentence": { "type": "string", "minLength": 1 }
+      }
+    },
+    "accessoryCall": {
+      "type": "object",
+      "description": "The robot call that runs. engine, engine_label, model and voice are the ones it started with, never the saved settings.",
+      "required": [
+        "accessory_id",
+        "call_id",
+        "source",
+        "phase",
+        "phase_sentence",
+        "state",
+        "muted",
+        "muted_by",
+        "engine",
+        "engine_label",
+        "model",
+        "voice",
+        "call_uuid",
+        "conversation",
+        "started_at",
+        "transcript",
+        "tasks",
+        "usage"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "accessory_id": { "$ref": "#/$defs/accessoryId" },
+        "call_id": { "$ref": "#/$defs/accessoryCallId" },
+        "source": { "enum": ["screen_tap", "head_swipe", "mac"] },
+        "phase": { "enum": ["starting", "active", "ending"] },
+        "phase_sentence": { "type": ["string", "null"] },
+        "state": {
+          "enum": ["connecting", "listening", "thinking", "speaking", "muted", "reconnecting", null]
+        },
+        "muted": { "type": "boolean" },
+        "muted_by": { "enum": ["mac", "accessory", null] },
+        "engine": { "type": "string" },
+        "engine_label": { "type": "string" },
+        "model": { "type": "string" },
+        "voice": { "type": "string" },
+        "call_uuid": { "type": ["string", "null"] },
+        "conversation": { "enum": ["chat", "private", null] },
+        "started_at": { "type": ["string", "null"] },
+        "transcript": {
+          "type": "array",
+          "maxItems": 6,
+          "items": { "$ref": "#/$defs/accessoryTranscriptLine" }
+        },
+        "tasks": { "type": "array", "maxItems": 8, "items": { "$ref": "#/$defs/accessoryTask" } },
+        "usage": { "oneOf": [{ "$ref": "#/$defs/accessoryUsage" }, { "type": "null" }] }
+      }
+    },
+    "accessoryTranscriptLine": {
+      "type": "object",
+      "required": ["speaker", "text", "final"],
+      "additionalProperties": false,
+      "properties": {
+        "speaker": { "enum": ["user", "assistant"] },
+        "text": { "type": "string", "maxLength": 400 },
+        "final": { "type": "boolean" }
+      }
+    },
+    "accessoryTask": {
+      "type": "object",
+      "required": ["task", "revision", "status", "summary", "in_chat", "cancellable"],
+      "additionalProperties": false,
+      "properties": {
+        "task": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "revision": { "type": "integer", "minimum": 1 },
+        "status": { "enum": ["running", "completed", "failed", "cancelled"] },
+        "summary": { "type": ["string", "null"], "maxLength": 240 },
+        "in_chat": { "type": "boolean" },
+        "cancellable": { "type": "boolean" }
+      }
+    },
+    "accessoryUsage": {
+      "type": "object",
+      "required": ["cost_cents", "voice_seconds", "accounting"],
+      "additionalProperties": false,
+      "properties": {
+        "cost_cents": { "type": ["number", "null"], "minimum": 0 },
+        "voice_seconds": { "type": ["number", "null"], "minimum": 0 },
+        "accounting": { "enum": ["complete", "incomplete", "running", null] }
       }
     },
     "logEntry": {

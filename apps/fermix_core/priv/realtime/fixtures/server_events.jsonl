@@ -17,6 +17,8 @@
 {"type":"usage","call_uuid":"8d4e2f6a-1b3c-4d5e-a6f7-0b1c2d3e4f5a","status":"live","voice_seconds":64.2,"voice_cost_cents":9.36,"voice_text_items":2,"backend_turns":1,"backend_cost":"unknown","accounting":"incomplete"}
 {"type":"error","reason":"invalid_json"}
 {"type":"error","reason":"call_in_progress","held_by":"desktop"}
+{"type":"error","reason":"voice_device_elsewhere","voice_device":"accessory:4f2573d536cb919c436355bbbc2825a0dba8e5be3d2ea9b6c87c5bd4de23d60a","sentence":"StackChan is your voice device, so this Mac's microphone stays off. Choose This Mac in Pet to talk here."}
+{"type":"error","reason":"voice_device_unreadable","sentence":"The voice device could not be read. Choose one in Pet."}
 {"type":"error","reason":"unknown_playback"}
 {"type":"error","reason":"playback_regressed"}
 {"type":"error","reason":"playback_beyond_sent"}

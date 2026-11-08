@@ -361,10 +361,171 @@ defmodule FermixChannels.Accessories.LinkTest do
       assert {:ok, []} = Store.list(ctx.home)
     end
 
+    # M91 E3: the owner names the robot as it pairs, every step names the
+    # attempt it was drawn from, and the attempt says when its two minutes end.
+    test "the record keeps the owner's name, and a step for another attempt is refused", ctx do
+      utc_now = fn -> ~U[2026-11-08 15:00:00Z] end
+      ctx = start(ctx, mode: :pairing, utc_now: utc_now)
+      AccessoryCase.await_state(&(&1.phase == :unenrolled))
+      sim = ctx.sim
+
+      assert :ok = Link.enroll_begin(ctx.link, "Desk robot")
+      AccessoryCase.await_received(sim, "enroll.reveal")
+      summary = AccessoryCase.await_state(&(&1.enrollment[:code] != nil))
+      assert summary.enrollment.expires_at == ~U[2026-11-08 15:02:00Z]
+
+      assert {:error, :stale_attempt} = Link.enroll_confirm(ctx.link, String.duplicate("0", 32))
+      assert {:error, :pairing_open} = Link.enroll_begin(ctx.link)
+
+      assert :ok = Link.enroll_confirm(ctx.link, summary.enrollment.attempt)
+      AccessorySim.confirm_match(sim)
+      AccessoryCase.await_received(sim, "enroll.commit")
+      done = AccessoryCase.await_state(&(&1.enrollment.phase == :done))
+
+      assert {:ok, [record]} = Store.list(ctx.home)
+      assert record.name == "Desk robot"
+      assert done.enrollment.accessory_id == record.accessory_id
+    end
+
     test "enrollment is refused on a port the owner did not select", ctx do
       ctx = ctx |> enrolled() |> start()
       attached!(ctx)
       assert {:error, :not_pairing} = Link.enroll_begin(ctx.link)
+    end
+  end
+
+  # M91 E3: what the Mac needs to say "Firmware incompatible" and which side
+  # to update (PROTOCOL.md, *Versioning*).
+  describe "firmware outside the range" do
+    test "a robot that speaks a newer wire is refused, and the link keeps the wire it said",
+         ctx do
+      ctx = ctx |> Map.put(:sim_opts, wire: 2) |> start(mode: :pairing)
+
+      assert %{code: "wire_version", wire_min: 1, wire_max: 1} =
+               AccessoryCase.await_received(ctx.sim, "refuse")
+
+      assert %{refusal: :wire_version, wire: 2} =
+               AccessoryCase.await_state(&(&1.phase == :refused))
+    end
+
+    test "a robot's own wire refusal keeps the range it speaks", ctx do
+      ctx = ctx |> Map.put(:sim_opts, silent?: true) |> start(mode: :pairing)
+      AccessoryCase.await_received(ctx.sim, "hello")
+
+      AccessorySim.send_message(ctx.sim, %{
+        type: "refuse",
+        code: "wire_version",
+        wire_min: 2,
+        wire_max: 3
+      })
+
+      assert %{refusal: {:accessory, :wire_version}, refused_range: {2, 3}} =
+               AccessoryCase.await_state(&(&1.phase == :refused))
+    end
+  end
+
+  # M91 E3: the setup's local checks, Calibrate head and the robot's own
+  # settings, each only on an attached robot with what it reported.
+  describe "setup checks and settings" do
+    test "a check reaches the robot, and its level and result are kept for the Mac", ctx do
+      ctx = ctx |> enrolled() |> start()
+      attached!(ctx)
+
+      assert :ok = Link.check_start(ctx.link, :mic, 3)
+      assert %{seconds: 3} = AccessoryCase.await_received(ctx.sim, "check.mic")
+      AccessorySim.send_message(ctx.sim, %{type: "check.level", rms: 900})
+      AccessoryCase.await_state(&match?(%{check: %{check: :mic, level: 900}}, &1))
+
+      AccessorySim.send_message(ctx.sim, %{type: "check.result", check: "mic", result: "ok"})
+
+      assert %{check: %{check: :mic, status: :ok, code: nil, level: 900}} =
+               AccessoryCase.await_state(&match?(%{check: %{status: :ok}}, &1))
+
+      assert :ok = Link.check_start(ctx.link, :face, nil)
+      assert %{pose: "speaking"} = AccessoryCase.await_received(ctx.sim, "check.face")
+      assert :ok = Link.check_stop(ctx.link)
+      AccessoryCase.await_received(ctx.sim, "check.stop")
+    end
+
+    test "what the robot did not report the capability of is refused, and nothing is sent",
+         ctx do
+      ctx = ctx |> enrolled() |> start()
+      attached!(ctx)
+
+      assert {:error, {:capability_missing, :motion}} = Link.check_start(ctx.link, :motion, nil)
+      assert {:error, {:capability_missing, :motion}} = Link.calibrate(ctx.link, :begin, nil)
+      assert {:error, {:capability_missing, :motion}} = Link.set(ctx.link, %{motion: true})
+      refute_received {:sim, _sim, {:received, %{type: "check.motion"}}}
+
+      assert :ok = Link.set(ctx.link, %{volume: 40})
+      assert %{volume: 40} = AccessoryCase.await_received(ctx.sim, "accessory.set")
+    end
+
+    test "a robot with head motion takes Calibrate head one step at a time", ctx do
+      caps = Capabilities.mask([:mic, :speaker, :screen, :touch, :motion])
+      ctx = ctx |> enrolled(caps: caps) |> start()
+      attached!(ctx)
+
+      assert :ok = Link.calibrate(ctx.link, :nudge, %{axis: :pan, steps: 4})
+
+      assert %{op: "nudge", axis: "pan", steps: 4} =
+               AccessoryCase.await_received(ctx.sim, "accessory.calibrate")
+
+      assert :ok = Link.check_start(ctx.link, :motion, nil)
+      assert %{gesture: "nod"} = AccessoryCase.await_received(ctx.sim, "check.motion")
+    end
+
+    # Fable review 6: a command outside the contract's own set is refused by
+    # the link, never sent half-formed.
+    test "a check or calibration step the contract does not take is refused", ctx do
+      caps = Capabilities.mask([:mic, :speaker, :screen, :touch, :motion])
+      ctx = ctx |> enrolled(caps: caps) |> start()
+      attached!(ctx)
+
+      assert {:error, :invalid_command} = Link.check_start(ctx.link, :mic, 0)
+
+      assert {:error, :invalid_command} =
+               Link.calibrate(ctx.link, :nudge, %{axis: :roll, steps: 4})
+
+      assert {:error, :invalid_command} =
+               Link.calibrate(ctx.link, :begin, %{axis: :pan, steps: 4})
+
+      refute_received {:sim, _sim, {:received, %{type: "check.mic"}}}
+      refute_received {:sim, _sim, {:received, %{type: "accessory.calibrate"}}}
+    end
+
+    test "the internal API refuses a check or nudge outside the contract's bounds" do
+      id = String.duplicate("a", 64)
+
+      assert_raise FunctionClauseError, fn ->
+        FermixChannels.Accessories.check_start(id, :mic, 11)
+      end
+
+      assert_raise FunctionClauseError, fn ->
+        FermixChannels.Accessories.check_start(id, :tone, 3)
+      end
+
+      assert_raise FunctionClauseError, fn ->
+        FermixChannels.Accessories.calibrate(id, :nudge, %{axis: :pan, steps: 0})
+      end
+
+      assert_raise FunctionClauseError, fn ->
+        FermixChannels.Accessories.calibrate(id, :set_zero, %{axis: :pan, steps: 2})
+      end
+    end
+
+    test "a check before the robot attached is refused", ctx do
+      ctx = ctx |> Map.put(:sim_opts, silent?: true) |> start(mode: :pairing)
+      AccessoryCase.await_received(ctx.sim, "hello")
+      assert {:error, :not_attached} = Link.check_start(ctx.link, :tone, nil)
+    end
+
+    test "the robot's own fault is kept for the Mac", ctx do
+      ctx = ctx |> enrolled() |> start()
+      attached!(ctx)
+
+      AccessorySim.send_message(ctx.sim, %{type: "diag.fault", code: "pack_mismatch"})
+      AccessoryCase.await_state(&(&1.fault == "pack_mismatch"))
     end
   end
 

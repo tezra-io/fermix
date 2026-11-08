@@ -1,4 +1,4 @@
-defmodule FermixChannels.Accessories.Readiness do
+defmodule FermixCore.Accessories.Readiness do
   @moduledoc """
   Whether an accessory call can start now (M91 D9), as `voice.readiness`
   tells the accessory. The accessory link runs whenever accessories are on,
@@ -10,7 +10,9 @@ defmodule FermixChannels.Accessories.Readiness do
   The codes are the readiness vocabulary of `priv/accessory/PROTOCOL.md`
   (*State and settings*): `voice_disabled`, `missing_key`,
   `restart_required`. `needs_local_primary` never arises here: the
-  accessories subtree starts only on a local Mac primary.
+  accessories subtree starts only on a local Mac primary. In core because
+  both the link (channels) and `accessories.status` (`Management.Accessories`)
+  read it, and core never depends on channels.
   """
 
   alias FermixCore.Realtime.Config

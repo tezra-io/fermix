@@ -138,6 +138,7 @@ defmodule Fermix.CLI.Doctor do
       Checks.computer_use_background(),
       Checks.computer_history(),
       Checks.browser_disclaim(),
+      Checks.accessories(),
       Checks.harness(),
       Checks.skill_curation(),
       Checks.plugins()

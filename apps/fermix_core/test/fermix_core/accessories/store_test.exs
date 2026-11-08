@@ -203,6 +203,63 @@ defmodule FermixCore.Accessories.StoreTest do
     assert length(records) == Store.max_records()
   end
 
+  # M91 §07: the voice device the owner chose, a file beside the records that
+  # travels with the home; this Mac's own audio until an accessory is chosen.
+  test "the voice device is this Mac until a paired accessory is chosen", %{home: home} do
+    assert {:ok, :desktop} = Store.load_voice_device(home)
+    refute File.exists?(Store.dir(home))
+
+    {:ok, _key} = Store.ensure_host_key(home)
+    robot = record()
+    :ok = Store.put(home, robot)
+
+    assert :ok = Store.put_voice_device(home, {:accessory, robot.accessory_id})
+    assert {:ok, {:accessory, id}} = Store.load_voice_device(home)
+    assert id == robot.accessory_id
+    assert mode(Store.voice_device_path(home)) == 0o600
+
+    assert :ok = Store.put_voice_device(home, :desktop)
+    assert {:ok, :desktop} = Store.load_voice_device(home)
+  end
+
+  test "only a paired accessory can be the voice device", %{home: home} do
+    {:ok, _key} = Store.ensure_host_key(home)
+    stranger = record()
+
+    assert {:error, :unknown_accessory} =
+             Store.put_voice_device(home, {:accessory, stranger.accessory_id})
+
+    assert {:ok, :desktop} = Store.load_voice_device(home)
+  end
+
+  test "forgetting the voice device makes this Mac the voice device again", %{home: home} do
+    {:ok, _key} = Store.ensure_host_key(home)
+    kept = record("Kept")
+    forgotten = record("Forgotten")
+    :ok = Store.put(home, kept)
+    :ok = Store.put(home, forgotten)
+
+    :ok = Store.put_voice_device(home, {:accessory, kept.accessory_id})
+    :ok = Store.forget(home, forgotten.accessory_id)
+    assert {:ok, {:accessory, kept_id}} = Store.load_voice_device(home)
+    assert kept_id == kept.accessory_id
+
+    :ok = Store.forget(home, kept.accessory_id)
+    assert {:ok, :desktop} = Store.load_voice_device(home)
+  end
+
+  test "a voice device file that is not the store's own is refused by name", %{home: home} do
+    {:ok, _key} = Store.ensure_host_key(home)
+    path = Store.voice_device_path(home)
+    File.write!(path, ~s({"v":1,"device":"phone:abc"}))
+    File.chmod!(path, 0o600)
+
+    assert {:error, {:invalid_voice_device, ^path}} = Store.load_voice_device(home)
+
+    File.chmod!(path, 0o644)
+    assert {:error, {:unsafe_permissions, ^path, 0o644, 0o600}} = Store.load_voice_device(home)
+  end
+
   test "the store reads only the home it is given" do
     assert_raise FunctionClauseError, fn -> Store.list("") end
     assert_raise FunctionClauseError, fn -> Store.ensure_host_key(nil) end

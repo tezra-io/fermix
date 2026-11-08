@@ -27,6 +27,11 @@ defmodule FermixChannels.Accessories.Call do
     * `spk.flushed` → `interrupt(played_ms)`; `playback.progress` → Grok's
       `playback_progress`; `mic.state` → `mute`; `call.end_request` → the end.
 
+  The Mac (M91 E3): every engine frame and mute is also folded into the
+  call's `Call.View` (the voice it started with, its state, transcript lines,
+  tasks and usage), sent to the link as `{:call_view, stream, call_id, view}`
+  at each change, from the call's start; `accessories.status` reads it there.
+
   A refused start becomes `call.result refused` with the refusal's code (the
   lease's `call_in_progress` among them) before any `call.start`. A
   call-ending fault (`credit_overgrant`, `segment_limit` and the rest, or
@@ -39,6 +44,7 @@ defmodule FermixChannels.Accessories.Call do
   use GenServer, restart: :temporary
 
   alias FermixChannels.Accessories.Call.Speaker
+  alias FermixChannels.Accessories.Call.View
   alias FermixCore.Accessories.Tasks
   alias FermixCore.Accessories.Telemetry
   alias FermixCore.Realtime.CallClient
@@ -68,6 +74,7 @@ defmodule FermixChannels.Accessories.Call do
   def init(opts) do
     Process.flag(:trap_exit, true)
     clock = Keyword.get(opts, :clock, fn -> System.monotonic_time(:millisecond) end)
+    config = Keyword.get_lazy(opts, :config, &Config.current/0)
 
     state = %{
       link: Keyword.fetch!(opts, :link),
@@ -75,12 +82,14 @@ defmodule FermixChannels.Accessories.Call do
       request: Keyword.get(opts, :request),
       source: Keyword.fetch!(opts, :source),
       endpoint: Keyword.fetch!(opts, :endpoint),
-      config: Keyword.get_lazy(opts, :config, &Config.current/0),
+      config: config,
       opts: opts,
       clock: clock,
+      utc_now: Keyword.get(opts, :utc_now, &DateTime.utc_now/0),
       started_ms: clock.(),
       client: nil,
-      session_id: nil,
+      session_id: SessionControl.session_scope(config),
+      view: View.new(config),
       speaker: Speaker.new(),
       tasks: Tasks.new(),
       mic: <<>>,
@@ -90,6 +99,7 @@ defmodule FermixChannels.Accessories.Call do
       counters: %{mic_frames: 0, mic_chunks: 0, pcm_seq_gaps: 0, task_events: 0, task_faults: 0}
     }
 
+    publish(state)
     {:ok, state, {:continue, :start}}
   end
 
@@ -97,9 +107,7 @@ defmodule FermixChannels.Accessories.Call do
 
   @impl true
   def handle_continue(:start, state) do
-    session_id = SessionControl.session_scope(state.config)
-    client = new_client(state, session_id)
-    state = %{state | session_id: session_id}
+    client = new_client(state, state.session_id)
 
     case CallClient.call_start(client) do
       {:cont, client} -> {:noreply, accepted(%{state | client: client})}
@@ -134,7 +142,7 @@ defmodule FermixChannels.Accessories.Call do
       do: to_link(state, %{type: "call.result", request: state.request, result: "accepted"})
 
     to_link(state, %{type: "call.start", stream: state.stream, call: state.session_id})
-    send_state(state, "connecting")
+    state |> viewed(&View.admitted(&1, state.utc_now.())) |> send_state("connecting")
   end
 
   # A session that started and then refused the call is torn down here, the
@@ -175,8 +183,12 @@ defmodule FermixChannels.Accessories.Call do
   # -- the call -------------------------------------------------------------------------
 
   @impl true
-  def handle_info({:realtime, event}, state), do: on_engine(state, event)
-  def handle_info({:emitted, event}, state), do: on_engine(state, event)
+  def handle_info({:realtime, event}, state),
+    do: on_engine(viewed(state, &View.engine(&1, event)), event)
+
+  def handle_info({:emitted, event}, state),
+    do: on_engine(viewed(state, &View.engine(&1, event)), event)
+
   def handle_info({:robot, message}, state), do: on_robot(state, message)
   def handle_info({:mic, seq, pcm}, state), do: {:noreply, on_mic(state, seq, pcm)}
 
@@ -306,17 +318,23 @@ defmodule FermixChannels.Accessories.Call do
     end
   end
 
+  # OpenAI Realtime's tool batches are tasks the Mac shows too (D21).
   defp tool_event(state, event) do
     case Tasks.tool_event(state.tasks, event) do
-      {:ok, events, tasks} -> task_events(%{state | tasks: tasks}, events)
-      {:fault, reason, tasks} -> task_fault(%{state | tasks: tasks}, reason)
+      {:ok, events, tasks} ->
+        %{state | tasks: tasks} |> batch_viewed(events) |> task_events(events)
+
+      {:fault, reason, tasks} ->
+        task_fault(%{state | tasks: tasks}, reason)
     end
   end
 
   defp reconnected(state) do
     {events, tasks} = Tasks.reconnect(state.tasks)
-    task_events(%{state | tasks: tasks}, events)
+    %{state | tasks: tasks} |> batch_viewed(events) |> task_events(events)
   end
+
+  defp batch_viewed(state, events), do: viewed(state, &View.task_events(&1, events))
 
   defp task_events(state, events) do
     Enum.each(events, &to_link(state, Map.merge(&1, %{type: "task.event", stream: state.stream})))
@@ -363,6 +381,7 @@ defmodule FermixChannels.Accessories.Call do
 
   defp on_robot(state, %{type: "mic.state", state: mic}) do
     muted? = mic != "live"
+    state = viewed(state, &View.muted(&1, if(muted?, do: :accessory)))
     if muted? == state.engine_muted?, do: {:noreply, state}, else: engine_mute(state, muted?)
   end
 
@@ -376,7 +395,7 @@ defmodule FermixChannels.Accessories.Call do
 
   defp mac_mute(state, muted?) do
     to_link(state, %{type: "mute.set", stream: state.stream, muted: muted?}, true)
-    engine_mute(state, muted?)
+    state |> viewed(&View.muted(&1, if(muted?, do: :mac))) |> engine_mute(muted?)
   end
 
   defp engine_mute(state, muted?) do
@@ -466,6 +485,17 @@ defmodule FermixChannels.Accessories.Call do
 
   defp to_link(state, message, urgent? \\ false),
     do: send(state.link, {:call_send, state.stream, message, urgent?})
+
+  # The view changed: the link hears it, with the call's id.
+  defp viewed(state, fun) do
+    view = fun.(state.view)
+    if view == state.view, do: state, else: publish(%{state | view: view})
+  end
+
+  defp publish(state) do
+    send(state.link, {:call_view, state.stream, state.session_id, state.view})
+    state
+  end
 
   defp count(state, key, n), do: update_in(state.counters[key], &(&1 + n))
 end

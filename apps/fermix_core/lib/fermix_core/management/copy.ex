@@ -85,7 +85,14 @@ defmodule FermixCore.Management.Copy do
   # AWS's name.
   @internal_words ~r/\b(?:epochs?|primar(?:y|ies)|candidates?|relays?|rails?|phases?|ledgers?|daemons?|(?<!access )key ids?)\b/i
   # What runs only on the computer a move leaves, in the order it is named.
-  @stays_here [imessage: "iMessage", voice: "voice calls", meetings: "meetings"]
+  @stays_here [
+    imessage: "iMessage",
+    voice: "voice calls",
+    meetings: "meetings",
+    accessories: "StackChan"
+  ]
+  # The features named alone in the singular.
+  @singular_features [[:imessage], [:accessories]]
   # What each loopback port a tunnel reaches carries, in the order named.
   @carried [whatsapp: "WhatsApp", cues: "webhook sources"]
   # What reaches the server through Funnel, as the webhooks' sentence starts.
@@ -199,6 +206,13 @@ defmodule FermixCore.Management.Copy do
     "Android",
     "Node.js",
     "Atom",
+    # The robot's own pairing prompt, the Mac app's Pet destination, its
+    # Reconnect action and its This Mac voice device, named as the robot and
+    # the app show them (M91).
+    "Pair with this Mac",
+    "Pet",
+    "Reconnect",
+    "This Mac",
     # GitHub's webhook form, named as GitHub labels it.
     "Add webhook",
     "Payload URL",
@@ -587,11 +601,11 @@ defmodule FermixCore.Management.Copy do
   as a sentence starts: "iMessage, voice calls and meetings stop after the
   move", "Voice calls stop after the move".
   """
-  @spec stops_after_move([:imessage | :voice | :meetings, ...]) :: String.t()
+  @spec stops_after_move([:imessage | :voice | :meetings | :accessories, ...]) :: String.t()
   def stops_after_move([_ | _] = features) do
     names = for {feature, name} <- @stays_here, feature in features, do: name
     true = length(names) == length(Enum.uniq(features))
-    verb = if features == [:imessage], do: "stops", else: "stop"
+    verb = if features in @singular_features, do: "stops", else: "stop"
 
     "#{names |> join_names() |> capitalised()} #{verb} after the move"
   end
@@ -612,11 +626,11 @@ defmodule FermixCore.Management.Copy do
   `:meetings`) on the computer `name` it returns to, as a sentence starts:
   "Voice calls and meetings run on studio-mac again after the move".
   """
-  @spec runs_again([:imessage | :voice | :meetings, ...], String.t()) :: String.t()
+  @spec runs_again([:imessage | :voice | :meetings | :accessories, ...], String.t()) :: String.t()
   def runs_again([_ | _] = features, name) when is_binary(name) do
     names = for {feature, label} <- @stays_here, feature in features, do: label
     true = length(names) == length(Enum.uniq(features))
-    verb = if features == [:imessage], do: "runs", else: "run"
+    verb = if features in @singular_features, do: "runs", else: "run"
 
     "#{names |> join_names() |> capitalised()} #{verb} on #{name} again after the move"
   end
@@ -631,7 +645,7 @@ defmodule FermixCore.Management.Copy do
   defp runs_here_line([]), do: ""
 
   defp runs_here_line(features) do
-    verb = if features == [:imessage], do: "runs", else: "run"
+    verb = if features in @singular_features, do: "runs", else: "run"
     " #{feature_names(features)} #{verb} here again."
   end
 

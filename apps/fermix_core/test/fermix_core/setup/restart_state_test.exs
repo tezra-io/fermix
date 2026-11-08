@@ -31,6 +31,7 @@ defmodule FermixCore.Setup.RestartStateTest do
     core = Map.new(@env_keys, fn key -> {key, Application.get_env(:fermix_core, key)} end)
     telegram = Application.get_env(:fermix_channels, :telegram)
     mobile = Application.get_env(:fermix_channels, :mobile)
+    accessories = Application.get_env(:fermix_channels, :accessories)
     secret_writer = Application.get_env(:fermix_core, :secret_writer)
 
     Application.put_env(:fermix_core, :secret_writer, FermixTestSupport.SecretWriterStub)
@@ -43,6 +44,7 @@ defmodule FermixCore.Setup.RestartStateTest do
       Enum.each(core, fn {key, value} -> restore(:fermix_core, key, value) end)
       restore(:fermix_channels, :telegram, telegram)
       restore(:fermix_channels, :mobile, mobile)
+      restore(:fermix_channels, :accessories, accessories)
       restore(:fermix_core, :secret_writer, secret_writer)
       FermixTestSupport.SecretWriterStub.reset()
 
@@ -180,6 +182,20 @@ defmodule FermixCore.Setup.RestartStateTest do
       refute RestartState.boot_bound?([:sandbox, :env])
       assert RestartState.boot_bound?([:providers, :openai])
       refute RestartState.boot_bound?([:memory])
+    end
+  end
+
+  # M91 E3: the accessory link's switch starts or stops its subtree when it is
+  # written, as the phone's does, so it asks for no restart either.
+  describe "the accessory link's switch" do
+    test "a switch change since boot is no restart reason" do
+      Application.put_env(:fermix_channels, :accessories, [])
+      server = start_state()
+
+      Application.put_env(:fermix_channels, :accessories, enabled: true)
+
+      assert RestartState.restart(server: server) == %{required: false, reasons: []}
+      refute RestartState.boot_bound?([:channels, :accessories, :enabled])
     end
   end
 

@@ -136,7 +136,27 @@ defmodule FermixCore.Management.Protocol do
     {"home.candidates.list", 2},
     {"home.move.readiness", 2},
     {"home.move.start", 2},
-    {"home.act", 2}
+    {"home.act", 2},
+    {"accessories.status", 2},
+    {"accessories.pair.start", 2},
+    {"accessories.pair.begin", 2},
+    {"accessories.pair.decide", 2},
+    {"accessories.pair.cancel", 2},
+    {"accessories.retry", 2},
+    {"accessories.release", 2},
+    {"accessories.reconnect", 2},
+    {"accessories.forget", 2},
+    {"accessories.revoke", 2},
+    {"accessories.voice_device.set", 2},
+    {"accessories.call.start", 2},
+    {"accessories.call.end", 2},
+    {"accessories.call.mute", 2},
+    {"accessories.call.interrupt", 2},
+    {"accessories.call.task.cancel", 2},
+    {"accessories.check.start", 2},
+    {"accessories.check.stop", 2},
+    {"accessories.calibrate", 2},
+    {"accessories.set", 2}
   ]
   @methods Enum.map(@method_minimums, fn {method, _minimum} -> method end)
   @method_minimum_versions Map.new(@method_minimums)

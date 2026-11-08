@@ -52,7 +52,17 @@ defmodule FermixCore.Management.SettingsTest do
     :secret_writer,
     :secret_store
   ]
-  @channel_keys [:telegram, :whatsapp, :discord, :slack, :signal, :acp, :mobile, :imessage]
+  @channel_keys [
+    :telegram,
+    :whatsapp,
+    :discord,
+    :slack,
+    :signal,
+    :acp,
+    :mobile,
+    :imessage,
+    :accessories
+  ]
 
   @row_fields ~w(
     key kind label footer info example advanced value present options min max step restart
@@ -1641,6 +1651,84 @@ defmodule FermixCore.Management.SettingsTest do
   # The managed task browser's pane. Its first row is the launcher's answer,
   # injected here so the host's own Chrome never decides a verdict; the other
   # three are the `[fermix_core.browser]` keys a person sets.
+  # M91 E3: `[fermix_channels.accessories] enabled`, the StackChan switch. A
+  # Mac's only, live like the phone's, and round-tripped through the file.
+  describe "the accessories section" do
+    test "a Mac publishes one live switch, off by default; another computer has no section" do
+      Application.delete_env(:fermix_channels, :accessories)
+
+      assert %{id: "accessories", pane: "voice", title: "StackChan"} in Settings.sections(
+               macos?: true
+             )
+
+      refute Enum.any?(Settings.sections(macos?: false), &(&1.id == "accessories"))
+      refute Settings.section?("accessories", macos?: false)
+
+      assert [row] = rows("accessories")
+
+      assert {row["key"], row["kind"], row["value"], row["restart"]} ==
+               {"accessories_enabled", "toggle", false, false}
+
+      assert row["label"] == "Allow a StackChan connection"
+      assert Copy.violations(row["footer"], :prose) == []
+    end
+
+    test "turning it on writes the file, applies at once and needs no restart", %{home: home} do
+      Application.delete_env(:fermix_channels, :accessories)
+
+      assert {:ok, result} =
+               Settings.apply("accessories", %{"accessories_enabled" => true},
+                 macos?: true,
+                 accessories_switch: &accessories_switched/1
+               )
+
+      assert_received {:accessories_switch, true}
+      assert result["applied"] == ["accessories_enabled"]
+      assert result["side_effects"] == []
+      refute RestartState.boot_bound?([:channels, :accessories, :enabled])
+      assert Application.get_env(:fermix_channels, :accessories) == [enabled: true]
+      assert row("accessories", "accessories_enabled")["value"] == true
+
+      # The save reads back as it was written: the section, then its one key.
+      text = File.read!(Path.join(home, "config.toml"))
+      assert text =~ "[fermix_channels.accessories]"
+      assert {:ok, persisted} = RestartState.load_persisted()
+      assert persisted.fermix_channels[:accessories] == [enabled: true]
+
+      assert {:ok, _off} =
+               Settings.apply("accessories", %{"accessories_enabled" => false},
+                 macos?: true,
+                 accessories_switch: &accessories_switched/1
+               )
+
+      assert_received {:accessories_switch, false}
+      assert Application.get_env(:fermix_channels, :accessories) == []
+    end
+
+    test "a switch the link did not follow is said as a side effect" do
+      Application.delete_env(:fermix_channels, :accessories)
+      sentence = "StackChan is on but could not start. See the daemon log."
+
+      assert {:ok, result} =
+               Settings.apply("accessories", %{"accessories_enabled" => true},
+                 macos?: true,
+                 accessories_switch: fn true -> {:error, sentence} end
+               )
+
+      assert result["side_effects"] == [sentence]
+    end
+
+    test "a value that is not a switch is refused by name" do
+      assert {:error, {:invalid_params, "accessories_enabled", _sentence}} =
+               Settings.apply("accessories", %{"accessories_enabled" => "yes please"},
+                 macos?: true,
+                 accessories_switch: &accessories_switched/1
+               )
+
+      refute_received {:accessories_switch, _on?}
+    end
+  end
+
   describe "the browser section" do
     test "publishes the browser in force and three live settings with their defaults" do
       Application.delete_env(:fermix_core, :browser)
@@ -2274,6 +2362,11 @@ defmodule FermixCore.Management.SettingsTest do
   # The phone channel's switch as settings call it, without starting anything.
   defp switched(on?) do
     send(self(), {:mobile_switch, on?})
+    :ok
+  end
+
+  defp accessories_switched(on?) do
+    send(self(), {:accessories_switch, on?})
     :ok
   end
 

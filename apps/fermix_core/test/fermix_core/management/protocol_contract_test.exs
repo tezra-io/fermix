@@ -53,6 +53,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
   alias FermixCore.Memory.Repo.CuesSql
   alias FermixCore.Readiness
   alias FermixCore.Setup.ConfigStore
+  alias FermixTestSupport.AccessoryGoldens
   alias FermixTestSupport.CueFixtures
   alias FermixTestSupport.HomeSummaryGoldens
   alias FermixTestSupport.MandateFixtures
@@ -551,6 +552,22 @@ defmodule FermixCore.Management.ProtocolContractTest do
     assert fixture_providers -- published_providers == []
   end
 
+  # PROTOCOL.md's vendoring note: `settings.get` has one golden per section. A
+  # section the daemon publishes with none is one an app built from the goldens
+  # refuses as "not published by this daemon", as the Mac's fake daemon did for
+  # `accessories`; said here by name rather than as a shape mismatch.
+  test "every section the daemon publishes has its own settings.get golden" do
+    goldens =
+      for fixture <- fixtures(@successes),
+          fixture["method"] == "settings.get",
+          into: MapSet.new(),
+          do: get_in(fixture, ["response", "result", "id"])
+
+    for %{id: id} <- Settings.sections(macos?: true) do
+      assert id in goldens, "the #{id} section has no settings.get golden"
+    end
+  end
+
   # The goldens illustrate the wire, not the catalog. A provider section's Model
   # row shows example options, and the models a daemon offers are data every app
   # reads at runtime (`settings_test.exs` pins the live row to `ModelCatalog`),
@@ -690,6 +707,60 @@ defmodule FermixCore.Management.ProtocolContractTest do
 
     for {_name, %{"summary" => %{"detail" => detail}}} <- HomeSummaryGoldens.rows(),
         do: assert(Map.keys(detail) -- detail_keys == [])
+  end
+
+  # M91 E3: every `accessories.*` golden is the router's own answer to its
+  # case, value for value, and each family of the status the Pet screens draw
+  # is the engine's own picture of its invented facts.
+  test "the golden accessories answers are the engine's own" do
+    for {method, params, opts, golden} <- AccessoryGoldens.cases() do
+      request = %{request_id: "req-1", protocol_version: 2, method: method, params: params}
+      assert {:ok, result} = Router.route(request, operation_opts: [accessories: opts])
+
+      assert named_fixture_result(golden) == json(result),
+             "the #{golden} golden no longer matches what the engine answers"
+    end
+
+    for {name, result} <- AccessoryGoldens.rows() do
+      assert named_fixture_result(name) == json(result),
+             "the #{name} golden no longer matches what the engine builds"
+    end
+  end
+
+  test "the golden accessories refusals are the engine's own" do
+    id = AccessoryGoldens.record().accessory_id
+
+    refused =
+      AccessoryGoldens.base(
+        records: {:ok, [AccessoryGoldens.record()]},
+        provider_opts: [
+          status: AccessoryGoldens.running([]),
+          replies: %{
+            call_start: {:error, {:refused, "call_in_progress"}},
+            call_end: {:error, :stale_call}
+          }
+        ]
+      )
+
+    cases = [
+      {"unavailable_accessories_call_refused", "accessories.call.start", %{"accessory_id" => id}},
+      {"changed_accessories_call", "accessories.call.end",
+       %{"accessory_id" => id, "call_id" => "voice-7c2e41d9"}}
+    ]
+
+    for {name, method, params} <- cases do
+      request = %{request_id: "req-1", protocol_version: 2, method: method, params: params}
+
+      assert {:error, code, details} =
+               Router.route(request, operation_opts: [accessories: refused])
+
+      assert Atom.to_string(code) == golden_error_code(name)
+      assert details == golden_error_details(name)
+    end
+  end
+
+  defp golden_error_code(name) do
+    @errors |> fixtures() |> Enum.find(&(&1["name"] == name)) |> Map.fetch!("code")
   end
 
   # Always On setup §3.4: `home.act`'s golden is the router's own answer to
@@ -1383,7 +1454,15 @@ defmodule FermixCore.Management.ProtocolContractTest do
       mcp_cases() ++
       cues_cases() ++
       home_cases() ++
+      accessories_cases() ++
       [act_case()]
+  end
+
+  # Every `accessories.*` method against `AccessoryGoldens`' invented facts,
+  # through the router, so the family's own projection is what is compared.
+  defp accessories_cases do
+    for {method, params, opts, _golden} <- AccessoryGoldens.cases(),
+        do: {method, params, [operation_opts: [accessories: opts]]}
   end
 
   # Stands in for `Cues.Proposals` with the record and the card in the shape

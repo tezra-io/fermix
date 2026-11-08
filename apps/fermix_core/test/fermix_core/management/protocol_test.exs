@@ -159,7 +159,27 @@ defmodule FermixCore.Management.ProtocolTest do
              "home.candidates.list",
              "home.move.readiness",
              "home.move.start",
-             "home.act"
+             "home.act",
+             "accessories.status",
+             "accessories.pair.start",
+             "accessories.pair.begin",
+             "accessories.pair.decide",
+             "accessories.pair.cancel",
+             "accessories.retry",
+             "accessories.release",
+             "accessories.reconnect",
+             "accessories.forget",
+             "accessories.revoke",
+             "accessories.voice_device.set",
+             "accessories.call.start",
+             "accessories.call.end",
+             "accessories.call.mute",
+             "accessories.call.interrupt",
+             "accessories.call.task.cancel",
+             "accessories.check.start",
+             "accessories.check.stop",
+             "accessories.calibrate",
+             "accessories.set"
            ]
 
     assert Protocol.error_codes() == [

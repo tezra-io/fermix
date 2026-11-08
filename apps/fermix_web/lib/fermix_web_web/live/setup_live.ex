@@ -64,6 +64,7 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.Transcription.Local.ModelStore, as: LocalModelStore
   alias FermixCore.Transcription.Local.SidecarInstaller, as: LocalSttInstaller
   alias FermixCore.Transcription.Registry, as: TranscriptionRegistry
+  alias FermixWebWeb.SetupLive.Accessories
   alias FermixWebWeb.SetupLive.AlwaysOn
   alias FermixWebWeb.SetupLive.Components
   alias FermixWebWeb.SetupLive.CuesState
@@ -249,6 +250,8 @@ defmodule FermixWebWeb.SetupLive do
       |> assign(:computer_history_picker, nil)
       |> assign(:meetings_config_open?, false)
       |> assign(:phone, Phone.initial())
+      |> assign(:accessories, Accessories.initial())
+      |> Accessories.load()
       |> assign_report(report)
       |> AlwaysOn.watch()
       |> AlwaysOn.on_tab(active_tab)
@@ -476,6 +479,15 @@ defmodule FermixWebWeb.SetupLive do
 
     # The Phone card reads the phone channel only while it is the one shown.
     {:noreply, if(channel == :mobile, do: Phone.load(socket), else: socket)}
+  end
+
+  # The StackChan section's switch (M91 E3): its own setter, never part of the
+  # voice form's draft. A write refreshes the report and the restart notice.
+  def handle_event("accessories_" <> _rest = event, params, socket) do
+    case Accessories.handle_event(event, params, socket) do
+      {socket, nil} -> {:noreply, socket}
+      {socket, _write} -> {:noreply, assign_report(socket, Wizard.report())}
+    end
   end
 
   # The Phone card's events. A settings write refreshes the report, so the card,
@@ -1228,6 +1240,7 @@ defmodule FermixWebWeb.SetupLive do
       embed?={@embed?}
       channels_form={@channels_form}
       phone={@phone}
+      accessories={@accessories}
       doctor_result={@doctor_result}
       memory_form={@memory_form}
       personalization_form={@personalization_form}

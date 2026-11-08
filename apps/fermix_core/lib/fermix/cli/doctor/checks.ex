@@ -17,6 +17,7 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias Fermix.CLI.Upgrade.InstallMethod
   alias Fermix.CLI.Upgrade.Manifest
   alias Fermix.CLI.VersionSkew
+  alias FermixCore.Accessories.Config, as: AccessoriesConfig
   alias FermixCore.Acp.IdentityStore
   alias FermixCore.Auth.Store, as: AuthStore
   alias FermixCore.Boot.PathBaseline
@@ -36,6 +37,7 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias FermixCore.Harness.Vendors, as: HarnessVendors
   alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.Epoch
+  alias FermixCore.Home.Role
   alias FermixCore.IMessage
   alias FermixCore.IMessage.Control, as: IMessageControl
   alias FermixCore.IMessage.HelperInstaller, as: IMessageHelper
@@ -1120,6 +1122,65 @@ defmodule Fermix.CLI.Doctor.Checks do
 
   defp refusal_label(status, nil), do: "HTTP #{status}"
   defp refusal_label(status, code), do: "HTTP #{status}, #{code}"
+
+  @doc """
+  The StackChan link (M91): off is a quiet row. On, it needs a local Mac
+  primary (another computer watches no USB port, whatever its `config.toml`
+  says after a move) and the packaged `fermix_serial` helper, which is found
+  and checked executable without starting it or opening any port. A CLI verb
+  with no engine of its own judges no role. `opts`: `:enabled?`, `:os_type`,
+  `:role` and `:helper_path` replace the reads in a test.
+  """
+  @spec accessories(keyword()) :: result()
+  def accessories(opts \\ []) when is_list(opts) do
+    os = Keyword.get_lazy(opts, :os_type, &:os.type/0)
+    role = Keyword.get_lazy(opts, :role, &booted_role/0)
+
+    cond do
+      not Keyword.get_lazy(opts, :enabled?, &AccessoriesConfig.enabled?/0) ->
+        ok("accessories", "StackChan is off")
+
+      os != {:unix, :darwin} or role not in [:primary, nil] ->
+        warn(
+          "accessories",
+          "on in config.toml, but StackChan needs a local Mac primary; this computer " <>
+            "watches no USB port"
+        )
+
+      true ->
+        serial_helper(
+          Keyword.get_lazy(opts, :helper_path, fn ->
+            Application.app_dir(:fermix_nif, "priv/fermix_serial")
+          end)
+        )
+    end
+  end
+
+  defp booted_role do
+    case Role.booted() do
+      %{role: role} -> role
+      nil -> nil
+    end
+  end
+
+  defp serial_helper(path) do
+    case File.stat(path) do
+      {:ok, %{type: :regular, mode: mode}} when Bitwise.band(mode, 0o111) != 0 ->
+        ok("accessories", "on; the USB serial helper is in place (#{path})")
+
+      {:ok, _not_executable} ->
+        fail(
+          "accessories",
+          "the USB serial helper at #{path} is not executable; reinstall fermix"
+        )
+
+      {:error, _reason} ->
+        fail(
+          "accessories",
+          "the USB serial helper is missing at #{path}; rebuild or reinstall fermix"
+        )
+    end
+  end
 
   @doc "Reports mobile identity permissions and daemon-owned listener state."
   @spec mobile(keyword()) :: result()

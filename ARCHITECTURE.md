@@ -1377,7 +1377,14 @@ per open port (attach, heartbeats, faults, pairing), and one `Call` per call
 under its link, which owns the call's `CallClient` as the
 `accessory:<accessory_id>` endpoint and translates the engine's frames to the
 accessory's within its speaker credit. The port itself is `Serial`, over the
-`fermix_serial` helper in `fermix_nif` (spawned through `disclaim`).
+`fermix_serial` helper in `fermix_nif` (spawned through `disclaim`). The Mac
+manages it through `accessories.*` (`Management.Accessories`, device-class),
+which reaches the subtree by name through `FermixChannels.Accessories.Management`
+and owns every sentence: one status with a long poll on its key (the watcher
+tells each waiter its every change), the pairing steps, the voice device (a
+file beside the records), the setup checks, and the robot call's controls. A
+call folds the frames it reads into `Call.View` and hands it to its link, so
+the Mac observes a robot call through that status without a second session.
 
 ### `apps/fermix_channels`
 

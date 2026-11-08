@@ -8,7 +8,11 @@ defmodule FermixCore.Accessories.Store do
       public key at enrollment, so a new one would unpair every accessory;
     * `accessories.json` — the enrolled accessories' records, mode `0600`:
       `{"v": 1, "accessories": [{accessory_id, accessory_pk, kind, name,
-      port_hint, enrolled_at}]}`, sorted by ID, at most `max_records/0`.
+      port_hint, enrolled_at}]}`, sorted by ID, at most `max_records/0`;
+    * `voice_device.json` — the voice device the owner chose, mode `0600`:
+      `{"v": 1, "device": "desktop" | "accessory:<accessory_id>"}`; absent is
+      this Mac's own audio. Only an enrolled accessory can be chosen, and
+      forgetting the chosen one makes this Mac the voice device again first.
 
   Every write goes to a temporary file in the same directory, is synced, and
   is then published in one step, so a reader sees the old file or the new one,
@@ -31,6 +35,7 @@ defmodule FermixCore.Accessories.Store do
   @dir "accessories"
   @host_key_file "host_key"
   @records_file "accessories.json"
+  @voice_device_file "voice_device.json"
   @version 1
   @max_records 8
   @dir_mode 0o700
@@ -41,6 +46,7 @@ defmodule FermixCore.Accessories.Store do
 
   @type home :: Path.t()
   @type error :: term()
+  @type voice_device :: :desktop | {:accessory, String.t()}
 
   @doc "How many accessories one home may enroll."
   @spec max_records() :: pos_integer()
@@ -59,6 +65,11 @@ defmodule FermixCore.Accessories.Store do
   @spec records_path(home()) :: Path.t()
   def records_path(home) when is_binary(home) and home != "",
     do: Path.join(dir(home), @records_file)
+
+  @doc "The voice device's file."
+  @spec voice_device_path(home()) :: Path.t()
+  def voice_device_path(home) when is_binary(home) and home != "",
+    do: Path.join(dir(home), @voice_device_file)
 
   # -- the host key ----------------------------------------------------------------
 
@@ -181,15 +192,87 @@ defmodule FermixCore.Accessories.Store do
     end
   end
 
-  @doc "Erases one accessory's record. `opts` as `put/3`."
+  @doc """
+  Erases one accessory's record. When it is the voice device, this Mac becomes
+  the voice device first, so a failed erase leaves a record that is no longer
+  chosen and never a choice of one that is gone. `opts` as `put/3`.
+  """
   @spec forget(home(), String.t(), keyword()) :: :ok | {:error, :unknown_accessory | error()}
   def forget(home, accessory_id, opts \\ []) when is_binary(accessory_id) and is_list(opts) do
-    with {:ok, records} <- list(home) do
-      case Enum.split_with(records, &(&1.accessory_id == accessory_id)) do
-        {[], _kept} -> {:error, :unknown_accessory}
-        {_forgotten, kept} -> write_records(home, kept, opts)
-      end
+    with {:ok, records} <- list(home),
+         {[_forgotten], kept} <- Enum.split_with(records, &(&1.accessory_id == accessory_id)),
+         :ok <- unchoose(home, accessory_id) do
+      write_records(home, kept, opts)
+    else
+      {[], _kept} -> {:error, :unknown_accessory}
+      {:error, _reason} = error -> error
     end
+  end
+
+  defp unchoose(home, accessory_id) do
+    case load_voice_device(home) do
+      {:ok, {:accessory, ^accessory_id}} -> write_voice_device(home, :desktop)
+      {:ok, _other} -> :ok
+      {:error, _reason} = error -> error
+    end
+  end
+
+  # -- the voice device ----------------------------------------------------------------
+
+  @doc "The voice device the owner chose: `:desktop` until an accessory is."
+  @spec load_voice_device(home()) :: {:ok, voice_device()} | {:error, error()}
+  def load_voice_device(home) when is_binary(home) and home != "" do
+    path = voice_device_path(home)
+
+    with :ok <- dir_state(home) |> present_or(:none),
+         :ok <- entry(path, :regular, @file_mode) |> present_or(:none),
+         {:ok, contents} <- read(path) do
+      decode_voice_device(path, contents)
+    else
+      :none -> {:ok, :desktop}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  @doc "Chooses the voice device: `:desktop`, or an enrolled accessory."
+  @spec put_voice_device(home(), voice_device()) :: :ok | {:error, :unknown_accessory | error()}
+  def put_voice_device(home, :desktop) when is_binary(home) and home != "",
+    do: write_voice_device(home, :desktop)
+
+  def put_voice_device(home, {:accessory, accessory_id} = device) when is_binary(accessory_id) do
+    with {:ok, _record} <- fetch(home, accessory_id), do: write_voice_device(home, device)
+  end
+
+  defp write_voice_device(home, device) do
+    path = voice_device_path(home)
+    temp = temp_path(path)
+    contents = Jason.encode!(%{"v" => @version, "device" => device_name(device)})
+
+    with :ok <- ensure_dir(home),
+         :ok <- write_synced(temp, contents),
+         :ok <- File.rename(temp, path) do
+      :ok
+    else
+      {:error, {:write_failed, _path, _reason}} = error -> error
+      {:error, reason} -> discard(temp, {:write_failed, path, reason})
+    end
+  end
+
+  defp device_name(:desktop), do: "desktop"
+  defp device_name({:accessory, accessory_id}), do: "accessory:" <> accessory_id
+
+  defp decode_voice_device(path, contents) do
+    case Jason.decode(contents) do
+      {:ok, %{"v" => @version, "device" => "desktop"}} -> {:ok, :desktop}
+      {:ok, %{"v" => @version, "device" => "accessory:" <> id}} -> accessory_device(path, id)
+      _other -> {:error, {:invalid_voice_device, path}}
+    end
+  end
+
+  defp accessory_device(path, id) do
+    if Regex.match?(~r/\A[0-9a-f]{64}\z/, id),
+      do: {:ok, {:accessory, id}},
+      else: {:error, {:invalid_voice_device, path}}
   end
 
   defp host_key_for_records(home) do

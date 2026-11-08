@@ -64,6 +64,7 @@ defmodule Fermix.CLI.Daemon do
   alias FermixCore.Introspection.Agents
   alias FermixCore.Introspection.Capabilities
   alias FermixCore.Introspection.Wire
+  alias FermixCore.Management.Accessories, as: ManagementAccessories
   alias FermixCore.Management.Cues, as: ManagementCues
   alias FermixCore.Management.Home, as: ManagementHome
   alias FermixCore.Management.HomeMove, as: ManagementHomeMove
@@ -105,6 +106,11 @@ defmodule Fermix.CLI.Daemon do
   # on the phone that asked, closing the window, and forgetting a device.
   @mobile_decisions_v1 ~w(mobile.pair.start mobile.pair.decide mobile.pair.cancel
                           mobile.devices.revoke)
+  # The owner's decisions on an accessory (M91 §07 and the E3 review): every
+  # `accessories.*` method but the status pairs, forgets, calls, sounds, moves
+  # or frees the robot, so a process the daemon started never sends one. Only
+  # `accessories.status` stays open.
+  @accessory_reads_v1 ~w(accessories.status)
   # Every Always On step (Always On setup §6): opening a code that lets a
   # server take this home, reviewing a move (the review reads every keychain
   # secret it would carry), starting it, moving back and restoring here; and
@@ -458,6 +464,11 @@ defmodule Fermix.CLI.Daemon do
   # `cues_mandates_enabled` back on undoes the owner's stop of every mandate.
   # Every other secret and section stays open, as it was.
   defp owner_family(method, _params) when method in @mobile_decisions_v1, do: :mobile
+
+  defp owner_family("accessories." <> _rest = method, _params)
+       when method not in @accessory_reads_v1,
+       do: :accessories
+
   defp owner_family(method, _params) when method in @home_decisions_v1, do: :home
   defp owner_family(method, _params) when method in @cue_decisions_v1, do: :cues
   defp owner_family(method, _params) when method in @setup_decisions_v1, do: :setup
@@ -509,6 +520,14 @@ defmodule Fermix.CLI.Daemon do
   defp owner_decision_refusal(:setup) do
     {:error, :unavailable,
      %{"capability" => @setup_capability, "sentence" => @setup_owner_sentence}}
+  end
+
+  defp owner_decision_refusal(:accessories) do
+    {:error, :unavailable,
+     %{
+       "capability" => ManagementAccessories.capability(),
+       "sentence" => ManagementAccessories.owner_only_sentence()
+     }}
   end
 
   defp owner_decision_refusal(:mobile) do

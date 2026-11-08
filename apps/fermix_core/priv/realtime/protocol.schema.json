@@ -281,7 +281,7 @@
         "type": { "const": "error" },
         "reason": {
           "type": "string",
-          "description": "The failure's code. call_in_progress refuses a call_start while another call is up or still settling, on any engine and from any endpoint; the connection closes after it. On an xai_realtime call, unknown_playback, playback_regressed and playback_beyond_sent refuse a playback_progress (an id never sent, an offset that went backwards, an offset beyond the audio sent) and close the connection; playback_stalled ends a call whose sent audio went unacknowledged for 2 seconds, playback_overflow one whose reply outgrew the audio the daemon holds, and call_ids_exhausted one that raised more function calls than it can remember."
+          "description": "The failure's code. call_in_progress refuses a call_start while another call is up or still settling, on any engine and from any endpoint; the connection closes after it. voice_device_elsewhere refuses this socket's call_start while the owner's voice device is a paired accessory, before any session, with voice_device and sentence, and voice_device_unreadable while that choice cannot be read, with sentence; the connection closes after either. On an xai_realtime call, unknown_playback, playback_regressed and playback_beyond_sent refuse a playback_progress (an id never sent, an offset that went backwards, an offset beyond the audio sent) and close the connection; playback_stalled ends a call whose sent audio went unacknowledged for 2 seconds, playback_overflow one whose reply outgrew the audio the daemon holds, and call_ids_exhausted one that raised more function calls than it can remember."
         },
         "kind": {
           "enum": [
@@ -302,6 +302,14 @@
         "held_by": {
           "type": "string",
           "description": "On call_in_progress: the endpoint holding the call, desktop or accessory:<accessory_id>. Absent only when the holder ended while being read."
+        },
+        "voice_device": {
+          "type": "string",
+          "description": "On voice_device_elsewhere: the owner's voice device, accessory:<accessory_id>."
+        },
+        "sentence": {
+          "type": "string",
+          "description": "On voice_device_elsewhere and voice_device_unreadable: the daemon's own sentence for the refusal, which a client shows as it is."
         },
         "required_for": {
           "enum": ["openai_live", "xai_realtime"],

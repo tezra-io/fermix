@@ -20,7 +20,9 @@ defmodule FermixCore.Management.Settings do
   alias FermixCore.Auth.Redaction
   alias FermixCore.Browser.Config, as: BrowserConfig
   alias FermixCore.Home.Snapshot.Settings, as: SnapshotSettings
+  alias FermixCore.Management.Accessories, as: AccessoryLink
   alias FermixCore.Management.Mobile, as: PhoneChannel
+  alias FermixCore.Management.Settings.Accessories
   alias FermixCore.Management.Settings.AnswerMap
   alias FermixCore.Management.Settings.Assistant
   alias FermixCore.Management.Settings.Browser
@@ -50,6 +52,7 @@ defmodule FermixCore.Management.Settings do
     Mobile,
     CuesSection,
     Voice,
+    Accessories,
     Tools,
     Browser,
     Secrets,
@@ -119,10 +122,10 @@ defmodule FermixCore.Management.Settings do
   Applies changed keys to one section.
 
   Every value is checked against the row it names before anything is written, so
-  a refused key never leaves half a change behind. The phone channel's switch is
-  the one setting applied the moment it is written: a write that moves it starts
-  or stops the channel (M51 §5.5), and `:mobile_switch` replaces that call in a
-  test.
+  a refused key never leaves half a change behind. The phone channel's switch
+  and the accessory link's are applied the moment they are written: a write
+  that moves one starts or stops its subtree (M51 §5.5, M91 E3), and
+  `:mobile_switch` and `:accessories_switch` replace those calls in a test.
   """
   @spec apply(String.t(), map(), keyword()) :: {:ok, map()} | {:error, write_error()}
   def apply(section, values, opts \\ [])
@@ -185,7 +188,9 @@ defmodule FermixCore.Management.Settings do
 
     current = ConfigStore.current_snapshot()
 
-    for sentence <- phone_switch(before, current, opts) ++ reach_switch(before, current, opts),
+    for sentence <-
+          phone_switch(before, current, opts) ++
+            reach_switch(before, current, opts) ++ accessories_switch(before, current, opts),
         do: Logger.warning("settings reload: #{sentence}")
 
     {:ok,
@@ -315,9 +320,29 @@ defmodule FermixCore.Management.Settings do
       "side_effects" =>
         side_effects(before, current, switch) ++
           phone ++
-          reach_switch(before, current, opts)
+          reach_switch(before, current, opts) ++
+          accessories_switch(before, current, opts)
     }
   end
+
+  # The accessory link's switch is live (M91 E3), as the phone's is: a write or
+  # a reload that moves it starts or stops the link at once, and a link that
+  # did not follow is said in the daemon's words.
+  defp accessories_switch(before, current, opts) do
+    now = accessories_on?(current)
+
+    if accessories_on?(before) == now do
+      []
+    else
+      case Keyword.get(opts, :accessories_switch, &AccessoryLink.apply_enabled/1).(now) do
+        :ok -> []
+        {:error, sentence} when is_binary(sentence) -> [sentence]
+      end
+    end
+  end
+
+  defp accessories_on?(snapshot),
+    do: snapshot |> Source.channel(:accessories) |> Keyword.get(:enabled, false) == true
 
   # The phone channel's switch is live (M51 §5.5): a write or a reload that moves
   # it starts or stops the channel at once, and a channel that did not follow it
@@ -504,14 +529,17 @@ defmodule FermixCore.Management.Settings do
     end
   end
 
-  # Channels has a section that exists on one platform only, so it is handed
-  # the options that name the host; every other family is the same everywhere.
+  # Channels and Accessories have sections that exist on one platform only, so
+  # they are handed the options that name the host; every other family is the
+  # same everywhere.
   defp family(section, opts), do: Enum.find(@families, &family_owns?(&1, section, opts))
 
   defp family_owns?(Channels, section, opts), do: Channels.owns?(section, opts)
+  defp family_owns?(Accessories, section, opts), do: Accessories.owns?(section, opts)
   defp family_owns?(module, section, _opts), do: module.owns?(section)
 
   defp family_sections(Channels, opts), do: Channels.sections(opts)
+  defp family_sections(Accessories, opts), do: Accessories.sections(opts)
   defp family_sections(module, _opts), do: module.sections()
 
   # The search section offers place search's backends as this build can run

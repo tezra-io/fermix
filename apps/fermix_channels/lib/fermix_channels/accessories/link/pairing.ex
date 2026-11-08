@@ -19,6 +19,7 @@ defmodule FermixChannels.Accessories.Link.Pairing do
 
   alias FermixCore.Accessories.Enrollment
   alias FermixCore.Accessories.HostKey
+  alias FermixCore.Accessories.P256
 
   @cancel_reasons %{
     "owner" => :owner,
@@ -109,7 +110,7 @@ defmodule FermixChannels.Accessories.Link.Pairing do
     if open?(e), do: close(e, :link_reset), else: {[], e}
   end
 
-  @doc "What the app shows of the attempt."
+  @doc "What the app shows of the attempt; once it is done, the accessory it paired."
   @spec summary(Enrollment.t() | nil) :: map() | nil
   def summary(nil), do: nil
 
@@ -121,7 +122,8 @@ defmodule FermixChannels.Accessories.Link.Pairing do
       code: Enrollment.compare_code(e),
       accessory_confirmed?: e.accessory_confirmed?,
       owner_confirmed?: e.owner_confirmed?,
-      closed_reason: e.closed_reason
+      closed_reason: e.closed_reason,
+      accessory_id: if(e.phase == :done, do: P256.id(e.accessory_pk))
     }
   end
 

@@ -207,7 +207,7 @@ words heard during a reply, or for 2 s after it, as the operator's turn.
 | `assistant_text_done` | `text` | Realtime only. The reply's whole text, once its words are done. It follows the reply's deltas and is never itself a delta. |
 | `tool_event` | `status`, `name`, `reason?` | Realtime only. One tool call's lifecycle, as the voice model calls Fermix's tools itself, several at once. `status` is one of three: `running` when the call starts, then `completed` or `error` when it settles; `name` is the tool's name; `reason` comes only with `error`. No field identifies the call, so a client counts the calls running. A provider reconnect (`state: "reconnecting"`) abandons every call still running: no further `tool_event` names any of them. |
 | `usage` | token/cost fields | Per-turn usage. The task engines add `call_uuid`, `status: "live"`, `voice_seconds`, `voice_cost_cents` (3 decimals), `backend_turns`, `backend_cost: "unknown"` and `accounting` (`complete` \| `incomplete` \| `running`). Grok adds `voice_text_items`, the text items the call sent the voice provider, each billed as a text event; SpaceXAI reports no settled usage, so a Grok call's final `accounting` is always `incomplete`. Unknown is not zero: a backend on a subscription allowance reports `unknown`, never `0`. |
-| `error` | `reason`, plus context fields | A failure; the daemon closes the connection after most errors. `reason: "call_in_progress"` refuses a `call_start` while another call is up, on any engine and from any endpoint, and optional `held_by` names the endpoint holding it (see *One call at a time*). On a Grok call, `unknown_playback`, `playback_regressed` and `playback_beyond_sent` refuse a `playback_progress`, and `playback_stalled`, `playback_overflow` and `call_ids_exhausted` end one (see *Playback feedback*). Optional `kind` (`update_required` \| `provider_refused` \| `cost_limit` \| `session_expired` \| `close_timeout` \| `bridge_unavailable` \| `max_session_duration` \| `provider_disconnected`) is the typed failure, and optional `detail` carries the vendor's own bounded sentence. |
+| `error` | `reason`, plus context fields | A failure; the daemon closes the connection after most errors. `reason: "call_in_progress"` refuses a `call_start` while another call is up, on any engine and from any endpoint, and optional `held_by` names the endpoint holding it (see *One call at a time*). `reason: "voice_device_elsewhere"` refuses this socket's `call_start` while the owner's voice device is a paired accessory, with `voice_device` and the daemon's `sentence`, and `reason: "voice_device_unreadable"` while the choice cannot be read, with `sentence` (see *One call at a time*). On a Grok call, `unknown_playback`, `playback_regressed` and `playback_beyond_sent` refuse a `playback_progress`, and `playback_stalled`, `playback_overflow` and `call_ids_exhausted` end one (see *Playback feedback*). Optional `kind` (`update_required` \| `provider_refused` \| `cost_limit` \| `session_expired` \| `close_timeout` \| `bridge_unavailable` \| `max_session_duration` \| `provider_disconnected`) is the typed failure, and optional `detail` carries the vendor's own bounded sentence. |
 | `playback_stop` | — | The assistant's audio playback has stopped. |
 | `call_ready` | `engine`, `call_id`, `call_uuid?`, `conversation?`, `tasks_outlive_call?`, `provider_session_id?`, `expires_at?`, `captions` | **v2.** The provider session is established. Under `openai_live` the call carries audio from the `listening` before it (see *Live call sequence*). `call_uuid` is the call's durable identity and the key of its record, the same on every `task` and `usage` of the call; `call_id` stays the trace session id and restarts with the daemon. `conversation` (`chat` \| `private`, task engines only) says where the call's tasks run: `chat`, the chat's own conversation, where a task reads what was typed and the chat later reads what was asked aloud; `private`, a conversation of the call's own, kept apart from the chat. `tasks_outlive_call` (task engines only) is `true` for a call in the chat: a task still running when the call ends is not cancelled but finishes into the chat (see *A task that outlives its call*); `false` for a private call, whose tasks end with it. `expires_at` is unix seconds and is absent when the provider did not say; `captions` is true when `caption` frames will follow. |
 | `caption` | `speaker` (`user` \| `assistant`), `delta`, `start_ms`, `end_ms` | **v2.** One verbatim transcript fragment. Concatenate `delta` bytes as received — never trim them or insert spaces — and allow user and assistant captions to overlap in time. A missing fragment is not proof of silence. |
@@ -369,3 +369,29 @@ call is; it is an additive optional field, absent only when the call that held
 it ended while the daemon was reading it. The call that was up is untouched. A
 repeated `call_start` on the connection that holds the call is not a second
 call.
+
+The owner's **voice device** is this Mac or a paired Fermix accessory, chosen
+in the Mac app's Pet (`accessories.voice_device.set` in
+`priv/management/PROTOCOL.md`). While an accessory is chosen, this socket's
+`call_start` is refused before any session starts, whatever the engine, with
+
+```json
+{"type":"error","reason":"voice_device_elsewhere","voice_device":"accessory:<accessory_id>","sentence":"StackChan is your voice device, so this Mac's microphone stays off. Choose This Mac in Pet to talk here."}
+```
+
+and the connection closes. `voice_device` names the chosen device in the
+endpoint form, and `sentence` is the daemon's, which a client shows as it is:
+while accessories are switched off and the robot is still chosen, it is
+"StackChan is off but is still your voice device. Choose This Mac in Pet to
+talk here." The choice never changes by itself. A choice that cannot be read
+is no choice of this Mac either: the call is refused with
+
+```json
+{"type":"error","reason":"voice_device_unreadable","sentence":"The voice device could not be read. Choose one in Pet."}
+```
+
+and a tap on a robot is refused the same way, until the owner chooses again,
+which writes the choice whole. `voice_device` and `sentence` are additive
+optional fields that only these refusals carry, so an older client renders
+them as any other `error`. An accessory's call started from the Mac and a
+phone's are not refused for the choice.

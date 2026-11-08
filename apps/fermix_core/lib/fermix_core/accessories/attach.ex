@@ -25,17 +25,21 @@ defmodule FermixCore.Accessories.Attach do
   # most one a second, so a busy link is never a signing oracle.
   @min_hello_interval_ms 1_000
   # The kinds this host knows: the capabilities each must report, and the
-  # metadata the daemon pins for it (M91 §04, D23), which the app renders and
-  # keeps no table of its own for. A pin the kind's first firmware release has
-  # not fixed yet is `:undecided`, never an invented value: the firmware range
-  # its releases declare compatible, and the install guide's address on
-  # fermix.ai.
+  # metadata the daemon pins for it (M91 §04, D23, D26), which the app renders
+  # and keeps no table of its own for. The firmware range is the wire versions
+  # a compatible firmware speaks: the host's own window, since a firmware that
+  # speaks none of it cannot attach, and its version string names a build,
+  # not a contract. The install guide is the firmware repository's INSTALL.md,
+  # which the owner's assistant follows (D26). The face and the gesture are the
+  # ones the setup's Test face and Test head movement show.
   @kinds %{
     "stackchan" => %{
       required_capabilities: [:mic, :speaker],
       display_name: "StackChan",
-      firmware_range: :undecided,
-      install_guide: :undecided
+      firmware_range: Control.supported_wire_range(),
+      install_guide: "https://github.com/tezra-io/fermix-stackchan/blob/main/INSTALL.md",
+      face_pose: "speaking",
+      motion_gesture: "nod"
     }
   }
 
@@ -113,12 +117,14 @@ defmodule FermixCore.Accessories.Attach do
   @spec kinds() :: [String.t()]
   def kinds, do: Map.keys(@kinds)
 
-  @typedoc "What the daemon pins for a kind; `:undecided` where no release has fixed it yet."
+  @typedoc "What the daemon pins for a kind: `firmware_range` is the inclusive wire-version range."
   @type kind_metadata :: %{
           required_capabilities: [Capabilities.name()],
           display_name: String.t(),
-          firmware_range: {String.t(), String.t()} | :undecided,
-          install_guide: String.t() | :undecided
+          firmware_range: {pos_integer(), pos_integer()},
+          install_guide: String.t(),
+          face_pose: String.t(),
+          motion_gesture: String.t()
         }
 
   @doc "A kind's pinned metadata, or `:error` for a kind this host does not know."

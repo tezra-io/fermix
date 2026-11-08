@@ -92,6 +92,63 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     end
   end
 
+  # M91 E3: the StackChan link. Off is fine; on, it needs a Mac primary and
+  # the packaged serial helper, which doctor finds without opening any port.
+  describe "accessories/1" do
+    setup do
+      dir = FermixTestSupport.SafeRm.make_tmp_dir!("doctor-accessories")
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
+      helper = Path.join(dir, "fermix_serial")
+      %{helper: helper}
+    end
+
+    defp accessories(overrides) do
+      Checks.accessories(
+        Keyword.merge([enabled?: true, os_type: {:unix, :darwin}, role: :primary], overrides)
+      )
+    end
+
+    test "off, it is a quiet row", %{helper: helper} do
+      assert %{name: "accessories", status: :ok, detail: "StackChan is off"} =
+               accessories(enabled?: false, helper_path: helper)
+    end
+
+    test "on with the helper packaged and executable, it is ready", %{helper: helper} do
+      File.write!(helper, "#!/bin/sh\n")
+      File.chmod!(helper, 0o755)
+
+      assert %{status: :ok, detail: detail} = accessories(helper_path: helper)
+      assert detail =~ "USB serial helper"
+    end
+
+    test "on with the helper missing, or not executable, it fails naming the path",
+         %{helper: helper} do
+      assert %{status: :fail, detail: missing} = accessories(helper_path: helper)
+      assert missing =~ helper
+
+      File.write!(helper, "not a program")
+      File.chmod!(helper, 0o644)
+      assert %{status: :fail, detail: not_executable} = accessories(helper_path: helper)
+      assert not_executable =~ "not executable"
+    end
+
+    test "on, but on a computer that is not a local Mac primary, it warns",
+         %{helper: helper} do
+      for overrides <- [[os_type: {:unix, :linux}], [role: :device], [role: :candidate]] do
+        assert %{status: :warn, detail: detail} =
+                 accessories([helper_path: helper] ++ overrides)
+
+        assert detail =~ "local Mac primary"
+      end
+    end
+
+    test "a CLI verb with no engine of its own judges no role", %{helper: helper} do
+      File.write!(helper, "#!/bin/sh\n")
+      File.chmod!(helper, 0o755)
+      assert %{status: :ok} = accessories(helper_path: helper, role: nil)
+    end
+  end
+
   describe "browser_disclaim/1" do
     test "not required off macOS" do
       result = Checks.browser_disclaim({:unix, :linux})

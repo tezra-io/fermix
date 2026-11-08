@@ -31,6 +31,7 @@ defmodule FermixCore.Management.CopyTest do
   alias FermixCore.Home.Snapshot.Run, as: SnapshotRun
   alias FermixCore.Home.Snapshot.S3, as: SnapshotS3
   alias FermixCore.Home.Snapshot.Status, as: SnapshotStatus
+  alias FermixCore.Management.Accessories
   alias FermixCore.Management.AlwaysOn
   alias FermixCore.Management.AlwaysOn.Input, as: AlwaysOnInput
   alias FermixCore.Management.ComputerUse
@@ -299,6 +300,14 @@ defmodule FermixCore.Management.CopyTest do
     test "every phone pairing sentence obeys the rules" do
       for sentence <- Mobile.sentences() do
         assert_clean(sentence, :prose, [], "mobile sentence")
+        assert internal_terms(sentence) == []
+      end
+    end
+
+    # M91 E3: the StackChan screens draw these as they are, in both doors.
+    test "every accessory sentence obeys the rules" do
+      for sentence <- Accessories.sentences() do
+        assert_clean(sentence, :prose, [], "accessories sentence")
         assert internal_terms(sentence) == []
       end
     end

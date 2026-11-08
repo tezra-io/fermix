@@ -333,4 +333,98 @@ defmodule FermixChannels.Accessories.WatcherTest do
     assert Link.status(link).accessory_id == record.accessory_id
     assert Watcher.link_for(w, String.duplicate("0", 64)) == {:error, :not_attached}
   end
+
+  # M91 E3: what `accessories.status` and its long poll read.
+  describe "the view the Mac reads" do
+    test "a subscriber is told each change, and a touch, with the version", ctx do
+      w = watcher(ctx)
+      # Fable review 1: the first word comes with the subscribe, as
+      # `Home.StatusWatch.join/2`'s does, so a change made before it is heard.
+      assert {:ok, ^w} = Watcher.subscribe(w, self())
+      assert_receive {:accessories_changed, first}
+
+      AccessoryBus.plug(ctx.bus, @other, serial: "11:22:33:44:55:66")
+      poll(w)
+      assert_receive {:accessories_changed, version}
+      assert version > first
+
+      assert :ok = Watcher.touch(w)
+      assert_receive {:accessories_changed, touched}
+      assert touched == version + 1
+
+      assert :ok = Watcher.unsubscribe(w, self())
+      assert :ok = Watcher.touch(w)
+      refute_received {:accessories_changed, _version}
+    end
+
+    # Fable review 4: Release for firmware update waits for the robot's call
+    # to end (PROTOCOL.md: "End the call first.").
+    test "a port whose link carries a call is not released", ctx do
+      {sim, _record} = enrolled_sim(ctx)
+      AccessoryBus.plug(ctx.bus, @robot, serial: AccessoryCase.serial(), peer: sim)
+      w = watcher(ctx)
+      poll(w)
+      entry = await_port(w, @robot, &attached?/1)
+
+      call = %{call_id: "voice-1", stream: 1, source: :mac, phase: :active, view: nil}
+      send(w, {:link_view, @robot, entry.pid, %{entry.link | call: call}})
+      await_port(w, @robot, &match?(%{link: %{call: %{}}}, &1))
+
+      assert {:error, :call_active} = Watcher.release(w, @robot)
+      assert port(Watcher.status(w), @robot).state == :linked
+      assert AccessoryBus.holder(ctx.bus, @robot) != nil
+    end
+
+    test "cancelling pairing closes the selected port and clears the choice", ctx do
+      sim = start_supervised!({AccessorySim, observer: self()})
+      AccessoryBus.plug(ctx.bus, @robot, serial: "11:22:33:44:55:66", peer: sim)
+      w = watcher(ctx)
+      poll(w)
+
+      assert :ok = Watcher.pair(w, @robot)
+      await_port(w, @robot, &(&1.state == :linked and &1.link != nil))
+      assert Watcher.status(w).selected == @robot
+
+      assert :ok = Watcher.cancel_pairing(w, @robot)
+      status = Watcher.status(w)
+      assert status.selected == nil
+      assert port(status, @robot).state == :unrelated
+      assert AccessoryBus.holder(ctx.bus, @robot) == nil
+    end
+
+    test "voice readiness is read at each poll, so a change of it moves the view", ctx do
+      {:ok, voice} = Agent.start_link(fn -> :ready end)
+
+      opts =
+        put_in(ctx.watcher_opts, [:link_opts, :readiness], fn -> Agent.get(voice, & &1) end)
+
+      w = start_supervised!({Watcher, opts}, id: :voice_watcher)
+      assert poll(w).voice == :ready
+      version = Watcher.status(w).version
+
+      Agent.update(voice, fn _ -> {:not_ready, "restart_required"} end)
+      status = poll(w)
+      assert status.voice == {:not_ready, "restart_required"}
+      assert status.version > version
+    end
+
+    test "a link that goes with a call on it leaves how the call ended", ctx do
+      {sim, record} = enrolled_sim(ctx)
+      AccessoryBus.plug(ctx.bus, @robot, serial: AccessoryCase.serial(), peer: sim)
+      w = watcher(ctx)
+      poll(w)
+      entry = await_port(w, @robot, &attached?/1)
+
+      # The link's own view with a call on it, as a call publishes it.
+      call = %{call_id: "voice-1", stream: 1, source: :screen_tap, phase: :active, view: nil}
+      send(w, {:link_view, @robot, entry.pid, %{entry.link | call: call}})
+      await_port(w, @robot, &match?(%{link: %{call: %{call_id: "voice-1"}}}, &1))
+
+      AccessoryBus.unplug(ctx.bus, @robot)
+      await_port(w, @robot, &(&1.state == :vanished))
+
+      assert %{call_id: "voice-1", reason: "unplugged", ended_at: %DateTime{}} =
+               Watcher.status(w).last_calls[record.accessory_id]
+    end
+  end
 end

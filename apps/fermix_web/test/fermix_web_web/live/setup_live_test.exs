@@ -7492,6 +7492,112 @@ defmodule FermixWebWeb.SetupLiveTest do
   defp escaped(message),
     do: message |> Phoenix.HTML.html_escape() |> Phoenix.HTML.safe_to_string()
 
+  # M91 E3, the Mac design's *Browser setup*: the Realtime tab's optional
+  # StackChan section, drawn from `accessories.status` through
+  # `AccessoryGoldens.Provider`, with its own switch and the Pet link.
+  describe "the Realtime tab's StackChan section" do
+    alias FermixTestSupport.AccessoryGoldens
+
+    setup do
+      web = Application.get_env(:fermix_web, :accessories)
+      channels = Application.get_env(:fermix_channels, :accessories)
+
+      on_exit(fn ->
+        restore_env(:fermix_web, :accessories, web)
+        restore_env(:fermix_channels, :accessories, channels)
+      end)
+    end
+
+    defp accessories_page(conn, management, settings \\ []) do
+      Application.put_env(:fermix_web, :accessories, management: management, settings: settings)
+      live(conn, "/setup?tab=realtime")
+    end
+
+    test "off, it offers the switch and no setup link, and says the Mac's voice still works",
+         %{conn: conn} do
+      {:ok, view, _html} = accessories_page(conn, AccessoryGoldens.base(enabled?: false))
+
+      assert view |> element("#accessories-sentence") |> render() =~ "StackChan is off."
+      assert has_element?(view, "#accessories-switch")
+      refute has_element?(view, "#accessories-setup-link")
+      assert render(view) =~ "Your Mac voice still works."
+    end
+
+    # Fable review 7: a robot left chosen when StackChan was turned off is
+    # said, and the page does not claim the Mac's voice still works.
+    test "off with the robot still chosen, it says so and how to fix it", %{conn: conn} do
+      robot = AccessoryGoldens.record()
+
+      opts =
+        AccessoryGoldens.base(
+          enabled?: false,
+          records: {:ok, [robot]},
+          voice_device: {:ok, {:accessory, robot.accessory_id}}
+        )
+
+      {:ok, view, _html} = accessories_page(conn, opts)
+
+      assert view |> element("#accessories-sentence") |> render() =~
+               "StackChan is off but is still your voice device. Choose This Mac in Pet to talk here."
+
+      refute render(view) =~ "Your Mac voice still works."
+    end
+
+    test "on and running, it links the Mac app's Pet and names the voice the next call takes",
+         %{conn: conn} do
+      {:ok, view, _html} = accessories_page(conn, AccessoryGoldens.base())
+
+      link = view |> element("#accessories-setup-link") |> render()
+      assert link =~ ~s(href="fermix://pet")
+      refute link =~ "token"
+      assert view |> element("#accessories-voice") |> render() =~ "eve"
+      refute has_element?(view, "#accessories-voice-sentence")
+    end
+
+    test "voice that is not ready says why, in the daemon's words", %{conn: conn} do
+      opts = AccessoryGoldens.base(readiness: {:not_ready, "missing_key"})
+      {:ok, view, _html} = accessories_page(conn, opts)
+
+      assert view |> element("#accessories-voice-sentence") |> render() =~
+               "Voice needs its provider key."
+    end
+
+    test "off a local Mac primary it says so and offers neither the switch nor the link",
+         %{conn: conn} do
+      opts = AccessoryGoldens.base(engine_role: %{role: :device, primary: "studio-mac"})
+      {:ok, view, _html} = accessories_page(conn, opts)
+
+      assert view |> element("#accessories-sentence") |> render() =~
+               "StackChan setup needs a local Mac primary."
+
+      refute has_element?(view, "#accessories-switch")
+      refute has_element?(view, "#accessories-setup-link")
+    end
+
+    test "the switch writes its own setting at once, apart from the voice form", %{conn: conn} do
+      test = self()
+      switch = fn on? -> send(test, {:accessories_switch, on?}) && :ok end
+      opts = AccessoryGoldens.base(enabled?: false)
+      {:ok, view, _html} = accessories_page(conn, opts, macos?: true, accessories_switch: switch)
+
+      view |> element("#accessories-switch") |> render_submit()
+
+      assert_receive {:accessories_switch, true}
+      assert Application.get_env(:fermix_channels, :accessories) == [enabled: true]
+    end
+
+    test "a link that did not follow the switch is said under it", %{conn: conn} do
+      sentence = "StackChan is on but could not start. See the daemon log."
+      switch = fn true -> {:error, sentence} end
+      opts = AccessoryGoldens.base(enabled?: false)
+      {:ok, view, _html} = accessories_page(conn, opts, macos?: true, accessories_switch: switch)
+
+      view |> element("#accessories-switch") |> render_submit()
+
+      assert view |> element("#accessories-notice") |> render() =~ sentence
+    end
+  end
+
   defp restore_env(app, key, :error), do: Application.delete_env(app, key)
   defp restore_env(app, key, {:ok, value}), do: Application.put_env(app, key, value)
   defp restore_env(app, key, nil), do: Application.delete_env(app, key)

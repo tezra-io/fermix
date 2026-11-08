@@ -39,7 +39,8 @@ defmodule FermixCore.Home.MoveReadiness do
       other one again for itself right after the move
       (`FermixCore.Plugins.Dist.Reinstall`), through the plugin installer;
     * `stays_here`: what the home has turned on that runs only on this
-      computer (iMessage on a Mac, voice calls, meetings; `stays_here/2`)
+      computer (iMessage on a Mac, voice calls, meetings, StackChan on a Mac;
+  `stays_here/2`)
       stops after the move, each named; with none of them on it is `ok`.
       Voice is this computer's own (its socket): calls from the phone carry
       on at the server when Talk to Fermix is on there and its key is in the
@@ -189,13 +190,14 @@ defmodule FermixCore.Home.MoveReadiness do
   What the home at `home` has turned on that runs only on this computer and
   stops after a move, read from its settings: iMessage (only when `macos?`),
   voice calls and meetings, in that order; or the sentence that says the
-  settings could not be read. `home.status` reads it on every poll, so an
+  settings could not be read. StackChan (`:accessories`, M91) is named last,
+  on a Mac only. `home.status` reads it on every poll, so an
   unreadable file is logged once when it stops being readable and once when
   it reads again (`Home.UnreadableFiles`, `opts`' `:unreadable_files`: that
   memory, or nil for none).
   """
   @spec stays_here(Path.t(), boolean(), keyword()) ::
-          {:ok, [:imessage | :voice | :meetings]} | {:error, String.t()}
+          {:ok, [:imessage | :voice | :meetings | :accessories]} | {:error, String.t()}
   def stays_here(home, macos?, opts \\ [])
       when is_binary(home) and is_boolean(macos?) and is_list(opts) do
     with {:ok, text} <- settings(home, opts), do: {:ok, features(text, macos?)}
@@ -517,7 +519,7 @@ defmodule FermixCore.Home.MoveReadiness do
   defp stays_behind([], _machine, _name), do: ""
 
   defp stays_behind(features, machine, name) do
-    them = if features == [:imessage], do: "it", else: "them"
+    them = if features in [[:imessage], [:accessories]], do: "it", else: "them"
     "#{Copy.stops_after_move(features)}: neither this #{machine} nor #{name} runs #{them}."
   end
 
@@ -535,7 +537,9 @@ defmodule FermixCore.Home.MoveReadiness do
     [
       imessage: macos? and on?(text, "fermix_channels.imessage", "enabled"),
       voice: on?(text, "fermix_core.realtime", "enabled"),
-      meetings: on?(text, "fermix_core.meetings", "enabled")
+      meetings: on?(text, "fermix_core.meetings", "enabled"),
+      # M91 D7, D13: a server carries the pairing and starts no accessory link.
+      accessories: macos? and on?(text, "fermix_channels.accessories", "enabled")
     ]
     |> Enum.filter(fn {_feature, on} -> on end)
     |> Enum.map(fn {feature, _on} -> feature end)

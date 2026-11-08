@@ -57,6 +57,14 @@ defmodule FermixChannels.Application do
       FermixChannels.Mobile.Management
     )
 
+    # The `accessories.*` methods (M91 E3) call the accessory link the same
+    # way, by name, through the provider registered here.
+    Application.put_env(
+      :fermix_core,
+      :accessories_management_provider,
+      FermixChannels.Accessories.Management
+    )
+
     # `/health` reports the Telegram poller's degraded posture. Core must not
     # compile-depend on channels, so the poller registers itself here; the
     # provider is present iff this application runs.

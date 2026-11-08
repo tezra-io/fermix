@@ -346,6 +346,24 @@ defmodule FermixCore.Home.MoveReadinessTest do
     refute item_in(items, "call_in_progress")
   end
 
+  # M91 D7, D13: a home moved to a server carries the StackChan's pairing but
+  # starts no accessory link there, so a Mac whose home has it on names it.
+  test "on a Mac, StackChan turned on is named among what stops after the move", ctx do
+    File.write!(Path.join(ctx.home, "config.toml"), """
+    [fermix_channels.accessories]
+    enabled = true
+    """)
+
+    assert %{items: items} = MoveReadiness.report(ctx.home, ctx.candidate, opts(ctx))
+
+    assert %{status: :warn, sentence: sentence} = item_in(items, "stays_here")
+    assert sentence == "StackChan stops after the move: neither this Mac nor north-box runs it."
+
+    linux = Keyword.put(opts(ctx), :host, "linux-x86_64")
+    assert %{items: items} = MoveReadiness.report(ctx.home, ctx.candidate, linux)
+    assert %{status: :ok} = item_in(items, "stays_here")
+  end
+
   test "on a Linux computer, voice calls on are named, and iMessage never is", ctx do
     File.write!(Path.join(ctx.home, "config.toml"), """
     [fermix_core.realtime]

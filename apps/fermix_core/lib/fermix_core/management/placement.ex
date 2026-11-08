@@ -6,9 +6,9 @@ defmodule FermixCore.Management.Placement do
   app keeps speaking only the local `daemon.sock`. A request about this
   machine is **device-class** and answered here: the daemon's own handshake,
   its lifecycle, logs, diagnostics and Doctor, the setup page's session and
-  detection, computer use, iMessage, the browser and capability installers,
-  and `settings.get` or `settings.apply` for a section that configures only
-  this machine. Everything else is **primary-class**: it configures or reads
+  detection, computer use, iMessage, an accessory wired to it (M91), the
+  browser and capability installers, and `settings.get` or `settings.apply`
+  for a section that configures only this machine. Everything else is **primary-class**: it configures or reads
   the Fermix that lives on the primary, so a linked device
   (`FermixCore.Home.DesktopLink.linked?/2`) forwards it over the rail
   (`FermixCore.Home.Link`), and a device with no link refuses it as stage 1
@@ -64,7 +64,8 @@ defmodule FermixCore.Management.Placement do
     browser.install.start capabilities.install.start
     home.status settings.sections home.act
   )
-  @device_families ~w(lifecycle. doctor. computer_use. imessage.)
+  # `accessories.`: an accessory is wired to the computer that answers (M91).
+  @device_families ~w(lifecycle. doctor. computer_use. imessage. accessories.)
   # The primary-class families whose state is the primary's memory.db, which
   # a device never opens: one with no link refuses them as retired.
   @database_families ~w(cues.)
@@ -81,9 +82,9 @@ defmodule FermixCore.Management.Placement do
   @composed_deadline_ms 5_000
 
   # The settings sections that configure only this machine: the sandbox its
-  # commands run in, computer use of this screen, this screen's history, and
-  # this Mac's Messages.
-  @device_sections ~w(sandbox computer_use computer_history channels.imessage)
+  # commands run in, computer use of this screen, this screen's history, this
+  # Mac's Messages, and the accessory link to this Mac's USB ports.
+  @device_sections ~w(sandbox computer_use computer_history channels.imessage accessories)
   @section_methods ~w(settings.get settings.apply)
 
   @device_class_sentence "This request configures the computer it came from, so the " <>

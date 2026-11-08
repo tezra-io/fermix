@@ -178,6 +178,7 @@ defmodule FermixCore.Management.Doctor.Descriptor do
       ),
       spec("computer_history", :capability, :info, :configured, &Checks.computer_history/0),
       spec("browser_disclaim", :security, :warning, :platform, &Checks.browser_disclaim/0),
+      spec("accessories", :capability, :warning, :configured, &Checks.accessories/0),
       spec("harness", :capability, :warning, :configured, &Checks.harness/0),
       spec("skill_curation", :capability, :info, :configured, &Checks.skill_curation/0),
       spec("plugins", :capability, :warning, :always, &Checks.plugins/0),

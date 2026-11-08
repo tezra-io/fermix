@@ -4,6 +4,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   alias FermixCore.Auth.Redaction
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.ModelCatalog
+  alias FermixWebWeb.SetupLive.Accessories
   alias FermixWebWeb.SetupLive.AlwaysOnPane
   alias FermixWebWeb.SetupLive.CuesPane
   alias FermixWebWeb.SetupLive.Phone
@@ -27,6 +28,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :embed?, :boolean, default: false
   attr :channels_form, :map, required: true
   attr :phone, :map, required: true
+  attr :accessories, :map, default: nil
   attr :xai_auth, :map, required: true
   attr :xai_auth_running?, :boolean, required: true
   attr :xai_auth_url, :string, default: nil
@@ -156,6 +158,7 @@ defmodule FermixWebWeb.SetupLive.Components do
               embed?={@embed?}
               channels_form={@channels_form}
               phone={@phone}
+              accessories={@accessories}
               xai_auth={@xai_auth}
               xai_auth_running?={@xai_auth_running?}
               xai_auth_url={@xai_auth_url}
@@ -315,6 +318,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :embed?, :boolean, default: false
   attr :channels_form, :map, required: true
   attr :phone, :map, required: true
+  attr :accessories, :map, default: nil
   attr :xai_auth, :map, required: true
   attr :xai_auth_running?, :boolean, required: true
   attr :xai_auth_url, :string, default: nil
@@ -1277,6 +1281,8 @@ defmodule FermixWebWeb.SetupLive.Components do
         <.realtime_limit_fields form={@realtime_form} />
         <.form_actions active_tab={@active_tab} tabs={@tabs} save_label="Save realtime" />
       </form>
+
+      <Accessories.panel :if={@accessories} accessories={@accessories} />
     </div>
     """
   end

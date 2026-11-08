@@ -13,6 +13,7 @@ defmodule FermixChannels.Accessories.SupervisorTest do
   alias FermixChannels.Accessories.Supervisor, as: AccessoriesSupervisor
   alias FermixCore.Accessories.P256
   alias FermixCore.Home.Role
+  alias FermixCore.Management.Accessories, as: ManagementAccessories
   alias FermixTestSupport.AccessoryBus
   alias FermixTestSupport.AccessoryCase
   alias FermixTestSupport.AccessoryMemoryTransport
@@ -246,5 +247,107 @@ defmodule FermixChannels.Accessories.SupervisorTest do
 
     assert {:error, :not_running} =
              Accessories.start_call(String.duplicate("a", 64), names: ctx.names)
+  end
+
+  # M91 E3: core's `accessories.*` handler, through the provider the channels
+  # application registers, reads this subtree's own view: the shapes the two
+  # apps share are held here end to end, not only by each side's doubles.
+  describe "the management provider" do
+    test "core's status reads a running subtree's ports, its paired robot and its pairing",
+         ctx do
+      bus = start_supervised!(AccessoryBus)
+      {public, private} = P256.generate()
+      {host, record} = AccessoryCase.enroll!(ctx.home, public)
+
+      robot =
+        start_supervised!(
+          {AccessorySim, observer: self(), key: {public, private}, enrolled_host: host.public},
+          id: :robot
+        )
+
+      stranger = start_supervised!({AccessorySim, observer: self()}, id: :stranger)
+
+      :ok =
+        AccessoryBus.plug(bus, "/dev/cu.usbmodem1101",
+          serial: AccessoryCase.serial(),
+          peer: robot
+        )
+
+      :ok =
+        AccessoryBus.plug(bus, "/dev/cu.usbmodem2201",
+          serial: "11:22:33:44:55:66",
+          peer: stranger
+        )
+
+      start_supervised!({AccessoriesSupervisor, tree_opts(ctx, bus)})
+      send(ctx.names.watcher, :poll)
+      await_attached(ctx, "/dev/cu.usbmodem1101")
+
+      opts = core_opts(ctx)
+      assert {:ok, status} = ManagementAccessories.status(opts)
+      assert status["state"] == "on"
+      assert [row] = status["accessories"]
+      assert row["accessory_id"] == record.accessory_id
+      assert row["connection"] == "attached"
+      assert row["selected"]
+      assert "start_call" in row["actions"]
+
+      assert {:ok, paired} =
+               ManagementAccessories.route(
+                 "accessories.pair.start",
+                 %{"path" => "/dev/cu.usbmodem2201"},
+                 opts
+               )
+
+      assert %{"selected" => true} =
+               Enum.find(paired["ports"], &(&1["path"] == "/dev/cu.usbmodem2201"))
+
+      assert {:ok, cancelled} =
+               ManagementAccessories.route(
+                 "accessories.pair.cancel",
+                 %{"path" => "/dev/cu.usbmodem2201"},
+                 opts
+               )
+
+      assert %{"status" => "unrelated", "selected" => false} =
+               Enum.find(cancelled["ports"], &(&1["path"] == "/dev/cu.usbmodem2201"))
+    end
+
+    test "a waiting status wakes when the subtree's view changes", ctx do
+      bus = start_supervised!(AccessoryBus)
+      start_supervised!({AccessoriesSupervisor, tree_opts(ctx, bus)})
+      test = self()
+
+      # The wait sets its timer once it is subscribed, so the timer tells the
+      # test when the change can be made.
+      holding = fn _message, _ms ->
+        send(test, :holding)
+        make_ref()
+      end
+
+      opts = Keyword.put(core_opts(ctx), :wait_timer, holding)
+      {:ok, %{"key" => key, "ports" => []}} = ManagementAccessories.status(opts)
+
+      waiter = Task.async(fn -> ManagementAccessories.status_after(key, 25_000, opts) end)
+      assert_receive :holding
+
+      :ok = AccessoryBus.plug(bus, "/dev/cu.usbmodem3301", serial: "11:22:33:44:55:66")
+      send(ctx.names.watcher, :poll)
+
+      assert {:ok, %{"ports" => [%{"status" => "unrelated"}]}} = Task.await(waiter, 10_000)
+    end
+  end
+
+  defp core_opts(ctx) do
+    [
+      provider: FermixChannels.Accessories.Management,
+      provider_opts: [names: ctx.names],
+      engine_role: %{role: :primary},
+      os_type: @mac,
+      enabled?: true,
+      home: ctx.home,
+      call_holder: :none,
+      readiness: :ready
+    ]
   end
 end

@@ -60,6 +60,25 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   After a move, your phone calls Fermix on the server when Talk to Fermix is
   on there and its key is in the server's secret store, while the Mac's own
   voice calls stop. No phone app with calls is released yet.
+- **A StackChan robot can be Fermix's voice on your Mac.** Wired to one of
+  the Mac's USB-C ports and running the Fermix firmware, the M5Stack
+  StackChan is a call's microphone and speaker: tap its screen or swipe its
+  head to talk, on any voice model, with your usual voice settings, keys and
+  limits. It is off until you allow it under the setup page's Realtime tab,
+  where the switch applies at once. Pairing happens over the cable with you
+  at the robot: it asks on its screen, both screens show the same six-digit
+  code, and you confirm on both. The robot only replaces this Mac's voice
+  once you choose it; while it is chosen, a call at the Mac itself is refused
+  and the Mac's microphone stays off, and a tap on a robot you did not choose
+  is refused.
+  When the robot needs the Fermix firmware, or firmware this Fermix can talk
+  to, Fermix says so and links its install guide; Fermix never flashes it.
+  Release for firmware update frees the port for the installer until you
+  choose Reconnect. The Mac shows the robot's call (its voice, what was said
+  and its tasks) and can end, mute or interrupt it without opening the Mac's
+  own microphone, and the call carries on with the app closed. StackChan
+  needs Fermix running on the Mac itself, not on an Always On server. Pairing
+  and the robot's controls in the Mac app's Pet come with an app update.
 
 ### Changed
 

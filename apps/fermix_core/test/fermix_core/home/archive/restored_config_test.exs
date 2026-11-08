@@ -98,6 +98,19 @@ defmodule FermixCore.Home.Archive.RestoredConfigTest do
     assert {:ok, _text, _settled} = RestoredConfig.settle(@config, facts)
   end
 
+  # M91 D7: a home restored onto a server keeps StackChan's switch as it was.
+  # The server starts no accessory link (it is no Mac), and a move back to the
+  # Mac finds the robot paired and the link on, with nothing to set again.
+  test "StackChan's switch survives a restore onto a computer that is not a Mac" do
+    config = """
+    [fermix_channels.accessories]
+    enabled = true
+    """
+
+    {:ok, text, _settled} = RestoredConfig.settle(config, facts(macos?: false, keyring: true))
+    assert ConfigText.value(text, "fermix_channels.accessories", "enabled") == {:ok, "true"}
+  end
+
   defp facts(macos?: macos?, keyring: usable?) do
     %{old_root: @old, new_root: @new, macos?: macos?, keyring_usable?: fn -> usable? end}
   end

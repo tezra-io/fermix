@@ -10,6 +10,7 @@ defmodule FermixCore.Realtime.ProtocolContractTest do
 
   use ExUnit.Case, async: true
 
+  alias FermixCore.Realtime.CallClient
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.Endpoint
   alias FermixCore.Realtime.LiveFrames
@@ -180,6 +181,84 @@ defmodule FermixCore.Realtime.ProtocolContractTest do
     assert {:ok, _endpoint} = Endpoint.parse(held_by)
     refute "held_by" in schema["$defs"]["error"]["required"]
     assert schema["$defs"]["error"]["properties"]["held_by"]["type"] == "string"
+  end
+
+  # M91 E3: while a paired accessory is the owner's voice device, the Mac's
+  # own call_start is refused before any session, naming the device in the
+  # Endpoint form and carrying the daemon's sentence, which the app renders.
+  test "the voice device refusal is a published error reason with a golden row",
+       %{schema: schema} do
+    properties = schema["$defs"]["error"]["properties"]
+    assert properties["reason"]["description"] =~ "voice_device_elsewhere"
+    assert properties["voice_device"]["type"] == "string"
+    assert properties["sentence"]["type"] == "string"
+
+    golden =
+      @server_fixtures
+      |> fixture_lines()
+      |> Enum.map(&Jason.decode!/1)
+      |> Enum.find(&(&1["type"] == "error" and &1["reason"] == "voice_device_elsewhere"))
+
+    assert %{"voice_device" => device, "sentence" => sentence} = golden
+    assert {:ok, {:accessory, _id}} = Endpoint.parse(device)
+
+    test = self()
+
+    client =
+      CallClient.new(
+        endpoint: :desktop,
+        protocol_version: 3,
+        config: Config.current(),
+        emit: fn frame ->
+          send(test, {:emitted, frame})
+          :ok
+        end,
+        task_supervisor: :unused_until_a_session_starts,
+        voice_device: fn -> Endpoint.parse(device) end,
+        accessories_enabled?: fn -> true end
+      )
+
+    assert {:stop, _client} = CallClient.call_start(client)
+    assert_receive {:emitted, frame}
+    assert Jason.decode!(Jason.encode!(frame)) == golden
+    assert sentence != ""
+  end
+
+  # Fable review 3: a choice that cannot be read refuses the Mac's own call
+  # with its own reason and sentence, and names no device.
+  test "the unreadable voice device refusal is a published error reason with a golden row",
+       %{schema: schema} do
+    assert schema["$defs"]["error"]["properties"]["reason"]["description"] =~
+             "voice_device_unreadable"
+
+    golden =
+      @server_fixtures
+      |> fixture_lines()
+      |> Enum.map(&Jason.decode!/1)
+      |> Enum.find(&(&1["type"] == "error" and &1["reason"] == "voice_device_unreadable"))
+
+    test = self()
+
+    client =
+      CallClient.new(
+        endpoint: :desktop,
+        protocol_version: 3,
+        config: Config.current(),
+        emit: fn frame ->
+          send(test, {:emitted, frame})
+          :ok
+        end,
+        task_supervisor: :unused_until_a_session_starts,
+        voice_device: fn -> {:error, {:invalid_voice_device, "/invented"}} end
+      )
+
+    ExUnit.CaptureLog.capture_log(fn ->
+      assert {:stop, _client} = CallClient.call_start(client)
+    end)
+
+    assert_receive {:emitted, frame}
+    assert Jason.decode!(Jason.encode!(frame)) == golden
+    refute Map.has_key?(golden, "voice_device")
   end
 
   test "the golden Live frames carry the call UUID" do

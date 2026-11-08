@@ -36,7 +36,20 @@ defmodule FermixChannels.Accessories.Link do
       the Mac, starts the call's own process under this one (linked; this
       process traps exits), so a call can block on its session's start while
       the link keeps reading. The call writes through the link, which drops
-      anything of a stream that is not the current call's.
+      anything of a stream that is not the current call's. A tap on an
+      accessory that is not the voice device is refused `not_selected`, and
+      one on an accessory short of power `power_too_low` (M91 §07); a start
+      from the Mac is the owner's own act and needs no selection. The Mac's
+      start is answered at once with the call's stream; its admission (the
+      call's id, `phase: :active`) or its refusal (`last_call`) shows in the
+      link's view. The Mac's controls name the call they are for, and one for
+      a call that is not the current one is refused.
+      The call's own view (`Call.View`) is published with the link's, so the
+      Mac observes the call through `accessories.status`.
+    * **Setup checks and settings** (M91 E3): a check, a calibration step or
+      a setting only on an attached accessory with no call, and only one it
+      reported the capability of; the check's progress and result, and the
+      accessory's own fault, are published with the link.
 
   Time is the injected clock's monotonic milliseconds (`:clock`) and every
   timer goes through `:send_after`, so a test moves time by hand. Every state
@@ -52,12 +65,14 @@ defmodule FermixChannels.Accessories.Link do
   alias FermixCore.Accessories.Attach
   alias FermixCore.Accessories.Capabilities
   alias FermixCore.Accessories.Control
+  alias FermixCore.Accessories.Enrollment
   alias FermixCore.Accessories.Frame
   alias FermixCore.Accessories.Parser
   alias FermixCore.Accessories.Reassembler
   alias FermixCore.Accessories.Record
   alias FermixCore.Accessories.Store
   alias FermixCore.Accessories.Telemetry
+  alias FermixCore.Accessories.VoiceDevice
 
   require Logger
 
@@ -84,6 +99,8 @@ defmodule FermixChannels.Accessories.Link do
   }
   @sources %{"screen_tap" => :screen_tap, "head_swipe" => :head_swipe}
   @always ~w(refuse error pong diag.counters diag.fault)
+  @low_power ~w(low critical)
+  @checks %{"tone" => :tone, "mic" => :mic, "face" => :face, "motion" => :motion}
   @by_phase %{
     hello: [],
     proving: ~w(attached),
@@ -110,6 +127,8 @@ defmodule FermixChannels.Accessories.Link do
     :send_after,
     :tick_ms,
     :readiness,
+    :voice_device,
+    :utc_now,
     :notify,
     :ended,
     :call_module,
@@ -119,15 +138,20 @@ defmodule FermixChannels.Accessories.Link do
     :peer,
     :accessory_state,
     :refusal,
+    :refused_range,
     :readiness_sent,
     :enrollment,
+    :pairing_name,
+    :pairing_expires_at,
     :host_key,
     :call,
     :closing,
     :published,
     :last_rx_ms,
     :last_ping_ms,
-    :last_check,
+    :check,
+    :fault,
+    :last_call,
     :diag_counters,
     parser: nil,
     reassembler: nil,
@@ -155,22 +179,32 @@ defmodule FermixChannels.Accessories.Link do
   @spec status(GenServer.server()) :: map()
   def status(link), do: GenServer.call(link, :status, @call_timeout_ms)
 
-  @doc "Starts pairing on the selected port: the first `enroll.begin`."
-  @spec enroll_begin(GenServer.server()) :: :ok | {:error, term()}
-  def enroll_begin(link), do: GenServer.call(link, {:owner_pairing, :begin}, @call_timeout_ms)
+  @doc """
+  Starts pairing on the selected port: the first `enroll.begin`. `name` is the
+  name the paired accessory's record keeps, the kind's own when nil.
+  """
+  @spec enroll_begin(GenServer.server(), String.t() | nil) :: :ok | {:error, term()}
+  def enroll_begin(link, name \\ nil) when is_binary(name) or is_nil(name),
+    do: GenServer.call(link, {:owner_pairing, {:begin, name}}, @call_timeout_ms)
 
-  @doc "The owner confirmed in the app that both screens show the same code."
-  @spec enroll_confirm(GenServer.server()) :: :ok | {:error, term()}
-  def enroll_confirm(link), do: GenServer.call(link, {:owner_pairing, :confirm}, @call_timeout_ms)
+  @doc """
+  The owner confirmed in the app that both screens show the same code, for
+  `attempt` (`nil`: whichever is open); `{:error, :stale_attempt}` when it is
+  not the open one.
+  """
+  @spec enroll_confirm(GenServer.server(), String.t() | nil) :: :ok | {:error, term()}
+  def enroll_confirm(link, attempt \\ nil),
+    do: GenServer.call(link, {:owner_pairing, :confirm, attempt}, @call_timeout_ms)
 
   @doc "The owner said the codes differ: the next round, or the attempt closes after three."
-  @spec enroll_mismatch(GenServer.server()) :: :ok | {:error, term()}
-  def enroll_mismatch(link),
-    do: GenServer.call(link, {:owner_pairing, :mismatch}, @call_timeout_ms)
+  @spec enroll_mismatch(GenServer.server(), String.t() | nil) :: :ok | {:error, term()}
+  def enroll_mismatch(link, attempt \\ nil),
+    do: GenServer.call(link, {:owner_pairing, :mismatch, attempt}, @call_timeout_ms)
 
   @doc "The owner cancelled the pairing in the app."
-  @spec enroll_cancel(GenServer.server()) :: :ok | {:error, term()}
-  def enroll_cancel(link), do: GenServer.call(link, {:owner_pairing, :cancel}, @call_timeout_ms)
+  @spec enroll_cancel(GenServer.server(), String.t() | nil) :: :ok | {:error, term()}
+  def enroll_cancel(link, attempt \\ nil),
+    do: GenServer.call(link, {:owner_pairing, :cancel, attempt}, @call_timeout_ms)
 
   @doc """
   Forgets the attached accessory: it is told to erase its keys
@@ -188,27 +222,62 @@ defmodule FermixChannels.Accessories.Link do
   @spec revoke(GenServer.server()) :: :ok | {:error, term()}
   def revoke(link), do: GenServer.call(link, {:remove, :revoke}, @call_timeout_ms)
 
-  @doc "Starts a call from the Mac on the attached accessory: its stream, or the refusal's code."
-  @spec start_call(GenServer.server()) :: {:ok, pos_integer()} | {:error, term()}
+  @doc """
+  Starts a call from the Mac on the attached accessory, answered at once with
+  its stream, or `{:refused, code}` (the code the accessory's own request
+  would hear) for what the link refuses itself. Whether the call is then
+  admitted shows in the link's view.
+  """
+  @spec start_call(GenServer.server()) ::
+          {:ok, %{stream: pos_integer()}} | {:error, {:refused, String.t()}}
   def start_call(link), do: GenServer.call(link, :start_call, @call_timeout_ms)
 
-  @doc "Ends the accessory's call from the Mac."
-  @spec end_call(GenServer.server()) :: :ok | {:error, :no_call}
-  def end_call(link), do: GenServer.call(link, {:to_call, {:end, :mac_end}}, @call_timeout_ms)
+  @doc "Ends the accessory's call `call_id` from the Mac."
+  @spec end_call(GenServer.server(), String.t()) :: :ok | {:error, :no_call | :stale_call}
+  def end_call(link, call_id) when is_binary(call_id),
+    do: GenServer.call(link, {:to_call, call_id, {:end, :mac_end}}, @call_timeout_ms)
 
-  @doc "The Mac's mute for the accessory's call."
-  @spec mute(GenServer.server(), boolean()) :: :ok | {:error, :no_call}
-  def mute(link, muted?) when is_boolean(muted?),
-    do: GenServer.call(link, {:to_call, {:mute, muted?}}, @call_timeout_ms)
+  @doc "The Mac's mute for the accessory's call `call_id`."
+  @spec mute(GenServer.server(), String.t(), boolean()) :: :ok | {:error, :no_call | :stale_call}
+  def mute(link, call_id, muted?) when is_binary(call_id) and is_boolean(muted?),
+    do: GenServer.call(link, {:to_call, call_id, {:mute, muted?}}, @call_timeout_ms)
 
   @doc "Interrupts the assistant's speech on the accessory (a flush, then the engine's interrupt)."
-  @spec interrupt(GenServer.server()) :: :ok | {:error, :no_call}
-  def interrupt(link), do: GenServer.call(link, {:to_call, :interrupt}, @call_timeout_ms)
+  @spec interrupt(GenServer.server(), String.t()) :: :ok | {:error, :no_call | :stale_call}
+  def interrupt(link, call_id) when is_binary(call_id),
+    do: GenServer.call(link, {:to_call, call_id, :interrupt}, @call_timeout_ms)
 
   @doc "Cancels one backend task of a task-engine call."
-  @spec cancel_task(GenServer.server(), String.t()) :: :ok | {:error, :no_call}
-  def cancel_task(link, delegation_id) when is_binary(delegation_id),
-    do: GenServer.call(link, {:to_call, {:cancel_task, delegation_id}}, @call_timeout_ms)
+  @spec cancel_task(GenServer.server(), String.t(), String.t()) ::
+          :ok | {:error, :no_call | :stale_call}
+  def cancel_task(link, call_id, delegation_id)
+      when is_binary(call_id) and is_binary(delegation_id),
+      do:
+        GenServer.call(link, {:to_call, call_id, {:cancel_task, delegation_id}}, @call_timeout_ms)
+
+  @doc """
+  Runs one setup check on an attached accessory with no call (`priv/accessory/
+  PROTOCOL.md`, *Setup checks and calibration*): `:tone`, `:mic` for
+  `seconds`, `:face` (the kind's test face) or `:motion` (its test gesture).
+  """
+  @spec check_start(GenServer.server(), :tone | :mic | :face | :motion, pos_integer() | nil) ::
+          :ok | {:error, term()}
+  def check_start(link, check, seconds) when check in [:tone, :mic, :face, :motion],
+    do: GenServer.call(link, {:device, {:check, check, seconds}}, @call_timeout_ms)
+
+  @doc "Ends any running check."
+  @spec check_stop(GenServer.server()) :: :ok | {:error, term()}
+  def check_stop(link), do: GenServer.call(link, {:device, :check_stop}, @call_timeout_ms)
+
+  @doc "One Calibrate head step: `:begin`, `:nudge` with `%{axis, steps}`, `:set_zero`, `:cancel`."
+  @spec calibrate(GenServer.server(), atom(), map() | nil) :: :ok | {:error, term()}
+  def calibrate(link, op, nudge) when op in [:begin, :nudge, :set_zero, :cancel],
+    do: GenServer.call(link, {:device, {:calibrate, op, nudge}}, @call_timeout_ms)
+
+  @doc "Changes the accessory's own `volume`, `brightness` or `motion`."
+  @spec set(GenServer.server(), map()) :: :ok | {:error, term()}
+  def set(link, values) when is_map(values) and map_size(values) > 0,
+    do: GenServer.call(link, {:device, {:set, values}}, @call_timeout_ms)
 
   # -- the process --------------------------------------------------------------------
 
@@ -229,8 +298,13 @@ defmodule FermixChannels.Accessories.Link do
   @impl true
   def handle_call(:status, _from, state), do: reply(state, summary(state))
 
-  def handle_call({:owner_pairing, op}, _from, state) do
-    {result, state} = owner_pairing(state, op)
+  def handle_call({:owner_pairing, {:begin, name}}, _from, state) do
+    {result, state} = owner_pairing(state, :begin, name)
+    reply(state, result)
+  end
+
+  def handle_call({:owner_pairing, op, attempt}, _from, state) do
+    {result, state} = owner_step(state, op, attempt)
     reply(state, result)
   end
 
@@ -240,18 +314,27 @@ defmodule FermixChannels.Accessories.Link do
   end
 
   def handle_call(:start_call, _from, state) do
-    case call_refusal(state) do
+    case call_refusal(state, :mac) do
       nil -> state |> start_call_process(nil, :mac) |> start_reply()
-      code -> reply(state, {:error, code})
+      code -> reply(state, {:error, {:refused, code}})
     end
   end
 
-  def handle_call({:to_call, _command}, _from, %{call: nil} = state),
+  def handle_call({:to_call, _call_id, _command}, _from, %{call: nil} = state),
     do: reply(state, {:error, :no_call})
 
-  def handle_call({:to_call, command}, _from, state) do
-    send(state.call.pid, command)
-    reply(state, :ok)
+  def handle_call({:to_call, call_id, command}, _from, %{call: call} = state) do
+    if call.call_id == call_id and not call.ending? do
+      send(call.pid, command)
+      reply(state, :ok)
+    else
+      reply(state, {:error, :stale_call})
+    end
+  end
+
+  def handle_call({:device, command}, _from, state) do
+    {result, state} = device(state, command)
+    reply(state, result)
   end
 
   @impl true
@@ -270,6 +353,9 @@ defmodule FermixChannels.Accessories.Link do
 
   def handle_info({:call_pcm, stream, pcm}, state),
     do: state |> call_pcm(stream, pcm) |> continue()
+
+  def handle_info({:call_view, stream, call_id, view}, state),
+    do: state |> call_view(stream, call_id, view) |> continue()
 
   def handle_info(message, state), do: transport_message(state, message)
 
@@ -325,6 +411,7 @@ defmodule FermixChannels.Accessories.Link do
   defp new_state(opts) do
     mode = Keyword.fetch!(opts, :mode)
     true = mode in [:attach, :pairing]
+    home = Keyword.fetch!(opts, :home)
 
     %__MODULE__{
       path: Keyword.fetch!(opts, :path),
@@ -332,12 +419,14 @@ defmodule FermixChannels.Accessories.Link do
       mode: mode,
       transport: Keyword.fetch!(opts, :transport),
       transport_opts: Keyword.get(opts, :transport_opts, []),
-      home: Keyword.fetch!(opts, :home),
+      home: home,
       store_writer: Keyword.fetch!(opts, :store_writer),
       clock: Keyword.get(opts, :clock, fn -> System.monotonic_time(:millisecond) end),
       send_after: Keyword.get(opts, :send_after, &Process.send_after/3),
       tick_ms: Keyword.get(opts, :tick_ms, @tick_ms),
       readiness: Keyword.fetch!(opts, :readiness),
+      voice_device: Keyword.get(opts, :voice_device, fn -> Store.load_voice_device(home) end),
+      utc_now: Keyword.get(opts, :utc_now, &DateTime.utc_now/0),
       notify: Keyword.get(opts, :notify, fn _summary -> :ok end),
       ended: Keyword.get(opts, :ended, fn _reason -> :ok end),
       call_module: Keyword.get(opts, :call_module, FermixChannels.Accessories.Call),
@@ -365,8 +454,8 @@ defmodule FermixChannels.Accessories.Link do
   defp reply(%{closing: nil} = state, value), do: {:reply, value, publish(state)}
   defp reply(state, value), do: {:stop, {:shutdown, state.closing}, value, state}
 
-  defp start_reply(%{call: %{stream: stream}} = state), do: reply(state, {:ok, stream})
-  defp start_reply(state), do: reply(state, {:error, "call_failed"})
+  defp start_reply(%{call: %{stream: stream}} = state), do: reply(state, {:ok, %{stream: stream}})
+  defp start_reply(state), do: reply(state, {:error, {:refused, "call_failed"}})
 
   defp unexpected(state, message) do
     Logger.debug("accessory link ignored an unexpected message: #{inspect(message, limit: 8)}")
@@ -408,6 +497,9 @@ defmodule FermixChannels.Accessories.Link do
         hello_due?: false,
         verified: nil,
         refusal: nil,
+        refused_range: nil,
+        check: nil,
+        fault: nil,
         readiness_sent: nil,
         parser: Parser.reset(state.parser),
         reassembler: Reassembler.new()
@@ -431,7 +523,7 @@ defmodule FermixChannels.Accessories.Link do
   # The link starts again: whatever it carried ends, and a new HELLO follows.
   defp restart(state, reason) do
     state
-    |> end_call(reason)
+    |> stop_call(reason)
     |> reset_pairing()
     |> greet()
   end
@@ -595,7 +687,7 @@ defmodule FermixChannels.Accessories.Link do
   defp dispatch(state, %{type: "refuse", code: "auth_timeout"}), do: accessory_timed_out(state)
 
   defp dispatch(state, %{type: "pong"}), do: state
-  defp dispatch(state, %{type: "refuse", code: code}), do: accessory_refused(state, code)
+  defp dispatch(state, %{type: "refuse"} = refusal), do: accessory_refused(state, refusal)
   defp dispatch(state, %{type: "error"} = error), do: peer_error(state, error)
   defp dispatch(state, %{type: "attached", state: accessory}), do: on_attached(state, accessory)
 
@@ -605,11 +697,16 @@ defmodule FermixChannels.Accessories.Link do
   defp dispatch(state, %{type: "diag.counters", counters: counters}),
     do: %{state | diag_counters: counters}
 
+  # The accessory's own fault is kept until the next HELLO, so the Mac says
+  # it (M91 E3: "StackChan reports a problem").
   defp dispatch(state, %{type: "diag.fault", code: code}) do
     Logger.warning("accessory #{state.path} reported a fault: #{code}")
     Telemetry.emit_fault(:accessory_fault, :peer, 1)
-    state
+    %{state | fault: code}
   end
+
+  defp dispatch(state, %{type: "check.level", rms: rms}), do: check_level(state, rms)
+  defp dispatch(state, %{type: "check.result"} = result), do: check_result(state, result)
 
   defp dispatch(state, %{type: "enroll." <> _} = message), do: accessory_pairing(state, message)
   defp dispatch(state, %{type: "call.request"} = request), do: call_request(state, request)
@@ -617,7 +714,7 @@ defmodule FermixChannels.Accessories.Link do
   defp dispatch(state, %{type: type} = message) when type in @call_scoped,
     do: to_call(state, message)
 
-  defp dispatch(state, message), do: %{state | last_check: Map.delete(message, :gen)}
+  defp dispatch(state, %{type: "diag.chunk"}), do: state
 
   defp peer_error(state, %{code: code} = error) do
     Logger.warning("accessory #{state.path} refused a host message: #{inspect(error)}")
@@ -698,10 +795,15 @@ defmodule FermixChannels.Accessories.Link do
     |> send_readiness()
   end
 
-  defp accessory_refused(state, code) do
-    refusal = Map.fetch!(@refusals, code)
-    attach_telemetry(state, :accessory_refused, refusal)
-    move(%{state | refusal: {:accessory, refusal}}, :refused, :refused)
+  # An accessory's `wire_version` refusal names its own range, which says
+  # which side to update (PROTOCOL.md, *Versioning*).
+  defp accessory_refused(state, %{code: code} = refusal) do
+    reason = Map.fetch!(@refusals, code)
+    attach_telemetry(state, :accessory_refused, reason)
+    range = if reason == :wire_version, do: {refusal[:wire_min], refusal[:wire_max]}
+
+    %{state | refusal: {:accessory, reason}, refused_range: range}
+    |> move(:refused, :refused)
   end
 
   defp attach_telemetry(state, status, accessory_refusal) do
@@ -732,18 +834,25 @@ defmodule FermixChannels.Accessories.Link do
 
   # -- pairing ----------------------------------------------------------------------------
 
-  defp owner_pairing(state, :begin) do
+  defp owner_pairing(state, :begin, name) do
     cond do
       state.mode != :pairing -> {{:error, :not_pairing}, state}
+      state.phase == :attached -> {{:error, :already_paired}, state}
       state.phase != :unenrolled -> {{:error, :not_unenrolled}, state}
       Pairing.open?(state.enrollment) -> {{:error, :pairing_open}, state}
-      true -> begin_pairing(state)
+      true -> begin_pairing(%{state | pairing_name: name})
     end
   end
 
-  defp owner_pairing(%{enrollment: nil} = state, _op), do: {{:error, :no_pairing}, state}
+  # Every step names the attempt it was drawn from (M91 §07: bind every step
+  # to a daemon-issued attempt ID); `nil` is whichever is open.
+  defp owner_step(%{enrollment: nil} = state, _op, _attempt), do: {{:error, :no_pairing}, state}
 
-  defp owner_pairing(state, op) do
+  defp owner_step(%{enrollment: %{attempt: open}} = state, _op, attempt)
+       when attempt != nil and attempt != open,
+       do: {{:error, :stale_attempt}, state}
+
+  defp owner_step(state, op, _attempt) do
     {effects, enrollment} =
       Pairing.owner(state.enrollment, op, state.host_key, state.gen, now(state))
 
@@ -756,7 +865,10 @@ defmodule FermixChannels.Accessories.Link do
     case StoreWriter.ensure_host_key(state.store_writer) do
       {:ok, host} ->
         {effects, enrollment} = Pairing.begin(host, state.gen, now(state))
-        {:ok, run_effects(%{state | host_key: host, enrollment: enrollment}, effects)}
+        expires_at = DateTime.add(state.utc_now.(), div(Enrollment.window_ms(), 1_000), :second)
+
+        state = %{state | host_key: host, enrollment: enrollment, pairing_expires_at: expires_at}
+        {:ok, run_effects(state, effects)}
 
       {:error, reason} ->
         {{:error, {:host_key, reason}}, state}
@@ -793,7 +905,7 @@ defmodule FermixChannels.Accessories.Link do
       accessory_id: id,
       accessory_pk: pk,
       kind: state.peer.kind,
-      name: meta.display_name,
+      name: state.pairing_name || meta.display_name,
       port_hint: state.serial,
       enrolled_at: DateTime.utc_now()
     }
@@ -810,7 +922,7 @@ defmodule FermixChannels.Accessories.Link do
 
   defp remove(%{phase: :attached} = state, how) do
     id = state.verified.accessory.accessory_id
-    state = end_call(state, :forgotten)
+    state = stop_call(state, :forgotten)
     state = if how == :forget, do: transmit(state, %{type: "accessory.forget"}), else: state
 
     case StoreWriter.forget(state.store_writer, id) do
@@ -821,22 +933,144 @@ defmodule FermixChannels.Accessories.Link do
 
   defp remove(state, _how), do: {{:error, :not_attached}, state}
 
+  # -- setup checks, calibration and settings -------------------------------------------
+
+  # Only on an attached accessory with no call, and only what it reported the
+  # capability of (PROTOCOL.md, *Setup checks and calibration*, *Capabilities*).
+  defp device(state, command) do
+    with :ok <- quiet(state),
+         {:ok, message, urgent?} <- device_message(state, command),
+         :ok <- device_capable(state, message) do
+      {:ok, state |> transmit(message, urgent?) |> checking(command)}
+    else
+      {:error, _reason} = refused -> {refused, state}
+    end
+  end
+
+  defp quiet(%{phase: :attached, call: nil}), do: :ok
+  defp quiet(%{phase: :attached}), do: {:error, :call_active}
+  defp quiet(_state), do: {:error, :not_attached}
+
+  defp device_message(_state, {:check, :tone, _seconds}),
+    do: {:ok, %{type: "check.tone"}, false}
+
+  defp device_message(_state, {:check, :mic, seconds}) when seconds in 1..10,
+    do: {:ok, %{type: "check.mic", seconds: seconds}, false}
+
+  defp device_message(state, {:check, :face, _seconds}),
+    do: {:ok, %{type: "check.face", pose: kind_pin(state, :face_pose)}, false}
+
+  defp device_message(state, {:check, :motion, _seconds}),
+    do: {:ok, %{type: "check.motion", gesture: kind_pin(state, :motion_gesture)}, false}
+
+  defp device_message(_state, :check_stop), do: {:ok, %{type: "check.stop"}, true}
+
+  defp device_message(_state, {:calibrate, :nudge, %{axis: axis, steps: steps}})
+       when axis in [:pan, :tilt] and steps in -64..64 and steps != 0 do
+    message = %{
+      type: "accessory.calibrate",
+      op: "nudge",
+      axis: Atom.to_string(axis),
+      steps: steps
+    }
+
+    {:ok, message, false}
+  end
+
+  defp device_message(_state, {:calibrate, op, nil}) when op in [:begin, :set_zero, :cancel],
+    do: {:ok, %{type: "accessory.calibrate", op: Atom.to_string(op)}, false}
+
+  defp device_message(_state, {:set, values}) when map_size(values) > 0,
+    do:
+      {:ok, Map.put(Map.take(values, [:volume, :brightness, :motion]), :type, "accessory.set"),
+       false}
+
+  # Anything else is outside the contract's own set (a check's seconds out of
+  # range, a nudge with no axis, a step that takes none): refused, never sent.
+  defp device_message(_state, _command), do: {:error, :invalid_command}
+
+  defp kind_pin(state, key) do
+    {:ok, meta} = Attach.kind_metadata(state.verified.kind)
+    Map.fetch!(meta, key)
+  end
+
+  # `accessory.set`'s `motion` needs the capability its message type does not
+  # name; everything else is the type's own.
+  defp device_capable(state, %{type: "accessory.set"} = message) do
+    if Map.has_key?(message, :motion) and :motion not in caps(state),
+      do: {:error, {:capability_missing, :motion}},
+      else: :ok
+  end
+
+  defp device_capable(state, %{type: type}), do: capable(state, type)
+
+  defp checking(state, {:check, check, _seconds}),
+    do: %{state | check: %{check: check, status: :running, code: nil, level: nil}}
+
+  defp checking(state, _command), do: state
+
+  defp check_level(%{check: %{status: :running} = check} = state, rms),
+    do: %{state | check: %{check | level: rms}}
+
+  defp check_level(state, _rms), do: count(state, :dropped, :no_check)
+
+  defp check_result(state, %{check: check, result: result} = message) do
+    level = if state.check, do: state.check.level
+
+    %{
+      state
+      | check: %{
+          check: Map.fetch!(@checks, check),
+          status: String.to_existing_atom(result),
+          code: message[:code],
+          level: level
+        }
+    }
+  end
+
   # -- calls ------------------------------------------------------------------------------
 
   defp call_request(state, %{request: request, source: source}) do
-    case call_refusal(state) do
+    case call_refusal(state, :accessory) do
       nil -> start_call_process(state, request, Map.fetch!(@sources, source))
       code -> transmit(state, refused_result(request, code))
     end
   end
 
-  defp call_refusal(state) do
+  # A tap asks for a call on the accessory it came from, which must be the
+  # voice device; the Mac's start is the owner choosing this accessory now.
+  defp call_refusal(state, origin) do
     cond do
       state.phase != :attached -> "not_attached"
       state.call != nil -> "call_in_progress"
       state.next_stream > @max_stream -> "stream_ids_exhausted"
+      low_power?(state) -> "power_too_low"
+      origin == :accessory -> choice_refusal(state) || readiness_refusal(state.readiness.())
       true -> readiness_refusal(state.readiness.())
     end
+  end
+
+  defp low_power?(%{accessory_state: %{power: power}}), do: power in @low_power
+  defp low_power?(_state), do: false
+
+  # A tap needs this accessory to be the voice device; a choice that cannot be
+  # read refuses it with its own reason (`VoiceDevice.refusal/3`), never read
+  # as chosen or not.
+  defp choice_refusal(%{verified: %{accessory: %{accessory_id: id}}} = state) do
+    read = state.voice_device.()
+
+    case VoiceDevice.refusal({:accessory, id}, read, true) do
+      {:error, {reason, _device, _sentence}} -> voice_device_unreadable(state, read, reason)
+      :ok -> if read == {:ok, {:accessory, id}}, do: nil, else: "not_selected"
+    end
+  end
+
+  defp voice_device_unreadable(state, {:error, why}, reason) do
+    Logger.error(
+      "accessory link #{state.path}: the voice device could not be read: #{inspect(why)}"
+    )
+
+    Atom.to_string(reason)
   end
 
   defp readiness_refusal(:ready), do: nil
@@ -861,7 +1095,10 @@ defmodule FermixChannels.Accessories.Link do
 
     case state.call_module.start_link(opts) do
       {:ok, pid} ->
-        %{state | call: new_call(pid, stream, request, source), next_stream: stream + 1}
+        call =
+          Map.put(new_call(pid, stream, request, source), :accessory_id, accessory.accessory_id)
+
+        %{state | call: call, next_stream: stream + 1}
 
       {:error, reason} ->
         call_not_started(state, request, reason)
@@ -874,6 +1111,9 @@ defmodule FermixChannels.Accessories.Link do
       stream: stream,
       request: request,
       source: source,
+      call_id: nil,
+      view: nil,
+      end_reason: nil,
       result?: false,
       started?: false,
       ending?: false
@@ -886,15 +1126,24 @@ defmodule FermixChannels.Accessories.Link do
 
   # What the call sends goes out only while it is the link's current call.
   defp call_send(%{call: %{stream: stream, ending?: false}} = state, stream, message, urgent?) do
-    state = mark_call(state, message.type)
+    state = mark_call(state, message)
     transmit(state, message, urgent?)
   end
 
   defp call_send(state, _stream, _message, _urgent?), do: count(state, :dropped, :stale_call)
 
-  defp mark_call(state, "call.result"), do: put_in(state.call.result?, true)
-  defp mark_call(state, "call.start"), do: put_in(state.call.started?, true)
-  defp mark_call(state, _type), do: state
+  defp mark_call(state, %{type: "call.result"}), do: put_in(state.call.result?, true)
+
+  # Admitted: the call has its id, which the Mac's controls name.
+  defp mark_call(state, %{type: "call.start", call: call_id}),
+    do: %{state | call: %{state.call | started?: true, call_id: call_id}}
+
+  defp mark_call(state, _message), do: state
+
+  defp call_view(%{call: %{stream: stream}} = state, stream, call_id, view),
+    do: %{state | call: %{state.call | view: view, call_id: state.call.call_id || call_id}}
+
+  defp call_view(state, _stream, _call_id, _view), do: state
 
   defp call_pcm(%{call: %{stream: stream, ending?: false}} = state, stream, pcm),
     do: write_speaker(state, stream, pcm)
@@ -925,16 +1174,16 @@ defmodule FermixChannels.Accessories.Link do
   # every path: a call lives only on an attached link, and leaving `:attached`
   # ends it, for `why`.
   defp move(state, :attached, _why), do: %{state | phase: :attached}
-  defp move(state, phase, why), do: %{end_call(state, why) | phase: phase}
+  defp move(state, phase, why), do: %{stop_call(state, why) | phase: phase}
 
   # The link ends its call itself: the accessory is told at once, and the call
   # process tears its session down and exits.
-  defp end_call(%{call: nil} = state, _reason), do: state
-  defp end_call(%{call: %{ending?: true}} = state, _reason), do: state
+  defp stop_call(%{call: nil} = state, _reason), do: state
+  defp stop_call(%{call: %{ending?: true}} = state, _reason), do: state
 
-  defp end_call(%{call: call} = state, reason) do
+  defp stop_call(%{call: call} = state, reason) do
     send(call.pid, {:end, reason})
-    state = put_in(state.call.ending?, true)
+    state = %{state | call: %{call | ending?: true, end_reason: reason}}
     if call.started?, do: transmit(state, call_end(call.stream, reason), true), else: state
   end
 
@@ -945,9 +1194,27 @@ defmodule FermixChannels.Accessories.Link do
     do: %{type: "call.end", stream: stream, reason: reason}
 
   defp call_exited(%{call: call} = state, reason) do
-    state = %{state | call: nil}
+    state = %{state | call: nil, last_call: last_call(state, call, reason)}
     if call.ending?, do: state, else: call_settled(state, call, reason)
   end
+
+  # How the call ended, for the Mac (`accessories.status`'s `last_call`): the
+  # call's own reason, the refusal's code, or the link's reason for ending it.
+  defp last_call(state, call, reason) do
+    %{
+      accessory_id: call.accessory_id,
+      call_id: call.call_id,
+      reason: ended_reason(call, reason),
+      ended_at: state.utc_now.()
+    }
+  end
+
+  defp ended_reason(%{ending?: true, end_reason: :forgotten}, _reason), do: "forgotten"
+  defp ended_reason(%{ending?: true, end_reason: :mac_end}, _reason), do: "mac_end"
+  defp ended_reason(%{ending?: true}, _reason), do: "link_lost"
+  defp ended_reason(_call, {:shutdown, {:refused, code}}), do: code
+  defp ended_reason(_call, {:shutdown, {:call_ended, reason}}), do: reason
+  defp ended_reason(_call, _reason), do: "call_failed"
 
   defp call_settled(state, _call, {:shutdown, {:refused, _code}}), do: state
 
@@ -1033,9 +1300,40 @@ defmodule FermixChannels.Accessories.Link do
       accessory_state: state.accessory_state,
       refusal: state.refusal,
       voice: state.readiness_sent,
-      enrollment: Pairing.summary(state.enrollment),
-      call: state.call && Map.take(state.call, [:stream, :source, :ending?]),
+      wire: state.peer && state.peer.wire,
+      refused_range: state.refused_range,
+      enrollment: enrollment_summary(state),
+      call: call_summary(state.call),
+      check: state.check,
+      fault: state.fault,
+      last_call: state.last_call,
       counters: state.counters
+    }
+  end
+
+  defp enrollment_summary(%{enrollment: nil}), do: nil
+
+  defp enrollment_summary(state),
+    do: Map.put(Pairing.summary(state.enrollment), :expires_at, state.pairing_expires_at)
+
+  # `phase`: `starting` until the call is admitted, `ending` while it settles.
+  defp call_summary(nil), do: nil
+
+  defp call_summary(call) do
+    phase =
+      cond do
+        call.ending? -> :ending
+        call.started? -> :active
+        true -> :starting
+      end
+
+    %{
+      call_id: call.call_id,
+      stream: call.stream,
+      source: call.source,
+      phase: phase,
+      ending?: call.ending?,
+      view: call.view
     }
   end
 

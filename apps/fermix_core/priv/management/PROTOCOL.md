@@ -138,12 +138,13 @@ primary's, exactly as its own socket would give it.
 
 - **Answered on this computer** (device-class): `hello`, `lifecycle.*`,
   `diagnostics.build`, `logs.query`, `doctor.*`, `setup.session.create`,
-  `setup.detect`, `computer_use.*`, `imessage.*`, `browser.install.start`,
+  `setup.detect`, `computer_use.*`, `imessage.*`, `accessories.*` (the
+  robot is wired to this computer), `browser.install.start`,
   `capabilities.install.start`, Always On's steps (`home.act`: a move back
   and Restore here are this computer's own, and `home.act` sends the server's
   own steps itself, below), and `settings.get` and `settings.apply` for a section
   that configures only this computer: `sandbox`, `computer_use`,
-  `computer_history` and `channels.imessage`.
+  `computer_history`, `channels.imessage` and `accessories`.
 - **Composed** (answered here, with the primary's own part): `home.status`
   answers this computer's facts and adds `primary_home`, the primary's own
   `home.status`; `settings.sections` lists this computer's own sections and
@@ -564,7 +565,7 @@ daemon onto anything else.
 | `lifecycle.cancel` | `lease_id` | Releases the window with the daemon untouched. |
 | `diagnostics.build` | none | A bounded, field-allowlisted, scrubbed diagnostic object for user-selected export. |
 | `setup.state.get` | none | Everything a setup surface reads before it renders: readiness with its gating split, restart state with the daemon's own reason sentences, one row per provider and per channel, the personalization presence summary, feature switches, the profile, and the coexistence facts. Minimum version `2`. |
-| `settings.sections` | none | The ordered inventory of every section this daemon can serve, each with the pane it renders under, as `{sections, primary_missing}`. The one enumerator: a section reachable through `settings.get` and absent here fails the daemon's own contract test. On a linked desktop it is composed (see *After a move*): this computer's own sections (`sandbox`, `computer_use`, `computer_history`, `channels.imessage`) and the primary's others, and `primary_missing` the sentence while the primary's are missing; null everywhere else. Minimum version `2`. |
+| `settings.sections` | none | The ordered inventory of every section this daemon can serve, each with the pane it renders under, as `{sections, primary_missing}`. The one enumerator: a section reachable through `settings.get` and absent here fails the daemon's own contract test. On a linked desktop it is composed (see *After a move*): this computer's own sections (`sandbox`, `computer_use`, `computer_history`, `channels.imessage`, `accessories`) and the primary's others, and `primary_missing` the sentence while the primary's are missing; null everywhere else. Minimum version `2`. |
 | `settings.get` | `section` | One section's rows. Exactly one section per call, which is what keeps every result inside the published depth budget. Minimum version `2`. |
 | `settings.apply` | `section`, `values` | Applies the changed keys of one section and answers with what landed, the restart state, a readiness summary, and the changes the operator did not type. Minimum version `2`. |
 | `settings.reload` | none | Re-reads the settings file, pushes it into the running configuration, and re-records the baseline. The one action behind `Reload settings from disk`. Minimum version `2`. |
@@ -652,6 +653,26 @@ daemon onto anything else.
 | `home.move.readiness` | `candidate_id` | On the primary only: what the owner reviews before moving this home to a held candidate, answered `{ready, items}`, each item `{id, status, sentence}` with `status` `ok`, `warn` or `block` and `ready` false while any item blocks. The items, in order: `keychain_secrets` (the secrets this computer keeps in its keychain move with the home, into the server's secret files; one the keychain will not give blocks, named as its settings row labels it ("your Anthropic key", with the section's title when the label alone does not say which; one no row shows is counted), never by its id or its value; checking reads each value, which opens the keychain and can raise its prompt, and the sentence says so), `engine_version` (a server that runs an older Fermix blocks, and so does a newer one, which could never move the home back here; on a move back to the Mac the home left, a candidate whose `os` is macOS, only a Mac older than the server blocks), `disk` (the capture needs about twice the home free here; short of it blocks, with the numbers), `s3_size` (a home over one S3 upload, 5 GiB, warns where the server keeps snapshots in S3), `plugins` (on a server of another OS or architecture, the plugins the catalog has no build of for it warn, named; the server installs every other one again right after the move), `stays_here` (what the home has turned on that runs only on this computer stops after the move: iMessage on a Mac, voice calls, meetings, each named; `ok` when none is on; on a move back to a Mac, what of them the server's settings turn on runs there again, named, and is `ok`), `whatsapp` (WhatsApp turned on warns: it stops after the move until the owner runs the Tailscale Funnel command the Always On screen shows for the server, which gives it an inbound address there, and points Meta at the address it prints), `slack` (Slack turned on without Socket Mode warns: it stops after the move unless switched to Socket Mode), `coding_agents` (coding agents approved here warn: they ask for the owner's approval again on the server, as after any restore), `cutover_gap` (a recurring job more than an hour late is skipped; with Telegram set up, its messages sent during the move wait until it is done), `serves_nothing` (this computer serves nothing during the move) and `service` (Fermix run from a terminal, with nothing to start it again, warns: "Fermix runs from a terminal here, so it stops when the move starts. Start it again to finish."; the Mac app's engine, a process inside Fermix's own systemd unit (`fermix.service`, read from its cgroup, never from an inherited `INVOCATION_ID`) and a `fermix service` install are `ok`). A client that does not know an id shows its sentence as it is. The engine keeps the review for the start that follows it; one it cannot keep is `unavailable` {`capability`: `home`}. A candidate this home does not hold is `invalid_params` on `candidate_id`; another role is `unavailable` {`capability`: `home`}. It walks the whole home first: a client gives it at least 65 s, and a desktop forwarding it waits 60 s (*Forward deadlines*). Rail-only: answered only to a desktop's forward, which a linked desktop's own `home.act` sends; on `daemon.sock` it is `unavailable` {`capability`: `home`, `method`} with "Always On takes this step itself: send home.act with the action the summary offers." (*After a move*). On the computer that sets up, `home.act` runs the same review at Move now and at Check again. Minimum version `2`. |
 | `home.move.start` | `candidate_id`, `recovery_passphrase` (12 to 1024 bytes), `keep_as_desktop?` (boolean, true unless said) | On the primary only, and only while `home.move.readiness` has no item that blocks (otherwise `unavailable` {`capability`: `home`} with the sentence of each block). A ready review of the same candidate at most 15 minutes old is taken as it was shown, so the keychain is not read again before the move's capture reads it; with none, the engine checks now. Before anything else of the move, the recovery passphrase is checked against the recovery key this primary keeps: with one set, it must be the passphrase that set it (derived under the kept key's own salt, it must give its public half), else `invalid_params` on `recovery_passphrase` with "That is not the recovery passphrase you set."; with none set, it sets one, as `home.snapshots.passphrase` does, and a start refused after that keeps it. The move carries the kept key, so the new primary's snapshots open with the passphrase the owner already has and a move never makes a second key. On a move back this runs on the server, whose key it is. It writes the move to a held candidate, hands this home to the device role, removes this home's record of a move back that ended (`device/return.json`), answers `{move_id, candidate, recovery_recipient, key_id, keep_as_desktop, sentence}`, and then restarts the engine through the daemon's one stop path; the service manager brings it back in the device role, which carries the move out. The passphrase is never stored, logged or answered. A candidate this home does not hold is `invalid_params` on `candidate_id` and a passphrase under 12 bytes `invalid_params` on `recovery_passphrase`, each with a sentence; another role, a move already under way, or a home that never started as the primary is `unavailable` {`capability`: `home`} with the daemon's sentence. It may walk the whole home first: a client gives it at least 65 s, and a desktop forwarding it waits 60 s, answering `unconfirmed` when the primary had it and its answer was lost (*After a move*). Rail-only: answered only to a desktop's forward, which a linked desktop's own `home.act` sends; on `daemon.sock` it is `unavailable` {`capability`: `home`, `method`} with "Always On takes this step itself: send home.act with the action the summary offers." (*After a move*). On the computer that sets up, `home.act`'s Move now reaches the same start in place. Minimum version `2`. |
 | `home.act` | `action` (an action id the summary offers, but `learn_more` and `update`, which the surface opens itself), `key` (the `key` it was drawn with), `input` (optional: `recovery_passphrase`, text, as the action's `needs` asked) | Every Always On step (Always On setup §3.4, and *The Always On summary*'s *Acting on it*). The engine runs one act at a time and reads the summary first: one that does not offer `action` under `key` answers `changed` with `details.sentence` alone, and does nothing; the surface reads `home.status` again. Otherwise it runs the step and answers `{summary, result}`: the summary after it (Restore here's job already says it runs) and `result`, `own_server`'s `{code, expires_at, command, tailscale}` (the code answered once and never again, the command carrying none, `tailscale` the optional step that also joins the server to the owner's tailnet, `{sentence, command}`), `move_now`'s and `try_again`'s `{move_id}`, null for every other step. Refusals, each with `details.sentence`: `invalid_params` on `action` (one the surface opens itself, or no action), `key`, `input` or the field of a missing or bad input (a passphrase that is not the one set: "That is not the recovery passphrase you set."); `unavailable` {`capability`: `home`} (a backup or a restore already runs, the review blocks the move, nothing to move to); `external_change` and `config_unreadable` when the recovery key could not be kept; and a step sent to the server answered as the server answered it (`primary_unreachable`, `unconfirmed` among them). `input` is never logged, traced or answered. An owner decision. Device-class: a linked desktop answers it itself, sending the server's own steps over the link (*After a move*), and the server refuses one forwarded to it with `device_class_method`. A client gives it 90 s (a review sent to the server takes up to 60 s). Minimum version `2`. |
+| `accessories.status` | none; or `after` (a `key`) and `wait_ms` (at most 25,000) together, to wait for a change | The accessory picture this Mac draws (see *Accessories*): `key`, `state` (`off`, `needs_local_primary`, `not_running`, `on`), `sentence`, `enabled`, `kinds`, `voice`, `voice_device`, `ports`, `accessories`, `pairing` and `call`. Answered in every role and with accessories off. With `after` and `wait_ms` it is answered once its `key` is not `after`, or when `wait_ms` passed. Device-class. Minimum version `2`. |
+| `accessories.pair.start` | `path` | Opens the port the owner selected for pairing, ending whatever held it, and answers the status. A port must be listed (`invalid_params` on `path`) and not released for a firmware update. An owner decision. Device-class. Minimum version `2`. |
+| `accessories.pair.begin` | `path`, `name` (optional, 1 to 64 bytes) | Starts the pairing attempt on the selected port once it reads `unpaired`: the robot asks "Pair with this Mac?" on its screen. `name` is the name the paired robot is kept under, the kind's name when absent. Answers the status, whose `pairing` names the new `attempt`. An owner decision. Device-class. Minimum version `2`. |
+| `accessories.pair.decide` | `path`, `attempt`, `matches` (boolean) | The owner's answer to the compare code: `true` confirms it (the robot is enrolled once it confirmed too), `false` says the codes differ (the next round with a new code, and the third closes the attempt). Answers the status. An `attempt` that is not the open one answers `changed`. An owner decision. Device-class. Minimum version `2`. |
+| `accessories.pair.cancel` | `path`, `attempt` (optional) | Cancels the open attempt, if any (`changed` when `attempt` names another), closes the selected port and clears the selection, and answers the status. A robot already enrolled stays paired: its row says so, and Forget removes it. An owner decision. Device-class. Minimum version `2`. |
+| `accessories.retry` | `path` | Opens a busy or failed port again now, or the port that gave no Fermix answer, and answers the status. An owner decision. Device-class. Minimum version `2`. |
+| `accessories.release` | `path` | Releases a port for a firmware update: the port is closed, and it stays closed, across the installer's resets, until `accessories.reconnect`. Refused with "End the call first." while the robot on it has a call, running or settling. Answers the status. An owner decision. Device-class. Minimum version `2`. |
+| `accessories.reconnect` | `path` | Watches a released port again and answers the status. An owner decision. Device-class. Minimum version `2`. |
+| `accessories.forget` | `accessory_id` | Forgets a paired robot (the `forget` action): an attached one is told to erase its keys and its call ends; its record is erased either way, and it stops being the voice device. Answers the status. An owner decision. Device-class. Minimum version `2`. |
+| `accessories.revoke` | `accessory_id` | Erases a paired robot's record at this Mac alone (the `revoke` action, offered wherever `forget` is), without telling the robot, so its next attach is refused: for a robot that is lost or that cannot be told. Its call ends and it stops being the voice device. Answers the status. An owner decision. Device-class. Minimum version `2`. |
+| `accessories.voice_device.set` | `device` (`desktop` or `accessory:<accessory_id>`) | Chooses where the next call captures and plays audio. Only while no call runs or settles anywhere in this home (otherwise `unavailable` with the sentence); an accessory must be paired. While an accessory is chosen, the Mac's own call on `realtime.sock` is refused `voice_device_elsewhere` with the daemon's sentence (`priv/realtime/PROTOCOL.md`, *One call at a time*), and a tap on a robot that is not chosen is refused `not_selected`. Answers the status. An owner decision. Device-class. Minimum version `2`. |
+| `accessories.call.start` | `accessory_id` | Starts a call on an attached robot from the Mac and answers the status at once, inside the standard call timeout. The status long poll carries what follows: `call.phase` `starting`, then `active` once admitted, or, when the voice core refuses it (another call holds the home's one call), no `call` and the robot's `last_call` naming the refusal. A start the link refuses itself answers `unavailable` {`capability`: `accessories`, `code`, `sentence`}, `code` the refusal's (`call_in_progress` while the robot has a call, `voice_disabled`, `missing_key`, `restart_required`, `power_too_low`). A robot that is not attached is refused `invalid_params` on `accessory_id` ("That robot is not connected."). An owner decision. Device-class. Minimum version `2`. |
+| `accessories.call.end` | `accessory_id`, `call_id` | Ends the robot's call and answers the status. A `call_id` that is not the current call's answers `changed`. An owner decision. Device-class. Minimum version `2`. |
+| `accessories.call.mute` | `accessory_id`, `call_id`, `muted` (boolean) | The Mac's mute for the robot's call: the robot closes its microphone gate. Answers the status; `changed` as `accessories.call.end`. An owner decision. Device-class. Minimum version `2`. |
+| `accessories.call.interrupt` | `accessory_id`, `call_id` | Stops the assistant's reply on the robot. It does not cancel a task. Answers the status; `changed` as `accessories.call.end`. An owner decision. Device-class. Minimum version `2`. |
+| `accessories.call.task.cancel` | `accessory_id`, `call_id`, `task` | Cancels one task of a Live or Grok call (a task the call view marks `cancellable`). Answers the status; `changed` as `accessories.call.end`. An owner decision. Device-class. Minimum version `2`. |
+| `accessories.check.start` | `accessory_id`, `check` (`tone`, `mic`, `face`, `motion`), `seconds` (`mic` only, 1 to 10, default 5) | Runs one local setup check on an attached robot with no call: a test tone, the microphone's level while the owner speaks (levels only, no audio leaves the robot), the kind's test face or its test head movement. Its progress and result show in the accessory's `check`. Answers the status. An owner decision. Device-class. Minimum version `2`. |
+| `accessories.check.stop` | `accessory_id` | Ends any running check and answers the status. An owner decision. Device-class. Minimum version `2`. |
+| `accessories.calibrate` | `accessory_id`, `op` (`begin`, `nudge`, `set_zero`, `cancel`), `axis` and `steps` (`nudge` only: `pan` or `tilt`, −64 to 64 and not 0) | Calibrate head, one step at a time, on an attached robot with head motion and no call. Progress shows in the accessory's `state.calibration`. Answers the status. An owner decision. Device-class. Minimum version `2`. |
+| `accessories.set` | `accessory_id`, `volume`, `brightness` (each 0 to 100), `motion` (boolean, robots with head motion only), at least one | Changes the robot's own settings and answers the status; the robot reports the values it took in `state`. An owner decision. Device-class. Minimum version `2`. |
 
 Notes that the shapes alone do not carry:
 
@@ -1707,6 +1728,213 @@ Notes that the shapes alone do not carry:
   needs a restart: the scheduler reads the section at every run and plans
   again when it is saved.
 
+## Accessories
+
+`accessories.*` manages a Fermix accessory (M91: a StackChan robot) wired to
+this Mac over USB. The daemon owns the port, the pairing records and the
+robot's calls (`priv/accessory/PROTOCOL.md`); the app sends requests and draws
+what the daemon answers, and keeps no state of its own but unsaved form input.
+Every sentence and every action a row offers is the daemon's; the app renders
+them as they are and keeps no compatibility table, no readiness rule and no
+copy of its own.
+
+**Where it answers.** Every method is device-class (*After a move*): the
+engine that receives it answers it. Accessories run only on a local Mac
+primary, so on a device-role or candidate engine, or off macOS,
+`accessories.status` answers `state` `needs_local_primary` and every other
+method `unavailable` {`capability`: `accessories`, `sentence`: "StackChan setup
+needs a local Mac primary."}. With accessories off, the status answers `off`
+and the other methods `unavailable` with "StackChan is off."; Forget and Revoke
+still erase a record then.
+
+**The switch.** `[fermix_channels.accessories] enabled` is the `accessories`
+settings section's one row, `accessories_enabled` (pane `voice`, a Mac only).
+It is live: `settings.apply` starts or stops the accessory link at once
+(turning it off ends a robot call and closes the port), and a link that did not
+follow says so in `side_effects`. It never needs a restart.
+
+### The status
+
+`accessories.status` and every other method's success answer the same object:
+
+| Field | Shape |
+|---|---|
+| `key` | 16 hex digits: changes when anything below changes. A client waits with `{after: key, wait_ms}` (at most 25,000) and is answered at the first change or when the wait ran out. A waiting read wakes at once at each change of the ports, links and calls the accessory link owns, so a call's state, captions and tasks arrive as they happen, and reads again every 2 s for what no process announces (the home's call lease, voice readiness, the switch, the pairing store), so no change waits out the wait. |
+| `state` | `off`, `needs_local_primary`, `not_running` (on, but the link has not started this boot) or `on`. |
+| `sentence` | The daemon's one line for the whole picture. |
+| `enabled` | The switch. |
+| `kinds` | `[{kind, name, wire_min, wire_max, install_guide}]`: each kind this engine pairs and its pinned metadata. `stackchan`: name `StackChan`, wire `1`–`1`, the guide `https://github.com/tezra-io/fermix-stackchan/blob/main/INSTALL.md`. Compatible firmware is firmware that speaks a wire version in the range. |
+| `voice` | `{ready, code, sentence, engine, engine_label, model, voice}`: whether a call can start now (`code` null, `voice_disabled`, `missing_key` or `restart_required`), and the configured voice a next call takes. |
+| `voice_device` | `{device, accessory_id, changeable, sentence}`: `desktop` or `accessory:<accessory_id>`; `changeable` false while a call runs or settles anywhere in this home. `sentence` says why the device needs the owner: the call that keeps it ("The voice device can change once the call has finished."), a choice that cannot be read ("The voice device could not be read. Choose one in Pet."; `device` then reads `desktop` only because it must name one, and every call is refused until the owner chooses again), or a robot still chosen while accessories are off ("StackChan is off but is still your voice device. Choose This Mac in Pet to talk here.", also the status's `sentence`); null otherwise. The choice never changes by itself. |
+| `ports` | Every Espressif USB serial port the daemon sees, by `path` (at most 16 that went away are kept): `{path, serial, status, selected, accessory_id, kind, firmware, update, install_guide, retrying, sentence, actions}`. |
+| `ports_sentence` | While accessories are on and no port is seen: "Plug your StackChan into this Mac with its USB-C cable."; null otherwise. |
+| `accessories` | Every paired robot, oldest first, at most 8: `{accessory_id, short_id, name, kind, enrolled_at, connection, path, gen, firmware, capabilities, state, calibration_sentence, fault, check, selected, sentence, actions, last_call}`. |
+| `pairing` | The attempt on the selected port, or null: `{path, attempt, round, max_rounds, phase, code, accessory_confirmed, owner_confirmed, closed_reason, accessory_id, expires_at, sentence}`. |
+| `call` | The robot call that runs, or null (a desktop or phone call is not here): `{accessory_id, call_id, source, phase, phase_sentence, state, muted, muted_by, engine, engine_label, model, voice, call_uuid, conversation, started_at, transcript, tasks, usage}`. |
+
+A **port**'s `status`, its `sentence` and the `actions` it offers:
+
+| `status` | `sentence` | `actions` |
+|---|---|---|
+| `unrelated` | "A USB serial device is plugged in." | `pair` |
+| `attaching` | "Checking the USB device." | none |
+| `unpaired` | "StackChan found. Fermix firmware is compatible." (the selected port, an unpaired robot that answered) | `pair_begin`, `pair_cancel` |
+| `pairing` | the attempt's sentence (below) | `pair_cancel` |
+| `attached` | "Connected by USB." | `release` |
+| `busy` | "Another app is using StackChan's USB port. Close it and try again." | `retry` |
+| `needs_firmware` | "This USB device isn't running Fermix firmware. If it's your StackChan, install the firmware first." | `open_install_guide`, `retry` |
+| `incompatible` | `update` `firmware`: "Update the robot firmware." `update` `fermix`: "Update Fermix: this robot's firmware is newer than this Fermix." | `open_install_guide` or `update_fermix`, then `release` |
+| `not_paired` | "This robot isn't paired with this Mac." (a robot whose proof failed, or one that forgot its pairing) | `pair` |
+| `released` | "Install the firmware update now, then choose Reconnect." | `reconnect` |
+| `vanished` | "The USB device was unplugged." | none |
+| `failed` | "The USB connection failed. Try again." | `retry` |
+
+`selected` is the port chosen for pairing. `retrying` is true while a busy
+port is opened again on its own (five opens, 1, 2, 4, 8 and 15 s apart; after
+them only Retry opens it). `install_guide` is the kind's guide on a row that
+offers `open_install_guide`, null otherwise. `accessory_id` is the robot
+attached on it, `kind` and `firmware` what it reported, and `update` (`firmware`
+or `fermix`) which side to update on an `incompatible` port. The daemon opens
+only the selected port and ports whose USB serial a paired robot's record
+names, so `unrelated` is any other Espressif board as much as a robot: the app
+does not call it a StackChan.
+
+An **accessory**'s `connection` and `sentence` (the robot's own fault or power
+sentence comes first while attached):
+
+| `connection` | `sentence` |
+|---|---|
+| `attached` | "Connected by USB. Firmware compatible." |
+| `attaching` | "Connecting to StackChan." |
+| `unplugged` | "Plug StackChan into this Mac." |
+| `released` | "Install the firmware update now, then choose Reconnect." |
+| `busy` | the port's |
+| `not_paired` | "This robot isn't paired with this Mac." |
+| `incompatible` | the port's |
+| `failed` | "StackChan's USB connection failed. Try again." |
+| `off` | the status's |
+
+While attached: `fault` set, "StackChan reports a problem: `<fault>`. Check its
+screen."; `state.power` `low` or `critical`, "StackChan needs more power. Plug
+it into one of this Mac's USB-C ports, not a hub."
+
+`actions` come from `start_call` (attached, voice ready, power not low, no
+call anywhere), `select` (not the voice device, no call), `check` and
+`calibrate` (attached, no call; `calibrate` only with `motion`), `release`
+(attached, no call), `reconnect`, `retry`, `pair`, `open_install_guide`,
+`update_fermix`, and `forget` and `revoke`, which every paired robot on a
+local Mac primary offers. `short_id` is the ID as a person reads it (16 hex digits in four groups
+of four). `gen` is the connection generation of an attached robot, null
+otherwise. `capabilities` are the ones in use on the link (`mic`, `speaker`,
+`screen`, `touch`, `pet`, `motion`, `battery`); the app offers a kind's
+controls only for these. `state` is the robot's own report, or null before one
+arrives: `{battery, power, brownout, volume, brightness, motion,
+calibration}`, `battery` null when the robot has no reading (never zero, never a
+factory placeholder), `motion` `absent`, `off`, `homing`, `ready`, `paused` or
+`fault`, and `calibration` `absent`, `missing`, `valid`, `calibrating` or
+`failed`; Head movements stays off until `calibration` is `valid`.
+`calibration_sentence` is the daemon's sentence for `calibration`, null for
+`absent` or with no `state`: `missing` "Head movement is off until the robot is
+calibrated.", `valid` "The head is calibrated.", `calibrating` "Calibrating the
+head: nudge each axis to its center, then set zero.", `failed` "The head
+calibration did not finish, so head movement stays off until a calibration
+succeeds." `check` is
+the newest setup check, or null: `{check, status, code, level}`, `status`
+`running`, `ok` or `fault`, `level` the microphone's newest RMS level (0 to
+32,767) during `mic`. `selected` is whether it is the voice device.
+`last_call` is how its newest call ended, or null: `{call_id, reason, sentence,
+ended_at}`. A reason the daemon has no sentence for reads "The call ended.",
+and `reason` keeps the token:
+
+| `reason` | `sentence` |
+|---|---|
+| `unplugged` | "StackChan was unplugged, so the call ended." |
+| `link_lost` | "StackChan's connection was lost, so the call ended." |
+| `forgotten` | "The robot was forgotten, so its call ended." |
+| `call_in_progress` | "Another voice call is in progress." |
+| `not_selected` | "StackChan is not your voice device. Choose it in Pet to call from the robot." |
+| `power_too_low` | the power sentence |
+| `voice_disabled`, `missing_key`, `restart_required` | the voice sentence |
+| `call_failed` | "The call could not start. See the daemon log." |
+
+The **pairing** attempt: `phase` `begun` (the robot asks "Pair with this
+Mac?"), `offered`, `revealed` (both screens show `code`, six digits), `committing`,
+`done` or `closed` (`closed_reason` `owner`, `expired`, `mismatch_limit`,
+`invalid_offer`, `invalid_reveal` or `link_reset`). `code` is null before
+`revealed`. `round` counts from 1 to `max_rounds` (3). `accessory_id` is the
+robot the attempt paired once it is `done`, null before. `expires_at` is when the
+attempt's two minutes run out, until the robot is committing. Its sentences:
+`begun` "Tap Pair with this Mac on your robot.", `offered` and `revealed`
+"Check the code on your robot. It should match the code shown here.",
+`committing` "Pairing your robot. Keep it plugged in.", `done` "Your robot is
+paired.", and closed: `owner` "Pairing was cancelled.", `expired` "Pairing took
+longer than two minutes. Start again.", `mismatch_limit` "The codes did not
+match three times. Start pairing again.", `invalid_offer` and `invalid_reveal`
+"The robot's pairing answer did not check out, so nothing was paired.",
+`link_reset` "The robot's connection reset during pairing. Start again." A
+code match alone pairs nothing: the robot's own confirmation, which proves it
+holds the key it offered, and the owner's `matches: true`, in either order,
+commit it. The first pairing burns one of the robot's eFuse key blocks, which
+the robot says on its own screen before the owner confirms.
+
+The **call**: `call_id` is the call's session id, which the call controls
+name. `source` `screen_tap`, `head_swipe` or `mac`. `phase` `starting` (not yet
+admitted), `active` or `ending` (settling: the voice device cannot change).
+`state` the voice state (`connecting`, `listening`, `thinking`, `speaking`,
+`muted`, `reconnecting`) or null before the first. `phase_sentence` is "The call
+is starting." while `starting`, "The call is ending." while `ending`, and null
+while `active`, where `state` says what the call is doing. `muted` with `muted_by`
+`mac` or `accessory`. `engine`, `engine_label`, `model` and `voice` are the
+ones the call started with, which a voice setting saved during the call does
+not change; the app labels the call with them, never with `voice`'s.
+`call_uuid` and `conversation` (`chat` or `private`) once the call is ready,
+null before and on an engine without them. `started_at` is when the call was
+admitted, null while `starting`. `transcript` is the call's newest lines,
+oldest first, at most 6: `{speaker, text, final}`, `speaker` `user` or
+`assistant`, `text` at most 400 characters (a longer line keeps its end),
+`final` once the line is whole; nothing of it is persisted by this method.
+`tasks` are the call's newest tasks, at most 8, in the order they started:
+`{task, revision, status, summary, in_chat, cancellable}`, `status`
+`running`, `completed`, `failed` or `cancelled`, `summary` at most 240
+characters or null, `in_chat` true when the result was written to the chat,
+`cancellable` true for a Live or Grok task still running. `usage` is null or
+`{cost_cents, voice_seconds, accounting}`, each null when the engine did not
+say; unknown is never zero. The app observes the call through this method and
+opens no microphone or speaker of the Mac; a robot call also runs, and its
+controls work on the robot, with the app closed.
+
+**Refusals.** Every refusal carries `details.sentence`:
+
+- `invalid_params` on `volume` for an `accessories.set` with no setting
+  ("Send at least one of volume, brightness or motion."), on `path` ("No USB
+  device is plugged in at that port.",
+  "That port is released for a firmware update. Choose Reconnect first.",
+  "Pairing has not been started on that port."), on `accessory_id` ("No paired
+  robot has that id.", "That robot is not connected."), on `device` ("No paired
+  robot has that id."), on `task` ("That task cannot be cancelled."), and on
+  any other field with the field alone;
+- `unavailable` {`capability`: `accessories`} with the status's sentence when
+  accessories are off, need a local Mac primary or have not started; with
+  "Only the owner can set up or control StackChan: use the Fermix app or your
+  own terminal." for an owner decision another caller asked for (every method
+  of the family but `accessories.status`: a process the daemon started never
+  pairs, calls, sounds, moves or frees the robot, nor ends or mutes the
+  owner's call); with
+  "The voice device can change once the call has finished." while a call runs;
+  with "End the call first." for a check, calibration, setting or release
+  during one; with "StackChan cannot do that." for a check or setting the
+  robot did not report the capability of; with "Pairing is already open on
+  this port." and "StackChan is already paired."; and, for `call.start`, with
+  `code` and the refusal's sentence (*Accessories*, `last_call`);
+- `changed` when an `attempt` or `call_id` is not the current one, with "That
+  pairing attempt has ended, so look at it again." or "That call has ended, so
+  look at it again."
+
+**Bounds.** At most 8 paired robots, 16 vanished ports, 6 transcript lines of
+400 characters and 8 tasks of 240-character summaries; a status wait of
+25,000 ms. Every method but a status wait answers inside the standard call
+timeout.
+
 ## Error codes
 
 | `code` | Meaning |
@@ -1731,7 +1959,7 @@ Notes that the shapes alone do not carry:
 | `primary_unreachable` | After a move, the primary this computer forwards to cannot be reached, or did not answer in time. `details.sentence` says so, and `details.primary` names it when it is known (see *After a move*). |
 | `device_class_method` | The primary refused a request that configures the computer that forwarded it. `details.method` names it and `details.sentence` says why. |
 | `unconfirmed` | After a move, the primary had a forwarded request whose effect may stand though its answer did not arrive (`home.move.start`). `details.method` names it, `details.primary` names the primary when known, and `details.sentence` says where its outcome shows (see *After a move*). Not a failure: read `home.status`. |
-| `changed` | `home.act` was drawn from a summary that no longer offers the action under its key, so nothing was done. `details` holds `sentence` alone, which says so; the surface reads `home.status` again and the owner presses again from there (see *The Always On summary*). |
+| `changed` | `home.act` was drawn from a summary that no longer offers the action under its key, or an `accessories.*` request named a pairing attempt or a call that is no longer the current one, so nothing was done. `details` holds `sentence` alone, which says so; the surface reads `home.status` again and the owner presses again from there (see *The Always On summary*). |
 
 `lease_expired` and `unknown_lease` are deliberately distinct: the first lets
 the app tell the operator the transaction timed out, the second says the id was
@@ -1755,7 +1983,8 @@ one, is `details.sentence`. Six codes carry one:
 - `config_unreadable` — `details.sentence` is the parser's own message.
 - `unavailable` — when a caller that is not the owner asks for an owner's
   decision: the phone's, "Only the owner can pair or forget a phone; run this
-  from your own terminal.", the cues', "Only the owner can change cues: use
+  from your own terminal.", the accessories', "Only the owner can set up or
+  control StackChan: use the Fermix app or your own terminal.", the cues', "Only the owner can change cues: use
   the Fermix app or your own terminal.", and the home's, "Only the owner can
   move Fermix or set its recovery passphrase: use the Fermix app or your own
   terminal." And when the cues cannot reach their records, with the cues'
@@ -1793,7 +2022,8 @@ Operation-specific bounds, owned by the operation rather than the envelope: a
 262144 encoded bytes, with a 256-character search and a 64-character subsystem;
 a `diagnostics.build` object carries at most 500 log entries; `mobile.devices.list`
 carries at most 64 devices, each string a phone sends in a pairing request is
-at most 128 bytes, and a pairing `uri` is at most 2048 bytes.
+at most 128 bytes, and a pairing `uri` is at most 2048 bytes; `accessories.status`
+carries at most 8 paired robots and 16 vanished ports (*Accessories*).
 
 ## Vendoring into `fermix-macos`
 
@@ -1810,7 +2040,11 @@ own client tests against the same golden frames the daemon is tested against.
   `mobile.pair.get` one per session state, for `job.get` a browser download
   both completed and failed, for `computer_use.permissions.get` a Mac
   answer and a Linux one, for `home.status` one per family of the Always On
-  summary's states, and for `home.act` a cancelled code and `own_server`'s
+  summary's states, for `accessories.status` one per family of the setup and
+  call states (off, needs a local Mac primary, a port with no Fermix answer,
+  incompatible firmware, pairing with its code, a pairing just done, a paired
+  robot in a call, that call settling, and StackChan off with the robot still
+  chosen), and for `home.act` a cancelled code and `own_server`'s
   answer (`home_act_own_server`: the code, its command and the Tailscale
   step).
 - `fixtures/errors.jsonl` — one full error envelope per published code,

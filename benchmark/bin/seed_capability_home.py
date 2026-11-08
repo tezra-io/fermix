@@ -338,6 +338,12 @@ def render_config(
     # If a future capability task legitimately needs recall_activity, seed a
     # synthetic spool instead of enabling live capture.
     lines += ["[fermix_core.computer_history]", "enabled = false", ""]
+    # The StackChan accessory link (M91) is another deliberate exception, and
+    # it is not seeded: on, the daemon lists this Mac's USB serial ports every
+    # two seconds and would open a port a paired robot's serial names, which
+    # reaches real hardware on the eval host. No capability task needs it, and
+    # the accessory_voice behavioral suite answers from self-knowledge with the
+    # link off, so leaving its default (off) blocks nothing.
     # Computer use is not seeded at all, so its experimental `background` gate
     # (M42 slice 5) is off here as it is everywhere — deliberately, and recorded
     # so its absence never reads as an oversight either. It is the second

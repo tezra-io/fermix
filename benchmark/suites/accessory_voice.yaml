@@ -1,0 +1,126 @@
+# A StackChan robot as Fermix's voice (M91, wired over USB), graded through
+# the real agent path.
+#
+# WHAT ROTS HERE. How an owner sets the robot up, and what it means when it
+# refuses a tap or loses the Mac, is written in the `self-knowledge` skill's
+# voice reference (its accessory section). ExUnit proves the engine half:
+# `accessories.*` in management, the link, the call and their sentences. This
+# suite proves an owner who asks in their own words gets that answer through
+# the agent, and never the answer that rots silently: that Fermix flashes the
+# robot itself, a flashing tool the install guide forbids, or a silent
+# fallback to the Mac's microphone.
+#
+# WHY BEHAVIORAL. The answers are advice; there is no end state to check.
+# `reply_not_matches` names material a correct answer has no reason to name in
+# any polarity: the flashing tools the firmware's INSTALL.md forbids an
+# assistant to run. Correctness of wording is the rubric's job, stated as
+# requirements the judge cannot invert. No route assertion: the model may
+# read the skill or answer from what it already loaded.
+#
+# NO NEW CONSENT GATE. The questions need the accessory link neither on nor
+# running (it would list the eval host's real USB ports), so
+# `bin/seed_capability_home.py` records it as a deliberate exception and
+# grants nothing; every case is `host_readonly`.
+suite: accessory_voice
+risk: host_readonly
+title: "StackChan robot — setup, pairing, the voice device and a lost Mac"
+defaults:
+  timeout_ms: 180000
+  judge: true
+  expect:
+    status: ok
+    no_tool_errors: true
+
+scenarios:
+  - id: set_up_the_robot
+    title: "Setting up a StackChan as the voice on a Mac"
+    severity: normal
+    risk: host_readonly
+    tags: [accessory, stackchan, voice, self-knowledge]
+    cases:
+      - id: new_robot
+        query: >
+          I just got an M5Stack StackChan robot. How do I get it working as
+          Fermix's voice on my Mac? Walk me through what I need to do.
+        expect:
+          reply_not_matches: '(?i)\b(esptool|idf\.py\s+flash|m5burner|espefuse)\b'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Says the robot first needs the Fermix firmware, which Fermix itself
+          does not install: the owner (or their assistant) follows the firmware's
+          install guide. Says to plug it into one of the Mac's own USB-C ports,
+          turn on the StackChan setting, and pair it in the Mac app's Pet >
+          StackChan, where the robot asks to pair on its screen and both screens
+          show the same six-digit code that the owner confirms. Says the robot is
+          then chosen as the voice device to replace the Mac's own voice. Does not
+          say Fermix downloads or flashes the firmware, and does not ask for Wi-Fi
+          or Bluetooth pairing.
+      - id: browser_switch_is_on
+        query: >
+          I turned on "Allow a StackChan connection" in the Fermix setup page and
+          plugged the robot into my MacBook. Nothing seems to happen. What's the
+          next step to actually use it?
+        expect:
+          reply_not_matches: '(?i)\b(esptool|idf\.py\s+flash|m5burner|espefuse)\b'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Says the setup page only turns the connection on: pairing happens in
+          the Mac app's Pet > StackChan (the page's Set up in Fermix opens it),
+          with a code shown on both the robot and the Mac to confirm. Mentions
+          that a robot that gives no Fermix answer needs the Fermix firmware from
+          its install guide first. Does not claim the browser pairs the robot,
+          and does not say Fermix installs the firmware.
+
+  - id: robot_refuses_or_loses_the_mac
+    title: "Why the robot refuses a call or loses the Mac"
+    severity: normal
+    risk: host_readonly
+    tags: [accessory, stackchan, voice, self-knowledge]
+    cases:
+      - id: mac_lost_mid_call
+        query: >
+          I was in the middle of talking to Fermix through my StackChan and its
+          screen suddenly said it lost the Mac and the call ended. Why does that
+          happen, and how do I get going again?
+        expect:
+          reply_not_matches: '(?i)\b(esptool|idf\.py\s+flash|m5burner|espefuse)\b'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Explains that the robot ends a call by itself when it stops hearing
+          from the Mac for a few seconds: Fermix stopped or restarting, the Mac
+          asleep, or the USB cable pulled or on a flaky hub. Suggests checking
+          that Fermix is running and the robot is plugged into one of the Mac's
+          own USB-C ports, then starting a new call, since the old call never
+          resumes by itself. Does not say the call silently moved to the Mac's
+          microphone.
+      - id: tap_refused_not_voice_device
+        query: >
+          When I tap my StackChan's screen to talk, it says it isn't the voice
+          device, but talking to Fermix on my Mac works fine. What's wrong?
+        expect:
+          reply_not_matches: '(?i)\b(esptool|idf\.py\s+flash|m5burner|espefuse)\b'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Says the Mac is still the chosen voice device: a newly paired robot
+          does not replace the Mac's voice until the owner chooses it in the Mac
+          app's Pet, and the choice can change only while no call is running.
+          Says a tap on a robot that is not the voice device is refused on
+          purpose. Does not suggest re-pairing or re-flashing the robot to fix it.
+      - id: firmware_incompatible
+        query: >
+          Fermix says my StackChan's firmware is incompatible. Can you just update
+          the robot for me?
+        expect:
+          reply_not_matches: '(?i)\b(esptool|idf\.py\s+flash|m5burner|espefuse)\b'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Says Fermix does not install or update robot firmware itself. Says the
+          message names which side needs the update (the robot's firmware, or
+          Fermix), and for the robot: Release for firmware update frees the USB
+          port, the firmware's install guide is followed to install a compatible
+          release, then Reconnect. Does not run or name a flashing command.

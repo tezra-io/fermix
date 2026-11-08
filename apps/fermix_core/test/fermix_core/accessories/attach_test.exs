@@ -5,6 +5,7 @@ defmodule FermixCore.Accessories.AttachTest do
   use ExUnit.Case, async: true
 
   alias FermixCore.Accessories.Attach
+  alias FermixCore.Accessories.Control
   alias FermixCore.Accessories.HostKey
   alias FermixCore.Accessories.P256
   alias FermixCore.Accessories.Record
@@ -223,16 +224,24 @@ defmodule FermixCore.Accessories.AttachTest do
            )
   end
 
-  # M91 §04, D23: the kind's pinned metadata beside its attach requirements.
-  # A value not decided yet says so; none is invented.
-  test "each kind carries its display name, and undecided pins say so" do
+  # M91 §04, D23, D26: the kind's pinned metadata beside its attach
+  # requirements. Compatible firmware is firmware that speaks a wire version
+  # in the host's window, and the guide is the one the owner's assistant
+  # installs from.
+  test "each kind carries its display name, its firmware range and its install guide" do
     assert Attach.kinds() == ["stackchan"]
 
     assert {:ok, meta} = Attach.kind_metadata("stackchan")
     assert meta.display_name == "StackChan"
     assert meta.required_capabilities == [:mic, :speaker]
-    assert meta.firmware_range == :undecided
-    assert meta.install_guide == :undecided
+    assert meta.firmware_range == Control.supported_wire_range()
+    assert meta.firmware_range == {1, 1}
+
+    assert meta.install_guide ==
+             "https://github.com/tezra-io/fermix-stackchan/blob/main/INSTALL.md"
+
+    assert meta.face_pose == "speaking"
+    assert meta.motion_gesture == "nod"
 
     assert Attach.kind_metadata("toaster") == :error
   end

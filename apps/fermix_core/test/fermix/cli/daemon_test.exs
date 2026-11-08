@@ -6,7 +6,9 @@ defmodule Fermix.CLI.DaemonTest do
   alias FermixCore.Auth.Store
   alias FermixCore.Auth.TokenSupervisor
   alias FermixCore.Capabilities.MCP.RuntimeStatus
+  alias FermixCore.Management.Accessories, as: ManagementAccessories
   alias FermixCore.Management.Lifecycle
+  alias FermixCore.Management.Protocol, as: ManagementProtocol
   alias FermixCore.Management.Router
   alias FermixCore.Plugins.Dist.Store, as: DistStore
   alias FermixCore.SocketPath
@@ -1199,6 +1201,96 @@ defmodule Fermix.CLI.DaemonTest do
                "sentence" =>
                  "Only the owner can set up Always On, move Fermix or set its recovery " <>
                    "passphrase: use the Fermix app, the setup page or your own terminal."
+             }
+
+      golden
+    end
+  end
+
+  # M91 E3 and its review: every accessories.* method but the status moves
+  # the robot or the owner's call (pairing streams the owner's microphone, a
+  # call opens it, a check sounds a tone or moves the head, a release frees
+  # the port), so neither the agent nor a command it ran may send any of
+  # them. Only `accessories.status` stays open.
+  describe "owner decisions on accessories" do
+    @robot_id String.duplicate("b", 64)
+    @port "/dev/cu.usbmodem1101"
+    @accessory_decisions [
+      {"accessories.pair.start", %{"path" => @port}},
+      {"accessories.pair.begin", %{"path" => @port}},
+      {"accessories.pair.decide",
+       %{"path" => @port, "attempt" => String.duplicate("a", 32), "matches" => true}},
+      {"accessories.pair.cancel", %{"path" => @port}},
+      {"accessories.retry", %{"path" => @port}},
+      {"accessories.release", %{"path" => @port}},
+      {"accessories.reconnect", %{"path" => @port}},
+      {"accessories.forget", %{"accessory_id" => @robot_id}},
+      {"accessories.revoke", %{"accessory_id" => @robot_id}},
+      {"accessories.voice_device.set", %{"device" => "desktop"}},
+      {"accessories.call.start", %{"accessory_id" => @robot_id}},
+      {"accessories.call.end", %{"accessory_id" => @robot_id, "call_id" => "voice-1"}},
+      {"accessories.call.mute",
+       %{"accessory_id" => @robot_id, "call_id" => "voice-1", "muted" => true}},
+      {"accessories.call.interrupt", %{"accessory_id" => @robot_id, "call_id" => "voice-1"}},
+      {"accessories.call.task.cancel",
+       %{"accessory_id" => @robot_id, "call_id" => "voice-1", "task" => "dlg_1"}},
+      {"accessories.check.start", %{"accessory_id" => @robot_id, "check" => "tone"}},
+      {"accessories.check.stop", %{"accessory_id" => @robot_id}},
+      {"accessories.calibrate", %{"accessory_id" => @robot_id, "op" => "begin"}},
+      {"accessories.set", %{"accessory_id" => @robot_id, "volume" => 40}}
+    ]
+
+    test "every accessories method is in the list, and only the status is not" do
+      listed = Enum.map(@accessory_decisions, &elem(&1, 0))
+
+      published =
+        for "accessories." <> _ = method <- ManagementProtocol.methods(), do: method
+
+      assert Enum.sort(listed ++ ["accessories.status"]) == Enum.sort(published)
+    end
+
+    test "a process the daemon started is refused, and so is one it cannot place" do
+      golden = accessories_owner_golden()
+
+      for peer <- [[daemon_os_pid: ParentProcess.os_pid()], [os: {:win32, :nt}]] do
+        socket_path = start_peer_daemon(peer)
+
+        log =
+          ExUnit.CaptureLog.capture_log(fn ->
+            for {method, params} <- @accessory_decisions do
+              assert {:error, {:management_error, "unavailable", _message, ^golden}} =
+                       Client.request_v1(method, params,
+                         socket_path: socket_path,
+                         timeout: 5_000
+                       ),
+                     method
+            end
+
+            refute match?(
+                     {:error, {:management_error, "unavailable", _message, ^golden}},
+                     Client.request_v1("accessories.status", %{},
+                       socket_path: socket_path,
+                       timeout: 5_000
+                     )
+                   )
+          end)
+
+        assert log =~ "only the owner may"
+      end
+    end
+
+    defp accessories_owner_golden do
+      golden =
+        :fermix_core
+        |> Application.app_dir("priv/management/fixtures/errors.jsonl")
+        |> File.stream!()
+        |> Enum.map(&Jason.decode!/1)
+        |> Enum.find(&(&1["name"] == "unavailable_accessories_owner_decision"))
+        |> get_in(["response", "error", "details"])
+
+      assert golden == %{
+               "capability" => "accessories",
+               "sentence" => ManagementAccessories.owner_only_sentence()
              }
 
       golden

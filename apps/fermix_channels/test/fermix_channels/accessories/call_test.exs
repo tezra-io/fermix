@@ -17,6 +17,7 @@ defmodule FermixChannels.Accessories.CallTest do
   alias FermixChannels.Accessories.Link
   alias FermixChannels.Accessories.StoreWriter
   alias FermixCore.Accessories.P256
+  alias FermixCore.Accessories.Store
   alias FermixCore.Realtime.CallClient
   alias FermixCore.Realtime.CallLease
   alias FermixCore.Realtime.Config
@@ -54,7 +55,7 @@ defmodule FermixChannels.Accessories.CallTest do
   defp attached(ctx, opts \\ []) do
     engine = Keyword.get(opts, :engine, "openai_realtime")
     {public, private} = P256.generate()
-    {host, record} = AccessoryCase.enroll!(ctx.home, public)
+    {host, record} = AccessoryCase.enroll!(ctx.home, public, Keyword.take(opts, [:selected]))
     sim_opts = [observer: self(), key: {public, private}, enrolled_host: host.public]
     sim = start_supervised!({AccessorySim, sim_opts ++ Keyword.get(opts, :sim, [])})
     bus = AccessoryCase.bus!(@path, sim)
@@ -134,12 +135,89 @@ defmodule FermixChannels.Accessories.CallTest do
       assert {:ok, %{endpoint: "accessory:" <> _}} = CallLease.holder(ctx.lease)
     end
 
-    test "a start from the Mac sends call.start with no call.result", ctx do
+    # M91 E3: the Mac's start answers at once, inside any client's timeout;
+    # the call's admission and its id then show in the link's own view, which
+    # the app's status long poll reads.
+    test "a start from the Mac answers at once, and its admission shows in the link's view",
+         ctx do
       ctx = attached(ctx)
 
-      assert {:ok, 1} = Link.start_call(ctx.link)
-      assert %{stream: 1} = AccessoryCase.await_received(ctx.sim, "call.start")
+      assert {:ok, %{stream: 1}} = Link.start_call(ctx.link)
+      assert %{stream: 1, call: call_id} = AccessoryCase.await_received(ctx.sim, "call.start")
       refute_received {:sim, _sim, {:received, %{type: "call.result"}}}
+
+      assert %{call: %{call_id: ^call_id, phase: :active, source: :mac}} =
+               AccessoryCase.await_state(&match?(%{call: %{phase: :active}}, &1))
+    end
+
+    test "a start from the Mac the home's call lease refuses says why in the link's view", ctx do
+      ctx = attached(ctx)
+      desktop = desktop_call(ctx)
+      assert_receive {:desktop, ^desktop, :started}
+
+      assert {:ok, %{stream: 1}} = Link.start_call(ctx.link)
+
+      assert %{call: nil, last_call: %{reason: "call_in_progress"}} =
+               AccessoryCase.await_state(&match?(%{last_call: %{}}, &1))
+
+      refute_received {:sim, _sim, {:received, %{type: "call.start"}}}
+    end
+
+    # M91 §07: a tap on a paired robot that is not the voice device is refused
+    # with its own reason and never changes the choice; the Mac's start is the
+    # owner's own act on it, so it is not.
+    test "a tap on an accessory that is not the voice device is refused not_selected", ctx do
+      ctx = attached(ctx, selected: false)
+
+      request = AccessorySim.request_call(ctx.sim)
+
+      assert %{request: ^request, result: "refused", code: "not_selected"} =
+               AccessoryCase.await_received(ctx.sim, "call.result")
+
+      refute_received {:engine_started, _session, _opts}
+      assert {:ok, %{stream: 1}} = Link.start_call(ctx.link)
+      AccessoryCase.await_received(ctx.sim, "call.start")
+    end
+
+    # Fable review 3: a choice that cannot be read is no choice of this robot;
+    # the tap is refused with its own reason, never read as chosen or not.
+    test "a tap while the voice device cannot be read is refused voice_device_unreadable", ctx do
+      ctx = attached(ctx)
+      path = Store.voice_device_path(ctx.home)
+      File.write!(path, "not json")
+      File.chmod!(path, 0o600)
+
+      request = AccessorySim.request_call(ctx.sim)
+
+      assert %{request: ^request, result: "refused", code: "voice_device_unreadable"} =
+               AccessoryCase.await_received(ctx.sim, "call.result")
+
+      refute_received {:engine_started, _session, _opts}
+    end
+
+    test "an accessory short of power is refused power_too_low, from a tap and from the Mac",
+         ctx do
+      ctx = attached(ctx)
+
+      AccessorySim.send_message(ctx.sim, %{
+        type: "accessory.state",
+        battery: 4,
+        power: "low",
+        brownout: true,
+        volume: 60,
+        brightness: 70,
+        motion: "off",
+        calibration: "valid"
+      })
+
+      AccessoryCase.await_state(&match?(%{accessory_state: %{power: "low"}}, &1))
+      request = AccessorySim.request_call(ctx.sim)
+
+      assert %{request: ^request, code: "power_too_low"} =
+               AccessoryCase.await_received(ctx.sim, "call.result")
+
+      assert {:error, {:refused, "power_too_low"}} = Link.start_call(ctx.link)
+      refute_received {:engine_started, _session, _opts}
     end
 
     test "voice that is not ready is refused before any session, with its code", ctx do
@@ -190,6 +268,72 @@ defmodule FermixChannels.Accessories.CallTest do
     end
   end
 
+  # M91 E3: the Mac observes a robot call through the link's view and
+  # controls it by the call's id.
+  describe "the Mac's view of the call" do
+    test "the link publishes the voice the call started with, its lines, tasks and mute", ctx do
+      ctx = ctx |> attached() |> call_up()
+      call_id = ctx.call_id
+
+      :ok =
+        AccessoryEngine.emit(ctx.session, %{type: "transcript_delta", text: "What is on today?"})
+
+      :ok =
+        AccessoryEngine.emit(ctx.session, %{
+          type: "tool_event",
+          status: "running",
+          name: "calendar"
+        })
+
+      :ok = AccessoryEngine.emit(ctx.session, %{type: "usage", cost_cents: 0.5})
+      assert :ok = Link.mute(ctx.link, call_id, true)
+
+      summary =
+        AccessoryCase.await_state(
+          &match?(%{call: %{view: %{muted_by: :mac, usage: %{}, tasks: [_]}}}, &1)
+        )
+
+      assert %{call_id: ^call_id, phase: :active, source: :screen_tap, view: view} = summary.call
+      assert view.engine == "openai_realtime"
+      assert view.model == Config.normalize(enabled: true, engine: "openai_realtime").model
+      assert [%{speaker: :user, text: "What is on today?", final?: true}] = view.transcript
+      assert [%{task: "rt:1", status: "running"}] = view.tasks
+      assert view.usage.cost_cents == 0.5
+      assert %DateTime{} = view.started_at
+    end
+
+    test "a control for a call that is not the current one is refused", ctx do
+      ctx = attached(ctx)
+      assert {:error, :no_call} = Link.end_call(ctx.link, "voice-gone")
+
+      ctx = call_up(ctx)
+      assert {:error, :stale_call} = Link.end_call(ctx.link, "voice-gone")
+      assert {:error, :stale_call} = Link.interrupt(ctx.link, "voice-gone")
+      refute_received {:sim, _sim, {:received, %{type: "call.end"}}}
+
+      assert :ok = Link.end_call(ctx.link, ctx.call_id)
+      assert %{reason: "mac_end"} = AccessoryCase.await_received(ctx.sim, "call.end")
+    end
+
+    test "how the call ended is kept for the Mac", ctx do
+      ctx = ctx |> attached() |> call_up()
+      call_id = ctx.call_id
+      accessory_id = ctx.record.accessory_id
+
+      AccessorySim.end_request(ctx.sim)
+
+      assert %{
+               call: nil,
+               last_call: %{call_id: ^call_id, accessory_id: ^accessory_id, reason: "end_request"}
+             } = AccessoryCase.await_state(&match?(%{last_call: %{}}, &1))
+    end
+
+    test "a setup check is refused while a call runs", ctx do
+      ctx = ctx |> attached() |> call_up()
+      assert {:error, :call_active} = Link.check_start(ctx.link, :tone, nil)
+    end
+  end
+
   describe "the microphone" do
     test "five 960-byte frames become one 4,800-byte chunk, and a gap is counted", ctx do
       ctx = ctx |> attached() |> call_up()
@@ -219,7 +363,7 @@ defmodule FermixChannels.Accessories.CallTest do
       AccessorySim.mic_state(ctx.sim, "muted")
       assert_receive {:engine, ^session, {:mute, true}}
 
-      assert :ok = Link.mute(ctx.link, false)
+      assert :ok = Link.mute(ctx.link, ctx.call_id, false)
       assert %{muted: false} = AccessoryCase.await_received(ctx.sim, "mute.set")
       assert_receive {:engine, ^session, {:mute, false}}
     end
@@ -325,12 +469,12 @@ defmodule FermixChannels.Accessories.CallTest do
       :ok = AccessoryEngine.emit(ctx.session, audio(2_000))
       pcm_received(ctx.sim, 2_000)
 
-      assert :ok = Link.interrupt(ctx.link)
+      assert :ok = Link.interrupt(ctx.link, ctx.call_id)
       AccessoryCase.await_received(ctx.sim, "spk.flush")
       assert_receive {:engine, ^session, {:interrupt, 0}}
 
       # Nothing is left to flush: a second interrupt sends nothing.
-      assert :ok = Link.interrupt(ctx.link)
+      assert :ok = Link.interrupt(ctx.link, ctx.call_id)
       _ = Link.status(ctx.link)
       refute_received {:sim, _sim, {:received, %{type: "spk.flush"}}}
     end

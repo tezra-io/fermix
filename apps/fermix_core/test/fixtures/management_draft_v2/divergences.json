@@ -2849,6 +2849,600 @@
       "field": "rows[].status",
       "kind": "engine_only",
       "why": "Each Linux row's status is the doctor's: ok, warn, fail or not_applicable. A Linux answer carries the rows fermix doctor prints after its computer use row, from the same producers, so the pane and doctor read one source. Optional within protocol 2; the draft predates the Linux helper, and a Mac answer never carries them."
+    },
+    {
+      "method": "(errors)",
+      "field": "unavailable:capability,code,sentence",
+      "kind": "engine_only",
+      "why": "M91 E3: a refused accessories.call.start answers unavailable with details {capability, code, sentence}: code is the refusal's own (call_in_progress, voice_disabled, missing_key, restart_required, power_too_low, not_attached), which the app keys its next action on, and sentence is the daemon's. The draft predates the accessory surface."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:accessories.calibrate",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:accessories.call.end",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:accessories.call.interrupt",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:accessories.call.mute",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:accessories.call.start",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:accessories.call.task.cancel",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:accessories.check.start",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:accessories.check.stop",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:accessories.forget",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:accessories.pair.begin",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:accessories.pair.cancel",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:accessories.pair.decide",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:accessories.pair.start",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:accessories.reconnect",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:accessories.release",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:accessories.retry",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:accessories.revoke",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:accessories.set",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:accessories.status",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:accessories.voice_device.set",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:accessories.calibrate=2",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:accessories.call.end=2",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:accessories.call.interrupt=2",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:accessories.call.mute=2",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:accessories.call.start=2",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:accessories.call.task.cancel=2",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:accessories.check.start=2",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:accessories.check.stop=2",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:accessories.forget=2",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:accessories.pair.begin=2",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:accessories.pair.cancel=2",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:accessories.pair.decide=2",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:accessories.pair.start=2",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:accessories.reconnect=2",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:accessories.release=2",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:accessories.retry=2",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:accessories.revoke=2",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:accessories.set=2",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:accessories.status=2",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:accessories.voice_device.set=2",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "accessories.calibrate",
+      "field": "params:accessory_id",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.calibrate",
+      "field": "params:axis",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.calibrate",
+      "field": "params:op",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.calibrate",
+      "field": "params:steps",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.call.end",
+      "field": "params:accessory_id",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.call.end",
+      "field": "params:call_id",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.call.interrupt",
+      "field": "params:accessory_id",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.call.interrupt",
+      "field": "params:call_id",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.call.mute",
+      "field": "params:accessory_id",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.call.mute",
+      "field": "params:call_id",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.call.mute",
+      "field": "params:muted",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.call.start",
+      "field": "params:accessory_id",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.call.task.cancel",
+      "field": "params:accessory_id",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.call.task.cancel",
+      "field": "params:call_id",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.call.task.cancel",
+      "field": "params:task",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.check.start",
+      "field": "params:accessory_id",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.check.start",
+      "field": "params:check",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.check.start",
+      "field": "params:seconds",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.check.stop",
+      "field": "params:accessory_id",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.forget",
+      "field": "params:accessory_id",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.pair.begin",
+      "field": "params:name",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.pair.begin",
+      "field": "params:path",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.pair.cancel",
+      "field": "params:attempt",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.pair.cancel",
+      "field": "params:path",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.pair.decide",
+      "field": "params:attempt",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.pair.decide",
+      "field": "params:matches",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.pair.decide",
+      "field": "params:path",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.pair.start",
+      "field": "params:path",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.reconnect",
+      "field": "params:path",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.release",
+      "field": "params:path",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.retry",
+      "field": "params:path",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.revoke",
+      "field": "params:accessory_id",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.set",
+      "field": "params:accessory_id",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.set",
+      "field": "params:volume",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.status",
+      "field": "params:after",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.status",
+      "field": "params:wait_ms",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.voice_device.set",
+      "field": "params:device",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.accessories.calibrate",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.accessories.call.end",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.accessories.call.interrupt",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.accessories.call.mute",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.accessories.call.start",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.accessories.call.task.cancel",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.accessories.check.start",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.accessories.check.stop",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.accessories.forget",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.accessories.pair.begin",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.accessories.pair.cancel",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.accessories.pair.decide",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.accessories.pair.start",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.accessories.reconnect",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.accessories.release",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.accessories.retry",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.accessories.revoke",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.accessories.set",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.accessories.status",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.accessories.voice_device.set",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "settings.get:accessories",
+      "field": "rows:accessories_enabled",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories section, a Mac's only, under the voice pane, holds the one live switch of [fermix_channels.accessories]: allowing a StackChan to connect over USB. It postdates the draft, and an app that has not re-vendored never asks for the section."
     }
   ]
 }

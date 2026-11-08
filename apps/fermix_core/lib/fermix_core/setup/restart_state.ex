@@ -83,6 +83,8 @@ defmodule FermixCore.Setup.RestartState do
   # §4.5); the rest of the sandbox section is read at boot. The phone channel's
   # switch, `channels.mobile.enabled`, starts or stops its subtree when it is
   # written (M51 §5.5); the rest of the phone block is read when it starts. The
+  # accessory link's switch, `channels.accessories.enabled`, is live the same
+  # way (M91 E3). The
   # cue filter's default model (`routing.filter_*`, M60 §8.2) is read at every
   # filter call; the rest of routing is read when a run starts its route. The
   # cue tree starts at boot (its switch and the door's port), but its sources
@@ -91,7 +93,7 @@ defmodule FermixCore.Setup.RestartState do
   # mandates and their switch are read at every mandate call.
   @live_parts [
     sandbox: [[:env]],
-    channels: [[:mobile, :enabled], [:mobile, :iroh]],
+    channels: [[:mobile, :enabled], [:mobile, :iroh], [:accessories, :enabled]],
     routing: [[:filter_provider], [:filter_model], [:filter_reasoning_effort]],
     cues: [[:screen], [:decision_provider], [:mandates_enabled], [:sources], [:mandates]]
   ]

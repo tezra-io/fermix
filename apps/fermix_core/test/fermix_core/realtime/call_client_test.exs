@@ -336,6 +336,85 @@ defmodule FermixCore.Realtime.CallClientTest do
     end
   end
 
+  # M91 E3: the owner's voice device is this Mac or a paired accessory, and
+  # the engine holds it: while an accessory is chosen, this Mac's own call is
+  # refused before any session, with its reason, the device and the daemon's
+  # sentence. An accessory's own call, and a phone's, are not this Mac's.
+  describe "the voice device" do
+    @chosen_robot "accessory:" <> String.duplicate("4f", 32)
+
+    test "a desktop call is refused while a paired accessory is the voice device", ctx do
+      robot = fn -> {:ok, {:accessory, String.duplicate("4f", 32)}} end
+      client = new_client(ctx, voice_device: robot)
+
+      assert {:stop, %CallClient{session: nil}} = CallClient.call_start(client)
+
+      assert_receive {:emitted,
+                      %{
+                        type: "error",
+                        reason: "voice_device_elsewhere",
+                        voice_device: @chosen_robot,
+                        sentence: sentence
+                      }}
+
+      assert sentence =~ "voice device"
+      refute_received {:session_started, _session, _opts}
+    end
+
+    test "an accessory's own call and a phone's are not refused for it", ctx do
+      robot = fn -> {:ok, {:accessory, String.duplicate("4f", 32)}} end
+
+      for endpoint <- [{:accessory, String.duplicate("4f", 32)}, @phone] do
+        config = if endpoint == @phone, do: live_config(), else: Config.current()
+        client = new_client(ctx, endpoint: endpoint, config: config, voice_device: robot)
+        assert {:cont, client} = CallClient.call_start(client)
+        CallClient.teardown(client)
+      end
+    end
+
+    # Fable review 3: a choice that cannot be read is no choice of this Mac;
+    # the call is refused with its own reason until the owner chooses again.
+    test "a voice device that cannot be read refuses this Mac's call, and the log says why",
+         ctx do
+      unreadable = fn -> {:error, {:invalid_voice_device, "/invented/voice_device.json"}} end
+      client = new_client(ctx, voice_device: unreadable)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:stop, %CallClient{session: nil}} = CallClient.call_start(client)
+        end)
+
+      assert_receive {:emitted,
+                      %{
+                        type: "error",
+                        reason: "voice_device_unreadable",
+                        sentence: "The voice device could not be read. Choose one in Pet."
+                      } = frame}
+
+      refute Map.has_key?(frame, :voice_device)
+      refute_received {:session_started, _session, _opts}
+      assert log =~ "voice device could not be read"
+    end
+
+    # Fable review 7: the robot stays chosen when accessories are turned off,
+    # and the refusal says so rather than calling it the voice device in use.
+    test "a robot still chosen with accessories off is refused in those words", ctx do
+      robot = fn -> {:ok, {:accessory, String.duplicate("4f", 32)}} end
+      client = new_client(ctx, voice_device: robot, accessories_enabled?: fn -> false end)
+
+      assert {:stop, _client} = CallClient.call_start(client)
+
+      assert_receive {:emitted,
+                      %{
+                        reason: "voice_device_elsewhere",
+                        voice_device: @chosen_robot,
+                        sentence:
+                          "StackChan is off but is still your voice device. Choose This Mac in " <>
+                            "Pet to talk here."
+                      }}
+    end
+  end
+
   # The Realtime wire's events, decoded, as the call's verbs: the one mapping
   # every adapter speaking that wire shares.
   describe "the wire's events" do
@@ -501,7 +580,9 @@ defmodule FermixCore.Realtime.CallClientTest do
       session_starter: Keyword.get(opts, :session_starter, starter),
       session_guard: Keyword.get(opts, :session_guard, ctx.guard),
       task_supervisor: ctx.tasks,
-      deadline_ms: Keyword.get(opts, :deadline_ms, :infinity)
+      deadline_ms: Keyword.get(opts, :deadline_ms, :infinity),
+      voice_device: Keyword.get(opts, :voice_device, fn -> {:ok, :desktop} end),
+      accessories_enabled?: Keyword.get(opts, :accessories_enabled?, fn -> true end)
     )
   end
 

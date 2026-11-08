@@ -10,9 +10,12 @@ defmodule FermixCore.Realtime.CallClient do
     * the endpoint the call is for, the peer's realtime protocol version (what
       the Unix handshake negotiated, or the level an adapter translates), and
       the config the connection started with;
-    * the per-engine minimum version and the endpoint's engine rule
-      (`Endpoint.admit_engine/2`: a phone takes a call only on a task engine),
-      both refused at `call_start` before any session exists;
+    * the per-engine minimum version, the endpoint's engine rule
+      (`Endpoint.admit_engine/2`: a phone takes a call only on a task engine)
+      and the owner's voice device (`Accessories.VoiceDevice.refusal/3`: the
+      Mac's own call waits while a paired accessory is chosen, or while the
+      choice cannot be read, M91 E3), each refused at `call_start` before any
+      session exists;
     * starting the session through `SessionGuard`, which monitors the adapter
       before the session exists and binds it the moment it does, so it never
       outlives the adapter (`session_opts/1` is the default starter's half of
@@ -60,6 +63,9 @@ defmodule FermixCore.Realtime.CallClient do
   guard (it settles on its own, holding the home's call until it does).
   """
 
+  alias FermixCore.Accessories.Config, as: AccessoriesConfig
+  alias FermixCore.Accessories.Store, as: AccessoryStore
+  alias FermixCore.Accessories.VoiceDevice
   alias FermixCore.Memory.Config, as: MemoryConfig
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.DeviceIdentity
@@ -98,7 +104,11 @@ defmodule FermixCore.Realtime.CallClient do
     session_supervisor: SessionSupervisor,
     session_guard: SessionGuard,
     # How long `task_cancel` and `call_stop` wait for the session (moduledoc).
-    deadline_ms: :infinity
+    deadline_ms: :infinity,
+    # The owner's voice device and the accessory switch, read at the Mac's
+    # `call_start` (`Accessories.VoiceDevice.refusal/3`).
+    voice_device: nil,
+    accessories_enabled?: nil
   ]
 
   @type emit :: (map() -> :ok | {:error, term()})
@@ -115,7 +125,9 @@ defmodule FermixCore.Realtime.CallClient do
           starter_opts: keyword(),
           session_supervisor: GenServer.server(),
           session_guard: GenServer.server(),
-          deadline_ms: timeout()
+          deadline_ms: timeout(),
+          voice_device: (-> VoiceDevice.read()),
+          accessories_enabled?: (-> boolean())
         }
   @type result :: {:cont, t()} | {:stop, t()}
 
@@ -134,10 +146,14 @@ defmodule FermixCore.Realtime.CallClient do
       __MODULE__,
       opts
       |> Keyword.put_new(:session_starter, &start_session/1)
+      |> Keyword.put_new(:voice_device, &chosen_voice_device/0)
+      |> Keyword.put_new(:accessories_enabled?, &AccessoriesConfig.enabled?/0)
       |> Keyword.update!(:protocol_version, &positive_version!/1)
       |> Keyword.update!(:config, fn %Config{} = config -> config end)
       |> Keyword.update!(:emit, fn emit when is_function(emit, 1) -> emit end)
       |> Keyword.update(:deadline_ms, :infinity, &deadline!/1)
+      |> Keyword.update!(:voice_device, fn read when is_function(read, 0) -> read end)
+      |> Keyword.update!(:accessories_enabled?, fn read when is_function(read, 0) -> read end)
     )
   end
 
@@ -190,8 +206,32 @@ defmodule FermixCore.Realtime.CallClient do
         update_required(client)
 
       true ->
-        start_call(client)
+        admit_device(client)
     end
+  end
+
+  # Only the Mac's own call is the owner's voice device's to refuse: an
+  # accessory's call is its link's, and a phone's is not this Mac's.
+  defp admit_device(%__MODULE__{endpoint: :desktop} = client) do
+    read = client.voice_device.()
+
+    case VoiceDevice.refusal(:desktop, read, client.accessories_enabled?.()) do
+      :ok -> start_call(client)
+      {:error, refusal} -> voice_device_refused(client, read, refusal)
+    end
+  end
+
+  defp admit_device(client), do: start_call(client)
+
+  defp chosen_voice_device, do: AccessoryStore.load_voice_device(ConfigStore.fermix_home())
+
+  defp voice_device_refused(client, read, {reason, device, sentence}) do
+    if match?({:error, _}, read),
+      do: Logger.error("realtime: the voice device could not be read: #{inspect(elem(read, 1))}")
+
+    frame = %{type: "error", reason: Atom.to_string(reason), sentence: sentence}
+    _ = client.emit.(if device, do: Map.put(frame, :voice_device, device), else: frame)
+    {:stop, client}
   end
 
   @doc """

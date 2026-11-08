@@ -10,7 +10,8 @@ defmodule FermixCore.Home.Candidate.Return do
     * copies the **device-class sections** whole from this computer's retired
       `config.toml` (`device_tables/0`, the settings sections that configure
       only the machine they run on, `Management.Placement.device_sections/0`):
-      the sandbox, computer use, computer history and this Mac's Messages.
+      the sandbox, computer use, computer history, this Mac's Messages and
+      its StackChan switch (M91).
       The server's tables of those sections are dropped, so iMessage is on
       again when it was on before the move, and nothing the server set for
       itself configures this computer;
@@ -41,7 +42,8 @@ defmodule FermixCore.Home.Candidate.Return do
     "sandbox" => "sandbox",
     "computer_use" => "fermix_core.computer_use",
     "computer_history" => "fermix_core.computer_history",
-    "channels.imessage" => "fermix_channels.imessage"
+    "channels.imessage" => "fermix_channels.imessage",
+    "accessories" => "fermix_channels.accessories"
   }
 
   @doc "Each device-class settings section with the `config.toml` table it lives under."

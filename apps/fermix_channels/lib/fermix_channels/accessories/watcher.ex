@@ -28,14 +28,21 @@ defmodule FermixChannels.Accessories.Watcher do
   Links run under the subtree's link supervisor, each on its own, so one
   link's crash ends only its own call. A watcher that starts again ends every
   link it finds there and opens afresh, so no port is held by a link nobody
-  watches. Every change of the view bumps `version` (the update key a status
-  long poll waits on) and, for a test, tells `:observer`.
+  watches. Every change of the view bumps `version` and tells each
+  subscriber (`subscribe/2`: a waiting `accessories.status`, at most 32 at
+  once) `{:accessories_changed, version}` and, for a test, `:observer`.
+
+  The view (M91 E3) is the ports with their links' own views, the port
+  selected for pairing, voice readiness as each poll reads it (so a waiting
+  status hears a voice setting change), and how each accessory's newest call
+  ended: as its link said, or `unplugged` and `link_lost` when the link
+  itself went with a call on it.
   """
 
   use GenServer
 
   alias FermixChannels.Accessories.Link
-  alias FermixChannels.Accessories.Readiness
+  alias FermixCore.Accessories.Readiness
   alias FermixCore.Accessories.Store
 
   require Logger
@@ -47,6 +54,8 @@ defmodule FermixChannels.Accessories.Watcher do
   @max_failures 5
   @max_vanished 16
   @call_timeout_ms 5_000
+  @max_subscribers 32
+  @max_last_calls 16
 
   @type port_state ::
           :linked | :busy | :unrelated | :vanished | :released | :no_answer | :failed
@@ -62,7 +71,13 @@ defmodule FermixChannels.Accessories.Watcher do
   end
 
   @doc "Every watched port and its state, with the view's update key."
-  @spec status(GenServer.server(), timeout()) :: %{version: non_neg_integer(), ports: [map()]}
+  @spec status(GenServer.server(), timeout()) :: %{
+          version: non_neg_integer(),
+          selected: String.t() | nil,
+          voice: term(),
+          last_calls: %{String.t() => map()},
+          ports: [map()]
+        }
   def status(watcher, timeout \\ @call_timeout_ms), do: GenServer.call(watcher, :status, timeout)
 
   @doc """
@@ -79,7 +94,11 @@ defmodule FermixChannels.Accessories.Watcher do
   def retry(watcher, path, timeout \\ @call_timeout_ms) when is_binary(path),
     do: GenServer.call(watcher, {:retry, path}, timeout)
 
-  @doc "Releases a port for a firmware update: closed, and ignored until `reconnect/2`."
+  @doc """
+  Releases a port for a firmware update: closed, and ignored until
+  `reconnect/2`. A port whose link carries a call, running or settling, is
+  refused `{:error, :call_active}`: the owner ends the call first.
+  """
   @spec release(GenServer.server(), String.t(), timeout()) :: :ok | {:error, term()}
   def release(watcher, path, timeout \\ @call_timeout_ms) when is_binary(path),
     do: GenServer.call(watcher, {:release, path}, timeout)
@@ -94,6 +113,39 @@ defmodule FermixChannels.Accessories.Watcher do
           {:ok, pid()} | {:error, :not_attached}
   def link_for(watcher, accessory_id, timeout \\ @call_timeout_ms) when is_binary(accessory_id),
     do: GenServer.call(watcher, {:link_for, accessory_id}, timeout)
+
+  @doc """
+  Tells `pid` `{:accessories_changed, version}` at once and then at every
+  change of the view, until it exits or `unsubscribe/3`, so a change made
+  before the subscribe is heard too (as `Home.StatusWatch.join/2`'s first
+  word is); answers the watcher's pid, which the caller monitors to hear the
+  watcher end.
+  """
+  @spec subscribe(GenServer.server(), pid(), timeout()) :: {:ok, pid()} | {:error, :too_many}
+  def subscribe(watcher, pid, timeout \\ @call_timeout_ms) when is_pid(pid),
+    do: GenServer.call(watcher, {:subscribe, pid}, timeout)
+
+  @doc "Stops telling `pid`."
+  @spec unsubscribe(GenServer.server(), pid(), timeout()) :: :ok
+  def unsubscribe(watcher, pid, timeout \\ @call_timeout_ms) when is_pid(pid),
+    do: GenServer.call(watcher, {:unsubscribe, pid}, timeout)
+
+  @doc """
+  Tells every subscriber something it reads beside the view changed (the voice
+  device the owner chose): the version moves without a change of the view.
+  """
+  @spec touch(GenServer.server(), timeout()) :: :ok
+  def touch(watcher, timeout \\ @call_timeout_ms), do: GenServer.call(watcher, :touch, timeout)
+
+  @doc """
+  Ends pairing on the selected port: the selection is cleared, its link
+  closed, and the port read again as any other (an accessory that paired
+  meanwhile is opened by its hint). A port that is not the selected one is
+  left as it is.
+  """
+  @spec cancel_pairing(GenServer.server(), String.t(), timeout()) :: :ok
+  def cancel_pairing(watcher, path, timeout \\ @call_timeout_ms) when is_binary(path),
+    do: GenServer.call(watcher, {:cancel_pairing, path}, timeout)
 
   @doc "The link on a port, attached or not (the pairing link, say)."
   @spec link_on(GenServer.server(), String.t(), timeout()) :: {:ok, pid()} | {:error, :not_linked}
@@ -111,6 +163,11 @@ defmodule FermixChannels.Accessories.Watcher do
       link_supervisor: Keyword.fetch!(opts, :link_supervisor),
       link_opts: Keyword.get(opts, :link_opts, []),
       send_after: Keyword.get(opts, :send_after, &Process.send_after/3),
+      utc_now: Keyword.get(opts, :utc_now, &DateTime.utc_now/0),
+      readiness: Keyword.get(Keyword.get(opts, :link_opts, []), :readiness, &Readiness.voice/0),
+      voice: nil,
+      subscribers: %{},
+      last_calls: %{},
       poll_ms: Keyword.get(opts, :poll_ms, @poll_ms),
       observer: Keyword.get(opts, :observer),
       ports: %{},
@@ -154,12 +211,10 @@ defmodule FermixChannels.Accessories.Watcher do
   end
 
   def handle_call({:release, path}, _from, state) do
-    state = stop_link(state, path)
-    key = release_key(state, path)
-    entry = %{state: :released, serial: serial_of(state, path)}
-
-    {:reply, :ok,
-     %{state | released: MapSet.put(state.released, key)} |> put_entry(path, entry) |> changed()}
+    case Map.get(state.entries, path) do
+      %{state: :linked, link: %{call: %{}}} -> {:reply, {:error, :call_active}, state}
+      _no_call -> {:reply, :ok, state |> release_port(path) |> changed()}
+    end
   end
 
   def handle_call({:reconnect, path}, _from, state) do
@@ -172,6 +227,29 @@ defmodule FermixChannels.Accessories.Watcher do
     do:
       {:reply, find_link(state, &(&1.accessory_id == accessory_id and &1.phase == :attached)),
        state}
+
+  def handle_call({:subscribe, pid}, _from, state) do
+    if map_size(state.subscribers) >= @max_subscribers do
+      {:reply, {:error, :too_many}, state}
+    else
+      ref = Process.monitor(pid)
+      send(pid, {:accessories_changed, state.version})
+      {:reply, {:ok, self()}, %{state | subscribers: Map.put(state.subscribers, ref, pid)}}
+    end
+  end
+
+  def handle_call({:unsubscribe, pid}, _from, state),
+    do: {:reply, :ok, drop_subscriber(state, pid)}
+
+  def handle_call(:touch, _from, state),
+    do: {:reply, :ok, announce(%{state | version: state.version + 1})}
+
+  def handle_call({:cancel_pairing, path}, _from, %{selected: path} = state) do
+    state = %{state | selected: nil} |> stop_link(path) |> forget_entry(path)
+    {:reply, :ok, state |> consider_present(path) |> changed()}
+  end
+
+  def handle_call({:cancel_pairing, _path}, _from, state), do: {:reply, :ok, state}
 
   def handle_call({:link_on, path}, _from, state) do
     case Map.get(state.entries, path) do
@@ -190,6 +268,10 @@ defmodule FermixChannels.Accessories.Watcher do
 
   def handle_info({:link_ended, path, pid, reason}, state),
     do: {:noreply, state |> link_ended(path, pid, reason) |> changed()}
+
+  def handle_info({:DOWN, ref, :process, _pid, _reason}, state)
+      when is_map_key(state.subscribers, ref),
+      do: {:noreply, %{state | subscribers: Map.delete(state.subscribers, ref)}}
 
   def handle_info({:DOWN, ref, :process, pid, reason}, state),
     do: {:noreply, state |> link_down(ref, pid, reason) |> changed()}
@@ -210,6 +292,8 @@ defmodule FermixChannels.Accessories.Watcher do
   end
 
   defp poll(state) do
+    state = %{state | voice: state.readiness.()}
+
     case state.transport.enumerate(state.transport_opts) do
       {:ok, ports} -> %{state | enumerate_error: nil} |> reconcile(usj_ports(ports))
       {:error, reason} -> enumerate_failed(state, reason)
@@ -361,7 +445,11 @@ defmodule FermixChannels.Accessories.Watcher do
   defp link_view(state, path, pid, view) do
     case Map.get(state.entries, path) do
       %{pid: ^pid} = entry ->
-        state |> put_entry(path, %{entry | link: view}) |> paired(path, view) |> changed()
+        state
+        |> put_entry(path, %{entry | link: view})
+        |> paired(path, view)
+        |> last_call(Map.get(view, :last_call))
+        |> changed()
 
       _stale ->
         state
@@ -380,7 +468,7 @@ defmodule FermixChannels.Accessories.Watcher do
 
   defp link_down(state, ref, pid, reason) do
     case Enum.find(state.entries, fn {_path, entry} -> Map.get(entry, :ref) == ref end) do
-      {path, entry} -> ended(state, path, entry, reason)
+      {path, entry} -> state |> call_gone(entry, reason) |> ended(path, entry, reason)
       nil -> stale_down(state, pid)
     end
   end
@@ -393,7 +481,7 @@ defmodule FermixChannels.Accessories.Watcher do
     case Map.get(state.entries, path) do
       %{state: :linked, pid: ^pid, ref: ref} = entry ->
         Process.demonitor(ref, [:flush])
-        ended(state, path, entry, reason)
+        state |> call_gone(entry, reason) |> ended(path, entry, reason)
 
       _stale ->
         state
@@ -417,6 +505,37 @@ defmodule FermixChannels.Accessories.Watcher do
     Logger.warning("accessory link on #{path} ended: #{inspect(reason)}")
     failed(state, path, entry, reason)
   end
+
+  # A link that ends with a call on it never publishes the call's end: the
+  # cable went (`unplugged`) or the link did (`link_lost`).
+  defp call_gone(state, %{link: %{call: %{} = call, accessory_id: id}}, reason)
+       when is_binary(id) do
+    last_call(state, %{
+      accessory_id: id,
+      call_id: call.call_id,
+      reason: gone_reason(reason),
+      ended_at: state.utc_now.()
+    })
+  end
+
+  defp call_gone(state, _entry, _reason), do: state
+
+  defp gone_reason({:shutdown, {:transport_closed, :vanished}}), do: "unplugged"
+  defp gone_reason({:shutdown, {:open_failed, :not_found}}), do: "unplugged"
+  defp gone_reason(_reason), do: "link_lost"
+
+  defp last_call(state, %{accessory_id: id} = last) when is_binary(id) do
+    calls = Map.put(state.last_calls, id, Map.delete(last, :accessory_id))
+
+    calls =
+      if map_size(calls) > @max_last_calls,
+        do: calls |> Enum.sort_by(&elem(&1, 1).ended_at, DateTime) |> tl() |> Map.new(),
+        else: calls
+
+    %{state | last_calls: calls}
+  end
+
+  defp last_call(state, _none), do: state
 
   defp failed(state, path, entry, reason) do
     failures = Map.get(entry, :failures, 0) + 1
@@ -450,6 +569,13 @@ defmodule FermixChannels.Accessories.Watcher do
   defp pair_port(state, path, info) do
     state = stop_link(%{state | selected: path}, path) |> forget_entry(path)
     {:reply, :ok, state |> consider(path, info) |> changed()}
+  end
+
+  defp release_port(state, path) do
+    state = stop_link(state, path)
+    key = release_key(state, path)
+    entry = %{state: :released, serial: serial_of(state, path)}
+    put_entry(%{state | released: MapSet.put(state.released, key)}, path, entry)
   end
 
   defp stop_link(state, path) do
@@ -514,16 +640,28 @@ defmodule FermixChannels.Accessories.Watcher do
 
   # The update key moves only when what a reader sees moved.
   defp changed(state) do
-    ports = view(state).ports
+    seen = Map.delete(view(state), :version)
 
-    if ports == state.last_ports,
+    if seen == state.last_ports,
       do: state,
-      else: announce(%{state | version: state.version + 1, last_ports: ports})
+      else: announce(%{state | version: state.version + 1, last_ports: seen})
   end
 
   defp announce(state) do
     if state.observer, do: send(state.observer, {:watcher_changed, self()})
+    for {_ref, pid} <- state.subscribers, do: send(pid, {:accessories_changed, state.version})
     state
+  end
+
+  defp drop_subscriber(state, pid) do
+    case Enum.find(state.subscribers, fn {_ref, subscriber} -> subscriber == pid end) do
+      {ref, _pid} ->
+        Process.demonitor(ref, [:flush])
+        %{state | subscribers: Map.delete(state.subscribers, ref)}
+
+      nil ->
+        state
+    end
   end
 
   defp view(state) do
@@ -542,7 +680,13 @@ defmodule FermixChannels.Accessories.Watcher do
         }
       end)
 
-    %{version: state.version, ports: ports}
+    %{
+      version: state.version,
+      selected: state.selected,
+      voice: state.voice,
+      last_calls: state.last_calls,
+      ports: ports
+    }
   end
 
   # A busy port being opened again is still busy to the owner.
