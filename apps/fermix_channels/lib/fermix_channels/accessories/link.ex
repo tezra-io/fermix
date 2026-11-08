@@ -704,8 +704,12 @@ defmodule FermixChannels.Accessories.Link do
   defp dispatch(state, %{type: "accessory.state"} = message),
     do: %{state | accessory_state: Map.drop(message, [:type, :gen])}
 
-  defp dispatch(state, %{type: "diag.counters", counters: counters}),
-    do: %{state | diag_counters: counters} |> diag_to_call(counters)
+  # The latest microphone opening's levels go to the call alone, never into
+  # the link's view (`accessories.status`).
+  defp dispatch(state, %{type: "diag.counters", counters: counters} = message) do
+    levels = Map.drop(message, [:type, :gen, :counters])
+    diag_to_call(%{state | diag_counters: counters}, counters, levels)
+  end
 
   # The accessory's own fault is kept until the next HELLO, so the Mac says
   # it (M91 E3: "StackChan reports a problem").
@@ -726,13 +730,13 @@ defmodule FermixChannels.Accessories.Link do
 
   defp dispatch(state, %{type: "diag.chunk"}), do: state
 
-  # The robot's own counters ride its call's link event too (M91 F3).
-  defp diag_to_call(%{call: %{pid: pid, ending?: false}} = state, counters) do
-    send(pid, {:robot_diag, counters})
+  # The robot's own counters and levels ride its call's link event too (M91 F3).
+  defp diag_to_call(%{call: %{pid: pid, ending?: false}} = state, counters, levels) do
+    send(pid, {:robot_diag, counters, levels})
     state
   end
 
-  defp diag_to_call(state, _counters), do: state
+  defp diag_to_call(state, _counters, _levels), do: state
 
   defp peer_error(state, %{code: code} = error) do
     Logger.warning("accessory #{state.path} refused a host message: #{inspect(error)}")

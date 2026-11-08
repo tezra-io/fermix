@@ -322,6 +322,29 @@ defmodule FermixChannels.Accessories.LinkTest do
       assert %{gen: 2} = AccessoryCase.await_received(ctx.sim, "hello")
       assert AccessoryCase.await_state(&(&1.gen == 2)).diag == nil
     end
+
+    # The levels are the call's (its link event), not the link's view, which
+    # `accessories.status` exports to the Mac as the eight counters.
+    test "keep only the counters when the robot also reports its microphone levels", ctx do
+      ctx = ctx |> enrolled() |> start()
+      attached!(ctx)
+
+      counters = %{
+        uptime_s: 30,
+        frames_rx: 18,
+        frames_tx: 640,
+        crc_errors: 0,
+        resync_bytes: 0,
+        pcm_seq_gaps: 0,
+        mic_overflows: 0,
+        spk_underflows: 0
+      }
+
+      levels = %{mic_rms: 140, mic_peak: 520, ref_rms: 0, ref_peak: 2, out_rms: 61, out_peak: 170}
+      message = Map.merge(%{type: "diag.counters", counters: counters}, levels)
+      AccessorySim.send_message(ctx.sim, message)
+      assert AccessoryCase.await_state(&(&1.diag != nil)).diag == counters
+    end
   end
 
   describe "heartbeat and liveness" do

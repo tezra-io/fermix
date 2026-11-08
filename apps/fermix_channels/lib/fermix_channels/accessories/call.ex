@@ -81,6 +81,15 @@ defmodule FermixChannels.Accessories.Call do
     mic_overflows: :robot_mic_overflows,
     spk_underflows: :robot_spk_underflows
   }
+  # The robot's levels of its latest microphone opening, beside them.
+  @robot_levels %{
+    mic_rms: :robot_mic_rms,
+    mic_peak: :robot_mic_peak,
+    ref_rms: :robot_ref_rms,
+    ref_peak: :robot_ref_peak,
+    out_rms: :robot_out_rms,
+    out_peak: :robot_out_peak
+  }
   @client_opts [:session_module, :session_starter, :session_supervisor, :session_guard]
   @token ~r/\A[a-z][a-z0-9_]{0,47}\z/
 
@@ -114,6 +123,7 @@ defmodule FermixChannels.Accessories.Call do
       mic_live?: false,
       mic_level: %{max: 0, total: 0},
       robot_diag: Keyword.get(opts, :robot_diag),
+      robot_levels: %{},
       engine_muted?: false,
       sent_state: nil,
       counters: %{
@@ -221,7 +231,9 @@ defmodule FermixChannels.Accessories.Call do
 
   def handle_info({:robot, message}, state), do: on_robot(state, message)
   def handle_info({:mic, seq, pcm}, state), do: {:noreply, on_mic(state, seq, pcm)}
-  def handle_info({:robot_diag, counters}, state), do: {:noreply, %{state | robot_diag: counters}}
+
+  def handle_info({:robot_diag, counters, levels}, state),
+    do: {:noreply, %{state | robot_diag: counters, robot_levels: levels}}
 
   def handle_info({:robot_error, code}, state),
     do: finish(state, Map.fetch!(@robot_errors, code))
@@ -549,6 +561,7 @@ defmodule FermixChannels.Accessories.Call do
       state.counters
       |> Map.merge(Speaker.counters(state.speaker))
       |> Map.merge(robot_counters(state.robot_diag))
+      |> Map.merge(robot_levels(state.robot_levels))
       |> Map.merge(level_counters(state))
       |> Map.put(:duration_ms, max(state.clock.() - state.started_ms, 0))
 
@@ -569,6 +582,15 @@ defmodule FermixChannels.Accessories.Call do
         Map.has_key?(diag, name),
         into: %{},
         do: {key, Map.fetch!(diag, name)}
+  end
+
+  # The levels of the robot's latest report in this call; none when that
+  # report carried none (`Control` has them all six or none).
+  defp robot_levels(%{} = levels) do
+    for {name, key} <- @robot_levels,
+        Map.has_key?(levels, name),
+        into: %{},
+        do: {key, Map.fetch!(levels, name)}
   end
 
   defp error_reason(%{kind: kind}) when is_binary(kind), do: token(kind, "session_error")

@@ -1296,7 +1296,13 @@ paired accessory such as StackChan) emits three events, all through
   counters since its boot, as last reported: `robot_uptime_s`,
   `robot_frames_rx`, `robot_frames_tx`, `robot_crc_errors`,
   `robot_resync_bytes`, `robot_pcm_seq_gaps`, `robot_mic_overflows`,
-  `robot_spk_underflows`. The
+  `robot_spk_underflows`; and, when the robot's latest `diag.counters` in
+  the call carried them, its own levels of its latest microphone opening
+  (int 0–32767, all six or none): `robot_mic_rms`, `robot_mic_peak`,
+  `robot_ref_rms`, `robot_ref_peak`, `robot_out_rms`, `robot_out_peak`, the
+  RMS over the opening and that of its loudest 200 ms, for the AFE's input
+  microphone, its reference (the speaker's loopback) and its output, so a
+  call the engine heard nothing of says whether the robot heard anything. The
   metadata: `endpoint`, `engine`, `source` (`screen_tap`, `head_swipe`,
   `mac`) and `reason` (why it ended: `end_request`, `mac_end`,
   `session_error`, `credit_overgrant`, `link_gone`, …).

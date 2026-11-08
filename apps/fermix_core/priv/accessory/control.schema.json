@@ -1576,6 +1576,7 @@
       }
     },
     "diag.counters": {
+      "description": "The latest microphone opening's six levels come all together or not at all.",
       "type": "object",
       "required": [
         "type",
@@ -1645,8 +1646,86 @@
               "maximum": 4294967295
             }
           }
+        },
+        "mic_rms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 32767
+        },
+        "mic_peak": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 32767
+        },
+        "ref_rms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 32767
+        },
+        "ref_peak": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 32767
+        },
+        "out_rms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 32767
+        },
+        "out_peak": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 32767
         }
-      }
+      },
+      "allOf": [
+        {
+          "dependentRequired": {
+            "mic_rms": [
+              "mic_peak",
+              "ref_rms",
+              "ref_peak",
+              "out_rms",
+              "out_peak"
+            ],
+            "mic_peak": [
+              "mic_rms",
+              "ref_rms",
+              "ref_peak",
+              "out_rms",
+              "out_peak"
+            ],
+            "ref_rms": [
+              "mic_rms",
+              "mic_peak",
+              "ref_peak",
+              "out_rms",
+              "out_peak"
+            ],
+            "ref_peak": [
+              "mic_rms",
+              "mic_peak",
+              "ref_rms",
+              "out_rms",
+              "out_peak"
+            ],
+            "out_rms": [
+              "mic_rms",
+              "mic_peak",
+              "ref_rms",
+              "ref_peak",
+              "out_peak"
+            ],
+            "out_peak": [
+              "mic_rms",
+              "mic_peak",
+              "ref_rms",
+              "ref_peak",
+              "out_rms"
+            ]
+          }
+        }
+      ]
     },
     "diag.fault": {
       "type": "object",

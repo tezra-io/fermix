@@ -760,6 +760,11 @@ def messages(keys, attach, enroll):
         {"type": "diag.counters", "gen": 7, "counters": {"uptime_s": 3600, "frames_rx": 912, "frames_tx": 180004,
                                                          "crc_errors": 0, "resync_bytes": 77, "pcm_seq_gaps": 0,
                                                          "mic_overflows": 0, "spk_underflows": 2}},
+        # The latest microphone opening's levels, all six beside the counters.
+        {"type": "diag.counters", "gen": 7, "counters": {"uptime_s": 52, "frames_rx": 33, "frames_tx": 1296,
+                                                         "crc_errors": 0, "resync_bytes": 0, "pcm_seq_gaps": 0,
+                                                         "mic_overflows": 0, "spk_underflows": 0},
+         "mic_rms": 188, "mic_peak": 507, "ref_rms": 0, "ref_peak": 3, "out_rms": 731, "out_peak": 2014},
         {"type": "diag.fault", "gen": 7, "code": "event_queue_overflow"},
         {"type": "diag.chunk", "gen": 7, "source": "log", "chunk": 0, "last": True, "data": "4920283831322920"},
     ]

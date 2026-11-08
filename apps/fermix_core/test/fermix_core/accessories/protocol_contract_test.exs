@@ -65,8 +65,8 @@ defmodule FermixCore.Accessories.ProtocolContractTest do
   defmodule SchemaEval do
     @moduledoc false
     # Just the JSON Schema keywords the cross-field rules use (if, then, else,
-    # required, properties, const, type, anyOf, not), so the test can ask the
-    # schema the same question it asks `Control`.
+    # required, dependentRequired, properties, const, type, anyOf, not), so
+    # the test can ask the schema the same question it asks `Control`.
 
     def valid?(rules, object) when is_list(rules), do: Enum.all?(rules, &valid?(&1, object))
 
@@ -85,6 +85,12 @@ defmodule FermixCore.Accessories.ProtocolContractTest do
 
     defp keyword?("required", names, _schema, object),
       do: Enum.all?(names, &Map.has_key?(object, &1))
+
+    defp keyword?("dependentRequired", dependents, _schema, object) do
+      Enum.all?(dependents, fn {name, names} ->
+        not Map.has_key?(object, name) or Enum.all?(names, &Map.has_key?(object, &1))
+      end)
+    end
 
     defp keyword?("anyOf", options, _schema, object), do: Enum.any?(options, &valid?(&1, object))
     defp keyword?("not", inner, _schema, object), do: not valid?(inner, object)
@@ -410,6 +416,17 @@ defmodule FermixCore.Accessories.ProtocolContractTest do
         "caps" => 127
       }
 
+    robot =
+      Map.new(
+        ~w(uptime_s frames_rx frames_tx crc_errors resync_bytes pcm_seq_gaps mic_overflows
+           spk_underflows),
+        &{&1, 0}
+      )
+
+    counters = fn present -> Map.new(present, &{&1, 9}) |> Map.put("counters", robot) end
+
+    levels = ~w(mic_rms mic_peak ref_rms ref_peak out_rms out_peak)
+
     [
       {:host, 0, "hello", hello.(1, 1), true},
       {:host, 0, "hello", hello.(2, 1), false},
@@ -433,7 +450,11 @@ defmodule FermixCore.Accessories.ProtocolContractTest do
       {:host, 0, "accessory.calibrate", %{"op" => "nudge", "axis" => "pan", "steps" => 0}, false},
       {:host, 0, "accessory.calibrate", %{"op" => "begin"}, true},
       {:host, 0, "accessory.calibrate", %{"op" => "begin", "axis" => "pan"}, false},
-      {:host, 0, "accessory.calibrate", %{"op" => "cancel", "steps" => 2}, false}
+      {:host, 0, "accessory.calibrate", %{"op" => "cancel", "steps" => 2}, false},
+      {:accessory, 0, "diag.counters", counters.(levels), true},
+      {:accessory, 0, "diag.counters", counters.([]), true},
+      {:accessory, 0, "diag.counters", counters.(["mic_rms"]), false},
+      {:accessory, 0, "diag.counters", counters.(levels -- ["out_peak"]), false}
     ]
   end
 

@@ -87,6 +87,90 @@ defmodule FermixCore.Accessories.ControlTest do
              Control.decode(:accessory, 0, json.(Map.delete(state, "power")))
   end
 
+  # The latest microphone opening's levels ride `diag.counters` beside its
+  # `counters`, all six or none (PROTOCOL.md (accessory), *Diagnostics*).
+  describe "diag.counters' levels" do
+    @counters %{
+      "uptime_s" => 75,
+      "frames_rx" => 31,
+      "frames_tx" => 1_204,
+      "crc_errors" => 0,
+      "resync_bytes" => 0,
+      "pcm_seq_gaps" => 0,
+      "mic_overflows" => 0,
+      "spk_underflows" => 0
+    }
+    @levels %{
+      "mic_rms" => 238,
+      "mic_peak" => 911,
+      "ref_rms" => 4,
+      "ref_peak" => 17,
+      "out_rms" => 702,
+      "out_peak" => 2_655
+    }
+
+    defp counters_json(fields) do
+      %{"type" => "diag.counters", "gen" => 4, "counters" => @counters}
+      |> Map.merge(fields)
+      |> Jason.encode!()
+    end
+
+    test "all six decode beside the counters and encode back" do
+      assert {:ok, message} = Control.decode(:accessory, 0, counters_json(@levels))
+
+      assert %{
+               counters: %{uptime_s: 75, frames_tx: 1_204},
+               mic_rms: 238,
+               mic_peak: 911,
+               ref_rms: 4,
+               ref_peak: 17,
+               out_rms: 702,
+               out_peak: 2_655
+             } = message
+
+      assert {:ok, json} = Control.encode(:accessory, message)
+      assert Jason.decode!(json) == Map.merge(Jason.decode!(counters_json(%{})), @levels)
+    end
+
+    test "none is a message without them" do
+      assert {:ok, message} = Control.decode(:accessory, 0, counters_json(%{}))
+      assert Map.keys(message) |> Enum.sort() == [:counters, :gen, :type]
+    end
+
+    test "some but not all is invalid, named by the first missing level" do
+      partial = Map.take(@levels, ["mic_rms", "mic_peak", "out_peak"])
+
+      assert {:error, {:invalid_message, "diag.counters", "ref_rms"}} =
+               Control.decode(:accessory, 0, counters_json(partial))
+
+      assert {:error, {:invalid_message, "diag.counters", "mic_rms"}} =
+               Control.decode(:accessory, 0, counters_json(Map.delete(@levels, "mic_rms")))
+
+      assert {:error, {:invalid_message, "diag.counters", "out_peak"}} =
+               Control.encode(:accessory, %{
+                 type: "diag.counters",
+                 gen: 4,
+                 counters: Map.new(@counters, fn {k, v} -> {String.to_existing_atom(k), v} end),
+                 mic_rms: 1,
+                 mic_peak: 2,
+                 ref_rms: 3,
+                 ref_peak: 4,
+                 out_rms: 5
+               })
+    end
+
+    test "a level is an int16 magnitude, 0 to 32,767" do
+      assert {:ok, %{mic_peak: 32_767}} =
+               Control.decode(:accessory, 0, counters_json(%{@levels | "mic_peak" => 32_767}))
+
+      assert {:error, {:invalid_message, "diag.counters", "mic_peak"}} =
+               Control.decode(:accessory, 0, counters_json(%{@levels | "mic_peak" => 32_768}))
+
+      assert {:error, {:invalid_message, "diag.counters", "ref_rms"}} =
+               Control.decode(:accessory, 0, counters_json(%{@levels | "ref_rms" => -1}))
+    end
+  end
+
   test "a payload over the 8,192-byte cap, not UTF-8, or not one object is invalid_json" do
     sized = fn bytes ->
       prefix = ~s({"type":"pong","gen":1,"uptime_ms":1,"p":")

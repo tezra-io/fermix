@@ -60,6 +60,10 @@ defmodule FermixCore.Accessories.Control do
                            mic_overflows spk_underflows)a,
                 do: {name, {:int, 0, @u32}}
 
+  # The latest microphone opening's levels beside `diag.counters`' counters:
+  # RMS and the loudest 200 ms of the AFE's microphone, reference and output.
+  @levels ~w(mic_rms mic_peak ref_rms ref_peak out_rms out_peak)a
+
   # type => {senders, required fields, optional fields}; `type` and `gen` are
   # required of every message and not listed. Field order is validation order.
   @specs %{
@@ -160,7 +164,9 @@ defmodule FermixCore.Accessories.Control do
     "accessory.forget" => {[:host], [], []},
     "accessory.state" => {[:accessory], @state, []},
     "diag.fetch" => {[:host], [source: @source, chunk: {:int, 0, 65_535}], []},
-    "diag.counters" => {[:accessory], [counters: {:object, @counters}], []},
+    "diag.counters" =>
+      {[:accessory], [counters: {:object, @counters}],
+       for(name <- @levels, do: {name, {:int, 0, 32_767}})},
     "diag.fault" => {[:accessory], [code: @code], []},
     "diag.chunk" =>
       {[:accessory],
@@ -168,7 +174,8 @@ defmodule FermixCore.Accessories.Control do
   }
 
   # One entry per `relation/2` clause below that names a type.
-  @relation_types ~w(hello hello_ack refuse call.result accessory.set accessory.calibrate)
+  @relation_types ~w(hello hello_ack refuse call.result accessory.set accessory.calibrate
+                     diag.counters)
 
   # The capability an accessory must report before the host sends the message.
   @capabilities %{
@@ -457,6 +464,11 @@ defmodule FermixCore.Accessories.Control do
   end
 
   defp relation("accessory.calibrate", message), do: absent(message, [:axis, :steps])
+
+  defp relation("diag.counters", message) do
+    if Enum.any?(@levels, &Map.has_key?(message, &1)), do: present(message, @levels), else: :ok
+  end
+
   defp relation(_type, _message), do: :ok
 
   defp present(message, fields) do

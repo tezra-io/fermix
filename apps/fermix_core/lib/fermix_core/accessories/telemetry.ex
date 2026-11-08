@@ -107,7 +107,16 @@ defmodule FermixCore.Accessories.Telemetry do
     :robot_resync_bytes,
     :robot_pcm_seq_gaps,
     :robot_mic_overflows,
-    :robot_spk_underflows
+    :robot_spk_underflows,
+    # The robot's own levels of its latest microphone opening, as it last
+    # reported them in the call: RMS over the opening and its loudest 200 ms,
+    # of the AFE's microphone, reference (speaker loopback) and output.
+    :robot_mic_rms,
+    :robot_mic_peak,
+    :robot_ref_rms,
+    :robot_ref_peak,
+    :robot_out_rms,
+    :robot_out_peak
   ]
 
   @type attach_status ::

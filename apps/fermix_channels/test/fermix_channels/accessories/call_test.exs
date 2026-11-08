@@ -522,7 +522,38 @@ defmodule FermixChannels.Accessories.CallTest do
 
       assert_receive {:telemetry, [:fermix, :accessory, :call_link], counters, _meta}
       refute Map.has_key?(counters, :robot_crc_errors)
+      refute Enum.any?(Map.keys(robot_level_counters()), &Map.has_key?(counters, &1))
       assert %{interrupts: 0, interrupt_played_ms_total: 0} = counters
+    end
+
+    # The robot's own measure of its microphone opening (the AFE's microphone,
+    # reference and output), as it last reported them in the call, so a call
+    # the engine heard nothing of says whether the robot heard anything.
+    test "carries the robot's own microphone levels, as it last reported them", ctx do
+      ctx = ctx |> attached() |> call_up()
+      TelemetryCapture.attach([[:fermix, :accessory, :call_link]], session_id: ctx.call_id)
+
+      earlier = Map.new(robot_levels(), fn {name, level} -> {name, level + 1} end)
+      AccessorySim.send_message(ctx.sim, diag_counters(earlier))
+      AccessorySim.send_message(ctx.sim, diag_counters(robot_levels()))
+      AccessorySim.end_request(ctx.sim)
+
+      assert_receive {:telemetry, [:fermix, :accessory, :call_link], counters, _meta}
+      assert Map.take(counters, Map.keys(robot_level_counters())) == robot_level_counters()
+      assert %{robot_uptime_s: 61, robot_spk_underflows: 3} = counters
+    end
+
+    test "names no robot level when its last report carried none", ctx do
+      ctx = ctx |> attached() |> call_up()
+      TelemetryCapture.attach([[:fermix, :accessory, :call_link]], session_id: ctx.call_id)
+
+      AccessorySim.send_message(ctx.sim, diag_counters(robot_levels()))
+      AccessorySim.send_message(ctx.sim, diag_counters(%{}))
+      AccessorySim.end_request(ctx.sim)
+
+      assert_receive {:telemetry, [:fermix, :accessory, :call_link], counters, _meta}
+      assert %{robot_uptime_s: 61} = counters
+      refute Enum.any?(Map.keys(robot_level_counters()), &Map.has_key?(counters, &1))
     end
   end
 
@@ -872,6 +903,24 @@ defmodule FermixChannels.Accessories.CallTest do
       spk_underflows: 3
     }
   end
+
+  defp robot_levels do
+    %{mic_rms: 238, mic_peak: 911, ref_rms: 4, ref_peak: 17, out_rms: 702, out_peak: 2_655}
+  end
+
+  defp robot_level_counters do
+    %{
+      robot_mic_rms: 238,
+      robot_mic_peak: 911,
+      robot_ref_rms: 4,
+      robot_ref_peak: 17,
+      robot_out_rms: 702,
+      robot_out_peak: 2_655
+    }
+  end
+
+  defp diag_counters(levels),
+    do: Map.merge(%{type: "diag.counters", counters: robot_counters()}, levels)
 
   defp duplicate_ack do
     %{

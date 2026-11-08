@@ -639,7 +639,14 @@ least one. `voice.readiness {ready, code?}` says whether a call can start
 ## Diagnostics
 
 `diag.counters` every 10 s and at a call's end, with the accessory's counters
-since boot. `diag.fault {code}` names a fault the accessory hit.
+since boot and, beside `counters`, the levels of its latest microphone opening
+(a call or a mic check, kept until the next): `mic_rms`, `mic_peak`, `ref_rms`,
+`ref_peak`, `out_rms`, `out_peak` (each int 0–32767), the RMS over the opening
+and that of its loudest 200 ms, for the AFE's input microphone, its input
+reference (the speaker's loopback) and its output, at 16 kHz. They come all
+six or none: none until an opening has a whole 200 ms of each, and a message
+with some but not all is `invalid_message`, naming the first one missing in
+that order. `diag.fault {code}` names a fault the accessory hit.
 `diag.fetch {source, chunk}` asks for one chunk of the accessory's log ring or
 core dump, and `diag.chunk {source, chunk, last, data}` answers with at most
 1,536 bytes. Diagnostics never carry raw audio, transcripts or credentials.
@@ -731,7 +738,7 @@ that stream; the rest on stream 0.
 | `spk.drained` | `stream`, `segment` | |
 | `spk.flushed` | `stream`, `segment?`, `played_ms` | |
 | `accessory.state` | `battery`, `power`, `brownout`, `volume`, `brightness`, `motion`, `calibration` | |
-| `diag.counters` | `counters`: `uptime_s`, `frames_rx`, `frames_tx`, `crc_errors`, `resync_bytes`, `pcm_seq_gaps`, `mic_overflows`, `spk_underflows` (each int 0–2³²−1) | |
+| `diag.counters` | `counters`: `uptime_s`, `frames_rx`, `frames_tx`, `crc_errors`, `resync_bytes`, `pcm_seq_gaps`, `mic_overflows`, `spk_underflows` (each int 0–2³²−1); `mic_rms?`, `mic_peak?`, `ref_rms?`, `ref_peak?`, `out_rms?`, `out_peak?` (each int 0–32767) | The six levels all together or none. |
 | `diag.fault` | `code` (token 48) | |
 | `diag.chunk` | `source`, `chunk`, `last` (bool), `data` (1–1,536 bytes as hex) | |
 
