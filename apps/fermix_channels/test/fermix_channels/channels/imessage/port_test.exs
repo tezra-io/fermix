@@ -6,8 +6,9 @@ defmodule FermixChannels.Channels.IMessage.PortTest do
   transport transitions.
 
   The fake is a POSIX `sh` script written into a per-test home: it answers by
-  method, records each spawn in `<home>/spawns`, exits with `<home>/exit_code`
-  when that file exists and answers `initialize` with `<home>/protocol_version`.
+  method, records each spawn in `<home>/spawns`, reads `initialize` and exits
+  with `<home>/exit_code` when that file exists, and answers `initialize` with
+  `<home>/protocol_version`.
   With `<home>/close_stdin` it closes its input before that answer and stays up
   (`/bin/sleep`); with `<home>/mute` it never answers, writes `<home>/muted`
   and stays up. It uses shell builtins and absolute paths only, so nothing on
@@ -24,6 +25,7 @@ defmodule FermixChannels.Channels.IMessage.PortTest do
   echo spawn >> "$home/spawns"
   if [ -f "$home/exit_code" ]; then
     read code < "$home/exit_code"
+    IFS= read -r line
     exit "$code"
   fi
   version=1
