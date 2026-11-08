@@ -67,7 +67,7 @@ defmodule FermixCore.Home.Candidate.ActivationReturnTest do
     "workspace/notes.md" => "the server's notes"
   }
 
-  # The stop case builds a home per stop, so it runs on a small copy that still
+  # The stop cases build a home each, so they run on a small copy that still
   # holds every kind of step: a path set aside in place, a kept path moved into
   # a staged entry, an entry with its database files, the ended tenure and the
   # marker.
@@ -85,6 +85,23 @@ defmodule FermixCore.Home.Candidate.ActivationReturnTest do
                  ])
 
   @small_staged Map.take(@staged, ["config.toml", "memory.db", "plugins/reinstall.json"])
+
+  @small {@small_retired, @small_staged}
+
+  # What a stop case finishes against: one whole activation of the small home,
+  # run once for the module, gives the first step of each kind and the files
+  # it leaves.
+  @stop_kinds [:a, :kept, :aside, :placed, :c, :d, :e, :f]
+
+  setup_all do
+    tmp = SafeRm.make_tmp_dir!("activation_return_reference")
+    on_exit(fn -> SafeRm.rm_rf!(tmp) end)
+    reference = activating_home!(tmp, "reference", @small)
+    test = self()
+    :ok = Activation.activate(reference, :return, after_step: &send(test, {:step, &1, nil, nil}))
+    stops = collect_steps() |> Enum.map(&elem(&1, 0)) |> first_of_each_kind()
+    %{reference: %{expected: files(reference), stops: stops}}
+  end
 
   setup do
     tmp = SafeRm.make_tmp_dir!("activation_return")
@@ -149,27 +166,26 @@ defmodule FermixCore.Home.Candidate.ActivationReturnTest do
     assert {:f, true, false} in steps
   end
 
-  test "a stop after any step is finished by the next run from the recorded entries", ctx do
-    small = {@small_retired, @small_staged}
-    reference = activating_home!(ctx.tmp, "reference", small)
-    test = self()
-    :ok = Activation.activate(reference, :return, after_step: &send(test, {:step, &1, nil, nil}))
-    expected = files(reference)
-    steps = Enum.map(collect_steps(), &elem(&1, 0))
-    stops = first_of_each_kind(steps)
+  test "a whole activation of the small home takes every kind of step a stop follows", ctx do
+    assert ctx.reference.stops |> Enum.map(&kind/1) |> Enum.sort() == Enum.sort(@stop_kinds)
+  end
 
-    assert stops |> Enum.map(&kind/1) |> Enum.sort() ==
-             Enum.sort([:a, :kept, :aside, :placed, :c, :d, :e, :f])
-
-    for {step, index} <- Enum.with_index(stops) do
-      home = activating_home!(ctx.tmp, "stop-#{index}", small)
+  # A case per kind of step, each on one home of its own: every file call a
+  # home's activation makes queues on the VM's one file server behind the
+  # whole suite's, so one case that built a home for every kind outlasted the
+  # test timeout on a loaded runner.
+  for kind <- @stop_kinds do
+    test "a stop after step #{kind} is finished by the next run from the recorded entries",
+         ctx do
+      step = Enum.find(ctx.reference.stops, &(kind(&1) == unquote(kind)))
+      home = activating_home!(ctx.tmp, "home", @small)
 
       assert catch_throw(Activation.activate(home, :return, after_step: stop_at(step))) ==
                {:stopped, step}
 
       refute primary?(home) and Moved.read(home) != :absent, inspect(step)
       assert :ok = next_boot(home, step), inspect(step)
-      assert files(home) == expected, "after a stop at #{inspect(step)}"
+      assert files(home) == ctx.reference.expected, "after a stop at #{inspect(step)}"
     end
   end
 
@@ -313,11 +329,29 @@ defmodule FermixCore.Home.Candidate.ActivationReturnTest do
 
   defp primary?(home), do: File.read!(Path.join(home, "config.toml")) =~ ~s(role = "primary")
 
-  # Raw writes skip the VM's one file server, which the whole suite queues on.
+  # Raw writes skip the VM's one file server, which the whole suite queues on,
+  # and each directory below `root` is one call to it: File.mkdir_p makes and
+  # stats every ancestor from / down, for every file.
   defp write!(root, path, contents) do
     file = Path.join(root, path)
-    File.mkdir_p!(Path.dirname(file))
+    Enum.each(dirs_from(root, Path.dirname(path)), &mkdir!/1)
     File.write!(file, contents, [:raw])
+  end
+
+  # `root`, then each directory of `rel` beneath it, parents first.
+  defp dirs_from(root, rel) do
+    below =
+      rel |> Path.split() |> Enum.reject(&(&1 == ".")) |> Enum.scan(root, &Path.join(&2, &1))
+
+    [root | below]
+  end
+
+  defp mkdir!(dir) do
+    case File.mkdir(dir) do
+      :ok -> :ok
+      {:error, :eexist} -> :ok
+      {:error, reason} -> raise File.Error, reason: reason, action: "make directory", path: dir
+    end
   end
 
   defp mode(path), do: Bitwise.band(File.stat!(path).mode, 0o777)
