@@ -10,6 +10,9 @@ defmodule FermixChannels.Desktop.RelayIrohEndToEndTest do
   hints, and the relay dials the hint its link holds and names the path the
   helper reports.
 
+  Answered by the primary's own `Fermix.CLI.Daemon`, a forwarded call costs
+  the link and that answer, and no wait besides.
+
   Opt-in, because it needs the helper built from a `fermix-iroh` checkout
   (`cargo build --release --locked`):
 
@@ -29,6 +32,7 @@ defmodule FermixChannels.Desktop.RelayIrohEndToEndTest do
 
   import ExUnit.CaptureLog
 
+  alias Fermix.CLI.Daemon
   alias FermixChannels.Desktop.Manage
   alias FermixChannels.Desktop.Peer
   alias FermixChannels.Desktop.Relay
@@ -49,6 +53,10 @@ defmodule FermixChannels.Desktop.RelayIrohEndToEndTest do
 
   @device_id "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e"
   @timeout_ms 15_000
+  # Over loopback the link answers in a few milliseconds, so a median past
+  # this is a wait outside the link and the primary's answer.
+  @call_bound_ms 50
+  @timed_calls 10
   # Never resolves, so nothing leaves the machine for a relay.
   @relay %{"url" => "https://relay.invalid/", "quic_port" => 7842}
 
@@ -60,6 +68,68 @@ defmodule FermixChannels.Desktop.RelayIrohEndToEndTest do
   end
 
   test "a desktop's relay reaches its primary over iroh and forwards a management call", ctx do
+    test = self()
+
+    serve = fn frame, _device_id ->
+      %{"request_id" => id, "method" => method} = Jason.decode!(frame)
+      send(test, {:served, method})
+      %{"request_id" => id, "result" => %{"answered_by" => "primary"}}
+    end
+
+    link = link!(ctx, %{manage: {Manage, serve: serve}})
+    %{names: names, hint: hint} = link
+
+    # The server's endpoint is on the port it was given, not one iroh picked.
+    assert link.bound == link.port
+
+    assert %{connected: true, epoch: 3, name: "fermix-vm"} = link.status
+    assert [%{device_id: @device_id}] = Peer.connected(names.peers)
+
+    # The dial went straight to the hint, and the session said it again.
+    assert %{path: :direct} = Relay.status(names.relay)
+    assert {:ok, %{primary: %{addrs: [^hint]}}} = DesktopLink.read(link.desktop_root)
+
+    request = %{request_id: "r-1", protocol_version: 2, method: "cues.status", params: %{}}
+    assert {:ok, %{"answered_by" => "primary"}} = Relay.forward(names.relay, request)
+    assert_receive {:served, "cues.status"}, @timeout_ms
+    refute_received {:relay_emit, _status, _failures, _class}
+  end
+
+  # The primary's own daemon answers each call, as `Desktop.Manage` has it do
+  # in an engine. A call over the link on this machine takes a few
+  # milliseconds; one that waits on the primary's daemon for anything but its
+  # answer takes far longer, on every call.
+  test "a forwarded call costs the link and the primary's answer, and no wait besides", ctx do
+    tasks = start_supervised!({Task.Supervisor, []}, id: :daemon_tasks)
+    daemon = start_primary_daemon!(tasks)
+    serve = fn frame, device_id -> Daemon.serve_forwarded(frame, device_id, daemon) end
+    %{names: names} = link!(ctx, %{manage: {Manage, serve: serve, task_supervisor: tasks}})
+
+    took_ms =
+      for call <- 1..@timed_calls do
+        request = %{
+          request_id: "t-#{call}",
+          protocol_version: 2,
+          method: "settings.get",
+          params: %{"section" => "providers.openai"}
+        }
+
+        started = System.monotonic_time(:millisecond)
+        assert {:ok, %{"engine" => "primary"}} = Relay.forward(names.relay, request)
+        System.monotonic_time(:millisecond) - started
+      end
+
+    median = took_ms |> Enum.sort() |> Enum.at(div(@timed_calls, 2))
+
+    assert median < @call_bound_ms,
+           "forwarded calls took #{inspect(took_ms)} ms, past the #{@call_bound_ms} ms bound"
+  end
+
+  # -- the link ------------------------------------------------------------------------
+
+  # A primary whose rail serves `families`, and a desktop's relay connected to
+  # it over two real helpers, dialed at the server's loopback hint.
+  defp link!(ctx, families) do
     test = self()
     primary_root = root!("fx-re-p")
     PrimaryHome.booted!(primary_root)
@@ -74,22 +144,11 @@ defmodule FermixChannels.Desktop.RelayIrohEndToEndTest do
     )
 
     registry = start_registry(names)
-
-    serve = fn frame, _device_id ->
-      %{"request_id" => id, "method" => method} = Jason.decode!(frame)
-      send(test, {:served, method})
-      %{"request_id" => id, "result" => %{"answered_by" => "primary"}}
-    end
-
-    families = %{manage: {Manage, serve: serve}}
     port = free_udp_port()
     hint = "127.0.0.1:#{port}"
 
     {endpoint_id, bound} =
       start_listener(ctx, primary_root, names, registry, desktop, families, port)
-
-    # The server's endpoint is on the port it was given, not one iroh picked.
-    assert bound == port
 
     desktop_root = root!("fx-re-d")
 
@@ -123,17 +182,39 @@ defmodule FermixChannels.Desktop.RelayIrohEndToEndTest do
        emit: fn status, failures, class -> send(test, {:relay_emit, status, failures, class}) end}
     )
 
-    assert %{connected: true, epoch: 3, name: "fermix-vm"} = await_connected(names.relay, 300)
-    assert [%{device_id: @device_id}] = Peer.connected(names.peers)
+    status = await_connected(names.relay, 300)
 
-    # The dial went straight to the hint, and the session said it again.
-    assert %{path: :direct} = Relay.status(names.relay)
-    assert {:ok, %{primary: %{addrs: [^hint]}}} = DesktopLink.read(desktop_root)
+    %{
+      names: names,
+      port: port,
+      bound: bound,
+      hint: hint,
+      desktop_root: desktop_root,
+      status: status
+    }
+  end
 
-    request = %{request_id: "r-1", protocol_version: 2, method: "cues.status", params: %{}}
-    assert {:ok, %{"answered_by" => "primary"}} = Relay.forward(names.relay, request)
-    assert_receive {:served, "cues.status"}, @timeout_ms
-    refute_received {:relay_emit, _status, _failures, _class}
+  # The primary's `Fermix.CLI.Daemon`, on a socket of the test's own: its
+  # router answers `settings.get` from a reader that names the engine.
+  defp start_primary_daemon!(tasks) do
+    name = :"re2e_daemon_#{System.unique_integer([:positive])}"
+
+    start_supervised!(
+      {Daemon,
+       name: name,
+       socket_path: Path.join(root!("fx-re-s"), "d.sock"),
+       task_supervisor: tasks,
+       forwarding: [],
+       management_opts: [
+         engine_role: %{role: :primary, primary: nil},
+         settings_reader: fn section, _opts ->
+           {:ok, %{"section" => section, "engine" => "primary"}}
+         end
+       ]},
+      id: name
+    )
+
+    name
   end
 
   # -- the primary's rail ------------------------------------------------------------

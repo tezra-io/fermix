@@ -85,7 +85,7 @@ defmodule Fermix.CLI.Daemon do
   require Logger
 
   @recv_timeout_ms 5_000
-  @accept_idle_ms 200
+  @accept_retry_ms 1_000
   @skill_name_pattern ~r/^[A-Za-z0-9_-]{1,64}$/
   @skill_view_max_bytes 65_536
   @mobile_pair_wait_ms 120_000
@@ -243,7 +243,6 @@ defmodule Fermix.CLI.Daemon do
       {:ok, listen_socket} ->
         File.chmod!(socket_path, 0o600)
         Logger.info("Daemon control socket listening at #{socket_path}")
-        Process.send_after(self(), :accept, 0)
 
         {:ok,
          %{
@@ -269,7 +268,7 @@ defmodule Fermix.CLI.Daemon do
            # requests (`:primary_forward`, the rail's, given the request and its
            # options); any other engine answers every one here.
            forwarding: Keyword.get_lazy(opts, :forwarding, &HomeLink.forwarding/0)
-         }}
+         }, {:continue, :accept}}
 
       {:error, reason} ->
         {:stop, {:listen_failed, reason, socket_path}}
@@ -317,27 +316,22 @@ defmodule Fermix.CLI.Daemon do
   @impl true
   def handle_call(:management_opts, _from, state), do: {:reply, management_opts(state), state}
 
+  # Connections are accepted by a linked process of the daemon's own, so the
+  # daemon takes a call the moment it comes (`serve_forwarded/3` asks it for
+  # its options on every forwarded request), never once an accept's wait
+  # ends. The acceptor serves each connection with the state init left,
+  # which nothing changes after.
   @impl true
-  def handle_info(:accept, state) do
-    case :gen_tcp.accept(state.listen_socket, @accept_idle_ms) do
-      {:ok, conn} ->
-        serve_admitted(state, conn)
-        send(self(), :accept)
-        {:noreply, state}
-
-      {:error, :timeout} ->
-        send(self(), :accept)
-        {:noreply, state}
-
-      {:error, :closed} ->
-        {:stop, :normal, state}
-
-      {:error, reason} ->
-        Logger.warning("Daemon accept error: #{inspect(reason)}")
-        Process.send_after(self(), :accept, 1_000)
-        {:noreply, state}
-    end
+  def handle_continue(:accept, state) do
+    acceptor = spawn_link(fn -> accept_loop(state) end)
+    {:noreply, Map.put(state, :acceptor, acceptor)}
   end
+
+  # The acceptor ends once the listening socket closed, or by a crash; the
+  # daemon ends with it.
+  @impl true
+  def handle_info({:EXIT, acceptor, reason}, %{acceptor: acceptor} = state),
+    do: {:stop, reason, state}
 
   @impl true
   def terminate(_reason, %{listen_socket: socket, socket_path: path}) do
@@ -363,6 +357,22 @@ defmodule Fermix.CLI.Daemon do
     )
 
     :ok
+  end
+
+  defp accept_loop(state) do
+    case :gen_tcp.accept(state.listen_socket) do
+      {:ok, conn} ->
+        serve_admitted(state, conn)
+        accept_loop(state)
+
+      {:error, :closed} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Daemon accept error: #{inspect(reason)}")
+        Process.sleep(@accept_retry_ms)
+        accept_loop(state)
+    end
   end
 
   # A command Fermix confines gets no answer here, whatever it asks.

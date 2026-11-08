@@ -178,7 +178,8 @@ will be part of a future release; nothing in this group is in a release yet.
   never makes a second key. Your Mac (or Linux
   computer) stays awake while the move runs, and only then. The computer the
   home left stays a desktop of the server: the app's chat and Fermix-wide
-  settings go to the server through it, and paired phones see a reconnect. It
+  settings go to the server through it, a settings call costing one round
+  trip to the server, and paired phones see a reconnect. It
   records no computer history from then on and opens no copy of your memory:
   what it still holds of them is a retired copy. The
   server will not remove that desktop from its devices, since this version
