@@ -68,7 +68,10 @@ defmodule FermixTestSupport.AccessorySim do
   @doc "The owner swipes back: the accessory asks the host to end the call."
   def end_request(sim), do: GenServer.call(sim, :end_request)
 
-  @doc "Sends `count` microphone frames on the call's stream; `skip: n` leaves a seq gap first."
+  @doc """
+  Sends `count` microphone frames on the call's stream; `skip: n` leaves a seq
+  gap first, and `pcm:` (960 bytes) is every frame's audio.
+  """
   def send_mic(sim, count, opts \\ []), do: GenServer.call(sim, {:send_mic, count, opts})
 
   @doc "Reports the microphone's state, as the accessory's own mute does."
@@ -168,7 +171,8 @@ defmodule FermixTestSupport.AccessorySim do
 
   def handle_call({:send_mic, count, opts}, _from, state) do
     state = update_in(state, [:seq, :mic], &(&1 + Keyword.get(opts, :skip, 0)))
-    {:reply, :ok, Enum.reduce(1..count//1, state, fn i, acc -> mic_frame(acc, i) end)}
+    pcm = Keyword.get(opts, :pcm)
+    {:reply, :ok, Enum.reduce(1..count//1, state, fn i, acc -> mic_frame(acc, i, pcm) end)}
   end
 
   def handle_call({:mic_state, mic, reason}, _from, state) do
@@ -549,8 +553,9 @@ defmodule FermixTestSupport.AccessorySim do
 
   # -- writing --------------------------------------------------------------------------
 
-  defp mic_frame(%{call: call} = state, i) do
-    payload = :binary.copy(<<rem(i, 251)>>, @mic_bytes)
+  # `pcm` (960 bytes) is every frame's audio; without it, frame i is the byte i.
+  defp mic_frame(%{call: call} = state, i, pcm) do
+    payload = pcm || :binary.copy(<<rem(i, 251)>>, @mic_bytes)
     frame = %Frame{type: :mic, stream: call.stream, seq: state.seq.mic, payload: payload}
     deliver(state, Frame.encode(frame))
     update_in(state, [:seq, :mic], &rem(&1 + 1, 4_294_967_296))

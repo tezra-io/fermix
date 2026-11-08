@@ -588,7 +588,10 @@ defmodule FermixOpik.TraceFileTest do
       "interrupt_played_ms_last" => 340,
       "interrupt_played_ms_total" => 340,
       "robot_crc_errors" => 0,
-      "robot_spk_underflows" => 2
+      "robot_spk_underflows" => 2,
+      "mic_rms_max" => 2_400,
+      "mic_rms_mean" => 610,
+      "mic_chunks_silent" => 4
     }
 
     assert {[:fermix, :accessory, :call_link], measurements, meta} =
@@ -603,7 +606,10 @@ defmodule FermixOpik.TraceFileTest do
              interrupt_played_ms_last: 340,
              interrupt_played_ms_total: 340,
              robot_crc_errors: 0,
-             robot_spk_underflows: 2
+             robot_spk_underflows: 2,
+             mic_rms_max: 2_400,
+             mic_rms_mean: 610,
+             mic_chunks_silent: 4
            }
 
     assert meta.session_id == "voice_live:3"

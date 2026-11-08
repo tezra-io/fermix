@@ -187,6 +187,23 @@ defmodule FermixCore.Accessories.TelemetryTest do
     assert_receive {:telemetry, [:fermix, :accessory, :call_link], ^counters, _meta}
   end
 
+  # Whether the robot's microphone sent sound: the forwarded chunks' RMS levels.
+  test "the microphone's level is a call counter" do
+    session_id = "session:#{System.unique_integer([:positive])}"
+    TelemetryCapture.attach([[:fermix, :accessory, :call_link]], session_id: session_id)
+    counters = %{mic_chunks: 3, mic_rms_max: 3_000, mic_rms_mean: 1_333, mic_chunks_silent: 1}
+
+    :ok =
+      Telemetry.emit_call_link(session_id, counters, %{
+        endpoint: "accessory:" <> @accessory,
+        engine: "grok_voice",
+        source: :screen_tap,
+        reason: :end_request
+      })
+
+    assert_receive {:telemetry, [:fermix, :accessory, :call_link], ^counters, _meta}
+  end
+
   test "a counter the contract does not name is refused, so nothing else reaches the event" do
     assert_raise ArgumentError, fn ->
       Telemetry.emit_call_link("session:1", %{mic_frames: 1, transcript: 0}, %{

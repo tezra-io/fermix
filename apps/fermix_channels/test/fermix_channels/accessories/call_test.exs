@@ -458,6 +458,41 @@ defmodule FermixChannels.Accessories.CallTest do
              } = counters
     end
 
+    # Whether the robot's microphone sent sound or silence: each forwarded
+    # 4,800-byte chunk's RMS over its int16 samples.
+    test "carries the level of the microphone audio it forwarded", ctx do
+      ctx = ctx |> attached() |> call_up()
+      session = ctx.session
+      TelemetryCapture.attach([[:fermix, :accessory, :call_link]], session_id: ctx.call_id)
+
+      silence = :binary.copy(<<0::little-signed-16>>, 480)
+      steady = :binary.copy(<<1_000::little-signed-16>>, 480)
+      loud = :binary.copy(<<3_000::little-signed-16, -3_000::little-signed-16>>, 240)
+
+      for pcm <- [silence, steady, loud] do
+        AccessorySim.send_mic(ctx.sim, 5, pcm: pcm)
+        assert_receive {:engine, ^session, {:audio, chunk}}
+        assert chunk == :binary.copy(pcm, 5)
+      end
+
+      AccessorySim.end_request(ctx.sim)
+
+      assert_receive {:telemetry, [:fermix, :accessory, :call_link], counters, _meta}
+
+      assert %{mic_chunks: 3, mic_rms_max: 3_000, mic_rms_mean: 1_333, mic_chunks_silent: 1} =
+               counters
+    end
+
+    test "names no microphone level before a chunk was forwarded", ctx do
+      ctx = ctx |> attached() |> call_up()
+      TelemetryCapture.attach([[:fermix, :accessory, :call_link]], session_id: ctx.call_id)
+      AccessorySim.end_request(ctx.sim)
+
+      assert_receive {:telemetry, [:fermix, :accessory, :call_link], counters, _meta}
+      assert %{mic_chunks: 0, mic_chunks_silent: 0} = counters
+      refute Map.has_key?(counters, :mic_rms_max) or Map.has_key?(counters, :mic_rms_mean)
+    end
+
     test "names no robot counter the robot never reported", ctx do
       ctx = ctx |> attached() |> call_up()
       TelemetryCapture.attach([[:fermix, :accessory, :call_link]], session_id: ctx.call_id)

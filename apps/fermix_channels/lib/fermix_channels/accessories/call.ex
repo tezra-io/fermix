@@ -23,7 +23,10 @@ defmodule FermixChannels.Accessories.Call do
   Accessory to engine:
 
     * five 960-byte microphone frames → one 4,800-byte chunk (`audio`), with
-      the gaps in their sequence numbers counted and the audio used;
+      the gaps in their sequence numbers counted and the audio used, and
+      each chunk's RMS level kept for the call's link event (the loudest,
+      the mean, and the silent chunks), so a call that heard nothing says
+      whether the robot sent silence;
     * `spk.flushed` → `interrupt(played_ms)`; `playback.progress` → Grok's
       `playback_progress`; `mic.state` → `mute`; `call.end_request` → the end.
 
@@ -56,6 +59,8 @@ defmodule FermixChannels.Accessories.Call do
   require Logger
 
   @mic_chunk_bytes 4_800
+  # A chunk whose RMS is under this is silence, not speech.
+  @silent_rms 50
   @seq_modulus 4_294_967_296
   @call_states ~w(connecting listening thinking speaking muted reconnecting)
   @robot_errors %{
@@ -107,6 +112,7 @@ defmodule FermixChannels.Accessories.Call do
       mic: <<>>,
       mic_seq: nil,
       mic_live?: false,
+      mic_level: %{max: 0, total: 0},
       robot_diag: Keyword.get(opts, :robot_diag),
       engine_muted?: false,
       sent_state: nil,
@@ -117,6 +123,7 @@ defmodule FermixChannels.Accessories.Call do
         task_events: 0,
         task_faults: 0,
         mic_frames_before_live: 0,
+        mic_chunks_silent: 0,
         interrupts: 0,
         interrupt_played_ms_total: 0
       }
@@ -488,12 +495,39 @@ defmodule FermixChannels.Accessories.Call do
 
   defp forward_mic(%{mic: <<chunk::binary-size(@mic_chunk_bytes), rest::binary>>} = state) do
     case CallClient.audio(state.client, chunk) do
-      {:cont, client} -> %{state | client: client, mic: rest} |> count(:mic_chunks, 1)
-      {:stop, client} -> send_end(%{state | client: client, mic: rest}, :session_error)
+      {:cont, client} ->
+        %{state | client: client, mic: rest} |> count(:mic_chunks, 1) |> level(rms(chunk))
+
+      {:stop, client} ->
+        send_end(%{state | client: client, mic: rest}, :session_error)
     end
   end
 
   defp forward_mic(state), do: state
+
+  # One pass over the chunk's int16 samples, no allocation per sample; the
+  # sum of squares stays a small integer (2,400 samples of at most 2^30).
+  defp rms(chunk), do: round(:math.sqrt(sum_squares(chunk, 0) / div(byte_size(chunk), 2)))
+
+  defp sum_squares(<<sample::little-signed-16, rest::binary>>, acc),
+    do: sum_squares(rest, acc + sample * sample)
+
+  defp sum_squares(<<>>, acc), do: acc
+
+  defp level(state, rms) do
+    state = %{
+      state
+      | mic_level: %{max: max(state.mic_level.max, rms), total: state.mic_level.total + rms}
+    }
+
+    if rms < @silent_rms, do: count(state, :mic_chunks_silent, 1), else: state
+  end
+
+  # Levels only once a chunk was forwarded: no audio has no level.
+  defp level_counters(%{counters: %{mic_chunks: 0}}), do: %{}
+
+  defp level_counters(%{counters: %{mic_chunks: chunks}, mic_level: level}),
+    do: %{mic_rms_max: level.max, mic_rms_mean: round(level.total / chunks)}
 
   # A refused chunk ends the call from the loop, not from inside the reduce.
   defp send_end(state, reason) do
@@ -514,6 +548,7 @@ defmodule FermixChannels.Accessories.Call do
       state.counters
       |> Map.merge(Speaker.counters(state.speaker))
       |> Map.merge(robot_counters(state.robot_diag))
+      |> Map.merge(level_counters(state))
       |> Map.put(:duration_ms, max(state.clock.() - state.started_ms, 0))
 
     Telemetry.emit_call_link(state.session_id, counters, %{

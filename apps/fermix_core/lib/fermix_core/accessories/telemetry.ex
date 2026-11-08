@@ -93,6 +93,12 @@ defmodule FermixCore.Accessories.Telemetry do
     :interrupts,
     :interrupt_played_ms_last,
     :interrupt_played_ms_total,
+    # The forwarded microphone chunks' RMS levels, over their int16 samples:
+    # the loudest, the mean, and how many were silent (RMS under 50). The
+    # two levels only once a chunk was forwarded.
+    :mic_rms_max,
+    :mic_rms_mean,
+    :mic_chunks_silent,
     # The robot's own `diag.counters`, since its boot, as it last reported them.
     :robot_uptime_s,
     :robot_frames_rx,

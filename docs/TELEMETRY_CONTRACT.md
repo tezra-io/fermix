@@ -1287,6 +1287,11 @@ paired accessory such as StackChan) emits three events, all through
   forwarded, so it stays 0, HW-08's host-side proof); `interrupts`,
   `interrupt_played_ms_total` and, after the first, `interrupt_played_ms_last`
   (each interrupt's played position, as the robot's `spk.flushed` gave it);
+  the level of the microphone audio forwarded to the engine, each 4,800-byte
+  chunk's RMS over its int16 samples: `mic_chunks_silent` (chunks with an RMS
+  under 50) and, once a chunk was forwarded, `mic_rms_max` and `mic_rms_mean`
+  (the mean of the chunks' RMS), so a call that heard nothing says whether
+  the robot sent silence;
   and, once the robot reported its `diag.counters` on this attach, its own
   counters since its boot, as last reported: `robot_uptime_s`,
   `robot_frames_rx`, `robot_frames_tx`, `robot_crc_errors`,
