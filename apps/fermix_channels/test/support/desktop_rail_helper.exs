@@ -40,6 +40,8 @@ defmodule FermixChannels.Test.DesktopRail do
     def init({test, socket}), do: {:ok, %{test: test, socket: socket, owner: nil}}
 
     @impl true
+    def handle_call(:await_ready, _from, state), do: {:reply, %{state: :ready}, state}
+
     def handle_call({:reserve_dial, owner}, _from, state),
       do: {:reply, {:ok, "d1", state.socket}, %{state | owner: owner}}
 
@@ -50,6 +52,51 @@ defmodule FermixChannels.Test.DesktopRail do
     end
 
     @impl true
+    def handle_cast({:forget_dial, _id}, state), do: {:noreply, state}
+  end
+
+  defmodule StartingSpy do
+    @moduledoc """
+    A dial-only `Iroh.Helper` that is still starting: a dial is `not_ready`,
+    and `await_ready/2` tells the test it waits (`:awaited`) and is answered
+    once the test calls `ready/1`; from then on it takes each dial as
+    `DialSpy` does. Started with the test's pid and the dial socket's path.
+    """
+    use GenServer
+
+    def start_link({test, socket}), do: GenServer.start_link(__MODULE__, {test, socket})
+    def ready(spy), do: GenServer.cast(spy, :ready)
+
+    @impl true
+    def init({test, socket}),
+      do: {:ok, %{test: test, socket: socket, owner: nil, ready?: false, waiting: []}}
+
+    @impl true
+    def handle_call(:await_ready, from, %{ready?: false} = state) do
+      send(state.test, :awaited)
+      {:noreply, %{state | waiting: [from | state.waiting]}}
+    end
+
+    def handle_call(:await_ready, _from, state), do: {:reply, %{state: :ready}, state}
+
+    def handle_call({:reserve_dial, _owner}, _from, %{ready?: false} = state),
+      do: {:reply, {:error, :not_ready}, state}
+
+    def handle_call({:reserve_dial, owner}, _from, state),
+      do: {:reply, {:ok, "d1", state.socket}, %{state | owner: owner}}
+
+    def handle_call({:dial, id, op}, _from, state) do
+      send(state.test, {:dial_op, op})
+      send(state.owner, {:iroh_dial, id, {:failed, :unreachable}})
+      {:reply, :ok, state}
+    end
+
+    @impl true
+    def handle_cast(:ready, state) do
+      Enum.each(state.waiting, &GenServer.reply(&1, %{state: :ready}))
+      {:noreply, %{state | ready?: true, waiting: []}}
+    end
+
     def handle_cast({:forget_dial, _id}, state), do: {:noreply, state}
   end
 

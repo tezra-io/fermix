@@ -52,8 +52,14 @@ defmodule FermixChannels.Home.Enrollment do
   (`FermixCore.Home.StatusWatch`, `:enrollment`): the summary an app draws
   reads the window (companion protocol 6).
 
+  A code needs the rail ready: one asleep (no phone paired yet) or starting
+  is woken and waited for, up to 10 s (`Iroh.Helper.await_ready/2`), so the
+  first code after a start is no refusal; a rail still starting then is
+  refused in its own sentence.
+
   Primary only: `FermixCore.Home.Role` leaves it out of a device and a
-  candidate. Test seams: `:home`, `:helper`, `:device_store`, `:clock` (a
+  candidate. Test seams: `:home`, `:helper`, `:rail_wait_ms` (that bound),
+  `:device_store`, `:clock` (a
   0-arity `DateTime`), `:schedule` (a 2-arity `Process.send_after/3`
   stand-in for the expiry),
   `:host_name`, `:identity` (a 1-arity loader answering the gateway's public
@@ -76,6 +82,12 @@ defmodule FermixChannels.Home.Enrollment do
 
   # How long a window stays open, in seconds.
   @window_s 1_800
+  # How long opening a code waits for the rail to start; it starts in a
+  # second or two, and gives up on its own after its hello and ready bounds.
+  @rail_wait_ms 10_000
+  @rail_slow_sentence "Remote reach did not start within #{div(@rail_wait_ms, 1_000)} seconds, " <>
+                        "so Fermix opened no code. Open it again in a minute; Doctor says why " <>
+                        "if remote reach still does not start."
   @file_name "enrollment.json"
   @file_mode 0o600
 
@@ -173,6 +185,7 @@ defmodule FermixChannels.Home.Enrollment do
     state = %{
       home: home,
       helper: Keyword.get(opts, :helper, Helper),
+      rail_wait_ms: Keyword.get(opts, :rail_wait_ms, @rail_wait_ms),
       device_store: Keyword.get(opts, :device_store, DeviceStore),
       clock: Keyword.get(opts, :clock, &DateTime.utc_now/0),
       schedule: Keyword.get(opts, :schedule, &Process.send_after(self(), &1, &2)),
@@ -331,7 +344,7 @@ defmodule FermixChannels.Home.Enrollment do
   end
 
   defp code_facts(state) do
-    with {:ok, node_id} <- endpoint(state.helper),
+    with {:ok, node_id} <- endpoint(state.helper, state.rail_wait_ms),
          {:ok, relays} <- listening_relays(state.device_store),
          {:ok, gateway_pk} <- state.identity.(state.home),
          {:ok, name} <- state.host_name.() do
@@ -347,15 +360,16 @@ defmodule FermixChannels.Home.Enrollment do
   end
 
   # The rail must be ready: a candidate reaches the primary only through it.
-  defp endpoint(helper) do
-    case Helper.status(helper) do
+  # One asleep or starting is woken and waited for.
+  defp endpoint(helper, wait_ms) do
+    case Helper.await_ready(helper, wait_ms) do
       %{state: :ready, endpoint_id: id} ->
         {:ok, id}
 
-      %{state: state} when state in [:dormant, :starting] ->
-        :ok = Helper.activate(helper)
+      :timeout ->
+        Logger.warning("enrollment: no code: remote reach did not start within #{wait_ms} ms")
 
-        {:error, "Remote reach is starting. Open the enrollment code again in a few seconds."}
+        {:error, @rail_slow_sentence}
 
       %{state: :off} ->
         {:error,

@@ -82,7 +82,8 @@ will be part of a future release; nothing in this group is in a release yet.
   settings, memory, secrets, skills and workspace) can now move from your
   computer to a Linux server, so Fermix keeps working with your Mac closed.
   With Reach from anywhere on, Always On on your primary gives an enrollment
-  code, good once for thirty minutes; a server enrolled with it waits for the
+  code, good once for thirty minutes (the first after a start waits a moment
+  for Reach from anywhere to start, rather than asking you to try again); a server enrolled with it waits for the
   move, and you review the move (the secrets that travel, the server's Fermix,
   which must be this computer's own, since a newer one could never move the
   home back, free disk, the plugins with no build for the server, and what stops: those

@@ -179,6 +179,42 @@ defmodule FermixChannels.Mobile.Iroh.HelperTest do
     assert %{state: :ready} = await_state(pid, :ready)
   end
 
+  # Opening an enrollment code and a desktop's dial wait for the rail's start
+  # instead of refusing, or failing on, a rail that is only starting.
+  test "await_ready wakes a dormant rail and answers once it is ready", ctx do
+    pid = start(ctx, binary_path: fake(ctx), identity_exists?: fn -> false end, test_pid: self())
+
+    assert %{state: :dormant} = Helper.status(pid)
+    assert %{state: :ready, endpoint_id: @fixture_id} = Helper.await_ready(pid, @helper_ms)
+    assert %{state: :ready} = Helper.await_ready(pid, @helper_ms)
+  end
+
+  test "await_ready answers a start that could not start, and an absent rail, as they are",
+       ctx do
+    missing =
+      start(ctx, binary_path: Path.join(ctx.root, "absent"), identity_exists?: fn -> false end)
+
+    assert %{state: :helper_missing} = Helper.await_ready(missing, @helper_ms)
+
+    failing =
+      start(ctx,
+        binary_path: fake(ctx, exit_after_hello: 3),
+        identity_exists?: fn -> false end,
+        test_pid: self()
+      )
+
+    assert %{state: :failed, failure: _words} = Helper.await_ready(failing, @helper_ms)
+    assert Helper.await_ready(:no_such_rail, @helper_ms) == %{state: :off}
+  end
+
+  test "await_ready on a rail still starting past the caller's bound is a timeout", ctx do
+    pid = start(ctx, binary_path: fake(ctx, after_start: []), test_pid: self())
+
+    # The fake never says ready, and the rail gives it 30 s: still starting.
+    assert Helper.await_ready(pid, 100) == :timeout
+    assert %{state: :starting} = Helper.status(pid)
+  end
+
   test "hello, start, ready: the helper gets the key, the bridge, the relays and the limits",
        ctx do
     pid = start(ctx, binary_path: fake(ctx), test_pid: self())

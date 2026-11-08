@@ -15,7 +15,10 @@ defmodule FermixChannels.Mobile.Iroh.Helper do
   - `helper_missing`: this build carries no helper (a source checkout, or any
     release before the helper is bundled). Reported, not retried; nothing takes
     its place.
-  - `starting`, `ready`.
+  - `starting`, `ready`. `await_ready/2` wakes a dormant rail and answers
+    once it is ready or could not start, within the caller's bound: opening
+    an enrollment code and a desktop's dial wait on it, so a rail that is
+    only starting is neither a refusal nor a failure.
   - `failed`: the helper crashed, timed out, reported an error, or disagreed
     with this build. It never stops this process: a helper that keeps failing
     must not restart its way up the supervisors and halt the daemon. A crash or
@@ -174,6 +177,23 @@ defmodule FermixChannels.Mobile.Iroh.Helper do
   @doc "The rail's status; `%{state: :off}` when it is switched off or absent."
   @spec status(GenServer.server()) :: status() | %{state: :off}
   def status(server), do: safe_call(server, :status, %{state: :off})
+
+  @doc """
+  Wakes a dormant rail, as `activate/1` does, and answers its status once it
+  is ready or could not start (`failed`, `helper_missing`), at once when it
+  is neither dormant nor starting; `%{state: :off}` when it is switched off
+  or absent, and `:timeout` while it still starts after `timeout_ms`. Never
+  exits.
+  """
+  @spec await_ready(GenServer.server(), pos_integer()) ::
+          status() | %{state: :off} | :timeout
+  def await_ready(server, timeout_ms) when is_integer(timeout_ms) and timeout_ms > 0 do
+    if alive?(server), do: GenServer.call(server, :await_ready, timeout_ms), else: %{state: :off}
+  catch
+    :exit, {:timeout, _call} -> :timeout
+    :exit, {reason, _call} when reason in [:noproc, :normal, :shutdown] -> %{state: :off}
+    :exit, {{:shutdown, _detail}, _call} -> %{state: :off}
+  end
 
   @doc """
   Where a peer may dial this endpoint directly (`Iroh.Hints`): this machine's
@@ -407,7 +427,8 @@ defmodule FermixChannels.Mobile.Iroh.Helper do
       home: %{relay: nil, connected: false, error: nil},
       paths: %{},
       refused: %{busy: 0, alpn: 0, bridge_unreachable: 0},
-      dials: %{}
+      dials: %{},
+      waiters: []
     }
 
     if mode == :dial or state.identity_exists?.(),
@@ -444,6 +465,13 @@ defmodule FermixChannels.Mobile.Iroh.Helper do
 
   def handle_call(:candidate, _from, state), do: {:reply, :none, state}
   def handle_call(:status, _from, state), do: {:reply, status_of(state), state}
+
+  # Answered when the rail settles (`answer_waiters/1`); a dormant one is
+  # started first, which may settle it at once.
+  def handle_call(:await_ready, from, %{rail: :dormant} = state),
+    do: {:noreply, state |> start_helper() |> wait_or_answer(from)}
+
+  def handle_call(:await_ready, from, state), do: {:noreply, wait_or_answer(state, from)}
 
   def handle_call(:hints, _from, %{rail: :ready, bind_port: port} = state) when is_integer(port),
     do: {:reply, Hints.tailnet(state.interfaces, port), state}
@@ -546,7 +574,7 @@ defmodule FermixChannels.Mobile.Iroh.Helper do
     else
       {:missing, path} ->
         Logger.warning("fermix-iroh is not in this build (#{path}); remote reach is off")
-        %{state | rail: :helper_missing}
+        answer_waiters(%{state | rail: :helper_missing})
 
       {:error, {:key, reason}} ->
         fail(state, {:key, reason}, false)
@@ -688,7 +716,7 @@ defmodule FermixChannels.Mobile.Iroh.Helper do
       Logger.info("fermix-iroh ready as #{id}")
       if state.failures > 0, do: :ok = state.emit.(:recovered, 0, :none)
 
-      %{
+      answer_waiters(%{
         cancel_stage(state)
         | rail: :ready,
           stage: :running,
@@ -696,7 +724,7 @@ defmodule FermixChannels.Mobile.Iroh.Helper do
           last_failure: nil,
           endpoint_id: id,
           ready_at: state.clock.()
-      }
+      })
     else
       fail(state, {:endpoint_id, id, state.key.endpoint_id}, false)
     end
@@ -834,7 +862,27 @@ defmodule FermixChannels.Mobile.Iroh.Helper do
         ready_at: nil
     }
 
-    if retryable?, do: schedule_retry(state, reason), else: %{state | retry: nil}
+    state = if retryable?, do: schedule_retry(state, reason), else: %{state | retry: nil}
+    answer_waiters(state)
+  end
+
+  # A caller of `await_ready/2` waits while the rail starts and hears its
+  # status once it settles; every other state is its answer now. The callers
+  # bound their own wait, and the stage timeouts bound the start.
+  defp wait_or_answer(%{rail: :starting} = state, from),
+    do: %{state | waiters: [from | state.waiters]}
+
+  defp wait_or_answer(state, from) do
+    GenServer.reply(from, status_of(state))
+    state
+  end
+
+  defp answer_waiters(%{waiters: []} = state), do: state
+
+  defp answer_waiters(state) do
+    status = status_of(state)
+    Enum.each(state.waiters, &GenServer.reply(&1, status))
+    %{state | waiters: []}
   end
 
   # Said when the rail starts failing and whenever its words change, then at

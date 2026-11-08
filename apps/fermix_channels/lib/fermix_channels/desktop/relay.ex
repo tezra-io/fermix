@@ -38,6 +38,11 @@ defmodule FermixChannels.Desktop.Relay do
   said nothing of it. A change while the session is up tells the Always On
   watch, like the session's own comings and goings.
 
+  The dial-only helper starts beside the relay, so each dial first waits up
+  to 10 s for it to be ready (`Iroh.Helper.await_ready/2`): a session opened
+  while this engine starts is no outage, and a helper that did not start in
+  that time is the dial's own refusal, an outage like any other.
+
   Every ending it did not ask for is retried after 1 s, doubling to 60 s, and
   the backoff starts over once a session is up. While the session is down,
   every caller hears that the primary is unreachable, by its name
@@ -125,6 +130,7 @@ defmodule FermixChannels.Desktop.Relay do
 
   alias FermixChannels.Desktop.Relay.Media
   alias FermixChannels.Mobile.Chunks
+  alias FermixChannels.Mobile.Iroh.Helper
   alias FermixChannels.Mobile.Peers
   alias FermixChannels.Mobile.Protocol
   alias FermixChannels.Mobile.Rail
@@ -137,6 +143,9 @@ defmodule FermixChannels.Desktop.Relay do
   alias FermixCore.Setup.ConfigStore
 
   @first_backoff_ms 1_000
+  # How long a dial waits for the dial-only helper to start: it starts in
+  # well under a second beside this process.
+  @helper_wait_ms 10_000
   @max_backoff_ms 60_000
   # A session that stayed up this long before the primary ended it normally
   # is renewed quietly, however many renewals came before it.
@@ -510,6 +519,8 @@ defmodule FermixChannels.Desktop.Relay do
   @doc false
   @spec run_connector(pid(), Rail.route(), keyword()) :: :ok
   def run_connector(relay, route, opts) do
+    :ok = helper_started(Keyword.get(opts, :helper))
+
     case Rail.open(route, :ik, opts) do
       {:ok, rail} ->
         send(relay, {:relay_connector, self(), {:opened, rail}})
@@ -519,6 +530,14 @@ defmodule FermixChannels.Desktop.Relay do
         send(relay, {:relay_connector, self(), {:failed, reason}})
         :ok
     end
+  end
+
+  # The helper's start is waited for; how it settled is the dial's to say.
+  defp helper_started(nil), do: :ok
+
+  defp helper_started(helper) do
+    _settled = Helper.await_ready(helper, @helper_wait_ms)
+    :ok
   end
 
   # Ends with the session: its close, or the relay letting it go.

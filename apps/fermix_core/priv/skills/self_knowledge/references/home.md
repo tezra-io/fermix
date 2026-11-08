@@ -335,8 +335,8 @@ it, never a second writer.
   file keeps the secret only while it can still admit a server: once one is
   recorded, or the window is over, the secret leaves it, and the
   state and expiry stay for the status. It needs Reach from
-  anywhere on and ready: otherwise it is refused by name ("Remote reach is
-  off…", or "…starting; open the code again in a few seconds").
+  anywhere on, waking it for 10 s: otherwise it is refused by name
+  ("Remote reach is off…", "…did not start…").
 - **The candidate.** `fermix home enroll --code-file PATH
   [--snapshot-bucket B --snapshot-region R]` (what the server's first boot
   runs) makes a fresh home a candidate primary: it writes
@@ -767,8 +767,8 @@ it, never a second writer.
   the secrets, the browser, traces) with the plain fact that whoever hosts it
   can technically read its disk (snapshots are encrypted to the recovery
   passphrase), and lines the engine finishes: the server, its system and
-  version, until when it waits, each place's last backup or failed try, the space this
-  computer's copies take and the server's disk. Times are stated in the
+  version, until when it waits, each place's last backup or failure, the
+  space this computer's copies take and the server's disk. Times are stated in the
   owner's time zone as dates and times, never as ages. Learn more opens the
   Always On docs.
 - **Webhooks on the server.** Slack (Socket Mode), Telegram and Discord need
@@ -843,8 +843,8 @@ it, never a second writer.
   recovery passphrase without echo (twice where none is set yet), and the
   confirm as `[y/N]`, No unless answered. It prints the step's id as it runs,
   never what was typed, then waits for Always On to move on (the server
-  connecting, the move, a restore, a backup, a code waiting for its server) and offers
-  the next step. The code for the server is printed once, under the command
+  connecting, the move, a restore, a backup, a code waiting for its server)
+  and offers the next step. The code for the server is printed once, under the command
   to run on it. `fermix always-on STEP` takes one step, by the action's id
   with `-` for `_` (`own-server`, `cancel`, `back-up-now`, `check-again`,
   `move-now`, `try-again`, `move-back`, `restore-here`; `learn-more` and

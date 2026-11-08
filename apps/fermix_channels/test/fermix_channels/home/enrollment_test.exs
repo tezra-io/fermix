@@ -214,6 +214,51 @@ defmodule FermixChannels.Home.EnrollmentTest do
     refute File.exists?(Candidate.path(home, "code"))
   end
 
+  # Remote reach sleeps until something needs it: the first code after a
+  # start wakes it and waits, rather than refusing a first try.
+  test "a rail asleep is woken and waited for, and the code opens once it is ready", ctx do
+    rail = start_supervised!({HomeMove.WakingRail, self()})
+    suffix = System.unique_integer([:positive])
+
+    enrollment =
+      start_supervised!(
+        {Enrollment,
+         name: :"enrollment_waking_#{suffix}",
+         home: ctx.primary.root,
+         helper: rail,
+         device_store: ctx.primary.store,
+         host_name: fn -> {:ok, "studio-mac"} end,
+         status_changed: fn -> :ok end}
+      )
+
+    opening = Task.async(fn -> Enrollment.open(enrollment) end)
+    assert_receive {:awaited, ^rail}, 10_000
+    HomeMove.WakingRail.wake(rail, %{state: :ready, endpoint_id: ctx.primary.node_id})
+
+    assert {:ok, %{code: code}} = Task.await(opening, 15_000)
+    assert {:ok, %{node_id: node_id}} = EnrollmentCode.decode(code)
+    assert node_id == ctx.primary.node_id
+  end
+
+  test "a rail still starting past the wait is refused in its own sentence" do
+    rail = start_supervised!({HomeMove.WakingRail, self()})
+    suffix = System.unique_integer([:positive])
+
+    enrollment =
+      start_supervised!(
+        {Enrollment, name: :"enrollment_slow_#{suffix}", helper: rail, rail_wait_ms: 100}
+      )
+
+    assert {:error, {:unavailable, sentence}} = Enrollment.open(enrollment)
+
+    assert sentence ==
+             "Remote reach did not start within 10 seconds, so Fermix opened no code. Open " <>
+               "it again in a minute; Doctor says why if remote reach still does not start."
+
+    assert Copy.summary_violations(sentence) == []
+    assert Enrollment.status(enrollment) == nil
+  end
+
   test "no code is opened while the rail is not ready" do
     rail = start_supervised!({HomeMove.RailStatus, %{state: :off}})
     suffix = System.unique_integer([:positive])

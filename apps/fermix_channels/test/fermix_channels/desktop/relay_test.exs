@@ -595,6 +595,27 @@ defmodule FermixChannels.Desktop.RelayTest do
     log
   end
 
+  # The dial-only helper starts beside the relay: a session opened while the
+  # engine starts waits for it, so the start is no outage and says nothing.
+  test "the first dial waits for the helper to start, with no outage meanwhile" do
+    primary = DesktopRail.primary!()
+    root = DesktopRail.desktop_home!(primary)
+    File.mkdir_p!(Path.join(root, "mobile"))
+    File.chmod!(Path.join(root, "mobile"), 0o700)
+    socket = Path.join([root, "mobile", "d1.sock"])
+    spy = start_supervised!({DesktopRail.StartingSpy, {self(), socket}})
+
+    relay = DesktopRail.start_relay!(root, primary, connect: nil, helper: spy)
+    assert_receive :awaited, 10_000
+
+    assert %{status: :renewing} = Relay.status(relay)
+    refute_received {:relay_emit, :degraded, _failures, _class}
+    refute_received {:scheduled, {:relay_timer, :reconnect, _token}, _delay}
+
+    DesktopRail.StartingSpy.ready(spy)
+    assert_receive {:dial_op, %{"op" => "dial"}}, 10_000
+  end
+
   test "every dial names the hints the link holds" do
     primary = DesktopRail.primary!()
     hints = ["100.101.102.103:4033"]

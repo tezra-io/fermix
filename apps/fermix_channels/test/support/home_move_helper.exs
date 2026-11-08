@@ -48,7 +48,7 @@ defmodule FermixChannels.Test.HomeMove do
 
   defmodule RailStatus do
     @moduledoc false
-    # Answers `Iroh.Helper.status/1` with a fixed status.
+    # Answers `Iroh.Helper.status/1` and `await_ready/2` with a fixed status.
     use GenServer
 
     def start_link(status), do: GenServer.start_link(__MODULE__, status)
@@ -57,7 +57,40 @@ defmodule FermixChannels.Test.HomeMove do
     def init(status), do: {:ok, status}
 
     @impl true
-    def handle_call(:status, _from, status), do: {:reply, status, status}
+    def handle_call(message, _from, status) when message in [:status, :await_ready],
+      do: {:reply, status, status}
+  end
+
+  defmodule WakingRail do
+    @moduledoc false
+    # A rail asleep until the test wakes it: `Iroh.Helper.status/1` says
+    # dormant, `await_ready/2` tells the test it waits (`{:awaited, rail}`) and
+    # is answered once the test calls `wake/2` with the status it settles at.
+    use GenServer
+
+    def start_link(test), do: GenServer.start_link(__MODULE__, test)
+    def wake(rail, status), do: GenServer.cast(rail, {:wake, status})
+
+    @impl true
+    def init(test), do: {:ok, %{test: test, status: %{state: :dormant}, waiting: []}}
+
+    @impl true
+    def handle_call(:status, _from, state), do: {:reply, state.status, state}
+
+    def handle_call(:await_ready, from, %{status: %{state: :dormant}} = state) do
+      send(state.test, {:awaited, self()})
+      {:noreply, %{state | waiting: [from | state.waiting]}}
+    end
+
+    def handle_call(:await_ready, _from, state), do: {:reply, state.status, state}
+
+    @impl true
+    def handle_cast(:activate, state), do: {:noreply, state}
+
+    def handle_cast({:wake, status}, state) do
+      Enum.each(state.waiting, &GenServer.reply(&1, status))
+      {:noreply, %{state | status: status, waiting: []}}
+    end
   end
 
   @doc """

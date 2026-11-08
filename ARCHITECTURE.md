@@ -1610,7 +1610,9 @@ Current channels:
   `phone_modes`. On the primary, `Home.Enrollment` (primary only) holds the one
   window and its secret (thirty minutes, kept in `mobile/enrollment.json`
   across a restart; the file drops the secret once a candidate is recorded or
-  the window expired), `Home.EnrollmentResponder` runs `IKpsk2` with it and
+  the window expired; opening one wakes a rail asleep or starting and waits
+  10 s for it, `Iroh.Helper.await_ready/2`, which the desktop relay's dials
+  wait on too), `Home.EnrollmentResponder` runs `IKpsk2` with it and
   burns the window at the first frame that decrypts (the PSK proves itself
   only there; the candidate that burned it is answered again with the same
   id when its acceptance was lost, while the window lasts), and records the candidate
