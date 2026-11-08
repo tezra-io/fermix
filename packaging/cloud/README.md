@@ -231,7 +231,14 @@ runs `--quiet`.
    Debian and Ubuntu): the account's uid, gid and groups and no PAM session,
    so no `pam_unix` session lines in the journal, then `env -i` with exactly
    `HOME`, `USER`, `LOGNAME`, `SHELL`, `PATH`, `LANG`, `XDG_RUNTIME_DIR` and
-   `FERMIX_HOME`.
+   `FERMIX_HOME`. The account holds two unpacked copies of the engine, about
+   126 MB each: the service's under `~/.cache/fermix/runtime` (the package's
+   unit sets `FERMIX_LINUX_PACKAGE_INSTALL_DIR`) and the one these calls
+   unpack under `~/.local/share`. They stay apart on purpose: Burrito, which
+   wraps the engine, deletes every older release under the directory it
+   unpacks into on each run, so with one directory the first `fermix` call
+   after an update would delete the running engine's tree before its
+   restart, and keep it gone for as long as a move holds that restart off.
 9. A browser for the agent's tasks. Debian: the distribution's `chromium`,
    which the engine's launcher finds on its `PATH` and starts headless as
    `fermix`, with Chromium's own sandbox. Ubuntu ships Chromium only as a
