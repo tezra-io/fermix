@@ -1709,12 +1709,11 @@ defmodule FermixCore.Management.HomeSummaryTest do
   end
 
   # The snapshots with the place `id`'s last try failed in `said`.
-  defp backed_up(snapshots, id, said) do
-    Map.update!(snapshots, "targets", fn targets ->
-      for target <- targets,
-          do: if(target["id"] == id, do: Map.put(target, "last_error", said), else: target)
-    end)
-  end
+  defp backed_up(snapshots, id, said),
+    do: Map.update!(snapshots, "targets", &Enum.map(&1, fn t -> failed(t, id, said) end))
+
+  defp failed(%{"id" => id} = target, id, said), do: Map.put(target, "last_error", said)
+  defp failed(target, _id, _said), do: target
 
   # The review's items this home's settings give, as `MoveReadiness` words
   # them (the summary carries no copy of its own for them).
