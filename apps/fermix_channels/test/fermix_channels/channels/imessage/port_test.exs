@@ -327,6 +327,27 @@ defmodule FermixChannels.Channels.IMessage.PortTest do
     assert %{status: :backoff, class: :helper_exited_in_handshake} = HelperPort.status(port)
   end
 
+  # A request written to a helper whose input is closed fails with EPIPE, and
+  # the port exits with that reason and no exit status. The helper can no
+  # longer be reached, so that EXIT is its death: the request fails, and the
+  # helper restarts under the usual rules. The fake closes its input before it
+  # answers `initialize` and stays up; the next spawn, without that knob,
+  # answers.
+  test "a port that exits under a request write is the helper's death, and it restarts", ctx do
+    close_stdin = Path.join(ctx.home, "close_stdin")
+    File.write!(close_stdin, "")
+    {:ok, port} = start_port(ctx)
+    {:ok, _handshake} = HelperPort.attach(port, self())
+    SafeRm.rm!(close_stdin)
+
+    assert {:error, {:helper_unavailable, _message, %{"class" => "helper_exited"}}} =
+             HelperPort.call(port, "probe", %{}, @arrival_ms)
+
+    assert_receive {:imessage_helper, :down, :helper_exited}
+    assert_receive {:imessage_helper, :up, _handshake}, @arrival_ms
+    assert {:ok, _probe} = HelperPort.call(port, "probe", %{}, 2_000)
+  end
+
   # Sends `reason` as an exit signal to the helper's port once the fake has
   # written `<home>/muted`. The port is found by its executable's path, which
   # is this test's own.

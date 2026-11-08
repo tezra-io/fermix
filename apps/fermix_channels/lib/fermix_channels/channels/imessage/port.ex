@@ -16,12 +16,12 @@ defmodule FermixChannels.Channels.IMessage.Port do
   process running: the exit status is classified, `64` (usage) and `70`–`72`
   (the disclaim contract) and a mismatch are never retried, anything else is
   re-spawned with backoff from 5 s doubling to a 60 s cap, retried
-  indefinitely. A port that exits with no status during the handshake,
-  because the `initialize` write met the helper's closed input, is retried as
-  `:helper_exited_in_handshake`. The transport telemetry fires on transitions
-  only: one `:degraded` at the first failure, one `:recovered` when a spawn
-  answers `initialize` again. A raise in this module's own code still crashes
-  it.
+  indefinitely. A port that exits with no status, because a write met the
+  helper's closed input, is retried as `:helper_exited_in_handshake` during
+  the handshake and `:helper_exited` after it. The transport telemetry fires
+  on transitions only: one `:degraded` at the first failure, one `:recovered`
+  when a spawn answers `initialize` again. A raise in this module's own code
+  still crashes it.
   """
 
   use GenServer
@@ -65,6 +65,7 @@ defmodule FermixChannels.Channels.IMessage.Port do
           | {:helper_spawn_failed, atom()}
           | :helper_timeout
           | :helper_exited_in_handshake
+          | :helper_exited
           | :helper_protocol_mismatch
           | :helper_initialize_failed
           | :protocol_error
@@ -193,8 +194,15 @@ defmodule FermixChannels.Channels.IMessage.Port do
     {:noreply, %{state | listener: nil, listener_ref: nil}}
   end
 
-  # A port is linked to its owner, and this process traps exits; the exit
-  # status (or our own close) already accounted for the helper.
+  # A port is linked to its owner, and this process traps exits. The current
+  # port exits with no exit status when a write met the helper's closed input
+  # (EPIPE). The helper can no longer be reached, so that is its death, and the
+  # restart rules follow.
+  def handle_info({:EXIT, port, _reason}, %{port: port} = state) do
+    {:noreply, note_failure(%{state | port: nil}, :helper_exited)}
+  end
+
+  # Any other port's exit status, or our own close, already accounted for it.
   def handle_info({:EXIT, port, _reason}, state) when is_port(port), do: {:noreply, state}
 
   # Output of a helper this process already gave up on (closed after a protocol

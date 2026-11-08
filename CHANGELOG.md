@@ -179,6 +179,13 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the service had already closed. It then waited out the 15-second timeout:
   a lookup took about 20 seconds, and a post failed. Plugin calls now drop a
   connection that has sat idle for 15 seconds and open a fresh one.
+- **iMessage restarts its helper when the helper stops reading.** A helper
+  that closed its input, as one that is exiting does, left the channel up
+  but unable to reach it: the next request waited out its timeout, every one
+  after it failed, and the helper was never restarted. Fermix now takes that
+  as the helper stopping and restarts it with the usual backoff. A helper
+  that stops as it starts now fails at once, as having exited during
+  startup, instead of after a 10-second wait reported as a timeout.
 
 ### Behind a feature flag
 
