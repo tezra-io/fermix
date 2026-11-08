@@ -121,6 +121,21 @@ defmodule FermixChannels.Mobile.Iroh.HelperTest do
     end
   end
 
+  defp await_connected(pid, attempts \\ div(@helper_ms, @poll_ms)) do
+    case Helper.status(pid) do
+      %{state: :ready, connected: true} = status ->
+        status
+
+      other when attempts > 0 ->
+        # sleep: polls a state the rail announces to no one
+        Process.sleep(@poll_ms)
+
+        if attempts == 1,
+          do: flunk("rail stayed #{inspect(other)}"),
+          else: await_connected(pid, attempts - 1)
+    end
+  end
+
   # The rail's retry timer, delivered by hand once it has failed `failures`
   # times, rather than waited for.
   defp retry_now(pid, failures) do
@@ -228,7 +243,9 @@ defmodule FermixChannels.Mobile.Iroh.HelperTest do
        ctx do
     pid = start(ctx, binary_path: fake(ctx), test_pid: self())
 
-    assert %{state: :ready, endpoint_id: @fixture_id, connected: true} = await_state(pid, :ready)
+    # The fake reports its relay in the line after `ready`, and a status read
+    # can land between the two: wait for the relay, not only for ready.
+    assert %{state: :ready, endpoint_id: @fixture_id, connected: true} = await_connected(pid)
 
     assert [%{"op" => "start"} = start] = ops(ctx)
     assert start["secret_key_path"] == Path.join(ctx.root, "mobile/iroh_key")
