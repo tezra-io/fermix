@@ -275,11 +275,14 @@ defmodule FermixCore.Accessories.ParserTest do
     end
   end
 
+  # Any base but the last u32: a message of two fragments starting there wraps
+  # to seq 0, which starts a new sequence and drops it (PROTOCOL.md,
+  # *Reassembly*; `ReassemblerTest`).
   property "a control message cut into fragments reassembles to itself" do
     check all(
             payload <- binary(min_length: 1, max_length: 8_192),
             stream <- integer(0..65_535),
-            base <- integer(0..4_294_967_295)
+            base <- integer(0..4_294_967_294)
           ) do
       frames =
         payload

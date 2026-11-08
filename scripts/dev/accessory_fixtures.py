@@ -222,6 +222,11 @@ class Reassembler:
         self.last_seq = None
 
     def feed(self, flags, stream, seq, payload):
+        if seq == 0:
+            # A new sequence: the sender opened the link again. Drop any
+            # partial message and the base, count no fault.
+            self.open = None
+            self.last_seq = None
         if self.last_seq is not None and seq != (self.last_seq + 1) % 2**32:
             return self.fault("control_seq_gap")
         self.last_seq = seq
@@ -628,6 +633,14 @@ def reassembly_fixture():
         ("over_8_kib", [(1, 0, 0, b"x" * 4096), (0, 0, 1, b"x" * 4096), (2, 0, 2, b"x")], ["control_too_large"]),
         ("exactly_8_kib", [(1, 0, 0, b"x" * 4096), (2, 0, 1, b"x" * 4096)], ["m"]),
         ("rebases_after_a_fault", [(0, 0, 10, p[1]), (3, 0, 99, b"{}")], ["fragment_sequence", "m"]),
+        # A control frame with seq 0 starts a new sequence (a sender that
+        # opened the link again): no gap, any partial message dropped, no fault.
+        ("seq_zero_after_a_gap_rebases", [(3, 0, 41, b"{}"), (3, 0, 0, b"[]")], ["m", "m"]),
+        ("seq_zero_drops_an_open_message", [(1, 0, 7, p[0]), (3, 0, 0, b"[]")], ["m"]),
+        ("seq_zero_then_counts_on", [(3, 0, 41, b"{}"), (3, 0, 0, b"{}"), (3, 0, 2, b"{}")],
+         ["m", "m", "control_seq_gap"]),
+        ("a_wrap_inside_a_message_drops_it", [(1, 0, 4294967295, p[0]), (2, 0, 0, p[2])],
+         ["fragment_sequence"]),
     ]
     rows = []
     for name, frames, expected in cases:

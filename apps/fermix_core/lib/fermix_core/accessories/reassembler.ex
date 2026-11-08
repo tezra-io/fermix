@@ -6,7 +6,8 @@ defmodule FermixCore.Accessories.Reassembler do
   sender's control frames. Control frames must arrive in sequence, a message
   stays on one stream, and none passes 8,192 bytes; any break is a fault
   that drops the open message and the expected sequence number, so the next
-  control frame starts afresh. Pure.
+  control frame starts afresh. A control frame with seq 0 always starts a new
+  sequence (a sender that opened the link again), with no fault. Pure.
   """
 
   import Bitwise
@@ -36,8 +37,17 @@ defmodule FermixCore.Accessories.Reassembler do
   @spec max_message_bytes() :: pos_integer()
   def max_message_bytes, do: @max_message
 
-  @doc "Takes the next control frame: more to come, a whole message with its stream, or a fault."
+  @doc """
+  Takes the next control frame: more to come, a whole message with its
+  stream, or a fault. A frame with seq 0 starts a new sequence: a sender that
+  opened the link again numbers its control frames from 0, so any partial
+  message and the expected seq are dropped with no fault, and the frame is
+  read as the first of the new sequence.
+  """
   @spec feed(t(), Frame.t()) :: result()
+  def feed(%__MODULE__{}, %Frame{type: :control, seq: 0} = frame),
+    do: fragment(%__MODULE__{last_seq: 0}, frame)
+
   def feed(%__MODULE__{} = reassembler, %Frame{type: :control, seq: seq} = frame) do
     if in_sequence?(reassembler, seq),
       do: fragment(%{reassembler | last_seq: seq}, frame),

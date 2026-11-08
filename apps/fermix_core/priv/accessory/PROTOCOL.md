@@ -109,7 +109,13 @@ expects `previous + 1` after that:
 
 - a gap in microphone or speaker PCM is counted and reported in
   `diag.counters` (`pcm_seq_gaps`), and the audio is used;
-- a gap in control frames is the fault `control_seq_gap` (*Reassembly*).
+- a gap in control frames is the fault `control_seq_gap` (*Reassembly*);
+- **a control frame with seq `0` starts a new sequence**: the receiver drops
+  any partial message and rebases on it, and no fault is counted. A sender
+  that opened the link again (a restarted daemon or a new link process on a
+  port the accessory kept, a rebooted accessory) numbers its control frames
+  from `0` while its peer still holds the old base, so its first HELLO is
+  never lost to `control_seq_gap`.
 
 ## Receiving
 
@@ -168,7 +174,9 @@ cable, and its bytes may take the whole second. Each end reads with a tick of
 its own (an empty read at least every 250 ms) so a stall is found with nothing
 arriving. Starting the link again (a new HELLO, sent or received) drops the
 held bytes, counted as discarded, and the parser hunts afresh; its counters
-carry on.
+carry on. A sender that starts the link again after opening it anew sends that
+HELLO with control seq `0`, which starts a new sequence at the receiver
+(*Reassembly*): the HELLO is read at once, with no fault.
 
 Plausibility, before the CRC, in this order: `frame_version` (version is not
 1), `unknown_frame_type` (type is not 1–4), `bad_flags` (a bit 3–7 is set),
@@ -197,14 +205,20 @@ control frames (PCM frames may come between them). Messages of wire version 1
 all fit in one frame; the reassembly exists so an additive field never needs a
 new framing. The receiver:
 
-1. faults `control_seq_gap` when a control frame's `seq` is not the previous
-   control frame's plus one (modulo 2³²);
-2. faults `fragment_sequence` on a `START` while a message is open, or on a
+1. starts a new sequence on a control frame with `seq` `0`: it drops any
+   partial message and the expected `seq`, counts no fault, and reads the
+   frame as the first of the new sequence. So a wrap from `4,294,967,295` to
+   `0` inside a fragmented message drops that message (its rest, read as the
+   start of the new sequence, is `fragment_sequence`); every message of wire
+   version 1 is one frame;
+2. faults `control_seq_gap` when any other control frame's `seq` is not the
+   previous control frame's plus one (modulo 2³²);
+3. faults `fragment_sequence` on a `START` while a message is open, or on a
    frame without `START` while none is;
-3. faults `fragment_stream` when a fragment's stream differs from its
+4. faults `fragment_stream` when a fragment's stream differs from its
    message's;
-4. faults `control_too_large` when a message would pass **8,192** bytes;
-5. delivers the message, with its stream, on its `END`.
+5. faults `control_too_large` when a message would pass **8,192** bytes;
+6. delivers the message, with its stream, on its `END`.
 
 A fault drops the open message and the expected `seq`, so the next control
 frame starts a new base. `fixtures/reassembly.json` holds frame sequences and

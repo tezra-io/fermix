@@ -478,6 +478,14 @@ defmodule FermixChannels.Accessories.Link do
     %{greet(state) | refusal: :auth_timeout}
   end
 
+  # The accessory's own word that the attach ran out of time is taken as the
+  # host's own deadline: a new HELLO, at the HELLO rate. Its other refusals
+  # hold the port idle (`accessory_refused`).
+  defp accessory_timed_out(state) do
+    attach_telemetry(state, :accessory_refused, :auth_timeout)
+    %{greet(state) | refusal: {:accessory, :auth_timeout}}
+  end
+
   defp tick_liveness(%{phase: phase} = state) when phase in [:proving, :attached, :unenrolled] do
     bound = if state.call, do: @lost_call_ms, else: @lost_idle_ms
 
@@ -583,6 +591,8 @@ defmodule FermixChannels.Accessories.Link do
       do: dispatch(state, message),
       else: transmit(state, error_message("not_now", type))
   end
+
+  defp dispatch(state, %{type: "refuse", code: "auth_timeout"}), do: accessory_timed_out(state)
 
   defp dispatch(state, %{type: "pong"}), do: state
   defp dispatch(state, %{type: "refuse", code: code}), do: accessory_refused(state, code)

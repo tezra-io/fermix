@@ -100,6 +100,9 @@ defmodule FermixTestSupport.AccessorySim do
   @doc "Sends raw bytes onto the wire (line noise, a broken frame)."
   def send_raw(sim, bytes), do: GenServer.call(sim, {:send_raw, bytes})
 
+  @doc "USB went and came back (a replug or a reboot): the accessory's counters start again."
+  def usb_reset(sim), do: GenServer.call(sim, :usb_reset)
+
   @doc "Changes a behaviour flag, such as `silent?` or `auto_credit`."
   def set(sim, key, value), do: GenServer.call(sim, {:set, key, value})
 
@@ -185,20 +188,25 @@ defmodule FermixTestSupport.AccessorySim do
 
   def handle_call({:set, key, value}, _from, state), do: {:reply, :ok, Map.put(state, key, value)}
 
-  @impl true
-  def handle_info({:accessory_port, :opened, ref, owner}, state) do
-    # USB appeared for this host: the accessory's counters start again.
-    {:noreply,
+  def handle_call(:usb_reset, _from, state) do
+    {:reply, :ok,
      %{
        state
-       | owner: owner,
-         ref: ref,
-         parser: Parser.new(:host),
+       | parser: Parser.new(:host),
          reassembler: Reassembler.new(),
          seq: %{control: 0, mic: 0, diagnostics: 0},
          call: nil
      }}
   end
+
+  @impl true
+  # A host opened the port: a restarted daemon or a new link process, which
+  # numbers its frames from 0 again. The accessory sees no USB change, so it
+  # keeps its own counters and its receive side's sequence base, as the
+  # firmware does; only a seq-0 control frame rebases it (PROTOCOL.md,
+  # *Reassembly*). `usb_reset/1` is a replug or a reboot.
+  def handle_info({:accessory_port, :opened, ref, owner}, state),
+    do: {:noreply, %{state | owner: owner, ref: ref, call: nil}}
 
   def handle_info({:accessory_port, :closed, ref}, %{ref: ref} = state),
     do: {:noreply, %{state | owner: nil, ref: nil, call: nil}}
