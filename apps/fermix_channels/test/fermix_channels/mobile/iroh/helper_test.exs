@@ -379,8 +379,11 @@ defmodule FermixChannels.Mobile.Iroh.HelperTest do
   test "a helper that fails for a day otherwise gives up naming no port", ctx do
     {:ok, clock} = Agent.start_link(fn -> 0 end)
 
+    # The line is matched up to its end, so it is captured uncoloured: at a
+    # terminal the formatter would close its colour after the message,
+    # between the words and the newline.
     log =
-      capture_log([format: "$message\n"], fn ->
+      capture_log([format: "$message\n", colors: [enabled: false]], fn ->
         pid =
           start(ctx,
             binary_path: fake(ctx, exit_after_hello: 3),
