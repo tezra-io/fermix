@@ -6,6 +6,7 @@ defmodule FermixCore.Realtime.SupervisorTest do
   alias FermixCore.Realtime.CallLease
   alias FermixCore.Realtime.CallRecord
   alias FermixCore.Realtime.CallRegistry
+  alias FermixCore.Realtime.CallSweep
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.LocalVoiceSocket
   alias FermixCore.Realtime.SessionControl
@@ -114,6 +115,41 @@ defmodule FermixCore.Realtime.SupervisorTest do
     assert %{bindings: bindings, starts: starts} = :sys.get_state(tree.guard)
     assert bindings == %{}
     assert starts == %{}
+  end
+
+  # A call never outlives what admitted it (`:rest_for_one` in start order): a
+  # crash of the call lease or the call registry ends every session, the guard
+  # tree and the socket, and the record sweep, restarted after the sessions are
+  # gone, closes the records they left open. Stopped with `:shutdown`, as a
+  # Registry fails: a kill races its partitions' names.
+  for {label, crashed} <- [{"call lease", :lease}, {"call registry", :registry}] do
+    @tag :capture_log
+    test "a crashed #{label} ends the call in progress, closes its record and frees the lease" do
+      tree = start_tree!("crash_#{unquote(crashed)}", records: true)
+      :ok = await_child_done(tree.supervisor, CallSweep)
+      owner = start_from_adapter(tree, &start_realtime(tree, &1))
+      assert_receive {:started, ^owner, {:ok, session}}
+      assert {:ok, %{endpoint: "desktop"}} = CallLease.holder(tree.lease)
+      session_ref = Process.monitor(session)
+
+      # The record the running call keeps, still open.
+      uuid = "6d1e2f3a-4b5c-4d7e-8f9a-0b1c2d3e4f5a"
+      opts = CallRecord.repo_opts(tree.repo)
+      :ok = CallRecord.open(CallRecord.new(uuid, "openai_live"), DateTime.utc_now(), opts)
+
+      :ok = Supervisor.stop(Map.fetch!(tree, unquote(crashed)), :shutdown)
+
+      assert_receive {:DOWN, ^session_ref, :process, ^session, _reason}
+      :ok = await_child_done(tree.supervisor, CallSweep)
+
+      assert {:ok, %{end_reason: "daemon_restarted"}} =
+               Repo.get_voice_call(uuid, server: tree.repo)
+
+      next = start_from_adapter(tree, &start_realtime(tree, &1))
+      assert_receive {:started, ^next, {:ok, next_session}}
+      assert next_session != session
+      assert {:ok, %{endpoint: "desktop"}} = CallLease.holder(tree.lease)
+    end
   end
 
   # A start still running when its guard dies would finish onto the restarted
@@ -321,8 +357,9 @@ defmodule FermixCore.Realtime.SupervisorTest do
     pid
   end
 
-  # A whole realtime tree under names of its own, stopped when the test ends.
-  defp start_tree!(label) do
+  # A whole realtime tree under names of its own, stopped when the test ends;
+  # with `records: true`, a record repo of its own for its sweep.
+  defp start_tree!(label, opts \\ []) do
     unique = "#{label}_#{System.unique_integer([:positive])}"
     socket_path = Path.join(System.tmp_dir!(), "fermix-realtime-#{unique}.sock")
 
@@ -331,19 +368,23 @@ defmodule FermixCore.Realtime.SupervisorTest do
       sessions: :"rt_sessions_#{unique}",
       tasks: :"rt_tasks_#{unique}",
       lease: :"rt_lease_#{unique}",
-      guard: :"rt_guard_#{unique}"
+      registry: :"rt_calls_#{unique}",
+      guard: :"rt_guard_#{unique}",
+      repo: record_repo(unique, Keyword.get(opts, :records, false))
     }
 
     {:ok, pid} =
       Realtime.Supervisor.start_link(
-        name: tree.supervisor,
-        socket_path: socket_path,
-        socket_name: :"rt_socket_#{unique}",
-        session_supervisor_name: tree.sessions,
-        task_supervisor_name: tree.tasks,
-        call_registry_name: :"rt_calls_#{unique}",
-        call_lease_name: tree.lease,
-        session_guard_name: tree.guard
+        [
+          name: tree.supervisor,
+          socket_path: socket_path,
+          socket_name: :"rt_socket_#{unique}",
+          session_supervisor_name: tree.sessions,
+          task_supervisor_name: tree.tasks,
+          call_registry_name: tree.registry,
+          call_lease_name: tree.lease,
+          session_guard_name: tree.guard
+        ] ++ if(tree.repo, do: [record_repo: tree.repo], else: [])
       )
 
     # Linked to the test, its parent, so it shuts down as the test exits;
@@ -355,6 +396,36 @@ defmodule FermixCore.Realtime.SupervisorTest do
     end)
 
     tree
+  end
+
+  defp record_repo(_unique, false), do: nil
+
+  defp record_repo(unique, true) do
+    db_path = Path.join(System.tmp_dir!(), "fermix-realtime-#{unique}.db")
+    repo = :"rt_repo_#{unique}"
+    start_supervised!({Repo, name: repo, enabled: true, database_path: db_path})
+
+    on_exit(fn ->
+      Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &FermixTestSupport.SafeRm.rm/1)
+    end)
+
+    repo
+  end
+
+  # A `:transient` child that finished shows `:undefined`; a running one is
+  # awaited to its normal stop.
+  defp await_child_done(supervisor, id) do
+    {^id, pid, _type, _modules} = supervisor |> Supervisor.which_children() |> List.keyfind(id, 0)
+    await_normal_exit(pid)
+  end
+
+  defp await_normal_exit(:undefined), do: :ok
+
+  defp await_normal_exit(pid) when is_pid(pid) do
+    ref = Process.monitor(pid)
+    assert_receive {:DOWN, ^ref, :process, ^pid, reason}, 5_000
+    assert reason in [:normal, :noproc]
+    :ok
   end
 
   # An adapter stand-in: has the tree's guard start a session for it, tells

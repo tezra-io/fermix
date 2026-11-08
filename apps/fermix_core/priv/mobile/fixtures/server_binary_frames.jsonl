@@ -7,3 +7,7 @@
 {"header":{"v":2,"t":"loopback_response","seq":18,"request_id":"rq-0e5c","status":200,"headers":[["content-type","text/html; charset=utf-8"]],"index":0,"last":true},"bytes_b64":"PHA+U2lnbmVkIGluLiBZb3UgY2FuIGNsb3NlIHRoaXMgdGFiLjwvcD4="}
 {"header":{"v":2,"t":"loopback_response","seq":19,"request_id":"rq-0e5d","status":204,"headers":[],"index":0,"last":true},"bytes_b64":""}
 {"header":{"v":2,"t":"snapshot_chunk","seq":23,"snapshot_id":"snap-20261021T0600Z","index":0},"bytes_b64":"RlhTTkFQMQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}
+{"header":{"v":2,"t":"call_line","seq":15,"call_id":"call-7c1e"},"bytes_b64":"eyJ0eXBlIjoic2VydmVyX2hlbGxvIiwibWluX3ZlcnNpb24iOjEsIm1heF92ZXJzaW9uIjozfQ=="}
+{"header":{"v":2,"t":"call_line","seq":16,"call_id":"call-7c1e"},"bytes_b64":"eyJ0eXBlIjoic3RhdGUiLCJzdGF0ZSI6Imxpc3RlbmluZyJ9"}
+{"header":{"v":2,"t":"call_audio","seq":17,"call_id":"call-7c1e","playback_id":"m0"},"bytes_b64":"AAAQACAAEAAAAPD/4P/w/w=="}
+{"header":{"v":2,"t":"call_audio","seq":18,"call_id":"call-7c1e","playback_id":"p3"},"bytes_b64":"AAAQACAAEAAAAPD/4P/w/w=="}

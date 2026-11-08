@@ -843,6 +843,10 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
       :call_stop
     )
 
+    phone = Map.put(meta, :endpoint, "phone:0d7f6a52")
+    LiveTelemetry.phone_detached(phone)
+    LiveTelemetry.phone_resumed(phone, 1_250)
+
     sync(server)
 
     rows =

@@ -278,6 +278,31 @@ defmodule FermixCore.Home.MoveReadinessTest do
     assert sentence =~ "studio-mac runs a newer Fermix than this computer"
   end
 
+  # M87: a move restarts this engine, which ends a call in progress before the
+  # move starts; the review says so, naming who the call is with.
+  test "a voice call in progress is named first: the move ends it before it starts", ctx do
+    for {endpoint, who} <- [
+          {"phone:0d7f6a52", "from your phone"},
+          {"desktop", "on this computer"},
+          {"accessory:k151-01", "from an accessory"}
+        ] do
+      holder = %{endpoint: endpoint, engine: "openai_live", started_at: @now}
+      opts = Keyword.put(opts(ctx), :call_holder, fn -> {:ok, holder} end)
+
+      assert %{items: [first | _rest]} = MoveReadiness.report(ctx.home, ctx.candidate, opts)
+
+      assert first == %{
+               id: "call_in_progress",
+               status: :warn,
+               sentence: "A voice call #{who} is in progress: the move ends it before it starts."
+             }
+    end
+
+    opts = Keyword.put(opts(ctx), :call_holder, fn -> :none end)
+    assert %{items: items} = MoveReadiness.report(ctx.home, ctx.candidate, opts)
+    refute item_in(items, "call_in_progress")
+  end
+
   test "on a Linux computer, voice calls on are named, and iMessage never is", ctx do
     File.write!(Path.join(ctx.home, "config.toml"), """
     [fermix_core.realtime]
@@ -292,8 +317,11 @@ defmodule FermixCore.Home.MoveReadinessTest do
 
     assert %{status: :warn, sentence: sentence} = item_in(items, "stays_here")
 
+    # M87 §07: the computer's own voice stops; the phone's calls follow the home.
     assert sentence ==
-             "Voice calls stop after the move: neither this computer nor north-box runs them."
+             "This computer's voice calls stop after the move; calls from your phone " <>
+               "carry on at north-box when Talk to Fermix is on there and its key is in " <>
+               "north-box's secret store."
 
     File.write!(Path.join(ctx.home, "config.toml"), "")
     assert %{items: items} = MoveReadiness.report(ctx.home, ctx.candidate, linux)

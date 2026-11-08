@@ -6,6 +6,10 @@ defmodule FermixCore.Home.MoveReadiness do
 
   Each item is `ok`, `warn` or `block`, with the one sentence the owner reads:
 
+    * `call_in_progress`, first and only while a voice call is in progress
+      (`Realtime.CallLease`; `:call_holder` in a test), warns, naming whom
+      the call is with: the move restarts this engine, which ends the call
+      before the move's capture starts;
     * `keychain_secrets`: the secrets this computer keeps in its keychain
       move with the home, into the server's secret files
       (`FermixCore.Home.MoveSecrets`); one Fermix cannot read, or a
@@ -36,7 +40,10 @@ defmodule FermixCore.Home.MoveReadiness do
       (`FermixCore.Plugins.Dist.Reinstall`), through the plugin installer;
     * `stays_here`: what the home has turned on that runs only on this
       computer (iMessage on a Mac, voice calls, meetings; `stays_here/2`)
-      stops after the move, each named; with none of them on it is `ok`. On
+      stops after the move, each named; with none of them on it is `ok`.
+      Voice is this computer's own (its socket): calls from the phone carry
+      on at the server when Talk to Fermix is on there and its key is in the
+      server's secret store (M87 §07). On
       a move back, what the server's settings turn on of them runs there
       again, named, and is `ok`;
     * `whatsapp`: WhatsApp turned on warns: it stops after the move until
@@ -84,6 +91,7 @@ defmodule FermixCore.Home.MoveReadiness do
   alias FermixCore.Management.Lifecycle
   alias FermixCore.Management.Settings
   alias FermixCore.Plugins.Dist.Index
+  alias FermixCore.Realtime.CallLease
 
   require Logger
 
@@ -108,13 +116,14 @@ defmodule FermixCore.Home.MoveReadiness do
       end
 
     items =
-      [
-        keychain(config, opts),
-        version(candidate, Keyword.get_lazy(opts, :version, &BuildInfo.product_version/0)),
-        disk(home, home_bytes, name, opts),
-        s3_size(candidate, home_bytes),
-        plugins(home, host, candidate, opts)
-      ] ++
+      call_in_progress(Keyword.get(opts, :call_holder, &call_holder/0)) ++
+        [
+          keychain(config, opts),
+          version(candidate, Keyword.get_lazy(opts, :version, &BuildInfo.product_version/0)),
+          disk(home, home_bytes, name, opts),
+          s3_size(candidate, home_bytes),
+          plugins(home, host, candidate, opts)
+        ] ++
         summary_items(
           config,
           String.starts_with?(host, "macos-"),
@@ -443,6 +452,33 @@ defmodule FermixCore.Home.MoveReadiness do
           "#{Enum.join(names, ", ")}."
       )
 
+  # M87: a move restarts this engine, and the restart ends a voice call in
+  # progress before the move's capture starts; the review names it first.
+  defp call_in_progress(holder) do
+    case holder.() do
+      {:ok, %{endpoint: endpoint}} ->
+        [
+          item(
+            "call_in_progress",
+            :warn,
+            "A voice call #{call_with(endpoint)} is in progress: the move ends it before it starts."
+          )
+        ]
+
+      :none ->
+        []
+    end
+  end
+
+  defp call_with("desktop"), do: "on this computer"
+  defp call_with("phone:" <> _device_id), do: "from your phone"
+  defp call_with("accessory:" <> _device_id), do: "from an accessory"
+
+  # Voice's tree runs only where Talk to Fermix is on: no lease, no call.
+  defp call_holder do
+    if Process.whereis(CallLease), do: CallLease.holder(CallLease), else: :none
+  end
+
   defp stays_here_item({:ok, text}, macos?, name, returning?) do
     case {features(text, macos?), returning?} do
       {[], _returning?} -> item("stays_here", :ok, none_on(macos?))
@@ -456,8 +492,27 @@ defmodule FermixCore.Home.MoveReadiness do
 
   defp stops(features, macos?, name) do
     machine = if macos?, do: "Mac", else: "computer"
+
+    [stays_behind(features -- [:voice], machine, name), voice_moves(features, machine, name)]
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.join(" ")
+  end
+
+  defp stays_behind([], _machine, _name), do: ""
+
+  defp stays_behind(features, machine, name) do
     them = if features == [:imessage], do: "it", else: "them"
     "#{Copy.stops_after_move(features)}: neither this #{machine} nor #{name} runs #{them}."
+  end
+
+  # M87 §07: this computer's own voice reaches only its socket, so it stops;
+  # a phone's calls ride its session to wherever the home runs.
+  defp voice_moves(features, machine, name) do
+    if :voice in features,
+      do:
+        "This #{machine}'s voice calls stop after the move; calls from your phone carry on " <>
+          "at #{name} when Talk to Fermix is on there and its key is in #{name}'s secret store.",
+      else: ""
   end
 
   defp none_on(true), do: "iMessage, voice calls and meetings are not turned on."

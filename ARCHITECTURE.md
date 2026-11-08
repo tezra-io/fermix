@@ -513,7 +513,9 @@ settings row labels it, `Management.Settings.secret_names/1`, the one reading
 of those labels, never by its id; engine versions, free disk, the S3 upload
 bound, the plugins the catalog has no build of for the server, what stops:
 those of iMessage, voice calls and meetings the home has turned on
-(`MoveReadiness.stays_here/3`, which the summary's `off` line reads too),
+(`MoveReadiness.stays_here/3`, which the summary's `off` line reads too; the
+review says this computer's voice stops and a phone's calls carry on at the
+server), a voice call in progress, which the move's restart ends,
 WhatsApp, and Slack without Socket Mode;
 coding agents asking for approval again, read from `config.toml`; the
 cutover gap; an engine nothing starts again, `Lifecycle.restarts_itself?/1`,
@@ -1162,16 +1164,31 @@ fixtures).
 Unix adapter for the Mac app's calls: it owns the listener, framing and
 handshake, and hands each connection's call to a `CallClient`, the
 transport-independent half every voice adapter shares (the engine's version
-floor, starting the session, the command verbs, teardown). `Endpoint` is the
-policy that differs by who a call is for (`desktop` or
-`accessory:<accessory_id>`): screen sharing is the desktop's alone, and the
+floor, starting the session, the command verbs, teardown, and a deadline on
+the verbs that wait without one of their own). `Endpoint` is the
+policy that differs by who a call is for (`desktop`,
+`accessory:<accessory_id>` or `phone:<device_id>`): screen sharing is the
+desktop's alone, a phone takes only the task engines (`CallClient` refuses
+`openai_realtime` with `engine_not_for_phones` before any session), and the
 safety identifier an OpenAI Realtime call sends comes from the endpoint (the
-task engines send none). Every engine session takes the
+task engines send none). A phone's call (M87) rides its mobile session:
+`FermixChannels.Mobile.Call`, one process per call registered by device id
+under the mobile subtree, is its `CallClient`'s adapter. It carries Realtime
+lines word for word in `call_line` frames and the audio as raw PCM16 in
+`call_audio` (`Mobile.CallAudio` bounds it: 300 ms old is dropped, 500 ms of
+credit, 5 s behind ends the call), holds the call for 20 s across a closed
+session, and ends it on revocation, an unknown device, a moved primary or
+the window's end; the session writes its frames ahead of everything else
+and holds the phone's media while it is attached. Every engine session takes the
 home's one `CallLease` from its `init/1`, so one owner-voice call runs at a
 time across engines and endpoints, and `SessionGuard` starts each session
 for the adapter that owns it and tears it down when that adapter exits, even
 mid-start. The guard heads a `:rest_for_one` tree with the task and session
-supervisors after it, so a guard restart ends every session it guarded.
+supervisors after it, so a guard restart ends every session it guarded. The
+voice tree's top level is `:rest_for_one` in start order too (lease,
+registry, record sweep, guarded sessions, socket): a lease or registry that
+crashes comes back empty, so every session and the socket go with it, and
+the sweep restarted after them closes the records they left open.
 `SessionServer` runs OpenAI
 Realtime with tools through `ToolBridge` and optional screen perception. The
 two task engines execute no tools and hand every task to an agent turn through
@@ -1460,9 +1477,10 @@ Current channels:
   (`phone`, `desktop`, and the enrollment and move sessions wave two serves):
   the session answers a known event its kind may not send
   `error{code:"unsupported_event"}` and stays open, and drops a server event
-  its kind may not be sent. The fields of the M75 events are
-  `Mobile.PeerEvents`' declarative table, which `Mobile.Protocol` consults
-  for them alone. `Mobile.Chunks` is pure: it cuts a payload into `index` and
+  its kind may not be sent. The fields of the M75 events, and of a phone's
+  call channel (M87: `call_open`, `call_line`, `call_audio`, `call_close`
+  up, `call_attached` and the last three down), are `Mobile.PeerEvents`'
+  declarative table, which `Mobile.Protocol` consults for them alone. `Mobile.Chunks` is pure: it cuts a payload into `index` and
   `last` frames of at most 60 KiB and reassembles one in order within its
   event's bound, refusing a gap, a repeat or a payload past it; both sides of
   a desktop's session use it. When a `desktop` session completes `hello` it

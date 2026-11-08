@@ -16,6 +16,13 @@ defmodule FermixChannels.Mobile.DeviceRegistry do
   asks the remote-reach rail to recompute the relays it uses (M62 §5), a cast
   that never waits on the rail.
 
+  A phone's voice call (`Mobile.Call`) outlives the socket it started on, so
+  revocation tells the device's call itself (`{:mobile_revoked, device_id}`),
+  whether or not a socket is attached; the call cancels the hand-offs it
+  started, which run as `voice` and are claimed by no device. A device whose
+  row is gone while its socket is attached ends its call too (`{:call_end,
+  :unknown_device}`).
+
   Each entry carries its device's kind, read from the trust store when the
   socket attaches (M75 §3): `:phone`, or `:desktop` for a desktop engine's
   session. The phones' audience (`broadcast/3`, `connected/2`) is phones
@@ -27,6 +34,7 @@ defmodule FermixChannels.Mobile.DeviceRegistry do
   use GenServer
 
   alias FermixChannels.Companion.Turns
+  alias FermixChannels.Mobile.Call
   alias FermixChannels.Mobile.DeviceStore
   alias FermixChannels.Mobile.Iroh.Helper
 
@@ -125,6 +133,7 @@ defmodule FermixChannels.Mobile.DeviceRegistry do
        authorize_device: Keyword.get(opts, :authorize_device, &DeviceStore.fetch/2),
        delete_device: Keyword.get(opts, :delete_device, &DeviceStore.delete/2),
        revoke_requests: Keyword.get(opts, :revoke_requests, &Turns.revoke_device(Turns, &1)),
+       end_call: Keyword.get(opts, :end_call, &Call.notify(&1, &2)),
        relays_changed:
          Keyword.get(opts, :relays_changed, fn -> Helper.relays_acknowledged(Helper) end)
      }}
@@ -180,12 +189,14 @@ defmodule FermixChannels.Mobile.DeviceRegistry do
       :ok ->
         state = revoke_presence(state, device_id)
         :ok = state.revoke_requests.(device_id)
+        :ok = state.end_call.(device_id, {:mobile_revoked, device_id})
         :ok = state.relays_changed.()
         {:reply, :ok, state}
 
       {:error, {:device_not_found, ^device_id}} = missing ->
         state = revoke_presence(state, device_id)
         :ok = state.revoke_requests.(device_id)
+        :ok = state.end_call.(device_id, {:mobile_revoked, device_id})
         {:reply, missing, state}
 
       {:error, _reason} = error ->
@@ -278,6 +289,7 @@ defmodule FermixChannels.Mobile.DeviceRegistry do
         {:reply, :ok, state}
 
       {:error, _reason} = error ->
+        :ok = state.end_call.(device_id, {:call_end, :unknown_device})
         {:reply, error, revoke_presence(state, device_id)}
     end
   end

@@ -2,6 +2,7 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
   use ExUnit.Case, async: true
 
   alias FermixChannels.Mobile.Attestation
+  alias FermixChannels.Mobile.CallAudio
   alias FermixChannels.Mobile.Chunks
   alias FermixChannels.Mobile.Iroh.Relays
   alias FermixChannels.Mobile.Management
@@ -569,6 +570,56 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
     assert server_errors(server_event("text_done", text_done(true)), schema) == []
   end
 
+  # M87: a phone's call channel is published as the session speaks it: its
+  # audio frame, the words a call ends with, and the call caps.
+  test "the schema publishes a phone's call channel as the codec reads it", %{schema: schema} do
+    defs = schema["$defs"]
+
+    for def <- ~w(call_audio call_audio_to_phone) do
+      assert defs[def]["x-raw-bytes"] == true, def
+      assert defs[def]["x-max-raw-bytes"] == CallAudio.frame_bytes(), def
+    end
+
+    for def <- ~w(call_line call_line_to_phone), do: assert(defs[def]["x-raw-bytes"] == true)
+    assert "playback_id" in defs["call_audio_to_phone"]["required"]
+    assert "control_seq" in defs["call_attached"]["required"]
+
+    endings = defs["call_close_to_phone"]["properties"]["reason"]["enum"]
+    assert endings != []
+
+    for reason <- endings ++ ["hung_up"] do
+      close = %{"call_id" => "c1", "reason" => reason}
+      encoded? = match?({:ok, _frame}, Protocol.encode_server_frame("call_close", close, 1))
+      assert encoded? == (server_errors(server_event("call_close", close), schema) == [])
+      assert encoded? == reason in endings, reason
+    end
+
+    refusals = defs["callCaps"]["properties"]["reason"]["enum"]
+    assert refusals != []
+
+    # This daemon always sends its epoch; the schema leaves it optional for older ones.
+    ack = Map.put(hello_ack_payload(), "primary_epoch", 1)
+
+    for {available?, reason} <- [{true, nil}, {false, "bogus"} | Enum.map(refusals, &{false, &1})] do
+      payload = put_in(ack, ["caps", "call"], call_caps(available?, reason))
+      encoded? = match?({:ok, _frame}, Protocol.encode_server_frame("hello_ack", payload, 1))
+      assert encoded? == (server_errors(server_event("hello_ack", payload), schema) == [])
+      assert encoded? == (available? or reason in refusals), inspect(reason)
+    end
+  end
+
+  test "documentation tells a phone how a call runs on its session", %{protocol: protocol} do
+    [_before, section] = String.split(protocol, "## Calls from the phone", parts: 2)
+    [section, _after] = String.split(section, "\n## ", parts: 2)
+
+    for word <- ~w(call_open call_attached control_seq playback_id playback_progress
+                   link_too_slow unknown_call engine_not_for_phones caps.call) do
+      assert section =~ word, "Calls from the phone does not name #{word}"
+    end
+
+    for bound <- ["20 s", "300 ms", "500 ms", "5 s"], do: assert(section =~ bound, bound)
+  end
+
   # FEAT-5: the pairing link is the one thing a phone reads before it has a
   # session, so its format is exported, and pinned to what the daemon builds.
   describe "the pairing link" do
@@ -886,6 +937,11 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
 
   defp server_errors(event, schema),
     do: WireSchema.errors(event, WireSchema.ref("serverEvent"), schema)
+
+  defp call_caps(available?, reason) do
+    call = %{"available" => available?, "min_version" => 2, "max_version" => 3, "camera" => false}
+    if reason, do: Map.put(call, "reason", reason), else: call
+  end
 
   defp text_done(truncated) do
     %{"turn_id" => "turn-1", "server_seq" => 1, "text" => "Hi", "truncated" => truncated}

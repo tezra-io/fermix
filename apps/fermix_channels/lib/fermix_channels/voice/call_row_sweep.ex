@@ -27,6 +27,10 @@ defmodule FermixChannels.Voice.CallRowSweep do
   The cutoff is taken in `init/1`: a call this boot started is left to its
   own session's task, and its detached tasks to this boot's owner.
 
+  A call from the phone (M87, `Mobile.Call`) runs on the same sessions and
+  leaves the same record as the Mac's, which names no endpoint, so this pass
+  settles its row the same way.
+
   A `:transient` child that stops `:normal` once the pass is done: a boot
   step, not a service. The pass runs in `handle_continue/2` so a slow write
   never sits inside the supervisor's start.

@@ -65,8 +65,10 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
           "id" => "stays_here",
           "status" => "warn",
           "sentence" =>
-            "iMessage, voice calls and meetings stop after the move: neither this Mac nor " <>
-              "#{@server_name} runs them."
+            "iMessage and meetings stop after the move: neither this Mac nor " <>
+              "#{@server_name} runs them. This Mac's voice calls stop after the move; " <>
+              "calls from your phone carry on at #{@server_name} when Talk to Fermix is on " <>
+              "there and its key is in #{@server_name}'s secret store."
         }
       ]
     }

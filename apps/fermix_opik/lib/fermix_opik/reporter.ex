@@ -64,6 +64,8 @@ defmodule FermixOpik.Reporter do
     [:fermix, :voice_live, :delegation_stop],
     [:fermix, :voice_live, :provider_error],
     [:fermix, :voice_live, :call_stop],
+    [:fermix, :voice_live, :phone_detached],
+    [:fermix, :voice_live, :phone_resumed],
     [:fermix, :voice_gist, :run_start],
     [:fermix, :voice_gist, :run_complete],
     [:fermix, :voice_gist, :run_error],

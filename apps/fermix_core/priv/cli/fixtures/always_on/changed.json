@@ -45,7 +45,7 @@
         "readiness": [
           {
             "id": "stays_here",
-            "sentence": "iMessage, voice calls and meetings stop after the move: neither this Mac nor fermix-general-a3f9 runs them.",
+            "sentence": "iMessage and meetings stop after the move: neither this Mac nor fermix-general-a3f9 runs them. This Mac's voice calls stop after the move; calls from your phone carry on at fermix-general-a3f9 when Talk to Fermix is on there and its key is in fermix-general-a3f9's secret store.",
             "status": "warn"
           }
         ],
@@ -56,7 +56,7 @@
         },
         "waits_until": "2031-05-05T11:00:00Z"
       },
-      "key": "ApB-OXxjSV9dMkxB-H828w",
+      "key": "77ml5eq0pK4CN0aaBj_fpQ",
       "notice": {
         "id": "ready:cand-5e2a9c1f7b3d4086",
         "sentence": "Your server is ready for the move."

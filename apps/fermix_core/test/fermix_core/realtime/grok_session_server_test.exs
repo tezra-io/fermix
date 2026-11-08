@@ -7,6 +7,7 @@ defmodule FermixCore.Realtime.GrokSessionServerTest do
   alias FermixCore.Realtime.GrokSessionServer
   alias FermixCore.Realtime.SessionControl
   alias FermixCore.Realtime.XAIRealtimeClient
+  alias FermixTestSupport.TelemetryCapture
 
   @moduletag :capture_log
 
@@ -183,6 +184,17 @@ defmodule FermixCore.Realtime.GrokSessionServerTest do
       assert session_config.resumption == %{enabled: false}
       assert [%{type: "function", name: "fermix_task"}] = session_config.tools
       refute Map.has_key?(session_config.turn_detection, :idle_timeout_ms)
+    end
+
+    test "call_start names the endpoint the call runs for", %{clock: clock} do
+      scope = "voice_live:endpoint_#{System.unique_integer([:positive, :monotonic])}"
+      TelemetryCapture.attach([[:fermix, :voice_live, :call_start]], session_id: scope)
+      session = start_session(clock: clock, session_scope: scope, endpoint: {:phone, "0d7f6a52"})
+
+      :ok = SessionControl.call_start(session)
+
+      assert_receive {:telemetry, [:fermix, :voice_live, :call_start], _m,
+                      %{endpoint: "phone:0d7f6a52"}}
     end
 
     test "a refused handshake answers the companion in the vendor's words", %{clock: clock} do

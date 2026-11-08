@@ -19,6 +19,7 @@ defmodule FermixCore.Realtime.CallClientTest do
   alias FermixTestSupport.CallLeases
 
   @robot {:accessory, "desk-robot"}
+  @phone {:phone, "0d7f6a52-91c3-4b8e-a1f0-5e2d9c4b7a13"}
 
   # A session double. `call_start` queues a frame for the adapter, then answers
   # what the test scripted; `call_stop` tells the test and ends the session; a
@@ -61,9 +62,21 @@ defmodule FermixCore.Realtime.CallClientTest do
       end
     end
 
+    # A session stuck settling (a busy Queue under a hand-off's stop) answers
+    # no `call_stop`; it has been told, and ends when the test does.
+    def handle_call(:call_stop, _from, %{stop: :stuck} = state) do
+      send(state.observer, {:call_stop, self()})
+      {:noreply, state}
+    end
+
     def handle_call(:call_stop, _from, state) do
       send(state.observer, {:call_stop, self()})
       {:stop, :normal, :ok, state}
+    end
+
+    def handle_call({:forwarded, {:cancel_task, "stuck"} = verb}, _from, state) do
+      send(state.observer, {:forwarded, verb})
+      {:noreply, state}
     end
 
     def handle_call({:forwarded, verb}, _from, state) do
@@ -291,6 +304,99 @@ defmodule FermixCore.Realtime.CallClientTest do
     end
   end
 
+  describe "a phone's call" do
+    # M87 D2: the Realtime engine joins no chat and offers a screen-share tool
+    # for a Mac the caller is away from, so a phone is refused before any
+    # session exists.
+    test "is refused under OpenAI Realtime before any session starts", ctx do
+      client = new_client(ctx, endpoint: @phone, answer: :ok)
+
+      assert {:stop, %CallClient{session: nil}} = CallClient.call_start(client)
+
+      assert_receive {:emitted, %{type: "error", reason: "engine_not_for_phones"}}
+      refute_received {:session_started, _session, _opts}
+    end
+
+    test "starts under a task engine, for the phone", ctx do
+      client = new_client(ctx, endpoint: @phone, config: live_config(), answer: :ok)
+
+      assert {:cont, _client} = CallClient.call_start(client)
+      assert_receive {:session_started, _session, opts}
+      assert Keyword.fetch!(opts, :endpoint) == @phone
+    end
+
+    test "is refused below its engine's floor, which caps.call publishes" do
+      assert CallClient.engine_min_protocol_version(live_config()) == 2
+
+      assert CallClient.engine_min_protocol_version(
+               Config.normalize(enabled: true, engine: "xai_realtime", model: "grok-voice-3.0")
+             ) == 3
+
+      assert CallClient.engine_min_protocol_version(Config.normalize(enabled: true)) == 1
+    end
+  end
+
+  # The Realtime wire's events, decoded, as the call's verbs: the one mapping
+  # every adapter speaking that wire shares.
+  describe "the wire's events" do
+    test "drive the verbs they name", ctx do
+      client = started_client(ctx, live_config())
+
+      assert {:cont, client} =
+               CallClient.event(client, %{type: "mute", payload: %{"enabled" => false}})
+
+      assert_receive {:forwarded, {:mute, false}}
+
+      assert {:cont, _client} =
+               CallClient.event(client, %{
+                 type: "task_cancel",
+                 payload: %{"delegation_id" => "delegation-1"}
+               })
+
+      assert_receive {:forwarded, {:cancel_task, "delegation-1"}}
+    end
+
+    test "call_start starts the call", ctx do
+      client = new_client(ctx, answer: :ok)
+
+      assert {:cont, %CallClient{session: session}} =
+               CallClient.event(client, %{type: "call_start", payload: %{}})
+
+      assert is_pid(session)
+    end
+  end
+
+  # `cancel_task` and `call_stop` wait with no timeout of their own; an adapter
+  # that must stay up for its peer (the phone's call) gives them a deadline.
+  describe "the deadline on the unbounded verbs" do
+    @tag :capture_log
+    test "a cancel past it is given up and the call goes on", ctx do
+      client = started_client(ctx, live_config(), deadline_ms: 50)
+
+      assert {:cont, %CallClient{session: session}} = CallClient.task_cancel(client, "stuck")
+
+      assert_receive {:forwarded, {:cancel_task, "stuck"}}
+      assert Process.alive?(session)
+      refute_received {:emitted, %{type: "error"}}
+    end
+
+    @tag :capture_log
+    test "a stop past it lets the session go from the guard and still says idle", ctx do
+      client = started_client(ctx, live_config(), deadline_ms: 50, stop: :stuck)
+      session = client.session
+
+      assert {:cont, %CallClient{session: nil}} = CallClient.call_stop(client)
+
+      assert_receive {:call_stop, ^session}
+      assert :sys.get_state(ctx.guard).bindings == %{}
+      assert_receive {:emitted, %{type: "state", state: "idle"}}
+    end
+
+    test "is no deadline at all by default: the socket waits as SessionControl does", ctx do
+      assert new_client(ctx, answer: :ok).deadline_ms == :infinity
+    end
+  end
+
   describe "the default starter's options" do
     test "derive the engine module and session scope from the engine" do
       put_openai_key()
@@ -372,8 +478,10 @@ defmodule FermixCore.Realtime.CallClientTest do
     test_pid = self()
     answer = Keyword.get(opts, :answer, :ok)
 
+    stop = Keyword.get(opts, :stop, :ends)
+
     starter = fn session_opts ->
-      spec = %{observer: test_pid, opts: session_opts, answer: answer, lease: nil}
+      spec = %{observer: test_pid, opts: session_opts, answer: answer, lease: nil, stop: stop}
 
       with {:ok, pid} <- ScriptedSession.start(spec) do
         send(test_pid, {:session_started, pid, session_opts})
@@ -392,13 +500,14 @@ defmodule FermixCore.Realtime.CallClientTest do
       session_module: ScriptedSession,
       session_starter: Keyword.get(opts, :session_starter, starter),
       session_guard: Keyword.get(opts, :session_guard, ctx.guard),
-      task_supervisor: ctx.tasks
+      task_supervisor: ctx.tasks,
+      deadline_ms: Keyword.get(opts, :deadline_ms, :infinity)
     )
   end
 
   # A client whose call is up under `config`, its start's frames drained.
-  defp started_client(ctx, config) do
-    client = new_client(ctx, config: config, answer: :ok)
+  defp started_client(ctx, config, opts \\ []) do
+    client = new_client(ctx, [config: config, answer: :ok] ++ opts)
     {:cont, client} = CallClient.call_start(client)
     assert_receive {:realtime, %{type: "state", state: "listening"}}
     client

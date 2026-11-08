@@ -9,7 +9,7 @@ defmodule FermixChannels.Mobile.ProtocolTest do
     push_register push_unregister ack read_state request_status pair_request unpair ping
     companion_open companion_line companion_close manage loopback_request loopback_failed
     snapshot_stored snapshot_refused enroll_request move_offer move_chunk move_end
-    move_commit move_resume
+    move_commit move_resume call_open call_line call_audio call_close
   )
   @server_events ~w(
     hello_ack accepted attach_status turn_started text_delta tool_event text_done turn_done
@@ -18,7 +18,7 @@ defmodule FermixChannels.Mobile.ProtocolTest do
     error pong event_part
     companion_line companion_close manage_result loopback_open loopback_response
     loopback_close snapshot_begin snapshot_chunk snapshot_end enroll_accepted move_accept
-    move_ready move_done
+    move_ready move_done call_attached call_line call_audio call_close
   )
 
   # Protocol 1 never had a client, so the window is protocol 2 alone (M51 D1).
@@ -578,6 +578,53 @@ defmodule FermixChannels.Mobile.ProtocolTest do
     for push <- [["fcm"], ["apns", "fcm"], ["web"]] do
       assert {:error, {:invalid_field, "caps.push"}} =
                Protocol.encode_server_frame("hello_ack", put_in(ack, ["caps", "push"], push), 1)
+    end
+  end
+
+  # M87: whether this primary serves a call from the phone, why not, and the
+  # Realtime versions a call needs. Absent from an older primary, and from a
+  # desktop's hello_ack.
+  test "hello_ack's caps.call says whether calls are served, and why not" do
+    ack = %{
+      "session_id" => "s",
+      "min_version" => 2,
+      "max_version" => 2,
+      "profiles" => [],
+      "candidates" => [],
+      "history_head_seq" => 0,
+      "read_up_to_seq" => 0,
+      "caps" => %{"commands" => [], "max_media_bytes" => 1},
+      "primary_epoch" => 3
+    }
+
+    served = %{"available" => true, "min_version" => 2, "max_version" => 3, "camera" => false}
+    assert {:ok, _frame} = Protocol.encode_server_frame("hello_ack", ack, 1)
+
+    assert {:ok, _frame} =
+             Protocol.encode_server_frame("hello_ack", put_in(ack, ["caps", "call"], served), 1)
+
+    for reason <- ~w(voice_off no_key engine_not_for_phones) do
+      refused = served |> Map.put("available", false) |> Map.put("reason", reason)
+
+      assert {:ok, _frame} =
+               Protocol.encode_server_frame(
+                 "hello_ack",
+                 put_in(ack, ["caps", "call"], refused),
+                 1
+               )
+    end
+
+    for bad <- [
+          Map.put(served, "reason", "voice_off"),
+          %{served | "available" => false},
+          served |> Map.put("available", false) |> Map.put("reason", "busy"),
+          Map.delete(served, "min_version"),
+          %{served | "max_version" => 0},
+          %{served | "camera" => "no"},
+          "yes"
+        ] do
+      assert {:error, {:invalid_field, "caps.call"}} =
+               Protocol.encode_server_frame("hello_ack", put_in(ack, ["caps", "call"], bad), 1)
     end
   end
 

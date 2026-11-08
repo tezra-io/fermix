@@ -92,6 +92,33 @@ defmodule FermixCore.Realtime.Protocol do
     end
   end
 
+  @doc """
+  The daemon's answer to a `client_hello` at `client_version`: `server_hello`
+  with the range it accepts, or the refusal that names which side must update,
+  after which the adapter closes. Every adapter speaking this wire answers the
+  handshake with it: the Unix socket, and the phone's call channel.
+  """
+  @spec hello_reply(integer()) :: {:ok, map()} | {:error, map()}
+  def hello_reply(client_version) when is_integer(client_version) do
+    {min, max} = supported_version_range()
+
+    case negotiate(client_version) do
+      :ok ->
+        {:ok, %{type: "server_hello", min_version: min, max_version: max}}
+
+      {:error, direction} ->
+        {:error,
+         %{
+           type: "error",
+           reason: "unsupported_protocol_version",
+           direction: Atom.to_string(direction),
+           client_version: client_version,
+           min_version: min,
+           max_version: max
+         }}
+    end
+  end
+
   @spec decode_client_event(String.t(), Config.t()) :: {:ok, event()} | {:error, term()}
   def decode_client_event(line, %Config{} = config) when is_binary(line) do
     with {:ok, decoded} <- decode_json(line),

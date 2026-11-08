@@ -51,6 +51,8 @@ defmodule FermixChannels.Mobile.Protocol do
   @max_attestation_chain_bytes 16 * 1_024
   @max_status_requests 32
   @request_states ~w(accepted running completed failed)
+  # Why a primary serves no call from the phone (`hello_ack.caps.call.reason`).
+  @call_refusals ~w(voice_off no_key engine_not_for_phones)
 
   # The events protocol 2 shipped with; M75's follow from `Mobile.PeerEvents`.
   @shipped_client_events ~w(
@@ -759,10 +761,35 @@ defmodule FermixChannels.Mobile.Protocol do
          :ok <- nonnegative_u64(payload, "history_head_seq"),
          :ok <- nonnegative_u64(payload, "read_up_to_seq"),
          :ok <- map_field(payload, "caps"),
-         :ok <- positive_u64(payload, "primary_epoch") do
+         :ok <- positive_u64(payload, "primary_epoch"),
+         :ok <- optional_call_caps(payload["caps"]) do
       optional_push_services(payload["caps"], "caps.push")
     end
   end
+
+  # Whether the primary serves a call from the phone (M87): absent from an
+  # older primary and from a desktop's hello_ack. A call it does not serve
+  # says why; one it serves says nothing more.
+  defp optional_call_caps(%{"call" => call}) do
+    if call_caps?(call), do: :ok, else: {:error, {:invalid_field, "caps.call"}}
+  end
+
+  defp optional_call_caps(_caps), do: :ok
+
+  defp call_caps?(%{"available" => available?, "camera" => camera?} = call)
+       when is_boolean(available?) and is_boolean(camera?) do
+    versions? =
+      integer_range(call, "min_version", 1, @max_u64) == :ok and
+        integer_range(call, "max_version", 1, @max_u64) == :ok
+
+    versions? and call_reason?(available?, Map.get(call, "reason"))
+  end
+
+  defp call_caps?(_call), do: false
+
+  defp call_reason?(true, nil), do: true
+  defp call_reason?(false, reason), do: reason in @call_refusals
+  defp call_reason?(_available?, _reason), do: false
 
   # Absent from a daemon older than the list, as every field protocol 2 gained
   # after it shipped may be.

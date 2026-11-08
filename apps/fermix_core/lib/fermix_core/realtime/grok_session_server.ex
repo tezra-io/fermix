@@ -53,6 +53,7 @@ defmodule FermixCore.Realtime.GrokSessionServer do
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.ConversationRecorder
   alias FermixCore.Realtime.DeviceIdentity
+  alias FermixCore.Realtime.Endpoint
   alias FermixCore.Realtime.GrokLatency
   alias FermixCore.Realtime.GrokLedger
   alias FermixCore.Realtime.GrokPlayback
@@ -194,7 +195,8 @@ defmodule FermixCore.Realtime.GrokSessionServer do
           conversation: Config.conversation(config),
           device_id: device_id,
           voice_provider: :xai,
-          meta: telemetry_meta(config, call_id, call_uuid, device_id),
+          meta:
+            telemetry_meta(config, call_id, call_uuid, device_id, Keyword.fetch!(opts, :endpoint)),
           clock: clock,
           record_opts: CallRecord.repo_opts(Keyword.get(opts, :record_repo, Repo)),
           persist?: config.persist_transcripts?
@@ -1704,11 +1706,12 @@ defmodule FermixCore.Realtime.GrokSessionServer do
 
   ## Telemetry and text
 
-  defp telemetry_meta(config, call_id, call_uuid, device_id) do
+  defp telemetry_meta(config, call_id, call_uuid, device_id, endpoint) do
     %{
       session_id: call_id,
       call_uuid: call_uuid,
       device_id: device_id,
+      endpoint: Endpoint.format(endpoint),
       engine: config.engine,
       provider: config.provider,
       model: config.model,

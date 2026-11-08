@@ -166,6 +166,46 @@ defmodule FermixChannels.Mobile.DeviceRegistryTest do
     assert_received {:requests_revoked, "gone"}
   end
 
+  # M87: a phone's call outlives its socket, so revocation tells the call
+  # itself, socket or none; a device whose row vanished ends its call too.
+  test "revocation and a vanished device end the device's call, attached or not" do
+    test_pid = self()
+
+    registry =
+      start_supervised!(
+        {DeviceRegistry,
+         name: :"call_registry_#{System.unique_integer([:positive])}",
+         device_store: :store,
+         authorize_device: fn :store, id ->
+           if id == "vanished", do: {:error, :not_found}, else: {:ok, %{device_id: id}}
+         end,
+         delete_device: fn :store, _id -> :ok end,
+         revoke_requests: fn _id -> :ok end,
+         relays_changed: fn -> :ok end,
+         end_call: fn device_id, message ->
+           send(test_pid, {:end_call, device_id, message})
+           :ok
+         end},
+        id: make_ref()
+      )
+
+    assert :ok = DeviceRegistry.revoke(registry, "away")
+    assert_received {:end_call, "away", {:mobile_revoked, "away"}}
+
+    socket = spawn(fn -> Process.sleep(:infinity) end)
+    :ok = DeviceRegistry.attach(registry, "kept", socket)
+    {:error, _reason} = DeviceRegistry.attach(registry, "vanished", socket)
+    refute_received {:end_call, _id, _message}
+
+    other = spawn(fn -> Process.sleep(:infinity) end)
+    :ok = DeviceRegistry.attach(registry, "doomed", other)
+    :sys.replace_state(registry, &%{&1 | authorize_device: fn :store, _id -> {:error, :gone} end})
+    assert {:error, _reason} = DeviceRegistry.authorized?(registry, "doomed", other)
+    assert_received {:end_call, "doomed", {:call_end, :unknown_device}}
+
+    Enum.each([socket, other], &Process.exit(&1, :kill))
+  end
+
   # M62 §5: the relays the daemon's endpoint uses are those every paired phone
   # acknowledged, so a phone that leaves may widen them.
   test "a revocation asks the remote rail to recompute its relays" do

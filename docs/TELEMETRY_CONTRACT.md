@@ -923,9 +923,9 @@ Its completion re-enters the chat as an ordinary companion turn (`main-*`),
 also a root of its own.
 
 Every emission goes through `FermixCore.Realtime.LiveTelemetry` (the
-detached task's owner included) — never hand-rolled. The six events are `[:fermix, :voice_live, :call_start |
+detached task's owner included) — never hand-rolled. The eight events are `[:fermix, :voice_live, :call_start |
 :session_started | :delegation_start | :delegation_stop | :provider_error |
-:call_stop]`. Shared metadata: `agent: "voice_live"`, `session_id` (the call
+:call_stop | :phone_detached | :phone_resumed]`. Shared metadata: `agent: "voice_live"`, `session_id` (the call
 id), `call_uuid`, `engine`, `provider`, `device_id`, `model`, `voice`, and
 `provider_session_id` once the vendor has named its session — that last one is
 the only handle a vendor-side investigation has, and it exists nowhere else in
@@ -947,7 +947,18 @@ between delegations is force-closed at the idle TTL, and its ledger-bearing
 with (M56 §4.3), never quoting it: `instructions_bytes` (the composed
 instructions, the owner's details and memory files included) and `input_items`
 and `input_bytes` (the starting `session.input`: the chat's newest messages and
-earlier calls' gists; both `0` for a private call or an empty chat). The delegation events carry
+earlier calls' gists; both `0` for a private call or an empty chat). It
+names `endpoint`, who the call runs for: `desktop` (the Mac app's socket) or
+`<kind>:<device_id>` (`accessory:<id>`, `phone:<id>`, a device that calls
+Fermix itself); the Realtime engine's `[:fermix, :realtime, :call_start]`
+carries it too, and the exporter puts it on both kinds of call root. A phone's
+call (M87) outlives a closed session for its 20 s window: `phone_detached`
+marks the phone's session closing mid-call, and `phone_resumed` its return,
+with the gap as its `duration_ms` measurement, so the exporter's span for it
+is as long as the phone was away. Both name `endpoint`, and both come from
+`FermixChannels.Mobile.Call` once the call's voice session has named its call
+id (`call_ready`); a gap before that is a log line only. A call the window
+ran out on ends with `call_stop`, as any other. The delegation events carry
 `delegation_id`, `revision` and `turn_session_id`, and `delegation_stop` adds
 the terminal word `status` (`completed | failed | cancelled`, and `timed_out`
 on a detached stop; never a bare "ok")
@@ -1041,7 +1052,7 @@ bill, which is the `call_stop` ledger. A vendor failure reaches
 on it. No field of any Grok event carries raw audio, a transcript, a caption,
 memory text, an API key or an unsanitized provider payload.
 
-`Trace.TelemetryHandler` registers all six events as `agent_event` rows,
+`Trace.TelemetryHandler` registers all eight events as `agent_event` rows,
 flattening every metadata key and measurement, `engine`, `provider`,
 `voice_text_items` and the latency summary included; `FermixOpik` binds them
 (`infer_kind("voice_live:" <> _)` → `:voice_live`,

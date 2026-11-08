@@ -40,6 +40,13 @@ defmodule FermixChannels.Mobile.SupervisorTest do
     assert Enum.find_index(ids, &(&1 == instance_names.request_coordinator)) <
              Enum.find_index(ids, &(&1 == Listener))
 
+    # A phone's session finds its call, or starts one, before any carrier
+    # takes a phone (M87).
+    for call_child <- [instance_names.calls, instance_names.call_supervisor] do
+      assert Enum.find_index(ids, &(&1 == call_child)) <
+               Enum.find_index(ids, &(&1 == Listener))
+    end
+
     # Sockets read their candidates from the discovery cache.
     assert Enum.find_index(ids, &(&1 == FermixChannels.Mobile.Discovery)) <
              Enum.find_index(ids, &(&1 == Listener))
@@ -722,7 +729,9 @@ defmodule FermixChannels.Mobile.SupervisorTest do
       bridge_connections: Module.concat(__MODULE__, "BridgeConnections#{suffix}"),
       desktop: Module.concat(__MODULE__, "Desktop#{suffix}"),
       desktop_peers: Module.concat(__MODULE__, "DesktopPeers#{suffix}"),
-      desktop_peer_supervisor: Module.concat(__MODULE__, "DesktopPeerSupervisor#{suffix}")
+      desktop_peer_supervisor: Module.concat(__MODULE__, "DesktopPeerSupervisor#{suffix}"),
+      calls: Module.concat(__MODULE__, "Calls#{suffix}"),
+      call_supervisor: Module.concat(__MODULE__, "CallSupervisor#{suffix}")
     }
   end
 

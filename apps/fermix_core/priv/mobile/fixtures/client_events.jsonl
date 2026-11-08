@@ -32,3 +32,7 @@
 {"v":2,"t":"move_end","seq":15,"move_id":"mv-8e41"}
 {"v":2,"t":"move_commit","seq":16,"move_id":"mv-8e41"}
 {"v":2,"t":"move_resume","seq":1,"move_id":"mv-8e41"}
+{"v":2,"t":"call_open","seq":5,"call_id":"call-7c1e","resume":false}
+{"v":2,"t":"call_open","seq":1,"call_id":"call-7c1e","resume":true}
+{"v":2,"t":"call_close","seq":11,"call_id":"call-7c1e","reason":"owner_hung_up"}
+{"v":2,"t":"call_close","seq":12,"call_id":"call-7c1e"}

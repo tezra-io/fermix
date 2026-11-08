@@ -69,6 +69,7 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.ConversationRecorder
   alias FermixCore.Realtime.DeviceIdentity
+  alias FermixCore.Realtime.Endpoint
   alias FermixCore.Realtime.LiveChat
   alias FermixCore.Realtime.LiveFrames
   alias FermixCore.Realtime.LiveLedger
@@ -214,7 +215,8 @@ defmodule FermixCore.Realtime.LiveSessionServer do
           conversation: Config.conversation(config),
           device_id: device_id,
           voice_provider: :openai,
-          meta: telemetry_meta(config, call_id, call_uuid, device_id),
+          meta:
+            telemetry_meta(config, call_id, call_uuid, device_id, Keyword.fetch!(opts, :endpoint)),
           clock: clock,
           record_opts: CallRecord.repo_opts(Keyword.get(opts, :record_repo, Repo)),
           persist?: config.persist_transcripts?
@@ -1254,11 +1256,12 @@ defmodule FermixCore.Realtime.LiveSessionServer do
 
   # The call's telemetry metadata, held by its tasks from here on: the
   # provider session id joins it once the session starts.
-  defp telemetry_meta(config, call_id, call_uuid, device_id) do
+  defp telemetry_meta(config, call_id, call_uuid, device_id, endpoint) do
     %{
       session_id: call_id,
       call_uuid: call_uuid,
       device_id: device_id,
+      endpoint: Endpoint.format(endpoint),
       engine: config.engine,
       provider: config.provider,
       model: config.model,

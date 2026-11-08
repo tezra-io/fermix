@@ -81,6 +81,7 @@ defmodule FermixCore.Realtime.SessionServerTelemetryTest do
     assert meta.session_id == @session_scope
     assert meta.model == "gpt-realtime-2"
     assert meta.voice == "marin"
+    assert meta.endpoint == "desktop"
 
     assert :ok = SessionServer.handle_provider_event(server, {:session_created, %{}})
     assert_receive {:tele, [:fermix, :realtime, :session_created], _m, created}

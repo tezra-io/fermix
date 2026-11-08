@@ -61,6 +61,30 @@ defmodule FermixCore.Realtime.LiveTelemetryTest do
     assert meta.max_duration_ms == 900_000
   end
 
+  # M87: who the call runs for (`desktop`, `<kind>:<device_id>`).
+  test "call_start names the endpoint the call runs for" do
+    LiveTelemetry.call_start(Map.put(@meta, :endpoint, "phone:0d7f6a52"), 900_000, @start_size)
+
+    assert_receive {:vl, [:fermix, :voice_live, :call_start], %{}, meta}
+    assert meta.endpoint == "phone:0d7f6a52"
+  end
+
+  # M87: a phone's call outlives a closed session; the gap is the call's to show.
+  test "a phone's detach and its resume, with the gap as the resume's duration" do
+    meta = Map.put(@meta, :endpoint, "phone:0d7f6a52")
+    LiveTelemetry.phone_detached(meta)
+
+    assert_receive {:vl, [:fermix, :voice_live, :phone_detached], %{}, detached}
+    assert detached.session_id == "voice_live:7"
+    assert detached.endpoint == "phone:0d7f6a52"
+
+    LiveTelemetry.phone_resumed(meta, 1_250)
+
+    assert_receive {:vl, [:fermix, :voice_live, :phone_resumed], %{duration_ms: 1_250}, resumed}
+    assert resumed.call_uuid == @call_uuid
+    assert resumed.endpoint == "phone:0d7f6a52"
+  end
+
   # M56 §4.3: what the call started with is sized, never quoted.
   test "call_start carries the size of the instructions and the starting input" do
     LiveTelemetry.call_start(@meta, 900_000, %{
@@ -274,7 +298,9 @@ defmodule FermixCore.Realtime.LiveTelemetryTest do
              [:fermix, :voice_live, :delegation_start],
              [:fermix, :voice_live, :delegation_stop],
              [:fermix, :voice_live, :provider_error],
-             [:fermix, :voice_live, :call_stop]
+             [:fermix, :voice_live, :call_stop],
+             [:fermix, :voice_live, :phone_detached],
+             [:fermix, :voice_live, :phone_resumed]
            ]
 
     assert Enum.all?(definitions, &(&1.trace_type == :agent_event))
@@ -286,7 +312,9 @@ defmodule FermixCore.Realtime.LiveTelemetryTest do
              "voice_live_delegation_start",
              "voice_live_delegation_stop",
              "voice_live_provider_error",
-             "voice_live_call_stop"
+             "voice_live_call_stop",
+             "voice_live_phone_detached",
+             "voice_live_phone_resumed"
            ]
   end
 end

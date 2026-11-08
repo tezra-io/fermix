@@ -23,6 +23,7 @@ defmodule FermixChannels.Mobile.Supervisor do
   require Logger
 
   alias FermixChannels.Desktop.Supervisor, as: DesktopSupervisor
+  alias FermixChannels.Mobile.Call
   alias FermixChannels.Mobile.DeviceRegistry
   alias FermixChannels.Mobile.DeviceStore
   alias FermixChannels.Mobile.Discovery
@@ -299,7 +300,8 @@ defmodule FermixChannels.Mobile.Supervisor do
       {DeviceRegistry,
        name: names.device_registry,
        device_store: names.device_store,
-       relays_changed: fn -> Iroh.Helper.relays_acknowledged(names.iroh_helper) end},
+       relays_changed: fn -> Iroh.Helper.relays_acknowledged(names.iroh_helper) end,
+       end_call: &Call.notify(names.calls, &1, &2)},
       {PairManager,
        root: root,
        name: names.pair_manager,
@@ -323,6 +325,13 @@ defmodule FermixChannels.Mobile.Supervisor do
              recovery_limit: Keyword.get(opts, :recovery_limit, 200),
              device_store: names.device_store},
             id: names.request_coordinator
+          ),
+          # Before the carriers: a phone's session finds its call here, and
+          # starts one under the call supervisor (M87).
+          Supervisor.child_spec({Registry, keys: :unique, name: names.calls}, id: names.calls),
+          Supervisor.child_spec(
+            {DynamicSupervisor, name: names.call_supervisor, strategy: :one_for_one},
+            id: names.call_supervisor
           ),
           # Before the carriers: a desktop's session starts its peer here.
           {DesktopSupervisor,
@@ -377,7 +386,9 @@ defmodule FermixChannels.Mobile.Supervisor do
       bridge_connections: FermixChannels.Mobile.Iroh.Connections,
       desktop: DesktopSupervisor,
       desktop_peers: FermixChannels.Desktop.Peers,
-      desktop_peer_supervisor: FermixChannels.Desktop.PeerSupervisor
+      desktop_peer_supervisor: FermixChannels.Desktop.PeerSupervisor,
+      calls: FermixChannels.Mobile.Calls,
+      call_supervisor: FermixChannels.Mobile.CallSupervisor
     }
 
     Map.merge(defaults, Keyword.get(opts, :names, %{}))
@@ -479,6 +490,8 @@ defmodule FermixChannels.Mobile.Supervisor do
       iroh_helper: names.iroh_helper,
       desktop_peers: names.desktop_peers,
       desktop_peer_supervisor: names.desktop_peer_supervisor,
+      calls: names.calls,
+      call_supervisor: names.call_supervisor,
       max_media_bytes: Keyword.get(config, :max_media_bytes, @default_max_media_bytes),
       push_environment: config |> Keyword.get(:push, []) |> Keyword.get(:environment),
       push_services: push_services

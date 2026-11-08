@@ -1789,6 +1789,7 @@ defmodule FermixCore.Realtime.SessionServer do
     %{
       session_id: to_string(state.session_scope),
       device_id: state.device_id,
+      endpoint: Endpoint.format(state.endpoint),
       model: state.config.model,
       voice: state.config.voice,
       session_scope: to_string(state.session_scope)

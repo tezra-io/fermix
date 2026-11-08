@@ -196,6 +196,151 @@ defmodule FermixChannels.Mobile.SessionTest do
     refute_received :socket_attached
   end
 
+  # M87: a phone's hello_ack says whether this primary serves its calls; a
+  # desktop's voice is its own computer's, so its hello_ack says nothing.
+  test "a phone's hello_ack carries caps.call; a desktop's does not" do
+    served = %{"available" => true, "min_version" => 2, "max_version" => 3, "camera" => false}
+    caps = fn "paired-device" -> served end
+
+    assert {:push, [ack], _ready} =
+             Session.handle_frame(
+               hello_frame(%{}),
+               hello_state(primary_epoch: 3, call_caps: caps)
+             )
+
+    assert header(ack)["caps"]["call"] == served
+
+    desktop =
+      hello_state(
+        primary_epoch: 3,
+        call_caps: caps,
+        peer_kind: :desktop,
+        start_desktop_peer: fn _opts -> {:ok, spawn(fn -> :ok end)} end,
+        record_engine_version: fn _id, _version, _at -> :ok end
+      )
+
+    assert {:push, [ack], _ready} = Session.handle_frame(hello_frame(%{}), desktop)
+    refute Map.has_key?(header(ack)["caps"], "call")
+  end
+
+  # A copy of the home the phone has seen move on holds a call it cannot
+  # resume: it ends at once.
+  test "a stale primary ends the phone's call here" do
+    test_pid = self()
+
+    end_call = fn device_id, message ->
+      send(test_pid, {:call_ended, device_id, message})
+      :ok
+    end
+
+    state = hello_state(primary_epoch: 3, end_call: end_call)
+
+    assert {:stop, :stale_primary, _close, _frames, _state} =
+             Session.handle_frame(hello_frame(%{"primary_epoch" => 4}), state)
+
+    assert_received {:call_ended, "paired-device", {:call_end, :stale_primary}}
+  end
+
+  # The media a phone in a call is pushed waits, bounded: a run past the bound
+  # is dropped whole (the phone fetches it by its ref after the call), and the
+  # rest goes after the call's close.
+  @tag :capture_log
+  test "media pushed during a call waits for its close, a run past the bound dropped whole" do
+    {:push, _ack, ready} = Session.handle_frame(hello_frame(%{}), hello_state(primary_epoch: 3))
+    call = spawn(fn -> Process.sleep(:infinity) end)
+
+    attached = %{
+      "t" => "call_attached",
+      "call_id" => "c1",
+      "resumed" => false,
+      "muted" => false,
+      "camera" => false,
+      "control_seq" => 0
+    }
+
+    assert {:push, [frame], ready} =
+             Session.handle_info({:mobile_call, call, :control, attached}, ready)
+
+    assert header(frame)["t"] == "call_attached"
+    chunk = :binary.copy(<<7>>, 61_440)
+
+    ready =
+      Enum.reduce(media_run("big", 560, chunk) ++ media_run("small", 1, "x"), ready, fn event,
+                                                                                        ready ->
+        assert {:ok, ready} = Session.handle_info({:mobile_event, event}, ready)
+        ready
+      end)
+
+    assert {:push, [text], ready} =
+             Session.handle_info(
+               {:mobile_event, %{"t" => "notice", "kind" => "k", "text" => "t"}},
+               ready
+             )
+
+    assert header(text)["t"] == "notice"
+    close = %{"t" => "call_close", "call_id" => "c1", "reason" => "ended"}
+
+    assert {:push, frames, _ready} =
+             Session.handle_info({:mobile_call, call, :control, close}, ready)
+
+    assert Enum.map(frames, &{header(&1)["t"], header(&1)["ref"]}) == [
+             {"call_close", nil},
+             {"media_begin", "small"},
+             {"media_chunk", "small"},
+             {"media_end", "small"}
+           ]
+
+    Process.exit(call, :kill)
+  end
+
+  test "a call that ends without its close lets the media it held go" do
+    {:push, _ack, ready} = Session.handle_frame(hello_frame(%{}), hello_state(primary_epoch: 3))
+    call = spawn(fn -> Process.sleep(:infinity) end)
+
+    attached = %{
+      "t" => "call_attached",
+      "call_id" => "c1",
+      "resumed" => false,
+      "muted" => false,
+      "camera" => false,
+      "control_seq" => 0
+    }
+
+    {:push, _frames, ready} = Session.handle_info({:mobile_call, call, :control, attached}, ready)
+    [begin | _rest] = media_run("small", 1, "x")
+    assert {:ok, ready} = Session.handle_info({:mobile_event, begin}, ready)
+
+    ref = Process.monitor(call)
+    Process.exit(call, :kill)
+    assert_receive {:DOWN, ^ref, :process, ^call, :killed}
+    assert_receive {:DOWN, hold, :process, ^call, :killed}
+    assert hold == ready.call_hold.ref
+
+    assert {:push, [frame], _ready} =
+             Session.handle_info({:DOWN, hold, :process, call, :killed}, ready)
+
+    assert header(frame)["t"] == "media_begin"
+  end
+
+  defp media_run(ref, chunks, bytes) do
+    begin = %{
+      "t" => "media_begin",
+      "ref" => ref,
+      "server_seq" => 9,
+      "kind" => "file",
+      "mime" => "application/octet-stream",
+      "size_bytes" => 1,
+      "sha256" => String.duplicate("a", 64)
+    }
+
+    chunk_events =
+      for index <- 0..(chunks - 1),
+          do: %{"t" => "media_chunk", "ref" => ref, "index" => index, "bytes" => bytes}
+
+    [begin] ++
+      chunk_events ++ [%{"t" => "media_end", "ref" => ref, "sha256" => String.duplicate("a", 64)}]
+  end
+
   test "pair_approved gives a newly paired phone the daemon's primary epoch" do
     {:ok, state} =
       Session.init(%{

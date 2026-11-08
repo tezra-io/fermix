@@ -2,14 +2,15 @@ defmodule FermixChannels.Mobile.PeerEvents do
   @moduledoc """
   The fields of the events M75 adds to the mobile wire: a desktop's session,
   a candidate's enrollment and the move (`PROTOCOL.md`: *Desktop sessions*,
-  *Enrollment and the move*).
+  *Enrollment and the move*); and M87's call channel on a phone's session
+  (*Calls from the phone*).
 
   One declarative table per direction, `client` for what the initiator sends
   (a phone, a desktop, a candidate, the source of a move) and `server` for what
   the responder sends. Each event names its fields, each with the rule its
   value must meet (optional ones are absent, never null), and its raw tail:
-  `:none`, `:required` (one to 60 KiB) or `{:optional, max}` (empty, or at most
-  `max` bytes). `Mobile.Protocol` owns the frame and the catalogs and asks this
+  `:none`, `:required` (one to 60 KiB), `{:optional, max}` (empty, or at most
+  `max` bytes) or `{:pcm16, max}` (whole PCM16 samples, two to `max` bytes). `Mobile.Protocol` owns the frame and the catalogs and asks this
   module about these events alone. Pure.
   """
 
@@ -29,7 +30,12 @@ defmodule FermixChannels.Mobile.PeerEvents do
   @controls ~r/[\x{0000}-\x{001F}\x{007F}-\x{009F}]/u
   @blank ~r/\s/u
 
+  @playback_id ~r/\A[A-Za-z0-9._:-]{1,64}\z/
+  # A call's audio frame: 100 ms of 24 kHz mono PCM16.
+  @call_audio_bytes 4_800
+
   @loopback_failures ~w(port_in_use not_permitted failed)
+  @call_endings ~w(ended lost link_too_slow revoked unknown_call)
   @snapshot_refusals ~w(disk_floor space_unknown mismatch out_of_order invalid_name write_failed)
 
   @relay {:object, [{"url", :relay_url}, {"quic_port", :port}]}
@@ -90,7 +96,11 @@ defmodule FermixChannels.Mobile.PeerEvents do
     "move_chunk" => {[{"move_id", :id}, {"index", :count}], :required},
     "move_end" => {[{"move_id", :id}], :none},
     "move_commit" => {[{"move_id", :id}], :none},
-    "move_resume" => {[{"move_id", :id}], :none}
+    "move_resume" => {[{"move_id", :id}], :none},
+    "call_open" => {[{"call_id", :id}, {"resume", :boolean}], :none},
+    "call_line" => {[{"call_id", :id}, {"control_seq", {:optional, :positive}}], :required},
+    "call_audio" => {[{"call_id", :id}], {:pcm16, @call_audio_bytes}},
+    "call_close" => {[{"call_id", :id}, {"reason", {:optional, :text}}], :none}
   }
 
   @server %{
@@ -121,18 +131,30 @@ defmodule FermixChannels.Mobile.PeerEvents do
     "enroll_accepted" => {[{"candidate_id", :id}, {"primary_name", :name}], :none},
     "move_accept" => {[{"move_id", :id}, {"recipient", :x25519}], :none},
     "move_ready" => {[{"move_id", :id}, {"epoch", :positive}], :none},
-    "move_done" => {[{"move_id", :id}, {"epoch", :positive}], :none}
+    "move_done" => {[{"move_id", :id}, {"epoch", :positive}], :none},
+    "call_attached" =>
+      {[
+         {"call_id", :id},
+         {"resumed", :boolean},
+         {"muted", :boolean},
+         {"camera", :boolean},
+         {"control_seq", :count}
+       ], :none},
+    "call_line" => {[{"call_id", :id}], :required},
+    "call_audio" =>
+      {[{"call_id", :id}, {"playback_id", :playback_id}], {:pcm16, @call_audio_bytes}},
+    "call_close" => {[{"call_id", :id}, {"reason", {:enum, @call_endings}}], :none}
   }
 
   @client_events ~w(
     companion_open companion_line companion_close manage loopback_request loopback_failed
     snapshot_stored snapshot_refused enroll_request move_offer move_chunk move_end move_commit
-    move_resume
+    move_resume call_open call_line call_audio call_close
   )
   @server_events ~w(
     companion_line companion_close manage_result loopback_open loopback_response
     loopback_close snapshot_begin snapshot_chunk snapshot_end enroll_accepted move_accept
-    move_ready move_done
+    move_ready move_done call_attached call_line call_audio call_close
   )
 
   if Enum.sort(@client_events) != Enum.sort(Map.keys(@client)) or
@@ -141,7 +163,7 @@ defmodule FermixChannels.Mobile.PeerEvents do
   end
 
   @type direction :: :client | :server
-  @type raw :: :none | :required | {:optional, pos_integer()}
+  @type raw :: :none | :required | {:optional, pos_integer()} | {:pcm16, pos_integer()}
 
   @doc "The M75 events the initiator sends, in catalog order."
   @spec client_events() :: [String.t()]
@@ -195,8 +217,15 @@ defmodule FermixChannels.Mobile.PeerEvents do
       {:required, _size} -> :ok
       {{:optional, max}, size} when size > max -> {:error, {:raw_chunk_too_large, size, max}}
       {{:optional, _max}, _size} -> :ok
+      {{:pcm16, max}, size} -> pcm16(size, max)
     end
   end
+
+  # Whole PCM16 samples: one to `max` bytes, an even count.
+  defp pcm16(0, _max), do: {:error, {:missing_field, "bytes"}}
+  defp pcm16(size, max) when size > max, do: {:error, {:raw_chunk_too_large, size, max}}
+  defp pcm16(size, _max) when rem(size, 2) == 1, do: {:error, {:invalid_field, "bytes"}}
+  defp pcm16(_size, _max), do: :ok
 
   defp events(:client), do: @client_events
   defp events(:server), do: @server_events
@@ -243,6 +272,7 @@ defmodule FermixChannels.Mobile.PeerEvents do
   defp valid?(:port, value), do: valid?({:range, 1, 65_535}, value)
   defp valid?(:boolean, value), do: is_boolean(value)
   defp valid?(:id, value), do: matches?(@id, value)
+  defp valid?(:playback_id, value), do: matches?(@playback_id, value)
   defp valid?(:method, value), do: matches?(@method, value) and byte_size(value) <= 128
   defp valid?(:http_method, value), do: matches?(@http_method, value)
   defp valid?(:node_id, value), do: matches?(@node_id, value)

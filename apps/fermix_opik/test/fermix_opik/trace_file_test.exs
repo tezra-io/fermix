@@ -278,12 +278,14 @@ defmodule FermixOpik.TraceFileTest do
                  "agent" => "realtime",
                  "model" => "gpt-realtime-2",
                  "voice" => "marin",
-                 "device_id" => "dev-1"
+                 "device_id" => "dev-1",
+                 "endpoint" => "desktop"
                })
              )
 
     assert start_meta.session_id == "session:1"
     assert start_meta.model == "gpt-realtime-2"
+    assert start_meta.endpoint == "desktop"
 
     assert {[:fermix, :realtime, :call_stop], %{}, _stop_meta} =
              TraceFile.normalize(
@@ -330,7 +332,9 @@ defmodule FermixOpik.TraceFileTest do
       {"voice_live_delegation_start", :delegation_start},
       {"voice_live_delegation_stop", :delegation_stop},
       {"voice_live_provider_error", :provider_error},
-      {"voice_live_call_stop", :call_stop}
+      {"voice_live_call_stop", :call_stop},
+      {"voice_live_phone_detached", :phone_detached},
+      {"voice_live_phone_resumed", :phone_resumed}
     ]
 
     for {row_event, phase} <- phases do
@@ -350,10 +354,12 @@ defmodule FermixOpik.TraceFileTest do
           "revision" => 1,
           "turn_session_id" => "voice_delegation_7",
           "status" => "completed",
-          "reason" => "call_stop"
+          "reason" => "call_stop",
+          "endpoint" => "phone:0d7f6a52",
+          "duration_ms" => 1_250
         })
 
-      assert {[:fermix, :voice_live, ^phase], _meas, meta} =
+      assert {[:fermix, :voice_live, ^phase], meas, meta} =
                TraceFile.normalize("agent_event", row)
 
       assert meta.session_id == "voice_live:1"
@@ -361,6 +367,8 @@ defmodule FermixOpik.TraceFileTest do
       assert meta.engine == "openai_live"
       assert meta.provider == "openai"
       assert meta.turn_session_id == "voice_delegation_7"
+      assert meta.endpoint == "phone:0d7f6a52"
+      assert meas.duration_ms == 1_250
     end
   end
 

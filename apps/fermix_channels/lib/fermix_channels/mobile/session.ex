@@ -51,6 +51,19 @@ defmodule FermixChannels.Mobile.Session do
   (`app_version`), which the session records for the server's update
   (`FermixCore.Home.EngineCeiling`, under the identity's home); a record that
   fails is logged and the desktop is served all the same.
+
+  ## A phone's call
+
+  A phone's call channel (M87; `call_open`, `call_line`, `call_audio`,
+  `call_close`) belongs to the device's `Mobile.Call`, which this session
+  hands every call event to and never waits on. The call's frames come back
+  as `{:mobile_call, call, :control | :audio, event}` and are written ahead of
+  everything else queued here, control first, then audio, so a large media or
+  companion chunk never sits between the phone and its call. While a call is
+  attached to this session (from its `call_attached` until its `call_close`, or
+  the call's end), the media this primary pushes to the phone waits, bounded,
+  and goes after the call; text still flows. A phone's `hello_ack` says
+  whether this primary serves calls (`caps.call`).
   """
 
   require Logger
@@ -62,6 +75,7 @@ defmodule FermixChannels.Mobile.Session do
   alias FermixChannels.Gateway.Commands.Registry, as: CommandRegistry
   alias FermixChannels.Home.EnrollmentResponder
   alias FermixChannels.Mobile.Attestation
+  alias FermixChannels.Mobile.Call
   alias FermixChannels.Mobile.DeviceRegistry
   alias FermixChannels.Mobile.DeviceStore
   alias FermixChannels.Mobile.Discovery
@@ -108,6 +122,14 @@ defmodule FermixChannels.Mobile.Session do
   @queued_events ~w(msg command)
   @max_pending_requests 32
   @max_media_fetch_queue 8
+  @call_frames ~w(call_line call_audio call_close)
+  @media_pushes ~w(media_begin media_chunk media_end)
+  # The call frames written ahead of everything else, per read: a bound on the
+  # drain, past which the rest go at the next read.
+  @max_call_frames_per_read 64
+  # The media a phone in a call is pushed waits here, up to this; a run past it
+  # is dropped whole, and the phone fetches it by its ref once the call ends.
+  @max_held_media_bytes 32 * 1_024 * 1_024
   @max_candidates 16
   # The rail's candidate comes last, after this many host candidates, so the
   # list stays within `@max_candidates`.
@@ -271,6 +293,13 @@ defmodule FermixChannels.Mobile.Session do
     |> Map.put_new(:desktop_peer_supervisor, FermixChannels.Desktop.PeerSupervisor)
     |> Map.put_new(:desktop_peer, nil)
     |> Map.put_new(:desktop_peer_ref, nil)
+    |> Map.put_new(:calls, FermixChannels.Mobile.Calls)
+    |> Map.put_new(:call_supervisor, FermixChannels.Mobile.CallSupervisor)
+    |> Map.put_new(:call_options, [])
+    |> Map.put_new(:call_hold, nil)
+    |> Map.put_new(:held_media, [])
+    |> Map.put_new(:held_media_bytes, 0)
+    |> Map.put_new(:dropped_media, MapSet.new())
     |> Map.put_new(:clock, clock(opts))
     |> Map.put_new(:wall_clock, &DateTime.utc_now/0)
     |> put_default_dependencies()
@@ -345,7 +374,7 @@ defmodule FermixChannels.Mobile.Session do
     if session_expired?(state) do
       session_expired(state)
     else
-      push_fanout_event(event, state)
+      call_frames_first(state, &push_fanout_event(event, &1))
     end
   end
 
@@ -353,9 +382,21 @@ defmodule FermixChannels.Mobile.Session do
     if session_expired?(state) do
       session_expired(state)
     else
-      media_step(state)
+      call_frames_first(state, &media_step/1)
     end
   end
+
+  def handle_info({:mobile_call, call, class, event}, %{phase: :ready} = state)
+      when is_pid(call) and class in [:control, :audio] and is_map(event) do
+    if session_expired?(state) do
+      session_expired(state)
+    else
+      push_call_frames([{call, class, event}], state)
+    end
+  end
+
+  def handle_info({:DOWN, ref, :process, _call, _reason}, %{call_hold: %{ref: ref}} = state),
+    do: release_media(%{state | call_hold: nil}, [])
 
   def handle_info(
         {:mobile_handshake_deadline, token},
@@ -455,6 +496,23 @@ defmodule FermixChannels.Mobile.Session do
     |> Map.put_new(:run_request, &Task.Supervisor.start_child(FermixCore.TaskSupervisor, &1))
     |> Map.put_new(:record_engine_version, engine_recorder(state.identity_root))
     |> put_peer_dependencies()
+    |> put_call_dependencies()
+  end
+
+  # A phone's call: the device's `Mobile.Call`, found in the session's
+  # registry of calls.
+  defp put_call_dependencies(state) do
+    call_opts = [
+      calls: state.calls,
+      call_supervisor: state.call_supervisor,
+      call_options: state.call_options
+    ]
+
+    state
+    |> Map.put_new(:open_call, &Call.open(&1, &2, &3, &4, call_opts))
+    |> Map.put_new(:route_call, &Call.deliver(&1, &2, &3, &4, &5, call_opts))
+    |> Map.put_new(:end_call, &Call.notify(state.calls, &1, &2))
+    |> Map.put_new(:call_caps, &Call.caps/1)
   end
 
   # The home the session's identity is read from: a test's root, or this
@@ -672,6 +730,10 @@ defmodule FermixChannels.Mobile.Session do
       "mobile hello refused as a stale primary: this engine is at epoch #{mine}, " <>
         "the phone has seen epoch #{theirs}"
     )
+
+    # A call this copy still holds for the phone cannot resume here.
+    :ok =
+      state.end_call.(value(state.authenticated_device, :device_id), {:call_end, :stale_primary})
 
     payload = %{
       "code" => "stale_primary",
@@ -1097,17 +1159,27 @@ defmodule FermixChannels.Mobile.Session do
          "candidates" => hello_candidates(state),
          "history_head_seq" => history_head,
          "read_up_to_seq" => read_up_to,
-         "caps" => %{
-           "commands" => CommandRegistry.catalog(),
-           "media" => true,
-           "streaming" => true,
-           "turn_done" => true,
-           "max_media_bytes" => state.max_media_bytes,
-           "push" => state.push_services
-         },
+         "caps" => caps(state),
          "primary_epoch" => primary_epoch
        }}
     end
+  end
+
+  defp caps(state) do
+    caps = %{
+      "commands" => CommandRegistry.catalog(),
+      "media" => true,
+      "streaming" => true,
+      "turn_done" => true,
+      "max_media_bytes" => state.max_media_bytes,
+      "push" => state.push_services
+    }
+
+    # Whether this primary serves a call from the phone (M87): a phone's
+    # alone, since a desktop's own voice reaches its own computer's socket.
+    if session_kind(state) == :phone,
+      do: Map.put(caps, "call", state.call_caps.(state.device_id)),
+      else: caps
   end
 
   # M51 D3: the phone's key attestation is verified before the owner hears of
@@ -1292,6 +1364,20 @@ defmodule FermixChannels.Mobile.Session do
     queue_request(event, state)
   end
 
+  # A call's events are the device's call's, never a request: no client
+  # message id, no ack, no replay. The call answers through its own frames; a
+  # call this primary does not hold is answered here.
+  defp dispatch_event(%{type: "call_open", payload: payload}, state) do
+    %{"call_id" => call_id, "resume" => resume?} = payload
+    call_answer(state.open_call.(state.device_id, self(), call_id, resume?), call_id, state)
+  end
+
+  defp dispatch_event(%{type: type, payload: payload, bytes: bytes}, state)
+       when type in @call_frames do
+    answer = state.route_call.(state.device_id, self(), type, payload, bytes)
+    call_answer(answer, payload["call_id"], state)
+  end
+
   defp dispatch_event(event, state) do
     case state.event_router.(event, ingress_context(state), router_opts(state)) do
       :ok -> {:ok, nil, state}
@@ -1450,6 +1536,8 @@ defmodule FermixChannels.Mobile.Session do
   end
 
   defp media_step(%{media_transfer: nil, media_queue: []} = state), do: {:ok, state}
+  # A phone in a call fetches nothing; what it asked for waits for the call.
+  defp media_step(%{call_hold: %{}} = state), do: {:ok, state}
 
   defp media_step(%{media_transfer: nil, media_queue: [ref | rest]} = state),
     do: start_media_transfer(ref, %{state | media_queue: rest})
@@ -1589,6 +1677,10 @@ defmodule FermixChannels.Mobile.Session do
   # peer's: it is dropped for this device, reported where the operator reads,
   # and the session stays up. Encoding finishes before anything is encrypted,
   # so a dropped event never moves the send nonce.
+  defp push_fanout_event(%{"t" => type} = event, %{call_hold: %{}} = state)
+       when type in @media_pushes,
+       do: {:ok, hold_media(event, state)}
+
   defp push_fanout_event(event, state) do
     started = System.monotonic_time()
 
@@ -1599,6 +1691,169 @@ defmodule FermixChannels.Mobile.Session do
       {:error, reason} -> drop_event(event, reason, started, state)
     end
   end
+
+  # -- a phone's call ---------------------------------------------------------
+
+  defp call_answer(:ok, _call_id, state), do: {:ok, nil, state}
+
+  defp call_answer({:close, reason}, call_id, state) do
+    encode_event_frames(%{"t" => "call_close", "call_id" => call_id, "reason" => reason}, state)
+  end
+
+  # The call's frames queued behind whatever this read is for go first.
+  defp call_frames_first(state, next) do
+    case write_call_frames(queued_call_frames([]), state) do
+      {:ok, [], state} -> next.(state)
+      {:ok, frames, state} -> prepend_frames(frames, next.(state))
+      {:error, reason, state} -> protocol_error(reason, state)
+    end
+  end
+
+  defp push_call_frames(first, state) do
+    case write_call_frames(queued_call_frames(first), state) do
+      {:ok, frames, state} -> reply(frames, state)
+      {:error, reason, state} -> protocol_error(reason, state)
+    end
+  end
+
+  # Control first, then audio, each in the order it came; `first` is the one
+  # this read is for.
+  defp queued_call_frames(first) do
+    {controls, audio} = Enum.split_with(first, fn {_call, class, _event} -> class == :control end)
+
+    controls ++
+      drain_call_frames(:control, @max_call_frames_per_read) ++
+      audio ++ drain_call_frames(:audio, @max_call_frames_per_read)
+  end
+
+  defp drain_call_frames(_class, 0), do: []
+
+  defp drain_call_frames(class, remaining) do
+    receive do
+      {:mobile_call, call, ^class, event} when is_pid(call) and is_map(event) ->
+        [{call, class, event} | drain_call_frames(class, remaining - 1)]
+    after
+      0 -> []
+    end
+  end
+
+  defp write_call_frames(queued, state) do
+    Enum.reduce_while(queued, {:ok, [], state}, fn {call, _class, event}, {:ok, frames, state} ->
+      case call_frame(call, event, state) do
+        {:ok, more, state} -> {:cont, {:ok, frames ++ more, state}}
+        {:error, _reason, _state} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  # A frame this session cannot encode is dropped as a fan-out event is; one
+  # it cannot encrypt ends the session, as any frame's does.
+  defp call_frame(call, event, state) do
+    case encode_plaintexts(event, state) do
+      {:ok, plaintexts} ->
+        with {:ok, frames, state} <- encrypt_batch(plaintexts, state) do
+          after_call_frame(event, call, frames, state)
+        end
+
+      {:error, reason} ->
+        {:ok, state} = drop_event(event, reason, System.monotonic_time(), state)
+        {:ok, [], state}
+    end
+  end
+
+  # From its `call_attached` until its `call_close`, or the call's end, the
+  # call holds this phone's media.
+  defp after_call_frame(%{"t" => "call_attached", "call_id" => id}, call, frames, state) do
+    {:ok, frames, hold_for_call(state, call, id)}
+  end
+
+  defp after_call_frame(%{"t" => "call_close", "call_id" => id}, _call, frames, state) do
+    case state.call_hold do
+      %{call_id: ^id, ref: ref} ->
+        Process.demonitor(ref, [:flush])
+        release_held_media(%{state | call_hold: nil}, frames)
+
+      _other_or_none ->
+        {:ok, frames, state}
+    end
+  end
+
+  defp after_call_frame(_event, _call, frames, state), do: {:ok, frames, state}
+
+  defp hold_for_call(%{call_hold: %{call: call, call_id: id}} = state, call, id), do: state
+
+  defp hold_for_call(state, call, id) do
+    if state.call_hold, do: Process.demonitor(state.call_hold.ref, [:flush])
+    %{state | call_hold: %{call: call, call_id: id, ref: Process.monitor(call)}}
+  end
+
+  defp release_media(state, frames) do
+    case release_held_media(state, frames) do
+      {:ok, frames, state} -> reply(frames, state)
+      {:error, reason, state} -> protocol_error(reason, state)
+    end
+  end
+
+  # The media held for the call goes now, in order, and a fetch it held
+  # resumes.
+  defp release_held_media(state, frames) do
+    held = Enum.reverse(state.held_media)
+    state = %{state | held_media: [], held_media_bytes: 0, dropped_media: MapSet.new()}
+    :ok = schedule_media_step(state)
+
+    Enum.reduce_while(held, {:ok, frames, state}, fn event, {:ok, frames, state} ->
+      case call_frame(self(), event, state) do
+        {:ok, more, state} -> {:cont, {:ok, frames ++ more, state}}
+        {:error, _reason, _state} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp hold_media(%{"ref" => ref} = event, state) do
+    size = byte_size(Map.get(event, "bytes", <<>>))
+
+    cond do
+      MapSet.member?(state.dropped_media, ref) ->
+        forget_dropped(event, state)
+
+      state.held_media_bytes + size > @max_held_media_bytes ->
+        drop_held_run(event, state)
+
+      true ->
+        %{
+          state
+          | held_media: [event | state.held_media],
+            held_media_bytes: state.held_media_bytes + size
+        }
+    end
+  end
+
+  defp forget_dropped(%{"t" => "media_end", "ref" => ref}, state),
+    do: %{state | dropped_media: MapSet.delete(state.dropped_media, ref)}
+
+  defp forget_dropped(_event, state), do: state
+
+  defp drop_held_run(%{"t" => type, "ref" => ref}, state) do
+    Logger.warning(
+      "mobile session dropped media #{ref} pushed during a call: past the " <>
+        "#{@max_held_media_bytes}-byte hold; the phone fetches it by its ref"
+    )
+
+    kept = Enum.reject(state.held_media, &(&1["ref"] == ref))
+    bytes = Enum.reduce(kept, 0, &(&2 + byte_size(Map.get(&1, "bytes", <<>>))))
+
+    dropped =
+      if type == "media_end", do: state.dropped_media, else: MapSet.put(state.dropped_media, ref)
+
+    %{state | held_media: kept, held_media_bytes: bytes, dropped_media: dropped}
+  end
+
+  defp prepend_frames(frames, {:ok, state}), do: {:push, frames, state}
+  defp prepend_frames(frames, {:push, more, state}), do: {:push, frames ++ more, state}
+  defp prepend_frames(frames, {:stop, why, close, state}), do: {:stop, why, close, frames, state}
+
+  defp prepend_frames(frames, {:stop, why, close, more, state}),
+    do: {:stop, why, close, frames ++ more, state}
 
   # M75 §5.3: a server event this session's kind is never sent.
   defp for_kind(event, kind) do

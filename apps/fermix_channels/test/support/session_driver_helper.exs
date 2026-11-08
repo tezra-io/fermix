@@ -50,6 +50,20 @@ defmodule FermixChannels.Test.SessionDriver do
     client
   end
 
+  @doc """
+  Holds the carrier before its next read, so whatever the test sends it waits
+  in its mailbox, in order, until `release/2`.
+  """
+  def hold(driver) do
+    ref = make_ref()
+    send(driver, {:driver_hold, self(), ref})
+    assert_receive {:driver_held, ^ref}
+    ref
+  end
+
+  @doc "Lets a held carrier read again."
+  def release(driver, ref), do: send(driver, {:driver_release, ref})
+
   @doc "Waits for the session's next push and decodes its events: `{[{header, bytes}], client}`."
   def client_receive(driver, client) do
     assert_receive {:driver_out, ^driver, frames}
@@ -83,7 +97,16 @@ defmodule FermixChannels.Test.SessionDriver do
     receive do
       {:driver_wire, bytes} -> bytes |> Session.handle_frame(state) |> carry(test)
       {:driver_to_test, message} -> forward(message, state, test)
+      {:driver_hold, from, ref} -> held(from, ref, state, test)
       message -> message |> Session.handle_info(state) |> carry(test)
+    end
+  end
+
+  defp held(from, ref, state, test) do
+    send(from, {:driver_held, ref})
+
+    receive do
+      {:driver_release, ^ref} -> loop(state, test)
     end
   end
 

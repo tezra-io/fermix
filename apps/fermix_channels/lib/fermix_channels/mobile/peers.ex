@@ -15,12 +15,17 @@ defmodule FermixChannels.Mobile.Peers do
   A server event a kind may not receive is never sent to it: a session drops
   it as an event it cannot encode is dropped.
 
+  A phone's call channel (M87, `call_*`) is a phone's alone: a call is the
+  owner's voice on the phone, and a desktop's own voice reaches its own
+  computer's socket.
+
   Pure.
   """
 
   @phone_client ~w(
     hello msg attach_begin attach_chunk attach_end command cancel history_pull media_fetch
     push_register push_unregister ack read_state request_status unpair ping
+    call_open call_line call_audio call_close
   )
   @desktop_client ~w(
     hello ping media_fetch ack companion_open companion_line companion_close manage
@@ -30,6 +35,7 @@ defmodule FermixChannels.Mobile.Peers do
     hello_ack accepted attach_status turn_started text_delta tool_event text_done turn_done
     media_begin media_chunk media_end turn_error row reaction approval approval_resolved
     link_preview read_state history_page request_status_page notice error pong event_part
+    call_attached call_line call_audio call_close
   )
   @desktop_server ~w(
     hello_ack error pong event_part media_begin media_chunk media_end companion_line

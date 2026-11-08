@@ -39,6 +39,8 @@ defmodule FermixCore.Realtime.LiveTelemetry do
   @delegation_stop_event [:fermix, :voice_live, :delegation_stop]
   @provider_error_event [:fermix, :voice_live, :provider_error]
   @call_stop_event [:fermix, :voice_live, :call_stop]
+  @phone_detached_event [:fermix, :voice_live, :phone_detached]
+  @phone_resumed_event [:fermix, :voice_live, :phone_resumed]
 
   @delegation_statuses ~w(completed failed cancelled)
   # A task that outlived its call has a wall clock, which one on the call
@@ -81,6 +83,18 @@ defmodule FermixCore.Realtime.LiveTelemetry do
       trace_event: "voice_live_call_stop",
       trace_type: :agent_event,
       agent_field: :agent
+    },
+    %{
+      event: @phone_detached_event,
+      trace_event: "voice_live_phone_detached",
+      trace_type: :agent_event,
+      agent_field: :agent
+    },
+    %{
+      event: @phone_resumed_event,
+      trace_event: "voice_live_phone_resumed",
+      trace_type: :agent_event,
+      agent_field: :agent
     }
   ]
 
@@ -91,6 +105,8 @@ defmodule FermixCore.Realtime.LiveTelemetry do
   than emitted as nil. `provider_session_id` is unknown until `session.started` arrives.
   `call_uuid` is the key of the call's durable record: the call id is a counter
   that restarts with the VM, so the UUID is what ties a trace to that record.
+  `endpoint` (`desktop`, `<kind>:<device_id>`) is who the call runs for;
+  `call_start` and a phone's detach and resume carry it.
   """
   @type meta :: %{
           required(:session_id) => String.t(),
@@ -99,6 +115,7 @@ defmodule FermixCore.Realtime.LiveTelemetry do
           optional(:call_uuid) => String.t(),
           optional(:parent_session) => String.t(),
           optional(:device_id) => String.t(),
+          optional(:endpoint) => String.t(),
           optional(:model) => String.t(),
           optional(:voice) => String.t(),
           optional(:provider_session_id) => String.t()
@@ -146,6 +163,7 @@ defmodule FermixCore.Realtime.LiveTelemetry do
       meta
       |> base()
       |> Map.merge(%{
+        endpoint: Map.get(meta, :endpoint),
         max_duration_ms: max_duration_ms,
         instructions_bytes: instructions,
         input_items: items,
@@ -259,6 +277,29 @@ defmodule FermixCore.Realtime.LiveTelemetry do
       @call_stop_event,
       numeric!(measurements),
       Map.put(base(meta), :reason, Atom.to_string(reason))
+    )
+  end
+
+  @doc """
+  The phone carrying the call went away (M87): its session closed, and the
+  call waits for it to resume. `meta.endpoint` names the phone.
+  """
+  @spec phone_detached(meta()) :: :ok
+  def phone_detached(%{endpoint: endpoint} = meta) when is_binary(endpoint) do
+    execute(@phone_detached_event, %{}, Map.put(base(meta), :endpoint, endpoint))
+  end
+
+  @doc """
+  The phone took its call back after `gap_ms` away: the gap rides as the
+  event's `duration_ms`, so the call's trace shows it as a span that long.
+  """
+  @spec phone_resumed(meta(), non_neg_integer()) :: :ok
+  def phone_resumed(%{endpoint: endpoint} = meta, gap_ms)
+      when is_binary(endpoint) and is_integer(gap_ms) and gap_ms >= 0 do
+    execute(
+      @phone_resumed_event,
+      %{duration_ms: gap_ms},
+      Map.put(base(meta), :endpoint, endpoint)
     )
   end
 

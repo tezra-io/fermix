@@ -367,6 +367,7 @@ defmodule FermixOpik.Mapper do
       metadata:
         drop_nil(%{
           device_id: Map.get(metadata, :device_id),
+          endpoint: Map.get(metadata, :endpoint),
           # Both task engines share this run kind and these phases (M70 §09):
           # the engine and the voice provider are what tell a Grok call from a
           # GPT Live one on every span, not only on the root.

@@ -46,6 +46,18 @@ The Fermix app's voice companion. The app talks to the daemon over `$FERMIX_HOME
 - `fermix voice status` and `fermix doctor` name the engine in force.
 - One call at a time per home, whichever engine runs it: starting a call from another window or Mac while one is up, or still ending, is refused with `call_in_progress`, which names where the call is held (`desktop` for the Mac app), and the call that was up carries on.
 
+## Calls from the phone
+
+A paired phone's Fermix app calls Fermix too. The call rides the phone's own encrypted session (the LAN, Tailscale or the relays, whichever the phone reaches the primary by) and runs on the primary, an Always On server included, as a Mac call does: same settings, keys, engines' behaviour, cost bounds and record.
+
+- **What it needs**: **Talk to Fermix** on with its key, and GPT-Live or Grok. The Realtime models serve the Mac alone, so under one the phone is told `engine_not_for_phones`; pick GPT-Live or Grok in Settings > Voice. The phone learns whether it can call each time it connects (`voice_off`, `no_key` or `engine_not_for_phones` when not), and the primary checks again when a call opens; a setting turned on waits for a restart, as on the Mac. An app too old for the engine's wire is told to update.
+- **One call at a time** across the home: a call from the phone is refused while the Mac holds one, and the reverse, the refusal naming who holds it (`desktop`, `phone:<device id>`).
+- **A dropped connection is not a hang-up**: the call waits 20 s for the phone to come back and picks up where it was, mute and all. Past that it ends. A link too slow for live audio (audio kept waiting 5 s) ends the call with `link_too_slow`. Either way the phone's chat and its connection stay up.
+- **Tasks** a phone's call starts run as a Mac call's do, in the chat's conversation unless the call is private. Removing the phone ends its call at once and cancels the tasks that call started that have not finished.
+- While a call is up, pictures and files for the phone wait until it ends; text still arrives.
+- **Moves**: the move's review names a call in progress, and the move ends it before it starts. After a move to an Always On server, the Mac's own voice stops (its app reaches only its own computer), and the phone calls the server when Talk to Fermix is on there and its key is in the server's secret store; a key this computer kept in its keychain moves into that store with the home.
+- No camera yet. Traces name who a call ran for (`endpoint`), and a phone's gaps show on its call's trace.
+
 ## Noise and echo
 
 - **Cleaned on the Mac, not by the voice provider.** GPT-Live takes no noise, echo or voice-detection settings, and Grok's turn detection runs on what reaches it. Realtime uses OpenAI's close-microphone noise reduction and a stricter speech threshold that ignores most clicks, but both run after the pet's own voice has already come back through the microphone. So the app turns on macOS voice processing for every call: echo cancellation, noise suppression and voice level. Other apps' sound is lowered only slightly, and only while someone speaks.

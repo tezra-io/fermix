@@ -10,8 +10,9 @@ defmodule FermixCore.Realtime.CallClient do
     * the endpoint the call is for, the peer's realtime protocol version (what
       the Unix handshake negotiated, or the level an adapter translates), and
       the config the connection started with;
-    * the per-engine minimum version, refused at `call_start` before any
-      session exists;
+    * the per-engine minimum version and the endpoint's engine rule
+      (`Endpoint.admit_engine/2`: a phone takes a call only on a task engine),
+      both refused at `call_start` before any session exists;
     * starting the session through `SessionGuard`, which monitors the adapter
       before the session exists and binds it the moment it does, so it never
       outlives the adapter (`session_opts/1` is the default starter's half of
@@ -20,7 +21,9 @@ defmodule FermixCore.Realtime.CallClient do
       it: `task_cancel` only on the task engines, `playback_progress` only on
       Grok;
     * the ordered flush of frames the session already queued before the
-      call's own last word, and teardown.
+      call's own last word, and teardown;
+    * the mapping of the wire's decoded events to the verbs (`event/2`), shared
+      by every adapter that speaks the Realtime wire.
 
   Every frame leaves through the adapter's `emit` function, so the adapter
   keeps its own encoding. Each verb answers `{:cont, client}` to keep the
@@ -45,6 +48,16 @@ defmodule FermixCore.Realtime.CallClient do
   session starts, up to the guard's start bound, so a GenServer adapter whose
   own loop must stay responsive owns each call from a per-call process, as the
   socket's handler task does.
+
+  `cancel_task` and `call_stop` wait with no timeout of their own
+  (`SessionControl`). The socket keeps that wait, bounded by its companion
+  dropping a connection it cannot write to; an adapter whose own loop must
+  outlast a stuck session (the phone's call, which a resume window and a
+  revocation must still reach) gives them a `deadline_ms`. The wait then runs
+  in a task under the deadline while the adapter's own mailbox keeps the
+  session's frames: a cancel past it is given up and the call goes on (the
+  session still processes it), and a stop past it lets the session go from the
+  guard (it settles on its own, holding the home's call until it does).
   """
 
   alias FermixCore.Memory.Config, as: MemoryConfig
@@ -56,6 +69,8 @@ defmodule FermixCore.Realtime.CallClient do
   alias FermixCore.Realtime.SessionGuard
   alias FermixCore.Realtime.SessionSupervisor
   alias FermixCore.Setup.ConfigStore
+
+  require Logger
 
   # The wire version each engine's CALL requires. The handshake window still
   # admits an older companion (it may run an engine it can render); this is the
@@ -81,7 +96,9 @@ defmodule FermixCore.Realtime.CallClient do
     # module sets (companion, endpoint, supervisors).
     starter_opts: [],
     session_supervisor: SessionSupervisor,
-    session_guard: SessionGuard
+    session_guard: SessionGuard,
+    # How long `task_cancel` and `call_stop` wait for the session (moduledoc).
+    deadline_ms: :infinity
   ]
 
   @type emit :: (map() -> :ok | {:error, term()})
@@ -97,7 +114,8 @@ defmodule FermixCore.Realtime.CallClient do
           session_starter: SessionGuard.starter(),
           starter_opts: keyword(),
           session_supervisor: GenServer.server(),
-          session_guard: GenServer.server()
+          session_guard: GenServer.server(),
+          deadline_ms: timeout()
         }
   @type result :: {:cont, t()} | {:stop, t()}
 
@@ -119,6 +137,7 @@ defmodule FermixCore.Realtime.CallClient do
       |> Keyword.update!(:protocol_version, &positive_version!/1)
       |> Keyword.update!(:config, fn %Config{} = config -> config end)
       |> Keyword.update!(:emit, fn emit when is_function(emit, 1) -> emit end)
+      |> Keyword.update(:deadline_ms, :infinity, &deadline!/1)
     )
   end
 
@@ -163,10 +182,52 @@ defmodule FermixCore.Realtime.CallClient do
   """
   @spec call_start(t()) :: result()
   def call_start(%__MODULE__{} = client) do
-    if client.protocol_version < engine_min_protocol_version(client.config),
-      do: update_required(client),
-      else: start_call(client)
+    cond do
+      Endpoint.admit_engine(client.endpoint, client.config.engine) != :ok ->
+        stop_with(:engine_not_for_phones, client)
+
+      client.protocol_version < engine_min_protocol_version(client.config) ->
+        update_required(client)
+
+      true ->
+        start_call(client)
+    end
   end
+
+  @doc """
+  The wire's decoded events (`Protocol.decode_client_event/2`, after the
+  handshake) as the call's verbs: the one mapping every adapter that speaks
+  the Realtime wire shares. `audio_chunk`'s payload is the decoded PCM.
+  """
+  @spec event(t(), Protocol.event()) :: result()
+  def event(%__MODULE__{} = client, %{type: "call_start"}), do: call_start(client)
+
+  def event(%__MODULE__{} = client, %{type: "audio_chunk", payload: %{"audio" => audio}}),
+    do: audio(client, audio)
+
+  def event(%__MODULE__{} = client, %{type: "interrupt", payload: payload}),
+    do: interrupt(client, Map.get(payload, "audio_end_ms"))
+
+  def event(%__MODULE__{} = client, %{type: "mute", payload: payload}),
+    do: mute(client, Map.get(payload, "enabled", true) == true)
+
+  def event(%__MODULE__{} = client, %{type: "task_cancel", payload: payload}),
+    do: task_cancel(client, Map.fetch!(payload, "delegation_id"))
+
+  def event(%__MODULE__{} = client, %{type: "playback_progress", payload: payload}) do
+    %{"playback_id" => playback_id, "played_ms" => played_ms, "drained" => drained?} = payload
+    playback_progress(client, playback_id, played_ms, drained?)
+  end
+
+  def event(%__MODULE__{} = client, %{type: "call_stop"}), do: call_stop(client)
+
+  @doc """
+  The wire version a call on `config`'s engine requires: the floor
+  `call_start` refuses below, and what a phone's `hello_ack` publishes.
+  """
+  @spec engine_min_protocol_version(Config.t()) :: pos_integer()
+  def engine_min_protocol_version(%Config{engine: engine}),
+    do: Map.fetch!(@engine_min_protocol_version, engine)
 
   @doc "Forwards one microphone chunk."
   @spec audio(t(), binary()) :: result()
@@ -246,7 +307,15 @@ defmodule FermixCore.Realtime.CallClient do
   @spec teardown(t()) :: t()
   def teardown(%__MODULE__{session: session} = client) when is_pid(session) do
     Process.demonitor(client.session_ref, [:flush])
-    :ok = SessionGuard.teardown(session, client.session_module)
+
+    stop = fn -> {:answered, SessionGuard.teardown(session, client.session_module)} end
+
+    case within_deadline(client, stop) do
+      {:answered, :ok} -> :ok
+      :past_deadline -> past_deadline(:call_stop, client)
+      {:down, reason} -> Logger.warning("voice: a call's stop exited: #{inspect(reason)}")
+    end
+
     _ = SessionGuard.release(client.session_guard)
     %{client | session: nil, session_ref: nil}
   end
@@ -325,8 +394,45 @@ defmodule FermixCore.Realtime.CallClient do
     :exit, {reason, {GenServer, :call, _args}} -> {:down, reason}
   end
 
-  defp cancel_task(client, delegation_id),
-    do: command(client, &client.session_module.cancel_task(&1, delegation_id))
+  defp cancel_task(%{session: nil} = client, _delegation_id),
+    do: stop_with(:not_connected, client)
+
+  defp cancel_task(client, delegation_id) do
+    cancel = &client.session_module.cancel_task(&1, delegation_id)
+
+    case within_deadline(client, fn -> call_session(client, cancel) end) do
+      {:answered, :ok} -> {:cont, client}
+      {:answered, {:error, reason}} -> stop_with(reason, client)
+      {:down, reason} -> flush_then_stop({:session_down, reason}, client)
+      :past_deadline -> {:cont, past_deadline(:cancel_task, client)}
+    end
+  end
+
+  # The wait a verb with no timeout of its own gets: none, as SessionControl
+  # waits, or the adapter's deadline, in a task the deadline kills. What the
+  # session sends meanwhile stays queued in the adapter's mailbox. `wait`
+  # answers `{:answered, answer}` or `{:down, reason}`.
+  defp within_deadline(%{deadline_ms: :infinity}, wait), do: wait.()
+
+  defp within_deadline(client, wait) do
+    task = Task.Supervisor.async_nolink(client.task_supervisor, wait)
+
+    case Task.yield(task, client.deadline_ms) || Task.shutdown(task, :brutal_kill) do
+      {:ok, answer} -> answer
+      {:exit, reason} -> {:down, reason}
+      nil -> :past_deadline
+    end
+  end
+
+  defp past_deadline(verb, client) do
+    Logger.warning(
+      "voice: a #{Endpoint.format(client.endpoint)} call's #{verb} was not answered in " <>
+        "#{client.deadline_ms} ms; the call no longer waits for it, and the session still " <>
+        "handles it"
+    )
+
+    client
+  end
 
   # The session pushes its frames to the adapter's MAILBOX, and the adapter is
   # blocked inside the call while it does, so the session's own rich `error`
@@ -378,10 +484,6 @@ defmodule FermixCore.Realtime.CallClient do
     {:stop, client}
   end
 
-  # An engine missing from the table fails loud.
-  defp engine_min_protocol_version(%Config{engine: engine}),
-    do: Map.fetch!(@engine_min_protocol_version, engine)
-
   defp stop_with(reason, client) do
     _ = client.emit.(error_frame(reason))
     {:stop, client}
@@ -403,6 +505,16 @@ defmodule FermixCore.Realtime.CallClient do
       raise(
         ArgumentError,
         "protocol_version must be a positive integer, got: #{inspect(version)}"
+      )
+
+  defp deadline!(:infinity), do: :infinity
+  defp deadline!(ms) when is_integer(ms) and ms > 0, do: ms
+
+  defp deadline!(other),
+    do:
+      raise(
+        ArgumentError,
+        "deadline_ms must be :infinity or a positive integer, got: #{inspect(other)}"
       )
 
   # A voice key that is not saved keeps the word the wire always carried for

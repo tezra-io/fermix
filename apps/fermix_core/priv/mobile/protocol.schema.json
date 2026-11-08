@@ -31,7 +31,8 @@
           "request_status", "pair_request", "unpair", "ping",
           "companion_open", "companion_line", "companion_close", "manage", "loopback_request",
           "loopback_failed", "snapshot_stored", "snapshot_refused", "enroll_request",
-          "move_offer", "move_chunk", "move_end", "move_commit", "move_resume"
+          "move_offer", "move_chunk", "move_end", "move_commit", "move_resume",
+          "call_open", "call_line", "call_audio", "call_close"
         ]}
       },
       "allOf": [
@@ -65,7 +66,11 @@
         {"if": {"properties": {"t": {"const": "move_chunk"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/move_chunk"}},
         {"if": {"properties": {"t": {"const": "move_end"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/move_end"}},
         {"if": {"properties": {"t": {"const": "move_commit"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/move_commit"}},
-        {"if": {"properties": {"t": {"const": "move_resume"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/move_resume"}}
+        {"if": {"properties": {"t": {"const": "move_resume"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/move_resume"}},
+        {"if": {"properties": {"t": {"const": "call_open"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/call_open"}},
+        {"if": {"properties": {"t": {"const": "call_line"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/call_line"}},
+        {"if": {"properties": {"t": {"const": "call_audio"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/call_audio"}},
+        {"if": {"properties": {"t": {"const": "call_close"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/call_close"}}
       ]
     },
     "serverEvent": {
@@ -81,7 +86,8 @@
           "companion_line", "companion_close", "manage_result", "loopback_open",
           "loopback_response", "loopback_close", "snapshot_begin", "snapshot_chunk",
           "snapshot_end",
-          "enroll_accepted", "move_accept", "move_ready", "move_done"
+          "enroll_accepted", "move_accept", "move_ready", "move_done",
+          "call_attached", "call_line", "call_audio", "call_close"
         ]}
       },
       "allOf": [
@@ -123,7 +129,11 @@
         {"if": {"properties": {"t": {"const": "enroll_accepted"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/enroll_accepted"}},
         {"if": {"properties": {"t": {"const": "move_accept"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/move_accept"}},
         {"if": {"properties": {"t": {"const": "move_ready"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/move_ready"}},
-        {"if": {"properties": {"t": {"const": "move_done"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/move_done"}}
+        {"if": {"properties": {"t": {"const": "move_done"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/move_done"}},
+        {"if": {"properties": {"t": {"const": "call_attached"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/call_attached"}},
+        {"if": {"properties": {"t": {"const": "call_line"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/call_line_to_phone"}},
+        {"if": {"properties": {"t": {"const": "call_audio"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/call_audio_to_phone"}},
+        {"if": {"properties": {"t": {"const": "call_close"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/call_close_to_phone"}}
       ]
     },
     "hello": {
@@ -274,7 +284,20 @@
         "commands": {"type": "array", "items": {"$ref": "#/$defs/commandDescriptor"}},
         "media": {"type": "boolean"}, "streaming": {"type": "boolean"}, "turn_done": {"type": "boolean"},
         "max_media_bytes": {"type": "integer", "minimum": 0},
-        "push": {"$ref": "#/$defs/pushServices"}
+        "push": {"$ref": "#/$defs/pushServices"},
+        "call": {"$ref": "#/$defs/callCaps"}
+      }
+    },
+    "callCaps": {
+      "type": "object", "required": ["available", "min_version", "max_version", "camera"],
+      "description": "Whether this primary serves a call from the phone now (M87), on a phone's hello_ack alone; absent from an older primary. reason is present only when available is false. min_version and max_version are the Realtime protocol range the call's lines may speak: min_version is the engine's floor, and an app whose own range does not reach it needs an update. camera is false until the call takes video.",
+      "allOf": [{"if": {"properties": {"available": {"const": false}}, "required": ["available"]}, "then": {"required": ["reason"]}}],
+      "properties": {
+        "available": {"type": "boolean"},
+        "reason": {"enum": ["voice_off", "no_key", "engine_not_for_phones"]},
+        "min_version": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615},
+        "max_version": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615},
+        "camera": {"type": "boolean"}
       }
     },
     "pushServices": {
@@ -605,6 +628,34 @@
     "move_resume": {"allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "move_id"], "description": "Source to candidate, after a lost move_commit or move_done: answered move_ready (staged) or move_done (activated).", "properties": {"t": {"const": "move_resume"}, "move_id": {"$ref": "#/$defs/wireId"}}},
     "move_ready": {"allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "move_id", "epoch"], "description": "Candidate to source: the home is restored and staged at epoch.", "properties": {"t": {"const": "move_ready"}, "move_id": {"$ref": "#/$defs/wireId"}, "epoch": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615}}},
     "move_done": {"allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "move_id", "epoch"], "description": "Candidate to source: the staged home is in place; the candidate restarts as the primary at epoch.", "properties": {"t": {"const": "move_done"}, "move_id": {"$ref": "#/$defs/wireId"}, "epoch": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615}}},
+    "call_open": {"allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "call_id", "resume"], "description": "Phone to primary: open a call, or with resume true take back the call this phone held (the reconnect window is 20 s). Answered call_attached, or call_close.", "properties": {"t": {"const": "call_open"}, "call_id": {"$ref": "#/$defs/wireId"}, "resume": {"type": "boolean"}}},
+    "call_line": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "x-raw-bytes": true,
+      "required": ["v", "t", "seq", "call_id"],
+      "description": "Phone to primary: one Realtime protocol line, its raw tail the line's JSON without its newline, in one frame. control_seq numbers a control line (1, 2, ...) so a line sent again after a resume is applied once.",
+      "properties": {"t": {"const": "call_line"}, "call_id": {"$ref": "#/$defs/wireId"}, "control_seq": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615}}
+    },
+    "call_audio": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "x-raw-bytes": true, "x-max-raw-bytes": 4800,
+      "required": ["v", "t", "seq", "call_id"],
+      "description": "Phone to primary: the microphone's audio, PCM16 at 24 kHz mono, whole samples, at most 100 ms (4,800 bytes) a frame.",
+      "properties": {"t": {"const": "call_audio"}, "call_id": {"$ref": "#/$defs/wireId"}}
+    },
+    "call_close": {"allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "call_id"], "description": "Phone to primary: the owner ended the call. reason is the phone's, for logs.", "properties": {"t": {"const": "call_close"}, "call_id": {"$ref": "#/$defs/wireId"}, "reason": {"type": "string", "minLength": 1, "maxLength": 512, "x-max-bytes": 512}}},
+    "call_attached": {"allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "call_id", "resumed", "muted", "camera", "control_seq"], "description": "Primary to phone: this session carries the call. resumed is true when the call was held across a reconnect; muted and camera are the call's state; control_seq is the last control line applied (0 for none), so the phone sends again only those after it.", "properties": {"t": {"const": "call_attached"}, "call_id": {"$ref": "#/$defs/wireId"}, "resumed": {"type": "boolean"}, "muted": {"type": "boolean"}, "camera": {"type": "boolean"}, "control_seq": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615}}},
+    "call_line_to_phone": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "x-raw-bytes": true,
+      "required": ["v", "t", "seq", "call_id"],
+      "description": "Primary to phone (t call_line): one Realtime protocol line, its raw tail the line's JSON without its newline, in one frame.",
+      "properties": {"t": {"const": "call_line"}, "call_id": {"$ref": "#/$defs/wireId"}}
+    },
+    "call_audio_to_phone": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "x-raw-bytes": true, "x-max-raw-bytes": 4800,
+      "required": ["v", "t", "seq", "call_id", "playback_id"],
+      "description": "Primary to phone (t call_audio): the assistant's audio, PCM16 at 24 kHz mono, whole samples, at most 100 ms (4,800 bytes) a frame. playback_id names the playback it belongs to, which playback_progress reports against; after a playback_stop line the phone drops audio under any id it saw before that line.",
+      "properties": {"t": {"const": "call_audio"}, "call_id": {"$ref": "#/$defs/wireId"}, "playback_id": {"type": "string", "pattern": "^[A-Za-z0-9._:-]{1,64}$"}}
+    },
+    "call_close_to_phone": {"allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "call_id", "reason"], "description": "Primary to phone (t call_close): the call ended. ended: hung up or failed; lost: the phone was away past the window; link_too_slow: the link kept audio waiting 5 s; revoked: the phone was removed; unknown_call: this primary holds no such call.", "properties": {"t": {"const": "call_close"}, "call_id": {"$ref": "#/$defs/wireId"}, "reason": {"enum": ["ended", "lost", "link_too_slow", "revoked", "unknown_call"]}}},
     "pairingLink": {
       "type": "object",
       "x-uri-prefix": "fermix://pair?",

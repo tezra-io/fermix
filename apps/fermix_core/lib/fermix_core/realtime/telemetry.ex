@@ -15,7 +15,12 @@ defmodule FermixCore.Realtime.Telemetry do
 
   alias FermixCore.Telemetry
 
+  @typedoc """
+  The call's correlation fields. `endpoint` (`desktop`, `<kind>:<device_id>`)
+  is who the call runs for; only `call_start` carries it.
+  """
   @type meta :: %{
+          optional(:endpoint) => String.t(),
           session_id: String.t(),
           device_id: String.t(),
           model: String.t(),
@@ -24,7 +29,8 @@ defmodule FermixCore.Realtime.Telemetry do
         }
 
   @spec call_start(meta()) :: :ok
-  def call_start(meta) when is_map(meta), do: emit(:call_start, %{}, base(meta))
+  def call_start(meta) when is_map(meta),
+    do: emit(:call_start, %{}, meta |> base() |> with_endpoint(meta))
 
   @spec session_created(meta()) :: :ok
   def session_created(meta) when is_map(meta), do: emit(:session_created, %{}, base(meta))
@@ -108,6 +114,11 @@ defmodule FermixCore.Realtime.Telemetry do
       session_scope: meta.session_scope
     }
   end
+
+  defp with_endpoint(metadata, %{endpoint: endpoint}) when is_binary(endpoint),
+    do: Map.put(metadata, :endpoint, endpoint)
+
+  defp with_endpoint(metadata, _meta), do: metadata
 
   defp emit(name, measurements, metadata) do
     :telemetry.execute([:fermix, :realtime, name], measurements, metadata)

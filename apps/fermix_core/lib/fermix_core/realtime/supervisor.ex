@@ -1,6 +1,15 @@
 defmodule FermixCore.Realtime.Supervisor do
   @moduledoc """
   Supervisor for the local Realtime voice runtime.
+
+  `:rest_for_one`, in start order: a child's crash restarts every child
+  started after it. A call never outlives what admitted it, so a crash of the
+  call lease or the call registry ends every session (the guard tree), their
+  tasks and the socket, and the record sweep, restarted after the sessions
+  are gone, closes the records those calls left open before the new socket
+  takes a call. A restarted lease or registry is empty, so under
+  `:one_for_one` the sessions it admitted would run on unleased and a second
+  call could open beside them.
   """
 
   use Supervisor
@@ -26,11 +35,13 @@ defmodule FermixCore.Realtime.Supervisor do
     socket_path = Keyword.get(opts, :socket_path, Config.socket_path())
     guard_name = Keyword.get(opts, :session_guard_name, SessionGuard)
 
-    # The call lease and registry first: every session takes the home's one
-    # call from its own `init/1`, and a task-engine session claims its chat
-    # context. The record sweep before the socket: its cutoff must precede
-    # every call this boot starts. The guarded sessions before the socket whose
-    # calls they are.
+    # Start order is restart order (`:rest_for_one`). The call lease and
+    # registry first: every session takes the home's one call from its own
+    # `init/1`, and a task-engine session claims its chat context. The record
+    # sweep after both and before the sessions: when either crashes, the
+    # sessions are gone before the sweep takes its cutoff, so it closes their
+    # records; and before the socket, so its cutoff precedes every call this
+    # boot starts. The guarded sessions before the socket whose calls they are.
     children = [
       {CallLease, name: Keyword.get(opts, :call_lease_name, CallLease)},
       {CallRegistry, name: Keyword.get(opts, :call_registry_name, CallRegistry)},
@@ -44,7 +55,7 @@ defmodule FermixCore.Realtime.Supervisor do
        session_guard: guard_name}
     ]
 
-    Supervisor.init(children, strategy: :one_for_one)
+    Supervisor.init(children, strategy: :rest_for_one)
   end
 
   # The guard and what it answers for, under `:rest_for_one` with the guard

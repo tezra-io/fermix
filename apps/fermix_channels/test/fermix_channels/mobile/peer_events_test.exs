@@ -179,15 +179,110 @@ defmodule FermixChannels.Mobile.PeerEventsTest do
     end
   end
 
+  # M87 §06: a call channel on a phone's session, carrying the Realtime wire's
+  # own objects as raw tails and its audio as raw PCM16.
+  describe "a phone's call channel" do
+    @pcm :binary.copy(<<0, 1>>, 2_400)
+
+    test "a call opens or resumes by its id" do
+      assert {:ok, %{type: "call_open"}} =
+               decode("call_open", %{"call_id" => @call, "resume" => false})
+
+      assert {:error, {:missing_field, "resume"}} = decode("call_open", %{"call_id" => @call})
+
+      assert {:error, {:invalid_field, "call_id"}} =
+               decode("call_open", %{"call_id" => "", "resume" => true})
+
+      assert {:error, {:unexpected_binary, "call_open"}} =
+               decode("call_open", %{"call_id" => @call, "resume" => true}, "x")
+    end
+
+    # `seq` is the frame's own sequence, so the control's number is its own
+    # field.
+    test "a line carries one Realtime object, its control numbered" do
+      line = ~s({"type":"mute","enabled":true})
+
+      assert {:ok, %{bytes: ^line}} =
+               decode("call_line", %{"call_id" => @call, "control_seq" => 3}, line)
+
+      assert {:ok, _hello} =
+               decode("call_line", %{"call_id" => @call}, ~s({"type":"client_hello"}))
+
+      assert {:error, {:missing_field, "bytes"}} = decode("call_line", %{"call_id" => @call})
+
+      assert {:error, {:invalid_field, "control_seq"}} =
+               decode("call_line", %{"call_id" => @call, "control_seq" => 0}, line)
+
+      assert {:ok, _line} = encode("call_line", %{"call_id" => @call}, ~s({"type":"state"}))
+    end
+
+    # PCM16 at 24 kHz mono: 100 ms is 4,800 bytes, and a sample is two.
+    test "audio is whole PCM16 samples, at most 100 ms a frame" do
+      assert {:ok, %{bytes: @pcm}} = decode("call_audio", %{"call_id" => @call}, @pcm)
+
+      assert {:error, {:missing_field, "bytes"}} = decode("call_audio", %{"call_id" => @call})
+
+      assert {:error, {:raw_chunk_too_large, 4_802, 4_800}} =
+               decode("call_audio", %{"call_id" => @call}, @pcm <> <<0, 0>>)
+
+      assert {:error, {:invalid_field, "bytes"}} =
+               decode("call_audio", %{"call_id" => @call}, <<0, 0, 0>>)
+
+      down = %{"call_id" => @call, "playback_id" => "p17"}
+      assert {:ok, _frame} = encode("call_audio", down, @pcm)
+
+      assert {:error, {:missing_field, "playback_id"}} =
+               encode("call_audio", %{"call_id" => @call}, @pcm)
+
+      assert {:error, {:invalid_field, "playback_id"}} =
+               encode("call_audio", %{down | "playback_id" => String.duplicate("p", 65)}, @pcm)
+    end
+
+    test "the primary attaches a call with its state as it holds it" do
+      attached = %{
+        "call_id" => @call,
+        "resumed" => true,
+        "muted" => false,
+        "camera" => false,
+        "control_seq" => 0
+      }
+
+      assert {:ok, _frame} = encode("call_attached", attached)
+
+      assert {:error, {:invalid_field, "control_seq"}} =
+               encode("call_attached", %{attached | "control_seq" => -1})
+
+      assert {:error, {:missing_field, "camera"}} =
+               encode("call_attached", Map.delete(attached, "camera"))
+    end
+
+    test "a close says why from the primary, and may from the phone" do
+      for reason <- ~w(ended lost link_too_slow revoked unknown_call) do
+        assert {:ok, _frame} = encode("call_close", %{"call_id" => @call, "reason" => reason})
+      end
+
+      assert {:error, {:missing_field, "reason"}} = encode("call_close", %{"call_id" => @call})
+
+      assert {:error, {:invalid_field, "reason"}} =
+               encode("call_close", %{"call_id" => @call, "reason" => "hung_up"})
+
+      assert {:ok, _event} = decode("call_close", %{"call_id" => @call})
+
+      assert {:ok, _event} =
+               decode("call_close", %{"call_id" => @call, "reason" => "Ended for a phone call"})
+    end
+  end
+
   test "the table and the catalogs agree, and every raw-tailed event is named" do
     for type <- PeerEvents.client_events(), do: assert(type in Protocol.client_events())
     for type <- PeerEvents.server_events(), do: assert(type in Protocol.server_events())
 
     assert Enum.sort(PeerEvents.raw_events(:client)) ==
-             ~w(companion_line loopback_request manage move_chunk)
+             ~w(call_audio call_line companion_line loopback_request manage move_chunk)
 
     assert Enum.sort(PeerEvents.raw_events(:server)) ==
-             ~w(companion_line loopback_response manage_result snapshot_chunk)
+             ~w(call_audio call_line companion_line loopback_response manage_result
+                snapshot_chunk)
   end
 
   defp decode(type, fields, bytes \\ <<>>) do

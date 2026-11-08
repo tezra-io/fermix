@@ -662,6 +662,16 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
       assert input_bytes == LiveChat.input_size(payload.input).input_bytes
       refute inspect(metadata) =~ "private link"
     end
+
+    test "call_start names the endpoint the call runs for", %{clock: clock} do
+      scope = "voice_live:endpoint_#{System.unique_integer([:positive, :monotonic])}"
+      attach_call_start_handler([scope])
+      session = start_session(clock: clock, session_scope: scope, endpoint: {:phone, "0d7f6a52"})
+
+      :ok = SessionControl.call_start(session)
+
+      assert_receive {:call_start, %{session_id: ^scope, endpoint: "phone:0d7f6a52"}}
+    end
   end
 
   describe "session.started" do

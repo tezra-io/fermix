@@ -427,31 +427,9 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
   end
 
   defp dispatch_event(event, state) do
-    {verdict, client} = call_event(event, state.client)
+    {verdict, client} = CallClient.event(state.client, event)
     {verdict, %{state | client: client}}
   end
-
-  # The wire's events, decoded, as the call's verbs.
-  defp call_event(%{type: "call_start"}, client), do: CallClient.call_start(client)
-
-  defp call_event(%{type: "audio_chunk", payload: %{"audio" => audio}}, client),
-    do: CallClient.audio(client, audio)
-
-  defp call_event(%{type: "interrupt", payload: payload}, client),
-    do: CallClient.interrupt(client, Map.get(payload, "audio_end_ms"))
-
-  defp call_event(%{type: "mute", payload: payload}, client),
-    do: CallClient.mute(client, Map.get(payload, "enabled", true) == true)
-
-  defp call_event(%{type: "task_cancel", payload: payload}, client),
-    do: CallClient.task_cancel(client, Map.fetch!(payload, "delegation_id"))
-
-  defp call_event(%{type: "playback_progress", payload: payload}, client) do
-    %{"playback_id" => playback_id, "played_ms" => played_ms, "drained" => drained?} = payload
-    CallClient.playback_progress(client, playback_id, played_ms, drained?)
-  end
-
-  defp call_event(%{type: "call_stop"}, client), do: CallClient.call_stop(client)
 
   # A repeat hello is a protocol violation — the handshake is a one-shot
   # transition. Fail loud rather than silently re-negotiating.
@@ -460,39 +438,21 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
   end
 
   defp handle_client_hello(%{"protocol_version" => version}, state) do
-    case Protocol.negotiate(version) do
-      :ok ->
-        {min, max} = Protocol.supported_version_range()
-        reply = %{type: "server_hello", min_version: min, max_version: max}
-
-        # A peer that broke mid-handshake is expected, not a bug: stop the loop
-        # so the handler exits cleanly and its owned socket closes (peer EOF),
-        # instead of letting a hard `:ok =` match-fail turn a normal disconnect
-        # into a handler crash.
+    case Protocol.hello_reply(version) do
+      # A peer that broke mid-handshake is expected, not a bug: stop the loop
+      # so the handler exits cleanly and its owned socket closes (peer EOF),
+      # instead of letting a hard `:ok =` match-fail turn a normal disconnect
+      # into a handler crash.
+      {:ok, reply} ->
         case send_event(state.conn, reply) do
           :ok -> {:cont, %{state | client: new_client(state, version)}}
           {:error, _reason} -> {:stop, state}
         end
 
-      {:error, direction} ->
-        send_version_mismatch_and_stop(direction, version, state)
+      {:error, refusal} ->
+        _ = send_event(state.conn, refusal)
+        {:stop, state}
     end
-  end
-
-  defp send_version_mismatch_and_stop(direction, client_version, state) do
-    {min, max} = Protocol.supported_version_range()
-
-    _ =
-      send_event(state.conn, %{
-        type: "error",
-        reason: "unsupported_protocol_version",
-        direction: Atom.to_string(direction),
-        client_version: client_version,
-        min_version: min,
-        max_version: max
-      })
-
-    {:stop, state}
   end
 
   # Every call on this socket is the Mac app's: the `desktop` endpoint, at the

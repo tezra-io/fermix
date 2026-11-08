@@ -64,6 +64,28 @@ defmodule FermixCore.Realtime.ProtocolTest do
     assert {:error, :client_too_new} = Protocol.negotiate(max + 1)
   end
 
+  # Every adapter that speaks this wire answers `client_hello` with this one
+  # reply: the Unix socket and the phone's call channel alike.
+  test "hello_reply answers a version in range with server_hello and refuses the rest" do
+    {min, max} = Protocol.supported_version_range()
+
+    assert Protocol.hello_reply(max) ==
+             {:ok, %{type: "server_hello", min_version: min, max_version: max}}
+
+    assert Protocol.hello_reply(max + 1) ==
+             {:error,
+              %{
+                type: "error",
+                reason: "unsupported_protocol_version",
+                direction: "client_too_new",
+                client_version: max + 1,
+                min_version: min,
+                max_version: max
+              }}
+
+    assert {:error, %{direction: "client_too_old", client_version: 0}} = Protocol.hello_reply(0)
+  end
+
   test "exposes the version and event catalog as the source of truth" do
     assert Protocol.protocol_version() == 3
     assert Protocol.supported_version_range() == {1, 3}

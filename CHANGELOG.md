@@ -47,13 +47,26 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `read_blocked` for a page already there, and `allowed_hosts` does not lift
   it. Other local ports, such as a development server, open as before.
 
+### Added
+
+- **Call Fermix from your phone.** Fermix now takes a voice call from a
+  paired phone over the phone's own encrypted connection, on GPT-Live or
+  Grok, wherever Fermix runs, an Always On server included. A dropped
+  connection is not a hang-up: the call waits 20 seconds for the phone to
+  come back and picks up where it was. The phone and the Mac share the one
+  call at a time, removing a phone ends its call at once along with the tasks
+  it started, and a move ends a call in progress, after its review says so.
+  No phone app with calls is released yet.
+
 ### Changed
 
 - **One voice call at a time, on every voice model.** A second call now
   waits for the first whichever model runs it: OpenAI Realtime too, not
   only GPT-Live and Grok, so two calls can no longer bill side by side.
   The refusal says where the call in progress is. A call that has just
-  ended holds its place for the second or so it takes to close.
+  ended holds its place for the second or so it takes to close, and a fault
+  in what keeps the one call now ends the call in progress rather than
+  letting a second one start beside it.
 
 ### Fixed
 

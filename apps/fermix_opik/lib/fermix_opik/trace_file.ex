@@ -312,6 +312,16 @@ defmodule FermixOpik.TraceFile do
     {[:fermix, :voice_live, :call_stop], voice_live_usage_measurements(row), voice_live_meta(row)}
   end
 
+  defp normalize_agent_event("voice_live_phone_detached", row) do
+    {[:fermix, :voice_live, :phone_detached], voice_live_usage_measurements(row),
+     voice_live_meta(row)}
+  end
+
+  defp normalize_agent_event("voice_live_phone_resumed", row) do
+    {[:fermix, :voice_live, :phone_resumed], voice_live_usage_measurements(row),
+     voice_live_meta(row)}
+  end
+
   # A management Doctor run (M34 §5). Counts only — a check summary can name an
   # operator path, so no summary or evidence text is replayed.
   defp normalize_agent_event("doctor_session_start", row) do
@@ -412,6 +422,7 @@ defmodule FermixOpik.TraceFile do
       :engine,
       :provider,
       :device_id,
+      :endpoint,
       :model,
       :voice,
       :provider_session_id,
@@ -456,7 +467,17 @@ defmodule FermixOpik.TraceFile do
   end
 
   defp realtime_meta(row) do
-    meta(row, [:session_id, :agent, :device_id, :model, :voice, :session_scope, :reason, :attempt])
+    meta(row, [
+      :session_id,
+      :agent,
+      :device_id,
+      :endpoint,
+      :model,
+      :voice,
+      :session_scope,
+      :reason,
+      :attempt
+    ])
   end
 
   # Rebuild the call's final usage measurements from a flattened `call_stop` row.

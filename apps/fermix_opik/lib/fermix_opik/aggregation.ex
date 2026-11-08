@@ -558,8 +558,9 @@ defmodule FermixOpik.Aggregation do
   end
 
   # Realtime voice runs on its own WebSocket session. call_start opens the root
-  # trace (carrying model/voice/device); the model turn and tool calls reuse the
-  # provider/tool spans and nest via the shared session_id; call_stop closes it.
+  # trace (carrying model/voice/device and the endpoint the call ran for); the
+  # model turn and tool calls reuse the provider/tool spans and nest via the
+  # shared session_id; call_stop closes it.
   def apply_event(state, [:fermix, :realtime, :call_start], _meas, meta, at) do
     case Map.get(meta, :session_id) do
       nil ->
@@ -574,6 +575,7 @@ defmodule FermixOpik.Aggregation do
           trace_metadata:
             compact(%{
               device_id: Map.get(meta, :device_id),
+              endpoint: Map.get(meta, :endpoint),
               model: Map.get(meta, :model),
               voice: Map.get(meta, :voice),
               session_scope: Map.get(meta, :session_scope)
@@ -661,6 +663,7 @@ defmodule FermixOpik.Aggregation do
           trace_metadata:
             compact(%{
               device_id: Map.get(meta, :device_id),
+              endpoint: Map.get(meta, :endpoint),
               model: Map.get(meta, :model),
               voice: Map.get(meta, :voice),
               engine: Map.get(meta, :engine),
@@ -696,9 +699,18 @@ defmodule FermixOpik.Aggregation do
 
   # Point spans for the call's lifecycle. A `provider_error` is deliberately NOT
   # terminal: a Live moderation refusal cuts the audio and the session keeps
-  # running, so closing the trace here would truncate the rest of the call.
+  # running, so closing the trace here would truncate the rest of the call. A
+  # phone's detach and resume (M87) are the call's too; the resume's
+  # `duration_ms` is the gap, so its span covers the time the phone was away.
   def apply_event(state, [:fermix, :voice_live, phase], meas, meta, at)
-      when phase in [:session_started, :delegation_start, :delegation_stop, :provider_error] do
+      when phase in [
+             :session_started,
+             :delegation_start,
+             :delegation_stop,
+             :provider_error,
+             :phone_detached,
+             :phone_resumed
+           ] do
     add_child_span(
       state,
       meta,

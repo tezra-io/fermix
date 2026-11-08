@@ -1205,6 +1205,28 @@ defmodule FermixOpik.AggregationTest do
     assert created.parent_span_id == wrapper.id
   end
 
+  # M87: the endpoint a call ran for (`desktop`, `<kind>:<device_id>`).
+  test "a realtime call's root names the endpoint it ran for" do
+    {_state, closed} =
+      run([
+        {[:fermix, :realtime, :call_start], %{},
+         %{
+           session_id: "session:3",
+           agent: "realtime",
+           device_id: "dev-1",
+           endpoint: "desktop",
+           model: "gpt-realtime-2",
+           voice: "marin",
+           session_scope: "session:3"
+         }},
+        {[:fermix, :realtime, :call_stop], %{},
+         %{session_id: "session:3", agent: "realtime", model: "gpt-realtime-2", voice: "marin"}}
+      ])
+
+    assert [%{trace: trace}] = closed
+    assert trace.metadata.endpoint == "desktop"
+  end
+
   test "a realtime call_stop folds the call's audio usage into the trace metadata" do
     {_state, closed} =
       run([
@@ -2461,6 +2483,53 @@ defmodule FermixOpik.AggregationTest do
           ] do
         assert event in FermixOpik.Reporter.events(),
                "#{inspect(event)} is not subscribed, so the run is invisible to Opik"
+      end
+    end
+
+    test "a live call's root names the endpoint it ran for" do
+      {_state, closed} =
+        run([
+          {@voice_live_start, %{},
+           voice_live_meta(%{max_duration_ms: 900_000, endpoint: "phone:0d7f6a52"})},
+          {@voice_live_stop, %{voice_seconds: 12.0}, voice_live_meta(%{reason: "call_stop"})}
+        ])
+
+      assert [%{trace: trace}] = closed
+      assert trace.metadata.endpoint == "phone:0d7f6a52"
+    end
+
+    # M87: a phone's call outlives a closed session, and the gap shows on the
+    # call as a span as long as the phone was away.
+    test "a phone's detach and resume are spans of the call, the resume as long as the gap" do
+      phone = %{endpoint: "phone:0d7f6a52"}
+
+      {_state, closed} =
+        run([
+          {@voice_live_start, %{}, voice_live_meta(Map.put(phone, :max_duration_ms, 900_000))},
+          {[:fermix, :voice_live, :phone_detached], %{}, voice_live_meta(phone)},
+          {[:fermix, :voice_live, :phone_resumed], %{duration_ms: 1_250}, voice_live_meta(phone)},
+          {@voice_live_stop, %{voice_seconds: 12.0}, voice_live_meta(%{reason: "call_stop"})}
+        ])
+
+      assert [%{trace: trace, spans: spans}] = closed
+      root = span_named(spans, trace.name)
+      detached = span_named(spans, "voice_live:phone_detached")
+      resumed = span_named(spans, "voice_live:phone_resumed")
+      assert detached.parent_span_id == root.id
+      assert resumed.parent_span_id == root.id
+      assert resumed.metadata.endpoint == "phone:0d7f6a52"
+
+      {:ok, started, 0} = DateTime.from_iso8601(resumed.start_time)
+      {:ok, ended, 0} = DateTime.from_iso8601(resumed.end_time)
+      assert DateTime.diff(ended, started, :millisecond) == 1_250
+    end
+
+    test "the reporter subscribes to a phone's detach and resume" do
+      for event <- [
+            [:fermix, :voice_live, :phone_detached],
+            [:fermix, :voice_live, :phone_resumed]
+          ] do
+        assert event in FermixOpik.Reporter.events(), inspect(event)
       end
     end
 
