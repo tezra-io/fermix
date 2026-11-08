@@ -24,6 +24,8 @@ defmodule FermixChannels.Mobile.CallTest do
   @call "c-9f1e"
   @seen ~U[2026-11-07 08:00:00Z]
   @pcm :binary.copy(<<1, 0>>, 2_400)
+  # The 100 ms frames the playback credit lets out unplayed.
+  @credit_frames div(CallAudio.credit_ms(), 100)
 
   # A voice session in place of an engine's: it takes the home's call in
   # `init/1` as every engine does, tells the test each verb, and pushes to its
@@ -563,8 +565,8 @@ defmodule FermixChannels.Mobile.CallTest do
       %{call: call, voice: voice, relay: relay, clock: clock} =
         call_alone!(ctx, "openai_live", quiet_ms: 200)
 
-      push_audio(voice, 6)
-      assert length(audio_frames(5)) == 5
+      push_audio(voice, @credit_frames + 1)
+      assert length(audio_frames(@credit_frames)) == @credit_frames
       call_ref = Process.monitor(call)
       stuck = %{type: "playback_progress", playback_id: "m1", played_ms: 0, drained: false}
 
@@ -600,8 +602,8 @@ defmodule FermixChannels.Mobile.CallTest do
       send(voice, {:push, Map.put(ready, :conversation, "chat")})
       assert_receive {:from_call, :control, %{"t" => "call_line"}}
 
-      push_audio(voice, 5)
-      assert length(audio_frames(5)) == 5
+      push_audio(voice, @credit_frames)
+      assert length(audio_frames(@credit_frames)) == @credit_frames
 
       # Quiet for less than the bound: still attached.
       Agent.update(clock, &(&1 + 199))

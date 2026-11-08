@@ -634,7 +634,7 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
       assert section =~ "`#{reason}`", "Calls from the phone does not name #{reason}"
     end
 
-    for bound <- ["20 s", "300 ms", "500 ms", "5 s", "1.5 s"], do: assert(section =~ bound, bound)
+    for bound <- ["20 s", "300 ms", "1 s", "5 s", "1.5 s"], do: assert(section =~ bound, bound)
   end
 
   # FEAT-5: the pairing link is the one thing a phone reads before it has a

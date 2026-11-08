@@ -11,11 +11,16 @@ defmodule FermixChannels.Mobile.CallAudio do
 
     * **age:** audio that has waited here 300 ms is dropped before it is
       written, oldest first, so what reaches the phone is still worth playing;
-    * **credit:** at most 500 ms of audio is outstanding on the phone, sent and
+    * **credit:** at most 1 s of audio is outstanding on the phone, sent and
       not yet reported played (`progress/4`, from the phone's
       `playback_progress` against each `playback_id`, checked as the voice
       session checks it); a playback the phone reported drained counts
-      nothing of what was sent before that report. Some audio is never
+      nothing of what was sent before that report. The phone keeps a cushion
+      of its own ahead of what it plays, since Live delivers its voice a
+      little slower than real time and unevenly, and its reports come a round
+      trip and up to 100 ms late, so the credit leaves room for both: at
+      500 ms a Pixel on the relay sat at the credit with its 200 ms cushion,
+      and audio that waited for a late report aged out (2026-11-08). Some audio is never
       reported: what the phone drops after a playback stop, and what was in
       flight when its link went. So a stop (`clear/1`) and a resume
       (`settle/1`) count everything sent so far as drained, keeping what was
@@ -36,7 +41,7 @@ defmodule FermixChannels.Mobile.CallAudio do
   @bytes_per_ms 48
   @frame_bytes 4_800
   @max_age_ms 300
-  @credit_ms 500
+  @credit_ms 1_000
   @behind_limit_ms 5_000
   @max_queued 64
   @max_playbacks 64

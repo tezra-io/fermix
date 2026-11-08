@@ -1037,8 +1037,10 @@ latest 64), a `played_ms` below one already reported for the id, or one past
 the audio it wrote to the phone under the id ends the call with the error
 line `unknown_playback`, `playback_regressed` or `playback_beyond_sent` and
 `call_close{reason:"ended"}`. The primary
-keeps at most 500 ms of audio sent and not yet reported played (a playback
-reported drained counts nothing sent before the report). The phone never
+keeps at most 1 s of audio sent and not yet reported played (a playback
+reported drained counts nothing sent before the report), room for a playout
+cushion the phone keeps against a provider that delivers unevenly and for the
+link's round trip. The phone never
 reports the audio it drops after a `playback_stop`, or what was in flight when
 its link went, so a `playback_stop` and a resume count everything sent so far
 as played; a later report is still checked against all of it. The primary

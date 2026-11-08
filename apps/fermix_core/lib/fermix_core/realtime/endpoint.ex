@@ -29,7 +29,7 @@ defmodule FermixCore.Realtime.Endpoint do
   # The engines a phone's call may run on: the task engines, which join the
   # chat and hand every task to the Fermix agent (M87 D2).
   @phone_engines ["openai_live", "xai_realtime"]
-  # A phone's Grok playback window: under the phone call's 500 ms credit by
+  # A phone's Grok playback window: inside the phone call's 1 s credit with
   # one vendor chunk (`grok_playback_opts/1`).
   @phone_grok_window_ms 300
 
@@ -90,7 +90,7 @@ defmodule FermixCore.Realtime.Endpoint do
   @doc """
   How a Grok call paces its audio to this endpoint: the options its
   `GrokPlayback` starts with. A phone's audio rides its mobile session, where
-  the call holds at most 500 ms unplayed on the phone and drops audio that
+  the call holds at most 1 s unplayed on the phone and drops audio that
   waited 300 ms to be written (`FermixChannels.Mobile.CallAudio`); a reply
   Grok streams faster than it plays would pile up behind that credit and age
   out. So a phone's window is 300 ms, which with one vendor chunk of up to

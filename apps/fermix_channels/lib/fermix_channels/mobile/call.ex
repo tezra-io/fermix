@@ -44,7 +44,7 @@ defmodule FermixChannels.Mobile.Call do
 
   ## The media path
 
-  Audio going down waits in `CallAudio` (the 300 ms age bound, 500 ms of
+  Audio going down waits in `CallAudio` (the 300 ms age bound, 1 s of
   playback credit, 5 s behind ends the call). The phone reports
   `playback_progress` on every engine against the `playback_id` every
   `call_audio` carries: Grok's own on a Grok call, minted here (`m<n>`, a new
