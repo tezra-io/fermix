@@ -30,7 +30,9 @@ defmodule FermixCore.Home.MoveReadiness do
       desktop older than the server;
     * `disk`: the capture needs about twice the home free on this computer
       (`FermixCore.Home.Disk`); short of it, or with the free space unknown,
-      it blocks, saying how much is needed; the server needs as much again;
+      it blocks, saying how much is needed; the server needs as much again.
+      A home the walk refuses blocks too, naming the path and what to do
+      in `fermix home export`'s words (`Archive.collect_sentence/1`);
     * `s3_size`: a home larger than one S3 upload (5 GiB) warns where the
       server keeps its snapshots in S3: it would never back up there;
     * `plugins`: on a server of another OS or architecture, the plugins
@@ -353,9 +355,10 @@ defmodule FermixCore.Home.MoveReadiness do
   # enrolled through the window that desktop opened on this server.
   defp returning?(%{returning: desktop}), do: is_binary(desktop)
 
+  # What the walk refused, in the words `fermix home export` says it in.
   defp disk(_home, {:error, reason}, _name, _opts) do
     Logger.error("move readiness: the home could not be measured: #{inspect(reason)}")
-    item("disk", :block, "Fermix could not measure this home; Fermix's log says why.")
+    item("disk", :block, Archive.collect_sentence(reason))
   end
 
   defp disk(home, {:ok, home_bytes}, name, opts) do

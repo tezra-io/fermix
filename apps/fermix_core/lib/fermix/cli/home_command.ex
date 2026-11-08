@@ -424,27 +424,17 @@ defmodule Fermix.CLI.HomeCommand do
 
   defp sentence({:home_not_found, root}, _root), do: "There is no Fermix home at #{root}."
 
-  defp sentence({:too_many_files, count, max}, _root),
-    do: "The home holds #{count} files or more, beyond the #{max} one archive carries."
+  # A home the walk refused, in the words a move's readiness says it in.
+  defp sentence({kind, _count, _max} = reason, _root)
+       when kind in [:too_many_files, :too_many_bytes],
+       do: Archive.collect_sentence(reason)
 
-  defp sentence({:too_many_bytes, bytes, max}, _root),
-    do: "The home holds #{bytes} bytes or more, beyond the #{max} one archive carries."
+  defp sentence({kind, _path, _detail} = reason, _root)
+       when kind in [:unsupported_entry, :unsupported_link],
+       do: Archive.collect_sentence(reason)
 
-  defp sentence({:unsupported_entry, path, type}, _root) do
-    "#{path} in the home is a #{type}, which an archive cannot carry. Move it out of the " <>
-      "home, then export again."
-  end
-
-  defp sentence({:unsupported_link, path, target}, _root) do
-    "#{path} in the home links to #{target}, outside the home, which an archive cannot " <>
-      "carry. Move it out of the home, then export again."
-  end
-
-  defp sentence({:unsupported_name, path}, _root),
-    do: "#{inspect(path)} in the home has a name an archive cannot carry. Rename it."
-
-  defp sentence({:too_deep, path}, _root),
-    do: "#{path} in the home is nested too deep for an archive."
+  defp sentence({kind, _path} = reason, _root) when kind in [:unsupported_name, :too_deep],
+    do: Archive.collect_sentence(reason)
 
   defp sentence({:changed_during_export, path}, _root) do
     "#{path} changed while it was being archived. Make sure nothing runs on this home, " <>
@@ -526,7 +516,7 @@ defmodule Fermix.CLI.HomeCommand do
       "old home cannot be moved safely. Nothing was written."
   end
 
-  defp sentence({:file, path, reason}, _root), do: "#{path}: #{describe(reason)}."
+  defp sentence({:file, _path, _reason} = reason, _root), do: Archive.collect_sentence(reason)
   defp sentence({:tar, name, reason}, _root), do: "Writing #{name} failed: #{inspect(reason)}."
   defp sentence(reason, _root), do: "The command failed: #{inspect(reason)}."
 

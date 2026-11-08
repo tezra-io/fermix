@@ -145,6 +145,25 @@ defmodule Fermix.CLI.HomeCommandTest do
     assert err =~ "at least 12 bytes"
   end
 
+  # One wording for a home an archive cannot carry: a move's readiness says
+  # the same sentence (`Archive.collect_sentence/1`), so it ends in what to
+  # do whichever surface shows it.
+  test "export refuses a home it cannot carry, naming the path and what to do", ctx do
+    File.mkdir_p!(Path.join(ctx.home, "workspace"))
+    File.ln_s!("/etc", Path.join(ctx.home, "workspace/notes"))
+
+    {status, _out, err} =
+      run(["export", ctx.archive, "--passphrase-file", ctx.passphrase_file], home: ctx.home)
+
+    assert status == 1
+
+    assert err ==
+             "fermix home: workspace/notes in the home links to /etc, outside the home, " <>
+               "which an archive cannot carry. Move it out of the home, then try again.\n"
+
+    refute File.exists?(ctx.archive)
+  end
+
   test "import refuses a root that is not empty", ctx do
     {0, _out, _err} =
       run(["export", ctx.archive, "--passphrase-file", ctx.passphrase_file], home: ctx.home)

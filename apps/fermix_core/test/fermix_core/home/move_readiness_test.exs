@@ -400,6 +400,51 @@ defmodule FermixCore.Home.MoveReadinessTest do
     assert sentence =~ "5 GiB"
   end
 
+  # EC2 test 2026-11-08: a home the move cannot carry blocked with "Fermix's
+  # log says why". The review names the path and what to do, in the words
+  # `fermix home export` uses for the same home (`Archive.collect_sentence/1`).
+  describe "a home the move cannot carry" do
+    test "a link out of the home blocks, naming it", ctx do
+      File.mkdir_p!(Path.join(ctx.home, "workspace"))
+      File.ln_s!("/etc", Path.join(ctx.home, "workspace/notes"))
+
+      assert %{ready: false, items: items} =
+               MoveReadiness.report(ctx.home, ctx.candidate, opts(ctx))
+
+      assert item_in(items, "disk") == %{
+               id: "disk",
+               status: :block,
+               sentence:
+                 "workspace/notes in the home links to /etc, outside the home, which an " <>
+                   "archive cannot carry. Move it out of the home, then try again."
+             }
+    end
+
+    test "a special file blocks, naming it", ctx do
+      File.mkdir_p!(Path.join(ctx.home, "workspace"))
+      {_out, 0} = System.cmd("mkfifo", [Path.join(ctx.home, "workspace/pipe")])
+
+      assert %{items: items} = MoveReadiness.report(ctx.home, ctx.candidate, opts(ctx))
+
+      assert %{status: :block, sentence: sentence} = item_in(items, "disk")
+
+      assert sentence ==
+               "workspace/pipe in the home is a special file, which an archive cannot " <>
+                 "carry. Move it out of the home, then try again."
+    end
+
+    test "a tree nested too deep blocks, naming it", ctx do
+      deep = Enum.map_join(1..66, "/", fn _level -> "d" end)
+      File.mkdir_p!(Path.join([ctx.home, "workspace", deep]))
+
+      assert %{items: items} = MoveReadiness.report(ctx.home, ctx.candidate, opts(ctx))
+
+      assert %{status: :block, sentence: sentence} = item_in(items, "disk")
+      assert sentence =~ ~r{\Aworkspace(/d)+ in the home is nested too deep for an archive\. }
+      assert sentence =~ "Move it out of the home, then try again."
+    end
+  end
+
   # Always On setup §9: under `fermix run` at a terminal a move stops Fermix
   # and nothing starts it again.
   test "Fermix run from a terminal warns that the move stops it", ctx do

@@ -23,6 +23,7 @@ defmodule FermixCore.Management.CopyTest do
   alias FermixCore.Cues.FollowUps
   alias FermixCore.Cues.Mandates
   alias FermixCore.Cues.ProposalView
+  alias FermixCore.Home.Archive
   alias FermixCore.Home.Candidate, as: HomeCandidate
   alias FermixCore.Home.Move, as: HomeMove
   alias FermixCore.Home.MoveReadiness
@@ -783,6 +784,23 @@ defmodule FermixCore.Management.CopyTest do
           assert Copy.summary_violations(item.sentence) == [], "#{item.id}: #{item.sentence}"
           refute_command(item.sentence, item.id)
         end
+      end
+
+      # A home the walk refuses blocks the review in the walk's own words.
+      for reason <- [
+            {:unsupported_link, "workspace/notes", "/etc"},
+            {:unsupported_entry, "workspace/pipe", :other},
+            {:unsupported_entry, "workspace/disk", :device},
+            {:unsupported_name, <<"workspace/", 0xFF>>},
+            {:too_deep, "workspace/deep"},
+            {:too_many_files, 100_001, 100_000},
+            {:too_many_bytes, 1_073_741_825, 1_073_741_824},
+            {:file, "/home/owner/.fermix/workspace", :eacces}
+          ] do
+        sentence = Archive.collect_sentence(reason)
+        assert_clean(sentence, :prose, [], "walk refusal #{inspect(reason)}")
+        assert Copy.summary_violations(sentence) == [], sentence
+        refute_command(sentence, "walk refusal")
       end
     end
   end

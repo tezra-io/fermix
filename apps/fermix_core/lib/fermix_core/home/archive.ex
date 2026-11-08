@@ -90,6 +90,13 @@ defmodule FermixCore.Home.Archive do
           keyring_secrets: non_neg_integer()
         }
   @type source :: {:memory, %{String.t() => binary()}} | {:staged, Path.t()}
+  @typedoc "Why `collect/2` refused a home."
+  @type collect_refusal ::
+          {:too_many_files | :too_many_bytes, pos_integer(), pos_integer()}
+          | {:unsupported_entry, String.t(), atom()}
+          | {:unsupported_link, String.t(), String.t()}
+          | {:unsupported_name | :too_deep, String.t()}
+          | {:file, Path.t(), term()}
   @type restored :: %{
           files: non_neg_integer(),
           epoch: pos_integer(),
@@ -295,7 +302,8 @@ defmodule FermixCore.Home.Archive do
   capture, so both carry the same set.
   """
   @spec collect(Path.t(), Manifest.max_bytes()) ::
-          {:ok, [{String.t(), File.Stat.t()}], [Manifest.link()]} | {:error, term()}
+          {:ok, [{String.t(), File.Stat.t()}], [Manifest.link()]}
+          | {:error, collect_refusal()}
   def collect(root, max_total_bytes) when is_binary(root) do
     acc = %{files: [], links: [], count: 0, bytes: 0, max: max_total_bytes}
 
@@ -304,6 +312,53 @@ defmodule FermixCore.Home.Archive do
       {:error, _reason} = error -> error
     end
   end
+
+  @doc """
+  The sentence an owner reads for a home `collect/2` refused: the path, and
+  what to do. Every surface that walks a home for an archive says it in these
+  words: `fermix home export` and a move's readiness review
+  (`FermixCore.Home.MoveReadiness`).
+  """
+  @spec collect_sentence(collect_refusal()) :: String.t()
+  def collect_sentence({:too_many_files, count, max}),
+    do:
+      "The home holds #{count} files or more, beyond the #{max} one archive carries. " <>
+        "Make it smaller, then try again."
+
+  def collect_sentence({:too_many_bytes, bytes, max}),
+    do:
+      "The home holds #{bytes} bytes or more, beyond the #{max} one archive carries. " <>
+        "Make it smaller, then try again."
+
+  def collect_sentence({:unsupported_entry, path, type}),
+    do:
+      "#{path} in the home is a #{entry_kind(type)}, which an archive cannot carry. " <>
+        "Move it out of the home, then try again."
+
+  def collect_sentence({:unsupported_link, path, target}),
+    do:
+      "#{path} in the home links to #{target}, outside the home, which an archive cannot " <>
+        "carry. Move it out of the home, then try again."
+
+  def collect_sentence({:unsupported_name, path}),
+    do:
+      "#{inspect(path)} in the home has a name an archive cannot carry. Rename it, then try " <>
+        "again."
+
+  def collect_sentence({:too_deep, path}),
+    do:
+      "#{path} in the home is nested too deep for an archive. Move it out of the home, then " <>
+        "try again."
+
+  def collect_sentence({:file, path, reason}), do: "#{path}: #{describe_file_error(reason)}."
+
+  defp entry_kind(:device), do: "device file"
+  defp entry_kind(_other), do: "special file"
+
+  defp describe_file_error(reason) when is_atom(reason),
+    do: List.to_string(:file.format_error(reason))
+
+  defp describe_file_error(reason), do: inspect(reason)
 
   defp walk(_root, rel_dir, depth, _acc) when depth > @max_depth,
     do: {:error, {:too_deep, rel_dir}}
