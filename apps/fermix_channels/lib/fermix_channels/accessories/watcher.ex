@@ -210,9 +210,12 @@ defmodule FermixChannels.Accessories.Watcher do
     end
   end
 
+  # Only a path the watcher lists or shows can be released: anything else would
+  # record an entry for a device it never saw.
   def handle_call({:release, path}, _from, state) do
-    case Map.get(state.entries, path) do
-      %{state: :linked, link: %{call: %{}}} -> {:reply, {:error, :call_active}, state}
+    case {Map.has_key?(state.ports, path), Map.get(state.entries, path)} do
+      {false, nil} -> {:reply, {:error, :not_present}, state}
+      {_, %{state: :linked, link: %{call: %{}}}} -> {:reply, {:error, :call_active}, state}
       _no_call -> {:reply, :ok, state |> release_port(path) |> changed()}
     end
   end

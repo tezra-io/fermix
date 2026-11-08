@@ -250,6 +250,15 @@ defmodule FermixChannels.Accessories.WatcherTest do
     await_port(w, @robot, &attached?/1)
   end
 
+  test "releasing a path the watcher does not list is refused and records nothing", ctx do
+    w = watcher(ctx)
+    poll(w)
+
+    assert {:error, :not_present} = Watcher.release(w, "/dev/cu.not-a-robot")
+    assert {:error, :not_present} = Watcher.release(w, "/etc/passwd")
+    assert Watcher.status(w).ports == []
+  end
+
   test "every port that goes reads as vanished, whatever it read before, and a bounded few are kept",
        ctx do
     {sim, _record} = enrolled_sim(ctx)
