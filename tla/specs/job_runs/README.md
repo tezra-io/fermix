@@ -348,6 +348,19 @@ fault ran past the runner's two-minute limit. Check 36's two properties were
 split again (36, 53) when `runsKnown` took it to that limit on a loaded
 machine (123 s, against 71 s and 92 s apart).
 
+Checks 08, 43 and 53 then sat at 60 to 80 s and timed out when TLA runs
+overlapped. Two narrowings that leave each verdict and what it covers as it
+was brought them to 35 s, 35 s and 17 s (from 78 s, 73 s and 61 s):
+- Checks 43 and 53, and their `needs` checks 44 and 38, run with no fire
+  time. `Due` is false for a watcher's task, so the clock drives none of its
+  steps, and a tick only doubled the states (43: 2,926,878 to 1,463,439; 53:
+  91,342 to 45,671).
+- A configuration with no owner request leaves out `JobChanged`'s strong
+  fairness, and one with no cue tree `CueAdmit`'s (`FairnessScope`). TLC
+  splits a liveness check in two for each strongly fair action: check 08's
+  liveness pass went from 54 s to 13 s, and check 53's from 39 s to 18 s
+  before its clock went too.
+
 **Follow-ups (M60 watcher follow-ups).** Every property below is broken by
 its `needs` check too.
 - **One active run of a follow-up** (check 54), with two triggers, a run by
@@ -1138,5 +1151,7 @@ shortest and can change between runs.
   constant: that window is not modelled.
 - Fairness: weak on each runner's, send helper's, report task's and Scheduler
   callback's next step, and on the runner's delivery timer. Strong on the
-  Scheduler serving its mailbox and its own timers. None on the clock, the
-  owner, the cue inbox, the platform or crashes.
+  Scheduler serving its mailbox and its own timers; a configuration with no
+  owner request or no cue tree leaves out the strong fairness of the step it
+  can never take (`FairnessScope` in `TypeOK` holds that it cannot). None on
+  the clock, the owner, the cue inbox, the platform or crashes.

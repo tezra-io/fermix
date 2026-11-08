@@ -331,6 +331,13 @@ Snaps == [en : BOOLEAN, st : {"scheduled", "running", "paused", "none"},
 NoSnap == [en |-> FALSE, st |-> "none", next |-> 0]
 Final == {"skipped", "sent", "failed"}
 
+\* Fairness gives JobChanged and CueAdmit strong fairness only in a
+\* configuration that can take them; this holds that the others cannot.
+\* Every check carries TypeOK, so each proves that its own omission is sound.
+FairnessScope ==
+    /\ OwnerMoves + OwnerEdits = 0 => ~changed
+    /\ ~CuesOn => ~cuePending
+
 TypeOK ==
     /\ jobEnabled \in BOOLEAN
     /\ jobState \in {"scheduled", "running", "paused"}
@@ -362,6 +369,7 @@ TypeOK ==
     /\ oSnap \in Snaps
     /\ cuePending \in BOOLEAN /\ admit \in BOOLEAN /\ runsKnown \in BOOLEAN
     /\ fQ \in 0..Cues /\ fClaimed \subseteq Runs
+    /\ FairnessScope
     /\ intent \in {"none", "paused", "resumed"}
     /\ movesLeft \in 0..OwnerMoves /\ editsLeft \in 0..OwnerEdits
     /\ manualLeft \in 0..ManualRuns
@@ -1709,11 +1717,16 @@ Next ==
 \* a callback (weak fairness), and the Scheduler serving its mailbox and its
 \* own timers (strong fairness: a message that keeps finding the Scheduler idle
 \* is eventually handled). The clock, the owner, the cue inbox, the platform's
-\* answers and every crash and Repo timeout get no fairness.
+\* answers and every crash and Repo timeout get no fairness. JobChanged needs
+\* an owner's request and CueAdmit the cue tree, so a configuration without
+\* them can take neither (FairnessScope): their strong fairness holds on all
+\* its behaviours, and is left out. TLC splits a liveness check in two for
+\* each strongly fair action, so each one left out halves that check's work.
 Fairness ==
     /\ WF_vars(SchedStep)
-    /\ SF_vars(DueTimerFires) /\ SF_vars(ReconcileFires) /\ SF_vars(JobChanged)
-    /\ SF_vars(CueAdmit)
+    /\ SF_vars(DueTimerFires) /\ SF_vars(ReconcileFires)
+    /\ IF OwnerMoves + OwnerEdits > 0 THEN SF_vars(JobChanged) ELSE TRUE
+    /\ IF CuesOn THEN SF_vars(CueAdmit) ELSE TRUE
     /\ \A r \in Runs :
           /\ SF_vars(HandleDown(r))
           /\ WF_vars(RunnerStep(r))
