@@ -1,5 +1,11 @@
 {
   "clips": {
+    "bye_to_the_van_driver_27": {
+      "duration_ms": 11245,
+      "file": "bye_to_the_van_driver_27.wav",
+      "sha256": "1b6ec31aa06936023c616a447a25a7fd738e39c82d92e2119d3259d6feaf05c8",
+      "text": "Who's driving the pantry van on Saturday the twenty-seventh of March, twenty twenty-seven? The rota is in the voice fixtures folder of my workspace. I want to say bye to them before they move away."
+    },
     "cancel_never_mind": {
       "duration_ms": 4803,
       "file": "cancel_never_mind.wav",
@@ -24,6 +30,12 @@
       "sha256": "e5f7203c83d73d1a30a9b7c83e93ed4173e2ba476a35d57bebb0022eac913538",
       "text": "Sorry, I said the wrong date. I meant the stocktake for the twentieth of March, not the thirteenth."
     },
+    "dont_hang_up_sorting_20": {
+      "duration_ms": 10433,
+      "file": "dont_hang_up_sorting_20.wav",
+      "sha256": "744fdf2cde50073977e746ea2f7b9334a46a69842217910bd3f44067b3d666c8",
+      "text": "Hang on, don't hang up yet. Who's on sorting at the pantry on Saturday the twentieth of March, twenty twenty-seven? The rota is in the voice fixtures folder of my workspace."
+    },
     "followup_brown_rice": {
       "duration_ms": 4571,
       "file": "followup_brown_rice.wav",
@@ -35,6 +47,24 @@
       "file": "followup_curry.wav",
       "sha256": "74271b8e97290c2d97bd1303bbfef7ea90b0f31657355cf49983f83977858b5f",
       "text": "While that runs, what can I use instead of chickpeas in a curry?"
+    },
+    "goodbye_okay_thanks_bye": {
+      "duration_ms": 2129,
+      "file": "goodbye_okay_thanks_bye.wav",
+      "sha256": "14d0505dae62744e5b8d50ade4e179dcc10e943791c6f431474dd9888e0f37b8",
+      "text": "Okay, thanks, bye."
+    },
+    "goodbye_talk_to_you_later": {
+      "duration_ms": 1929,
+      "file": "goodbye_talk_to_you_later.wav",
+      "sha256": "1c5d0108c7ac2643fe4f902d681b7adf434549de3c93de9ec37effc4d9c9e95e",
+      "text": "Alright, talk to you later."
+    },
+    "greeting_can_you_hear_me": {
+      "duration_ms": 2271,
+      "file": "greeting_can_you_hear_me.wav",
+      "sha256": "e2e953c6334725352ee7ad56ea9e5bd67f0fc1dddd5cd1844584c97d136e30e0",
+      "text": "Hi there. Can you hear me all right?"
     },
     "rota_intake_13": {
       "duration_ms": 8861,

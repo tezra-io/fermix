@@ -346,7 +346,7 @@ def test_browser_and_harness_state_are_part_of_the_baseline():
 
 def test_voice_turns_grok_voice_on_with_its_engine_and_no_key():
     cfg = seed.render_config(
-        "/tmp/x-eval", "openai", {"default_model": "gpt-5.6-luna"}, None, voice=True)
+        "/tmp/x-eval", "openai", {"default_model": "gpt-5.6-luna"}, None, voice="xai_realtime")
     doc = tomllib.loads(cfg)
 
     # The parser refuses a Grok model under the default openai_realtime engine,
@@ -360,6 +360,52 @@ def test_voice_turns_grok_voice_on_with_its_engine_and_no_key():
     assert "api_key" not in cfg
     # Turning voice on grants nothing else: computer history stays off.
     assert doc["fermix_core"]["computer_history"]["enabled"] is False
+
+
+def test_voice_can_turn_gpt_live_on_with_its_engine_and_no_key():
+    cfg = seed.render_config(
+        "/tmp/x-eval", "anthropic", {"default_model": "claude-x"}, None, voice="openai_live")
+    doc = tomllib.loads(cfg)
+
+    # GPT-Live's one model under its own engine; the key is the openai provider's
+    # slot, filled from OPENAI_API_KEY at daemon boot and never written here.
+    assert doc["fermix_core"]["realtime"] == {
+        "enabled": True, "engine": "openai_live", "model": "gpt-live-1",
+        "max_session_minutes": 5}
+    assert "openai" not in doc["fermix_core"]["providers"]
+    assert "api_key" not in cfg and "OPENAI_API_KEY" in cfg
+    # No consent of its own to grant, and none granted: the Realtime-only and
+    # phone-only settings stay at the product's defaults, computer history off.
+    realtime = doc["fermix_core"]["realtime"]
+    assert "screen_share" not in realtime and "camera_share" not in realtime
+    assert doc["fermix_core"]["computer_history"]["enabled"] is False
+
+
+def test_an_unknown_voice_engine_is_refused():
+    with pytest.raises(ValueError, match="voice engine must be one of"):
+        seed.voice_lines("openai_realtime")
+
+
+@pytest.mark.parametrize("flags, engine, model", [
+    (["--voice"], "xai_realtime", "grok-voice-3.0"),
+    (["--voice", "--voice-engine", "xai_realtime"], "xai_realtime", "grok-voice-3.0"),
+    (["--voice", "--voice-engine", "openai_live"], "openai_live", "gpt-live-1"),
+])
+def test_the_voice_engine_is_chosen_at_seed_time(tmp_path, monkeypatch, capsys, flags, engine,
+                                                 model):
+    doc = _seed_main(monkeypatch, tmp_path / "x-eval", *flags)
+
+    assert (doc["fermix_core"]["realtime"]["engine"],
+            doc["fermix_core"]["realtime"]["model"]) == (engine, model)
+    key_env = seed.VOICE_ENGINES[engine][1]
+    assert f"voice: {engine} ({model}) on; {key_env} must be set" in capsys.readouterr().out
+
+
+def test_a_voice_engine_needs_voice(tmp_path, monkeypatch):
+    with pytest.raises(SystemExit):
+        _seed_main(monkeypatch, tmp_path / "x-eval", "--voice-engine", "openai_live")
+    with pytest.raises(SystemExit):
+        _seed_main(monkeypatch, tmp_path / "x-eval", "--voice", "--voice-engine", "grok")
 
 
 def test_without_voice_the_eval_home_has_no_realtime_section():

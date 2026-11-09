@@ -1054,6 +1054,26 @@ FERMIX_EVAL_HOME="$VOICE_HOME" OPIK_PROJECT=fermix-voice-eval uv run bin/run_eva
   --voice --confirm-daemon-isolated --confirm-isolated-env
 ```
 
+`suites/voice_greeting_goodbye.yaml` (M96: the voice greets first, a spoken goodbye
+ends the call) covers both task engines, so it runs once per engine: once against
+the Grok home above, and once against the same home reseeded for GPT-Live, whose key
+is the OpenAI provider's `api_key` slot, filled at boot from `OPENAI_API_KEY`. Every
+case accepts either engine; Grok's greeting is a gate and GPT-Live's a watched rubric
+line, since GPT-Live may start silent.
+
+```sh
+FERMIX_EVAL_HOME="$VOICE_HOME" OPIK_PROJECT=fermix-voice-eval uv run bin/run_eval.py \
+  --suite voice_greeting_goodbye --judge --voice --confirm-daemon-isolated \
+  --confirm-isolated-env
+# then GPT-Live: stop the daemon, reseed, restart it with OPENAI_API_KEY, run again
+uv run bin/seed_capability_home.py "$VOICE_HOME" --voice --voice-engine openai_live
+(cd .. && FERMIX_HOME="$VOICE_HOME" OPENAI_API_KEY="$OPENAI_API_KEY" FERMIX_OPIK_ENABLED=1 \
+  FERMIX_OPIK_PROJECT=fermix-voice-eval FERMIX_BROWSER_HEADLESS=1 mix fermix.dev --no-web)
+FERMIX_EVAL_HOME="$VOICE_HOME" OPIK_PROJECT=fermix-voice-eval uv run bin/run_eval.py \
+  --suite voice_greeting_goodbye --judge --voice --confirm-daemon-isolated \
+  --confirm-isolated-env
+```
+
 `--judge` needs the judge's credential as in §1 (`ANTHROPIC_API_KEY`, else an
 `ant auth login` profile, for the configured `anthropic` judge). Before a run, the
 runner checks the home is a disposable

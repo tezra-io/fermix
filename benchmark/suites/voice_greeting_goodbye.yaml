@@ -1,0 +1,252 @@
+# Voice greeting and goodbye (M96 §10): on a task-engine call the voice says
+# hello first, and a goodbye said aloud ends the call without a button.
+#
+# `drive: voice` (bin/evallib/voice.py) is the Mac app's call on
+# `<FERMIX_HOME>/realtime.sock`, protocol v5: fixture audio is the microphone,
+# a simulated speaker acknowledges the voice's audio, every frame is recorded.
+# The runner stays silent at the start of every call while the voice greets: up
+# to 4 s for it to begin, then until it has finished. So a greeting case proves
+# the voice spoke before the owner did; a goodbye case proves the daemon ended
+# the call itself (`call_ended {reason: "goodbye"}`, no `error`) and the runner
+# never had to send `call_stop`; a not-a-goodbye case proves a request that
+# carries a goodbye word is answered through a task and the call stays up.
+#
+# One suite, both task engines: it runs once against a home seeded for Grok
+# Voice (`bin/seed_capability_home.py --voice`, the default, XAI_API_KEY on the
+# daemon) and once against one seeded for GPT-Live (`--voice --voice-engine
+# openai_live`, OPENAI_API_KEY on the daemon). Every case accepts either engine
+# and nothing else. Grok's greeting is a gate (`wire.spoke_first_on`); GPT-Live's
+# is a watched rubric line, because OpenAI says GPT-Live "may paraphrase the
+# greeting, add words, or remain silent". That the greeting names the owner
+# (the eval home's personalization says "Eval Operator") is a watched rubric
+# line on both engines, never a gate.
+#
+# What ExUnit holds instead, because a live provider cannot be made to do it on
+# demand: the goodbye phrase table, its negatives and its bounds, a transcript
+# that lands after the reply started, an interruption that forgets the goodbye,
+# echo that neither ends nor keeps a call (CallGoodbye, the Grok and Live
+# sessions); a peer below v5 never armed (CallClient); a fresh call_start on the
+# same connection after a goodbye end (LocalVoiceSocket); the accessory's and
+# the phone's ends; and the v5 wire (Protocol, ProtocolContract).
+#
+# Every case only reads the rota fixture in the eval workspace (or nothing), so
+# every scenario is host_readonly; the not-a-goodbye cases are rota questions,
+# not reminders, so they write no job into the eval home. No case asserts a
+# route: GPT-Live hands off by id with no `fermix_task` call, and grok_voice.yaml
+# holds the one labelled sanity case for Grok's bridge function. Running it:
+# benchmark/README.md, *Grok voice calls*; every case opens one paid call, so
+# `--voice` is required, and the voice eval daemon must be up with realtime on.
+suite: voice_greeting_goodbye
+risk: host_readonly
+title: "Voice calls: the voice says hello first, and a spoken goodbye ends the call"
+description: >
+  Real calls on the voice socket against either task engine (Grok Voice or
+  GPT-Live). The voice greets the owner before the owner speaks; a whole-turn
+  goodbye ends the call from the daemon's side once the voice's goodbye has
+  played, with no error and no client hang-up; a request that only contains a
+  goodbye word is answered through a Fermix task and the call stays up.
+defaults:
+  timeout_ms: 180000
+  judge: true
+  expect:
+    status: ok
+
+scenarios:
+  - id: voice_greets_first
+    # host_readonly: the first case reads nothing; the second reads the rota
+    # fixture in the eval workspace.
+    risk: host_readonly
+    title: "The voice greets the owner before the owner says anything"
+    severity: normal
+    tags: [voice, greeting]
+    cases:
+      - id: greeted_then_asked_if_heard
+        drive: voice
+        voice:
+          clips:
+            - say: greeting_can_you_hear_me
+        expect:
+          wire:
+            engine: [xai_realtime, openai_live]
+            # Grok only: on GPT-Live the vendor allows a silent start, so the
+            # same requirement is the judge's watched requirement 1.
+            spoke_first_on: [xai_realtime]
+            events_all: [call_ready, caption, audio_delta]
+            events_none: [error, call_ended]
+            # Nothing the owner said in this call needs Fermix: a hand-off would
+            # be the greeting acting on an earlier message.
+            max_tasks: 0
+        rubric: |
+          1. Before the owner's first words in the timeline, the voice greets the owner
+             with one short, casual line.
+          2. The greeting addresses the owner by name; the owner is Eval Operator, and a
+             natural short form of that name counts.
+          3. Nothing the voice says before the owner's first words answers, summarises or
+             acts on anything said before this call.
+          4. After the owner asks whether the voice can hear them, the voice answers that
+             it can.
+          Not required: any particular wording of the greeting, or mentioning the time of
+          day.
+        watch:
+          - n: 1
+            reason: >-
+              OpenAI documents that GPT-Live "may paraphrase the greeting, add words, or
+              remain silent", so a silent start is allowed on openai_live (M96 §4.3);
+              on xai_realtime the same requirement is the hard gate
+              wire.spoke_first_on. Not yet measured on either engine. Revisit when
+              the candidate model changes.
+          - n: 2
+            reason: >-
+              The design observes the owner's name in the greeting and never gates it
+              (M96 §10): the greeting text tells the voice to use the name only if it
+              knows it, and "Eval Operator" is an unusual name to say. Not yet
+              measured on either engine. Revisit when the candidate model changes.
+      - id: greeted_then_asked_about_the_rota
+        drive: voice
+        voice:
+          clips:
+            - say: rota_intake_13
+        expect:
+          # Floor: the name the rota file holds for that shift.
+          reply_matches: "(?i)penhallow"
+          reply_not_matches: "(?i)(can'?t|cannot|unable to) (access|open|read|reach) (your|the) (files?|workspace|rota)"
+          wire:
+            engine: [xai_realtime, openai_live]
+            spoke_first_on: [xai_realtime]
+            events_all: [call_ready, caption, audio_delta, task]
+            events_none: [error, call_ended]
+            task_statuses_all: [completed]
+            task_statuses_none: [failed, cancelled, superseded]
+            max_tasks: 1
+            task_terminal_once: true
+        rubric: |
+          1. Before the owner's first words in the timeline, the voice greets the owner
+             with one short, casual line.
+          2. The greeting addresses the owner by name; the owner is Eval Operator, and a
+             natural short form of that name counts.
+          3. The voice tells the owner that Ilse Penhallow is on intake at the pantry on
+             Saturday 13 March 2027, and names her only after the task's completed frame
+             in the timeline.
+          Not required: any particular wording of the greeting, or mentioning the other
+          roles or Saturdays.
+        watch:
+          - n: 1
+            reason: >-
+              OpenAI documents that GPT-Live "may paraphrase the greeting, add words, or
+              remain silent", so a silent start is allowed on openai_live (M96 §4.3);
+              on xai_realtime the same requirement is the hard gate
+              wire.spoke_first_on. Not yet measured on either engine. Revisit when
+              the candidate model changes.
+          - n: 2
+            reason: >-
+              The design observes the owner's name in the greeting and never gates it
+              (M96 §10): the greeting text tells the voice to use the name only if it
+              knows it, and "Eval Operator" is an unusual name to say. Not yet
+              measured on either engine. Revisit when the candidate model changes.
+
+  - id: spoken_goodbye_ends_the_call
+    # host_readonly: a goodbye reads nothing and hands nothing off.
+    risk: host_readonly
+    title: "A goodbye said aloud ends the call from Fermix's side, with no error"
+    severity: normal
+    tags: [voice, goodbye]
+    cases:
+      - id: okay_thanks_bye
+        drive: voice
+        voice:
+          clips:
+            - say: goodbye_okay_thanks_bye
+          # Longer than the default, so a slow end is the daemon's to make
+          # before the runner would hang up itself (wire.call_stop_sent).
+          quiet_ms: 10000
+        expect:
+          # Phrasing-independent floor for "ask nothing more": the last thing
+          # the voice said is not a question.
+          reply_not_matches: "\\?\\s*$"
+          wire:
+            engine: [xai_realtime, openai_live]
+            events_all: [call_ready, caption, audio_delta]
+            events_none: [error]
+            call_ended: goodbye
+            call_stop_sent: false
+            max_tasks: 0
+        rubric: |
+          1. After the owner says goodbye, the voice says a short goodbye back.
+          2. After the owner says goodbye, the voice asks the owner nothing more.
+          Not required: any particular wording of either goodbye, or whether the voice
+          greeted the owner first.
+      - id: alright_talk_to_you_later
+        drive: voice
+        voice:
+          clips:
+            - say: goodbye_talk_to_you_later
+          quiet_ms: 10000
+        expect:
+          reply_not_matches: "\\?\\s*$"
+          wire:
+            engine: [xai_realtime, openai_live]
+            events_all: [call_ready, caption, audio_delta]
+            events_none: [error]
+            call_ended: goodbye
+            call_stop_sent: false
+            max_tasks: 0
+        rubric: |
+          1. After the owner says goodbye, the voice says a short goodbye back.
+          2. After the owner says goodbye, the voice asks the owner nothing more.
+          Not required: any particular wording of either goodbye, or whether the voice
+          greeted the owner first.
+
+  - id: goodbye_word_inside_a_request
+    # host_readonly: each task reads the rota fixture in the eval workspace.
+    risk: host_readonly
+    title: "A request that carries a goodbye word is answered, and the call stays up"
+    severity: critical
+    tags: [voice, goodbye, negative]
+    cases:
+      - id: say_bye_to_the_van_driver
+        drive: voice
+        voice:
+          clips:
+            - say: bye_to_the_van_driver_27
+        expect:
+          # Floor: the name the rota file holds for that shift.
+          reply_matches: "(?i)ashgrove"
+          reply_not_matches: "(?i)(can'?t|cannot|unable to) (access|open|read|reach) (your|the) (files?|workspace|rota)"
+          wire:
+            engine: [xai_realtime, openai_live]
+            events_all: [call_ready, caption, audio_delta, task]
+            events_none: [error, call_ended]
+            task_statuses_all: [completed]
+            task_statuses_none: [failed, cancelled, superseded]
+            max_tasks: 1
+            task_terminal_once: true
+        rubric: |
+          1. The voice tells the owner that Tobin Ashgrove is driving the van on Saturday
+             27 March 2027, and names him only after the task's completed frame in the
+             timeline.
+          2. The voice treats the owner's words as a question to answer, not as the owner
+             leaving: it does not say goodbye to the owner.
+          Not required: mentioning the other roles or Saturdays, or commenting on the
+          move.
+      - id: dont_hang_up_yet
+        drive: voice
+        voice:
+          clips:
+            - say: dont_hang_up_sorting_20
+        expect:
+          reply_matches: "(?i)penhallow"
+          reply_not_matches: "(?i)(can'?t|cannot|unable to) (access|open|read|reach) (your|the) (files?|workspace|rota)"
+          wire:
+            engine: [xai_realtime, openai_live]
+            events_all: [call_ready, caption, audio_delta, task]
+            events_none: [error, call_ended]
+            task_statuses_all: [completed]
+            task_statuses_none: [failed, cancelled, superseded]
+            max_tasks: 1
+            task_terminal_once: true
+        rubric: |
+          1. The voice tells the owner that Ilse Penhallow is on sorting at the pantry on
+             Saturday 20 March 2027, and names her only after the task's completed frame
+             in the timeline.
+          2. The voice keeps the call going: it does not say goodbye to the owner.
+          Not required: mentioning the other roles or Saturdays.

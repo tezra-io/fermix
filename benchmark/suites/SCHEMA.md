@@ -572,10 +572,10 @@ socket that cannot be reached, closes, or goes silent past `timeout_ms` is
 ```
 
 The runner (`bin/evallib/voice.py`) is the Mac app's voice call on
-`<FERMIX_HOME>/realtime.sock`, protocol v3 as `apps/fermix_core/priv/realtime/PROTOCOL.md`
+`<FERMIX_HOME>/realtime.sock`, protocol v5 as `apps/fermix_core/priv/realtime/PROTOCOL.md`
 documents it: `client_hello`, `call_start`, then from the daemon's `listening`
 a continuous microphone of 100 ms `audio_chunk`s (24 kHz mono PCM16) at
-real-time pace, silence included, until `call_stop`. The voice's audio goes to
+real-time pace, silence included, until the call ends. The voice's audio goes to
 a simulated speaker that plays it in real time, in arrival order, and sends
 `playback_progress` for every `audio_delta.playback_id` at most every 100 ms
 while it plays and at once when it drains or a `playback_stop` cuts it. It
@@ -588,8 +588,13 @@ The case's `voice:` map is the call:
   generates (macOS `say` + `afconvert`); the loader refuses a clip whose WAV is
   missing, is not 24 kHz mono PCM16, or no longer matches its manifest sha256.
   Each clip waits `gap_ms` (0–30000, default 1500) of silence, counted from
-  `call_ready` for the first clip and from the end of the one before for the
-  rest. `after: task_running` (not on the first clip) also waits for a `task`
+  the end of the voice's opening for the first clip and from the end of the one
+  before for the rest. The opening is the greeting a task engine speaks first
+  (M96): the owner stays silent up to 4 s after `call_ready` for the voice to
+  begin, and once it has, until the daemon no longer says `speaking` and no
+  voiced audio or assistant caption has arrived for 1 s; never past 20 s after
+  `call_ready`. So a first clip is never said over the greeting, which on Grok
+  would barge in and cut it. `after: task_running` (not on the first clip) also waits for a `task`
   frame saying `running` since the previous clip began, so "while that runs",
   "cancel that" and "I meant the twentieth" are said while the task is in
   flight; a clip whose `after` does not hold within 30 s is abandoned with the
@@ -598,26 +603,33 @@ The case's `voice:` map is the call:
   was said, every task's newest revision ended (`completed`, `failed`,
   `cancelled`), the speaker has played everything, and no `audio_delta`,
   `caption`, `task` or `playback_stop` arrived for this long. The runner then
-  sends `call_stop` and reads until the final `usage`, at most 10 s.
+  sends `call_stop` and reads until the final `usage`, at most 10 s. When the
+  daemon ends the call itself first (`call_ended`, v5: the owner said goodbye),
+  the runner stops the microphone, sends nothing more, `call_stop` and playback
+  reports included, reads until the final `usage`, at most 10 s, and closes the
+  connection. Clips the call ended before are recorded as abandoned.
 
 The case's one turn is its clips' fixture texts, so reports and the judge see
 what was said. Everything the daemon sends is recorded in arrival order with
 its time since `call_start`: `state`, `call_ready`, `caption`, `task`, `usage`,
-`error`, `playback_stop`, and `audio_delta` by size only; a frame type the
+`error`, `playback_stop`, `call_ended`, and `audio_delta` by size only; a frame type the
 runner does not know is kept by its type. `expect.wire` is graded against that
 record, one `wire.<key>` gate per key, and is required on every voice case:
 
 | Key | Type | Passes when |
 |---|---|---|
-| `engine` | str | `call_ready.engine` equals it (`xai_realtime` for Grok) |
-| `events_all` | [str] | every listed frame type arrived; drawn from `state`, `call_ready`, `caption`, `audio_delta`, `playback_stop`, `task`, `usage`, `error` |
+| `engine` | str or [str] | `call_ready.engine` equals it, or is one of the list (`xai_realtime` for Grok, `openai_live` for GPT-Live; drawn from those and `openai_realtime`). A suite that covers both task engines lists both and runs once against a home seeded for each |
+| `events_all` | [str] | every listed frame type arrived; drawn from `state`, `call_ready`, `caption`, `audio_delta`, `playback_stop`, `task`, `usage`, `error`, `call_ended` |
 | `events_none` | [str] | none of the listed frame types arrived |
 | `task_statuses_all` | [str] | every listed status is how some task revision ended; drawn from `pending`, `running`, `completed`, `failed`, `cancelled`, `superseded` |
 | `task_statuses_none` | [str] | no task revision ended in a listed status |
 | `caption_not_matches` | regex | what the voice said aloud (its `assistant` captions, concatenated as received) does not match: the leak check that a cancelled or superseded result never speaks. Make it match the protected material only |
-| `max_tasks` | int ≥ 1 | the call handed off at most this many tasks (distinct `delegation_id`s) |
+| `max_tasks` | int ≥ 0 | the call handed off at most this many tasks (distinct `delegation_id`s); `0`: none |
 | `task_terminal_once` | `true` | no task revision ended twice, and no task completed twice |
 | `spoke_while_task_running` | `true` | an `assistant` caption arrived after the last clip ended while some task's newest revision had not ended: the voice talked while a task was pending |
+| `spoke_first_on` | [engine] | on a call whose `call_ready.engine` is listed, the first `assistant` caption arrived before the first `user` caption and before the owner's first clip began: the voice spoke first. On any other engine the gate is not graded and not reported, so a requirement only one engine keeps (GPT-Live may start silent) is a gate there and a judge `watch` everywhere |
+| `call_ended` | str | the daemon ended the call itself exactly once, with this `reason` (`goodbye`), after `state: idle` and followed by the call's final `usage` |
+| `call_stop_sent` | bool | the runner sent `call_stop` (`true`), or never did because the daemon ended the call first (`false`) |
 
 How a revision *ended* is its last `task` frame's status, except that a
 `cancelled` revision a newer revision of the same `delegation_id` replaced
@@ -643,7 +655,7 @@ trace can unprove. Positive trace gates keep the incomplete downgrade. A socket
 that cannot be reached, refuses `call_start` (`call_in_progress`, an
 `update_required` refusal), closes, or does not settle within `timeout_ms` is
 `INCOMPLETE`, never a failed gate; the runner sends `call_stop` on every path
-once it sent `call_start`.
+once it sent `call_start`, unless the daemon had already ended the call.
 
 Every voice case opens one paid voice call, so it runs only with `--voice`.
 Named by `--suite`, `--scenario`, `--case` or `--tag` without it, the case is

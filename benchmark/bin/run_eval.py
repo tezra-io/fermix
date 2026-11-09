@@ -247,7 +247,7 @@ def _sweeps_past_voice(args) -> bool:
     """A bare `--all` sweep without `--voice` leaves `drive: voice` cases out.
 
     A voice case spends a paid voice minute and runs only against an eval daemon
-    with Grok voice on, which no other tier starts (`make behavioral-isolated`
+    with voice on, which no other tier starts (`make behavioral-isolated`
     sweeps `--all` against a daemon started without realtime). Named with
     --suite, --scenario, --case or --tag, it is selected and, without `--voice`,
     skipped with a notice that leaves the run incomplete."""
@@ -546,20 +546,20 @@ def voice_jobs_driven(jobs, args) -> bool:
 
 def voice_policy_error(jobs, args) -> str | None:
     """A voice case runs only against a disposable eval home, whatever its risk:
-    its call writes the eval home's chat, and its daemon has Grok voice on."""
+    its call writes the eval home's chat, and its daemon has voice on."""
     if not voice_jobs_driven(jobs, args):
         return None
     if not (getattr(args, "confirm_daemon_isolated", False) and args.confirm_isolated_env):
-        return ("drive: voice cases run only against the disposable Grok-voice eval daemon: "
+        return ("drive: voice cases run only against the disposable voice eval daemon: "
                 "pass --confirm-daemon-isolated and --confirm-isolated-env")
     return None
 
 
 def voice_precondition_error(fermix_home: str) -> str | None:
-    """The eval home has Grok voice on and its daemon answers on the voice socket.
+    """The eval home has voice on and its daemon answers on the voice socket.
 
     Read before anything is driven, so a daemon started with --no-realtime, or
-    without XAI_API_KEY (the realtime supervisor then never starts), fails the
+    without its engine's key (the realtime supervisor then never starts), fails the
     run once instead of every voice case as an unreachable socket."""
     home = os.path.realpath(os.path.expanduser(fermix_home))
     path = os.path.join(home, "config.toml")
@@ -579,8 +579,9 @@ def voice_precondition_error(fermix_home: str) -> str | None:
         probe.connect(sock)
     except OSError as exc:
         return (f"no voice socket answers at {sock} ({exc}): start the eval daemon with "
-                "realtime on (`mix fermix.dev`, never --no-realtime) and XAI_API_KEY in its "
-                "environment")
+                "realtime on (`mix fermix.dev`, never --no-realtime) and its engine's key in "
+                "its environment (XAI_API_KEY for xai_realtime, OPENAI_API_KEY for "
+                "openai_live)")
     finally:
         probe.close()
     return None
@@ -1932,7 +1933,7 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="include operator-assisted cases (you send a Telegram message when prompted); "
                          "without this flag such cases are skipped with a notice")
     ap.add_argument("--voice", action="store_true",
-                    help="include drive: voice cases: each opens one paid Grok voice call on the "
+                    help="include drive: voice cases: each opens one paid voice call on the "
                          "eval daemon's realtime.sock; without this flag a named voice case is "
                          "skipped with a notice and a bare --all leaves voice cases out")
     ap.add_argument("--dangerous", action="store_true",
@@ -2031,7 +2032,7 @@ def _print_dry_run(chosen, profiles, judge_on: bool, args,
                      if case.needs_voice and voice_on)
     if voice_jobs:
         # Validated, not started: a dry run opens no call and spends nothing.
-        print(f"  voice: {voice_jobs} case trial(s) would each open one paid Grok voice call "
+        print(f"  voice: {voice_jobs} case trial(s) would each open one paid voice call "
               f"on <FERMIX_HOME>/{voice.SOCKET_NAME}")
     fixture_jobs = sum(1 for _suite, _scenario, case, _trial in jobs
                        if case_uses_fixture(case))
@@ -2570,7 +2571,7 @@ def main(argv=None, host: str | None = None) -> int:
     left_out = voice_cases_left_out(suites, args, profiles)
     if left_out:
         print(f"note: --all leaves out {left_out} drive: voice case(s) (each spends a paid "
-              "voice minute against the Grok-voice eval daemon); name them with --suite and "
+              "voice minute against the voice eval daemon); name them with --suite and "
               "pass --voice")
     selection_error = _selection_error(args, suites, chosen, profiles)
     if selection_error:

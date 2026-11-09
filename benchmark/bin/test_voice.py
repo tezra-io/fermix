@@ -143,15 +143,24 @@ def test_a_voice_case_without_its_voice_map_is_named(tmp_path):
 
 @pytest.mark.parametrize("wire, fragment", [
     ({"loudness": 1}, "unknown `wire` key `loudness`"),
-    ({"engine": ""}, "`wire.engine` must be a non-empty string"),
+    ({"engine": ""}, "`wire.engine` must be an engine, or a non-empty list"),
+    ({"engine": "grok"}, "`wire.engine` must be an engine, or a non-empty list"),
+    ({"engine": []}, "`wire.engine` must be an engine, or a non-empty list"),
+    ({"engine": ["xai_realtime", "grok"]}, "`wire.engine` must be an engine, or a non-empty list"),
+    ({"spoke_first_on": "xai_realtime"}, "`wire.spoke_first_on` must be a non-empty list"),
+    ({"spoke_first_on": ["xai"]}, "`wire.spoke_first_on` must be a non-empty list"),
+    ({"call_ended": ""}, "`wire.call_ended` must be the non-empty reason"),
+    ({"call_ended": True}, "`wire.call_ended` must be the non-empty reason"),
+    ({"call_stop_sent": "no"}, "`wire.call_stop_sent` must be true or false"),
+    ({"events_none": ["hangup"]}, "`wire.events_none` must be a non-empty list"),
     ({"events_all": ["transcript"]}, "`wire.events_all` must be a non-empty list"),
     ({"events_none": []}, "`wire.events_none` must be a non-empty list"),
     ({"task_statuses_all": ["done"]}, "`wire.task_statuses_all` must be a non-empty list"),
     ({"task_statuses_none": "failed"}, "`wire.task_statuses_none` must be a non-empty list"),
     ({"caption_not_matches": "("}, "`wire.caption_not_matches` is not a valid regex"),
     ({"caption_not_matches": ""}, "`wire.caption_not_matches` must be a non-empty regex"),
-    ({"max_tasks": 0}, "`wire.max_tasks` must be a positive integer"),
-    ({"max_tasks": True}, "`wire.max_tasks` must be a positive integer"),
+    ({"max_tasks": -1}, "`wire.max_tasks` must be a non-negative integer"),
+    ({"max_tasks": True}, "`wire.max_tasks` must be a non-negative integer"),
     ({"task_terminal_once": False}, "`wire.task_terminal_once` must be true"),
     ({"spoke_while_task_running": "yes"}, "`wire.spoke_while_task_running` must be true"),
 ])
@@ -214,8 +223,8 @@ def test_a_manifest_file_outside_its_folder_is_refused(tmp_path):
 
 # --- the shipped suite and fixtures --------------------------------------------
 
-def _shipped():
-    return next(s for s in suites.load_all(SUITES_DIR) if s.name == "grok_voice")
+def _shipped(name="grok_voice"):
+    return next(s for s in suites.load_all(SUITES_DIR) if s.name == name)
 
 
 def test_the_shipped_voice_suite_loads_with_explicit_risks_and_one_sanity_route():
@@ -225,10 +234,18 @@ def test_the_shipped_voice_suite_loads_with_explicit_risks_and_one_sanity_route(
     # Every scenario states its risk, and only the two the design allows.
     assert all(scenario.get("risk") in ("host_readonly", "isolated_mutation")
                for scenario in raw["scenarios"])
-    cases = [case for scenario in suite.scenarios for case in scenario.cases]
-    assert cases and all(case.drive == "voice" for case in cases)
+    every = [case for scenario in suite.scenarios for case in scenario.cases]
+    cases = [case for case in every if case.drive == "voice"]
+    # The camera hand-off's cases (M87) drive what reaches the model, no call.
+    assert len(cases) == 8 and {case.id for case in every if case.drive != "voice"} == {
+        case.id for scenario in suite.scenarios if scenario.id == "camera_hand_off"
+        for case in scenario.cases}
     assert all(case.expect["wire"]["engine"] == "xai_realtime" for case in cases)
-    assert all(case.rubric for case in cases)
+    # Every call now starts on a v5 client, with the goodbye end armed: none may
+    # end itself.
+    assert all("call_ended" in case.expect["wire"]["events_none"]
+               for case in cases if "events_none" in case.expect["wire"])
+    assert all(case.rubric for case in every)
     # Route assertions: exactly one labelled sanity case asserts the bridge call.
     routed = [case.id for case in cases if case.expect.get("tools_any")]
     assert routed == ["intake_on_the_thirteenth"]
@@ -242,6 +259,69 @@ def test_the_shipped_manifest_says_what_the_generator_says():
     assert {key: entry["text"] for key, entry in manifest.items()} == make_voice_fixtures.CLIPS
     for key, entry in manifest.items():
         assert voice.clip_problem(os.path.join(SUITES_DIR, "fixtures"), key, entry) is None
+
+
+def test_the_greeting_and_goodbye_suite_runs_on_either_task_engine():
+    suite = _shipped("voice_greeting_goodbye")
+    with open(suite.path, encoding="utf-8") as handle:
+        raw = yaml.safe_load(handle)
+    # A missing risk would skip silently: every scenario states it, read-only.
+    assert all(scenario.get("risk") == "host_readonly" for scenario in raw["scenarios"])
+    by_scenario = {scenario.id: scenario.cases for scenario in suite.scenarios}
+    cases = [case for scenario_cases in by_scenario.values() for case in scenario_cases]
+    assert len(cases) == 6 and all(case.drive == "voice" and case.rubric for case in cases)
+    # One suite, run once per engine: every case takes either task engine.
+    assert all(case.expect["wire"]["engine"] == ["xai_realtime", "openai_live"]
+               for case in cases)
+    # No route assertion: GPT-Live hands off by id, with no fermix_task call.
+    assert not any(case.expect.get("tools_any") for case in cases)
+    for case in by_scenario["voice_greets_first"]:
+        # A gate on Grok; on GPT-Live, and for the owner's name, a watch.
+        assert case.expect["wire"]["spoke_first_on"] == ["xai_realtime"]
+        assert {n for n, _reason in case.watch} == {1, 2}
+        assert "call_ended" in case.expect["wire"]["events_none"]
+    for case in by_scenario["spoken_goodbye_ends_the_call"]:
+        wire = case.expect["wire"]
+        assert (wire["call_ended"], wire["call_stop_sent"], wire["max_tasks"]) == (
+            "goodbye", False, 0)
+        assert "error" in wire["events_none"] and "reply_matches" not in case.expect
+    for case in by_scenario["goodbye_word_inside_a_request"]:
+        wire = case.expect["wire"]
+        assert {"error", "call_ended"} <= set(wire["events_none"])
+        assert wire["task_statuses_all"] == ["completed"]
+        assert "spoke_first_on" not in wire
+
+
+def test_the_goodbye_clips_are_whole_goodbyes_and_the_others_only_carry_the_word():
+    manifest, _error = voice.load_manifest(os.path.join(SUITES_DIR, "fixtures"))
+    said = {case.id: manifest[case.voice["clips"][0]["say"]]["text"]
+            for scenario in _shipped("voice_greeting_goodbye").scenarios
+            for case in scenario.cases}
+    # At most 8 words, the engine's bound on a whole-turn goodbye (M96 D4).
+    assert all(len(said[case].split()) <= 8
+               for case in ("okay_thanks_bye", "alright_talk_to_you_later"))
+    for case in ("say_bye_to_the_van_driver", "dont_hang_up_yet"):
+        assert len(said[case].split()) > 8 and "twenty twenty-seven" in said[case]
+        assert "bye" in said[case] or "hang up" in said[case]
+
+
+def test_the_rota_floors_name_who_the_rota_holds_for_the_asked_shift():
+    rota, day = {}, None
+    with open(os.path.join(SUITES_DIR, "fixtures", "voice", "pantry_rota.txt"),
+              encoding="utf-8") as handle:
+        for line in handle.read().splitlines()[1:]:
+            if line.startswith("Saturday"):
+                day = line.split()[1]
+            elif line.strip():
+                role, name = line.strip().split(":")
+                rota[(day, role)] = name.split()[-1].lower()
+    asked = {"greeted_then_asked_about_the_rota": ("13", "intake"),
+             "say_bye_to_the_van_driver": ("27", "van"),
+             "dont_hang_up_yet": ("20", "sorting")}
+    floors = {case.id: case.expect["reply_matches"]
+              for scenario in _shipped("voice_greeting_goodbye").scenarios
+              for case in scenario.cases if case.id in asked}
+    assert floors == {case_id: f"(?i){rota[shift]}" for case_id, shift in asked.items()}
 
 
 def test_the_correction_and_cancel_cases_forbid_only_the_other_dates_shelves():
@@ -473,6 +553,118 @@ def test_the_recorded_audio_is_its_size_alone():
                            "audio": base64.b64encode(bytes(960)).decode()}, 1.0)
     assert silent == {"t_ms": 1.0, "type": "audio_delta", "bytes": 960, "silent": True}
     assert voice.record({"type": "surprise", "x": 1}, 1.0) == {"t_ms": 1.0, "type": "surprise"}
+    assert voice.record({"type": "call_ended", "reason": "goodbye"}, 1.0) == {
+        "t_ms": 1.0, "type": "call_ended", "reason": "goodbye"}
+
+
+# --- M96: the greeting and the goodbye, on recorded frame lists ----------------------
+
+def _greeted_goodbye():
+    """A Grok call that greets, hears the owner's goodbye, says goodbye back,
+    and is ended by the daemon in the protocol's order."""
+    return [{"type": "state", "state": "listening", "t_ms": 5},
+            {"type": "call_ready", "engine": "xai_realtime", "call_id": "voice_live:4",
+             "t_ms": 50},
+            {"type": "state", "state": "speaking", "t_ms": 300},
+            {"type": "audio_delta", "playback_id": "p1", "bytes": 48_000, "t_ms": 310},
+            {"type": "caption", "speaker": "assistant", "delta": "Evening, Eval!", "t_ms": 1_400},
+            {"type": "state", "state": "listening", "t_ms": 1_410},
+            {"type": "caption", "speaker": "user", "delta": "Okay, thanks, bye.", "t_ms": 5_200},
+            {"type": "audio_delta", "playback_id": "p2", "bytes": 24_000, "t_ms": 5_300},
+            {"type": "caption", "speaker": "assistant", "delta": " Bye!", "t_ms": 5_900},
+            {"type": "state", "state": "idle", "t_ms": 6_000},
+            {"type": "call_ended", "reason": "goodbye", "t_ms": 6_010},
+            {"type": "usage", "status": "live", "accounting": "incomplete", "t_ms": 6_020}]
+
+
+_BYE_CLIPS = ({"say": "bye", "start_ms": 3_000.0, "end_ms": 4_200.0},)
+_M96_KEYS = {"engine": ["xai_realtime", "openai_live"], "spoke_first_on": ["xai_realtime"],
+             "call_ended": "goodbye", "call_stop_sent": False, "events_none": ["error"],
+             "max_tasks": 0}
+
+
+def _m96_evidence(frames, call_stop_sent=False):
+    evidence = _evidence(frames, _BYE_CLIPS)
+    evidence.call_stop_sent = call_stop_sent
+    return evidence
+
+
+def test_the_greeting_and_goodbye_gates_pass_on_the_call_they_describe():
+    evidence = _m96_evidence(_greeted_goodbye())
+
+    gates = voice.wire_gates(evidence, _M96_KEYS)
+
+    assert [g.key for g in gates] == ["wire.engine", "wire.events_none", "wire.max_tasks",
+                                      "wire.spoke_first_on", "wire.call_ended",
+                                      "wire.call_stop_sent"]
+    assert all(g.passed for g in gates), [g.detail for g in gates if not g.passed]
+    # The judge sees the daemon's end in the call's timeline.
+    assert {"t_ms": 6_010, "call_ended_by_fermix": "goodbye"} in voice.judge_evidence(
+        evidence)["voice_call"]["timeline"]
+
+
+def _m96_broken(how):
+    frames, stopped = _greeted_goodbye(), False
+    ended = next(i for i, f in enumerate(frames) if f["type"] == "call_ended")
+    if how == "engine":
+        frames[1]["engine"] = "openai_realtime"
+    elif how == "events_none":
+        frames.insert(ended, {"type": "error", "reason": "session_down", "t_ms": 6_005})
+    elif how == "max_tasks":
+        frames.insert(6, {"type": "task", "delegation_id": "d1", "revision": 1,
+                          "status": "completed", "t_ms": 5_250})
+    elif how == "spoke_first_on":           # no greeting: the first caption is the goodbye's
+        frames = [f for f in frames if f.get("delta") != "Evening, Eval!"]
+    elif how == "spoke_first_on/owner_heard_first":
+        frames.insert(2, {"type": "caption", "speaker": "user", "delta": "Hm.", "t_ms": 200})
+    elif how == "call_ended":               # the runner had to hang up
+        frames = [f for f in frames if f["type"] != "call_ended"]
+    elif how == "call_ended/other_reason":
+        frames[ended]["reason"] = "max_session_duration"
+    elif how == "call_ended/twice":
+        frames.append(dict(frames[ended], t_ms=6_030))
+    elif how == "call_ended/before_idle":
+        frames[ended - 1], frames[ended] = frames[ended], frames[ended - 1]
+    elif how == "call_ended/no_final_usage":
+        frames = frames[:ended + 1]
+    elif how == "call_stop_sent":
+        stopped = True
+    return _m96_evidence(frames, stopped)
+
+
+@pytest.mark.parametrize("how", [
+    "engine", "events_none", "max_tasks", "spoke_first_on", "spoke_first_on/owner_heard_first",
+    "call_ended", "call_ended/other_reason", "call_ended/twice", "call_ended/before_idle",
+    "call_ended/no_final_usage", "call_stop_sent"])
+def test_each_greeting_and_goodbye_gate_fails_on_the_broken_call_it_exists_for(how):
+    gates = {g.key: g for g in voice.wire_gates(_m96_broken(how), _M96_KEYS)}
+    key = f"wire.{how.split('/')[0]}"
+
+    assert not gates[key].passed, gates[key].detail
+    assert [k for k, g in gates.items() if not g.passed] == [key]
+
+
+def test_the_greeting_gate_is_not_graded_on_an_engine_it_does_not_list():
+    # GPT-Live may stay silent at the start: its greeting is the judge's watched
+    # requirement, so no gate is reported, and none is counted as passed.
+    frames = [f for f in _greeted_goodbye() if f.get("delta") != "Evening, Eval!"]
+    frames[1]["engine"] = "openai_live"
+
+    keys = [g.key for g in voice.wire_gates(_m96_evidence(frames), _M96_KEYS)]
+
+    assert "wire.spoke_first_on" not in keys and "wire.call_ended" in keys
+
+
+def test_a_goodbye_case_on_a_call_the_runner_hung_up_fails_both_ways():
+    # What the runner records when the daemon never ended the call: it sent
+    # call_stop after the quiet window, and the daemon said nothing terminal.
+    frames = [f for f in _greeted_goodbye() if f["type"] != "call_ended"]
+
+    gates = {g.key: g for g in voice.wire_gates(_m96_evidence(frames, call_stop_sent=True),
+                                                _M96_KEYS)}
+
+    assert not gates["wire.call_ended"].passed and not gates["wire.call_stop_sent"].passed
+    assert gates["wire.call_stop_sent"].detail == "the runner sent call_stop (expected never sent)"
 
 
 # --- the call client, against a scripted stand-in daemon ---------------------------
@@ -483,16 +675,23 @@ class FakeVoiceDaemon:
     It hears the microphone the way a provider's turn detection would: a run of
     non-silent chunks is an utterance, and the first silent chunk after one ends
     it. What it says when each utterance ends depends on `mode`; a running task
-    completes `complete_after` chunks (100 ms each) after the last utterance."""
+    completes `complete_after` chunks (100 ms each) after the last utterance.
+    With `greet` it speaks first, as a v5 task engine does: the greeting's
+    caption and `listening` follow once the speaker reports it drained. In
+    `goodbye` mode it answers the first utterance with a goodbye and, once that
+    has drained, ends the call itself (`call_ended`) and keeps the connection."""
 
-    def __init__(self, mode="answer", complete_after=8):
+    def __init__(self, mode="answer", complete_after=8, greet=False):
         self.home = tempfile.mkdtemp(prefix="vx")
         self.path = voice.socket_path(self.home)
         self.mode = mode
         self.complete_after = complete_after
+        self.greet = greet
         self.received: list[dict] = []
         self.utterances: list[int] = []         # chunk index each utterance began at
         self.running_sent_at: int | None = None
+        self.greeted_at: int | None = None      # chunks heard when the greeting had played
+        self.client_closed = False
         self.server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.server.bind(self.path)
         self.server.listen(1)
@@ -524,6 +723,7 @@ class FakeVoiceDaemon:
         while True:
             chunk = self.conn.recv(65536)
             if not chunk:
+                self.client_closed = True
                 return
             self.buffer += chunk
             while b"\n" in self.buffer:
@@ -550,7 +750,7 @@ class FakeVoiceDaemon:
     def _on(self, frame):
         kind = frame["type"]
         if kind == "client_hello":
-            self.send({"type": "server_hello", "min_version": 1, "max_version": 3})
+            self.send({"type": "server_hello", "min_version": 1, "max_version": 5})
         elif kind == "call_start" and self.mode == "refuse":
             self.send({"type": "error", "reason": "call_in_progress"})
             return "close"
@@ -559,6 +759,11 @@ class FakeVoiceDaemon:
             self.send({"type": "call_ready", "engine": "xai_realtime", "call_id": "voice_live:7",
                        "call_uuid": "u-7", "conversation": "chat", "tasks_outlive_call": True,
                        "provider_session_id": "sess_7", "captions": True})
+            if self.greet:
+                self.send({"type": "state", "state": "speaking"})
+                self.audio("p0", 400)
+        elif kind == "playback_progress" and frame["drained"]:
+            self._drained(frame["playback_id"])
         elif kind == "audio_chunk":
             return self._heard(base64.b64decode(frame["audio"]))
         elif kind == "call_stop":
@@ -585,8 +790,22 @@ class FakeVoiceDaemon:
                 self._complete()
         return None
 
+    def _drained(self, pid):
+        if pid == "p0" and self.greeted_at is None:
+            self.greeted_at = self.chunks
+            self.send({"type": "caption", "speaker": "assistant", "delta": "Hi there."})
+            self.send({"type": "state", "state": "listening"})
+        elif pid == "p1" and self.mode == "goodbye":
+            self.send({"type": "state", "state": "idle"})
+            self.send({"type": "call_ended", "reason": "goodbye"})
+            self.send({"type": "usage", "status": "live", "accounting": "incomplete"})
+
     def _utterance_ended(self, n):
-        if n == 1:
+        if n == 1 and self.mode == "goodbye":
+            self.send({"type": "state", "state": "speaking"})
+            self.audio("p1", 300)
+            self.send({"type": "caption", "speaker": "assistant", "delta": " Bye!"})
+        elif n == 1:
             self.task("running")
             self.audio("p1", 300)
             self.send({"type": "caption", "speaker": "assistant", "delta": "On it."})
@@ -609,7 +828,10 @@ class FakeVoiceDaemon:
 
 
 @pytest.fixture
-def daemon():
+def daemon(monkeypatch):
+    # The opening's bounds, shortened: no stand-in greets unless told to.
+    monkeypatch.setattr(voice, "OPENING_WAIT_MS", 300)
+    monkeypatch.setattr(voice, "OPENING_QUIET_MS", 200)
     made = []
 
     def start(**kwargs):
@@ -644,7 +866,8 @@ def test_a_call_is_driven_until_it_settles_and_then_hung_up(daemon):
     assert [c["say"] for c in evidence.clips] == ["ask"]
     kinds = [frame["type"] for frame in fake.received]
     assert kinds[:2] == ["client_hello", "call_start"] and kinds[-1] == "call_stop"
-    assert fake.sent("client_hello")[0]["protocol_version"] == 3
+    assert fake.sent("client_hello")[0]["protocol_version"] == 5
+    assert evidence.call_stop_sent and evidence.summary()["call_stop_sent"] is True
     # Every chunk is 100 ms of 24 kHz mono PCM16.
     assert {len(base64.b64decode(f["audio"])) for f in fake.sent("audio_chunk")} == {4_800}
     # Every playback id was acknowledged to its end, never past what was sent.
@@ -656,6 +879,71 @@ def test_a_call_is_driven_until_it_settles_and_then_hung_up(daemon):
         assert any(r["playback_id"] == pid and r["drained"] and r["played_ms"] == total
                    for r in reports)
     assert evidence.summary()["playback_reports"] == len(reports)
+
+
+def test_the_first_clip_waits_for_the_greeting_to_play_out(daemon):
+    fake = daemon(mode="answer", greet=True)
+
+    evidence = voice.drive(fake.home, _plan(), timeout_s=30)
+
+    assert evidence.ok, evidence.error
+    # The owner spoke only once the greeting had drained on the speaker: never
+    # over it, which on Grok would barge in and cut it.
+    assert fake.greeted_at is not None and fake.utterances[0] > fake.greeted_at
+    assert evidence.spoken().startswith("Hi there.")
+    gates = voice.wire_gates(evidence, {"spoke_first_on": ["xai_realtime"]})
+    assert all(g.passed for g in gates), [g.detail for g in gates]
+
+
+def test_a_silent_start_holds_the_owner_for_the_opening_then_the_greeting_gate_fails(daemon):
+    fake = daemon(mode="answer")
+
+    evidence = voice.drive(fake.home, _plan(), timeout_s=30)
+
+    assert evidence.ok, evidence.error
+    # A lower bound on the runner's own clock: load can only make it later.
+    ready_at = next(f["t_ms"] for f in evidence.frames if f["type"] == "call_ready")
+    assert evidence.clips[0]["start_ms"] >= ready_at + voice.OPENING_WAIT_MS
+    (gate,) = voice.wire_gates(evidence, {"spoke_first_on": ["xai_realtime"]})
+    assert not gate.passed, gate.detail
+
+
+def test_a_call_the_daemon_ends_on_a_goodbye_is_never_sent_call_stop(daemon):
+    fake = daemon(mode="goodbye")
+
+    evidence = voice.drive(fake.home, _plan(), timeout_s=30)
+
+    assert evidence.ok, evidence.error
+    assert not evidence.call_stop_sent and fake.sent("call_stop") == []
+    gates = voice.wire_gates(evidence, {"call_ended": "goodbye", "call_stop_sent": False,
+                                        "events_none": ["error"]})
+    assert all(g.passed for g in gates), [g.detail for g in gates]
+    # The daemon kept the connection; the runner closed it once the call was over.
+    fake.thread.join(timeout=10)
+    assert not fake.thread.is_alive() and fake.client_closed
+
+
+def test_clips_a_call_ended_before_are_reported_unsaid(daemon):
+    fake = daemon(mode="goodbye")
+
+    evidence = voice.drive(fake.home, _plan("task_running"), timeout_s=30)
+
+    assert evidence.ok, evidence.error
+    assert [c["say"] for c in evidence.clips] == ["ask"]
+    assert evidence.abandoned == ["more0"] and fake.sent("call_stop") == []
+
+
+def test_once_the_daemon_ended_the_call_the_hang_up_sends_nothing(monkeypatch):
+    monkeypatch.setattr(voice, "CLOSE_WAIT_S", 0.2)
+    conn = _Chatty({"type": "audio_delta", "playback_id": "p9",
+                    "audio": base64.b64encode(b"\x01\x00" * 480).decode()})
+    call = voice._Call()
+    call.take({"type": "call_ended", "reason": "goodbye"}, 0.0)
+    evidence = voice.Evidence(True, None, None)
+
+    assert _bounded(lambda: voice._hang_up(conn, call, voice.PlaybackSink(0.0),
+                                           time.monotonic(), evidence))
+    assert conn.sent == [] and not evidence.call_stop_sent
 
 
 def test_digital_silence_between_replies_does_not_hold_the_call_open(daemon):
@@ -868,15 +1156,30 @@ _SHIPPED = ["--suite", "grok_voice", "--profile", "host_readonly", "--profile",
 
 
 def test_the_runner_dry_runs_the_shipped_suite_with_and_without_the_flag(capsys):
-    assert run_eval.main(_SHIPPED) == 4
+    # The camera hand-off's two cases open no call, so they run either way.
+    assert run_eval.main(_SHIPPED) == 0
     out = capsys.readouterr().out
-    assert "0 case trial(s) would run" in out and "8 voice trial(s) would skip" in out
+    assert "2 case trial(s) would run" in out and "8 voice trial(s) would skip" in out
     assert out.count("skip: needs --voice") == 8
 
     assert run_eval.main(_SHIPPED + ["--voice"]) == 0
     out = capsys.readouterr().out
-    assert "8 case trial(s) would run" in out and "skip: needs --voice" not in out
-    assert "8 case trial(s) would each open one paid Grok voice call" in out
+    assert "10 case trial(s) would run" in out and "skip: needs --voice" not in out
+    assert "8 case trial(s) would each open one paid voice call" in out
+
+
+def test_the_runner_dry_runs_the_greeting_suite_only_with_the_flag(capsys):
+    argv = ["--suite", "voice_greeting_goodbye", "--judge", "--dry-run"]
+
+    assert run_eval.main(argv) == 4
+    out = capsys.readouterr().out
+    assert "0 case trial(s) would run" in out and "6 voice trial(s) would skip" in out
+
+    assert run_eval.main(argv + ["--voice"]) == 0
+    out = capsys.readouterr().out
+    assert "6 case trial(s) would run" in out
+    assert "6 case trial(s) would each open one paid voice call" in out
+    assert out.count("[host_readonly; run]") == 6
 
 
 def test_driving_voice_cases_needs_the_isolation_attestations(capsys):

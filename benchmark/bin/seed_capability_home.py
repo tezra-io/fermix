@@ -60,11 +60,14 @@ dir that does not exist (`claude_config_dir`), so Claude Code is never ready
 whether or not its program is installed. The harness consent is pre-granted
 for every home (below).
 
-`--voice` turns Grok voice on for the `drive: voice` suite (grok_voice.yaml):
-`[fermix_core.realtime]` enabled, engine `xai_realtime`, model `grok-voice-3.0`.
-The voice key is the xAI provider's api_key slot, filled at daemon boot from
-`XAI_API_KEY` (config/runtime.exs) and never written here; the realtime socket
-starts only in a daemon run with realtime on (`mix fermix.dev`, not
+`--voice` turns voice on for the `drive: voice` suites (grok_voice.yaml,
+voice_greeting_goodbye.yaml): `[fermix_core.realtime]` enabled with one task
+engine and its one model. `--voice-engine` picks it: `xai_realtime` (Grok Voice,
+`grok-voice-3.0`, the default) or `openai_live` (GPT-Live, `gpt-live-1`), so a
+suite that covers both engines runs once per engine. The voice key is the
+engine's provider api_key slot, filled at daemon boot from `XAI_API_KEY` or
+`OPENAI_API_KEY` (config/runtime.exs) and never written here; the realtime
+socket starts only in a daemon run with realtime on (`mix fermix.dev`, not
 `--no-realtime`) and that key present.
 """
 
@@ -145,12 +148,16 @@ _OAUTH_PROFILE_KEY = {
 }
 # Providers whose api_key the daemon reads from an environment variable at boot
 # (config/runtime.exs); the explicit/CI mode supports exactly these + ollama.
-# Grok voice (M70) for `--voice`: the engine's one shipped model. The parser
-# refuses a Grok model under the default `openai_realtime` engine, so the engine
-# is written beside the model; the provider follows from the engine.
-VOICE_ENGINE = "xai_realtime"
-VOICE_MODEL = "grok-voice-3.0"
-VOICE_KEY_ENV = "XAI_API_KEY"
+# The task engines `--voice` can turn on (M70 Grok Voice, M41 GPT-Live): each
+# engine's one shipped model and the daemon environment variable its provider's
+# api_key slot is filled from at boot. The parser refuses either model under the
+# default `openai_realtime` engine, so the engine is written beside the model;
+# the provider follows from the engine.
+VOICE_ENGINES = {
+    "xai_realtime": ("grok-voice-3.0", "XAI_API_KEY"),
+    "openai_live": ("gpt-live-1", "OPENAI_API_KEY"),
+}
+DEFAULT_VOICE_ENGINE = "xai_realtime"
 # A spend bound for a disposable home: a voice case's call lasts a few minutes
 # at most, and the daemon ends one that outlives this whatever its client does.
 VOICE_MAX_SESSION_MINUTES = 5
@@ -243,7 +250,7 @@ def dev_provider(dev: dict, pid: str) -> tuple[str, dict, str | None]:
 
 def render_config(
     home: str, pid: str, blk: dict, profile: str | None,
-    allowed_roots: tuple[str, ...] = (), explicit: bool = False, voice: bool = False,
+    allowed_roots: tuple[str, ...] = (), explicit: bool = False, voice: str | None = None,
     cues: dict | None = None,
 ) -> str:
     workspace = os.path.join(home, "workspace")
@@ -388,7 +395,7 @@ def render_config(
     lines += ["[fermix_core.personalization]", 'user_name = "Eval Operator"',
               'timezone = "America/New_York"', 'communication_style = "concise"', ""]
     if voice:
-        lines += voice_lines()
+        lines += voice_lines(voice)
     if cues:
         lines += cue_lines(home, cues)
     return "\n".join(lines)
@@ -523,16 +530,21 @@ def write_cue_plugin(home: str) -> str:
     return path
 
 
-def voice_lines() -> list[str]:
-    """Grok voice on, for the `drive: voice` suite. Turning voice on is the one
-    human decision a voice case needs; the call's conversation stays the
-    product default (the chat), so the cases see what an owner's call does. No
-    other gate is granted: computer history stays off (above), so nothing it
-    guards can reach the voice provider."""
-    return ["# Grok voice for drive: voice (grok_voice.yaml). The key is XAI_API_KEY on the",
-            "# daemon process, read at boot; the socket needs a daemon run with realtime on.",
-            "[fermix_core.realtime]", "enabled = true", f'engine = "{VOICE_ENGINE}"',
-            f'model = "{VOICE_MODEL}"', f"max_session_minutes = {VOICE_MAX_SESSION_MINUTES}",
+def voice_lines(engine: str) -> list[str]:
+    """Voice on with one task engine, for the `drive: voice` suites. Turning
+    voice on is the one human decision a voice case needs, on either engine:
+    neither has a consent of its own (`screen_share` is read only by the
+    Realtime engine, `camera_share` only by a phone's call). The call's
+    conversation stays the product default (the chat), so the cases see what an
+    owner's call does. No other gate is granted: computer history stays off
+    (above), so nothing it guards can reach the voice provider."""
+    if engine not in VOICE_ENGINES:
+        raise ValueError(f"voice engine must be one of {sorted(VOICE_ENGINES)}, got {engine!r}")
+    model, key_env = VOICE_ENGINES[engine]
+    return [f"# Voice for drive: voice ({engine}). The key is {key_env} on the daemon",
+            "# process, read at boot; the socket needs a daemon run with realtime on.",
+            "[fermix_core.realtime]", "enabled = true", f'engine = "{engine}"',
+            f'model = "{model}"', f"max_session_minutes = {VOICE_MAX_SESSION_MINUTES}",
             ""]
 
 
@@ -767,8 +779,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--allow-root", dest="allow_roots", action="append", default=[],
                         help="absolute path appended to sandbox allowed_roots (repeatable)")
     parser.add_argument("--voice", action="store_true",
-                        help="turn Grok voice on for the drive: voice suite (the daemon needs "
-                             f"{VOICE_KEY_ENV} in its environment and realtime on)")
+                        help="turn voice on for the drive: voice suites (the daemon needs the "
+                             "engine's key in its environment and realtime on)")
+    parser.add_argument("--voice-engine", dest="voice_engine", choices=sorted(VOICE_ENGINES),
+                        help=f"with --voice: the task engine (default {DEFAULT_VOICE_ENGINE}; "
+                             + ", ".join(f"{engine} needs {key}" for engine, (_model, key)
+                                         in sorted(VOICE_ENGINES.items())) + ")")
     parser.add_argument("--cues", action="store_true",
                         help="turn cues on for the cue suites (door, sources, default filter "
                              "model; seed_cues.exs then makes the watchers); off by default")
@@ -817,6 +833,9 @@ def main() -> None:
         die("use --provider/--model (explicit mode) or --dev-provider, not both")
     if not args.cues and (args.cue_mandates or args.cue_filter_model):
         die("--cue-mandates and --cue-filter-model need --cues")
+    if args.voice_engine and not args.voice:
+        die("--voice-engine needs --voice")
+    voice_engine = (args.voice_engine or DEFAULT_VOICE_ENGINE) if args.voice else None
     allowed_roots = tuple(
         os.path.abspath(os.path.expanduser(p)) for p in args.allow_roots)
 
@@ -848,7 +867,7 @@ def main() -> None:
     else:
         clear_cue_fixtures(home)
     config = render_config(home, pid, blk, profile, allowed_roots,
-                           explicit=bool(args.provider), voice=args.voice, cues=cues)
+                           explicit=bool(args.provider), voice=voice_engine, cues=cues)
     if args.extra_config:
         config += read_extra_config(config, args.extra_config)
     with open(os.path.join(home, "config.toml"), "w", encoding="utf-8") as fh:
@@ -867,9 +886,10 @@ def main() -> None:
         print(f"cues: door on 127.0.0.1:{cues['door_port']}, filter "
               f"{'/'.join(cues['filter'])}, mandates {'on' if cues['mandates'] else 'off'}; "
               "run seed_cues.exs next, daemon still down")
-    if args.voice:
-        print(f"voice: {VOICE_MODEL} on; {VOICE_KEY_ENV} must be set on the daemon process, "
-              "started with realtime on (mix fermix.dev, not --no-realtime)")
+    if voice_engine:
+        model, key_env = VOICE_ENGINES[voice_engine]
+        print(f"voice: {voice_engine} ({model}) on; {key_env} must be set on the daemon "
+              "process, started with realtime on (mix fermix.dev, not --no-realtime)")
 
 
 if __name__ == "__main__":

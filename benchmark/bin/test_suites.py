@@ -534,7 +534,9 @@ def test_the_shipped_watches_each_name_one_requirement_and_a_reason():
                for suite in suites.load_all(SUITES_DIR, include_dangerous=True)
                for scenario in suite.scenarios for case in scenario.cases if case.watch}
     assert {case_id: [n for n, _reason in watch] for case_id, watch in watches.items()} == \
-        {"people_and_customer_update": [4], "hiring_decision": [2]}
+        {"people_and_customer_update": [4], "hiring_decision": [2],
+         # voice_greeting_goodbye.yaml: GPT-Live's greeting and the owner's name
+         "greeted_then_asked_if_heard": [1, 2], "greeted_then_asked_about_the_rota": [1, 2]}
     assert all("Revisit when the candidate model changes." in reason
                for watch in watches.values() for _n, reason in watch)
 
@@ -626,7 +628,12 @@ def test_the_shipped_numbered_rubrics_parse():
                       "batteries": 2, "garden_and_kitchen": 3, "groceries": 2,
                       "hardware": 2, "landing_page": 2, "newsletter": 2,
                       "oat_milk_route_sanity": 2, "packing": 2, "reading": 2,
-                      "site_and_app": 3}
+                      "site_and_app": 3,
+                      # voice_greeting_goodbye.yaml
+                      "greeted_then_asked_if_heard": 4,
+                      "greeted_then_asked_about_the_rota": 3, "okay_thanks_bye": 2,
+                      "alright_talk_to_you_later": 2, "say_bye_to_the_van_driver": 2,
+                      "dont_hang_up_yet": 2}
 
 
 if __name__ == "__main__":

@@ -2,12 +2,17 @@
 #
 # `voice_in_chat` drives what a hand-off persists, typed, because no driver
 # spoke the voice wire. `drive: voice` does (bin/evallib/voice.py): the runner
-# is the Mac app's call on `<FERMIX_HOME>/realtime.sock`, protocol v3. It
+# is the Mac app's call on `<FERMIX_HOME>/realtime.sock`, protocol v5. It
 # streams fixture audio (suites/fixtures/voice/, made by
 # bin/make_voice_fixtures.py) as the microphone at real-time pace, silence
 # included, plays the voice's audio on a simulated speaker that sends
 # `playback_progress` for every playback id, records every frame, and ends the
-# call once every task ended and the voice has gone quiet. So each case proves
+# call once every task ended and the voice has gone quiet. The voice greets the
+# owner first (M96), and the runner waits for that greeting to finish before
+# the first clip, so no clip here is said over it; the greeting is gated in
+# voice_greeting_goodbye.yaml, and nothing here counts on the owner speaking
+# first. A v5 call can also end itself on a goodbye, which no clip here is, so
+# the cases that list forbidden frames forbid `call_ended` too. So each case proves
 # the half no ExUnit suite can: Grok, the real provider model, hears the
 # request, decides to hand it to Fermix with `fermix_task`, and Fermix's task
 # runs through the real VoiceBridge and agent loop to an answer the voice says.
@@ -91,7 +96,7 @@ scenarios:
           wire:
             engine: xai_realtime
             events_all: [call_ready, caption, audio_delta, task]
-            events_none: [error]
+            events_none: [error, call_ended]
             task_statuses_all: [completed]
             task_statuses_none: [failed, cancelled, superseded]
             max_tasks: 1
@@ -113,7 +118,7 @@ scenarios:
           wire:
             engine: xai_realtime
             events_all: [call_ready, caption, audio_delta, task]
-            events_none: [error]
+            events_none: [error, call_ended]
             task_statuses_all: [completed]
             task_statuses_none: [failed, cancelled, superseded]
             max_tasks: 1
