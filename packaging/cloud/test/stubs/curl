@@ -5,25 +5,85 @@
 # release file on GitHub answers /etc/fermix-test/release/v<version>/<file>,
 # each a 404 while the file is not there (what the regular installer's
 # --always-on fetches); https://pkgs.tailscale.com/ is fetched for real, with
-# the curl the tailnet scenario installs; any other address is refused, as
-# one that does not resolve is. Logs every call as a GET of its URL.
+# the curl the tailnet scenario installs; the instance metadata service and
+# AWS STS answer what the s3-backups scenario put in /etc/fermix-test/imds/
+# and /etc/fermix-test/sts/ (E1's credentials helper); any other address is
+# refused, as one that does not resolve is. Logs every call as its method and
+# URL, every argument list to curl-argv (where no secret may be), and for
+# STS the access key its standard input signed with and the parameters it
+# sent.
 set -eu
 log=/var/log/fermix-test
-url="" out=""
+fixtures=/etc/fermix-test
+url="" out="" method=GET config="" params=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -o) out=$2; shift 2 ;;
-    --proto) shift 2 ;;
+    --proto | --max-time | -H | -w | --aws-sigv4) shift 2 ;;
+    -X) method=$2; shift 2 ;;
+    -K)
+      [ "$2" = - ] || { echo "curl stand-in: -K takes only -" >&2; exit 2; }
+      config=$(cat)
+      shift 2
+      ;;
+    -d | --data-urlencode) method=POST params="$params$2
+"; shift 2 ;;
     http://* | https://*) url=$1; shift ;;
     --*) echo "curl stand-in: unexpected option $1" >&2; exit 2 ;;
     -*) shift ;;
     *) echo "curl stand-in: unexpected argument" >&2; exit 2 ;;
   esac
 done
-printf 'curl GET %s\n' "$url" >>"$log/calls.log"
+printf 'curl %s %s\n' "$method" "$url" >>"$log/calls.log"
+printf '%s\n' "$0 $*" >>"$log/curl-argv"
+
+# Writes $1 to -o's file, or prints it.
+answer() {
+  if [ -n "$out" ]; then cat "$1" >"$out"; else cat "$1"; fi
+}
+
+# The metadata service: a token for a PUT, then paths read with it, which
+# must arrive on standard input.
+imds() {
+  [ ! -f "$fixtures/imds/unreachable" ] || {
+    echo "curl: (28) Connection timed out after 5002 milliseconds" >&2
+    exit 28
+  }
+  if [ "$method" = PUT ]; then
+    printf 'invented-imds-token'
+    return 0
+  fi
+  case "$config" in
+    *'X-aws-ec2-metadata-token: invented-imds-token'*) ;;
+    *) echo "curl: (22) The requested URL returned error: 401" >&2; exit 22 ;;
+  esac
+  case "$1" in
+    /latest/meta-data/iam/security-credentials/) file=$fixtures/imds/role ;;
+    /latest/meta-data/iam/security-credentials/*) file=$fixtures/imds/credentials.json ;;
+    *) file=/nonexistent ;;
+  esac
+  [ -f "$file" ] || { echo "curl: (22) The requested URL returned error: 404" >&2; exit 22; }
+  answer "$file"
+}
+
+# STS: the request's parameters and the key its standard input signed with
+# are recorded; the answer and its status are the fixture's.
+sts() {
+  [ ! -f "$fixtures/sts/unreachable" ] || {
+    echo "curl: (6) Could not resolve host: sts.eu-west-1.amazonaws.com" >&2
+    exit 6
+  }
+  printf '%s' "$params" >"$log/sts-params"
+  printf '%s\n' "$config" | sed -n 's/^user = "\([^:]*\):.*/\1/p' >"$log/sts-signed-with"
+  printf '%s\n' "$config" | sed -n 's/^header = "x-amz-security-token: \(.*\)"$/\1/p' >"$log/sts-token-header"
+  answer "$fixtures/sts/answer.xml"
+  if [ -f "$fixtures/sts/status" ]; then cat "$fixtures/sts/status"; else printf 200; fi
+}
 
 [ ! -f /etc/fermix-test/install-unreachable ] || exit 6
 case "$url" in
+  http://169.254.169.254/*) imds "${url#http://169.254.169.254}"; exit 0 ;;
+  https://sts.*.amazonaws.com/) sts; exit 0 ;;
   https://fermix.ai/install) body=/cloud/test/fake-install.sh ;;
   https://fermix.ai/install/releases) body=/etc/fermix-test/releases ;;
   https://github.com/tezra-io/fermix/releases/download/*)
@@ -33,4 +93,4 @@ case "$url" in
   *) exit 6 ;;
 esac
 [ -f "$body" ] || exit 22
-if [ -n "$out" ]; then cat "$body" >"$out"; else cat "$body"; fi
+answer "$body"

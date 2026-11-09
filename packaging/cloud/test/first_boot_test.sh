@@ -8,9 +8,9 @@
 # a bucket, a restore host, the failures that stop the
 # first boot, an Ubuntu host with swap of its own, the update's cases (the
 # night's, the follow run's and their lock),
-# a host joining a tailnet with Tailscale's live signing key, and the
+# a host joining a tailnet with Tailscale's live signing key, the
 # distribution's Chromium installed for real and started headless as the
-# engine account. The existing host also reaches its first boot through the
+# engine account, and a server whose infrastructure set its S3 bucket (E1). The existing host also reaches its first boot through the
 # regular installer (scripts/install.sh --always-on), which checks this
 # script against a stand-in digest table before running it.
 # The host part needs shellcheck, dash, script(1) and perl, on macOS or
@@ -55,7 +55,7 @@ sh "$here/on_host.sh" || fail "a host check failed; its FAIL lines above say whi
 [ "$mode" = all ] || exit 0
 
 status=0
-for scenario in existing-host restore failures ubuntu updates tailnet chromium; do
+for scenario in existing-host restore failures ubuntu updates tailnet chromium s3-backups; do
   echo "--- $scenario"
   # Chromium's own sandbox needs the user namespaces a server's kernel gives
   # an unprivileged account; Docker's default seccomp profile refuses them, so

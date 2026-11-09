@@ -22,7 +22,10 @@
 # 04:00 UTC.
 #
 # Options: --restore, --snapshot-bucket NAME --snapshot-region REGION
-# (together), --version X (the release to install: the one the computer that
+# (together; or the bucket the server's infrastructure set, from
+# /etc/fermix/snapshot-destination, which fermix-server-aws's user data writes:
+# then the snapshots are signed with the server's instance role through a root
+# credentials helper, and flags that name another bucket are refused), --version X (the release to install: the one the computer that
 # sets the server up runs; the latest without it), --tailscale (join the
 # owner's tailnet before enrolling, with the auth key in TS_AUTHKEY or asked
 # for on the terminal without echo). It never prints the code or the key,
@@ -88,6 +91,13 @@ TAILSCALE_UP_TIMEOUT=2m
 TS_KEY_PREFIX=tskey-
 TS_KEY_MIN=20
 TS_KEY_MAX=200
+# E1: where the server's infrastructure names its snapshot bucket, and the
+# root helper that hands the engine account a one-hour session of the
+# snapshot writer role for it, through a directory that account may only
+# read. The engine account never reaches the metadata service itself.
+SNAPSHOT_DESTINATION=/etc/fermix/snapshot-destination
+CREDENTIALS_HELPER=/usr/local/sbin/fermix-snapshot-credentials
+CREDENTIALS_DIR=/run/fermix-snapshots
 
 CODE=""
 RELEASE=""
@@ -95,6 +105,7 @@ RELEASE_GIVEN=0
 RESTORE=0
 SNAPSHOT_BUCKET=""
 SNAPSHOT_REGION=""
+SNAPSHOT_ROLE_ARN=""
 HOME_EXISTS=0
 # What an existing home is (read_home): kept as it runs, or a candidate that
 # enrolls again with a new code. KEPT_HOME_IS says what a kept home is.
@@ -175,6 +186,39 @@ parse_args() {
     TS_KEY=""
     fail "TS_AUTHKEY holds a Tailscale auth key, but --tailscale was not given: add --tailscale to join this server to your tailnet, or leave TS_AUTHKEY out."
   fi
+}
+
+# The one line KEY=value of the destination file, exactly once.
+destination_field() {
+  [ "$(grep -c "^$1=" "$SNAPSHOT_DESTINATION")" -eq 1 ] || return 1
+  sed -n "s/^$1=//p" "$SNAPSHOT_DESTINATION"
+}
+
+# E1: the bucket the server's infrastructure set, read as --snapshot-bucket
+# and --snapshot-region are, before anything is installed. Root's file, which
+# no other account may change; flags that name another bucket or region are
+# refused, so there is one path.
+read_snapshot_destination() {
+  [ -e "$SNAPSHOT_DESTINATION" ] || return 0
+  case "$(stat -c '%u %A' "$SNAPSHOT_DESTINATION")" in
+    "0 -rw-r--r--" | "0 -rw-------" | "0 -r--r--r--" | "0 -r--------") ;;
+    *) fail "$SNAPSHOT_DESTINATION is not root's alone (owned by root, writable by no other account), so the bucket it names is not used." ;;
+  esac
+  bucket=$(destination_field bucket) || bucket=""
+  matches "$bucket" '^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$' ||
+    fail "$SNAPSHOT_DESTINATION names no S3 bucket on one bucket= line."
+  region=$(destination_field region) || region=""
+  matches "$region" '^[a-z0-9][a-z0-9-]{0,31}$' ||
+    fail "$SNAPSHOT_DESTINATION names no region on one region= line."
+  role=$(destination_field role_arn) || role=""
+  matches "$role" '^arn:aws[a-z-]*:iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_/-]+$' ||
+    fail "$SNAPSHOT_DESTINATION names no IAM role on one role_arn= line."
+  if [ -n "$SNAPSHOT_BUCKET" ] && { [ "$SNAPSHOT_BUCKET" != "$bucket" ] || [ "$SNAPSHOT_REGION" != "$region" ]; }; then
+    fail "--snapshot-bucket and --snapshot-region name another bucket than $SNAPSHOT_DESTINATION, which this server's infrastructure wrote: leave them out to use $bucket in $region."
+  fi
+  SNAPSHOT_BUCKET=$bucket
+  SNAPSHOT_REGION=$region
+  SNAPSHOT_ROLE_ARN=$role
 }
 
 os_field() {
@@ -1066,6 +1110,224 @@ EOF
   systemctl start "user@$ENGINE_UID.service"
 }
 
+# 6b. E1, on a server whose infrastructure set the bucket: the root helper
+# that assumes the snapshot writer role with the instance role's credentials
+# (root alone reaches the metadata service) and hands the engine account that
+# one-hour session, which may only put objects into the bucket. It runs once
+# now, and the run must work, then every 15 minutes from a root timer, so a
+# session always has 45 minutes left. The engine reads
+# $CREDENTIALS_DIR/credentials.json (root:fermix 0640) at each upload, and the
+# last failed run's one sentence from $CREDENTIALS_DIR/error.
+install_snapshot_credentials() {
+  [ -n "$SNAPSHOT_ROLE_ARN" ] || return 0
+  say "Setting up S3 backups to $SNAPSHOT_BUCKET, signed with this server's instance role"
+  write_credentials_helper
+  write_file /etc/tmpfiles.d/fermix-snapshot-credentials.conf 0644 <<EOF
+d $CREDENTIALS_DIR 0750 root $ENGINE_USER -
+EOF
+  install -d -m 0750 -o root -g "$ENGINE_USER" "$CREDENTIALS_DIR"
+  chown root:"$ENGINE_USER" "$CREDENTIALS_DIR"
+  chmod 0750 "$CREDENTIALS_DIR"
+  write_file "$UNIT_DIR/fermix-snapshot-credentials.service" 0644 <<EOF
+[Unit]
+Description=Fermix: hand Fermix a one-hour S3 session of this server's snapshot writer role
+Wants=network-online.target
+After=network-online.target fermix-metadata-block.service
+
+[Service]
+Type=oneshot
+ExecStart=$CREDENTIALS_HELPER
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=$CREDENTIALS_DIR
+EOF
+  write_file "$UNIT_DIR/fermix-snapshot-credentials.timer" 0644 <<'EOF'
+[Unit]
+Description=Fermix: a fresh S3 session for Fermix's snapshots every 15 minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=15min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
+EOF
+  "$CREDENTIALS_HELPER" ||
+    fail "The S3 credentials helper could not hand Fermix a session, so S3 backups would fail; its message above says why. Check that this server's stack applied enable_s3_backups, then run this command again."
+  systemctl daemon-reload
+  systemctl --quiet enable --now fermix-snapshot-credentials.timer
+}
+
+# The helper: the role, region, directory and group first boot read, then a
+# fixed body. Every secret it handles reaches curl on its standard input
+# (-K -), never its command line, which any account may read.
+write_credentials_helper() {
+  install -d -m 0755 "$(dirname "$CREDENTIALS_HELPER")"
+  {
+    cat <<EOF
+#!/bin/sh
+# Fermix Always On: hands Fermix's account a one-hour session of the snapshot
+# writer role, which may only put objects into this server's snapshot bucket.
+# fermix-snapshot-credentials.timer runs it every 15 minutes, as root.
+# Written by Fermix's first boot, which writes it again whenever it runs.
+set -eu
+
+ROLE_ARN=$SNAPSHOT_ROLE_ARN
+REGION=$SNAPSHOT_REGION
+OUT_DIR=$CREDENTIALS_DIR
+ENGINE_GROUP=$ENGINE_USER
+EOF
+    cat <<'FERMIX_CREDENTIALS'
+IMDS=http://169.254.169.254
+SESSION_SECONDS=3600
+SESSION_NAME=fermix-snapshots
+MAX_SAID=300
+WORK=""
+TOKEN=""
+KEY_ID=""
+SECRET=""
+SESSION=""
+
+finish() {
+  if [ -n "$WORK" ]; then rm -rf "$WORK"; fi
+}
+
+# One sentence, kept for the engine to show beside its own, and a non-zero
+# exit. A sentence that cannot be kept still reaches the journal.
+fail() {
+  printf 'fermix snapshot credentials: %s\n' "$1" >&2
+  if [ -n "$WORK" ] && printf '%s\n' "$1" >"$WORK/error" && chmod 0640 "$WORK/error" &&
+    chgrp "$ENGINE_GROUP" "$WORK/error"; then
+    mv -fT "$WORK/error" "$OUT_DIR/error" || true
+  fi
+  exit 1
+}
+
+# Whole-line match of one value against an extended regular expression.
+matches() {
+  case "$1" in *'
+'*) return 1 ;; esac
+  printf '%s\n' "$1" | grep -Eq "$2"
+}
+
+# A value made only of the characters AWS writes in a key, a secret or a
+# token, of at most $2 bytes.
+plain() {
+  [ -n "$1" ] && [ "${#1}" -le "$2" ] && matches "$1" '^[A-Za-z0-9/+=]+$'
+}
+
+# curl's own words for a failed call, one line, bounded.
+curl_said() {
+  tr '\n' ' ' <"$WORK/curl.err" | sed 's/^curl: //; s/^([0-9]*) //; s/ *$//' | cut -c1-"$MAX_SAID"
+}
+
+# A metadata path into the file $2, with the session token on curl's
+# standard input.
+imds() {
+  printf 'header = "X-aws-ec2-metadata-token: %s"\n' "$TOKEN" |
+    curl -fsS --max-time 5 -K - -o "$2" "$IMDS$1" 2>"$WORK/curl.err"
+}
+
+# The field $1 of the JSON the metadata service answers, one per line.
+imds_field() {
+  sed -n 's/^ *"'"$1"'" *: *"\([^"]*\)".*/\1/p' "$WORK/instance.json" | head -n 1
+}
+
+# The element $1 of STS's XML answer.
+sts_field() {
+  tr -d '\n' <"$WORK/sts.xml" | sed -n 's/.*<'"$1"'>\([^<]*\)<\/'"$1"'>.*/\1/p'
+}
+
+instance_credentials() {
+  TOKEN=$(curl -fsS --max-time 5 -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 300' \
+    "$IMDS/latest/api/token" 2>"$WORK/curl.err") ||
+    fail "The instance metadata service did not answer ($(curl_said)), so no S3 session was made."
+  imds /latest/meta-data/iam/security-credentials/ "$WORK/role" ||
+    fail "This server's instance metadata names no instance role ($(curl_said)), so no S3 session was made."
+  role=$(head -n 1 "$WORK/role")
+  matches "$role" '^[A-Za-z0-9+=,.@_-]+$' ||
+    fail "This server's instance metadata names no instance role, so no S3 session was made."
+  imds "/latest/meta-data/iam/security-credentials/$role" "$WORK/instance.json" ||
+    fail "The instance metadata service gave no credentials for the role $role ($(curl_said))."
+  KEY_ID=$(imds_field AccessKeyId)
+  SECRET=$(imds_field SecretAccessKey)
+  SESSION=$(imds_field Token)
+  if [ "$(imds_field Code)" != Success ] || ! plain "$KEY_ID" 128 || ! plain "$SECRET" 128 ||
+    ! plain "$SESSION" 8192; then
+    fail "The instance role's credentials are not in the shape AWS writes, so no S3 session was made."
+  fi
+}
+
+# sts:AssumeRole of the snapshot writer, signed by curl (SigV4) with the
+# instance role's credentials, which reach it on its standard input.
+assume_role() {
+  status=$(printf 'user = "%s:%s"\nheader = "x-amz-security-token: %s"\n' "$KEY_ID" "$SECRET" "$SESSION" |
+    curl -sS --max-time 30 --proto '=https' -K - --aws-sigv4 "aws:amz:$REGION:sts" \
+      -d Action=AssumeRole -d Version=2011-06-15 --data-urlencode "RoleArn=$ROLE_ARN" \
+      -d "RoleSessionName=$SESSION_NAME" -d "DurationSeconds=$SESSION_SECONDS" \
+      -o "$WORK/sts.xml" -w '%{http_code}' "https://sts.$REGION.amazonaws.com/" 2>"$WORK/curl.err") ||
+    fail "AWS STS could not be reached ($(curl_said)), so no S3 session was made."
+  KEY_ID="" SECRET="" SESSION=""
+  [ "$status" = 200 ] || sts_refused "$status"
+}
+
+# STS's own Code and Message, its escapes undone, bounded.
+sts_refused() {
+  code=$(sts_field Code | cut -c1-80)
+  message=$(sts_field Message | sed "s/&quot;/\"/g; s/&apos;/'/g; s/&lt;/</g; s/&gt;/>/g; s/&amp;/\\&/g" |
+    cut -c1-"$MAX_SAID")
+  fail "AWS STS refused the snapshot session (HTTP $1 ${code:-with no code}: ${message:-no message})."
+}
+
+# The session, as the engine reads it, with the account the role is in: the
+# bucket's owner the engine names on every upload. Replaced whole, by rename.
+write_session() {
+  key_id=$(sts_field AccessKeyId)
+  secret=$(sts_field SecretAccessKey)
+  session=$(sts_field SessionToken)
+  expiration=$(sts_field Expiration)
+  account=$(printf '%s\n' "$ROLE_ARN" | cut -d: -f5)
+  if ! plain "$key_id" 128 || ! plain "$secret" 128 || ! plain "$session" 8192 ||
+    ! matches "$expiration" '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'; then
+    fail "AWS STS answered with no session in its shape, so none was handed to Fermix."
+  fi
+  printf '{"access_key_id":"%s","secret_access_key":"%s","session_token":"%s","expiration":"%s","account_id":"%s"}\n' \
+    "$key_id" "$secret" "$session" "$expiration" "$account" >"$WORK/credentials.json"
+  chmod 0640 "$WORK/credentials.json"
+  chgrp "$ENGINE_GROUP" "$WORK/credentials.json"
+  mv -fT "$WORK/credentials.json" "$OUT_DIR/credentials.json" ||
+    fail "The S3 session could not be written to $OUT_DIR/credentials.json."
+  rm -f "$OUT_DIR/error"
+  printf '==> Fermix holds an S3 session until %s\n' "$expiration"
+}
+
+main() {
+  umask 077
+  PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+  LC_ALL=C
+  export PATH LC_ALL
+  cd /
+  trap finish EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  [ "$(id -u)" -eq 0 ] || fail "Run this as root, as fermix-snapshot-credentials.timer does."
+  [ "$#" -eq 0 ] || fail "fermix-snapshot-credentials takes no argument."
+  # The work directory is beside the output, so each file lands by rename.
+  WORK=$(mktemp -d "$OUT_DIR/.work.XXXXXX") ||
+    fail "$OUT_DIR is missing or not root's to write, so no S3 session was made."
+  instance_credentials
+  assume_role
+  write_session
+}
+
+main "$@"
+FERMIX_CREDENTIALS
+  } | write_file "$CREDENTIALS_HELPER" 0755
+}
+
 # 7. A candidate that enrolls again: its engine stops first, since the
 # enrollment replaces the candidate only while no engine runs in the home;
 # the service starts again at step 8, or right after a refused enrollment
@@ -1087,6 +1349,7 @@ enroll() {
   if [ -n "$SNAPSHOT_BUCKET" ]; then
     set -- "$@" --snapshot-bucket "$SNAPSHOT_BUCKET" --snapshot-region "$SNAPSHOT_REGION"
   fi
+  if [ -n "$SNAPSHOT_ROLE_ARN" ]; then set -- "$@" --snapshot-instance-role; fi
   as_engine "$@" || enroll_refused
 }
 
@@ -1288,6 +1551,7 @@ main() {
 
   parse_args "$@"
   check_host
+  read_snapshot_destination
   WORK=$(mktemp -d /run/fermix-always-on.XXXXXX)
   # A first boot often finds unattended upgrades holding the package lock; the
   # installer's apt-get waits for it too.
@@ -1314,6 +1578,7 @@ main() {
   schedule_updates
   create_engine_user
   if [ "$TAILSCALE" -eq 1 ]; then join_tailnet; fi
+  install_snapshot_credentials
   if [ "$RESTORE" -eq 1 ] && [ "$HOME_EXISTS" -eq 0 ]; then
     finish_restore
   else

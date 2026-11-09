@@ -47,9 +47,18 @@
 #   chromium       the distribution's Chromium installed for real and started
 #                  headless as the engine account, the way the engine's
 #                  launcher starts it, its own sandbox on
+#   s3-backups     E1: a server whose infrastructure set its bucket
+#                  (/etc/fermix/snapshot-destination): enrolled with it and
+#                  --snapshot-instance-role, the root credentials helper and
+#                  its timer, the session the engine account reads and cannot
+#                  change, no secret in any command line; each failure of
+#                  the helper in its own words, kept for the engine; a first
+#                  boot whose helper fails stopped before enrolling; flags
+#                  naming another bucket and a destination not root's alone
+#                  or not in its shape refused; a restore host
 set -eu
 
-SCENARIO=${1:?scenario: existing-host, restore, failures, ubuntu, updates, tailnet or chromium}
+SCENARIO=${1:?scenario: existing-host, restore, failures, ubuntu, updates, tailnet, chromium or s3-backups}
 FIRST_BOOT=/cloud/first-boot.sh
 INSTALLER=/install.sh
 # Where the installer's mktemp makes its directory, so a run can be seen to
@@ -1187,6 +1196,225 @@ chromium() {
   [ "$chromium_status" -eq 0 ] || tail -n 20 /tmp/chromium.err | sed 's/^/    /'
 }
 
+# -- s3-backups (E1) -----------------------------------------------------------
+
+DESTINATION=/etc/fermix/snapshot-destination
+HELPER=/usr/local/sbin/fermix-snapshot-credentials
+SESSIONS=/run/fermix-snapshots
+S3_BUCKET=fermix-server-snapshots-111122223333-eu-west-1
+S3_ROLE=arn:aws:iam::111122223333:role/fermix-server/fermix-server-snapshot-writer
+# Invented values in AWS's shapes; nothing here is a secret.
+INSTANCE_KEY=ASIAINVENTEDINSTANCE1
+INSTANCE_SECRET=InventedInstanceSecretForTheContainerTest0123
+INSTANCE_TOKEN=IQoJInventedInstanceTokenForTheContainerTestOnly/0123456789+abcdef=
+SESSION_KEY=ASIAINVENTEDSESSION01
+SESSION_SECRET=InventedSessionSecretForTheContainerTest/0123
+SESSION_TOKEN=IQoJInventedSessionTokenForTheContainerTestOnly/0123456789+abcdef=
+
+# What fermix-server-aws's user data writes, as root.
+write_destination() {
+  install -d -m 0755 /etc/fermix
+  printf '# Written by fermix-server'"'"'s user data (enable_s3_backups).\nbucket=%s\nregion=eu-west-1\nrole_arn=%s\n' \
+    "$S3_BUCKET" "$S3_ROLE" >"$DESTINATION"
+  chmod 0644 "$DESTINATION"
+}
+
+# The metadata service's role and credentials, and STS's answer: a session
+# unless $1 names a status, with $2 as its body.
+serve_aws() {
+  rm -rf "$FIXTURES/imds" "$FIXTURES/sts"
+  mkdir -p "$FIXTURES/imds" "$FIXTURES/sts"
+  printf 'fermix-server-instance\n' >"$FIXTURES/imds/role"
+  cat >"$FIXTURES/imds/credentials.json" <<EOF
+{
+  "Code" : "Success",
+  "LastUpdated" : "2026-11-09T05:00:00Z",
+  "Type" : "AWS-HMAC",
+  "AccessKeyId" : "$INSTANCE_KEY",
+  "SecretAccessKey" : "$INSTANCE_SECRET",
+  "Token" : "$INSTANCE_TOKEN",
+  "Expiration" : "2026-11-09T11:00:00Z"
+}
+EOF
+  if [ -n "${1-}" ]; then
+    printf '%s' "$1" >"$FIXTURES/sts/status"
+    printf '%s' "$2" >"$FIXTURES/sts/answer.xml"
+    return 0
+  fi
+  cat >"$FIXTURES/sts/answer.xml" <<EOF
+<AssumeRoleResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+  <AssumeRoleResult>
+    <AssumedRoleUser>
+      <AssumedRoleId>AROAINVENTED:fermix-snapshots</AssumedRoleId>
+      <Arn>arn:aws:sts::111122223333:assumed-role/fermix-server-snapshot-writer/fermix-snapshots</Arn>
+    </AssumedRoleUser>
+    <Credentials>
+      <AccessKeyId>$SESSION_KEY</AccessKeyId>
+      <SecretAccessKey>$SESSION_SECRET</SecretAccessKey>
+      <SessionToken>$SESSION_TOKEN</SessionToken>
+      <Expiration>2026-11-09T06:00:00Z</Expiration>
+    </Credentials>
+  </AssumeRoleResult>
+</AssumeRoleResponse>
+EOF
+}
+
+# No instance secret or token in any command line, output or recorded call.
+secrets_absent_everywhere() {
+  for secret in "$INSTANCE_SECRET" "$INSTANCE_TOKEN" "$SESSION_SECRET" "$SESSION_TOKEN"; do
+    if grep -rqF -- "$secret" "$OUT" "$LOG/calls.log" "$LOG/curl-argv" "$LOG/exec-start" 2>/dev/null; then
+      fail "a secret of the instance role or the session appears in a command line, an output or a recorded call"
+      return 0
+    fi
+  done
+  pass "no secret of the instance role or the session is in a command line, an output or a recorded call"
+}
+
+# The helper, as the timer runs it: its exit in STATUS, its stderr in ERR.
+run_helper() {
+  reset_log
+  set +e
+  "$HELPER" </dev/null >"$OUT" 2>"$ERR"
+  STATUS=$?
+  set -e
+}
+
+# The helper refused with $1: its sentence on stderr and in the error file
+# the engine shows, the session it held before left until it runs out.
+helper_refused() {
+  if [ "$STATUS" -eq 1 ] && [ "$(cat "$ERR")" = "fermix snapshot credentials: $1" ] &&
+    [ "$(cat "$SESSIONS/error")" = "$1" ] && [ "$(mode_owner "$SESSIONS/error")" = '640 root:fermix' ] &&
+    [ -f "$SESSIONS/credentials.json" ] && [ -z "$(find "$SESSIONS" -name '.work.*')" ]; then
+    pass "$2"
+  else
+    fail "$2 (exit $STATUS)"
+    sed 's/^/    stderr: /' "$ERR"
+  fi
+}
+
+s3_backups() {
+  write_destination
+  serve_aws
+  printf 'enrolling|Enrolling with Invented Mac.\nenrolled|Enrolled with Invented Mac; waiting for its move.\n' \
+    >"$FIXTURES/phases"
+  run_apart env FERMIX_ENROLL_CODE="$CODE" sh "$FIRST_BOOT"
+  check "[ $STATUS -eq 0 ]" "a server whose infrastructure set its bucket enrolls (exit $STATUS)"
+  [ "$STATUS" -eq 0 ] || sed 's/^/    /' "$OUT" "$ERR"
+  ENGINE_UID=$(id -u fermix)
+  check "contains $LOG/calls.log 'fermix home enroll --code-file /run/fermix/enroll.code --snapshot-bucket $S3_BUCKET --snapshot-region eu-west-1 --snapshot-instance-role [as fermix]'" \
+    "it enrolls with the bucket and region the file names, signed with the instance role"
+  check "contains $OUT '==> Setting up S3 backups to $S3_BUCKET, signed with this server'\''s instance role'" \
+    "and says it sets S3 backups up"
+  check "[ \"\$(mode_owner $HELPER)\" = '755 root:root' ] && contains $HELPER 'ROLE_ARN=$S3_ROLE' && contains $HELPER 'REGION=eu-west-1'" \
+    "the helper is root's, with the role and region the file names"
+  check "[ \"\$(mode_owner $SESSIONS)\" = '750 root:fermix' ]" "the session directory is root's, read by fermix"
+  check "[ \"\$(cat /etc/tmpfiles.d/fermix-snapshot-credentials.conf)\" = 'd $SESSIONS 0750 root fermix -' ]" \
+    "and is recreated so at every boot"
+  printf '{"access_key_id":"%s","secret_access_key":"%s","session_token":"%s","expiration":"2026-11-09T06:00:00Z","account_id":"111122223333"}\n' \
+    "$SESSION_KEY" "$SESSION_SECRET" "$SESSION_TOKEN" >/tmp/session.expected
+  check "cmp -s $SESSIONS/credentials.json /tmp/session.expected && [ \"\$(mode_owner $SESSIONS/credentials.json)\" = '640 root:fermix' ]" \
+    "the first run wrote the session and its account, root's and read by fermix"
+  check "[ ! -e $SESSIONS/error ] && [ -z \"\$(find $SESSIONS -name '.work.*')\" ]" \
+    "and left no error and no work directory"
+  check "[ \"\$(cat $LOG/sts-signed-with)\" = $INSTANCE_KEY ] && [ \"\$(cat $LOG/sts-token-header)\" = '$INSTANCE_TOKEN' ]" \
+    "STS was asked with the instance role's credentials, on curl's standard input"
+  printf 'Action=AssumeRole\nVersion=2011-06-15\nRoleArn=%s\nRoleSessionName=fermix-snapshots\nDurationSeconds=3600\n' \
+    "$S3_ROLE" >/tmp/params.expected
+  check "cmp -s $LOG/sts-params /tmp/params.expected" "for the snapshot writer, for an hour"
+  cmp -s "$LOG/sts-params" /tmp/params.expected || diff /tmp/params.expected "$LOG/sts-params" | sed 's/^/    /' || true
+  service=/etc/systemd/system/fermix-snapshot-credentials.service
+  timer=/etc/systemd/system/fermix-snapshot-credentials.timer
+  check "contains $service 'ExecStart=$HELPER' && contains $service 'ReadWritePaths=$SESSIONS' && contains $timer 'OnUnitActiveSec=15min' && contains $timer 'OnBootSec=1min'" \
+    "a root timer runs it every 15 minutes, and a minute after each boot"
+  check "contains $LOG/calls.log 'systemctl --quiet enable --now fermix-snapshot-credentials.timer'" "the timer is on"
+  secrets_absent_everywhere
+  check "runuser -u fermix -- cat $SESSIONS/credentials.json >/dev/null" "the engine account reads the session"
+  check "! runuser -u fermix -- sh -c ': >$SESSIONS/credentials.json' 2>/dev/null && ! runuser -u fermix -- sh -c ': >$SESSIONS/other' 2>/dev/null" \
+    "and can change nothing there"
+
+  # Each failure of a later run: its own sentence, kept for the engine; the
+  # session the last run left stays until it runs out.
+  serve_aws 403 '<ErrorResponse><Error><Type>Sender</Type><Code>AccessDenied</Code><Message>User: arn:aws:sts::111122223333:assumed-role/fermix-server-instance/i-0 is not authorized to perform: sts:AssumeRole on resource: &quot;fermix-server-snapshot-writer&quot;</Message></Error></ErrorResponse>'
+  run_helper
+  helper_refused 'AWS STS refused the snapshot session (HTTP 403 AccessDenied: User: arn:aws:sts::111122223333:assumed-role/fermix-server-instance/i-0 is not authorized to perform: sts:AssumeRole on resource: "fermix-server-snapshot-writer").' \
+    "STS's refusal is kept in its own words"
+  serve_aws 200 '<AssumeRoleResponse><AssumeRoleResult></AssumeRoleResult></AssumeRoleResponse>'
+  run_helper
+  helper_refused "AWS STS answered with no session in its shape, so none was handed to Fermix." \
+    "an answer with no session is named"
+  serve_aws
+  touch "$FIXTURES/sts/unreachable"
+  run_helper
+  helper_refused "AWS STS could not be reached (Could not resolve host: sts.eu-west-1.amazonaws.com), so no S3 session was made." \
+    "STS out of reach, in curl's words"
+  serve_aws
+  rm "$FIXTURES/imds/role"
+  run_helper
+  helper_refused "This server's instance metadata names no instance role (The requested URL returned error: 404), so no S3 session was made." \
+    "a server with no instance role"
+  serve_aws
+  printf '{\n  "Code" : "Success",\n  "AccessKeyId" : "not one"\n}\n' >"$FIXTURES/imds/credentials.json"
+  run_helper
+  helper_refused "The instance role's credentials are not in the shape AWS writes, so no S3 session was made." \
+    "credentials not in AWS's shape"
+  serve_aws
+  touch "$FIXTURES/imds/unreachable"
+  run_helper
+  helper_refused "The instance metadata service did not answer (Connection timed out after 5002 milliseconds), so no S3 session was made." \
+    "the metadata service out of reach"
+  serve_aws
+  run_helper
+  check "[ $STATUS -eq 0 ] && [ ! -e $SESSIONS/error ] && cmp -s $SESSIONS/credentials.json /tmp/session.expected" \
+    "the next run that works clears the error"
+  secrets_absent_everywhere
+
+  # A first boot whose helper cannot hand a session stops before enrolling.
+  fresh_host
+  serve_aws 403 '<ErrorResponse><Error><Code>AccessDenied</Code><Message>Not authorized.</Message></Error></ErrorResponse>'
+  run_apart env FERMIX_ENROLL_CODE="$CODE" sh "$FIRST_BOOT"
+  check "! grep -q 'fermix home enroll' $LOG/calls.log" "a helper that fails stops the first boot before it enrolls"
+  check "contains $ERR 'fermix always-on: The S3 credentials helper could not hand Fermix a session, so S3 backups would fail; its message above says why.' && contains $ERR 'AWS STS refused the snapshot session (HTTP 403 AccessDenied: Not authorized.)'" \
+    "with its own sentence after the helper's"
+  serve_aws
+
+  # The destination is one path: flags naming another bucket, and a file that
+  # is not root's alone or not in its shape, are refused before anything runs.
+  fresh_host
+  run_apart env FERMIX_ENROLL_CODE="$CODE" sh "$FIRST_BOOT" --snapshot-bucket fermix-snapshots-invented --snapshot-region eu-west-1
+  stopped_with "--snapshot-bucket and --snapshot-region name another bucket than $DESTINATION, which this server's infrastructure wrote: leave them out to use $S3_BUCKET in eu-west-1." \
+    "flags that name another bucket than the infrastructure's are refused"
+  check "[ ! -s $LOG/calls.log ]" "before anything runs"
+  run_apart env FERMIX_ENROLL_CODE="$CODE" sh "$FIRST_BOOT" --snapshot-bucket "$S3_BUCKET" --snapshot-region eu-west-1
+  check "[ $STATUS -eq 0 ] && contains $LOG/calls.log '--snapshot-bucket $S3_BUCKET --snapshot-region eu-west-1 --snapshot-instance-role'" \
+    "the same bucket given as flags too is the one path"
+  fresh_host
+  chmod 0664 "$DESTINATION"
+  run_apart env FERMIX_ENROLL_CODE="$CODE" sh "$FIRST_BOOT"
+  stopped_with "$DESTINATION is not root's alone (owned by root, writable by no other account), so the bucket it names is not used." \
+    "a destination another account could write is refused"
+  chmod 0644 "$DESTINATION"
+  sed -i '/^role_arn=/d' "$DESTINATION"
+  run_apart env FERMIX_ENROLL_CODE="$CODE" sh "$FIRST_BOOT"
+  stopped_with "$DESTINATION names no IAM role on one role_arn= line." "a destination with no role is refused"
+  printf 'role_arn=%s\nrole_arn=%s\n' "$S3_ROLE" "$S3_ROLE" >>"$DESTINATION"
+  run_apart env FERMIX_ENROLL_CODE="$CODE" sh "$FIRST_BOOT"
+  stopped_with "$DESTINATION names no IAM role on one role_arn= line." "and one with two"
+  write_destination
+  sed -i 's/^bucket=.*/bucket=Not_A_Bucket/' "$DESTINATION"
+  run_apart env FERMIX_ENROLL_CODE="$CODE" sh "$FIRST_BOOT"
+  stopped_with "$DESTINATION names no S3 bucket on one bucket= line." "a destination naming no bucket is refused"
+  write_destination
+
+  # A server restored from a snapshot gets the helper too, and the steps name
+  # the bucket the infrastructure set.
+  fresh_host
+  rm -rf /home/fermix/.fermix "$SESSIONS"
+  run_first_boot sh "$FIRST_BOOT" --restore
+  check "[ $STATUS -eq 0 ] && contains $OUT 'from the bucket $S3_BUCKET in' && [ -f $SESSIONS/credentials.json ]" \
+    "a restore host gets the helper and names the bucket in its steps"
+  check "! grep -q 'fermix home enroll' $LOG/calls.log" "and enrolls nothing"
+}
+
 CODE=$(make_code "invented-enrollment-secret-for-tests-only")
 CODE_BODY=${CODE#fxenroll1.}
 # An invented key in the real shape, and Tailscale's package signing key, as
@@ -1204,6 +1432,7 @@ case "$SCENARIO" in
   updates) setup_tools; updates ;;
   tailnet) setup_tools ca-certificates curl gpg; tailnet ;;
   chromium) chromium ;;
+  s3-backups) setup_tools; s3_backups ;;
   *)
     echo "unknown scenario $SCENARIO" >&2
     exit 2

@@ -6,9 +6,11 @@
 #
 # The copy it runs is first-boot.sh without its last line (`main "$@"`) and
 # without the update script's writer (write_update_script, whose script the
-# container scenarios and scripts/release/test_fermix_update.py run), with six
-# fixed lines moved under this test's own directory, each asserted present
-# exactly once. Its PATH holds only this test's bin directory: tailscale,
+# container scenarios and scripts/release/test_fermix_update.py run) and the
+# S3 credentials helper's (write_credentials_helper, the s3-backups
+# scenario's), with
+# seven fixed lines moved under this test's own directory, each asserted
+# present exactly once. Its PATH holds only this test's bin directory: tailscale,
 # apt-get, curl, gpg and systemctl are stand-ins, and every other command is
 # a shim that logs its arguments and runs the host's own, so every command
 # line the first boot starts is logged. Nothing reaches the network, a
@@ -100,12 +102,13 @@ move_line() {
   mv "$1.moved" "$1"
 }
 
-# first-boot.sh without write_update_script, from its first line to the
-# brace that closes it.
-drop_update_writer() {
-  awk '
-    state == 0 && $0 == "write_update_script() {" { state = 1; next }
-    state == 1 { if ($0 == "  } | write_file \"$UPDATE_SCRIPT\" 0755") state = 2; next }
+# first-boot.sh without the writer $1 (write_update_script,
+# write_credentials_helper), from its first line to the brace that closes it,
+# whose script ends with the line $2.
+drop_writer() {
+  NAME="$1() {" LAST=$2 awk '
+    state == 0 && $0 == ENVIRON["NAME"] { state = 1; next }
+    state == 1 { if ($0 == ENVIRON["LAST"]) state = 2; next }
     state == 2 { if ($0 != "}") exit 4; state = 3; next }
     { print }
     END { if (state != 3) exit 3 }'
@@ -162,12 +165,17 @@ EOF
 
 build_copy() {
   [ "$(tail -n 1 "$FIRST_BOOT")" = 'main "$@"' ] || die "first-boot.sh no longer ends with main \"\$@\"."
-  sed '$d' "$FIRST_BOOT" | drop_update_writer >"$COPY" ||
-    die "first-boot.sh no longer holds write_update_script as this test cuts it out."
+  # shellcheck disable=SC2016 # each writer's last line as first-boot.sh holds it
+  sed '$d' "$FIRST_BOOT" | drop_writer write_update_script '  } | write_file "$UPDATE_SCRIPT" 0755' |
+    drop_writer write_credentials_helper '  } | write_file "$CREDENTIALS_HELPER" 0755' >"$COPY" ||
+    die "first-boot.sh no longer holds write_update_script and write_credentials_helper as this test cuts them out."
   move_line "$COPY" 'ACCOUNT_HOME=/home/fermix' "ACCOUNT_HOME=$T/home/fermix"
   move_line "$COPY" 'RUN_DIR=/run/fermix' "RUN_DIR=$T/run/fermix"
   move_line "$COPY" 'TAILSCALE_KEYRING=/usr/share/keyrings/tailscale-archive-keyring.gpg' "TAILSCALE_KEYRING=$KEYRING"
   move_line "$COPY" 'TAILSCALE_SOURCE=/etc/apt/sources.list.d/tailscale.list' "TAILSCALE_SOURCE=$SOURCE"
+  # No run here has a bucket its infrastructure set: the s3-backups container
+  # scenario has one.
+  move_line "$COPY" 'SNAPSHOT_DESTINATION=/etc/fermix/snapshot-destination' "SNAPSHOT_DESTINATION=$T/etc/fermix/snapshot-destination"
   move_line "$COPY" '  PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' "  PATH=$BIN"
   # shellcheck disable=SC2016 # the line as first-boot.sh holds it, unexpanded
   move_line "$COPY" '  WORK=$(mktemp -d /run/fermix-always-on.XXXXXX)' "  WORK=\$(mktemp -d $T/run/fermix-always-on.XXXXXX)"
@@ -940,7 +948,7 @@ other_homes() {
 build_copy
 make_shims
 make_stand_ins
-pass "the copy of first-boot.sh parses, its six moved lines each found once"
+pass "the copy of first-boot.sh parses, its seven moved lines each found once"
 
 without_the_flag
 key_from_the_environment

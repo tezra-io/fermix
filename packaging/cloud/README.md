@@ -218,9 +218,28 @@ runs `--quiet`.
    directory above it. A normal uid also keeps `journalctl --user` working.
 7. With `--tailscale` (either mode), joins the owner's tailnet, so the
    server's tailnet address exists when it enrolls (below).
+   On a server whose infrastructure set its snapshot bucket (E1:
+   fermix-server-aws's `enable_s3_backups` writes
+   `/etc/fermix/snapshot-destination`, root's, `bucket=`, `region=` and
+   `role_arn=` once each, read before anything is installed, and refused when
+   another account could write it, a line is missing or doubled, or
+   `--snapshot-bucket` and `--snapshot-region` name another bucket), either
+   mode then installs the S3 credentials helper,
+   `/usr/local/sbin/fermix-snapshot-credentials` (root's, the role and region
+   baked in), and runs it once, failing the first boot when it cannot hand a
+   session. It reads the instance role's credentials from the metadata
+   service, which only root reaches, assumes the snapshot writer role with
+   them through `curl --aws-sigv4` (every secret on curl's standard input,
+   never its command line), and writes the one-hour session and the role's
+   account to `/run/fermix-snapshots/credentials.json` (the directory `root:fermix`
+   0750, recreated at boot; the file 0640, replaced by rename), or its one
+   failure's sentence to `error` beside it. `fermix-snapshot-credentials.timer`
+   runs it a minute after each boot and every 15 minutes. The engine signs
+   its uploads with that session and never sees the instance role's own.
 8. Enroll mode, as `fermix`, with a clean environment: `fermix home enroll
    --code-file /run/fermix/enroll.code [--snapshot-bucket B --snapshot-region
-   R]`, then, with `XDG_RUNTIME_DIR=/run/user/<uid>` (systemctl reaches the user manager's
+   R [--snapshot-instance-role]]` (the last when the bucket came from the
+   destination file), then, with `XDG_RUNTIME_DIR=/run/user/<uid>` (systemctl reaches the user manager's
    private socket; no user D-Bus needed), `fermix service install --home
    /home/fermix/.fermix`. A candidate enrolling again is stopped first
    (`fermix service uninstall`), and started again with the enrollment it had
@@ -495,7 +514,12 @@ fails before enrolling; and the distribution's Chromium installed with
 the real `apt-get` and started headless as `fermix` through the engine's
 `oom_score_adj` shell, with its own sandbox (that container runs without
 Docker's seccomp profile, which refuses the user namespaces a server's kernel
-gives an unprivileged account). It is not wired into CI;
+gives an unprivileged account); and a server whose infrastructure set its
+S3 bucket (E1): enrolled with it and `--snapshot-instance-role`, the
+credentials helper's session that the engine account reads and cannot
+change, no secret in any command line, each of the helper's failures in its
+own words, a first boot whose helper fails stopped before enrolling, the
+destination file's refusals, and a restore host. It is not wired into CI;
 `scripts/release/test_fermix_update.py` runs the update's release choice,
 the follow run, the lock (with a stand-in `flock` and the night's wait cut
 to a second) and first boot's `--version` hermetically, in CI. What only a
