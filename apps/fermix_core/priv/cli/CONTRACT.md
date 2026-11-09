@@ -285,9 +285,12 @@ once, and its row is never its keys:
 
 A refusal is `home_status_unavailable`.
 
-`fermix home enroll --code-file PATH [--snapshot-bucket B --snapshot-region R]`
+`fermix home enroll --code-file PATH [--snapshot-bucket B --snapshot-region R [--snapshot-instance-role]]`
 is not a machine-mode verb: it takes no `--json` and no running Fermix, and
-makes a fresh home a candidate. It exits `0` with one line
+makes a fresh home a candidate. `--snapshot-instance-role` (first boot's, when
+the server's infrastructure set the bucket) keeps that the bucket is signed
+with the server's instance role; the held candidate's `snapshots` still names
+the bucket and region alone. It exits `0` with one line
 on stdout once the home is a candidate and the code file is removed, `1` with
 one sentence on stderr when it refused, leaving the home and the code file as
 it found them, and `2` on a usage error. A home that holds a candidate which

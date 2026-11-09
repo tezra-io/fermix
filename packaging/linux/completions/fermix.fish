@@ -62,6 +62,7 @@ complete -c fermix -n "__fish_seen_subcommand_from home" -l mark-moved -d "Mark 
 complete -c fermix -n "__fish_seen_subcommand_from home; and __fish_seen_subcommand_from enroll" -l code-file -r -d "Read the enrollment code from this file"
 complete -c fermix -n "__fish_seen_subcommand_from home; and __fish_seen_subcommand_from enroll" -l snapshot-bucket -r -d "The bucket this server keeps its snapshots in"
 complete -c fermix -n "__fish_seen_subcommand_from home; and __fish_seen_subcommand_from enroll" -l snapshot-region -r -d "The region of that bucket"
+complete -c fermix -n "__fish_seen_subcommand_from home; and __fish_seen_subcommand_from enroll" -l snapshot-instance-role -d "Sign with this server's instance role (set by its infrastructure)"
 complete -c fermix -n "__fish_seen_subcommand_from browser" -a "bridge install uninstall status" -d "Browser bridge subcommand"
 complete -c fermix -n "__fish_seen_subcommand_from acp" -a "forget"
 complete -c fermix -n "__fish_seen_subcommand_from diagnostics" -a "export"

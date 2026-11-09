@@ -7,7 +7,9 @@ defmodule FermixCore.Home.Candidate do
 
     * `code`: the enrollment code, until the enrollment is accepted;
     * `destination.json`: the snapshot bucket and region the new primary
-      writes to (`{}` when none was named);
+      writes to (`{}` when none was named), and `s3_credentials`
+      `"instance_role"` when the server's infrastructure set them (E1): kept
+      here, never sent with the enrollment;
     * `noise_key`: the candidate's X25519 Noise static key (32 raw bytes), its
       key in the enrollment handshake and the move's responder key;
     * `recipient_key`: the one-time snapshot recipient (`Snapshot.Recipient`)
@@ -146,7 +148,9 @@ defmodule FermixCore.Home.Candidate do
 
   @doc """
   Makes `home` a candidate from `code_text` (see the moduledoc). `opts`:
-  `:destination` (`%{"s3_bucket" => b, "s3_region" => r}` or nil), `:now` (a `DateTime`),
+  `:destination` (`%{"s3_bucket" => b, "s3_region" => r}`, with
+  `"s3_credentials" => "instance_role"` where the server's infrastructure set
+  them, or nil), `:now` (a `DateTime`),
   `:consume` (a 0-arity function run last, such as removing the code file
   the code came from; its `{:error, reason}` undoes the enrollment too), and
   `:hello` (`DaemonProbe.stopped/2`'s seam).
@@ -395,11 +399,18 @@ defmodule FermixCore.Home.Candidate do
   defp given_destination(nil), do: {:ok, %{}}
 
   defp given_destination(%{"s3_bucket" => bucket, "s3_region" => region} = facts) do
-    if EnrollmentCode.printable?(bucket) and EnrollmentCode.printable?(region),
-      do: {:ok, Map.take(facts, ["s3_bucket", "s3_region"])},
-      else:
+    cond do
+      not (EnrollmentCode.printable?(bucket) and EnrollmentCode.printable?(region)) ->
         {:error,
          {:invalid_destination, "The snapshot bucket and region are text of 1 to 128 bytes."}}
+
+      Map.get(facts, "s3_credentials", "instance_role") != "instance_role" ->
+        {:error,
+         {:invalid_destination, ~s(A snapshot bucket's signing is "instance_role" or not given.)}}
+
+      true ->
+        {:ok, Map.take(facts, ["s3_bucket", "s3_region", "s3_credentials"])}
+    end
   end
 
   # A fresh install writes nothing a move would carry: every top-level entry

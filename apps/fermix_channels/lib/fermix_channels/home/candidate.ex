@@ -356,8 +356,10 @@ defmodule FermixChannels.Home.Candidate do
       }
       |> put_unless_empty("addrs", hints)
 
+    # The primary learns where the snapshots go, not how they are signed: that
+    # is this server's own (E1), and the enrollment's shape stays as it is.
     %{"host" => host, "candidate" => candidate}
-    |> put_unless_empty("snapshots", destination)
+    |> put_unless_empty("snapshots", Map.take(destination, ["s3_bucket", "s3_region"]))
   end
 
   defp put_unless_empty(map, _key, facts) when facts == %{} or facts == [], do: map

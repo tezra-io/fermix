@@ -11,7 +11,9 @@ defmodule FermixCore.Home.Candidate.Activation do
   home itself, `[fermix_core.engine] role = "primary"` (the source wrote
   `device` before it captured), the destination facts in
   `[fermix_core.snapshots]` (the bucket and its region when one was named,
-  and the recovery recipient the move carried). On a host that is not a Mac
+  with `s3_credentials = "instance_role"` in place of any storage address or
+  access keys where the server's infrastructure set them, and the recovery
+  recipient the move carried). On a host that is not a Mac
   the restore itself has already turned iMessage off
   (`FermixCore.Home.Archive.RestoredConfig`), as it does
   for `fermix home import`: a settings file that turns iMessage on refuses to
@@ -301,13 +303,24 @@ defmodule FermixCore.Home.Candidate.Activation do
     end
   end
 
-  defp put_destination(text, %{"s3_bucket" => bucket, "s3_region" => region}) do
+  defp put_destination(text, %{"s3_bucket" => bucket, "s3_region" => region} = destination) do
     text
     |> ConfigText.put("fermix_core.snapshots", "s3_bucket", toml_string(bucket))
     |> ConfigText.put("fermix_core.snapshots", "s3_region", toml_string(region))
+    |> put_signing(Map.get(destination, "s3_credentials"))
   end
 
   defp put_destination(text, %{}), do: text
+
+  # E1: the server's infrastructure set the bucket, and its instance role signs
+  # alone: a storage address or access keys the computer set by hand go.
+  defp put_signing(text, "instance_role") do
+    ~w(s3_endpoint s3_access_key_id s3_secret_access_key)
+    |> Enum.reduce(text, &elem(ConfigText.drop(&2, "fermix_core.snapshots", &1), 0))
+    |> ConfigText.put("fermix_core.snapshots", "s3_credentials", toml_string("instance_role"))
+  end
+
+  defp put_signing(text, nil), do: text
 
   defp put_recipient(text, nil), do: text
 

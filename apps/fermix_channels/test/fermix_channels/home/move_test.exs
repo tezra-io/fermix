@@ -28,7 +28,14 @@ defmodule FermixChannels.Home.MoveTest do
   alias FermixTestSupport.SafeRm
   alias FermixTestSupport.TelemetryCapture
 
-  @destination %{"s3_bucket" => "invented-bucket-91", "s3_region" => "eu-north-1"}
+  # The server's infrastructure set the bucket (E1): the candidate keeps how
+  # it signs, its enrollment carries the bucket and region alone, and the
+  # move writes all three into the new primary's settings.
+  @destination %{
+    "s3_bucket" => "invented-bucket-91",
+    "s3_region" => "eu-north-1",
+    "s3_credentials" => "instance_role"
+  }
   @primary_record %{role: :primary, primary: nil}
   # The candidate is an Always On server on a tailnet.
   @hints ["100.101.102.103:4033", "[fd7a:115c:a1e0::9]:4033"]
@@ -102,7 +109,7 @@ defmodule FermixChannels.Home.MoveTest do
     assert config =~ ~s(workspace_root = "#{home}/workspace")
     assert config =~ ~s(s3_bucket = "invented-bucket-91")
     assert config =~ ~s(s3_region = "eu-north-1")
-    refute config =~ "s3_credentials"
+    assert config =~ ~s(s3_credentials = "instance_role")
     # The new primary's snapshots are encrypted to the key the old one kept.
     assert config =~ ~s(recipient = "#{Recipient.encode(ctx.recipient)}")
     assert File.read!(Path.join([home, "journals", "day.md"])) == "an invented day\n"

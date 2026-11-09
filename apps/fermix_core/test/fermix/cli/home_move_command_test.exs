@@ -67,6 +67,40 @@ defmodule Fermix.CLI.HomeMoveCommandTest do
       assert {:ok, %{role: :candidate}} = Role.configured(ctx.home)
     end
 
+    # E1: first boot passes --snapshot-instance-role when the server's
+    # infrastructure set the bucket; the candidate keeps it with the bucket.
+    test "an infrastructure-set bucket is kept with how it signs", ctx do
+      argv = [
+        "enroll",
+        "--code-file",
+        ctx.code_file,
+        "--snapshot-bucket",
+        "invented-bucket-91",
+        "--snapshot-region",
+        "eu-north-1",
+        "--snapshot-instance-role"
+      ]
+
+      assert {0, _out, ""} = run(argv, home: ctx.home, now: fn -> @now end)
+
+      assert Candidate.destination(ctx.home) ==
+               {:ok,
+                %{
+                  "s3_bucket" => "invented-bucket-91",
+                  "s3_region" => "eu-north-1",
+                  "s3_credentials" => "instance_role"
+                }}
+    end
+
+    test "the instance role signs only a bucket given with it", ctx do
+      assert {2, _out, _err} =
+               run(["enroll", "--code-file", ctx.code_file, "--snapshot-instance-role"],
+                 home: ctx.home
+               )
+
+      assert File.exists?(ctx.code_file)
+    end
+
     test "a refusal leaves the home and the code file as they were", ctx do
       {status, _out, err} =
         run(["enroll", "--code-file", ctx.code_file],

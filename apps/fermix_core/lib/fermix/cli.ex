@@ -161,7 +161,7 @@ defmodule Fermix.CLI do
       fermix home status [--json]                  Show the role, epoch and snapshots of this home
       fermix home snapshots status [--json]        Show the snapshots
       fermix home snapshots passphrase --passphrase-file PATH [--json]  Set the recovery passphrase
-      fermix home enroll --code-file PATH [--snapshot-bucket B --snapshot-region R]  Make this fresh home a candidate primary
+      fermix home enroll --code-file PATH [--snapshot-bucket B --snapshot-region R [--snapshot-instance-role]]  Make this fresh home a candidate primary
       fermix home candidates [--json]              List the enrolled candidate primaries
       fermix always-on [--json]                    Show Always On; on a terminal, take each step
       fermix always-on ACTION [--recovery-passphrase-file PATH] [--yes] [--wait] [--json]

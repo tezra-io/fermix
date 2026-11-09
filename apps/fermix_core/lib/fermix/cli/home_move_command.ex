@@ -3,13 +3,15 @@ defmodule Fermix.CLI.HomeMoveCommand do
   `fermix home enroll` and `candidates` (M75 §7, §14): a fresh host enrolling
   as a candidate primary, and the candidates the primary holds.
 
-      fermix home enroll --code-file PATH [--snapshot-bucket B --snapshot-region R]
+      fermix home enroll --code-file PATH [--snapshot-bucket B --snapshot-region R [--snapshot-instance-role]]
       fermix home candidates [--json]
 
   - `enroll`, on the new host, makes a fresh home a candidate
     (`FermixCore.Home.Candidate.enroll/3`) with no engine running: it reads
     the code from the file (trimmed), writes `candidate/` and the candidate
-    role, and removes the code file. A failure leaves the home as it found
+    role, and removes the code file. `--snapshot-instance-role` (first boot
+    passes it when the server's infrastructure set the bucket) keeps that the
+    bucket is signed with the server's instance role (E1). A failure leaves the home as it found
     it, and the code file too. Human output only.
   - `candidates` lists the candidates the primary holds: from the engine
     (`home.candidates.list`), or from the home's file when it is stopped.
@@ -28,13 +30,14 @@ defmodule Fermix.CLI.HomeMoveCommand do
   @enroll_switches [
     code_file: :string,
     snapshot_bucket: :string,
-    snapshot_region: :string
+    snapshot_region: :string,
+    snapshot_instance_role: :boolean
   ]
   @call_timeout_ms 30_000
   @max_file_bytes 4_096
   @usage """
   Usage:
-    fermix home enroll --code-file PATH [--snapshot-bucket B --snapshot-region R]
+    fermix home enroll --code-file PATH [--snapshot-bucket B --snapshot-region R [--snapshot-instance-role]]
     fermix home candidates [--json]
   """
 
@@ -115,17 +118,21 @@ defmodule Fermix.CLI.HomeMoveCommand do
   end
 
   defp destination(opts) do
-    case {Keyword.get(opts, :snapshot_bucket), Keyword.get(opts, :snapshot_region)} do
-      {nil, nil} ->
+    case {Keyword.get(opts, :snapshot_bucket), Keyword.get(opts, :snapshot_region),
+          Keyword.get(opts, :snapshot_instance_role, false)} do
+      {nil, nil, false} ->
         {:ok, nil}
 
-      {bucket, region} when is_binary(bucket) and is_binary(region) ->
-        {:ok, %{"s3_bucket" => bucket, "s3_region" => region}}
+      {bucket, region, instance_role?} when is_binary(bucket) and is_binary(region) ->
+        {:ok, signed(%{"s3_bucket" => bucket, "s3_region" => region}, instance_role?)}
 
       _half ->
         :usage
     end
   end
+
+  defp signed(destination, true), do: Map.put(destination, "s3_credentials", "instance_role")
+  defp signed(destination, false), do: destination
 
   defp read_small(path) do
     case File.stat(path) do

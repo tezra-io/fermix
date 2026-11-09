@@ -7,6 +7,7 @@ defmodule FermixCore.Home.Candidate.ActivationTest do
   alias FermixCore.Home.EnrollmentCode
   alias FermixCore.Home.Epoch
   alias FermixCore.Home.Snapshot
+  alias FermixCore.Home.Snapshot.Config
   alias FermixCore.Home.Snapshot.Recipient
   alias FermixCore.Home.Snapshot.Status
   alias FermixCore.Plugins.Dist.Reinstall
@@ -86,6 +87,60 @@ defmodule FermixCore.Home.Candidate.ActivationTest do
 
     # Still a candidate until the staged home is renamed into place.
     assert File.read!(Path.join(ctx.home, "config.toml")) =~ ~s(role = "candidate")
+  end
+
+  # E1: a bucket the server's infrastructure set is signed with the
+  # instance role, which the moved settings say explicitly; a storage address
+  # or access keys the computer set by hand are dropped, since the instance
+  # role signs alone.
+  test "an infrastructure-set destination says to sign with the instance role", ctx do
+    File.write!(
+      Path.join(ctx.source, "config.toml"),
+      """
+      [fermix_core.engine]
+      role = "device"
+
+      [fermix_core.snapshots]
+      s3_bucket = "invented-hand-set-bucket"
+      s3_endpoint = "https://s3.invented.test"
+      s3_access_key_id = "@file"
+      s3_secret_access_key = "@file"
+      """
+    )
+
+    SafeRm.rm!(ctx.incoming)
+
+    {:ok, _written} =
+      Snapshot.write(ctx.source, Recipient.public(ctx.pair), ctx.incoming, host: "macos-aarch64")
+
+    destination = %{
+      "s3_bucket" => "invented-bucket-91",
+      "s3_region" => "eu-north-1",
+      "s3_credentials" => "instance_role"
+    }
+
+    assert {:ok, 7} =
+             Activation.stage(
+               ctx.home,
+               ctx.incoming,
+               ctx.pair,
+               %{"destination" => destination, "recovery_recipient" => @recovery},
+               restore_opts()
+             )
+
+    config = File.read!(Path.join(Candidate.staging_path(ctx.home), "config.toml"))
+    assert config =~ ~s(s3_bucket = "invented-bucket-91")
+    assert config =~ ~s(s3_credentials = "instance_role")
+    refute config =~ "invented-hand-set-bucket"
+    refute config =~ "s3_endpoint"
+    refute config =~ "s3_access_key_id"
+    refute config =~ "s3_secret_access_key"
+    assert {:ok, %{credentials: :instance_role}} = config |> snapshots_section() |> Config.s3()
+  end
+
+  defp snapshots_section(config) do
+    {:ok, parsed} = TomlElixir.decode(config)
+    parsed |> get_in(["fermix_core", "snapshots"]) |> Config.normalize()
   end
 
   test "the keychain's secrets the stream carried land in the file store, referenced as files",

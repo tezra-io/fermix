@@ -8,7 +8,7 @@ defmodule Fermix.CLI.HomeCommand do
       fermix home status [--json]
       fermix home snapshots status [--json]
       fermix home snapshots passphrase --passphrase-file PATH [--json]
-      fermix home enroll --code-file PATH [--snapshot-bucket B --snapshot-region R]
+      fermix home enroll --code-file PATH [--snapshot-bucket B --snapshot-region R [--snapshot-instance-role]]
       fermix home candidates [--json]
 
   `export` archives the home this command runs against (`FERMIX_HOME`, default
@@ -542,7 +542,7 @@ defmodule Fermix.CLI.HomeCommand do
       fermix home status [--json]
       fermix home snapshots status [--json]
       fermix home snapshots passphrase --passphrase-file PATH [--json]
-      fermix home enroll --code-file PATH [--snapshot-bucket B --snapshot-region R]
+      fermix home enroll --code-file PATH [--snapshot-bucket B --snapshot-region R [--snapshot-instance-role]]
       fermix home candidates [--json]
     """)
 

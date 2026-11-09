@@ -296,6 +296,30 @@ defmodule FermixCore.Home.CandidateTest do
       assert Enum.sort(File.ls!(ctx.home)) == ["candidate", "config.toml", "device"]
     end
 
+    # E1: a bucket the server's infrastructure set signs with the instance
+    # role, and the candidate keeps that with the bucket and region alone.
+    test "keeps an infrastructure-set destination's signing, and refuses any other", ctx do
+      destination = %{
+        "s3_bucket" => "invented-bucket-91",
+        "s3_region" => "eu-north-1",
+        "s3_credentials" => "instance_role"
+      }
+
+      assert {:error, {:invalid_destination, sentence}} =
+               Candidate.enroll(ctx.home, ctx.code,
+                 destination: %{destination | "s3_credentials" => "access_keys"},
+                 now: @now
+               )
+
+      assert sentence == ~s(A snapshot bucket's signing is "instance_role" or not given.)
+      refute File.exists?(ctx.home)
+
+      assert {:ok, _code} =
+               Candidate.enroll(ctx.home, ctx.code, destination: destination, now: @now)
+
+      assert Candidate.destination(ctx.home) == {:ok, destination}
+    end
+
     test "refuses a code that ran out, or one Fermix did not open", ctx do
       assert {:error, {:code_expired, ~U[2031-05-04 10:10:00Z]}} =
                Candidate.enroll(ctx.home, ctx.code, now: ~U[2031-05-04 10:10:00Z])
