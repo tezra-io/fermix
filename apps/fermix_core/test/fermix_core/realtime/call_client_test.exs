@@ -76,6 +76,10 @@ defmodule FermixCore.Realtime.CallClientTest do
       {:stop, :normal, :ok, state}
     end
 
+    # A session ending the call on the owner's goodbye while a verb waits on it.
+    def handle_call({:forwarded, {:cancel_task, "goodbye"}}, _from, state),
+      do: {:stop, {:shutdown, :goodbye}, state}
+
     def handle_call({:forwarded, {:cancel_task, "stuck"} = verb}, _from, state) do
       send(state.observer, {:forwarded, verb})
       {:noreply, state}
@@ -272,6 +276,45 @@ defmodule FermixCore.Realtime.CallClientTest do
       assert {:stop, %CallClient{session: nil}} = CallClient.session_down(client, :killed)
       assert_receive {:emitted, %{type: "error", reason: "{:session_down, :killed}"}}
       assert :sys.get_state(ctx.guard).bindings == %{}
+    end
+  end
+
+  # M96 §6: a session ends a call itself only on the owner's goodbye, only for
+  # a peer at wire version 5, and that end is the button's, never a failure.
+  describe "a call that ends on a goodbye" do
+    test "the session is told it may, only for a peer at version 5 or later", ctx do
+      for {version, ends?} <- [{4, false}, {5, true}] do
+        client = new_client(ctx, protocol_version: version)
+        assert {:cont, client} = CallClient.call_start(client)
+        assert_receive {:session_started, _session, opts}
+        assert Keyword.fetch!(opts, :ends_on_goodbye) == ends?
+        assert {:cont, _client} = CallClient.call_stop(client)
+      end
+    end
+
+    test "its exit is an end, not a death: nothing is said, and the guard lets it go", ctx do
+      client = started_client(ctx, Config.current(), protocol_version: 5)
+      %CallClient{session: session, session_ref: ref} = client
+
+      GenServer.stop(session, {:shutdown, :goodbye})
+      assert_receive {:DOWN, ^ref, :process, ^session, {:shutdown, :goodbye}}
+
+      assert {:ended, %CallClient{session: nil, session_ref: nil}} =
+               CallClient.session_down(client, {:shutdown, :goodbye})
+
+      refute_received {:emitted, _frame}
+      assert :sys.get_state(ctx.guard).bindings == %{}
+    end
+
+    test "a verb that waited on it is not refused; the session's own end follows", ctx do
+      client = started_client(ctx, live_config(), protocol_version: 5)
+      %CallClient{session: session, session_ref: ref} = client
+
+      assert {:cont, ^client} = CallClient.task_cancel(client, "goodbye")
+      refute_received {:emitted, %{type: "error"}}
+
+      assert_receive {:DOWN, ^ref, :process, ^session, {:shutdown, :goodbye}}
+      assert {:ended, _client} = CallClient.session_down(client, {:shutdown, :goodbye})
     end
   end
 

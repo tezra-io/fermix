@@ -33,9 +33,9 @@ Current values (see the schema's `x-protocol-version` / `x-supported-version-ran
 
 | Field | Value |
 |---|---|
-| `protocol_version` (pet declares) | `3`; a phone with a camera, `4` |
+| `protocol_version` (pet declares) | `3`; a phone with a camera, `4`; a client that takes `call_ended`, `5` |
 | daemon `min_version` | `1` |
-| daemon `max_version` | `4` |
+| daemon `max_version` | `5` |
 
 Unknown fields are ignored by older peers, so an additive optional field does
 not need a version bump.
@@ -57,7 +57,7 @@ The refusal is
 
 ```json
 {"type":"error","reason":"unsupported_protocol_version","kind":"update_required",
- "direction":"client_too_old","client_version":1,"min_version":2,"max_version":4,
+ "direction":"client_too_old","client_version":1,"min_version":2,"max_version":5,
  "required_for":"openai_live"}
 ```
 
@@ -93,7 +93,7 @@ OpenAI call carries `playback_id`, and `playback_progress` is refused there with
 
 ```json
 {"type":"error","reason":"unsupported_protocol_version","kind":"update_required",
- "direction":"client_too_old","client_version":2,"min_version":3,"max_version":4,
+ "direction":"client_too_old","client_version":2,"min_version":3,"max_version":5,
  "required_for":"xai_realtime"}
 ```
 
@@ -125,6 +125,35 @@ phone's `call_frame`, `priv/mobile/PROTOCOL.md`), and the voice never sees them.
 While the camera is on, each task the voice hands the Fermix agent carries the
 newest frame no older than 8 s, and a task with none tells the agent there is no
 current picture.
+
+### Version 5 — the call that ends itself
+
+Version 5 adds a normal end the daemon starts (M96): the server object
+`call_ended` with `reason`, a string. Today one reason exists, `goodbye`: on a
+task-engine call (`openai_live`, `xai_realtime`), when the owner's whole turn
+was a goodbye in English ("okay, thanks, bye", "talk to you later") and the
+voice's reply to it has played, the daemon ends the call. No engine requires
+version 5, and no client object changed.
+
+A client treats any `reason` as a normal end, its own hang-up: stop the
+microphone and playback, show the call ended, no error. The daemon sends no
+`error` with it, and the connection **stays open** for a fresh `call_start`,
+as after `call_stop`; the client sends no `call_stop` for it. Frames the
+client sends after it reach no call, and a `call_start` starts a new one. The
+ending's frames (see the call sequences):
+
+```
+daemon -> pet:   state { state: "idle" }
+daemon -> pet:   call_ended { reason: "goodbye" }
+daemon -> pet:   task { …, detached: true }   (a call in the chat: a task still running)
+daemon -> pet:   usage { …, accounting: … }   (final)
+```
+
+Only a client whose `client_hello` was at version 5 or later is given this end:
+for an older client the daemon never ends a call on what the owner says, and
+the owner keeps the button. On every version the voice greets the owner first
+when a task-engine call is ready; that is ordinary `audio_delta` and `caption`
+after `call_ready`, and needs no version.
 
 ## Handshake state machine
 
@@ -241,6 +270,7 @@ words heard during a reply, or for 2 s after it, as the operator's turn.
 | `playback_stop` | — | The assistant's audio playback has stopped. |
 | `call_ready` | `engine`, `call_id`, `call_uuid?`, `conversation?`, `tasks_outlive_call?`, `provider_session_id?`, `expires_at?`, `captions` | **v2.** The provider session is established. Under `openai_live` the call carries audio from the `listening` before it (see *Live call sequence*). `call_uuid` is the call's durable identity and the key of its record, the same on every `task` and `usage` of the call; `call_id` stays the trace session id and restarts with the daemon. `conversation` (`chat` \| `private`, task engines only) says where the call's tasks run: `chat`, the chat's own conversation, where a task reads what was typed and the chat later reads what was asked aloud; `private`, a conversation of the call's own, kept apart from the chat. `tasks_outlive_call` (task engines only) is `true` for a call in the chat: a task still running when the call ends is not cancelled but finishes into the chat (see *A task that outlives its call*); `false` for a private call, whose tasks end with it. `expires_at` is unix seconds and is absent when the provider did not say; `captions` is true when `caption` frames will follow. |
 | `caption` | `speaker` (`user` \| `assistant`), `delta`, `start_ms`, `end_ms` | **v2.** One verbatim transcript fragment. Concatenate `delta` bytes as received — never trim them or insert spaces — and allow user and assistant captions to overlap in time. A missing fragment is not proof of silence. |
+| `call_ended` | `reason` | **v5.** The daemon ended the call itself, normally, after `state: "idle"` and before the call's last `task` and `usage` (see *Version 5*). `reason` is `goodbye` today: the owner said goodbye and the voice's goodbye has played. A client treats any `reason` as its own hang-up: no error, and the connection stays open for a fresh `call_start`. Sent only to a client at version 5 or later. |
 | `task` | `call_uuid?`, `delegation_id`, `revision`, `status`, `summary?`, `server_seq?`, `detached?` | **v2.** Lifecycle of one backend delegation: `pending` \| `running` \| `completed` \| `failed` \| `cancelled`. `revision` fences a re-asked task so a late frame from an earlier revision can be dropped. `summary` is bounded to 240 characters. Backend progress belongs here, outside the spoken captions. `server_seq` (a task-engine call in the chat) is the chat timeline row the result was shown at: a result too long to say, or that cannot be said (a link, code, a table), is written to the chat whole while the voice says a short line, so a client can say the result is in the chat. Absent when nothing was shown. `detached` (a task-engine call in the chat) is `true` on the one `running` frame the daemon sends as the call ends for a task that will finish into the chat; no later `task` frame names it, since the call is over. Absent on every other frame. |
 
 ## Live call sequence
@@ -272,6 +302,7 @@ pet  -> daemon:  audio_chunk …                     (continuous PCM, including 
                  daemon opens the provider session and the backend bridge, holding the audio
 daemon -> pet:   call_ready { engine: "openai_live", call_id, call_uuid, conversation, tasks_outlive_call, provider_session_id?, expires_at?, captions }
                  daemon passes the held audio on, in order, then each chunk as it arrives
+daemon -> pet:   audio_delta … / caption …         (the voice greets the owner first; Live may stay silent)
 daemon -> pet:   caption …                         (user and assistant fragments, overlapping)
 daemon -> pet:   state { state: "thinking" }       (the operator has stopped speaking)
 daemon -> pet:   audio_delta … / state { speaking }
@@ -283,6 +314,16 @@ daemon -> pet:   usage { status: "live", voice_seconds, voice_cost_cents, backen
                          backend_cost: "unknown", accounting: "running" }
 pet  -> daemon:  call_stop
 daemon -> pet:   state { state: "idle" }
+daemon -> pet:   task { …, status: "running", summary?, detached: true }  (a call in the chat: a task still running)
+daemon -> pet:   usage { …, accounting: "complete" | "incomplete" }       (final)
+```
+
+Or, in place of `call_stop`, the owner says goodbye (v5 client): once the voice's
+reply has had time to play and its output has carried no voice for a second,
+
+```
+daemon -> pet:   state { state: "idle" }
+daemon -> pet:   call_ended { reason: "goodbye" }
 daemon -> pet:   task { …, status: "running", summary?, detached: true }  (a call in the chat: a task still running)
 daemon -> pet:   usage { …, accounting: "complete" | "incomplete" }       (final)
 ```
@@ -310,6 +351,7 @@ daemon -> pet:   state { state: "listening" }      (the call is accepted)
 pet  -> daemon:  audio_chunk …                     (continuous PCM, including silence)
                  daemon opens the provider session and the backend bridge, holding the audio
 daemon -> pet:   call_ready { engine: "xai_realtime", call_id, call_uuid, conversation, tasks_outlive_call, provider_session_id?, captions }
+daemon -> pet:   audio_delta { playback_id, audio } … / caption …   (the voice greets the owner first)
 daemon -> pet:   caption …                         (each finished utterance once)
 daemon -> pet:   state { state: "thinking" | "speaking" | "listening" }      (as the turn moves)
 daemon -> pet:   audio_delta { playback_id, audio } …
@@ -326,9 +368,20 @@ daemon -> pet:   task { …, status: "running", summary?, detached: true }  (a c
 daemon -> pet:   usage { …, accounting: "incomplete" }                    (final)
 ```
 
+Or, in place of `call_stop`, the owner says goodbye (v5 client): once the pet
+reports the voice's reply drained and nothing more is being generated,
+
+```
+daemon -> pet:   state { state: "idle" }
+daemon -> pet:   call_ended { reason: "goodbye" }
+daemon -> pet:   task { …, status: "running", summary?, detached: true }  (a call in the chat: a task still running)
+daemon -> pet:   usage { …, accounting: "incomplete" }                    (final)
+```
+
 An `interrupt`, or the operator speaking over a reply, stops the reply: the
 daemon answers `playback_stop`, and no more audio of that reply follows. An
-interruption stops speech only; a task the call handed off keeps running.
+interruption stops speech only; a task the call handed off keeps running. An
+interruption of the voice's goodbye keeps the call up.
 
 ## Playback feedback
 

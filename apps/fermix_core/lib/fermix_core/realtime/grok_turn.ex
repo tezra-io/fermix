@@ -28,6 +28,9 @@ defmodule FermixCore.Realtime.GrokTurn do
       owed again at most `@max_continuation_attempts` times.
     * **An interrupted response stays interrupted.** Its later audio is
       dropped (`fence/2`), and a call it carries is refused rather than run.
+    * **The greeting is a continuation too** (M96 §4.2). `owe/1` owes one
+      once the greeting's item was sent, so the call's first reply is asked
+      for by the same rule; any response that starts answers it.
 
   Pure: the session owns the clock, the timers and the wire.
   """
@@ -48,6 +51,7 @@ defmodule FermixCore.Realtime.GrokTurn do
           owed?: boolean(),
           requested: String.t() | nil,
           attempts: non_neg_integer(),
+          greeting?: boolean(),
           next_id: pos_integer()
         }
 
@@ -62,11 +66,24 @@ defmodule FermixCore.Realtime.GrokTurn do
             # The continuation asked for and not yet started, by its id.
             requested: nil,
             attempts: 0,
+            # Whether what is owed or asked for is the call's greeting.
+            greeting?: false,
             next_id: 1
 
   @doc "A call with no turn taken yet."
   @spec new() :: t()
   def new, do: %__MODULE__{}
+
+  @doc """
+  The greeting's item was sent (M96 §4.2): a continuation is owed, the reply
+  that greets the owner, asked for when it is due like any other.
+  """
+  @spec owe(t()) :: t()
+  def owe(%__MODULE__{} = turn), do: %{turn | owed?: true, greeting?: true}
+
+  @doc "Whether what is owed or asked for is the greeting, not a task's result."
+  @spec greeting?(t()) :: boolean()
+  def greeting?(%__MODULE__{greeting?: greeting?}), do: greeting?
 
   @doc "Server VAD heard the owner start speaking."
   @spec speech_started(t()) :: t()
@@ -172,7 +189,7 @@ defmodule FermixCore.Realtime.GrokTurn do
   def request_failed(%__MODULE__{requested: id} = turn) when is_binary(id) do
     if turn.attempts < @max_continuation_attempts,
       do: {:retry, %{turn | owed?: true, requested: nil}},
-      else: {:gave_up, %{turn | requested: nil, attempts: 0}}
+      else: {:gave_up, %{turn | requested: nil, attempts: 0, greeting?: false}}
   end
 
   def request_failed(%__MODULE__{} = turn), do: {:none, turn}
@@ -223,9 +240,10 @@ defmodule FermixCore.Realtime.GrokTurn do
   # continuation that still starts is a second answer the provider chose, not
   # one Fermix asks for again.
   defp started(%{requested: id} = turn, id) when is_binary(id),
-    do: %{turn | requested: nil, attempts: 0}
+    do: %{turn | requested: nil, attempts: 0, greeting?: false}
 
-  defp started(turn, _other), do: %{turn | owed?: false, requested: nil, attempts: 0}
+  defp started(turn, _other),
+    do: %{turn | owed?: false, requested: nil, attempts: 0, greeting?: false}
 
   # A done response whose every call is answered is finished: it owes a
   # continuation when it carried any call at all.

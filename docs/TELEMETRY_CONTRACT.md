@@ -1007,7 +1007,8 @@ the first audio Grok generated for it) and `audible_latency_ms_median`/`_max`
 the first reply after each turn counts, a latency with no sample is absent
 rather than `0`, and a task's own time stays on its `delegation_stop`, so a
 slow provider, a slow client and a slow backend remain three findings.
-Metadata carries `reason` — `call_stop`, `cost_limit`, `max_session_duration`,
+Metadata carries `reason` — `call_stop`, `goodbye` (the owner said goodbye and the
+call ended itself, M96), `cost_limit`, `max_session_duration`,
 `provider_disconnected`, `session_expired`, and on Grok also `playback_stalled`, `playback_overflow`
 and `call_ids_exhausted` — because a ceiling kill that read as a hang-up is
 exactly what makes a torn-down call undiagnosable. A non-numeric measurement

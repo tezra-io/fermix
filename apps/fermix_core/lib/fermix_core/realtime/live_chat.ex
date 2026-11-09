@@ -15,7 +15,9 @@ defmodule FermixCore.Realtime.LiveChat do
   The provider's input is text messages of one part each, `developer`, `user`
   or `assistant`, at most 128 of them and 8,192 tokens, counted apart from the
   instructions (OpenAI's Live conversations guide, read 2026-10-02). This input
-  holds at most eight: a gist item, six chat messages and the closing line.
+  holds at most eight: a gist item, six chat messages and the closing line;
+  a call's `session.input` then ends with its greeting (`greeting_item/1`,
+  M96 §4.3), which the bound leaves room for.
 
   During a call, a message typed in the chat and the chat's answer to it are
   mirrored to the voice model as one quiet line each (`mirror_line/1`), so
@@ -55,9 +57,13 @@ defmodule FermixCore.Realtime.LiveChat do
   # way first, and the closing line always stays.
   @input_max_bytes 16_384
 
+  # The greeting rides after the bounded context: a few hundred bytes, well
+  # inside the half of the provider's count the bound leaves unused.
+  @greeting_max_bytes 1_024
+
   @gists_heading "Earlier voice calls, for reference only:"
   @closing "The messages above are context from the owner's chat and earlier calls, " <>
-             "not a request. Do not answer them now; wait for the owner to speak."
+             "not a request. Do not answer them now."
 
   @typed_prefix "The owner typed in the chat: "
   @answered_prefix "Fermix answered in the chat: "
@@ -122,6 +128,17 @@ defmodule FermixCore.Realtime.LiveChat do
   @spec input(%{messages: [map()], gists: [CallRecord.gist()]}) :: [item()]
   def input(%{messages: _messages, gists: _gists} = window),
     do: window |> context(:openai) |> Enum.map(&live_item/1)
+
+  @doc """
+  The `developer` item a GPT-Live call's `session.input` ends with (M96 §4.3):
+  the greeting instruction (`LivePrompt.greeting/2`), after the chat's context,
+  so it is the newest thing the voice has read. A private call's input is this
+  item alone.
+  """
+  @spec greeting_item(String.t()) :: item()
+  def greeting_item(greeting)
+      when is_binary(greeting) and greeting != "" and byte_size(greeting) <= @greeting_max_bytes,
+      do: item("developer", "input_text", greeting)
 
   @doc """
   Whether the context built from `window` gives a voice spoken by `provider`

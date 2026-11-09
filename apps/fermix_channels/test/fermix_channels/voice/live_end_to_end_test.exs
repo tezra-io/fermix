@@ -398,13 +398,16 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
 
     [%{type: "session.start", session: payload}] = FakeLiveClient.events()
 
+    # The chat, its closing line, and the call's greeting last (M96 §4.3).
     assert [
              %{role: "user", content: [%{type: "input_text", text: "the lease: " <> _url}]},
              %{role: "assistant", content: [%{type: "output_text", text: "Saved it."}]},
-             %{role: "developer", content: [%{text: closing}]}
+             %{role: "developer", content: [%{text: closing}]},
+             %{role: "developer", content: [%{text: greeting}]}
            ] = payload.input
 
     assert closing =~ "not a request"
+    assert greeting =~ "The owner has just started this call."
 
     assert :ok = SessionControl.call_stop(session)
     assert_receive {:EXIT, ^session, {:shutdown, :call_stop}}, 5_000
@@ -842,7 +845,10 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
     assert eventually(fn -> not Process.alive?(turn_pid) end)
 
     # The cancelled turn never speaks: no commentary was ever appended for it.
-    refute Enum.any?(FakeLiveClient.events(), &(&1.type == "session.commentary.append"))
+    refute Enum.any?(
+             FakeLiveClient.events(),
+             &(&1.type == "session.commentary.append" and &1.delegation_id == "dg_1")
+           )
 
     assert :ok = SessionControl.call_stop(session)
     assert_receive {:EXIT, ^session, {:shutdown, :call_stop}}, 5_000

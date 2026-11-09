@@ -26,7 +26,7 @@ defmodule FermixChannels.Mobile.CallCapsTest do
     assert Call.caps(live, true, @phone) == %{
              "available" => true,
              "min_version" => 2,
-             "max_version" => 4,
+             "max_version" => 5,
              "camera" => true
            }
   end

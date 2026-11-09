@@ -36,6 +36,11 @@ defmodule FermixCore.Realtime.CallClient do
   connection or `{:stop, client}` after a terminal frame. The error vocabulary
   is the realtime wire's (`priv/realtime/PROTOCOL.md`).
 
+  A session ends a call itself only on the owner's goodbye (M96 §6), and only
+  for a peer at wire version 5 or later (`ends_on_goodbye`, in the session's
+  start options): its `call_ended` frame is already queued, and its exit
+  reaches `session_down/2`, which answers `{:ended, client}`, the button's end.
+
   What an adapter does, a GenServer included:
 
     * calls every verb from its own process, never from a task: the session's
@@ -88,6 +93,10 @@ defmodule FermixCore.Realtime.CallClient do
   @engine_min_protocol_version %{"openai_realtime" => 1, "openai_live" => 2, "xai_realtime" => 3}
   # The wire version that added `camera` and the hello's `camera` flag (M87).
   @camera_min_protocol_version 4
+  # The wire version that added `call_ended`, the end a session starts itself
+  # when the owner says goodbye (M96): an older peer would show it as a
+  # failure, so its session never ends a call that way.
+  @goodbye_min_protocol_version 5
   # How many queued frames are written ahead of the call's own last word (a
   # refusal, a session-down error, a hang-up's `idle`) before the drain gives
   # up and that word is written. A session queues a handful.
@@ -373,10 +382,22 @@ defmodule FermixCore.Realtime.CallClient do
   end
 
   @doc """
-  The bound session died mid-call (its monitor, `session_ref`, fired). The
-  peer is told, so it does not wait on silence, and the connection should end.
+  The bound session exited mid-call (its monitor, `session_ref`, fired).
+
+  A session that ended the call on the owner's goodbye (`{:shutdown,
+  :goodbye}`) already sent `call_ended`, and its exit is ordered after it: it
+  is the button's end, `{:ended, client}`, nothing more is said, and the
+  adapter keeps or closes its connection as after `call_stop`. Any other exit
+  is a death: the peer is told, so it does not wait on silence, and the
+  connection should end.
   """
-  @spec session_down(t(), term()) :: {:stop, t()}
+  @spec session_down(t(), term()) :: {:ended | :stop, t()}
+  def session_down(%__MODULE__{session: session} = client, {:shutdown, :goodbye})
+      when is_pid(session) do
+    _ = SessionGuard.release(client.session_guard)
+    {:ended, %{client | session: nil, session_ref: nil, camera_on?: false}}
+  end
+
   def session_down(%__MODULE__{session: session} = client, reason) when is_pid(session) do
     _ = client.emit.(error_frame({:session_down, reason}))
     _ = SessionGuard.release(client.session_guard)
@@ -461,6 +482,7 @@ defmodule FermixCore.Realtime.CallClient do
       client.starter_opts
       |> Keyword.put(:companion, self())
       |> Keyword.put(:endpoint, client.endpoint)
+      |> Keyword.put(:ends_on_goodbye, client.protocol_version >= @goodbye_min_protocol_version)
       |> Keyword.put(:session_supervisor, client.session_supervisor)
       |> Keyword.put_new(:task_supervisor, client.task_supervisor)
 
@@ -481,6 +503,7 @@ defmodule FermixCore.Realtime.CallClient do
     case call_session(client, send) do
       {:answered, :ok} -> {:cont, client}
       {:answered, {:error, reason}} -> stop_with(reason, client)
+      {:down, {:shutdown, :goodbye}} -> {:cont, client}
       {:down, reason} -> flush_then_stop({:session_down, reason}, client)
     end
   end
@@ -489,7 +512,10 @@ defmodule FermixCore.Realtime.CallClient do
   # answering (it died, or a cancel was queued behind its settle) or did not
   # answer in time (`call_start`'s bound). Either is the session's death, told
   # the way `session_down/2` tells it, after what the session queued first,
-  # instead of an adapter exit the peer would read as a bare EOF.
+  # instead of an adapter exit the peer would read as a bare EOF. A verb that
+  # waited on a session ending the call on a goodbye is not refused: the
+  # session's `call_ended` and its `:DOWN` are queued behind, and end the call
+  # through `session_down/2`.
   defp call_session(client, send) do
     {:answered, send.(client.session)}
   catch
@@ -505,6 +531,7 @@ defmodule FermixCore.Realtime.CallClient do
     case within_deadline(client, fn -> call_session(client, cancel) end) do
       {:answered, :ok} -> {:cont, client}
       {:answered, {:error, reason}} -> stop_with(reason, client)
+      {:down, {:shutdown, :goodbye}} -> {:cont, client}
       {:down, reason} -> flush_then_stop({:session_down, reason}, client)
       :past_deadline -> {:cont, past_deadline(:cancel_task, client)}
     end

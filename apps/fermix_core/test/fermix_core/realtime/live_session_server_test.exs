@@ -376,7 +376,9 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
       assert payload.audio.format == %{type: "audio/pcm", rate: 24_000}
 
       keys = payload |> Map.keys() |> Enum.map(&to_string/1)
-      assert Enum.sort(keys) == ~w(audio delegation instructions model store)
+      assert Enum.sort(keys) == ~w(audio delegation input instructions model store)
+      assert [%{role: "developer"} = greeting] = payload.input
+      assert greeting?(greeting)
     end
 
     # M56 §4.3 (D5): generated in code at the start of every call, after
@@ -538,24 +540,29 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
 
       assert_received {:bridge_window, %{messages: 6, gists: 3}}
       [%{type: "session.start", session: payload}] = FakeLiveClient.events()
-      assert payload.input == LiveChat.input(window)
+      {chat, [greeting]} = Enum.split(payload.input, -1)
+      assert chat == LiveChat.input(window)
+      assert greeting?(greeting)
 
       assert Enum.map(payload.input, & &1.role) ==
-               ~w(developer user assistant developer)
+               ~w(developer user assistant developer developer)
     end
 
-    test "an empty chat sends no session.input", %{clock: clock} do
+    test "an empty chat's session.input is the greeting alone", %{clock: clock} do
       session = start_session(clock: clock)
 
       :ok = SessionControl.call_start(session)
 
       assert_received {:bridge_window, _bounds}
       [%{type: "session.start", session: payload}] = FakeLiveClient.events()
-      refute Map.has_key?(payload, :input)
+      assert [greeting] = payload.input
+      assert greeting?(greeting)
     end
 
     # M56 §5: a private call is kept apart from the chat, in both directions.
-    test "a private call reads nothing of the chat and sends no input", %{clock: clock} do
+    test "a private call reads nothing of the chat; its input is the greeting alone", %{
+      clock: clock
+    } do
       FakeBridge.set_window({:ok, %{messages: [%{role: "user", content: "x"}], gists: []}})
       session = start_session(clock: clock, config: live_config(conversation: "private"))
 
@@ -563,7 +570,8 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
 
       refute_received {:bridge_window, _bounds}
       [%{type: "session.start", session: payload}] = FakeLiveClient.events()
-      refute Map.has_key?(payload, :input)
+      assert [greeting] = payload.input
+      assert greeting?(greeting)
     end
 
     # The same as a LIVE.md that cannot be read: the call does not start on
@@ -624,9 +632,7 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
       assert [%{type: "session.start"}, %{type: "session.start"}] = FakeLiveClient.events()
     end
 
-    test "a refusal naming any other field, or of a start with no input, is not retried", %{
-      clock: clock
-    } do
+    test "a refusal naming any other field is not retried", %{clock: clock} do
       FakeBridge.set_window({:ok, %{messages: [%{role: "user", content: "x"}], gists: []}})
       session = start_session(clock: clock)
       :ok = SessionControl.call_start(session)
@@ -635,15 +641,6 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
       send(session, {:openai_live_event, {:error, input_refusal("session.input_audio")}})
       sync(session)
       assert [%{type: "session.start"}] = FakeLiveClient.events()
-
-      end_call(session)
-      FakeBridge.set_window({:ok, %{messages: [], gists: []}})
-      bare = start_session(clock: clock)
-      :ok = SessionControl.call_start(bare)
-
-      send(bare, {:openai_live_event, {:error, input_refusal("session.input")}})
-      sync(bare)
-      assert Enum.count(FakeLiveClient.events(), &(&1.type == "session.start")) == 2
     end
 
     test "call_start says how large the instructions and the input are, never what", %{
@@ -660,7 +657,8 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
       assert_receive {:call_start, metadata}
       [%{type: "session.start", session: payload}] = FakeLiveClient.events()
       assert metadata.instructions_bytes == byte_size(payload.instructions)
-      assert %{input_items: 2, input_bytes: input_bytes} = metadata
+      # The chat's message, the closing line and the greeting.
+      assert %{input_items: 3, input_bytes: input_bytes} = metadata
       assert input_bytes == LiveChat.input_size(payload.input).input_bytes
       refute inspect(metadata) =~ "private link"
     end
@@ -830,9 +828,12 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
       assert {:error, {:call_in_progress, "desktop"}} =
                LiveSessionServer.start_link(session_opts(clock: clock))
 
-      # The refused start touched nothing of the call that is up.
+      # The refused start touched nothing of the call that is up: its start,
+      # and the greeting said once it started.
       assert {:ok, %{session: ^first}} = CallRegistry.active(@call_registry)
-      assert [%{type: "session.start"}] = FakeLiveClient.events()
+
+      assert [%{type: "session.start"}, %{type: "session.commentary.append", delegation_id: nil}] =
+               FakeLiveClient.events()
     end
 
     test "a second session is refused while the first is still settling", %{clock: clock} do
@@ -2640,6 +2641,148 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
 
   # Live publishes no turn boundaries and cannot cancel a reply, so the daemon,
   # as the relay both audio streams pass through, reads the turn from them.
+  # M96 §4.3, OpenAI's *Greeting the caller*: the greeting ends
+  # `session.input`, and goes once more as a commentary with no delegation
+  # once the session has started.
+  describe "the greeting" do
+    test "once the session starts, the same text goes once as a commentary with no delegation",
+         %{clock: clock} do
+      session = listening_session(clock)
+      [%{type: "session.start", session: payload} | after_start] = FakeLiveClient.events()
+      [%{content: [%{text: greeting}]}] = payload.input
+
+      assert [%{type: "session.commentary.append", delegation_id: nil, content: ^greeting}] =
+               after_start
+
+      assert greeting =~ "Now: "
+      send(session, {:openai_live_event, {:session_updated, %{}}})
+      sync(session)
+      assert length(FakeLiveClient.events()) == 2
+    end
+
+    test "a start refused over its input still greets through the commentary", %{clock: clock} do
+      session = start_session(clock: clock)
+      :ok = SessionControl.call_start(session)
+      send(session, {:openai_live_event, {:error, input_refusal("session.input[0].content")}})
+      start_provider_session(session)
+
+      assert [
+               %{type: "session.start"},
+               %{type: "session.start", session: second},
+               %{type: "session.commentary.append", delegation_id: nil, content: content}
+             ] = FakeLiveClient.events()
+
+      refute Map.has_key?(second, :input)
+      assert content =~ "The owner has just started this call."
+    end
+  end
+
+  # M96 §5: on a call whose client takes `call_ended` (wire v5), the owner's
+  # whole turn being a goodbye ends the call once the voice's reply has
+  # played. Both sides are dated on Live's own transcript timeline; a reply
+  # has played once its voice has gone quiet for the goodbye's second, whose
+  # timer each test delivers by hand.
+  describe "the goodbye" do
+    test "ends the call once the reply's voice has gone quiet", %{clock: clock} do
+      Process.flag(:trap_exit, true)
+      session = listening_session(clock, ends_on_goodbye: true)
+      speak(session, "Okay, thanks, bye.", 1_000, 1_600)
+      assistant_says(session, "Bye, talk soon!", 2_200)
+      voice(session)
+
+      quiet(session)
+
+      assert_receive {:EXIT, ^session, {:shutdown, :goodbye}}
+      assert_received {:realtime, %{type: "state", state: "idle"}}
+      assert_received {:realtime, %{type: "call_ended", reason: "goodbye"}}
+      refute_received {:realtime, %{type: "error"}}
+    end
+
+    test "a goodbye whose words arrive after the reply began still ends it", %{clock: clock} do
+      Process.flag(:trap_exit, true)
+      session = listening_session(clock, ends_on_goodbye: true)
+      assistant_says(session, "Bye!", 2_200)
+      speak(session, "bye", 1_500, 1_800)
+      voice(session)
+
+      quiet(session)
+
+      assert_receive {:EXIT, ^session, {:shutdown, :goodbye}}
+    end
+
+    test "a goodbye's words that arrive after the reply played out end it then", %{clock: clock} do
+      Process.flag(:trap_exit, true)
+      session = listening_session(clock, ends_on_goodbye: true)
+      assistant_says(session, "Bye!", 2_200)
+      voice(session)
+      quiet(session)
+      assert Process.alive?(session)
+
+      send(
+        session,
+        {:openai_live_event, {:transcript_delta, :user, "Thanks, bye.", 1_500, 1_900}}
+      )
+
+      assert_receive {:EXIT, ^session, {:shutdown, :goodbye}}
+    end
+
+    test "a pause inside the reply is not its end", %{clock: clock} do
+      session = listening_session(clock, ends_on_goodbye: true)
+      speak(session, "bye", 1_000, 1_300)
+      assistant_says(session, "Bye", 2_000)
+      voice(session)
+      %{goodbye_timer: {_timer, paused}} = sync(session)
+      voice(session)
+
+      send(session, {:goodbye_quiet, paused})
+      sync(session)
+
+      assert Process.alive?(session)
+      refute_received {:realtime, %{type: "call_ended"}}
+    end
+
+    test "the reply's echo, heard after it began, neither ends the call nor keeps it", %{
+      clock: clock
+    } do
+      session = listening_session(clock, ends_on_goodbye: true)
+      speak(session, "What's on tomorrow?", 1_000, 1_800)
+      assistant_says(session, "Nothing much. Bye for now!", 2_200)
+      speak(session, " Bye for now!", 3_000, 3_600)
+      voice(session)
+
+      quiet(session)
+
+      assert Process.alive?(session)
+      refute_received {:realtime, %{type: "call_ended"}}
+    end
+
+    test "an interrupt over the voice's goodbye keeps the call", %{clock: clock} do
+      session = listening_session(clock, ends_on_goodbye: true)
+      speak(session, "bye", 1_000, 1_300)
+      assistant_says(session, "Bye!", 2_000)
+      voice(session)
+      %{goodbye_timer: {_timer, token}} = sync(session)
+
+      :ok = SessionControl.interrupt(session, 100)
+      send(session, {:goodbye_quiet, token})
+      sync(session)
+
+      assert %{goodbye_timer: nil} = sync(session)
+      assert Process.alive?(session)
+      refute_received {:realtime, %{type: "call_ended"}}
+    end
+
+    test "a client older than wire version 5 is never ended on a goodbye", %{clock: clock} do
+      session = listening_session(clock)
+      speak(session, "Okay, thanks, bye.", 1_000, 1_600)
+      assistant_says(session, "Bye!", 2_200)
+      voice(session)
+
+      assert %{goodbye_timer: nil, goodbye: nil} = sync(session)
+      refute_received {:realtime, %{type: "call_ended"}}
+    end
+  end
+
   describe "turn state" do
     test "a reply that has had time to play out returns the pet to listening", %{clock: clock} do
       session = listening_session(clock, reply_margin_ms: 10)
@@ -3195,6 +3338,11 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
     )
   end
 
+  defp greeting?(%{type: "message", role: "developer", content: [%{text: text}]}),
+    do: text =~ "The owner has just started this call."
+
+  defp greeting?(_item), do: false
+
   defp camera_rule?(%{type: "session.instructions.append", content: content}),
     do: content == LivePrompt.camera_rule()
 
@@ -3223,6 +3371,28 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
 
   defp restore_voice_bridge(module),
     do: Application.put_env(:fermix_core, :voice_bridge, module)
+
+  # A fragment of the voice's words from Live's transcript, at `start_ms`.
+  defp assistant_says(session, text, start_ms) do
+    send(
+      session,
+      {:openai_live_event, {:transcript_delta, :assistant, text, start_ms, start_ms + 400}}
+    )
+
+    sync(session)
+  end
+
+  # 200 ms of the voice's reply.
+  defp voice(session) do
+    send(session, {:openai_live_event, {:audio_delta, reply_audio(200)}})
+    sync(session)
+  end
+
+  # The reply's voice has gone quiet for the goodbye's second, delivered by hand.
+  defp quiet(session) do
+    %{goodbye_timer: {_timer, token}} = sync(session)
+    send(session, {:goodbye_quiet, token})
+  end
 
   defp speak(session, text, start_ms, end_ms) do
     send(session, {:openai_live_event, {:transcript_delta, :user, text, start_ms, end_ms}})

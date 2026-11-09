@@ -35,6 +35,14 @@ defmodule FermixCore.Realtime.GrokSessionServer do
   Grok hears audio and permitted text only: what the call starts with and a
   message mirrored from the chat are masked against SpaceXAI's own Computer
   History grant (`LiveChat`), never OpenAI's.
+
+  The voice speaks first (M96 §4.2): once ready, the greeting's text goes in as
+  one quiet `system` item and `GrokTurn` owes the reply that says it. And the
+  call ends itself when the owner's whole turn was a goodbye and Grok's reply
+  to it has played (`CallGoodbye`, §5), only for a client at wire version 5
+  (`ends_on_goodbye`): the owner's utterances, a response starting, a
+  barge-in and playback drained with nothing cancellable are its signals, on
+  the call's clock, and its end is the settle path's `call_ended`.
   """
 
   use GenServer
@@ -44,7 +52,9 @@ defmodule FermixCore.Realtime.GrokSessionServer do
   alias FermixCore.Memory.Config, as: MemoryConfig
   alias FermixCore.Memory.Repo
   alias FermixCore.Prompt.BootstrapLoader
+  alias FermixCore.Prompt.IdentityName
   alias FermixCore.Providers.Telemetry, as: ProviderTelemetry
+  alias FermixCore.Realtime.CallGoodbye
   alias FermixCore.Realtime.CallLease
   alias FermixCore.Realtime.CallRecord
   alias FermixCore.Realtime.CallRegistry
@@ -241,6 +251,9 @@ defmodule FermixCore.Realtime.GrokSessionServer do
       ledger: GrokLedger.new(config.max_estimated_cost_cents_per_session, clock.()),
       playback: GrokPlayback.new(Endpoint.grok_playback_opts(Keyword.fetch!(opts, :endpoint))),
       turn: GrokTurn.new(),
+      # Whether the owner's goodbye ends the call (M96), `nil` for a client
+      # older than wire version 5.
+      goodbye: goodbye(Keyword.get(opts, :ends_on_goodbye, false)),
       transcript: LiveTranscript.new(),
       speech: CallSpeech.new(),
       # VAD bounds of the owner's utterances awaiting their transcript.
@@ -310,16 +323,15 @@ defmodule FermixCore.Realtime.GrokSessionServer do
   def handle_call({:playback_progress, playback_id, played_ms, drained?}, _from, state) do
     case GrokPlayback.progress(state.playback, playback_id, played_ms, drained?) do
       {:ok, playback, forwards} ->
-        state =
-          %{state | playback: playback}
-          |> played(played_ms)
-          |> forward_audio(forwards)
-          |> caption_heard()
-          |> watch_playback()
-          |> maybe_listening()
-          |> maybe_continue()
-
-        {:reply, :ok, state}
+        %{state | playback: playback}
+        |> played(played_ms)
+        |> forward_audio(forwards)
+        |> caption_heard()
+        |> watch_playback()
+        |> maybe_listening()
+        |> maybe_continue()
+        |> reply_played_out()
+        |> reply_with(:ok)
 
       {:error, reason} ->
         Logger.warning("voice_grok: refused a playback report: #{reason}")
@@ -581,14 +593,18 @@ defmodule FermixCore.Realtime.GrokSessionServer do
   defp resolve_prompt(%{prompt: prompt}) when is_binary(prompt), do: {:ok, prompt}
 
   # GROK.md, then the same identity, date, memory and capability facts a Live
-  # call is told (M70 §07).
+  # call is told (M70 §07), and the goodbye's rule when it ends the call.
   defp resolve_prompt(state) do
     conversation = Config.conversation(state.config)
 
     with {:ok, grok_md} <- BootstrapLoader.load_grok(state.agent_id),
          {:ok, context} <- LivePrompt.context(state.agent_id, conversation) do
       capabilities = LivePrompt.eligible_capabilities(state.capability_registry, conversation)
-      {:ok, LivePrompt.compose(grok_md.content, capabilities, context)}
+
+      {:ok,
+       LivePrompt.compose(grok_md.content, capabilities, context,
+         ends_on_goodbye: not is_nil(state.goodbye)
+       )}
     end
   end
 
@@ -668,8 +684,10 @@ defmodule FermixCore.Realtime.GrokSessionServer do
          state
          |> start_timers()
          |> say_camera_rule()
+         |> say_greeting()
          |> notify_call_ready()
-         |> release_held_audio()}
+         |> release_held_audio()
+         |> maybe_continue()}
 
       {:error, reason} ->
         Logger.error("voice_grok: the voice bridge refused the call: #{inspect(reason)}")
@@ -700,8 +718,10 @@ defmodule FermixCore.Realtime.GrokSessionServer do
   defp provider_event({:speech_stopped, item_id}, state),
     do: {:noreply, speech_stopped(state, item_id)}
 
-  defp provider_event({:user_transcript, item_id, transcript}, state),
-    do: {:noreply, user_transcript(state, item_id, transcript)}
+  defp provider_event({:user_transcript, item_id, transcript}, state) do
+    {state, heard} = user_transcript(state, item_id, transcript)
+    owner_heard(state, heard)
+  end
 
   defp provider_event({:response_created, response_id, metadata}, state),
     do: {:noreply, response_created(state, response_id, metadata)}
@@ -720,8 +740,11 @@ defmodule FermixCore.Realtime.GrokSessionServer do
 
   defp provider_event({:function_call, call}, state), do: function_call(state, call)
 
-  defp provider_event({:response_done, response_id, status, usage}, state),
-    do: {:noreply, response_done(state, response_id, status, usage)}
+  defp provider_event({:response_done, response_id, status, usage}, state) do
+    state
+    |> response_done(response_id, status, usage)
+    |> reply_played_out()
+  end
 
   # Before the session is ready any error is about its configuration or its
   # context, and the call cannot start on half of either.
@@ -802,14 +825,15 @@ defmodule FermixCore.Realtime.GrokSessionServer do
 
   # One finalized utterance, once: the transcript the task request reads, the
   # call's speech, a caption and, when kept, the record. Its bounds are the
-  # local moments VAD heard it start and stop, not word alignment.
+  # local moments VAD heard it start and stop, not word alignment. With it,
+  # what was heard and when it began, for the goodbye.
   defp user_transcript(state, item_id, transcript) do
     {{start_ms, end_ms}, user_items} = pop_bounds(state.user_items, item_id, offset_ms(state))
     state = %{state | user_items: user_items}
 
     case String.trim(transcript) do
-      "" -> state
-      _words -> utterance(state, :user, transcript, start_ms, end_ms)
+      "" -> {state, nil}
+      _words -> {utterance(state, :user, transcript, start_ms, end_ms), {transcript, start_ms}}
     end
   end
 
@@ -852,7 +876,8 @@ defmodule FermixCore.Realtime.GrokSessionServer do
       state
       | turn: GrokTurn.response_created(state.turn, response_id, metadata),
         response_started_ms: started,
-        latency: latency_on_response(state.latency, metadata)
+        latency: latency_on_response(state.latency, metadata),
+        goodbye: goodbye_signal(state.goodbye, &CallGoodbye.reply_started(&1, offset_ms(state)))
     }
     |> cancel_vad_timer()
     |> cancel_continuation_timer()
@@ -1236,6 +1261,12 @@ defmodule FermixCore.Realtime.GrokSessionServer do
 
   defp maybe_continue(state), do: state
 
+  defp owed(turn) do
+    if GrokTurn.greeting?(turn),
+      do: "the greeting",
+      else: "a continuation (its result stays in the task frame)"
+  end
+
   defp continuation_failed(state, why) do
     case GrokTurn.request_failed(state.turn) do
       {:retry, turn} ->
@@ -1243,10 +1274,7 @@ defmodule FermixCore.Realtime.GrokSessionServer do
         maybe_continue(cancel_continuation_timer(%{state | turn: turn}))
 
       {:gave_up, turn} ->
-        Logger.warning(
-          "voice_grok: a continuation was #{why} twice; the result stays in the task frame"
-        )
-
+        Logger.warning("voice_grok: #{owed(state.turn)} was #{why} twice; it is not asked again")
         LiveTelemetry.provider_error(state.tasks.meta, "continuation #{why}")
         cancel_continuation_timer(%{state | turn: turn})
 
@@ -1271,7 +1299,8 @@ defmodule FermixCore.Realtime.GrokSessionServer do
     notify(state, LiveFrames.playback_stop())
 
     turn = Enum.reduce(GrokTurn.active(state.turn), state.turn, &GrokTurn.fence(&2, &1))
-    state = cancel_ack_timer(%{state | playback: playback, turn: turn})
+    goodbye = goodbye_signal(state.goodbye, &CallGoodbye.interrupted/1)
+    state = cancel_ack_timer(%{state | playback: playback, turn: turn, goodbye: goodbye})
 
     Enum.reduce(targets, state, &truncate/2)
   end
@@ -1316,6 +1345,43 @@ defmodule FermixCore.Realtime.GrokSessionServer do
   end
 
   defp maybe_listening(state), do: state
+
+  ## The goodbye (M96 §5)
+
+  defp goodbye(true), do: CallGoodbye.new(IdentityName.configured_name())
+  defp goodbye(false), do: nil
+
+  # A signal `CallGoodbye` only records, on a call it is armed for.
+  defp goodbye_signal(nil, _signal), do: nil
+  defp goodbye_signal(goodbye, signal), do: signal.(goodbye)
+
+  # The owner's utterance, ended with a space: utterances are whole, and the
+  # goodbye joins a turn's pieces as they come.
+  defp owner_heard(%{goodbye: nil} = state, _heard), do: {:noreply, state}
+  defp owner_heard(state, nil), do: {:noreply, state}
+
+  defp owner_heard(state, {text, start_ms}),
+    do: goodbye_verdict(state, CallGoodbye.owner_words(state.goodbye, text <> " ", start_ms))
+
+  # The reply has played out once the client drained it and nothing is being
+  # generated, `maybe_listening/1`'s own test, whether or not it spoke.
+  defp reply_played_out(%{goodbye: nil} = state), do: {:noreply, state}
+  defp reply_played_out(%{closing?: true} = state), do: {:noreply, state}
+
+  defp reply_played_out(state) do
+    if GrokPlayback.drained?(state.playback) and GrokTurn.cancellable(state.turn) == [],
+      do: goodbye_verdict(state, CallGoodbye.reply_played_out(state.goodbye)),
+      else: {:noreply, state}
+  end
+
+  defp goodbye_verdict(state, {:end, goodbye}),
+    do: end_call(%{state | goodbye: goodbye}, :goodbye)
+
+  defp goodbye_verdict(state, {:cont, goodbye}), do: {:noreply, %{state | goodbye: goodbye}}
+
+  # A goodbye's end inside a call: the caller is answered once the call has settled.
+  defp reply_with({:noreply, state}, reply), do: {:reply, reply, state}
+  defp reply_with({:stop, reason, state}, reply), do: {:stop, reason, reply, state}
 
   ## The chat, mirrored
 
@@ -1397,6 +1463,24 @@ defmodule FermixCore.Realtime.GrokSessionServer do
 
   defp say_camera_rule(state), do: state
 
+  ## The greeting (M96 §4.2)
+
+  # The greeting's text, the newest item Grok has read, then the reply that
+  # says it is owed (`maybe_continue/1` asks for it). A budget already spent,
+  # connected time counted to now, sends neither, so Grok is never asked to
+  # answer the context instead.
+  defp say_greeting(state) do
+    state = tick_ledger(state)
+
+    if GrokLedger.affords_text_item?(state.ledger) do
+      state = send_billable_item(state, "system", LivePrompt.greeting(state.started_at))
+      %{state | turn: GrokTurn.owe(state.turn)}
+    else
+      Logger.warning("voice_grok: the call is not greeted: the call's budget is spent")
+      state
+    end
+  end
+
   ## Teardown
 
   defp end_call(state, reason), do: {:stop, {:shutdown, reason}, settle(state, reason)}
@@ -1424,6 +1508,11 @@ defmodule FermixCore.Realtime.GrokSessionServer do
   end
 
   defp notify_terminal(state, :call_stop), do: state
+
+  defp notify_terminal(state, :goodbye) do
+    notify(state, LiveFrames.call_ended(:goodbye))
+    state
+  end
 
   defp notify_terminal(state, :cost_limit) do
     notify_usage(state, "limit_reached")

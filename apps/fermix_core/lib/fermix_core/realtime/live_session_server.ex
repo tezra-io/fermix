@@ -47,6 +47,21 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   the record. An event of a handed-over task that reached this session before
   its route was released is forwarded to its owner as this process exits.
 
+  The voice speaks first (M96 §4.3), as OpenAI's *Greeting the caller* says
+  to make it: the greeting's text ends `session.input` as a `developer` item,
+  and once `session.started` arrives it goes once more as a commentary with
+  no delegation. GPT-Live may still stay silent; that is accepted.
+
+  The call ends itself when the owner's whole turn was a goodbye and the
+  voice's reply has played (`CallGoodbye`, M96 §5), only for a client at wire
+  version 5 (`ends_on_goodbye`). Live's own transcript timeline carries both
+  sides ("milliseconds from the start of the session", its guide says): the
+  owner's words at their `start_ms`, and a reply's start at its first output
+  transcript fragment. A reply has played out once its voice has had time to
+  play and then `@goodbye_quiet_ms` more carried none (a pause inside a reply
+  is not its end), which also closes it; only the client's `interrupt` is an
+  interruption, since Live's own barge-in cannot be told from the echo.
+
   A call in the chat leaves a gist and one chat row (M56 §4.2): the settle
   closes the record with the settled cost and what the call owes the chat,
   then hands a snapshot of what was said and the tasks to `CallGist`, under
@@ -61,6 +76,8 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   alias FermixCore.ComputerHistory.Taint
   alias FermixCore.Memory.Config, as: MemoryConfig
   alias FermixCore.Memory.Repo
+  alias FermixCore.Prompt.IdentityName
+  alias FermixCore.Realtime.CallGoodbye
   alias FermixCore.Realtime.CallLease
   alias FermixCore.Realtime.CallRecord
   alias FermixCore.Realtime.CallRegistry
@@ -94,6 +111,10 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   # How long after its audio has had time to play a reply counts as over: the
   # pet buffers a little before it plays.
   @reply_margin_ms 300
+  # How long a reply's output must carry no voice, past the margin, before it
+  # counts as played out for the goodbye (M96 §5.3): a pause inside a reply
+  # is not its end.
+  @goodbye_quiet_ms 1_000
   # The microphone held while the provider session starts: ten seconds of
   # 24 kHz PCM16, more than a slow connect and the start deadline together, so
   # a start that succeeds loses none of the first words, and a bound on what a
@@ -234,6 +255,12 @@ defmodule FermixCore.Realtime.LiveSessionServer do
       close_deadline_ms: Keyword.get(opts, :close_deadline_ms, @close_deadline_ms),
       usage_tick_ms: Keyword.get(opts, :usage_tick_ms, @usage_tick_ms),
       reply_margin_ms: Keyword.get(opts, :reply_margin_ms, @reply_margin_ms),
+      # Whether the owner's goodbye ends the call (M96), `nil` for a client
+      # older than wire version 5; whether a reply's words have begun and its
+      # voice not yet gone quiet; and the greeting, until it is said.
+      goodbye: goodbye(Keyword.get(opts, :ends_on_goodbye, false)),
+      reply_open?: false,
+      greeting: nil,
       provider_ready?: false,
       provider_session_id: nil,
       expires_at: nil,
@@ -265,7 +292,8 @@ defmodule FermixCore.Realtime.LiveSessionServer do
       start_timer: nil,
       max_session_timer: nil,
       usage_timer: nil,
-      reply_timer: nil
+      reply_timer: nil,
+      goodbye_timer: nil
     }
   end
 
@@ -284,6 +312,7 @@ defmodule FermixCore.Realtime.LiveSessionServer do
 
     state =
       %{state | turn: LiveTurn.interrupted(state.turn, now(state))}
+      |> goodbye_interrupted()
       |> cancel_reply_timer()
       |> notify_state("listening")
       |> send_append(
@@ -436,6 +465,13 @@ defmodule FermixCore.Realtime.LiveSessionServer do
 
   def handle_info({:reply_played_out, _stale_token}, state), do: {:noreply, state}
 
+  def handle_info({:goodbye_quiet, token}, %{goodbye_timer: {_timer, token}} = state) do
+    state = %{state | goodbye_timer: nil, reply_open?: false}
+    goodbye_verdict(state, CallGoodbye.reply_played_out(state.goodbye))
+  end
+
+  def handle_info({:goodbye_quiet, _stale_token}, state), do: {:noreply, state}
+
   def handle_info({:context_wait_expired, delegation_id, revision}, state) do
     {tasks, told} =
       CallTasks.context_wait_expired(state.tasks, delegation_id, revision, state.transcript)
@@ -496,7 +532,7 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   ## Call start
 
   defp start_call(state) do
-    state = listen_while_starting(state)
+    state = %{listen_while_starting(state) | greeting: LivePrompt.greeting(state.started_at)}
 
     with {:ok, bridge} <- resolve_bridge(state),
          {:ok, instructions} <- resolve_prompt(state),
@@ -505,7 +541,7 @@ defmodule FermixCore.Realtime.LiveSessionServer do
          {:ok, pid} <- open_socket(state, api_key) do
       tasks = state.tasks |> CallTasks.put_bridge(bridge) |> taint_if(input_tainted?)
       state = %{state | voice_bridge: bridge, live_pid: pid, tasks: tasks}
-      send_session_start(state, instructions, input)
+      send_session_start(state, instructions, input ++ [LiveChat.greeting_item(state.greeting)])
     else
       {:error, {:provider_refused, reason}} -> refuse_start(state, reason)
       {:error, reason} -> {:error, reason, notify_error(state, reason)}
@@ -572,7 +608,11 @@ defmodule FermixCore.Realtime.LiveSessionServer do
     with {:ok, live_md} <- LivePrompt.load(state.agent_id),
          {:ok, context} <- LivePrompt.context(state.agent_id, conversation) do
       capabilities = LivePrompt.eligible_capabilities(state.capability_registry, conversation)
-      {:ok, LivePrompt.compose(live_md, capabilities, context)}
+
+      {:ok,
+       LivePrompt.compose(live_md, capabilities, context,
+         ends_on_goodbye: not is_nil(state.goodbye)
+       )}
     end
   end
 
@@ -632,6 +672,7 @@ defmodule FermixCore.Realtime.LiveSessionServer do
           |> start_timers()
           |> sync_mute()
           |> say_camera_rule()
+          |> say_greeting()
           |> notify_call_ready()
           |> release_held_audio()
 
@@ -669,7 +710,7 @@ defmodule FermixCore.Realtime.LiveSessionServer do
     notify(state, LiveFrames.caption(Atom.to_string(speaker), delta, start_ms, end_ms))
 
     record_caption(state, speaker, delta, start_ms, end_ms)
-    {:noreply, read_operator_words(state, speaker)}
+    state |> read_operator_words(speaker) |> goodbye_words(speaker, delta, start_ms)
   end
 
   defp handle_live_event({:delegation_created, id, offset_ms}, state) do
@@ -917,6 +958,11 @@ defmodule FermixCore.Realtime.LiveSessionServer do
 
   defp notify_terminal(state, :call_stop), do: state
 
+  defp notify_terminal(state, :goodbye) do
+    notify(state, LiveFrames.call_ended(:goodbye))
+    state
+  end
+
   defp notify_terminal(state, :cost_limit) do
     state
     |> notify_usage("limit_reached")
@@ -975,7 +1021,10 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   defp forward_reply_audio(state, delta, plays_for_ms) do
     state = if state.speaking?, do: state, else: notify_state(state, "speaking")
     notify(state, LiveFrames.audio_delta(delta))
-    arm_reply_timer(state, plays_for_ms + state.reply_margin_ms)
+
+    state
+    |> arm_reply_timer(plays_for_ms + state.reply_margin_ms)
+    |> arm_goodbye_timer(plays_for_ms + state.reply_margin_ms + @goodbye_quiet_ms)
   end
 
   # The operator's turn, from Live's recognition of their words: a fragment is
@@ -1081,6 +1130,52 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   end
 
   defp say_camera_rule(state), do: state
+
+  ## The greeting (M96 §4.3)
+
+  # Once, after `session.started`, as a commentary with no delegation: the
+  # second half of the vendor's sequence, the first being the same text at the
+  # end of `session.input`.
+  defp say_greeting(%{greeting: greeting, provider_ready?: true} = state)
+       when is_binary(greeting) do
+    event =
+      OpenAILiveClient.commentary_append_event(OpenAILiveClient.new_event_id(), nil, greeting)
+
+    send_append(%{state | greeting: nil}, event, :commentary, nil)
+  end
+
+  defp say_greeting(state), do: state
+
+  ## The goodbye (M96 §5)
+
+  defp goodbye(true), do: CallGoodbye.new(IdentityName.configured_name())
+  defp goodbye(false), do: nil
+
+  # The owner's words feed the goodbye as Live dates them. The first of the
+  # voice's words while no reply is open begins one, at its own `start_ms`.
+  defp goodbye_words(%{goodbye: nil} = state, _speaker, _delta, _start_ms), do: {:noreply, state}
+
+  defp goodbye_words(state, :user, delta, start_ms),
+    do: goodbye_verdict(state, CallGoodbye.owner_words(state.goodbye, delta, start_ms))
+
+  defp goodbye_words(%{reply_open?: false} = state, :assistant, _delta, start_ms) do
+    goodbye = CallGoodbye.reply_started(state.goodbye, start_ms)
+    {:noreply, %{state | goodbye: goodbye, reply_open?: true}}
+  end
+
+  defp goodbye_words(state, :assistant, _delta, _start_ms), do: {:noreply, state}
+
+  defp goodbye_interrupted(%{goodbye: nil} = state), do: state
+
+  defp goodbye_interrupted(state) do
+    %{state | goodbye: CallGoodbye.interrupted(state.goodbye), reply_open?: false}
+    |> cancel_goodbye_timer()
+  end
+
+  defp goodbye_verdict(state, {:end, goodbye}),
+    do: end_call(%{state | goodbye: goodbye}, :goodbye)
+
+  defp goodbye_verdict(state, {:cont, goodbye}), do: {:noreply, %{state | goodbye: goodbye}}
 
   defp send_mute(%{provider_ready?: false} = state, _enabled?), do: state
 
@@ -1256,9 +1351,10 @@ defmodule FermixCore.Realtime.LiveSessionServer do
 
   defp cancel_timers(state) do
     Enum.each([state.start_timer, state.max_session_timer, state.usage_timer], &cancel_timer/1)
+    state = state |> cancel_reply_timer() |> cancel_goodbye_timer()
 
     %{
-      cancel_reply_timer(state)
+      state
       | start_timer: nil,
         max_session_timer: nil,
         usage_timer: nil,
@@ -1273,6 +1369,24 @@ defmodule FermixCore.Realtime.LiveSessionServer do
     token = make_ref()
     timer = Process.send_after(self(), {:reply_played_out, token}, delay_ms)
     %{state | reply_timer: {timer, token}}
+  end
+
+  # Re-armed by every voiced chunk, like the reply timer, `@goodbye_quiet_ms`
+  # later: only on a call the goodbye can end.
+  defp arm_goodbye_timer(%{goodbye: nil} = state, _delay_ms), do: state
+
+  defp arm_goodbye_timer(state, delay_ms) do
+    state = cancel_goodbye_timer(state)
+    token = make_ref()
+    timer = Process.send_after(self(), {:goodbye_quiet, token}, delay_ms)
+    %{state | goodbye_timer: {timer, token}}
+  end
+
+  defp cancel_goodbye_timer(%{goodbye_timer: nil} = state), do: state
+
+  defp cancel_goodbye_timer(%{goodbye_timer: {timer, _token}} = state) do
+    cancel_timer(timer)
+    %{state | goodbye_timer: nil}
   end
 
   defp cancel_reply_timer(%{reply_timer: nil} = state), do: state

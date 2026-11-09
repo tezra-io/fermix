@@ -400,10 +400,14 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
 
   # The session died mid-call. The peer is told, then the handler exits and the
   # socket closes. Without this, the audio_chunk cast would keep "succeeding"
-  # into a dead session while the peer waited on silence.
+  # into a dead session while the peer waited on silence. A session that ended
+  # the call on the owner's goodbye already said `call_ended`: the connection
+  # stays for a fresh `call_start`, as after `call_stop` (M96 §6.2).
   defp handle_session_down(reason, state) do
-    {:stop, _client} = CallClient.session_down(state.client, reason)
-    :ok
+    case CallClient.session_down(state.client, reason) do
+      {:ended, client} -> client_loop(%{state | client: client})
+      {:stop, _client} -> :ok
+    end
   end
 
   defp handle_bytes(bytes, state) do

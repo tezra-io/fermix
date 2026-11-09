@@ -3,6 +3,7 @@
 {"type":"client_hello","protocol_version":3}
 {"type":"client_hello","protocol_version":4}
 {"type":"client_hello","protocol_version":4,"camera":true}
+{"type":"client_hello","protocol_version":5}
 {"type":"call_start"}
 {"type":"audio_chunk","audio":"MTIzNA=="}
 {"type":"interrupt"}

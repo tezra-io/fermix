@@ -578,8 +578,10 @@ defmodule FermixChannels.Mobile.Call do
     {:noreply, detach(state)}
   end
 
+  # A session that died, or one that ended the call on the owner's goodbye
+  # (its `call_ended` already relayed, M96 §6.2): either way the call is over.
   defp down(ref, reason, %{client: %CallClient{session_ref: ref} = client} = state) do
-    {:stop, client} = CallClient.session_down(client, reason)
+    {_ending, client} = CallClient.session_down(client, reason)
     state = drain_emitted(%{state | client: client}, @max_emitted)
     close(state, "ended")
   end

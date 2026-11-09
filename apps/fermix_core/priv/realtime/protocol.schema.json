@@ -3,8 +3,8 @@
   "$id": "https://fermix.sh/realtime/protocol.schema.json",
   "title": "Fermix Realtime voice socket protocol",
   "description": "Newline-delimited JSON wire contract between the Fermix daemon and the FermixPet companion. Source of truth: FermixCore.Realtime.Protocol. See PROTOCOL.md.",
-  "x-protocol-version": 4,
-  "x-supported-version-range": { "min": 1, "max": 4 },
+  "x-protocol-version": 5,
+  "x-supported-version-range": { "min": 1, "max": 5 },
   "$defs": {
     "clientEvent": {
       "type": "object",
@@ -69,7 +69,8 @@
             "playback_stop",
             "call_ready",
             "caption",
-            "task"
+            "task",
+            "call_ended"
           ]
         }
       },
@@ -101,6 +102,10 @@
         {
           "if": { "required": ["type"], "properties": { "type": { "const": "usage" } } },
           "then": { "$ref": "#/$defs/usage" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "call_ended" } } },
+          "then": { "$ref": "#/$defs/call_ended" }
         }
       ]
     },
@@ -180,6 +185,18 @@
         "type": { "const": "server_hello" },
         "min_version": { "type": "integer", "minimum": 1 },
         "max_version": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "call_ended": {
+      "type": "object",
+      "description": "v5: the daemon ended the call itself, normally: a call on a task engine (openai_live, xai_realtime) whose owner said goodbye, once the voice's goodbye played. Sent only to a client whose client_hello was at version 5 or later, after state idle and before the call's last task and usage frames. A client treats it as its own hang-up: stop the microphone and playback, show the call ended, no error. The connection stays open for a fresh call_start, as after call_stop, and the client sends no call_stop for it.",
+      "required": ["type", "reason"],
+      "properties": {
+        "type": { "const": "call_ended" },
+        "reason": {
+          "type": "string",
+          "description": "Why the call ended. Today goodbye: the owner said goodbye. The vocabulary is open: a client treats any reason as a normal end."
+        }
       }
     },
     "audio_delta": {

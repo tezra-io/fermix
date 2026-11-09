@@ -285,7 +285,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     assert Jason.decode!(String.trim(line)) == %{
              "type" => "server_hello",
              "min_version" => 1,
-             "max_version" => 4
+             "max_version" => 5
            }
 
     :gen_tcp.close(conn)
@@ -319,7 +319,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
              "direction" => "client_too_new",
              "client_version" => 99,
              "min_version" => 1,
-             "max_version" => 4
+             "max_version" => 5
            } = Jason.decode!(String.trim(line))
 
     assert {:error, :closed} = :gen_tcp.recv(conn, 0, 1_000)
@@ -847,6 +847,36 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     wait_until(fn -> LocalVoiceSocket.active_clients(socket) == {:ok, 0} end)
   end
 
+  # M96 §6.2: a session that ends the call on the owner's goodbye has said
+  # `call_ended`; its exit is the button's end, so the connection stays for a
+  # fresh call and the peer reads no error and no EOF.
+  test "a session ending the call on a goodbye keeps the connection for a fresh call" do
+    %{socket: socket, socket_path: socket_path} = start_unlinked_session_socket()
+
+    {:ok, conn} = connect(socket_path)
+    :ok = handshake(conn, 5)
+    :ok = :gen_tcp.send(conn, ~s({"type":"call_start"}\n))
+    assert_receive {:session_started, session, opts}
+    assert Keyword.fetch!(opts, :ends_on_goodbye)
+    assert {:ok, _listening} = recv_line(conn)
+
+    send(Keyword.fetch!(opts, :companion), {:realtime, %{type: "call_ended", reason: "goodbye"}})
+    :ok = Agent.stop(session, {:shutdown, :goodbye})
+
+    assert {:ok, line} = recv_line(conn, 2_000)
+    assert Jason.decode!(String.trim(line)) == %{"type" => "call_ended", "reason" => "goodbye"}
+
+    # The same connection carries the next call.
+    :ok = :gen_tcp.send(conn, ~s({"type":"call_start"}\n))
+    assert_receive {:session_started, fresh, _opts}
+    assert fresh != session
+    assert {:ok, line} = recv_line(conn)
+    assert %{"type" => "state", "state" => "listening"} = Jason.decode!(String.trim(line))
+    assert LocalVoiceSocket.active_clients(socket) == {:ok, 1}
+
+    :gen_tcp.close(conn)
+  end
+
   test "killing the connection handler closes the client socket and tears the session down" do
     %{socket: socket, socket_path: socket_path} = start_unlinked_session_socket()
 
@@ -894,7 +924,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
              "direction" => "client_too_old",
              "client_version" => 1,
              "min_version" => 2,
-             "max_version" => 4,
+             "max_version" => 5,
              "required_for" => "openai_live"
            }
 
@@ -1023,7 +1053,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
                "direction" => "client_too_old",
                "client_version" => version,
                "min_version" => 3,
-               "max_version" => 4,
+               "max_version" => 5,
                "required_for" => "xai_realtime"
              }
 
@@ -1053,7 +1083,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     {:ok, conn} = connect(socket_path)
     :ok = :gen_tcp.send(conn, ~s({"type":"client_hello","protocol_version":4,"camera":true}\n))
     assert {:ok, line} = recv_line(conn)
-    assert %{"type" => "server_hello", "max_version" => 4} = Jason.decode!(String.trim(line))
+    assert %{"type" => "server_hello", "max_version" => 5} = Jason.decode!(String.trim(line))
 
     :ok = :gen_tcp.send(conn, ~s({"type":"call_start"}\n))
     assert_receive {:session_started, _session, _opts}
@@ -1344,7 +1374,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     :ok = :gen_tcp.send(conn, ~s({"type":"client_hello","protocol_version":#{version}}\n))
     assert {:ok, line} = recv_line(conn)
 
-    assert %{"type" => "server_hello", "min_version" => 1, "max_version" => 4} =
+    assert %{"type" => "server_hello", "min_version" => 1, "max_version" => 5} =
              Jason.decode!(String.trim(line))
 
     :ok

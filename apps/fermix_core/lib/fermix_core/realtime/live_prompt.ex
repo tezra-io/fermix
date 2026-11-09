@@ -30,6 +30,7 @@ defmodule FermixCore.Realtime.LivePrompt do
   alias FermixCore.Agents.VoiceCall
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Clock
   alias FermixCore.HostFacts
   alias FermixCore.Memory.PromptFiles
   alias FermixCore.Prompt.BootstrapLoader
@@ -104,6 +105,10 @@ defmodule FermixCore.Realtime.LivePrompt do
                  "picture: never say or imply that you can see anything. Hand off anything " <>
                  "about what the camera shows, and your Fermix agent reads the newest picture."
 
+  # M96 §5.4: told only to a call that ends on the owner's goodbye.
+  @goodbye_rule "When the owner says goodbye, say a short goodbye back and ask nothing more: " <>
+                  "the call ends once you've said it."
+
   # M87 Phase 2: what a task is told when the phone's camera is on and no
   # fresh frame came with it, so its reply says so rather than guessing.
   @no_picture_note "The owner's phone camera is on, but there is no current picture of " <>
@@ -152,10 +157,20 @@ defmodule FermixCore.Realtime.LivePrompt do
   Bounded by `instructions_max_bytes/0`: past it MEMORY.md is left out, then
   USER.md, and the omission is logged. Nothing else is cut, so a `live_md`
   that alone passes the bound is sent whole.
+
+  `opts[:ends_on_goodbye]` (default `false`) adds `goodbye_rule/0` last: a
+  call whose client hears the call end on a goodbye (M96 §5.4, §6.3).
   """
-  @spec compose(String.t(), [Capability.t()], context()) :: String.t()
-  def compose(live_md, capabilities, %{prompt_memory: %{}, conversation: conversation} = context)
-      when is_binary(live_md) and is_list(capabilities) do
+  @spec compose(String.t(), [Capability.t()], context(), keyword()) :: String.t()
+  def compose(live_md, capabilities, context, opts \\ [])
+
+  def compose(
+        live_md,
+        capabilities,
+        %{prompt_memory: %{}, conversation: conversation} = context,
+        opts
+      )
+      when is_binary(live_md) and is_list(capabilities) and is_list(opts) do
     leading =
       Enum.reject(
         [
@@ -171,7 +186,8 @@ defmodule FermixCore.Realtime.LivePrompt do
 
     tools = [
       @backend_heading <> "\n" <> capability_lines(capabilities),
-      shown_in_chat(conversation)
+      shown_in_chat(conversation),
+      goodbye_line(Keyword.get(opts, :ends_on_goodbye, false))
     ]
 
     fits? = fn memory ->
@@ -276,6 +292,31 @@ defmodule FermixCore.Realtime.LivePrompt do
   def camera_rule, do: @camera_rule
 
   @doc """
+  What a task-engine voice is told when its call is ready (M96 §4): the owner
+  has just called, the time to the minute in their zone (`Clock.now_line/2`,
+  so the greeting suits the moment), and to greet them first, by name when
+  the instructions carry it, in one casual line, then listen. Built per call,
+  so the minute costs no prompt cache. No sample greeting: the wording is the
+  voice's own.
+
+  `opts` is `Clock`'s (`:personalization`, the seam a test pins the zone with).
+  """
+  @spec greeting(DateTime.t(), keyword()) :: String.t()
+  def greeting(%DateTime{} = now, opts \\ []) when is_list(opts) do
+    "The owner has just started this call. " <>
+      Clock.now_line(now, opts) <>
+      " Greet the owner first, by name if you know it, in one short, casual line that " <>
+      "suits the moment, then stop and listen. Don't answer or act on any earlier message."
+  end
+
+  @doc """
+  The rule a call is told when its client hears the call end on the owner's
+  goodbye (M96 §5.4): say goodbye back, and nothing more.
+  """
+  @spec goodbye_rule() :: String.t()
+  def goodbye_rule, do: @goodbye_rule
+
+  @doc """
   What a task-engine call's hand-off is told, beside `backend_addendum/1`, when
   the phone's camera is on and the task carries no fresh frame (M87 Phase 2).
   """
@@ -361,6 +402,9 @@ defmodule FermixCore.Realtime.LivePrompt do
   # A private call shows nothing in the chat (M56 §5), so it is told nothing.
   defp shown_in_chat("chat"), do: @shown_in_chat
   defp shown_in_chat("private"), do: nil
+
+  defp goodbye_line(true), do: @goodbye_rule
+  defp goodbye_line(false), do: nil
 
   # `LIVE.md`'s template still says "You are Fermix"; this line, read after it,
   # is what a renamed assistant answers to.

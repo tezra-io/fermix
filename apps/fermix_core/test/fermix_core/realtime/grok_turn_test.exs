@@ -41,6 +41,38 @@ defmodule FermixCore.Realtime.GrokTurnTest do
     end
   end
 
+  # M96 §4.2: the greeting is a continuation owed before anything was said.
+  describe "owe/1" do
+    test "owes the greeting, due at once on a quiet call, and any response answers it" do
+      turn = GrokTurn.owe(GrokTurn.new())
+      assert GrokTurn.greeting?(turn)
+      assert GrokTurn.due?(turn, true)
+
+      {id, turn} = GrokTurn.request(turn)
+      assert GrokTurn.greeting?(turn)
+
+      turn = GrokTurn.response_created(turn, "r1", %{"fermix_continuation" => id})
+      refute GrokTurn.greeting?(turn)
+      refute GrokTurn.due?(GrokTurn.response_done(turn, "r1"), true)
+    end
+
+    test "owner speech answers it too: Grok's own response consumes what was owed" do
+      turn = GrokTurn.owe(GrokTurn.new()) |> GrokTurn.response_created("r_vad", nil)
+      refute GrokTurn.greeting?(turn)
+      refute GrokTurn.due?(GrokTurn.response_done(turn, "r_vad"), true)
+    end
+
+    test "a greeting that never starts is asked once more, then given up" do
+      {_id, turn} = GrokTurn.request(GrokTurn.owe(GrokTurn.new()))
+      assert {:retry, turn} = GrokTurn.request_failed(turn)
+      assert GrokTurn.greeting?(turn)
+      {_id, turn} = GrokTurn.request(turn)
+      assert {:gave_up, turn} = GrokTurn.request_failed(turn)
+      refute GrokTurn.greeting?(turn)
+      refute GrokTurn.due?(turn, true)
+    end
+  end
+
   describe "the continuation" do
     test "is owed once a done response's every call is answered, and due when nothing stands in the way" do
       turn = GrokTurn.response_created(GrokTurn.new(), "r1", nil)

@@ -18,7 +18,10 @@ defmodule FermixChannels.Accessories.Call do
       anything to flush.
     * a GPT-Live or Grok `task`, and OpenAI Realtime's `tool_event`s and its
       reconnects → `task.event` (`FermixCore.Accessories.Tasks`, M91 D21).
-    * `error`, or the session ending → the call ends.
+    * `error`, or the session ending → the call ends. A session that ended
+      the call itself (`call_ended`, the owner's goodbye, M96 §6.2) ends it
+      with that reason, once the session has gone: the robot hears
+      `call.end {reason: "goodbye"}`.
 
   Accessory to engine:
 
@@ -90,6 +93,9 @@ defmodule FermixChannels.Accessories.Call do
     out_rms: :robot_out_rms,
     out_peak: :robot_out_peak
   }
+  # Why a session ended a call itself (`call_ended.reason`, M96): each is the
+  # call's end reason and the robot's `call.end` reason.
+  @ended_reasons %{"goodbye" => :goodbye}
   @client_opts [:session_module, :session_starter, :session_supervisor, :session_guard]
   @token ~r/\A[a-z][a-z0-9_]{0,47}\z/
 
@@ -126,6 +132,8 @@ defmodule FermixChannels.Accessories.Call do
       robot_levels: %{},
       engine_muted?: false,
       sent_state: nil,
+      # Why the session ended the call itself (`call_ended`), until it goes.
+      ended_reason: nil,
       counters: %{
         mic_frames: 0,
         mic_chunks: 0,
@@ -249,8 +257,10 @@ defmodule FermixChannels.Accessories.Call do
         {:DOWN, ref, :process, _session, reason},
         %{client: %{session_ref: ref}} = state
       ) do
-    {:stop, client} = CallClient.session_down(state.client, reason)
-    finish(%{state | client: client}, :session_ended)
+    case CallClient.session_down(state.client, reason) do
+      {:ended, client} -> finish(%{state | client: client}, state.ended_reason || :call_ended)
+      {:stop, client} -> finish(%{state | client: client}, :session_ended)
+    end
   end
 
   # The link went, however it went: the session goes with it.
@@ -280,6 +290,11 @@ defmodule FermixChannels.Accessories.Call do
 
   defp on_engine(state, %{type: "error"} = error),
     do: finish(state, :session_error, error_reason(error))
+
+  # Only recorded: the session is still settling, and its exit ends the call
+  # (a teardown from here would wait on that settle).
+  defp on_engine(state, %{type: "call_ended", reason: reason}) when is_binary(reason),
+    do: {:noreply, %{state | ended_reason: Map.get(@ended_reasons, reason, :call_ended)}}
 
   defp on_engine(state, _event), do: {:noreply, state}
 

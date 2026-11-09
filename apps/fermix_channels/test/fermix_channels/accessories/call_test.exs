@@ -821,6 +821,23 @@ defmodule FermixChannels.Accessories.CallTest do
       session_gone(session, ctx.lease)
     end
 
+    # M96 §6.2: a session that ends the call on the owner's goodbye says so,
+    # then goes. The call only records the reason from the frame, so it never
+    # waits on a session still settling, and ends on the session's exit.
+    test "a session that ends the call on a goodbye ends it with that reason", ctx do
+      ctx = ctx |> attached() |> call_up()
+      session = ctx.session
+      assert Keyword.fetch!(ctx.session_opts, :ends_on_goodbye)
+
+      :ok = AccessoryEngine.emit(session, %{type: "state", state: "idle"})
+      :ok = AccessoryEngine.emit(session, %{type: "call_ended", reason: "goodbye"})
+      :ok = GenServer.stop(session, {:shutdown, :goodbye})
+
+      assert %{reason: "goodbye"} = AccessoryCase.await_received(ctx.sim, "call.end")
+      refute_received {:engine, ^session, :call_stop}
+      session_gone(session, ctx.lease)
+    end
+
     test "an engine error ends the call with its kind", ctx do
       ctx = ctx |> attached() |> call_up()
 

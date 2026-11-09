@@ -265,8 +265,9 @@ defmodule FermixCore.Realtime.LiveTelemetry do
   `voice_cost_millicents` (integer sub-cent units, duration-priced),
   `backend_turns`, and `accounting_complete` as 0/1 — and every value must be a
   number: a rendered string reads as a measurement downstream and prices
-  nothing. `reason` (`:call_stop`, `:cost_limit`, `:max_session_duration`,
-  `:provider_disconnected`, `:session_expired`) rides as metadata, because a
+  nothing. `reason` (`:call_stop`, `:goodbye`, `:cost_limit`,
+  `:max_session_duration`, `:provider_disconnected`, `:session_expired`) rides
+  as metadata, because a
   ceiling kill that looked like a hang-up is exactly what makes a torn-down call
   undiagnosable.
   """

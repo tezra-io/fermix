@@ -87,8 +87,8 @@ defmodule FermixCore.Realtime.ProtocolTest do
   end
 
   test "exposes the version and event catalog as the source of truth" do
-    assert Protocol.protocol_version() == 4
-    assert Protocol.supported_version_range() == {1, 4}
+    assert Protocol.protocol_version() == 5
+    assert Protocol.supported_version_range() == {1, 5}
     assert "client_hello" in Protocol.client_events()
     assert "server_hello" in Protocol.server_events()
   end
@@ -115,9 +115,22 @@ defmodule FermixCore.Realtime.ProtocolTest do
 
   # The floor stays at 1 while the ceiling rises: a v1 companion still runs the
   # Realtime engine, and an N/N-1 window would have dropped it at v3.
-  test "negotiate serves every version from 1 to 4" do
-    for version <- 1..4, do: assert(:ok = Protocol.negotiate(version))
-    assert {:error, :client_too_new} = Protocol.negotiate(5)
+  test "negotiate serves every version from 1 to 5" do
+    for version <- 1..5, do: assert(:ok = Protocol.negotiate(version))
+    assert {:error, :client_too_new} = Protocol.negotiate(6)
+  end
+
+  # v5, the call that ends itself (M96): one server event, a normal end the
+  # daemon starts, and nothing a client sends.
+  test "v5 adds call_ended without dropping an earlier event" do
+    assert "call_ended" in Protocol.server_events()
+    assert {:ok, line} = Protocol.encode_server_event("call_ended", %{reason: "goodbye"})
+    assert Jason.decode!(line) == %{"type" => "call_ended", "reason" => "goodbye"}
+    refute "call_ended" in Protocol.client_events()
+
+    for type <- ~w(call_ready caption task playback_stop) do
+      assert type in Protocol.server_events()
+    end
   end
 
   # v4, the phone's camera (M87 Phase 2): one client object, and a hello that

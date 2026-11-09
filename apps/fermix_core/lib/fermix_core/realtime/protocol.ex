@@ -24,7 +24,9 @@ defmodule FermixCore.Realtime.Protocol do
   (`playback_id` on `audio_delta`, `playback_progress`). Version 4 adds the
   phone's camera (M87): `client_hello`'s optional `camera` flag, which says
   whether the endpoint has one, and the `camera` object that turns it on and
-  off (`CallClient` decides who may send it). An older companion is
+  off (`CallClient` decides who may send it). Version 5 adds the call that
+  ends itself (M96): `call_ended`, a normal end the daemon starts, today when
+  the owner says goodbye; only a peer at 5 or later is given one. An older companion is
   still served for the engines it can render; a call whose engine needs a newer
   version refuses it at `call_start` with `update_required` (the rule lives in
   `CallClient`, the one place that knows both the peer's version and the
@@ -34,14 +36,14 @@ defmodule FermixCore.Realtime.Protocol do
   alias FermixCore.Realtime.Config
 
   # Bumped in lockstep with any wire-shape change.
-  @protocol_version 4
+  @protocol_version 5
   # A literal, not derived from the version: a v1 companion still runs the
   # Realtime engine, and the N/N-1 window this once was would have dropped it
   # silently at v3. Raising the floor is a release decision of its own.
   @min_supported_version 1
 
   @client_events ~w(client_hello call_start audio_chunk interrupt mute call_stop task_cancel playback_progress camera)
-  @server_events ~w(server_hello state audio_delta transcript_delta assistant_text_delta assistant_text_done tool_event usage error playback_stop call_ready caption task)
+  @server_events ~w(server_hello state audio_delta transcript_delta assistant_text_delta assistant_text_done tool_event usage error playback_stop call_ready caption task call_ended)
 
   # One call per home (`CallLease`): a `call_start` while another call is up or
   # still settling, on any engine and from any endpoint, is refused with this

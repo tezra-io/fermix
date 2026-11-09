@@ -482,6 +482,46 @@ defmodule FermixCore.Realtime.LivePromptTest do
     end
   end
 
+  # M96 §4.1: the one greeting instruction, built per call, the time in the
+  # owner's zone; no sample greeting and no scripted line.
+  describe "greeting/2" do
+    test "says the owner just called, the time in their zone, and to greet first, then listen" do
+      greeting =
+        LivePrompt.greeting(~U[2027-03-05 00:42:00Z],
+          personalization: [timezone: "America/New_York"]
+        )
+
+      assert greeting =~ "The owner has just started this call."
+      assert greeting =~ "Now: Thursday, March 4, 2027 at 7:42 PM EST."
+      assert greeting =~ "Greet the owner first, by name if you know it"
+      assert greeting =~ "then stop and listen"
+      assert greeting =~ "Don't answer or act on any earlier message."
+      refute greeting =~ ~r/"[^"]+"/
+    end
+  end
+
+  # M96 §5.4: told only to a call the owner's goodbye can end.
+  describe "goodbye_rule/0 and compose's ends_on_goodbye" do
+    test "a call that ends on a goodbye is told to say goodbye back and nothing more" do
+      prompt =
+        LivePrompt.compose(Defaults.live_md(), [capability("web_search", :web)], @bare,
+          ends_on_goodbye: true
+        )
+
+      assert LivePrompt.goodbye_rule() =~ "say a short goodbye back and ask nothing more"
+      assert String.ends_with?(prompt, LivePrompt.goodbye_rule())
+    end
+
+    test "any other call is not told it" do
+      for opts <- [[], [ends_on_goodbye: false]] do
+        prompt =
+          LivePrompt.compose(Defaults.live_md(), [capability("web_search", :web)], @bare, opts)
+
+        refute prompt =~ LivePrompt.goodbye_rule()
+      end
+    end
+  end
+
   describe "camera_rule/0" do
     # M87 Phase 2, after M41's rule for a screen: the voice sees nothing, so it
     # never implies it does, and hands off anything about the picture.

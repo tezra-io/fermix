@@ -17,11 +17,19 @@ defmodule FermixCore.Realtime.LiveFramesTest do
       LiveFrames.call_ready("openai_live", "voice_live:1", @call_uuid, "chat", nil, nil),
       LiveFrames.task(@call_uuid, "dg_1", 1, "running", nil),
       LiveFrames.usage(@call_uuid, LiveLedger.usage_payload(LiveLedger.new(100, 0))),
-      LiveFrames.error(:cost_limit)
+      LiveFrames.error(:cost_limit),
+      LiveFrames.call_ended(:goodbye)
     ]
 
     for %{type: type} <- frames do
       assert type in Protocol.server_events()
+    end
+  end
+
+  describe "call_ended/1" do
+    test "names why the daemon ended the call, and only a documented reason" do
+      assert LiveFrames.call_ended(:goodbye) == %{type: "call_ended", reason: "goodbye"}
+      assert_raise FunctionClauseError, fn -> LiveFrames.call_ended(:call_stop) end
     end
   end
 

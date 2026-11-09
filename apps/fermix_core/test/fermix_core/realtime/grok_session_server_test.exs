@@ -48,6 +48,7 @@ defmodule FermixCore.Realtime.GrokSessionServerTest do
     def close(socket), do: Agent.stop(socket)
 
     def events, do: Agent.get(@name, & &1.events)
+    def clear_events, do: Agent.update(@name, &%{&1 | events: []})
     def socket, do: Agent.get(@name, & &1.socket)
 
     def deliver(frame) do
@@ -250,7 +251,8 @@ defmodule FermixCore.Realtime.GrokSessionServerTest do
                          provider_session_id: "sess_1"
                        }}
 
-      assert :sys.get_state(session).ledger.text_items_sent == 2
+      # The chat's line, the closing line, and the greeting sent once ready.
+      assert :sys.get_state(session).ledger.text_items_sent == 3
     end
 
     test "a private call reads no chat and is ready once configured", %{clock: clock} do
@@ -650,6 +652,162 @@ defmodule FermixCore.Realtime.GrokSessionServerTest do
     end
   end
 
+  # M96 §4.2: the voice speaks first. The greeting's text is the newest item
+  # Grok reads, and the reply that says it is the one continuation the call
+  # owes before anything was said.
+  describe "the greeting" do
+    test "once ready, one quiet system item and then exactly one response.create", %{
+      clock: clock
+    } do
+      session = start_session(clock: clock)
+      :ok = SessionControl.call_start(session)
+      :ok = SessionControl.audio_chunk(session, <<1, 2>>)
+      configure(session)
+
+      types = Enum.map(FakeXAI.events(), & &1.type)
+      assert List.last(types) == "response.create"
+      assert Enum.count(types, &(&1 == "response.create")) == 1
+
+      # The held microphone audio goes before the request for the greeting.
+      assert Enum.find_index(types, &(&1 == "input_audio_buffer.append")) <
+               Enum.find_index(types, &(&1 == "response.create"))
+
+      assert [greeting] =
+               for(
+                 %{type: "conversation.item.create", item: item} <- FakeXAI.events(),
+                 do: item
+               )
+
+      assert greeting?(greeting)
+      assert hd(greeting.content).text =~ "Now: "
+      assert [%{response: %{metadata: %{"fermix_continuation" => _id}}}] = continuations()
+      assert_received {:realtime, %{type: "call_ready"}}
+    end
+
+    test "a call whose budget is already spent is not greeted", %{clock: clock} do
+      Process.flag(:trap_exit, true)
+      session = start_session(clock: clock, config: grok_config(cost_cents: 1))
+      :ok = SessionControl.call_start(session)
+      # Ten connected seconds cost more than the cent the call may spend.
+      Agent.update(clock, fn _ms -> 10_000 end)
+      configure(session)
+
+      refute Enum.any?(FakeXAI.events(), &(&1.type == "conversation.item.create"))
+      assert continuations() == []
+    end
+
+    test "the owner speaking over the greeting cuts it, as over any reply", %{clock: clock} do
+      session = start_session(clock: clock)
+      ready(session)
+      [%{response: %{metadata: metadata}}] = continuations()
+
+      deliver(%{
+        "type" => "response.created",
+        "response" => %{"id" => "r_hi", "metadata" => metadata}
+      })
+
+      deliver(audio_delta("r_hi", "a_hi"))
+      sync(session)
+      flush_frames()
+
+      deliver(%{"type" => "input_audio_buffer.speech_started", "item_id" => "u1"})
+      sync(session)
+
+      assert_received {:realtime, %{type: "playback_stop"}}
+    end
+
+    test "a greeting that never starts is asked for once more, then given up", %{clock: clock} do
+      session = ready_session_ungreeted(clock)
+      [%{response: %{metadata: %{"fermix_continuation" => first}}}] = continuations()
+
+      send(session, {:continuation_wait, first})
+      sync(session)
+
+      assert [_first, %{response: %{metadata: %{"fermix_continuation" => second}}}] =
+               continuations()
+
+      send(session, {:continuation_wait, second})
+      sync(session)
+      assert length(continuations()) == 2
+      refute :sys.get_state(session).turn.greeting?
+    end
+  end
+
+  # M96 §5: on a call whose client takes `call_ended` (wire v5), the owner's
+  # whole turn being a goodbye ends the call once Grok's reply has played.
+  describe "the goodbye" do
+    test "a goodbye whose transcript lands after the reply began ends the call once it played",
+         %{clock: clock} do
+      Process.flag(:trap_exit, true)
+      scope = "voice_live:goodbye_#{System.unique_integer([:positive, :monotonic])}"
+      TelemetryCapture.attach([[:fermix, :voice_live, :call_stop]], session_id: scope)
+      session = ready_session(clock, ends_on_goodbye: true, session_scope: scope)
+
+      playback_id = goodbye_reply(session, clock, "Okay, thanks, bye.")
+      :ok = SessionControl.playback_progress(session, playback_id, 100, true)
+
+      assert_receive {:EXIT, ^session, {:shutdown, :goodbye}}
+      assert_received {:realtime, %{type: "state", state: "idle"}}
+      assert_received {:realtime, %{type: "call_ended", reason: "goodbye"}}
+      refute_received {:realtime, %{type: "error"}}
+
+      assert_receive {:telemetry, [:fermix, :voice_live, :call_stop], _measurements,
+                      %{reason: "goodbye"}}
+    end
+
+    test "the reply's end at response.done ends it when the client already drained", %{
+      clock: clock
+    } do
+      Process.flag(:trap_exit, true)
+      session = ready_session(clock, ends_on_goodbye: true)
+      user_says(session, "u1", "bye", clock)
+      Agent.update(clock, fn _ms -> 2_300 end)
+      deliver(%{"type" => "response.created", "response" => %{"id" => "r1"}})
+      deliver(audio_delta("r1", "a1"))
+      sync(session)
+      assert_received {:realtime, %{type: "audio_delta", playback_id: playback_id}}
+      :ok = SessionControl.playback_progress(session, playback_id, 100, true)
+      assert Process.alive?(session)
+
+      deliver(response_done("r1"))
+
+      assert_receive {:EXIT, ^session, {:shutdown, :goodbye}}
+      assert_received {:realtime, %{type: "call_ended", reason: "goodbye"}}
+    end
+
+    test "speaking over the voice's goodbye keeps the call", %{clock: clock} do
+      session = ready_session(clock, ends_on_goodbye: true)
+      playback_id = goodbye_reply(session, clock, "bye")
+      :ok = SessionControl.playback_progress(session, playback_id, 50, false)
+
+      deliver(%{"type" => "input_audio_buffer.speech_started", "item_id" => "u2"})
+      sync(session)
+      assert_received {:realtime, %{type: "playback_stop"}}
+
+      :ok = SessionControl.playback_progress(session, playback_id, 50, true)
+      assert Process.alive?(session)
+      refute_received {:realtime, %{type: "call_ended"}}
+    end
+
+    test "a turn that only mentions a goodbye keeps the call", %{clock: clock} do
+      session = ready_session(clock, ends_on_goodbye: true)
+      playback_id = goodbye_reply(session, clock, "Remind me to say bye to Priya at five")
+      :ok = SessionControl.playback_progress(session, playback_id, 100, true)
+
+      assert Process.alive?(session)
+      refute_received {:realtime, %{type: "call_ended"}}
+    end
+
+    test "a client older than wire version 5 is never ended on a goodbye", %{clock: clock} do
+      session = ready_session(clock)
+      playback_id = goodbye_reply(session, clock, "Okay, thanks, bye.")
+      :ok = SessionControl.playback_progress(session, playback_id, 100, true)
+
+      assert Process.alive?(session)
+      refute_received {:realtime, %{type: "call_ended"}}
+    end
+  end
+
   describe "playback" do
     test "audio carries a playback id and the reply plays out on the client's drain", %{
       clock: clock
@@ -866,7 +1024,8 @@ defmodule FermixCore.Realtime.GrokSessionServerTest do
                Enum.filter(FakeXAI.events(), &(&1.type == "conversation.item.create"))
 
       refute Enum.any?(FakeXAI.events(), &(&1.type == "response.create"))
-      assert :sys.get_state(session).ledger.text_items_sent == 1
+      # The greeting, then the typed line.
+      assert :sys.get_state(session).ledger.text_items_sent == 2
     end
 
     test "a private call is told nothing", %{clock: clock} do
@@ -875,7 +1034,10 @@ defmodule FermixCore.Realtime.GrokSessionServerTest do
       :ok = SessionControl.chat_typed(session, "use https://x.test/lease")
       sync(session)
 
-      assert Enum.filter(FakeXAI.events(), &(&1.type == "conversation.item.create")) == []
+      assert [%{item: item}] =
+               Enum.filter(FakeXAI.events(), &(&1.type == "conversation.item.create"))
+
+      assert greeting?(item)
     end
 
     test "an answer drawn from Computer History is withheld when only OpenAI is granted", %{
@@ -928,13 +1090,14 @@ defmodule FermixCore.Realtime.GrokSessionServerTest do
                        %{
                          type: "usage",
                          accounting: "incomplete",
-                         voice_text_items: 0,
+                         voice_text_items: 1,
                          voice_cost_cents: cents
                        }}
 
-      assert cents == 12.0
+      # Ninety seconds connected, and the greeting's one text item.
+      assert cents == 12.4
 
-      assert_received {:call_stop, %{voice_cost_millicents: 12_000},
+      assert_received {:call_stop, %{voice_cost_millicents: 12_400},
                        %{engine: "xai_realtime", provider: "xai", reason: "call_stop"}}
 
       :telemetry.detach(handler)
@@ -1043,12 +1206,66 @@ defmodule FermixCore.Realtime.GrokSessionServerTest do
     )
   end
 
-  defp ready_session(clock) do
+  # A ready call whose greeting has been said: the greeting's reply started
+  # and ended, and the fake's record of what was sent starts after it.
+  defp ready_session(clock, opts \\ []) do
+    session = start_session(Keyword.put(opts, :clock, clock))
+    ready(session)
+    greeted(session)
+    flush_frames()
+    FakeXAI.clear_events()
+    session
+  end
+
+  defp ready_session_ungreeted(clock) do
     session = start_session(clock: clock)
     ready(session)
     flush_frames()
     session
   end
+
+  # The owner says `text` (VAD heard it from 1 s to 2 s), Grok's reply begins
+  # at 2.3 s with one 100 ms chunk, the transcript of what the owner said
+  # lands after that, and the reply is done. The reply's playback id.
+  defp goodbye_reply(session, clock, text) do
+    Agent.update(clock, fn _ms -> 1_000 end)
+    deliver(%{"type" => "input_audio_buffer.speech_started", "item_id" => "u1"})
+    sync(session)
+    Agent.update(clock, fn _ms -> 2_000 end)
+    deliver(%{"type" => "input_audio_buffer.speech_stopped", "item_id" => "u1"})
+    sync(session)
+    Agent.update(clock, fn _ms -> 2_300 end)
+    deliver(%{"type" => "response.created", "response" => %{"id" => "r1"}})
+    deliver(audio_delta("r1", "a1"))
+
+    deliver(%{
+      "type" => "conversation.item.input_audio_transcription.completed",
+      "item_id" => "u1",
+      "transcript" => text
+    })
+
+    deliver(response_done("r1"))
+    sync(session)
+    assert_received {:realtime, %{type: "audio_delta", playback_id: playback_id}}
+    playback_id
+  end
+
+  defp greeted(session) do
+    [%{response: %{metadata: metadata}}] = continuations()
+
+    deliver(%{
+      "type" => "response.created",
+      "response" => %{"id" => "r_hi", "metadata" => metadata}
+    })
+
+    deliver(response_done("r_hi"))
+    sync(session)
+  end
+
+  defp greeting?(%{role: "system", content: [%{text: text}]}),
+    do: text =~ "The owner has just started this call."
+
+  defp greeting?(_item), do: false
 
   # A started call with no chat to prime: ready as soon as it is configured.
   defp ready(session) do

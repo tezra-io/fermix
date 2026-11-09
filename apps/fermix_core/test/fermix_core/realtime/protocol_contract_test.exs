@@ -369,6 +369,32 @@ defmodule FermixCore.Realtime.ProtocolContractTest do
         do: assert(%{"type" => "camera", "on" => on} in clients, "no golden camera #{on}")
   end
 
+  # v5, the call that ends itself (M96 §7): one server object with a required
+  # reason, a golden row the daemon builds exactly, and a v5 hello.
+  test "the v5 def publishes call_ended as the daemon builds it", %{schema: schema} do
+    defs = schema["$defs"]
+
+    assert defs["call_ended"]["required"] == ["type", "reason"]
+    assert %{"type" => "string"} = defs["call_ended"]["properties"]["reason"]
+    assert defs["call_ended"]["description"] =~ "no error"
+    assert defs["call_ended"]["description"] =~ "connection stays open"
+
+    golden =
+      @server_fixtures
+      |> fixture_lines()
+      |> Enum.map(&Jason.decode!/1)
+      |> Enum.find(&(&1["type"] == "call_ended"))
+
+    assert golden == LiveFrames.call_ended(:goodbye) |> Jason.encode!() |> Jason.decode!()
+
+    clients =
+      @client_fixtures
+      |> fixture_lines()
+      |> Enum.map(&Jason.decode!/1)
+
+    assert %{"type" => "client_hello", "protocol_version" => 5} in clients
+  end
+
   test "the playback refusals are published error reasons with golden rows", %{schema: schema} do
     description = schema["$defs"]["error"]["properties"]["reason"]["description"]
 

@@ -812,6 +812,24 @@ defmodule FermixChannels.Mobile.CallTest do
       end
     end
 
+    # M96 §6.2: a session that ends the call on the owner's goodbye says
+    # `call_ended`, which the phone hears like any frame, and the call channel
+    # closes `ended`, as every finished phone call does.
+    test "a session ending the call on a goodbye is relayed, then the call closes ended", ctx do
+      hello = %{type: "client_hello", protocol_version: 5}
+      %{call: call, voice: voice} = call_alone!(ctx, "openai_live", hello: hello)
+      call_ref = Process.monitor(call)
+
+      send(voice, {:push, %{type: "call_ended", reason: "goodbye"}})
+      :ok = GenServer.stop(voice, {:shutdown, :goodbye})
+
+      assert_receive {:from_call, :control, %{"t" => "call_line", "bytes" => ended}}
+      assert Jason.decode!(ended) == %{"type" => "call_ended", "reason" => "goodbye"}
+      assert_receive {:from_call, :control, %{"t" => "call_close", "reason" => "ended"}}
+      assert_receive {:DOWN, ^call_ref, :process, ^call, :normal}
+      refute_received {:voice, ^voice, :call_stop}
+    end
+
     # A link can drop with the handshake in flight: the phone sends its
     # `client_hello` again on resume when it never saw `server_hello`.
     test "a repeated client_hello at the negotiated version is answered again", ctx do
@@ -819,7 +837,7 @@ defmodule FermixChannels.Mobile.CallTest do
 
       send(call, line_frame(relay, %{type: "client_hello", protocol_version: 3}, nil, 0))
       assert_receive {:from_call, :control, %{"t" => "call_line", "bytes" => hello}}
-      assert %{"type" => "server_hello", "max_version" => 4} = Jason.decode!(hello)
+      assert %{"type" => "server_hello", "max_version" => 5} = Jason.decode!(hello)
 
       send(call, line_frame(relay, %{type: "mute", enabled: true}, 2, 0))
       assert_receive {:voice, ^voice, {:mute, true}}
@@ -1204,7 +1222,7 @@ defmodule FermixChannels.Mobile.CallTest do
     client = open_new!(driver, client, seq)
     client = send_line(driver, client, %{type: "client_hello", protocol_version: 3}, seq + 1, nil)
     {[{%{"t" => "call_line"}, hello}], client} = Driver.client_receive(driver, client)
-    assert %{"type" => "server_hello", "max_version" => 4} = Jason.decode!(hello)
+    assert %{"type" => "server_hello", "max_version" => 5} = Jason.decode!(hello)
 
     client = send_line(driver, client, %{type: "call_start"}, seq + 2, 1)
     assert_receive {:voice_started, voice, opts}
