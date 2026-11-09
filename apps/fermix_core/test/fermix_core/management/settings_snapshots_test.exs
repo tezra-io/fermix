@@ -1,7 +1,8 @@
 defmodule FermixCore.Management.SettingsSnapshotsTest do
   @moduledoc """
-  The `snapshots` settings section (M75 §8): its rows, a write through the
-  settings door, the two secrets through `secret.set`, and what is refused.
+  The `snapshots` settings section (M75 §8, ALWAYS_ON_PANE §3.12): its two
+  rows, a write through the settings door, what is refused, and the access
+  keys of another S3 service through `secret.set`.
   Every case runs in its own home with the application environment it touches
   restored on exit, as `settings_test.exs` does.
   """
@@ -9,6 +10,7 @@ defmodule FermixCore.Management.SettingsSnapshotsTest do
   use ExUnit.Case, async: false
 
   alias FermixCore.Home.Snapshot.Recipient
+  alias FermixCore.Home.Snapshot.Settings, as: SnapshotSettings
   alias FermixCore.Management.Secrets
   alias FermixCore.Management.Settings
   alias FermixCore.Setup.ConfigStore
@@ -63,82 +65,76 @@ defmodule FermixCore.Management.SettingsSnapshotsTest do
     %{home: tmp}
   end
 
-  test "the section is published under the Always On pane", _context do
+  # ALWAYS_ON_PANE §3.12 (D7, D18): no app sets any part of S3. The section
+  # keeps how often and whether the recovery passphrase is set; the raw
+  # recovery key is never shown.
+  test "the section offers how often and the passphrase's state, and nothing of S3", _context do
     assert %{id: "snapshots", pane: "always_on", title: "Recovery snapshots"} in Settings.sections()
 
     assert {:ok, %{"rows" => rows}} = Settings.get("snapshots")
+    assert Enum.map(rows, & &1["key"]) == ~w(snapshots_passphrase snapshots_interval_hours)
 
-    assert Enum.map(rows, & &1["key"]) == ~w(
-             snapshots_recipient snapshots_interval_hours snapshots_s3_bucket
-             snapshots_s3_region snapshot_s3_access_key_id snapshot_s3_secret_access_key
-             snapshots_s3_prefix snapshots_s3_endpoint
-           )
-
-    assert %{"read_only" => true, "value" => ""} = row(rows, "snapshots_recipient")
+    assert %{
+             "kind" => "text",
+             "label" => "Recovery passphrase",
+             "value" => "Not set",
+             "read_only" => true,
+             "footer" => "Every backup is encrypted to it, and Fermix never stores it."
+           } = row(rows, "snapshots_passphrase")
 
     assert %{"value" => 6, "min" => 1, "max" => 168, "restart" => false} =
              row(rows, "snapshots_interval_hours")
-
-    assert %{"kind" => "secret", "present" => false} = row(rows, "snapshot_s3_access_key_id")
   end
 
-  test "a write lands in config.toml and reads back in the rows", %{home: home} do
-    assert {:ok, result} =
-             Settings.apply("snapshots", %{
-               "snapshots_s3_bucket" => "invented-fermix-snapshots",
-               "snapshots_s3_region" => "eu-west-1",
-               "snapshots_interval_hours" => 12
-             })
+  test "the passphrase reads Set once a recovery key is kept, and the key is never shown" do
+    assert {:ok, _saved} = SnapshotSettings.put_recipient(Recipient.generate())
 
-    assert Enum.sort(result["applied"]) ==
-             ~w(snapshots_interval_hours snapshots_s3_bucket snapshots_s3_region)
+    {:ok, %{"rows" => rows}} = Settings.get("snapshots")
+    assert %{"value" => "Set"} = row(rows, "snapshots_passphrase")
+    refute Enum.any?(rows, &(is_binary(&1["value"]) and &1["value"] =~ "fxsnap1."))
+  end
+
+  test "a write of how often lands in config.toml and reads back in the rows", %{home: home} do
+    assert {:ok, result} = Settings.apply("snapshots", %{"snapshots_interval_hours" => 12})
+    assert result["applied"] == ["snapshots_interval_hours"]
 
     contents = File.read!(Path.join(home, "config.toml"))
     assert contents =~ "[fermix_core.snapshots]"
-    assert contents =~ ~s(s3_bucket = "invented-fermix-snapshots")
     assert contents =~ "interval_hours = 12"
     assert Keyword.get(Application.get_env(:fermix_core, :snapshots), :interval_hours) == 12
 
     {:ok, %{"rows" => rows}} = Settings.get("snapshots")
-    assert %{"value" => "invented-fermix-snapshots"} = row(rows, "snapshots_s3_bucket")
     assert %{"value" => 12} = row(rows, "snapshots_interval_hours")
-
-    # Clearing a text row removes the key, so its default applies again.
-    assert {:ok, _cleared} = Settings.apply("snapshots", %{"snapshots_s3_region" => ""})
-    refute File.read!(Path.join(home, "config.toml")) =~ "s3_region"
   end
 
-  test "the access keys are stored with secret.set and reported present", %{home: home} do
-    assert {:ok, %{"present" => true}} = Secrets.set("snapshot_s3_access_key_id", "AKIAINVENTED")
-
-    assert File.read!(Path.join(home, "config.toml")) =~ ~s(s3_access_key_id = "@keyring")
-    assert SecretWriterStub.get(:snapshot_s3_access_key_id) == {:ok, "AKIAINVENTED"}
-
-    {:ok, %{"rows" => rows}} = Settings.get("snapshots")
-    assert %{"present" => true} = row(rows, "snapshot_s3_access_key_id")
-  end
-
-  test "the recovery key, a secret row and a bad value are refused by name" do
-    recipient = Recipient.encode(Recipient.generate())
+  test "S3 is no setting of the section, and the passphrase changes elsewhere" do
+    for key <- ~w(snapshots_s3_bucket snapshots_s3_region snapshots_s3_prefix
+                  snapshots_s3_endpoint snapshots_recipient) do
+      assert {:error, {:invalid_params, ^key, "This section has no setting by that name."}} =
+               Settings.apply("snapshots", %{key => "invented"})
+    end
 
     assert {:error,
-            {:invalid_params, "snapshots_recipient",
+            {:invalid_params, "snapshots_passphrase",
              "This setting is shown here and changed elsewhere."}} =
-             Settings.apply("snapshots", %{"snapshots_recipient" => recipient})
+             Settings.apply("snapshots", %{"snapshots_passphrase" => "Set"})
 
-    assert {:error,
-            {:invalid_params, "snapshot_s3_access_key_id",
-             "This is a secret. Store it with secret.set instead."}} =
-             Settings.apply("snapshots", %{"snapshot_s3_access_key_id" => "AKIA"})
-
-    assert {:error, {:invalid_params, "snapshots_s3_bucket", sentence}} =
-             Settings.apply("snapshots", %{"snapshots_s3_bucket" => "Not A Bucket"})
-
-    assert sentence =~ "s3_bucket takes a bucket name"
+    assert_raise ArgumentError, ~r/unknown snapshot setting/, fn ->
+      SnapshotSettings.save(s3_bucket: "invented-fermix-snapshots")
+    end
 
     assert ConfigStore.current_snapshot().fermix_core
            |> Keyword.get(:snapshots, [])
            |> Keyword.get(:s3_bucket) == nil
+  end
+
+  # Another S3 service is set on the server itself: its keys still go through
+  # secret.set (`fermix settings secret set`), though no row shows them.
+  test "the access keys of another S3 service are still stored with secret.set", %{home: home} do
+    assert {:ok, %{"present" => true}} = Secrets.set("snapshot_s3_access_key_id", "AKIAINVENTED")
+
+    assert File.read!(Path.join(home, "config.toml")) =~ ~s(s3_access_key_id = "@keyring")
+    assert SecretWriterStub.get(:snapshot_s3_access_key_id) == {:ok, "AKIAINVENTED"}
   end
 
   defp row(rows, key), do: Enum.find(rows, &(&1["key"] == key))

@@ -1513,7 +1513,8 @@ defmodule FermixCore.Management.ProtocolContractTest do
   # of its own and the proposal stand-in above; every write answers from a home
   # and is pinned to its golden in `CuesTest`.
   # The home family against a home holding what the goldens show: epoch 4, no
-  # marker, one verified S3 snapshot, a recipient and a bucket, and a scheduler
+  # marker, an Always On server's targets, one verified S3 snapshot, a
+  # recipient and a bucket, and a scheduler
   # whose run starts and finishes at once; and, for enrollment and the move, a
   # window a candidate used, that candidate, and a move to it that was undone.
   defp home_cases do
@@ -1552,6 +1553,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
        name: scheduler,
        home: home,
        config: fn -> config end,
+       targets: SnapshotScheduler.targets(:server),
        now: fn -> ~U[2026-10-27 09:30:00Z] end,
        timer: fn _message, _delay -> make_ref() end,
        run: fn _home, _config, _targets, _opts -> :not_configured end}
@@ -1564,6 +1566,8 @@ defmodule FermixCore.Management.ProtocolContractTest do
           engine_role: %{role: :primary, primary: nil},
           config: config,
           scheduler: scheduler,
+          # The goldens show an Always On server's snapshots (D18).
+          snapshot_targets: SnapshotScheduler.targets(:server),
           profile: "general",
           save_recipient: fn _recipient -> {:ok, %{}} end,
           now: ~U[2026-10-27 09:30:00Z],

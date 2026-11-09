@@ -1708,9 +1708,15 @@ Notes that the shapes alone do not carry:
   A move session has no one-hour lifetime, and its attempts send one capture. On a candidate, `phase` is `enrolling`, `enrolled`,
   `receiving`, `staged`, `activating`, `expired` or `failed`, and `candidate`
   is null.
-- **A snapshot target row is the daemon's.** There are two targets, in
-  order: `s3` (label `S3`) and `desktop` (label `your desktop`: every desktop
-  connected to this primary over the rail, on while it has a desktop row).
+- **A snapshot target row is the daemon's.** On an Always On server's
+  primary (its home holds a desktop row a move wrote, and the host is not
+  macOS) there are two targets, in order: `s3` (label `S3`) and `desktop`
+  (label `your desktop`: every desktop connected to this primary over the
+  rail, on while it has a desktop row). Any other primary has none:
+  `targets` is `[]`, `configured` false, and `sentence` says
+  `Snapshots are kept only by an Always On server, and this computer is not one.`,
+  whatever its settings name; `home.snapshots.run` is refused with that
+  sentence.
   `last_verified` is the newest snapshot the target proved it holds (S3
   accepted its SHA-256 checksum; a desktop answered the same SHA-256) and
   outlives later failures; `last_error` is the newest failure's sentence,
@@ -1725,15 +1731,16 @@ Notes that the shapes alone do not carry:
   primary a move activated runs its first snapshot at once. `destination` is where the target puts
   snapshots (`s3://<bucket>/<prefix>/<profile>/`, or `snapshots/ on <names>`
   for the desktops), null while it is off.
-- **`snapshots` is the snapshot section**, under pane `always_on`:
-  `snapshots_recipient` (read-only: it changes only through
-  `home.snapshots.passphrase`), `snapshots_interval_hours` (1 to 168, format
-  `hours`), `snapshots_s3_bucket`, `snapshots_s3_region`, the two secret rows
-  `snapshot_s3_access_key_id` and `snapshot_s3_secret_access_key` (stored with
-  `secret.set` under those ids), and, `advanced`, `snapshots_s3_prefix` and
-  `snapshots_s3_endpoint` (an S3-compatible host, addressed path-style). None
-  needs a restart: the scheduler reads the section at every run and plans
-  again when it is saved.
+- **`snapshots` is the snapshot section**, under pane `always_on`, with two
+  rows: `snapshots_passphrase` (read-only text, `Set` or `Not set`: it
+  changes only through `home.snapshots.passphrase`, and the recovery key is
+  never shown) and `snapshots_interval_hours` (1 to 168, format `hours`).
+  No app sets any part of S3: an Always On server's bucket comes from its
+  infrastructure through first boot, and another S3 service is set on the
+  server itself (`config.toml`, its keys through `secret.set`, which still
+  takes `snapshot_s3_access_key_id` and `snapshot_s3_secret_access_key`
+  though no row shows them). Neither row needs a restart: the scheduler reads
+  the section at every run and plans again when it is saved.
 
 ## Accessories
 

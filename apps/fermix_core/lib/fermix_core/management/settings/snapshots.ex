@@ -1,16 +1,19 @@
 defmodule FermixCore.Management.Settings.Snapshots do
   @moduledoc """
-  The `snapshots` section (M75 §8): where and how often the primary keeps its
-  encrypted snapshots, under the `always_on` pane. Every row is a projection
-  of `[fermix_core.snapshots]` (`Home.Snapshot.Config`), and every write goes
-  through `Home.Snapshot.Settings.save/2`.
+  The `snapshots` section (M75 §8, ALWAYS_ON_PANE §3.12): how often the
+  primary keeps its encrypted snapshots, and whether the recovery passphrase
+  is set, under the `always_on` pane. The interval is a projection of
+  `[fermix_core.snapshots]` (`Home.Snapshot.Config`), written through
+  `Home.Snapshot.Settings.save/2`.
 
-  The recovery key is shown and never written here: it is derived from the
-  recovery passphrase by `home.snapshots.passphrase`, which never stores the
-  passphrase. The S3 access keys are secret rows, stored with `secret.set`
-  under `snapshot_s3_access_key_id` and `snapshot_s3_secret_access_key`.
-  The last attempt, the last verified point and the next run are runtime
-  facts, published by `home.snapshots.status` rather than as rows.
+  No app sets any part of S3 (D7): an Always On server's bucket comes from its
+  infrastructure, through first boot and the move's activation, and another
+  S3 service is set on the server itself, in `config.toml` with its keys
+  through `secret.set`. The recovery passphrase is shown as set or not, and
+  never written here: `home.snapshots.passphrase` derives the recovery key
+  from it and never stores the passphrase; the key itself is never shown. The
+  last attempt, the last verified point and the next run are runtime facts,
+  published by `home.snapshots.status` rather than as rows.
   """
 
   alias FermixCore.Home.Snapshot.Config
@@ -18,9 +21,6 @@ defmodule FermixCore.Management.Settings.Snapshots do
   alias FermixCore.Management.Settings.Source
 
   @section %{id: "snapshots", pane: "always_on", title: "Recovery snapshots"}
-
-  @recipient_info "Every snapshot is encrypted to this key. Restoring one needs the recovery " <>
-                    "passphrase it came from, and Fermix never stores that passphrase."
 
   @doc "The one section this module owns."
   @spec sections() :: [%{id: String.t(), pane: String.t(), title: String.t()}]
@@ -37,10 +37,9 @@ defmodule FermixCore.Management.Settings.Snapshots do
     restart = Row.restart?(:snapshots)
 
     [
-      Row.new("snapshots_recipient", :text, "Recovery key",
-        footer: "Fermix makes it from the recovery passphrase you set in Always On.",
-        info: @recipient_info,
-        value: Source.string(block, :recipient),
+      Row.new("snapshots_passphrase", :text, "Recovery passphrase",
+        footer: "Every backup is encrypted to it, and Fermix never stores it.",
+        value: if(Config.recipient?(block), do: "Set", else: "Not set"),
         read_only: true,
         restart: restart
       ),
@@ -51,39 +50,6 @@ defmodule FermixCore.Management.Settings.Snapshots do
         step: 1,
         format: :hours,
         restart: restart
-      ),
-      Row.new("snapshots_s3_bucket", :text, "S3 bucket",
-        footer: "Snapshots are kept here, and nothing is kept until it is set.",
-        example: "fermix-snapshots",
-        value: Source.string(block, :s3_bucket),
-        restart: restart
-      ),
-      Row.new("snapshots_s3_region", :text, "Region",
-        example: "eu-west-1",
-        value: Source.string(block, :s3_region),
-        restart: restart
-      ),
-      Row.new("snapshot_s3_access_key_id", :secret, "Access key ID",
-        present: Source.secret_present?(snapshot, :snapshot_s3_access_key_id),
-        restart: restart
-      ),
-      Row.new("snapshot_s3_secret_access_key", :secret, "Secret access key",
-        present: Source.secret_present?(snapshot, :snapshot_s3_secret_access_key),
-        restart: restart
-      ),
-      Row.new("snapshots_s3_prefix", :text, "Folder in the bucket",
-        footer: "Each profile keeps its snapshots in a folder of its own beneath it.",
-        example: "fermix",
-        value: Source.string(block, :s3_prefix),
-        restart: restart,
-        advanced: true
-      ),
-      Row.new("snapshots_s3_endpoint", :text, "Storage address",
-        footer: "Only for a storage service that speaks S3. Leave it empty for AWS.",
-        example: "https://s3.example.net",
-        value: Source.string(block, :s3_endpoint),
-        restart: restart,
-        advanced: true
       )
     ]
   end

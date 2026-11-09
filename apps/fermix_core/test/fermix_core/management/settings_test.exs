@@ -1973,7 +1973,9 @@ defmodule FermixCore.Management.SettingsTest do
 
       assert names["anthropic_api_key"] == "Anthropic key"
       assert names["telegram_bot_token"] == "Bot token in Telegram"
-      assert names["snapshot_s3_secret_access_key"] == "Secret access key in Recovery snapshots"
+      # No section shows another S3 service's keys (ALWAYS_ON_PANE §3.12), so
+      # they are named nowhere and a move's review counts them.
+      refute Map.has_key?(names, "snapshot_s3_secret_access_key")
 
       # The first section that shows a secret names it.
       assert names["openai_api_key"] == "OpenAI key"
