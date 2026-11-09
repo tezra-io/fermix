@@ -14,9 +14,10 @@ defmodule FermixCore.Realtime.Endpoint do
 
   The voice policy that differs by endpoint lives here and nowhere else, so a
   new kind is one more clause per function: screen sharing is offered to the
-  desktop alone, the safety identifier an OpenAI Realtime call sends is
-  derived from the endpoint (the task engines send none), and a phone takes a
-  call only on a task engine. Pure: no process, no I/O.
+  desktop alone and a camera to the phone alone, the safety identifier an
+  OpenAI Realtime call sends is derived from the endpoint (the task engines
+  send none), and a phone takes a call only on a task engine. Pure: no
+  process, no I/O.
   """
 
   alias FermixCore.Realtime.DeviceIdentity
@@ -70,6 +71,17 @@ defmodule FermixCore.Realtime.Endpoint do
   def screen_share?(:desktop), do: true
   def screen_share?({:accessory, _accessory_id}), do: false
   def screen_share?({:phone, _device_id}), do: false
+
+  @doc """
+  Whether a call for this endpoint may share a camera (M87 Phase 2): a phone's,
+  whose frames ride its own mobile session. The Mac's socket and an accessory
+  have no way to carry a frame, so the Realtime wire's `camera` is refused from
+  them whatever their hello says.
+  """
+  @spec camera?(t()) :: boolean()
+  def camera?({:phone, _device_id}), do: true
+  def camera?(:desktop), do: false
+  def camera?({:accessory, _accessory_id}), do: false
 
   @doc """
   Whether a call for this endpoint may run on `engine`, refused before any

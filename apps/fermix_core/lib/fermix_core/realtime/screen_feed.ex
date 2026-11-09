@@ -57,6 +57,18 @@ defmodule FermixCore.Realtime.ScreenFeed do
   @wedge_grace_ms 30_000
   @minute_ms 60_000
 
+  @doc """
+  The fastest cadence a feed of frames may run at: one per this many
+  milliseconds, the feed's own while the user speaks. A phone call's camera
+  frames are held to it too (M87 Phase 2).
+  """
+  @spec min_interval_ms() :: pos_integer()
+  def min_interval_ms, do: @speaking_interval_ms
+
+  @doc "The hard ceiling on a feed's frames in a minute, a phone call's camera's included."
+  @spec max_frames_per_minute() :: pos_integer()
+  def max_frames_per_minute, do: @max_frames_per_min
+
   @type stop_reason ::
           :requested
           | {:capture_unavailable, term()}

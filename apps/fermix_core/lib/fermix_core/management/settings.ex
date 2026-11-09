@@ -403,7 +403,8 @@ defmodule FermixCore.Management.Settings do
     {:model, "realtime_model"},
     {:voice, "realtime_voice"},
     {:reasoning_effort, "realtime_reasoning_effort"},
-    {:conversation, "realtime_conversation"}
+    {:conversation, "realtime_conversation"},
+    {:camera_share, "realtime_camera_share"}
   ]
 
   defp derived_keys(_keys, nil), do: []
@@ -411,9 +412,14 @@ defmodule FermixCore.Management.Settings do
   defp derived_keys(keys, {previous, now}) do
     for {key, row} <- @realtime_derived,
         row not in keys,
-        Keyword.get(previous, key) != Keyword.get(now, key),
+        derived_value(previous, key) != derived_value(now, key),
         do: row
   end
+
+  # The camera row shows the value in force, so a key first written by a move
+  # between Live and Grok moves no row.
+  defp derived_value(block, :camera_share), do: camera_share(block)
+  defp derived_value(block, key), do: Keyword.get(block, key)
 
   # Changes the operator did not type, in the daemon's own words. Two rules, and
   # both are real: choosing a transcription backend snaps the shared model key to
@@ -449,7 +455,8 @@ defmodule FermixCore.Management.Settings do
         Keyword.has_key?(previous, :conversation),
         Keyword.has_key?(now, :conversation)
       ) ++
-      screen_share_sentence(screen_share?(previous), screen_share?(now), realtime_engine(now))
+      screen_share_sentence(screen_share?(previous), screen_share?(now), realtime_engine(now)) ++
+      camera_share_sentence(camera_share(previous), camera_share(now))
   end
 
   # The model is what the operator picked, so naming it back would only repeat
@@ -497,6 +504,29 @@ defmodule FermixCore.Management.Settings do
   # An absent key is the struct default, which is on.
   defp screen_share?(block),
     do: Keyword.get(block, :screen_share, %RealtimeConfig{}.screen_share?) == true
+
+  # A task-engine setting (M87 Phase 2): the journey onto the Realtime engine,
+  # which takes no calls from the phone, drops it, and the journey back puts it
+  # on. A switch the owner turned off on Live stays off on Grok and is no news.
+  defp camera_share_sentence(previous, nil) when is_boolean(previous),
+    do: [
+      "Sharing the phone's camera was removed because this engine takes no calls from the phone."
+    ]
+
+  defp camera_share_sentence(nil, true),
+    do: [
+      "Sharing the phone's camera was turned on because this engine takes calls from the phone."
+    ]
+
+  defp camera_share_sentence(_previous, _now), do: []
+
+  # The switch in force: `nil` under the Realtime engine, where it is no
+  # setting, and otherwise the key, whose absence is the struct default, on.
+  defp camera_share(block) do
+    if RealtimeConfig.hands_off_tasks?(%RealtimeConfig{engine: realtime_engine(block)}),
+      do: Keyword.get(block, :camera_share, %RealtimeConfig{}.camera_share?) == true,
+      else: nil
+  end
 
   defp transcription_model(snapshot) do
     snapshot

@@ -26,9 +26,28 @@ defmodule FermixChannels.Mobile.CallCapsTest do
     assert Call.caps(live, true, @phone) == %{
              "available" => true,
              "min_version" => 2,
-             "max_version" => 3,
-             "camera" => false
+             "max_version" => 4,
+             "camera" => true
            }
+  end
+
+  # M87 Phase 2: a task engine takes the phone's camera frames while the
+  # owner's camera_share is on; the Realtime engine takes no phone call at all.
+  test "the camera is offered on a task engine with camera_share on, and nowhere else" do
+    put_openai_key()
+    grok = Config.normalize(enabled: true, engine: "xai_realtime", model: "grok-voice-3.0")
+
+    no_camera =
+      Config.normalize(
+        enabled: true,
+        engine: "openai_live",
+        model: "gpt-live-1",
+        camera_share: false
+      )
+
+    assert %{"camera" => true} = Call.caps(grok, true, @phone)
+    assert %{"camera" => false} = Call.caps(no_camera, true, @phone)
+    assert %{"camera" => false} = Call.caps(Config.normalize(enabled: true), true, @phone)
   end
 
   test "each reason a call is not served is said, the window still published" do

@@ -26,6 +26,7 @@ defmodule FermixCore.Realtime.CallTasksTest do
     @impl true
     def submit(_handle, request, _callbacks) do
       send(self(), {:submitted, request.delegation_id, request.revision})
+      send(self(), {:request, request})
       {:ok, {:task, request.delegation_id, request.revision}}
     end
 
@@ -133,4 +134,119 @@ defmodule FermixCore.Realtime.CallTasksTest do
     assert_received {:forwarded, 2, {:result, {:ok, "Booked."}}}
     refute_received {:forwarded, _revision, {:result, {:cancelled}}}
   end
+
+  # M87 Phase 2: the phone's camera. A hand-off carries the newest frame the
+  # call holds while the camera is on and the frame is fresh (2 s); with the
+  # camera on and none fresh, it carries none and says the camera is on, so
+  # the agent is told there is no current picture.
+  describe "the camera's frame on a hand-off" do
+    setup %{tasks: tasks} do
+      Process.put(:now, 10_000)
+      %{tasks: %{tasks | clock: fn -> Process.get(:now) end}}
+    end
+
+    test "with the camera off a hand-off carries no frame and says it is off", %{
+      tasks: tasks,
+      transcript: transcript
+    } do
+      tasks = CallTasks.put_frame(tasks, jpeg("ignored"))
+      {:ok, _tasks, _told} = CallTasks.create(tasks, "t1", 9_500, transcript)
+
+      assert_received {:request, %{frame: nil, camera_on?: false}}
+    end
+
+    test "the newest fresh frame rides the hand-off, named as the camera's", %{
+      tasks: tasks,
+      transcript: transcript
+    } do
+      tasks =
+        tasks
+        |> CallTasks.camera(true)
+        |> CallTasks.put_frame(jpeg("older"))
+        |> CallTasks.put_frame(jpeg("newest"))
+
+      Process.put(:now, 12_000)
+      {:ok, _tasks, _told} = CallTasks.create(tasks, "t1", 9_500, transcript)
+
+      assert_received {:request,
+                       %{
+                         frame: %{source: :camera, mime_type: "image/jpeg", data: "newest"},
+                         camera_on?: true
+                       }}
+    end
+
+    test "a frame older than the freshness bound is not used, and is let go", %{
+      tasks: tasks,
+      transcript: transcript
+    } do
+      tasks = tasks |> CallTasks.camera(true) |> CallTasks.put_frame(jpeg("stale"))
+
+      Process.put(:now, 10_000 + CallTasks.frame_fresh_ms() + 1)
+      {:ok, tasks, _told} = CallTasks.create(tasks, "t1", 9_500, transcript)
+
+      assert_received {:request, %{frame: nil, camera_on?: true}}
+      assert tasks.frame == nil
+    end
+
+    test "turning the camera off, or clearing, lets the frame go", %{
+      tasks: tasks,
+      transcript: transcript
+    } do
+      on = tasks |> CallTasks.camera(true) |> CallTasks.put_frame(jpeg("seen"))
+
+      assert (on |> CallTasks.camera(false)).frame == nil
+      assert (on |> CallTasks.put_frame(nil)).frame == nil
+
+      back_on = on |> CallTasks.camera(false) |> CallTasks.camera(true)
+      {:ok, _tasks, _told} = CallTasks.create(back_on, "t1", 9_500, transcript)
+
+      assert_received {:request, %{frame: nil, camera_on?: true}}
+    end
+
+    test "a frame that comes while the camera is off is not kept", %{tasks: tasks} do
+      assert CallTasks.put_frame(tasks, jpeg("late")).frame == nil
+    end
+
+    # Kept only while fresh, not until the next hand-off: each frame arms its
+    # own clear at the freshness bound, and a newer frame's supersedes it.
+    test "a frame is let go by its own timer once it is no longer fresh", %{tasks: tasks} do
+      first = tasks |> CallTasks.camera(true) |> CallTasks.put_frame(jpeg("first"))
+      %{ref: first_ref, timer: first_timer} = first.frame
+
+      assert Process.read_timer(first_timer) in (CallTasks.frame_fresh_ms() - 100)..CallTasks.frame_fresh_ms()
+
+      second = CallTasks.put_frame(first, jpeg("second"))
+      %{ref: second_ref} = second.frame
+      refute Process.read_timer(first_timer)
+
+      # The superseded frame's clear, already on its way, is ignored.
+      assert CallTasks.frame_stale(second, first_ref).frame.data == "second"
+      assert CallTasks.frame_stale(second, second_ref).frame == nil
+    end
+
+    test "Camera off and a clear stop the frame's timer", %{tasks: tasks} do
+      on = tasks |> CallTasks.camera(true) |> CallTasks.put_frame(jpeg("seen"))
+
+      for gone <- [CallTasks.camera(on, false), CallTasks.put_frame(on, nil)] do
+        assert gone.frame == nil
+        refute Process.read_timer(on.frame.timer)
+      end
+    end
+
+    # A crash report prints the session's state: the frame is its size and source.
+    test "the frame prints as its size, never its bytes", %{tasks: tasks} do
+      tasks =
+        tasks
+        |> CallTasks.camera(true)
+        |> CallTasks.put_frame(jpeg(<<0xFF, 0xD8, 0xFF, "picture">>))
+
+      printable = CallTasks.printable(tasks)
+
+      assert %{source: :camera, bytes: 10} = printable.frame
+      refute inspect(printable, limit: :infinity) =~ "255, 216, 255"
+      assert CallTasks.printable(CallTasks.camera(tasks, false)).frame == nil
+    end
+  end
+
+  defp jpeg(data), do: %{mime_type: "image/jpeg", data: data}
 end

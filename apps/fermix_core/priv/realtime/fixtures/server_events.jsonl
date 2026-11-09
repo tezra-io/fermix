@@ -1,4 +1,4 @@
-{"type":"server_hello","min_version":1,"max_version":3}
+{"type":"server_hello","min_version":1,"max_version":4}
 {"type":"state","state":"listening"}
 {"type":"audio_delta","audio":"AAAA"}
 {"type":"audio_delta","playback_id":"p17","audio":"AAAA"}
@@ -25,7 +25,9 @@
 {"type":"error","reason":"playback_stalled"}
 {"type":"error","reason":"playback_overflow"}
 {"type":"error","reason":"call_ids_exhausted"}
-{"type":"error","reason":"unsupported_protocol_version","direction":"client_too_new","client_version":99,"min_version":1,"max_version":3}
-{"type":"error","reason":"unsupported_protocol_version","kind":"update_required","direction":"client_too_old","client_version":1,"min_version":2,"max_version":3,"required_for":"openai_live"}
-{"type":"error","reason":"unsupported_protocol_version","kind":"update_required","direction":"client_too_old","client_version":2,"min_version":3,"max_version":3,"required_for":"xai_realtime"}
+{"type":"error","reason":"unsupported_by_endpoint"}
+{"type":"error","reason":"camera_off"}
+{"type":"error","reason":"unsupported_protocol_version","direction":"client_too_new","client_version":99,"min_version":1,"max_version":4}
+{"type":"error","reason":"unsupported_protocol_version","kind":"update_required","direction":"client_too_old","client_version":1,"min_version":2,"max_version":4,"required_for":"openai_live"}
+{"type":"error","reason":"unsupported_protocol_version","kind":"update_required","direction":"client_too_old","client_version":2,"min_version":3,"max_version":4,"required_for":"xai_realtime"}
 {"type":"playback_stop"}

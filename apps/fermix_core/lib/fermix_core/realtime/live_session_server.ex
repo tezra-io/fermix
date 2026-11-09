@@ -79,6 +79,7 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   alias FermixCore.Realtime.LiveTranscript
   alias FermixCore.Realtime.LiveTurn
   alias FermixCore.Realtime.OpenAILiveClient
+  alias FermixCore.Realtime.SessionControl
   alias FermixCore.Realtime.VoiceBridge
 
   require Logger
@@ -238,6 +239,9 @@ defmodule FermixCore.Realtime.LiveSessionServer do
       expires_at: nil,
       max_duration_ms: config.max_session_minutes * @minute_ms,
       muted?: false,
+      # The phone camera's rule (M87 Phase 2): `:unsaid` until the camera first
+      # turns on, `:owed` until the provider session is up to hear it, `:said`.
+      camera_rule: :unsaid,
       provider_muted?: false,
       speaking?: false,
       turn: LiveTurn.new(),
@@ -307,6 +311,13 @@ defmodule FermixCore.Realtime.LiveSessionServer do
     {:reply, :ok, state}
   end
 
+  # M87 Phase 2: Live sees nothing, so the first Camera on tells the voice so,
+  # once its session is up to hear it; off lets the camera's frame go.
+  def handle_call({:camera, on?}, _from, state) do
+    state = %{state | tasks: CallTasks.camera(state.tasks, on?)}
+    {:reply, :ok, if(on?, do: owe_camera_rule(state), else: state)}
+  end
+
   # `SessionControl` waits for `cancel_task` and `call_stop` with no timeout, so
   # both must stay bounded. A cancel is one bridge cancel (the Queue's stop of
   # that hand-off's turn, however long a busy Queue takes to reach it) and then
@@ -355,6 +366,9 @@ defmodule FermixCore.Realtime.LiveSessionServer do
 
   @impl true
   def handle_cast({:chat, event}, state), do: {:noreply, mirror_chat(state, event)}
+
+  def handle_cast({:camera_frame, frame}, state),
+    do: {:noreply, %{state | tasks: CallTasks.put_frame(state.tasks, frame)}}
 
   def handle_cast({:audio_chunk, audio}, state) do
     case audio_route(state, audio) do
@@ -429,6 +443,9 @@ defmodule FermixCore.Realtime.LiveSessionServer do
     {:noreply, tell(%{state | tasks: tasks}, told)}
   end
 
+  def handle_info({:camera_frame_stale, ref}, state),
+    do: {:noreply, %{state | tasks: CallTasks.frame_stale(state.tasks, ref)}}
+
   def handle_info({:delegation_event, delegation_id, revision, event}, state) do
     {tasks, told} =
       CallTasks.delegation_event(state.tasks, delegation_id, revision, event, state.transcript)
@@ -459,6 +476,22 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   end
 
   def terminate(_reason, _state), do: :ok
+
+  # A crash report, and `:sys.get_status/1`, print the state and the message
+  # being handled: the camera's frame, the owner's held microphone audio and
+  # the provider key print as their sizes or not at all, never their bytes.
+  @impl true
+  def format_status(status) do
+    status
+    |> Map.replace_lazy(:state, &printable_state/1)
+    |> Map.replace_lazy(:message, &SessionControl.printable_message/1)
+  end
+
+  defp printable_state(%{tasks: tasks, held_audio_bytes: held} = state) do
+    %{state | api_key: :redacted, tasks: CallTasks.printable(tasks), held_audio: {:bytes, held}}
+  end
+
+  defp printable_state(state), do: state
 
   ## Call start
 
@@ -598,6 +631,7 @@ defmodule FermixCore.Realtime.LiveSessionServer do
           state
           |> start_timers()
           |> sync_mute()
+          |> say_camera_rule()
           |> notify_call_ready()
           |> release_held_audio()
 
@@ -1029,6 +1063,24 @@ defmodule FermixCore.Realtime.LiveSessionServer do
       {:error, reason} -> report_send_error(state, reason)
     end
   end
+
+  defp owe_camera_rule(%{camera_rule: :unsaid} = state),
+    do: say_camera_rule(%{state | camera_rule: :owed})
+
+  defp owe_camera_rule(state), do: state
+
+  defp say_camera_rule(%{camera_rule: :owed, provider_ready?: true} = state) do
+    event =
+      OpenAILiveClient.instructions_append_event(
+        OpenAILiveClient.new_event_id(),
+        nil,
+        LivePrompt.camera_rule()
+      )
+
+    send_append(%{state | camera_rule: :said}, event, :instructions, nil)
+  end
+
+  defp say_camera_rule(state), do: state
 
   defp send_mute(%{provider_ready?: false} = state, _enabled?), do: state
 

@@ -77,8 +77,9 @@ defmodule FermixCore.Realtime.Config do
   @realtime_only_keys [:reasoning_effort, :transcription_model, :max_response_output_tokens]
 
   # The mirror image: settings the Realtime wire has no use for, refused under
-  # `openai_realtime` the same way (M56 §5).
-  @live_only_keys [:conversation]
+  # `openai_realtime` the same way (M56 §5). `camera_share` is one because only
+  # a task engine takes calls from the phone (M87).
+  @live_only_keys [:conversation, :camera_share]
 
   # Where a task engine's hand-offs run (M56 §5): in the chat's own
   # conversation, or, `private`, in one of the call's own as before.
@@ -103,6 +104,7 @@ defmodule FermixCore.Realtime.Config do
           max_session_minutes: pos_integer(),
           max_estimated_cost_cents_per_session: pos_integer(),
           screen_share?: boolean(),
+          camera_share?: boolean(),
           persist_transcripts?: boolean(),
           persist_audio?: boolean(),
           conversation: String.t() | nil
@@ -128,6 +130,11 @@ defmodule FermixCore.Realtime.Config do
             # privacy-sensitive machine — the ONE knob this feature adds; every
             # cadence/retention/budget bound is an internal constant.
             screen_share?: true,
+            # Whether a call from the phone may share its camera (M87 Phase 2):
+            # the newest fresh frame rides each hand-off to the Fermix agent, and
+            # the owner still turns the camera on in each call. A task-engine
+            # setting, off under the Realtime engine, which takes no phone calls.
+            camera_share?: true,
             persist_transcripts?: false,
             persist_audio?: false,
             # What the file says, `nil` while nobody has set it: `conversation/1`
@@ -311,6 +318,7 @@ defmodule FermixCore.Realtime.Config do
       max_estimated_cost_cents_per_session:
         positive_int(config, :max_estimated_cost_cents_per_session, 100),
       screen_share?: screen_share(config, engine),
+      camera_share?: camera_share(config, engine),
       persist_transcripts?: bool(config, :persist_transcripts, false),
       persist_audio?: bool(config, :persist_audio, false),
       conversation: conversation_setting(config, engine)
@@ -334,7 +342,7 @@ defmodule FermixCore.Realtime.Config do
         max_estimated_cost_cents_per_session: config.max_estimated_cost_cents_per_session,
         screen_share: config.screen_share?,
         persist_transcripts: config.persist_transcripts?
-      ] ++ conversation_keyword(config)
+      ] ++ camera_share_keyword(config) ++ conversation_keyword(config)
   end
 
   @spec socket_path() :: String.t()
@@ -355,6 +363,14 @@ defmodule FermixCore.Realtime.Config do
     do: [reasoning_effort: effort]
 
   defp reasoning_effort_keyword(%__MODULE__{}), do: []
+
+  # The mirror image: under the Realtime engine `camera_share` is a key the
+  # parser refuses, so it is never rendered there.
+  defp camera_share_keyword(%__MODULE__{engine: engine, camera_share?: share})
+       when engine in @task_engines,
+       do: [camera_share: share]
+
+  defp camera_share_keyword(%__MODULE__{}), do: []
 
   # Written only once someone set it, so the file keeps "never chosen" apart
   # from a chosen default (M56 D2).
@@ -424,6 +440,11 @@ defmodule FermixCore.Realtime.Config do
   end
 
   defp screen_share(config, _openai_engine), do: bool(config, :screen_share, true)
+
+  # `reject_live_only_keys!/2` has already refused the key under the Realtime
+  # engine, which takes no calls from the phone and so shares no camera.
+  defp camera_share(_config, "openai_realtime"), do: false
+  defp camera_share(config, _task_engine), do: bool(config, :camera_share, true)
 
   defp reasoning_effort(config, "openai_realtime"),
     do: string(config, :reasoning_effort, "low")

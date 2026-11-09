@@ -10,7 +10,9 @@ defmodule FermixChannels.Mobile.PeerEvents do
   the responder sends. Each event names its fields, each with the rule its
   value must meet (optional ones are absent, never null), and its raw tail:
   `:none`, `:required` (one to 60 KiB), `{:optional, max}` (empty, or at most
-  `max` bytes) or `{:pcm16, max}` (whole PCM16 samples, two to `max` bytes). `Mobile.Protocol` owns the frame and the catalogs and asks this
+  `max` bytes), `{:pcm16, max}` (whole PCM16 samples, two to `max` bytes) or
+  `{:jpeg, max}` (one JPEG, its start-of-image marker first, at most `max`
+  bytes). `Mobile.Protocol` owns the frame and the catalogs and asks this
   module about these events alone. Pure.
   """
 
@@ -33,6 +35,11 @@ defmodule FermixChannels.Mobile.PeerEvents do
   @playback_id ~r/\A[A-Za-z0-9._:-]{1,64}\z/
   # A call's audio frame: 100 ms of 24 kHz mono PCM16.
   @call_audio_bytes 4_800
+  # A camera still (M87 Phase 2): the phone scales it to a 768-pixel long edge
+  # and steps its quality down until it fits; the sides' bound is generous.
+  @call_frame_side {:range, 1, 4_096}
+  # A JPEG opens with its start-of-image marker and the next marker's first byte.
+  @jpeg_magic <<0xFF, 0xD8, 0xFF>>
 
   @loopback_failures ~w(port_in_use not_permitted failed)
   @snapshot_refusals ~w(disk_floor space_unknown mismatch out_of_order invalid_name write_failed)
@@ -99,6 +106,13 @@ defmodule FermixChannels.Mobile.PeerEvents do
     "call_open" => {[{"call_id", :id}, {"resume", :boolean}], :none},
     "call_line" => {[{"call_id", :id}, {"control_seq", {:optional, :positive}}], :required},
     "call_audio" => {[{"call_id", :id}], {:pcm16, @call_audio_bytes}},
+    "call_frame" =>
+      {[
+         {"call_id", :id},
+         {"width", @call_frame_side},
+         {"height", @call_frame_side},
+         {"captured_ms", :count}
+       ], {:jpeg, @max_raw}},
     "call_close" => {[{"call_id", :id}, {"reason", {:optional, :text}}], :none}
   }
 
@@ -150,7 +164,7 @@ defmodule FermixChannels.Mobile.PeerEvents do
   @client_events ~w(
     companion_open companion_line companion_close manage loopback_request loopback_failed
     snapshot_stored snapshot_refused enroll_request move_offer move_chunk move_end move_commit
-    move_resume call_open call_line call_audio call_close
+    move_resume call_open call_line call_audio call_frame call_close
   )
   @server_events ~w(
     companion_line companion_close manage_result loopback_open loopback_response
@@ -164,7 +178,12 @@ defmodule FermixChannels.Mobile.PeerEvents do
   end
 
   @type direction :: :client | :server
-  @type raw :: :none | :required | {:optional, pos_integer()} | {:pcm16, pos_integer()}
+  @type raw ::
+          :none
+          | :required
+          | {:optional, pos_integer()}
+          | {:pcm16, pos_integer()}
+          | {:jpeg, pos_integer()}
 
   @doc "The M75 events the initiator sends, in catalog order."
   @spec client_events() :: [String.t()]
@@ -209,18 +228,25 @@ defmodule FermixChannels.Mobile.PeerEvents do
 
   @doc "Checks an M75 event's raw tail against its table."
   @spec validate_raw(direction(), String.t(), binary()) :: :ok | {:error, term()}
-  def validate_raw(direction, type, bytes) when is_binary(bytes) do
-    case {raw(direction, type), byte_size(bytes)} do
-      {:none, 0} -> :ok
-      {:none, _size} -> {:error, {:unexpected_binary, type}}
-      {:required, 0} -> {:error, {:missing_field, "bytes"}}
-      {:required, size} when size > @max_raw -> {:error, {:raw_chunk_too_large, size, @max_raw}}
-      {:required, _size} -> :ok
-      {{:optional, max}, size} when size > max -> {:error, {:raw_chunk_too_large, size, max}}
-      {{:optional, _max}, _size} -> :ok
-      {{:pcm16, max}, size} -> pcm16(size, max)
-    end
-  end
+  def validate_raw(direction, type, bytes) when is_binary(bytes),
+    do: check_raw(raw(direction, type), type, bytes)
+
+  defp check_raw(:none, _type, <<>>), do: :ok
+  defp check_raw(:none, type, _bytes), do: {:error, {:unexpected_binary, type}}
+  defp check_raw(:required, _type, <<>>), do: {:error, {:missing_field, "bytes"}}
+  defp check_raw(:required, _type, bytes), do: at_most(byte_size(bytes), @max_raw)
+  defp check_raw({:optional, max}, _type, bytes), do: at_most(byte_size(bytes), max)
+  defp check_raw({:pcm16, max}, _type, bytes), do: pcm16(byte_size(bytes), max)
+  defp check_raw({:jpeg, max}, _type, bytes), do: jpeg(bytes, byte_size(bytes), max)
+
+  defp at_most(size, max) when size > max, do: {:error, {:raw_chunk_too_large, size, max}}
+  defp at_most(_size, _max), do: :ok
+
+  # One JPEG: its markers first, at most `max` bytes.
+  defp jpeg(_bytes, 0, _max), do: {:error, {:missing_field, "bytes"}}
+  defp jpeg(_bytes, size, max) when size > max, do: {:error, {:raw_chunk_too_large, size, max}}
+  defp jpeg(@jpeg_magic <> _rest, _size, _max), do: :ok
+  defp jpeg(_bytes, _size, _max), do: {:error, {:invalid_field, "bytes"}}
 
   # Whole PCM16 samples: one to `max` bytes, an even count.
   defp pcm16(0, _max), do: {:error, {:missing_field, "bytes"}}

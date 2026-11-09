@@ -12,6 +12,7 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
   alias FermixCore.Realtime.CallSweep
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.LiveChat
+  alias FermixCore.Realtime.LivePrompt
   alias FermixCore.Realtime.LiveSessionServer
   alias FermixCore.Realtime.LiveText
   alias FermixCore.Realtime.LiveTranscript
@@ -1882,6 +1883,97 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
     end
   end
 
+  # M87 Phase 2: a phone's camera. Live sees nothing, so the voice is told so
+  # once, the first time the camera turns on, and each hand-off carries the
+  # camera's newest frame while it is fresh.
+  describe "the phone's camera" do
+    setup %{clock: clock} do
+      session = start_session(clock: clock, endpoint: {:phone, "0d7f6a52"})
+      :ok = SessionControl.call_start(session)
+      start_provider_session(session)
+      speak(session, "what am I holding", 1_000, 4_000)
+      %{session: session}
+    end
+
+    test "the first Camera on tells the voice it cannot see, once", %{session: session} do
+      refute Enum.any?(FakeLiveClient.events(), &camera_rule?/1)
+
+      for on? <- [true, false, true], do: assert(:ok = SessionControl.camera(session, on?))
+
+      assert [%{delegation_id: nil}] = Enum.filter(FakeLiveClient.events(), &camera_rule?/1)
+    end
+
+    test "a hand-off carries the camera's newest fresh frame", %{session: session} do
+      :ok = SessionControl.camera(session, true)
+      :ok = SessionControl.camera_frame(session, jpeg("older"))
+      :ok = SessionControl.camera_frame(session, jpeg("newest"))
+      send(session, {:openai_live_event, {:delegation_created, "dg_1", 4_200}})
+
+      assert_receive {:bridge_submit, _handle, request}
+      assert request.frame == %{source: :camera, mime_type: "image/jpeg", data: "newest"}
+      assert request.camera_on?
+    end
+
+    test "a frame past the freshness bound rides no hand-off, which says the camera is on",
+         %{session: session, clock: clock} do
+      :ok = SessionControl.camera(session, true)
+      :ok = SessionControl.camera_frame(session, jpeg("old"))
+      sync(session)
+      Agent.update(clock, &(&1 + 2_001))
+      send(session, {:openai_live_event, {:delegation_created, "dg_1", 4_200}})
+
+      assert_receive {:bridge_submit, _handle, %{frame: nil, camera_on?: true}}
+    end
+
+    test "Camera off and a clear let the frame go", %{session: session} do
+      :ok = SessionControl.camera(session, true)
+      :ok = SessionControl.camera_frame(session, jpeg("seen"))
+      :ok = SessionControl.camera_frame(session, nil)
+      send(session, {:openai_live_event, {:delegation_created, "dg_1", 4_200}})
+      assert_receive {:bridge_submit, _handle, %{frame: nil, camera_on?: true}}
+
+      :ok = SessionControl.camera_frame(session, jpeg("seen again"))
+      :ok = SessionControl.camera(session, false)
+      assert :sys.get_state(session).tasks.frame == nil
+    end
+
+    test "the frame is let go when its own timer says it is no longer fresh", %{
+      session: session
+    } do
+      :ok = SessionControl.camera(session, true)
+      :ok = SessionControl.camera_frame(session, jpeg("seen"))
+      %{ref: ref} = :sys.get_state(session).tasks.frame
+
+      send(session, {:camera_frame_stale, ref})
+
+      assert :sys.get_state(session).tasks.frame == nil
+    end
+
+    # A crash report prints the session's state and the message it was
+    # handling: a picture, the owner's voice and the key are their sizes.
+    test "its printed status carries no picture, microphone audio or key", %{session: session} do
+      picture = <<0xFF, 0xD8, 0xFF, "picture">>
+      :ok = SessionControl.camera(session, true)
+      :ok = SessionControl.camera_frame(session, jpeg(picture))
+      :sys.replace_state(session, &%{&1 | held_audio: ["mic-secret-audio"], held_audio_bytes: 16})
+
+      printed = inspect(:sys.get_status(session), limit: :infinity, printable_limit: :infinity)
+      refute printed =~ ~r/255, 216, 255|mic-secret-audio|sk-test/
+      assert printed =~ "bytes: 10"
+
+      for message <- [
+            {:"$gen_cast", {:camera_frame, jpeg(picture)}},
+            {:"$gen_cast", {:audio_chunk, "mic-secret-audio"}}
+          ] do
+        status =
+          LiveSessionServer.format_status(%{state: :sys.get_state(session), message: message})
+
+        printed = inspect(status, limit: :infinity, printable_limit: :infinity)
+        refute printed =~ ~r/255, 216, 255|mic-secret-audio|sk-test/
+      end
+    end
+  end
+
   describe "delegations" do
     setup %{clock: clock} do
       session = start_session(clock: clock)
@@ -1908,7 +2000,8 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
       assert_receive {:bridge_submit, _handle, request}
       assert request.text == "user: book the room"
       assert request.turn_session_id =~ ~r/^voice_delegation_\d+$/
-      assert request.screen_frame == nil
+      assert request.frame == nil
+      refute request.camera_on?
       assert_receive {:realtime, %{type: "task", delegation_id: "dg_1", status: "running"}}
     end
 
@@ -3100,6 +3193,13 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
         }}}
     )
   end
+
+  defp camera_rule?(%{type: "session.instructions.append", content: content}),
+    do: content == LivePrompt.camera_rule()
+
+  defp camera_rule?(_event), do: false
+
+  defp jpeg(data), do: %{mime_type: "image/jpeg", data: data}
 
   defp mirror?(%{type: "session.thinking.append", delegation_id: nil}), do: true
   defp mirror?(_event), do: false

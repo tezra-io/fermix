@@ -357,6 +357,50 @@ defmodule FermixCore.Realtime.ConfigTest do
     end
   end
 
+  # M87 Phase 2: whether a call from the phone may share its camera. Only the
+  # task engines take calls from the phone, so it is their setting: on by
+  # default, written out on every save as screen sharing is, and refused
+  # under the Realtime engine rather than ignored there.
+  describe "the camera_share setting (M87)" do
+    test "on by default under each task engine, and written out" do
+      for engine <- ~w(openai_live xai_realtime) do
+        config = Config.normalize(engine: engine)
+
+        assert config.camera_share? == true
+        assert Keyword.get(Config.to_keyword(config), :camera_share) == true
+      end
+    end
+
+    test "turned off, it stays off and is written off" do
+      for engine <- ~w(openai_live xai_realtime) do
+        config = Config.normalize(engine: engine, camera_share: false)
+
+        assert config.camera_share? == false
+        assert Keyword.get(Config.to_keyword(config), :camera_share) == false
+      end
+    end
+
+    test "under the Realtime engine it is no setting: refused by name, off, never written" do
+      assert_raise ArgumentError,
+                   "realtime.camera_share is a Live-only setting; remove it from " <>
+                     ~s([fermix_core.realtime] or set engine = "openai_live"),
+                   fn -> Config.normalize(engine: "openai_realtime", camera_share: true) end
+
+      config = Config.normalize(engine: "openai_realtime")
+
+      assert config.camera_share? == false
+      refute Keyword.has_key?(Config.to_keyword(config), :camera_share)
+    end
+
+    test "a value that is not a boolean is refused by name" do
+      assert_raise ArgumentError,
+                   ~s(realtime.camera_share must be a boolean, got: "sometimes"),
+                   fn ->
+                     Config.normalize(engine: "openai_live", camera_share: "sometimes")
+                   end
+    end
+  end
+
   # M70: Grok Voice is the third engine, on its own provider. The engine still
   # derives everything else: the provider follows from it, its voices are its
   # own, and every setting it has no use for is refused rather than ignored.
@@ -502,7 +546,8 @@ defmodule FermixCore.Realtime.ConfigTest do
                max_session_minutes: 15,
                max_estimated_cost_cents_per_session: 100,
                screen_share: false,
-               persist_transcripts: false
+               persist_transcripts: false,
+               camera_share: true
              ]
     end
 
@@ -515,6 +560,8 @@ defmodule FermixCore.Realtime.ConfigTest do
             [engine: "xai_realtime", provider: "xai", voice: "sal", conversation: "private"],
             [engine: :xai_realtime, provider: :xai, voice: :leo, conversation: :chat],
             [engine: "xai_realtime", screen_share: false, persist_transcripts: true],
+            [engine: "xai_realtime", camera_share: false],
+            [engine: :openai_live, camera_share: "false", conversation: "private"],
             %{"engine" => "xai_realtime", "provider" => "xai", "voice" => "ara"},
             [engine: :openai_live, provider: :openai, voice: :beacon],
             [engine: :openai_realtime, provider: :openai, reasoning_effort: :high],

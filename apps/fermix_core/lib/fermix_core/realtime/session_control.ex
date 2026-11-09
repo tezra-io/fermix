@@ -12,7 +12,8 @@ defmodule FermixCore.Realtime.SessionControl do
 
   Every engine handles the call verbs (`call_start` through `reload_runtime`).
   The task engines, Live and Grok, which hand every task to the Fermix agent,
-  also handle `cancel_task` and the chat's verbs (`chat_typed`, `chat_answered`,
+  also handle `cancel_task`, the phone camera's verbs (`camera`,
+  `camera_frame`) and the chat's verbs (`chat_typed`, `chat_answered`,
   `call_context`); only Grok handles `playback_progress`. A caller that could
   reach the wrong engine is refused before it sends: a connection by engine
   (`CallClient`), the chat through `CallRegistry`, which only a task-engine
@@ -29,6 +30,7 @@ defmodule FermixCore.Realtime.SessionControl do
   alias FermixCore.Realtime.CallSpeech
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.SessionServer
+  alias FermixCore.Realtime.VoiceBridge
 
   # `call_start` blocks on the provider handshake, so it sits above the engines'
   # own internal deadlines: an upstream stall must surface as the engine's typed
@@ -110,6 +112,44 @@ defmodule FermixCore.Realtime.SessionControl do
       when is_session(server) and is_binary(playback_id) and playback_id != "" and
              is_integer(played_ms) and played_ms >= 0 and is_boolean(drained?),
       do: GenServer.call(server, {:playback_progress, playback_id, played_ms, drained?})
+
+  @doc """
+  Turns the call's camera on or off (M87 Phase 2, Realtime v4). Task engines
+  only: `CallClient` refuses `camera` elsewhere before any session call. The
+  first time it turns on, the voice is told it cannot see; off lets the
+  camera's newest frame go.
+  """
+  @spec camera(GenServer.server(), boolean()) :: :ok
+  def camera(server, on?) when is_session(server) and is_boolean(on?),
+    do: GenServer.call(server, {:camera, on?})
+
+  @doc """
+  The camera's newest frame, for the call's next hand-offs while it is fresh,
+  or `nil` to let the frame go (M87 Phase 2). A cast, as audio is: media is
+  fire-and-forget, and the adapter bounds what it sends.
+  """
+  @spec camera_frame(GenServer.server(), VoiceBridge.frame_input() | nil) :: :ok
+  def camera_frame(server, nil) when is_session(server),
+    do: GenServer.cast(server, {:camera_frame, nil})
+
+  def camera_frame(server, %{mime_type: mime, data: data} = frame)
+      when is_session(server) and is_binary(mime) and is_binary(data),
+      do: GenServer.cast(server, {:camera_frame, frame})
+
+  @doc """
+  A message this module cast to a session, as the session's crash report may
+  print it (its `format_status/1`): a camera frame's and the microphone's
+  bytes as their size. Any other message is returned as it is.
+  """
+  @spec printable_message(term()) :: term()
+  def printable_message({:"$gen_cast", {:camera_frame, %{data: data} = frame}})
+      when is_binary(data),
+      do: {:"$gen_cast", {:camera_frame, %{frame | data: {:bytes, byte_size(data)}}}}
+
+  def printable_message({:"$gen_cast", {:audio_chunk, audio}}) when is_binary(audio),
+    do: {:"$gen_cast", {:audio_chunk, {:bytes, byte_size(audio)}}}
+
+  def printable_message(message), do: message
 
   @doc """
   The owner typed `text` in the chat (M56 §4.3). Sent, never awaited: a

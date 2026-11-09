@@ -285,7 +285,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     assert Jason.decode!(String.trim(line)) == %{
              "type" => "server_hello",
              "min_version" => 1,
-             "max_version" => 3
+             "max_version" => 4
            }
 
     :gen_tcp.close(conn)
@@ -319,7 +319,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
              "direction" => "client_too_new",
              "client_version" => 99,
              "min_version" => 1,
-             "max_version" => 3
+             "max_version" => 4
            } = Jason.decode!(String.trim(line))
 
     assert {:error, :closed} = :gen_tcp.recv(conn, 0, 1_000)
@@ -894,7 +894,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
              "direction" => "client_too_old",
              "client_version" => 1,
              "min_version" => 2,
-             "max_version" => 3,
+             "max_version" => 4,
              "required_for" => "openai_live"
            }
 
@@ -1023,7 +1023,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
                "direction" => "client_too_old",
                "client_version" => version,
                "min_version" => 3,
-               "max_version" => 3,
+               "max_version" => 4,
                "required_for" => "xai_realtime"
              }
 
@@ -1040,6 +1040,42 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     {conn, _session} = start_grok_call(socket_path)
 
     :gen_tcp.close(conn)
+  end
+
+  # M87 Phase 2, wire v4: the Mac's socket may speak v4, the hello's camera flag
+  # included, but the camera is a phone's. A `camera` here is the client's bug:
+  # refused with unsupported_by_endpoint, and the connection closes.
+  test "a v4 companion runs a Live call, and its camera is refused", %{
+    socket_path: socket_path
+  } do
+    put_realtime_env(engine: "openai_live")
+
+    {:ok, conn} = connect(socket_path)
+    :ok = :gen_tcp.send(conn, ~s({"type":"client_hello","protocol_version":4,"camera":true}\n))
+    assert {:ok, line} = recv_line(conn)
+    assert %{"type" => "server_hello", "max_version" => 4} = Jason.decode!(String.trim(line))
+
+    :ok = :gen_tcp.send(conn, ~s({"type":"call_start"}\n))
+    assert_receive {:session_started, _session, _opts}
+    assert {:ok, line} = recv_line(conn)
+    assert %{"type" => "state", "state" => "listening"} = Jason.decode!(String.trim(line))
+
+    :ok = :gen_tcp.send(conn, ~s({"type":"camera","on":true}\n))
+    assert {:ok, line} = recv_line(conn)
+
+    assert %{"type" => "error", "reason" => "unsupported_by_endpoint"} =
+             Jason.decode!(String.trim(line))
+
+    assert {:error, :closed} = :gen_tcp.recv(conn, 0, 1_000)
+  end
+
+  test "a hello whose camera flag is not a boolean is refused", %{socket_path: socket_path} do
+    {:ok, conn} = connect(socket_path)
+    :ok = :gen_tcp.send(conn, ~s({"type":"client_hello","protocol_version":4,"camera":"yes"}\n))
+
+    assert {:ok, line} = recv_line(conn)
+    assert %{"type" => "error", "reason" => "invalid_camera"} = Jason.decode!(String.trim(line))
+    assert {:error, :closed} = :gen_tcp.recv(conn, 0, 1_000)
   end
 
   test "a v3 companion still runs both OpenAI engines", %{socket_path: socket_path} do
@@ -1308,7 +1344,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     :ok = :gen_tcp.send(conn, ~s({"type":"client_hello","protocol_version":#{version}}\n))
     assert {:ok, line} = recv_line(conn)
 
-    assert %{"type" => "server_hello", "min_version" => 1, "max_version" => 3} =
+    assert %{"type" => "server_hello", "min_version" => 1, "max_version" => 4} =
              Jason.decode!(String.trim(line))
 
     :ok

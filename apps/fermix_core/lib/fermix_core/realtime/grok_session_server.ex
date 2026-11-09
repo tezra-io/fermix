@@ -65,6 +65,7 @@ defmodule FermixCore.Realtime.GrokSessionServer do
   alias FermixCore.Realtime.LiveTelemetry
   alias FermixCore.Realtime.LiveText
   alias FermixCore.Realtime.LiveTranscript
+  alias FermixCore.Realtime.SessionControl
   alias FermixCore.Realtime.VoiceBridge
   alias FermixCore.Realtime.XAIRealtimeClient
   alias FermixCore.Tools.Telemetry, as: ToolsTelemetry
@@ -220,6 +221,9 @@ defmodule FermixCore.Realtime.GrokSessionServer do
       # `session.created`), `:configuring` (awaiting `session.updated`),
       # `:priming` (the call's context awaiting acknowledgement) and `:ready`.
       phase: :idle,
+      # The phone camera's rule (M87 Phase 2): `:unsaid` until the camera first
+      # turns on, `:owed` until the session is ready to hear it, `:said`.
+      camera_rule: :unsaid,
       # When the socket opened, on the call's clock: the provider's session
       # and its bill start there.
       connected_ms: nil,
@@ -334,6 +338,14 @@ defmodule FermixCore.Realtime.GrokSessionServer do
 
   def handle_call(:socket_pid, _from, state), do: {:reply, state.socket, state}
 
+  # M87 Phase 2: Grok sees nothing, so the first Camera on tells the voice so,
+  # as one quiet system item once the session is ready; off lets the camera's
+  # frame go.
+  def handle_call({:camera, on?}, _from, state) do
+    state = %{state | tasks: CallTasks.camera(state.tasks, on?)}
+    {:reply, :ok, if(on?, do: owe_camera_rule(state), else: state)}
+  end
+
   def handle_call(:call_context, _from, state) do
     context = %{
       call_uuid: state.call_uuid,
@@ -348,6 +360,9 @@ defmodule FermixCore.Realtime.GrokSessionServer do
 
   @impl true
   def handle_cast({:chat, event}, state), do: {:noreply, mirror_chat(state, event)}
+
+  def handle_cast({:camera_frame, frame}, state),
+    do: {:noreply, %{state | tasks: CallTasks.put_frame(state.tasks, frame)}}
 
   def handle_cast({:audio_chunk, audio}, state) do
     case audio_route(state, audio) do
@@ -450,6 +465,9 @@ defmodule FermixCore.Realtime.GrokSessionServer do
     {:noreply, tell(%{state | tasks: tasks}, told)}
   end
 
+  def handle_info({:camera_frame_stale, ref}, state),
+    do: {:noreply, %{state | tasks: CallTasks.frame_stale(state.tasks, ref)}}
+
   def handle_info({:delegation_event, task_id, revision, event}, state) do
     {tasks, told} =
       CallTasks.delegation_event(state.tasks, task_id, revision, event, state.transcript)
@@ -479,6 +497,29 @@ defmodule FermixCore.Realtime.GrokSessionServer do
   end
 
   def terminate(_reason, _state), do: :ok
+
+  # A crash report, and `:sys.get_status/1`, print the state and the message
+  # being handled: the camera's frame, the owner's held microphone audio, the
+  # voice's audio held back and the provider key print as their sizes or not
+  # at all, never their bytes.
+  @impl true
+  def format_status(status) do
+    status
+    |> Map.replace_lazy(:state, &printable_state/1)
+    |> Map.replace_lazy(:message, &SessionControl.printable_message/1)
+  end
+
+  defp printable_state(%{tasks: tasks, held_audio_bytes: held} = state) do
+    %{
+      state
+      | api_key: :redacted,
+        tasks: CallTasks.printable(tasks),
+        held_audio: {:bytes, held},
+        playback: GrokPlayback.printable(state.playback)
+    }
+  end
+
+  defp printable_state(state), do: state
 
   ## Call start
 
@@ -622,7 +663,13 @@ defmodule FermixCore.Realtime.GrokSessionServer do
       {:ok, tasks} ->
         state = %{state | tasks: tasks, phase: :ready}
         LiveTelemetry.session_started(state.tasks.meta)
-        {:noreply, state |> start_timers() |> notify_call_ready() |> release_held_audio()}
+
+        {:noreply,
+         state
+         |> start_timers()
+         |> say_camera_rule()
+         |> notify_call_ready()
+         |> release_held_audio()}
 
       {:error, reason} ->
         Logger.error("voice_grok: the voice bridge refused the call: #{inspect(reason)}")
@@ -1329,6 +1376,26 @@ defmodule FermixCore.Realtime.GrokSessionServer do
 
   defp taint_if(tasks, true), do: CallTasks.mark_tainted(tasks)
   defp taint_if(tasks, false), do: tasks
+
+  ## The phone's camera
+
+  # Owed until it is sent: a rule the budget could not afford is tried again
+  # at the next Camera on.
+  defp owe_camera_rule(%{camera_rule: :said} = state), do: state
+  defp owe_camera_rule(state), do: say_camera_rule(%{state | camera_rule: :owed})
+
+  # A quiet item like a mirrored chat line, never followed by `response.create`.
+  # Marked said only once it is sent.
+  defp say_camera_rule(%{camera_rule: :owed, phase: :ready, closing?: false} = state) do
+    if GrokLedger.affords_text_item?(state.ledger) do
+      send_billable_item(%{state | camera_rule: :said}, "system", LivePrompt.camera_rule())
+    else
+      Logger.warning("voice_grok: the camera's rule waits: the call's budget is spent")
+      state
+    end
+  end
+
+  defp say_camera_rule(state), do: state
 
   ## Teardown
 

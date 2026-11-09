@@ -24,6 +24,12 @@ defmodule FermixCore.Realtime.CallTasks do
       reply drawn from Computer History reaches the voice only when its
       provider may carry it (M56 §9, `LiveChat.history_permitted?/1`); a private
       call shows nothing.
+    * **The camera** (M87 Phase 2). While a phone's camera is on, the call
+      keeps the newest frame it was given, and a task carries it to the agent
+      only while it is fresh (`frame_fresh_ms/0`); with the camera on and no
+      fresh frame, the request says the camera is on, and the agent is told
+      there is no current picture. Turning the camera off, a clear and the
+      call's end let the frame go, and no frame is ever persisted.
     * **The end.** A private call cancels its tasks; a call in the chat hands
       the running one over to finish into the chat (M56 §4.6). The call's
       record, its gist and its one chat row are settled once (M56 §4.2).
@@ -78,6 +84,13 @@ defmodule FermixCore.Realtime.CallTasks do
   # The wire's own bound on `task.summary` (protocol v2).
   @summary_max_chars 240
   @tool_progress_interval_ms 2_000
+
+  # How long the camera's newest frame stands for what the camera shows (M87
+  # Phase 2): a task raised later than this after it reads no picture rather
+  # than an old one, which may show something the owner has since put away.
+  # The phone sends a frame every second while the owner speaks, so a task
+  # raised by what they just said finds one.
+  @frame_fresh_ms 2_000
 
   # What the voice is told about a result shown in the chat (M56 §4.5), after
   # the line it says, only once the row is written.
@@ -157,7 +170,21 @@ defmodule FermixCore.Realtime.CallTasks do
           access_window: {String.t(), non_neg_integer()} | nil,
           access_confirms: %{reference() => {String.t(), pos_integer()}},
           detached: %{String.t() => {pos_integer(), VoiceBridge.forward()}},
-          outbox: [map()]
+          outbox: [map()],
+          camera_on?: boolean(),
+          frame: held_frame() | nil
+        }
+
+  @typedoc """
+  The camera's newest frame as the call holds it: when it came, by `clock`, and
+  the timer that lets it go once it is no longer fresh, named by `ref`.
+  """
+  @type held_frame :: %{
+          mime_type: String.t(),
+          data: binary(),
+          at: integer(),
+          ref: reference(),
+          timer: reference()
         }
 
   @enforce_keys [
@@ -217,7 +244,11 @@ defmodule FermixCore.Realtime.CallTasks do
     detached: %{},
     # The `task` frames of the step in progress, newest first, handed to the
     # session behind what the voice is told (`emit/2`).
-    outbox: []
+    outbox: [],
+    # The phone's camera (M87 Phase 2): whether it is on, and its newest frame
+    # (`t:held_frame/0`). Never persisted.
+    camera_on?: false,
+    frame: nil
   ]
 
   @doc """
@@ -284,6 +315,62 @@ defmodule FermixCore.Realtime.CallTasks do
   @spec fetch(t(), String.t()) :: {:ok, LiveDelegation.record()} | :error
   def fetch(%__MODULE__{} = tasks, id) when is_binary(id),
     do: LiveDelegation.fetch(tasks.delegations, id)
+
+  ## The camera
+
+  @doc "How long the camera's newest frame stands for what the camera shows."
+  @spec frame_fresh_ms() :: pos_integer()
+  def frame_fresh_ms, do: @frame_fresh_ms
+
+  @doc """
+  Turns the call's camera on or off (M87 Phase 2). Off lets the newest frame
+  go, so no later task reads a picture taken before it.
+  """
+  @spec camera(t(), boolean()) :: t()
+  def camera(%__MODULE__{} = tasks, true), do: %{tasks | camera_on?: true}
+  def camera(%__MODULE__{} = tasks, false), do: %{let_frame_go(tasks) | camera_on?: false}
+
+  @doc """
+  Keeps `frame` as the camera's newest, stamped with when it came, for as long
+  as it is fresh: it arms a timer that sends this process
+  `{:camera_frame_stale, ref}` at the freshness bound, for the session to hand
+  to `frame_stale/2`, and a newer frame's timer replaces it. `nil` lets the
+  frame go (the phone's link detached). A frame that comes while the camera is
+  off is not kept: the phone sends none then, and one that crossed a Camera off
+  on its way is the picture the owner turned away from.
+  """
+  @spec put_frame(t(), VoiceBridge.frame_input() | nil) :: t()
+  def put_frame(%__MODULE__{} = tasks, nil), do: let_frame_go(tasks)
+  def put_frame(%__MODULE__{camera_on?: false} = tasks, %{}), do: tasks
+
+  def put_frame(%__MODULE__{} = tasks, %{mime_type: mime, data: data})
+      when is_binary(mime) and is_binary(data) do
+    ref = make_ref()
+    timer = Process.send_after(self(), {:camera_frame_stale, ref}, @frame_fresh_ms)
+    frame = %{mime_type: mime, data: data, at: now(tasks), ref: ref, timer: timer}
+    %{let_frame_go(tasks) | frame: frame}
+  end
+
+  @doc """
+  Lets the frame `ref` names go: its timer fired, so it is no longer fresh. A
+  newer frame's timer replaced that one, so a stale message for an earlier
+  frame changes nothing.
+  """
+  @spec frame_stale(t(), reference()) :: t()
+  def frame_stale(%__MODULE__{frame: %{ref: ref}} = tasks, ref) when is_reference(ref),
+    do: %{tasks | frame: nil}
+
+  def frame_stale(%__MODULE__{} = tasks, ref) when is_reference(ref), do: tasks
+
+  @doc """
+  The call's tasks as a crash report or `:sys.get_status/1` may print them:
+  the camera's frame as its source and size, never its bytes.
+  """
+  @spec printable(t()) :: t()
+  def printable(%__MODULE__{frame: nil} = tasks), do: tasks
+
+  def printable(%__MODULE__{frame: frame} = tasks),
+    do: %{tasks | frame: %{source: :camera, bytes: byte_size(frame.data), at: frame.at}}
 
   ## The call's record and bridge call
 
@@ -657,6 +744,7 @@ defmodule FermixCore.Realtime.CallTasks do
   defp submit(tasks, record, transcript) do
     turn_session_id = mint_turn_session_id()
     text = request_text(tasks, record, transcript)
+    tasks = drop_stale_frame(tasks)
     request = delegation_request(tasks, record, turn_session_id, text)
     tasks = %{tasks | turn_sessions: Map.put(tasks.turn_sessions, record.id, turn_session_id)}
 
@@ -769,9 +857,30 @@ defmodule FermixCore.Realtime.CallTasks do
       revision: record.revision,
       turn_session_id: turn_session_id,
       text: text,
-      screen_frame: nil,
+      frame: camera_frame(tasks.frame),
+      camera_on?: tasks.camera_on?,
       outside_sources: tasks.outside_sources
     }
+  end
+
+  defp camera_frame(nil), do: nil
+
+  defp camera_frame(%{mime_type: mime, data: data}),
+    do: %{source: :camera, mime_type: mime, data: data}
+
+  # The newest frame stands for what the camera shows only while it is fresh;
+  # past that it is let go, so no task reads it.
+  defp drop_stale_frame(%{frame: %{at: at}} = tasks) do
+    if now(tasks) - at > @frame_fresh_ms, do: let_frame_go(tasks), else: tasks
+  end
+
+  defp drop_stale_frame(tasks), do: tasks
+
+  defp let_frame_go(%{frame: nil} = tasks), do: tasks
+
+  defp let_frame_go(%{frame: %{timer: timer}} = tasks) do
+    _ = Process.cancel_timer(timer)
+    %{tasks | frame: nil}
   end
 
   # In the chat's conversation a hand-off's request is the exchange since the

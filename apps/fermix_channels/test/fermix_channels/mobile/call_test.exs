@@ -24,6 +24,7 @@ defmodule FermixChannels.Mobile.CallTest do
   @call "c-9f1e"
   @seen ~U[2026-11-07 08:00:00Z]
   @pcm :binary.copy(<<1, 0>>, 2_400)
+  @jpeg <<0xFF, 0xD8, 0xFF, 0xE0, "a camera still">>
   # The 100 ms frames the playback credit lets out unplayed.
   @credit_frames div(CallAudio.credit_ms(), 100)
 
@@ -37,6 +38,8 @@ defmodule FermixChannels.Mobile.CallTest do
     def audio_chunk(pid, audio), do: GenServer.cast(pid, {:verb, {:audio, audio}})
     def interrupt(pid, end_ms), do: GenServer.call(pid, {:verb, {:interrupt, end_ms}})
     def mute(pid, enabled?), do: GenServer.call(pid, {:verb, {:mute, enabled?}})
+    def camera(pid, on?), do: GenServer.call(pid, {:verb, {:camera, on?}})
+    def camera_frame(pid, frame), do: GenServer.cast(pid, {:verb, {:camera_frame, frame}})
     def cancel_task(pid, id), do: GenServer.call(pid, {:verb, {:cancel_task, id}})
 
     def playback_progress(pid, id, played, drained?),
@@ -816,7 +819,7 @@ defmodule FermixChannels.Mobile.CallTest do
 
       send(call, line_frame(relay, %{type: "client_hello", protocol_version: 3}, nil, 0))
       assert_receive {:from_call, :control, %{"t" => "call_line", "bytes" => hello}}
-      assert %{"type" => "server_hello", "max_version" => 3} = Jason.decode!(hello)
+      assert %{"type" => "server_hello", "max_version" => 4} = Jason.decode!(hello)
 
       send(call, line_frame(relay, %{type: "mute", enabled: true}, 2, 0))
       assert_receive {:voice, ^voice, {:mute, true}}
@@ -892,7 +895,203 @@ defmodule FermixChannels.Mobile.CallTest do
     end
   end
 
+  # M87 Phase 2: the phone's camera. Its frames ride `call_frame` on the
+  # phone's own session, taken only from the attached session while the
+  # camera is on, under ScreenFeed's ceiling; a frame dropped is counted and
+  # logged, never a call-ending error. The voice session holds the newest.
+  describe "the phone's camera" do
+    test "a frame from the phone reaches the session while the camera is on", ctx do
+      {driver, client} = ready_phone!(ctx)
+      client = open_new!(driver, client, 2)
+      hello = %{type: "client_hello", protocol_version: 4, camera: true}
+      client = send_line(driver, client, hello, 3, nil)
+      {[{%{"t" => "call_line"}, _hello}], client} = Driver.client_receive(driver, client)
+      client = send_line(driver, client, %{type: "call_start"}, 4, 1)
+      assert_receive {:voice_started, voice, _opts}
+      {[_listening], client} = Driver.client_receive(driver, client)
+
+      client = send_line(driver, client, %{type: "camera", on: true}, 5, 2)
+      assert_receive {:voice, ^voice, {:camera, true}}
+
+      client = Driver.client_send(driver, client, "call_frame", frame_header(), 6, @jpeg)
+      assert_receive {:voice, ^voice, {:camera_frame, %{mime_type: "image/jpeg", data: @jpeg}}}
+
+      hang_up!(driver, client, voice, 7)
+    end
+
+    test "frames are held to ScreenFeed's ceiling, each drop counted, the call going on", ctx do
+      %{call: call, voice: voice, relay: relay, clock: clock} = camera_call!(ctx, "openai_live")
+      # The suite logs warnings and up; the call's drop lines are info.
+      Logger.put_module_level(Call, :info)
+      on_exit(fn -> Logger.delete_module_level(Call) end)
+      now = fn -> Agent.get(clock, & &1) end
+
+      send(call, frame(relay, @jpeg, now.()))
+      assert_receive {:voice, ^voice, {:camera_frame, %{data: @jpeg}}}
+
+      log =
+        ExUnit.CaptureLog.capture_log([level: :info], fn ->
+          Agent.update(clock, &(&1 + 100))
+          send(call, frame(relay, @jpeg <> "sooner", now.()))
+          _ = :sys.get_state(call)
+        end)
+
+      assert log =~ "dropped a camera frame (too_soon); 1 so far"
+
+      Agent.update(clock, &(&1 + 1_000))
+      send(call, frame(relay, @jpeg, now.()))
+      _ = :sys.get_state(call)
+      refute_received {:voice, ^voice, {:camera_frame, _frame}}
+
+      Agent.update(clock, &(&1 + 1_000))
+      send(call, frame(relay, @jpeg <> "moved", now.()))
+      assert_receive {:voice, ^voice, {:camera_frame, %{data: @jpeg <> "moved"}}}
+
+      assert %{too_soon: 1, unchanged: 1} = :sys.get_state(call).frames.dropped
+      assert Process.alive?(call) and :sys.get_state(call).attached != nil
+    end
+
+    test "no frame is taken while the camera is off, or from a session not the call's", ctx do
+      %{call: call, voice: voice, relay: relay, clock: clock} =
+        camera_call!(ctx, "xai_realtime", camera: false)
+
+      send(call, frame(relay, @jpeg, Agent.get(clock, & &1)))
+      stray = spawn(fn -> :ok end)
+      send(call, frame(stray, @jpeg, Agent.get(clock, & &1)))
+      _ = :sys.get_state(call)
+
+      refute_received {:voice, ^voice, {:camera_frame, _frame}}
+      assert %{camera_off: 1, not_attached: 1} = :sys.get_state(call).frames.dropped
+      assert :sys.get_state(call).attached != nil
+    end
+
+    test "Camera off and a detach let the frame go; a resume says the camera's state", ctx do
+      %{call: call, voice: voice, relay: relay, clock: clock} = camera_call!(ctx, "openai_live")
+      send(call, frame(relay, @jpeg, Agent.get(clock, & &1)))
+      assert_receive {:voice, ^voice, {:camera_frame, %{data: @jpeg}}}
+
+      Process.unlink(relay)
+      Process.exit(relay, :kill)
+      assert_receive {:voice, ^voice, {:camera_frame, nil}}
+      await(call, &(&1.attached == nil))
+
+      test = self()
+      relay = spawn_link(fn -> relay(test) end)
+      :ok = Call.open(@phone_id, relay, @call, true, calls: ctx.calls)
+      assert_receive {:from_call, :control, %{"t" => "call_attached", "camera" => true}}
+
+      # The same picture after the resume is the session's again.
+      Agent.update(clock, &(&1 + 1_000))
+      send(call, frame(relay, @jpeg, Agent.get(clock, & &1)))
+      assert_receive {:voice, ^voice, {:camera_frame, %{data: @jpeg}}}
+
+      send(call, line_frame(relay, %{type: "camera", on: false}, 3, 0))
+      assert_receive {:voice, ^voice, {:camera, false}}
+      assert :sys.get_state(call).camera? == false
+    end
+
+    # camera_share can go off between the phone's hello_ack and its call: the
+    # one event is refused, and the call goes on with the camera off.
+    test "a camera turned on while camera_share is off is refused alone, the call going on",
+         ctx do
+      %{call: call, voice: voice, relay: relay, clock: clock} =
+        camera_call!(ctx, "openai_live", camera: false, camera_share: false)
+
+      send(call, line_frame(relay, %{type: "camera", on: true}, 2, 0))
+
+      assert_receive {:from_call, :control, %{"t" => "call_line", "bytes" => refusal}}
+      assert Jason.decode!(refusal) == %{"type" => "error", "reason" => "camera_off"}
+
+      send(call, frame(relay, @jpeg, Agent.get(clock, & &1)))
+      state = :sys.get_state(call)
+
+      refute_received {:voice, ^voice, {:camera, true}}
+      refute_received {:voice, ^voice, {:camera_frame, _frame}}
+      refute_received {:voice, ^voice, :call_stop}
+      assert %{camera?: false, control_seq: 2, frames: %{dropped: %{camera_off: 1}}} = state
+      assert state.attached != nil
+    end
+
+    test "camera_share is the call's as it opened, for the call's life", ctx do
+      {:ok, share} = Agent.start_link(fn -> true end)
+
+      config = fn ->
+        Config.normalize(
+          enabled: true,
+          engine: "xai_realtime",
+          model: "grok-voice-3.0",
+          camera_share: Agent.get(share, & &1)
+        )
+      end
+
+      hello = %{type: "client_hello", protocol_version: 4, camera: true}
+
+      %{call: call, voice: voice, relay: relay} =
+        call_alone!(ctx, "xai_realtime", config: config, hello: hello)
+
+      Agent.update(share, fn _share -> false end)
+      send(call, line_frame(relay, %{type: "camera", on: true}, 2, 0))
+
+      assert_receive {:voice, ^voice, {:camera, true}}
+      assert :sys.get_state(call).camera?
+    end
+
+    # A crash report prints the call's state and the message it was handling:
+    # a still and either voice's audio print as their sizes.
+    test "its printed status carries no picture or audio", ctx do
+      %{call: call, relay: relay} = camera_call!(ctx, "openai_live")
+
+      :sys.replace_state(call, fn state ->
+        queue = :queue.in({0, "p1", "voice-secret-pcm"}, state.audio.queue)
+        %{state | audio: %{state.audio | queue: queue, queued: 1}}
+      end)
+
+      secrets = ~r/255, 216, 255|voice-secret-pcm|mic-secret-audio/
+      printed = inspect(:sys.get_status(call), limit: :infinity, printable_limit: :infinity)
+      refute printed =~ secrets
+      assert printed =~ ":bytes, 16"
+
+      header = %{"call_id" => @call}
+
+      for message <- [
+            frame(relay, @jpeg, 0),
+            {:call_frame, relay, "call_audio", header, "mic-secret-audio", 0}
+          ] do
+        status = Call.format_status(%{state: :sys.get_state(call), message: message})
+        refute inspect(status, limit: :infinity, printable_limit: :infinity) =~ secrets
+      end
+    end
+  end
+
   # -- helpers ------------------------------------------------------------------
+
+  # A call up as `call_alone!/3`'s, from a phone whose v4 hello has a camera,
+  # the camera turned on unless `camera: false`.
+  defp camera_call!(ctx, engine, opts \\ []) do
+    camera_share = Keyword.get(opts, :camera_share, true)
+    model = if engine == "xai_realtime", do: "grok-voice-3.0", else: "gpt-live-1"
+
+    config = fn ->
+      Config.normalize(enabled: true, engine: engine, model: model, camera_share: camera_share)
+    end
+
+    hello = %{type: "client_hello", protocol_version: 4, camera: true}
+    up = call_alone!(ctx, engine, config: config, hello: hello)
+
+    if Keyword.get(opts, :camera, true) do
+      send(up.call, line_frame(up.relay, %{type: "camera", on: true}, 2, 0))
+      voice = up.voice
+      assert_receive {:voice, ^voice, {:camera, true}}
+    end
+
+    up
+  end
+
+  defp frame(session, jpeg, at),
+    do: {:call_frame, session, "call_frame", frame_header(), jpeg, at}
+
+  defp frame_header,
+    do: %{"call_id" => @call, "width" => 768, "height" => 576, "captured_ms" => 0}
 
   # A call up with the test as its phone's session, behind a relay process.
   defp call_alone!(ctx, engine, overrides \\ []) do
@@ -901,13 +1100,19 @@ defmodule FermixChannels.Mobile.CallTest do
     relay = spawn_link(fn -> relay(test) end)
     model = if engine == "xai_realtime", do: "grok-voice-3.0", else: "gpt-live-1"
 
+    {hello, overrides} =
+      Keyword.pop(overrides, :hello, %{type: "client_hello", protocol_version: 3})
+
     opts =
       call_options(
         %{ctx | engine: engine},
-        [
-          clock: fn -> Agent.get(clock, & &1) end,
-          config: fn -> Config.normalize(enabled: true, engine: engine, model: model) end
-        ] ++ overrides
+        Keyword.merge(
+          [
+            clock: fn -> Agent.get(clock, & &1) end,
+            config: fn -> Config.normalize(enabled: true, engine: engine, model: model) end
+          ],
+          overrides
+        )
       )
 
     call_opts = [calls: ctx.calls, call_supervisor: ctx.call_supervisor, call_options: opts]
@@ -915,7 +1120,7 @@ defmodule FermixChannels.Mobile.CallTest do
     assert_receive {:from_call, :control, %{"t" => "call_attached"}}
     call = call_pid!(ctx)
 
-    send(call, line_frame(relay, %{type: "client_hello", protocol_version: 3}, nil, 0))
+    send(call, line_frame(relay, hello, nil, 0))
     assert_receive {:from_call, :control, %{"t" => "call_line"}}
     send(call, line_frame(relay, %{type: "call_start"}, 1, 0))
     assert_receive {:voice_started, voice, _opts}
@@ -999,7 +1204,7 @@ defmodule FermixChannels.Mobile.CallTest do
     client = open_new!(driver, client, seq)
     client = send_line(driver, client, %{type: "client_hello", protocol_version: 3}, seq + 1, nil)
     {[{%{"t" => "call_line"}, hello}], client} = Driver.client_receive(driver, client)
-    assert %{"type" => "server_hello", "max_version" => 3} = Jason.decode!(hello)
+    assert %{"type" => "server_hello", "max_version" => 4} = Jason.decode!(hello)
 
     client = send_line(driver, client, %{type: "call_start"}, seq + 2, 1)
     assert_receive {:voice_started, voice, opts}

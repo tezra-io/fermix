@@ -71,6 +71,17 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   After a move, your phone calls Fermix on the server when Talk to Fermix is
   on there and its key is in the server's secret store, while the Mac's own
   voice calls stop. No phone app with calls is released yet.
+- **Show Fermix things with your phone's camera during a call.** Turn the
+  camera on in a call from the phone and ask about what it sees: the voice
+  hands the question to your Fermix agent, which is given the camera's
+  newest picture, at most two seconds old. The voice itself sees nothing,
+  says so rather than pretend, and with no current picture your agent says
+  it cannot see it right now. The phone sends at most a picture a second, and
+  no picture is kept. **Share the phone's camera** in Settings > Voice turns
+  it off (`[fermix_core.realtime] camera_share`, on by default, GPT-Live and
+  Grok only). The voice wire is now version 4; the Mac app and older phone
+  apps keep working on version 3. No phone app with the camera is released
+  yet.
 - **A StackChan robot can be Fermix's voice on your Mac.** Wired to one of
   the Mac's USB-C ports and running the Fermix firmware, the M5Stack
   StackChan is a call's microphone and speaker: tap its screen or swipe its

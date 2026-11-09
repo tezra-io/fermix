@@ -71,6 +71,16 @@ defmodule FermixChannels.Mobile.CallAudio do
   @spec new() :: t()
   def new, do: %__MODULE__{}
 
+  @doc """
+  The queue as a crash report may print it: the audio waiting is its size,
+  never its bytes.
+  """
+  @spec printable(t()) :: map()
+  def printable(%__MODULE__{} = audio) do
+    bytes = :queue.fold(fn {_at, _id, pcm}, sum -> sum + byte_size(pcm) end, 0, audio.queue)
+    %{audio | queue: {:audio, audio.queued, :bytes, bytes}}
+  end
+
   @doc "The wire's largest audio frame: 100 ms of PCM16 at 24 kHz mono."
   @spec frame_bytes() :: pos_integer()
   def frame_bytes, do: @frame_bytes

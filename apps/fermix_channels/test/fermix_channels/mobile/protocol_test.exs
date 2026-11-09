@@ -9,7 +9,7 @@ defmodule FermixChannels.Mobile.ProtocolTest do
     push_register push_unregister ack read_state request_status pair_request unpair ping
     companion_open companion_line companion_close manage loopback_request loopback_failed
     snapshot_stored snapshot_refused enroll_request move_offer move_chunk move_end
-    move_commit move_resume call_open call_line call_audio call_close
+    move_commit move_resume call_open call_line call_audio call_frame call_close
   )
   @server_events ~w(
     hello_ack accepted attach_status turn_started text_delta tool_event text_done turn_done

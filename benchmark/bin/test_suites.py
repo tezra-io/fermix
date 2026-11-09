@@ -559,6 +559,8 @@ def test_the_shipped_numbered_rubrics_parse():
                       "never_mind_cancel": 2, "stop_the_stocktake": 2,
                       "thirteenth_corrected_to_twentieth": 3,
                       "twentieth_corrected_to_thirteenth": 3,
+                      "alpha_label_held_to_the_camera": 2,
+                      "mug_with_no_current_picture": 2,
                       # home_move.yaml
                       "move_to_vm_sanity": 4, "device_role_after_the_move": 3,
                       "what_stops_after_an_always_on_move": 5,

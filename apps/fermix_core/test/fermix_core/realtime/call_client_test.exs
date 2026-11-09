@@ -37,6 +37,8 @@ defmodule FermixCore.Realtime.CallClientTest do
     def call_stop(pid), do: GenServer.call(pid, :call_stop)
     def cancel_task(pid, id), do: GenServer.call(pid, {:forwarded, {:cancel_task, id}})
     def mute(pid, enabled?), do: GenServer.call(pid, {:forwarded, {:mute, enabled?}})
+    def camera(pid, on?), do: GenServer.call(pid, {:forwarded, {:camera, on?}})
+    def camera_frame(pid, frame), do: GenServer.cast(pid, {:forwarded, {:camera_frame, frame}})
 
     def playback_progress(pid, id, played_ms, drained?),
       do: GenServer.call(pid, {:forwarded, {:playback_progress, id, played_ms, drained?}})
@@ -82,6 +84,12 @@ defmodule FermixCore.Realtime.CallClientTest do
     def handle_call({:forwarded, verb}, _from, state) do
       send(state.observer, {:forwarded, verb})
       {:reply, :ok, state}
+    end
+
+    @impl true
+    def handle_cast({:forwarded, verb}, state) do
+      send(state.observer, {:forwarded, verb})
+      {:noreply, state}
     end
 
     @impl true
@@ -336,6 +344,109 @@ defmodule FermixCore.Realtime.CallClientTest do
     end
   end
 
+  # M87 Phase 2, Realtime v4: the camera is a phone's, on a task engine, and
+  # only when its hello said it has one: anything else is the peer's bug and
+  # ends the connection with its reason, before the session hears of it.
+  # Turning it on also needs the owner's camera_share, which can go off
+  # between the phone's hello_ack and its call: that refuses the one event and
+  # the call goes on, the camera off.
+  describe "the phone's camera" do
+    test "reaches a task engine's session from a phone whose v4 hello has one", ctx do
+      client = camera_client(ctx, live_config())
+
+      refute client.camera_on?
+
+      assert {:cont, client} =
+               CallClient.event(client, %{type: "camera", payload: %{"on" => true}})
+
+      assert_receive {:forwarded, {:camera, true}}
+      assert client.camera_on?
+
+      assert {:cont, client} = CallClient.camera(client, false)
+      assert_receive {:forwarded, {:camera, false}}
+      refute client.camera_on?
+
+      frame = %{mime_type: "image/jpeg", data: "jpeg"}
+      assert {:cont, client} = CallClient.frame(client, frame)
+      assert_receive {:forwarded, {:camera_frame, ^frame}}
+
+      assert {:cont, client} = CallClient.frame(client, nil)
+      assert_receive {:forwarded, {:camera_frame, nil}}
+
+      # The call's end takes the camera with its session.
+      assert {:cont, client} = CallClient.camera(client, true)
+      refute CallClient.teardown(client).camera_on?
+    end
+
+    test "is refused from an endpoint that has none", ctx do
+      refusals = [
+        new_client(ctx,
+          endpoint: :desktop,
+          config: live_config(),
+          camera?: true,
+          protocol_version: 4
+        ),
+        new_client(ctx,
+          endpoint: @robot,
+          config: live_config(),
+          camera?: true,
+          protocol_version: 4
+        ),
+        new_client(ctx,
+          endpoint: @phone,
+          config: live_config(),
+          camera?: false,
+          protocol_version: 4
+        ),
+        new_client(ctx,
+          endpoint: @phone,
+          config: live_config(),
+          camera?: true,
+          protocol_version: 3
+        )
+      ]
+
+      for client <- refusals do
+        {:cont, client} = CallClient.call_start(client)
+        assert_receive {:realtime, %{type: "state", state: "listening"}}
+
+        assert {:stop, client} = CallClient.camera(client, true)
+        assert_receive {:emitted, %{type: "error", reason: "unsupported_by_endpoint"}}
+        # One session per adapter process: the next client's call needs this one gone.
+        %CallClient{session: nil} = CallClient.teardown(client)
+      end
+
+      refute_received {:forwarded, {:camera, _on?}}
+    end
+
+    # A phone's call never starts under OpenAI Realtime (`engine_not_for_phones`),
+    # so a camera there is refused for the engine before any session is asked.
+    test "is refused under OpenAI Realtime", ctx do
+      realtime = Config.normalize(enabled: true)
+
+      client =
+        new_client(ctx, endpoint: @phone, config: realtime, camera?: true, protocol_version: 4)
+
+      assert {:stop, _client} = CallClient.camera(client, true)
+      assert_receive {:emitted, %{type: "error", reason: "unsupported_by_engine"}}
+      refute_received {:session_started, _session, _opts}
+    end
+
+    test "on is refused while camera_share is off, the call going on; off is always taken",
+         ctx do
+      config = Config.normalize(enabled: true, engine: "xai_realtime", camera_share: false)
+      client = camera_client(ctx, config)
+
+      assert {:cont, client} = CallClient.camera(client, true)
+      assert_receive {:emitted, %{type: "error", reason: "camera_off"}}
+      refute_received {:forwarded, {:camera, true}}
+      refute client.camera_on?
+
+      assert {:cont, _client} = CallClient.camera(client, false)
+      assert_receive {:forwarded, {:camera, false}}
+    end
+  end
+
   # M91 E3: the owner's voice device is this Mac or a paired accessory, and
   # the engine holds it: while an accessory is chosen, this Mac's own call is
   # refused before any session, with its reason, the device and the daemon's
@@ -581,10 +692,15 @@ defmodule FermixCore.Realtime.CallClientTest do
       session_guard: Keyword.get(opts, :session_guard, ctx.guard),
       task_supervisor: ctx.tasks,
       deadline_ms: Keyword.get(opts, :deadline_ms, :infinity),
+      camera?: Keyword.get(opts, :camera?, false),
       voice_device: Keyword.get(opts, :voice_device, fn -> {:ok, :desktop} end),
       accessories_enabled?: Keyword.get(opts, :accessories_enabled?, fn -> true end)
     )
   end
+
+  # A phone's call at v4 whose hello said it has a camera, up under `config`.
+  defp camera_client(ctx, config),
+    do: started_client(ctx, config, endpoint: @phone, camera?: true, protocol_version: 4)
 
   # A client whose call is up under `config`, its start's frames drained.
   defp started_client(ctx, config, opts \\ []) do

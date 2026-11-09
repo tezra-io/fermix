@@ -329,6 +329,46 @@ defmodule FermixCore.Realtime.ProtocolContractTest do
              Protocol.decode_client_event(frame.(longest <> "p"), config)
   end
 
+  # v4, the phone's camera (M87 Phase 2): an optional flag on the hello, which
+  # an older peer never sends, and one client object that states the camera's
+  # state. Its refusals are published with golden rows: the one that closes a
+  # connection sending it where it is not taken, and `camera_off`, which
+  # refuses the event alone and leaves the call up.
+  test "the v4 defs publish the camera as the daemon reads it", %{schema: schema} do
+    defs = schema["$defs"]
+
+    assert %{"type" => "boolean"} = defs["client_hello"]["properties"]["camera"]
+    refute "camera" in defs["client_hello"]["required"]
+
+    assert defs["camera"]["required"] == ["type", "on"]
+    assert %{"type" => "boolean"} = defs["camera"]["properties"]["on"]
+
+    description = defs["error"]["properties"]["reason"]["description"]
+
+    golden =
+      @server_fixtures
+      |> fixture_lines()
+      |> Enum.map(&Jason.decode!/1)
+
+    for reason <- ~w(unsupported_by_endpoint camera_off) do
+      assert description =~ reason, "the error def does not publish #{reason}"
+      assert %{"type" => "error", "reason" => reason} in golden, "no golden #{reason} row"
+    end
+
+    assert description =~ "the one reason that does not end the call"
+    assert defs["camera"]["description"] =~ "the call goes on"
+
+    clients =
+      @client_fixtures
+      |> fixture_lines()
+      |> Enum.map(&Jason.decode!/1)
+
+    assert %{"type" => "client_hello", "protocol_version" => 4, "camera" => true} in clients
+
+    for on <- [true, false],
+        do: assert(%{"type" => "camera", "on" => on} in clients, "no golden camera #{on}")
+  end
+
   test "the playback refusals are published error reasons with golden rows", %{schema: schema} do
     description = schema["$defs"]["error"]["properties"]["reason"]["description"]
 

@@ -67,6 +67,25 @@ defmodule FermixChannels.Mobile.Call do
   `call_ready` names: `[:fermix, :voice_live, :phone_detached]`, and
   `[:fermix, :voice_live, :phone_resumed]` whose `duration_ms` is the gap.
 
+  ## The camera
+
+  The camera (M87 Phase 2) is the Realtime wire's v4 `camera` on a
+  `call_line`, numbered as any control and reconciled through
+  `call_attached.camera`; it is taken from a phone whose `client_hello` said
+  it has one (`CallClient`). The owner's `camera_share` is the call's
+  config's, read when the call opens and kept for its life: `camera{on: true}`
+  while it is off is refused alone with `camera_off`, and the call goes on
+  with the camera off. Its stills ride `call_frame`, one JPEG each, and go on
+  to the voice session as the camera's newest frame
+  (`SessionControl.camera_frame/2`), which a task carries only while it is
+  fresh. A frame is taken only from the attached session, only while the
+  camera is on, and within `ScreenFeed`'s ceiling (`CallFrames`); any other is
+  dropped, counted by why, with a log line at the first drop of each kind and
+  every `@frame_drop_log_every`th, and the call goes on. A detach lets the
+  session's frame go (the camera stays on, and the phone's next frame after
+  the resume is taken), as Camera off does. A frame's bytes are never kept
+  here or logged.
+
   ## Staying responsive
 
   The mobile session never waits on this process: everything reaches it as a
@@ -84,6 +103,7 @@ defmodule FermixChannels.Mobile.Call do
   require Logger
 
   alias FermixChannels.Mobile.CallAudio
+  alias FermixChannels.Mobile.CallFrames
   alias FermixCore.Realtime.CallClient
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.Endpoint
@@ -104,6 +124,10 @@ defmodule FermixChannels.Mobile.Call do
   @max_held_lines 512
   @max_emitted 256
   @task_unsettled ~w(pending running)
+  # A dropped camera frame is logged at the first of its kind and at every
+  # this many after, its count named, so a phone that floods says so without
+  # flooding the log.
+  @frame_drop_log_every 20
   # What a client may give a call besides the device, the call and its session.
   @client_opts [:session_module, :session_starter, :session_supervisor, :session_guard]
 
@@ -118,8 +142,8 @@ defmodule FermixChannels.Mobile.Call do
   @doc """
   What a phone's `hello_ack` says of calls (`caps.call`): whether this primary
   serves one, why not when it does not, the Realtime version window a call
-  needs (`min_version` is the configured engine's floor), and that it takes no
-  camera yet.
+  needs (`min_version` is the configured engine's floor), and whether it takes
+  the phone's camera: on a task engine while the owner's `camera_share` is on.
   """
   @spec caps(String.t()) :: map()
   def caps(device_id) when is_binary(device_id),
@@ -132,7 +156,7 @@ defmodule FermixChannels.Mobile.Call do
     base = %{
       "min_version" => CallClient.engine_min_protocol_version(config),
       "max_version" => Protocol.protocol_version(),
-      "camera" => false
+      "camera" => Config.hands_off_tasks?(config) and config.camera_share?
     }
 
     with :ok <- readiness(config, running?),
@@ -285,6 +309,8 @@ defmodule FermixChannels.Mobile.Call do
        window: nil,
        control_seq: 0,
        muted?: false,
+       camera?: false,
+       frames: CallFrames.new(),
        held_lines: :queue.new(),
        held_count: 0,
        audio: CallAudio.new(),
@@ -316,7 +342,7 @@ defmodule FermixChannels.Mobile.Call do
   def handle_info({:call_frame, session, type, %{"call_id" => id} = header, bytes, at}, state) do
     if attached_session?(state, session) and id == state.call_id,
       do: phone_frame(type, header, bytes, at, %{state | heard_at: state.clock.()}),
-      else: {:noreply, state}
+      else: {:noreply, stray_frame(type, state)}
   end
 
   def handle_info({:realtime, event}, state), do: {:noreply, deliver_server_event(state, event)}
@@ -344,6 +370,26 @@ defmodule FermixChannels.Mobile.Call do
     Logger.debug("voice: a phone call ignored #{inspect(message, limit: 5)}")
     {:noreply, state}
   end
+
+  # A crash report, and `:sys.get_status/1`, print the state and the message
+  # being handled: the voice's audio waiting for the phone, and a frame's raw
+  # tail (a still, the microphone), print as their sizes, never their bytes.
+  @impl true
+  def format_status(status) do
+    status
+    |> Map.replace_lazy(:state, &printable_state/1)
+    |> Map.replace_lazy(:message, &printable_message/1)
+  end
+
+  defp printable_state(%{audio: %CallAudio{} = audio} = state),
+    do: %{state | audio: CallAudio.printable(audio)}
+
+  defp printable_state(state), do: state
+
+  defp printable_message({:call_frame, session, type, header, bytes, at}) when is_binary(bytes),
+    do: {:call_frame, session, type, header, {:bytes, byte_size(bytes)}, at}
+
+  defp printable_message(message), do: message
 
   # -- opening and attaching ----------------------------------------------------------
 
@@ -402,7 +448,7 @@ defmodule FermixChannels.Mobile.Call do
       "call_id" => state.call_id,
       "resumed" => resumed?,
       "muted" => state.muted?,
-      "camera" => false,
+      "camera" => state.camera?,
       "control_seq" => state.control_seq
     })
 
@@ -436,6 +482,7 @@ defmodule FermixChannels.Mobile.Call do
         detached_at: state.clock.()
     }
 
+    state = let_frame_go(state)
     if CallAudio.unheard?(state.audio), do: interrupt_unheard(state), else: state
   end
 
@@ -561,6 +608,19 @@ defmodule FermixChannels.Mobile.Call do
     end
   end
 
+  defp phone_frame("call_frame", _header, jpeg, at, %{camera?: true} = state) do
+    case CallFrames.admit(state.frames, jpeg, at) do
+      {:ok, frames} ->
+        frame_up(jpeg, %{state | frames: frames})
+
+      {:drop, reason, count, frames} ->
+        {:noreply, log_drop(%{state | frames: frames}, reason, count)}
+    end
+  end
+
+  defp phone_frame("call_frame", _header, _jpeg, _at, state),
+    do: {:noreply, drop_frame(state, :camera_off)}
+
   defp put_control_seq(state, seq) when is_integer(seq), do: %{state | control_seq: seq}
   defp put_control_seq(state, nil), do: state
 
@@ -571,6 +631,47 @@ defmodule FermixChannels.Mobile.Call do
     end
   end
 
+  defp frame_up(jpeg, state) do
+    case run_client(state, &CallClient.frame(&1, %{mime_type: "image/jpeg", data: jpeg})) do
+      {:cont, state} -> {:noreply, state}
+      {:stop, state} -> end_on_error(state)
+    end
+  end
+
+  # Only a camera frame is counted: any other frame from a session that is not
+  # the call's is dropped as it always was.
+  defp stray_frame("call_frame", state), do: drop_frame(state, :not_attached)
+  defp stray_frame(_type, state), do: state
+
+  defp drop_frame(state, reason) do
+    {count, frames} = CallFrames.drop(state.frames, reason)
+    log_drop(%{state | frames: frames}, reason, count)
+  end
+
+  defp log_drop(state, reason, count) do
+    if rem(count, @frame_drop_log_every) == 1 do
+      Logger.info(
+        "voice: phone #{state.device_id}'s call dropped a camera frame (#{reason}); " <>
+          "#{count} so far"
+      )
+    end
+
+    state
+  end
+
+  # A detach lets the session's frame go, and the picture it was, so the
+  # phone's first frame after a resume is taken whatever it shows. The match
+  # holds because `SessionControl.camera_frame/2` is a cast, which answers `:ok`
+  # whatever the session's state, so `CallClient.frame/2` cannot stop while the
+  # session is a pid; a verb that could would need its `{:stop, _}` handled here.
+  defp let_frame_go(%{camera?: true, client: %CallClient{session: session}} = state)
+       when is_pid(session) do
+    {:cont, state} = run_client(state, &CallClient.frame(&1, nil))
+    %{state | frames: CallFrames.forget_picture(state.frames)}
+  end
+
+  defp let_frame_go(state), do: state
+
   defp phone_line(state, bytes) do
     case Protocol.decode_client_event(bytes, state.config) do
       {:ok, event} -> line(event, state)
@@ -579,11 +680,11 @@ defmodule FermixChannels.Mobile.Call do
   end
 
   defp line(
-         %{type: "client_hello", payload: %{"protocol_version" => version}},
+         %{type: "client_hello", payload: %{"protocol_version" => version} = hello},
          %{client: nil} = state
        ) do
     case Protocol.hello_reply(version) do
-      {:ok, reply} -> {:noreply, state |> send_line(reply) |> new_client(version)}
+      {:ok, reply} -> {:noreply, state |> send_line(reply) |> new_client(version, hello)}
       {:error, refusal} -> state |> send_line(refusal) |> close("ended")
     end
   end
@@ -621,12 +722,27 @@ defmodule FermixChannels.Mobile.Call do
     end
   end
 
+  # The camera is what the client holds once it ran the event: `camera_off`
+  # refuses the event alone and leaves it off.
+  defp line(%{type: "camera"} = event, state) do
+    case run_client(state, &CallClient.event(&1, event)) do
+      {:cont, state} -> {:noreply, camera_now(state, state.client.camera_on?)}
+      {:stop, state} -> end_on_error(state)
+    end
+  end
+
   defp line(%{type: "call_stop"} = event, state) do
     {_verdict, state} = run_client(state, &CallClient.event(&1, event))
     close(state, "ended")
   end
 
   defp line(event, state), do: client_event(event, state)
+
+  # Camera off lets the picture go here as the session lets its frame go.
+  defp camera_now(state, true), do: %{state | camera?: true}
+
+  defp camera_now(state, false),
+    do: %{state | camera?: false, frames: CallFrames.forget_picture(state.frames)}
 
   defp forward_progress(event, %{config: %{engine: "xai_realtime"}} = state),
     do: client_event(event, state)
@@ -644,7 +760,7 @@ defmodule FermixChannels.Mobile.Call do
     state |> send_line(CallClient.error_frame(reason)) |> end_on_error()
   end
 
-  defp new_client(state, version) do
+  defp new_client(state, version, hello) do
     call = self()
 
     client =
@@ -658,7 +774,8 @@ defmodule FermixChannels.Mobile.Call do
           :ok
         end,
         task_supervisor: state.task_supervisor,
-        deadline_ms: state.deadline_ms
+        deadline_ms: state.deadline_ms,
+        camera?: Map.fetch!(hello, "camera")
       )
       |> CallClient.new()
 

@@ -55,7 +55,8 @@ defmodule FermixChannels.Mobile.Session do
   ## A phone's call
 
   A phone's call channel (M87; `call_open`, `call_line`, `call_audio`,
-  `call_close`) belongs to the device's `Mobile.Call`, which this session
+  `call_frame`, the camera's picture, and `call_close`) belongs to the
+  device's `Mobile.Call`, which this session
   hands every call event to and never waits on. The call's frames come back
   as `{:mobile_call, call, :control | :stop | :audio, event}` and are written
   ahead of everything else queued here, controls first, then audio, so a large
@@ -127,7 +128,7 @@ defmodule FermixChannels.Mobile.Session do
   @queued_events ~w(msg command)
   @max_pending_requests 32
   @max_media_fetch_queue 8
-  @call_frames ~w(call_line call_audio call_close)
+  @call_frames ~w(call_line call_audio call_frame call_close)
   @media_pushes ~w(media_begin media_chunk media_end)
   # The call frames written ahead of everything else, per read: a bound on the
   # drain, past which the rest go at the next read.

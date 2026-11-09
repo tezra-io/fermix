@@ -96,6 +96,20 @@ defmodule FermixCore.Realtime.LivePrompt do
   credentials, and do not instruct the voice model to promise unverified success.
   """
 
+  # M87 Phase 2: the one rule a task-engine voice gains the first time a
+  # phone's camera turns on in its call. It sees nothing (M41's screen-share
+  # rule says the same of a screen), so it hands off whatever is about the
+  # picture, and the task reads the camera's newest frame.
+  @camera_rule "The owner can now show things with their phone's camera. You cannot see the " <>
+                 "picture: never say or imply that you can see anything. Hand off anything " <>
+                 "about what the camera shows, and your Fermix agent reads the newest picture."
+
+  # M87 Phase 2: what a task is told when the phone's camera is on and no
+  # fresh frame came with it, so its reply says so rather than guessing.
+  @no_picture_note "The owner's phone camera is on, but there is no current picture of " <>
+                     "what it shows. Say you cannot see it right now, and do not guess " <>
+                     "what it shows."
+
   @addendum_media """
   A picture or file you send with send_attachment or generate_image appears in
   the owner's chat, since the voice cannot show it. Send it there when the owner
@@ -252,6 +266,21 @@ defmodule FermixCore.Realtime.LivePrompt do
         String.trim(@addendum_private_reply),
         String.trim(@addendum_media)
       ])
+
+  @doc """
+  The rule a task-engine voice is told the first time a phone's camera turns
+  on in its call (M87 Phase 2): it cannot see, and hands off anything about
+  the picture.
+  """
+  @spec camera_rule() :: String.t()
+  def camera_rule, do: @camera_rule
+
+  @doc """
+  What a task-engine call's hand-off is told, beside `backend_addendum/1`, when
+  the phone's camera is on and the task carries no fresh frame (M87 Phase 2).
+  """
+  @spec no_picture_note() :: String.t()
+  def no_picture_note, do: @no_picture_note
 
   @doc """
   The capabilities a Live call in `conversation` (`"chat"` or `"private"`)

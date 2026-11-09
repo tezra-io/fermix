@@ -73,7 +73,10 @@ defmodule FermixCore.Realtime.VoiceBridge do
   `voice_delegation_<n>`) so the agent turn it produces is correlatable, and
   `revision` fences a re-asked task against a late answer to the earlier one.
   `outside_sources` is what the call's earlier hand-offs read that someone else
-  could have written; the turn starts with it.
+  could have written; the turn starts with it. `frame` is the picture the task
+  reads, attached to its turn and never persisted; `camera_on?` with no
+  `frame` is a phone camera that is on with no current picture, which the
+  turn is told.
   """
   @type request :: %{
           call_id: String.t(),
@@ -81,9 +84,19 @@ defmodule FermixCore.Realtime.VoiceBridge do
           revision: pos_integer(),
           turn_session_id: String.t(),
           text: String.t(),
-          screen_frame: nil | %{mime_type: String.t(), data: binary()},
+          frame: nil | frame(),
+          camera_on?: boolean(),
           outside_sources: MapSet.t()
         }
+
+  @typedoc """
+  A picture a task reads with its request, never persisted: the newest fresh
+  frame of the phone's camera (M87 Phase 2), named by where it came from.
+  """
+  @type frame :: %{source: :camera | :screen, mime_type: String.t(), data: binary()}
+
+  @typedoc "A frame as a session is given it, before it is named by its source."
+  @type frame_input :: %{mime_type: String.t(), data: binary()}
 
   @typedoc """
   How the running turn reports back. Each is called from the bridge's process,

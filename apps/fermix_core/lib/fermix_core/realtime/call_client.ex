@@ -22,7 +22,10 @@ defmodule FermixCore.Realtime.CallClient do
       the session contract);
     * the command verbs, each refused under an engine that has no clause for
       it: `task_cancel` only on the task engines, `playback_progress` only on
-      Grok;
+      Grok, and the camera (`camera`, Realtime v4) only on the task engines,
+      from an endpoint that can carry its frames whose hello said it has one,
+      and on only while the owner's `camera_share` is (the one refusal that
+      leaves the call up);
     * the ordered flush of frames the session already queued before the
       call's own last word, and teardown;
     * the mapping of the wire's decoded events to the verbs (`event/2`), shared
@@ -74,6 +77,7 @@ defmodule FermixCore.Realtime.CallClient do
   alias FermixCore.Realtime.SessionControl
   alias FermixCore.Realtime.SessionGuard
   alias FermixCore.Realtime.SessionSupervisor
+  alias FermixCore.Realtime.VoiceBridge
   alias FermixCore.Setup.ConfigStore
 
   require Logger
@@ -82,6 +86,8 @@ defmodule FermixCore.Realtime.CallClient do
   # admits an older companion (it may run an engine it can render); this is the
   # floor for a call, and the number the refusal reports as `min_version`.
   @engine_min_protocol_version %{"openai_realtime" => 1, "openai_live" => 2, "xai_realtime" => 3}
+  # The wire version that added `camera` and the hello's `camera` flag (M87).
+  @camera_min_protocol_version 4
   # How many queued frames are written ahead of the call's own last word (a
   # refusal, a session-down error, a hang-up's `idle`) before the drain gives
   # up and that word is written. A session queues a handful.
@@ -105,6 +111,10 @@ defmodule FermixCore.Realtime.CallClient do
     session_guard: SessionGuard,
     # How long `task_cancel` and `call_stop` wait for the session (moduledoc).
     deadline_ms: :infinity,
+    # Whether the peer's `client_hello` said its endpoint has a camera (v4),
+    # and whether the session has the camera on (`camera/2`).
+    camera?: false,
+    camera_on?: false,
     # The owner's voice device and the accessory switch, read at the Mac's
     # `call_start` (`Accessories.VoiceDevice.refusal/3`).
     voice_device: nil,
@@ -126,6 +136,8 @@ defmodule FermixCore.Realtime.CallClient do
           session_supervisor: GenServer.server(),
           session_guard: GenServer.server(),
           deadline_ms: timeout(),
+          camera?: boolean(),
+          camera_on?: boolean(),
           voice_device: (-> VoiceDevice.read()),
           accessories_enabled?: (-> boolean())
         }
@@ -152,6 +164,7 @@ defmodule FermixCore.Realtime.CallClient do
       |> Keyword.update!(:config, fn %Config{} = config -> config end)
       |> Keyword.update!(:emit, fn emit when is_function(emit, 1) -> emit end)
       |> Keyword.update(:deadline_ms, :infinity, &deadline!/1)
+      |> Keyword.update(:camera?, false, fn camera? when is_boolean(camera?) -> camera? end)
       |> Keyword.update!(:voice_device, fn read when is_function(read, 0) -> read end)
       |> Keyword.update!(:accessories_enabled?, fn read when is_function(read, 0) -> read end)
     )
@@ -259,6 +272,9 @@ defmodule FermixCore.Realtime.CallClient do
     playback_progress(client, playback_id, played_ms, drained?)
   end
 
+  def event(%__MODULE__{} = client, %{type: "camera", payload: %{"on" => on?}}),
+    do: camera(client, on?)
+
   def event(%__MODULE__{} = client, %{type: "call_stop"}), do: call_stop(client)
 
   @doc """
@@ -314,6 +330,35 @@ defmodule FermixCore.Realtime.CallClient do
   end
 
   @doc """
+  Turns the call's camera on or off (Realtime v4, M87 Phase 2); `camera_on?`
+  is then the state the session holds. Taken from an endpoint that can carry a
+  camera's frames (`Endpoint.camera?/1`) whose hello at version 4 or later said
+  it has one, on a task engine: anything else is the peer's bug, refused in
+  that order with `unsupported_by_endpoint` or `unsupported_by_engine`, and the
+  connection ends. Turning it on also needs the owner's `camera_share`, as the
+  call's config holds it: the owner may turn it off after the peer last
+  heard, so `camera_off` refuses that one event, the camera stays off and the
+  call goes on. The session hears of none of these.
+  """
+  @spec camera(t(), boolean()) :: result()
+  def camera(%__MODULE__{} = client, on?) when is_boolean(on?) do
+    case camera_refusal(client, on?) do
+      nil -> camera_applied(command(client, &client.session_module.camera(&1, on?)), on?)
+      :camera_off -> refuse_event(:camera_off, client)
+      reason -> stop_with(reason, client)
+    end
+  end
+
+  @doc """
+  Hands the session the camera's newest frame, or `nil` to let it go (M87
+  Phase 2). The frames ride the adapter's own transport, which bounds them
+  and sends one only while the camera it turned on through `camera/2` is on.
+  """
+  @spec frame(t(), VoiceBridge.frame_input() | nil) :: result()
+  def frame(%__MODULE__{} = client, frame) when is_map(frame) or is_nil(frame),
+    do: command(client, &client.session_module.camera_frame(&1, frame))
+
+  @doc """
   Ends the CALL but keeps the connection for a fresh one. The session's last
   frames were sent before it answered, so they are already queued here: they
   go first, so `idle` is the call's last frame and a fresh `call_start` never
@@ -357,7 +402,7 @@ defmodule FermixCore.Realtime.CallClient do
     end
 
     _ = SessionGuard.release(client.session_guard)
-    %{client | session: nil, session_ref: nil}
+    %{client | session: nil, session_ref: nil, camera_on?: false}
   end
 
   def teardown(%__MODULE__{} = client), do: client
@@ -371,6 +416,23 @@ defmodule FermixCore.Realtime.CallClient do
     do: %{type: "error", reason: Protocol.call_in_progress()}
 
   def error_frame(reason), do: %{type: "error", reason: reason_to_string(reason)}
+
+  defp camera_refusal(client, on?) do
+    cond do
+      not camera_endpoint?(client) -> :unsupported_by_endpoint
+      not Config.hands_off_tasks?(client.config) -> :unsupported_by_engine
+      on? and not client.config.camera_share? -> :camera_off
+      true -> nil
+    end
+  end
+
+  defp camera_applied({:cont, client}, on?), do: {:cont, %{client | camera_on?: on?}}
+  defp camera_applied({:stop, client}, _on?), do: {:stop, client}
+
+  defp camera_endpoint?(client) do
+    Endpoint.camera?(client.endpoint) and client.camera? and
+      client.protocol_version >= @camera_min_protocol_version
+  end
 
   defp start_call(client) do
     case ensure_session(client) do
@@ -527,6 +589,13 @@ defmodule FermixCore.Realtime.CallClient do
   defp stop_with(reason, client) do
     _ = client.emit.(error_frame(reason))
     {:stop, client}
+  end
+
+  # The one refusal that does not end the call: the event is answered with its
+  # `error` and dropped.
+  defp refuse_event(reason, client) do
+    _ = client.emit.(error_frame(reason))
+    {:cont, client}
   end
 
   defp start_session(opts) do

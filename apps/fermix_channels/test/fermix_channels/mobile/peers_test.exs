@@ -43,7 +43,7 @@ defmodule FermixChannels.Mobile.PeersTest do
   # M87 §06: the call channel is the owner's voice on the phone; a desktop's
   # own voice reaches its own computer's socket.
   test "a phone opens a call channel and a desktop is refused one, open" do
-    for type <- ~w(call_open call_line call_audio call_close) do
+    for type <- ~w(call_open call_line call_audio call_frame call_close) do
       assert Peers.authorize(:phone, type) == :ok
       assert {:error, {:unsupported_event, ^type}} = Peers.authorize(:desktop, type)
     end

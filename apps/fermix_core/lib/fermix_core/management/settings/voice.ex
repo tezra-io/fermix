@@ -174,6 +174,9 @@ defmodule FermixCore.Management.Settings.Voice do
   # Whether a call's hand-offs run in the chat's own conversation is a task
   # engine question too (M56 §5): the Realtime engine hands nothing off. The row
   # shows the value in force, so an unset key reads as the chat it means.
+  #
+  # So is the phone's camera (M87 Phase 2): only a task engine takes calls from
+  # the phone, and its hand-offs are what carry the picture.
   defp realtime_engine_rows(config, snapshot, restart) do
     speaker = Map.fetch!(@speaking_engines, config.engine)
 
@@ -191,6 +194,14 @@ defmodule FermixCore.Management.Settings.Voice do
             "A private call is kept apart from the chat.",
         value: RealtimeConfig.conversation(config),
         options: Enum.map(RealtimeConfig.conversations(), &conversation_option/1),
+        restart: restart
+      ),
+      Row.new("realtime_camera_share", :toggle, "Share the phone's camera",
+        footer:
+          "Lets a call from the phone show your Fermix agent what its camera sees, " <>
+            "once you turn the camera on in the call. " <>
+            "The voice itself cannot see, and no picture is kept.",
+        value: config.camera_share?,
         restart: restart
       )
     ]

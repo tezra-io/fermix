@@ -3,8 +3,8 @@
   "$id": "https://fermix.sh/realtime/protocol.schema.json",
   "title": "Fermix Realtime voice socket protocol",
   "description": "Newline-delimited JSON wire contract between the Fermix daemon and the FermixPet companion. Source of truth: FermixCore.Realtime.Protocol. See PROTOCOL.md.",
-  "x-protocol-version": 3,
-  "x-supported-version-range": { "min": 1, "max": 3 },
+  "x-protocol-version": 4,
+  "x-supported-version-range": { "min": 1, "max": 4 },
   "$defs": {
     "clientEvent": {
       "type": "object",
@@ -19,7 +19,8 @@
             "mute",
             "call_stop",
             "task_cancel",
-            "playback_progress"
+            "playback_progress",
+            "camera"
           ]
         }
       },
@@ -43,6 +44,10 @@
         {
           "if": { "required": ["type"], "properties": { "type": { "const": "playback_progress" } } },
           "then": { "$ref": "#/$defs/playback_progress" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "camera" } } },
+          "then": { "$ref": "#/$defs/camera" }
         }
       ]
     },
@@ -104,7 +109,11 @@
       "required": ["type", "protocol_version"],
       "properties": {
         "type": { "const": "client_hello" },
-        "protocol_version": { "type": "integer", "minimum": 1 }
+        "protocol_version": { "type": "integer", "minimum": 1 },
+        "camera": {
+          "type": "boolean",
+          "description": "v4, optional: whether this endpoint has a camera it can share in a call (a phone). Absent means false, which is every older client's hello."
+        }
       }
     },
     "audio_chunk": {
@@ -153,6 +162,15 @@
           "type": "boolean",
           "description": "True when everything sent under this id so far has played."
         }
+      }
+    },
+    "camera": {
+      "type": "object",
+      "description": "v4: turns the call's camera on or off, stating the state it wants, so a repeat is harmless. Taken only during a call on a task engine (openai_live, xai_realtime), from an endpoint whose client_hello at version 4 or later said camera: true; the frames themselves ride the endpoint's own transport. Refused with error(unsupported_by_endpoint) from any other endpoint, error(unsupported_by_engine) under openai_realtime, and the connection closes after either. For on: true while the call's camera_share reading (taken when the call opened, kept for its life) is off, error(camera_off) refuses that camera alone: the camera stays off and the call goes on. No frame answers it.",
+      "required": ["type", "on"],
+      "properties": {
+        "type": { "const": "camera" },
+        "on": { "type": "boolean", "description": "The state the camera should be in." }
       }
     },
     "server_hello": {
@@ -281,7 +299,7 @@
         "type": { "const": "error" },
         "reason": {
           "type": "string",
-          "description": "The failure's code. call_in_progress refuses a call_start while another call is up or still settling, on any engine and from any endpoint; the connection closes after it. voice_device_elsewhere refuses this socket's call_start while the owner's voice device is a paired accessory, before any session, with voice_device and sentence, and voice_device_unreadable while that choice cannot be read, with sentence; the connection closes after either. On an xai_realtime call, unknown_playback, playback_regressed and playback_beyond_sent refuse a playback_progress (an id never sent, an offset that went backwards, an offset beyond the audio sent) and close the connection; playback_stalled ends a call whose sent audio went unacknowledged for 2 seconds, playback_overflow one whose reply outgrew the audio the daemon holds, and call_ids_exhausted one that raised more function calls than it can remember."
+          "description": "The failure's code. call_in_progress refuses a call_start while another call is up or still settling, on any engine and from any endpoint; the connection closes after it. voice_device_elsewhere refuses this socket's call_start while the owner's voice device is a paired accessory, before any session, with voice_device and sentence, and voice_device_unreadable while that choice cannot be read, with sentence; the connection closes after either. On an xai_realtime call, unknown_playback, playback_regressed and playback_beyond_sent refuse a playback_progress (an id never sent, an offset that went backwards, an offset beyond the audio sent) and close the connection; playback_stalled ends a call whose sent audio went unacknowledged for 2 seconds, playback_overflow one whose reply outgrew the audio the daemon holds, and call_ids_exhausted one that raised more function calls than it can remember. A camera from an endpoint whose client_hello did not say camera: true at version 4 or later is refused with unsupported_by_endpoint, and the connection closes after it; a camera with on: true while the call's camera_share reading is off with camera_off, and the call goes on: the one reason that does not end the call."
         },
         "kind": {
           "enum": [

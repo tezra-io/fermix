@@ -605,6 +605,24 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     end
   end
 
+  # M87 Phase 2: "can you see what I'm holding up?" on a phone call is answered
+  # by the agent from the camera's newest frame, never by the voice, and the
+  # owner can turn the sharing off.
+  test "documents a phone call's camera" do
+    reference = File.read!(reference_path("voice"))
+
+    for required <- [
+          "`camera_share`",
+          "The voice itself sees nothing",
+          "newest picture",
+          "no picture is kept"
+        ] do
+      assert reference =~ required, "the voice reference does not say #{required}"
+    end
+
+    refute reference =~ "No camera yet"
+  end
+
   # After the first provider, the primary moves only by an explicit action; a
   # self-reference that says saving a provider promotes it sends an owner to
   # the wrong control.

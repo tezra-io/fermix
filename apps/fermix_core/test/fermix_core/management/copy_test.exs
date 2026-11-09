@@ -226,6 +226,7 @@ defmodule FermixCore.Management.CopyTest do
       keys = Enum.map(view["rows"], & &1["key"])
 
       assert "realtime_backend" in keys and "realtime_conversation" in keys
+      assert "realtime_camera_share" in keys
 
       for row <- view["rows"] do
         where = "realtime.#{row["key"]}"
@@ -254,6 +255,7 @@ defmodule FermixCore.Management.CopyTest do
       keys = Enum.map(view["rows"], & &1["key"])
 
       assert "realtime_backend" in keys and "xai_api_key" in keys
+      assert "realtime_camera_share" in keys
 
       for row <- view["rows"] do
         where = "realtime.#{row["key"]}"

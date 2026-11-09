@@ -5,6 +5,7 @@ defmodule FermixCore.Realtime.GrokSessionServerTest do
   alias FermixCore.Realtime.CallRegistry
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.GrokSessionServer
+  alias FermixCore.Realtime.LivePrompt
   alias FermixCore.Realtime.SessionControl
   alias FermixCore.Realtime.XAIRealtimeClient
   alias FermixTestSupport.TelemetryCapture
@@ -297,6 +298,108 @@ defmodule FermixCore.Realtime.GrokSessionServerTest do
       assert_receive {:realtime, %{type: "error", kind: "provider_refused", detail: detail}}
       assert detail =~ "invalid_voice"
       assert_receive {:EXIT, ^session, {:shutdown, :provider_refused}}
+    end
+  end
+
+  # M87 Phase 2: a phone's camera. Grok sees nothing, so the voice is told so
+  # once, as a quiet system item, the first time the camera turns on, and each
+  # task carries the camera's newest fresh frame.
+  describe "the phone's camera" do
+    test "the first Camera on tells the voice it cannot see, once", %{clock: clock} do
+      session = ready_session(clock)
+
+      for on? <- [true, false, true], do: assert(:ok = SessionControl.camera(session, on?))
+
+      assert [%{role: "system"}] = camera_rules()
+      refute Enum.any?(FakeXAI.events(), &(&1.type == "response.create"))
+    end
+
+    test "a Camera on before the session is ready is told once it is", %{clock: clock} do
+      session = start_session(clock: clock)
+      :ok = SessionControl.call_start(session)
+      :ok = SessionControl.camera(session, true)
+      assert camera_rules() == []
+
+      configure(session)
+
+      assert [%{role: "system"}] = camera_rules()
+    end
+
+    test "a task carries the camera's newest fresh frame", %{clock: clock} do
+      session = ready_session(clock)
+      :ok = SessionControl.camera(session, true)
+      user_says(session, "u1", "what am I holding", clock)
+      :ok = SessionControl.camera_frame(session, %{mime_type: "image/jpeg", data: "jpeg"})
+
+      call(session, "r1", "call_1", %{action: "submit", request: "Say what the owner holds"})
+
+      assert_receive {:bridge_submit, %{frame: frame, camera_on?: true}}
+      assert frame == %{source: :camera, mime_type: "image/jpeg", data: "jpeg"}
+    end
+
+    test "the frame is let go when its own timer says it is no longer fresh", %{clock: clock} do
+      session = ready_session(clock)
+      :ok = SessionControl.camera(session, true)
+      :ok = SessionControl.camera_frame(session, %{mime_type: "image/jpeg", data: "jpeg"})
+      %{ref: ref} = :sys.get_state(session).tasks.frame
+
+      send(session, {:camera_frame_stale, ref})
+
+      assert :sys.get_state(session).tasks.frame == nil
+    end
+
+    # The rule is a billable item: one the budget cannot afford is not sent,
+    # and stays owed, so the next Camera on says it.
+    test "a rule the budget refused is said at the next chance", %{clock: clock} do
+      session = ready_session(clock)
+      ledger = :sys.get_state(session).ledger
+      :sys.replace_state(session, &%{&1 | ledger: %{ledger | ceiling_millicents: 0}})
+
+      :ok = SessionControl.camera(session, true)
+      assert camera_rules() == []
+      assert :sys.get_state(session).camera_rule == :owed
+
+      :sys.replace_state(session, &%{&1 | ledger: ledger})
+      :ok = SessionControl.camera(session, false)
+      :ok = SessionControl.camera(session, true)
+
+      assert [%{role: "system"}] = camera_rules()
+      assert :sys.get_state(session).camera_rule == :said
+    end
+
+    # A crash report prints the session's state and the message it was
+    # handling: a picture, either voice's audio and the key are their sizes.
+    test "its printed status carries no picture, audio or key", %{clock: clock} do
+      session = ready_session(clock)
+      picture = %{mime_type: "image/jpeg", data: <<0xFF, 0xD8, 0xFF, "picture">>}
+      :ok = SessionControl.camera(session, true)
+      :ok = SessionControl.camera_frame(session, picture)
+
+      :sys.replace_state(session, fn state ->
+        queue = :queue.in({"p1", "Z3Jvay1zZWNyZXQtdm9pY2U=", 17}, state.playback.queue)
+
+        %{
+          state
+          | held_audio: ["mic-secret-audio"],
+            held_audio_bytes: 16,
+            playback: %{state.playback | queue: queue, queued_bytes: 17}
+        }
+      end)
+
+      secrets = ~r/255, 216, 255|mic-secret-audio|Z3Jvay1zZWNyZXQtdm9pY2U|xai-test/
+      printed = inspect(:sys.get_status(session), limit: :infinity, printable_limit: :infinity)
+      refute printed =~ secrets
+      assert printed =~ "bytes: 10"
+
+      for message <- [
+            {:"$gen_cast", {:camera_frame, picture}},
+            {:"$gen_cast", {:audio_chunk, "mic-secret-audio"}}
+          ] do
+        status =
+          GrokSessionServer.format_status(%{state: :sys.get_state(session), message: message})
+
+        refute inspect(status, limit: :infinity, printable_limit: :infinity) =~ secrets
+      end
     end
   end
 
@@ -1041,6 +1144,12 @@ defmodule FermixCore.Realtime.GrokSessionServerTest do
   defp outputs do
     for %{type: "conversation.item.create", item: %{type: "function_call_output"} = item} <-
           FakeXAI.events(),
+        do: item
+  end
+
+  defp camera_rules do
+    for %{type: "conversation.item.create", item: %{type: "message"} = item} <- FakeXAI.events(),
+        Enum.any?(item.content, &(&1.text == LivePrompt.camera_rule())),
         do: item
   end
 

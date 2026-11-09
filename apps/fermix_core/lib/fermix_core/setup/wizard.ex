@@ -66,6 +66,7 @@ defmodule FermixCore.Setup.Wizard do
           | {:realtime_max_cost_cents, pos_integer() | String.t()}
           | {:realtime_persist_transcripts, boolean() | String.t()}
           | {:realtime_conversation, String.t()}
+          | {:realtime_camera_share, boolean() | String.t()}
           | {:computer_use_enabled, boolean() | String.t()}
           | {:computer_use_background, boolean() | String.t()}
           | {:computer_history_enabled, boolean() | String.t()}
@@ -1931,6 +1932,11 @@ defmodule FermixCore.Setup.Wizard do
         normalize_realtime_string(
           Keyword.get(answers, :realtime_conversation),
           :realtime_conversation
+        ),
+      camera_share:
+        normalize_realtime_bool(
+          Keyword.get(answers, :realtime_camera_share),
+          :realtime_camera_share
         )
     ]
     |> reject_nil_values()
@@ -2028,9 +2034,12 @@ defmodule FermixCore.Setup.Wizard do
     |> put_realtime_voice("xai_realtime")
   end
 
+  # The task-engine settings go with the move: whether calls join the chat,
+  # and the phone's camera, since the Realtime engine takes no calls from the
+  # phone (M87).
   defp move_realtime_engine(existing, "openai_realtime") do
     existing
-    |> Keyword.drop([:conversation])
+    |> Keyword.drop([:conversation, :camera_share])
     |> Keyword.put_new(:reasoning_effort, "low")
     |> put_realtime_provider("openai_realtime")
     |> put_realtime_model("openai_realtime")

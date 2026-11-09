@@ -21,7 +21,10 @@ defmodule FermixCore.Realtime.Protocol do
 
   Version 2 adds the Live engine's frames (`task_cancel`, `call_ready`,
   `caption`, `task`). Version 3 adds the Grok engine's playback feedback
-  (`playback_id` on `audio_delta`, `playback_progress`). An older companion is
+  (`playback_id` on `audio_delta`, `playback_progress`). Version 4 adds the
+  phone's camera (M87): `client_hello`'s optional `camera` flag, which says
+  whether the endpoint has one, and the `camera` object that turns it on and
+  off (`CallClient` decides who may send it). An older companion is
   still served for the engines it can render; a call whose engine needs a newer
   version refuses it at `call_start` with `update_required` (the rule lives in
   `CallClient`, the one place that knows both the peer's version and the
@@ -31,13 +34,13 @@ defmodule FermixCore.Realtime.Protocol do
   alias FermixCore.Realtime.Config
 
   # Bumped in lockstep with any wire-shape change.
-  @protocol_version 3
+  @protocol_version 4
   # A literal, not derived from the version: a v1 companion still runs the
   # Realtime engine, and the N/N-1 window this once was would have dropped it
   # silently at v3. Raising the floor is a release decision of its own.
   @min_supported_version 1
 
-  @client_events ~w(client_hello call_start audio_chunk interrupt mute call_stop task_cancel playback_progress)
+  @client_events ~w(client_hello call_start audio_chunk interrupt mute call_stop task_cancel playback_progress camera)
   @server_events ~w(server_hello state audio_delta transcript_delta assistant_text_delta assistant_text_done tool_event usage error playback_stop call_ready caption task)
 
   # One call per home (`CallLease`): a `call_start` while another call is up or
@@ -166,17 +169,16 @@ defmodule FermixCore.Realtime.Protocol do
   end
 
   defp payload_for("client_hello", decoded, _config) do
-    case Map.get(decoded, "protocol_version") do
-      version when is_integer(version) and version > 0 ->
-        {:ok, %{"protocol_version" => version}}
-
-      nil ->
-        {:error, :missing_protocol_version}
-
-      _other ->
-        {:error, :invalid_protocol_version}
+    with {:ok, version} <- fetch_protocol_version(decoded),
+         {:ok, camera?} <- fetch_hello_camera(decoded) do
+      {:ok, %{"protocol_version" => version, "camera" => camera?}}
     end
   end
+
+  defp payload_for("camera", %{"on" => on?}, _config) when is_boolean(on?),
+    do: {:ok, %{"on" => on?}}
+
+  defp payload_for("camera", _decoded, _config), do: {:error, :invalid_camera}
 
   defp payload_for("task_cancel", decoded, _config) do
     case Map.get(decoded, "delegation_id") do
@@ -202,6 +204,23 @@ defmodule FermixCore.Realtime.Protocol do
   end
 
   defp payload_for(_type, decoded, _config), do: {:ok, Map.delete(decoded, "type")}
+
+  defp fetch_protocol_version(decoded) do
+    case Map.get(decoded, "protocol_version") do
+      version when is_integer(version) and version > 0 -> {:ok, version}
+      nil -> {:error, :missing_protocol_version}
+      _other -> {:error, :invalid_protocol_version}
+    end
+  end
+
+  # v4: whether the endpoint has a camera. A hello that says nothing of it,
+  # every older peer's, has none.
+  defp fetch_hello_camera(decoded) do
+    case Map.get(decoded, "camera", false) do
+      camera? when is_boolean(camera?) -> {:ok, camera?}
+      _other -> {:error, :invalid_camera}
+    end
+  end
 
   defp fetch_playback_id(%{"playback_id" => id})
        when is_binary(id) and id != "" and byte_size(id) <= @playback_id_max_bytes,

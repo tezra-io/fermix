@@ -1140,14 +1140,21 @@ Notes that the shapes alone do not carry:
   only under a task engine too, a choice of `chat` or `private` stored as
   `realtime.conversation`: `chat`, the value in force while the key is unset,
   runs a call's hand-offs in the chat's own conversation, and `private` keeps
-  them in one of the call's own. The key row is the voice provider's own slot:
+  them in one of the call's own. `realtime_camera_share` ("Share the phone's
+  camera") is present only under a task engine as well, a toggle stored as
+  `realtime.camera_share` and on by default: whether a call from a paired phone
+  may share its camera once the owner turns the camera on in the call (M87).
+  The Realtime engine takes no calls from the phone, so it has no such row and
+  refuses the key. The key row is the voice provider's own slot:
   `openai_api_key` under both OpenAI engines and `xai_api_key` under Grok, which
   takes an API key only (a SpaceXAI sign-in does not authorize voice). Applying a
   model of another engine therefore moves the engine and its provider with it,
   adds or removes the reasoning effort, moves a voice the new engine does not
-  ship to that engine's default, drops a chosen `realtime_conversation` on the
-  way to Realtime, and on the way to Grok turns off screen sharing during calls,
-  which Grok does not support. The result names every key the daemon derived in
+  ship to that engine's default, drops a chosen `realtime_conversation` and the
+  camera switch on the way to Realtime, puts the camera switch back, on, on the
+  way from Realtime to a task engine (a move between Live and Grok keeps it as it
+  was), and on the way to Grok turns off screen sharing during calls, which Grok
+  does not support. The result names every key the daemon derived in
   `applied` — including `realtime_engine`, which is a derived key rather than a
   row — with a sentence for each in `side_effects` (screen sharing has a
   sentence and no row); reload the section when one of those keys appears,

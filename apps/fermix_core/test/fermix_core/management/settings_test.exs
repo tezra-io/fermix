@@ -590,6 +590,7 @@ defmodule FermixCore.Management.SettingsTest do
                "realtime_voice",
                "realtime_backend",
                "realtime_conversation",
+               "realtime_camera_share",
                "openai_api_key",
                "realtime_max_session_minutes",
                "realtime_max_cost_cents",
@@ -684,6 +685,50 @@ defmodule FermixCore.Management.SettingsTest do
       refute "realtime_conversation" in Enum.map(rows("realtime"), & &1["key"])
     end
 
+    # M87 Phase 2: a call from the phone may share its camera once the owner
+    # turns it on in the call. Only a task engine takes calls from the phone,
+    # so only a task engine publishes the switch, on until someone turns it off.
+    test "each task engine publishes the camera switch, on by default" do
+      for engine <- ~w(openai_live xai_realtime) do
+        Application.put_env(:fermix_core, :realtime, enabled: true, engine: engine)
+
+        assert %{
+                 "kind" => "toggle",
+                 "label" => "Share the phone's camera",
+                 "footer" =>
+                   "Lets a call from the phone show your Fermix agent what its camera sees, " <>
+                     "once you turn the camera on in the call. " <>
+                     "The voice itself cannot see, and no picture is kept.",
+                 "value" => true,
+                 "read_only" => false
+               } = row("realtime", "realtime_camera_share")
+      end
+    end
+
+    test "turning the camera switch off writes the key and reads back" do
+      Application.put_env(:fermix_core, :realtime,
+        enabled: true,
+        engine: "openai_live",
+        model: "gpt-live-1"
+      )
+
+      assert {:ok, result} = Settings.apply("realtime", %{"realtime_camera_share" => false})
+
+      assert result["applied"] == ["realtime_camera_share"]
+      assert result["side_effects"] == []
+      assert Keyword.get(Application.get_env(:fermix_core, :realtime), :camera_share) == false
+      assert %{"value" => false} = row("realtime", "realtime_camera_share")
+    end
+
+    test "the Realtime engine publishes no camera switch" do
+      Application.put_env(:fermix_core, :realtime, enabled: true, engine: "openai_realtime")
+
+      refute "realtime_camera_share" in Enum.map(rows("realtime"), & &1["key"])
+
+      assert {:error, {:invalid_params, "realtime_camera_share", _sentence}} =
+               Settings.apply("realtime", %{"realtime_camera_share" => true})
+    end
+
     # M70 §06: Grok is a task engine like Live, so it publishes the same backend
     # and conversation rows, its own voices, and the SpaceXAI provider's key slot
     # in place of OpenAI's.
@@ -700,6 +745,7 @@ defmodule FermixCore.Management.SettingsTest do
                "realtime_voice",
                "realtime_backend",
                "realtime_conversation",
+               "realtime_camera_share",
                "xai_api_key",
                "realtime_max_session_minutes",
                "realtime_max_cost_cents",
@@ -764,10 +810,18 @@ defmodule FermixCore.Management.SettingsTest do
       assert Keyword.get(realtime, :model) == "gpt-live-1"
       refute Keyword.has_key?(realtime, :reasoning_effort)
 
-      assert Enum.sort(result["applied"]) ==
-               ["realtime_engine", "realtime_model", "realtime_reasoning_effort"]
+      assert Enum.sort(result["applied"]) == [
+               "realtime_camera_share",
+               "realtime_engine",
+               "realtime_model",
+               "realtime_reasoning_effort"
+             ]
 
       assert "The engine changed to Live, with your Fermix agent." in result["side_effects"]
+
+      assert "Sharing the phone's camera was turned on because this engine takes calls from the phone." in result[
+               "side_effects"
+             ]
 
       assert "Reasoning effort was removed because this engine does not use it." in result[
                "side_effects"
@@ -952,10 +1006,12 @@ defmodule FermixCore.Management.SettingsTest do
       # Grok's move turned screen sharing off; the move back puts it on again.
       assert Keyword.get(back, :screen_share) == true
       refute Keyword.has_key?(back, :conversation)
+      refute Keyword.has_key?(back, :camera_share)
       assert Keyword.get(back, :max_session_minutes) == 30
       assert Keyword.get(back, :persist_transcripts) == true
 
       assert Enum.sort(realtime_result["applied"]) == [
+               "realtime_camera_share",
                "realtime_conversation",
                "realtime_engine",
                "realtime_model",
@@ -968,7 +1024,8 @@ defmodule FermixCore.Management.SettingsTest do
                "The voice changed to marin.",
                "Reasoning effort was restored because this engine uses it.",
                "Whether voice calls join the chat was reset because this engine does not use it.",
-               "Screen sharing during calls was turned back on."
+               "Screen sharing during calls was turned back on.",
+               "Sharing the phone's camera was removed because this engine takes no calls from the phone."
              ]
 
       assert {:ok, reloaded} = ConfigStore.load_runtime_config()
@@ -995,6 +1052,45 @@ defmodule FermixCore.Management.SettingsTest do
 
       assert Keyword.get(Application.get_env(:fermix_core, :realtime), :screen_share) == true
       refute Enum.any?(result["side_effects"], &(&1 =~ "Screen sharing"))
+    end
+
+    # The owner's camera switch is a task-engine setting: a move between Live
+    # and Grok keeps it as it was and says nothing, and only the move onto the
+    # Realtime engine, which takes no calls from the phone, drops it.
+    test "Live to Grok keeps a camera switch turned off, and says nothing of it" do
+      Application.put_env(:fermix_core, :realtime,
+        enabled: true,
+        engine: "openai_live",
+        model: "gpt-live-1",
+        voice: "marin",
+        camera_share: false
+      )
+
+      assert {:ok, result} = Settings.apply("realtime", %{"realtime_model" => "grok-voice-3.0"})
+
+      assert Keyword.get(Application.get_env(:fermix_core, :realtime), :camera_share) == false
+      refute "realtime_camera_share" in result["applied"]
+      refute Enum.any?(result["side_effects"], &(&1 =~ "camera"))
+    end
+
+    test "Live to Realtime drops a camera switch turned off, and names it" do
+      Application.put_env(:fermix_core, :realtime,
+        enabled: true,
+        engine: "openai_live",
+        model: "gpt-live-1",
+        voice: "marin",
+        camera_share: false
+      )
+
+      assert {:ok, result} =
+               Settings.apply("realtime", %{"realtime_model" => "gpt-realtime-2"})
+
+      refute Keyword.has_key?(Application.get_env(:fermix_core, :realtime), :camera_share)
+      assert "realtime_camera_share" in result["applied"]
+
+      assert "Sharing the phone's camera was removed because this engine takes no calls from the phone." in result[
+               "side_effects"
+             ]
     end
 
     test "a model no engine ships is refused against the published options" do

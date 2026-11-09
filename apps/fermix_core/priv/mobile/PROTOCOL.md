@@ -934,8 +934,8 @@ daemon's. The extension must reproduce it before shipping.
 
 A phone talks to Fermix by voice over its own session. A call is a Realtime
 protocol conversation (`priv/realtime/PROTOCOL.md`), the one the Mac's voice
-companion speaks over its local socket, carried in four events each way beside
-the chat. A desktop's session carries none: a desktop's voice reaches its own
+companion speaks over its local socket, carried in four events each way
+beside the chat, and a fifth from the phone for its camera's stills. A desktop's session carries none: a desktop's voice reaches its own
 computer's socket, and a call event from a desktop is answered
 `error{code:"unsupported_event"}`, the session staying open.
 
@@ -947,7 +947,9 @@ waiting for a restart), `no_key` (its provider key is missing) or
 serves the Mac alone). `min_version` and `max_version` are the Realtime
 protocol versions a call's lines may speak; `min_version` is the configured
 engine's floor, and an app whose own range does not reach it needs an update.
-`camera` is false: no call takes video yet. `reason` is a string, as
+`camera` is true when a call takes the phone's camera (below): on a task
+engine (`openai_live`, `xai_realtime`) while the owner's `[fermix_core.realtime]
+camera_share` setting is on. `reason` is a string, as
 `error.code` is: these are the values this primary sends, and a later one may
 give another, which an app reads as needing an update. A primary older than
 calls, and a desktop's `hello_ack`, carry no `call`. The primary checks again
@@ -961,6 +963,7 @@ The phone sends:
 | `call_open` | `call_id`, `resume` | open a call under a new `call_id`, or with `resume: true` take back the call this phone holds; answered `call_attached`, or `call_close` |
 | `call_line` | `call_id`; `control_seq?` + raw bytes | one Realtime client line, its JSON without the newline, in one frame of at most 60 KiB; `control_seq` numbers a control line (below) |
 | `call_audio` | `call_id` + raw bytes | the microphone: PCM16 at 24 kHz mono, whole samples, 2 to 4,800 bytes (100 ms) a frame |
+| `call_frame` | `call_id`, `width`, `height`, `captured_ms` + raw bytes | one camera still while the call's camera is on (below): one JPEG, opening `FF D8 FF`, of 1 byte to 60 KiB; `width` and `height` are its pixels, 1 to 4,096; `captured_ms` is when the phone took it, on its own clock, for logs |
 | `call_close` | `call_id`; `reason?` | the owner ended the call; `reason`, at most 512 bytes of text, is for logs; answered with the call's last lines and `call_close{reason:"ended"}`, or `call_close{reason:"unknown_call"}` |
 
 The primary sends:
@@ -1016,13 +1019,15 @@ interrupted then, cut at what it reported playing, since Grok ends a call
 whose audio goes unreported for 2 s.
 
 **Controls.** The phone numbers each control line it sends (`call_start`,
-`mute`, `interrupt`, `task_cancel`, `call_stop`) with
-`control_seq`, rising from 1 within a call, and each states its result (a
-`mute` names `enabled`). The primary applies each once and drops one at or
-below the last it applied, which `call_attached.control_seq` names, so after a
-resume the phone sends again only the controls after it, before any audio. A
-line without `control_seq` (`client_hello`, `playback_progress`) is applied as
-it comes.
+`mute`, `camera`, `interrupt`, `task_cancel`, `call_stop`) with `control_seq`,
+rising from 1 within a call, and each states its result (a `mute` names
+`enabled`, a `camera` names `on`). The primary applies each once and drops one
+at or below the last it applied, which `call_attached.control_seq` names, so
+after a resume the phone sends again only the controls after it, before any
+audio. A control the primary refused and the call outlived (a `camera` refused
+`camera_off`) counts as applied: its `control_seq` is consumed, and the phone
+does not send it again after a resume. A line without `control_seq`
+(`client_hello`, `playback_progress`) is applied as it comes.
 
 **Audio.** Every `call_audio` the primary sends carries a `playback_id`: on a
 Grok call, Grok's own, passed through; on any other engine one the primary
@@ -1064,6 +1069,37 @@ fetched) and sends it after; text still flows. It holds at most 32 MiB: a
 download past that is dropped whole, and the phone fetches it again by its
 `ref`. A call that ends on a fault, without its own `call_close`, is closed
 by the session with `call_close{reason:"ended"}`, and the held media follows.
+
+**The camera.** The camera is Realtime version 4's
+(`priv/realtime/PROTOCOL.md`): a phone that has one says `camera: true` in its
+`client_hello` at version 4, and turns it on and off with the control line
+`camera{on}`. A `camera` from a phone whose hello did not say so is refused
+with `unsupported_by_endpoint`, which ends the call as a Realtime error does.
+The call reads the owner's `camera_share` when it opens (`call_open`) and
+keeps that reading for its life, resumes included; `caps.call.camera` is read
+when the phone connects, so the owner may have turned it off between the two.
+`camera{on: true}` while the call's reading is off is then refused alone with
+the error line `camera_off`: the call goes on, the camera stays off
+(`call_attached.camera` false), and a `call_frame` sent anyway is dropped and
+counted. The phone takes `camera_off` as "the camera is off" and stops its
+camera. It is the one error line that does not end a call; `unknown_playback`
+and the other playback errors, and `unsupported_by_endpoint`, end it.
+`call_attached.camera` is the camera's state as the primary holds it: it stays
+on across a reconnect, so a phone that turned it off while away sends that
+again after `call_attached`. While it is on, the phone sends its stills as
+`call_frame`, not as lines. The primary takes at most one a second (give or
+take 100 ms of the link's jitter) and 20 a minute (a fixed minute from the
+first still taken, as `ScreenFeed` counts its own), `ScreenFeed`'s ceiling,
+whatever the phone sends, and drops a still identical to the last one it took,
+one that comes while the camera is off, and one from a session the call is not
+attached to; a dropped still is counted in the primary's log and never ends
+the call. The voice never sees a still: each task the voice hands the Fermix
+agent while the camera is on carries the newest still the primary took within
+the last 2 s, and a task with none tells the agent there is no current
+picture, so the voice says it cannot see right now. The newest still is let go
+once it is 2 s old, and on Camera off, a detach and the call's end; the
+primary never keeps one, nor logs its bytes, and a still a task already
+carried to a provider cannot be taken back.
 
 **Revocation.** A phone revoked mid-call is sent the error line `revoked`
 first; then it is muted, the hand-offs its call started that have not settled
@@ -1241,7 +1277,7 @@ sent is never sent to it. `FermixChannels.Mobile.Peers` is this table.
 
 | Kind | Sends | Is sent |
 |---|---|---|
-| phone | `hello` `msg` `attach_begin` `attach_chunk` `attach_end` `command` `cancel` `history_pull` `media_fetch` `push_register` `push_unregister` `ack` `read_state` `request_status` `unpair` `ping` `call_open` `call_line` `call_audio` `call_close` | `hello_ack` `accepted` `attach_status` `turn_started` `text_delta` `tool_event` `text_done` `turn_done` `media_begin` `media_chunk` `media_end` `turn_error` `row` `reaction` `approval` `approval_resolved` `link_preview` `read_state` `history_page` `request_status_page` `notice` `error` `pong` `event_part` `call_attached` `call_line` `call_audio` `call_close` |
+| phone | `hello` `msg` `attach_begin` `attach_chunk` `attach_end` `command` `cancel` `history_pull` `media_fetch` `push_register` `push_unregister` `ack` `read_state` `request_status` `unpair` `ping` `call_open` `call_line` `call_audio` `call_frame` `call_close` | `hello_ack` `accepted` `attach_status` `turn_started` `text_delta` `tool_event` `text_done` `turn_done` `media_begin` `media_chunk` `media_end` `turn_error` `row` `reaction` `approval` `approval_resolved` `link_preview` `read_state` `history_page` `request_status_page` `notice` `error` `pong` `event_part` `call_attached` `call_line` `call_audio` `call_close` |
 | desktop | `hello` `ping` `media_fetch` `ack` `companion_open` `companion_line` `companion_close` `manage` `loopback_request` `loopback_failed` `snapshot_stored` `snapshot_refused` | `hello_ack` `error` `pong` `event_part` `media_begin` `media_chunk` `media_end` `companion_line` `companion_close` `manage_result` `loopback_open` `loopback_response` `loopback_close` `snapshot_begin` `snapshot_chunk` `snapshot_end` |
 | enrollment | `enroll_request` `ping` | `enroll_accepted` `error` `pong` |
 | move | `move_offer` `move_chunk` `move_end` `move_commit` `move_resume` `ping` | `move_accept` `move_ready` `move_done` `error` `pong` |

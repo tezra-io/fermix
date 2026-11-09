@@ -33,9 +33,9 @@ Current values (see the schema's `x-protocol-version` / `x-supported-version-ran
 
 | Field | Value |
 |---|---|
-| `protocol_version` (pet declares) | `3` |
+| `protocol_version` (pet declares) | `3`; a phone with a camera, `4` |
 | daemon `min_version` | `1` |
-| daemon `max_version` | `3` |
+| daemon `max_version` | `4` |
 
 Unknown fields are ignored by older peers, so an additive optional field does
 not need a version bump.
@@ -57,7 +57,7 @@ The refusal is
 
 ```json
 {"type":"error","reason":"unsupported_protocol_version","kind":"update_required",
- "direction":"client_too_old","client_version":1,"min_version":2,"max_version":3,
+ "direction":"client_too_old","client_version":1,"min_version":2,"max_version":4,
  "required_for":"openai_live"}
 ```
 
@@ -93,9 +93,38 @@ OpenAI call carries `playback_id`, and `playback_progress` is refused there with
 
 ```json
 {"type":"error","reason":"unsupported_protocol_version","kind":"update_required",
- "direction":"client_too_old","client_version":2,"min_version":3,"max_version":3,
+ "direction":"client_too_old","client_version":2,"min_version":3,"max_version":4,
  "required_for":"xai_realtime"}
 ```
+
+### Version 4 — the phone's camera
+
+Version 4 adds the camera of a call from the phone (M87): `client_hello` gains
+an optional `camera` flag, `true` from an endpoint that has a camera it can
+share, and a new client object, `camera` with `on`, turns it on and off. No
+engine requires version 4, and no server frame changed: a v1 to v3 pet is served
+exactly as before, and the Mac's socket and a StackChan never send `camera`.
+
+`camera` states the state it wants, so a repeat is harmless, and no frame
+answers it. It is taken only during a call on a task engine (`openai_live`,
+`xai_realtime`), from an endpoint whose `client_hello` at version 4 or later
+said `camera: true`. Anything else is the client's bug, and closes the
+connection after an `error`: `unsupported_by_endpoint` from any other endpoint,
+and `unsupported_by_engine` under `openai_realtime`. Turning it on also needs
+the daemon's `[fermix_core.realtime] camera_share` setting, as the call read it
+when it opened: the call keeps that reading for its life, so the owner changing
+the setting reaches the next call, not this one. A client may have learned the
+setting before the owner turned it off (a phone's `caps.call.camera`, read when
+it connected), so `on: true` while the call's reading is off is refused with
+`error` `reason: "camera_off"` and **the call goes on**: that `camera` alone is
+refused, the camera stays off, and the client should take the error as "the
+camera is off" and stop its camera. `camera_off` is the one `error` on this wire
+that does not end the call; `on: false` is never refused for it. The camera's
+frames do not ride this wire: each endpoint carries them on its own transport (a
+phone's `call_frame`, `priv/mobile/PROTOCOL.md`), and the voice never sees them.
+While the camera is on, each task the voice hands the Fermix agent carries the
+newest frame no older than 2 s, and a task with none tells the agent there is no
+current picture.
 
 ## Handshake state machine
 
@@ -164,7 +193,7 @@ and `CompanionState.swift` (pet) together.
 
 | `type` | Fields | Notes |
 |---|---|---|
-| `client_hello` | `protocol_version` (int > 0, required) | First frame. Opens the handshake. |
+| `client_hello` | `protocol_version` (int > 0, required), `camera` (bool, optional, default `false`) | First frame. Opens the handshake. `camera` (**v4**) says the endpoint has a camera it can share in a call. |
 | `call_start` | — | Begins a voice call; starts the realtime session. Requires a completed handshake. |
 | `audio_chunk` | `audio` (base64 PCM16, required) | Mic audio. Decoded size is capped by `[fermix_core.realtime] max_chunk_bytes`. |
 | `interrupt` | `audio_end_ms` (int ≥ 0, optional) | Barge-in; `audio_end_ms` is how much of the assistant's audio actually played. |
@@ -172,6 +201,7 @@ and `CompanionState.swift` (pet) together.
 | `call_stop` | — | Ends the active call and closes the session. |
 | `task_cancel` | `delegation_id` (non-empty string, required) | **v2.** Cancels one backend delegation of a task-engine call (`openai_live`, `xai_realtime`). Under `openai_realtime` it is refused with `error: unsupported_by_engine` and the connection closes. |
 | `playback_progress` | `playback_id` (non-empty string ≤ 64 bytes, required), `played_ms` (int ≥ 0, required), `drained` (bool, required) | **v3**, `xai_realtime` only. How much of one playback id's audio the pet has rendered (see *Playback feedback*). Under the OpenAI engines it is refused with `error: unsupported_by_engine` and the connection closes. |
+| `camera` | `on` (bool, required) | **v4**, a task-engine call from an endpoint whose hello said `camera: true`. Turns the call's camera on or off (see *Version 4*). Refused with `error: unsupported_by_endpoint` or `unsupported_by_engine`, and the connection closes; for `on: true` while the call's `camera_share` reading is off, refused alone with `error: camera_off`, and the call goes on. |
 
 ## Client audio
 
@@ -207,7 +237,7 @@ words heard during a reply, or for 2 s after it, as the operator's turn.
 | `assistant_text_done` | `text` | Realtime only. The reply's whole text, once its words are done. It follows the reply's deltas and is never itself a delta. |
 | `tool_event` | `status`, `name`, `reason?` | Realtime only. One tool call's lifecycle, as the voice model calls Fermix's tools itself, several at once. `status` is one of three: `running` when the call starts, then `completed` or `error` when it settles; `name` is the tool's name; `reason` comes only with `error`. No field identifies the call, so a client counts the calls running. A provider reconnect (`state: "reconnecting"`) abandons every call still running: no further `tool_event` names any of them. |
 | `usage` | token/cost fields | Per-turn usage. The task engines add `call_uuid`, `status: "live"`, `voice_seconds`, `voice_cost_cents` (3 decimals), `backend_turns`, `backend_cost: "unknown"` and `accounting` (`complete` \| `incomplete` \| `running`). Grok adds `voice_text_items`, the text items the call sent the voice provider, each billed as a text event; SpaceXAI reports no settled usage, so a Grok call's final `accounting` is always `incomplete`. Unknown is not zero: a backend on a subscription allowance reports `unknown`, never `0`. |
-| `error` | `reason`, plus context fields | A failure; the daemon closes the connection after most errors. `reason: "call_in_progress"` refuses a `call_start` while another call is up, on any engine and from any endpoint, and optional `held_by` names the endpoint holding it (see *One call at a time*). `reason: "voice_device_elsewhere"` refuses this socket's `call_start` while the owner's voice device is a paired accessory, with `voice_device` and the daemon's `sentence`, and `reason: "voice_device_unreadable"` while the choice cannot be read, with `sentence` (see *One call at a time*). On a Grok call, `unknown_playback`, `playback_regressed` and `playback_beyond_sent` refuse a `playback_progress`, and `playback_stalled`, `playback_overflow` and `call_ids_exhausted` end one (see *Playback feedback*). Optional `kind` (`update_required` \| `provider_refused` \| `cost_limit` \| `session_expired` \| `close_timeout` \| `bridge_unavailable` \| `max_session_duration` \| `provider_disconnected`) is the typed failure, and optional `detail` carries the vendor's own bounded sentence. |
+| `error` | `reason`, plus context fields | A failure; the daemon closes the connection after most errors. `reason: "call_in_progress"` refuses a `call_start` while another call is up, on any engine and from any endpoint, and optional `held_by` names the endpoint holding it (see *One call at a time*). `reason: "voice_device_elsewhere"` refuses this socket's `call_start` while the owner's voice device is a paired accessory, with `voice_device` and the daemon's `sentence`, and `reason: "voice_device_unreadable"` while the choice cannot be read, with `sentence` (see *One call at a time*). On a Grok call, `unknown_playback`, `playback_regressed` and `playback_beyond_sent` refuse a `playback_progress`, and `playback_stalled`, `playback_overflow` and `call_ids_exhausted` end one (see *Playback feedback*). For a `camera`, `unsupported_by_endpoint` and `unsupported_by_engine` end the call, and `camera_off` refuses that `camera` alone and the call goes on: the one `error` that does not end a call (see *Version 4*). Optional `kind` (`update_required` \| `provider_refused` \| `cost_limit` \| `session_expired` \| `close_timeout` \| `bridge_unavailable` \| `max_session_duration` \| `provider_disconnected`) is the typed failure, and optional `detail` carries the vendor's own bounded sentence. |
 | `playback_stop` | — | The assistant's audio playback has stopped. |
 | `call_ready` | `engine`, `call_id`, `call_uuid?`, `conversation?`, `tasks_outlive_call?`, `provider_session_id?`, `expires_at?`, `captions` | **v2.** The provider session is established. Under `openai_live` the call carries audio from the `listening` before it (see *Live call sequence*). `call_uuid` is the call's durable identity and the key of its record, the same on every `task` and `usage` of the call; `call_id` stays the trace session id and restarts with the daemon. `conversation` (`chat` \| `private`, task engines only) says where the call's tasks run: `chat`, the chat's own conversation, where a task reads what was typed and the chat later reads what was asked aloud; `private`, a conversation of the call's own, kept apart from the chat. `tasks_outlive_call` (task engines only) is `true` for a call in the chat: a task still running when the call ends is not cancelled but finishes into the chat (see *A task that outlives its call*); `false` for a private call, whose tasks end with it. `expires_at` is unix seconds and is absent when the provider did not say; `captions` is true when `caption` frames will follow. |
 | `caption` | `speaker` (`user` \| `assistant`), `delta`, `start_ms`, `end_ms` | **v2.** One verbatim transcript fragment. Concatenate `delta` bytes as received — never trim them or insert spaces — and allow user and assistant captions to overlap in time. A missing fragment is not proof of silence. |

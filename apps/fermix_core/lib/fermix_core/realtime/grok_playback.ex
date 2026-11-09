@@ -108,6 +108,14 @@ defmodule FermixCore.Realtime.GrokPlayback do
   end
 
   @doc """
+  The tracker as a crash report may print it: the audio held back is its
+  size, never its bytes.
+  """
+  @spec printable(t()) :: map()
+  def printable(%__MODULE__{} = t),
+    do: %{t | queue: {:audio, :queue.len(t.queue), :bytes, t.queued_bytes}}
+
+  @doc """
   Take one vendor audio delta.
 
   The first chunk for an `{item_id, content_index}` mints its playback id. The

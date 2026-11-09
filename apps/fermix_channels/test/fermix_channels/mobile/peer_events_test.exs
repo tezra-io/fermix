@@ -238,6 +238,36 @@ defmodule FermixChannels.Mobile.PeerEventsTest do
                encode("call_audio", %{down | "playback_id" => String.duplicate("p", 65)}, @pcm)
     end
 
+    # M87 Phase 2: a camera still, one JPEG of at most 60 KiB, with its size
+    # and when the phone took it. Anything else is a malformed frame.
+    test "a camera frame is one JPEG of at most 60 KiB, with its size and time" do
+      header = %{"call_id" => @call, "width" => 768, "height" => 576, "captured_ms" => 1_234}
+      jpeg = <<0xFF, 0xD8, 0xFF, 0xE0>> <> :binary.copy(<<0>>, 64)
+      biggest = <<0xFF, 0xD8, 0xFF>> <> :binary.copy(<<0>>, 60 * 1_024 - 3)
+
+      assert {:ok, %{type: "call_frame", bytes: ^jpeg}} = decode("call_frame", header, jpeg)
+      assert {:ok, _frame} = decode("call_frame", header, biggest)
+
+      assert {:error, {:raw_chunk_too_large, 61_441, 61_440}} =
+               decode("call_frame", header, biggest <> <<0>>)
+
+      assert {:error, {:missing_field, "bytes"}} = decode("call_frame", header)
+
+      for not_jpeg <- [<<0x89, "PNG", 0, 0>>, <<0xFF, 0xD8>>] do
+        assert {:error, {:invalid_field, "bytes"}} = decode("call_frame", header, not_jpeg)
+      end
+
+      for field <- ~w(call_id width height captured_ms) do
+        assert {:error, {:missing_field, ^field}} =
+                 decode("call_frame", Map.delete(header, field), jpeg)
+      end
+
+      for {field, bad} <- [{"width", 0}, {"width", 4_097}, {"height", 0}, {"captured_ms", -1}] do
+        assert {:error, {:invalid_field, ^field}} =
+                 decode("call_frame", Map.put(header, field, bad), jpeg)
+      end
+    end
+
     test "the primary attaches a call with its state as it holds it" do
       attached = %{
         "call_id" => @call,
@@ -283,7 +313,8 @@ defmodule FermixChannels.Mobile.PeerEventsTest do
     for type <- PeerEvents.server_events(), do: assert(type in Protocol.server_events())
 
     assert Enum.sort(PeerEvents.raw_events(:client)) ==
-             ~w(call_audio call_line companion_line loopback_request manage move_chunk)
+             ~w(call_audio call_frame call_line companion_line loopback_request manage
+                move_chunk)
 
     assert Enum.sort(PeerEvents.raw_events(:server)) ==
              ~w(call_audio call_line companion_line loopback_response manage_result

@@ -183,7 +183,8 @@ defmodule FermixChannels.Voice.BridgeTest do
         revision: 1,
         turn_session_id: "voice_delegation_1",
         text: "user: what is on my calendar",
-        screen_frame: nil,
+        frame: nil,
+        camera_on?: false,
         outside_sources: MapSet.new()
       },
       overrides
@@ -387,9 +388,9 @@ defmodule FermixChannels.Voice.BridgeTest do
 
     test "a screen frame rides the turn as a transient picture", ctx do
       handle = open(ctx)
-      frame = %{mime_type: "image/png", data: "bytes"}
+      frame = %{source: :screen, mime_type: "image/png", data: "bytes"}
 
-      {:ok, _ref} = Bridge.submit(handle, request(%{screen_frame: frame}), callbacks())
+      {:ok, _ref} = Bridge.submit(handle, request(%{frame: frame}), callbacks())
 
       assert_receive {:turn_started, msg, _pid}, 5_000
 
@@ -402,6 +403,49 @@ defmodule FermixChannels.Voice.BridgeTest do
                  status: :ready
                }
              ] = msg.inbound_attachments
+
+      Bridge.close_call(handle)
+    end
+
+    # M87 Phase 2: the phone camera's newest fresh frame rides the turn as the
+    # screen's did, named for its source, and never persisted.
+    test "a camera frame rides the turn as a transient picture named for the camera", ctx do
+      handle = open(ctx)
+      frame = %{source: :camera, mime_type: "image/jpeg", data: "jpeg"}
+
+      {:ok, _ref} =
+        Bridge.submit(handle, request(%{frame: frame, camera_on?: true}), callbacks())
+
+      assert_receive {:turn_started, msg, _pid}, @turn_start_wait_ms
+
+      assert [
+               %FermixCore.Attachments{
+                 kind: :still,
+                 mime_type: "image/jpeg",
+                 name: "camera frame",
+                 bytes: "jpeg",
+                 status: :ready
+               }
+             ] = msg.inbound_attachments
+
+      assert msg.metadata.voice_call.prompt_addendum == LivePrompt.backend_addendum("private")
+
+      Bridge.close_call(handle)
+    end
+
+    # With the camera on and no fresh frame, the turn is told there is no
+    # current picture, in its prompt and not in the words the chat keeps.
+    test "a camera that is on with no current picture is said to the turn", ctx do
+      handle = open(ctx)
+
+      {:ok, _ref} = Bridge.submit(handle, request(%{camera_on?: true}), callbacks())
+      assert_receive {:turn_started, msg, _pid}, @turn_start_wait_ms
+
+      assert msg.inbound_attachments == []
+      assert msg.content == "user: what is on my calendar"
+
+      assert msg.metadata.voice_call.prompt_addendum ==
+               LivePrompt.backend_addendum("private") <> "\n\n" <> LivePrompt.no_picture_note()
 
       Bridge.close_call(handle)
     end

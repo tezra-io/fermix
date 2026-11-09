@@ -14,6 +14,7 @@ defmodule FermixCore.Realtime.LivePromptTest do
 
   @title "# LIVE.md — Live Voice Companion"
   @voice_in_chat_suite Path.expand("../../../../../benchmark/suites/voice_in_chat.yaml", __DIR__)
+  @grok_voice_suite Path.expand("../../../../../benchmark/suites/grok_voice.yaml", __DIR__)
 
   setup do
     bootstrap_dir =
@@ -454,6 +455,42 @@ defmodule FermixCore.Realtime.LivePromptTest do
 
       assert copies > 0
       assert length(String.split(suite, addendum)) - 1 == copies
+    end
+
+    # M87 Phase 2: the camera's hand-off case in each voice suite carries the
+    # addendum the same way, and the no-picture line after it as the bridge
+    # adds it, so both are held to the code's copy.
+    test "the grok_voice camera case carries the addendum a call in the chat sends" do
+      suite = one_spaced(File.read!(@grok_voice_suite))
+      opening = "This task comes from an ongoing voice conversation."
+      copies = length(String.split(suite, opening)) - 1
+
+      assert copies > 0
+
+      assert length(String.split(suite, one_spaced(LivePrompt.backend_addendum("chat")))) - 1 ==
+               copies
+    end
+
+    test "the no-picture line each voice eval carries is the one a hand-off is told" do
+      told =
+        one_spaced(LivePrompt.backend_addendum("chat")) <>
+          " " <> one_spaced(LivePrompt.no_picture_note())
+
+      for path <- [@voice_in_chat_suite, @grok_voice_suite] do
+        assert String.contains?(one_spaced(File.read!(path)), told), Path.basename(path)
+      end
+    end
+  end
+
+  describe "camera_rule/0" do
+    # M87 Phase 2, after M41's rule for a screen: the voice sees nothing, so it
+    # never implies it does, and hands off anything about the picture.
+    test "tells the voice it cannot see and to hand off what the camera shows" do
+      rule = LivePrompt.camera_rule()
+
+      assert rule =~ "You cannot see"
+      assert rule =~ "never say or imply that you can see"
+      assert rule =~ "Hand off anything about what the camera shows"
     end
   end
 

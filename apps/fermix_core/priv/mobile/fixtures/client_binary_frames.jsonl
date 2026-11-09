@@ -10,3 +10,5 @@
 {"header":{"v":2,"t":"call_line","seq":7,"call_id":"call-7c1e","control_seq":1},"bytes_b64":"eyJ0eXBlIjoiY2FsbF9zdGFydCJ9"}
 {"header":{"v":2,"t":"call_audio","seq":8,"call_id":"call-7c1e"},"bytes_b64":"AAAQACAAEAAAAPD/4P/w/w=="}
 {"header":{"v":2,"t":"call_line","seq":9,"call_id":"call-7c1e","control_seq":2},"bytes_b64":"eyJ0eXBlIjoibXV0ZSIsImVuYWJsZWQiOnRydWV9"}
+{"header":{"v":2,"t":"call_line","seq":10,"call_id":"call-7c1e","control_seq":3},"bytes_b64":"eyJ0eXBlIjoiY2FtZXJhIiwib24iOnRydWV9"}
+{"header":{"v":2,"t":"call_frame","seq":11,"call_id":"call-7c1e","width":768,"height":576,"captured_ms":48210},"bytes_b64":"/9j/4AAQSkZJRgD/2Q=="}

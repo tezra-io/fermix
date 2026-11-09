@@ -68,6 +68,14 @@ defmodule FermixCore.Realtime.EndpointTest do
       refute Endpoint.screen_share?({:phone, @phone})
     end
 
+    # M87 Phase 2: the camera is the phone's, whose frames ride its own
+    # session; the Mac's socket and an accessory carry none.
+    test "the camera is a phone's alone" do
+      assert Endpoint.camera?({:phone, @phone})
+      refute Endpoint.camera?(:desktop)
+      refute Endpoint.camera?({:accessory, "desk-robot"})
+    end
+
     # The Realtime engine runs no chat and leaves no gist, and its screen_share
     # tool would watch a Mac nobody at the phone can see (M87 D2).
     test "a phone takes a call only on a task engine" do

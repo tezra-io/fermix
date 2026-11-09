@@ -622,11 +622,34 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
     end
   end
 
+  # M87 Phase 2: a camera still rides call_frame, one JPEG of at most 60 KiB,
+  # and caps.call says whether the primary takes them.
+  test "the schema publishes a phone's camera frame as the codec reads it", %{schema: schema} do
+    defs = schema["$defs"]
+    frame = defs["call_frame"]
+
+    assert frame["x-raw-bytes"] == true
+    assert frame["x-max-raw-bytes"] == 60 * 1_024
+    assert frame["x-raw-media-type"] == "image/jpeg"
+
+    for field <- ~w(call_id width height captured_ms), do: assert(field in frame["required"])
+
+    for side <- ~w(width height) do
+      assert %{"type" => "integer", "minimum" => 1, "maximum" => 4_096} =
+               frame["properties"][side]
+    end
+
+    assert %{"type" => "integer", "minimum" => 0} = frame["properties"]["captured_ms"]
+    assert defs["callCaps"]["description"] =~ "camera_share"
+  end
+
   test "documentation tells a phone how a call runs on its session", %{protocol: protocol} do
     [_before, section] = String.split(protocol, "## Calls from the phone", parts: 2)
     [section, _after] = String.split(section, "\n## ", parts: 2)
 
-    for word <- ~w(call_open call_attached control_seq playback_id playback_progress caps.call) do
+    for word <-
+          ~w(call_open call_attached control_seq playback_id playback_progress caps.call
+             call_frame camera camera_share) do
       assert section =~ word, "Calls from the phone does not name #{word}"
     end
 
