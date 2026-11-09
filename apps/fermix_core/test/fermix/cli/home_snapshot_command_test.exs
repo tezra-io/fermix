@@ -14,6 +14,8 @@ defmodule Fermix.CLI.HomeSnapshotCommandTest do
   alias FermixTestSupport.SafeRm
 
   @passphrase "invented-quarry-semaphore"
+  # A home that never moved keeps no snapshots, on any host (D18).
+  @off_server "Snapshots are kept only by an Always On server, and this computer is not one."
   @now_ms 1_793_083_733_000
 
   setup_all do
@@ -126,11 +128,11 @@ defmodule Fermix.CLI.HomeSnapshotCommandTest do
       assert %{"ok" => true, "result" => result} = Jason.decode!(out)
       assert result["role"] == "primary"
       assert result["epoch"] == 5
-      assert result["snapshots"]["sentence"] =~ "set a recovery passphrase"
+      assert result["snapshots"]["sentence"] == @off_server
 
       {0, human, ""} = run(["status"], home: ctx.home, client: stopped())
       assert human =~ "Role: primary\nPrimary epoch: 5\n"
-      assert human =~ "Snapshots: Snapshots are off: set a recovery passphrase to turn them on."
+      assert human =~ "Snapshots: #{@off_server}"
     end
 
     test "a home marked moved reads as a device, naming where it went", ctx do
@@ -318,12 +320,8 @@ defmodule Fermix.CLI.HomeSnapshotCommandTest do
     test "snapshots status prints the snapshots alone", ctx do
       {0, out, ""} = run(["snapshots", "status", "--json"], home: ctx.home, client: stopped())
 
-      assert %{
-               "result" => %{
-                 "configured" => false,
-                 "targets" => [%{"id" => "s3"}, %{"id" => "desktop"}]
-               }
-             } = Jason.decode!(out)
+      assert %{"result" => %{"configured" => false, "targets" => [], "sentence" => @off_server}} =
+               Jason.decode!(out)
     end
   end
 

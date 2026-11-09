@@ -458,8 +458,16 @@ defmodule FermixCore.Management.AlwaysOnTest do
         :not_configured
       end
 
-      scheduler = scheduler!(ctx.home, config, run: run)
-      opts = ctx.opts |> Keyword.put(:config, config) |> Keyword.put(:scheduler, scheduler)
+      # An Always On server's primary writes to S3 and its desktops (D18).
+      targets = Scheduler.targets(:server)
+      scheduler = scheduler!(ctx.home, config, run: run, targets: targets)
+
+      opts =
+        ctx.opts
+        |> Keyword.put(:config, config)
+        |> Keyword.put(:scheduler, scheduler)
+        |> Keyword.put(:snapshot_targets, targets)
+
       assert %{"detail" => %{"kind" => "backup_old"}} = summary(opts)
 
       assert {:ok, %{"result" => nil}} = press(%{ctx | opts: opts}, "back_up_now")

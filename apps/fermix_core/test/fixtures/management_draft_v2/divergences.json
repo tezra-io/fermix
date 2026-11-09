@@ -2648,51 +2648,15 @@
     },
     {
       "method": "settings.get:snapshots",
-      "field": "rows:snapshot_s3_access_key_id",
-      "kind": "engine_only",
-      "why": "M75: the snapshots section (pane always_on) publishes where and how often the primary keeps its encrypted snapshots, and the two S3 access-key secrets. The draft predates it; the rows are the ordinary row shape."
-    },
-    {
-      "method": "settings.get:snapshots",
-      "field": "rows:snapshot_s3_secret_access_key",
-      "kind": "engine_only",
-      "why": "M75: the snapshots section (pane always_on) publishes where and how often the primary keeps its encrypted snapshots, and the two S3 access-key secrets. The draft predates it; the rows are the ordinary row shape."
-    },
-    {
-      "method": "settings.get:snapshots",
       "field": "rows:snapshots_interval_hours",
       "kind": "engine_only",
       "why": "M75: the snapshots section (pane always_on) publishes where and how often the primary keeps its encrypted snapshots, and the two S3 access-key secrets. The draft predates it; the rows are the ordinary row shape."
     },
     {
       "method": "settings.get:snapshots",
-      "field": "rows:snapshots_recipient",
+      "field": "rows:snapshots_passphrase",
       "kind": "engine_only",
-      "why": "M75: the snapshots section (pane always_on) publishes where and how often the primary keeps its encrypted snapshots, and the two S3 access-key secrets. The draft predates it; the rows are the ordinary row shape."
-    },
-    {
-      "method": "settings.get:snapshots",
-      "field": "rows:snapshots_s3_bucket",
-      "kind": "engine_only",
-      "why": "M75: the snapshots section (pane always_on) publishes where and how often the primary keeps its encrypted snapshots, and the two S3 access-key secrets. The draft predates it; the rows are the ordinary row shape."
-    },
-    {
-      "method": "settings.get:snapshots",
-      "field": "rows:snapshots_s3_endpoint",
-      "kind": "engine_only",
-      "why": "M75: the snapshots section (pane always_on) publishes where and how often the primary keeps its encrypted snapshots, and the two S3 access-key secrets. The draft predates it; the rows are the ordinary row shape."
-    },
-    {
-      "method": "settings.get:snapshots",
-      "field": "rows:snapshots_s3_prefix",
-      "kind": "engine_only",
-      "why": "M75: the snapshots section (pane always_on) publishes where and how often the primary keeps its encrypted snapshots, and the two S3 access-key secrets. The draft predates it; the rows are the ordinary row shape."
-    },
-    {
-      "method": "settings.get:snapshots",
-      "field": "rows:snapshots_s3_region",
-      "kind": "engine_only",
-      "why": "M75: the snapshots section (pane always_on) publishes where and how often the primary keeps its encrypted snapshots, and the two S3 access-key secrets. The draft predates it; the rows are the ordinary row shape."
+      "why": "ALWAYS_ON_PANE 3.12 (D7): the snapshots section no longer shows the raw recovery key or any S3 row; it says whether the recovery passphrase is set (Set or Not set, read only), beside how often snapshots run. The draft predates it, so the app re-vendors this export before it draws the row."
     },
     {
       "method": "(errors)",

@@ -245,8 +245,9 @@ defmodule FermixChannels.Desktop.SnapshotTargetTest do
     end
   end
 
+  # On an Always On server's primary (D18); no other primary has a target.
   test "the scheduler writes to S3 and then to the desktops" do
-    assert Scheduler.targets() == [FermixCore.Home.Snapshot.S3, SnapshotTarget]
+    assert Scheduler.targets(:server) == [FermixCore.Home.Snapshot.S3, SnapshotTarget]
   end
 
   test "it is on only while the primary has a desktop row" do

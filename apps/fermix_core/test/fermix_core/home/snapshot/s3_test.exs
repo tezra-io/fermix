@@ -292,7 +292,7 @@ defmodule FermixCore.Home.Snapshot.S3Test do
                "The server's credentials helper has handed Fermix no S3 session yet. Its " <>
                  "last try: AWS STS refused the snapshot session (AccessDenied: not authorized)."
 
-      File.rm!(Path.join(tmp, "error"))
+      SafeRm.rm!(Path.join(tmp, "error"))
 
       assert {:error, {:session_missing, nil} = quiet} =
                S3.store(snapshot!(tmp, "bytes"), instance_role("http://127.0.0.1:1"), opts(tmp))

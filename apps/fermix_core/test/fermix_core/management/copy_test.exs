@@ -27,6 +27,7 @@ defmodule FermixCore.Management.CopyTest do
   alias FermixCore.Home.Candidate, as: HomeCandidate
   alias FermixCore.Home.Move, as: HomeMove
   alias FermixCore.Home.MoveReadiness
+  alias FermixCore.Home.ServerPrimary
   alias FermixCore.Home.Snapshot.Recipient, as: SnapshotRecipient
   alias FermixCore.Home.Snapshot.Recovery
   alias FermixCore.Home.Snapshot.Run, as: SnapshotRun
@@ -678,6 +679,23 @@ defmodule FermixCore.Management.CopyTest do
         assert_clean(view["sentence"], :prose, [], "snapshot status")
         refute_command(view["sentence"], "snapshot status")
       end
+
+      # A primary that is no Always On server's has no target (D18).
+      off_server =
+        SnapshotStatus.view(SnapshotStatus.empty(), %{
+          config: on,
+          targets: [],
+          running: false,
+          profile: "general"
+        })
+
+      assert_clean(off_server["sentence"], :prose, [], "snapshot status off a server")
+      refute_command(off_server["sentence"], "snapshot status off a server")
+
+      for reason <- [:macos, :no_desktop, {:device_list, :eacces}] do
+        assert_clean(ServerPrimary.sentence(reason), :prose, [], "server primary")
+        refute_command(ServerPrimary.sentence(reason), "server primary")
+      end
     end
 
     test "every target and capture failure sentence obeys the rules" do
@@ -687,7 +705,15 @@ defmodule FermixCore.Management.CopyTest do
         {:unreachable, "connection refused"},
         {:checksum_mismatch, "x"},
         {:keys_missing, :snapshot_s3_access_key_id},
-        {:secret_unreadable, :snapshot_s3_secret_access_key, :missing_secret}
+        {:secret_unreadable, :snapshot_s3_secret_access_key, :missing_secret},
+        # E1: the instance role's session and the bucket's owner.
+        {:not_the_owners_bucket, "invented-bucket", "111122223333", 403, "Access Denied"},
+        {:session_missing, nil},
+        {:session_missing,
+         "AWS STS refused the snapshot session (HTTP 403 AccessDenied: Access Denied)."},
+        {:session_unreadable, :eacces},
+        :session_malformed,
+        {:session_expired, ~U[2026-10-27 09:30:30Z], nil}
       ]
 
       capture_reasons = [

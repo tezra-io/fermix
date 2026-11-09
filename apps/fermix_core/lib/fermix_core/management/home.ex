@@ -124,8 +124,8 @@ defmodule FermixCore.Management.Home do
   alias FermixCore.Home.Moved
   alias FermixCore.Home.MoveSecrets
   alias FermixCore.Home.Return
-  alias FermixCore.Home.ServerPrimary
   alias FermixCore.Home.Role
+  alias FermixCore.Home.ServerPrimary
   alias FermixCore.Home.Snapshot.Recipient
   alias FermixCore.Home.Snapshot.Recovery
   alias FermixCore.Home.Snapshot.Scheduler
