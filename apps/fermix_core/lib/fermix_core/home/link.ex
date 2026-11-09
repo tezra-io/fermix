@@ -100,6 +100,15 @@ defmodule FermixCore.Home.Link do
   @callback drop_desktop_row(Path.t(), <<_::256>>) :: :ok | {:error, term()}
 
   @doc """
+  Any role: the desktop rows in the device list of the home at `root`, read
+  from its file rather than the running store, which starts after
+  `fermix_core` and only on the primary: whether a home is an Always On
+  server's (`FermixCore.Home.ServerPrimary`). No list holds none.
+  """
+  @callback home_desktops(Path.t()) ::
+              {:ok, [%{device_id: String.t(), name: String.t()}]} | {:error, term()}
+
+  @doc """
   Device role: starts receiving the home back from the server (Always On's
   move back) beside the relay: the candidate subtree under the running device
   tree, for the candidate `FermixCore.Home.Candidate.prepare_return/3` wrote

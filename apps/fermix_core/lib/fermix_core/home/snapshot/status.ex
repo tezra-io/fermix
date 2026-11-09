@@ -184,8 +184,15 @@ defmodule FermixCore.Home.Snapshot.Status do
     Map.put(view, "sentence", sentence(view))
   end
 
-  @doc "The one sentence for a view's state as a whole."
+  @doc """
+  The one sentence for a view's state as a whole. A view with no target is a
+  primary that is no Always On server's (`Snapshot.Scheduler.targets/1`),
+  which keeps none whatever its settings say.
+  """
   @spec sentence(map()) :: String.t()
+  def sentence(%{"targets" => []}),
+    do: "Snapshots are kept only by an Always On server, and this computer is not one."
+
   def sentence(%{"recipient_set" => false}),
     do: "Snapshots are off: set a recovery passphrase to turn them on."
 

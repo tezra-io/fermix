@@ -742,6 +742,21 @@ defmodule FermixCore.Management.HomeTest do
                 }}
     end
 
+    # D18: a primary that is no Always On server has no target, so its bucket
+    # is never written and a run is refused in the status's own words.
+    test "a primary that is no Always On server keeps none", %{home: home, recipient: recipient} do
+      config = [recipient: recipient, s3_bucket: "invented-bucket"]
+      scheduler = scheduler!(home, config, targets: [])
+      opts = forwarded(opts(home, config: config, scheduler: scheduler, snapshot_targets: []))
+      sentence = "Snapshots are kept only by an Always On server, and this computer is not one."
+
+      assert route("home.snapshots.run", %{}, opts) ==
+               {:error, :unavailable, %{"capability" => "snapshots", "sentence" => sentence}}
+
+      assert {:ok, %{"configured" => false, "targets" => [], "sentence" => ^sentence}} =
+               route("home.snapshots.status", %{}, opts)
+    end
+
     test "a device, and an engine with no scheduler, refuse by name", %{home: home} do
       assert {:error, :unavailable, %{"sentence" => device}} =
                route("home.snapshots.run", %{}, forwarded(opts(home, engine_role: @device)))
@@ -1109,6 +1124,8 @@ defmodule FermixCore.Management.HomeTest do
           profile: "general",
           now: @at,
           disk_usage: disk(0.42),
+          # An Always On server's primary, unless a test says otherwise (D18).
+          snapshot_targets: Scheduler.targets(:server),
           # The live channel and cue settings are global: a home here serves none.
           webhook_settings: fn -> %{whatsapp: [], cues: [], web_port: 4030} end
         ],
@@ -1127,13 +1144,17 @@ defmodule FermixCore.Management.HomeTest do
 
     start_supervised!(
       {Scheduler,
-       [
-         name: name,
-         home: home,
-         config: fn -> config end,
-         now: fn -> ~U[2026-10-27 09:00:00Z] end,
-         timer: fn _message, _delay -> make_ref() end
-       ] ++ extra}
+       Keyword.merge(
+         [
+           name: name,
+           home: home,
+           config: fn -> config end,
+           targets: Scheduler.targets(:server),
+           now: fn -> ~U[2026-10-27 09:00:00Z] end,
+           timer: fn _message, _delay -> make_ref() end
+         ],
+         extra
+       )}
     )
 
     name

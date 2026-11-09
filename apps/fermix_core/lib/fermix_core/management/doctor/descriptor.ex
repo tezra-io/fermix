@@ -201,7 +201,10 @@ defmodule FermixCore.Management.Doctor.Descriptor do
       spec("engine_path_baseline", :runtime, :warning, :always, &Checks.engine_path_baseline/0),
       # The engine's own word for its link to the server, read from its
       # `home.status`; no row where there is no link.
-      spec("server_link", :connectivity, :warning, :configured, &Checks.server_link/0)
+      spec("server_link", :connectivity, :warning, :configured, &Checks.server_link/0),
+      # D18: a primary that is no Always On server's but names an S3 bucket;
+      # no row anywhere else.
+      spec("s3_backups", :configuration, :warning, :configured, &Checks.s3_backups/0)
     ]
   end
 

@@ -49,6 +49,22 @@ defmodule FermixCore.Home.Snapshot.StatusTest do
   end
 
   describe "the view every surface draws" do
+    # D18: a primary that is no Always On server has no target at all, whatever
+    # its settings name, and says so before anything about the passphrase.
+    test "off where no target runs: only an Always On server keeps snapshots" do
+      view =
+        view(Status.empty(), [recipient: @recipient, s3_bucket: "invented-bucket"], targets: [])
+
+      assert view["configured"] == false
+      assert view["targets"] == []
+      assert view["next_run_at"] == nil
+
+      assert view["sentence"] ==
+               "Snapshots are kept only by an Always On server, and this computer is not one."
+
+      assert view(Status.empty(), [], targets: [])["sentence"] == view["sentence"]
+    end
+
     test "off until a recovery passphrase is set" do
       view = view(Status.empty(), s3_bucket: "invented-bucket")
 
@@ -189,7 +205,7 @@ defmodule FermixCore.Home.Snapshot.StatusTest do
   defp view(status, config, extra \\ []) do
     Status.view(status, %{
       config: config,
-      targets: [S3],
+      targets: Keyword.get(extra, :targets, [S3]),
       running: Keyword.get(extra, :running, false),
       profile: "general"
     })

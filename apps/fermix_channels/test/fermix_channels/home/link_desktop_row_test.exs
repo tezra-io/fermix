@@ -43,6 +43,24 @@ defmodule FermixChannels.Home.LinkDesktopRowTest do
     assert {:ok, [_phone]} = DeviceStore.list(root: staging)
   end
 
+  # E1 (D18): whether a home is an Always On server's is read from its file,
+  # before the channels' running store starts, and from any home by its root.
+  test "the desktop rows of a home are read from its file", %{staging: staging} do
+    assert Link.home_desktops(staging) == {:ok, []}
+
+    {:ok, _device} = DeviceStore.add(row(:phone, "Pixel 9"), root: staging)
+    assert Link.home_desktops(staging) == {:ok, []}
+
+    mac = row(:desktop, "orchard-mac")
+    {:ok, _device} = DeviceStore.add(mac, root: staging)
+
+    assert Link.home_desktops(staging) ==
+             {:ok, [%{device_id: mac.device_id, name: "orchard-mac"}]}
+
+    File.write!(DeviceStore.store_path(staging), "not = [toml")
+    assert {:error, _reason} = Link.home_desktops(staging)
+  end
+
   test "a list that cannot be read is named", %{staging: staging} do
     File.mkdir_p!(Path.dirname(DeviceStore.store_path(staging)))
     File.write!(DeviceStore.store_path(staging), "not = [toml")

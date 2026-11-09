@@ -131,6 +131,7 @@ defmodule Fermix.CLI.Doctor do
       Checks.realtime(),
       Checks.mobile(),
       Checks.server_link(),
+      Checks.s3_backups(),
       Checks.imessage_helper(),
       Checks.imessage_permissions(),
       Checks.acp(),

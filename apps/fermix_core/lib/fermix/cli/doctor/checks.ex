@@ -38,6 +38,7 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.Epoch
   alias FermixCore.Home.Role
+  alias FermixCore.Home.ServerPrimary
   alias FermixCore.IMessage
   alias FermixCore.IMessage.Control, as: IMessageControl
   alias FermixCore.IMessage.HelperInstaller, as: IMessageHelper
@@ -1588,6 +1589,37 @@ defmodule Fermix.CLI.Doctor.Checks do
 
   defp link_row(nil),
     do: warn("server link", "not read: the running engine reports no link to a server")
+
+  @doc """
+  S3 backups that stopped (ALWAYS_ON_PANE §3.12, D18): a primary that is no
+  Always On server's (`Home.ServerPrimary`) keeps none, so one whose
+  `[fermix_core.snapshots]` still names a bucket, set by hand in
+  `config.toml`, is told so once here rather than left silent. Any other home
+  has no row: a server's primary (its S3 status is `home.snapshots.status`'s),
+  one naming no bucket, a device or candidate (the primary keeps the
+  snapshots), and a home whose role or settings cannot be read (the rows that
+  read those say why). `:home`, `:macos?` and `:desktop_rows` are the tests'
+  seams.
+  """
+  @spec s3_backups(keyword()) :: result() | nil
+  def s3_backups(opts \\ []) when is_list(opts) do
+    home = Keyword.get_lazy(opts, :home, &ConfigStore.fermix_home/0)
+
+    with {:ok, %{role: :primary}} <- Role.configured(home),
+         {:ok, section} <- ConfigStore.snapshots_config(home),
+         bucket when is_binary(bucket) <- Keyword.get(section, :s3_bucket),
+         {:not_server, reason} <-
+           ServerPrimary.check(home, Keyword.take(opts, [:macos?, :desktop_rows])) do
+      warn(
+        "s3 backups",
+        "stopped: config.toml names the S3 bucket #{bucket}, but " <>
+          ServerPrimary.sentence(reason) <>
+          " Remove s3_bucket from [fermix_core.snapshots] to clear this."
+      )
+    else
+      _not_stopped -> nil
+    end
+  end
 
   defp path_words("direct"), do: " directly"
   defp path_words("relay"), do: " through Fermix's relay"

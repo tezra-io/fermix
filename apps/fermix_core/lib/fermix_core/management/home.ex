@@ -124,6 +124,7 @@ defmodule FermixCore.Management.Home do
   alias FermixCore.Home.Moved
   alias FermixCore.Home.MoveSecrets
   alias FermixCore.Home.Return
+  alias FermixCore.Home.ServerPrimary
   alias FermixCore.Home.Role
   alias FermixCore.Home.Snapshot.Recipient
   alias FermixCore.Home.Snapshot.Recovery
@@ -637,13 +638,21 @@ defmodule FermixCore.Management.Home do
     view =
       Status.view(%{status | next_run_at: next_run_at}, %{
         config: config(opts),
-        targets: Scheduler.targets(),
+        targets: targets(home, opts),
         running: running,
         profile: profile(opts)
       })
 
     device_view(view, role)
   end
+
+  # The targets of an Always On server's primary, none on any other (D18);
+  # `:snapshot_targets` names them for a test.
+  defp targets(home, opts),
+    do:
+      Keyword.get_lazy(opts, :snapshot_targets, fn ->
+        Scheduler.targets(ServerPrimary.check(home))
+      end)
 
   # A device writes none of the primary's snapshots, whatever its copy of the
   # section says, and its status file is a retired copy of what it wrote as the

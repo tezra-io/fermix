@@ -8,8 +8,9 @@ defmodule FermixChannels.Home.Link do
   `status/0`'s `desktops` by the primary's desktop peers
   (`FermixChannels.Desktop.Peer`), and `open_enrollment/1`,
   `withdraw_enrollment/0`, `forget_candidate/1` and `status/0`'s
-  `enrollment` by the enrollment window, `drop_desktop_row/2` by the device store of the staged home it
-  names, and `start_return/1` and `stop_return/0` by the device tree
+  `enrollment` by the enrollment window, `drop_desktop_row/2` and
+  `home_desktops/1` by the device store of the home they name, read from its
+  file, and `start_return/1` and `stop_return/0` by the device tree
   (`FermixChannels.Desktop.DeviceSupervisor`), whose candidate subtree
   receives a move back beside the relay.
 
@@ -70,6 +71,17 @@ defmodule FermixChannels.Home.Link do
       {:ok, %{device_id: id}} -> {:error, {:not_a_desktop, id}}
       {:error, {:noise_identity_not_found, _key}} -> :ok
       {:error, _reason} = error -> error
+    end
+  end
+
+  @impl true
+  def home_desktops(root) when is_binary(root) and root != "" do
+    case DeviceStore.list(root: root) do
+      {:ok, devices} ->
+        {:ok, for(%{kind: :desktop} = row <- devices, do: Map.take(row, [:device_id, :name]))}
+
+      {:error, _reason} = error ->
+        error
     end
   end
 

@@ -298,6 +298,30 @@ defmodule FermixCore.Home.Snapshot.SchedulerTest do
     assert %{running: false, next_run_at: nil} = Scheduler.info(scheduler)
   end
 
+  # D18: the targets are S3 and the desktops on an Always On server's
+  # primary, and none anywhere else, so a Mac primary whose settings name a
+  # bucket schedules nothing and writes nothing.
+  test "an Always On server's primary writes to S3 and its desktops; no other primary to any" do
+    assert Scheduler.targets(:server) ==
+             [
+               FermixCore.Home.Snapshot.S3
+               | Application.fetch_env!(:fermix_core, :snapshot_targets)
+             ]
+
+    assert Scheduler.targets({:not_server, :macos}) == []
+    assert Scheduler.targets({:not_server, :no_desktop}) == []
+  end
+
+  test "a Mac primary with a bucket in its settings schedules nothing and writes nothing",
+       context do
+    scheduler = start!(context, targets: Scheduler.targets({:not_server, :macos}))
+
+    refute_received {:planned, _message, _delay}
+    assert %{next_run_at: nil, running: false} = Scheduler.info(scheduler)
+    assert Scheduler.run_now(scheduler) == {:error, :not_configured}
+    refute_received {:stored, _snapshot, _bytes}
+  end
+
   test "a stale tick does nothing", context do
     scheduler = start!(context)
     assert_receive {:planned, {:tick, _token}, _delay}
@@ -443,7 +467,7 @@ defmodule FermixCore.Home.Snapshot.SchedulerTest do
     test = self()
     %{home: home, clock: clock, config: config} = context
 
-    opts =
+    defaults =
       [
         name: nil,
         home: home,
@@ -455,9 +479,9 @@ defmodule FermixCore.Home.Snapshot.SchedulerTest do
           make_ref()
         end,
         run_opts: [test: test, host: "macos-aarch64"]
-      ] ++ extra
+      ]
 
-    start_supervised!({Scheduler, opts})
+    start_supervised!({Scheduler, Keyword.merge(defaults, extra)})
   end
 
   defp configured(pair, bucket),

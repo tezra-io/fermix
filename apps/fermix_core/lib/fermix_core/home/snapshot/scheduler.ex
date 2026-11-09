@@ -9,6 +9,14 @@ defmodule FermixCore.Home.Snapshot.Scheduler do
   home is a retired copy. In the device role `home.snapshots.run` answers that
   snapshots are the primary's.
 
+  **An Always On server's primary only** (D18): its targets are S3 and the
+  desktops there, and none on any other primary (`targets/0`,
+  `Home.ServerPrimary`), so a Mac primary whose settings name a bucket plans
+  nothing and writes nothing. They are read when a recipient is set and the
+  scheduler asks what to write to, not when it starts: the fact lives in the
+  channels' device list, which `fermix_core` reaches only through
+  `Home.Link`.
+
   **When.** The next run is the last attempt plus the interval, read back from
   the status file at boot, and never sooner than #{div(300, 60)} minutes after
   the scheduler starts, so a restart loop is not a snapshot loop; a home that
@@ -54,6 +62,7 @@ defmodule FermixCore.Home.Snapshot.Scheduler do
   use GenServer
 
   alias FermixCore.Delivery.ChannelSend
+  alias FermixCore.Home.ServerPrimary
   alias FermixCore.Home.Snapshot.Config
   alias FermixCore.Home.Snapshot.Run
   alias FermixCore.Home.Snapshot.S3
@@ -74,7 +83,7 @@ defmodule FermixCore.Home.Snapshot.Scheduler do
   @type state :: %{
           home: Path.t(),
           config: (-> keyword()),
-          targets: [module()],
+          targets: (-> [module()]),
           now: (-> DateTime.t()),
           timer: (term(), non_neg_integer() -> reference()) | nil,
           run: (Path.t(), keyword(), [module()], keyword() ->
@@ -90,12 +99,21 @@ defmodule FermixCore.Home.Snapshot.Scheduler do
         }
 
   @doc """
-  The targets the engine writes to, in order: S3, then those configured at
-  `:snapshot_targets` (the desktops over the rail, which `fermix_core` does
-  not compile against: `FermixChannels.Desktop.SnapshotTarget`).
+  The targets this engine's home writes to: `targets/1` of whether its
+  primary is an Always On server's (`Home.ServerPrimary`).
   """
   @spec targets() :: [module()]
-  def targets, do: [S3 | Application.fetch_env!(:fermix_core, :snapshot_targets)]
+  def targets, do: targets(ServerPrimary.check(ConfigStore.fermix_home()))
+
+  @doc """
+  The targets for `answer`, in order: on an Always On server's primary S3,
+  then those configured at `:snapshot_targets` (the desktops over the rail,
+  which `fermix_core` does not compile against:
+  `FermixChannels.Desktop.SnapshotTarget`); on any other primary none.
+  """
+  @spec targets(ServerPrimary.answer()) :: [module()]
+  def targets(:server), do: [S3 | Application.fetch_env!(:fermix_core, :snapshot_targets)]
+  def targets({:not_server, _reason}), do: []
 
   @doc """
   Starts the scheduler. `opts`: `:name`, `:home`, `:config` (a 0-arity reader
@@ -143,12 +161,13 @@ defmodule FermixCore.Home.Snapshot.Scheduler do
   @impl true
   def init(opts) do
     now = Keyword.get(opts, :now, &DateTime.utc_now/0)
+    home = Keyword.get_lazy(opts, :home, &ConfigStore.fermix_home/0)
 
     state = %{
-      home: Keyword.get_lazy(opts, :home, &ConfigStore.fermix_home/0),
+      home: home,
       config:
         Keyword.get(opts, :config, fn -> Application.get_env(:fermix_core, :snapshots, []) end),
-      targets: Keyword.get(opts, :targets, targets()),
+      targets: targets_reader(opts, home),
       now: now,
       timer: timer(opts),
       run: Keyword.get(opts, :run, &Run.run/4),
@@ -206,7 +225,8 @@ defmodule FermixCore.Home.Snapshot.Scheduler do
   def handle_info(_message, state), do: {:noreply, state}
 
   defp start_run(state) do
-    %{home: home, run: run, targets: targets, run_opts: run_opts} = state
+    %{home: home, run: run, run_opts: run_opts} = state
+    targets = state.targets.()
     record(state, &%{&1 | run_at_boot: false})
     config = state.config.()
     opts = Keyword.put(run_opts, :now, state.now)
@@ -237,7 +257,7 @@ defmodule FermixCore.Home.Snapshot.Scheduler do
   defp finished(state, {:crashed, _reason}) do
     at = DateTime.truncate(state.now.(), :second)
     config = state.config.()
-    on = Enum.filter(state.targets, &match?({:ok, _settings}, &1.configured(config)))
+    on = Enum.filter(state.targets.(), &match?({:ok, _settings}, &1.configured(config)))
 
     record(state, fn status ->
       Enum.reduce(
@@ -426,7 +446,7 @@ defmodule FermixCore.Home.Snapshot.Scheduler do
     config = state.config.()
 
     Keyword.has_key?(config, :recipient) and
-      Enum.any?(state.targets, &match?({:ok, _settings}, &1.configured(config)))
+      Enum.any?(state.targets.(), &match?({:ok, _settings}, &1.configured(config)))
   end
 
   defp interval_s(state), do: Config.interval_hours(state.config.()) * @hour_s
@@ -436,6 +456,14 @@ defmodule FermixCore.Home.Snapshot.Scheduler do
       Keyword.get(opts, :timer_enabled, true) == false -> nil
       timer = Keyword.get(opts, :timer) -> timer
       true -> &send_after/2
+    end
+  end
+
+  # A test names its targets; the engine reads its home's when it asks.
+  defp targets_reader(opts, home) do
+    case Keyword.fetch(opts, :targets) do
+      {:ok, targets} when is_list(targets) -> fn -> targets end
+      :error -> fn -> targets(ServerPrimary.check(home)) end
     end
   end
 
