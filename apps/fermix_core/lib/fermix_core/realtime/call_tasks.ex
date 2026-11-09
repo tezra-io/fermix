@@ -88,9 +88,12 @@ defmodule FermixCore.Realtime.CallTasks do
   # How long the camera's newest frame stands for what the camera shows (M87
   # Phase 2): a task raised later than this after it reads no picture rather
   # than an old one, which may show something the owner has since put away.
-  # The phone sends a frame every second while the owner speaks, so a task
-  # raised by what they just said finds one.
-  @frame_fresh_ms 2_000
+  # It outlasts the phone's longest documented gap, so a hand-off at any
+  # moment finds a frame while the camera is on: the phone sends a still each
+  # second while the owner speaks, each two otherwise, and each six once the
+  # scene is still (the app's `CallStills`), so 6 s, and 2 s for the link's
+  # jitter. A scene still that long is the same picture.
+  @frame_fresh_ms 8_000
 
   # What the voice is told about a result shown in the chat (M56 §4.5), after
   # the line it says, only once the row is written.

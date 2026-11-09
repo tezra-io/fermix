@@ -897,7 +897,7 @@ defmodule FermixChannels.Mobile.CallTest do
 
   # M87 Phase 2: the phone's camera. Its frames ride `call_frame` on the
   # phone's own session, taken only from the attached session while the
-  # camera is on, under ScreenFeed's ceiling; a frame dropped is counted and
+  # camera is on, within the call's bounds; a frame dropped is counted and
   # logged, never a call-ending error. The voice session holds the newest.
   describe "the phone's camera" do
     test "a frame from the phone reaches the session while the camera is on", ctx do
@@ -919,7 +919,7 @@ defmodule FermixChannels.Mobile.CallTest do
       hang_up!(driver, client, voice, 7)
     end
 
-    test "frames are held to ScreenFeed's ceiling, each drop counted, the call going on", ctx do
+    test "frames are held to the call's bounds, each drop counted, the call going on", ctx do
       %{call: call, voice: voice, relay: relay, clock: clock} = camera_call!(ctx, "openai_live")
       # The suite logs warnings and up; the call's drop lines are info.
       Logger.put_module_level(Call, :info)

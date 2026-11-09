@@ -207,6 +207,37 @@ defmodule FermixCore.Realtime.CallTasksTest do
       assert CallTasks.put_frame(tasks, jpeg("late")).frame == nil
     end
 
+    # The phone's documented cadence (M87 Phase 2, the app's `CallStills`): a
+    # still each second while the owner speaks, each two otherwise, and each
+    # six once the scene is still, each up to 100 ms late on the link. A
+    # hand-off at any moment finds a frame: the oldest it can be is just before
+    # the next one comes.
+    test "a hand-off at any moment of a call at the phone's cadence finds a frame", %{
+      tasks: tasks,
+      transcript: transcript
+    } do
+      sends =
+        [{1_000, 30_000}, {2_000, 30_000}, {6_000, 60_000}, {1_000, 20_000}, {6_000, 40_000}]
+        |> Enum.flat_map_reduce(10_000, fn {every, span}, start ->
+          {Enum.to_list(start..(start + span - every)//every), start + span}
+        end)
+        |> elem(0)
+
+      arrivals = Enum.with_index(sends, fn send, n -> send + rem(n, 2) * 100 end)
+      on = CallTasks.camera(tasks, true)
+
+      for {at, next} <- Enum.zip(arrivals, tl(arrivals) ++ [List.last(arrivals) + 6_100]) do
+        Process.put(:now, at)
+        held = CallTasks.put_frame(on, jpeg("at #{at}"))
+
+        Process.put(:now, next - 1)
+        {:ok, _tasks, _told} = CallTasks.create(held, "t1", 9_500, transcript)
+
+        assert_received {:request, %{frame: %{data: data}}}, "no frame #{next - 1 - at} ms on"
+        assert data == "at #{at}"
+      end
+    end
+
     # Kept only while fresh, not until the next hand-off: each frame arms its
     # own clear at the freshness bound, and a newer frame's supersedes it.
     test "a frame is let go by its own timer once it is no longer fresh", %{tasks: tasks} do

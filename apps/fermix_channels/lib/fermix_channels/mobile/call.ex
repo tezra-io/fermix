@@ -79,7 +79,7 @@ defmodule FermixChannels.Mobile.Call do
   to the voice session as the camera's newest frame
   (`SessionControl.camera_frame/2`), which a task carries only while it is
   fresh. A frame is taken only from the attached session, only while the
-  camera is on, and within `ScreenFeed`'s ceiling (`CallFrames`); any other is
+  camera is on, and within the call's bounds (`CallFrames`); any other is
   dropped, counted by why, with a log line at the first drop of each kind and
   every `@frame_drop_log_every`th, and the call goes on. A detach lets the
   session's frame go (the camera stays on, and the phone's next frame after

@@ -10,6 +10,7 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
   alias FermixCore.Realtime.CallRegistry
   alias FermixCore.Realtime.CallSpeech
   alias FermixCore.Realtime.CallSweep
+  alias FermixCore.Realtime.CallTasks
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.LiveChat
   alias FermixCore.Realtime.LivePrompt
@@ -1919,7 +1920,7 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
       :ok = SessionControl.camera(session, true)
       :ok = SessionControl.camera_frame(session, jpeg("old"))
       sync(session)
-      Agent.update(clock, &(&1 + 2_001))
+      Agent.update(clock, &(&1 + CallTasks.frame_fresh_ms() + 1))
       send(session, {:openai_live_event, {:delegation_created, "dg_1", 4_200}})
 
       assert_receive {:bridge_submit, _handle, %{frame: nil, camera_on?: true}}

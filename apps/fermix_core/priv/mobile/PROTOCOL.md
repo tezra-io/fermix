@@ -1087,19 +1087,23 @@ and the other playback errors, and `unsupported_by_endpoint`, end it.
 `call_attached.camera` is the camera's state as the primary holds it: it stays
 on across a reconnect, so a phone that turned it off while away sends that
 again after `call_attached`. While it is on, the phone sends its stills as
-`call_frame`, not as lines. The primary takes at most one a second (give or
-take 100 ms of the link's jitter) and 20 a minute (a fixed minute from the
-first still taken, as `ScreenFeed` counts its own), `ScreenFeed`'s ceiling,
-whatever the phone sends, and drops a still identical to the last one it took,
-one that comes while the camera is off, and one from a session the call is not
-attached to; a dropped still is counted in the primary's log and never ends
-the call. The voice never sees a still: each task the voice hands the Fermix
+`call_frame`, not as lines: at most one a second and at least one every 6 s,
+sooner when the scene changes (a still each second while the owner speaks,
+each two otherwise, and each six once the scene is still). The primary takes
+at most one a second (give or take 100 ms of the link's jitter) and at most 60
+a minute (a fixed minute from the first still taken), whatever the phone
+sends, so a phone at that cadence is never dropped. It drops a still past
+those bounds, one identical to the last one it took, one that comes while the
+camera is off, and one from a session the call is not attached to; a dropped
+still is counted in the primary's log and never ends the call. The voice never
+sees a still. The primary keeps the newest still for 8 s, the phone's longest
+gap and 2 s for the link's jitter, so each task the voice hands the Fermix
 agent while the camera is on carries the newest still the primary took within
-the last 2 s, and a task with none tells the agent there is no current
+the last 8 s, and a task with none tells the agent there is no current
 picture, so the voice says it cannot see right now. The newest still is let go
-once it is 2 s old, and on Camera off, a detach and the call's end; the
-primary never keeps one, nor logs its bytes, and a still a task already
-carried to a provider cannot be taken back.
+once it is 8 s old, and on Camera off, a detach and the call's end; the
+primary keeps none longer, never logs its bytes, and cannot take back a still
+a task already carried to a provider.
 
 **Revocation.** A phone revoked mid-call is sent the error line `revoked`
 first; then it is muted, the hand-offs its call started that have not settled

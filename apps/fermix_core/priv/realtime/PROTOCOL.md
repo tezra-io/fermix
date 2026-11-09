@@ -123,7 +123,7 @@ that does not end the call; `on: false` is never refused for it. The camera's
 frames do not ride this wire: each endpoint carries them on its own transport (a
 phone's `call_frame`, `priv/mobile/PROTOCOL.md`), and the voice never sees them.
 While the camera is on, each task the voice hands the Fermix agent carries the
-newest frame no older than 2 s, and a task with none tells the agent there is no
+newest frame no older than 8 s, and a task with none tells the agent there is no
 current picture.
 
 ## Handshake state machine
