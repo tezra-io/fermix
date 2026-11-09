@@ -257,10 +257,16 @@ will be part of a future release; nothing in this group is in a release yet.
   last 30 days (`update_ceiling` in `fermix home status --json`), never past
   it and never back down, so once every computer linked to it runs a new
   release, the server takes it within a few minutes.
-  Once a recovery passphrase is set, a primary keeps encrypted snapshots of
-  itself in an S3 bucket, every six hours by default, and after a move on your
-  desktop too (the server's first as soon as your desktop connects), and a
-  lost server is restored from the newest one. A move or
+  Once a recovery passphrase is set, your server keeps encrypted snapshots of
+  itself on your desktop, every six hours by default (the first as soon as
+  your desktop connects), and in an S3 bucket where the server's own setup
+  names one, and a lost server is restored from the newest one. A server
+  built with fermix-server-aws gets its bucket from `enable_s3_backups` and
+  signs with its instance role, through a root helper that hands Fermix a
+  one-hour session which can only add snapshots to that bucket: no keys
+  anywhere. Another S3 service is set on the server itself. No app shows any
+  S3 setting, and a Mac on its own keeps no S3 snapshots; one whose settings
+  still name a bucket is told so by `fermix doctor`. A move or
   restore onto a Linux server keeps your secrets in its keyring only when the
   keyring answers, and otherwise in Fermix's own secret files. The app,
   the setup page's Always On tab and `fermix home status` all lead with the

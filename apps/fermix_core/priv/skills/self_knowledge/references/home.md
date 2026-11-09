@@ -153,7 +153,8 @@ it, never a second writer.
   later kernel is not). Below it every command Fermix runs would be refused,
   so the first boot checks the kernel before it installs anything and names
   what is missing. After `--always-on`:
-  `--snapshot-bucket NAME --snapshot-region REGION`, `--restore`,
+  `--snapshot-bucket NAME --snapshot-region REGION` (or the bucket the
+  server's infrastructure wrote), `--restore`,
   `--version X`, the release to install (Always On's command names this
   computer's; without it, the latest), and `--tailscale` (below).
 - The first boot, as root: writes the code to `/run/fermix/enroll.code`
@@ -537,10 +538,11 @@ it, never a second writer.
 
 ## Snapshots and the recovery passphrase
 
-- A primary can keep encrypted snapshots of its home in an S3 bucket (AWS or
-  any S3-compatible service), so a lost host is recovered by restoring the
-  newest one. A snapshot carries what an export carries, taken while Fermix
-  runs: the memory database is copied consistently and nothing is torn.
+- An Always On server's primary keeps encrypted snapshots of its home in an
+  S3 bucket, so a lost server is recovered by restoring the newest one. A
+  computer whose home never moved keeps none (`fermix doctor` says so). A
+  snapshot carries what an export carries, taken while Fermix runs: the
+  memory database is copied consistently.
 - Snapshots are encrypted to a recovery key derived from a recovery passphrase
   the owner chooses (at least 12 bytes). `fermix home snapshots passphrase
   --passphrase-file PATH`, or Fermix asking twice without echo, sets it on a
@@ -548,18 +550,18 @@ it, never a second writer.
   passphrase, so it writes snapshots on its own and only the passphrase opens
   them. Whoever holds the passphrase and a snapshot can stand up the primary.
 - They are on once a recovery passphrase is set and a bucket is named in
-  `[fermix_core.snapshots]` (`s3_bucket`, `s3_region`, and `s3_endpoint` for a
-  service that is not AWS), every `interval_hours` (default 6). Fermix signs
-  with the secrets `snapshot_s3_access_key_id` and
-  `snapshot_s3_secret_access_key` (stored with `fermix settings secret set`).
-  The key should only be allowed to write objects: Fermix never lists, reads
-  or deletes them, and a versioned bucket keeps every snapshot.
+  `[fermix_core.snapshots]`, every `interval_hours` (default 6). No app sets
+  S3. On AWS, fermix-server-aws's `enable_s3_backups` names the bucket at
+  first boot and Fermix signs with a root helper's one-hour session of the
+  server's snapshot writer role (`s3_credentials = "instance_role"`): no
+  keys. Another S3 service is set on the server: `s3_bucket`, `s3_region`,
+  `s3_endpoint`, and the two `snapshot_s3_*` secrets (`fermix settings secret
+  set`). Fermix never lists, reads or deletes objects.
 - Each snapshot is `<prefix>/<profile>/<UTC time>-e<epoch>.fxsnap` in the
   bucket. It counts as stored only when the bucket accepted its SHA-256
   checksum; a failure keeps the bucket's own words and is retried at the next
   interval. **Back up now** in Always On takes one now (on a linked desktop
-  it asks the server). A bucket named with
-  dots is addressed path-style, which S3's certificate covers. A capture
+  it asks the server). A capture
   needs about twice the home free on the disk and is refused with the
   numbers otherwise.
 - Each stored point names the recovery key it was written for (its key id,
@@ -890,7 +892,7 @@ it, never a second writer.
 | Whether a recovery passphrase is set; each place snapshots go, its last verified snapshot (and the recovery key it opens with), a desktop copy that is waiting, and its last error | Recovery | `fermix home snapshots status` |
 | Set the recovery passphrase | Recovery: typed twice, never shown; a change says which snapshots open with which passphrase | `fermix home snapshots passphrase` |
 | On the primary: the secrets that did not resolve on this host (`secrets_missing`), by id | Secrets to enter again | `fermix home status` |
-| Where snapshots are kept (bucket, region, the S3-compatible address, how often) and the two access keys | Recovery: the `snapshots` section; the keys as hidden fields, never shown again | `fermix settings set snapshots …`, `fermix settings secret set snapshot_s3_access_key_id` |
+| How often snapshots run, and whether the recovery passphrase is set (S3 is the server's own) | Recovery: the `snapshots` section | `fermix settings set snapshots …` |
 | Take a snapshot now (`home.act` `back_up_now`) | **Back up now**, offered once snapshots have somewhere to go | `fermix always-on back-up-now` |
 | An enrollment code for the server (`home.act` `own_server`) | **Use my own Linux server**: the code shown once with **Copy** and when it expires, beside the command for the server, which carries no code, and the optional `--tailscale` one; **Cancel the code** closes it | `fermix always-on own-server`, the code printed once under both commands; `cancel` closes it |
 | On a linked desktop: the Tailscale Funnel mounts the server's webhooks need (`summary.detail.webhooks`, from the server's `webhooks`) | Each command with **Copy**, its policy step and caveats | `fermix always-on`, each command on a line of its own |
