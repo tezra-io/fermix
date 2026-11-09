@@ -107,6 +107,7 @@ defmodule FermixCore.Home.Archive do
           harness_consent_reset: boolean(),
           secret_store_switched: boolean(),
           imessage_disabled: boolean(),
+          instance_role_dropped: boolean(),
           device_settings_dropped: [String.t()],
           keyring_secrets: non_neg_integer(),
           screen_history_removed: non_neg_integer(),

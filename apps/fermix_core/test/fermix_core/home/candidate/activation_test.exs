@@ -138,9 +138,90 @@ defmodule FermixCore.Home.Candidate.ActivationTest do
     assert {:ok, %{credentials: :instance_role}} = config |> snapshots_section() |> Config.s3()
   end
 
+  # The stream again, from a source whose settings are `text`.
+  defp stage_snapshots!(ctx, text) do
+    File.write!(
+      Path.join(ctx.source, "config.toml"),
+      "[fermix_core.engine]\nrole = \"device\"\n\n" <> text
+    )
+
+    SafeRm.rm!(ctx.incoming)
+
+    {:ok, _written} =
+      Snapshot.write(ctx.source, Recipient.public(ctx.pair), ctx.incoming, host: "macos-aarch64")
+
+    :ok
+  end
+
+  defp staged_config!(ctx, destination) do
+    assert {:ok, 7} =
+             Activation.stage(
+               ctx.home,
+               ctx.incoming,
+               ctx.pair,
+               %{"destination" => destination, "recovery_recipient" => @recovery},
+               restore_opts()
+             )
+
+    File.read!(Path.join(Candidate.staging_path(ctx.home), "config.toml"))
+  end
+
   defp snapshots_section(config) do
     {:ok, parsed} = TomlElixir.decode(config)
     parsed |> get_in(["fermix_core", "snapshots"]) |> Config.normalize()
+  end
+
+  # The instance role signs for the one server whose infrastructure set the
+  # bucket. Wherever else the home becomes the primary, its bucket and signing
+  # stay behind; a bucket set by hand with access keys travels as it was.
+  describe "the last server's instance-role signing" do
+    test "is left behind by a move to a server its infrastructure gave no bucket", ctx do
+      stage_snapshots!(ctx, """
+      [fermix_core.snapshots]
+      interval_hours = 12
+      s3_bucket = "invented-last-server-bucket"
+      s3_region = "eu-north-1"
+      s3_credentials = "instance_role"
+      """)
+
+      config = staged_config!(ctx, %{})
+
+      refute config =~ "s3_bucket"
+      refute config =~ "s3_region"
+      refute config =~ "s3_credentials"
+      assert config =~ "interval_hours = 12"
+    end
+
+    test "gives way to a bucket a move names by hand, signed with access keys", ctx do
+      stage_snapshots!(ctx, """
+      [fermix_core.snapshots]
+      s3_bucket = "invented-last-server-bucket"
+      s3_region = "eu-north-1"
+      s3_credentials = "instance_role"
+      """)
+
+      config =
+        staged_config!(ctx, %{"s3_bucket" => "invented-by-hand", "s3_region" => "eu-west-1"})
+
+      assert config =~ ~s(s3_bucket = "invented-by-hand")
+      assert config =~ ~s(s3_region = "eu-west-1")
+      refute config =~ "invented-last-server-bucket"
+      refute config =~ "s3_credentials"
+    end
+
+    test "a bucket set by hand with access keys travels as it was", ctx do
+      stage_snapshots!(ctx, """
+      [fermix_core.snapshots]
+      s3_bucket = "invented-hand-set-bucket"
+      s3_region = "eu-north-1"
+      s3_endpoint = "https://s3.invented.test"
+      """)
+
+      config = staged_config!(ctx, %{})
+
+      assert config =~ ~s(s3_bucket = "invented-hand-set-bucket")
+      assert config =~ ~s(s3_endpoint = "https://s3.invented.test")
+    end
   end
 
   test "the keychain's secrets the stream carried land in the file store, referenced as files",

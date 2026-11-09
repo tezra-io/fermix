@@ -22,7 +22,12 @@ defmodule FermixCore.Home.Archive.RestoredConfig do
     * `[fermix_channels.imessage] enabled = true` restored on a host that is
       not macOS becomes `false`: iMessage needs that Mac's Messages database
       and helper, and a settings file that asks for it refuses to load on
-      another system, so the restored engine could not start (M75).
+      another system, so the restored engine could not start (M75);
+    * an Always On server's own S3 bucket, signed with its instance role
+      (`s3_credentials = "instance_role"`), restored on macOS is left out
+      (`Archive.InstanceRole`): a Mac keeps no S3 snapshots. Elsewhere it is
+      kept, since a Linux restore may be that server's own, whose first boot
+      sets its role up again.
 
   It also reports, without changing them, the keys that hold absolute paths
   outside the old home, and how many secrets the file keeps as `@keyring`
@@ -30,6 +35,7 @@ defmodule FermixCore.Home.Archive.RestoredConfig do
   """
 
   alias FermixCore.Home.Archive.ConfigText
+  alias FermixCore.Home.Archive.InstanceRole
   alias FermixCore.Home.DeviceLocal
   alias FermixCore.Setup.SecretWriter
 
@@ -45,6 +51,7 @@ defmodule FermixCore.Home.Archive.RestoredConfig do
           harness_consent_reset: boolean(),
           secret_store_switched: boolean(),
           imessage_disabled: boolean(),
+          instance_role_dropped: boolean(),
           device_settings_dropped: [String.t()],
           keyring_secrets: non_neg_integer()
         }
@@ -58,6 +65,7 @@ defmodule FermixCore.Home.Archive.RestoredConfig do
       harness_consent_reset: false,
       secret_store_switched: false,
       imessage_disabled: false,
+      instance_role_dropped: false,
       device_settings_dropped: [],
       keyring_secrets: 0
     }
@@ -100,14 +108,16 @@ defmodule FermixCore.Home.Archive.RestoredConfig do
     {consent_text, consent_reset?} = reset_harness_consent(rebased)
     {store_text, switched?} = file_store_without_keyring(consent_text, facts)
     {imessage_text, imessage_off?} = imessage_off_away_from_macos(store_text, facts)
+    {settled_text, instance_role_dropped?} = instance_role_off_a_mac(imessage_text, facts)
 
-    {imessage_text,
+    {settled_text,
      %{
        rewritten: rewritten,
        kept_paths: ConfigText.paths_outside(original, facts.old_root),
        harness_consent_reset: consent_reset?,
        secret_store_switched: switched?,
        imessage_disabled: imessage_off?,
+       instance_role_dropped: instance_role_dropped?,
        device_settings_dropped: dropped,
        keyring_secrets: ConfigText.keyring_references(original)
      }}
@@ -131,6 +141,13 @@ defmodule FermixCore.Home.Archive.RestoredConfig do
         {text, false}
     end
   end
+
+  defp instance_role_off_a_mac(text, %{macos?: true}) do
+    dropped = InstanceRole.drop(text)
+    {dropped, dropped != text}
+  end
+
+  defp instance_role_off_a_mac(text, %{macos?: false}), do: {text, false}
 
   defp file_store_without_keyring(text, %{macos?: true}), do: {text, false}
 

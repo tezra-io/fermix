@@ -93,6 +93,7 @@ defmodule FermixCore.Home.ArchiveTest do
                   harness_consent_reset: true,
                   secret_store_switched: false,
                   imessage_disabled: false,
+                  instance_role_dropped: false,
                   device_settings_dropped: [],
                   keyring_secrets: 2,
                   screen_history_removed: 3,

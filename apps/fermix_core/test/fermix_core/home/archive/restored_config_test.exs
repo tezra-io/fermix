@@ -29,6 +29,7 @@ defmodule FermixCore.Home.Archive.RestoredConfigTest do
              harness_consent_reset: true,
              secret_store_switched: true,
              imessage_disabled: false,
+             instance_role_dropped: false,
              device_settings_dropped: [],
              keyring_secrets: 1
            }
@@ -73,6 +74,33 @@ defmodule FermixCore.Home.Archive.RestoredConfigTest do
 
     assert {:ok, ^config, %{imessage_disabled: false}} =
              RestoredConfig.settle(config, facts(macos?: true, keyring: false))
+  end
+
+  # A server's snapshots, signed with its own instance role, never come with
+  # its home to a Mac, which keeps none; a Linux restore may be that server's
+  # own, whose first boot set the role up again. A bucket set by hand with
+  # access keys is kept anywhere.
+  test "a server's instance-role signing is left out on a Mac and kept elsewhere" do
+    config = """
+    [fermix_core.snapshots]
+    interval_hours = 12
+    s3_bucket = "invented-server-bucket"
+    s3_region = "eu-north-1"
+    s3_credentials = "instance_role"
+    """
+
+    assert {:ok, mac_text, %{instance_role_dropped: true}} =
+             RestoredConfig.settle(config, facts(macos?: true, keyring: true))
+
+    assert mac_text == "[fermix_core.snapshots]\ninterval_hours = 12\n"
+
+    assert {:ok, ^config, %{instance_role_dropped: false}} =
+             RestoredConfig.settle(config, facts(macos?: false, keyring: true))
+
+    by_hand = "[fermix_core.snapshots]\ns3_bucket = \"invented-hand-set\"\n"
+
+    assert {:ok, ^by_hand, %{instance_role_dropped: false}} =
+             RestoredConfig.settle(by_hand, facts(macos?: true, keyring: true))
   end
 
   test "iMessage already off, or never configured, is left as it was" do

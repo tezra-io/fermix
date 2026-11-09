@@ -13,7 +13,9 @@ defmodule FermixCore.Home.Candidate.Activation do
   `[fermix_core.snapshots]` (the bucket and its region when one was named,
   with `s3_credentials = "instance_role"` in place of any storage address or
   access keys where the server's infrastructure set them, and the recovery
-  recipient the move carried). On a host that is not a Mac
+  recipient the move carried). The last server's own instance-role bucket
+  never travels on: a move back, or a move to a server whose infrastructure
+  named none, leaves it behind (`Archive.InstanceRole`). On a host that is not a Mac
   the restore itself has already turned iMessage off
   (`FermixCore.Home.Archive.RestoredConfig`), as it does
   for `fermix home import`: a settings file that turns iMessage on refuses to
@@ -73,6 +75,7 @@ defmodule FermixCore.Home.Candidate.Activation do
   """
 
   alias FermixCore.Home.Archive.ConfigText
+  alias FermixCore.Home.Archive.InstanceRole
   alias FermixCore.Home.Candidate
   alias FermixCore.Home.Candidate.Return
   alias FermixCore.Home.DesktopLink
@@ -279,6 +282,7 @@ defmodule FermixCore.Home.Candidate.Activation do
   defp moved_settings(text, facts) do
     text
     |> ConfigText.put("fermix_core.engine", "role", ~s("primary"))
+    |> InstanceRole.drop()
     |> put_destination(Map.get(facts, "destination", %{}))
     |> put_recipient(Map.get(facts, "recovery_recipient"))
   end

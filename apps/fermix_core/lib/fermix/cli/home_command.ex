@@ -210,6 +210,9 @@ defmodule Fermix.CLI.HomeCommand do
     if restored.imessage_disabled,
       do: IO.puts("iMessage needs a Mac, so it is turned off here.")
 
+    if restored.instance_role_dropped,
+      do: IO.puts("The server's S3 bucket stays with the server: a Mac keeps no S3 snapshots.")
+
     print_left_out(restored.device_settings_dropped)
 
     print_keyring(restored.keyring_secrets, "The archived home kept", "on this host")

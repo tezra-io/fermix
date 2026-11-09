@@ -58,7 +58,17 @@ defmodule FermixChannels.Home.ReturnTest do
 
     # Forward: the Mac moves to the server and stays as its desktop.
     {:ok, %{code: code}} = Enrollment.open(mac.enrollment)
-    server_root = HomeMove.candidate_home!(code)
+    # The server's infrastructure set its bucket (E1), which a move back
+    # leaves behind on the server.
+    server_root =
+      HomeMove.candidate_home!(code,
+        destination: %{
+          "s3_bucket" => "invented-server-bucket",
+          "s3_region" => "eu-north-1",
+          "s3_credentials" => "instance_role"
+        }
+      )
+
     to_server = HomeMove.start_candidate!(server_root, mac)
     %{"candidate_id" => to_server_id} = HomeMove.await_phase(server_root, "enrolled")
     {:ok, _move} = Move.start(mac.root, @primary, to_server_id, recipient, HomeMove.start_opts())
@@ -110,6 +120,13 @@ defmodule FermixChannels.Home.ReturnTest do
     # Its own desktop row is gone from the list it took back.
     assert {:ok, []} = DeviceStore.list(root: mac)
     assert File.read!(Path.join(mac, "config.toml")) =~ ~s(workspace_root = "#{mac}/workspace")
+    # The server signed its snapshots with its own instance role; the Mac
+    # takes none of that bucket's settings back.
+    assert File.read!(Path.join(ctx.server.root, "config.toml")) =~
+             ~s(s3_credentials = "instance_role")
+
+    refute File.read!(Path.join(mac, "config.toml")) =~ "invented-server-bucket"
+    refute File.read!(Path.join(mac, "config.toml")) =~ "s3_credentials"
     one_primary!(ctx)
 
     # The Mac's first boot as the primary records that it took Fermix back.
