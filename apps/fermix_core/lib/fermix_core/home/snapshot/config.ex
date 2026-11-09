@@ -12,12 +12,21 @@ defmodule FermixCore.Home.Snapshot.Config do
       s3_endpoint = "https://s3.example.net"      # S3-compatible hosts only
       s3_access_key_id = "@keyring"               # the snapshot_s3_* secret
       s3_secret_access_key = "@keyring"           # references
+      s3_credentials = "instance_role"            # E1, in place of the keys
 
   The S3 target is on when `recipient` and `s3_bucket` are both set. Absent
   keys read as their defaults (`interval_hours` 6, `s3_prefix` `fermix`) and
   are never written for the owner. The two key fields hold the references
   `SecretPaths` keeps for the secrets `snapshot_s3_access_key_id` and
   `snapshot_s3_secret_access_key`, never typed by hand.
+
+  **How the target signs.** With the access keys, unless `s3_credentials` is
+  `"instance_role"`: an Always On server whose infrastructure set the bucket
+  (fermix-server-aws's `enable_s3_backups`), where the move's activation
+  writes it from the candidate's destination and the target signs with the
+  session root's credentials helper hands the engine (`S3.Credentials`). It
+  is never inferred: without it, missing keys are missing keys. It takes no
+  storage address and no access key beside it.
 
   `normalize/1` turns the parsed file into the keyword application environment
   holds, refusing an unknown key or a bad value by name with a sentence that
@@ -31,7 +40,9 @@ defmodule FermixCore.Home.Snapshot.Config do
 
   @section "[fermix_core.snapshots]"
   @keys ~w(recipient interval_hours s3_bucket s3_region s3_prefix s3_endpoint
-           s3_access_key_id s3_secret_access_key)
+           s3_access_key_id s3_secret_access_key s3_credentials)
+  # What `s3_credentials = "instance_role"` takes nothing of.
+  @instance_role_refuses ~w(s3_endpoint s3_access_key_id s3_secret_access_key)a
   @default_interval_hours 6
   @default_prefix "fermix"
   @interval 1..168
@@ -47,6 +58,7 @@ defmodule FermixCore.Home.Snapshot.Config do
           region: String.t(),
           prefix: String.t(),
           endpoint: String.t() | nil,
+          credentials: :access_keys | :instance_role,
           access_key_id: String.t() | nil,
           secret_access_key: String.t() | nil
         }
@@ -66,7 +78,8 @@ defmodule FermixCore.Home.Snapshot.Config do
   def normalize(config) when is_map(config) or is_list(config) do
     entries = entries!(config)
 
-    Enum.flat_map(@keys, fn key ->
+    @keys
+    |> Enum.flat_map(fn key ->
       with {^key, raw} <- List.keyfind(entries, key, 0),
            value when value != nil <- value!(key, raw) do
         [{String.to_existing_atom(key), value}]
@@ -74,6 +87,23 @@ defmodule FermixCore.Home.Snapshot.Config do
         _absent -> []
       end
     end)
+    |> signs_alone!()
+  end
+
+  # The instance role signs alone: a storage address or an access key beside
+  # it would be a second way to sign the same bucket.
+  defp signs_alone!(section) do
+    case {Keyword.get(section, :s3_credentials),
+          Enum.find(@instance_role_refuses, &Keyword.has_key?(section, &1))} do
+      {"instance_role", key} when key != nil ->
+        raise ArgumentError,
+              ~s(config.toml #{@section} s3_credentials = "instance_role" signs with the ) <>
+                "server's instance role, so it takes no #{key}. Remove one of them. Fix it " <>
+                "and save again."
+
+      _alone ->
+        section
+    end
   end
 
   @doc """
@@ -116,6 +146,7 @@ defmodule FermixCore.Home.Snapshot.Config do
            region: Keyword.get(config, :s3_region, "us-east-1"),
            prefix: Keyword.get(config, :s3_prefix, @default_prefix),
            endpoint: Keyword.get(config, :s3_endpoint),
+           credentials: credentials(Keyword.get(config, :s3_credentials)),
            access_key_id: Keyword.get(config, :s3_access_key_id),
            secret_access_key: Keyword.get(config, :s3_secret_access_key)
          }}
@@ -124,6 +155,9 @@ defmodule FermixCore.Home.Snapshot.Config do
         :not_configured
     end
   end
+
+  defp credentials("instance_role"), do: :instance_role
+  defp credentials(nil), do: :access_keys
 
   defp entries!(config) do
     entries = Enum.map(config, &entry!/1)
@@ -152,6 +186,16 @@ defmodule FermixCore.Home.Snapshot.Config do
   defp value!("s3_region", value), do: matching!("s3_region", value, @region, region_rule())
   defp value!("s3_prefix", value), do: prefix!(value)
   defp value!("s3_endpoint", value), do: endpoint!(value)
+  defp value!("s3_credentials", "instance_role"), do: "instance_role"
+
+  defp value!("s3_credentials", _value),
+    do:
+      refuse(
+        "s3_credentials",
+        ~s(takes only "instance_role", the Always On server's own role; leave it out to ) <>
+          "sign with access keys"
+      )
+
   defp value!(key, value), do: secret!(key, value)
 
   defp recipient!(value) do

@@ -3,7 +3,8 @@ defmodule FermixCore.Home.Snapshot.S3.SigV4Test do
   # (`aws-sig-v4-test-suite`: AKIDEXAMPLE, us-east-1, service `service`,
   # 20150830T123600Z) and the S3 examples of "Signature Calculations for the
   # Authorization Header: Transferring Payload in a Single Chunk"
-  # (AKIAIOSFODNN7EXAMPLE, us-east-1, s3, 20130524T000000Z).
+  # (AKIAIOSFODNN7EXAMPLE, us-east-1, s3, 20130524T000000Z), and the suite's
+  # session-token request (`post-sts-header-before`).
   use ExUnit.Case, async: true
 
   alias FermixCore.Home.Snapshot.S3.SigV4
@@ -14,6 +15,11 @@ defmodule FermixCore.Home.Snapshot.S3.SigV4Test do
   }
   @suite_scope %{region: "us-east-1", service: "service", now: ~U[2015-08-30 12:36:00Z]}
   @empty_sha256 "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  @suite_token "AQoDYXdzEPT//////////wEXAMPLEtc764bNrC9SAPBSM22wDOk4x4HIZ8j4FZTwdQWLWsKWHGBuF" <>
+                 "qwAeMicRXmxfpSPfIeoIYRqTflfKD8YUuwthAx7mSEI/qkPpKPi/kMcGdQrmGdeehM4IC1NtBmU" <>
+                 "pp2wUE8phUZampKsburEDy0KPkyQDYwT7WZ0wq5VSXDvp75YU9HFvlRd8Tx6q6fE8YQcHNVXAki" <>
+                 "Y9q6d+xo0rKwT38xVqr7ZD0u0iPPkUL64lIZbqBAz+scqKmlzm8FDrypNC9Yjc8fPOLn9FX9KSY" <>
+                 "vKTr4rvx3iSIlTJabIQwj2ICCR/oLxBA=="
 
   @s3_credentials %{
     access_key_id: "AKIAIOSFODNN7EXAMPLE",
@@ -43,6 +49,30 @@ defmodule FermixCore.Home.Snapshot.S3.SigV4Test do
 
       assert signature(request, @suite_credentials, @suite_scope) ==
                "5da7c1a2acd57cee7505fc6676e4e544621c30862966e37dddb68e92efbe5d6b"
+    end
+  end
+
+  # The suite's post-sts-token/post-sts-header-before: a session's token is
+  # sent as `x-amz-security-token` and signed with the other headers. botocore
+  # signs the same request to the same value.
+  describe "a session's token" do
+    test "post-sts-header-before" do
+      credentials = Map.put(@suite_credentials, :session_token, @suite_token)
+      request = suite_request("POST", [])
+      headers = SigV4.sign(request, credentials, @suite_scope)
+
+      assert List.keyfind(headers, "x-amz-security-token", 0) ==
+               {"x-amz-security-token", @suite_token}
+
+      assert authorization(request, credentials, @suite_scope) ==
+               "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/service/aws4_request, " <>
+                 "SignedHeaders=host;x-amz-date;x-amz-security-token, " <>
+                 "Signature=85d96828115b5dc0cfc3bd16ad9e210dd772bbebba041836c64533a82be05ead"
+    end
+
+    test "access keys alone add no token" do
+      headers = SigV4.sign(suite_request("POST", []), @suite_credentials, @suite_scope)
+      refute List.keyfind(headers, "x-amz-security-token", 0)
     end
   end
 

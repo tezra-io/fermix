@@ -22,6 +22,15 @@ defmodule FermixCore.Home.Snapshot.S3 do
   target never lists, reads or deletes, so an access key that may only
   `PutObject` is enough.
 
+  **What it signs with** (`S3.Credentials`): the access keys, or on an Always
+  On server whose infrastructure set the bucket the instance role's session,
+  whose token is signed with the rest (`x-amz-security-token`). With the
+  session, the upload also names the account the session belongs to as the
+  bucket's expected owner (`x-amz-expected-bucket-owner`, signed): the
+  bucket's name is predictable and S3's names are global, so a bucket of that
+  name in another account refuses it (403), which is its own failure
+  (`{:not_the_owners_bucket, ...}`), apart from a bucket that does not exist.
+
   **One `PUT`.** A single `PutObject` carries up to 5 GiB. A larger snapshot is
   refused by name (`{:too_large, size, max}`) rather than split: multipart
   upload needs three more calls and a second permission story, and a home that
@@ -76,14 +85,14 @@ defmodule FermixCore.Home.Snapshot.S3 do
   def store(%{path: path, size: size, sha256: sha256, name: name}, settings, opts)
       when is_binary(path) and is_list(opts) do
     with :ok <- within_one_put(size),
-         {:ok, credentials} <- Credentials.resolve(settings) do
+         {:ok, credentials} <- Credentials.resolve(settings, opts) do
       key = key(settings, name, opts)
 
       request =
         request(settings, key, %{path: path, size: size, sha256: sha256}, credentials, opts)
 
       case HttpClient.request(request, "snapshot S3 upload") do
-        {:ok, response} -> answer(response, settings, key, sha256)
+        {:ok, response} -> answer(response, settings, key, sha256, credentials)
         {:error, exception} -> {:error, {:unreachable, Exception.message(exception)}}
       end
     end
@@ -93,9 +102,36 @@ defmodule FermixCore.Home.Snapshot.S3 do
   def sentence({:too_large, size, max}),
     do: "The snapshot is #{size} bytes, more than the #{max} one S3 upload carries."
 
-  def sentence({:refused, status, code, message}) do
-    said = if String.ends_with?(message, [".", "?", "!"]), do: message, else: message <> "."
-    "S3 refused the snapshot (#{status} #{code}): #{said}"
+  def sentence({:refused, status, code, message}),
+    do: "S3 refused the snapshot (#{status} #{code}): #{terminated(message)}"
+
+  def sentence({:not_the_owners_bucket, bucket, account_id, status, message}) do
+    "S3 refused the snapshot (#{status} AccessDenied): #{terminated(message)} Fermix puts it " <>
+      "only into a bucket of the account #{account_id}, and this server's session may write " <>
+      "only there: the bucket #{bucket} may belong to another account."
+  end
+
+  def sentence({:session_missing, nil}),
+    do:
+      "The server's credentials helper has handed Fermix no S3 session yet: " <>
+        "fermix-snapshot-credentials.timer runs it every 15 minutes."
+
+  def sentence({:session_missing, said}),
+    do:
+      "The server's credentials helper has handed Fermix no S3 session yet. Its last try: " <>
+        terminated(said)
+
+  def sentence({:session_unreadable, reason}),
+    do:
+      "Fermix could not read the S3 session the server's credentials helper wrote: " <>
+        "#{:file.format_error(reason)}."
+
+  def sentence(:session_malformed),
+    do: "The S3 session file the server's credentials helper wrote is not in its shape."
+
+  def sentence({:session_expired, at, said}) do
+    "The S3 session the server's credentials helper handed Fermix ran out at " <>
+      DateTime.to_iso8601(at) <> "." <> last_try(said)
   end
 
   def sentence({:unreachable, reason}), do: "S3 could not be reached: #{reason}."
@@ -114,6 +150,12 @@ defmodule FermixCore.Home.Snapshot.S3 do
 
   def sentence(reason), do: "The S3 upload failed: #{describe(reason)}."
 
+  defp terminated(text),
+    do: if(String.ends_with?(text, [".", "?", "!"]), do: text, else: text <> ".")
+
+  defp last_try(nil), do: ""
+  defp last_try(said), do: " Its last try: " <> terminated(said)
+
   defp within_one_put(size) when size <= @max_put_bytes, do: :ok
   defp within_one_put(size), do: {:error, {:too_large, size, @max_put_bytes}}
 
@@ -122,12 +164,13 @@ defmodule FermixCore.Home.Snapshot.S3 do
     uri = URI.parse(base)
     checksum = file.sha256 |> Base.decode16!(case: :lower) |> Base.encode64()
 
-    headers = [
-      {"host", host(uri)},
-      {"content-length", Integer.to_string(file.size)},
-      {"x-amz-content-sha256", file.sha256},
-      {"x-amz-checksum-sha256", checksum}
-    ]
+    headers =
+      [
+        {"host", host(uri)},
+        {"content-length", Integer.to_string(file.size)},
+        {"x-amz-content-sha256", file.sha256},
+        {"x-amz-checksum-sha256", checksum}
+      ] ++ expected_owner(credentials)
 
     signed =
       SigV4.sign(
@@ -155,6 +198,13 @@ defmodule FermixCore.Home.Snapshot.S3 do
     )
   end
 
+  # The instance role's session names its account as the bucket's owner, so a
+  # bucket of that name in another account refuses the upload.
+  defp expected_owner(%{account_id: account_id}),
+    do: [{"x-amz-expected-bucket-owner", account_id}]
+
+  defp expected_owner(_access_keys), do: []
+
   # Path-style on an S3-compatible host, virtual-hosted on AWS, and path-style
   # on AWS for a dotted bucket name: `a.b.s3.<region>.amazonaws.com` is not
   # covered by `*.s3.<region>.amazonaws.com`, so TLS would refuse it.
@@ -171,7 +221,7 @@ defmodule FermixCore.Home.Snapshot.S3 do
     if {scheme, port} in [{"https", 443}, {"http", 80}], do: host, else: "#{host}:#{port}"
   end
 
-  defp answer(%Req.Response{status: 200} = response, settings, key, sha256) do
+  defp answer(%Req.Response{status: 200} = response, settings, key, sha256, _credentials) do
     ours = sha256 |> Base.decode16!(case: :lower) |> Base.encode64()
 
     case Req.Response.get_header(response, "x-amz-checksum-sha256") do
@@ -181,10 +231,23 @@ defmodule FermixCore.Home.Snapshot.S3 do
     end
   end
 
-  defp answer(%Req.Response{status: status, body: body}, _settings, _key, _sha256) do
-    {:error,
-     {:refused, status, xml_field(body, "Code") || "no code", vendor_message(body, status)}}
+  defp answer(%Req.Response{status: status, body: body}, settings, _key, _sha256, credentials) do
+    refused(
+      status,
+      xml_field(body, "Code") || "no code",
+      vendor_message(body, status),
+      settings,
+      credentials
+    )
   end
+
+  # A bucket of another account refuses an upload naming its expected owner
+  # with 403 AccessDenied; with the session, that refusal is its own.
+  defp refused(403, "AccessDenied", message, settings, %{account_id: account_id}),
+    do: {:error, {:not_the_owners_bucket, settings.bucket, account_id, 403, message}}
+
+  defp refused(status, code, message, _settings, _credentials),
+    do: {:error, {:refused, status, code, message}}
 
   defp vendor_message(body, status) do
     case xml_field(body, "Message") do

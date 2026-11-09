@@ -105,9 +105,55 @@ defmodule FermixCore.Home.Snapshot.ConfigTest do
              region: "us-east-1",
              prefix: "fermix",
              endpoint: nil,
+             credentials: :access_keys,
              access_key_id: nil,
              secret_access_key: nil
            }
+  end
+
+  # E1: the server's infrastructure set the bucket, and the engine signs with
+  # its instance role's session. Explicit, written at enrollment: never chosen
+  # because keys are missing.
+  test "signing with the instance role is a setting of its own" do
+    section = %{
+      "s3_bucket" => "invented-snapshots",
+      "s3_region" => "eu-west-1",
+      "s3_credentials" => "instance_role"
+    }
+
+    normalized = Config.normalize(section)
+
+    assert normalized == [
+             s3_bucket: "invented-snapshots",
+             s3_region: "eu-west-1",
+             s3_credentials: "instance_role"
+           ]
+
+    assert Config.normalize(Config.to_keyword(normalized)) == normalized
+
+    assert {:ok, %{credentials: :instance_role, access_key_id: nil, secret_access_key: nil}} =
+             Config.s3([{:recipient, @recipient} | normalized])
+  end
+
+  test "the instance role signs alone: no storage address or access key beside it" do
+    for key <- ~w(s3_endpoint s3_access_key_id s3_secret_access_key) do
+      value = if key == "s3_endpoint", do: "https://s3.invented.test", else: "invented"
+
+      error =
+        assert_raise ArgumentError, fn ->
+          Config.normalize(%{
+            "s3_bucket" => "invented-snapshots",
+            "s3_credentials" => "instance_role",
+            key => value
+          })
+        end
+
+      assert error.message ==
+               ~s(config.toml [fermix_core.snapshots] s3_credentials = "instance_role" signs ) <>
+                 "with the server's instance role, so it takes no #{key}. Remove one of " <>
+                 "them. Fix it and save again.",
+             key
+    end
   end
 
   test "an empty text value is a cleared field" do
@@ -124,7 +170,8 @@ defmodule FermixCore.Home.Snapshot.ConfigTest do
           {"s3_prefix", "/fermix", "with no slash at either end"},
           {"s3_endpoint", "ftp://s3.invented.test", "takes the storage service's address"},
           {"s3_endpoint", "https://s3.invented.test/path", "with no path"},
-          {"s3_access_key_id", "two\nlines", "takes a single line"}
+          {"s3_access_key_id", "two\nlines", "takes a single line"},
+          {"s3_credentials", "access_keys", ~s(takes only "instance_role")}
         ] do
       error = assert_raise ArgumentError, fn -> Config.normalize(%{key => value}) end
       assert error.message =~ "config.toml [fermix_core.snapshots] #{key} takes", key
