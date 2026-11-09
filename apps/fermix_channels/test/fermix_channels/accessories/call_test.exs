@@ -195,6 +195,22 @@ defmodule FermixChannels.Accessories.CallTest do
       refute_received {:engine_started, _session, _opts}
     end
 
+    # The Mac names the accessory, so its start needs no choice of it; a choice
+    # that cannot be read is still never read as one, from either side.
+    test "a start from the Mac while the voice device cannot be read is refused voice_device_unreadable",
+         ctx do
+      ctx = attached(ctx)
+      path = Store.voice_device_path(ctx.home)
+      File.write!(path, "not json")
+      File.chmod!(path, 0o600)
+
+      assert {:error, {:refused, "voice_device_unreadable"}} = Link.start_call(ctx.link)
+
+      assert %{call: nil} = Link.status(ctx.link)
+      refute_received {:sim, _sim, {:received, %{type: "call.start"}}}
+      refute_received {:engine_started, _session, _opts}
+    end
+
     test "an accessory short of power is refused power_too_low, from a tap and from the Mac",
          ctx do
       ctx = attached(ctx)

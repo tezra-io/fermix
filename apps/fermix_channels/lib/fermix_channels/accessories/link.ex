@@ -1072,7 +1072,16 @@ defmodule FermixChannels.Accessories.Link do
       state.next_stream > @max_stream -> "stream_ids_exhausted"
       low_power?(state) -> "power_too_low"
       origin == :accessory -> choice_refusal(state) || readiness_refusal(state.readiness.())
-      true -> readiness_refusal(state.readiness.())
+      true -> unreadable_refusal(state) || readiness_refusal(state.readiness.())
+    end
+  end
+
+  # The Mac names this accessory, so its start needs no choice of it; a choice
+  # that cannot be read still refuses it, as it refuses a tap.
+  defp unreadable_refusal(state) do
+    case state.voice_device.() do
+      {:error, _why} = read -> voice_device_unreadable(state, read, :voice_device_unreadable)
+      {:ok, _device} -> nil
     end
   end
 

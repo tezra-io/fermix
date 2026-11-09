@@ -5,6 +5,7 @@ defmodule FermixCore.Management.AccessoriesTest do
   use ExUnit.Case, async: true
 
   alias FermixCore.Accessories.Store
+  alias FermixCore.Accessories.VoiceDevice
   alias FermixCore.Management.Accessories
   alias FermixCore.Management.Copy
   alias FermixCore.Management.Settings.Voice
@@ -647,6 +648,32 @@ defmodule FermixCore.Management.AccessoriesTest do
                "capability" => "accessories",
                "code" => "call_in_progress",
                "sentence" => "Another voice call is in progress."
+             }
+    end
+
+    test "a start refused for a voice device that cannot be read says so" do
+      facts = Goldens.running([Goldens.entry(:linked, attached_link())])
+
+      opts =
+        Goldens.base(
+          records: {:ok, [Goldens.record()]},
+          provider_opts: [
+            status: facts,
+            replies: %{call_start: {:error, {:refused, "voice_device_unreadable"}}}
+          ]
+        )
+
+      assert {:error, :unavailable, details} =
+               route(
+                 "accessories.call.start",
+                 %{"accessory_id" => Goldens.record().accessory_id},
+                 opts
+               )
+
+      assert details == %{
+               "capability" => "accessories",
+               "code" => "voice_device_unreadable",
+               "sentence" => VoiceDevice.unreadable_sentence()
              }
     end
 

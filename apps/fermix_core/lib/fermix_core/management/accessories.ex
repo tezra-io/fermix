@@ -1297,6 +1297,7 @@ defmodule FermixCore.Management.Accessories do
       Map.has_key?(@call_sentences, reason) -> Map.fetch!(@call_sentences, reason)
       Map.has_key?(@voice_sentences, reason) -> Map.fetch!(@voice_sentences, reason)
       reason == "power_too_low" -> @power_sentence
+      reason == "voice_device_unreadable" -> VoiceDevice.unreadable_sentence()
       true -> @call_ended_sentence
     end
   end
