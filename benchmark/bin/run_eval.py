@@ -1329,9 +1329,13 @@ def run_voice_case(cfg, client, suite, scn, case, run_id, trial, judge_on):
     trace = dict(trace, output={"text": evidence.spoken()})
     budget = {"max_cost_usd": cfg.budgets.max_cost_usd,
               "max_duration_ms": cfg.budgets.max_duration_ms}
-    gates = grade.grade(trace, spans, dict(budget, **eff),
-                        elapsed_ms=evidence.elapsed_ms) + wire_gates
-    view = grade.TurnView.build(trace, spans, elapsed_ms=evidence.elapsed_ms)
+    # A call that handed Fermix no task has no token usage: its own voice
+    # accounting is what shows its trace whole.
+    require_tokens = not voice.accounted_without_tasks(trace)
+    gates = grade.grade(trace, spans, dict(budget, **eff), elapsed_ms=evidence.elapsed_ms,
+                        require_tokens=require_tokens) + wire_gates
+    view = grade.TurnView.build(trace, spans, elapsed_ms=evidence.elapsed_ms,
+                                require_tokens=require_tokens)
     _record_graded_turn(rec, cfg, trace, gates, view, None)
     evidence_incomplete = _view_incomplete(view)
     said = spoken_request.split("\n")           # one clip's fixture text per line
@@ -1345,7 +1349,7 @@ def run_voice_case(cfg, client, suite, scn, case, run_id, trial, judge_on):
     rubric = None if evidence_incomplete else _rubric_record(
         cfg, case, scn, run_id, trial, judge_on, voice.transcript(evidence, said),
         [_tool_evidence(view, 0), voice.judge_evidence(evidence)],
-        _candidate_routes_from_turns([rec]), turn_records=[rec],
+        voice.call_routes(trace) + _candidate_routes_from_turns([rec]), turn_records=[rec],
         candidate_session=evidence.call_id(), extra_facts=facts)
     negative_failed = bool(failed_gates([rec], NEGATIVE_GATES))
     gate_ok = all(gate.passed for gate in gates) and not negative_failed

@@ -182,7 +182,8 @@ class TurnView:
     @classmethod
     def build(cls, trace: dict, spans: list[dict],
               elapsed_ms: float | None = None,
-              require_duration: bool = True) -> "TurnView":
+              require_duration: bool = True,
+              require_tokens: bool = True) -> "TurnView":
         tool_spans = sorted(
             [s for s in spans if s.get("type") == "tool"],
             key=lambda s: parse_ts(s.get("start_time")) or datetime.min.replace(tzinfo=timezone.utc),
@@ -220,7 +221,7 @@ class TurnView:
         if not trace_complete and not issues:
             issues.append("trace was not proven settled by OpikClient.await_complete")
         issues.extend(_metric_issues(
-            cost_ok, duration_ok, tokens_ok, iterations_ok, require_duration))
+            cost_ok, duration_ok, tokens_ok, iterations_ok, require_duration, require_tokens))
         return cls(
             reply=text_of(trace.get("output")),
             cost=cost,
@@ -283,7 +284,8 @@ def _duration_metric(elapsed_ms: float | None) -> tuple[float, bool, str]:
 
 
 def _metric_issues(cost_ok: bool, duration_ok: bool, tokens_ok: bool,
-                   iterations_ok: bool, require_duration: bool = True) -> list[str]:
+                   iterations_ok: bool, require_duration: bool = True,
+                   require_tokens: bool = True) -> list[str]:
     # Cost and iterations are exporter/provider-dependent: an OAuth or not-yet-priced
     # model reports no cost (Opik owns pricing), and some paths emit no iteration
     # count. They are reported when present but never gate gradability — a settled
@@ -291,7 +293,7 @@ def _metric_issues(cost_ok: bool, duration_ok: bool, tokens_ok: bool,
     del cost_ok, iterations_ok
     checks = (
         (duration_ok or not require_duration, "duration missing or invalid"),
-        (tokens_ok, "usage.total_tokens missing or invalid"),
+        (tokens_ok or not require_tokens, "usage.total_tokens missing or invalid"),
     )
     return [detail for ok, detail in checks if not ok]
 
@@ -381,9 +383,11 @@ def grade(trace: dict, spans: list[dict], expect: dict,
           elapsed_ms: float | None = None,
           require_duration: bool = True,
           fixture_state: dict | None = None,
-          workspace_paths: dict | None = None) -> list[GateResult]:
+          workspace_paths: dict | None = None,
+          require_tokens: bool = True) -> list[GateResult]:
     v = TurnView.build(
-        trace, spans, elapsed_ms=elapsed_ms, require_duration=require_duration)
+        trace, spans, elapsed_ms=elapsed_ms, require_duration=require_duration,
+        require_tokens=require_tokens)
     out: list[GateResult] = []
 
     def add(key, passed, detail, conclusive=True):

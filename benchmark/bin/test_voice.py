@@ -1319,6 +1319,68 @@ def test_a_settled_call_is_graded_on_its_trace_and_what_the_voice_said(
     assert "Kestrel" not in json.dumps(turn["voice"])
 
 
+def _taskless_call_trace(**metadata):
+    """A call that handed Fermix nothing, as Opik holds it: no token usage, only
+    the call's own voice accounting (M96: a greeting or a goodbye alone)."""
+    meta = {"engine": "xai_realtime", "voice_seconds": 20.0, "voice_cost_millicents": 1_666,
+            "backend_turns": 0, "accounting_complete": 0}
+    return {"id": "t-2", "name": "voice_live:4", "start_time": "2026-10-17T09:00:00Z",
+            "end_time": "2026-10-17T09:00:20Z", "usage": None,
+            "metadata": {k: v for k, v in dict(meta, **metadata).items() if v is not None},
+            "_eval_trace_complete": True}
+
+
+def _graded_goodbye(tmp_path, monkeypatch, trace):
+    suite, scenario, case = _graded_case(tmp_path, wire=_M96_KEYS,
+                                         expect={"reply_not_matches": "\\?\\s*$"})
+    monkeypatch.setattr(voice, "drive", lambda *_a, **_k: _m96_evidence(_greeted_goodbye()))
+    monkeypatch.setattr(voice, "poll_call_trace", lambda *_a, **_k: trace)
+    client = SimpleNamespace(await_complete=lambda found: (dict(found), []))
+    return run_eval.run_voice_case(_cfg(), client, suite, scenario, case, "run1", 1, False)
+
+
+def test_a_call_that_ran_no_task_is_whole_on_its_own_voice_accounting(tmp_path, monkeypatch,
+                                                                       stub_fixtures):
+    result = _graded_goodbye(tmp_path, monkeypatch, _taskless_call_trace())
+
+    turn = result["turns"][0]
+    assert result["outcome"] == "pass", [g for g in turn["gates"] if not g["passed"]]
+    assert {"key": "telemetry_complete", "passed": True, "detail": "required telemetry present",
+            "conclusive": True} in turn["gates"]
+
+
+def test_the_voice_model_is_a_candidate_route_the_judge_is_kept_apart_from(
+        tmp_path, monkeypatch, stub_fixtures):
+    # What the judge grades is what the voice said aloud, so the voice model is a
+    # candidate even on a call that handed Fermix nothing.
+    seen = []
+
+    def rubric_record(*args, **_kwargs):
+        seen.append(args[8])
+        return None
+
+    monkeypatch.setattr(run_eval, "_rubric_record", rubric_record)
+    _graded_goodbye(tmp_path, monkeypatch,
+                    _taskless_call_trace(provider="xai", model="grok-voice-test"))
+    _graded_goodbye(tmp_path / "unnamed", monkeypatch, _taskless_call_trace())
+
+    assert seen == [[{"provider": "xai", "model": "grok-voice-test",
+                      "reasoning_effort": "default"}], []]
+
+
+@pytest.mark.parametrize("metadata", [
+    {"voice_seconds": None}, {"voice_seconds": 0.0}, {"voice_cost_millicents": None},
+    {"backend_turns": 1}, {"backend_turns": None}])
+def test_a_call_trace_with_neither_tokens_nor_its_voice_accounting_is_incomplete(
+        tmp_path, monkeypatch, stub_fixtures, metadata):
+    result = _graded_goodbye(tmp_path, monkeypatch, _taskless_call_trace(**metadata))
+
+    gates = {g["key"]: g for g in result["turns"][0]["gates"]}
+    assert result["outcome"] == "incomplete"
+    assert not gates["telemetry_complete"]["passed"]
+    assert gates["telemetry_complete"]["detail"] == "usage.total_tokens missing or invalid"
+
+
 def test_the_call_trace_is_the_one_named_for_the_call_after_it_started():
     after = run_eval.now_utc().replace(year=2026, month=10, day=17, hour=9, minute=0,
                                        second=0, microsecond=0)

@@ -1049,6 +1049,31 @@ def trace_window_start(evidence: Evidence) -> datetime:
     return evidence.started_at - timedelta(seconds=10)
 
 
+def call_routes(trace: dict) -> list[dict]:
+    """The voice model as a candidate route, from the call trace's own
+    `provider` and `model`: what the judge grades is what it said aloud, so the
+    judge is kept apart from it as from any task turn's model. Empty when the
+    trace names neither."""
+    meta = trace.get("metadata") or {}
+    provider, model = meta.get("provider"), meta.get("model")
+    if not (isinstance(provider, str) and provider and isinstance(model, str) and model):
+        return []
+    return [{"provider": provider, "model": model, "reasoning_effort": "default"}]
+
+
+def accounted_without_tasks(trace: dict) -> bool:
+    """Whether the call handed Fermix no task and its trace carries the call's
+    own voice accounting: billed voice seconds and a cost. Token usage comes
+    only from a task's turns, so a call that was a greeting and a goodbye has
+    none, and this accounting is what shows its trace whole instead."""
+    meta = trace.get("metadata") or {}
+    seconds, cost = meta.get("voice_seconds"), meta.get("voice_cost_millicents")
+    return (meta.get("backend_turns") == 0
+            and isinstance(seconds, (int, float)) and not isinstance(seconds, bool)
+            and seconds > 0
+            and isinstance(cost, int) and not isinstance(cost, bool) and cost >= 0)
+
+
 # --- what the judge reads -----------------------------------------------------
 
 def transcript(evidence: Evidence, spoken: list[str]) -> list[dict]:
