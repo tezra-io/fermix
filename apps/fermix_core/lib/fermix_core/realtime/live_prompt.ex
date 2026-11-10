@@ -64,6 +64,10 @@ defmodule FermixCore.Realtime.LivePrompt do
     {:communication_style, "Communication style"}
   ]
 
+  # The owner asked for their name in the greeting and seldom after it.
+  @name_use "Use the owner's name when you greet them and only once in a while after " <>
+              "that, not as a tag on your sentences."
+
   @backend_heading "Backend tools:"
 
   # M56 §4.5, §4.6: told, after the capability names, only to a call whose
@@ -416,9 +420,12 @@ defmodule FermixCore.Realtime.LivePrompt do
   defp owner_block(personalization) when is_list(personalization) do
     case Enum.flat_map(@owner_fields, &owner_line(personalization, &1)) do
       [] -> nil
-      lines -> @owner_heading <> "\n\n" <> Enum.join(lines, "\n")
+      lines -> @owner_heading <> "\n\n" <> Enum.join(lines, "\n") <> name_use(lines)
     end
   end
+
+  defp name_use(["- Name: " <> _name | _rest]), do: "\n\n" <> @name_use
+  defp name_use(_lines), do: ""
 
   defp owner_line(personalization, {key, label}) do
     case Keyword.get(personalization, key) do

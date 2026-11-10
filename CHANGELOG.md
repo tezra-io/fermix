@@ -63,7 +63,7 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **A voice call says hello, and hangs up on goodbye.** On GPT-Live and
   Grok, the voice now speaks first: when a call connects, from the Mac, the
   phone or an accessory, it greets you by name in one short line, then
-  listens. Say "bye" or "goodbye" ("okay, thanks, bye") and the voice says
+  listens, and after the greeting says your name only once in a while. Say "bye" or "goodbye" ("okay, thanks, bye") and the voice says
   goodbye back, then the call ends by itself, with no button: work you handed
   off still finishes into the chat, as when you hang up. A goodbye inside a
   request ("remind me to say bye to Sam at five") keeps the call up, as does

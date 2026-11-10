@@ -168,6 +168,20 @@ defmodule FermixCore.Realtime.LivePromptTest do
       refute prompt =~ ": x"
     end
 
+    test "a set name comes with how seldom to say it: in the greeting, then once in a while" do
+      named = LivePrompt.compose(@title, [], %{@bare | personalization: [user_name: "Marisol"]})
+
+      [_before, owner] = String.split(named, "## The owner\n\n- Name: Marisol\n\n", parts: 2)
+      assert owner =~ "Use the owner's name when you greet them and only once in a while after"
+      assert owner =~ "not as a tag on your sentences"
+
+      unnamed =
+        LivePrompt.compose(@title, [], %{@bare | personalization: [timezone: "Pacific/Fiji"]})
+
+      assert unnamed =~ "## The owner\n\n- Time zone: Pacific/Fiji"
+      refute unnamed =~ "owner's name"
+    end
+
     # M56 §4.5: the voice learns from the generated capability section, not
     # from LIVE.md, that a result it cannot say is put in the chat, and only
     # in a call whose results can be.
