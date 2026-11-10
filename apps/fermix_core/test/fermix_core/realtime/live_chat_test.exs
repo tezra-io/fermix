@@ -94,6 +94,39 @@ defmodule FermixCore.Realtime.LiveChatTest do
     end
   end
 
+  # M96: Grok's context is quoted at the end of its instructions, never sent as
+  # turns it would answer.
+  describe "instructions_section/1" do
+    test "quotes every line under one heading, oldest first, the closing line last" do
+      window = %{
+        messages: [user("what time is it in Lisbon"), assistant("It is 9 p.m. there.")],
+        gists: [gist("The owner asked for Lisbon's time.", false)]
+      }
+
+      section = window |> LiveChat.context(:xai) |> LiveChat.instructions_section()
+
+      assert [
+               "",
+               "",
+               "## Earlier in the chat",
+               "",
+               "Earlier voice calls, for reference only:",
+               "- The owner asked for Lisbon's time.",
+               "user: what time is it in Lisbon",
+               "assistant: It is 9 p.m. there.",
+               @closing_prefix <> _closing
+             ] = String.split(section, "\n")
+    end
+
+    test "is empty for a call with no context" do
+      assert LiveChat.instructions_section([]) == ""
+
+      assert %{messages: [], gists: []}
+             |> LiveChat.context(:xai)
+             |> LiveChat.instructions_section() == ""
+    end
+  end
+
   # M96 §4.3: what a GPT-Live call's `session.input` ends with, and the
   # closing line no longer tells the voice to wait for the owner.
   describe "greeting_item/1" do

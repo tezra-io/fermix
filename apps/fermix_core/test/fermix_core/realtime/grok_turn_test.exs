@@ -145,6 +145,32 @@ defmodule FermixCore.Realtime.GrokTurnTest do
       assert {:none, _turn} = GrokTurn.request_failed(turn)
     end
 
+    # Grok's VAD can drop a response it began, before any audio, and never send
+    # its response.done (a robot call, 2026-11-09).
+    test "a response Grok never closes is ended by the next one it starts" do
+      turn =
+        GrokTurn.new()
+        |> GrokTurn.response_created("r_dropped", %{"fermix_continuation" => "c1"})
+        |> GrokTurn.response_created("r_vad", nil)
+        |> GrokTurn.response_done("r_vad")
+
+      assert GrokTurn.active(turn) == []
+      assert GrokTurn.cancellable(turn) == []
+      assert turn |> answered_response("r2", "a") |> GrokTurn.due?(true)
+    end
+
+    test "a call a dropped response carried still owes its continuation once answered" do
+      turn = GrokTurn.response_created(GrokTurn.new(), "r_dropped", nil)
+      {:ok, turn} = GrokTurn.function_call(turn, "r_dropped", "a")
+      turn = turn |> GrokTurn.response_created("r_vad", nil) |> GrokTurn.response_done("r_vad")
+      refute GrokTurn.due?(turn, true)
+
+      turn = GrokTurn.answered(turn, "a")
+      assert GrokTurn.due?(turn, true)
+      # Its own response.done, should it come late, changes nothing.
+      assert turn |> GrokTurn.response_done("r_dropped") |> GrokTurn.due?(true)
+    end
+
     test "a response with no call owes nothing" do
       turn =
         GrokTurn.new() |> GrokTurn.response_created("r1", nil) |> GrokTurn.response_done("r1")

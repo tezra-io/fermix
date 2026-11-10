@@ -947,7 +947,9 @@ between delegations is force-closed at the idle TTL, and its ledger-bearing
 with (M56 §4.3), never quoting it: `instructions_bytes` (the composed
 instructions, the owner's details and memory files included) and `input_items`
 and `input_bytes` (the starting `session.input`: the chat's newest messages and
-earlier calls' gists; both `0` for a private call or an empty chat). It
+earlier calls' gists; both `0` for a private call or an empty chat). A Grok
+call quotes that context at the end of its instructions instead (M96), and
+`instructions_bytes` counts them without it. It
 names `endpoint`, who the call runs for: `desktop` (the Mac app's socket) or
 `<kind>:<device_id>` (`accessory:<id>`, `phone:<id>`, a device that calls
 Fermix itself); the Realtime engine's `[:fermix, :realtime, :call_start]`

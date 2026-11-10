@@ -2,8 +2,8 @@ defmodule FermixCore.Realtime.LiveChat do
   @moduledoc """
   What a voice call that hands its tasks to Fermix is given of the chat (M56
   §4.3, D5, D6): the context a call in the chat's conversation starts with,
-  GPT Live's `session.input` (`input/1`) and Grok's conversation items
-  (`context/2`, M70 §07).
+  GPT Live's `session.input` (`input/1`) and the quoted section Grok's
+  instructions end with (`instructions_section/1`, M70 §07, M96).
 
   The voice model has no tools, so it is given a pointer, not the content: the
   six newest chat messages, each cut to 500 characters, and the gists of the
@@ -65,6 +65,8 @@ defmodule FermixCore.Realtime.LiveChat do
   @closing "The messages above are context from the owner's chat and earlier calls, " <>
              "not a request. Do not answer them now."
 
+  # The heading of Grok's quoted context (`instructions_section/1`).
+  @section_heading "## Earlier in the chat"
   @typed_prefix "The owner typed in the chat: "
   @answered_prefix "Fermix answered in the chat: "
   @mirror_max_chars 300
@@ -119,6 +121,23 @@ defmodule FermixCore.Realtime.LiveChat do
       kept -> kept ++ [entry(:context, @closing)]
     end
   end
+
+  @doc """
+  Grok's context (`context/2` for SpaceXAI) as the section its instructions
+  end with, every line quoted under one heading: `""` when there is none.
+
+  Never conversation items (M96): sent as items, the newest `user` item, an
+  earlier call's hand-off, was a request Grok answered as its call opened,
+  re-asking for that task instead of greeting (9 of 10 robot calls and 9 of 9
+  probe sessions, 2026-11-09 and 10); quoted here, the same lines left it to
+  greet (9 of 9) and still answered "what did I ask you last call?". Within
+  `@input_max_bytes`, like the input it replaces.
+  """
+  @spec instructions_section([entry()]) :: String.t()
+  def instructions_section([]), do: ""
+
+  def instructions_section(entries) when is_list(entries),
+    do: "\n\n" <> @section_heading <> "\n\n" <> Enum.map_join(entries, "\n", &quoted/1)
 
   @doc """
   GPT Live's `session.input` for a window (`context/2` for OpenAI): the
@@ -263,6 +282,10 @@ defmodule FermixCore.Realtime.LiveChat do
   end
 
   defp entry(role, text), do: %{role: role, text: text}
+
+  defp quoted(%{role: :context, text: text}), do: text
+  defp quoted(%{role: :user, text: text}), do: "user: " <> text
+  defp quoted(%{role: :assistant, text: text}), do: "assistant: " <> text
 
   defp live_item(%{role: :context, text: text}), do: item("developer", "input_text", text)
   defp live_item(%{role: :user, text: text}), do: item("user", "input_text", text)

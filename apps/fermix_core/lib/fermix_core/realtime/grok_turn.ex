@@ -29,8 +29,14 @@ defmodule FermixCore.Realtime.GrokTurn do
     * **An interrupted response stays interrupted.** Its later audio is
       dropped (`fence/2`), and a call it carries is refused rather than run.
     * **The greeting is a continuation too** (M96 §4.2). `owe/1` owes one
-      once the greeting's item was sent, so the call's first reply is asked
-      for by the same rule; any response that starts answers it.
+      once the call is ready, so the call's first reply is asked for by the
+      same rule; any response that starts answers it.
+    * **Grok runs one response at a time.** A response that starts has
+      ended every other still open, whether or not its `response.done`
+      came: Grok's server VAD can drop a response it had begun, before any
+      audio, and never close it on the wire (seen on a call, 2026-11-09).
+      Left open, it would hold every later continuation, and the goodbye's
+      played-out signal, behind it for the rest of the call.
 
   Pure: the session owns the clock, the timers and the wire.
   """
@@ -75,8 +81,8 @@ defmodule FermixCore.Realtime.GrokTurn do
   def new, do: %__MODULE__{}
 
   @doc """
-  The greeting's item was sent (M96 §4.2): a continuation is owed, the reply
-  that greets the owner, asked for when it is due like any other.
+  The call is ready (M96 §4.2): a continuation is owed, the reply that greets
+  the owner, asked for when it is due like any other.
   """
   @spec owe(t()) :: t()
   def owe(%__MODULE__{} = turn), do: %{turn | owed?: true, greeting?: true}
@@ -103,13 +109,19 @@ defmodule FermixCore.Realtime.GrokTurn do
   def vad_grace_over(%__MODULE__{} = turn), do: %{turn | vad_pending?: false}
 
   @doc """
-  A response started. Fermix's own continuation names itself in `metadata`
+  A response started, and every other still open has ended (one response at a
+  time). Fermix's own continuation names itself in `metadata`
   (`fermix_continuation`); any other response, Grok's own after speech, hears
   the outputs already given and consumes what was owed.
   """
   @spec response_created(t(), String.t(), map() | nil) :: t()
   def response_created(%__MODULE__{} = turn, response_id, metadata)
       when is_binary(response_id) and (is_map(metadata) or is_nil(metadata)) do
+    turn =
+      turn.active
+      |> MapSet.delete(response_id)
+      |> Enum.reduce(turn, &response_done(&2, &1))
+
     %{
       turn
       | active: MapSet.put(turn.active, response_id),

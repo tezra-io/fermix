@@ -253,6 +253,19 @@ defmodule FermixCore.Realtime.XAIRealtimeClient do
     %{type: "response.create", response: %{metadata: %{"fermix_continuation" => continuation_id}}}
   end
 
+  @doc """
+  Ask for a response under instructions of its own: xAI's per-response
+  override, which stands in for the session's instructions for this one
+  response and no other (its speech-to-speech guide, "Per-Response
+  Instructions"). So `instructions` is the whole prompt that response reads,
+  never an addition to the session's.
+  """
+  @spec response_create_event(String.t(), String.t()) :: map()
+  def response_create_event(continuation_id, instructions)
+      when is_binary(instructions) and instructions != "" do
+    put_in(response_create_event(continuation_id), [:response, :instructions], instructions)
+  end
+
   @spec response_cancel_event(String.t()) :: map()
   def response_cancel_event(response_id) when is_binary(response_id) and response_id != "" do
     %{type: "response.cancel", response_id: response_id}

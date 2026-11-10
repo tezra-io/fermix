@@ -152,6 +152,18 @@ defmodule FermixCore.Realtime.XAIRealtimeClientTest do
       assert_raise FunctionClauseError, fn -> Client.response_create_event("") end
     end
 
+    test "a response may carry its own instructions, the whole prompt for it alone" do
+      assert Client.response_create_event("c1", "Be brief.\n\nGreet them.") == %{
+               type: "response.create",
+               response: %{
+                 metadata: %{"fermix_continuation" => "c1"},
+                 instructions: "Be brief.\n\nGreet them."
+               }
+             }
+
+      assert_raise FunctionClauseError, fn -> Client.response_create_event("c1", "") end
+    end
+
     test "cancel names the response, and truncate names the item, part and offset" do
       assert Client.response_cancel_event("resp_1") == %{
                type: "response.cancel",

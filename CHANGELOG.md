@@ -142,6 +142,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A Grok call no longer goes quiet about a finished task after you speak
+  as a reply starts.** Grok could drop a reply it had just begun when you
+  spoke, without ever closing it, and the call then waited on that reply for
+  good: a task that finished later was never answered aloud, only in the
+  chat, and a spoken "bye" did not end the call. A reply Grok starts now ends
+  any it left open.
 - **`fermix --version` no longer creates a Fermix home.** Every command wrote
   the web listener's signing key, `secret_key_base`, into the account's home
   as it started, making `~/.fermix` where there was none, so `fermix

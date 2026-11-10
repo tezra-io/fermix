@@ -36,10 +36,11 @@ defmodule FermixCore.Realtime.GrokSessionServer do
   message mirrored from the chat are masked against SpaceXAI's own Computer
   History grant (`LiveChat`), never OpenAI's.
 
-  The voice speaks first (M96 §4.2): once ready, the greeting's text goes in as
-  one quiet `system` item and `GrokTurn` owes the reply that says it. And the
-  call ends itself when the owner's whole turn was a goodbye and Grok's reply
-  to it has played (`CallGoodbye`, §5), only for a client at wire version 5
+  The voice speaks first (M96 §4.2): once ready, `GrokTurn` owes the reply that
+  greets the owner, asked for with the greeting in that reply's own
+  instructions. And the call ends itself when the owner's whole turn was a
+  goodbye and Grok's reply to it has played (`CallGoodbye`, §5), only for a
+  client at wire version 5
   (`ends_on_goodbye`): the owner's utterances, a response starting, a
   barge-in and playback drained with nothing cancellable are its signals, on
   the call's clock, and its end is the settle path's `call_ended`.
@@ -87,8 +88,8 @@ defmodule FermixCore.Realtime.GrokSessionServer do
   # Bounds the design fixes (M70 §05). All internal constants: the operator
   # configures a ceiling and a max duration, not a protocol.
   #
-  # Connect, configure, the call's context acknowledged and the bridge open,
-  # end to end, inside `SessionControl`'s 12-second `call_start`.
+  # Connect, configure and the bridge open, end to end, inside
+  # `SessionControl`'s 12-second `call_start`.
   @start_deadline_ms 10_000
   @close_deadline_ms 5_000
   @usage_tick_ms 5_000
@@ -228,8 +229,8 @@ defmodule FermixCore.Realtime.GrokSessionServer do
       vad_grace_ms: Keyword.get(opts, :vad_grace_ms, @vad_grace_ms),
       continuation_wait_ms: Keyword.get(opts, :continuation_wait_ms, @continuation_wait_ms),
       # `:idle` until the socket opens, then `:connecting` (awaiting
-      # `session.created`), `:configuring` (awaiting `session.updated`),
-      # `:priming` (the call's context awaiting acknowledgement) and `:ready`.
+      # `session.created`), `:configuring` (awaiting `session.updated`) and
+      # `:ready`.
       phase: :idle,
       # The phone camera's rule (M87 Phase 2): `:unsaid` until the camera first
       # turns on, `:owed` until the session is ready to hear it, `:said`.
@@ -239,7 +240,6 @@ defmodule FermixCore.Realtime.GrokSessionServer do
       connected_ms: nil,
       provider_session_id: nil,
       instructions: nil,
-      context: [],
       # Billable items sent and not yet acknowledged, by client item id.
       unacked_items: MapSet.new(),
       # Why a start failed, in the vendor's or the daemon's own words.
@@ -554,8 +554,8 @@ defmodule FermixCore.Realtime.GrokSessionServer do
         | voice_bridge: bridge,
           socket: socket,
           tasks: tasks,
-          instructions: instructions,
-          context: context,
+          # The chat's context ends them, quoted (`LiveChat.instructions_section/1`).
+          instructions: instructions <> LiveChat.instructions_section(context),
           phase: :connecting,
           connected_ms: now(state),
           # Billed from the connection, so the ledger starts with it.
@@ -649,28 +649,11 @@ defmodule FermixCore.Realtime.GrokSessionServer do
 
   # The provider applied the configuration. A turn detection other than the
   # server VAD this session is built on is a session it cannot run.
-  defp configured(state, %{turn_detection: detection}) when detection in [nil, "server_vad"] do
-    state = prime(state)
-
-    if MapSet.size(state.unacked_items) == 0,
-      do: become_ready(state),
-      else: {:noreply, %{state | phase: :priming}}
-  end
+  defp configured(state, %{turn_detection: detection}) when detection in [nil, "server_vad"],
+    do: become_ready(state)
 
   defp configured(state, %{turn_detection: detection}),
     do: fail_start(state, "The provider configured turn detection #{inspect(detection)}.")
-
-  # The call's context, one acknowledged item per line: quoted, never a
-  # request, and never answered (no `response.create` follows).
-  defp prime(state) do
-    Enum.reduce(state.context, %{state | context: []}, fn entry, acc ->
-      send_billable_item(acc, context_role(entry.role), entry.text)
-    end)
-  end
-
-  defp context_role(:context), do: "system"
-  defp context_role(:user), do: "user"
-  defp context_role(:assistant), do: "assistant"
 
   defp become_ready(state) do
     state = cancel_start_timer(state)
@@ -773,23 +756,16 @@ defmodule FermixCore.Realtime.GrokSessionServer do
 
   defp item_added(state, id) do
     if MapSet.member?(state.unacked_items, id) do
-      state = %{
-        state
-        | unacked_items: MapSet.delete(state.unacked_items, id),
-          ledger: GrokLedger.text_item_acked(state.ledger)
-      }
-
-      primed(state)
+      {:noreply,
+       %{
+         state
+         | unacked_items: MapSet.delete(state.unacked_items, id),
+           ledger: GrokLedger.text_item_acked(state.ledger)
+       }}
     else
       {:noreply, state}
     end
   end
-
-  defp primed(%{phase: :priming} = state) do
-    if MapSet.size(state.unacked_items) == 0, do: become_ready(state), else: {:noreply, state}
-  end
-
-  defp primed(state), do: {:noreply, state}
 
   ## The owner's turn
 
@@ -1253,9 +1229,10 @@ defmodule FermixCore.Realtime.GrokSessionServer do
   defp maybe_continue(%{phase: :ready, closing?: false} = state) do
     if GrokTurn.due?(state.turn, GrokPlayback.drained?(state.playback)) do
       {id, turn} = GrokTurn.request(state.turn)
+      state = %{state | turn: turn}
 
-      %{state | turn: turn}
-      |> send_provider(XAIRealtimeClient.response_create_event(id))
+      state
+      |> send_provider(response_create_event(state, id))
       |> arm_continuation_timer(id)
     else
       state
@@ -1263,6 +1240,12 @@ defmodule FermixCore.Realtime.GrokSessionServer do
   end
 
   defp maybe_continue(state), do: state
+
+  defp response_create_event(state, id) do
+    if GrokTurn.greeting?(state.turn),
+      do: XAIRealtimeClient.response_create_event(id, greeting_instructions(state)),
+      else: XAIRealtimeClient.response_create_event(id)
+  end
 
   defp owed(turn) do
     if GrokTurn.greeting?(turn),
@@ -1472,21 +1455,26 @@ defmodule FermixCore.Realtime.GrokSessionServer do
 
   ## The greeting (M96 §4.2)
 
-  # The greeting's text, the newest item Grok has read, then the reply that
-  # says it is owed (`maybe_continue/1` asks for it). A budget already spent,
-  # connected time counted to now, sends neither, so Grok is never asked to
-  # answer the context instead.
+  # The reply that greets the owner is owed, and `maybe_continue/1` asks for it
+  # under the greeting's own instructions (`greeting_instructions/1`). A call
+  # the connect already took over its budget is not greeted: its ceiling ends
+  # it.
   defp say_greeting(state) do
     state = tick_ledger(state)
 
-    if GrokLedger.affords_text_item?(state.ledger) do
-      state = send_billable_item(state, "system", LivePrompt.greeting(state.started_at))
-      %{state | turn: GrokTurn.owe(state.turn)}
-    else
+    if GrokLedger.over_ceiling?(state.ledger) do
       Logger.warning("voice_grok: the call is not greeted: the call's budget is spent")
       state
+    else
+      %{state | turn: GrokTurn.owe(state.turn)}
     end
   end
+
+  # The greeting rides in the instructions of the one response that says it,
+  # after the call's own (the quoted chat included): xAI documents that
+  # per-response override, and no `system` conversation item.
+  defp greeting_instructions(state),
+    do: state.instructions <> "\n\n" <> LivePrompt.greeting(state.started_at)
 
   ## Teardown
 
