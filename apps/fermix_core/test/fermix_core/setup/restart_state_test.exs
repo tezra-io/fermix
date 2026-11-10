@@ -166,7 +166,8 @@ defmodule FermixCore.Setup.RestartStateTest do
     # Not boot-bound is not unwatched: a later save would revert an outside edit
     # to the allow list exactly as it would any other section.
     test "an outside edit to the env policy is still an external change", %{home: home} do
-      path = Path.join(home, "config.toml")
+      # The sandbox is this computer's own (M97 §4).
+      path = Path.join(home, "machine.toml")
       File.write!(path, "[sandbox.env]\nallow = [\"A_KEY\"]\n")
       server = start_state()
       assert RestartState.config_state(server: server) == :clear

@@ -25,6 +25,9 @@ defmodule FermixCore.Home.Candidate.ActivationReturnTest do
     "chatgpt_host.json" => "stale, the server has none",
     "daemon.sock" => "",
     "config.toml.lock" => "",
+    # M97 §4: this computer's own settings, and an interrupted write of them.
+    "machine.toml" => ~s([sandbox]\nmode = "strict"\n),
+    "machine.toml.tmp" => "an interrupted write",
     ".move/phase.json" => ~s({"phase":"done"}),
     "logs/fermix.log" => "this computer's log",
     "device/desktop.json" => "the link to the server",
@@ -118,6 +121,7 @@ defmodule FermixCore.Home.Candidate.ActivationReturnTest do
       Map.merge(
         Map.take(@retired, [
           "config.toml.lock",
+          "machine.toml",
           "logs/fermix.log",
           "device/local/window.json",
           "device/return.json",

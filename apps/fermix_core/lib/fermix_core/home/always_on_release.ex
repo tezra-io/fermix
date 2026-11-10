@@ -29,8 +29,8 @@ defmodule FermixCore.Home.AlwaysOnRelease do
   stops the engine's boot, as every section does, and the verbs answer with
   the file it is in.
 
-  The switch is the home's, not the computer's, so it travels with it: no
-  device-class section (`Candidate.Return.device_tables/0`) holds it, a
+  The switch is the home's, not the computer's, so it travels with it: the
+  machine file (`Setup.MachineFile`) does not hold it, a
   move to a server carries it in the settings file activation writes last,
   and a move back brings the server's copy home. A candidate home is
   written with it on (`Home.Candidate`), since a candidate exists only for

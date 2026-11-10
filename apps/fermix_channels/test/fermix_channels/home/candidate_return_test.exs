@@ -25,6 +25,7 @@ defmodule FermixChannels.Home.CandidateReturnTest do
   alias FermixCore.Home.Role
   alias FermixCore.Home.Snapshot
   alias FermixCore.Home.Snapshot.Recipient
+  alias FermixCore.Setup.MachineFile
   alias FermixTestSupport.SafeRm
 
   @now ~U[2031-06-01 09:00:00Z]
@@ -60,9 +61,9 @@ defmodule FermixChannels.Home.CandidateReturnTest do
 
       staging = Candidate.staging_path(ctx.mac)
       staged = File.read!(Path.join(staging, "config.toml"))
-      # This computer's own sandbox, not the server's.
-      assert staged =~ "this computer's sandbox"
-      refute staged =~ "the server's sandbox"
+      # M97 §4: neither computer's own sandbox is in the home's settings;
+      # this one's stays in its machine file.
+      refute staged =~ "sandbox"
       # Its own desktop row is gone from the device list it takes back.
       assert {:ok, [%{name: "office-mac"}]} = DeviceStore.list(root: staging)
 
@@ -77,6 +78,8 @@ defmodule FermixChannels.Home.CandidateReturnTest do
 
       assert File.read!(Path.join([ctx.mac, "browser", "profiles", "owner", "Cookies"])) ==
                "signed-in sessions"
+
+      assert File.read!(MachineFile.path(ctx.mac)) =~ "this computer's sandbox"
 
       refute File.exists?(Path.join(ctx.mac, "chatgpt_host.json"))
       refute File.exists?(DesktopLink.path(ctx.mac))
@@ -248,7 +251,9 @@ defmodule FermixChannels.Home.CandidateReturnTest do
 
     [fermix_core]
     secret_store = "file"
+    """)
 
+    File.write!(MachineFile.path(mac), """
     [sandbox]
     # this computer's sandbox
     workspace_root = "#{mac}/workspace"
@@ -270,8 +275,8 @@ defmodule FermixChannels.Home.CandidateReturnTest do
   end
 
   # The server, retired into the device role for the move: its own sandbox,
-  # a day of its own, and a device list holding this computer's desktop row
-  # and another desktop's.
+  # in its settings as an earlier engine kept it, a day of its own, and a
+  # device list holding this computer's desktop row and another desktop's.
   defp server_home!(server, desktop_key) do
     File.mkdir_p!(Path.join(server, "journals"))
 

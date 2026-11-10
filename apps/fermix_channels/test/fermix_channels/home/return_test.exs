@@ -119,7 +119,10 @@ defmodule FermixChannels.Home.ReturnTest do
     refute File.exists?(DesktopLink.key_path(mac))
     # Its own desktop row is gone from the list it took back.
     assert {:ok, []} = DeviceStore.list(root: mac)
-    assert File.read!(Path.join(mac, "config.toml")) =~ ~s(workspace_root = "#{mac}/workspace")
+
+    assert File.read!(Path.join(mac, "config.toml")) =~
+             ~s(recordings = "#{mac}/workspace/meetings")
+
     # The server signed its snapshots with its own instance role; the Mac
     # takes none of that bucket's settings back.
     assert File.read!(Path.join(ctx.server.root, "config.toml")) =~

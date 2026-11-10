@@ -3,8 +3,9 @@ defmodule FermixCore.Setup.ConfigStore do
   Thin persisted setup store shared by web and CLI onboarding.
 
   Persists the runtime snapshot to `config.toml` under `FERMIX_HOME` (or the
-  default `~/.fermix`) and owns the local workspace layout used by setup,
-  health reporting, traces, and logs.
+  default `~/.fermix`), and this computer's own settings to `machine.toml`
+  beside it (`Setup.MachineFile`), and owns the local workspace layout used by
+  setup, health reporting, traces, and logs.
   """
 
   alias FermixCore.Accessories.Config, as: AccessoriesConfig
@@ -20,6 +21,7 @@ defmodule FermixCore.Setup.ConfigStore do
   alias FermixCore.Harness.Config, as: HarnessConfig
   alias FermixCore.Home.AlwaysOnRelease
   alias FermixCore.Home.Archive.ConfigText
+  alias FermixCore.Home.Candidate
   alias FermixCore.Home.Role
   alias FermixCore.Home.Snapshot.Config, as: SnapshotConfig
   alias FermixCore.IMessage
@@ -34,6 +36,7 @@ defmodule FermixCore.Setup.ConfigStore do
   alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Sandbox.EnvHealth
+  alias FermixCore.Setup.MachineFile
   alias FermixCore.Setup.RestartState
   alias FermixCore.Setup.SecretStore
   alias FermixCore.Setup.SecretWriter
@@ -181,7 +184,8 @@ defmodule FermixCore.Setup.ConfigStore do
   end
 
   @doc """
-  Reads and normalizes the settings file.
+  Reads and normalizes the settings file and the machine file beside it, each
+  setting from its own file only (`MachineFile.join/2`).
 
   A value a normalizer refuses raises with the key named. A section the file
   enables on a host that cannot run it answers a typed error instead: an
@@ -191,10 +195,83 @@ defmodule FermixCore.Setup.ConfigStore do
   """
   @spec load_runtime_config(keyword()) :: {:ok, runtime_config()} | {:error, term()}
   def load_runtime_config(opts \\ []) do
-    case File.read(path()) do
-      {:ok, contents} -> platform_checked(parse_document(contents), opts)
-      {:error, :enoent} -> {:ok, empty_runtime_config()}
+    with {:ok, config} <- read_settings(path()),
+         {:ok, machine} <- read_settings(MachineFile.path(fermix_home())) do
+      loaded(config, machine, opts)
+    end
+  end
+
+  # Neither file: the in-memory defaults of a home nobody set up.
+  defp loaded(:absent, :absent, _opts), do: {:ok, empty_runtime_config()}
+
+  defp loaded(config, machine, opts) do
+    document = MachineFile.join(decode_document(text(config)), decode_document(text(machine)))
+    platform_checked(normalize_document(document), opts)
+  end
+
+  defp read_settings(file) do
+    case File.read(file) do
+      {:ok, contents} -> {:ok, contents}
+      {:error, :enoent} -> {:ok, :absent}
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp text(:absent), do: ""
+  defp text(contents) when is_binary(contents), do: contents
+
+  @doc """
+  Moves this computer's own settings out of `home`'s `config.toml` into its
+  `machine.toml` (M97 §4, `MachineFile.migration/3`): the machine file is
+  written first and `config.toml` loses them after, each write atomic, under
+  the config lock. Run at every boot before any setting is read
+  (`bootstrap_runtime_config/1`, which `config/runtime.exs` calls for the
+  daemon and every CLI verb alike), so a boot stopped between the writes is
+  finished by the next. A home that is not there yet has nothing to move.
+  `opts`: `:server?`, whether this machine is an Always On server, in place of
+  `Home.Candidate.server?/1` (tests).
+  """
+  @spec migrate_machine_file(Path.t(), keyword()) :: :ok | {:error, term()}
+  def migrate_machine_file(home, opts \\ [])
+      when is_binary(home) and home != "" and is_list(opts) do
+    if File.dir?(home) do
+      server? = Keyword.get_lazy(opts, :server?, fn -> Candidate.server?(home) end)
+      with_config_lock(home, fn -> migrate_locked(home, server?) end)
+    else
+      :ok
+    end
+  end
+
+  defp migrate_locked(home, server?) do
+    with {:ok, config} <- read_settings(home_document_path(home)),
+         {:ok, machine} <- read_settings(MachineFile.path(home)),
+         plan = MachineFile.migration(text(config), machine, server?),
+         :ok <- write_if(MachineFile.path(home), plan.machine),
+         :ok <- write_if(home_document_path(home), plan.config) do
+      log_notice(MachineFile.notice(plan))
+    end
+  end
+
+  defp write_if(_file, nil), do: :ok
+  defp write_if(file, text), do: write_atomic(file, text)
+
+  defp log_notice(nil), do: :ok
+  defp log_notice({:info, sentence}), do: Logger.info(sentence)
+  defp log_notice({:warning, sentence}), do: Logger.warning(sentence)
+
+  # Written beside the file and renamed over it, mode `0600`; a write that
+  # fails removes what it left.
+  defp write_atomic(file, text) do
+    tmp = file <> ".tmp"
+
+    with :ok <- File.write(tmp, text),
+         :ok <- File.chmod(tmp, 0o600),
+         :ok <- File.rename(tmp, file) do
+      :ok
+    else
+      {:error, reason} ->
+        _ = File.rm(tmp)
+        {:error, {:file, file, reason}}
     end
   end
 
@@ -314,6 +391,9 @@ defmodule FermixCore.Setup.ConfigStore do
   The whole read, change and write runs under the config lock, which every
   writer of the file takes, so a save never lands between an MCP server write's
   read and its write, whichever VM made either.
+
+  This computer's own settings are written to `machine.toml` (`MachineFile`),
+  first and atomically, and every other setting to `config.toml`.
   """
   @spec save_snapshot(runtime_config(), keyword()) :: :ok | {:error, term()}
   def save_snapshot(snapshot, opts \\ []) do
@@ -326,6 +406,7 @@ defmodule FermixCore.Setup.ConfigStore do
          {:ok, persisted} <- persisted_snapshot(snapshot, opts),
          :ok <- File.mkdir_p(fermix_home()),
          :ok <- ensure_workspace(),
+         :ok <- write_atomic(MachineFile.path(fermix_home()), dump_machine(persisted)),
          :ok <- File.write(path(), dump_snapshot(Map.put(persisted, :mcp, mcp))) do
       RestartState.record_persisted_baseline()
     end
@@ -427,12 +508,15 @@ defmodule FermixCore.Setup.ConfigStore do
   Missing TOML returns `:ok` (the in-memory defaults from
   `empty_runtime_config/0` apply, which normalize to no-op merges).
   Malformed TOML returns `{:error, reason}` so boot can surface the
-  problem rather than silently start with stale defaults.
+  problem rather than silently start with stale defaults. This computer's
+  own settings are moved into `machine.toml` first
+  (`migrate_machine_file/2`, given `opts`' `:server?`).
   """
   @spec bootstrap_runtime_config() :: :ok | {:error, term()}
   @spec bootstrap_runtime_config(keyword()) :: :ok | {:error, term()}
   def bootstrap_runtime_config(opts \\ []) do
-    with {:ok, snapshot} <- load_runtime_config(Keyword.take(opts, [:supervised, :macos?])),
+    with :ok <- migrate_machine_file(fermix_home(), Keyword.take(opts, [:server?])),
+         {:ok, snapshot} <- load_runtime_config(Keyword.take(opts, [:supervised, :macos?])),
          :ok <- apply_snapshot(snapshot, opts),
          # This is the boot read of the file, which is what the external-change
          # baseline means: the values in application environment now came from
@@ -1493,8 +1577,6 @@ defmodule FermixCore.Setup.ConfigStore do
     cues = Keyword.get(fermix_core, :cues, [])
     memory = Keyword.get(fermix_core, :memory, [])
     realtime = Keyword.get(fermix_core, :realtime, [])
-    computer_use = Keyword.get(fermix_core, :computer_use, [])
-    computer_history = Keyword.get(fermix_core, :computer_history, [])
     transcription = Keyword.get(fermix_core, :transcription, [])
     meetings = Keyword.get(fermix_core, :meetings, [])
     tools = Keyword.get(fermix_core, :tools, [])
@@ -1506,7 +1588,6 @@ defmodule FermixCore.Setup.ConfigStore do
     engine = Keyword.get(fermix_core, :engine, [])
     snapshots = Keyword.get(fermix_core, :snapshots, [])
     always_on = Keyword.get(fermix_core, :always_on, [])
-    sandbox = Map.get(snapshot, :sandbox, [])
     channels = Map.get(snapshot, :fermix_channels, [])
     web = snapshot |> Map.get(:fermix_web, []) |> normalize_web() |> web_to_keyword()
 
@@ -1546,8 +1627,6 @@ defmodule FermixCore.Setup.ConfigStore do
       render_cues(cues),
       render_section(["fermix_core", "memory"], memory),
       render_section(["fermix_core", "realtime"], realtime),
-      render_section(["fermix_core", "computer_use"], computer_use),
-      render_section(["fermix_core", "computer_history"], computer_history),
       render_section(["fermix_core", "transcription"], transcription),
       render_section(["fermix_core", "meetings"], meetings),
       render_section(["fermix_core", "tools", "web_search"], Keyword.get(tools, :web_search, [])),
@@ -1566,7 +1645,6 @@ defmodule FermixCore.Setup.ConfigStore do
       render_plugins(plugins),
       render_oauth(oauth),
       render_plugin_secrets(plugin_secrets),
-      render_sandbox(sandbox),
       render_section(["fermix_channels", "telegram"], Keyword.get(channels, :telegram, [])),
       render_section(["fermix_channels", "whatsapp"], Keyword.get(channels, :whatsapp, [])),
       render_section(["fermix_channels", "discord"], Keyword.get(channels, :discord, [])),
@@ -1574,15 +1652,37 @@ defmodule FermixCore.Setup.ConfigStore do
       render_section(["fermix_channels", "signal"], Keyword.get(channels, :signal, [])),
       render_section(["fermix_channels", "acp"], Keyword.get(channels, :acp, [])),
       render_mobile(Keyword.get(channels, :mobile, [])),
-      render_section(["fermix_channels", "imessage"], Keyword.get(channels, :imessage, [])),
-      render_section(
-        ["fermix_channels", "accessories"],
-        Keyword.get(channels, :accessories, [])
-      ),
       render_section(["fermix_web"], web),
       render_mcp(Map.fetch!(snapshot, :mcp))
     ]
     |> List.flatten()
+    |> Enum.reject(&(&1 in [nil, ""]))
+    |> Enum.join("\n\n")
+    |> Kernel.<>("\n")
+  end
+
+  # `machine.toml`: this computer's own settings (`MachineFile`), which
+  # `dump_snapshot/1` leaves out, through the same renderers.
+  defp dump_machine(snapshot) do
+    fermix_core = Map.get(snapshot, :fermix_core, [])
+    channels = Map.get(snapshot, :fermix_channels, [])
+    dev_local = fermix_core |> Keyword.get(:plugins, []) |> Keyword.take([:dev_local])
+
+    [
+      MachineFile.header(),
+      render_sandbox(Map.get(snapshot, :sandbox, [])),
+      render_section(
+        ["fermix_core", "computer_use"],
+        Keyword.get(fermix_core, :computer_use, [])
+      ),
+      render_section(
+        ["fermix_core", "computer_history"],
+        Keyword.get(fermix_core, :computer_history, [])
+      ),
+      render_section(["fermix_core", "plugins"], dev_local),
+      render_section(["fermix_channels", "imessage"], Keyword.get(channels, :imessage, [])),
+      render_section(["fermix_channels", "accessories"], Keyword.get(channels, :accessories, []))
+    ]
     |> Enum.reject(&(&1 in [nil, ""]))
     |> Enum.join("\n\n")
     |> Kernel.<>("\n")
@@ -1650,8 +1750,9 @@ defmodule FermixCore.Setup.ConfigStore do
   defp render_plugins(plugins) when is_list(plugins) do
     entries = Keyword.get(plugins, :entries, %{})
 
+    # `dev_local` is this computer's own, written to `machine.toml`.
     [
-      render_section(["fermix_core", "plugins"], Keyword.drop(plugins, [:entries])),
+      render_section(["fermix_core", "plugins"], Keyword.drop(plugins, [:entries, :dev_local])),
       render_named_sections(["fermix_core", "plugins"], entries)
     ]
     |> List.flatten()
@@ -1838,9 +1939,10 @@ defmodule FermixCore.Setup.ConfigStore do
       else: "\"" <> String.replace(value, "\"", "\\\"") <> "\""
   end
 
+  # `config.toml` alone, for a writer that renders it again: this computer's
+  # own settings are `machine.toml`'s, so none is read from here.
   defp parse_document(contents) do
-    document = decode_document(contents)
-    normalize_document(document)
+    contents |> decode_document() |> MachineFile.drop() |> normalize_document()
   end
 
   # The settings file's decoder: one assignment per line under the last
@@ -2149,7 +2251,7 @@ defmodule FermixCore.Setup.ConfigStore do
       :ok
     else
       raise ArgumentError, """
-      config.toml [fermix_core.computer_history] has unknown key(s): #{Enum.join(unknown, ", ")}.
+      machine.toml [fermix_core.computer_history] has unknown key(s): #{Enum.join(unknown, ", ")}.
 
       Allowed keys: #{Enum.map_join(ComputerHistoryConfig.config_keys(), ", ", &Atom.to_string/1)}.
       Remove or fix the key(s); the daemon will not boot until this is fixed.

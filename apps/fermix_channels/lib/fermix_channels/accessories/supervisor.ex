@@ -18,9 +18,9 @@ defmodule FermixChannels.Accessories.Supervisor do
       channel's precedent. Off, there is no watcher and no port is opened.
     * **The role.** Only a primary: it is in `Home.Role`'s primary-only list,
       so a device-role or candidate engine never starts it, whatever its
-      `config.toml` says after a move.
+      `machine.toml` says after a move.
     * **The platform.** Only macOS: a home moved to a Linux server carries
-      its records and its switch, and starts no endpoint.
+      its records, and the switch stays on the Mac (`machine.toml`).
     * **Voice.** Not at all: the link runs whenever the switch is on, so an
       accessory stays attached and is told voice is not ready while voice is
       off, its key missing, or its runtime not started this boot.
@@ -114,7 +114,7 @@ defmodule FermixChannels.Accessories.Supervisor do
 
   defp not_a_mac do
     Logger.warning(
-      "accessories are on in config.toml, but an accessory needs a local Mac primary; " <>
+      "accessories are on in machine.toml, but an accessory needs a local Mac primary; " <>
         "no accessory port is watched on this engine"
     )
 

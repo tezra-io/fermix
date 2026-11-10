@@ -39,7 +39,7 @@ One gate, checked once per turn, governs every reader: the turn's model calls, t
 | `local` | nowhere (on-device) | nothing implicitly: a remote primary needs a `remote_summaries` entry |
 | a provider name, e.g. `anthropic` | exactly that provider, never failing over | nothing implicitly; a router such as OpenRouter is a sharper risk (unknown downstream vendors) |
 
-`remote_summaries = ["anthropic"]` lets named providers see derived summaries, never raw events, in owner turns and voice. Grants name providers, not models. The summarizer and `remote_summaries` are set in `config.toml`; the Mac app shows the summarizer read-only.
+`remote_summaries = ["anthropic"]` lets named providers see derived summaries, never raw events, in owner turns and voice. Grants name providers, not models. The summarizer and `remote_summaries` are set in this computer's `machine.toml`; the Mac app shows the summarizer read-only.
 
 ## How notes are made
 

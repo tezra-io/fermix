@@ -302,7 +302,7 @@ defmodule FermixCore.Sandbox.Config do
       developer -> standard
       trusted_local -> open
     Run: fermix sandbox mode #{renamed}
-    Or edit ~/.fermix/config.toml: mode = #{inspect(value)} -> mode = #{inspect(renamed)}
+    Or edit ~/.fermix/machine.toml: mode = #{inspect(value)} -> mode = #{inspect(renamed)}
     """
     |> String.trim()
   end
@@ -313,7 +313,7 @@ defmodule FermixCore.Sandbox.Config do
       none -> bare
       trusted -> extended
     Run: fermix sandbox commands profile #{renamed}
-    Or edit ~/.fermix/config.toml: profile = #{inspect(value)} -> profile = #{inspect(renamed)}
+    Or edit ~/.fermix/machine.toml: profile = #{inspect(value)} -> profile = #{inspect(renamed)}
     """
     |> String.trim()
   end

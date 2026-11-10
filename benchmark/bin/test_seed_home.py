@@ -64,15 +64,16 @@ def test_explicit_mode_refuses_unknown_provider():
 
 def test_render_config_explicit_mode_has_no_secret_and_parses():
     cfg = seed.render_config(
-        "/tmp/x-eval", "openai", {"default_model": "gpt-5.6-luna"}, None,
-        ("/tmp/x-eval/extra",))
+        "/tmp/x-eval", "openai", {"default_model": "gpt-5.6-luna"}, None)
     doc = tomllib.loads(cfg)
     provider = doc["fermix_core"]["providers"]["openai"]
     assert provider["primary"] is True
     assert provider["default_model"] == "gpt-5.6-luna"
     assert "api_key" not in provider
     assert "profile" not in doc["fermix_core"]
-    sandbox = doc["sandbox"]
+    # M97 §4: the sandbox is the machine's own setting, in machine.toml only.
+    assert "sandbox" not in doc
+    sandbox = tomllib.loads(seed.render_machine("/tmp/x-eval", ("/tmp/x-eval/extra",)))["sandbox"]
     assert sandbox["mode"] == "strict"
     assert sandbox["workspace_root"] == "/tmp/x-eval/workspace"
     assert sandbox["allowed_roots"] == ["/tmp/x-eval/skills", "/tmp/x-eval/extra"]
@@ -94,7 +95,8 @@ def test_render_config_keyring_mode_unchanged():
     doc = tomllib.loads(cfg)
     assert doc["fermix_core"]["profile"] == "default"
     assert doc["fermix_core"]["providers"]["openai"]["api_key"] == "@keyring"
-    assert doc["sandbox"]["allowed_roots"] == ["/tmp/x-eval/skills"]
+    assert tomllib.loads(seed.render_machine("/tmp/x-eval"))["sandbox"]["allowed_roots"] == [
+        "/tmp/x-eval/skills"]
 
 
 def test_render_config_always_roots_the_homes_skills_dir():
@@ -104,8 +106,7 @@ def test_render_config_always_roots_the_homes_skills_dir():
     # the turn before the deliverable is written (create_and_confirm_skill
     # scored 0 that way with nothing wrong in the product). The runner
     # precondition allows it: only roots that ESCAPE the home are refused.
-    cfg = seed.render_config("/tmp/x-eval", "openai", {"default_model": "m"}, None)
-    doc = tomllib.loads(cfg)
+    doc = tomllib.loads(seed.render_machine("/tmp/x-eval"))
     assert doc["sandbox"]["allowed_roots"] == ["/tmp/x-eval/skills"]
 
 
@@ -113,8 +114,7 @@ def test_render_config_allows_the_skill_credential_fixture():
     # M45: the credential eval needs one allowed sandbox variable whose value a
     # harmless `command` source prints — the same record shape a value stored
     # from Settings > Sandbox has — so no keychain and no operator env is read.
-    cfg = seed.render_config("/tmp/x-eval", "openai", {"default_model": "m"}, None)
-    env = tomllib.loads(cfg)["sandbox"]["env"]
+    env = tomllib.loads(seed.render_machine("/tmp/x-eval"))["sandbox"]["env"]
     assert env["allow"] == [seed.SKILL_TOKEN_NAME]
     source = env[seed.SKILL_TOKEN_NAME]
     assert source["source"] == "command"
@@ -358,8 +358,11 @@ def test_voice_turns_grok_voice_on_with_its_engine_and_no_key():
     # xai provider block, and no key in any block that is written.
     assert "xai" not in doc["fermix_core"]["providers"]
     assert "api_key" not in cfg
-    # Turning voice on grants nothing else: computer history stays off.
-    assert doc["fermix_core"]["computer_history"]["enabled"] is False
+    # Turning voice on grants nothing else: computer history stays off, in the
+    # machine's own file (M97 §4).
+    assert "computer_history" not in doc["fermix_core"]
+    machine = tomllib.loads(seed.render_machine("/tmp/x-eval"))
+    assert machine["fermix_core"]["computer_history"]["enabled"] is False
 
 
 def test_voice_can_turn_gpt_live_on_with_its_engine_and_no_key():
@@ -378,7 +381,7 @@ def test_voice_can_turn_gpt_live_on_with_its_engine_and_no_key():
     # phone-only settings stay at the product's defaults, computer history off.
     realtime = doc["fermix_core"]["realtime"]
     assert "screen_share" not in realtime and "camera_share" not in realtime
-    assert doc["fermix_core"]["computer_history"]["enabled"] is False
+    assert "computer_history" not in doc["fermix_core"]
 
 
 def test_an_unknown_voice_engine_is_refused():
@@ -441,8 +444,11 @@ def test_cue_mandates_add_their_sources_and_the_stub_plugin_from_the_home():
     doc = tomllib.loads(seed.render_config(
         "/tmp/x-eval", "openai", {"default_model": "m"}, None, cues=_cues(mandates=True)))
     assert set(seed.CUE_MANDATE_SOURCES) <= set(doc["fermix_core"]["cues"]["sources"])
-    assert doc["fermix_core"]["plugins"] == {
-        "enabled": [seed.CUE_PLUGIN], "dev_local": "/tmp/x-eval/eval-plugins"}
+    assert doc["fermix_core"]["plugins"] == {"enabled": [seed.CUE_PLUGIN]}
+    # The dev plugin folder is this computer's own (M97 §4).
+    machine = tomllib.loads(seed.render_machine("/tmp/x-eval", cues=_cues(mandates=True)))
+    assert machine["fermix_core"]["plugins"] == {"dev_local": "/tmp/x-eval/eval-plugins"}
+    assert "plugins" not in tomllib.loads(seed.render_machine("/tmp/x-eval"))["fermix_core"]
 
 
 def test_cue_fixtures_write_one_private_token_per_source_and_the_manifest(tmp_path):
@@ -485,6 +491,9 @@ def _seed_main(monkeypatch, home, *flags):
     monkeypatch.setattr(sys, "argv", ["seed_capability_home.py", str(home), "--provider",
                                       "openai", "--model", "gpt-x", *flags])
     seed.main()
+    # M97 §4: the seed writes the machine's own settings beside config.toml.
+    machine = tomllib.loads((home / seed.MACHINE_FILE).read_text())
+    assert machine["sandbox"]["mode"] == "strict"
     return tomllib.loads((home / "config.toml").read_text())
 
 

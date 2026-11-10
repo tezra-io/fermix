@@ -7,6 +7,7 @@ defmodule FermixCore.Home.MoveReadinessTest do
   alias FermixCore.Home.Candidates
   alias FermixCore.Home.Epoch
   alias FermixCore.Home.MoveReadiness
+  alias FermixCore.Setup.MachineFile
   alias FermixCore.Setup.SecretWriter
   alias FermixTestSupport.DistFixtures
   alias FermixTestSupport.SafeRm
@@ -37,10 +38,13 @@ defmodule FermixCore.Home.MoveReadinessTest do
     [fermix_channels.slack]
     enabled = true
 
-    [fermix_channels.imessage]
-    enabled = true
-
     [fermix_core.meetings]
+    enabled = true
+    """)
+
+    # This Mac's own settings (M97 §4).
+    File.write!(MachineFile.path(home), """
+    [fermix_channels.imessage]
     enabled = true
     """)
 
@@ -141,6 +145,8 @@ defmodule FermixCore.Home.MoveReadinessTest do
     enabled = true
     mode = "socket"
     """)
+
+    File.write!(MachineFile.path(ctx.home), "")
 
     assert %{items: items} = MoveReadiness.report(ctx.home, ctx.candidate, opts(ctx))
     item = fn id -> Enum.find(items, &(&1.id == id)) end
@@ -349,7 +355,9 @@ defmodule FermixCore.Home.MoveReadinessTest do
   # M91 D7, D13: a home moved to a server carries the StackChan's pairing but
   # starts no accessory link there, so a Mac whose home has it on names it.
   test "on a Mac, StackChan turned on is named among what stops after the move", ctx do
-    File.write!(Path.join(ctx.home, "config.toml"), """
+    File.write!(Path.join(ctx.home, "config.toml"), "")
+
+    File.write!(MachineFile.path(ctx.home), """
     [fermix_channels.accessories]
     enabled = true
     """)
@@ -364,12 +372,30 @@ defmodule FermixCore.Home.MoveReadinessTest do
     assert %{status: :ok} = item_in(items, "stays_here")
   end
 
+  # M97 §4: what runs only on this computer is read from its machine file; a
+  # section an earlier engine left in config.toml is read by nothing.
+  test "iMessage and StackChan are read from this computer's machine file only", ctx do
+    File.write!(Path.join(ctx.home, "config.toml"), """
+    [fermix_channels.imessage]
+    enabled = true
+
+    [fermix_channels.accessories]
+    enabled = true
+    """)
+
+    File.write!(MachineFile.path(ctx.home), "")
+
+    assert %{items: items} = MoveReadiness.report(ctx.home, ctx.candidate, opts(ctx))
+
+    assert %{status: :ok, sentence: "iMessage, voice calls and meetings are not turned on."} =
+             item_in(items, "stays_here")
+
+    assert MoveReadiness.stays_here(ctx.home, true, unreadable_files: nil) == {:ok, []}
+  end
+
   test "on a Linux computer, voice calls on are named, and iMessage never is", ctx do
     File.write!(Path.join(ctx.home, "config.toml"), """
     [fermix_core.realtime]
-    enabled = true
-
-    [fermix_channels.imessage]
     enabled = true
     """)
 
@@ -439,8 +465,13 @@ defmodule FermixCore.Home.MoveReadinessTest do
     dev = Path.join(ctx.home, "dev-plugins")
     File.mkdir_p!(dev)
     File.ln_s!("/etc", Path.join(dev, "tesla"))
-    config = Path.join(ctx.home, "config.toml")
-    File.write!(config, File.read!(config) <> ~s(\n[fermix_core.plugins]\ndev_local = "#{dev}"\n))
+    # The dev plugin folder is this computer's own (M97 §4).
+    machine = MachineFile.path(ctx.home)
+
+    File.write!(
+      machine,
+      File.read!(machine) <> ~s(\n[fermix_core.plugins]\ndev_local = "#{dev}"\n)
+    )
 
     for {host, machine} <- [{"macos-aarch64", "Mac"}, {"linux-x86_64", "computer"}] do
       seams = Keyword.put(opts(ctx), :host, host)

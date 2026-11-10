@@ -51,7 +51,10 @@ defmodule FermixCore.Home.ArchiveTest do
     "browser/profiles/default/Cookies",
     "imessage/cursor.json",
     "harness/runs/run-1/stdout.log",
-    "grants/grant-1793083733-1.json"
+    "grants/grant-1793083733-1.json",
+    # M97 §4: this computer's own settings, and an interrupted write of them.
+    "machine.toml",
+    "machine.toml.tmp"
   ]
 
   setup do
@@ -88,11 +91,10 @@ defmodule FermixCore.Home.ArchiveTest do
                 %{
                   files: created.files,
                   epoch: 4,
-                  rewritten: ["sandbox.workspace_root"],
-                  kept_paths: ["sandbox.helper"],
+                  rewritten: ["fermix_core.meetings.recordings"],
+                  kept_paths: ["fermix_core.meetings.helper"],
                   harness_consent_reset: true,
                   secret_store_switched: false,
-                  imessage_disabled: false,
                   instance_role_dropped: false,
                   device_settings_dropped: [],
                   keyring_secrets: 2,
@@ -118,7 +120,10 @@ defmodule FermixCore.Home.ArchiveTest do
       # nothing else in the file changed.
       assert File.read!(Path.join(into, "config.toml")) ==
                config_toml(home)
-               |> String.replace(~s("#{home}/workspace"), ~s("#{into}/workspace"))
+               |> String.replace(
+                 ~s("#{home}/workspace/meetings"),
+                 ~s("#{into}/workspace/meetings")
+               )
                |> String.replace("approved = true", "approved = false")
 
       # Screen history went from the restored database and nothing else did; the
@@ -533,8 +538,8 @@ defmodule FermixCore.Home.ArchiveTest do
     [fermix_core.harness]
     approved = true
 
-    [sandbox]
-    workspace_root = "#{home}/workspace"
+    [fermix_core.meetings]
+    recordings = "#{home}/workspace/meetings"
     helper = "/opt/invented/tool"
     """
   end

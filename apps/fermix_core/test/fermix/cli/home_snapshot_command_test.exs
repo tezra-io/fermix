@@ -32,7 +32,7 @@ defmodule Fermix.CLI.HomeSnapshotCommandTest do
 
     File.write!(
       Path.join(home, "config.toml"),
-      "[sandbox]\nworkspace_root = \"#{home}/workspace\"\n"
+      "[fermix_core.meetings]\nrecordings = \"#{home}/workspace/meetings\"\n"
     )
 
     File.write!(Path.join(home, "journal.md"), "an invented journal\n")
@@ -67,7 +67,7 @@ defmodule Fermix.CLI.HomeSnapshotCommandTest do
 
       assert {status, err} == {0, ""}
       assert out =~ "Restored 3 files into #{ctx.into} at primary epoch 6."
-      assert out =~ "Rewrote 1 path in config.toml: sandbox.workspace_root."
+      assert out =~ "Rewrote 1 path in config.toml: fermix_core.meetings.recordings."
       assert File.read!(Path.join(ctx.into, "journal.md")) == "an invented journal\n"
       assert Epoch.read(ctx.into) == {:ok, 6}
     end

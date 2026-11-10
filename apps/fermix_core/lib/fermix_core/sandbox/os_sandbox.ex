@@ -52,13 +52,15 @@ defmodule FermixCore.Sandbox.OsSandbox do
   # store, the phone gateway's identity bundle under `mobile/`: `gateway_key`,
   # `tls.key`, `iroh_key`, and a desktop's key under `device/`),
   # the agent's browser cookies, and the logs and traces a token can survive
-  # redaction in. `auth.json` and `memory.db` are matched with the files named
-  # after them (`.tmp.N`, `-wal`) by the read-deny patterns instead.
+  # redaction in. `auth.json`, `memory.db` and this computer's own
+  # `machine.toml` (M97 §4: neither read nor written in any mode) are matched
+  # with the files named after them (`.tmp.N`, `-wal`, `.tmp`) by the read-deny
+  # patterns instead.
   @secret_entries ~w(
     secrets secret_key_base setup-token setup-launch-token.json acp_identities
     mobile device plugins/run chatgpt_host.json browser/profiles logs traces
   )
-  @secret_prefixed ~w(auth.json memory.db)
+  @secret_prefixed ~w(auth.json memory.db machine.toml)
 
   # Outside Fermix's home, what a command may never read in any mode: an
   # Always-On host's enrollment code (M75). `PathPolicy` protects it from

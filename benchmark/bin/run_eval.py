@@ -682,7 +682,8 @@ def _path_within(path: str, root: str) -> bool:
 def daemon_sandbox_error(
         fermix_home: str, require_isolated: bool, require_strict: bool) -> str | None:
     home = os.path.realpath(os.path.expanduser(fermix_home))
-    config_path = os.path.join(home, "config.toml")
+    # The sandbox is the machine's own setting, read from machine.toml only (M97 §4).
+    config_path = os.path.join(home, "machine.toml")
     try:
         with open(config_path, "rb") as handle:
             raw = tomllib.load(handle)
@@ -725,7 +726,7 @@ def daemon_sandbox_error(
 
 def _configured_workspace(fermix_home: str) -> str:
     home = os.path.realpath(os.path.expanduser(fermix_home))
-    with open(os.path.join(home, "config.toml"), "rb") as handle:
+    with open(os.path.join(home, "machine.toml"), "rb") as handle:
         raw = tomllib.load(handle)
     workspace_raw = raw.get("sandbox", {}).get(
         "workspace_root", os.path.join(home, "workspace"))

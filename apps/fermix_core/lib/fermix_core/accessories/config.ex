@@ -1,14 +1,14 @@
 defmodule FermixCore.Accessories.Config do
   @moduledoc """
-  `[fermix_channels.accessories]` in `config.toml` (M91): whether this engine
-  runs the accessory link, the wired connection a desk companion such as
-  StackChan attaches over.
+  `[fermix_channels.accessories]` in this computer's `machine.toml` (M91, M97
+  §4): whether this engine runs the accessory link, the wired connection a
+  desk companion such as StackChan attaches over.
 
   Phase A has one key, `enabled`, a boolean, off when the section says
   nothing. `FermixChannels.Accessories` starts its subtree only when it is on,
-  and only on a local Mac primary; the section travels with the home like the
-  rest of `config.toml`. There is no environment-variable overlay: the file
-  owns the setting.
+  and only on a local Mac primary; the section stays on this computer when
+  the home moves (`Setup.MachineFile`). There is no environment-variable
+  overlay: the file owns the setting.
 
   Read through `FermixCore.Setup.ConfigStore` like every other section (here
   in core because the store must use it and core never depends on channels):
@@ -72,7 +72,7 @@ defmodule FermixCore.Accessories.Config do
 
   defp not_a_table!(value) do
     raise ArgumentError,
-          "#{@section} is not a table: #{inspect(value)}. Fix it in config.toml; " <>
+          "#{@section} is not a table: #{inspect(value)}. Fix it in machine.toml; " <>
             "the daemon will not boot until this is fixed."
   end
 
@@ -81,6 +81,6 @@ defmodule FermixCore.Accessories.Config do
   defp enabled!(value) do
     raise ArgumentError,
           "#{@section}.enabled must be true or false, not #{inspect(value)}. Fix it in " <>
-            "config.toml; the daemon will not boot until this is fixed."
+            "machine.toml; the daemon will not boot until this is fixed."
   end
 end

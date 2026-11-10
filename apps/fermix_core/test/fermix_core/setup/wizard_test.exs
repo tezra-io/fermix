@@ -1512,7 +1512,8 @@ defmodule FermixCore.Setup.WizardTest do
         telegram_owner_user_id: "111"
       )
 
-    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    # The sandbox is this computer's own (M97 §4).
+    contents = File.read!(Path.join(tmp_home, "machine.toml"))
 
     assert contents =~ ~s([sandbox.env.OPENAI_API_KEY])
     assert contents =~ ~s(source = "command")
@@ -2933,7 +2934,8 @@ defmodule FermixCore.Setup.WizardTest do
       assert "FOO_API_KEY" in persisted.env.allow
       assert "BAR_API_KEY" in persisted.env.allow
 
-      contents = File.read!(Path.join(tmp_home, "config.toml"))
+      # The sandbox is this computer's own (M97 §4).
+      contents = File.read!(Path.join(tmp_home, "machine.toml"))
       assert contents =~ ~s(mode = "open")
       assert contents =~ ~s(profile = "extended")
       assert contents =~ "FOO_API_KEY"
@@ -3003,7 +3005,9 @@ defmodule FermixCore.Setup.WizardTest do
 
       contents = File.read!(Path.join(tmp_home, "config.toml"))
       refute contents =~ "sk-from-env-only"
-      assert contents =~ ~s(mode = "open")
+      machine = File.read!(Path.join(tmp_home, "machine.toml"))
+      refute machine =~ "sk-from-env-only"
+      assert machine =~ ~s(mode = "open")
     end
 
     test "moves already persisted API key to keyring on save", %{tmp_home: tmp_home} do
@@ -3020,7 +3024,7 @@ defmodule FermixCore.Setup.WizardTest do
       contents = File.read!(Path.join(tmp_home, "config.toml"))
       assert contents =~ ~s(api_key = "@keyring")
       refute contents =~ "sk-already-on-disk"
-      assert contents =~ ~s(mode = "strict")
+      assert File.read!(Path.join(tmp_home, "machine.toml")) =~ ~s(mode = "strict")
 
       assert {:ok, "sk-already-on-disk"} =
                FermixTestSupport.SecretWriterStub.get(:openai_api_key)

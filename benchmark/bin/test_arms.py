@@ -352,7 +352,9 @@ def _seeded() -> str:
 
 def test_table_headers_lists_what_a_document_writes():
     headers = seed.table_headers(_seeded())
-    assert "sandbox" in headers and "fermix_core.harness" in headers
+    assert "fermix_core.harness" in headers
+    # M97 §4: the sandbox is the machine's own setting, which machine.toml holds.
+    assert "sandbox" not in headers
     assert "fermix_core.providers.openai" in headers
 
 

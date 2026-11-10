@@ -13,7 +13,8 @@ directive it stored.
 
 What is kept is what `seed_capability_home.reset_state` clears (`STATE_DIRS` and
 `STATE_FILES`: memory.db with its -wal and -shm, the memory/ tree, skills, job runs,
-journals, grants, bootstrap, browser, harness and eval-mcp) plus config.toml. An
+journals, grants, bootstrap, browser, harness and eval-mcp) plus config.toml and
+machine.toml (the sandbox the seed set, which a grant changes). An
 entry absent from the snapshot is removed on restore, as the seed left it.
 auth.json is not kept: the daemon may rotate an OAuth refresh token in it, and
 putting the old one back would sign the eval home out.
@@ -43,7 +44,7 @@ from evallib import safe_rm  # noqa: E402
 
 SNAPSHOT_DIR = "eval-snapshot"
 PARTIAL_DIR = "eval-snapshot.partial"
-KEPT = seed.STATE_DIRS + seed.STATE_FILES + ("config.toml",)
+KEPT = seed.STATE_DIRS + seed.STATE_FILES + ("config.toml", seed.MACHINE_FILE)
 
 
 def down_home(home: str, what: str) -> str:

@@ -107,7 +107,7 @@ defmodule FermixChannels.Test.HomeMove do
 
     File.write!(
       Path.join(root, "config.toml"),
-      "# the owner's note\n[sandbox]\nworkspace_root = \"#{root}/workspace\"\n"
+      "# the owner's note\n[fermix_core.meetings]\nrecordings = \"#{root}/workspace/meetings\"\n"
     )
 
     File.mkdir_p!(Path.join(root, "journals"))

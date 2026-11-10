@@ -242,7 +242,7 @@ defmodule FermixCore.ComputerHistory.Config do
 
   defp retired_message(:sites) do
     "computer_history.sites is retired: every site in an allowlisted browser is " <>
-      "recorded; remove the key from config.toml"
+      "recorded; remove the key from machine.toml"
   end
 
   # --- per-key validators -------------------------------------------------

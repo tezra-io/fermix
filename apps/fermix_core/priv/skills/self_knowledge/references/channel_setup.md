@@ -140,7 +140,7 @@ No public URL: Fermix runs `signal-cli` on the same machine.
 
 ## iMessage
 
-Mac only, and no public URL: Fermix reads and sends through Messages on the Mac it runs on. iMessage does not exist on Linux at all: the setup surfaces never show it there, and a `config.toml` that turns it on refuses to start ("imessage runs only on the Mac whose Messages it reads"). There is no remote-Mac mode.
+Mac only, and no public URL: Fermix reads and sends through Messages on the Mac it runs on. iMessage does not exist on Linux at all: the setup surfaces never show it there, and a `machine.toml` that turns it on refuses to start ("imessage runs only on the Mac whose Messages it reads"). There is no remote-Mac mode.
 
 Fermix never opens the Messages database itself. A signed helper app, **Fermix Messages**, does the reading and sending, and the two macOS permissions belong to it, never to Fermix, Terminal or Homebrew, so they survive Fermix updates. The helper also keeps the list of people Fermix may message, which changes only through a dialog it shows on your screen.
 
@@ -174,7 +174,7 @@ Troubleshooting, by what the helper reports (Doctor rows `imessage_helper` and `
 ## Who may talk: owner and allow lists
 
 - `owner_user_id` is the operator: full tools and owner commands. With no allow list, the owner is the only sender let in.
-- Guests: `allowed_user_ids` (Telegram, Discord, Slack) or `allowed_sender_ids` (WhatsApp, Signal, iMessage), a list of quoted ids in `config.toml`; only iMessage's guest list also has a setup field. Guests get read-only chat. Setting a list replaces the owner-only default (the owner still gets in); an empty list (`[]`, or an empty `*_ALLOWED_*_IDS` variable on a Linux or dev install) keeps Telegram, Discord and Signal from starting even with an owner set; on iMessage it only means no guests.
+- Guests: `allowed_user_ids` (Telegram, Discord, Slack) or `allowed_sender_ids` (WhatsApp, Signal, iMessage), a list of quoted ids in `config.toml` (iMessage's in the Mac's own `machine.toml`); only iMessage's guest list also has a setup field. Guests get read-only chat. Setting a list replaces the owner-only default (the owner still gets in); an empty list (`[]`, or an empty `*_ALLOWED_*_IDS` variable on a Linux or dev install) keeps Telegram, Discord and Signal from starting even with an owner set; on iMessage it only means no guests.
 - `command_allowlist` lets listed guests run owner-tier commands such as `/new` and `/compact`; each must also be on the guest list, or they never reach Fermix.
 - With neither an owner nor a list, Telegram, Discord, Signal and Slack over Socket Mode refuse to start ("Refusing to start the <channel> adapter" in the boot log) and the Slack and WhatsApp webhooks drop every sender. A sender who is not allowed gets no reply at all.
 - Reminders and skill proposals go to `[fermix_core.jobs] default_delivery_target` when set, else to the owner on the first of Telegram, Signal and WhatsApp with an `owner_user_id`; a Discord or Slack owner needs that target. A scheduled job delivers only where it was told to (its origin, an explicit target, or that default), never to an owner id on its own.

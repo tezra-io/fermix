@@ -252,7 +252,8 @@ defmodule FermixCore.Management.SecretsEnvTest do
       assert live.env.deny == ["OTHER"]
       assert ExternalEnv.source_kind(live.env, "ALPACA_API_KEY") == :managed
 
-      persisted = File.read!(Path.join(home, "config.toml"))
+      # The sandbox is this computer's own (M97 §4).
+      persisted = File.read!(Path.join(home, "machine.toml"))
       assert persisted =~ "[sandbox.env.ALPACA_API_KEY]"
       refute persisted =~ @value
     end

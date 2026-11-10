@@ -1785,8 +1785,9 @@ defmodule FermixCore.Management.SettingsTest do
       assert Application.get_env(:fermix_channels, :accessories) == [enabled: true]
       assert row("accessories", "accessories_enabled")["value"] == true
 
-      # The save reads back as it was written: the section, then its one key.
-      text = File.read!(Path.join(home, "config.toml"))
+      # The save reads back as it was written: the section, then its one key,
+      # in this computer's own file (M97 §4).
+      text = File.read!(Path.join(home, "machine.toml"))
       assert text =~ "[fermix_channels.accessories]"
       assert {:ok, persisted} = RestartState.load_persisted()
       assert persisted.fermix_channels[:accessories] == [enabled: true]

@@ -30,8 +30,8 @@ defmodule Fermix.CLI.HomeCommandTest do
     [fermix_core.providers.openai]
     api_key = "@keyring"
 
-    [sandbox]
-    workspace_root = "#{home}/workspace"
+    [fermix_core.meetings]
+    recordings = "#{home}/workspace/meetings"
     """)
 
     :ok = Epoch.write(home, 5)
@@ -73,14 +73,14 @@ defmodule Fermix.CLI.HomeCommandTest do
 
     assert {status, err} == {0, ""}
     assert out =~ "Restored 2 files into #{ctx.into} at primary epoch 6."
-    assert out =~ "Rewrote 1 path in config.toml: sandbox.workspace_root."
+    assert out =~ "Rewrote 1 path in config.toml: fermix_core.meetings.recordings."
     assert out =~ "The archived home kept 1 secret in the OS keyring"
     assert out =~ "The passphrase file #{ctx.passphrase_file} holds the owner root"
     assert String.ends_with?(out, @moved <> "\n")
     refute out =~ "Coding-harness"
     refute out =~ "screen-history"
     refute out =~ "Reinstall"
-    assert File.read!(Path.join(ctx.into, "config.toml")) =~ ~s("#{ctx.into}/workspace")
+    assert File.read!(Path.join(ctx.into, "config.toml")) =~ ~s("#{ctx.into}/workspace/meetings")
     assert Epoch.read(ctx.into) == {:ok, 6}
     refute File.exists?(Path.join(ctx.home, "moved.json"))
   end
@@ -238,9 +238,12 @@ defmodule Fermix.CLI.HomeCommandTest do
     [fermix_core.harness]
     approved = true
 
-    [sandbox]
-    workspace_root = "#{ctx.home}/workspace"
+    [fermix_core.meetings]
+    recordings = "#{ctx.home}/workspace/meetings"
     extra = "/Users/invented/Projects"
+
+    [sandbox]
+    mode = "open"
 
     [fermix_core.plugins]
     dev_local = "/Users/invented/Projects/plugins"
@@ -266,13 +269,14 @@ defmodule Fermix.CLI.HomeCommandTest do
     assert {status, err} == {0, ""}
 
     assert out =~
-             "Kept as they were; review them, they hold paths outside the old home: sandbox.extra."
+             "Kept as they were; review them, they hold paths outside the old home: " <>
+               "fermix_core.meetings.extra."
 
     assert out =~ "Coding-harness consent does not travel; approve it again here."
 
     assert out =~
              "Settings of the computer the home came from stay there: " <>
-               "fermix_core.plugins.dev_local."
+               "sandbox, fermix_core.plugins.dev_local."
 
     assert out =~
              ~s(This host has no usable keyring, so secrets are kept in files here: secret_store = "file".)

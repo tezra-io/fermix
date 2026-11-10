@@ -106,7 +106,7 @@ defmodule FermixChannels.Home.MoveTest do
 
     config = File.read!(Path.join(home, "config.toml"))
     assert config =~ "# the owner's note"
-    assert config =~ ~s(workspace_root = "#{home}/workspace")
+    assert config =~ ~s(recordings = "#{home}/workspace/meetings")
     assert config =~ ~s(s3_bucket = "invented-bucket-91")
     assert config =~ ~s(s3_region = "eu-north-1")
     assert config =~ ~s(s3_credentials = "instance_role")

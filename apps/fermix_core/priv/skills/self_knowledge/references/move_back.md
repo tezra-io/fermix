@@ -42,8 +42,9 @@ The move to a server, the roles and the epoch: skill_view(name:
   files (logs, browser profiles, iMessage's cursor, the helper apps, models,
   coding runs, the copies of the server's backups) stay
   where they were, the secrets go back into this computer's keychain, its
-  own device settings (sandbox, computer use, computer history, iMessage)
-  come back from before the move, and Fermix restarts as the primary, one
+  own settings (sandbox, computer use, computer history, iMessage, StackChan,
+  the dev plugin folder: its `machine.toml`) never left it and stay as they
+  were, and Fermix restarts as the primary, one
   epoch up from the server. Phones follow; the desktop link ends. A server
   that undid the move ("The move back was undone. Fermix still runs on your
   server.") offers **Try again** and **Cancel**, also when this computer

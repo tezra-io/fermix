@@ -20,6 +20,7 @@ defmodule FermixCore.Management.HomeTest do
   alias FermixCore.Management.HomeSummary
   alias FermixCore.Management.Jobs
   alias FermixCore.Management.Router
+  alias FermixCore.Setup.MachineFile
   alias FermixTestSupport.SafeRm
 
   @primary %{role: :primary, primary: nil}
@@ -358,15 +359,15 @@ defmodule FermixCore.Management.HomeTest do
     test "off names what this home uses that stops after the move, read from its settings",
          %{home: home} do
       File.write!(Path.join(home, "config.toml"), """
-      [fermix_channels.imessage]
-      enabled = true
-
       [fermix_core.realtime]
       enabled = false
 
       [fermix_core.meetings]
       enabled = true
       """)
+
+      # This Mac's own setting (M97 §4).
+      File.write!(MachineFile.path(home), "[fermix_channels.imessage]\nenabled = true\n")
 
       assert {:ok, %{"summary" => summary}} =
                route("home.status", %{}, opts(home, host_os: :macos))
@@ -376,6 +377,7 @@ defmodule FermixCore.Management.HomeTest do
                  "iMessage and meetings stop after the move."
 
       File.write!(Path.join(home, "config.toml"), "")
+      File.write!(MachineFile.path(home), "")
 
       assert {:ok, %{"summary" => %{"sentence" => sentence}}} =
                route("home.status", %{}, opts(home, host_os: :macos))

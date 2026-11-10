@@ -40,10 +40,11 @@ defmodule FermixCore.Home.MoveReadiness do
       named: they stop working after the move. The server installs every
       other one again for itself right after the move
       (`FermixCore.Plugins.Dist.Reinstall`), through the plugin installer;
-    * `dev_plugins`, only while this home's settings name a dev plugin
-      folder (`[fermix_core.plugins] dev_local`), warns: the folder and its
-      links to checkouts stay on this computer (`FermixCore.Home.DeviceLocal`),
-      so the server runs none of them, and the walk never blocks on them;
+    * `dev_plugins`, only while this computer's settings name a dev plugin
+      folder (`[fermix_core.plugins] dev_local`, in its `machine.toml`), warns:
+      the folder and its links to checkouts stay on this computer
+      (`FermixCore.Home.DeviceLocal`), so the server runs none of them, and
+      the walk never blocks on them;
     * `stays_here`: what the home has turned on that runs only on this
       computer (iMessage on a Mac, voice calls, meetings, StackChan on a Mac;
   `stays_here/2`)
@@ -100,6 +101,7 @@ defmodule FermixCore.Home.MoveReadiness do
   alias FermixCore.Management.Settings
   alias FermixCore.Plugins.Dist.Index
   alias FermixCore.Realtime.CallLease
+  alias FermixCore.Setup.MachineFile
 
   require Logger
 
@@ -175,20 +177,25 @@ defmodule FermixCore.Home.MoveReadiness do
 
   @doc """
   This home's settings as `summary_items/4` reads them: the text of its
-  `config.toml` (none is an empty one), or the sentence that says it could
-  not be read. `home.status` reads it on every poll, so an unreadable file
-  is logged once when it stops being readable and once when it reads again
+  `config.toml` followed by this computer's `machine.toml` (none is an empty
+  one; `settings_text/2`), or the sentence that says one could not be read.
+  `home.status` reads it on every poll, so an unreadable file is logged once
+  when it stops being readable and once when it reads again
   (`Home.UnreadableFiles`, `opts`' `:unreadable_files`: that memory, or nil
   for none).
   """
   @spec settings(Path.t(), keyword()) :: {:ok, String.t()} | {:error, String.t()}
   def settings(home, opts \\ []) when is_binary(home) and is_list(opts) do
-    file = config_path(home)
-    read = config_text(file)
     memory = Keyword.get(opts, :unreadable_files, UnreadableFiles)
-    :ok = UnreadableFiles.log_read(file, "home status", read, memory)
 
-    case read do
+    [config, machine] =
+      for file <- [config_path(home), MachineFile.path(home)] do
+        read = config_text(file)
+        :ok = UnreadableFiles.log_read(file, "home status", read, memory)
+        read
+      end
+
+    case settings_text(config, machine) do
       {:ok, text} -> {:ok, text}
       {:error, _reason} -> {:error, @unreadable_settings}
     end
@@ -484,8 +491,8 @@ defmodule FermixCore.Home.MoveReadiness do
           "#{Enum.join(names, ", ")}."
       )
 
-  # The dev plugin folder is this computer's (`DeviceLocal.settings/0`): no
-  # restore carries it, so the server runs none of its plugins.
+  # The dev plugin folder is this computer's (its `machine.toml`): no move
+  # carries it, so the server runs none of its plugins.
   defp dev_plugins({:ok, text}, macos?, name) do
     machine = if macos?, do: "Mac", else: "computer"
 
@@ -690,15 +697,36 @@ defmodule FermixCore.Home.MoveReadiness do
 
   # A review is asked for, not polled, so each unreadable read is logged.
   defp read_config(home) do
-    case config_text(config_path(home)) do
-      {:ok, text} ->
-        {:ok, text}
-
-      {:error, reason} ->
-        Logger.error("move readiness: config.toml could not be read: #{inspect(reason)}")
-        {:error, @unreadable_settings}
+    case settings_text(logged_read(config_path(home)), logged_read(MachineFile.path(home))) do
+      {:ok, text} -> {:ok, text}
+      {:error, _reason} -> {:error, @unreadable_settings}
     end
   end
+
+  defp logged_read(file) do
+    read = config_text(file)
+
+    case read do
+      {:ok, _text} ->
+        read
+
+      {:error, reason} ->
+        Logger.error(
+          "move readiness: #{Path.basename(file)} could not be read: #{inspect(reason)}"
+        )
+
+        read
+    end
+  end
+
+  # This home's settings and this computer's own as one text, each read where
+  # it lives: `config.toml` without any machine setting it still holds, then
+  # `machine.toml` (`Setup.MachineFile`).
+  defp settings_text({:ok, config}, {:ok, machine}),
+    do: {:ok, elem(MachineFile.strip(config), 0) <> "\n" <> machine}
+
+  defp settings_text({:error, _reason} = error, _machine), do: error
+  defp settings_text(_config, {:error, _reason} = error), do: error
 
   defp config_path(home), do: Path.join(home, "config.toml")
 

@@ -34,7 +34,9 @@ defmodule FermixCore.Sandbox.PathPolicy do
   @pane_bundle_ids ~w(io.tezra.FermixPet io.tezra.FermixPet.dev)
 
   # The daemon's own state under FERMIX_HOME, which no agent task reads or
-  # writes through file tools: configuration and credentials (the Linux file
+  # writes through file tools: configuration and credentials (the settings and
+  # this computer's own `machine.toml`, whose sandbox a task could otherwise
+  # widen, the Linux file
   # secret store, setup tokens, the session-signing key, ACP and mobile
   # identities, a desktop's key, the Sign in with ChatGPT install id, plugin
   # token projections, browser profiles), the persona files
@@ -42,7 +44,7 @@ defmodule FermixCore.Sandbox.PathPolicy do
   # kind joins this list in the same change. Each entry also covers the files
   # named after it (see `protected?/2`).
   @protected_fermix_entries ~w(
-    config.toml auth.json grants logs traces memory.db daemon.sock
+    config.toml machine.toml auth.json grants logs traces memory.db daemon.sock
     secrets secret_key_base setup-token setup-launch-token.json acp_identities
     mobile device plugins/run browser/profiles bootstrap acp.sock realtime.sock
     browser_bridge.sock companion.sock browser_host.sock native_host.sock chatgpt_host.json

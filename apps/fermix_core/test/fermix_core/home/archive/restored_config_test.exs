@@ -15,8 +15,8 @@ defmodule FermixCore.Home.Archive.RestoredConfigTest do
   enabled = true
   approved = true # given on the invented Mac
 
-  [sandbox]
-  workspace_root = "/Users/invented/.fermix/workspace"
+  [fermix_core.meetings]
+  recordings = "/Users/invented/.fermix/workspace/meetings"
   extra_roots = ["/Users/invented/Projects"]
   """
 
@@ -24,18 +24,17 @@ defmodule FermixCore.Home.Archive.RestoredConfigTest do
     {:ok, text, settled} = RestoredConfig.settle(@config, facts(macos?: false, keyring: false))
 
     assert settled == %{
-             rewritten: ["sandbox.workspace_root"],
-             kept_paths: ["sandbox.extra_roots"],
+             rewritten: ["fermix_core.meetings.recordings"],
+             kept_paths: ["fermix_core.meetings.extra_roots"],
              harness_consent_reset: true,
              secret_store_switched: true,
-             imessage_disabled: false,
              instance_role_dropped: false,
              device_settings_dropped: [],
              keyring_secrets: 1
            }
 
-    assert ConfigText.value(text, "sandbox", "workspace_root") ==
-             {:ok, ~s("/home/invented/.fermix/workspace")}
+    assert ConfigText.value(text, "fermix_core.meetings", "recordings") ==
+             {:ok, ~s("/home/invented/.fermix/workspace/meetings")}
 
     assert ConfigText.value(text, "fermix_core.harness", "approved") ==
              {:ok, "false"}
@@ -43,7 +42,7 @@ defmodule FermixCore.Home.Archive.RestoredConfigTest do
     assert text =~ "approved = false # given on the invented Mac"
     assert ConfigText.value(text, "fermix_core", "secret_store") == {:ok, ~s("file")}
 
-    assert ConfigText.value(text, "sandbox", "extra_roots") ==
+    assert ConfigText.value(text, "fermix_core.meetings", "extra_roots") ==
              {:ok, ~s(["/Users/invented/Projects"])}
   end
 
@@ -62,18 +61,6 @@ defmodule FermixCore.Home.Archive.RestoredConfigTest do
 
     assert {:ok, ^config, %{secret_store_switched: false, harness_consent_reset: false}} =
              RestoredConfig.settle(config, facts(macos?: false, keyring: false))
-  end
-
-  test "iMessage turned on is turned off away from a Mac, and kept on one" do
-    config = "[fermix_channels.imessage]\nenabled = true\n"
-
-    assert {:ok, linux_text, %{imessage_disabled: true}} =
-             RestoredConfig.settle(config, facts(macos?: false, keyring: true))
-
-    assert ConfigText.value(linux_text, "fermix_channels.imessage", "enabled") == {:ok, "false"}
-
-    assert {:ok, ^config, %{imessage_disabled: false}} =
-             RestoredConfig.settle(config, facts(macos?: true, keyring: false))
   end
 
   # A server's snapshots, signed with its own instance role, never come with
@@ -103,16 +90,6 @@ defmodule FermixCore.Home.Archive.RestoredConfigTest do
              RestoredConfig.settle(by_hand, facts(macos?: true, keyring: true))
   end
 
-  test "iMessage already off, or never configured, is left as it was" do
-    off = "[fermix_channels.imessage]\nenabled = false\n"
-
-    assert {:ok, ^off, %{imessage_disabled: false}} =
-             RestoredConfig.settle(off, facts(macos?: false, keyring: true))
-
-    assert {:ok, "", %{imessage_disabled: false}} =
-             RestoredConfig.settle("", facts(macos?: false, keyring: true))
-  end
-
   test "an explicit keyring store becomes the file store in place" do
     config = ~s([fermix_core]\nsecret_store = 'keyring'\n)
 
@@ -127,42 +104,68 @@ defmodule FermixCore.Home.Archive.RestoredConfigTest do
     assert {:ok, _text, _settled} = RestoredConfig.settle(@config, facts)
   end
 
-  # M91 D7: a home restored onto a server keeps StackChan's switch as it was.
-  # The server starts no accessory link (it is no Mac), and a move back to the
-  # Mac finds the robot paired and the link on, with nothing to set again.
-  test "StackChan's switch survives a restore onto a computer that is not a Mac" do
+  # M97 §4: an engine keeps this computer's own settings in machine.toml,
+  # which no archive carries. A home an earlier engine wrote still has them in
+  # config.toml (EC2 test 2026-11-08: a Mac's dev plugin folder moved to the
+  # server, whose plugin registry could not load), so a restore leaves every
+  # one out, on any host, and says so; the rest of a table is kept.
+  test "the computer's own settings an earlier engine kept are left out, the rest kept" do
     config = """
-    [fermix_channels.accessories]
+    [fermix_core.agent]
+    name = "Orchard"
+
+    [sandbox]
+    mode = "strict"
+    workspace_root = "/Users/invented/.fermix/workspace"
+
+    [sandbox.env]
+    allow = ["INVENTED_TOKEN"]
+
+    [fermix_core.computer_use]
     enabled = true
-    """
 
-    {:ok, text, _settled} = RestoredConfig.settle(config, facts(macos?: false, keyring: true))
-    assert ConfigText.value(text, "fermix_channels.accessories", "enabled") == {:ok, "true"}
-  end
+    [fermix_core.computer_history]
+    enabled = true
 
-  # EC2 test 2026-11-08: a Mac's dev plugin folder moved to the server in
-  # its settings, and the plugin registry could not load there. The setting
-  # is the computer's that set it up (`DeviceLocal.settings/0`): a restore
-  # leaves it out, on any host, and says so; the rest of its table is kept.
-  test "this machine's own settings are left out, the rest of their table kept" do
-    config = """
     [fermix_core.plugins]
     enabled = ["invented-notes"]
     dev_local = "/Users/invented/.fermix/dev-plugins" # the plugin checkouts here
+
+    [fermix_channels.imessage]
+    enabled = true
+
+    [fermix_channels.accessories]
+    enabled = true
     """
 
     for macos? <- [true, false] do
       {:ok, text, settled} = RestoredConfig.settle(config, facts(macos?: macos?, keyring: true))
 
       assert text == """
+             [fermix_core.agent]
+             name = "Orchard"
+
              [fermix_core.plugins]
              enabled = ["invented-notes"]
              """
 
-      assert settled.device_settings_dropped == ["fermix_core.plugins.dev_local"]
+      assert settled.device_settings_dropped == [
+               "sandbox",
+               "fermix_core.computer_use",
+               "fermix_core.computer_history",
+               "fermix_channels.imessage",
+               "fermix_channels.accessories",
+               "fermix_core.plugins.dev_local"
+             ]
+
       assert settled.rewritten == []
       assert settled.kept_paths == []
     end
+  end
+
+  test "a home whose settings hold none of them is left as it was" do
+    assert {:ok, "", %{device_settings_dropped: []}} =
+             RestoredConfig.settle("", facts(macos?: false, keyring: true))
   end
 
   defp facts(macos?: macos?, keyring: usable?) do

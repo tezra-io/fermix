@@ -208,7 +208,9 @@ def test_restore_puts_back_the_seeded_state_and_removes_what_came_after(scratch)
 
 
 def test_snapshot_keeps_what_reset_state_clears_and_the_config():
-    assert set(state.KEPT) == {*seed.STATE_DIRS, *seed.STATE_FILES, "config.toml"}
+    # The seeded sandbox is the machine's own setting (M97 §4), which a grant changes.
+    assert set(state.KEPT) == {*seed.STATE_DIRS, *seed.STATE_FILES, "config.toml",
+                               seed.MACHINE_FILE}
     assert "auth.json" not in state.KEPT
 
 

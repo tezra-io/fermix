@@ -5,7 +5,8 @@
 """Seed a disposable capability-eval FERMIX_HOME so `make capability` can run.
 
 Creates the home, a git-backed workspace (the checker's per-trial scoring root),
-a minimal strict config.toml, and the auth the scored model needs. The scored
+a minimal config.toml with a strict machine.toml beside it (the sandbox is the
+machine's own setting), and the auth the scored model needs. The scored
 model is DERIVED from the primary provider in ~/.fermix-dev/config.toml, so the
 disposable daemon benchmarks the same model you develop against, reusing the dev
 home's credentials:
@@ -89,6 +90,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from evallib import safe_rm  # noqa: E402
 
 DEV_HOME = os.path.expanduser("~/.fermix-dev")
+# This computer's own settings, beside config.toml (M97 §4): the engine reads
+# the sandbox, computer use and history, iMessage, the accessory link and the
+# dev plugin folder from it only.
+MACHINE_FILE = "machine.toml"
+MACHINE_TABLES = ("sandbox", "fermix_core.computer_use", "fermix_core.computer_history",
+                  "fermix_channels.imessage", "fermix_channels.accessories")
 # Homes this script must never touch, compared as REALPATHS so a symlink cannot dress
 # one of them up as a disposable eval home.
 _NON_DISPOSABLE = tuple(os.path.realpath(os.path.expanduser(p))
@@ -250,10 +257,8 @@ def dev_provider(dev: dict, pid: str) -> tuple[str, dict, str | None]:
 
 def render_config(
     home: str, pid: str, blk: dict, profile: str | None,
-    allowed_roots: tuple[str, ...] = (), explicit: bool = False, voice: str | None = None,
-    cues: dict | None = None,
+    explicit: bool = False, voice: str | None = None, cues: dict | None = None,
 ) -> str:
-    workspace = os.path.join(home, "workspace")
     uses_key = "api_key" in blk
     if explicit:
         source_note = ("# Disposable eval daemon (explicit/CI spec): strict, home-scoped sandbox; no\n"
@@ -278,28 +283,6 @@ def render_config(
             continue
         if key in blk and blk[key] not in (None, ""):
             lines.append(f'{key} = "{blk[key]}"')
-    # `<home>/skills` is always a sandbox root: it is where the daemon
-    # materializes skills, and the skill tasks verify their created SKILL.md
-    # with raw file reads. Under a workspace-only sandbox that read is denied
-    # -> request_directory_access -> "stop and wait for the owner" — an
-    # approval no eval can answer — so the turn ends before the deliverable
-    # is written and the task scores 0 with nothing wrong in the product
-    # (create_and_confirm_skill, 2026-08-06: 9 of 10 base trials died there).
-    # Same rule as the harness consent below: pre-grant every human-decision
-    # gate, scoped to this throwaway home. The runner precondition tolerates
-    # it — only roots that escape the home are refused.
-    roots = ", ".join(
-        json.dumps(root) for root in (os.path.join(home, "skills"), *allowed_roots))
-    lines += ["", "[sandbox]", 'mode = "strict"',
-              f'workspace_root = "{workspace}"', f"allowed_roots = [{roots}]", ""]
-    # The skill-credential fixture (M45): allowed, and read through a `command`
-    # source, so every shell command the eval daemon runs receives it and the
-    # redaction of its value is exercised on the real agent path.
-    token_path = os.path.join(home, SKILL_TOKEN_FILE)
-    lines += ["[sandbox.env]", f"allow = [{json.dumps(SKILL_TOKEN_NAME)}]", "",
-              f"[sandbox.env.{SKILL_TOKEN_NAME}]", 'source = "command"',
-              'command = "/bin/cat"', f"args = [{json.dumps(token_path)}]",
-              "timeout_ms = 3000", ""]
     # The halden_ops fixture MCP server (cap_tool_discovery). `/usr/bin/env python3`
     # because the server is standard-library only and this seeder's interpreter lives
     # in a uv cache the daemon should not depend on.
@@ -334,17 +317,7 @@ def render_config(
     # credentials, and this seeder installs neither — so a home that never gets a
     # lane still advertises nothing and refuses locally rather than dialling out.
     lines += ["[fermix_core.meetings]", "enabled = true", ""]
-    # Computer history (MILESTONE_32) is the DELIBERATE EXCEPTION to the
-    # pre-grant-every-gate rule, recorded here so its absence never reads as an
-    # oversight. Its `enabled` gate does not merely advertise a tool — it starts
-    # a live capturer that would record the eval HOST's real screen activity
-    # into this throwaway home and ship summaries to a provider, which is
-    # exactly the private-data movement the capability runner exists to refuse:
-    # the recall suite's positive half is risk `private_account_read`, a class
-    # `make capability-auto` never loads. Pre-granting would leak, not unblock.
-    # If a future capability task legitimately needs recall_activity, seed a
-    # synthetic spool instead of enabling live capture.
-    lines += ["[fermix_core.computer_history]", "enabled = false", ""]
+    # Computer history stays off: see `render_machine`, which writes it.
     # The StackChan accessory link (M91) is another deliberate exception, and
     # it is not seeded: on, the daemon lists this Mac's USB serial ports every
     # two seconds and would open a port a paired robot's serial names, which
@@ -401,6 +374,55 @@ def render_config(
     return "\n".join(lines)
 
 
+def render_machine(home: str, allowed_roots: tuple[str, ...] = (),
+                   cues: dict | None = None) -> str:
+    """The eval home's `machine.toml` (M97 §4): the settings that describe the
+    computer the daemon runs on, which the engine reads from this file only and
+    never from config.toml. The sandbox, the skill-credential fixture's
+    environment source, computer history held off and, with cue mandates, the
+    dev plugin folder the stub plugin is installed from."""
+    workspace = os.path.join(home, "workspace")
+    lines = ["# Managed by benchmark/bin/seed_capability_home.py — regenerated on each run.",
+             "# This computer's own settings (sandbox, computer history, dev plugins).", ""]
+    # `<home>/skills` is always a sandbox root: it is where the daemon
+    # materializes skills, and the skill tasks verify their created SKILL.md
+    # with raw file reads. Under a workspace-only sandbox that read is denied
+    # -> request_directory_access -> "stop and wait for the owner" — an
+    # approval no eval can answer — so the turn ends before the deliverable
+    # is written and the task scores 0 with nothing wrong in the product
+    # (create_and_confirm_skill, 2026-08-06: 9 of 10 base trials died there).
+    # Same rule as the harness consent in `render_config`: pre-grant every
+    # human-decision gate, scoped to this throwaway home. The runner
+    # precondition tolerates it — only roots that escape the home are refused.
+    roots = ", ".join(
+        json.dumps(root) for root in (os.path.join(home, "skills"), *allowed_roots))
+    lines += ["[sandbox]", 'mode = "strict"',
+              f'workspace_root = "{workspace}"', f"allowed_roots = [{roots}]", ""]
+    # The skill-credential fixture (M45): allowed, and read through a `command`
+    # source, so every shell command the eval daemon runs receives it and the
+    # redaction of its value is exercised on the real agent path.
+    token_path = os.path.join(home, SKILL_TOKEN_FILE)
+    lines += ["[sandbox.env]", f"allow = [{json.dumps(SKILL_TOKEN_NAME)}]", "",
+              f"[sandbox.env.{SKILL_TOKEN_NAME}]", 'source = "command"',
+              'command = "/bin/cat"', f"args = [{json.dumps(token_path)}]",
+              "timeout_ms = 3000", ""]
+    # Computer history (MILESTONE_32) is the DELIBERATE EXCEPTION to the
+    # pre-grant-every-gate rule, recorded here so its absence never reads as an
+    # oversight. Its `enabled` gate does not merely advertise a tool — it starts
+    # a live capturer that would record the eval HOST's real screen activity
+    # into this throwaway home and ship summaries to a provider, which is
+    # exactly the private-data movement the capability runner exists to refuse:
+    # the recall suite's positive half is risk `private_account_read`, a class
+    # `make capability-auto` never loads. Pre-granting would leak, not unblock.
+    # If a future capability task legitimately needs recall_activity, seed a
+    # synthetic spool instead of enabling live capture.
+    lines += ["[fermix_core.computer_history]", "enabled = false", ""]
+    if cues and cues["mandates"]:
+        lines += ["[fermix_core.plugins]",
+                  f"dev_local = {json.dumps(os.path.join(home, CUE_PLUGIN_DIR))}", ""]
+    return "\n".join(lines)
+
+
 def cue_lines(home: str, cues: dict) -> list[str]:
     """Cues on, for the cue suites (`cap_cues`, `cues`): the switch, the door on this
     home's own port, every source the suites post to with its token in the `@file`
@@ -420,8 +442,7 @@ def cue_lines(home: str, cues: dict) -> list[str]:
     lines += ["[fermix_core.routing]", f"filter_provider = {json.dumps(provider)}",
               f"filter_model = {json.dumps(model)}", ""]
     if cues["mandates"]:
-        lines += ["[fermix_core.plugins]", f"enabled = [{json.dumps(CUE_PLUGIN)}]",
-                  f"dev_local = {json.dumps(os.path.join(home, CUE_PLUGIN_DIR))}", ""]
+        lines += ["[fermix_core.plugins]", f"enabled = [{json.dumps(CUE_PLUGIN)}]", ""]
     return lines
 
 
@@ -585,6 +606,11 @@ def extra_config_error(rendered: str, fragment: str) -> str | None:
         # THAT table instead of the document root.
         return (f"--extra-config must start with a table header; top-level key(s) "
                 f"{bare} would be appended into the seeder's last table")
+    machine = sorted(header for header in table_headers(fragment)
+                     if any(header == t or header.startswith(t + ".") for t in MACHINE_TABLES))
+    if machine or "dev_local" in parsed.get("fermix_core", {}).get("plugins", {}):
+        return (f"--extra-config sets this computer's own settings {machine or ['dev_local']}, "
+                f"which Fermix reads from {MACHINE_FILE}, never from config.toml")
     written = set(table_headers(rendered))
     clashes = sorted(set(table_headers(fragment)) & written)
     if clashes:
@@ -866,12 +892,14 @@ def main() -> None:
         write_cue_fixtures(home, cues)
     else:
         clear_cue_fixtures(home)
-    config = render_config(home, pid, blk, profile, allowed_roots,
+    config = render_config(home, pid, blk, profile,
                            explicit=bool(args.provider), voice=voice_engine, cues=cues)
     if args.extra_config:
         config += read_extra_config(config, args.extra_config)
     with open(os.path.join(home, "config.toml"), "w", encoding="utf-8") as fh:
         fh.write(config)
+    with open(os.path.join(home, MACHINE_FILE), "w", encoding="utf-8") as fh:
+        fh.write(render_machine(home, allowed_roots, cues))
 
     if args.provider:
         env_name = _ENV_KEY_PROVIDERS.get(pid)

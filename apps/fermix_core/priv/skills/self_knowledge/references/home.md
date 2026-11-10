@@ -83,7 +83,8 @@ it, never a second writer.
   token file, the file secret store, the phone identity bundle and device
   list, prompt files, skills, journals, the workspace and installed plugins)
   and leaves out what belongs to the machine: logs, traces, sockets, locks,
-  sandbox grants, the dev plugin folder and its setting, browser profiles, the iMessage cursor, coding-harness
+  sandbox grants, the dev plugin folder, `machine.toml` (its own settings),
+  browser profiles, the iMessage cursor, coding-harness
   spools, downloaded models and helper binaries, and the moved marker.
   Secrets kept in the OS keyring are not in the home and do not travel in an
   archive; export and import both say how many must be entered again on the
@@ -455,8 +456,8 @@ it, never a second writer.
   keeps the phase, says the ending and why in its sentence, and tries again
   at each read). On the server:
   `enrolled`, `receiving`, `staged` (restored one epoch up, with its snapshot
-  bucket, region and recovery key, and
-  iMessage turned off on a server that is not a Mac, in `candidate/staging`),
+  bucket, region and recovery key, and no machine settings, in
+  `candidate/staging`; the server's own sandbox starts at `open`),
   `activating` (the restored home renamed into place,
   its settings last), then it restarts as the primary, and its first start
   takes a snapshot at once and installs again, through the plugin installer

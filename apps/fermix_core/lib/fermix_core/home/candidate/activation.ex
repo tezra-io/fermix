@@ -15,11 +15,11 @@ defmodule FermixCore.Home.Candidate.Activation do
   access keys where the server's infrastructure set them, and the recovery
   recipient the move carried). The last server's own instance-role bucket
   never travels on: a move back, or a move to a server whose infrastructure
-  named none, leaves it behind (`Archive.InstanceRole`). On a host that is not a Mac
-  the restore itself has already turned iMessage off
-  (`FermixCore.Home.Archive.RestoredConfig`), as it does
-  for `fermix home import`: a settings file that turns iMessage on refuses to
-  load anywhere else, and the new primary must boot. The keychain's secrets
+  named none, leaves it behind (`Archive.InstanceRole`). No setting of the
+  computer the home left comes with it: those are in that computer's own
+  `machine.toml`, which no stream carries, and the restore leaves out any an
+  earlier engine kept in `config.toml` (`FermixCore.Home.Archive.RestoredConfig`),
+  so the new primary takes its own machine file. The keychain's secrets
   the source carried in the stream are in the staged file store by then, and
   each `@keyring` reference whose file arrived becomes `@file`
   (`FermixCore.Home.MoveSecrets.adopt/2`), so the new primary resolves every

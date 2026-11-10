@@ -134,7 +134,8 @@ def config_problems(fermix_home: str) -> list[str]:
     by default (`computer_use/config.ex:75`) and a strict sandbox derives strict
     (look-only) access, which refuses every click (`config.ex:64`,
     `tools/computer_use.ex:384-386`)."""
-    path = os.path.join(os.path.realpath(os.path.expanduser(fermix_home)), "config.toml")
+    # Both are the machine's own settings, read from machine.toml only (M97 §4).
+    path = os.path.join(os.path.realpath(os.path.expanduser(fermix_home)), "machine.toml")
     try:
         with open(path, "rb") as handle:
             raw = tomllib.load(handle)

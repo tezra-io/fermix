@@ -9,6 +9,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
   alias FermixCore.Meetings.Config, as: MeetingsConfig
   alias FermixCore.OpenLoops.Config, as: OpenLoopsConfig
   alias FermixCore.Setup.ConfigStore
+  alias FermixCore.Setup.MachineFile
 
   setup do
     fermix_home = System.get_env("FERMIX_HOME")
@@ -919,10 +920,12 @@ defmodule FermixCore.Setup.ConfigStoreTest do
 
     assert :ok = ConfigStore.save_snapshot(snapshot)
 
-    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    # This computer's own setting (M97 §4).
+    contents = File.read!(Path.join(tmp_home, "machine.toml"))
     assert contents =~ "[fermix_core.computer_history]"
     assert contents =~ "enabled = true"
     assert contents =~ ~s(summarizer = "local")
+    refute File.read!(Path.join(tmp_home, "config.toml")) =~ "computer_history"
 
     assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
     computer_history = Keyword.get(loaded.fermix_core, :computer_history, [])
@@ -966,7 +969,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
 
       assert :ok = ConfigStore.save_snapshot(snapshot)
 
-      contents = File.read!(Path.join(tmp_home, "config.toml"))
+      contents = File.read!(Path.join(tmp_home, "machine.toml"))
       assert contents =~ toml_line
       # The internal atom spelling must never reach disk.
       refute contents =~ "default_provider"
@@ -1150,6 +1153,9 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     System.put_env("FERMIX_HOME", tmp_home)
     File.mkdir_p!(tmp_home)
     File.write!(Path.join(tmp_home, "config.toml"), @roundtrip_toml)
+    # The fixture is one file, as an earlier engine wrote it: the boot moves
+    # this computer's own settings into machine.toml before the first read.
+    assert :ok = ConfigStore.migrate_machine_file(tmp_home, server?: false)
 
     assert {:ok, first} = ConfigStore.load_runtime_config(resolve_secrets: false)
 
@@ -1174,6 +1180,12 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert :ok = ConfigStore.save_snapshot(first)
     assert {:ok, second} = ConfigStore.load_runtime_config(resolve_secrets: false)
     assert second == first
+
+    # Each setting in its own file (M97 §4).
+    assert tmp_home |> Path.join("config.toml") |> File.read!() |> MachineFile.strip() |> elem(1) ==
+             []
+
+    assert File.read!(Path.join(tmp_home, "machine.toml")) =~ "[fermix_core.computer_use]"
 
     # The listener lives outside `fermix_core`, so the roster check above cannot
     # reach it; name it here rather than leave the one section the gate walks
@@ -1285,7 +1297,9 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     [fermix_core.personalization]
     user_name = "Ana \\"Q\\" C:\\\\d"
     communication_style = "keep \\d as written"
+    """)
 
+    File.write!(Path.join(tmp_home, "machine.toml"), """
     [fermix_core.computer_history]
     apps = ["com.apple.Safari", "a\\"b\\\\","c"]
     """)
@@ -1499,7 +1513,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     System.put_env("FERMIX_HOME", tmp_home)
     File.mkdir_p!(tmp_home)
 
-    File.write!(Path.join(tmp_home, "config.toml"), """
+    File.write!(Path.join(tmp_home, "machine.toml"), """
     [fermix_core.computer_history]
     enabled = true
     apps = ["com.apple.Safari"]
@@ -1512,7 +1526,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     refute Keyword.has_key?(computer_history, :sites)
 
     assert :ok = ConfigStore.save_snapshot(loaded)
-    refute File.read!(Path.join(tmp_home, "config.toml")) =~ "sites"
+    refute File.read!(Path.join(tmp_home, "machine.toml")) =~ "sites"
   end
 
   test "load refuses to boot on an unknown computer_history key (M32)" do
@@ -1523,7 +1537,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     System.put_env("FERMIX_HOME", tmp_home)
     File.mkdir_p!(tmp_home)
 
-    File.write!(Path.join(tmp_home, "config.toml"), """
+    File.write!(Path.join(tmp_home, "machine.toml"), """
     [fermix_core.computer_history]
     enabled = true
     aps = ["com.apple.Safari"]
@@ -2261,10 +2275,15 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     File.write!(Path.join(tmp_home, "config.toml"), """
     [fermix_core.plugins]
     enabled = ["google_calendar"]
-    dev_local = "/tmp/x"
 
     [fermix_core.plugins.google_calendar]
     auth_profile = "google_calendar:primary"
+    """)
+
+    # The dev plugin folder is this computer's own (M97 §4).
+    File.write!(Path.join(tmp_home, "machine.toml"), """
+    [fermix_core.plugins]
+    dev_local = "/tmp/x"
     """)
 
     assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
@@ -2278,9 +2297,11 @@ defmodule FermixCore.Setup.ConfigStoreTest do
 
     assert :ok = ConfigStore.save_snapshot(loaded)
 
-    contents = File.read!(Path.join(tmp_home, "config.toml"))
-    assert contents =~ ~s(dev_local = "/tmp/x")
+    contents = File.read!(Path.join(tmp_home, "machine.toml"))
+    assert contents =~ ~s([fermix_core.plugins]\ndev_local = "/tmp/x")
     refute contents =~ "[fermix_core.plugins.dev_local]"
+    refute contents =~ "google_calendar"
+    refute File.read!(Path.join(tmp_home, "config.toml")) =~ "dev_local"
   end
 
   test "a non-string plugins dev_local is dropped like other bad config values" do
@@ -2291,9 +2312,8 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     System.put_env("FERMIX_HOME", tmp_home)
     File.mkdir_p!(tmp_home)
 
-    File.write!(Path.join(tmp_home, "config.toml"), """
+    File.write!(Path.join(tmp_home, "machine.toml"), """
     [fermix_core.plugins]
-    enabled = ["google_calendar"]
     dev_local = 42
     """)
 
@@ -3365,7 +3385,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
 
     assert :ok = ConfigStore.save_snapshot(snapshot)
 
-    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    contents = File.read!(Path.join(tmp_home, "machine.toml"))
     assert contents =~ "[fermix_core.computer_use]"
     assert contents =~ "enabled = true"
     assert contents =~ "screenshot_after = false"
@@ -3401,7 +3421,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     System.put_env("FERMIX_HOME", tmp_home)
     File.mkdir_p!(tmp_home)
 
-    File.write!(Path.join(tmp_home, "config.toml"), """
+    File.write!(Path.join(tmp_home, "machine.toml"), """
     [fermix_core.computer_use]
     enabled = true
     mode = "browser"
@@ -3852,7 +3872,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
       snapshot = %{fermix_core: [], fermix_channels: [imessage: section], fermix_web: []}
 
       assert :ok = ConfigStore.save_snapshot(snapshot)
-      contents = File.read!(Path.join(home, "config.toml"))
+      contents = File.read!(Path.join(home, "machine.toml"))
       assert contents =~ "[fermix_channels.imessage]"
       refute contents =~ "posture"
       refute contents =~ ~r/\[fermix_channels\.imessage\][^\[]*mode =/
@@ -3879,7 +3899,8 @@ defmodule FermixCore.Setup.ConfigStoreTest do
       assert live[:owner_user_id] == "me@example.com"
     end
 
-    defp write_config!(home, contents), do: File.write!(Path.join(home, "config.toml"), contents)
+    # This Mac's own section (M97 §4).
+    defp write_config!(home, contents), do: File.write!(Path.join(home, "machine.toml"), contents)
   end
 
   # `[fermix_channels.accessories]` (M91 Phase A): one switch, off when the
@@ -3899,7 +3920,8 @@ defmodule FermixCore.Setup.ConfigStoreTest do
         FermixTestSupport.SafeRm.rm_rf!(tmp_home)
       end)
 
-      %{config: Path.join(tmp_home, "config.toml")}
+      # This computer's own section (M97 §4).
+      %{config: Path.join(tmp_home, "machine.toml")}
     end
 
     test "save/load round-trips the switch, applies it, and clears it when turned off", ctx do

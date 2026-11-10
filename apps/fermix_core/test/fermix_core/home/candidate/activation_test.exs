@@ -11,6 +11,7 @@ defmodule FermixCore.Home.Candidate.ActivationTest do
   alias FermixCore.Home.Snapshot.Recipient
   alias FermixCore.Home.Snapshot.Status
   alias FermixCore.Plugins.Dist.Reinstall
+  alias FermixCore.Setup.MachineFile
   alias FermixTestSupport.SafeRm
 
   @now ~U[2031-05-04 10:00:00Z]
@@ -29,6 +30,9 @@ defmodule FermixCore.Home.Candidate.ActivationTest do
       [fermix_core.engine]
       role = "device"
 
+      [fermix_core.meetings]
+      recordings = "#{source}/workspace/meetings"
+
       [sandbox]
       workspace_root = "#{source}/workspace"
 
@@ -36,6 +40,9 @@ defmodule FermixCore.Home.Candidate.ActivationTest do
       enabled = true
       """
     )
+
+    # The source's own machine file, which no stream carries (M97 §4).
+    File.write!(MachineFile.path(source), "[sandbox]\nmode = \"strict\"\n")
 
     File.write!(Path.join([source, "journals", "day.md"]), "an invented day\n")
     :ok = Epoch.write(source, 6)
@@ -75,13 +82,16 @@ defmodule FermixCore.Home.Candidate.ActivationTest do
 
     assert config =~ ~s(role = "primary")
     refute config =~ ~s(role = "device")
-    assert config =~ ~s(workspace_root = "#{ctx.home}/workspace")
+    assert config =~ ~s(recordings = "#{ctx.home}/workspace/meetings")
     assert config =~ ~s(s3_bucket = "invented-bucket-91")
     assert config =~ ~s(s3_region = "eu-north-1")
     refute config =~ "s3_credentials"
     assert config =~ ~s(recipient = "#{@recovery}")
-    # iMessage runs only on a Mac; left on, the settings would not load here.
-    assert config =~ "[fermix_channels.imessage]\nenabled = false"
+    # M97 §4: no setting of the computer the home left comes with it, neither
+    # its machine file nor what an earlier engine kept in its settings (an
+    # iMessage switch there would refuse the load off a Mac).
+    assert MachineFile.strip(config) == {config, []}
+    refute File.exists?(MachineFile.path(staging))
     assert {:ok, 7} = Epoch.read(staging)
     assert File.read!(Path.join([staging, "journals", "day.md"])) == "an invented day\n"
 
@@ -301,7 +311,7 @@ defmodule FermixCore.Home.Candidate.ActivationTest do
     refute File.exists?(Reinstall.path(Path.join(Candidate.staging_path(ctx.home), "plugins")))
   end
 
-  test "a Mac keeps its iMessage setting", ctx do
+  test "a Mac takes none of another computer's own settings either", ctx do
     assert {:ok, 7} =
              Activation.stage(ctx.home, ctx.incoming, ctx.pair, %{},
                host: "macos-aarch64",
@@ -309,7 +319,7 @@ defmodule FermixCore.Home.Candidate.ActivationTest do
              )
 
     config = File.read!(Path.join(Candidate.staging_path(ctx.home), "config.toml"))
-    assert config =~ "[fermix_channels.imessage]\nenabled = true"
+    assert MachineFile.strip(config) == {config, []}
   end
 
   # Always On's switch is the home's own setting, not this computer's

@@ -13,11 +13,27 @@ defmodule FermixCore.Home.Candidate.ReturnSettleTest do
   alias FermixCore.Home.Moved
   alias FermixCore.Home.Snapshot
   alias FermixCore.Home.Snapshot.Recipient
-  alias FermixCore.Management.Placement
+  alias FermixCore.Setup.MachineFile
   alias FermixCore.Setup.SecretWriter
   alias FermixTestSupport.SafeRm
 
   @now ~U[2031-06-01 09:00:00Z]
+  @mac_machine """
+  [sandbox]
+  mode = "standard"
+
+  [sandbox.env]
+  allow = ["MAC_ONLY"]
+
+  [fermix_core.computer_use]
+  enabled = true
+
+  [fermix_core.plugins]
+  dev_local = "/Users/invented/.fermix/dev-plugins"
+
+  [fermix_channels.imessage]
+  enabled = true
+  """
   @recovery "fxsnap1.AAAAAAAAAAAAAAAAAAAAAA.BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
 
   setup do
@@ -37,10 +53,6 @@ defmodule FermixCore.Home.Candidate.ReturnSettleTest do
     %{tmp: tmp, mac: mac, profile: profile, pair: pair, incoming: incoming, desktop: desktop}
   end
 
-  test "the device-class sections name every section only this machine configures" do
-    assert Enum.sort(Map.keys(Return.device_tables())) == Enum.sort(Placement.device_sections())
-  end
-
   test "stages the server's copy one epoch up, settled for this computer as it was", ctx do
     assert {:ok, 7} = stage(ctx)
 
@@ -50,13 +62,13 @@ defmodule FermixCore.Home.Candidate.ReturnSettleTest do
     assert {:ok, 7} = Epoch.read(staging)
     assert value(config, "fermix_core.engine", "role") == ~s("primary")
     assert value(config, "fermix_core.snapshots", "recipient") == ~s("#{@recovery}")
-    # What only this computer configures is this computer's again.
-    assert value(config, "fermix_channels.imessage", "enabled") == "true"
-    assert value(config, "sandbox", "mode") == ~s("standard")
-    assert value(config, "sandbox.env", "allow") == ~s(["MAC_ONLY"])
+    # M97 §4: what only a computer configures is in its own machine file,
+    # which never left this one and which the staging leaves as it is; the
+    # server's, which an earlier engine kept in its settings, stays out.
+    assert MachineFile.strip(config) == {config, []}
     refute config =~ "SERVER_ONLY"
-    assert value(config, "fermix_core.computer_use", "enabled") == "true"
-    assert value(config, "fermix_core.computer_history", "apps") == ~s(["Safari"])
+    refute File.exists?(MachineFile.path(staging))
+    assert File.read!(MachineFile.path(ctx.mac)) == @mac_machine
     # Everything else is the server's: Always On's switch, which this
     # computer's own settings no longer carry, comes back with the home.
     assert value(config, "fermix_core.memory", "enabled") == "true"
@@ -163,81 +175,6 @@ defmodule FermixCore.Home.Candidate.ReturnSettleTest do
     refute File.exists?(Candidate.staging_path(ctx.mac))
   end
 
-  describe "settle/4's device-class sections" do
-    test "come whole from the retired settings, and a section only the server set goes" do
-      staged = """
-      [fermix_core]
-      profile = "general"
-
-      [sandbox]
-      mode = "open"
-
-      [sandbox.commands.server-only]
-      argv = ["true"]
-
-      [fermix_core.computer_use]
-      enabled = false
-
-      [fermix_core.memory]
-      enabled = true
-      """
-
-      retired = """
-      [fermix_core.engine]
-      role = "device"
-
-      [sandbox]
-      mode = "strict" # this Mac's own
-      """
-
-      text = Return.device_sections(staged, retired)
-
-      assert value(text, "sandbox", "mode") == ~s("strict")
-      assert text =~ "# this Mac's own"
-      refute text =~ "server-only"
-      refute text =~ "computer_use"
-      assert value(text, "fermix_core.memory", "enabled") == "true"
-      assert value(text, "fermix_core", "profile") == ~s("general")
-    end
-
-    # EC2 test 2026-11-08: the dev plugin folder is this computer's
-    # (`DeviceLocal.settings/0`). Every restore leaves it out, so a move back
-    # puts this computer's own into the server's table, beside the rest of it.
-    test "this computer's own settings come back from the retired file" do
-      staged = """
-      [fermix_core.plugins]
-      enabled = ["invented-notes"]
-      """
-
-      retired = """
-      [fermix_core.plugins]
-      enabled = ["invented-old"]
-      dev_local = "/Users/invented/.fermix/dev-plugins"
-      """
-
-      text = Return.device_sections(staged, retired)
-
-      assert value(text, "fermix_core.plugins", "dev_local") ==
-               ~s("/Users/invented/.fermix/dev-plugins")
-
-      assert value(text, "fermix_core.plugins", "enabled") == ~s(["invented-notes"])
-    end
-
-    test "a setting this computer never set stays unset" do
-      staged = "[fermix_core.plugins]\nenabled = []\n"
-      assert Return.device_sections(staged, ~s([fermix_core]\nprofile = "general"\n)) == staged
-    end
-  end
-
-  test "a move back keeps this computer's dev plugin folder", ctx do
-    put_retired(ctx.mac, "fermix_core.plugins", "dev_local", ~s("#{ctx.mac}/dev-plugins"))
-
-    assert {:ok, 7} = stage(ctx)
-
-    config = File.read!(Path.join(Candidate.staging_path(ctx.mac), "config.toml"))
-    assert value(config, "fermix_core.plugins", "dev_local") == ~s("#{ctx.mac}/dev-plugins")
-  end
-
   # The row drop is the rail's (`FermixCore.Home.Link`), which this app does
   # not compile against; it is pinned in the channels app's own test.
   defp stage(ctx, opts \\ []) do
@@ -326,7 +263,7 @@ defmodule FermixCore.Home.Candidate.ReturnSettleTest do
   end
 
   # The computer the home left: a linked desktop in the device role, its
-  # marker, its own settings for what only it configures.
+  # marker, and its own machine file for what only it configures.
   defp mac_home!(root, profile) do
     File.mkdir_p!(root)
 
@@ -339,23 +276,9 @@ defmodule FermixCore.Home.Candidate.ReturnSettleTest do
 
     [fermix_core.providers.anthropic]
     api_key = "@keyring"
-
-    [sandbox]
-    mode = "standard"
-
-    [sandbox.env]
-    allow = ["MAC_ONLY"]
-
-    [fermix_core.computer_use]
-    enabled = true
-
-    [fermix_core.computer_history]
-    enabled = true
-    apps = ["Safari"]
-
-    [fermix_channels.imessage]
-    enabled = true
     """)
+
+    File.write!(MachineFile.path(root), @mac_machine)
 
     :ok =
       Moved.write(root, %{epoch: 5, moved_at: ~U[2031-05-01 10:00:00Z], to: "hetzner-orchard"})

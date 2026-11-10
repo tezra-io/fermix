@@ -4,21 +4,13 @@ defmodule FermixCore.Home.Candidate.Return do
   (`FermixCore.Home.Candidate.Activation.stage/6`): a return is Always On's
   move back, which stages the server's copy of the home on the computer the
   home left, beside that computer's retired copy, and the staged settings
-  must describe this computer again. `settle/4` takes the staged
-  `config.toml` text once the move's own settling is done and:
+  must describe this computer again. This computer's own settings need
+  nothing here: they are in its `machine.toml` (`FermixCore.Setup.MachineFile`),
+  which never left it, which the return keeps
+  (`FermixCore.Home.DeviceLocal`), and which the staged `config.toml` never
+  holds. `settle/4` takes the staged `config.toml` text once the move's own
+  settling is done and:
 
-    * copies the **device-class sections** whole from this computer's retired
-      `config.toml` (`device_tables/0`, the settings sections that configure
-      only the machine they run on, `Management.Placement.device_sections/0`):
-      the sandbox, computer use, computer history, this Mac's Messages and
-      its StackChan switch (M91).
-      The server's tables of those sections are dropped, so iMessage is on
-      again when it was on before the move, and nothing the server set for
-      itself configures this computer;
-    * puts back this computer's **own settings**, the ones that name its own
-      paths (`FermixCore.Home.DeviceLocal.settings/0`, such as the dev plugin
-      folder), from the retired `config.toml`: every restore leaves them out,
-      the server's included;
     * names the **secret store** this computer used
       (`[fermix_core] secret_store`, read by `SecretWriter.parse_store/1`),
       and where that is the keychain, puts every secret back into it
@@ -36,24 +28,11 @@ defmodule FermixCore.Home.Candidate.Return do
 
   alias FermixCore.Home.Archive.ConfigText
   alias FermixCore.Home.DesktopLink
-  alias FermixCore.Home.DeviceLocal
   alias FermixCore.Home.Link
   alias FermixCore.Home.MoveSecrets
   alias FermixCore.Setup.SecretWriter
 
   @config "config.toml"
-  # Each device-class settings section by the table its settings live under.
-  @device_tables %{
-    "sandbox" => "sandbox",
-    "computer_use" => "fermix_core.computer_use",
-    "computer_history" => "fermix_core.computer_history",
-    "channels.imessage" => "fermix_channels.imessage",
-    "accessories" => "fermix_channels.accessories"
-  }
-
-  @doc "Each device-class settings section with the `config.toml` table it lives under."
-  @spec device_tables() :: %{String.t() => String.t()}
-  def device_tables, do: @device_tables
 
   @doc """
   Settles the staged settings `text` of the staged home at `staging` for the
@@ -64,37 +43,10 @@ defmodule FermixCore.Home.Candidate.Return do
       when is_binary(text) and is_binary(home) and is_binary(staging) and is_list(opts) do
     with {:ok, retired} <- read_retired(home),
          {:ok, store} <- retired_store(retired),
-         {:ok, text} <- secrets(device_sections(text, retired), store, staging, opts),
+         {:ok, text} <- secrets(text, store, staging, opts),
          :ok <- drop_own_row(home, staging, opts) do
       {:ok, text}
     end
-  end
-
-  @doc """
-  `staged` with every table of the device-class sections taken from
-  `retired` instead, comments and all, and each of this computer's own
-  settings that `retired` sets (`DeviceLocal.settings/0`) put back; every
-  other line of `staged` kept.
-  """
-  @spec device_sections(String.t(), String.t()) :: String.t()
-  def device_sections(staged, retired) when is_binary(staged) and is_binary(retired) do
-    tables = Enum.sort(Map.values(@device_tables))
-    kept = Enum.reduce(tables, staged, &ConfigText.drop_tables(&2, &1))
-
-    case Enum.flat_map(tables, &ConfigText.tables(retired, &1)) do
-      [] -> kept
-      blocks -> String.trim_trailing(kept) <> "\n\n" <> Enum.join(blocks, "\n") <> "\n"
-    end
-    |> own_settings(retired)
-  end
-
-  defp own_settings(text, retired) do
-    Enum.reduce(DeviceLocal.settings(), text, fn %{table: table, key: key}, acc ->
-      case ConfigText.value(retired, table, key) do
-        {:ok, raw} -> ConfigText.put(acc, table, key, raw)
-        :absent -> acc
-      end
-    end)
   end
 
   @doc """

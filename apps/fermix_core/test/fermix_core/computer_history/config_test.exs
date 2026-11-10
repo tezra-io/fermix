@@ -283,7 +283,7 @@ defmodule FermixCore.ComputerHistory.ConfigTest do
       assert [_one] = Regex.scan(~r/computer_history\.sites is retired/, log)
 
       assert log =~
-               "every site in an allowlisted browser is recorded; remove the key from config.toml"
+               "every site in an allowlisted browser is recorded; remove the key from machine.toml"
     end
 
     test "to_keyword never emits it" do

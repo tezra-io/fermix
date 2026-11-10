@@ -766,7 +766,7 @@ def test_daemon_sandbox_requires_strict_eval_scoped_workspace(tmp_path):
     home = tmp_path / "fermix-eval"
     workspace = home / "workspace"
     (workspace / ".git").mkdir(parents=True)
-    (home / "config.toml").write_text(
+    (home / "machine.toml").write_text(
         f'[sandbox]\nmode = "strict"\nworkspace_root = "{workspace}"\n'
     )
     assert run_eval.daemon_sandbox_error(
@@ -777,7 +777,7 @@ def test_safe_dev_sandbox_does_not_require_strict_mode_or_git_workspace(tmp_path
     home = tmp_path / ".fermix-dev"
     workspace = home / "workspace"
     workspace.mkdir(parents=True)
-    (home / "config.toml").write_text(
+    (home / "machine.toml").write_text(
         f'[sandbox]\nmode = "standard"\nworkspace_root = "{workspace}"\n'
     )
     assert run_eval.daemon_sandbox_error(
@@ -788,7 +788,7 @@ def test_daemon_sandbox_requires_disposable_repo_snapshot(tmp_path):
     home = tmp_path / "fermix-eval"
     workspace = home / "workspace"
     workspace.mkdir(parents=True)
-    (home / "config.toml").write_text(
+    (home / "machine.toml").write_text(
         f'[sandbox]\nmode = "strict"\nworkspace_root = "{workspace}"\n'
     )
     error = run_eval.daemon_sandbox_error(
@@ -799,7 +799,7 @@ def test_daemon_sandbox_requires_disposable_repo_snapshot(tmp_path):
 def test_daemon_sandbox_rejects_host_workspace_escape(tmp_path):
     home = tmp_path / "fermix-eval"
     home.mkdir()
-    (home / "config.toml").write_text(
+    (home / "machine.toml").write_text(
         f'[sandbox]\nmode = "strict"\nworkspace_root = "{tmp_path}"\n'
     )
     assert run_eval.daemon_sandbox_error(
@@ -1863,7 +1863,7 @@ def _workspace_case(tmp_path, paths):
     home = tmp_path / "fermix-eval-home"
     workspace = home / "workspace"
     workspace.mkdir(parents=True)
-    (home / "config.toml").write_text(f'[sandbox]\nworkspace_root = "{workspace}"\n')
+    (home / "machine.toml").write_text(f'[sandbox]\nworkspace_root = "{workspace}"\n')
     suite = _write_suite(tmp_path, "isolated_mutation")
     scenario, case = suite.scenarios[0], suite.scenarios[0].cases[0]
     case.turns = [suites.Turn("follow the note", expect={
@@ -2136,7 +2136,7 @@ def test_run_case_reads_the_workspace_before_and_after_the_turn(tmp_path, monkey
     workspace = home / "workspace"
     (workspace / "left-behind").mkdir(parents=True)
     (workspace / "left-behind" / "old.txt").write_text("from an earlier case")
-    (home / "config.toml").write_text(f'[sandbox]\nworkspace_root = "{workspace}"\n')
+    (home / "machine.toml").write_text(f'[sandbox]\nworkspace_root = "{workspace}"\n')
     suite = _write_suite(tmp_path, "isolated_mutation")
     scenario, case = suite.scenarios[0], suite.scenarios[0].cases[0]
     case.turns = [suites.Turn("follow the note", expect={

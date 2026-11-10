@@ -13,14 +13,20 @@ defmodule FermixCore.Home.DeviceLocalTest do
     assert patterns == Enum.uniq(patterns)
   end
 
-  # EC2 test 2026-11-08: a Mac's dev plugin folder is a setting naming this
-  # machine's own checkouts. A restore leaves it out of the settings it
-  # writes, and a return keeps this machine's own.
-  test "the settings that stay on this machine name their table, key and reason" do
-    assert [%{table: "fermix_core.plugins", key: "dev_local", reason: reason}] =
-             DeviceLocal.settings()
+  # M97 §4: this computer's own settings (its sandbox, computer use, screen
+  # history, Messages, accessory link and dev plugin folder) are a file of its
+  # own, which no archive carries and a return keeps; an interrupted write of
+  # it, or of config.toml, goes.
+  test "the machine file stays on this machine and a return keeps it" do
+    assert DeviceLocal.excluded?("machine.toml")
+    assert DeviceLocal.kept_through_return?("machine.toml")
 
-    assert is_binary(reason) and reason != "" and not String.contains?(reason, "\n")
+    for partial <- ["machine.toml.tmp", "config.toml.tmp"] do
+      assert DeviceLocal.excluded?(partial), partial
+      refute DeviceLocal.kept_through_return?(partial), partial
+    end
+
+    refute DeviceLocal.excluded?("config.toml")
   end
 
   test "every entry says whether a return keeps it, and there is no third answer" do

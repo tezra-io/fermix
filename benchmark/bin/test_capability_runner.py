@@ -313,7 +313,7 @@ def test_capability_sandbox_requires_strict_home_scoped_repo(tmp_path):
     home = tmp_path / "fermix-capability-eval"
     workspace = home / "workspace"
     (workspace / ".git").mkdir(parents=True)
-    (home / "config.toml").write_text(
+    (home / "machine.toml").write_text(
         f'[sandbox]\nmode = "strict"\nworkspace_root = "{workspace}"\n'
     )
     assert rc._capability_sandbox_error(str(home), require_isolated=True) is None
@@ -323,7 +323,7 @@ def test_capability_safe_dev_run_accepts_standard_non_git_workspace(tmp_path):
     home = tmp_path / ".fermix-dev"
     workspace = home / "workspace"
     workspace.mkdir(parents=True)
-    (home / "config.toml").write_text(
+    (home / "machine.toml").write_text(
         f'[sandbox]\nmode = "standard"\nworkspace_root = "{workspace}"\n'
     )
     assert rc._capability_sandbox_error(str(home), require_isolated=False) is None
@@ -333,7 +333,7 @@ def test_capability_safe_dev_run_accepts_standard_non_git_workspace(tmp_path):
 def test_capability_sandbox_rejects_workspace_escape(tmp_path):
     home = tmp_path / "fermix-capability-eval"
     home.mkdir()
-    (home / "config.toml").write_text(
+    (home / "machine.toml").write_text(
         f'[sandbox]\nmode = "strict"\nworkspace_root = "{tmp_path}"\n'
     )
     assert rc._capability_sandbox_error(str(home), require_isolated=True) is not None
@@ -343,7 +343,7 @@ def test_capability_sandbox_rejects_nonconventional_workspace_root(tmp_path):
     home = tmp_path / "fermix-capability-eval"
     workspace = home / "repo"
     (workspace / ".git").mkdir(parents=True)
-    (home / "config.toml").write_text(
+    (home / "machine.toml").write_text(
         f'[sandbox]\nmode = "strict"\nworkspace_root = "{workspace}"\n'
     )
     error = rc._capability_sandbox_error(str(home), require_isolated=True)

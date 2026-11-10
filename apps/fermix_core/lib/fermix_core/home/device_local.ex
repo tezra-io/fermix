@@ -15,6 +15,10 @@ defmodule FermixCore.Home.DeviceLocal do
     {"auth.json.broken.*", :keep,
      "a token file this machine quarantined as unreadable, kept here for recovery"},
     {"config.toml.pre-m5", :keep, "a backup taken by a secret migration on this machine"},
+    {"machine.toml", :keep,
+     "this computer's own settings: its sandbox, computer use, screen history, Messages, " <>
+       "accessory link and dev plugin folder"},
+    {"*.toml.tmp", :drop, "an interrupted write of the settings or the machine file"},
     {"moved.json", :drop,
      "the marker that retires this copy; a restored home is the new primary"},
     {"device", :keep, "this machine's own Always On record: a return's"},
@@ -83,13 +87,6 @@ defmodule FermixCore.Home.DeviceLocal do
     {"plugins/evidence/*/.*.staging", :drop, "plugin provenance being staged"}
   ]
 
-  # Each setting that names this machine's own paths, as its `config.toml`
-  # table and key, with the one-line reason it stays.
-  @settings [
-    {"fermix_core.plugins", "dev_local",
-     "the dev plugin folder, plugin checkouts on this machine that no other machine has"}
-  ]
-
   for {pattern, return, _reason} <- @entries, return not in [:keep, :drop] do
     raise CompileError,
       description: "device-local #{pattern}: a return either :keep's or :drop's it"
@@ -146,15 +143,10 @@ defmodule FermixCore.Home.DeviceLocal do
   |---|---|---|
   #{Enum.map_join(@entries, "\n", fn {pattern, return, reason} -> "| `#{pattern}` | #{return} | #{reason} |" end)}
 
-  **Settings.** A setting that names this machine's own paths stays here too
-  (`settings/0`): every restore leaves it out of the settings it writes
-  (`FermixCore.Home.Archive.RestoredConfig`), so another machine never reads
-  a path it does not have, and a return keeps this machine's own
-  (`FermixCore.Home.Candidate.Return`).
-
-  | Setting | Why it stays |
-  |---|---|
-  #{Enum.map_join(@settings, "\n", fn {table, key, reason} -> "| `[#{table}] #{key}` | #{reason} |" end)}
+  **Settings.** The settings that describe this machine live in its own
+  `machine.toml` (`FermixCore.Setup.MachineFile`), which stays here like any
+  other path above, so another machine never reads a path or a switch it
+  does not have, and a return keeps this machine's own.
   """
 
   @matchers for {pattern, return, _reason} <- @entries,
@@ -167,7 +159,6 @@ defmodule FermixCore.Home.DeviceLocal do
 
   @type return :: :keep | :drop
   @type entry :: %{pattern: String.t(), return: return(), reason: String.t()}
-  @type setting :: %{table: String.t(), key: String.t(), reason: String.t()}
 
   @doc "The device-local list: each pattern, what a return does with it, and its reason."
   @spec excluded() :: [entry()]
@@ -176,12 +167,6 @@ defmodule FermixCore.Home.DeviceLocal do
       Enum.map(@entries, fn {pattern, return, reason} ->
         %{pattern: pattern, return: return, reason: reason}
       end)
-
-  @doc "The settings that stay on this machine: each `config.toml` table, key and reason."
-  @spec settings() :: [setting()]
-  def settings,
-    do:
-      Enum.map(@settings, fn {table, key, reason} -> %{table: table, key: key, reason: reason} end)
 
   @doc "Whether `path`, relative to the home, stays on this machine."
   @spec excluded?(String.t()) :: boolean()

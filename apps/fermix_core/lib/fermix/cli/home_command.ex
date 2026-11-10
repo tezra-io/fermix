@@ -207,9 +207,6 @@ defmodule Fermix.CLI.HomeCommand do
       )
     end
 
-    if restored.imessage_disabled,
-      do: IO.puts("iMessage needs a Mac, so it is turned off here.")
-
     if restored.instance_role_dropped,
       do: IO.puts("The server's S3 bucket stays with the server: a Mac keeps no S3 snapshots.")
 

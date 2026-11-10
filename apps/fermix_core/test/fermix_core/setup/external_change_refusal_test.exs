@@ -69,7 +69,8 @@ defmodule FermixCore.Setup.ExternalChangeRefusalTest do
 
   test "with no outside change every write proceeds", %{home: home} do
     assert {:ok, _report} = Wizard.set_sandbox_overrides(:strict, nil, nil)
-    assert File.read!(Path.join(home, "config.toml")) =~ ~s(mode = "strict")
+    # The sandbox is this computer's own (M97 §4).
+    assert File.read!(Path.join(home, "machine.toml")) =~ ~s(mode = "strict")
   end
 
   test "an outside write refuses the wizard tail and names the sections", %{home: home} do
