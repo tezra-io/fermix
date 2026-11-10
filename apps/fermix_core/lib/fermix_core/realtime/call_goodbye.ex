@@ -59,27 +59,8 @@ defmodule FermixCore.Realtime.CallGoodbye do
     ~w(thats it),
     ~w(all done)
   ]
-  @closings [
-    ~w(bye),
-    ~w(bye bye),
-    ~w(goodbye),
-    ~w(good bye),
-    ~w(bye for now),
-    ~w(see you later),
-    ~w(see ya),
-    ~w(talk to you later),
-    ~w(catch you later),
-    ~w(take care),
-    ~w(good night),
-    ~w(goodnight),
-    ~w(gotta go),
-    ~w(got to go),
-    ~w(hang up),
-    ~w(end the call)
-  ]
-  # Often the first half of "see you at five" when the owner pauses, so only
-  # after a lead-in or before a tail.
-  @guarded_closings [~w(see you), ~w(talk later)]
+  # Only "bye" and "goodbye" for now, by the owner's choice (2026-11-09).
+  @closings [~w(bye), ~w(bye bye), ~w(goodbye), ~w(good bye)]
   @tails [~w(then), ~w(now), ~w(for now), ~w(thanks), ~w(thank you), ~w(fermix)]
 
   @typep fragment :: {non_neg_integer(), String.t()}
@@ -163,8 +144,8 @@ defmodule FermixCore.Realtime.CallGoodbye do
   @doc """
   Whether `text` is a whole English goodbye: at most #{@max_words} words, fillers
   left out, that are exactly any lead-ins ("okay", "thanks"), one closing
-  ("bye", "talk to you later") and any tails ("then", "thanks", the
-  assistant's name). "Tell Sam bye" and "see you at five" are not.
+  ("bye" or "goodbye") and any tails ("for now", "thanks", the assistant's
+  name). "Tell Sam bye" and "talk to you later" are not.
 
   Normalised first: lowercase, apostrophes dropped (`that's` is `thats`), every
   other mark that is not a letter or a digit, hyphens included, a space.
@@ -235,7 +216,7 @@ defmodule FermixCore.Realtime.CallGoodbye do
 
   defp shaped?(text, tails) when byte_size(text) <= @max_text_bytes do
     words = words(text)
-    length(words) in 1..@max_words and closed?(words, false, tails)
+    length(words) in 1..@max_words and closed?(words, tails)
   end
 
   defp shaped?(_text, _tails), do: false
@@ -251,21 +232,13 @@ defmodule FermixCore.Realtime.CallGoodbye do
 
   # Any lead-ins, then one closing, then any tails. Each step takes at least
   # one word of at most eight, so the walk is bounded.
-  defp closed?(words, led?, tails) do
-    closing?(words, led?, tails) or
-      Enum.any?(@lead_ins, fn lead -> after_phrase?(words, lead, &closed?(&1, true, tails)) end)
+  defp closed?(words, tails) do
+    closing?(words, tails) or
+      Enum.any?(@lead_ins, fn lead -> after_phrase?(words, lead, &closed?(&1, tails)) end)
   end
 
-  defp closing?(words, led?, tails) do
-    Enum.any?(@closings, &after_phrase?(words, &1, fn rest -> tails?(rest, tails) end)) or
-      Enum.any?(
-        @guarded_closings,
-        &after_phrase?(words, &1, fn rest -> guarded?(rest, led?, tails) end)
-      )
-  end
-
-  defp guarded?([], led?, _tails), do: led?
-  defp guarded?(rest, _led?, tails), do: tails?(rest, tails)
+  defp closing?(words, tails),
+    do: Enum.any?(@closings, &after_phrase?(words, &1, fn rest -> tails?(rest, tails) end))
 
   defp tails?([], _tails), do: true
 

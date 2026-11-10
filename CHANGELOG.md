@@ -63,13 +63,14 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **A voice call says hello, and hangs up on goodbye.** On GPT-Live and
   Grok, the voice now speaks first: when a call connects, from the Mac, the
   phone or an accessory, it greets you by name in one short line, then
-  listens. Say goodbye ("okay, thanks, bye") and the voice says goodbye back,
-  then the call ends by itself, with no button: work you handed off still
-  finishes into the chat, as when you hang up. A goodbye inside a request
-  ("remind me to say bye to Sam at five") keeps the call up, as does talking
-  over the voice's goodbye, and only English goodbyes end a call for now. An
-  accessory such as StackChan ends calls this way at once; the Mac app does
-  once it is updated for it, and until then keeps its End button.
+  listens. Say "bye" or "goodbye" ("okay, thanks, bye") and the voice says
+  goodbye back, then the call ends by itself, with no button: work you handed
+  off still finishes into the chat, as when you hang up. A goodbye inside a
+  request ("remind me to say bye to Sam at five") keeps the call up, as does
+  talking over the voice's goodbye, and only English "bye" and "goodbye" end
+  a call for now. An accessory such as StackChan ends calls this way at once;
+  the Mac app does once it is updated for it, and until then keeps its End
+  button.
 - **Call Fermix from your phone.** Fermix now takes a voice call from a
   paired phone over the phone's own encrypted connection, on GPT-Live or
   Grok, wherever Fermix runs, an Always On server included. A dropped

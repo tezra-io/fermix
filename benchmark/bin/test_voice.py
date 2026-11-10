@@ -299,7 +299,7 @@ def test_the_goodbye_clips_are_whole_goodbyes_and_the_others_only_carry_the_word
             for case in scenario.cases}
     # At most 8 words, the engine's bound on a whole-turn goodbye (M96 D4).
     assert all(len(said[case].split()) <= 8
-               for case in ("okay_thanks_bye", "alright_talk_to_you_later"))
+               for case in ("okay_thanks_bye", "alright_goodbye_for_now"))
     for case in ("say_bye_to_the_van_driver", "dont_hang_up_yet"):
         assert len(said[case].split()) > 8 and "twenty twenty-seven" in said[case]
         assert "bye" in said[case] or "hang up" in said[case]

@@ -48,17 +48,17 @@
       "sha256": "74271b8e97290c2d97bd1303bbfef7ea90b0f31657355cf49983f83977858b5f",
       "text": "While that runs, what can I use instead of chickpeas in a curry?"
     },
+    "goodbye_for_now": {
+      "duration_ms": 1848,
+      "file": "goodbye_for_now.wav",
+      "sha256": "560b496056bfe24424b561ab091b4022717196ad42c233ea90f37e94b8a66bb6",
+      "text": "Alright, goodbye for now."
+    },
     "goodbye_okay_thanks_bye": {
       "duration_ms": 2129,
       "file": "goodbye_okay_thanks_bye.wav",
       "sha256": "14d0505dae62744e5b8d50ade4e179dcc10e943791c6f431474dd9888e0f37b8",
       "text": "Okay, thanks, bye."
-    },
-    "goodbye_talk_to_you_later": {
-      "duration_ms": 1929,
-      "file": "goodbye_talk_to_you_later.wav",
-      "sha256": "1c5d0108c7ac2643fe4f902d681b7adf434549de3c93de9ec37effc4d9c9e95e",
-      "text": "Alright, talk to you later."
     },
     "greeting_can_you_hear_me": {
       "duration_ms": 2271,

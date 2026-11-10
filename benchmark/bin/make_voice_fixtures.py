@@ -76,7 +76,7 @@ CLIPS: dict[str, str] = {
     # goodbyes, and two requests that carry a goodbye word without being one.
     "greeting_can_you_hear_me": "Hi there. Can you hear me all right?",
     "goodbye_okay_thanks_bye": "Okay, thanks, bye.",
-    "goodbye_talk_to_you_later": "Alright, talk to you later.",
+    "goodbye_for_now": "Alright, goodbye for now.",
     "bye_to_the_van_driver_27": (
         "Who's driving the pantry van on Saturday the twenty-seventh of March, "
         "twenty twenty-seven? The rota is in the voice fixtures folder of my workspace. "

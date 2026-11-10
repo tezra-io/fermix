@@ -131,7 +131,7 @@ current picture.
 Version 5 adds a normal end the daemon starts (M96): the server object
 `call_ended` with `reason`, a string. Today one reason exists, `goodbye`: on a
 task-engine call (`openai_live`, `xai_realtime`), when the owner's whole turn
-was a goodbye in English ("okay, thanks, bye", "talk to you later") and the
+was "bye" or "goodbye" in English ("okay, thanks, bye", "goodbye for now") and the
 voice's reply to it has played, the daemon ends the call. No engine requires
 version 5, and no client object changed.
 

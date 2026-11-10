@@ -632,7 +632,7 @@ def test_the_shipped_numbered_rubrics_parse():
                       # voice_greeting_goodbye.yaml
                       "greeted_then_asked_if_heard": 4,
                       "greeted_then_asked_about_the_rota": 3, "okay_thanks_bye": 2,
-                      "alright_talk_to_you_later": 2, "say_bye_to_the_van_driver": 2,
+                      "alright_goodbye_for_now": 2, "say_bye_to_the_van_driver": 2,
                       "dont_hang_up_yet": 2}
 
 

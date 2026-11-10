@@ -175,11 +175,11 @@ scenarios:
           2. After the owner says goodbye, the voice asks the owner nothing more.
           Not required: any particular wording of either goodbye, or whether the voice
           greeted the owner first.
-      - id: alright_talk_to_you_later
+      - id: alright_goodbye_for_now
         drive: voice
         voice:
           clips:
-            - say: goodbye_talk_to_you_later
+            - say: goodbye_for_now
           quiet_ms: 10000
         expect:
           reply_not_matches: "\\?\\s*$"

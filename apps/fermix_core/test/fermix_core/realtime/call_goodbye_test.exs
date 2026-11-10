@@ -12,24 +12,15 @@ defmodule FermixCore.Realtime.CallGoodbyeTest do
             "Goodbye",
             "Okay, thanks, bye.",
             "OK bye",
-            "Alright, talk to you later.",
-            "All right, catch you later then",
             "Thank you so much, goodbye.",
             "Thanks, bye, thanks",
-            "Cool, see ya",
             "Perfect. That's all, bye!",
-            "That’s it, take care",
+            "That’s it, goodbye",
             "Um, okay, uh, bye",
-            "Sounds good, good night",
-            "gotta go",
-            "Got to go now",
             "Bye for now",
-            "Okay, hang up",
-            "End the call",
+            "Alright, goodbye for now.",
+            "All right, good bye then",
             "Cheers, bye",
-            "Okay, see you",
-            "See you then",
-            "Okay, talk later",
             "Bye, Fermix"
           ] do
         assert CallGoodbye.goodbye?(text, nil), "expected a goodbye: #{inspect(text)}"
@@ -55,6 +46,25 @@ defmodule FermixCore.Realtime.CallGoodbyeTest do
             "Bye bye bye bye bye bye bye bye bye",
             "Okay thanks so much for everything bye",
             "Remind me to say bye to Sam at five"
+          ] do
+        refute CallGoodbye.goodbye?(text, nil), "expected no goodbye: #{inspect(text)}"
+      end
+    end
+
+    test "only bye and goodbye close a turn: every other farewell keeps the call" do
+      for text <- [
+            "Alright, talk to you later.",
+            "All right, catch you later then",
+            "Cool, see ya",
+            "That's it, take care",
+            "Sounds good, good night",
+            "gotta go",
+            "Got to go now",
+            "Okay, hang up",
+            "End the call",
+            "Okay, see you",
+            "See you then",
+            "Okay, talk later"
           ] do
         refute CallGoodbye.goodbye?(text, nil), "expected no goodbye: #{inspect(text)}"
       end
