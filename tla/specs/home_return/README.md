@@ -327,6 +327,27 @@ Each is modelled as built. Walking them found nothing new.
 
 Each is modelled as built. Walking them found nothing new.
 
+Walked again against db21a29d (M97: the computer's key and switches):
+- **Step c** (`end_tenure/2`) deletes the ended tenure's key from the secret
+  store its link records (with any file an older Fermix kept it in), then
+  removes the link, so a stop between the two deletes the key again. The key
+  is a write no rule reads, so `CTenure` stays one step. A link it cannot
+  read, or a store that will not delete, now fails the step where two file
+  removals did before, and the activation tries again, as the header's
+  failed activation does (not modelled).
+- **The server's move worker** moves with `keep_as_desktop: false`, so it
+  makes no key, no row, no link and no switches; `ensure_offers/1` on its
+  resume writes nothing.
+- **The `on` screen** offers the review of what a computer that moved before
+  M97 keeps on for its server (`review_offers`), beside Back up now, and
+  Move now from the computer that sets Always On up records `keep_offers`
+  in its request (`local_move/3`). Each is an act that writes nothing a rule
+  reads; Move now on a return (`forwarded_move/4`) is as before.
+
+None changes a modelled step. The comments' line numbers into the files
+this commit changed had drifted before it too; they now point at the
+committed code.
+
 ## Done
 
 Deadlock checking is on. `Done` has these ends:
@@ -379,7 +400,9 @@ The `.tla` header lists what is left out, with the reason for each:
   request then stands beside no job, as a stop of the engine leaves it;
 - a second desktop (the stale epoch, the passed return's drop);
 - the copy's choice and a wrong passphrase;
-- the key's derivation.
+- the key's derivation;
+- the Mac's other acts: Back up now, and the review of what a computer that
+  moved before M97 keeps on for its server.
 
 ## Outside the model
 

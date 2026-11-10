@@ -16,7 +16,7 @@ Models one move of M75 §7.2 (B5). Three parts take part:
 **Who serves as the primary**:
 - The source serves as the primary when its engine booted as one, or when its
   next boot will: `config.toml` says primary and `moved.json` is absent
-  (`Role.resolve/2`, `role.ex:165-177`). Counting the next boot keeps the end
+  (`Role.resolve/2`, `role.ex:200-210`). Counting the next boot keeps the end
   of `undo/3` on the cautious side: the role is written there, and the restart
   comes after.
 - The candidate serves as the primary once `config.toml` is renamed into
@@ -31,9 +31,16 @@ Models one move of M75 §7.2 (B5). Three parts take part:
 - `SourceCanCrash`, `CandidateCanCrash` (at most `MaxCrashes` times each):
   the engine dies and boots again from its files. The source's worker re-runs
   `run/1`; the candidate re-runs `carry_on/1`.
-- `TransferCanFail`, before `move_ready`. Three failures fall under it:
-  - an attempt fails at the source before its offer is out (the desktop key
-    or row, or the capture), and the worker tries again;
+- `TransferCanFail`, before `move_ready`. Five failures fall under it:
+  - an attempt fails at the source before its offer is out in a way another
+    attempt may mend (the device row, or a capture that failed for another
+    reason than room), and the worker tries again (`AttemptFails`);
+  - an attempt fails at the source before its offer is out in a way another
+    would not mend, and the worker aborts the move (`AttemptAborts`,
+    `attempt_failed/2`, `move_worker.ex:236-250`): the secret store refuses
+    the desktop key, or its item holds another home's key under the same
+    profile; the keychain does not give the settings' secrets; or the
+    capture has no room;
   - the candidate's restore fails: it goes back to enrolled, holding no move,
     and refuses, so the source aborts;
   - the ready epoch or the marker cannot be written, and `commit/4` aborts;
@@ -49,7 +56,7 @@ Models one move of M75 §7.2 (B5). Three parts take part:
 - `OldRequestsArrive`: a request the worker sent on a rail it has since given
   up on still reaches the candidate. Two rails are two streams, so nothing
   orders one rail's frames against another's. The worker closes a rail it
-  gives up on (`close_rail/1`, `move_worker.ex:212`, `:426`, `:439`), but
+  gives up on (`close_rail/1`, `move_worker.ex:224`, `:523`, `:537`), but
   `Rail.close/1` sends its close frame behind whatever the rail already sent
   (`rail.ex`). Whether the iroh helper still delivers what it holds once the
   socket closes ("the helper ends its stream on its own", `helper.ex`) is
@@ -60,21 +67,21 @@ Models one move of M75 §7.2 (B5). Three parts take part:
   for the move it staged (`commit_move/2`, `candidate.ex:637-670`).
 - `MarkerBeforeCommit`: the worker writes `moved.json` and records
   `committing` before it sends `move_commit` (`commit/4`, then `retired/4`,
-  `move_worker.ex:424-446`).
+  `move_worker.ex:517-540`).
 - `OffersFenced`: the candidate takes an offer only when it is later than the
   move it holds, a later move id or a later attempt of the same move, and
   refuses an earlier or equal one (`move_mismatch`), leaving what it holds
   untouched (`fenced_offer/2`, `later?/2`, `candidate.ex:506-518`).
-  `move_offer` carries the attempt (`stream/3`, `move_worker.ex:374`), which
-  only grows across restarts. Move ids are ordered by when the move started
-  (`move_id/1`, `move.ex:505-514`); with one move id, the fence orders by
-  attempt.
+  `move_offer` carries the attempt (`send_snapshot/3`, `move_worker.ex:450`),
+  which only grows across restarts. Move ids are ordered by when the move
+  started (`move_id/1`, `move.ex:532-541`); with one move id, the fence
+  orders by attempt.
 - `ReadyAfterStaged`: `move_ready` goes out only after `staged` is written.
   `restored/2` records `staged`, then tells the responder
   (`candidate.ex:606-612`), which answers `move_ready` only then
   (`move_responder.ex:65-69`).
 - `AwaitPinsRail`: the worker takes an answer only from the rail it waits on
-  (`await_any/3` matches `{:rail, ^rail, _}`, `move_worker.ex:748-761`).
+  (`await_any/3` matches `{:rail, ^rail, _}`, `move_worker.ex:907-920`).
 - `EndingsAfterRestart`: the worker records `committed` (after `move_done`)
   or `undoing` (after an undo) and then restarts itself (`SelfRestart`,
   `Lifecycle.restart_self/0`); the engine that boots after it records `done`
@@ -90,10 +97,11 @@ Models one move of M75 §7.2 (B5). Three parts take part:
 There is no `AbortRechecksMarker` switch, because in this model the re-check
 in `abort/3` never finds a marker. Every road to `abort/3` starts before
 `retire/1` writes one:
-- a refusal or the attempt cap, in `transfer/1` and `attempt_failed/2`,
-  which run only while the marker is absent;
+- a refusal, a failure another attempt would not mend, or the attempt cap,
+  in `transfer/1` and `attempt_failed/2`, which run only while the marker is
+  absent;
 - `commit/4`'s error clause, after the ready epoch or the marker could not
-  be written (`move_worker.ex:429-431`);
+  be written (`move_worker.ex:521-524`);
 - a recorded `aborting`, which `carry_on/3` reaches only when the marker is
   absent.
 
@@ -135,7 +143,7 @@ serve"). It rests on two mechanisms:
   marker write fails, and the source undoes the move.
 
 Run by hand against the retire rule (check 04's setup), neither mechanism
-switched off breaks `RetiredOnlyForStagedCandidate` (26,486 and 29,530 states
+switched off breaks `RetiredOnlyForStagedCandidate` (37,100 and 35,061 states
 explored). When the marker lands, the candidate is already activating or
 active, and both are in the rule's set. They protect only the one-primary
 rule.
@@ -161,8 +169,9 @@ rests on three mechanisms:
 **Witnesses**:
 - **08**: the move completes, with the source done and the candidate booted
   as the primary.
-- **09**: the move is undone (the restore fails, the candidate refuses, the
-  source aborts) and the source boots as the primary again.
+- **09**: the move is undone and the source boots as the primary again. Its
+  shortest path is an attempt that aborts at the source before its offer is
+  out (`AttemptAborts`), as a desktop key the secret store refuses does.
 - **10**: the move completes after a `move_done` was lost. Its shortest path
   is the candidate's own scheduled restart, which ends the rail before the
   `move_done` arrives. The worker's wait ends, it resumes, the dial finds no
@@ -175,7 +184,7 @@ rests on three mechanisms:
 **Check 12**: `done` and `aborted` are written only by the engine that came
 back after its restart, never by one about to stop. The rule is
 `EndingsFromSurvivor`. It rests on two mechanisms:
-- `EndingsAfterRestart` (check 13: a 545-state search finds the
+- `EndingsAfterRestart` (check 13: a 219-state search finds the
   counterexample, the worker writing `done` and still running).
 - `RetryOnlyAfterBoot` (check 14: a 19-state counterexample). The worker
   records `committed` and is about to restart its engine, and a
@@ -277,22 +286,28 @@ deadlock check cannot see one, which is why the invariant must.
 
 The checks run with one move, the code's three attempts, `MaxLosses = 2` and
 `MaxCrashes = 1` per engine. Each check takes about a second; the largest,
-checks 01, 04 and 12, explore 24,579 states.
+checks 01, 04 and 12, explore 24,617 states.
 
 Each `holds` check was run by hand with one more loss and one more crash
-(`MaxLosses = 3`, `MaxCrashes = 2`): checks 01, 04 and 12 hold (133,698
-states, about 1 s each). With two more of each (`MaxLosses = 4`,
-`MaxCrashes = 3`), check 04 still holds (382,677 states, 4 s).
+(`MaxLosses = 3`, `MaxCrashes = 2`): checks 01, 04 and 12 hold (133,773
+states, about 2 s for the three together). With two more of each
+(`MaxLosses = 4`, `MaxCrashes = 3`), check 04 still holds (382,801 states,
+5 s).
 
 ## Not modelled
 
 The `.tla` header lists what is left out:
 - enrollment, and its 24-hour listen window;
 - the stream's frames and their checks;
-- the desktop key, its row, `desktop.json` and the snapshot file;
+- the desktop key (in the secret store, its store and public half recorded
+  in `.move/phase.json` first), its row, `desktop.json`, the switches in
+  `machine.toml` (what the computer keeps on for its server), the request's
+  `keep_offers`, and the snapshot file;
 - the sleep guard the worker holds for its run (`MoveAwake`) and the staged
   plugin store's reinstall request (`Plugins.Dist.Reinstall`);
-- the resume loop's 24-hour bound;
+- the resume loop's 24-hour bound, and a link or switches write after the
+  marker that fails at the commit and again on resuming: each ends the
+  worker until the next boot, which resumes;
 - a part-way marker write;
 - a failed rename inside `activate/1` (retried on a timer; a resume meanwhile
   is refused, as for any candidate still activating);
@@ -313,9 +328,38 @@ This was noticed while reading the code. TLC does not show it.
   exclusively, then writes it (`moved.ex:45-59`). If the write or the close
   fails (a full disk), the file may be left unreadable. `commit/4` then
   aborts, and `abort/3` raises on the unreadable marker
-  (`move_worker.ex:663-669`). The worker's restart reaches `carry_on/3`'s
-  clause for an unreadable marker (`:154`), which records a sentence asking for the
+  (`move_worker.ex:808-814`). The worker's restart reaches `carry_on/3`'s
+  clause for an unreadable marker (`:169`), which records a sentence asking for the
   marker to be fixed and does nothing else. The source stays a device and
   the candidate stays staged: safe, never two primaries, and stopped until a
   person acts. This is by design, since whether the home retired cannot be
   told.
+
+## Re-read for the computer's key and switches (M97, 2026-11-10)
+
+Re-read against db21a29d, which staled the `move_worker.ex`, `activation.ex`,
+`move.ex` and `home_move.ex` pins:
+- **The desktop key** moved from `device/desktop_key` to the secret store
+  (`ComputerKey`). Before the key is stored, its store and public half are
+  recorded in `.move/phase.json`, whose phase stays `streaming`; a restart
+  reads that record, and an undo deletes only that key, logging and leaving
+  one the store will not delete. None of these is a write a rule reads.
+- **A key failure now aborts the move** where a key file failure tried
+  again: `attempt_failed/2` aborts on `{:computer_key, _}` by name. The
+  model had no abort before the offer, though the keychain's secrets and a
+  capture with no room already aborted there. `AttemptAborts` adds it, under
+  `TransferCanFail`. With it, every check keeps its verdict and every `needs`
+  counterexample its length; the holds checks explore 24,617 states, up from
+  24,579; witness 09 now takes it, a 10-state path where it was 12.
+- **The switches** (`[fermix_core.computer]` in `machine.toml`, what the
+  computer keeps on for its server) are written by `retired/4` between the
+  link and `committing`, after the marker, and once by `resume/1`. They are
+  read by no rule, and one that cannot be written ends the worker until the
+  next boot as a link that cannot be written does.
+- **`Move.start/5` and `HomeMove.move_start/3`** add `keep_offers` to the
+  request, a field no rule reads.
+- **`activation.ex`** changed only in a return's step c (`home_return`) and
+  its moduledoc; the forward `activate/1` is as before.
+
+The comments' line numbers for these four files had drifted before this
+change too; they now point at the committed code.

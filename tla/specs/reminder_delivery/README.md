@@ -42,7 +42,7 @@ attempt like every platform's, so nothing here models it separately.
   (`delivery_worker.ex:197-200`, `:66`).
 - `SchedulerCanRestart`: the scheduler crashes while the BEAM stays up. Any
   earlier child of the flat `:rest_for_one` list (`Repo`, `MainAgent`,
-  `JobScheduler`, …; `application.ex:260-363`) restarts it too. A scheduler
+  `JobScheduler`, …; `application.ex:290-376`) restarts it too. A scheduler
   Repo call that times out no longer does: it returns an error (see
   `RepoCanFail`).
 - `DaemonCanCrash`: the whole daemon dies and boots again.
@@ -71,7 +71,7 @@ least one check):
   (`:1033`) repeat it inside the same Repo callback (`repo.ex:3134-3137`), where
   no other writer can interleave, so removing only them would change nothing.
 - `WorkersDieWithScheduler`: `DeliverySupervisor` starts after the scheduler
-  under `:rest_for_one` (`application.ex:363-364`, `:183`).
+  under `:rest_for_one` (`application.ex:384-385`, `:185`).
 - `SendsDieWithWorker`: a worker's send process is spawned linked to it
   (`Process.spawn(fun, [:link, :monitor])`, `channel_send.ex:219-224`), so a
   worker killed mid-send takes its send with it. Off, it is the code before the
@@ -97,7 +97,7 @@ least one check):
   - No sixth attempt (`scheduler.ex:332-335`). This rests on `AttemptCap`
     (check 02).
   - Never two workers for the row (`delivery_supervisor.ex:5-10`,
-    `application.ex:356-364`). This rests on `ClaimRequiresPending` (check 03),
+    `application.ex:377-385`). This rests on `ClaimRequiresPending` (check 03),
     `WorkersDieWithScheduler` (check 04) and `ResetSkipsMonitored` (check 05),
     and on the timing fact `DownHandledBeforeRetryDue` (check 20).
   - Never two sends for the row either (the premise of M30 §19.10's no-lease
@@ -459,6 +459,17 @@ place records, and a phone's message says when its list channel draws lists.
 A reminder is delivered with no `turn_id`, so it takes no records and its
 row, proactive dedupe and push are as before. The spec cites no `mobile.ex`
 line. No delivery path the spec models changed.
+
+Re-read on 2026-11-10 for the computers' registry (M97), which staled the
+`application.ex` pin: the core tree gained `Computers.Registry`, a
+primary-only process after `Companion.OriginBackfill` and before the
+snapshot scheduler, which keeps what the home's computers offer in files
+under `device/computers/`. It starts after the temporal scheduler and its
+delivery supervisor, which keep their order, so a crash of it reaches
+neither, and it touches no `temporal:` row. The comments' `application.ex`
+numbers had drifted before this change (`:183` named a sidecar call, not the
+strategy at `:185`); they now point at the committed file. No delivery path
+the spec models changed.
 
 ## Code and doc drift
 

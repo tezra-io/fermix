@@ -81,17 +81,21 @@
 (*    it;                                                                  *)
 (*  - the copy's choice and a wrong passphrase, refused before anything is *)
 (*    written (LocalReturn.choose/2);                                      *)
-(*  - the deriving of the key: part of the staging step (RhStage).         *)
+(*  - the deriving of the key: part of the staging step (RhStage);         *)
+(*  - the Mac's other acts (Back up now, and on its on screen the review   *)
+(*    of what a computer that moved before M97 keeps on for its server):   *)
+(*    one act each through the same serializer and key rule, writing       *)
+(*    nothing a rule reads.                                                *)
 (*                                                                         *)
 (* One step = one thing in the code: one file write (or one rename), one   *)
 (* Candidate callback, one dial, one forwarded request, one wait the       *)
 (* server's worker ends, one job ending, one boot, or the owner deleting   *)
 (* the server.                                                             *)
 (***************************************************************************)
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/home/move_worker.ex @ 01df75dfd0b6
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/home/move_worker.ex @ 96c85cd8f8ae
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/home/candidate.ex @ f5bbc97f81b2
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/home/move_responder.ex @ e8b3fa2f99b9
-\* SOURCE: apps/fermix_core/lib/fermix_core/home/candidate/activation.ex @ 1663c930b093
+\* SOURCE: apps/fermix_core/lib/fermix_core/home/candidate/activation.ex @ a2f503c5499b
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/candidate.ex#prepare_return,returnable,return_checks,returnable_engine,returnable_home,linked_and_still,no_move_here,replaceable_return,present?,remove @ 1c0fff782879
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/device_supervisor.ex#children,dial_children,start_candidate,stop_candidate,start_candidate_subtree,candidate_spec @ a9ce5e14d9a3
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/home/link.ex#start_return,stop_return @ c80b94d3aa36
@@ -99,22 +103,22 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/return.ex#done,record_done,write,remove @ fa5374582cd1
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/moved.ex#write,exclusive_write,read,remove @ 27b13b295c9c
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/role.ex#resolve,primary,configured_role @ 6b56d83c809d
-\* SOURCE: apps/fermix_core/lib/fermix_core/home/move.ex#start,pending?,@pending,max_attempts,@max_attempts,finish_at_boot,finish_due,ending,finish @ 84b4f8c190f1
-\* SOURCE: apps/fermix_core/lib/fermix_core/management/home_move.ex#move_start @ 428bcf251b24
+\* SOURCE: apps/fermix_core/lib/fermix_core/home/move.ex#start,pending?,@pending,max_attempts,@max_attempts,finish_at_boot,finish_due,ending,finish @ 485c3032eec3
+\* SOURCE: apps/fermix_core/lib/fermix_core/management/home_move.ex#move_start @ 125bb5abc0ed
 \* SOURCE: apps/fermix_core/lib/fermix_core/management/placement.ex#unconfirmed_on_loss?,unconfirmed,@unconfirmed_methods @ 0881001a46d0
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/relay.ex#lost_answer @ dfb459724267
-\* SOURCE: apps/fermix_core/lib/fermix_core/management/always_on.ex @ 35f7d2a17fa2
+\* SOURCE: apps/fermix_core/lib/fermix_core/management/always_on.ex @ 96ca2ab14da9
 \* SOURCE: apps/fermix_core/lib/fermix_core/management/home.ex#restoring? @ 10524f88be3d
-\* SOURCE: apps/fermix_core/lib/fermix_core/management/home_summary.ex#screen,target,device,settled,retired,away,away_here,on,returning,return_view,return_ready,return_moving,return_undone,return_stopped,restore_view,return_cancel,restoring,restore_running?,restore_offer,restorable,started?,stale?,silent?,server_move,server_idle?,@before_move,@ended,@server_moves @ 741cbccec86e
+\* SOURCE: apps/fermix_core/lib/fermix_core/management/home_summary.ex#screen,target,device,settled,retired,away,away_here,on,returning,return_view,return_ready,return_moving,return_undone,return_stopped,restore_view,return_cancel,restoring,restore_running?,restore_offer,restorable,started?,stale?,silent?,server_move,server_idle?,@before_move,@ended,@server_moves @ 187ebdbd9221
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/local_return.ex#restore,restored,staged,placed,failed,restart @ a9fe927a65e2
 EXTENDS Naturals
 
 CONSTANTS
     \* Environment switches: what may happen around the return.
     MessagesCanBeLost,  \* a rail loses a request or an answer, an answer comes only after
-                        \* the worker stopped waiting (await_any/3, move_worker.ex:748-762),
+                        \* the worker stopped waiting (await_any/3, move_worker.ex:907-920),
                         \* or the forwarded home.move.start is lost, before or after the
-                        \* server had it (both unconfirmed, placement.ex:197-212): at
+                        \* server had it (both unconfirmed, placement.ex:200-215): at
                         \* most MaxLosses times in all
     MaxLosses,
     ServerCanCrash,     \* the server's engine dies while its worker runs, and boots again
@@ -132,28 +136,28 @@ CONSTANTS
     \* the real order.
     MarkerBeforeCommit,  \* the server writes its moved.json and records committing before
                          \* it sends move_commit (commit/4, retired/4,
-                         \* move_worker.ex:424-446)
+                         \* move_worker.ex:517-540)
     MarkerBeforeConfig,  \* the Mac's activation removes its moved.json (step e) before it
                          \* renames the staged config.toml into place (step f)
-                         \* (activate/3, activation.ex:210-225)
+                         \* (activate/3, activation.ex:220-234)
     RecordEntries,       \* the staged entries are recorded once, in
                          \* candidate/entries.json, before any rename, and every run reads
-                         \* them back (record_entries/1, activation.ex:147-156; activate/1,
+                         \* them back (record_entries/1, activation.ex:156-164; activate/1,
                          \* candidate.ex:686-689); FALSE lists the staging again at each
                          \* run, as the forward activate/1 does
     PruneRetired,        \* step a sets aside every path of the retired copy the entries
                          \* do not name and this machine does not keep (prune_retired/3,
-                         \* activation.ex:375-411)
+                         \* activation.ex:396-432)
     OwnerDeletesFirst,   \* the owner confirms Restore here only once the server is deleted
                          \* or stopped, as its confirm asks (Copy's confirm_restore_here:
                          \* "if it still runs, two copies of Fermix answer the same
                          \* channels"); FALSE confirms with the server still running
     UnconfirmedKept,     \* Move now on a return keeps move_started_at when the forwarded
                          \* home.move.start is answered unconfirmed too
-                         \* (return_answered/3, always_on.ex:481-487); FALSE keeps it
+                         \* (return_answered/3, always_on.ex:536-542); FALSE keeps it
                          \* only on {ok, move_id}
     StartKeptFirst,      \* Move now writes move_started_at before it forwards
-                         \* home.move.start (return_start_ahead/2, always_on.ex:466-479),
+                         \* home.move.start (return_start_ahead/2, always_on.ex:521-531),
                          \* and the answer settles it; FALSE is the design's draft 2, which
                          \* writes it after the answer (finding HR-1, fixed)
     StoppedReturnClears, \* a move back a stop left part-way clears: Cancel removes
@@ -164,16 +168,16 @@ CONSTANTS
                          \* FALSE is neither (finding HR-2, fixed)
     UndoneInAnyPhase,    \* a candidate receiving or staged whose server answers as the
                          \* primary with no move under way draws undone, or Cancel with no
-                         \* record (return_view/2, home_summary.ex:730-736); FALSE draws
+                         \* record (return_view/2, home_summary.ex:771-777); FALSE draws
                          \* moving whatever the server says (finding HR-2, fixed)
     RequestBesideJob,    \* the summary draws Restore here running only while its request
                          \* in return.json stands beside its running job
-                         \* (restore_running?/1, home_summary.ex:801-802; Home's
+                         \* (restore_running?/1, home_summary.ex:842-843; Home's
                          \* restoring?/2); FALSE takes the request alone, which a stop of
                          \* the engine leaves behind
     EndingSettles        \* the job's ending settles a local candidate a stopped run left,
                          \* as the next start would (restore_ended/3, always_on.ex:
-                         \* 710-734): one receiving discarded (Home.Candidate.remove/1),
+                         \* 765-789): one receiving discarded (Home.Candidate.remove/1),
                          \* one activating finished by a restart; FALSE takes back only
                          \* the request
 
@@ -291,7 +295,7 @@ TypeOK ==
 -----------------------------------------------------------------------------
 (* Shared pieces *)
 
-\* Role.resolve/2 (role.ex:191-201) at a boot: a configured device is a
+\* Role.resolve/2 (role.ex:200-210) at a boot: a configured device is a
 \* device whatever the marker says; a configured primary beside a marker is
 \* refused, and that engine never runs.
 Resolve(r, m) == IF r = "device" THEN "device" ELSE IF m THEN "refused" ELSE "primary"
@@ -333,9 +337,9 @@ Coming == req # "none" \/ restore = "cur" \/ aTo = "cur"
 NothingComing == ~Coming /\ rep = "none"
 
 \* Where a failed wait goes: another attempt before move_ready
-\* (attempt_failed/2, move_worker.ex:232-239), the resume after the commit
-\* (retired/4, :440-444), the next round of the resume loop (resume_loop/4,
-\* :523-540).
+\* (attempt_failed/2, move_worker.ex:252-259), the resume after the commit
+\* (retired/4, :535-538), the next round of the resume loop (resume_loop/4,
+\* :669-686).
 AfterAwait(w) == CASE w \in {"await_accept", "await_ready"} -> "transfer"
                    [] w = "await_done" -> "resume"
                    [] OTHER -> "resume_dial"
@@ -370,15 +374,15 @@ WGoto(w) ==
     /\ wpc' = w
     /\ UNCHANGED <<srvFiles, sBoot, sAlive, rail, macFiles, macRun, budgets, hist>>
 
-\* run/1 (move_worker.ex:120-133) and carry_on/3 (:150-159): the marker
+\* run/1 (move_worker.ex:131-144) and carry_on/3 (:162-171): the marker
 \* first, then the phase.
 Run ==
     /\ wpc = "run"
     /\ WGoto(IF sMoved THEN "resume" ELSE IF sPhase = "aborting" THEN "abort" ELSE "transfer")
 
-\* transfer/1 (move_worker.ex:190-200): counts the attempt, or aborts once
+\* transfer/1 (move_worker.ex:202-212): counts the attempt, or aborts once
 \* MaxAttempts were made, across restarts. The rail a failed attempt closed
-\* (close_rail/1, :211) is closed here, the worker's next step.
+\* (close_rail/1, :224) is closed here, the worker's next step.
 Transfer ==
     /\ wpc = "transfer"
     /\ IF sAttempts >= MaxAttempts
@@ -387,9 +391,11 @@ Transfer ==
     /\ CloseRail
     /\ UNCHANGED <<sRole, sMoved, sBoot, sAlive, macFiles, macHold, budgets, hist>>
 
-\* attempt_transfer/1 (move_worker.ex:202-218): the capture (no desktop key
-\* or row for a source not kept as a desktop), open_candidate/1 (:713-728)
-\* to the Mac's candidate, and move_offer (stream/3, :364-384).
+\* attempt_transfer/1 (move_worker.ex:214-230): the capture (no desktop key
+\* or row for a source not kept as a desktop, so none of the key failures
+\* that abort a move from a computer kept as one), open_candidate/1
+\* (:873-888) to the Mac's candidate, and move_offer (send_snapshot/3,
+\* :441-459).
 SendOffer ==
     /\ wpc = "offer" /\ Listening
     /\ wpc' = "await_accept"
@@ -398,15 +404,15 @@ SendOffer ==
 
 \* No candidate answers the dial (the Mac's engine is not a device running
 \* its candidate, or the network is down): attempt_failed/2 sleeps and tries
-\* again (move_worker.ex:216, :232-239).
+\* again (move_worker.ex:228, :252-259).
 DialFails ==
     /\ wpc = "offer" /\ ~Listening
     /\ wpc' = "transfer"
     /\ MoveOn("none", FALSE)
     /\ UNCHANGED <<srvFiles, sBoot, sAlive, macFiles, macHold, budgets, hist>>
 
-\* await(rail, "move_accept"), then the chunks and move_end (stream/3,
-\* move_worker.ex:378-382): one "stream" request stands for them all.
+\* await(rail, "move_accept"), then the chunks and move_end (send_snapshot/3,
+\* move_worker.ex:454-457): one "stream" request stands for them all.
 TakeAccept ==
     /\ wpc = "await_accept" /\ rep = "accept"
     /\ rep' = "none"
@@ -414,16 +420,16 @@ TakeAccept ==
     /\ wpc' = "await_ready"
     /\ UNCHANGED <<srvFiles, sBoot, sAlive, railUp, macFiles, macRun, budgets, hist>>
 
-\* await(rail, "move_ready") (stream/3, move_worker.ex:383), then commit/4.
+\* await(rail, "move_ready") (stream/3, move_worker.ex:436), then commit/4.
 TakeReady ==
     /\ wpc = "await_ready" /\ rep = "ready"
     /\ rep' = "none"
     /\ wpc' = IF MarkerBeforeCommit THEN "retire" ELSE "send_commit"
     /\ UNCHANGED <<srvFiles, sBoot, sAlive, railUp, req, macFiles, macRun, budgets, hist>>
 
-\* An error event is a refusal (await_any/3, move_worker.ex:750-751): before
-\* move_ready it aborts the move (attempt_failed/2, :219-220); after it,
-\* retired/4 resumes (:440-444) and the resume loop goes round again.
+\* An error event is a refusal (await_any/3, move_worker.ex:909-910): before
+\* move_ready it aborts the move (attempt_failed/2, :232-233); after it,
+\* retired/4 resumes (:535-538) and the resume loop goes round again.
 TakeRefusal ==
     /\ wpc \in Awaiting /\ rep = "error"
     /\ rep' = "none"
@@ -431,14 +437,15 @@ TakeRefusal ==
     /\ UNCHANGED <<srvFiles, sBoot, sAlive, railUp, req, macFiles, macRun, budgets, hist>>
 
 \* The wait's timeout, or the rail's {:closed, _} (await_any/3,
-\* move_worker.ex:756-759), when nothing can arrive any more.
+\* move_worker.ex:915-918), when nothing can arrive any more.
 GiveUp ==
     /\ wpc \in Awaiting /\ NothingComing
     /\ WGoto(AfterAwait(wpc))
 
-\* commit/4 (move_worker.ex:424-433): the ready epoch (a file no rule reads),
-\* then retire/1 writes moved.json (:455-468); retired/4 records committing
-\* (:435-436), one step here: a crash anywhere among them boots a device that
+\* commit/4 (move_worker.ex:517-526): the ready epoch (a file no rule reads),
+\* then retire/1 writes moved.json (:555-567); retired/4 records committing
+\* (:531; its link/3 and keep_offers/1 write nothing for a source not kept as
+\* a desktop), one step here: a crash anywhere among them boots a device that
 \* resumes once the marker exists, and transfers again before. Without
 \* MarkerBeforeCommit, move_commit goes first.
 Retire ==
@@ -448,22 +455,22 @@ Retire ==
     /\ wpc' = IF MarkerBeforeCommit THEN "send_commit" ELSE "await_done"
     /\ UNCHANGED <<sRole, sAttempts, sBoot, sAlive, rail, macFiles, macRun, budgets, hist>>
 
-\* move_commit on the same rail (retired/4, move_worker.ex:438), then await
-\* move_done (:438).
+\* move_commit on the same rail (retired/4, move_worker.ex:532-533;
+\* send_commit/2, :543), then await move_done (:544).
 SendCommit ==
     /\ wpc = "send_commit"
     /\ req' = IF railUp THEN "commit" ELSE "none"
     /\ wpc' = IF MarkerBeforeCommit THEN "await_done" ELSE "retire"
     /\ UNCHANGED <<srvFiles, sBoot, sAlive, railUp, rep, macFiles, macRun, budgets, hist>>
 
-\* move_done (retired/4 :438; resumed/3 :559-565).
+\* move_done (retired/4 :532-533; resumed/3 :705-711).
 TakeDone ==
     /\ wpc \in {"await_done", "await_resume", "await_done_r"} /\ rep = "done"
     /\ rep' = "none"
     /\ wpc' = "finish"
     /\ UNCHANGED <<srvFiles, sBoot, sAlive, railUp, req, macFiles, macRun, budgets, hist>>
 
-\* done/2 (move_worker.ex:647-661): record committed, then restart, after
+\* done/2 (move_worker.ex:790-804): record committed, then restart, after
 \* which the server boots as a device with no link and serves nothing.
 Finish ==
     /\ wpc = "finish"
@@ -476,8 +483,10 @@ SelfRestart ==
     /\ ServerBoots
     /\ UNCHANGED <<sRole, sMoved, sAttempts, sAlive, macFiles, macHold, budgets, hist>>
 
-\* resume/1 (move_worker.ex:503-516): record committing, then the loop. A
-\* failed commit closed its rail first (retired/4, :442): folded in here.
+\* resume/1 (move_worker.ex:615-629): record committing, then the loop
+\* (ensure_link/3 and ensure_offers/1 write nothing for a source not kept as
+\* a desktop). A failed commit closed its rail first (retired/4, :537):
+\* folded in here.
 Resume ==
     /\ wpc = "resume"
     /\ sPhase' = "committing"
@@ -485,9 +494,9 @@ Resume ==
     /\ CloseRail
     /\ UNCHANGED <<sRole, sMoved, sAttempts, sBoot, sAlive, macFiles, macHold, budgets, hist>>
 
-\* resume_once/2 (move_worker.ex:543-548): open_candidate/1, then
-\* move_resume (resume_on/2, :549-557). with_rail/2 closed the previous
-\* round's rail (:590-594): folded in here.
+\* resume_once/2 (move_worker.ex:688-693): open_candidate/1, then
+\* move_resume (resume_on/2, :695-702). with_rail/2 closed the previous
+\* round's rail (:736-740): folded in here.
 ResumeDial ==
     /\ wpc = "resume_dial" /\ Listening
     /\ wpc' = "await_resume"
@@ -495,7 +504,7 @@ ResumeDial ==
     /\ UNCHANGED <<srvFiles, sBoot, sAlive, macFiles, macHold, budgets, hist>>
 
 \* No candidate answers. A source not kept as a desktop has no desktop key
-\* to probe the moved identity with (probe_primary/2, :569-580, finds no
+\* to probe the moved identity with (probe_primary/2, :715-726, finds no
 \* link), so the loop sleeps and dials again, for 24 hours (a bound not
 \* modelled: it then records a sentence and stops, changing no file a rule
 \* reads).
@@ -505,7 +514,7 @@ ResumeDialFails ==
     /\ UNCHANGED <<srvFiles, srvRun, macFiles, macHold, budgets, hist>>
 
 \* move_ready answers move_resume: still staged, so commit now (resumed/3,
-\* move_worker.ex:562-566).
+\* move_worker.ex:707-711).
 TakeResumeReady ==
     /\ wpc = "await_resume" /\ rep = "ready"
     /\ rep' = "none"
@@ -513,7 +522,7 @@ TakeResumeReady ==
     /\ wpc' = "await_done_r"
     /\ UNCHANGED <<srvFiles, sBoot, sAlive, railUp, macFiles, macRun, budgets, hist>>
 
-\* abort/3 (move_worker.ex:663-669): reads the marker again; with it,
+\* abort/3 (move_worker.ex:808-814): reads the marker again; with it,
 \* resume. A refused attempt or a failed commit closed its rail first.
 Abort ==
     /\ wpc = "abort"
@@ -521,7 +530,7 @@ Abort ==
     /\ CloseRail
     /\ UNCHANGED <<srvFiles, sBoot, sAlive, macFiles, macHold, budgets, hist>>
 
-\* undo/3 (move_worker.ex:671-690): record aborting; then role primary, the
+\* undo/3 (move_worker.ex:816-835): record aborting; then role primary, the
 \* request removed and undoing recorded, one step here (a crash between the
 \* role and undoing boots the primary, which records aborted either way), and
 \* the restart.
@@ -618,7 +627,7 @@ Enroll ==
 
 -----------------------------------------------------------------------------
 (* A return's activation: Activation.record_entries/1 and activate/3       *)
-(* (activation.ex:147-156, :210-225), one durable write per step, run by   *)
+(* (activation.ex:156-164, :220-234), one durable write per step, run by   *)
 (* the candidate process on move_commit or at its start in activating      *)
 (* (carry_on/1, finish_activation/1, activate/1: candidate.ex:205-215,     *)
 (* :671-688), or by Restore here's home_restore job.                       *)
@@ -644,7 +653,7 @@ ARecord ==
     /\ UNCHANGED <<mCfg, mMarker, mLink, mDb, mStale, rj, cPhase, cKind, stDb, stCfg, rq,
                    ARest>>
 
-\* a. prune_retired/3 (activation.ex:375-411): every top-level path that is no
+\* a. prune_retired/3 (activation.ex:396-432): every top-level path that is no
 \* recorded entry, candidate, config.toml or moved.json is pruned in place:
 \* what this machine keeps stays, the rest goes into candidate/replaced/.
 APrune ==
@@ -655,7 +664,7 @@ APrune ==
        ELSE UNCHANGED <<mStale, mDb>>
     /\ UNCHANGED <<mCfg, mMarker, mLink, rj, cPhase, cKind, cRec, stDb, stCfg, rq, ARest>>
 
-\* b. place_returned/4 (activation.ex:414-435), for a recorded entry still
+\* b. place_returned/4 (activation.ex:435-456), for a recorded entry still
 \* staged: this computer's copy set aside with its -wal and -shm, then the
 \* staged one renamed into place; one gone from the staging was placed by an
 \* earlier run and is skipped.
@@ -672,8 +681,13 @@ BPlace ==
        ELSE UNCHANGED <<mDb, stDb>>
     /\ UNCHANGED <<mCfg, mMarker, mLink, mStale, rj, cPhase, cKind, cRec, stCfg, rq, ARest>>
 
-\* c. end_tenure/1 (activation.ex:468-469): device/desktop.json and
-\* device/desktop_key go.
+\* c. end_tenure/2 (activation.ex:488-503): the ended tenure's key is deleted
+\* from the secret store its link records (ComputerKey.delete/3, with any file
+\* an older Fermix kept it in), then device/desktop.json goes. One step here:
+\* the key is a write no rule reads, and a stop between the two deletes it
+\* again at the next run, which still finds the link and the store it names.
+\* A link that cannot be read, or a store that will not delete, fails the
+\* step, and the activation tries again (not modelled, as the header says).
 CTenure ==
     /\ AStep("c", "d")
     /\ mLink' = FALSE
@@ -691,7 +705,7 @@ EMarker ==
     /\ mMarker' = FALSE
     /\ UNCHANGED <<mCfg, mLink, mDb, mStale, rj, cPhase, cKind, cRec, stDb, stCfg, rq, ARest>>
 
-\* f. place_return_config/2 (activation.ex:472-478): staging/config.toml
+\* f. place_return_config/2 (activation.ex:505-512): staging/config.toml
 \* renamed to config.toml, the Mac's commit point; done already when an
 \* earlier run renamed it.
 FConfig ==
@@ -731,7 +745,7 @@ GDone ==
 \* candidate in any other phase is removed (drop_local/1, :696-706). A
 \* primary boot runs prepare_home (application.ex:201-240) first:
 \* finish_activation/1 removes a candidate whose settings are in place
-\* (activation.ex:249-262), and Return.done/2 records moved_at
+\* (activation.ex:259-271), and Return.done/2 records moved_at
 \* (return.ex:117-132); then the memory repo opens memory.db, making a fresh
 \* one where there is none. Restore here's request stays as the boot found
 \* it: a primary reads none.
@@ -764,8 +778,8 @@ CandRestart ==
 -----------------------------------------------------------------------------
 (* The Mac's acts: home.act through Management.AlwaysOn, from the design   *)
 
-\* returning/1 (home_summary.ex:683-703), the first clause of the
-\* device's summary (device/1, :538): any candidate of this computer's, or,
+\* returning/1 (home_summary.ex:724-744), the first clause of the
+\* device's summary (device/1, :580): any candidate of this computer's, or,
 \* with none, return.json with move_started_at and no moved_at. (The stale
 \* check against a newer epoch the link reached needs a second desktop: not
 \* modelled.)
@@ -777,9 +791,9 @@ Returning == cPhase # "none" \/ rj = "started"
 ServerAborted == LinkUp /\ sPhase = "aborted"
 ServerIdle == LinkUp /\ sPhase \in {"none", "aborted"}
 
-\* Restore here (restore_offer/1, home_summary.ex:806-812): this computer
+\* Restore here (restore_offer/1, home_summary.ex:847-853): this computer
 \* holds a copy (always, here) and nothing answers from the server
-\* (silent?/1, :816-821: no link, or no session for ten minutes, which here is
+\* (silent?/1, :886-891: no link, or no session for ten minutes, which here is
 \* the network down or the server gone). A server that runs answers, as the
 \* primary or, moving or retired, as one that is not (`stale`, `revoked`):
 \* not silent.
@@ -787,7 +801,7 @@ ServerSilent == ~net \/ ~sAlive \/ ~mLink
 
 RestoreOffer == IF ServerSilent THEN {"restore_here"} ELSE {}
 
-\* restoring/1 (home_summary.ex:795-802), the second clause of the device's
+\* restoring/1 (home_summary.ex:836-843), the second clause of the device's
 \* summary: moving, with nothing to press, while Restore here's request
 \* stands beside its running job (Home's restoring?/2 reads the job family:
 \* the act's steps here). Without RequestBesideJob the request alone.
@@ -823,9 +837,12 @@ ReturnOffers ==
              IF UndoneInAnyPhase /\ ServerIdle THEN {"cancel"} ELSE {}
       [] OTHER -> {}
 
-\* Neither (settled/1, :530-541): a desktop whose server answers draws on
-\* (on/1, :613-629), which offers Move back (the act refuses it while the
-\* server reports a move, which it cannot while it answers as the primary);
+\* Neither (settled/1, :582-593): a desktop whose server answers draws on
+\* (on/1, :674-692), which offers Move back (the act refuses it while the
+\* server reports a move, which it cannot while it answers as the primary),
+\* beside Back up now and, where this computer moved before M97 and its
+\* switches wait for the owner, the review of them (review_action/1,
+\* :697-699): acts that write nothing a rule reads, not modelled;
 \* one whose server does not answer (away_here/1 and retired/1:
 \* cannot_reach, retired) offers Restore here beside its own action. Ten
 \* minutes of silence are not modelled: the link is down or up.
@@ -833,7 +850,7 @@ DeviceOffers ==
     (IF LinkUp THEN {"move_back"} ELSE {})
     \cup RestoreOffer
 
-\* The actions the Mac's summary offers now (screen/1, :243-245). A primary
+\* The actions the Mac's summary offers now (screen/1, :268-270). A primary
 \* offers none of this spec's actions.
 Offered ==
     IF mBoot # "device" THEN {}
@@ -872,7 +889,7 @@ Preparable(kind) ==
     /\ (kind = "return" => mLink)
     /\ cPhase \in {"none", "failed"}
 
-\* Move back (move_back/2, always_on.ex:507-600): the server's move is
+\* Move back (move_back/2, always_on.ex:562-655): the server's move is
 \* checked (server_still/1, a press while it reports one refused), this
 \* computer's own checks are made (returnable/3, Preparable: one refused
 \* asks the server for nothing) and home.enroll.open forwarded and
@@ -907,16 +924,16 @@ MbStart ==
     /\ UNCHANGED <<srvFiles, srvRun, rail, macFiles, mBoot, restore, apc, aOwner, aTo,
                    activated, budgets, hist>>
 
-\* Move now on a return (forwarded_move/4, always_on.ex:444-460):
+\* Move now on a return (forwarded_move/4, always_on.ex:499-515):
 \* home.move.start {candidate_id, passphrase, keep_as_desktop: false}
 \* forwarded over the link. The server's HomeMove.move_start/3 runs
 \* Move.start/5 (request, phase requested, role device), removes its own
 \* record of a move back that ended there (none here) and restarts into the
 \* move. Its answer arrives, or is lost (unconfirmed: placement.ex:197-212),
 \* after the server had it or before; a link that is down never sent it.
-\* With StartKeptFirst (the code: return_start_ahead/2, :459-469) return.json
+\* With StartKeptFirst (the code: return_start_ahead/2, :521-531) return.json
 \* gains move_started_at before the request leaves (MnMark), and the answer
-\* settles it (return_answered/3, :474-480): a move id keeps it (adding the
+\* settles it (return_answered/3, :536-542): a move id keeps it (adding the
 \* move id, a field no rule reads), unconfirmed keeps it (UnconfirmedKept),
 \* any other answer takes it back (MnUnmark). Without StartKeptFirst, the
 \* design's draft 2: the record after the answer (MnRecord).
@@ -967,7 +984,7 @@ MnUnmark ==
                    activated, budgets, hist>>
 
 \* Cancel on a return (cancel/2 when returning?/1, cancel_return/1,
-\* always_on.ex:317-341, :602-634): Link.stop_return/0 stops the candidate
+\* always_on.ex:331-355, :657-689): Link.stop_return/0 stops the candidate
 \* subtree (DeviceSupervisor.stop_candidate/1: its process is stopped where
 \* it is, an activation part-way included, and its rails end);
 \* home.enroll.withdraw is forwarded (nothing here reads the
@@ -997,12 +1014,12 @@ CxForget ==
                    cRec, stDb, stCfg, mBoot, cUp, restore, apc, aOwner, aTo,
                    activated, budgets, hist>>
 
-\* Restore here (restore_here/3, always_on.ex:645-654): the copy is chosen
+\* Restore here (restore_here/3, always_on.ex:700-709): the copy is chosen
 \* first (a wrong passphrase writes nothing, not modelled), then return.json
-\* gains restore_requested (restore_record/3, :626-632: the record of a move
+\* gains restore_requested (restore_record/3, :720-723: the record of a move
 \* back not yet done, or a new one naming the server, which reads as asked;
 \* the home moves away once only here, so no record of an ended move back
-\* meets a restore), then the home_restore job (start_restore/3, :639-654),
+\* meets a restore), then the home_restore job (start_restore/3, :733-748),
 \* which is never resumed after a restart:
 \* LocalReturn.restore/3 (local_return.ex:93-267): Candidate.prepare_return
 \* (:local), Activation.stage of the copy (a failure records failed and ends
@@ -1011,8 +1028,8 @@ CxForget ==
 \* written in the job's own run, where no other writer of return.json runs;
 \* one it cannot keep is logged and the restore goes on) and activate(:return),
 \* then the restart. However the run ends, the job's ending takes the
-\* request back (request_done/1, :697-705: RhEnd), then settles what a run
-\* stopped from outside left (restore_ended/3, :671-695: RhSettle).
+\* request back (request_done/1, :791-799: RhEnd), then settles what a run
+\* stopped from outside left (restore_ended/3, :765-789: RhSettle).
 RhRequest ==
     /\ act = "rh_request" /\ AGoto("rh_prepare")
     /\ rq' = TRUE
@@ -1149,7 +1166,7 @@ RestoreFails ==
 
 \* The ready epoch or the marker cannot be written (Moved.write/2 fails
 \* before the file exists): commit/4 closes the rail and aborts
-\* (move_worker.ex:429-432).
+\* (move_worker.ex:521-524).
 RetireFails == TransferCanFail /\ wpc = "retire" /\ WGoto("abort")
 
 \* The server's engine dies while its worker runs, and boots again.

@@ -30,9 +30,10 @@ The modules it describes:
   (`restore_offer`). `offered` and `find_action` read what a screen offers.
 
 Not modelled, each covered elsewhere:
-- the other steps of `home.act` (Move back, Move now, Cancel and the rest):
-  one act each through the same serializer and key rule, with no job of the
-  family (`always_on_test.exs`; `home_return` models the move back's);
+- the other steps of `home.act` (Move back, Move now, Cancel, the review of
+  what a computer keeps on for its server, and the rest): one act each
+  through the same serializer and key rule, with no job of the family
+  (`always_on_test.exs`; `home_return` models the move back's);
 - the run itself (`LocalReturn.restore/3`), its candidate, which draws
   moving once written, the restart its success ends in, and what the ending
   settles after a run stopped from outside (`home_return`);
@@ -109,3 +110,17 @@ and its request taken back (10).
 ## Findings
 
 None.
+
+## Re-read for the computer's switches (M97, 2026-11-10)
+
+Re-read against db21a29d, which staled the `always_on.ex` pin. The act
+gained `review_offers`, the review of what a computer that moved before M97
+keeps on for its server: a step of `step/3`, run after the key rule like
+the others, which writes the computer's switches in `machine.toml` and
+starts no job. Move now from the computer that sets Always On up casts its
+`keep_offers` input before `HomeMove.move_start/3`, refusing an unknown one
+before the move starts. Restore here's request, its job, the busy
+refusal and the ending are as before, so nothing the spec models changed.
+The comments' line numbers into `always_on.ex`, and into `home_summary.ex`
+and `home.ex`, which the same commit changed, had drifted before it too;
+they now point at the committed code.

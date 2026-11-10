@@ -544,3 +544,16 @@ pin. The task reads `job_runs`, `scheduled_jobs`, `cue_deliveries`,
 run. The cue tree is still the tree's last child, a crash of anything before
 it restarts it as before, and the task's own exit restarts nothing, so
 nothing the spec models changed.
+
+## Re-read for the computers' registry (2026-11-10)
+
+The core tree gained `Computers.Registry` (M97), a primary-only process
+between `Companion.OriginBackfill` and the snapshot scheduler that keeps what
+the home's computers offer, in files under `device/computers/`. It staled
+the `application.ex` pin. It reads and writes no delivery, watcher, run or
+proposal row. The cue tree is still the tree's last child. A crash of the
+registry restarts the snapshot scheduler and the cue tree, as a crash of the
+snapshot scheduler already did: for the dispatcher that is the filtering
+group's restart, its call tasks first, which the model takes as
+`FiltersRestart`, and `Jobs.Scheduler`, before it, is untouched. Nothing the
+spec models changed; it cites no `application.ex` line.
