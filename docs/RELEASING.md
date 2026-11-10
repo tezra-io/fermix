@@ -145,8 +145,8 @@ files the installer fetches with their `.sig` and `.pem` from the published rele
 verifies each against the tag's release-workflow identity, hashes it, and adds
 the rows to `src/config/engine-releases.txt`, moving `latest` only forward; any
 failure leaves the file unchanged. That file is what `/install/releases` serves.
-It is cumulative, so an Always On server can still install the release its
-desktop runs; pinning an older release adds its rows without moving `latest`.
+It is cumulative, so an Always On server can still install any release it
+lists; pinning an older release adds its rows without moving `latest`.
 Each app release then adds one row of its own, in the same site change that
 copies its appcast (the Mac app) or pins its packages (the Linux app,
 `node scripts/pin-linux-release.mjs vA.B.C`):
@@ -180,10 +180,52 @@ Linux package row of the install paths above against the served installer.
 **The order matters.** The installer refuses a release the table does not list,
 so until the site's pin of a release deploys, `curl -fsSL https://fermix.ai/install | sh`
 keeps installing the previous `latest`, and `--version X.Y.Z` for the new one
-(an Always On server whose desktop already runs it) stops with `lists no release
+(an Always On server set up at that release) stops with `lists no release
 X.Y.Z`. Pin each release in the site pull request that follows it. A change to
 what the installer reads deploys only together with, or after, the table it
 reads: an installer ahead of its table refuses every machine.
+
+**The server leads, and what a release owes its computers.** An Always On
+server updates on its own (`fermix-update`, written by
+`packaging/cloud/first-boot.sh`): every five minutes it installs the newest
+release eligible for its home, which `fermix home status --json` answers as
+`update.eligible` (and as `update_ceiling`, the field a script written by an
+older first boot reads). A release is eligible once the table carries an `app`
+row for it for the system of each computer that keeps the home's backups, so
+the order of a release is: the engine is tagged and pinned on the site; the Mac
+app that pins it is published and its `app` row deploys, at which point servers
+take the engine within five minutes; the Linux app follows whenever it is
+ready. Nothing waits for an owner to install an app. An engine release with no
+`app` row reaches no server, which is the safe side: check
+`curl -fsSL https://fermix.ai/install/releases | awk '$1 == "app"'` after the
+app's site change deploys. After each install the server fetches that
+release's `fermix_always_on.sh`, checks it against the table and lets it
+rewrite the update script, so a change to `fermix-update` reaches existing
+servers with the release that carries it; keep `--update-script-only` and the
+`update_ceiling` field working for as long as any server may still run an
+older script. On the server, `sudo fermix-update --release X.Y.Z` is the same
+update by hand: it refuses a release below the installed one, one the table
+does not list, and one that is not eligible unless `--ahead-of-apps` is given.
+
+Computers are clients with a window, counted in minor versions
+(`FermixCore.Computers.Versions`): the server serves a computer on its own
+minor version or up to two behind, and a computer further behind keeps its
+settings only. Every release therefore owes the two minor versions before it:
+
+- a wire change (mobile, companion, management) is additive first, so the
+  server understands the old form and the new, and the old form is removed
+  only once the window has passed it;
+- the companion protocol's `min_version` is never raised above the version
+  the release two minor versions back speaks, and a client newer than the
+  daemon is served the daemon's newest through
+  `client_hello.min_protocol_version` (`priv/companion/PROTOCOL.md`,
+  *Versioning*), so each app keeps speaking the versions inside the window;
+- `home.status` and the settings rows only gain optional fields, since an
+  older app reads a newer server's answers.
+
+Move back and Restore here are the one place a version must match: a computer
+reads a home only as new as its own engine (`FermixCore.Home.Readable`), which
+is why eligibility waits for the app and not for its install.
 
 **The version rule, and what it costs.** Neither package may carry a Debian
 revision or an rpm epoch, because `fermix-desktop` pins `Depends: fermix (= <v>)`

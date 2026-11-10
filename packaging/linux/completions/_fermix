@@ -2,7 +2,7 @@
 # zsh completion for fermix, installed by the fermix package.
 # The verb list is the one `fermix help` prints; a test keeps them in step.
 
-_fermix_verbs=(setup auth ask chat run sandbox grant revoke service start stop restart status health voice acp browser browser-bridge agents capabilities skills plugins pair devices settings memory home always-on logs upgrade uninstall migrate-to-app doctor diagnostics version help)
+_fermix_verbs=(setup auth ask chat run sandbox grant revoke service start stop restart status health voice acp browser browser-bridge agents capabilities skills plugins pair devices settings memory home always-on computer logs upgrade uninstall migrate-to-app doctor diagnostics version help)
 
 _fermix() {
   local context state state_descr line
@@ -87,7 +87,10 @@ _fermix() {
           _values 'subcommand' 'export' 'import' 'mark-moved' 'status' 'snapshots' 'passphrase' 'enroll' 'candidates' '--into' '--passphrase-file' '--mark-moved' '--to' '--code-file' '--snapshot-bucket' '--snapshot-region' '--snapshot-instance-role' '--json'
           ;;
         always-on)
-          _values 'step' 'cancel' 'move-now' 'try-again' 'learn-more' 'update' 'back-up-now' 'check-again' 'own-server' 'move-back' 'restore-here' '--recovery-passphrase-file' '--yes' '--wait' '--json'
+          _values 'step' 'cancel' 'move-now' 'try-again' 'learn-more' 'update' 'back-up-now' 'check-again' 'own-server' 'move-back' 'restore-here' 'add-computer' 'approve-computer' 'deny-computer' '--recovery-passphrase-file' '--sas' '--yes' '--wait' '--json'
+          ;;
+        computer)
+          _values 'subcommand' 'join'
           ;;
         logs)
           _values 'option' '-f' '-n'

@@ -31,8 +31,12 @@ defmodule FermixCore.Management.CopyTest do
   alias FermixCore.Cues.ProposalView
   alias FermixCore.Home.Archive
   alias FermixCore.Home.Candidate, as: HomeCandidate
+  alias FermixCore.Home.Join, as: HomeJoin
+  alias FermixCore.Home.Leave, as: HomeLeave
   alias FermixCore.Home.Move, as: HomeMove
   alias FermixCore.Home.MoveReadiness
+  alias FermixCore.Home.ReleaseTable
+  alias FermixCore.Home.RestartHold
   alias FermixCore.Home.ServerPrimary
   alias FermixCore.Home.Snapshot.Recipient, as: SnapshotRecipient
   alias FermixCore.Home.Snapshot.Recovery
@@ -42,6 +46,8 @@ defmodule FermixCore.Management.CopyTest do
   alias FermixCore.Management.Accessories
   alias FermixCore.Management.AlwaysOn
   alias FermixCore.Management.AlwaysOn.Input, as: AlwaysOnInput
+  alias FermixCore.Management.Computer, as: ComputerJournal
+  alias FermixCore.Management.ComputerLink
   alias FermixCore.Management.ComputerUse
   alias FermixCore.Management.Copy
   alias FermixCore.Management.Cues, as: ManagementCues
@@ -50,6 +56,7 @@ defmodule FermixCore.Management.CopyTest do
   alias FermixCore.Management.Cues.SourceRow, as: CueSourceRow
   alias FermixCore.Management.Cues.WatcherRow, as: CueWatcherRow
   alias FermixCore.Management.Doctor.Remediation
+  alias FermixCore.Management.Home, as: ManagementHome
   alias FermixCore.Management.HomeMove, as: ManagementHomeMove
   alias FermixCore.Management.HomeSummary
   alias FermixCore.Management.McpServers.Row, as: McpRow
@@ -880,7 +887,8 @@ defmodule FermixCore.Management.CopyTest do
 
       owner = [
         {"home owner decision", ManagementHomeMove.owner_only_sentence()},
-        {"setup owner decision", setup_owner_sentence()}
+        {"setup owner decision", setup_owner_sentence()},
+        {"computer owner decision", computer_owner_sentence()}
       ]
 
       recovery =
@@ -939,12 +947,18 @@ defmodule FermixCore.Management.CopyTest do
 
     # The daemon's refusal of a setup session, as the golden its own test
     # holds the daemon to.
-    defp setup_owner_sentence do
+    defp setup_owner_sentence, do: golden_owner_sentence("unavailable_setup_owner_decision")
+
+    # The daemon's refusal of this computer's switches (M97 §7.2), likewise.
+    defp computer_owner_sentence,
+      do: golden_owner_sentence("unavailable_computer_owner_decision")
+
+    defp golden_owner_sentence(name) do
       :fermix_core
       |> Application.app_dir("priv/management/fixtures/errors.jsonl")
       |> File.stream!()
       |> Enum.map(&Jason.decode!/1)
-      |> Enum.find(&(&1["name"] == "unavailable_setup_owner_decision"))
+      |> Enum.find(&(&1["name"] == name))
       |> get_in(["response", "error", "details", "sentence"])
     end
 
@@ -996,6 +1010,34 @@ defmodule FermixCore.Management.CopyTest do
           do: assert_owner_words(text, :prose, ["studio Mac", "garden server"], "rename")
 
       for text <- Switches.sentences(), do: assert_owner_words(text, :prose, [], "switches")
+
+      # A command the daemon started is refused the switches in words of their own.
+      assert_owner_words(computer_owner_sentence(), :prose, [], "computer owner")
+
+      # This computer's record of what its server did here (M97 §6.3): a
+      # management refusal, which points at the log as the others do.
+      for text <- ComputerJournal.sentences(),
+          do: assert_clean(text, :prose, [], "computer journal")
+    end
+
+    # M97 §3.1, §3.3: a computer joining a home, its owner's answer on the
+    # server, and a computer leaving, each printed as it is.
+    test "every sentence of a computer joining and leaving obeys the rules" do
+      names = ["studio Mac", "garden server"]
+
+      golden =
+        for name <- ~w(invalid_params_home_enroll_approve_sas unavailable_home_enroll_approve_none
+                       unavailable_computer_disconnect_not_told),
+            do: golden_owner_sentence(name)
+
+      sentences =
+        HomeJoin.sentences("garden server") ++
+          HomeLeave.sentences() ++
+          ComputerLink.sentences() ++
+          [Mobile.only_backups_sentence("studio Mac") | golden]
+
+      assert length(sentences) > 20
+      for text <- sentences, do: assert_owner_words(text, :prose, names, "join")
     end
 
     test "the This computer section obeys the rules, reviewed and waiting" do
@@ -1269,6 +1311,9 @@ defmodule FermixCore.Management.CopyTest do
       costs: [:coding_agents, :telegram],
       telegram: true,
       to: "studio-mac",
+      name: "loft-linux",
+      system: "Linux",
+      sas: "482913",
       day: @restored_day,
       place: "your desktop",
       at: ~U[2031-05-04 10:00:00Z],
@@ -1285,7 +1330,7 @@ defmodule FermixCore.Management.CopyTest do
 
     labels =
       for id <- HomeSummary.actions(),
-          extra <- [%{}, %{code: true}, %{forget: true}, %{renew: true}],
+          extra <- [%{}, %{code: true}, %{forget: true}, %{renew: true}, %{first: true}],
           machine <- ["Mac", "computer"],
           values = Map.put(extra, :machine, machine),
           do: {"action #{id}", Copy.summary_label(String.to_existing_atom(id), values), :name}
@@ -2239,6 +2284,34 @@ defmodule FermixCore.Management.CopyTest do
   end
 
   defp assert_clean(nil, _kind, _names, _where), do: :ok
+
+  # M97 §3.4, the server leads: what `home.status.update` and
+  # `restart_hold` say, the problem sentences and the label in place of Move
+  # back, all without a version number (the version is a field).
+  describe "the server leads" do
+    test "every sentence of the update, the table and the restart hold is plain words" do
+      held =
+        for waits_for <- [[:macos], [:linux], [:macos, :linux], [:macos, :unknown], [:unknown]],
+            do: {"held #{inspect(waits_for)}", ManagementHome.held_sentence(waits_for)}
+
+      table = for said <- ReleaseTable.sentences(), do: {"table", said}
+      hold = for said <- RestartHold.sentences(), do: {"restart hold", said}
+
+      for {where, sentence} <- held ++ table ++ hold do
+        assert_clean(sentence, :prose, ["Mac", "Linux"], where)
+        assert Copy.summary_violations(sentence) == [], "#{where}: #{sentence}"
+      end
+
+      for machine <- ["Mac", "computer"],
+          key <- [:update_settings_only, :server_older, :server_ahead] do
+        said = Copy.summary_sentence(key, %{machine: machine})
+        refute said =~ ~r/\d+\.\d+/, "#{key}: #{said}"
+      end
+
+      assert Copy.summary_label(:update, %{first: true, machine: "Mac"}) ==
+               "Update Fermix on this Mac first"
+    end
+  end
 
   defp assert_clean(text, kind, names, where) when is_binary(text) do
     assert Copy.violations(text, kind, names) == [],

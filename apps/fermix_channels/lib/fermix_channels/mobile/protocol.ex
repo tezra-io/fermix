@@ -45,6 +45,8 @@ defmodule FermixChannels.Mobile.Protocol do
   @default_max_media_bytes 20 * 1_024 * 1_024
   @platforms ~w(ios android)
   @computer_platforms ~w(macos linux)
+  # Where a computer stands against its server (M97 §3.4, `Computers.Versions`).
+  @computer_standings ~w(current behind ahead settings_only)
   # This daemon pushes through APNs alone, so it is the wire's whole catalog.
   @push_services ~w(apns)
   @attestation_kinds ~w(android_keymint apple_app_attest)
@@ -781,20 +783,39 @@ defmodule FermixChannels.Mobile.Protocol do
   # Which of a computer's own events the server takes (M97 §5.3): absent from
   # a server older than the computer record and from a phone's hello_ack, and
   # a computer sends none of them then. Each flag a boolean; a later server
-  # may name more.
+  # may name more. Where the computer stands against the server and what the
+  # server speaks (§3.4) are optional: absent from a server before them.
   defp optional_computer_caps(%{"computer" => %{"v" => version} = computer})
        when is_integer(version) and version > 0 do
-    flags = Map.take(computer, ~w(offers link_path))
+    flags = Map.take(computer, ~w(offers link_path invoke))
 
-    if Enum.all?(flags, fn {_flag, value} -> is_boolean(value) end),
-      do: :ok,
-      else: {:error, {:invalid_field, "caps.computer"}}
+    if Enum.all?(flags, fn {_flag, value} -> is_boolean(value) end) and
+         computer_standing?(computer) and computer_versions?(computer),
+       do: :ok,
+       else: {:error, {:invalid_field, "caps.computer"}}
   end
 
   defp optional_computer_caps(%{"computer" => _computer}),
     do: {:error, {:invalid_field, "caps.computer"}}
 
   defp optional_computer_caps(_caps), do: :ok
+
+  defp computer_standing?(%{"standing" => standing}), do: standing in @computer_standings
+  defp computer_standing?(_computer), do: true
+
+  # The server's engine version, and the companion and management ranges it
+  # speaks, each `[min, max]`.
+  defp computer_versions?(%{"versions" => %{"engine" => engine} = versions})
+       when is_binary(engine) and engine != "",
+       do: version_range?(versions["companion"]) and version_range?(versions["management"])
+
+  defp computer_versions?(%{"versions" => _versions}), do: false
+  defp computer_versions?(_computer), do: true
+
+  defp version_range?([min, max]) when is_integer(min) and is_integer(max),
+    do: min >= 1 and min <= max
+
+  defp version_range?(_range), do: false
 
   # Whether the primary serves a call from the phone (M87): absent from an
   # older primary and from a desktop's hello_ack. A call it does not serve

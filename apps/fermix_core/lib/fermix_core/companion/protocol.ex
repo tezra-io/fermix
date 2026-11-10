@@ -124,6 +124,16 @@ defmodule FermixCore.Companion.Protocol do
   daemon always sends it and an older one in the same window does not, so it
   is additive and optional, on every version and on the phone's wire too.
 
+  The window runs both ways (M97 §3.4: the server leads). A client newer
+  than the daemon names the oldest version it still speaks
+  (`client_hello.min_protocol_version`, at most its own); when that is at
+  most the daemon's newest, the daemon serves its newest and says so
+  (`server_hello.protocol_version`), and the client speaks that version on
+  the connection. Both fields are additive and optional, and a client
+  inside the range is served its own version as before. The floor is kept
+  at or below the version the engine release two minor versions back
+  speaks, so a computer within the server's window always connects.
+
   Both hellos carry the primary epoch (M75 D14), additive and optional on
   every version: `server_hello.primary_epoch` is the home's, absent only from a
   home that has never booted as the primary, and `client_hello.primary_epoch`
@@ -439,19 +449,28 @@ defmodule FermixCore.Companion.Protocol do
   def media_release_grace_s, do: @media_release_grace_s
 
   @doc """
-  Negotiate a client's `protocol_version` against the daemon's supported range.
+  Negotiate a client's `protocol_version` (and the oldest it still speaks,
+  `client_hello.min_protocol_version`, or nil) against the daemon's range:
+  `{:ok, served}`, the version the connection speaks, or why it cannot.
 
-  `{:error, :client_too_old}` means the client must update, and
-  `{:error, :client_too_new}` means the daemon must update.
+  A client inside the range is served its own version. A newer one that
+  still speaks the daemon's newest (its `min_protocol_version` at most
+  `max_version`) is served `max_version`, the two-way window of the
+  server-leads model (M97 §3.4): a computer ahead of its server speaks the
+  server's versions. Otherwise `{:error, :client_too_old}` means the client
+  must update, and `{:error, :client_too_new}` that the daemon must.
   """
-  @spec negotiate(integer()) :: :ok | {:error, :client_too_old | :client_too_new}
-  def negotiate(client_version) when is_integer(client_version) do
+  @spec negotiate(integer(), integer() | nil) ::
+          {:ok, pos_integer()} | {:error, :client_too_old | :client_too_new}
+  def negotiate(client_version, client_min \\ nil)
+      when is_integer(client_version) and (is_nil(client_min) or is_integer(client_min)) do
     {min, max} = supported_version_range()
 
     cond do
       client_version < min -> {:error, :client_too_old}
-      client_version > max -> {:error, :client_too_new}
-      true -> :ok
+      client_version <= max -> {:ok, client_version}
+      is_integer(client_min) and client_min <= max -> {:ok, max}
+      true -> {:error, :client_too_new}
     end
   end
 
@@ -605,12 +624,14 @@ defmodule FermixCore.Companion.Protocol do
   end
 
   # `client_hello` is transport, not chat: it has no payload rules beyond the
-  # version, whose two errors are the Realtime socket's, verbatim, and the
+  # version, whose two errors are the Realtime socket's, verbatim, the oldest
+  # version the client still speaks (at most its own, M97 §3.4) and the
   # optional highest primary epoch the client has seen (M75 D14).
   defp validate_client_event("client_hello", payload) do
     case Map.get(payload, "protocol_version") do
       version when is_integer(version) and version > 0 ->
-        optional_positive_u64(payload, "primary_epoch")
+        with :ok <- optional_min_protocol_version(payload, version),
+             do: optional_positive_u64(payload, "primary_epoch")
 
       nil ->
         {:error, :missing_protocol_version}
@@ -624,6 +645,15 @@ defmodule FermixCore.Companion.Protocol do
   # connection takes it only from a version 7 owner's connection, the only one
   # an `attach_file` is taken from (moduledoc).
   defp validate_client_event(type, payload), do: validate_client_payload(type, payload)
+
+  defp optional_min_protocol_version(%{"min_protocol_version" => min}, version)
+       when is_integer(min) and min > 0 and min <= version,
+       do: :ok
+
+  defp optional_min_protocol_version(%{"min_protocol_version" => _min}, _version),
+    do: {:error, {:invalid_field, "min_protocol_version"}}
+
+  defp optional_min_protocol_version(_payload, _version), do: :ok
 
   defp validate_client("msg", payload) do
     with :ok <- nonempty(payload, "client_msg_id"),
@@ -749,6 +779,7 @@ defmodule FermixCore.Companion.Protocol do
   defp validate_server("server_hello", payload) do
     with :ok <- positive_u64(payload, "min_version"),
          :ok <- positive_u64(payload, "max_version"),
+         :ok <- optional_served_version(payload),
          :ok <- optional_positive_u64(payload, "primary_epoch"),
          :ok <- enum(payload, "role", @engine_roles),
          :ok <- optional_commands(payload),
@@ -1147,6 +1178,14 @@ defmodule FermixCore.Companion.Protocol do
        do: :ok
 
   defp valid_version_range(_payload), do: {:error, {:invalid_field, "version_range"}}
+
+  # The version a newer client is served (M97 §3.4): the daemon's newest.
+  defp optional_served_version(%{"protocol_version" => @protocol_version}), do: :ok
+
+  defp optional_served_version(%{"protocol_version" => _other}),
+    do: {:error, {:invalid_field, "protocol_version"}}
+
+  defp optional_served_version(_payload), do: :ok
 
   defp decode_json(line) do
     case Jason.decode(line) do

@@ -54,6 +54,10 @@
 {"v":2,"t":"snapshot_begin","seq":22,"snapshot_id":"snap-20261021T0600Z","name":"20261021T060000Z-e3.fxsnap","size_bytes":4194304,"sha256":"4f2a7d3c9e1b6058a2d4c7e9f1b3a5d7c9e2f4a6b8d0c1e3f5a7b9c2d4e6f8a0"}
 {"v":2,"t":"snapshot_end","seq":95,"snapshot_id":"snap-20261021T0600Z"}
 {"v":2,"t":"enroll_accepted","seq":1,"candidate_id":"cand-6c19","primary_name":"studio"}
+{"v":2,"t":"join_approved","seq":1,"device_id":"7e1f0c2a-3b4d-4e5f-8a6b-7c8d9e0f1a2b","name":"loft-linux","primary_epoch":5,"primary":{"name":"garden-server","node_id":"3c0f6e2a91b84d57a6e2f0c4d8b1937e5a2c6f08d4b7e19a3f5c2d8e6b0a4f71","relays":[{"url":"https://eu1.relay.fermix.ai/","quic_port":7842}],"relays_rev":"0123456789abcdef","addrs":["100.101.102.103:7843"]}}
+{"v":2,"t":"join_approved","seq":1,"device_id":"2b9d4c6e-8f1a-4e37-b5c0-9a3d7e1f6b24","name":"den-mac 2","primary_epoch":5,"primary":{"name":"garden-server","node_id":"3c0f6e2a91b84d57a6e2f0c4d8b1937e5a2c6f08d4b7e19a3f5c2d8e6b0a4f71","relays":[{"url":"https://eu1.relay.fermix.ai/","quic_port":7842}],"relays_rev":"0123456789abcdef","addrs":[]}}
+{"v":2,"t":"join_denied","seq":1,"reason":"denied"}
+{"v":2,"t":"join_denied","seq":1,"reason":"timeout"}
 {"v":2,"t":"move_accept","seq":1,"move_id":"mv-8e41","recipient":"WnVzcmVjaXBpZW50S2V5Rm9yVGhlTW92ZUZpeHR1cmU="}
 {"v":2,"t":"move_ready","seq":2,"move_id":"mv-8e41","epoch":4}
 {"v":2,"t":"move_done","seq":3,"move_id":"mv-8e41","epoch":4}
@@ -65,4 +69,6 @@
 {"v":2,"t":"call_attached","seq":2,"call_id":"call-7c1e","resumed":true,"muted":true,"camera":false,"control_seq":2}
 {"v":2,"t":"call_close","seq":21,"call_id":"call-7c1e","reason":"ended"}
 {"v":2,"t":"call_close","seq":3,"call_id":"call-0b42","reason":"unknown_call"}
-{"v":2,"t":"hello_ack","seq":1,"session_id":"mobile-session-6","min_version":2,"max_version":2,"profiles":[{"id":"main","name":"Fermix"}],"candidates":[{"host":"workstation.tail1234.ts.net","interface":"utun4","scope":"tailnet"},{"host":"100.101.102.103","interface":"utun4","scope":"tailnet"}],"history_head_seq":12,"read_up_to_seq":11,"caps":{"commands":[{"name":"help","aliases":[],"description":"Show available commands"}],"media":true,"streaming":true,"turn_done":true,"max_media_bytes":20971520,"push":[],"computer":{"v":1,"offers":true,"link_path":true}},"primary_epoch":3}
+{"v":2,"t":"hello_ack","seq":1,"session_id":"mobile-session-6","min_version":2,"max_version":2,"profiles":[{"id":"main","name":"Fermix"}],"candidates":[{"host":"workstation.tail1234.ts.net","interface":"utun4","scope":"tailnet"},{"host":"100.101.102.103","interface":"utun4","scope":"tailnet"}],"history_head_seq":12,"read_up_to_seq":11,"caps":{"commands":[{"name":"help","aliases":[],"description":"Show available commands"}],"media":true,"streaming":true,"turn_done":true,"max_media_bytes":20971520,"push":[],"computer":{"v":1,"offers":true,"link_path":true,"invoke":true,"standing":"behind","versions":{"engine":"4.12.3","companion":[6,7],"management":[1,2]}}},"primary_epoch":3}
+{"v":2,"t":"invoke_cancel","seq":47,"id":"inv-gswlx2g3bkbjeppi3ln5zx32oy"}
+{"v":2,"t":"invoke_status","seq":48,"id":"inv-iiyu34dyxjwr7gp5jkeh62xtbe"}

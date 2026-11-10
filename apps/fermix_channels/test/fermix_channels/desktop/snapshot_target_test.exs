@@ -13,7 +13,7 @@ defmodule FermixChannels.Desktop.SnapshotTargetTest do
   alias FermixTestSupport.SafeRm
 
   @desktop "desk-1"
-  @rows [%{device_id: @desktop, name: "Studio Mac"}]
+  @rows [%{device_id: @desktop, name: "Studio Mac", backups: true}]
   @plenty 100 * 1_024 * 1_024 * 1_024
   @wait 10_000
 
@@ -201,6 +201,20 @@ defmodule FermixChannels.Desktop.SnapshotTargetTest do
 
     assert SnapshotTarget.sentence(reason) ==
              "Your Studio Mac is not connected; the snapshot waits for the next run."
+  end
+
+  # M97 D7: a computer that joined keeps no copy unless its owner chose it.
+  test "a connected computer that keeps no backups is sent nothing", ctx do
+    desktop = start_desktop(ctx, {:ok, @plenty})
+    snapshot = snapshot(ctx, "20261027T093000Z-e4.fxsnap", 10)
+    joined = [%{device_id: @desktop, name: "Loft Linux", backups: false}]
+    opts = Keyword.put(target_opts(ctx, desktop), :desktop_rows, fn -> joined end)
+
+    assert {:waiting, {:not_connected, "Studio Mac"}} =
+             SnapshotTarget.store(snapshot, %{names: ["Studio Mac"]}, opts)
+
+    refute_received {:to_primary, _type, _event}
+    assert File.ls(Path.join(ctx.desktop, "snapshots")) in [{:error, :enoent}, {:ok, []}]
   end
 
   describe "the desktop's store" do

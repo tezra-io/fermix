@@ -3572,4 +3572,171 @@ defmodule FermixOpik.AggregationTest do
       assert trace.name == "computer_use:#{@cu_session}"
     end
   end
+
+  @inv_start [:fermix, :computer_invocation, :start]
+  @inv_complete [:fermix, :computer_invocation, :complete]
+  @inv_error [:fermix, :computer_invocation, :error]
+  @inv_id "inv-mfrgg2lt5vgmy3dpqzt7xk4wha"
+  @inv_session "inv_inv-mfrgg2lt5vgmy3dpqzt7xk4wha"
+  @inv_turn "main-41"
+
+  # The emitter's own metadata shape (FermixCore.Computers.Telemetry), mirrored
+  # by hand like `computer_use_meta/1` above.
+  defp invocation_meta(extra) do
+    Map.merge(
+      %{
+        session_id: @inv_session,
+        parent_session: @inv_turn,
+        capability: "files",
+        op: "read",
+        origin: :chat,
+        epoch: 3
+      },
+      extra
+    )
+  end
+
+  describe "computer invocations" do
+    test "the reporter subscribes to every computer_invocation event" do
+      for event <- [@inv_start, @inv_complete, @inv_error] do
+        assert event in FermixOpik.Reporter.events(),
+               "#{inspect(event)} is not subscribed, so the run is invisible to Opik"
+      end
+    end
+
+    # The turn that asked is on the SERVER's trace, and a turn's id is minted per
+    # engine, so on the computer `parent_session` can name an unrelated turn of
+    # its own. The run opens its own root even while a local turn with that very
+    # id is open, and its bookend ships that root and leaves the turn alone.
+    test "an invocation is one root, never nested under a local turn sharing its parent's id" do
+      {state, closed} =
+        run([
+          {[:fermix, :provider, :call], %{duration_ms: 10},
+           %{provider: :openai, model: "gpt-5", status: :ok, session_id: @inv_turn}},
+          {@inv_start, %{duration_ms: 0}, invocation_meta(%{})},
+          {@inv_complete, %{duration_ms: 85, result_bytes: 2_048},
+           invocation_meta(%{status: :ok})}
+        ])
+
+      assert [%{trace: trace, spans: [root]}] = closed
+      assert trace.name == "computer_invocation:#{@inv_session}"
+      assert trace.tags == ["computer_invocation"]
+
+      assert trace.metadata == %{
+               parent_session: @inv_turn,
+               capability: "files",
+               op: "read",
+               origin: "chat",
+               epoch: 3,
+               duration_ms: 85,
+               result_bytes: 2_048
+             }
+
+      refute Map.has_key?(trace, :error_info)
+      assert root.name == "computer_invocation:#{@inv_session}"
+      refute Map.has_key?(root, :parent_span_id)
+
+      # The local turn is untouched: still open, still holding its own call.
+      assert [turn] = Map.values(state.traces)
+      assert turn.root_session == @inv_turn
+      assert turn.open?
+      assert length(spans_of_type(turn.spans, "llm")) == 1
+    end
+
+    # "ok" is the absence of a status on every root (`put_status/2`), so an ok
+    # invocation's metadata carries none.
+    test "ok, cancelled and refused close with :complete, never as an error" do
+      cases = [
+        {%{status: :ok}, nil, nil},
+        {%{status: :cancelled}, "cancelled", nil},
+        {%{status: :refused, refusal: :stale_epoch}, "refused", "stale_epoch"}
+      ]
+
+      for {bookend, status, refusal} <- cases do
+        {state, closed} =
+          run([
+            {@inv_start, %{duration_ms: 0}, invocation_meta(%{})},
+            {@inv_complete, %{duration_ms: 6, result_bytes: 0}, invocation_meta(bookend)}
+          ])
+
+        assert state.traces == %{}
+        assert [%{trace: trace}] = closed
+        refute Map.has_key?(trace, :error_info)
+        assert trace.metadata[:status] == status
+        assert trace.metadata[:refusal] == refusal
+        assert trace.metadata.duration_ms == 6
+      end
+    end
+
+    test "failed, timed_out and unknown close with :error and error_info naming the status" do
+      for status <- [:failed, :timed_out, :unknown] do
+        {state, closed} =
+          run([
+            {@inv_start, %{duration_ms: 0}, invocation_meta(%{})},
+            {@inv_error, %{duration_ms: 20_000, result_bytes: 0},
+             invocation_meta(%{status: status})}
+          ])
+
+        word = Atom.to_string(status)
+        assert state.traces == %{}
+        assert [%{trace: trace}] = closed
+        assert trace.name == "computer_invocation:#{@inv_session}"
+        assert trace.metadata.status == word
+        assert trace.metadata.duration_ms == 20_000
+        assert trace.error_info == %{exception_type: "ComputerInvocationError", message: word}
+      end
+    end
+
+    # Without the prefix clause a bookend whose opener was missed (a restart
+    # between the two) would mint a root `infer_kind/1` reads as `:subagent`.
+    test "a bookend with no opener still closes as a computer_invocation root" do
+      {_state, closed} =
+        run([
+          {@inv_error, %{duration_ms: 9, result_bytes: 0}, invocation_meta(%{status: :unknown})}
+        ])
+
+      assert [%{trace: trace}] = closed
+      assert trace.tags == ["computer_invocation"]
+      assert trace.name == "computer_invocation:#{@inv_session}"
+      assert trace.metadata.parent_session == @inv_turn
+    end
+
+    # The server's half: the model's one call is an ordinary tool exec under the
+    # turn, carrying the four keys that point at the computer's root.
+    test "the server's exec stays under its turn and carries the invocation's keys" do
+      {_state, closed} =
+        run([
+          {[:fermix, :tool, :exec], %{duration_ms: 140},
+           %{
+             tool: "computer_files",
+             agent: "main",
+             success: false,
+             session_id: @inv_turn,
+             computer: "dev_7k2m9q",
+             invocation: @inv_id,
+             invoke_status: :refused,
+             refusal: :off
+           }},
+          {[:fermix, :agent, :message], %{iterations: 2, total_tokens: 60},
+           %{
+             channel: :telegram,
+             chat_id: "c1",
+             sender: "u1",
+             session_id: @inv_turn,
+             agent: "main"
+           }}
+        ])
+
+      assert [%{trace: turn, spans: spans}] = closed
+      assert turn.name == "agent:main"
+      [tool] = spans_of_type(spans, "tool")
+
+      assert tool.metadata == %{
+               computer: "dev_7k2m9q",
+               invocation: @inv_id,
+               invoke_status: :refused,
+               refusal: :off
+             }
+    end
+  end
 end

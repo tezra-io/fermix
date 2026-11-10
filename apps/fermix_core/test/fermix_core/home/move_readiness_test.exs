@@ -7,6 +7,7 @@ defmodule FermixCore.Home.MoveReadinessTest do
   alias FermixCore.Home.Candidates
   alias FermixCore.Home.Epoch
   alias FermixCore.Home.MoveReadiness
+  alias FermixCore.Home.Releases
   alias FermixCore.Setup.MachineFile
   alias FermixCore.Setup.SecretWriter
   alias FermixTestSupport.DistFixtures
@@ -252,20 +253,43 @@ defmodule FermixCore.Home.MoveReadinessTest do
     assert disk =~ "make room first"
   end
 
-  # Always On's move back (design §6): a server always runs its desktop's
-  # Fermix, and the review is the net, so a server newer than this computer
-  # blocks too: the home could never come back here.
-  test "a server newer than this computer blocks the move: the home could not come back",
+  # M97 §3.4, the server leads: a server newer than this computer is fine
+  # once an update for this computer's system that carries its engine is
+  # published, read from the release table at the review; until then, or
+  # with the table unread, it blocks: the home could never come back here.
+  test "a newer server is fine once this computer's update is published, and blocks before",
        ctx do
     newer = %{ctx.candidate | version: "0.18.0"}
+    table = fn rows -> fn -> Releases.parse(release_table(rows)) end end
 
-    assert %{ready: false, items: items} = MoveReadiness.report(ctx.home, newer, opts(ctx))
+    published = Keyword.put(opts(ctx), :release_table, table.(["app 0.18.0 macos 2.4.0"]))
+    assert %{items: items} = MoveReadiness.report(ctx.home, newer, published)
+    assert %{status: :ok, sentence: sentence} = item_in(items, "engine_version")
 
+    assert sentence ==
+             "north-box runs a newer Fermix than this computer. The update for this computer " <>
+               "is published: install it before you move Fermix back here."
+
+    # Only the Linux app carries it, and this computer is a Mac.
+    linux_only = Keyword.put(opts(ctx), :release_table, table.(["app 0.18.0 linux 1.3.0"]))
+    assert %{ready: false, items: items} = MoveReadiness.report(ctx.home, newer, linux_only)
     assert %{status: :block, sentence: sentence} = item_in(items, "engine_version")
 
     assert sentence ==
-             "north-box runs a newer Fermix than this computer, so Fermix could not move " <>
-               "back. Update Fermix on this computer first."
+             "north-box runs a newer Fermix than this computer, and no update for this " <>
+               "computer carries it yet, so Fermix could not move back. Set the server up " <>
+               "with this computer's version, or wait for that update."
+
+    unread = Keyword.put(opts(ctx), :release_table, fn -> {:error, "An invented failure."} end)
+    assert %{ready: false, items: items} = MoveReadiness.report(ctx.home, newer, unread)
+    assert %{status: :block, sentence: sentence} = item_in(items, "engine_version")
+    assert sentence =~ "Fermix could not read which updates are published. Check again."
+
+    # The table is read only for a newer server.
+    refuse = fn -> flunk("the table is read only for a newer server") end
+    same = Keyword.put(opts(ctx), :release_table, refuse)
+    assert %{items: items} = MoveReadiness.report(ctx.home, ctx.candidate, same)
+    assert %{status: :ok} = item_in(items, "engine_version")
   end
 
   # The same review on the server, when the candidate is the desktop the
@@ -320,8 +344,10 @@ defmodule FermixCore.Home.MoveReadinessTest do
     {:ok, mac} =
       Candidates.add(ctx.home, %{candidate_attrs() | name: "studio-mac", os: "darwin"}, @now)
 
+    unread = Keyword.put(opts(ctx), :release_table, fn -> {:error, "An invented failure."} end)
+
     assert %{ready: false, items: items} =
-             MoveReadiness.report(ctx.home, %{mac | version: "0.18.0"}, opts(ctx))
+             MoveReadiness.report(ctx.home, %{mac | version: "0.18.0"}, unread)
 
     assert %{status: :block, sentence: sentence} = item_in(items, "engine_version")
     assert sentence =~ "studio-mac runs a newer Fermix than this computer"
@@ -664,6 +690,15 @@ defmodule FermixCore.Home.MoveReadinessTest do
       assert %{status: :warn, sentence: ^sentence} = item_in(items, "whatsapp")
       assert %{status: :warn} = item_in(items, "serves_nothing")
     end
+  end
+
+  # A release table that pins 0.17.0 and 0.18.0, with `rows` after.
+  defp release_table(rows) do
+    digests =
+      for version <- ["0.17.0", "0.18.0"],
+          do: "#{version} #{String.duplicate("c", 64)} fermix_always_on.sh"
+
+    Enum.join(["format 1", "latest 0.18.0"] ++ digests ++ rows, "\n") <> "\n"
   end
 
   defp opts(ctx),

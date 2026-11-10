@@ -76,6 +76,51 @@ defmodule FermixCore.Home.ComputerKeyTest do
     def command_source(_key, _opts \\ []), do: %{source: :command, command: "", args: []}
   end
 
+  # Stores that answer for an item they do not hold as the real helpers do,
+  # never with `:missing_secret`: the Keychain's `security` exits 44
+  # (errSecItemNotFound), and `secret-tool lookup` exits 1 and prints nothing.
+  @absent_answers [
+    {SecurityAnswers,
+     {:helper_failed, "/usr/bin/security find-generic-password -a fermix -s item -g", 44,
+      "security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain.\n"}},
+    {SecretToolAnswers,
+     {:helper_failed, "/usr/bin/secret-tool lookup service item account fermix", 1, ""}}
+  ]
+
+  for {name, absent} <- @absent_answers do
+    defmodule Module.concat(__MODULE__, name) do
+      @moduledoc false
+      @behaviour FermixCore.Setup.SecretWriter
+
+      alias FermixTestSupport.SecretWriterStub
+
+      @absent absent
+
+      @impl true
+      def available?(_opts \\ []), do: true
+
+      @impl true
+      def probe(opts \\ []), do: SecretWriterStub.probe(opts)
+
+      @impl true
+      def put(key, value, opts \\ []), do: SecretWriterStub.put(key, value, opts)
+
+      @impl true
+      def get(key, opts \\ []) do
+        case SecretWriterStub.get(key, opts) do
+          {:error, :missing_secret} -> {:error, @absent}
+          answer -> answer
+        end
+      end
+
+      @impl true
+      def delete(key, opts \\ []), do: SecretWriterStub.delete(key, opts)
+
+      @impl true
+      def command_source(_key, _opts \\ []), do: %{source: :command, command: "", args: []}
+    end
+  end
+
   setup do
     tmp = SafeRm.make_tmp_dir!("computer_key")
     on_exit(fn -> SafeRm.rm_rf!(tmp) end)
@@ -104,6 +149,40 @@ defmodule FermixCore.Home.ComputerKeyTest do
       assert File.read!(file) == Base.encode64(keypair.private)
       assert Bitwise.band(File.stat!(file).mode, 0o777) == 0o600
       assert ComputerKey.read(home, store: :file, impl: SecretWriter.File) == {:ok, keypair}
+    end
+
+    # A fresh keychain holds no item, and each helper says so in its own
+    # way: a key is made all the same, and one that is gone reads as missing.
+    for {name, _absent} <- @absent_answers do
+      test "makes a key where #{inspect(name)} says the store holds none", ctx do
+        home = home!(ctx, "mac")
+        opts = [impl: Module.concat(__MODULE__, unquote(name))]
+
+        assert {:ok, keypair, :keyring} = ComputerKey.create(home, opts)
+        assert ComputerKey.read(home, [store: :keyring] ++ opts) == {:ok, keypair}
+
+        assert ComputerKey.delete(home, :keyring, [public: keypair.public] ++ opts) == :ok
+        assert ComputerKey.read(home, [store: :keyring] ++ opts) == {:error, {:missing, :keyring}}
+        # Deleting what is gone is no refusal.
+        assert ComputerKey.delete(home, :keyring, [public: keypair.public] ++ opts) == :ok
+      end
+    end
+
+    test "any other helper failure is the store's refusal, not a missing key", ctx do
+      home = home!(ctx, "mac")
+
+      for reason <- [
+            {:helper_failed, "/usr/bin/security find-generic-password -a fermix -s item -g", 51,
+             "security: denied"},
+            {:helper_failed, "/usr/bin/secret-tool lookup service item", 1,
+             "secret-tool: Cannot autolaunch D-Bus without X11"},
+            {:helper_timeout, "/usr/bin/security find-generic-password", 3_000}
+          ] do
+        refute SecretWriter.absent?(reason), inspect(reason)
+      end
+
+      assert SecretWriter.absent?(:missing_secret)
+      assert {:ok, _keypair, :keyring} = ComputerKey.create(home)
     end
 
     test "never overwrites another computer key two homes under one profile share", ctx do

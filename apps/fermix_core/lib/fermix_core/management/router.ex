@@ -17,6 +17,8 @@ defmodule FermixCore.Management.Router do
   alias FermixCore.Management.AlwaysOn
   alias FermixCore.Management.Auth
   alias FermixCore.Management.Capabilities
+  alias FermixCore.Management.Computer, as: ComputerMethods
+  alias FermixCore.Management.ComputerLink
   alias FermixCore.Management.ComputerUse
   alias FermixCore.Management.Cues
   alias FermixCore.Management.Detect
@@ -72,7 +74,7 @@ defmodule FermixCore.Management.Router do
   @workspace_select_params ~w(name profile workspace_id label)
   @mobile_session_params ~w(session_id)
   @mobile_decide_params ~w(session_id approved)
-  @mobile_device_params ~w(device_id)
+  @mobile_device_params ~w(device_id confirmed)
   @imessage_grant_params ~w(service)
   @mcp_name_params ~w(name)
   @mcp_server_params ~w(
@@ -89,6 +91,10 @@ defmodule FermixCore.Management.Router do
   @home_readiness_params ~w(candidate_id)
   @home_move_params ~w(candidate_id recovery_passphrase keep_as_desktop)
   @home_act_params ~w(action key input)
+  @home_enroll_open_params ~w(purpose)
+  @home_enroll_approve_params ~w(sas)
+  @computer_join_params ~w(code)
+  @computer_disconnect_params ~w(confirmed)
   @computers_rename_params ~w(device_id name)
   # A candidate (M75 §2) answers the protocol's hello and home.status, and
   # refuses every other method by name.
@@ -300,6 +306,11 @@ defmodule FermixCore.Management.Router do
 
   # Names a computer of the home (M97 §3.2), on the primary; a linked
   # computer forwards it (`Management.Placement`).
+  # What Fermix on its server did on this computer (M97 §6.3): its own
+  # journal, answered here (`Management.Computer`).
+  defp route_known("computer.journal.list", params, opts),
+    do: ComputerMethods.journal_list(params, opts |> operation_opts() |> Keyword.take([:home]))
+
   defp route_known("computers.rename", params, opts) do
     with :ok <- reject_unknown_params(params, @computers_rename_params),
          {:ok, device_id} <- text_param(params, "device_id"),
@@ -311,6 +322,26 @@ defmodule FermixCore.Management.Router do
         {:error, {:not_found, sentence}} -> invalid_params("device_id", sentence)
         {:error, {_refused, sentence}} -> invalid_params("name", sentence)
       end
+    end
+  end
+
+  # This computer's own link to a home (M97 §3.1, §3.3), answered here.
+  defp route_known("computer.join.start", params, opts) do
+    with :ok <- reject_unknown_params(params, @computer_join_params) do
+      operation_result(ComputerLink.join_start(Map.get(params, "code"), computer_link_opts(opts)))
+    end
+  end
+
+  defp route_known("computer.join.cancel", params, opts) do
+    with :ok <- reject_unknown_params(params, []) do
+      operation_result(ComputerLink.join_cancel(computer_link_opts(opts)))
+    end
+  end
+
+  defp route_known("computer.disconnect", params, opts) do
+    with :ok <- reject_unknown_params(params, @computer_disconnect_params),
+         {:ok, confirmed?} <- optional_boolean(params, "confirmed") do
+      operation_result(ComputerLink.disconnect(confirmed?, computer_link_opts(opts)))
     end
   end
 
@@ -349,10 +380,25 @@ defmodule FermixCore.Management.Router do
     end
   end
 
-  # No params: a param sent is refused by name.
+  # `purpose` (default `candidate`): `computer` opens the code a computer
+  # joins the home with (M97 §3.1); any other param is refused by name.
   defp route_home("home.enroll.open", params, opts) do
+    with :ok <- reject_unknown_params(params, @home_enroll_open_params),
+         {:ok, purpose} <- enroll_purpose(Map.get(params, "purpose", "candidate")) do
+      operation_result(HomeMove.enroll_open([purpose: purpose] ++ home_opts(opts)))
+    end
+  end
+
+  # The owner's answer to the computer that waits to join (M97 §7.5).
+  defp route_home("home.enroll.approve", params, opts) do
+    with :ok <- reject_unknown_params(params, @home_enroll_approve_params) do
+      operation_result(HomeMove.enroll_approve(Map.get(params, "sas"), home_opts(opts)))
+    end
+  end
+
+  defp route_home("home.enroll.deny", params, opts) do
     with :ok <- reject_unknown_params(params, []) do
-      operation_result(HomeMove.enroll_open(home_opts(opts)))
+      operation_result(HomeMove.enroll_deny(home_opts(opts)))
     end
   end
 
@@ -419,6 +465,10 @@ defmodule FermixCore.Management.Router do
   end
 
   defp wait_ms(_ms), do: invalid_params("wait_ms")
+
+  defp enroll_purpose("candidate"), do: {:ok, :candidate}
+  defp enroll_purpose("computer"), do: {:ok, :computer}
+  defp enroll_purpose(_purpose), do: invalid_params("purpose")
 
   defp keep_as_desktop(params) do
     case Map.get(params, "keep_as_desktop", true) do
@@ -706,9 +756,21 @@ defmodule FermixCore.Management.Router do
     end
   end
 
+  # `confirmed` (default false): the owner agreed to remove the one computer
+  # that keeps the server's backup copies (M97 §3.3).
   defp mobile_revoke(params, opts) do
-    with {:ok, device_id} <- fetch_string(params, "device_id", @mobile_device_params) do
-      operation_result(Mobile.devices_revoke(device_id, mobile_opts(opts)))
+    with {:ok, device_id} <- fetch_string(params, "device_id", @mobile_device_params),
+         {:ok, confirmed?} <- optional_boolean(params, "confirmed") do
+      operation_result(
+        Mobile.devices_revoke(device_id, Keyword.put(mobile_opts(opts), :confirmed, confirmed?))
+      )
+    end
+  end
+
+  defp optional_boolean(params, field) do
+    case Map.get(params, field, false) do
+      value when is_boolean(value) -> {:ok, value}
+      _invalid -> invalid_params(field)
     end
   end
 
@@ -913,6 +975,13 @@ defmodule FermixCore.Management.Router do
   # linked device's way to its primary (`:primary_forward`, from the daemon)
   # lets `home.status` add the primary's own, and the actor says whether a
   # desktop forwarded the request.
+  defp computer_link_opts(opts) do
+    opts
+    |> operation_opts()
+    |> Keyword.get(:computer_link, [])
+    |> Keyword.merge(Keyword.take(opts, [:primary_forward]))
+  end
+
   defp home_opts(opts) do
     home =
       opts

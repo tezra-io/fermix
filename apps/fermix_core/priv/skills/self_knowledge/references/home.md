@@ -264,22 +264,18 @@ it, never a second writer.
   `/etc/apt/apt.conf.d/21fermix-always-on`). Fermix: the package comes from
   release files, not an apt source, so two root timers run
   `/usr/local/sbin/fermix-update`: `fermix-follow.timer` every five minutes
-  and `fermix-update.timer` every night at 04:00 UTC. Each installs the
-  release the computers it serves run (`fermix home status --json`'s
-  `update_ceiling`: the oldest Fermix among the desktops that reached it in
-  the last 30 days, which the server records from each one's connection),
-  only when that is newer than the installed one and never back down, and
-  nothing while no computer was seen; then `fermix restart` as `fermix`
-  when `fermix service status` says the
-  running engine is behind the installed one (so a restart a run skipped is
-  done at the next). So once every computer linked to the server runs a new
-  release, the server takes it within a few minutes: the chat protocol does
-  not always behave across versions, so the server and its computers
-  update as one. The reboot stays at night: only the 04:00 UTC run reboots,
-  when `/run/reboot-required` exists.
-  While a move is under way on the server (sending its home, or as a
-  candidate enrolling or receiving one) the restart waits until the first
-  run after it ends, and so it does when the engine's status cannot be
+  and `fermix-update.timer` every night at 04:00 UTC. The server leads:
+  each installs the newest release whose app is published for every
+  computer keeping its backups (`fermix home status --json`'s `update`,
+  read from fermix.ai's release table; `held` names a newer one waiting for
+  an app), never back down, nothing while no table was read, then takes
+  that release's own update script; then `fermix restart` as `fermix` when
+  the engine is behind. Computers up to two minor versions behind are
+  served; older ones keep settings only ("Update Fermix on this computer").
+  `fermix-update --release X` updates by hand behind the same gate
+  (`--ahead-of-apps` to go past it). The reboot stays at night.
+  A move under way on the server, or a computer's work (ten minutes at
+  most), holds the restart, and so does a status that cannot be
   read; the reboot waits at most two nights in a row for a move and then
   happens all the same. The two runs never install at once (one lock: a
   five-minute run leaves the update to one already running, the night waits
@@ -614,13 +610,13 @@ it, never a second writer.
   is fetched from the primary and handed to the app as a file on this
   computer.
 - Settings and other Fermix-wide requests from the app go to the primary
-  too, the home's recovery, enrollment and move included (snapshots, a new
-  enrollment code, the servers waiting, the move's readiness and the move
-  itself): after the move the server holds them. What configures this
-  computer is answered here: Fermix's own status and lifecycle, its logs,
-  diagnostics and Doctor, the setup page, computer use, iMessage, the browser
-  and capability installers, and the settings sections sandbox, computer
-  use, computer history and iMessage.
+  too, recovery, enrollment and move included (snapshots, an enrollment
+  code, waiting servers, the move's readiness and start): after the move
+  the server holds them. What configures this computer is answered here:
+  Fermix's own status and lifecycle, its logs, diagnostics and Doctor, the
+  setup page, computer use, iMessage, the browser and capability
+  installers, and the settings sections sandbox, computer use, computer
+  history, iMessage, accessories and This computer.
 - Two answers are put together here: the home's status is this computer's
   own (its role, its link to the primary, where the move went) with the
   primary's own picture added (its recovery, its enrollment and candidates,
@@ -664,9 +660,8 @@ it, never a second writer.
   is treated as an outage from then on: this desktop waits longer between
   tries (the usual backoff) and says "The server <name> ends this computer's
   session each time it opens."
-  The server refuses to remove this computer from its devices ("This desktop
-  cannot be removed: …"), since this version cannot link it again and it
-  keeps copies of the server's backups.
+  Removing this computer on the server, or Disconnect here, ends the link
+  (the `computers` reference).
   When the server does not know this computer anyway (the server was
   restored from a snapshot taken before this computer joined it), this
   desktop stops trying
@@ -754,11 +749,10 @@ it, never a second writer.
   - a problem, in one sentence with the one action that fixes it: no answer
     for 10 minutes of this computer being awake (**Learn more**, and
     **Restore on this Mac** where it holds a copy), this computer too old for
-    its server (**Update**), the server older than this computer, which
-    updated first ("Your server runs an older Fermix than this Mac. It
-    updates to this Mac's version within a few minutes once every computer
-    linked to it runs it.", **Learn more**: the server's update installs
-    the oldest version among them),
+    its server or past its window (**Update**), the server older than this
+    computer (it updates once the apps carry the newer one, **Learn more**)
+    or ahead of the apps (**Update**; Move back and Restore here say "Update
+    Fermix on this Mac first"),
     the server's disk 85% full or more (**Learn
     more**), the last backup over 3 days old or failed until stored (**Back up now**), a review that blocks the move
     (**Check again**), a move back that stopped (*Moving back*), and on the

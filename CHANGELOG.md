@@ -139,6 +139,15 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ended holds its place for the second or so it takes to close, and a fault
   in what keeps the one call now ends the call in progress rather than
   letting a second one start beside it.
+- **This computer's own settings now live in `machine.toml`.** The sandbox,
+  computer use, computer history, iMessage and the dev plugin folder describe
+  the computer Fermix runs on, not your home, so the first start of this
+  version moves them from `config.toml` into `machine.toml` beside it, once,
+  and every save writes them there. To change one by hand, edit
+  `machine.toml`: one added to `config.toml` is not read there, reloading the
+  settings says so in the log, and the next save or start takes it out of
+  `config.toml`. As with `config.toml`, no command or file tool the agent
+  runs can read or change `machine.toml`.
 
 ### Fixed
 
@@ -276,12 +285,27 @@ will be part of a future release; nothing in this group is in a release yet.
   any install is; one it could not install says so in Plugins, with Install….
   A server announces nothing over mDNS, whatever the settings it took from
   your computer say: it is no host on your local network.
-  A server always runs the Fermix of the computer it serves: Use my own Linux
-  server's command names that release, and every five minutes the server
-  installs the oldest release among the computers that reached it in the
-  last 30 days (`update_ceiling` in `fermix home status --json`), never past
-  it and never back down, so once every computer linked to it runs a new
-  release, the server takes it within a few minutes.
+  Your server keeps itself up to date and your computers follow it. Use my
+  own Linux server's command names the release it starts on, and every five
+  minutes the server installs the newest release that the app of each
+  computer keeping its backups already carries, read from fermix.ai's release
+  table (`update` in `fermix home status --json`: the release it runs, the
+  one it may install, and a newer one still waiting for an app), never back
+  down, and nothing while it cannot read the table. A computer that has not
+  installed an update never holds the server back: one up to two minor
+  versions behind the server works as before, and one further behind keeps
+  its settings and says to update Fermix on it. A computer ahead of its
+  server speaks the server's version of the chat protocol. Move back and
+  Restore here need this computer's Fermix to be at least as new as the
+  server's, and say "Update Fermix on this Mac first" in their place when it
+  is not. On the server, `sudo fermix-update --release X` updates by hand
+  behind the same rule: it refuses an older release, one fermix.ai does not
+  list, and one no app carries yet unless `--ahead-of-apps` is added, after
+  which each computer that keeps backups says the server runs a newer Fermix
+  than it can restore. After an update the restart waits for a move, and
+  for a command, screen session or message send running on a computer, ten
+  minutes at most; each update also replaces the server's update script
+  with the new release's own.
   Once a recovery passphrase is set, your server keeps encrypted snapshots of
   itself on your desktop, every six hours by default (the first as soon as
   your desktop connects), and in an S3 bucket where the server's own setup
@@ -367,8 +391,8 @@ will be part of a future release; nothing in this group is in a release yet.
   install a browser yourself) and waits for your primary to accept the
   server. The server then keeps itself up to date: Debian's security updates
   install every day, and every five minutes Fermix's installer runs again
-  when your computers run a newer release and restarts Fermix unless a move
-  is under way; reboots wait for 04:00 UTC, when the nightly run reboots if
+  when a newer release is eligible for the server and restarts Fermix unless
+  a move is under way; reboots wait for 04:00 UTC, when the nightly run reboots if
   an update asks for it (a move holds that off two nights at most). The two
   never install at once, and a run that fails leaves Fermix running and says
   why in the journal. A server whose kernel cannot sandbox commands is refused before
@@ -470,8 +494,9 @@ will be part of a future release; nothing in this group is in a release yet.
   server your computer held for 24 hours with no move is told once, as one to
   set up again; Restore here finished is told once, naming the day of the
   backup it restored; a computer that updated first and finds its server on an
-  older Fermix says the server updates to its version within a few minutes
-  once every computer linked to it runs it, rather than look all well; and a
+  older Fermix says the server updates on its own once the app for each
+  computer that keeps your backups carries the newer one, rather than look
+  all well; and a
   server's own copy retired by a move back says where Fermix moved back to.
 - **WhatsApp and webhook sources reach Fermix on your Always On server.**
   Once Fermix runs on your server, Always On on your computer shows the
@@ -522,6 +547,23 @@ will be part of a future release; nothing in this group is in a release yet.
 
 ### Added
 
+- **Add another computer to your Fermix with a code and six digits.** A
+  computer no longer has to be the one your Fermix moved from. On a computer
+  already in your Fermix, or on the server (`fermix always-on add-computer`),
+  Always On's Add a computer opens a code that works once, for 30 minutes.
+  On the new computer you connect to a Fermix that already runs with that
+  code (`fermix computer join CODE` where there is no app), and both show six
+  digits taken from their encrypted connection: you add the computer only if
+  they match, so someone who merely saw the code cannot join. Until you add
+  it, it has no access; not adding it, wrong digits or the code running out
+  add nothing. A computer that joins moves nothing, starts with everything
+  Fermix on your server may use switched off, keeps no backups, and offers no
+  Move back. One that already has a Fermix of its own is refused, and nothing
+  is deleted to make room. You can remove a computer from your devices
+  (`fermix devices revoke`), after which it joins again only with a new code;
+  the one that keeps the only copies of your server's backups asks first.
+  Disconnect this computer does the same from the computer itself and
+  deletes its key. A phone cannot add a computer yet.
 - **The Linux installer installs a release you name.** `curl -fsSL
   https://fermix.ai/install | sh -s -- --version X.Y.Z` installs that
   release instead of the latest, from that release's own files, under the

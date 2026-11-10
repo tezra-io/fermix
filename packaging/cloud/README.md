@@ -148,20 +148,37 @@ runs `--quiet`.
    `fermix-follow.timer` (`OnBootSec=2min`, `OnUnitActiveSec=5min`) runs
    `fermix-follow.service`, `fermix-update --follow`, every five minutes, and
    `fermix-update.timer` (`OnCalendar=*-*-* 04:00:00 UTC`,
-   `Persistent=true`) runs `fermix-update.service`, the nightly update. Both
-   install the release the computers this server serves run, read from
-   `fermix home status --json`'s `update_ceiling` (the oldest engine among
-   the desktops that reached it in the last 30 days), with the installer
+   `Persistent=true`) runs `fermix-update.service`, the nightly update. The
+   server leads (M97): both install the newest release eligible for this
+   server, read from `fermix home status --json`'s `update_ceiling`, which is
+   the engine's `update.eligible`: the newest release, at or above the one
+   it runs, that the app of each system whose computers keep the home's
+   backups carries, from the release table the engine reads from fermix.ai
+   every five minutes (`FermixCore.Home.ReleaseTable`; an app row is added
+   when that app release is published). They install it with the installer
    again (`--no-setup --version X`, with its sha256 check and the cosign
    signature check through the package's own cosign) when it is newer than
    the installed one in `dpkg --compare-versions`' order; an installed
-   release newer than it is never installed back down, and no home, no
-   computer seen or a `home status` that fails installs nothing on that run
-   (the last fails the run). So the home can always move back to its
-   computer, the server's Fermix follows that computer's, and within a few
-   minutes, since the chat protocol does not always behave across versions:
-   once every computer linked to the server runs a release, the next follow
-   run installs it. Then `fermix restart`
+   release newer than it is never installed back down, and no home, none
+   eligible (a table not read yet among the reasons, so it fails closed) or
+   a `home status` that fails installs nothing on that run (the last fails
+   the run). A stopped engine reads no table, so nothing is installed until
+   it runs. After each install the script becomes that release's own: it
+   fetches the release's `fermix_always_on.sh` from its GitHub release,
+   refuses it unless its sha256 is the one the table lists, and runs it with
+   `--update-script-only`, which writes `/usr/local/sbin/fermix-update`
+   again as that release writes it and nothing else (a script that cannot
+   be fetched, checked or run leaves the old one, says so, and fails the run
+   once the restart is decided). The owner's own update on the server is
+   the same act behind the same gate: `fermix-update --release X` refuses X
+   below the installed release (an older Fermix cannot read the home), a
+   release the table does not list, and one newer than the eligible release
+   unless `--ahead-of-apps` is given, which installs it all the same: each
+   computer that keeps backups then says the server runs a newer Fermix
+   than it can restore, until its app catches up. A hand update waits for a
+   run that holds the lock as the night does, installs, takes the release's
+   script, and restarts as a follow run does; it never reboots. Then
+   `fermix restart`
    as `fermix` when `fermix service status --json` says `pending_restart`
    (the running engine is older than the installed one, so a restart a run
    skipped or failed is still due at the next, and an engine that is not
@@ -176,7 +193,12 @@ runs `--quiet`.
    (`LogLevelMax=notice`), which drops systemd's own start and finish lines
    for each run (at `info`) and keeps systemd's lines for a run that fails,
    and its `fermix` calls open no PAM session (below). A restart a move held
-   off happens at the first follow run after the move ends. The two never run at once: each
+   off happens at the first follow run after the move ends. Work Fermix runs
+   on a computer (a command, a screen session, a message send) holds the
+   restart too, at most ten minutes from the oldest one's start: `fermix
+   home status --json`'s `restart_hold.wait_s` above 0 skips it, in one
+   line, and the first run after the engine lets go restarts it; it never
+   holds the night's reboot. The two never run at once: each
    takes an exclusive `flock` on `/run/fermix-update.lock` (root's, 0600; a
    file only root can make, as `/run` is root's) before anything else, with
    the lock's descriptor closed for the installer and every `fermix` call, so
@@ -207,8 +229,9 @@ runs `--quiet`.
    the package was touched. Any failure says why on stderr (the journal:
    `journalctl -u fermix-follow` and `journalctl -u fermix-update`) and the
    run exits non-zero; the next one tries again. Any argument but `--follow`
-   is refused in one sentence before anything runs. First boot writes the
-   script and both timers' units again whenever it runs.
+   or `--release X [--ahead-of-apps]` is refused in one sentence before
+   anything runs. First boot writes the script and both timers' units again
+   whenever it runs, and each installed release writes the script again.
 6. Creates the account `fermix` (home `/home/fermix`, `/usr/sbin/nologin`, no
    password), lingering, with `/run/fermix` recreated for it at every boot
    (tmpfiles.d) and a `user@<uid>.service` drop-in whose `ExecStartPre` refuses
@@ -494,17 +517,21 @@ again once its home is a primary, and refused as a retired copy; the
 failures that stop the
 first boot, each by its exit status and its one sentence on stderr; an
 Ubuntu host with swap of its own; the nightly update, one night per case (the
-computers' release already installed, a newer one, a failed installer while
-a reboot is asked for, the reboot, an installer that cannot be downloaded
-(the reboot all the same), a failed `service status` and a failed `home
-status` (no restart, the reboot all the same), three nights under a move
-(the reboot waits two, then goes), a move in an ended phase, a failed
-restart (the reboot all the same), an older release never installed back
-down, no computer seen, no home yet), then the follow run (no home yet:
-nothing run or said; a newer release installed and the engine restarted
-while a reboot is asked for, which it leaves to the night with its count
-untouched; a move holding the restart until the first run after it ends;
-nothing due, nothing said; any other option refused), and the lock with
+eligible release already installed, a newer one and then the update script
+it publishes, checked against the table, a marked copy proving it replaced
+the script, a failed installer while a reboot is asked for, the reboot, an
+installer that cannot be downloaded (the reboot all the same), a failed
+`service status` and a failed `home status` (no restart, the reboot all the
+same), three nights under a move (the reboot waits two, then goes), a move
+in an ended phase, a failed restart (the reboot all the same), an older
+release never installed back down, none eligible, no home yet), then the
+follow run (no home yet: nothing run or said; a newer release installed and
+the engine restarted while a reboot is asked for, which it leaves to the
+night with its count untouched; a move holding the restart until the first
+run after it ends; a computer's work holding it until the engine lets go;
+nothing due, nothing said; any other option refused), the owner's hand
+update (an older release, one the table lacks and one ahead of the apps
+refused, then `--ahead-of-apps` installing it), and the lock with
 the real `flock` (a follow run leaving the update to the run that holds
 it, in one line; the night saying it waits, running nothing until that
 run ends, then running); a host joining a tailnet with
@@ -521,8 +548,10 @@ change, no secret in any command line, each of the helper's failures in its
 own words, a first boot whose helper fails stopped before enrolling, the
 destination file's refusals, and a restore host. It is not wired into CI;
 `scripts/release/test_fermix_update.py` runs the update's release choice,
-the follow run, the lock (with a stand-in `flock` and the night's wait cut
-to a second) and first boot's `--version` hermetically, in CI. What only a
+the update script each release takes (and every way it refuses one), the
+owner's hand update and its gate, the restart a computer's work holds, the
+follow run, the lock (with a stand-in `flock` and the night's wait cut to a
+second) and first boot's `--version` hermetically, in CI. What only a
 real server proves: the user manager starting behind the drop-in, the swap
 file turning on, the timers firing (every five minutes, and at 04:00 UTC)
 and the reboot.

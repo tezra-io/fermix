@@ -4,7 +4,7 @@ defmodule Fermix.CLI.AlwaysOnCommand do
   a Homebrew or Linux install without the Fermix app.
 
       fermix always-on [--json]
-      fermix always-on ACTION [--recovery-passphrase-file PATH] [--yes] [--wait] [--json]
+      fermix always-on ACTION [--recovery-passphrase-file PATH] [--sas DIGITS] [--yes] [--wait] [--json]
 
   The engine owns the flow. The verb reads `home.status` and draws its
   summary; for the step asked (`ACTION`, an action id in kebab form) it
@@ -74,6 +74,7 @@ defmodule Fermix.CLI.AlwaysOnCommand do
 
   @switches [
     recovery_passphrase_file: :string,
+    sas: :string,
     yes: :boolean,
     wait: :boolean,
     json: :boolean
@@ -87,11 +88,13 @@ defmodule Fermix.CLI.AlwaysOnCommand do
   @usage """
   Usage:
     fermix always-on [--json]
-    fermix always-on ACTION [--recovery-passphrase-file PATH] [--yes] [--wait] [--json]
+    fermix always-on ACTION [--recovery-passphrase-file PATH] [--sas DIGITS] [--yes] [--wait] [--json]
 
   ACTION is one of the steps Always On offers now:
     cancel move-now try-again learn-more update back-up-now check-again own-server
-    move-back restore-here
+    move-back restore-here add-computer approve-computer deny-computer
+
+  approve-computer takes the six digits the new computer shows (--sas, or asked).
   """
 
   @type context :: map()
@@ -185,6 +188,7 @@ defmodule Fermix.CLI.AlwaysOnCommand do
   defp flags(opts) do
     %{
       passphrase_file: Keyword.get(opts, :recovery_passphrase_file),
+      sas: Keyword.get(opts, :sas),
       yes: Keyword.get(opts, :yes, false),
       wait: Keyword.get(opts, :wait, false),
       json: Keyword.get(opts, :json, false)

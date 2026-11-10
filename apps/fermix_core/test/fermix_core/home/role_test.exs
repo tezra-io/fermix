@@ -1,6 +1,7 @@
 defmodule FermixCore.Home.RoleTest do
   use ExUnit.Case, async: true
 
+  alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.Moved
   alias FermixCore.Home.Role
   alias FermixTestSupport.SafeRm
@@ -63,6 +64,28 @@ defmodule FermixCore.Home.RoleTest do
     test "a device records where the marker says the primary went", %{root: root} do
       assert Role.boot(put_marker(root, :marker), role: :device) ==
                {:ok, %{role: :device, primary: "aws i-0f3b1c"}}
+    end
+
+    # M97 §3.1: a computer that joined has a link and no marker.
+    test "a device with no marker names the server its link names", %{root: root} do
+      :ok =
+        DesktopLink.write(root, %{
+          device_id: "7e1f0c2a-3b4d-4e5f-8a6b-7c8d9e0f1a2b",
+          key: :keyring,
+          primary: %{
+            name: "studio-mac",
+            gateway_pk: :binary.copy(<<3>>, 32),
+            node_id: String.duplicate("4f", 32),
+            relays: [%{"url" => "https://eu1.relay.invalid/", "quic_port" => 7842}],
+            relays_rev: "0123456789abcdef"
+          },
+          epoch: 4
+        })
+
+      assert Role.boot(root, role: :device) == {:ok, %{role: :device, primary: "studio-mac"}}
+
+      File.write!(Path.join(root, "config.toml"), ~s([fermix_core.engine]\nrole = "device"\n))
+      assert Role.configured(root) == {:ok, %{role: :device, primary: "studio-mac"}}
     end
 
     test "a device with no marker knows no primary", %{root: root} do

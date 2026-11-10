@@ -741,6 +741,114 @@ defmodule FermixOpik.MapperTest do
     assert Jason.encode!(span.metadata.outcome) == ~s("refused")
   end
 
+  # M97 §6.2: the server's one tool exec for an invocation carries the
+  # computer's device id, the invocation's id, how it ended and why the computer
+  # refused it. The invocation's run is a root on the computer's own trace, so
+  # these are the only link from the turn to it. The live emitter sends the two
+  # words as ATOMS and `Map.take` keeps them so; replay hands them back as
+  # strings (pinned in the trace-file round trip). The target and the arguments
+  # are content and must still drop: this stays an allowlist.
+  test "tool_span keeps an invocation's computer, id, status and refusal, and nothing else" do
+    metadata = %{
+      tool: "computer_files",
+      success: false,
+      computer: "dev_7k2m9q",
+      invocation: "inv-mfrgg2lt5vgmy3dpqzt7xk4wha",
+      invoke_status: :refused,
+      refusal: :outside_sandbox,
+      target: "/Users/ines/Taxes/2025.pdf",
+      args: %{"path" => "/Users/ines/Taxes/2025.pdf"}
+    }
+
+    span =
+      Mapper.tool_span(metadata, %{duration_ms: 31},
+        trace_id: "t",
+        project_name: "fermix",
+        ended: @ended
+      )
+
+    assert span.metadata == %{
+             computer: "dev_7k2m9q",
+             invocation: "inv-mfrgg2lt5vgmy3dpqzt7xk4wha",
+             invoke_status: :refused,
+             refusal: :outside_sandbox
+           }
+
+    assert Jason.encode!(span.metadata.invoke_status) == ~s("refused")
+    assert Jason.encode!(span.metadata.refusal) == ~s("outside_sandbox")
+  end
+
+  @invocation_meta %{
+    session_id: "inv_inv-mfrgg2lt5vgmy3dpqzt7xk4wha",
+    parent_session: "main-41",
+    capability: "files",
+    op: "read",
+    origin: :chat,
+    epoch: 3
+  }
+
+  # The invocation's run on the computer (M97 §6.2). The opener carries the
+  # emitter's allowlist and nothing else: its `duration_ms` is a placeholder
+  # zero, not a measurement, and the target never reaches a trace.
+  test "computer_invocation_root of the opener carries the allowlist and no status" do
+    metadata = Map.put(@invocation_meta, :target, "/Users/ines/Taxes/2025.pdf")
+
+    assert Mapper.computer_invocation_root(:start, metadata, %{duration_ms: 0}) == %{
+             metadata: %{
+               parent_session: "main-41",
+               capability: "files",
+               op: "read",
+               origin: "chat",
+               epoch: 3
+             },
+             status: nil,
+             error_info: nil
+           }
+  end
+
+  # `ok`, `cancelled` and `refused` close with `:complete`: a refusal is the
+  # computer answering, not the run failing, so it carries its word and why,
+  # and no error_info.
+  test "computer_invocation_root of a refusal names it and is no error" do
+    metadata = Map.merge(@invocation_meta, %{status: :refused, refusal: :off})
+
+    root =
+      Mapper.computer_invocation_root(:complete, metadata, %{duration_ms: 4, result_bytes: 0})
+
+    assert root.status == "refused"
+    assert root.error_info == nil
+    assert root.metadata.refusal == "off"
+    assert root.metadata.duration_ms == 4
+    assert root.metadata.result_bytes == 0
+  end
+
+  # `failed`, `timed_out` and `unknown` close with `:error`, which makes the
+  # trace filterable as failed; the status is the whole diagnosis it carries.
+  test "computer_invocation_root of an error flags it with its status" do
+    metadata = Map.put(@invocation_meta, :status, :timed_out)
+
+    root =
+      Mapper.computer_invocation_root(:error, metadata, %{duration_ms: 30_000, result_bytes: 0})
+
+    assert root.status == "timed_out"
+
+    assert root.error_info == %{
+             exception_type: "ComputerInvocationError",
+             message: "timed_out"
+           }
+  end
+
+  # Live, the words are atoms; replayed from JSONL they are strings. The root
+  # reads both alike.
+  test "computer_invocation_root reads a replayed row's strings as the live atoms" do
+    live = Map.merge(@invocation_meta, %{status: :refused, refusal: :busy})
+    replayed = Map.merge(@invocation_meta, %{origin: "chat", status: "refused", refusal: "busy"})
+    counts = %{duration_ms: 1, result_bytes: 0}
+
+    assert Mapper.computer_invocation_root(:complete, live, counts) ==
+             Mapper.computer_invocation_root(:complete, replayed, counts)
+  end
+
   # M70 §09: a Grok voice call's `fermix_task` function call is one tool span
   # per call the model made, refused and cancelled ones included, and its
   # terminal word and the Fermix task id are what tell them apart. A closed enum

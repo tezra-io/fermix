@@ -49,15 +49,21 @@ defmodule FermixChannels.Mobile.Session do
   hands it every desktop-family event; it gets no approval cards, and phone
   broadcasts never reach it. A desktop's `hello` names its engine's version
   (`app_version`), which the session records in the home's record of its
-  computers (`FermixCore.Computers.Store`, under the identity's home), read
-  by the server's update (`FermixCore.Home.EngineCeiling`); a record that
-  fails is logged and the desktop is served all the same. It names its
-  system too (`platform`, M97 §3.2), kept on its row when the row says none
-  or another; a phone's `hello` never moves its row's platform. Its
+  computers (`FermixCore.Computers.Store`, under the identity's home); a
+  record that fails is logged and the desktop is served all the same. It
+  names its system too (`platform`, M97 §3.2), kept on its row when the row
+  says none or another; a phone's `hello` never moves its row's platform. Its
   `hello_ack` says which of a computer's own events this server takes
-  (`caps.computer`: `offers`, `link_path`), which a computer sends only when
+  (`caps.computer`: `offers`, `link_path`, and `invoke` for the
+  invocation's events either way, M97 §6.1), which a computer sends only when
   it is said, since an older server closes the session on an event it does
-  not know.
+  not know. It says too where the computer stands against this server
+  (`caps.computer.standing`, `FermixCore.Computers.Versions` of the
+  `app_version` its hello named, M97 §3.4) and what this server speaks
+  (`caps.computer.versions`: its engine version and its companion and
+  management ranges); the desktop's peer is told the standing, and its
+  companion family refuses chat to a computer past the window
+  (`settings_only`), which keeps its link for settings alone.
 
   ## A phone's call
 
@@ -134,8 +140,12 @@ defmodule FermixChannels.Mobile.Session do
   alias FermixChannels.Mobile.Protocol
   alias FermixChannels.Mobile.RequestCoordinator
   alias FermixChannels.Telemetry, as: ChannelTelemetry
+  alias FermixCore.BuildInfo
+  alias FermixCore.Companion.Protocol, as: CompanionProtocol
   alias FermixCore.Companion.Timeline
   alias FermixCore.Computers.Store, as: ComputerStore
+  alias FermixCore.Computers.Versions
+  alias FermixCore.Management.Protocol, as: ManagementProtocol
   alias FermixCore.Setup.ConfigStore
 
   @max_wire_bytes 65_535
@@ -193,7 +203,7 @@ defmodule FermixChannels.Mobile.Session do
 
   # Which of a computer's own events this server takes (M97 §5.3), in a
   # desktop's hello_ack.
-  @computer_caps %{"v" => 1, "offers" => true, "link_path" => true}
+  @computer_caps %{"v" => 1, "offers" => true, "link_path" => true, "invoke" => true}
 
   @type state :: map()
 
@@ -1052,9 +1062,10 @@ defmodule FermixChannels.Mobile.Session do
 
   defp accept_hello(_event, state), do: {:error, :hello_required, state}
 
-  # A desktop's engine version, for the version a server installs at most
-  # (Always On's move back). It never refuses the desktop: a record that
-  # fails is said in the log, and the next hello records it again.
+  # A desktop's engine version, for the home's record of its computers, which
+  # says where each stands against this server (M97 §3.4). It never refuses
+  # the desktop: a record that fails is said in the log, and the next hello
+  # records it again.
   defp record_engine_version(%{payload: payload}, %{peer_kind: :desktop} = state) do
     case state.record_engine_version.(
            state.device_id,
@@ -1186,7 +1197,9 @@ defmodule FermixChannels.Mobile.Session do
   defp acknowledge_relays(same, same, _state), do: :ok
   defp acknowledge_relays(_previous, _current, state), do: state.relay_list_acknowledged.()
 
-  defp hello_ack(state, _event) do
+  defp hello_ack(state, event) do
+    state = put_standing(state, event)
+
     with {:ok, payload} <- build_hello_ack(state),
          {:ok, frames, state} <- encode_event("hello_ack", payload, <<>>, state) do
       {:ok, frames, state}
@@ -1278,8 +1291,10 @@ defmodule FermixChannels.Mobile.Session do
     end
   end
 
-  # A desktop's peer is the desktops'; a phone's runs its list channel alone.
-  defp peer_place(:desktop, state), do: [registry: state.desktop_peers]
+  # A desktop's peer is the desktops', and its families know where the
+  # computer stands; a phone's runs its list channel alone.
+  defp peer_place(:desktop, state),
+    do: [registry: state.desktop_peers, standing: state.computer_standing]
 
   defp peer_place(:phone, state),
     do: [
@@ -1304,9 +1319,43 @@ defmodule FermixChannels.Mobile.Session do
     # this server takes (M97 §5.3).
     case session_kind(state) do
       :phone -> Map.merge(caps, %{"call" => state.call_caps.(state.device_id), "lists" => true})
-      :desktop -> Map.put(caps, "computer", @computer_caps)
+      :desktop -> Map.put(caps, "computer", computer_caps(state))
     end
   end
+
+  # A computer also hears where it stands against this server and the
+  # versions this server speaks (M97 §3.4), so it can say "Update Fermix on
+  # this computer" itself.
+  defp computer_caps(state) do
+    {companion_min, companion_max} = CompanionProtocol.supported_version_range()
+    {management_min, management_max} = ManagementProtocol.supported_version_range()
+
+    Map.merge(@computer_caps, %{
+      "standing" => Atom.to_string(state.computer_standing),
+      "versions" => %{
+        "engine" => server_engine_version(state),
+        "companion" => [companion_min, companion_max],
+        "management" => [management_min, management_max]
+      }
+    })
+  end
+
+  # Where a desktop's engine stands against this one, by the version its
+  # hello names (`Computers.Versions`): its chat is refused past the window,
+  # by its peer's companion family. A phone has none.
+  defp put_standing(state, %{payload: payload}) do
+    case session_kind(state) do
+      :desktop ->
+        standing = Versions.standing(payload["app_version"], server_engine_version(state))
+        Map.put(state, :computer_standing, standing)
+
+      :phone ->
+        state
+    end
+  end
+
+  defp server_engine_version(state),
+    do: Map.get_lazy(state, :engine_version, &BuildInfo.product_version/0)
 
   # M51 D3: the phone's key attestation is verified before the owner hears of
   # the phone. A refusal ends the session: the pairing manager closes the

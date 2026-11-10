@@ -2,7 +2,7 @@
 # The verb list is the one `fermix help` prints; a test keeps them in step.
 
 _fermix() {
-  local verbs="setup auth ask chat run sandbox grant revoke service start stop restart status health voice acp browser browser-bridge agents capabilities skills plugins pair devices settings memory home always-on logs upgrade uninstall migrate-to-app doctor diagnostics version help"
+  local verbs="setup auth ask chat run sandbox grant revoke service start stop restart status health voice acp browser browser-bridge agents capabilities skills plugins pair devices settings memory home always-on computer logs upgrade uninstall migrate-to-app doctor diagnostics version help"
   local current previous
   current="${COMP_WORDS[COMP_CWORD]}"
   previous="${COMP_WORDS[COMP_CWORD - 1]}"
@@ -83,7 +83,10 @@ _fermix() {
       mapfile -t COMPREPLY < <(compgen -W "export import mark-moved status snapshots passphrase enroll candidates --into --passphrase-file --mark-moved --to --code-file --snapshot-bucket --snapshot-region --snapshot-instance-role --json" -- "$current")
       ;;
     always-on)
-      mapfile -t COMPREPLY < <(compgen -W "cancel move-now try-again learn-more update back-up-now check-again own-server move-back restore-here --recovery-passphrase-file --yes --wait --json" -- "$current")
+      mapfile -t COMPREPLY < <(compgen -W "cancel move-now try-again learn-more update back-up-now check-again own-server move-back restore-here add-computer approve-computer deny-computer --recovery-passphrase-file --sas --yes --wait --json" -- "$current")
+      ;;
+    computer)
+      mapfile -t COMPREPLY < <(compgen -W "join" -- "$current")
       ;;
     logs)
       mapfile -t COMPREPLY < <(compgen -W "-f -n" -- "$current")

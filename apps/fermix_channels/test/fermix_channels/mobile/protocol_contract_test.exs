@@ -12,6 +12,8 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
   alias FermixChannels.Mobile.Router
   alias FermixChannels.Mobile.Session
   alias FermixCore.Computers.Offers
+  alias FermixCore.Computers.Origin
+  alias FermixCore.Computers.Outcome
   alias FermixTestSupport.WireSchema
 
   @priv_dir Application.app_dir(:fermix_core, "priv/mobile")
@@ -661,9 +663,35 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
     end
 
     [ack] = Enum.filter(server_headers(), &get_in(&1, ["caps", "computer"]))
-    assert ack["caps"]["computer"] == %{"v" => 1, "offers" => true, "link_path" => true}
-    taken = [ack["caps"]["computer"], %{"v" => 1}, %{"v" => 2, "link_path" => false, "x" => 1}]
-    refused = [%{"v" => 0}, %{"v" => "1"}, %{"offers" => true}, %{"v" => 1, "link_path" => "on"}]
+
+    assert ack["caps"]["computer"] == %{
+             "v" => 1,
+             "offers" => true,
+             "link_path" => true,
+             "invoke" => true,
+             "standing" => "behind",
+             "versions" => %{"engine" => "4.12.3", "companion" => [6, 7], "management" => [1, 2]}
+           }
+
+    versions = ack["caps"]["computer"]["versions"]
+
+    taken = [
+      ack["caps"]["computer"],
+      %{"v" => 1},
+      %{"v" => 2, "link_path" => false, "x" => 1},
+      %{"v" => 1, "standing" => "settings_only"}
+    ]
+
+    refused = [
+      %{"v" => 0},
+      %{"v" => "1"},
+      %{"offers" => true},
+      %{"v" => 1, "link_path" => "on"},
+      %{"v" => 1, "standing" => "stale"},
+      %{"v" => 1, "versions" => Map.delete(versions, "engine")},
+      %{"v" => 1, "versions" => %{versions | "companion" => [7]}},
+      %{"v" => 1, "versions" => %{versions | "management" => [0, 2]}}
+    ]
 
     for computer <- taken ++ refused ++ [[]] do
       payload = ack |> Map.drop(~w(v t seq)) |> put_in(["caps", "computer"], computer)
@@ -691,6 +719,245 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
       assert decoded? == (client_errors(header, schema) == []), path
       assert decoded? == path in ~w(direct relay), path
     end
+  end
+
+  # M97 §6.1: the invocation is one table either way, so every header is read
+  # as a computer's (decoded) and as a server's (encoded), and the schema
+  # takes exactly what both take.
+  # M97 §3.1, §7.5: a computer's join. The codec and the schema refuse the
+  # same frames, the denial reasons are the ones the codec takes, and the
+  # six digits are documented under a label that is not a pairing's.
+  test "the schema publishes a computer's join as the codec reads it",
+       %{schema: schema, protocol: protocol} do
+    [request | _more] = Enum.filter(client_headers(), &(&1["t"] == "join_request"))
+
+    for platform <- ~w(macos linux android) do
+      header = Map.put(request, "platform", platform)
+      decoded? = match?({:ok, _event}, Protocol.decode_client_frame(frame(header)))
+      assert decoded? == (client_errors(header, schema) == []), platform
+      assert decoded? == platform in ~w(macos linux), platform
+    end
+
+    refute client_errors(Map.delete(request, "host"), schema) == []
+
+    reasons = schema["$defs"]["join_denied"]["properties"]["reason"]["enum"]
+    assert reasons == ~w(denied timeout cancelled device_disconnected)
+
+    for reason <- reasons ++ ["attestation"] do
+      event = server_event("join_denied", %{"reason" => reason})
+      payload = %{"reason" => reason}
+      built? = match?({:ok, _frame}, Protocol.encode_server_frame("join_denied", payload, 1))
+      assert built? == (server_errors(event, schema) == []), reason
+      assert built? == reason in reasons, reason
+    end
+
+    [approved | _more] = Enum.filter(server_headers(), &(&1["t"] == "join_approved"))
+    refute server_errors(Map.delete(approved, "primary"), schema) == []
+
+    assert protocol =~ ~s(data: "fermix-computer-sas-v1")
+    assert protocol =~ ~s(data: "fermix-mobile-sas-v1")
+    assert protocol =~ "`enrollment_purpose`"
+    assert protocol =~ "(`join <reason>`)"
+  end
+
+  test "the schema publishes the invocation as the codec reads it", %{schema: schema} do
+    open = invoke_golden(&(&1["t"] == "invoke_open" and is_map(&1["part"])))
+    part = invoke_golden(&(&1["t"] == "invoke_part"))
+    cancel = invoke_golden(&(&1["t"] == "invoke_cancel"))
+    status = invoke_golden(&(&1["t"] == "invoke_status"))
+    largest = Outcome.max_part_bytes()
+
+    taken = [
+      open,
+      part,
+      cancel,
+      status,
+      Map.put(open, "deadline_ms", 0),
+      Map.put(open, "deadline_ms", 900_000),
+      open |> Map.drop(~w(turn part)) |> Map.put("origin", "computer"),
+      put_in(open, ["part", "size_bytes"], largest),
+      Map.put(open, "capability", "a" <> String.duplicate("b", 31)),
+      Map.put(part, "size_bytes", largest)
+    ]
+
+    drifted = [
+      Map.put(open, "capability", "Files"),
+      Map.put(open, "capability", "a" <> String.duplicate("b", 32)),
+      Map.put(open, "op", "Write"),
+      Map.put(open, "op", String.duplicate("w", 65)),
+      Map.put(open, "deadline_ms", 900_001),
+      Map.put(open, "deadline_ms", -1),
+      Map.put(open, "epoch", 0),
+      Map.put(open, "origin", "phone"),
+      Map.put(open, "id", ""),
+      Map.delete(open, "last"),
+      Map.update!(open, "turn", &Map.delete(&1, "tool_call_id")),
+      put_in(open, ["turn", "session_id"], String.duplicate("s", 129)),
+      put_in(open, ["part", "size_bytes"], largest + 1),
+      put_in(open, ["part", "size_bytes"], 0),
+      put_in(open, ["part", "sha256"], "abc"),
+      put_in(open, ["part", "mime"], "text plain"),
+      Map.put(part, "size_bytes", 0),
+      Map.put(part, "size_bytes", largest + 1),
+      Map.delete(part, "size_bytes"),
+      Map.put(cancel, "id", "-inv"),
+      Map.delete(status, "id")
+    ]
+
+    for header <- taken ++ drifted do
+      assert invoke_read?(header, schema) == header in taken, inspect(header)
+    end
+  end
+
+  # Which field rides with which status is the answer's reader's rule
+  # (`Outcome.from_wire/2`), not the codec's: the codec takes a refusal on an
+  # `ok`, the reader refuses it, and so does the schema.
+  test "the schema publishes an invocation's answer as the codec and its reader read it",
+       %{schema: schema} do
+    result = invoke_golden(&(&1["t"] == "invoke_result" and is_map(&1["part"])))
+    refused = invoke_golden(&(&1["t"] == "invoke_result" and &1["status"] == "refused"))
+    lost = "Fermix on this computer stopped while it ran."
+
+    taken = [
+      result,
+      refused,
+      result |> Map.drop(~w(receipt part)) |> Map.put("status", "unknown"),
+      result |> Map.drop(["part"]) |> Map.merge(%{"status" => "unknown", "message" => lost}),
+      Map.merge(result, %{"status" => "failed", "message" => "No such file."}),
+      Map.put(result, "status", "timed_out")
+    ]
+
+    drifted = [
+      Map.put(result, "status", "lost"),
+      Map.put(refused, "refusal", "asleep"),
+      Map.put(result, "duration_ms", -1),
+      Map.put(refused, "message", String.duplicate("m", 513)),
+      put_in(result, ["receipt", "at"], "2026-11-10T11:14:07+02:00"),
+      put_in(result, ["receipt", "at"], "yesterday"),
+      put_in(result, ["receipt", "target"], String.duplicate("t", 257)),
+      Map.update!(result, "receipt", &Map.delete(&1, "target")),
+      put_in(result, ["part", "size_bytes"], 0)
+    ]
+
+    for header <- taken ++ drifted do
+      assert invoke_read?(header, schema) == header in taken, inspect(header)
+    end
+
+    for header <- taken do
+      assert {:ok, _outcome} = Outcome.from_wire(Map.drop(header, ~w(v t seq)), "{}")
+    end
+
+    unreadable = [
+      Map.put(result, "refusal", "busy"),
+      Map.put(result, "message", "Done."),
+      Map.merge(result, %{"status" => "cancelled", "message" => "Stopped."}),
+      Map.merge(result, %{"status" => "failed", "message" => "No such file.", "refusal" => "off"}),
+      Map.put(result, "status", "failed"),
+      Map.delete(refused, "refusal"),
+      Map.delete(refused, "message")
+    ]
+
+    for header <- unreadable do
+      assert invoke_codec?(header), inspect(header)
+      assert {:error, _reason} = Outcome.from_wire(Map.drop(header, ~w(v t seq)), "{}")
+      refute client_errors(header, schema) == [], inspect(header)
+      refute server_errors(header, schema) == [], inspect(header)
+    end
+  end
+
+  test "the invocation's words and bounds are the computer record's own", %{schema: schema} do
+    defs = schema["$defs"]
+    words = fn atoms -> Enum.map(atoms, &Atom.to_string/1) end
+
+    assert defs["invoke_result"]["properties"]["status"]["enum"] == words.(Outcome.statuses())
+    assert defs["invoke_result"]["properties"]["refusal"]["enum"] == words.(Outcome.refusals())
+    assert defs["invoke_open"]["properties"]["origin"]["enum"] == words.(Origin.wire_origins())
+    assert defs["invokePart"]["properties"]["size_bytes"]["maximum"] == Outcome.max_part_bytes()
+    assert defs["invoke_part"]["properties"]["size_bytes"]["maximum"] == Outcome.max_part_bytes()
+    assert defs["invoke_part"]["x-max-part-bytes"] == Outcome.max_part_bytes()
+    assert {:ok, Outcome.max_result_bytes()} == Chunks.bound("invoke_result")
+
+    # The receipt-only answer in the fixtures is read as one.
+    [{header, payload}] =
+      for %{"header" => %{"t" => "invoke_result"} = header, "bytes_b64" => tail} <-
+            jsonl(@client_binary_fixtures),
+          Base.decode64!(tail) == Outcome.receipt_only_payload(),
+          do: {header, Base.decode64!(tail)}
+
+    assert {:ok, %Outcome{receipt_only: true, receipt: %{target: _target}}} =
+             Outcome.from_wire(Map.drop(header, ~w(v t seq)), payload)
+  end
+
+  # A computer sends an invocation's events only to a server whose hello_ack
+  # takes them, and the flag that says so is a boolean.
+  test "caps.computer.invoke is a boolean the codec and the schema read alike",
+       %{schema: schema} do
+    [ack] = Enum.filter(server_headers(), &get_in(&1, ["caps", "computer"]))
+    assert ack["caps"]["computer"]["invoke"] == true
+
+    for {flag, taken?} <- [{true, true}, {false, true}, {"yes", false}, {1, false}] do
+      payload = ack |> Map.drop(~w(v t seq)) |> put_in(["caps", "computer", "invoke"], flag)
+      encoded? = match?({:ok, _frame}, Protocol.encode_server_frame("hello_ack", payload, 1))
+      assert encoded? == (server_errors(server_event("hello_ack", payload), schema) == [])
+      assert encoded? == taken?, inspect(flag)
+    end
+  end
+
+  test "documentation tells a computer how an invocation runs", %{protocol: protocol} do
+    [_before, section] = String.split(protocol, "### Invocations", parts: 2)
+    [section, _after] = String.split(section, "\n### ", parts: 2)
+
+    words =
+      ~w(caps.computer.invoke size_bytes receipt_only device/invocations/ interrupted) ++
+        Enum.map(Outcome.statuses() ++ Outcome.refusals(), &"`#{&1}`")
+
+    for word <- words, do: assert(section =~ word, word)
+
+    for bound <- [
+          "1 MiB",
+          "4 MiB",
+          "20 MiB",
+          "64 MiB",
+          "900,000",
+          "256 KiB",
+          "at most 8",
+          "32 waiting",
+          "10 minutes",
+          "32 MiB",
+          "7 days",
+          "2,000",
+          "The upload did not arrive whole."
+        ],
+        do: assert(section =~ bound, bound)
+  end
+
+  # The golden invocation header `pick` finds, in either direction.
+  defp invoke_golden(pick) do
+    header = Enum.find(client_headers() ++ server_headers(), pick)
+    assert is_map(header), "no invocation golden matches"
+    header
+  end
+
+  # Whether the codec and the schema read `header`, which they must agree on.
+  defp invoke_read?(header, schema) do
+    read? = invoke_codec?(header)
+    assert read? == (client_errors(header, schema) == []), inspect(header)
+    assert read? == (server_errors(header, schema) == []), inspect(header)
+    read?
+  end
+
+  # Whether the codec reads `header` both ways: a computer decoding it and a
+  # server encoding it, which must agree.
+  defp invoke_codec?(header) do
+    bytes = if header["t"] in ~w(invoke_cancel invoke_status), do: <<>>, else: "{}"
+    fields = Map.drop(header, ~w(v t seq))
+    decoded? = match?({:ok, _event}, Protocol.decode_client_frame(frame(header, bytes)))
+
+    encoded? =
+      match?({:ok, _frame}, Protocol.encode_server_frame(header["t"], fields, 1, bytes))
+
+    assert decoded? == encoded?, "the two directions read #{inspect(header)} apart"
+    decoded?
   end
 
   test "documentation tells a phone how a call runs on its session", %{protocol: protocol} do

@@ -244,9 +244,24 @@ defmodule FermixCore.Setup.MachineFile do
   def notice(%{machine: machine, removed: removed}) when is_binary(machine),
     do: {:info, "This computer's own settings moved to #{@name}: #{Enum.join(removed, ", ")}."}
 
+  # A boot stopped between the two writes, or a section written into
+  # config.toml by hand since: either way the machine file is what is read.
   def notice(%{machine: nil, removed: removed}) do
     {:warning,
-     "config.toml held settings #{@name} already holds, so they were removed from it: " <>
-       "#{Enum.join(removed, ", ")}."}
+     "config.toml held this computer's own settings, which Fermix reads only from #{@name}, " <>
+       "so they were removed from it: #{Enum.join(removed, ", ")}."}
+  end
+
+  @doc """
+  What a settings reload says when `config.toml` holds machine settings
+  (`names`, as `strip/1` names them): someone wrote them there by hand since
+  the boot moved them. Nothing reads them there, so the sentence says where
+  they belong and what the next save or start does with them.
+  """
+  @spec misplaced_notice([String.t(), ...]) :: String.t()
+  def misplaced_notice([_ | _] = names) do
+    "config.toml holds this computer's own settings, which Fermix reads only from #{@name}, " <>
+      "so they are ignored: #{Enum.join(names, ", ")}. Move them to #{@name}; the next " <>
+      "settings save or start removes them from config.toml."
   end
 end

@@ -23,7 +23,8 @@ defmodule FermixCore.Computers.Switches do
   offers an offer only while the master is on, the offer is on and the
   switches were reviewed (`on?/2`).
 
-  **Writers.** `write/2` sets the whole section in a home's `machine.toml`,
+  **Writers.** `forget/1` removes the section (a computer that
+  disconnects). `write/2` sets the whole section in a home's `machine.toml`,
   every other line of the file kept, under the config lock: a move's commit
   (`FermixChannels.Home.MoveWorker`), the first boot of a computer that moved
   before M97 (`Computers.Consent.derive_moved/2`) and the review
@@ -33,7 +34,8 @@ defmodule FermixCore.Computers.Switches do
   application environment at once, so a later settings save renders the same
   switches, and tells this computer's offers reporter
   (`FermixChannels.Desktop.Offers`, registered as `listener/0`) to send its
-  offers again.
+  offers again, and its invocations (`invoke_listener/0`) to read the master
+  switch again.
   """
 
   alias FermixCore.Setup.ConfigStore
@@ -57,6 +59,7 @@ defmodule FermixCore.Computers.Switches do
   @keys @flags ++ @offers
   @key_names Map.new(@keys, &{Atom.to_string(&1), &1})
   @listener :fermix_computer_offers
+  @invoke_listener :fermix_computer_invoke
   @review_kept_sentence "A review cannot be taken back. Switch off what Fermix on your server " <>
                           "may use instead."
 
@@ -87,6 +90,14 @@ defmodule FermixCore.Computers.Switches do
   @doc "The registered name of the process told when the switches change."
   @spec listener() :: atom()
   def listener, do: @listener
+
+  @doc """
+  The registered name of this computer's invocations
+  (`FermixChannels.Desktop.Invoke`'s Admission), told as well when the
+  switches change: the master switch off ends what runs there.
+  """
+  @spec invoke_listener() :: atom()
+  def invoke_listener, do: @invoke_listener
 
   @doc """
   The section as application environment holds it: accepts the parsed file
@@ -169,6 +180,19 @@ defmodule FermixCore.Computers.Switches do
   end
 
   @doc """
+  Removes the section from `home`'s `machine.toml` (M97 §3.3: a computer
+  that disconnects offers nothing to any server), every other line kept,
+  and tells the offers reporter as `write/2` does.
+  """
+  @spec forget(Path.t()) :: :ok | {:error, term()}
+  def forget(home) when is_binary(home) and home != "" do
+    with :ok <- ConfigStore.drop_machine_table(home, @table) do
+      if running_home?(home), do: Application.put_env(:fermix_core, :computer, [])
+      notify()
+    end
+  end
+
+  @doc """
   The settings door's write of the `computer` section (`answers`: its keys as
   atoms, `enabled`, `reviewed` and each offer): refused while the settings
   file changed outside Fermix, as every settings write is. Any write is the
@@ -194,13 +218,18 @@ defmodule FermixCore.Computers.Switches do
   @spec sentences() :: [String.t()]
   def sentences, do: [@review_kept_sentence]
 
-  # The offers reporter re-sends what this computer offers; none runs on an
-  # engine that is no linked computer.
+  # The offers reporter re-sends what this computer offers, and the
+  # invocations read the master switch again; none runs on an engine that is
+  # no linked computer.
   defp notify do
-    case Process.whereis(@listener) do
-      nil -> :ok
-      pid -> GenServer.cast(pid, :switches_changed)
+    for name <- [@listener, @invoke_listener] do
+      case Process.whereis(name) do
+        nil -> :ok
+        pid -> GenServer.cast(pid, :switches_changed)
+      end
     end
+
+    :ok
   end
 
   defp running_home?(home), do: Path.expand(home) == Path.expand(ConfigStore.fermix_home())

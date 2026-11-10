@@ -117,10 +117,37 @@ defmodule FermixCore.Management.HomeSummary do
 
   A linked desktop whose server refused its protocol as newer than its own
   (`daemon_too_old`: this computer updated first) is a `problem` of kind
-  `server_older`, whose sentence says the server updates to this computer's
-  version within a few minutes once every computer linked to it runs it (its
-  update installs the oldest of theirs, `Home.EngineCeiling`); never a bare
-  `on`.
+  `server_older`, whose sentence says the server updates on its own once the
+  app for each computer that keeps the home's backups carries the newer
+  Fermix (M97 §3.4: the server leads, from the release channel); never a
+  bare `on`.
+
+  Where this computer stands against its server (`standing`,
+  `Computers.Versions` of this engine's version and the server's
+  `home.status` `version`): past the window (`settings_only`) it is the
+  `update` problem in its own sentence (this computer keeps its link for
+  settings alone). A server that installed a release ahead of the apps
+  (its `update.ahead_of_apps`, an owner's override) that this computer
+  cannot read (`readable`, `Home.Readable`) is the problem `server_ahead`,
+  with Update, until this computer's Fermix catches up. Where this computer
+  cannot read the server's home, Move back and Restore here are not offered:
+  in their place an Update action says "Update Fermix on this computer
+  first". A server that says no version (one that is silent) is not
+  compared; the restore itself refuses a home it cannot read.
+
+  **Computers** (M97 §3.1, §7.5). A linked computer's `on` and the server's
+  own `primary` offer Add a computer (`add_computer`, a code a new computer
+  joins with). While a computer asks to join (the server's enrollment window
+  `awaiting_approval`), that screen's sentence names it, its system and the
+  six digits it shows, its action is `approve_computer` (needs `sas`, the
+  digits as the owner reads them on the new computer; its key binds the
+  digits shown) and `deny_computer` stands beside it. On the computer that
+  joins (`device/join.json`, `Home.Join`), the screen is `creating`, with
+  Cancel, while it dials and while it waits for the owner (outcome `running`,
+  then `waiting`, the sentence carrying the digits), and once it was not
+  added, its sentence says why (outcome `failed`). Move back and Restore
+  here are offered only where the home moved from this computer (its moved
+  marker): a computer that joined has neither.
 
   `notice` is the occurrence the apps raise as a system notification, or
   nil: the server ready (`ready:<candidate>`), the move done
@@ -128,7 +155,9 @@ defmodule FermixCore.Management.HomeSummary do
   reach (`cannot_reach:<since>`), the newest backup a week old
   (`backup_week:<at>`), Fermix back on this computer after a move back
   (`back:<epoch>`), Restore here finished, naming the day of the backup it
-  restored (`restored:<epoch>`), and a held server whose 24 hours ran out,
+  restored (`restored:<epoch>`), a computer that joined the home
+  (`computer_joined:<device id>`, while the window names it), and a held
+  server whose 24 hours ran out,
   which must be set up again with a new code (`server_lapsed:<candidate>`,
   on the screen it leaves, while the code that enrolled it still names it;
   never a desktop's candidate for a move back).
@@ -155,13 +184,16 @@ defmodule FermixCore.Management.HomeSummary do
   alias FermixCore.Clock
   alias FermixCore.Computers.Consent
   alias FermixCore.Computers.Switches
+  alias FermixCore.Computers.Versions
   alias FermixCore.Cues.Webhook
   alias FermixCore.Funnel
   alias FermixCore.Home.Candidate
   alias FermixCore.Home.Candidates
   alias FermixCore.Home.DesktopLink
+  alias FermixCore.Home.Join
   alias FermixCore.Home.Move
   alias FermixCore.Home.MoveReadiness
+  alias FermixCore.Home.Readable
   alias FermixCore.Home.Return
   alias FermixCore.Home.ServerSandbox
   alias FermixCore.Home.Snapshot.Capture
@@ -172,11 +204,11 @@ defmodule FermixCore.Management.HomeSummary do
 
   @states ~w(off connect creating ready moving on undone retired candidate primary problem)
   @outcomes ~w(running waiting done failed)
-  @problems ~w(cannot_reach not_set_up waited_too_long update server_older disk_full backup_old
-               backup_failed not_ready return_failed)
+  @problems ~w(cannot_reach not_set_up waited_too_long update server_older server_ahead
+               disk_full backup_old backup_failed not_ready return_failed)
   @actions ~w(cancel move_now try_again learn_more update back_up_now check_again own_server
-              move_back restore_here review_offers)
-  @needs ~w(recovery_passphrase new_recovery_passphrase)
+              move_back restore_here review_offers add_computer approve_computer deny_computer)
+  @needs ~w(recovery_passphrase new_recovery_passphrase sas)
 
   @unreachable_ms 10 * 60_000
   @backup_old_s 3 * 86_400
@@ -237,7 +269,9 @@ defmodule FermixCore.Management.HomeSummary do
           required(:lapsed) => String.t() | nil,
           required(:moved_back) => boolean(),
           required(:primary_behind) => boolean(),
-          required(:restarts_itself) => boolean() | nil
+          required(:restarts_itself) => boolean() | nil,
+          optional(:standing) => FermixCore.Computers.Versions.standing() | nil,
+          optional(:readable) => :ok | {:error, term()} | nil
         }
   @type summary :: %{String.t() => term()}
 
@@ -438,9 +472,12 @@ defmodule FermixCore.Management.HomeSummary do
       lapsed: lapsed(home, role, {link, return}, now, reads),
       moved_back: moved_back(home, role, reads),
       primary_behind: Map.get(status, :primary_behind, false),
+      standing: server_compared(status, &Versions.standing/2),
+      readable: server_compared(status, &readable_from/2),
       restarts_itself: restarts_itself(role, opts),
       keeps_on: keeps_on(home, {role, link}, host_os, opts),
       offers_review: offers_review(DesktopLink.linked?(record, home), host_os, opts),
+      join: if(role == :device, do: Join.view(home)),
       server_sandbox: server_sandbox(home, role, reads)
     }
   end
@@ -577,7 +614,8 @@ defmodule FermixCore.Management.HomeSummary do
   # A move back leads, whatever the link says (its activation ends the
   # tenure's link); then Restore here's job, before its candidate is
   # written; then the computer's own move.
-  defp device(facts), do: returning(facts) || restoring(facts) || settled(facts)
+  defp device(facts),
+    do: joining(facts) || returning(facts) || restoring(facts) || asking(settled(facts), facts)
 
   defp settled(%{move: %{"phase" => "committing"}} = facts),
     do: view("moving", sentence(:waiting, facts), nil, %{})
@@ -608,7 +646,9 @@ defmodule FermixCore.Management.HomeSummary do
     checks = [
       &away_here/1,
       &too_old/1,
+      &settings_only/1,
       &server_older/1,
+      &server_ahead/1,
       &server_disk/1,
       &backup_failed/1,
       &desktop_backup/1
@@ -635,13 +675,29 @@ defmodule FermixCore.Management.HomeSummary do
 
   defp too_old(_facts), do: nil
 
+  # Past the server's window (M97 §3.4): this computer keeps its link for
+  # settings alone until its Fermix updates.
+  defp settings_only(%{standing: :settings_only} = facts),
+    do: problem("update", sentence(:update_settings_only, facts), :update, %{})
+
+  defp settings_only(_facts), do: nil
+
   # The server refused this computer's protocol as newer than its own: it
-  # updates to this computer's version within a few minutes once every
-  # computer linked to it runs it.
+  # updates on its own once the apps that keep the home's backups carry it.
   defp server_older(%{primary_behind: true} = facts),
     do: problem("server_older", sentence(:server_older, facts), :learn_more, %{})
 
   defp server_older(_facts), do: nil
+
+  # The server installed a release ahead of the apps (an owner's override)
+  # that this computer cannot read: until its Fermix catches up, a restore
+  # here would be refused.
+  defp server_ahead(%{readable: {:error, _newer}, primary_home: %{"update" => update}} = facts) do
+    if match?(%{"ahead_of_apps" => true}, update),
+      do: problem("server_ahead", sentence(:server_ahead, facts), :update, %{})
+  end
+
+  defp server_ahead(_facts), do: nil
 
   defp server_disk(%{primary_home: %{"disk" => disk}}), do: disk_problem(disk, :disk_full)
   defp server_disk(_facts), do: nil
@@ -678,7 +734,9 @@ defmodule FermixCore.Management.HomeSummary do
       "copies_bytes" => facts.copies_bytes,
       "disk_used" => get_in(facts, [:primary_home, "disk", "used"]),
       "data" => sentence(:data, facts),
-      "actions" => review_action(facts) ++ [action(:back_up_now)] ++ List.wrap(move_back(facts))
+      "actions" =>
+        review_action(facts) ++
+          [action(:back_up_now), action(:add_computer)] ++ List.wrap(move_back(facts))
     }
 
     detail = put_some(detail, "review", Map.get(facts, :offers_review))
@@ -823,15 +881,24 @@ defmodule FermixCore.Management.HomeSummary do
 
   # Move back, where this engine would start again by itself after it; an
   # engine run from a terminal is refused it at the press, so it is not
-  # offered (`move_back_lines/3` says why).
-  defp move_back(%{restarts_itself: true} = facts),
-    do: action(:move_back, %{machine: machine(facts.host_os)})
+  # offered (`move_back_lines/3` says why). Where this computer cannot read
+  # the server's home, Update stands in its place.
+  defp move_back(%{restarts_itself: true, moved: %{}} = facts),
+    do: readable_or_update(facts, action(:move_back, %{machine: machine(facts.host_os)}))
 
   defp move_back(_facts), do: nil
 
   # A move back that ended is offered again as it was asked: its engine
   # started again by itself then, and the press checks it once more.
-  defp move_back_again(facts), do: action(:move_back, %{machine: machine(facts.host_os)})
+  defp move_back_again(facts),
+    do: readable_or_update(facts, action(:move_back, %{machine: machine(facts.host_os)}))
+
+  # "Update Fermix on this computer first" (M97 §3.4) in place of an action
+  # that takes the server's home here, which this computer cannot read.
+  defp readable_or_update(%{readable: {:error, _newer}} = facts, _act),
+    do: action(:update, %{first: true, machine: machine(facts.host_os)})
+
+  defp readable_or_update(_facts, act), do: act
 
   defp restoring(facts) do
     if restore_running?(facts), do: view("moving", sentence(:restore_moving, facts), nil, %{})
@@ -844,10 +911,17 @@ defmodule FermixCore.Management.HomeSummary do
 
   # Restore here (design §8): wherever the server is silent (`silent?/1`),
   # and only while this computer holds a copy, the newest named.
-  defp restore_offer(%{copies: [newest | _]} = facts) do
+  defp restore_offer(%{copies: [newest | _], moved: %{}} = facts) do
     if silent?(facts),
       do:
-        action(:restore_here, %{copy: newest.name, at: newest.at, machine: machine(facts.host_os)})
+        readable_or_update(
+          facts,
+          action(:restore_here, %{
+            copy: newest.name,
+            at: newest.at,
+            machine: machine(facts.host_os)
+          })
+        )
   end
 
   defp restore_offer(_facts), do: nil
@@ -897,13 +971,102 @@ defmodule FermixCore.Management.HomeSummary do
 
   defp server_idle?(_facts), do: false
 
+  # -- a computer joining, and one that asks to join (M97 §3.1, §7.5) ----------------
+
+  # This computer joining a home: `creating` while it dials and while it
+  # waits for the owner, with the digits both ends show; how it ended once
+  # it was not added. Cancel makes it its own home again.
+  defp joining(%{join: %{"phase" => phase} = join} = facts) do
+    sentence =
+      case phase do
+        "dialing" ->
+          sentence(:join_dialing, facts, %{to: join["server"]})
+
+        "awaiting_approval" ->
+          sentence(:join_waiting, facts, %{to: join["server"], sas: join["sas"]})
+
+        "denied" ->
+          join["sentence"]
+      end
+
+    view("creating", sentence, action(:cancel), %{})
+  end
+
+  defp joining(_facts), do: nil
+
+  # A computer that asks to join the home, on the server's screen and on each
+  # linked computer's: the owner adds it with the digits it shows, or not.
+  defp asking(%{"state" => state} = view, facts) when state in ["on", "primary"] do
+    case joiner(facts) do
+      nil -> view
+      joiner -> ask(view, joiner, facts)
+    end
+  end
+
+  defp asking(view, _facts), do: view
+
+  defp ask(view, joiner, facts) do
+    deny = action(:deny_computer)
+    values = %{name: joiner.name, system: system(joiner.platform), sas: joiner.sas}
+
+    %{
+      view
+      | "sentence" => sentence(:computer_asks, facts, values),
+        "action" => action(:approve_computer, %{sas: joiner.sas})
+    }
+    |> update_in(
+      ["detail"],
+      &Map.update(&1, "alternatives", [deny], fn more -> [deny | more] end)
+    )
+  end
+
+  # The window as this place reads it: the server's own, or the server's
+  # `home.status` on a linked computer.
+  defp joiner(%{role: :device} = facts) do
+    case get_in(facts, [:primary_home, "enrollment"]) do
+      %{"state" => "awaiting_approval", "joiner" => %{"sas" => sas} = joiner} ->
+        %{name: joiner["name"], platform: joiner["platform"], sas: sas}
+
+      _none ->
+        nil
+    end
+  end
+
+  defp joiner(facts) do
+    case window(facts) do
+      %{state: :awaiting_approval, joiner: %{} = joiner} -> joiner
+      _none -> nil
+    end
+  end
+
+  # The computer that joined through the window, while the window names it.
+  defp joined(%{role: :device} = facts) do
+    case get_in(facts, [:primary_home, "enrollment"]) do
+      %{"state" => "approved", "joined" => %{"device_id" => id, "name" => name}} -> {id, name}
+      _none -> nil
+    end
+  end
+
+  defp joined(facts) do
+    case window(facts) do
+      %{state: :approved, joined: %{device_id: id, name: name}} -> {id, name}
+      _none -> nil
+    end
+  end
+
+  defp system("macos"), do: "macOS"
+  defp system(_linux), do: "Linux"
+
   # -- the server ----------------------------------------------------------------
 
   defp server(facts) do
     disk = disk_problem(facts.disk, :server_disk_full)
 
     disk || backup_failed(facts) || server_backup(facts) ||
-      view("primary", sentence(:primary, facts), nil, %{})
+      asking(
+        view("primary", sentence(:primary, facts), nil, %{"actions" => [action(:add_computer)]}),
+        facts
+      )
   end
 
   defp server_backup(facts) do
@@ -1152,6 +1315,7 @@ defmodule FermixCore.Management.HomeSummary do
   end
 
   defp needs(:restore_here, _facts), do: ["recovery_passphrase"]
+  defp needs(:approve_computer, _facts), do: ["sas"]
   defp needs(act, facts) when act in [:move_now, :try_again], do: [passphrase_need(facts)]
   defp needs(_act, _facts), do: []
 
@@ -1204,6 +1368,7 @@ defmodule FermixCore.Management.HomeSummary do
   defp target_of(:cancel, %{forget: true}, facts), do: candidate_id(target(facts))
 
   defp target_of(:restore_here, %{copy: name}, _facts), do: name
+  defp target_of(:approve_computer, %{sas: sas}, _facts), do: sas
   defp target_of(_act, _values, _facts), do: nil
 
   defp candidate_id(%{"candidate_id" => id}), do: id
@@ -1311,6 +1476,13 @@ defmodule FermixCore.Management.HomeSummary do
   defp outcome(%{"state" => "problem"} = view, facts),
     do: if(backing_up?(view, facts), do: "running", else: "failed")
 
+  defp outcome(_view, %{join: %{"phase" => phase}}),
+    do:
+      Map.fetch!(
+        %{"dialing" => "running", "awaiting_approval" => "waiting", "denied" => "failed"},
+        phase
+      )
+
   defp outcome(%{"state" => state}, _facts) when state in ["creating", "moving"], do: "running"
   defp outcome(%{"state" => "candidate"}, facts), do: receiving(facts)
 
@@ -1340,8 +1512,10 @@ defmodule FermixCore.Management.HomeSummary do
     end
   end
 
-  defp occurrence(_view, %{role: :primary, link: %{desktops: [_ | _]}} = facts),
-    do: week_occurrence(facts, :notice_server_backup_week) || sandbox_occurrence(facts)
+  defp occurrence(view, %{role: :primary, link: %{desktops: [_ | _]}} = facts),
+    do:
+      week_occurrence(facts, :notice_server_backup_week) || sandbox_occurrence(facts) ||
+        joined_occurrence(view, facts)
 
   defp occurrence(view, %{role: role} = facts) when role in [:primary, :device] do
     Enum.find_value(
@@ -1353,7 +1527,8 @@ defmodule FermixCore.Management.HomeSummary do
         &moved_occurrence/2,
         &restored_occurrence/2,
         &back_occurrence/2,
-        &lapsed_occurrence/2
+        &lapsed_occurrence/2,
+        &joined_occurrence/2
       ],
       & &1.(view, facts)
     )
@@ -1369,6 +1544,18 @@ defmodule FermixCore.Management.HomeSummary do
   end
 
   defp reach_occurrence(_view, _facts), do: nil
+
+  # A computer joined the home (M97 §3.1): told once, on the owner's other
+  # surfaces, while the window names it.
+  defp joined_occurrence(_view, facts) do
+    case joined(facts) do
+      {id, name} ->
+        {"computer_joined:" <> id, sentence(:notice_computer_joined, facts, %{name: name})}
+
+      nil ->
+        nil
+    end
+  end
 
   # A computer whose switches wait for the owner's review (M97 §7.3): told
   # once, while it waits.
@@ -1704,6 +1891,21 @@ defmodule FermixCore.Management.HomeSummary do
 
   defp state_result({:ok, _state}), do: :ok
   defp state_result(error), do: error
+
+  # This engine's version against the server's (its own `home.status`, on a
+  # linked desktop), through `compare`; nil where the server said none or
+  # either is not a version.
+  defp server_compared(%{version: ours, primary_home: %{"version" => theirs}}, compare)
+       when is_binary(ours) and is_binary(theirs) do
+    if version?(ours) and version?(theirs), do: compare.(ours, theirs)
+  end
+
+  defp server_compared(_status, _compare), do: nil
+
+  defp version?(text), do: match?({:ok, _version}, Version.parse(text))
+
+  # Whether this engine reads a home the server's engine wrote.
+  defp readable_from(ours, theirs), do: Readable.readable?(%{engine_version: theirs}, ours)
 
   # The copies a desktop keeps of its server's snapshots, newest first, by
   # the time their names carry (`Snapshot.name/2`); a name that is no

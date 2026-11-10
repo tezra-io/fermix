@@ -149,7 +149,15 @@ defmodule FermixOpik.TraceFile do
        :policy_enforcement,
        :validator,
        :mandate_call_id,
-       :mandate_reason
+       :mandate_reason,
+       # An invocation on a linked computer (M97 §6.2): the computer, the
+       # invocation, how it ended and why it was refused. Its run is a root on
+       # the computer's own trace, so these are the only link from a replayed
+       # turn to it. Ids and closed words — never the target or the arguments.
+       :computer,
+       :invocation,
+       :invoke_status,
+       :refusal
      ])}
   end
 
@@ -394,6 +402,23 @@ defmodule FermixOpik.TraceFile do
     {[:fermix, :computer_use, :session_resume], %{}, computer_use_meta(row)}
   end
 
+  # An invocation's run on the computer (M97 §6.2). One allowlist for the three
+  # rows, `parent_session` included: the run is its own root and that field is
+  # the only record of which turn on the server asked. The opener's
+  # `duration_ms` is a placeholder zero, so it replays no measurement.
+  defp normalize_agent_event("computer_invocation_start", row) do
+    {[:fermix, :computer_invocation, :start], %{}, invocation_meta(row)}
+  end
+
+  defp normalize_agent_event("computer_invocation_complete", row) do
+    {[:fermix, :computer_invocation, :complete], invocation_measurements(row),
+     invocation_meta(row)}
+  end
+
+  defp normalize_agent_event("computer_invocation_error", row) do
+    {[:fermix, :computer_invocation, :error], invocation_measurements(row), invocation_meta(row)}
+  end
+
   defp normalize_agent_event(_other, _row), do: :skip
 
   @accessory_counters ~w(duration_ms mic_frames mic_chunks pcm_seq_gaps speaker_frames
@@ -423,6 +448,20 @@ defmodule FermixOpik.TraceFile do
   # the measurements existed must replay with none rather than a fabricated zero.
   defp computer_use_measurements(row) do
     Enum.reduce([:actions, :duration_ms], %{}, fn key, acc ->
+      case Map.fetch(row, Atom.to_string(key)) do
+        {:ok, value} when is_number(value) -> Map.put(acc, key, value)
+        _other -> acc
+      end
+    end)
+  end
+
+  defp invocation_meta(row) do
+    meta(row, [:session_id, :parent_session, :capability, :op, :origin, :epoch, :status, :refusal])
+  end
+
+  # Only the counts the row holds: a missing one replays as unknown, not zero.
+  defp invocation_measurements(row) do
+    Enum.reduce([:duration_ms, :result_bytes], %{}, fn key, acc ->
       case Map.fetch(row, Atom.to_string(key)) do
         {:ok, value} when is_number(value) -> Map.put(acc, key, value)
         _other -> acc

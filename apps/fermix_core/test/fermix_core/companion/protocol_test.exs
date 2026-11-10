@@ -255,10 +255,55 @@ defmodule FermixCore.Companion.ProtocolTest do
   end
 
   test "negotiates directionally, version 6 and version 7 both accepted, version 5 too old" do
-    assert :ok = Protocol.negotiate(6)
-    assert :ok = Protocol.negotiate(7)
+    assert {:ok, 6} = Protocol.negotiate(6)
+    assert {:ok, 7} = Protocol.negotiate(7)
     assert {:error, :client_too_old} = Protocol.negotiate(5)
     assert {:error, :client_too_new} = Protocol.negotiate(8)
+  end
+
+  # M97 §3.4: the window runs both ways. A newer client that still speaks
+  # the daemon's newest is served it; one that does not, or says nothing of
+  # what it still speaks, is refused as before; an older one is never
+  # served up, whatever it says.
+  test "a newer client that still speaks the daemon's newest is served it" do
+    assert {:ok, 7} = Protocol.negotiate(9, 7)
+    assert {:ok, 7} = Protocol.negotiate(8, 3)
+    assert {:ok, 6} = Protocol.negotiate(6, 6)
+    assert {:error, :client_too_new} = Protocol.negotiate(9, 8)
+    assert {:error, :client_too_new} = Protocol.negotiate(9, nil)
+    assert {:error, :client_too_old} = Protocol.negotiate(5, 5)
+  end
+
+  test "client_hello takes the oldest version it speaks only at most its own" do
+    assert {:ok, %{payload: %{"min_protocol_version" => 7}}} =
+             Protocol.decode_client_event(
+               ~s({"type":"client_hello","protocol_version":9,"min_protocol_version":7})
+             )
+
+    for min <- [0, 10, "7", nil] do
+      line =
+        Jason.encode!(%{type: "client_hello", protocol_version: 9, min_protocol_version: min})
+
+      assert {:error, {:invalid_field, "min_protocol_version"}} =
+               Protocol.decode_client_event(line),
+             inspect(min)
+    end
+
+    assert {:ok, _line} =
+             Protocol.encode_server_event("server_hello", %{
+               "min_version" => 6,
+               "max_version" => 7,
+               "protocol_version" => 7,
+               "role" => "primary"
+             })
+
+    assert {:error, {:invalid_field, "protocol_version"}} =
+             Protocol.encode_server_event("server_hello", %{
+               "min_version" => 6,
+               "max_version" => 7,
+               "protocol_version" => 6,
+               "role" => "primary"
+             })
   end
 
   test "client_hello refuses a missing or malformed version with the Realtime reasons" do

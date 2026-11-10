@@ -70,6 +70,16 @@ defmodule FermixCore.Management.AlwaysOn do
       reviewed (`Computers.Consent.review/3`); with none given, the block as
       the summary proposed it. `move_now` and `try_again` record their
       `keep_offers` in the move the same way (`HomeMove.move_start/3`).
+    * `add_computer` (M97 §3.1): a code a new computer joins the home with
+      (`home.enroll.open {purpose: computer}`, here on the server, over the
+      link on a linked computer), answered once as `{code, expires_at}`.
+    * `approve_computer` and `deny_computer` (M97 §7.5): the owner's answer
+      to the computer that waits to join, approved with the six digits it
+      shows (`input.sas`, `home.enroll.approve`), which `result` names as
+      `{device_id, name}`, or denied (`home.enroll.deny`). Digits that are
+      not its own deny it, and the code is spent.
+    * `cancel` on a computer joining a home (M97 §3.1): the join ends and
+      this computer is its own home again (`Home.Join.cancel/2`).
     * `restore_here` (design §8), offered once the server went silent and
       pressed once the owner confirmed they deleted or stopped it: the
       newest copy of the server's snapshots this desktop keeps that the
@@ -119,6 +129,7 @@ defmodule FermixCore.Management.AlwaysOn do
   alias FermixCore.Computers.Consent
   alias FermixCore.Computers.Switches
   alias FermixCore.Home.Candidate
+  alias FermixCore.Home.Join
   alias FermixCore.Home.Link
   alias FermixCore.Home.LocalReturn
   alias FermixCore.Home.Move
@@ -137,7 +148,7 @@ defmodule FermixCore.Management.AlwaysOn do
 
   @capability "home"
   @acts ~w(cancel move_now try_again back_up_now check_again own_server move_back restore_here
-           review_offers)
+           review_offers add_computer approve_computer deny_computer)
   @opened ~w(learn_more update)
   # Every client allows `home.act` this long: a review sent to the server
   # takes up to 60 s.
@@ -304,6 +315,13 @@ defmodule FermixCore.Management.AlwaysOn do
   defp step(%{action: "cancel"}, seen, opts), do: cancel(seen, opts)
   defp step(%{action: "review_offers", input: input}, _seen, opts), do: review_offers(input, opts)
   defp step(%{action: "own_server"}, _seen, opts), do: own_server(opts)
+  defp step(%{action: "add_computer"}, _seen, opts), do: add_computer(opts)
+
+  defp step(%{action: "approve_computer", input: input}, _seen, opts),
+    do: approve_computer(input.sas, opts)
+
+  defp step(%{action: "deny_computer"}, _seen, opts),
+    do: on_server("home.enroll.deny", %{}, fn -> HomeMove.enroll_deny(opts) end, opts)
 
   defp step(%{action: "back_up_now"}, _seen, opts),
     do: on_server("home.snapshots.run", %{}, fn -> Home.snapshots_run(opts) end, opts)
@@ -330,6 +348,7 @@ defmodule FermixCore.Management.AlwaysOn do
   # its screen offers to forget; else the code of the owner's server.
   defp cancel(%{facts: facts}, opts) do
     cond do
+      joining?(facts) -> cancel_join(opts)
       returning?(facts) -> cancel_return(opts)
       facts.role == :primary and HomeSummary.target(facts) != nil -> forget_server(facts, opts)
       true -> withdraw_code(opts)
@@ -343,6 +362,16 @@ defmodule FermixCore.Management.AlwaysOn do
     case forget.(id) do
       :ok -> {:ok, nil}
       {:error, {:unavailable, sentence}} when is_binary(sentence) -> unavailable(sentence)
+    end
+  end
+
+  # A computer joining a home (M97 §3.1): its own home again, restarted.
+  defp joining?(facts), do: Map.get(facts, :join) != nil
+
+  defp cancel_join(opts) do
+    case Join.cancel(home(opts), Keyword.take(opts, [:restart, :key_opts])) do
+      :ok -> {:ok, nil}
+      {:error, reason} -> unavailable(Join.error_sentence(reason))
     end
   end
 
@@ -385,15 +414,39 @@ defmodule FermixCore.Management.AlwaysOn do
 
   # A step the server takes: here, or over the link on a linked desktop.
   defp on_server(method, params, local, opts) do
-    answered =
-      case Keyword.fetch(opts, :primary_forward) do
-        {:ok, forward} -> forward.(server_request(method, params), [])
-        :error -> local.()
-      end
-
-    case answered do
+    case server_answer(method, params, local, opts) do
       {:ok, _answer} -> {:ok, nil}
       refused -> refused
+    end
+  end
+
+  defp server_answer(method, params, local, opts) do
+    case Keyword.fetch(opts, :primary_forward) do
+      {:ok, forward} -> forward.(server_request(method, params), [])
+      :error -> local.()
+    end
+  end
+
+  # Add a computer (M97 §3.1): the server's code for a computer that joins,
+  # answered once.
+  defp add_computer(opts) do
+    local = fn -> HomeMove.enroll_open([purpose: :computer] ++ opts) end
+
+    case server_answer("home.enroll.open", %{"purpose" => "computer"}, local, opts) do
+      {:ok, %{"code" => code, "expires_at" => at}} -> {:ok, %{"code" => code, "expires_at" => at}}
+      refused -> refused
+    end
+  end
+
+  # The owner adds the computer that waits, with the digits it shows.
+  defp approve_computer(sas, opts) do
+    with {:ok, sas} <- HomeMove.sas_param(sas) do
+      local = fn -> HomeMove.enroll_approve(sas, opts) end
+
+      case server_answer("home.enroll.approve", %{"sas" => sas}, local, opts) do
+        {:ok, %{"device_id" => id, "name" => name}} -> {:ok, %{"device_id" => id, "name" => name}}
+        refused -> refused
+      end
     end
   end
 

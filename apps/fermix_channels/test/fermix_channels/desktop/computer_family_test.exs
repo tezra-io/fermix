@@ -124,6 +124,10 @@ defmodule FermixChannels.Desktop.ComputerFamilyTest do
     assert {:error, {:not_taken, "link_path"}} =
              Relay.send_event(desktop.relay, %{"t" => "link_path", "path" => "direct"})
 
+    # Nor the invocation's events (M97 §6.1), under the cap that names them.
+    result = %{"t" => "invoke_result", "id" => "inv-1", "status" => "unknown", "duration_ms" => 0}
+    assert {:error, {:not_taken, "invoke_result"}} = Relay.send_event(desktop.relay, result, "{}")
+
     assert %{connected: true} = Relay.status(desktop.relay)
     assert Registry.live(ctx.registry)[DesktopRail.device_id()].offers == []
   end

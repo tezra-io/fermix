@@ -2,15 +2,17 @@ defmodule FermixCore.Computers.Computer do
   @moduledoc """
   One computer of the home, as the primary knows it (M97 §3.2): its id and
   the name the owner calls it (unique in the home), its system, the engine
-  version it last said, whether its session is up and since when, when the
-  home last heard it, the path its session runs, what it offers, and
-  whether it keeps the home's backup copies.
+  version it last said and where that stands against this server
+  (`Computers.Versions`, §3.4; nil before it said one), whether its session
+  is up and since when, when the home last heard it, the path its session
+  runs, what it offers, and whether it keeps the home's backup copies.
 
   Built by `FermixCore.Computers.list/1` from its device row, the live facts
   (`Computers.Registry`) and its record (`Computers.Store`).
   """
 
   alias FermixCore.Computers.Offers
+  alias FermixCore.Computers.Versions
 
   @enforce_keys [:device_id, :name]
   defstruct [
@@ -18,6 +20,7 @@ defmodule FermixCore.Computers.Computer do
     :name,
     platform: nil,
     engine_version: nil,
+    standing: nil,
     connected: false,
     since: nil,
     last_seen: nil,
@@ -31,6 +34,7 @@ defmodule FermixCore.Computers.Computer do
           name: String.t(),
           platform: :macos | :linux | nil,
           engine_version: String.t() | nil,
+          standing: Versions.standing() | nil,
           connected: boolean(),
           since: DateTime.t() | nil,
           last_seen: DateTime.t() | nil,
@@ -47,6 +51,7 @@ defmodule FermixCore.Computers.Computer do
       "name" => computer.name,
       "platform" => computer.platform && Atom.to_string(computer.platform),
       "engine_version" => computer.engine_version,
+      "standing" => computer.standing && Atom.to_string(computer.standing),
       "connected" => computer.connected,
       "since" => iso(computer.since),
       "last_seen" => iso(computer.last_seen),

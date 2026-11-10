@@ -552,6 +552,103 @@ defmodule FermixCore.Management.AlwaysOnTest do
     end
   end
 
+  # M97 §3.1, §7.5: the owner adds a computer from a linked computer's
+  # screen, which sends each step to the server, or on the server itself.
+  describe "adding a computer" do
+    setup ctx do
+      :ok = DesktopLink.write(ctx.home, desktop_link())
+      :ok = Moved.write(ctx.home, %{epoch: 4, moved_at: @at, to: "fermix-general-a3f9"})
+      script = start_supervised!({Agent, fn -> joining_part(nil) end}, id: :script)
+      test = self()
+
+      forward = fn %{method: method, params: params}, _opts ->
+        send(test, {:forwarded, method, params})
+        Agent.get(script, & &1).(method, params)
+      end
+
+      Agent.update(ctx.link, &%{&1 | primary: primary(nil)})
+
+      opts =
+        ctx.opts
+        |> Keyword.put(:engine_role, @device)
+        |> Keyword.put(:primary_forward, forward)
+
+      %{ctx | opts: opts} |> Map.put(:script, script)
+    end
+
+    test "Add a computer asks the server for a computer's code, answered once", ctx do
+      assert {:ok, %{"result" => %{"code" => "fxenroll1.computer", "expires_at" => _at}}} =
+               press(ctx, "add_computer")
+
+      assert_received {:forwarded, "home.enroll.open", %{"purpose" => "computer"}}
+    end
+
+    test "a computer that asks is added with the digits it shows, or not", ctx do
+      Agent.update(ctx.script, fn _part -> joining_part(joiner()) end)
+
+      assert %{"action" => %{"id" => "approve_computer", "needs" => ["sas"]}} = summary(ctx.opts)
+
+      assert {:error, :invalid_params, %{"field" => "sas"}} =
+               press(ctx, "approve_computer", %Input{sas: "12345"})
+
+      refute_received {:forwarded, "home.enroll.approve", _params}
+
+      assert {:ok, %{"result" => %{"device_id" => "7e1f0c2a-3b4d-4e5f-8a6b-7c8d9e0f1a2b"}}} =
+               press(ctx, "approve_computer", %Input{sas: "482 913"})
+
+      assert_received {:forwarded, "home.enroll.approve", %{"sas" => "482913"}}
+
+      assert {:ok, %{"result" => nil}} = press(ctx, "deny_computer")
+      assert_received {:forwarded, "home.enroll.deny", %{}}
+    end
+  end
+
+  describe "adding a computer, on the server" do
+    test "the code, the approval and the denial run there", ctx do
+      Agent.update(ctx.link, &%{&1 | desktops: [desktop_row()]})
+      test = self()
+
+      opts =
+        Keyword.merge(ctx.opts,
+          open_join: fn ->
+            send(test, :join_opened)
+            {:ok, %{code: "fxenroll1.local", expires_at: ~U[2031-05-04 12:30:00Z]}}
+          end,
+          approve_join: fn sas ->
+            send(test, {:join_approved, sas})
+            {:error, :sas_mismatch}
+          end,
+          deny_join: fn -> send(test, :join_denied) && :ok end
+        )
+
+      ctx = %{ctx | opts: opts}
+
+      assert {:ok, %{"result" => %{"code" => "fxenroll1.local"}}} = press(ctx, "add_computer")
+      assert_received :join_opened
+
+      waiting = %{
+        state: :awaiting_approval,
+        expires_at: ~U[2031-05-04 12:30:00Z],
+        candidate_id: nil,
+        purpose: :computer,
+        joiner: %{name: "loft-linux", platform: "linux", sas: "482913"},
+        joined: nil
+      }
+
+      Agent.update(ctx.link, &%{&1 | enrollment: waiting})
+
+      # Digits that are not the computer's deny it: the owner is told so.
+      assert {:error, :invalid_params, %{"field" => "sas", "sentence" => sentence}} =
+               press(ctx, "approve_computer", %Input{sas: "100200"})
+
+      assert_received {:join_approved, "100200"}
+      assert sentence =~ "Those digits are not the ones the new computer showed"
+
+      assert {:ok, %{"result" => nil}} = press(ctx, "deny_computer")
+      assert_received :join_denied
+    end
+  end
+
   describe "moving back, on a linked desktop" do
     setup ctx do
       :ok = DesktopLink.write(ctx.home, desktop_link())
@@ -1237,6 +1334,35 @@ defmodule FermixCore.Management.AlwaysOnTest do
         {:ok, %{"withdrawn" => true}}
     end
   end
+
+  # The server's part while a computer may ask to join it (M97 §7.5).
+  defp joining_part(joiner) do
+    status =
+      Map.put(server_status(:on), "enrollment", %{
+        "state" => if(joiner, do: "awaiting_approval", else: "open"),
+        "purpose" => "computer",
+        "expires_at" => "2031-05-04T12:30:00Z",
+        "candidate_id" => nil,
+        "joiner" => joiner,
+        "joined" => nil
+      })
+
+    fn
+      "home.status", _params ->
+        {:ok, status}
+
+      "home.enroll.open", %{"purpose" => "computer"} ->
+        {:ok, %{"code" => "fxenroll1.computer", "expires_at" => "2031-05-04T12:30:00Z"}}
+
+      "home.enroll.approve", %{"sas" => "482913"} ->
+        {:ok, %{"device_id" => "7e1f0c2a-3b4d-4e5f-8a6b-7c8d9e0f1a2b", "name" => "loft-linux"}}
+
+      "home.enroll.deny", %{} ->
+        {:ok, %{"denied" => true}}
+    end
+  end
+
+  defp joiner, do: %{"name" => "loft-linux", "platform" => "linux", "sas" => "482913"}
 
   # The server's part while its backup runs.
   defp backing_up(script) do

@@ -1052,9 +1052,10 @@ defmodule Fermix.CLI.DaemonTest do
 
     # M97 §7.2: what Fermix on the server may use on this computer widens only
     # at this computer, by its owner: a command the daemon started (the
-    # server's work run here, among them) never writes it.
+    # server's work run here, among them) never writes it. The refusal says
+    # that, in a sentence of its own: it is no Always On step.
     test "this computer's switches are refused to a process the daemon started" do
-      golden = golden_error_details("unavailable_home_owner_decision")
+      golden = golden_error_details("unavailable_computer_owner_decision")
 
       write =
         {"settings.apply", %{"section" => "computer", "values" => %{"computer_shell" => true}}}
@@ -1075,6 +1076,8 @@ defmodule Fermix.CLI.DaemonTest do
 
       assert log =~ "only the owner may"
       refute_received {:written, _write, _target}
+      assert golden["capability"] == "home"
+      refute golden["sentence"] =~ "passphrase"
     end
 
     test "every other secret and section stays open to a process the daemon started" do

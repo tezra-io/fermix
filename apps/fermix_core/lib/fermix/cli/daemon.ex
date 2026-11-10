@@ -114,8 +114,10 @@ defmodule Fermix.CLI.Daemon do
   # Every Always On step (Always On setup §6): opening a code that lets a
   # server take this home, reviewing a move (the review reads every keychain
   # secret it would carry), starting it, moving back and restoring here; and
-  # replacing the recovery key (M75). The reads stay open.
-  @home_decisions_v1 ~w(home.act home.snapshots.passphrase)
+  # replacing the recovery key (M75); and this computer joining a home or
+  # leaving it (M97 §3.1, §3.3). The reads stay open.
+  @home_decisions_v1 ~w(home.act home.snapshots.passphrase computer.join.start
+                        computer.join.cancel computer.disconnect)
   # Opening the setup page: its session drives every decision the page offers,
   # the owner's included (Always On setup §6). `fermix setup` mints its own
   # launch token in-process and never asks here; the Mac app's agent is an
@@ -124,6 +126,10 @@ defmodule Fermix.CLI.Daemon do
   @setup_capability "setup_session"
   @setup_owner_sentence "Only the owner can open the setup page: use the Fermix app or your " <>
                           "own terminal."
+  # What Fermix on the server may use on this computer (M97 §7.2): no Always
+  # On step, so a sentence of its own, under the Always On capability.
+  @computer_owner_sentence "Only the person at this computer can change what Fermix on your " <>
+                             "server may use on it: use the Fermix app or the setup page."
   @owner_decisions_v0 ~w(mobile_pair_begin mobile_pair_decide mobile_pair_cancel
                          mobile_device_revoke)
   # The cue writes that widen what reaches a task or what a task may do, the
@@ -489,7 +495,7 @@ defmodule Fermix.CLI.Daemon do
   # What Fermix on the server may use on this computer (M97 §7.2) widens only
   # here, by the owner: never by a process the daemon started, the server's
   # own work run on this computer among them.
-  defp owner_family("settings.apply", %{"section" => "computer"}), do: :home
+  defp owner_family("settings.apply", %{"section" => "computer"}), do: :computer
 
   defp owner_family("settings.apply", %{"section" => section}) when is_binary(section),
     do: if(SettingsCues.owns?(section), do: :cues)
@@ -514,14 +520,20 @@ defmodule Fermix.CLI.Daemon do
   # channel is fine and doctor says so, so "not running" would send the
   # operator after the wrong fault. The capability and the sentence are the
   # request's family's: the phone's own pair for its pairing methods, the
-  # cues' for theirs and for a cue write that rides a generic method, and for
-  # Always On's and the recovery key the home's.
+  # cues' for theirs and for a cue write that rides a generic method, for
+  # Always On's and the recovery key the home's, and for this computer's
+  # switches the home's capability with a sentence of their own.
   defp owner_decision_refusal(:home) do
     {:error, :unavailable,
      %{
        "capability" => ManagementHomeMove.capability(),
        "sentence" => ManagementHomeMove.owner_only_sentence()
      }}
+  end
+
+  defp owner_decision_refusal(:computer) do
+    {:error, :unavailable,
+     %{"capability" => ManagementHomeMove.capability(), "sentence" => @computer_owner_sentence}}
   end
 
   defp owner_decision_refusal(:cues) do

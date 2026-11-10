@@ -243,6 +243,11 @@
       "properties": {
         "type": { "const": "client_hello" },
         "protocol_version": { "type": "integer", "minimum": 1 },
+        "min_protocol_version": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "The oldest version this client still speaks, at most protocol_version (M97: the window runs both ways). A daemon whose max_version is below protocol_version and at least this serves max_version and names it in server_hello.protocol_version; absent, a client newer than the daemon is refused client_too_new as before."
+        },
         "primary_epoch": {
           "type": "integer",
           "minimum": 1,
@@ -426,6 +431,11 @@
         "type": { "const": "server_hello" },
         "min_version": { "type": "integer", "minimum": 1 },
         "max_version": { "type": "integer", "minimum": 1 },
+        "protocol_version": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "The version this connection speaks, present only when the daemon served a newer client its max_version (that client's min_protocol_version allowed it): the client speaks this version from here on. Absent when the client is served the version it declared, and from a daemon older than the two-way window."
+        },
         "primary_epoch": {
           "type": "integer",
           "minimum": 1,

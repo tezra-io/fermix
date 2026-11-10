@@ -490,6 +490,52 @@ defmodule FermixChannels.Companion.ConnectionTest do
     assert closed?(client)
   end
 
+  # M97 §3.4: the window runs both ways. A newer client that still speaks
+  # this daemon's newest is served it, and the hello names it; one that does
+  # not, or does not say, is refused as before; one inside the window is
+  # served its own, and the hello names nothing more.
+  test "a newer client is served the daemon's newest where it still speaks it",
+       %{socket_path: path} do
+    served = connect(path)
+
+    send_line(served, %{
+      "type" => "client_hello",
+      "protocol_version" => 9,
+      "min_protocol_version" => 7
+    })
+
+    assert %{"type" => "server_hello", "protocol_version" => 7, "max_version" => 7} = recv(served)
+
+    own = connect(path)
+
+    send_line(own, %{
+      "type" => "client_hello",
+      "protocol_version" => 7,
+      "min_protocol_version" => 6
+    })
+
+    assert %{"type" => "server_hello"} = hello = recv(own)
+    refute Map.has_key?(hello, "protocol_version")
+  end
+
+  test "a newer client that does not still speak the daemon's newest is refused as before",
+       %{socket_path: path} do
+    for min <- [8, nil] do
+      refused = connect(path)
+      line = %{"type" => "client_hello", "protocol_version" => 9}
+      send_line(refused, if(min, do: Map.put(line, "min_protocol_version", min), else: line))
+
+      assert %{
+               "type" => "error",
+               "reason" => "unsupported_protocol_version",
+               "direction" => "client_too_new",
+               "client_version" => 9
+             } = recv(refused)
+
+      assert closed?(refused)
+    end
+  end
+
   test "a message is claimed once, acknowledged, and a resend never runs twice", ctx do
     client = hello(ctx.socket_path)
     watcher = hello(ctx.socket_path)

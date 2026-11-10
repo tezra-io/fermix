@@ -1351,6 +1351,50 @@ defmodule FermixOpik.Aggregation do
     )
   end
 
+  # An invocation (M97 §6.2) is a run kind on the computer that runs it, and
+  # always a ROOT there. The turn that asked is on another machine's trace (the
+  # server's), so `parent_session` rides as correlation metadata only, as for
+  # computer use: a turn's id is minted per engine, so here it can name an
+  # unrelated turn of this computer's own, and nesting under it would put the
+  # invocation in that turn's trace and let the bookend ship it. The model's
+  # call stays on the server as one tool exec, joined by its `invocation` key.
+  #
+  # `ok`, `cancelled` and `refused` close with `:complete`; `failed`,
+  # `timed_out` and `unknown` with `:error`, which alone carries `error_info`.
+  # An invocation that outlives the idle TTL ships its root then, and its
+  # bookend opens a continuation root under the same id, as computer use does.
+  def apply_event(state, [:fermix, :computer_invocation, :start], meas, meta, at) do
+    case Map.get(meta, :session_id) do
+      nil ->
+        {state, []}
+
+      session_id ->
+        ctx = %{
+          parent_session: nil,
+          kind: :computer_invocation,
+          name: nil,
+          input: nil,
+          trace_metadata: Mapper.computer_invocation_root(:start, meta, meas).metadata,
+          at: at.at,
+          mono: at.mono
+        }
+
+        {state, _ref} = ensure_session(state, session_id, ctx)
+        {state, []}
+    end
+  end
+
+  def apply_event(state, [:fermix, :computer_invocation, verb], meas, meta, at)
+      when verb in [:complete, :error] do
+    root = Mapper.computer_invocation_root(verb, meta, meas)
+
+    close_root(state, meta, at, %{
+      status: root.status,
+      error_info: root.error_info,
+      metadata: root.metadata
+    })
+  end
+
   def apply_event(state, _event, _meas, _meta, _at), do: {state, []}
 
   @doc """
@@ -1777,6 +1821,10 @@ defmodule FermixOpik.Aggregation do
   # this clause a completion whose opener was missed reads as a `:subagent`
   # phantom root, which is what the voice-call clauses above exist to prevent.
   defp infer_kind("cua_" <> _), do: :computer_use
+  # An invocation's run on the computer. The prefix is minted in
+  # `Computers.Telemetry.session_id/1`; keep the two in lockstep, or a bookend
+  # whose opener was missed reads as a `:subagent` phantom root.
+  defp infer_kind("inv_" <> _), do: :computer_invocation
   defp infer_kind("doctor:" <> _), do: :doctor
   defp infer_kind("job:" <> _), do: :management_job
   defp infer_kind(_other), do: :subagent
@@ -1817,6 +1865,11 @@ defmodule FermixOpik.Aggregation do
   # nothing about which session it was — so the id identifies it, as for a voice
   # delegation. One conversation can run several sessions in a day.
   defp wrapper_name(:computer_use, _name, session), do: "computer_use:#{session}"
+  # The id identifies an invocation; the capability is in its metadata, and a
+  # replayed row's `agent` (the capability, by the trace handler) is no name.
+  defp wrapper_name(:computer_invocation, _name, session),
+    do: "computer_invocation:#{session}"
+
   defp wrapper_name(kind, nil, session), do: "#{kind}:#{session}"
   defp wrapper_name(kind, name, _session), do: "#{kind}:#{name}"
 

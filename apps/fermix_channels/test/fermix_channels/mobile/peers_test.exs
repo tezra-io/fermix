@@ -75,7 +75,11 @@ defmodule FermixChannels.Mobile.PeersTest do
   end
 
   test "an enrollment and a move session send only their own events, and keep alive" do
-    assert Peers.client_events(:enrollment) == ~w(enroll_request ping)
+    # A computer joining a home (M97 §3.1) rides the enrollment session too.
+    assert Peers.client_events(:enrollment) == ~w(enroll_request join_request ping)
+
+    assert Peers.server_events(:enrollment) ==
+             ~w(enroll_accepted join_approved join_denied error pong)
 
     assert Peers.client_events(:move) ==
              ~w(move_offer move_chunk move_end move_commit move_resume ping)

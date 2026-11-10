@@ -12,6 +12,13 @@ The move to a server, the roles and the epoch: skill_view(name:
   offered it, and its Details line Move back says why ("Fermix runs from a
   terminal here, so it could not start again on its own after the move
   back. Install it as a service first.").
+  A computer reads a home only as new as its own Fermix: where the server
+  runs a newer one (the server updates itself as soon as the apps carry a
+  release), **Update Fermix on this Mac first** stands in place of Move
+  back, and of Restore on this Mac; the restore itself refuses a backup a
+  newer Fermix wrote. Updating the app is the fix: the server only takes a
+  release once that app is published, unless its owner went ahead of the
+  apps (`fermix-update --release X --ahead-of-apps`).
   It is two presses, each one `home.act`.
   Move back makes this computer's own checks first, so a refused one asks
   the server for nothing, then asks the server for a code (it names this

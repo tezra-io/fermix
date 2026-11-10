@@ -10,17 +10,22 @@ defmodule FermixChannels.Mobile.LanesTest do
   require FermixChannels.Mobile.Lanes
 
   alias FermixChannels.Mobile.Lanes
+  alias FermixChannels.Mobile.PeerEvents
   alias FermixChannels.Mobile.Peers
   alias FermixChannels.Mobile.Protocol
 
   # A run of `event_part` carries one event whole, in that event's lane.
   @not_events ["event_part"]
-  @invocations ~w(invoke_open invoke_part invoke_cancel invoke_result invoke_status)
+  # An event whose lane its header decides, with the fields the wire
+  # requires of it: every other event rides its lane with any header.
+  @headers %{"invoke_part" => %{"size_bytes" => 1}}
 
   test "every event the codec knows, either way, rides a lane" do
     known = Enum.uniq(Protocol.client_events() ++ Protocol.server_events()) -- @not_events
 
-    missing = for type <- known, Lanes.lane(type, %{}) == {:error, {:no_lane, type}}, do: type
+    missing =
+      for type <- known, Lanes.lane(type, header(type)) == {:error, {:no_lane, type}}, do: type
+
     assert missing == [], "events with no lane: #{inspect(missing)}"
   end
 
@@ -28,17 +33,46 @@ defmodule FermixChannels.Mobile.LanesTest do
     for kind <- Peers.kinds(),
         type <- Peers.client_events(kind) ++ Peers.server_events(kind),
         type not in @not_events do
-      assert {:ok, _lane} = Lanes.lane(type, %{}), "#{kind} #{type} has no lane"
+      assert {:ok, _lane} = Lanes.lane(type, header(type)), "#{kind} #{type} has no lane"
     end
   end
 
-  test "the table names only events the codec knows, and the invocations before they ship" do
+  test "the table names only events the codec knows" do
     known = MapSet.new(Protocol.client_events() ++ Protocol.server_events())
     named = Lanes.types()
 
     assert named -- Enum.uniq(named) == []
-    assert Enum.sort(Enum.reject(named, &MapSet.member?(known, &1))) == Enum.sort(@invocations)
+    assert Enum.reject(named, &MapSet.member?(known, &1)) == []
   end
+
+  # The wire and the table agree here: a header field that decides a lane is
+  # one the codec requires of that event either way, so no frame the codec
+  # takes is without a lane.
+  test "every header field that decides a lane is one the wire requires, either way" do
+    for {type, fields} <- Lanes.header_fields(), direction <- [:client, :server] do
+      assert PeerEvents.event?(direction, type), "#{type} is no #{direction} event"
+
+      assert fields -- PeerEvents.required(direction, type) == [],
+             "#{direction} #{type} does not require #{inspect(fields)}"
+    end
+
+    assert :ok =
+             PeerEvents.validate(:client, "invoke_part", %{
+               "id" => "inv-a",
+               "index" => 0,
+               "last" => true,
+               "size_bytes" => 9
+             })
+
+    assert {:error, _missing} =
+             PeerEvents.validate(:client, "invoke_part", %{
+               "id" => "inv-a",
+               "index" => 0,
+               "last" => true
+             })
+  end
+
+  defp header(type), do: Map.get(@headers, type, %{})
 
   test "a call's frames are live, a stream's frames bulk, the rest interactive" do
     for type <- ~w(call_open call_attached call_line call_audio call_frame call_close),

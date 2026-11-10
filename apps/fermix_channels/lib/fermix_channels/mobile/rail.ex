@@ -154,6 +154,15 @@ defmodule FermixChannels.Mobile.Rail do
   @spec close(pid()) :: :ok
   def close(rail) when is_pid(rail), do: GenServer.call(rail, :close)
 
+  @doc """
+  The six digits of `purpose` this session's handshake derives
+  (`Mobile.Noise.sas/2`), which the responder derives too: a computer's join
+  shows them on both ends (M97 §7.5).
+  """
+  @spec sas(pid(), :phone | :computer) :: String.t()
+  def sas(rail, purpose) when is_pid(rail) and purpose in [:phone, :computer],
+    do: Noise.sas_digits(GenServer.call(rail, :handshake_hash), purpose)
+
   defp valid_node_id(node_id) do
     if Regex.match?(~r/\A[0-9a-f]{64}\z/, node_id), do: :ok, else: {:error, :invalid_node_id}
   end
@@ -273,6 +282,9 @@ defmodule FermixChannels.Mobile.Rail do
       {:error, reason, state} -> end_session({:socket, reason}, state, {:reply, {:error, reason}})
     end
   end
+
+  def handle_call(:handshake_hash, _from, state),
+    do: {:reply, Noise.handshake_hash(state.noise), state}
 
   def handle_call(:close, _from, state) do
     :ok = send_close(state, 1000, "session closed")

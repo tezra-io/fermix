@@ -4,7 +4,10 @@ defmodule FermixChannels.Mobile.PeerEvents do
   a candidate's enrollment and the move (`PROTOCOL.md`: *Desktop sessions*,
   *Enrollment and the move*); M87's call channel on a phone's session
   (*Calls from the phone*); and M97's computer record on a desktop's session
-  (`offers`, `link_path`).
+  (`offers`, `link_path`) and a computer's join on an enrollment session
+  (`join_request`, `join_approved`, `join_denied`), and the invocation, the
+  same five events either way (`invoke_open`, `invoke_part`,
+  `invoke_cancel`, `invoke_result`, `invoke_status`, M97 §6.1).
 
   One declarative table per direction, `client` for what the initiator sends
   (a phone, a desktop, a candidate, the source of a move) and `server` for what
@@ -46,8 +49,63 @@ defmodule FermixChannels.Mobile.PeerEvents do
   @loopback_failures ~w(port_in_use not_permitted failed)
   @link_paths ~w(direct relay)
   @snapshot_refusals ~w(disk_floor space_unknown mismatch out_of_order invalid_name write_failed)
+  @computer_platforms ~w(macos linux)
+  @join_denials ~w(denied timeout cancelled device_disconnected)
 
   @relay {:object, [{"url", :relay_url}, {"quic_port", :port}]}
+
+  # The invocation (M97 §6.1): the same five events either way, a server
+  # asking its computer and a computer asking its server.
+  @capability ~r/\A[a-z][a-z0-9_]{0,31}\z/
+  @max_op_bytes 64
+  @max_deadline_ms 900_000
+  @max_part_bytes 20 * 1_024 * 1_024
+  @origins Enum.map(FermixCore.Computers.Origin.wire_origins(), &Atom.to_string/1)
+  @statuses Enum.map(FermixCore.Computers.Outcome.statuses(), &Atom.to_string/1)
+  @refusals Enum.map(FermixCore.Computers.Outcome.refusals(), &Atom.to_string/1)
+  @part {:object,
+         [
+           {"size_bytes", {:range, 1, @max_part_bytes}},
+           {"sha256", :sha256},
+           {"mime", :mime}
+         ]}
+  @invoke %{
+    "invoke_open" =>
+      {[
+         {"id", :id},
+         {"capability", :capability},
+         {"op", :op},
+         {"deadline_ms", {:range, 0, @max_deadline_ms}},
+         {"epoch", :positive},
+         {"origin", {:enum, @origins}},
+         {"turn", {:optional, {:object, [{"session_id", :name}, {"tool_call_id", :name}]}}},
+         {"part", {:optional, @part}},
+         {"index", :count},
+         {"last", :boolean}
+       ], :required},
+    "invoke_part" =>
+      {[
+         {"id", :id},
+         {"index", :count},
+         {"last", :boolean},
+         {"size_bytes", {:range, 1, @max_part_bytes}}
+       ], :required},
+    "invoke_cancel" => {[{"id", :id}], :none},
+    "invoke_status" => {[{"id", :id}], :none},
+    "invoke_result" =>
+      {[
+         {"id", :id},
+         {"status", {:enum, @statuses}},
+         {"refusal", {:optional, {:enum, @refusals}}},
+         {"message", {:optional, :text}},
+         {"receipt", {:optional, {:object, [{"at", :instant}, {"target", :target_text}]}}},
+         {"part", {:optional, @part}},
+         {"duration_ms", :count},
+         {"index", :count},
+         {"last", :boolean}
+       ], :required}
+  }
+  @invoke_events ~w(invoke_open invoke_part invoke_cancel invoke_result invoke_status)
 
   @client %{
     "companion_open" => {[{"channel", :channel}], :none},
@@ -92,6 +150,12 @@ defmodule FermixChannels.Mobile.PeerEvents do
              {"addrs", {:optional, {:list, :hint, 1, 8}}}
            ]}},
          {"snapshots", {:optional, {:object, [{"s3_bucket", :name}, {"s3_region", :name}]}}}
+       ], :none},
+    "join_request" =>
+      {[
+         {"host",
+          {:object, [{"name", :name}, {"os", :name}, {"arch", :name}, {"version", :name}]}},
+         {"platform", {:enum, @computer_platforms}}
        ], :none},
     "move_offer" =>
       {[
@@ -147,6 +211,22 @@ defmodule FermixChannels.Mobile.PeerEvents do
     "snapshot_chunk" => {[{"snapshot_id", :id}, {"index", :count}], :required},
     "snapshot_end" => {[{"snapshot_id", :id}], :none},
     "enroll_accepted" => {[{"candidate_id", :id}, {"primary_name", :name}], :none},
+    "join_approved" =>
+      {[
+         {"device_id", :id},
+         {"name", :name},
+         {"primary_epoch", :positive},
+         {"primary",
+          {:object,
+           [
+             {"name", :name},
+             {"node_id", :node_id},
+             {"relays", {:list, @relay, 1, 8}},
+             {"relays_rev", :rev},
+             {"addrs", {:optional, {:list, :hint, 0, 8}}}
+           ]}}
+       ], :none},
+    "join_denied" => {[{"reason", {:enum, @join_denials}}], :none},
     "move_accept" => {[{"move_id", :id}, {"recipient", :x25519}], :none},
     "move_ready" => {[{"move_id", :id}, {"epoch", :positive}], :none},
     "move_done" => {[{"move_id", :id}, {"epoch", :positive}], :none},
@@ -170,12 +250,20 @@ defmodule FermixChannels.Mobile.PeerEvents do
     companion_open companion_line companion_close manage loopback_request loopback_failed
     snapshot_stored snapshot_refused enroll_request move_offer move_chunk move_end move_commit
     move_resume call_open call_line call_audio call_frame call_close offers link_path
+    join_request
   )
   @server_events ~w(
     companion_line companion_close manage_result loopback_open loopback_response
     loopback_close snapshot_begin snapshot_chunk snapshot_end enroll_accepted move_accept
-    move_ready move_done call_attached call_line call_audio call_close
+    move_ready move_done call_attached call_line call_audio call_close join_approved
+    join_denied
   )
+
+  # The invocation rides both directions with one table.
+  @client Map.merge(@client, @invoke)
+  @server Map.merge(@server, @invoke)
+  @client_events @client_events ++ @invoke_events
+  @server_events @server_events ++ @invoke_events
 
   if Enum.sort(@client_events) != Enum.sort(Map.keys(@client)) or
        Enum.sort(@server_events) != Enum.sort(Map.keys(@server)) do
@@ -314,6 +402,11 @@ defmodule FermixChannels.Mobile.PeerEvents do
   defp valid?(:recipient, value), do: matches?(@recipient, value)
   defp valid?(:sha256, value), do: matches?(@sha256, value)
   defp valid?(:rev, value), do: matches?(@rev, value)
+  defp valid?(:capability, value), do: matches?(@capability, value)
+  defp valid?(:op, value), do: matches?(@method, value) and byte_size(value) <= @max_op_bytes
+  defp valid?(:instant, value), do: instant?(value)
+  defp valid?(:target_text, value), do: printable?(value, 256)
+  defp valid?(:mime, value), do: printable?(value, 127) and not Regex.match?(@blank, value)
   defp valid?(:name, value), do: printable?(value, 128)
   defp valid?(:text, value), do: printable?(value, 512)
   defp valid?(:target, value), do: target?(value)
@@ -329,6 +422,12 @@ defmodule FermixChannels.Mobile.PeerEvents do
   end
 
   defp printable?(_value, _max), do: false
+
+  # A moment in UTC, as ISO 8601 writes it.
+  defp instant?(value) when is_binary(value) and byte_size(value) <= 64,
+    do: match?({:ok, _at, 0}, DateTime.from_iso8601(value))
+
+  defp instant?(_value), do: false
 
   # An HTTP request target in origin form: a path and its query.
   defp target?("/" <> _rest = value),

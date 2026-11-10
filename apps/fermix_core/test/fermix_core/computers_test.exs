@@ -58,12 +58,45 @@ defmodule FermixCore.ComputersTest do
     Process.put(:fake_rows, rows)
 
     Keyword.merge(
-      [role: :primary, link: FakeLink, live: %{}, records: %{}, server_name: "garden server"],
+      [
+        role: :primary,
+        link: FakeLink,
+        live: %{},
+        records: %{},
+        server_name: "garden server",
+        version: "0.19.2"
+      ],
       overrides
     )
   end
 
   describe "list" do
+    # M97 §3.4: each computer stands against this server's version by the one
+    # it last said; one past the window offers nothing until it updates.
+    test "each computer stands against the server, and one past the window offers nothing" do
+      rows = [
+        row(@studio, "studio Mac", "macos", connected: true, since: @since),
+        row(@loft, "loft Linux", "linux")
+      ]
+
+      records = %{
+        @studio => %{engine_version: "0.16.4", seen_at: @seen, offers: [@files]},
+        @loft => %{engine_version: "0.17.0", seen_at: @seen, offers: [@shell]}
+      }
+
+      live = %{@studio => %{offers: [@files, @shell], path: :relay, since: @since}}
+
+      assert [loft, studio] = Computers.list(opts(rows, records: records, live: live))
+      assert {loft.standing, loft.offers} == {:behind, [@shell]}
+      assert {studio.standing, studio.offers} == {:settings_only, []}
+      assert Computer.view(studio)["standing"] == "settings_only"
+
+      ahead = %{@loft => %{engine_version: "0.20.0", seen_at: @seen}}
+      assert [_loft, _studio] = listed = Computers.list(opts(rows, records: ahead, live: live))
+      assert Enum.map(listed, & &1.standing) == [:ahead, nil]
+      assert Computer.view(List.last(listed))["standing"] == nil
+    end
+
     test "an away computer has its last offers and when the home last heard it" do
       rows = [row(@loft, "loft Linux", "linux", last_seen: ~U[2031-05-30 08:00:00Z])]
       records = %{@loft => %{engine_version: "0.19.0", seen_at: @seen, offers: [@files, @shell]}}

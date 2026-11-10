@@ -98,6 +98,9 @@ defmodule FermixCore.Management.HomeSummaryTest do
        "Fermix moved to your server, and this Mac is no longer connected to it.", "learn_more"},
       {"a desktop the server forgot", desktop(link_primary: primary(:revoked)), "retired",
        "Fermix moved to your server, and this Mac is no longer connected to it.", "learn_more"},
+      {"a computer asking to join the home", desktop(primary_home: asking_home()), "on",
+       "A computer named loft-linux (Linux) asks to join your Fermix. Add it only if it " <>
+         "shows 482 913.", "approve_computer"},
       {"a server's copy retired by a move back",
        device(linked: false, moved: moved_to("studio-mac"), moved_back: true, host_os: :linux),
        "retired", "This copy is retired: Fermix moved back to studio-mac.", "learn_more"},
@@ -126,13 +129,24 @@ defmodule FermixCore.Management.HomeSummaryTest do
        "Fermix cannot reach your server. Your messages wait until it is back.", "learn_more"},
       {"a server this Mac is too old for", desktop(primary_too_old: true, primary_home: nil),
        "problem", "Update Fermix on this Mac to keep using Always On.", "update"},
-      # Re-check finding 3: the server's update installs the oldest version
-      # among the computers linked to it (`Home.EngineCeiling`), within a few
-      # minutes of the last of them taking it.
+      # M97 §3.4: the server leads, from the release channel, once the app
+      # for each computer that keeps the backups carries the release.
       {"a server older than this Mac", desktop(primary_behind: true, primary_home: nil),
        "problem",
-       "Your server runs an older Fermix than this Mac. It updates to this Mac's version " <>
-         "within a few minutes once every computer linked to it runs it.", "learn_more"},
+       "Your server runs an older Fermix than this Mac. It updates on its own once the app " <>
+         "for each computer that keeps your backups carries the newer one.", "learn_more"},
+      # M97 §3.4: past the server's window, settings only; and a server that
+      # went ahead of the apps, which this Mac cannot read.
+      {"a Mac past the server's window", desktop(standing: :settings_only), "problem",
+       "Update Fermix on this Mac. Your server runs a newer Fermix, so until then this Mac " <>
+         "can change settings only.", "update"},
+      {"a server ahead of the apps",
+       desktop(
+         primary_home: Map.put(server_home([]), "update", %{"ahead_of_apps" => true}),
+         readable: {:error, {:newer_engine, "0.9.0", "0.8.0"}}
+       ), "problem",
+       "Your server runs a newer Fermix than this Mac can restore. Update Fermix on this Mac.",
+       "update"},
       {"a server disk nearly full", desktop(primary_home: server_home(disk: 0.9)), "problem",
        "Your server's disk is 90% full.", "learn_more"},
       {"a last backup five days old",
@@ -506,7 +520,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
 
       assert detail["copies_bytes"] == 3_221_225_472
       assert detail["disk_used"] == 0.42
-      assert ids(detail["actions"]) == ["back_up_now", "move_back"]
+      assert ids(detail["actions"]) == ["back_up_now", "add_computer", "move_back"]
 
       assert detail["data"] ==
                "Your conversations and memories, the secrets, the browser and traces live on " <>
@@ -547,9 +561,15 @@ defmodule FermixCore.Management.HomeSummaryTest do
     end
 
     test "every state with nothing more to say holds an empty detail" do
-      for facts <- [device(move: move("streaming")), server([]), candidate_role("enrolled")] do
+      for facts <- [device(move: move("streaming")), candidate_role("enrolled")] do
         assert HomeSummary.summary(facts)["detail"] == %{}
       end
+
+      # The server's own screen offers Add a computer (M97 §3.1), and nothing more.
+      assert %{"actions" => [%{"id" => "add_computer"}]} =
+               detail = HomeSummary.summary(server([]))["detail"]
+
+      assert Map.keys(detail) == ["actions"]
     end
   end
 
@@ -712,7 +732,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
   # Review simplification 3: one reading of what a screen offers.
   test "what a screen offers is its action, then the alternatives, then Details' actions" do
     assert ids(HomeSummary.offered(HomeSummary.summary(desktop([])))) ==
-             ["back_up_now", "move_back"]
+             ["back_up_now", "add_computer", "move_back"]
 
     code = facts(link: link(enrollment: manual(:open)))
     assert ids(HomeSummary.offered(HomeSummary.summary(code))) == ["own_server", "cancel"]
@@ -771,8 +791,8 @@ defmodule FermixCore.Management.HomeSummaryTest do
 
       assert needs.(returning(back("enrolled"))) == ["recovery_passphrase"]
 
-      %{"detail" => %{"actions" => [back_up, move_back]}} = HomeSummary.summary(desktop([]))
-      assert {back_up["needs"], move_back["needs"]} == {[], []}
+      %{"detail" => %{"actions" => [back_up, add, move_back]}} = HomeSummary.summary(desktop([]))
+      assert {back_up["needs"], add["needs"], move_back["needs"]} == {[], [], []}
     end
 
     test "Learn more opens the docs" do
@@ -815,7 +835,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
 
     test "find_action/3 finds an action by its id and key wherever it sits, and nothing else" do
       summary = HomeSummary.summary(desktop([]))
-      [_back_up, move_back] = summary["detail"]["actions"]
+      [_back_up, _add, move_back] = summary["detail"]["actions"]
 
       assert {:ok, ^move_back} = HomeSummary.find_action(summary, "move_back", move_back["key"])
       assert :error = HomeSummary.find_action(summary, "move_back", "another-key")
@@ -1149,13 +1169,73 @@ defmodule FermixCore.Management.HomeSummaryTest do
       assert Enum.find(linux, &(&1["id"] == "move_back"))["label"] == "Move back to this computer"
     end
 
+    # M97 §3.4: a computer that cannot read its server's home (the server
+    # runs a newer Fermix) is offered Update in place of Move back, and in
+    # place of Restore here, by the one rule (`Home.Readable`).
+    test "a computer that cannot read the server's home is asked to update first" do
+      newer = {:error, {:newer_engine, "0.9.0", "0.8.0"}}
+      summary = HomeSummary.summary(desktop(readable: newer))
+
+      assert summary["state"] == "on"
+      assert ids(summary["detail"]["actions"]) == ["back_up_now", "add_computer", "update"]
+      refute "move_back" in ids(HomeSummary.offered(summary))
+
+      assert %{"label" => "Update Fermix on this Mac first", "needs" => [], "confirm" => nil} =
+               Enum.find(summary["detail"]["actions"], &(&1["id"] == "update"))
+
+      silent = primary(:unreachable, 10 * @minute)
+      copy = %{name: "20310504T100000Z-e5.fxsnap", at: ~U[2031-05-04 10:00:00Z]}
+
+      restorable =
+        HomeSummary.summary(desktop(link_primary: silent, copies: [copy], readable: newer))
+
+      refute "restore_here" in ids(HomeSummary.offered(restorable))
+      assert "update" in ids(HomeSummary.offered(restorable))
+
+      assert "move_back" in ids(HomeSummary.offered(HomeSummary.summary(desktop(readable: :ok))))
+    end
+
+    # §3.4: past the server's window this computer keeps its link for
+    # settings alone; a server that went past the apps (an owner's override)
+    # and that this computer cannot read says so until it updates.
+    test "a computer past the window, and one behind a server ahead of the apps, update" do
+      settings_only = HomeSummary.summary(desktop(standing: :settings_only))
+
+      assert {settings_only["state"], settings_only["detail"]["kind"],
+              settings_only["action"]["id"]} == {"problem", "update", "update"}
+
+      assert settings_only["sentence"] ==
+               "Update Fermix on this Mac. Your server runs a newer Fermix, so until then this " <>
+                 "Mac can change settings only."
+
+      ahead_home = Map.put(server_home([]), "update", %{"ahead_of_apps" => true})
+      newer = {:error, {:newer_engine, "0.9.0", "0.8.0"}}
+      ahead = HomeSummary.summary(desktop(primary_home: ahead_home, readable: newer))
+
+      assert {ahead["state"], ahead["detail"]["kind"], ahead["action"]["id"]} ==
+               {"problem", "server_ahead", "update"}
+
+      assert ahead["sentence"] ==
+               "Your server runs a newer Fermix than this Mac can restore. Update Fermix on " <>
+                 "this Mac."
+
+      # One this computer reads, or a server inside the apps, is no problem.
+      for facts <- [
+            desktop(primary_home: ahead_home, readable: :ok),
+            desktop(primary_home: Map.put(server_home([]), "update", nil), readable: newer),
+            desktop(standing: :behind)
+          ] do
+        refute HomeSummary.summary(facts)["detail"]["kind"] in ["update", "server_ahead"]
+      end
+    end
+
     # The move back's own check refuses an engine run from a terminal at the
     # press, so the screen says it where Move back would be, before any press.
     test "an engine run from a terminal is not offered Move back, and Details say why" do
       summary = HomeSummary.summary(desktop(restarts_itself: false))
 
       assert summary["state"] == "on"
-      assert ids(summary["detail"]["actions"]) == ["back_up_now"]
+      assert ids(summary["detail"]["actions"]) == ["back_up_now", "add_computer"]
       refute "move_back" in ids(HomeSummary.offered(summary))
 
       assert %{"label" => "Move back", "value" => said} =
@@ -1651,6 +1731,147 @@ defmodule FermixCore.Management.HomeSummaryTest do
     end)
   end
 
+  # M97 §3.1, §7.5: a computer that asks to join, on the server's own screen
+  # and on a linked computer's; the screen of the computer that joins; and a
+  # computer that joined has no Move back or Restore here.
+  describe "computers joining the home" do
+    test "the server and a linked computer offer Add a computer" do
+      assert "add_computer" in ids(HomeSummary.offered(HomeSummary.summary(server([]))))
+      assert "add_computer" in ids(HomeSummary.offered(HomeSummary.summary(desktop([]))))
+    end
+
+    test "a computer that asks to join is added with the digits it shows, or not" do
+      waiting = %{
+        state: :awaiting_approval,
+        expires_at: ~U[2031-05-04 12:30:00Z],
+        candidate_id: nil,
+        purpose: :computer,
+        joiner: %{name: "loft-linux", platform: "linux", sas: "482913"},
+        joined: nil
+      }
+
+      on_server =
+        HomeSummary.summary(
+          server(link: link(desktops: server([]).link.desktops, enrollment: waiting))
+        )
+
+      assert %{"id" => "approve_computer", "needs" => ["sas"], "label" => "Add it"} =
+               on_server["action"]
+
+      assert [%{"id" => "deny_computer", "needs" => []}] = on_server["detail"]["alternatives"]
+
+      assert on_server["sentence"] ==
+               "A computer named loft-linux (Linux) asks to join your Fermix. Add it only if " <>
+                 "it shows 482 913."
+
+      home =
+        Map.put(server_home([]), "enrollment", %{
+          "state" => "awaiting_approval",
+          "purpose" => "computer",
+          "joiner" => %{"name" => "loft-linux", "platform" => "linux", "sas" => "482913"}
+        })
+
+      linked = HomeSummary.summary(desktop(primary_home: home))
+      assert {linked["state"], linked["action"]["id"]} == {"on", "approve_computer"}
+      assert linked["action"]["key"] == on_server["action"]["key"]
+
+      # Other digits are another approval: the key binds the digits shown.
+      other = put_in(home, ["enrollment", "joiner", "sas"], "100200")
+
+      refute HomeSummary.summary(desktop(primary_home: other))["action"]["key"] ==
+               linked["action"]["key"]
+    end
+
+    test "a computer that joined is told once on the owner's other screens" do
+      joined = %{
+        state: :approved,
+        expires_at: ~U[2031-05-04 12:30:00Z],
+        candidate_id: nil,
+        purpose: :computer,
+        joiner: nil,
+        joined: %{device_id: "7e1f0c2a-3b4d-4e5f-8a6b-7c8d9e0f1a2b", name: "loft-linux"}
+      }
+
+      notice =
+        HomeSummary.summary(
+          server(link: link(desktops: server([]).link.desktops, enrollment: joined))
+        )["notice"]
+
+      assert notice == %{
+               "id" => "computer_joined:7e1f0c2a-3b4d-4e5f-8a6b-7c8d9e0f1a2b",
+               "sentence" => "A computer named loft-linux joined your Fermix."
+             }
+
+      home =
+        Map.put(server_home([]), "enrollment", %{
+          "state" => "approved",
+          "purpose" => "computer",
+          "joined" => %{
+            "device_id" => "7e1f0c2a-3b4d-4e5f-8a6b-7c8d9e0f1a2b",
+            "name" => "loft-linux"
+          }
+        })
+
+      assert HomeSummary.summary(desktop(primary_home: home))["notice"] == notice
+    end
+
+    test "the computer that joins shows where it stands, with Cancel" do
+      join = %{"server" => "studio-mac", "sas" => nil, "sentence" => nil}
+
+      dialing =
+        HomeSummary.summary(
+          device(linked: false, moved: nil, join: Map.put(join, "phase", "dialing"))
+        )
+
+      assert {dialing["state"], dialing["outcome"], dialing["action"]["id"]} ==
+               {"creating", "running", "cancel"}
+
+      assert dialing["sentence"] == "Connecting this Mac to your Fermix on studio-mac."
+
+      waiting =
+        HomeSummary.summary(
+          device(
+            linked: false,
+            moved: nil,
+            join: %{join | "sas" => "482913"} |> Map.put("phase", "awaiting_approval")
+          )
+        )
+
+      assert {waiting["state"], waiting["outcome"]} == {"creating", "waiting"}
+      assert waiting["sentence"] =~ "Both show 482 913"
+
+      said = "studio-mac did not add this computer. Open a new code there to try again."
+
+      denied =
+        HomeSummary.summary(
+          device(
+            linked: false,
+            moved: nil,
+            join: %{join | "sentence" => said} |> Map.put("phase", "denied")
+          )
+        )
+
+      assert {denied["state"], denied["outcome"], denied["sentence"]} ==
+               {"creating", "failed", said}
+    end
+
+    test "a computer that joined has no Move back and no Restore here" do
+      silent = primary(:unreachable, 10 * @minute)
+      copy = %{name: "20310504T100000Z-e5.fxsnap", at: ~U[2031-05-04 10:00:00Z]}
+
+      for facts <- [
+            desktop(moved: nil),
+            desktop(moved: nil, link_primary: silent, copies: [copy])
+          ] do
+        offered = ids(HomeSummary.offered(HomeSummary.summary(facts)))
+        refute "move_back" in offered
+        refute "restore_here" in offered
+      end
+
+      assert "move_back" in ids(HomeSummary.offered(HomeSummary.summary(desktop([]))))
+    end
+  end
+
   # -- facts --------------------------------------------------------------------
 
   defp facts(overrides) do
@@ -1852,6 +2073,15 @@ defmodule FermixCore.Management.HomeSummaryTest do
     do: %{to: "fermix-general-a3f9", moved_at: at, epoch: 5}
 
   defp moved_to(to), do: %{moved() | to: to}
+
+  # The server's home while a computer asks to join it (M97 §7.5).
+  defp asking_home do
+    Map.put(server_home([]), "enrollment", %{
+      "state" => "awaiting_approval",
+      "purpose" => "computer",
+      "joiner" => %{"name" => "loft-linux", "platform" => "linux", "sas" => "482913"}
+    })
+  end
 
   defp server_home(overrides) do
     backups =

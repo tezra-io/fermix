@@ -26,15 +26,21 @@
 #                  and its one sentence on stderr
 #   ubuntu         no Chromium package, and the sentence that says to install
 #                  one; swap of its own, which it keeps
-#   updates        the nightly update, which installs the release its
-#                  computers run: that release already installed, a newer
-#                  one, a failed installer, a reboot asked for, an installer
-#                  that cannot be downloaded, a failed status read, three
-#                  nights under a move, an ended move, a failed restart, an
-#                  older one never installed back down, none seen, no home;
-#                  then the follow run: no home, a newer release and the
-#                  restart but never a reboot, a move holding the restart
-#                  until it ends, nothing due; and the lock, with the real
+#   updates        the nightly update, which installs the newest release
+#                  eligible for the server: that release already installed,
+#                  a newer one, then the update script that release
+#                  publishes, checked against the table (a marked copy
+#                  proves it replaced the script), a failed installer, a
+#                  reboot asked for, an installer that cannot be downloaded,
+#                  a failed status read, three nights under a move, an ended
+#                  move, a failed restart, an older one never installed back
+#                  down, none eligible, no home; then the follow run: no
+#                  home, a newer release and the restart but never a reboot,
+#                  a move holding the restart until it ends, a computer's
+#                  work holding it until the engine says it may go, nothing
+#                  due; the owner's own update (--release): no downgrade, no
+#                  release the table lacks, none ahead of the apps unless
+#                  --ahead-of-apps says so; and the lock, with the real
 #                  flock: a follow run leaving the update to the run that
 #                  holds it, and the night waiting for that run
 #   tailnet        --tailscale: a key without the flag, a malformed one and
@@ -798,35 +804,67 @@ rebooted() {
   rm -f /run/reboot-required
 }
 
+# The table every release of these scenarios is pinned in, each with this
+# first boot as its Always On server script, which the update runs with
+# --update-script-only after it installs that release; release 1.2.4's copy
+# is marked, so its run is seen to replace the update script.
+serve_releases() {
+  digest=$(sha256sum "$FIRST_BOOT" | cut -d' ' -f1)
+  {
+    printf 'format 1\nlatest 1.2.11\n'
+    for release in 1.2.3 1.2.4 1.2.5 1.2.6 1.2.7 1.2.8 1.2.9 1.2.10 1.2.11; do
+      if [ "$release" = 1.2.4 ]; then
+        sed 's/^REBOOT_FLAG=\/run\/reboot-required$/&\n# invented mark of release 1.2.4/' "$FIRST_BOOT" >/tmp/marked-first-boot.sh
+        install -D -m 0644 /tmp/marked-first-boot.sh "$FIXTURES/release/v$release/fermix_always_on.sh"
+        printf '%s %s fermix_always_on.sh\n' "$release" "$(sha256sum /tmp/marked-first-boot.sh | cut -d' ' -f1)"
+      else
+        install -D -m 0644 "$FIRST_BOOT" "$FIXTURES/release/v$release/fermix_always_on.sh"
+        printf '%s %s fermix_always_on.sh\n' "$release" "$digest"
+      fi
+    done
+  } >"$FIXTURES/releases"
+}
+
+# The two calls that make the update script release $1's own.
+refresh_calls() {
+  printf "'curl GET https://fermix.ai/install/releases' 'curl GET https://github.com/tezra-io/fermix/releases/download/v%s/fermix_always_on.sh'" "$1"
+}
+
 # The nightly update, run by hand as fermix-update.service runs it, one night
 # per case, on a host first boot enrolled. Releases are invented versions: the
-# release the computers run is the stand-in fermix's update_ceiling
-# ($FIXTURES/ceiling, 1.2.3 without it), the fake installer installs the one
-# it is asked for, and the stand-in fermix runs the release its last start
-# installed.
+# newest release eligible for the server is the stand-in fermix's
+# update_ceiling ($FIXTURES/ceiling, 1.2.3 without it), the fake installer
+# installs the one it is asked for, each install then runs that release's
+# update script from the table (serve_releases), and the stand-in fermix runs
+# the release its last start installed.
 updates() {
   run_first_boot env FERMIX_ENROLL_CODE="$CODE" sh "$FIRST_BOOT"
   check "[ $STATUS -eq 0 ]" "a host enrolls (exit $STATUS)"
   [ "$STATUS" -eq 0 ] || sed 's/^/    /' "$OUT"
   check_updates
+  serve_releases
   update=/usr/local/sbin/fermix-update
   status='fermix service status --json [as fermix]'
   home='fermix home status --json [as fermix]'
   restart='fermix restart [as fermix]'
   reboot='systemctl reboot'
   install='curl GET https://fermix.ai/install'
+  table='curl GET https://fermix.ai/install/releases'
 
   run_apart "$update"
   check "[ $STATUS -eq 0 ] && night_calls '$home' '$status'" \
-    "a night on the release its computers run downloads nothing, asks whether a restart is due, and does nothing else"
-  check "contains $OUT '==> Fermix 1.2.3 is the release your computers run'" "and says so"
+    "a night on the eligible release downloads nothing, asks whether a restart is due, and does nothing else"
+  check "contains $OUT '==> Fermix 1.2.3 is the newest release eligible for this server'" "and says so"
   check "contains $OUT '==> No restart is due and no update asks for a reboot'" "and that nothing is due"
 
   printf '1.2.4\n' >"$FIXTURES/ceiling"
   run_apart "$update"
-  check "[ $STATUS -eq 0 ] && night_calls '$home' '$install' 'installer --no-setup --version 1.2.4' '$status' '$home' '$restart'" \
-    "a newer release on its computers is installed exactly, and with no move under way the engine restarts as its own account"
+  check "[ $STATUS -eq 0 ] && night_calls '$home' '$install' 'installer --no-setup --version 1.2.4' $(refresh_calls 1.2.4) '$status' '$home' '$restart'" \
+    "a newer eligible release is installed exactly, its update script replaces this one, and with no move under way the engine restarts as its own account"
   check "contains $OUT '==> Fermix went from 1.2.3 to 1.2.4'" "and names both versions"
+  check "grep -qxF '# invented mark of release 1.2.4' $update && [ \"\$(mode_owner $update)\" = '755 root:root' ]" \
+    "the update script is now the one release 1.2.4 publishes, root's alone"
+  check "contains $OUT '==> This update script is now Fermix 1.2.4'\''s own'" "and the night says so"
   for name in HOME XDG_RUNTIME_DIR FERMIX_HOME; do
     check "grep -qx $name $LOG/env-restart" "fermix restart has $name"
   done
@@ -844,8 +882,9 @@ updates() {
 
   rm -f "$FIXTURES/installer-fails"
   run_apart "$update"
-  check "[ $STATUS -eq 0 ] && night_calls '$home' '$install' 'installer --no-setup --version 1.2.5' '$status' '$home' '$restart' '$reboot'" \
+  check "[ $STATUS -eq 0 ] && night_calls '$home' '$install' 'installer --no-setup --version 1.2.5' $(refresh_calls 1.2.5) '$status' '$home' '$restart' '$reboot'" \
     "the next night updates, restarts the engine, then reboots as asked"
+  check "! grep -qF 'invented mark' $update" "and the update script is release 1.2.5's own again"
   rebooted
 
   printf '1.2.6\n' >"$FIXTURES/ceiling"
@@ -864,7 +903,7 @@ updates() {
   run_apart "$update"
   ended_with "fermix service status stopped, so the engine is not restarted tonight; its message above says why." \
     "when fermix service status fails, the night says so in one line and ends non-zero"
-  check "night_calls '$home' '$install' 'installer --no-setup --version 1.2.6' '$status' '$home' '$reboot'" \
+  check "night_calls '$home' '$install' 'installer --no-setup --version 1.2.6' $(refresh_calls 1.2.6) '$status' '$home' '$reboot'" \
     "and skips the restart but still reboots"
   rm -f "$FIXTURES/service-status-fails"
   rebooted
@@ -884,7 +923,7 @@ updates() {
   printf 'receiving|Receiving the home from Invented Mac.\n' >"$FIXTURES/phases"
   : >/run/reboot-required
   run_apart "$update"
-  check "[ $STATUS -eq 0 ] && night_calls '$home' '$install' 'installer --no-setup --version 1.2.7' '$status' '$home'" \
+  check "[ $STATUS -eq 0 ] && night_calls '$home' '$install' 'installer --no-setup --version 1.2.7' $(refresh_calls 1.2.7) '$status' '$home'" \
     "the first night this candidate receives a move, nothing restarts or reboots"
   check "contains $OUT '==> A move is under way on this server (receiving), so the engine restarts at the first follow run after it ends'" \
     "and the restart says why in one line"
@@ -925,7 +964,7 @@ updates() {
   run_apart "$update"
   ended_with "Fermix is updated, but fermix restart stopped; its message above says why." \
     "a restart that fails says so in one line and ends the night non-zero"
-  check "night_calls '$home' '$install' 'installer --no-setup --version 1.2.8' '$status' '$home' '$restart' '$reboot'" \
+  check "night_calls '$home' '$install' 'installer --no-setup --version 1.2.8' $(refresh_calls 1.2.8) '$status' '$home' '$restart' '$reboot'" \
     "and the server still reboots"
   rm -f "$FIXTURES/restart-fails"
   rebooted
@@ -933,14 +972,14 @@ updates() {
   printf '1.2.7\n' >"$FIXTURES/ceiling"
   run_apart "$update"
   check "[ $STATUS -eq 0 ] && night_calls '$home' '$status' '$home' '$restart'" \
-    "a computer on an older release is never installed back down to; the restart a night left due still runs"
-  check "contains $OUT '==> Fermix 1.2.8 is newer than 1.2.7, the oldest release your computers run, and is never installed back down: moving Fermix back to that computer waits until it updates'" \
+    "an older eligible release is never installed back down to; the restart a night left due still runs"
+  check "contains $OUT '==> Fermix 1.2.8 is newer than 1.2.7, the newest release eligible for this server, and is never installed back down'" \
     "and says why"
 
   printf 'none\n' >"$FIXTURES/ceiling"
   run_apart "$update"
-  check "[ $STATUS -eq 0 ] && night_calls '$home' '$status'" "with no computer seen, nothing is installed"
-  check "contains $OUT '==> No computer has reached this server in the last 30 days, so Fermix stays at 1.2.8'" \
+  check "[ $STATUS -eq 0 ] && night_calls '$home' '$status'" "with no release eligible, nothing is installed"
+  check "contains $OUT '==> No release is eligible for this server now (fermix home status says why), so Fermix stays at 1.2.8'" \
     "and says so"
 
   rm -rf /home/fermix/.fermix
@@ -949,12 +988,13 @@ updates() {
   run_apart "$update"
   check "[ $STATUS -eq 0 ] && night_calls '$status'" \
     "a server with no home yet (a restore host) installs nothing and starts no engine"
-  check "contains $OUT '==> This server has no Fermix home yet, so no computer names the release to install; Fermix stays at 1.2.8'" \
+  check "contains $OUT '==> This server has no Fermix home yet, so no release is chosen for it; Fermix stays at 1.2.8'" \
     "and says why"
   check "contains $OUT '==> No restart is due and no update asks for a reboot'" "and that nothing is due"
   check "[ \"\$(deferral_count)\" = none ]" "a night with no move clears the count"
   check "[ -z \"\$(find /run -maxdepth 1 -name 'fermix-update.*' -type d)\" ]" "no night leaves a work directory behind"
   follow_runs
+  hand_updates
   update_lock
 }
 
@@ -972,8 +1012,8 @@ follow_runs() {
   count=$(deferral_count)
   : >/run/reboot-required
   run_apart "$update" --follow
-  check "[ $STATUS -eq 0 ] && night_calls '$home' '$install' 'installer --no-setup --version 1.2.9' '$status' '$home' '$restart'" \
-    "a follow run installs its computers' newer release, then restarts the engine as its own account"
+  check "[ $STATUS -eq 0 ] && night_calls '$home' '$install' 'installer --no-setup --version 1.2.9' $(refresh_calls 1.2.9) '$status' '$home' '$restart'" \
+    "a follow run installs the newer eligible release, then restarts the engine as its own account"
   check "contains $OUT '==> Fermix went from 1.2.8 to 1.2.9'" "and names both versions"
   check "[ -e /run/reboot-required ] && [ \"\$(deferral_count)\" = '$count' ]" \
     "it never reboots, though an update asks for it, and leaves the night's count as it was"
@@ -981,22 +1021,52 @@ follow_runs() {
   printf '1.2.10\n' >"$FIXTURES/ceiling"
   printf 'receiving|Receiving the home from Invented Mac.\n' >"$FIXTURES/phases"
   run_apart "$update" --follow
-  check "[ $STATUS -eq 0 ] && night_calls '$home' '$install' 'installer --no-setup --version 1.2.10' '$status' '$home'" \
+  check "[ $STATUS -eq 0 ] && night_calls '$home' '$install' 'installer --no-setup --version 1.2.10' $(refresh_calls 1.2.10) '$status' '$home'" \
     "a follow run while a move is under way installs, and holds the restart"
   check "contains $OUT '==> A move is under way on this server (receiving), so the engine restarts at the first follow run after it ends'" \
     "and says the restart waits until the move ends"
   printf 'committed|Moved to the invented server.\n' >"$FIXTURES/phases"
+  printf '240\n' >"$FIXTURES/hold"
+  run_apart "$update" --follow
+  check "[ $STATUS -eq 0 ] && night_calls '$home' '$status' '$home'" \
+    "once the move ended, work Fermix runs on a computer still holds the restart"
+  check "contains $OUT '==> Fermix is running work on a computer, so the engine restarts once it ends, at a follow run within 240 seconds'" \
+    "and says for how long at most"
+  printf '0\n' >"$FIXTURES/hold"
   run_apart "$update" --follow
   check "[ $STATUS -eq 0 ] && night_calls '$home' '$status' '$home' '$restart'" \
-    "the first follow run after the move ended restarts the engine"
-  rm -f "$FIXTURES/phases"
+    "the first follow run the engine lets go restarts it"
+  rm -f "$FIXTURES/phases" "$FIXTURES/hold"
 
   run_apart "$update" --follow
   check "[ $STATUS -eq 0 ] && night_calls '$home' '$status' && [ ! -s $OUT ] && [ ! -s $ERR ]" \
     "a follow run with nothing due asks only what it must and says nothing"
   run_apart "$update" --now
-  check "[ $STATUS -eq 1 ] && [ ! -s $LOG/calls.log ] && [ \"\$(cat $ERR)\" = 'fermix update: An option was not recognised. fermix-update takes --follow, which fermix-follow.timer passes, or nothing for the nightly update.' ]" \
-    "an option other than --follow is refused, in one sentence, before anything runs"
+  check "[ $STATUS -eq 1 ] && [ ! -s $LOG/calls.log ] && [ \"\$(cat $ERR)\" = 'fermix update: An option was not recognised. fermix-update takes --follow, which fermix-follow.timer passes, --release with a release and, to go ahead of the apps, --ahead-of-apps, or nothing for the nightly update.' ]" \
+    "an option it does not take is refused, in one sentence, before anything runs"
+}
+
+# The owner's own update on the same host, which runs 1.2.10 with 1.2.10
+# eligible: behind the same gate as the automatic one.
+hand_updates() {
+  run_apart "$update" --release 1.2.9
+  ended_with "Fermix 1.2.10 is installed, and 1.2.9 is older: Fermix is never installed back down, since an older Fermix cannot read your home." \
+    "a hand update to an older release is refused, saying why"
+  check "[ ! -s $LOG/calls.log ]" "before anything is read"
+
+  run_apart "$update" --release 1.2.12
+  ended_with "https://fermix.ai/install/releases lists no release 1.2.12, so nothing was installed." \
+    "a hand update to a release the table lacks is refused"
+
+  run_apart "$update" --release 1.2.11
+  ended_with "Fermix 1.2.11 is ahead of the apps: no app that carries it is published yet for a computer that keeps your backups, and that computer could not restore your home from them. Nothing was installed. To install it all the same, run: fermix-update --release 1.2.11 --ahead-of-apps" \
+    "a hand update past the eligible release is refused, with the one override named"
+  check "night_calls '$table' '$home'" "having read only the table and the eligible release"
+
+  run_apart "$update" --release 1.2.11 --ahead-of-apps
+  check "[ $STATUS -eq 0 ] && night_calls '$table' '$home' '$install' 'installer --no-setup --version 1.2.11' $(refresh_calls 1.2.11) '$status' '$home' '$restart'" \
+    "--ahead-of-apps installs it, takes its update script and restarts the engine, and never reboots"
+  check "contains $OUT '==> Installing Fermix 1.2.11 ahead of the apps, as asked'" "and says it goes ahead of the apps"
 }
 
 # Waits, at most 60 s, until the command $2 succeeds; past that, $1 is a

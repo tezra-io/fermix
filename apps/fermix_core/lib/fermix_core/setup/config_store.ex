@@ -270,6 +270,24 @@ defmodule FermixCore.Setup.ConfigStore do
   defp log_notice({:info, sentence}), do: Logger.info(sentence)
   defp log_notice({:warning, sentence}), do: Logger.warning(sentence)
 
+  @doc """
+  The machine settings `home`'s `config.toml` holds, by name
+  (`MachineFile.strip/1`): ones written there by hand since the boot moved
+  them, which no load reads (`MachineFile.join/2`). Only named, for a reload
+  to say (`MachineFile.misplaced_notice/1`); `[]` when it holds none or does
+  not exist.
+  """
+  @spec misplaced_machine_settings(Path.t()) ::
+          {:ok, [String.t()]} | {:error, {:config, Path.t(), term()}}
+  def misplaced_machine_settings(home) when is_binary(home) and home != "" do
+    file = home_document_path(home)
+
+    case read_settings(file) do
+      {:ok, contents} -> {:ok, contents |> text() |> MachineFile.strip() |> elem(1)}
+      {:error, reason} -> {:error, {:config, file, reason}}
+    end
+  end
+
   # Written beside the file and renamed over it, mode `0600`; a write that
   # fails removes what it left.
   defp write_atomic(file, text) do
@@ -379,6 +397,33 @@ defmodule FermixCore.Setup.ConfigStore do
       when is_binary(home) and home != "" and is_binary(table) and table != "" and
              is_list(pairs) do
     with_config_lock(home, fn -> write_machine_table(home, table, pairs) end)
+  end
+
+  @doc """
+  Removes `table`, and every table beneath it, from `home`'s `machine.toml`,
+  every other line of the file kept; a file or a table that is absent has
+  nothing to remove. Under the config lock, as `put_machine_table/3`.
+  """
+  @spec drop_machine_table(Path.t(), String.t()) :: :ok | {:error, term()}
+  def drop_machine_table(home, table)
+      when is_binary(home) and home != "" and is_binary(table) and table != "" do
+    with_config_lock(home, fn -> remove_machine_table(home, table) end)
+  end
+
+  defp remove_machine_table(home, table) do
+    file = MachineFile.path(home)
+
+    case File.read(file) do
+      {:ok, text} ->
+        with :ok <- write_atomic(file, ConfigText.drop_tables(text, table)),
+             do: persisted_baseline(home)
+
+      {:error, :enoent} ->
+        :ok
+
+      {:error, reason} ->
+        {:error, {:config_unreadable, file, reason}}
+    end
   end
 
   defp write_machine_table(home, table, pairs) do

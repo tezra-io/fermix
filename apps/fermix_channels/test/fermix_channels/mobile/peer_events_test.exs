@@ -342,17 +342,160 @@ defmodule FermixChannels.Mobile.PeerEventsTest do
     end
   end
 
+  # M97 §6.1: the invocation, the same five events either way.
+  describe "an invocation's events, either way" do
+    @open %{
+      "id" => "inv-k3t9w2m7q4x8b6n1c5v0zhjdfa",
+      "capability" => "files",
+      "op" => "read",
+      "deadline_ms" => 20_000,
+      "epoch" => 4,
+      "origin" => "chat",
+      "turn" => %{"session_id" => "main-12", "tool_call_id" => "call-3"},
+      "index" => 0,
+      "last" => true
+    }
+    @part %{"size_bytes" => 9, "sha256" => @sha, "mime" => "text/plain"}
+
+    test "a request names its capability, op, deadline, epoch and origin" do
+      assert {:ok, %{type: "invoke_open", bytes: "{}"}} = decode("invoke_open", @open, "{}")
+      assert {:ok, _frame} = encode("invoke_open", @open, "{}")
+      assert {:ok, _event} = decode("invoke_open", Map.put(@open, "part", @part), "{}")
+
+      # A computer's own request names no turn; a deadline of 0 is the wire's
+      # to carry, and the receiver's to allow for a long-lived op alone.
+      own =
+        @open |> Map.delete("turn") |> Map.merge(%{"origin" => "computer", "deadline_ms" => 0})
+
+      assert {:ok, _event} = decode("invoke_open", own, "{}")
+
+      for {field, bad} <- [
+            {"capability", "Files"},
+            {"capability", String.duplicate("a", 33)},
+            {"op", "Read"},
+            {"op", String.duplicate("a", 65)},
+            {"deadline_ms", 900_001},
+            {"deadline_ms", -1},
+            {"epoch", 0},
+            {"origin", "owner"},
+            {"id", "-inv"}
+          ] do
+        assert {:error, {:invalid_field, ^field}} =
+                 decode("invoke_open", Map.put(@open, field, bad), "{}"),
+               "#{field} #{inspect(bad)}"
+      end
+
+      assert {:error, {:missing_field, "epoch"}} =
+               decode("invoke_open", Map.delete(@open, "epoch"), "{}")
+
+      assert {:error, {:missing_field, "turn.tool_call_id"}} =
+               decode("invoke_open", %{@open | "turn" => %{"session_id" => "main-12"}}, "{}")
+
+      for {field, bad} <- [
+            {"size_bytes", 0},
+            {"size_bytes", 20 * 1_024 * 1_024 + 1},
+            {"sha256", "abc"},
+            {"mime", "text plain"}
+          ] do
+        named = "part." <> field
+
+        assert {:error, {:invalid_field, ^named}} =
+                 decode("invoke_open", Map.put(@open, "part", %{@part | field => bad}), "{}")
+      end
+
+      assert {:error, {:missing_field, "bytes"}} = decode("invoke_open", @open, <<>>)
+    end
+
+    test "a part's frame names its whole size, which decides its lane" do
+      frame = %{"id" => @open["id"], "index" => 0, "last" => false, "size_bytes" => 300_000}
+      assert {:ok, _event} = decode("invoke_part", frame, "nine byte")
+      assert {:ok, _frame} = encode("invoke_part", frame, "nine byte")
+
+      assert {:error, {:missing_field, "size_bytes"}} =
+               decode("invoke_part", Map.delete(frame, "size_bytes"), "nine byte")
+
+      assert {:error, {:invalid_field, "size_bytes"}} =
+               decode("invoke_part", %{frame | "size_bytes" => 0}, "nine byte")
+
+      assert {:error, {:missing_field, "bytes"}} = decode("invoke_part", frame, <<>>)
+    end
+
+    test "an answer's status and refusal are the closed sets, its message and receipt bounded" do
+      answer = %{
+        "id" => @open["id"],
+        "status" => "ok",
+        "duration_ms" => 41,
+        "receipt" => %{"at" => "2031-06-08T09:22:10.000Z", "target" => "notes/plan.md"},
+        "index" => 0,
+        "last" => true
+      }
+
+      assert {:ok, _event} = decode("invoke_result", answer, "{}")
+      assert {:ok, _frame} = encode("invoke_result", answer, "{}")
+
+      refused =
+        Map.merge(answer, %{
+          "status" => "refused",
+          "refusal" => "stopped_here",
+          "message" => "The person at this computer stopped it."
+        })
+
+      assert {:ok, _event} = decode("invoke_result", refused, "{}")
+
+      for {field, bad} <- [
+            {"status", "done"},
+            {"refusal", "denied"},
+            {"message", String.duplicate("a", 513)},
+            {"duration_ms", -1}
+          ] do
+        assert {:error, {:invalid_field, ^field}} =
+                 decode("invoke_result", Map.put(refused, field, bad), "{}"),
+               "#{field} #{inspect(bad)}"
+      end
+
+      for {field, bad} <- [{"at", "yesterday"}, {"target", String.duplicate("a", 257)}] do
+        named = "receipt." <> field
+        receipt = %{answer["receipt"] | field => bad}
+
+        assert {:error, {:invalid_field, ^named}} =
+                 decode("invoke_result", %{answer | "receipt" => receipt}, "{}")
+      end
+    end
+
+    test "a cancel and a status ask carry an id and nothing else" do
+      for type <- ~w(invoke_cancel invoke_status) do
+        assert {:ok, _event} = decode(type, %{"id" => @open["id"]})
+        assert {:ok, _frame} = encode(type, %{"id" => @open["id"]})
+        assert {:error, {:missing_field, "id"}} = decode(type, %{})
+      end
+    end
+
+    test "a request's arguments are bounded to 1 MiB and an answer's result to 4 MiB" do
+      alias FermixChannels.Mobile.Chunks
+
+      assert Chunks.bound("invoke_open") == {:ok, 1_048_576}
+      assert Chunks.bound("invoke_result") == {:ok, 4_194_304}
+      assert Chunks.key_field("invoke_open") == {:ok, "id"}
+      assert Chunks.key_field("invoke_result") == {:ok, "id"}
+
+      {:ok, bound} = Chunks.bound("invoke_open")
+      {:more, whole} = bound |> Chunks.new() |> Chunks.add(0, false, :binary.copy("a", bound))
+
+      assert {:error, {:chunk_payload_too_large, _size, ^bound}} = Chunks.add(whole, 1, true, "a")
+    end
+  end
+
   test "the table and the catalogs agree, and every raw-tailed event is named" do
     for type <- PeerEvents.client_events(), do: assert(type in Protocol.client_events())
     for type <- PeerEvents.server_events(), do: assert(type in Protocol.server_events())
 
     assert Enum.sort(PeerEvents.raw_events(:client)) ==
-             ~w(call_audio call_frame call_line companion_line loopback_request manage
-                move_chunk offers)
+             ~w(call_audio call_frame call_line companion_line invoke_open invoke_part
+                invoke_result loopback_request manage move_chunk offers)
 
     assert Enum.sort(PeerEvents.raw_events(:server)) ==
-             ~w(call_audio call_line companion_line loopback_response manage_result
-                snapshot_chunk)
+             ~w(call_audio call_line companion_line invoke_open invoke_part invoke_result
+                loopback_response manage_result snapshot_chunk)
   end
 
   defp decode(type, fields, bytes \\ <<>>) do

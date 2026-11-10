@@ -161,6 +161,7 @@ defmodule FermixCore.Home.Candidate do
     now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
 
     with {:ok, code} <- EnrollmentCode.decode(code_text),
+         :ok <- candidate_code(code),
          :ok <- not_expired(code, now),
          {:ok, destination} <- given_destination(Keyword.get(opts, :destination)),
          {:ok, found} <- fresh(home, window(code), Keyword.take(opts, [:hello])) do
@@ -317,6 +318,11 @@ defmodule FermixCore.Home.Candidate do
       "The enrollment code expired at #{DateTime.to_iso8601(at)}. Get a new code from the " <>
         "primary's Always On and enroll with it."
 
+  def error_sentence({:code_purpose, :computer}),
+    do:
+      "That code connects a computer to your Fermix, so it sets up no server: open the code " <>
+        "for your own server in Always On."
+
   def error_sentence(:primary_epoch),
     do:
       "This home has run as a primary (it holds a primary epoch), so it cannot become a candidate."
@@ -391,6 +397,10 @@ defmodule FermixCore.Home.Candidate do
   def error_sentence(other), do: "The candidate's files could not be used: #{inspect(other)}."
 
   # -- enroll -----------------------------------------------------------------
+
+  # A computer's code joins a computer to a home (M97 §3.1); it makes no server.
+  defp candidate_code(%{purpose: :candidate}), do: :ok
+  defp candidate_code(%{purpose: purpose}), do: {:error, {:code_purpose, purpose}}
 
   defp not_expired(%{expires_at: at}, now) do
     if DateTime.compare(at, now) == :gt, do: :ok, else: {:error, {:code_expired, at}}

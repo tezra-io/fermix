@@ -487,7 +487,7 @@ defmodule Fermix.CLI.SettingsCommand.RenderTest do
                  "  - Provider settings changed since Fermix started.\n"
 
       assert text(Render.reload(%{result | "config_state" => "external_change"})) =~
-               "config.toml state: external_change\n"
+               "config.toml and machine.toml state: external_change\n"
     end
   end
 
@@ -538,8 +538,8 @@ defmodule Fermix.CLI.SettingsCommand.RenderTest do
     test "external_change points at reload" do
       assert Render.error(mgmt("external_change", %{"section" => "personalization"}), @read) ==
                {1,
-                "config.toml changed outside Fermix, so nothing was saved.\n" <>
-                  "Load it with `fermix settings reload`, then retry."}
+                "config.toml or machine.toml changed outside Fermix, so nothing was saved.\n" <>
+                  "Load them with `fermix settings reload`, then retry."}
     end
 
     test "config_unreadable carries the daemon's sentence" do
@@ -547,8 +547,9 @@ defmodule Fermix.CLI.SettingsCommand.RenderTest do
 
       assert Render.error(mgmt("config_unreadable", details), @read) ==
                {1,
-                "config.toml could not be read: config.toml [fermix_core.providers] openai " <>
-                  "must be a table. Fix it, then run `fermix settings reload`."}
+                "config.toml or machine.toml could not be read: config.toml " <>
+                  "[fermix_core.providers] openai must be a table. Fix it, then run " <>
+                  "`fermix settings reload`."}
     end
 
     test "a refused secret store names the file store and never switches it" do

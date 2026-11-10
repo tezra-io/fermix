@@ -3,6 +3,7 @@
   "reference": "Independent RFC 7748 X25519, RFC 8439 ChaCha20-Poly1305, and Noise state-machine implementation",
   "suite": "Noise_{IK,IKpsk2}_25519_ChaChaPoly_SHA256",
   "sas": "HMAC-SHA256(handshake_hash, 'fermix-mobile-sas-v1'); first BE u32 modulo 1000000; zero-pad to 6 digits",
+  "computer_sas": "HMAC-SHA256(handshake_hash, 'fermix-computer-sas-v1'); first BE u32 modulo 1000000; zero-pad to 6 digits: a computer's join, whose digits never match a phone's",
   "vectors": [
     {
       "pattern": "ik",
@@ -27,6 +28,7 @@
       ],
       "handshake_hash": "595624126ecab8f04803c4d2b7bbf9cdbb390157ccc5a5dd3db5432589c45834",
       "sas": "077362",
+      "computer_sas": "459678",
       "transport_messages": [
         {
           "plaintext": "6d6f62696c652d6d657373616765",
@@ -71,6 +73,7 @@
       ],
       "handshake_hash": "89ac9b21852cc86e62189504d9ab359132fedb9c2e3fd5a2c12415138476093b",
       "sas": "669979",
+      "computer_sas": "954294",
       "transport_messages": [
         {
           "plaintext": "6d6f62696c652d6d657373616765",

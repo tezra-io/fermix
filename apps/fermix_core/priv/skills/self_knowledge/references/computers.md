@@ -1,8 +1,8 @@
 # The home's computers (Always On)
 
 Once the home runs on an Always On server, every computer linked to it is a
-member of the home: today the computer the home moved from; a computer that
-joins comes in a later update of Fermix. The server keeps a record of each,
+member of the home: the computer the home moved from, and every computer
+the owner added with a code (*Adding a computer*). The server keeps a record of each,
 and each computer decides for itself what Fermix on the server may use on
 it. In this release the server lists its computers and what they offer, but
 runs nothing on them yet. The move, the link and the summary: skill_view(name:
@@ -32,6 +32,76 @@ runs nothing on them yet. The move, the link and the summary: skill_view(name:
   called <name>.", "Your server is already called <name>.", "Your Fermix has
   no such computer." No `fermix` command renames a computer, and the agent
   has no tool for it.
+
+## Adding a computer
+
+Any computer with Fermix can join a home that already runs. Nothing moves:
+the new computer keeps its own key, its link and its own settings, and holds
+no memory of its own.
+
+1. **Open a code.** On a computer already in the home: Always On > Details >
+   **Add a computer**. On the server: `fermix always-on add-computer`. The
+   code works once, for 30 minutes, for a computer and nothing else. Only
+   one code is open at a time: while a code for the owner's own server is
+   open, Add a computer is refused until that one is used or cancelled, and
+   a new computer code replaces an older one.
+2. **Enter it on the new computer.** In the app's first-run screen, the
+   choice to connect to a Fermix that already runs (management
+   `computer.join.start`). With no app: stop Fermix there, run `fermix
+   computer join CODE`, then start Fermix.
+3. **Compare six digits.** The new computer shows them: "Add this Mac on
+   <server>, where it asks you to. Both show 482 913; if they differ, do not
+   add it." The Always On screen of the server and of every linked computer
+   says "A computer named loft-linux (Linux) asks to join your Fermix. Add it
+   only if it shows 482 913.", with **Add it** (type the digits read on the
+   new computer; on the server `fermix always-on approve-computer --sas
+   482913`) and **Do not add it** (`deny-computer`). The digits come from
+   the encrypted connection itself, so someone who only saw the code cannot
+   make them match. A phone cannot add a computer yet.
+
+- Until the owner adds it, the new computer has no access and no record.
+  Not adding it, typing digits that are not its own ("Those digits are not
+  the ones the new computer showed, so it was not added. Open a new code to
+  try again."), its connection dropping while it waits and the 30 minutes
+  running out all add nothing, and the code is spent each time: open a new
+  one. **Cancel** on the new computer makes it its own Fermix again.
+- Once added it is listed at once, under the name it gave (with " 2" when
+  another device has that name), and the owner's other surfaces are told "A
+  computer named loft-linux joined your Fermix." It starts with every offer
+  off (switched on at that computer, below), keeps no copies of the home's
+  backups, and has no Move back or Restore here: those belong to the
+  computer the home moved from.
+- A computer that already has a Fermix of its own is refused by name, and
+  nothing is deleted to make room: "This computer already has a Fermix of
+  its own (it holds <what>), so it cannot join another. Two homes cannot be
+  merged." What counts: any message, memory or scheduled job, a paired phone
+  or computer, a home that moved to a server, or a link to one. A code for
+  the owner's own server ("That code sets up a server of your own, so a
+  computer cannot join with it."), an expired one and a second join while
+  one runs are refused too.
+- **A computer's key** is in its own secret store (the Keychain on a Mac,
+  the keyring on Linux, the file store where the owner chose it), named by
+  the home's profile; it never travels in a move or a backup, and a
+  disconnect or a move back deletes it.
+
+## Removing a computer
+
+- **From the home.** Remove it from the devices (the apps' device list, or
+  `fermix devices revoke <id>` on the server; management
+  `mobile.devices.revoke`): its link ends, the server forgets what it
+  offered, and it comes back only by joining again with a new code. The one
+  computer that keeps the only copies of the server's backups asks first:
+  "<name> keeps the only copies of your server's backups. Remove it anyway?"
+  (`--yes` on the terminal).
+- **From the computer.** **Disconnect this computer** (management
+  `computer.disconnect`) tells the server, then deletes that computer's key,
+  its link and what the server may use on it. A computer that joined is its
+  own Fermix again; the one the home moved from stays retired, with its own
+  copies of the backups. A server that cannot be told asks first: "Fermix
+  could not tell your server. Disconnect anyway? Your server lists this
+  computer until you remove it there."
+- Adding, removing and disconnecting are the owner's decisions: the agent
+  has no tool for them, and a command Fermix runs is refused.
 
 ## What a computer offers
 
@@ -113,6 +183,43 @@ website password saved there: each is done at that computer. What remains:
 with commands on and that computer's sandbox `open`, a server that is
 taken over could read and change the account's files there, which is why the
 move's review warns of it.
+
+## What the server asks of a computer, and that computer's record
+
+The link carries a request from the server to a computer and its answer
+back. No tool of a turn sends one yet (the last section), so today the
+record below stays empty; this is how each request is held once one does.
+
+- **The computer decides.** It refuses a request from an older copy of the
+  home, anything while its master switch is off, and what its own switch
+  for that offer has off, before anything runs; switching the master off
+  also ends what is running ("The person at studio Mac stopped it."). It
+  runs at most 8 requests at once with 32 waiting, and refuses past that.
+- **The kind of turn that asked is the server's word.** Each request names
+  it (a chat, a call, a scheduled run, a cue, a worker, background), and the
+  computer applies its own rules to it. That check guards against a bug on
+  the server, not against a server that was taken over.
+- **Every request ends one way:** done, failed (in the computer's words),
+  refused (switched off, unavailable, outside its sandbox, only while the
+  owner is in the conversation, stopped at the computer, busy, an older copy
+  of the home), timed out, cancelled, or not known.
+- **Not known.** Something that changes that computer is never sent twice
+  by the link. When its answer is lost (the session dropped, the computer
+  restarted), Fermix says so in a sentence of its own: "Fermix lost studio
+  Mac's answer, so whether <what> happened is not known. Check before doing
+  it again." Check, or tell the owner; never repeat it on a guess. A read
+  is simply asked once more.
+- **The receipt and the journal.** The computer writes each request to its
+  own journal before it runs and again when it ends: when, what kind (the
+  offer and operation), what it acted on (a path, a host or an action), the
+  kind of turn, how it ended and how long it took. Never the content: no
+  file bytes, command output or page text. It keeps the newest 2,000
+  requests of the last 7 days, on that computer, in a folder no agent
+  command or file tool can read or write, and the server cannot edit it.
+  The owner reads it there: the management method `computer.journal.list`
+  (`limit` 1 to 200, `before`), answered only on that computer, which its
+  app shows as "What Fermix did on this computer". No `fermix` command and
+  no agent tool lists it.
 
 ## What a moved computer keeps on
 

@@ -128,6 +128,21 @@ defmodule FermixCore.Setup.MachineFileTest do
     end
   end
 
+  # A machine setting written into config.toml by hand after the boot moved
+  # them, as a reload finds it.
+  describe "misplaced_notice/1" do
+    test "names what config.toml holds of this computer's, where it belongs, and its end" do
+      sentence = MachineFile.misplaced_notice(["sandbox", "fermix_core.plugins.dev_local"])
+
+      assert sentence =~
+               "config.toml holds this computer's own settings, which Fermix reads only from " <>
+                 "machine.toml, so they are ignored: sandbox, fermix_core.plugins.dev_local."
+
+      assert sentence =~ "Move them to machine.toml"
+      assert sentence =~ "the next settings save or start removes them from config.toml"
+    end
+  end
+
   describe "migration/3" do
     test "a home with neither file is left as it is" do
       assert MachineFile.migration("", :absent, false) ==
@@ -156,7 +171,10 @@ defmodule FermixCore.Setup.MachineFileTest do
       assert plan.machine == nil
       assert plan.config == elem(MachineFile.strip(@old_config), 0)
       assert {:warning, sentence} = MachineFile.notice(plan)
-      assert sentence =~ "machine.toml already holds"
+      # True of a section added to config.toml by hand too, which the machine
+      # file need not hold.
+      assert sentence =~ "which Fermix reads only from machine.toml, so they were removed"
+      assert sentence =~ ": sandbox, fermix_core.computer_use"
     end
 
     test "a migrated home changes nothing" do

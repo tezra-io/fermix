@@ -15,6 +15,7 @@
     "primary": null,
     "primary_home": null,
     "primary_missing": null,
+    "restart_hold": null,
     "role": "primary",
     "secrets_missing": [],
     "snapshots": {
@@ -62,6 +63,7 @@
       "sentence": "Keep Fermix running when this Mac sleeps. It moves to a server you own. iMessage and meetings stop after the move. This Mac's voice calls stop after the move; calls from your phone carry on at your server when Talk to Fermix is on there and its key is in your server's secret store.",
       "state": "off"
     },
+    "update": null,
     "update_ceiling": null,
     "version": "1.2.3",
     "webhooks": []

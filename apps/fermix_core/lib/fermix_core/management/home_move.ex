@@ -12,6 +12,15 @@ defmodule FermixCore.Management.HomeMove do
     desktop's move back (Always On's Move back), and the window names it
     (its device id), as does the candidate that enrolls through it. The code
     is answered once and never logged or kept in a status.
+  - `home.enroll.open {purpose: "computer"}` (primary only, M97 §3.1) opens
+    the window for a computer that joins the home instead (Add a computer):
+    `Home.Link.impl().open_join/0`. A window of the other purpose that is
+    open is not replaced: the code is refused by name.
+  - `home.enroll.approve {sas}` and `home.enroll.deny` (primary only) are
+    the owner's answer to the computer that waits on that window
+    (`approve_join/1`, `deny_join/0`): approved with the six digits it
+    shows, its row is written; digits that are not its own deny it, and the
+    code is spent either way.
   - `home.enroll.withdraw` (primary only) releases the window
     (`FermixCore.Home.Link.impl().withdraw_enrollment/0`): the copied code a
     desktop opened to move back, when its owner cancels.
@@ -39,7 +48,11 @@ defmodule FermixCore.Management.HomeMove do
     lives only inside that check: it is never stored, logged or answered.
   - In `home.status`: `enrollment` is the window (`state` `open`, `used` or
     `expired`, `expires_at`, and the `candidate_id` that enrolled through
-    it, null until one did) or null; `candidates` the held candidates on
+    it, null until one did; a computer's window also says `purpose`
+    `computer`, its `state` may be `awaiting_approval`, `approved` or
+    `denied`, and it names the `joiner` that waits, `{name, platform, sas}`,
+    or null, and the computer that joined through it, `joined {device_id,
+    name}`, or null) or null; `candidates` the held candidates on
     a primary, empty elsewhere; `move` the move's `phase`, `candidate` (its
     name, null on the candidate itself) and `sentence`, or null.
 
@@ -71,6 +84,10 @@ defmodule FermixCore.Management.HomeMove do
 
   @capability "home"
   @not_primary "Only the primary enrolls candidates and starts a move."
+  @sas_sentence "Type the six digits the new computer shows."
+  @mismatch_sentence "Those digits are not the ones the new computer showed, so it was not " <>
+                       "added. Open a new code to try again."
+  @no_joiner_sentence "No computer is waiting to join your Fermix."
   @owner_sentence "Only the owner can set up Always On, move Fermix or set its recovery " <>
                     "passphrase: use the Fermix app, the setup page or your own terminal."
 
@@ -101,16 +118,14 @@ defmodule FermixCore.Management.HomeMove do
     }
   end
 
-  @doc "`home.enroll.open`: the enrollment window."
+  @doc """
+  `home.enroll.open`: the enrollment window; `opts[:purpose]` `:computer`
+  opens one for a computer that joins the home (`:candidate` unless said).
+  """
   @spec enroll_open(keyword()) :: {:ok, map()} | {:error, term()}
   def enroll_open(opts \\ []) when is_list(opts) do
-    open =
-      Keyword.get(opts, :open_enrollment, fn returning ->
-        Link.impl().open_enrollment(returning)
-      end)
-
     with :ok <- primary(role(opts)) do
-      case open.(returning(Keyword.get(opts, :actor))) do
+      case opener(Keyword.get(opts, :purpose, :candidate), opts).() do
         {:ok, %{code: code, expires_at: %DateTime{} = at}} ->
           {:ok, %{"code" => code, "expires_at" => DateTime.to_iso8601(at)}}
 
@@ -119,6 +134,70 @@ defmodule FermixCore.Management.HomeMove do
       end
     end
   end
+
+  defp opener(:candidate, opts) do
+    open =
+      Keyword.get(opts, :open_enrollment, fn returning ->
+        Link.impl().open_enrollment(returning)
+      end)
+
+    fn -> open.(returning(Keyword.get(opts, :actor))) end
+  end
+
+  defp opener(:computer, opts),
+    do: Keyword.get(opts, :open_join, fn -> Link.impl().open_join() end)
+
+  @doc """
+  `home.enroll.approve`: the owner adds the computer waiting on the window,
+  with the six digits it shows (`sas`).
+  """
+  @spec enroll_approve(term(), keyword()) :: {:ok, map()} | {:error, term()}
+  def enroll_approve(sas, opts \\ []) when is_list(opts) do
+    approve = Keyword.get(opts, :approve_join, fn sas -> Link.impl().approve_join(sas) end)
+
+    with {:ok, sas} <- sas_param(sas),
+         :ok <- primary(role(opts)) do
+      case approve.(sas) do
+        {:ok, %{device_id: id, name: name}} ->
+          {:ok, %{"device_id" => id, "name" => name}}
+
+        {:error, :sas_mismatch} ->
+          {:error, {:invalid_params, "sas", @mismatch_sentence}}
+
+        {:error, :none} ->
+          {:error, {:unavailable, @capability, @no_joiner_sentence}}
+
+        {:error, {:unavailable, sentence}} when is_binary(sentence) ->
+          {:error, {:unavailable, @capability, sentence}}
+      end
+    end
+  end
+
+  @doc "`home.enroll.deny`: the owner does not add the computer waiting on the window."
+  @spec enroll_deny(keyword()) :: {:ok, map()} | {:error, term()}
+  def enroll_deny(opts \\ []) when is_list(opts) do
+    deny = Keyword.get(opts, :deny_join, fn -> Link.impl().deny_join() end)
+
+    with :ok <- primary(role(opts)) do
+      case deny.() do
+        :ok -> {:ok, %{"denied" => true}}
+        {:error, {:unavailable, sentence}} -> {:error, {:unavailable, @capability, sentence}}
+      end
+    end
+  end
+
+  @doc "The six digits a computer shows, as the owner typed them: spaces dropped."
+  @spec sas_param(term()) ::
+          {:ok, String.t()} | {:error, {:invalid_params, String.t(), String.t()}}
+  def sas_param(sas) when is_binary(sas) and byte_size(sas) <= 32 do
+    digits = String.replace(sas, " ", "")
+
+    if Regex.match?(~r/\A[0-9]{6}\z/, digits),
+      do: {:ok, digits},
+      else: {:error, {:invalid_params, "sas", @sas_sentence}}
+  end
+
+  def sas_param(_sas), do: {:error, {:invalid_params, "sas", @sas_sentence}}
 
   # The copied code a linked desktop asks its server for is the one it takes
   # the home back with: the window names that desktop.
@@ -285,13 +364,36 @@ defmodule FermixCore.Management.HomeMove do
 
   defp enrollment_view(nil), do: nil
 
+  # A candidate's window as it always was; a computer's names its purpose,
+  # the computer that waits and the one that joined.
   defp enrollment_view(%{state: state, expires_at: %DateTime{} = at} = window)
-       when state in [:open, :used, :expired],
-       do: %{
-         "state" => Atom.to_string(state),
-         "expires_at" => DateTime.to_iso8601(at),
-         "candidate_id" => window.candidate_id
-       }
+       when state in [:open, :used, :expired, :awaiting_approval, :approved, :denied] do
+    view = %{
+      "state" => Atom.to_string(state),
+      "expires_at" => DateTime.to_iso8601(at),
+      "candidate_id" => window.candidate_id
+    }
+
+    case Map.get(window, :purpose, :candidate) do
+      :candidate ->
+        view
+
+      :computer ->
+        Map.merge(view, %{
+          "purpose" => "computer",
+          "joiner" => joiner_view(Map.get(window, :joiner)),
+          "joined" => joined_view(Map.get(window, :joined))
+        })
+    end
+  end
+
+  defp joiner_view(nil), do: nil
+
+  defp joiner_view(%{name: name, platform: platform, sas: sas}),
+    do: %{"name" => name, "platform" => platform, "sas" => sas}
+
+  defp joined_view(nil), do: nil
+  defp joined_view(%{device_id: id, name: name}), do: %{"device_id" => id, "name" => name}
 
   defp held(home, :primary, now) do
     case Candidates.list(home, now) do

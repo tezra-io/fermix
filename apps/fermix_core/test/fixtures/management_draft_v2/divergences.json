@@ -3437,6 +3437,144 @@
       "field": "params:name",
       "kind": "engine_only",
       "why": "M97 §3.2: computers.rename carries the new name, one line of at most 64 bytes once trimmed, refused with a sentence otherwise. The draft predates the method."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:computer.journal.list",
+      "kind": "engine_only",
+      "why": "M97 §6.3: computer.journal.list is the owner's read of this computer's own journal of what its server did here. It postdates the draft and is published under minimum version 2 with no protocol bump, gated with Always On like home.act, so a client that has not re-vendored never calls it."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:computer.journal.list=2",
+      "kind": "engine_only",
+      "why": "M97 §6.3: computer.journal.list is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.computer.journal.list",
+      "kind": "engine_only",
+      "why": "M97 §6.3: hello publishes every method this daemon serves with its minimum version, computer.journal.list included where Always On is offered. The draft predates it; a client ignores a method it does not know."
+    },
+    {
+      "method": "computer.journal.list",
+      "field": "params:limit",
+      "kind": "engine_only",
+      "why": "M97 §6.3: computer.journal.list takes how many entries to answer, 1 to 200 and 50 when absent. The draft predates the method."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:home.enroll.approve",
+      "kind": "engine_only",
+      "why": "M97 §7.5: home.enroll.approve is the owner's approval of the computer that waits to join, with the six digits it shows. It postdates the draft and is published under minimum version 2 with no protocol bump, behind the Always On gate."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:home.enroll.approve=2",
+      "kind": "engine_only",
+      "why": "M97 §7.5: home.enroll.approve is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.home.enroll.approve",
+      "kind": "engine_only",
+      "why": "M97 §7.5: hello publishes every method this daemon serves with its minimum version, home.enroll.approve included where Always On is offered. The draft predates it; a client ignores a method it does not know."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:home.enroll.deny",
+      "kind": "engine_only",
+      "why": "M97 §7.5: home.enroll.deny is the owner's refusal of the computer that waits to join. It postdates the draft and is published under minimum version 2 with no protocol bump, behind the Always On gate."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:home.enroll.deny=2",
+      "kind": "engine_only",
+      "why": "M97 §7.5: home.enroll.deny is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.home.enroll.deny",
+      "kind": "engine_only",
+      "why": "M97 §7.5: hello publishes every method this daemon serves with its minimum version, home.enroll.deny included where Always On is offered. The draft predates it; a client ignores a method it does not know."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:computer.join.start",
+      "kind": "engine_only",
+      "why": "M97 §3.1: computer.join.start joins this computer to a home that already runs, with the code Add a computer opened there. It postdates the draft and is published under minimum version 2 with no protocol bump, behind the Always On gate."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:computer.join.start=2",
+      "kind": "engine_only",
+      "why": "M97 §3.1: computer.join.start is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.computer.join.start",
+      "kind": "engine_only",
+      "why": "M97 §3.1: hello publishes every method this daemon serves with its minimum version, computer.join.start included where Always On is offered. The draft predates it; a client ignores a method it does not know."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:computer.join.cancel",
+      "kind": "engine_only",
+      "why": "M97 §3.1: computer.join.cancel ends this computer's join wherever it stands. It postdates the draft and is published under minimum version 2 with no protocol bump, behind the Always On gate."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:computer.join.cancel=2",
+      "kind": "engine_only",
+      "why": "M97 §3.1: computer.join.cancel is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.computer.join.cancel",
+      "kind": "engine_only",
+      "why": "M97 §3.1: hello publishes every method this daemon serves with its minimum version, computer.join.cancel included where Always On is offered. The draft predates it; a client ignores a method it does not know."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:computer.disconnect",
+      "kind": "engine_only",
+      "why": "M97 §3.3: computer.disconnect takes this computer out of the home it is linked to. It postdates the draft and is published under minimum version 2 with no protocol bump, behind the Always On gate."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:computer.disconnect=2",
+      "kind": "engine_only",
+      "why": "M97 §3.3: computer.disconnect is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.computer.disconnect",
+      "kind": "engine_only",
+      "why": "M97 §3.3: hello publishes every method this daemon serves with its minimum version, computer.disconnect included where Always On is offered. The draft predates it; a client ignores a method it does not know."
+    },
+    {
+      "method": "computer.join.start",
+      "field": "params:code",
+      "kind": "engine_only",
+      "why": "M97 §3.1: computer.join.start carries the code a computer joins with, at most 4,096 bytes, refused on code when Fermix did not open it, when it sets up a server instead, or when it expired. The draft predates the method."
+    },
+    {
+      "method": "home.enroll.approve",
+      "field": "params:sas",
+      "kind": "engine_only",
+      "why": "M97 §7.5: home.enroll.approve carries the six digits the computer that asks shows, as its owner read them there; digits that are not its own are refused on sas and spend the code. The draft predates the method."
+    },
+    {
+      "method": "home.enroll.open",
+      "field": "params:purpose",
+      "kind": "engine_only",
+      "why": "M97 §3.1: home.enroll.open takes an optional purpose, candidate (the default, as before) or computer, which opens the code a computer joins the home with. The draft predates it; a request without it means what it always meant."
+    },
+    {
+      "method": "mobile.devices.revoke",
+      "field": "params:confirmed",
+      "kind": "engine_only",
+      "why": "M97 §3.3: mobile.devices.revoke now removes a computer too, and takes an optional confirmed, which the one computer that keeps the only copies of the server's backups needs. The draft predates it; a request without it forgets a phone as before."
     }
   ]
 }

@@ -17,12 +17,15 @@ defmodule FermixCore.Management.ProtocolContractTest do
   alias FermixCore.Computers
   alias FermixCore.Computers.Consent
   alias FermixCore.Computers.Facts, as: ComputerFacts
+  alias FermixCore.Computers.Journal
   alias FermixCore.Computers.Offers
   alias FermixCore.Computers.Switches
   alias FermixCore.Cues.Config, as: CuesConfig
   alias FermixCore.Home.Candidates, as: HomeCandidates
+  alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.EnrollmentCode
   alias FermixCore.Home.Epoch
+  alias FermixCore.Home.Join, as: HomeJoin
   alias FermixCore.Home.Move, as: HomeMove
   alias FermixCore.Home.MoveReadiness
   alias FermixCore.Home.Snapshot
@@ -80,6 +83,11 @@ defmodule FermixCore.Management.ProtocolContractTest do
   @golden_now ~U[2031-05-04 12:00:00Z]
   @golden_server "fermix-general-a3f9"
   @golden_candidate "cand-5e2a9c1f7b3d4086"
+  # M97 §3.1, §3.3: the join goldens, in the order `join_cases/0` answers them.
+  @join_goldens ~w(home_enroll_open_computer home_enroll_approve home_enroll_deny
+                   computer_join_start computer_join_cancel computer_disconnect)
+  @join_now ~U[2031-05-04 10:00:00Z]
+  @joined_id "7e1f0c2a-3b4d-4e5f-8a6b-7c8d9e0f1a2b"
 
   @mcp_router_toml ~S"""
   [mcp.servers.filesystem]
@@ -802,6 +810,16 @@ defmodule FermixCore.Management.ProtocolContractTest do
     assert named_fixture_result("home_act_own_server") == json(answer)
   end
 
+  # M97 §3.1, §7.5: Add a computer's code and the computer added are the
+  # router's own answers, each to the step as the screen before it offers it.
+  test "the golden Add a computer answers are the engine's own" do
+    for {golden, step} <- computer_act_cases() do
+      {params, opts} = step.()
+      assert {:ok, answer} = Router.route(request("home.act", params), opts), golden
+      assert named_fixture_result(golden) == json(answer), golden
+    end
+  end
+
   # M97 §3.2, §7.3: a server lists its computers (with the notice that it
   # left out the settings it inherited), a linked Mac that moved before M97
   # waits for the owner's review, and the Mac that sets Always On up shows
@@ -853,6 +871,93 @@ defmodule FermixCore.Management.ProtocolContractTest do
       assert {:error, :invalid_params, details} = Router.route(request, opts)
       assert details == golden_error_details(name), name
     end
+  end
+
+  # M97 §3.1, §3.3, §7.5: a computer's code, the owner's answer to the
+  # computer that asks, the join on the computer itself and its leaving, each
+  # the router's own answer; and each refusal in its own sentence.
+  test "the golden join answers and refusals are the router's own" do
+    for {{method, params, opts}, golden} <- Enum.zip(join_cases(), @join_goldens) do
+      assert {:ok, answer} = Router.route(request(method, params), opts), method
+      assert named_fixture_result(golden) == json(answer), golden
+    end
+
+    for {name, code, method, params, opts} <- join_refusals() do
+      assert {:error, ^code, details} = Router.route(request(method, params), opts), name
+      assert details == golden_error_details(name), name
+    end
+  end
+
+  # M97 §6.3: what Fermix on its server did on this computer, read from its
+  # own journal: an answer, a refusal before anything ran, and one that runs.
+  test "the golden computer journal is the router's own" do
+    home = FermixTestSupport.SafeRm.make_tmp_dir!("contract_journal")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
+    dir = Journal.dir(home)
+    echo = "inv-gk4zq7m2xw5bj8c3tn6vd9hpra"
+    at = ~U[2031-06-08 09:14:02.120Z]
+
+    for record <- [
+          {:started,
+           %{
+             id: echo,
+             at: at,
+             capability: "system",
+             op: "echo",
+             target: "echo",
+             origin: :chat,
+             epoch: 3,
+             turn_session: "main-12"
+           }},
+          {:finished,
+           %{
+             id: echo,
+             at: DateTime.add(at, 4, :millisecond),
+             status: :ok,
+             result_bytes: 96,
+             duration_ms: 4
+           }},
+          {:finished,
+           %{
+             id: "inv-r2m7x4kq9vb3wz6hc8tj5nd2fe",
+             at: ~U[2031-06-08 09:20:41.500Z],
+             status: :refused,
+             refusal: :off,
+             result_bytes: 151,
+             duration_ms: 0,
+             capability: "files",
+             op: "write",
+             target: "drafts/plan.txt",
+             origin: :scheduled
+           }},
+          {:started,
+           %{
+             id: "inv-t5bn8q3zk7mx2cw9vh4dj6rpfa",
+             at: ~U[2031-06-08 09:22:10.000Z],
+             capability: "shell",
+             op: "run",
+             target: "ls drafts",
+             origin: :chat,
+             epoch: 3,
+             turn_session: "main-12"
+           }}
+        ] do
+      :ok =
+        case record do
+          {:started, fields} -> Journal.append_started(dir, fields)
+          {:finished, fields} -> Journal.append_finished(dir, fields)
+        end
+    end
+
+    request = %{
+      request_id: "req-computer-journal-1",
+      protocol_version: 2,
+      method: "computer.journal.list",
+      params: %{"limit" => 20}
+    }
+
+    assert {:ok, answer} = Router.route(request, operation_opts: [home: home])
+    assert named_fixture_result("computer_journal_list") == json(answer)
   end
 
   # M97 §7.2: a computer linked to its server publishes `computer`, what Fermix
@@ -1565,7 +1670,8 @@ defmodule FermixCore.Management.ProtocolContractTest do
       cues_cases() ++
       home_cases() ++
       accessories_cases() ++
-      [act_case(), computers_case()]
+      [act_case(), computers_case()] ++
+      join_cases()
   end
 
   # Every `accessories.*` method against `AccessoryGoldens`' invented facts,
@@ -1776,6 +1882,77 @@ defmodule FermixCore.Management.ProtocolContractTest do
     {"home.act", %{"action" => "cancel", "key" => key}, [operation_opts: [always_on: seams]]}
   end
 
+  # M97 §3.1, §7.5: on the server, Add a computer answers a computer's code
+  # once; then, with a computer waiting on that code, Add it with the digits
+  # it shows answers the computer added, and the screen after it tells the
+  # owner's other surfaces.
+  defp computer_act_cases do
+    home = SafeRm.make_tmp_dir!("contract_add_computer")
+    on_exit(fn -> SafeRm.rm_rf!(home) end)
+    :ok = Epoch.write(home, 5)
+    unique = System.unique_integer([:positive])
+    serializer = :"contract_add_computer_#{unique}"
+    start_supervised!({AlwaysOn, name: serializer}, id: serializer)
+    desktop = %{device_id: @desktop_id, name: "studio-mac", connected: true}
+
+    waiting = %{
+      state: :awaiting_approval,
+      expires_at: ~U[2031-05-04 10:30:00Z],
+      candidate_id: nil,
+      purpose: :computer,
+      joiner: %{name: "loft-linux", platform: "linux", sas: "482913"},
+      joined: nil
+    }
+
+    joined = %{device_id: @joined_id, name: "loft-linux"}
+
+    link =
+      start_supervised!(
+        {Agent, fn -> %{primary: nil, desktops: [desktop], enrollment: nil} end},
+        id: :"contract_add_computer_link_#{unique}"
+      )
+
+    seams = [
+      home: home,
+      engine_role: %{role: :primary, primary: nil},
+      profile: "general",
+      now: @join_now,
+      host_os: :linux,
+      config: [],
+      scheduler: nil,
+      disk_usage: fn _home -> {:ok, %{used: 0.42, nearly_full: false}} end,
+      link_status: fn -> Agent.get(link, & &1) end,
+      open_join: fn ->
+        Agent.update(link, &%{&1 | enrollment: %{waiting | state: :open, joiner: nil}})
+        {:ok, %{code: join_code(:computer), expires_at: ~U[2031-05-04 10:30:00Z]}}
+      end,
+      approve_join: fn "482913" ->
+        Agent.update(link, &%{&1 | enrollment: %{waiting | state: :approved, joined: joined}})
+        {:ok, joined}
+      end,
+      settings_snapshot: fn -> %{} end,
+      jobs: jobs(),
+      serializer: serializer
+    ]
+
+    summary = fn -> seams |> ManagementHome.summary_facts() |> HomeSummary.summary() end
+    opts = [operation_opts: [always_on: seams]]
+
+    add = fn ->
+      %{"detail" => %{"actions" => actions}} = summary.()
+      %{"key" => key} = Enum.find(actions, &(&1["id"] == "add_computer"))
+      {%{"action" => "add_computer", "key" => key}, opts}
+    end
+
+    approve = fn ->
+      Agent.update(link, &%{&1 | enrollment: waiting})
+      %{"action" => %{"id" => "approve_computer", "key" => key}} = summary.()
+      {%{"action" => "approve_computer", "key" => key, "input" => %{"sas" => "482 913"}}, opts}
+    end
+
+    [{"home_act_add_computer", add}, {"home_act_approve_computer", approve}]
+  end
+
   # Use my own Linux server pressed on the first screen: the window it opens
   # names an invented code, the release this engine runs is the golden's own,
   # and the screen after it waits for the server.
@@ -1864,6 +2041,121 @@ defmodule FermixCore.Management.ProtocolContractTest do
     end
   end
 
+  # M97 §3.1, §3.3, §7.5, in the order of `@join_goldens`: the server opens a
+  # computer's code and its owner adds the computer that asks, with the
+  # digits as they typed them, or does not; a computer joins with the code,
+  # cancels a join under way, and one linked to its server leaves it.
+  defp join_cases do
+    [
+      {"home.enroll.open", %{"purpose" => "computer"}, join_server([])},
+      {"home.enroll.approve", %{"sas" => "482 913"}, join_server([])},
+      {"home.enroll.deny", %{}, join_server([])},
+      {"computer.join.start", %{"code" => join_code(:computer)}, joiner(join_home())},
+      {"computer.join.cancel", %{}, joiner(joining_home())},
+      {"computer.disconnect", %{}, leaver(fn _request, _opts -> {:ok, %{"revoked" => true}} end)}
+    ]
+  end
+
+  # Each refusal's golden, its code, and the request that is refused.
+  defp join_refusals do
+    out_of_reach = fn _request, _opts -> {:error, :primary_unreachable, %{}} end
+    mismatch = [approve_join: fn _sas -> {:error, :sas_mismatch} end]
+    none = [approve_join: fn _sas -> {:error, :none} end]
+
+    [
+      {"invalid_params_computer_join_code", :invalid_params, "computer.join.start",
+       %{"code" => join_code(:candidate)}, joiner(join_home())},
+      {"unavailable_computer_join_home_of_its_own", :unavailable, "computer.join.start",
+       %{"code" => join_code(:computer)}, joiner(linked_home())},
+      {"unavailable_computer_disconnect_not_told", :unavailable, "computer.disconnect", %{},
+       leaver(out_of_reach)},
+      {"invalid_params_home_enroll_approve_sas", :invalid_params, "home.enroll.approve",
+       %{"sas" => "100200"}, join_server(mismatch)},
+      {"unavailable_home_enroll_approve_none", :unavailable, "home.enroll.approve",
+       %{"sas" => "482913"}, join_server(none)}
+    ]
+  end
+
+  # The server's window, over a linked computer's forward: the code it
+  # opens, and the owner's answer to the computer that waits.
+  defp join_server(overrides) do
+    seams =
+      Keyword.merge(
+        [
+          engine_role: %{role: :primary, primary: nil},
+          open_join: fn ->
+            {:ok, %{code: join_code(:computer), expires_at: ~U[2031-05-04 10:30:00Z]}}
+          end,
+          approve_join: fn "482913" -> {:ok, %{device_id: @joined_id, name: "loft-linux"}} end,
+          deny_join: fn -> :ok end
+        ],
+        overrides
+      )
+
+    [actor: {:desktop, @desktop_id}, operation_opts: [home: seams]]
+  end
+
+  defp joiner(home) do
+    # No relay runs here: the link says nothing of its server.
+    link_status = fn -> %{primary: nil} end
+    seams = [home: home, now: @join_now, restart: fn -> :ok end, link_status: link_status]
+    [operation_opts: [computer_link: seams]]
+  end
+
+  defp leaver(forward), do: [primary_forward: forward] ++ joiner(linked_home())
+
+  # A home that holds nothing, under a keychain profile of its own (the stub
+  # keychain is one table for the VM).
+  defp join_home do
+    home = SafeRm.make_tmp_dir!("contract_join")
+    on_exit(fn -> SafeRm.rm_rf!(home) end)
+    profile = "contract-join-#{System.unique_integer([:positive])}"
+    File.write!(Path.join(home, "config.toml"), ~s([fermix_core]\nprofile = "#{profile}"\n))
+    home
+  end
+
+  defp joining_home do
+    home = join_home()
+    :ok = HomeJoin.start(home, join_code(:computer), now: @join_now, restart: fn -> :ok end)
+    home
+  end
+
+  defp linked_home do
+    home = join_home()
+
+    :ok =
+      DesktopLink.write(home, %{
+        device_id: @joined_id,
+        key: :keyring,
+        primary: %{
+          name: @golden_server,
+          gateway_pk: :binary.copy(<<0x3C>>, 32),
+          node_id: String.duplicate("4f", 32),
+          relays: [%{"url" => "https://eu1.relay.invalid/", "quic_port" => 7842}],
+          relays_rev: "0123456789abcdef"
+        },
+        epoch: 5
+      })
+
+    home
+  end
+
+  defp join_code(purpose) do
+    {:ok, code} =
+      EnrollmentCode.encode(%{
+        purpose: purpose,
+        secret: :binary.copy(<<0x5A>>, 32),
+        gateway_pk: :binary.copy(<<0x3C>>, 32),
+        node_id: String.duplicate("4f", 32),
+        relays: [%{"url" => "https://eu1.relay.invalid/", "quic_port" => 7842}],
+        relays_rev: "0123456789abcdef",
+        name: @golden_server,
+        expires_at: ~U[2031-05-04 10:30:00Z]
+      })
+
+    code
+  end
+
   # M97 §3.2: name the Linux computer, against the two computers' rows, the
   # Mac's session and both records.
   defp computers_case do
@@ -1911,7 +2203,9 @@ defmodule FermixCore.Management.ProtocolContractTest do
           offers: linux_offers()
         }
       },
-      server_name: @golden_server
+      server_name: @golden_server,
+      # The server's own version, which each computer stands against (M97 §3.4).
+      version: "1.2.3"
     ]
   end
 
@@ -2494,9 +2788,13 @@ defmodule FermixCore.Management.ProtocolContractTest do
        ]}
     end
 
-    # The desktop a move linked is refused, as the phone channel refuses it.
-    def devices_revoke("c41e9d27-5a8b-4f63-9e20-7d1b3c5a8f94", _opts),
-      do: {:error, :desktop_device}
+    # The one computer that keeps the server's backups is removed only once
+    # the owner confirmed it, as the phone channel answers (M97 §3.3).
+    def devices_revoke("c41e9d27-5a8b-4f63-9e20-7d1b3c5a8f94", opts) do
+      if Keyword.get(opts, :confirmed),
+        do: {:ok, %{device_id: "c41e9d27-5a8b-4f63-9e20-7d1b3c5a8f94"}},
+        else: {:error, {:only_backups, "Studio Mac"}}
+    end
 
     def devices_revoke(device_id, _opts), do: {:ok, %{device_id: device_id}}
 
@@ -2540,7 +2838,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
     end
   end
 
-  test "forgetting the desktop a move linked is refused with the golden's sentence" do
+  test "removing the one computer that keeps the backups asks first, with the golden's sentence" do
     opts = [operation_opts: [mobile: [provider: FakeMobileProvider]]]
     params = %{"device_id" => "c41e9d27-5a8b-4f63-9e20-7d1b3c5a8f94"}
 
@@ -2548,6 +2846,18 @@ defmodule FermixCore.Management.ProtocolContractTest do
              Router.route(request("mobile.devices.revoke", params), opts)
 
     assert details == golden_error_details("unavailable_mobile_desktop_revoke")
+
+    assert {:ok, %{"device_id" => _id, "revoked" => true}} =
+             Router.route(
+               request("mobile.devices.revoke", Map.put(params, "confirmed", true)),
+               opts
+             )
+
+    assert {:error, :invalid_params, %{"field" => "confirmed"}} =
+             Router.route(
+               request("mobile.devices.revoke", Map.put(params, "confirmed", "yes")),
+               opts
+             )
   end
 
   # The seven phone methods against the fake above: what is compared is the view

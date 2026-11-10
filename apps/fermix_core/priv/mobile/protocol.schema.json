@@ -33,7 +33,8 @@
           "loopback_failed", "snapshot_stored", "snapshot_refused", "enroll_request",
           "move_offer", "move_chunk", "move_end", "move_commit", "move_resume",
           "call_open", "call_line", "call_audio", "call_frame", "call_close",
-          "offers", "link_path"
+          "offers", "link_path", "join_request",
+          "invoke_open", "invoke_part", "invoke_cancel", "invoke_result", "invoke_status"
         ]}
       },
       "allOf": [
@@ -63,6 +64,7 @@
         {"if": {"properties": {"t": {"const": "snapshot_stored"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/snapshot_stored"}},
         {"if": {"properties": {"t": {"const": "snapshot_refused"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/snapshot_refused"}},
         {"if": {"properties": {"t": {"const": "enroll_request"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/enroll_request"}},
+        {"if": {"properties": {"t": {"const": "join_request"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/join_request"}},
         {"if": {"properties": {"t": {"const": "move_offer"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/move_offer"}},
         {"if": {"properties": {"t": {"const": "move_chunk"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/move_chunk"}},
         {"if": {"properties": {"t": {"const": "move_end"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/move_end"}},
@@ -74,7 +76,12 @@
         {"if": {"properties": {"t": {"const": "call_frame"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/call_frame"}},
         {"if": {"properties": {"t": {"const": "call_close"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/call_close"}},
         {"if": {"properties": {"t": {"const": "offers"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/offers"}},
-        {"if": {"properties": {"t": {"const": "link_path"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/link_path"}}
+        {"if": {"properties": {"t": {"const": "link_path"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/link_path"}},
+        {"if": {"properties": {"t": {"const": "invoke_open"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/invoke_open"}},
+        {"if": {"properties": {"t": {"const": "invoke_part"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/invoke_part"}},
+        {"if": {"properties": {"t": {"const": "invoke_cancel"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/invoke_cancel"}},
+        {"if": {"properties": {"t": {"const": "invoke_result"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/invoke_result"}},
+        {"if": {"properties": {"t": {"const": "invoke_status"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/invoke_status"}}
       ]
     },
     "serverEvent": {
@@ -91,7 +98,9 @@
           "loopback_response", "loopback_close", "snapshot_begin", "snapshot_chunk",
           "snapshot_end",
           "enroll_accepted", "move_accept", "move_ready", "move_done",
-          "call_attached", "call_line", "call_audio", "call_close"
+          "join_approved", "join_denied",
+          "call_attached", "call_line", "call_audio", "call_close",
+          "invoke_open", "invoke_part", "invoke_cancel", "invoke_result", "invoke_status"
         ]}
       },
       "allOf": [
@@ -131,13 +140,20 @@
         {"if": {"properties": {"t": {"const": "snapshot_chunk"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/snapshot_chunk"}},
         {"if": {"properties": {"t": {"const": "snapshot_end"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/snapshot_end"}},
         {"if": {"properties": {"t": {"const": "enroll_accepted"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/enroll_accepted"}},
+        {"if": {"properties": {"t": {"const": "join_approved"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/join_approved"}},
+        {"if": {"properties": {"t": {"const": "join_denied"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/join_denied"}},
         {"if": {"properties": {"t": {"const": "move_accept"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/move_accept"}},
         {"if": {"properties": {"t": {"const": "move_ready"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/move_ready"}},
         {"if": {"properties": {"t": {"const": "move_done"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/move_done"}},
         {"if": {"properties": {"t": {"const": "call_attached"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/call_attached"}},
         {"if": {"properties": {"t": {"const": "call_line"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/call_line_to_phone"}},
         {"if": {"properties": {"t": {"const": "call_audio"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/call_audio_to_phone"}},
-        {"if": {"properties": {"t": {"const": "call_close"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/call_close_to_phone"}}
+        {"if": {"properties": {"t": {"const": "call_close"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/call_close_to_phone"}},
+        {"if": {"properties": {"t": {"const": "invoke_open"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/invoke_open"}},
+        {"if": {"properties": {"t": {"const": "invoke_part"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/invoke_part"}},
+        {"if": {"properties": {"t": {"const": "invoke_cancel"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/invoke_cancel"}},
+        {"if": {"properties": {"t": {"const": "invoke_result"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/invoke_result"}},
+        {"if": {"properties": {"t": {"const": "invoke_status"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/invoke_status"}}
       ]
     },
     "hello": {
@@ -297,12 +313,27 @@
     },
     "computerCaps": {
       "type": "object", "required": ["v"],
-      "description": "Which of a computer's own events this server takes (M97), on a desktop's hello_ack alone; absent from a phone's and from a server older than the computer record. v is a positive integer; offers and link_path, each a boolean when present, say whether the server takes that event, and a later server may add more keys. A computer sends offers or link_path only when its flag is true: a server that does not know the event closes the session on it (unsupported, close 1002).",
+      "description": "Which of a computer's own events this server takes (M97), on a desktop's hello_ack alone; absent from a phone's and from a server older than the computer record. v is a positive integer; offers and link_path, each a boolean when present, say whether the server takes that event, and a later server may add more keys. A computer sends offers or link_path only when its flag is true: a server that does not know the event closes the session on it (unsupported, close 1002). standing is where the computer stands against this server by the app_version its hello named, counted in minor versions (M97 3.4): current (the server's major.minor), behind (the same major, at most two minor versions behind; served as current is), ahead (newer than the server, which it speaks to in the server's versions), settings_only (further behind or an older major: the link carries settings alone, every companion_open is answered companion_close, and the computer offers nothing until it updates). versions is what this server speaks: its engine version, and the companion and management protocol ranges, each [min, max]. Both are absent from a server older than the window.",
       "properties": {
         "v": {"type": "integer", "minimum": 1},
         "offers": {"type": "boolean"},
-        "link_path": {"type": "boolean"}
+        "link_path": {"type": "boolean"},
+        "invoke": {"type": "boolean", "description": "true when this server takes the invocation's five events (invoke_open, invoke_part, invoke_cancel, invoke_result, invoke_status) from the computer; a computer sends none of them otherwise."},
+        "standing": {"enum": ["current", "behind", "ahead", "settings_only"]},
+        "versions": {
+          "type": "object", "required": ["engine", "companion", "management"],
+          "properties": {
+            "engine": {"type": "string", "minLength": 1},
+            "companion": {"$ref": "#/$defs/versionRange"},
+            "management": {"$ref": "#/$defs/versionRange"}
+          }
+        }
       }
+    },
+    "versionRange": {
+      "type": "array", "minItems": 2, "maxItems": 2,
+      "description": "An inclusive protocol range [min, max], each a positive integer, min at most max.",
+      "items": {"type": "integer", "minimum": 1}
     },
     "callCaps": {
       "type": "object", "required": ["available", "min_version", "max_version", "camera"],
@@ -619,6 +650,77 @@
       "description": "Desktop to primary (M97), only when the hello_ack's caps.computer.link_path is true: whether the session the computer dialed runs direct or through a relay, once it is known at the session's start and again at each change.",
       "properties": {"t": {"const": "link_path"}, "path": {"enum": ["direct", "relay"]}}
     },
+    "invoke_open": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "x-raw-bytes": true, "x-chunked": true, "x-chunk-key": "id", "x-max-payload-bytes": 1048576,
+      "required": ["v", "t", "seq", "id", "capability", "op", "deadline_ms", "epoch", "origin", "index", "last"],
+      "description": "Either direction on a desktop's session (M97): the caller asks the other end to run one operation, the primary one of the computer's capabilities, the computer one of the home's services; a computer sends it only when the hello_ack's caps.computer.invoke is true. The chunked payload is the operation's arguments, a UTF-8 JSON object, at most 1 MiB. id is the caller's and never reused (this primary mints inv- and 26 lowercase base32 characters). deadline_ms counts from the request's arrival, its wait included; 0 means until cancelled and is taken only for a long-lived op. epoch is the caller's primary epoch: a computer that has seen a newer one refuses the request stale_epoch. origin is the kind of turn that asked, or computer for a computer's own request; turn names that turn, and a turn's request without one is refused unavailable. part announces the one upload that follows as invoke_part frames under the same id. An operation the receiver does not have is refused unavailable. Answered with invoke_result.",
+      "properties": {
+        "t": {"const": "invoke_open"},
+        "id": {"$ref": "#/$defs/wireId"},
+        "capability": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,31}$"},
+        "op": {"type": "string", "maxLength": 64, "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$"},
+        "deadline_ms": {"type": "integer", "minimum": 0, "maximum": 900000},
+        "epoch": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615},
+        "origin": {"enum": ["chat", "voice", "scheduled", "cue", "worker", "background", "computer"]},
+        "turn": {"type": "object", "required": ["session_id", "tool_call_id"], "properties": {"session_id": {"$ref": "#/$defs/peerName"}, "tool_call_id": {"$ref": "#/$defs/peerName"}}},
+        "part": {"$ref": "#/$defs/invokePart"},
+        "index": {"$ref": "#/$defs/chunkIndex"}, "last": {"type": "boolean"}
+      }
+    },
+    "invoke_part": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "x-raw-bytes": true, "x-max-part-bytes": 20971520,
+      "required": ["v", "t", "seq", "id", "index", "last", "size_bytes"],
+      "description": "Either direction (M97): the one part an invocation's invoke_open or invoke_result announced, a stream under its id: index from 0 and contiguous, a raw tail of 1 to 60 KiB, last on its final frame. size_bytes on every frame is the whole part's announced size (1 to 20 MiB), which sets its lane: up to 256 KiB interactive, above it bulk. A part with a gap, a frame past its announced size, a size that changes, or a total or SHA-256 not the announced one fails its invocation, and the session stays open.",
+      "properties": {"t": {"const": "invoke_part"}, "id": {"$ref": "#/$defs/wireId"}, "index": {"$ref": "#/$defs/chunkIndex"}, "last": {"type": "boolean"}, "size_bytes": {"type": "integer", "minimum": 1, "maximum": 20971520}}
+    },
+    "invoke_cancel": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "id"],
+      "description": "Either direction (M97): the caller cancels its invocation. It is answered with exactly one invoke_result for that id: cancelled, or the outcome reached first; one the receiver no longer runs is answered as invoke_status is.",
+      "properties": {"t": {"const": "invoke_cancel"}, "id": {"$ref": "#/$defs/wireId"}}
+    },
+    "invoke_status": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "id"],
+      "description": "Either direction (M97): the caller asks again for its invocation's answer, as the primary does for every invocation it still waits on when a computer's session comes back. The receiver sends the invoke_result it holds again; holding only its journal's receipt, an invoke_result of that status with the receipt and the payload {\"receipt_only\":true}; with no record, status unknown and no receipt. One still running or waiting is answered when it ends.",
+      "properties": {"t": {"const": "invoke_status"}, "id": {"$ref": "#/$defs/wireId"}}
+    },
+    "invoke_result": {
+      "allOf": [
+        {"$ref": "#/$defs/envelope"},
+        {"if": {"properties": {"status": {"const": "refused"}}, "required": ["status"]}, "then": {"required": ["refusal", "message"]}},
+        {"if": {"properties": {"status": {"const": "failed"}}, "required": ["status"]}, "then": {"required": ["message"]}},
+        {"if": {"properties": {"status": {"enum": ["ok", "failed", "timed_out", "cancelled", "unknown"]}}, "required": ["status"]}, "then": {"properties": {"refusal": {"enum": []}}}},
+        {"if": {"properties": {"status": {"enum": ["ok", "timed_out", "cancelled"]}}, "required": ["status"]}, "then": {"properties": {"message": {"enum": []}}}}
+      ],
+      "x-raw-bytes": true, "x-chunked": true, "x-chunk-key": "id", "x-max-payload-bytes": 4194304,
+      "required": ["v", "t", "seq", "id", "status", "duration_ms", "index", "last"],
+      "description": "Either direction (M97): how an invocation ended, under its id. The chunked payload is its result, a UTF-8 JSON object of at most 4 MiB (each operation's own bound is tighter): {} for none, and {\"receipt_only\":true} for an answer that holds only the journal's receipt. status: ok (it ran), failed (it ran and failed, message its own words), refused (it never ran), timed_out (not finished within its deadline), cancelled, unknown (whether it ran is not known). refusal, present for refused alone: off (switched off there), unavailable (it cannot run there), outside_sandbox, not_attended (it runs only while the owner is in the conversation), stopped_here (the person at the computer stopped it), busy, stale_epoch (asked by an older copy of the home). message is required for failed and refused, optional for unknown and absent otherwise. receipt is the answering side's record that it took the request: when, in UTC, and what it acted on (a path, a host or an action, never content). part announces the one part that follows as invoke_part frames: the caller is done once both have arrived, in either order, since they may ride different lanes. duration_ms counts from the request's arrival.",
+      "properties": {
+        "t": {"const": "invoke_result"},
+        "id": {"$ref": "#/$defs/wireId"},
+        "status": {"enum": ["ok", "failed", "refused", "timed_out", "cancelled", "unknown"]},
+        "refusal": {"enum": ["off", "unavailable", "outside_sandbox", "not_attended", "stopped_here", "busy", "stale_epoch"]},
+        "message": {"type": "string", "minLength": 1, "maxLength": 512, "x-max-bytes": 512},
+        "receipt": {
+          "type": "object", "required": ["at", "target"],
+          "properties": {
+            "at": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|\\+00:00)$", "maxLength": 64},
+            "target": {"type": "string", "minLength": 1, "maxLength": 256, "x-max-bytes": 256}
+          }
+        },
+        "part": {"$ref": "#/$defs/invokePart"},
+        "duration_ms": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615},
+        "index": {"$ref": "#/$defs/chunkIndex"}, "last": {"type": "boolean"}
+      }
+    },
+    "invokePart": {
+      "type": "object", "required": ["size_bytes", "sha256", "mime"],
+      "description": "A part an invocation announces, which follows as invoke_part frames under its id: its whole size in bytes (1 to 20 MiB), its SHA-256 in lowercase hex, and its media type, 1 to 127 bytes of printable text without white space. At most one part per invocation each way.",
+      "properties": {
+        "size_bytes": {"type": "integer", "minimum": 1, "maximum": 20971520},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "mime": {"type": "string", "minLength": 1, "maxLength": 127, "x-max-bytes": 127, "pattern": "^[^\\s\\x00-\\x1f\\x7f]+$"}
+      }
+    },
     "enroll_request": {
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "host", "candidate"],
       "description": "Candidate to primary, on an enrollment session (FXM1 0x03): the candidate's host, its route and one-time snapshot recipient, and what it says of its snapshot target, unverified.",
@@ -633,6 +735,40 @@
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "candidate_id", "primary_name"],
       "description": "Primary to candidate: the candidate is recorded; the session then closes 1000.",
       "properties": {"t": {"const": "enroll_accepted"}, "candidate_id": {"$ref": "#/$defs/wireId"}, "primary_name": {"$ref": "#/$defs/peerName"}}
+    },
+    "join_request": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "host", "platform"],
+      "description": "A computer that joins the home to the primary (M97), the first event of an enrollment session (FXM1 0x03) on a window opened for a computer: the computer's host and the system it runs. Both ends then show six digits derived from the handshake under the label fermix-computer-sas-v1, and the session is held until the owner decides.",
+      "properties": {
+        "t": {"const": "join_request"},
+        "host": {"type": "object", "required": ["name", "os", "arch", "version"], "properties": {"name": {"$ref": "#/$defs/peerName"}, "os": {"$ref": "#/$defs/peerName"}, "arch": {"$ref": "#/$defs/peerName"}, "version": {"$ref": "#/$defs/peerName"}}},
+        "platform": {"enum": ["macos", "linux"]}
+      }
+    },
+    "join_approved": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "device_id", "name", "primary_epoch", "primary"],
+      "description": "Primary to the computer that asked to join (M97), once the owner approved it with the digits it shows: its device id, the name the home gave it, the primary's epoch and where it reaches the primary from now on. The session then closes 1000 (joined).",
+      "properties": {
+        "t": {"const": "join_approved"},
+        "device_id": {"$ref": "#/$defs/wireId"},
+        "name": {"$ref": "#/$defs/peerName"},
+        "primary_epoch": {"type": "integer", "minimum": 1},
+        "primary": {
+          "type": "object", "required": ["name", "node_id", "relays", "relays_rev"],
+          "properties": {
+            "name": {"$ref": "#/$defs/peerName"},
+            "node_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "relays": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"$ref": "#/$defs/relay"}},
+            "relays_rev": {"type": "string", "pattern": "^[0-9a-f]{16}$"},
+            "addrs": {"type": "array", "maxItems": 8, "items": {"$ref": "#/$defs/addressHint"}, "description": "Where the computer may dial the primary directly: an Always On server's tailnet addresses at its fixed port. Empty or absent when there are none."}
+          }
+        }
+      }
+    },
+    "join_denied": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "reason"],
+      "description": "Primary to the computer that asked to join (M97): it was not added, and its code is spent. The session then closes 4003 (join <reason>).",
+      "properties": {"t": {"const": "join_denied"}, "reason": {"enum": ["denied", "timeout", "cancelled", "device_disconnected"]}}
     },
     "move_offer": {
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "move_id", "size_bytes", "sha256", "source_epoch", "attempt"],

@@ -142,6 +142,11 @@ config :fermix_core,
 # (`FermixCore.Home.Link`).
 config :fermix_core, :home_link, FermixChannels.Home.Link
 
+# How the server reaches a computer's session for an invocation (M97 §6.1):
+# through its peer. Injected by module for the same reason as the dispatcher
+# above (`FermixCore.Computers.Transport`).
+config :fermix_core, :computers_transport, FermixChannels.Desktop.InvokeTransport
+
 # Where the primary keeps snapshots beyond S3 (M75 §8, D19): its connected
 # desktops, over the rail. Injected by module for the same reason as the
 # dispatcher above; the scheduler writes to `Snapshot.S3` and then these

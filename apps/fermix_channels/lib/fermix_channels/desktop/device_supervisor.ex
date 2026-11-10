@@ -5,7 +5,11 @@ defmodule FermixChannels.Desktop.DeviceSupervisor do
   device role starts it (`FermixCore.Home.Role`'s device-only list, through
   the one filter `Role.children/2`).
 
-  `:one_for_one` over two subtrees, so neither takes the other down:
+  `:one_for_one` over its subtrees, so none takes another down:
+
+  - **This computer's invocations** (`Desktop.Invoke`, M97 §6.2) when
+    `device/desktop.json` exists: what its server asks of it, a sibling of
+    the dial subtree so a helper or relay restart ends no running one.
 
   - **The dial subtree** (`children/1`'s `:dial`, `:rest_for_one`): one list,
     in start order, each with the condition under which this boot starts it
@@ -13,7 +17,9 @@ defmodule FermixChannels.Desktop.DeviceSupervisor do
     protocol 3, a fresh in-memory key, no bridge) they dial through, started
     only when one of them starts. While a move this home started is pending
     (`FermixCore.Home.Move.pending?/1`): the move worker
-    (`FermixChannels.Home.MoveWorker`), its source. When
+    (`FermixChannels.Home.MoveWorker`), its source. While this computer joins
+    a home and has no link yet (`FermixCore.Home.Join.present?/1`, M97
+    §3.1): the joiner (`FermixChannels.Desktop.Join`). When
     `device/desktop.json` exists: the desktop's services
     (`Desktop.DeviceServices`), then the desktop relay (`Desktop.Relay`). The
     users dial through the helper, so its restart takes them down with it,
@@ -31,11 +37,13 @@ defmodule FermixChannels.Desktop.DeviceSupervisor do
 
   require Logger
 
+  alias FermixChannels.Desktop.Invoke
   alias FermixChannels.Desktop.Relay
   alias FermixChannels.Home.CandidateSupervisor
   alias FermixChannels.Mobile.Iroh.Helper
   alias FermixCore.Home.Candidate
   alias FermixCore.Home.DesktopLink
+  alias FermixCore.Home.Join
   alias FermixCore.Home.Move
   alias FermixCore.Setup.ConfigStore
 
@@ -57,9 +65,10 @@ defmodule FermixChannels.Desktop.DeviceSupervisor do
   end
 
   @doc """
-  This boot's subtrees for the home at `root`: the dial subtree when the rail
-  has a user here, the candidate subtree when the home holds a candidate;
-  none at all when it needs neither.
+  This boot's subtrees for the home at `root`: this computer's invocations
+  (`Desktop.Invoke`) and the dial subtree when the home is linked, the dial
+  subtree alone while a move this home started is pending, the candidate
+  subtree when the home holds a candidate; none at all when it needs none.
   """
   @spec children(Path.t()) :: [Supervisor.child_spec()]
   def children(root) when is_binary(root) and root != "" do
@@ -69,7 +78,13 @@ defmodule FermixChannels.Desktop.DeviceSupervisor do
         children -> [dial_spec(children)]
       end
 
-    if Candidate.present?(root), do: dial ++ [candidate_spec(root)], else: dial
+    # Beside the dial subtree, never inside it: a helper or relay restart
+    # ends no running invocation (M97 §5.2). Started first, so it takes the
+    # server's requests from the session's first frame.
+    invoke = if File.regular?(DesktopLink.path(root)), do: [invoke_spec(root)], else: []
+    serving = invoke ++ dial
+
+    if Candidate.present?(root), do: serving ++ [candidate_spec(root)], else: serving
   end
 
   @doc """
@@ -85,6 +100,8 @@ defmodule FermixChannels.Desktop.DeviceSupervisor do
       for {start?, child} <- [
             # One line per child, in start order; the relay comes last.
             {Move.pending?(root), {FermixChannels.Home.MoveWorker, home: root, helper: @helper}},
+            {Join.present?(root) and not linked?,
+             {FermixChannels.Desktop.Join, home: root, helper: @helper}},
             {linked?, {FermixChannels.Desktop.DeviceServices, home: root}},
             {linked?, {Relay, root: root, helper: @helper}}
           ],
@@ -153,6 +170,21 @@ defmodule FermixChannels.Desktop.DeviceSupervisor do
       start: {Supervisor, :start_link, [children, [strategy: :rest_for_one, name: @dial]]},
       type: :supervisor
     }
+
+  # Every option explicit, none read from application environment: this
+  # computer's switches are read from its own machine file at each request,
+  # and one that cannot be read refuses everything (`Invoke.switches_in/1`).
+  defp invoke_spec(root),
+    do:
+      Supervisor.child_spec(
+        {Invoke,
+         home: root,
+         switches: Invoke.switches_in(root),
+         capabilities: Invoke.capabilities(),
+         clock: &DateTime.utc_now/0,
+         relay: Relay},
+        []
+      )
 
   defp candidate_spec(root),
     do: %{

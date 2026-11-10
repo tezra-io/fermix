@@ -76,6 +76,22 @@ previous one (or the same value while only one version exists).
 | daemon `min_version` | `6` |
 | daemon `max_version` | `7` |
 
+**The window runs both ways** (M97: the server leads). After a move a
+computer's chat is carried to its server, which updates on its own and may
+run ahead of the computer or behind it. A computer behind the server is
+served inside `{min_version, max_version}`; one ahead of it names the oldest
+version it still speaks in `client_hello.min_protocol_version` (at most its
+own `protocol_version`). When that is at most the daemon's `max_version`,
+the daemon serves `max_version` and says so in `server_hello.protocol_version`,
+and the client speaks that version on the connection from then on: it sends
+no event, and expects none, that a later version brought. Both fields are
+additive and optional; a client that sends no `min_protocol_version` is
+served exactly as before. The policy: `min_version` is never above the
+version the engine release two minor versions back speaks, so every computer
+inside the server's window (two minor versions) connects; a release that
+bumps this protocol on consecutive minor versions keeps the older version in
+the window for that long.
+
 ### Version 2: a turn that ends with no reply
 
 Version 2 adds one server event, `turn_done { turn_id }`: the turn completed and
@@ -294,15 +310,17 @@ Realtime voice socket's. No other event is serviced until it completes.
 
 ```
 companion: connect socket
-companion -> daemon:  client_hello { protocol_version: P, primary_epoch?: E }
+companion -> daemon:  client_hello { protocol_version: P, min_protocol_version?: L, primary_epoch?: E }
                       daemon negotiates P against {min, max}:
-                        P in [min, max] -> daemon -> companion: server_hello { min_version, max_version, primary_epoch?, role, commands, attachments? }
-                        P < min         -> error(unsupported_protocol_version, client_too_old); close
-                        P > max         -> error(unsupported_protocol_version, client_too_new); close
+                        P in [min, max]       -> daemon -> companion: server_hello { min_version, max_version, primary_epoch?, role, commands, attachments? }
+                        P < min               -> error(unsupported_protocol_version, client_too_old); close
+                        P > max, L <= max     -> daemon -> companion: server_hello { ..., protocol_version: max }; the connection speaks max
+                        P > max, L absent or > max -> error(unsupported_protocol_version, client_too_new); close
                       then, on the primary, E against the home's primary epoch M:
                         E > M           -> error(stale_primary); close
-companion: on server_hello, validate its own version V in [min_version, max_version]:
-             in range     -> connected
+companion: on server_hello, take V = server_hello.protocol_version when present, else its own,
+           and validate V in [min_version, max_version]:
+             in range     -> connected, speaking V
              out of range -> refuse; report which side must update
 ```
 
@@ -314,7 +332,9 @@ Rules the daemon enforces:
 2. A second `client_hello` is rejected with `error: unexpected_client_hello`
    and the connection is closed.
 3. A `client_hello` without a positive integer `protocol_version` is rejected
-   with `error: missing_protocol_version` or `error: invalid_protocol_version`.
+   with `error: missing_protocol_version` or `error: invalid_protocol_version`;
+   a `min_protocol_version` that is not a positive integer at most
+   `protocol_version` is rejected with `error: invalid_field`.
 
 Rules the companion enforces:
 

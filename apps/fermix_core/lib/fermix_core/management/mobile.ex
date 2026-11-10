@@ -84,10 +84,8 @@ defmodule FermixCore.Management.Mobile do
   @unavailable_attestation_sentence "Google's attestation service could not be reached."
   @no_request_sentence "No phone is waiting for a decision."
   @unknown_device_sentence "No paired phone has that id."
-  # The desktop a move linked to this primary (M75): this version cannot link
-  # a revoked desktop again, and it keeps copies of the primary's snapshots.
-  @desktop_sentence "This desktop cannot be removed: this version of Fermix cannot link it " <>
-                      "to the server again, and it keeps copies of the server's backups."
+  # What follows the name of the one computer that keeps the backups (M97 §3.3).
+  @only_backups_tail " keeps the only copies of your server's backups. Remove it anyway?"
   @owner_only_sentence "Only the owner can pair or forget a phone; run this from your own terminal."
   # What a settings write says when the channel did not follow its switch.
   @switch_not_started_sentence "The phone channel is on but could not start. See the daemon log."
@@ -124,7 +122,6 @@ defmodule FermixCore.Management.Mobile do
         @unavailable_attestation_sentence,
         @no_request_sentence,
         @unknown_device_sentence,
-        @desktop_sentence,
         @owner_only_sentence,
         @switch_not_started_sentence,
         @switch_not_ready_sentence,
@@ -140,6 +137,18 @@ defmodule FermixCore.Management.Mobile do
   """
   @spec off_sentence() :: String.t()
   def off_sentence, do: @off_sentence
+
+  @doc """
+  What removing the one computer that keeps the server's backup copies asks
+  the owner first; the removal is sent again with `confirmed` once they agree.
+  """
+  @spec only_backups_sentence(String.t()) :: String.t()
+  def only_backups_sentence(name) when is_binary(name), do: name <> @only_backups_tail
+
+  @doc "Whether `sentence` is that question, whatever computer it names."
+  @spec only_backups_sentence?(String.t()) :: boolean()
+  def only_backups_sentence?(sentence) when is_binary(sentence),
+    do: String.ends_with?(sentence, @only_backups_tail)
 
   @doc """
   The sentence the daemon socket's refusal of a pairing or forgetting decision
@@ -238,7 +247,12 @@ defmodule FermixCore.Management.Mobile do
     with {:ok, reply} <- call(opts, :devices_list, []), do: devices_reply(reply)
   end
 
-  @doc "Forgets one paired phone. A desktop is refused: see `@desktop_sentence`."
+  @doc """
+  Forgets one paired phone, or removes one computer (M97 §3.3), which can join
+  again with a code. The one computer that keeps the server's backup copies
+  is removed only with `opts[:confirmed]`; without it the owner is asked
+  (`only_backups_sentence/1`).
+  """
   @spec devices_revoke(String.t(), keyword()) :: result()
   def devices_revoke(device_id, opts \\ []) when is_binary(device_id) and is_list(opts) do
     with {:ok, reply} <- call(opts, :devices_revoke, [device_id]), do: revoke_reply(reply)
@@ -340,8 +354,8 @@ defmodule FermixCore.Management.Mobile do
   defp revoke_reply({:error, :device_not_found}),
     do: {:error, {:invalid_params, "device_id", @unknown_device_sentence}}
 
-  defp revoke_reply({:error, :desktop_device}),
-    do: {:error, {:unavailable, @capability, @desktop_sentence}}
+  defp revoke_reply({:error, {:only_backups, name}}) when is_binary(name),
+    do: {:error, {:unavailable, @capability, only_backups_sentence(name)}}
 
   defp revoke_reply({:error, reason}) when reason in @channel_down,
     do: {:error, {:unavailable, @capability}}

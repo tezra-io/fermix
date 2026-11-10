@@ -37,6 +37,11 @@ defmodule FermixCore.Management.Home do
       status file is a retired copy, so its `snapshots` lists no target: the
       primary's are in `primary_home`.
 
+  `join` (M97 §3.1): on a computer joining a home (`Home.Join`), `phase`
+  (`dialing`, `awaiting_approval` or `denied`), the `server`'s name, `sas`
+  (the six digits both ends show once the server answered, else null) and
+  the `sentence`; absent on every other engine.
+
   Enrollment and the move (`FermixCore.Management.HomeMove`):
 
     * `enrollment`: the enrollment window on the primary (`state` and
@@ -85,10 +90,27 @@ defmodule FermixCore.Management.Home do
   exits: the daemon serves each request in a process of its own. `disk` is how full this primary's disk is (`Home.Disk.usage/2`:
   `used`, a fraction, and `nearly_full` from 85%), null in any other role and
   when it cannot be read, so a linked desktop reads its server's from
-  `primary_home`. `version` is this engine's. `update_ceiling` is the version
-  a server's update installs, in every role: the oldest engine among
-  the desktops this machine served in the last 30 days
-  (`Home.EngineCeiling`), null when none was or it cannot be read.
+  `primary_home`. `version` is this engine's.
+
+  **The server leads** (M97 §3.4, D14). On an Always On server
+  (`Home.AlwaysOn.server?/1`), `update` is what its update may install, from
+  the release table it keeps (`Home.ReleaseTable`) and its computers:
+  `running` (this engine's version), `eligible` (the newest release, at or
+  above it, that the app of each system whose computers keep backups
+  carries, `Home.Releases.eligible/3`; null when none, or when no table was
+  read: the update installs nothing then), `held` (a newer release not
+  eligible yet: its `version`, the systems it `waits_for` and a `sentence`
+  that names no version; null when there is none), `ahead_of_apps` (this
+  engine runs past what some backup system's app carries, an owner's
+  override) and `table` (`read_at`, when the table was last read, and the
+  `sentence` of a fetch that failed or of why none was read, each null
+  otherwise). Null on every other engine. `update_ceiling` is `update`'s
+  `eligible`, null where `update` is: the field every server's update script
+  reads, kept so a script an older first boot wrote follows the server too.
+  `restart_hold` is what holds the engine's restart after an update
+  (`Home.RestartHold`): a move under way, or work in progress on a computer
+  for at most ten minutes, `{reason, count, wait_s, sentence}`; null when
+  nothing does.
 
   `home.snapshots.run` starts a snapshot now (`busy` while one runs);
   `home.snapshots.passphrase` derives a new recovery key from
@@ -110,7 +132,10 @@ defmodule FermixCore.Management.Home do
   `:webhook_settings` (a 0-arity reader of what `webhooks` is read from:
   `%{whatsapp, cues, web_port}`, the WhatsApp channel's and the cues'
   applied settings and the web listener's port, `Setup.Endpoint.port/1`),
-  `:version`, `:now`, `:host_os`, `:return_boot` (in place of
+  `:version`, `:now`, `:host_os`, `:always_on_server` (a boolean),
+  `:release_table` (in place of `Home.ReleaseTable.current/0`),
+  `:computer_work` (0-arity, the work in progress on the computers),
+  `:return_boot` (in place of
   `Home.Return.boot_done/0`) and `:stop_return` (in place of the rail's,
   which a desktop's move back the home went past is stopped with); `:jobs`
   (the job family Restore here's job runs in); for the wait, `:status_watch` (the
@@ -126,15 +151,20 @@ defmodule FermixCore.Management.Home do
 
   alias FermixCore.BuildInfo
   alias FermixCore.Computers
+  alias FermixCore.Computers.Calls
   alias FermixCore.Computers.Computer
   alias FermixCore.Cues.Config, as: CuesConfig
+  alias FermixCore.Home.AlwaysOn
   alias FermixCore.Home.Candidate
   alias FermixCore.Home.Disk
-  alias FermixCore.Home.EngineCeiling
   alias FermixCore.Home.Epoch
+  alias FermixCore.Home.Join
   alias FermixCore.Home.Link
   alias FermixCore.Home.Moved
   alias FermixCore.Home.MoveSecrets
+  alias FermixCore.Home.Releases
+  alias FermixCore.Home.ReleaseTable
+  alias FermixCore.Home.RestartHold
   alias FermixCore.Home.Return
   alias FermixCore.Home.Role
   alias FermixCore.Home.ServerPrimary
@@ -277,10 +307,13 @@ defmodule FermixCore.Management.Home do
       secrets_missing: secrets_missing(role, opts),
       disk: disk(home, role, opts),
       version: Keyword.get_lazy(opts, :version, &BuildInfo.product_version/0),
-      update_ceiling: update_ceiling(home, opts),
       webhooks: webhooks(role, opts),
-      computers: computers(home, role, opts)
+      computers: computers(home, role, opts),
+      join: joining(home, role),
+      restart_hold: restart_hold(move.move, opts)
     }
+
+    facts = put_update(facts, role, opts)
 
     summary_status =
       Map.merge(facts, %{
@@ -362,18 +395,119 @@ defmodule FermixCore.Management.Home do
 
   defp disk(_home, _record, _opts), do: nil
 
-  # The version a server's update installs (`Home.EngineCeiling`),
-  # from this machine's own record in any role; one that cannot be read is
-  # null, said in the log once while it stays so.
-  defp update_ceiling(home, opts) do
-    read = EngineCeiling.ceiling(home, Keyword.get_lazy(opts, :now, &DateTime.utc_now/0))
-    memory = Keyword.get(opts, :unreadable_files, UnreadableFiles)
-    :ok = UnreadableFiles.log_read(EngineCeiling.dir(home), "home status", read, memory)
-
-    case read do
-      {:ok, ceiling} -> ceiling
-      {:error, _reason} -> nil
+  # What an Always On server's update may install (M97 §3.4), and the field
+  # every update script reads (`update_ceiling`, its `eligible`); null on any
+  # other engine.
+  defp put_update(facts, role, opts) do
+    case update(role, facts, opts) do
+      nil -> Map.merge(facts, %{update: nil, update_ceiling: nil})
+      update -> Map.merge(facts, %{update: update, update_ceiling: update["eligible"]})
     end
+  end
+
+  defp update(role, facts, opts) do
+    if always_on_server?(role, facts.epoch, opts) do
+      reader = Keyword.get(opts, :release_table, &ReleaseTable.current/0)
+      backups = backup_systems(facts.computers)
+      update_view(reader.(), facts.version, backups)
+    end
+  end
+
+  defp update_view({:ok, table, read_at, failure}, running, backups) do
+    %{eligible: eligible, held: held, ahead_of_apps: ahead} =
+      Releases.eligible(table, running, backups)
+
+    %{
+      "running" => running,
+      "eligible" => eligible,
+      "held" => held_view(held),
+      "ahead_of_apps" => ahead,
+      "table" => %{"read_at" => iso8601(read_at), "sentence" => failure}
+    }
+  end
+
+  defp update_view({:error, sentence}, running, _backups) do
+    %{
+      "running" => running,
+      "eligible" => nil,
+      "held" => nil,
+      "ahead_of_apps" => false,
+      "table" => %{"read_at" => nil, "sentence" => sentence}
+    }
+  end
+
+  defp held_view(nil), do: nil
+
+  defp held_view(%{version: version, waits_for: waits_for}),
+    do: %{
+      "version" => version,
+      "waits_for" => Enum.map(waits_for, &Atom.to_string/1),
+      "sentence" => held_sentence(waits_for)
+    }
+
+  @doc "The sentence a held release says for the systems it `waits_for`, naming no version."
+  @spec held_sentence([Releases.backup_system()]) :: String.t()
+  def held_sentence(waits_for) when is_list(waits_for) do
+    "A newer Fermix is released. Your server takes it once " <> waits_on(waits_for) <> "."
+  end
+
+  defp waits_on([:macos]), do: "the Mac app that carries it is published"
+  defp waits_on([:linux]), do: "the Linux app that carries it is published"
+  defp waits_on([:macos, :linux]), do: "the Mac and Linux apps that carry it are published"
+
+  defp waits_on(_with_unknown),
+    do: "every computer that keeps your backups has updated Fermix and its app carries it"
+
+  # The systems of the computers that keep the home's backups; one that has
+  # not said its system could need either app (`Releases.eligible/3`).
+  defp backup_systems(computers) do
+    computers
+    |> Enum.filter(& &1.backups)
+    |> Enum.map(&(&1.platform || :unknown))
+    |> Enum.uniq()
+  end
+
+  # This engine is an Always On server's (`Home.AlwaysOn`): its primary, a
+  # Linux package with no app, at an epoch above 1, from the facts its boot
+  # recorded and the epoch this record read. A verb with no engine tree
+  # recorded none, and a stopped Fermix reads no table: no `update` there.
+  # `:always_on_server` in a test.
+  defp always_on_server?(%{role: role}, epoch, opts) do
+    Keyword.get_lazy(opts, :always_on_server, fn ->
+      case Application.get_env(:fermix_core, :host_facts) do
+        %{install: install, os: os, linux_app: linux_app} ->
+          AlwaysOn.server?(%{
+            role: role,
+            install: install,
+            os: os,
+            linux_app: linux_app,
+            epoch: epoch
+          })
+
+        nil ->
+          false
+      end
+    end)
+  end
+
+  # What holds the restart after an update: a move under way, or work in
+  # progress on a computer (`Home.RestartHold`).
+  defp restart_hold(move, opts) do
+    phase = if is_map(move), do: move["phase"]
+    now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
+    phase |> RestartHold.view(computer_work(opts), now) |> RestartHold.to_map()
+  end
+
+  # The work in progress on the home's computers: the invocations that
+  # change something and are still waited on (M97 §6,
+  # `Computers.Calls.running_effects/1`, each with its `started_at`).
+  # `:computer_work` in a test.
+  defp computer_work(opts), do: Keyword.get(opts, :computer_work, &running_effects/0).()
+
+  # Only the primary's engine tree waits on computers: a device, a candidate
+  # and a verb with no engine tree run no `Calls`, and ask nothing of one.
+  defp running_effects do
+    if GenServer.whereis(Calls), do: Calls.running_effects(Calls), else: []
   end
 
   # The home's computers (M97 §3.2), on the primary; none anywhere else. A
@@ -456,8 +590,9 @@ defmodule FermixCore.Management.Home do
   null when absent), a linked desktop's `primary_home` and `primary_missing`
   (null when absent), the primary's `disk` (null when absent), the
   `update_ceiling` (null when absent) and the primary's `webhooks` (none when
-  absent) and the primary's `computers` (none when absent). Pure, so the
-  CLI's goldens are built from it.
+  absent) and the primary's `computers` (none when absent), and the server's
+  `update` and `restart_hold` (null when absent). Pure, so the CLI's goldens
+  are built from it.
   """
   @spec picture(%{
           required(:role) => Role.role(),
@@ -476,8 +611,11 @@ defmodule FermixCore.Management.Home do
           optional(:primary_missing) => String.t() | nil,
           optional(:secrets_missing) => [String.t()],
           optional(:update_ceiling) => String.t() | nil,
+          optional(:update) => map() | nil,
+          optional(:restart_hold) => map() | nil,
           optional(:webhooks) => [map()],
-          optional(:computers) => [Computer.t()]
+          optional(:computers) => [Computer.t()],
+          optional(:join) => map() | nil
         }) :: map()
   def picture(
         %{
@@ -507,10 +645,23 @@ defmodule FermixCore.Management.Home do
       "disk" => Map.get(facts, :disk),
       "version" => version,
       "update_ceiling" => Map.get(facts, :update_ceiling),
+      "update" => Map.get(facts, :update),
+      "restart_hold" => Map.get(facts, :restart_hold),
       "webhooks" => Map.get(facts, :webhooks, []),
       "computers" => Enum.map(Map.get(facts, :computers, []), &Computer.view/1)
     }
+    |> put_join(Map.get(facts, :join))
   end
+
+  # Only on a computer that joins a home: absent everywhere else, so a
+  # client before the join reads the record it always read.
+  defp put_join(record, nil), do: record
+  defp put_join(record, join), do: Map.put(record, "join", join)
+
+  # This computer joining a home (M97 §3.1, `Home.Join`), in the device role
+  # it joins in; nil otherwise.
+  defp joining(home, %{role: :device}), do: Join.view(home)
+  defp joining(_home, _record), do: nil
 
   @doc """
   A desktop's link to its primary as `home.status` answers it in `primary`

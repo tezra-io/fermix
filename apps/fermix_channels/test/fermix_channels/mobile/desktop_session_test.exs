@@ -112,6 +112,48 @@ defmodule FermixChannels.Mobile.DesktopSessionTest do
     refute_received {:engine_recorded, @phone_id, _version, _at}
   end
 
+  # M97 §3.4: the server leads. A desktop's hello says its engine's version,
+  # which stands against this server's by major.minor; its peer is told the
+  # standing, and a phone has none.
+  test "a desktop's hello stands against the server, and its peer is told", ctx do
+    test = self()
+    supervisor = ctx.peer_supervisor
+
+    for {server, standing} <- [
+          {"0.17.4", :current},
+          {"0.19.0", :behind},
+          {"0.16.2", :ahead},
+          {"0.20.0", :settings_only}
+        ] do
+      {_driver, _client} =
+        ready_desktop!(ctx, %{},
+          engine_version: server,
+          hello_ack_builder: fn state ->
+            send(test, {:standing_at_ack, state.computer_standing})
+            {:ok, hello_ack()}
+          end,
+          start_desktop_peer: fn opts ->
+            send(test, {:peer_standing, Keyword.fetch!(opts, :standing)})
+            Peer.start(supervisor, Keyword.put(opts, :families, %{}))
+          end
+        )
+
+      assert_receive {:standing_at_ack, ^standing}
+      assert_receive {:peer_standing, ^standing}
+    end
+
+    {_driver, _client} =
+      ready!(ctx, ctx.phone, @phone_id,
+        engine_version: "0.20.0",
+        hello_ack_builder: fn state ->
+          send(test, {:phone_standing, Map.get(state, :computer_standing)})
+          {:ok, hello_ack()}
+        end
+      )
+
+    assert_receive {:phone_standing, nil}
+  end
+
   # M97 §3.2: a computer names its system in its hello, kept on its row; a
   # phone's row keeps the platform its attestation proved.
   test "a desktop's hello names its system on its row; a phone's moves nothing", ctx do

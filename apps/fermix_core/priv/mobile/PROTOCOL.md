@@ -222,7 +222,8 @@ message) is sent as one run of `event_part` frames instead of one frame:
 ## Chunked payloads
 
 A payload too large for one frame (a desktop's management call, a tunneled
-companion line, a computer's offers) travels as frames of one event, each
+companion line, a computer's offers, an invocation's arguments or result)
+travels as frames of one event, each
 with `index` (from 0) and `last` (boolean) in its header and at most 60 KiB
 of the payload as its raw tail. A chunked event's header stays within 4,075
 bytes, so a full tail still fits one plaintext.
@@ -249,10 +250,14 @@ bytes, so a full tail still fits one plaintext.
 | `manage_result` | `call_id` | 4 MiB |
 | `loopback_response` | `request_id` | 256 KiB |
 | `offers` | `rev` | 64 KiB |
+| `invoke_open` | `id` | 1 MiB |
+| `invoke_result` | `id` | 4 MiB |
 
 `snapshot_chunk` and `move_chunk` are streams, not chunked payloads: `index`
 alone, contiguous from 0, ended by `snapshot_end` or `move_end`, and bounded
 only by the disk. The binary fixtures carry a whole two-frame run each way.
+`invoke_part` is a stream too, with `index` from 0 and `last`, bounded by the
+size its invocation announced (see *Invocations*).
 
 ## Lanes
 
@@ -262,11 +267,14 @@ session, not a second connection, and nothing on the wire names it.
 | Lane | Events | Rule |
 |---|---|---|
 | live | `call_open`, `call_attached`, `call_line`, `call_audio`, `call_frame`, `call_close` | written first |
-| interactive | every event of no other lane: chat, `manage` and `manage_result`, `companion_*`, `loopback_*`, a computer's `offers` and `link_path`, `hello`, `ping`, `pong`, `error`, `ack` | written before bulk |
-| bulk | `media_fetch`, `media_begin`, `media_chunk`, `media_end`, `attach_*`, `snapshot_*`, `move_*` | written when nothing live or interactive waits, one frame at a time |
+| interactive | every event of no other lane: chat, `manage` and `manage_result`, `companion_*`, `loopback_*`, a computer's `offers` and `link_path`, `invoke_open`, `invoke_cancel`, `invoke_result` and `invoke_status`, an `invoke_part` whose `size_bytes` is at most 256 KiB, `hello`, `ping`, `pong`, `error`, `ack` | written before bulk |
+| bulk | `media_fetch`, `media_begin`, `media_chunk`, `media_end`, `attach_*`, `snapshot_*`, `move_*`, an `invoke_part` whose `size_bytes` is over 256 KiB, an `invoke_open` that submits a history sitting (`capability` `history`, `op` `submit`) | written when nothing live or interactive waits, one frame at a time |
 
 - A family's events share one lane, so a lane never reorders a family's own
-  events (a snapshot's `snapshot_stored` rides bulk with its chunks). Events
+  events (a snapshot's `snapshot_stored` rides bulk with its chunks), except
+  the invocation's: `invoke_part` and `invoke_open` take their lane from
+  their header, so a large part's frames ride bulk while its `invoke_result`
+  rides interactive (see *Invocations*). Events
   of different lanes may overtake one another: a reply's `row` may arrive
   before the blob a `media_begin` push carries, as it does during a call.
 - Within a lane, frames go in the order they were handed over: a chunked
@@ -293,7 +301,7 @@ first handshake message starts with one fixed, clear five-byte prelude:
 |---|---|---|---|
 | `46 58 4d 31 01` (`FXM1` + `0x01`) | `IK` | a paired phone's or desktop's session | the primary |
 | `46 58 4d 31 02` (`FXM1` + `0x02`) | `IKpsk2` | owner-open pairing window | the primary |
-| `46 58 4d 31 03` (`FXM1` + `0x03`) | `IKpsk2` | enrollment of a candidate primary (see *Enrollment and the move*) | the primary, only while an enrollment window is open |
+| `46 58 4d 31 03` (`FXM1` + `0x03`) | `IKpsk2` | enrollment of a candidate primary, or a computer joining the home (see *Enrollment and the move*) | the primary, only while an enrollment window is open |
 | `46 58 4d 31 04` (`FXM1` + `0x04`) | `IK` | the move of a home to its candidate (see *Enrollment and the move*) | the candidate engine |
 
 The responder validates this prelude before initializing cryptographic state.
@@ -1165,7 +1173,14 @@ the primary ends normally (`1000`, a daemon stopping) is renewed at once
 without being shown as an outage, once in a row: a renewed session the
 primary ends normally again within a minute of opening is an outage from then
 on, redialed with the usual backoff. A desktop the primary revoked (`4003`,
-live or at the handshake) does not dial again until its engine restarts.
+live or at the handshake) does not dial again until its engine restarts. The
+owner removes a computer as a phone is forgotten (management
+`mobile.devices.revoke`; the one that keeps the home's backup copies only
+once they confirmed it), and a computer that disconnects itself asks for the
+same over its own session (`manage`) before it deletes its key. The primary
+drops the row and what it kept of the computer's offers, and closes its
+session `4003` (`device revoked`). A removed computer comes back only by
+joining again with a code (see *Enrollment and the move*).
 
 A desktop's session takes the phone events `hello`, `ping`, `media_fetch` and
 `ack`, and these (the companion family, `companion_open`, `companion_line` and
@@ -1185,9 +1200,14 @@ see *Lists on a phone*):
 | `offers` | `rev`, `index`, `last` + raw bytes | what the computer offers its server, a JSON payload chunked, at most 64 KiB; `rev` is the payload's revision; sent only when `hello_ack` says `caps.computer.offers: true` (see *A computer's own record*) |
 | `link_path` | `path` | the session the desktop dialed runs `direct` or through a `relay`; sent only when `hello_ack` says `caps.computer.link_path: true` |
 
+The invocation's five events (`invoke_open`, `invoke_part`, `invoke_cancel`,
+`invoke_result`, `invoke_status`) go both ways on a desktop's session, a
+desktop sending them only when `hello_ack` says `caps.computer.invoke: true`
+(see *Invocations*).
+
 The primary sends a desktop `hello_ack`, `pong`, `error`, `event_part`,
 `media_begin`, `media_chunk` and `media_end`, `companion_line` and
-`companion_close` (above), and these:
+`companion_close` (above), the invocation's events, and these:
 
 | `t` | Required payload | Rules |
 |---|---|---|
@@ -1229,17 +1249,33 @@ computer's record; a phone sends none of it.
   writes it on the desktop's row when the row names no platform or another
   one; a phone's `hello` never moves its row's platform.
 - **What the primary takes.** A desktop's `hello_ack` carries
-  `caps.computer`, `{"v":1,"offers":true,"link_path":true}` from this
-  primary: `v` is a positive integer, and `offers` and `link_path`, each a
+  `caps.computer`, with `{"v":1,"offers":true,"link_path":true,"invoke":true}`
+  among its keys from this primary: `v` is a positive integer, and `offers`,
+  `link_path` and `invoke` (the five events of *Invocations*), each a
   boolean when present, say whether the primary takes that event. A later
   primary may add keys, which a desktop ignores. A phone's `hello_ack`, and a
   primary's older than the record, carry no `computer`.
+- **Where it stands.** The primary leads: it updates on its own, and serves
+  a computer up to two minor versions behind it. `caps.computer.standing`
+  says where this computer stands, by the `app_version` its `hello` named,
+  counted by major.minor and never by patch: `current` (the primary's
+  major.minor), `behind` (the same major, at most two minor versions behind,
+  served as `current` is), `ahead` (newer than the primary, which it speaks
+  to in the primary's versions) or `settings_only` (further behind, or an
+  older major). A `settings_only` computer keeps its link for settings
+  alone: every `companion_open` is answered `companion_close` with "Update
+  Fermix on this computer to chat through your server.", and the primary
+  treats it as offering nothing until it updates; it never holds the primary
+  back. `caps.computer.versions` is what the primary speaks: its `engine`
+  version, and its `companion` and `management` protocol ranges, each
+  `[min, max]`. A primary older than the window sends neither.
 - **Sent only when taken.** A desktop sends `offers` only when
-  `caps.computer.offers` is true, and `link_path` only when
-  `caps.computer.link_path` is true. A primary older than these events does
+  `caps.computer.offers` is true, `link_path` only when
+  `caps.computer.link_path` is true, and an `invoke_*` event only when
+  `caps.computer.invoke` is true. A primary older than these events does
   not know their `t`, and an unknown client event is refused `unsupported`
   and closes the session (`1002`, see *Errors*), so a desktop that sent
-  either unasked would lose its session at every reconnect.
+  one unasked would lose its session at every reconnect.
 
 **Offers.** `offers` carries the computer's whole list as one chunked payload
 (see *Chunked payloads*), a UTF-8 JSON object:
@@ -1277,6 +1313,144 @@ malformed frame like any other (close `1002`).
 `link_path{path}`: at the session's start, once it knows, and again at each
 change.
 
+### Invocations
+
+The primary and a computer ask each other to run one operation: the primary
+one of the capabilities the computer offers, the computer one of the home's
+services. Both directions use the same five events with the same fields. The
+side that sends `invoke_open` is the caller, and the other side answers. A
+computer sends none of them unless its `hello_ack` says
+`caps.computer.invoke: true`. The primary asks only a computer that is
+connected and has sent its offers this session, and refuses on its own side,
+before anything is sent, an operation whose offer the computer says is not
+on.
+
+| `t` | Required payload | Rules |
+|---|---|---|
+| `invoke_open` | `id`, `capability`, `op`, `deadline_ms`, `epoch`, `origin`, `index`, `last` + raw bytes; `turn?`, `part?` | the request: its arguments, a JSON object, chunked, at most 1 MiB |
+| `invoke_part` | `id`, `index`, `last`, `size_bytes` + raw bytes | the one part a request or its answer announced, a stream (see *The part*) |
+| `invoke_cancel` | `id` | the caller cancels its request; answered with exactly one `invoke_result` |
+| `invoke_status` | `id` | the caller asks for the answer again (see *After a reconnect*) |
+| `invoke_result` | `id`, `status`, `duration_ms`, `index`, `last` + raw bytes; `refusal?`, `message?`, `receipt?`, `part?` | how the request ended: its result, a JSON object, chunked, at most 4 MiB (each operation's own bound is tighter), `{}` for none |
+
+**The request.**
+
+| Field | Rule |
+|---|---|
+| `id` | the caller's, never reused; this primary mints `inv-` and 26 lowercase base32 characters |
+| `capability` | `^[a-z][a-z0-9_]{0,31}$` |
+| `op` | lowercase words joined by `.`, as a management method is named, at most 64 bytes |
+| `deadline_ms` | 0 to 900,000, counted from the request's arrival, its wait included; 0 means until cancelled and is taken only for a long-lived op |
+| `epoch` | the caller's primary epoch, 1 to 2^64−1 |
+| `origin` | the kind of turn that asked: `chat`, `voice`, `scheduled`, `cue`, `worker` or `background`; `computer` for a computer's own request |
+| `turn?` | `{session_id, tool_call_id}`, each at most 128 bytes: the turn that asked (the invocation's `id` as `tool_call_id` when the turn gives none), required for every origin but `computer` |
+| `part?` | `{size_bytes, sha256, mime}`: an upload follows, 1 to 20 MiB, its SHA-256 in lowercase hex, its media type at most 127 bytes with no white space |
+
+The origin is the primary's word. A computer applies its own rules to it
+(computer use runs only for a turn the owner is in), which guards against a
+mistake on the primary, not against a primary that was taken over. An
+operation the receiver does not have is refused `unavailable`.
+
+**The answer.**
+
+| Field | Rule |
+|---|---|
+| `status` | `ok` (it ran; the payload is its result), `failed` (it ran and failed), `refused` (it never ran), `timed_out` (it did not finish within its deadline), `cancelled`, or `unknown` (whether it ran is not known) |
+| `refusal?` | for `refused` alone: `off` (switched off on that computer), `unavailable` (it cannot run there), `outside_sandbox`, `not_attended` (it runs only while the owner is in the conversation), `stopped_here` (the person at the computer stopped it), `busy` or `stale_epoch` (an older copy of the home asked) |
+| `message?` | 1 to 512 bytes of UTF-8 with no control character: required for `failed` (the operation's own words) and `refused` (the answering side's sentence), optional for `unknown`, absent otherwise |
+| `receipt?` | `{at, target}`, the answering side's record that it took the request: when, in UTC as ISO 8601 writes it, and what it acted on, a path, a host or an action of at most 256 bytes, never content |
+| `part?` | `{size_bytes, sha256, mime}`: a part follows, as for a request |
+| `duration_ms` | from the request's arrival to its answer |
+
+The payload `{"receipt_only":true}` marks an answer that holds only the
+journal's receipt, and no result. A caller that cannot read an answer (a
+refusal on another status, a message where none rides, a result that is not
+a JSON object) ends its request `failed`. No invocation's failure is an
+`error`; a header the codec refuses is a malformed frame (close `1002`).
+
+**The part.** An invocation carries at most one part each way: an upload its
+request announces, or a file its answer announces. The part follows as
+`invoke_part` frames under the invocation's `id`: `index` from 0 and
+contiguous, each tail 1 to 60 KiB, `last` on the final frame, and on every
+frame `size_bytes`, the whole part's announced size, which picks its lane
+(see *Lanes*). The receiver joins the frames and checks their total and
+SHA-256 against the announcement. A gap, a frame past the announced size, a
+`size_bytes` that changes, or a total or SHA-256 that differs fails the
+invocation ("The upload did not arrive whole." on a computer, "The answer's
+file did not arrive whole." on the primary), and the session stays open; an
+operation that changed something and lost only its answer's part stays
+`ok`. A computer holds at most 20 MiB of one upload and 64 MiB across its
+uploads, and refuses a request past that `busy`; the primary holds at most
+20 MiB of one answer's part and 64 MiB across a computer's.
+
+**An answer and its part.** An `invoke_result` rides the interactive lane,
+and its part rides interactive up to 256 KiB announced and bulk above, so
+other events come between them. The caller is done only once the
+`invoke_result` and any part it announced have both arrived, and takes them
+in either order.
+
+**Cancel.** `invoke_cancel` is answered with exactly one `invoke_result` for
+its `id`: `cancelled`, or the outcome the request reached first. A request
+the receiver already answered is answered as `invoke_status` is, and the
+caller keeps the first answer it took.
+
+**After a reconnect.** The primary waits on its invocations, not on a
+session. When a computer's session comes back, the primary sends
+`invoke_status` for every invocation it still waits on from that computer,
+and the computer answers each:
+
+- an answer it still holds is sent again, its part included;
+- holding only its journal's record, an `invoke_result` of the recorded
+  status with the receipt, the payload `{"receipt_only":true}` and no part;
+- with no record, `unknown` with no receipt;
+- a request still running or waiting is answered when it ends.
+
+The primary never sends an operation that changes something (an effect)
+again: an answer that is `unknown`, or that holds only the receipt, ends it
+as it stands. A read is asked once more under a new `id`, with the time it
+has left, when a second or more is left. When no answer comes within the
+deadline and 2 s more, an effect ends `unknown` and a read `timed_out`, and
+the primary sends `invoke_cancel`, best-effort. A computer never runs an
+`id` twice: an `invoke_open` whose `id` it knows is answered as
+`invoke_status` is. The primary holds no answer to a computer's own request
+once sent, so its `invoke_status` for one that ended is answered `unknown`.
+
+**On the computer.** A computer admits a request in this order, each step a
+refusal with the computer's sentence:
+
+1. the request's `epoch` is at least its link's (`stale_epoch`: an older
+   copy of the home never acts here);
+2. it has the capability and its op (`unavailable`);
+3. its master switch is on, its switches are reviewed and the capability's
+   offer is on, read at that moment (`off`);
+4. a `deadline_ms` of 0 only for a long-lived op, and a `turn` for every
+   origin but `computer` (`unavailable`);
+5. arguments the capability takes (`failed`, with the capability's
+   sentence);
+6. the capability's own rules, such as the origin and the sandbox's folders
+   (`not_attended`, `outside_sandbox`).
+
+It runs at most 8 requests at once and keeps at most 32 waiting, first come
+first served, a request whose upload has not arrived among them; past that
+it answers `busy`. A request still waiting when its deadline passes never
+runs, and a run past it is stopped; both are answered `timed_out`. Turning
+the master switch off ends everything running or waiting as `refused`
+`stopped_here`.
+
+Each request is recorded in the computer's journal, `device/invocations/`
+in its home, one file per UTC day. A `started` record is written to disk
+before the run, and a journal that cannot be written runs nothing; a
+`finished` record is written before the answer goes. A request refused
+before it ran has only its `finished` record. The journal holds ids, times,
+the capability, op, target, origin, status and sizes, never arguments,
+results or files, and keeps 7 days and at most 2,000 invocations. At start,
+a request a crash left started is recorded `unknown` (`interrupted`).
+`device/` never travels with the home.
+
+Each answer also stays in memory for 10 minutes, at most 32 answers and
+32 MiB, the oldest leaving first, for an `invoke_status` after a lost
+answer; past that, the journal's record alone answers.
+
 ### The sign-in forward and snapshot copies
 
 **Sign-in forward.** A browser sign-in the desktop started (its forwarded
@@ -1299,7 +1473,9 @@ no `Content-Length` on the wire (each end writes its own); a chunked request
 body is refused.
 
 **Snapshot copies.** The primary sends each snapshot it writes, still
-encrypted: `snapshot_begin`, `snapshot_chunk`s of at most 60 KiB from
+encrypted, to each connected desktop that keeps the home's backup copies
+(the computer the home moved from does; one that joined with a code does
+not): `snapshot_begin`, `snapshot_chunk`s of at most 60 KiB from
 `index` 0, `snapshot_end`. The desktop answers `snapshot_stored` with the
 SHA-256 it computed, which verifies the copy when it is `snapshot_begin`'s,
 or `snapshot_refused`. A new `snapshot_begin` abandons a copy in progress.
@@ -1367,9 +1543,54 @@ first frame within 10 s of the handshake, or the stream closes `1008`.
 | `enroll_accepted` | `candidate_id`, `primary_name` | primary to candidate; the session then closes `1000` |
 
 A refused enrollment is an `error` with `code` `enrollment_expired`,
-`enrollment_used` or `enrollment_limit` (4 candidates already held), then
-close `4003` with the text `enrollment expired`, `enrollment used` or
-`enrollment limit`.
+`enrollment_used`, `enrollment_limit` (4 candidates already held) or
+`enrollment_purpose` (below), then
+close `4003` with the text `enrollment expired`, `enrollment used`,
+`enrollment limit` or `enrollment purpose`.
+
+**A computer joining the home** (M97) uses the same session. The owner opens
+a window for a computer (Add a computer); its code is version 2 and names
+its purpose (`"v": 2, "purpose": "computer"`), where a candidate's stays
+version 1, so a decoder that knows only version 1 refuses a computer's code
+on `v`. One window is held at a time: a code of the other purpose is refused
+while one is open, and the open window stays as it is. The window takes the
+first event of its own purpose alone: `join_request` on a candidate's
+window, and `enroll_request` on a computer's, are answered `error` with
+`code` `enrollment_purpose` and closed `4003` (`enrollment purpose`).
+
+| `t` | Required payload | Rules |
+|---|---|---|
+| `join_request` | `host{name, os, arch, version}`, `platform` | computer to primary, the session's first event, within 10 s of the handshake; `platform` is `macos` or `linux`; each text at most 128 bytes |
+| `join_approved` | `device_id`, `name`, `primary_epoch`, `primary{name, node_id, relays[], relays_rev, addrs[]?}` | primary to computer, once the owner approved; `name` is the home's name for the computer, the one it said unless another device holds it (then suffixed ` 2`, ` 3` and on); `primary` is where the computer reaches the primary from now on, as a desktop route's (`relays` 1 to 8, `addrs` 0 to 8); the session then closes `1000` (`joined`) |
+| `join_denied` | `reason` | primary to computer; `reason` is `denied` (the owner said no, or typed digits that are not the computer's), `timeout` (the window's thirty minutes ran out), `cancelled` (the owner cancelled the code or opened another) or `device_disconnected`; the session then closes `4003` (`join <reason>`) |
+
+The join has the second step a phone's pairing has. After the handshake both
+ends derive six digits from the handshake hash exactly as a pairing's SAS is
+derived (see *Noise modes and pairing*), with a label of their own:
+
+1. `digest = HMAC-SHA256(key: handshake_hash, data: "fermix-computer-sas-v1")`
+2. read the first four digest bytes as an unsigned big-endian integer;
+3. reduce modulo 1,000,000 and zero-pad to six decimal digits.
+
+The label differs from a pairing's, so a phone's digits and a computer's
+never match by construction (`noise_vectors.json` carries both for each
+vector, as `sas` and `computer_sas`). The computer shows the digits with its
+name and system; the surface that opened the code shows the same digits and
+its owner approves with them (management `home.act`, `approve_computer`).
+The `join_request` burns the window as an enrollment does, and the primary
+then holds the session with no deadline but the window's own: while the
+owner decides it answers `ping` with `pong` and refuses every other event
+(`unsupported_event`), so a keepalive never has to stop. Until the owner
+approves, the computer has no row and no access. Approval writes its
+`desktop` row (its `platform`, no backup copies, every offer off) and
+answers `join_approved`; a denial, digits that are not the computer's, a
+session that ends while it waits, a cancelled code and the window running
+out answer `join_denied` where the session still stands and write nothing.
+The code is spent either way. A computer whose answer was lost dials again
+with the same key while the window lasts and is answered as it was:
+`join_approved` again, or `join_denied` with the reason kept; any other key
+is `enrollment_used`. Once approved, the computer links with `IK` (`0x01`)
+as every desktop does (see *Desktop sessions*).
 
 **The move** (`FXM1 0x04`, `IK`). The source of a move, the old primary in the
 device role, streams the home to its candidate. The initiator's static key is
@@ -1421,8 +1642,8 @@ sent is never sent to it. `FermixChannels.Mobile.Peers` is this table.
 | Kind | Sends | Is sent |
 |---|---|---|
 | phone | `hello` `msg` `attach_begin` `attach_chunk` `attach_end` `command` `cancel` `history_pull` `media_fetch` `push_register` `push_unregister` `ack` `read_state` `request_status` `unpair` `ping` `call_open` `call_line` `call_audio` `call_frame` `call_close` `companion_open` `companion_line` `companion_close` | `hello_ack` `accepted` `attach_status` `turn_started` `text_delta` `tool_event` `text_done` `turn_done` `media_begin` `media_chunk` `media_end` `turn_error` `row` `reaction` `approval` `approval_resolved` `link_preview` `read_state` `history_page` `request_status_page` `notice` `error` `pong` `event_part` `call_attached` `call_line` `call_audio` `call_close` `companion_line` `companion_close` |
-| desktop | `hello` `ping` `media_fetch` `ack` `companion_open` `companion_line` `companion_close` `manage` `loopback_request` `loopback_failed` `snapshot_stored` `snapshot_refused` `offers` `link_path` | `hello_ack` `error` `pong` `event_part` `media_begin` `media_chunk` `media_end` `companion_line` `companion_close` `manage_result` `loopback_open` `loopback_response` `loopback_close` `snapshot_begin` `snapshot_chunk` `snapshot_end` |
-| enrollment | `enroll_request` `ping` | `enroll_accepted` `error` `pong` |
+| desktop | `hello` `ping` `media_fetch` `ack` `companion_open` `companion_line` `companion_close` `manage` `loopback_request` `loopback_failed` `snapshot_stored` `snapshot_refused` `offers` `link_path` `invoke_open` `invoke_part` `invoke_cancel` `invoke_result` `invoke_status` | `hello_ack` `error` `pong` `event_part` `media_begin` `media_chunk` `media_end` `companion_line` `companion_close` `manage_result` `loopback_open` `loopback_response` `loopback_close` `snapshot_begin` `snapshot_chunk` `snapshot_end` `invoke_open` `invoke_part` `invoke_cancel` `invoke_result` `invoke_status` |
+| enrollment | `enroll_request` `join_request` `ping` | `enroll_accepted` `join_approved` `join_denied` `error` `pong` |
 | move | `move_offer` `move_chunk` `move_end` `move_commit` `move_resume` `ping` | `move_accept` `move_ready` `move_done` `error` `pong` |
 
 A pairing session (`0x02`), until the owner decides, sends `pair_request` and
@@ -1492,7 +1713,7 @@ parsed.
 | `invalid_field`, `missing_field` | a field the daemon refuses once the frame decoded, such as a `msg`'s `attach_ids` | `client_msg_id` for a `msg` or `command` | open |
 | `unsupported_event` | a known event this session's kind may not send (see *Who may send what*), such as `pair_request` on a paired socket, or a desktop's event outside the families the primary serves | — | open |
 | `invalid_offers` | a desktop's `offers` payload the primary refuses, or whose `rev` is not its own; the computer offers nothing until it sends one the primary takes (see *A computer's own record*) | — | open |
-| `enrollment_expired`, `enrollment_used`, `enrollment_limit` | a refused enrollment (see *Enrollment and the move*) | — | closed `4003` |
+| `enrollment_expired`, `enrollment_used`, `enrollment_limit`, `enrollment_purpose` | a refused enrollment, or a first event for a window of the other purpose (see *Enrollment and the move*) | — | closed `4003` |
 | `move_unknown`, `move_mismatch`, `move_failed` | a refused move step (see *Enrollment and the move*) | — | closed `4003` |
 | `request_backlog_full` | 32 requests already waiting | — | open |
 | `media_fetch_backlog_full` | 8 fetches already waiting | `ref` | open |
@@ -1511,13 +1732,13 @@ the device has since replaced.
 
 | Code | Why | Client |
 |---|---|---|
-| `1000` | a phone's one-hour session lifetime ran out (`Noise session lifetime reached`; a desktop's session has none), the daemon is shutting down, an enrollment was accepted, or a phone's session went silent mid-call: no call frame for 1.5 s while the phone holds the call's audio (`call link silent`) | reconnect with a new handshake (a desktop at once, showing no outage, once in a row: then with the backoff); a candidate does not |
+| `1000` | a phone's one-hour session lifetime ran out (`Noise session lifetime reached`; a desktop's session has none), the daemon is shutting down, an enrollment was accepted, a computer's join was approved (`joined`), or a phone's session went silent mid-call: no call frame for 1.5 s while the phone holds the call's audio (`call link silent`) | reconnect with a new handshake (a desktop at once, showing no outage, once in a row: then with the backoff); a candidate does not |
 | `1002` | a protocol error (`mobile protocol error`, `invalid mobile prelude`, `unsupported mobile protocol version`, `stale primary`), no inbound frame for 150 s, or a malformed WebSocket frame | reconnect; after `unsupported_protocol_version`, update first; after `stale_primary`, tell the owner and keep the highest epoch it has seen |
 | `1003` | a text message | send binary messages |
 | `1008` | the handshake deadline (`mobile handshake deadline`); on the remote route, also a stream still in its handshake closed to make room for a newer one | reconnect |
 | `1009` | a message over 65,535 bytes (`mobile frame too large`) | never send one |
 | `1011` | the daemon's socket failed, or the primary's side of a desktop's session, or of a phone's list channel, failed or did not start (`desktop peer failed`) | reconnect |
 | `4001` | `connection replaced`: a newer connection of the same phone, or a pairing request from the same phone key | do not reconnect this connection; the newer one is live |
-| `4003` | `device revoked`, `device unknown` (an `IK` handshake from a key no row holds), `pairing <reason>` after `pair_denied`, `authenticated device mismatch` (the `hello` named another device), `enrollment <reason>` after a refused enrollment, or `move <code>` after a refused move step | do not reconnect with this identity until it pairs again; a candidate or a move's source reads the `error` before it |
+| `4003` | `device revoked`, `device unknown` (an `IK` handshake from a key no row holds), `pairing <reason>` after `pair_denied`, `authenticated device mismatch` (the `hello` named another device), `enrollment <reason>` after a refused enrollment, `join <reason>` after `join_denied`, or `move <code>` after a refused move step | do not reconnect with this identity until it pairs again; a candidate, a joining computer or a move's source reads the `error` or the `join_denied` before it |
 
 A connection past its memory bound is dropped with no close frame.

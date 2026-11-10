@@ -10,6 +10,8 @@ defmodule FermixCore.Management.SettingsTest do
 
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias FermixCore.Browser.Error, as: BrowserError
   alias FermixCore.Management.Copy
   alias FermixCore.Management.Router
@@ -1376,6 +1378,45 @@ defmodule FermixCore.Management.SettingsTest do
 
       assert is_binary(sentence) and sentence != ""
       assert {:error, {:config_unreadable, _same}} = Settings.reload()
+    end
+  end
+
+  # M97 §4: this computer's own settings are read from machine.toml alone, and
+  # the outside-edit check compares both files joined, so a section written
+  # into config.toml by hand changes nothing it sees. A reload names it once,
+  # with where it belongs, and machine.toml still wins.
+  describe "a machine setting written into config.toml" do
+    test "a reload names it and where it belongs, and reads the machine file's", %{home: home} do
+      File.write!(Path.join(home, "machine.toml"), "[sandbox]\nmode = \"strict\"\n")
+
+      File.write!(Path.join(home, "config.toml"), """
+      [sandbox]
+      mode = "open"
+
+      [fermix_core.computer_use]
+      enabled = true
+      """)
+
+      log = capture_log(fn -> assert {:ok, %{"reloaded" => true}} = Settings.reload() end)
+
+      assert log =~
+               "settings reload: config.toml holds this computer's own settings, which Fermix " <>
+                 "reads only from machine.toml, so they are ignored: sandbox, " <>
+                 "fermix_core.computer_use."
+
+      assert SandboxConfig.normalize(Application.get_env(:fermix_core, :sandbox)).mode == :strict
+      assert Application.get_env(:fermix_core, :computer_use)[:enabled] != true
+    end
+
+    test "a reload of a config.toml that holds none says nothing of it", %{home: home} do
+      File.write!(
+        Path.join(home, "config.toml"),
+        "[fermix_core.memory]\nreview_interval_hours = 9\n"
+      )
+
+      log = capture_log(fn -> assert {:ok, %{"reloaded" => true}} = Settings.reload() end)
+
+      refute log =~ "this computer's own settings"
     end
   end
 

@@ -5,6 +5,8 @@ defmodule FermixCore.Home.Candidate.ActivationReturnTest do
   # staging leaves (`return_settle_test.exs` covers that).
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog
+
   alias FermixCore.Home.AlwaysOnRelease
   alias FermixCore.Home.Candidate
   alias FermixCore.Home.Candidate.Activation
@@ -191,6 +193,47 @@ defmodule FermixCore.Home.Candidate.ActivationReturnTest do
     refute File.exists?(DesktopLink.path(home))
   end
 
+  # A run after a stop between the key's deletion and the link's deletes only
+  # the key this home had, as the first run recorded it: another home under the
+  # same profile may have stored its own in the item since (D13).
+  test "a later run of step c leaves another home's key under the same profile", ctx do
+    home = activating_home!(ctx.tmp, "home", @small)
+    profile = keyed_profile!(home)
+    {:ok, link} = DesktopLink.read(home)
+
+    assert catch_throw(Activation.activate(home, :return, after_step: stop_at(:c))) ==
+             {:stopped, :c}
+
+    # The stop came before the link went: it is back as the first run found it.
+    :ok = DesktopLink.write(home, link)
+    other = Path.join(ctx.tmp, "other")
+    write!(other, "config.toml", ~s([fermix_core]\nprofile = "#{profile}"\n))
+    {:ok, %{public: other_public}, :keyring} = ComputerKey.create(other)
+
+    assert :ok = Activation.activate(home, :return)
+    assert {:ok, %{public: ^other_public}} = ComputerKey.read(other, store: :keyring)
+    refute File.exists?(DesktopLink.path(home))
+  end
+
+  # The step ends this computer's time as a linked computer however its link
+  # reads. One that cannot be read names no store, so it goes, the reason is
+  # logged by name, and no key is guessed at.
+  test "a link that cannot be read goes at step c, logged by name, and no key is guessed",
+       ctx do
+    home = activating_home!(ctx.tmp, "home", @small)
+    profile = keyed_profile!(home)
+    File.write!(DesktopLink.path(home), "{\"v\": 2, \"key\": \"@keyring\"")
+
+    log = capture_log(fn -> assert :ok = Activation.activate(home, :return) end)
+
+    refute File.exists?(DesktopLink.path(home))
+    assert log =~ "the desktop link could not be read"
+    assert log =~ "invalid_link"
+
+    assert {:ok, _base64} =
+             SecretWriter.get({:device_key, :desktop}, profile: profile, store: :keyring)
+  end
+
   test "the config is primary only once the marker is gone, at every step", ctx do
     home = activating_home!(ctx.tmp, "home")
     test = self()
@@ -343,6 +386,18 @@ defmodule FermixCore.Home.Candidate.ActivationReturnTest do
     :ok = Candidate.put_state(home, Map.put(state, "phase", "activating"), @now)
     {:ok, _entries} = Activation.record_entries(home)
     home
+  end
+
+  # The home under a profile of its own, its key in the keychain and its link
+  # naming that store.
+  defp keyed_profile!(home) do
+    profile = "activation-return-#{System.unique_integer([:positive])}"
+    File.write!(Path.join(home, "config.toml"), ~s([fermix_core]\nprofile = "#{profile}"\n))
+    SafeRm.rm!(Path.join(home, "device/desktop_key"))
+    {:ok, _keypair, :keyring} = ComputerKey.create(home)
+    {:ok, link} = DesktopLink.read(home)
+    :ok = DesktopLink.write(home, %{link | key: :keyring})
+    profile
   end
 
   # After f the next boot is the primary's, which finishes the activation;

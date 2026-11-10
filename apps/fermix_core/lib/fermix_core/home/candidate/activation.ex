@@ -63,7 +63,12 @@ defmodule FermixCore.Home.Candidate.Activation do
        boot in between made again;
     c. the ended tenure's key is deleted from the secret store its desktop
        link records (`FermixCore.Home.ComputerKey.delete/3`, with any file
-       an older Fermix kept it in), then the link is removed from `device/`;
+       an older Fermix kept it in), then the link is removed from `device/`.
+       The store and the key's public half are recorded once, before anything
+       is deleted (`candidate/tenure.json`), and the item goes only while it
+       holds that key, so a later run never deletes another home's under the
+       same profile. A link that cannot be read names no store: it is removed,
+       the reason logged by name, and any key it named stays where it is;
     d. the snapshot status asks for a snapshot at the first boot;
     e. the moved marker is removed (`FermixCore.Home.Moved.remove/1`): the
        server carries its own by now, since it sent `move_commit` after
@@ -89,11 +94,16 @@ defmodule FermixCore.Home.Candidate.Activation do
   alias FermixCore.Home.Snapshot.Recipient
   alias FermixCore.Home.Snapshot.Status
   alias FermixCore.Plugins.Dist.Reinstall
+  alias FermixCore.Setup.SecretWriter
+
+  require Logger
 
   @config "config.toml"
   @file_mode 0o600
   @return_kinds ~w(return local)
   @return_opts [:impl, :supervised, :drop_desktop_row]
+  # Step c's record when this home holds no key it can name.
+  @no_tenure_key %{store: nil, public: nil}
 
   @doc """
   Restores the stream at `incoming` into the staging directory with `pair`
@@ -214,7 +224,7 @@ defmodule FermixCore.Home.Candidate.Activation do
   `record_entries/1` recorded (refused as `:entries_unrecorded` without them).
   `opts`: `:after_step`, a 1-arity function called with each step's name once
   it is done (a test seam that stops it part-way), and `:impl` and
-  `:supervised`, which the key's deletion takes.
+  `:supervised`, which the key's read and deletion take.
   """
   @spec activate(Path.t(), :return, keyword()) :: :ok | {:error, term()}
   def activate(home, :return, opts \\ []) when is_binary(home) and is_list(opts) do
@@ -485,22 +495,94 @@ defmodule FermixCore.Home.Candidate.Activation do
   defp keep_unit(home, unit, _to, {:ok, _stat}), do: set_aside_path(home, unit)
   defp keep_unit(_home, _unit, to, {:error, reason}), do: {:error, {:file, to, reason}}
 
-  # Step c: the ended tenure's key, then its link, which names the store the
-  # key is in, so a stop between the two deletes the key again (D13).
+  # Step c: the ended tenure's key, then its link. Which key is this home's is
+  # recorded once, before anything is deleted, so a run after a stop between
+  # the two deletes only that key: two homes under one profile share the item
+  # (D13).
   defp end_tenure(home, opts) do
-    with {:ok, store} <- tenure_store(home),
-         :ok <- ComputerKey.delete(home, store, opts) do
+    with {:ok, tenure} <- tenure(home, opts),
+         :ok <- forget_key(home, tenure, opts) do
       remove_file(DesktopLink.path(home))
     end
   end
 
-  defp tenure_store(home) do
-    case DesktopLink.read(home) do
-      {:ok, %{key: store}} -> {:ok, store}
-      {:error, {:file, _path, :enoent}} -> {:ok, nil}
-      {:error, reason} -> {:error, {:desktop_link, reason}}
+  defp forget_key(home, %{store: nil}, opts), do: ComputerKey.delete(home, nil, opts)
+
+  defp forget_key(home, %{store: store, public: public}, opts),
+    do: ComputerKey.delete(home, store, [public: public] ++ opts)
+
+  defp tenure(home, opts) do
+    file = tenure_path(home)
+
+    case File.read(file) do
+      {:ok, contents} -> decode_tenure(contents, file)
+      {:error, :enoent} -> record_tenure(home, file, opts)
+      {:error, reason} -> {:error, {:file, file, reason}}
     end
   end
+
+  defp record_tenure(home, file, opts) do
+    with {:ok, tenure} <- linked_key(home, opts),
+         :ok <- Candidate.write_private(file, Jason.encode!(encode_tenure(tenure))) do
+      {:ok, tenure}
+    end
+  end
+
+  # The key the store the link names holds now. No link, a link from before
+  # the key moved, and a store that holds no key name none; a link that cannot
+  # be read names no store, so its key is never guessed at.
+  defp linked_key(home, opts) do
+    case DesktopLink.read(home) do
+      {:ok, %{key: nil}} -> {:ok, @no_tenure_key}
+      {:ok, %{key: store}} -> stored_key(home, store, opts)
+      {:error, {:file, _path, :enoent}} -> {:ok, @no_tenure_key}
+      {:error, reason} -> unreadable_link(reason)
+    end
+  end
+
+  defp stored_key(home, store, opts) do
+    case ComputerKey.read(home, [store: store] ++ opts) do
+      {:ok, %{public: public}} -> {:ok, %{store: store, public: public}}
+      {:error, {:missing, ^store}} -> {:ok, @no_tenure_key}
+      {:error, {:invalid, ^store}} -> {:ok, @no_tenure_key}
+      {:error, reason} -> {:error, {:computer_key, reason}}
+    end
+  end
+
+  defp unreadable_link(reason) do
+    Logger.warning(
+      "move back: the desktop link could not be read (#{inspect({:desktop_link, reason})}), " <>
+        "so it is removed and any key it named stays in its store: " <>
+        DesktopLink.error_sentence(reason)
+    )
+
+    {:ok, @no_tenure_key}
+  end
+
+  defp encode_tenure(%{store: nil}), do: %{"store" => nil, "public" => nil}
+
+  defp encode_tenure(%{store: store, public: public}),
+    do: %{"store" => SecretWriter.sentinel_for(store), "public" => Base.encode64(public)}
+
+  defp decode_tenure(contents, file) do
+    case Jason.decode(contents) do
+      {:ok, %{"store" => sentinel, "public" => encoded}} -> tenure_of(sentinel, encoded, file)
+      _invalid -> {:error, {:invalid_state, file}}
+    end
+  end
+
+  defp tenure_of(nil, nil, _file), do: {:ok, @no_tenure_key}
+
+  defp tenure_of(sentinel, encoded, file) when is_binary(encoded) do
+    case {SecretWriter.store_of_sentinel(sentinel), Base.decode64(encoded)} do
+      {{:ok, store}, {:ok, <<_::256>> = public}} -> {:ok, %{store: store, public: public}}
+      _invalid -> {:error, {:invalid_state, file}}
+    end
+  end
+
+  defp tenure_of(_sentinel, _encoded, file), do: {:error, {:invalid_state, file}}
+
+  defp tenure_path(home), do: Candidate.path(home, "tenure.json")
 
   # Step f: done already when an earlier run renamed it.
   defp place_return_config(home, staging) do

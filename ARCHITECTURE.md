@@ -1496,7 +1496,9 @@ Current channels:
   `devices.toml` (`Mobile.DeviceStore`) names `kind`: a `phone` (a row that
   names none, as every row before desktops) or a `desktop` engine with no
   push or attestation field, which `Mobile.Management`'s one revoke path
-  refuses to forget (`:desktop_device`: this version cannot link it again);
+  removes as it forgets a phone (M97 §3.3: its record in `Computers.Store`
+  goes with it, and the one that keeps the only backup copies needs
+  `confirmed`, `{:only_backups, name}` without it);
   `DeviceRegistry`
   carries the kind and keeps the phones' audience (`broadcast/3`,
   `connected/2`) to phones. `Mobile.Peers` is the one table of kind × event
@@ -1660,7 +1662,22 @@ Current channels:
   burns the window at the first frame that decrypts (the PSK proves itself
   only there; the candidate that burned it is answered again with the same
   id when its acceptance was lost, while the window lasts), and records the candidate
-  (`FermixCore.Home.Candidates`). A
+  (`FermixCore.Home.Candidates`). The window has a purpose (M97 §3.1, §7.5):
+  one opened for a `:computer` (a version 2 code; a code of the other purpose
+  is refused while one is open, never replacing it) takes `join_request`
+  instead, and the responder holds that session, answering `ping`, with the
+  six digits both ends derive from the handshake under their own label
+  (`Mobile.Noise.sas/2`), until the owner approves with those digits
+  (`Enrollment.approve/2`, which alone writes the computer's `desktop` row:
+  its platform, `backups: false`), denies, cancels, the session ends or the
+  window runs out; every ending but approval writes nothing, and the code is
+  spent either way. The computer's side is `FermixCore.Home.Join`, the one
+  writer of `device/join.json` (refused for a home of its own; its key made
+  in the secret store first), and `Desktop.Join`, a worker in the device
+  tree's dial subtree while that file is here and no link is; approval
+  writes the link with every offer off (`Join.finish/3`) and restarts.
+  `FermixCore.Home.Leave` is the way out: the server is told over the link,
+  then the key, the link and the switches go. A
   candidate engine runs `Home.CandidateSupervisor` alone: its own
   `Iroh.Bridge` (move prelude only) and `Iroh.Helper` in listen mode rooted at
   `<home>/candidate`, then `Home.Candidate`, the one writer of its phase file,

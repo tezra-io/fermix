@@ -41,7 +41,9 @@ defmodule FermixChannels.Mobile.Management do
   alias FermixChannels.Mobile.Push.PigeonDispatcher
   alias FermixChannels.Mobile.Session
   alias FermixChannels.Mobile.Supervisor, as: MobileSupervisor
+  alias FermixCore.Computers.Store, as: ComputerStore
   alias FermixCore.Readiness
+  alias FermixCore.Setup.ConfigStore
 
   @max_wait_ms 120_000
   @max_listed_devices 64
@@ -684,9 +686,9 @@ defmodule FermixChannels.Mobile.Management do
   end
 
   defp revoke(device_id, opts) do
-    with :ok <- not_desktop(device_id, opts) do
+    with {:ok, device} <- revocable(device_id, opts) do
       case revoke_call(device_id, opts) do
-        :ok -> {:ok, %{device_id: device_id}}
+        :ok -> revoked(device, device_id, opts)
         # The facade's wire vocabulary: the registry's tuple would reach the CLI
         # as an inspect() dump, and the id is already in the caller's hands.
         {:error, {:device_not_found, _id}} -> {:error, :device_not_found}
@@ -695,17 +697,59 @@ defmodule FermixChannels.Mobile.Management do
     end
   end
 
-  # The desktop a move linked to this primary (M75) is never revoked: this
-  # version cannot link a revoked desktop again, and it keeps copies of the
-  # primary's snapshots. Read from the same place the revoke would delete it.
-  defp not_desktop(device_id, opts) do
+  # A computer can be removed (M97 §3.3): one removed joins again with a code.
+  # The one computer that keeps the server's backup copies is named first, and
+  # removed only once the owner confirmed (`opts[:confirmed]`). Read from the
+  # same place the revoke would delete it.
+  defp revocable(device_id, opts) do
     case fetch_device(device_id, opts) do
-      {:ok, %{kind: :desktop}} -> {:error, :desktop_device}
-      {:ok, _phone} -> :ok
+      {:ok, %{kind: :desktop} = desktop} -> backups_checked(desktop, opts)
+      {:ok, phone} -> {:ok, phone}
       {:error, {:device_not_found, _id}} -> {:error, :device_not_found}
       {:error, _reason} = error -> error
     end
   end
+
+  defp backups_checked(desktop, opts) do
+    with false <- Keyword.get(opts, :confirmed, false) == true,
+         true <- keeps_copies?(desktop),
+         {:ok, devices} <- paired_devices(opts),
+         [] <- other_holders(devices, desktop.device_id) do
+      {:error, {:only_backups, desktop.name}}
+    else
+      {:error, _reason} = error -> error
+      _confirmed_or_not_the_only_holder -> {:ok, desktop}
+    end
+  end
+
+  # A row that does not say keeps copies, as every computer did before the
+  # flag (M97 D7).
+  defp keeps_copies?(%{backups: backups}), do: backups != false
+
+  defp other_holders(devices, device_id) do
+    for %{kind: :desktop} = row <- devices,
+        row.device_id != device_id and keeps_copies?(row),
+        do: row
+  end
+
+  # A removed computer's record of what it offered goes with its row
+  # (`FermixCore.Computers.Store`); a record that cannot go is said in the log,
+  # since the computer itself is already removed.
+  defp revoked(%{kind: :desktop}, device_id, opts) do
+    home = Keyword.get_lazy(opts, :root, &ConfigStore.fermix_home/0)
+
+    case ComputerStore.forget(home, device_id) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error("revoke: the removed computer's record stays: #{inspect(reason)}")
+    end
+
+    {:ok, %{device_id: device_id}}
+  end
+
+  defp revoked(_phone, device_id, _opts), do: {:ok, %{device_id: device_id}}
 
   defp fetch_device(device_id, opts) do
     if subtree_started?(opts) do

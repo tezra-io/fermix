@@ -7,6 +7,8 @@ defmodule FermixChannels.Home.MoveTest do
   # the restarts (messages to the test) and the timers (never fired).
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog
+
   alias FermixChannels.Home.Candidate, as: CandidateProcess
   alias FermixChannels.Home.Enrollment
   alias FermixChannels.Home.MoveWorker
@@ -27,6 +29,7 @@ defmodule FermixChannels.Home.MoveTest do
   alias FermixCore.Home.Role
   alias FermixCore.Home.Snapshot
   alias FermixCore.Home.Snapshot.Recipient
+  alias FermixCore.Setup.MachineFile
   alias FermixCore.Setup.SecretWriter
   alias FermixTestSupport.SafeRm
   alias FermixTestSupport.TelemetryCapture
@@ -347,6 +350,54 @@ defmodule FermixChannels.Home.MoveTest do
       assert_received :source_restart
     end
 
+    # A server the home moves back from keeps nothing on for a server, so its
+    # resume owes no switches and never reads this computer's machine.toml.
+    test "a source not kept as a desktop resumes whatever its machine.toml holds", ctx do
+      source = ctx.primary.root
+      rewrite_request!(source, &Map.put(&1, "keep_as_desktop", false))
+      :ok = Move.put_phase(source, "streaming", %{"device_id" => nil}, HomeMove.now())
+      retire_by_hand(source, ctx)
+      File.write!(MachineFile.path(source), "[fermix_core.computer]\nfiles = \"maybe\"\n")
+
+      run_worker(source, ctx.candidate)
+
+      assert {:ok, %{"phase" => "committed", "epoch" => 5}} = Move.read_phase(source)
+      assert_received :source_restart
+      refute File.exists?(DesktopLink.path(source))
+    end
+
+    # The switches a kept computer is owed are written before the commit, so
+    # a machine.toml they cannot go into holds it, said as what failed.
+    test "switches that cannot be written hold the commit, with a sentence of their own", ctx do
+      source = ctx.primary.root
+      retire_by_hand(source, ctx)
+      File.write!(MachineFile.path(source), "[fermix_core.computer]\nfiles = \"maybe\"\n")
+
+      log = capture_log(fn -> run_worker(source, ctx.candidate) end)
+
+      assert {:ok, %{"phase" => "committing", "sentence" => sentence}} = Move.read_phase(source)
+      assert sentence =~ "machine.toml"
+      refute sentence =~ "desktop link"
+      assert log =~ "machine.toml"
+      refute_received :source_restart
+      assert {:ok, %{role: :candidate}} = Role.configured(ctx.home)
+    end
+
+    # A request a newer engine wrote may keep an offer this engine does not
+    # know: it is left off, named in the log, and the move goes on.
+    test "an offer this engine does not know is left off, named, and the move goes on", ctx do
+      source = ctx.primary.root
+      rewrite_request!(source, &Map.put(&1, "keep_offers", ["files", "teleport"]))
+      retire_by_hand(source, ctx)
+
+      log = capture_log(fn -> run_worker(source, ctx.candidate) end)
+
+      assert {:ok, %{"phase" => "committed", "epoch" => 5}} = Move.read_phase(source)
+      assert {:ok, switches} = Switches.read(source)
+      assert Switches.switched_on(switches) == [:files]
+      assert log =~ "teleport"
+    end
+
     test "a candidate that never answers leaves the move committed, with its sentence", ctx do
       source = ctx.primary.root
       retire_by_hand(source, ctx)
@@ -653,6 +704,12 @@ defmodule FermixChannels.Home.MoveTest do
   defp retire_by_hand(source, ctx) do
     :ok = Move.put_phase(source, "streaming", %{"ready_epoch" => ctx.ready}, HomeMove.now())
     :ok = Moved.write(source, %{epoch: 4, moved_at: HomeMove.now(), to: "north-box"})
+  end
+
+  # The request as another engine, or the owner's choice, wrote it.
+  defp rewrite_request!(source, change) do
+    file = Path.join(Move.dir(source), "request.json")
+    File.write!(file, file |> File.read!() |> Jason.decode!() |> change.() |> Jason.encode!())
   end
 
   defp commit_by_hand(ctx) do

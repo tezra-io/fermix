@@ -15,6 +15,11 @@ defmodule FermixChannels.Desktop.Companion do
   open, is answered `companion_close` with its reason, and the session stays
   open. The channels end with the session.
 
+  A computer past the server's window (its peer's `standing` is
+  `:settings_only`, `FermixCore.Computers.Versions`, M97 §3.4) keeps its link
+  for settings alone: every `companion_open` is answered `companion_close`
+  with `settings_only_sentence/0`, and no connection starts.
+
   A phone's list channel (M85 E4) is this family too, for a phone's session
   (`kind: :phone`): one channel, a second answered `companion_close` with
   "One list channel is open from this phone.", and its connection started in
@@ -39,10 +44,15 @@ defmodule FermixChannels.Desktop.Companion do
 
   @max_channels 4
   @kinds [:desktop, :phone]
+  @settings_only_sentence "Update Fermix on this computer to chat through your server."
 
   @doc "The most channels a desktop holds open at once."
   @spec max_channels() :: pos_integer()
   def max_channels, do: @max_channels
+
+  @doc "Why a computer past the server's window is refused a chat (moduledoc)."
+  @spec settings_only_sentence() :: String.t()
+  def settings_only_sentence, do: @settings_only_sentence
 
   @impl true
   def init(%{device_id: device_id, registry: registry} = context) do
@@ -55,6 +65,7 @@ defmodule FermixChannels.Desktop.Companion do
        device_id: device_id,
        registry: registry,
        kind: kind,
+       standing: Map.get(context, :standing, :current),
        session: Map.get(context, :session),
        endpoint: Keyword.get(opts, :endpoint, Endpoint),
        supervisor: Keyword.get(opts, :supervisor, FermixChannels.Desktop.TunnelSupervisor),
@@ -67,6 +78,10 @@ defmodule FermixChannels.Desktop.Companion do
   end
 
   @impl true
+  def handle_event("companion_open", %{"channel" => channel}, _payload, state)
+      when state.standing == :settings_only,
+      do: {:ok, close(state, channel, @settings_only_sentence)}
+
   def handle_event("companion_open", %{"channel" => channel}, _payload, state),
     do: {:ok, open(channel, prune(state))}
 

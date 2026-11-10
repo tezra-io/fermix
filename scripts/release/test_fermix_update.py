@@ -5,16 +5,22 @@
 # ///
 """Hermetic tests for the release an Always On server installs.
 
-A server always runs exactly the Fermix of the computers it serves as their
-primary, so the home can always move back to one of them (Always On's move
-back, design §6): its first boot installs the release it is given
-(`packaging/cloud/first-boot.sh --version`), and the update it writes
-(`fermix-update`) installs `fermix home status --json`'s `update_ceiling`,
-never past it and never back down: every five minutes as a follow run
-(`--follow`), which installs and restarts but never reboots, and every night
-at 04:00 UTC, which reboots too. The two never run at once: each takes one
-lock, which a follow run leaves to the run that holds it and the night waits
-for, within a bound.
+The server leads (M97 §3.4): it updates itself to the newest release that the
+app of each computer keeping its backups carries, which the engine reads from
+the release table and answers as `fermix home status --json`'s
+`update_ceiling` (`update.eligible`). Its first boot installs the release it
+is given (`packaging/cloud/first-boot.sh --version`), and the update it writes
+(`fermix-update`) installs the eligible release, never back down: every five
+minutes as a follow run (`--follow`), which installs and restarts but never
+reboots, and every night at 04:00 UTC, which reboots too. The owner's own
+update (`--release X [--ahead-of-apps]`) passes the same gate: no downgrade,
+only a release the table lists, and only an eligible one unless it says to go
+ahead of the apps. After each install the update script becomes the
+installed release's own (its `fermix_always_on.sh`, checked against the
+table, run with `--update-script-only`). A restart waits for a move and for
+work on a computer (`restart_hold.wait_s`). The runs never overlap: each
+takes one lock, which a follow run leaves to the run that holds it and the
+night waits for, within a bound.
 
 The update is the script first boot writes, taken from first-boot.sh as it
 writes it, with its fixed paths moved under this test's own directory (each
@@ -28,6 +34,7 @@ flock.
 
 import contextlib
 import fcntl
+import hashlib
 import os
 import shutil
 import subprocess
@@ -39,10 +46,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 FIRST_BOOT = ROOT / "packaging/cloud/first-boot.sh"
 INSTALL_URL = "https://fermix.ai/install"
+RELEASES_URL = "https://fermix.ai/install/releases"
+ARTIFACT_ORIGIN = "https://github.com/tezra-io/fermix/releases/download/"
 
 REAL_TOOLS = (
     "sh", "cat", "tr", "sed", "rm", "mv", "mktemp", "install", "dirname", "env",
-    "mkdir", "chmod", "cut", "grep",
+    "mkdir", "chmod", "cut", "grep", "awk", "sha256sum",
 )
 
 # `dpkg --compare-versions A OP B` for the plain MAJOR.MINOR.PATCH releases
@@ -98,67 +107,70 @@ class NightlyUpdateTest(unittest.TestCase):
 
     # -- the release it installs ---------------------------------------------
 
-    def test_a_server_behind_its_computers_installs_exactly_their_release(self):
+    def test_a_server_behind_the_eligible_release_installs_it_and_takes_its_script(self):
         self._installed("0.17.0")
-        self._ceiling("0.17.2")
+        self._eligible("0.17.2")
 
         result = self._night()
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("==> Fermix went from 0.17.0 to 0.17.2", result.stdout)
+        self.assertIn("==> This update script is now Fermix 0.17.2's own", result.stdout)
         calls = self._calls()
-        self.assertEqual(calls[:3], [
+        self.assertEqual(calls[:6], [
             "fermix home status --json",
             f"curl {INSTALL_URL}",
             "installer --no-setup --version 0.17.2",
+            f"curl {RELEASES_URL}",
+            f"curl {ARTIFACT_ORIGIN}v0.17.2/fermix_always_on.sh",
+            "always-on --update-script-only",
         ])
         # The engine runs the older release, so it is restarted.
         self.assertIn("fermix restart", calls)
 
     def test_releases_are_ordered_as_dpkg_orders_them_not_as_text(self):
         self._installed("0.9.0")
-        self._ceiling("0.10.0")
+        self._eligible("0.10.0")
 
         result = self._night()
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("installer --no-setup --version 0.10.0", self._calls())
 
-    def test_a_server_on_its_computers_release_downloads_nothing(self):
+    def test_a_server_on_the_eligible_release_downloads_nothing(self):
         self._installed("0.17.0")
-        self._ceiling("0.17.0")
+        self._eligible("0.17.0")
 
         result = self._night()
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("==> Fermix 0.17.0 is the release your computers run", result.stdout)
+        self.assertIn("==> Fermix 0.17.0 is the newest release eligible for this server", result.stdout)
         self.assertNotIn(f"curl {INSTALL_URL}", self._calls())
 
-    def test_a_server_newer_than_its_computers_is_never_installed_back_down(self):
+    def test_a_server_newer_than_the_eligible_release_is_never_installed_back_down(self):
         self._installed("0.18.0")
-        self._ceiling("0.17.2")
+        self._eligible("0.17.2")
 
         result = self._night()
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(
-            "==> Fermix 0.18.0 is newer than 0.17.2, the oldest release your computers run, "
-            "and is never installed back down: moving Fermix back to that computer waits "
-            "until it updates",
+            "==> Fermix 0.18.0 is newer than 0.17.2, the newest release eligible for this server, "
+            "and is never installed back down",
             result.stdout,
         )
         self.assertNotIn(f"curl {INSTALL_URL}", self._calls())
 
-    def test_with_no_computer_seen_fermix_stays_as_it_is(self):
+    def test_with_no_release_eligible_fermix_stays_as_it_is(self):
         self._installed("0.17.0")
-        self._ceiling(None)
+        self._eligible(None)
 
         result = self._night()
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(
-            "==> No computer has reached this server in the last 30 days, so Fermix stays at "
-            "0.17.0",
+            "==> No release is eligible for this server now (fermix home status says why), so "
+            "Fermix stays at 0.17.0",
             result.stdout,
         )
         self.assertNotIn(f"curl {INSTALL_URL}", self._calls())
@@ -175,7 +187,7 @@ class NightlyUpdateTest(unittest.TestCase):
             [call for call in self._calls() if call.startswith(("curl", "fermix home"))], []
         )
 
-    def test_a_ceiling_that_cannot_be_read_installs_nothing_and_ends_the_night_non_zero(self):
+    def test_an_eligible_release_that_cannot_be_read_installs_nothing_and_fails_the_night(self):
         self._installed("0.17.0")
         (self.state / "home-status-fails").touch()
 
@@ -191,7 +203,7 @@ class NightlyUpdateTest(unittest.TestCase):
 
     def test_an_installer_that_fails_stops_the_night_before_the_restart(self):
         self._installed("0.17.0")
-        self._ceiling("0.17.2")
+        self._eligible("0.17.2")
         (self.state / "installer-fails").touch()
 
         result = self._night()
@@ -199,12 +211,133 @@ class NightlyUpdateTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("The Fermix installer stopped", result.stderr)
         self.assertNotIn("fermix restart", self._calls())
+        self.assertNotIn("always-on --update-script-only", self._calls())
+
+    # -- the update script follows the release it installed ---------------------
+
+    def test_an_update_script_the_table_does_not_vouch_for_is_never_run(self):
+        for case, setup, said in (
+            ("mismatch", lambda: self._always_on("#!/bin/sh\necho tampered\n", keep_digest=True),
+             "the update script of Fermix 0.17.2 is not the one"),
+            ("unlisted", lambda: self._table(always_on=False),
+             "lists no single update script for Fermix 0.17.2"),
+            ("table", lambda: (self.state / "table-unreachable").touch(),
+             "the release table could not be read"),
+            ("stops", lambda: (self.state / "always-on-fails").touch(),
+             "the update script of Fermix 0.17.2 stopped"),
+        ):
+            with self.subTest(case=case):
+                self._reset()
+                self._installed("0.17.0")
+                self._eligible("0.17.2")
+                setup()
+
+                result = self._follow()
+
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn(said, result.stderr)
+                self.assertIn("so this update script stays as it was.", result.stderr)
+                # The release is installed and the engine restarted all the same.
+                self.assertIn("installer --no-setup --version 0.17.2", self._calls())
+                self.assertEqual(self._calls()[-1], "fermix restart")
+                if case != "stops":
+                    self.assertNotIn("always-on --update-script-only", self._calls())
+
+    # -- the owner's own update (--release) -------------------------------------
+
+    def test_a_hand_update_installs_an_eligible_release_then_restarts_and_never_reboots(self):
+        self._installed("0.17.0")
+        self._eligible("0.18.0")
+        self.reboot_flag.touch()
+
+        result = self._run("--release", "0.17.2")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("==> Updating Fermix 0.17.0 to 0.17.2, as asked, through", result.stdout)
+        calls = self._calls()
+        self.assertEqual(calls[:5], [
+            f"curl {RELEASES_URL}",
+            "fermix home status --json",
+            f"curl {INSTALL_URL}",
+            "installer --no-setup --version 0.17.2",
+            f"curl {RELEASES_URL}",
+        ])
+        self.assertEqual(calls[-1], "fermix restart")
+        self.assertNotIn("systemctl reboot", calls)
+        self.assertTrue(self.reboot_flag.exists())
+
+    def test_a_hand_update_is_never_a_downgrade(self):
+        self._installed("0.18.0")
+        self._eligible("0.18.0")
+
+        result = self._run("--release", "0.17.2")
+
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(
+            result.stderr,
+            "fermix update: Fermix 0.18.0 is installed, and 0.17.2 is older: Fermix is never "
+            "installed back down, since an older Fermix cannot read your home.\n",
+        )
+        self.assertEqual(self._calls(), [])
+
+    def test_a_hand_update_to_a_release_the_table_lacks_installs_nothing(self):
+        self._installed("0.17.0")
+        self._eligible("0.17.2")
+
+        result = self._run("--release", "0.17.9", "--ahead-of-apps")
+
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(
+            result.stderr,
+            f"fermix update: {RELEASES_URL} lists no release 0.17.9, so nothing was installed.\n",
+        )
+        self.assertEqual(self._calls(), [f"curl {RELEASES_URL}"])
+
+    def test_a_hand_update_ahead_of_the_apps_is_refused_unless_it_says_so(self):
+        self._installed("0.17.0")
+        self._eligible("0.17.2")
+
+        result = self._run("--release", "0.18.0")
+
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(
+            result.stderr,
+            "fermix update: Fermix 0.18.0 is ahead of the apps: no app that carries it is "
+            "published yet for a computer that keeps your backups, and that computer could not "
+            "restore your home from them. Nothing was installed. To install it all the same, "
+            "run: fermix-update --release 0.18.0 --ahead-of-apps\n",
+        )
+        self.assertNotIn(f"curl {INSTALL_URL}", self._calls())
+
+        self._reset()
+        self._installed("0.17.0")
+        self._eligible(None)
+
+        result = self._run("--release", "0.18.0", "--ahead-of-apps")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            "==> Installing Fermix 0.18.0 ahead of the apps, as asked: each computer that keeps "
+            "your backups says so until its app carries it",
+            result.stdout,
+        )
+        self.assertIn("installer --no-setup --version 0.18.0", self._calls())
+
+    def test_a_hand_update_to_the_installed_release_does_nothing_more(self):
+        self._installed("0.17.2")
+        self._eligible("0.17.2")
+
+        result = self._run("--release", "0.17.2")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("==> Fermix 0.17.2 is installed already", result.stdout)
+        self.assertNotIn(f"curl {INSTALL_URL}", self._calls())
 
     # -- the follow run, every five minutes -----------------------------------
 
-    def test_a_follow_run_installs_its_computers_release_then_restarts_the_engine(self):
+    def test_a_follow_run_installs_the_eligible_release_then_restarts_the_engine(self):
         self._installed("0.17.0")
-        self._ceiling("0.17.2")
+        self._eligible("0.17.2")
 
         result = self._follow()
 
@@ -213,6 +346,9 @@ class NightlyUpdateTest(unittest.TestCase):
             "fermix home status --json",
             f"curl {INSTALL_URL}",
             "installer --no-setup --version 0.17.2",
+            f"curl {RELEASES_URL}",
+            f"curl {ARTIFACT_ORIGIN}v0.17.2/fermix_always_on.sh",
+            "always-on --update-script-only",
             "fermix service status --json",
             "fermix home status --json",
             "fermix restart",
@@ -224,11 +360,11 @@ class NightlyUpdateTest(unittest.TestCase):
         )
 
     def test_a_follow_run_never_reboots_and_never_touches_the_reboot_count(self):
-        for ceiling in ("0.17.2", "0.17.0"):
-            with self.subTest(ceiling=ceiling):
+        for eligible in ("0.17.2", "0.17.0"):
+            with self.subTest(eligible=eligible):
                 self.log.write_text("", encoding="utf-8")
                 self._installed("0.17.0")
-                self._ceiling(ceiling)
+                self._eligible(eligible)
                 self.reboot_flag.touch()
                 self.deferrals.parent.mkdir(exist_ok=True)
                 self.deferrals.write_text("1\n", encoding="utf-8")
@@ -244,7 +380,7 @@ class NightlyUpdateTest(unittest.TestCase):
     def test_a_follow_run_restarts_an_engine_behind_the_installed_release(self):
         self._installed("0.17.2")
         (self.state / "running-version").write_text("0.17.0", encoding="utf-8")
-        self._ceiling("0.17.2")
+        self._eligible("0.17.2")
 
         result = self._follow()
 
@@ -258,7 +394,7 @@ class NightlyUpdateTest(unittest.TestCase):
 
     def test_a_follow_run_holds_the_restart_while_a_move_is_under_way_then_restarts(self):
         self._installed("0.17.0")
-        self._ceiling("0.17.2", phase="receiving")
+        self._eligible("0.17.2", phase="receiving")
 
         result = self._follow()
 
@@ -274,7 +410,7 @@ class NightlyUpdateTest(unittest.TestCase):
         # The first follow run after the move ended restarts it: what runs is
         # still older than what is installed.
         self.log.write_text("", encoding="utf-8")
-        self._ceiling("0.17.2", phase="committed")
+        self._eligible("0.17.2", phase="committed")
 
         result = self._follow()
 
@@ -286,12 +422,40 @@ class NightlyUpdateTest(unittest.TestCase):
             "fermix restart",
         ])
 
+    # M97 §3.4: a restart waits for work on a computer, which the engine
+    # bounds at ten minutes and answers as `restart_hold.wait_s`.
+    def test_a_restart_waits_for_work_on_a_computer_until_the_engine_says_it_may_go(self):
+        self._installed("0.17.2")
+        (self.state / "running-version").write_text("0.17.0", encoding="utf-8")
+        self._eligible("0.17.2", hold_s=240)
+
+        for run in (self._follow, self._night):
+            with self.subTest(run=run.__name__):
+                self.log.write_text("", encoding="utf-8")
+                result = run()
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn("fermix restart", self._calls())
+                self.assertIn(
+                    "==> Fermix is running work on a computer, so the engine restarts once it "
+                    "ends, at a follow run within 240 seconds",
+                    result.stdout,
+                )
+
+        self.log.write_text("", encoding="utf-8")
+        self._eligible("0.17.2", hold_s=0)
+
+        result = self._follow()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self._calls()[-1], "fermix restart")
+
     def test_a_follow_run_with_nothing_due_says_nothing(self):
-        for installed, ceiling in (("0.17.0", "0.17.0"), ("0.18.0", "0.17.2"), ("0.17.0", None)):
-            with self.subTest(installed=installed, ceiling=ceiling):
+        for installed, eligible in (("0.17.0", "0.17.0"), ("0.18.0", "0.17.2"), ("0.17.0", None)):
+            with self.subTest(installed=installed, eligible=eligible):
                 self.log.write_text("", encoding="utf-8")
                 self._installed(installed)
-                self._ceiling(ceiling)
+                self._eligible(eligible)
 
                 result = self._follow()
 
@@ -325,18 +489,32 @@ class NightlyUpdateTest(unittest.TestCase):
         )
         self.assertNotIn(f"curl {INSTALL_URL}", self._calls())
 
-    def test_an_argument_other_than_follow_is_refused_before_anything_runs(self):
-        for argv in (["--folow"], ["follow"], ["--follow", "--follow"], ["--follow", "now"]):
+    def test_an_argument_the_update_does_not_take_is_refused_before_anything_runs(self):
+        refusal = (
+            "fermix update: An option was not recognised. fermix-update takes --follow, which "
+            "fermix-follow.timer passes, --release with a release and, to go ahead of the apps, "
+            "--ahead-of-apps, or nothing for the nightly update.\n"
+        )
+        not_a_release = "fermix update: --release takes a Fermix release, such as 0.17.0.\n"
+        for argv, said in (
+            (["--folow"], refusal),
+            (["follow"], refusal),
+            (["--follow", "--follow"], refusal),
+            (["--follow", "now"], refusal),
+            (["--release"], refusal),
+            (["--release", "0.17.2", "--ahead"], refusal),
+            (["--release", "0.17.2", "--ahead-of-apps", "--follow"], refusal),
+            (["--ahead-of-apps", "--release", "0.17.2"], refusal),
+            (["--release", "0.17"], not_a_release),
+            (["--release", "latest"], not_a_release),
+            (["--release", "0.17.2.1"], not_a_release),
+            (["--release", ".17.2"], not_a_release),
+        ):
             with self.subTest(argv=argv):
                 result = self._run(*argv)
 
                 self.assertEqual(result.returncode, 1)
-                self.assertEqual(
-                    result.stderr,
-                    "fermix update: An option was not recognised. fermix-update takes "
-                    "--follow, which fermix-follow.timer passes, or nothing for the nightly "
-                    "update.\n",
-                )
+                self.assertEqual(result.stderr, said)
                 self.assertEqual(self._calls(), [])
                 self.assertFalse(self.flock_log.exists())
 
@@ -347,7 +525,7 @@ class NightlyUpdateTest(unittest.TestCase):
             with self.subTest(run=run.__name__):
                 self.flock_log.write_text("", encoding="utf-8")
                 self._installed("0.17.0")
-                self._ceiling("0.17.0")
+                self._eligible("0.17.0")
 
                 result = run()
 
@@ -357,7 +535,7 @@ class NightlyUpdateTest(unittest.TestCase):
 
     def test_a_follow_run_leaves_the_update_to_a_run_that_holds_the_lock(self):
         self._installed("0.17.0")
-        self._ceiling("0.17.2")
+        self._eligible("0.17.2")
 
         with self._lock_held():
             result = self._follow()
@@ -369,7 +547,7 @@ class NightlyUpdateTest(unittest.TestCase):
 
     def test_the_night_waits_for_a_run_that_holds_the_lock_within_its_bound(self):
         self._installed("0.17.0")
-        self._ceiling("0.17.2")
+        self._eligible("0.17.2")
         self.reboot_flag.touch()
 
         with self._lock_held():
@@ -402,7 +580,7 @@ class NightlyUpdateTest(unittest.TestCase):
         for run in (self._night, self._follow):
             with self.subTest(run=run.__name__):
                 self._installed("0.17.0")
-                self._ceiling("0.17.2")
+                self._eligible("0.17.2")
 
                 result = run()
 
@@ -536,7 +714,10 @@ class NightlyUpdateTest(unittest.TestCase):
         (self.state / "installed-version").write_text(version, encoding="utf-8")
         (self.state / "running-version").write_text(version, encoding="utf-8")
 
-    def _ceiling(self, version, phase=None):
+    def _eligible(self, version, phase=None, hold_s=None):
+        """The engine's `home status --json`: the eligible release
+        (`update_ceiling`), a move's phase, and how long a computer's work
+        holds the restart (`restart_hold.wait_s`)."""
         value = "null" if version is None else f'"{version}"'
         move = "null"
         if phase is not None:
@@ -544,12 +725,50 @@ class NightlyUpdateTest(unittest.TestCase):
                 f'{{\n      "candidate": null,\n      "phase": "{phase}",\n'
                 '      "sentence": "An invented sentence."\n    }'
             )
+        hold = "null"
+        if hold_s is not None:
+            hold = (
+                '{\n      "count": 1,\n      "reason": "computer_work",\n'
+                '      "sentence": "An invented sentence.",\n'
+                f'      "wait_s": {hold_s}\n    }}'
+            )
         (self.state / "home-status.json").write_text(
-            f'{{\n  "ok": true,\n  "result": {{\n    "move": {move},\n    "role": "primary",\n'
+            f'{{\n  "ok": true,\n  "result": {{\n    "move": {move},\n'
+            f'    "restart_hold": {hold},\n    "role": "primary",\n'
             f'    "update_ceiling": {value},\n    "version": "0.17.0"\n  }},\n'
             '  "schema_version": 1\n}\n',
             encoding="utf-8",
         )
+
+    # The release table: every release a test names, each with the update
+    # script the stand-in publishes, or none when `always_on` is false.
+    def _table(self, always_on=True):
+        digest = hashlib.sha256((self.state / "always-on.sh").read_bytes()).hexdigest()
+        rows = ["format 1", "latest 0.18.0"]
+        for version in ("0.9.0", "0.10.0", "0.17.0", "0.17.2", "0.18.0"):
+            rows.append(f"{version} {'e' * 64} fermix_{version}_amd64.deb")
+            if always_on:
+                rows.append(f"{version} {digest} fermix_always_on.sh")
+        (self.state / "releases").write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+    # The release's update script: records how it was run, and fails when told.
+    # `keep_digest` leaves the table naming the script it had.
+    def _always_on(self, body=None, keep_digest=False):
+        state, log = self.state, self.log
+        body = body or (
+            "#!/bin/sh\n"
+            f"printf 'always-on %s\\n' \"$*\" >>'{log}'\n"
+            f"[ ! -f '{state}/always-on-fails' ] || exit 1\n"
+        )
+        (self.state / "always-on.sh").write_text(body, encoding="utf-8")
+        if not keep_digest:
+            self._table()
+
+    def _reset(self):
+        self.log.write_text("", encoding="utf-8")
+        for name in ("always-on-fails", "table-unreachable"):
+            (self.state / name).unlink(missing_ok=True)
+        self._always_on()
 
     @contextlib.contextmanager
     def _lock_held(self):
@@ -589,8 +808,15 @@ while [ $# -gt 0 ]; do
   esac
 done
 printf 'curl %s\\n' "$url" >>'{log}'
-[ "$url" = '{INSTALL_URL}' ] || exit 6
-cat '{installer}' >"$out"
+case "$url" in
+  '{INSTALL_URL}') cat '{installer}' >"$out" ;;
+  '{RELEASES_URL}')
+    [ ! -f '{state}/table-unreachable' ] || exit 22
+    cat '{state}/releases' >"$out"
+    ;;
+  '{ARTIFACT_ORIGIN}'v*/fermix_always_on.sh) cat '{state}/always-on.sh' >"$out" ;;
+  *) exit 6 ;;
+esac
 """)
         self._fake("dpkg-query", f"""#!/bin/sh
 cat '{state}/installed-version'
@@ -627,6 +853,7 @@ esac
         for tool in ("cmp", "cp"):
             (self.bin / tool).symlink_to(shutil.which(tool))
         self._fake("flock", self._fake_flock())
+        self._always_on()
 
     def _fake_flock(self):
         """flock(1) on a descriptor the update opened, as util-linux takes it.

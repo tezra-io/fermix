@@ -59,6 +59,10 @@ defmodule FermixChannels.Test.HomeMove do
     @impl true
     def handle_call(message, _from, status) when message in [:status, :await_ready],
       do: {:reply, status, status}
+
+    # The endpoint's direct address hints (`Iroh.Helper.hints/1`): a status
+    # may name some, else none.
+    def handle_call(:hints, _from, status), do: {:reply, Map.get(status, :hints, []), status}
   end
 
   defmodule WakingRail do

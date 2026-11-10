@@ -26,8 +26,12 @@ defmodule Fermix.CLI.SettingsCommand.Render do
 
   @not_running "the Fermix daemon is not running, and settings change only through it.\n" <>
                  "Start it with `fermix start`. If setup never finished, run `fermix setup` first."
-  @external_change "config.toml changed outside Fermix, so nothing was saved.\n" <>
-                     "Load it with `fermix settings reload`, then retry."
+  # The settings are two files, `config.toml` and this computer's own
+  # `machine.toml` (M97 §4), and the daemon's refusal does not say which one
+  # changed or could not be read, so its sentences name both.
+  @settings_files "config.toml or machine.toml"
+  @external_change "#{@settings_files} changed outside Fermix, so nothing was saved.\n" <>
+                     "Load them with `fermix settings reload`, then retry."
   @file_store_remedy "On a machine with no desktop session to unlock it, " <>
                        "store secrets in the file store instead:\n" <>
                        "  fermix settings set secrets secret_store=file"
@@ -427,7 +431,7 @@ defmodule Fermix.CLI.SettingsCommand.Render do
   end
 
   defp config_state("clear"), do: []
-  defp config_state(state), do: ["config.toml state: ", safe(state), "\n"]
+  defp config_state(state), do: ["config.toml and machine.toml state: ", safe(state), "\n"]
 
   defp provider?(%{
          "id" => id,
@@ -469,7 +473,7 @@ defmodule Fermix.CLI.SettingsCommand.Render do
          _ctx
        )
        when is_binary(sentence) do
-    "config.toml could not be read: #{sentence |> safe() |> String.trim_trailing(".")}. " <>
+    "#{@settings_files} could not be read: #{sentence |> safe() |> String.trim_trailing(".")}. " <>
       "Fix it, then run `fermix settings reload`."
   end
 

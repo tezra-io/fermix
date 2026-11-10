@@ -14,20 +14,32 @@ defmodule FermixCore.Management.AlwaysOn.Input do
       review's block left ticked; for `review_offers`, what it keeps on after
       the owner's review. A list of offer ids, or nil when not given (the
       block as the engine proposed it).
+    * `sas` (M97 §7.5): for `approve_computer`, the six digits the computer
+      that asks to join shows, as the owner typed them. Text, or nil.
   """
 
-  @fields %{"recovery_passphrase" => :recovery_passphrase, "keep_offers" => :keep_offers}
-  @shape_sentence "Always On takes a recovery passphrase, as text, and the offers to keep on, " <>
-                    "as a list, and nothing else."
+  @fields %{
+    "recovery_passphrase" => :recovery_passphrase,
+    "keep_offers" => :keep_offers,
+    "sas" => :sas
+  }
+  @shape_sentence "Always On takes a recovery passphrase, as text, the offers to keep on, " <>
+                    "as a list, and a new computer's digits, as text, and nothing else."
   @field_sentences %{
     "recovery_passphrase" => "Type the recovery passphrase as text.",
-    "keep_offers" => "Send the offers to keep on as a list of their ids."
+    "keep_offers" => "Send the offers to keep on as a list of their ids.",
+    "sas" => "Type the six digits the new computer shows."
   }
   @max_offers 32
+  @text_fields ~w(recovery_passphrase sas)
 
-  defstruct recovery_passphrase: nil, keep_offers: nil
+  defstruct recovery_passphrase: nil, keep_offers: nil, sas: nil
 
-  @type t :: %__MODULE__{recovery_passphrase: String.t() | nil, keep_offers: [String.t()] | nil}
+  @type t :: %__MODULE__{
+          recovery_passphrase: String.t() | nil,
+          keep_offers: [String.t()] | nil,
+          sas: String.t() | nil
+        }
 
   @doc "The fields `input` may hold, as the wire names them."
   @spec fields() :: [String.t()]
@@ -55,7 +67,7 @@ defmodule FermixCore.Management.AlwaysOn.Input do
     do: length(value) <= @max_offers and Enum.all?(value, &is_binary/1)
 
   defp given?(field, value) when is_map_key(@fields, field),
-    do: is_nil(value) or (field == "recovery_passphrase" and is_binary(value))
+    do: is_nil(value) or (field in @text_fields and is_binary(value))
 
   defp given?(_field, _value), do: false
 
@@ -73,7 +85,8 @@ defmodule FermixCore.Management.AlwaysOn.Input do
     def inspect(input, opts) do
       shown = [
         recovery_passphrase: withheld(input.recovery_passphrase),
-        keep_offers: input.keep_offers
+        keep_offers: input.keep_offers,
+        sas: input.sas
       ]
 
       concat(["#FermixCore.Management.AlwaysOn.Input<", to_doc(shown, opts), ">"])

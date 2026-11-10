@@ -35,8 +35,88 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
       {"home_status_server", server()},
       {"home_status_on", on()},
       {"home_status_backup_failed", backup_failed()},
-      {"home_status_problem", problem()}
+      {"home_status_problem", problem()},
+      {"home_status_server_asking", server_asking()},
+      {"home_status_server_joined", server_joined()},
+      {"home_status_joining", joining()}
     ]
+  end
+
+  # M97 §3.1, §7.5: a computer asks to join on the code Add a computer
+  # opened. The server's screen names it, its system and the six digits it
+  # shows, and its owner adds it or not.
+  defp server_asking do
+    joiner = %{name: "loft-linux", platform: "linux", sas: "482913"}
+
+    server_with_window(
+      Map.merge(window(:awaiting_approval, nil, ~U[2031-05-04 12:20:00Z]), %{
+        purpose: :computer,
+        joiner: joiner,
+        joined: nil
+      }),
+      %{
+        "state" => "awaiting_approval",
+        "expires_at" => "2031-05-04T12:20:00Z",
+        "candidate_id" => nil,
+        "purpose" => "computer",
+        "joiner" => %{"name" => "loft-linux", "platform" => "linux", "sas" => "482913"},
+        "joined" => nil
+      }
+    )
+  end
+
+  # The owner added it: the window names the computer that joined, and the
+  # owner's other surfaces are told once.
+  defp server_joined do
+    joined = %{device_id: "7e1f0c2a-3b4d-4e5f-8a6b-7c8d9e0f1a2b", name: "loft-linux"}
+
+    server_with_window(
+      Map.merge(window(:approved, nil, ~U[2031-05-04 12:20:00Z]), %{
+        purpose: :computer,
+        joiner: nil,
+        joined: joined
+      }),
+      %{
+        "state" => "approved",
+        "expires_at" => "2031-05-04T12:20:00Z",
+        "candidate_id" => nil,
+        "purpose" => "computer",
+        "joiner" => nil,
+        "joined" => %{"device_id" => joined.device_id, "name" => joined.name}
+      }
+    )
+  end
+
+  defp server_with_window(window, view) do
+    desktop = %{device_id: "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e", name: "studio-mac"}
+
+    record(
+      :primary,
+      %{epoch: 5, snapshots: server_snapshots(), disk: disk(0.42), update_ceiling: "1.2.3"},
+      %{
+        link:
+          link(
+            desktops: [Map.merge(desktop, %{connected: true, since: ~U[2031-05-04 09:00:00Z]})],
+            enrollment: window
+          ),
+        enrollment: view
+      }
+    )
+  end
+
+  # The computer that joins, once the server answered: it shows the six
+  # digits and waits for its owner to add it there.
+  defp joining do
+    join = %{
+      "phase" => "awaiting_approval",
+      "server" => @server_name,
+      "sas" => "482913",
+      "sentence" => "Waiting for you to add this computer on #{@server_name}."
+    }
+
+    record(:device, %{epoch: nil, snapshots: retired_snapshots(:device), join: join}, %{
+      join: join
+    })
   end
 
   # The owner's server used its code and connects.
@@ -192,6 +272,7 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
         return: nil,
         returning: nil,
         restoring: false,
+        join: Map.get(extra, :join),
         copies: Map.get(extra, :copies, []),
         lapsed: nil,
         moved_back: false,

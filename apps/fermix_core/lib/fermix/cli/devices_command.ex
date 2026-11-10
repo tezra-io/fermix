@@ -1,13 +1,17 @@
 defmodule Fermix.CLI.DevicesCommand do
   @moduledoc """
-  Lists and revokes the phones paired with the running daemon, over the
-  management protocol (`mobile.devices.list`, `mobile.devices.revoke`).
+  Lists and revokes the phones paired with the running daemon, and removes
+  a computer of the home (M97 §3.3), over the management protocol
+  (`mobile.devices.list`, `mobile.devices.revoke`). The one computer that
+  keeps the only copies of the server's backups is removed only with
+  `--yes`: without it the daemon's question is printed and nothing changes.
 
   Both operations require the running daemon so persistence and live socket
   revocation have one authority.
   """
 
   alias Fermix.CLI.Daemon.Client
+  alias FermixCore.Management.Mobile
 
   @call_timeout_ms 5_000
   @uuid_pattern ~r/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/
@@ -22,7 +26,8 @@ defmodule Fermix.CLI.DevicesCommand do
 
     case argv do
       ["list"] -> list_devices(client, io)
-      ["revoke", device_id] -> revoke_device(device_id, client, io)
+      ["revoke", device_id] -> revoke_device(device_id, false, client, io)
+      ["revoke", device_id, "--yes"] -> revoke_device(device_id, true, client, io)
       _ -> usage(io)
     end
   end
@@ -36,21 +41,25 @@ defmodule Fermix.CLI.DevicesCommand do
     end
   end
 
-  defp revoke_device(device_id, client, io) do
+  defp revoke_device(device_id, confirmed?, client, io) do
     if Regex.match?(@uuid_pattern, device_id) do
-      revoke_valid_device(String.downcase(device_id), client, io)
+      revoke_valid_device(String.downcase(device_id), confirmed?, client, io)
     else
       invalid_id(io)
     end
   end
 
-  defp revoke_valid_device(device_id, client, io) do
-    params = %{"device_id" => device_id}
+  defp revoke_valid_device(device_id, confirmed?, client, io) do
+    params = revoke_params(device_id, confirmed?)
 
     case client.("mobile.devices.revoke", params, timeout: @call_timeout_ms) do
       {:ok, %{"device_id" => ^device_id, "revoked" => true}} ->
-        IO.puts(io.stdout, "revoked phone #{device_id}")
+        IO.puts(io.stdout, "revoked device #{device_id}")
         0
+
+      {:error, {:management_error, "unavailable", _message, %{"sentence" => sentence}}}
+      when is_binary(sentence) and not confirmed? ->
+        asked(sentence, io)
 
       {:ok, _other} ->
         fail(io, "fermix devices revoke: invalid daemon reply")
@@ -61,6 +70,21 @@ defmodule Fermix.CLI.DevicesCommand do
       {:error, reason} ->
         fail(io, "fermix devices revoke: #{describe(reason)}")
     end
+  end
+
+  defp revoke_params(device_id, false), do: %{"device_id" => device_id}
+  defp revoke_params(device_id, true), do: %{"device_id" => device_id, "confirmed" => true}
+
+  # The daemon's question about the one computer that keeps the backups is
+  # answered by running the verb again with --yes; any other refusal is said
+  # as it came.
+  defp asked(sentence, io) do
+    IO.puts(io.stderr, "fermix devices revoke: #{scrub(sentence)}")
+
+    if Mobile.only_backups_sentence?(sentence),
+      do: IO.puts(io.stderr, "Run it again with --yes to remove it.")
+
+    1
   end
 
   defp print_devices([], io) do
@@ -158,7 +182,7 @@ defmodule Fermix.CLI.DevicesCommand do
 
   defp usage(io) do
     IO.puts(io.stderr, "usage: fermix devices list")
-    IO.puts(io.stderr, "       fermix devices revoke <device_id>")
+    IO.puts(io.stderr, "       fermix devices revoke <device_id> [--yes]")
     2
   end
 

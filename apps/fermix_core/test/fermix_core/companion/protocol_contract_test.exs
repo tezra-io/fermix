@@ -857,9 +857,18 @@ defmodule FermixCore.Companion.ProtocolContractTest do
     hellos = @server_fixtures |> jsonl() |> Enum.filter(&(&1["type"] == "server_hello"))
 
     for hello <- hellos do
-      assert Map.drop(hello, ~w(primary_epoch role commands attachments)) ==
+      assert Map.drop(hello, ~w(primary_epoch role commands attachments protocol_version)) ==
                %{"type" => "server_hello", "min_version" => min, "max_version" => max}
     end
+
+    # M97 §3.4: a hello that served a newer client its newest names it.
+    assert [%{"protocol_version" => ^max}] =
+             Enum.filter(hellos, &Map.has_key?(&1, "protocol_version"))
+
+    assert [%{"min_protocol_version" => served}] =
+             @client_fixtures |> jsonl() |> Enum.filter(&Map.has_key?(&1, "min_protocol_version"))
+
+    assert served <= max
   end
 
   # M75 D14: both hellos carry the primary epoch, optional on each, with a

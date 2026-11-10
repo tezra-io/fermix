@@ -622,6 +622,16 @@ defmodule FermixChannels.Home.MoveWorker do
       deadline = System.monotonic_time(:millisecond) + ctx.resume_for_ms
       resume_loop(ctx, epoch, deadline, @first_resume_ms)
     else
+      {:error, {:switches, reason}} ->
+        Logger.error("move: this computer's switches could not be written: #{inspect(reason)}")
+
+        unconfirmed(
+          ctx,
+          "committing",
+          "What this computer keeps on for #{name(ctx)} could not be written to its " <>
+            "machine.toml; fix the file and restart Fermix."
+        )
+
       {:error, reason} ->
         Logger.error("move: the desktop link could not be written: #{inspect(reason)}")
         unconfirmed(ctx, "committing", "The desktop link to #{name(ctx)} could not be written.")
@@ -641,28 +651,55 @@ defmodule FermixChannels.Home.MoveWorker do
   # existed keeps the block as this engine proposes it.
   defp keep_offers(ctx) do
     if Move.keep_as_desktop?(ctx.request),
-      do: Consent.accept(ctx.home, kept_offers(ctx.request)),
+      do: accept_offers(ctx),
       else: :ok
+  end
+
+  defp accept_offers(ctx) do
+    case Consent.accept(ctx.home, kept_offers(ctx.request)) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:switches, reason}}
+    end
   end
 
   defp kept_offers(request) do
     case Move.keep_offers(request) do
-      nil ->
-        Consent.default_keep()
-
-      offers ->
-        {:ok, kept} = Consent.cast(offers)
-        kept
+      nil -> Consent.default_keep()
+      offers -> known_offers(offers)
     end
   end
 
-  # Resuming after the marker: the switches written once, unless the commit
-  # already wrote them and someone at this computer has changed them since.
+  # An offer this engine does not decide (a request a newer engine wrote) is
+  # left off and named in the log, and the move goes on.
+  defp known_offers(offers) do
+    names = Enum.map(Consent.decided(), &Atom.to_string/1)
+    {known, unknown} = Enum.split_with(offers, &(&1 in names))
+
+    if unknown != [] do
+      Logger.warning(
+        "move: the request keeps offers this engine does not know, left off: " <>
+          Enum.map_join(unknown, ", ", &inspect/1)
+      )
+    end
+
+    for offer <- Consent.decided(), Atom.to_string(offer) in known, do: offer
+  end
+
+  # Resuming after the marker: a source kept as a desktop gets its switches
+  # once, unless the commit already wrote them and someone at this computer
+  # has changed them since. A source that is not kept is owed none, so its
+  # machine.toml is not read.
   defp ensure_offers(ctx) do
+    if Move.keep_as_desktop?(ctx.request),
+      do: owed_offers(ctx),
+      else: :ok
+  end
+
+  defp owed_offers(ctx) do
     case Switches.read(ctx.home) do
-      {:ok, []} -> keep_offers(ctx)
+      {:ok, []} -> accept_offers(ctx)
       {:ok, _written} -> :ok
-      {:error, _reason} = error -> error
+      {:error, reason} -> {:error, {:switches, reason}}
     end
   end
 

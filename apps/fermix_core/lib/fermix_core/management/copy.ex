@@ -105,6 +105,7 @@ defmodule FermixCore.Management.Copy do
   @summary_keys ~w(off connect connecting ready moving waiting on on_backup on_no_backup undone
                    retired retired_back candidate_waiting candidate_receiving primary
                    cannot_reach server_not_set_up server_waited_too_long update server_older
+                   update_settings_only server_ahead
                    disk_full server_disk_full backup_old backup_none server_backup_old
                    backup_failed
                    backup_push not_ready data notice_ready notice_moved notice_backup_week
@@ -115,7 +116,8 @@ defmodule FermixCore.Management.Copy do
                    progress_restoring progress_backing_up confirm_restore_here confirm_return_move confirm_forget
                    webhooks webhooks_whatsapp webhooks_cue webhooks_port webhooks_ingress
                    webhooks_tunnel own_server_tailscale notice_computer_review
-                   notice_server_sandbox)a
+                   notice_server_sandbox computer_asks join_dialing join_waiting
+                   notice_computer_joined)a
   # Each Details line's label, by its key.
   @line_labels [
     server: "Server",
@@ -148,6 +150,9 @@ defmodule FermixCore.Management.Copy do
     "Fermix Computer Use",
     "Fermix Messages",
     "Always On",
+    # Always On's step for a computer that joins the home, as its screens
+    # label it (M97).
+    "Add a computer",
     # The system of the server Always On moves to.
     "Linux",
     # The display server the Linux computer-use rows name.
@@ -423,10 +428,20 @@ defmodule FermixCore.Management.Copy do
   def summary_sentence(:update, %{machine: machine}),
     do: "Update Fermix on this #{machine} to keep using Always On."
 
+  def summary_sentence(:update_settings_only, %{machine: machine}),
+    do:
+      "Update Fermix on this #{machine}. Your server runs a newer Fermix, so until then " <>
+        "this #{machine} can change settings only."
+
   def summary_sentence(:server_older, %{machine: machine}),
     do:
-      "Your server runs an older Fermix than this #{machine}. It updates to this " <>
-        "#{machine}'s version within a few minutes once every computer linked to it runs it."
+      "Your server runs an older Fermix than this #{machine}. It updates on its own once " <>
+        "the app for each computer that keeps your backups carries the newer one."
+
+  def summary_sentence(:server_ahead, %{machine: machine}),
+    do:
+      "Your server runs a newer Fermix than this #{machine} can restore. Update Fermix on " <>
+        "this #{machine}."
 
   def summary_sentence(:disk_full, %{percent: percent}),
     do: "Your server's disk is #{percent}% full."
@@ -477,6 +492,22 @@ defmodule FermixCore.Management.Copy do
 
   def summary_sentence(:notice_server_backup_week, _values),
     do: "The last backup is a week old. It runs when your Mac is online."
+
+  def summary_sentence(:computer_asks, %{name: name, system: system, sas: sas}),
+    do:
+      "A computer named #{name} (#{system}) asks to join your Fermix. Add it only if it " <>
+        "shows #{digits(sas)}."
+
+  def summary_sentence(:join_dialing, %{machine: machine, to: to}),
+    do: "Connecting this #{machine} to your Fermix on #{to}."
+
+  def summary_sentence(:join_waiting, %{machine: machine, to: to, sas: sas}),
+    do:
+      "Add this #{machine} on #{to}, where it asks you to. Both show #{digits(sas)}; if " <>
+        "they differ, do not add it."
+
+  def summary_sentence(:notice_computer_joined, %{name: name}),
+    do: "A computer named #{name} joined your Fermix."
 
   def summary_sentence(:notice_server_lapsed, _values),
     do:
@@ -804,10 +835,17 @@ defmodule FermixCore.Management.Copy do
   def summary_label(:move_now, _values), do: "Move now"
   def summary_label(:try_again, _values), do: "Try again"
   def summary_label(:learn_more, _values), do: "Learn more"
+
+  def summary_label(:update, %{first: true, machine: machine}),
+    do: "Update Fermix on this #{machine} first"
+
   def summary_label(:update, _values), do: "Update"
   def summary_label(:back_up_now, _values), do: "Back up now"
   def summary_label(:check_again, _values), do: "Check again"
   def summary_label(:review_offers, _values), do: "Review what your server may use"
+  def summary_label(:add_computer, _values), do: "Add a computer"
+  def summary_label(:approve_computer, _values), do: "Add it"
+  def summary_label(:deny_computer, _values), do: "Do not add it"
 
   def summary_label(:own_server, %{renew: true}),
     do: "Open a new code (the current one stops working)"
@@ -815,6 +853,10 @@ defmodule FermixCore.Management.Copy do
   def summary_label(:own_server, _values), do: "Use my own Linux server"
   def summary_label(:move_back, %{machine: machine}), do: "Move back to this #{machine}"
   def summary_label(:restore_here, %{machine: machine}), do: "Restore on this #{machine}"
+
+  # Six digits as a person reads them aloud: two groups of three.
+  defp digits(<<first::binary-size(3), rest::binary-size(3)>>), do: first <> " " <> rest
+  defp digits(sas) when is_binary(sas), do: sas
 
   # How long ago, in the largest whole unit: minutes, hours or days.
   defp ago(seconds) when seconds < 60, do: "just now"

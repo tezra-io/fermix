@@ -17,6 +17,7 @@ defmodule Fermix.CLI do
   alias Fermix.CLI.BrowserCommand
   alias Fermix.CLI.CapabilitiesCommand
   alias Fermix.CLI.ChatCommand
+  alias Fermix.CLI.ComputerCommand
   alias Fermix.CLI.DevicesCommand
   alias Fermix.CLI.DiagnosticsCommand
   alias Fermix.CLI.Doctor
@@ -92,6 +93,7 @@ defmodule Fermix.CLI do
   defp dispatch("memory", rest), do: MemoryCommand.run(rest)
   defp dispatch("home", rest), do: HomeCommand.run(rest)
   defp dispatch("always-on", rest), do: AlwaysOnCommand.run(rest)
+  defp dispatch("computer", rest), do: ComputerCommand.run(rest)
   defp dispatch("upgrade", rest), do: UpgradeCommand.run(rest)
   defp dispatch("uninstall", rest), do: UninstallCommand.run(rest)
   defp dispatch("migrate-to-app", rest), do: MigrateToApp.run(rest)
@@ -145,7 +147,7 @@ defmodule Fermix.CLI do
       fermix plugins [list|catalog|enable NAME|disable NAME|auth ...] [--json]
       fermix pair                                  Pair a phone companion device
       fermix devices list                          List paired phones
-      fermix devices revoke DEVICE_ID              Revoke a paired phone
+      fermix devices revoke DEVICE_ID [--yes]      Revoke a paired phone, or remove a computer
       fermix settings [list] [--json]              List the running daemon's settings sections
       fermix settings show SECTION [--info] [--json]  Show one section's rows and values
       fermix settings set SECTION KEY=VALUE... [--json]  Change keys in one section
@@ -166,6 +168,7 @@ defmodule Fermix.CLI do
       fermix always-on [--json]                    Show Always On; on a terminal, take each step
       fermix always-on ACTION [--recovery-passphrase-file PATH] [--yes] [--wait] [--json]
                                                    Take one Always On step (own-server, move-now, ...)
+      fermix computer join CODE                    Join this computer to a Fermix that already runs
       fermix logs   [-f] [-n LINES]                Show daemon log file
       fermix upgrade [--check]                     Self-update from signed releases
       fermix uninstall                             Remove a Fermix.app-managed installation

@@ -30,7 +30,11 @@ defmodule FermixWebWeb.SetupLive.AlwaysOnPane do
         <span class="loading loading-spinner loading-sm" />
       </p>
       <.card :if={@always_on.summary} always_on={@always_on} />
-      <.own_code :if={@always_on.code} code={@always_on.code} />
+      <.own_code :if={@always_on.code && @always_on.code.command} code={@always_on.code} />
+      <.computer_code
+        :if={@always_on.code && !@always_on.code.command}
+        code={@always_on.code}
+      />
       <.details :if={@always_on.summary} detail={@always_on.summary["detail"] || %{}} />
       <.webhooks
         :if={@always_on.summary && @always_on.summary["detail"]["webhooks"]}
@@ -221,7 +225,8 @@ defmodule FermixWebWeb.SetupLive.AlwaysOnPane do
       assign(assigns,
         open: open,
         passphrase?: passphrase?,
-        again?: "new_recovery_passphrase" in open["needs"]
+        again?: "new_recovery_passphrase" in open["needs"],
+        digits?: "sas" in open["needs"]
       )
 
     ~H"""
@@ -242,6 +247,7 @@ defmodule FermixWebWeb.SetupLive.AlwaysOnPane do
           autocomplete="off"
         >
           <.passphrase :if={@passphrase?} again?={@again?} />
+          <.digits :if={@digits?} />
           <.step_end always_on={@always_on} />
         </form>
       </div>
@@ -270,6 +276,25 @@ defmodule FermixWebWeb.SetupLive.AlwaysOnPane do
         name="always_on_step[passphrase_again]"
         value=""
         autocomplete="new-password"
+        class="input input-sm input-bordered mt-1 w-full"
+      />
+    </label>
+    """
+  end
+
+  # The six digits the computer that asks to join shows (M97 §7.5): no
+  # secret, so they are typed in the open.
+  defp digits(assigns) do
+    ~H"""
+    <label class="block">
+      <span class="text-sm font-medium">The six digits the new computer shows</span>
+      <input
+        id="always-on-step-digits"
+        type="text"
+        name="always_on_step[sas]"
+        value=""
+        inputmode="numeric"
+        autocomplete="off"
         class="input input-sm input-bordered mt-1 w-full"
       />
     </label>
@@ -362,6 +387,42 @@ defmodule FermixWebWeb.SetupLive.AlwaysOnPane do
         </p>
       </div>
       <p :for={note <- @webhooks["notes"]} class="mt-3 text-sm text-base-content/70">{note}</p>
+    </section>
+    """
+  end
+
+  attr :code, :map, required: true
+
+  # Add a computer's code (M97 §3.1): shown once, for the new computer.
+  defp computer_code(assigns) do
+    assigns = assign(assigns, card: @card)
+
+    ~H"""
+    <section id="always-on-code" class={@card}>
+      <p class="text-sm">
+        On the new computer, connect to a Fermix that already runs and paste this code:
+      </p>
+      <div class="mt-2 flex items-start gap-2">
+        <code
+          id="always-on-code-text"
+          class="min-w-0 flex-1 break-all rounded-box bg-base-200 px-3 py-2 font-mono text-xs"
+        >
+          {@code.code}
+        </code>
+        <button
+          id="always-on-copy-code"
+          type="button"
+          class="btn btn-xs"
+          phx-hook="CopyText"
+          data-copy-from="always-on-code-text"
+        >
+          Copy
+        </button>
+      </div>
+      <p class="mt-3 text-sm text-base-content/70">It works once, until {@code.until}.</p>
+      <button type="button" class="btn btn-ghost btn-sm mt-3" phx-click="always_on_done">
+        Done
+      </button>
     </section>
     """
   end

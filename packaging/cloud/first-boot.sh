@@ -16,17 +16,19 @@
 # With --restore it takes no code and enrolls nothing: it prepares the same
 # server and prints the steps that restore a snapshot onto it. Either way the
 # server gets swap when it has none, and keeps itself up to date: Debian's
-# security updates every day, Fermix to the release the computers it serves
-# run, within five minutes of their running it and never past it, so the home
-# can always move back to one of them, and the reboots updates ask for at
-# 04:00 UTC.
+# security updates every day, Fermix to the newest release that the app of
+# each computer keeping its backups carries, within five minutes of its
+# publication (the server leads: its computers follow within a window), and
+# the reboots updates ask for at 04:00 UTC.
 #
 # Options: --restore, --snapshot-bucket NAME --snapshot-region REGION
 # (together; or the bucket the server's infrastructure set, from
 # /etc/fermix/snapshot-destination, which fermix-server-aws's user data writes:
 # then the snapshots are signed with the server's instance role through a root
 # credentials helper, and flags that name another bucket are refused), --version X (the release to install: the one the computer that
-# sets the server up runs; the latest without it), --tailscale (join the
+# sets the server up runs; the latest without it), --update-script-only (what
+# fermix-update runs after it installs a release: the update script written
+# again as this release writes it, and nothing else), --tailscale (join the
 # owner's tailnet before enrolling, with the auth key in TS_AUTHKEY or asked
 # for on the terminal without echo). It never prints the code or the key,
 # never logs them and never puts them on a command line. Run again, it
@@ -103,6 +105,9 @@ CODE=""
 RELEASE=""
 RELEASE_GIVEN=0
 RESTORE=0
+# --update-script-only: the update script (fermix-update) is written again as
+# this release writes it, and nothing else runs (update_script_only).
+UPDATE_SCRIPT_ONLY=0
 SNAPSHOT_BUCKET=""
 SNAPSHOT_REGION=""
 SNAPSHOT_ROLE_ARN=""
@@ -155,6 +160,7 @@ parse_args() {
     case "$1" in
       --restore) RESTORE=1; shift ;;
       --tailscale) TAILSCALE=1; shift ;;
+      --update-script-only) UPDATE_SCRIPT_ONLY=1; shift ;;
       --snapshot-bucket | --snapshot-region | --version)
         [ $# -ge 2 ] || fail "$1 needs a value."
         case "$1" in
@@ -167,6 +173,12 @@ parse_args() {
       *) fail "An option was not recognised. This script takes --restore, --snapshot-bucket, --snapshot-region, --version and --tailscale." ;;
     esac
   done
+
+  if [ "$UPDATE_SCRIPT_ONLY" -eq 1 ] &&
+    { [ "$RESTORE" -eq 1 ] || [ "$TAILSCALE" -eq 1 ] || [ "$RELEASE_GIVEN" -eq 1 ] ||
+      [ -n "$SNAPSHOT_BUCKET" ] || [ -n "$SNAPSHOT_REGION" ]; }; then
+    fail "--update-script-only takes no other option: it rewrites the update script and nothing else."
+  fi
 
   # A release is a plain MAJOR.MINOR.PATCH, as every release's packages are.
   if [ "$RELEASE_GIVEN" -eq 1 ]; then
@@ -625,6 +637,20 @@ apt_periodic_on() {
   [ "$(apt-config shell VALUE "APT::Periodic::$1")" = "VALUE='1'" ]
 }
 
+# --update-script-only, which fermix-update runs after it installs a release,
+# once it has checked this script against the release table: the update
+# script written again as this release writes it, and nothing else, so a
+# server set up by an older first boot follows the rules of the release it
+# runs. No code is asked for, nothing is installed, and the host is not
+# checked again.
+update_script_only() {
+  [ "$(id -u)" -eq 0 ] || fail "Run this as root: fermix-update runs it after an update."
+  WORK=$(mktemp -d /run/fermix-update-script.XXXXXX)
+  write_update_script
+  say "The update script $UPDATE_SCRIPT is this release's own"
+  exit 0
+}
+
 # The script fermix-update.timer and fermix-follow.timer run: first boot's
 # account, home, binary and installer address, then a fixed body.
 write_update_script() {
@@ -634,8 +660,11 @@ write_update_script() {
 #!/bin/sh
 # Fermix Always On: with no argument, the nightly update fermix-update.timer
 # runs at 04:00 UTC; with --follow, the follow run fermix-follow.timer starts
-# every five minutes, which installs and restarts but never reboots.
-# Written by Fermix's first boot, which writes it again whenever it runs.
+# every five minutes, which installs and restarts but never reboots; with
+# --release X [--ahead-of-apps], the owner's own update to release X, behind
+# the same gate. Written by Fermix's first boot, which writes it again
+# whenever it runs, and by each release this script installs
+# (--update-script-only).
 set -eu
 
 ENGINE_USER=$ENGINE_USER
@@ -656,8 +685,19 @@ DEFERRALS_MAX=2
 # this long, half its unit's 30 minutes, so it keeps the rest to update.
 LOCK_FILE=/run/fermix-update.lock
 LOCK_WAIT_SECONDS=900
+# The release table the installer trusts, and where every release's files
+# are, as the installer builds their address: a hand update reads which
+# releases exist from it, and each install checks the release's own update
+# script against it.
+RELEASES_URL=https://fermix.ai/install/releases
+ARTIFACT_ORIGIN=https://github.com/tezra-io/fermix/releases/download/
+ALWAYS_ON_FILE=fermix_always_on.sh
 WORK=""
 PHASE=""
+# What holds the restart (restart_held): move, work, or nothing; and how long
+# work on a computer still holds it, in seconds.
+HOLD=""
+WAIT_S=""
 # Set when the engine's answer or its restart failed: the night still decides
 # the reboot, then ends non-zero.
 ENGINE_FAILED=0
@@ -665,8 +705,13 @@ ENGINE_FAILED=0
 # nothing on disk changed and the night goes on to the restart and the
 # reboot, then ends non-zero.
 INSTALLER_UNREACHABLE=0
-# The release this run installs, once read (ceiling_due).
-CEILING=""
+# Set when the update script of a release just installed could not replace
+# this one (refresh_update_script): the run goes on, then ends non-zero.
+REFRESH_FAILED=0
+# The release this run installs, once read (release_due, hand_release), and
+# the newest release eligible for this server (read_eligible).
+RELEASE=""
+ELIGIBLE=""
 # A follow run (--follow, read_mode) installs and restarts but never
 # reboots, and says in its own words what the night says differently: when
 # (WHEN), what is still decided once the installer could not be downloaded
@@ -675,6 +720,12 @@ FOLLOW=0
 WHEN=tonight
 STILL_DECIDED="the restart and the reboot are still decided"
 AS_IF_NO_MOVE=" and the reboot is decided as if no move were under way"
+# The owner's own update (--release X): the release asked for, and whether it
+# may go ahead of the apps (--ahead-of-apps). It installs and restarts as a
+# follow run does, never reboots, and says every step.
+HAND=0
+WANTED=""
+AHEAD_OF_APPS=0
 
 # One sentence and a non-zero exit, ending the run there.
 fail() {
@@ -686,8 +737,9 @@ say() {
   printf '==> %s\n' "$1"
 }
 
-# A line only the night says: a follow run, in the journal every five
-# minutes, says what it did and what failed, not that nothing was due.
+# A line only the night and a hand update say: a follow run, in the journal
+# every five minutes, says what it did and what failed, not that nothing was
+# due.
 note() {
   [ "$FOLLOW" -eq 1 ] || say "$1"
 }
@@ -696,18 +748,40 @@ finish() {
   if [ -n "$WORK" ]; then rm -rf "$WORK"; fi
 }
 
-# The run's kind, from its one argument: none for the night, --follow for a
-# follow run. Nothing else is taken, and no argument is echoed back.
+# The run's kind, from its arguments: none for the night, --follow for a
+# follow run, --release X with --ahead-of-apps or not for the owner's own
+# update. Nothing else is taken, and no argument is echoed back.
 read_mode() {
   case "$#:${1-}" in
     0:) return 0 ;;
-    1:--follow) ;;
-    *) fail "An option was not recognised. fermix-update takes --follow, which fermix-follow.timer passes, or nothing for the nightly update." ;;
+    1:--follow) FOLLOW=1 ;;
+    2:--release | 3:--release) read_release "$@" ;;
+    *) refuse_mode ;;
   esac
-  FOLLOW=1
   WHEN=now
   STILL_DECIDED="the restart is still decided"
   AS_IF_NO_MOVE=""
+}
+
+refuse_mode() {
+  fail "An option was not recognised. fermix-update takes --follow, which fermix-follow.timer passes, --release with a release and, to go ahead of the apps, --ahead-of-apps, or nothing for the nightly update."
+}
+
+# --release X [--ahead-of-apps]: X a plain MAJOR.MINOR.PATCH, as every
+# release's packages are.
+read_release() {
+  if [ "$#" -eq 3 ] && [ "$3" != --ahead-of-apps ]; then refuse_mode; fi
+  case "$2" in
+    '' | *[!0-9.]* | .* | *. | *..*) fail "--release takes a Fermix release, such as 0.17.0." ;;
+  esac
+  minor_patch=${2#*.}
+  patch=${minor_patch#*.}
+  case "$patch" in *.*) fail "--release takes a Fermix release, such as 0.17.0." ;; esac
+  [ "$minor_patch" != "$2" ] && [ "$patch" != "$minor_patch" ] ||
+    fail "--release takes a Fermix release, such as 0.17.0."
+  HAND=1
+  WANTED=$2
+  if [ "$#" -eq 3 ]; then AHEAD_OF_APPS=1; fi
 }
 
 # flock(1) on the lock's descriptor, 9, with $@ (-n, or -w and a bound): 0
@@ -723,14 +797,20 @@ lock() {
 }
 
 # The lock, before anything is read or installed. A follow run that finds it
-# held leaves the update to the run that holds it; the night waits for that
-# run, at most LOCK_WAIT_SECONDS. Exiting releases it.
+# held leaves the update to the run that holds it; the night and a hand
+# update wait for that run, at most LOCK_WAIT_SECONDS. Exiting releases it.
 take_lock() {
   exec 9>"$LOCK_FILE"
   if lock -n; then return 0; fi
   if [ "$FOLLOW" -eq 1 ]; then
     say "Another Fermix update is running, so this follow run leaves it to that one"
     exit 0
+  fi
+  if [ "$HAND" -eq 1 ]; then
+    say "Another Fermix update is running, so this update waits for it to finish"
+    lock -w "$LOCK_WAIT_SECONDS" ||
+      fail "Another Fermix update was still running when this update stopped waiting for it, so nothing was installed; run it again."
+    return 0
   fi
   say "Another Fermix update is running, so the nightly update waits for it to finish"
   lock -w "$LOCK_WAIT_SECONDS" ||
@@ -753,14 +833,14 @@ fetch_installer() {
   fi
 }
 
-# The installer, checking fermix.ai's digests: it installs the release
-# this run's ceiling names. The package restarts nothing, so the running engine
-# is untouched until the restart. Its exit status does not say whether it
-# failed before or after the package manager ran, so any failure stops the
-# run before the restart and the reboot. The lock's descriptor is closed for
-# it, as for every fermix verb, so nothing they leave running holds the lock.
+# The installer, checking fermix.ai's digests: it installs the release this
+# run chose (RELEASE). The package restarts nothing, so the running engine is
+# untouched until the restart. Its exit status does not say whether it failed
+# before or after the package manager ran, so any failure stops the run
+# before the restart and the reboot. The lock's descriptor is closed for it,
+# as for every fermix verb, so nothing they leave running holds the lock.
 update_fermix() {
-  sh "$WORK/install.sh" --no-setup --version "$CEILING" </dev/null 9>&- ||
+  sh "$WORK/install.sh" --no-setup --version "$RELEASE" </dev/null 9>&- ||
     fail "The Fermix installer stopped, so the engine keeps running; its message above says why."
 }
 
@@ -781,37 +861,147 @@ warn() {
   printf 'fermix update: %s\n' "$1" >&2
 }
 
-# Whether this run installs a release, and which (CEILING): the
-# `update_ceiling` of `fermix home status --json`, the oldest Fermix among the
-# computers this server served as their primary in the last 30 days, so the
-# home can always move back to one of them. Due only when the installed
-# release ($1) is older, in dpkg's own order: a newer one is never installed
-# back down. No home yet, no computer seen, or an answer that cannot be read
-# installs nothing; only the last fails the run.
-ceiling_due() {
-  if [ ! -e "$FERMIX_HOME_DIR" ]; then
-    note "This server has no Fermix home yet, so no computer names the release to install; Fermix stays at $1"
-    return 1
-  fi
-  if ! as_engine home status --json >"$WORK/ceiling.json"; then
+# The newest release eligible for this server (ELIGIBLE): `fermix home status
+# --json`'s `update_ceiling`, which is `update.eligible`: the newest release,
+# at or above the one Fermix runs, that the app of each system whose
+# computers keep the home's backups carries, read from the release table the
+# engine keeps (M97, the server leads). Empty when none is, or when the
+# engine has read no table. A status read that fails fails the run.
+read_eligible() {
+  ELIGIBLE=""
+  if ! as_engine home status --json >"$WORK/eligible.json"; then
     warn "fermix home status stopped, so Fermix is not updated $WHEN; its message above says why."
     ENGINE_FAILED=1
     return 1
   fi
-  CEILING=$(tr -d '\n' <"$WORK/ceiling.json" |
+  ELIGIBLE=$(tr -d '\n' <"$WORK/eligible.json" |
     sed -n 's/.*"update_ceiling": *"\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)".*/\1/p')
-  if [ -z "$CEILING" ]; then
-    note "No computer has reached this server in the last 30 days, so Fermix stays at $1"
+}
+
+# Whether this run installs a release, and which (RELEASE): the eligible one
+# (read_eligible), when the installed release ($1) is older in dpkg's own
+# order: a newer one is never installed back down. No home yet, none
+# eligible, or an answer that cannot be read installs nothing; only the last
+# fails the run.
+release_due() {
+  if [ ! -e "$FERMIX_HOME_DIR" ]; then
+    note "This server has no Fermix home yet, so no release is chosen for it; Fermix stays at $1"
     return 1
   fi
-  if [ "$CEILING" = "$1" ]; then
-    note "Fermix $1 is the release your computers run"
+  read_eligible || return 1
+  if [ -z "$ELIGIBLE" ]; then
+    note "No release is eligible for this server now (fermix home status says why), so Fermix stays at $1"
     return 1
   fi
-  if dpkg --compare-versions "$CEILING" lt "$1"; then
-    note "Fermix $1 is newer than $CEILING, the oldest release your computers run, and is never installed back down: moving Fermix back to that computer waits until it updates"
+  if [ "$ELIGIBLE" = "$1" ]; then
+    note "Fermix $1 is the newest release eligible for this server"
     return 1
   fi
+  if dpkg --compare-versions "$ELIGIBLE" lt "$1"; then
+    note "Fermix $1 is newer than $ELIGIBLE, the newest release eligible for this server, and is never installed back down"
+    return 1
+  fi
+  RELEASE=$ELIGIBLE
+}
+
+# The release table, into the run's directory.
+fetch_table() {
+  curl -fsSL --proto '=https' "$RELEASES_URL" -o "$WORK/releases" &&
+    [ "$(awk 'NR == 1 { print; exit }' "$WORK/releases")" = "format 1" ]
+}
+
+# Whether the table lists release $1: one of its file rows names it.
+table_lists() {
+  awk -v version="$1" '
+    NR > 1 && NF == 3 && $1 == version { found = 1; exit }
+    END { exit !found }
+  ' "$WORK/releases"
+}
+
+# The sha256 the table lists for file $2 of release $1, or nothing unless it
+# lists exactly one, as the installer reads it.
+table_digest() {
+  awk -v version="$1" -v file="$2" '
+    NR > 1 && NF == 3 && $1 == version && $3 == file { digest = $2; rows++ }
+    END { if (rows == 1) print digest }
+  ' "$WORK/releases"
+}
+
+# The owner's own update to WANTED (--release), behind the same gate as the
+# automatic one: never below the installed release ($1), since an older
+# Fermix cannot read the home; only a release the table lists; and only an
+# eligible one, or one no newer than it, unless --ahead-of-apps says to go
+# ahead of the apps, which this says. Sets RELEASE; 1 when nothing is due.
+hand_release() {
+  if dpkg --compare-versions "$WANTED" lt "$1"; then
+    fail "Fermix $1 is installed, and $WANTED is older: Fermix is never installed back down, since an older Fermix cannot read your home."
+  fi
+  if [ "$WANTED" = "$1" ]; then
+    say "Fermix $WANTED is installed already"
+    return 1
+  fi
+  [ -e "$FERMIX_HOME_DIR" ] ||
+    fail "This server has no Fermix home yet, so no release is chosen for it; nothing was installed."
+  fetch_table ||
+    fail "Could not read the release table from $RELEASES_URL, so nothing was installed."
+  table_lists "$WANTED" ||
+    fail "$RELEASES_URL lists no release $WANTED, so nothing was installed."
+  read_eligible || exit 1
+  if [ -z "$ELIGIBLE" ] || dpkg --compare-versions "$WANTED" gt "$ELIGIBLE"; then
+    [ "$AHEAD_OF_APPS" -eq 1 ] ||
+      fail "Fermix $WANTED is ahead of the apps: no app that carries it is published yet for a computer that keeps your backups, and that computer could not restore your home from them. Nothing was installed. To install it all the same, run: fermix-update --release $WANTED --ahead-of-apps"
+    say "Installing Fermix $WANTED ahead of the apps, as asked: each computer that keeps your backups says so until its app carries it"
+  fi
+  RELEASE=$WANTED
+}
+
+# The release chosen, through the installer; then this script becomes the
+# installed release's own.
+install_release() {
+  if fetch_installer; then
+    update_fermix
+    report_versions "$1"
+    refresh_update_script
+  fi
+}
+
+# The update script of the release just installed, so the next run follows
+# that release's rules: its Always On server script (the copy of
+# first-boot.sh every release publishes as fermix_always_on.sh), checked
+# against the sha256 the release table lists for it as the installer checks
+# a package, rewrites this script and nothing else (--update-script-only).
+# This run goes on as it began: the shell keeps the file it read, which the
+# rewrite replaces by a rename. A script that cannot be fetched or checked
+# leaves this one as it is, says so, and fails the run at its end.
+refresh_update_script() {
+  installed=$(installed_version) || exit 1
+  if ! fetch_table; then
+    refresh_failed "the release table could not be read from $RELEASES_URL"
+    return 0
+  fi
+  digest=$(table_digest "$installed" "$ALWAYS_ON_FILE")
+  if [ -z "$digest" ]; then
+    refresh_failed "$RELEASES_URL lists no single update script for Fermix $installed"
+    return 0
+  fi
+  if ! curl -fsSL --proto '=https' "${ARTIFACT_ORIGIN}v$installed/$ALWAYS_ON_FILE" -o "$WORK/$ALWAYS_ON_FILE"; then
+    refresh_failed "the update script of Fermix $installed could not be downloaded"
+    return 0
+  fi
+  if [ "$(sha256sum "$WORK/$ALWAYS_ON_FILE" | cut -d ' ' -f 1)" != "$digest" ]; then
+    refresh_failed "the update script of Fermix $installed is not the one $RELEASES_URL lists"
+    return 0
+  fi
+  if ! sh "$WORK/$ALWAYS_ON_FILE" --update-script-only </dev/null 9>&-; then
+    refresh_failed "the update script of Fermix $installed stopped; its message above says why"
+    return 0
+  fi
+  say "This update script is now Fermix $installed's own"
+}
+
+refresh_failed() {
+  warn "Fermix is updated, but $1, so this update script stays as it was."
+  REFRESH_FAILED=1
 }
 
 # Whether the running engine is older than the installed one: the `alignment`
@@ -829,13 +1019,17 @@ restart_due() {
     sed -n 's/.*"alignment": *"\([a-z_]*\)".*/\1/p')" = pending_restart ]
 }
 
-# Whether a move is under way here, from `fermix home status --json` (with
-# Fermix running or not), in a phase the move code treats as pending: this
-# server sending its home (Home.Move's pending phases), or a candidate
-# enrolling or receiving one. Ended phases (committed, undoing, done, aborted,
-# enrolled, expired, failed) are not. Sets PHASE. An answer that cannot be
-# read counts as no move, and the engine is not restarted on this run.
-move_under_way() {
+# Whether the engine's restart waits, from `fermix home status --json` (with
+# Fermix running or not): a move under way here, in a phase the move code
+# treats as pending: this server sending its home (Home.Move's pending
+# phases), or a candidate enrolling or receiving one; ended phases
+# (committed, undoing, done, aborted, enrolled, expired, failed) are not.
+# Or work Fermix runs on a computer (`restart_hold.wait_s` above 0), which
+# the engine bounds at ten minutes. Sets PHASE, HOLD (move or work) and
+# WAIT_S. An answer that cannot be read counts as no hold, and the engine is
+# not restarted on this run.
+restart_held() {
+  HOLD=""
   [ -e "$FERMIX_HOME_DIR" ] || return 1
   if ! as_engine home status --json >"$WORK/home-status.json"; then
     warn "fermix home status stopped, so the engine is not restarted $WHEN$AS_IF_NO_MOVE; its message above says why."
@@ -845,9 +1039,17 @@ move_under_way() {
   PHASE=$(tr -d '\n' <"$WORK/home-status.json" | sed -n 's/.*"move": *{\([^}]*\)}.*/\1/p' |
     sed -n 's/.*"phase": *"\([a-z_]*\)".*/\1/p')
   case "$PHASE" in
-    requested | streaming | committing | aborting) return 0 ;;
-    enrolling | receiving | staged | activating) return 0 ;;
+    requested | streaming | committing | aborting | enrolling | receiving | staged | activating)
+      HOLD=move
+      return 0
+      ;;
   esac
+  WAIT_S=$(tr -d '\n' <"$WORK/home-status.json" | sed -n 's/.*"restart_hold": *{\([^}]*\)}.*/\1/p' |
+    sed -n 's/.*"wait_s": *\([0-9][0-9]*\).*/\1/p')
+  if [ -n "$WAIT_S" ] && [ "$WAIT_S" -gt 0 ]; then
+    HOLD=work
+    return 0
+  fi
   return 1
 }
 
@@ -861,25 +1063,31 @@ restart_engine() {
   fi
 }
 
-# The restart, unless the engine's answers failed or a move is under way ($1).
+# The restart, unless the engine's answers failed or something holds it ($1:
+# move, work, or nothing).
 restart_step() {
   [ "$ENGINE_FAILED" -eq 0 ] || return 0
-  if [ "$1" -eq 1 ]; then
-    say "A move is under way on this server ($PHASE), so the engine restarts at the first follow run after it ends"
-    return 0
-  fi
+  case "$1" in
+    move)
+      say "A move is under way on this server ($PHASE), so the engine restarts at the first follow run after it ends"
+      return 0
+      ;;
+    work)
+      say "Fermix is running work on a computer, so the engine restarts once it ends, at a follow run within $WAIT_S seconds"
+      return 0
+      ;;
+  esac
   restart_engine
 }
 
 # A follow run's restart, decided as the night's is: when the engine is
-# behind the installed release, unless a move is under way. A restart a move
-# held off is still due at the first run after it ends. It never reboots, and
-# never reads or writes the night's deferral count.
+# behind the installed release, unless a move or a computer's work holds it.
+# A restart they held off is still due at the first run after. It never
+# reboots, and never reads or writes the night's deferral count.
 follow_restart() {
   restart_due || return 0
-  moving=0
-  if move_under_way; then moving=1; fi
-  restart_step "$moving"
+  restart_held || :
+  restart_step "$HOLD"
 }
 
 # Consecutive nights a move has held a reboot off. A count the file does not
@@ -902,11 +1110,12 @@ record_deferral() {
   mv -f "$DEFERRALS_FILE.incoming" "$DEFERRALS_FILE"
 }
 
-# The reboot an update asks for, unless a move is under way ($1) and has held
-# it off fewer than DEFERRALS_MAX nights in a row.
+# The reboot an update asks for, unless a move is under way ($1 is move) and
+# has held it off fewer than DEFERRALS_MAX nights in a row. A computer's work
+# holds the restart, not the night's reboot.
 reboot_step() {
   sentence="An installed update asks for a reboot ($REBOOT_FLAG), so this server reboots now"
-  if [ "$1" -eq 1 ]; then
+  if [ "$1" = move ]; then
     count=$(deferrals)
     if [ "$count" -lt "$DEFERRALS_MAX" ]; then
       record_deferral $((count + 1))
@@ -931,11 +1140,10 @@ restart_and_reboot() {
     rm -f "$DEFERRALS_FILE"
     return 0
   fi
-  moving=0
-  if move_under_way; then moving=1; fi
-  if [ "$restart" -eq 1 ]; then restart_step "$moving"; fi
+  restart_held || :
+  if [ "$restart" -eq 1 ]; then restart_step "$HOLD"; fi
   if [ -e "$REBOOT_FLAG" ]; then
-    reboot_step "$moving"
+    reboot_step "$HOLD"
   else
     rm -f "$DEFERRALS_FILE"
   fi
@@ -965,7 +1173,7 @@ main() {
   [ "$(id -u)" -eq 0 ] || fail "Run this as root, as fermix-update.timer does."
   take_lock
   # A server with no Fermix home yet (a first boot that has not enrolled it,
-  # or a restore host before its import) has no computer to follow and no
+  # or a restore host before its import) has no release chosen for it and no
   # engine to restart, so a follow run there does nothing and says nothing.
   if [ "$FOLLOW" -eq 1 ] && [ ! -e "$FERMIX_HOME_DIR" ]; then exit 0; fi
   WORK=$(mktemp -d /run/fermix-update.XXXXXX)
@@ -974,15 +1182,18 @@ main() {
   export APT_CONFIG
 
   before=$(installed_version) || exit 1
-  if ceiling_due "$before"; then
-    say "Updating Fermix $before to $CEILING, the release your computers run, through $INSTALL_URL"
-    if fetch_installer; then
-      update_fermix
-      report_versions "$before"
+  if [ "$HAND" -eq 1 ]; then
+    if hand_release "$before"; then
+      say "Updating Fermix $before to $RELEASE, as asked, through $INSTALL_URL"
+      install_release "$before"
     fi
+  elif release_due "$before"; then
+    say "Updating Fermix $before to $RELEASE, the newest release eligible for this server, through $INSTALL_URL"
+    install_release "$before"
   fi
-  if [ "$FOLLOW" -eq 1 ]; then follow_restart; else restart_and_reboot; fi
-  [ "$ENGINE_FAILED" -eq 0 ] && [ "$INSTALLER_UNREACHABLE" -eq 0 ] || exit 1
+  if [ "$FOLLOW" -eq 1 ] || [ "$HAND" -eq 1 ]; then follow_restart; else restart_and_reboot; fi
+  [ "$ENGINE_FAILED" -eq 0 ] && [ "$INSTALLER_UNREACHABLE" -eq 0 ] && [ "$REFRESH_FAILED" -eq 0 ] ||
+    exit 1
 }
 
 main "$@"
@@ -995,19 +1206,22 @@ FERMIX_UPDATE
 # provider's image lacks it, and its two daily switches set in a file of
 # Fermix's. Fermix's own: the package comes from the release files, not an apt
 # source, so unattended-upgrades never sees it; root timers run the installer
-# for the release the computers this server serves run (the engine's update
-# ceiling; nothing when none was seen, and never back down), and restart the
-# engine when it runs an older release than the one installed (not while a
-# move is under way, nor when the engine's answers fail): every five minutes
-# (fermix-follow.timer), so the server takes a release within minutes of its
-# computers, and every night at 04:00 UTC (fermix-update.timer), which also
-# reboots when an update asks for it (a move may hold that off two nights in
-# a row, no more). One lock keeps the two from running at once. An installer
-# that ran and failed stops the run before both; one that could not be
-# downloaded changed nothing, so both are still decided. Every failure says
-# why in the journal, and the next run tries again.
+# for the newest release eligible for this server (the engine's `update`, from
+# the release table: one the app of each computer keeping its backups
+# carries; nothing when none is, and never back down), then make the update
+# script that release's own, and restart the engine when it runs an older
+# release than the one installed (not while a move is under way or a
+# computer's work holds it, at most ten minutes, nor when the engine's
+# answers fail): every five minutes (fermix-follow.timer), so the server takes
+# a release within minutes of its apps, and every night at 04:00 UTC
+# (fermix-update.timer), which also reboots when an update asks for it (a
+# move may hold that off two nights in a row, no more). One lock keeps the two
+# from running at once. An installer that ran and failed stops the run before
+# both; one that could not be downloaded changed nothing, so both are still
+# decided. Every failure says why in the journal, and the next run tries
+# again.
 schedule_updates() {
-  say "Turning on updates: Debian's security updates every day, Fermix every five minutes to the release your computers run, and the reboots updates ask for at 04:00 UTC"
+  say "Turning on updates: Debian's security updates every day, Fermix every five minutes to the newest release your apps carry, and the reboots updates ask for at 04:00 UTC"
   apt_install unattended-upgrades
   write_file "$UPGRADES_CONF" 0644 <<'EOF'
 // Fermix Always On: nobody logs in to this server, so Debian's own updates
@@ -1047,7 +1261,7 @@ EOF
   # stay out, and a run that fails keeps systemd's lines that say so.
   write_file "$UNIT_DIR/fermix-follow.service" 0644 <<EOF
 [Unit]
-Description=Fermix: install the release this server's computers run, and restart Fermix when it is behind
+Description=Fermix: install the newest release eligible for this server, and restart Fermix when it is behind
 Wants=network-online.target
 After=network-online.target
 
@@ -1060,7 +1274,7 @@ LogLevelMax=notice
 EOF
   write_file "$UNIT_DIR/fermix-follow.timer" 0644 <<'EOF'
 [Unit]
-Description=Fermix: follow the release this server's computers run, every five minutes
+Description=Fermix: follow the newest release eligible for this server, every five minutes
 
 [Timer]
 OnBootSec=2min
@@ -1550,6 +1764,7 @@ main() {
   trap 'exit 143' TERM
 
   parse_args "$@"
+  if [ "$UPDATE_SCRIPT_ONLY" -eq 1 ]; then update_script_only; fi
   check_host
   read_snapshot_destination
   WORK=$(mktemp -d /run/fermix-always-on.XXXXXX)

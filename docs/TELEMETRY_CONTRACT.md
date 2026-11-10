@@ -1563,6 +1563,63 @@ carried, no image data — whatever the content-capture posture. Those are conte
 they ride the model's side of the wire and the capture gate, never always-on
 metadata.
 
+## Computer invocations
+
+A server engine asks a linked computer engine to run a capability over the link
+(`invoke_open` … `invoke_result`, M97 §6), and on the **computer** that
+invocation is a **run kind**: `session_id = "inv_<invocation id>"`, minted by
+`FermixCore.Computers.Telemetry.session_id/1`. The id is itself `inv-` and 26
+base32 characters, so a session reads `inv_inv-…`. Every emission goes through
+`FermixCore.Computers.Telemetry` — never hand-rolled — and the bookends are
+`[:fermix, :computer_invocation, :start | :complete | :error]`.
+
+**Which bookend closes the run is the diagnosis.** Every invocation the computer
+answers opens with `:start` and closes with exactly one bookend: `:complete` for
+`ok`, `cancelled` and `refused`, `:error` for `failed`, `timed_out` and
+`unknown`. A refusal is the computer answering, not the run failing, so it
+closes with `:complete` and its `refusal` word; its bookend is emitted **before**
+the answer goes, so the computer's record of a refusal never depends on the
+answer reaching the server. Measurements: `duration_ms` (a placeholder `0` on the
+opener, which the exporter never exports) and, on a bookend, `result_bytes`.
+Metadata is a fixed allowlist: `session_id`, `parent_session`, `capability`,
+`op`, `origin`, `epoch`, and on a bookend `status` and `refusal` (absent unless
+refused). Never the arguments, the result or the target: those are content, and
+the computer's journal holds the target.
+
+The run is **always a root on the computer's own trace, and `parent_session`
+rides as correlation metadata, never as a parent**. The turn that asked is on
+another machine's trace — the server's — so there is nothing on this one to nest
+under; and a turn's id is minted per engine, so the same id can name an unrelated
+turn of the computer's own, and nesting under it would file the invocation in
+that turn's trace and let the bookend ship that turn early.
+`Trace.TelemetryHandler` registers the three as `agent_event` rows
+(`computer_invocation_start | _complete | _error`, each row's `agent` the
+capability); `FermixOpik` binds them (`infer_kind("inv_" <> _)` →
+`:computer_invocation`, the root opening on `:start` and closing through
+`close_root` on `:complete` and `:error` with the fields
+`Mapper.computer_invocation_root/3` builds, `error_info` on `:error` alone,
+replay in `TraceFile`). The id prefix is minted outside `fermix_opik`; keep it in
+lockstep with the exporter's clause, or a bookend arriving without its opener
+reads as a `:subagent` phantom root. An invocation that outlives the exporter's
+idle TTL ships its root then, and its bookend opens a continuation root under the
+same id, as a computer-use session's does; the JSONL stream is the complete
+record.
+
+**On the server an invocation is one tool exec.** The model's one call that
+invokes a computer is one ordinary `[:fermix, :tool, :exec]` under the *turn's*
+session, and its metadata gains four keys from
+`Computers.Outcome.exec_metadata/1`: `computer` (the computer's device id),
+`invocation` (the invocation's id), `invoke_status` (how it ended) and `refusal`
+(absent unless refused). Two ids and two closed words, never the target or the
+arguments, so all four ride outside the content gate; the bare `invocation` id is
+how a reader finds the computer's `inv_<id>` root. A metadata key no exporter
+names is silently dropped, so the four are listed in both allowlists a tool key
+must pass: `Mapper.tool_span/3`'s `Map.take` and
+`TraceFile.normalize("tool_exec", …)`. As with `outcome`, their **types differ by
+seam**: `invoke_status` and `refusal` are atoms on the live path and strings
+after replay, both pinned by tests, so a consumer that compares them must accept
+both spellings.
+
 ## Content (prompts / responses / tool IO)
 
 Attach bodies **only** behind `FermixCore.Telemetry.capture_content?/0`, and

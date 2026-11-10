@@ -293,9 +293,17 @@ defmodule FermixCore.Home.ComputerKey do
 
     case SecretWriter.get(@item, secret) do
       {:ok, value} -> decode(value, store)
-      {:error, :missing_secret} -> {:error, {:missing, store}}
-      {:error, reason} -> {:error, {:store, store, reason}}
+      {:error, reason} -> unread(reason, store)
     end
+  end
+
+  # A store that holds no key yet says so in its own helper's words
+  # (`SecretWriter.absent?/1`): that is a missing key, never a refusal, or a
+  # fresh keychain could hold no computer's key at all.
+  defp unread(reason, store) do
+    if SecretWriter.absent?(reason),
+      do: {:error, {:missing, store}},
+      else: {:error, {:store, store, reason}}
   end
 
   defp decode(value, store) do

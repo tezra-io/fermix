@@ -66,7 +66,9 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
     The one-time code of the owner's server, answered once by
     `own_server`, with the command to run there, the optional step that also
     joins it to the owner's tailnet (`tailscale`, its sentence and command)
-    and until when the code works. LiveView's crash report prints every
+    and until when the code works; or the one-time code a new computer joins
+    with (M97 §3.1), answered once by `add_computer`, which has no command
+    and no Tailscale step (both nil). LiveView's crash report prints every
     assign, so no print of it spells the code.
     """
     @enforce_keys [:code, :command, :tailscale, :until]
@@ -74,16 +76,18 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
 
     @type t :: %__MODULE__{
             code: String.t(),
-            command: String.t(),
-            tailscale: %{String.t() => String.t()},
+            command: String.t() | nil,
+            tailscale: %{String.t() => String.t()} | nil,
             until: String.t()
           }
 
     @doc """
     The card a step's `result` makes: `own_server`'s, matched whole (the
-    code's three fields, then its Tailscale step on its own), or none for a
-    step that answers none (null, or a move's `{move_id}`). Any other shape
-    raises: the code is answered once, so it is never dropped in silence. A
+    code's three fields, then its Tailscale step on its own),
+    `add_computer`'s (`{code, expires_at}` and nothing else), or none for a
+    step that answers none (null, a move's `{move_id}`, or the computer
+    `approve_computer` added, which the screen after it names). Any other
+    shape raises: the code is answered once, so it is never dropped in silence. A
     refusal names the fields, never the code.
     """
     @spec from_result(map() | nil) :: t() | nil
@@ -106,6 +110,16 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
         until: Clock.stated_instant(expires)
       }
     end
+
+    def from_result(%{"code" => code, "expires_at" => at} = result)
+        when is_binary(code) and is_binary(at) and map_size(result) == 2 do
+      {:ok, expires, _offset} = DateTime.from_iso8601(at)
+      %__MODULE__{code: code, command: nil, tailscale: nil, until: Clock.stated_instant(expires)}
+    end
+
+    def from_result(%{"device_id" => id, "name" => name} = result)
+        when is_binary(id) and is_binary(name) and map_size(result) == 2,
+        do: nil
 
     def from_result(result), do: raise(ArgumentError, "home.act answered #{shape(result)}")
 
@@ -380,6 +394,10 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
 
   defp needed("recovery_passphrase", fields),
     do: {:ok, %{"recovery_passphrase" => fields["passphrase"]}}
+
+  # The six digits the computer that asks to join shows (M97 §7.5), as the
+  # owner typed them; the engine reads them.
+  defp needed("sas", fields), do: {:ok, %{"sas" => fields["sas"]}}
 
   # -- the step ------------------------------------------------------------------
 

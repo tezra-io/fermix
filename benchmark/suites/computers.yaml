@@ -215,3 +215,141 @@ scenarios:
           away too, is welcome. It does not claim to have looked at or
           controlled any screen, and does not say the screen works on loft
           Linux.
+
+  # The server leads (M97, the server's version): it installs a release on its
+  # own once the app that carries it is published for each computer that keeps
+  # its backups (here the studio Mac, the only one that does), whether or not
+  # anybody installed that app, and a computer that has not updated never holds
+  # it back. Before M97 the server waited for every computer to run the release,
+  # which is the answer a stale description gives, so the rubric refuses it by
+  # name. An eval home is not a Linux package install, so `fermix home status`
+  # answers no `update` there and reads no release table: what is graded is the
+  # rule, which the model has from its own reference, never a release number
+  # (a correct reply needs none, and the rubric refuses an invented one). The
+  # floor is the one noun every correct answer says, the app. No route
+  # assertion: reading the reference or the home's status are both fine.
+  - id: why_the_server_has_not_updated
+    title: "Why the server has not taken a new release yet"
+    severity: normal
+    risk: host_readonly
+    tags: [computers, always-on, home, versions]
+    cases:
+      - id: why_hasnt_my_server_taken_the_new_fermix
+        query: "Why hasn't my server taken the new Fermix?"
+        expect:
+          reply_matches: '(?i)\bapps?\b'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Says the server updates itself, and takes a new Fermix release
+          only once the app that carries that release is published (released)
+          for each computer that keeps the home's backups; naming the Mac app,
+          or the studio Mac as the computer that keeps the backups, is correct
+          and welcome. It does not say the server waits until the owner
+          installs the update on a computer, until every computer runs the new
+          version, or that it follows the oldest version among the computers:
+          a reply whose main explanation is any of those fails. It does not
+          invent a release number, a date the release arrives, or a claim
+          that a specific release is being held right now; saying that it
+          cannot see a release waiting from here, or that the status shows
+          none, is correct. It does not claim to have updated, restarted or
+          changed the server. Mentioning the reason (a computer must be able
+          to restore the home from its backups), that the server checks every
+          five minutes, that an unreadable release table also stops updates,
+          or that the owner can update by hand on the server is welcome but
+          not required.
+      - id: new_version_out_but_server_is_behind
+        query: >
+          I read that a new version of Fermix came out, but my server still
+          seems to be on the old one. What is it waiting for?
+        expect:
+          reply_matches: '(?i)\bapps?\b'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Says the server updates on its own and is waiting for the app
+          that carries the new release to be published (released) for each
+          computer that keeps the home's backups; naming the Mac app, or the
+          studio Mac as the computer that keeps the backups, is correct and
+          welcome. It does not say the server waits until the owner installs
+          the update on a computer, until every computer runs the new
+          version, or that it follows the oldest version among the computers:
+          a reply whose main explanation is any of those fails. It does not
+          invent a release number, a date the release arrives, or a claim
+          that a specific release is being held right now; saying that it
+          cannot see a release waiting from here, or that the status shows
+          none, is correct. It does not claim to have updated, restarted or
+          changed the server. Mentioning that nothing needs doing on the
+          owner's side, that the server checks every five minutes, or that
+          the owner can update by hand on the server is welcome but not
+          required.
+
+  # Adding a computer (M97, identity): a second computer joins a home that
+  # already runs with a code and a six-digit check, and moves nothing. The
+  # failure this guards is the plausible wrong road: an owner sent to pair the
+  # laptop like a phone, to enroll it as a server, or to move the home onto it.
+  # What is graded is the road, which the model has from its own reference:
+  # a code from Always On, entered on the laptop, then the same six digits on
+  # both. No wording floor and no route assertion: every phrasing of those
+  # three steps is right, reading the reference or answering from the prompt
+  # are both fine, and nothing here opens a code (the question asks how).
+  - id: connecting_another_computer
+    title: "How to connect a second computer to a Fermix that already runs"
+    severity: normal
+    risk: host_readonly
+    tags: [computers, always-on, home, join]
+    cases:
+      - id: how_do_i_connect_my_linux_laptop
+        query: "How do I connect my Linux laptop to my Fermix?"
+        expect:
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: |
+          1. Says the laptop joins with a code the owner opens from Always On
+             on a computer that is already part of this Fermix, or on the
+             server itself (Add a computer; `fermix always-on add-computer`
+             names the same step).
+          2. Says the code is then entered on the Linux laptop: in the Fermix
+             app there, by choosing to connect to a Fermix that already runs,
+             or from a terminal with `fermix computer join` and the code.
+             Either one is enough.
+          3. Says both sides then show six digits, and that the owner adds
+             the laptop only when the digits it shows are the same as the
+             ones shown where the code was opened.
+          4. Gives no other road as the way to connect the laptop: not
+             pairing it like a phone (`fermix pair`, a QR code), not setting
+             it up as a server (`fermix home enroll`, Use my own Linux
+             server), and not moving the home onto it.
+          5. Does not claim to have opened a code, added the laptop or
+             changed anything itself.
+          Not required: that the code works once and for 30 minutes, that the
+          laptop starts with everything switched off until the owner turns
+          things on there, that it keeps no backups, or how to remove it.
+      - id: second_mac_without_moving_anything
+        query: >
+          I just got a second Mac for the kitchen. Can I hook it up to the
+          Fermix that's already running, without moving anything over to it?
+        expect:
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: |
+          1. Says yes, and that the Mac joins with a code the owner opens
+             from Always On on a computer that is already part of this
+             Fermix, or on the server itself (Add a computer; `fermix
+             always-on add-computer` names the same step).
+          2. Says the code is then entered on the new Mac: in the Fermix app
+             there, by choosing to connect to a Fermix that already runs, or
+             from a terminal with `fermix computer join` and the code. Either
+             one is enough.
+          3. Says both sides then show six digits, and that the owner adds
+             the Mac only when the digits it shows are the same as the ones
+             shown where the code was opened.
+          4. Says nothing moves to the new Mac: Fermix keeps running where
+             it runs now. It does not present a move of the home, phone
+             pairing (`fermix pair`, a QR code) or setting the Mac up as a
+             server (`fermix home enroll`) as the way to connect it.
+          5. Does not claim to have opened a code, added the Mac or changed
+             anything itself.
+          Not required: that the code works once and for 30 minutes, that the
+          Mac starts with everything switched off until the owner turns
+          things on there, that it keeps no backups, or how to remove it.

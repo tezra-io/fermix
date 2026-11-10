@@ -8,7 +8,8 @@ defmodule Fermix.CLI.AlwaysOnCommand.Step do
   What a need takes: `new_recovery_passphrase`, masked twice and compared,
   or `--recovery-passphrase-file`; `recovery_passphrase`, masked once, or
   the file. Either is sent as `input.recovery_passphrase`, and Fermix checks
-  it.
+  it. `sas` (M97 §7.5) is the six digits the computer that asks to join
+  shows, read from `--sas` or asked on the terminal, sent as `input.sas`.
 
   The input is held as `AlwaysOn.Input`, whose `Inspect` withholds the
   passphrase, until the one call that sends it.
@@ -31,6 +32,7 @@ defmodule Fermix.CLI.AlwaysOnCommand.Step do
   # `home.act` this long (PROTOCOL.md).
   @act_ms 90_000
   @passphrase_flag "--recovery-passphrase-file PATH"
+  @sas_flag "--sas DIGITS"
 
   @type outcome ::
           {:acted, map(), map()}
@@ -65,11 +67,23 @@ defmodule Fermix.CLI.AlwaysOnCommand.Step do
 
   defp need("new_recovery_passphrase", input, ctx), do: passphrase(:twice, input, ctx)
   defp need("recovery_passphrase", input, ctx), do: passphrase(:once, input, ctx)
+  defp need("sas", input, ctx), do: digits(input, ctx)
 
   defp need(need, _input, _ctx) do
     {:refused, :action_refused,
      output: "this step needs #{need}, which this fermix does not know; update it"}
   end
+
+  # The digits are no secret: the new computer shows them, and the owner
+  # types what they read there.
+  defp digits(input, %{flags: %{sas: sas}}) when is_binary(sas), do: {:ok, %{input | sas: sas}}
+
+  defp digits(input, %{interactive?: true} = ctx) do
+    IO.write(ctx.stderr, "The six digits the new computer shows: ")
+    {:ok, %{input | sas: AlwaysOnCommand.answer(ctx)}}
+  end
+
+  defp digits(_input, _ctx), do: {:missing, @sas_flag}
 
   defp passphrase(_times, input, %{flags: %{passphrase_file: path}}) when is_binary(path) do
     case HomeCommand.read_passphrase_file(Path.expand(path)) do

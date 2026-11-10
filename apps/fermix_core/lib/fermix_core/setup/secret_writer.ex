@@ -46,6 +46,8 @@ defmodule FermixCore.Setup.SecretWriter do
   @cue_source_prefix "cue_source:"
   @cue_secret_fields [:token, :key, :secret, :path_secret]
   @device_key_item "device:desktop_key"
+  # `security` exits 44 (errSecItemNotFound) for an item it does not hold.
+  @keychain_item_not_found 44
   @type external_key :: {:external_env, String.t()}
   @type mcp_key :: {:mcp, String.t()}
   @type cue_source_key :: {:cue_source, String.t(), :token | :key | :secret | :path_secret}
@@ -193,6 +195,28 @@ defmodule FermixCore.Setup.SecretWriter do
 
   @spec get(secret_key(), keyword()) :: {:ok, String.t()} | writer_error()
   def get(key, opts \\ []) when is_secret_key(key), do: impl(opts).get(key, opts)
+
+  @doc """
+  Whether `reason`, a failed `get/2`, says the store holds no such item
+  rather than that it could not be asked. Each store has its own word for
+  it: `:missing_secret` (an empty value, a file that is not there), the
+  Keychain's `security find-generic-password` exiting 44
+  (errSecItemNotFound), and `secret-tool lookup` exiting 1 with nothing
+  printed, where a failure of its own prints why. A caller that must tell
+  "not stored yet" from "cannot be read" asks here; `get/2` itself hands
+  each helper's answer on unchanged.
+  """
+  @spec absent?(term()) :: boolean()
+  def absent?(:missing_secret), do: true
+
+  def absent?({:helper_failed, command, @keychain_item_not_found, _output})
+      when is_binary(command),
+      do: String.contains?(command, " find-generic-password ")
+
+  def absent?({:helper_failed, command, 1, ""}) when is_binary(command),
+    do: String.contains?(command, " lookup ")
+
+  def absent?(_reason), do: false
 
   @doc """
   Removes the OS-keyring item for `key`. Succeeds when no item exists — the

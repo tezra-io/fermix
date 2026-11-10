@@ -7,6 +7,7 @@ defmodule FermixChannels.Desktop.DeviceSupervisorTest do
   use ExUnit.Case, async: false
 
   alias FermixChannels.Desktop.DeviceSupervisor
+  alias FermixChannels.Desktop.Invoke
   alias FermixChannels.Desktop.Relay
   alias FermixChannels.Home.Candidate, as: CandidateProcess
   alias FermixChannels.Home.CandidateSupervisor
@@ -29,12 +30,17 @@ defmodule FermixChannels.Desktop.DeviceSupervisorTest do
     assert DeviceSupervisor.children(root) == []
 
     linked!(root)
-    assert [%{id: :dial, type: :supervisor}] = DeviceSupervisor.children(root)
+
+    assert [%{id: Invoke, type: :supervisor}, %{id: :dial, type: :supervisor}] =
+             DeviceSupervisor.children(root)
 
     return_candidate!(root)
 
-    assert [%{id: :dial}, %{id: CandidateSupervisor, restart: :temporary, type: :supervisor}] =
-             DeviceSupervisor.children(root)
+    assert [
+             %{id: Invoke},
+             %{id: :dial},
+             %{id: CandidateSupervisor, restart: :temporary, type: :supervisor}
+           ] = DeviceSupervisor.children(root)
   end
 
   test "a boot of a desktop that holds a move back runs the relay and the candidate side by side",
@@ -100,6 +106,29 @@ defmodule FermixChannels.Desktop.DeviceSupervisorTest do
     Process.unlink(squatter)
     Process.exit(squatter, :kill)
     assert_receive {:DOWN, ^ref, :process, ^squatter, :killed}
+  end
+
+  # M97 §5.2: the server's requests run beside the dial subtree, so a dial
+  # helper that restarts (and the relay with it) ends none of them.
+  test "a dial helper that restarts leaves this computer's invocations running", %{root: root} do
+    linked!(root)
+    start_supervised!({DeviceSupervisor, root: root})
+    admission = Process.whereis(Invoke.admission(Invoke))
+    helper = Process.whereis(DeviceSupervisor.helper())
+    assert is_pid(admission) and is_pid(helper)
+
+    ref = Process.monitor(helper)
+    Process.exit(helper, :kill)
+    assert_receive {:DOWN, ^ref, :process, ^helper, :killed}
+
+    HomeMove.await(fn ->
+      case Process.whereis(Relay) do
+        pid when is_pid(pid) -> if Process.whereis(DeviceSupervisor.helper()) != helper, do: pid
+        nil -> nil
+      end
+    end)
+
+    assert Process.whereis(Invoke.admission(Invoke)) == admission
   end
 
   test "no device tree is running: there is nothing to start a move back under", %{root: root} do

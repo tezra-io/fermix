@@ -299,6 +299,95 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
     end
   end
 
+  # M97 §3.1, §7.5: Add a computer's code and the computer added.
+  describe "adding a computer" do
+    test "the code and the computer added are printed, each matched whole" do
+      code = %{"code" => "fxenroll1.invented", "expires_at" => "2031-05-04T10:30:00Z"}
+
+      assert [intro, "  fxenroll1.invented"] = Render.result(code)
+      assert intro =~ "works once, until 2031-05-04T10:30:00Z"
+
+      added = %{"device_id" => "7e1f0c2a-3b4d-4e5f-8a6b-7c8d9e0f1a2b", "name" => "loft-linux"}
+      assert Render.result(added) == ["loft-linux is now a computer of your Fermix."]
+
+      for bad <- [Map.put(code, "name", "loft-linux"), Map.put(added, "code", "fxenroll1.x")] do
+        error = assert_raise ArgumentError, fn -> Render.result(bad) end
+        refute error.message =~ "fxenroll1"
+      end
+    end
+
+    test "add-computer prints the code the server opened, once", ctx do
+      server = golden_summary("home_status_server")
+      add = Enum.find(server["detail"]["actions"], &(&1["id"] == "add_computer"))
+      result = %{"code" => "fxenroll1.invented", "expires_at" => "2031-05-04T10:30:00Z"}
+
+      act = fn params ->
+        assert params == %{"action" => "add_computer", "key" => add["key"]}
+        {:ok, %{"summary" => server, "result" => result}}
+      end
+
+      client = script([hello(), {"home.status", {:ok, status(server)}}, {"home.act", act}])
+      assert {0, out, _err} = run(["add-computer"], ctx, client)
+      assert out =~ "  fxenroll1.invented\n"
+    end
+
+    test "approve-computer takes the digits from --sas, never a prompt", ctx do
+      asking = golden_summary("home_status_server_asking")
+      joined = golden_summary("home_status_server_joined")
+      %{"id" => "approve_computer", "key" => key, "needs" => ["sas"]} = asking["action"]
+      client = script([hello(), {"home.status", {:ok, status(asking)}}])
+
+      {2, "", err} = run(["approve-computer"], ctx, client)
+      assert err =~ "pass --sas DIGITS"
+      refute_act()
+
+      act = fn params ->
+        assert params == %{
+                 "action" => "approve_computer",
+                 "key" => key,
+                 "input" => %{"sas" => "482 913"}
+               }
+
+        added = %{"device_id" => "7e1f0c2a-3b4d-4e5f-8a6b-7c8d9e0f1a2b", "name" => "loft-linux"}
+        {:ok, %{"summary" => joined, "result" => added}}
+      end
+
+      client = script([hello(), {"home.status", {:ok, status(asking)}}, {"home.act", act}])
+      assert {0, out, _err} = run(["approve-computer", "--sas", "482 913"], ctx, client)
+      assert out =~ "loft-linux is now a computer of your Fermix."
+    end
+
+    test "deny-computer sends the step beside it, asking nothing", ctx do
+      asking = golden_summary("home_status_server_asking")
+      [deny | _more] = asking["detail"]["alternatives"]
+
+      act = fn params ->
+        assert params == %{"action" => "deny_computer", "key" => deny["key"]}
+        {:ok, %{"summary" => golden_summary("home_status_server"), "result" => nil}}
+      end
+
+      client = script([hello(), {"home.status", {:ok, status(asking)}}, {"home.act", act}])
+      assert {0, _out, _err} = run(["deny-computer"], ctx, client)
+    end
+
+    test "on a terminal the digits are asked for, as the new computer shows them", ctx do
+      asking = golden_summary("home_status_server_asking")
+      joined = golden_summary("home_status_server_joined")
+
+      act = fn params ->
+        assert params["input"] == %{"sas" => "482913"}
+        added = %{"device_id" => "7e1f0c2a-3b4d-4e5f-8a6b-7c8d9e0f1a2b", "name" => "loft-linux"}
+        {:ok, %{"summary" => joined, "result" => added}}
+      end
+
+      client = script([hello(), {"home.status", {:ok, status(asking)}}, {"home.act", act}])
+      {{0, out, err}, _prompts} = run_tty(["approve-computer"], ctx, client, "482913\n")
+
+      assert err =~ "The six digits the new computer shows: "
+      assert out =~ "loft-linux is now a computer of your Fermix."
+    end
+  end
+
   describe "one step without a terminal" do
     test "a confirm needs --yes, and refuses with its own sentence otherwise", ctx do
       ready = golden_summary("home_status_ready")

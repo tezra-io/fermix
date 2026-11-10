@@ -13,6 +13,9 @@ defmodule FermixCore.Computers do
   computer offers what its session said, nothing before its first
   `offers`; one that is away is listed with the offers it last said, so the
   model can say it is away rather than guess. Nothing is ever inferred.
+  Each stands against this engine's version by the one it last said
+  (`Computers.Versions`, §3.4); one past the window (`:settings_only`)
+  offers nothing until it updates, whatever it said.
 
   Off the primary there are none: a computer's own list lives on its server.
 
@@ -24,15 +27,19 @@ defmodule FermixCore.Computers do
   Seams in `opts`: `:role` (the engine role, `Home.Role.booted/0`'s), `:rows`
   (0-arity, in place of the link's), `:live` (the Registry's live map),
   `:home`, `:records` (the records map), `:server_name`, `:link` (the link
-  module), `:always_on` (boolean), `:host_facts`, `:personalization`.
+  module), `:always_on` (boolean), `:host_facts`, `:personalization`,
+  `:version` (this engine's, `BuildInfo.product_version/0`).
   """
 
   require Logger
 
+  alias FermixCore.BuildInfo
   alias FermixCore.Computers.Computer
+  alias FermixCore.Computers.Invocation
   alias FermixCore.Computers.Prompt
   alias FermixCore.Computers.Registry
   alias FermixCore.Computers.Store
+  alias FermixCore.Computers.Versions
   alias FermixCore.Home.AlwaysOnRelease
   alias FermixCore.Home.ComputerName
   alias FermixCore.Home.Link
@@ -104,6 +111,32 @@ defmodule FermixCore.Computers do
     end
   end
 
+  @doc """
+  Asks `computer` (a `Computer`, or its device id or name) to run `op` of
+  the capability `module` with `args`, for the turn whose loop context is
+  `context` (M97 §6.1): the caller blocks until the answer, at most the
+  deadline and 2 s more. `{:ok, outcome}` when it ran (`Outcome` `ok`),
+  else `{:error, outcome}`, whose `Outcome.sentence/2` the model reads. An
+  effect is never sent twice by the link (`Computers.Invocation`).
+
+  `opts`: `:deadline_ms` (30 s by default, 0 only for a long-lived op),
+  `:part` (bytes, or `{bytes, mime}`, uploaded with the request) and
+  `:on_part` (1-arity, told `%{received_bytes, size_bytes}` as the answer's
+  part arrives), and `Computers.Invocation`'s seams.
+  """
+  @spec call(Computer.t() | String.t(), module(), String.t(), map(), map(), keyword()) ::
+          {:ok, FermixCore.Computers.Outcome.t()} | {:error, FermixCore.Computers.Outcome.t()}
+  def call(computer, module, op, args, context, opts \\ []),
+    do: Invocation.call(computer, module, op, args, context, opts)
+
+  @doc """
+  Cancels the invocation `id` (`invoke_cancel`): its caller hears the
+  computer's answer, `cancelled` or the outcome it reached first.
+  """
+  @spec cancel(String.t(), keyword()) :: :ok | {:error, :not_found | term()}
+  def cancel(id, opts \\ []) when is_binary(id) and is_list(opts),
+    do: Invocation.cancel(id, opts)
+
   @doc "Every sentence a rename refusal says, for the copy rules."
   @spec sentences() :: [String.t()]
   def sentences do
@@ -122,9 +155,11 @@ defmodule FermixCore.Computers do
   defp joined({:ok, rows}, opts) do
     live = Keyword.get_lazy(opts, :live, fn -> Registry.live() end)
     records = records(opts)
+    version = Keyword.get_lazy(opts, :version, &BuildInfo.product_version/0)
 
     rows
     |> Enum.map(&computer(&1, live[&1.device_id], Map.get(records, &1.device_id, %{})))
+    |> Enum.map(&stand(&1, version))
     |> Enum.sort_by(&String.downcase(&1.name))
   end
 
@@ -148,6 +183,17 @@ defmodule FermixCore.Computers do
       offers: offers(row.connected, live, record),
       backups: row.backups != false
     }
+  end
+
+  # Where the computer stands against this engine (M97 §3.4); one past the
+  # window offers nothing until it updates.
+  defp stand(%Computer{engine_version: nil} = computer, _version), do: computer
+
+  defp stand(%Computer{engine_version: theirs} = computer, version) do
+    case Versions.standing(theirs, version) do
+      :settings_only -> %{computer | standing: :settings_only, offers: []}
+      standing -> %{computer | standing: standing}
+    end
   end
 
   # A session's own offers while it is up; the last ones said while it is

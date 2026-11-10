@@ -7,7 +7,8 @@ defmodule FermixChannels.Home.Link do
   `forward/1` and `status/0`'s `primary` by the desktop relay (device role),
   `status/0`'s `desktops` by the primary's desktop peers
   (`FermixChannels.Desktop.Peer`), and `open_enrollment/1`,
-  `withdraw_enrollment/0`, `forget_candidate/1` and `status/0`'s
+  `withdraw_enrollment/0`, `open_join/0`, `approve_join/1`, `deny_join/0`,
+  `forget_candidate/1` and `status/0`'s
   `enrollment` by the enrollment window, `drop_desktop_row/2` and
   `home_desktops/1` by the device store of the home they name, read from its
   file, and `start_return/1` and `stop_return/0` by the device tree
@@ -47,6 +48,26 @@ defmodule FermixChannels.Home.Link do
     if Process.whereis(Enrollment),
       do: Enrollment.open(Enrollment, returning),
       else: {:error, {:unavailable, "Fermix cannot open a code here right now."}}
+  end
+
+  @impl true
+  def open_join do
+    if Process.whereis(Enrollment),
+      do: Enrollment.open(Enrollment, nil, :computer),
+      else: {:error, {:unavailable, "Fermix cannot open a code here right now."}}
+  end
+
+  # The window that holds the computer is the primary's alone.
+  @impl true
+  def approve_join(sas) when is_binary(sas) do
+    if Process.whereis(Enrollment),
+      do: Enrollment.approve(Enrollment, sas),
+      else: {:error, :none}
+  end
+
+  @impl true
+  def deny_join do
+    if Process.whereis(Enrollment), do: Enrollment.deny(Enrollment), else: :ok
   end
 
   # No window runs outside the primary, so there is none to close.

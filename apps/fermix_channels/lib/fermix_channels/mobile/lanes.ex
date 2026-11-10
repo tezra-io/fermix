@@ -25,8 +25,9 @@ defmodule FermixChannels.Mobile.Lanes do
   a second connection.
 
   `event_part` is no event of its own: a run carries one event whole, in that
-  event's lane, and is never split. The `invoke_*` events are named here
-  before any session sends them (M97 §6), so they cannot ship without a lane.
+  event's lane, and is never split. A header field that decides a lane is
+  one the codec requires of that event (`Mobile.PeerEvents`, M97 §6.1), so
+  no frame the codec takes is without a lane; the table's test holds both.
   An event the table does not name has no lane (`{:error, {:no_lane,
   type}}`), and every event the codec knows has one, which its test holds.
 
@@ -70,7 +71,7 @@ defmodule FermixChannels.Mobile.Lanes do
     approval approval_resolved link_preview notice
     companion_open companion_line companion_close manage manage_result
     loopback_open loopback_request loopback_response loopback_close loopback_failed
-    enroll_request enroll_accepted
+    enroll_request enroll_accepted join_request join_approved join_denied
     invoke_cancel invoke_result invoke_status
     offers link_path
   )

@@ -101,7 +101,9 @@ List the catalog, install, enable, disable and sign in to plugins.
 Pair a mobile companion device.
 .TP
 .B fermix devices
-List and revoke paired mobile devices.
+List and revoke paired mobile devices, and remove a computer of your Fermix
+(\fBrevoke\fR \fIID\fR; \fB\-\-yes\fR for the one computer that keeps
+the only copies of your server's backups).
 .TP
 .B fermix settings
 Show and change the running service's settings from a terminal, with no
@@ -155,7 +157,7 @@ it under the recovery passphrase, the engine then restarts in the device role
 and carries the move out, and \fBstatus\fR shows where it stands.
 .TP
 .B fermix always-on
-.RI "[--json] | " ACTION " [--recovery-passphrase-file " PATH "] [--yes] [--wait] [--json]"
+.RI "[--json] | " ACTION " [--recovery-passphrase-file " PATH "] [--sas " DIGITS "] [--yes] [--wait] [--json]"
 Set up Always On from a terminal, the same steps the setup page and the
 Fermix app offer: Fermix moves to a Linux server of your own. With no
 \fIACTION\fR it prints where Always On stands and the steps it offers; on a
@@ -166,13 +168,27 @@ by its name: \fBown\-server\fR (the command for your server, with the code
 it asks for printed once), \fBcancel\fR, \fBback\-up\-now\fR,
 \fBcheck\-again\fR, \fBmove\-now\fR, \fBtry\-again\fR,
 \fBmove\-back\fR or \fBrestore\-here\fR, while \fBlearn\-more\fR and
-\fBupdate\fR print their page. With no terminal, or with \fB\-\-json\fR,
+\fBupdate\fR print their page. \fBadd\-computer\fR prints a code that
+another computer joins your Fermix with (see \fBfermix computer\fR), once;
+when that computer asks to join, \fBapprove\-computer\fR adds it with the
+six digits it shows (\fB\-\-sas\fR, or asked on a terminal) and
+\fBdeny\-computer\fR does not. With no terminal, or with \fB\-\-json\fR,
 nothing is asked: \fB\-\-recovery\-passphrase\-file\fR reads the
 passphrase, \fB\-\-yes\fR accepts what the step asks first, and
 \fB\-\-wait\fR waits for the step to settle, exiting 1 when it ends on a
 problem or is still at it after 45 minutes. A passphrase is never taken as an
 argument. It needs Fermix running. A release build has no Always
 On yet: there it says "Always On is not in this release of Fermix yet."
+.TP
+.B fermix computer
+.RI "join " CODE
+Join this computer to a Fermix that already runs, with the code Add a
+computer opened there (\fBfermix always\-on add\-computer\fR on the
+server). Nothing moves to this computer. Run it with Fermix stopped here,
+then start Fermix: it shows six digits, and you add this computer on a
+computer already in your Fermix only if the same digits show there. A
+computer that already has a Fermix of its own is refused, and nothing is
+deleted. A release build has no Always On yet, and says so here too.
 .TP
 .B fermix logs
 Show the daemon's own log file.

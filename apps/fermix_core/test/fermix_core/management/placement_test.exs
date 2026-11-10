@@ -45,7 +45,7 @@ defmodule FermixCore.Management.PlacementTest do
   # code, are served only to a desktop's forward and refused on `daemon.sock`.
   test "the server's Always On steps are the rail's alone, refused elsewhere by name" do
     rail = ~w(home.move.readiness home.move.start home.enroll.open home.enroll.withdraw
-              home.snapshots.run)
+              home.enroll.approve home.enroll.deny home.snapshots.run)
 
     assert Enum.sort(Placement.rail_only_methods()) == Enum.sort(rail)
 
@@ -121,13 +121,14 @@ defmodule FermixCore.Management.PlacementTest do
              Placement.primary_part(unworded, "home.status")
 
     # Review M4: a server on an older protocol than this computer's, until
-    # its update takes this version, is said apart from one that is missing.
+    # its update takes a newer one, is said apart from one that is missing.
+    # M97 §3.4: the server leads, updating once the apps carry the release.
     older = fn _request, _opts -> {:error, :daemon_too_old, %{"maximum_version" => 2}} end
 
     assert {:behind,
-            "The server runs an older Fermix than this computer. It updates to this " <>
-              "computer's version within a few minutes once every computer linked to it " <>
-              "runs it."} = Placement.primary_part(older, "home.status")
+            "The server runs an older Fermix than this computer. It updates on its own " <>
+              "once the app for each computer that keeps your backups carries the newer " <>
+              "one."} = Placement.primary_part(older, "home.status")
   end
 
   # A section named here that no build serves would place nothing.

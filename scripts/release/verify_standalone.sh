@@ -373,6 +373,150 @@ esac
 grep -Fq "delete-generic-password -a fermix -s fermix:$profile:FERMIX_PLUGIN_DISCORD" "$keychain_log" 2>/dev/null ||
   fail "plugins auth clear never ran the stand-in keychain helper, so this stage proved nothing"
 
+# ── computer join, run tree-less from this artifact ─────────────────────────
+# `fermix computer join CODE` joins this computer to a Fermix that already
+# runs. It runs with Fermix stopped and no supervision tree, and it makes this
+# computer's key in the secret store, so every keychain helper it runs has to
+# run inline: a verb that asks for a command host dies on every install, as
+# `plugins auth clear` once did. A join is part of Always On, so a release
+# refuses it in a home whose settings do not turn Always On on. It runs
+# before the migrate-to-app stage because that stage ends the script on a
+# Linux target.
+#
+# No keychain is touched. Two stand-in `security` helpers, each first on PATH
+# for its run, record what the verb asks (never the key it stores). One
+# refuses every request as a keychain that will not answer does: the verb
+# must exit 1 with its own sentence naming the keychain, and leave no join
+# and no role behind. The other answers as a fresh login Keychain does, exit
+# 44 for the item it does not hold yet, then keeps what is added and gives it
+# back: the verb must take "no such item" as a key to make, store it, read it
+# back, write `device/join.json` at mode 0600 and make the engine a device.
+# The code is one this script builds, for a server that does not exist: the
+# verb dials nothing, the next start of Fermix does.
+join_bin="$runtime_root/join-keychain-bin"
+join_refusing_bin="$runtime_root/join-refusing-keychain-bin"
+join_log="$runtime_root/join-keychain.log"
+join_item="$runtime_root/join-keychain.item"
+join_profile="fermix-verify-join-$$"
+join_out="$runtime_root/join.out"
+mkdir -p "$join_bin" "$join_refusing_bin"
+
+cat > "$join_bin/security" <<SECURITY
+#!/bin/sh
+printf '%s %s %s %s %s\n' "\$1" "\$2" "\$3" "\$4" "\$5" >> "$join_log"
+case "\$1:\$6" in
+  find-generic-password:-g)
+    if [ -f "$join_item" ]; then
+      printf 'password: "%s"\n' "\$(cat "$join_item")" >&2
+      exit 0
+    fi
+    printf 'security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain.\n' >&2
+    exit 44
+    ;;
+  add-generic-password:-w)
+    printf '%s' "\$7" > "$join_item"
+    exit 0
+    ;;
+  delete-generic-password:)
+    if [ -f "$join_item" ]; then rm -f "$join_item"; exit 0; fi
+    printf 'security: The specified item could not be found in the keychain.\n' >&2
+    exit 44
+    ;;
+  *) printf 'stand-in security: unexpected invocation: security %s\n' "\$1" >&2 ; exit 64 ;;
+esac
+SECURITY
+
+cat > "$join_refusing_bin/security" <<SECURITY
+#!/bin/sh
+printf 'refused %s\n' "\$1" >> "$join_log"
+printf 'security: SecKeychainSearchCopyNext: User interaction is not allowed.\n' >&2
+exit 51
+SECURITY
+chmod +x "$join_bin/security" "$join_refusing_bin/security"
+
+join_json='{"v":2,"purpose":"computer","secret":"WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo=","gateway_pk":"PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw=","node_id":"4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f","relays":[{"url":"https://eu1.relay.invalid/","quic_port":7842}],"relays_rev":"0123456789abcdef","name":"verify-server","expires_at":"2099-01-01T00:00:00Z"}'
+join_code="fxenroll1.$(printf '%s' "$join_json" | base64 | tr -d '\n=' | tr '+/' '-_')"
+
+# Runs the verb in the home $1 with the keychain stand-in directory $2 first
+# on PATH; its output lands in $join_out and its exit status in $join_status.
+run_join() {
+  join_status=0
+  env -u FERMIX_OPIK_ENABLED \
+    HOME="$home" \
+    FERMIX_HOME="$1" \
+    PATH="$2:/usr/bin:/bin:/usr/sbin:/sbin" \
+    "$artifact" computer join "$join_code" < /dev/null > "$join_out" 2>&1 || join_status=$?
+  cat "$join_out"
+  # Named before any other verdict, so the message is precise when this
+  # class comes back.
+  ! grep -Fq "command host supervisor" "$join_out" ||
+    fail "computer join ran its keychain helper under a command host this tree-less verb does not have"
+}
+
+join_settings() {
+  mkdir -m 700 "$1"
+  printf '[fermix_core]\nprofile = "%s"\n%s' "$join_profile" "$2" > "$1/config.toml"
+  chmod 600 "$1/config.toml"
+}
+
+# A release without the switch refuses before it asks the keychain anything.
+join_gated_home="$runtime_root/join-gated-home"
+join_settings "$join_gated_home" ""
+run_join "$join_gated_home" "$join_bin"
+[ "$join_status" -eq 1 ] ||
+  fail "computer join in a home without Always On must exit 1, got $join_status"
+grep -Fq "fermix computer join: Always On is not in this release of Fermix yet." "$join_out" ||
+  fail "computer join in a home without Always On did not say so"
+[ ! -e "$join_log" ] && [ ! -e "$join_gated_home/device" ] ||
+  fail "computer join in a home without Always On reached the keychain or wrote a join"
+
+join_switch='
+[fermix_core.always_on]
+enabled = true
+'
+
+# A keychain that will not answer: refused by name, and nothing is left.
+join_refused_home="$runtime_root/join-refused-home"
+join_settings "$join_refused_home" "$join_switch"
+join_refused_settings="$(cat "$join_refused_home/config.toml")"
+run_join "$join_refused_home" "$join_refusing_bin"
+[ "$join_status" -eq 1 ] ||
+  fail "computer join with a keychain that will not answer must exit 1, got $join_status"
+grep -Fq "fermix computer join: Fermix could not use this computer's key: the keychain refused the request." "$join_out" ||
+  fail "computer join did not name the keychain that refused it"
+grep -Fq "refused find-generic-password" "$join_log" 2>/dev/null ||
+  fail "computer join never asked the refusing keychain stand-in, so this stage proved nothing"
+[ ! -e "$join_refused_home/device/join.json" ] ||
+  fail "computer join left a join behind after the keychain refused it"
+[ "$(cat "$join_refused_home/config.toml")" = "$join_refused_settings" ] ||
+  fail "computer join changed the settings of a home whose keychain refused it: $(cat "$join_refused_home/config.toml")"
+
+# A fresh keychain: the key is made, stored and read back, and the join waits
+# for the next start of Fermix.
+join_home="$runtime_root/join-home"
+join_settings "$join_home" "$join_switch"
+run_join "$join_home" "$join_bin"
+[ "$join_status" -eq 0 ] ||
+  fail "computer join must exit 0 in the throwaway world, got $join_status"
+grep -Fq "This computer joins your Fermix on verify-server when Fermix starts here." "$join_out" ||
+  fail "computer join did not say that the join waits for the next start of Fermix"
+join_service="fermix:$join_profile:device:desktop_key"
+grep -Fq "find-generic-password -a fermix -s $join_service" "$join_log" &&
+  grep -Fq "add-generic-password -a fermix -s $join_service" "$join_log" ||
+  fail "computer join never stored its key through the stand-in keychain helper, so this stage proved nothing"
+[ -s "$join_item" ] ||
+  fail "computer join stored no key in the stand-in keychain"
+[ -f "$join_home/device/join.json" ] ||
+  fail "computer join wrote no join for the next start of Fermix"
+case "$(ls -l "$join_home/device/join.json")" in
+  -rw-------*) ;;
+  *) fail "computer join wrote its join readable by others: $(ls -l "$join_home/device/join.json")" ;;
+esac
+! grep -Fq "$(cat "$join_item")" "$join_home/device/join.json" ||
+  fail "computer join wrote this computer's private key into its join"
+grep -Eq '^role = "device"$' "$join_home/config.toml" ||
+  fail "computer join did not make the engine a device: $(cat "$join_home/config.toml")"
+
 # ── auth logout, run tree-less from this artifact ───────────────────────────
 # `fermix auth logout` runs without the supervision tree. It takes the two
 # cross-VM lockfiles beside auth.json (the profile lock, then the store lock),

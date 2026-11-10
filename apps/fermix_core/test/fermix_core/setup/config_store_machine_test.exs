@@ -172,6 +172,22 @@ defmodule FermixCore.Setup.ConfigStoreMachineTest do
       refute Keyword.has_key?(Keyword.fetch!(loaded.fermix_core, :plugins), :dev_local)
       assert Keyword.fetch!(loaded.fermix_core, :agent)[:name] == "Orchard"
     end
+
+    # Between starts a person may write one into config.toml by hand; nothing
+    # reads it there, so a reload names it (`Management.Settings.reload/1`).
+    test "names the machine settings config.toml holds, and none where it holds none", ctx do
+      assert ConfigStore.misplaced_machine_settings(ctx.home) == {:ok, []}
+
+      File.write!(Path.join(ctx.home, "config.toml"), @old_config)
+
+      assert ConfigStore.misplaced_machine_settings(ctx.home) ==
+               {:ok, ~w(sandbox fermix_core.computer_use fermix_channels.imessage
+                        fermix_core.plugins.dev_local)}
+
+      {home_only, _removed} = MachineFile.strip(@old_config)
+      File.write!(Path.join(ctx.home, "config.toml"), home_only)
+      assert ConfigStore.misplaced_machine_settings(ctx.home) == {:ok, []}
+    end
   end
 
   describe "the boot's migration" do
@@ -214,7 +230,7 @@ defmodule FermixCore.Setup.ConfigStoreMachineTest do
           assert :ok = ConfigStore.migrate_machine_file(ctx.home, server?: false)
         end)
 
-      assert log =~ "machine.toml already holds"
+      assert log =~ "which Fermix reads only from machine.toml, so they were removed from it"
       assert File.read!(MachineFile.path(ctx.home)) == own
       refute File.exists?(Path.join(ctx.home, "config.toml.tmp"))
 

@@ -1,16 +1,16 @@
 defmodule FermixCore.Management.HomeTest do
   use ExUnit.Case, async: true
 
-  alias FermixCore.Computers.Store
+  alias FermixCore.Computers.Computer
   alias FermixCore.Cues.Config, as: CuesConfig
   alias FermixCore.Home.Candidate
   alias FermixCore.Home.Candidates
   alias FermixCore.Home.DesktopLink
-  alias FermixCore.Home.EngineCeiling
   alias FermixCore.Home.EnrollmentCode
   alias FermixCore.Home.Epoch
   alias FermixCore.Home.Move
   alias FermixCore.Home.Moved
+  alias FermixCore.Home.Releases
   alias FermixCore.Home.Return
   alias FermixCore.Home.Snapshot.Capture
   alias FermixCore.Home.Snapshot.Recipient
@@ -29,6 +29,8 @@ defmodule FermixCore.Management.HomeTest do
   @desktop {:desktop, "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e"}
   @passphrase "invented-lighthouse-meridian"
   @at ~U[2031-05-04 12:00:00Z]
+  @mac_id "5b2e7c1a-9d43-4f08-b6a1-3c7e9f2d8a54"
+  @linux_id "8e4a1f6c-2b7d-4c95-a3e0-6d1b9c8f7e23"
 
   setup do
     tmp = SafeRm.make_tmp_dir!("management_home")
@@ -220,18 +222,79 @@ defmodule FermixCore.Management.HomeTest do
       assert {:ok, %{moved_at: @at, epoch: 4}} = Return.read(home)
     end
 
-    # Design §6: the version a server's update installs, the oldest
-    # of its desktops' seen in the last 30 days, in every role.
-    test "the update ceiling is the oldest desktop's engine, or null", %{home: home} do
-      assert {:ok, %{"update_ceiling" => nil}} = route("home.status", %{}, opts(home))
+    # M97 §3.4, the server leads: an Always On server's update installs the
+    # newest release whose app is published for each system of the computers
+    # that keep its backups, read from the release table it keeps;
+    # `update_ceiling` is that release, the field every update script reads.
+    test "a server's update is the newest release its backup holders' apps carry",
+         %{home: home} do
+      table = release_table(["app 9.9.10 macos 3.1.0", "app 9.10.0 linux 1.4.0"])
+      at = ~U[2031-05-04 11:55:00Z]
+      server = [always_on_server: true, release_table: fn -> {:ok, table, at, nil} end]
 
-      :ok = seen(home, "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e", "0.18.0")
-      :ok = seen(home, "0d3f8a7e-5c21-4b9e-8f60-2a4c6e8b1d37", "0.17.1")
+      mac = computer("studio-mac", :macos, true)
+      linux = computer("loft-linux", :linux, false)
 
-      assert {:ok, %{"update_ceiling" => "0.17.1"}} = route("home.status", %{}, opts(home))
+      assert {:ok, %{"update" => update, "update_ceiling" => "9.9.10"}} =
+               route("home.status", %{}, opts(home, server ++ [computers: [mac, linux]]))
 
-      assert {:ok, %{"update_ceiling" => "0.17.1"}} =
+      assert update == %{
+               "running" => "9.9.9",
+               "eligible" => "9.9.10",
+               "held" => %{
+                 "version" => "9.10.0",
+                 "waits_for" => ["macos"],
+                 "sentence" =>
+                   "A newer Fermix is released. Your server takes it once the Mac app that " <>
+                     "carries it is published."
+               },
+               "ahead_of_apps" => false,
+               "table" => %{"read_at" => "2031-05-04T11:55:00Z", "sentence" => nil}
+             }
+
+      # A computer that keeps no backups holds nothing back.
+      assert {:ok, %{"update_ceiling" => "9.10.0"}} =
+               route("home.status", %{}, opts(home, server ++ [computers: [linux]]))
+
+      # Not a server: no update, and no ceiling.
+      assert {:ok, %{"update" => nil, "update_ceiling" => nil}} =
+               route("home.status", %{}, opts(home, computers: [mac]))
+
+      assert {:ok, %{"update" => nil, "update_ceiling" => nil}} =
                route("home.status", %{}, opts(home, engine_role: @device))
+    end
+
+    # The table fails closed: none read yet is no eligible release, with the
+    # sentence that says why, so the update installs nothing.
+    test "a server with no table read installs nothing, and says why", %{home: home} do
+      failed = fn -> {:error, "An invented failure to read the table."} end
+      server = [always_on_server: true, release_table: failed, computers: []]
+
+      assert {:ok, %{"update" => update, "update_ceiling" => nil}} =
+               route("home.status", %{}, opts(home, server))
+
+      assert %{
+               "eligible" => nil,
+               "held" => nil,
+               "ahead_of_apps" => false,
+               "table" => %{
+                 "read_at" => nil,
+                 "sentence" => "An invented failure to read the table."
+               }
+             } = update
+    end
+
+    # §3.4: a restart waits for a move, and for work in progress on a
+    # computer at most ten minutes.
+    test "the restart hold names a move, then a computer's work", %{home: home} do
+      assert {:ok, %{"restart_hold" => nil}} = route("home.status", %{}, opts(home))
+
+      work = fn -> [%{started_at: DateTime.add(@at, -240, :second)}] end
+
+      assert {:ok, %{"restart_hold" => %{"reason" => "computer_work", "count" => 1} = hold}} =
+               route("home.status", %{}, opts(home, computer_work: work))
+
+      assert hold["wait_s"] == 360
     end
 
     # Always On's inbound webhooks (design, "Inbound webhooks without a public
@@ -308,23 +371,6 @@ defmodule FermixCore.Management.HomeTest do
                  "note" => "Tailscale prints the address this gives." <> _rest
                }
              ] = webhooks["mounts"]
-    end
-
-    test "an update ceiling that cannot be read is null, and the log says why", %{home: home} do
-      :ok = seen(home, "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e", "0.18.0")
-
-      File.write!(
-        Path.join(EngineCeiling.dir(home), "0d3f8a7e-5c21-4b9e-8f60-2a4c6e8b1d37.json"),
-        "{"
-      )
-
-      log =
-        ExUnit.CaptureLog.capture_log(fn ->
-          assert {:ok, %{"update_ceiling" => nil}} =
-                   route("home.status", %{}, opts(home, unreadable_files: nil))
-        end)
-
-      assert log =~ "computers could not be read"
     end
 
     test "the next run and a run in progress come from a running scheduler",
@@ -548,6 +594,41 @@ defmodule FermixCore.Management.HomeTest do
       assert status["summary"]["detail"]["kind"] == "update"
       assert status["primary_home"] == nil
       assert status["primary_missing"] =~ "newer Fermix"
+    end
+
+    # M97 §3.4: a desktop stands against its server's version by
+    # major.minor: past the window it keeps settings alone and is asked to
+    # update; a newer server inside it takes Move back's place with Update.
+    test "a desktop reads where it stands against its server's version", %{home: home} do
+      :ok = DesktopLink.write(home, desktop_link())
+      :ok = Moved.write(home, %{epoch: 4, moved_at: @at, to: "invented-vm"})
+
+      status_with = fn server_version ->
+        part = %{"role" => "primary", "version" => server_version, "snapshots" => %{}}
+
+        {:ok, status} =
+          route(
+            "home.status",
+            %{},
+            opts(home,
+              engine_role: @device,
+              link_status: link(primary: primary(nil)),
+              restarts_itself: true
+            )
+            |> Keyword.put(:primary_forward, fn _request, _opts -> {:ok, part} end)
+          )
+
+        status["summary"]
+      end
+
+      assert %{"state" => "problem", "detail" => %{"kind" => "update"}} = status_with.("9.12.0")
+
+      inside = status_with.("9.10.1")
+      assert inside["state"] == "on"
+      assert "update" in Enum.map(inside["detail"]["actions"], & &1["id"])
+      refute "move_back" in Enum.map(inside["detail"]["actions"], & &1["id"])
+
+      assert "move_back" in Enum.map(status_with.("9.9.0")["detail"]["actions"], & &1["id"])
     end
 
     # Review M4: a desktop that updated first meets a server on an older
@@ -1131,7 +1212,10 @@ defmodule FermixCore.Management.HomeTest do
           # An Always On server's primary, unless a test says otherwise (D18).
           snapshot_targets: Scheduler.targets(:server),
           # The live channel and cue settings are global: a home here serves none.
-          webhook_settings: fn -> %{whatsapp: [], cues: [], web_port: 4030} end
+          webhook_settings: fn -> %{whatsapp: [], cues: [], web_port: 4030} end,
+          # This engine's version, which a desktop's server stands against
+          # (M97 §3.4): the servers here run 9.9.8 and 9.9.9.
+          version: "9.9.9"
         ],
         extra
       )
@@ -1164,7 +1248,22 @@ defmodule FermixCore.Management.HomeTest do
     name
   end
 
-  # The engine version a computer's hello said (M97: the computers' records).
-  defp seen(home, device_id, version),
-    do: Store.record(home, device_id, %{engine_version: version, seen_at: @at})
+  # A release table pinning 9.9.9, 9.9.10 and 9.10.0, with `rows` after.
+  defp release_table(rows) do
+    digests =
+      for version <- ["9.9.9", "9.9.10", "9.10.0"],
+          do: "#{version} #{String.duplicate("d", 64)} fermix_always_on.sh"
+
+    text = Enum.join(["format 1", "latest 9.10.0"] ++ digests ++ rows, "\n") <> "\n"
+    {:ok, table} = Releases.parse(text)
+    table
+  end
+
+  defp computer(name, platform, backups),
+    do: %Computer{
+      device_id: if(platform == :macos, do: @mac_id, else: @linux_id),
+      name: name,
+      platform: platform,
+      backups: backups
+    }
 end

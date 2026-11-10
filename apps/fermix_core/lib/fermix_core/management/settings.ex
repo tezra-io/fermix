@@ -42,6 +42,7 @@ defmodule FermixCore.Management.Settings do
   alias FermixCore.Readiness
   alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Setup.ConfigStore
+  alias FermixCore.Setup.MachineFile
   alias FermixCore.Setup.RestartState
   alias FermixCore.Setup.Wizard
 
@@ -193,7 +194,8 @@ defmodule FermixCore.Management.Settings do
 
     for sentence <-
           phone_switch(before, current, opts) ++
-            reach_switch(before, current, opts) ++ accessories_switch(before, current, opts),
+            reach_switch(before, current, opts) ++
+            accessories_switch(before, current, opts) ++ misplaced_machine_settings(),
         do: Logger.warning("settings reload: #{sentence}")
 
     {:ok,
@@ -203,6 +205,17 @@ defmodule FermixCore.Management.Settings do
        "readiness" => readiness(),
        "config_state" => config_state_word()
      }}
+  end
+
+  # This computer's own settings are read from machine.toml alone (M97 §4),
+  # and the outside-edit check compares both files joined, so one written into
+  # config.toml by hand would be ignored without a word: the reload names it.
+  defp misplaced_machine_settings do
+    case ConfigStore.misplaced_machine_settings(ConfigStore.fermix_home()) do
+      {:ok, []} -> []
+      {:ok, names} -> [MachineFile.misplaced_notice(names)]
+      {:error, reason} -> ["config.toml could not be read again: #{inspect(reason)}"]
+    end
   end
 
   defp config_state_word do

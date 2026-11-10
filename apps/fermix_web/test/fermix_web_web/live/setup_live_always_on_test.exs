@@ -156,7 +156,7 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
 
     # The server's summary offers nothing to press, and the tab names none of
     # the engine's own words for the move.
-    test "on the server: the summary's one sentence, and nothing to press", %{
+    test "on the server: the summary's one sentence, and Add a computer alone to press", %{
       conn: conn,
       home: home,
       link: link
@@ -171,7 +171,8 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
       html = open!(conn)
 
       assert text(html, "#always-on-sentence") == "Fermix runs here."
-      assert actions(html, "#always-on-pane") == []
+      assert actions(html, "#always-on-pane") == ["always_on_press"]
+      assert html =~ ~s(phx-value-id="add_computer")
 
       for word <- ["Epoch", "primary", "invented-new-vm", "Studio Mac", "passphrase", "code"] do
         refute text(html, "#always-on-pane") =~ word, "the tab shows #{word}"
@@ -278,6 +279,13 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
 
       assert Code.from_result(nil) == nil
       assert Code.from_result(%{"move_id" => "mv-0001"}) == nil
+
+      # M97 §3.1, §7.5: Add a computer's code has no command of its own, and
+      # the computer added is named by the screen after it.
+      assert %Code{code: @manual_code, command: nil, tailscale: nil} =
+               Code.from_result(Map.take(code, ["code", "expires_at"]))
+
+      assert Code.from_result(%{"device_id" => @desktop_id, "name" => "loft-linux"}) == nil
 
       for bad <- [
             Map.delete(code, "tailscale"),
@@ -695,6 +703,52 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
       settle_jobs!(seams)
     end
 
+    # M97 §3.1, §7.5: the owner adds a computer from a linked computer's page.
+    test "linked: Add a computer shows the server's code once, with no command", %{
+      conn: conn,
+      seams: seams
+    } do
+      linked!(seams)
+      {view, _html} = open_view!(conn, "/setup")
+
+      press(view, "add_computer")
+      html = settle!(view)
+
+      assert_received {:forwarded, "home.enroll.open", %{"purpose" => "computer"}}
+      assert text(html, "#always-on-code") =~ "On the new computer, connect to a Fermix"
+      assert text(html, "#always-on-code-text") == return_code()
+      assert text(html, "#always-on-code") =~ "Sunday, May 4, 2031 at 12:30 PM UTC"
+      refute html =~ ~s(id="always-on-code-command")
+      refute view.pid |> :sys.get_state() |> inspect(limit: :infinity) =~ return_code()
+    end
+
+    test "linked: a computer that asks is added with the digits typed, or not added", %{
+      conn: conn,
+      seams: seams
+    } do
+      asking!(seams)
+      {view, html} = open_view!(conn, "/setup")
+
+      assert text(html, "#always-on-sentence") ==
+               "A computer named loft-linux (Linux) asks to join your Fermix. Add it only " <>
+                 "if it shows 482 913."
+
+      html = press(view, "approve_computer")
+      assert html =~ ~s(name="always_on_step[sas]")
+
+      # Anything but six digits is the page's error line, and nothing is sent.
+      html = submit!(view, %{"sas" => "4829"})
+      assert text(html, "#always-on-step") =~ "Type the six digits the new computer shows."
+      refute_received {:forwarded, "home.enroll.approve", _params}
+
+      submit!(view, %{"sas" => "482 913"})
+      assert_received {:forwarded, "home.enroll.approve", %{"sas" => "482913"}}
+
+      press(view, "deny_computer")
+      settle!(view)
+      assert_received {:forwarded, "home.enroll.deny", %{}}
+    end
+
     # Always On's move back is drawn as any step is: pressed from Details'
     # actions, sent to the server over the link, and this page does not
     # restart (the restart comes at the activation, and the page reconnects).
@@ -829,6 +883,11 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
   # `home.status` and the steps sent to it.
   defp linked!(seams, overrides \\ []) do
     :ok = DesktopLink.write(seams.home, desktop_link())
+    # The computer the home moved from: Move back and Restore here are its
+    # alone (M97 §3.1: a computer that joined has no marker).
+    if Moved.read(seams.home) == :absent,
+      do: :ok = Moved.write(seams.home, %{epoch: 4, moved_at: @at, to: "invented-vm"})
+
     Agent.update(seams.link, &%{&1 | primary: primary(nil)})
     test = seams.test
 
@@ -856,9 +915,41 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
 
   defp server_part("home.snapshots.run"), do: {:ok, %{"started" => true, "snapshots" => %{}}}
 
+  defp server_part("home.enroll.approve"),
+    do: {:ok, %{"device_id" => "7e1f0c2a-3b4d-4e5f-8a6b-7c8d9e0f1a2b", "name" => "loft-linux"}}
+
+  defp server_part("home.enroll.deny"), do: {:ok, %{"denied" => true}}
+
   # The copied code the server opens for this desktop to move back with.
   defp server_part("home.enroll.open"),
     do: {:ok, %{"code" => return_code(), "expires_at" => "2031-05-04T12:30:00Z"}}
+
+  # A linked desktop whose server holds a computer that asks to join.
+  defp asking!(seams) do
+    :ok = DesktopLink.write(seams.home, desktop_link())
+    Agent.update(seams.link, &%{&1 | primary: primary(nil)})
+    test = seams.test
+
+    waiting = %{
+      "state" => "awaiting_approval",
+      "expires_at" => "2031-05-04T12:30:00Z",
+      "candidate_id" => nil,
+      "purpose" => "computer",
+      "joiner" => %{"name" => "loft-linux", "platform" => "linux", "sas" => "482913"},
+      "joined" => nil
+    }
+
+    forward = fn %{method: method, params: params}, _opts ->
+      send(test, {:forwarded, method, params})
+
+      case server_part(method) do
+        {:ok, %{"role" => "primary"} = status} -> {:ok, %{status | "enrollment" => waiting}}
+        answer -> answer
+      end
+    end
+
+    put_seams(seams, [], fn -> [primary_forward: forward] end)
+  end
 
   defp return_code do
     {:ok, code} =

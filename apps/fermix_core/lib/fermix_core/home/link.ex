@@ -33,8 +33,12 @@ defmodule FermixCore.Home.Link do
   awake, and `down_at`, when that stretch began on the wall clock (both nil
   while one is up). `desktops` are the primary's desktop peers.
   `enrollment` is the primary's enrollment window: `state` `:open`, `:used` or
-  `:expired`, when it expires and the `candidate_id` that enrolled through it
-  (nil until one did); `nil` when no window is kept. `down_ms` is on the
+  `:expired`, a computer's join's `:awaiting_approval`, `:approved` or
+  `:denied` (M97 §3.1), its `purpose`, when it expires, the `candidate_id`
+  that enrolled through it (nil until one did), the `joiner` waiting for the
+  owner (`name`, `platform`, `sas`, or nil) and the computer that joined
+  through it (`joined`, its `device_id` and `name`, nil until one did);
+  `nil` when no window is kept. `down_ms` is on the
   monotonic clock, which stops while the computer sleeps
   (`home.status.summary`, M75 lean v1 §7).
   """
@@ -43,9 +47,13 @@ defmodule FermixCore.Home.Link do
           desktops: [map()],
           enrollment:
             %{
-              state: :open | :used | :expired,
-              expires_at: DateTime.t(),
-              candidate_id: String.t() | nil
+              required(:state) =>
+                :open | :used | :expired | :awaiting_approval | :approved | :denied,
+              required(:expires_at) => DateTime.t(),
+              required(:candidate_id) => String.t() | nil,
+              optional(:purpose) => :candidate | :computer,
+              optional(:joiner) => map() | nil,
+              optional(:joined) => map() | nil
             }
             | nil
         }
@@ -82,6 +90,29 @@ defmodule FermixCore.Home.Link do
   """
   @callback withdraw_enrollment() ::
               :ok | {:error, {:unavailable, String.t()}}
+
+  @doc """
+  Primary role: opens the enrollment window for a computer that joins the
+  home (M97 §3.1, Add a computer), thirty minutes, and answers its code and
+  when it expires. Refused by name while a window of the other purpose is
+  open. A refusal carries the sentence a person is shown.
+  """
+  @callback open_join() ::
+              {:ok, %{code: String.t(), expires_at: DateTime.t()}}
+              | {:error, {:unavailable, String.t()}}
+
+  @doc """
+  Primary role: the owner approves the computer waiting on the window with
+  the six digits `sas` it shows: its row is written and it is told. Digits
+  that are not its own deny it and spend the code (`:sas_mismatch`); no
+  computer waiting is `:none`.
+  """
+  @callback approve_join(String.t()) ::
+              {:ok, %{device_id: String.t(), name: String.t()}}
+              | {:error, :none | :sas_mismatch | {:unavailable, String.t()}}
+
+  @doc "Primary role: the owner denies the computer waiting on the window; none is nothing."
+  @callback deny_join() :: :ok | {:error, {:unavailable, String.t()}}
 
   @doc """
   Primary role: drops the held candidate `candidate_id` the owner forgot

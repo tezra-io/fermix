@@ -262,7 +262,17 @@ defmodule FermixOpik.Mapper do
             # closed enum and an opaque id; the request the model sent is
             # content and is never a field.
             :status,
-            :task_id
+            :task_id,
+            # An invocation on a linked computer (M97 §6.2): the computer's
+            # device id, the invocation's id, how it ended and why the computer
+            # refused it. Its run is a root on the computer's own trace, so
+            # these are the only link from the turn to it. Two ids and two
+            # closed words (atoms live, strings after replay); the target and
+            # the arguments are content and never a field.
+            :computer,
+            :invocation,
+            :invoke_status,
+            :refusal
           ])
         )
     }
@@ -531,6 +541,58 @@ defmodule FermixOpik.Mapper do
     }
     |> drop_nil()
   end
+
+  @doc """
+  The root fields of one invocation's run on a computer, from a
+  `[:fermix, :computer_invocation, :start | :complete | :error]` event (M97
+  §6.2): its metadata, its terminal word and, on `:error` alone, its
+  `error_info`. `Aggregation` opens the root with the metadata and closes it
+  with all three.
+
+  The key list mirrors the emitter's allowlist exactly
+  (`FermixCore.Computers.Telemetry`). `session_id` names the root and is not
+  repeated; `parent_session` is the server turn that asked, correlation only.
+  A bookend adds its `duration_ms` and `result_bytes`; the opener's
+  `duration_ms` is a placeholder zero and never exports. The words are read
+  alike as atoms (live) or strings (replayed), and nothing an invocation acted
+  on or answered is in any of them.
+  """
+  @spec computer_invocation_root(:start | :complete | :error, map(), map()) :: %{
+          metadata: map(),
+          status: String.t() | nil,
+          error_info: map() | nil
+        }
+  def computer_invocation_root(verb, metadata, measurements)
+      when verb in [:start, :complete, :error] and is_map(metadata) and is_map(measurements) do
+    counts =
+      if verb == :start, do: %{}, else: Map.take(measurements, [:duration_ms, :result_bytes])
+
+    status = stringify(Map.get(metadata, :status))
+
+    labels =
+      drop_nil(%{
+        parent_session: Map.get(metadata, :parent_session),
+        capability: Map.get(metadata, :capability),
+        op: Map.get(metadata, :op),
+        origin: stringify(Map.get(metadata, :origin)),
+        epoch: Map.get(metadata, :epoch),
+        refusal: stringify(Map.get(metadata, :refusal))
+      })
+
+    %{
+      metadata: Map.merge(labels, counts),
+      status: status,
+      error_info: invocation_error(verb, status)
+    }
+  end
+
+  # `failed`, `timed_out` and `unknown` close with `:error`; the status word is
+  # the whole diagnosis the event carries, and the event name alone says it
+  # failed when a row lost its word.
+  defp invocation_error(:error, status),
+    do: %{exception_type: "ComputerInvocationError", message: status || "error"}
+
+  defp invocation_error(_verb, _status), do: nil
 
   @doc """
   Build a point span from a `[:fermix, :timeout, :expired]` event — a failure

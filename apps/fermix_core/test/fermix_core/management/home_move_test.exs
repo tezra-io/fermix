@@ -161,6 +161,68 @@ defmodule FermixCore.Management.HomeMoveTest do
     end
   end
 
+  # M97 §3.1, §7.5: a computer's code, and the owner's answer to the
+  # computer that waits on it, each sent by a linked computer over the link.
+  describe "a computer's window" do
+    test "opens a computer's code for the purpose, and refuses one the method does not know",
+         ctx do
+      test = self()
+
+      seams =
+        Keyword.merge(ctx.seams,
+          open_join: fn ->
+            send(test, :join_opened)
+            {:ok, %{code: "fxenroll1.jkl", expires_at: ~U[2031-05-04 10:40:00Z]}}
+          end,
+          open_enrollment: fn _returning -> flunk("a computer's code is no candidate's") end
+        )
+
+      assert {:ok, %{"code" => "fxenroll1.jkl"}} =
+               forwarded("home.enroll.open", %{"purpose" => "computer"}, @primary, seams)
+
+      assert_received :join_opened
+
+      assert {:error, :invalid_params, %{"field" => "purpose"}} =
+               forwarded("home.enroll.open", %{"purpose" => "phone"}, @primary, seams)
+    end
+
+    test "approves with the computer's digits, typed with or without a space", ctx do
+      test = self()
+
+      seams =
+        Keyword.merge(ctx.seams,
+          approve_join: fn sas ->
+            send(test, {:approved, sas})
+
+            if sas == "482913",
+              do: {:ok, %{device_id: "7e1f0c2a-3b4d-4e5f-8a6b-7c8d9e0f1a2b", name: "loft-linux"}},
+              else: {:error, :sas_mismatch}
+          end,
+          deny_join: fn -> send(test, :denied) && :ok end
+        )
+
+      assert {:ok,
+              %{"device_id" => "7e1f0c2a-3b4d-4e5f-8a6b-7c8d9e0f1a2b", "name" => "loft-linux"}} =
+               forwarded("home.enroll.approve", %{"sas" => "482 913"}, @primary, seams)
+
+      assert_received {:approved, "482913"}
+
+      assert {:error, :invalid_params, %{"field" => "sas", "sentence" => _mismatch}} =
+               forwarded("home.enroll.approve", %{"sas" => "100200"}, @primary, seams)
+
+      assert {:error, :invalid_params, %{"field" => "sas"}} =
+               forwarded("home.enroll.approve", %{"sas" => "48291"}, @primary, seams)
+
+      refute_received {:approved, "48291"}
+
+      assert {:ok, %{"denied" => true}} = forwarded("home.enroll.deny", %{}, @primary, seams)
+      assert_received :denied
+
+      assert {:error, {:unavailable, "home", _sentence}} =
+               HomeMove.enroll_deny([engine_role: @device] ++ seams)
+    end
+  end
+
   describe "home.enroll.withdraw" do
     test "closes the window on the primary", ctx do
       test = self()

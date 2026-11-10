@@ -11,7 +11,8 @@ defmodule FermixChannels.Mobile.ProtocolTest do
     companion_open companion_line companion_close manage loopback_request loopback_failed
     snapshot_stored snapshot_refused enroll_request move_offer move_chunk move_end
     move_commit move_resume call_open call_line call_audio call_frame call_close
-    offers link_path
+    offers link_path join_request
+    invoke_open invoke_part invoke_cancel invoke_result invoke_status
   )
   @server_events ~w(
     hello_ack accepted attach_status turn_started text_delta tool_event text_done turn_done
@@ -21,6 +22,8 @@ defmodule FermixChannels.Mobile.ProtocolTest do
     companion_line companion_close manage_result loopback_open loopback_response
     loopback_close snapshot_begin snapshot_chunk snapshot_end enroll_accepted move_accept
     move_ready move_done call_attached call_line call_audio call_close
+    join_approved join_denied
+    invoke_open invoke_part invoke_cancel invoke_result invoke_status
   )
 
   # Protocol 1 never had a client, so the window is protocol 2 alone (M51 D1).

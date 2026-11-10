@@ -19,8 +19,11 @@ defmodule FermixCore.Management.Placement do
   desktop's is while its server is out of reach, with the sentence that this
   computer is no longer connected to its server. The home's recovery, enrollment and move are the primary's too
   (`home.snapshots.*`, `home.enroll.open`, `home.enroll.withdraw`,
-  `home.candidates.list`, `home.move.readiness`, `home.move.start`): after a
-  move the server holds them, and the desktop reaches them only through it.
+  `home.enroll.approve`, `home.enroll.deny`, `home.candidates.list`,
+  `home.move.readiness`, `home.move.start`): after a move the server holds
+  them, and the desktop reaches them only through it. A computer's own link
+  (M97 §3.1, §3.3: `computer.join.start`, `computer.join.cancel`,
+  `computer.disconnect`) is device-class: it is this computer's.
   Always On's steps (`home.act`) are device-class: a linked desktop takes a
   move back and Restore here itself, and its `home.act` sends the server's
   own steps over the link.
@@ -28,7 +31,8 @@ defmodule FermixCore.Management.Placement do
   **Rail-only** (`rail_only?/1`, Always On setup §3.5): the server's steps a
   linked desktop's `home.act` sends (`home.move.readiness`,
   `home.move.start`, `home.enroll.open`, `home.enroll.withdraw`,
-  `home.snapshots.run`) are served only to a desktop's forward (actor
+  `home.enroll.approve`, `home.enroll.deny`, `home.snapshots.run`) are
+  served only to a desktop's forward (actor
   `{:desktop, _}`) and
   refused on `daemon.sock` by name (`rail_only_refusal/1`): there, `home.act`
   takes the step.
@@ -63,14 +67,17 @@ defmodule FermixCore.Management.Placement do
     hello diagnostics.build logs.query setup.session.create setup.detect
     browser.install.start capabilities.install.start
     home.status settings.sections home.act
+    computer.join.start computer.join.cancel computer.disconnect
   )
   # `accessories.`: an accessory is wired to the computer that answers (M91).
-  @device_families ~w(lifecycle. doctor. computer_use. imessage. accessories.)
+  # `computer.`: this computer's own record of what its server did here
+  # (M97 §6.3); it does not match `computer_use.`.
+  @device_families ~w(lifecycle. doctor. computer_use. imessage. accessories. computer.)
   # The primary-class families whose state is the primary's memory.db, which
   # a device never opens: one with no link refuses them as retired.
   @database_families ~w(cues.)
   @rail_only_methods ~w(home.move.readiness home.move.start home.enroll.open home.enroll.withdraw
-                        home.snapshots.run)
+                        home.enroll.approve home.enroll.deny home.snapshots.run)
   @rail_only_sentence "Always On takes this step itself: send home.act with the action the " <>
                         "summary offers."
   # Answered on this machine with the primary's own answer added (M75: a
@@ -94,9 +101,9 @@ defmodule FermixCore.Management.Placement do
                            "server does not answer it."
   @too_old_sentence "The server runs a newer Fermix than this computer can talk to, so " <>
                       "update Fermix on this computer."
-  @behind_sentence "The server runs an older Fermix than this computer. It updates to this " <>
-                     "computer's version within a few minutes once every computer linked to " <>
-                     "it runs it."
+  @behind_sentence "The server runs an older Fermix than this computer. It updates on its " <>
+                     "own once the app for each computer that keeps your backups carries the " <>
+                     "newer one."
 
   # How long a desktop waits for the primary's answer to a forwarded request:
   # well inside the apps' 10 s call timeout, except the two calls that walk the
@@ -156,9 +163,9 @@ defmodule FermixCore.Management.Placement do
   `{:too_old, sentence}` when the primary refused this engine's protocol as
   too old (`client_too_old`), so the summary asks for an update, and
   `{:behind, sentence}` when it refused it as newer than its own
-  (`daemon_too_old`: this computer updated first, and the server's update
-  takes its version within a few minutes once every computer linked to it
-  runs it), so the summary says so.
+  (`daemon_too_old`: this computer updated first, and the server updates on
+  its own once the app for each computer that keeps the backups carries the
+  newer release, M97 §3.4), so the summary says so.
   """
   @spec primary_part((Protocol.request(), keyword() -> Protocol.route_result()), String.t()) ::
           {:ok, map()} | {:missing, String.t()} | {:too_old, String.t()} | {:behind, String.t()}

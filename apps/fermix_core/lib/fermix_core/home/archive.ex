@@ -45,7 +45,8 @@ defmodule FermixCore.Home.Archive do
   **A newer engine's home is refused.** The manifest names the engine that
   wrote it; a restore by an older engine refuses it by name
   (`{:newer_engine, theirs, ours}`) before it writes anything, since the home
-  may hold settings and data this engine cannot read.
+  may hold settings and data this engine cannot read (`Home.Readable`, the
+  one rule).
 
   **What does not travel as consent or history.** A restore withdraws
   coding-harness consent, moves a keyring-mode home to the file store on a host
@@ -71,6 +72,7 @@ defmodule FermixCore.Home.Archive do
   alias FermixCore.Home.DeviceLocal
   alias FermixCore.Home.Epoch
   alias FermixCore.Home.Moved
+  alias FermixCore.Home.Readable
   alias FermixCore.Setup.SecretWriter
 
   require Logger
@@ -215,7 +217,7 @@ defmodule FermixCore.Home.Archive do
       when is_map(manifest) and is_binary(root) and root_state in [:absent, :empty] and
              is_list(opts) do
     with {:ok, host} <- host(opts),
-         :ok <- not_newer(manifest.engine_version),
+         :ok <- not_newer(manifest),
          {:ok, epoch} <- next_epoch(manifest.primary_epoch),
          {:ok, source, settled} <- settle_config(source, manifest, root, host, opts),
          {:ok, reinstall} <- plugins_to_reinstall(source, manifest, host),
@@ -790,22 +792,10 @@ defmodule FermixCore.Home.Archive do
   defp installed_names({:ok, %{} = installed}), do: {:ok, installed |> Map.keys() |> Enum.sort()}
   defp installed_names(other), do: {:error, {:plugin_lockfile, other}}
 
-  # A home a newer engine wrote may carry settings and data this engine does
-  # not know, so it is refused by name rather than run half-understood; an
-  # engine version that does not parse is refused the same way.
-  defp not_newer(version) do
-    ours = BuildInfo.product_version()
-
-    case Version.parse(version) do
-      {:ok, theirs} ->
-        if Version.compare(theirs, Version.parse!(ours)) == :gt,
-          do: {:error, {:newer_engine, version, ours}},
-          else: :ok
-
-      :error ->
-        {:error, {:newer_engine, version, ours}}
-    end
-  end
+  # A home a newer engine wrote is refused by name (`Home.Readable`, the one
+  # rule a restore, a move's review and Always On's screen share).
+  defp not_newer(%{engine_version: _theirs} = manifest),
+    do: Readable.readable?(manifest, BuildInfo.product_version())
 
   defp next_epoch(epoch) do
     if epoch + 1 <= Epoch.max_epoch(), do: {:ok, epoch + 1}, else: {:error, :epoch_overflow}

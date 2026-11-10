@@ -52,6 +52,28 @@ defmodule FermixChannels.Home.Enrollment do
   (`FermixCore.Home.StatusWatch`, `:enrollment`): the summary an app draws
   reads the window (companion protocol 6).
 
+  **A computer's join** (M97 §3.1, §7.5). A window opened with the purpose
+  `:computer` (`open/3`) takes a computer that joins the home instead of a
+  candidate: its code is version 2 (`EnrollmentCode`), and only one window
+  is held, so opening a code of the other purpose while one is open (open,
+  or a computer waiting for the owner) is refused by name and the open
+  window stays; one of the same purpose replaces it, as before, and a
+  computer waiting on the one replaced is told `cancelled`. The joining
+  computer's `join_request` burns the window as an enrollment does and
+  waits (`join/5`): the responder holds the session with the six digits it
+  derived from the handshake under the computer label (`Mobile.Noise.sas/2`)
+  until the owner approves with those digits (`approve/2`), denies
+  (`deny/1`), cancels the code, the session ends (`device_disconnected`) or
+  the window's half hour runs out (`timeout`). Approval writes the
+  computer's row (`kind: :desktop`, its `platform`, `backups: false`, a name
+  no other row holds, compared without case, suffixed " 2" and on where it
+  must) and answers the responder `{:join_approved, payload}`; anything else
+  answers `{:join_denied, reason}` and writes nothing. Digits that are not
+  the computer's deny it too. The code is spent either way, and the window
+  keeps how it ended (`approved` with the computer's device id, or
+  `denied`): an answer that was lost reaches the same computer again (its
+  Noise key) while the window lasts.
+
   A code needs the rail ready: one asleep (no phone paired yet) or starting
   is woken and waited for, up to 10 s (`Iroh.Helper.await_ready/2`), so the
   first code after a start is no refusal; a rail still starting then is
@@ -64,7 +86,8 @@ defmodule FermixChannels.Home.Enrollment do
   stand-in for the expiry),
   `:host_name`, `:identity` (a 1-arity loader answering the gateway's public
   key for a home), `:status_changed` (a 0-arity call in place of telling the
-  Always On watch).
+  Always On watch), `:hints` (0-arity, this endpoint's direct address hints,
+  as `Iroh.Helper.hints/1`).
   """
 
   use GenServer
@@ -77,7 +100,9 @@ defmodule FermixChannels.Home.Enrollment do
   alias FermixChannels.Mobile.Iroh.Relays
   alias FermixCore.Home.Candidates
   alias FermixCore.Home.ComputerName
+  alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.EnrollmentCode
+  alias FermixCore.Home.Epoch
   alias FermixCore.Home.StatusWatch
   alias FermixCore.Setup.ConfigStore
 
@@ -91,11 +116,26 @@ defmodule FermixChannels.Home.Enrollment do
                         "if remote reach still does not start."
   @file_name "enrollment.json"
   @file_mode 0o600
+  @purposes [:candidate, :computer]
+  # How a computer's join ends without approval (`join_denied`'s `reason`).
+  @denials ~w(denied timeout cancelled device_disconnected)
+  # The rows a computer's name is kept apart from: every one the store holds.
+  @max_name_suffix 99
+  @other_open_sentences %{
+    candidate:
+      "A code for a new computer is open. Use it, or let it close in half an hour, " <>
+        "before you open the one for your own server.",
+    computer: "A code for your own server is open. Use it or cancel it before you add a computer."
+  }
 
+  @type purpose :: :candidate | :computer
   @type window_view :: %{
-          state: :open | :used | :expired,
+          state: :open | :used | :expired | :awaiting_approval | :approved | :denied,
+          purpose: purpose(),
           expires_at: DateTime.t(),
-          candidate_id: String.t() | nil
+          candidate_id: String.t() | nil,
+          joiner: %{name: String.t(), platform: String.t(), sas: String.t()} | nil,
+          joined: %{device_id: String.t(), name: String.t()} | nil
         }
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -113,7 +153,60 @@ defmodule FermixChannels.Home.Enrollment do
           | {:error, {:unavailable, String.t()}}
   def open(server \\ __MODULE__, returning \\ nil)
       when is_nil(returning) or is_binary(returning),
-      do: GenServer.call(server, {:open, returning}, 15_000)
+      do: open(server, returning, :candidate)
+
+  @doc """
+  `open/2` for `purpose`: `:candidate` (a server of the owner's own, or a
+  move back), or `:computer` (a computer that joins the home, which no move
+  back names). Refused by name while a window of the other purpose is open.
+  """
+  @spec open(GenServer.server(), String.t() | nil, purpose()) ::
+          {:ok, %{code: String.t(), expires_at: DateTime.t()}}
+          | {:error, {:unavailable, String.t()}}
+  def open(server, returning, purpose)
+      when (is_nil(returning) or is_binary(returning)) and purpose in @purposes and
+             (purpose == :candidate or is_nil(returning)),
+      do: GenServer.call(server, {:open, returning, purpose}, 15_000)
+
+  @doc "The held window's purpose, or `:none`; `:none` too when no window process runs."
+  @spec purpose(GenServer.server()) :: purpose() | :none
+  def purpose(server \\ __MODULE__) do
+    if GenServer.whereis(server), do: GenServer.call(server, :purpose), else: :none
+  catch
+    :exit, {reason, _call} when reason in [:noproc, :normal, :shutdown] -> :none
+  end
+
+  @doc """
+  A computer that proved the secret with the Noise key `noise_pk` asks to
+  join (`join_request`), showing `sas`; `responder` is told how it ends
+  (`{:join_approved, payload}` or `{:join_denied, reason}`) and watched, so
+  a session that ends while it waits denies it. Answers `{:ok,
+  :awaiting_approval}`, `{:ok, {:approved, payload}}` to the computer an
+  approval was already given (its answer was lost), or why not: `:purpose`
+  (a candidate's window), `:used`, `:expired`, `{:denied, reason}`.
+  """
+  @spec join(GenServer.server(), map(), <<_::256>>, String.t(), pid()) ::
+          {:ok, :awaiting_approval | {:approved, map()}}
+          | {:error, :purpose | :used | :expired | :none | {:denied, String.t()}}
+  def join(server \\ __MODULE__, request, <<_::256>> = noise_pk, sas, responder)
+      when is_map(request) and is_binary(sas) and is_pid(responder),
+      do: GenServer.call(server, {:join, request, noise_pk, sas, responder})
+
+  @doc """
+  The owner approves the waiting computer with the six digits `sas` it shows:
+  its row is written and it is told. Digits that are not the computer's deny
+  it (`:sas_mismatch`), and the code is spent. `{:error, :none}` when no
+  computer waits.
+  """
+  @spec approve(GenServer.server(), String.t()) ::
+          {:ok, %{device_id: String.t(), name: String.t()}}
+          | {:error, :none | :sas_mismatch | {:unavailable, String.t()}}
+  def approve(server \\ __MODULE__, sas) when is_binary(sas),
+    do: GenServer.call(server, {:approve, sas})
+
+  @doc "The owner denies the waiting computer; none waiting is nothing to deny."
+  @spec deny(GenServer.server()) :: :ok | {:error, {:unavailable, String.t()}}
+  def deny(server \\ __MODULE__), do: GenServer.call(server, :deny)
 
   @doc """
   Releases the window when the owner cancels its code: one that recorded no
@@ -197,16 +290,30 @@ defmodule FermixChannels.Home.Enrollment do
       window: load(home)
     }
 
+    helper = state.helper
+    state = Map.put(state, :hints, Keyword.get(opts, :hints, fn -> Helper.hints(helper) end))
+
     {:ok, expire_or_arm(state)}
   end
 
   @impl true
-  def handle_call({:open, returning}, _from, state) do
-    case code_facts(state) do
-      {:ok, facts} -> open_window(returning, facts, state)
+  def handle_call({:open, returning, purpose}, _from, state) do
+    with :ok <- none_other_open(state, purpose),
+         {:ok, facts} <- code_facts(state) do
+      open_window(returning, purpose, facts, cancel_joiner(state))
+    else
       {:error, sentence} -> {:reply, {:error, {:unavailable, sentence}}, state}
     end
   end
+
+  def handle_call(:purpose, _from, %{window: nil} = state), do: {:reply, :none, state}
+  def handle_call(:purpose, _from, state), do: {:reply, state.window.purpose, state}
+
+  def handle_call({:join, request, noise_pk, sas, responder}, _from, state),
+    do: join_window(request, noise_pk, sas, responder, state)
+
+  def handle_call({:approve, sas}, _from, state), do: approve_joiner(sas, state)
+  def handle_call(:deny, _from, state), do: deny_joiner("denied", :ok, state)
 
   def handle_call(:withdraw, _from, %{window: %{withdrawn?: false}} = state),
     do: withdraw_window(state)
@@ -245,9 +352,16 @@ defmodule FermixChannels.Home.Enrollment do
   def handle_call({:take, remote}, _from, state) do
     case window_state(state.window, state.clock.()) do
       :open -> keep(state, %{state.window | used?: true, used_by: remote}, :ok)
-      other -> {:reply, {:error, other}, state}
+      other -> {:reply, {:error, spent(other)}, state}
     end
   end
+
+  def handle_call(
+        {:enroll, _request, _noise_pk},
+        _from,
+        %{window: %{purpose: :computer}} = state
+      ),
+      do: {:reply, {:error, :purpose}, state}
 
   # The candidate already recorded through this window is answered as it was.
   def handle_call(
@@ -279,8 +393,11 @@ defmodule FermixChannels.Home.Enrollment do
   def handle_call(:status, _from, %{window: window} = state) do
     view = %{
       state: window_state(window, state.clock.()),
+      purpose: window.purpose,
       expires_at: window.expires_at,
-      candidate_id: window.candidate_id
+      candidate_id: window.candidate_id,
+      joiner: joiner_view(window.joiner),
+      joined: window.joined
     }
 
     {:reply, view, state}
@@ -288,32 +405,50 @@ defmodule FermixChannels.Home.Enrollment do
 
   @impl true
   def handle_info({:expire, expires_at}, %{window: %{expires_at: expires_at}} = state) do
+    {_reply, state} = deny_or_none("timeout", state)
     state = expire_or_arm(state)
     :ok = state.status_changed.()
     {:noreply, state}
   end
+
+  # The session of the computer that waits ended: it is denied, and the
+  # code is spent.
+  def handle_info(
+        {:DOWN, ref, :process, _pid, _reason},
+        %{window: %{joiner: %{monitor: ref}}} = state
+      ) do
+    {_reply, state} = deny_or_none("device_disconnected", state)
+    {:noreply, state}
+  end
+
+  def handle_info({:DOWN, _ref, :process, _pid, _reason}, state), do: {:noreply, state}
 
   # A timer of a window another replaced.
   def handle_info({:expire, _expires_at}, state), do: {:noreply, state}
 
   # -- opening ----------------------------------------------------------------
 
-  defp open_window(returning, facts, state) do
+  defp open_window(returning, purpose, facts, state) do
     now = state.clock.()
     expires_at = now |> DateTime.add(@window_s, :second) |> DateTime.truncate(:second)
     secret = :crypto.strong_rand_bytes(32)
+    code_facts = Map.merge(facts, %{secret: secret, expires_at: expires_at, purpose: purpose})
 
-    case EnrollmentCode.encode(Map.merge(facts, %{secret: secret, expires_at: expires_at})) do
+    case EnrollmentCode.encode(code_facts) do
       {:ok, code} ->
         window = %{
           withdrawn?: false,
+          purpose: purpose,
           secret: secret,
           expires_at: expires_at,
           used?: false,
           name: facts.name,
           used_by: nil,
           candidate_id: nil,
-          returning: returning
+          returning: returning,
+          joiner: nil,
+          joined: nil,
+          denied: nil
         }
 
         Logger.info("enrollment: a window is open until #{DateTime.to_iso8601(expires_at)}")
@@ -329,19 +464,222 @@ defmodule FermixChannels.Home.Enrollment do
   # Released: a window that recorded no candidate ends now (open, or used by
   # a server that never finished enrolling) and the write takes its secret off
   # the disk; one whose candidate is recorded keeps its expiry and who used it.
-  defp withdraw_window(%{window: window} = state) do
+  # A computer waiting on it is told `cancelled`.
+  defp withdraw_window(state) do
+    %{window: window} = state = cancel_joiner(state)
     now = DateTime.truncate(state.clock.(), :second)
     Logger.info("enrollment: the window was withdrawn")
 
     expires_at =
-      if window.candidate_id == nil and window_state(window, now) != :expired,
-        do: now,
-        else: window.expires_at
+      if window.candidate_id == nil and window.joined == nil and
+           window_state(window, now) not in [:expired, :denied],
+         do: now,
+         else: window.expires_at
 
     case keep(state, %{window | expires_at: expires_at, withdrawn?: true}, :ok) do
       {:reply, :ok, kept} -> {:reply, :ok, %{kept | window: %{kept.window | secret: nil}}}
       refused -> refused
     end
+  end
+
+  # One window at a time: a code of the other purpose waits until the open
+  # one is used, closes or is cancelled, and is refused by name meanwhile.
+  defp none_other_open(%{window: %{purpose: held, withdrawn?: false} = window} = state, purpose)
+       when held != purpose do
+    if window_state(window, state.clock.()) in [:open, :awaiting_approval],
+      do: {:error, Map.fetch!(@other_open_sentences, purpose)},
+      else: :ok
+  end
+
+  defp none_other_open(_state, _purpose), do: :ok
+
+  # -- a computer's join ------------------------------------------------------
+
+  defp join_window(_request, _noise_pk, _sas, _responder, %{window: nil} = state),
+    do: {:reply, {:error, :none}, state}
+
+  defp join_window(
+         _request,
+         _noise_pk,
+         _sas,
+         _responder,
+         %{window: %{purpose: :candidate}} = state
+       ),
+       do: {:reply, {:error, :purpose}, state}
+
+  defp join_window(request, noise_pk, sas, responder, %{window: window} = state) do
+    cond do
+      window.used_by != noise_pk -> {:reply, {:error, :used}, state}
+      window.joined != nil -> {:reply, approved_again(window.joined, state), state}
+      is_binary(window.denied) -> {:reply, {:error, {:denied, window.denied}}, state}
+      expired?(window, state) -> {:reply, {:error, :expired}, state}
+      true -> await_owner(request, noise_pk, sas, responder, state)
+    end
+  end
+
+  # The computer waits, in memory alone: a session that ends while it waits
+  # (an engine restart among them) denies it.
+  defp await_owner(request, noise_pk, sas, responder, %{window: window} = state) do
+    host = request["host"]
+    _forgot = forget_joiner(window.joiner)
+
+    joiner = %{
+      name: host["name"],
+      os: host["os"],
+      arch: host["arch"],
+      version: host["version"],
+      platform: request["platform"],
+      sas: sas,
+      noise_pk: noise_pk,
+      responder: responder,
+      monitor: Process.monitor(responder)
+    }
+
+    Logger.info("enrollment: a computer named #{joiner.name} waits for the owner")
+    :ok = state.status_changed.()
+    {:reply, {:ok, :awaiting_approval}, %{state | window: %{window | joiner: joiner}}}
+  end
+
+  defp approve_joiner(
+         sas,
+         %{window: %{purpose: :computer, joiner: %{sas: sas} = joiner}} = state
+       ),
+       do: add_computer(joiner, state)
+
+  defp approve_joiner(_sas, %{window: %{purpose: :computer, joiner: %{}}} = state) do
+    Logger.warning("enrollment: the owner's digits are not the computer's; it is denied")
+    {_denied, state} = deny_or_none("denied", state)
+    {:reply, {:error, :sas_mismatch}, state}
+  end
+
+  defp approve_joiner(_sas, state), do: {:reply, {:error, :none}, state}
+
+  # The payload first, so a row is written only for a computer that can be
+  # told where its server is.
+  defp add_computer(joiner, state) do
+    device_id = uuid()
+
+    with {:ok, rows} <- DeviceStore.list(state.device_store),
+         name = unique_name(joiner.name, rows),
+         {:ok, payload} <- approved_payload(device_id, name, state),
+         {:ok, _row} <-
+           DeviceStore.add(state.device_store, computer_row(joiner, device_id, name, state)) do
+      send(joiner.responder, {:join_approved, payload})
+      _forgot = forget_joiner(joiner)
+      Logger.info("enrollment: the computer #{device_id} (#{name}) joined")
+      joined = %{device_id: device_id, name: name}
+      keep(state, %{state.window | joiner: nil, joined: joined}, {:ok, joined})
+    else
+      {:error, reason} ->
+        Logger.error("enrollment: the computer could not be added: #{inspect(reason)}")
+
+        {:reply, {:error, {:unavailable, "Fermix could not add the computer; its log says why."}},
+         state}
+    end
+  end
+
+  # A computer that joins keeps no backup copies until its owner chooses it
+  # (M97 D7), and says its system.
+  defp computer_row(joiner, device_id, name, state) do
+    %{
+      device_id: device_id,
+      name: name,
+      model: "#{system(joiner.platform)} computer",
+      noise_pk: joiner.noise_pk,
+      created_at: DateTime.truncate(state.clock.(), :second),
+      kind: :desktop,
+      platform: joiner.platform,
+      backups: false
+    }
+  end
+
+  defp system("macos"), do: "macOS"
+  defp system("linux"), do: "Linux"
+
+  # The name the computer gave, unless another row holds it, compared without
+  # case: then the first of " 2", " 3" and on that none holds.
+  defp unique_name(name, rows) do
+    taken = MapSet.new(rows, &String.downcase(&1.name))
+
+    [name | Enum.map(2..@max_name_suffix, &"#{name} #{&1}")]
+    |> Enum.find(name, &(not MapSet.member?(taken, String.downcase(&1))))
+  end
+
+  # Where the computer reaches its server: this primary's route now, its
+  # epoch, and the direct address hints its endpoint listens on.
+  defp approved_payload(device_id, name, state) do
+    with {:ok, facts} <- code_facts(state),
+         {:ok, epoch} <- primary_epoch(state.home) do
+      {:ok,
+       %{
+         "device_id" => device_id,
+         "name" => name,
+         "primary_epoch" => epoch,
+         "primary" => %{
+           "name" => facts.name,
+           "node_id" => facts.node_id,
+           "relays" => facts.relays,
+           "relays_rev" => facts.relays_rev,
+           "addrs" => state.hints.() |> Enum.filter(&DesktopLink.hint?/1) |> Enum.take(8)
+         }
+       }}
+    end
+  end
+
+  defp approved_again(%{device_id: device_id, name: name}, state) do
+    case approved_payload(device_id, name, state) do
+      {:ok, payload} -> {:ok, {:approved, payload}}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp primary_epoch(home) do
+    case Epoch.read(home) do
+      {:ok, epoch} -> {:ok, epoch}
+      :absent -> {:error, :epoch_absent}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  # The owner's denial (`deny/1`), and every other ending of a wait.
+  defp deny_joiner(reason, reply, state) do
+    {_denied, state} = deny_or_none(reason, state)
+    {:reply, reply, state}
+  end
+
+  # The computer that waits is told `reason` and nothing of it is written; the
+  # window keeps the ending, and the code is spent.
+  defp deny_or_none(reason, %{window: %{joiner: %{} = joiner} = window} = state)
+       when reason in @denials do
+    send(joiner.responder, {:join_denied, reason})
+    _forgot = forget_joiner(joiner)
+    Logger.info("enrollment: the computer #{joiner.name} was not added (#{reason})")
+    {:denied, kept(state, %{window | joiner: nil, denied: reason})}
+  end
+
+  defp deny_or_none(_reason, state), do: {:none, state}
+
+  defp cancel_joiner(state), do: elem(deny_or_none("cancelled", state), 1)
+
+  defp forget_joiner(%{monitor: monitor}), do: Process.demonitor(monitor, [:flush])
+  defp forget_joiner(nil), do: true
+
+  defp joiner_view(nil), do: nil
+  defp joiner_view(joiner), do: Map.take(joiner, [:name, :platform, :sas])
+
+  defp expired?(window, state), do: DateTime.compare(state.clock.(), window.expires_at) != :lt
+
+  # A window spent any way is used to a session that is not the one it took.
+  defp spent(:expired), do: :expired
+  defp spent(_spent), do: :used
+
+  defp uuid do
+    <<a::32, b::16, c::16, d::16, e::48>> = :crypto.strong_rand_bytes(16)
+    c = Bitwise.bor(Bitwise.band(c, 0x0FFF), 0x4000)
+    d = Bitwise.bor(Bitwise.band(d, 0x3FFF), 0x8000)
+
+    [<<a::32>>, <<b::16>>, <<c::16>>, <<d::16>>, <<e::48>>]
+    |> Enum.map_join("-", &Base.encode16(&1, case: :lower))
   end
 
   defp code_facts(state) do
@@ -466,6 +804,22 @@ defmodule FermixChannels.Home.Enrollment do
     end
   end
 
+  # An ending already told is kept in memory whatever the disk says; a write
+  # that fails is said in the log, and the next start reads the window as it
+  # was written last.
+  defp kept(state, window) do
+    case write(state.home, window, state.clock.()) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error("enrollment: the window could not be kept: #{inspect(reason)}")
+    end
+
+    :ok = state.status_changed.()
+    %{state | window: window}
+  end
+
   # Written before it is answered, so the answer always describes what a
   # restart will find. A write that fails is refused by name rather than
   # answered as if it held.
@@ -490,6 +844,7 @@ defmodule FermixChannels.Home.Enrollment do
     json =
       Jason.encode!(%{
         "v" => 2,
+        "purpose" => Atom.to_string(window.purpose),
         "withdrawn" => window.withdrawn?,
         "secret" => kept_secret(window, now),
         "expires_at" => DateTime.to_iso8601(window.expires_at),
@@ -497,7 +852,9 @@ defmodule FermixChannels.Home.Enrollment do
         "name" => window.name,
         "used_by" => window.used_by && Base.encode64(window.used_by),
         "candidate_id" => window.candidate_id,
-        "returning" => window.returning
+        "returning" => window.returning,
+        "joined" => window.joined,
+        "denied" => window.denied
       })
 
     with :ok <- File.mkdir_p(Path.dirname(file)),
@@ -516,6 +873,8 @@ defmodule FermixChannels.Home.Enrollment do
   # candidate: not once its candidate is recorded, nor once it expired.
   defp kept_secret(%{secret: nil}, _now), do: nil
   defp kept_secret(%{candidate_id: id}, _now) when is_binary(id), do: nil
+  defp kept_secret(%{joined: %{}}, _now), do: nil
+  defp kept_secret(%{denied: reason}, _now) when is_binary(reason), do: nil
 
   defp kept_secret(%{secret: secret, expires_at: at}, now) do
     if DateTime.compare(now, at) == :lt, do: Base.encode64(secret), else: nil
@@ -553,17 +912,24 @@ defmodule FermixChannels.Home.Enrollment do
     with {:ok, secret} <- optional_key(secret),
          {:ok, expires_at, 0} <- DateTime.from_iso8601(at),
          {:ok, used_by} <- optional_key(map["used_by"]),
-         true <- is_nil(map["returning"]) or is_binary(map["returning"]) do
+         true <- is_nil(map["returning"]) or is_binary(map["returning"]),
+         {:ok, purpose} <- stored_purpose(map["purpose"]),
+         {:ok, joined} <- stored_joined(map["joined"]),
+         true <- is_nil(map["denied"]) or map["denied"] in @denials do
       {:ok,
        %{
          withdrawn?: withdrawn?,
+         purpose: purpose,
          secret: secret,
          expires_at: expires_at,
          used?: used?,
          name: map["name"],
          used_by: used_by,
          candidate_id: map["candidate_id"],
-         returning: map["returning"]
+         returning: map["returning"],
+         joiner: nil,
+         joined: joined,
+         denied: map["denied"]
        }}
     else
       _invalid -> {:error, :invalid_window}
@@ -571,6 +937,19 @@ defmodule FermixChannels.Home.Enrollment do
   end
 
   defp decode(_other), do: {:error, :invalid_window}
+
+  # A window written before a computer could join is a candidate's.
+  defp stored_purpose(nil), do: {:ok, :candidate}
+  defp stored_purpose("candidate"), do: {:ok, :candidate}
+  defp stored_purpose("computer"), do: {:ok, :computer}
+  defp stored_purpose(_other), do: :error
+
+  defp stored_joined(nil), do: {:ok, nil}
+
+  defp stored_joined(%{"device_id" => id, "name" => name}) when is_binary(id) and is_binary(name),
+    do: {:ok, %{device_id: id, name: name}}
+
+  defp stored_joined(_other), do: :error
 
   defp optional_key(nil), do: {:ok, nil}
 
@@ -583,13 +962,18 @@ defmodule FermixChannels.Home.Enrollment do
 
   defp optional_key(_other), do: :error
 
-  # A used window stands as the record of its candidate; one whose server was
-  # never recorded through it ends with its half hour, like an unused one.
+  # A used window stands as the record of its candidate, or of how a
+  # computer's join ended; one whose server was never recorded through it
+  # ends with its half hour, like an unused one, and so does a computer's
+  # wait for the owner.
   defp window_state(%{used?: true, candidate_id: id}, _now) when is_binary(id), do: :used
+  defp window_state(%{joined: %{}}, _now), do: :approved
+  defp window_state(%{denied: reason}, _now) when is_binary(reason), do: :denied
 
-  defp window_state(%{used?: used?, expires_at: at}, now) do
+  defp window_state(%{used?: used?, expires_at: at} = window, now) do
     cond do
       DateTime.compare(now, at) != :lt -> :expired
+      window.joiner != nil -> :awaiting_approval
       used? -> :used
       true -> :open
     end

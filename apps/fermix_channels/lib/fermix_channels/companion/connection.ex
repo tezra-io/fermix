@@ -22,7 +22,10 @@ defmodule FermixChannels.Companion.Connection do
   the connection stays open.
 
   The version its hello declared is the connection's value in that registry,
-  and it is never sent a server event a later version brought
+  or this daemon's newest where a newer client still speaks it
+  (`client_hello.min_protocol_version`, M97 §3.4), which the `server_hello`
+  names as `protocol_version`; it is never sent a server event a later
+  version brought
   (`Protocol.server_event_version/1`): a version 2 client never sees
   `row_updated`, `media_path` or `media_missing`. A client event a later
   version brought (`Protocol.client_event_version/1`) is refused as unknown.
@@ -526,31 +529,41 @@ defmodule FermixChannels.Companion.Connection do
   defp hello(_payload, %{version: version} = state) when is_integer(version),
     do: refuse(:unexpected_client_hello, state)
 
+  # A newer client that still speaks this daemon's newest version is served
+  # it, and the hello says so (M97 §3.4: the window runs both ways).
   defp hello(%{"protocol_version" => version} = payload, state) do
-    case Protocol.negotiate(version) do
-      :ok -> primary_hello(version, payload["primary_epoch"], state)
-      {:error, direction} -> refuse_version(direction, version, state)
+    case Protocol.negotiate(version, payload["min_protocol_version"]) do
+      {:ok, ^version} ->
+        primary_hello(version, payload["primary_epoch"], %{}, state)
+
+      {:ok, served} ->
+        primary_hello(served, payload["primary_epoch"], served_field(served), state)
+
+      {:error, direction} ->
+        refuse_version(direction, version, state)
     end
   end
 
+  defp served_field(served), do: %{"protocol_version" => served}
+
   # The client's highest-seen epoch against the home's (moduledoc). The hello
   # names the engine's role, so a client compares a primary's epoch only.
-  defp primary_hello(version, theirs, state) do
+  defp primary_hello(version, theirs, served, state) do
     role = engine_role(state)
-    named = %{"role" => Atom.to_string(role)}
+    named = Map.put(served, "role", Atom.to_string(role))
 
     case state.primary_epoch.() do
-      {:ok, mine} -> epoch_hello(version, {role, mine}, theirs, state)
+      {:ok, mine} -> epoch_hello(version, {role, mine}, {theirs, named}, state)
       :absent -> join(version, named, state)
       {:error, reason} -> refuse_unread_epoch(reason, state)
     end
   end
 
   # Only the primary refuses a client that has met a later primary.
-  defp epoch_hello(version, {role, mine}, theirs, state) do
+  defp epoch_hello(version, {role, mine}, {theirs, named}, state) do
     if role == :primary and is_integer(theirs) and theirs > mine,
       do: refuse_stale_primary(mine, theirs, state),
-      else: join(version, %{"primary_epoch" => mine, "role" => Atom.to_string(role)}, state)
+      else: join(version, Map.put(named, "primary_epoch", mine), state)
   end
 
   defp engine_role(state) do

@@ -111,7 +111,8 @@ defmodule FermixChannels.Desktop.Relay do
   lines go to its `Desktop.Tunnel`; a forwarded call's answer to its caller,
   which decodes it in its own process; the media frames to
   `Desktop.MediaFetches`; the loopback's to `Desktop.Loopback`; the snapshot
-  copies' to `Desktop.SnapshotStore` (`:families` names the last three).
+  copies' to `Desktop.SnapshotStore`; the invocations' (`invoke_*`, M97
+  §6.2) to `Desktop.Invoke` (`:families` names the last four).
   Each hand-off is bounded by what waits in the process taking it, and what
   happens at the bound is the family's:
 
@@ -122,6 +123,7 @@ defmodule FermixChannels.Desktop.Relay do
   | media | 256 frames | the fetch fails `busy`, its blob's later frames are dropped |
   | loopback | 64 events | the event is dropped |
   | snapshots | 256 frames | the copy is refused (`write_failed`), its later frames dropped |
+  | invocations | 512 events in `Desktop.Invoke`'s Admission | the event is dropped; the server asks for the state of what it waits on |
 
   A family whose process is not running has its events dropped until it
   runs again; a media fetch's waiters are told so. Each run of drops is
@@ -148,10 +150,11 @@ defmodule FermixChannels.Desktop.Relay do
   (`platform`); once a session is up the relay tells this computer's offers
   reporter (`Desktop.Offers`, `:offers` names it) the `hello_ack`'s caps, and
   it sends the path the session runs (`link_path`), at the start once the
-  helper has named it and at each change. Both `offers` and `link_path` go
-  only to a server whose `hello_ack` takes them (`caps.computer`): any other
-  send of one is refused `{:error, {:not_taken, type}}`, since an older
-  server closes the session on an event it does not know.
+  helper has named it and at each change. Both `offers` and `link_path`, and
+  the invocation's events (`caps.computer.invoke`), go only to a server
+  whose `hello_ack` takes them (`caps.computer`): any other send of one is
+  refused `{:error, {:not_taken, type}}`, since an older server closes the
+  session on an event it does not know.
 
   ## Bounds
 
@@ -187,6 +190,7 @@ defmodule FermixChannels.Desktop.Relay do
 
   require Logger
 
+  alias FermixChannels.Desktop.Invoke
   alias FermixChannels.Desktop.Loopback
   alias FermixChannels.Desktop.MediaFetches
   alias FermixChannels.Desktop.Offers, as: DesktopOffers
@@ -234,8 +238,17 @@ defmodule FermixChannels.Desktop.Relay do
   @max_open_payloads 32
   @status_wait_ms 5_000
   # A computer's own events (M97 §5.3), each sent only where the server's
-  # hello_ack takes it.
-  @computer_events ~w(offers link_path)
+  # hello_ack takes it, by the flag of `caps.computer` that says so: the
+  # invocation's five (M97 §6.1) go under one.
+  @computer_events %{
+    "offers" => "offers",
+    "link_path" => "link_path",
+    "invoke_open" => "invoke",
+    "invoke_part" => "invoke",
+    "invoke_cancel" => "invoke",
+    "invoke_result" => "invoke",
+    "invoke_status" => "invoke"
+  }
 
   # Every event the primary sends a desktop, and the family that serves it
   # here: the session itself, the companion channels, the forwarded calls, the
@@ -256,14 +269,24 @@ defmodule FermixChannels.Desktop.Relay do
     "loopback_close" => :loopback,
     "snapshot_begin" => :snapshots,
     "snapshot_chunk" => :snapshots,
-    "snapshot_end" => :snapshots
+    "snapshot_end" => :snapshots,
+    "invoke_open" => :invoke,
+    "invoke_part" => :invoke,
+    "invoke_cancel" => :invoke,
+    "invoke_result" => :invoke,
+    "invoke_status" => :invoke
   }
 
   # The families served by a process of their own, by its registered name.
-  @family_servers %{media: MediaFetches, loopback: Loopback, snapshots: SnapshotStore}
+  @family_servers %{
+    media: MediaFetches,
+    loopback: Loopback,
+    snapshots: SnapshotStore,
+    invoke: ComputerSwitches.invoke_listener()
+  }
   # What may wait in each family's process before the family's rule applies
   # (moduledoc); a channel's tunnel holds at most @max_tunnel_lines.
-  @family_bounds %{media: 256, loopback: 64, snapshots: 256}
+  @family_bounds %{media: 256, loopback: 64, snapshots: 256, invoke: 512}
   @max_tunnel_lines 256
 
   @typedoc "The link's state in one word (the moduledoc says what each means)."
@@ -589,7 +612,7 @@ defmodule FermixChannels.Desktop.Relay do
   # Answered once its last frame is written (`written/3`). A computer's own
   # event goes only to a server whose hello_ack takes it (M97 §5.3).
   def handle_call({:send, type, _fields, _payload}, _from, %{phase: :connected} = state)
-      when type in @computer_events and not is_map_key(state.computer_caps, type),
+      when is_map_key(@computer_events, type) and not is_map_key(state.computer_caps, type),
       do: {:reply, {:error, {:not_taken, type}}, state}
 
   def handle_call({:send, type, fields, payload}, from, %{phase: :connected} = state) do
@@ -862,7 +885,8 @@ defmodule FermixChannels.Desktop.Relay do
   defp take(:session, "pong", _fields, _tail, state), do: state
   defp take(:session, "error", fields, _tail, state), do: primary_error(fields, state)
 
-  defp take(family, type, fields, tail, state) when family in [:channels, :calls, :loopback] do
+  defp take(family, type, fields, tail, state)
+       when family in [:channels, :calls, :loopback, :invoke] do
     if Chunks.chunked?(type),
       do: take_chunk(family, type, fields, tail, state),
       else: complete(family, type, fields, tail, state)
@@ -907,7 +931,10 @@ defmodule FermixChannels.Desktop.Relay do
   # The computer's own events the server's hello_ack takes (M97 §5.3), by
   # event: none from a server older than the computer record.
   defp computer_caps(%{"computer" => %{} = computer}) do
-    for type <- @computer_events, Map.get(computer, type) == true, into: %{}, do: {type, true}
+    for {type, flag} <- @computer_events,
+        Map.get(computer, flag) == true,
+        into: %{},
+        do: {type, true}
   end
 
   defp computer_caps(_caps), do: %{}
@@ -1076,6 +1103,9 @@ defmodule FermixChannels.Desktop.Relay do
 
   defp complete(:loopback, type, fields, payload, state),
     do: loopback(type, fields, payload, state)
+
+  defp complete(:invoke, type, fields, payload, state),
+    do: invocation(type, fields, payload, state)
 
   # -- sending (M97 §5.1: lanes) ---------------------------------------------------
 
@@ -1253,6 +1283,7 @@ defmodule FermixChannels.Desktop.Relay do
   defp family_words(:snapshots), do: "snapshots are"
   defp family_words(:media), do: "media frames are"
   defp family_words(:loopback), do: "sign-in forwards are"
+  defp family_words(:invoke), do: "the server's requests are"
 
   defp not_running(family),
     do:
@@ -1317,6 +1348,26 @@ defmodule FermixChannels.Desktop.Relay do
 
       :down ->
         drop(state, :loopback, :all, not_running(:loopback))
+    end
+  end
+
+  # -- the invocations (M97 §6.2) --------------------------------------------------------
+
+  # A request, its part's frames, a cancel or a status ask, each as it came.
+  # One that cannot be handed is dropped: the server asks for its state once
+  # it waits on it, and hears it was never taken.
+  defp invocation(type, fields, payload, state) do
+    case hand_off(state, :invoke, &Invoke.handle(&1, type, fields, payload)) do
+      :handed ->
+        handed(state, :invoke)
+
+      :full ->
+        bound = Map.fetch!(@family_bounds, :invoke)
+        sentence = "the server's requests are behind (#{bound} waiting): its events are dropped"
+        drop(state, :invoke, :all, sentence)
+
+      :down ->
+        drop(state, :invoke, :all, not_running(:invoke))
     end
   end
 

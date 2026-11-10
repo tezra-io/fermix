@@ -5,7 +5,8 @@ defmodule FermixChannels.Mobile.Peers do
 
   A session's kind is what its handshake proved: `phone` and `desktop` are a
   paired device's (Noise `IK`, read from the device's row), `enrollment` is a
-  candidate primary on an enrollment window (`FXM1 0x03`), `move` is the
+  candidate primary, or a computer joining the home (M97 §3.1), on an
+  enrollment window (`FXM1 0x03`), `move` is the
   source of a move on its candidate (`FXM1 0x04`). The pairing session itself
   (`IKpsk2`, before the owner approved) takes only `pair_request` and `ping`,
   and `Mobile.Session` keeps that rule.
@@ -21,7 +22,10 @@ defmodule FermixChannels.Mobile.Peers do
 
   A computer's own record (M97 §3.2) is a desktop's alone: what it offers
   (`offers`) and the path its session runs (`link_path`), each sent only to
-  a server whose `hello_ack` says it takes them (`caps.computer`).
+  a server whose `hello_ack` says it takes them (`caps.computer`). So is
+  the invocation (M97 §6.1, `invoke_*`), which a desktop and its server
+  each send the other: the server asking one of the computer's
+  capabilities, the computer one of the home's services.
 
   A phone's list channel (M85 E4) is the companion family's `companion_open`,
   `companion_line` and `companion_close`, which a desktop sends too: one
@@ -41,6 +45,7 @@ defmodule FermixChannels.Mobile.Peers do
   @desktop_client ~w(
     hello ping media_fetch ack companion_open companion_line companion_close manage
     loopback_request loopback_failed snapshot_stored snapshot_refused offers link_path
+    invoke_open invoke_part invoke_cancel invoke_result invoke_status
   )
   @phone_server ~w(
     hello_ack accepted attach_status turn_started text_delta tool_event text_done turn_done
@@ -52,18 +57,19 @@ defmodule FermixChannels.Mobile.Peers do
     hello_ack error pong event_part media_begin media_chunk media_end companion_line
     companion_close manage_result loopback_open loopback_response loopback_close
     snapshot_begin snapshot_chunk snapshot_end
+    invoke_open invoke_part invoke_cancel invoke_result invoke_status
   )
 
   @client %{
     phone: @phone_client,
     desktop: @desktop_client,
-    enrollment: ~w(enroll_request ping),
+    enrollment: ~w(enroll_request join_request ping),
     move: ~w(move_offer move_chunk move_end move_commit move_resume ping)
   }
   @server %{
     phone: @phone_server,
     desktop: @desktop_server,
-    enrollment: ~w(enroll_accepted error pong),
+    enrollment: ~w(enroll_accepted join_approved join_denied error pong),
     move: ~w(move_accept move_ready move_done error pong)
   }
   @kinds [:phone, :desktop, :enrollment, :move]

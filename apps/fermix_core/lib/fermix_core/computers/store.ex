@@ -22,8 +22,8 @@ defmodule FermixCore.Computers.Store do
   files: the schema's bound on a primary's computers. A file Fermix did not
   write is named, never read as a record.
 
-  It supersedes `device/engine_ceiling/` (`Home.EngineCeiling` reads the
-  versions here until its window is replaced).
+  It supersedes `device/engine_ceiling/`. Each computer's engine version is
+  what it stands by against this server (`Computers.Versions`, M97 §3.4).
   """
 
   alias FermixCore.Computers.Offers

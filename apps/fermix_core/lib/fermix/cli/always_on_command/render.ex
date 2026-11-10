@@ -115,6 +115,21 @@ defmodule Fermix.CLI.AlwaysOnCommand.Render do
       ]
   end
 
+  # Add a computer (M97 §3.1): the code a new computer joins with.
+  def result(%{"code" => code, "expires_at" => until} = result)
+      when is_binary(code) and is_binary(until) and map_size(result) == 2 do
+    [
+      "On the new computer, connect to a Fermix that already runs and paste this code. It " <>
+        "works once, until #{until}:",
+      "  " <> code
+    ]
+  end
+
+  # The computer added (M97 §7.5).
+  def result(%{"device_id" => id, "name" => name} = result)
+      when is_binary(id) and is_binary(name) and map_size(result) == 2,
+      do: ["#{name} is now a computer of your Fermix."]
+
   def result(result), do: raise(ArgumentError, "home.act answered #{shape(result)}")
 
   defp tailscale_lines(%{"sentence" => sentence, "command" => command} = step)

@@ -31,6 +31,7 @@ defmodule FermixCore.Application do
   alias FermixCore.Cues.Supervisor, as: CuesSupervisor
   alias FermixCore.Harness.Supervisor, as: HarnessSupervisor
   alias FermixCore.Home.AlwaysOn
+  alias FermixCore.Home.AlwaysOnRelease
   alias FermixCore.Home.Candidate
   alias FermixCore.Home.Epoch
   alias FermixCore.Home.Move
@@ -413,6 +414,14 @@ defmodule FermixCore.Application do
         # re-read their state; its own is rebuilt from each computer's next
         # event, the records holding the last offers meanwhile.
         FermixCore.Computers.Registry,
+        # The invocations the server waits on (M97 §6.1), primary-only: a
+        # crash loses only its waiters' routing, and they time out.
+        FermixCore.Computers.Calls,
+        # The release table an Always On server's update chooses from (M97
+        # §3.4), primary-only and fetching only on a server where Always On
+        # is offered. It never raises on a fetch or a table: each fails into
+        # a sentence. Its timer stays dark under `mix test`.
+        {FermixCore.Home.ReleaseTable, release_table_opts()},
         # The primary's snapshots (M75 §8), before the cue tree so a crash of
         # either restarts nothing but the cue tree. Its timers stay dark under
         # `mix test`; tests start their own with an injected clock and timer.
@@ -727,6 +736,15 @@ defmodule FermixCore.Application do
     ConfigStore.fermix_home()
     |> AlwaysOn.facts(Role.recorded(), HostFacts.current())
     |> AlwaysOn.server?()
+  end
+
+  # An Always On server where this build offers Always On reads the release
+  # table its update chooses from; any other engine reads none (M97 §3.4).
+  defp release_table_opts do
+    [
+      fetching: AlwaysOnRelease.available?() and always_on_server?(),
+      timer_enabled: @compiled_env != :test
+    ]
   end
 
   defp jobs_scheduler_opts do
