@@ -320,8 +320,8 @@ browser, and keep a strict sandbox below its home. The flags attest that the
 already-running daemon was restarted with that setup; they are not proof or
 containment.
 
-A disposable behavioral daemon's config must include a boundary like this,
-alongside a separately configured provider:
+A disposable behavioral daemon's `machine.toml`, beside the `config.toml` that
+configures its provider separately, must include a boundary like this:
 
 ```toml
 [sandbox]

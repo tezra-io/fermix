@@ -1454,7 +1454,8 @@ class VerifyStandaloneTest(unittest.TestCase):
             '    [ "$4" = "--into" ] && [ "$6" = "--passphrase-file" ] || exit 64\n'
             '    mkdir -p "$5/mobile"\n'
             "    printf '6\\n' > \"$5/mobile/primary_epoch\"\n"
-            "    printf '[sandbox]\\nworkspace_root = \"%s/workspace\"\\n' \"$5\" > \"$5/config.toml\"\n"
+            "    printf '[fermix_channels.signal]\\ncli_path = \"%s/bin/signal-cli\"\\n' \"$5\""
+            ' > "$5/config.toml"\n'
             "    printf 'Restored 2 files into %s at primary epoch 6.\\n' \"$5\"\n"
             "    exit 0\n"
             "  fi\n"
@@ -1561,9 +1562,17 @@ class VerifyStandaloneTest(unittest.TestCase):
             "  fi\n"
         )
 
+    # The release reads the dev plugin folder from machine.toml only (M97 §4).
+    # Its boot also moves one an older home kept in config.toml, which this
+    # stand-in does not do, so it finds the plugin only where the stage must
+    # write the folder now.
     def _plugins_clear_behaviour(self, plugins_clear):
         forget = (
             '  [ "$*" = "plugins auth clear discord" ] || exit 64\n'
+            '  if ! grep -Fq \'dev_local = \' "$FERMIX_HOME/machine.toml" 2>/dev/null; then\n'
+            "    printf 'fermix plugins: no plugin named discord\\n' >&2\n"
+            "    exit 1\n"
+            "  fi\n"
             "  profile=\"$(sed -n 's/^profile = \"\\(.*\\)\"$/\\1/p'"
             ' "$FERMIX_HOME/config.toml")"\n'
             "  delete_status=0\n"

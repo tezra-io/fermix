@@ -147,6 +147,20 @@ the rows to `src/config/engine-releases.txt`, moving `latest` only forward; any
 failure leaves the file unchanged. That file is what `/install/releases` serves.
 It is cumulative, so an Always On server can still install the release its
 desktop runs; pinning an older release adds its rows without moving `latest`.
+Each app release then adds one row of its own, in the same site change that
+copies its appcast (the Mac app) or pins its packages (the Linux app,
+`node scripts/pin-linux-release.mjs vA.B.C`):
+`node scripts/pin-app-release.mjs macos vA.B.C` for the Mac app,
+`node scripts/pin-app-release.mjs linux vA.B.C` for the Linux app. It adds
+`app <engine_version> <system> <app_version>`, saying that app release is
+published and which engine release it carries, which `FermixCore.Home.Releases`
+reads to choose the release an Always On server may install; the installer
+skips the row. The script needs `cosign` on `PATH` and `gh` signed in to an
+account that can read the app's repository, which is private: it verifies every
+file the app release published on `download.fermix.ai`
+against the app's release workflow for that tag and its commit, then reads the
+engine release the app pins at that commit, which must already be pinned here,
+so pin the engine release first. Any failure leaves the file unchanged.
 Before the site deploys:
 
 ```sh

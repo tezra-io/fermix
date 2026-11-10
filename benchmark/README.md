@@ -298,8 +298,9 @@ make capability-auto     # seed -> start (background) -> preflight -> full sweep
 Under the hood (`bin/capability-daemon.sh` + `bin/seed_capability_home.py`) it:
 
 1. **Seeds `~/.fermix-capability-eval`** — creates the home, a git-backed
-   `workspace/` (the checker's per-trial scoring root), a minimal strict
-   `config.toml`, and the auth the scored model needs. The scored model is derived
+   `workspace/` (the checker's per-trial scoring root), a minimal `config.toml`
+   with a strict `machine.toml` beside it (the sandbox is this computer's own
+   setting), and the auth the scored model needs. The scored model is derived
    from the `primary = true` provider in `~/.fermix-dev/config.toml`, and its
    credentials are reused from the dev home:
    - **OAuth providers** (`openai_codex`, `anthropic`, `xai`) store their token
@@ -314,7 +315,7 @@ Under the hood (`bin/capability-daemon.sh` + `bin/seed_capability_home.py`) it:
    - **API-key providers** keep `profile = "fermix-dev"` plus a `@keyring` sentinel,
      so the existing `fermix:fermix-dev:<ENV>` keychain entry resolves unchanged.
 
-   The `[sandbox]` block is always regenerated strict and home-scoped
+   The `[sandbox]` block, in `machine.toml`, is always regenerated strict and home-scoped
    (`mode = "strict"`, `workspace_root = $FERMIX_HOME/workspace`, `allowed_roots =
    ["$FERMIX_HOME/skills"]`) — never copied from the dev config, whose
    `allowed_roots` escape the home and would fail the runner's precondition. The
@@ -967,11 +968,13 @@ intersects.
 
 `seed_capability_home.py --extra-config <file.toml>` is the other half of an arm:
 its fragment is appended to the rendered config, and it is REFUSED when it
-redefines a table the seeder already writes (`[sandbox]`, `[fermix_core.harness]`,
-the provider block, …) or starts with a bare key — both would otherwise surface
-as a TOML error at daemon boot, naming a line in a generated file. An arm changes
-what the seeder does not own; if it needs to change what the seeder does own, the
-seeder learns the setting.
+redefines a table the seeder already writes (`[fermix_core.harness]`, the
+provider block, …) or starts with a bare key — both would otherwise surface
+as a TOML error at daemon boot, naming a line in a generated file — and when it
+sets one of this computer's own settings (`[sandbox]` and the other
+`machine.toml` tables, or `dev_local`), which Fermix never reads from
+`config.toml`. An arm changes what the seeder does not own; if it needs to
+change what the seeder does own, the seeder learns the setting.
 
 **Comparing two code revisions** (this release's loop against the last) is the
 same mechanism with two checkouts, not a second mode in the runner. Check the
@@ -1134,7 +1137,7 @@ measures. The preconditions, in order (exit 3): `FERMIX_EVAL_HOME` is set (left
 unset, the harness would fall back to `~/.fermix-dev`, on the owner's Mac the
 live development daemon the phone pairs with) and is not `~/.fermix`, both
 checked before any daemon is contacted; the fixture's platform is
-this host's; its script or binary exists; the daemon answers; its `config.toml`
+this host's; its script or binary exists; the daemon answers; its `machine.toml`
 has `[fermix_core.computer_use] enabled = true` and no strict sandbox (strict
 derives look-only computer use, which refuses every action); and the fixture's
 `--self-test` records every control the corpus asserts on.

@@ -457,7 +457,7 @@ expect:
 
 The floor under a tool ban that does not depend on the trace being right about
 what ran. Each path is relative to the eval daemon's sandbox workspace
-(`[sandbox] workspace_root` in the home's `config.toml`, where a strict-mode
+(`[sandbox] workspace_root` in the home's `machine.toml`, where a strict-mode
 command starts), without traversal and below the workspace itself; run
 placeholders render in it. `run_eval.py` looks just before the turn is driven
 and again once its trace settled:

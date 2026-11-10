@@ -288,7 +288,7 @@ def test_configured_timezone_reads_the_daemons_personalization_label(tmp_path):
     config_path = tmp_path / "config.toml"
     config_path.write_text('[fermix_core.personalization]\ntimezone = "America/New_York"\n')
     assert run_eval.configured_timezone(str(tmp_path)) == "America/New_York"
-    config_path.write_text('[sandbox]\nmode = "strict"\n')
+    config_path.write_text('[fermix_core.meetings]\nenabled = true\n')
     assert run_eval.configured_timezone(str(tmp_path)) is None
 
 

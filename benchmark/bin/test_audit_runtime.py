@@ -177,7 +177,41 @@ class BrowserConfigTest(unittest.TestCase):
         self.assertEqual(set(config['fermix_core']), {'providers', 'browser'})
         self.assertEqual(config['fermix_core']['providers']['anthropic']['default_model'], 'model')
         self.assertEqual(config['fermix_core']['providers']['anthropic']['base_url'], 'http://proxy:8080/v1')
-        self.assertEqual(config['sandbox']['mode'], 'strict')
+        self.assertNotIn('sandbox', config)
+
+class BootstrapHomeTest(unittest.TestCase):
+    # M97 §4: the sandbox is this computer's own setting, which the engine reads
+    # from machine.toml beside config.toml and never from config.toml.
+    def test_sandbox_is_written_to_the_machine_file_only(self):
+        import hashlib
+        import importlib.util
+        import io
+        import json
+        import stat
+        import tomllib
+        from contextlib import redirect_stdout
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        path = Path(__file__).resolve().parents[1] / 'audit/docker/audit_bootstrap.py'
+        spec = importlib.util.spec_from_file_location('audit_bootstrap', path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        request = json.dumps({'model': 'model', 'proxy_url': 'http://proxy:8080/v1', 'token': 'dummy'})
+        with TemporaryDirectory() as folder, patch.object(module, 'Path', return_value=Path(folder)), \
+                patch('sys.stdin', io.StringIO(request)), redirect_stdout(io.StringIO()) as out:
+            module.main()
+            home = Path(folder)
+            config = (home / 'config.toml').read_bytes()
+            machine = (home / 'machine.toml').read_bytes()
+            machine_mode = stat.S_IMODE((home / 'machine.toml').stat().st_mode)
+        self.assertNotIn('sandbox', tomllib.loads(config.decode()))
+        self.assertEqual(tomllib.loads(machine.decode()), {'sandbox': {
+            'mode': 'strict', 'workspace_root': '/home/audit/fermix/workspace',
+            'allowed_roots': ['/home/audit/fermix/skills']}})
+        self.assertEqual(machine_mode, 0o600)
+        self.assertEqual(json.loads(out.getvalue()), {
+            'config_sha256': hashlib.sha256(config).hexdigest(),
+            'machine_sha256': hashlib.sha256(machine).hexdigest()})
 
 class ObserverValidationTest(unittest.TestCase):
     def test_secret_is_redacted_from_normalized_observer_record(self):

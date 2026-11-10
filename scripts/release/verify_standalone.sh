@@ -295,7 +295,9 @@ esac
 # an argv it does not recognize exits non-zero so a keychain call added later
 # cannot pass this gate unanswered. The home is a fresh one whose profile names
 # no stored item, and it holds a dev_local api_key plugin for the verb to find,
-# because `auth clear` resolves the plugin before it asks the keychain.
+# because `auth clear` resolves the plugin before it asks the keychain. The dev
+# plugin folder is this computer's own setting, which the release reads from
+# machine.toml beside config.toml and never from config.toml.
 plugins_home="$runtime_root/plugins-home"
 keychain_bin="$runtime_root/keychain-bin"
 keychain_log="$runtime_root/keychain.log"
@@ -336,10 +338,13 @@ MANIFEST
 cat > "$plugins_home/config.toml" <<CONFIG
 [fermix_core]
 profile = "$profile"
+CONFIG
 
+cat > "$plugins_home/machine.toml" <<MACHINE
 [fermix_core.plugins]
 dev_local = "$plugin_checkout"
-CONFIG
+MACHINE
+chmod 600 "$plugins_home/machine.toml"
 
 clear_status=0
 clear_output="$(
@@ -607,7 +612,9 @@ grep -Fq "Fermix is not running from this home" "$always_on_err" ||
 # terminal is needed. The archive is restored into a second fresh root, which
 # must come back one epoch higher with the setting moved to the new path. The
 # source is then marked moved twice: the first must succeed and the second
-# refuse, because the first move is the one that counts.
+# refuse, because the first move is the one that counts. The setting is the
+# Signal command's path, one that travels with the home: this computer's own
+# settings stay behind in its machine.toml, which no archive carries.
 home_src="$runtime_root/home-src"
 home_dst="$runtime_root/home-dst"
 home_archive="$runtime_root/home.fxhome"
@@ -615,7 +622,7 @@ home_passphrase="$runtime_root/home-passphrase"
 mkdir -m 700 "$home_src" "$home_src/mobile"
 printf '5\n' > "$home_src/mobile/primary_epoch"
 chmod 600 "$home_src/mobile/primary_epoch"
-printf '[sandbox]\nworkspace_root = "%s/workspace"\n' "$home_src" > "$home_src/config.toml"
+printf '[fermix_channels.signal]\ncli_path = "%s/bin/signal-cli"\n' "$home_src" > "$home_src/config.toml"
 printf 'invented-verify-passphrase\n' > "$home_passphrase"
 chmod 600 "$home_passphrase"
 
@@ -642,7 +649,7 @@ printf '%s\n' "$home_output"
 [ "$home_status" -eq 0 ] || fail "fermix home import must exit 0 into an empty root, got $home_status"
 [ "$(cat "$home_dst/mobile/primary_epoch" 2>/dev/null)" = 6 ] ||
   fail "fermix home import must make the restored home the next primary, epoch 6"
-grep -Fq "\"$home_dst/workspace\"" "$home_dst/config.toml" 2>/dev/null ||
+grep -Fq "\"$home_dst/bin/signal-cli\"" "$home_dst/config.toml" 2>/dev/null ||
   fail "fermix home import did not move the setting that named the old home to the new one"
 [ ! -e "$home_dst/moved.json" ] || fail "fermix home import marked the restored home moved"
 
