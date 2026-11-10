@@ -342,7 +342,10 @@ defmodule FermixChannels.Mobile.PhoneListChannelTest do
   end
 
   defp primary_companion!(suffix) do
-    dir = FermixTestSupport.SafeRm.make_tmp_dir!("phone-lists")
+    # A short root, as DesktopRailHelper.root!/1's: the channel's tunnel socket under
+    # it must fit a socket address on macOS (103 bytes under its deep tmp folder).
+    dir = Path.join(System.tmp_dir!(), "plists-#{suffix}")
+    FermixTestSupport.SafeRm.mark!(dir)
     repo = :"phone_lists_repo_#{suffix}"
     registry = :"phone_lists_registry_#{suffix}"
     connections = :"phone_lists_conns_#{suffix}"
