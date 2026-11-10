@@ -2378,24 +2378,28 @@ defmodule FermixCore.Agents.TurnRunnerTest do
     end
 
     # M85 §07: the card's line goes only to a turn the Mac's connection carried
-    # after it pulled the lists' index; the Mac's chat on a connection that did
-    # not, and every other channel, keep the line that says to write the list.
-    test "the card's line rides only a companion turn whose connection draws lists",
+    # after it pulled the lists' index, or a phone's whose list channel did
+    # (E4); the Mac's chat and the phone on a connection that did not, and
+    # every other channel, keep the line that says to write the list.
+    test "the card's line rides only a companion or phone turn whose connection draws lists",
          %{repo: repo} do
       card = "A list you read or change is drawn under your reply, live"
       written = "No list is drawn here"
 
-      drawn =
-        %{channel: "companion", chat_id: "main", metadata: %{draws_lists: true}}
-        |> capture_prompt(memory_repo: repo)
-        |> rules_line()
+      for channel <- ["companion", "mobile"] do
+        drawn =
+          %{channel: channel, chat_id: "main", metadata: %{draws_lists: true}}
+          |> capture_prompt(memory_repo: repo)
+          |> rules_line()
 
-      assert drawn =~ card
-      refute drawn =~ written
+        assert drawn =~ card, channel
+        refute drawn =~ written, channel
+      end
 
       for msg <- [
             %{channel: "companion", chat_id: "main"},
             %{channel: "companion", chat_id: "main", metadata: %{draws_lists: false}},
+            %{channel: "mobile", chat_id: "main"},
             put_in(private_chat("40041"), [:metadata, :draws_lists], true)
           ] do
         line = msg |> capture_prompt(memory_repo: repo) |> rules_line()

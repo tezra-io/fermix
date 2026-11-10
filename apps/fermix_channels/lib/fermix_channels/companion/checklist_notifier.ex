@@ -6,7 +6,8 @@ defmodule FermixChannels.Companion.ChecklistNotifier do
   boot, and `FermixCore.Checklists.Registry` calls `changed/1` right after the
   store commits any change, whoever made it: the model, a job or a device.
   It tells every connection of the companion socket which lists changed, with
-  their new revs and what a device's add or create made; each connection
+  their new revs and what a device's add or create made, and every phone's
+  list channel (registered under `{:lists, profile}`, M85 E4); each connection
   decides what it holds and pushes it (`Companion.Checklists`). It runs in the
   caller's process and only sends messages, so a change never waits on a
   socket. With the companion socket down there is nobody to tell.
@@ -20,8 +21,10 @@ defmodule FermixChannels.Companion.ChecklistNotifier do
   @spec changed(map(), atom()) :: :ok
   def changed(%{lists: [_ | _] = lists}, registry \\ Companion.registry())
       when is_atom(registry) do
-    if Process.whereis(registry),
-      do: Registry.dispatch(registry, @profile, &tell(&1, {:checklists_changed, lists}))
+    if Process.whereis(registry) do
+      for key <- [@profile, {:lists, @profile}],
+          do: Registry.dispatch(registry, key, &tell(&1, {:checklists_changed, lists}))
+    end
 
     :ok
   end

@@ -107,11 +107,11 @@ defmodule FermixCore.Prompt.ChannelPresentation do
   `Checklists.Note.rules/3` carries on the owner's private turns only. The
   card's line goes to a turn on the Mac's chat whose connection draws lists
   (`draws?`: it pulled their index), never to a version alone, since a Mac
-  app on the version may not draw them; every other turn is told to write the
-  list.
+  app on the version may not draw them, and to a phone's turn whose list
+  channel pulled it (M85 E4); every other turn is told to write the list.
   """
   @spec checklist_line(String.t() | nil, boolean()) :: String.t()
-  def checklist_line("companion", true) do
+  def checklist_line(channel, true) when channel in ["companion", "mobile"] do
     "A list you read or change is drawn under your reply, live: say in a sentence what " <>
       "changed and never repeat its items."
   end

@@ -217,8 +217,9 @@ defmodule FermixCore.Companion.ProtocolContractTest do
     assert protocol =~ "## When Always On changes"
   end
 
-  # M85 §07: the owner's lists are version 6 events this wire alone carries,
-  # sent only to the owner's connection; the ops and bounds the schema
+  # M85 §07: the owner's lists are version 6 events of this wire, sent only to
+  # the owner's connection, never in the phone's shared broadcast: a phone
+  # reaches them over its list channel (M85 E4); the ops and bounds the schema
   # publishes are the engine's, and the goldens carry every op and shape.
   test "the owner's lists are version 6 events this wire does not share, with goldens", %{
     schema: schema,
@@ -266,7 +267,8 @@ defmodule FermixCore.Companion.ProtocolContractTest do
     flat = String.replace(protocol, ~r/\s+/, " ")
     assert protocol =~ "## Lists"
     assert flat =~ "Version 6 also brings the owner's lists"
-    assert flat =~ "The phone's wire does not carry lists in this version."
+    assert flat =~ "A phone carries the same events over its list channel on the mobile wire"
+    assert flat =~ "**A phone's list channel.**"
     assert flat =~ "at most once per 100 ms"
 
     for op <- ChecklistRegistry.device_ops() do

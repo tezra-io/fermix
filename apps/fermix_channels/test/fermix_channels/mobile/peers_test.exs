@@ -35,8 +35,28 @@ defmodule FermixChannels.Mobile.PeersTest do
       assert {:error, {:unsupported_event, ^type}} = Peers.authorize(:desktop, type)
     end
 
-    for type <- families do
+    for type <- families -- ~w(companion_open companion_line companion_close) do
       assert {:error, {:unsupported_event, ^type}} = Peers.authorize(:phone, type)
+    end
+  end
+
+  # M85 E4: a phone's list channel is the companion family, one channel of it;
+  # the family's other events stay a desktop's.
+  test "a phone opens, writes and closes a list channel, and is sent its lines and close" do
+    for type <- ~w(companion_open companion_line companion_close) do
+      assert Peers.authorize(:phone, type) == :ok
+    end
+
+    for type <- ~w(companion_line companion_close) do
+      assert Peers.server_event?(:phone, type)
+    end
+
+    for type <- ~w(manage loopback_request loopback_failed snapshot_stored snapshot_refused) do
+      assert {:error, {:unsupported_event, ^type}} = Peers.authorize(:phone, type)
+    end
+
+    for type <- ~w(manage_result loopback_open snapshot_begin) do
+      refute Peers.server_event?(:phone, type)
     end
   end
 

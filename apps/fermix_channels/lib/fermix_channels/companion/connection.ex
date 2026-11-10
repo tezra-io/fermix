@@ -87,6 +87,21 @@ defmodule FermixChannels.Companion.Connection do
   (`metadata.draws_lists`) once it has pulled the index. `:checklist_opts` are
   the Registry's options (a test's repo and notifier).
 
+  ## A phone's list channel (M85 E4)
+
+  A phone's list channel (`Desktop.Companion`) runs this connection in the
+  lists scope (`scope: :lists`): it takes `client_hello`, `checklists_pull`,
+  `checklist_pull` and `checklist_edit` and refuses every other client event
+  as `unknown_event`, closing, as an event newer than its version is refused.
+  It joins no timeline: it registers under `{:lists, profile}`, which only the
+  list notifier reaches, never under the profile its turns' rows, read state
+  and streams go to; no waiting approval or proposal follows its hello and it
+  subscribes to no Always On watch. Its edits are made via `:made_via`
+  (`"phone"`; a connection of the Mac's is `"mac"`), and the process
+  `:draws_to` names (the phone's session) is told `:list_channel_draws` once,
+  when the channel first pulls the index, so the phone's turns say they draw
+  lists.
+
   ## Files (version 7)
 
   The hello tells the owner's connection (`:independent`) where to hand the
@@ -247,6 +262,11 @@ defmodule FermixChannels.Companion.Connection do
       checklists: Checklists.new(),
       checklist_opts: Keyword.get(opts, :checklist_opts, []),
       checklist_window_ms: Keyword.get(opts, :checklist_window_ms, @checklist_window_ms),
+      # A phone's list channel (moduledoc): the scope it serves, who its edits
+      # are made via, and the session told when it draws lists.
+      scope: scope!(Keyword.get(opts, :scope, :all)),
+      made_via: made_via!(Keyword.get(opts, :made_via, "mac")),
+      draws_to: Keyword.get(opts, :draws_to),
       # Placed once at handover, before any line is read (moduledoc); the
       # daemon's process and platform are seams a test stands in for.
       daemon_os_pid: Keyword.get(opts, :daemon_os_pid, String.to_integer(System.pid())),
@@ -383,6 +403,7 @@ defmodule FermixChannels.Companion.Connection do
   defp dispatch(%{type: type} = event, state) do
     cond do
       Protocol.client_event_version(type) > state.version -> refuse({:unknown_event, type}, state)
+      not in_scope?(type, state) -> refuse({:unknown_event, type}, state)
       not attachments_admitted?(event, state) -> refuse(:attachments_unsupported, state)
       true -> serve_admitted(event, state)
     end
@@ -397,6 +418,15 @@ defmodule FermixChannels.Companion.Connection do
   end
 
   defp attachments_admitted?(_event, _state), do: true
+
+  @list_events ~w(checklists_pull checklist_pull checklist_edit)
+
+  # A phone's list channel serves the lists alone (moduledoc).
+  defp in_scope?(type, %{scope: :lists}), do: type in @list_events
+  defp in_scope?(_type, %{scope: :all}), do: true
+
+  defp scope!(scope) when scope in [:all, :lists], do: scope
+  defp made_via!(via) when via in ["mac", "phone"], do: via
 
   # The events that read or write the home's store, besides a `msg` or
   # `command`, which `Requests.request/3` refuses itself before it claims
@@ -536,7 +566,7 @@ defmodule FermixChannels.Companion.Connection do
       |> Map.merge(epoch)
       |> offer_attachments(state)
 
-    with {:ok, _owner} <- Registry.register(state.registry, @profile, version),
+    with {:ok, _owner} <- Registry.register(state.registry, registry_key(state), version),
          :ok <- watch_home(version, state),
          :ok <- send_event("server_hello", server_hello, state),
          :ok <- send_pending_approvals(state),
@@ -547,6 +577,11 @@ defmodule FermixChannels.Companion.Connection do
       _failed -> {:stop, state}
     end
   end
+
+  # A phone's list channel joins no timeline: only the list notifier reaches
+  # its key (moduledoc).
+  defp registry_key(%{scope: :lists}), do: {:lists, @profile}
+  defp registry_key(%{scope: :all}), do: @profile
 
   # The inbox and the largest file it takes, for the owner's connection alone
   # and only while the store runs (moduledoc).
@@ -560,6 +595,8 @@ defmodule FermixChannels.Companion.Connection do
   defp offer_attachments(hello, _state), do: hello
 
   # Before the hello is written, so the watch's first word follows it.
+  defp watch_home(_version, %{scope: :lists}), do: :ok
+
   defp watch_home(version, %{status_watch: watch}) do
     if watch != nil and Protocol.server_event_version("home_status_changed") <= version,
       do: StatusWatch.subscribe(watch, self()),
@@ -569,6 +606,8 @@ defmodule FermixChannels.Companion.Connection do
   # Every proposal still waiting follows the server_hello, oldest first, for
   # the owner's connection on version 4 alone (moduledoc); one that arrives
   # meanwhile may come twice, and the client keys cards by `proposal_id`.
+  defp send_waiting_proposals(%{scope: :lists}), do: :ok
+
   defp send_waiting_proposals(state) do
     state.proposal_opts
     |> Proposals.waiting()
@@ -597,6 +636,8 @@ defmodule FermixChannels.Companion.Connection do
   # server_hello, in the step that joined the registry, so a client that was
   # not connected when it went out shows it, and its resolution can only
   # arrive after it. Only a card raised here: a phone's resolves only there.
+  defp send_pending_approvals(%{scope: :lists}), do: :ok
+
   defp send_pending_approvals(state) do
     state.approvals
     |> Approvals.pending(@profile, :companion)
@@ -756,6 +797,7 @@ defmodule FermixChannels.Companion.Connection do
   defp checklists_pull(%{"profile_id" => @profile}, state) do
     case ChecklistRegistry.device_index(state.caller, state.checklist_opts) do
       {:ok, lists} ->
+        :ok = tell_draws(state)
         state = %{state | checklists: Checklists.index_pulled(state.checklists)}
         written(send_event("checklists", Checklists.index_payload(@profile, lists), state), state)
 
@@ -765,6 +807,15 @@ defmodule FermixChannels.Companion.Connection do
   end
 
   defp checklists_pull(_payload, state), do: answer({:error, :unsupported_profile}, state)
+
+  # The session a phone's list channel serves hears it draws lists once, at
+  # the first index this connection pulls (moduledoc).
+  defp tell_draws(%{draws_to: pid} = state) when is_pid(pid) do
+    unless Checklists.draws?(state.checklists), do: send(pid, :list_channel_draws)
+    :ok
+  end
+
+  defp tell_draws(_state), do: :ok
 
   defp checklist_pull(%{"profile_id" => @profile, "list_id" => list_id} = payload, state) do
     removed? = payload["removed"] == true
@@ -783,7 +834,9 @@ defmodule FermixChannels.Companion.Connection do
   defp checklist_pull(_payload, state), do: answer({:error, :unsupported_profile}, state)
 
   defp checklist_edit(%{"profile_id" => @profile, "client_msg_id" => id} = payload, state) do
-    case ChecklistRegistry.device_edit(payload, state.caller, state.checklist_opts) do
+    opts = Keyword.put(state.checklist_opts, :made_via, state.made_via)
+
+    case ChecklistRegistry.device_edit(payload, state.caller, opts) do
       {:ok, %{duplicate: false} = done} ->
         state = hold_made_list(payload, done, state)
 

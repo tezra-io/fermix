@@ -18,7 +18,9 @@ defmodule FermixChannels.Companion.Turns do
       claims its outcome, and a stop in that window would leave the timeline
       holding an answer the conversation's history marks as stopped. A phone
       turn streams and writes its own rows as it runs (`Channels.Mobile`'s
-      draft and `send_message`), so here it is settled and ended;
+      draft and `send_message`), each with the blocks of the records its
+      tools put since the last, taken as it is written (M85 E4), so here it
+      is settled and ended;
     * `{:completed}` writes each held reply as a timeline row, announces it as
       `text_done` at its `server_seq` to the companion connections and as a
       `row` to the phones, and completes the request. The place records the
@@ -507,8 +509,9 @@ defmodule FermixChannels.Companion.Turns do
 
   # The place records the conversation's searches returned, taken once for a
   # companion turn's replies (M72 §8.4). A phone turn writes its own rows and
-  # takes none. A holder that cannot answer is the operator's to read: the
-  # replies are written as text alone, which stands on its own.
+  # takes its records as it writes each (`Channels.Mobile`, M85 E4). A holder
+  # that cannot answer is the operator's to read: the replies are written as
+  # text alone, which stands on its own.
   defp reply_records(_state, %{transport: :mobile}), do: []
   defp reply_records(_state, %{replies: []}), do: []
 

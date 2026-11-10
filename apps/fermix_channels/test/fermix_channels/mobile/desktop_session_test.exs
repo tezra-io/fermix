@@ -159,8 +159,10 @@ defmodule FermixChannels.Mobile.DesktopSessionTest do
     {[{refusal, <<>>}], _client} = Driver.client_receive(desktop, desktop_client)
     assert refusal["code"] == "unsupported_event"
 
+    # A phone's list channel is the companion family's (M85 E4); the rest of
+    # a desktop's families stay a desktop's.
     {phone, phone_client} = ready_phone!(ctx)
-    phone_client = Driver.client_send(phone, phone_client, "companion_open", %{"channel" => 1}, 2)
+    phone_client = Driver.client_send(phone, phone_client, "manage", manage_fields(), 2, "{}")
     {[{refusal, <<>>}], phone_client} = Driver.client_receive(phone, phone_client)
     assert refusal["code"] == "unsupported_event"
 

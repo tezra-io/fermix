@@ -60,20 +60,20 @@ defmodule FermixChannels.Channels.Mobile do
     result
   end
 
-  defp do_parse_event(%{type: "msg", payload: payload}) when is_map(payload) do
+  defp do_parse_event(%{type: "msg", payload: payload} = event) when is_map(payload) do
     with {:ok, profile} <- profile(payload),
          {:ok, client_id} <- required(payload, "client_msg_id"),
          {:ok, text} <- binary(payload, "text"),
          {:ok, attachments} <- attachments(payload) do
-      {:ok, [message(client_id, profile, text, attachments, "msg")]}
+      {:ok, [message(client_id, profile, text, attachments, "msg") |> draws_lists(event)]}
     end
   end
 
-  defp do_parse_event(%{type: "command", payload: payload}) when is_map(payload) do
+  defp do_parse_event(%{type: "command", payload: payload} = event) when is_map(payload) do
     with {:ok, profile} <- profile(payload),
          {:ok, client_id} <- required(payload, "client_msg_id"),
          {:ok, command} <- command_text(payload) do
-      {:ok, [message(client_id, profile, command, [], "command")]}
+      {:ok, [message(client_id, profile, command, [], "command") |> draws_lists(event)]}
     end
   end
 
@@ -149,12 +149,14 @@ defmodule FermixChannels.Channels.Mobile do
   @impl true
   def seal_draft(%Message{} = message, %{turn_id: turn_id, state: state}, text)
       when is_binary(turn_id) and is_pid(state) and is_binary(text) do
-    with {:ok, {status, row}} <- persist_final_text(message, text) do
-      _ = emit_after_commit(message.chat_id, Output.text_done(turn_id, row, text))
+    blocks = turn_blocks(message.chat_id, text)
+
+    with {:ok, {status, row}} <- persist_final_text(message, text, blocks) do
+      _ = emit_after_commit(message.chat_id, Output.text_done(turn_id, row, text, blocks))
       _ = announce_to_companion(status, message.chat_id, row)
 
       _ =
-        LinkPreviews.schedule(message.chat_id, row.server_seq, ReplyBlocks.links(text),
+        LinkPreviews.schedule(message.chat_id, row.server_seq, ReplyBlocks.links(text, blocks),
           store: store()
         )
 
@@ -284,6 +286,7 @@ defmodule FermixChannels.Channels.Mobile do
     {result, duration_us} =
       Telemetry.timed_us(fn ->
         with :ok <- validate_profile(profile_id),
+             opts = with_turn_blocks(profile_id, text, opts),
              {:ok, {status, row}} <- Output.persist_text(store(), profile_id, text, Map.new(opts)),
              :ok <- deliver_persisted_text(status, profile_id, text, row, opts) do
           {:ok, status}
@@ -363,6 +366,13 @@ defmodule FermixChannels.Channels.Mobile do
     })
   end
 
+  # Whether the phone's list channel pulled the index (M85 E4): read off its
+  # session, never the payload, as the Mac's connection marks its turns.
+  defp draws_lists(%Message{} = message, %{draws_lists: true}),
+    do: %{message | metadata: Map.put(message.metadata, :draws_lists, true)}
+
+  defp draws_lists(%Message{} = message, _event), do: message
+
   defp attachments(payload), do: {:ok, Map.get(payload, "attachments", [])}
 
   defp profile(payload) do
@@ -415,14 +425,37 @@ defmodule FermixChannels.Channels.Mobile do
   defp client_message_id(%Message{} = message),
     do: value(message.metadata, :client_msg_id) || message.id
 
-  defp persist_final_text(message, text) do
+  defp persist_final_text(message, text, blocks) do
     attrs = %{
       turn_id: turn_id(message),
       in_reply_to: client_message_id(message),
-      attempt: request_attempt(message)
+      attempt: request_attempt(message),
+      blocks: blocks
     }
 
     Output.persist_final_text(store(), message.chat_id, attrs, text)
+  end
+
+  # A reply of a turn takes the records its tools put for the shared
+  # conversation, once, and is written with the blocks its text makes of them
+  # (M85 E4), as a Mac turn's reply is (`Companion.Turns`); a delivery no turn
+  # streamed brings its own `:blocks`, if any.
+  defp with_turn_blocks(profile_id, text, opts) do
+    if Keyword.has_key?(opts, :turn_id) and not Keyword.has_key?(opts, :blocks),
+      do: Keyword.put(opts, :blocks, turn_blocks(profile_id, text)),
+      else: opts
+  end
+
+  # A holder that cannot answer is the operator's to read: the reply is
+  # written as text alone, which stands on its own.
+  defp turn_blocks(profile_id, text) do
+    holder = Application.get_env(:fermix_channels, :mobile_reply_blocks, ReplyBlocks)
+    records = ReplyBlocks.take(holder, Companion.conversation_key(profile_id))
+    ReplyBlocks.build(text, records)
+  catch
+    :exit, reason ->
+      Logger.error("a phone reply's list and place records were not taken: #{inspect(reason)}")
+      []
   end
 
   defp persist_media(store, profile_id, media, ref, attrs) do
@@ -463,7 +496,7 @@ defmodule FermixChannels.Channels.Mobile do
   defp delivered_text(profile, text, row, opts) do
     case Keyword.get(opts, :turn_id) do
       nil -> Output.row(profile, row)
-      turn_id -> Output.text_done(turn_id, row, text)
+      turn_id -> Output.text_done(turn_id, row, text, Keyword.get(opts, :blocks, []))
     end
   end
 

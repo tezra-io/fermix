@@ -21,6 +21,7 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
   @client_binary_fixtures Path.join(@priv_dir, "fixtures/client_binary_frames.jsonl")
   @server_binary_fixtures Path.join(@priv_dir, "fixtures/server_binary_frames.jsonl")
   @pairing_links Path.join(@priv_dir, "fixtures/pairing_links.jsonl")
+  @companion_schema_path Application.app_dir(:fermix_core, "priv/companion/protocol.schema.json")
   @attestation_roots Path.join(@priv_dir, "attestation_roots.json")
   @android_signers Path.join(@priv_dir, "android_signers.json")
   # The reasons this primary gives for a call's end and for serving none: the
@@ -897,6 +898,26 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
     end
   end
 
+  # PROTOCOL.md "Desktop sessions": a run of `companion_line` frames carries
+  # one line of the companion connection, without its newline, which the
+  # companion protocol reads as it reads a line from its socket.
+  test "every companion_line run in the fixtures joins into one companion line" do
+    companion = @companion_schema_path |> File.read!() |> Jason.decode!()
+
+    for {path, ref} <- [
+          {@client_binary_fixtures, "clientEvent"},
+          {@server_binary_fixtures, "serverEvent"}
+        ] do
+      lines = companion_lines(path)
+      assert lines != [], "no companion line in #{Path.basename(path)}"
+
+      for line <- lines do
+        refute String.ends_with?(line, "\n"), line
+        assert WireSchema.errors(Jason.decode!(line), WireSchema.ref(ref), companion) == [], line
+      end
+    end
+  end
+
   test "every chunked run in the binary fixtures reassembles within its bound" do
     runs =
       for {path, decode} <- [
@@ -948,6 +969,30 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
     |> File.read!()
     |> String.split("\n", trim: true)
     |> Enum.map(&Jason.decode!/1)
+  end
+
+  # A fixture file's companion lines: each channel's frames in file order,
+  # joined at each `last`.
+  defp companion_lines(path) do
+    path
+    |> jsonl()
+    |> Enum.filter(&(&1["header"]["t"] == "companion_line"))
+    |> Enum.group_by(& &1["header"]["channel"])
+    |> Enum.flat_map(fn {_channel, frames} -> join_lines(frames) end)
+  end
+
+  defp join_lines(frames) do
+    {lines, []} = Enum.reduce(frames, {[], []}, &join_frame/2)
+    Enum.reverse(lines)
+  end
+
+  defp join_frame(fixture, {lines, run}) do
+    assert fixture["header"]["index"] == length(run)
+    run = [Base.decode64!(fixture["bytes_b64"]) | run]
+
+    if fixture["header"]["last"],
+      do: {[run |> Enum.reverse() |> IO.iodata_to_binary() | lines], []},
+      else: {lines, run}
   end
 
   defp client_headers do

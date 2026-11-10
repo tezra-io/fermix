@@ -70,6 +70,18 @@ defmodule FermixChannels.Mobile.Session do
   silent mid-stream (`{:mobile_call_silent, call}`) closes `1000`, so a phone
   whose link is alive reconnects and resumes. A phone's `hello_ack` says
   whether this primary serves calls (`caps.call`).
+
+  ## A phone's list channel
+
+  A phone's `hello_ack` says `caps.lists: true` (M85 E4): it may open one list
+  channel, the companion family a desktop's tunnel uses. Its first
+  `companion_open` starts its peer (`Desktop.Peer` with the companion family
+  alone, `kind: :phone`, registered apart from the desktops'), which this
+  session hands each of its companion events, as a desktop's; a phone that
+  never opens one runs none. The channel ends with the session. Once the
+  channel has pulled the index (`:list_channel_draws`), each `msg` and
+  `command` this session queues says it draws lists, so the phone's turns are
+  told their lists are drawn under the reply.
   """
 
   require Logger
@@ -77,7 +89,9 @@ defmodule FermixChannels.Mobile.Session do
   alias FermixChannels.Companion.Approvals
   alias FermixChannels.Companion.Fanout
   alias FermixChannels.Companion.Output
+  alias FermixChannels.Desktop.Companion, as: DesktopCompanion
   alias FermixChannels.Desktop.Peer, as: DesktopPeer
+  alias FermixChannels.Desktop.Supervisor, as: DesktopSupervisor
   alias FermixChannels.Gateway.Commands.Registry, as: CommandRegistry
   alias FermixChannels.Home.EnrollmentResponder
   alias FermixChannels.Mobile.Attestation
@@ -301,6 +315,8 @@ defmodule FermixChannels.Mobile.Session do
     |> Map.put_new(:desktop_peer_supervisor, FermixChannels.Desktop.PeerSupervisor)
     |> Map.put_new(:desktop_peer, nil)
     |> Map.put_new(:desktop_peer_ref, nil)
+    |> Map.put_new(:phone_families, %{companion: {DesktopCompanion, [kind: :phone]}})
+    |> Map.put_new(:draws_lists?, false)
     |> Map.put_new(:calls, FermixChannels.Mobile.Calls)
     |> Map.put_new(:call_supervisor, FermixChannels.Mobile.CallSupervisor)
     |> Map.put_new(:call_options, [])
@@ -414,6 +430,10 @@ defmodule FermixChannels.Mobile.Session do
       do: {:stop, :call_link_silent, {1000, "call link silent"}, state}
 
   def handle_info({:mobile_call_silent, call}, state) when is_pid(call), do: {:ok, state}
+
+  # The phone's list channel pulled the index: its turns from now on say they
+  # draw lists (moduledoc).
+  def handle_info(:list_channel_draws, state), do: {:ok, %{state | draws_lists?: true}}
 
   def handle_info(
         {:mobile_handshake_deadline, token},
@@ -898,7 +918,19 @@ defmodule FermixChannels.Mobile.Session do
       else: dispatch_event(event, state)
   end
 
-  defp dispatch_ready(event, state), do: dispatch_event(event, state)
+  # A phone's first companion event starts its list peer (moduledoc).
+  defp dispatch_ready(%{type: type} = event, state) do
+    if session_kind(state) == :phone and DesktopPeer.family_event?(type),
+      do: open_list_peer(event, state),
+      else: dispatch_event(event, state)
+  end
+
+  defp open_list_peer(event, state) do
+    case start_desktop_peer(state, :phone) do
+      {:ok, state} -> deliver_to_peer(event, state.desktop_peer, state)
+      {:error, reason} -> {:close, {:desktop_peer_unavailable, reason}, state}
+    end
+  end
 
   defp deliver_to_peer(event, peer, state) do
     case state.deliver_desktop_event.(peer, event) do
@@ -1102,7 +1134,7 @@ defmodule FermixChannels.Mobile.Session do
   defp after_hello_ack(:phone, frames, state), do: with_pending_approvals(frames, state)
 
   defp after_hello_ack(:desktop, frames, state) do
-    case start_desktop_peer(state) do
+    case start_desktop_peer(state, :desktop) do
       {:ok, state} -> {:ok, frames, state}
       {:error, reason} -> {:error, {:desktop_peer_not_started, reason}, state}
     end
@@ -1114,13 +1146,12 @@ defmodule FermixChannels.Mobile.Session do
     {:stop, reason, {1011, "desktop peer failed"}, state}
   end
 
-  defp start_desktop_peer(state) do
-    opts = [
-      device_id: state.device_id,
-      session: self(),
-      registry: state.desktop_peers,
-      connected_since: state.wall_clock.()
-    ]
+  # A desktop's peer serves every family it sends; a phone's, its list
+  # channel alone, registered apart so it is never a connected desktop.
+  defp start_desktop_peer(state, kind) do
+    opts =
+      [device_id: state.device_id, session: self(), connected_since: state.wall_clock.()] ++
+        peer_place(kind, state)
 
     case state.start_desktop_peer.(opts) do
       {:ok, peer} when is_pid(peer) ->
@@ -1182,6 +1213,15 @@ defmodule FermixChannels.Mobile.Session do
     end
   end
 
+  # A desktop's peer is the desktops'; a phone's runs its list channel alone.
+  defp peer_place(:desktop, state), do: [registry: state.desktop_peers]
+
+  defp peer_place(:phone, state),
+    do: [
+      registry: DesktopSupervisor.phone_registry(state.desktop_peers),
+      families: state.phone_families
+    ]
+
   defp caps(state) do
     caps = %{
       "commands" => CommandRegistry.catalog(),
@@ -1192,10 +1232,12 @@ defmodule FermixChannels.Mobile.Session do
       "push" => state.push_services
     }
 
-    # Whether this primary serves a call from the phone (M87): a phone's
-    # alone, since a desktop's own voice reaches its own computer's socket.
+    # Whether this primary serves a call from the phone (M87), and that it
+    # takes the phone's list channel (M85 E4): a phone's alone, since a
+    # desktop's own voice reaches its own computer's socket and its lists
+    # ride its companion tunnel.
     if session_kind(state) == :phone,
-      do: Map.put(caps, "call", state.call_caps.(state.device_id)),
+      do: Map.merge(caps, %{"call" => state.call_caps.(state.device_id), "lists" => true}),
       else: caps
   end
 
@@ -1452,6 +1494,7 @@ defmodule FermixChannels.Mobile.Session do
     router = state.event_router
     context = ingress_context(state)
     opts = router_opts(state)
+    event = if state.draws_lists?, do: Map.put(event, :draws_lists, true), else: event
 
     fn ->
       case router.(event, context, opts) do

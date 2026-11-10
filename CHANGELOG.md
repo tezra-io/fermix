@@ -121,6 +121,14 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   robot burns one key on its chip for good, and that returning to stock still
   works. The robot's checks, Calibrate head and its own settings stay in the
   Mac app.
+- **Your lists on your phone, live.** A paired phone now reads and changes
+  your lists as the Mac app does. A reply that read or changed a list shows
+  the list under it, and you tick, add, edit, move and restore items there.
+  Each change lands at once everywhere, and a change from a reply, a
+  scheduled job or the Mac shows on the phone as it happens. The lists travel
+  over the phone's own encrypted connection, so they work wherever Fermix
+  runs. A phone app that doesn't draw lists yet keeps showing a reply's list
+  as text.
 
 ### Changed
 

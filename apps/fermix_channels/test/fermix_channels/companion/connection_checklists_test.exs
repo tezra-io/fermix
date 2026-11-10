@@ -17,6 +17,7 @@ defmodule FermixChannels.Companion.ConnectionChecklistsTest do
   alias FermixChannels.Companion.Approvals
   alias FermixChannels.Companion.ChecklistNotifier
   alias FermixChannels.Companion.Endpoint
+  alias FermixChannels.Companion.Output
   alias FermixChannels.Mobile.RequestCoordinator
   alias FermixCore.Checklists.Registry, as: ChecklistRegistry
   alias FermixCore.Memory.Repo
@@ -119,6 +120,7 @@ defmodule FermixChannels.Companion.ConnectionChecklistsTest do
       socket_path: socket_path,
       registry: registry,
       repo: repo,
+      approvals: approvals,
       checklist_opts: checklist_opts,
       endpoint_opts: endpoint_opts
     }
@@ -537,6 +539,124 @@ defmodule FermixChannels.Companion.ConnectionChecklistsTest do
   # --- plumbing -------------------------------------------------------------------
 
   # The answer to a request, past any push that arrived before it.
+  # --- a phone's list channel (M85 E4) ------------------------------------------------
+
+  # The connection a phone's list channel runs: lists only, its edits made via
+  # the phone, and the session it serves told once it draws lists.
+  defp phone_channel!(ctx, opts \\ []) do
+    restart_endpoint(ctx, [scope: :lists, made_via: "phone", draws_to: self()] ++ opts)
+  end
+
+  defp flush_lists!(registry) do
+    for {pid, _version} <- Registry.lookup(registry, {:lists, "main"}),
+        do: send(pid, :checklists_flush)
+
+    :ok
+  end
+
+  describe "a phone's lists-only connection" do
+    test "pulls the index and a list, and edits, its rows made via the phone", ctx do
+      list_id = groceries!(ctx)
+      phone_channel!(ctx)
+      phone = hello(ctx.socket_path, 7)
+
+      assert [%{"list_id" => ^list_id}] = pull_index(phone)
+      assert_receive :list_channel_draws
+      _ = pull(phone, list_id)
+
+      edit(phone, "phone-add-1", list_id, %{"op" => "add", "text" => "Eggs"})
+      accepted!(phone, "phone-add-1")
+
+      {:ok, %{rows: rows}} =
+        ChecklistRegistry.device_list(list_id, false, :independent, ctx.checklist_opts)
+
+      assert %{made_via: "phone"} = Enum.find(rows, &(&1.text == "Eggs"))
+      assert %{made_via: "chat"} = Enum.find(rows, &(&1.text == "Lemons"))
+    end
+
+    test "says it draws lists once, and only after the index was pulled", ctx do
+      list_id = groceries!(ctx)
+      phone_channel!(ctx)
+      phone = hello(ctx.socket_path, 7)
+
+      _ = pull(phone, list_id)
+      refute_received :list_channel_draws
+
+      _ = pull_index(phone)
+      _ = pull_index(phone)
+      assert_receive :list_channel_draws
+      refute_receive :list_channel_draws, 100
+    end
+
+    test "joins no timeline: no row, no approval and no Always On word reach it", ctx do
+      card = Output.approval(%{kind: :sandbox, text: "Mac?", token: "MAC-T"})
+      assert :ok = Approvals.announce(ctx.approvals, "main", card, :companion)
+      phone_channel!(ctx, status_watch: self())
+      phone = hello(ctx.socket_path, 7)
+
+      assert Registry.lookup(ctx.registry, "main") == []
+      assert [{_pid, 7}] = Registry.lookup(ctx.registry, {:lists, "main"})
+      refute_received {:"$gen_cast", {:subscribe, _pid}}
+
+      # A waiting approval would have followed the hello, before this answer.
+      assert [] = pull_index(phone)
+    end
+
+    test "hears a change to a list it holds, whoever made it", ctx do
+      list_id = groceries!(ctx)
+      phone_channel!(ctx)
+      phone = hello(ctx.socket_path, 7)
+      _ = pull(phone, list_id)
+
+      model_edit!(ctx, [%{"list" => "Groceries", "ops" => [%{"op" => "add", "text" => "Milk"}]}])
+      flush_lists!(ctx.registry)
+
+      assert %{"type" => "checklist", "list" => %{"rev" => 2, "rows" => rows}} = recv(phone)
+      assert Enum.any?(rows, &(&1["text"] == "Milk"))
+    end
+
+    test "refuses every event but the lists' as unknown, and closes", ctx do
+      phone_channel!(ctx)
+
+      for %{"type" => type} = event <- refused_on_a_list_channel() do
+        phone = hello(ctx.socket_path, 7)
+        send_line(phone, event)
+        assert %{"type" => "error", "reason" => "unknown_event", "event" => ^type} = recv(phone)
+        assert {:error, :closed} = :gen_tcp.recv(phone, 0, @arrival_ms)
+      end
+    end
+  end
+
+  # Each as the companion goldens carry it, so only its type is refused.
+  defp refused_on_a_list_channel do
+    [
+      %{
+        "type" => "msg",
+        "client_msg_id" => "m-1",
+        "profile_id" => "main",
+        "text" => "hi",
+        "attach_ids" => []
+      },
+      %{
+        "type" => "command",
+        "client_msg_id" => "c-1",
+        "profile_id" => "main",
+        "name" => "confirm",
+        "args" => "opaque-token"
+      },
+      %{"type" => "cancel", "profile_id" => "main", "client_msg_id" => "m-1"},
+      %{"type" => "history_pull", "profile_id" => "main", "before_seq" => 120, "limit" => 50},
+      %{"type" => "read_state", "profile_id" => "main", "read_up_to_seq" => 13},
+      %{
+        "type" => "proposal_answer",
+        "client_msg_id" => "p-1",
+        "profile_id" => "main",
+        "proposal_id" => "cpr_4f1c2a9b7e3d5a60c8b1f2e3",
+        "decision" => "confirm"
+      }
+    ]
+  end
+
   defp next_answer(client) do
     case recv(client) do
       %{"type" => type} when type in ["checklist", "checklists"] -> next_answer(client)

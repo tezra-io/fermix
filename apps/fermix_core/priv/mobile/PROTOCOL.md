@@ -606,7 +606,9 @@ phone offers notifications only when its own platform's service is in it: an
 iPhone does when `apns` is listed, an Android phone never does. A daemon
 older than the list sends no `push`. A phone's `hello_ack` also carries
 `call`, whether this primary serves a call from the phone now (see *Calls
-from the phone*); a desktop's, and an older primary's, carries none. A `hello_ack` with 16 numeric candidates and the whole
+from the phone*), and `lists: true`, that it takes the phone's list channel
+(see *Lists on a phone*); a desktop's, and an older primary's, carries
+neither, and a phone opens a list channel only on `lists: true`. A `hello_ack` with 16 numeric candidates and the whole
 command catalog fits one frame; one whose candidates are long MagicDNS names
 arrives as an `event_part` run.
 
@@ -632,7 +634,7 @@ key only when it has one.
 
 `blocks[]` are records a reply carries, such as the places a search found
 that it recommends or the lists its turn read or changed, which the Mac's chat
-draws beside the text: the shape and
+draws beside the text, and a phone's turn carries too (*Lists on a phone*): the shape and
 rules are the companion socket's (`priv/companion/PROTOCOL.md`, *Blocks under
 a reply*). A row has the key only when it has one. The text stands alone, so a
 phone may ignore them, and skips a block `type` it does not know.
@@ -1132,7 +1134,9 @@ on, redialed with the usual backoff. A desktop the primary revoked (`4003`,
 live or at the handshake) does not dial again until its engine restarts.
 
 A desktop's session takes the phone events `hello`, `ping`, `media_fetch` and
-`ack`, and these:
+`ack`, and these (the companion family, `companion_open`, `companion_line` and
+`companion_close`, is a phone's list channel too, one channel and lists only:
+see *Lists on a phone*):
 
 | `t` | Required payload | Rules |
 |---|---|---|
@@ -1203,6 +1207,42 @@ encrypted: `snapshot_begin`, `snapshot_chunk`s of at most 60 KiB from
 `index` 0, `snapshot_end`. The desktop answers `snapshot_stored` with the
 SHA-256 it computed, which verifies the copy when it is `snapshot_begin`'s,
 or `snapshot_refused`. A new `snapshot_begin` abandons a copy in progress.
+
+## Lists on a phone
+
+A phone reads and changes the owner's lists over one list channel in its own
+session: the companion family a desktop's tunnel uses (`companion_open`,
+`companion_line`, `companion_close`, above), carrying the companion wire's
+list events line for line (`priv/companion/PROTOCOL.md`, *Lists*). A phone
+opens it only when its `hello_ack` says `caps.lists: true`; an older daemon
+says nothing and is sent no `companion_open`.
+
+The channel's first line is the phone's `client_hello`, in the companion
+window (`{6, 7}` today; a phone keeps up with companion versions as the Mac
+does, and one too old is refused `client_too_old`). On the primary it is an
+ordinary companion connection placed as the owner's, the phone's pairing being
+the proof, in the lists scope: it takes `client_hello`, `checklists_pull`,
+`checklist_pull` and `checklist_edit`, and is sent `server_hello`,
+`checklists`, `checklist`, `accepted` (to a `checklist_edit`) and `error`.
+Any other client event is refused `error{reason:"unknown_event", event}` on
+the channel, which then closes (`companion_close`); the session stays open.
+It is never sent a row, read state, history, a turn's stream, an approval, a
+proposal or `home_status_changed`: the phone has those on its own session.
+Its edits record `made_via: "phone"`.
+
+One channel per session: a second `companion_open`, whatever its number, is
+answered `companion_close` with "One list channel is open from this phone.",
+and the session stays open. The channel ends with the session; the phone
+opens it again after each `hello_ack`, and does not open it again in a session
+whose channel the primary closed. A line is at most 1 MiB, and a long list
+passes one frame's 60 KiB, so a whole list goes as one `companion_line` cut
+into chunks (the fixtures carry a 500-row list in two); the companion wire's
+own bounds hold inside it (a client line at most 65,536 bytes).
+
+Once the channel has pulled the index, the phone's turns say they draw lists:
+a reply that read or changed a list carries the `checklists` block (see
+*Timeline shapes*) on its `text_done` and `row`, and the model is told
+the list is drawn under its reply rather than to write it out.
 
 ## Enrollment and the move
 
@@ -1281,7 +1321,7 @@ sent is never sent to it. `FermixChannels.Mobile.Peers` is this table.
 
 | Kind | Sends | Is sent |
 |---|---|---|
-| phone | `hello` `msg` `attach_begin` `attach_chunk` `attach_end` `command` `cancel` `history_pull` `media_fetch` `push_register` `push_unregister` `ack` `read_state` `request_status` `unpair` `ping` `call_open` `call_line` `call_audio` `call_frame` `call_close` | `hello_ack` `accepted` `attach_status` `turn_started` `text_delta` `tool_event` `text_done` `turn_done` `media_begin` `media_chunk` `media_end` `turn_error` `row` `reaction` `approval` `approval_resolved` `link_preview` `read_state` `history_page` `request_status_page` `notice` `error` `pong` `event_part` `call_attached` `call_line` `call_audio` `call_close` |
+| phone | `hello` `msg` `attach_begin` `attach_chunk` `attach_end` `command` `cancel` `history_pull` `media_fetch` `push_register` `push_unregister` `ack` `read_state` `request_status` `unpair` `ping` `call_open` `call_line` `call_audio` `call_frame` `call_close` `companion_open` `companion_line` `companion_close` | `hello_ack` `accepted` `attach_status` `turn_started` `text_delta` `tool_event` `text_done` `turn_done` `media_begin` `media_chunk` `media_end` `turn_error` `row` `reaction` `approval` `approval_resolved` `link_preview` `read_state` `history_page` `request_status_page` `notice` `error` `pong` `event_part` `call_attached` `call_line` `call_audio` `call_close` `companion_line` `companion_close` |
 | desktop | `hello` `ping` `media_fetch` `ack` `companion_open` `companion_line` `companion_close` `manage` `loopback_request` `loopback_failed` `snapshot_stored` `snapshot_refused` | `hello_ack` `error` `pong` `event_part` `media_begin` `media_chunk` `media_end` `companion_line` `companion_close` `manage_result` `loopback_open` `loopback_response` `loopback_close` `snapshot_begin` `snapshot_chunk` `snapshot_end` |
 | enrollment | `enroll_request` `ping` | `enroll_accepted` `error` `pong` |
 | move | `move_offer` `move_chunk` `move_end` `move_commit` `move_resume` `ping` | `move_accept` `move_ready` `move_done` `error` `pong` |
@@ -1376,7 +1416,7 @@ the device has since replaced.
 | `1003` | a text message | send binary messages |
 | `1008` | the handshake deadline (`mobile handshake deadline`); on the remote route, also a stream still in its handshake closed to make room for a newer one | reconnect |
 | `1009` | a message over 65,535 bytes (`mobile frame too large`) | never send one |
-| `1011` | the daemon's socket failed, or the primary's side of a desktop's session failed or did not start (`desktop peer failed`) | reconnect |
+| `1011` | the daemon's socket failed, or the primary's side of a desktop's session, or of a phone's list channel, failed or did not start (`desktop peer failed`) | reconnect |
 | `4001` | `connection replaced`: a newer connection of the same phone, or a pairing request from the same phone key | do not reconnect this connection; the newer one is live |
 | `4003` | `device revoked`, `device unknown` (an `IK` handshake from a key no row holds), `pairing <reason>` after `pair_denied`, `authenticated device mismatch` (the `hello` named another device), `enrollment <reason>` after a refused enrollment, or `move <code>` after a refused move step | do not reconnect with this identity until it pairs again; a candidate or a move's source reads the `error` before it |
 

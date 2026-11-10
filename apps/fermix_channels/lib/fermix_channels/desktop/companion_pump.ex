@@ -22,6 +22,11 @@ defmodule FermixChannels.Desktop.CompanionPump do
   without: the app writes its files on the desktop, where the primary's inbox
   is not, so the hello offers no attachments (companion protocol 7).
 
+  A phone's list channel (`kind: :phone`, M85 E4) changes three more: the
+  connection serves the lists scope (`scope: :lists`), its edits are made via
+  the phone, and the phone's session (`:session`) is told when the channel
+  draws lists.
+
   ## Lines
 
   Each line the connection writes goes to the desktop as one `companion_line`
@@ -70,6 +75,8 @@ defmodule FermixChannels.Desktop.CompanionPump do
       endpoint: Keyword.fetch!(opts, :endpoint),
       supervisor: Keyword.fetch!(opts, :supervisor),
       socket_dir: Keyword.fetch!(opts, :socket_dir),
+      kind: Keyword.get(opts, :kind, :desktop),
+      session: Keyword.get(opts, :session),
       line_bound: line_bound,
       client: nil,
       buffer: "",
@@ -83,6 +90,7 @@ defmodule FermixChannels.Desktop.CompanionPump do
   def handle_continue(:connect, state) do
     with {:ok, connection_opts} <- Endpoint.connection_opts(state.endpoint),
          {:ok, client, server} <- socket_pair(state.socket_dir),
+         connection_opts = for_kind(connection_opts, state),
          {:ok, _connection} <- start_connection(state.supervisor, connection_opts, server) do
       arm(%{state | client: client})
     else
@@ -222,6 +230,13 @@ defmodule FermixChannels.Desktop.CompanionPump do
     {:error, reason}
   end
 
+  # A phone's list channel serves the lists alone, its edits made via the
+  # phone, and its session hears when it draws them (moduledoc).
+  defp for_kind(connection_opts, %{kind: :phone, session: session}) when is_pid(session),
+    do: Keyword.merge(connection_opts, scope: :lists, made_via: "phone", draws_to: session)
+
+  defp for_kind(connection_opts, %{kind: :desktop}), do: connection_opts
+
   # The desktop's app writes its files on the desktop, which the primary's
   # inbox is not on, so the connection offers it no attachments.
   defp start_connection(supervisor, connection_opts, server) do
@@ -269,7 +284,7 @@ defmodule FermixChannels.Desktop.CompanionPump do
   defp carry(state, ""), do: lines(state)
 
   defp carry(state, line) when byte_size(line) > state.line_bound,
-    do: {:error, too_long(), state}
+    do: {:error, too_long(state), state}
 
   defp carry(state, line) do
     event = %{"t" => "companion_line", "channel" => state.channel}
@@ -280,15 +295,15 @@ defmodule FermixChannels.Desktop.CompanionPump do
 
       {:error, reason} ->
         Logger.warning("desktop companion pump: a line was not sent: #{inspect(reason)}")
-        {:error, "The chat could not reach this desktop.", state}
+        {:error, "The chat could not reach this #{state.kind}.", state}
     end
   end
 
   defp bounded(partial, state) do
     if byte_size(partial) > state.line_bound,
-      do: {:error, too_long(), state},
+      do: {:error, too_long(state), state},
       else: {:ok, state}
   end
 
-  defp too_long, do: "A line from the server was too long to carry to this desktop."
+  defp too_long(state), do: "A line from the server was too long to carry to this #{state.kind}."
 end

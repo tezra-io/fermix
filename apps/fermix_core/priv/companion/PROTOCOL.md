@@ -237,7 +237,8 @@ them from, and sends them to, only a version 6 connection placed as the
 owner's, and sends a list event only to a connection that pulled: the index
 to one that pulled the index, a list to one that holds it. A version 5
 connection that sends one is refused with `error: unknown_event` and closed,
-and is never sent one. The phone's wire does not carry lists in this version.
+and is never sent one. A phone carries the same events over its list channel
+on the mobile wire (see *Lists*).
 
 Version 6 also lets an app stop asking for Always On's state on a timer. It
 adds one more server event, `home_status_changed`, with no fields: Always
@@ -1103,7 +1104,8 @@ and draws every change as it commits, whoever made it.
   state, never a delta; a client drops one whose `rev` is below the one it
   shows. A connection that never pulled is sent nothing.
 - **An edit** (`checklist_edit`). One `op`, applied in the same transaction
-  as the model's edits, its rows recorded as made from the Mac. `list_id`
+  as the model's edits, its rows recorded as made from the Mac, or from the
+  phone over a phone's list channel (`made_via: "phone"`). `list_id`
   names the list for every op but `create`. It is answered `accepted`
   (`duplicate: false`) once applied, and its change reaches every holder as a
   push, the sender too. An edit sent again with a `client_msg_id` already
@@ -1128,6 +1130,16 @@ and draws every change as it commits, whoever made it.
   leaves the items to the list drawn under it (the reply's `checklists` block,
   see *Blocks under a reply*). A turn from a connection that never pulled the
   index writes the list out as text.
+- **A phone's list channel.** A paired phone reads and changes the lists
+  over one companion connection carried in its own mobile session (the mobile
+  protocol's *Lists on a phone*). It is placed as the owner's, the pairing
+  being the proof, and speaks these events and nothing else: `client_hello`,
+  `checklists_pull`, `checklist_pull` and `checklist_edit` in, `server_hello`,
+  `checklists`, `checklist`, `accepted` and `error` out. Any other client
+  event is refused `error: unknown_event` and the channel closes. Holding,
+  pushes, edits, refusals and bounds are as above; its edits are made via
+  the phone, and a phone turn after its pull of the index is told the app
+  draws lists, as a Mac turn is.
 
 The ops, the model's by row id without its `replace`, with `clear_done` and
 `restore`:

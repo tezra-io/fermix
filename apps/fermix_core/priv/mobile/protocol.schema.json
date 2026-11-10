@@ -286,7 +286,8 @@
         "media": {"type": "boolean"}, "streaming": {"type": "boolean"}, "turn_done": {"type": "boolean"},
         "max_media_bytes": {"type": "integer", "minimum": 0},
         "push": {"$ref": "#/$defs/pushServices"},
-        "call": {"$ref": "#/$defs/callCaps"}
+        "call": {"$ref": "#/$defs/callCaps"},
+        "lists": {"type": "boolean", "description": "true on a phone's hello_ack when this primary takes the phone's list channel (M85 E4: companion_open, companion_line and companion_close carrying the companion wire's list events, one channel, lists only); absent from a desktop's and an older primary's, and a phone opens a list channel only when it is true."}
       }
     },
     "callCaps": {
@@ -505,7 +506,7 @@
     },
     "wireId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$", "description": "An id one side mints for a call, a request, a stream or a session: 1 to 128 of letters, digits, '.', '_', ':' and '-', starting with a letter or digit."},
     "chunkIndex": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615},
-    "companionChannel": {"type": "integer", "minimum": 1, "maximum": 64, "description": "One tunneled connection to the desktop's companion socket; at most 4 open at once."},
+    "companionChannel": {"type": "integer", "minimum": 1, "maximum": 64, "description": "One tunneled connection to the desktop's companion socket, at most 4 open at once; or a phone's list channel, one open at once."},
     "peerName": {"type": "string", "minLength": 1, "maxLength": 128, "x-max-bytes": 128, "description": "Text a person reads: valid UTF-8 without control characters."},
     "sha256Hex": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"},
     "httpHeaders": {
@@ -515,7 +516,7 @@
     },
     "companion_open": {
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "channel"],
-      "description": "Desktop to primary: the desktop's companion socket took a connection; the primary runs an ordinary companion connection for it, with owner trust.",
+      "description": "Desktop to primary: the desktop's companion socket took a connection; the primary runs an ordinary companion connection for it, with owner trust. Phone to primary: the phone opens its list channel (caps.lists), a companion connection in the lists scope; a second is answered companion_close.",
       "properties": {"t": {"const": "companion_open"}, "channel": {"$ref": "#/$defs/companionChannel"}}
     },
     "companion_line": {

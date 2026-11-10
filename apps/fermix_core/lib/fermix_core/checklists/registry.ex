@@ -203,9 +203,11 @@ defmodule FermixCore.Checklists.Registry do
   @doc """
   One edit a device sent (`checklist_edit`): `"client_msg_id"`, `"op"` and,
   for every op but `create`, `"list_id"`. It goes through the same
-  transaction as the model's (`Checklists.Ops`), its rows made via `mac`, and
-  once only: an id already applied is answered `duplicate: true` and changes
-  nothing. Answers the list it changed and the id an add or create made.
+  transaction as the model's (`Checklists.Ops`), its rows made via the
+  device's wire, `opts[:made_via]` (`"mac"`, or `"phone"` for a phone's list
+  channel, M85 E4), and once only: an id already applied is answered
+  `duplicate: true` and changes nothing. Answers the list it changed and the
+  id an add or create made.
   """
   @spec device_edit(map(), atom() | nil, keyword()) ::
           {:ok, %{list_id: String.t(), made: String.t() | nil, duplicate: boolean()}}
@@ -214,7 +216,8 @@ defmodule FermixCore.Checklists.Registry do
       when is_binary(client_msg_id) and is_list(opts) do
     start = System.monotonic_time(:microsecond)
     context = device_context()
-    edit = %{now: now(opts), outside?: false, made_via: "mac"}
+    made_via = device_made_via!(Keyword.get(opts, :made_via, "mac"))
+    edit = %{now: now(opts), outside?: false, made_via: made_via}
 
     result =
       with :ok <- device_gate(caller),
@@ -224,9 +227,11 @@ defmodule FermixCore.Checklists.Registry do
       end
 
     result = device_refusal(result)
-    emit_device_edit(result, start)
+    emit_device_edit(result, made_via, start)
     result
   end
+
+  defp device_made_via!(made_via) when made_via in ["mac", "phone"], do: made_via
 
   # A device sends one op, so its refusal is the op's own sentence, without
   # the place in a call the model is told, and names the fields a device
@@ -766,7 +771,7 @@ defmodule FermixCore.Checklists.Registry do
     )
   end
 
-  defp emit_device_edit(result, start) do
+  defp emit_device_edit(result, made_via, start) do
     {outcome, lists} =
       case result do
         {:ok, %{duplicate: true}} -> {:ok, 0}
@@ -776,7 +781,7 @@ defmodule FermixCore.Checklists.Registry do
 
     Telemetry.emit_edit(
       %{},
-      %{lists: lists, ops: 1, outcome: outcome, made_via: "mac", error_code: code(result)},
+      %{lists: lists, ops: 1, outcome: outcome, made_via: made_via, error_code: code(result)},
       elapsed(start)
     )
   end

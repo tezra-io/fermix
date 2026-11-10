@@ -1,7 +1,12 @@
 {"header":{"v":2,"t":"attach_chunk","seq":4,"attach_id":"attach-1","index":0},"bytes_b64":"MTIzNA=="}
 {"header":{"v":2,"t":"pair_request","seq":1,"device_name":"Owner's Pixel","model":"Google Pixel 9 Pro","app_version":"1.0.0","platform":"android","attestation":{"kind":"android_keymint","cert_lengths":[16,12,4]}},"bytes_b64":"TEVBRi1DRVJUSUZJQ0FURUlOVEVSTUVESUFURVJPT1Q="}
-{"header":{"v":2,"t":"companion_line","seq":3,"channel":1,"index":0,"last":false},"bytes_b64":"eyJ0IjoiY2hhdCIsImNsaWVudF9tc2dfaWQiOiJjLTc3IiwicHJvZmlsZV9pZCI6Im1haW4iLCJ0ZXh0IjoiRGlkIHRoZSBiYWNrdXAgcnVu"}
-{"header":{"v":2,"t":"companion_line","seq":4,"channel":1,"index":1,"last":true},"bytes_b64":"IGxhc3QgbmlnaHQ/In0K"}
+{"header":{"v":2,"t":"companion_line","seq":3,"channel":1,"index":0,"last":false},"bytes_b64":"eyJ0eXBlIjoibXNnIiwiY2xpZW50X21zZ19pZCI6ImMtNzciLCJwcm9maWxlX2lkIjoibWFpbiIsInRleHQiOiJEaWQgdGhlIGJhY2t1cCBydW4="}
+{"header":{"v":2,"t":"companion_line","seq":4,"channel":1,"index":1,"last":true},"bytes_b64":"IGxhc3QgbmlnaHQ/IiwiYXR0YWNoX2lkcyI6W119"}
+{"header":{"v":2,"t":"companion_line","seq":3,"channel":3,"index":0,"last":true},"bytes_b64":"eyJ0eXBlIjoiY2xpZW50X2hlbGxvIiwicHJvdG9jb2xfdmVyc2lvbiI6N30="}
+{"header":{"v":2,"t":"companion_line","seq":4,"channel":3,"index":0,"last":true},"bytes_b64":"eyJ0eXBlIjoiY2hlY2tsaXN0c19wdWxsIiwicHJvZmlsZV9pZCI6Im1haW4ifQ=="}
+{"header":{"v":2,"t":"companion_line","seq":5,"channel":3,"index":0,"last":true},"bytes_b64":"eyJ0eXBlIjoiY2hlY2tsaXN0X3B1bGwiLCJwcm9maWxlX2lkIjoibWFpbiIsImxpc3RfaWQiOiJja183YjJuNXI4dDB3In0="}
+{"header":{"v":2,"t":"companion_line","seq":6,"channel":3,"index":0,"last":true},"bytes_b64":"eyJ0eXBlIjoiY2hlY2tsaXN0X2VkaXQiLCJjbGllbnRfbXNnX2lkIjoicGhvbmUtMSIsInByb2ZpbGVfaWQiOiJtYWluIiwibGlzdF9pZCI6ImNrXzdiMm41cjh0MHciLCJvcCI6eyJvcCI6ImNoZWNrIiwicm93X2lkIjoiY2lfMDAwMDAwMDAwMSJ9fQ=="}
+{"header":{"v":2,"t":"companion_line","seq":8,"channel":3,"index":0,"last":true},"bytes_b64":"eyJ0eXBlIjoibXNnIiwiY2xpZW50X21zZ19pZCI6InBob25lLTIiLCJwcm9maWxlX2lkIjoibWFpbiIsInRleHQiOiJBZGQgbWlsayIsImF0dGFjaF9pZHMiOltdfQ=="}
 {"header":{"v":2,"t":"manage","seq":7,"call_id":"call-4f1a","method":"settings.get","protocol_version":2,"index":0,"last":true},"bytes_b64":"eyJzZWN0aW9uIjoiYWdlbnQifQ=="}
 {"header":{"v":2,"t":"loopback_request","seq":17,"loopback_id":"lb-2b90","request_id":"rq-0e5c","method":"GET","target":"/callback?code=Zq81&state=pine","headers":[["host","127.0.0.1:53682"],["accept","text/html"]]},"bytes_b64":""}
 {"header":{"v":2,"t":"loopback_request","seq":18,"loopback_id":"lb-2b90","request_id":"rq-0e5d","method":"POST","target":"/token","headers":[["content-type","application/x-www-form-urlencoded"]]},"bytes_b64":"Z3JhbnRfdHlwZT1hdXRob3JpemF0aW9uX2NvZGUmY29kZT1acTgx"}

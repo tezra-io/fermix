@@ -19,6 +19,12 @@ defmodule FermixChannels.Mobile.Peers do
   owner's voice on the phone, and a desktop's own voice reaches its own
   computer's socket.
 
+  A phone's list channel (M85 E4) is the companion family's `companion_open`,
+  `companion_line` and `companion_close`, which a desktop sends too: one
+  channel, carrying the owner's lists only (`Desktop.Companion`). The family's
+  other events (`manage`, the loopback forward, the snapshots) stay a
+  desktop's.
+
   Pure.
   """
 
@@ -26,6 +32,7 @@ defmodule FermixChannels.Mobile.Peers do
     hello msg attach_begin attach_chunk attach_end command cancel history_pull media_fetch
     push_register push_unregister ack read_state request_status unpair ping
     call_open call_line call_audio call_frame call_close
+    companion_open companion_line companion_close
   )
   @desktop_client ~w(
     hello ping media_fetch ack companion_open companion_line companion_close manage
@@ -35,7 +42,7 @@ defmodule FermixChannels.Mobile.Peers do
     hello_ack accepted attach_status turn_started text_delta tool_event text_done turn_done
     media_begin media_chunk media_end turn_error row reaction approval approval_resolved
     link_preview read_state history_page request_status_page notice error pong event_part
-    call_attached call_line call_audio call_close
+    call_attached call_line call_audio call_close companion_line companion_close
   )
   @desktop_server ~w(
     hello_ack error pong event_part media_begin media_chunk media_end companion_line

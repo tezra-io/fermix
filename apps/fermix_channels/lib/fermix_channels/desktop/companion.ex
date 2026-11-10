@@ -15,6 +15,12 @@ defmodule FermixChannels.Desktop.Companion do
   open, is answered `companion_close` with its reason, and the session stays
   open. The channels end with the session.
 
+  A phone's list channel (M85 E4) is this family too, for a phone's session
+  (`kind: :phone`): one channel, a second answered `companion_close` with
+  "One list channel is open from this phone.", and its connection started in
+  the lists scope, its edits made via the phone, and the phone's session told
+  when it draws lists (`Desktop.CompanionPump`).
+
   A test names its seams as the family's options (`Desktop.Peer`'s
   `{module, options}`): `:endpoint` (the companion
   endpoint), `:supervisor` (where the connections and pumps run,
@@ -32,6 +38,7 @@ defmodule FermixChannels.Desktop.Companion do
   alias FermixCore.Setup.ConfigStore
 
   @max_channels 4
+  @kinds [:desktop, :phone]
 
   @doc "The most channels a desktop holds open at once."
   @spec max_channels() :: pos_integer()
@@ -40,11 +47,15 @@ defmodule FermixChannels.Desktop.Companion do
   @impl true
   def init(%{device_id: device_id, registry: registry} = context) do
     opts = Map.get(context, :options, [])
+    kind = Keyword.get(opts, :kind, :desktop)
+    true = kind in @kinds
 
     {:ok,
      %{
        device_id: device_id,
        registry: registry,
+       kind: kind,
+       session: Map.get(context, :session),
        endpoint: Keyword.get(opts, :endpoint, Endpoint),
        supervisor: Keyword.get(opts, :supervisor, FermixChannels.Desktop.TunnelSupervisor),
        socket_dir:
@@ -93,6 +104,12 @@ defmodule FermixChannels.Desktop.Companion do
     Enum.each(state.channels, fn {_channel, pump} -> stop_pump(state, pump) end)
   end
 
+  defp open(channel, %{kind: :phone} = state) do
+    if map_size(state.channels) >= 1,
+      do: close(state, channel, "One list channel is open from this phone."),
+      else: start_pump(channel, state)
+  end
+
   defp open(channel, state) do
     cond do
       Map.has_key?(state.channels, channel) ->
@@ -114,7 +131,9 @@ defmodule FermixChannels.Desktop.Companion do
       registry: state.registry,
       endpoint: state.endpoint,
       supervisor: state.supervisor,
-      socket_dir: state.socket_dir
+      socket_dir: state.socket_dir,
+      kind: state.kind,
+      session: state.session
     ]
 
     case DynamicSupervisor.start_child(state.supervisor, {CompanionPump, opts}) do
