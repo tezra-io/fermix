@@ -47,7 +47,7 @@ shows up as a broken `ChatAccounted` instead.
 
 | Switch | When `TRUE` |
 |---|---|
-| `SocketsCanFreeze` | The OS suspends an app with no clean close. The daemon keeps its socket registered until the 150 s idle timeout (`Session.idle_timeout_ms`, `session.ex:181`), which the WebSocket (`router.ex:53-60`) and the iroh bridge connection (`bridge_connection.ex:199-206`) both apply. |
+| `SocketsCanFreeze` | The OS suspends an app with no clean close. The daemon keeps its socket registered until the 150 s idle timeout (`Session.idle_timeout_ms`, `session.ex:208`), which the WebSocket (`router.ex:53-60`) and the iroh bridge connection (`bridge_connection.ex:199-206`) both apply. |
 | `DispatchCanFail` | A dispatcher call returns a transient error. |
 | `AnswerCanBeLost` | The platform accepted a push and the daemon saw a timeout instead. |
 | `DaemonCanCrash` | The daemon dies with push tasks in flight, and boots again. |
@@ -62,7 +62,7 @@ one check):
 | `AcksAfterAnnounce` | The app acks a row once it has announced it: shown it on screen, or posted its notification. | The design's first draft: the app acks as soon as the row is persisted (PUSH-2). |
 | `LocalNotify` | The app posts the notification itself for a row that arrives while its chat is off screen. | The row is only listed. |
 | `NotifiedSet` | D22: the app announces an id once, whichever path brought it. | Every arrival alerts. |
-| `RetriesTransient` | D21: a transient dispatcher error is retried. | **Today's code:** one attempt, its failure logged (`notify_timeline_row`, `channels/mobile.ex:575-582`). |
+| `RetriesTransient` | D21: a transient dispatcher error is retried. | **Today's code:** one attempt, its failure logged (`notify_timeline_row`, `channels/mobile.ex:596-603`). |
 | `AttemptCap` | D21: at most three attempts per device. | The retry has no bound. |
 | `BootCheck` | D21: a boot step reads `push_attempted_seq` and decides once for the newest unread row above it. | **Today's code:** nothing runs at boot. |
 
@@ -168,7 +168,7 @@ Today's app-side rules are the iOS app's and are not pinned here.
 
 Re-read on 2026-10-17 against M60 (cues and watchers, not yet committed on
 `release/0.17.0`), which staled the `mobile.ex` pin: `delivered_effects`
-(`channels/mobile.ex:496-501`) skips the link-preview fetch when a send
+(`channels/mobile.ex:517-522`) skips the link-preview fetch when a send
 passes `link_previews: false` (a cue run's message, M60 §9.5,
 `schedule_previews`, `:503-506`). The push launch beside it is unchanged, and
 no push rule reads a preview, so nothing the spec models changed. Re-read
@@ -218,6 +218,14 @@ returned rather than its `server_seq`, so a phone's `text_done` carries the
 row's time as `ts`. The event, its row and the push decisions after it are
 as before, so nothing the spec models changed, and no line the spec cites
 moved.
+
+Re-read on 2026-11-09 for a phone's list channel (M85 E4), which staled the
+`mobile.ex` pin: `delivered_text` passes `Output.text_done` the reply's
+blocks, which a turn's reply now takes from its tools' list and place records
+before its row is written, as a Mac turn's does. The row, its event, the
+sockets it reaches and the push decisions after it are as before, so nothing
+the spec models changed. The comments' `mobile.ex` and `session.ex` numbers,
+which had drifted since the phone's call, now point at the committed files.
 
 ## What the spec changed in the design
 

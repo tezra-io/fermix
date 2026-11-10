@@ -180,6 +180,23 @@ announcement is added or moved, and the event reaches the same connections
 at the same point, so nothing the spec models changed. No line the spec
 cites moved.
 
+The re-read for a phone's list channel (M85 E4, 2026-11-09) found a third
+kind of connection on this socket's code: a phone's lists reach the daemon
+as a `Connection` in the lists scope, carried in the phone's own session
+(`PROTOCOL.md`'s *Lists*, the mobile protocol's *Lists on a phone*). It
+takes only the hello and the three list events, and `dispatch` refuses
+anything else from it as `unknown_event` and closes; `join` registers it
+under `{:lists, profile}`, which only the list notifier reaches, never under
+the profile the fan-out writes rows, read state and streams to; and
+`send_pending_approvals` writes it no card. It sends no `msg` or `command`,
+so it runs no request and no turn, and it never sees a row, a seq or a
+settlement. For the owner's connections the spec's two clients are, each of
+those steps is as before: the scope test passes every event, the key is the
+profile, the cards are written. `turns.ex` changed only in its docs. So
+nothing the spec models changed. The `connection.ex` and `turns.ex` line
+references, which had drifted by up to six lines before this change, now
+point at the committed code.
+
 **The Queue is one abstract process.** The runner takes one `.tla` per spec,
 and `turn_queue` proves the Queue's rules against `queue.ex`, so this spec takes
 them as given:
@@ -312,21 +329,21 @@ the checks that show a rule needs it):
   (`request_coordinator.ex:166-173`).
 - `SeqCursor`: the client's cursor rules (`PROTOCOL.md`).
 - `SubscribeBeforePull`: the Connection joins the registry before
-  `server_hello` (`join`, `connection.ex:528-546`).
+  `server_hello` (`join`, `connection.ex:561-579`).
 - `PageWrittenInReadStep`: the Connection writes `history_page` to the socket
-  in the step that read it (`read_opts`, `connection.ex:1186-1190`). `FALSE`
+  in the step that read it (`read_opts`, `connection.ex:1242-1246`). `FALSE`
   sends it through its own mailbox, where a live row sent after the read can
   overtake it.
 - `AnnouncesEveryRow`: every row written outside a turn's completion is
   announced as a `row` as it is written: the user's row (`announce_user_row`,
-  `connection.ex:1174-1175`) and a delivery (`announce_written`,
+  `connection.ex:1230-1231`) and a delivery (`announce_written`,
   `channels/companion.ex:409-410`), both built by `Companion.Output.row` and
   sent through `Companion.Fanout.announce`. `FALSE` announces no user row.
 - `SingleAnswer`: `Confirmations.take` is an `:ets.take`, the sole consumer of
   a token (`confirmations.ex:21-31`).
 - `ResendsPendingApprovals`: the Connection writes every card still waiting
   right after `server_hello`, in the step that joined the registry
-  (`send_pending_approvals`, `connection.ex:597-606`, from
+  (`send_pending_approvals`, `connection.ex:641-650`, from
   `Approvals.pending`). `FALSE`: a card goes out once, live.
 - `DropsCardsAtHello`: when `server_hello` arrives the client drops every card
   it shows and keeps only those sent after it (`PROTOCOL.md` "Approvals").
@@ -338,8 +355,8 @@ the checks that show a rule needs it):
 - `CancelMarksRequest`: a cancel is recorded on its request first
   (`Requests.cancel`, `requests.ex:192-208`; `cancel_request`,
   `mobile_sql.ex:821-840`). `Turns` reads the mark and enqueues in one step
-  (`hand_off`, `turns.ex:335-350`), and sends every stop of a turn it handed
-  off itself, after the enqueue (`turns.ex:249-253`, `stop_in_queue`,
+  (`hand_off`, `turns.ex:338-352`), and sends every stop of a turn it handed
+  off itself, after the enqueue (`turns.ex:253-256`, `stop_in_queue`,
   `:449-460`). `FALSE` is the code before 431d5663: the Connection called
   `Queue.stop_turn` directly.
 - `OutcomeEndsTurn`: a turn ends on the wire only from the Queue's outcome, in
@@ -350,15 +367,15 @@ the checks that show a rule needs it):
   answered without a turn stayed `running`, and the next boot ran it again.
 - `SettleUnlessHandedOff`: `Turns` settles that request only if no turn was
   handed off for it (`handle_cast({:settle_unless_handed_off, ...})`,
-  `turns.ex:295-301`). `FALSE` completes it regardless, as the code before did
+  `turns.ex:298-304`). `FALSE` completes it regardless, as the code before did
   for every `command`, so a command that became a turn (`/ultra`) had its reply
   refused.
 - `FailsUnsettled`: a settlement that fails is followed by one failure write
   for the attempt and by `error{request_failed, client_msg_id}` to the client
-  that sent the request (`settle_inline`, `run_settle`, `turns.ex:368-403`;
+  that sent the request (`settle_inline`, `run_settle`, `turns.ex:371-406`;
   `fail_attempt`, `report_failure`, `requests.ex:383-403`), through the
   transport's `report_failure`, which the connection writes as a failed
-  worker's error (`connection.ex:1162-1169`, `:308-309`). `FALSE` only logs the
+  worker's error (`connection.ex:1218-1225`, `:328-329`). `FALSE` only logs the
   failure: the request stays `running`, and the next boot runs the command
   again.
 - `SeqAssignedOnInsert`: the seq comes from the counter inside the inserting
@@ -542,7 +559,7 @@ of an entity its rules are about. All still hold:
 - A phone's revocation. `Turns` runs it in its own mailbox as a cancel of
   every unsettled request the device claimed: one step marks them all and
   stops each turn it handed off (`handle_cast({:revoke_device, ...})`,
-  `turns.ex:303-315`), so the device registry that forgot the phone never
+  `turns.ex:306-318`), so the device registry that forgot the phone never
   waits on the store.
 - A cancel that arrives before its request is claimed. There is no request to
   mark, so `cancel_request` answers `not_found`. `PROTOCOL.md` scopes the
@@ -553,16 +570,16 @@ of an entity its rules are about. All still hold:
 - A daemon restart and boot recovery. Recovery hands a request off through the
   same `Turns` step, so it reads the mark (431d5663); the model has no boot
   step to check that.
-- A Queue crash (`Turns` ends its turns as `interrupted`, `turns.ex:317-323`),
+- A Queue crash (`Turns` ends its turns as `interrupted`, `turns.ex:321-327`),
   and a hand-off `Turns` cannot complete (a mark it cannot read, a Queue
   already gone), which ends like a marked one. A cancel whose stop finds its
-  Queue gone is left to that `:DOWN`: `stop_in_queue` (`turns.ex:456-467`)
+  Queue gone is left to that `:DOWN`: `stop_in_queue` (`turns.ex:459-470`)
   waits with no timeout, so its call exits only when the Queue was already dead
   (`:noproc`) or dies during the stop (its exit reason), and it catches only
   that exit of its own call; until the review's third round (its R3-2) a Queue
   that died during the stop crashed `Turns`. A store call that exits inside
   `Turns` is logged as that request's error and the turn still ends once
-  (`guarded/3`, `turns.ex:599-609`). A raise in `Turns`' own code or store
+  (`guarded/3`, `turns.ex:606-616`). A raise in `Turns`' own code or store
   calls is a defect: it crashes `Turns` to `Companion.Supervisor`
   (`rest_for_one`), which releases the requests it fenced. A request worker's
   crash.
@@ -606,7 +623,7 @@ of an entity its rules are about. All still hold:
   card's `outside.args` and `outside.reason` are additive and ride every
   version. They are proposal events, left out as above.
 - The peer check at the hand-over (`handle_info(:socket_handover)`,
-  `connection.ex:264-271`). A client the daemon cannot place is sent
+  `connection.ex:284-291`). A client the daemon cannot place is sent
   `error: unidentified_client` and closed before a line is read, which the
   client sees as a drop before `server_hello`. The caller it places rides on
   each turn (`metadata.caller`) and decides only what the turn's tools may do.
@@ -656,7 +673,7 @@ off; open `tla/out/companion_session/<check>.txt` after a run to see the path.
 
 ### COMPANION-2: a connection must join the fan-out before its history is read
 - **Status:** holds in the code (b9248004): `join` registers the Connection
-  before it writes `server_hello` (`connection.ex:528-546`).
+  before it writes `server_hello` (`connection.ex:561-579`).
 - **Checks:** 01 holds; 03 breaks `TimelineConverges` with the join after the
   first page.
 

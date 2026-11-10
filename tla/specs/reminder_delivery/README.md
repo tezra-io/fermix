@@ -453,6 +453,13 @@ never a `text_done`, so its row, its proactive dedupe and its push are as
 before; the comments' `output.ex` numbers moved with the code. No delivery
 path the spec models changed.
 
+Re-read on 2026-11-09 for a phone's list channel (M85 E4), which staled the
+`mobile.ex` pin: a phone turn's reply now carries the blocks of its list and
+place records, and a phone's message says when its list channel draws lists.
+A reminder is delivered with no `turn_id`, so it takes no records and its
+row, proactive dedupe and push are as before. The spec cites no `mobile.ex`
+line. No delivery path the spec models changed.
+
 ## Code and doc drift
 
 - `delivery_worker.ex:160-163` says a claim past the validity boundary "cannot
