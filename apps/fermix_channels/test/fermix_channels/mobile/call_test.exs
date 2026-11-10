@@ -487,12 +487,12 @@ defmodule FermixChannels.Mobile.CallTest do
 
       Driver.release(driver, hold)
 
+      # The read for the media push writes the call's frames, then the text
+      # queued behind it (M97 lanes), in one write; the media push waits while
+      # the call is attached, and text still flows.
       {first, client} = Driver.client_receive(driver, client)
       types = Enum.map(first, fn {header, _bytes} -> header["t"] end)
-      assert types == ["call_line", "call_audio"]
-
-      # The media push waits while the call is attached; text still flows.
-      {[{%{"t" => "notice"}, <<>>}], client} = Driver.client_receive(driver, client)
+      assert types == ["call_line", "call_audio", "notice"]
       refute_received {:driver_out, _driver, _frames}
 
       {events, _client} = hang_up_events(driver, client, voice, 5)

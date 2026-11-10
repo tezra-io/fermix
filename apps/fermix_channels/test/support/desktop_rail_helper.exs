@@ -14,6 +14,7 @@ defmodule FermixChannels.Test.DesktopRail do
 
   import ExUnit.Callbacks, only: [start_supervised!: 2, on_exit: 1]
 
+  alias FermixChannels.Desktop.MediaFetches
   alias FermixChannels.Desktop.Peer
   alias FermixChannels.Desktop.Relay
   alias FermixChannels.Desktop.Supervisor, as: DesktopSupervisor
@@ -292,16 +293,21 @@ defmodule FermixChannels.Test.DesktopRail do
   @doc """
   Starts a relay for the desktop home `root` reaching `primary`, its timers
   sent to the test (`{:scheduled, message, delay_ms}`) and its telemetry too
-  (`{:relay_emit, status, failures, class}`). `:connect` replaces the bridge.
+  (`{:relay_emit, status, failures, class}`), with the home's own media
+  family (`Desktop.MediaFetches`) under the test's name. `:connect` replaces
+  the bridge.
   """
   def start_relay!(root, primary, opts \\ []) do
     test = self()
     name = :"desktop_rail_relay_#{System.unique_integer([:positive])}"
+    media = :"desktop_rail_media_#{System.unique_integer([:positive])}"
+    start_supervised!({MediaFetches, name: media, home: root}, id: media)
 
     relay_opts =
       [
         name: name,
         root: root,
+        families: %{media: media},
         connect: Keyword.get(opts, :connect, bridge_connect(primary.bridge_socket)),
         schedule: fn message, delay ->
           send(test, {:scheduled, message, delay})

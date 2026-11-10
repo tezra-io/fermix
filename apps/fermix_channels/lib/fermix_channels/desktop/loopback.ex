@@ -32,8 +32,9 @@ defmodule FermixChannels.Desktop.Loopback do
   reported to the primary (`loopback_failed`), whose sign-in then fails with
   that sentence.
 
-  The relay hands it the primary's events (`handle/3`, one line each in
-  `Desktop.Relay`'s `@inbound`); every connection is served in a task of its
+  The relay hands it the primary's events (`handle/4`, the `loopback`
+  family of `Desktop.Relay`'s `@inbound`) and never waits on it; every
+  connection is served in a task of its
   own, which reaches the primary through the relay. Test seams: `:name`,
   `:send` (a 2-arity function of the event and its payload, in place of
   `Desktop.Relay.send_event/3`), `:task_supervisor`, `:read_timeout_ms`,
@@ -64,12 +65,7 @@ defmodule FermixChannels.Desktop.Loopback do
   @spec events() :: [String.t()]
   def events, do: @events
 
-  @doc "Serves one of the primary's loopback events, from the relay."
-  @spec handle(String.t(), map(), binary()) :: :ok | {:error, :not_running}
-  def handle(type, fields, payload) when type in @events and is_map(fields),
-    do: handle(__MODULE__, type, fields, payload)
-
-  @doc false
+  @doc "Serves one of the primary's loopback events, from the relay, in its own time."
   @spec handle(GenServer.server(), String.t(), map(), binary()) :: :ok | {:error, :not_running}
   def handle(server, type, fields, payload) when type in @events do
     case GenServer.whereis(server) do

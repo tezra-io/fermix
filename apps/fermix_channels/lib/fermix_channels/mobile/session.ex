@@ -71,6 +71,22 @@ defmodule FermixChannels.Mobile.Session do
   whose link is alive reconnects and resumes. A phone's `hello_ack` says
   whether this primary serves calls (`caps.call`).
 
+  ## Lanes
+
+  What a session writes rides one of three lanes (`Mobile.Lanes`, M97 §5.1),
+  one mechanism for a phone's session and a desktop's. Each read writes the
+  live lane first: the call frames above, at most 128, the rest at the next
+  read. A read for a bulk frame (a media push, a media fetch's step, a
+  snapshot chunk) then writes up to 16 interactive events queued behind it,
+  in the order they came, and only then its one bulk frame; past 16 the rest
+  wait for the next read, so a flood of chat still lets one bulk frame
+  through per 16. Bulk frames go one per read, in the order they came. Those
+  two lanes queue nowhere but in the carrier's mailbox: their producers bound
+  them (a desktop's forwarded calls and channels, the snapshot stream's
+  catch-up every 16 chunks, the media fetch queue), and the carrier's memory
+  bound past that. Each logical event is encoded whole, so an `event_part`
+  run is never split, and `seq` rises by one per frame in the order written.
+
   ## A phone's list channel
 
   A phone's `hello_ack` says `caps.lists: true` (M85 E4): it may open one list
@@ -85,6 +101,7 @@ defmodule FermixChannels.Mobile.Session do
   """
 
   require Logger
+  require FermixChannels.Mobile.Lanes
 
   alias FermixChannels.Companion.Approvals
   alias FermixChannels.Companion.Fanout
@@ -102,6 +119,7 @@ defmodule FermixChannels.Mobile.Session do
   alias FermixChannels.Mobile.EventRouter
   alias FermixChannels.Mobile.Identity
   alias FermixChannels.Mobile.Iroh.Helper
+  alias FermixChannels.Mobile.Lanes
   alias FermixChannels.Mobile.MediaStore
   alias FermixChannels.Mobile.Noise
   alias FermixChannels.Mobile.PairManager
@@ -147,6 +165,9 @@ defmodule FermixChannels.Mobile.Session do
   # The call frames written ahead of everything else, per read: a bound on the
   # drain, past which the rest go at the next read.
   @max_call_frames_per_read 128
+  # The interactive events written ahead of one bulk frame, per read: past it
+  # the rest go at the next read, so a flood of chat still lets bulk through.
+  @max_interactive_per_read 16
   @call_classes [:control, :stop, :audio]
   # The media a phone in a call is pushed waits here, up to this; a run past it
   # is dropped whole, and the phone fetches it by its ref once the call ends.
@@ -398,7 +419,7 @@ defmodule FermixChannels.Mobile.Session do
     if session_expired?(state) do
       session_expired(state)
     else
-      call_frames_first(state, &push_fanout_event(event, &1))
+      lanes_first(event_lane(event), state, &push_fanout_event(event, &1))
     end
   end
 
@@ -406,7 +427,7 @@ defmodule FermixChannels.Mobile.Session do
     if session_expired?(state) do
       session_expired(state)
     else
-      call_frames_first(state, &media_step/1)
+      lanes_first(:bulk, state, &media_step/1)
     end
   end
 
@@ -1760,14 +1781,58 @@ defmodule FermixChannels.Mobile.Session do
     encode_event_frames(%{"t" => "call_close", "call_id" => call_id, "reason" => reason}, state)
   end
 
-  # The call's frames queued behind whatever this read is for go first.
-  defp call_frames_first(state, next) do
+  # -- lanes (M97 §5.1, `Mobile.Lanes`) -----------------------------------------
+
+  # Each read writes the live lane first (the call's frames queued behind it);
+  # a read for a bulk frame then writes the interactive events queued behind
+  # it, at most @max_interactive_per_read, and only then what it is for.
+  defp lanes_first(lane, state, next) do
     case write_call_frames(queued_call_frames([]), state) do
-      {:ok, [], state} -> next.(state)
-      {:ok, frames, state} -> prepend_frames(frames, next.(state))
+      {:ok, frames, state} -> prepend_frames(frames, interactive_first(lane, state, next))
       {:error, reason, state} -> protocol_error(reason, state)
     end
   end
+
+  defp interactive_first(:bulk, state, next),
+    do: drain_interactive(@max_interactive_per_read, [], state, next)
+
+  defp interactive_first(_lane, state, next), do: next.(state)
+
+  # In the order they came; past the bound the rest wait for the next read.
+  defp drain_interactive(0, frames, state, next), do: prepend_frames(frames, next.(state))
+
+  defp drain_interactive(left, frames, state, next) do
+    receive do
+      {:mobile_event, %{"t" => type} = event} when Lanes.interactive?(type, event) ->
+        write_interactive(event, left, frames, state, next)
+
+      {:mobile_event, %{type: type, payload: payload} = event}
+      when Lanes.interactive?(type, payload) ->
+        write_interactive(event, left, frames, state, next)
+    after
+      0 -> prepend_frames(frames, next.(state))
+    end
+  end
+
+  defp write_interactive(event, left, frames, state, next) do
+    case push_fanout_event(event, state) do
+      {:ok, state} -> drain_interactive(left - 1, frames, state, next)
+      {:push, more, state} -> drain_interactive(left - 1, frames ++ more, state, next)
+      stop -> prepend_frames(frames, stop)
+    end
+  end
+
+  # An event the lane table does not name rides no lane: it is dropped by name
+  # where it is encoded (`push_fanout_event/2`).
+  defp event_lane(event) do
+    case Lanes.lane(event_type(event), event_header(event)) do
+      {:ok, lane} -> lane
+      {:error, {:no_lane, _type}} -> :none
+    end
+  end
+
+  defp event_header(%{payload: payload}) when is_map(payload), do: payload
+  defp event_header(event), do: event
 
   defp push_call_frames(first, state) do
     case write_call_frames(queued_call_frames(first), state) do
@@ -1939,6 +2004,7 @@ defmodule FermixChannels.Mobile.Session do
     %{state | held_media: kept, held_media_bytes: bytes, dropped_media: dropped}
   end
 
+  defp prepend_frames([], result), do: result
   defp prepend_frames(frames, {:ok, state}), do: {:push, frames, state}
   defp prepend_frames(frames, {:push, more, state}), do: {:push, frames ++ more, state}
   defp prepend_frames(frames, {:stop, why, close, state}), do: {:stop, why, close, frames, state}

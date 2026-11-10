@@ -253,6 +253,36 @@ still fits one plaintext.
 alone, contiguous from 0, ended by `snapshot_end` or `move_end`, and bounded
 only by the disk. The binary fixtures carry a whole two-frame run each way.
 
+## Lanes
+
+What a session writes rides one of three lanes: an order inside the one
+session, not a second connection, and nothing on the wire names it.
+
+| Lane | Events | Rule |
+|---|---|---|
+| live | `call_open`, `call_attached`, `call_line`, `call_audio`, `call_frame`, `call_close` | written first |
+| interactive | every event of no other lane: chat, `manage` and `manage_result`, `companion_*`, `loopback_*`, `hello`, `ping`, `pong`, `error`, `ack` | written before bulk |
+| bulk | `media_fetch`, `media_begin`, `media_chunk`, `media_end`, `attach_*`, `snapshot_*`, `move_*` | written when nothing live or interactive waits, one frame at a time |
+
+- A family's events share one lane, so a lane never reorders a family's own
+  events (a snapshot's `snapshot_stored` rides bulk with its chunks). Events
+  of different lanes may overtake one another: a reply's `row` may arrive
+  before the blob a `media_begin` push carries, as it does during a call.
+- Within a lane, frames go in the order they were handed over: a chunked
+  payload's frames stay in `index` order, and an `event_part` run is written
+  whole and never split.
+- `seq` still rises by exactly one per frame, in the order frames are written.
+- The daemon writes, at each read, the live frames waiting (at most 128),
+  then, before a bulk frame, up to 16 interactive events waiting behind it,
+  then that one bulk frame; past 16 the rest go at the next read, so a flood
+  of interactive events still lets one bulk frame through per 16.
+- A desktop engine queues what it sends per lane, at most 256 KiB of raw
+  tails live, 16 MiB interactive and 4 MiB bulk, and 4,096 frames each. An
+  event its lane cannot take is refused before any of it is sent: a forwarded
+  call is answered `busy` and a tunneled chat ends as too busy.
+- A receiver holds every rule it held before (`seq`, chunk order,
+  `event_part` runs); lanes add none.
+
 ## Noise modes and pairing
 
 The phone is always the Noise initiator and the daemon is the responder. The
@@ -838,9 +868,9 @@ wait; one more is refused at once with `error{code:"media_fetch_backlog_full",
 ref}`, naming the fetch it refuses.
 
 A blob streams as `media_begin`, its `media_chunk`s (indexes from 0, each at
-most 60 KiB) and `media_end`, one chunk a step: other frames, `pong`
-included, can arrive between them, but one blob's frames stay in order and two
-blobs never mix. The daemon checks the size and SHA-256 as it streams: a blob
+most 60 KiB) and `media_end`, one chunk a step in the bulk lane (see
+*Lanes*): other frames, `pong` included, can arrive between them, but one
+blob's frames stay in order and two blobs never mix. The daemon checks the size and SHA-256 as it streams: a blob
 that no longer matches its row ends with `error{code:"media_descriptor_mismatch",
 ref}` in place of `media_end`, and the client discards what it received. A
 fetch that cannot start is `error{code, ref}`, such as `not_found` or
@@ -1060,8 +1090,8 @@ on a Grok call, whose audio the session paces to the phone in a 300 ms window,
 inside the credit.
 
 **Ordering.** A session writes a call's frames ahead of everything else it has
-queued, its control frames (`call_attached`, `call_line`, `call_close`) ahead
-of its audio. A `playback_stop` line would so overtake audio queued before it,
+queued (the live lane, see *Lanes*), its control frames (`call_attached`,
+`call_line`, `call_close`) ahead of its audio. A `playback_stop` line would so overtake audio queued before it,
 so the session drops that call's audio queued behind it unwritten. Audio
 already written can still arrive after the stop, so after a `playback_stop`
 the phone drops every `call_audio` under a `playback_id` it saw before that
@@ -1207,6 +1237,9 @@ encrypted: `snapshot_begin`, `snapshot_chunk`s of at most 60 KiB from
 `index` 0, `snapshot_end`. The desktop answers `snapshot_stored` with the
 SHA-256 it computed, which verifies the copy when it is `snapshot_begin`'s,
 or `snapshot_refused`. A new `snapshot_begin` abandons a copy in progress.
+The desktop writes a copy apart from the rest of its session, so its disk
+delays no other event; a copy whose frames outrun its disk by 256 is refused
+`write_failed`, and the next run sends it again.
 
 ## Lists on a phone
 

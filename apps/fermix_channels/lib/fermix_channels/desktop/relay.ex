@@ -88,13 +88,53 @@ defmodule FermixChannels.Desktop.Relay do
 
   ## What the primary sends
 
-  `@inbound` is the one map of who serves each event the primary sends a
-  desktop: the session itself (`hello_ack`, `pong`, `error`), the companion
-  channels, the forwarded calls, the media fetches, or a module's
-  `handle/3`. Chunked payloads (`companion_line`, `manage_result`, …) are put
-  back together first (`Mobile.Chunks`); a gap, a repeat or a payload past
-  its bound ends the session as a protocol error. An event no line names is
-  logged and dropped.
+  `@inbound` is the one map of which family serves each event the primary
+  sends a desktop: the session itself (`hello_ack`, `pong`, `error`), the
+  companion channels, the forwarded calls, the media fetches, the sign-in
+  loopbacks or the snapshot copies. Chunked payloads (`companion_line`,
+  `manage_result`, …) are put back together first (`Mobile.Chunks`); a gap, a
+  repeat or a payload past its bound ends the session as a protocol error. An
+  event no line names is logged and dropped.
+
+  The relay keeps the session, decodes and dispatches, and never waits on a
+  family (M97 §5.1): each family's work runs in a process of its own, which
+  takes the family's events in the order they came, so a backup being
+  written to disk delays no chat line and no settings answer. A channel's
+  lines go to its `Desktop.Tunnel`; a forwarded call's answer to its caller,
+  which decodes it in its own process; the media frames to
+  `Desktop.MediaFetches`; the loopback's to `Desktop.Loopback`; the snapshot
+  copies' to `Desktop.SnapshotStore` (`:families` names the last three).
+  Each hand-off is bounded by what waits in the process taking it, and what
+  happens at the bound is the family's:
+
+  | Family | Waiting at most | Past it |
+  |---|---|---|
+  | companion | 256 lines in the channel's tunnel | the chat ends, as too busy, and its close goes to the primary |
+  | forwarded calls | the 8 in flight | never dropped: each answer goes to its caller |
+  | media | 256 frames | the fetch fails `busy`, its blob's later frames are dropped |
+  | loopback | 64 events | the event is dropped |
+  | snapshots | 256 frames | the copy is refused (`write_failed`), its later frames dropped |
+
+  A family whose process is not running has its events dropped until it
+  runs again; a media fetch's waiters are told so. Each run of drops is
+  logged when it starts and when it ends, with the count, never per frame;
+  none ends the session.
+
+  ## What this desktop sends
+
+  Every frame this desktop sends rides a lane (`Mobile.Lanes`), queued in
+  `Relay.Outbox` with its bounds: live first, then interactive, then bulk,
+  one frame at a time, each lane in the order its frames came and a chunked
+  payload's frames in order. A writer process of the session's own writes
+  them to the rail one at a time and says when each is written, so the rail
+  gives each the next `seq` in the order written and the relay keeps
+  answering meanwhile. A lane past its bound refuses: a forwarded call is
+  answered `busy`, a chat line ends its chat as too busy, a channel or a
+  media fetch is refused `busy`, an `@inbound` family's event (`send_event/3`,
+  answered once its last frame is written) `{:error, :busy}`; a lane's
+  refusals are logged when they start and once it has drained, with the
+  count. When the session ends, every frame not yet written goes with it and
+  its waiter is told the session ended.
 
   ## Bounds
 
@@ -121,16 +161,22 @@ defmodule FermixChannels.Desktop.Relay do
   and `:cancel_timer` (this process's timers, delivered by hand in a test),
   `:clock`, `:monotonic` (a 0-arity count of milliseconds), `:emit` and
   `:status_changed` (a 0-arity call in place of telling the Always On
-  watch).
+  watch), `:families` (the `media`, `loopback` and `snapshots` processes,
+  by name or pid) and `:write` (in place of `Rail.send_event/4`, run in the
+  writer).
   """
 
   use GenServer
 
   require Logger
 
-  alias FermixChannels.Desktop.Relay.Media
+  alias FermixChannels.Desktop.Loopback
+  alias FermixChannels.Desktop.MediaFetches
+  alias FermixChannels.Desktop.Relay.Outbox
+  alias FermixChannels.Desktop.SnapshotStore
   alias FermixChannels.Mobile.Chunks
   alias FermixChannels.Mobile.Iroh.Helper
+  alias FermixChannels.Mobile.Lanes
   alias FermixChannels.Mobile.Peers
   alias FermixChannels.Mobile.Protocol
   alias FermixChannels.Mobile.Rail
@@ -166,9 +212,10 @@ defmodule FermixChannels.Desktop.Relay do
   @max_open_payloads 32
   @status_wait_ms 5_000
 
-  # Every event the primary sends a desktop, and who serves it here: the
-  # session itself, the companion channels, the forwarded calls, the media
-  # fetches, or a module's `handle/3`. One line per event.
+  # Every event the primary sends a desktop, and the family that serves it
+  # here: the session itself, the companion channels, the forwarded calls, the
+  # media fetches, the sign-in loopbacks or the snapshot copies. One line per
+  # event.
   @inbound %{
     "hello_ack" => :session,
     "pong" => :session,
@@ -179,13 +226,20 @@ defmodule FermixChannels.Desktop.Relay do
     "media_begin" => :media,
     "media_chunk" => :media,
     "media_end" => :media,
-    "loopback_open" => FermixChannels.Desktop.Loopback,
-    "loopback_response" => FermixChannels.Desktop.Loopback,
-    "loopback_close" => FermixChannels.Desktop.Loopback,
-    "snapshot_begin" => FermixChannels.Desktop.SnapshotStore,
-    "snapshot_chunk" => FermixChannels.Desktop.SnapshotStore,
-    "snapshot_end" => FermixChannels.Desktop.SnapshotStore
+    "loopback_open" => :loopback,
+    "loopback_response" => :loopback,
+    "loopback_close" => :loopback,
+    "snapshot_begin" => :snapshots,
+    "snapshot_chunk" => :snapshots,
+    "snapshot_end" => :snapshots
   }
+
+  # The families served by a process of their own, by its registered name.
+  @family_servers %{media: MediaFetches, loopback: Loopback, snapshots: SnapshotStore}
+  # What may wait in each family's process before the family's rule applies
+  # (moduledoc); a channel's tunnel holds at most @max_tunnel_lines.
+  @family_bounds %{media: 256, loopback: 64, snapshots: 256}
+  @max_tunnel_lines 256
 
   @typedoc "The link's state in one word (the moduledoc says what each means)."
   @type word :: :connected | :renewing | :unreachable | :revoked | :stale
@@ -208,8 +262,8 @@ defmodule FermixChannels.Desktop.Relay do
     GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
   end
 
-  @doc "Every event the primary sends a desktop, by who serves it here."
-  @spec inbound() :: %{String.t() => atom() | module()}
+  @doc "Every event the primary sends a desktop, by the family that serves it here."
+  @spec inbound() :: %{String.t() => atom()}
   def inbound, do: @inbound
 
   @doc "The link's facts for `home.status`, or `nil` when no relay runs."
@@ -248,11 +302,9 @@ defmodule FermixChannels.Desktop.Relay do
       when is_binary(method) and is_map(params) and is_list(opts) do
     deadline_ms = call_deadline(method, opts)
 
-    GenServer.call(
-      server,
-      {:forward, request, deadline_ms},
-      deadline_ms + @forward_wait_margin_ms
-    )
+    server
+    |> GenServer.call({:forward, request, deadline_ms}, deadline_ms + @forward_wait_margin_ms)
+    |> answered()
   catch
     :exit, {reason, _call} when reason in [:noproc, :normal, :shutdown] ->
       not_running()
@@ -260,6 +312,11 @@ defmodule FermixChannels.Desktop.Relay do
     :exit, {:timeout, _call} ->
       lost_answer(method, Placement.unreachable(nil, Placement.unreachable_sentence(nil)), nil)
   end
+
+  # The primary's answer is decoded here, in the caller, so a large one never
+  # holds the relay (M97 §5.1); every other answer is the relay's own.
+  defp answered({:relay_answer, payload}), do: management_answer(payload)
+  defp answered(result), do: result
 
   defp not_running do
     Logger.error("desktop relay: a management call found no relay running")
@@ -312,7 +369,7 @@ defmodule FermixChannels.Desktop.Relay do
 
   @doc """
   Fetches the blob `ref` from the primary for the calling tunnel, which is
-  told `{:relay_media, ref, result}` once it is staged (`Relay.Media`) or
+  told `{:relay_media, ref, result}` once it is staged (`Desktop.MediaFetches`) or
   failed.
   """
   @spec fetch_media(GenServer.server(), String.t()) ::
@@ -325,18 +382,27 @@ defmodule FermixChannels.Desktop.Relay do
   end
 
   @doc """
-  Sends the primary one event a desktop may send, for a module of `@inbound`
+  Sends the primary one event a desktop may send, for a family of `@inbound`
   that answers what it was sent: `event` is the header (`"t"` and its
   fields), `payload` the raw bytes, cut into chunks when the event is
-  chunked.
+  chunked. Answers once its last frame is written, in its lane's turn;
+  `{:error, :busy}` when its lane is full, and the session's ending when it
+  ends first.
   """
   @spec send_event(GenServer.server(), map(), binary()) ::
-          :ok | {:error, {:unreachable, String.t()} | {:not_for_desktop, String.t()} | term()}
+          :ok
+          | {:error, {:unreachable, String.t()} | {:not_for_desktop, String.t()} | :busy | term()}
   def send_event(server \\ __MODULE__, %{"t" => type} = event, payload \\ <<>>)
       when is_binary(type) and is_binary(payload) do
     if Peers.client_event?(:desktop, type),
       do: GenServer.call(server, {:send, type, Map.delete(event, "t"), payload}, @send_wait_ms),
       else: {:error, {:not_for_desktop, type}}
+  catch
+    :exit, {reason, _call} when reason in [:noproc, :normal, :shutdown] ->
+      {:error, {:unreachable, Placement.unreachable_sentence(nil)}}
+
+    :exit, {:timeout, _call} ->
+      {:error, :timeout}
   end
 
   # -- the process -----------------------------------------------------------
@@ -349,7 +415,7 @@ defmodule FermixChannels.Desktop.Relay do
     root = Keyword.get_lazy(opts, :root, &ConfigStore.fermix_home/0)
     state = base_state(root, opts)
 
-    case load(root, state.staging) do
+    case load(root) do
       {:ok, link, keypair} ->
         {:ok, %{state | link: link, keypair: keypair}, {:continue, :connect}}
 
@@ -366,7 +432,8 @@ defmodule FermixChannels.Desktop.Relay do
 
     %{
       root: root,
-      staging: Keyword.get_lazy(opts, :staging, fn -> Media.staging_dir(root) end),
+      families: Map.merge(@family_servers, Keyword.get(opts, :families, %{})),
+      write: Keyword.get(opts, :write, &Rail.send_event/4),
       helper: Keyword.get(opts, :helper),
       connect: Keyword.get(opts, :connect),
       rail_opts: Keyword.get(opts, :rail_opts, []),
@@ -387,6 +454,10 @@ defmodule FermixChannels.Desktop.Relay do
       since: nil,
       connector: nil,
       rail: nil,
+      writer: nil,
+      writing: nil,
+      outbox: Outbox.new(),
+      drops: %{},
       path: nil,
       failures: 0,
       degraded?: false,
@@ -399,33 +470,20 @@ defmodule FermixChannels.Desktop.Relay do
       calls: %{},
       waiting: :queue.new(),
       call_seq: 0,
-      fetches: %{},
-      transfer: nil
+      fetches: %{}
     }
   end
 
   # A key it cannot use still lets the relay name the primary it refuses to
   # reach.
-  defp load(root, staging) do
+  defp load(root) do
     with {:link, {:ok, link}} <- {:link, DesktopLink.read(root)},
          {:key, _link, {:ok, keypair}} <- {:key, link, DesktopLink.read_key(root)} do
-      :ok = prepare_staging(staging)
       {:ok, link, keypair}
     else
       {:link, {:error, reason}} -> {:error, reason, nil}
       {:key, link, {:error, reason}} -> {:error, reason, link}
     end
-  end
-
-  # A staging directory that cannot be prepared costs the app's media, never
-  # the link; it is logged, and each fetch then fails by name.
-  defp prepare_staging(staging) do
-    case Media.prepare(staging) do
-      :ok -> :ok
-      {:error, reason} -> Logger.error("desktop relay: media staging: #{inspect(reason)}")
-    end
-
-    :ok
   end
 
   @impl true
@@ -440,8 +498,13 @@ defmodule FermixChannels.Desktop.Relay do
   def handle_call(:open_channel, {tunnel, _tag}, state), do: open(tunnel, state)
   def handle_call({:fetch_media, ref}, {tunnel, _tag}, state), do: fetch(ref, tunnel, state)
 
-  def handle_call({:send, type, fields, payload}, _from, %{phase: :connected} = state),
-    do: {:reply, send_frames(state.rail, type, fields, payload), state}
+  # Answered once its last frame is written (`written/3`).
+  def handle_call({:send, type, fields, payload}, from, %{phase: :connected} = state) do
+    case enqueue(state, type, fields, payload, {:reply, from}) do
+      {:ok, state} -> {:noreply, state}
+      {:error, reason, state} -> {:reply, {:error, reason}, state}
+    end
+  end
 
   def handle_call({:send, _type, _fields, _payload}, _from, state),
     do: {:reply, {:error, {:unreachable, unreachable_sentence(state)}}, state}
@@ -466,11 +529,26 @@ defmodule FermixChannels.Desktop.Relay do
 
   def handle_info({:relay_timer, kind, token}, state), do: timer(kind, token, state)
 
+  def handle_info(
+        {:relay_written, writer, ref, result},
+        %{writer: writer, writing: {ref, tag}} = state
+      ),
+      do: {:noreply, written(result, tag, state)}
+
+  # The word of a writer let go with its session.
+  def handle_info({:relay_written, _writer, _ref, _result}, state), do: {:noreply, state}
+
+  def handle_info({:relay_media_done, ref, result}, state),
+    do: {:noreply, media_done(ref, result, state)}
+
   def handle_info({:DOWN, _monitor, :process, pid, _reason}, state),
     do: {:noreply, tunnel_down(pid, state)}
 
   def handle_info({:EXIT, connector, reason}, %{connector: connector} = state),
     do: {:noreply, link_down({:connector_exit, reason}, %{state | connector: nil, rail: nil})}
+
+  def handle_info({:EXIT, writer, reason}, %{writer: writer} = state),
+    do: {:noreply, drop_session({:writer_exit, reason}, %{state | writer: nil})}
 
   def handle_info({:EXIT, _pid, _reason}, state), do: {:noreply, state}
 
@@ -481,7 +559,7 @@ defmodule FermixChannels.Desktop.Relay do
 
   @impl true
   def terminate(_reason, state) do
-    :ok = Media.abort(state.transfer)
+    _state = stop_writer(state)
     :ok = stop_connector(state)
   end
 
@@ -576,12 +654,50 @@ defmodule FermixChannels.Desktop.Relay do
     :ok
   end
 
-  defp connector_message({:opened, rail}, state) do
-    state = %{state | rail: rail}
+  # The session's writer: it writes each frame the relay hands it to the rail,
+  # one at a time, and says how that went, so the relay never waits on a
+  # write and the rail gives each frame the next `seq` in the order written.
+  # It serves no calls; it ends with its session (`stop_writer/1`) or the
+  # relay.
+  defp start_writer(state) do
+    relay = self()
+    {rail, write} = {state.rail, state.write}
+    %{state | writer: spawn_link(fn -> run_writer(relay, rail, write) end), writing: nil}
+  end
 
-    case send_frames(rail, "hello", hello(state), <<>>) do
-      :ok -> {:noreply, state}
-      {:error, reason} -> {:noreply, drop_session({:hello, reason}, state)}
+  @doc false
+  @spec run_writer(pid(), pid(), (pid(), String.t(), map(), binary() -> :ok | {:error, term()})) ::
+          no_return()
+  def run_writer(relay, rail, write) do
+    receive do
+      {:relay_write, ref, {type, fields, bytes}} ->
+        send(relay, {:relay_written, self(), ref, rail_write(write, rail, type, fields, bytes)})
+        run_writer(relay, rail, write)
+    end
+  end
+
+  # A session that ended under the write answers its own ending.
+  defp rail_write(write, rail, type, fields, bytes) do
+    write.(rail, type, fields, bytes)
+  catch
+    :exit, reason -> {:error, {:rail_down, reason}}
+  end
+
+  defp stop_writer(%{writer: nil} = state), do: state
+
+  defp stop_writer(%{writer: writer} = state) do
+    Process.unlink(writer)
+    Process.exit(writer, :kill)
+    %{state | writer: nil}
+  end
+
+  # The session's lanes start empty, so its first frame is the hello.
+  defp connector_message({:opened, rail}, state) do
+    state = start_writer(%{state | rail: rail})
+
+    case enqueue(state, "hello", hello(state), <<>>, nil) do
+      {:ok, state} -> {:noreply, state}
+      {:error, reason, state} -> {:noreply, drop_session({:hello, reason}, state)}
     end
   end
 
@@ -641,19 +757,14 @@ defmodule FermixChannels.Desktop.Relay do
   defp take(:session, "pong", _fields, _tail, state), do: state
   defp take(:session, "error", fields, _tail, state), do: primary_error(fields, state)
 
-  defp take(family, type, fields, tail, state) when family in [:channels, :calls] do
+  defp take(family, type, fields, tail, state) when family in [:channels, :calls, :loopback] do
     if Chunks.chunked?(type),
       do: take_chunk(family, type, fields, tail, state),
       else: complete(family, type, fields, tail, state)
   end
 
   defp take(:media, type, fields, tail, state), do: media(type, fields, tail, state)
-
-  defp take(module, type, fields, tail, state) when is_atom(module) do
-    if Chunks.chunked?(type),
-      do: take_chunk(module, type, fields, tail, state),
-      else: handed(module, type, fields, tail, state)
-  end
+  defp take(:snapshots, type, fields, tail, state), do: snapshot(type, fields, tail, state)
 
   defp hello_ack(fields, %{link: link} = state) do
     case fields["primary_epoch"] do
@@ -767,8 +878,10 @@ defmodule FermixChannels.Desktop.Relay do
 
   # An error that names a ref ends that fetch; any other the primary's own
   # refusal of something this desktop sent, which leaves the session open.
-  defp primary_error(%{"ref" => ref} = fields, state),
-    do: media_failed(ref, fields["code"], state)
+  defp primary_error(%{"ref" => ref} = fields, state) do
+    :ok = to_family(state, :media, &MediaFetches.drop(&1, ref))
+    media_done(ref, {:error, media_code(fields["code"])}, state)
+  end
 
   # The primary refused this desktop's hello for having seen a later primary:
   # it is itself a retired copy.
@@ -826,28 +939,28 @@ defmodule FermixChannels.Desktop.Relay do
   defp complete(:calls, "manage_result", fields, payload, state),
     do: call_answered(fields, payload, state)
 
-  defp complete(module, type, fields, payload, state),
-    do: handed(module, type, fields, payload, state)
+  defp complete(:loopback, type, fields, payload, state),
+    do: loopback(type, fields, payload, state)
 
-  defp handed(module, type, fields, payload, state) do
-    case module.handle(type, fields, payload) do
-      :ok ->
-        :ok
+  # -- sending (M97 §5.1: lanes) ---------------------------------------------------
 
-      {:error, reason} ->
-        Logger.warning("desktop relay: #{type} was not served: #{inspect(reason)}")
+  # Queues one event's frames in its lane and writes the next frame if the
+  # writer is free; `tag` comes back once its last frame is written. Each
+  # frame is checked by the codec first, so none the rail would refuse is
+  # queued, and an event its lane cannot take is refused whole.
+  defp enqueue(state, type, fields, payload, tag) do
+    with {:ok, lane} <- Lanes.lane(type, fields),
+         {:ok, frames} <- frames(type, fields, payload) do
+      case Outbox.put(state.outbox, lane, frames, tag) do
+        {:ok, outbox} -> {:ok, pump(%{state | outbox: outbox})}
+        {:error, :busy, outbox} -> {:error, :busy, lane_refused(lane, %{state | outbox: outbox})}
+      end
+    else
+      {:error, reason} -> {:error, reason, state}
     end
-
-    state
   end
 
-  # -- sending -------------------------------------------------------------------
-
-  @doc false
-  @spec send_frames(pid() | nil, String.t(), map(), binary()) :: :ok | {:error, term()}
-  def send_frames(nil, _type, _fields, _payload), do: {:error, :not_connected}
-
-  def send_frames(rail, type, fields, payload) do
+  defp frames(type, fields, payload) do
     pieces =
       if Chunks.chunked?(type),
         do:
@@ -857,19 +970,219 @@ defmodule FermixChannels.Desktop.Relay do
           ),
         else: [{fields, payload}]
 
-    Enum.reduce_while(pieces, :ok, fn {fields, bytes}, :ok ->
-      case rail_send(rail, type, fields, bytes) do
-        :ok -> {:cont, :ok}
-        {:error, reason} -> {:halt, {:error, reason}}
+    Enum.reduce_while(pieces, {:ok, []}, fn {fields, bytes}, {:ok, frames} ->
+      case Protocol.encode_client_frame(type, fields, 1, bytes, []) do
+        {:ok, _plaintext} -> {:cont, {:ok, [{type, fields, bytes} | frames]}}
+        {:error, reason} -> {:halt, {:error, {:invalid_event, type, reason}}}
       end
+    end)
+    |> then(fn
+      {:ok, frames} -> {:ok, Enum.reverse(frames)}
+      {:error, _reason} = error -> error
     end)
   end
 
-  # A session that ended under the send answers its own ending to the owner.
-  defp rail_send(rail, type, fields, bytes) do
-    Rail.send_event(rail, type, fields, bytes)
-  catch
-    :exit, reason -> {:error, {:rail_down, reason}}
+  # One frame at a time: the next, by lane, once the writer said the last
+  # one went.
+  defp pump(%{writer: writer, writing: nil} = state) when is_pid(writer) do
+    case Outbox.take(state.outbox) do
+      {:ok, frame, tag, _lane, outbox} ->
+        ref = make_ref()
+        send(writer, {:relay_write, ref, frame})
+        lanes_drained(%{state | outbox: outbox, writing: {ref, tag}})
+
+      :empty ->
+        state
+    end
+  end
+
+  defp pump(state), do: state
+
+  defp written(:ok, tag, state), do: %{state | writing: nil} |> answer_written(tag) |> pump()
+
+  # The rail refused or ended under the write: the session ends, and the
+  # frame's waiter hears so with every other (`fail_everyone/3`).
+  defp written({:error, reason}, _tag, state), do: drop_session({:send, reason}, state)
+
+  defp answer_written(state, {:reply, from}) do
+    GenServer.reply(from, :ok)
+    state
+  end
+
+  defp answer_written(state, nil), do: state
+
+  # A lane's refusals are said when they start, and once it drained, with the
+  # count (`Outbox.drained/1`), never per frame.
+  defp lane_refused(lane, state) do
+    if Outbox.refused(state.outbox, lane) == 1 do
+      {bytes, frames} = Map.fetch!(Outbox.bounds(), lane)
+
+      Logger.warning(
+        "desktop relay: the #{lane} lane is full (#{bytes} bytes or #{frames} frames " <>
+          "waiting): its frames are refused until it drains"
+      )
+    end
+
+    state
+  end
+
+  defp lanes_drained(state) do
+    {drained, outbox} = Outbox.drained(state.outbox)
+
+    for {lane, refused} <- drained,
+        do:
+          Logger.warning("desktop relay: the #{lane} lane takes frames again; #{refused} refused")
+
+    %{state | outbox: outbox}
+  end
+
+  # -- the families' processes (M97 §5.1) -------------------------------------------
+
+  # Hands one event to `family`'s process, which takes it in its own time:
+  # the relay never waits on it. Past the family's bound, or with no process
+  # running, it is not handed, and the family's own rule applies.
+  defp hand_off(state, family, cast) do
+    bound = Map.fetch!(@family_bounds, family)
+
+    case backlog(Map.fetch!(state.families, family)) do
+      {:ok, pid, waiting} when waiting < bound ->
+        :ok = cast.(pid)
+        :handed
+
+      {:ok, _pid, _waiting} ->
+        :full
+
+      :down ->
+        :down
+    end
+  end
+
+  # A word the family's process must have whatever waits there: one per
+  # stream it ends, never per frame.
+  defp to_family(state, family, cast) do
+    case GenServer.whereis(Map.fetch!(state.families, family)) do
+      pid when is_pid(pid) -> cast.(pid)
+      nil -> :ok
+    end
+  end
+
+  defp backlog(server) do
+    with pid when is_pid(pid) <- GenServer.whereis(server),
+         {:message_queue_len, waiting} <- Process.info(pid, :message_queue_len) do
+      {:ok, pid, waiting}
+    else
+      _gone -> :down
+    end
+  end
+
+  # A family's events the relay could not hand over are dropped: a run of
+  # them is said when it starts and when it ends, with the count. A run with
+  # a key is one stream's (a refused copy, a busy blob), which ends with that
+  # stream; one keyed `:all` (no process running, a full loopback) ends with
+  # the next event handed.
+  defp drop(state, family, key, sentence) do
+    case state.drops do
+      %{^family => %{key: ^key} = run} ->
+        put_in(state.drops[family], %{run | dropped: run.dropped + 1})
+
+      _other ->
+        state = end_drops(state, family)
+        Logger.warning("desktop relay: #{sentence}")
+        put_in(state.drops[family], %{key: key, dropped: 1})
+    end
+  end
+
+  defp end_drops(state, family) do
+    case Map.pop(state.drops, family) do
+      {nil, _drops} ->
+        state
+
+      {run, drops} ->
+        Logger.warning(
+          "desktop relay: #{family_words(family)} taken again; #{run.dropped} dropped"
+        )
+
+        %{state | drops: drops}
+    end
+  end
+
+  defp handed(state, family) do
+    case state.drops do
+      %{^family => %{key: :all}} -> end_drops(state, family)
+      _other -> state
+    end
+  end
+
+  defp dropping?(state, family, key), do: match?(%{^family => %{key: ^key}}, state.drops)
+
+  defp family_words(:snapshots), do: "snapshots are"
+  defp family_words(:media), do: "media frames are"
+  defp family_words(:loopback), do: "sign-in forwards are"
+
+  defp not_running(family),
+    do:
+      "#{family_words(family)} not taken here (their process is not running): " <>
+        "their frames are dropped until it runs again"
+
+  # -- the snapshot copies -----------------------------------------------------------
+
+  # A new copy ends the run before it. A copy whose frames outran this disk
+  # past the store's bound is refused (`write_failed`), the store told by
+  # name, and its later frames dropped until its end.
+  defp snapshot(type, %{"snapshot_id" => id} = fields, tail, state) do
+    state = if type == "snapshot_begin", do: end_drops(state, :snapshots), else: state
+
+    if dropping?(state, :snapshots, id),
+      do: drop_snapshot(type, id, state),
+      else: hand_snapshot(type, fields, tail, state)
+  end
+
+  defp hand_snapshot(type, %{"snapshot_id" => id} = fields, tail, state) do
+    case hand_off(state, :snapshots, &SnapshotStore.handle(&1, type, fields, tail)) do
+      :handed -> handed(state, :snapshots)
+      :full -> refuse_copy(type, id, state)
+      :down -> drop(state, :snapshots, :all, not_running(:snapshots))
+    end
+  end
+
+  defp refuse_copy(type, id, state) do
+    bound = Map.fetch!(@family_bounds, :snapshots)
+    :ok = to_family(state, :snapshots, &SnapshotStore.refuse(&1, id, "write_failed"))
+
+    sentence =
+      "the snapshot copy #{id} outran this computer's disk (#{bound} frames waiting): " <>
+        "it is refused, and its later frames dropped"
+
+    state |> drop(:snapshots, id, sentence) |> copy_ended(type)
+  end
+
+  # Only a run of this copy's own is under way here.
+  defp drop_snapshot(type, id, state),
+    do: state |> drop(:snapshots, id, "") |> copy_ended(type)
+
+  defp copy_ended(state, "snapshot_end"), do: end_drops(state, :snapshots)
+  defp copy_ended(state, _type), do: state
+
+  # -- the sign-in loopbacks ---------------------------------------------------------
+
+  defp loopback(type, fields, payload, state) do
+    case hand_off(state, :loopback, &Loopback.handle(&1, type, fields, payload)) do
+      :handed ->
+        handed(state, :loopback)
+
+      :full ->
+        bound = Map.fetch!(@family_bounds, :loopback)
+
+        drop(
+          state,
+          :loopback,
+          :all,
+          "the sign-in forward is behind (#{bound} events waiting): its events are dropped"
+        )
+
+      :down ->
+        drop(state, :loopback, :all, not_running(:loopback))
+    end
   end
 
   # -- the companion channels ------------------------------------------------------
@@ -889,15 +1202,18 @@ defmodule FermixChannels.Desktop.Relay do
   defp open_channel(tunnel, state) do
     channel = free_channel(state.next_channel, state.channels)
 
-    case send_frames(state.rail, "companion_open", %{"channel" => channel}, <<>>) do
-      :ok ->
+    case enqueue(state, "companion_open", %{"channel" => channel}, <<>>, nil) do
+      {:ok, state} ->
         entry = %{pid: tunnel, monitor: Process.monitor(tunnel)}
         next = rem(channel, @channel_numbers) + 1
 
         {:reply, {:ok, channel, self()},
          %{state | channels: Map.put(state.channels, channel, entry), next_channel: next}}
 
-      {:error, _reason} ->
+      {:error, :busy, state} ->
+        {:reply, {:error, :busy}, state}
+
+      {:error, _reason, state} ->
         {:reply, {:error, {:unreachable, unreachable_sentence(state)}}, state}
     end
   end
@@ -909,21 +1225,50 @@ defmodule FermixChannels.Desktop.Relay do
       else: channel
   end
 
+  # A line the interactive lane cannot take ends its chat as too busy: the
+  # app keeps its outbox and reconnects.
   defp send_line_frames(channel, line, state) do
-    case send_frames(state.rail, "companion_line", %{"channel" => channel}, line) do
-      :ok -> state
-      {:error, reason} -> drop_session({:send, reason}, state)
+    case enqueue(state, "companion_line", %{"channel" => channel}, line, nil) do
+      {:ok, state} -> state
+      {:error, :busy, state} -> too_busy(channel, state)
+      {:error, reason, state} -> drop_session({:send, reason}, state)
     end
   end
 
+  defp too_busy(channel, state) do
+    %{pid: tunnel} = Map.fetch!(state.channels, channel)
+
+    sentence =
+      "The link to the server #{name(state)} is too busy to carry this chat. Try again."
+
+    send(tunnel, {:relay_down, channel, sentence})
+    end_channel(channel, tunnel, state)
+  end
+
+  # Its close is a frame with no bytes, which a full interactive lane still
+  # takes unless it holds 4,096 frames; one it refuses is logged.
   defp end_channel(channel, tunnel, state) do
     case Map.fetch(state.channels, channel) do
       {:ok, %{pid: ^tunnel, monitor: monitor}} ->
         Process.demonitor(monitor, [:flush])
-        _ = send_frames(state.rail, "companion_close", %{"channel" => channel}, <<>>)
-        %{state | channels: Map.delete(state.channels, channel)}
+        state = %{state | channels: Map.delete(state.channels, channel)}
+        send_close(channel, state)
 
       _other ->
+        state
+    end
+  end
+
+  defp send_close(channel, state) do
+    case enqueue(state, "companion_close", %{"channel" => channel}, <<>>, nil) do
+      {:ok, state} ->
+        state
+
+      {:error, reason, state} ->
+        Logger.warning(
+          "desktop relay: channel #{channel}'s close was not sent: #{inspect(reason)}"
+        )
+
         state
     end
   end
@@ -938,13 +1283,17 @@ defmodule FermixChannels.Desktop.Relay do
     forget_fetcher(pid, state)
   end
 
+  # The channel's tunnel writes each line to the app in its own time; one
+  # whose app left @max_tunnel_lines unread ends that chat, once.
   defp channel_event("companion_line", %{"channel" => channel}, line, state) do
     case Map.fetch(state.channels, channel) do
-      {:ok, %{pid: tunnel}} -> send(tunnel, {:relay_line, channel, line})
-      :error -> Logger.debug("desktop relay: a line for channel #{channel}, which is closed")
-    end
+      {:ok, %{pid: tunnel}} ->
+        hand_line(tunnel, channel, line, state)
 
-    state
+      :error ->
+        Logger.debug("desktop relay: a line for channel #{channel}, which is closed")
+        state
+    end
   end
 
   defp channel_event("companion_close", %{"channel" => channel} = fields, _payload, state) do
@@ -956,6 +1305,28 @@ defmodule FermixChannels.Desktop.Relay do
 
       {nil, _channels} ->
         state
+    end
+  end
+
+  defp hand_line(tunnel, channel, line, state) do
+    case Process.info(tunnel, :message_queue_len) do
+      {:message_queue_len, waiting} when waiting < @max_tunnel_lines ->
+        send(tunnel, {:relay_line, channel, line})
+        state
+
+      # Gone: its `:DOWN` ends the channel.
+      nil ->
+        state
+
+      {:message_queue_len, _behind} ->
+        Logger.warning(
+          "desktop relay: channel #{channel}'s app left #{@max_tunnel_lines} lines unread: " <>
+            "its chat ends"
+        )
+
+        sentence = "This chat fell too far behind the server #{name(state)}. Try again."
+        send(tunnel, {:relay_down, channel, sentence})
+        end_channel(channel, tunnel, state)
     end
   end
 
@@ -990,16 +1361,22 @@ defmodule FermixChannels.Desktop.Relay do
 
   defp start_call(call_id, request, from, deadline, state) do
     case manage_frames(call_id, request, state) do
-      :ok ->
+      {:ok, state} ->
         put_in(state.calls[call_id], %{from: from, deadline: deadline, method: request.method})
 
-      {:error, {:too_large, bound}} ->
+      {:error, {:too_large, bound}, state} ->
         cancel(state, deadline)
         too_large = %{"field" => "params", "maximum_bytes" => bound}
         GenServer.reply(from, {:error, :invalid_params, too_large})
         state
 
-      {:error, reason} ->
+      # The interactive lane is full: busy, as past the waiting calls.
+      {:error, :busy, state} ->
+        cancel(state, deadline)
+        GenServer.reply(from, {:error, :busy, %{"operation" => "forwarded management"}})
+        state
+
+      {:error, reason, state} ->
         cancel(state, deadline)
         GenServer.reply(from, unreachable(state))
         drop_session({:send, reason}, state)
@@ -1017,15 +1394,16 @@ defmodule FermixChannels.Desktop.Relay do
     }
 
     if byte_size(params) > bound,
-      do: {:error, {:too_large, bound}},
-      else: send_frames(state.rail, "manage", fields, params)
+      do: {:error, {:too_large, bound}, state},
+      else: enqueue(state, "manage", fields, params, nil)
   end
 
+  # Never dropped, and never decoded here: the caller decodes it (`answered/1`).
   defp call_answered(%{"call_id" => call_id}, payload, state) do
     case Map.pop(state.calls, call_id) do
       {%{from: from, deadline: deadline}, calls} ->
         cancel(state, deadline)
-        GenServer.reply(from, management_answer(payload))
+        GenServer.reply(from, {:relay_answer, payload})
         next_call(%{state | calls: calls})
 
       {nil, _calls} ->
@@ -1112,69 +1490,71 @@ defmodule FermixChannels.Desktop.Relay do
 
   defp new_fetch(ref, tunnel, state) do
     with true <- map_size(state.fetches) < @max_media_fetches,
-         :ok <- send_frames(state.rail, "media_fetch", %{"ref" => ref}, <<>>) do
+         {:ok, state} <- enqueue(state, "media_fetch", %{"ref" => ref}, <<>>, nil) do
       {:reply, :ok, put_in(state.fetches[ref], [tunnel])}
     else
       false -> {:reply, {:error, :busy}, state}
-      {:error, _reason} -> {:reply, {:error, {:unreachable, unreachable_sentence(state)}}, state}
+      {:error, :busy, state} -> {:reply, {:error, :busy}, state}
+      {:error, _reason, state} -> {:reply, unreachable_media(state), state}
     end
   end
+
+  defp unreachable_media(state), do: {:error, {:unreachable, unreachable_sentence(state)}}
 
   defp forget_fetcher(pid, state) do
     fetches = Map.new(state.fetches, fn {ref, waiters} -> {ref, List.delete(waiters, pid)} end)
     %{state | fetches: fetches}
   end
 
-  # Blobs come one at a time; a begin for a ref nobody here asked for is
-  # left unstaged, and its chunks with it.
-  defp media("media_begin", %{"ref" => ref} = fields, _tail, state) do
-    :ok = Media.abort(state.transfer)
-    state = %{state | transfer: nil}
+  # Blobs come one at a time, written in `Desktop.MediaFetches`, which says
+  # how each ended (`{:relay_media_done, ref, result}`); a begin for a ref
+  # nobody here asked for is left unstaged there, and its chunks with it. A new
+  # blob ends the run before it, and a blob's end its own.
+  defp media("media_begin" = type, %{"ref" => ref} = fields, _tail, state) do
+    state = end_drops(state, :media)
+    {wanted?, max} = {Map.has_key?(state.fetches, ref), state.max_media_bytes}
+    hand_media(type, ref, &MediaFetches.begin(&1, self(), fields, wanted?, max), state)
+  end
 
-    with true <- Map.has_key?(state.fetches, ref),
-         {:ok, transfer} <- Media.begin(state.staging, fields, state.max_media_bytes) do
-      %{state | transfer: transfer}
-    else
-      false -> state
-      {:error, reason} -> media_done(ref, {:error, reason}, state)
+  defp media(type, %{"ref" => ref} = fields, tail, state) do
+    if dropping?(state, :media, ref),
+      do: state |> drop(:media, ref, "") |> blob_ended(type),
+      else: hand_media(type, ref, media_cast(type, ref, fields, tail), state)
+  end
+
+  defp media_cast("media_chunk", ref, fields, tail),
+    do: &MediaFetches.chunk(&1, ref, fields["index"], tail)
+
+  defp media_cast("media_end", ref, _fields, _tail), do: &MediaFetches.finish(&1, ref)
+
+  defp blob_ended(state, "media_end"), do: end_drops(state, :media)
+  defp blob_ended(state, _type), do: state
+
+  # A blob that outran this disk past the bound fails busy, and its later
+  # frames are dropped; with no process to write it, its waiters hear so.
+  defp hand_media(type, ref, cast, state) do
+    case hand_off(state, :media, cast) do
+      :handed ->
+        handed(state, :media)
+
+      :full ->
+        bound = Map.fetch!(@family_bounds, :media)
+        :ok = to_family(state, :media, &MediaFetches.drop(&1, ref))
+
+        sentence =
+          "the blob #{ref} outran this computer's disk (#{bound} frames waiting): " <>
+            "its fetch fails busy, and its later frames are dropped"
+
+        state
+        |> drop(:media, ref, sentence)
+        |> blob_ended(type)
+        |> then(&media_done(ref, {:error, :busy}, &1))
+
+      :down ->
+        state
+        |> drop(:media, :all, not_running(:media))
+        |> then(&media_done(ref, {:error, :not_running}, &1))
     end
-  end
-
-  defp media(
-         "media_chunk",
-         %{"ref" => ref, "index" => index},
-         tail,
-         %{transfer: %{ref: ref}} = state
-       ) do
-    case Media.chunk(state.transfer, index, tail) do
-      {:ok, transfer} -> %{state | transfer: transfer}
-      {:error, reason} -> abort_transfer(ref, reason, state)
-    end
-  end
-
-  defp media("media_end", %{"ref" => ref}, _tail, %{transfer: %{ref: ref} = transfer} = state),
-    do: media_done(ref, Media.finish(transfer, state.staging), %{state | transfer: nil})
-
-  # A chunk or an end of a blob whose start was refused here.
-  defp media(_type, _fields, _tail, state), do: state
-
-  defp abort_transfer(ref, reason, state) do
-    :ok = Media.abort(state.transfer)
-    media_done(ref, {:error, reason}, %{state | transfer: nil})
-  end
-
-  defp media_failed(ref, code, state) do
-    state =
-      case state.transfer do
-        %{ref: ^ref} = transfer ->
-          :ok = Media.abort(transfer)
-          %{state | transfer: nil}
-
-        _other ->
-          state
-      end
-
-    media_done(ref, {:error, media_code(code)}, state)
   end
 
   defp media_code(code) when code in ["not_found", "media_gone", "media_descriptor_mismatch"],
@@ -1188,7 +1568,10 @@ defmodule FermixChannels.Desktop.Relay do
     {waiters, fetches} = Map.pop(state.fetches, ref, [])
     result = media_result(result)
     Enum.each(waiters, &send(&1, {:relay_media, ref, result}))
-    if waiters == [] and match?({:ok, _media}, result), do: Media.discard(state.staging, ref)
+
+    if waiters == [] and match?({:ok, _media}, result),
+      do: :ok = to_family(state, :media, &MediaFetches.discard(&1, ref))
+
     %{state | fetches: fetches}
   end
 
@@ -1209,6 +1592,8 @@ defmodule FermixChannels.Desktop.Relay do
   # quietly, a primary that no longer knows this computer is not tried again,
   # and anything else is an outage, retried with backoff.
   defp link_down(reason, state) do
+    state = stop_writer(state)
+
     state =
       case ending_kind(reason, state) do
         :renewal -> renewal(reason, state)
@@ -1334,7 +1719,8 @@ defmodule FermixChannels.Desktop.Relay do
   # that no longer knows this computer.
   defp fail_everyone(state, sentence, tunnel_word \\ :relay_down)
        when tunnel_word in [:relay_down, :relay_revoked] do
-    :ok = Media.abort(state.transfer)
+    :ok = to_family(state, :media, &MediaFetches.abort/1)
+    state = fail_unwritten(state, sentence)
     answer = Placement.unreachable(name(state), sentence)
 
     for {channel, %{pid: tunnel, monitor: monitor}} <- state.channels do
@@ -1362,9 +1748,26 @@ defmodule FermixChannels.Desktop.Relay do
         calls: %{},
         waiting: :queue.new(),
         fetches: %{},
-        transfer: nil,
         open: %{}
     }
+  end
+
+  # The frames not yet written go with their session; whoever waits on one
+  # (`send_event/3`) is told it ended. The lanes start empty, and a lane that
+  # was refusing says it takes frames again.
+  defp fail_unwritten(state, sentence) do
+    {tags, outbox} = Outbox.clear(state.outbox)
+
+    writing =
+      case state.writing do
+        {_ref, tag} -> [tag]
+        nil -> []
+      end
+
+    for {:reply, from} <- writing ++ tags,
+        do: GenServer.reply(from, {:error, {:unreachable, sentence}})
+
+    lanes_drained(%{state | outbox: outbox, writing: nil})
   end
 
   defp down_sentence({:stale_primary, mine, theirs}, state) do

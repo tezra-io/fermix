@@ -23,11 +23,14 @@ defmodule FermixChannels.Desktop.SnapshotStore do
   Only the copies are here: this machine never holds the recovery passphrase,
   so it cannot read them; `fermix home import` restores one with it.
 
-  The relay hands it the primary's events (`handle/3`, one line each in
-  `Desktop.Relay`'s `@inbound`), and waits for each chunk to be written, so a
-  slow disk slows the stream instead of filling memory. The answer goes back
-  in a task, never from inside the relay's call. Test seams: `:name`,
-  `:home`, `:send`, `:free_bytes` (a 1-arity function of the directory),
+  The relay hands it the primary's events (`handle/4`, the `snapshots`
+  family of `Desktop.Relay`'s `@inbound`) and never waits on it (M97 §5.1),
+  so a slow disk delays no chat line and no settings answer: they take their
+  turn here, in order. At most 256 wait; a copy whose stream outruns this
+  disk past that is refused by the relay's word (`refuse/3`, `write_failed`),
+  and the relay drops its later frames. The answer goes back in a task, so
+  this process never waits on the link either. Test seams: `:name`, `:home`,
+  `:send`, `:free_bytes` (a 1-arity function of the directory),
   `:task_supervisor`.
   """
 
@@ -44,7 +47,6 @@ defmodule FermixChannels.Desktop.SnapshotStore do
   @keep 3
   @floor_bytes 2 * 1_024 * 1_024 * 1_024
   @name ~r/\A[0-9]{8}T[0-9]{6}Z-e[0-9]{1,12}\.fxsnap\z/
-  @call_timeout_ms 60_000
   @df_timeout_ms 5_000
 
   @doc "How many copies a desktop keeps."
@@ -55,18 +57,20 @@ defmodule FermixChannels.Desktop.SnapshotStore do
   @spec floor_bytes() :: pos_integer()
   def floor_bytes, do: @floor_bytes
 
-  @doc "Serves one of the primary's snapshot events, from the relay."
-  @spec handle(String.t(), map(), binary()) :: :ok | {:error, term()}
-  def handle(type, fields, payload) when type in @events and is_map(fields),
-    do: handle(__MODULE__, type, fields, payload)
+  @doc "Takes one of the primary's snapshot events, from the relay, in its own time."
+  @spec handle(GenServer.server(), String.t(), map(), binary()) :: :ok
+  def handle(server, type, fields, payload)
+      when type in @events and is_map(fields) and is_binary(payload),
+      do: GenServer.cast(server, {:event, type, fields, payload})
 
-  @doc false
-  @spec handle(GenServer.server(), String.t(), map(), binary()) :: :ok | {:error, term()}
-  def handle(server, type, fields, payload) when type in @events do
-    GenServer.call(server, {type, fields, payload}, @call_timeout_ms)
-  catch
-    :exit, {reason, _call} when reason in [:noproc, :normal, :shutdown] -> {:error, :not_running}
-  end
+  @doc """
+  Refuses the copy `id` with `reason`, by the relay's word: its stream
+  outran this disk, and the relay drops what follows. A copy in progress
+  goes with its partial file; the primary is told either way.
+  """
+  @spec refuse(GenServer.server(), String.t(), String.t()) :: :ok
+  def refuse(server, id, reason) when is_binary(id) and is_binary(reason),
+    do: GenServer.cast(server, {:refuse, id, reason})
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) when is_list(opts),
@@ -87,34 +91,40 @@ defmodule FermixChannels.Desktop.SnapshotStore do
   end
 
   @impl true
-  def handle_call({"snapshot_begin", fields, _payload}, _from, state) do
+  def handle_cast({:event, "snapshot_begin", fields, _payload}, state) do
     state = abandon(state)
 
     case begin(fields, state) do
       {:ok, copy} ->
-        {:reply, :ok, %{state | copy: copy}}
+        {:noreply, %{state | copy: copy}}
 
       {:error, reason} ->
-        refuse(fields["snapshot_id"], reason, state)
-        {:reply, :ok, state}
+        tell_refused(fields["snapshot_id"], reason, state)
+        {:noreply, state}
     end
   end
 
-  def handle_call(
-        {"snapshot_chunk", %{"snapshot_id" => id, "index" => index}, bytes},
-        _from,
+  def handle_cast(
+        {:event, "snapshot_chunk", %{"snapshot_id" => id, "index" => index}, bytes},
         state
       ) do
     case state.copy do
-      %{id: ^id, next: ^index} = copy -> {:reply, :ok, write(copy, bytes, state)}
-      _other -> {:reply, :ok, refuse_copy(id, "out_of_order", state)}
+      %{id: ^id, next: ^index} = copy -> {:noreply, write(copy, bytes, state)}
+      _other -> {:noreply, refuse_copy(id, "out_of_order", state)}
     end
   end
 
-  def handle_call({"snapshot_end", %{"snapshot_id" => id}, _payload}, _from, state) do
+  def handle_cast({:event, "snapshot_end", %{"snapshot_id" => id}, _payload}, state) do
     case state.copy do
-      %{id: ^id} = copy -> {:reply, :ok, finish(copy, state)}
-      _other -> {:reply, :ok, refuse_copy(id, "out_of_order", state)}
+      %{id: ^id} = copy -> {:noreply, finish(copy, state)}
+      _other -> {:noreply, refuse_copy(id, "out_of_order", state)}
+    end
+  end
+
+  def handle_cast({:refuse, id, reason}, state) do
+    case state.copy do
+      %{id: ^id} -> {:noreply, refuse_copy(id, reason, state)}
+      _other -> {:noreply, refuse_with(id, reason, state)}
     end
   end
 
@@ -247,13 +257,18 @@ defmodule FermixChannels.Desktop.SnapshotStore do
 
   defp refuse_copy(id, reason, state) do
     state = abandon(state)
-    refuse(id, reason, state)
+    tell_refused(id, reason, state)
     state
   end
 
-  defp refuse(id, reason, state) do
+  defp tell_refused(id, reason, state) do
     Logger.warning("desktop snapshots: #{id} refused: #{reason}")
     answer(state, %{"t" => "snapshot_refused", "snapshot_id" => id, "reason" => reason})
+  end
+
+  defp refuse_with(id, reason, state) do
+    :ok = tell_refused(id, reason, state)
+    state
   end
 
   # A copy in progress goes with its partial file.
@@ -271,7 +286,8 @@ defmodule FermixChannels.Desktop.SnapshotStore do
     %{state | copy: nil}
   end
 
-  # The relay is waiting on this process, so the answer goes from a task.
+  # The answer waits for its turn in the relay's bulk lane, so it goes from a
+  # task and this process takes the next event meanwhile.
   defp answer(state, %{"t" => type} = event) do
     job = fn ->
       case state.send.(event, <<>>) do
