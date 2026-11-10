@@ -70,11 +70,25 @@ engine's provider api_key slot, filled at daemon boot from `XAI_API_KEY` or
 `OPENAI_API_KEY` (config/runtime.exs) and never written here; the realtime
 socket starts only in a daemon run with realtime on (`mix fermix.dev`, not
 `--no-realtime`) and that key present.
+
+`--computers` (M97) makes the home an Always On server with two linked
+computers, both away, for the computers suite (suites/computers.yaml): a
+desktop row each in `mobile/devices.toml` (what `DeviceStore` reads) and a
+record each in `device/computers/<device_id>.json` (its last offers, engine
+version and when it was last seen), with `[fermix_core.always_on]` turned on so
+a release build serves the `## Computers` section too (a dev build serves it
+regardless). It is off by default: the section joins every owner turn, which
+would move the measured prompt of every unrelated suite. No session ever
+exists in an eval, so both computers are listed as away. The seed records what
+it wrote in `eval-fixtures/computers.json`; a seed without `--computers`
+removes all of it, and a seed with it refuses a devices file it did not write.
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
 import json
 import os
 import re
@@ -213,6 +227,38 @@ CODEX_MODEL_LIST = {
         {"slug": "gpt-quiet-reserve", "display_name": "Quiet Reserve", "visibility": "hide"},
     ],
 }
+# Computers (M97), with --computers: two computers linked to this home, neither
+# with a session. Each is a desktop row in the paired-device store (`DeviceStore`:
+# lowercase uuid, name and model 1..255 bytes, a unique 32-byte Noise key, ISO
+# 8601 UTC times, no phone field) and a record of what it last said about itself.
+# `model` is the string the move writes for each system. Every value is invented,
+# and fixed, so every seed writes the same bytes.
+COMPUTERS_MANIFEST = os.path.join("eval-fixtures", "computers.json")
+DEVICES_FILE = os.path.join("mobile", "devices.toml")
+COMPUTER_RECORDS_DIR = os.path.join("device", "computers")
+COMPUTERS = (
+    {"device_id": "6f1c2a9e-3b7d-4c21-9a8e-1d2f3a4b5c6d", "name": "studio Mac",
+     "model": "macOS desktop", "platform": "macos", "backups": True,
+     "created_at": "2026-10-02T09:00:00Z", "last_seen": "2026-11-09T22:40:00Z",
+     "engine_version": "0.19.0", "offers_rev": "3a7c19e04b2d58f6",
+     "offers": [{"id": "files", "state": "on"},
+                {"id": "shell", "state": "on", "detail": "standard"},
+                {"id": "browser", "state": "on"},
+                {"id": "computer_use", "state": "on"},
+                {"id": "imessage", "state": "on"},
+                {"id": "history", "state": "on"}]},
+    {"device_id": "b47e0d93-5a1c-4f68-8e2b-7c9d1a3f6e05", "name": "loft Linux",
+     "model": "Linux desktop", "platform": "linux", "backups": False,
+     "created_at": "2026-10-19T16:30:00Z", "last_seen": "2026-11-06T14:05:00Z",
+     "engine_version": "0.19.0", "offers_rev": "c81e5f2a90d7b346",
+     "offers": [{"id": "files", "state": "on"},
+                {"id": "shell", "state": "on", "detail": "strict"},
+                {"id": "browser", "state": "on"},
+                {"id": "imessage", "state": "unavailable",
+                 "sentence": "Messages runs only on a Mac."},
+                {"id": "history", "state": "unavailable",
+                 "sentence": "Fermix records computer history only on a Mac for now."}]},
+)
 _ENV_KEY_PROVIDERS = {
     "openai": "OPENAI_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
@@ -258,6 +304,7 @@ def dev_provider(dev: dict, pid: str) -> tuple[str, dict, str | None]:
 def render_config(
     home: str, pid: str, blk: dict, profile: str | None,
     explicit: bool = False, voice: str | None = None, cues: dict | None = None,
+    computers: bool = False,
 ) -> str:
     uses_key = "api_key" in blk
     if explicit:
@@ -371,6 +418,12 @@ def render_config(
         lines += voice_lines(voice)
     if cues:
         lines += cue_lines(home, cues)
+    # With --computers: the home serves Always On, which the `## Computers`
+    # section needs. A dev build serves it whatever this says; a release build
+    # (`Home.AlwaysOnRelease`) only with it. `enabled` is the section's only key.
+    if computers:
+        lines += ["# Always On for the computers suite (--computers).",
+                  "[fermix_core.always_on]", "enabled = true", ""]
     return "\n".join(lines)
 
 
@@ -549,6 +602,85 @@ def write_cue_plugin(home: str) -> str:
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(manifest, fh, indent=2)
     return path
+
+
+def computer_noise_pk(device_id: str) -> str:
+    """A computer's Noise public key as its row stores it (standard base64 of 32
+    bytes). Derived from its id, so every seed writes the same bytes and no two
+    rows share one; no session ever uses it."""
+    digest = hashlib.sha256(f"fermix-eval computer {device_id}".encode()).digest()
+    return base64.b64encode(digest).decode("ascii")
+
+
+def render_devices() -> str:
+    """`mobile/devices.toml` with one desktop row per computer in `COMPUTERS`."""
+    lines = ["# Managed by benchmark/bin/seed_capability_home.py --computers: the",
+             "# computers linked to this home, both away (no session).", ""]
+    for computer in COMPUTERS:
+        lines += ["[[devices]]"]
+        lines += [f"{key} = {json.dumps(computer[key])}"
+                  for key in ("device_id", "name", "model")]
+        lines += [f"noise_pk = {json.dumps(computer_noise_pk(computer['device_id']))}",
+                  f"created_at = {json.dumps(computer['created_at'])}",
+                  'kind = "desktop"',
+                  f"platform = {json.dumps(computer['platform'])}",
+                  f"last_seen = {json.dumps(computer['last_seen'])}",
+                  f"backups = {json.dumps(computer['backups'])}", ""]
+    return "\n".join(lines)
+
+
+def computer_record(computer: dict) -> dict:
+    """What a computer last said about itself, as the home keeps it on disk."""
+    return {"v": 1, "engine_version": computer["engine_version"],
+            "seen_at": computer["last_seen"], "offers_rev": computer["offers_rev"],
+            "offers": computer["offers"]}
+
+
+def computer_paths(home: str) -> list[str]:
+    """Every file `write_computer_fixtures` writes, the manifest last."""
+    records = [os.path.join(home, COMPUTER_RECORDS_DIR, f"{c['device_id']}.json")
+               for c in COMPUTERS]
+    return [os.path.join(home, DEVICES_FILE), *records, os.path.join(home, COMPUTERS_MANIFEST)]
+
+
+def make_private_dir(path: str) -> None:
+    os.makedirs(path, exist_ok=True)
+    os.chmod(path, 0o700)
+
+
+def write_computer_fixtures(home: str) -> dict:
+    """The two computers (`COMPUTERS`): the devices file (directory 0700, file
+    0600, the modes `DeviceStore` refuses anything but), one record each under
+    `device/computers/` (0700 / 0600), and the manifest that says this seed
+    wrote them. Rewritten whole on every seed. A devices file the manifest does
+    not account for is refused, never overwritten: an eval home pairs nothing,
+    so it is someone else's."""
+    devices = os.path.join(home, DEVICES_FILE)
+    if os.path.exists(devices) and not os.path.isfile(os.path.join(home, COMPUTERS_MANIFEST)):
+        die(f"refusing to replace {devices}: this seed did not write it (no "
+            f"{COMPUTERS_MANIFEST}); remove it or seed a fresh home")
+    make_private_dir(os.path.dirname(devices))
+    write_private(devices, render_devices())
+    make_private_dir(os.path.join(home, os.path.dirname(COMPUTER_RECORDS_DIR)))
+    make_private_dir(os.path.join(home, COMPUTER_RECORDS_DIR))
+    for computer in COMPUTERS:
+        path = os.path.join(home, COMPUTER_RECORDS_DIR, f"{computer['device_id']}.json")
+        write_private(path, json.dumps(computer_record(computer), indent=2) + "\n")
+    manifest = {"computers": [{key: c[key] for key in ("name", "platform", "last_seen")}
+                              for c in COMPUTERS]}
+    write_private(os.path.join(home, COMPUTERS_MANIFEST), json.dumps(manifest, indent=2))
+    return manifest
+
+
+def clear_computer_fixtures(home: str) -> None:
+    """A seed without --computers: remove what a previous --computers seed wrote
+    (its manifest says so), so no other suite's turns carry a `## Computers`
+    section. A home without the manifest is left as it is."""
+    if not os.path.isfile(os.path.join(home, COMPUTERS_MANIFEST)):
+        return
+    for path in computer_paths(home):
+        if os.path.isfile(path):
+            os.remove(safe_rm.check(path, home, min_below=1))
 
 
 def voice_lines(engine: str) -> list[str]:
@@ -820,6 +952,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cue-mandates", dest="cue_mandates", action="store_true",
                         help="with --cues: add the stub http plugin and the two mandates the "
                              "cue suite's mandate cases need (they are held out without it)")
+    parser.add_argument("--computers", action="store_true",
+                        help="link two computers to the home (studio Mac, loft Linux), both "
+                             "away, and turn Always On on, for the computers suite; off by "
+                             "default")
     parser.add_argument("--extra-config", dest="extra_config",
                         help="TOML fragment appended to the rendered config (one "
                              "configuration ARM's difference); refused when it "
@@ -892,8 +1028,12 @@ def main() -> None:
         write_cue_fixtures(home, cues)
     else:
         clear_cue_fixtures(home)
-    config = render_config(home, pid, blk, profile,
-                           explicit=bool(args.provider), voice=voice_engine, cues=cues)
+    if args.computers:
+        write_computer_fixtures(home)
+    else:
+        clear_computer_fixtures(home)
+    config = render_config(home, pid, blk, profile, explicit=bool(args.provider),
+                           voice=voice_engine, cues=cues, computers=args.computers)
     if args.extra_config:
         config += read_extra_config(config, args.extra_config)
     with open(os.path.join(home, "config.toml"), "w", encoding="utf-8") as fh:
@@ -918,6 +1058,9 @@ def main() -> None:
         model, key_env = VOICE_ENGINES[voice_engine]
         print(f"voice: {voice_engine} ({model}) on; {key_env} must be set on the daemon "
               "process, started with realtime on (mix fermix.dev, not --no-realtime)")
+    if args.computers:
+        names = " and ".join(c["name"] for c in COMPUTERS)
+        print(f"computers: {names} linked, both away; Always On on")
 
 
 if __name__ == "__main__":

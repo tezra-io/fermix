@@ -27,7 +27,7 @@ _TOP_KEYS = {
 # What a suite may require of the eval home beyond the defaults (`requires:`). A
 # home seeded without it holds the suite's cases out as NOT EVALUATED, never as
 # zeros. `cues`: seeded with `seed_capability_home.py --cues` and seed_cues.exs.
-REQUIREMENTS = ("cues",)
+REQUIREMENTS = ("cues", "computers")
 _DEFAULT_KEYS = {"timeout_ms", "judge", "expect"}
 _SCENARIO_KEYS = {"id", "title", "severity", "risk", "confirm_cost", "tags", "cases",
                   "sticky_gates", "platforms"}

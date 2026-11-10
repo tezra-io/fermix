@@ -19,7 +19,7 @@ defmodule FermixCore.Home.AlwaysOnReleaseTest do
   alias FermixTestSupport.SafeRm
 
   @sentence "Always On is not in this release of Fermix yet."
-  @gated ~w(home.status home.act)
+  @gated ~w(home.status home.act computers.rename)
 
   test "a prod build offers Always On only where its home turns it on, dev and test always" do
     refute AlwaysOnRelease.available?(:prod, [])

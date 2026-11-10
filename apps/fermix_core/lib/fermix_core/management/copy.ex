@@ -114,7 +114,8 @@ defmodule FermixCore.Management.Copy do
                    progress_return_receiving progress_return_staged progress_return_placing
                    progress_restoring progress_backing_up confirm_restore_here confirm_return_move confirm_forget
                    webhooks webhooks_whatsapp webhooks_cue webhooks_port webhooks_ingress
-                   webhooks_tunnel own_server_tailscale)a
+                   webhooks_tunnel own_server_tailscale notice_computer_review
+                   notice_server_sandbox)a
   # Each Details line's label, by its key.
   @line_labels [
     server: "Server",
@@ -464,6 +465,16 @@ defmodule FermixCore.Management.Copy do
   def summary_sentence(:notice_backup_week, %{machine: machine}),
     do: "Your last backup is a week old. It runs when this #{machine} is online."
 
+  def summary_sentence(:notice_computer_review, %{machine: machine}),
+    do:
+      "Fermix on your server can use nothing on this #{machine} until you review what it " <>
+        "may use."
+
+  def summary_sentence(:notice_server_sandbox, _values),
+    do:
+      "This server now uses its own sandbox setting: open. The settings it had from your " <>
+        "computer stay on that computer."
+
   def summary_sentence(:notice_server_backup_week, _values),
     do: "The last backup is a week old. It runs when your Mac is online."
 
@@ -796,6 +807,7 @@ defmodule FermixCore.Management.Copy do
   def summary_label(:update, _values), do: "Update"
   def summary_label(:back_up_now, _values), do: "Back up now"
   def summary_label(:check_again, _values), do: "Check again"
+  def summary_label(:review_offers, _values), do: "Review what your server may use"
 
   def summary_label(:own_server, %{renew: true}),
     do: "Open a new code (the current one stops working)"

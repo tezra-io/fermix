@@ -19,6 +19,10 @@ defmodule FermixChannels.Mobile.Peers do
   owner's voice on the phone, and a desktop's own voice reaches its own
   computer's socket.
 
+  A computer's own record (M97 §3.2) is a desktop's alone: what it offers
+  (`offers`) and the path its session runs (`link_path`), each sent only to
+  a server whose `hello_ack` says it takes them (`caps.computer`).
+
   A phone's list channel (M85 E4) is the companion family's `companion_open`,
   `companion_line` and `companion_close`, which a desktop sends too: one
   channel, carrying the owner's lists only (`Desktop.Companion`). The family's
@@ -36,7 +40,7 @@ defmodule FermixChannels.Mobile.Peers do
   )
   @desktop_client ~w(
     hello ping media_fetch ack companion_open companion_line companion_close manage
-    loopback_request loopback_failed snapshot_stored snapshot_refused
+    loopback_request loopback_failed snapshot_stored snapshot_refused offers link_path
   )
   @phone_server ~w(
     hello_ack accepted attach_status turn_started text_delta tool_event text_done turn_done

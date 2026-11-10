@@ -153,6 +153,8 @@ defmodule FermixCore.Management.HomeSummary do
   """
 
   alias FermixCore.Clock
+  alias FermixCore.Computers.Consent
+  alias FermixCore.Computers.Switches
   alias FermixCore.Cues.Webhook
   alias FermixCore.Funnel
   alias FermixCore.Home.Candidate
@@ -161,17 +163,19 @@ defmodule FermixCore.Management.HomeSummary do
   alias FermixCore.Home.Move
   alias FermixCore.Home.MoveReadiness
   alias FermixCore.Home.Return
+  alias FermixCore.Home.ServerSandbox
   alias FermixCore.Home.Snapshot.Capture
   alias FermixCore.Home.UnreadableFiles
   alias FermixCore.Management.Copy
   alias FermixCore.Management.Lifecycle
+  alias FermixCore.Setup.ConfigStore
 
   @states ~w(off connect creating ready moving on undone retired candidate primary problem)
   @outcomes ~w(running waiting done failed)
   @problems ~w(cannot_reach not_set_up waited_too_long update server_older disk_full backup_old
                backup_failed not_ready return_failed)
   @actions ~w(cancel move_now try_again learn_more update back_up_now check_again own_server
-              move_back restore_here)
+              move_back restore_here review_offers)
   @needs ~w(recovery_passphrase new_recovery_passphrase)
 
   @unreachable_ms 10 * 60_000
@@ -179,6 +183,8 @@ defmodule FermixCore.Management.HomeSummary do
   @day_s 86_400
   # The apps raise their notification once the newest backup is this old.
   @backup_week_s 7 * @day_s
+  # A server tells that it left out its inherited settings this long after.
+  @server_sandbox_s 7 * @day_s
   # The states whose sentence `key/1` leaves out: on `on` and `problem` it
   # carries a figure that moves with the clock (a backup's age, a count of
   # days, how full a disk is), and their state, action and kind say every
@@ -432,7 +438,10 @@ defmodule FermixCore.Management.HomeSummary do
       lapsed: lapsed(home, role, {link, return}, now, reads),
       moved_back: moved_back(home, role, reads),
       primary_behind: Map.get(status, :primary_behind, false),
-      restarts_itself: restarts_itself(role, opts)
+      restarts_itself: restarts_itself(role, opts),
+      keeps_on: keeps_on(home, {role, link}, host_os, opts),
+      offers_review: offers_review(DesktopLink.linked?(record, home), host_os, opts),
+      server_sandbox: server_sandbox(home, role, reads)
     }
   end
 
@@ -497,12 +506,18 @@ defmodule FermixCore.Management.HomeSummary do
         })
 
       [] ->
-        view("ready", sentence(:ready, facts), action(:move_now), %{
-          "server" => server_facts(candidate),
-          "readiness" => items,
-          "waits_until" => candidate["expires_at"],
-          "alternatives" => forget(facts)
-        })
+        view(
+          "ready",
+          sentence(:ready, facts),
+          action(:move_now),
+          %{
+            "server" => server_facts(candidate),
+            "readiness" => items,
+            "waits_until" => candidate["expires_at"],
+            "alternatives" => forget(facts)
+          }
+          |> put_some("keeps_on", Map.get(facts, :keeps_on))
+        )
     end
   end
 
@@ -663,8 +678,10 @@ defmodule FermixCore.Management.HomeSummary do
       "copies_bytes" => facts.copies_bytes,
       "disk_used" => get_in(facts, [:primary_home, "disk", "used"]),
       "data" => sentence(:data, facts),
-      "actions" => [action(:back_up_now)] ++ List.wrap(move_back(facts))
+      "actions" => review_action(facts) ++ [action(:back_up_now)] ++ List.wrap(move_back(facts))
     }
+
+    detail = put_some(detail, "review", Map.get(facts, :offers_review))
 
     view(
       "on",
@@ -672,6 +689,13 @@ defmodule FermixCore.Management.HomeSummary do
       nil,
       webhooks(detail, get_in(facts, [:primary_home, "webhooks"]))
     )
+  end
+
+  # A computer that moved before M97 offers nothing until the owner reviews
+  # what Fermix on the server may use on it (M97 §7.3): the review's block is
+  # in Details, with its step.
+  defp review_action(facts) do
+    if Map.get(facts, :offers_review), do: [action(:review_offers)], else: []
   end
 
   defp on_sentence(%{primary_home: %{"snapshots" => snapshots}} = facts) do
@@ -1317,12 +1341,13 @@ defmodule FermixCore.Management.HomeSummary do
   end
 
   defp occurrence(_view, %{role: :primary, link: %{desktops: [_ | _]}} = facts),
-    do: week_occurrence(facts, :notice_server_backup_week)
+    do: week_occurrence(facts, :notice_server_backup_week) || sandbox_occurrence(facts)
 
   defp occurrence(view, %{role: role} = facts) when role in [:primary, :device] do
     Enum.find_value(
       [
         &reach_occurrence/2,
+        &review_occurrence/2,
         &ready_occurrence/2,
         fn _view, facts -> week_occurrence(facts, :notice_backup_week) end,
         &moved_occurrence/2,
@@ -1344,6 +1369,24 @@ defmodule FermixCore.Management.HomeSummary do
   end
 
   defp reach_occurrence(_view, _facts), do: nil
+
+  # A computer whose switches wait for the owner's review (M97 §7.3): told
+  # once, while it waits.
+  defp review_occurrence(_view, %{role: :device} = facts) do
+    if Map.get(facts, :offers_review),
+      do: {"computer_review", sentence(:notice_computer_review, facts)}
+  end
+
+  defp review_occurrence(_view, _facts), do: nil
+
+  # A server that left out the settings it inherited (M97 §4): told for a
+  # week after, once.
+  defp sandbox_occurrence(%{server_sandbox: %DateTime{} = at} = facts) do
+    if DateTime.diff(facts.now, at, :second) < @server_sandbox_s,
+      do: {"server_sandbox:" <> iso(at), sentence(:notice_server_sandbox, facts)}
+  end
+
+  defp sandbox_occurrence(_facts), do: nil
 
   defp ready_occurrence(%{"state" => "ready"}, facts),
     do: {"ready:" <> target(facts)["candidate_id"], sentence(ready_notice(facts), facts)}
@@ -1468,10 +1511,15 @@ defmodule FermixCore.Management.HomeSummary do
 
   defp deadlines(%{role: :primary, link: %{desktops: [_ | _]}} = facts) do
     since = backup_since(facts)
-    [backup_deadline(since, facts), week_deadline(since, facts)]
+    [backup_deadline(since, facts), week_deadline(since, facts), sandbox_deadline(facts)]
   end
 
   defp deadlines(%{role: :primary} = facts), do: expiries(facts.candidates, facts)
+
+  defp sandbox_deadline(%{server_sandbox: %DateTime{} = at} = facts),
+    do: ms_until(DateTime.add(at, @server_sandbox_s, :second), facts)
+
+  defp sandbox_deadline(_facts), do: nil
 
   # A held server is dropped at its expiry (`Home.Candidates`).
   defp expiries(candidates, facts),
@@ -1506,6 +1554,48 @@ defmodule FermixCore.Management.HomeSummary do
       _other -> :linux
     end
   end
+
+  # What this computer keeps on for its server after the move (M97 §7.3),
+  # where a move from it is set up: never on a server, which has computers.
+  defp keeps_on(home, {:primary, %{desktops: []}}, host_os, opts) do
+    snapshot = Keyword.get(opts, :settings_snapshot, &ConfigStore.current_snapshot/0).()
+    Consent.view(Consent.keep_on_block(home, os: host_os, snapshot: snapshot))
+  end
+
+  defp keeps_on(_home, _role_link, _host_os, _opts), do: nil
+
+  # A linked computer whose switches wait for the owner's review: the block
+  # of what they propose to keep on.
+  defp offers_review(true, host_os, opts) do
+    switches = Keyword.get_lazy(opts, :computer_switches, &Switches.current/0)
+
+    if Switches.reviewed?(switches),
+      do: nil,
+      else: Consent.view(Consent.block(Consent.proposed(switches), os: host_os, kind: :review))
+  end
+
+  defp offers_review(false, _host_os, _opts), do: nil
+
+  # That this server left out the settings it inherited, and when; one that
+  # cannot be read is logged once while it stays so.
+  defp server_sandbox(home, :primary, reads) do
+    read = ServerSandbox.read(home)
+
+    :ok =
+      UnreadableFiles.log_read(
+        ServerSandbox.path(home),
+        "home status",
+        read_result(read),
+        memory(reads)
+      )
+
+    case read do
+      {:ok, at} -> at
+      _absent_or_unreadable -> nil
+    end
+  end
+
+  defp server_sandbox(_home, _role, _reads), do: nil
 
   # The last review of the move, whatever its age: on the computer that moves.
   # One that cannot be read is logged once while it stays so.

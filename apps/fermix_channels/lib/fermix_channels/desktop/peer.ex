@@ -5,7 +5,8 @@ defmodule FermixChannels.Desktop.Peer do
   When a session whose device row is a `desktop` completes `hello`, it starts
   one peer under `FermixChannels.Desktop.PeerSupervisor` and hands it every
   desktop-family event the desktop sends (`deliver/2`): the companion tunnel,
-  `manage`, `loopback_request` and `snapshot_stored`. The peer puts each
+  `manage`, `loopback_request`, `snapshot_stored`, and the computer's own
+  record (`offers`, `link_path`, M97). The peer puts each
   chunked payload back together (`Mobile.Chunks`, within each event's bound)
   and hands every complete event to the module its family names in
   `@families`, the one map of families. An event whose family has no module
@@ -35,7 +36,8 @@ defmodule FermixChannels.Desktop.Peer do
     companion: FermixChannels.Desktop.Companion,
     manage: FermixChannels.Desktop.Manage,
     loopback: FermixChannels.Desktop.LoopbackForward,
-    snapshots: FermixChannels.Desktop.SnapshotCopies
+    snapshots: FermixChannels.Desktop.SnapshotCopies,
+    computer: FermixChannels.Desktop.ComputerFamily
   }
 
   @event_families %{
@@ -46,9 +48,11 @@ defmodule FermixChannels.Desktop.Peer do
     "loopback_request" => :loopback,
     "loopback_failed" => :loopback,
     "snapshot_stored" => :snapshots,
-    "snapshot_refused" => :snapshots
+    "snapshot_refused" => :snapshots,
+    "offers" => :computer,
+    "link_path" => :computer
   }
-  @family_names [:companion, :manage, :loopback, :snapshots]
+  @family_names [:companion, :manage, :loopback, :snapshots, :computer]
   @registry FermixChannels.Desktop.Peers
   @supervisor FermixChannels.Desktop.PeerSupervisor
   @max_open_payloads 32

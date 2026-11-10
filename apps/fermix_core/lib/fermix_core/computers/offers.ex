@@ -1,0 +1,263 @@
+defmodule FermixCore.Computers.Offers do
+  @moduledoc """
+  What a computer offers its server (M97 §3.2), worked out and put on the
+  wire. Pure.
+
+  `compute/3` asks each offer module (`Computers.Offer`) for its state on
+  this computer. The words around a switch are here, so every offer says
+  them the same way (`switched/4`): an offer is off while the switches wait
+  for the owner's review (a computer that moved before M97), while the
+  master is off, or while its own switch is off.
+
+  On the wire (`offers`, the mobile protocol's *Desktop sessions*) the list
+  travels as one JSON payload, `{"v":1,"offers":[…]}`, each offer
+  `{id, state, sentence?, detail?}`, and its revision `rev`, the first 8
+  bytes of the payload's SHA-256 in lowercase hex (`encode/1`). `decode/1`
+  is the one check either end makes, and names the first thing it refuses:
+
+    * at most 32 offers, each `id` matching `^[a-z][a-z0-9_]{0,31}$` and
+      named once;
+    * `state` one of `on`, `off` and `unavailable`;
+    * `sentence` present unless the state is `on`, 1 to 300 bytes of
+      printable UTF-8;
+    * `detail`, when present, 1 to 64 bytes of printable text.
+
+  An id this engine has no module for is kept as it came: a newer computer
+  may offer more, and the home lists only what it was told.
+  """
+
+  alias FermixCore.Computers.Facts
+  alias FermixCore.Computers.Switches
+
+  @version 1
+  @max_offers 32
+  @max_sentence_bytes 300
+  @max_detail_bytes 64
+  @id ~r/\A[a-z][a-z0-9_]{0,31}\z/
+  @controls ~r/[\x{0000}-\x{001F}\x{007F}-\x{009F}]/u
+  @states %{"on" => :on, "off" => :off, "unavailable" => :unavailable}
+  # The offers whose capability lives in core, in the order a computer lists
+  # them; the device ends beside the link follow them
+  # (`FermixChannels.Desktop.Offers`).
+  @core [
+    FermixCore.Computers.Offers.Files,
+    FermixCore.Computers.Offers.Shell,
+    FermixCore.Computers.Offers.Browser,
+    FermixCore.Computers.Offers.ComputerUse,
+    FermixCore.Computers.Offers.IMessage,
+    FermixCore.Computers.Offers.History
+  ]
+  @no_system_sentence "Fermix offers this only on a Mac or a Linux computer."
+
+  @typedoc "One offer as the home records it."
+  @type offer :: %{
+          id: String.t(),
+          state: :on | :off | :unavailable,
+          sentence: String.t() | nil,
+          detail: String.t() | nil
+        }
+
+  @doc "The most offers one computer sends."
+  @spec max_offers() :: pos_integer()
+  def max_offers, do: @max_offers
+
+  @doc "The offer modules whose capability lives in core, in the order a computer lists them."
+  @spec core_modules() :: [module()]
+  def core_modules, do: @core
+
+  @doc "An offer's sentence on a system Fermix offers nothing on."
+  @spec no_system_sentence() :: String.t()
+  def no_system_sentence, do: @no_system_sentence
+
+  @doc "Each module's offer on this computer, in the modules' order."
+  @spec compute([module()], Switches.t(), Facts.t()) :: [offer()]
+  def compute(modules, switches, facts)
+      when is_list(modules) and is_list(switches) and is_map(facts) do
+    for module <- modules do
+      case module.state(switches, facts) do
+        {:on, detail} ->
+          offer(module.id(), :on, nil, detail)
+
+        {state, sentence} when state in [:off, :unavailable] ->
+          offer(module.id(), state, sentence)
+      end
+    end
+  end
+
+  defp offer(id, state, sentence, detail \\ nil),
+    do: %{id: Atom.to_string(id), state: state, sentence: sentence, detail: detail}
+
+  @doc """
+  An offer that its switch decides, on a machine that can have it: on with
+  `detail`, or off with the sentence that says why (the moduledoc).
+  """
+  @spec switched(Switches.t(), Switches.offer(), Facts.t(), String.t() | nil) ::
+          {:on, String.t() | nil} | {:off, String.t()}
+  def switched(switches, id, facts, detail) when is_list(switches) and is_map(facts) do
+    machine = Facts.machine(facts)
+
+    cond do
+      not Switches.reviewed?(switches) -> {:off, waiting_sentence(machine)}
+      not Switches.enabled?(switches) -> {:off, master_off_sentence(machine)}
+      Switches.on?(switches, id) -> {:on, detail}
+      true -> {:off, switched_off_sentence(machine)}
+    end
+  end
+
+  @doc "An offer's sentence while the switches wait for the owner's review."
+  @spec waiting_sentence(String.t()) :: String.t()
+  def waiting_sentence(machine) when is_binary(machine),
+    do: "Waiting for you to review what Fermix on your server may use on this #{machine}."
+
+  @doc "An offer's sentence while this computer's master switch is off."
+  @spec master_off_sentence(String.t()) :: String.t()
+  def master_off_sentence(machine) when is_binary(machine),
+    do: "Everything Fermix on your server may use is switched off on this #{machine}."
+
+  @doc "An offer's sentence while its own switch is off."
+  @spec switched_off_sentence(String.t()) :: String.t()
+  def switched_off_sentence(machine) when is_binary(machine),
+    do: "Switched off on this #{machine}. Only someone at this #{machine} can switch it on."
+
+  @doc """
+  The wire payload of `offers` and its revision (the moduledoc), or the first
+  thing `decode/1` would refuse in it.
+  """
+  @spec encode([offer()]) :: {:ok, binary(), String.t()} | {:error, {:invalid_offers, String.t()}}
+  def encode(offers) when is_list(offers) do
+    payload = Jason.encode!(%{"v" => @version, "offers" => Enum.map(offers, &wire/1)})
+
+    with {:ok, _offers} <- decode(payload), do: {:ok, payload, rev(payload)}
+  end
+
+  @doc "The revision of a payload: the first 8 bytes of its SHA-256, lowercase hex."
+  @spec rev(binary()) :: String.t()
+  def rev(payload) when is_binary(payload),
+    do: :sha256 |> :crypto.hash(payload) |> binary_part(0, 8) |> Base.encode16(case: :lower)
+
+  @doc "Whether `rev` is a revision's shape: 16 lowercase hex digits."
+  @spec rev?(term()) :: boolean()
+  def rev?(rev), do: is_binary(rev) and Regex.match?(~r/\A[0-9a-f]{16}\z/, rev)
+
+  @doc "The offers a payload carries, or the first thing it breaks (the moduledoc)."
+  @spec decode(binary()) :: {:ok, [offer()]} | {:error, {:invalid_offers, String.t()}}
+  def decode(payload) when is_binary(payload) do
+    with {:ok, document} <- json(payload),
+         {:ok, list} <- list(document),
+         {:ok, offers} <- each_offer(list),
+         :ok <- unique(offers) do
+      {:ok, offers}
+    end
+  end
+
+  @doc """
+  An offer as the home records it on disk and as `home.status` lists it:
+  string keys, absent ones null.
+  """
+  @spec view(offer()) :: map()
+  def view(%{id: id, state: state} = offer) do
+    %{
+      "id" => id,
+      "state" => Atom.to_string(state),
+      "sentence" => Map.get(offer, :sentence),
+      "detail" => Map.get(offer, :detail)
+    }
+  end
+
+  defp wire(%{id: id, state: state} = offer) do
+    %{"id" => id, "state" => Atom.to_string(state)}
+    |> put_some("sentence", Map.get(offer, :sentence))
+    |> put_some("detail", Map.get(offer, :detail))
+  end
+
+  defp put_some(map, _key, nil), do: map
+  defp put_some(map, key, value), do: Map.put(map, key, value)
+
+  defp json(payload) do
+    case Jason.decode(payload) do
+      {:ok, %{} = document} -> {:ok, document}
+      {:ok, _other} -> refuse("the payload is not a JSON object")
+      {:error, _reason} -> refuse("the payload is not JSON")
+    end
+  end
+
+  defp list(%{"v" => @version, "offers" => offers}) when is_list(offers) do
+    if length(offers) <= @max_offers,
+      do: {:ok, offers},
+      else: refuse("it lists more than #{@max_offers} offers")
+  end
+
+  defp list(%{"v" => @version}), do: refuse("offers is not a list")
+  defp list(_document), do: refuse("v is not #{@version}")
+
+  defp each_offer(list) do
+    list
+    |> Enum.with_index()
+    |> Enum.reduce_while({:ok, []}, fn {item, index}, {:ok, acc} ->
+      case one(item) do
+        {:ok, offer} -> {:cont, {:ok, [offer | acc]}}
+        {:error, what} -> {:halt, refuse("offer #{index}: #{what}")}
+      end
+    end)
+    |> then(fn
+      {:ok, offers} -> {:ok, Enum.reverse(offers)}
+      error -> error
+    end)
+  end
+
+  defp one(%{"id" => id, "state" => state} = item) do
+    with :ok <- id(id),
+         {:ok, state} <- state(state),
+         {:ok, sentence} <- sentence(Map.get(item, "sentence"), state),
+         {:ok, detail} <- detail(Map.get(item, "detail")) do
+      {:ok, %{id: id, state: state, sentence: sentence, detail: detail}}
+    end
+  end
+
+  defp one(%{}), do: {:error, "it names no id or no state"}
+  defp one(_item), do: {:error, "it is not an object"}
+
+  defp id(id) do
+    if is_binary(id) and Regex.match?(@id, id), do: :ok, else: {:error, "its id is not an id"}
+  end
+
+  defp state(state) do
+    case Map.fetch(@states, state) do
+      {:ok, atom} -> {:ok, atom}
+      :error -> {:error, "its state is not on, off or unavailable"}
+    end
+  end
+
+  defp sentence(nil, :on), do: {:ok, nil}
+  defp sentence(nil, _state), do: {:error, "it has no sentence"}
+
+  defp sentence(sentence, _state) do
+    if printable?(sentence, @max_sentence_bytes),
+      do: {:ok, sentence},
+      else: {:error, "its sentence is not 1 to #{@max_sentence_bytes} bytes of printable text"}
+  end
+
+  defp detail(nil), do: {:ok, nil}
+
+  defp detail(detail) do
+    if printable?(detail, @max_detail_bytes),
+      do: {:ok, detail},
+      else: {:error, "its detail is not 1 to #{@max_detail_bytes} bytes of printable text"}
+  end
+
+  defp printable?(value, max) when is_binary(value),
+    do: byte_size(value) in 1..max and String.valid?(value) and not Regex.match?(@controls, value)
+
+  defp printable?(_value, _max), do: false
+
+  defp unique(offers) do
+    ids = Enum.map(offers, & &1.id)
+
+    case ids -- Enum.uniq(ids) do
+      [] -> :ok
+      [id | _more] -> refuse("#{id} is named more than once")
+    end
+  end
+
+  defp refuse(what), do: {:error, {:invalid_offers, "The offers were refused: #{what}."}}
+end

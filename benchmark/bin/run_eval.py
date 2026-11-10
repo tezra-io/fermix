@@ -264,18 +264,34 @@ def voice_cases_left_out(suites, args, profiles) -> int:
 
 
 def hold_out_unseeded(cfg, chosen) -> tuple[list, list]:
-    """Suites that `requires: [cues]` on an eval home seeded without --cues. They are
-    NOT EVALUATED, named and left out of the run, never driven and never failures:
-    the capability runner's rule for an unmet precondition, so a sweep over a home
-    without cues reports the gap instead of a suite of zeros."""
-    needing = [(suite, scns) for suite, scns in chosen if "cues" in suite.requires]
-    problem = cue_drive.home_problem(cfg.daemon.fermix_home) if needing else None
-    if problem is None:
-        return chosen, []
-    held = [(suite.name, case.id, problem)
-            for suite, scns in needing for scenario in scns for case in scenario.cases]
-    kept = [(suite, scns) for suite, scns in chosen if "cues" not in suite.requires]
+    """Suites whose `requires:` the eval home was not seeded with (`cues`: --cues;
+    `computers`: --computers). They are NOT EVALUATED, named and left out of the
+    run, never driven and never failures: the capability runner's rule for an unmet
+    precondition, so a sweep over an unseeded home reports the gap instead of a
+    suite of zeros."""
+    home = cfg.daemon.fermix_home
+    problems = {need: requirement_problem(need, home)
+                for need in {n for suite, _scns in chosen for n in suite.requires}}
+    unmet = {need: why for need, why in problems.items() if why is not None}
+    kept, held = [], []
+    for suite, scns in chosen:
+        why = next((unmet[need] for need in suite.requires if need in unmet), None)
+        if why is None:
+            kept.append((suite, scns))
+        else:
+            held.extend((suite.name, case.id, why) for scenario in scns for case in scenario.cases)
     return kept, held
+
+
+def requirement_problem(need: str, home: str) -> str | None:
+    """Why `home` cannot run a suite that requires `need`, or None."""
+    if need == "cues":
+        return cue_drive.home_problem(home)
+    if need == "computers":
+        marker = os.path.join(os.path.expanduser(home), "eval-fixtures", "computers.json")
+        return None if os.path.isfile(marker) else (
+            "the eval home was not seeded with --computers (seed_capability_home.py)")
+    raise ValueError(f"unknown requirement {need!r}")
 
 
 def split_by_platform(chosen, platform: str) -> tuple[list, list]:

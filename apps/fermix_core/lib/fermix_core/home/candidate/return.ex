@@ -18,16 +18,18 @@ defmodule FermixCore.Home.Candidate.Return do
       profile): a keychain that refuses fails the staging by name
       (`error_sentence/2`);
     * drops this computer's **own desktop row** from the staged device list,
-      the row whose Noise key is `device/desktop_key`'s public half, through
-      the rail (`FermixCore.Home.Link`'s `drop_desktop_row/2`); a computer
-      with no desktop key holds no row.
+      the row whose Noise key is the public half of this computer's key
+      (`FermixCore.Home.ComputerKey`, from the store its link records),
+      through the rail (`FermixCore.Home.Link`'s `drop_desktop_row/2`); a
+      computer with no link, or whose store holds no key, holds no row.
 
   Test seams in `opts`: `:drop_desktop_row` (the rail's function), and
-  `MoveSecrets.restore/3`'s `:impl` and `:supervised`.
+  `:impl` and `:supervised`, which `MoveSecrets.restore/3` and the key's
+  read take.
   """
 
   alias FermixCore.Home.Archive.ConfigText
-  alias FermixCore.Home.DesktopLink
+  alias FermixCore.Home.ComputerKey
   alias FermixCore.Home.Link
   alias FermixCore.Home.MoveSecrets
   alias FermixCore.Setup.SecretWriter
@@ -110,9 +112,10 @@ defmodule FermixCore.Home.Candidate.Return do
   # -- the desktop row --------------------------------------------------------
 
   defp drop_own_row(home, staging, opts) do
-    case DesktopLink.read_key(home) do
+    case ComputerKey.read(home, Keyword.take(opts, [:impl, :supervised])) do
       {:ok, %{public: public}} -> drop_row(staging, public, opts)
-      {:error, {:file, _path, :enoent}} -> :ok
+      {:error, {:link, {:file, _path, :enoent}}} -> :ok
+      {:error, {:missing, _store}} -> :ok
       {:error, reason} -> {:error, {:desktop_key, reason}}
     end
   end

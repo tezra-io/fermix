@@ -25,7 +25,8 @@ defmodule FermixCore.Home.DeviceLocal do
     {"device/server.json", :keep,
      "marks this machine an Always On server, whose iroh endpoint binds a fixed port"},
     {"device/desktop.json", :drop, "a desktop's link to its primary"},
-    {"device/desktop_key", :drop, "a desktop's own key"},
+    {"device/desktop_key", :drop,
+     "a computer's own key, in the file an older Fermix kept it in before it moved"},
     {"snapshots", :keep,
      "this machine's snapshot status and capture staging, and a desktop's copies of the " <>
        "primary's snapshots"},
@@ -64,6 +65,7 @@ defmodule FermixCore.Home.DeviceLocal do
     {"mobile/*.part", :drop, "an interrupted write of the media manifest"},
     {"mobile/media/*.part", :drop, "an interrupted write of timeline media"},
     {"secrets/.*", :drop, "the file secret store's staging for an interrupted write"},
+    {"secrets/device.desktop_key", :drop, "a computer's own key, which never travels"},
     {"acp_identities/*.tmp.*", :drop, "an interrupted write of an ACP identity"},
     {"acp_identities/*.broken.*", :keep,
      "an ACP identity this machine quarantined as unreadable"},

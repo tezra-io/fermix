@@ -65,3 +65,4 @@
 {"v":2,"t":"call_attached","seq":2,"call_id":"call-7c1e","resumed":true,"muted":true,"camera":false,"control_seq":2}
 {"v":2,"t":"call_close","seq":21,"call_id":"call-7c1e","reason":"ended"}
 {"v":2,"t":"call_close","seq":3,"call_id":"call-0b42","reason":"unknown_call"}
+{"v":2,"t":"hello_ack","seq":1,"session_id":"mobile-session-6","min_version":2,"max_version":2,"profiles":[{"id":"main","name":"Fermix"}],"candidates":[{"host":"workstation.tail1234.ts.net","interface":"utun4","scope":"tailnet"},{"host":"100.101.102.103","interface":"utun4","scope":"tailnet"}],"history_head_seq":12,"read_up_to_seq":11,"caps":{"commands":[{"name":"help","aliases":[],"description":"Show available commands"}],"media":true,"streaming":true,"turn_done":true,"max_media_bytes":20971520,"push":[],"computer":{"v":1,"offers":true,"link_path":true}},"primary_epoch":3}

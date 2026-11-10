@@ -5,6 +5,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
   # and written here, so each row names exactly what makes its state.
   use ExUnit.Case, async: true
 
+  alias FermixCore.Computers.Consent
   alias FermixCore.Home.Snapshot.S3
   alias FermixCore.Home.Snapshot.Status
   alias FermixCore.Management.Copy
@@ -102,6 +103,11 @@ defmodule FermixCore.Management.HomeSummaryTest do
        "retired", "This copy is retired: Fermix moved back to studio-mac.", "learn_more"},
       {"a desktop with a fresh backup", desktop([]), "on",
        "Fermix runs on your server. Last backup 2 hours ago.", nil},
+      # M97 §7.3: a computer that moved before its server could ask what it
+      # may use here offers nothing until the owner reviews it.
+      {"a desktop whose switches wait for the review",
+       desktop(offers_review: Consent.view(Consent.block([:files, :shell], os: :macos))), "on",
+       "Fermix runs on your server. Last backup 2 hours ago.", nil},
       {"a desktop whose server's part did not arrive", desktop(primary_home: nil), "on",
        "Fermix runs on your server.", nil},
       {"a desktop while Fermix is stopped", desktop(link_primary: nil, primary_home: nil), "on",
@@ -149,6 +155,9 @@ defmodule FermixCore.Management.HomeSummaryTest do
   defp server_cases do
     [
       {"the server itself", server([]), "primary", "Fermix runs here.", nil},
+      # M97 §4: a server that left out the settings it inherited says so.
+      {"the server the day it took its own sandbox setting",
+       server(server_sandbox: ~U[2031-05-03 12:00:00Z]), "primary", "Fermix runs here.", nil},
       {"the server's disk nearly full", server(disk: %{"used" => 0.87, "nearly_full" => true}),
        "problem", "This server's disk is 87% full.", "learn_more"},
       {"the server's last backup five days old",
@@ -348,6 +357,56 @@ defmodule FermixCore.Management.HomeSummaryTest do
   end
 
   # -- what Details holds -------------------------------------------------------
+
+  # M97 §7.3 and §4: what a computer keeps on for its server, and a server
+  # that took its own sandbox setting.
+  describe "a computer's offers" do
+    test "a desktop whose switches wait offers the review, says it once, and shows its block" do
+      block = Consent.view(Consent.block([:files, :shell], os: :macos))
+      summary = HomeSummary.summary(desktop(offers_review: block))
+
+      assert %{"id" => "computer_review", "sentence" => said} = summary["notice"]
+      assert said =~ "until you review"
+      assert summary["detail"]["review"] == block
+      assert "review_offers" in Enum.map(HomeSummary.offered(summary), & &1["id"])
+
+      reviewed = HomeSummary.summary(desktop([]))
+      refute Map.has_key?(reviewed["detail"], "review")
+      refute "review_offers" in Enum.map(HomeSummary.offered(reviewed), & &1["id"])
+      refute match?(%{"id" => "computer_review"}, reviewed["notice"])
+    end
+
+    test "the move's ready screen shows what this computer keeps on" do
+      block = Consent.view(Consent.block([:files, :shell, :browser], os: :macos))
+
+      candidate = %{
+        "candidate_id" => "cand-1",
+        "name" => "garden-box",
+        "expires_at" => "2031-05-05T12:00:00Z"
+      }
+
+      summary =
+        HomeSummary.summary(facts(candidates: [candidate], keeps_on: block))
+
+      assert summary["state"] == "ready"
+      assert summary["detail"]["keeps_on"] == block
+    end
+
+    test "a server says for a week that it took its own sandbox setting" do
+      at = ~U[2031-05-03 12:00:00Z]
+
+      assert %{"id" => "server_sandbox:2031-05-03T12:00:00Z", "sentence" => said} =
+               HomeSummary.summary(server(server_sandbox: at))["notice"]
+
+      assert said =~ "its own sandbox setting: open"
+
+      watched = HomeSummary.watch(server(server_sandbox: at))
+      assert watched.next_change_ms <= 6 * 86_400_000
+
+      later = server(server_sandbox: at, now: DateTime.add(at, 8 * 86_400, :second))
+      refute match?(%{"id" => "server_sandbox:" <> _}, HomeSummary.summary(later)["notice"])
+    end
+  end
 
   describe "the detail" do
     test "the first screen is Use my own Linux server, which asks nothing" do

@@ -17,6 +17,12 @@ defmodule FermixCore.Management.CopyTest do
   alias FermixCore.Auth.Redaction
   alias FermixCore.Capabilities.MCP.Config, as: McpConfig
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Computers
+  alias FermixCore.Computers.Consent
+  alias FermixCore.Computers.Facts, as: ComputerFacts
+  alias FermixCore.Computers.Offers
+  alias FermixCore.Computers.Offers.ComputerUse, as: ComputerUseOffer
+  alias FermixCore.Computers.Switches
   alias FermixCore.Cues.Config, as: CuesConfig
   alias FermixCore.Cues.Filter.Decision
   alias FermixCore.Cues.FollowUpReadiness
@@ -53,6 +59,7 @@ defmodule FermixCore.Management.CopyTest do
   alias FermixCore.Management.Plugins.Row, as: PluginRow
   alias FermixCore.Management.Protocol
   alias FermixCore.Management.Settings
+  alias FermixCore.Management.Settings.ThisComputer
   alias FermixCore.Providers.DecisionModel
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Readiness
@@ -957,6 +964,125 @@ defmodule FermixCore.Management.CopyTest do
       assert_clean(ManagementHomeMove.owner_only_sentence(), :prose, ["Always On"], "owner")
       refute_command(ManagementHomeMove.owner_only_sentence(), "owner")
     end
+  end
+
+  # M97: what a computer offers its server (`home.status` `computers`), the
+  # block of what it keeps on (the summary's `keeps_on` and `review`), a
+  # rename's refusals and the `computer` section. The apps print each as it
+  # is, so beside the rules each names no fermix command and none of the
+  # engine's own words for the move.
+  describe "the computer copy" do
+    test "every offer sentence and label obeys the rules" do
+      for {where, text} <- offer_copy(), do: assert_owner_words(text, :prose, [], where)
+
+      for module <- Offers.core_modules(),
+          do: assert_owner_words(module.label(), :name, [], "offer label #{module.id()}")
+    end
+
+    # A block names the offers it keeps on by their labels, for a Mac and a
+    # Linux computer, in every sandbox mode, its warning included.
+    test "every block of what a computer keeps on obeys the rules" do
+      sentences = Consent.sentences()
+
+      assert length(sentences) > 10
+      assert Enum.any?(sentences, &String.starts_with?(&1, "With commands on"))
+
+      for text <- sentences, do: assert_owner_words(text, :prose, [], "keep block")
+    end
+
+    # A rename refusal names the computer or the server as the owner typed it.
+    test "every rename refusal and switch refusal obeys the rules" do
+      for text <- Computers.sentences(),
+          do: assert_owner_words(text, :prose, ["studio Mac", "garden server"], "rename")
+
+      for text <- Switches.sentences(), do: assert_owner_words(text, :prose, [], "switches")
+    end
+
+    test "the This computer section obeys the rules, reviewed and waiting" do
+      [section] = ThisComputer.sections(computer?: true)
+      assert_owner_words(section.title, :prose, [], "section title computer")
+
+      for text <- ThisComputer.sentences(),
+          do: assert_owner_words(text, :prose, [], "computer footer")
+
+      for reviewed <- [true, false],
+          row <- ThisComputer.rows("computer", %{fermix_core: [computer: [reviewed: reviewed]]}),
+          {field, text} <- [label: row["label"], footer: row["footer"]],
+          is_binary(text),
+          do: assert_owner_words(text, :prose, [], "computer.#{row["key"]} #{field}")
+    end
+
+    # Each offer's state rests on more than one fact, so a case set that
+    # stopped reaching a branch would pass on the sentences left. These are
+    # the ones it must reach.
+    test "the case set reaches every sentence each offer says" do
+      reached = offer_copy() |> Enum.map(&elem(&1, 1)) |> MapSet.new()
+
+      switched =
+        for machine <- ["Mac", "computer"],
+            say <- [
+              &Offers.waiting_sentence/1,
+              &Offers.master_off_sentence/1,
+              &Offers.switched_off_sentence/1
+            ],
+            do: say.(machine)
+
+      wanted = [Offers.no_system_sentence() | switched] ++ ComputerUseOffer.sentences()
+
+      assert Enum.reject(wanted, &MapSet.member?(reached, &1)) == []
+      assert MapSet.size(reached) >= length(wanted) + 3
+    end
+  end
+
+  # Every sentence an offer says across invented machines and switches, from
+  # the offer modules themselves.
+  defp offer_copy do
+    for facts <- offer_facts(),
+        switches <- offer_switches(),
+        offer <- Offers.compute(Offers.core_modules(), switches, facts),
+        is_binary(offer.sentence),
+        uniq: true,
+        do: {"offer #{offer.id}", offer.sentence}
+  end
+
+  # A Mac and a Linux computer as they should be; each on the wrong processor,
+  # without the computer use helper, and refusing the screen; a Linux computer
+  # whose kernel does not hold commands to the sandbox; and a system Fermix
+  # offers nothing on.
+  defp offer_facts do
+    base = [helpers: %{computer_use: true}, permissions: %{}, sandbox_mode: :standard]
+    mac = [os: :macos, arch: "arm64", landlock: :not_asked]
+    linux = [os: :linux, arch: "x86_64", landlock: :ok]
+    no_helper = [helpers: %{computer_use: false}]
+    no_screen = [permissions: %{screen: false}]
+
+    for machine <- [mac, linux],
+        change <- [[], [arch: "riscv64"], no_helper, no_screen] do
+      ComputerFacts.read(base |> Keyword.merge(machine) |> Keyword.merge(change))
+    end ++
+      [
+        ComputerFacts.read(base ++ [os: :linux, arch: "x86_64", landlock: {:error, "no ABI"}]),
+        ComputerFacts.read(base ++ [os: :other, arch: "x86_64", landlock: :not_asked])
+      ]
+  end
+
+  # Waiting for the review, the master off, every offer off, every offer on.
+  defp offer_switches do
+    [
+      Switches.only(Switches.offers(), reviewed: false),
+      Switches.only(Switches.offers(), enabled: false),
+      Switches.only([]),
+      Switches.only(Switches.offers())
+    ]
+  end
+
+  defp assert_owner_words(text, kind, names, where) do
+    assert_clean(text, kind, names, where)
+
+    assert Copy.summary_violations(text) == [],
+           "#{where}: #{inspect(text)} breaks #{inspect(Copy.summary_violations(text))}"
+
+    refute_command(text, where)
   end
 
   # The words of `home.status.summary` (M75 lean v1 §7): every sentence key

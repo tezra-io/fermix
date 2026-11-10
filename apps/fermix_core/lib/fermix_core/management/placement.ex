@@ -83,8 +83,11 @@ defmodule FermixCore.Management.Placement do
 
   # The settings sections that configure only this machine: the sandbox its
   # commands run in, computer use of this screen, this screen's history, this
-  # Mac's Messages, and the accessory link to this Mac's USB ports.
-  @device_sections ~w(sandbox computer_use computer_history channels.imessage accessories)
+  # Mac's Messages, the accessory link to this Mac's USB ports, and what
+  # Fermix on its server may use on it (M97 §7.2), which the server can never
+  # write.
+  @device_sections ~w(sandbox computer_use computer_history channels.imessage accessories
+                      computer)
   @section_methods ~w(settings.get settings.apply)
 
   @device_class_sentence "This request configures the computer it came from, so the " <>

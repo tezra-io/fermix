@@ -26,9 +26,16 @@ defmodule FermixChannels.Mobile.DeviceStore do
     phone has its push salt (`apns_key_salt`); a desktop has no push or
     attestation field at all.
 
-    `platform`, `signer_role`, `version_code`, `boot_state` and
-    `device_locked` are what the phone's key attestation proved when it was
-    approved; a phone paired before attestation was verified has them `nil`.
+    `platform` is a phone's `android` or `ios`, as its key attestation proved
+    it, or a computer's `macos` or `linux` (M97 §3.2), as the computer itself
+    said it when its row was written or at its `hello`; `nil` on a row that
+    has not said it yet. `backups` is a computer's alone: whether it keeps
+    copies of the home's snapshots (M97 D7), absent meaning it does, as every
+    computer did before the flag existed.
+
+    `signer_role`, `version_code`, `boot_state` and `device_locked` are what
+    the phone's key attestation proved when it was approved; a phone paired
+    before attestation was verified has them `nil`.
     `relay_list_rev` is the relay list revision the device last acknowledged
     in its `hello` (M62 §3.1), `nil` until it names one.
     """
@@ -45,7 +52,8 @@ defmodule FermixChannels.Mobile.DeviceStore do
                   version_code: nil,
                   boot_state: nil,
                   device_locked: nil,
-                  relay_list_rev: nil
+                  relay_list_rev: nil,
+                  backups: nil
                 ]
 
     @type t :: %__MODULE__{
@@ -63,7 +71,8 @@ defmodule FermixChannels.Mobile.DeviceStore do
             version_code: non_neg_integer() | nil,
             boot_state: :verified | nil,
             device_locked: true | nil,
-            relay_list_rev: String.t() | nil
+            relay_list_rev: String.t() | nil,
+            backups: boolean() | nil
           }
   end
 
@@ -83,9 +92,17 @@ defmodule FermixChannels.Mobile.DeviceStore do
     :version_code,
     :boot_state,
     :device_locked,
-    :relay_list_rev
+    :relay_list_rev,
+    :backups
   ]
-  @platforms ~w(android ios)
+  # A row's `platform`, by its kind: what a phone's attestation proved, or the
+  # system a computer runs.
+  @phone_platforms ~w(android ios)
+  @desktop_platforms ~w(macos linux)
+  # The one-time backfill of a computer row written before it had a platform
+  # (`backfill_platforms/1`): the system its `model` names, as the move wrote
+  # it (`FermixChannels.Home.MoveWorker`).
+  @model_platforms %{"macOS desktop" => "macos", "Linux desktop" => "linux"}
   @signer_roles %{"development" => :development, "release" => :release}
   @kinds %{"phone" => :phone, "desktop" => :desktop}
   # What only a phone has: its push salt and token, and what its attestation
@@ -93,13 +110,14 @@ defmodule FermixChannels.Mobile.DeviceStore do
   @phone_only_fields [
     :apns_key_salt,
     :push_token,
-    :platform,
     :signer_role,
     :version_code,
     :boot_state,
     :device_locked
   ]
-  @update_fields [:name, :model, :push_token, :last_seen, :relay_list_rev]
+  # What only a computer has: whether it keeps the home's backup copies.
+  @desktop_only_fields [:backups]
+  @update_fields [:name, :model, :push_token, :last_seen, :relay_list_rev, :platform]
   @relay_list_rev_regex ~r/\A[0-9a-f]{16}\z/
   # last_seen is informational, and every hello records it: a newer value
   # inside this window is not worth a durable, fsync'd rewrite of the store.
@@ -216,10 +234,49 @@ defmodule FermixChannels.Mobile.DeviceStore do
     GenServer.call(server, {:find_by_noise_pk, noise_pk})
   end
 
+  @doc """
+  Gives each computer row written before rows had a platform (M97 §3.2) the
+  system its `model` names (`macOS desktop` or `Linux desktop`, as the move
+  writes it, `FermixChannels.Home.MoveWorker`). Once, as the store starts on
+  the primary, so every later reader takes a row's `platform` as it is and
+  none reads `model` for it. A row whose model names neither keeps no
+  platform, said in the log; the computer's next `hello` names it
+  (`Mobile.Session`). Rows only: nothing else is written.
+  """
+  @spec backfill_platforms(keyword()) :: :ok | {:error, term()}
+  def backfill_platforms(opts) when is_list(opts), do: with_root(opts, &backfill_at_root/1)
+
+  defp backfill_at_root(root) do
+    with {:ok, devices} <- read_devices(root) do
+      case Enum.map(devices, &backfilled/1) do
+        ^devices -> :ok
+        filled -> write_devices(root, filled)
+      end
+    end
+  end
+
+  defp backfilled(%Device{kind: :desktop, platform: nil, model: model} = device) do
+    case Map.fetch(@model_platforms, model) do
+      {:ok, platform} ->
+        %{device | platform: platform}
+
+      :error ->
+        Logger.warning(
+          "computer #{device.device_id} has no platform yet, and its model names none; " <>
+            "its next hello names it"
+        )
+
+        device
+    end
+  end
+
+  defp backfilled(device), do: device
+
   @impl true
   def init(opts) do
     with {:ok, root} <- resolve_root(opts),
-         {:ok, _devices} <- read_devices(root) do
+         {:ok, _devices} <- read_devices(root),
+         :ok <- backfill_at_root(root) do
       {:ok, %{root: root, cache: nil}}
     else
       {:error, reason} -> {:stop, reason}
@@ -473,7 +530,8 @@ defmodule FermixChannels.Mobile.DeviceStore do
       version_code: row["version_code"],
       boot_state: decode_boot_state(row["boot_state"]),
       device_locked: row["device_locked"],
-      relay_list_rev: row["relay_list_rev"]
+      relay_list_rev: row["relay_list_rev"],
+      backups: row["backups"]
     }
 
     validate_decoded(attrs)
@@ -555,23 +613,36 @@ defmodule FermixChannels.Mobile.DeviceStore do
   end
 
   defp validate_phone(attrs) do
-    with :ok <- validate_binary32(:apns_key_salt, attrs[:apns_key_salt]) do
+    with :ok <- validate_binary32(:apns_key_salt, attrs[:apns_key_salt]),
+         :ok <- absent_fields(attrs, @desktop_only_fields, :phone_field) do
       validate_attestation_facts(attrs)
     end
   end
 
   defp validate_desktop(attrs) do
-    case Enum.find(@phone_only_fields, &(not is_nil(attrs[&1]))) do
-      nil -> :ok
-      field -> {:error, {:invalid_device, field, :desktop_field}}
+    with :ok <- absent_fields(attrs, @phone_only_fields, :desktop_field) do
+      cond do
+        attrs[:platform] not in [nil | @desktop_platforms] -> invalid_desktop(:platform)
+        attrs[:backups] not in [nil, true, false] -> invalid_desktop(:backups)
+        true -> :ok
+      end
     end
   end
+
+  defp absent_fields(attrs, fields, reason) do
+    case Enum.find(fields, &(not is_nil(attrs[&1]))) do
+      nil -> :ok
+      field -> {:error, {:invalid_device, field, reason}}
+    end
+  end
+
+  defp invalid_desktop(field), do: {:error, {:invalid_device, field, :invalid_desktop_fact}}
 
   # What a verified attestation can have proved; absent on a row from before
   # attestation was verified.
   defp validate_attestation_facts(attrs) do
     cond do
-      attrs[:platform] not in [nil | @platforms] -> invalid_fact(:platform)
+      attrs[:platform] not in [nil | @phone_platforms] -> invalid_fact(:platform)
       attrs[:signer_role] not in [nil | Map.values(@signer_roles)] -> invalid_fact(:signer_role)
       not valid_version_code?(attrs[:version_code]) -> invalid_fact(:version_code)
       attrs[:boot_state] not in [nil, :verified] -> invalid_fact(:boot_state)
@@ -777,6 +848,7 @@ defmodule FermixChannels.Mobile.DeviceStore do
     |> maybe_put("boot_state", encode_atom(device.boot_state))
     |> maybe_put("device_locked", device.device_locked)
     |> maybe_put("relay_list_rev", device.relay_list_rev)
+    |> maybe_put("backups", device.backups)
   end
 
   # A phone's row names no kind, as every row written before M75 does, so it

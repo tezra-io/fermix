@@ -85,6 +85,72 @@ defmodule FermixChannels.Home.Link do
     end
   end
 
+  # The primary's computer rows (M97 §3.2), with whether each session is up;
+  # none where no store runs.
+  @impl true
+  def computer_rows do
+    if Process.whereis(DeviceStore) && Process.whereis(FermixChannels.Desktop.Peers),
+      do: computer_rows(DeviceStore.list()),
+      else: {:ok, []}
+  end
+
+  defp computer_rows({:ok, devices}) do
+    connected = Map.new(Peer.connected(), &{&1.device_id, &1.connected_since})
+
+    {:ok,
+     for(%{kind: :desktop} = row <- devices, do: computer_row(row, connected[row.device_id]))}
+  end
+
+  defp computer_rows({:error, _reason} = error), do: error
+
+  defp computer_row(row, since) do
+    %{
+      device_id: row.device_id,
+      name: row.name,
+      platform: row.platform,
+      last_seen: row.last_seen,
+      backups: row.backups,
+      connected: since != nil,
+      since: since
+    }
+  end
+
+  # The store serializes its writes; a name another computer holds, compared
+  # without case, is refused against the rows as they stand.
+  @impl true
+  def rename_computer(device_id, name) when is_binary(device_id) and is_binary(name) do
+    with {:ok, devices} <- DeviceStore.list(),
+         {:ok, _row} <- computer(devices, device_id),
+         :ok <- free_name(devices, device_id, name),
+         {:ok, row} <- DeviceStore.update(device_id, %{name: name}) do
+      {:ok, computer_row(row, connected_since(device_id))}
+    end
+  end
+
+  defp computer(devices, device_id) do
+    case Enum.find(devices, &(&1.device_id == device_id and &1.kind == :desktop)) do
+      nil -> {:error, {:not_found, device_id}}
+      row -> {:ok, row}
+    end
+  end
+
+  defp free_name(devices, device_id, name) do
+    taken =
+      Enum.any?(
+        devices,
+        &(&1.device_id != device_id and String.downcase(&1.name) == String.downcase(name))
+      )
+
+    if taken, do: {:error, {:name_taken, name}}, else: :ok
+  end
+
+  defp connected_since(device_id) do
+    case Peer.lookup(device_id) do
+      {:ok, _peer, %{connected_since: since}} -> since
+      {:error, :not_connected} -> nil
+    end
+  end
+
   @impl true
   def start_return(home) when is_binary(home) and home != "",
     do: DeviceSupervisor.start_candidate(home)

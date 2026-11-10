@@ -43,6 +43,7 @@ defmodule FermixChannels.Desktop.RelayIrohEndToEndTest do
   alias FermixChannels.Mobile.Iroh.Helper
   alias FermixChannels.Mobile.Iroh.Relays.Source
   alias FermixChannels.Mobile.Noise
+  alias FermixCore.Home.ComputerKey
   alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.Epoch
   alias FermixTestSupport.PrimaryHome
@@ -151,10 +152,15 @@ defmodule FermixChannels.Desktop.RelayIrohEndToEndTest do
       start_listener(ctx, primary_root, names, registry, desktop, families, port)
 
     desktop_root = root!("fx-re-d")
+    # The desktop's key is in the keychain under a profile of its own.
+    File.mkdir_p!(desktop_root)
+    profile = ~s([fermix_core]\nprofile = "#{Path.basename(desktop_root)}"\n)
+    File.write!(Path.join(desktop_root, "config.toml"), profile)
 
     :ok =
       DesktopLink.write(desktop_root, %{
         device_id: @device_id,
+        key: :keyring,
         primary: %{
           name: "fermix-vm",
           gateway_pk: identity.gateway_public_key,
@@ -166,7 +172,7 @@ defmodule FermixChannels.Desktop.RelayIrohEndToEndTest do
         epoch: 3
       })
 
-    :ok = DesktopLink.write_key(desktop_root, desktop.private)
+    {:ok, _keypair, :keyring} = ComputerKey.create(desktop_root, keypair: desktop)
     dialer = start_dialer(ctx, desktop_root)
 
     start_supervised!(

@@ -11,6 +11,7 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
   alias FermixChannels.Mobile.Protocol
   alias FermixChannels.Mobile.Router
   alias FermixChannels.Mobile.Session
+  alias FermixCore.Computers.Offers
   alias FermixTestSupport.WireSchema
 
   @priv_dir Application.app_dir(:fermix_core, "priv/mobile")
@@ -644,6 +645,54 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
     assert defs["callCaps"]["description"] =~ "camera_share"
   end
 
+  # M97 §3.2, §5.3: a desktop names its system on hello, its hello_ack says
+  # which of a computer's own events the server takes, and its offers travel
+  # as one chunked payload whose rev is its own. The schema reads each as the
+  # codec does.
+  test "the schema publishes a computer's own record as the codec reads it", %{schema: schema} do
+    [hello] = Enum.filter(client_headers(), &(&1["t"] == "hello" and &1["platform"]))
+    refute "platform" in schema["$defs"]["hello"]["required"]
+
+    for platform <- ~w(macos linux windows ios) do
+      header = Map.put(hello, "platform", platform)
+      decoded? = match?({:ok, _event}, Protocol.decode_client_frame(frame(header)))
+      assert decoded? == (client_errors(header, schema) == []), platform
+      assert decoded? == platform in ~w(macos linux), platform
+    end
+
+    [ack] = Enum.filter(server_headers(), &get_in(&1, ["caps", "computer"]))
+    assert ack["caps"]["computer"] == %{"v" => 1, "offers" => true, "link_path" => true}
+    taken = [ack["caps"]["computer"], %{"v" => 1}, %{"v" => 2, "link_path" => false, "x" => 1}]
+    refused = [%{"v" => 0}, %{"v" => "1"}, %{"offers" => true}, %{"v" => 1, "link_path" => "on"}]
+
+    for computer <- taken ++ refused ++ [[]] do
+      payload = ack |> Map.drop(~w(v t seq)) |> put_in(["caps", "computer"], computer)
+      encoded? = match?({:ok, _frame}, Protocol.encode_server_frame("hello_ack", payload, 1))
+      assert encoded? == (server_errors(server_event("hello_ack", payload), schema) == [])
+      assert encoded? == computer in taken, inspect(computer)
+    end
+
+    [%{"header" => header, "bytes_b64" => tail}] =
+      Enum.filter(jsonl(@client_binary_fixtures), &(&1["header"]["t"] == "offers"))
+
+    payload = Base.decode64!(tail)
+    assert {:ok, [_offer | _more]} = Offers.decode(payload)
+    assert Offers.rev(payload) == header["rev"]
+
+    for rev <- ["0F1E2D3C4B5A6978", "0f1e2d3c", "0f1e2d3c4b5a69780"] do
+      drifted = Map.put(header, "rev", rev)
+      refute match?({:ok, _event}, Protocol.decode_client_frame(frame(drifted, payload))), rev
+      refute client_errors(drifted, schema) == [], rev
+    end
+
+    for path <- ~w(direct relay tailnet) do
+      header = %{"v" => 2, "t" => "link_path", "seq" => 3, "path" => path}
+      decoded? = match?({:ok, _event}, Protocol.decode_client_frame(frame(header)))
+      assert decoded? == (client_errors(header, schema) == []), path
+      assert decoded? == path in ~w(direct relay), path
+    end
+  end
+
   test "documentation tells a phone how a call runs on its session", %{protocol: protocol} do
     [_before, section] = String.split(protocol, "## Calls from the phone", parts: 2)
     [section, _after] = String.split(section, "\n## ", parts: 2)
@@ -1022,6 +1071,9 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
 
   defp server_errors(event, schema),
     do: WireSchema.errors(event, WireSchema.ref("serverEvent"), schema)
+
+  defp client_errors(event, schema),
+    do: WireSchema.errors(event, WireSchema.ref("clientEvent"), schema)
 
   defp call_caps(available?, reason) do
     call = %{"available" => available?, "min_version" => 2, "max_version" => 3, "camera" => false}

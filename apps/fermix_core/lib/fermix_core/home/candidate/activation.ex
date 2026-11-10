@@ -61,7 +61,9 @@ defmodule FermixCore.Home.Candidate.Activation do
        with its `-wal` and `-shm`, and the staged entry is renamed into
        place; a kept path already moved by an earlier run wins over one a
        boot in between made again;
-    c. the ended tenure's desktop link and key are removed from `device/`;
+    c. the ended tenure's key is deleted from the secret store its desktop
+       link records (`FermixCore.Home.ComputerKey.delete/3`, with any file
+       an older Fermix kept it in), then the link is removed from `device/`;
     d. the snapshot status asks for a snapshot at the first boot;
     e. the moved marker is removed (`FermixCore.Home.Moved.remove/1`): the
        server carries its own by now, since it sent `move_commit` after
@@ -78,6 +80,7 @@ defmodule FermixCore.Home.Candidate.Activation do
   alias FermixCore.Home.Archive.InstanceRole
   alias FermixCore.Home.Candidate
   alias FermixCore.Home.Candidate.Return
+  alias FermixCore.Home.ComputerKey
   alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.DeviceLocal
   alias FermixCore.Home.Moved
@@ -210,7 +213,8 @@ defmodule FermixCore.Home.Candidate.Activation do
   `activating`): the steps a to g of the moduledoc, over the entries
   `record_entries/1` recorded (refused as `:entries_unrecorded` without them).
   `opts`: `:after_step`, a 1-arity function called with each step's name once
-  it is done (a test seam that stops it part-way).
+  it is done (a test seam that stops it part-way), and `:impl` and
+  `:supervised`, which the key's deletion takes.
   """
   @spec activate(Path.t(), :return, keyword()) :: :ok | {:error, term()}
   def activate(home, :return, opts \\ []) when is_binary(home) and is_list(opts) do
@@ -221,7 +225,7 @@ defmodule FermixCore.Home.Candidate.Activation do
          {:ok, entries} <- read_entries(home),
          :ok <- prune_retired(home, entries, after_step),
          :ok <- place_returned(home, staging, entries, after_step),
-         :ok <- step(end_tenure(home), :c, after_step),
+         :ok <- step(end_tenure(home, Keyword.take(opts, [:impl, :supervised])), :c, after_step),
          :ok <- step(Status.write(home, %{Status.empty() | run_at_boot: true}), :d, after_step),
          :ok <- step(Moved.remove(home), :e, after_step),
          :ok <- step(place_return_config(home, staging), :f, after_step) do
@@ -481,9 +485,22 @@ defmodule FermixCore.Home.Candidate.Activation do
   defp keep_unit(home, unit, _to, {:ok, _stat}), do: set_aside_path(home, unit)
   defp keep_unit(_home, _unit, to, {:error, reason}), do: {:error, {:file, to, reason}}
 
-  # Step c: the files of the ended tenure inside a directory a return keeps.
-  defp end_tenure(home),
-    do: each_ok([DesktopLink.path(home), DesktopLink.key_path(home)], &remove_file/1)
+  # Step c: the ended tenure's key, then its link, which names the store the
+  # key is in, so a stop between the two deletes the key again (D13).
+  defp end_tenure(home, opts) do
+    with {:ok, store} <- tenure_store(home),
+         :ok <- ComputerKey.delete(home, store, opts) do
+      remove_file(DesktopLink.path(home))
+    end
+  end
+
+  defp tenure_store(home) do
+    case DesktopLink.read(home) do
+      {:ok, %{key: store}} -> {:ok, store}
+      {:error, {:file, _path, :enoent}} -> {:ok, nil}
+      {:error, reason} -> {:error, {:desktop_link, reason}}
+    end
+  end
 
   # Step f: done already when an earlier run renamed it.
   defp place_return_config(home, staging) do

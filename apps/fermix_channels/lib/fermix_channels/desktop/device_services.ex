@@ -4,7 +4,8 @@ defmodule FermixChannels.Desktop.DeviceServices do
   D19, M97 §5.1), in the device role: the sign-in loopback forward
   (`Desktop.Loopback`), the snapshot copies (`Desktop.SnapshotStore`) and the
   media fetches (`Desktop.MediaFetches`), each family of the link in a process
-  of its own. The relay hands each the primary's events (`Desktop.Relay`'s
+  of its own, and what this computer offers its server (`Desktop.Offers`,
+  M97 §3.2), which the relay tells when a session is up. The relay hands each the primary's events (`Desktop.Relay`'s
   `@inbound`) and never waits on one, so they start before it
   (`Desktop.DeviceSupervisor`).
 
@@ -16,6 +17,7 @@ defmodule FermixChannels.Desktop.DeviceServices do
 
   alias FermixChannels.Desktop.Loopback
   alias FermixChannels.Desktop.MediaFetches
+  alias FermixChannels.Desktop.Offers
   alias FermixChannels.Desktop.SnapshotStore
 
   @spec start_link(keyword()) :: Supervisor.on_start()
@@ -27,7 +29,7 @@ defmodule FermixChannels.Desktop.DeviceServices do
     home = Keyword.fetch!(opts, :home)
 
     Supervisor.init(
-      [Loopback, {SnapshotStore, home: home}, {MediaFetches, home: home}],
+      [Loopback, {SnapshotStore, home: home}, {MediaFetches, home: home}, {Offers, home: home}],
       strategy: :one_for_one
     )
   end

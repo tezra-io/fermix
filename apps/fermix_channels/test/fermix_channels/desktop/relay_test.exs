@@ -14,9 +14,53 @@ defmodule FermixChannels.Desktop.RelayTest do
   alias FermixChannels.Mobile.DeviceRegistry
   alias FermixChannels.Mobile.Protocol
   alias FermixChannels.Test.DesktopRail
+  alias FermixCore.Home.ComputerKey
   alias FermixCore.Home.DesktopLink
 
   @unreachable "The server fermix-vm is unreachable. Fermix keeps your message until it is back."
+
+  # The keychain as a locked login keyring answers it, until the test opens
+  # it; kept per profile, so each test's desktop home has its own. Reads and
+  # writes are the stub keychain's.
+  defmodule LockableKeychain do
+    @moduledoc false
+    @behaviour FermixCore.Setup.SecretWriter
+
+    alias FermixTestSupport.SecretWriterStub
+
+    def lock(profile), do: :persistent_term.put({__MODULE__, profile}, :locked)
+    def open(profile), do: :persistent_term.erase({__MODULE__, profile})
+
+    @impl true
+    def available?(_opts \\ []), do: true
+
+    @impl true
+    def probe(opts \\ []) do
+      case :persistent_term.get({__MODULE__, Keyword.fetch!(opts, :profile)}, :open) do
+        :locked ->
+          %{
+            store: Keyword.fetch!(opts, :store),
+            state: :locked,
+            sentence: "the login keyring is locked: unlock it"
+          }
+
+        :open ->
+          SecretWriterStub.probe(opts)
+      end
+    end
+
+    @impl true
+    def put(key, value, opts \\ []), do: SecretWriterStub.put(key, value, opts)
+
+    @impl true
+    def get(key, opts \\ []), do: SecretWriterStub.get(key, opts)
+
+    @impl true
+    def delete(key, opts \\ []), do: SecretWriterStub.delete(key, opts)
+
+    @impl true
+    def command_source(key, opts \\ []), do: SecretWriterStub.command_source(key, opts)
+  end
 
   # A family of the primary, reporting each event the desktop sends it.
   defmodule CaptureFamily do
@@ -396,30 +440,110 @@ defmodule FermixChannels.Desktop.RelayTest do
     assert sentence =~ "it sent a message this computer could not read"
   end
 
-  test "a desktop key readable by others is refused by name, and nothing is dialed" do
+  # M97 D13: the key is in the secret store the link records; a relay that
+  # cannot have it says why, by name, and never dials.
+  test "a key the keychain does not hold is refused by name, and nothing is dialed" do
     primary = DesktopRail.primary!()
-    root = DesktopRail.desktop_home!(primary, key_mode: 0o644)
-    test = self()
-
-    relay =
-      DesktopRail.start_relay!(root, primary,
-        connect: fn ->
-          send(test, :dialed)
-          {:error, :econnrefused}
-        end
-      )
+    root = DesktopRail.desktop_home!(primary)
+    :ok = ComputerKey.delete(root, :keyring)
+    relay = DesktopRail.start_relay!(root, primary, connect: dialed_by_test())
 
     assert %{connected: false, status: :unreachable, name: "fermix-vm", sentence: sentence} =
              Relay.status(relay)
 
-    assert sentence ==
-             "The desktop key file is mode 0644, readable by others; Fermix uses it only at 0600."
+    assert sentence == "This computer's key is not in the keychain, so Fermix cannot use it."
 
     request = %{request_id: "r-1", protocol_version: 2, method: "settings.sections", params: %{}}
 
     assert {:error, :primary_unreachable, %{"sentence" => ^sentence}} =
              Relay.forward(relay, request)
 
+    refute_received :dialed
+    refute_received {:scheduled, {:relay_timer, :reload, _token}, _delay}
+  end
+
+  test "a key an older Fermix kept in a file moves into the keychain as the relay starts" do
+    primary = DesktopRail.primary!()
+    root = DesktopRail.desktop_home!(primary)
+    keep_key_in_file!(root, primary.desktop.private, 0o600)
+
+    relay = DesktopRail.start_relay!(root, primary)
+
+    assert %{connected: true} = DesktopRail.await_connected(relay)
+    assert {:ok, %{key: :keyring}} = DesktopLink.read(root)
+    refute File.exists?(Path.join(root, "device/desktop_key"))
+    assert ComputerKey.read(root) == {:ok, primary.desktop}
+  end
+
+  test "a key file the move cannot use is refused by name, and is never read instead" do
+    primary = DesktopRail.primary!()
+    root = DesktopRail.desktop_home!(primary)
+    keep_key_in_file!(root, primary.desktop.private, 0o644)
+
+    relay = DesktopRail.start_relay!(root, primary, connect: dialed_by_test())
+
+    assert %{connected: false, status: :unreachable, sentence: sentence} = Relay.status(relay)
+
+    assert sentence ==
+             "This computer's key file is mode 0644, readable by others; Fermix uses it " <>
+               "only at 0600."
+
+    refute_received :dialed
+    assert {:ok, %{key: nil}} = DesktopLink.read(root)
+  end
+
+  test "a locked keyring is refused by name, asked again on the backoff, and reached once open" do
+    primary = DesktopRail.primary!()
+    root = DesktopRail.desktop_home!(primary)
+    profile = Path.basename(root)
+    LockableKeychain.lock(profile)
+    on_exit(fn -> LockableKeychain.open(profile) end)
+
+    relay = DesktopRail.start_relay!(root, primary, key_opts: [impl: LockableKeychain])
+
+    assert %{connected: false, status: :unreachable, sentence: sentence} = Relay.status(relay)
+
+    assert sentence ==
+             "Fermix cannot use this computer's key: the login keyring is locked: unlock it. " <>
+               "Fermix tries again in 1 s."
+
+    assert_receive {:scheduled, {:relay_timer, :reload, _token} = second, 1_000}
+    send(relay, second)
+    assert_receive {:scheduled, {:relay_timer, :reload, _token} = third, 2_000}
+    assert %{sentence: later} = Relay.status(relay)
+    assert later =~ "Fermix tries again in 2 s."
+
+    LockableKeychain.open(profile)
+    send(relay, third)
+
+    assert %{connected: true} = DesktopRail.await_connected(relay)
+  end
+
+  test "a keyring still locked after ten asks is left refused, saying how to go on" do
+    primary = DesktopRail.primary!()
+    root = DesktopRail.desktop_home!(primary)
+    profile = Path.basename(root)
+    LockableKeychain.lock(profile)
+    on_exit(fn -> LockableKeychain.open(profile) end)
+
+    relay =
+      DesktopRail.start_relay!(root, primary,
+        key_opts: [impl: LockableKeychain],
+        connect: dialed_by_test()
+      )
+
+    for _ask <- 2..10 do
+      assert_receive {:scheduled, {:relay_timer, :reload, _token} = again, _delay}
+      send(relay, again)
+    end
+
+    assert %{connected: false, status: :unreachable, sentence: sentence} = Relay.status(relay)
+
+    assert sentence ==
+             "Fermix cannot use this computer's key: the login keyring is locked: unlock it. " <>
+               "Start Fermix again once it is unlocked."
+
+    refute_received {:scheduled, {:relay_timer, :reload, _token}, _delay}
     refute_received :dialed
   end
 
@@ -796,5 +920,26 @@ defmodule FermixChannels.Desktop.RelayTest do
       "caps" => %{"commands" => [], "max_media_bytes" => 20_971_520}
     }
     |> Map.put("primary_epoch", epoch)
+  end
+
+  defp dialed_by_test do
+    test = self()
+
+    fn ->
+      send(test, :dialed)
+      {:error, :econnrefused}
+    end
+  end
+
+  # The desktop home as an engine before the key moved left it: a version 1
+  # link and the key in its own file, the keychain holding none.
+  defp keep_key_in_file!(root, private, mode) do
+    :ok = ComputerKey.delete(root, :keyring)
+    path = DesktopLink.path(root)
+    link = path |> File.read!() |> Jason.decode!() |> Map.delete("key") |> Map.put("v", 1)
+    File.write!(path, Jason.encode!(link))
+    file = Path.join(root, "device/desktop_key")
+    File.write!(file, private)
+    File.chmod!(file, mode)
   end
 end

@@ -120,7 +120,9 @@ defmodule FermixChannels.Home.MoveEndToEndTest do
     root = short_root("fx-e2e-p")
     :ok = Epoch.write(root, 4)
     {:ok, _identity} = Identity.ensure(root: root)
-    File.write!(Path.join(root, "config.toml"), "[sandbox]\nmode = \"strict\"\n")
+    # A keychain profile of its own: the move stores this computer's key there.
+    profile = ~s([fermix_core]\nprofile = "#{Path.basename(root)}"\n\n)
+    File.write!(Path.join(root, "config.toml"), profile <> "[sandbox]\nmode = \"strict\"\n")
     suffix = System.unique_integer([:positive])
     store = :"e2e_move_store_#{suffix}"
     start_supervised!({DeviceStore, root: root, name: store}, id: :primary_store)

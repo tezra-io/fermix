@@ -100,7 +100,8 @@ defmodule FermixCore.Home.Move do
   whose readiness report blocks (`{:not_ready, sentences}`). `opts`: `:now`,
   `:keep_as_desktop` (default true: this computer becomes a desktop of the new
   primary; false for a server a desktop moves back from, which then serves
-  nothing),
+  nothing), `:keep_offers` (what a computer that stays a desktop keeps on for
+  its server, M97 §7.3, recorded in the request as `keep_offers`),
   `:readiness` (the report the owner was just shown, from `review/3`, in
   place of making one), and `FermixCore.Home.MoveReadiness.report/3`'s.
   Writes the request and the role; a failure part-way removes `.move/`.
@@ -113,6 +114,8 @@ defmodule FermixCore.Home.Move do
     now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
     keep_as_desktop = Keyword.get(opts, :keep_as_desktop, true)
     true = is_boolean(keep_as_desktop)
+    keep_offers = Keyword.get(opts, :keep_offers)
+    true = is_nil(keep_offers) or Enum.all?(keep_offers, &is_atom/1)
     recipient = Recipient.public(recipient)
 
     with :ok <- primary(record),
@@ -132,6 +135,8 @@ defmodule FermixCore.Home.Move do
         "keep_as_desktop" => keep_as_desktop
       }
 
+      request = put_keep_offers(request, keep_as_desktop, keep_offers)
+
       with :ok <- write_request(home, request, now) do
         {:ok,
          %{
@@ -142,6 +147,26 @@ defmodule FermixCore.Home.Move do
            keep_as_desktop: keep_as_desktop
          }}
       end
+    end
+  end
+
+  # What this computer keeps on for its server (M97 §7.3), decided as the
+  # move is accepted and written to its switches at the commit: a computer
+  # that stays a desktop only.
+  defp put_keep_offers(request, true, keep) when is_list(keep),
+    do: Map.put(request, "keep_offers", Enum.map(keep, &Atom.to_string/1))
+
+  defp put_keep_offers(request, _keep_as_desktop, _keep), do: request
+
+  @doc """
+  The offers a request keeps on for the server (M97 §7.3), as `start/5`
+  recorded them; nil in a request written before the choice existed.
+  """
+  @spec keep_offers(map()) :: [String.t()] | nil
+  def keep_offers(%{} = request) do
+    case Map.get(request, "keep_offers") do
+      offers when is_list(offers) -> offers
+      _absent -> nil
     end
   end
 

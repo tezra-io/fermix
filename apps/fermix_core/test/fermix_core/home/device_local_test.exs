@@ -29,6 +29,15 @@ defmodule FermixCore.Home.DeviceLocalTest do
     refute DeviceLocal.excluded?("config.toml")
   end
 
+  # M97 D13: a computer's own key on the file store is a file of that store,
+  # and the store travels; the key never does, nor survives a return.
+  test "a computer's own key in the file store stays here, and only it" do
+    assert DeviceLocal.excluded?("secrets/device.desktop_key")
+    refute DeviceLocal.kept_through_return?("secrets/device.desktop_key")
+    refute DeviceLocal.excluded?("secrets/OPENAI_API_KEY")
+    refute DeviceLocal.excluded?("secrets/device.desktop_key.old")
+  end
+
   test "every entry says whether a return keeps it, and there is no third answer" do
     for %{pattern: pattern, return: return} <- DeviceLocal.excluded() do
       assert return in [:keep, :drop], pattern
@@ -83,6 +92,7 @@ defmodule FermixCore.Home.DeviceLocalTest do
           ".move/phase.json",
           "device/desktop.json",
           "device/desktop_key",
+          "secrets/device.desktop_key",
           "candidate/state.json",
           "mobile/candidates.json",
           "mobile/enrollment.json",

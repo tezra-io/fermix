@@ -18,6 +18,7 @@ defmodule FermixChannels.Home.CandidateReturnTest do
   alias FermixChannels.Test.HomeMove
   alias FermixCore.Home.Candidate
   alias FermixCore.Home.Candidate.Activation
+  alias FermixCore.Home.ComputerKey
   alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.EnrollmentCode
   alias FermixCore.Home.Epoch
@@ -174,6 +175,7 @@ defmodule FermixChannels.Home.CandidateReturnTest do
     :ok =
       DesktopLink.write(ctx.mac, %{
         device_id: "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e",
+        key: :file,
         primary: %{
           name: "north-box",
           gateway_pk: facts.gateway_pk,
@@ -241,6 +243,8 @@ defmodule FermixChannels.Home.CandidateReturnTest do
 
   # The computer the home left: retired, marked, linked, with a path of its
   # own deep inside a kept directory and a stale file the server never had.
+  # Its key is in its file store under a profile of its own: the stub
+  # keychain is one table for the VM.
   defp retired_mac!(mac) do
     File.mkdir_p!(Path.join([mac, "browser", "profiles", "owner"]))
     File.mkdir_p!(Path.join(mac, "journals"))
@@ -250,6 +254,7 @@ defmodule FermixChannels.Home.CandidateReturnTest do
     role = "device"
 
     [fermix_core]
+    profile = "cr-#{System.unique_integer([:positive])}"
     secret_store = "file"
     """)
 
@@ -263,14 +268,27 @@ defmodule FermixChannels.Home.CandidateReturnTest do
     File.write!(Path.join(mac, "chatgpt_host.json"), "stale")
     File.write!(Path.join([mac, "journals", "day.md"]), "a retired day\n")
     :ok = Moved.write(mac, %{epoch: 4, moved_at: @now, to: "north-box"})
-    File.mkdir_p!(Path.dirname(DesktopLink.path(mac)))
-    File.write!(DesktopLink.path(mac), "{}")
+    :ok = DesktopLink.write(mac, retired_link())
     mac
   end
 
+  defp retired_link do
+    %{
+      device_id: "0d3f8a7e-5c21-4b9e-8f60-2a4c6e8b1d37",
+      key: :file,
+      primary: %{
+        name: "north-box",
+        gateway_pk: :binary.copy(<<0x3C>>, 32),
+        node_id: String.duplicate("4f", 32),
+        relays: [%{"url" => "https://eu1.relay.invalid/", "quic_port" => 7842}],
+        relays_rev: "0123456789abcdef"
+      },
+      epoch: 4
+    }
+  end
+
   defp desktop_key!(mac) do
-    keypair = Noise.generate_keypair()
-    :ok = DesktopLink.write_key(mac, keypair.private)
+    {:ok, keypair, :file} = ComputerKey.create(mac, keypair: Noise.generate_keypair())
     keypair
   end
 

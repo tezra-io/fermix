@@ -135,7 +135,10 @@ defmodule FermixCore.Home.Role do
        "retired copy"},
     {FermixCore.Companion.OriginBackfill,
      "says where earlier messages came from on memory.db's timeline, which a device does " <>
-       "not open"}
+       "not open"},
+    {FermixCore.Computers.Registry,
+     "keeps what the home's computers offer and how they connect; only the primary serves " <>
+       "them"}
   ]
 
   @primary_only_modules Enum.map(@primary_only, &elem(&1, 0))

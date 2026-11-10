@@ -29,7 +29,7 @@ scenarios:                     # required, >= 1
 ### `requires`
 
 What the suite needs the eval home to have been seeded with, beyond the defaults.
-One value today: `cues` — the home was seeded with `seed_capability_home.py
+Two values: `cues` — the home was seeded with `seed_capability_home.py
 --cues` and `seed_cues.exs` (`FERMIX_CAP_SEED_ARGS=--cues capability-daemon.sh up`
 does both), which turns cues on, writes the door, the local-push sources and the
 default filter model, and makes the watchers. It is opt-in because cues add
@@ -38,6 +38,13 @@ seeded without it both runners hold the suite's cases out as **NOT EVALUATED**:
 named, never driven, never scored and never a failure (`run_eval.py` and
 `run_capability.py` read `eval-fixtures/cues.json` and `cue_watchers.json` in the
 home before driving). A `drive: cue` suite must declare it.
+
+`computers` — the home was seeded with `seed_capability_home.py --computers`
+(`FERMIX_CAP_SEED_ARGS=--computers capability-daemon.sh up`), which links two
+away computers to an Always On home (their device rows and records) for the
+`## Computers` prompt section. On a home seeded without it `run_eval.py` holds
+the suite's cases out as **NOT EVALUATED** (it reads
+`eval-fixtures/computers.json` in the home).
 
 ### `abort_on_tool_error`
 

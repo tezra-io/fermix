@@ -44,6 +44,7 @@ defmodule FermixChannels.Mobile.Protocol do
   @max_u64 18_446_744_073_709_551_615
   @default_max_media_bytes 20 * 1_024 * 1_024
   @platforms ~w(ios android)
+  @computer_platforms ~w(macos linux)
   # This daemon pushes through APNs alone, so it is the wire's whole catalog.
   @push_services ~w(apns)
   @attestation_kinds ~w(android_keymint apple_app_attest)
@@ -591,10 +592,21 @@ defmodule FermixChannels.Mobile.Protocol do
          :ok <- nonempty(payload, "app_version"),
          :ok <- nonnegative_u64(payload, "last_server_seq"),
          :ok <- positive_integer(payload, "protocol_v"),
-         :ok <- optional_positive_u64(payload, "primary_epoch") do
+         :ok <- optional_positive_u64(payload, "primary_epoch"),
+         :ok <- optional_computer_platform(payload) do
       optional_relay_list_rev(payload)
     end
   end
+
+  # The system a computer runs (M97 §3.2), named by a desktop's hello; absent
+  # from a phone's and from an engine older than the computer record.
+  defp optional_computer_platform(%{"platform" => platform}) when platform in @computer_platforms,
+    do: :ok
+
+  defp optional_computer_platform(%{"platform" => _other}),
+    do: {:error, {:invalid_field, "platform"}}
+
+  defp optional_computer_platform(_payload), do: :ok
 
   # The relay list revision the phone has stored (M62 §3.1): 16 lowercase hex
   # digits. A well-formed revision this daemon does not know is still recorded.
@@ -760,10 +772,29 @@ defmodule FermixChannels.Mobile.Protocol do
          :ok <- nonnegative_u64(payload, "read_up_to_seq"),
          :ok <- map_field(payload, "caps"),
          :ok <- positive_u64(payload, "primary_epoch"),
-         :ok <- optional_call_caps(payload["caps"]) do
+         :ok <- optional_call_caps(payload["caps"]),
+         :ok <- optional_computer_caps(payload["caps"]) do
       optional_push_services(payload["caps"], "caps.push")
     end
   end
+
+  # Which of a computer's own events the server takes (M97 §5.3): absent from
+  # a server older than the computer record and from a phone's hello_ack, and
+  # a computer sends none of them then. Each flag a boolean; a later server
+  # may name more.
+  defp optional_computer_caps(%{"computer" => %{"v" => version} = computer})
+       when is_integer(version) and version > 0 do
+    flags = Map.take(computer, ~w(offers link_path))
+
+    if Enum.all?(flags, fn {_flag, value} -> is_boolean(value) end),
+      do: :ok,
+      else: {:error, {:invalid_field, "caps.computer"}}
+  end
+
+  defp optional_computer_caps(%{"computer" => _computer}),
+    do: {:error, {:invalid_field, "caps.computer"}}
+
+  defp optional_computer_caps(_caps), do: :ok
 
   # Whether the primary serves a call from the phone (M87): absent from an
   # older primary and from a desktop's hello_ack. A call it does not serve

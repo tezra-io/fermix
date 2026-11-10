@@ -1,6 +1,7 @@
 defmodule FermixCore.Management.HomeTest do
   use ExUnit.Case, async: true
 
+  alias FermixCore.Computers.Store
   alias FermixCore.Cues.Config, as: CuesConfig
   alias FermixCore.Home.Candidate
   alias FermixCore.Home.Candidates
@@ -224,8 +225,8 @@ defmodule FermixCore.Management.HomeTest do
     test "the update ceiling is the oldest desktop's engine, or null", %{home: home} do
       assert {:ok, %{"update_ceiling" => nil}} = route("home.status", %{}, opts(home))
 
-      :ok = EngineCeiling.record(home, "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e", "0.18.0", @at)
-      :ok = EngineCeiling.record(home, "0d3f8a7e-5c21-4b9e-8f60-2a4c6e8b1d37", "0.17.1", @at)
+      :ok = seen(home, "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e", "0.18.0")
+      :ok = seen(home, "0d3f8a7e-5c21-4b9e-8f60-2a4c6e8b1d37", "0.17.1")
 
       assert {:ok, %{"update_ceiling" => "0.17.1"}} = route("home.status", %{}, opts(home))
 
@@ -310,7 +311,7 @@ defmodule FermixCore.Management.HomeTest do
     end
 
     test "an update ceiling that cannot be read is null, and the log says why", %{home: home} do
-      :ok = EngineCeiling.record(home, "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e", "0.18.0", @at)
+      :ok = seen(home, "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e", "0.18.0")
 
       File.write!(
         Path.join(EngineCeiling.dir(home), "0d3f8a7e-5c21-4b9e-8f60-2a4c6e8b1d37.json"),
@@ -323,7 +324,7 @@ defmodule FermixCore.Management.HomeTest do
                    route("home.status", %{}, opts(home, unreadable_files: nil))
         end)
 
-      assert log =~ "engine_ceiling could not be read"
+      assert log =~ "computers could not be read"
     end
 
     test "the next run and a run in progress come from a running scheduler",
@@ -1056,6 +1057,7 @@ defmodule FermixCore.Management.HomeTest do
   defp desktop_link do
     %{
       device_id: "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e",
+      key: :keyring,
       primary: %{
         name: "invented-vm",
         gateway_pk: :binary.copy(<<3>>, 32),
@@ -1161,4 +1163,8 @@ defmodule FermixCore.Management.HomeTest do
 
     name
   end
+
+  # The engine version a computer's hello said (M97: the computers' records).
+  defp seen(home, device_id, version),
+    do: Store.record(home, device_id, %{engine_version: version, seen_at: @at})
 end

@@ -6,9 +6,13 @@ defmodule FermixChannels.Home.MoveWorker do
 
   **Before `move_ready`** (phases `requested`, `streaming`):
 
-    1. the desktop's X25519 key goes to `device/desktop_key` and its row
+    1. the desktop's X25519 key goes into the secret store
+       (`FermixCore.Home.ComputerKey`; the phase records which store and the
+       key's public half first, so a restart finds its own key, and never
+       takes or deletes another home's under the same profile) and its row
        (`kind: :desktop`) into `mobile/devices.toml`, before
-       anything is captured, so the row travels and the key never does;
+       anything is captured, so the row travels and the key never does; a
+       key the store will not take aborts the move by name;
     2. the value of every `@keyring` reference in `config.toml` is read from
        the keychain (`FermixCore.Home.MoveSecrets`), and the home is captured
        (`Snapshot.write/4`) into `.move/<id>.fxsnap`, encrypted to the one-time
@@ -35,9 +39,11 @@ defmodule FermixChannels.Home.MoveWorker do
   retired.
 
   **The commit.** On `move_ready` the worker records the ready epoch, writes
-  `moved.json` (`to` the candidate's name) and `device/desktop.json` (the
-  source's own gateway key and node id, since the identity bundle moves),
-  records `committing`, and only then sends `move_commit`. The link names the
+  `moved.json` (`to` the candidate's name), `device/desktop.json` (the
+  source's own gateway key and node id, since the identity bundle moves) and
+  what this computer keeps on for its server (`[fermix_core.computer]` in its
+  `machine.toml`, as the request recorded it, M97 §7.3), records
+  `committing`, and only then sends `move_commit`. The link names the
   candidate's address hints (an Always On server's tailnet addresses, which
   the move dialed it with), so the desktop dials its new primary there too.
   On `move_done` it
@@ -74,7 +80,8 @@ defmodule FermixChannels.Home.MoveWorker do
 
   Test seams: `:home`, `:helper`, `:connect` (route to a `Mobile.Rail`
   `:connect` function), `:clock`, `:sleep`, `:restart`, `:snapshot_opts`,
-  `:resume_for_ms`, `:awake` (0-arity, as `MoveAwake.hold/0`).
+  `:resume_for_ms`, `:awake` (0-arity, as `MoveAwake.hold/0`), `:key_opts`
+  (handed to `ComputerKey`: its secret writer).
   """
 
   use Task, restart: :transient
@@ -89,6 +96,9 @@ defmodule FermixChannels.Home.MoveWorker do
   alias FermixChannels.Mobile.Protocol
   alias FermixChannels.Mobile.Rail
   alias FermixCore.BuildInfo
+  alias FermixCore.Computers.Consent
+  alias FermixCore.Computers.Switches
+  alias FermixCore.Home.ComputerKey
   alias FermixCore.Home.ComputerName
   alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.Move
@@ -101,6 +111,7 @@ defmodule FermixChannels.Home.MoveWorker do
   alias FermixCore.Management.Lifecycle
   alias FermixCore.Management.Settings
   alias FermixCore.Setup.ConfigStore
+  alias FermixCore.Setup.SecretWriter
 
   @chunk_bytes 60 * 1_024
   @accept_ms 60_000
@@ -171,7 +182,8 @@ defmodule FermixChannels.Home.MoveWorker do
       restart: Keyword.get(opts, :restart, &Lifecycle.restart_self/0),
       snapshot_opts: Keyword.get(opts, :snapshot_opts, []),
       resume_for_ms: Keyword.get(opts, :resume_for_ms, @resume_for_ms),
-      awake: Keyword.get(opts, :awake, default_awake())
+      awake: Keyword.get(opts, :awake, default_awake()),
+      key_opts: Keyword.get(opts, :key_opts, [])
     }
   end
 
@@ -229,6 +241,14 @@ defmodule FermixChannels.Home.MoveWorker do
   defp attempt_failed(ctx, {:capture, {:free_space_unknown, _reason} = reason}),
     do: abort(ctx, {:capture, :free_space_unknown}, Run.capture_sentence(reason))
 
+  defp attempt_failed(ctx, {:computer_key, reason}),
+    do:
+      abort(
+        ctx,
+        :computer_key,
+        "#{ComputerKey.error_sentence(reason)} Nothing moved; start the move again."
+      )
+
   defp attempt_failed(ctx, reason) do
     Logger.warning(
       "move: an attempt to send this home to #{name(ctx)} failed: #{inspect(reason)}"
@@ -246,19 +266,56 @@ defmodule FermixChannels.Home.MoveWorker do
       else: {:ok, %{device_id: nil, keypair: nil}}
   end
 
+  # The key's store and public half are in the phase before the key is
+  # stored, so a restart knows the item it finds is this move's, and an abort
+  # deletes only that one: two homes under one profile share it (M97 D13).
   defp desktop_key(ctx) do
-    case DesktopLink.read_key(ctx.home) do
-      {:ok, keypair} -> desktop_row(ctx, keypair)
-      {:error, {:file, _path, :enoent}} -> new_desktop(ctx)
-      {:error, reason} -> {:error, {:desktop_key, reason}}
+    {:ok, phase} = Move.read_phase(ctx.home)
+
+    case recorded_key(phase) do
+      {:ok, store, public} -> stored_key(ctx, store, public)
+      :none -> new_desktop(ctx)
+    end
+  end
+
+  defp stored_key(ctx, store, public) do
+    case ComputerKey.read(ctx.home, [store: store] ++ ctx.key_opts) do
+      {:ok, %{public: ^public} = keypair} -> desktop_row(ctx, keypair)
+      {:ok, _another} -> {:error, {:computer_key, {:in_use, store}}}
+      {:error, {:missing, ^store}} -> new_desktop(ctx)
+      {:error, reason} -> {:error, {:computer_key, reason}}
     end
   end
 
   defp new_desktop(ctx) do
     keypair = Noise.generate_keypair()
 
-    with :ok <- DesktopLink.write_key(ctx.home, keypair.private), do: desktop_row(ctx, keypair)
+    with {:ok, store} <- computer_key(ComputerKey.store(ctx.home)),
+         :ok <- record(ctx, "streaming", %{"key" => key_record(store, keypair.public)}),
+         {:ok, _keypair, _store} <-
+           computer_key(
+             ComputerKey.create(ctx.home, [keypair: keypair, store: store] ++ ctx.key_opts)
+           ) do
+      desktop_row(ctx, keypair)
+    end
   end
+
+  defp computer_key({:error, reason}), do: {:error, {:computer_key, reason}}
+  defp computer_key(answer), do: answer
+
+  defp key_record(store, public),
+    do: %{"store" => SecretWriter.sentinel_for(store), "public" => Base.encode64(public)}
+
+  defp recorded_key(%{"key" => %{"store" => sentinel, "public" => encoded}}) do
+    with {:ok, store} <- SecretWriter.store_of_sentinel(sentinel),
+         {:ok, <<_::256>> = public} <- Base.decode64(encoded) do
+      {:ok, store, public}
+    else
+      _unreadable -> :none
+    end
+  end
+
+  defp recorded_key(_phase), do: :none
 
   # The row is found by the key, so a restart between the key and the row (or
   # after both) adds it once.
@@ -270,6 +327,8 @@ defmodule FermixChannels.Home.MoveWorker do
     end
   end
 
+  # The computer the move leaves keeps the home's backup copies (M97 D7), and
+  # says its system in its row (M97 §3.2).
   defp add_row(ctx, keypair) do
     attrs = %{
       device_id: uuid(),
@@ -277,7 +336,9 @@ defmodule FermixChannels.Home.MoveWorker do
       model: "#{os()} desktop",
       noise_pk: keypair.public,
       created_at: DateTime.truncate(ctx.clock.(), :second),
-      kind: :desktop
+      kind: :desktop,
+      platform: platform(),
+      backups: true
     }
 
     case DeviceStore.add(attrs, root: ctx.home) do
@@ -466,6 +527,7 @@ defmodule FermixChannels.Home.MoveWorker do
 
   defp retired(ctx, rail, desktop, epoch) do
     with :ok <- link(ctx, desktop.device_id, epoch),
+         :ok <- keep_offers(ctx),
          :ok <- record(ctx, "committing", %{"sentence" => nil}),
          {:ok, %{"epoch" => done_epoch}} <-
            timed(ctx, "commit", fn -> send_commit(ctx, rail) end, nil) do
@@ -509,11 +571,13 @@ defmodule FermixChannels.Home.MoveWorker do
 
   defp link(ctx, device_id, epoch) do
     with {:ok, identity} <- Identity.load(root: ctx.home),
-         {:ok, node_id} <- node_id(ctx.home) do
+         {:ok, node_id} <- node_id(ctx.home),
+         {:ok, store} <- key_store(ctx.home) do
       current = Relays.current()
 
       DesktopLink.write(ctx.home, %{
         device_id: device_id,
+        key: store,
         primary: %{
           name: name(ctx),
           gateway_pk: identity.gateway_public_key,
@@ -524,6 +588,17 @@ defmodule FermixChannels.Home.MoveWorker do
         },
         epoch: epoch
       })
+    end
+  end
+
+  # The store the key went to, as the phase recorded it: the link records it
+  # from here on. A move an older Fermix began recorded none.
+  defp key_store(home) do
+    {:ok, phase} = Move.read_phase(home)
+
+    case recorded_key(phase) do
+      {:ok, store, _public} -> {:ok, store}
+      :none -> {:error, :no_key_recorded}
     end
   end
 
@@ -542,6 +617,7 @@ defmodule FermixChannels.Home.MoveWorker do
     epoch = phase["ready_epoch"]
 
     with :ok <- ensure_link(ctx, phase, epoch),
+         :ok <- ensure_offers(ctx),
          :ok <- record(ctx, "committing", %{}) do
       deadline = System.monotonic_time(:millisecond) + ctx.resume_for_ms
       resume_loop(ctx, epoch, deadline, @first_resume_ms)
@@ -556,6 +632,38 @@ defmodule FermixChannels.Home.MoveWorker do
     if File.regular?(DesktopLink.path(ctx.home)),
       do: :ok,
       else: link(ctx, phase["device_id"], epoch)
+  end
+
+  # What this computer keeps on for its server (M97 §7.3), as the move
+  # recorded it when it was accepted: written beside the link, before the
+  # server is told to commit, so a move undone leaves no switches. A source
+  # not kept as a desktop keeps nothing; a request written before the choice
+  # existed keeps the block as this engine proposes it.
+  defp keep_offers(ctx) do
+    if Move.keep_as_desktop?(ctx.request),
+      do: Consent.accept(ctx.home, kept_offers(ctx.request)),
+      else: :ok
+  end
+
+  defp kept_offers(request) do
+    case Move.keep_offers(request) do
+      nil ->
+        Consent.default_keep()
+
+      offers ->
+        {:ok, kept} = Consent.cast(offers)
+        kept
+    end
+  end
+
+  # Resuming after the marker: the switches written once, unless the commit
+  # already wrote them and someone at this computer has changed them since.
+  defp ensure_offers(ctx) do
+    case Switches.read(ctx.home) do
+      {:ok, []} -> keep_offers(ctx)
+      {:ok, _written} -> :ok
+      {:error, _reason} = error -> error
+    end
   end
 
   defp resume_loop(ctx, epoch, deadline, pause_ms) do
@@ -606,7 +714,7 @@ defmodule FermixChannels.Home.MoveWorker do
   # the candidate activated: only it holds the gateway key and the epoch.
   defp probe_primary(ctx, epoch) do
     with {:ok, link} <- DesktopLink.read(ctx.home),
-         {:ok, keypair} <- DesktopLink.read_key(ctx.home),
+         {:ok, keypair} <- ComputerKey.read(ctx.home, ctx.key_opts),
          route = Map.take(link.primary, [:node_id, :relays, :relays_rev, :addrs]),
          {:ok, rail} <-
            rail_open(ctx, route, :ik,
@@ -708,7 +816,7 @@ defmodule FermixChannels.Home.MoveWorker do
   defp undo(ctx, reason, sentence) do
     {:ok, phase} = Move.read_phase(ctx.home)
     :ok = record(ctx, "aborting", %{"sentence" => sentence})
-    :ok = remove_desktop(ctx, phase["device_id"])
+    :ok = remove_desktop(ctx, phase)
     _ = File.rm(Move.snapshot_path(ctx.home, ctx.request["move_id"]))
     :ok = ConfigStore.put_engine_role(ctx.home, :primary)
     :ok = Move.remove_request(ctx.home)
@@ -726,15 +834,29 @@ defmodule FermixChannels.Home.MoveWorker do
     ctx.restart.()
   end
 
-  defp remove_desktop(ctx, device_id) do
-    with :ok <- remove_row(ctx.home, device_id) do
-      case File.rm(DesktopLink.key_path(ctx.home)) do
-        :ok -> :ok
-        {:error, :enoent} -> :ok
-        {:error, reason} -> {:error, {:file, DesktopLink.key_path(ctx.home), reason}}
+  # The row, then the key the phase recorded, and only if it is still that
+  # key (D13). A key the store will not delete now (a keyring that locked)
+  # is logged and left: the primary comes back regardless.
+  defp remove_desktop(ctx, phase) do
+    with :ok <- remove_row(ctx.home, phase["device_id"]) do
+      case forget_key(ctx, recorded_key(phase)) do
+        :ok ->
+          :ok
+
+        {:error, reason} ->
+          Logger.error(
+            "move: the desktop key was not deleted: #{ComputerKey.error_sentence(reason)}"
+          )
+
+          :ok
       end
     end
   end
+
+  defp forget_key(ctx, {:ok, store, public}),
+    do: ComputerKey.delete(ctx.home, store, [public: public] ++ ctx.key_opts)
+
+  defp forget_key(ctx, :none), do: ComputerKey.delete(ctx.home, nil, ctx.key_opts)
 
   defp remove_row(_home, nil), do: :ok
 
@@ -827,6 +949,14 @@ defmodule FermixChannels.Home.MoveWorker do
       {:unix, :darwin} -> "macOS"
       {:unix, :linux} -> "Linux"
       {_family, other} -> Atom.to_string(other)
+    end
+  end
+
+  # A computer row's `platform`: the two systems a computer runs Fermix on.
+  defp platform do
+    case :os.type() do
+      {:unix, :darwin} -> "macos"
+      {:unix, :linux} -> "linux"
     end
   end
 end

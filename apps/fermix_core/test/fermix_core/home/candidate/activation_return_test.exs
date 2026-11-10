@@ -8,11 +8,29 @@ defmodule FermixCore.Home.Candidate.ActivationReturnTest do
   alias FermixCore.Home.AlwaysOnRelease
   alias FermixCore.Home.Candidate
   alias FermixCore.Home.Candidate.Activation
+  alias FermixCore.Home.ComputerKey
+  alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.Moved
   alias FermixCore.Home.Snapshot.Status
+  alias FermixCore.Setup.SecretWriter
   alias FermixTestSupport.SafeRm
 
   @now ~U[2031-06-01 09:20:00Z]
+
+  # The ended tenure's link as an engine before the key moved wrote it: its
+  # key is the file beside it, which step c deletes with the link.
+  @link_before_key Jason.encode!(%{
+                     "v" => 1,
+                     "device_id" => "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e",
+                     "primary" => %{
+                       "name" => "hetzner-orchard",
+                       "gateway_pk" => Base.encode64(:binary.copy(<<3>>, 32)),
+                       "node_id" => String.duplicate("c4", 32),
+                       "relays" => [%{"url" => "https://eu1.relay.invalid/", "quic_port" => 7842}],
+                       "relays_rev" => String.duplicate("a1", 8)
+                     },
+                     "primary_epoch" => 5
+                   })
 
   # This computer's retired copy: its own paths, the ended tenure's
   # bookkeeping, and the stale copy of what travels.
@@ -30,7 +48,7 @@ defmodule FermixCore.Home.Candidate.ActivationReturnTest do
     "machine.toml.tmp" => "an interrupted write",
     ".move/phase.json" => ~s({"phase":"done"}),
     "logs/fermix.log" => "this computer's log",
-    "device/desktop.json" => "the link to the server",
+    "device/desktop.json" => @link_before_key,
     "device/desktop_key" => "the desktop key",
     "device/local/window.json" => "a file of this machine's own",
     "device/return.json" => "the return's record",
@@ -146,6 +164,31 @@ defmodule FermixCore.Home.Candidate.ActivationReturnTest do
     # A top-level the staging lacks keeps its kept path and goes with the rest.
     assert File.dir?(Path.join(home, "harness"))
     refute File.exists?(Path.join(home, "job_runs"))
+  end
+
+  # M97 D13: a move back deletes this computer's key from the store its link
+  # records, then the link that records it.
+  test "the ended tenure's key goes from the store its link names, then the link", ctx do
+    home = activating_home!(ctx.tmp, "home", @small)
+    profile = "activation-return-#{System.unique_integer([:positive])}"
+    File.write!(Path.join(home, "config.toml"), ~s([fermix_core]\nprofile = "#{profile}"\n))
+    SafeRm.rm!(Path.join(home, "device/desktop_key"))
+    {:ok, _keypair, :keyring} = ComputerKey.create(home)
+    {:ok, link} = DesktopLink.read(home)
+    :ok = DesktopLink.write(home, %{link | key: :keyring})
+
+    stored = fn ->
+      SecretWriter.get({:device_key, :desktop}, profile: profile, store: :keyring)
+    end
+
+    assert {:ok, _base64} = stored.()
+
+    assert :ok = Activation.activate(home, :return)
+
+    # The returned settings name a profile of their own, so the item is
+    # looked up by the one the key was stored under.
+    assert stored.() == {:error, :missing_secret}
+    refute File.exists?(DesktopLink.path(home))
   end
 
   test "the config is primary only once the marker is gone, at every step", ctx do

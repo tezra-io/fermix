@@ -308,13 +308,47 @@ defmodule FermixChannels.Mobile.PeerEventsTest do
     end
   end
 
+  # M97 §3.2, §5.3: a computer's own record on a desktop's session.
+  describe "a computer's offers and path" do
+    test "offers is a chunked payload under its revision, link_path a path" do
+      rev = "0f1e2d3c4b5a6978"
+      payload = ~s({"v":1,"offers":[]})
+      chunk = %{"rev" => rev, "index" => 0, "last" => true}
+
+      assert {:ok, _event} = decode("offers", chunk, payload)
+
+      assert {:error, {:invalid_field, "rev"}} =
+               decode("offers", %{chunk | "rev" => "XYZ"}, payload)
+
+      assert {:error, {:missing_field, "bytes"}} = decode("offers", chunk)
+
+      assert {:ok, _event} = decode("link_path", %{"path" => "relay"})
+      assert {:error, {:invalid_field, "path"}} = decode("link_path", %{"path" => "carrier"})
+    end
+
+    test "a desktop's hello names its system, and nothing else is one" do
+      hello = %{
+        "device_id" => "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e",
+        "app_version" => "0.19.0",
+        "last_server_seq" => 0,
+        "protocol_v" => Protocol.protocol_version()
+      }
+
+      assert {:ok, _event} = decode("hello", hello)
+      assert {:ok, _event} = decode("hello", Map.put(hello, "platform", "linux"))
+
+      assert {:error, {:invalid_field, "platform"}} =
+               decode("hello", Map.put(hello, "platform", "ios"))
+    end
+  end
+
   test "the table and the catalogs agree, and every raw-tailed event is named" do
     for type <- PeerEvents.client_events(), do: assert(type in Protocol.client_events())
     for type <- PeerEvents.server_events(), do: assert(type in Protocol.server_events())
 
     assert Enum.sort(PeerEvents.raw_events(:client)) ==
              ~w(call_audio call_frame call_line companion_line loopback_request manage
-                move_chunk)
+                move_chunk offers)
 
     assert Enum.sort(PeerEvents.raw_events(:server)) ==
              ~w(call_audio call_line companion_line loopback_response manage_result

@@ -691,3 +691,19 @@ def test_each_pattern_floor_catches_an_ask_and_passes_a_plain_words_reply(case_i
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q", "--disable-plugin-autoload"]))
+
+
+def test_a_home_seeded_without_computers_holds_the_computers_suite_out(tmp_path):
+    behavioral = [(s, s.scenarios) for s in suites.load_all(os.path.join(BENCH, "suites"))
+                  if s.name in ("computers", "memory")]
+    bare = str(tmp_path / "bare-eval")
+    kept, held = run_eval.hold_out_unseeded(_cfg(bare), behavioral)
+    assert [suite.name for suite, _scns in kept] == ["memory"]
+    assert {suite for suite, _case, _reason in held} == {"computers"} and held
+    assert all("--computers" in reason for _s, _c, reason in held)
+
+    os.makedirs(os.path.join(bare, "eval-fixtures"))
+    with open(os.path.join(bare, "eval-fixtures", "computers.json"), "w", encoding="utf-8") as fh:
+        fh.write("{}")
+    kept, held = run_eval.hold_out_unseeded(_cfg(bare), behavioral)
+    assert held == [] and kept == behavioral

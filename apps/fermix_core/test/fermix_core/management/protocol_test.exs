@@ -160,6 +160,7 @@ defmodule FermixCore.Management.ProtocolTest do
              "home.move.readiness",
              "home.move.start",
              "home.act",
+             "computers.rename",
              "accessories.status",
              "accessories.pair.start",
              "accessories.pair.begin",

@@ -297,7 +297,7 @@ it, never a second writer.
 - **Memory.** Out of memory the kernel stops one process. The swap file makes
   that rarer, and on Linux the engine starts Chrome, and so every Chrome
   process, with `oom_score_adj` 1000, so the kernel stops Chrome before the
-  engine. Both values are constants until they are measured on a real server.
+  engine.
 - On Ubuntu there is no Chromium package (only a snap, which Fermix does not
   use), so the first boot installs no browser there: an Ubuntu server needs
   one installed by hand (Google Chrome's own package, for example), and until
@@ -443,7 +443,7 @@ it, never a second writer.
   passphrase: the new primary's snapshots open only with it.
 - **What happens** (`home.status`'s `move`: phase, candidate, sentence; also
   `fermix home status`). On this computer: `requested`; `streaming`, the
-  desktop's own key goes to `device/desktop_key` and its row into the device
+  desktop's own key goes into the secret store and its row into the device
   list, the value of every secret `config.toml` keeps in the keychain is read,
   then the home is captured (as a snapshot, encrypted to the candidate's
   one-time key, in `.move/`, the keychain's secrets inside it as files of the
@@ -600,10 +600,10 @@ it, never a second writer.
 - After an Always On move the computer the home left keeps Fermix running in
   the device role, linked to the new primary: `<home>/device/desktop.json`
   names the primary (its name, gateway key, iroh node id and relays, its
-  direct address hints, and the highest primary epoch this desktop has seen)
-  and `<home>/device/desktop_key`
-  is the desktop's own key, used only at mode 0600 (a looser mode is refused
-  by name and nothing is dialed). Both stay on this computer.
+  direct address hints, the highest primary epoch this desktop has seen, and
+  the secret store with its own key: the keychain, or the file store, whose
+  copy never travels). An old key file moves there at start; a key it cannot
+  use is refused by name and nothing is dialed. Both stay here.
 - The Mac or Linux app changes nothing: it keeps talking to this computer's
   own Fermix sockets, and this Fermix carries what belongs to the primary over
   one encrypted session through the iroh rail. The app's chat goes to the
@@ -612,7 +612,7 @@ it, never a second writer.
   carried; a process this Fermix started (a command the primary asked this
   desktop to run) or one running detached is refused. Media a chat row names
   is fetched from the primary and handed to the app as a file on this
-  computer, as always.
+  computer.
 - Settings and other Fermix-wide requests from the app go to the primary
   too, the home's recovery, enrollment and move included (snapshots, a new
   enrollment code, the servers waiting, the move's readiness and the move
@@ -625,9 +625,9 @@ it, never a second writer.
   own (its role, its link to the primary, where the move went) with the
   primary's own picture added (its recovery, its enrollment and candidates,
   its move), and the list of settings sections is this computer's own with the
-  primary's others. The primary's part is asked within 5 seconds; while it
-  cannot be had, this computer's part is still shown and a sentence says why
-  the primary's is missing. This computer's own old snapshot status is a
+  primary's others. The primary's part is asked within 5 seconds; without
+  it, this computer's part is still shown and a sentence says why. This
+  computer's own old snapshot status is a
   retired copy and is not shown as the home's recovery.
 - Signing in (a provider, a plugin, an MCP server) from the app on this
   desktop runs on the primary, where the tokens live, and the browser page
@@ -694,7 +694,8 @@ it, never a second writer.
   --json`) shows the link: the primary's name, whether it is connected and
   since when, the epoch, the sentence, and while it is connected its path
   (`direct` or `relay`). On the primary the same picture lists its desktops,
-  each with whether it is connected.
+  each with whether it is connected, and beside them `computers`, each
+  computer's record and what it offers (the `computers` reference).
 
 ## Moving back to the computer the home left
 

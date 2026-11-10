@@ -1116,6 +1116,13 @@ defmodule FermixCore.Setup.ConfigStoreTest do
   remote_summaries = ["anthropic"]
   summarizer = "default"
 
+  [fermix_core.computer]
+  enabled = true
+  reviewed = false
+  files = true
+  shell = true
+  browser = false
+
   [fermix_core.transcription]
   backend = "openai"
   model = "gpt-4o-mini-transcribe"

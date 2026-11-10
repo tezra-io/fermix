@@ -2,6 +2,7 @@
   "ok": true,
   "result": {
     "candidates": [],
+    "computers": [],
     "desktops": [],
     "disk": {
       "nearly_full": false,

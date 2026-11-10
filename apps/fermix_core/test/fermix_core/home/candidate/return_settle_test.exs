@@ -8,6 +8,7 @@ defmodule FermixCore.Home.Candidate.ReturnSettleTest do
   alias FermixCore.Home.Candidate
   alias FermixCore.Home.Candidate.Activation
   alias FermixCore.Home.Candidate.Return
+  alias FermixCore.Home.ComputerKey
   alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.Epoch
   alias FermixCore.Home.Moved
@@ -48,7 +49,7 @@ defmodule FermixCore.Home.Candidate.ReturnSettleTest do
     {:ok, _written} =
       Snapshot.write(server, Recipient.public(pair), incoming, host: "linux-x86_64")
 
-    {:ok, desktop} = DesktopLink.read_key(mac)
+    {:ok, desktop} = ComputerKey.read(mac)
 
     %{tmp: tmp, mac: mac, profile: profile, pair: pair, incoming: incoming, desktop: desktop}
   end
@@ -97,9 +98,22 @@ defmodule FermixCore.Home.Candidate.ReturnSettleTest do
   end
 
   test "a computer with no desktop key holds no row to drop", ctx do
-    SafeRm.rm!(DesktopLink.key_path(ctx.mac))
+    :ok = ComputerKey.delete(ctx.mac, :keyring)
 
     assert {:ok, 7} = stage(ctx, drop_desktop_row: fn _root, _pk -> flunk("no row to drop") end)
+  end
+
+  # M97 D13: the key is read from the store the link records, never from the
+  # file an older Fermix kept it in.
+  test "a key that has not moved out of its file fails the staging by name", ctx do
+    {:ok, link} = DesktopLink.read(ctx.mac)
+    v1 = ctx.mac |> DesktopLink.path() |> File.read!() |> Jason.decode!()
+    File.write!(DesktopLink.path(ctx.mac), Jason.encode!(%{Map.delete(v1, "key") | "v" => 1}))
+    File.write!(Path.join(ctx.mac, "device/desktop_key"), :crypto.strong_rand_bytes(32))
+    assert link.key == :keyring
+
+    assert {:error, {:desktop_key, :not_moved}} =
+             stage(ctx, drop_desktop_row: fn _root, _pk -> flunk("no key read from its file") end)
   end
 
   test "a device list that cannot be changed fails the staging", ctx do
@@ -283,7 +297,23 @@ defmodule FermixCore.Home.Candidate.ReturnSettleTest do
     :ok =
       Moved.write(root, %{epoch: 5, moved_at: ~U[2031-05-01 10:00:00Z], to: "hetzner-orchard"})
 
-    :ok = DesktopLink.write_key(root, :crypto.strong_rand_bytes(32))
+    {:ok, _keypair, :keyring} = ComputerKey.create(root)
+    :ok = DesktopLink.write(root, desktop_link())
     root
+  end
+
+  defp desktop_link do
+    %{
+      device_id: "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e",
+      key: :keyring,
+      primary: %{
+        name: "hetzner-orchard",
+        gateway_pk: :binary.copy(<<3>>, 32),
+        node_id: String.duplicate("c4", 32),
+        relays: [%{"url" => "https://eu1.relay.invalid/", "quic_port" => 7842}],
+        relays_rev: String.duplicate("a1", 8)
+      },
+      epoch: 5
+    }
   end
 end

@@ -964,6 +964,7 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
   defp desktop_link do
     %{
       device_id: "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e",
+      key: :keyring,
       primary: %{
         name: "invented-vm",
         gateway_pk: :binary.copy(<<3>>, 32),

@@ -45,7 +45,8 @@ The move to a server, the roles and the epoch: skill_view(name:
   own settings (sandbox, computer use, computer history, iMessage, StackChan,
   the dev plugin folder: its `machine.toml`) never left it and stay as they
   were, and Fermix restarts as the primary, one
-  epoch up from the server. Phones follow; the desktop link ends. A server
+  epoch up from the server. Phones follow; the desktop link ends, and this
+  computer's own key is deleted from its keychain (or file store). A server
   that undid the move ("The move back was undone. Fermix still runs on your
   server.") offers **Try again** and **Cancel**, also when this computer
   had begun to receive. A move back that ended or stopped part-way is a
@@ -69,7 +70,8 @@ The move to a server, the roles and the epoch: skill_view(name:
   again, two copies of Fermix answer the same channels"), and says what is
   lost: messages, memory and jobs since that backup, and Telegram messages
   older than 24 hours where it is set up. Fermix deletes no server: it
-  restores the copy here and restarts as the primary. A restore that stopped before its copy was in
+  restores the copy here, deletes this computer's own key as a move back
+  does, and restarts as the primary. A restore that stopped before its copy was in
   place is offered again. Before confirming, delete the server, or stop
   Fermix on it for good (or run `fermix home mark-moved` there).
 - `fermix always-on move-back` and `fermix always-on restore-here

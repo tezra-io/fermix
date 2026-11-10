@@ -4,7 +4,8 @@ defmodule FermixCore.Setup.MachineFile do
   that describe the computer an engine runs on rather than the home. They are
   the sections only this machine configures
   (`Management.Placement.device_sections/0`: its sandbox, computer use, screen
-  history, this Mac's Messages and the accessory link), whole, and one key of
+  history, this Mac's Messages, the accessory link, and what Fermix on its
+  server may use on it, `Computers.Switches`), whole, and one key of
   a home table, `[fermix_core.plugins] dev_local`, the dev plugin folder,
   which names this machine's own checkouts.
 
@@ -38,10 +39,11 @@ defmodule FermixCore.Setup.MachineFile do
     "computer_use" => "fermix_core.computer_use",
     "computer_history" => "fermix_core.computer_history",
     "channels.imessage" => "fermix_channels.imessage",
-    "accessories" => "fermix_channels.accessories"
+    "accessories" => "fermix_channels.accessories",
+    "computer" => "fermix_core.computer"
   }
   @tables ~w(sandbox fermix_core.computer_use fermix_core.computer_history
-             fermix_channels.imessage fermix_channels.accessories)
+             fermix_channels.imessage fermix_channels.accessories fermix_core.computer)
   # The keys of a home table that are this machine's, as table and key.
   @keys [{"fermix_core.plugins", "dev_local"}]
   @server_sandbox_mode :open

@@ -27,14 +27,16 @@ defmodule FermixChannels.Mobile.Chunks do
     "companion_line" => @mib,
     "manage" => @mib,
     "manage_result" => 4 * @mib,
-    "loopback_response" => 256 * 1_024
+    "loopback_response" => 256 * 1_024,
+    "offers" => 64 * 1_024
   }
 
   @key_fields %{
     "companion_line" => "channel",
     "manage" => "call_id",
     "manage_result" => "call_id",
-    "loopback_response" => "request_id"
+    "loopback_response" => "request_id",
+    "offers" => "rev"
   }
 
   @typedoc "One piece of a split payload: its index, whether it is the last, and its bytes."

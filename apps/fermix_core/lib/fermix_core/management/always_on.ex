@@ -64,6 +64,12 @@ defmodule FermixCore.Management.AlwaysOn do
       server's copied code is closed (`home.enroll.withdraw`;
       one the server cannot be asked to close lapses by itself), and the
       candidate and the record go.
+    * `review_offers` (M97 §7.3): on a linked computer that moved before
+      M97, whose switches wait for the owner's review: the offers in the
+      input's `keep_offers` stay on, every other is off, and the switches are
+      reviewed (`Computers.Consent.review/3`); with none given, the block as
+      the summary proposed it. `move_now` and `try_again` record their
+      `keep_offers` in the move the same way (`HomeMove.move_start/3`).
     * `restore_here` (design §8), offered once the server went silent and
       pressed once the owner confirmed they deleted or stopped it: the
       newest copy of the server's snapshots this desktop keeps that the
@@ -110,6 +116,8 @@ defmodule FermixCore.Management.AlwaysOn do
   use GenServer
 
   alias FermixCore.BuildInfo
+  alias FermixCore.Computers.Consent
+  alias FermixCore.Computers.Switches
   alias FermixCore.Home.Candidate
   alias FermixCore.Home.Link
   alias FermixCore.Home.LocalReturn
@@ -128,7 +136,8 @@ defmodule FermixCore.Management.AlwaysOn do
   require Logger
 
   @capability "home"
-  @acts ~w(cancel move_now try_again back_up_now check_again own_server move_back restore_here)
+  @acts ~w(cancel move_now try_again back_up_now check_again own_server move_back restore_here
+           review_offers)
   @opened ~w(learn_more update)
   # Every client allows `home.act` this long: a review sent to the server
   # takes up to 60 s.
@@ -156,6 +165,8 @@ defmodule FermixCore.Management.AlwaysOn do
   @no_copy_sentence "There is no backup on this computer to restore."
   @code_left_sentence "The code your server opened for it could not be closed, so it stops " <>
                         "working by itself within half an hour."
+  @keep_sentence "Name only what this computer may keep on for your server."
+  @review_kept_sentence "Your review could not be saved. See the daemon log."
   # Restore here's job.
   @restore_kind :home_restore
   # A move the server reports, from its request to its undoing.
@@ -195,7 +206,9 @@ defmodule FermixCore.Management.AlwaysOn do
       @server_moving_sentence,
       @not_receiving_sentence,
       @no_copy_sentence,
-      @code_left_sentence
+      @code_left_sentence,
+      @keep_sentence,
+      @review_kept_sentence
     ]
   end
 
@@ -289,6 +302,7 @@ defmodule FermixCore.Management.AlwaysOn do
     do: restore_here(input.recovery_passphrase, seen, opts)
 
   defp step(%{action: "cancel"}, seen, opts), do: cancel(seen, opts)
+  defp step(%{action: "review_offers", input: input}, _seen, opts), do: review_offers(input, opts)
   defp step(%{action: "own_server"}, _seen, opts), do: own_server(opts)
 
   defp step(%{action: "back_up_now"}, _seen, opts),
@@ -395,9 +409,50 @@ defmodule FermixCore.Management.AlwaysOn do
   defp local_move(candidate_id, request, opts) do
     with :ok <- reviewed(candidate_id, opts),
          :ok <- still_offered(request, opts),
+         {:ok, keep} <- keep_offers(request.input, opts),
          {:ok, started} <-
-           HomeMove.move_start(candidate_id, request.input.recovery_passphrase, opts),
+           HomeMove.move_start(candidate_id, request.input.recovery_passphrase, opts ++ keep),
          do: {:ok, %{"move_id" => started["move_id"]}}
+  end
+
+  # What this computer keeps on for its server after the move (M97 §7.3): the
+  # lines the owner left ticked, else the block as the engine proposed it.
+  defp keep_offers(%Input{keep_offers: nil}, _opts), do: {:ok, []}
+
+  defp keep_offers(%Input{keep_offers: keep}, _opts) do
+    case Consent.cast(keep) do
+      {:ok, offers} -> {:ok, [keep_offers: offers]}
+      {:error, _offer} -> {:error, {:invalid_params, "keep_offers", @keep_sentence}}
+    end
+  end
+
+  # The owner's review of what a computer that moved before M97 keeps on.
+  defp review_offers(input, opts) do
+    keep =
+      case input.keep_offers do
+        nil -> {:ok, Consent.proposed(Switches.current())}
+        offers -> Consent.cast(offers)
+      end
+
+    with {:ok, offers} <- keep_or_refuse(keep),
+         :ok <- reviewed_kept(Consent.review(home(opts), offers)) do
+      {:ok, nil}
+    end
+  end
+
+  defp keep_or_refuse({:ok, offers}), do: {:ok, offers}
+
+  defp keep_or_refuse({:error, _offer}),
+    do: {:error, {:invalid_params, "keep_offers", @keep_sentence}}
+
+  defp reviewed_kept(:ok), do: :ok
+
+  defp reviewed_kept({:error, reason}) do
+    Logger.error(
+      "always on: the review of this computer's offers was not saved: #{inspect(reason)}"
+    )
+
+    unavailable(@review_kept_sentence)
   end
 
   # The review the owner was shown under 15 minutes ago, else one now, kept

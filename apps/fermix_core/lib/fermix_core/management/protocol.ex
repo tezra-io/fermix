@@ -137,6 +137,7 @@ defmodule FermixCore.Management.Protocol do
     {"home.move.readiness", 2},
     {"home.move.start", 2},
     {"home.act", 2},
+    {"computers.rename", 2},
     {"accessories.status", 2},
     {"accessories.pair.start", 2},
     {"accessories.pair.begin", 2},

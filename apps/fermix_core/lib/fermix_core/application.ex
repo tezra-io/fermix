@@ -408,6 +408,11 @@ defmodule FermixCore.Application do
         # `:temporary`, so a crash restarts nothing after it; dark under `mix
         # test`, whose suites run their own pass on their own Repo.
         {OriginBackfill, enabled: @compiled_env != :test},
+        # What the home knows live of its computers (M97 §3.2), primary-only.
+        # A crash restarts the snapshot scheduler and the cue tree, which
+        # re-read their state; its own is rebuilt from each computer's next
+        # event, the records holding the last offers meanwhile.
+        FermixCore.Computers.Registry,
         # The primary's snapshots (M75 §8), before the cue tree so a crash of
         # either restarts nothing but the cue tree. Its timers stay dark under
         # `mix test`; tests start their own with an injected clock and timer.

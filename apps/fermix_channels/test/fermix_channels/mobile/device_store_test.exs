@@ -377,7 +377,6 @@ defmodule FermixChannels.Mobile.DeviceStoreTest do
       for {field, value} <- [
             apns_key_salt: :crypto.strong_rand_bytes(32),
             push_token: "token",
-            platform: "android",
             signer_role: :release,
             version_code: 7,
             boot_state: :verified,
@@ -409,6 +408,92 @@ defmodule FermixChannels.Mobile.DeviceStoreTest do
 
       assert {:error, {:invalid_device, :push_token, :desktop_field}} =
                DeviceStore.update(desktop.device_id, %{push_token: "token"}, root: root)
+    end
+
+    # M97 §3.2 and D7: a computer says its system, and whether it keeps the
+    # home's backup copies.
+    test "a desktop row keeps its platform and its backups flag", %{root: root} do
+      for {platform, backups} <- [{"macos", true}, {"linux", false}, {nil, nil}] do
+        attrs = Map.merge(desktop_attrs(), %{platform: platform, backups: backups})
+
+        assert {:ok, %Device{platform: ^platform, backups: ^backups} = added} =
+                 DeviceStore.add(attrs, root: root)
+
+        assert {:ok, ^added} = DeviceStore.fetch(attrs.device_id, root: root)
+      end
+
+      toml = File.read!(Path.join(root, "mobile/devices.toml"))
+      assert toml =~ ~s(platform = "linux")
+      assert toml =~ "backups = false"
+    end
+
+    test "a desktop takes only a computer's system, and a phone only a phone's",
+         %{root: root} do
+      for platform <- ["ios", "android", "windows"] do
+        assert {:error, {:invalid_device, :platform, :invalid_desktop_fact}} =
+                 DeviceStore.add(Map.put(desktop_attrs(), :platform, platform), root: root)
+      end
+
+      assert {:error, {:invalid_device, :backups, :invalid_desktop_fact}} =
+               DeviceStore.add(Map.put(desktop_attrs(), :backups, "yes"), root: root)
+
+      assert {:error, {:invalid_device, :platform, :invalid_attestation_fact}} =
+               DeviceStore.add(Map.put(device_attrs(), :platform, "macos"), root: root)
+
+      assert {:error, {:invalid_device, :backups, :phone_field}} =
+               DeviceStore.add(Map.put(device_attrs(), :backups, true), root: root)
+
+      for platform <- ["android", "ios"] do
+        assert {:ok, %Device{platform: ^platform}} =
+                 DeviceStore.add(Map.put(device_attrs(), :platform, platform), root: root)
+      end
+    end
+
+    test "an update names a desktop's platform once its hello says it", %{root: root} do
+      desktop = desktop_attrs()
+      assert {:ok, _desktop} = DeviceStore.add(desktop, root: root)
+
+      assert {:ok, %Device{platform: "linux"}} =
+               DeviceStore.update(desktop.device_id, %{platform: "linux"}, root: root)
+
+      assert {:error, {:invalid_device, :platform, :invalid_desktop_fact}} =
+               DeviceStore.update(desktop.device_id, %{platform: "ios"}, root: root)
+    end
+
+    test "the backfill names each computer's platform from the model the move wrote",
+         %{root: root} do
+      mac = Map.put(desktop_attrs(), :model, "macOS desktop")
+      linux = Map.put(desktop_attrs(), :model, "Linux desktop")
+      named = Map.merge(desktop_attrs(), %{model: "Linux desktop", platform: "macos"})
+      unknown = desktop_attrs()
+      phone = device_attrs()
+
+      for attrs <- [mac, linux, named, unknown, phone],
+          do: assert({:ok, _device} = DeviceStore.add(attrs, root: root))
+
+      assert :ok = DeviceStore.backfill_platforms(root: root)
+      {:ok, rows} = DeviceStore.list(root: root)
+      platform = fn attrs -> Enum.find(rows, &(&1.device_id == attrs.device_id)).platform end
+
+      assert platform.(mac) == "macos"
+      assert platform.(linux) == "linux"
+      assert platform.(named) == "macos"
+      assert platform.(unknown) == nil
+      assert platform.(phone) == nil
+
+      before = File.stat!(Path.join(root, "mobile/devices.toml"))
+      assert :ok = DeviceStore.backfill_platforms(root: root)
+      assert File.stat!(Path.join(root, "mobile/devices.toml")).inode == before.inode
+    end
+
+    test "the store backfills as it starts", %{root: root} do
+      mac = Map.put(desktop_attrs(), :model, "macOS desktop")
+      assert {:ok, %Device{platform: nil}} = DeviceStore.add(mac, root: root)
+
+      name = Module.concat(__MODULE__, "Store#{unique_id()}")
+      start_supervised!({DeviceStore, root: root, name: name})
+
+      assert {:ok, %Device{platform: "macos"}} = DeviceStore.fetch(name, mac.device_id)
     end
 
     test "a row naming a kind this daemon does not know fails loudly", %{root: root} do

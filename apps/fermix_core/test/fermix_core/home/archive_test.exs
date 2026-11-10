@@ -54,7 +54,9 @@ defmodule FermixCore.Home.ArchiveTest do
     "grants/grant-1793083733-1.json",
     # M97 §4: this computer's own settings, and an interrupted write of them.
     "machine.toml",
-    "machine.toml.tmp"
+    "machine.toml.tmp",
+    # M97 D13: a computer's own key, where its home keeps secrets as files.
+    "secrets/device.desktop_key"
   ]
 
   setup do

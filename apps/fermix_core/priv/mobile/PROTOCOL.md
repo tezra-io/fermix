@@ -222,10 +222,10 @@ message) is sent as one run of `event_part` frames instead of one frame:
 ## Chunked payloads
 
 A payload too large for one frame (a desktop's management call, a tunneled
-companion line) travels as frames of one event, each with `index` (from 0)
-and `last` (boolean) in its header and at most 60 KiB of the payload as its
-raw tail. A chunked event's header stays within 4,075 bytes, so a full tail
-still fits one plaintext.
+companion line, a computer's offers) travels as frames of one event, each
+with `index` (from 0) and `last` (boolean) in its header and at most 60 KiB
+of the payload as its raw tail. A chunked event's header stays within 4,075
+bytes, so a full tail still fits one plaintext.
 
 - One payload's frames carry the same value of the event's key field and the
   same header fields, and arrive in `index` order, the last one marked
@@ -248,6 +248,7 @@ still fits one plaintext.
 | `manage` | `call_id` | 1 MiB |
 | `manage_result` | `call_id` | 4 MiB |
 | `loopback_response` | `request_id` | 256 KiB |
+| `offers` | `rev` | 64 KiB |
 
 `snapshot_chunk` and `move_chunk` are streams, not chunked payloads: `index`
 alone, contiguous from 0, ended by `snapshot_end` or `move_end`, and bounded
@@ -261,7 +262,7 @@ session, not a second connection, and nothing on the wire names it.
 | Lane | Events | Rule |
 |---|---|---|
 | live | `call_open`, `call_attached`, `call_line`, `call_audio`, `call_frame`, `call_close` | written first |
-| interactive | every event of no other lane: chat, `manage` and `manage_result`, `companion_*`, `loopback_*`, `hello`, `ping`, `pong`, `error`, `ack` | written before bulk |
+| interactive | every event of no other lane: chat, `manage` and `manage_result`, `companion_*`, `loopback_*`, a computer's `offers` and `link_path`, `hello`, `ping`, `pong`, `error`, `ack` | written before bulk |
 | bulk | `media_fetch`, `media_begin`, `media_chunk`, `media_end`, `attach_*`, `snapshot_*`, `move_*` | written when nothing live or interactive waits, one frame at a time |
 
 - A family's events share one lane, so a lane never reorders a family's own
@@ -533,7 +534,7 @@ served.
 
 | `t` | Required payload | Rules |
 |---|---|---|
-| `hello` | `device_id`, `app_version`, `last_server_seq`, `protocol_v`; `relay_list_rev?`, `primary_epoch?` | first paired-session event; `relay_list_rev` is the revision of the relay list the phone holds (see *Remote reach*), 16 lowercase hex digits; `primary_epoch` is the highest primary epoch the phone has seen, absent when it has seen none (see *Primary epoch*) |
+| `hello` | `device_id`, `app_version`, `last_server_seq`, `protocol_v`; `relay_list_rev?`, `primary_epoch?`, `platform?` | first paired-session event; `relay_list_rev` is the revision of the relay list the phone holds (see *Remote reach*), 16 lowercase hex digits; `primary_epoch` is the highest primary epoch the phone has seen, absent when it has seen none (see *Primary epoch*); `platform` is a desktop's alone, the system its computer runs, and a phone never sends it (see *A computer's own record*) |
 | `msg` | `client_msg_id`, `profile_id`, `text`, `attach_ids[]` | text or at least one attachment is required |
 | `attach_begin` | `attach_id`, `kind`, `mime`, `size_bytes`, `sha256`; `name?`, `poster_of?` | SHA-256 is announced before transfer so the host can deduplicate. `kind` is one of `image`, `animation`, `video`, `audio`, `voice`, `document`, `file`; the daemon names the kind from the bytes itself and reads `kind` as a hint. `voice` is a recording the owner made in the app: the daemon treats it as the owner's own words, while `audio` (an audio file attached or forwarded) is treated as content someone else could have written. The row's `media_refs` and every media event name a `voice` upload `audio`. A daemon older than `voice` reads it as no hint and handles the recording as an audio file, so a phone sends `voice` without checking the daemon's version. A still sent with `poster_of` set to a video's `attach_id` is that video's poster frame, not an attachment of its own |
 | `attach_chunk` | `attach_id`, `index` + raw bytes | contiguous zero-based indexes; raw bytes ≤60 KiB |
@@ -638,7 +639,9 @@ older than the list sends no `push`. A phone's `hello_ack` also carries
 `call`, whether this primary serves a call from the phone now (see *Calls
 from the phone*), and `lists: true`, that it takes the phone's list channel
 (see *Lists on a phone*); a desktop's, and an older primary's, carries
-neither, and a phone opens a list channel only on `lists: true`. A `hello_ack` with 16 numeric candidates and the whole
+neither, and a phone opens a list channel only on `lists: true`. A desktop's
+carries `computer` instead, which of a computer's own events the primary
+takes (see *A computer's own record*); a phone's never does. A `hello_ack` with 16 numeric candidates and the whole
 command catalog fits one frame; one whose candidates are long MagicDNS names
 arrives as an `event_part` run.
 
@@ -1151,7 +1154,8 @@ keeps a session to the new primary as a `desktop` device. Its row in
 field; a row that names no kind is a phone's, as every row written before
 desktops did. A
 desktop authenticates exactly as a paired phone does: `IK` (`0x01`) with its
-own static key, then `hello` with the highest `primary_epoch` it has seen,
+own static key, then `hello` with the highest `primary_epoch` it has seen and
+the system its computer runs (`platform`, see *A computer's own record*),
 answered with `hello_ack`. The primary reads the row's kind and admits that
 kind's events alone (see *Who may send what*). The desktop's Mac or Linux app
 speaks only its local sockets; the desktop's engine carries them over this
@@ -1178,6 +1182,8 @@ see *Lists on a phone*):
 | `loopback_failed` | `loopback_id`, `port`, `reason` | the desktop would not or could not listen on `127.0.0.1` on `port` of the loopback: `port_in_use` (something listens there), `not_permitted` (the system refused, or the port is below 1024 or one of the desktop engine's own) or `failed` (anything else, or 8 loopbacks already open); the sign-in ends with that sentence |
 | `snapshot_stored` | `snapshot_id`, `sha256` | the desktop kept a snapshot, and the SHA-256 of what it wrote |
 | `snapshot_refused` | `snapshot_id`, `reason` | the desktop kept no copy: `disk_floor` (it would have left under 2 GiB free), `space_unknown`, `mismatch` (size or SHA-256 not `snapshot_begin`'s), `out_of_order`, `invalid_name` or `write_failed`; nothing partial is left |
+| `offers` | `rev`, `index`, `last` + raw bytes | what the computer offers its server, a JSON payload chunked, at most 64 KiB; `rev` is the payload's revision; sent only when `hello_ack` says `caps.computer.offers: true` (see *A computer's own record*) |
+| `link_path` | `path` | the session the desktop dialed runs `direct` or through a `relay`; sent only when `hello_ack` says `caps.computer.link_path: true` |
 
 The primary sends a desktop `hello_ack`, `pong`, `error`, `event_part`,
 `media_begin`, `media_chunk` and `media_end`, `companion_line` and
@@ -1210,6 +1216,66 @@ failed`) when the primary's side of it fails or does not start. A desktop
 holds at most 32 chunked payloads open at once, as the primary does; the
 primary also holds at most 64 MiB across a desktop's open payloads. Past
 either, the session closes `1002`.
+
+### A computer's own record
+
+A desktop tells the primary about the computer it runs on: its system, what
+it offers the home, and the path its session runs. The primary keeps each
+computer's record; a phone sends none of it.
+
+- **Its system.** `hello.platform` is `macos` or `linux`; any other value is a
+  malformed frame (close `1002`). A desktop always sends it, a phone never
+  does, and a desktop engine older than the record leaves it out. The primary
+  writes it on the desktop's row when the row names no platform or another
+  one; a phone's `hello` never moves its row's platform.
+- **What the primary takes.** A desktop's `hello_ack` carries
+  `caps.computer`, `{"v":1,"offers":true,"link_path":true}` from this
+  primary: `v` is a positive integer, and `offers` and `link_path`, each a
+  boolean when present, say whether the primary takes that event. A later
+  primary may add keys, which a desktop ignores. A phone's `hello_ack`, and a
+  primary's older than the record, carry no `computer`.
+- **Sent only when taken.** A desktop sends `offers` only when
+  `caps.computer.offers` is true, and `link_path` only when
+  `caps.computer.link_path` is true. A primary older than these events does
+  not know their `t`, and an unknown client event is refused `unsupported`
+  and closes the session (`1002`, see *Errors*), so a desktop that sent
+  either unasked would lose its session at every reconnect.
+
+**Offers.** `offers` carries the computer's whole list as one chunked payload
+(see *Chunked payloads*), a UTF-8 JSON object:
+
+```json
+{"v":1,"offers":[{"id":"files","state":"on"},{"id":"shell","state":"on","detail":"standard"},{"id":"imessage","state":"off","sentence":"Switched off on this Mac. Only someone at this Mac can switch it on."}]}
+```
+
+| Field | Rule |
+|---|---|
+| `v` | `1` |
+| `offers` | 0 to 32 offers, each `id` named once |
+| `id` | `^[a-z][a-z0-9_]{0,31}$`: `files`, `shell`, `browser`, `computer_use`, `imessage`, `history`, `voice`, `attachments`, `accessory` and `notifications` today; the primary keeps an id it does not know as it came, since a newer computer may offer more |
+| `state` | `on`, `off` or `unavailable` |
+| `sentence?` | why the offer is not on, for the owner to read: required unless `state` is `on`, 1 to 300 bytes of UTF-8 with no control character |
+| `detail?` | a short note on the offer, such as the sandbox mode `shell` runs commands in: 1 to 64 bytes of UTF-8 with no control character |
+
+The header's `rev` is the payload's revision, the first 8 bytes of its
+SHA-256 as 16 lowercase hex digits, and the payload's chunk key. A desktop
+sends its offers at each session's start, as soon as `hello_ack` says the
+primary takes them (the primary holds none from an earlier session), and
+again whenever the revision changes.
+
+The primary decodes the whole payload and checks that `rev` is its own. A
+payload it refuses, or whose `rev` is another payload's, is answered
+`error{code:"invalid_offers"}`, whose `message` names the first thing wrong,
+and the session stays open. The computer then offers nothing until it sends
+a payload the primary takes: a bad payload fails closed, for that computer
+alone, as does a session that has sent none yet. A header that breaks the
+codec's rules (a `rev` that is not 16 lowercase hex digits, say) is a
+malformed frame like any other (close `1002`).
+
+**The path.** Only the side that dials learns whether its session runs
+`direct` or through a `relay`, so the desktop tells the primary with
+`link_path{path}`: at the session's start, once it knows, and again at each
+change.
 
 ### The sign-in forward and snapshot copies
 
@@ -1355,7 +1421,7 @@ sent is never sent to it. `FermixChannels.Mobile.Peers` is this table.
 | Kind | Sends | Is sent |
 |---|---|---|
 | phone | `hello` `msg` `attach_begin` `attach_chunk` `attach_end` `command` `cancel` `history_pull` `media_fetch` `push_register` `push_unregister` `ack` `read_state` `request_status` `unpair` `ping` `call_open` `call_line` `call_audio` `call_frame` `call_close` `companion_open` `companion_line` `companion_close` | `hello_ack` `accepted` `attach_status` `turn_started` `text_delta` `tool_event` `text_done` `turn_done` `media_begin` `media_chunk` `media_end` `turn_error` `row` `reaction` `approval` `approval_resolved` `link_preview` `read_state` `history_page` `request_status_page` `notice` `error` `pong` `event_part` `call_attached` `call_line` `call_audio` `call_close` `companion_line` `companion_close` |
-| desktop | `hello` `ping` `media_fetch` `ack` `companion_open` `companion_line` `companion_close` `manage` `loopback_request` `loopback_failed` `snapshot_stored` `snapshot_refused` | `hello_ack` `error` `pong` `event_part` `media_begin` `media_chunk` `media_end` `companion_line` `companion_close` `manage_result` `loopback_open` `loopback_response` `loopback_close` `snapshot_begin` `snapshot_chunk` `snapshot_end` |
+| desktop | `hello` `ping` `media_fetch` `ack` `companion_open` `companion_line` `companion_close` `manage` `loopback_request` `loopback_failed` `snapshot_stored` `snapshot_refused` `offers` `link_path` | `hello_ack` `error` `pong` `event_part` `media_begin` `media_chunk` `media_end` `companion_line` `companion_close` `manage_result` `loopback_open` `loopback_response` `loopback_close` `snapshot_begin` `snapshot_chunk` `snapshot_end` |
 | enrollment | `enroll_request` `ping` | `enroll_accepted` `error` `pong` |
 | move | `move_offer` `move_chunk` `move_end` `move_commit` `move_resume` `ping` | `move_accept` `move_ready` `move_done` `error` `pong` |
 
@@ -1425,6 +1491,7 @@ parsed.
 | `attachment_unavailable` | a `msg` naming an `attach_id` the daemon no longer holds | `client_msg_id` | open |
 | `invalid_field`, `missing_field` | a field the daemon refuses once the frame decoded, such as a `msg`'s `attach_ids` | `client_msg_id` for a `msg` or `command` | open |
 | `unsupported_event` | a known event this session's kind may not send (see *Who may send what*), such as `pair_request` on a paired socket, or a desktop's event outside the families the primary serves | — | open |
+| `invalid_offers` | a desktop's `offers` payload the primary refuses, or whose `rev` is not its own; the computer offers nothing until it sends one the primary takes (see *A computer's own record*) | — | open |
 | `enrollment_expired`, `enrollment_used`, `enrollment_limit` | a refused enrollment (see *Enrollment and the move*) | — | closed `4003` |
 | `move_unknown`, `move_mismatch`, `move_failed` | a refused move step (see *Enrollment and the move*) | — | closed `4003` |
 | `request_backlog_full` | 32 requests already waiting | — | open |

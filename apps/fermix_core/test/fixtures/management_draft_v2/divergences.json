@@ -3407,6 +3407,36 @@
       "field": "rows:accessories_enabled",
       "kind": "engine_only",
       "why": "M91 E3: the accessories section, a Mac's only, under the voice pane, holds the one live switch of [fermix_channels.accessories]: allowing a StackChan to connect over USB. It postdates the draft, and an app that has not re-vendored never asks for the section."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:computers.rename",
+      "kind": "engine_only",
+      "why": "M97 §3.2: computers.rename names a computer of the home, unique in it and not the server's own name, and answers the computer as home.status lists it. It postdates the draft and is published under minimum version 2 with no protocol bump, gated with Always On like home.act, so a client that has not re-vendored never calls it."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:computers.rename=2",
+      "kind": "engine_only",
+      "why": "M97 §3.2: computers.rename is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.computers.rename",
+      "kind": "engine_only",
+      "why": "M97 §3.2: hello publishes every method this daemon serves with its minimum version, computers.rename included where Always On is offered. The draft predates it; a client ignores a method it does not know."
+    },
+    {
+      "method": "computers.rename",
+      "field": "params:device_id",
+      "kind": "engine_only",
+      "why": "M97 §3.2: computers.rename names the computer by the device id home.status lists it under. The draft predates the method."
+    },
+    {
+      "method": "computers.rename",
+      "field": "params:name",
+      "kind": "engine_only",
+      "why": "M97 §3.2: computers.rename carries the new name, one line of at most 64 bytes once trimmed, refused with a sentence otherwise. The draft predates the method."
     }
   ]
 }

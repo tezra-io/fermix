@@ -288,6 +288,38 @@ defmodule FermixCore.Management.HomeMoveTest do
     end
   end
 
+  # M97 §7.3 (O3): what this computer keeps on for its server after a move.
+  describe "what a move keeps on" do
+    @kept_settings [
+      snapshot: %{fermix_core: [computer_use: [enabled: true]], sandbox: [mode: :standard]},
+      os: :macos
+    ]
+
+    test "the start records what was kept on, the block's own when nothing was said", ctx do
+      {:ok, record} = Candidates.add(ctx.home, candidate_attrs(), @now)
+      seams = [engine_role: @primary] ++ @kept_settings ++ ctx.seams
+
+      assert {:ok, _started} =
+               HomeMove.move_start(
+                 record.candidate_id,
+                 @passphrase,
+                 [keep_offers: [:files]] ++ seams
+               )
+
+      assert {:ok, request} = Move.read_request(ctx.home)
+      assert Move.keep_offers(request) == ["files"]
+    end
+
+    test "a start with no choice keeps the block as proposed", ctx do
+      {:ok, record} = Candidates.add(ctx.home, candidate_attrs(), @now)
+      seams = [engine_role: @primary] ++ @kept_settings ++ ctx.seams
+
+      assert {:ok, _started} = HomeMove.move_start(record.candidate_id, @passphrase, seams)
+      assert {:ok, request} = Move.read_request(ctx.home)
+      assert Move.keep_offers(request) == ~w(files shell browser computer_use)
+    end
+  end
+
   describe "home.move.start" do
     test "refuses while the readiness report blocks, naming why, and restarts nothing", ctx do
       {:ok, record} = Candidates.add(ctx.home, candidate_attrs(), @now)

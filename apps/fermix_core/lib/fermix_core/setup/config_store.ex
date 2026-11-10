@@ -15,6 +15,7 @@ defmodule FermixCore.Setup.ConfigStore do
   alias FermixCore.Capabilities.MCP.Secrets, as: McpSecrets
   alias FermixCore.Capabilities.MCP.Supervisor, as: McpSupervisor
   alias FermixCore.ComputerHistory.Config, as: ComputerHistoryConfig
+  alias FermixCore.Computers.Switches, as: ComputerSwitches
   alias FermixCore.ComputerUse.Config, as: ComputerUseConfig
   alias FermixCore.Cues.Config, as: CuesConfig
   alias FermixCore.Cues.SourceManager
@@ -23,6 +24,7 @@ defmodule FermixCore.Setup.ConfigStore do
   alias FermixCore.Home.Archive.ConfigText
   alias FermixCore.Home.Candidate
   alias FermixCore.Home.Role
+  alias FermixCore.Home.ServerSandbox
   alias FermixCore.Home.Snapshot.Config, as: SnapshotConfig
   alias FermixCore.IMessage
   alias FermixCore.Memory.CompactionConfig
@@ -164,7 +166,8 @@ defmodule FermixCore.Setup.ConfigStore do
         secret_store: Application.get_env(:fermix_core, :secret_store, :keyring),
         engine: Application.get_env(:fermix_core, :engine, []),
         snapshots: Application.get_env(:fermix_core, :snapshots, []),
-        always_on: Application.get_env(:fermix_core, :always_on, [])
+        always_on: Application.get_env(:fermix_core, :always_on, []),
+        computer: Application.get_env(:fermix_core, :computer, [])
       ],
       sandbox: Application.get_env(:fermix_core, :sandbox, SandboxConfig.default()),
       fermix_channels: [
@@ -247,10 +250,18 @@ defmodule FermixCore.Setup.ConfigStore do
          {:ok, machine} <- read_settings(MachineFile.path(home)),
          plan = MachineFile.migration(text(config), machine, server?),
          :ok <- write_if(MachineFile.path(home), plan.machine),
-         :ok <- write_if(home_document_path(home), plan.config) do
+         :ok <- write_if(home_document_path(home), plan.config),
+         :ok <- record_server_sandbox(home, plan) do
       log_notice(MachineFile.notice(plan))
     end
   end
+
+  # A server that left out the settings it inherited records it once, for
+  # its summary's notice (`Home.ServerSandbox`).
+  defp record_server_sandbox(home, %{server_default?: true, removed: [_ | _]}),
+    do: ServerSandbox.record(home, DateTime.utc_now())
+
+  defp record_server_sandbox(_home, _plan), do: :ok
 
   defp write_if(_file, nil), do: :ok
   defp write_if(file, text), do: write_atomic(file, text)
@@ -331,6 +342,60 @@ defmodule FermixCore.Setup.ConfigStore do
       {:ok, contents} -> decode_section(contents, file, "always_on", &AlwaysOnRelease.normalize/1)
       {:error, :enoent} -> {:ok, []}
       {:error, reason} -> {:error, {:config, file, reason}}
+    end
+  end
+
+  @doc """
+  One table of `home`'s `machine.toml` (`MachineFile`), decoded with the
+  file's own decoder and not normalized: the table's string-keyed map, nil
+  when the file or the table is absent, `{:config, path, reason}` when the
+  file cannot be read. For a reader of one machine section with no engine
+  tree, or of another home (`Computers.Switches.read/1`).
+  """
+  @spec machine_table(Path.t(), String.t()) ::
+          {:ok, map() | nil} | {:error, {:config, Path.t(), term()}}
+  def machine_table(home, table)
+      when is_binary(home) and home != "" and is_binary(table) and table != "" do
+    file = MachineFile.path(home)
+
+    case File.read(file) do
+      {:ok, contents} -> {:ok, contents |> decode_document() |> get_in(String.split(table, "."))}
+      {:error, :enoent} -> {:ok, nil}
+      {:error, reason} -> {:error, {:config, file, reason}}
+    end
+  end
+
+  @doc """
+  Sets each `{key, raw}` of `pairs` in `table` of `home`'s `machine.toml`
+  (`raw` the value's TOML text): in place, every other line of the file kept
+  (`Home.Archive.ConfigText.put/4`), the file created with its header when it
+  does not exist. Under the config lock, like every writer of the settings;
+  written to a temporary file and renamed, mode `0600`, and this VM's own
+  write to its own home is the new baseline (`save_snapshot/2`).
+  """
+  @spec put_machine_table(Path.t(), String.t(), [{String.t(), String.t()}]) ::
+          :ok | {:error, term()}
+  def put_machine_table(home, table, pairs)
+      when is_binary(home) and home != "" and is_binary(table) and table != "" and
+             is_list(pairs) do
+    with_config_lock(home, fn -> write_machine_table(home, table, pairs) end)
+  end
+
+  defp write_machine_table(home, table, pairs) do
+    file = MachineFile.path(home)
+
+    contents =
+      case File.read(file) do
+        {:ok, text} -> {:ok, text}
+        {:error, :enoent} -> {:ok, MachineFile.header() <> "\n"}
+        {:error, reason} -> {:error, {:config_unreadable, file, reason}}
+      end
+
+    with {:ok, text} <- contents,
+         text =
+           Enum.reduce(pairs, text, fn {key, raw}, acc -> ConfigText.put(acc, table, key, raw) end),
+         :ok <- write_atomic(file, text) do
+      persisted_baseline(home)
     end
   end
 
@@ -454,6 +519,7 @@ defmodule FermixCore.Setup.ConfigStore do
     apply_engine_config(Keyword.get(persisted.fermix_core, :engine, []))
     apply_snapshots_config(Keyword.get(persisted.fermix_core, :snapshots, []))
     apply_always_on_config(Keyword.get(persisted.fermix_core, :always_on, []))
+    apply_computer_config(Keyword.get(persisted.fermix_core, :computer, []))
     apply_sandbox_config(Map.get(persisted, :sandbox, SandboxConfig.default()))
 
     apply_channel_config(:telegram, Keyword.get(persisted.fermix_channels, :telegram, []))
@@ -878,7 +944,12 @@ defmodule FermixCore.Setup.ConfigStore do
           snapshot
           |> Map.get(:fermix_core, [])
           |> Keyword.get(:always_on, [])
-          |> AlwaysOnRelease.to_keyword()
+          |> AlwaysOnRelease.to_keyword(),
+        computer:
+          snapshot
+          |> Map.get(:fermix_core, [])
+          |> Keyword.get(:computer, [])
+          |> ComputerSwitches.to_keyword()
       ],
       sandbox:
         snapshot
@@ -1039,7 +1110,8 @@ defmodule FermixCore.Setup.ConfigStore do
         secret_store: :keyring,
         engine: [],
         snapshots: [],
-        always_on: []
+        always_on: [],
+        computer: []
       ],
       sandbox: SandboxConfig.default(),
       fermix_channels: [
@@ -1327,6 +1399,12 @@ defmodule FermixCore.Setup.ConfigStore do
   # Replace (not merge), re-normalized on the way in like the snapshots
   # section. `hello` and the router read it at every call
   # (`Home.AlwaysOnRelease.available?/0`).
+  # What Fermix on the server may use on this computer (M97 §7.2), read at
+  # each request and by the offers reporter, so it is live.
+  defp apply_computer_config(computer_config) do
+    Application.put_env(:fermix_core, :computer, ComputerSwitches.normalize(computer_config))
+  end
+
   defp apply_always_on_config(always_on_config) do
     Application.put_env(:fermix_core, :always_on, AlwaysOnRelease.normalize(always_on_config))
     :ok
@@ -1679,6 +1757,10 @@ defmodule FermixCore.Setup.ConfigStore do
         ["fermix_core", "computer_history"],
         Keyword.get(fermix_core, :computer_history, [])
       ),
+      render_section(
+        ["fermix_core", "computer"],
+        ComputerSwitches.to_keyword(Keyword.get(fermix_core, :computer, []))
+      ),
       render_section(["fermix_core", "plugins"], dev_local),
       render_section(["fermix_channels", "imessage"], Keyword.get(channels, :imessage, [])),
       render_section(["fermix_channels", "accessories"], Keyword.get(channels, :accessories, []))
@@ -2018,7 +2100,8 @@ defmodule FermixCore.Setup.ConfigStore do
         secret_store: normalize_secret_store(get_in(document, ["fermix_core", "secret_store"])),
         engine: Role.normalize(get_in(document, ["fermix_core", "engine"])),
         snapshots: SnapshotConfig.normalize(get_in(document, ["fermix_core", "snapshots"])),
-        always_on: AlwaysOnRelease.normalize(get_in(document, ["fermix_core", "always_on"]))
+        always_on: AlwaysOnRelease.normalize(get_in(document, ["fermix_core", "always_on"])),
+        computer: ComputerSwitches.normalize(get_in(document, ["fermix_core", "computer"]))
       ],
       sandbox: SandboxConfig.normalize(Map.get(document, "sandbox")),
       fermix_channels: [

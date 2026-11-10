@@ -54,6 +54,7 @@ defmodule FermixCore.Management.HomeMove do
   `:restarts_itself`.
   """
 
+  alias FermixCore.Computers.Consent
   alias FermixCore.Home.Candidate
   alias FermixCore.Home.Candidates
   alias FermixCore.Home.Link
@@ -192,8 +193,12 @@ defmodule FermixCore.Management.HomeMove do
                role(opts),
                candidate_id,
                recipient,
-               [now: now(opts), keep_as_desktop: Keyword.get(opts, :keep_as_desktop, true)] ++
-                 reviewed ++ readiness_opts(opts)
+               [
+                 now: now(opts),
+                 keep_as_desktop: Keyword.get(opts, :keep_as_desktop, true),
+                 keep_offers:
+                   Keyword.get_lazy(opts, :keep_offers, fn -> Consent.default_keep(opts) end)
+               ] ++ reviewed ++ readiness_opts(opts)
              )
            ) do
       :ok = forget_ended_return(home(opts))

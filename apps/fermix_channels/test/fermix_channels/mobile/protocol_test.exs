@@ -3,13 +3,15 @@ defmodule FermixChannels.Mobile.ProtocolTest do
 
   alias FermixChannels.Mobile.Protocol
 
-  # Protocol 2 as it shipped, then what M75 added to it (additive, still 2).
+  # Protocol 2 as it shipped, then what M75, M87 and M97 added to it (additive,
+  # still 2).
   @client_events ~w(
     hello msg attach_begin attach_chunk attach_end command cancel history_pull media_fetch
     push_register push_unregister ack read_state request_status pair_request unpair ping
     companion_open companion_line companion_close manage loopback_request loopback_failed
     snapshot_stored snapshot_refused enroll_request move_offer move_chunk move_end
     move_commit move_resume call_open call_line call_audio call_frame call_close
+    offers link_path
   )
   @server_events ~w(
     hello_ack accepted attach_status turn_started text_delta tool_event text_done turn_done

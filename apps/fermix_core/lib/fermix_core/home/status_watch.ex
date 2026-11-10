@@ -17,9 +17,10 @@ defmodule FermixCore.Home.StatusWatch do
   opened, used, enrolled, withdrawn or expired, `FermixChannels.Home.Enrollment`),
   `:snapshots` (a backup run finished,
   `Snapshot.Scheduler`), `:link` (the desktop's session to its server up or
-  down, `FermixChannels.Desktop.Relay`) and `:server` (a desktop's tunnel
+  down, `FermixChannels.Desktop.Relay`), `:server` (a desktop's tunnel
   heard its server's own notice, so the server's part of `home.status` may
-  have moved). Then at the summary's next change by the clock alone
+  have moved) and `:computers` (on the primary, a computer's session, offers
+  or path changed, `FermixCore.Computers.Registry`). Then at the summary's next change by the clock alone
   (`next_change_ms`), on one timer, replaced at each read and never sooner
   than a second; and when the runtime's time offset moves (`:clock`: a wake
   from sleep, since the monotonic clock its timers count stops while the
@@ -68,7 +69,7 @@ defmodule FermixCore.Home.StatusWatch do
   alias FermixCore.Management.Home
   alias FermixCore.Management.HomeSummary
 
-  @kinds [:move, :enrollment, :snapshots, :link, :server]
+  @kinds [:move, :enrollment, :snapshots, :link, :server, :computers]
   # While Always On is off, only these can end it.
   @off_wakes [:move, :enrollment]
   @min_delay_ms 1_000
@@ -76,7 +77,7 @@ defmodule FermixCore.Home.StatusWatch do
   # again then.
   @max_delay_ms 7 * 86_400_000
 
-  @type kind :: :move | :enrollment | :snapshots | :link | :server
+  @type kind :: :move | :enrollment | :snapshots | :link | :server | :computers
   @type read :: %{key: term(), off: boolean(), next_change_ms: pos_integer() | nil}
 
   @spec start_link(keyword()) :: GenServer.on_start()

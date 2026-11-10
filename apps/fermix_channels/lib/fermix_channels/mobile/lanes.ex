@@ -6,7 +6,7 @@ defmodule FermixChannels.Mobile.Lanes do
   | Lane | Carries | Rule |
   |---|---|---|
   | `live` | a call's frames (`call_*`) | written first |
-  | `interactive` | chat, management calls and results, sign-in forwards, invocations (`invoke_*`), `hello`, `ping`, `pong`, `error`, `ack` and every other event | written before bulk |
+  | `interactive` | chat, management calls and results, sign-in forwards, invocations (`invoke_*`), a computer's `offers` and `link_path`, `hello`, `ping`, `pong`, `error`, `ack` and every other event | written before bulk |
   | `bulk` | the frames of a stream: media, attachments, snapshot copies, the move; an invocation's large file bytes and a history sitting | written when the other two are empty, one frame at a time |
 
   A lane is a function of an event's type and its header (`lane/2`), so one
@@ -72,6 +72,7 @@ defmodule FermixChannels.Mobile.Lanes do
     loopback_open loopback_request loopback_response loopback_close loopback_failed
     enroll_request enroll_accepted
     invoke_cancel invoke_result invoke_status
+    offers link_path
   )
 
   @by_header Map.keys(@header_fields)

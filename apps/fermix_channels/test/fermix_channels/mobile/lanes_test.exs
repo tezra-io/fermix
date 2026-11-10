@@ -45,7 +45,8 @@ defmodule FermixChannels.Mobile.LanesTest do
         do: assert(Lanes.lane(type, %{}) == {:ok, :live})
 
     for type <- ~w(invoke_cancel invoke_result invoke_status manage manage_result
-                   companion_line loopback_request hello ping pong error ack),
+                   companion_line loopback_request hello ping pong error ack
+                   offers link_path),
         do: assert(Lanes.lane(type, %{}) == {:ok, :interactive})
 
     for type <- ~w(snapshot_begin snapshot_chunk snapshot_end snapshot_stored media_fetch

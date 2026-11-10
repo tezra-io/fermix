@@ -19,6 +19,7 @@ defmodule Fermix.CLI.Doctor.ServerLinkCheckTest do
     :ok =
       DesktopLink.write(home, %{
         device_id: "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e",
+        key: :keyring,
         primary: %{
           name: "fermix-vm",
           gateway_pk: <<7::256>>,

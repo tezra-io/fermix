@@ -1,15 +1,16 @@
 defmodule FermixCore.Home.DesktopLink do
   @moduledoc """
-  The two files that make a device-role engine a desktop of its primary
-  (M75 §3, §6): `<home>/device/desktop.json`, what the desktop relay needs to
-  reach the primary, and `<home>/device/desktop_key`, the desktop's own
-  Noise static key. Both stay on this machine (`device/` is device-local).
+  The file that makes a device-role engine a desktop of its primary (M75 §3,
+  §6): `<home>/device/desktop.json`, what the desktop relay needs to reach
+  the primary, and which secret store holds the desktop's own Noise static
+  key (`FermixCore.Home.ComputerKey`, M97 §7.5). It stays on this machine
+  (`device/` is device-local).
 
-  The move worker writes both on the source of a move (`write/2`,
-  `write_key/2`); the desktop relay (`FermixChannels.Desktop.Relay`) reads
-  them and raises what the file remembers as it learns more
-  (`record_epoch/3`, `record_route/3`). One engine boot decides whether the
-  home is linked (`linked?/2`): the device role with `desktop.json` present.
+  The move worker writes it on the source of a move (`write/2`); the
+  desktop relay (`FermixChannels.Desktop.Relay`) reads it and raises what the
+  file remembers as it learns more (`record_epoch/3`, `record_route/3`). One
+  engine boot decides whether the home is linked (`linked?/2`): the device
+  role with `desktop.json` present.
 
   ## `device/desktop.json`
 
@@ -17,8 +18,9 @@ defmodule FermixCore.Home.DesktopLink do
   never sees half of one:
 
       {
-        "v": 1,
+        "v": 2,
         "device_id": "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e",
+        "key": "@keyring",
         "primary": {
           "name": "fermix-vm",
           "gateway_pk": "<32 bytes, standard base64 with padding>",
@@ -31,6 +33,11 @@ defmodule FermixCore.Home.DesktopLink do
       }
 
   - `device_id` is the desktop's row in the primary's `devices.toml` (a UUID).
+  - `key` is the secret store that holds the desktop's key: `@keyring` or
+    `@file`, `SecretWriter`'s sentinels. Every write names it. A version 1
+    file, which an engine before it wrote, has none: its key is the raw file
+    `device/desktop_key`, which `ComputerKey.migrate/2` moves into the store
+    and records here (`key: nil` until then).
   - `primary.name` is the name a person knows the primary by, at most 128
     bytes of printable text: the server the move went to. `gateway_pk` is the primary's X25519 gateway key
     (the Noise responder's static key) and `node_id` its iroh endpoint id; both
@@ -43,20 +50,16 @@ defmodule FermixCore.Home.DesktopLink do
     without them.
   - `primary_epoch` is the highest primary epoch this desktop has seen. It
     never goes down.
-
-  ## `device/desktop_key`
-
-  The desktop's X25519 private key, the raw 32 bytes, mode `0600`, a regular
-  file. Any looser mode is refused by name: the key proves this desktop to the
-  primary.
   """
 
   alias FermixCore.Home.Role
+  alias FermixCore.Setup.SecretWriter
 
-  @version 1
+  @version 2
+  # The link an engine before the key moved wrote: no `key`.
+  @version_before_key 1
   @dir "device"
   @link_file "desktop.json"
-  @key_file "desktop_key"
   @file_mode 0o600
   @dir_mode 0o700
   @max_name_bytes 128
@@ -69,9 +72,13 @@ defmodule FermixCore.Home.DesktopLink do
   @typedoc "A relay on the route, in the mobile wire's shape."
   @type relay :: %{required(String.t()) => String.t() | pos_integer()}
 
-  @typedoc "What `desktop.json` holds."
+  @typedoc """
+  What `desktop.json` holds. `key` is nil only in a link read from a version
+  1 file; a write needs a store.
+  """
   @type t :: %{
           device_id: String.t(),
+          key: SecretWriter.store() | nil,
           primary: %{
             required(:name) => String.t(),
             required(:gateway_pk) => <<_::256>>,
@@ -86,19 +93,11 @@ defmodule FermixCore.Home.DesktopLink do
   @typedoc "The desktop's Noise static keypair."
   @type keypair :: %{private: <<_::256>>, public: <<_::256>>}
 
-  @type error ::
-          {:file, Path.t(), File.posix()}
-          | {:invalid_link, Path.t(), atom()}
-          | {:key_mode, Path.t(), non_neg_integer()}
-          | {:invalid_key, Path.t(), atom()}
+  @type error :: {:file, Path.t(), File.posix()} | {:invalid_link, Path.t(), atom()}
 
   @doc "Where `desktop.json` lives under `home`."
   @spec path(Path.t()) :: Path.t()
   def path(home) when is_binary(home) and home != "", do: Path.join([home, @dir, @link_file])
-
-  @doc "Where the desktop's key lives under `home`."
-  @spec key_path(Path.t()) :: Path.t()
-  def key_path(home) when is_binary(home) and home != "", do: Path.join([home, @dir, @key_file])
 
   @doc """
   Whether an engine that booted as `record` serves `home` as a desktop of its
@@ -124,7 +123,10 @@ defmodule FermixCore.Home.DesktopLink do
     end
   end
 
-  @doc "Writes `desktop.json` whole, mode `0600`, creating `device/` (`0700`)."
+  @doc """
+  Writes `desktop.json` whole, mode `0600`, creating `device/` (`0700`). A
+  link that names no key store is refused (`{:invalid_link, path, :key}`).
+  """
   @spec write(Path.t(), t()) :: :ok | {:error, error()}
   def write(home, %{device_id: _id, primary: _primary, epoch: _epoch} = link)
       when is_binary(home) and home != "" do
@@ -189,31 +191,6 @@ defmodule FermixCore.Home.DesktopLink do
     with :ok <- write(home, link), do: {:ok, link}
   end
 
-  @doc """
-  Reads the desktop's key: a regular file of exactly 32 bytes, mode `0600`.
-  """
-  @spec read_key(Path.t()) :: {:ok, keypair()} | {:error, error()}
-  def read_key(home) when is_binary(home) and home != "" do
-    file = key_path(home)
-
-    with :ok <- key_entry(file),
-         {:ok, private} <- read_file(file),
-         :ok <- key_length(private, file) do
-      {public, ^private} = :crypto.generate_key(:ecdh, :x25519, private)
-      {:ok, %{private: private, public: public}}
-    end
-  end
-
-  @doc "Writes the desktop's private key, mode `0600`, creating `device/` (`0700`)."
-  @spec write_key(Path.t(), <<_::256>>) :: :ok | {:error, error()}
-  def write_key(home, <<_::256>> = private) when is_binary(home) and home != "" do
-    file = key_path(home)
-
-    with :ok <- ensure_dir(Path.dirname(file)) do
-      atomic_write(file, private)
-    end
-  end
-
   @doc "The sentence a person is shown for an error of this module."
   @spec error_sentence(error()) :: String.t()
   def error_sentence({:file, path, :enoent}),
@@ -224,17 +201,6 @@ defmodule FermixCore.Home.DesktopLink do
 
   def error_sentence({:invalid_link, _path, field}),
     do: "The desktop link file is not one Fermix wrote: its #{field} is not valid."
-
-  def error_sentence({:key_mode, _path, mode}),
-    do:
-      "The desktop key file is mode #{octal(mode)}, readable by others; " <>
-        "Fermix uses it only at 0600."
-
-  def error_sentence({:invalid_key, _path, _detail}),
-    do: "The desktop key file is not a key Fermix wrote."
-
-  defp octal(mode),
-    do: mode |> Bitwise.band(0o777) |> Integer.to_string(8) |> String.pad_leading(4, "0")
 
   # -- reading -----------------------------------------------------------------
 
@@ -253,14 +219,27 @@ defmodule FermixCore.Home.DesktopLink do
   end
 
   defp decode(%{"v" => @version} = decoded, file) do
+    with {:ok, sentinel} <- field(decoded, :key, &SecretWriter.sentinel?/1, file),
+         {:ok, store} <- SecretWriter.store_of_sentinel(sentinel),
+         {:ok, link} <- decode_link(decoded, file) do
+      {:ok, Map.put(link, :key, store)}
+    end
+  end
+
+  # Its key is still the file `ComputerKey.migrate/2` moves.
+  defp decode(%{"v" => @version_before_key} = decoded, file) do
+    with {:ok, link} <- decode_link(decoded, file), do: {:ok, Map.put(link, :key, nil)}
+  end
+
+  defp decode(_decoded, file), do: {:error, {:invalid_link, file, :v}}
+
+  defp decode_link(decoded, file) do
     with {:ok, device_id} <- field(decoded, :device_id, &uuid?/1, file),
          {:ok, primary} <- primary(decoded["primary"], file),
          {:ok, epoch} <- field(decoded, :primary_epoch, &epoch?/1, file) do
       {:ok, %{device_id: device_id, primary: primary, epoch: epoch}}
     end
   end
-
-  defp decode(_decoded, file), do: {:error, {:invalid_link, file, :v}}
 
   defp primary(%{} = primary, file) do
     with {:ok, name} <- field(primary, :name, &name?/1, file),
@@ -334,26 +313,13 @@ defmodule FermixCore.Home.DesktopLink do
 
   defp relay?(_relay), do: false
 
-  defp key_entry(file) do
-    case File.lstat(file) do
-      {:ok, %{type: :regular, mode: mode}} -> key_mode(Bitwise.band(mode, 0o777), file)
-      {:ok, %{type: type}} -> {:error, {:invalid_key, file, type}}
-      {:error, reason} -> {:error, {:file, file, reason}}
-    end
-  end
-
-  defp key_mode(@file_mode, _file), do: :ok
-  defp key_mode(mode, file), do: {:error, {:key_mode, file, mode}}
-
-  defp key_length(<<_::256>>, _file), do: :ok
-  defp key_length(_bytes, file), do: {:error, {:invalid_key, file, :length}}
-
   # -- writing -----------------------------------------------------------------
 
-  defp encode(%{device_id: device_id, primary: primary, epoch: epoch}, file) do
+  defp encode(%{device_id: device_id, primary: primary, epoch: epoch} = link, file) do
     decoded = %{
       "v" => @version,
       "device_id" => device_id,
+      "key" => key_sentinel(Map.get(link, :key)),
       "primary" => %{
         "name" => primary.name,
         "gateway_pk" => Base.encode64(primary.gateway_pk),
@@ -368,6 +334,10 @@ defmodule FermixCore.Home.DesktopLink do
     # What is written must read back: the same checks hold both ways.
     with {:ok, _link} <- decode(decoded, file), do: {:ok, Jason.encode!(decoded)}
   end
+
+  # No store, no sentinel: the read-back check refuses it by name.
+  defp key_sentinel(store) when store in [:keyring, :file], do: SecretWriter.sentinel_for(store)
+  defp key_sentinel(_none), do: nil
 
   defp ensure_dir(dir) do
     with :ok <- File.mkdir_p(dir),

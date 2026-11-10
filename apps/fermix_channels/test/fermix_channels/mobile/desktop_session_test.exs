@@ -112,6 +112,28 @@ defmodule FermixChannels.Mobile.DesktopSessionTest do
     refute_received {:engine_recorded, @phone_id, _version, _at}
   end
 
+  # M97 §3.2: a computer names its system in its hello, kept on its row; a
+  # phone's row keeps the platform its attestation proved.
+  test "a desktop's hello names its system on its row; a phone's moves nothing", ctx do
+    test = self()
+
+    update = fn :store, id, changes ->
+      send(test, {:updated, id, changes})
+      {:ok, row(id)}
+    end
+
+    {_driver, _client} =
+      ready_desktop!(ctx, %{}, update_device: update, hello: %{"platform" => "linux"})
+
+    assert_receive {:updated, @desktop_id, %{platform: "linux", last_seen: @seen}}
+
+    {_driver, _client} =
+      ready!(ctx, ctx.phone, @phone_id, update_device: update, hello: %{"platform" => "macos"})
+
+    assert_receive {:updated, @phone_id, changes}
+    refute Map.has_key?(changes, :platform)
+  end
+
   test "a version that could not be recorded is logged, and the desktop is served", ctx do
     log =
       ExUnit.CaptureLog.capture_log(fn ->
@@ -360,6 +382,7 @@ defmodule FermixChannels.Mobile.DesktopSessionTest do
   # A paired device's session through IK and hello, its hello_ack read.
   defp ready!(ctx, keypair, device_id, opts) do
     keys = %{ctx.desktop.public => @desktop_id, ctx.phone.public => @phone_id}
+    {extra_hello, opts} = Keyword.pop(opts, :hello, %{})
 
     driver =
       Driver.start!(
@@ -394,7 +417,7 @@ defmodule FermixChannels.Mobile.DesktopSessionTest do
       "protocol_v" => Protocol.protocol_version()
     }
 
-    client = Driver.client_send(driver, client, "hello", hello, 1)
+    client = Driver.client_send(driver, client, "hello", Map.merge(hello, extra_hello), 1)
 
     assert {[{%{"t" => "hello_ack", "seq" => 1}, <<>>}], client} =
              Driver.client_receive(driver, client)

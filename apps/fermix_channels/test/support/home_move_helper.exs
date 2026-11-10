@@ -95,7 +95,9 @@ defmodule FermixChannels.Test.HomeMove do
 
   @doc """
   A primary's home at `:epoch` (4), its gateway identity and iroh key, a
-  config naming a path inside it, its device store, its enrollment window
+  config naming a path inside it and a keychain profile of its own (the stub
+  keychain is one table for the VM, and a move's source stores its desktop
+  key there), its device store, its enrollment window
   (its timers through `:schedule`, and what it tells the Always On watch
   through `:status_changed`, when given) and its bridge. Answers the
   facts a test needs.
@@ -107,7 +109,8 @@ defmodule FermixChannels.Test.HomeMove do
 
     File.write!(
       Path.join(root, "config.toml"),
-      "# the owner's note\n[fermix_core.meetings]\nrecordings = \"#{root}/workspace/meetings\"\n"
+      "# the owner's note\n[fermix_core]\nprofile = \"#{Path.basename(root)}\"\n\n" <>
+        "[fermix_core.meetings]\nrecordings = \"#{root}/workspace/meetings\"\n"
     )
 
     File.mkdir_p!(Path.join(root, "journals"))

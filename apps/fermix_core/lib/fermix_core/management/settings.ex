@@ -19,6 +19,7 @@ defmodule FermixCore.Management.Settings do
 
   alias FermixCore.Auth.Redaction
   alias FermixCore.Browser.Config, as: BrowserConfig
+  alias FermixCore.Computers.Switches, as: ComputerSwitches
   alias FermixCore.Home.Snapshot.Settings, as: SnapshotSettings
   alias FermixCore.Management.Accessories, as: AccessoryLink
   alias FermixCore.Management.Mobile, as: PhoneChannel
@@ -34,6 +35,7 @@ defmodule FermixCore.Management.Settings do
   alias FermixCore.Management.Settings.Secrets
   alias FermixCore.Management.Settings.Snapshots
   alias FermixCore.Management.Settings.Source
+  alias FermixCore.Management.Settings.ThisComputer
   alias FermixCore.Management.Settings.Tools
   alias FermixCore.Management.Settings.Voice
   alias FermixCore.Meetings.Config, as: MeetingsConfig
@@ -56,7 +58,8 @@ defmodule FermixCore.Management.Settings do
     Tools,
     Browser,
     Secrets,
-    Snapshots
+    Snapshots,
+    ThisComputer
   ]
 
   @type section :: %{id: String.t(), pane: String.t(), title: String.t()}
@@ -277,6 +280,7 @@ defmodule FermixCore.Management.Settings do
   defp commit(:cues, answers), do: CuesSection.save(answers)
   defp commit(:browser, answers), do: BrowserConfig.save(answers)
   defp commit(:snapshots, answers), do: SnapshotSettings.save(answers)
+  defp commit(:computer, answers), do: ComputerSwitches.save(answers)
 
   defp commit(:sandbox, answers) do
     Wizard.set_sandbox_overrides(
@@ -559,17 +563,19 @@ defmodule FermixCore.Management.Settings do
     end
   end
 
-  # Channels and Accessories have sections that exist on one platform only, so
-  # they are handed the options that name the host; every other family is the
-  # same everywhere.
+  # Channels and Accessories have sections that exist on one platform only,
+  # and This computer's exists on a linked computer only, so they are handed
+  # the options that name the host; every other family is the same everywhere.
   defp family(section, opts), do: Enum.find(@families, &family_owns?(&1, section, opts))
 
   defp family_owns?(Channels, section, opts), do: Channels.owns?(section, opts)
   defp family_owns?(Accessories, section, opts), do: Accessories.owns?(section, opts)
+  defp family_owns?(ThisComputer, section, opts), do: ThisComputer.owns?(section, opts)
   defp family_owns?(module, section, _opts), do: module.owns?(section)
 
   defp family_sections(Channels, opts), do: Channels.sections(opts)
   defp family_sections(Accessories, opts), do: Accessories.sections(opts)
+  defp family_sections(ThisComputer, opts), do: ThisComputer.sections(opts)
   defp family_sections(module, _opts), do: module.sections()
 
   # The search section offers place search's backends as this build can run

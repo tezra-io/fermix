@@ -42,6 +42,7 @@ defmodule FermixChannels.Home.ReturnTest do
   alias FermixCore.Home.Snapshot.Recovery
   alias FermixCore.Management.Protocol
   alias FermixCore.Management.Router
+  alias FermixCore.Setup.SecretWriter
   alias FermixTestSupport.TelemetryCapture
 
   @moduletag timeout: 120_000
@@ -88,6 +89,11 @@ defmodule FermixChannels.Home.ReturnTest do
   end
 
   test "the home comes back: the Mac is the one primary at N+2, the server is marked", ctx do
+    # M97 D13: the Mac's key is in its keychain until the move back ends.
+    profile = Path.basename(ctx.mac.root)
+    item = fn -> SecretWriter.get({:device_key, :desktop}, profile: profile, store: :keyring) end
+    assert {:ok, _key} = item.()
+
     back = move_back!(ctx)
     assert {:ok, %{"move_id" => move_id}} = move_now(ctx, back, @passphrase)
     TelemetryCapture.attach([[:fermix, :home, :move]], move_id: move_id)
@@ -116,7 +122,7 @@ defmodule FermixChannels.Home.ReturnTest do
     assert File.read!(Path.join([mac, "imessage", "cursor"])) == "rowid 4411"
     assert File.read!(Key.path(mac)) == File.read!(Key.path(ctx.server.root))
     refute File.exists?(DesktopLink.path(mac))
-    refute File.exists?(DesktopLink.key_path(mac))
+    assert item.() == {:error, :missing_secret}
     # Its own desktop row is gone from the list it took back.
     assert {:ok, []} = DeviceStore.list(root: mac)
 

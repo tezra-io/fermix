@@ -48,9 +48,16 @@ defmodule FermixChannels.Mobile.Session do
   A desktop's session starts its `Desktop.Peer` once `hello` is answered and
   hands it every desktop-family event; it gets no approval cards, and phone
   broadcasts never reach it. A desktop's `hello` names its engine's version
-  (`app_version`), which the session records for the server's update
-  (`FermixCore.Home.EngineCeiling`, under the identity's home); a record that
-  fails is logged and the desktop is served all the same.
+  (`app_version`), which the session records in the home's record of its
+  computers (`FermixCore.Computers.Store`, under the identity's home), read
+  by the server's update (`FermixCore.Home.EngineCeiling`); a record that
+  fails is logged and the desktop is served all the same. It names its
+  system too (`platform`, M97 §3.2), kept on its row when the row says none
+  or another; a phone's `hello` never moves its row's platform. Its
+  `hello_ack` says which of a computer's own events this server takes
+  (`caps.computer`: `offers`, `link_path`), which a computer sends only when
+  it is said, since an older server closes the session on an event it does
+  not know.
 
   ## A phone's call
 
@@ -128,7 +135,7 @@ defmodule FermixChannels.Mobile.Session do
   alias FermixChannels.Mobile.RequestCoordinator
   alias FermixChannels.Telemetry, as: ChannelTelemetry
   alias FermixCore.Companion.Timeline
-  alias FermixCore.Home.EngineCeiling
+  alias FermixCore.Computers.Store, as: ComputerStore
   alias FermixCore.Setup.ConfigStore
 
   @max_wire_bytes 65_535
@@ -181,8 +188,12 @@ defmodule FermixChannels.Mobile.Session do
   @typed_refusals ~w(
     store_quota_exceeded media_too_large sha256_mismatch announced_hash_mismatch
     size_mismatch size_exceeded unexpected_chunk invalid_field missing_field
-    attachment_unavailable unsupported_event push_environment_mismatch
+    attachment_unavailable unsupported_event push_environment_mismatch invalid_offers
   )a
+
+  # Which of a computer's own events this server takes (M97 §5.3), in a
+  # desktop's hello_ack.
+  @computer_caps %{"v" => 1, "offers" => true, "link_path" => true}
 
   @type state :: map()
 
@@ -577,7 +588,10 @@ defmodule FermixChannels.Mobile.Session do
   # engine's own home.
   defp engine_recorder(root) do
     fn device_id, version, at ->
-      EngineCeiling.record(root || ConfigStore.fermix_home(), device_id, version, at)
+      ComputerStore.record(root || ConfigStore.fermix_home(), device_id, %{
+        engine_version: version,
+        seen_at: at
+      })
     end
   end
 
@@ -1028,7 +1042,7 @@ defmodule FermixChannels.Mobile.Session do
 
     if payload["device_id"] == authenticated_id do
       with :ok <- current_primary(payload["primary_epoch"], state),
-           {:ok, state} <- persist_hello(state, authenticated_id, payload["relay_list_rev"]) do
+           {:ok, state} <- persist_hello(state, authenticated_id, hello_facts(payload, state)) do
         attach_authenticated(event, state, authenticated_id)
       end
     else
@@ -1107,15 +1121,45 @@ defmodule FermixChannels.Mobile.Session do
 
   defp raise_heap_cap(_state), do: :ok
 
-  # Every hello records when the phone was last seen, and the relay list
-  # revision it names (M62 §3.1); the store writes only what changed. A newly
-  # acknowledged revision can widen the relays the daemon's endpoint may use.
-  defp persist_hello(state, device_id, relay_list_rev) do
+  # What a hello moves on its row: the relay list revision it names (M62
+  # §3.1), and a computer's system when its row names none or another (M97
+  # §3.2). A phone's row keeps the platform its attestation proved.
+  defp hello_facts(payload, state) do
+    facts = maybe_put(%{}, :relay_list_rev, payload["relay_list_rev"])
+
+    case {session_kind(state), payload["platform"]} do
+      {:desktop, platform} when is_binary(platform) -> computer_platform(facts, platform, state)
+      _phone_or_unsaid -> facts
+    end
+  end
+
+  defp computer_platform(facts, platform, state) do
+    case value(state.authenticated_device, :platform) do
+      ^platform ->
+        facts
+
+      nil ->
+        Map.put(facts, :platform, platform)
+
+      recorded ->
+        Logger.warning(
+          "computer #{value(state.authenticated_device, :device_id)} says it runs #{platform}, " <>
+            "and its row said #{recorded}; the row now says #{platform}"
+        )
+
+        Map.put(facts, :platform, platform)
+    end
+  end
+
+  # Every hello records when the phone was last seen, and what `hello_facts/2`
+  # read from it; the store writes only what changed. A newly acknowledged
+  # relay list revision can widen the relays the daemon's endpoint may use.
+  defp persist_hello(state, device_id, facts) do
     wall_clock = Map.get(state, :wall_clock, &DateTime.utc_now/0)
 
     case wall_clock.() do
       %DateTime{} = seen_at ->
-        attrs = maybe_put(%{last_seen: seen_at}, :relay_list_rev, relay_list_rev)
+        attrs = Map.put(facts, :last_seen, seen_at)
         update_hello(state, device_id, attrs)
 
       other ->
@@ -1256,10 +1300,12 @@ defmodule FermixChannels.Mobile.Session do
     # Whether this primary serves a call from the phone (M87), and that it
     # takes the phone's list channel (M85 E4): a phone's alone, since a
     # desktop's own voice reaches its own computer's socket and its lists
-    # ride its companion tunnel.
-    if session_kind(state) == :phone,
-      do: Map.merge(caps, %{"call" => state.call_caps.(state.device_id), "lists" => true}),
-      else: caps
+    # ride its companion tunnel. A computer hears which of its own events
+    # this server takes (M97 §5.3).
+    case session_kind(state) do
+      :phone -> Map.merge(caps, %{"call" => state.call_caps.(state.device_id), "lists" => true})
+      :desktop -> Map.put(caps, "computer", @computer_caps)
+    end
   end
 
   # M51 D3: the phone's key attestation is verified before the owner hears of

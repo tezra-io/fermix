@@ -2,8 +2,9 @@ defmodule FermixChannels.Mobile.PeerEvents do
   @moduledoc """
   The fields of the events M75 adds to the mobile wire: a desktop's session,
   a candidate's enrollment and the move (`PROTOCOL.md`: *Desktop sessions*,
-  *Enrollment and the move*); and M87's call channel on a phone's session
-  (*Calls from the phone*).
+  *Enrollment and the move*); M87's call channel on a phone's session
+  (*Calls from the phone*); and M97's computer record on a desktop's session
+  (`offers`, `link_path`).
 
   One declarative table per direction, `client` for what the initiator sends
   (a phone, a desktop, a candidate, the source of a move) and `server` for what
@@ -29,6 +30,7 @@ defmodule FermixChannels.Mobile.PeerEvents do
   @relay_url ~r/\Ahttps:\/\/[a-z0-9]([a-z0-9.-]*[a-z0-9])?\/\z/
   @recipient ~r/\Afxsnap1\.[A-Za-z0-9_-]{1,128}\.[A-Za-z0-9_-]{43}\z/
   @sha256 ~r/\A[0-9a-fA-F]{64}\z/
+  @rev ~r/\A[0-9a-f]{16}\z/
   @controls ~r/[\x{0000}-\x{001F}\x{007F}-\x{009F}]/u
   @blank ~r/\s/u
 
@@ -42,6 +44,7 @@ defmodule FermixChannels.Mobile.PeerEvents do
   @jpeg_magic <<0xFF, 0xD8, 0xFF>>
 
   @loopback_failures ~w(port_in_use not_permitted failed)
+  @link_paths ~w(direct relay)
   @snapshot_refusals ~w(disk_floor space_unknown mismatch out_of_order invalid_name write_failed)
 
   @relay {:object, [{"url", :relay_url}, {"quic_port", :port}]}
@@ -113,7 +116,9 @@ defmodule FermixChannels.Mobile.PeerEvents do
          {"height", @call_frame_side},
          {"captured_ms", :count}
        ], {:jpeg, @max_raw}},
-    "call_close" => {[{"call_id", :id}, {"reason", {:optional, :text}}], :none}
+    "call_close" => {[{"call_id", :id}, {"reason", {:optional, :text}}], :none},
+    "offers" => {[{"rev", :rev}, {"index", :count}, {"last", :boolean}], :required},
+    "link_path" => {[{"path", {:enum, @link_paths}}], :none}
   }
 
   @server %{
@@ -164,7 +169,7 @@ defmodule FermixChannels.Mobile.PeerEvents do
   @client_events ~w(
     companion_open companion_line companion_close manage loopback_request loopback_failed
     snapshot_stored snapshot_refused enroll_request move_offer move_chunk move_end move_commit
-    move_resume call_open call_line call_audio call_frame call_close
+    move_resume call_open call_line call_audio call_frame call_close offers link_path
   )
   @server_events ~w(
     companion_line companion_close manage_result loopback_open loopback_response
@@ -308,6 +313,7 @@ defmodule FermixChannels.Mobile.PeerEvents do
   defp valid?(:relay_url, value), do: matches?(@relay_url, value) and byte_size(value) <= 261
   defp valid?(:recipient, value), do: matches?(@recipient, value)
   defp valid?(:sha256, value), do: matches?(@sha256, value)
+  defp valid?(:rev, value), do: matches?(@rev, value)
   defp valid?(:name, value), do: printable?(value, 128)
   defp valid?(:text, value), do: printable?(value, 512)
   defp valid?(:target, value), do: target?(value)

@@ -125,6 +125,39 @@ defmodule FermixCore.Home.Link do
   """
   @callback stop_return() :: :ok
 
+  @typedoc """
+  One computer's device row as the primary holds it (M97 §3.2): its id, the
+  name the owner calls it, its system (`"macos"`, `"linux"`, or nil before
+  it said), when it last said `hello`, whether it keeps the home's backup
+  copies (nil: yes), and whether its session is up and since when.
+  """
+  @type computer_row :: %{
+          device_id: String.t(),
+          name: String.t(),
+          platform: String.t() | nil,
+          last_seen: DateTime.t() | nil,
+          backups: boolean() | nil,
+          connected: boolean(),
+          since: DateTime.t() | nil
+        }
+
+  @doc """
+  Primary role: every computer's device row (M97 §3.2), with whether its
+  session is up. None on any other engine, which holds no device store.
+  """
+  @callback computer_rows() :: {:ok, [computer_row()]} | {:error, term()}
+
+  @doc """
+  Primary role: names the computer `device_id` `name` on its device row
+  (`computers.rename`). The name is checked by the caller
+  (`FermixCore.Computers.rename/3`); one another computer holds, compared
+  without case, is refused here as well, where the rows are written
+  (`{:name_taken, name}`), and a computer the home does not hold is
+  `{:not_found, device_id}`.
+  """
+  @callback rename_computer(String.t(), String.t()) ::
+              {:ok, computer_row()} | {:error, {:name_taken | :not_found, String.t()} | term()}
+
   @typedoc "How a request reaches the primary: the rail's `forward/2` on a linked desktop."
   @type forwarding ::
           [primary_forward: (Protocol.request(), keyword() -> Protocol.route_result())] | []

@@ -32,7 +32,8 @@
           "companion_open", "companion_line", "companion_close", "manage", "loopback_request",
           "loopback_failed", "snapshot_stored", "snapshot_refused", "enroll_request",
           "move_offer", "move_chunk", "move_end", "move_commit", "move_resume",
-          "call_open", "call_line", "call_audio", "call_frame", "call_close"
+          "call_open", "call_line", "call_audio", "call_frame", "call_close",
+          "offers", "link_path"
         ]}
       },
       "allOf": [
@@ -71,7 +72,9 @@
         {"if": {"properties": {"t": {"const": "call_line"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/call_line"}},
         {"if": {"properties": {"t": {"const": "call_audio"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/call_audio"}},
         {"if": {"properties": {"t": {"const": "call_frame"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/call_frame"}},
-        {"if": {"properties": {"t": {"const": "call_close"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/call_close"}}
+        {"if": {"properties": {"t": {"const": "call_close"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/call_close"}},
+        {"if": {"properties": {"t": {"const": "offers"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/offers"}},
+        {"if": {"properties": {"t": {"const": "link_path"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/link_path"}}
       ]
     },
     "serverEvent": {
@@ -146,7 +149,8 @@
         "last_server_seq": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615},
         "protocol_v": {"type": "integer", "minimum": 1},
         "relay_list_rev": {"type": "string", "pattern": "^[0-9a-f]{16}$", "description": "The revision of the relay list this phone has stored (M62); absent means none."},
-        "primary_epoch": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615, "description": "The highest primary epoch this phone has seen from this pairing (M75); absent when it has seen none. A daemon at a lower epoch refuses the hello with stale_primary."}
+        "primary_epoch": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615, "description": "The highest primary epoch this phone has seen from this pairing (M75); absent when it has seen none. A daemon at a lower epoch refuses the hello with stale_primary."},
+        "platform": {"enum": ["macos", "linux"], "description": "The system a desktop engine's computer runs (M97): a desktop always sends it, a phone never does, and an engine older than the computer record leaves it out. Any other value is a malformed frame."}
       }
     },
     "msg": {
@@ -287,7 +291,17 @@
         "max_media_bytes": {"type": "integer", "minimum": 0},
         "push": {"$ref": "#/$defs/pushServices"},
         "call": {"$ref": "#/$defs/callCaps"},
-        "lists": {"type": "boolean", "description": "true on a phone's hello_ack when this primary takes the phone's list channel (M85 E4: companion_open, companion_line and companion_close carrying the companion wire's list events, one channel, lists only); absent from a desktop's and an older primary's, and a phone opens a list channel only when it is true."}
+        "lists": {"type": "boolean", "description": "true on a phone's hello_ack when this primary takes the phone's list channel (M85 E4: companion_open, companion_line and companion_close carrying the companion wire's list events, one channel, lists only); absent from a desktop's and an older primary's, and a phone opens a list channel only when it is true."},
+        "computer": {"$ref": "#/$defs/computerCaps"}
+      }
+    },
+    "computerCaps": {
+      "type": "object", "required": ["v"],
+      "description": "Which of a computer's own events this server takes (M97), on a desktop's hello_ack alone; absent from a phone's and from a server older than the computer record. v is a positive integer; offers and link_path, each a boolean when present, say whether the server takes that event, and a later server may add more keys. A computer sends offers or link_path only when its flag is true: a server that does not know the event closes the session on it (unsupported, close 1002).",
+      "properties": {
+        "v": {"type": "integer", "minimum": 1},
+        "offers": {"type": "boolean"},
+        "link_path": {"type": "boolean"}
       }
     },
     "callCaps": {
@@ -593,6 +607,17 @@
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "snapshot_id", "reason"],
       "description": "Desktop to primary: the desktop kept no copy of the snapshot, and why: it would have left the disk under its floor, the free space could not be read, the bytes did not match snapshot_begin, a chunk came out of order, the name was not a snapshot's, or the write failed.",
       "properties": {"t": {"const": "snapshot_refused"}, "snapshot_id": {"$ref": "#/$defs/wireId"}, "reason": {"enum": ["disk_floor", "space_unknown", "mismatch", "out_of_order", "invalid_name", "write_failed"]}}
+    },
+    "offers": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "x-raw-bytes": true, "x-chunked": true, "x-chunk-key": "rev", "x-max-payload-bytes": 65536,
+      "required": ["v", "t", "seq", "rev", "index", "last"],
+      "description": "Desktop to primary (M97), only when the hello_ack's caps.computer.offers is true: what this computer offers its server, the chunked payload the UTF-8 JSON object {\"v\":1,\"offers\":[{id, state, sentence?, detail?}]}: at most 32 offers; id matching ^[a-z][a-z0-9_]{0,31}$, each named once; state on, off or unavailable; sentence required unless state is on, 1 to 300 bytes of printable UTF-8; detail at most 64 bytes, printable. rev is the payload's revision, the first 8 bytes of its SHA-256 in lowercase hex. Sent at each session's start and whenever the revision changes. A payload the primary refuses, or whose rev is not its own, is answered error{code:invalid_offers}, the session stays open, and the computer offers nothing until it sends a payload the primary takes.",
+      "properties": {"t": {"const": "offers"}, "rev": {"type": "string", "pattern": "^[0-9a-f]{16}$"}, "index": {"$ref": "#/$defs/chunkIndex"}, "last": {"type": "boolean"}}
+    },
+    "link_path": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "path"],
+      "description": "Desktop to primary (M97), only when the hello_ack's caps.computer.link_path is true: whether the session the computer dialed runs direct or through a relay, once it is known at the session's start and again at each change.",
+      "properties": {"t": {"const": "link_path"}, "path": {"enum": ["direct", "relay"]}}
     },
     "enroll_request": {
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "host", "candidate"],

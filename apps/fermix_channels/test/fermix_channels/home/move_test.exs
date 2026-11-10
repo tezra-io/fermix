@@ -16,11 +16,14 @@ defmodule FermixChannels.Home.MoveTest do
   alias FermixChannels.Mobile.Rail
   alias FermixChannels.Test.DesktopRail
   alias FermixChannels.Test.HomeMove
+  alias FermixCore.Computers.Switches
   alias FermixCore.Home.Candidate
+  alias FermixCore.Home.ComputerKey
   alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.Epoch
   alias FermixCore.Home.Move
   alias FermixCore.Home.Moved
+  alias FermixCore.Home.MoveSecrets
   alias FermixCore.Home.Role
   alias FermixCore.Home.Snapshot
   alias FermixCore.Home.Snapshot.Recipient
@@ -95,7 +98,15 @@ defmodule FermixChannels.Home.MoveTest do
     assert link.primary.node_id == ctx.primary.node_id
     # The desktop dials its server there too, until the server says otherwise.
     assert link.primary.addrs == @hints
-    assert {:ok, desktop_key} = DesktopLink.read_key(source)
+    # M97 D13: its key is in this computer's keychain, which the link names.
+    assert link.key == :keyring
+    assert {:ok, desktop_key} = ComputerKey.read(source)
+    refute File.exists?(Path.join(source, "device/desktop_key"))
+    # M97 §7.3: what this computer keeps on for its server, written at the
+    # commit (a request with no choice keeps the block as proposed).
+    assert {:ok, switches} = Switches.read(source)
+    assert Switches.reviewed?(switches)
+    assert Switches.on?(switches, :files) and Switches.on?(switches, :shell)
 
     # The candidate: activated at epoch + 1 with the destination facts.
     assert_received {:scheduled, :restart, _delay}
@@ -117,10 +128,13 @@ defmodule FermixChannels.Home.MoveTest do
     # The identity bundle moved; the desktop's row travelled, its key did not.
     assert File.read!(Key.path(home)) == File.read!(Key.path(source))
     assert {:ok, devices} = DeviceStore.list(root: home)
-    assert [%{kind: :desktop, device_id: id, noise_pk: pk}] = devices
+    assert [%{kind: :desktop, device_id: id, noise_pk: pk} = row] = devices
+    # M97 §3.2, D7: the row says its system, and that it keeps the backups.
+    assert row.platform == if(:os.type() == {:unix, :darwin}, do: "macos", else: "linux")
+    assert row.backups == true
     assert id == link.device_id
     assert pk == desktop_key.public
-    refute File.exists?(DesktopLink.key_path(home))
+    refute File.exists?(Path.join(home, "device/desktop_key"))
     refute File.exists?(Path.join([home, "mobile", "candidates.json"]))
     assert {:ok, _snapshot_view} = File.ls(home)
 
@@ -199,9 +213,12 @@ defmodule FermixChannels.Home.MoveTest do
     assert :ok = Move.finish_at_boot(source, :primary)
     assert {:ok, %{"phase" => "aborted", "sentence" => ^sentence}} = Move.read_phase(source)
     refute File.exists?(request_file)
-    refute File.exists?(DesktopLink.key_path(source))
+    # M97 D13: the key the move made is deleted with its row.
+    assert ComputerKey.read(source, store: :keyring) == {:error, {:missing, :keyring}}
     assert {:ok, []} = DeviceStore.list(root: source)
     refute Move.pending?(source)
+    # M97 §7.3: an undone move leaves no switches.
+    assert Switches.read(source) == {:ok, []}
 
     # The candidate was never told to commit: it is still a candidate.
     assert Candidate.present?(ctx.home)
@@ -209,6 +226,59 @@ defmodule FermixChannels.Home.MoveTest do
 
     assert_received {:telemetry, [:fermix, :home, :move], _m,
                      %{phase: :finished, side: :source, result: :aborted, error_class: :refused}}
+  end
+
+  # M97 D13: a home on the file store keeps the computer's key as a file of
+  # that store, and the store travels with the home; the key never does.
+  test "a source on the file store keeps its key there, and the move carries it nowhere",
+       ctx do
+    source = ctx.primary.root
+    config = Path.join(source, "config.toml")
+
+    file_store =
+      String.replace(
+        File.read!(config),
+        "[fermix_core]\n",
+        "[fermix_core]\nsecret_store = \"file\"\n"
+      )
+
+    File.write!(config, file_store)
+
+    run_worker(source, ctx.candidate, key_opts: [impl: SecretWriter.File])
+
+    assert_received :source_restart
+    assert {:ok, %{key: :file}} = DesktopLink.read(source)
+    assert {:ok, desktop_key} = ComputerKey.read(source, impl: SecretWriter.File)
+    key_file = Path.join(source, "secrets/device.desktop_key")
+    assert File.read!(key_file) == Base.encode64(desktop_key.private)
+
+    # The home moved with this computer's row; the key stayed here.
+    assert {:ok, [%{noise_pk: pk}]} = DeviceStore.list(root: ctx.home)
+    assert pk == desktop_key.public
+    refute File.exists?(Path.join(ctx.home, "secrets/device.desktop_key"))
+  end
+
+  # M97 D13: two homes under one profile on one computer share the keychain
+  # item, so a move never takes or overwrites another home's key.
+  test "a key another home keeps under the same profile stops the move by name", ctx do
+    source = ctx.primary.root
+    other = SafeRm.make_tmp_dir!("move-twin")
+    on_exit(fn -> SafeRm.rm_rf!(other) end)
+    File.cp!(Path.join(source, "config.toml"), Path.join(other, "config.toml"))
+    {:ok, kept, :keyring} = ComputerKey.create(other)
+
+    run_worker(source, ctx.candidate, connect: fn _route -> flunk("dialed") end)
+
+    assert {:ok, %{"phase" => "undoing", "sentence" => sentence}} = Move.read_phase(source)
+
+    assert sentence ==
+             "The keychain already holds another computer key under this home's profile: " <>
+               "another Fermix home on this computer uses the same profile. Give each home " <>
+               "a profile of its own. Nothing moved; start the move again."
+
+    assert {:ok, %{role: :primary}} = Role.configured(source)
+    assert {:ok, []} = DeviceStore.list(root: source)
+    assert ComputerKey.read(other, store: :keyring) == {:ok, kept}
   end
 
   test "a source that spent its attempts aborts without dialing", ctx do
@@ -556,10 +626,10 @@ defmodule FermixChannels.Home.MoveTest do
     5
   end
 
-  # The desktop's key and row, which the worker writes before it captures.
+  # The desktop's key and row, which the worker writes before it captures,
+  # and the key's store and public half, which it records first.
   defp desktop_by_hand(source) do
-    keypair = Noise.generate_keypair()
-    :ok = DesktopLink.write_key(source, keypair.private)
+    {:ok, keypair, :keyring} = ComputerKey.create(source)
 
     {:ok, device} =
       DeviceStore.add(
@@ -574,7 +644,9 @@ defmodule FermixChannels.Home.MoveTest do
         root: source
       )
 
-    :ok = Move.put_phase(source, "streaming", %{"device_id" => device.device_id}, HomeMove.now())
+    key = %{"store" => "@keyring", "public" => Base.encode64(keypair.public)}
+    recorded = %{"device_id" => device.device_id, "key" => key}
+    :ok = Move.put_phase(source, "streaming", recorded, HomeMove.now())
   end
 
   # What the worker writes after move_ready and before move_commit.
@@ -590,20 +662,13 @@ defmodule FermixChannels.Home.MoveTest do
     assert_receive {:rail, ^rail, {:event, %{"t" => "move_done", "epoch" => 5}, _bytes}}, 30_000
   end
 
-  # A keychain reference in the source's settings, under a profile of this
-  # test's own in the stub store.
+  # A keychain reference in the source's settings, under the profile of the
+  # source's own its settings name (`HomeMove.primary!/1`) in the stub store.
   defp keychain_reference!(source) do
-    profile = "move-#{System.unique_integer([:positive])}"
     config = Path.join(source, "config.toml")
-
-    File.write!(
-      config,
-      File.read!(config) <>
-        "\n[fermix_core]\nprofile = \"#{profile}\"\n\n" <>
-        "[fermix_core.providers.anthropic]\napi_key = \"@keyring\"\n"
-    )
-
-    profile
+    text = File.read!(config)
+    File.write!(config, text <> "\n[fermix_core.providers.anthropic]\napi_key = \"@keyring\"\n")
+    MoveSecrets.profile(text)
   end
 
   defp open_move(ctx, candidate) do

@@ -38,3 +38,6 @@
 {"v":2,"t":"call_open","seq":1,"call_id":"call-7c1e","resume":true}
 {"v":2,"t":"call_close","seq":11,"call_id":"call-7c1e","reason":"owner_hung_up"}
 {"v":2,"t":"call_close","seq":12,"call_id":"call-7c1e"}
+{"v":2,"t":"hello","seq":1,"device_id":"desktop-7b2e","app_version":"0.19.0","last_server_seq":0,"protocol_v":2,"primary_epoch":3,"platform":"macos"}
+{"v":2,"t":"link_path","seq":3,"path":"direct"}
+{"v":2,"t":"link_path","seq":14,"path":"relay"}

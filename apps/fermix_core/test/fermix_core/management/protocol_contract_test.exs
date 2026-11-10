@@ -14,11 +14,18 @@ defmodule FermixCore.Management.ProtocolContractTest do
   alias Fermix.CLI.Doctor.Checks
   alias FermixCore.Capabilities.MCP.Config, as: McpConfig
   alias FermixCore.Capabilities.MCP.RuntimeStatus
+  alias FermixCore.Computers
+  alias FermixCore.Computers.Consent
+  alias FermixCore.Computers.Facts, as: ComputerFacts
+  alias FermixCore.Computers.Offers
+  alias FermixCore.Computers.Switches
   alias FermixCore.Cues.Config, as: CuesConfig
   alias FermixCore.Home.Candidates, as: HomeCandidates
   alias FermixCore.Home.EnrollmentCode
   alias FermixCore.Home.Epoch
   alias FermixCore.Home.Move, as: HomeMove
+  alias FermixCore.Home.MoveReadiness
+  alias FermixCore.Home.Snapshot
   alias FermixCore.Home.Snapshot.Recipient, as: SnapshotRecipient
   alias FermixCore.Home.Snapshot.Scheduler, as: SnapshotScheduler
   alias FermixCore.Home.Snapshot.Status, as: SnapshotStatus
@@ -67,6 +74,12 @@ defmodule FermixCore.Management.ProtocolContractTest do
   @compatibility Application.app_dir(:fermix_core, "priv/management/fixtures/compatibility.jsonl")
   # The desktop whose forward the server's Always On steps answer.
   @desktop_id "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e"
+  # The M97 goldens' other computer, a Linux one away from its server, and the
+  # facts `HomeSummaryGoldens` draws its server and its move with.
+  @loft_id "c4a71e93-2b5d-4f08-9e6a-3d7b1f0c5a82"
+  @golden_now ~U[2031-05-04 12:00:00Z]
+  @golden_server "fermix-general-a3f9"
+  @golden_candidate "cand-5e2a9c1f7b3d4086"
 
   @mcp_router_toml ~S"""
   [mcp.servers.filesystem]
@@ -789,6 +802,103 @@ defmodule FermixCore.Management.ProtocolContractTest do
     assert named_fixture_result("home_act_own_server") == json(answer)
   end
 
+  # M97 §3.2, §7.3: a server lists its computers (with the notice that it
+  # left out the settings it inherited), a linked Mac that moved before M97
+  # waits for the owner's review, and the Mac that sets Always On up shows
+  # what it keeps on for its server after the move. Each golden is the record
+  # `Management.Home.picture/1` builds from invented facts, its computers the
+  # ones `Computers.list/1` joins from their rows, sessions and records, and
+  # its summary the one `HomeSummary.summary/1` answers for the same facts.
+  test "the golden M97 home.status pictures are the engine's own" do
+    detail_keys = Map.keys(schema_detail_properties())
+
+    for {name, record} <- computer_status_goldens() do
+      assert named_fixture_result(name) == json(record),
+             "the #{name} golden no longer matches what the engine builds"
+
+      assert Map.keys(record["summary"]["detail"]) -- detail_keys == []
+    end
+  end
+
+  # `computers.rename` answers the computer under its new name as
+  # `home.status` lists it; a name another computer holds, a computer the home
+  # does not have, and `home.act` offers to keep that are not a list each
+  # answer `invalid_params` with their field and sentence.
+  test "the golden M97 answers and refusals are the router's own" do
+    {"computers.rename", params, opts} = computers_case()
+
+    request = %{
+      request_id: "req-1",
+      protocol_version: 2,
+      method: "computers.rename",
+      params: params
+    }
+
+    assert {:ok, answer} = Router.route(request, opts)
+    assert named_fixture_result("computers_rename") == json(answer)
+
+    refusals = [
+      {"invalid_params_computers_rename_name", "computers.rename",
+       %{"device_id" => @loft_id, "name" => "studio-mac"}},
+      {"invalid_params_computers_rename_device_id", "computers.rename",
+       %{"device_id" => "0b8c2f61-7d4e-4a39-a5f2-e81c3d6b9047", "name" => "spare-linux"}},
+      {"invalid_params_home_act_keep_offers", "home.act",
+       %{"action" => "move_now", "key" => "k", "input" => %{"keep_offers" => "files"}}}
+    ]
+
+    for {name, method, params} <- refusals do
+      {_method, _params, opts} = computers_case()
+      request = %{request_id: "req-1", protocol_version: 2, method: method, params: params}
+
+      assert {:error, :invalid_params, details} = Router.route(request, opts)
+      assert details == golden_error_details(name), name
+    end
+  end
+
+  # M97 §7.2: a computer linked to its server publishes `computer`, what Fermix
+  # on the server may use on it, among its own sections; its inventory is the
+  # server's sections and its own (provider sections are data, as above), and
+  # the section's golden is the one it answers for its switches.
+  test "the golden linked computer's sections are the ones it publishes" do
+    server = fn request, _opts -> Router.route(request, macos?: false, computer?: false) end
+
+    sections = %{
+      request_id: "req-1",
+      protocol_version: 2,
+      method: "settings.sections",
+      params: %{}
+    }
+
+    assert {:ok, composed} =
+             Router.route(sections, macos?: true, computer?: true, primary_forward: server)
+
+    golden = named_fixture_result("settings_sections_computer")
+    ids = fn result -> Enum.map(result["sections"], & &1["id"]) end
+    {fixture_providers, fixture_rest} = Enum.split_with(ids.(golden), &provider_section?/1)
+    {published_providers, published_rest} = Enum.split_with(ids.(composed), &provider_section?/1)
+
+    assert fixture_rest == published_rest
+    assert fixture_providers -- published_providers == []
+    assert List.last(fixture_rest) == "computer"
+    assert golden["primary_missing"] == composed["primary_missing"]
+
+    snapshot =
+      computer_snapshot(
+        enabled: true,
+        reviewed: true,
+        files: true,
+        shell: true,
+        browser: true,
+        history: true
+      )
+
+    params = %{"section" => "computer"}
+    get = %{request_id: "req-1", protocol_version: 2, method: "settings.get", params: params}
+
+    assert {:ok, view} = Router.route(get, macos?: true, computer?: true, snapshot: snapshot)
+    assert named_fixture_result("settings_get_computer") == json(view)
+  end
+
   test "the schema's row vocabulary matches the settings module", %{schema: schema} do
     row = schema["$defs"]["settingsRow"]["properties"]
     %{kinds: kinds, formats: formats} = Settings.vocabulary()
@@ -1455,7 +1565,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
       cues_cases() ++
       home_cases() ++
       accessories_cases() ++
-      [act_case()]
+      [act_case(), computers_case()]
   end
 
   # Every `accessories.*` method against `AccessoryGoldens`' invented facts,
@@ -1727,6 +1837,310 @@ defmodule FermixCore.Management.ProtocolContractTest do
       })
 
     code
+  end
+
+  # Stands in for the rail's device rows (`Home.Link`), held in the case's own
+  # process, so a rename is read back as the rows a real one leaves.
+  defmodule FakeComputerLink do
+    @moduledoc false
+
+    def computer_rows, do: {:ok, Process.get(:contract_computer_rows, [])}
+
+    def rename_computer(device_id, name) do
+      rows = Process.get(:contract_computer_rows, [])
+      other? = &(&1.device_id != device_id and String.downcase(&1.name) == String.downcase(name))
+
+      cond do
+        not Enum.any?(rows, &(&1.device_id == device_id)) -> {:error, {:not_found, device_id}}
+        Enum.any?(rows, other?) -> {:error, {:name_taken, name}}
+        true -> renamed(rows, device_id, name)
+      end
+    end
+
+    defp renamed(rows, device_id, name) do
+      rows = Enum.map(rows, &if(&1.device_id == device_id, do: %{&1 | name: name}, else: &1))
+      Process.put(:contract_computer_rows, rows)
+      {:ok, Enum.find(rows, &(&1.device_id == device_id))}
+    end
+  end
+
+  # M97 §3.2: name the Linux computer, against the two computers' rows, the
+  # Mac's session and both records.
+  defp computers_case do
+    {"computers.rename", %{"device_id" => @loft_id, "name" => "attic-linux"},
+     [operation_opts: [computers: computer_seams()]]}
+  end
+
+  # The server's two computers: the Mac connected directly, offering what its
+  # session sent; the Linux one away, with the offers it last sent and when
+  # the home last heard it, and keeping no backup copies.
+  defp computer_seams do
+    rows = [
+      %{
+        device_id: @desktop_id,
+        name: "studio-mac",
+        platform: "macos",
+        last_seen: ~U[2031-05-04 09:00:00Z],
+        backups: nil,
+        connected: true,
+        since: ~U[2031-05-04 09:00:00Z]
+      },
+      %{
+        device_id: @loft_id,
+        name: "loft-linux",
+        platform: "linux",
+        last_seen: ~U[2031-05-03 21:40:00Z],
+        backups: false,
+        connected: false,
+        since: nil
+      }
+    ]
+
+    Process.put(:contract_computer_rows, rows)
+    mac = mac_offers()
+
+    [
+      role: :primary,
+      link: FakeComputerLink,
+      live: %{@desktop_id => %{offers: mac, path: :direct, since: ~U[2031-05-04 09:00:00Z]}},
+      records: %{
+        @desktop_id => %{engine_version: "1.2.3", seen_at: ~U[2031-05-04 11:58:00Z], offers: mac},
+        @loft_id => %{
+          engine_version: "1.2.3",
+          seen_at: ~U[2031-05-03 21:42:00Z],
+          offers: linux_offers()
+        }
+      },
+      server_name: @golden_server
+    ]
+  end
+
+  # Each offer's state as the engine works it out: a Mac without the computer
+  # use helper, Messages switched off; a Linux computer whose kernel holds
+  # commands to the sandbox, its screen switched off.
+  defp mac_offers do
+    facts =
+      ComputerFacts.read(
+        os: :macos,
+        arch: "arm64",
+        landlock: :not_asked,
+        helpers: %{computer_use: false},
+        permissions: %{},
+        sandbox_mode: :standard
+      )
+
+    Offers.compute(Offers.core_modules(), Switches.only(~w(files shell browser history)a), facts)
+  end
+
+  defp linux_offers do
+    facts =
+      ComputerFacts.read(
+        os: :linux,
+        arch: "x86_64",
+        landlock: :ok,
+        helpers: %{computer_use: true},
+        permissions: %{},
+        sandbox_mode: :strict
+      )
+
+    Offers.compute(Offers.core_modules(), Switches.only(~w(files shell browser)a), facts)
+  end
+
+  defp computer_snapshot(switches) do
+    Map.update(ConfigStore.current_snapshot(), :fermix_core, [], fn core ->
+      Keyword.put(core, :computer, switches)
+    end)
+  end
+
+  defp computer_status_goldens do
+    server = server_computers()
+
+    [
+      {"home_status_server_computers", server},
+      {"home_status_on_review", on_review(server)},
+      {"home_status_ready_keeps_on", ready_keeps_on()}
+    ]
+  end
+
+  # The server golden's own facts (`HomeSummaryGoldens`), with its two
+  # computers, both desktops of it, and the settings it inherited left out
+  # two days ago.
+  defp server_computers do
+    server = golden_row("home_status_server")
+    computers = Computers.list(computer_seams())
+    desktops = Enum.map(computers, &Map.take(&1, [:device_id, :name, :connected, :since]))
+
+    summary =
+      golden_summary(
+        link: %{primary: nil, desktops: desktops, enrollment: nil},
+        snapshots: server["snapshots"],
+        disk: server["disk"],
+        server_sandbox: ~U[2031-05-02 08:00:00Z]
+      )
+
+    ManagementHome.picture(%{
+      role: :primary,
+      epoch: server["epoch"],
+      moved: nil,
+      snapshots: server["snapshots"],
+      summary: summary,
+      version: server["version"],
+      disk: server["disk"],
+      update_ceiling: server["update_ceiling"],
+      webhooks: server["webhooks"],
+      desktops: desktops,
+      computers: computers
+    })
+  end
+
+  # The linked Mac of the `on` golden, moved before M97: its switches wait
+  # for the owner's review, keeping what a move would have kept.
+  defp on_review(server) do
+    on = golden_row("home_status_on")
+    moved = %{to: @golden_server, moved_at: ~U[2031-05-01 09:00:00Z], epoch: 4}
+    waiting = Switches.only(~w(files shell browser history)a, reviewed: false)
+
+    review =
+      Consent.block(Consent.proposed(waiting), os: :macos, sandbox_mode: :standard, kind: :review)
+
+    summary =
+      golden_summary(
+        role: :device,
+        linked: true,
+        moved: moved,
+        link: %{primary: connected_server(), desktops: [], enrollment: nil},
+        snapshots: on["snapshots"],
+        primary_home: server,
+        copies_bytes: 3 * 48_211,
+        copies: desktop_copies(),
+        offers_review: Consent.view(review)
+      )
+
+    ManagementHome.picture(%{
+      role: :device,
+      epoch: 4,
+      moved: moved,
+      snapshots: on["snapshots"],
+      summary: summary,
+      version: "1.2.3",
+      primary: connected_server(),
+      primary_home: server
+    })
+  end
+
+  # The `ready` golden's facts, with what this Mac keeps on for its server
+  # after the move: its screen too, and commands while its sandbox is open.
+  defp ready_keeps_on do
+    ready = golden_row("home_status_ready")
+
+    window = %{
+      state: :used,
+      expires_at: ~U[2031-05-04 11:15:00Z],
+      candidate_id: @golden_candidate
+    }
+
+    keep = Consent.block(~w(files shell browser computer_use)a, os: :macos, sandbox_mode: :open)
+
+    summary =
+      golden_summary(
+        link: %{primary: nil, desktops: [], enrollment: window},
+        candidates: ready["candidates"],
+        review: ready_review(),
+        move_items:
+          MoveReadiness.summary_items({:ok, ""}, true, @golden_server, restarts_itself: true),
+        snapshots: ready["snapshots"],
+        disk: ready["disk"],
+        keeps_on: Consent.view(keep)
+      )
+
+    ManagementHome.picture(%{
+      role: :primary,
+      epoch: 4,
+      moved: nil,
+      snapshots: ready["snapshots"],
+      summary: summary,
+      version: "1.2.3",
+      disk: ready["disk"],
+      enrollment: ready["enrollment"],
+      candidates: ready["candidates"]
+    })
+  end
+
+  defp ready_review do
+    sentence =
+      "iMessage and meetings stop after the move: neither this Mac nor #{@golden_server} " <>
+        "runs them. This Mac's voice calls stop after the move; calls from your phone carry " <>
+        "on at #{@golden_server} when Talk to Fermix is on there and its key is in " <>
+        "#{@golden_server}'s secret store."
+
+    %{
+      candidate_id: @golden_candidate,
+      reviewed_at: ~U[2031-05-04 11:30:00Z],
+      ready: true,
+      items: [%{"id" => "stays_here", "status" => "warn", "sentence" => sentence}]
+    }
+  end
+
+  # The summary of `overrides` over the facts `HomeSummaryGoldens` builds every
+  # golden from.
+  defp golden_summary(overrides) do
+    %{
+      role: :primary,
+      host_os: :macos,
+      now: @golden_now,
+      linked: false,
+      moved: nil,
+      move: nil,
+      link: %{primary: nil, desktops: [], enrollment: nil},
+      candidates: [],
+      review: nil,
+      move_items: [],
+      snapshots: nil,
+      disk: nil,
+      primary_home: nil,
+      primary_too_old: false,
+      copies_bytes: nil,
+      stays_here: [],
+      return_costs: [],
+      zone: "Europe/Berlin",
+      return: nil,
+      returning: nil,
+      restoring: false,
+      copies: [],
+      lapsed: nil,
+      moved_back: false,
+      primary_behind: false,
+      restarts_itself: true
+    }
+    |> Map.merge(Map.new(overrides))
+    |> HomeSummary.summary()
+  end
+
+  defp golden_row(name) do
+    {^name, record} = List.keyfind(HomeSummaryGoldens.rows(), name, 0)
+    record
+  end
+
+  defp connected_server do
+    %{
+      name: @golden_server,
+      connected: true,
+      status: :connected,
+      since: ~U[2031-05-04 09:00:00Z],
+      epoch: 5,
+      sentence: "Fermix is connected to the server #{@golden_server}.",
+      down_ms: nil,
+      down_at: nil,
+      path: :direct
+    }
+  end
+
+  # The three copies of the server's snapshots the linked Mac keeps.
+  defp desktop_copies do
+    for hour <- [10, 4, 0] do
+      at = DateTime.new!(~D[2031-05-04], Time.new!(hour, 0, 0), "Etc/UTC")
+      %{name: Snapshot.name(at, 4), at: at}
+    end
   end
 
   # Enrollment and the move as the `home.status` golden shows them: the
@@ -2249,9 +2663,13 @@ defmodule FermixCore.Management.ProtocolContractTest do
   # Every section, not a representative one: the app's descriptor coverage test
   # reads the vendored fixture for the keys it binds, so a section with no
   # golden result is a pane whose keys nothing on the far side is held to.
+  # The `computer` section is published only on a computer linked to its
+  # server (M97 §7.2), so it is asked for as one.
   defp settings_cases do
-    for section <- Settings.sections(macos?: true),
-        do: {"settings.get", %{"section" => section.id}, [macos?: true]}
+    for(
+      section <- Settings.sections(macos?: true),
+      do: {"settings.get", %{"section" => section.id}, [macos?: true]}
+    ) ++ [{"settings.get", %{"section" => "computer"}, [macos?: true, computer?: true]}]
   end
 
   # Sources, never rendered rows: the projection under test is the daemon's.

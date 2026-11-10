@@ -10,11 +10,14 @@ Run: `uv run bin/test_seed_home.py`."""
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
+import re
 import subprocess
 import sys
 import tomllib
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -555,6 +558,162 @@ def test_cue_options_need_cues(tmp_path, monkeypatch, flags):
 def test_the_door_port_is_free_and_not_the_default():
     port = seed.free_door_port()
     assert 1024 < port < 65536 and port != 4032
+
+
+# --- computers (M97) ---------------------------------------------------------------
+
+# The rules `FermixChannels.Mobile.DeviceStore` reads a row by (decode_device/1,
+# validate_new/1, validate_desktop/1, validate_loaded_uniqueness/2).
+_UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+_ROW_REQUIRED = {"device_id", "name", "model", "noise_pk", "created_at"}
+_ROW_OPTIONAL = {"kind", "apns_key_salt", "push_token", "last_seen", "platform", "signer_role",
+                 "version_code", "boot_state", "device_locked", "relay_list_rev", "backups"}
+_PHONE_ONLY = {"apns_key_salt", "push_token", "signer_role", "version_code", "boot_state",
+               "device_locked"}
+# The computer record (M97 §3.2): offer ids, states, and a sentence unless on.
+_OFFER_IDS = {"files", "shell", "browser", "computer_use", "imessage", "history", "voice",
+              "attachments", "accessory", "notifications"}
+_OFFER_STATES = {"on", "off", "unavailable"}
+
+
+def _utc(value):
+    # DateTime.from_iso8601/1 must answer offset 0.
+    assert isinstance(value, str) and value.endswith("Z"), value
+    parsed = datetime.fromisoformat(value)
+    assert parsed.utcoffset() == timedelta(0)
+    return parsed
+
+
+def _assert_desktop_row(row):
+    assert _ROW_REQUIRED <= set(row) and set(row) <= _ROW_REQUIRED | _ROW_OPTIONAL, row
+    assert not _PHONE_ONLY & set(row), row
+    assert _UUID.match(row["device_id"])
+    for field in ("name", "model"):
+        assert 1 <= len(row[field].encode()) <= 255
+    assert len(base64.b64decode(row["noise_pk"], validate=True)) == 32
+    _utc(row["created_at"])
+    _utc(row["last_seen"])
+    assert row["kind"] == "desktop" and row["platform"] in ("macos", "linux")
+    assert isinstance(row["backups"], bool)
+
+
+def _assert_record(record, row):
+    assert set(record) == {"v", "engine_version", "seen_at", "offers_rev", "offers"}
+    assert record["v"] == 1 and record["engine_version"]
+    assert re.fullmatch(r"[0-9a-f]{16}", record["offers_rev"])
+    assert _utc(record["seen_at"]) == _utc(row["last_seen"])
+    ids = [offer["id"] for offer in record["offers"]]
+    assert len(ids) == len(set(ids)) and set(ids) <= _OFFER_IDS
+    for offer in record["offers"]:
+        assert set(offer) <= {"id", "state", "sentence", "detail"}
+        assert offer["state"] in _OFFER_STATES
+        assert ("sentence" in offer) == (offer["state"] != "on"), offer
+        assert offer.get("sentence", "x") and offer.get("detail", "x")
+
+
+def _offers(record):
+    return {offer["id"]: offer for offer in record["offers"]}
+
+
+def _computer_tree(home):
+    """Every path the computers fixture owns, with its bytes (files) and mode."""
+    tree = {}
+    for top in ("mobile", "device", "eval-fixtures/computers.json"):
+        root = home / top
+        for path in [root, *sorted(root.rglob("*"))] if root.is_dir() else [root]:
+            data = path.read_bytes() if path.is_file() else None
+            tree[str(path.relative_to(home))] = (data, path.stat().st_mode & 0o777)
+    return tree
+
+
+def test_the_computers_fixture_writes_two_away_computers_the_store_reads(tmp_path):
+    home = tmp_path / "x-eval"
+    home.mkdir()
+    seed.write_computer_fixtures(str(home))
+
+    # The modes DeviceStore refuses anything but, and the same for the records.
+    for directory in ("mobile", "device", "device/computers"):
+        assert (home / directory).stat().st_mode & 0o777 == 0o700, directory
+    devices = home / "mobile" / "devices.toml"
+    assert devices.stat().st_mode & 0o777 == 0o600
+    rows = tomllib.loads(devices.read_text())["devices"]
+    assert [row["name"] for row in rows] == ["studio Mac", "loft Linux"]
+    for row in rows:
+        _assert_desktop_row(row)
+    assert len({row["device_id"] for row in rows}) == 2
+    assert len({row["noise_pk"] for row in rows}) == 2
+
+    records = {}
+    for row in rows:
+        path = home / "device" / "computers" / f"{row['device_id']}.json"
+        assert path.stat().st_mode & 0o777 == 0o600
+        records[row["name"]] = json.loads(path.read_text())
+        _assert_record(records[row["name"]], row)
+    assert sorted(p.name for p in (home / "device" / "computers").iterdir()) == sorted(
+        f"{row['device_id']}.json" for row in rows)
+
+    # studio Mac: every usual offer on, its shell standard.
+    mac = _offers(records["studio Mac"])
+    assert {oid for oid, offer in mac.items() if offer["state"] == "on"} == {
+        "files", "shell", "browser", "computer_use", "imessage", "history"}
+    assert mac["shell"]["detail"] == "standard"
+    # loft Linux: files, a strict shell and the browser; Messages and history cannot run.
+    linux = _offers(records["loft Linux"])
+    assert {oid for oid, offer in linux.items() if offer["state"] == "on"} == {
+        "files", "shell", "browser"}
+    assert linux["shell"]["detail"] == "strict"
+    assert linux["imessage"] == {"id": "imessage", "state": "unavailable",
+                                 "sentence": "Messages runs only on a Mac."}
+    assert linux["history"] == {"id": "history", "state": "unavailable",
+                                "sentence": "Fermix records computer history only on a Mac for now."}
+    assert {row["platform"] for row in rows} == {"macos", "linux"}
+
+    manifest = json.loads((home / seed.COMPUTERS_MANIFEST).read_text())
+    assert [c["name"] for c in manifest["computers"]] == ["studio Mac", "loft Linux"]
+
+
+def test_a_second_computers_seed_writes_the_same_bytes(tmp_path, monkeypatch):
+    home = tmp_path / "x-eval"
+    _seed_main(monkeypatch, home, "--computers")
+    first = _computer_tree(home)
+    _seed_main(monkeypatch, home, "--computers")
+    assert _computer_tree(home) == first
+    assert any(path.endswith(".json") and path.startswith("device") for path in first)
+
+
+def test_computers_turn_always_on_on_and_a_seed_without_them_takes_them_away(
+        tmp_path, monkeypatch, capsys):
+    # The `## Computers` section joins every owner turn of every suite, so a home
+    # has the computers only when a run asks (--computers), like cues.
+    home = tmp_path / "x-eval"
+    on = _seed_main(monkeypatch, home, "--computers")
+    assert on["fermix_core"]["always_on"] == {"enabled": True}
+    assert "computers: studio Mac and loft Linux linked, both away" in capsys.readouterr().out
+    written = seed.computer_paths(str(home))
+    assert all(os.path.isfile(path) for path in written)
+
+    off = _seed_main(monkeypatch, home)
+    assert "always_on" not in off["fermix_core"]
+    assert not any(os.path.exists(path) for path in written)
+
+
+def test_without_computers_the_config_has_no_always_on_section():
+    cfg = seed.render_config("/tmp/x-eval", "openai", {"default_model": "m"}, None)
+    assert "always_on" not in tomllib.loads(cfg)["fermix_core"]
+
+
+def test_computers_refuse_a_devices_file_the_seed_did_not_write(tmp_path, monkeypatch):
+    # An eval home pairs nothing, so a devices file with no manifest is someone
+    # else's: refused, never overwritten, and a seed without --computers leaves it.
+    home = tmp_path / "x-eval"
+    (home / "mobile").mkdir(parents=True)
+    foreign = home / "mobile" / "devices.toml"
+    foreign.write_text("devices = []\n")
+    with pytest.raises(SystemExit):
+        seed.write_computer_fixtures(str(home))
+    assert foreign.read_text() == "devices = []\n"
+    seed.clear_computer_fixtures(str(home))
+    assert foreign.read_text() == "devices = []\n"
 
 
 if __name__ == "__main__":

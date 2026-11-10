@@ -12,10 +12,18 @@ defmodule FermixChannels.Desktop.Relay do
 
   ## The link
 
-  It reads `device/desktop.json` and `device/desktop_key`
-  (`FermixCore.Home.DesktopLink`) when it starts. A file it cannot use leaves
-  it refused by name: it never dials, says why in `status/1`, and answers
-  every caller with that sentence. Otherwise it dials the primary at once,
+  It reads `device/desktop.json` (`FermixCore.Home.DesktopLink`) when it
+  starts, and this computer's key from the secret store the link records
+  (`FermixCore.Home.ComputerKey`, M97 §7.5), after moving a key an older
+  Fermix kept in `device/desktop_key` into that store
+  (`ComputerKey.migrate/2`: the device tree's one migration, run here before
+  anything else in the tree reads the key). A link or key it cannot use leaves
+  it refused by name: it never dials, never reads the old file instead, says
+  why in `status/1`, and answers every caller with that sentence. A locked
+  keyring alone is asked again, on the backoff below and at most 10 times in
+  all (a keyring often unlocks just after the session that starts this
+  engine), then left refused until the engine starts again. Otherwise it
+  dials the primary at once,
   runs `IK` with the desktop's key against the primary's gateway key, and
   sends `hello` with the desktop's `device_id`, this engine's version, the
   highest primary epoch it has seen and the revision of the relay list it
@@ -136,6 +144,15 @@ defmodule FermixChannels.Desktop.Relay do
   count. When the session ends, every frame not yet written goes with it and
   its waiter is told the session ended.
 
+  A computer's own record (M97 §3.2, §5.3): its `hello` names its system
+  (`platform`); once a session is up the relay tells this computer's offers
+  reporter (`Desktop.Offers`, `:offers` names it) the `hello_ack`'s caps, and
+  it sends the path the session runs (`link_path`), at the start once the
+  helper has named it and at each change. Both `offers` and `link_path` go
+  only to a server whose `hello_ack` takes them (`caps.computer`): any other
+  send of one is refused `{:error, {:not_taken, type}}`, since an older
+  server closes the session on an event it does not know.
+
   ## Bounds
 
   At most 4 channels at once, numbered round the 64 the wire allows so a
@@ -162,8 +179,8 @@ defmodule FermixChannels.Desktop.Relay do
   `:clock`, `:monotonic` (a 0-arity count of milliseconds), `:emit` and
   `:status_changed` (a 0-arity call in place of telling the Always On
   watch), `:families` (the `media`, `loopback` and `snapshots` processes,
-  by name or pid) and `:write` (in place of `Rail.send_event/4`, run in the
-  writer).
+  by name or pid), `:write` (in place of `Rail.send_event/4`, run in the
+  writer) and `:key_opts` (handed to `ComputerKey`: its secret writer).
   """
 
   use GenServer
@@ -172,6 +189,7 @@ defmodule FermixChannels.Desktop.Relay do
 
   alias FermixChannels.Desktop.Loopback
   alias FermixChannels.Desktop.MediaFetches
+  alias FermixChannels.Desktop.Offers, as: DesktopOffers
   alias FermixChannels.Desktop.Relay.Outbox
   alias FermixChannels.Desktop.SnapshotStore
   alias FermixChannels.Mobile.Chunks
@@ -182,6 +200,8 @@ defmodule FermixChannels.Desktop.Relay do
   alias FermixChannels.Mobile.Rail
   alias FermixChannels.Telemetry, as: ChannelTelemetry
   alias FermixCore.BuildInfo
+  alias FermixCore.Computers.Switches, as: ComputerSwitches
+  alias FermixCore.Home.ComputerKey
   alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.StatusWatch
   alias FermixCore.Management.Placement
@@ -193,6 +213,8 @@ defmodule FermixChannels.Desktop.Relay do
   # well under a second beside this process.
   @helper_wait_ms 10_000
   @max_backoff_ms 60_000
+  # How many times in all a locked keyring is asked for this computer's key.
+  @max_key_tries 10
   # A session that stayed up this long before the primary ended it normally
   # is renewed quietly, however many renewals came before it.
   @steady_session_ms 60_000
@@ -211,6 +233,9 @@ defmodule FermixChannels.Desktop.Relay do
   @desktop_max_media_bytes 64 * 1_024 * 1_024
   @max_open_payloads 32
   @status_wait_ms 5_000
+  # A computer's own events (M97 §5.3), each sent only where the server's
+  # hello_ack takes it.
+  @computer_events ~w(offers link_path)
 
   # Every event the primary sends a desktop, and the family that serves it
   # here: the session itself, the companion channels, the forwarded calls, the
@@ -415,14 +440,12 @@ defmodule FermixChannels.Desktop.Relay do
     root = Keyword.get_lazy(opts, :root, &ConfigStore.fermix_home/0)
     state = base_state(root, opts)
 
-    case load(root) do
+    case load(root, state.key_opts) do
       {:ok, link, keypair} ->
         {:ok, %{state | link: link, keypair: keypair}, {:continue, :connect}}
 
       {:error, reason, link} ->
-        sentence = DesktopLink.error_sentence(reason)
-        Logger.error("desktop relay: not connecting to the primary: #{sentence}")
-        {:ok, %{state | link: link, phase: :refused, word: :unreachable, sentence: sentence}}
+        {:ok, refused(reason, link, state)}
     end
   end
 
@@ -446,6 +469,9 @@ defmodule FermixChannels.Desktop.Relay do
       emit:
         Keyword.get(opts, :emit, &ChannelTelemetry.emit_transport(:desktop_relay, &1, &2, &3)),
       status_changed: Keyword.get(opts, :status_changed, fn -> StatusWatch.changed(:link) end),
+      key_opts: Keyword.get(opts, :key_opts, []),
+      offers: Keyword.get(opts, :offers, ComputerSwitches.listener()),
+      computer_caps: %{},
       link: nil,
       keypair: nil,
       phase: :connecting,
@@ -474,15 +500,77 @@ defmodule FermixChannels.Desktop.Relay do
     }
   end
 
-  # A key it cannot use still lets the relay name the primary it refuses to
-  # reach.
-  defp load(root) do
+  # The key moves out of an older Fermix's file first, then is read from the
+  # store the link records. A key it cannot use still lets the relay name the
+  # primary it refuses to reach.
+  defp load(root, key_opts) do
+    moved = ComputerKey.migrate(root, key_opts)
+
     with {:link, {:ok, link}} <- {:link, DesktopLink.read(root)},
-         {:key, _link, {:ok, keypair}} <- {:key, link, DesktopLink.read_key(root)} do
+         {:key, _link, done} when done in [:migrated, :nothing] <- {:key, link, moved},
+         {:key, _link, {:ok, keypair}} <- {:key, link, ComputerKey.read(root, key_opts)} do
       {:ok, link, keypair}
     else
-      {:link, {:error, reason}} -> {:error, reason, nil}
+      {:link, {:error, reason}} -> {:error, {:link, reason}, nil}
       {:key, link, {:error, reason}} -> {:error, reason, link}
+    end
+  end
+
+  # A link or key this relay cannot use: it says why and never dials. A
+  # locked keyring alone is asked again, on the backoff, `@max_key_tries`
+  # times in all.
+  defp refused(reason, link, state) do
+    tries = state.failures + 1
+    sentence = refusal_sentence(reason, tries)
+    Logger.error("desktop relay: not connecting to the primary: #{sentence}")
+    again? = locked?(reason) and tries < @max_key_tries
+
+    %{
+      state
+      | link: link,
+        phase: :refused,
+        word: :unreachable,
+        failures: tries,
+        sentence: sentence,
+        reconnect: if(again?, do: arm(state, :reload, backoff(tries)))
+    }
+  end
+
+  defp refusal_sentence(reason, tries) do
+    sentence = ComputerKey.error_sentence(reason)
+
+    cond do
+      not locked?(reason) ->
+        sentence
+
+      tries < @max_key_tries ->
+        "#{sentence} Fermix tries again in #{div(backoff(tries), 1_000)} s."
+
+      true ->
+        "#{sentence} Start Fermix again once it is unlocked."
+    end
+  end
+
+  defp locked?({:unusable, %{state: :locked}}), do: true
+  defp locked?(_reason), do: false
+
+  defp reload(state) do
+    case load(state.root, state.key_opts) do
+      {:ok, link, keypair} ->
+        Logger.info("desktop relay: this computer's key is readable now; connecting")
+        :ok = state.status_changed.()
+
+        connect(%{
+          state
+          | link: link,
+            keypair: keypair,
+            failures: 0,
+            word: :renewing,
+            sentence: "Fermix is connecting to its server."
+        })
+
+      {:error, reason, link} ->
+        refused(reason, link, state)
     end
   end
 
@@ -498,7 +586,12 @@ defmodule FermixChannels.Desktop.Relay do
   def handle_call(:open_channel, {tunnel, _tag}, state), do: open(tunnel, state)
   def handle_call({:fetch_media, ref}, {tunnel, _tag}, state), do: fetch(ref, tunnel, state)
 
-  # Answered once its last frame is written (`written/3`).
+  # Answered once its last frame is written (`written/3`). A computer's own
+  # event goes only to a server whose hello_ack takes it (M97 §5.3).
+  def handle_call({:send, type, _fields, _payload}, _from, %{phase: :connected} = state)
+      when type in @computer_events and not is_map_key(state.computer_caps, type),
+      do: {:reply, {:error, {:not_taken, type}}, state}
+
   def handle_call({:send, type, fields, payload}, from, %{phase: :connected} = state) do
     case enqueue(state, type, fields, payload, {:reply, from}) do
       {:ok, state} -> {:noreply, state}
@@ -570,7 +663,7 @@ defmodule FermixChannels.Desktop.Relay do
     route = route(state)
     opts = rail_opts(state)
     {:ok, connector} = Task.start_link(fn -> run_connector(relay, route, opts) end)
-    %{state | connector: connector, rail: nil, path: nil, phase: :connecting}
+    %{state | connector: connector, rail: nil, path: nil, phase: :connecting, computer_caps: %{}}
   end
 
   defp route(%{link: %{primary: primary}}),
@@ -710,12 +803,15 @@ defmodule FermixChannels.Desktop.Relay do
   defp connector_message({:path, %{kind: kind}}, %{path: kind} = state), do: {:noreply, state}
 
   defp connector_message({:path, %{kind: kind}}, state) do
+    state = %{state | path: kind}
+
     if state.phase == :connected do
       Logger.info("desktop relay: the session to #{name(state)} runs #{path_words(kind)}")
       :ok = state.status_changed.()
+      {:noreply, send_link_path(state)}
+    else
+      {:noreply, state}
     end
-
-    {:noreply, %{state | path: kind}}
   end
 
   defp connector_message({:event, %{"t" => type} = header, tail}, state) do
@@ -742,8 +838,17 @@ defmodule FermixChannels.Desktop.Relay do
       "last_server_seq" => 0,
       "protocol_v" => Protocol.protocol_version(),
       "relay_list_rev" => state.link.primary.relays_rev,
-      "primary_epoch" => state.link.epoch
+      "primary_epoch" => state.link.epoch,
+      "platform" => platform()
     }
+  end
+
+  # The system this computer runs (M97 §3.2), which its hello names.
+  defp platform do
+    case :os.type() do
+      {:unix, :darwin} -> "macos"
+      {:unix, :linux} -> "linux"
+    end
   end
 
   defp unserved(type, state) do
@@ -776,13 +881,16 @@ defmodule FermixChannels.Desktop.Relay do
   defp connected(epoch, fields, state) do
     link = state.link |> keep_epoch(epoch, state.root) |> keep_route(fields, state.root)
     max_media = media_bound(get_in(fields, ["caps", "max_media_bytes"]))
+    caps = Map.get(fields, "caps", %{})
     :ok = state.status_changed.()
+    :ok = DesktopOffers.connected(state.offers, caps)
 
     if state.degraded?, do: state.emit.(:recovered, state.failures, :none)
 
     %{
       state
       | link: link,
+        computer_caps: computer_caps(caps),
         phase: :connected,
         word: :connected,
         since: state.clock.(),
@@ -793,6 +901,33 @@ defmodule FermixChannels.Desktop.Relay do
         max_media_bytes: max_media,
         sentence: "Fermix is connected to the server #{link.primary.name}."
     }
+    |> send_link_path()
+  end
+
+  # The computer's own events the server's hello_ack takes (M97 §5.3), by
+  # event: none from a server older than the computer record.
+  defp computer_caps(%{"computer" => %{} = computer}) do
+    for type <- @computer_events, Map.get(computer, type) == true, into: %{}, do: {type, true}
+  end
+
+  defp computer_caps(_caps), do: %{}
+
+  # Only the dialing side learns whether the path is direct or relayed (M97
+  # §17), so it tells the server: at the session's start once the helper has
+  # named it, and at each change, where the server takes it.
+  defp send_link_path(%{path: path, computer_caps: %{"link_path" => true}} = state)
+       when path in [:direct, :relay] do
+    case enqueue(state, "link_path", %{"path" => Atom.to_string(path)}, <<>>, nil) do
+      {:ok, state} -> state
+      {:error, reason, state} -> unsent_link_path(reason, state)
+    end
+  end
+
+  defp send_link_path(state), do: state
+
+  defp unsent_link_path(reason, state) do
+    Logger.warning("desktop relay: the session's path was not sent: #{inspect(reason)}")
+    state
   end
 
   # The primary names its blob bound; this desktop takes no more than its own
@@ -1829,6 +1964,9 @@ defmodule FermixChannels.Desktop.Relay do
 
   defp timer(:reconnect, token, %{reconnect: {_ref, token, :reconnect}} = state),
     do: {:noreply, connect(%{state | reconnect: nil})}
+
+  defp timer(:reload, token, %{reconnect: {_ref, token, :reload}} = state),
+    do: {:noreply, reload(%{state | reconnect: nil})}
 
   # A call's id is used once, so its timer firing is never stale.
   defp timer({:call, call_id}, _token, state), do: {:noreply, call_timed_out(call_id, state)}

@@ -19,6 +19,16 @@ defmodule FermixCore.Management.Home do
       null otherwise.
     * `desktops`: on the primary, its desktop peers: `device_id`, `name`,
       `connected` and `since` (null while not connected); empty otherwise.
+      Kept for the apps that read it; `computers` says more of the same.
+    * `computers` (M97 §3.2): on the primary, each computer of the home
+      (`FermixCore.Computers.list/1`): `device_id`, `name`, `platform`
+      (`macos`, `linux`, or null before it said), `engine_version`,
+      `connected`, `since`, `last_seen`, `path` (`direct` or `relay` while
+      its session is up and it said, else null), `offers` (each `{id,
+      state, sentence, detail}`: what it offers in its session, nothing
+      before its first offers; while away, what it last offered) and
+      `backups`; empty otherwise. Optional: a server older than the
+      computer record answers none.
     * `primary_home`: on a linked desktop, the primary's own `home.status`
       (its recovery, enrollment, candidates and move), asked within
       `Management.Placement.composed_deadline_ms/0`; null on any other engine
@@ -115,6 +125,8 @@ defmodule FermixCore.Management.Home do
   """
 
   alias FermixCore.BuildInfo
+  alias FermixCore.Computers
+  alias FermixCore.Computers.Computer
   alias FermixCore.Cues.Config, as: CuesConfig
   alias FermixCore.Home.Candidate
   alias FermixCore.Home.Disk
@@ -266,7 +278,8 @@ defmodule FermixCore.Management.Home do
       disk: disk(home, role, opts),
       version: Keyword.get_lazy(opts, :version, &BuildInfo.product_version/0),
       update_ceiling: update_ceiling(home, opts),
-      webhooks: webhooks(role, opts)
+      webhooks: webhooks(role, opts),
+      computers: computers(home, role, opts)
     }
 
     summary_status =
@@ -363,6 +376,12 @@ defmodule FermixCore.Management.Home do
     end
   end
 
+  # The home's computers (M97 §3.2), on the primary; none anywhere else. A
+  # caller with no engine tree reads a stopped Fermix, whose computers have
+  # no session.
+  defp computers(home, %{role: role}, opts),
+    do: Keyword.get_lazy(opts, :computers, fn -> Computers.list(home: home, role: role) end)
+
   # What the primary serves on loopback that the internet must reach, from
   # its applied settings; a source's URL is its sentinel, never a store read.
   # A verb with no engine tree reads a stopped Fermix, which serves nothing.
@@ -437,7 +456,8 @@ defmodule FermixCore.Management.Home do
   null when absent), a linked desktop's `primary_home` and `primary_missing`
   (null when absent), the primary's `disk` (null when absent), the
   `update_ceiling` (null when absent) and the primary's `webhooks` (none when
-  absent). Pure, so the CLI's goldens are built from it.
+  absent) and the primary's `computers` (none when absent). Pure, so the
+  CLI's goldens are built from it.
   """
   @spec picture(%{
           required(:role) => Role.role(),
@@ -456,7 +476,8 @@ defmodule FermixCore.Management.Home do
           optional(:primary_missing) => String.t() | nil,
           optional(:secrets_missing) => [String.t()],
           optional(:update_ceiling) => String.t() | nil,
-          optional(:webhooks) => [map()]
+          optional(:webhooks) => [map()],
+          optional(:computers) => [Computer.t()]
         }) :: map()
   def picture(
         %{
@@ -486,7 +507,8 @@ defmodule FermixCore.Management.Home do
       "disk" => Map.get(facts, :disk),
       "version" => version,
       "update_ceiling" => Map.get(facts, :update_ceiling),
-      "webhooks" => Map.get(facts, :webhooks, [])
+      "webhooks" => Map.get(facts, :webhooks, []),
+      "computers" => Enum.map(Map.get(facts, :computers, []), &Computer.view/1)
     }
   end
 

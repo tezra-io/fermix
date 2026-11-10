@@ -238,6 +238,7 @@
     "home.move.readiness": 2,
     "home.move.start": 2,
     "home.act": 2,
+    "computers.rename": 2,
     "accessories.status": 2,
     "accessories.pair.start": 2,
     "accessories.pair.begin": 2,
@@ -369,6 +370,7 @@
             "home.move.readiness",
             "home.move.start",
             "home.act",
+            "computers.rename",
             "accessories.status",
             "accessories.pair.start",
             "accessories.pair.begin",
@@ -1074,6 +1076,13 @@
         {
           "if": {
             "required": ["method"],
+            "properties": { "method": { "const": "computers.rename" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/computers_rename_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
             "properties": { "method": { "const": "accessories.status" } }
           },
           "then": { "properties": { "params": { "$ref": "#/$defs/accessories_status_params" } } }
@@ -1376,6 +1385,7 @@
         { "$ref": "#/$defs/home_move_readiness_result" },
         { "$ref": "#/$defs/home_move_start_result" },
         { "$ref": "#/$defs/home_act_result" },
+        { "$ref": "#/$defs/computers_rename_result" },
         { "$ref": "#/$defs/accessories_status_result" },
         { "$ref": "#/$defs/accessories_pair_start_result" },
         { "$ref": "#/$defs/accessories_pair_begin_result" },
@@ -5982,6 +5992,12 @@
               "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
             }
           }
+        },
+        "computers": {
+          "description": "On the primary, each computer of the home, by name: its id and name, its system, the engine version it last said, whether its session is up and since when, when the home last heard it, the path its session runs, what it offers its server and whether it keeps the home's backup copies. Empty in any other role. Absent from an engine older than it, which a client reads as none.",
+          "type": "array",
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/homeComputer" }
         }
       }
     },
@@ -6004,7 +6020,7 @@
               "required": ["id", "sentence"],
               "additionalProperties": false,
               "properties": {
-                "id": { "type": "string", "pattern": "^(ready|moved|cannot_reach|backup_week|back|restored|server_lapsed):.+$" },
+                "id": { "type": "string", "pattern": "^((ready|moved|cannot_reach|backup_week|back|restored|server_lapsed|server_sandbox):.+|computer_review)$" },
                 "sentence": { "type": "string", "minLength": 1 }
               }
             },
@@ -6023,7 +6039,7 @@
       "required": ["id", "label", "needs", "confirm", "url", "key"],
       "additionalProperties": false,
       "properties": {
-        "id": { "enum": ["cancel", "move_now", "try_again", "learn_more", "update", "back_up_now", "check_again", "own_server", "move_back", "restore_here"] },
+        "id": { "enum": ["cancel", "move_now", "try_again", "learn_more", "update", "back_up_now", "check_again", "own_server", "move_back", "restore_here", "review_offers"] },
         "label": { "type": "string", "minLength": 1 },
         "needs": { "type": "array", "maxItems": 1, "uniqueItems": true, "items": { "enum": ["recovery_passphrase", "new_recovery_passphrase"] } },
         "confirm": { "type": ["string", "null"], "minLength": 1 },
@@ -6033,7 +6049,7 @@
     },
     "homeSummaryDetail": {
       "type": "object",
-      "description": "What Details holds for the state: on connect and creating alternatives; on ready server, readiness, waits_until and alternatives (Forget this server); on undone alternatives (Forget this server); on on server, backups, copies_bytes, disk_used, data and actions; on problem kind, note, seen_at and alternatives (readiness where the problem has it); lines on ready, on and problem wherever there are any; progress while a move back or a restore runs; webhooks on a linked desktop's on only, where its server serves any (never on the server's own primary, whose summary rides inside each desktop's home.status under max_json_depth).",
+      "description": "What Details holds for the state: on connect and creating alternatives; on ready server, readiness, waits_until and alternatives (Forget this server), and, on the computer that sets Always On up, keeps_on (what it keeps on for its server after the move); on undone alternatives (Forget this server); on on server, backups, copies_bytes, disk_used, data and actions, and review while this computer waits for the owner's review of what its server may use on it (review_offers first in actions); on problem kind, note, seen_at and alternatives (readiness where the problem has it); lines on ready, on and problem wherever there are any; progress while a move back or a restore runs; webhooks on a linked desktop's on only, where its server serves any (never on the server's own primary, whose summary rides inside each desktop's home.status under max_json_depth).",
       "additionalProperties": false,
       "properties": {
         "lines": {
@@ -6074,6 +6090,8 @@
         "kind": { "enum": ["cannot_reach", "not_set_up", "waited_too_long", "update", "server_older", "disk_full", "backup_old", "backup_failed", "not_ready", "return_failed"] },
         "note": { "type": ["string", "null"] },
         "seen_at": { "type": ["string", "null"] },
+        "keeps_on": { "$ref": "#/$defs/computerKeepBlock" },
+        "review": { "$ref": "#/$defs/computerKeepBlock" },
         "webhooks": {
           "description": "On a linked desktop's on only: the Tailscale Funnel mounts the owner runs on the server for what it serves (home.status webhooks: the server's own, never this computer's): the sentence with the one-time tailnet steps, each mount's label, command (run as root, with sudo) and note (where its sender is pointed), WhatsApp's first, and the caveats. A webhook source's mount is its /cues/hooks/<ref> prefix, so no command carries its URL's secret. Never on the server's own primary: its summary rides inside each desktop's home.status as primary_home, where the mounts would pass max_json_depth.",
           "type": "object",
@@ -6151,6 +6169,60 @@
         "name": { "type": "string" },
         "connected": { "type": "boolean" },
         "since": { "type": ["string", "null"] }
+      }
+    },
+    "homeComputer": {
+      "type": "object",
+      "description": "A computer of the home, as its primary knows it: device_id and name (unique in the home, compared without case); platform macos or linux, null before it said; engine_version, the Fermix version it last said, null before it did; connected and since (null while not connected); last_seen, when the home last heard it, null before it did; path direct or relay while its session is up and the path is known, else null; offers, what it offers its server in this session (none before its first offers), and while it is away what it last offered; backups, whether it keeps copies of the home's backups.",
+      "required": ["device_id", "name", "platform", "engine_version", "connected", "since", "last_seen", "path", "offers", "backups"],
+      "additionalProperties": false,
+      "properties": {
+        "device_id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string" },
+        "platform": { "enum": ["macos", "linux", null] },
+        "engine_version": { "type": ["string", "null"] },
+        "connected": { "type": "boolean" },
+        "since": { "type": ["string", "null"] },
+        "last_seen": { "type": ["string", "null"] },
+        "path": { "enum": ["direct", "relay", null] },
+        "offers": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/computerOffer" } },
+        "backups": { "type": "boolean" }
+      }
+    },
+    "computerOffer": {
+      "type": "object",
+      "description": "One thing a computer offers its server. id is files, shell, browser, computer_use, imessage, history, voice, attachments, accessory or notifications; one a newer computer names is kept as it came, and a client that does not know it shows its sentence as it is. state on, off (switched off on that computer, or not reviewed yet) or unavailable (it cannot work there). sentence says why it is not on, in the engine's words, null while on. detail is a short word while on, such as the sandbox mode commands run in (strict, standard or open), else null.",
+      "required": ["id", "state", "sentence", "detail"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,31}$" },
+        "state": { "enum": ["on", "off", "unavailable"] },
+        "sentence": { "type": ["string", "null"], "minLength": 1, "maxLength": 300 },
+        "detail": { "type": ["string", "null"], "minLength": 1, "maxLength": 64 }
+      }
+    },
+    "computerKeepBlock": {
+      "type": "object",
+      "description": "What a computer keeps on for its server: sentence names what stays on, warning is the plain warning where commands stay on while this computer's sandbox is open (null otherwise), and lines are one per offer this computer's system can have, in order: offer (files, shell, browser, computer_use, imessage, history), label in the owner's words and on, whether it stays on. A surface draws each line as a tick the owner may change, and sends the offers left ticked as home.act's input.keep_offers.",
+      "required": ["sentence", "warning", "lines"],
+      "additionalProperties": false,
+      "properties": {
+        "sentence": { "type": "string", "minLength": 1 },
+        "warning": { "type": ["string", "null"], "minLength": 1 },
+        "lines": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "type": "object",
+            "required": ["offer", "label", "on"],
+            "additionalProperties": false,
+            "properties": {
+              "offer": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,31}$" },
+              "label": { "type": "string", "minLength": 1 },
+              "on": { "type": "boolean" }
+            }
+          }
+        }
       }
     },
     "home_snapshots_status_params": { "type": "object", "maxProperties": 0, "additionalProperties": false },
@@ -6342,7 +6414,8 @@
             "check_again",
             "own_server",
             "move_back",
-            "restore_here"
+            "restore_here",
+            "review_offers"
           ]
         },
         "key": { "type": "string", "minLength": 1, "maxLength": 64 },
@@ -6351,10 +6424,16 @@
     },
     "homeActInput": {
       "type": "object",
-      "description": "What the action's needs collected: recovery_passphrase (needs recovery_passphrase, typed once, or new_recovery_passphrase, typed twice and compared by the surface; restore_here's opens the copy it restores). Never logged, never answered.",
+      "description": "What the action's needs collected: recovery_passphrase (needs recovery_passphrase, typed once, or new_recovery_passphrase, typed twice and compared by the surface; restore_here's opens the copy it restores), never logged and never answered; and keep_offers, the offers of a keeps_on or review block left ticked.",
       "additionalProperties": false,
       "properties": {
-        "recovery_passphrase": { "type": "string", "minLength": 12, "maxLength": 1024 }
+        "recovery_passphrase": { "type": "string", "minLength": 12, "maxLength": 1024 },
+        "keep_offers": {
+          "description": "For move_now and try_again on the computer that sets Always On up, the offers of the ready screen's detail.keeps_on left ticked: what this computer keeps on for its server after the move; absent, the block as it was shown. For review_offers, the offers of on's detail.review left ticked: what stays on after the owner's review; absent, the review as it was shown. A list that is not of text is refused (invalid_params on keep_offers), and so is an id other than files, shell, browser, computer_use, imessage and history.",
+          "type": "array",
+          "maxItems": 32,
+          "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,31}$" }
+        }
       }
     },
     "home_act_result": {
@@ -6394,6 +6473,25 @@
             { "type": "null" }
           ]
         }
+      }
+    },
+    "computers_rename_params": {
+      "type": "object",
+      "description": "The computer to name, by its device id, and its new name: one line, at most 64 bytes once trimmed.",
+      "required": ["device_id", "name"],
+      "additionalProperties": false,
+      "properties": {
+        "device_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 256 }
+      }
+    },
+    "computers_rename_result": {
+      "type": "object",
+      "description": "The computer under its new name, as home.status lists it.",
+      "required": ["computer"],
+      "additionalProperties": false,
+      "properties": {
+        "computer": { "$ref": "#/$defs/homeComputer" }
       }
     },
     "homeCandidate": {

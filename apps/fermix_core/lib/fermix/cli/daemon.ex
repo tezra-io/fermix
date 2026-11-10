@@ -486,6 +486,11 @@ defmodule Fermix.CLI.Daemon do
   defp owner_family(method, %{"id" => @cue_secret_prefix <> _ref}) when method in @secret_writes,
     do: :cues
 
+  # What Fermix on the server may use on this computer (M97 §7.2) widens only
+  # here, by the owner: never by a process the daemon started, the server's
+  # own work run on this computer among them.
+  defp owner_family("settings.apply", %{"section" => "computer"}), do: :home
+
   defp owner_family("settings.apply", %{"section" => section}) when is_binary(section),
     do: if(SettingsCues.owns?(section), do: :cues)
 

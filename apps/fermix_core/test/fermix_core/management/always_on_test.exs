@@ -6,6 +6,7 @@ defmodule FermixCore.Management.AlwaysOnTest do
   # from its own completion event, never waited for by the clock.
   use ExUnit.Case, async: true
 
+  alias FermixCore.Computers.Switches
   alias FermixCore.Home.Candidate
   alias FermixCore.Home.Candidates
   alias FermixCore.Home.DesktopLink
@@ -495,6 +496,30 @@ defmodule FermixCore.Management.AlwaysOnTest do
         |> Keyword.put(:primary_forward, forward)
 
       %{ctx | opts: opts} |> Map.put(:script, script)
+    end
+
+    # M97 §7.3: a computer that moved before its server could ask what it may
+    # use here offers nothing until the owner reviews it, here.
+    test "the review of a computer's offers keeps what the owner ticked", ctx do
+      waiting = Switches.only([:files, :shell, :browser], reviewed: false)
+      opts = Keyword.put(ctx.opts, :computer_switches, waiting)
+
+      assert %{"notice" => %{"id" => "computer_review"}, "detail" => %{"review" => review}} =
+               summary(opts)
+
+      assert Enum.map(Enum.filter(review["lines"], & &1["on"]), & &1["offer"]) ==
+               ~w(files shell browser)
+
+      input = %Input{keep_offers: ["files"]}
+      assert {:ok, %{"result" => nil}} = press(%{ctx | opts: opts}, "review_offers", input)
+
+      assert {:ok, switches} = Switches.read(ctx.home)
+      assert Switches.reviewed?(switches)
+      assert Switches.on?(switches, :files)
+      refute Switches.on?(switches, :shell)
+
+      assert {:error, :invalid_params, %{"field" => "keep_offers"}} =
+               press(%{ctx | opts: opts}, "review_offers", %Input{keep_offers: ["camera"]})
     end
 
     test "Back up now is sent to the server", ctx do
@@ -1298,6 +1323,7 @@ defmodule FermixCore.Management.AlwaysOnTest do
   defp desktop_link do
     %{
       device_id: "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e",
+      key: :keyring,
       primary: %{
         name: "fermix-general-a3f9",
         gateway_pk: :binary.copy(<<3>>, 32),

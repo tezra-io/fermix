@@ -1050,6 +1050,33 @@ defmodule Fermix.CLI.DaemonTest do
       assert_writes_reached(socket_path, @cue_writes)
     end
 
+    # M97 §7.2: what Fermix on the server may use on this computer widens only
+    # at this computer, by its owner: a command the daemon started (the
+    # server's work run here, among them) never writes it.
+    test "this computer's switches are refused to a process the daemon started" do
+      golden = golden_error_details("unavailable_home_owner_decision")
+
+      write =
+        {"settings.apply", %{"section" => "computer", "values" => %{"computer_shell" => true}}}
+
+      socket_path =
+        start_peer_daemon(
+          management_opts: recording_writers(),
+          daemon_os_pid: ParentProcess.os_pid()
+        )
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          {method, params} = write
+
+          assert {:error, {:management_error, "unavailable", _message, ^golden}} =
+                   Client.request_v1(method, params, socket_path: socket_path, timeout: @reply_ms)
+        end)
+
+      assert log =~ "only the owner may"
+      refute_received {:written, _write, _target}
+    end
+
     test "every other secret and section stays open to a process the daemon started" do
       socket_path =
         start_peer_daemon(

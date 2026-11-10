@@ -1,6 +1,7 @@
 defmodule FermixCore.Home.DesktopLinkTest do
-  # M75 §3, §6: the two files that make a device-role engine a desktop of its
-  # primary, as the move worker writes them and the relay reads them.
+  # M75 §3, §6: the file that makes a device-role engine a desktop of its
+  # primary, as the move worker writes it and the relay reads it, and which
+  # secret store holds the desktop's key (M97 §7.5).
   use ExUnit.Case, async: true
 
   alias FermixCore.Home.DesktopLink
@@ -8,6 +9,7 @@ defmodule FermixCore.Home.DesktopLinkTest do
 
   @link %{
     device_id: "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e",
+    key: :keyring,
     primary: %{
       name: "fermix-vm",
       gateway_pk: <<7::256>>,
@@ -35,7 +37,8 @@ defmodule FermixCore.Home.DesktopLinkTest do
     assert Bitwise.band(dir_mode, 0o777) == 0o700
 
     on_disk = home |> DesktopLink.path() |> File.read!() |> Jason.decode!()
-    assert on_disk["v"] == 1
+    assert on_disk["v"] == 2
+    assert on_disk["key"] == "@keyring"
     assert on_disk["primary_epoch"] == 4
     assert on_disk["primary"]["gateway_pk"] == Base.encode64(<<7::256>>)
   end
@@ -46,7 +49,9 @@ defmodule FermixCore.Home.DesktopLinkTest do
     good = path |> File.read!() |> Jason.decode!()
 
     for {field, broken} <- [
-          {:v, Map.put(good, "v", 2)},
+          {:v, Map.put(good, "v", 3)},
+          {:key, Map.put(good, "key", "@vault")},
+          {:key, Map.delete(good, "key")},
           {:device_id, Map.put(good, "device_id", "desk")},
           {:primary_epoch, Map.put(good, "primary_epoch", 0)},
           {:node_id, put_in(good, ["primary", "node_id"], "AB")},
@@ -129,21 +134,30 @@ defmodule FermixCore.Home.DesktopLinkTest do
         do: refute(DesktopLink.hint?(hint), inspect(hint))
   end
 
-  test "the key is read only at 0600, and a looser mode is refused by name", %{home: home} do
-    {public, private} = :crypto.generate_key(:ecdh, :x25519)
-    assert :ok = DesktopLink.write_key(home, private)
-    assert {:ok, %{private: ^private, public: ^public}} = DesktopLink.read_key(home)
+  # M97 D13: the file store holds the key too, and every write names which.
+  test "the key's store is recorded, and a write that names none is refused", %{home: home} do
+    assert :ok = DesktopLink.write(home, %{@link | key: :file})
+    assert {:ok, %{key: :file}} = DesktopLink.read(home)
+    assert (home |> DesktopLink.path() |> File.read!() |> Jason.decode!())["key"] == "@file"
 
-    path = DesktopLink.key_path(home)
-    File.chmod!(path, 0o644)
-    assert {:error, {:key_mode, ^path, 0o644}} = DesktopLink.read_key(home)
+    path = DesktopLink.path(home)
 
-    assert DesktopLink.error_sentence({:key_mode, path, 0o644}) ==
-             "The desktop key file is mode 0644, readable by others; Fermix uses it only at 0600."
+    for keyless <- [Map.delete(@link, :key), %{@link | key: nil}] do
+      assert DesktopLink.write(home, keyless) == {:error, {:invalid_link, path, :key}}
+    end
 
-    File.chmod!(path, 0o600)
-    File.write!(path, "short")
-    assert {:error, {:invalid_key, ^path, :length}} = DesktopLink.read_key(home)
+    assert {:ok, %{key: :file}} = DesktopLink.read(home)
+  end
+
+  # An engine before the key moved wrote version 1, with the key in its own
+  # file: it still reads, with no store, until the key moves.
+  test "a link from before the key moved reads with no store", %{home: home} do
+    assert :ok = DesktopLink.write(home, @link)
+    path = DesktopLink.path(home)
+    older = path |> File.read!() |> Jason.decode!() |> Map.delete("key") |> Map.put("v", 1)
+    File.write!(path, Jason.encode!(older))
+
+    assert DesktopLink.read(home) == {:ok, %{@link | key: nil}}
   end
 
   test "linked only in the device role with the link present", %{home: home} do

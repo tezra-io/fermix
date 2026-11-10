@@ -33,7 +33,9 @@ defmodule FermixCore.Home.SnapshotTest do
     "grants/grant-1793083733-1.json",
     "snapshots/status.json",
     # M97 §4: this computer's own settings never travel.
-    "machine.toml"
+    "machine.toml",
+    # M97 D13: a computer's own key, where its home keeps secrets as files.
+    "secrets/device.desktop_key"
   ]
 
   @link {"plugins/installed/invented/current", "1.0.0"}

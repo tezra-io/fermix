@@ -5,8 +5,8 @@ defmodule FermixChannels.Test.DesktopRail do
   The primary is the engine's own: `Mobile.Session` with real Noise behind the
   real iroh bridge socket (`Iroh.Bridge`), a `DeviceRegistry`, and the
   desktop peers' supervisors (`Desktop.Supervisor`), each under the test's own
-  names. The desktop's home holds `device/desktop.json` and its 0600 key, as
-  the move worker leaves them. A relay reaches the primary through the
+  names. The desktop's home holds `device/desktop.json` and its key in the
+  secret store the link names, as the move worker leaves them. A relay reaches the primary through the
   bridge's socket (`bridge_connect/1`, the helper's side of a dialed stream),
   so everything past the dial is the code that runs in production; only the
   dial itself, and the trust store's rows, are stood in for.
@@ -22,6 +22,7 @@ defmodule FermixChannels.Test.DesktopRail do
   alias FermixChannels.Mobile.Identity
   alias FermixChannels.Mobile.Iroh.Bridge
   alias FermixChannels.Mobile.Noise
+  alias FermixCore.Home.ComputerKey
   alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.Epoch
   alias FermixTestSupport.PrimaryHome
@@ -257,13 +258,18 @@ defmodule FermixChannels.Test.DesktopRail do
   @doc """
   A desktop's home after the move: `device/desktop.json` naming the primary,
   the epoch it last saw (`:epoch`, 3) and its address hints (`:addrs`, none),
-  and the desktop's key at `:key_mode` (0600).
+  and the desktop's key in the keychain the link names, under a profile of
+  the home's own (`config.toml`): the stub keychain is one table for the VM.
   """
   def desktop_home!(primary, opts \\ []) do
     root = root!("fx-dd")
+    File.mkdir_p!(root)
+    profile = ~s([fermix_core]\nprofile = "#{Path.basename(root)}"\n)
+    File.write!(Path.join(root, "config.toml"), profile)
 
     link = %{
       device_id: @device_id,
+      key: :keyring,
       primary: %{
         name: Keyword.get(opts, :name, "fermix-vm"),
         gateway_pk: primary.gateway_public_key,
@@ -276,8 +282,7 @@ defmodule FermixChannels.Test.DesktopRail do
     }
 
     :ok = DesktopLink.write(root, link)
-    :ok = DesktopLink.write_key(root, primary.desktop.private)
-    :ok = File.chmod(DesktopLink.key_path(root), Keyword.get(opts, :key_mode, 0o600))
+    {:ok, _keypair, :keyring} = ComputerKey.create(root, keypair: primary.desktop)
     root
   end
 

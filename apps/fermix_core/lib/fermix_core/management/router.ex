@@ -7,6 +7,8 @@ defmodule FermixCore.Management.Router do
   """
 
   alias FermixCore.BuildInfo
+  alias FermixCore.Computers
+  alias FermixCore.Computers.Computer
   alias FermixCore.Health
   alias FermixCore.Home.AlwaysOnRelease
   alias FermixCore.Home.Role
@@ -87,6 +89,7 @@ defmodule FermixCore.Management.Router do
   @home_readiness_params ~w(candidate_id)
   @home_move_params ~w(candidate_id recovery_passphrase keep_as_desktop)
   @home_act_params ~w(action key input)
+  @computers_rename_params ~w(device_id name)
   # A candidate (M75 §2) answers the protocol's hello and home.status, and
   # refuses every other method by name.
   @candidate_methods ~w(hello home.status)
@@ -294,6 +297,22 @@ defmodule FermixCore.Management.Router do
   # The accessory family validates its own params (`Management.Accessories`).
   defp route_known("accessories." <> _rest = method, params, opts),
     do: Accessories.route(method, params, accessories_opts(opts))
+
+  # Names a computer of the home (M97 §3.2), on the primary; a linked
+  # computer forwards it (`Management.Placement`).
+  defp route_known("computers.rename", params, opts) do
+    with :ok <- reject_unknown_params(params, @computers_rename_params),
+         {:ok, device_id} <- text_param(params, "device_id"),
+         {:ok, name} <- text_param(params, "name") do
+      computer_opts = opts |> operation_opts() |> Keyword.get(:computers, [])
+
+      case Computers.rename(device_id, name, computer_opts) do
+        {:ok, computer} -> {:ok, %{"computer" => Computer.view(computer)}}
+        {:error, {:not_found, sentence}} -> invalid_params("device_id", sentence)
+        {:error, {_refused, sentence}} -> invalid_params("name", sentence)
+      end
+    end
+  end
 
   # The server's Always On steps answer only a desktop's forward (Always On
   # setup §3.5); everything else of the family is routed as it comes.
@@ -1056,9 +1075,20 @@ defmodule FermixCore.Management.Router do
   end
 
   defp settings_opts(opts),
-    do: Keyword.take(opts, [:snapshot, :supervised, :macos?])
+    do: Keyword.take(opts, [:snapshot, :supervised, :macos?, :computer?])
 
   defp invalid_params(field), do: {:error, :invalid_params, %{"field" => field}}
+
+  defp invalid_params(field, sentence),
+    do: {:error, :invalid_params, %{"field" => field, "sentence" => sentence}}
+
+  # A required text parameter, within the published text bound.
+  defp text_param(params, field) do
+    case Map.get(params, field) do
+      value when is_binary(value) and byte_size(value) in 1..@max_text_bytes -> {:ok, value}
+      _missing_or_wrong -> invalid_params(field)
+    end
+  end
 
   defp hello(opts) do
     identity_provider = Keyword.get(opts, :identity_provider, &engine_identity/0)
